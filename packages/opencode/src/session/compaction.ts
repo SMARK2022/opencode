@@ -504,8 +504,12 @@ const layer = Layer.effect(
           modelID: model.id,
           variant: userMessage.model.variant,
         })
-      const own = yield* SessionProcessor.ownAssistant({ sessionID: input.sessionID, requestID: input.parentID }, { events, db })
-      const rawHistory = compactionPart && messages.at(-1)?.info.id === input.parentID ? messages.slice(0, -1) : messages
+      const own = yield* SessionProcessor.ownAssistant(
+        { sessionID: input.sessionID, requestID: input.parentID },
+        { events, db },
+      )
+      const rawHistory =
+        compactionPart && messages.at(-1)?.info.id === input.parentID ? messages.slice(0, -1) : messages
       // #251：压缩上传必须和普通 prompt 共用同一个 active replay window：数据库里的 raw history
       // 会保留已被 summary 覆盖的旧 head 作为审计/恢复数据，但这些旧 tool results 不能在
       // 后续 summary 更新时再次进入 provider 请求；否则每条工具输出会按 head/tail 预算
@@ -628,14 +632,26 @@ const layer = Layer.effect(
       if (result === "continue" && !processor.message.error) {
         // 复用唯一附录追加点；Todo 由现有服务读取，不新建 evidence 状态或写入旁路。
         const todos = yield* todo.get(input.sessionID)
-        const handoff = yield* CompactionFileEvidence.render(history, fs, ctx.worktree, completedCompactions(history).length + 1, ctx.directory, todos)
-        if (handoff) yield* session.updatePart({
-          id: PartID.ascending(), messageID: msg.id, sessionID: input.sessionID,
-          type: "text", text: handoff, synthetic: true,
-          // 与摘要同一消息持久化，UI与模型回放看到相同的当前磁盘证据。
-          metadata: { kind: CompactionFileEvidence.kind, version: 1 },
-          time: { start: Date.now(), end: Date.now() },
-        })
+        const handoff = yield* CompactionFileEvidence.render(
+          history,
+          fs,
+          ctx.worktree,
+          completedCompactions(history).length + 1,
+          ctx.directory,
+          todos,
+        )
+        if (handoff)
+          yield* session.updatePart({
+            id: PartID.ascending(),
+            messageID: msg.id,
+            sessionID: input.sessionID,
+            type: "text",
+            text: handoff,
+            synthetic: true,
+            // 与摘要同一消息持久化，UI与模型回放看到相同的当前磁盘证据。
+            metadata: { kind: CompactionFileEvidence.kind, version: 1 },
+            time: { start: Date.now(), end: Date.now() },
+          })
       }
 
       // #256：双锚点更新——tail_start_id 保留整轮尾部，recent_user_messages 保留最新用户意图；
@@ -657,19 +673,19 @@ const layer = Layer.effect(
         if (replay) {
           const original = replay.info
           const replayMsg = yield* session.updateMessage({
-              id: MessageID.ascending(),
-              role: "user",
-              sessionID: input.sessionID,
-              time: { created: Date.now() },
-              agent: original.agent,
-              model: original.model,
-              format: original.format,
-              tools: original.tools,
-              system: original.system,
-              // [local-smark] 继承原始 canonical user 的 Goal turn ID，
-              // 使 compaction replay 不产生新 eligible Goal turn
-              goalTurnID: original.goalTurnID ?? original.id,
-            })
+            id: MessageID.ascending(),
+            role: "user",
+            sessionID: input.sessionID,
+            time: { created: Date.now() },
+            agent: original.agent,
+            model: original.model,
+            format: original.format,
+            tools: original.tools,
+            system: original.system,
+            // [local-smark] 继承原始 canonical user 的 Goal turn ID，
+            // 使 compaction replay 不产生新 eligible Goal turn
+            goalTurnID: original.goalTurnID ?? original.id,
+          })
           for (const part of replay.parts) {
             if (part.type === "compaction") continue
             const replayPart =
@@ -764,8 +780,8 @@ const layer = Layer.effect(
       // technical source 已有 lineage 时继续向原 canonical turn 透传，不能形成 lineage 链。
       const source = Option.getOrUndefined(
         // #493：predicate 只读取 role——历史 cold Parts 与 summary.diffs 不参与 marker source 定位；
-      // 最终匹配仍 hydrate 完整 user，goalTurnID/model 等 lineage 输入不会来自不完整 projection。
-      yield* session.findMessage(input.sessionID, (info) => info.role === "user").pipe(Effect.orDie),
+        // 最终匹配仍 hydrate 完整 user，goalTurnID/model 等 lineage 输入不会来自不完整 projection。
+        yield* session.findMessage(input.sessionID, (info) => info.role === "user").pipe(Effect.orDie),
       )
       const msg = yield* session.updateMessage({
         id: input.id,
@@ -816,9 +832,7 @@ const layer = Layer.effect(
       // #538：summary 查询仍先执行：finished/no-error boundary 已经成功，后续可选动作失败
       // 不能反向隐藏该边界或撤销它承载的 retained context。
       const summary = Option.getOrUndefined(
-        yield* find(
-          (info) => info.role === "assistant" && info.parentID === input.parentID && info.summary === true,
-        ),
+        yield* find((info) => info.role === "assistant" && info.parentID === input.parentID && info.summary === true),
       )
       if (summary?.info.role === "assistant" && summary.info.finish && !summary.info.error) return
       // marker 按 ID 定位：预分配 parentID 保证即使 create 中途回写未完成也能找到本次 scratch。

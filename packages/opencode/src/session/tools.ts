@@ -36,7 +36,10 @@ type ToolTimingInput = {
   callID: string | undefined
 }
 
-function toolTiming(input: ToolTimingInput, extra: { phase: "tool.start" } | { phase: "tool.end"; status: "completed" | "error"; durationMs: number }) {
+function toolTiming(
+  input: ToolTimingInput,
+  extra: { phase: "tool.start" } | { phase: "tool.end"; status: "completed" | "error"; durationMs: number },
+) {
   // 工具 timing 只记录 daemon log 中的短 milestone，禁止携带 args、output、
   // metadata。tool.start/tool.end 是低基数字段，用来把“工具静默等待”
   // 和 provider 首 token 慢、TUI 接收/应用慢区分开。
@@ -118,28 +121,38 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
     callID: options.toolCallId,
     // #364：goalSvc 传入 ctx.extra，使 goal tool 能调用 SessionGoal.Service；
     // goalTurn 同样经 ctx.extra 传递，GoalTool 用它校验 read snapshot 与 turn 连续性
-    extra: { model: input.model, bypassAgentCheck: input.bypassAgentCheck, promptOps: input.promptOps, goalSvc: input.goalSvc, goalTurn: input.goalTurn },
+    extra: {
+      model: input.model,
+      bypassAgentCheck: input.bypassAgentCheck,
+      promptOps: input.promptOps,
+      goalSvc: input.goalSvc,
+      goalTurn: input.goalTurn,
+    },
     agent: input.agent.name,
     messages: input.messages,
     metadata: (val) =>
-      input.processor.updateToolCall(options.toolCallId, (match) => {
-        if (!["running", "pending"].includes(match.state.status)) return match
-        // #214：工具 metadata 回调替换实时进度数据（如 shell 输出预览）
-        // #214：仅保留 permission-review 包络——它由 PermissionReviewer 拥有，链接父工具到隐藏子会话
-        // #214：shell/edit/write 进度更新不得丢弃 autoReview 审查状态
-        const autoReview = match.state.status === "running" ? match.state.metadata?.autoReview : undefined
-        return {
-          ...match,
-          state: {
-            title: val.title,
-            metadata: autoReview ? { ...(val.metadata ?? {}), autoReview } : val.metadata,
-            status: "running",
-            input: args,
-            time: match.state.status === "running" ? match.state.time : { start: Date.now() },
-          },
-        }
-      // live 进度经 val.delivery 透传：ephemeral 只广播不落盘，durable 保持原路径。
-      }, val.delivery),
+      input.processor.updateToolCall(
+        options.toolCallId,
+        (match) => {
+          if (!["running", "pending"].includes(match.state.status)) return match
+          // #214：工具 metadata 回调替换实时进度数据（如 shell 输出预览）
+          // #214：仅保留 permission-review 包络——它由 PermissionReviewer 拥有，链接父工具到隐藏子会话
+          // #214：shell/edit/write 进度更新不得丢弃 autoReview 审查状态
+          const autoReview = match.state.status === "running" ? match.state.metadata?.autoReview : undefined
+          return {
+            ...match,
+            state: {
+              title: val.title,
+              metadata: autoReview ? { ...(val.metadata ?? {}), autoReview } : val.metadata,
+              status: "running",
+              input: args,
+              time: match.state.status === "running" ? match.state.time : { start: Date.now() },
+            },
+          }
+          // live 进度经 val.delivery 透传：ephemeral 只广播不落盘，durable 保持原路径。
+        },
+        val.delivery,
+      ),
     ask: (req) =>
       permission
         .ask({
@@ -180,7 +193,12 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
             }
             // #557：本地 Tool 的真实执行屏障先于 plugin/Permission——事件回调只能登记 Part，
             // 不能证明 mutation 尚未开始；worktree 声明在拒继行时也保留归因边界。
-            yield* input.processor.updateToolCall(options.toolCallId, (part) => part, "durable", item.worktree ?? "none")
+            yield* input.processor.updateToolCall(
+              options.toolCallId,
+              (part) => part,
+              "durable",
+              item.worktree ?? "none",
+            )
             yield* plugin.trigger(
               "tool.execute.before",
               { tool: item.id, sessionID: ctx.sessionID, callID: ctx.callID },
@@ -204,7 +222,15 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
             // 包含plugin前后hook的实际adapter耗时；Bash自行装饰，不能重复追加。
             const adapterElapsedMs = Date.now() - adapterStartedAt
             if (options.abortSignal?.aborted) {
-              if (item.id !== ShellID.ToolID) output.output += "\n\n" + formatExecutionNotice({ source: "tool", severity: "warning", reason: "user_abort", elapsed_ms: adapterElapsedMs })
+              if (item.id !== ShellID.ToolID)
+                output.output +=
+                  "\n\n" +
+                  formatExecutionNotice({
+                    source: "tool",
+                    severity: "warning",
+                    reason: "user_abort",
+                    elapsed_ms: adapterElapsedMs,
+                  })
               yield* input.processor.completeToolCall(options.toolCallId, output)
             } else if (item.id !== ShellID.ToolID) {
               const notice = formatLongExecutionNotice("tool", adapterElapsedMs)
@@ -585,7 +611,14 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
           // 先保留MCP附件和截断结果，再对最终模型文本追加唯一执行提示。
           const elapsedMs = Date.now() - mcpStartedAt
           if (opts.abortSignal?.aborted) {
-            output.output += "\n\n" + formatExecutionNotice({ source: "tool", severity: "warning", reason: "user_abort", elapsed_ms: elapsedMs })
+            output.output +=
+              "\n\n" +
+              formatExecutionNotice({
+                source: "tool",
+                severity: "warning",
+                reason: "user_abort",
+                elapsed_ms: elapsedMs,
+              })
             yield* input.processor.completeToolCall(opts.toolCallId, output)
           } else {
             const notice = formatLongExecutionNotice("tool", elapsedMs)

@@ -45,15 +45,33 @@ const lineEndingFormatLayer = Layer.succeed(Format.Service, {
 })
 
 const itLineEndingFormatted = testEffect(
-  LayerNode.compile(LayerNode.group([LSP.node, FSUtil.node, EventV2Bridge.node, Truncate.node, Agent.node, Format.node]), [
-    [Format.node, lineEndingFormatLayer],
-  ]),
+  LayerNode.compile(
+    LayerNode.group([LSP.node, FSUtil.node, EventV2Bridge.node, Truncate.node, Agent.node, Format.node]),
+    [[Format.node, lineEndingFormatLayer]],
+  ),
 )
 
 // 新反馈切片只用真实工具/隔离文件及受控服务；构建层就替换LSP，不靠扩展名或环境开关避开进程。
-const feedbackGroup = LayerNode.group([LSP.node, FSUtil.node, Format.node, EventV2Bridge.node, Truncate.node, Agent.node])
-const itFeedback = testEffect(LayerNode.compile(feedbackGroup, [[LSP.node, feedbackLsp], [Format.node, feedbackFormat]]))
-const itFeedbackFormatted = testEffect(LayerNode.compile(feedbackGroup, [[LSP.node, feedbackLsp], [Format.node, lineEndingFormatLayer]]))
+const feedbackGroup = LayerNode.group([
+  LSP.node,
+  FSUtil.node,
+  Format.node,
+  EventV2Bridge.node,
+  Truncate.node,
+  Agent.node,
+])
+const itFeedback = testEffect(
+  LayerNode.compile(feedbackGroup, [
+    [LSP.node, feedbackLsp],
+    [Format.node, feedbackFormat],
+  ]),
+)
+const itFeedbackFormatted = testEffect(
+  LayerNode.compile(feedbackGroup, [
+    [LSP.node, feedbackLsp],
+    [Format.node, lineEndingFormatLayer],
+  ]),
+)
 
 const baseCtx = {
   sessionID: SessionID.make("ses_test"),
@@ -377,7 +395,8 @@ describe("tool.apply_patch freeform", () => {
                       fp: "fp",
                       start: 1,
                       end: 1,
-                      total: 1, totalExact: true,
+                      total: 1,
+                      totalExact: true,
                       returned: 1,
                       stub: false,
                     },
@@ -703,9 +722,12 @@ describe("tool.apply_patch freeform", () => {
       yield* writeText(missing, "other\n")
       yield* writeText(ambiguous, "one marker here\ntwo marker there\n")
 
-      yield* execute({
-        patchText: "*** Begin Patch\n*** Update File: valid_insert.txt\n@@ marker\n+beta\n*** End Patch",
-      }, ctx)
+      yield* execute(
+        {
+          patchText: "*** Begin Patch\n*** Update File: valid_insert.txt\n@@ marker\n+beta\n*** End Patch",
+        },
+        ctx,
+      )
       const failures = [
         "*** Begin Patch\n*** Update File: missing_insert.txt\n@@ marker\n+beta\n*** End Patch",
         "*** Begin Patch\n*** Update File: ambiguous_insert.txt\n@@ marker\n+beta\n*** End Patch",
@@ -771,12 +793,18 @@ describe("tool.apply_patch freeform", () => {
       yield* writeText(middle, "a\nb\nc\n")
       yield* writeText(all, "alpha")
 
-      yield* execute({
-        patchText: "*** Begin Patch\n*** Update File: middle_delete.txt\n@@\n-b\n*** End Patch",
-      }, ctx)
-      yield* execute({
-        patchText: "*** Begin Patch\n*** Update File: delete_insert.txt\n@@\n-alpha\n@@\n+beta\n*** End Patch",
-      }, ctx)
+      yield* execute(
+        {
+          patchText: "*** Begin Patch\n*** Update File: middle_delete.txt\n@@\n-b\n*** End Patch",
+        },
+        ctx,
+      )
+      yield* execute(
+        {
+          patchText: "*** Begin Patch\n*** Update File: delete_insert.txt\n@@\n-alpha\n@@\n+beta\n*** End Patch",
+        },
+        ctx,
+      )
 
       expect(yield* readText(middle)).toBe("a\nc\n")
       expect(yield* readText(all)).toBe("beta\n")
@@ -802,7 +830,7 @@ describe("tool.apply_patch freeform", () => {
         const error = Cause.squash(exit.cause) as Error
         expect(error.message).toContain("Closest match at line 1")
         expect(error.message).toContain("chars omitted")
-                // 0441 起摘录改为有界窗口 char-diff：差异点 ±30 字符可见，其余以 omitted 标记；
+        // 0441 起摘录改为有界窗口 char-diff：差异点 ±30 字符可见，其余以 omitted 标记；
         // 完整长 expected 只能留在原始 patchText；错误正文只提供实际差异窗口与列号。
         expect(error.message).toContain("line 1 actual")
         expect(error.message).toContain("difference: requested columns 301-301 differ from actual columns 301-301")
@@ -1354,8 +1382,7 @@ EOF`
       const { ctx, calls } = makeCtx()
       const target = path.join(test.directory, "patch-crlf.txt")
       yield* writeText(target, "line1\r\nline2\r\n")
-      const patchText =
-        "*** Begin Patch\n*** Update File: patch-crlf.txt\n@@\n-line2\n+changed\n*** End Patch"
+      const patchText = "*** Begin Patch\n*** Update File: patch-crlf.txt\n@@\n-line2\n+changed\n*** End Patch"
       yield* execute({ patchText }, ctx)
       const raw = yield* readText(target)
       expect(raw).toBe("line1\r\nchanged\r\n")
@@ -1381,13 +1408,16 @@ EOF`
       const { ctx, calls } = makeCtx()
       const target = path.join(test.directory, "patch-cr.txt")
       yield* writeText(target, "line1\rline2\r")
-      const patchText =
-        "*** Begin Patch\n*** Update File: patch-cr.txt\n@@\n-line2\n+changed\n*** End Patch"
+      const patchText = "*** Begin Patch\n*** Update File: patch-cr.txt\n@@\n-line2\n+changed\n*** End Patch"
       yield* execute({ patchText }, ctx)
       const raw = yield* readText(target)
       expect(raw).toBe("line1\rchanged\r")
       expect(calls).toHaveLength(1)
-      expect(calls[0]?.metadata.files[0]).toMatchObject({ additions: 1, deletions: 1, patch: expect.stringContaining("-line2\n+changed") })
+      expect(calls[0]?.metadata.files[0]).toMatchObject({
+        additions: 1,
+        deletions: 1,
+        patch: expect.stringContaining("-line2\n+changed"),
+      })
     }),
   )
 
@@ -1402,8 +1432,7 @@ EOF`
       // 文件含 "real content"，patch 搜索 "missing context"
       yield* writeText(target, "line1\nreal content here\nline3\n")
 
-      const patchText =
-        "*** Begin Patch\n*** Update File: mismatch.txt\n@@\n-missing context\n+changed\n*** End Patch"
+      const patchText = "*** Begin Patch\n*** Update File: mismatch.txt\n@@\n-missing context\n+changed\n*** End Patch"
 
       const exit = yield* execute({ patchText }, ctx).pipe(Effect.exit)
       expect(Exit.isFailure(exit)).toBe(true)
@@ -1415,8 +1444,8 @@ EOF`
         expect((patchText + err.message).split("missing context").length - 1).toBe(1)
         expect(err.message).not.toContain("missing context")
       }
-      }),
-    )
+    }),
+  )
 
   // #522：两个不同 end 与 failed chunk 具有相同最小距离；Patch 不能按文件顺序挑选一个 actual。
   // 文件不变断言同时证明 tie 仍属于 diagnostic failure，而不是 fuzzy replacement success。
@@ -1535,7 +1564,6 @@ EOF`
   )
 })
 
-
 // [local-smark] 元数据 diff 有界切片：二进制 delete 的全文行 diff 是 407MB part 行事故的
 // 直接构成物；本组切片锁定"标记 + 度量 + sha256 身份"的有界表示与计数精确性（INV-01/07/08）。
 describe("tool.apply_patch metadata diff bounding", () => {
@@ -1651,7 +1679,13 @@ const editCtxWithPriorRead = (ctx: ToolCtx, filePath: string, directory: string)
             type: "tool" as const,
             tool: "read",
             callID: "call_read",
-            state: { status: "completed" as const, input: { filePath }, output: "content", metadata: {}, time: { start: 0, end: 1 } },
+            state: {
+              status: "completed" as const,
+              input: { filePath },
+              output: "content",
+              metadata: {},
+              time: { start: 0, end: 1 },
+            },
           },
         ],
       },
@@ -1839,7 +1873,6 @@ describe("tool diff gate budgets by real cost (per tool-diff-edit-budget-gate-re
     }),
   )
 })
-
 
 const toolDiffMessages = (metadata: Record<string, unknown>) =>
   [

@@ -47,26 +47,26 @@ Ran 3648 tests across 229 files. [1425.80s]
 
 ## 3. Repository Context
 
-| Source | Why it constrains this task |
-| --- | --- |
-| 根 `AGENTS.md` | 测试从包目录运行；`bun typecheck`；风格规则 |
-| `packages/core/AGENTS.md` | core 是 spawner owner；Effect 测试约定 |
-| `.opencode/policy/first-principles-engineering.md` | owner 修复、单一路径、E/C 门禁 |
+| Source                                                        | Why it constrains this task                                         |
+| ------------------------------------------------------------- | ------------------------------------------------------------------- |
+| 根 `AGENTS.md`                                                | 测试从包目录运行；`bun typecheck`；风格规则                         |
+| `packages/core/AGENTS.md`                                     | core 是 spawner owner；Effect 测试约定                              |
+| `.opencode/policy/first-principles-engineering.md`            | owner 修复、单一路径、E/C 门禁                                      |
 | `docs/plans/cross-platform-red-root-repair.md`（已 verified） | 483e840c5d 的批准范围与审计记录；本任务修复其引入的缺陷，属新因果链 |
-| `packages/core/src/cross-spawn-spawner.ts` 现行实现 | tap 急切缓冲（:251-257）与 exit 信号 'close' 单源（:274-281） |
+| `packages/core/src/cross-spawn-spawner.ts` 现行实现           | tap 急切缓冲（:251-257）与 exit 信号 'close' 单源（:274-281）       |
 
 ## 4. Files and Evidence Read
 
-| Evidence | Relevance | Evidence class |
-| --- | --- | --- |
-| CI run 33278197213 失败日志（gh 独立拉取）：`tool.grep > basic search` 30000.11ms Windows 顶格；同 run `test/file/ripgrep.test.ts` 全过（36-70ms） | 症状：grep 截断路径挂死；rg 解析与基本 spawn 正常（排除下载假设） | observed（用户提供 + gh 复核） |
-| CI run 33252630865（742585a466，含 tap 之前的 edit 修复）：Windows grep 通过（当时 5s 默认预算内完成），仅 macOS shell basic 红 | 日期定位：缺陷在 483e840c5d 引入（tap），单次 CI 时序触发 | observed |
-| **确定性红色回路（本机）**：spawn `200_000×"x"` 写手（stdin ignore、win32 非 detached），sleep 500ms，`handle.kill()`（5s timeoutOrElse 包裹）→ 当前树**进程整体挂死 >60s（shell 60s 超时杀掉，零输出）**——kill 的 5s 窗口与 orDie 均被 scope finalizer 的无限 close 等待吞没 | 第一分歧的直接复现：未消费输出 + kill → 'close' 永不触发 → exit Deferred / kill await / scope finalizer 三处无限等待 | observed |
-| **对照实验（预修复树）**：同一探针在 `D:\Temp\opencode\old-control`（pre-tap 惰性 setupOutput，:246-257 惰性 fromReadable）→ **kill→exit 764ms 解析** | 回归归属：缺陷由 483e840c5d 的 tap 引入（pre-tap 无此挂死模式） | observed |
-| `cross-spawn-spawner.ts:265-288` spawn 事件接线：`proc.on("exit")` 仅暂存 args（:274-276）；`proc.on("close")` 才 `Deferred.doneUnsafe(signal, ...)`（:277-281）；scope finalizer 与 kill 路径均 `Deferred.await(signal)`（:380-399、:425-435） | owner 与耦合点：exit 信号语义 = 'close'（exit + stdio 排干），与 tap 背压后的暂停流互斥 | observed |
-| `ripgrep.ts:533-573` search 截断路径：`Stream.take(limit+1)` → `handle.kill()` → `Effect.all([... handle.exitCode])` | 消费者侧触发面：grep basic search（"export" > 64 命中）必经此分支 | observed |
-| 本机 grep 套件 12/12 绿 + 压力探针 30 次最差 1123ms | 缺陷为时序相关（消费快/输出小则不触发）；CI 单次命中 | observed |
-| 本机重现 483e840c5d 后既有回归面（core 25/0、shell 186/0、prompt 96/14/0） | 修复不得破坏已验证的 INV-01 保真与既有绿面 | observed |
+| Evidence                                                                                                                                                                                                                                                                      | Relevance                                                                                                            | Evidence class                 |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- | ------------------------------ |
+| CI run 33278197213 失败日志（gh 独立拉取）：`tool.grep > basic search` 30000.11ms Windows 顶格；同 run `test/file/ripgrep.test.ts` 全过（36-70ms）                                                                                                                            | 症状：grep 截断路径挂死；rg 解析与基本 spawn 正常（排除下载假设）                                                    | observed（用户提供 + gh 复核） |
+| CI run 33252630865（742585a466，含 tap 之前的 edit 修复）：Windows grep 通过（当时 5s 默认预算内完成），仅 macOS shell basic 红                                                                                                                                               | 日期定位：缺陷在 483e840c5d 引入（tap），单次 CI 时序触发                                                            | observed                       |
+| **确定性红色回路（本机）**：spawn `200_000×"x"` 写手（stdin ignore、win32 非 detached），sleep 500ms，`handle.kill()`（5s timeoutOrElse 包裹）→ 当前树**进程整体挂死 >60s（shell 60s 超时杀掉，零输出）**——kill 的 5s 窗口与 orDie 均被 scope finalizer 的无限 close 等待吞没 | 第一分歧的直接复现：未消费输出 + kill → 'close' 永不触发 → exit Deferred / kill await / scope finalizer 三处无限等待 | observed                       |
+| **对照实验（预修复树）**：同一探针在 `D:\Temp\opencode\old-control`（pre-tap 惰性 setupOutput，:246-257 惰性 fromReadable）→ **kill→exit 764ms 解析**                                                                                                                         | 回归归属：缺陷由 483e840c5d 的 tap 引入（pre-tap 无此挂死模式）                                                      | observed                       |
+| `cross-spawn-spawner.ts:265-288` spawn 事件接线：`proc.on("exit")` 仅暂存 args（:274-276）；`proc.on("close")` 才 `Deferred.doneUnsafe(signal, ...)`（:277-281）；scope finalizer 与 kill 路径均 `Deferred.await(signal)`（:380-399、:425-435）                               | owner 与耦合点：exit 信号语义 = 'close'（exit + stdio 排干），与 tap 背压后的暂停流互斥                              | observed                       |
+| `ripgrep.ts:533-573` search 截断路径：`Stream.take(limit+1)` → `handle.kill()` → `Effect.all([... handle.exitCode])`                                                                                                                                                          | 消费者侧触发面：grep basic search（"export" > 64 命中）必经此分支                                                    | observed                       |
+| 本机 grep 套件 12/12 绿 + 压力探针 30 次最差 1123ms                                                                                                                                                                                                                           | 缺陷为时序相关（消费快/输出小则不触发）；CI 单次命中                                                                 | observed                       |
+| 本机重现 483e840c5d 后既有回归面（core 25/0、shell 186/0、prompt 96/14/0）                                                                                                                                                                                                    | 修复不得破坏已验证的 INV-01 保真与既有绿面                                                                           | observed                       |
 
 ## 5. Current Behavior
 
@@ -87,23 +87,23 @@ spawn(command)
 
 ## 6. Supported Input Domain and Reachability
 
-| Input or condition | Producer | Upstream guarantees | Reachable path | Owner | Classification |
-| --- | --- | --- | --- | --- | --- |
-| 子进程输出 > tap HWM 且消费者提前停止读取，随后 kill 或进程退出 | 任意 spawner 消费者的截断/abort 路径：Ripgrep.search take 截断（grep 工具默认路径）、shell abort 中途输出、glob sentinel（scope finalizer kill） | 无——exit 信号与排干耦合 | grep basic search CI 实测红；本机确定性探针红 | packages/core cross-spawn-spawner spawn() 事件接线 | observed |
+| Input or condition                                              | Producer                                                                                                                                         | Upstream guarantees     | Reachable path                                | Owner                                              | Classification |
+| --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------- | --------------------------------------------- | -------------------------------------------------- | -------------- |
+| 子进程输出 > tap HWM 且消费者提前停止读取，随后 kill 或进程退出 | 任意 spawner 消费者的截断/abort 路径：Ripgrep.search take 截断（grep 工具默认路径）、shell abort 中途输出、glob sentinel（scope finalizer kill） | 无——exit 信号与排干耦合 | grep basic search CI 实测红；本机确定性探针红 | packages/core cross-spawn-spawner spawn() 事件接线 | observed       |
 
 ## 7. Required Invariants
 
-| ID | Behavioral invariant | Evidence | Existing test |
-| --- | --- | --- | --- |
-| INV-01 | （沿用前计划，已验证）输出保真：写入与订阅时序解耦，已写入字节完整可读 | 前计划 §23 + 既有 core retention 测试 | 有（10/10 exit-后订阅） |
-| INV-06（新） | exit 信号与 stdio 排干解耦：进程死亡（'exit' 事件）后，`handle.exitCode`、`kill` await 与 scope finalizer 必须在有界时间内完成，无论输出流消费/背压状态；已完成信号不得二次完成 | 确定性探针（当前挂死/旧树 764ms）+ CI 红 | 无（本次建立） |
-| INV-07（新） | 排干解耦不得破坏 INV-01：exit 后 tap 缓冲数据仍可完整读取 | INV-01 既有测试 + 'exit' 完成信号后读取的语义 | 有（retention 测试覆盖 exit-后读取） |
+| ID           | Behavioral invariant                                                                                                                                                            | Evidence                                      | Existing test                        |
+| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------- | ------------------------------------ |
+| INV-01       | （沿用前计划，已验证）输出保真：写入与订阅时序解耦，已写入字节完整可读                                                                                                          | 前计划 §23 + 既有 core retention 测试         | 有（10/10 exit-后订阅）              |
+| INV-06（新） | exit 信号与 stdio 排干解耦：进程死亡（'exit' 事件）后，`handle.exitCode`、`kill` await 与 scope finalizer 必须在有界时间内完成，无论输出流消费/背压状态；已完成信号不得二次完成 | 确定性探针（当前挂死/旧树 764ms）+ CI 红      | 无（本次建立）                       |
+| INV-07（新） | 排干解耦不得破坏 INV-01：exit 后 tap 缓冲数据仍可完整读取                                                                                                                       | INV-01 既有测试 + 'exit' 完成信号后读取的语义 | 有（retention 测试覆盖 exit-后读取） |
 
 ## 8. First Divergence and Root Cause
 
-| Invariant | First divergence | Owning module/interface | Proof |
-| --- | --- | --- | --- |
-| INV-06 | `spawn()`（cross-spawn-spawner.ts:277-281）仅以 `'close'`（exit + stdio 排干）完成 exit Deferred；483e840c5d 的 tap 在消费者停止后对 `proc.stdout` 施加背压，暂停的流使 `'close'` 永不触发；`'exit'`（:274-276）已到但只暂存不完成 | `packages/core/src/cross-spawn-spawner.ts` `spawn()`（进程生命周期信号唯一 owner） | 双侧探针：当前树挂死 >60s vs pre-tap 树 764ms；CI grep 红；kill/finalizer 三处 await 同源 |
+| Invariant | First divergence                                                                                                                                                                                                                   | Owning module/interface                                                            | Proof                                                                                     |
+| --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| INV-06    | `spawn()`（cross-spawn-spawner.ts:277-281）仅以 `'close'`（exit + stdio 排干）完成 exit Deferred；483e840c5d 的 tap 在消费者停止后对 `proc.stdout` 施加背压，暂停的流使 `'close'` 永不触发；`'exit'`（:274-276）已到但只暂存不完成 | `packages/core/src/cross-spawn-spawner.ts` `spawn()`（进程生命周期信号唯一 owner） | 双侧探针：当前树挂死 >60s vs pre-tap 树 764ms；CI grep 红；kill/finalizer 三处 await 同源 |
 
 红色回路（确定性，本机）：
 
@@ -118,10 +118,10 @@ bun -e '<spawn 200KB writer; sleep 500; handle.kill() with 5s timeoutOrElse>'
 
 ## 9. Responsibility and Seam
 
-| Concern | Owner | Interface promise | Why it belongs here | Why another module does not own it |
-| --- | --- | --- | --- | --- |
+| Concern                | Owner                              | Interface promise                            | Why it belongs here                                        | Why another module does not own it                                              |
+| ---------------------- | ---------------------------------- | -------------------------------------------- | ---------------------------------------------------------- | ------------------------------------------------------------------------------- |
 | 进程死亡信号的完成时机 | `cross-spawn-spawner.ts` `spawn()` | exitCode/kill/finalizer 在进程死亡后有界完成 | 三类等待共用同一 Deferred，其完成事件由 spawn 接线唯一决定 | ripgrep/shell 的 kill 等待只是消费者；在消费者层加超时是重复兜底（policy 禁止） |
-| 输出保真（INV-01） | `setupOutput` tap（不改） | 已验证 | — | — |
+| 输出保真（INV-01）     | `setupOutput` tap（不改）          | 已验证                                       | —                                                          | —                                                                               |
 
 ## 10. Single Approved Primary-Path Design
 
@@ -154,82 +154,82 @@ signal 现在由进程死亡驱动。
 
 ## 11. Secondary and Replacement Path Inventory
 
-| Path | Current or proposed | Classification | Produces success? | Decision-surface share | Disposition |
-| --- | --- | --- | --- | --- | --- |
-| tap 急切缓冲（setupOutput） | 现有（483e840c5d） | primary-contract branch（INV-01） | yes | 已在 | preserve（不改） |
-| 'close' 完成信号 | 现有 | 待修复的 primary 路径 | yes | 主路径 | 就地修复为 'exit' 驱动 + close 幂等兜底 |
-| 消费者层 exitCode 超时（ripgrep/shell） | 不存在 | forbidden（下游重复兜底） | — | 0 | reject |
-| kill 后 destroy tap | 不存在 | forbidden（破坏 INV-01 保留） | — | 0 | reject |
-| 回退 483e840c5d | — | forbidden（丢已验证修复） | — | 0 | reject |
+| Path                                    | Current or proposed | Classification                    | Produces success? | Decision-surface share | Disposition                             |
+| --------------------------------------- | ------------------- | --------------------------------- | ----------------- | ---------------------- | --------------------------------------- |
+| tap 急切缓冲（setupOutput）             | 现有（483e840c5d）  | primary-contract branch（INV-01） | yes               | 已在                   | preserve（不改）                        |
+| 'close' 完成信号                        | 现有                | 待修复的 primary 路径             | yes               | 主路径                 | 就地修复为 'exit' 驱动 + close 幂等兜底 |
+| 消费者层 exitCode 超时（ripgrep/shell） | 不存在              | forbidden（下游重复兜底）         | —                 | 0                      | reject                                  |
+| kill 后 destroy tap                     | 不存在              | forbidden（破坏 INV-01 保留）     | —                 | 0                      | reject                                  |
+| 回退 483e840c5d                         | —                   | forbidden（丢已验证修复）         | —                 | 0                      | reject                                  |
 
 ## 12. Workaround Deletion and Replacement
 
-| Existing workaround or duplicate | Why it existed | Why the approved route supersedes it | Delete or collapse location |
-| --- | --- | --- | --- |
-| 无存量 workaround（缺陷为 483e840c5d 新引入；此前无补偿层） | — | — | — |
+| Existing workaround or duplicate                            | Why it existed | Why the approved route supersedes it | Delete or collapse location |
+| ----------------------------------------------------------- | -------------- | ------------------------------------ | --------------------------- |
+| 无存量 workaround（缺陷为 483e840c5d 新引入；此前无补偿层） | —              | —                                    | —                           |
 
 ## 13. Forward Traceability
 
-| Requirement or invariant | Production path | Planned file/change | Behavioral test |
-| --- | ---| --- | --- |
-| INV-06 exit 信号解耦 | spawn() 'exit' 完成源 | cross-spawn-spawner.ts | core 新测试：200KB 未消费写手 + kill → exitCode 有界完成（当前确定性红） |
-| INV-01 保真不回归 | tap 不动 | 无 | 既有 retention 测试（10 次循环）保持绿 |
-| INV-07 exit 后可读 | 'exit' 完成 + tap 保留 | 无 | 新测试在 exitCode 解析后追加读取断言（部分字节） |
-| CI grep 红 | INV-06 修复的下游实例 | 无消费者改动 | 本机 grep 套件 + 用户 CI 复跑 |
-| 治理（双审计） | 本 plan | plan 文档 | §22/§24 审计记录 |
+| Requirement or invariant | Production path        | Planned file/change    | Behavioral test                                                          |
+| ------------------------ | ---------------------- | ---------------------- | ------------------------------------------------------------------------ |
+| INV-06 exit 信号解耦     | spawn() 'exit' 完成源  | cross-spawn-spawner.ts | core 新测试：200KB 未消费写手 + kill → exitCode 有界完成（当前确定性红） |
+| INV-01 保真不回归        | tap 不动               | 无                     | 既有 retention 测试（10 次循环）保持绿                                   |
+| INV-07 exit 后可读       | 'exit' 完成 + tap 保留 | 无                     | 新测试在 exitCode 解析后追加读取断言（部分字节）                         |
+| CI grep 红               | INV-06 修复的下游实例  | 无消费者改动           | 本机 grep 套件 + 用户 CI 复跑                                            |
+| 治理（双审计）           | 本 plan                | plan 文档              | §22/§24 审计记录                                                         |
 
 ## 14. Reverse Traceability
 
-| Proposed production concept | Requirement ID | Evidence | Why existing logic cannot carry it |
-| --- | --- | --- | --- |
-| 'exit' 驱动 + 'close' 幂等兜底的信号完成 | INV-06/07 | 双侧探针 + CI 红 | 'close' 单源与背压暂停流互斥；'exit' 已到达却只暂存 |
+| Proposed production concept              | Requirement ID | Evidence         | Why existing logic cannot carry it                  |
+| ---------------------------------------- | -------------- | ---------------- | --------------------------------------------------- |
+| 'exit' 驱动 + 'close' 幂等兜底的信号完成 | INV-06/07      | 双侧探针 + CI 红 | 'close' 单源与背压暂停流互斥；'exit' 已到达却只暂存 |
 
 ## 15. File-Level Change Plan
 
-| File | Add / modify / delete | Exact responsibility of the change | Expected line delta |
-| --- | --- | --- | --- |
-| `packages/core/src/cross-spawn-spawner.ts` | modify | spawn() 增加 completeOnce 幂等闭包；'exit' 即完成 signal；'close' 兜底 no-op；中文不变量注释 | 约 +14/−4 |
-| `packages/core/test/effect/cross-spawn-spawner.test.ts` | modify | 新增 INV-06/07 测试（未消费大输出 + kill → exitCode 有界；exit 后部分读取）；fx.live + 显式 timeout | 约 +30 |
-| 本 plan | add | — | — |
+| File                                                    | Add / modify / delete | Exact responsibility of the change                                                                  | Expected line delta |
+| ------------------------------------------------------- | --------------------- | --------------------------------------------------------------------------------------------------- | ------------------- |
+| `packages/core/src/cross-spawn-spawner.ts`              | modify                | spawn() 增加 completeOnce 幂等闭包；'exit' 即完成 signal；'close' 兜底 no-op；中文不变量注释        | 约 +14/−4           |
+| `packages/core/test/effect/cross-spawn-spawner.test.ts` | modify                | 新增 INV-06/07 测试（未消费大输出 + kill → exitCode 有界；exit 后部分读取）；fx.live + 显式 timeout | 约 +30              |
+| 本 plan                                                 | add                   | —                                                                                                   | —                   |
 
 （2 代码文件 + plan = 3 文件。）
 
 ## 16. TDD Behavior Slices
 
-| Order | Red behavior | Why current code fails | Minimal green behavior | Regression protected |
-| --- | --- | --- | --- | --- |
-| 1 | core spawner（fx.live，显式 timeout 20_000）：spawn 写 200KB×2 的写手（无人消费 stdout），sleep 500ms，`handle.kill()`，断言 exitCode 在测试内解析（kill 自身即 await signal）| 'close' 被背压暂停流阻断，signal 永不完成（本机确定性探针红：进程挂死） | 'exit' 完成源 → kill/exitCode 有界返回 | INV-06；同时覆盖 grep 截断、shell abort、glob finalizer 三个可达面 |
-| 2 | 同测试内在 kill 返回后从 `handle.stdout` 读取并断言含开头字节（`startsWith("x")` 的累积读取） | （修复后应绿；修复前同挂死） | tap 缓冲在 exit 后仍可读 | INV-07/INV-01 |
-| 3 | 既有全套回归 | — | core 25→27/0、grep 12/0、shell 186/0、prompt 抽样、typecheck 双包 | 全绿面不回归 |
+| Order | Red behavior                                                                                                                                                                   | Why current code fails                                                  | Minimal green behavior                                            | Regression protected                                               |
+| ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------- | ----------------------------------------------------------------- | ------------------------------------------------------------------ |
+| 1     | core spawner（fx.live，显式 timeout 20_000）：spawn 写 200KB×2 的写手（无人消费 stdout），sleep 500ms，`handle.kill()`，断言 exitCode 在测试内解析（kill 自身即 await signal） | 'close' 被背压暂停流阻断，signal 永不完成（本机确定性探针红：进程挂死） | 'exit' 完成源 → kill/exitCode 有界返回                            | INV-06；同时覆盖 grep 截断、shell abort、glob finalizer 三个可达面 |
+| 2     | 同测试内在 kill 返回后从 `handle.stdout` 读取并断言含开头字节（`startsWith("x")` 的累积读取）                                                                                  | （修复后应绿；修复前同挂死）                                            | tap 缓冲在 exit 后仍可读                                          | INV-07/INV-01                                                      |
+| 3     | 既有全套回归                                                                                                                                                                   | —                                                                       | core 25→27/0、grep 12/0、shell 186/0、prompt 抽样、typecheck 双包 | 全绿面不回归                                                       |
 
 ## 17. Chinese Comment Budget
 
-| Metric | Estimate | Method |
-| --- | --- | --- |
-| Effective changed code lines `E` | 约 8（completeOnce 闭包 + 事件接线改写）+ 测试约 25 | 排除注释/空行 |
-| Required Chinese explanatory comments `C` | ≥ max(1, ceil(33×0.15)) = 5；计划 2 处约 8 行 | ①spawn() 处：exit/close 语义差与背压机理、幂等兜底理由；②测试处：未消费输出+kill 即最对抗形态 |
+| Metric                                    | Estimate                                            | Method                                                                                        |
+| ----------------------------------------- | --------------------------------------------------- | --------------------------------------------------------------------------------------------- |
+| Effective changed code lines `E`          | 约 8（completeOnce 闭包 + 事件接线改写）+ 测试约 25 | 排除注释/空行                                                                                 |
+| Required Chinese explanatory comments `C` | ≥ max(1, ceil(33×0.15)) = 5；计划 2 处约 8 行       | ①spawn() 处：exit/close 语义差与背压机理、幂等兜底理由；②测试处：未消费输出+kill 即最对抗形态 |
 
 ## 18. Verification
 
-| Command | Working directory | Evidence produced |
-| --- | --- | --- |
-| `bun test test/effect/cross-spawn-spawner.test.ts` | packages/core | 新 slice 1/2 红转绿 + 既有 25 项保持绿 |
-| `bun test --timeout 30000 test/tool/grep.test.ts` | packages/opencode | 12/0（CI 红的本地实例面） |
-| `bun test --timeout 30000 test/tool/shell.test.ts` | packages/opencode | 186/0（abort/kill 可达面） |
-| `bun test --timeout 30000 test/session/prompt.test.ts -t "refreshes queued Permission"` 等 3 项抽样 | packages/opencode | 抽样绿（shell-in-loop 面） |
-| `bun typecheck` | packages/core 与 packages/opencode | 双包 exit 0 |
-| 确定性探针复跑（第 8 节命令） | packages/core | 修复后 <5s 解析 |
-| macOS/Windows CI | 用户复跑 | grep 红消除且无新红 |
+| Command                                                                                             | Working directory                  | Evidence produced                      |
+| --------------------------------------------------------------------------------------------------- | ---------------------------------- | -------------------------------------- |
+| `bun test test/effect/cross-spawn-spawner.test.ts`                                                  | packages/core                      | 新 slice 1/2 红转绿 + 既有 25 项保持绿 |
+| `bun test --timeout 30000 test/tool/grep.test.ts`                                                   | packages/opencode                  | 12/0（CI 红的本地实例面）              |
+| `bun test --timeout 30000 test/tool/shell.test.ts`                                                  | packages/opencode                  | 186/0（abort/kill 可达面）             |
+| `bun test --timeout 30000 test/session/prompt.test.ts -t "refreshes queued Permission"` 等 3 项抽样 | packages/opencode                  | 抽样绿（shell-in-loop 面）             |
+| `bun typecheck`                                                                                     | packages/core 与 packages/opencode | 双包 exit 0                            |
+| 确定性探针复跑（第 8 节命令）                                                                       | packages/core                      | 修复后 <5s 解析                        |
+| macOS/Windows CI                                                                                    | 用户复跑                           | grep 红消除且无新红                    |
 
 ## 19. Diff Budget
 
-| Metric | Estimate | Justification |
-| --- | --- | --- |
-| Files added | 0（plan 除外） | — |
-| Files modified | 2 代码 + plan = 3 | 单点 owner 修复 |
-| Production lines | 约 +14/−4 | 幂等完成闭包 |
-| Test lines | 约 +30 | 1 个新测试（双断言） |
-| Generated lines | 0 | — |
+| Metric           | Estimate          | Justification        |
+| ---------------- | ----------------- | -------------------- |
+| Files added      | 0（plan 除外）    | —                    |
+| Files modified   | 2 代码 + plan = 3 | 单点 owner 修复      |
+| Production lines | 约 +14/−4         | 幂等完成闭包         |
+| Test lines       | 约 +30            | 1 个新测试（双断言） |
+| Generated lines  | 0                 | —                    |
 
 ## 20. Real Risks and Open Decisions
 
@@ -269,9 +269,9 @@ The independent auditor must:
 
 ## 22. Plan Audit Record
 
-| Round | Audited revision | Full scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | R1 | yes | 0 | 4（§3 引用不存在的 packages/core/AGENTS.md；行号漂移（exit :288-290/close :291-295/finalizer :394-414/exitCode :429/kill :439-449）；gh run 33278197213 在 SMARK2022/opencode 返回 404 无法独立复核（用户提供文本按原样可信，机制归因已由对照树独立确证）；阈值措辞（实际 take(66)>184 命中）） | No blocking findings — APPROVE | ses_fb02c621dffeE2nkSI0L3thGHc |
+| Round | Audited revision | Full scope? | Blocking findings | Non-blocking findings                                                                                                                                                                                                                                                                           | Result                         | Invocation reference           |
+| ----- | ---------------- | ----------- | ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------ | ------------------------------ |
+| 1     | R1               | yes         | 0                 | 4（§3 引用不存在的 packages/core/AGENTS.md；行号漂移（exit :288-290/close :291-295/finalizer :394-414/exitCode :429/kill :439-449）；gh run 33278197213 在 SMARK2022/opencode 返回 404 无法独立复核（用户提供文本按原样可信，机制归因已由对照树独立确证）；阈值措辞（实际 take(66)>184 命中）） | No blocking findings — APPROVE | ses_fb02c621dffeE2nkSI0L3thGHc |
 
 <details><summary>Verbatim independent audit verdict (Round 1, revision R1) — approved</summary>
 
@@ -331,7 +331,7 @@ The independent auditor must:
 
 **批准** — 针对确切版本 R1（计划审计，全范围）。未发现阻塞性发现；硬性关卡（根本原因所有者修复、单一主路径、无回退族、可红测试、可证明的可达性、完整的双向可追溯性、受限制的文件计划、正确的验证命令、一致的元数据）均已通过。非阻塞项目（幽灵 AGENTS.md 引用、行号漂移、不可验证的 gh 运行声明、阈值措辞）应对实施者透明，但无需修订即可继续。允许转换到 Status: approved / Revision: R1 / Approved revision: R1 / Implementation allowed: yes。
 
-*审计探针产物：`D:\\Temp\\opencode\\audit-exit-signal`（预批准临时目录，未触碰仓库任何文件）。*
+_审计探针产物：`D:\\Temp\\opencode\\audit-exit-signal`（预批准临时目录，未触碰仓库任何文件）。_
 
 </details>
 
@@ -357,13 +357,13 @@ Complete only after implementation.
 
 ### Verification Commands and Results
 
-| Command | Working directory | Result |
-| --- | --- | --- |
-| `bun test test/effect/cross-spawn-spawner.test.ts` | packages/core | 26 pass / 0 fail（含既有 retention 10 循环 INV-01 不回归） |
-| `bun test --timeout 30000 test/tool/grep.test.ts` | packages/opencode | 12 pass / 0 fail（CI 红的本地实例面） |
-| `bun test --timeout 30000 test/tool/shell.test.ts` | packages/opencode | 186 pass / 0 fail（abort/kill 可达面） |
-| `bun test --timeout 30000 ... -t "refreshes queued Permission"` | packages/opencode | 1 pass / 0 fail（shell-in-loop 抽样） |
-| `bun typecheck` | packages/core、packages/opencode | 双包 exit 0 |
+| Command                                                         | Working directory                | Result                                                     |
+| --------------------------------------------------------------- | -------------------------------- | ---------------------------------------------------------- |
+| `bun test test/effect/cross-spawn-spawner.test.ts`              | packages/core                    | 26 pass / 0 fail（含既有 retention 10 循环 INV-01 不回归） |
+| `bun test --timeout 30000 test/tool/grep.test.ts`               | packages/opencode                | 12 pass / 0 fail（CI 红的本地实例面）                      |
+| `bun test --timeout 30000 test/tool/shell.test.ts`              | packages/opencode                | 186 pass / 0 fail（abort/kill 可达面）                     |
+| `bun test --timeout 30000 ... -t "refreshes queued Permission"` | packages/opencode                | 1 pass / 0 fail（shell-in-loop 抽样）                      |
+| `bun typecheck`                                                 | packages/core、packages/opencode | 双包 exit 0                                                |
 
 ### Original Feedback-Loop Result
 
@@ -375,12 +375,12 @@ Complete only after implementation.
 
 ### Chinese Comment Calculation
 
-| Metric | Actual | Exclusions and evidence |
-| --- | --- | --- |
-| Effective changed code lines `E` | 36 | 生产 7（闭包 6 + exit 内 1 行调用）+ 测试 29（排除 9 行注释）；排除空行/纯删除 |
-| Qualifying Chinese comment lines `C` | 9 | 生产 4（exit/close 语义差 + 背压机理 + 幂等理由）+ 测试 5（对抗形态 + 预算用途） |
-| Ratio `C / E` | 0.25 | ≥ 0.15 |
-| Required minimum `C` | 6 | `max(1, ceil(36 × 0.15))` |
+| Metric                               | Actual | Exclusions and evidence                                                          |
+| ------------------------------------ | ------ | -------------------------------------------------------------------------------- |
+| Effective changed code lines `E`     | 36     | 生产 7（闭包 6 + exit 内 1 行调用）+ 测试 29（排除 9 行注释）；排除空行/纯删除   |
+| Qualifying Chinese comment lines `C` | 9      | 生产 4（exit/close 语义差 + 背压机理 + 幂等理由）+ 测试 5（对抗形态 + 预算用途） |
+| Ratio `C / E`                        | 0.25   | ≥ 0.15                                                                           |
+| Required minimum `C`                 | 6      | `max(1, ceil(36 × 0.15))`                                                        |
 
 ### Remaining Unverified Items
 
@@ -388,9 +388,9 @@ Complete only after implementation.
 
 ## 24. Implementation Audit Record
 
-| Round | Plan revision | Full original scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | R1 | yes | 0 | 4（shell 套件在本机现出 1 项预存环境性 flake（Select-Object 测试，裸 powershell 探针 3/5 非零退出）与 diff 无关；§23 的 186/0 在审计机为 185/1；断言 startsWith→toContain 漂移；无关 models-snapshot.js 散落改动需提交时隔离） | No blocking findings — APPROVE | ses_fb0149fd8ffe4WFDesd11D7CcS |
+| Round | Plan revision | Full original scope? | Blocking findings | Non-blocking findings                                                                                                                                                                                                          | Result                         | Invocation reference           |
+| ----- | ------------- | -------------------- | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------ | ------------------------------ |
+| 1     | R1            | yes                  | 0                 | 4（shell 套件在本机现出 1 项预存环境性 flake（Select-Object 测试，裸 powershell 探针 3/5 非零退出）与 diff 无关；§23 的 186/0 在审计机为 185/1；断言 startsWith→toContain 漂移；无关 models-snapshot.js 散落改动需提交时隔离） | No blocking findings — APPROVE | ses_fb0149fd8ffe4WFDesd11D7CcS |
 
 <details><summary>Verbatim independent implementation audit verdict (Round 1, plan revision R1) — approved</summary>
 

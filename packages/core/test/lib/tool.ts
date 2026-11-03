@@ -22,12 +22,19 @@ export const executeTool = (registry: ToolRegistry.Interface, input: ToolRegistr
 // 仅为显式测试场景提供完成态历史；调用工具本身不会自动制造此前已读的证明。
 export const toolHistory = (path: string, tool = "read") => [
   Schema.decodeUnknownSync(SessionMessage.Assistant)({
-    id: "msg_prior", type: "assistant", agent: "build",
+    id: "msg_prior",
+    type: "assistant",
+    agent: "build",
     model: { id: "test", providerID: "test" },
     time: { created: 0, completed: 1 },
-    content: [{
-      type: "tool", id: "prior", name: tool, time: { created: 0, completed: 1 },
-      state: { status: "completed", input: { path }, structured: {}, content: [] },
-    }],
+    content: [
+      {
+        type: "tool",
+        id: "prior",
+        name: tool,
+        time: { created: 0, completed: 1 },
+        state: { status: "completed", input: { path }, structured: {}, content: [] },
+      },
+    ],
   }),
 ]

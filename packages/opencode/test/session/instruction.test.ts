@@ -30,7 +30,11 @@ const it = testEffect(
 )
 
 // #270：配置参数化，允许测试传入自定义 config
-const instructionLayer = (global: Partial<Global.Interface>, flags?: Partial<RuntimeFlags.Info>, config: Record<string, unknown> = {}) =>
+const instructionLayer = (
+  global: Partial<Global.Interface>,
+  flags?: Partial<RuntimeFlags.Info>,
+  config: Record<string, unknown> = {},
+) =>
   AppNodeBuilder.build(Instruction.node, [
     // #270：覆盖 get 而非整个 service——TestConfig.make 的展开目标是服务方法，config 数据必须走 get 返回值
     // #270：Info 类型未导出——Record + as any 与 code-mode.test.ts 先例一致
@@ -42,8 +46,8 @@ const instructionLayer = (global: Partial<Global.Interface>, flags?: Partial<Run
 const provideInstruction =
   // #270：新增 config 参数供远程指令测试使用
   (global: Partial<Global.Interface>, flags?: Partial<RuntimeFlags.Info>, config: Partial<Config.Interface> = {}) =>
-  <A, E, R>(self: Effect.Effect<A, E, R>) =>
-    self.pipe(Effect.provide(instructionLayer(global, flags, config)))
+    <A, E, R>(self: Effect.Effect<A, E, R>) =>
+      self.pipe(Effect.provide(instructionLayer(global, flags, config)))
 
 const write = (filepath: string, content: string) =>
   Effect.gen(function* () {

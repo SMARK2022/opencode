@@ -18,7 +18,15 @@ import { message as cleanMessage } from "@/utils/diffs"
 import { sessionNotFoundError } from "@/utils/server-errors"
 import { rootSession } from "@/utils/session-route"
 import { normalizeSessionInfo } from "@/utils/session"
-import { compareMessages, messageKey, normalizeSessionMessages, preserveMessageHidden, reviewerRequestID, sessionMessageHidden, syntheticTurn } from "@/utils/session-message"
+import {
+  compareMessages,
+  messageKey,
+  normalizeSessionMessages,
+  preserveMessageHidden,
+  reviewerRequestID,
+  sessionMessageHidden,
+  syntheticTurn,
+} from "@/utils/session-message"
 import type { NativeSessionEvent } from "./native-session-event"
 import { mergePartSnapshot, mergePartSnapshots } from "./global-sync/part-merge"
 import { dropSessionCaches, pickSessionCacheEvictions, SESSION_CACHE_LIMIT } from "./global-sync/session-cache"
@@ -37,10 +45,13 @@ const emptyIDs: ReadonlySet<string> = new Set()
 function needsOlderTurnRoot(source: readonly SessionMessageInfo[]) {
   const visible = source.filter((message) => !sessionMessageHidden(message))
   // 页内已有较新的请求也不代表包含并发助手实际引用的较旧请求。
-  if (visible.some((message) => {
-    const id = reviewerRequestID(message)
-    return id !== undefined && !visible.some((root) => root.id === id && syntheticTurn(root)?.reviewer)
-  })) return true
+  if (
+    visible.some((message) => {
+      const id = reviewerRequestID(message)
+      return id !== undefined && !visible.some((root) => root.id === id && syntheticTurn(root)?.reviewer)
+    })
+  )
+    return true
   const boundary = visible.find(
     (message) =>
       message.type === "user" ||
@@ -634,7 +645,10 @@ export function createServerSession(
       // HTTP page 写入前先与本地现值做单调合并，防止 page-load 把 running tool part 回退成旧快照
       const fetched = load?.clearedMessageParts.has(item.id)
         ? []
-        : mergePartSnapshots(data.part[item.id], item.part.filter((part) => !SKIP_PARTS.has(part.type)))
+        : mergePartSnapshots(
+            data.part[item.id],
+            item.part.filter((part) => !SKIP_PARTS.has(part.type)),
+          )
       const fetchedIDs = new Set(fetched.map((part) => part.id))
       const pending = pendingParts.get(sessionID)?.get(item.id)
       const touched = new Set([...(load?.touchedParts.get(item.id) ?? []), ...(pending ?? [])])
@@ -692,7 +706,11 @@ export function createServerSession(
           const current = existing.filter((message) => !incoming.has(message.id))
           const live = new Map(existing.map((message) => [message.id, message]))
           return (page.sourceMode === "older" ? [...page.source, ...current] : [...current, ...page.source]).map(
-            (message) => preserveMessageHidden(live.get(message.id), load?.touchedSource.has(message.id) ? (live.get(message.id) ?? message) : message),
+            (message) =>
+              preserveMessageHidden(
+                live.get(message.id),
+                load?.touchedSource.has(message.id) ? (live.get(message.id) ?? message) : message,
+              ),
           )
         })()
       : undefined
@@ -902,8 +920,7 @@ export function createServerSession(
         if (touched.has(message.id)) concealed.add(message.id)
         continue
       }
-      if (message.type === "user" || syntheticTurn(message) !== undefined)
-        parentID = message.id
+      if (message.type === "user" || syntheticTurn(message) !== undefined) parentID = message.id
       if (message.type === "shell") {
         if (touched.has(message.id)) touched.add(`${message.id}:assistant`)
         parentID = undefined
@@ -917,11 +934,16 @@ export function createServerSession(
 
     const normalized = normalizeSessionMessages(reduction.sessionID, reduction.messages)
     batch(() => {
-      if (concealed.size) setData(produce((draft) => {
-        draft.message[reduction.sessionID] = (draft.message[reduction.sessionID] ?? []).filter((message) => !concealed.has(message.id))
-        // 仅移除显示及片段；原始session_message和隐藏metadata继续保留。
-        for (const messageID of concealed) deleteMessageParts(draft, messageID)
-      }))
+      if (concealed.size)
+        setData(
+          produce((draft) => {
+            draft.message[reduction.sessionID] = (draft.message[reduction.sessionID] ?? []).filter(
+              (message) => !concealed.has(message.id),
+            )
+            // 仅移除显示及片段；原始session_message和隐藏metadata继续保留。
+            for (const messageID of concealed) deleteMessageParts(draft, messageID)
+          }),
+        )
       for (const message of normalized.messages) {
         if (!touched.has(message.id)) continue
         apply({ type: "message.updated", properties: { sessionID: reduction.sessionID, info: message } })
@@ -949,7 +971,13 @@ export function createServerSession(
       .message({ sessionID, messageID })
       .then((message) => {
         const current = data.session_message[sessionID] ?? []
-        const messages = [...current.filter((item) => item.id !== message.id), preserveMessageHidden(current.find((item) => item.id === message.id), message)].sort(compareMessages)
+        const messages = [
+          ...current.filter((item) => item.id !== message.id),
+          preserveMessageHidden(
+            current.find((item) => item.id === message.id),
+            message,
+          ),
+        ].sort(compareMessages)
         projectV2({ sessionID, messages, touched: [message.id] })
       })
       .catch(() => {})
@@ -1251,13 +1279,16 @@ export function createServerSession(
         }
         // 保留上方 hydration 变化标记；raw 不参与仅适用于文字的 deltaBases/accumulator。
         if (props.field === "raw") {
-          setData("part", props.messageID, produce((draft) => {
-            if (!draft) return
-            const part = draft[result.index]
-            // Server session 与 global reducer 使用同一 pending/raw 语义，终态不接受迟到片段。
-            if (part.type === "tool" && part.state.status === "pending")
-              part.state.raw += props.delta
-          }))
+          setData(
+            "part",
+            props.messageID,
+            produce((draft) => {
+              if (!draft) return
+              const part = draft[result.index]
+              // Server session 与 global reducer 使用同一 pending/raw 语义，终态不接受迟到片段。
+              if (part.type === "tool" && part.state.status === "pending") part.state.raw += props.delta
+            }),
+          )
           return
         }
 

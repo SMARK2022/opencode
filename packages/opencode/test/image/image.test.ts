@@ -16,9 +16,17 @@ const tiny = testEffect(
 )
 
 // 禁用缩放使错误的全局预算直接暴露，上传仍按原尺寸配置和默认 5 MiB 接收。
-const uploads = testEffect(LayerNode.compile(Image.node, [[Config.node, TestConfig.layer({
-  get: () => Effect.succeed({ attachment: { image: { auto_resize: false, max_width: 10000, max_height: 10000 } } }),
-})]]))
+const uploads = testEffect(
+  LayerNode.compile(Image.node, [
+    [
+      Config.node,
+      TestConfig.layer({
+        get: () =>
+          Effect.succeed({ attachment: { image: { auto_resize: false, max_width: 10000, max_height: 10000 } } }),
+      }),
+    ],
+  ]),
+)
 
 function part(mime: string, data: string) {
   return {
@@ -67,7 +75,13 @@ describe("Image", () => {
       ])
 
       source.free()
-      expect(results.map((result) => result.url.startsWith(`data:${result.mime};base64,`))).toEqual([true, true, true, true, true])
+      expect(results.map((result) => result.url.startsWith(`data:${result.mime};base64,`))).toEqual([
+        true,
+        true,
+        true,
+        true,
+        true,
+      ])
       expect(results.every((result) => result.mime === "image/png" || result.mime === "image/jpeg")).toBe(true)
       for (const [index, result] of results.entries()) {
         const base64 = result.url.slice(result.url.indexOf(";base64,") + 8)
@@ -174,9 +188,14 @@ describe("Image", () => {
 
   uploads.effect("keeps upload limits while applying an explicit Read-only budget", () =>
     Effect.gen(function* () {
-      const input = part("image/png", Buffer.from(yield* Effect.promise(() =>
-        Bun.file(path.join(import.meta.dir, "fixtures", "picture-5mb-base64.png")).arrayBuffer(),
-      )).toString("base64"))
+      const input = part(
+        "image/png",
+        Buffer.from(
+          yield* Effect.promise(() =>
+            Bun.file(path.join(import.meta.dir, "fixtures", "picture-5mb-base64.png")).arrayBuffer(),
+          ),
+        ).toString("base64"),
+      )
       const image = yield* Image.Service
       // 同一真实图片在上传调用中必须保持原样，不能悄悄继承 Read 的 1.2 MB。
       expect(yield* image.normalize(input)).toEqual(input)

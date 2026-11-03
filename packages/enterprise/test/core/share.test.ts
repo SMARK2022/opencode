@@ -38,9 +38,12 @@ function useTestStorage() {
     const request = new Request(input, init)
     const url = new URL(request.url)
     const bucketPath = `/${state.bucket}`
-    if (url.host !== `s3.${state.region}.amazonaws.com` || (url.pathname !== bucketPath && !url.pathname.startsWith(`${bucketPath}/`))) {
+    if (
+      url.host !== `s3.${state.region}.amazonaws.com` ||
+      (url.pathname !== bucketPath && !url.pathname.startsWith(`${bucketPath}/`))
+    ) {
       return state.originalFetch(input, init)
-    // 只拦截测试 bucket 的路径前缀；其它 S3/外部流量原样放行，防止测试污染共享端点。
+      // 只拦截测试 bucket 的路径前缀；其它 S3/外部流量原样放行，防止测试污染共享端点。
     }
 
     const key = decodeURIComponent(url.pathname.slice(bucketPath.length).replace(/^\//, ""))
@@ -54,9 +57,12 @@ function useTestStorage() {
       const limited = url.searchParams.has("max-keys") ? keys.slice(0, Number(url.searchParams.get("max-keys"))) : keys
       // max-keys/start-after 逐字复刻 S3 分页语义——Share.data 的分页迭代依赖这两个游标。
       // Share.data 依赖 list 顺序和 start-after 游标；这里模拟 S3 ListObjectsV2 的关键返回字段，不伪造生产模块。
-      return new Response(`<ListBucketResult>${limited.map((item) => `<Contents><Key>${item}</Key></Contents>`).join("")}</ListBucketResult>`, {
-        headers: { "Content-Type": "application/xml" },
-      })
+      return new Response(
+        `<ListBucketResult>${limited.map((item) => `<Contents><Key>${item}</Key></Contents>`).join("")}</ListBucketResult>`,
+        {
+          headers: { "Content-Type": "application/xml" },
+        },
+      )
     }
 
     if (request.method === "PUT") {

@@ -289,7 +289,9 @@ export const {
     // 释放不依赖父数组存在；删除沿用目标按ID定位，不依赖可变的消息时间或排序key。
     function releaseMessage(sessionID: string, messageID: string) {
       touchMessage(sessionID, messageID)
-      dropBufferedDeltas((event) => event.properties.sessionID === sessionID && event.properties.messageID === messageID)
+      dropBufferedDeltas(
+        (event) => event.properties.sessionID === sessionID && event.properties.messageID === messageID,
+      )
       // [0625] Message 删除边界忘掉其 Part 的终态 ID 事实，重建后能正常准入。
       releasedTerminalParts.get(sessionID)?.delete(messageID)
       const messages = store.message[sessionID]
@@ -474,7 +476,11 @@ export const {
       return result
     }
 
-    function logPartDeltaApplication(event: EventMessagePartDelta, phase: "delta.apply" | "delta.drop", reason?: string) {
+    function logPartDeltaApplication(
+      event: EventMessagePartDelta,
+      phase: "delta.apply" | "delta.drop",
+      reason?: string,
+    ) {
       const key = `${phase}\0${partDeltaTimingKey(event.properties)}`
       if (loggedPartDeltaApplications.has(key)) return
       // apply/drop 阶段表示 “SyncProvider reducer 已处理 delta”。drop 只说明
@@ -522,8 +528,7 @@ export const {
           const part = draft[result.index]
           // V1 raw 表示工具的未解析参数，必须更新嵌套 pending state 才能被 token 消费端读取。
           if (event.properties.field === "raw") {
-            if (part.type === "tool" && part.state.status === "pending")
-              part.state.raw += event.properties.delta
+            if (part.type === "tool" && part.state.status === "pending") part.state.raw += event.properties.delta
             // 终态或非工具的迟到 raw 不能污染顶层字段，也不能把 running input 变回字符串。
             return
           }
@@ -593,11 +598,14 @@ export const {
       // #531 raw-only → structured 单向：有 command 后不得再被 raw 快照盖回。
       // 已有 structured 时保留 existing.input，防止后到的残缺快照回退 command。
       const existingKeys = Object.keys(existingInput)
-      const existingRawOnly = existingKeys.length === 1 && existingKeys[0] === "raw" && typeof existingInput.raw === "string"
+      const existingRawOnly =
+        existingKeys.length === 1 && existingKeys[0] === "raw" && typeof existingInput.raw === "string"
       const nextStructured = Object.keys(nextInput).some((key) => key !== "raw")
       const input = existingRawOnly && nextStructured ? nextInput : existingInput
       const existingMeta =
-        existing.state.metadata && typeof existing.state.metadata === "object" && !Array.isArray(existing.state.metadata)
+        existing.state.metadata &&
+        typeof existing.state.metadata === "object" &&
+        !Array.isArray(existing.state.metadata)
           ? existing.state.metadata
           : {}
       const nextMeta =
@@ -678,9 +686,13 @@ export const {
     // 对每个快照 part 调用 mergeLivePart 与本地对应 part 做单调守卫。
     function mergeLiveParts(existing: readonly Part[] | undefined, next: readonly Part[]): Part[] {
       if (!existing) return next.slice()
-      return next.map((part) => mergeLivePart(existing.find((item) => item.id === part.id), part))
+      return next.map((part) =>
+        mergeLivePart(
+          existing.find((item) => item.id === part.id),
+          part,
+        ),
+      )
     }
-
 
     function flushPartDeltas() {
       // #186：先清 timer 再消费队列，防止重入二次调度
@@ -741,9 +753,8 @@ export const {
       if (!current) return current
       const match = search(store.session, current.id, (session) => session.id)
       // raw trace仍保留完整事件；只有进入viewer store时才保留同一diff投影的本地总量。
-      const summary = match.found && Object.hasOwn(store.session_diff, current.id)
-        ? store.session[match.index].summary
-        : undefined
+      const summary =
+        match.found && Object.hasOwn(store.session_diff, current.id) ? store.session[match.index].summary : undefined
       const projected = summary ? { ...current, summary } : current
       if (!tracker?.moved) return projected
       return { ...projected, ...tracker.moved, time: { ...projected.time, ...tracker.moved.time } }
@@ -768,7 +779,11 @@ export const {
     function listSessions() {
       const tracker = new Map<string, SessionTrace>()
       listingSessions.add(tracker)
-      const query = { start: Date.now() - SESSION_LIST_LOOKBACK_MS, limit: SESSION_LIST_BROWSE_LIMIT, ...sessionListQuery() }
+      const query = {
+        start: Date.now() - SESSION_LIST_LOOKBACK_MS,
+        limit: SESSION_LIST_BROWSE_LIMIT,
+        ...sessionListQuery(),
+      }
       // project ID 固定到请求发起时的实例；全局事件本身不做项目筛选。
       const projectID = project.project()
       const directory = query.directory
@@ -783,7 +798,11 @@ export const {
           global: projectID === "global",
         }).some((item) => {
           const prefix = item.replace(/\/+$/, "")
-          return info.path !== undefined && (SessionPath.ancestors(item, { root: true }).includes(info.path) || info.path.startsWith(prefix ? `${prefix}/` : ""))
+          return (
+            info.path !== undefined &&
+            (SessionPath.ancestors(item, { root: true }).includes(info.path) ||
+              info.path.startsWith(prefix ? `${prefix}/` : ""))
+          )
         })
         if (info.projectID === projectID && (projectPath || nullPath)) return true
         if (!directory) return false
@@ -797,7 +816,10 @@ export const {
           global: true,
         }).some((item) => {
           const prefix = item.replace(/\/+$/, "")
-          return info.path !== undefined && (SessionPath.ancestors(item).includes(info.path) || info.path.startsWith(prefix ? `${prefix}/` : ""))
+          return (
+            info.path !== undefined &&
+            (SessionPath.ancestors(item).includes(info.path) || info.path.startsWith(prefix ? `${prefix}/` : ""))
+          )
         })
         if (info.projectID === "global" && (globalPath || nullPath)) return true
         const normalized = path.resolve(directory).replaceAll("\\", "/").replace(/\/+$/, "")
@@ -806,34 +828,39 @@ export const {
         const current = process.platform === "win32" ? comparable.toLowerCase() : comparable
         return SessionPath.ancestors(value).includes(current) || current.startsWith(value ? `${value}/` : "")
       }
-      return sdk.client.session
-        .list(query)
-        .then((x) => {
-          // 未触碰行保留服务端结果；触碰行先完成部分初始化，再按最新 placement 判断成员。
-          const infos = (x.data ?? []).flatMap((info) => {
-            // 显式删除优先于旧HTTP行，其他placement及实时列表合并仍由原tracker裁决。
-            if (deletedSessionIDs.has(info.id)) return []
-            if (!tracker.has(info.id)) return [info]
-            const current = acceptSession(info, tracker.get(info.id))
-            return current && matches(current) ? [current] : []
+      return (
+        sdk.client.session
+          .list(query)
+          .then((x) => {
+            // 未触碰行保留服务端结果；触碰行先完成部分初始化，再按最新 placement 判断成员。
+            const infos = (x.data ?? []).flatMap((info) => {
+              // 显式删除优先于旧HTTP行，其他placement及实时列表合并仍由原tracker裁决。
+              if (deletedSessionIDs.has(info.id)) return []
+              if (!tracker.has(info.id)) return [info]
+              const current = acceptSession(info, tracker.get(info.id))
+              return current && matches(current) ? [current] : []
+            })
+            // 只补本请求收到事件的行，保住新会话；不保留未触碰的旧排除成员或删除墓碑。
+            infos.push(
+              ...Array.from(tracker).flatMap(([id, trace]) => {
+                // 已知 full/null 只取本请求的事件证据；仅部分 move 可借用仍可见的基础行。
+                const base = trace.session === undefined ? store.session.find((item) => item.id === id) : trace.session
+                const info = base && acceptSession(base, trace)
+                // start 仅筛补入的成员；usage 不推进 updated，不能用它仲裁快照先后。
+                return info &&
+                  !infos.some((item) => item.id === id) &&
+                  matches(info) &&
+                  info.time.updated >= query.start
+                  ? [info]
+                  : []
+              }),
+            )
+            setStore("session", reconcile(infos.toSorted((a, b) => a.id.localeCompare(b.id))))
+            return infos
           })
-          // 只补本请求收到事件的行，保住新会话；不保留未触碰的旧排除成员或删除墓碑。
-          infos.push(
-            ...Array.from(tracker).flatMap(([id, trace]) => {
-              // 已知 full/null 只取本请求的事件证据；仅部分 move 可借用仍可见的基础行。
-              const base = trace.session === undefined ? store.session.find((item) => item.id === id) : trace.session
-              const info = base && acceptSession(base, trace)
-              // start 仅筛补入的成员；usage 不推进 updated，不能用它仲裁快照先后。
-              return info && !infos.some((item) => item.id === id) && matches(info) && info.time.updated >= query.start
-                ? [info]
-                : []
-            }),
-          )
-          setStore("session", reconcile(infos.toSorted((a, b) => a.id.localeCompare(b.id))))
-          return infos
-        })
-        // tracker 只存活到快照真正接收完毕；HTTP 失败同样释放，不能积累常驻版本表。
-        .finally(() => listingSessions.delete(tracker))
+          // tracker 只存活到快照真正接收完毕；HTTP 失败同样释放，不能积累常驻版本表。
+          .finally(() => listingSessions.delete(tracker))
+      )
     }
 
     const exit = useExit()
@@ -849,8 +876,12 @@ export const {
         case "global.disposed": {
           // 原始SSE载荷仍按运行时字段识别，普通dispose不触发主动停机路径。
           const properties: unknown = event.properties
-          if (!properties || typeof properties !== "object" ||
-            !("reason" in properties) || properties.reason !== "daemon-stop") {
+          if (
+            !properties ||
+            typeof properties !== "object" ||
+            !("reason" in properties) ||
+            properties.reason !== "daemon-stop"
+          ) {
             // 认证刷新只重新拉取客户端数据，保留现有会话与终端。
             void bootstrap()
             break
@@ -876,7 +907,10 @@ export const {
           void bootstrap({ fatal: false }).catch(() => undefined)
           break
         case "permission.replied": {
-          markPermissionRequestChange((event.properties as { sessionID: string; requestID: string }).sessionID, (event.properties as { sessionID: string; requestID: string }).requestID)
+          markPermissionRequestChange(
+            (event.properties as { sessionID: string; requestID: string }).sessionID,
+            (event.properties as { sessionID: string; requestID: string }).requestID,
+          )
           const requests = store.permission[event.properties.sessionID]
           if (!requests) break
           const match = search(requests, event.properties.requestID, (r) => r.id)
@@ -926,7 +960,10 @@ export const {
 
         case "question.replied":
         case "question.rejected": {
-          markQuestionRequestChange((event.properties as { sessionID: string; requestID: string }).sessionID, (event.properties as { sessionID: string; requestID: string }).requestID)
+          markQuestionRequestChange(
+            (event.properties as { sessionID: string; requestID: string }).sessionID,
+            (event.properties as { sessionID: string; requestID: string }).requestID,
+          )
           const requests = store.question[event.properties.sessionID]
           if (!requests) break
           const match = search(requests, event.properties.requestID, (r) => r.id)
@@ -1169,7 +1206,7 @@ export const {
             replayOrphanDeltas(part.id, part.messageID)
             break
           }
-          const result = search(parts, part.id, item => item.id)
+          const result = search(parts, part.id, (item) => item.id)
           if (result.found) {
             // 合并守卫：防止 fire-and-forget 竞态导致短快照覆盖长流式文本
             setStore("part", part.messageID, result.index, reconcile(mergeLivePart(parts[result.index], part)))
@@ -1254,65 +1291,152 @@ export const {
 
     // #153：session_status 独立刷新，force sync 与 bootstrap 共用同一入口
     // #192：快照按 session 建表，供后续增量 update 提供二分查找的排序不变式
-    function pendingRequestsBySession<T extends { id: string; sessionID: string }>(requests: T[]) { return requests.toSorted((a, b) => a.id.localeCompare(b.id)).reduce<Record<string, T[]>>((result, request) => { ;(result[request.sessionID] ??= []).push(request); return result }, {}) }
-    function pendingRequestChangeKey(sessionID: string, requestID: string) { return `${sessionID}\0${requestID}` }
+    function pendingRequestsBySession<T extends { id: string; sessionID: string }>(requests: T[]) {
+      return requests
+        .toSorted((a, b) => a.id.localeCompare(b.id))
+        .reduce<Record<string, T[]>>((result, request) => {
+          ;(result[request.sessionID] ??= []).push(request)
+          return result
+        }, {})
+    }
+    function pendingRequestChangeKey(sessionID: string, requestID: string) {
+      return `${sessionID}\0${requestID}`
+    }
     // #192：merge live changes 防 stale 覆盖
     // #192：快照整体替换负责丢弃断线期间已解决的 blocker，live changes 只回放本地确认的变更
-    function pendingRequestsWithLiveChanges<T extends { id: string; sessionID: string }>(snapshot: Record<string, T[]>, current: Record<string, T[]>, changes: Map<string, { sessionID: string; requestID: string; version: number }>, since: number) {
-      const result = Object.fromEntries(Object.entries(snapshot).map(([sessionID, requests]) => [sessionID, [...requests]])) as Record<string, T[]>
+    function pendingRequestsWithLiveChanges<T extends { id: string; sessionID: string }>(
+      snapshot: Record<string, T[]>,
+      current: Record<string, T[]>,
+      changes: Map<string, { sessionID: string; requestID: string; version: number }>,
+      since: number,
+    ) {
+      const result = Object.fromEntries(
+        Object.entries(snapshot).map(([sessionID, requests]) => [sessionID, [...requests]]),
+      ) as Record<string, T[]>
       for (const change of changes.values()) {
         if (change.version <= since) continue
-          // #192：版本号小于快照起始的变更已被快照包含，跳过避免重复回放
+        // #192：版本号小于快照起始的变更已被快照包含，跳过避免重复回放
         const currentRequests = current[change.sessionID]
-        if (!currentRequests) { removePendingRequest(result, change.sessionID, change.requestID); continue }
-          // #192：当前 store 已无该请求说明已解决，快照中对应项也应清除
+        if (!currentRequests) {
+          removePendingRequest(result, change.sessionID, change.requestID)
+          continue
+        }
+        // #192：当前 store 已无该请求说明已解决，快照中对应项也应清除
         const currentMatch = search(currentRequests, change.requestID, (request) => request.id)
-        if (!currentMatch.found) { removePendingRequest(result, change.sessionID, change.requestID); continue }
-          // #192：变更指向的请求在 store 中不存在时同样从快照结果移除
+        if (!currentMatch.found) {
+          removePendingRequest(result, change.sessionID, change.requestID)
+          continue
+        }
+        // #192：变更指向的请求在 store 中不存在时同样从快照结果移除
         const requests = result[change.sessionID] ?? []
         const match = search(requests, change.requestID, (request) => request.id)
-        if (match.found) { requests[match.index] = currentRequests[currentMatch.index] } else { requests.splice(match.index, 0, currentRequests[currentMatch.index]) }
+        if (match.found) {
+          requests[match.index] = currentRequests[currentMatch.index]
+        } else {
+          requests.splice(match.index, 0, currentRequests[currentMatch.index])
+        }
         result[change.sessionID] = requests
       }
       return result
     }
-    function removePendingRequest<T extends { id: string }>(requestsBySession: Record<string, T[]>, sessionID: string, id: string) {
+    function removePendingRequest<T extends { id: string }>(
+      requestsBySession: Record<string, T[]>,
+      sessionID: string,
+      id: string,
+    ) {
       const requests = requestsBySession[sessionID]
       if (!requests) return
       const match = search(requests, id, (request) => request.id)
       if (!match.found) return
       const next = requests.toSpliced(match.index, 1)
-      if (next.length === 0) { delete requestsBySession[sessionID]; return }
+      if (next.length === 0) {
+        delete requestsBySession[sessionID]
+        return
+      }
       requestsBySession[sessionID] = next
     }
     // #192：permission 变更记录在本地增量表，重连快照恢复后据此回放
     // #192：permissionVersion 是本地单调计数，快照恢复时仅回放版本号更新的变更
     // #192：快照恢复以版本号为界：变更版本高于快照起始才回放，保证不丢不重
-    function markPermissionRequestChange(sessionID: string, requestID: string) { permissionVersion += 1; if (permissionRefreshes === 0) return; permissionChanges.set(pendingRequestChangeKey(sessionID, requestID), { sessionID, requestID, version: permissionVersion }) }
+    function markPermissionRequestChange(sessionID: string, requestID: string) {
+      permissionVersion += 1
+      if (permissionRefreshes === 0) return
+      permissionChanges.set(pendingRequestChangeKey(sessionID, requestID), {
+        sessionID,
+        requestID,
+        version: permissionVersion,
+      })
+    }
     // #192：question 变更与 permission 同走增量表，保证两类 blocker 一致恢复
     // #192：questionVersion 与 permission 同规则，保证两类请求恢复一致
-    function markQuestionRequestChange(sessionID: string, requestID: string) { questionVersion += 1; if (questionRefreshes === 0) return; questionChanges.set(pendingRequestChangeKey(sessionID, requestID), { sessionID, requestID, version: questionVersion }) }
+    function markQuestionRequestChange(sessionID: string, requestID: string) {
+      questionVersion += 1
+      if (questionRefreshes === 0) return
+      questionChanges.set(pendingRequestChangeKey(sessionID, requestID), {
+        sessionID,
+        requestID,
+        version: questionVersion,
+      })
+    }
     // #192：refreshVersion 是请求计数，仅最新 reconnect 的响应写 store，乱序返回被丢弃
     // #192：permission 快照恢复与本地变更回放合并，是重连后 store 重建的完整路径
     // #192：快照整体替换后由本地变更表决定保留哪些请求，阻断期解决的 blocker 不再回放，live changes 只回放本地确认的变更
     async function refreshPermissionRequests(workspace: string | undefined) {
-      const version = permissionVersion; const refreshVersion = permissionRefreshVersion + 1; permissionRefreshVersion = refreshVersion; permissionRefreshes += 1
-      try { const response = await sdk.client.permission.list({ workspace }); if (refreshVersion !== permissionRefreshVersion) return; const rows = (response.data ?? []).filter((request) => !deletedSessionIDs.has(request.sessionID)); setStore("permission", reconcile(pendingRequestsWithLiveChanges(pendingRequestsBySession(rows), store.permission, permissionChanges, version))) }
-      // #192：竞态守卫比对刷新时的版本号，旧响应即使后到也不覆盖新快照
-      finally { permissionRefreshes -= 1; if (permissionRefreshes === 0) permissionChanges.clear() }
+      const version = permissionVersion
+      const refreshVersion = permissionRefreshVersion + 1
+      permissionRefreshVersion = refreshVersion
+      permissionRefreshes += 1
+      try {
+        const response = await sdk.client.permission.list({ workspace })
+        if (refreshVersion !== permissionRefreshVersion) return
+        const rows = (response.data ?? []).filter((request) => !deletedSessionIDs.has(request.sessionID))
+        setStore(
+          "permission",
+          reconcile(
+            pendingRequestsWithLiveChanges(
+              pendingRequestsBySession(rows),
+              store.permission,
+              permissionChanges,
+              version,
+            ),
+          ),
+        )
+      } finally {
+        // #192：竞态守卫比对刷新时的版本号，旧响应即使后到也不覆盖新快照
+        permissionRefreshes -= 1
+        if (permissionRefreshes === 0) permissionChanges.clear()
+      }
     }
     // #192：question 与 permission 共用同一快照替换+live merge 规则，保证两类请求恢复一致
     async function refreshQuestionRequests(workspace: string | undefined) {
-      const version = questionVersion; const refreshVersion = questionRefreshVersion + 1; questionRefreshVersion = refreshVersion; questionRefreshes += 1
-      try { const response = await sdk.client.question.list({ workspace }); if (refreshVersion !== questionRefreshVersion) return; const rows = (response.data ?? []).filter((request) => !deletedSessionIDs.has(request.sessionID)); setStore("question", reconcile(pendingRequestsWithLiveChanges(pendingRequestsBySession(rows), store.question, questionChanges, version))) }
-      finally { questionRefreshes -= 1; if (questionRefreshes === 0) questionChanges.clear() }
+      const version = questionVersion
+      const refreshVersion = questionRefreshVersion + 1
+      questionRefreshVersion = refreshVersion
+      questionRefreshes += 1
+      try {
+        const response = await sdk.client.question.list({ workspace })
+        if (refreshVersion !== questionRefreshVersion) return
+        const rows = (response.data ?? []).filter((request) => !deletedSessionIDs.has(request.sessionID))
+        setStore(
+          "question",
+          reconcile(
+            pendingRequestsWithLiveChanges(pendingRequestsBySession(rows), store.question, questionChanges, version),
+          ),
+        )
+      } finally {
+        questionRefreshes -= 1
+        if (questionRefreshes === 0) questionChanges.clear()
+      }
     }
 
     async function refreshStatus() {
       // 失败随 bootstrap 的 Effect.all 语义上抛，与其他首次拉取保持一致的致命性
       const x = await sdk.client.session.status({ workspace: project.workspace.current() })
       // 状态快照可能早于 session.deleted 发出；已删除 Session 的 status 不得回填。
-      setStore("session_status", reconcile(Object.fromEntries(Object.entries(x.data ?? {}).filter(([id]) => !deletedSessionIDs.has(id)))))
+      setStore(
+        "session_status",
+        reconcile(Object.fromEntries(Object.entries(x.data ?? {}).filter(([id]) => !deletedSessionIDs.has(id)))),
+      )
     }
 
     async function bootstrap(input: { fatal?: boolean } = {}) {
@@ -1495,16 +1619,18 @@ export const {
               // #290：会话消息拉取窗口同步提升至 300，与本地缓存窗口对齐
               // 仅 TUI viewer 请求省略每轮冷 summary；Web App/SDK 的默认完整合同不带此信号。
               // limit=300 继续锁定现有分页语义；projection 只改变每条 Message 的数据深度，不改变范围或顺序。
-              sdk.client.session.messages(
-                { sessionID, limit: 300 },
-                { headers: { [TUI_VIEWER_HEADER]: TUI_VIEWER } },
-              ),
+              sdk.client.session.messages({ sessionID, limit: 300 }, { headers: { [TUI_VIEWER_HEADER]: TUI_VIEWER } }),
               sdk.client.session.todo({ sessionID }),
               // #153：force sync 同时刷新 status，避免 diff 已更新而 busy 状态过期
               sdk.client.session.status({ workspace: project.workspace.current() }),
             ])
             if (!alive()) return
-            setStore("session_status", reconcile(Object.fromEntries(Object.entries(status.data ?? {}).filter(([id]) => !deletedSessionIDs.has(id)))))
+            setStore(
+              "session_status",
+              reconcile(
+                Object.fromEntries(Object.entries(status.data ?? {}).filter(([id]) => !deletedSessionIDs.has(id))),
+              ),
+            )
             // #368：SDK 未生成 session.goal 方法——as any 调用运行时 undefined→TypeError 被吞，
             // goal 状态永不在会话打开时加载（/goal 误弹 Set）。改用 sdk.fetch 直调 GET，非致命。
             try {
@@ -1547,7 +1673,10 @@ export const {
                 })
                 infos.push(
                   ...currentMessages.filter(
-                    (message) => tracker.messages.has(message.id) && !removedMessageIDs.has(message.id) && !infos.some((item) => item.id === message.id),
+                    (message) =>
+                      tracker.messages.has(message.id) &&
+                      !removedMessageIDs.has(message.id) &&
+                      !infos.some((item) => item.id === message.id),
                   ),
                 )
                 infos.sort(compareMessage)
@@ -1575,7 +1704,10 @@ export const {
                   })
                   parts.push(
                     ...currentParts.filter(
-                      (part) => !partGone(part.sessionID, part.messageID, part.id) && tracker.parts.has(part.id) && !parts.some((item) => item.id === part.id),
+                      (part) =>
+                        !partGone(part.sessionID, part.messageID, part.id) &&
+                        tracker.parts.has(part.id) &&
+                        !parts.some((item) => item.id === part.id),
                     ),
                   )
                   draft.part[message.info.id] = parts
@@ -1604,10 +1736,7 @@ export const {
             // 可见历史先发布；diff 的 decode/传输失败仍由同一个 sync 直接抛出，但不能再成为首屏屏障。
             // diff 此时才创建 Promise，因此不存在“早期 rejection 等待其他请求”造成的 unhandled 窗口。
             // force reconnect 仍 await 同一 authoritative 请求；这里不是 fire-and-forget，也不合成备用成功。
-            const diff = await sdk.client.session.diff(
-              { sessionID },
-              { headers: { [TUI_VIEWER_HEADER]: TUI_VIEWER } },
-            )
+            const diff = await sdk.client.session.diff({ sessionID }, { headers: { [TUI_VIEWER_HEADER]: TUI_VIEWER } })
             // diff 是 sync 的最后一个 await：删除发生在 diff 挂起时，结果不得回填。
             if (!alive()) return
             // data??[] 兼容旧 daemon 无 headers 响应；投影后再决定 totals 来源。

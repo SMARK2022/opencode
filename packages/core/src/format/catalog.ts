@@ -33,7 +33,6 @@ const Filesystem = {
   },
 }
 
-
 export const gofmt: Info = {
   name: "gofmt",
   extensions: [".go"],
@@ -422,5 +421,32 @@ export const dfmt: Info = {
   },
 }
 
-export const definitions: Record<string, Info> = { gofmt, mix, prettier, oxfmt, biome, zig, clang, ktlint, ruff, rlang, uvformat, rubocop, standardrb, htmlbeautifier, dart, ocamlformat, terraform, latexindent, gleam, shfmt, nixfmt, rustfmt, pint, ormolu, cljfmt, dfmt }
+export const definitions: Record<string, Info> = {
+  gofmt,
+  mix,
+  prettier,
+  oxfmt,
+  biome,
+  zig,
+  clang,
+  ktlint,
+  ruff,
+  rlang,
+  uvformat,
+  rubocop,
+  standardrb,
+  htmlbeautifier,
+  dart,
+  ocamlformat,
+  terraform,
+  latexindent,
+  gleam,
+  shfmt,
+  nixfmt,
+  rustfmt,
+  pint,
+  ormolu,
+  cljfmt,
+  dfmt,
+}
 export const builtins = Object.values(definitions)

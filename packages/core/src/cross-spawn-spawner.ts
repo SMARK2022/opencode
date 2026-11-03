@@ -377,18 +377,20 @@ export const make = Effect.gen(function* () {
   const waitForGroup = (command: ChildProcess.StandardCommand, proc: NodeChildProcess.ChildProcess) =>
     Effect.gen(function* () {
       if (process.platform === "win32" || command.options.detached === false) return
-      while (yield* Effect.try({
-        try: () => {
-          try {
-            process.kill(-proc.pid!, 0)
-            return true
-          } catch (err) {
-            if ((err as NodeJS.ErrnoException).code === "ESRCH") return false
-            throw err
-          }
-        },
-        catch: (err) => toPlatformError("kill", toError(err), command),
-      })) {
+      while (
+        yield* Effect.try({
+          try: () => {
+            try {
+              process.kill(-proc.pid!, 0)
+              return true
+            } catch (err) {
+              if ((err as NodeJS.ErrnoException).code === "ESRCH") return false
+              throw err
+            }
+          },
+          catch: (err) => toPlatformError("kill", toError(err), command),
+        })
+      ) {
         yield* Effect.sleep(10)
       }
     })
@@ -480,7 +482,8 @@ export const make = Effect.gen(function* () {
                 detached: command.options.detached ?? process.platform !== "win32",
                 shell: command.options.shell,
                 // cmd自行解析/c脚本；Node的反斜杠转义会破坏其中路径和嵌套引号。
-                windowsVerbatimArguments: process.platform === "win32" && /(?:^|[\\/])cmd(?:\.exe)?$/i.test(command.command),
+                windowsVerbatimArguments:
+                  process.platform === "win32" && /(?:^|[\\/])cmd(?:\.exe)?$/i.test(command.command),
                 windowsHide: process.platform === "win32",
               },
               capture,
@@ -490,7 +493,10 @@ export const make = Effect.gen(function* () {
               const kill = timeout(proc, command, command.options)
               // 取消scope仍拥有独占进程组；root先退出不能跳过已存在的后代回收和升级窗口。
               // 复用目标waitForGroup，不为相同执行域增加第二套轮询或等待stdio排空。
-              const group = (command.options.forceKillAfter !== undefined || Exit.isFailure(outcome)) && process.platform !== "win32" && command.options.detached !== false
+              const group =
+                (command.options.forceKillAfter !== undefined || Exit.isFailure(outcome)) &&
+                process.platform !== "win32" &&
+                command.options.detached !== false
               if (done && !group) {
                 const [code] = yield* Deferred.await(signal)
                 if (process.platform === "win32") return yield* Effect.void

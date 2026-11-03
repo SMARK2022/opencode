@@ -56,22 +56,22 @@ curl -fsSL https://github.com/SMARK2022/opencode/releases/latest/download/instal
 
 #### 安装脚本行为（#167）
 
-| 场景 | 行为 |
-|---|---|
-| 目标目录已有同版本 | **重装刷新**，不跳过 |
-| PATH 上别处已有同版本 | 警告后仍安装到目标目录 |
-| 默认 PATH 改写 | 更新**所有已存在**的支持 shell profile |
-| sudo（uid=0 且 `SUDO_USER`） | 默认拒绝；需 `--allow-sudo` |
+| 场景                         | 行为                                   |
+| ---------------------------- | -------------------------------------- |
+| 目标目录已有同版本           | **重装刷新**，不跳过                   |
+| PATH 上别处已有同版本        | 警告后仍安装到目标目录                 |
+| 默认 PATH 改写               | 更新**所有已存在**的支持 shell profile |
+| sudo（uid=0 且 `SUDO_USER`） | 默认拒绝；需 `--allow-sudo`            |
 
 #### 常用安装参数
 
-| 参数 | 含义 |
-|---|---|
+| 参数                    | 含义                         |
+| ----------------------- | ---------------------------- |
 | `--path-profile <path>` | 只改写指定 profile（可重复） |
-| `--all-shell-profiles` | 扫描全部支持 profile |
-| `--interactive` | 交互选择（无 TTY 回退默认） |
-| `--allow-sudo` | 允许在 sudo 下运行 |
-| `--no-modify-path` | 不改任何 shell profile |
+| `--all-shell-profiles`  | 扫描全部支持 profile         |
+| `--interactive`         | 交互选择（无 TTY 回退默认）  |
+| `--allow-sudo`          | 允许在 sudo 下运行           |
+| `--no-modify-path`      | 不改任何 shell profile       |
 
 ```bash
 # 兼容上游一键安装（非 SMARK 默认仓库）
@@ -120,12 +120,12 @@ XDG_BIN_DIR=$HOME/.local/bin curl -fsSL https://opencode.ai/install | bash
 
 ### 会话管理
 
-| 能力 | 说明 |
-|---|---|
-| 会话搜索 | 按关键词检索历史会话，并用路径过滤缩小范围 |
-| 手动压缩 | 用户可以主动触发优化后的 compaction，压缩选择异步处理并带错误提示，压缩后保留上下文摘要 |
-| 中断恢复 | 记录中断次数和确认时间，父会话中断会传播到子任务 |
-| Session Warping | 长会话跨上下文继续推进而无需重建 |
+| 能力            | 说明                                                                                    |
+| --------------- | --------------------------------------------------------------------------------------- |
+| 会话搜索        | 按关键词检索历史会话，并用路径过滤缩小范围                                              |
+| 手动压缩        | 用户可以主动触发优化后的 compaction，压缩选择异步处理并带错误提示，压缩后保留上下文摘要 |
+| 中断恢复        | 记录中断次数和确认时间，父会话中断会传播到子任务                                        |
+| Session Warping | 长会话跨上下文继续推进而无需重建                                                        |
 
 ### Agents
 

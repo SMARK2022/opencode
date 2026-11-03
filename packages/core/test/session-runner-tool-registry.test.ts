@@ -11,11 +11,31 @@ import { SessionMessage } from "@opencode-ai/core/session/message"
 import { ToolOutputStore } from "@opencode-ai/core/tool-output-store"
 import { ToolRegistry } from "@opencode-ai/core/tool/registry"
 import { executeTool, settleTool, toolDefinitions } from "./lib/tool"
-import { Cause, Context, Deferred, Effect, Exit, Fiber, Layer, Option, Schema, SchemaGetter, SchemaIssue, Scope } from "effect"
+import {
+  Cause,
+  Context,
+  Deferred,
+  Effect,
+  Exit,
+  Fiber,
+  Layer,
+  Option,
+  Schema,
+  SchemaGetter,
+  SchemaIssue,
+  Scope,
+} from "effect"
 import { Client } from "@modelcontextprotocol/sdk/client/index.js"
 import { Server } from "@modelcontextprotocol/sdk/server/index.js"
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js"
-import { CallToolRequestSchema, ListToolsRequestSchema, ListResourcesRequestSchema, ListResourceTemplatesRequestSchema, ReadResourceRequestSchema, type CallToolRequest } from "@modelcontextprotocol/sdk/types.js"
+import {
+  CallToolRequestSchema,
+  ListToolsRequestSchema,
+  ListResourcesRequestSchema,
+  ListResourceTemplatesRequestSchema,
+  ReadResourceRequestSchema,
+  type CallToolRequest,
+} from "@modelcontextprotocol/sdk/types.js"
 import { ChildProcessSpawner } from "effect/unstable/process"
 import { McpConnection } from "@opencode-ai/core/mcp/connection"
 import { McpAuth } from "@opencode-ai/core/mcp/auth"
@@ -88,8 +108,13 @@ describe("ToolRegistry", () => {
         write: make("edit"),
         apply_patch: make("edit"),
       })
-      const names = (rules: Parameters<ToolRegistry.Interface["materialize"]>[0], selection?: Parameters<ToolRegistry.Interface["materialize"]>[1]) =>
-        service.materialize(rules, selection).pipe(Effect.map(({ definitions }) => definitions.map((tool) => tool.name)))
+      const names = (
+        rules: Parameters<ToolRegistry.Interface["materialize"]>[0],
+        selection?: Parameters<ToolRegistry.Interface["materialize"]>[1],
+      ) =>
+        service
+          .materialize(rules, selection)
+          .pipe(Effect.map(({ definitions }) => definitions.map((tool) => tool.name)))
 
       expect(yield* names([{ action: "question", resource: "*", effect: "deny" }])).toEqual([
         "bash",
@@ -111,20 +136,50 @@ describe("ToolRegistry", () => {
       ).toEqual([])
       expect(yield* names([{ action: "edit", resource: "*", effect: "deny" }])).toEqual(["question", "bash"])
       // 单独关闭write不能误关共享edit权限的其他工具，ask与局部资源也不等于关闭。
-      expect(yield* names([], [{ action: "write", resource: "*", effect: "deny" }])).toEqual(["question", "bash", "edit", "apply_patch"])
-      expect(yield* names([], [{ action: "write", resource: "*", effect: "ask" }])).toEqual(["question", "bash", "edit", "write", "apply_patch"])
-      expect(yield* names([], [{ action: "write", resource: "private", effect: "deny" }])).toEqual(["question", "bash", "edit", "write", "apply_patch"])
-      expect(yield* names([], [
-        { action: "*", resource: "*", effect: "deny" },
-        { action: "write", resource: "*", effect: "allow" },
-      ])).toEqual(["write"])
-      expect(yield* names([], [
-        { action: "write", resource: "*", effect: "allow" },
-        { action: "*", resource: "*", effect: "deny" },
-      ])).toEqual([])
-      expect(yield* names([{ action: "edit", resource: "*", effect: "deny" }], [
-        { action: "write", resource: "*", effect: "allow" },
-      ])).toEqual(["question", "bash"])
+      expect(yield* names([], [{ action: "write", resource: "*", effect: "deny" }])).toEqual([
+        "question",
+        "bash",
+        "edit",
+        "apply_patch",
+      ])
+      expect(yield* names([], [{ action: "write", resource: "*", effect: "ask" }])).toEqual([
+        "question",
+        "bash",
+        "edit",
+        "write",
+        "apply_patch",
+      ])
+      expect(yield* names([], [{ action: "write", resource: "private", effect: "deny" }])).toEqual([
+        "question",
+        "bash",
+        "edit",
+        "write",
+        "apply_patch",
+      ])
+      expect(
+        yield* names(
+          [],
+          [
+            { action: "*", resource: "*", effect: "deny" },
+            { action: "write", resource: "*", effect: "allow" },
+          ],
+        ),
+      ).toEqual(["write"])
+      expect(
+        yield* names(
+          [],
+          [
+            { action: "write", resource: "*", effect: "allow" },
+            { action: "*", resource: "*", effect: "deny" },
+          ],
+        ),
+      ).toEqual([])
+      expect(
+        yield* names(
+          [{ action: "edit", resource: "*", effect: "deny" }],
+          [{ action: "write", resource: "*", effect: "allow" }],
+        ),
+      ).toEqual(["question", "bash"])
       // 内部支持工具保留；被关闭的定义不进入该快照的结算集合。
       yield* service.register({ StructuredOutput: make() })
       expect(yield* names([], [{ action: "*", resource: "*", effect: "deny" }])).toEqual(["StructuredOutput"])
@@ -165,41 +220,78 @@ describe("ToolRegistry", () => {
       const started = yield* Deferred.make<void>()
       const cancelled = yield* Deferred.make<void>()
       const changed = yield* Deferred.make<void>()
-      const state = { connections: 0, closes: 0, deny: false, calls: [] as CallToolRequest["params"][], permissions: [] as PermissionV2.AssertInput[] }
-      const rawSchema = { type: "object" as const, properties: { mode: { type: "string" } }, not: { required: ["forbidden"] }, additionalProperties: true }
-      const server = new Server({ name: "fixture", version: "1" }, { capabilities: { tools: { listChanged: true }, resources: {} }, instructions: "Use the fixture tools exactly as described." })
+      const state = {
+        connections: 0,
+        closes: 0,
+        deny: false,
+        calls: [] as CallToolRequest["params"][],
+        permissions: [] as PermissionV2.AssertInput[],
+      }
+      const rawSchema = {
+        type: "object" as const,
+        properties: { mode: { type: "string" } },
+        not: { required: ["forbidden"] },
+        additionalProperties: true,
+      }
+      const server = new Server(
+        { name: "fixture", version: "1" },
+        {
+          capabilities: { tools: { listChanged: true }, resources: {} },
+          instructions: "Use the fixture tools exactly as described.",
+        },
+      )
       let description = "Original MCP description"
-      server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [{ name: "echo.tool", description, inputSchema: rawSchema }] }))
+      server.setRequestHandler(ListToolsRequestSchema, async () => ({
+        tools: [{ name: "echo.tool", description, inputSchema: rawSchema }],
+      }))
       server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
         state.calls.push(request.params)
         expect(request.params.name).toBe("echo.tool")
         const token = request.params._meta?.progressToken
         expect(token).toBeDefined()
-        if (token !== undefined) await extra.sendNotification({ method: "notifications/progress", params: { progressToken: token, progress: 1 } })
+        if (token !== undefined)
+          await extra.sendNotification({
+            method: "notifications/progress",
+            params: { progressToken: token, progress: 1 },
+          })
         if (request.params.arguments?.mode === "wait") {
           return await new Promise<never>((_resolve, reject) => {
-            extra.signal.addEventListener("abort", () => {
-              Effect.runFork(Deferred.succeed(cancelled, undefined))
-              reject(new Error("cancelled fixture request"))
-            }, { once: true })
+            extra.signal.addEventListener(
+              "abort",
+              () => {
+                Effect.runFork(Deferred.succeed(cancelled, undefined))
+                reject(new Error("cancelled fixture request"))
+              },
+              { once: true },
+            )
             // 先安装取消监听再发布ready，避免fixture丢失同步送达的真实SDK取消通知。
             Effect.runFork(Deferred.succeed(started, undefined))
           })
         }
-        if (request.params.arguments?.mode === "error") return { isError: true, content: [{ type: "text", text: "fixture rejected the request" }] }
+        if (request.params.arguments?.mode === "error")
+          return { isError: true, content: [{ type: "text", text: "fixture rejected the request" }] }
         if (request.params.arguments?.mode === "structured") return { content: [], structuredContent: { ok: true } }
-        return { structuredContent: { ok: true }, content: [
-          { type: "text", text: "MCP text" },
-          { type: "image", data: "AQI=", mimeType: "image/png" },
-          { type: "resource", resource: { uri: "fixture://pdf", blob: "AQI=", mimeType: "application/pdf" } },
-          { type: "resource", resource: { uri: "fixture://zip", blob: "AQI=", mimeType: "application/zip" } },
-        ] }
+        return {
+          structuredContent: { ok: true },
+          content: [
+            { type: "text", text: "MCP text" },
+            { type: "image", data: "AQI=", mimeType: "image/png" },
+            { type: "resource", resource: { uri: "fixture://pdf", blob: "AQI=", mimeType: "application/pdf" } },
+            { type: "resource", resource: { uri: "fixture://zip", blob: "AQI=", mimeType: "application/zip" } },
+          ],
+        }
       })
-      server.setRequestHandler(ListResourcesRequestSchema, async request => request.params?.cursor
-        ? { resources: [{ name: "second", uri: "fixture://second" }] }
-        : { resources: [{ name: "first", uri: "fixture://first" }], nextCursor: "next" })
-      server.setRequestHandler(ListResourceTemplatesRequestSchema, async () => ({ resourceTemplates: [{ name: "template", uriTemplate: "fixture://{name}" }] }))
-      server.setRequestHandler(ReadResourceRequestSchema, async request => ({ contents: [{ uri: request.params.uri, text: "resource body", mimeType: "text/plain" }] }))
+      server.setRequestHandler(ListResourcesRequestSchema, async (request) =>
+        request.params?.cursor
+          ? { resources: [{ name: "second", uri: "fixture://second" }] }
+          : { resources: [{ name: "first", uri: "fixture://first" }], nextCursor: "next" },
+      )
+      server.setRequestHandler(ListResourceTemplatesRequestSchema, async () => ({
+        resourceTemplates: [{ name: "template", uriTemplate: "fixture://{name}" }],
+      }))
+      server.setRequestHandler(ReadResourceRequestSchema, async (request) => ({
+        contents: [{ uri: request.params.uri, text: "resource body", mimeType: "text/plain" }],
+      }))
       class MemoryClient extends Client {
         override async connect(..._transport: Parameters<Client["connect"]>) {
           state.connections++
@@ -213,66 +305,144 @@ describe("ToolRegistry", () => {
         }
       }
       const connection = yield* McpConnection.make({
-        directory: process.cwd(), Client: MemoryClient,
-        config: () => Effect.succeed(ConfigMCP.resolve([
-          ConfigMigrateV1.mcp({ mcp: { fixture: { type: "remote", url: "https://mcp.fixture.invalid", oauth: false, enabled: false, timeout: 5000 } } }) ?? {},
-          ConfigMigrateV1.mcp({ mcp: { fixture: { enabled: true } } }) ?? {},
-        ])),
-        notify: notice => notice.type === "tools_changed" ? Deferred.succeed(changed, undefined).pipe(Effect.asVoid) : Effect.void,
-      }).pipe(Effect.provide(Layer.mergeAll(Layer.mock(McpAuth.Service, {}), Layer.mock(McpBrowser.Service, {}), Layer.mock(ChildProcessSpawner.ChildProcessSpawner, {}))))
+        directory: process.cwd(),
+        Client: MemoryClient,
+        config: () =>
+          Effect.succeed(
+            ConfigMCP.resolve([
+              ConfigMigrateV1.mcp({
+                mcp: {
+                  fixture: {
+                    type: "remote",
+                    url: "https://mcp.fixture.invalid",
+                    oauth: false,
+                    enabled: false,
+                    timeout: 5000,
+                  },
+                },
+              }) ?? {},
+              ConfigMigrateV1.mcp({ mcp: { fixture: { enabled: true } } }) ?? {},
+            ]),
+          ),
+        notify: (notice) =>
+          notice.type === "tools_changed" ? Deferred.succeed(changed, undefined).pipe(Effect.asVoid) : Effect.void,
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            Layer.mock(McpAuth.Service, {}),
+            Layer.mock(McpBrowser.Service, {}),
+            Layer.mock(ChildProcessSpawner.ChildProcessSpawner, {}),
+          ),
+        ),
+      )
       const disabledConnection = yield* McpConnection.make({
-        directory: process.cwd(), Client: MemoryClient,
-        config: () => Effect.succeed(ConfigMCP.resolve([
-          ConfigMigrateV1.mcp({ mcp: { fixture: { type: "remote", url: "https://mcp.fixture.invalid", oauth: false } } }) ?? {},
-          ConfigMigrateV1.mcp({ mcp: { fixture: { enabled: false } } }) ?? {},
-        ])),
+        directory: process.cwd(),
+        Client: MemoryClient,
+        config: () =>
+          Effect.succeed(
+            ConfigMCP.resolve([
+              ConfigMigrateV1.mcp({
+                mcp: { fixture: { type: "remote", url: "https://mcp.fixture.invalid", oauth: false } },
+              }) ?? {},
+              ConfigMigrateV1.mcp({ mcp: { fixture: { enabled: false } } }) ?? {},
+            ]),
+          ),
         notify: () => Effect.void,
-      }).pipe(Effect.provide(Layer.mergeAll(Layer.mock(McpAuth.Service, {}), Layer.mock(McpBrowser.Service, {}), Layer.mock(ChildProcessSpawner.ChildProcessSpawner, {}))))
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            Layer.mock(McpAuth.Service, {}),
+            Layer.mock(McpBrowser.Service, {}),
+            Layer.mock(ChildProcessSpawner.ChildProcessSpawner, {}),
+          ),
+        ),
+      )
       yield* Effect.addFinalizer(() => Effect.promise(() => server.close()))
       expect(yield* disabledConnection.status()).toEqual({ fixture: { status: "disabled" } })
       expect(state.connections).toBe(0)
-      const permission = Layer.mock(PermissionV2.Service, { assert: input => {
-        state.permissions.push(input)
-        return state.deny ? Effect.fail(new PermissionV2.CorrectedError({ feedback: "permission refused" })) : Effect.void
-      } })
-      const context = yield* Layer.build(McpTools.layer.pipe(
-        Layer.provide(Layer.succeed(McpRuntime.Service, connection)),
-        Layer.provide(Layer.succeed(Tools.Service, { register: service.register })),
-        Layer.provide(permission),
-      ))
+      const permission = Layer.mock(PermissionV2.Service, {
+        assert: (input) => {
+          state.permissions.push(input)
+          return state.deny
+            ? Effect.fail(new PermissionV2.CorrectedError({ feedback: "permission refused" }))
+            : Effect.void
+        },
+      })
+      const context = yield* Layer.build(
+        McpTools.layer.pipe(
+          Layer.provide(Layer.succeed(McpRuntime.Service, connection)),
+          Layer.provide(Layer.succeed(Tools.Service, { register: service.register })),
+          Layer.provide(permission),
+        ),
+      )
       const native = Context.get(context, McpTools.Service)
       const contextFor = yield* native.prepare()
       expect(state.connections).toBe(1)
       const snapshot = yield* service.materialize()
-      const definition = snapshot.definitions.find(tool => tool.name === "fixture_echo_tool")
+      const definition = snapshot.definitions.find((tool) => tool.name === "fixture_echo_tool")
       expect(definition?.description).toBe(description)
       expect(definition?.inputSchema).toEqual(rawSchema)
-      expect(snapshot.definitions.map(tool => tool.name)).toContain("list_mcp_resources")
-      expect((yield* SystemContext.initialize(contextFor(snapshot.definitions.map(tool => tool.name)))).baseline).toContain("Use the fixture tools exactly as described.")
+      expect(snapshot.definitions.map((tool) => tool.name)).toContain("list_mcp_resources")
+      expect(
+        (yield* SystemContext.initialize(contextFor(snapshot.definitions.map((tool) => tool.name)))).baseline,
+      ).toContain("Use the fixture tools exactly as described.")
       expect((yield* SystemContext.initialize(contextFor([]))).baseline).toBe("")
       yield* Effect.all([native.prepare(), native.prepare()], { concurrency: "unbounded" })
-      expect((yield* service.materialize()).definitions.find(tool => tool.name === "fixture_echo_tool")).toBe(definition)
-      const invoke = (name: string, input: Record<string, unknown>, id = "call-mcp") => snapshot.settle({ sessionID, ...identity, call: { type: "tool-call", name, id, input } })
+      expect((yield* service.materialize()).definitions.find((tool) => tool.name === "fixture_echo_tool")).toBe(
+        definition,
+      )
+      const invoke = (name: string, input: Record<string, unknown>, id = "call-mcp") =>
+        snapshot.settle({ sessionID, ...identity, call: { type: "tool-call", name, id, input } })
       const media = yield* invoke("fixture_echo_tool", { mode: "media", literal: "$&" })
       expect(media.output?.structured).toEqual({ ok: true })
       expect(media.output?.content).toEqual([
-        { type: "text", text: "MCP text\n\n[Binary MCP resource omitted: fixture://zip (application/zip, 2 B) is not a supported attachment type]" },
+        {
+          type: "text",
+          text: "MCP text\n\n[Binary MCP resource omitted: fixture://zip (application/zip, 2 B) is not a supported attachment type]",
+        },
         { type: "file", uri: "data:image/png;base64,AQI=", mime: "image/png", name: undefined },
         { type: "file", uri: "data:application/pdf;base64,AQI=", mime: "application/pdf", name: "fixture://pdf" },
       ])
       expect(state.calls.at(-1)?.arguments).toEqual({ mode: "media", literal: "$&" })
-      expect(state.permissions.at(-1)).toMatchObject({ action: "fixture_echo_tool", sessionID, source: { messageID: identity.assistantMessageID, callID: "call-mcp" } })
-      expect((yield* invoke("fixture_echo_tool", { mode: "structured" })).result).toEqual({ type: "text", value: '{"ok":true}' })
-      expect((yield* invoke("fixture_echo_tool", { mode: "error" })).result).toEqual({ type: "error", value: "fixture rejected the request" })
+      expect(state.permissions.at(-1)).toMatchObject({
+        action: "fixture_echo_tool",
+        sessionID,
+        source: { messageID: identity.assistantMessageID, callID: "call-mcp" },
+      })
+      expect((yield* invoke("fixture_echo_tool", { mode: "structured" })).result).toEqual({
+        type: "text",
+        value: '{"ok":true}',
+      })
+      expect((yield* invoke("fixture_echo_tool", { mode: "error" })).result).toEqual({
+        type: "error",
+        value: "fixture rejected the request",
+      })
       const count = state.calls.length
       state.deny = true
-      expect((yield* invoke("fixture_echo_tool", { mode: "media" })).result).toEqual({ type: "error", value: "permission refused" })
+      expect((yield* invoke("fixture_echo_tool", { mode: "media" })).result).toEqual({
+        type: "error",
+        value: "permission refused",
+      })
       expect(state.calls).toHaveLength(count)
       state.deny = false
-      expect((yield* invoke("list_mcp_resources", {})).output?.structured).toMatchObject({ resources: [{ name: "first", server: "fixture" }, { name: "second", server: "fixture" }] })
-      expect((yield* invoke("list_mcp_resource_templates", {})).output?.structured).toMatchObject({ resourceTemplates: [{ uriTemplate: "fixture://{name}", server: "fixture" }] })
-      expect((yield* invoke("read_mcp_resource", { server: "fixture", uri: "fixture://first" })).result).toEqual({ type: "text", value: "Resource: fixture://first\nMIME: text/plain\nresource body" })
-      expect(state.permissions.at(-1)).toMatchObject({ action: "read", resources: ["mcp:fixture:fixture://first"], save: ["mcp:fixture:*"] })
+      expect((yield* invoke("list_mcp_resources", {})).output?.structured).toMatchObject({
+        resources: [
+          { name: "first", server: "fixture" },
+          { name: "second", server: "fixture" },
+        ],
+      })
+      expect((yield* invoke("list_mcp_resource_templates", {})).output?.structured).toMatchObject({
+        resourceTemplates: [{ uriTemplate: "fixture://{name}", server: "fixture" }],
+      })
+      expect((yield* invoke("read_mcp_resource", { server: "fixture", uri: "fixture://first" })).result).toEqual({
+        type: "text",
+        value: "Resource: fixture://first\nMIME: text/plain\nresource body",
+      })
+      expect(state.permissions.at(-1)).toMatchObject({
+        action: "read",
+        resources: ["mcp:fixture:fixture://first"],
+        save: ["mcp:fixture:*"],
+      })
       // 真实SDK取消通知终止单次调用，共享client仍可继续结算下一次请求。
       const running = yield* invoke("fixture_echo_tool", { mode: "wait" }, "call-mcp-cancel").pipe(Effect.forkChild)
       yield* Deferred.await(started)
@@ -284,14 +454,25 @@ describe("ToolRegistry", () => {
       yield* Effect.promise(() => server.sendToolListChanged())
       yield* Deferred.await(changed)
       yield* native.prepare()
-      expect((yield* service.materialize()).definitions.find(tool => tool.name === "fixture_echo_tool")?.description).toBe(description)
-      expect((yield* invoke("fixture_echo_tool", { mode: "structured" })).result).toEqual({ type: "error", value: "Stale tool call: fixture_echo_tool" })
+      expect(
+        (yield* service.materialize()).definitions.find((tool) => tool.name === "fixture_echo_tool")?.description,
+      ).toBe(description)
+      expect((yield* invoke("fixture_echo_tool", { mode: "structured" })).result).toEqual({
+        type: "error",
+        value: "Stale tool call: fixture_echo_tool",
+      })
       const hidden = yield* service.materialize([], [{ action: "fixture_echo_tool", resource: "*", effect: "deny" }])
-      expect(hidden.definitions.map(tool => tool.name)).not.toContain("fixture_echo_tool")
-      expect((yield* hidden.settle({ sessionID, ...identity, call: { type: "tool-call", name: "fixture_echo_tool", id: "disabled-mcp", input: {} } })).result).toEqual({ type: "error", value: "Unknown tool: fixture_echo_tool" })
+      expect(hidden.definitions.map((tool) => tool.name)).not.toContain("fixture_echo_tool")
+      expect(
+        (yield* hidden.settle({
+          sessionID,
+          ...identity,
+          call: { type: "tool-call", name: "fixture_echo_tool", id: "disabled-mcp", input: {} },
+        })).result,
+      ).toEqual({ type: "error", value: "Unknown tool: fixture_echo_tool" })
       yield* connection.disconnect("fixture")
       yield* native.prepare()
-      expect((yield* service.materialize()).definitions.map(tool => tool.name)).toEqual(["echo"])
+      expect((yield* service.materialize()).definitions.map((tool) => tool.name)).toEqual(["echo"])
       expect(state.closes).toBe(1)
       // 数字前缀与长合成名保持原身份；已关闭的定义不能先阻断整个Native turn。
       for (const serverName of ["1fixture", "fixture".repeat(10)]) {
@@ -299,15 +480,25 @@ describe("ToolRegistry", () => {
         yield* native.prepare()
         const materialized = yield* service.materialize()
         const name = `${serverName}_echo_tool`
-        expect(materialized.definitions.map(tool => tool.name)).toContain(name)
-        const result = yield* materialized.settle({ sessionID, ...identity, call: { type: "tool-call", name, id: "named-mcp", input: { mode: "structured" } } })
+        expect(materialized.definitions.map((tool) => tool.name)).toContain(name)
+        const result = yield* materialized.settle({
+          sessionID,
+          ...identity,
+          call: { type: "tool-call", name, id: "named-mcp", input: { mode: "structured" } },
+        })
         expect(result.result).toEqual({ type: "text", value: '{"ok":true}' })
         const disabled = yield* service.materialize([], [{ action: "*", resource: "*", effect: "deny" }])
         expect(disabled.definitions).toEqual([])
-        expect((yield* disabled.settle({ sessionID, ...identity, call: { type: "tool-call", name, id: "disabled-named-mcp", input: {} } })).result).toEqual({ type: "error", value: `Unknown tool: ${name}` })
+        expect(
+          (yield* disabled.settle({
+            sessionID,
+            ...identity,
+            call: { type: "tool-call", name, id: "disabled-named-mcp", input: {} },
+          })).result,
+        ).toEqual({ type: "error", value: `Unknown tool: ${name}` })
         yield* connection.disconnect(serverName)
         yield* native.prepare()
-        expect((yield* service.materialize()).definitions.map(tool => tool.name)).toEqual(["echo"])
+        expect((yield* service.materialize()).definitions.map((tool) => tool.name)).toEqual(["echo"])
       }
       expect(state.closes).toBe(3)
     }),
@@ -438,12 +629,18 @@ describe("ToolRegistry", () => {
       expect(contexts).toEqual([{ sessionID, ...identity, toolCallID: "call-context" }])
       // 用现成TestClock验证真实结算临界：纯JSON结果不能被长成功Notice替代。
       for (const elapsed of [119999, 120000]) {
-        yield* service.register({ structured: Tool.make({
-          description: "Structured", input: Schema.Struct({}), output: Schema.Struct({ ok: Schema.Boolean }),
-          execute: () => adjust(elapsed).pipe(Effect.as({ ok: true })),
-        }) })
+        yield* service.register({
+          structured: Tool.make({
+            description: "Structured",
+            input: Schema.Struct({}),
+            output: Schema.Struct({ ok: Schema.Boolean }),
+            execute: () => adjust(elapsed).pipe(Effect.as({ ok: true })),
+          }),
+        })
         const settled = yield* settleTool(service, {
-          sessionID, ...identity, call: { type: "tool-call", id: `structured-${elapsed}`, name: "structured", input: {} },
+          sessionID,
+          ...identity,
+          call: { type: "tool-call", id: `structured-${elapsed}`, name: "structured", input: {} },
         })
         expect(settled.output?.structured).toEqual({ ok: true })
         if (elapsed < 120000) {
@@ -451,7 +648,10 @@ describe("ToolRegistry", () => {
           continue
         }
         expect(settled.output?.content[0]).toEqual({ type: "text", text: '{"ok":true}' })
-        expect(settled.output?.content[1]).toEqual({ type: "text", text: '<opencode_notice type="execution" source="tool" severity="info" reason="completed" elapsed_ms="120000" />' })
+        expect(settled.output?.content[1]).toEqual({
+          type: "text",
+          text: '<opencode_notice type="execution" source="tool" severity="info" reason="completed" elapsed_ms="120000" />',
+        })
         expect(settled.result).toEqual(ToolOutput.toResultValue(settled.output!))
       }
     }),

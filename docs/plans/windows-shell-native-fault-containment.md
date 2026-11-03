@@ -24,17 +24,17 @@
 
 保留本任务的上下文约束：当前阶段为调研与方案；由主代理完成方案编写；helper 优先内联于责任模块；用户要求定位共享 daemon 导致全部活跃 Session 一起中断的问题。
 
-| ID | 确认需求 |
-| --- | --- |
-| REQ-01 | 修复近期 Windows shell 执行链暴露的进程级故障入口，保留既有 shell 行为 |
-| REQ-02 | 将本次原生执行故障限制在单次 Tool 调用，其他活跃 Session、TUI 连接和 daemon 继续服务 |
-| REQ-03 | 在架构上明确审批、执行、取消、原生资源和数据库的所有者 |
-| REQ-04 | 保留执行子进程及 daemon 的退出身份、退出码和原生 stderr 证据 |
-| REQ-05 | 生产文件数至多 6；生产累计新增行加删除行至多 1,000 |
-| REQ-06 | 本轮仅形成 canonical plan；后续按 TDD、独立审计和真实构建验证实施 |
-| REQ-07 | 避免性能下降：跨进程执行与 IPC 的延迟、吞吐和资源占用须满足量化门禁 |
+| ID     | 确认需求                                                                                          |
+| ------ | ------------------------------------------------------------------------------------------------- |
+| REQ-01 | 修复近期 Windows shell 执行链暴露的进程级故障入口，保留既有 shell 行为                            |
+| REQ-02 | 将本次原生执行故障限制在单次 Tool 调用，其他活跃 Session、TUI 连接和 daemon 继续服务              |
+| REQ-03 | 在架构上明确审批、执行、取消、原生资源和数据库的所有者                                            |
+| REQ-04 | 保留执行子进程及 daemon 的退出身份、退出码和原生 stderr 证据                                      |
+| REQ-05 | 生产文件数至多 6；生产累计新增行加删除行至多 1,000                                                |
+| REQ-06 | 本轮仅形成 canonical plan；后续按 TDD、独立审计和真实构建验证实施                                 |
+| REQ-07 | 避免性能下降：跨进程执行与 IPC 的延迟、吞吐和资源占用须满足量化门禁                               |
 | REQ-08 | 检查并完善生命周期维护的完整流程：执行宿主、原生资源、后代回收、诊断保留与 owner 重建恢复各自闭环 |
-| REQ-09 | 最终方案完成独立审计前不得实施生产修改 |
+| REQ-09 | 最终方案完成独立审计前不得实施生产修改                                                            |
 
 ## 2. Explicit Non-Goals
 
@@ -47,43 +47,43 @@
 
 ## 3. Repository Context
 
-| Source | Why it constrains this task |
-| --- | --- |
-| `AGENTS.md` | 深模块、小接口、单用途 helper 内联；包目录测试与 typecheck |
-| `packages/opencode/AGENTS.md` | Effect v4、scope/finalizer、InstanceState 和 AppRuntime 的责任分工 |
-| `packages/opencode/test/AGENTS.md` | 实际进程用 live 测试；就绪使用可观察信号 |
-| `CONTEXT.md` | Session/Tool/Run state/Permission/InstanceState 的统一领域词汇 |
-| `.opencode/policy/first-principles-engineering.md` | 一条主路径、双向追踪、证据等级、诊断预算和中文注释门禁 |
-| `.opencode/templates/canonical-plan.md` | 本文件采用完整 24 节结构 |
-| `docs/adr/README.md` | 当前 ADR 索引的已接受条目为 triage 规则，执行隔离领域由本计划记录决策 |
-| `docs/plans/bash-post-result-lifecycle-and-native-invocation.md:180` | 前台退出后结算在途读取、冻结已产生字节、完整排空；正常后台任务继续运行 |
-| `docs/plans/windows-daemon-sqlite-buffer-corruption-repair.md:368` | Windows worker 启动前建立非 console stdio，再 FreeConsole；保留这一已验证 HANDLE 合同 |
+| Source                                                               | Why it constrains this task                                                           |
+| -------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| `AGENTS.md`                                                          | 深模块、小接口、单用途 helper 内联；包目录测试与 typecheck                            |
+| `packages/opencode/AGENTS.md`                                        | Effect v4、scope/finalizer、InstanceState 和 AppRuntime 的责任分工                    |
+| `packages/opencode/test/AGENTS.md`                                   | 实际进程用 live 测试；就绪使用可观察信号                                              |
+| `CONTEXT.md`                                                         | Session/Tool/Run state/Permission/InstanceState 的统一领域词汇                        |
+| `.opencode/policy/first-principles-engineering.md`                   | 一条主路径、双向追踪、证据等级、诊断预算和中文注释门禁                                |
+| `.opencode/templates/canonical-plan.md`                              | 本文件采用完整 24 节结构                                                              |
+| `docs/adr/README.md`                                                 | 当前 ADR 索引的已接受条目为 triage 规则，执行隔离领域由本计划记录决策                 |
+| `docs/plans/bash-post-result-lifecycle-and-native-invocation.md:180` | 前台退出后结算在途读取、冻结已产生字节、完整排空；正常后台任务继续运行                |
+| `docs/plans/windows-daemon-sqlite-buffer-corruption-repair.md:368`   | Windows worker 启动前建立非 console stdio，再 FreeConsole；保留这一已验证 HANDLE 合同 |
 
 `packages/core` 范围的 AGENTS 搜索结果为空，适用仓库根规则。历史审计结果作为原有行为约束，本任务的审批由 §22 独立记录。
 
 ## 4. Files and Evidence Read
 
-| Evidence | Relevance | Evidence class |
-| --- | --- | --- |
-| `packages/core/src/windows-shell-output.ts:51` | 每次 make 创建 FFI 绑定，双管道、OVERLAPPED、finish/close 和库释放 | observed |
-| `packages/core/src/cross-spawn-spawner.ts:241`、`:300`、`:413` | eager taps、真实 root exit、scope 释放顺序、进程树终止 | observed |
-| `packages/opencode/src/tool/shell.ts:428`、`:854` | WinPS mark、原始审批命令、输出/exit/abort/timeout 竞争 | observed |
-| `packages/opencode/src/tool/tool.ts:128` | Tool span 含 Session/Message/call ID，错误沿 execute 效果通道传播 | observed |
-| `packages/opencode/src/server/global-lifecycle.ts`、`server/routes/instance/httpapi/handlers/global.ts:157` | 全局配置变更与显式 dispose 是独立全实例处置入口 | observed |
-| `packages/opencode/src/cli/cmd/tui/worker.ts:255`、`:492`、`:545` | graceful shutdown、恢复、活跃计数及共享数据库 owner | observed |
-| `packages/opencode/src/session/stale-turn.ts:146` | owner 重建时将遗留运行记录终端化为 Aborted/interrupted | observed |
-| `packages/opencode/src/cli/cmd/tui/daemon.ts:69` | PowerShell supervisor、PID 握手、双流 drain、stderr 默认 Stream.Null | observed |
-| `packages/opencode/src/index.ts:45`、`script/build.ts` | 编译程序按 process role 导入内置 worker；构建入口和 bundle 验证 | observed |
-| `packages/core/src/util/opencode-process.ts` | role 值为环境字符串；sanitizedProcessEnv 清除 role/run ID，支持显式覆盖 | observed |
-| `packages/core/src/util/log.ts:74`、`:167`、`:181` | file writer 可能进入 terminal 状态；close 与保留窗口 | observed |
-| `packages/opencode/src/util/process.ts:74`、`mcp/index.ts:556` | 现有 killTree、MCP 后代清理责任，保留原域 | observed |
-| `packages/core/test/effect/cross-spawn-spawner.test.ts:63` | 完整输出、迟订阅、早停、spawn failure、并发 scope 的既有 seam | observed |
-| `D:\Temp\opencode\ffi-stress.ts`、`.out.log`、`.err.log` | 最初压力脚本 3,456 次 spawn、280 秒段错误；含与生产不同的提前 close 顺序 | observed |
-| 本轮实际生产 spawner 命令，见 §8.3 | PowerShell + 实际 Effect scope/finalizer：1,531 次 spawn、157,722ms、exit 3、RSS 0.18GB | observed |
-| 同轮绑定寿命单变量对照 | 进程持有一套 FFI 绑定，实际 spawner 工作负载完成 2,369 次、250,655ms，loads=1 | observed |
-| `C:\Users\Lenovo\.local\share\opencode\log\2026-10-05T152955.log` | pid 46192；21:50:15 UTC 活跃计数 4，日志止于 21:50:34 UTC | observed |
-| 同目录 `2026-10-05T215035.log:57` | 新 owner pid 55768 于 21:50:38 UTC 发布 lock | observed |
-| 同目录 `2026-10-04T194319.log:274394` | 17:20 本地时间那次存在 idle-timeout shutdown；修正早先仅看尾部的误分类 | observed |
+| Evidence                                                                                                    | Relevance                                                                               | Evidence class |
+| ----------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- | -------------- |
+| `packages/core/src/windows-shell-output.ts:51`                                                              | 每次 make 创建 FFI 绑定，双管道、OVERLAPPED、finish/close 和库释放                      | observed       |
+| `packages/core/src/cross-spawn-spawner.ts:241`、`:300`、`:413`                                              | eager taps、真实 root exit、scope 释放顺序、进程树终止                                  | observed       |
+| `packages/opencode/src/tool/shell.ts:428`、`:854`                                                           | WinPS mark、原始审批命令、输出/exit/abort/timeout 竞争                                  | observed       |
+| `packages/opencode/src/tool/tool.ts:128`                                                                    | Tool span 含 Session/Message/call ID，错误沿 execute 效果通道传播                       | observed       |
+| `packages/opencode/src/server/global-lifecycle.ts`、`server/routes/instance/httpapi/handlers/global.ts:157` | 全局配置变更与显式 dispose 是独立全实例处置入口                                         | observed       |
+| `packages/opencode/src/cli/cmd/tui/worker.ts:255`、`:492`、`:545`                                           | graceful shutdown、恢复、活跃计数及共享数据库 owner                                     | observed       |
+| `packages/opencode/src/session/stale-turn.ts:146`                                                           | owner 重建时将遗留运行记录终端化为 Aborted/interrupted                                  | observed       |
+| `packages/opencode/src/cli/cmd/tui/daemon.ts:69`                                                            | PowerShell supervisor、PID 握手、双流 drain、stderr 默认 Stream.Null                    | observed       |
+| `packages/opencode/src/index.ts:45`、`script/build.ts`                                                      | 编译程序按 process role 导入内置 worker；构建入口和 bundle 验证                         | observed       |
+| `packages/core/src/util/opencode-process.ts`                                                                | role 值为环境字符串；sanitizedProcessEnv 清除 role/run ID，支持显式覆盖                 | observed       |
+| `packages/core/src/util/log.ts:74`、`:167`、`:181`                                                          | file writer 可能进入 terminal 状态；close 与保留窗口                                    | observed       |
+| `packages/opencode/src/util/process.ts:74`、`mcp/index.ts:556`                                              | 现有 killTree、MCP 后代清理责任，保留原域                                               | observed       |
+| `packages/core/test/effect/cross-spawn-spawner.test.ts:63`                                                  | 完整输出、迟订阅、早停、spawn failure、并发 scope 的既有 seam                           | observed       |
+| `D:\Temp\opencode\ffi-stress.ts`、`.out.log`、`.err.log`                                                    | 最初压力脚本 3,456 次 spawn、280 秒段错误；含与生产不同的提前 close 顺序                | observed       |
+| 本轮实际生产 spawner 命令，见 §8.3                                                                          | PowerShell + 实际 Effect scope/finalizer：1,531 次 spawn、157,722ms、exit 3、RSS 0.18GB | observed       |
+| 同轮绑定寿命单变量对照                                                                                      | 进程持有一套 FFI 绑定，实际 spawner 工作负载完成 2,369 次、250,655ms，loads=1           | observed       |
+| `C:\Users\Lenovo\.local\share\opencode\log\2026-10-05T152955.log`                                           | pid 46192；21:50:15 UTC 活跃计数 4，日志止于 21:50:34 UTC                               | observed       |
+| 同目录 `2026-10-05T215035.log:57`                                                                           | 新 owner pid 55768 于 21:50:38 UTC 发布 lock                                            | observed       |
+| 同目录 `2026-10-04T194319.log:274394`                                                                       | 17:20 本地时间那次存在 idle-timeout shutdown；修正早先仅看尾部的误分类                  | observed       |
 
 本计划引用的是实际源码内容和工具回执，公开 Bun issue 仅为背景资料。
 
@@ -109,35 +109,35 @@ daemon 新 owner 启动时的 stale-turn reconciliation 会把遗留运行记录
 
 ## 6. Supported Input Domain and Reachability
 
-| Input or condition | Producer | Upstream guarantees | Reachable path | Owner | Classification |
-| --- | --- | --- | --- | --- | --- |
-| 已批准 WinPS 命令 | ShellTool.cmd | 原始命令、cwd、env 已完成 Permission | mark -> spawner | ShellTool / spawner | observed |
-| 正常非零退出 | PowerShell/native executable | 保留精确退出码 | root exit -> Tool result | spawner | contracted |
-| root 退出、后台仍存活 | `Start-Process` | 前台结束与后台寿命分离 | capture finish | capture | observed |
-| stdout/stderr 背压及迟订阅 | 输出消费者 | 二进制字节和独立 stream | eager tap -> Stream | capture adapter | observed |
-| user abort / deadline | Tool Context、ShellTool timer | 每次调用一个取消域 | handle.kill + scope release | ShellTool / spawner | observed |
-| 原生调用宿主段错误 | FFI 执行 | JS catch 的作用域为 JS 异常 | capture 所在进程整体退出 | capture host | observed |
-| 多 Session 并行 | 同一 daemon 的多个 runner | 每个调用独立 Context | 多个 marked commands | capture adapter | observed |
-| 命令启动后 host 退出 | 原生故障或取消 | 命令可能已经发生外部副作用 | 宿主退出 -> owner error | adapter | reachable |
-| native stderr/exit code | runtime 与 OS | stderr 可能绕过应用 Log | 父进程监督 | launcher | observed |
-| source/compiled 启动 | Bun source 和安装版 executable | 当前两类入口都有消费者 | role dispatch | core / index.ts | observed |
+| Input or condition         | Producer                       | Upstream guarantees                  | Reachable path              | Owner               | Classification |
+| -------------------------- | ------------------------------ | ------------------------------------ | --------------------------- | ------------------- | -------------- |
+| 已批准 WinPS 命令          | ShellTool.cmd                  | 原始命令、cwd、env 已完成 Permission | mark -> spawner             | ShellTool / spawner | observed       |
+| 正常非零退出               | PowerShell/native executable   | 保留精确退出码                       | root exit -> Tool result    | spawner             | contracted     |
+| root 退出、后台仍存活      | `Start-Process`                | 前台结束与后台寿命分离               | capture finish              | capture             | observed       |
+| stdout/stderr 背压及迟订阅 | 输出消费者                     | 二进制字节和独立 stream              | eager tap -> Stream         | capture adapter     | observed       |
+| user abort / deadline      | Tool Context、ShellTool timer  | 每次调用一个取消域                   | handle.kill + scope release | ShellTool / spawner | observed       |
+| 原生调用宿主段错误         | FFI 执行                       | JS catch 的作用域为 JS 异常          | capture 所在进程整体退出    | capture host        | observed       |
+| 多 Session 并行            | 同一 daemon 的多个 runner      | 每个调用独立 Context                 | 多个 marked commands        | capture adapter     | observed       |
+| 命令启动后 host 退出       | 原生故障或取消                 | 命令可能已经发生外部副作用           | 宿主退出 -> owner error     | adapter             | reachable      |
+| native stderr/exit code    | runtime 与 OS                  | stderr 可能绕过应用 Log              | 父进程监督                  | launcher            | observed       |
+| source/compiled 启动       | Bun source 和安装版 executable | 当前两类入口都有消费者               | role dispatch               | core / index.ts     | observed       |
 
 标记域支持当前生产构造器和已有 marked 测试使用的 StandardCommand 子集：原始 executable/argv、cwd、env、stdin ignore、标准 stdout/stderr、Windows detached=false、killSignal/forceKillAfter。Effect Sink、额外 fd、管道组合仍由原未标记接口处理；新增跨进程消息只承载此已确认子集。
 
 ## 7. Required Invariants
 
-| ID | Behavioral invariant | Evidence | Existing test |
-| --- | --- | --- | --- |
-| INV-01 | 一次 capture 的原生故障仅终止对应 Tool 执行，其他 Session、daemon health 和 lock owner 保持 | REQ-02 + 原生崩溃复现 | 新增双 Session 隔离测试 |
-| INV-02 | FFI callable 与其 library 的寿命覆盖全部使用；每个原生宿主持有唯一绑定直到进程退出 | 寿命对照、当前 per-call close | 新增有界生产路径压力回归 |
-| INV-03 | 保持真实 root 退出码、已产生输出完整性、前台完成与后台独立运行 | 历史 R11 合同 | core/shell 既有测试 |
-| INV-04 | 审批发生在执行前；原始 executable/argv/cwd/env 原样交付；一次审批最多执行一次命令 | 当前 ShellTool 接口 | Permission + side-effect 计数 |
-| INV-05 | abort、timeout、scope release 只回收本次执行域，完成等待包括原生读取终态 | 当前 scope 合同 | abort/timeout/early consumer |
-| INV-06 | 正常 Session/SQLite 生命周期由 daemon 独占；执行子进程仅持有调用数据 | 现有单 writer 设计 | host 存储隔离测试 |
-| INV-07 | host 丢失或传输失败返回明确执行错误，含身份/退出原因；空输出与 code=0 仅来自正常完整完成 | REQ-04 | crash/protocol/late failure |
-| INV-08 | 输出内存受每流 backpressure 约束，保持字节保真及独立消费能力 | 原双管道合同 | 大输出、迟订阅、双流 |
-| INV-09 | daemon 的 native stderr 和 OS exit code 由现有 supervisor 在进程外记录 | REQ-04 | compiled daemon abrupt exit |
-| INV-10 | 生产累计变更符合 6 文件、1,000 行硬上限 | REQ-05 | numstat 审计 |
+| ID     | Behavioral invariant                                                                        | Evidence                      | Existing test                 |
+| ------ | ------------------------------------------------------------------------------------------- | ----------------------------- | ----------------------------- |
+| INV-01 | 一次 capture 的原生故障仅终止对应 Tool 执行，其他 Session、daemon health 和 lock owner 保持 | REQ-02 + 原生崩溃复现         | 新增双 Session 隔离测试       |
+| INV-02 | FFI callable 与其 library 的寿命覆盖全部使用；每个原生宿主持有唯一绑定直到进程退出          | 寿命对照、当前 per-call close | 新增有界生产路径压力回归      |
+| INV-03 | 保持真实 root 退出码、已产生输出完整性、前台完成与后台独立运行                              | 历史 R11 合同                 | core/shell 既有测试           |
+| INV-04 | 审批发生在执行前；原始 executable/argv/cwd/env 原样交付；一次审批最多执行一次命令           | 当前 ShellTool 接口           | Permission + side-effect 计数 |
+| INV-05 | abort、timeout、scope release 只回收本次执行域，完成等待包括原生读取终态                    | 当前 scope 合同               | abort/timeout/early consumer  |
+| INV-06 | 正常 Session/SQLite 生命周期由 daemon 独占；执行子进程仅持有调用数据                        | 现有单 writer 设计            | host 存储隔离测试             |
+| INV-07 | host 丢失或传输失败返回明确执行错误，含身份/退出原因；空输出与 code=0 仅来自正常完整完成    | REQ-04                        | crash/protocol/late failure   |
+| INV-08 | 输出内存受每流 backpressure 约束，保持字节保真及独立消费能力                                | 原双管道合同                  | 大输出、迟订阅、双流          |
+| INV-09 | daemon 的 native stderr 和 OS exit code 由现有 supervisor 在进程外记录                      | REQ-04                        | compiled daemon abrupt exit   |
+| INV-10 | 生产累计变更符合 6 文件、1,000 行硬上限                                                     | REQ-05                        | numstat 审计                  |
 
 R2补充INV-05的阶段定义：批准后至spawn/ready/started/执行/排空/结算受同一deadline；取消、断连和宿主丢失必须释放本次执行域。INV-07成功的唯一证据是completed，不以root exit或字节EOF替代。INV-09证据身份按每次daemon启动分代，观测I/O失败不停止stderr消费。
 
@@ -151,11 +151,11 @@ R2补充INV-05的阶段定义：批准后至spawn/ready/started/执行/排空/�
 
 **寿命修复的证据精度**：进程级保留 FFI 绑定的单变量对照完成了给定压力窗口。具体 native 指针失效指令、Bun 内部内存错误类型和每一次历史退出的同源性属于继续保留的调查边界；本方案的隔离验收由可控 host 退出和多 Session 存活证明，且通过重跑真实崩溃工作负载验证寿命修复。
 
-| Invariant | First divergence | Owning module/interface | Proof |
-| --- | --- | --- | --- |
-| INV-01 | marked capture 的 native 操作运行在全局 daemon 地址空间 | WindowsShellOutput / CrossSpawnSpawner | 真实 spawner 宿主段错误 + 当前进程拓扑 |
-| INV-02 | 工具级 resource stack 同时拥有进程可调用 FFI bindings 的关闭 | WindowsShellOutput.make / close | `:56`、`:68`、`:265`；共享绑定对照 |
-| INV-09 | launcher 默认将 runtime stderr drain 到 Null，运行期退出码只随 wrapper 退出 | tui/daemon.ts spawnDaemon | `:103-111`、ensure 启动后返回 |
+| Invariant | First divergence                                                            | Owning module/interface                | Proof                                  |
+| --------- | --------------------------------------------------------------------------- | -------------------------------------- | -------------------------------------- |
+| INV-01    | marked capture 的 native 操作运行在全局 daemon 地址空间                     | WindowsShellOutput / CrossSpawnSpawner | 真实 spawner 宿主段错误 + 当前进程拓扑 |
+| INV-02    | 工具级 resource stack 同时拥有进程可调用 FFI bindings 的关闭                | WindowsShellOutput.make / close        | `:56`、`:68`、`:265`；共享绑定对照     |
+| INV-09    | launcher 默认将 runtime stderr drain 到 Null，运行期退出码只随 wrapper 退出 | tui/daemon.ts spawnDaemon              | `:103-111`、ensure 启动后返回          |
 
 ### 8.2 证据纠正
 
@@ -209,17 +209,17 @@ bun -e $repro
 
 ## 9. Responsibility and Seam
 
-| Concern | Owner | Interface promise | Why it belongs here | Reuse |
-| --- | --- | --- | --- | --- |
-| 审批、命令、会话取消与deadline | ShellTool | 执行已批准命令，返回本 Tool 结果 | 当前 trust seam | 保留 ask/cmd/decoder/progress |
-| 进程句柄与 Effect scope | CrossSpawnSpawner | 同一个 ChildProcessHandle 合同 | 已有启动/kill/exitCode owner | 复用 makeHandle/PlatformError |
-| Windows capture 与隔离宿主 | WindowsShellOutput | 正确字节流、前台完成、局部原生失败 | 原生操作的唯一拥有者 | 深化现有模块 |
-| shell 后代故障回收 | 同一个 capture host | 故障/取消回收当前调用；正常后台继续运行 | 宿主先于命令取得 OS 生命周期资源 | 宿主内局部 Win32 Job Object |
-| compiled role dispatch | index.ts | 启动指定内部角色 | 当前 binary dispatcher | 新增一个生产 role 分支 |
-| Session/Message/SQLite | daemon | 单 owner 持久化与 runner 管理 | 已有主路径 | 保持现有所有权 |
-| 执行错误身份 | ShellTool 的现有日志上下文 | executionID 关联 sessionID/callID | 已有 Context | 局部 tapErrorCause，原错误继续传播 |
-| daemon native stderr/exit | tui/daemon.ts wrapper | 监督真实 worker 生命周期 | 进程外存活的现有监督者 | 原双流 drain、PID协议 |
-| 完成诊断文件保留 | Log cleanup | 限量、按时间保留已结束记录 | 现有日志保留 owner | 扩展同一 cleanup |
+| Concern                        | Owner                      | Interface promise                       | Why it belongs here              | Reuse                              |
+| ------------------------------ | -------------------------- | --------------------------------------- | -------------------------------- | ---------------------------------- |
+| 审批、命令、会话取消与deadline | ShellTool                  | 执行已批准命令，返回本 Tool 结果        | 当前 trust seam                  | 保留 ask/cmd/decoder/progress      |
+| 进程句柄与 Effect scope        | CrossSpawnSpawner          | 同一个 ChildProcessHandle 合同          | 已有启动/kill/exitCode owner     | 复用 makeHandle/PlatformError      |
+| Windows capture 与隔离宿主     | WindowsShellOutput         | 正确字节流、前台完成、局部原生失败      | 原生操作的唯一拥有者             | 深化现有模块                       |
+| shell 后代故障回收             | 同一个 capture host        | 故障/取消回收当前调用；正常后台继续运行 | 宿主先于命令取得 OS 生命周期资源 | 宿主内局部 Win32 Job Object        |
+| compiled role dispatch         | index.ts                   | 启动指定内部角色                        | 当前 binary dispatcher           | 新增一个生产 role 分支             |
+| Session/Message/SQLite         | daemon                     | 单 owner 持久化与 runner 管理           | 已有主路径                       | 保持现有所有权                     |
+| 执行错误身份                   | ShellTool 的现有日志上下文 | executionID 关联 sessionID/callID       | 已有 Context                     | 局部 tapErrorCause，原错误继续传播 |
+| daemon native stderr/exit      | tui/daemon.ts wrapper      | 监督真实 worker 生命周期                | 进程外存活的现有监督者           | 原双流 drain、PID协议              |
+| 完成诊断文件保留               | Log cleanup                | 限量、按时间保留已结束记录              | 现有日志保留 owner               | 扩展同一 cleanup                   |
 
 ## 10. Single Approved Primary-Path Design
 
@@ -260,16 +260,16 @@ TUI -> daemon [Permission + Session + SQLite]
 
 采用现有 Node child_process IPC；定义一个版本 `v:1` 和一个 executionID。双方只接收本调用身份与合法阶段的消息。
 
-| 方向 | 消息 | 含义 |
-| --- | --- | --- |
-| host -> parent | ready | OS 资源和接收循环已就绪 |
-| parent -> host | run | 唯一 executable/argv/options 交付 |
-| host -> parent | started(rootPID) | 实际命令进程已创建 |
-| host -> parent | chunk(stream, seq, base64) / end(stream) | 两流独立有序的原始字节 |
-| parent -> host | credit(stream, seq) | 相应输出消费者允许继续交付 |
-| host -> parent | root-exit(code, signal) | 原始进程退出，保持 exitCode 的现有可观察时机 |
-| host -> parent | completed / failed | 输出资源结算后的执行终态 |
-| parent -> host | cancel(signal) / accepted | 本调用取消、正常终态已交付确认 |
+| 方向           | 消息                                     | 含义                                         |
+| -------------- | ---------------------------------------- | -------------------------------------------- |
+| host -> parent | ready                                    | OS 资源和接收循环已就绪                      |
+| parent -> host | run                                      | 唯一 executable/argv/options 交付            |
+| host -> parent | started(rootPID)                         | 实际命令进程已创建                           |
+| host -> parent | chunk(stream, seq, base64) / end(stream) | 两流独立有序的原始字节                       |
+| parent -> host | credit(stream, seq)                      | 相应输出消费者允许继续交付                   |
+| host -> parent | root-exit(code, signal)                  | 原始进程退出，保持 exitCode 的现有可观察时机 |
+| host -> parent | completed / failed                       | 输出资源结算后的执行终态                     |
+| parent -> host | cancel(signal) / accepted                | 本调用取消、正常终态已交付确认               |
 
 每流最多一个 64KiB 原始数据 frame 在途；base64 最大编码长度 87,384，父端验证编码、序号、流编号和该帧上限。两个 stream 各自 credit，root-exit/cancel 等控制消息独立交付。父端在 Readable 消费需求下返还 credit，宿主在 credit 到达后推进对应 Effect Stream，保持有限背压。
 
@@ -295,14 +295,14 @@ Windows nested-job、正常后台幸存、parent disconnect 和真实 host 强�
 
 ### 10.5 错误分层
 
-| 层 | 终态与影响范围 |
-| --- | --- |
-| Permission 拒绝 | 沿现有 Tool 拒绝结果，执行宿主创建次数为零 |
-| shell 非零 exit | 原始 code 与已捕获输出返回当前 Tool |
-| abort/timeout | 原 Context/deadline 语义，回收对应 host/job |
+| 层                 | 终态与影响范围                                                              |
+| ------------------ | --------------------------------------------------------------------------- |
+| Permission 拒绝    | 沿现有 Tool 拒绝结果，执行宿主创建次数为零                                  |
+| shell 非零 exit    | 原始 code 与已捕获输出返回当前 Tool                                         |
+| abort/timeout      | 原 Context/deadline 语义，回收对应 host/job                                 |
 | capture 原生段错误 | 父端观察 host 退出，当前 Tool 输出错误；daemon PID/lock 和其他 Session 保持 |
-| host 协议/输出失败 | 同一个失败通道，保留身份和诊断摘要 |
-| daemon 自身退出 | 原有 owner 恢复负责 Session 持久终态；wrapper 留下 native stderr/exit 事实 |
+| host 协议/输出失败 | 同一个失败通道，保留身份和诊断摘要                                          |
+| daemon 自身退出    | 原有 owner 恢复负责 Session 持久终态；wrapper 留下 native stderr/exit 事实  |
 
 本方案保留当前 Session/tool-error 处理，增加的错误在现有执行 seam 内传播。语义性 Promise rejection 与进程级原生错误使用各自已有/新增责任域，单次工具失败无需全局 dispose。
 
@@ -324,15 +324,15 @@ Windows nested-job、正常后台幸存、parent disconnect 和真实 host 强�
 
 ## 11. Secondary and Replacement Path Inventory
 
-| Path | Current/proposed | Classification | Produces success? | Share | Disposition |
-| --- | --- | --- | --- | --- | --- |
-| Windows marked command -> isolated host | proposed | primary-contract branch | 是，完整终态后 | 主路径 | 实施 |
-| host 内原 native capture 算法 | preserved | primary-contract branch | 是 | 主路径 | 复用 |
-| 未标记/Unix/MCP 等原 spawner | current | contracted pass-through | 是 | 范围内保留 | 保留 |
-| 正常 root 非零退出 | current | primary-contract branch | 返回真实命令结果 | 主路径 | 保留 |
-| abort/timeout/host-lost/protocol failure | proposed | primary-contract error outcomes | 返回明确失败 | 主路径 | 实施 |
-| stderr 双段、退出记录和保留 | proposed | diagnostic | 仅证据 | R2估计17/187=9.09%，实际diff逐节点核验 | 收敛后实施 |
-| 故障后重试命令、切回 in-process 或换普通管道 | rejected | forbidden fallback | 会产生替代成功 | 0 | 排除 |
+| Path                                         | Current/proposed | Classification                  | Produces success? | Share                                  | Disposition |
+| -------------------------------------------- | ---------------- | ------------------------------- | ----------------- | -------------------------------------- | ----------- |
+| Windows marked command -> isolated host      | proposed         | primary-contract branch         | 是，完整终态后    | 主路径                                 | 实施        |
+| host 内原 native capture 算法                | preserved        | primary-contract branch         | 是                | 主路径                                 | 复用        |
+| 未标记/Unix/MCP 等原 spawner                 | current          | contracted pass-through         | 是                | 范围内保留                             | 保留        |
+| 正常 root 非零退出                           | current          | primary-contract branch         | 返回真实命令结果  | 主路径                                 | 保留        |
+| abort/timeout/host-lost/protocol failure     | proposed         | primary-contract error outcomes | 返回明确失败      | 主路径                                 | 实施        |
+| stderr 双段、退出记录和保留                  | proposed         | diagnostic                      | 仅证据            | R2估计17/187=9.09%，实际diff逐节点核验 | 收敛后实施  |
+| 故障后重试命令、切回 in-process 或换普通管道 | rejected         | forbidden fallback              | 会产生替代成功    | 0                                      | 排除        |
 
 R1的6/70估计作废。R2按语义路径估计：主执行约170节点（协议解析/阶段、native资源、启动/执行/取消/退出、流背压、Job与scope）；诊断17节点：host尾部裁剪与错误附加2、ShellTool身份tap1、Log每目录统一读取失败/存活/保留窗/最近额度/删除失败5、wrapper初始化/写入/轮转/持久化失效/终端转发失效/退出记录/尾部截止/资源收尾/证据可用状态9。helper的委托调用、普通字段赋值不与同一语义路径重复计数；catch导致真正执行失败的出口归主合同。该数值为R2设计估计而非当前实现已通过结论。必须保留逐节点ledger并交独立审计；若同一口径实际超过10%，停止放行、收敛实现或明确请求用户例外，禁止仅改名分类或增加无关分母。
 
@@ -340,44 +340,44 @@ R1的6/70估计作废。R2按语义路径估计：主执行约170节点（协议
 
 ## 12. Workaround Deletion and Replacement
 
-| Existing behavior | Why it existed | Primary repair | Location |
-| --- | --- | --- | --- |
-| 每次 capture 创建/关闭 FFI library | 原资源栈将 native binding 与管道同寿命 | host 进程寿命拥有绑定；scope 只收资源 | windows-shell-output.ts |
-| daemon 内 marked capture 执行 | 初版输出修复沿用宿主 | 原算法移入每调用宿主 | cross-spawn-spawner.ts |
-| 默认 native stderr -> Stream.Null | launcher 只处理输出可见性 | 有界落盘 + 原转发 | tui/daemon.ts |
-| 运行期 worker exitCode 随 wrapper 消失 | ensure 只观察启动窗口 | wrapper 写生命周期记录 | tui/daemon.ts |
+| Existing behavior                      | Why it existed                         | Primary repair                        | Location                |
+| -------------------------------------- | -------------------------------------- | ------------------------------------- | ----------------------- |
+| 每次 capture 创建/关闭 FFI library     | 原资源栈将 native binding 与管道同寿命 | host 进程寿命拥有绑定；scope 只收资源 | windows-shell-output.ts |
+| daemon 内 marked capture 执行          | 初版输出修复沿用宿主                   | 原算法移入每调用宿主                  | cross-spawn-spawner.ts  |
+| 默认 native stderr -> Stream.Null      | launcher 只处理输出可见性              | 有界落盘 + 原转发                     | tui/daemon.ts           |
+| 运行期 worker exitCode 随 wrapper 消失 | ensure 只观察启动窗口                  | wrapper 写生命周期记录                | tui/daemon.ts           |
 
 原 R11 的 EOF/前台完成合同保留；原生捕获算法沿单一主路径继续服务。重构后清除旧的 per-call library disposal 与父端 native capture 获取点，避免双份语义。
 
 ## 13. Forward Traceability
 
-| Requirement/invariant | Production path | Planned change | Behavioral test |
-| --- | --- | --- | --- |
-| REQ-01 / INV-02 | native capture | 进程绑定寿命 | 原 §8.3 workload 固定次数；生命周期退出完整性 |
-| REQ-02 / INV-01 | host-lost -> 当前 Tool error | 隔离宿主 + adapter | 两 Session，同步 READY 后终止 A host，B 持续产出，daemon PID/token 不变 |
-| REQ-03 / INV-04/06 | Permission -> command -> host | role dispatch、原始参数 IPC | 拒绝零副作用；批准执行一次；source/bundle 无 daemon lock/DB 初始化 |
-| INV-03/08 | stream/root-exit/completed | 双流 credit、原 finish 算法 | 精确二进制输出、迟订阅、Start-Process 前后台合同 |
-| INV-05 | abort/deadline/job | 原 scope + host OS job | 取消一个调用、杀后代、保留其他调用与正常后台任务 |
-| REQ-04 / INV-07 | parent error | executionID + Context 日志 | late host loss、退出码与错误唯一性 |
-| REQ-04 / INV-09 | daemon wrapper | bounded stderr/exit persistence | raw stderr 标记后强退、记录 PID/exitCode、无假优雅原因 |
-| REQ-05 / INV-10 | 全部实现 diff | 六文件清单与硬 cap | git numstat 总和 |
-| REQ-06 | audit/TDD/build | §16/18/21 | 全量审核及安装版 smoke |
-| REQ-07 | 单调用 host + 有界 IPC | §10.2/10.3；§16 性能门禁 | 100 短命令 + 20 次 1MiB 双流在并发 1/8 下的 p50/p95/吞吐/RSS/handles 测量 |
-| REQ-08 | host/job/capture/diag 各自生命周期闭环 | §10.1/10.4/10.6；S5/S9/S10 | 正常完成解除 job、故障回收、活跃诊断保留、owner 重建恢复 |
-| REQ-09 | 本计划元数据与审计记录 | §21/22/24 | 独立审计原文与批准字段一致后才进入实施 |
+| Requirement/invariant | Production path                        | Planned change                  | Behavioral test                                                           |
+| --------------------- | -------------------------------------- | ------------------------------- | ------------------------------------------------------------------------- |
+| REQ-01 / INV-02       | native capture                         | 进程绑定寿命                    | 原 §8.3 workload 固定次数；生命周期退出完整性                             |
+| REQ-02 / INV-01       | host-lost -> 当前 Tool error           | 隔离宿主 + adapter              | 两 Session，同步 READY 后终止 A host，B 持续产出，daemon PID/token 不变   |
+| REQ-03 / INV-04/06    | Permission -> command -> host          | role dispatch、原始参数 IPC     | 拒绝零副作用；批准执行一次；source/bundle 无 daemon lock/DB 初始化        |
+| INV-03/08             | stream/root-exit/completed             | 双流 credit、原 finish 算法     | 精确二进制输出、迟订阅、Start-Process 前后台合同                          |
+| INV-05                | abort/deadline/job                     | 原 scope + host OS job          | 取消一个调用、杀后代、保留其他调用与正常后台任务                          |
+| REQ-04 / INV-07       | parent error                           | executionID + Context 日志      | late host loss、退出码与错误唯一性                                        |
+| REQ-04 / INV-09       | daemon wrapper                         | bounded stderr/exit persistence | raw stderr 标记后强退、记录 PID/exitCode、无假优雅原因                    |
+| REQ-05 / INV-10       | 全部实现 diff                          | 六文件清单与硬 cap              | git numstat 总和                                                          |
+| REQ-06                | audit/TDD/build                        | §16/18/21                       | 全量审核及安装版 smoke                                                    |
+| REQ-07                | 单调用 host + 有界 IPC                 | §10.2/10.3；§16 性能门禁        | 100 短命令 + 20 次 1MiB 双流在并发 1/8 下的 p50/p95/吞吐/RSS/handles 测量 |
+| REQ-08                | host/job/capture/diag 各自生命周期闭环 | §10.1/10.4/10.6；S5/S9/S10      | 正常完成解除 job、故障回收、活跃诊断保留、owner 重建恢复                  |
+| REQ-09                | 本计划元数据与审计记录                 | §21/22/24                       | 独立审计原文与批准字段一致后才进入实施                                    |
 
 ## 14. Reverse Traceability
 
-| Proposed concept | Requirement ID | Evidence | Why reuse is insufficient |
-| --- | --- | --- | --- |
-| per-invocation host | REQ-02 | 实际 spawner 宿主段错误 | JS scope 共享地址空间 |
-| 进程寿命 FFI binding | REQ-01 | per-call dlopen/close + 单变量对照 | 旧 DisposableStack 把两种寿命合并 |
-| IPC v1 + executionID + credit | REQ-02/03 | 真实参数、字节、取消和背压跨进程需求 | 现有 ChildProcessHandle 面向同进程 streams |
-| 内部 shell-capture role | REQ-03 | compiled index 根据 role 分发 | 安装版并非任意脚本解释器 |
-| host 内 OS job | REQ-02/03 | Windows 树终止和正常后台幸存合同 | host 原生退出时 JS finalizer 已失去执行机会 |
-| host-lost 错误身份 | REQ-04 | 一次调用部分副作用后可退出 | root exitCode 不能代表捕获完整性 |
-| wrapper stderr/exit 记录 | REQ-04 | Stream.Null 与运行期退出码缺口 | daemon 内 Log 与退出进程同命运 |
-| terminal 诊断目录保留 | REQ-04 | 新增生命周期文件 | 现有 timestamp.log glob 覆盖范围不同 |
+| Proposed concept              | Requirement ID | Evidence                             | Why reuse is insufficient                   |
+| ----------------------------- | -------------- | ------------------------------------ | ------------------------------------------- |
+| per-invocation host           | REQ-02         | 实际 spawner 宿主段错误              | JS scope 共享地址空间                       |
+| 进程寿命 FFI binding          | REQ-01         | per-call dlopen/close + 单变量对照   | 旧 DisposableStack 把两种寿命合并           |
+| IPC v1 + executionID + credit | REQ-02/03      | 真实参数、字节、取消和背压跨进程需求 | 现有 ChildProcessHandle 面向同进程 streams  |
+| 内部 shell-capture role       | REQ-03         | compiled index 根据 role 分发        | 安装版并非任意脚本解释器                    |
+| host 内 OS job                | REQ-02/03      | Windows 树终止和正常后台幸存合同     | host 原生退出时 JS finalizer 已失去执行机会 |
+| host-lost 错误身份            | REQ-04         | 一次调用部分副作用后可退出           | root exitCode 不能代表捕获完整性            |
+| wrapper stderr/exit 记录      | REQ-04         | Stream.Null 与运行期退出码缺口       | daemon 内 Log 与退出进程同命运              |
+| terminal 诊断目录保留         | REQ-04         | 新增生命周期文件                     | 现有 timestamp.log glob 覆盖范围不同        |
 
 R2新/修正概念反向映射：completed后EOF对应INV-07（R1没有成功屏障）；短同步资源取得和可中断ready对应INV-05（R1的不可中断acquire尚无cleanup）；disconnect进入同一取消对应INV-05/REQ-08（R1只兑现accepted）；launchID对应INV-09（缓存的TUI runID不能标识多代worker）；持久化不可用但持续drain对应REQ-04/08（CopyToAsync本身无法隔离target.Write失败）；S7确定性本地LLM属于测试输入而非新生产入口。没有新公开API、DB迁移或生产故障注入开关。
 
@@ -387,15 +387,15 @@ R2新/修正概念反向映射：completed后EOF对应INV-07（R1没有成功屏
 
 R2预算仍从原HEAD累计计算，绝不重置到R1工作区。使用正常格式与有效说明，禁止把多条语句挤成一行凑数。通过收敛父端重复缓冲层、移除expectExit双宣告以及统一wrapper持久化状态释放返工空间；总预算目标990，硬上限1000。以下是R2分配估计，最终按格式化后numstat验收。
 
-| File | Operation | Exact responsibility | Added+deleted cap |
-| --- | --- | --- | ---: |
-| `packages/core/src/windows-shell-output.ts` | modify | 单次执行完成屏障、启动资源所有权、取消/断连/Job结算、单层背压 | 650 |
-| `packages/core/src/cross-spawn-spawner.ts` | modify | 短同步acquire与可中断ready；host cleanup；保留原未标记路径 | 90 |
-| `packages/opencode/src/index.ts` | modify | compiled shell-capture role dispatch | 10 |
-| `packages/opencode/src/tool/shell.ts` | modify | 同一deadline覆盖spawn至完整完成，原abort/timeout结果 | 70 |
-| `packages/opencode/src/cli/cmd/tui/daemon.ts` | modify | 分代身份、单路tee、诊断写失败隔离、双流尾部有界 | 125 |
-| `packages/core/src/util/log.ts` | modify | 分代证据目录保留与清理，统一单目录读取边界 | 45 |
-| **生产合计** | **6 文件** | **0 个新生产模块** | **990** |
+| File                                          | Operation  | Exact responsibility                                          | Added+deleted cap |
+| --------------------------------------------- | ---------- | ------------------------------------------------------------- | ----------------: |
+| `packages/core/src/windows-shell-output.ts`   | modify     | 单次执行完成屏障、启动资源所有权、取消/断连/Job结算、单层背压 |               650 |
+| `packages/core/src/cross-spawn-spawner.ts`    | modify     | 短同步acquire与可中断ready；host cleanup；保留原未标记路径    |                90 |
+| `packages/opencode/src/index.ts`              | modify     | compiled shell-capture role dispatch                          |                10 |
+| `packages/opencode/src/tool/shell.ts`         | modify     | 同一deadline覆盖spawn至完整完成，原abort/timeout结果          |                70 |
+| `packages/opencode/src/cli/cmd/tui/daemon.ts` | modify     | 分代身份、单路tee、诊断写失败隔离、双流尾部有界               |               125 |
+| `packages/core/src/util/log.ts`               | modify     | 分代证据目录保留与清理，统一单目录读取边界                    |                45 |
+| **生产合计**                                  | **6 文件** | **0 个新生产模块**                                            |           **990** |
 
 测试修改定位于已有 core spawner、ShellTool、daemon、log 套件；新增有界 stress/compiled smoke 测试夹具归测试目录。测试文件中承载的生产实现或被生产入口导入的代码按生产预算计算。
 
@@ -403,18 +403,18 @@ R2预算仍从原HEAD累计计算，绝不重置到R1工作区。使用正常格
 
 本计划确认测试 seam 为实际 `ChildProcessSpawner`、`ShellTool.execute`、daemon HTTP/Session 接口、现有 launcher seam 与日志产物。每个切片先红后绿，使用真实子进程、独立输出常量和 readiness 信号。
 
-| Order | Red behavior | Why current code fails | Minimal green | Protected regression |
-| --- | --- | --- | --- | --- |
-| S1 | 重跑 §8.3 的实际捕获工作负载，父测试进程要求正常终态 | 已观察到 exit 3 | 进程寿命绑定；保留完整采样 | 原生绑定寿命回归 |
-| S2 | 一个 approved shell 调用拥有独立 host；宿主强退时只该调用失败 | 当前 native capture 在 daemon 中 | mark -> host adapter | 进程故障域 |
-| S3 | 字节精确输出、双流背压、root 非零、late subscribe | 新 IPC 实施前该 seam 尚未存在 | credit/root-exit/completed | 输出与完成保真 |
-| S4 | Start-Process 前台按已产生输出返回，后台继续写自己的日志 | 跨进程/Job 的正常完成合同需要锁定 | 完成时释放 job 限制 | 已交付后台启动行为 |
-| S5 | host 被强退、IPC 断开、user abort 均回收当前活跃后代 | 现有 in-process finalizer 依赖宿主存活 | job + scoped cancel | 孤儿与误杀 |
-| S6 | root exit=0 后 capture host 退出仍产生执行错误 | 单看 root code 会伪造成功 | late failure 进入输出错误 | 终态准确性 |
-| S7 | daemon A/B 两个活跃 Session，A host 强退，B 输出持续、PID/token 稳定 | 现有共享原生故障域 | 完整新主路径 | 用户多 TUI 症状 |
-| S8 | 安装 bundle 的 shell-capture 角色只启动执行域；Permission deny 零副作用 | 安装入口目前只识别已有角色 | compiled 分发与隔离env | 真实发布路径 |
-| S9 | daemon 写 raw stderr 后 abrupt exit 留下身份与退出码；stderr 大流量有界 | 当前默认丢弃 stderr | wrapper 监督记录 | 事故取证 |
-| S10 | active 诊断目录保留，过期已完成目录按额度删除 | 新目录超出现有 glob | 同一 Log cleanup 扩展 | 日志占用与证据窗口 |
+| Order | Red behavior                                                            | Why current code fails                 | Minimal green              | Protected regression |
+| ----- | ----------------------------------------------------------------------- | -------------------------------------- | -------------------------- | -------------------- |
+| S1    | 重跑 §8.3 的实际捕获工作负载，父测试进程要求正常终态                    | 已观察到 exit 3                        | 进程寿命绑定；保留完整采样 | 原生绑定寿命回归     |
+| S2    | 一个 approved shell 调用拥有独立 host；宿主强退时只该调用失败           | 当前 native capture 在 daemon 中       | mark -> host adapter       | 进程故障域           |
+| S3    | 字节精确输出、双流背压、root 非零、late subscribe                       | 新 IPC 实施前该 seam 尚未存在          | credit/root-exit/completed | 输出与完成保真       |
+| S4    | Start-Process 前台按已产生输出返回，后台继续写自己的日志                | 跨进程/Job 的正常完成合同需要锁定      | 完成时释放 job 限制        | 已交付后台启动行为   |
+| S5    | host 被强退、IPC 断开、user abort 均回收当前活跃后代                    | 现有 in-process finalizer 依赖宿主存活 | job + scoped cancel        | 孤儿与误杀           |
+| S6    | root exit=0 后 capture host 退出仍产生执行错误                          | 单看 root code 会伪造成功              | late failure 进入输出错误  | 终态准确性           |
+| S7    | daemon A/B 两个活跃 Session，A host 强退，B 输出持续、PID/token 稳定    | 现有共享原生故障域                     | 完整新主路径               | 用户多 TUI 症状      |
+| S8    | 安装 bundle 的 shell-capture 角色只启动执行域；Permission deny 零副作用 | 安装入口目前只识别已有角色             | compiled 分发与隔离env     | 真实发布路径         |
+| S9    | daemon 写 raw stderr 后 abrupt exit 留下身份与退出码；stderr 大流量有界 | 当前默认丢弃 stderr                    | wrapper 监督记录           | 事故取证             |
+| S10   | active 诊断目录保留，过期已完成目录按额度删除                           | 新目录超出现有 glob                    | 同一 Log cleanup 扩展      | 日志占用与证据窗口   |
 
 S2/S7 使用测试父进程按 READY 记录的准确 host 身份触发 OS 终止；子进程执行真实业务命令。S7 的命令夹具输出自己的实际父进程身份作为就绪信号：旧路径该身份为测试 daemon，新路径为 capture host，因此对该身份施加 OS 终止能真实区分两种故障域。操作范围限定测试夹具进程树和隔离数据库。测试故障注入留在测试驱动，生产入口仅提供真实 role/协议。S7 同时断言 Session B 的新输出、数据库继续可写和 daemon health，而非只断言一个 PID 尚存。
 
@@ -422,16 +422,16 @@ S2/S7 使用测试父进程按 READY 记录的准确 host 身份触发 OS 终止
 
 R2切片追加：先S6后双end至completed窗口故障、S5断连及启动前取消、S9重连证据分代/I/O失败仍drain/print-logs同时落盘、最后S7真实daemon集成。S7使用现有隔离worker启动器和本地确定性LLM HTTP fixture，让真实Session loop调用真实ShellTool；禁止用`/session/:id/shell`替代，因为prompt.shell有自己的shellImpl并不经过ShellTool。A/B命令各自发就绪标记，测试取得A实际host身份后只杀A host；断言A Tool错误持久化、B新输出与完成、daemon health/PID/token保持、HTTP创建并读取新Session成功（DB继续可写）。
 
-| R2切片 | 红信号与独立期望 | owner/file | 绿后的回归 |
-| --- | --- | --- | --- |
-| R2-T1 | 第二个end后、completed前杀host；Tool必须失败而非code0成功 | windows-shell-output/spawner；已有host测试与ShellTool测试 | root非零、正常完成、空输出、迟订阅 |
-| R2-T2 | 实际IPC断连后host/root/后代全部退出；ready前取消零命令副作用 | host入口/spawner；测试独占启动门只放fixture | 静默长命令、credit等待、Job后台正常幸存 |
-| R2-T3 | ShellTool deadline覆盖受控启动等待；取消不会等started | shell.ts/spawner；真实host启动fixture+Context abort | 原timeout/abort notice与截断结果 |
-| R2-T4 | 同一launcher两次spawn的身份/尾部各自保留 | daemon.ts/log.ts；真实wrapper测试 | 活跃保留、完成24h/最近10、孤儿记录回收 |
-| R2-T5 | 轮转I/O冲突后worker仍完成stderr写入与退出，取证明确不可用 | daemon.ts；独占目录注入冲突 | print-logs同时转发/落盘，2MiB严格边界，双流尾部截止 |
-| R2-T6 | 新compiled测试类型错误；固定字节、退出与隔离目录实际副作用验证 | S8测试（生产入口保持） | 类型检查+新构建artifact通过；无产物只在明确非发布环境skip |
-| R2-T7 | 真实daemon双Session故障隔离，单测上限120s | 新shell-capture-isolation.test.ts，复用现有LLM协议和worker启动方式 | A报错/B继续/DB写入/health/owner均保持 |
-| R2-T8 | 压力每次消费双流并核验完整终态/字节；任何流错误使测试失败 | gated stress/test.yml | 默认skip，独立并行必过，含setup总10min |
+| R2切片 | 红信号与独立期望                                               | owner/file                                                         | 绿后的回归                                                |
+| ------ | -------------------------------------------------------------- | ------------------------------------------------------------------ | --------------------------------------------------------- |
+| R2-T1  | 第二个end后、completed前杀host；Tool必须失败而非code0成功      | windows-shell-output/spawner；已有host测试与ShellTool测试          | root非零、正常完成、空输出、迟订阅                        |
+| R2-T2  | 实际IPC断连后host/root/后代全部退出；ready前取消零命令副作用   | host入口/spawner；测试独占启动门只放fixture                        | 静默长命令、credit等待、Job后台正常幸存                   |
+| R2-T3  | ShellTool deadline覆盖受控启动等待；取消不会等started          | shell.ts/spawner；真实host启动fixture+Context abort                | 原timeout/abort notice与截断结果                          |
+| R2-T4  | 同一launcher两次spawn的身份/尾部各自保留                       | daemon.ts/log.ts；真实wrapper测试                                  | 活跃保留、完成24h/最近10、孤儿记录回收                    |
+| R2-T5  | 轮转I/O冲突后worker仍完成stderr写入与退出，取证明确不可用      | daemon.ts；独占目录注入冲突                                        | print-logs同时转发/落盘，2MiB严格边界，双流尾部截止       |
+| R2-T6  | 新compiled测试类型错误；固定字节、退出与隔离目录实际副作用验证 | S8测试（生产入口保持）                                             | 类型检查+新构建artifact通过；无产物只在明确非发布环境skip |
+| R2-T7  | 真实daemon双Session故障隔离，单测上限120s                      | 新shell-capture-isolation.test.ts，复用现有LLM协议和worker启动方式 | A报错/B继续/DB写入/health/owner均保持                     |
+| R2-T8  | 压力每次消费双流并核验完整终态/字节；任何流错误使测试失败      | gated stress/test.yml                                              | 默认skip，独立并行必过，含setup总10min                    |
 
 R3-T5补充默认入口验收：隔离父夹具向真实 `_spawn` 传入正常ensure同款`stderr:"ignore"`，在独占诊断目录制造轮转冲突；父夹具自己的stderr被测试驱动捕获，必须出现带launchID的supervisor错误，同时worker继续输出并正常退出。另用正常ensure启动的隔离真实worker验证相同wrapper选择路径，不替换spawn实现。真实print-logs只增加worker转发，不改变supervisor错误出口。
 
@@ -439,12 +439,12 @@ R3-T5补充默认入口验收：隔离父夹具向真实 `_spawn` 传入正常en
 
 ## 17. Chinese Comment Budget
 
-| Metric | Estimate | Method |
-| --- | ---: | --- |
-| Effective changed code lines E | 900–1,200 | 生产和测试新增/实质修改；排除纯 import、格式、移动 |
-| Required C | 135–180 | `ceil(E * 0.15)` |
-| Production explanatory comments | 约 100–115 | 包含于 §15 的990目标/1000硬上限，正常格式 |
-| Test/config explanatory comments | 约 85–115 | 解释真实故障窗口/就绪屏障/隔离目录/字节期望，不重复测试名 |
+| Metric                           |   Estimate | Method                                                    |
+| -------------------------------- | ---------: | --------------------------------------------------------- |
+| Effective changed code lines E   |  900–1,200 | 生产和测试新增/实质修改；排除纯 import、格式、移动        |
+| Required C                       |    135–180 | `ceil(E * 0.15)`                                          |
+| Production explanatory comments  | 约 100–115 | 包含于 §15 的990目标/1000硬上限，正常格式                 |
+| Test/config explanatory comments |  约 85–115 | 解释真实故障窗口/就绪屏障/隔离目录/字节期望，不重复测试名 |
 
 中文说明重点：绑定与每调用资源的寿命差异；native 故障域；root-exit 与 completed；credit 的双流独立性；正常后台任务与 job 回收；审批后单次执行；source/compiled role；原生 stderr 和退出记录由父进程拥有；测试故障注入代表的实际失败模式。
 
@@ -452,33 +452,33 @@ R3-T5补充默认入口验收：隔离父夹具向真实 `_spawn` 传入正常en
 
 以下命令在实施阶段执行；本规划阶段不运行构建或修改测试。
 
-| Command | Working directory | Evidence produced |
-| --- | --- | --- |
-| `bun test test/effect/cross-spawn-spawner.test.ts --timeout 60000` | `packages/core` | spawner、capture、scope、IPC 的行为切片 |
-| `bun test test/tool/shell.test.ts --timeout 60000` | `packages/opencode` | Permission、输出、后台启动、取消和错误呈现 |
-| `bun test test/cli/tui/daemon.test.ts --timeout 60000` | `packages/opencode` | 多 Session 与真实 launcher 隔离 |
-| `bun test test/util/log.test.ts --timeout 30000` | `packages/core` | 应用日志与新增诊断保留 |
-| `bun typecheck` | `packages/core` | core 类型合同 |
-| `bun typecheck` | `packages/opencode` | app 类型合同 |
-| `bun run script/build.ts --single --skip-install --skip-embed-web-ui` | `packages/opencode` | 本机 compiled artifact，保持安装版原 exe |
-| `bun test test/cli/tui/shell-capture-compiled.test.ts --timeout 60000` | `packages/opencode` | 新测试使用刚构建 dist artifact；真实 role、父进程退出、Job、IPC |
-| `OPENCODE_STRESS=1 bun test test/stress/windows-shell-output-stress.test.ts`（PowerShell用env设置） | `packages/core` | 保留PowerShell双流及间歇提前结束scope的原始行为负载，逐调用核验字节/完整终态；固定CI规模全部完成，测试不超过5分钟、job不超过10分钟 |
-| `bun test test/cli/tui/shell-capture-isolation.test.ts --timeout 120000` | `packages/opencode` | 隔离真实daemon+确定性LLM驱动双Session，A故障后B/health/DB/owner继续工作 |
-| `git diff --numstat <implementation-base> -- <六个生产路径>` | repo root | 新增+删除行总和与实际生产文件数 |
+| Command                                                                                             | Working directory   | Evidence produced                                                                                                                  |
+| --------------------------------------------------------------------------------------------------- | ------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| `bun test test/effect/cross-spawn-spawner.test.ts --timeout 60000`                                  | `packages/core`     | spawner、capture、scope、IPC 的行为切片                                                                                            |
+| `bun test test/tool/shell.test.ts --timeout 60000`                                                  | `packages/opencode` | Permission、输出、后台启动、取消和错误呈现                                                                                         |
+| `bun test test/cli/tui/daemon.test.ts --timeout 60000`                                              | `packages/opencode` | 多 Session 与真实 launcher 隔离                                                                                                    |
+| `bun test test/util/log.test.ts --timeout 30000`                                                    | `packages/core`     | 应用日志与新增诊断保留                                                                                                             |
+| `bun typecheck`                                                                                     | `packages/core`     | core 类型合同                                                                                                                      |
+| `bun typecheck`                                                                                     | `packages/opencode` | app 类型合同                                                                                                                       |
+| `bun run script/build.ts --single --skip-install --skip-embed-web-ui`                               | `packages/opencode` | 本机 compiled artifact，保持安装版原 exe                                                                                           |
+| `bun test test/cli/tui/shell-capture-compiled.test.ts --timeout 60000`                              | `packages/opencode` | 新测试使用刚构建 dist artifact；真实 role、父进程退出、Job、IPC                                                                    |
+| `OPENCODE_STRESS=1 bun test test/stress/windows-shell-output-stress.test.ts`（PowerShell用env设置） | `packages/core`     | 保留PowerShell双流及间歇提前结束scope的原始行为负载，逐调用核验字节/完整终态；固定CI规模全部完成，测试不超过5分钟、job不超过10分钟 |
+| `bun test test/cli/tui/shell-capture-isolation.test.ts --timeout 120000`                            | `packages/opencode` | 隔离真实daemon+确定性LLM驱动双Session，A故障后B/health/DB/owner继续工作                                                            |
+| `git diff --numstat <implementation-base> -- <六个生产路径>`                                        | repo root           | 新增+删除行总和与实际生产文件数                                                                                                    |
 
 stress 的父驱动始终捕获子进程 stderr/exit，测试产物仅存夹具目录。短功能测试以握手/输出/进程退出为就绪信号；压力测试的有限墙钟只负责测试截止。
 
 ## 19. Diff Budget
 
-| Metric | Estimate | Justification |
-| --- | ---: | --- |
-| Production files added | 0 | 内联深化现有 owner |
-| Production files modified | 6 | 固定 §15 清单 |
-| Production files deleted | 0 | 无平行实现或无关清理 |
-| Production added+deleted lines | 目标 850–970；硬上限 1,000 | 包含正常格式和说明；采用累计原基线 diff |
-| Test lines | 450–700 | 真实子进程/多 Session/compiled 与固定 stress |
-| Generated lines | 0 | API、SDK、迁移保持 |
-| Plan files | 1 | 本 canonical 文件 |
+| Metric                         |                   Estimate | Justification                                |
+| ------------------------------ | -------------------------: | -------------------------------------------- |
+| Production files added         |                          0 | 内联深化现有 owner                           |
+| Production files modified      |                          6 | 固定 §15 清单                                |
+| Production files deleted       |                          0 | 无平行实现或无关清理                         |
+| Production added+deleted lines | 目标 850–970；硬上限 1,000 | 包含正常格式和说明；采用累计原基线 diff      |
+| Test lines                     |                    450–700 | 真实子进程/多 Session/compiled 与固定 stress |
+| Generated lines                |                          0 | API、SDK、迁移保持                           |
+| Plan files                     |                          1 | 本 canonical 文件                            |
 
 每个实施切片记录实际累计 numstat。文件拆分、把实现搬进测试、把生成实现算作零行都违背此预算合同。任何必要范围超额都先修订方案并取得用户决策。
 
@@ -517,11 +517,11 @@ stress 的父驱动始终捕获子进程 stderr/exit，测试产物仅存夹具�
 
 ## 22. Plan Audit Record
 
-| Round | Audited revision | Full scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | R1 | yes | No blocking findings. | 6 项（原文如下） | APPROVE | task `ses_ef067d443ffe9V8TtBqZXlDm22` |
-| 2 | R2 | yes | B-01 默认启动路径会丢弃方案指定的诊断持久化失败报告 | 3项：预算估计待实证、旧基线措辞、性能表旧措辞 | BLOCK | `ses_eeeeddf48ffe2L4WmkxexenhpV` |
-| 3 | R3 | yes | No blocking findings. | 3项：实际预算待验证、旧修订措辞、性能表旧用语 | APPROVE | `ses_eeeeddf48ffe2L4WmkxexenhpV` |
+| Round | Audited revision | Full scope? | Blocking findings                                   | Non-blocking findings                         | Result  | Invocation reference                  |
+| ----- | ---------------- | ----------- | --------------------------------------------------- | --------------------------------------------- | ------- | ------------------------------------- |
+| 1     | R1               | yes         | No blocking findings.                               | 6 项（原文如下）                              | APPROVE | task `ses_ef067d443ffe9V8TtBqZXlDm22` |
+| 2     | R2               | yes         | B-01 默认启动路径会丢弃方案指定的诊断持久化失败报告 | 3项：预算估计待实证、旧基线措辞、性能表旧措辞 | BLOCK   | `ses_eeeeddf48ffe2L4WmkxexenhpV`      |
+| 3     | R3               | yes         | No blocking findings.                               | 3项：实际预算待验证、旧修订措辞、性能表旧用语 | APPROVE | `ses_eeeeddf48ffe2L4WmkxexenhpV`      |
 
 R3审计原文：**APPROVE — 仅批准本次审计的 R3 方案。** 适用文件：`docs/plans/windows-shell-native-fault-containment.md`，本次读取版本最后修改时间为 **2026-10-06 20:00:21**。主代理可原样记录本次完整范围判决，并将状态更新为 `approved`、批准修订设为 `R3`、实施许可设为 `yes`。此批准允许按 R3 实施，不批准当前工作区实现发布；最终仍须完成全部验证、实际预算核算和完整独立实施审计。
 
@@ -591,16 +591,17 @@ No blocking findings.
 
 生产 6 文件，added+deleted = 999（硬上限 1000）：
 
-| File | +/- | 内容 |
-| --- | --- | --- |
-| packages/core/src/windows-shell-output.ts | ~692/34 | 进程寿命 kernel32 绑定（懒加载单例，无 per-call close）；HOST_ROLE/isHost；协议 v1（ready/run/started/chunk/end/root-exit/completed/failed/cancel/accepted/credit）；openRemote 父端 adapter（拉动驱动 credit 背压、close 事件终态判定、expectExit 主动终止宣告、协议违例带帧预览）；runHost 宿主入口（Job kill-on-close、64KiB 分帧、先转发后等退出） |
-| packages/core/src/cross-spawn-spawner.ts | 76/39 | releaseProcess 提取为共享 finalizer；marked 分支按 isHost 分流本地/远端；handle.kill 与 scope 释放双入口 expectExit；handle.pid 暴露真实命令 rootPID |
-| packages/core/src/util/log.ts | 66/9 | daemon-native 保留治理（活跃保留/完成最新10+24h/start-only 超窗回收，证据文件 mtime）；_cleanup 测试缝 |
-| packages/opencode/src/index.ts | 6/0 | shell-capture 角色分发（编译 bundle 入口） |
-| packages/opencode/src/tool/shell.ts | 8/2 | spawn 错误补记 sessionID/callID + cause（宿主故障归因到调用） |
-| packages/opencode/src/cli/cmd/tui/daemon.ts | 67/3 | wrapper 取证：lifecycle.json（PID 发布前）、exit.json（WaitForExit 后）、stderr 两段 1MiB 轮转 + tailTruncated 标记、stdout 无界等待 + stderr 1s 有界尾部等待 |
+| File                                        | +/-     | 内容                                                                                                                                                                                                                                                                                                                                                   |
+| ------------------------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| packages/core/src/windows-shell-output.ts   | ~692/34 | 进程寿命 kernel32 绑定（懒加载单例，无 per-call close）；HOST_ROLE/isHost；协议 v1（ready/run/started/chunk/end/root-exit/completed/failed/cancel/accepted/credit）；openRemote 父端 adapter（拉动驱动 credit 背压、close 事件终态判定、expectExit 主动终止宣告、协议违例带帧预览）；runHost 宿主入口（Job kill-on-close、64KiB 分帧、先转发后等退出） |
+| packages/core/src/cross-spawn-spawner.ts    | 76/39   | releaseProcess 提取为共享 finalizer；marked 分支按 isHost 分流本地/远端；handle.kill 与 scope 释放双入口 expectExit；handle.pid 暴露真实命令 rootPID                                                                                                                                                                                                   |
+| packages/core/src/util/log.ts               | 66/9    | daemon-native 保留治理（活跃保留/完成最新10+24h/start-only 超窗回收，证据文件 mtime）；\_cleanup 测试缝                                                                                                                                                                                                                                                |
+| packages/opencode/src/index.ts              | 6/0     | shell-capture 角色分发（编译 bundle 入口）                                                                                                                                                                                                                                                                                                             |
+| packages/opencode/src/tool/shell.ts         | 8/2     | spawn 错误补记 sessionID/callID + cause（宿主故障归因到调用）                                                                                                                                                                                                                                                                                          |
+| packages/opencode/src/cli/cmd/tui/daemon.ts | 67/3    | wrapper 取证：lifecycle.json（PID 发布前）、exit.json（WaitForExit 后）、stderr 两段 1MiB 轮转 + tailTruncated 标记、stdout 无界等待 + stderr 1s 有界尾部等待                                                                                                                                                                                          |
 
 测试与 CI（不计入生产预算）：
+
 - packages/core/test/effect/cross-spawn-spawner.test.ts +13（S2 隔离断言）
 - packages/core/test/process/windows-shell-output.test.ts 新增 4 用例（Job 回收 S5a、late failure S6、并发隔离 S7 机制层、后台任务幸存 S4）
 - packages/core/test/util/log.test.ts 新增 2 用例（S10）
@@ -643,12 +644,12 @@ No blocking findings.
 
 ### Chinese Comment Calculation
 
-| Metric | Actual | Exclusions and evidence |
-| --- | --- | --- |
-| E | 737 | 排除 import（10）与空行的有效新增生产行 |
-| C | 112 | 邻近修改点的不变量/边界/安全解释 |
-| C/E | 15.2% | ≥15% 门禁通过 |
-| Minimum C | 111 | ceil(737×0.15) |
+| Metric    | Actual | Exclusions and evidence                 |
+| --------- | ------ | --------------------------------------- |
+| E         | 737    | 排除 import（10）与空行的有效新增生产行 |
+| C         | 112    | 邻近修改点的不变量/边界/安全解释        |
+| C/E       | 15.2%  | ≥15% 门禁通过                           |
+| Minimum C | 111    | ceil(737×0.15)                          |
 
 ### Deviations for Auditor Judgment
 
@@ -664,11 +665,11 @@ No blocking findings.
 
 ## 24. Implementation Audit Record
 
-| Round | Plan revision | Full original scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | R1 | 全范围 | B-01：S8 编译版角色分发回归测试未交付且未记录偏差 → 已补交门控测试（6/6 通过） | 7 项（预算估计漂移、路径漂移、E/C 口径、游离 rejection、TailFile 写失败降级、诊断预算口径、2MiB 措辞） | BLOCK | ses_eef6cb298ffeu32qjQa1VEA4sd |
-| 2 | R1 | 全范围重审 | B-01（新）：S8 测试断言非合同精确报文次序，实测 18 跑 2 败 → 改为合同性断言（ready 首发/started 先于首帧/completed 末位/类型计数），20/20 通过 | 维持首轮 7 项 + 2 项新记录 | BLOCK | 同上 |
-| 3 | R1 | 全范围重审 | No blocking findings | 维持 9 项 + 1 项新记录（断言合同性确认） | APPROVE | ses_eef6cb298ffeu32qjQa1VEA4sd |
+| Round | Plan revision | Full original scope? | Blocking findings                                                                                                                              | Non-blocking findings                                                                                  | Result  | Invocation reference           |
+| ----- | ------------- | -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ | ------- | ------------------------------ |
+| 1     | R1            | 全范围               | B-01：S8 编译版角色分发回归测试未交付且未记录偏差 → 已补交门控测试（6/6 通过）                                                                 | 7 项（预算估计漂移、路径漂移、E/C 口径、游离 rejection、TailFile 写失败降级、诊断预算口径、2MiB 措辞） | BLOCK   | ses_eef6cb298ffeu32qjQa1VEA4sd |
+| 2     | R1            | 全范围重审           | B-01（新）：S8 测试断言非合同精确报文次序，实测 18 跑 2 败 → 改为合同性断言（ready 首发/started 先于首帧/completed 末位/类型计数），20/20 通过 | 维持首轮 7 项 + 2 项新记录                                                                             | BLOCK   | 同上                           |
+| 3     | R1            | 全范围重审           | No blocking findings                                                                                                                           | 维持 9 项 + 1 项新记录（断言合同性确认）                                                               | APPROVE | ses_eef6cb298ffeu32qjQa1VEA4sd |
 
 第 3 轮审计原话结论："APPROVE — 实施审计第 3 轮（末轮）无阻塞发现。当前工作区 diff（生产 999 行/6 文件 + 6 测试文件含 S8 门禁 + test.yml）满足批准修订 R1 的全部合同、原始需求及用户追加约束，可释放。"
 
@@ -678,34 +679,34 @@ No blocking findings.
 
 甲：`ses_eef261899ffeVvmdZpALLvfmSI`。最终原文：**BLOCK — 保留 B-01 至 B-07，新增 B-08 至 B-10。**
 
-| ID | 原始分类及标题 | 本轮证据 |
-| --- | --- | --- |
-| B-01 | Blocking 高：`completed` 尚未交付，调用已经获得成功终态 | observed：rootCode=0、completed=false、errors=0 |
-| B-02 | Blocking 高：IPC 断连后，host 与命令继续存活 | observed：真实断连后两者存活，夹具清理后均退出 |
-| B-03 | Blocking 高：启动握手不可中断，用户 timeout 尚未开始 | contracted：ready acquisition 与 ShellTool deadline 调用顺序 |
-| B-04 | Blocking 高：同一 TUI 重连会覆盖前次 daemon 崩溃证据 | observed：FIRST_CRASH 被 SECOND_CRASH 覆盖 |
-| B-05 | Blocking 高：诊断轮转失败会停止 stderr drain | observed：workerAlive=true、wrapperExited=false、writeCompleted=false |
-| B-06 | Blocking 中：`--print-logs` 不保存 native stderr | observed：lifecycle 存在、stderr.b 缺失 |
-| B-07 | Blocking 中：压力绿标没有验证完整完成，缺少约定的双 Session 验收 | contracted：真实消费与 S7 seam 缺失 |
-| B-08 | Blocking 中：新增 compiled 测试使 opencode typecheck 失败 | observed：测试第83行 TS2345/TS2769，退出2 |
-| B-09 | Blocking 中：全范围中文说明性注释未达到 15% | observed：E=1034、C=138、13.35% |
-| B-10 | Blocking 中：诊断决策面超过 10% 上限 | 复议后原文：**B-10：BLOCK，保留；依据更正为 37/228＝16.23%。原 46/235 作废。** |
+| ID   | 原始分类及标题                                                   | 本轮证据                                                                       |
+| ---- | ---------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| B-01 | Blocking 高：`completed` 尚未交付，调用已经获得成功终态          | observed：rootCode=0、completed=false、errors=0                                |
+| B-02 | Blocking 高：IPC 断连后，host 与命令继续存活                     | observed：真实断连后两者存活，夹具清理后均退出                                 |
+| B-03 | Blocking 高：启动握手不可中断，用户 timeout 尚未开始             | contracted：ready acquisition 与 ShellTool deadline 调用顺序                   |
+| B-04 | Blocking 高：同一 TUI 重连会覆盖前次 daemon 崩溃证据             | observed：FIRST_CRASH 被 SECOND_CRASH 覆盖                                     |
+| B-05 | Blocking 高：诊断轮转失败会停止 stderr drain                     | observed：workerAlive=true、wrapperExited=false、writeCompleted=false          |
+| B-06 | Blocking 中：`--print-logs` 不保存 native stderr                 | observed：lifecycle 存在、stderr.b 缺失                                        |
+| B-07 | Blocking 中：压力绿标没有验证完整完成，缺少约定的双 Session 验收 | contracted：真实消费与 S7 seam 缺失                                            |
+| B-08 | Blocking 中：新增 compiled 测试使 opencode typecheck 失败        | observed：测试第83行 TS2345/TS2769，退出2                                      |
+| B-09 | Blocking 中：全范围中文说明性注释未达到 15%                      | observed：E=1034、C=138、13.35%                                                |
+| B-10 | Blocking 中：诊断决策面超过 10% 上限                             | 复议后原文：**B-10：BLOCK，保留；依据更正为 37/228＝16.23%。原 46/235 作废。** |
 
 乙：`ses_eef2615fcffed86ORe6Xf3E7Mn`。最终原文：**BLOCK — 仅针对本轮核对的 R1 和当前实际 diff。**
 
-| ID | 原始分类及标题 | 本轮证据 |
-| --- | --- | --- |
-| B-01 | Blocking 高：`completed` 之前的宿主故障仍可能变成 Tool 成功 | reachable |
-| B-02 | Blocking 高：IPC 断开后执行宿主和命令继续存活——已动态复现 | observed |
-| B-03 | Blocking 高：READY/started 等待不受 Tool deadline 和取消约束 | contracted |
-| B-04 | Blocking 高：诊断写失败会停止 stderr drain，可能反向卡死共享 daemon | reachable |
-| B-05 | Blocking 中：`--print-logs` 分支没有原生 stderr 持久化 | contracted |
-| B-06 | Blocking 中：压力测试存在假绿路径，且没有复跑原始故障负载 | reachable |
-| B-07 | Blocking 中：没有完成多 Session 原始症状的端到端验收 | contracted |
-| B-08 | Blocking 中：同一 TUI 重启 daemon 会复用诊断目录，覆盖旧证据并残留旧退出记录 | reachable |
-| B-09 | Blocking 中：新增 compiled 测试导致 application typecheck 失败 | observed：退出2 |
-| B-10 | Blocking 中：全范围中文解释性注释不足 15% | observed：E=1035、C=118、11.40% |
-| B-11 | 初判 Blocking 中：实际诊断决策面超过 10% | 复议后原文：**B-11 最终结论：撤回“已实证超过 10%”这一 blocking finding，改为 non-blocking 计数证据不足；不宣告预算通过。** 原52/283作废 |
+| ID   | 原始分类及标题                                                               | 本轮证据                                                                                                                                |
+| ---- | ---------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| B-01 | Blocking 高：`completed` 之前的宿主故障仍可能变成 Tool 成功                  | reachable                                                                                                                               |
+| B-02 | Blocking 高：IPC 断开后执行宿主和命令继续存活——已动态复现                    | observed                                                                                                                                |
+| B-03 | Blocking 高：READY/started 等待不受 Tool deadline 和取消约束                 | contracted                                                                                                                              |
+| B-04 | Blocking 高：诊断写失败会停止 stderr drain，可能反向卡死共享 daemon          | reachable                                                                                                                               |
+| B-05 | Blocking 中：`--print-logs` 分支没有原生 stderr 持久化                       | contracted                                                                                                                              |
+| B-06 | Blocking 中：压力测试存在假绿路径，且没有复跑原始故障负载                    | reachable                                                                                                                               |
+| B-07 | Blocking 中：没有完成多 Session 原始症状的端到端验收                         | contracted                                                                                                                              |
+| B-08 | Blocking 中：同一 TUI 重启 daemon 会复用诊断目录，覆盖旧证据并残留旧退出记录 | reachable                                                                                                                               |
+| B-09 | Blocking 中：新增 compiled 测试导致 application typecheck 失败               | observed：退出2                                                                                                                         |
+| B-10 | Blocking 中：全范围中文解释性注释不足 15%                                    | observed：E=1035、C=118、11.40%                                                                                                         |
+| B-11 | 初判 Blocking 中：实际诊断决策面超过 10%                                     | 复议后原文：**B-11 最终结论：撤回“已实证超过 10%”这一 blocking finding，改为 non-blocking 计数证据不足；不宣告预算通过。** 原52/283作废 |
 
 两人保留的 non-blocking：stdout 无界尾部等待；compiled smoke 的长度与零 stderr 断言不能证明字节精确及 DB/lock 零副作用。甲另记录 TailFile 越过单段1MiB（实际1,064,960字节）、ShellTool全套218过2败1错误而单测复跑通过；乙另记录未修改 npm-config 的5个失败、registry环境影响待归因。二者均拒绝把工具的 user_abort 标签当作人工取消或 native 崩溃根因，不要求扩展至未修改的 Unix/MCP/SQLite，也不要求备用后端或命令重放。
 
@@ -822,15 +823,15 @@ Release verdict:
 
 本次实现仅修改以下六个生产owner，无新增生产模块。冻结前正常格式的`git diff --numstat HEAD -- <六路径>`结果如下；C#嵌入代码已将连续操作展开，未以测试承载生产逻辑。
 
-| File | Added | Deleted | 合计 |
-| --- | ---: | ---: | ---: |
-| packages/core/src/cross-spawn-spawner.ts | 54 | 12 | 66 |
-| packages/core/src/util/log.ts | 55 | 0 | 55 |
-| packages/core/src/windows-shell-output.ts | 586 | 27 | 613 |
-| packages/opencode/src/cli/cmd/tui/daemon.ts | 162 | 20 | 182 |
-| packages/opencode/src/index.ts | 6 | 0 | 6 |
-| packages/opencode/src/tool/shell.ts | 33 | 43 | 76 |
-| **总计** | **896** | **102** | **998** |
+| File                                        |   Added | Deleted |    合计 |
+| ------------------------------------------- | ------: | ------: | ------: |
+| packages/core/src/cross-spawn-spawner.ts    |      54 |      12 |      66 |
+| packages/core/src/util/log.ts               |      55 |       0 |      55 |
+| packages/core/src/windows-shell-output.ts   |     586 |      27 |     613 |
+| packages/opencode/src/cli/cmd/tui/daemon.ts |     162 |      20 |     182 |
+| packages/opencode/src/index.ts              |       6 |       0 |       6 |
+| packages/opencode/src/tool/shell.ts         |      33 |      43 |      76 |
+| **总计**                                    | **896** | **102** | **998** |
 
 冻结时HEAD为`680dc87e4fd5e712c6efe0dcee6b646d142102b9`。会话初始ref为`8e9181e314`；期间其它工作已提交。直接核对`git diff --numstat 8e9181e314 HEAD -- <六路径>`，唯一差异是`util/log.ts`的27增1删（另一个已提交的Log.close相关改动），本次保留它，未计入本任务；其余五路径基线相同。本GOAL的任何未提交实现均未通过换基线抹除。构建生成的`models-snapshot.js`及其它无关staged/untracked内容不纳入本次实现，不撤销、不提交。
 
@@ -840,31 +841,31 @@ Release verdict:
 
 前述§24保留每个真实红信号。R6 CLI继承stderr复现为CLI退出0/stdout EOF/daemon健康但stderr未EOF；改launcher-owned pipe后原真实CLI用例通过。持pipe用例同时覆盖静默与持续stderr后代，先观察worker退出记录才开始尾部护栏，避免把慢机冷启动计入五秒窗口。取证失败仍持续drain、真实码保留、正常3MiB stdout逐字节、双段各严格1MiB均通过。单一lifecycle消费者对暂时截断的JSON曾误删证据，新增红信号后改为保留无法确认owner死亡的已有记录；空目录仍按年龄回收。
 
-| 命令（均为包目录） | 目录 | 最终结果 |
-| --- | --- | --- |
-| `bun typecheck` | packages/core | 退出0 |
-| `bun test --timeout 60000` | packages/core | 378 pass，1 gated stress skip，0 fail；708断言，57.33s |
-| `OPENCODE_STRESS=1 OPENCODE_STRESS_COUNT=500 bun test test/stress/windows-shell-output-stress.test.ts`（pwsh环境赋值） | packages/core | 1 pass，1907断言，101.33s；真实PowerShell双流及提前释放scope |
-| `bun typecheck` | packages/opencode | 退出0 |
-| `bun test test/tool/shell.test.ts --timeout 60000` | packages/opencode | 222 pass，731断言，183.25s |
-| `bun test test/cli/tui/daemon.test.ts test/cli/tui/daemon-wrapper-forensics.test.ts test/cli/tui/shell-capture-isolation.test.ts --timeout 60000` | packages/opencode | 59 pass，236断言，374.22s |
-| `bun run script/build.ts --single --skip-install --skip-embed-web-ui` | packages/opencode | 成功；version及voice Worker smoke通过 |
-| `bun test test/cli/tui/shell-capture-compiled.test.ts` | packages/opencode | 1 pass，15断言，3.38s |
+| 命令（均为包目录）                                                                                                                                | 目录              | 最终结果                                                     |
+| ------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------- | ------------------------------------------------------------ |
+| `bun typecheck`                                                                                                                                   | packages/core     | 退出0                                                        |
+| `bun test --timeout 60000`                                                                                                                        | packages/core     | 378 pass，1 gated stress skip，0 fail；708断言，57.33s       |
+| `OPENCODE_STRESS=1 OPENCODE_STRESS_COUNT=500 bun test test/stress/windows-shell-output-stress.test.ts`（pwsh环境赋值）                            | packages/core     | 1 pass，1907断言，101.33s；真实PowerShell双流及提前释放scope |
+| `bun typecheck`                                                                                                                                   | packages/opencode | 退出0                                                        |
+| `bun test test/tool/shell.test.ts --timeout 60000`                                                                                                | packages/opencode | 222 pass，731断言，183.25s                                   |
+| `bun test test/cli/tui/daemon.test.ts test/cli/tui/daemon-wrapper-forensics.test.ts test/cli/tui/shell-capture-isolation.test.ts --timeout 60000` | packages/opencode | 59 pass，236断言，374.22s                                    |
+| `bun run script/build.ts --single --skip-install --skip-embed-web-ui`                                                                             | packages/opencode | 成功；version及voice Worker smoke通过                        |
+| `bun test test/cli/tui/shell-capture-compiled.test.ts`                                                                                            | packages/opencode | 1 pass，15断言，3.38s                                        |
 
 最终dist exe为152897536 bytes，SHA256 `efe0d2888aa5236bd7f7366eabf96f33b56cff7dbb1f6da2318a846d07376705`。安装版未替换。一次验证命令把pwsh环境赋值接在`&&`后导致ParserError；已用原生命令顺序重跑，以上core结果来自纠正后的实际执行，不计那次未运行的命令为通过。
 
 ### Owner与路径分类
 
-| 路径 | 分类与实际owner |
-| --- | --- |
-| marked父端 / host角色内本地capture / 未标记调用 | 同一执行合同的支持域分支；spawner只执行其中一条，local Effect保持惰性，无失败后转后端 |
-| source / compiled role | 同一host算法的部署入口；index.ts只分发角色，源码入口加载失败沿真实进程错误报告 |
-| ready、root-exit、completed、late failure | 主执行生命周期；root不能代替completed，双流与退出错误保持真实失败 |
-| abort、disconnect、scope release、Job解除或保留限制 | 主资源生命周期；取消持有host退出责任，正常后台任务保留独立寿命 |
-| wrapper启动失败、worker退出、两级尾部截止、launcher双reader | 主启动/监督生命周期；不终止后台后代制造EOF，不重放命令 |
-| host stderr尾部/协议预览/错误身份、Tool session-call日志 | 诊断；有界证据且不改变执行结果 |
-| launcher分代身份、lifecycle记录、stderr双段/tee/不可用报告 | 诊断；同一consumer持续drain，失败显式可见，无备用文件或假成功 |
-| 24h/最近10份/活跃owner及部分记录保护 | 诊断治理；只处理本owner的证据目录，不触及DB或其它工作区 |
+| 路径                                                        | 分类与实际owner                                                                       |
+| ----------------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| marked父端 / host角色内本地capture / 未标记调用             | 同一执行合同的支持域分支；spawner只执行其中一条，local Effect保持惰性，无失败后转后端 |
+| source / compiled role                                      | 同一host算法的部署入口；index.ts只分发角色，源码入口加载失败沿真实进程错误报告        |
+| ready、root-exit、completed、late failure                   | 主执行生命周期；root不能代替completed，双流与退出错误保持真实失败                     |
+| abort、disconnect、scope release、Job解除或保留限制         | 主资源生命周期；取消持有host退出责任，正常后台任务保留独立寿命                        |
+| wrapper启动失败、worker退出、两级尾部截止、launcher双reader | 主启动/监督生命周期；不终止后台后代制造EOF，不重放命令                                |
+| host stderr尾部/协议预览/错误身份、Tool session-call日志    | 诊断；有界证据且不改变执行结果                                                        |
+| launcher分代身份、lifecycle记录、stderr双段/tee/不可用报告  | 诊断；同一consumer持续drain，失败显式可见，无备用文件或假成功                         |
+| 24h/最近10份/活跃owner及部分记录保护                        | 诊断治理；只处理本owner的证据目录，不触及DB或其它工作区                               |
 
 删除或收敛的冗余：`expectExit`双宣告、父端queue/held/pump重复缓冲、双end提前EOF、cancel watcher fiber、取证文件mtime优先级回退、单用releaseProcess模块内helper、未被消费的远端Capture空方法、重复signalDone/cancelled状态、Root PID重复getter、手写WireCommand类型/校验副本、额外FileStream门面方法。DLL对象及绑定保留在同一进程寿命owner，局部Win32错误映射仍复用原调用位置。
 
@@ -958,12 +959,12 @@ Job仍在命令启动前建立kill-on-close并加入自身。使用ABI的i64参�
 
 ### Mapping And Verification
 
-| Requirement/invariant | Owner/path/file | Behavior verification |
-| --- | --- | --- |
-| REQ-01、INV-03/08/11 | windows-shell-output.ts的同一read/finish/close | 原500次真实双流逐字节压力；GC边界实验；EOF、取消及提前scope释放 |
-| REQ-02/03/08 | 同一host、Job、spawner及Session链 | 宿主故障隔离、真实双Session、后台幸存与断连回收原测试 |
-| REQ-05与单用helper内联要求 | 同文件内联wire/Job、删除多余委托与别名 | 正常格式diff、core/typecheck、host协议与身份原测试 |
-| REQ-04/07、既有完整范围 | daemon/log/ShellTool/CI既有R6设计 | 取证故障、真实退出码、ShellTool全套、compiled角色、十分钟Test并行job |
+| Requirement/invariant      | Owner/path/file                                | Behavior verification                                                |
+| -------------------------- | ---------------------------------------------- | -------------------------------------------------------------------- |
+| REQ-01、INV-03/08/11       | windows-shell-output.ts的同一read/finish/close | 原500次真实双流逐字节压力；GC边界实验；EOF、取消及提前scope释放      |
+| REQ-02/03/08               | 同一host、Job、spawner及Session链              | 宿主故障隔离、真实双Session、后台幸存与断连回收原测试                |
+| REQ-05与单用helper内联要求 | 同文件内联wire/Job、删除多余委托与别名         | 正常格式diff、core/typecheck、host协议与身份原测试                   |
+| REQ-04/07、既有完整范围    | daemon/log/ShellTool/CI既有R6设计              | 取证故障、真实退出码、ShellTool全套、compiled角色、十分钟Test并行job |
 
 反向映射：NTSTATUS与操作状态块只承担INV-11，原跨调用GetLastError不能保持配对；完成事件承担原读取终态/缓冲区寿命保证，原线程错误码不能代替它；伪句柄i64与内联Job承担原自加入Job责任和用户单用helper要求，没有新owner。所有变化属于主执行/资源路径，诊断43/182的历史事实及用户例外原样保留；新增备用成功路径为0。
 
@@ -1007,20 +1008,20 @@ Release verdict原文：
 
 原始红信号为§27的未插桩500次压力stderr少256字节，退出1；生产修复后保持原producer、500次数、8并发及每16次一次scope早退，连续两次完整通过。原GC边界实验是状态配对机制证明；本轮不把历史事故全部归因于它。
 
-| Command | Working directory | Result |
-| --- | --- | --- |
-| `bun typecheck` | packages/core | 退出0 |
-| `bun test test/process/windows-shell-output.test.ts test/effect/cross-spawn-spawner.test.ts --timeout 60000` | packages/core | 42 pass / 76 assertions，25.94s |
-| `bun test --timeout 60000` | packages/core | 378 pass / 1 gated stress skip / 708 assertions，60.28s |
-| `OPENCODE_STRESS=1 OPENCODE_STRESS_COUNT=500 OPENCODE_STRESS_ROUNDS=1 bun test test/stress/windows-shell-output-stress.test.ts`，pwsh赋值 | packages/core | 两次各1 pass / 1907 assertions，113.74s及132.79s；无preload |
-| `bun typecheck` | packages/opencode | 两次退出0 |
-| `bun test test/tool/shell.test.ts --timeout 60000` | packages/opencode | 223 pass / 735 assertions，187.25s |
-| `bun test test/tool/shell.test.ts --test-name-pattern 'keeps command secrets\|covers pending spawn' --timeout 60000` | packages/opencode | 格式收敛后3 pass / 8 assertions，12.73s |
-| `bun test test/cli/tui/daemon.test.ts test/cli/tui/daemon-wrapper-forensics.test.ts test/cli/tui/shell-capture-isolation.test.ts --timeout 60000` | packages/opencode | 59 pass / 236 assertions，343.26s；故意制造的diagnostic unavailable按预期可见 |
-| `bun build test/effect/cross-spawn-spawner.test.ts --target=bun --outfile D:\Temp\opencode\posix-spawner.test.mjs`，再由WSL Bun执行`--test-name-pattern 'reaps a POSIX descendant'` | packages/core / WSL | 当前源码重新bundle，普通/忽略TERM后代2 pass / 6 assertions，991ms |
-| `bun run script/build.ts --single --skip-install --skip-embed-web-ui` | packages/opencode | build、version及voice Worker smoke通过 |
-| `bun test test/cli/tui/shell-capture-compiled.test.ts` | packages/opencode | 1 pass / 15 assertions，5.00s |
-| `git diff --check` | repository root | 退出0 |
+| Command                                                                                                                                                                             | Working directory   | Result                                                                        |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------- | ----------------------------------------------------------------------------- |
+| `bun typecheck`                                                                                                                                                                     | packages/core       | 退出0                                                                         |
+| `bun test test/process/windows-shell-output.test.ts test/effect/cross-spawn-spawner.test.ts --timeout 60000`                                                                        | packages/core       | 42 pass / 76 assertions，25.94s                                               |
+| `bun test --timeout 60000`                                                                                                                                                          | packages/core       | 378 pass / 1 gated stress skip / 708 assertions，60.28s                       |
+| `OPENCODE_STRESS=1 OPENCODE_STRESS_COUNT=500 OPENCODE_STRESS_ROUNDS=1 bun test test/stress/windows-shell-output-stress.test.ts`，pwsh赋值                                           | packages/core       | 两次各1 pass / 1907 assertions，113.74s及132.79s；无preload                   |
+| `bun typecheck`                                                                                                                                                                     | packages/opencode   | 两次退出0                                                                     |
+| `bun test test/tool/shell.test.ts --timeout 60000`                                                                                                                                  | packages/opencode   | 223 pass / 735 assertions，187.25s                                            |
+| `bun test test/tool/shell.test.ts --test-name-pattern 'keeps command secrets\|covers pending spawn' --timeout 60000`                                                                | packages/opencode   | 格式收敛后3 pass / 8 assertions，12.73s                                       |
+| `bun test test/cli/tui/daemon.test.ts test/cli/tui/daemon-wrapper-forensics.test.ts test/cli/tui/shell-capture-isolation.test.ts --timeout 60000`                                   | packages/opencode   | 59 pass / 236 assertions，343.26s；故意制造的diagnostic unavailable按预期可见 |
+| `bun build test/effect/cross-spawn-spawner.test.ts --target=bun --outfile D:\Temp\opencode\posix-spawner.test.mjs`，再由WSL Bun执行`--test-name-pattern 'reaps a POSIX descendant'` | packages/core / WSL | 当前源码重新bundle，普通/忽略TERM后代2 pass / 6 assertions，991ms             |
+| `bun run script/build.ts --single --skip-install --skip-embed-web-ui`                                                                                                               | packages/opencode   | build、version及voice Worker smoke通过                                        |
+| `bun test test/cli/tui/shell-capture-compiled.test.ts`                                                                                                                              | packages/opencode   | 1 pass / 15 assertions，5.00s                                                 |
+| `git diff --check`                                                                                                                                                                  | repository root     | 退出0                                                                         |
 
 新产物version `0.0.0-dev-smark-202610070738`，152899584 bytes，SHA256 `c62c69c9adc8a79b29e6e161843f976aa4efab54dc0640b47f94349f8be4e866`；用户安装版未替换，未停止共享daemon。
 
@@ -1079,17 +1080,17 @@ Non-blocking findings原文：
 
 本轮独立执行结果原文：
 
-| 验证 | 结果 |
-| --- | --- |
-| core `bun typecheck` | 通过 |
-| opencode `bun typecheck` | 通过 |
-| core 全套 | 378 pass、1 gated stress skip、708 assertions，62.21s |
-| 原 500 次压力负载 | 1 pass、1907 assertions，120.13s |
-| ShellTool 全套 | 223 pass、735 assertions，192.82s |
-| daemon / forensics / 真实 Session 隔离 | 59 pass、236 assertions，349.04s |
-| 当前源码独占 bundle，WSL POSIX 四组合 | 4 pass、18 assertions，1.01s |
-| compiled capture smoke | 1 pass、15 assertions，4.53s |
-| `git diff --check` | 通过 |
+| 验证                                   | 结果                                                  |
+| -------------------------------------- | ----------------------------------------------------- |
+| core `bun typecheck`                   | 通过                                                  |
+| opencode `bun typecheck`               | 通过                                                  |
+| core 全套                              | 378 pass、1 gated stress skip、708 assertions，62.21s |
+| 原 500 次压力负载                      | 1 pass、1907 assertions，120.13s                      |
+| ShellTool 全套                         | 223 pass、735 assertions，192.82s                     |
+| daemon / forensics / 真实 Session 隔离 | 59 pass、236 assertions，349.04s                      |
+| 当前源码独占 bundle，WSL POSIX 四组合  | 4 pass、18 assertions，1.01s                          |
+| compiled capture smoke                 | 1 pass、15 assertions，4.53s                          |
+| `git diff --check`                     | 通过                                                  |
 
 此前B-01已重新检查：当前失败scope在root-done分支之前执行进程组回收，四组合回归包含该场景并通过。本轮独立确认生产6文件/998行；E=1737、C=262、15.083%，最低261；排除83空行、58 TS-import、6 C# using、24不合格中文候选。Primary-path/fallback与Code quality/Chinese-comment verdict均为**通过**。
 

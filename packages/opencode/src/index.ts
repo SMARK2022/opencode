@@ -19,7 +19,9 @@ if (process.env.OPENCODE_PROCESS_ROLE === "voice-smoke") {
   const timeout = Bun.sleep(10_000).then(() => {
     throw new Error("Compiled voice Worker probe timed out")
   })
-  worker.onmessage = (event) => { if (event.data?.type === "probe") acknowledged.resolve() }
+  worker.onmessage = (event) => {
+    if (event.data?.type === "probe") acknowledged.resolve()
+  }
   worker.onerror = (event) => acknowledged.reject(new Error(event.message || "Compiled voice Worker failed"))
   worker.addEventListener("close", () => closed.resolve(), { once: true })
   worker.postMessage({ type: "probe" })

@@ -100,10 +100,19 @@ function writeMeta(absFile: string, patch: string, exists = true) {
 }
 
 // apply_patch 工具的 metadata：files[] 每项 relativePath 已相对 worktree
-function applyPatchMeta(files: Array<{ relativePath: string; type: string; patch: string; additions: number; deletions: number }>) {
+function applyPatchMeta(
+  files: Array<{ relativePath: string; type: string; patch: string; additions: number; deletions: number }>,
+) {
   return {
     diff: files.map((f) => f.patch).join("\n"),
-    files: files.map((f) => ({ filePath: "/abs/" + f.relativePath, relativePath: f.relativePath, type: f.type, patch: f.patch, additions: f.additions, deletions: f.deletions })),
+    files: files.map((f) => ({
+      filePath: "/abs/" + f.relativePath,
+      relativePath: f.relativePath,
+      type: f.type,
+      patch: f.patch,
+      additions: f.additions,
+      deletions: f.deletions,
+    })),
     diagnostics: {},
   }
 }
@@ -177,10 +186,13 @@ describe("computeDiff tool-flow aggregation", () => {
         const info = yield* session.create({})
         // apply_patch 的 relativePath 已是 worktree-相对，不依赖 worktree 变量本身
         const msg = assistantWithTools(info.id, dir, [
-          toolPart("apply_patch", applyPatchMeta([
-            { relativePath: "added.ts", type: "add", patch: "+a\n", additions: 1, deletions: 0 },
-            { relativePath: "removed.ts", type: "delete", patch: "-r\n", additions: 0, deletions: 1 },
-          ])),
+          toolPart(
+            "apply_patch",
+            applyPatchMeta([
+              { relativePath: "added.ts", type: "add", patch: "+a\n", additions: 1, deletions: 0 },
+              { relativePath: "removed.ts", type: "delete", patch: "-r\n", additions: 0, deletions: 1 },
+            ]),
+          ),
         ])
         const diffs = yield* summary.computeDiff({ messages: [msg] })
         expect(diffs.length).toBe(2)
@@ -236,7 +248,10 @@ describe("computeDiff tool-flow aggregation", () => {
           const absTs = path.join(dir, "code.ts")
           yield* Effect.promise(() => fs.writeFile(absTs, "original"))
           // edit 工具的 metadata 携带 ts 文件的 diff 证据
-          const toolPartEdit = toolPart("edit", editMeta(absTs, "--- code.ts\n+++ code.ts\n@@ -1 +1 @@\n-original\n+modified\n", 1, 1))
+          const toolPartEdit = toolPart(
+            "edit",
+            editMeta(absTs, "--- code.ts\n+++ code.ts\n@@ -1 +1 @@\n-original\n+modified\n", 1, 1),
+          )
 
           // 取 after 快照（模拟 step-finish 的 snapshot）
           const after = yield* snapshot.track()
@@ -280,4 +295,3 @@ describe("computeDiff tool-flow aggregation", () => {
     ),
   )
 })
-

@@ -59,10 +59,12 @@ export const GlobTool = Tool.define(
 
           const output = []
           // [local-smark] partial 假阴性防护：部分路径不可访问时显式提示，
-        // 模型可据此收窄路径或调整 pattern，而不是误信全量无匹配
-        if (files.length === 0 && globPartial)
-          output.push("No files found, but some paths could not be accessed (permission denied); results may be incomplete.")
-        else if (files.length === 0) output.push("No files found")
+          // 模型可据此收窄路径或调整 pattern，而不是误信全量无匹配
+          if (files.length === 0 && globPartial)
+            output.push(
+              "No files found, but some paths could not be accessed (permission denied); results may be incomplete.",
+            )
+          else if (files.length === 0) output.push("No files found")
           if (files.length > 0) {
             output.push(...files.map((file) => path.resolve(search, file.path)))
             if (truncated) {

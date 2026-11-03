@@ -4,10 +4,7 @@ import path from "path"
 
 // #449 语义：bash 展开输出的命令与输出之间统一空行分隔，且不再有内联
 // "Model context output" 标签——标题的 · returned to model 与上下文背景色已足够区分。
-const sessionSource = readFileSync(
-  path.join(import.meta.dir, "../../../src/routes/session/index.tsx"),
-  "utf8",
-)
+const sessionSource = readFileSync(path.join(import.meta.dir, "../../../src/routes/session/index.tsx"), "utf8")
 
 describe("Session Shell output spacing", () => {
   test("Shell does not show 'Model context output' inline label", () => {
@@ -27,7 +24,10 @@ describe("Session Shell output spacing", () => {
   })
 
   test("BlockTool uses one vertical spacing strategy", () => {
-    const blockToolSource = sessionSource.slice(sessionSource.indexOf("function BlockTool("), sessionSource.indexOf("function Shell("))
+    const blockToolSource = sessionSource.slice(
+      sessionSource.indexOf("function BlockTool("),
+      sessionSource.indexOf("function Shell("),
+    )
     expect(blockToolSource).toContain("marginTop={1}")
     expect(blockToolSource).not.toContain("gap={1}")
   })
@@ -37,13 +37,16 @@ describe("Session Shell output spacing", () => {
     expect(sessionSource).toContain("DEFAULT_BLOCK_CHAR_THRESHOLD = 800")
     expect(sessionSource).toContain("maxChars = DEFAULT_BLOCK_CHAR_THRESHOLD")
     expect(sessionSource).toContain("Math.min(maxChars() * 2, DEFAULT_BLOCK_CHAR_THRESHOLD)")
-    expect(sessionSource).toContain('diffContent().length > DEFAULT_BLOCK_CHAR_THRESHOLD')
+    expect(sessionSource).toContain("diffContent().length > DEFAULT_BLOCK_CHAR_THRESHOLD")
     expect(sessionSource).toContain('(file.patch ?? "").length > DEFAULT_BLOCK_CHAR_THRESHOLD')
     expect(sessionSource).toContain('(diff() ?? "").length > DEFAULT_BLOCK_CHAR_THRESHOLD')
   })
 
   test("Shell counts command and output characters for collapse", () => {
-    const shellSource = sessionSource.slice(sessionSource.indexOf("function Shell("), sessionSource.indexOf("function DiffView("))
+    const shellSource = sessionSource.slice(
+      sessionSource.indexOf("function Shell("),
+      sessionSource.indexOf("function DiffView("),
+    )
     expect(shellSource).toContain("shellPreviewText")
     expect(shellSource).toContain("collapseToolOutput(shellPreviewText(), 20,")
     expect(shellSource).toContain("previewText(shellPreviewText(), maxLines, maxChars())")
@@ -74,7 +77,7 @@ describe("Session Shell output spacing", () => {
     const inlineToolSource = sessionSource.slice(start, end)
     expect(start).toBeGreaterThan(-1)
     expect(end).toBeGreaterThan(start)
-    expect(inlineToolSource).toContain('if (!previous) return 1')
+    expect(inlineToolSource).toContain("if (!previous) return 1")
   })
 })
 
@@ -84,7 +87,9 @@ describe("Session collapsed preview sentinel removal", () => {
     // sentinel 注入形态（两种旧分支）必须全部消失，直接返回真实截断内容。
     expect(sessionSource).not.toContain('[preview, "…"].join("\\n")')
     expect(sessionSource).not.toContain(': "…"')
-    expect(sessionSource).toContain("return collapseToolOutput(input, maxLines, Math.min(maxChars, DEFAULT_BLOCK_CHAR_THRESHOLD), false).output")
+    expect(sessionSource).toContain(
+      "return collapseToolOutput(input, maxLines, Math.min(maxChars, DEFAULT_BLOCK_CHAR_THRESHOLD), false).output",
+    )
   })
 
   test("notebook previewText drops the ellipsis sentinel row", () => {
@@ -97,10 +102,7 @@ describe("Session collapsed preview sentinel removal", () => {
   })
 
   test("previewDiff no longer pushes a sentinel context row", () => {
-    const previewDiffSource = readFileSync(
-      path.join(import.meta.dir, "../../../src/util/preview-diff.ts"),
-      "utf8",
-    )
+    const previewDiffSource = readFileSync(path.join(import.meta.dir, "../../../src/util/preview-diff.ts"), "utf8")
     expect(previewDiffSource).not.toContain('body.push(" …")')
   })
 })

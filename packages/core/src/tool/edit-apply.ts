@@ -23,7 +23,10 @@ export type EditReplacement = {
 export class EditApplyError extends Error {
   // #521：失败索引只在 owner 内传递，用于 multi-edit 诊断，不进入 Schema、metadata 或用户可见文案。
   // 继承 Error 的既有 message，使调用方获得身份而不改变原有错误渲染契约。
-  constructor(message: string, readonly editIndex: number) {
+  constructor(
+    message: string,
+    readonly editIndex: number,
+  ) {
     super(message)
   }
 }
@@ -61,7 +64,6 @@ type LineSpan = { start: number; end: number }
 // 12. range 先按偏移原位排序再重叠检查与 reverse apply（顺序不变性），避免错位拼接与部分写盘。
 // 13. identical 条目校验后跳写并保留提交形态；批级等值仍是唯一 no-op 门，真实编辑记录 actualOld。
 // 14. 兼容 replace() 仅允许 length-1 委托，禁止复制粘贴第二实现。
-
 
 /**
  * 封闭归一化集（与 Pi normalizeForFuzzyMatch 对齐的 OpenCode 命名）：
@@ -151,7 +153,11 @@ export function applyReplacementsPreservingUnchangedLines(
     result += originalLines.slice(originalLineIndex, group.startLine).join("")
     const groupStartOffset = baseLines[group.startLine].start
     const groupEndOffset = baseLines[group.endLine - 1].end
-    result += applyReplacements(baseContent.slice(groupStartOffset, groupEndOffset), group.replacements, groupStartOffset)
+    result += applyReplacements(
+      baseContent.slice(groupStartOffset, groupEndOffset),
+      group.replacements,
+      groupStartOffset,
+    )
     originalLineIndex = group.endLine
   }
   result += originalLines.slice(originalLineIndex).join("")
@@ -200,10 +206,16 @@ function ambiguitySuffix(base: string, oldString: string, usedNormalized: boolea
     const end = offset + probe.length
     return (offset === 0 || base[offset - 1] === "\n") && (end === base.length || base[end] === "\n")
   })
-  const hint = uniqueExtensionHint(base.split("\n"), candidateLines, probe.split("\n").length, (extended) => {
-    const text = extended.join("\n")
-    return (usedNormalized ? countOccurrences(base, text) : exactLiteralCount(base, text)) === 1
-  }, lineAligned)
+  const hint = uniqueExtensionHint(
+    base.split("\n"),
+    candidateLines,
+    probe.split("\n").length,
+    (extended) => {
+      const text = extended.join("\n")
+      return (usedNormalized ? countOccurrences(base, text) : exactLiteralCount(base, text)) === 1
+    },
+    lineAligned,
+  )
   return formatAmbiguityHint(hint)
 }
 
@@ -261,7 +273,11 @@ function exactLiteralCount(content: string, oldString: string): number {
 }
 
 // exact 域枚举 range；replaceAll 时展开全部非重叠字面命中（旧 content.replaceAll 的区间形态）。
-function enumerateExactRanges(content: string, oldString: string, replaceAll: boolean): Array<{ matchIndex: number; matchLength: number }> {
+function enumerateExactRanges(
+  content: string,
+  oldString: string,
+  replaceAll: boolean,
+): Array<{ matchIndex: number; matchLength: number }> {
   const first = content.indexOf(oldString)
   if (first === -1) return []
   if (!replaceAll) return [{ matchIndex: first, matchLength: oldString.length }]
@@ -575,13 +591,18 @@ export function applyEdits(content: string, edits: EditReplacement[], path = "fi
 
 // 只记录matcher确认的真实覆写；哈希对象是模型提交的LF needle，两代不能各自猜测命中内容。
 export function provenance(edits: EditReplacement[], indices: readonly number[]) {
-  return indices.flatMap(editIndex => {
+  return indices.flatMap((editIndex) => {
     const original = edits[editIndex]
     if (!original) return []
-    return [{ editIndex, original: {
-      byteLength: Buffer.byteLength(original.oldString, "utf-8"),
-      sha256: createHash("sha256").update(original.oldString, "utf-8").digest("hex"),
-    } }]
+    return [
+      {
+        editIndex,
+        original: {
+          byteLength: Buffer.byteLength(original.oldString, "utf-8"),
+          sha256: createHash("sha256").update(original.oldString, "utf-8").digest("hex"),
+        },
+      },
+    ]
   })
 }
 
@@ -605,7 +626,8 @@ export function warningTail(input: {
   if (input.rewrites.length > 0 && fits([...lines, header])) {
     lines.push(header)
     const shown: string[] = []
-    const marker = (count: number) => `- ... ${count} more rewrite fingerprint(s) stored in ${input.channel}.inputProvenance`
+    const marker = (count: number) =>
+      `- ... ${count} more rewrite fingerprint(s) stored in ${input.channel}.inputProvenance`
     for (const rewrite of input.rewrites) {
       const line = `- edits[${rewrite.editIndex}]: original=${rewrite.original.byteLength} UTF-8 bytes sha256=${rewrite.original.sha256}`
       const remaining = input.rewrites.length - shown.length - 1

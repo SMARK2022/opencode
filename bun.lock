@@ -27,7 +27,6 @@
         "turbo": "2.10.2",
       },
     },
-    // 批量版本对齐：以下 workspace 版本统一随版本链 patch 升级，lock 必须同步
     "packages/app": {
       "name": "@opencode-ai/app",
       "version": "1.19.9",
@@ -157,7 +156,6 @@
         "@typescript/native-preview": "catalog:",
       },
     },
-    // console 子包与主包版本保持一致
     "packages/console/app": {
       "name": "@opencode-ai/console-app",
       "version": "1.19.9",
@@ -289,7 +287,6 @@
         "wrangler": "4.50.0",
       },
     },
-    // core 版本同步，frozen install 依赖此一致性
     "packages/core": {
       "name": "@opencode-ai/core",
       "version": "1.19.9",
@@ -571,7 +568,6 @@
         "@typescript/native-preview": "catalog:",
       },
     },
-    // frozen install 要求与 packages/opencode/package.json 的实际版本同步；已对齐时保留目标值，不回退到源分支版本。
     "packages/opencode": {
       "name": "opencode",
       "version": "1.19.17-smark",
@@ -780,7 +776,6 @@
         "@typescript/native-preview": "catalog:",
       },
     },
-    // sdk/js 版本同步，避免发布产物版本漂移
     "packages/sdk/js": {
       "name": "@opencode-ai/sdk",
       "version": "1.19.9",
@@ -984,7 +979,6 @@
         "@typescript/native-preview": "catalog:",
       },
     },
-    // ui 版本同步，保持与 app/web 渲染栈一致
     "packages/ui": {
       "name": "@opencode-ai/ui",
       "version": "1.19.9",

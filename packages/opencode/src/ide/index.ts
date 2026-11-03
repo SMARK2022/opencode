@@ -3,8 +3,6 @@ import { NamedError } from "@opencode-ai/core/util/error"
 import { Process } from "@/util/process"
 import { IdeEvent } from "@opencode-ai/schema/ide-event"
 
-
-
 // 扩展完整 ID 必须等于 package.json 的 publisher + "." + name
 // publisher=SMARK2022：SMARK 分支发布者，避免与上游 sst 扩展冲突
 // name=opencode-ide-bridge：notebook/bridge 工具宿主扩展名
@@ -41,7 +39,7 @@ export const InstallFailedError = NamedError.create("InstallFailedError", {
 
 export function ide() {
   if (process.env["TERM_PROGRAM"] === "vscode") {
-  const v = process.env["GIT_ASKPASS"]
+    const v = process.env["GIT_ASKPASS"]
     for (const ide of SUPPORTED_IDES) {
       if (v?.includes(ide.name)) return ide.name
     }

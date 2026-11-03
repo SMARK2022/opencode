@@ -5,8 +5,10 @@ export default {
   id: "20260623000000_session_step_usage",
   up(tx) {
     // 旧回填漏掉 native 结算且只取 V1 最后一步；升级修正基数，运行时仍由同一 projector 增量维护。
-    return tx
-      .run(`
+    return (
+      tx
+        .run(
+          `
         UPDATE session
         -- 仅修 token 基数；cost 已有独立账本，不能借这次回填改变历史费用。
         SET (tokens_input, tokens_output, tokens_reasoning, tokens_cache_read, tokens_cache_write) = (
@@ -29,8 +31,10 @@ export default {
             WHERE session_id = session.id AND type = 'assistant'
           )
         )
-      `)
-      // SQL 失败交给迁移事务回滚且不写完成记录，不能吞错后让错误用量基数继续使用。
-      .pipe(Effect.asVoid)
+      `,
+        )
+        // SQL 失败交给迁移事务回滚且不写完成记录，不能吞错后让错误用量基数继续使用。
+        .pipe(Effect.asVoid)
+    )
   },
 } satisfies DatabaseMigration.Migration

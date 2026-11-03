@@ -288,7 +288,8 @@ function count(n: number, label: string): string {
 // #246：run 模式与 TUI 滚动回显共用同一套 grep 摘要语义；helper 放在
 // tool.ts 顶层供 runGrep/scrollGrepStart 复用，避免两处各写一份漂移。
 function grepPatterns(value: unknown, exclude = false): string[] {
-  const items = typeof value === "string" ? [value] : Array.isArray(value) ? value.filter((item) => typeof item === "string") : []
+  const items =
+    typeof value === "string" ? [value] : Array.isArray(value) ? value.filter((item) => typeof item === "string") : []
   // #246：exclude 项已带 ! 前缀时不重复添加，保持 rg 的幂等语义；
   // 非 string 数组项直接丢弃，不报错——历史会话的 input 可能不完整
   // grep 的 inline 行是给人扫一眼的摘要，不展示 include=/exclude= 字段名；

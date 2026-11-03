@@ -35,30 +35,30 @@
 
 ## 3. Repository Context
 
-| Source | 约束 |
-|---|---|
-| 根 AGENTS.md、CONTEXT.md | 本地包测试/typecheck；保护无关 worktree；Session/Message 与 native glyph 所有权分开 |
-| thirdparty/opentui/AGENTS.md | Zig 修改后需 native build；跨运行时 FFI 不变；不无复现修复 |
-| docs/adr/README.md | 当前 ADR 仅 triage，无字形池设计约束；此局部修复无需新 ADR |
-| first-principles-engineering.md、canonical-plan.md | 修首次偏离、双向映射、无 fallback、批准前不实施 |
+| Source                                             | 约束                                                                                |
+| -------------------------------------------------- | ----------------------------------------------------------------------------------- |
+| 根 AGENTS.md、CONTEXT.md                           | 本地包测试/typecheck；保护无关 worktree；Session/Message 与 native glyph 所有权分开 |
+| thirdparty/opentui/AGENTS.md                       | Zig 修改后需 native build；跨运行时 FFI 不变；不无复现修复                          |
+| docs/adr/README.md                                 | 当前 ADR 仅 triage，无字形池设计约束；此局部修复无需新 ADR                          |
+| first-principles-engineering.md、canonical-plan.md | 修首次偏离、双向映射、无 fallback、批准前不实施                                     |
 
 core 子目录没有额外 AGENTS.md。所有下文 `core/...` 路径相对 `thirdparty/opentui/packages/core/`。
 
 ## 4. Files and Evidence Read
 
-| Evidence | Relevance | Evidence class |
-|---|---|---|
-| core/src/zig/buffer.zig:475-612,901-998,1183-1296,1424-1859 | 写入拒绝、混合、两处分配点；TextBufferView 与 EditorView 共享实现 | reachable |
-| core/src/zig/text-buffer-view.zig:1143-1191,1288-1299；text-buffer-iterators.zig:351-380 | word 断点与递增列换算游标必须一起向前 | reachable |
-| core/src/zig/tests/text-buffer-view_test.zig | word/char 行布局公开 seam 与缓存/选择回归 | contracted |
-| core/src/zig/grapheme.zig:124-297,369-553,697-793 | alloc 返回新 ref=0 或已有 live ID；tracker 第一/最后引用语义 | reachable |
-| core/src/zig/lib.zig:2657-2775 | encodeUnicode 已显式 incref 交付调用者，不是同一个无 owner 绘制路径 | reachable |
-| core/src/Renderable.ts:1423-1460,1768-1834；renderables/TextBufferRenderable.ts:475 | overflow-hidden 到绘制的真实调用链 | reachable |
-| core/src/zig/tests/buffer_test.zig:243-323,1978-2035 | 背景元数据、整字裁剪、原有 span 不得破坏 | contracted |
-| core/src/tests/renderer.custom-stdout.test.ts | 现成 native output feed 收集测试，不新增终端模拟器依赖 | reachable |
-| .temp/Testing/garbled-render.test.tsx | 原始红测、精确阈值及真实组件树 | observed |
-| docs/plans/tui-freeze-native-handle-exhaustion.md §11 | 日志和独立复现记录；不作为批准依据 | observed |
-| core/package.json、opentui/package.json、core/src/zig.ts:110-141 | build/test 命令及实际 native package 加载路径 | contracted |
+| Evidence                                                                                 | Relevance                                                           | Evidence class |
+| ---------------------------------------------------------------------------------------- | ------------------------------------------------------------------- | -------------- |
+| core/src/zig/buffer.zig:475-612,901-998,1183-1296,1424-1859                              | 写入拒绝、混合、两处分配点；TextBufferView 与 EditorView 共享实现   | reachable      |
+| core/src/zig/text-buffer-view.zig:1143-1191,1288-1299；text-buffer-iterators.zig:351-380 | word 断点与递增列换算游标必须一起向前                               | reachable      |
+| core/src/zig/tests/text-buffer-view_test.zig                                             | word/char 行布局公开 seam 与缓存/选择回归                           | contracted     |
+| core/src/zig/grapheme.zig:124-297,369-553,697-793                                        | alloc 返回新 ref=0 或已有 live ID；tracker 第一/最后引用语义        | reachable      |
+| core/src/zig/lib.zig:2657-2775                                                           | encodeUnicode 已显式 incref 交付调用者，不是同一个无 owner 绘制路径 | reachable      |
+| core/src/Renderable.ts:1423-1460,1768-1834；renderables/TextBufferRenderable.ts:475      | overflow-hidden 到绘制的真实调用链                                  | reachable      |
+| core/src/zig/tests/buffer_test.zig:243-323,1978-2035                                     | 背景元数据、整字裁剪、原有 span 不得破坏                            | contracted     |
+| core/src/tests/renderer.custom-stdout.test.ts                                            | 现成 native output feed 收集测试，不新增终端模拟器依赖              | reachable      |
+| .temp/Testing/garbled-render.test.tsx                                                    | 原始红测、精确阈值及真实组件树                                      | observed       |
+| docs/plans/tui-freeze-native-handle-exhaustion.md §11                                    | 日志和独立复现记录；不作为批准依据                                  | observed       |
+| core/package.json、opentui/package.json、core/src/zig.ts:110-141                         | build/test 命令及实际 native package 加载路径                       | contracted     |
 
 全量搜索 production 的 grapheme alloc 调用：buffer.zig 两处，lib.zig encodeUnicode 一处；其余 pool.alloc 命中是 link pool。allocUnowned 无额外 production 调用点。不得修改不同责任的 link pool。
 
@@ -76,29 +76,29 @@ overflow-hidden 父组件 -> scissor -> drawText / drawTextBufferInternal
 
 ## 6. Supported Input Domain and Reachability
 
-| 条件 | Producer / 上游保证 | 路径与 owner | Classification |
-|---|---|---|---|
-| CJK 右半越过 scissor | 合法父裁剪可小于子文本宽度 | 两个绘制入口 -> buffer setter | observed |
-| 同字形已被其他 buffer 持有 | alloc 可返回已有 live ID，不承诺总是新分配 | pool/tracker | reachable |
-| 整字落在 scissor 内 | 正常多字节文本 | 原有 set/混合/track | contracted |
-| 实体 buffer 行尾放不下 | 起点有效、编码 span 超过物理行宽 | setInternal 原有填空语义 | reachable |
-| 透明/半透明与背景保留 | view fg/bg、opacity、既有 destination | 原有 blending 可不保留输入字形 | reachable |
-| 编辑器/选择/样式文本 | EditorView 与 TextBufferView 共用模板 | drawTextBufferInternal | reachable |
-| word 行尾空间不足、混合 CJK/emoji/ASCII | 有效内容、word 模式、完整行宽至少容纳该字形 | TextBufferView 虚拟行生产者 | observed |
-| 字形第一引用 interning 失败 | incref 的 StringHashMap 分配可失败 | 同步分配交付事务 | reachable |
-| 现场截图唯一触发组件 | 当前日志没有池快照 | 无证据，不能确定 | speculative |
+| 条件                                    | Producer / 上游保证                         | 路径与 owner                   | Classification |
+| --------------------------------------- | ------------------------------------------- | ------------------------------ | -------------- |
+| CJK 右半越过 scissor                    | 合法父裁剪可小于子文本宽度                  | 两个绘制入口 -> buffer setter  | observed       |
+| 同字形已被其他 buffer 持有              | alloc 可返回已有 live ID，不承诺总是新分配  | pool/tracker                   | reachable      |
+| 整字落在 scissor 内                     | 正常多字节文本                              | 原有 set/混合/track            | contracted     |
+| 实体 buffer 行尾放不下                  | 起点有效、编码 span 超过物理行宽            | setInternal 原有填空语义       | reachable      |
+| 透明/半透明与背景保留                   | view fg/bg、opacity、既有 destination       | 原有 blending 可不保留输入字形 | reachable      |
+| 编辑器/选择/样式文本                    | EditorView 与 TextBufferView 共用模板       | drawTextBufferInternal         | reachable      |
+| word 行尾空间不足、混合 CJK/emoji/ASCII | 有效内容、word 模式、完整行宽至少容纳该字形 | TextBufferView 虚拟行生产者    | observed       |
+| 字形第一引用 interning 失败             | incref 的 StringHashMap 分配可失败          | 同步分配交付事务               | reachable      |
+| 现场截图唯一触发组件                    | 当前日志没有池快照                          | 无证据，不能确定               | speculative    |
 
 ## 7. Required Invariants
 
-| ID | Behavioral invariant | Evidence / test |
-|---|---|---|
-| INV-01 | 被裁掉的重复文本不得耗尽共享字形容量、影响其他组件 | 原始部分缺字红测 |
-| INV-02 | scissor 整字拒绝不得修改既有字形或边界外 cell | 现有 buffer_test 两个 scissor 测试 |
-| INV-03 | 每个新绘制分配都有明确同步 owner；借用 live ID 不得误释放 | alloc/track 合同，新增共享 ID 测试 |
+| ID     | Behavioral invariant                                                   | Evidence / test                       |
+| ------ | ---------------------------------------------------------------------- | ------------------------------------- |
+| INV-01 | 被裁掉的重复文本不得耗尽共享字形容量、影响其他组件                     | 原始部分缺字红测                      |
+| INV-02 | scissor 整字拒绝不得修改既有字形或边界外 cell                          | 现有 buffer_test 两个 scissor 测试    |
+| INV-03 | 每个新绘制分配都有明确同步 owner；借用 live ID 不得误释放              | alloc/track 合同，新增共享 ID 测试    |
 | INV-04 | 原有字宽、选择、颜色、透明混合及低层明确裁剪语义不变；修复上层换行错误 | 现有 buffer/render 测试及补充边界用例 |
-| INV-05 | clear/destroy 后可继续绘制新字形，不能靠全局清池 | 跨 buffer/renderer 容量复现 |
-| INV-06 | TS/FFI/public API、数据库、消息内容、线程模式不变 | 用户要求局部兼容修复 |
-| INV-07 | 启用换行的正文在行尾移到下一行，虚拟行不切开字形，不遗漏或重复原文 | 两列 word 实测 red 与原文 oracle |
+| INV-05 | clear/destroy 后可继续绘制新字形，不能靠全局清池                       | 跨 buffer/renderer 容量复现           |
+| INV-06 | TS/FFI/public API、数据库、消息内容、线程模式不变                      | 用户要求局部兼容修复                  |
+| INV-07 | 启用换行的正文在行尾移到下一行，虚拟行不切开字形，不遗漏或重复原文     | 两列 word 实测 red 与原文 oracle      |
 
 ## 8. First Divergence and Root Cause
 
@@ -120,13 +120,13 @@ bun -e 'import assert from "node:assert/strict";import {TextBuffer,TextBufferVie
 
 ## 9. Responsibility and Seam
 
-| Concern | Owner | 原因 |
-|---|---|---|
-| 分配前确认整字能进入裁剪区域 | buffer 内字形绘制生产者 | 已持有坐标、字宽、scissor、颜色；不需要上层 UI 猜测 |
-| 分配到 buffer 引用的交接 | 同一同步绘制调用 | 生产者知道 ID 从何而来；setter 还接收外部已持有的 ID |
-| 存活字形复用/最后引用释放 | 既有 GraphemePool/GraphemeTracker | 复用 incref/decref，不改 ID 格式或全局生命周期 |
-| 视觉兼容 | 既有 set/alpha blending | 保留唯一实际写入实现，不复制绘制算法 |
-| 行尾换行与断点列换算 | text-buffer-view.zig | 该模块生产虚拟行；低层 setter 不知道逻辑行或 word 边界 |
+| Concern                      | Owner                             | 原因                                                   |
+| ---------------------------- | --------------------------------- | ------------------------------------------------------ |
+| 分配前确认整字能进入裁剪区域 | buffer 内字形绘制生产者           | 已持有坐标、字宽、scissor、颜色；不需要上层 UI 猜测    |
+| 分配到 buffer 引用的交接     | 同一同步绘制调用                  | 生产者知道 ID 从何而来；setter 还接收外部已持有的 ID   |
+| 存活字形复用/最后引用释放    | 既有 GraphemePool/GraphemeTracker | 复用 incref/decref，不改 ID 格式或全局生命周期         |
+| 视觉兼容                     | 既有 set/alpha blending           | 保留唯一实际写入实现，不复制绘制算法                   |
+| 行尾换行与断点列换算         | text-buffer-view.zig              | 该模块生产虚拟行；低层 setter 不知道逻辑行或 word 边界 |
 
 ## 10. Single Primary-Path Design
 
@@ -179,12 +179,12 @@ setter 的输入可能是其他 buffer 正持有的 interned ID。无条件 free
 
 ## 11. Secondary and Replacement Path Inventory
 
-| Path | 分类 | 处理 |
-|---|---|---|
+| Path                                         | 分类                       | 处理                               |
+| -------------------------------------------- | -------------------------- | ---------------------------------- |
 | 整字裁剪 no-op、物理行尾填空、混合保留原字形 | 既有 primary-contract 分支 | 保留，前置可确定的拒绝，不改变输出 |
-| 同步持有/释放 | 正常资源生命周期 | 新字形分配 owner 的唯一交接方式 |
-| 分配错误传给原调用者 | 既有 error/diagnostic 路径 | 保留，不新增恢复成功路径 |
-| 定时 GC、扩大池、重绘兜底、修改滑窗 | forbidden workaround | 不引入 |
+| 同步持有/释放                                | 正常资源生命周期           | 新字形分配 owner 的唯一交接方式    |
+| 分配错误传给原调用者                         | 既有 error/diagnostic 路径 | 保留，不新增恢复成功路径           |
+| 定时 GC、扩大池、重绘兜底、修改滑窗          | forbidden workaround       | 不引入                             |
 
 新增 alternate success=0；新增日志/诊断决策=0。异常分支预计少于改动生产代码的 10%，实际以 diff 核算；大部分修改为前置判定及同步正常写入。
 
@@ -196,36 +196,36 @@ setter 的输入可能是其他 buffer 正持有的 interned ID。无条件 free
 
 ## 13. Forward Traceability
 
-| Requirement/invariant | 路径/修改 | Behavioral test |
-|---|---|---|
-| INV-01/02 | 两分配点前置裁剪，复用 setter 谓词 | 超容量重复裁剪后新文本完整；既有 span 不变 |
-| INV-03/05 | 同步持有交接 | 共享字形、行尾拒绝、clear/destroy 后重新绘制 |
-| INV-03 首次引用失败 | writeGrapheme -> 原 pool.incref -> 返回原错误并清理未交付槽 | slice 6：生产入口失败注入、剩余容量及原 live 引用完整 |
-| INV-04 | 两入口复用原 setter，ASCII 快速路径不变 | CJK/emoji/selection/alpha/物理行尾结果与旧合同相同 |
-| INV-04 同字形半透明更新 | 不前置拒绝 alpha 路径 | live 中字跨 scissor 重绘，可见首 cell 样式按原 blend 更新，右侧不变且 ID/refcount 保持 |
-| INV-06 | 仅 buffer.zig 私有方法 | 相关包 typecheck、native build、FFI/真实树回归 |
-| INV-07 | text-buffer-view.zig word 断点单调扫描 | 窄行原文守恒、准确虚拟行起点、resize/append/selection |
+| Requirement/invariant   | 路径/修改                                                   | Behavioral test                                                                        |
+| ----------------------- | ----------------------------------------------------------- | -------------------------------------------------------------------------------------- |
+| INV-01/02               | 两分配点前置裁剪，复用 setter 谓词                          | 超容量重复裁剪后新文本完整；既有 span 不变                                             |
+| INV-03/05               | 同步持有交接                                                | 共享字形、行尾拒绝、clear/destroy 后重新绘制                                           |
+| INV-03 首次引用失败     | writeGrapheme -> 原 pool.incref -> 返回原错误并清理未交付槽 | slice 6：生产入口失败注入、剩余容量及原 live 引用完整                                  |
+| INV-04                  | 两入口复用原 setter，ASCII 快速路径不变                     | CJK/emoji/selection/alpha/物理行尾结果与旧合同相同                                     |
+| INV-04 同字形半透明更新 | 不前置拒绝 alpha 路径                                       | live 中字跨 scissor 重绘，可见首 cell 样式按原 blend 更新，右侧不变且 ID/refcount 保持 |
+| INV-06                  | 仅 buffer.zig 私有方法                                      | 相关包 typecheck、native build、FFI/真实树回归                                         |
+| INV-07                  | text-buffer-view.zig word 断点单调扫描                      | 窄行原文守恒、准确虚拟行起点、resize/append/selection                                  |
 
 ## 14. Reverse Traceability
 
-| Concept | 对应 invariant | 现有逻辑不足 |
-|---|---|---|
-| 共用右边界 predicate | INV-01/02 | 既有判定只发生在分配后，生产者无法避免无效分配 |
-| 私有 writeGrapheme | INV-01/03/05 | 两个分配点都向允许拒绝的 setter 交付无 owner ID |
-| 同步临时引用 | INV-03/04 | 几何有效也可能不接管；前置裁剪不能覆盖物理行尾及依赖目标 cell 的 alpha 路径 |
-| 首次引用失败释放 | INV-03 | interning 可真实 OOM；未交付槽不能遗留，必须返回原错误 |
-| 去除 word 索引局部回退 | INV-07 | 旧索引回退但换算游标前进，导致从错误字形列继续 |
+| Concept                | 对应 invariant | 现有逻辑不足                                                                |
+| ---------------------- | -------------- | --------------------------------------------------------------------------- |
+| 共用右边界 predicate   | INV-01/02      | 既有判定只发生在分配后，生产者无法避免无效分配                              |
+| 私有 writeGrapheme     | INV-01/03/05   | 两个分配点都向允许拒绝的 setter 交付无 owner ID                             |
+| 同步临时引用           | INV-03/04      | 几何有效也可能不接管；前置裁剪不能覆盖物理行尾及依赖目标 cell 的 alpha 路径 |
+| 首次引用失败释放       | INV-03         | interning 可真实 OOM；未交付槽不能遗留，必须返回原错误                      |
+| 去除 word 索引局部回退 | INV-07         | 旧索引回退但换算游标前进，导致从错误字形列继续                              |
 
 ## 15. File-Level Change Plan
 
-| File | Action | 精确内容 | 估算 |
-|---|---|---|---|
-| core/src/zig/buffer.zig | modify | 共用裁剪 predicate、writeGrapheme、替换两处分配与写入，保留 counters/ASCII | 80–150 行生产 diff |
-| core/src/zig/text-buffer-view.zig | modify | 删除 saved_wrap_idx 局部回退，说明游标单调 invariant | 3–12 行生产 diff |
-| core/src/zig/tests/buffer_test.zig | modify | 两入口容量、shared ID、边界/透明/行尾、EditorView、首次 interning 失败回收 | 180–300 行 |
-| core/src/zig/tests/text-buffer-view_test.zig | modify | INV-07 精确起点/原文守恒，resize/append/selection/宽度矩阵 | 80–160 行 |
-| core/src/tests/renderer.custom-stdout.test.ts | modify | 真实 clipped Box/Text 重绘后其他普通文本与输出字节完整 | 50–90 行 |
-| 本文件 | add/update | 唯一 canonical plan | 文档不计生产预算 |
+| File                                          | Action     | 精确内容                                                                   | 估算               |
+| --------------------------------------------- | ---------- | -------------------------------------------------------------------------- | ------------------ |
+| core/src/zig/buffer.zig                       | modify     | 共用裁剪 predicate、writeGrapheme、替换两处分配与写入，保留 counters/ASCII | 80–150 行生产 diff |
+| core/src/zig/text-buffer-view.zig             | modify     | 删除 saved_wrap_idx 局部回退，说明游标单调 invariant                       | 3–12 行生产 diff   |
+| core/src/zig/tests/buffer_test.zig            | modify     | 两入口容量、shared ID、边界/透明/行尾、EditorView、首次 interning 失败回收 | 180–300 行         |
+| core/src/zig/tests/text-buffer-view_test.zig  | modify     | INV-07 精确起点/原文守恒，resize/append/selection/宽度矩阵                 | 80–160 行          |
+| core/src/tests/renderer.custom-stdout.test.ts | modify     | 真实 clipped Box/Text 重绘后其他普通文本与输出字节完整                     | 50–90 行           |
+| 本文件                                        | add/update | 唯一 canonical plan                                                        | 文档不计生产预算   |
 
 不修改 grapheme.zig/lib.zig/TS 生产组件；不新增测试依赖。@xterm/headless 仅用于已有本地调查，core/package.json 未声明它，不能直接作为正式测试依赖。正式集成断言源文字、完整 native 输出及内存字符；实验的 headless 校验作为补充证据。最终提交包含 OpenTUI 子仓库相关文件的 commit、父仓库本 plan 与 submodule pointer commit；不得 push。调查文档 §11 的本任务证据可单独纳入，先确认同文件无他人混合修改。
 
@@ -233,15 +233,15 @@ setter 的输入可能是其他 buffer 正持有的 interned ID。无条件 free
 
 按批准后的公开 seam 执行，当前不写测试。
 
-| Order | Red/兼容行为 | 为什么会失败 | Green 与保护 |
-|---|---|---|---|
-| 1 | drawTextBuffer 裁剪 65536 次后绘制含新中文字的原文 | 裁剪不引用、不释放分配 | 前置判断 + scoped ownership，原文逐字相等 |
-| 2 | drawText 同条件、新字在中间仍保留后缀 | 相同 owner 缺陷，但失败会提前结束 draw | 同一方法覆盖，不另写恢复逻辑 |
-| 3 | scissor 精确容纳/拒绝；物理行尾、透明 overlay、shared ID、清理重绘 | 后者为兼容用例，部分现有 green，不伪称全部 red | 测借用 ID 不误释放、已有像素/metadata 不变 |
-| 4 | EditorView 共用入口；真实 Box/Text 影响另一文本及输出 | 当前真实树已 red | 相同原文、无 missing CJK、后续新文本正常 |
-| 5 | 两列 word 下 `丁丁b😀甲.丁乙` 完整换行且起点不切分 emoji | wrap_idx 回退导致末字替换 | 删除局部回退；宽度、连续 append、resize、选中文本完整 |
-| 6 | 生产绘制入口的首次 interning 分配失败 | 未持有时旧 tracker 的首次引用可能 panic；漏掉新清理时容量减少 | drawText 保持 OutOfMemory；view 保持既有失败输出；槽位可重用，原 live 字形不变 |
-| 7 | 同一 live 字形跨 scissor 的半透明样式重绘 | 现状 green；R3 过宽前置判断会使颜色不更新 | 足够宽时先画中，再 scissor 仅首列，改 fg/半透明 bg 重画中；可见 cell 的颜色/属性必须匹配原 blend，外侧 cell 不变，字形及引用数不变；两入口均覆盖 |
+| Order | Red/兼容行为                                                       | 为什么会失败                                                  | Green 与保护                                                                                                                                     |
+| ----- | ------------------------------------------------------------------ | ------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 1     | drawTextBuffer 裁剪 65536 次后绘制含新中文字的原文                 | 裁剪不引用、不释放分配                                        | 前置判断 + scoped ownership，原文逐字相等                                                                                                        |
+| 2     | drawText 同条件、新字在中间仍保留后缀                              | 相同 owner 缺陷，但失败会提前结束 draw                        | 同一方法覆盖，不另写恢复逻辑                                                                                                                     |
+| 3     | scissor 精确容纳/拒绝；物理行尾、透明 overlay、shared ID、清理重绘 | 后者为兼容用例，部分现有 green，不伪称全部 red                | 测借用 ID 不误释放、已有像素/metadata 不变                                                                                                       |
+| 4     | EditorView 共用入口；真实 Box/Text 影响另一文本及输出              | 当前真实树已 red                                              | 相同原文、无 missing CJK、后续新文本正常                                                                                                         |
+| 5     | 两列 word 下 `丁丁b😀甲.丁乙` 完整换行且起点不切分 emoji           | wrap_idx 回退导致末字替换                                     | 删除局部回退；宽度、连续 append、resize、选中文本完整                                                                                            |
+| 6     | 生产绘制入口的首次 interning 分配失败                              | 未持有时旧 tracker 的首次引用可能 panic；漏掉新清理时容量减少 | drawText 保持 OutOfMemory；view 保持既有失败输出；槽位可重用，原 live 字形不变                                                                   |
+| 7     | 同一 live 字形跨 scissor 的半透明样式重绘                          | 现状 green；R3 过宽前置判断会使颜色不更新                     | 足够宽时先画中，再 scissor 仅首列，改 fg/半透明 bg 重画中；可见 cell 的颜色/属性必须匹配原 blend，外侧 cell 不变，字形及引用数不变；两入口均覆盖 |
 
 slice 6 使用 buffer_test.zig 的本地 pool 注入点，无 production API 改动。参考既有 memory_leak_regression_test.zig:59-74，预先建立本地 buffer、池容量和另一 buffer 的 live 字形，然后仅替换 pool.allocator 为 std.testing.FailingAllocator，令下一次 internLiveId 的 key 分配失败。分配前后恢复 allocator 的 defer 顺序先于池销毁。分别走 drawText 和 drawTextBuffer，不直接调用新私有 helper；确认确实 has_induced_failure、direct 返回原 OutOfMemory，view 保持失败字形空位及 ASCII 后缀，已有 live 引用的 bytes/refcount 不变。解除故障后占满剩余 class0 槽并断言预期可用数量（扣除明确 live 数量），检出遗漏 freeUnreferenced，随后清理所有实验槽。第一次 key 分配与 map 扩容的失败都需覆盖：空 interning map、预先分配 class 页的本地池可令 fail_index=0/1 分别失败于 key/map；已有 live 引用场景另行验证。原错误、资源归还和引用存活三者不能用仅“不崩溃”代替。
 
@@ -253,18 +253,18 @@ slice 6 使用 buffer_test.zig 的本地 pool 注入点，无 production API 改
 
 ## 18. Verification
 
-| Command | Cwd | Evidence |
-|---|---|---|
-| `bun run test:native -Dtest-filter="grapheme"` | thirdparty/opentui/packages/core | 字形、裁剪相关 native 回归 |
-| `bun run test:native -Dtest-filter="drawTextBuffer"` | 同上 | view、metadata、Editor 共用路径 |
-| `bun run test:native -Dtest-filter="alpha"` | 同上 | 混合行为回归 |
-| `bun run test:native -Dtest-filter="renderer"` | 同上 | 输出与 buffer 同步回归 |
-| `bun run test:native -Dtest-filter="wrap"` | 同上 | word/char、编辑器换行、宽字/测量回归 |
-| `bun run build` | thirdparty/opentui | native 及本地依赖包构建；不得替换生产安装 |
-| `bun test src/tests/renderer.custom-stdout.test.ts src/tests/opacity.test.ts src/tests/renderer.selection.test.ts` | thirdparty/opentui/packages/core | 真实组件/输出/选择 |
-| `bun typecheck` | opencode | 全应用类型兼容；不直接调用 tsc |
-| `bun typecheck --project tsconfig.build.json`、`bun typecheck --project ../solid/tsconfig.build.json`、`bun typecheck --project ../react/tsconfig.build.json` | core | 复用已有脚本验证真实发布类型项目；同时执行现有 build 的声明生成，不新增或弱化 tsconfig |
-| `bun run bench:text-table` | thirdparty/opentui/packages/core | 修前后同参数重复基线，检查正常绘制成本 |
+| Command                                                                                                                                                       | Cwd                              | Evidence                                                                               |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------- | -------------------------------------------------------------------------------------- |
+| `bun run test:native -Dtest-filter="grapheme"`                                                                                                                | thirdparty/opentui/packages/core | 字形、裁剪相关 native 回归                                                             |
+| `bun run test:native -Dtest-filter="drawTextBuffer"`                                                                                                          | 同上                             | view、metadata、Editor 共用路径                                                        |
+| `bun run test:native -Dtest-filter="alpha"`                                                                                                                   | 同上                             | 混合行为回归                                                                           |
+| `bun run test:native -Dtest-filter="renderer"`                                                                                                                | 同上                             | 输出与 buffer 同步回归                                                                 |
+| `bun run test:native -Dtest-filter="wrap"`                                                                                                                    | 同上                             | word/char、编辑器换行、宽字/测量回归                                                   |
+| `bun run build`                                                                                                                                               | thirdparty/opentui               | native 及本地依赖包构建；不得替换生产安装                                              |
+| `bun test src/tests/renderer.custom-stdout.test.ts src/tests/opacity.test.ts src/tests/renderer.selection.test.ts`                                            | thirdparty/opentui/packages/core | 真实组件/输出/选择                                                                     |
+| `bun typecheck`                                                                                                                                               | opencode                         | 全应用类型兼容；不直接调用 tsc                                                         |
+| `bun typecheck --project tsconfig.build.json`、`bun typecheck --project ../solid/tsconfig.build.json`、`bun typecheck --project ../react/tsconfig.build.json` | core                             | 复用已有脚本验证真实发布类型项目；同时执行现有 build 的声明生成，不新增或弱化 tsconfig |
+| `bun run bench:text-table`                                                                                                                                    | thirdparty/opentui/packages/core | 修前后同参数重复基线，检查正常绘制成本                                                 |
 
 正式 native/JS 测试必须确认加载本次构建产物：当前 zig.ts 由平台 native package 解析 DLL；禁止用旧 node_modules DLL 的 green 冒充修复验证。版本和路径从 package.json/正常 build 解析，不硬编码版本或另建 manifest。
 
@@ -272,14 +272,14 @@ slice 6 使用 buffer_test.zig 的本地 pool 注入点，无 production API 改
 
 用户测试范围原文：『不要尝试跑全量的 test，你可以只跑你受影响的那部分 test。因为全量 test 整体要将近一个小时，很慢的。』上表是窄反馈入口，不能代替最终受影响集合。最终集合与执行顺序如下；每组必须有非零执行数和成功结果，不能靠过滤名恰好没命中放行：
 
-| 集合 / 行为映射 | 最终命令与目录 |
-|---|---|
-| native 所有 buffer 模块（两个入口、alpha、selection、TextBuffer/View、编辑历史、metadata）、字形池/泄漏、renderer/输出、native consumer、wrap/utf8 | core 下逐个 `bun run test:native -Dtest-filter="<filter>"`，filter 为 `buffer`、`grapheme`、`memory_leak_regression`、`renderer`、`native-span-feed`、`native-renderable`、`wrap`、`editor-view`、`utf8`、`split-scrollback`；使用完整模块路径匹配确认实际清单，重复命中只重复验证、不豁免其他组 |
-| JS 直接 FFI buffer/view/editor 与 glyph 序列、抓帧 | core 下 `bun test src/buffer.test.ts src/text-buffer.test.ts src/text-buffer-view.test.ts src/edit-buffer.test.ts src/editor-view.test.ts src/testing/capture-spans.test.ts` |
-| 各实际文本消费者，包括 Markdown/Code/Diff、选择器、输入、TextArea、LineNumber、表格及 Box 裁剪 | core 下 `bun test src/renderables`，该目录是完整受影响组件集合，不是全 core 测试 |
-| renderer 输出/生命周期/selection、滚动裁剪、动态测量/resize、透明叠层 | core 下 `bun test src/tests/renderer. src/tests/renderable src/tests/scrollbox src/tests/native-backed-measurement src/tests/native-span-feed src/tests/wrap-resize-perf.test.ts src/tests/opacity.test.ts src/tests/absolute-positioning.snapshot.test.ts src/tests/destroy-`；这些参数是 Bun 文件路径子串筛选 |
-| Solid 动态挂载/移除、字形树与排版、选择/编辑及 React 对应消费者 | solid 下 `bun test tests/box.test.tsx tests/control-flow tests/dynamic- tests/layout.test.tsx tests/link.test.tsx tests/line-number tests/scroll tests/sticky-scroll.test.tsx tests/textarea.test.tsx tests/diff.test.tsx tests/reconciler-destroy-backlog.test.tsx`；react 下 `bun test tests/layout.test.tsx tests/link.test.tsx tests/slot.test.tsx tests/destroy-crash.test.tsx` |
-| 应用真实 TUI 对接 | opencode 下 `bun test test/cli/cmd/tui`，必须记录 core/solid/DLL 解析路径均绑定此次构建；不能把原发布版本上的绿测作为此次集成证据 |
+| 集合 / 行为映射                                                                                                                                    | 最终命令与目录                                                                                                                                                                                                                                                                                                                                                                       |
+| -------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| native 所有 buffer 模块（两个入口、alpha、selection、TextBuffer/View、编辑历史、metadata）、字形池/泄漏、renderer/输出、native consumer、wrap/utf8 | core 下逐个 `bun run test:native -Dtest-filter="<filter>"`，filter 为 `buffer`、`grapheme`、`memory_leak_regression`、`renderer`、`native-span-feed`、`native-renderable`、`wrap`、`editor-view`、`utf8`、`split-scrollback`；使用完整模块路径匹配确认实际清单，重复命中只重复验证、不豁免其他组                                                                                     |
+| JS 直接 FFI buffer/view/editor 与 glyph 序列、抓帧                                                                                                 | core 下 `bun test src/buffer.test.ts src/text-buffer.test.ts src/text-buffer-view.test.ts src/edit-buffer.test.ts src/editor-view.test.ts src/testing/capture-spans.test.ts`                                                                                                                                                                                                         |
+| 各实际文本消费者，包括 Markdown/Code/Diff、选择器、输入、TextArea、LineNumber、表格及 Box 裁剪                                                     | core 下 `bun test src/renderables`，该目录是完整受影响组件集合，不是全 core 测试                                                                                                                                                                                                                                                                                                     |
+| renderer 输出/生命周期/selection、滚动裁剪、动态测量/resize、透明叠层                                                                              | core 下 `bun test src/tests/renderer. src/tests/renderable src/tests/scrollbox src/tests/native-backed-measurement src/tests/native-span-feed src/tests/wrap-resize-perf.test.ts src/tests/opacity.test.ts src/tests/absolute-positioning.snapshot.test.ts src/tests/destroy-`；这些参数是 Bun 文件路径子串筛选                                                                      |
+| Solid 动态挂载/移除、字形树与排版、选择/编辑及 React 对应消费者                                                                                    | solid 下 `bun test tests/box.test.tsx tests/control-flow tests/dynamic- tests/layout.test.tsx tests/link.test.tsx tests/line-number tests/scroll tests/sticky-scroll.test.tsx tests/textarea.test.tsx tests/diff.test.tsx tests/reconciler-destroy-backlog.test.tsx`；react 下 `bun test tests/layout.test.tsx tests/link.test.tsx tests/slot.test.tsx tests/destroy-crash.test.tsx` |
+| 应用真实 TUI 对接                                                                                                                                  | opencode 下 `bun test test/cli/cmd/tui`，必须记录 core/solid/DLL 解析路径均绑定此次构建；不能把原发布版本上的绿测作为此次集成证据                                                                                                                                                                                                                                                    |
 
 以上没有修改 tokenizer、音频、网络/模型、数据库、消息分页协议、独立 Yoga layout 算法、插件发现；不扩大到相应无关全量 test。若实际调用证据显示另一个直接消费者遗漏，纳入同一受影响集合，记录原因。任何已知或本次发现的红测均须处理，无法覆盖的必要路径阻止 verified/commit。禁止 skip、删除断言、更新错误快照来制造 green；对旧测试语义的修改先核对真实生产合同并进入文件计划。
 
@@ -357,43 +357,43 @@ B-03 证据复核：buffer.zig:924-948 可对同一 live encoded char 的半透�
 
 ### 实际变更文件（git diff，相对 OpenTUI 子仓库 HEAD）
 
-| File | 变更 | 内容 |
-|---|---|---|
-| packages/core/src/zig/buffer.zig | modify | 新增私有 `clipsGraphemeRight` 与 `writeGrapheme`（同步引用交接 + 首引用失败回收 + 仅普通 setter 路径的前置裁剪），setInternal 复用 predicate，两处裸 alloc 入口改经 writeGrapheme |
-| packages/core/src/zig/text-buffer-view.zig | modify | 删除 saved_wrap_idx 声明/备份/恢复，断点索引与列换算游标单调同向 |
-| packages/core/src/zig/tests/buffer_test.zig | modify | 新增容量回归（view/direct）、首引用失败回收（两入口×三场景）、同 live 字形半透明样式回归（两入口） |
-| packages/core/src/zig/tests/text-buffer-view_test.zig | modify | 新增 word 断点不切字形回归（精确虚拟行起点/宽度 oracle） |
-| packages/core/src/tests/renderer.custom-stdout.test.ts | modify | 新增隔离进程真实树 65534 帧回归：内存帧与 native 输出字节双重 oracle |
+| File                                                   | 变更   | 内容                                                                                                                                                                              |
+| ------------------------------------------------------ | ------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| packages/core/src/zig/buffer.zig                       | modify | 新增私有 `clipsGraphemeRight` 与 `writeGrapheme`（同步引用交接 + 首引用失败回收 + 仅普通 setter 路径的前置裁剪），setInternal 复用 predicate，两处裸 alloc 入口改经 writeGrapheme |
+| packages/core/src/zig/text-buffer-view.zig             | modify | 删除 saved_wrap_idx 声明/备份/恢复，断点索引与列换算游标单调同向                                                                                                                  |
+| packages/core/src/zig/tests/buffer_test.zig            | modify | 新增容量回归（view/direct）、首引用失败回收（两入口×三场景）、同 live 字形半透明样式回归（两入口）                                                                                |
+| packages/core/src/zig/tests/text-buffer-view_test.zig  | modify | 新增 word 断点不切字形回归（精确虚拟行起点/宽度 oracle）                                                                                                                          |
+| packages/core/src/tests/renderer.custom-stdout.test.ts | modify | 新增隔离进程真实树 65534 帧回归：内存帧与 native 输出字节双重 oracle                                                                                                              |
 
 生产文件 2 个（预算≤4），生产修改约 48 行净增（预算≤600）。未新增 public API、FFI、依赖、配置或迁移。
 
 ### Red-Green 证据
 
-| Slice | Red（修复前实测） | Green（修复后实测） |
-|---|---|---|
-| 1 view 容量 | `中试文ABC` → `中  文ABC`（65534 次真实树重绘） | 87/87 buffer 套件通过，原文逐字相等 |
-| 2 direct 容量 | 第 65537 次 drawText 抛 OutOfMemory（grapheme.zig:373 grow） | 同套件通过 |
-| 5 word 断点 | `丁丁b😀甲.丁乙` → `丁丁b😀甲.丁丁`，起点含 emoji 第二列 6 | 147/147 view 套件通过，起点/宽度与字面 oracle 一致 |
-| 6 首引用失败 | 旧路径在 tracker 首引用处可能 panic 且未交付槽泄漏 | 两入口返回原错误语义、槽位可复用、live 引用完整 |
+| Slice          | Red（修复前实测）                                                            | Green（修复后实测）                                          |
+| -------------- | ---------------------------------------------------------------------------- | ------------------------------------------------------------ |
+| 1 view 容量    | `中试文ABC` → `中  文ABC`（65534 次真实树重绘）                              | 87/87 buffer 套件通过，原文逐字相等                          |
+| 2 direct 容量  | 第 65537 次 drawText 抛 OutOfMemory（grapheme.zig:373 grow）                 | 同套件通过                                                   |
+| 5 word 断点    | `丁丁b😀甲.丁乙` → `丁丁b😀甲.丁丁`，起点含 emoji 第二列 6                   | 147/147 view 套件通过，起点/宽度与字面 oracle 一致           |
+| 6 首引用失败   | 旧路径在 tracker 首引用处可能 panic 且未交付槽泄漏                           | 两入口返回原错误语义、槽位可复用、live 引用完整              |
 | 7 同 ID 半透明 | R3 设计缺陷（前置拒绝跳过样式更新）在 R4/R5 修正；现状与新实现均保持样式更新 | 两入口可见 cell 样式更新、scissor 外 continuation 逐字节不变 |
 
 ### 验证命令与结果（全部 cwd 均为包目录，native 使用同盘 cache）
 
-| 命令 | 结果 |
-|---|---|
-| `bun run test:native -Dtest-filter=<buffer/grapheme/memory_leak_regression/renderer/native-span-feed/native-renderable/wrap/editor-view/utf8/split-scrollback>` | 全 10 组通过（1676 passed / 5 skipped / 0 failed） |
-| `bun test src/buffer.test.ts src/text-buffer.test.ts src/text-buffer-view.test.ts src/edit-buffer.test.ts src/editor-view.test.ts src/testing/capture-spans.test.ts` | 339 pass / 0 fail |
-| `bun test src/renderables` | 1330 pass / 0 fail |
-| `bun test src/tests/renderer. src/tests/renderable src/tests/scrollbox src/tests/native-backed-measurement src/tests/native-span-feed src/tests/wrap-resize-perf.test.ts src/tests/opacity.test.ts src/tests/absolute-positioning.snapshot.test.ts src/tests/destroy-` | 741 pass / 0 fail |
-| solid：`bun test tests/box.test.tsx tests/control-flow tests/dynamic- tests/layout.test.tsx tests/link.test.tsx tests/line-number tests/scroll tests/sticky-scroll.test.tsx tests/textarea.test.tsx tests/diff.test.tsx tests/reconciler-destroy-backlog.test.tsx` | 176 pass / 0 fail |
-| react：`bun test tests/layout.test.tsx tests/link.test.tsx tests/slot.test.tsx tests/destroy-crash.test.tsx` | 49 pass / 0 fail（输出中的 error 文本为 error-boundary 测试夹具的预期日志） |
-| opencode：`bun test test/cli/cmd/tui`（先将重建的 core dist/DLL/solid dist 绑定进根 node_modules，DLL SHA256 前缀 DA8692A626177C84 与构建一致） | 324 pass / 0 fail；测后已无损恢复原发布包（82F26AA9E6EE3701），node_modules 不进入提交 |
-| 原始反馈环：`.temp/Testing` `bun test garbled-render.test.tsx --test-name-pattern "real clipped"`（绑定重建 DLL） | 65534 帧后 `中试文ABC` 完整，802ms |
-| 原始反馈环：`--test-name-pattern "plain text CJK survival"` | 12 组宽度×文本块 missing=0 |
-| `bun run build`（opentui 根，ZIG_GLOBAL_CACHE_DIR 同盘） | core/qrcode/three/solid/react/keymap/ssh 全部构建与声明生成成功 |
-| `bun typecheck`（packages/opencode）；`bun typecheck --project tsconfig.build.json`（core）及 `../solid`、`../react` 的 tsconfig.build.json | 全部 exit 0 |
-| `bun run test:dist --skip-build`（core/solid/keymap，使用 D:\Temp\opencode 便携 Node v26.3.0，未改系统 Node） | 三包 packed dist smoke 全部通过 |
-| `bun run bench:text-table` 修前/修后 | 修复前后同量级（如 replace_tables avg 13.45→14.86ms，同机方差范围内），无异常回归 |
+| 命令                                                                                                                                                                                                                                                                   | 结果                                                                                   |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------- |
+| `bun run test:native -Dtest-filter=<buffer/grapheme/memory_leak_regression/renderer/native-span-feed/native-renderable/wrap/editor-view/utf8/split-scrollback>`                                                                                                        | 全 10 组通过（1676 passed / 5 skipped / 0 failed）                                     |
+| `bun test src/buffer.test.ts src/text-buffer.test.ts src/text-buffer-view.test.ts src/edit-buffer.test.ts src/editor-view.test.ts src/testing/capture-spans.test.ts`                                                                                                   | 339 pass / 0 fail                                                                      |
+| `bun test src/renderables`                                                                                                                                                                                                                                             | 1330 pass / 0 fail                                                                     |
+| `bun test src/tests/renderer. src/tests/renderable src/tests/scrollbox src/tests/native-backed-measurement src/tests/native-span-feed src/tests/wrap-resize-perf.test.ts src/tests/opacity.test.ts src/tests/absolute-positioning.snapshot.test.ts src/tests/destroy-` | 741 pass / 0 fail                                                                      |
+| solid：`bun test tests/box.test.tsx tests/control-flow tests/dynamic- tests/layout.test.tsx tests/link.test.tsx tests/line-number tests/scroll tests/sticky-scroll.test.tsx tests/textarea.test.tsx tests/diff.test.tsx tests/reconciler-destroy-backlog.test.tsx`     | 176 pass / 0 fail                                                                      |
+| react：`bun test tests/layout.test.tsx tests/link.test.tsx tests/slot.test.tsx tests/destroy-crash.test.tsx`                                                                                                                                                           | 49 pass / 0 fail（输出中的 error 文本为 error-boundary 测试夹具的预期日志）            |
+| opencode：`bun test test/cli/cmd/tui`（先将重建的 core dist/DLL/solid dist 绑定进根 node_modules，DLL SHA256 前缀 DA8692A626177C84 与构建一致）                                                                                                                        | 324 pass / 0 fail；测后已无损恢复原发布包（82F26AA9E6EE3701），node_modules 不进入提交 |
+| 原始反馈环：`.temp/Testing` `bun test garbled-render.test.tsx --test-name-pattern "real clipped"`（绑定重建 DLL）                                                                                                                                                      | 65534 帧后 `中试文ABC` 完整，802ms                                                     |
+| 原始反馈环：`--test-name-pattern "plain text CJK survival"`                                                                                                                                                                                                            | 12 组宽度×文本块 missing=0                                                             |
+| `bun run build`（opentui 根，ZIG_GLOBAL_CACHE_DIR 同盘）                                                                                                                                                                                                               | core/qrcode/three/solid/react/keymap/ssh 全部构建与声明生成成功                        |
+| `bun typecheck`（packages/opencode）；`bun typecheck --project tsconfig.build.json`（core）及 `../solid`、`../react` 的 tsconfig.build.json                                                                                                                            | 全部 exit 0                                                                            |
+| `bun run test:dist --skip-build`（core/solid/keymap，使用 D:\Temp\opencode 便携 Node v26.3.0，未改系统 Node）                                                                                                                                                          | 三包 packed dist smoke 全部通过                                                        |
+| `bun run bench:text-table` 修前/修后                                                                                                                                                                                                                                   | 修复前后同量级（如 replace_tables avg 13.45→14.86ms，同机方差范围内），无异常回归      |
 
 ### E/C 门禁（实际）
 
@@ -401,12 +401,12 @@ E=231（有效新增/修改代码行，排除空行与注释行；git diff --uni
 
 ### Secondary / replacement path 实际清单
 
-| Path | 分类 |
-|---|---|
+| Path                                                    | 分类                                         |
+| ------------------------------------------------------- | -------------------------------------------- |
 | 整字裁剪 no-op、物理行尾填空、alpha 保留/同 ID 样式更新 | 既有 primary-contract 分支（保留，不改语义） |
-| 同步持有/释放、首引用失败回收 | 正常资源生命周期（本修复的唯一新机制） |
-| drawText OOM 返回 / view OOM warning+推进 | 既有错误语义（原样保留） |
-| 新增 alternate success | 0 |
+| 同步持有/释放、首引用失败回收                           | 正常资源生命周期（本修复的唯一新机制）       |
+| drawText OOM 返回 / view OOM warning+推进               | 既有错误语义（原样保留）                     |
+| 新增 alternate success                                  | 0                                            |
 
 ### 未验证项 / 剩余风险
 

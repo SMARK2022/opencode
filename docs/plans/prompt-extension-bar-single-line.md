@@ -83,48 +83,48 @@ behavioral constraints.
 
 ## 3. Repository Context
 
-| Source | Why it constrains this task |
-| --- | --- |
-| `CONTEXT.md` | Defines Session, Status, Message, Provider, Project, and the `cli/cmd/tui` responsibility vocabulary. |
-| Root `AGENTS.md` | Requires package-local tests/typecheck, minimal focused changes, parallel investigation, and preservation of unrelated worktree changes. |
-| `packages/opencode/AGENTS.md` | Requires package-local verification and existing TypeScript/module conventions. |
-| `packages/opencode/test/AGENTS.md` | Requires behavior tests through real seams rather than duplicated implementation logic. |
-| `.opencode/policy/first-principles-engineering.md` | Requires a proven first divergence, one primary path, no fallback, complete traceability, and the Chinese explanatory-comment gate. |
-| `.opencode/templates/canonical-plan.md` | Defines required plan sections and approval transitions. |
-| `docs/adr/README.md` | No accepted ADR governs this local Prompt layout; this is a focused component contract, not a new repository-wide architectural decision. |
+| Source                                             | Why it constrains this task                                                                                                               |
+| -------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| `CONTEXT.md`                                       | Defines Session, Status, Message, Provider, Project, and the `cli/cmd/tui` responsibility vocabulary.                                     |
+| Root `AGENTS.md`                                   | Requires package-local tests/typecheck, minimal focused changes, parallel investigation, and preservation of unrelated worktree changes.  |
+| `packages/opencode/AGENTS.md`                      | Requires package-local verification and existing TypeScript/module conventions.                                                           |
+| `packages/opencode/test/AGENTS.md`                 | Requires behavior tests through real seams rather than duplicated implementation logic.                                                   |
+| `.opencode/policy/first-principles-engineering.md` | Requires a proven first divergence, one primary path, no fallback, complete traceability, and the Chinese explanatory-comment gate.       |
+| `.opencode/templates/canonical-plan.md`            | Defines required plan sections and approval transitions.                                                                                  |
+| `docs/adr/README.md`                               | No accepted ADR governs this local Prompt layout; this is a focused component contract, not a new repository-wide architectural decision. |
 
 ## 4. Files and Evidence Read
 
-| Evidence | Relevance | Evidence class |
-| --- | --- | --- |
-| User screenshot: long retry error | Shows the extension bar wrapping and splitting retry metadata despite the error being clickable. | observed |
-| User screenshot: transcription plus long file | Shows the home Prompt extension bar wrapping while `Transcribing voice...`, the file indicator, and `agents`/`commands` coexist. | observed |
-| Temporary real-`Prompt` OpenTUI harness, run with `bun test D:\Temp\opencode\prompt-footer-repro.test.tsx --timeout 30000` and then deleted | Mounted the production Prompt in a 160-column renderer inside a 75-column box, drove voice recording to `transcribing`, injected a real `session.status` event, and asserted one visual row. Expected `[1, 1]`; current result was `[2, 2]`. | observed |
-| Current R5 temporary real-`Prompt` OpenTUI harness, run with `bun test D:\Temp\opencode\prompt-footer-repro.test.tsx --timeout 30000` | Re-ran the current source with a controlled recorder, active bridge file, and real global Status events. At 160 terminal columns with a 75-column Prompt, the current final frame measured `idle=1`, `busy=3`, `recording=3`, `transcribing=2`, `retry=2`; expected one-row state matrix is `[1, 1, 1, 1, 1]`. | observed |
-| In-memory OpenTUI retry layout probe | Current unshrinkable retry string grew to four rows at 110 columns; a prioritized `wrapMode="none"`/flex layout remained one row at 60, 75, and 110 columns. | observed |
-| `packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx` | Owns actual Prompt width measurement, editor-file display, voice/retry/status branching, details click behavior, and the bottom extension-bar layout. | observed |
-| `packages/opencode/src/cli/cmd/tui/routes/home.tsx` | Proves the home Prompt is capped at `maxWidth={75}` even when the terminal is much wider. | observed |
-| `packages/opencode/src/cli/cmd/tui/routes/session/index.tsx` | Proves Session mounts the same Prompt and can reduce its allocation with an in-layout sidebar; also owns retry-action dialogs, not footer rendering. | observed |
-| `packages/opencode/src/cli/cmd/tui/routes/session/layout.ts` | Establishes the 42-column Session sidebar and fixed horizontal chrome that can reduce Prompt allocation relative to terminal width. | observed |
-| `packages/opencode/src/cli/cmd/tui/context/editor.ts` | Proves IDE/bridge active paths are unconstrained strings and produce the editor selection consumed by Prompt. | reachable |
-| `packages/opencode/src/cli/cmd/tui/prompt-voice-input.ts` | Defines shared voice statuses and current human-readable status text; the new requirement permits a main-Prompt-only compact presentation mode while retaining default consumer wording. | observed |
-| `packages/opencode/src/cli/cmd/tui/prompt-voice-recorder.ts` | Confirms transcription lifecycle and recorder behavior are separate from extension-bar layout. | observed |
-| `packages/opencode/src/cli/cmd/tui/ui/dialog-prompt.tsx` | Proves the shared voice status text is also rendered in a medium dialog with a different footer. | observed |
-| `packages/opencode/src/cli/cmd/tui/routes/session/question.tsx` | Proves the shared voice status text is also rendered in the question editor footer. | observed |
-| `packages/opencode/src/session/status.ts` | Defines retry status as an unconstrained message plus attempt and next timestamp. | contracted/reachable |
-| `packages/opencode/src/session/retry.ts` | Shows retry messages originate from provider/transport errors and can include long provider text or URLs. | reachable |
-| `packages/opencode/src/session/message-v2.ts` | Shows Provider errors preserve string messages without a display-width bound before Session retry status. | reachable |
-| `packages/opencode/src/cli/cmd/tui/ui/dialog-alert.tsx` and `ui/dialog.tsx` | Establish the existing click target's detail surface and responsive dialog width. | observed |
-| `packages/opencode/src/cli/cmd/tui/plugin/api.tsx` | Proves `Prompt.hint` is public plugin input, while `Prompt.right` is a separate card-internal row. | contracted |
-| Search of repository Prompt API consumers | Found no in-repository `Prompt.hint` consumer requiring a multi-line extension-bar contract. | observed |
-| `packages/opencode/test/cli/cmd/tui/prompt-submit-transport.test.tsx` | Provides an existing real Prompt Provider stack and final-frame seam that can be extended without testing private helpers. | observed |
-| `packages/opencode/test/cli/tui/prompt-voice-input.test.ts` | Locks shared voice wording/lifecycle and the width-gated idle voice hint. | observed |
-| `packages/opencode/test/cli/cmd/tui/session-integration.test.ts` | Contains source-level Prompt smoke assertions but is not sufficient for the visual wrapping regression. | observed |
-| `packages/opencode/test/cli/cmd/tui/session-layout.test.ts` | Demonstrates accepted use of OpenTUI's real renderer to verify terminal-cell layout rather than reimplement Yoga arithmetic. | observed |
-| `packages/opencode/src/util/locale.ts` and `test/util/locale.test.ts` | Establish current code-unit-based middle truncation and its Unicode-surrogate guarantees. | observed |
-| `node_modules/@opentui/core/renderables/TextBufferRenderable.d.ts` | Confirms native `wrapMode="none"` and `truncate` support. | contracted |
-| `node_modules/@opentui/core/Renderable.d.ts` | Confirms `height`, `minWidth`, `maxWidth`, `flexShrink`, and `overflow` layout controls. | contracted |
-| `packages/ui/src/components/session-retry.tsx` | Shows the web UI independently truncates retry messages and exposes full text through a tooltip; it is useful comparison evidence but out of TUI scope. | observed |
+| Evidence                                                                                                                                    | Relevance                                                                                                                                                                                                                                                                                                      | Evidence class       |
+| ------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------- |
+| User screenshot: long retry error                                                                                                           | Shows the extension bar wrapping and splitting retry metadata despite the error being clickable.                                                                                                                                                                                                               | observed             |
+| User screenshot: transcription plus long file                                                                                               | Shows the home Prompt extension bar wrapping while `Transcribing voice...`, the file indicator, and `agents`/`commands` coexist.                                                                                                                                                                               | observed             |
+| Temporary real-`Prompt` OpenTUI harness, run with `bun test D:\Temp\opencode\prompt-footer-repro.test.tsx --timeout 30000` and then deleted | Mounted the production Prompt in a 160-column renderer inside a 75-column box, drove voice recording to `transcribing`, injected a real `session.status` event, and asserted one visual row. Expected `[1, 1]`; current result was `[2, 2]`.                                                                   | observed             |
+| Current R5 temporary real-`Prompt` OpenTUI harness, run with `bun test D:\Temp\opencode\prompt-footer-repro.test.tsx --timeout 30000`       | Re-ran the current source with a controlled recorder, active bridge file, and real global Status events. At 160 terminal columns with a 75-column Prompt, the current final frame measured `idle=1`, `busy=3`, `recording=3`, `transcribing=2`, `retry=2`; expected one-row state matrix is `[1, 1, 1, 1, 1]`. | observed             |
+| In-memory OpenTUI retry layout probe                                                                                                        | Current unshrinkable retry string grew to four rows at 110 columns; a prioritized `wrapMode="none"`/flex layout remained one row at 60, 75, and 110 columns.                                                                                                                                                   | observed             |
+| `packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx`                                                                              | Owns actual Prompt width measurement, editor-file display, voice/retry/status branching, details click behavior, and the bottom extension-bar layout.                                                                                                                                                          | observed             |
+| `packages/opencode/src/cli/cmd/tui/routes/home.tsx`                                                                                         | Proves the home Prompt is capped at `maxWidth={75}` even when the terminal is much wider.                                                                                                                                                                                                                      | observed             |
+| `packages/opencode/src/cli/cmd/tui/routes/session/index.tsx`                                                                                | Proves Session mounts the same Prompt and can reduce its allocation with an in-layout sidebar; also owns retry-action dialogs, not footer rendering.                                                                                                                                                           | observed             |
+| `packages/opencode/src/cli/cmd/tui/routes/session/layout.ts`                                                                                | Establishes the 42-column Session sidebar and fixed horizontal chrome that can reduce Prompt allocation relative to terminal width.                                                                                                                                                                            | observed             |
+| `packages/opencode/src/cli/cmd/tui/context/editor.ts`                                                                                       | Proves IDE/bridge active paths are unconstrained strings and produce the editor selection consumed by Prompt.                                                                                                                                                                                                  | reachable            |
+| `packages/opencode/src/cli/cmd/tui/prompt-voice-input.ts`                                                                                   | Defines shared voice statuses and current human-readable status text; the new requirement permits a main-Prompt-only compact presentation mode while retaining default consumer wording.                                                                                                                       | observed             |
+| `packages/opencode/src/cli/cmd/tui/prompt-voice-recorder.ts`                                                                                | Confirms transcription lifecycle and recorder behavior are separate from extension-bar layout.                                                                                                                                                                                                                 | observed             |
+| `packages/opencode/src/cli/cmd/tui/ui/dialog-prompt.tsx`                                                                                    | Proves the shared voice status text is also rendered in a medium dialog with a different footer.                                                                                                                                                                                                               | observed             |
+| `packages/opencode/src/cli/cmd/tui/routes/session/question.tsx`                                                                             | Proves the shared voice status text is also rendered in the question editor footer.                                                                                                                                                                                                                            | observed             |
+| `packages/opencode/src/session/status.ts`                                                                                                   | Defines retry status as an unconstrained message plus attempt and next timestamp.                                                                                                                                                                                                                              | contracted/reachable |
+| `packages/opencode/src/session/retry.ts`                                                                                                    | Shows retry messages originate from provider/transport errors and can include long provider text or URLs.                                                                                                                                                                                                      | reachable            |
+| `packages/opencode/src/session/message-v2.ts`                                                                                               | Shows Provider errors preserve string messages without a display-width bound before Session retry status.                                                                                                                                                                                                      | reachable            |
+| `packages/opencode/src/cli/cmd/tui/ui/dialog-alert.tsx` and `ui/dialog.tsx`                                                                 | Establish the existing click target's detail surface and responsive dialog width.                                                                                                                                                                                                                              | observed             |
+| `packages/opencode/src/cli/cmd/tui/plugin/api.tsx`                                                                                          | Proves `Prompt.hint` is public plugin input, while `Prompt.right` is a separate card-internal row.                                                                                                                                                                                                             | contracted           |
+| Search of repository Prompt API consumers                                                                                                   | Found no in-repository `Prompt.hint` consumer requiring a multi-line extension-bar contract.                                                                                                                                                                                                                   | observed             |
+| `packages/opencode/test/cli/cmd/tui/prompt-submit-transport.test.tsx`                                                                       | Provides an existing real Prompt Provider stack and final-frame seam that can be extended without testing private helpers.                                                                                                                                                                                     | observed             |
+| `packages/opencode/test/cli/tui/prompt-voice-input.test.ts`                                                                                 | Locks shared voice wording/lifecycle and the width-gated idle voice hint.                                                                                                                                                                                                                                      | observed             |
+| `packages/opencode/test/cli/cmd/tui/session-integration.test.ts`                                                                            | Contains source-level Prompt smoke assertions but is not sufficient for the visual wrapping regression.                                                                                                                                                                                                        | observed             |
+| `packages/opencode/test/cli/cmd/tui/session-layout.test.ts`                                                                                 | Demonstrates accepted use of OpenTUI's real renderer to verify terminal-cell layout rather than reimplement Yoga arithmetic.                                                                                                                                                                                   | observed             |
+| `packages/opencode/src/util/locale.ts` and `test/util/locale.test.ts`                                                                       | Establish current code-unit-based middle truncation and its Unicode-surrogate guarantees.                                                                                                                                                                                                                      | observed             |
+| `node_modules/@opentui/core/renderables/TextBufferRenderable.d.ts`                                                                          | Confirms native `wrapMode="none"` and `truncate` support.                                                                                                                                                                                                                                                      | contracted           |
+| `node_modules/@opentui/core/Renderable.d.ts`                                                                                                | Confirms `height`, `minWidth`, `maxWidth`, `flexShrink`, and `overflow` layout controls.                                                                                                                                                                                                                       | contracted           |
+| `packages/ui/src/components/session-retry.tsx`                                                                                              | Shows the web UI independently truncates retry messages and exposes full text through a tooltip; it is useful comparison evidence but out of TUI scope.                                                                                                                                                        | observed             |
 
 ## 5. Current Behavior
 
@@ -199,18 +199,18 @@ must retain the default stop guidance.
 
 ## 6. Supported Input Domain and Reachability
 
-| Input or condition | Producer | Upstream guarantees | Reachable path | Owner | Classification |
-| --- | --- | --- | --- | --- | --- |
-| Home Prompt allocated 75 columns inside a wider terminal | `Home` route | `maxWidth={75}` is explicit | `Home -> Prompt -> syncPromptWidth` | Prompt extension-bar layout | observed |
-| Session Prompt narrower than terminal because of sidebar/chrome | Session route | Sidebar is 42 columns when in layout | `Session -> Prompt -> syncPromptWidth` | Prompt extension-bar layout | reachable |
-| Long ASCII IDE basename | VS Code/Claude/Zed bridge selection | `filePath` is a string; no basename length cap | `EditorContext -> Prompt` | Prompt file-indicator presentation | observed |
-| CJK/emoji or wide-cell IDE basename | Public editor path string | Schema validates string shape, not terminal cell width | `EditorContext -> Prompt` | Prompt file-indicator presentation | reachable |
-| Voice starting/recording/stopping/transcribing while file context exists | Prompt voice controller plus EditorContext | Voice state and file selection are independent | `voiceInputStatus + editorContext -> Prompt Switch/right region` | Prompt extension-bar composition | observed |
-| Retry message of 81-120 characters | Provider/transport error | Retry schema has no display bound | `MessageV2 -> SessionRetry -> SessionStatus -> Prompt` | Prompt retry presentation | reachable |
-| Retry message over 120 characters | Same | Same | Same | Prompt retry presentation | observed |
-| Retry message containing newlines or repeated whitespace | Provider parser returns arbitrary `Schema.String` | No display normalization before status | Same | Prompt retry summary presentation | reachable |
-| Retry countdown from seconds through longer formatted durations | `SessionStatus.next` and `formatDuration` | `next` is a non-negative timestamp | `Prompt.seconds -> formatDuration` | Prompt retry metadata presentation | reachable |
-| Plugin-provided Prompt hint | TUI plugin API | Arbitrary JSX element; no multi-line promise found | `Plugin ui.Prompt -> Prompt.props.hint` | Prompt extension-bar clipping contract; plugin owns content | contracted |
+| Input or condition                                                       | Producer                                          | Upstream guarantees                                    | Reachable path                                                   | Owner                                                       | Classification |
+| ------------------------------------------------------------------------ | ------------------------------------------------- | ------------------------------------------------------ | ---------------------------------------------------------------- | ----------------------------------------------------------- | -------------- |
+| Home Prompt allocated 75 columns inside a wider terminal                 | `Home` route                                      | `maxWidth={75}` is explicit                            | `Home -> Prompt -> syncPromptWidth`                              | Prompt extension-bar layout                                 | observed       |
+| Session Prompt narrower than terminal because of sidebar/chrome          | Session route                                     | Sidebar is 42 columns when in layout                   | `Session -> Prompt -> syncPromptWidth`                           | Prompt extension-bar layout                                 | reachable      |
+| Long ASCII IDE basename                                                  | VS Code/Claude/Zed bridge selection               | `filePath` is a string; no basename length cap         | `EditorContext -> Prompt`                                        | Prompt file-indicator presentation                          | observed       |
+| CJK/emoji or wide-cell IDE basename                                      | Public editor path string                         | Schema validates string shape, not terminal cell width | `EditorContext -> Prompt`                                        | Prompt file-indicator presentation                          | reachable      |
+| Voice starting/recording/stopping/transcribing while file context exists | Prompt voice controller plus EditorContext        | Voice state and file selection are independent         | `voiceInputStatus + editorContext -> Prompt Switch/right region` | Prompt extension-bar composition                            | observed       |
+| Retry message of 81-120 characters                                       | Provider/transport error                          | Retry schema has no display bound                      | `MessageV2 -> SessionRetry -> SessionStatus -> Prompt`           | Prompt retry presentation                                   | reachable      |
+| Retry message over 120 characters                                        | Same                                              | Same                                                   | Same                                                             | Prompt retry presentation                                   | observed       |
+| Retry message containing newlines or repeated whitespace                 | Provider parser returns arbitrary `Schema.String` | No display normalization before status                 | Same                                                             | Prompt retry summary presentation                           | reachable      |
+| Retry countdown from seconds through longer formatted durations          | `SessionStatus.next` and `formatDuration`         | `next` is a non-negative timestamp                     | `Prompt.seconds -> formatDuration`                               | Prompt retry metadata presentation                          | reachable      |
+| Plugin-provided Prompt hint                                              | TUI plugin API                                    | Arbitrary JSX element; no multi-line promise found     | `Plugin ui.Prompt -> Prompt.props.hint`                          | Prompt extension-bar clipping contract; plugin owns content | contracted     |
 
 Inputs such as malicious escape sequences, unbounded dialog scrolling, or a
 plugin depending on multi-line Prompt hints were not observed and have no
@@ -219,27 +219,27 @@ dialog refactor, or compatibility branches in this plan.
 
 ## 7. Required Invariants
 
-| ID | Behavioral invariant | Evidence | Existing test |
-| --- | --- | --- | --- |
-| INV-01 | The Prompt extension bar occupies exactly one visual row in idle, busy, retry, and all active voice states; dynamic content may truncate or clip but must not increase Prompt height. | User screenshots and real Prompt reproduction, including the full R5 state matrix. | None; new real-frame coverage required. |
-| INV-02 | Variable-width content is budgeted against the measured Prompt allocation, not total terminal width. | Home 160/75 reproduction and existing `syncPromptWidth`. | Token/voice decisions partially cover `promptWidth`; editor file does not. |
-| INV-03 | A long file indicator keeps useful identity (start/end, especially extension and optional selection suffix) while yielding space to current-state controls. | User request for information density; current middle truncation intent. | Existing Locale unit tests only; no final-frame test. |
-| INV-04 | Every retry error exposes a short, stable `details` affordance; clicking the error/details region opens the original unmodified message, including for 81-120-character messages. | User requirement and current dialog behavior. | None. |
-| INV-05 | Retry summary, details affordance, countdown/attempt, and `esc interrupt` remain distinct tokens; verbose prose cannot squeeze the actionable tokens out or wrap them. | Retry screenshot and OpenTUI prioritized-layout probe. | None. |
-| INV-06 | Voice lifecycle and the default shared wording used by dialog/question consumers remain unchanged; only the main Prompt may use a compact display projection. | Shared function call sites, new user requirement, and exact-width reproduction. | `prompt-voice-input.test.ts`; new compact/default assertions. |
-| INV-07 | The full retry error in Session state is never truncated, normalized, or replaced; only the one-line display summary may normalize whitespace and truncate. | SessionStatus and DialogAlert path. | New click/detail assertion required. |
-| INV-08 | Existing pending/sent file color, usage formatting, shortcut bindings, retry timing, and plugin API signatures remain unchanged. | Current Prompt behavior and explicit non-goals. | Existing related suites plus focused regression tests. |
-| INV-09 | Main-Prompt recording/transcription labels preserve the stop shortcut and phase meaning while using the shortest natural wording that materially reduces left-side width. | New surgical-scope requirement and current `recording=3` / `transcribing=2` frame result. | New compact voice formatter assertions and real Prompt frame. |
+| ID     | Behavioral invariant                                                                                                                                                                  | Evidence                                                                                  | Existing test                                                              |
+| ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
+| INV-01 | The Prompt extension bar occupies exactly one visual row in idle, busy, retry, and all active voice states; dynamic content may truncate or clip but must not increase Prompt height. | User screenshots and real Prompt reproduction, including the full R5 state matrix.        | None; new real-frame coverage required.                                    |
+| INV-02 | Variable-width content is budgeted against the measured Prompt allocation, not total terminal width.                                                                                  | Home 160/75 reproduction and existing `syncPromptWidth`.                                  | Token/voice decisions partially cover `promptWidth`; editor file does not. |
+| INV-03 | A long file indicator keeps useful identity (start/end, especially extension and optional selection suffix) while yielding space to current-state controls.                           | User request for information density; current middle truncation intent.                   | Existing Locale unit tests only; no final-frame test.                      |
+| INV-04 | Every retry error exposes a short, stable `details` affordance; clicking the error/details region opens the original unmodified message, including for 81-120-character messages.     | User requirement and current dialog behavior.                                             | None.                                                                      |
+| INV-05 | Retry summary, details affordance, countdown/attempt, and `esc interrupt` remain distinct tokens; verbose prose cannot squeeze the actionable tokens out or wrap them.                | Retry screenshot and OpenTUI prioritized-layout probe.                                    | None.                                                                      |
+| INV-06 | Voice lifecycle and the default shared wording used by dialog/question consumers remain unchanged; only the main Prompt may use a compact display projection.                         | Shared function call sites, new user requirement, and exact-width reproduction.           | `prompt-voice-input.test.ts`; new compact/default assertions.              |
+| INV-07 | The full retry error in Session state is never truncated, normalized, or replaced; only the one-line display summary may normalize whitespace and truncate.                           | SessionStatus and DialogAlert path.                                                       | New click/detail assertion required.                                       |
+| INV-08 | Existing pending/sent file color, usage formatting, shortcut bindings, retry timing, and plugin API signatures remain unchanged.                                                      | Current Prompt behavior and explicit non-goals.                                           | Existing related suites plus focused regression tests.                     |
+| INV-09 | Main-Prompt recording/transcription labels preserve the stop shortcut and phase meaning while using the shortest natural wording that materially reduces left-side width.             | New surgical-scope requirement and current `recording=3` / `transcribing=2` frame result. | New compact voice formatter assertions and real Prompt frame.              |
 
 ## 8. First Divergence and Root Cause
 
-| Invariant | First divergence | Owning module/interface | Proof |
-| --- | --- | --- | --- |
-| INV-01/02/03 | `editorFileLabelDisplay` computes its maximum from `dimensions().width` after Prompt already owns a more accurate measured `promptWidth()`. | `Prompt` editor-file presentation | Real 160-terminal/75-Prompt harness produced a 48-character label and two voice rows; equal 75/75 allocation produced a 25-character label and one row. |
-| INV-01/05 | Retry presentation concatenates summary, a long parenthetical hint, and retry metadata into one non-shrinkable/default-wrapping text region. | `Prompt` retry extension-bar branch | Real Prompt harness expected one row but received two; low-level production-equivalent layout reached four rows at 110 columns. |
-| INV-04 | Display truncation begins at `>80`, while detail affordance and click handling begin only at `>120`. | `Prompt` retry summary/detail contract | Source conditions prove the 81-120 dead zone. |
-| INV-01/07 | The extension-bar root and dynamic text do not establish a fixed-height/non-wrapping contract, and display text is not separated from the original detail value. | `Prompt` extension-bar container | Current JSX has no `height={1}`/`overflow="hidden"` at the root and only usage text sets `wrapMode="none"`. |
-| INV-09 | The main Prompt consumes the verbose shared recording/transcription labels after already rendering a phase marker/spinner, making the left state region materially wider than necessary. | `Prompt` main consumer plus `prompt-voice-input.ts` formatter | Current real Prompt frame measured `recording=3` rows and `transcribing=2` rows under the 75-column home allocation; dialog/question consumers are separate call sites. |
+| Invariant    | First divergence                                                                                                                                                                         | Owning module/interface                                       | Proof                                                                                                                                                                   |
+| ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| INV-01/02/03 | `editorFileLabelDisplay` computes its maximum from `dimensions().width` after Prompt already owns a more accurate measured `promptWidth()`.                                              | `Prompt` editor-file presentation                             | Real 160-terminal/75-Prompt harness produced a 48-character label and two voice rows; equal 75/75 allocation produced a 25-character label and one row.                 |
+| INV-01/05    | Retry presentation concatenates summary, a long parenthetical hint, and retry metadata into one non-shrinkable/default-wrapping text region.                                             | `Prompt` retry extension-bar branch                           | Real Prompt harness expected one row but received two; low-level production-equivalent layout reached four rows at 110 columns.                                         |
+| INV-04       | Display truncation begins at `>80`, while detail affordance and click handling begin only at `>120`.                                                                                     | `Prompt` retry summary/detail contract                        | Source conditions prove the 81-120 dead zone.                                                                                                                           |
+| INV-01/07    | The extension-bar root and dynamic text do not establish a fixed-height/non-wrapping contract, and display text is not separated from the original detail value.                         | `Prompt` extension-bar container                              | Current JSX has no `height={1}`/`overflow="hidden"` at the root and only usage text sets `wrapMode="none"`.                                                             |
+| INV-09       | The main Prompt consumes the verbose shared recording/transcription labels after already rendering a phase marker/spinner, making the left state region materially wider than necessary. | `Prompt` main consumer plus `prompt-voice-input.ts` formatter | Current real Prompt frame measured `recording=3` rows and `transcribing=2` rows under the 75-column home allocation; dialog/question consumers are separate call sites. |
 
 The voice text is a downstream pressure participant, not the first divergence.
 The same `Transcribing voice...` fits in one row when the file label uses the
@@ -270,15 +270,15 @@ must be added at the existing repository test seam before production changes.
 
 ## 9. Responsibility and Seam
 
-| Concern | Owner | Interface promise | Why it belongs here | Why another module does not own it |
-| --- | --- | --- | --- | --- |
-| One-row extension-bar geometry | `Prompt` bottom extension-bar container | Compose current state and secondary indicators inside actual Prompt allocation | It owns the JSX/flex tree and already measures final Prompt width. | Home/Session routes should not duplicate internal footer arithmetic. |
-| File-indicator display budget | `Prompt` editor-file presentation | Render editor identity without monopolizing status chrome | It combines editor path with actual layout width. | EditorContext owns discovery/state, not terminal presentation. |
-| Retry summary/detail affordance | `Prompt` retry branch | Compact status plus access to original details | It consumes SessionStatus for this UI and already opens DialogAlert. | SessionRetry and SessionStatus must remain UI-agnostic and preserve data. |
-| Original error content | Existing SessionStatus value and DialogAlert invocation | Preserve the exact message for detail inspection | Existing path already supplies it. | Display normalization must not mutate domain state. |
-| Voice lifecycle and shared wording | `prompt-voice-input.ts` | Report voice phase consistently to three consumers | Existing controller owns it and is not defective. | Prompt layout must absorb local pressure rather than changing shared semantics. |
-| Plugin hint content | Plugin | Supply its JSX content | Plugin creates the content. | Prompt owns only the one-row clipping boundary, not plugin-specific shortening. |
-| Behavioral verification | Real rendered Prompt seam | Observe terminal rows and dialog interaction | This catches Yoga/text behavior and actual state composition. | Pure formatter/source-text tests cannot detect the reported wrap. |
+| Concern                            | Owner                                                   | Interface promise                                                              | Why it belongs here                                                  | Why another module does not own it                                              |
+| ---------------------------------- | ------------------------------------------------------- | ------------------------------------------------------------------------------ | -------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
+| One-row extension-bar geometry     | `Prompt` bottom extension-bar container                 | Compose current state and secondary indicators inside actual Prompt allocation | It owns the JSX/flex tree and already measures final Prompt width.   | Home/Session routes should not duplicate internal footer arithmetic.            |
+| File-indicator display budget      | `Prompt` editor-file presentation                       | Render editor identity without monopolizing status chrome                      | It combines editor path with actual layout width.                    | EditorContext owns discovery/state, not terminal presentation.                  |
+| Retry summary/detail affordance    | `Prompt` retry branch                                   | Compact status plus access to original details                                 | It consumes SessionStatus for this UI and already opens DialogAlert. | SessionRetry and SessionStatus must remain UI-agnostic and preserve data.       |
+| Original error content             | Existing SessionStatus value and DialogAlert invocation | Preserve the exact message for detail inspection                               | Existing path already supplies it.                                   | Display normalization must not mutate domain state.                             |
+| Voice lifecycle and shared wording | `prompt-voice-input.ts`                                 | Report voice phase consistently to three consumers                             | Existing controller owns it and is not defective.                    | Prompt layout must absorb local pressure rather than changing shared semantics. |
+| Plugin hint content                | Plugin                                                  | Supply its JSX content                                                         | Plugin creates the content.                                          | Prompt owns only the one-row clipping boundary, not plugin-specific shortening. |
+| Behavioral verification            | Real rendered Prompt seam                               | Observe terminal rows and dialog interaction                                   | This catches Yoga/text behavior and actual state composition.        | Pure formatter/source-text tests cannot detect the reported wrap.               |
 
 ## 10. Single Approved Primary-Path Design
 
@@ -320,6 +320,7 @@ Prompt branch, not width-specific alternate footers.
    `details` is the exact recommended affordance. It matches the existing
    lowercase muted footer vocabulary (`agents`, `commands`, `interrupt`), costs
    seven cells, and replaces `(click to expand)` without losing intent.
+
 5. Keep the error summary in `theme.error`, normalize only display whitespace
    with the display-only equivalent of `message.replace(/\s+/g, " ").trim()`,
    and let it grow/shrink inside remaining space with native visual truncation.
@@ -350,6 +351,7 @@ Prompt branch, not width-specific alternate footers.
    `voice` word without hiding that the phase is transcription. `DialogPrompt`
    and `QuestionPrompt` keep the existing default strings. This is a single
    formatter with a supported presentation option, not a second lifecycle path.
+
 9. Preserve the public `Prompt.hint` and `Prompt.right` types. The extension-row
    parent clips an oversized hint to one row; no repository consumer proves a
    multi-line compatibility contract. The card-internal `right` slot is untouched.
@@ -358,35 +360,35 @@ Prompt branch, not width-specific alternate footers.
 
 When all content cannot physically fit, the one-row layout must prioritize:
 
-| Priority | Content | Disposition under pressure |
-| --- | --- | --- |
-| P0 | Current voice/retry/busy state, retry `details`, countdown/attempt, `esc interrupt`, and existing active duration | Preserve and never wrap; final terminal-edge clipping is allowed only when even P0 exceeds physical width. |
-| P1 | Active editor file identity | Middle/native truncate and shrink within the actual Prompt budget. |
-| P2 | Usage, agent, command, and idle voice hints | Preserve existing adaptive visibility; enclosing group may be clipped after P0/P1 have claimed space. |
+| Priority | Content                                                                                                           | Disposition under pressure                                                                                 |
+| -------- | ----------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| P0       | Current voice/retry/busy state, retry `details`, countdown/attempt, `esc interrupt`, and existing active duration | Preserve and never wrap; final terminal-edge clipping is allowed only when even P0 exceeds physical width. |
+| P1       | Active editor file identity                                                                                       | Middle/native truncate and shrink within the actual Prompt budget.                                         |
+| P2       | Usage, agent, command, and idle voice hints                                                                       | Preserve existing adaptive visibility; enclosing group may be clipped after P0/P1 have claimed space.      |
 
 ### 10.3 Considered alternatives
 
-| Approach | Assessment | Disposition |
-| --- | --- | --- |
-| Globally rename shared voice states to `Transcribing...`, `Saving...`, etc. | Small diff, but changes dialog/question consumers unnecessarily and still leaves the file/retry wrapping defect. | Reject. |
-| Add a compact presentation option used only by the main Prompt | Keeps shared default wording and lifecycle intact while removing redundant phase words from the exact pressured consumer. | Approve as part of the primary path. |
-| Keep concatenated retry text and lower 80/120 constants | Still couples interaction to arbitrary length and cannot respond to actual Prompt/sidebar allocation. | Reject. |
-| Add several width breakpoints that hide file/commands/errors | Creates parallel presentation branches and loses more information than necessary. | Reject. |
-| Let Yoga wrap to two rows when busy | Directly violates the user's core requirement and causes Prompt height jitter. | Reject. |
-| One fixed-height row with shrinkable variable text and fixed actions | Repairs both first divergences at the owner while maximizing information per available cell. | Approve as the sole primary path. |
+| Approach                                                                    | Assessment                                                                                                                | Disposition                          |
+| --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- | ------------------------------------ |
+| Globally rename shared voice states to `Transcribing...`, `Saving...`, etc. | Small diff, but changes dialog/question consumers unnecessarily and still leaves the file/retry wrapping defect.          | Reject.                              |
+| Add a compact presentation option used only by the main Prompt              | Keeps shared default wording and lifecycle intact while removing redundant phase words from the exact pressured consumer. | Approve as part of the primary path. |
+| Keep concatenated retry text and lower 80/120 constants                     | Still couples interaction to arbitrary length and cannot respond to actual Prompt/sidebar allocation.                     | Reject.                              |
+| Add several width breakpoints that hide file/commands/errors                | Creates parallel presentation branches and loses more information than necessary.                                         | Reject.                              |
+| Let Yoga wrap to two rows when busy                                         | Directly violates the user's core requirement and causes Prompt height jitter.                                            | Reject.                              |
+| One fixed-height row with shrinkable variable text and fixed actions        | Repairs both first divergences at the owner while maximizing information per available cell.                              | Approve as the sole primary path.    |
 
 ## 11. Secondary and Replacement Path Inventory
 
-| Path | Current or proposed | Classification | Produces success? | Decision-surface share | Disposition |
-| --- | --- | --- | --- | --- | --- |
-| Prompt state `Switch` branches (voice, running, warp, workspace, hint) | Current | Supported-domain branches in one presentation contract | yes | Existing | Preserve under one-row parent. |
-| Gemini quota message alias | Current | Supported-domain display branch | yes | Existing | Preserve exactly. |
-| DialogAlert detail display | Current | Diagnostic path | no | Existing; no new branch | Preserve, call for every retry message. |
-| Editor pending/sent color branch | Current | Supported-domain display branch | yes | Existing | Preserve. |
-| Native truncation under width pressure | Proposed | Supported-domain branch inside one layout contract | yes | Approximately 2 layout decisions, not an alternate success path | Add. |
-| Main-Prompt compact voice presentation option | Proposed | Supported-domain presentation branch within the existing voice formatter | yes | One local display branch; no alternate lifecycle/success path | Add. |
-| Plugin hint clipping at parent boundary | Proposed/current contract enforcement | Contracted pass-through | yes | No new semantic branch | Preserve content, constrain geometry. |
-| Separate compact footer selected only after overflow | Proposed alternative | Forbidden fallback/duplicate presentation path | yes | Not allowed | Reject. |
+| Path                                                                   | Current or proposed                   | Classification                                                           | Produces success? | Decision-surface share                                          | Disposition                             |
+| ---------------------------------------------------------------------- | ------------------------------------- | ------------------------------------------------------------------------ | ----------------- | --------------------------------------------------------------- | --------------------------------------- |
+| Prompt state `Switch` branches (voice, running, warp, workspace, hint) | Current                               | Supported-domain branches in one presentation contract                   | yes               | Existing                                                        | Preserve under one-row parent.          |
+| Gemini quota message alias                                             | Current                               | Supported-domain display branch                                          | yes               | Existing                                                        | Preserve exactly.                       |
+| DialogAlert detail display                                             | Current                               | Diagnostic path                                                          | no                | Existing; no new branch                                         | Preserve, call for every retry message. |
+| Editor pending/sent color branch                                       | Current                               | Supported-domain display branch                                          | yes               | Existing                                                        | Preserve.                               |
+| Native truncation under width pressure                                 | Proposed                              | Supported-domain branch inside one layout contract                       | yes               | Approximately 2 layout decisions, not an alternate success path | Add.                                    |
+| Main-Prompt compact voice presentation option                          | Proposed                              | Supported-domain presentation branch within the existing voice formatter | yes               | One local display branch; no alternate lifecycle/success path   | Add.                                    |
+| Plugin hint clipping at parent boundary                                | Proposed/current contract enforcement | Contracted pass-through                                                  | yes               | No new semantic branch                                          | Preserve content, constrain geometry.   |
+| Separate compact footer selected only after overflow                   | Proposed alternative                  | Forbidden fallback/duplicate presentation path                           | yes               | Not allowed                                                     | Reject.                                 |
 
 New alternate success paths: zero. Proposed diagnostic decision surface is the
 existing details click path with its incorrect length guard removed; no new
@@ -395,53 +397,53 @@ diagnostic algorithm is introduced. The secondary-path ratio is therefore below
 
 ## 12. Workaround Deletion and Replacement
 
-| Existing workaround or duplicate | Why it existed | Why the approved route supersedes it | Delete or collapse location |
-| --- | --- | --- | --- |
-| `message.length > 80` display slice | Limits visible error prose without knowing actual layout | Flex/native truncation uses real available space and keeps fixed controls visible. | Prompt retry `message` memo. |
-| `message.length > 120` click gate | Attempts to expose only very long errors | Every retry now has one stable detail surface; length is unrelated to whether details are useful. | Prompt `isTruncated` memo and click handler. |
-| Literal ` (click to expand)` | Advertises the gated dialog | Fixed muted `details` is shorter, consistent, and always truthful. | Prompt `retryText`. |
-| Bracketed `[retrying ... attempt #N]` sentence | Packs retry metadata into the same long string | Independent compact token remains visible while summary shrinks. | Prompt `retryText`. |
-| File budget based on terminal `dimensions().width` | Predates/usefully ignores no local allocation | Existing measured `promptWidth()` is authoritative after Home maxWidth/sidebar layout. | Prompt `editorFileLabelDisplay`. |
+| Existing workaround or duplicate                   | Why it existed                                           | Why the approved route supersedes it                                                              | Delete or collapse location                  |
+| -------------------------------------------------- | -------------------------------------------------------- | ------------------------------------------------------------------------------------------------- | -------------------------------------------- |
+| `message.length > 80` display slice                | Limits visible error prose without knowing actual layout | Flex/native truncation uses real available space and keeps fixed controls visible.                | Prompt retry `message` memo.                 |
+| `message.length > 120` click gate                  | Attempts to expose only very long errors                 | Every retry now has one stable detail surface; length is unrelated to whether details are useful. | Prompt `isTruncated` memo and click handler. |
+| Literal ` (click to expand)`                       | Advertises the gated dialog                              | Fixed muted `details` is shorter, consistent, and always truthful.                                | Prompt `retryText`.                          |
+| Bracketed `[retrying ... attempt #N]` sentence     | Packs retry metadata into the same long string           | Independent compact token remains visible while summary shrinks.                                  | Prompt `retryText`.                          |
+| File budget based on terminal `dimensions().width` | Predates/usefully ignores no local allocation            | Existing measured `promptWidth()` is authoritative after Home maxWidth/sidebar layout.            | Prompt `editorFileLabelDisplay`.             |
 
 ## 13. Forward Traceability
 
-| Requirement or invariant | Production path | Planned file/change | Behavioral test |
-| --- | --- | --- | --- |
-| INV-01 single visual row | Prompt extension-bar root | `component/prompt/index.tsx`: fixed one-row/non-wrapping boundary | Real Prompt frame asserts one non-empty row for idle, busy, recording, transcribing, and retry. |
-| INV-02 actual Prompt width | `syncPromptWidth -> editor file budget` | Reuse `promptWidth()` instead of terminal dimensions | 160-column renderer + 75-column Prompt + long file. |
-| INV-03 useful file identity | Editor label text | Shrink/native middle truncate while retaining current label semantics | Frame contains recognizable prefix/suffix/extension and no second row; include wide-cell filename case. |
-| INV-04 stable details | Retry summary click | Remove both length gates; fixed `details`; raw message to DialogAlert | 81-120-character message shows `details`; click reveals exact original. |
-| INV-05 fixed retry controls | Retry flex tokens | Separate summary/details/metadata/interrupt tokens | Long retry frame contains `details`, compact retry token, and `esc interrupt` on one row. |
-| INV-06 shared voice/default consumers unchanged | Existing voice helper call sites | Add optional compact mode while preserving default output; main Prompt opts in | Existing exact-string/lifecycle tests plus default/compact formatter assertions. |
-| INV-07 raw detail preserved | SessionStatus -> DialogAlert | Normalize only display memo | Multiline/long message detail equals original while footer is one row. |
-| INV-08 no adjacent regressions | Existing Prompt branches | Preserve colors, usage, keybindings, plugin types | Existing Prompt/voice/session suites and typecheck/build. |
-| INV-09 shorter main-Prompt voice labels | Main Prompt -> voice formatter compact option | Pass compact mode only from `component/prompt/index.tsx` | Real recording/transcribing frame plus literal compact-label expectations. |
+| Requirement or invariant                        | Production path                               | Planned file/change                                                            | Behavioral test                                                                                         |
+| ----------------------------------------------- | --------------------------------------------- | ------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------- |
+| INV-01 single visual row                        | Prompt extension-bar root                     | `component/prompt/index.tsx`: fixed one-row/non-wrapping boundary              | Real Prompt frame asserts one non-empty row for idle, busy, recording, transcribing, and retry.         |
+| INV-02 actual Prompt width                      | `syncPromptWidth -> editor file budget`       | Reuse `promptWidth()` instead of terminal dimensions                           | 160-column renderer + 75-column Prompt + long file.                                                     |
+| INV-03 useful file identity                     | Editor label text                             | Shrink/native middle truncate while retaining current label semantics          | Frame contains recognizable prefix/suffix/extension and no second row; include wide-cell filename case. |
+| INV-04 stable details                           | Retry summary click                           | Remove both length gates; fixed `details`; raw message to DialogAlert          | 81-120-character message shows `details`; click reveals exact original.                                 |
+| INV-05 fixed retry controls                     | Retry flex tokens                             | Separate summary/details/metadata/interrupt tokens                             | Long retry frame contains `details`, compact retry token, and `esc interrupt` on one row.               |
+| INV-06 shared voice/default consumers unchanged | Existing voice helper call sites              | Add optional compact mode while preserving default output; main Prompt opts in | Existing exact-string/lifecycle tests plus default/compact formatter assertions.                        |
+| INV-07 raw detail preserved                     | SessionStatus -> DialogAlert                  | Normalize only display memo                                                    | Multiline/long message detail equals original while footer is one row.                                  |
+| INV-08 no adjacent regressions                  | Existing Prompt branches                      | Preserve colors, usage, keybindings, plugin types                              | Existing Prompt/voice/session suites and typecheck/build.                                               |
+| INV-09 shorter main-Prompt voice labels         | Main Prompt -> voice formatter compact option | Pass compact mode only from `component/prompt/index.tsx`                       | Real recording/transcribing frame plus literal compact-label expectations.                              |
 
 ## 14. Reverse Traceability
 
-| Proposed production concept | Requirement ID | Evidence | Why existing logic cannot carry it |
-| --- | --- | --- | --- |
-| Fixed-height extension-row boundary | INV-01 | Both screenshots and `[2,2]` real-frame failure | Current root permits children to determine height and wrap. |
-| Actual-width file budget | INV-02/03 | 160-terminal/75-Prompt differential reproduction | Terminal width is not the Prompt allocation; existing `promptWidth()` is unused here. |
-| Shrinkable non-wrapping file/error text | INV-01/03/05 | OpenTUI probe stayed one row at 60/75/110 columns | Current dynamic text has default wrapping and retry parent is non-shrinkable. |
-| Fixed `details` affordance | INV-04 | User request and 81-120 source dead zone | Current hint is long and conditionally false even after visible truncation. |
-| Compact independent retry token | INV-05 | Retry screenshot; current bracketed sentence wraps | Current metadata cannot remain visible independently of summary width. |
-| Display-only whitespace normalization | INV-01/07 | Retry message is unconstrained `Schema.String` | Explicit newlines bypass ordinary word wrapping and can hide later summary content. |
-| Main-Prompt compact voice option | INV-06/09 | New user scope plus real recording/transcribing row counts | A global wording change would alter dialog/question consumers; the existing formatter needs one owner-controlled presentation distinction. |
-| Real Prompt final-frame tests | All | Existing source/helper tests did not catch screenshots; temporary real harness did | Formatter or source-text assertions cannot observe Yoga row count or click/dialog behavior. |
+| Proposed production concept             | Requirement ID | Evidence                                                                           | Why existing logic cannot carry it                                                                                                         |
+| --------------------------------------- | -------------- | ---------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| Fixed-height extension-row boundary     | INV-01         | Both screenshots and `[2,2]` real-frame failure                                    | Current root permits children to determine height and wrap.                                                                                |
+| Actual-width file budget                | INV-02/03      | 160-terminal/75-Prompt differential reproduction                                   | Terminal width is not the Prompt allocation; existing `promptWidth()` is unused here.                                                      |
+| Shrinkable non-wrapping file/error text | INV-01/03/05   | OpenTUI probe stayed one row at 60/75/110 columns                                  | Current dynamic text has default wrapping and retry parent is non-shrinkable.                                                              |
+| Fixed `details` affordance              | INV-04         | User request and 81-120 source dead zone                                           | Current hint is long and conditionally false even after visible truncation.                                                                |
+| Compact independent retry token         | INV-05         | Retry screenshot; current bracketed sentence wraps                                 | Current metadata cannot remain visible independently of summary width.                                                                     |
+| Display-only whitespace normalization   | INV-01/07      | Retry message is unconstrained `Schema.String`                                     | Explicit newlines bypass ordinary word wrapping and can hide later summary content.                                                        |
+| Main-Prompt compact voice option        | INV-06/09      | New user scope plus real recording/transcribing row counts                         | A global wording change would alter dialog/question consumers; the existing formatter needs one owner-controlled presentation distinction. |
+| Real Prompt final-frame tests           | All            | Existing source/helper tests did not catch screenshots; temporary real harness did | Formatter or source-text assertions cannot observe Yoga row count or click/dialog behavior.                                                |
 
 No new module, public interface, setting, dependency, cache, retry, schema,
 adapter, or compatibility path is justified or planned.
 
 ## 15. File-Level Change Plan
 
-| File | Add / modify / delete | Exact responsibility of the change | Expected line delta |
-| --- | --- | --- | --- |
-| `packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx` | modify | Repair file-width source, enforce one-row flex priority, split retry summary/details/metadata, and preserve raw detail click. | approximately +24 / -18 production lines |
-| `packages/opencode/test/cli/cmd/tui/prompt-submit-transport.test.tsx` | modify | Extend the existing real Prompt harness with renderer/Prompt-width/config/event options and add final-frame plus detail-click regressions. | approximately +70 / -8 test lines |
-| `packages/opencode/src/cli/cmd/tui/prompt-voice-input.ts` | modify | Add an optional compact presentation mode while preserving current default strings and voice lifecycle. | approximately +12 / -4 production lines |
-| `packages/opencode/test/cli/tui/prompt-voice-input.test.ts` | modify | Lock default shared wording and main-Prompt compact labels, including the stop shortcut. | approximately +28 / -4 test lines |
-| `packages/opencode/src/cli/cmd/tui/ui/dialog-alert.tsx` | no change | Existing detail surface carries observed messages. | 0 |
+| File                                                                  | Add / modify / delete | Exact responsibility of the change                                                                                                         | Expected line delta                      |
+| --------------------------------------------------------------------- | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------- |
+| `packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx`        | modify                | Repair file-width source, enforce one-row flex priority, split retry summary/details/metadata, and preserve raw detail click.              | approximately +24 / -18 production lines |
+| `packages/opencode/test/cli/cmd/tui/prompt-submit-transport.test.tsx` | modify                | Extend the existing real Prompt harness with renderer/Prompt-width/config/event options and add final-frame plus detail-click regressions. | approximately +70 / -8 test lines        |
+| `packages/opencode/src/cli/cmd/tui/prompt-voice-input.ts`             | modify                | Add an optional compact presentation mode while preserving current default strings and voice lifecycle.                                    | approximately +12 / -4 production lines  |
+| `packages/opencode/test/cli/tui/prompt-voice-input.test.ts`           | modify                | Lock default shared wording and main-Prompt compact labels, including the stop shortcut.                                                   | approximately +28 / -4 test lines        |
+| `packages/opencode/src/cli/cmd/tui/ui/dialog-alert.tsx`               | no change             | Existing detail surface carries observed messages.                                                                                         | 0                                        |
 
 No file additions, deletions, generated artifacts, migrations, or dependency
 changes are planned. This canonical plan is documentation and is not part of a
@@ -454,13 +456,13 @@ of the real `Prompt` mounted through its existing Provider stack. Tests must not
 call a private footer formatter, inspect source text, or reproduce Yoga width
 arithmetic.
 
-| Order | Red behavior | Why current code fails | Minimal green behavior | Regression protected |
-| --- | --- | --- | --- | --- |
-| 1 | In a 160-column renderer with Prompt constrained to 75 columns and a long IDE filename, idle, busy, recording, and transcribing each occupy one extension row; recording/transcribing use compact main-Prompt labels and idle/busy retain file suffix plus ordinary controls. | File budget uses terminal width, the shared voice labels are verbose, and dynamic labels wrap in the ordinary and active branches. | Reuse measured Prompt width; opt the main Prompt into compact voice wording; make variable file/text/control groups shrink or clip without wrapping. | Original file-indicator failure, ordinary busy path, and newly requested recording-width reduction. |
-| 2 | A >120-character retry message renders summary, `details`, compact retry metadata, and interrupt affordance in one row. | One unshrinkable concatenated sentence wraps. | Separate variable and fixed tokens inside one-row flex layout. | Long retry screenshot. |
-| 3 | An 81-120-character retry error shows `details`; clicking its visible region opens `Retry Error` with the exact original string. | Current display truncates at 80 but click gate starts at 120. | Remove length gate and always route raw message to existing dialog. | Hidden-details dead zone. |
-| 4 | A retry message containing newline/repeated whitespace remains one footer row while dialog content preserves the original whitespace. | Display and detail currently share the raw string; newline can force a visual line. | Normalize only display summary; keep raw value for dialog. | Reachable Provider message formatting. |
-| 5 | Existing usage, file pending/sent, active-duration, default dialog/question voice wording, and shortcut behavior remains unchanged. | Regression guard after layout and presentation-option refactor. | No extra lifecycle behavior; run existing focused suites. | Adjacent Prompt contracts and shared-consumer compatibility. |
+| Order | Red behavior                                                                                                                                                                                                                                                                  | Why current code fails                                                                                                             | Minimal green behavior                                                                                                                               | Regression protected                                                                                |
+| ----- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| 1     | In a 160-column renderer with Prompt constrained to 75 columns and a long IDE filename, idle, busy, recording, and transcribing each occupy one extension row; recording/transcribing use compact main-Prompt labels and idle/busy retain file suffix plus ordinary controls. | File budget uses terminal width, the shared voice labels are verbose, and dynamic labels wrap in the ordinary and active branches. | Reuse measured Prompt width; opt the main Prompt into compact voice wording; make variable file/text/control groups shrink or clip without wrapping. | Original file-indicator failure, ordinary busy path, and newly requested recording-width reduction. |
+| 2     | A >120-character retry message renders summary, `details`, compact retry metadata, and interrupt affordance in one row.                                                                                                                                                       | One unshrinkable concatenated sentence wraps.                                                                                      | Separate variable and fixed tokens inside one-row flex layout.                                                                                       | Long retry screenshot.                                                                              |
+| 3     | An 81-120-character retry error shows `details`; clicking its visible region opens `Retry Error` with the exact original string.                                                                                                                                              | Current display truncates at 80 but click gate starts at 120.                                                                      | Remove length gate and always route raw message to existing dialog.                                                                                  | Hidden-details dead zone.                                                                           |
+| 4     | A retry message containing newline/repeated whitespace remains one footer row while dialog content preserves the original whitespace.                                                                                                                                         | Display and detail currently share the raw string; newline can force a visual line.                                                | Normalize only display summary; keep raw value for dialog.                                                                                           | Reachable Provider message formatting.                                                              |
+| 5     | Existing usage, file pending/sent, active-duration, default dialog/question voice wording, and shortcut behavior remains unchanged.                                                                                                                                           | Regression guard after layout and presentation-option refactor.                                                                    | No extra lifecycle behavior; run existing focused suites.                                                                                            | Adjacent Prompt contracts and shared-consumer compatibility.                                        |
 
 Each slice must be run red before its production change. Expected values are
 literal user-visible row counts/text and the original input error, independent
@@ -468,10 +470,10 @@ of implementation calculations.
 
 ## 17. Chinese Comment Budget
 
-| Metric | Estimate | Method |
-| --- | --- | --- |
-| Effective changed code lines `E` | 125 | Approximately 48 production decision lines plus 77 behavioral test/harness lines; excludes imports, formatting, and this plan. |
-| Required Chinese explanatory comments `C` | at least 19 | `ceil(125 * 0.15) = 19`; implementation must recalculate actual `E` and increase `C` if needed. |
+| Metric                                    | Estimate    | Method                                                                                                                         |
+| ----------------------------------------- | ----------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| Effective changed code lines `E`          | 125         | Approximately 48 production decision lines plus 77 behavioral test/harness lines; excludes imports, formatting, and this plan. |
+| Required Chinese explanatory comments `C` | at least 19 | `ceil(125 * 0.15) = 19`; implementation must recalculate actual `E` and increase `C` if needed.                                |
 
 Qualifying comments must be distributed near:
 
@@ -494,14 +496,14 @@ across many lines do not count.
 
 ## 18. Verification
 
-| Command | Working directory | Evidence produced |
-| --- | --- | --- |
+| Command                                                                      | Working directory   | Evidence produced                                                                      |
+| ---------------------------------------------------------------------------- | ------------------- | -------------------------------------------------------------------------------------- |
 | `bun test test/cli/cmd/tui/prompt-submit-transport.test.tsx --timeout 30000` | `packages/opencode` | Real Prompt row-count, width differential, retry details, and interaction regressions. |
-| `bun test test/cli/tui/prompt-voice-input.test.ts --timeout 30000` | `packages/opencode` | Shared voice wording/lifecycle and hint thresholds remain unchanged. |
-| `bun test test/cli/cmd/tui/session-integration.test.ts --timeout 30000` | `packages/opencode` | Existing Prompt integration smoke contracts remain intact. |
-| `bun test test/util/locale.test.ts --timeout 30000` | `packages/opencode` | Existing truncation Unicode behavior remains intact. |
-| `bun typecheck` | `packages/opencode` | TSX/OpenTUI props, test harness, and SDK event types are valid. |
-| `bun run build` | `packages/opencode` | Production TUI build accepts the JSX and bundled runtime behavior. |
+| `bun test test/cli/tui/prompt-voice-input.test.ts --timeout 30000`           | `packages/opencode` | Shared voice wording/lifecycle and hint thresholds remain unchanged.                   |
+| `bun test test/cli/cmd/tui/session-integration.test.ts --timeout 30000`      | `packages/opencode` | Existing Prompt integration smoke contracts remain intact.                             |
+| `bun test test/util/locale.test.ts --timeout 30000`                          | `packages/opencode` | Existing truncation Unicode behavior remains intact.                                   |
+| `bun typecheck`                                                              | `packages/opencode` | TSX/OpenTUI props, test harness, and SDK event types are valid.                        |
+| `bun run build`                                                              | `packages/opencode` | Production TUI build accepts the JSX and bundled runtime behavior.                     |
 
 After implementation, rerun the original 160-terminal/75-Prompt scenario and
 record `[1, 1, 1, 1, 1]` for idle, busy, recording, transcribing, and retry.
@@ -509,14 +511,14 @@ Tests and typecheck must never run from repository root.
 
 ## 19. Diff Budget
 
-| Metric | Estimate | Justification |
-| --- | --- | --- |
-| Files added | 0 | Existing Prompt, voice formatter, and two test seams are sufficient. |
-| Files modified | 4 | One Prompt owner, one shared presentation formatter, and two existing behavioral test seams. |
-| Files deleted | 0 | No obsolete module exists; only local branches/strings are collapsed. |
-| Production lines | approximately 42 touched | Focused JSX/memo repair in one component. |
-| Test lines | approximately 78 touched | Real Provider/voice/editor/event setup and four vertical assertions. |
-| Generated lines | 0 | No schema or SDK change. |
+| Metric           | Estimate                 | Justification                                                                                |
+| ---------------- | ------------------------ | -------------------------------------------------------------------------------------------- |
+| Files added      | 0                        | Existing Prompt, voice formatter, and two test seams are sufficient.                         |
+| Files modified   | 4                        | One Prompt owner, one shared presentation formatter, and two existing behavioral test seams. |
+| Files deleted    | 0                        | No obsolete module exists; only local branches/strings are collapsed.                        |
+| Production lines | approximately 42 touched | Focused JSX/memo repair in one component.                                                    |
+| Test lines       | approximately 78 touched | Real Provider/voice/editor/event setup and four vertical assertions.                         |
+| Generated lines  | 0                        | No schema or SDK change.                                                                     |
 
 The budget is an audit signal, not permission to omit confirmed states or
 interaction coverage.
@@ -577,13 +579,13 @@ The independent auditor must:
 
 ## 22. Plan Audit Record
 
-| Round | Audited revision | Full scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | R1 | yes | No blocking findings. | 3 | APPROVE | `ses_096212a56ffemU8IZu4UNXD3pR` |
-| 2 | R2 | yes | B-01, B-02 | 3 | BLOCK | `ses_093f4d287ffeIyXncHc4Kbw7hA` |
-| 3 | R3 | yes | B-01 | 4 | BLOCK | `ses_093ee80e4ffe7gEHdJ7jdR3nXP` |
-| 4 | R4 | yes | B-01 | 4 | BLOCK | `ses_093e85778ffeHP3eh7MjdnKQYd` |
-| 5 | R5 | yes | No blocking findings. | 3 | APPROVE | `ses_093d2ed8dffeSgNj3RZDdYHX3l` |
+| Round | Audited revision | Full scope? | Blocking findings     | Non-blocking findings | Result  | Invocation reference             |
+| ----- | ---------------- | ----------- | --------------------- | --------------------- | ------- | -------------------------------- |
+| 1     | R1               | yes         | No blocking findings. | 3                     | APPROVE | `ses_096212a56ffemU8IZu4UNXD3pR` |
+| 2     | R2               | yes         | B-01, B-02            | 3                     | BLOCK   | `ses_093f4d287ffeIyXncHc4Kbw7hA` |
+| 3     | R3               | yes         | B-01                  | 4                     | BLOCK   | `ses_093ee80e4ffe7gEHdJ7jdR3nXP` |
+| 4     | R4               | yes         | B-01                  | 4                     | BLOCK   | `ses_093e85778ffeHP3eh7MjdnKQYd` |
+| 5     | R5               | yes         | No blocking findings. | 3                     | APPROVE | `ses_093d2ed8dffeSgNj3RZDdYHX3l` |
 
 R1 approval is historical only. The new compact main-Prompt voice requirement
 and implementation target are substantive, so they invalidate R1 approval and
@@ -681,17 +683,17 @@ No blocking findings.
 
 ## Requirement and traceability coverage
 
-| Confirmed requirement | Independent coverage assessment |
-|---|---|
-| Long file indicators must not create a second row | Covered by the actual-width correction from terminal width to `promptWidth()`, fixed one-row layout ownership, final-frame idle/busy/voice coverage, and the wide-cell suffix assertion. Current divergence is visible at `component/prompt/index.tsx:215-219`; Home constrains Prompt to 75 columns at `routes/home.tsx:72-84`. |
-| Long retry errors must remain compact | Covered by separating variable summary text from fixed `details`, retry metadata, interrupt, and active-duration tokens. Current concatenation and wrapping pressure are established at `component/prompt/index.tsx:1912-1992`. |
-| Error details must be clickable | Covered by unconditional `details` behavior and a real mouse-visible dialog test. Current truncation starts above 80 characters while clickability starts above 120 (`component/prompt/index.tsx:1932-1956`), making the 81–120 test red-capable. |
-| Full retry content must remain available | Covered by display-only whitespace normalization and passing the unchanged Status message to `DialogAlert`. Status permits an unconstrained string (`session/status.ts:13-27`). |
-| Recording/transcription wording should consume less width | Covered by a compact formatter mode used only by the main Prompt, including `Rec 00:03 · alt+v stop` and `Transcribing...`. Default dialog/question wording remains unchanged. |
-| Extension bar must remain one visual row | Covered by the fixed-height/non-wrapping parent contract and real rendered-frame matrix for idle, busy, recording, transcribing, and retry. Starting/stopping share the same branch and are shorter than the tested pressure cases. |
-| Preserve useful information and OpenCode style | Covered by lowercase `details`, compact retry notation, preserved stop/interrupt affordances, retained filename identity, and explicit P0/P1/P2 priorities. |
-| Surgical change only | Covered: four existing files, no new component, setting, dependency, schema, migration, or alternate footer. |
-| Existing adjacent semantics remain unchanged | Covered through explicit non-goals, existing focused suites, active-duration preservation, default voice wording assertions, typecheck, and build verification. |
+| Confirmed requirement                                     | Independent coverage assessment                                                                                                                                                                                                                                                                                                  |
+| --------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Long file indicators must not create a second row         | Covered by the actual-width correction from terminal width to `promptWidth()`, fixed one-row layout ownership, final-frame idle/busy/voice coverage, and the wide-cell suffix assertion. Current divergence is visible at `component/prompt/index.tsx:215-219`; Home constrains Prompt to 75 columns at `routes/home.tsx:72-84`. |
+| Long retry errors must remain compact                     | Covered by separating variable summary text from fixed `details`, retry metadata, interrupt, and active-duration tokens. Current concatenation and wrapping pressure are established at `component/prompt/index.tsx:1912-1992`.                                                                                                  |
+| Error details must be clickable                           | Covered by unconditional `details` behavior and a real mouse-visible dialog test. Current truncation starts above 80 characters while clickability starts above 120 (`component/prompt/index.tsx:1932-1956`), making the 81–120 test red-capable.                                                                                |
+| Full retry content must remain available                  | Covered by display-only whitespace normalization and passing the unchanged Status message to `DialogAlert`. Status permits an unconstrained string (`session/status.ts:13-27`).                                                                                                                                                  |
+| Recording/transcription wording should consume less width | Covered by a compact formatter mode used only by the main Prompt, including `Rec 00:03 · alt+v stop` and `Transcribing...`. Default dialog/question wording remains unchanged.                                                                                                                                                   |
+| Extension bar must remain one visual row                  | Covered by the fixed-height/non-wrapping parent contract and real rendered-frame matrix for idle, busy, recording, transcribing, and retry. Starting/stopping share the same branch and are shorter than the tested pressure cases.                                                                                              |
+| Preserve useful information and OpenCode style            | Covered by lowercase `details`, compact retry notation, preserved stop/interrupt affordances, retained filename identity, and explicit P0/P1/P2 priorities.                                                                                                                                                                      |
+| Surgical change only                                      | Covered: four existing files, no new component, setting, dependency, schema, migration, or alternate footer.                                                                                                                                                                                                                     |
+| Existing adjacent semantics remain unchanged              | Covered through explicit non-goals, existing focused suites, active-duration preservation, default voice wording assertions, typecheck, and build verification.                                                                                                                                                                  |
 
 Forward traceability is complete: every confirmed invariant maps to an existing owner, an exact planned change location, and a behaviorally sensitive test.
 
@@ -789,15 +791,15 @@ Any substantive change to behavior, scope, ownership, file plan, tests, or fallb
 
 ## Requirement and traceability coverage
 
-| Requirement | Coverage assessment |
-|---|---|
+| Requirement                                     | Coverage assessment                                                                                                                                                      |
+| ----------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | Long file indicator must not force a second row | Production owner and width-source correction are correctly identified. Coverage is incomplete because the ordinary idle/busy real-frame path is not behaviorally tested. |
-| Long retry error must remain compact | Covered by separating summary, details, retry metadata, and interrupt controls into one layout path. |
-| Details must be clickable and open full content | Covered by removing the 80/120 length mismatch and routing the raw message to the existing `DialogAlert`. |
-| Recording/transcription width reduction | Covered by a Prompt-local compact voice presentation option while preserving shared default wording. |
-| One-line extension bar | Production boundary is identified, but full state coverage is missing for idle/ordinary busy rendering. |
-| Existing style and semantics preserved | Mostly mapped through non-goals and regression suites; active-duration preservation should be stated more explicitly in the priority contract. |
-| Surgical scope/no major redesign | Covered: four existing files, no new footer, setting, dependency, schema, or fallback path. |
+| Long retry error must remain compact            | Covered by separating summary, details, retry metadata, and interrupt controls into one layout path.                                                                     |
+| Details must be clickable and open full content | Covered by removing the 80/120 length mismatch and routing the raw message to the existing `DialogAlert`.                                                                |
+| Recording/transcription width reduction         | Covered by a Prompt-local compact voice presentation option while preserving shared default wording.                                                                     |
+| One-line extension bar                          | Production boundary is identified, but full state coverage is missing for idle/ordinary busy rendering.                                                                  |
+| Existing style and semantics preserved          | Mostly mapped through non-goals and regression suites; active-duration preservation should be stated more explicitly in the priority contract.                           |
+| Surgical scope/no major redesign                | Covered: four existing files, no new footer, setting, dependency, schema, or fallback path.                                                                              |
 
 Because `B-01` leaves a confirmed state and original file-indicator scenario without a behaviorally sensitive regression, the plan does not yet satisfy the no-confirmed-requirement-left-unverified gate.
 
@@ -955,12 +957,12 @@ an independent full-scope implementation audit.
 
 ### Actual Files and Diff
 
-| File | Implemented responsibility | Raw diff | Whitespace-insensitive diff |
-| --- | --- | ---: | ---: |
-| `packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx` | Use measured Prompt width; enforce one-row flex priority; separate normalized retry summary, unconditional `details`, retry metadata, interrupt, and raw-detail dialog path. | +83 / -79 | +45 / -41 |
-| `packages/opencode/src/cli/cmd/tui/prompt-voice-input.ts` | Add opt-in compact presentation while preserving default shared strings and lifecycle. | +6 / -5 | +6 / -5 |
-| `packages/opencode/test/cli/cmd/tui/prompt-submit-transport.test.tsx` | Exercise the real 160-column renderer / 75-column Prompt, five status frames, SDK status events, visible mouse hit target, display whitespace normalization, and raw dialog detail. | +183 / -7 | +183 / -7 |
-| `packages/opencode/test/cli/tui/prompt-voice-input.test.ts` | Lock default and main-Prompt compact voice labels, timer value, and stop shortcut. | +12 / -0 | +12 / -0 |
+| File                                                                  | Implemented responsibility                                                                                                                                                          |  Raw diff | Whitespace-insensitive diff |
+| --------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------: | --------------------------: |
+| `packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx`        | Use measured Prompt width; enforce one-row flex priority; separate normalized retry summary, unconditional `details`, retry metadata, interrupt, and raw-detail dialog path.        | +83 / -79 |                   +45 / -41 |
+| `packages/opencode/src/cli/cmd/tui/prompt-voice-input.ts`             | Add opt-in compact presentation while preserving default shared strings and lifecycle.                                                                                              |   +6 / -5 |                     +6 / -5 |
+| `packages/opencode/test/cli/cmd/tui/prompt-submit-transport.test.tsx` | Exercise the real 160-column renderer / 75-column Prompt, five status frames, SDK status events, visible mouse hit target, display whitespace normalization, and raw dialog detail. | +183 / -7 |                   +183 / -7 |
+| `packages/opencode/test/cli/tui/prompt-voice-input.test.ts`           | Lock default and main-Prompt compact voice labels, timer value, and stop shortcut.                                                                                                  |  +12 / -0 |                    +12 / -0 |
 
 No production module, test file, configuration surface, dependency, schema,
 generated artifact, migration, alternate footer, or fallback path was added.
@@ -970,26 +972,26 @@ formatter/pure-move text.
 
 ### Red-Green Test Evidence
 
-| Slice | Red evidence | Green evidence |
-| --- | --- | --- |
-| Real Prompt state matrix | Original 160-terminal / 75-Prompt harness returned `{"idle":1,"busy":3,"recording":3,"transcribing":2,"retry":2}` instead of five one-row states. | Durable test and original loop return `[1, 1, 1, 1, 1]`. |
-| Compact voice presentation | Formatter test expected `Starting...` and received `Starting voice...` before the compact option existed. | Compact labels are `Starting...`, `Rec 00:03 · alt+v stop`, `Saving...`, and `Transcribing...`; default strings remain unchanged. |
-| Retry detail interaction | The first real mouse test timed out because OpenTUI's hit child `text` did not reliably bubble to the parent `box`. | Visible summary and `details` text own the same handler; clicking the rendered `details` coordinates opens `Retry Error`. |
-| Display/detail separation | A newline and three repeated spaces could enter the footer through `SessionStatus.Info.retry.message`. | Footer fragments render on one line without repeated spaces, while the dialog retains `The socket   closed...`. |
+| Slice                      | Red evidence                                                                                                                                      | Green evidence                                                                                                                    |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| Real Prompt state matrix   | Original 160-terminal / 75-Prompt harness returned `{"idle":1,"busy":3,"recording":3,"transcribing":2,"retry":2}` instead of five one-row states. | Durable test and original loop return `[1, 1, 1, 1, 1]`.                                                                          |
+| Compact voice presentation | Formatter test expected `Starting...` and received `Starting voice...` before the compact option existed.                                         | Compact labels are `Starting...`, `Rec 00:03 · alt+v stop`, `Saving...`, and `Transcribing...`; default strings remain unchanged. |
+| Retry detail interaction   | The first real mouse test timed out because OpenTUI's hit child `text` did not reliably bubble to the parent `box`.                               | Visible summary and `details` text own the same handler; clicking the rendered `details` coordinates opens `Retry Error`.         |
+| Display/detail separation  | A newline and three repeated spaces could enter the footer through `SessionStatus.Info.retry.message`.                                            | Footer fragments render on one line without repeated spaces, while the dialog retains `The socket   closed...`.                   |
 
 ### Verification Commands and Results
 
 All commands ran from `packages/opencode` as required.
 
-| Command | Result |
-| --- | --- |
-| `bun test test/cli/cmd/tui/prompt-submit-transport.test.tsx --timeout 30000` | PASS: 10 passed, 0 failed, 30 assertions. |
-| `bun test test/cli/tui/prompt-voice-input.test.ts --timeout 30000` | PASS: 22 passed, 1 pre-existing opt-in E2E skipped, 0 failed, 61 assertions. |
-| `bun test test/cli/cmd/tui/session-integration.test.ts --timeout 30000` | PASS: 35 passed, 0 failed, 67 assertions. |
-| `bun test test/util/locale.test.ts --timeout 30000` | PASS: 9 passed, 0 failed, 21 assertions. |
-| `bun typecheck` | PASS: `tsgo --noEmit`. |
-| `bun run build` | ENVIRONMENT BLOCKED: three default attempts failed while fetching `https://models.dev/api.json` with Bun `ECONNRESET`; an official live snapshot supplied through the repository-supported `MODELS_DEV_API_JSON` path reached the build and then stopped because `packages/app/node_modules/vite/bin/vite.js` is absent. Authorized `bun install --frozen-lockfile` retries against both configured mirror and `registry.npmjs.org` failed with `ConnectionClosed` manifest resolution. No unapproved offline URL, cache, or catch-and-success fallback was introduced. |
-| `git diff --check -- <four implementation paths>` | PASS. |
+| Command                                                                      | Result                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| ---------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `bun test test/cli/cmd/tui/prompt-submit-transport.test.tsx --timeout 30000` | PASS: 10 passed, 0 failed, 30 assertions.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `bun test test/cli/tui/prompt-voice-input.test.ts --timeout 30000`           | PASS: 22 passed, 1 pre-existing opt-in E2E skipped, 0 failed, 61 assertions.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `bun test test/cli/cmd/tui/session-integration.test.ts --timeout 30000`      | PASS: 35 passed, 0 failed, 67 assertions.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `bun test test/util/locale.test.ts --timeout 30000`                          | PASS: 9 passed, 0 failed, 21 assertions.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `bun typecheck`                                                              | PASS: `tsgo --noEmit`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `bun run build`                                                              | ENVIRONMENT BLOCKED: three default attempts failed while fetching `https://models.dev/api.json` with Bun `ECONNRESET`; an official live snapshot supplied through the repository-supported `MODELS_DEV_API_JSON` path reached the build and then stopped because `packages/app/node_modules/vite/bin/vite.js` is absent. Authorized `bun install --frozen-lockfile` retries against both configured mirror and `registry.npmjs.org` failed with `ConnectionClosed` manifest resolution. No unapproved offline URL, cache, or catch-and-success fallback was introduced. |
+| `git diff --check -- <four implementation paths>`                            | PASS.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 
 ### Original Feedback-Loop Result
 
@@ -1006,22 +1008,22 @@ The harness is outside the repository and makes no repository change.
 
 ### Actual Secondary and Replacement Path Inventory
 
-| Classification | Actual path | Verdict |
-| --- | --- | --- |
-| Primary | Editor/session/voice inputs → existing `Prompt` → measured Prompt width → one fixed-height extension row → shrinkable variable content plus fixed status/action tokens → existing `DialogAlert` for raw retry details. | Implemented and behaviorally verified. |
-| Shared voice compatibility | `DialogPrompt` and `QuestionPrompt` omit the compact option and retain existing default strings. | Preserved and covered by formatter regression. |
-| Secondary implementation | None. | No parallel footer or duplicate owner exists. |
-| Replacement/fallback | None. | No width-specific layout, feature flag, retry parser fallback, cache, catch-and-success, or compatibility branch exists. |
-| Removed workarounds | Terminal-wide file budget; 80-character summary truncation plus 120-character click gate; `(click to expand)`; one unshrinkable concatenated retry sentence. | Removed from the primary path and replaced by measured ownership and unconditional raw-detail routing. |
+| Classification             | Actual path                                                                                                                                                                                                            | Verdict                                                                                                                  |
+| -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| Primary                    | Editor/session/voice inputs → existing `Prompt` → measured Prompt width → one fixed-height extension row → shrinkable variable content plus fixed status/action tokens → existing `DialogAlert` for raw retry details. | Implemented and behaviorally verified.                                                                                   |
+| Shared voice compatibility | `DialogPrompt` and `QuestionPrompt` omit the compact option and retain existing default strings.                                                                                                                       | Preserved and covered by formatter regression.                                                                           |
+| Secondary implementation   | None.                                                                                                                                                                                                                  | No parallel footer or duplicate owner exists.                                                                            |
+| Replacement/fallback       | None.                                                                                                                                                                                                                  | No width-specific layout, feature flag, retry parser fallback, cache, catch-and-success, or compatibility branch exists. |
+| Removed workarounds        | Terminal-wide file budget; 80-character summary truncation plus 120-character click gate; `(click to expand)`; one unshrinkable concatenated retry sentence.                                                           | Removed from the primary path and replaced by measured ownership and unconditional raw-detail routing.                   |
 
 ### Chinese Comment Calculation
 
-| Metric | Actual | Exclusions and evidence |
-| --- | --- | --- |
-| Effective changed code lines `E` | 194 | New-side non-blank code lines from `git diff -w --unified=0`; excludes import-only, blank, comment-only, formatter-only, generated, plan-document, and pure-move lines. |
-| Qualifying Chinese comment lines `C` | 34 | Adjacent explanations cover measured-width ownership, P0/P1 priority, one-row clipping, raw/display separation, unconditional details, OpenTUI hit propagation, renderer setup, lifecycle cleanup, and compatibility. |
-| Ratio `C / E` | 17.53% | `34 / 194`. |
-| Required minimum `C` | 30 | `ceil(194 × 0.15) = 30`; actual exceeds the gate by 4. |
+| Metric                               | Actual | Exclusions and evidence                                                                                                                                                                                               |
+| ------------------------------------ | ------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Effective changed code lines `E`     | 194    | New-side non-blank code lines from `git diff -w --unified=0`; excludes import-only, blank, comment-only, formatter-only, generated, plan-document, and pure-move lines.                                               |
+| Qualifying Chinese comment lines `C` | 34     | Adjacent explanations cover measured-width ownership, P0/P1 priority, one-row clipping, raw/display separation, unconditional details, OpenTUI hit propagation, renderer setup, lifecycle cleanup, and compatibility. |
+| Ratio `C / E`                        | 17.53% | `34 / 194`.                                                                                                                                                                                                           |
+| Required minimum `C`                 | 30     | `ceil(194 × 0.15) = 30`; actual exceeds the gate by 4.                                                                                                                                                                |
 
 ### Remaining Unverified Items
 
@@ -1037,11 +1039,11 @@ The harness is outside the repository and makes no repository change.
 
 ## 24. Implementation Audit Record
 
-| Round | Plan revision | Full original scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | R5 | yes | B-01 required production build verification is not passing. | 3 | BLOCK | `ses_09397929cffeBaht6ILV3E6IvL` |
-| 2 | R5 | yes | B-01 required production build verification remains incomplete. | 3 | BLOCK | `ses_09397929cffeBaht6ILV3E6IvL` |
-| 3 | R5 | yes | No blocking findings. | 4 | APPROVE | `ses_09397929cffeBaht6ILV3E6IvL` |
+| Round | Plan revision | Full original scope? | Blocking findings                                               | Non-blocking findings | Result  | Invocation reference             |
+| ----- | ------------- | -------------------- | --------------------------------------------------------------- | --------------------- | ------- | -------------------------------- |
+| 1     | R5            | yes                  | B-01 required production build verification is not passing.     | 3                     | BLOCK   | `ses_09397929cffeBaht6ILV3E6IvL` |
+| 2     | R5            | yes                  | B-01 required production build verification remains incomplete. | 3                     | BLOCK   | `ses_09397929cffeBaht6ILV3E6IvL` |
+| 3     | R5            | yes                  | No blocking findings.                                           | 4                     | APPROVE | `ses_09397929cffeBaht6ILV3E6IvL` |
 
 The frozen R5 implementation is verified by the Round 3 full-scope
 `No blocking findings` and `APPROVE` result.

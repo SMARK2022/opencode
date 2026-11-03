@@ -35,29 +35,29 @@ not implementation authority.
 
 ## 3. Repository Context
 
-| Source | Why it constrains this task |
-| --- | --- |
-| `packages/opencode/AGENTS.md`（Style Guide） | 单函数优先、避免过早抽取单用 helper；函数式数组方法；`const`/ternary/早返回；中文注释覆盖非显然约束。 |
-| `packages/opencode/AGENTS.md`（Testing） | 测试不能从仓库根运行；在 `packages/opencode` 内运行。 |
-| `.opencode/templates/canonical-plan.md` | 本计划的结构与硬门。 |
+| Source                                                       | Why it constrains this task                                                                                                                |
+| ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| `packages/opencode/AGENTS.md`（Style Guide）                 | 单函数优先、避免过早抽取单用 helper；函数式数组方法；`const`/ternary/早返回；中文注释覆盖非显然约束。                                      |
+| `packages/opencode/AGENTS.md`（Testing）                     | 测试不能从仓库根运行；在 `packages/opencode` 内运行。                                                                                      |
+| `.opencode/templates/canonical-plan.md`                      | 本计划的结构与硬门。                                                                                                                       |
 | `packages/opencode/src/cli/cmd/tui/routes/session/index.tsx` | 主 Session 渲染器，含 `ReasoningRun`、`BlockTool`、`UserMessage`、`AssistantMessage`、`TextPart` 与 legacy error 全部既有折叠/未折叠实现。 |
-| `packages/opencode/src/cli/cmd/tui/config/keybind.ts` | 现有 `display_thinking` / `tool_details` 默认 `none`；per-block 折叠为鼠标驱动，无需新键位。 |
+| `packages/opencode/src/cli/cmd/tui/config/keybind.ts`        | 现有 `display_thinking` / `tool_details` 默认 `none`；per-block 折叠为鼠标驱动，无需新键位。                                               |
 
 ## 4. Files and Evidence Read
 
-| Evidence | Relevance | Evidence class |
-| --- | --- | --- |
-| `routes/session/index.tsx:1944-2052` `ReasoningRun` | 折叠的"house style"蓝本：`expanded` signal、`REASONING_PREVIEW_ROWS=5`、`reasoningRowsTotal` 视觉行测量、`maxHeight+overflow:hidden`、`onMouseUp` 含 selection guard + `!overflow()` 防预写、`▼ expand`/`▲ collapse` footer、wrap-mode 切换。 | observed |
-| `routes/session/index.tsx:2256-2270` `DEFAULT_BLOCK_CHAR_THRESHOLD=800` / `previewText` | 工具块的同步阈值与预览切片口径（行数 + 字符数双门，尾部 `…`）。 | observed |
-| `routes/session/index.tsx:2700-2832` `BlockTool` | preview/body 双区、懒挂载 + `visible` 切换（规避 OpenTUI renderable 重挂 bug）、`onMouseUp` 含 selection guard + 右键 `MouseButton.RIGHT` → `onRightClick`、footer `Click to expand/collapse`。 | observed |
-| `routes/session/index.tsx:1893-1907` legacy error | 当前全量渲染 `errorMessage(props.message.error)`，`theme.error` 左边框，无折叠。 | observed |
-| `routes/session/index.tsx:1561-1691` `UserMessage` | 当前全量 `<text>{content()}</text>`（1623）；`onMouseUp`（1616）→ 父级 `DialogMessage` 菜单（1389-1400）。左键已被占用，是核心冲突点。 | observed |
-| `routes/session/index.tsx:2098-2154` `TextPart` | 助手正文全量 `<markdown>`/`<code>`，无折叠、无点击处理。 | observed |
-| `routes/session/index.tsx:2774-2786` / `app.tsx:1076` / `ui/dialog.tsx:185` | `MouseButton.RIGHT` 右键作为既有"次要动作通道"的成熟模式。 | observed |
-| `src/util/error.ts:31-51` `errorMessage` | 错误文本来源，可能为多行 stack/JSON。 | observed |
-| `feature-plugins/system/session-v2.tsx:176-214, 361-376, 393-449, 452-513` | v2 debug route 的 `UserMessage`/error/`AssistantText` 全量渲染，以及其独立的 reasoning 折叠（minimal 模式 `▶ Thought`/`▼ Thinking`）。一期一致性收敛对象（`AssistantReasoning` 除外）。 | observed |
-| `config/keybind.ts:132-133` | `tool_details` / `display_thinking` 默认 `none`；per-block 折叠为鼠标驱动。 | observed |
-| `test/cli/cmd/tui/session-message-render.test.tsx:940-978` | 现有 reasoning 折叠的测试口径（`▼ expand` 出现条件、overflow 行数断言、短正文不得出现 disclosure）。新测试需对齐该口径。 | observed |
+| Evidence                                                                                | Relevance                                                                                                                                                                                                                                     | Evidence class |
+| --------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------- |
+| `routes/session/index.tsx:1944-2052` `ReasoningRun`                                     | 折叠的"house style"蓝本：`expanded` signal、`REASONING_PREVIEW_ROWS=5`、`reasoningRowsTotal` 视觉行测量、`maxHeight+overflow:hidden`、`onMouseUp` 含 selection guard + `!overflow()` 防预写、`▼ expand`/`▲ collapse` footer、wrap-mode 切换。 | observed       |
+| `routes/session/index.tsx:2256-2270` `DEFAULT_BLOCK_CHAR_THRESHOLD=800` / `previewText` | 工具块的同步阈值与预览切片口径（行数 + 字符数双门，尾部 `…`）。                                                                                                                                                                               | observed       |
+| `routes/session/index.tsx:2700-2832` `BlockTool`                                        | preview/body 双区、懒挂载 + `visible` 切换（规避 OpenTUI renderable 重挂 bug）、`onMouseUp` 含 selection guard + 右键 `MouseButton.RIGHT` → `onRightClick`、footer `Click to expand/collapse`。                                               | observed       |
+| `routes/session/index.tsx:1893-1907` legacy error                                       | 当前全量渲染 `errorMessage(props.message.error)`，`theme.error` 左边框，无折叠。                                                                                                                                                              | observed       |
+| `routes/session/index.tsx:1561-1691` `UserMessage`                                      | 当前全量 `<text>{content()}</text>`（1623）；`onMouseUp`（1616）→ 父级 `DialogMessage` 菜单（1389-1400）。左键已被占用，是核心冲突点。                                                                                                        | observed       |
+| `routes/session/index.tsx:2098-2154` `TextPart`                                         | 助手正文全量 `<markdown>`/`<code>`，无折叠、无点击处理。                                                                                                                                                                                      | observed       |
+| `routes/session/index.tsx:2774-2786` / `app.tsx:1076` / `ui/dialog.tsx:185`             | `MouseButton.RIGHT` 右键作为既有"次要动作通道"的成熟模式。                                                                                                                                                                                    | observed       |
+| `src/util/error.ts:31-51` `errorMessage`                                                | 错误文本来源，可能为多行 stack/JSON。                                                                                                                                                                                                         | observed       |
+| `feature-plugins/system/session-v2.tsx:176-214, 361-376, 393-449, 452-513`              | v2 debug route 的 `UserMessage`/error/`AssistantText` 全量渲染，以及其独立的 reasoning 折叠（minimal 模式 `▶ Thought`/`▼ Thinking`）。一期一致性收敛对象（`AssistantReasoning` 除外）。                                                      | observed       |
+| `config/keybind.ts:132-133`                                                             | `tool_details` / `display_thinking` 默认 `none`；per-block 折叠为鼠标驱动。                                                                                                                                                                   | observed       |
+| `test/cli/cmd/tui/session-message-render.test.tsx:940-978`                              | 现有 reasoning 折叠的测试口径（`▼ expand` 出现条件、overflow 行数断言、短正文不得出现 disclosure）。新测试需对齐该口径。                                                                                                                      | observed       |
 
 ## 5. Current Behavior
 
@@ -71,43 +71,43 @@ assistant text      -> <markdown>/<code> 全量渲染（TextPart，index.tsx:210
 
 ## 6. Supported Input Domain and Reachability
 
-| Input or condition | Producer | Upstream guarantees | Reachable path | Owner | Classification |
-| --- | --- | --- | --- | --- | --- |
-| 多行/超长 error（stack/JSON，数百行） | `errorMessage`（`util/error.ts`） | 纯 string | `AssistantMessage` error 分支（index.tsx:1893） | `AssistantMessage` | observed |
-| 超长 user 文本（粘贴日志/代码/长 prompt） | `UserMessage.parts` text 拼接（index.tsx:1574-1584） | 纯 string | `UserMessage` 正文（index.tsx:1623） | `UserMessage` | observed |
-| 超长 assistant 正文（大代码块/长解释） | `TextPart.part.text`（index.tsx:2102） | 纯 string | `TextPart`（index.tsx:2107-2150） | `TextPart` | observed |
-| 短正文（≤ 阈值） | 同上 | 同上 | 同上，应保持完整无 disclosure | 同上 | observed |
+| Input or condition                        | Producer                                             | Upstream guarantees | Reachable path                                  | Owner              | Classification |
+| ----------------------------------------- | ---------------------------------------------------- | ------------------- | ----------------------------------------------- | ------------------ | -------------- |
+| 多行/超长 error（stack/JSON，数百行）     | `errorMessage`（`util/error.ts`）                    | 纯 string           | `AssistantMessage` error 分支（index.tsx:1893） | `AssistantMessage` | observed       |
+| 超长 user 文本（粘贴日志/代码/长 prompt） | `UserMessage.parts` text 拼接（index.tsx:1574-1584） | 纯 string           | `UserMessage` 正文（index.tsx:1623）            | `UserMessage`      | observed       |
+| 超长 assistant 正文（大代码块/长解释）    | `TextPart.part.text`（index.tsx:2102）               | 纯 string           | `TextPart`（index.tsx:2107-2150）               | `TextPart`         | observed       |
+| 短正文（≤ 阈值）                          | 同上                                                 | 同上                | 同上，应保持完整无 disclosure                   | 同上               | observed       |
 
 ## 7. Required Invariants
 
-| ID | Behavioral invariant | Evidence | Existing test |
-| --- | --- | --- | --- |
-| INV-01 | 任意可折叠文本区在视觉行数超过阈值时默认收缩，仅显示预览行数 + disclosure footer。 | ReasoningRun:2018-2046；BlockTool:2814-2823 | session-message-render.test.tsx:947-961 |
-| INV-02 | 短正文（未超阈值）保持完整渲染，不出现 disclosure footer，点击不预写 `expanded`。 | ReasoningRun:2004-2006, 2043；测试:940 | session-message-render.test.tsx:940, 978 |
-| INV-03 | 折叠/展开 toggle 不得在文本拖选（`getSelection().getSelectedText()` 非空）时触发。 | ReasoningRun:2003；BlockTool:2776 | session-message-render.test.tsx:980-989（点击短正文不预写） |
-| INV-04 | `UserMessage` 左键 → `DialogMessage` 菜单的既有行为不得被折叠 toggle 改变。 | index.tsx:1389-1400, 1616 | — |
-| INV-05 | 折叠状态为挂载局部、非持久化，新 Session/新挂载默认收缩（与 ReasoningRun/BlockTool 一致）。 | ReasoningRun:1975；BlockTool:2743 | session-message-render.test.tsx:1296-1316 |
-| INV-06 | 流式 assistant 正文在未完成时不得伪造 disclosure（仅当真实 overflow 时显示 toggle）。 | ReasoningRun:1981-1987, 测试:964-978 | session-message-render.test.tsx:964-989 |
+| ID     | Behavioral invariant                                                                        | Evidence                                    | Existing test                                               |
+| ------ | ------------------------------------------------------------------------------------------- | ------------------------------------------- | ----------------------------------------------------------- |
+| INV-01 | 任意可折叠文本区在视觉行数超过阈值时默认收缩，仅显示预览行数 + disclosure footer。          | ReasoningRun:2018-2046；BlockTool:2814-2823 | session-message-render.test.tsx:947-961                     |
+| INV-02 | 短正文（未超阈值）保持完整渲染，不出现 disclosure footer，点击不预写 `expanded`。           | ReasoningRun:2004-2006, 2043；测试:940      | session-message-render.test.tsx:940, 978                    |
+| INV-03 | 折叠/展开 toggle 不得在文本拖选（`getSelection().getSelectedText()` 非空）时触发。          | ReasoningRun:2003；BlockTool:2776           | session-message-render.test.tsx:980-989（点击短正文不预写） |
+| INV-04 | `UserMessage` 左键 → `DialogMessage` 菜单的既有行为不得被折叠 toggle 改变。                 | index.tsx:1389-1400, 1616                   | —                                                           |
+| INV-05 | 折叠状态为挂载局部、非持久化，新 Session/新挂载默认收缩（与 ReasoningRun/BlockTool 一致）。 | ReasoningRun:1975；BlockTool:2743           | session-message-render.test.tsx:1296-1316                   |
+| INV-06 | 流式 assistant 正文在未完成时不得伪造 disclosure（仅当真实 overflow 时显示 toggle）。       | ReasoningRun:1981-1987, 测试:964-978        | session-message-render.test.tsx:964-989                     |
 
 ## 8. First Divergence and Root Cause
 
-| Invariant | First divergence | Owning module/interface | Proof |
-| --- | --- | --- | --- |
-| INV-01（error） | `AssistantMessage` error 分支直接 `<text>{errorMessage(...)}</text>`，无测量、无 `maxHeight`、无 toggle。 | `routes/session/index.tsx` `AssistantMessage`（1893-1907） | 该 `<box>` 仅设 padding/border，子节点为单一全量 `<text>`。 |
-| INV-01（user） | `UserMessage` 直接 `<text>{content()}</text>`，无测量、无 `maxHeight`、无 toggle。 | `routes/session/index.tsx` `UserMessage`（1623） | 同上，且 `onMouseUp` 已绑定菜单，无 disclosure 入口。 |
-| INV-01（assistant text） | `TextPart` 直接全量 `<markdown>`/`<code>`，无 `maxHeight`、无 toggle。 | `routes/session/index.tsx` `TextPart`（2107-2150） | `<box paddingLeft={3}>` 无高度约束，子节点全量渲染。 |
+| Invariant                | First divergence                                                                                          | Owning module/interface                                    | Proof                                                       |
+| ------------------------ | --------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------- | ----------------------------------------------------------- |
+| INV-01（error）          | `AssistantMessage` error 分支直接 `<text>{errorMessage(...)}</text>`，无测量、无 `maxHeight`、无 toggle。 | `routes/session/index.tsx` `AssistantMessage`（1893-1907） | 该 `<box>` 仅设 padding/border，子节点为单一全量 `<text>`。 |
+| INV-01（user）           | `UserMessage` 直接 `<text>{content()}</text>`，无测量、无 `maxHeight`、无 toggle。                        | `routes/session/index.tsx` `UserMessage`（1623）           | 同上，且 `onMouseUp` 已绑定菜单，无 disclosure 入口。       |
+| INV-01（assistant text） | `TextPart` 直接全量 `<markdown>`/`<code>`，无 `maxHeight`、无 toggle。                                    | `routes/session/index.tsx` `TextPart`（2107-2150）         | `<box paddingLeft={3}>` 无高度约束，子节点全量渲染。        |
 
 根因是统一的：这三处文本区从未接入 `ReasoningRun`/`BlockTool` 已建立的 disclosure 通路。非 bug，是缺失的能力。
 
 ## 9. Responsibility and Seam
 
-| Concern | Owner | Interface promise | Why it belongs here | Why another module does not own it |
-| --- | --- | --- | --- | --- |
-| 文本视觉行测量 | 新 `measureTextRows(content, width, widthMethod)`（泛化自 `reasoningRowsTotal`） | 同步返回视觉行数；释放 native 句柄 | ReasoningRun 已证明该口径对 word-wrap 文本必要；复用避免第二套测量 | `previewText` 是切片工具，不测量 |
-| 折叠 disclosure 组件 | 新 `CollapsibleTextBlock`（`routes/session/collapsible-text.tsx`） | 接收 `content`/`fg`/`header?`/`previewRows`/`threshold`；渲染限高正文 + footer + toggle；暴露 `onMouseUp` 行为模式（body-toggle vs footer-toggle） | 三处调用点（error/user/assistant text）语义同构，复用消除三份漂移实现 | ReasoningRun/BlockTool 各有专属约束，不合并 |
-| error 渲染入口 | `AssistantMessage` error 分支 | 用 `CollapsibleTextBlock` 包裹 `errorMessage(...)`，保留 `theme.error` 边框 | 该分支是 error 文本的唯一生产消费点 | — |
-| user 渲染入口 | `UserMessage` | 正文用 `CollapsibleTextBlock`（footer-toggle 模式）；保留 body `onMouseUp`→菜单 | 左键冲突在此解决 | — |
-| assistant 正文入口 | `TextPart` | `<markdown>`/`<code>` 外包 `CollapsibleTextBlock`（body-toggle 模式），流式遵循 INV-06 | 该组件是助手正文唯一渲染者 | — |
+| Concern              | Owner                                                                            | Interface promise                                                                                                                                  | Why it belongs here                                                   | Why another module does not own it          |
+| -------------------- | -------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------- | ------------------------------------------- |
+| 文本视觉行测量       | 新 `measureTextRows(content, width, widthMethod)`（泛化自 `reasoningRowsTotal`） | 同步返回视觉行数；释放 native 句柄                                                                                                                 | ReasoningRun 已证明该口径对 word-wrap 文本必要；复用避免第二套测量    | `previewText` 是切片工具，不测量            |
+| 折叠 disclosure 组件 | 新 `CollapsibleTextBlock`（`routes/session/collapsible-text.tsx`）               | 接收 `content`/`fg`/`header?`/`previewRows`/`threshold`；渲染限高正文 + footer + toggle；暴露 `onMouseUp` 行为模式（body-toggle vs footer-toggle） | 三处调用点（error/user/assistant text）语义同构，复用消除三份漂移实现 | ReasoningRun/BlockTool 各有专属约束，不合并 |
+| error 渲染入口       | `AssistantMessage` error 分支                                                    | 用 `CollapsibleTextBlock` 包裹 `errorMessage(...)`，保留 `theme.error` 边框                                                                        | 该分支是 error 文本的唯一生产消费点                                   | —                                           |
+| user 渲染入口        | `UserMessage`                                                                    | 正文用 `CollapsibleTextBlock`（footer-toggle 模式）；保留 body `onMouseUp`→菜单                                                                    | 左键冲突在此解决                                                      | —                                           |
+| assistant 正文入口   | `TextPart`                                                                       | `<markdown>`/`<code>` 外包 `CollapsibleTextBlock`（body-toggle 模式），流式遵循 INV-06                                                             | 该组件是助手正文唯一渲染者                                            | —                                           |
 
 **测量口径（N-03 澄清）**：`measureTextRows` 测量传入的 content 字符串。`UserMessage`/error 传入纯文本（`<text>` 无 conceal），raw = rendered，测量精确。`TextPart` 传入 raw markdown（`props.part.text.trim()`，pre-conceal）：与 `ReasoningRun` 的 post-conceal 捕获（`onChunks`/`onContent`，ReasoningRun:2087-2090）不同——reasoning 需精确测量来决定 word/char wrap 切换（ReasoningRun:2031, 2086），而 TextPart wrap-mode 固定，测量仅用于 disclosure gate。raw markdown 含语法标记（`**`/`#`/`` ` ``），conceal 后不可见，故 raw 测量可能略微高估视觉行数；在 20 行阈值下该高估（通常 <20% 字符）不会让明显短的正文误触阈值，worst case 为临界正文多出 disclosure footer（展开后可见实际不长，再收起即可），属可接受近似。`maxHeight`/`overflow:hidden` 保证折叠态显示与真实 post-conceal 行数一致，不受 raw 测量影响。若实测误报，可后续为 TextPart 补 `onChunks` 捕获，但当前不引入第二套捕获机制（避免冗余）。
 
@@ -137,11 +137,11 @@ content string
 
 ### 10.2 交互逻辑（冲突最小化）
 
-| 区块 | 左键 body | 左键 footer | 右键 body | 说明 |
-| --- | --- | --- | --- | --- |
-| error | toggle（INV-03 guard） | toggle | toggle | 无既有占用，沿用 ReasoningRun body-toggle |
-| user message | **保留 → `DialogMessage` 菜单**（INV-04） | toggle（`stopPropagation`） | toggle（body `onMouseUp` 按 `evt.button` 分支） | 左键冲突用独立 footer 点击目标解决；右键由 body `onMouseUp` 的 `evt.button===RIGHT` 分支拦截（用户明确提及） |
-| assistant text | toggle（INV-03 guard） | toggle | toggle | 无既有占用；流式遵循 INV-06 |
+| 区块           | 左键 body                                 | 左键 footer                 | 右键 body                                       | 说明                                                                                                         |
+| -------------- | ----------------------------------------- | --------------------------- | ----------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| error          | toggle（INV-03 guard）                    | toggle                      | toggle                                          | 无既有占用，沿用 ReasoningRun body-toggle                                                                    |
+| user message   | **保留 → `DialogMessage` 菜单**（INV-04） | toggle（`stopPropagation`） | toggle（body `onMouseUp` 按 `evt.button` 分支） | 左键冲突用独立 footer 点击目标解决；右键由 body `onMouseUp` 的 `evt.button===RIGHT` 分支拦截（用户明确提及） |
+| assistant text | toggle（INV-03 guard）                    | toggle                      | toggle                                          | 无既有占用；流式遵循 INV-06                                                                                  |
 
 - **selection guard**：所有 toggle 入口首行 `if (renderer.getSelection()?.getSelectedText()) return`（复制 ReasoningRun:2003 / BlockTool:2776）。
 - **overflow guard**：`if (!overflow()) return`，短正文不预写 `expanded`（复制 ReasoningRun:2004-2006）。
@@ -155,79 +155,80 @@ content string
 
 ## 11. Secondary and Replacement Path Inventory
 
-| Path | Current or proposed | Classification | Produces success? | Decision-surface share | Disposition |
-| --- | --- | --- | --- | --- | --- |
-| `ReasoningRun` 折叠 | current | existing compatibility | yes | 不变 | preserve（不合并） |
-| `BlockTool` 折叠 | current | existing compatibility | yes | 不变 | preserve（不合并） |
-| v2 debug route 的 `UserMessage`/error/`AssistantText` 全量渲染 | current | existing compatibility | yes | 一期一致性收敛 | 一期：迁移到 `CollapsibleTextBlock` |
-| v2 debug route 的 `AssistantReasoning` minimal 折叠 | current | existing compatibility | yes | 不变 | preserve |
-| 鼠标驱动 per-block 折叠 | proposed | primary-contract branch | yes | 100% | implement |
-| 键盘 per-block 折叠 | — | forbidden fallback | — | 0% | reject（无逐条 focus 模型，§2） |
+| Path                                                           | Current or proposed | Classification          | Produces success? | Decision-surface share | Disposition                         |
+| -------------------------------------------------------------- | ------------------- | ----------------------- | ----------------- | ---------------------- | ----------------------------------- |
+| `ReasoningRun` 折叠                                            | current             | existing compatibility  | yes               | 不变                   | preserve（不合并）                  |
+| `BlockTool` 折叠                                               | current             | existing compatibility  | yes               | 不变                   | preserve（不合并）                  |
+| v2 debug route 的 `UserMessage`/error/`AssistantText` 全量渲染 | current             | existing compatibility  | yes               | 一期一致性收敛         | 一期：迁移到 `CollapsibleTextBlock` |
+| v2 debug route 的 `AssistantReasoning` minimal 折叠            | current             | existing compatibility  | yes               | 不变                   | preserve                            |
+| 鼠标驱动 per-block 折叠                                        | proposed            | primary-contract branch | yes               | 100%                   | implement                           |
+| 键盘 per-block 折叠                                            | —                   | forbidden fallback      | —                 | 0%                     | reject（无逐条 focus 模型，§2）     |
 
 无新增 alternate success path。无用户请求的 rollback。
 
 ## 12. Workaround Deletion and Replacement
 
-| Existing workaround or duplicate | Why it existed | Why the approved route supersedes it | Delete or collapse location |
-| --- | --- | --- | --- |
-| 无 | 三处文本区从未有折叠 workaround | — | — |
+| Existing workaround or duplicate | Why it existed                  | Why the approved route supersedes it | Delete or collapse location |
+| -------------------------------- | ------------------------------- | ------------------------------------ | --------------------------- |
+| 无                               | 三处文本区从未有折叠 workaround | —                                    | —                           |
 
 ## 13. Forward Traceability
 
-| Requirement or invariant | Production path | Planned file/change | Behavioral test |
-| --- | --- | --- | --- |
-| INV-01 error 折叠 | `AssistantMessage` error 分支 → `CollapsibleTextBlock` | `index.tsx` error 分支 + `collapsible-text.tsx` | 长 error 渲染 `▼ expand (N rows)`，展开后含全文 |
-| INV-01 user 折叠 | `UserMessage` 正文 → `CollapsibleTextBlock`（footer-toggle） | `index.tsx` UserMessage + `collapsible-text.tsx` | 长 user 文本渲染 footer，footer 点击展开 |
-| INV-01 assistant text 折叠 | `TextPart` → `CollapsibleTextBlock`（body-toggle） | `index.tsx` TextPart + `collapsible-text.tsx` | 长 assistant 正文渲染 `▼ expand`，body 点击展开 |
-| INV-02 短正文无 disclosure | `overflow()` 为假时不渲染 footer、不预写 | `collapsible-text.tsx` | 短文本无 `▼/▲`，点击不改变状态 |
-| INV-03 selection guard | toggle 入口首行 guard | `collapsible-text.tsx` | 拖选后 mouseup 不触发 toggle |
-| INV-04 user 菜单不破坏 | footer `stopPropagation`；body `onMouseUp` 左键分支→菜单保留，右键分支→toggle | `index.tsx` UserMessage | 长 user 文本 body 左键仍弹出 `DialogMessage`，右键展开 |
-| INV-05 非持久化 | `createSignal(false)` 局部状态 | `collapsible-text.tsx` | 新挂载默认收缩 |
-| INV-06 流式不预写 | `overflow()` 依赖 post-measure；未 overflow 不显示 toggle | `index.tsx` TextPart + `collapsible-text.tsx` | 流式短正文无 disclosure，增长到 overflow 后出现 |
+| Requirement or invariant   | Production path                                                               | Planned file/change                              | Behavioral test                                        |
+| -------------------------- | ----------------------------------------------------------------------------- | ------------------------------------------------ | ------------------------------------------------------ |
+| INV-01 error 折叠          | `AssistantMessage` error 分支 → `CollapsibleTextBlock`                        | `index.tsx` error 分支 + `collapsible-text.tsx`  | 长 error 渲染 `▼ expand (N rows)`，展开后含全文        |
+| INV-01 user 折叠           | `UserMessage` 正文 → `CollapsibleTextBlock`（footer-toggle）                  | `index.tsx` UserMessage + `collapsible-text.tsx` | 长 user 文本渲染 footer，footer 点击展开               |
+| INV-01 assistant text 折叠 | `TextPart` → `CollapsibleTextBlock`（body-toggle）                            | `index.tsx` TextPart + `collapsible-text.tsx`    | 长 assistant 正文渲染 `▼ expand`，body 点击展开        |
+| INV-02 短正文无 disclosure | `overflow()` 为假时不渲染 footer、不预写                                      | `collapsible-text.tsx`                           | 短文本无 `▼/▲`，点击不改变状态                         |
+| INV-03 selection guard     | toggle 入口首行 guard                                                         | `collapsible-text.tsx`                           | 拖选后 mouseup 不触发 toggle                           |
+| INV-04 user 菜单不破坏     | footer `stopPropagation`；body `onMouseUp` 左键分支→菜单保留，右键分支→toggle | `index.tsx` UserMessage                          | 长 user 文本 body 左键仍弹出 `DialogMessage`，右键展开 |
+| INV-05 非持久化            | `createSignal(false)` 局部状态                                                | `collapsible-text.tsx`                           | 新挂载默认收缩                                         |
+| INV-06 流式不预写          | `overflow()` 依赖 post-measure；未 overflow 不显示 toggle                     | `index.tsx` TextPart + `collapsible-text.tsx`    | 流式短正文无 disclosure，增长到 overflow 后出现        |
 
 ## 14. Reverse Traceability
 
-| Proposed production concept | Requirement ID | Evidence | Why existing logic cannot carry it |
-| --- | --- | --- | --- |
-| `CollapsibleTextBlock` 组件 | INV-01..06 | ReasoningRun/BlockTool 已有模式但内联、不可复用 | 三处文本区无任何折叠代码 |
-| `measureTextRows` | INV-01, INV-06 | `reasoningRowsTotal`:1953-1967 为 reasoning 专属 | 当前未导出、未泛化 |
-| `MESSAGE_PREVIEW_ROWS=20` 等常量（消息类）+ 工具口径常量（错误类） | INV-01 | 用户"超过十行"放宽至 20 + BlockTool 工具口径 | 三处无阈值常量 |
-| footer `▼ expand (N rows)` | INV-01 | ReasoningRun:2046 `▼ expand` | 三处无 footer |
-| error header `✕ Error` | INV-01 | error 边框色已有，折叠态需更强信号 | 无 header |
-| footer `stopPropagation`（user） | INV-04 | BlockTool 右键 `stopPropagation`:2779 | user body 左键被菜单占用 |
-| 右键 toggle | INV-01 | BlockTool:2777-2782；用户明确提及 | 三处无右键 |
+| Proposed production concept                                        | Requirement ID | Evidence                                         | Why existing logic cannot carry it |
+| ------------------------------------------------------------------ | -------------- | ------------------------------------------------ | ---------------------------------- |
+| `CollapsibleTextBlock` 组件                                        | INV-01..06     | ReasoningRun/BlockTool 已有模式但内联、不可复用  | 三处文本区无任何折叠代码           |
+| `measureTextRows`                                                  | INV-01, INV-06 | `reasoningRowsTotal`:1953-1967 为 reasoning 专属 | 当前未导出、未泛化                 |
+| `MESSAGE_PREVIEW_ROWS=20` 等常量（消息类）+ 工具口径常量（错误类） | INV-01         | 用户"超过十行"放宽至 20 + BlockTool 工具口径     | 三处无阈值常量                     |
+| footer `▼ expand (N rows)`                                         | INV-01         | ReasoningRun:2046 `▼ expand`                     | 三处无 footer                      |
+| error header `✕ Error`                                             | INV-01         | error 边框色已有，折叠态需更强信号               | 无 header                          |
+| footer `stopPropagation`（user）                                   | INV-04         | BlockTool 右键 `stopPropagation`:2779            | user body 左键被菜单占用           |
+| 右键 toggle                                                        | INV-01         | BlockTool:2777-2782；用户明确提及                | 三处无右键                         |
 
 ## 15. File-Level Change Plan
 
-| File | Add / modify / delete | Exact responsibility of the change | Expected line delta |
-| --- | --- | --- | --- |
-| `packages/opencode/src/cli/cmd/tui/routes/session/collapsible-text.tsx` | add | 新文件：导出 `CollapsibleTextBlock` + `measureTextRows` + 阈值常量。复用 `ReasoningRun` 的测量/限高/footer/selection-guard 模式，参数化 `content`/`fg`/`header?`/`toggleMode`（`body` \| `footer`）。 | +90 |
-| `packages/opencode/src/cli/cmd/tui/routes/session/index.tsx` | modify | (a) import `CollapsibleTextBlock`；(b) error 分支（1893-1907）用其包裹 `errorMessage(...)`，传 `header`/`toggleMode="body"`；(c) `UserMessage`（1623）用其包裹正文，`toggleMode="footer"`，body `onMouseUp` 改为接收 evt：左键→`props.onMouseUp(goal)`（菜单保留），右键→toggle+`stopPropagation`；(d) `TextPart`（2107-2150）用其包裹 `<markdown>`/`<code>`，`toggleMode="body"`，流式遵循 INV-06。 | +34 / -8 |
-| `packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx` | modify | 新增 7 个行为切片（见 §16），复用现有 `withRenderedSession` / `waitForFrame` / `findRow` / `clickVisibleText` 夹具。 | +210 |
-| `packages/opencode/src/cli/cmd/tui/feature-plugins/system/session-v2.tsx` | modify（一期） | `UserMessage`（176-214）正文、error（361-376）与 `AssistantText`（393-449）迁移到 `CollapsibleTextBlock`，收敛两 route 外观。`AssistantReasoning` 不变。 | +18 / -8 |
+| File                                                                      | Add / modify / delete | Exact responsibility of the change                                                                                                                                                                                                                                                                                                                                                                   | Expected line delta |
+| ------------------------------------------------------------------------- | --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------- |
+| `packages/opencode/src/cli/cmd/tui/routes/session/collapsible-text.tsx`   | add                   | 新文件：导出 `CollapsibleTextBlock` + `measureTextRows` + 阈值常量。复用 `ReasoningRun` 的测量/限高/footer/selection-guard 模式，参数化 `content`/`fg`/`header?`/`toggleMode`（`body` \| `footer`）。                                                                                                                                                                                                | +90                 |
+| `packages/opencode/src/cli/cmd/tui/routes/session/index.tsx`              | modify                | (a) import `CollapsibleTextBlock`；(b) error 分支（1893-1907）用其包裹 `errorMessage(...)`，传 `header`/`toggleMode="body"`；(c) `UserMessage`（1623）用其包裹正文，`toggleMode="footer"`，body `onMouseUp` 改为接收 evt：左键→`props.onMouseUp(goal)`（菜单保留），右键→toggle+`stopPropagation`；(d) `TextPart`（2107-2150）用其包裹 `<markdown>`/`<code>`，`toggleMode="body"`，流式遵循 INV-06。 | +34 / -8            |
+| `packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx`      | modify                | 新增 7 个行为切片（见 §16），复用现有 `withRenderedSession` / `waitForFrame` / `findRow` / `clickVisibleText` 夹具。                                                                                                                                                                                                                                                                                 | +210                |
+| `packages/opencode/src/cli/cmd/tui/feature-plugins/system/session-v2.tsx` | modify（一期）        | `UserMessage`（176-214）正文、error（361-376）与 `AssistantText`（393-449）迁移到 `CollapsibleTextBlock`，收敛两 route 外观。`AssistantReasoning` 不变。                                                                                                                                                                                                                                             | +18 / -8            |
 
 ## 16. TDD Behavior Slices
 
-| Order | Red behavior | Why current code fails | Minimal green behavior | Regression protected |
-| --- | --- | --- | --- | --- |
-| 1 | 长 user 文本（>20 视觉行）出现 `▼ expand (N rows)` footer | `UserMessage` 全量渲染无 disclosure | footer 渲染 + 行数断言 | INV-01(user) |
-| 2 | 长 user 文本 body 左键弹出 `DialogMessage`（菜单项可见），footer 左键展开全文 | body `onMouseUp` 被菜单占用，footer 无 `stopPropagation` 则会双双触发或不触发 | footer 独立 toggle + body 菜单保留 | INV-04 |
-| 3 | 长 error 出现 `▼ expand` + `theme.error` 边框 + `✕ Error` header；展开含全文 | error 分支无 disclosure | header + footer + 展开全文 | INV-01(error) |
-| 4 | 长 assistant 正文出现 `▼ expand`；body 点击展开 | `TextPart` 无 disclosure | body-toggle 展开 | INV-01(assistant) |
-| 5 | 短正文（≤20 行消息 / ≤20 行错误）无 `▼/▲`，点击不改变渲染 | （应通过，作回归） | 无 footer | INV-02 |
-| 6 | 流式短 assistant 正文无 disclosure；增长到 overflow 后出现 `▼ expand` | 需 `overflow()` 跟随测量 | 流式不预写 | INV-06 |
-| 7 | 长 user 文本 body 右键展开（不弹菜单）；body 左键仍弹 `DialogMessage` | body `onMouseUp` 未按 `evt.button` 分支，右键会开菜单 | body 右键 toggle + 左键菜单 | INV-04 + N-02 |
+| Order | Red behavior                                                                  | Why current code fails                                                        | Minimal green behavior             | Regression protected |
+| ----- | ----------------------------------------------------------------------------- | ----------------------------------------------------------------------------- | ---------------------------------- | -------------------- |
+| 1     | 长 user 文本（>20 视觉行）出现 `▼ expand (N rows)` footer                     | `UserMessage` 全量渲染无 disclosure                                           | footer 渲染 + 行数断言             | INV-01(user)         |
+| 2     | 长 user 文本 body 左键弹出 `DialogMessage`（菜单项可见），footer 左键展开全文 | body `onMouseUp` 被菜单占用，footer 无 `stopPropagation` 则会双双触发或不触发 | footer 独立 toggle + body 菜单保留 | INV-04               |
+| 3     | 长 error 出现 `▼ expand` + `theme.error` 边框 + `✕ Error` header；展开含全文  | error 分支无 disclosure                                                       | header + footer + 展开全文         | INV-01(error)        |
+| 4     | 长 assistant 正文出现 `▼ expand`；body 点击展开                               | `TextPart` 无 disclosure                                                      | body-toggle 展开                   | INV-01(assistant)    |
+| 5     | 短正文（≤20 行消息 / ≤20 行错误）无 `▼/▲`，点击不改变渲染                     | （应通过，作回归）                                                            | 无 footer                          | INV-02               |
+| 6     | 流式短 assistant 正文无 disclosure；增长到 overflow 后出现 `▼ expand`         | 需 `overflow()` 跟随测量                                                      | 流式不预写                         | INV-06               |
+| 7     | 长 user 文本 body 右键展开（不弹菜单）；body 左键仍弹 `DialogMessage`         | body `onMouseUp` 未按 `evt.button` 分支，右键会开菜单                         | body 右键 toggle + 左键菜单        | INV-04 + N-02        |
 
 测试口径对齐 `session-message-render.test.tsx:940-989`：用 `waitForFrame` 等待文本出现，`findRow` 定位 footer 行，`clickVisibleText` 触发点击，断言 `▼ expand`/`▲ collapse` 与行间距。selection guard（INV-03）以"点击短正文不预写状态"间接覆盖（与 :980-989 同口径），不引入 mock。
 
 ## 17. Chinese Comment Budget
 
-| Metric | Estimate | Method |
-| --- | --- | --- |
-| Effective changed code lines `E` | ~126 | 排除 import、格式、纯移动 |
-| Required Chinese explanatory comments `C` | >= 19 | `ceil(126*0.15)=19` |
+| Metric                                    | Estimate | Method                    |
+| ----------------------------------------- | -------- | ------------------------- |
+| Effective changed code lines `E`          | ~126     | 排除 import、格式、纯移动 |
+| Required Chinese explanatory comments `C` | >= 19    | `ceil(126*0.15)=19`       |
 
 需中文注释的非显然点：
+
 1. 阈值常量取值理由：消息类 `MESSAGE_PREVIEW_ROWS=20`/`MESSAGE_COLLAPSE_THRESHOLD_ROWS=20`/`MESSAGE_COLLAPSE_CHAR_THRESHOLD=1600`（用户"超过十行"放宽档）；错误类复用工具口径 `previewRows=10`/`threshold=20`/`charThreshold=800`（错误密集，更早折叠）。
 2. `measureTextRows` 每次计算释放 native 句柄（复制 `reasoningRowsTotal:1963-1965` 的泄漏防护理由）。
 3. `toggleMode="footer"` 存在理由：user body 左键被 `DialogMessage` 菜单占用，必须用独立 footer 目标 + `stopPropagation` 解决冲突。
@@ -239,22 +240,22 @@ content string
 
 ## 18. Verification
 
-| Command | Working directory | Evidence produced |
-| --- | --- | --- |
-| `bun test test/cli/cmd/tui/session-message-render.test.tsx` | `packages/opencode` | §16 七个切片全绿 |
-| `bun test test/cli/cmd/tui/` | `packages/opencode` | 无既有 render 测试回归 |
-| `bun typecheck` | `packages/opencode` | `collapsible-text.tsx` 与三处调用点类型通过 |
+| Command                                                     | Working directory   | Evidence produced                           |
+| ----------------------------------------------------------- | ------------------- | ------------------------------------------- |
+| `bun test test/cli/cmd/tui/session-message-render.test.tsx` | `packages/opencode` | §16 七个切片全绿                            |
+| `bun test test/cli/cmd/tui/`                                | `packages/opencode` | 无既有 render 测试回归                      |
+| `bun typecheck`                                             | `packages/opencode` | `collapsible-text.tsx` 与三处调用点类型通过 |
 
 ## 19. Diff Budget
 
-| Metric | Estimate | Justification |
-| --- | --- | --- |
-| Files added | 1 | `collapsible-text.tsx` |
-| Files modified | 3（一期） | `index.tsx`、测试、`session-v2.tsx`（一期迁移） |
-| Files deleted | 0 | — |
-| Production lines | ~120 | 组件 + 测量 + 三处接入 |
-| Test lines | ~210 | 7 行为切片 |
-| Generated lines | 0 | — |
+| Metric           | Estimate  | Justification                                   |
+| ---------------- | --------- | ----------------------------------------------- |
+| Files added      | 1         | `collapsible-text.tsx`                          |
+| Files modified   | 3（一期） | `index.tsx`、测试、`session-v2.tsx`（一期迁移） |
+| Files deleted    | 0         | —                                               |
+| Production lines | ~120      | 组件 + 测量 + 三处接入                          |
+| Test lines       | ~210      | 7 行为切片                                      |
+| Generated lines  | 0         | —                                               |
 
 ## 20. Real Risks and Open Decisions
 

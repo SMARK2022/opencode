@@ -24,7 +24,14 @@ export function project<T extends Projectable>(part: T): T {
   const metadata = projectFields(part.state.metadata, tool)
   const structured = projectFields(part.state.structured, tool)
   if (metadata === part.state.metadata && structured === part.state.structured) return part
-  return { ...part, state: { ...part.state, ...(metadata !== part.state.metadata ? { metadata } : {}), ...(structured !== part.state.structured ? { structured } : {}) } }
+  return {
+    ...part,
+    state: {
+      ...part.state,
+      ...(metadata !== part.state.metadata ? { metadata } : {}),
+      ...(structured !== part.state.structured ? { structured } : {}),
+    },
+  }
 }
 
 export function projectFields<T>(fields: T, tool?: string): T {
@@ -32,7 +39,8 @@ export function projectFields<T>(fields: T, tool?: string): T {
   if (tool !== "edit") return fields
   if (typeof fields !== "object" || fields === null || !("diff" in fields) || !("filediff" in fields)) return fields
   const filediff = fields.filediff
-  if (typeof fields.diff !== "string" || typeof filediff !== "object" || filediff === null || Array.isArray(filediff)) return fields
+  if (typeof fields.diff !== "string" || typeof filediff !== "object" || filediff === null || Array.isArray(filediff))
+    return fields
   if (!("patch" in filediff) || filediff.patch !== fields.diff) return fields
   // V1 metadata与native structured只在正式viewer边界调用；共享事件及存储原对象始终不改写。
   const rest: Record<string, unknown> = { ...filediff }

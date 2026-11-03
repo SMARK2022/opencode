@@ -15,7 +15,15 @@ test("generates the same recorder resources for legacy and native build roots", 
     ["darwin", "x64", ["mac/x86_64/pv_recorder.node"]],
     ["darwin", "arm64", ["mac/arm64/pv_recorder.node"]],
     ["linux", "x64", ["linux/x86_64/pv_recorder.node"]],
-    ["linux", "arm64", ["raspberry-pi/cortex-a53-aarch64/pv_recorder.node", "raspberry-pi/cortex-a72-aarch64/pv_recorder.node", "raspberry-pi/cortex-a76-aarch64/pv_recorder.node"]],
+    [
+      "linux",
+      "arm64",
+      [
+        "raspberry-pi/cortex-a53-aarch64/pv_recorder.node",
+        "raspberry-pi/cortex-a72-aarch64/pv_recorder.node",
+        "raspberry-pi/cortex-a76-aarch64/pv_recorder.node",
+      ],
+    ],
   ] as const
   for (const [os, arch, expected] of targets) {
     const paths = roots.map((root) => {
@@ -55,7 +63,10 @@ class FakeVoiceWorker {
       }
       this.onmessage?.(new MessageEvent("message", { data: { type: "started" } })) // ready先于帧投递。
       this.onmessage?.(new MessageEvent("message", { data: { type: "frame", frame: new Int16Array(4).fill(7_777) } })) // 固定PCM证明实际WAV路径。
-      if (FakeVoiceWorker.terminalError) this.onmessage?.(new MessageEvent("message", { data: { type: "error", message: FakeVoiceWorker.terminalError } })) // 错误终态不能变成成功停止。
+      if (FakeVoiceWorker.terminalError)
+        this.onmessage?.(
+          new MessageEvent("message", { data: { type: "error", message: FakeVoiceWorker.terminalError } }),
+        ) // 错误终态不能变成成功停止。
     })
     if (FakeVoiceWorker.terminalError) return
     this.timer = setInterval(() => {
@@ -122,7 +133,12 @@ describe("prompt voice recorder", () => {
   const failures = [
     { name: "init", input: { initStatus: 8 }, actions: ["init"], message: "initialize failed" },
     { name: "start", input: { startStatus: 8 }, actions: ["init", "start", "delete"], message: "start failed" },
-    { name: "read", input: { readStatus: 8, stopStatus: 8 }, actions: ["init", "start", "read", "stop", "delete"], message: "read failed" },
+    {
+      name: "read",
+      input: { readStatus: 8, stopStatus: 8 },
+      actions: ["init", "start", "read", "stop", "delete"],
+      message: "read failed",
+    },
   ] as const
 
   // #558（INV-B4）：清理权矩阵——每阶段只清理已取得的资源，动作序列逐字断言。
@@ -147,7 +163,10 @@ describe("prompt voice recorder", () => {
     for (const failure of [{ stopStatus: 8 }, { deleteThrows: true }]) {
       await using tmp = await tmpdir()
       const log = path.join(tmp.path, "native.log")
-      const result = await runNativeWorker(tmp.path, fakeNativeSource({ ...failure, log }), { stopOnStarted: false, stopOnFrame: true })
+      const result = await runNativeWorker(tmp.path, fakeNativeSource({ ...failure, log }), {
+        stopOnStarted: false,
+        stopOnFrame: true,
+      })
 
       expect(result.terminal).toBe("stopped") // cleanup状态不能改写已完成录音。
       expect(result.frames.length).toBeGreaterThan(0)
@@ -303,7 +322,7 @@ async function waitForMissing(file: string) {
 
 // #558：busyWait 只用于主线程阻塞模拟——真实 Worker 独立线程不受影响，这正是本修复的 INV。
 function busyWait(ms: number) {
-  for (const start = performance.now(); performance.now() < start + ms;) {}
+  for (const start = performance.now(); performance.now() < start + ms; ) {}
 }
 
 // 真实 Worker + 临时 fake `.cjs` native addon——验证 Worker 侧 native 所有权与原子 stop 边界。
@@ -342,7 +361,7 @@ async function runNativeWorker(
 }
 
 // fake native addon：动作日志（init/start/read/stop/delete）+ 状态码/延迟/样本值全可控。
-  // #558：fake addon 动作日志——断言 Worker 清理权序列的唯一证据源。
+// #558：fake addon 动作日志——断言 Worker 清理权序列的唯一证据源。
 function fakeNativeSource(input: {
   log: string
   initStatus?: number

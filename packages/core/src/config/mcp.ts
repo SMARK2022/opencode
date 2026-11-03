@@ -60,7 +60,11 @@ export function resolve(entries: readonly Info[]): Resolved {
   const merged = entries.reduce<Info>((previous, current) => inherit(previous, current), {})
   return {
     timeout: merged.timeout,
-    servers: Object.fromEntries(Object.entries(merged.servers ?? {}).flatMap(([name, server]) => "type" in server ? [[name, server] as const] : [])),
+    servers: Object.fromEntries(
+      Object.entries(merged.servers ?? {}).flatMap(([name, server]) =>
+        "type" in server ? [[name, server] as const] : [],
+      ),
+    ),
   }
 }
 
@@ -74,7 +78,14 @@ function inherit<A extends object>(previous: A | undefined, next: A): A {
       return
     }
     // Schema.Class也承载配置字段，不能只递归plain object而丢掉Header/OAuth继承。
-    if (value !== null && typeof value === "object" && !Array.isArray(value) && old !== null && typeof old === "object" && !Array.isArray(old))
+    if (
+      value !== null &&
+      typeof value === "object" &&
+      !Array.isArray(value) &&
+      old !== null &&
+      typeof old === "object" &&
+      !Array.isArray(old)
+    )
       Reflect.set(result, key, inherit(old, value))
   })
   return result

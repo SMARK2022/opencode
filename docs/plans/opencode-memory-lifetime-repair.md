@@ -45,18 +45,18 @@
 
 ## 3. Repository Context
 
-| Source | Why it constrains this task |
-| --- | --- |
-| `AGENTS.md` | 最小修改、真实接口测试、package-local test/typecheck、不回退他人改动 |
-| `packages/opencode/AGENTS.md` | Effect Service/InstanceState/Scope 所有权、禁止冗余运行时、模块命名 |
-| `packages/opencode/test/AGENTS.md` | 隔离 tmpdir/testEffect、优先 readiness 而非猜测 sleep |
-| `packages/opencode/test/server/AGENTS.md` | 真实 Effect HTTP seam、listener 生命周期和配置隔离 |
-| `packages/opencode/src/server/routes/instance/httpapi/AGENTS.md` | 服务在 layer 边界构建，不能在 handler 重新 provide 整图 |
-| `.opencode/policy/first-principles-engineering.md` | first divergence、零新 fallback、双向映射、15% 中文解释注释 |
-| `.opencode/templates/canonical-plan.md`、`docs/workflow.md` | 本文 24 节和阶段终态 |
-| `CONTEXT.md` | Session/Message/Part、Run state、InstanceState、AppRuntime、Snapshot 的既有含义 |
-| `docs/adr/README.md`、ADR 索引 | 仅有 triage-label ADR，无内存生命周期 ADR；不虚构已接受的 eviction 策略 |
-| `packages/opencode/bunfig.toml`、`test/preload.ts` | Solid preload、隔离 XDG、内存 SQLite、测试自己的 GC/清理，不接真实 daemon |
+| Source                                                           | Why it constrains this task                                                     |
+| ---------------------------------------------------------------- | ------------------------------------------------------------------------------- |
+| `AGENTS.md`                                                      | 最小修改、真实接口测试、package-local test/typecheck、不回退他人改动            |
+| `packages/opencode/AGENTS.md`                                    | Effect Service/InstanceState/Scope 所有权、禁止冗余运行时、模块命名             |
+| `packages/opencode/test/AGENTS.md`                               | 隔离 tmpdir/testEffect、优先 readiness 而非猜测 sleep                           |
+| `packages/opencode/test/server/AGENTS.md`                        | 真实 Effect HTTP seam、listener 生命周期和配置隔离                              |
+| `packages/opencode/src/server/routes/instance/httpapi/AGENTS.md` | 服务在 layer 边界构建，不能在 handler 重新 provide 整图                         |
+| `.opencode/policy/first-principles-engineering.md`               | first divergence、零新 fallback、双向映射、15% 中文解释注释                     |
+| `.opencode/templates/canonical-plan.md`、`docs/workflow.md`      | 本文 24 节和阶段终态                                                            |
+| `CONTEXT.md`                                                     | Session/Message/Part、Run state、InstanceState、AppRuntime、Snapshot 的既有含义 |
+| `docs/adr/README.md`、ADR 索引                                   | 仅有 triage-label ADR，无内存生命周期 ADR；不虚构已接受的 eviction 策略         |
+| `packages/opencode/bunfig.toml`、`test/preload.ts`               | Solid preload、隔离 XDG、内存 SQLite、测试自己的 GC/清理，不接真实 daemon       |
 
 调查基线：父仓库 `da51973f8c75e7542096d6177cd956ad0d21ddbf`；运行环境 Windows x64 / Bun 1.3.14。原生 vendored HEAD `362be301`。源码工作树仍有其他任务的未提交 edit/write/patch 修改，已记录而未改动。实施前必须重读所有计划文件和此基线间的差异，不能据本文覆盖新工作。
 
@@ -64,40 +64,40 @@
 
 下表列出建立本设计与排除项的证据。引用为当前源码，不能自动等同于用户长时间运行的发布二进制。
 
-| Evidence | Relevance | Evidence class |
-| --- | --- | --- |
-| `packages/opencode/src/cli/cmd/tui/context/sync.tsx:193-228,305-368,666-667,801-998,1168-1248` | store、pending/orphan delta、删除、同步提交和 300 窗口 owner | reachable |
-| 同目录 `sdk.tsx:58-108,143-188`、`event.ts:71-81` | SDK 16ms 队列与 Project/active Session admission，不可静默丢后台流 | reachable |
-| 同目录 `sync-v2.tsx:53-84,155-169`、`app.tsx:303-332` | app-lifetime v2 provider，不能假定所有会话都启用 v2 | reachable |
-| `cli/cmd/tui/routes/session/index.tsx:315-333,1352,2134-2192,2793-2866` | 真实布局、文本预算、BlockTool 延迟构造与展开保留 | reachable |
-| `cli/cmd/tui/routes/session/dialog-message.tsx:26-38,69-94,121-143` | Retry/Fork await 边界依赖原消息数据 | reachable |
-| `cli/cmd/tui/plugin/api.tsx:179-180`、sidebar/files/context、prompt/history/stash/KV/audio | Part 公开消费者、固定历史/音频缓存边界 | reachable |
-| `session/revert.ts:152-168,197-226` | unrevert 只清未提交 Revert；cleanup hidden 是独立不可见事实 | reachable |
-| `session/prompt.ts:665-713,2613-2653,3043-3093` | 单槽真实 owner、exact prefix、conversion cache 与瞬态 request 字符串 | reachable |
-| `session/message-v2.ts:1000-1043,1882-1966` | viewer payload、原始 JSON exact proof；不允许碰撞式替代 | contracted |
-| `session/session.ts:711-727`、`session/projectors.ts:137-140`、`storage/db.ts:193-218` | 无实例删除、递归删除、事务后释放 seam | reachable |
-| `effect/instance-registry.ts`、`instance-state.ts`、`project/instance-store.ts:102-168` | disposer、reload barrier、scope 结束与缓存失效 | reachable |
-| `server/server.ts:103-139`、`server/routes/instance/httpapi/server.ts:185-255`、`websocket-tracker.ts` | 两图分裂与 listener-local auth/close owner | reachable |
-| `server/routes/instance/httpapi/handlers/global.ts:60-107`、`bus/index.ts:63-164` | 未背压有界化的队列；本次不改协议 | reachable |
-| `effect/run-service.ts`、`app-runtime.ts`、`plugin/index.ts:242-249` | shared memoMap 及 in-process 路径 | reachable |
-| `lsp/lsp.ts:331-378,501-550`、`lsp/client.ts:307,595-698`、`lsp/server.ts:34-119`、`tool/read.ts` | Node roots、文档与 Session claim 生命周期；现有 read touch 语义 | reachable |
-| `storage/db.ts:92-150`、`file/index.ts:337-396`、`provider/provider.ts:1409-1426,2084-2101` | SQLite 单例及目录缓存，不能宣称每图复制完整数据库 | reachable |
-| `index.ts:3-40`、`cli/cmd/run.ts:31`、`cli/cmd/serve.ts`、`cli/effect-cmd.ts` | CLI eager import footprint；本次没有安全冷启动对照证明应重写 |
-| `thirdparty/opentui/packages/core/src/Renderable.ts`、`renderables/{Diff,Code,TextBufferRenderable,ScrollBox}.ts` | live registry、原生资源释放、布局保持 | reachable |
-| 同包 `lib/tree-sitter/{client,parser.worker}.ts`、`zig/{buffer,grapheme,text-buffer,text-buffer-view}.zig` | parser/tree、clip-before-allocation、容量与引用生命周期 | reachable |
-| `thirdparty/opentui/packages/solid/src/reconciler.ts:118-168` | 256-root deferred destruction bound；非立即回收不等于永久泄漏 | reachable |
-| `.opencode/plugins/tui-smoke.tsx:990-1010`、OpenTUI `post/effects.ts:264-336` | vignette mask 按屏幕面积，不是正文级缓存 | reachable |
-| 根/`packages/{core,opencode,plugin}/package.json`、`bun.lock` | 实际 .12 dependency/peer/native closure | observed |
-| `script/upgrade-opentui.ts`、`packages/opencode/script/{verify-opentui-closure,opentui-provenance,smoke-opentui-artifact}.ts` | 唯一 release/closure 路径及构建验收；不得复制 DLL | contracted |
-| `test/cli/cmd/tui/{sync-fixture,sync.test,sync-undefined-messages.test,session-message-render.test,smooth-scrollbar.test}.tsx/ts` | 已有真实挂载、事件/HTTP、渲染/滚动 seam | observed |
-| `test/session/{prompt,session}.test.ts`、`test/project/instance.test.ts`、`test/storage/cold.test.ts` | warm cache、mutation、无实例删除、disposal、事务失败回归 | observed |
-| `test/server/httpapi-{listen,cors,authorization,instance,promptasync-context,event}.test.ts` | listener 配置及生命周期基线 | observed |
-| `test/lsp/client.test.ts`、`test/tool/lsp.test.ts` | LSP 16 项现有回归通过 | observed |
-| OpenTUI core 的 native-backed-measurement/renderer.lifecycle/text-buffer/text-buffer-view/scrollbox/native-handle/Diff.regression/allocator-stats/Code/renderer.custom-stdout 测试 | 170 项 core 相关现有测试通过，详见 §18 | observed |
-| OpenTUI solid 的 scrollbox-cleanchildren/duplicate-id-culling/sticky-scroll 测试 | 22 项现有回归通过 | observed |
-| `.temp/testing/memory-sync-lifecycle.test.tsx` | 真实 SyncProvider；18 个行为实验、16 MiB 留存、并发提交 | observed |
-| `.temp/testing/memory-daemon-ownership.test.ts` | 实际 loop/remove/dispose WeakRef、exact proof 体积、共享图反例 | observed |
-| `.temp/testing/memory-render-lifecycle.ts`、`memory-render-glyph.ts` | 安装/源码 DLL 对照、真实 native 资源与 geometry | observed |
+| Evidence                                                                                                                                                                           | Relevance                                                            | Evidence class |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------- | -------------- |
+| `packages/opencode/src/cli/cmd/tui/context/sync.tsx:193-228,305-368,666-667,801-998,1168-1248`                                                                                     | store、pending/orphan delta、删除、同步提交和 300 窗口 owner         | reachable      |
+| 同目录 `sdk.tsx:58-108,143-188`、`event.ts:71-81`                                                                                                                                  | SDK 16ms 队列与 Project/active Session admission，不可静默丢后台流   | reachable      |
+| 同目录 `sync-v2.tsx:53-84,155-169`、`app.tsx:303-332`                                                                                                                              | app-lifetime v2 provider，不能假定所有会话都启用 v2                  | reachable      |
+| `cli/cmd/tui/routes/session/index.tsx:315-333,1352,2134-2192,2793-2866`                                                                                                            | 真实布局、文本预算、BlockTool 延迟构造与展开保留                     | reachable      |
+| `cli/cmd/tui/routes/session/dialog-message.tsx:26-38,69-94,121-143`                                                                                                                | Retry/Fork await 边界依赖原消息数据                                  | reachable      |
+| `cli/cmd/tui/plugin/api.tsx:179-180`、sidebar/files/context、prompt/history/stash/KV/audio                                                                                         | Part 公开消费者、固定历史/音频缓存边界                               | reachable      |
+| `session/revert.ts:152-168,197-226`                                                                                                                                                | unrevert 只清未提交 Revert；cleanup hidden 是独立不可见事实          | reachable      |
+| `session/prompt.ts:665-713,2613-2653,3043-3093`                                                                                                                                    | 单槽真实 owner、exact prefix、conversion cache 与瞬态 request 字符串 | reachable      |
+| `session/message-v2.ts:1000-1043,1882-1966`                                                                                                                                        | viewer payload、原始 JSON exact proof；不允许碰撞式替代              | contracted     |
+| `session/session.ts:711-727`、`session/projectors.ts:137-140`、`storage/db.ts:193-218`                                                                                             | 无实例删除、递归删除、事务后释放 seam                                | reachable      |
+| `effect/instance-registry.ts`、`instance-state.ts`、`project/instance-store.ts:102-168`                                                                                            | disposer、reload barrier、scope 结束与缓存失效                       | reachable      |
+| `server/server.ts:103-139`、`server/routes/instance/httpapi/server.ts:185-255`、`websocket-tracker.ts`                                                                             | 两图分裂与 listener-local auth/close owner                           | reachable      |
+| `server/routes/instance/httpapi/handlers/global.ts:60-107`、`bus/index.ts:63-164`                                                                                                  | 未背压有界化的队列；本次不改协议                                     | reachable      |
+| `effect/run-service.ts`、`app-runtime.ts`、`plugin/index.ts:242-249`                                                                                                               | shared memoMap 及 in-process 路径                                    | reachable      |
+| `lsp/lsp.ts:331-378,501-550`、`lsp/client.ts:307,595-698`、`lsp/server.ts:34-119`、`tool/read.ts`                                                                                  | Node roots、文档与 Session claim 生命周期；现有 read touch 语义      | reachable      |
+| `storage/db.ts:92-150`、`file/index.ts:337-396`、`provider/provider.ts:1409-1426,2084-2101`                                                                                        | SQLite 单例及目录缓存，不能宣称每图复制完整数据库                    | reachable      |
+| `index.ts:3-40`、`cli/cmd/run.ts:31`、`cli/cmd/serve.ts`、`cli/effect-cmd.ts`                                                                                                      | CLI eager import footprint；本次没有安全冷启动对照证明应重写         |
+| `thirdparty/opentui/packages/core/src/Renderable.ts`、`renderables/{Diff,Code,TextBufferRenderable,ScrollBox}.ts`                                                                  | live registry、原生资源释放、布局保持                                | reachable      |
+| 同包 `lib/tree-sitter/{client,parser.worker}.ts`、`zig/{buffer,grapheme,text-buffer,text-buffer-view}.zig`                                                                         | parser/tree、clip-before-allocation、容量与引用生命周期              | reachable      |
+| `thirdparty/opentui/packages/solid/src/reconciler.ts:118-168`                                                                                                                      | 256-root deferred destruction bound；非立即回收不等于永久泄漏        | reachable      |
+| `.opencode/plugins/tui-smoke.tsx:990-1010`、OpenTUI `post/effects.ts:264-336`                                                                                                      | vignette mask 按屏幕面积，不是正文级缓存                             | reachable      |
+| 根/`packages/{core,opencode,plugin}/package.json`、`bun.lock`                                                                                                                      | 实际 .12 dependency/peer/native closure                              | observed       |
+| `script/upgrade-opentui.ts`、`packages/opencode/script/{verify-opentui-closure,opentui-provenance,smoke-opentui-artifact}.ts`                                                      | 唯一 release/closure 路径及构建验收；不得复制 DLL                    | contracted     |
+| `test/cli/cmd/tui/{sync-fixture,sync.test,sync-undefined-messages.test,session-message-render.test,smooth-scrollbar.test}.tsx/ts`                                                  | 已有真实挂载、事件/HTTP、渲染/滚动 seam                              | observed       |
+| `test/session/{prompt,session}.test.ts`、`test/project/instance.test.ts`、`test/storage/cold.test.ts`                                                                              | warm cache、mutation、无实例删除、disposal、事务失败回归             | observed       |
+| `test/server/httpapi-{listen,cors,authorization,instance,promptasync-context,event}.test.ts`                                                                                       | listener 配置及生命周期基线                                          | observed       |
+| `test/lsp/client.test.ts`、`test/tool/lsp.test.ts`                                                                                                                                 | LSP 16 项现有回归通过                                                | observed       |
+| OpenTUI core 的 native-backed-measurement/renderer.lifecycle/text-buffer/text-buffer-view/scrollbox/native-handle/Diff.regression/allocator-stats/Code/renderer.custom-stdout 测试 | 170 项 core 相关现有测试通过，详见 §18                               | observed       |
+| OpenTUI solid 的 scrollbox-cleanchildren/duplicate-id-culling/sticky-scroll 测试                                                                                                   | 22 项现有回归通过                                                    | observed       |
+| `.temp/testing/memory-sync-lifecycle.test.tsx`                                                                                                                                     | 真实 SyncProvider；18 个行为实验、16 MiB 留存、并发提交              | observed       |
+| `.temp/testing/memory-daemon-ownership.test.ts`                                                                                                                                    | 实际 loop/remove/dispose WeakRef、exact proof 体积、共享图反例       | observed       |
+| `.temp/testing/memory-render-lifecycle.ts`、`memory-render-glyph.ts`                                                                                                               | 安装/源码 DLL 对照、真实 native 资源与 geometry                      | observed       |
 
 说明：表内个别组合路径用文件 stem 表达，实际扩展名由相应目录已有文件决定；§18 给出可直接运行的完整路径。上轮 OS 指标仅作规模背景，不作为本 R1 对象归因证据。
 
@@ -149,60 +149,60 @@ vendored 修复 -> clip-before-allocation -> 同负载不消耗不可见 glyph o
 
 ## 6. Supported Input Domain and Reachability
 
-| Input or condition | Producer | Upstream guarantees | Reachable path | Owner | Classification |
-| --- | --- | --- | --- | --- | --- |
-| Message removed/hidden | Session projector / Revert cleanup | ID 和所属 Session 已解码；hidden 是持久事实 | useEvent -> sync reducer | SyncProvider | observed |
-| Part removed/hidden，父数组缺失 | 异步 Part 与 delta 生命周期 | 不能保证父 Message 已在 viewer | reducer/replay | SyncProvider | observed |
-| Session 删除，含未加载父 Message 的 Part | Session.Event.Deleted | Session ID 唯一，列表不是全部历史 | Project event -> store | SyncProvider | observed |
-| snapshot 挂起时删除/新增/terminal update | 并行 HTTP 与 SSE | 无统一服务端 revision，可顺序交错 | async session.sync + reducer | SyncProvider | observed |
-| unknown-but-live delta-before-parent | 当前 SSE producer | delta 不持久化，丢弃会丢文字 | orphan replay | SyncProvider | observed |
-| 300 窗口滚出、强制页替换 | 当前 viewer contract | projection removal 不等于持久删除 | sync/window | SyncProvider | contracted |
-| Retry/Fork await 中原 Part 失效 | 用户动作与异步网络 | 已选 Message 可在 await 后消失 | DialogMessage | action owner | reachable |
-| 无实例/递归 Session.remove | Session public interface | publish 可为 false，事务失败传播 | projector committed deletion | prompt slot owner | observed |
-| Project reload/dispose，旧 run 与新实例竞争 | InstanceStore/RunState | disposal 有 barrier，scope 可中断 | cache publish/dispose boundary | prompt slot owner | reachable |
-| 双 listener 不同 auth/close | Server.listen | 配置与 socket 生命周期必须隔离 | route layer build | listener owner | observed |
-| 不可见字形裁剪 | ScrollBox/renderer | 裁剪位置已知，不应创建不可见 glyph owner | native draw | existing OpenTUI repair | observed |
-| 任意无限乱序、多源伪造 ID | 无已证实生产者 | 不新增信任边界 | 不适用 | 不适用 | speculative |
+| Input or condition                          | Producer                           | Upstream guarantees                         | Reachable path                 | Owner                   | Classification |
+| ------------------------------------------- | ---------------------------------- | ------------------------------------------- | ------------------------------ | ----------------------- | -------------- |
+| Message removed/hidden                      | Session projector / Revert cleanup | ID 和所属 Session 已解码；hidden 是持久事实 | useEvent -> sync reducer       | SyncProvider            | observed       |
+| Part removed/hidden，父数组缺失             | 异步 Part 与 delta 生命周期        | 不能保证父 Message 已在 viewer              | reducer/replay                 | SyncProvider            | observed       |
+| Session 删除，含未加载父 Message 的 Part    | Session.Event.Deleted              | Session ID 唯一，列表不是全部历史           | Project event -> store         | SyncProvider            | observed       |
+| snapshot 挂起时删除/新增/terminal update    | 并行 HTTP 与 SSE                   | 无统一服务端 revision，可顺序交错           | async session.sync + reducer   | SyncProvider            | observed       |
+| unknown-but-live delta-before-parent        | 当前 SSE producer                  | delta 不持久化，丢弃会丢文字                | orphan replay                  | SyncProvider            | observed       |
+| 300 窗口滚出、强制页替换                    | 当前 viewer contract               | projection removal 不等于持久删除           | sync/window                    | SyncProvider            | contracted     |
+| Retry/Fork await 中原 Part 失效             | 用户动作与异步网络                 | 已选 Message 可在 await 后消失              | DialogMessage                  | action owner            | reachable      |
+| 无实例/递归 Session.remove                  | Session public interface           | publish 可为 false，事务失败传播            | projector committed deletion   | prompt slot owner       | observed       |
+| Project reload/dispose，旧 run 与新实例竞争 | InstanceStore/RunState             | disposal 有 barrier，scope 可中断           | cache publish/dispose boundary | prompt slot owner       | reachable      |
+| 双 listener 不同 auth/close                 | Server.listen                      | 配置与 socket 生命周期必须隔离              | route layer build              | listener owner          | observed       |
+| 不可见字形裁剪                              | ScrollBox/renderer                 | 裁剪位置已知，不应创建不可见 glyph owner    | native draw                    | existing OpenTUI repair | observed       |
+| 任意无限乱序、多源伪造 ID                   | 无已证实生产者                     | 不新增信任边界                              | 不适用                         | 不适用                  | speculative    |
 
 ## 7. Required Invariants
 
-| ID | Behavioral invariant | Evidence | Existing test |
-| --- | --- | --- | --- |
-| INV-01 | 已删除/隐藏 Message 的 Part 和 delta 不再由 TUI 持有；其他 Message 不变 | TUI 红测 | 新 lifecycle slices |
-| INV-02 | 已删除 Session 的重 payload 和 owned 状态释放，旧 HTTP/event 不得复活 | 16 MiB、HTTP race 红测 | 新 lifecycle slices |
-| INV-03 | 快照仅释放最终投影之外的对象，保留请求期间的合法变化 | force/new-message 红测 | sync stale-stream/progress tests |
-| INV-04 | 300、chronology、BINARY、后台恢复、terminal authority 不变 | 用户 + 现有通过测试 | sync chronology/delta/progress |
-| INV-05 | 被删除/dispose 的 prompt current-entry 不得延长对象生命，其他有效槽不受影响 | WeakRef 红测 | 新 prompt lifetime slices |
-| INV-06 | exact proof、单槽、2048-turn warm reuse、Compaction/Revert 和 Provider body 不变 | 现有 passing tests | prompt.test.ts |
-| INV-07 | 原生可见输出正确，不给被裁剪字形创建未消费 owner | installed red / vendored green | existing clipped regression |
-| INV-08 | 滚动高度/marker/thumb/选择、折叠、首屏与流式顺滑不退化 | 用户 + geometry 实验 | session-message-render / smooth-scrollbar / sticky-scroll |
-| INV-09 | Retry/Copy/Revert/Fork 使用用户选中时的输入，await 不依赖被释放 store | action consumer | 新 action race slice |
-| INV-10 | listener auth/close、LSP、MCP、权限/问题和数据库错误语义不弱化 | 反例 + 现有基线 | server/LSP/cold regressions |
-| INV-11 | <=12 production/dependency 文件；本方案再约束正式代码+测试 gross changed lines <=1200 | 用户硬预算，本文更保守计法 | diff accounting |
-| INV-12 | 本轮仅 plan 和指定实验；不审计、不实施、不提交 | 用户 | git status / audit record |
+| ID     | Behavioral invariant                                                                  | Evidence                       | Existing test                                             |
+| ------ | ------------------------------------------------------------------------------------- | ------------------------------ | --------------------------------------------------------- |
+| INV-01 | 已删除/隐藏 Message 的 Part 和 delta 不再由 TUI 持有；其他 Message 不变               | TUI 红测                       | 新 lifecycle slices                                       |
+| INV-02 | 已删除 Session 的重 payload 和 owned 状态释放，旧 HTTP/event 不得复活                 | 16 MiB、HTTP race 红测         | 新 lifecycle slices                                       |
+| INV-03 | 快照仅释放最终投影之外的对象，保留请求期间的合法变化                                  | force/new-message 红测         | sync stale-stream/progress tests                          |
+| INV-04 | 300、chronology、BINARY、后台恢复、terminal authority 不变                            | 用户 + 现有通过测试            | sync chronology/delta/progress                            |
+| INV-05 | 被删除/dispose 的 prompt current-entry 不得延长对象生命，其他有效槽不受影响           | WeakRef 红测                   | 新 prompt lifetime slices                                 |
+| INV-06 | exact proof、单槽、2048-turn warm reuse、Compaction/Revert 和 Provider body 不变      | 现有 passing tests             | prompt.test.ts                                            |
+| INV-07 | 原生可见输出正确，不给被裁剪字形创建未消费 owner                                      | installed red / vendored green | existing clipped regression                               |
+| INV-08 | 滚动高度/marker/thumb/选择、折叠、首屏与流式顺滑不退化                                | 用户 + geometry 实验           | session-message-render / smooth-scrollbar / sticky-scroll |
+| INV-09 | Retry/Copy/Revert/Fork 使用用户选中时的输入，await 不依赖被释放 store                 | action consumer                | 新 action race slice                                      |
+| INV-10 | listener auth/close、LSP、MCP、权限/问题和数据库错误语义不弱化                        | 反例 + 现有基线                | server/LSP/cold regressions                               |
+| INV-11 | <=12 production/dependency 文件；本方案再约束正式代码+测试 gross changed lines <=1200 | 用户硬预算，本文更保守计法     | diff accounting                                           |
+| INV-12 | 本轮仅 plan 和指定实验；不审计、不实施、不提交                                        | 用户                           | git status / audit record                                 |
 
 ## 8. First Divergence and Root Cause
 
-| Invariant | First divergence | Owning module/interface | Proof |
-| --- | --- | --- | --- |
-| 01/02 | 删除投影父对象时未释放子 payload；early return 跳过 orphan 清理 | sync reducer | memory-sync 14 reds |
-| 02/03 | await 之后无删除/请求代际检查，HTTP 集合直接替换 live 集合 | session.sync/refresh commits | force deletion/new-message/diff reds |
-| 05 | per-Service 单槽未加入 Session/Instance 生命周期 | SessionPrompt Service cache | delete/dispose WeakRef reds |
-| 07 | consumer 仍解析到未包含现有裁剪修复的 native artifact | dependency closure | 同版本不同 hash，固定负载差分 |
-| 09 | action 在 await 后才从可变化 store 提取用户选择内容 | DialogMessage | reachable consumer，须补行为红测 |
+| Invariant | First divergence                                                | Owning module/interface      | Proof                                |
+| --------- | --------------------------------------------------------------- | ---------------------------- | ------------------------------------ |
+| 01/02     | 删除投影父对象时未释放子 payload；early return 跳过 orphan 清理 | sync reducer                 | memory-sync 14 reds                  |
+| 02/03     | await 之后无删除/请求代际检查，HTTP 集合直接替换 live 集合      | session.sync/refresh commits | force deletion/new-message/diff reds |
+| 05        | per-Service 单槽未加入 Session/Instance 生命周期                | SessionPrompt Service cache  | delete/dispose WeakRef reds          |
+| 07        | consumer 仍解析到未包含现有裁剪修复的 native artifact           | dependency closure           | 同版本不同 hash，固定负载差分        |
+| 09        | action 在 await 后才从可变化 store 提取用户选择内容             | DialogMessage                | reachable consumer，须补行为红测     |
 
 红测命令与结果见 §18。根因界定不包含“看到 RSS 大，所以所有缓存都泄漏”；没有推导出这条命题。
 
 ## 9. Responsibility and Seam
 
-| Concern | Owner | Interface promise | Why it belongs here | Why another module does not own it |
-| --- | --- | --- | --- | --- |
-| viewer 对象释放与提交准入 | SyncProvider | useSync.data 对应有效 viewer projection | message/part/index/delta 和 HTTP commit 均由它持有 | renderer/SDK 不拥有完整 store |
-| 操作输入跨 await | DialogMessage | Retry/Fork 作用于已选输入 | action 知道要跨异步保存哪些轻量/必要数据 | cache 不应为等待 action 保留整页 |
-| current-entry 生存期 | 私有 prompt cache slot | 不延长已结束 Session/Instance 生存期 | 唯一保存 proof/canonical/chunks 的 owner | Bus publish=false 不能可靠通知所有槽 |
-| 已提交删除通知 | Session projector + Database.effect | 事务成功才失效缓存 | 包含无实例与递归删除路径 | UI/网络 handler 不覆盖全部入口 |
-| Project dispose/reload 完成 | InstanceStore existing barrier | 旧工作结束再清同代对象 | 避免 disposer 并行期间再发布旧槽 | timer 无法表达代际 |
-| native 消费一致性 | dependency manifests/lock/gitlink + existing verifier | 发布源码与消费 DLL 同源 | 修复已在 vendored 实现，不应另造算法 | 手拷 DLL 不可复现 |
+| Concern                     | Owner                                                 | Interface promise                       | Why it belongs here                                | Why another module does not own it   |
+| --------------------------- | ----------------------------------------------------- | --------------------------------------- | -------------------------------------------------- | ------------------------------------ |
+| viewer 对象释放与提交准入   | SyncProvider                                          | useSync.data 对应有效 viewer projection | message/part/index/delta 和 HTTP commit 均由它持有 | renderer/SDK 不拥有完整 store        |
+| 操作输入跨 await            | DialogMessage                                         | Retry/Fork 作用于已选输入               | action 知道要跨异步保存哪些轻量/必要数据           | cache 不应为等待 action 保留整页     |
+| current-entry 生存期        | 私有 prompt cache slot                                | 不延长已结束 Session/Instance 生存期    | 唯一保存 proof/canonical/chunks 的 owner           | Bus publish=false 不能可靠通知所有槽 |
+| 已提交删除通知              | Session projector + Database.effect                   | 事务成功才失效缓存                      | 包含无实例与递归删除路径                           | UI/网络 handler 不覆盖全部入口       |
+| Project dispose/reload 完成 | InstanceStore existing barrier                        | 旧工作结束再清同代对象                  | 避免 disposer 并行期间再发布旧槽                   | timer 无法表达代际                   |
+| native 消费一致性           | dependency manifests/lock/gitlink + existing verifier | 发布源码与消费 DLL 同源                 | 修复已在 vendored 实现，不应另造算法               | 手拷 DLL 不可复现                    |
 
 ## 10. Single Approved Primary-Path Design
 
@@ -239,80 +239,80 @@ vendored 修复 -> clip-before-allocation -> 同负载不消耗不可见 glyph o
 
 ## 11. Secondary and Replacement Path Inventory
 
-| Path | Current or proposed | Classification | Produces success? | Decision-surface share | Disposition |
-| --- | --- | --- | --- | --- | --- |
-| live/HTTP 合并，300 window，orphan-before-parent | current | primary-contract branch | yes | 保留 | preserve |
-| deleted/hidden rejection + lease invalidation | proposed | primary-contract branch | 不产生替代数据 | 核心 owner transition | implement |
-| goal 请求现有非致命处理、diff resolved/rejected 合同 | current | existing compatibility | 原有范围 | 不扩展 | preserve |
-| 数据库 after-commit slot invalidation | proposed | primary-contract branch | 无独立业务结果 | 核心 lifetime | implement |
-| 本地 DLL substitution | rejected | forbidden fallback | 可能伪装安装成功 | 0 | reject |
-| 共享整张 listener 图 | rejected | 非等价替换 | 破坏 auth/close | 0 | reject |
-| 每次 idle 清缓存、丢后台 delta、自动重试另一解析器 | rejected | forbidden fallback / behavior change | 可能 | 0 | reject |
-| 新生产诊断路径 | none | diagnostic | no | **0%** | none |
+| Path                                                 | Current or proposed | Classification                       | Produces success? | Decision-surface share | Disposition |
+| ---------------------------------------------------- | ------------------- | ------------------------------------ | ----------------- | ---------------------- | ----------- |
+| live/HTTP 合并，300 window，orphan-before-parent     | current             | primary-contract branch              | yes               | 保留                   | preserve    |
+| deleted/hidden rejection + lease invalidation        | proposed            | primary-contract branch              | 不产生替代数据    | 核心 owner transition  | implement   |
+| goal 请求现有非致命处理、diff resolved/rejected 合同 | current             | existing compatibility               | 原有范围          | 不扩展                 | preserve    |
+| 数据库 after-commit slot invalidation                | proposed            | primary-contract branch              | 无独立业务结果    | 核心 lifetime          | implement   |
+| 本地 DLL substitution                                | rejected            | forbidden fallback                   | 可能伪装安装成功  | 0                      | reject      |
+| 共享整张 listener 图                                 | rejected            | 非等价替换                           | 破坏 auth/close   | 0                      | reject      |
+| 每次 idle 清缓存、丢后台 delta、自动重试另一解析器   | rejected            | forbidden fallback / behavior change | 可能              | 0                      | reject      |
+| 新生产诊断路径                                       | none                | diagnostic                           | no                | **0%**                 | none        |
 
 新 alternate-success paths = 0；不增加 timer/TTL/备用 loader。测试和临时实验不计入 production decision surface。
 
 ## 12. Workaround Deletion and Replacement
 
-| Existing workaround or duplicate | Why it existed | Why the approved route supersedes it | Delete or collapse location |
-| --- | --- | --- | --- |
-| Message/Session 删除只改父列表的局部逻辑 | 初期仅满足显示移除 | 显示 owner 与 payload owner 同步结束 | `sync.tsx` 删除分支折叠进统一 release |
-| snapshot 只写新 Parts，不扫最终投影 | 保留 live 文本但忽略历史离场 | merge 完成后按最终集合释放，保留并发变化 | `sync.tsx` sync commit |
-| 缺父对象 early return 位于 orphan cleanup 之前 | 假定无父即无资源 | 实验直接证明 orphan 可存在 | `sync.tsx` removed/hidden |
-| 无 lifecycle 的 Service 局部 current-entry | warm reuse | 单槽保留、owner 正确退出 | `prompt.ts` 旧局部引用 |
-| .12 consumer 未消费新裁剪修复 | 源码与已安装 artifact 更新不同步 | 新 immutable closure 后消费正确代码 | manifests/lock/gitlink |
+| Existing workaround or duplicate               | Why it existed                   | Why the approved route supersedes it     | Delete or collapse location           |
+| ---------------------------------------------- | -------------------------------- | ---------------------------------------- | ------------------------------------- |
+| Message/Session 删除只改父列表的局部逻辑       | 初期仅满足显示移除               | 显示 owner 与 payload owner 同步结束     | `sync.tsx` 删除分支折叠进统一 release |
+| snapshot 只写新 Parts，不扫最终投影            | 保留 live 文本但忽略历史离场     | merge 完成后按最终集合释放，保留并发变化 | `sync.tsx` sync commit                |
+| 缺父对象 early return 位于 orphan cleanup 之前 | 假定无父即无资源                 | 实验直接证明 orphan 可存在               | `sync.tsx` removed/hidden             |
+| 无 lifecycle 的 Service 局部 current-entry     | warm reuse                       | 单槽保留、owner 正确退出                 | `prompt.ts` 旧局部引用                |
+| .12 consumer 未消费新裁剪修复                  | 源码与已安装 artifact 更新不同步 | 新 immutable closure 后消费正确代码      | manifests/lock/gitlink                |
 
 已有 BlockTool preview memo、Diff teardown、deferred destroy、parser release 不删除也不重写；本轮实验没有证明它们失效。
 
 ## 13. Forward Traceability
 
-| Requirement or invariant | Production path | Planned file/change | Behavioral test |
-| --- | --- | --- | --- |
-| 01/02，异常正文不保留 | sync release/admission | `sync.tsx` | message/part/session + 16 MiB + late events |
-| 02/03，旧异步请求不重建状态 | sync/refresh commit | `sync.tsx` | pending history/goal/diff/status/list/blocker、双 force |
-| 04，300/后台/排序/正文不变 | existing admission/merge | 同文件保持参数与序列 | existing sync suite + positive controls |
-| 05/06，cache 生命周期与 warm reuse | cache slots + deletion/disposal | prompt/cache/instance-store/projectors | WeakRef with collection control、warm prefix/body parity |
-| 07，裁剪与 native release | dependency family | 六个 dependency/gitlink 文件 | installed native output + compiled smoke |
-| 08，准确滚动/顺滑 | 不更改 layout；store 原子释放 | sync batching，render 路径保持 | existing render/scroll suite + repeated lifecycle geometry |
-| 09，action await 安全 | capture selected content | dialog-message | Retry/Fork during deletion |
-| 10，现有语义 | unchanged listener/LSP/database | 不引入整图共享 | server/LSP/cold baseline and regression |
-| 11/12 | diff / stage control | 本文文件白名单、预算 | numstat、status、无审计记录 |
+| Requirement or invariant           | Production path                 | Planned file/change                    | Behavioral test                                            |
+| ---------------------------------- | ------------------------------- | -------------------------------------- | ---------------------------------------------------------- |
+| 01/02，异常正文不保留              | sync release/admission          | `sync.tsx`                             | message/part/session + 16 MiB + late events                |
+| 02/03，旧异步请求不重建状态        | sync/refresh commit             | `sync.tsx`                             | pending history/goal/diff/status/list/blocker、双 force    |
+| 04，300/后台/排序/正文不变         | existing admission/merge        | 同文件保持参数与序列                   | existing sync suite + positive controls                    |
+| 05/06，cache 生命周期与 warm reuse | cache slots + deletion/disposal | prompt/cache/instance-store/projectors | WeakRef with collection control、warm prefix/body parity   |
+| 07，裁剪与 native release          | dependency family               | 六个 dependency/gitlink 文件           | installed native output + compiled smoke                   |
+| 08，准确滚动/顺滑                  | 不更改 layout；store 原子释放   | sync batching，render 路径保持         | existing render/scroll suite + repeated lifecycle geometry |
+| 09，action await 安全              | capture selected content        | dialog-message                         | Retry/Fork during deletion                                 |
+| 10，现有语义                       | unchanged listener/LSP/database | 不引入整图共享                         | server/LSP/cold baseline and regression                    |
+| 11/12                              | diff / stage control            | 本文文件白名单、预算                   | numstat、status、无审计记录                                |
 
 ## 14. Reverse Traceability
 
-| Proposed production concept | Requirement ID | Evidence | Why existing logic cannot carry it |
-| --- | --- | --- | --- |
-| Part/Message/Session release | 01/02 | 真实公开 store 红测 | 已有局部删除没有 child ownership |
-| ID-only invalidation facts | 02/04 | late full Part/delta rehydrate | 清当前数组不能阻止后续准入；未知 live delta 不能全拒绝 |
-| per-request token + active change IDs | 02/03 | HTTP stale resurrection/new message loss | fullSynced Set 不表示 in-flight generation |
-| action-local PromptInfo | 09 | await 后读 store | cache 不应为 action 长期保留全页 |
-| single-slot registry + lease | 05/06 | actual proof WeakRef | Service scope 比 Session/Instance 长且可有多图 |
-| after-commit release | 05/10 | remove publish=false/cold rollback | Bus 不是全部删除入口，事务内提前释放错误 |
-| old-context disposal boundary | 05/06 | dispose WeakRef + reload producer | 并发 runDisposers 内清理存在再发布窗口 |
-| immutable dependency closure | 07 | installed/vendor 差分 | 版本字符串不能证明实际修复被消费 |
+| Proposed production concept           | Requirement ID | Evidence                                 | Why existing logic cannot carry it                     |
+| ------------------------------------- | -------------- | ---------------------------------------- | ------------------------------------------------------ |
+| Part/Message/Session release          | 01/02          | 真实公开 store 红测                      | 已有局部删除没有 child ownership                       |
+| ID-only invalidation facts            | 02/04          | late full Part/delta rehydrate           | 清当前数组不能阻止后续准入；未知 live delta 不能全拒绝 |
+| per-request token + active change IDs | 02/03          | HTTP stale resurrection/new message loss | fullSynced Set 不表示 in-flight generation             |
+| action-local PromptInfo               | 09             | await 后读 store                         | cache 不应为 action 长期保留全页                       |
+| single-slot registry + lease          | 05/06          | actual proof WeakRef                     | Service scope 比 Session/Instance 长且可有多图         |
+| after-commit release                  | 05/10          | remove publish=false/cold rollback       | Bus 不是全部删除入口，事务内提前释放错误               |
+| old-context disposal boundary         | 05/06          | dispose WeakRef + reload producer        | 并发 runDisposers 内清理存在再发布窗口                 |
+| immutable dependency closure          | 07             | installed/vendor 差分                    | 版本字符串不能证明实际修复被消费                       |
 
 ## 15. File-Level Change Plan
 
 表内行数为 **added + deleted** 预算，包含注释/import/生成 lock，不用净删行抵销新增。不会改正式测试来让现有断言变弱。具体实现超预算时回到 plan revision，不删除必要测试凑数。
 
-| File | Add / modify / delete | Exact responsibility of the change | Expected gross lines |
-| --- | --- | --- | ---: |
-| `packages/opencode/src/cli/cmd/tui/context/sync.tsx` | modify | 生命周期释放、失效准入、async snapshot commit | 330 |
-| `packages/opencode/src/cli/cmd/tui/routes/session/dialog-message.tsx` | modify | Retry/Fork 首个 await 前捕获必要内容 | 20 |
-| `packages/opencode/src/session/prompt.ts` | modify | 单槽/lease 接入，保持算法 | 55 |
-| `packages/opencode/src/session/prompt-window-cache.ts` | add | 私有 slot registry、identity invalidation | 75 |
-| `packages/opencode/src/project/instance-store.ts` | modify | old-context disposal/reload barrier 接入 | 18 |
-| `packages/opencode/src/session/projectors.ts` | modify | after-commit Session 删除失效 | 10 |
-| `package.json` | modify | family catalog/overrides | 28 |
-| `packages/core/package.json` | modify | local package overrides | 22 |
-| `packages/opencode/package.json` | modify | local package overrides | 22 |
-| `packages/plugin/package.json` | modify | peer compatibility lower bound | 6 |
-| `bun.lock` | generated change | 单一不可变 family URL/integrity | 80 |
-| `thirdparty/opentui` gitlink | update only if release commit differs | 精确 release source pin，无新 native source 设计 | 2 |
-| `packages/opencode/test/cli/cmd/tui/sync.test.tsx` | modify | 参数化生命周期/HTTP 竞态，复用 fixture | 190 |
-| `packages/opencode/test/session/prompt.test.ts` | modify | cache lifecycle/rollback/concurrency，复用现有 fixtures | 95 |
-| `packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx` | modify | action race、布局保持 | 45 |
-| **小计** | 12 production/dependency + 3 test files | production/dependency 668，tests 330 | **998** |
+| File                                                                  | Add / modify / delete                   | Exact responsibility of the change                      | Expected gross lines |
+| --------------------------------------------------------------------- | --------------------------------------- | ------------------------------------------------------- | -------------------: |
+| `packages/opencode/src/cli/cmd/tui/context/sync.tsx`                  | modify                                  | 生命周期释放、失效准入、async snapshot commit           |                  330 |
+| `packages/opencode/src/cli/cmd/tui/routes/session/dialog-message.tsx` | modify                                  | Retry/Fork 首个 await 前捕获必要内容                    |                   20 |
+| `packages/opencode/src/session/prompt.ts`                             | modify                                  | 单槽/lease 接入，保持算法                               |                   55 |
+| `packages/opencode/src/session/prompt-window-cache.ts`                | add                                     | 私有 slot registry、identity invalidation               |                   75 |
+| `packages/opencode/src/project/instance-store.ts`                     | modify                                  | old-context disposal/reload barrier 接入                |                   18 |
+| `packages/opencode/src/session/projectors.ts`                         | modify                                  | after-commit Session 删除失效                           |                   10 |
+| `package.json`                                                        | modify                                  | family catalog/overrides                                |                   28 |
+| `packages/core/package.json`                                          | modify                                  | local package overrides                                 |                   22 |
+| `packages/opencode/package.json`                                      | modify                                  | local package overrides                                 |                   22 |
+| `packages/plugin/package.json`                                        | modify                                  | peer compatibility lower bound                          |                    6 |
+| `bun.lock`                                                            | generated change                        | 单一不可变 family URL/integrity                         |                   80 |
+| `thirdparty/opentui` gitlink                                          | update only if release commit differs   | 精确 release source pin，无新 native source 设计        |                    2 |
+| `packages/opencode/test/cli/cmd/tui/sync.test.tsx`                    | modify                                  | 参数化生命周期/HTTP 竞态，复用 fixture                  |                  190 |
+| `packages/opencode/test/session/prompt.test.ts`                       | modify                                  | cache lifecycle/rollback/concurrency，复用现有 fixtures |                   95 |
+| `packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx`  | modify                                  | action race、布局保持                                   |                   45 |
+| **小计**                                                              | 12 production/dependency + 3 test files | production/dependency 668，tests 330                    |              **998** |
 
 剩余 202 行是完整性余量，不授权第 13 个 production/dependency 文件。六个依赖文件为 release 前置条件可满足后的额度；本阶段不修改它们。现有 native 修复已在基线提交，不重复记作 R1 新代码；未来 release 若带入额外源代码，须单独检查完整 diff，不能借 gitlink 隐藏新算法或预算。
 
@@ -320,18 +320,18 @@ vendored 修复 -> clip-before-allocation -> 同负载不消耗不可见 glyph o
 
 实验 seam 由用户自主测试授权下选定：真实 SyncProvider/SDK test transport、真实 SessionPrompt/Session API、真实 renderable/native 输出。正式测试不照搬全部实验脚手架，不断言 private map 大小；从公开 store 内容、Provider body、资源可回收性和终端帧观察。
 
-| Order | Red behavior | Why current code fails | Minimal green behavior | Regression protected |
-| --- | --- | --- | --- | --- |
-| 1 | removed/hidden Message 后公开 Part 仍存在 | 只删父/index | release 所属 Parts/delta | sibling/其他 Session、chronology |
-| 2 | Session 删除后 16 MiB 与 owned 状态仍存在 | 只删列表/goal | release Session 全部 owned references | filtered list 非删除、后台活动 |
-| 3 | 无父删除/hidden、late Part/delta 会复活 | early return/无失效准入 | shared invalidation + replay gate | unknown live delta-before-parent |
-| 4 | HTTP history/goal/diff 迟到复活、双 force 乱序 | 无提交 token | token/active changes，逐 await guard | diff 错误传播、首屏先于 diff |
-| 5 | status/list/permission/question 迟到回填 | 删除未进入快照合并 | 复用 change-tracking/失效过滤 | 现有 blocker race tests |
-| 6 | snapshot 抹掉请求后新 Message | 直接 authoritative replace | final projection merge+prune | 300、BINARY、terminal、progress |
-| 7 | Retry/Fork await 中删除导致输入丢失/异常 | 捕获太晚 | action-local capture | synthetic/附件/Undo/Copy |
-| 8 | actual cache proof 在 delete/dispose 后仍可达 | service 单槽未失效 | slot/after-commit/context lifecycle | warm reuse、replacement control |
-| 9 | rollback/old disposal/new entry/active run/Scope close | 尚未完整实验，必须先 red 或明确现有 green | lease identity，不清新 entry | 无实例/递归删除，Provider body |
-| 10 | installed native clipped glyph exhaustion | consumer 落后修复 | 已发布修复 closure | native handles/scroll/selection |
+| Order | Red behavior                                           | Why current code fails                    | Minimal green behavior                | Regression protected             |
+| ----- | ------------------------------------------------------ | ----------------------------------------- | ------------------------------------- | -------------------------------- |
+| 1     | removed/hidden Message 后公开 Part 仍存在              | 只删父/index                              | release 所属 Parts/delta              | sibling/其他 Session、chronology |
+| 2     | Session 删除后 16 MiB 与 owned 状态仍存在              | 只删列表/goal                             | release Session 全部 owned references | filtered list 非删除、后台活动   |
+| 3     | 无父删除/hidden、late Part/delta 会复活                | early return/无失效准入                   | shared invalidation + replay gate     | unknown live delta-before-parent |
+| 4     | HTTP history/goal/diff 迟到复活、双 force 乱序         | 无提交 token                              | token/active changes，逐 await guard  | diff 错误传播、首屏先于 diff     |
+| 5     | status/list/permission/question 迟到回填               | 删除未进入快照合并                        | 复用 change-tracking/失效过滤         | 现有 blocker race tests          |
+| 6     | snapshot 抹掉请求后新 Message                          | 直接 authoritative replace                | final projection merge+prune          | 300、BINARY、terminal、progress  |
+| 7     | Retry/Fork await 中删除导致输入丢失/异常               | 捕获太晚                                  | action-local capture                  | synthetic/附件/Undo/Copy         |
+| 8     | actual cache proof 在 delete/dispose 后仍可达          | service 单槽未失效                        | slot/after-commit/context lifecycle   | warm reuse、replacement control  |
+| 9     | rollback/old disposal/new entry/active run/Scope close | 尚未完整实验，必须先 red 或明确现有 green | lease identity，不清新 entry          | 无实例/递归删除，Provider body   |
+| 10    | installed native clipped glyph exhaustion              | consumer 落后修复                         | 已发布修复 closure                    | native handles/scroll/selection  |
 
 一条 vertical slice red -> 最小 green -> 已有关联回归，再进入下一条。本轮只运行 red/现有基线，不实施 green。
 
@@ -339,11 +339,11 @@ WeakRef 是内存生命周期 oracle，不用它读取业务私有 map。正式�
 
 ## 17. Chinese Comment Budget
 
-| Metric | Estimate | Method |
-| --- | ---: | --- |
-| Effective changed code lines E | 约 680 | production + tests；排除 import-only、lock/generated、纯移动 |
-| Required Chinese explanatory comments C | 至少 102 | `ceil(E * 0.15)`；实际 E 增加时随之增加 |
-| 预算包含关系 | 998 gross 内包含解释性注释 | 不在 1200 行之外另加注释 |
+| Metric                                  |                   Estimate | Method                                                       |
+| --------------------------------------- | -------------------------: | ------------------------------------------------------------ |
+| Effective changed code lines E          |                     约 680 | production + tests；排除 import-only、lock/generated、纯移动 |
+| Required Chinese explanatory comments C |                   至少 102 | `ceil(E * 0.15)`；实际 E 增加时随之增加                      |
+| 预算包含关系                            | 998 gross 内包含解释性注释 | 不在 1200 行之外另加注释                                     |
 
 注释分布在：删除 vs eviction 的不同含义、未知 live delta 的不可丢弃性、snapshot 期间变更合并、terminal/progress 权威、过滤列表不等于删除、action await 输入所有权、单槽非 per-Project、after-commit/rollback、旧 context 与新 lease、native artifact 身份边界及测试对照意图。不得翻译赋值/重复测试名/集中凑行。
 
@@ -353,34 +353,34 @@ WeakRef 是内存生命周期 oracle，不用它读取业务私有 map。正式�
 
 `P` = `F:/ML/PythonAIProject/Claude-Code/opencode/packages/opencode`；`C` = 同仓库 `thirdparty/opentui/packages/core`；`S` = 同仓库 `thirdparty/opentui/packages/solid`。
 
-| Command | Working directory | Observed evidence |
-| --- | --- | --- |
-| `bun test --timeout 30000 ./test/cli/cmd/tui/sync.test.tsx ./test/cli/cmd/tui/sync-undefined-messages.test.tsx` | P | 28 pass / 0 fail |
-| `bun test --preload @opentui/solid/preload --preload ./test/preload.ts --timeout 30000 ../../.temp/testing/memory-sync-lifecycle.test.tsx` | P | 最终 4 pass / 14 fail，47 assertions；扩展版重复得到同样分类 |
-| `bun test --timeout 30000 ../../.temp/testing/memory-daemon-ownership.test.ts -t "releases retained proof"` | P | delete/dispose 两个目标红测；replacement collection positive control 通过 |
-| `bun test --timeout 30000 ../../.temp/testing/memory-daemon-ownership.test.ts -t "dispose releases retained proof"` | P | 独立重复 disposal 红测 |
-| `bun test --timeout 30000 ../../.temp/testing/memory-daemon-ownership.test.ts -t "real listener\|shared route memoMap\|shared tracker memoization\|measures real raw prompt proof"` | P | 四个命名实验的复现命令；前阶段各实验观察到 status 分裂、共享 auth/close 反例、exact proof 随 payload 增长。它们是排除错误方案证据，不要求全部变绿；未另计此合并命令的运行结果 |
-| `bun run --conditions=browser --preload @opentui/solid/preload ../../.temp/testing/memory-render-lifecycle.ts` | P | installed lifecycle/geometry 通过 |
-| 同上一命令加 `--vendored-native` | P | vendored lifecycle/geometry 通过 |
-| `bun run ../../.temp/testing/memory-render-glyph.ts` | P | wrapper exit 0；installed child 1，vendored child 0；wrapper 成功不等于 installed 通过 |
-| `bun test --timeout 15000 src/tests/native-backed-measurement-lifecycle.test.ts src/tests/renderer.lifecycle.test.ts src/text-buffer.test.ts src/text-buffer-view.test.ts src/tests/scrollbox.test.ts` | C | 144 pass |
-| `bun test --timeout 15000 src/native-handle.test.ts src/renderables/Diff.regression.test.ts src/tests/allocator-stats.test.ts` | C | 20 pass |
-| `bun test --timeout 15000 src/renderables/Code.test.ts -t "reuses one managed buffer\|filetype change releases\|replacing the client releases\|destroy during in-flight create\|destroy releases the managed buffer"` | C | 5 pass |
-| `bun test --timeout 15000 src/tests/renderer.custom-stdout.test.ts -t "clipped text subtree preserves"` | C | 1 pass |
-| `bun test --timeout 15000 tests/scrollbox-cleanchildren.test.tsx tests/scrollbox-duplicate-id-culling.test.tsx tests/sticky-scroll.test.tsx` | S | 22 pass |
-| `bun test --timeout 15000 test/cli/cmd/tui/session-message-render.test.tsx -t "non-collapsed shell\|expanded shell\|collapsed shell preview\|apply_patch preview card\|notebook source card keeps\|session keeps latest streamed\|switching sessions after scrolling"` | P | 7 pass |
-| `bun test --timeout 15000 test/cli/cmd/tui/smooth-scrollbar.test.ts` | P | 2 pass |
-| `bun test --timeout 30000 ./test/server/httpapi-listen.test.ts ./test/server/httpapi-cors.test.ts ./test/server/httpapi-authorization.test.ts` | P | 15 pass / 7 skip，Windows PTY/WebSocket skips 不算验证通过 |
-| `bun test --timeout 30000 ./test/server/httpapi-instance.test.ts ./test/server/httpapi-promptasync-context.test.ts ./test/server/httpapi-event.test.ts` | P | 10 pass |
-| `bun test --timeout 30000 ./test/session/prompt.test.ts -t "reuses a 2048-turn prefix"` | P | 1 pass |
-| `bun test --timeout 30000 ./test/session/prompt.test.ts -t "loop exits immediately\|contracts a retained suffix\|refreshes queued Permission\|invalidates a retained window\|sanitizes cached Tool"` | P | 5 pass |
-| `bun test --timeout 30000 ./test/session/session.test.ts -t "remove works without an instance"` | P | 1 pass |
-| `bun test --timeout 30000 ./test/project/instance.test.ts` | P | 10 pass |
-| `bun test --timeout 30000 ./test/storage/cold.test.ts -t "fails closed on a corrupted payload\|releases shared cold references"` | P | 2 pass |
-| `bun test --timeout 30000 ./test/lsp/client.test.ts ./test/tool/lsp.test.ts` | P | 16 pass / 0 fail，32 assertions |
-| `bun typecheck` | P | exit 0，`tsgo --noEmit` |
-| `gh release view v0.4.3-smark.12 --repo SMARK2022/opentui --json tagName,publishedAt,targetCommitish,isPrerelease` | root | .12 存在，2026-09-10 发布 prerelease |
-| 对 `.13` 执行相同查询 | root | release not found；未发布任何内容 |
+| Command                                                                                                                                                                                                                                                                | Working directory | Observed evidence                                                                                                                                                             |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `bun test --timeout 30000 ./test/cli/cmd/tui/sync.test.tsx ./test/cli/cmd/tui/sync-undefined-messages.test.tsx`                                                                                                                                                        | P                 | 28 pass / 0 fail                                                                                                                                                              |
+| `bun test --preload @opentui/solid/preload --preload ./test/preload.ts --timeout 30000 ../../.temp/testing/memory-sync-lifecycle.test.tsx`                                                                                                                             | P                 | 最终 4 pass / 14 fail，47 assertions；扩展版重复得到同样分类                                                                                                                  |
+| `bun test --timeout 30000 ../../.temp/testing/memory-daemon-ownership.test.ts -t "releases retained proof"`                                                                                                                                                            | P                 | delete/dispose 两个目标红测；replacement collection positive control 通过                                                                                                     |
+| `bun test --timeout 30000 ../../.temp/testing/memory-daemon-ownership.test.ts -t "dispose releases retained proof"`                                                                                                                                                    | P                 | 独立重复 disposal 红测                                                                                                                                                        |
+| `bun test --timeout 30000 ../../.temp/testing/memory-daemon-ownership.test.ts -t "real listener\|shared route memoMap\|shared tracker memoization\|measures real raw prompt proof"`                                                                                    | P                 | 四个命名实验的复现命令；前阶段各实验观察到 status 分裂、共享 auth/close 反例、exact proof 随 payload 增长。它们是排除错误方案证据，不要求全部变绿；未另计此合并命令的运行结果 |
+| `bun run --conditions=browser --preload @opentui/solid/preload ../../.temp/testing/memory-render-lifecycle.ts`                                                                                                                                                         | P                 | installed lifecycle/geometry 通过                                                                                                                                             |
+| 同上一命令加 `--vendored-native`                                                                                                                                                                                                                                       | P                 | vendored lifecycle/geometry 通过                                                                                                                                              |
+| `bun run ../../.temp/testing/memory-render-glyph.ts`                                                                                                                                                                                                                   | P                 | wrapper exit 0；installed child 1，vendored child 0；wrapper 成功不等于 installed 通过                                                                                        |
+| `bun test --timeout 15000 src/tests/native-backed-measurement-lifecycle.test.ts src/tests/renderer.lifecycle.test.ts src/text-buffer.test.ts src/text-buffer-view.test.ts src/tests/scrollbox.test.ts`                                                                 | C                 | 144 pass                                                                                                                                                                      |
+| `bun test --timeout 15000 src/native-handle.test.ts src/renderables/Diff.regression.test.ts src/tests/allocator-stats.test.ts`                                                                                                                                         | C                 | 20 pass                                                                                                                                                                       |
+| `bun test --timeout 15000 src/renderables/Code.test.ts -t "reuses one managed buffer\|filetype change releases\|replacing the client releases\|destroy during in-flight create\|destroy releases the managed buffer"`                                                  | C                 | 5 pass                                                                                                                                                                        |
+| `bun test --timeout 15000 src/tests/renderer.custom-stdout.test.ts -t "clipped text subtree preserves"`                                                                                                                                                                | C                 | 1 pass                                                                                                                                                                        |
+| `bun test --timeout 15000 tests/scrollbox-cleanchildren.test.tsx tests/scrollbox-duplicate-id-culling.test.tsx tests/sticky-scroll.test.tsx`                                                                                                                           | S                 | 22 pass                                                                                                                                                                       |
+| `bun test --timeout 15000 test/cli/cmd/tui/session-message-render.test.tsx -t "non-collapsed shell\|expanded shell\|collapsed shell preview\|apply_patch preview card\|notebook source card keeps\|session keeps latest streamed\|switching sessions after scrolling"` | P                 | 7 pass                                                                                                                                                                        |
+| `bun test --timeout 15000 test/cli/cmd/tui/smooth-scrollbar.test.ts`                                                                                                                                                                                                   | P                 | 2 pass                                                                                                                                                                        |
+| `bun test --timeout 30000 ./test/server/httpapi-listen.test.ts ./test/server/httpapi-cors.test.ts ./test/server/httpapi-authorization.test.ts`                                                                                                                         | P                 | 15 pass / 7 skip，Windows PTY/WebSocket skips 不算验证通过                                                                                                                    |
+| `bun test --timeout 30000 ./test/server/httpapi-instance.test.ts ./test/server/httpapi-promptasync-context.test.ts ./test/server/httpapi-event.test.ts`                                                                                                                | P                 | 10 pass                                                                                                                                                                       |
+| `bun test --timeout 30000 ./test/session/prompt.test.ts -t "reuses a 2048-turn prefix"`                                                                                                                                                                                | P                 | 1 pass                                                                                                                                                                        |
+| `bun test --timeout 30000 ./test/session/prompt.test.ts -t "loop exits immediately\|contracts a retained suffix\|refreshes queued Permission\|invalidates a retained window\|sanitizes cached Tool"`                                                                   | P                 | 5 pass                                                                                                                                                                        |
+| `bun test --timeout 30000 ./test/session/session.test.ts -t "remove works without an instance"`                                                                                                                                                                        | P                 | 1 pass                                                                                                                                                                        |
+| `bun test --timeout 30000 ./test/project/instance.test.ts`                                                                                                                                                                                                             | P                 | 10 pass                                                                                                                                                                       |
+| `bun test --timeout 30000 ./test/storage/cold.test.ts -t "fails closed on a corrupted payload\|releases shared cold references"`                                                                                                                                       | P                 | 2 pass                                                                                                                                                                        |
+| `bun test --timeout 30000 ./test/lsp/client.test.ts ./test/tool/lsp.test.ts`                                                                                                                                                                                           | P                 | 16 pass / 0 fail，32 assertions                                                                                                                                               |
+| `bun typecheck`                                                                                                                                                                                                                                                        | P                 | exit 0，`tsgo --noEmit`                                                                                                                                                       |
+| `gh release view v0.4.3-smark.12 --repo SMARK2022/opentui --json tagName,publishedAt,targetCommitish,isPrerelease`                                                                                                                                                     | root              | .12 存在，2026-09-10 发布 prerelease                                                                                                                                          |
+| 对 `.13` 执行相同查询                                                                                                                                                                                                                                                  | root              | release not found；未发布任何内容                                                                                                                                             |
 
 现有回归合计 **289 pass / 7 skip / 0 fail**，不含临时故意红测、不重复累计重复运行。完整仓库 suite 没有运行，不能称全仓全绿。临时实验最早的错误 SessionID fixture 已修正；它不是产品红测证据。
 
@@ -397,17 +397,17 @@ WeakRef 是内存生命周期 oracle，不用它读取业务私有 map。正式�
 
 ## 19. Diff Budget
 
-| Metric | Estimate / hard limit | Justification |
-| --- | --- | --- |
-| Production/dependency files | 12 / **<=12** | 包含 manifest、lock、gitlink，不隐藏在 generated 分类之外 |
-| New production files | 1 | 私有 prompt slot owner 避免业务循环依赖 |
-| Modified production/dependency | 11 | 包含条件成立后 gitlink |
-| Deleted files | 0 | owner 逻辑原位替换 |
-| Gross production/dependency lines | 668 | 注释/import/lock 计入 |
-| Formal test lines | 330 | 复用 fixtures/参数化，不能为了预算去掉合同 |
-| Gross implementation total | 998 / **<=1200** | 额外 202 行完整性余量；比只限 production 更保守 |
-| New migration / SDK / CI | 0 | 不扩协议、schema、流水线 |
-| Stage-1 experiments/docs | 4 个实验 + 本 plan | 用户单独授权的调研产物，不混作生产修改 |
+| Metric                            | Estimate / hard limit | Justification                                             |
+| --------------------------------- | --------------------- | --------------------------------------------------------- |
+| Production/dependency files       | 12 / **<=12**         | 包含 manifest、lock、gitlink，不隐藏在 generated 分类之外 |
+| New production files              | 1                     | 私有 prompt slot owner 避免业务循环依赖                   |
+| Modified production/dependency    | 11                    | 包含条件成立后 gitlink                                    |
+| Deleted files                     | 0                     | owner 逻辑原位替换                                        |
+| Gross production/dependency lines | 668                   | 注释/import/lock 计入                                     |
+| Formal test lines                 | 330                   | 复用 fixtures/参数化，不能为了预算去掉合同                |
+| Gross implementation total        | 998 / **<=1200**      | 额外 202 行完整性余量；比只限 production 更保守           |
+| New migration / SDK / CI          | 0                     | 不扩协议、schema、流水线                                  |
+| Stage-1 experiments/docs          | 4 个实验 + 本 plan    | 用户单独授权的调研产物，不混作生产修改                    |
 
 实施前后使用准确 base 的 `git diff --numstat` 与新增文件统计计算 added+deleted。不得用净行数、formatter 排除或 submodule 指针遮蔽新源代码放宽用户硬限制。若完整实现不能落在预算，停止并修订同一 plan；不得悄悄缩范围或丢测试。当前预算是设计估算，未实施验证。
 
@@ -427,16 +427,16 @@ WeakRef 是内存生命周期 oracle，不用它读取业务私有 map。正式�
 
 ### Investigated But Not Selected
 
-| Area | Evidence | Disposition and reason |
-| --- | --- | --- |
-| 整张 daemon 图共享 | actual auth/close 反例 | 排除；不是行为等价内存修复，需独立 transport/app-layer 设计 |
-| proof hash/每轮清缓存 | exact tuple 与 warm test | 排除；前者削弱零碰撞 admission，后者破坏 warm reuse |
-| TUI inactive LRU/降低300/裁正文 | 当前数据确有用途，用户要求不变 | 排除；不借内存名义改变默认合同 |
-| collapse 后 destroy body / 全量虚拟化 | geometry stable 且现行保留 intentional | 排除；没有必要改高度、选择、滚动、重新构造成本 |
-| 原生普通 destroy/parser leak | 两 DLL lifecycle 均返回基线 | 没有本轮证据支持另加销毁算法 |
-| LSP idle eviction/didClose 政策 | 独立工程有效、16 existing tests green | 保留调查结论；关闭时机会改变诊断/索引表现，当前无正确活动 lease 红测 |
-| SSE 限流/背压 | 无界路径 reachable，未测到当前 backlog | 不添加丢事件/重同步协议；这是单独 transport 合同，不用猜测 drive 修改 |
-| CLI lazy imports | broad dependency closure 可达 | 记录机会；尚无完整命令/help/compiled worker parity 与冷启动收益基线，不塞进此修复 |
+| Area                                  | Evidence                               | Disposition and reason                                                            |
+| ------------------------------------- | -------------------------------------- | --------------------------------------------------------------------------------- |
+| 整张 daemon 图共享                    | actual auth/close 反例                 | 排除；不是行为等价内存修复，需独立 transport/app-layer 设计                       |
+| proof hash/每轮清缓存                 | exact tuple 与 warm test               | 排除；前者削弱零碰撞 admission，后者破坏 warm reuse                               |
+| TUI inactive LRU/降低300/裁正文       | 当前数据确有用途，用户要求不变         | 排除；不借内存名义改变默认合同                                                    |
+| collapse 后 destroy body / 全量虚拟化 | geometry stable 且现行保留 intentional | 排除；没有必要改高度、选择、滚动、重新构造成本                                    |
+| 原生普通 destroy/parser leak          | 两 DLL lifecycle 均返回基线            | 没有本轮证据支持另加销毁算法                                                      |
+| LSP idle eviction/didClose 政策       | 独立工程有效、16 existing tests green  | 保留调查结论；关闭时机会改变诊断/索引表现，当前无正确活动 lease 红测              |
+| SSE 限流/背压                         | 无界路径 reachable，未测到当前 backlog | 不添加丢事件/重同步协议；这是单独 transport 合同，不用猜测 drive 修改             |
+| CLI lazy imports                      | broad dependency closure 可达          | 记录机会；尚无完整命令/help/compiled worker parity 与冷启动收益基线，不塞进此修复 |
 
 ### Rejected Speculation
 
@@ -454,9 +454,9 @@ WeakRef 是内存生命周期 oracle，不用它读取业务私有 map。正式�
 
 ## 22. Plan Audit Record
 
-| Round | Audited revision | Full scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | R1 | yes | No blocking findings. | 1) §16 slice 9 的 lease/context-identity 分支尚未实验固定，实施时必须先有 red 证据；2) `sync.tsx` 330 行是设计估算，超预算须回到 plan revision；3) §21 的“本轮用户明确不需要审计”是历史记录，不代表放行声明。 | APPROVE — plan revision R1 released for the approval transition. Any substantive edit, including filling in the future native release identity, invalidates this approval and requires a new full-scope audit. | adversarial-auditor task ses_f69ace5b8ffeOFIf502d2rFZX7 |
+| Round | Audited revision | Full scope? | Blocking findings     | Non-blocking findings                                                                                                                                                                                         | Result                                                                                                                                                                                                         | Invocation reference                                    |
+| ----- | ---------------- | ----------- | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------- |
+| 1     | R1               | yes         | No blocking findings. | 1) §16 slice 9 的 lease/context-identity 分支尚未实验固定，实施时必须先有 red 证据；2) `sync.tsx` 330 行是设计估算，超预算须回到 plan revision；3) §21 的“本轮用户明确不需要审计”是历史记录，不代表放行声明。 | APPROVE — plan revision R1 released for the approval transition. Any substantive edit, including filling in the future native release identity, invalidates this approval and requires a new full-scope audit. | adversarial-auditor task ses_f69ace5b8ffeOFIf502d2rFZX7 |
 
 R1 已获独立 verdict（见上表）；本字段仅在获得 `No blocking findings` + `APPROVE` 后才可原样记录。
 
@@ -466,18 +466,18 @@ R1 已获独立 verdict（见上表）；本字段仅在获得 `No blocking find
 
 按批准的 R1 实施（2026-09-13，HEAD 基线 `da51973f8c` 上的工作树）。实际变更：
 
-| File | Gross lines (added+deleted) | R1 估算 | 说明 |
-| --- | ---: | ---: | --- |
-| `packages/opencode/src/cli/cmd/tui/context/sync.tsx` | 337 | 330 | 失效集合、releaseMessage/releaseSession、admission、sync 代际与最终投影、pageFailed 保护、permission/question 守卫 |
-| `packages/opencode/src/cli/cmd/tui/routes/session/dialog-message.tsx` | 15 | 20 | Retry/Fork 首个 await 前捕获 |
-| `packages/opencode/src/session/prompt.ts` | 35 | 55 | 单槽接入 lease/instance，算法不变 |
-| `packages/opencode/src/session/prompt-window-cache.ts` | 71（新增） | 75 | 私有 slot registry |
-| `packages/opencode/src/project/instance-store.ts` | 6 | 18 | dispose/reload barrier 后按 directory 失效 |
-| `packages/opencode/src/session/projectors.ts` | 4 | 10 | Session 删除 after-commit 失效 |
-| `packages/opencode/test/cli/cmd/tui/sync.test.tsx` | 208 | 190 | 11 个 memory lifetime 用例（含无关 live part 存活对照） |
-| `packages/opencode/test/session/prompt.test.ts` | 129 | 95 | 2 个 WeakRef 生命周期 + 1 个 lease 竞态 |
-| `packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx` | 35 | 45 | Fork 删除窗口捕获用例 |
-| **合计** | **840** | 998 上限 | 生产/依赖 467 + 测试 373 |
+| File                                                                  | Gross lines (added+deleted) |  R1 估算 | 说明                                                                                                               |
+| --------------------------------------------------------------------- | --------------------------: | -------: | ------------------------------------------------------------------------------------------------------------------ |
+| `packages/opencode/src/cli/cmd/tui/context/sync.tsx`                  |                         337 |      330 | 失效集合、releaseMessage/releaseSession、admission、sync 代际与最终投影、pageFailed 保护、permission/question 守卫 |
+| `packages/opencode/src/cli/cmd/tui/routes/session/dialog-message.tsx` |                          15 |       20 | Retry/Fork 首个 await 前捕获                                                                                       |
+| `packages/opencode/src/session/prompt.ts`                             |                          35 |       55 | 单槽接入 lease/instance，算法不变                                                                                  |
+| `packages/opencode/src/session/prompt-window-cache.ts`                |                  71（新增） |       75 | 私有 slot registry                                                                                                 |
+| `packages/opencode/src/project/instance-store.ts`                     |                           6 |       18 | dispose/reload barrier 后按 directory 失效                                                                         |
+| `packages/opencode/src/session/projectors.ts`                         |                           4 |       10 | Session 删除 after-commit 失效                                                                                     |
+| `packages/opencode/test/cli/cmd/tui/sync.test.tsx`                    |                         208 |      190 | 11 个 memory lifetime 用例（含无关 live part 存活对照）                                                            |
+| `packages/opencode/test/session/prompt.test.ts`                       |                         129 |       95 | 2 个 WeakRef 生命周期 + 1 个 lease 竞态                                                                            |
+| `packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx`  |                          35 |       45 | Fork 删除窗口捕获用例                                                                                              |
+| **合计**                                                              |                     **840** | 998 上限 | 生产/依赖 467 + 测试 373                                                                                           |
 
 生产代码文件 6 个（含 1 个新增），≤12；gross 总行数 840 ≤ 1200。native/dependency 切片（manifest/lock/gitlink）未执行：用户明确该 OpenTUI 发布与 submodule 指针由另一个 agent 负责，本 diff 不含任何 native 或依赖变更。
 
@@ -498,19 +498,19 @@ R1 已获独立 verdict（见上表）；本字段仅在获得 `No blocking find
 
 全部在 `packages/opencode` 目录执行：
 
-| Command | Result |
-| --- | --- |
-| `bun test ./test/cli/cmd/tui/sync.test.tsx ./test/cli/cmd/tui/sync-undefined-messages.test.tsx` | **39 pass / 0 fail** |
-| `bun test ./test/cli/cmd/tui/session-message-render.test.tsx`（完整文件） | **91 pass / 0 fail** |
-| `bun test ./test/cli/cmd/tui/smooth-scrollbar.test.ts` | **2 pass / 0 fail** |
-| `bun test ./test/session/prompt.test.ts`（完整文件） | **103 pass / 14 skip / 0 fail** |
-| `bun test ./test/session/session.test.ts` | **4 pass / 0 fail** |
-| `bun test ./test/project/instance.test.ts` | **10 pass / 0 fail** |
-| `bun test ./test/storage/cold.test.ts -t "fails closed\|releases shared cold"` | **2 pass / 0 fail** |
-| `bun test ./test/server/httpapi-{listen,cors,authorization}.test.ts` | **15 pass / 7 skip / 0 fail**（Windows PTY/WebSocket skips 为既有平台跳过） |
-| `bun test ./test/server/httpapi-{instance,promptasync-context,event}.test.ts` | **10 pass / 0 fail** |
-| `bun test ./test/lsp/client.test.ts ./test/tool/lsp.test.ts` | **16 pass / 0 fail** |
-| `bun typecheck` | **exit 0**（`tsgo --noEmit`） |
+| Command                                                                                         | Result                                                                      |
+| ----------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
+| `bun test ./test/cli/cmd/tui/sync.test.tsx ./test/cli/cmd/tui/sync-undefined-messages.test.tsx` | **39 pass / 0 fail**                                                        |
+| `bun test ./test/cli/cmd/tui/session-message-render.test.tsx`（完整文件）                       | **91 pass / 0 fail**                                                        |
+| `bun test ./test/cli/cmd/tui/smooth-scrollbar.test.ts`                                          | **2 pass / 0 fail**                                                         |
+| `bun test ./test/session/prompt.test.ts`（完整文件）                                            | **103 pass / 14 skip / 0 fail**                                             |
+| `bun test ./test/session/session.test.ts`                                                       | **4 pass / 0 fail**                                                         |
+| `bun test ./test/project/instance.test.ts`                                                      | **10 pass / 0 fail**                                                        |
+| `bun test ./test/storage/cold.test.ts -t "fails closed\|releases shared cold"`                  | **2 pass / 0 fail**                                                         |
+| `bun test ./test/server/httpapi-{listen,cors,authorization}.test.ts`                            | **15 pass / 7 skip / 0 fail**（Windows PTY/WebSocket skips 为既有平台跳过） |
+| `bun test ./test/server/httpapi-{instance,promptasync-context,event}.test.ts`                   | **10 pass / 0 fail**                                                        |
+| `bun test ./test/lsp/client.test.ts ./test/tool/lsp.test.ts`                                    | **16 pass / 0 fail**                                                        |
+| `bun typecheck`                                                                                 | **exit 0**（`tsgo --noEmit`）                                               |
 
 完整仓库 suite 未运行；上述覆盖了全部变更文件的直接测试面与 R1 §18.2 列出的关联回归。
 
@@ -522,23 +522,23 @@ R1 已获独立 verdict（见上表）；本字段仅在获得 `No blocking find
 
 ### Actual Secondary and Replacement Path Inventory
 
-| Path | Classification | Verdict |
-| --- | --- | --- |
-| live/HTTP 合并、300 窗口、orphan-before-parent、mergeLivePart 守卫 | primary-contract branch（未改语义） | preserve |
-| deleted/hidden 释放 + admission 拒绝 + sync 代际 token | primary-contract branch（R1 批准） | implemented，无替代成功路径 |
-| pageFailed 跳过替换 | primary-contract branch（失败容忍是 SDK 既有合同） | implemented，由既有 stale-snapshot 测试锁定 |
-| `Database.effect` after-commit 失效 | primary-contract branch | implemented；回滚不失效 |
-| directory 维度 instance 失效 | primary-contract branch | implemented |
-| 本地 DLL 替换、整图共享、idle 清缓存、TTL、诊断路径 | forbidden fallback | 均未引入；decision surface 新增 0% |
+| Path                                                               | Classification                                     | Verdict                                     |
+| ------------------------------------------------------------------ | -------------------------------------------------- | ------------------------------------------- |
+| live/HTTP 合并、300 窗口、orphan-before-parent、mergeLivePart 守卫 | primary-contract branch（未改语义）                | preserve                                    |
+| deleted/hidden 释放 + admission 拒绝 + sync 代际 token             | primary-contract branch（R1 批准）                 | implemented，无替代成功路径                 |
+| pageFailed 跳过替换                                                | primary-contract branch（失败容忍是 SDK 既有合同） | implemented，由既有 stale-snapshot 测试锁定 |
+| `Database.effect` after-commit 失效                                | primary-contract branch                            | implemented；回滚不失效                     |
+| directory 维度 instance 失效                                       | primary-contract branch                            | implemented                                 |
+| 本地 DLL 替换、整图共享、idle 清缓存、TTL、诊断路径                | forbidden fallback                                 | 均未引入；decision surface 新增 0%          |
 
 ### Chinese Comment Calculation
 
-| Metric | Actual | Exclusions and evidence |
-| --- | --- | --- |
-| Effective changed code lines E | **588** | `git diff -U0` 新增行中排除空行、import-only；测试与生产同计 |
-| Qualifying Chinese comment lines C | **93** | 邻近修改点、解释不变量/边界/测试意图；不复述代码 |
-| Ratio C / E | **15.8%** | ≥ ceil(588 × 0.15) = 89 |
-| Required minimum C | 89 | 满足 |
+| Metric                             | Actual    | Exclusions and evidence                                      |
+| ---------------------------------- | --------- | ------------------------------------------------------------ |
+| Effective changed code lines E     | **588**   | `git diff -U0` 新增行中排除空行、import-only；测试与生产同计 |
+| Qualifying Chinese comment lines C | **93**    | 邻近修改点、解释不变量/边界/测试意图；不复述代码             |
+| Ratio C / E                        | **15.8%** | ≥ ceil(588 × 0.15) = 89                                      |
+| Required minimum C                 | 89        | 满足                                                         |
 
 代表性注释：`sync.tsx` 的“失效事实/窗口淘汰区别”“失败响应不是权威空页”“releaseMessage chronology 索引回退”；`prompt-window-cache.ts` 的“失效即推进 generation（在途发布目标未知）”“directory 而非 ctx 对象身份”；`projectors.ts` 的“事务提交后才失效”。
 
@@ -551,9 +551,9 @@ R1 已获独立 verdict（见上表）；本字段仅在获得 `No blocking find
 
 ## 24. Implementation Audit Record
 
-| Round | Plan revision | Full original scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | R1 | yes | B-01 `message.part.removed` 的 delta 清理谓词是恒真自比较，清空全部会话的缓冲流式 delta（sync.tsx lambda 参数遮蔽 switch 作用域 event；生产者 Session.removePart/processor/HTTP 端点可达；delta bus-only 丢弃即永久丢失，破坏 INV-04/08） | NB-1 §23 行数记账漂移（仍 ≤1200/≤12）；NB-2 Retry 无独立正式红测（与 Fork 同一 seam）；NB-3 session_goal undefined 键与空 part 数组键轻微留存；NB-4 §23 验证未由 auditor 复跑 | **BLOCK** | adversarial-auditor task ses_f6939cbdaffelZUu1PFKPJQD3N |
-| 2 | R1 | yes | No blocking findings.（B-01 修复验证：遮蔽消除、存活对照对该 bug 敏感、permission/question 守卫落盘且属 R1 §10.1.7 批准范围；全量 hunk 重审无新缺陷） | NB-1（updated）行数表已与 numstat 一致，467/373 拆分与 468/372 有 1 行口径漂移；NB-2/NB-3/NB-4 carried；NB-5 §24 记录职责 | **APPROVE**（仅适用于当前实际 diff 对照 R1；任何后续 substantive 修改使 approval 失效） | adversarial-auditor task ses_f6939cbdaffelZUu1PFKPJQD3N |
+| Round | Plan revision | Full original scope? | Blocking findings                                                                                                                                                                                                                         | Non-blocking findings                                                                                                                                                         | Result                                                                                  | Invocation reference                                    |
+| ----- | ------------- | -------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- | ------------------------------------------------------- |
+| 1     | R1            | yes                  | B-01 `message.part.removed` 的 delta 清理谓词是恒真自比较，清空全部会话的缓冲流式 delta（sync.tsx lambda 参数遮蔽 switch 作用域 event；生产者 Session.removePart/processor/HTTP 端点可达；delta bus-only 丢弃即永久丢失，破坏 INV-04/08） | NB-1 §23 行数记账漂移（仍 ≤1200/≤12）；NB-2 Retry 无独立正式红测（与 Fork 同一 seam）；NB-3 session_goal undefined 键与空 part 数组键轻微留存；NB-4 §23 验证未由 auditor 复跑 | **BLOCK**                                                                               | adversarial-auditor task ses_f6939cbdaffelZUu1PFKPJQD3N |
+| 2     | R1            | yes                  | No blocking findings.（B-01 修复验证：遮蔽消除、存活对照对该 bug 敏感、permission/question 守卫落盘且属 R1 §10.1.7 批准范围；全量 hunk 重审无新缺陷）                                                                                     | NB-1（updated）行数表已与 numstat 一致，467/373 拆分与 468/372 有 1 行口径漂移；NB-2/NB-3/NB-4 carried；NB-5 §24 记录职责                                                     | **APPROVE**（仅适用于当前实际 diff 对照 R1；任何后续 substantive 修改使 approval 失效） | adversarial-auditor task ses_f6939cbdaffelZUu1PFKPJQD3N |
 
 实现已获两轮 full-scope 审计（round 1 BLOCK/B-01 已返工，round 2 APPROVE / No blocking findings）；commit 只包含本任务路径。

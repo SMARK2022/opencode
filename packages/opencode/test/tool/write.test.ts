@@ -125,8 +125,37 @@ const run = Effect.fn("WriteToolTest.run")(function* (
 })
 
 // 同一真实Write入口分别配“不格式化”和受控formatter，两个分支都不构建真实LSP服务。
-const itFeedback = testEffect(LayerNode.compile(LayerNode.group([LSP.node, FSUtil.node, EventV2Bridge.node, Format.node, CrossSpawnSpawner.node, Truncate.node, Agent.node]), [[LSP.node, feedbackLsp], [Format.node, feedbackFormat]]))
-const itFeedbackFormatted = testEffect(LayerNode.compile(LayerNode.group([LSP.node, FSUtil.node, EventV2Bridge.node, mockFormatNode, CrossSpawnSpawner.node, Truncate.node, Agent.node]), [[LSP.node, feedbackLsp]]))
+const itFeedback = testEffect(
+  LayerNode.compile(
+    LayerNode.group([
+      LSP.node,
+      FSUtil.node,
+      EventV2Bridge.node,
+      Format.node,
+      CrossSpawnSpawner.node,
+      Truncate.node,
+      Agent.node,
+    ]),
+    [
+      [LSP.node, feedbackLsp],
+      [Format.node, feedbackFormat],
+    ],
+  ),
+)
+const itFeedbackFormatted = testEffect(
+  LayerNode.compile(
+    LayerNode.group([
+      LSP.node,
+      FSUtil.node,
+      EventV2Bridge.node,
+      mockFormatNode,
+      CrossSpawnSpawner.node,
+      Truncate.node,
+      Agent.node,
+    ]),
+    [[LSP.node, feedbackLsp]],
+  ),
+)
 
 describe("tool.write", () => {
   // INV-06/G04：formatter 实际改变内容时，output 必须回显「提交内容→最终落盘」的
@@ -438,7 +467,6 @@ describe("tool.write", () => {
       }),
     )
   })
-
 
   // [local-smark] 测试 auto-format 改变内容时 _formattedContent 的设置行为。
   // mockFormatLayer 模拟 formatter 在文件末尾追加换行符。

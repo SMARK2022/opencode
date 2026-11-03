@@ -153,9 +153,21 @@ const outlineRules: OutlineRule[] = [
   { exts: [".py"], regex: /^class\s+([A-Za-z_][\w]*)\b/, format: (m) => `class ${m[1]}` },
   { exts: [".go"], regex: /^func\s+(?:\([^)]*\)\s*)?([A-Za-z_][\w]*)\s*\(/, format: (m) => `function ${m[1]}` },
   { exts: [".go"], regex: /^type\s+([A-Za-z_][\w]*)\s+(struct|interface|func)\b/, format: (m) => `${m[2]} ${m[1]}` },
-  { exts: [".rs"], regex: /^(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+([A-Za-z_][\w]*)\b/, format: (m) => `function ${m[1]}` },
-  { exts: [".rs"], regex: /^(?:pub(?:\([^)]*\))?\s+)?(struct|enum|trait|type|mod|const|static)\s+([A-Za-z_][\w]*)\b/, format: (m) => `${m[1]} ${m[2]}` },
-  { exts: [".rs"], regex: /^impl(?:<[^>]+>)?\s+(.+?)\s*(?:\{|where\b)/, format: (m) => `impl ${m[1]?.trim().slice(0, 80)}` },
+  {
+    exts: [".rs"],
+    regex: /^(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+([A-Za-z_][\w]*)\b/,
+    format: (m) => `function ${m[1]}`,
+  },
+  {
+    exts: [".rs"],
+    regex: /^(?:pub(?:\([^)]*\))?\s+)?(struct|enum|trait|type|mod|const|static)\s+([A-Za-z_][\w]*)\b/,
+    format: (m) => `${m[1]} ${m[2]}`,
+  },
+  {
+    exts: [".rs"],
+    regex: /^impl(?:<[^>]+>)?\s+(.+?)\s*(?:\{|where\b)/,
+    format: (m) => `impl ${m[1]?.trim().slice(0, 80)}`,
+  },
   { exts: [".rs"], regex: /^macro_rules!\s+([A-Za-z_][\w]*)\b/, format: (m) => `macro ${m[1]}` },
   {
     exts: [".java"],
@@ -203,18 +215,39 @@ const outlineRules: OutlineRule[] = [
       /^(?:public|private|protected|internal|open|sealed|data|abstract|final|\s)*\s*(class|interface|object|enum class)\s+([A-Za-z_][\w]*)\b/,
     format: (m) => `${m[1]} ${m[2]}`,
   },
-  { exts: [".kt", ".kts"], regex: /^(?:public|private|protected|internal|suspend|inline|operator|override|\s)*fun\s+([A-Za-z_][\w]*)\s*\(/, format: (m) => `function ${m[1]}` },
+  {
+    exts: [".kt", ".kts"],
+    regex: /^(?:public|private|protected|internal|suspend|inline|operator|override|\s)*fun\s+([A-Za-z_][\w]*)\s*\(/,
+    format: (m) => `function ${m[1]}`,
+  },
   {
     exts: [".swift"],
-    regex: /^(?:public|private|internal|open|fileprivate|final|\s)*\s*(class|struct|enum|protocol|extension)\s+([A-Za-z_][\w]*)\b/,
+    regex:
+      /^(?:public|private|internal|open|fileprivate|final|\s)*\s*(class|struct|enum|protocol|extension)\s+([A-Za-z_][\w]*)\b/,
     format: (m) => `${m[1]} ${m[2]}`,
   },
-  { exts: [".swift"], regex: /^(?:public|private|internal|open|fileprivate|static|class|mutating|\s)*func\s+([A-Za-z_][\w]*)\s*\(/, format: (m) => `function ${m[1]}` },
+  {
+    exts: [".swift"],
+    regex: /^(?:public|private|internal|open|fileprivate|static|class|mutating|\s)*func\s+([A-Za-z_][\w]*)\s*\(/,
+    format: (m) => `function ${m[1]}`,
+  },
   { exts: [".rb"], regex: /^(class|module)\s+([A-Za-z_:][\w:]*)\b/, format: (m) => `${m[1]} ${m[2]}` },
   { exts: [".rb"], regex: /^def\s+(?:self\.)?([A-Za-z_][\w!?=]*)\b/, format: (m) => `function ${m[1]}` },
-  { exts: [".php"], regex: /^(?:abstract|final|\s)*\s*(class|interface|trait|enum)\s+([A-Za-z_][\w]*)\b/, format: (m) => `${m[1]} ${m[2]}` },
-  { exts: [".php"], regex: /^(?:public|protected|private|static|final|abstract|\s)*function\s+([A-Za-z_][\w]*)\s*\(/, format: (m) => `function ${m[1]}` },
-  { exts: [".scala"], regex: /^(?:abstract|final|sealed|case|\s)*\s*(class|object|trait|enum)\s+([A-Za-z_][\w]*)\b/, format: (m) => `${m[1]} ${m[2]}` },
+  {
+    exts: [".php"],
+    regex: /^(?:abstract|final|\s)*\s*(class|interface|trait|enum)\s+([A-Za-z_][\w]*)\b/,
+    format: (m) => `${m[1]} ${m[2]}`,
+  },
+  {
+    exts: [".php"],
+    regex: /^(?:public|protected|private|static|final|abstract|\s)*function\s+([A-Za-z_][\w]*)\s*\(/,
+    format: (m) => `function ${m[1]}`,
+  },
+  {
+    exts: [".scala"],
+    regex: /^(?:abstract|final|sealed|case|\s)*\s*(class|object|trait|enum)\s+([A-Za-z_][\w]*)\b/,
+    format: (m) => `${m[1]} ${m[2]}`,
+  },
   { exts: [".scala"], regex: /^def\s+([A-Za-z_][\w]*)\b/, format: (m) => `function ${m[1]}` },
 ]
 
@@ -309,9 +342,8 @@ export async function readOutlineCached(
   if (offset > 1) return undefined
   // 无稳定版本不缓存，仍使用原大纲读取，避免unknown版本串用结果。
   if (modifiedMs === undefined) return readOutline(filepath, total, offset, totalExact, budget, signal)
-  const canonical = process.platform === "win32"
-    ? filepath.replaceAll("\\", "/").toLowerCase()
-    : filepath.replaceAll("\\", "/")
+  const canonical =
+    process.platform === "win32" ? filepath.replaceAll("\\", "/").toLowerCase() : filepath.replaceAll("\\", "/")
   const cached = outlineCache.get(canonical)
   // cache 命中条件：同文件（canonicalPath）+ 同版本（size+modifiedMs）
   if (cached && cached.size === size && cached.modifiedMs === modifiedMs) {

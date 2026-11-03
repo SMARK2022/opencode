@@ -1,5 +1,12 @@
 import { describe, expect, test } from "bun:test"
-import { BashDiagnosticCollector, compressVisibleOutput, createTerminalDisplay, normalizePowerShellOutput, quotePattern, renderDiagnosticAppendix } from "@opencode-ai/core/tool/bash-compress"
+import {
+  BashDiagnosticCollector,
+  compressVisibleOutput,
+  createTerminalDisplay,
+  normalizePowerShellOutput,
+  quotePattern,
+  renderDiagnosticAppendix,
+} from "@opencode-ai/core/tool/bash-compress"
 import { formatExitNotice } from "@opencode-ai/core/util/output-notice"
 
 // #129：CLIXML 纯块解码与混合块保留
@@ -10,12 +17,19 @@ describe("tool.bash-compress", () => {
     collector.push(raw)
     collector.end()
     const snapshot = collector.snapshot()
-    const appendix = renderDiagnosticAppendix(snapshot, { durationMs: 3_000, exitCode: 7, visibleOutput: raw, config: { enabled: false } })
+    const appendix = renderDiagnosticAppendix(snapshot, {
+      durationMs: 3_000,
+      exitCode: 7,
+      visibleOutput: raw,
+      config: { enabled: false },
+    })
     expect(snapshot.errorLikeLines).toBe(0)
     expect(snapshot.discardedChars).toBeGreaterThan(0)
     expect(appendix).toContain("diagnostic sampling omitted")
     // 真实采样说明不含失败证据，仍须交付退出码；取消与超时不得伪造exit。
-    expect(formatExitNotice(7, false)).toBe('<opencode_notice type="execution" source="shell" severity="error" reason="exit" exit_code="7" />')
+    expect(formatExitNotice(7, false)).toBe(
+      '<opencode_notice type="execution" source="shell" severity="error" reason="exit" exit_code="7" />',
+    )
     expect(formatExitNotice(0, true)).toContain('severity="info" reason="exit" exit_code="0"')
     expect(formatExitNotice(42, true)).toContain('severity="error" reason="exit" exit_code="42"')
     expect(formatExitNotice(null, false)).toBeUndefined()
@@ -23,7 +37,11 @@ describe("tool.bash-compress", () => {
     const failure = new BashDiagnosticCollector()
     failure.push("fatal: hidden root cause\n")
     failure.end()
-    const diagnosed = renderDiagnosticAppendix(failure.snapshot(), { durationMs: 3_000, exitCode: 9, visibleOutput: "tail" })
+    const diagnosed = renderDiagnosticAppendix(failure.snapshot(), {
+      durationMs: 3_000,
+      exitCode: 9,
+      visibleOutput: "tail",
+    })
     expect(diagnosed).toContain('<opencode_excerpt type="shell_high_signal"')
     expect(formatExitNotice(9, false)).toContain('reason="exit" exit_code="9"')
   })
@@ -128,7 +146,9 @@ describe("tool.bash-compress", () => {
     expect(result.text).not.toContain("high-entropy")
     expect(result.text).not.toContain("ForegroundColor")
     expect(result.text).not.toContain("H:\\FRCheck\\scripts\\deploy.ps1")
-    expect(result.text.match(/============================================================/g)?.length).toBeGreaterThanOrEqual(2)
+    expect(
+      result.text.match(/============================================================/g)?.length,
+    ).toBeGreaterThanOrEqual(2)
     // XML文本节点允许多行正文，不能被误判为节点外的混合输出。
     const multiline = '<Objs><S S="Output">first\nsecond</S></Objs>'
     expect(compressVisibleOutput(multiline).text).toContain("first\nsecond")
@@ -286,10 +306,7 @@ describe("tool.bash-compress", () => {
   })
 
   test("template marker uses compact dialect", () => {
-    const text = Array.from(
-      { length: 8 },
-      (_, i) => `2024-01-0${i + 1}T10:00:00Z request phase completed`,
-    ).join("\n")
+    const text = Array.from({ length: 8 }, (_, i) => `2024-01-0${i + 1}T10:00:00Z request phase completed`).join("\n")
 
     const result = compressVisibleOutput(text)
 
@@ -300,7 +317,12 @@ describe("tool.bash-compress", () => {
 
   test("terminal progress marker uses compact dialect", () => {
     // 五段含足够重绘字节以满足目标收益门槛；marker计四次重绘，不降低生产阈值。
-    const text = ["step-alpha-1111", "step-beta-2222", "step-gamma-3333", "step-delta-4444", "step-epsilon-5555"].map((line) => line + " detail".repeat(20)).join("\r") + "\n" + "x".repeat(190)
+    const text =
+      ["step-alpha-1111", "step-beta-2222", "step-gamma-3333", "step-delta-4444", "step-epsilon-5555"]
+        .map((line) => line + " detail".repeat(20))
+        .join("\r") +
+      "\n" +
+      "x".repeat(190)
 
     const result = compressVisibleOutput(text)
 
@@ -323,15 +345,12 @@ describe("tool.bash-compress", () => {
   test("keeps 896-char base64 lines below the 1024-char high-entropy threshold", () => {
     // xorshift32（乘法 LCG 在 JS 里会溢出 2^53 退化）
     let s = 123456789
-    const blob = Array.from(
-      { length: 896 },
-      () => {
-        s ^= s << 13
-        s ^= s >>> 17
-        s ^= s << 5
-        return "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"[(s >>> 0) % 64]
-      },
-    ).join("")
+    const blob = Array.from({ length: 896 }, () => {
+      s ^= s << 13
+      s ^= s >>> 17
+      s ^= s << 5
+      return "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"[(s >>> 0) % 64]
+    }).join("")
 
     const result = compressVisibleOutput(blob)
 
@@ -375,7 +394,7 @@ describe("tool.bash-compress", () => {
       "monkey=abcdefghij stays intact because word boundary",
       "export token=QuietValue99 here for runtime use",
       "auth header uses sk-abcdefghijklmnopqrstuvwxyz keys",
-      "quoted secret password=\"SuperSecretValue123\" in config",
+      'quoted secret password="SuperSecretValue123" in config',
       "long value token=abcdefghijklmnop keeps seven char head",
       "final verification checklist items pending review",
     ].join("\n")
@@ -416,7 +435,9 @@ describe("tool.bash-compress", () => {
 
     const output = renderDiagnosticAppendix(snapshot, { durationMs: 3000, exitCode: 1 })
 
-    expect(output).toContain('<opencode_excerpt type="shell_high_signal" exit="1" contexts="1" errors="2" warnings="1" />')
+    expect(output).toContain(
+      '<opencode_excerpt type="shell_high_signal" exit="1" contexts="1" errors="2" warnings="1" />',
+    )
     expect(output).toContain("Error contexts omitted from the visible output:")
     expect(output).toContain("[L3-L5] root_cause")
     expect(output).toContain("> 4 | Error: first failure")

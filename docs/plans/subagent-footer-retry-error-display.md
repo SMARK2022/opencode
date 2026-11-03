@@ -39,22 +39,22 @@ not implementation authority.
 
 ## 3. Repository Context
 
-| Source | Why it constrains this task |
-| --- | --- |
-| `CONTEXT.md` | Status = `idle` \| `retry` \| `busy` |
-| `packages/opencode/AGENTS.md` | 测试从 package 目录跑 |
-| 主 agent Prompt footer | 权威 retry 展示契约 |
-| `SubagentFooter` | 所有 parentID 子会话（含 permission-reviewer）共用底部栏 |
+| Source                        | Why it constrains this task                              |
+| ----------------------------- | -------------------------------------------------------- |
+| `CONTEXT.md`                  | Status = `idle` \| `retry` \| `busy`                     |
+| `packages/opencode/AGENTS.md` | 测试从 package 目录跑                                    |
+| 主 agent Prompt footer        | 权威 retry 展示契约                                      |
+| `SubagentFooter`              | 所有 parentID 子会话（含 permission-reviewer）共用底部栏 |
 
 ## 4. Files and Evidence Read
 
-| Evidence | Relevance | Evidence class |
-| --- | --- | --- |
-| `session/index.tsx` visible/SubagentFooter/Prompt | child 卸 Prompt 挂 SubagentFooter | observed |
-| `subagent-footer.tsx` | status 仅服务 usage | observed |
-| `prompt/index.tsx` retry footer | 主红字契约 | observed |
-| `session/status.ts` + processor retry | 子会话同样写 status | observed |
-| 静态/行为 red 信号 | footer 无 Short error | observed |
+| Evidence                                          | Relevance                         | Evidence class |
+| ------------------------------------------------- | --------------------------------- | -------------- |
+| `session/index.tsx` visible/SubagentFooter/Prompt | child 卸 Prompt 挂 SubagentFooter | observed       |
+| `subagent-footer.tsx`                             | status 仅服务 usage               | observed       |
+| `prompt/index.tsx` retry footer                   | 主红字契约                        | observed       |
+| `session/status.ts` + processor retry             | 子会话同样写 status               | observed       |
+| 静态/行为 red 信号                                | footer 无 Short error             | observed       |
 
 ## 5. Current Behavior
 
@@ -67,27 +67,27 @@ Auto reviewer child uses same SubagentFooter
 
 ## 6. Supported Input Domain and Reachability
 
-| Input | Producer | Owner | Classification |
-| --- | --- | --- | --- |
-| child session_status retry | processor | SubagentFooter | observed |
-| permission-reviewer child | auto review navigate | SubagentFooter | observed |
+| Input                      | Producer             | Owner          | Classification |
+| -------------------------- | -------------------- | -------------- | -------------- |
+| child session_status retry | processor            | SubagentFooter | observed       |
+| permission-reviewer child  | auto review navigate | SubagentFooter | observed       |
 
 ## 7. Required Invariants
 
-| ID | Behavioral invariant |
-| --- | --- |
+| ID     | Behavioral invariant                                                   |
+| ------ | ---------------------------------------------------------------------- |
 | INV-01 | child（含 auto reviewer）retry 时 SubagentFooter 同行 theme.error 摘要 |
-| INV-02 | 红字优先于 token usage |
-| INV-03 | 压平摘要；`(details)` → DialogAlert 原文 |
-| INV-04 | `retry in … · #n` meta |
-| INV-05 | gemini quota 特例与 Prompt 一致 |
-| INV-06 | 非 retry 行为不变 |
-| INV-07 | 不恢复 child Prompt |
+| INV-02 | 红字优先于 token usage                                                 |
+| INV-03 | 压平摘要；`(details)` → DialogAlert 原文                               |
+| INV-04 | `retry in … · #n` meta                                                 |
+| INV-05 | gemini quota 特例与 Prompt 一致                                        |
+| INV-06 | 非 retry 行为不变                                                      |
+| INV-07 | 不恢复 child Prompt                                                    |
 
 ## 8. First Divergence and Root Cause
 
-| Invariant | First divergence | Owner |
-| --- | --- | --- |
+| Invariant  | First divergence                           | Owner          |
+| ---------- | ------------------------------------------ | -------------- |
 | INV-01..05 | SubagentFooter 未消费 session_status.retry | SubagentFooter |
 
 Root cause: UI consumer gap, not backend.
@@ -108,12 +108,12 @@ Default: modify only `subagent-footer.tsx` + one test file.
 
 ## 11. Secondary and Replacement Path Inventory
 
-| Path | Classification | Disposition |
-| --- | --- | --- |
-| SubagentFooter retry chrome | primary | implement |
-| Prompt retry / toast / message.error | preserve | preserve |
-| Re-enable Prompt on child | forbidden | reject |
-| Separate AutoReviewerFooter | forbidden | reject |
+| Path                                 | Classification | Disposition |
+| ------------------------------------ | -------------- | ----------- |
+| SubagentFooter retry chrome          | primary        | implement   |
+| Prompt retry / toast / message.error | preserve       | preserve    |
+| Re-enable Prompt on child            | forbidden      | reject      |
+| Separate AutoReviewerFooter          | forbidden      | reject      |
 
 ## 12. Workaround Deletion
 
@@ -121,26 +121,26 @@ Replace status-as-usage-only with status also driving retry chrome.
 
 ## 13. Forward Traceability
 
-| Inv | Path | File | Test |
-| --- | --- | --- | --- |
-| INV-01..04 | SubagentFooter retry | subagent-footer.tsx | session-message-render child retry |
-| INV-06 | else branch | same | existing usage/label |
-| auto reviewer | same component | zero extra mount | permission-reviewer title fixture |
+| Inv           | Path                 | File                | Test                               |
+| ------------- | -------------------- | ------------------- | ---------------------------------- |
+| INV-01..04    | SubagentFooter retry | subagent-footer.tsx | session-message-render child retry |
+| INV-06        | else branch          | same                | existing usage/label               |
+| auto reviewer | same component       | zero extra mount    | permission-reviewer title fixture  |
 
 ## 14. Reverse Traceability
 
-| Concept | Req | Why needed |
-| --- | --- | --- |
-| retry 红字簇 | INV-01..05 | Prompt unmounted on child |
-| createRefreshClock | INV-04 | countdown |
-| DialogAlert | INV-03 | details |
+| Concept            | Req        | Why needed                |
+| ------------------ | ---------- | ------------------------- |
+| retry 红字簇       | INV-01..05 | Prompt unmounted on child |
+| createRefreshClock | INV-04     | countdown                 |
+| DialogAlert        | INV-03     | details                   |
 
 ## 15. File-Level Change Plan
 
-| File | Change | Delta |
-| --- | --- | --- |
-| `packages/opencode/src/cli/cmd/tui/routes/session/subagent-footer.tsx` | modify | +40–70 |
-| `packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx` | modify | +60–120 |
+| File                                                                   | Change | Delta   |
+| ---------------------------------------------------------------------- | ------ | ------- |
+| `packages/opencode/src/cli/cmd/tui/routes/session/subagent-footer.tsx` | modify | +40–70  |
+| `packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx`   | modify | +60–120 |
 
 ## 16. TDD Behavior Slices
 
@@ -154,11 +154,11 @@ E≈50–70, C>=ceil(0.15E)
 
 ## 18. Verification
 
-| Command | Cwd |
-| --- | --- |
+| Command                                                                                                                     | Cwd               |
+| --------------------------------------------------------------------------------------------------------------------------- | ----------------- |
 | `bun test test/cli/cmd/tui/session-message-render.test.tsx -t "child subagent footer\|compact step\|non-shell auto review"` | packages/opencode |
-| `bun test test/cli/cmd/tui/prompt-submit-transport.test.tsx -t "retry\|details"` | packages/opencode |
-| `bun typecheck` | packages/opencode |
+| `bun test test/cli/cmd/tui/prompt-submit-transport.test.tsx -t "retry\|details"`                                            | packages/opencode |
+| `bun typecheck`                                                                                                             | packages/opencode |
 
 ## 19. Diff Budget
 
@@ -182,9 +182,9 @@ Full-scope independent audit required for plan and implementation.
 
 ## 22. Plan Audit Record
 
-| Round | Audited revision | Full scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | R1 | yes | No blocking findings. | TDD slices for INV-03/04/05 should be strengthened in implementation; parallel Prompt copy drift risk. | APPROVE | adversarial-auditor task_id ses_069c6d2b0ffeoA6Sr3uZjTJcVT |
+| Round | Audited revision | Full scope? | Blocking findings     | Non-blocking findings                                                                                  | Result  | Invocation reference                                       |
+| ----- | ---------------- | ----------- | --------------------- | ------------------------------------------------------------------------------------------------------ | ------- | ---------------------------------------------------------- |
+| 1     | R1               | yes         | No blocking findings. | TDD slices for INV-03/04/05 should be strengthened in implementation; parallel Prompt copy drift risk. | APPROVE | adversarial-auditor task_id ses_069c6d2b0ffeoA6Sr3uZjTJcVT |
 
 ### Independent plan audit verdict (verbatim)
 
@@ -201,11 +201,11 @@ Scope: full original requirement（task 子会话 + auto reviewer 共用 Subagen
 
 ### Actual Files and Diff
 
-| File | Change |
-| --- | --- |
+| File                                                                   | Change                                                                   |
+| ---------------------------------------------------------------------- | ------------------------------------------------------------------------ |
 | `packages/opencode/src/cli/cmd/tui/routes/session/subagent-footer.tsx` | modify: retry 红字簇 + details DialogAlert + countdown + layout priority |
-| `packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx` | modify: child permission-reviewer fixture + retry/details assertions |
-| `docs/plans/subagent-footer-retry-error-display.md` | plan artifact |
+| `packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx`   | modify: child permission-reviewer fixture + retry/details assertions     |
+| `docs/plans/subagent-footer-retry-error-display.md`                    | plan artifact                                                            |
 
 `git diff --stat` (code): 2 files, +201 / -11.
 
@@ -217,11 +217,11 @@ Scope: full original requirement（task 子会话 + auto reviewer 共用 Subagen
 
 ### Verification Commands and Results
 
-| Command | Cwd | Result |
-| --- | --- | --- |
+| Command                                                                                                                                                                             | Cwd               | Result |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------- | ------ |
 | `bun test test/cli/cmd/tui/session-message-render.test.tsx -t "child subagent footer shows red\|subagent footer shows compact\|non-shell auto review status opens" --timeout 60000` | packages/opencode | 3 pass |
-| `bun test test/cli/cmd/tui/prompt-submit-transport.test.tsx -t "opens the original retry\|keeps short retry" --timeout 60000` | packages/opencode | 2 pass |
-| `bun typecheck` | packages/opencode | pass |
+| `bun test test/cli/cmd/tui/prompt-submit-transport.test.tsx -t "opens the original retry\|keeps short retry" --timeout 60000`                                                       | packages/opencode | 2 pass |
+| `bun typecheck`                                                                                                                                                                     | packages/opencode | pass   |
 
 ### Original Feedback-Loop Result
 
@@ -229,20 +229,20 @@ Static red (status read, no theme.error/(details)/retry branch) resolved by prod
 
 ### Actual Secondary and Replacement Path Inventory
 
-| Path | Classification | Disposition |
-| --- | --- | --- |
-| SubagentFooter retry chrome | primary | implemented |
-| Prompt retry / toast / message.error | existing diagnostic | preserved |
-| Child Prompt re-enable | forbidden | not introduced |
+| Path                                 | Classification      | Disposition    |
+| ------------------------------------ | ------------------- | -------------- |
+| SubagentFooter retry chrome          | primary             | implemented    |
+| Prompt retry / toast / message.error | existing diagnostic | preserved      |
+| Child Prompt re-enable               | forbidden           | not introduced |
 
 ### Chinese Comment Calculation
 
-| Metric | Actual | Exclusions and evidence |
-| --- | --- | --- |
-| Effective changed code lines `E` | 180 | independent auditor recount round 2 |
-| Qualifying Chinese comment lines `C` | 29 | independent auditor recount round 2 |
-| Ratio `C / E` | 0.161 | PASS |
-| Required minimum `C` | 27 | max(1, ceil(0.15*180)) |
+| Metric                               | Actual | Exclusions and evidence             |
+| ------------------------------------ | ------ | ----------------------------------- |
+| Effective changed code lines `E`     | 180    | independent auditor recount round 2 |
+| Qualifying Chinese comment lines `C` | 29     | independent auditor recount round 2 |
+| Ratio `C / E`                        | 0.161  | PASS                                |
+| Required minimum `C`                 | 27     | max(1, ceil(0.15\*180))             |
 
 ### Remaining Unverified Items
 
@@ -251,10 +251,10 @@ Static red (status read, no theme.error/(details)/retry branch) resolved by prod
 
 ## 24. Implementation Audit Record
 
-| Round | Plan revision | Full original scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | R1 | yes | B-01 Chinese comment gate: E=180 C=22 need 27 | INV-05 no dedicated test; same-color not theme.error pin; narrow width untested; auditor did not re-run commands | BLOCK | ses_069bb0a82ffeUrHlrgGTSwDtqx |
-| 2 | R1 | yes | No blocking findings. | INV-05 no dedicated test; same-color not theme.error pin; narrow width untested | APPROVE | ses_069b65a98ffeEIDXrajUB1xvKn |
+| Round | Plan revision | Full original scope? | Blocking findings                             | Non-blocking findings                                                                                            | Result  | Invocation reference           |
+| ----- | ------------- | -------------------- | --------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- | ------- | ------------------------------ |
+| 1     | R1            | yes                  | B-01 Chinese comment gate: E=180 C=22 need 27 | INV-05 no dedicated test; same-color not theme.error pin; narrow width untested; auditor did not re-run commands | BLOCK   | ses_069bb0a82ffeUrHlrgGTSwDtqx |
+| 2     | R1            | yes                  | No blocking findings.                         | INV-05 no dedicated test; same-color not theme.error pin; narrow width untested                                  | APPROVE | ses_069b65a98ffeEIDXrajUB1xvKn |
 
 ### Independent implementation audit verdict (round 2, verbatim)
 

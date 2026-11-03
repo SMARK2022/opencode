@@ -6,9 +6,15 @@ export const VOICE_TRANSCRIBE_TIMEOUT_MS = 120_000
 // 比usage分拆阈值(>90)更晚出现，确保窄终端优先保留usage/commands等更高频信息。
 export const VOICE_HINT_MIN_PROMPT_WIDTH = 120
 
-export async function submitVoice(file: string, signal: AbortSignal, sdk: {
-  url: string; directory?: string; fetch: (input: string | URL, init?: RequestInit) => Promise<Response>
-}): Promise<string> {
+export async function submitVoice(
+  file: string,
+  signal: AbortSignal,
+  sdk: {
+    url: string
+    directory?: string
+    fetch: (input: string | URL, init?: RequestInit) => Promise<Response>
+  },
+): Promise<string> {
   signal.throwIfAborted()
   // standalone + native addon 的 Bun.file 正文释放会触发运行时崩溃；先取得独立字节所有权保护上传完成点。
   const bytes = await Bun.file(file).arrayBuffer()
@@ -17,11 +23,21 @@ export async function submitVoice(file: string, signal: AbortSignal, sdk: {
   // 每次提交读取当前连接，重连后的端口与 attach 认证沿 SDK 一起生效。
   const url = new URL("/tui/voice/transcribe", sdk.url)
   if (sdk.directory) url.searchParams.set("directory", sdk.directory)
-  const response = await sdk.fetch(url, { method: "POST", headers: { "content-type": "audio/wav" }, body: bytes, signal })
+  const response = await sdk.fetch(url, {
+    method: "POST",
+    headers: { "content-type": "audio/wav" },
+    body: bytes,
+    signal,
+  })
   // 响应正文仍归本轮信号；取消优先于响应解析和文字交付。
   const body: unknown = await response.json().catch(() => undefined)
   signal.throwIfAborted()
-  if (!response.ok) throw new Error(isRecord(body) && typeof body.message === "string" ? body.message : `Voice request returned HTTP ${response.status}`)
+  if (!response.ok)
+    throw new Error(
+      isRecord(body) && typeof body.message === "string"
+        ? body.message
+        : `Voice request returned HTTP ${response.status}`,
+    )
   // 只接收文字，凭据始终停留在共享后端的响应处理和配置中。
   if (!isRecord(body) || typeof body.text !== "string") throw new Error("Voice response must contain text")
   return body.text
@@ -119,8 +135,13 @@ export function createVoiceInputController(input: {
           if (text.trim()) input.insertText(text)
         } catch (error) {
           if (stopGeneration !== generation) return
-          input.onError?.(error instanceof Error && error.name === "TimeoutError"
-            ? "语音转录超时（120 秒）" : error instanceof Error ? error.message : String(error))
+          input.onError?.(
+            error instanceof Error && error.name === "TimeoutError"
+              ? "语音转录超时（120 秒）"
+              : error instanceof Error
+                ? error.message
+                : String(error),
+          )
         } finally {
           // stop 后也通过 abort 做最终清理：录音实现可能已停止，但临时 WAV 必须删除，避免转写后残留音频。
           await active?.abort().catch(() => {})
@@ -165,12 +186,18 @@ export function voiceHintVisible(promptWidth: number): boolean {
   return promptWidth > VOICE_HINT_MIN_PROMPT_WIDTH
 }
 
-export function voiceInputStatusText(status: VoiceInputStatus, shortcut: string, now = Date.now(), options: { compact?: boolean } = {}) {
+export function voiceInputStatusText(
+  status: VoiceInputStatus,
+  shortcut: string,
+  now = Date.now(),
+  options: { compact?: boolean } = {},
+) {
   // 这些文案直接显示在 footer；compact 是主 Prompt / DialogPrompt / QuestionPrompt 的统一 short profile。
   // #491/#505：默认长文案保留作兼容 profile，避免未来非 UI consumer 被静默改写。
   if (status.type === "starting") return options.compact ? "Starting..." : "Starting voice..."
   // recording 必须显示停止快捷键，用户不需要记住开始录音时按了哪个绑定。
-  if (status.type === "recording") return `${options.compact ? "Rec" : "Recording"} ${formatClock(now - status.startedAt)} · ${shortcut} stop`
+  if (status.type === "recording")
+    return `${options.compact ? "Rec" : "Recording"} ${formatClock(now - status.startedAt)} · ${shortcut} stop`
   // #491：compact 的 Rec 前缀省出 6 列给录音时钟，兜底快捷键提示仍不可省略。
   if (status.type === "stopping") return options.compact ? "Saving..." : "Saving voice..."
   // #491：transcribing 压缩文案预示即将注入，完整文案保留在 dialog/question 等宽裕场景。
@@ -181,7 +208,9 @@ export function voiceInputStatusText(status: VoiceInputStatus, shortcut: string,
 function formatClock(ms: number) {
   // 计时只向下取整，避免录音开始瞬间出现负数或跳秒。
   const seconds = Math.max(0, Math.floor(ms / 1000))
-  return `${Math.floor(seconds / 60).toString().padStart(2, "0")}:${(seconds % 60).toString().padStart(2, "0")}`
+  return `${Math.floor(seconds / 60)
+    .toString()
+    .padStart(2, "0")}:${(seconds % 60).toString().padStart(2, "0")}`
 }
 
 export * as PromptVoiceInput from "./prompt-voice-input"

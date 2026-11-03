@@ -622,7 +622,9 @@ describe("applyDirectoryEvent", () => {
     const [store, setStore] = createStore(
       baseState({
         part: {
-          [messageID]: [{ id: partID, sessionID, messageID, type: "text", text: "hello world", time: { start: 1 } } as Part],
+          [messageID]: [
+            { id: partID, sessionID, messageID, type: "text", text: "hello world", time: { start: 1 } } as Part,
+          ],
         },
         // 模拟 delta 累积后的 accum_delta 状态
         part_text_accum_delta: { [partID]: "hello world" },

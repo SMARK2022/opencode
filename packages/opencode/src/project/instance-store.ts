@@ -77,7 +77,10 @@ const layer: Layer.Layer<Service, never, Project.Service | InstanceBootstrap.Ser
       Effect.gen(function* () {
         // #523：pending bootstrap 与取消信号竞争；取消胜出时以 interrupt 收尾，不再等 boot 完成
         const exit = yield* Effect.exit(
-          Effect.raceFirst(boot({ ...input, directory }), Deferred.await(entry.cancel).pipe(Effect.andThen(Effect.interrupt))),
+          Effect.raceFirst(
+            boot({ ...input, directory }),
+            Deferred.await(entry.cancel).pipe(Effect.andThen(Effect.interrupt)),
+          ),
         )
         if (Exit.isFailure(exit)) yield* removeEntry(directory, entry)
         yield* Deferred.done(entry.deferred, exit).pipe(Effect.asVoid)

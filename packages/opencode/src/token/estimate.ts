@@ -27,16 +27,38 @@ const MAX_CHARS_PER_TOKEN = 8
 const INPUT_CHARS_HISTORY_LIMIT = 100_000
 
 type HistoryModel = { providerID?: string; id?: string; modelID?: string }
-type HistoryMessage = { info?: { role: string; providerID?: string; modelID?: string }; role?: string; providerID?: string; modelID?: string; parts: ReadonlyArray<HistoryPart> }
-type HistoryPart = { type: string; inputChars?: number; inputBreakdown?: { messages?: { attachments?: number }; media?: AttachmentTokenEstimate }; tokens?: { input: number; cache: { read: number; write: number } } }
+type HistoryMessage = {
+  info?: { role: string; providerID?: string; modelID?: string }
+  role?: string
+  providerID?: string
+  modelID?: string
+  parts: ReadonlyArray<HistoryPart>
+}
+type HistoryPart = {
+  type: string
+  inputChars?: number
+  inputBreakdown?: { messages?: { attachments?: number }; media?: AttachmentTokenEstimate }
+  tokens?: { input: number; cache: { read: number; write: number } }
+}
 type LearnedInputRatio = { charsPerToken: number; source: "model-history" | "session-history" }
-export type UploadInputEstimate = { inputTokens: number; textTokens: number; attachmentTokens: number; charsPerToken: number; source: "model-history" | "session-history" | "default" }
+export type UploadInputEstimate = {
+  inputTokens: number
+  textTokens: number
+  attachmentTokens: number
+  charsPerToken: number
+  source: "model-history" | "session-history" | "default"
+}
 
 // #194：estimateText 仅按字符数/密度换算，用于 tail/prune 等不依赖学习样本的场景
-export function estimateText(input: string, charsPerToken = DEFAULT_CHARS_PER_TOKEN) { return Math.max(0, Math.round((input || "").length / charsPerToken)) }
+export function estimateText(input: string, charsPerToken = DEFAULT_CHARS_PER_TOKEN) {
+  return Math.max(0, Math.round((input || "").length / charsPerToken))
+}
 
 // #194：learnInputCharsPerToken 用历史 step-finish 样本反推实际密度，避免固定 /4 失真
-export function learnInputCharsPerToken(input: { messages: ReadonlyArray<HistoryMessage>; model?: HistoryModel }): LearnedInputRatio | undefined {
+export function learnInputCharsPerToken(input: {
+  messages: ReadonlyArray<HistoryMessage>
+  model?: HistoryModel
+}): LearnedInputRatio | undefined {
   const modelRatio = collectInputRatio(input.messages, input.model, true)
   // #194：model-history 精确匹配当前模型时优先，session-history 是泛化回退
   if (modelRatio) return { charsPerToken: modelRatio, source: "model-history" }
@@ -47,19 +69,36 @@ export function learnInputCharsPerToken(input: { messages: ReadonlyArray<History
 }
 
 // #194：estimateUploadInput 汇总文本与附件 token，是 prompt/compaction 共用的唯一上传口径
-export function estimateUploadInput(input: { text: string; attachments: AttachmentTokenEstimate; history: ReadonlyArray<HistoryMessage>; model?: HistoryModel }): UploadInputEstimate {
+export function estimateUploadInput(input: {
+  text: string
+  attachments: AttachmentTokenEstimate
+  history: ReadonlyArray<HistoryMessage>
+  model?: HistoryModel
+}): UploadInputEstimate {
   // #194：先尝试同 model 历史密度，无样本时回退到 4，保证估算始终有界
   const learned = learnInputCharsPerToken({ messages: input.history, model: input.model })
   const charsPerToken = learned?.charsPerToken ?? DEFAULT_CHARS_PER_TOKEN
   // #194：文本部分按学习密度换算，附件部分独立累加，两者互不稀释
   const textTokens = estimateText(input.text, charsPerToken)
-  return { inputTokens: textTokens + input.attachments.tokens, textTokens, attachmentTokens: input.attachments.tokens, charsPerToken, source: learned?.source ?? "default" }
+  return {
+    inputTokens: textTokens + input.attachments.tokens,
+    textTokens,
+    attachmentTokens: input.attachments.tokens,
+    charsPerToken,
+    source: learned?.source ?? "default",
+  }
 }
 
 // #194：clampCharsPerToken 把学习结果限制在 2..8，防止单一样本把密度推到失真区间
-function clampCharsPerToken(value: number) { return Math.min(MAX_CHARS_PER_TOKEN, Math.max(MIN_CHARS_PER_TOKEN, value)) }
+function clampCharsPerToken(value: number) {
+  return Math.min(MAX_CHARS_PER_TOKEN, Math.max(MIN_CHARS_PER_TOKEN, value))
+}
 
-function collectInputRatio(messages: ReadonlyArray<HistoryMessage>, model: HistoryModel | undefined, modelOnly: boolean) {
+function collectInputRatio(
+  messages: ReadonlyArray<HistoryMessage>,
+  model: HistoryModel | undefined,
+  modelOnly: boolean,
+) {
   let historyInputTokens = 0
   let historyInputChars = 0
   for (let i = messages.length - 1; i >= 0 && historyInputChars < INPUT_CHARS_HISTORY_LIMIT; i--) {
@@ -83,7 +122,10 @@ function sameModel(message: HistoryMessage, model: HistoryModel | undefined) {
   if (!model?.providerID) return false
   const modelID = model.id ?? model.modelID
   if (!modelID) return false
-  return (message.info?.providerID ?? message.providerID) === model.providerID && (message.info?.modelID ?? message.modelID) === modelID
+  return (
+    (message.info?.providerID ?? message.providerID) === model.providerID &&
+    (message.info?.modelID ?? message.modelID) === modelID
+  )
 }
 
 // #194：inputRatioSample 只取 step-finish 消息的输入样本，其他消息类型不参与密度学习
@@ -108,4 +150,3 @@ function inputRatioSample(part: HistoryPart): { chars: number; tokens: number } 
 
 // #194：统一导出
 export * as TokenEstimate from "./estimate"
-

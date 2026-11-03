@@ -34,28 +34,28 @@
 
 ## 3. Repository Context
 
-| Source | Why it constrains this task |
-| --- | --- |
-| 根 AGENTS.md | 默认分支 dev；并行 agent 常驻（index.lock 竞争需等待重试） |
-| packages/opencode/AGENTS.md | Effect/模块形态规范；本任务不新增模块，仅改既有函数 |
-| packages/opencode/test/AGENTS.md | tmpdir fixture 可用于 cwd 相关测试 |
-| CONTEXT.md | 领域词汇：precheck 五级（safe/general/cautious/dangerous/forbidden）为权限系统既有语义 |
-| docs/adr/0001（triage） | 与本任务无直接关联，无适用 ADR |
-| 提交 ea7c4f30e5（五级拆分） | forbidden/dangerous 拆分的既有架构，本任务不动该层 |
+| Source                           | Why it constrains this task                                                            |
+| -------------------------------- | -------------------------------------------------------------------------------------- |
+| 根 AGENTS.md                     | 默认分支 dev；并行 agent 常驻（index.lock 竞争需等待重试）                             |
+| packages/opencode/AGENTS.md      | Effect/模块形态规范；本任务不新增模块，仅改既有函数                                    |
+| packages/opencode/test/AGENTS.md | tmpdir fixture 可用于 cwd 相关测试                                                     |
+| CONTEXT.md                       | 领域词汇：precheck 五级（safe/general/cautious/dangerous/forbidden）为权限系统既有语义 |
+| docs/adr/0001（triage）          | 与本任务无直接关联，无适用 ADR                                                         |
+| 提交 ea7c4f30e5（五级拆分）      | forbidden/dangerous 拆分的既有架构，本任务不动该层                                     |
 
 ## 4. Files and Evidence Read
 
-| Evidence | Relevance | Evidence class |
-| --- | --- | --- |
-| packages/opencode/src/permission/precheck.ts :27-29, :324-361, :450-553, :581-730, :1157-1266, :1395-1511 | Decision 类型、evaluate/bashEffect 入口、evaluateShell 段合并、raw 层、classifyTokens、classifyGit/gitSafe 全链 | observed |
-| packages/opencode/src/permission/reviewer/prompt.ts :66-91 | reason 进入 reviewer 上下文的唯一呈现点（"Retry reason:" 标签） | observed |
-| packages/opencode/src/permission/reviewer/service.ts :150-179, :91 | precheck.reason 传递链；Time advisory 独立通道（与标签零耦合） | observed |
-| packages/opencode/src/permission/auto.ts :37-109 | reason 仅作展示/前缀拼接，无字符串等值消费 | observed |
-| packages/opencode/test/permission/precheck.test.ts（git 断言面 :1055-1099, :1195-1197, :1290-1292 及全文 reason 断言核验） | 既有 git -C 断言全部 level-only；全文 reason 断言：:448/:1091（无 -C 路径）+ :148-186 六处 Windows 保护目录删除断言（均非 git 路径，不受本设计影响）[N-03 修正] | observed |
-| packages/opencode/test/permission/reviewer-prompt.test.ts :69, :102-144 | 断言传入内容字符串而非 "Retry reason:" 标签；:69 为 system intro 不动 | observed |
-| packages/opencode/test/session/prompt.test.ts :2160-2187 | Time advisory/600 words 断言走独立追加项，标签改名不触碰 | observed |
-| 生产 DB（~/.local/share/opencode/opencode.db）reviewer 决策取证（2026-09-06~07） | 三次 `git -C … commit` 误放行 rationale 均在反驳弱 -C 信号后用 goal-level 推理补位；06:10-06:13 四次 reviewer 审查 `git -C .temp/API status/show/log`（inside 只读，纯负担） | observed |
-| 红态探针 D:\Temp\opencode\gitc_red_probe.ts（2026-09-07 运行） | 10 条用例当前输出，见第 8 节 | observed |
+| Evidence                                                                                                                   | Relevance                                                                                                                                                                    | Evidence class |
+| -------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------- |
+| packages/opencode/src/permission/precheck.ts :27-29, :324-361, :450-553, :581-730, :1157-1266, :1395-1511                  | Decision 类型、evaluate/bashEffect 入口、evaluateShell 段合并、raw 层、classifyTokens、classifyGit/gitSafe 全链                                                              | observed       |
+| packages/opencode/src/permission/reviewer/prompt.ts :66-91                                                                 | reason 进入 reviewer 上下文的唯一呈现点（"Retry reason:" 标签）                                                                                                              | observed       |
+| packages/opencode/src/permission/reviewer/service.ts :150-179, :91                                                         | precheck.reason 传递链；Time advisory 独立通道（与标签零耦合）                                                                                                               | observed       |
+| packages/opencode/src/permission/auto.ts :37-109                                                                           | reason 仅作展示/前缀拼接，无字符串等值消费                                                                                                                                   | observed       |
+| packages/opencode/test/permission/precheck.test.ts（git 断言面 :1055-1099, :1195-1197, :1290-1292 及全文 reason 断言核验） | 既有 git -C 断言全部 level-only；全文 reason 断言：:448/:1091（无 -C 路径）+ :148-186 六处 Windows 保护目录删除断言（均非 git 路径，不受本设计影响）[N-03 修正]              | observed       |
+| packages/opencode/test/permission/reviewer-prompt.test.ts :69, :102-144                                                    | 断言传入内容字符串而非 "Retry reason:" 标签；:69 为 system intro 不动                                                                                                        | observed       |
+| packages/opencode/test/session/prompt.test.ts :2160-2187                                                                   | Time advisory/600 words 断言走独立追加项，标签改名不触碰                                                                                                                     | observed       |
+| 生产 DB（~/.local/share/opencode/opencode.db）reviewer 决策取证（2026-09-06~07）                                           | 三次 `git -C … commit` 误放行 rationale 均在反驳弱 -C 信号后用 goal-level 推理补位；06:10-06:13 四次 reviewer 审查 `git -C .temp/API status/show/log`（inside 只读，纯负担） | observed       |
+| 红态探针 D:\Temp\opencode\gitc_red_probe.ts（2026-09-07 运行）                                                             | 10 条用例当前输出，见第 8 节                                                                                                                                                 | observed       |
 
 ## 5. Current Behavior
 
@@ -80,40 +80,40 @@ bash tool 计划动作(metadata: {command, cwd, shell})
 
 ## 6. Supported Input Domain and Reachability
 
-| Input or condition | Producer | Upstream guarantees | Reachable path | Owner | Classification |
-| --- | --- | --- | --- | --- | --- |
-| `git -C <path> <sub>`（裸 -C + 独立实参） | bash tool 命令文本 | tokens 由 tokenize 产出 | classifyGit | precheck | observed（DB+测试） |
-| `git -C<path>` / `git -c<conf>` 附着短形式 | 同上 | 同上 | classifyGit（当前漏检附着形，探针 #9 safe 直过） | precheck | observed（绕过） |
-| `git -c/--config-env/--git-dir/--work-tree/--exec-path [值]` | 同上 | 同上 | classifyGit | precheck | observed |
-| `git --no-pager …` 安全 boolean 前缀 | 同上 | 同上 | classifyGit while 循环 | precheck | observed |
-| 链式 `;`/`&&`/`\|\|`/`\|` 多段（各段可独立命中 cautious） | splitCommands | 分段保序 | evaluateShell 合并 | precheck | observed |
-| `metadata.cwd` 有/无 | bash tool 必带 cwd；其他调用方（测试/pattern 路径）可能缺失 | 无 | bashEffect 新读取 | precheck | contracted（approval JSON 实证 metadata 含 cwd） |
-| `$VAR`/`~`/通配 -C 实参 | shell 展开前文本 | 静态不可解析 | membership 保守外部 | precheck | reachable |
-| 相对路径 `..`/`a/../a`/`.` | 同上 | path.resolve 词法归一 | membership | precheck | reachable |
-| win32 盘符大小写差异 | Windows 路径语义 | 大小写不敏感文件系统 | membership 折叠比较 | precheck | reachable |
+| Input or condition                                           | Producer                                                    | Upstream guarantees     | Reachable path                                   | Owner    | Classification                                   |
+| ------------------------------------------------------------ | ----------------------------------------------------------- | ----------------------- | ------------------------------------------------ | -------- | ------------------------------------------------ |
+| `git -C <path> <sub>`（裸 -C + 独立实参）                    | bash tool 命令文本                                          | tokens 由 tokenize 产出 | classifyGit                                      | precheck | observed（DB+测试）                              |
+| `git -C<path>` / `git -c<conf>` 附着短形式                   | 同上                                                        | 同上                    | classifyGit（当前漏检附着形，探针 #9 safe 直过） | precheck | observed（绕过）                                 |
+| `git -c/--config-env/--git-dir/--work-tree/--exec-path [值]` | 同上                                                        | 同上                    | classifyGit                                      | precheck | observed                                         |
+| `git --no-pager …` 安全 boolean 前缀                         | 同上                                                        | 同上                    | classifyGit while 循环                           | precheck | observed                                         |
+| 链式 `;`/`&&`/`\|\|`/`\|` 多段（各段可独立命中 cautious）    | splitCommands                                               | 分段保序                | evaluateShell 合并                               | precheck | observed                                         |
+| `metadata.cwd` 有/无                                         | bash tool 必带 cwd；其他调用方（测试/pattern 路径）可能缺失 | 无                      | bashEffect 新读取                                | precheck | contracted（approval JSON 实证 metadata 含 cwd） |
+| `$VAR`/`~`/通配 -C 实参                                      | shell 展开前文本                                            | 静态不可解析            | membership 保守外部                              | precheck | reachable                                        |
+| 相对路径 `..`/`a/../a`/`.`                                   | 同上                                                        | path.resolve 词法归一   | membership                                       | precheck | reachable                                        |
+| win32 盘符大小写差异                                         | Windows 路径语义                                            | 大小写不敏感文件系统    | membership 折叠比较                              | precheck | reachable                                        |
 
 ## 7. Required Invariants
 
-| ID | Behavioral invariant | Evidence | Existing test |
-| --- | --- | --- | --- |
-| INV-01 | 同一命令命中的全部同类规则信号必须出现在最终 reason（-C 重定向 + 子命令效应 + 链式各段，去重保序拼接） | DB 误放行根因：reviewer 只见 -C 弱信号 | 无（本任务新增） |
-| INV-02 | `git -C <inside-cwd>` 且子命令为 general 及以下 → 与无 flag 同构（safe/general，零 reviewer 负担） | 用户原文"inside+general及以下默认无问题"；DB 负担取证 | 无（新增） |
-| INV-03 | outside worktree 或注入 flag（-c/--git-dir/--work-tree/--config-env/--exec-path）→ 至少 cautious 且 reason 携带对应信号 | 用户原文"outsideworktree…提升到相应内容" | precheck.test :1073-1077（level） |
-| INV-04 | 存在全局 flag 时子命令仍完整走既有 :1418-1463 分类（不被遮蔽） | 用户原文"内部也应当额外匹配" | 无（新增） |
-| INV-05 | 段合并收集全部同层级 cautious/dangerous/forbidden reason 后拼接，层级优先序 forbidden>dangerous>cautious 不变 | 用户原文"所有的cautious待检项检出之后进行reason的附加" | 无（新增） |
-| INV-06 | 附着短形式（`-Cdir`/`-cconf`）不得 safe 直过，按同一 membership/注入语义归类 | 探针 #9（safe 绕过实锤） | 无（新增） |
-| INV-07 | `metadata.cwd` 缺失或 -C 实参静态不可解析 → 保守按 outside 处理（cautious） | fail-safe 既有哲学（opaque→general 同构） | :1290-1292（$REPO cautious） |
-| INV-08 | 级别单调性与 raw 层短路保持：forbidden/dangerous 确定性短路、wrapper 载荷短路、maxRisk 取 max 均不变 | 用户原文"不是纯粹的放弃某些压缩路径" | precheck.test 既有 40+ 断言 |
-| INV-09 | `git commit`（无 flag）的 reason 字节不变："git state-changing command requires explicit approval" | :1091 既有精确断言 | precheck.test :1084-1098 |
+| ID     | Behavioral invariant                                                                                                    | Evidence                                               | Existing test                     |
+| ------ | ----------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------ | --------------------------------- |
+| INV-01 | 同一命令命中的全部同类规则信号必须出现在最终 reason（-C 重定向 + 子命令效应 + 链式各段，去重保序拼接）                  | DB 误放行根因：reviewer 只见 -C 弱信号                 | 无（本任务新增）                  |
+| INV-02 | `git -C <inside-cwd>` 且子命令为 general 及以下 → 与无 flag 同构（safe/general，零 reviewer 负担）                      | 用户原文"inside+general及以下默认无问题"；DB 负担取证  | 无（新增）                        |
+| INV-03 | outside worktree 或注入 flag（-c/--git-dir/--work-tree/--config-env/--exec-path）→ 至少 cautious 且 reason 携带对应信号 | 用户原文"outsideworktree…提升到相应内容"               | precheck.test :1073-1077（level） |
+| INV-04 | 存在全局 flag 时子命令仍完整走既有 :1418-1463 分类（不被遮蔽）                                                          | 用户原文"内部也应当额外匹配"                           | 无（新增）                        |
+| INV-05 | 段合并收集全部同层级 cautious/dangerous/forbidden reason 后拼接，层级优先序 forbidden>dangerous>cautious 不变           | 用户原文"所有的cautious待检项检出之后进行reason的附加" | 无（新增）                        |
+| INV-06 | 附着短形式（`-Cdir`/`-cconf`）不得 safe 直过，按同一 membership/注入语义归类                                            | 探针 #9（safe 绕过实锤）                               | 无（新增）                        |
+| INV-07 | `metadata.cwd` 缺失或 -C 实参静态不可解析 → 保守按 outside 处理（cautious）                                             | fail-safe 既有哲学（opaque→general 同构）              | :1290-1292（$REPO cautious）      |
+| INV-08 | 级别单调性与 raw 层短路保持：forbidden/dangerous 确定性短路、wrapper 载荷短路、maxRisk 取 max 均不变                    | 用户原文"不是纯粹的放弃某些压缩路径"                   | precheck.test 既有 40+ 断言       |
+| INV-09 | `git commit`（无 flag）的 reason 字节不变："git state-changing command requires explicit approval"                      | :1091 既有精确断言                                     | precheck.test :1084-1098          |
 
 ## 8. First Divergence and Root Cause
 
-| Invariant | First divergence | Owning module/interface | Proof |
-| --- | --- | --- | --- |
-| INV-01/INV-04 | classifyGit :1406-1409——while 扫全局 flag 时命中 GIT_UNSAFE_GLOBAL 即 `return`，子命令分类（:1418+）永不执行，`git -C X commit` 只产 "git global flag redirects execution context" | precheck.ts classifyGit | 探针 #1；DB 三次误放行 rationale |
-| INV-05 | evaluateShell :486-491——段合并 `find(first)` 只保留最高层第一个 decision 的 reason，链式其余段信号丢弃 | precheck.ts evaluateShell | 探针 #6（链式仅单 reason） |
-| INV-02 | 同 classifyGit 早返回：inside 只读与 outside 同罪一律 cautious，无法豁免（且 cwd 根本未传入分类链） | precheck.ts bashEffect（未读 metadata.cwd）+ classifyGit | 探针 #3/#4 |
-| INV-06 | flag 提取只做精确集合匹配（:1407 无附着短形式检测），`-Cpackages` 落入"安全 boolean"分支被跳过 | precheck.ts classifyGit flag 提取 | 探针 #9（safe 直过） |
+| Invariant     | First divergence                                                                                                                                                                   | Owning module/interface                                  | Proof                            |
+| ------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------- | -------------------------------- |
+| INV-01/INV-04 | classifyGit :1406-1409——while 扫全局 flag 时命中 GIT_UNSAFE_GLOBAL 即 `return`，子命令分类（:1418+）永不执行，`git -C X commit` 只产 "git global flag redirects execution context" | precheck.ts classifyGit                                  | 探针 #1；DB 三次误放行 rationale |
+| INV-05        | evaluateShell :486-491——段合并 `find(first)` 只保留最高层第一个 decision 的 reason，链式其余段信号丢弃                                                                             | precheck.ts evaluateShell                                | 探针 #6（链式仅单 reason）       |
+| INV-02        | 同 classifyGit 早返回：inside 只读与 outside 同罪一律 cautious，无法豁免（且 cwd 根本未传入分类链）                                                                                | precheck.ts bashEffect（未读 metadata.cwd）+ classifyGit | 探针 #3/#4                       |
+| INV-06        | flag 提取只做精确集合匹配（:1407 无附着短形式检测），`-Cpackages` 落入"安全 boolean"分支被跳过                                                                                     | precheck.ts classifyGit flag 提取                        | 探针 #9（safe 直过）             |
 
 根因：**单一 reason 数据通道 + 两处 first-wins 早返回**，使 reviewer 收到被任意截断的证据。下游症状（reviewer 用 goal-level 推理补位、发明默示批准）不是 reviewer 层缺陷。
 
@@ -131,12 +131,12 @@ bash tool 计划动作(metadata: {command, cwd, shell})
 
 ## 9. Responsibility and Seam
 
-| Concern | Owner | Interface promise | Why it belongs here | Why another module does not own it |
-| --- | --- | --- | --- | --- |
-| -C 剥离与 membership 判定 | precheck.classifyGit | 产 level+完整 reason | 唯一拥有 tokens+cwd 的分类点 | reviewer 只消费 reason；bash tool 不做语义分类 |
-| 链式段 reason 聚合 | precheck.evaluateShell | 同层级全量去重拼接 | 唯一看见全部段的合成点 | auto/reviewer 均在下游，无法重组已丢信息 |
-| safe 防御层同步 | precheck.gitSafe | -C-inside 不拒、注入仍拒 | classifyGit 返回 undefined 后的 safe 判定守门人 | — |
-| reason 呈现框架 | reviewer/prompt.ts | 多规则列表化 + strictest-wins 一句 | reviewer 上下文的唯一组装点 | 改 policy prose 属前轮已否决路线 |
+| Concern                   | Owner                  | Interface promise                  | Why it belongs here                             | Why another module does not own it             |
+| ------------------------- | ---------------------- | ---------------------------------- | ----------------------------------------------- | ---------------------------------------------- |
+| -C 剥离与 membership 判定 | precheck.classifyGit   | 产 level+完整 reason               | 唯一拥有 tokens+cwd 的分类点                    | reviewer 只消费 reason；bash tool 不做语义分类 |
+| 链式段 reason 聚合        | precheck.evaluateShell | 同层级全量去重拼接                 | 唯一看见全部段的合成点                          | auto/reviewer 均在下游，无法重组已丢信息       |
+| safe 防御层同步           | precheck.gitSafe       | -C-inside 不拒、注入仍拒           | classifyGit 返回 undefined 后的 safe 判定守门人 | —                                              |
+| reason 呈现框架           | reviewer/prompt.ts     | 多规则列表化 + strictest-wins 一句 | reviewer 上下文的唯一组装点                     | 改 policy prose 属前轮已否决路线               |
 
 ## 10. Single Approved Primary-Path Design
 
@@ -166,12 +166,12 @@ evaluate(input 含 metadata.cwd)
 
 元数表（skip 语义）：
 
-| flag | 裸形式 | 附着/=-形式 |
-| --- | --- | --- |
-| `-C` | 跳 2（flag+path） | 跳 1（`-Cdir`） |
-| `-c` | 跳 2（flag+conf 对） | 跳 1（`-cconf=v`） |
-| `--git-dir`/`--work-tree`/`--config-env` | 跳 2 | 跳 1（=自含） |
-| `--exec-path` | 跳 1（可选参：裸形 print-and-exit 不消费子命令位） | 跳 1 |
+| flag                                     | 裸形式                                             | 附着/=-形式        |
+| ---------------------------------------- | -------------------------------------------------- | ------------------ |
+| `-C`                                     | 跳 2（flag+path）                                  | 跳 1（`-Cdir`）    |
+| `-c`                                     | 跳 2（flag+conf 对）                               | 跳 1（`-cconf=v`） |
+| `--git-dir`/`--work-tree`/`--config-env` | 跳 2                                               | 跳 1（=自含）      |
+| `--exec-path`                            | 跳 1（可选参：裸形 print-and-exit 不消费子命令位） | 跳 1               |
 
 membership（纯词法，无 I/O）：
 
@@ -186,58 +186,58 @@ redirectsInsideCwd(target, cwd):
 
 ## 11. Secondary and Replacement Path Inventory
 
-| Path | Current or proposed | Classification | Produces success? | Decision-surface share | Disposition |
-| --- | --- | --- | --- | --- | --- |
-| classifyGit flag 早返回 | current | primary-contract 内的缺陷分支 | yes（错误单信号） | 100% git 全局 flag 命令 | remove（被合并逻辑替代） |
-| evaluateShell find(first) 合并 | current | 同上 | yes（丢信号） | 全部链式命令 | remove |
-| raw 层 forbidden/dangerous/cautious 短路 | current | 压缩路径（用户明示保留） | yes | 高风险确定命中 | preserve |
-| wrapper 载荷短路 :471-474 | current | 压缩路径 | yes | 包装器命令 | preserve |
-| gitSafe :1502 全局 flag 硬拒 | current | 防御层 | no（safe 判定） | safe 回路 | preserve（-C-inside 豁免同步） |
-| prompt "Retry reason:" 标签 | current | 呈现层 | no | reviewer 全部请求 | replace（matched-rules 框架） |
-| policy VCS carve-out 措辞 | 前轮提案 | forbidden fallback（用户否决） | — | — | reject |
+| Path                                     | Current or proposed | Classification                 | Produces success? | Decision-surface share  | Disposition                    |
+| ---------------------------------------- | ------------------- | ------------------------------ | ----------------- | ----------------------- | ------------------------------ |
+| classifyGit flag 早返回                  | current             | primary-contract 内的缺陷分支  | yes（错误单信号） | 100% git 全局 flag 命令 | remove（被合并逻辑替代）       |
+| evaluateShell find(first) 合并           | current             | 同上                           | yes（丢信号）     | 全部链式命令            | remove                         |
+| raw 层 forbidden/dangerous/cautious 短路 | current             | 压缩路径（用户明示保留）       | yes               | 高风险确定命中          | preserve                       |
+| wrapper 载荷短路 :471-474                | current             | 压缩路径                       | yes               | 包装器命令              | preserve                       |
+| gitSafe :1502 全局 flag 硬拒             | current             | 防御层                         | no（safe 判定）   | safe 回路               | preserve（-C-inside 豁免同步） |
+| prompt "Retry reason:" 标签              | current             | 呈现层                         | no                | reviewer 全部请求       | replace（matched-rules 框架）  |
+| policy VCS carve-out 措辞                | 前轮提案            | forbidden fallback（用户否决） | —                 | —                       | reject                         |
 
 新增平行走廊：零。所有变更都在既有 classifyGit/evaluateShell/gitSafe/prompt 四个 owner 内。
 
 ## 12. Workaround Deletion and Replacement
 
-| Existing workaround or duplicate | Why it existed | Why the approved route supersedes it | Delete or collapse location |
-| --- | --- | --- | --- |
-| "git global flag redirects execution context" 一刀切 cautious | 补丁式治理无法区分 -C 与注入、inside 与 outside | membership + 注入分离后按语义精确归类 | classifyGit（reason 串拆分替换） |
-| gitSafe 对全局 flag 的防御性硬拒 | classifyGit 曾保证先拦截 | classifyGit 不再一刀切，gitSafe 改用同一 GIT_FLAG_STRIP 保持两层一致 | gitSafe :1498-1503 |
+| Existing workaround or duplicate                              | Why it existed                                  | Why the approved route supersedes it                                 | Delete or collapse location      |
+| ------------------------------------------------------------- | ----------------------------------------------- | -------------------------------------------------------------------- | -------------------------------- |
+| "git global flag redirects execution context" 一刀切 cautious | 补丁式治理无法区分 -C 与注入、inside 与 outside | membership + 注入分离后按语义精确归类                                | classifyGit（reason 串拆分替换） |
+| gitSafe 对全局 flag 的防御性硬拒                              | classifyGit 曾保证先拦截                        | classifyGit 不再一刀切，gitSafe 改用同一 GIT_FLAG_STRIP 保持两层一致 | gitSafe :1498-1503               |
 
 ## 13. Forward Traceability
 
-| Requirement or invariant | Production path | Planned file/change | Behavioral test |
-| --- | --- | --- | --- |
-| INV-01 完整 reason | classifyGit 合并 + evaluateShell 聚合 | precheck.ts | slice 1/6/9 |
-| INV-02 inside 豁免 | membership + 合并规则空信号 | precheck.ts | slice 2/3 |
-| INV-03 outside/注入提升 | membership 保守 + 注入 reason | precheck.ts | slice 4/7 |
-| INV-04 子命令透传 | GIT_FLAG_STRIP 后接既有分类 | precheck.ts | slice 1/5/6 |
-| INV-05 段聚合 | evaluateShell 同层收集 | precheck.ts | slice 9 |
-| INV-06 附着形式 | flag 提取正则 | precheck.ts | slice 8 |
-| INV-07 无 cwd 保守 | membership false 分支 | precheck.ts | slice 4 |
-| INV-08 压缩路径保留 | 不触碰 raw/wrapper 层 | — | 既有 40+ 断言回归 |
-| INV-09 无 flag reason 不变 | 合并规则 reasons 为空走原路 | precheck.ts | 既有 :1084-1098 回归 |
-| 呈现框架 | matched-rules 标签 + strictest-wins | prompt.ts | slice 10 |
+| Requirement or invariant   | Production path                       | Planned file/change | Behavioral test      |
+| -------------------------- | ------------------------------------- | ------------------- | -------------------- |
+| INV-01 完整 reason         | classifyGit 合并 + evaluateShell 聚合 | precheck.ts         | slice 1/6/9          |
+| INV-02 inside 豁免         | membership + 合并规则空信号           | precheck.ts         | slice 2/3            |
+| INV-03 outside/注入提升    | membership 保守 + 注入 reason         | precheck.ts         | slice 4/7            |
+| INV-04 子命令透传          | GIT_FLAG_STRIP 后接既有分类           | precheck.ts         | slice 1/5/6          |
+| INV-05 段聚合              | evaluateShell 同层收集                | precheck.ts         | slice 9              |
+| INV-06 附着形式            | flag 提取正则                         | precheck.ts         | slice 8              |
+| INV-07 无 cwd 保守         | membership false 分支                 | precheck.ts         | slice 4              |
+| INV-08 压缩路径保留        | 不触碰 raw/wrapper 层                 | —                   | 既有 40+ 断言回归    |
+| INV-09 无 flag reason 不变 | 合并规则 reasons 为空走原路           | precheck.ts         | 既有 :1084-1098 回归 |
+| 呈现框架                   | matched-rules 标签 + strictest-wins   | prompt.ts           | slice 10             |
 
 ## 14. Reverse Traceability
 
-| Proposed production concept | Requirement ID | Evidence | Why existing logic cannot carry it |
-| --- | --- | --- | --- |
-| GIT_FLAG_STRIP 共享纯函数 | INV-02/03/04/06 | 探针 #1/#3/#9 | 现有两个消费点（classifyGit/gitSafe）各自为政且语义均错 |
-| redirectsInsideCwd | INV-02/07 | 用户原文 membership 拍板；DB 负担取证 | 现代码根本不接收 cwd |
-| 段聚合 join | INV-01/05 | 探针 #6 | find(first) 结构性丢信息 |
-| prompt 标签句 | INV-01 呈现侧 | 本任务多信号需求的呈现侧必然要求（用户原文「全部…才将相应的reason合并/两行」）；用户前轮原话「多条规则命中按更严格者审」为辅助锚 | "Retry reason:" 语义误导且无多规则指引 |
-| 注入 reason 新串 | INV-03 | -c hooksPath 执行面（classifyGit :1402-1403 既有注释） | 与 -C 混用一串无法区分语义 |
+| Proposed production concept | Requirement ID  | Evidence                                                                                                                         | Why existing logic cannot carry it                      |
+| --------------------------- | --------------- | -------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------- |
+| GIT_FLAG_STRIP 共享纯函数   | INV-02/03/04/06 | 探针 #1/#3/#9                                                                                                                    | 现有两个消费点（classifyGit/gitSafe）各自为政且语义均错 |
+| redirectsInsideCwd          | INV-02/07       | 用户原文 membership 拍板；DB 负担取证                                                                                            | 现代码根本不接收 cwd                                    |
+| 段聚合 join                 | INV-01/05       | 探针 #6                                                                                                                          | find(first) 结构性丢信息                                |
+| prompt 标签句               | INV-01 呈现侧   | 本任务多信号需求的呈现侧必然要求（用户原文「全部…才将相应的reason合并/两行」）；用户前轮原话「多条规则命中按更严格者审」为辅助锚 | "Retry reason:" 语义误导且无多规则指引                  |
+| 注入 reason 新串            | INV-03          | -c hooksPath 执行面（classifyGit :1402-1403 既有注释）                                                                           | 与 -C 混用一串无法区分语义                              |
 
 ## 15. File-Level Change Plan
 
-| File | Add / modify / delete | Exact responsibility of the change | Expected line delta |
-| --- | --- | --- | --- |
-| packages/opencode/src/permission/precheck.ts | modify | cwd 透传（evaluate→bashEffect→evaluateShell→evaluateCommand→classifyTokens/safeTokens）；GIT_FLAG_STRIP + redirectsInsideCwd + 注入/-C 语义分离 + 合并；evaluateShell 同层聚合；gitSafe 同步豁免 | +85/-30（净 ~55） |
-| packages/opencode/src/permission/reviewer/prompt.ts | modify | :82 标签与一句 strictest-wins 指引 | +2/-1 |
-| packages/opencode/test/permission/precheck.test.ts | modify | cwd-aware helper + 新 slice 断言 + 旧 -C 断言 reason 无断言无需动 | +~90 |
-| packages/opencode/test/permission/reviewer-prompt.test.ts | modify | 标签断言同步 | +2/-0 |
+| File                                                      | Add / modify / delete | Exact responsibility of the change                                                                                                                                                               | Expected line delta |
+| --------------------------------------------------------- | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------- |
+| packages/opencode/src/permission/precheck.ts              | modify                | cwd 透传（evaluate→bashEffect→evaluateShell→evaluateCommand→classifyTokens/safeTokens）；GIT_FLAG_STRIP + redirectsInsideCwd + 注入/-C 语义分离 + 合并；evaluateShell 同层聚合；gitSafe 同步豁免 | +85/-30（净 ~55）   |
+| packages/opencode/src/permission/reviewer/prompt.ts       | modify                | :82 标签与一句 strictest-wins 指引                                                                                                                                                               | +2/-1               |
+| packages/opencode/test/permission/precheck.test.ts        | modify                | cwd-aware helper + 新 slice 断言 + 旧 -C 断言 reason 无断言无需动                                                                                                                                | +~90                |
+| packages/opencode/test/permission/reviewer-prompt.test.ts | modify                | 标签断言同步                                                                                                                                                                                     | +2/-0               |
 
 生产文件 2 个（≤4 ✓），生产行数 ~58（≤600 ✓）。
 
@@ -245,52 +245,52 @@ redirectsInsideCwd(target, cwd):
 
 公共 seam：`PermissionPrecheck.evaluate({permission:"bash", patterns, metadata:{command, cwd?}})`。
 
-| Order | Red behavior | Why current code fails | Minimal green behavior | Regression protected |
-| --- | --- | --- | --- | --- |
-| 1 | `git -C <outside> commit -m x`（cwd=固定目录）reason 同时含 "state-changing command" 与 "redirects outside" | flag 早返回吞子命令 | GIT_FLAG_STRIP+合并 | DB 误放行类 |
-| 2 | `git -C . status` → safe | 早返回一律 cautious | membership inside | 只读负担类 |
-| 3 | `git -C packages/opencode status`、`git -C a/../a status` → safe；win32 大小写变体仅在 `process.platform === "win32"` 门内断言（POSIX CI 不跑折叠用例，防平台红测）[N-05] | 同上 | resolve+normalize+折叠 | 词法边界 |
-| 4 | `git -C .. status`、`git -C "$REPO" status`、无 cwd 元数据 → cautious 且 reason 含 "outside" | 同上（保守分支） | false 分支 | :1290-1292 语义 |
-| 5 | `git -C <inside> commit` → cautious 且 reason 仅 "git state-changing command…"（无 redirect 附加） | 同上 | 空信号合并 | inside+写操作 |
-| 6 | `git -C <outside> reset --hard` → reason 含 "destructive git reset"+"outside" | 同上 | 合并序 | 高风险组合 |
-| 7 | `git -c core.hooksPath=/h status`、`git --git-dir=/x status`、`git --exec-path st` → cautious 且 reason 含 "injects" | reason 串语义 | 注入族 | :1075 语义升级 |
-| 8 | `git -C<outside>dir status` 附着 → cautious；`git -C<inside>dir status` → safe | 附着形式漏检（#9 绕过） | 附着正则 | 绕过闭合 |
-| 9 | 链式 `git -C <outside> pull; git -C <outside> add f && git -C <outside> commit` → reason 聚合去重含两信号 | find(first) | 段聚合 | INV-05 |
-| 10 | buildUserPromptItems 输出含 "Precheck matched rules" 与 "strictest matched rule" | 标签不存在 | prompt.ts | 呈现框架 |
+| Order | Red behavior                                                                                                                                                              | Why current code fails  | Minimal green behavior | Regression protected |
+| ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------- | ---------------------- | -------------------- |
+| 1     | `git -C <outside> commit -m x`（cwd=固定目录）reason 同时含 "state-changing command" 与 "redirects outside"                                                               | flag 早返回吞子命令     | GIT_FLAG_STRIP+合并    | DB 误放行类          |
+| 2     | `git -C . status` → safe                                                                                                                                                  | 早返回一律 cautious     | membership inside      | 只读负担类           |
+| 3     | `git -C packages/opencode status`、`git -C a/../a status` → safe；win32 大小写变体仅在 `process.platform === "win32"` 门内断言（POSIX CI 不跑折叠用例，防平台红测）[N-05] | 同上                    | resolve+normalize+折叠 | 词法边界             |
+| 4     | `git -C .. status`、`git -C "$REPO" status`、无 cwd 元数据 → cautious 且 reason 含 "outside"                                                                              | 同上（保守分支）        | false 分支             | :1290-1292 语义      |
+| 5     | `git -C <inside> commit` → cautious 且 reason 仅 "git state-changing command…"（无 redirect 附加）                                                                        | 同上                    | 空信号合并             | inside+写操作        |
+| 6     | `git -C <outside> reset --hard` → reason 含 "destructive git reset"+"outside"                                                                                             | 同上                    | 合并序                 | 高风险组合           |
+| 7     | `git -c core.hooksPath=/h status`、`git --git-dir=/x status`、`git --exec-path st` → cautious 且 reason 含 "injects"                                                      | reason 串语义           | 注入族                 | :1075 语义升级       |
+| 8     | `git -C<outside>dir status` 附着 → cautious；`git -C<inside>dir status` → safe                                                                                            | 附着形式漏检（#9 绕过） | 附着正则               | 绕过闭合             |
+| 9     | 链式 `git -C <outside> pull; git -C <outside> add f && git -C <outside> commit` → reason 聚合去重含两信号                                                                 | find(first)             | 段聚合                 | INV-05               |
+| 10    | buildUserPromptItems 输出含 "Precheck matched rules" 与 "strictest matched rule"                                                                                          | 标签不存在              | prompt.ts              | 呈现框架             |
 
 每 slice 独立期望值（字面量字符串），不复现实现逻辑。
 
 ## 17. Chinese Comment Budget
 
-| Metric | Estimate | Method |
-| --- | --- | --- |
-| Effective changed code lines `E` | ~55 | 排除空行/import/纯移动 |
-| Required Chinese explanatory comments `C` | ≥ max(1, ceil(55×0.15)) = 9 | 邻近修改点 |
+| Metric                                    | Estimate                    | Method                 |
+| ----------------------------------------- | --------------------------- | ---------------------- |
+| Effective changed code lines `E`          | ~55                         | 排除空行/import/纯移动 |
+| Required Chinese explanatory comments `C` | ≥ max(1, ceil(55×0.15)) = 9 | 邻近修改点             |
 
 注释点：GIT_FLAG_STRIP 元数表与 --exec-path 可选参例外；-C 与注入族语义分离理由；membership 纯词法契约（无 I/O）+ win32 折叠 + symlink 残留；附着短形式检测；段聚合去重保序不变量；gitSafe 两层一致性；INV-09 字节不变约束；prompt 标签语义；保守外部 fail-safe。
 
 ## 18. Verification
 
-| Command | Working directory | Evidence produced |
-| --- | --- | --- |
-| bun run D:\Temp\opencode\gitc_red_probe.ts | packages/opencode | 原始反馈回路：10 用例全绿于新期望 |
-| bun test test/permission/precheck.test.ts | packages/opencode | slice 红→绿 + 既有 115 断言零红 |
-| bun test test/permission/reviewer-prompt.test.ts | packages/opencode | slice 10 + 既有断言零红 |
-| bun test test/permission/ | packages/opencode | 权限全组（~290）零红 |
-| bun test test/session/prompt.test.ts | packages/opencode | reviewer 集成（Time advisory 等）零红 |
-| bun typecheck | packages/opencode | 类型零错 |
+| Command                                          | Working directory | Evidence produced                     |
+| ------------------------------------------------ | ----------------- | ------------------------------------- |
+| bun run D:\Temp\opencode\gitc_red_probe.ts       | packages/opencode | 原始反馈回路：10 用例全绿于新期望     |
+| bun test test/permission/precheck.test.ts        | packages/opencode | slice 红→绿 + 既有 115 断言零红       |
+| bun test test/permission/reviewer-prompt.test.ts | packages/opencode | slice 10 + 既有断言零红               |
+| bun test test/permission/                        | packages/opencode | 权限全组（~290）零红                  |
+| bun test test/session/prompt.test.ts             | packages/opencode | reviewer 集成（Time advisory 等）零红 |
+| bun typecheck                                    | packages/opencode | 类型零错                              |
 
 ## 19. Diff Budget
 
-| Metric | Estimate | Justification |
-| --- | --- | --- |
-| Files added | 0 | — |
-| Files modified（生产） | 2 | precheck.ts + prompt.ts |
-| Files modified（测试） | 2 | 对应两个测试文件 |
-| Files deleted | 0 | — |
-| Production lines | ~58 | 用户预算 ≤600 |
-| Test lines | ~95 | — |
-| Generated lines | 0 | — |
+| Metric                 | Estimate | Justification           |
+| ---------------------- | -------- | ----------------------- |
+| Files added            | 0        | —                       |
+| Files modified（生产） | 2        | precheck.ts + prompt.ts |
+| Files modified（测试） | 2        | 对应两个测试文件        |
+| Files deleted          | 0        | —                       |
+| Production lines       | ~58      | 用户预算 ≤600           |
+| Test lines             | ~95      | —                       |
+| Generated lines        | 0        | —                       |
 
 ## 20. Real Risks and Open Decisions
 
@@ -322,9 +322,9 @@ redirectsInsideCwd(target, cwd):
 
 ## 22. Plan Audit Record
 
-| Round | Audited revision | Full scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | R1 | yes | 无 | N-01 分隔符用 "\n" 匹配「两行」；N-02 :79 术语漂移（保留不改，断言锚）+ §14 依据重锚；N-03 :148-186 六处 reason 断言补记；N-04 session-cache 风险注纠错；N-05 slice 3 win32 平台门 | APPROVE | task ses_f84e8d158ffeakqCTJPKkUolDr (2026-09-07, 全范围独立重建证据) |
+| Round | Audited revision | Full scope? | Blocking findings | Non-blocking findings                                                                                                                                                              | Result  | Invocation reference                                                 |
+| ----- | ---------------- | ----------- | ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- | -------------------------------------------------------------------- |
+| 1     | R1               | yes         | 无                | N-01 分隔符用 "\n" 匹配「两行」；N-02 :79 术语漂移（保留不改，断言锚）+ §14 依据重锚；N-03 :148-186 六处 reason 断言补记；N-04 session-cache 风险注纠错；N-05 slice 3 win32 平台门 | APPROVE | task ses_f84e8d158ffeakqCTJPKkUolDr (2026-09-07, 全范围独立重建证据) |
 
 审计后按合同折入 N-01/N-03/N-04/N-05 与 §14 重锚（N-02 保留 :79 原文不动，系测试断言锚点）：非阻塞记录修正不清空 approval；join 分隔符修正系逐字匹配用户需求的记录纠偏，非设计转向。
 
@@ -348,15 +348,15 @@ redirectsInsideCwd(target, cwd):
 
 ### Verification Commands and Results
 
-| 命令 | cwd | 结果 |
-| --- | --- | --- |
-| bun test test/permission/precheck.test.ts | packages/opencode | 116 pass / 0 fail（B-01 返工后重跑） |
-| bun test test/permission/reviewer-prompt.test.ts | packages/opencode | 20 pass / 0 fail |
-| bun test test/permission/ | packages/opencode | 292 pass / 0 fail（6 文件，B-01r3 修复后重跑） |
-| bun test test/session/prompt.test.ts | packages/opencode | 97 pass / 0 fail / 111 tests（14 skip，B-01r2 后重跑；B-01r3 仅改一行模板插值不在该套件路径上） |
-| bun typecheck（tsgo --noEmit） | packages/opencode | **B-01r3 修复后 exit 0 零错**（r2 轮曾因输出行数误读为干净而虚报——实测当时 exit 2 TS2339，已在 §24 记录；修复后以实际输出+退出码验证） |
-| node:path.posix 分支探针 D:\Temp\opencode\posix_membership_probe.ts | packages/opencode | 7/7 OK（B-01 fixture 修复的 POSIX 确定性验证；盘符 guard 为平台无关正则，剥损断言两平台同令牌确定性） |
-| B-01r3 修复验证探针 D:\Temp\opencode\r3_probe2.ts | packages/opencode | 3/3：未知前缀透传路径 reason 携带真实内层决策（不再 undefined），含剥损形态穿透剥头路径 |
+| 命令                                                                | cwd               | 结果                                                                                                                                   |
+| ------------------------------------------------------------------- | ----------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| bun test test/permission/precheck.test.ts                           | packages/opencode | 116 pass / 0 fail（B-01 返工后重跑）                                                                                                   |
+| bun test test/permission/reviewer-prompt.test.ts                    | packages/opencode | 20 pass / 0 fail                                                                                                                       |
+| bun test test/permission/                                           | packages/opencode | 292 pass / 0 fail（6 文件，B-01r3 修复后重跑）                                                                                         |
+| bun test test/session/prompt.test.ts                                | packages/opencode | 97 pass / 0 fail / 111 tests（14 skip，B-01r2 后重跑；B-01r3 仅改一行模板插值不在该套件路径上）                                        |
+| bun typecheck（tsgo --noEmit）                                      | packages/opencode | **B-01r3 修复后 exit 0 零错**（r2 轮曾因输出行数误读为干净而虚报——实测当时 exit 2 TS2339，已在 §24 记录；修复后以实际输出+退出码验证） |
+| node:path.posix 分支探针 D:\Temp\opencode\posix_membership_probe.ts | packages/opencode | 7/7 OK（B-01 fixture 修复的 POSIX 确定性验证；盘符 guard 为平台无关正则，剥损断言两平台同令牌确定性）                                  |
+| B-01r3 修复验证探针 D:\Temp\opencode\r3_probe2.ts                   | packages/opencode | 3/3：未知前缀透传路径 reason 携带真实内层决策（不再 undefined），含剥损形态穿透剥头路径                                                |
 
 ### Original Feedback-Loop Result
 
@@ -371,12 +371,12 @@ redirectsInsideCwd(target, cwd):
 
 ### Chinese Comment Calculation
 
-| Metric | Actual | Exclusions and evidence |
-| --- | --- | --- |
-| Effective changed code lines `E` | 175 | 实现审计 r3 独立重算口径：生产 115 + 测试 60；排除 import 1、空行、注释 |
-| Qualifying Chinese comment lines `C` | 70 | 生产 47 + 测试 23；membership 词法契约/盘符剥损 guard/per-token 剥损标记语义与 seam 归属/win32 折叠/保守分支、注入二分、附着归一化、元数表与 --exec-path 例外、合并规则与「两行」、段聚合全量收集、gitSafe 防御一致性、cwd 基准、prompt 标签动机、fixture 平台可移植理由、剥损/对照组断言意图 |
-| Ratio `C / E` | ~40% | `N/A` when `E = 0` |
-| Required minimum `C` | 27 | `E > 0: C >= max(1, ceil(175*0.15))=27` |
+| Metric                               | Actual | Exclusions and evidence                                                                                                                                                                                                                                                                       |
+| ------------------------------------ | ------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Effective changed code lines `E`     | 175    | 实现审计 r3 独立重算口径：生产 115 + 测试 60；排除 import 1、空行、注释                                                                                                                                                                                                                       |
+| Qualifying Chinese comment lines `C` | 70     | 生产 47 + 测试 23；membership 词法契约/盘符剥损 guard/per-token 剥损标记语义与 seam 归属/win32 折叠/保守分支、注入二分、附着归一化、元数表与 --exec-path 例外、合并规则与「两行」、段聚合全量收集、gitSafe 防御一致性、cwd 基准、prompt 标签动机、fixture 平台可移植理由、剥损/对照组断言意图 |
+| Ratio `C / E`                        | ~40%   | `N/A` when `E = 0`                                                                                                                                                                                                                                                                            |
+| Required minimum `C`                 | 27     | `E > 0: C >= max(1, ceil(175*0.15))=27`                                                                                                                                                                                                                                                       |
 
 ### Remaining Unverified Items
 
@@ -384,12 +384,12 @@ redirectsInsideCwd(target, cwd):
 
 ## 24. Implementation Audit Record
 
-| Round | Plan revision | Full original scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | R1 | yes | B-01 新测试块 fixture 硬编码 win32 专属 cwd，POSIX CI（ubuntu/macOS 必过核心测试）5 断言红，违反无红测硬约束 | N-01 §23 数字漂移（+135/-49 vs 实际 +129/-53）；N-02 :1091 引用漂移（实为 force-push 断言）；N-03 远程包装器载荷以本地 cwd 为 membership 基准的观察（owner 已记录，仅观察） | BLOCK | task ses_f84b70b54ffew3GMeXOMGUItTo（含中断后续起，2026-09-07） |
-| 2 | R1 | yes | B-01r2 盘符剥损 guard 不完整：反斜杠相对路径剥损（..\other → ..other）误判 inside，`git -C ..\other status` / `..\..` safe 直过漏审（本次 diff 新引入，INV-03/07 违反） | N-01r2 §23 E/C 表未刷新（重算 E=146/C=58）；N-02r2 POSIX 冒号文件名过度保守（fail-safe 方向已接受）；N-03r1 复验未变（远程包装器本地 cwd 基准，仅观察） | BLOCK | 同 task（round 2，2026-09-07，含真实 seam 复现探针） |
-| 3 | R1 | yes | B-01r3 重命名漏改 :558 `stripped.reason`（现为 boolean[]）→ typecheck exit 2 TS2339（CI typecheck 作业必红）+ 未知前缀透传路径 reason 退化为字面量 undefined | N-01r3 §23 E/C 重算 E=175/C=70/40%；N-02r3 双引号反斜杠过度审查（已接受方向）；N-03 未变（远程包装器，仅观察） | BLOCK | 同 task（round 3 终轮，2026-09-07，typecheck 复现+运行时探针） |
-| 4（全新会话终审） | R1 | yes | 无 | N-01 同类 flag 重复时 reason 重复行（段合并层去重已足够，无信号损失）；N-02 远程包装器本地 cwd 基准（保守方向，owner 已记录）；N-03 §23 E/C 估算漂移（审计重算 E≈175/C≈64，两种口径均过门）；N-04 实现命名与 §10 GIT_FLAG_STRIP 形状漂移（语义同一、双消费点共享单一事实来源） | APPROVE（No blocking findings） | task ses_f83d8700effee2221cDyzKdgzF（2026-09-07，独立重跑 136/0+292/0+97/0/14skip+typecheck exit 0+原始回路 10/10；三项历史 blocker 均在 owner 处验证修复而非掩盖） |
+| Round             | Plan revision | Full original scope? | Blocking findings                                                                                                                                                       | Non-blocking findings                                                                                                                                                                                                                                                          | Result                          | Invocation reference                                                                                                                                                |
+| ----------------- | ------------- | -------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1                 | R1            | yes                  | B-01 新测试块 fixture 硬编码 win32 专属 cwd，POSIX CI（ubuntu/macOS 必过核心测试）5 断言红，违反无红测硬约束                                                            | N-01 §23 数字漂移（+135/-49 vs 实际 +129/-53）；N-02 :1091 引用漂移（实为 force-push 断言）；N-03 远程包装器载荷以本地 cwd 为 membership 基准的观察（owner 已记录，仅观察）                                                                                                    | BLOCK                           | task ses_f84b70b54ffew3GMeXOMGUItTo（含中断后续起，2026-09-07）                                                                                                     |
+| 2                 | R1            | yes                  | B-01r2 盘符剥损 guard 不完整：反斜杠相对路径剥损（..\other → ..other）误判 inside，`git -C ..\other status` / `..\..` safe 直过漏审（本次 diff 新引入，INV-03/07 违反） | N-01r2 §23 E/C 表未刷新（重算 E=146/C=58）；N-02r2 POSIX 冒号文件名过度保守（fail-safe 方向已接受）；N-03r1 复验未变（远程包装器本地 cwd 基准，仅观察）                                                                                                                        | BLOCK                           | 同 task（round 2，2026-09-07，含真实 seam 复现探针）                                                                                                                |
+| 3                 | R1            | yes                  | B-01r3 重命名漏改 :558 `stripped.reason`（现为 boolean[]）→ typecheck exit 2 TS2339（CI typecheck 作业必红）+ 未知前缀透传路径 reason 退化为字面量 undefined            | N-01r3 §23 E/C 重算 E=175/C=70/40%；N-02r3 双引号反斜杠过度审查（已接受方向）；N-03 未变（远程包装器，仅观察）                                                                                                                                                                 | BLOCK                           | 同 task（round 3 终轮，2026-09-07，typecheck 复现+运行时探针）                                                                                                      |
+| 4（全新会话终审） | R1            | yes                  | 无                                                                                                                                                                      | N-01 同类 flag 重复时 reason 重复行（段合并层去重已足够，无信号损失）；N-02 远程包装器本地 cwd 基准（保守方向，owner 已记录）；N-03 §23 E/C 估算漂移（审计重算 E≈175/C≈64，两种口径均过门）；N-04 实现命名与 §10 GIT_FLAG_STRIP 形状漂移（语义同一、双消费点共享单一事实来源） | APPROVE（No blocking findings） | task ses_f83d8700effee2221cDyzKdgzF（2026-09-07，独立重跑 136/0+292/0+97/0/14skip+typecheck exit 0+原始回路 10/10；三项历史 blocker 均在 owner 处验证修复而非掩盖） |
 
 B-01 返工（同 owner 测试文件 + membership 生产 guard）：fixture resolve 锚定平台绝对路径；返工中发现并根因修复 tokenize 剥损孪生问题（盘符相对剥损形态保守 outside guard，剥损只会多审不会漏审）；新增剥损形态断言；全部验证命令重跑绿。N-01 已按审计口径修正 §23。N-02 确认：无 flag 字节不变由 reasons 为空分支结构保证且有 inside 单行断言钉住。N-03 记录为观察（owner：remote 递归调用点，若收紧传 undefined 即可，无需新机制）。
 

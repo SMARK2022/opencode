@@ -22,7 +22,7 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
   const theme = () => props.api.theme.current
   // 从 sync store 读取 goal 状态
   const goal = createMemo(() => props.api.state.session.goal(props.session_id))
-  const style = createMemo(() => (goal() ? STATUS_STYLE[goal()!.status] ?? STATUS_STYLE.active : null))
+  const style = createMemo(() => (goal() ? (STATUS_STYLE[goal()!.status] ?? STATUS_STYLE.active) : null))
 
   return (
     <Show when={goal() && style()}>

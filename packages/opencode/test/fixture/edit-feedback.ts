@@ -17,4 +17,3 @@ export const feedbackFormat = Layer.mock(Format.Service, {
   status: () => Effect.succeed([]),
   file: () => Effect.succeed(false),
 })
-

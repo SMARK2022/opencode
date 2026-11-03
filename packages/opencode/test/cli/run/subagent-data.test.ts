@@ -552,7 +552,10 @@ describe("run subagent data", () => {
     expect(snapshotSubagentData(data).tabs).toEqual([expect.objectContaining({ sessionID: "child-1" })])
     reduce(data, {
       type: "message.updated",
-      properties: { sessionID: "parent-1", info: { id: "msg-child-1", role: "assistant", hidden: { time: 2, reason: "undo" } } },
+      properties: {
+        sessionID: "parent-1",
+        info: { id: "msg-child-1", role: "assistant", hidden: { time: 2, reason: "undo" } },
+      },
     })
     expect(snapshotSubagentData(data)).toEqual({ tabs: [], details: {}, permissions: [], questions: [] })
     // #553：同一 reducer 还必须把 hidden task Part 当删除事件，且无 tab 时不能创建。

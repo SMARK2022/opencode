@@ -29,16 +29,16 @@ opencode 需要把“模型可见的工具输出提示”从当前的临时字�
 
 现状不是单点 bug，而是提示语法没有统一层级。相同语义被不同格式表达：
 
-| 语义 | 当前格式示例 | 问题 |
-| --- | --- | --- |
-| shell 输出被截断 | `...output truncated...` + `Full output saved to:` | 缺少总行数/字节数；不是结构化提示 |
-| 通用工具输出被截断 | 自然语言段落 | 与 shell 截断不一致；字段不可稳定解析 |
-| 重复输出被压缩 | `... [same line repeated ...]` | 可读，但与其他省略标记不统一 |
-| adapter 摘要 | `<pytest_summary>`、`<docker_build_summary>`、`<tsc_diagnostics_summary>` | 每个 adapter 发明一个 tag |
-| 高熵内容省略 | `<high-entropy ...>` | tag 命名和块级提示混用 |
-| shell 诊断摘录 | `<bash_high_signal_excerpt>` | 方向正确，但 tag 太具体 |
-| shell timeout/abort | `<shell_metadata>` | 名字宽泛，字段不结构化 |
-| compaction 截断 | `[Tool output truncated for compaction: omitted N chars]` | 与 tool/shell 截断断裂 |
+| 语义                | 当前格式示例                                                              | 问题                                  |
+| ------------------- | ------------------------------------------------------------------------- | ------------------------------------- |
+| shell 输出被截断    | `...output truncated...` + `Full output saved to:`                        | 缺少总行数/字节数；不是结构化提示     |
+| 通用工具输出被截断  | 自然语言段落                                                              | 与 shell 截断不一致；字段不可稳定解析 |
+| 重复输出被压缩      | `... [same line repeated ...]`                                            | 可读，但与其他省略标记不统一          |
+| adapter 摘要        | `<pytest_summary>`、`<docker_build_summary>`、`<tsc_diagnostics_summary>` | 每个 adapter 发明一个 tag             |
+| 高熵内容省略        | `<high-entropy ...>`                                                      | tag 命名和块级提示混用                |
+| shell 诊断摘录      | `<bash_high_signal_excerpt>`                                              | 方向正确，但 tag 太具体               |
+| shell timeout/abort | `<shell_metadata>`                                                        | 名字宽泛，字段不结构化                |
+| compaction 截断     | `[Tool output truncated for compaction: omitted N chars]`                 | 与 tool/shell 截断断裂                |
 
 这些提示都会影响模型如何理解工具结果。它们必须像一个轻量 harness：把工具输出的边界、缺失、恢复方式说清楚，但不能把过多实现细节带进上下文。
 
@@ -217,15 +217,15 @@ message: Command exceeded timeout. Retry with a larger timeout only if it is exp
 
 第一阶段只需要这些类型。不要提前扩展成大 taxonomy。
 
-| type | 使用场景 | 推荐形态 |
-| --- | --- | --- |
-| `output_truncated` | shell 或通用工具输出被截断 | `opencode_notice` |
-| `output_compressed` | 输出经过压缩且需要告知模型 | `opencode_notice` |
-| `command_summary` | pytest/docker/tsc/npm adapter 摘要 | `opencode_notice` |
-| `execution` | timeout、user_abort、非正常执行元信息 | `opencode_notice` |
-| `shell_high_signal` | shell 错误高信号摘录 | `opencode_excerpt` |
+| type                   | 使用场景                                           | 推荐形态                        |
+| ---------------------- | -------------------------------------------------- | ------------------------------- |
+| `output_truncated`     | shell 或通用工具输出被截断                         | `opencode_notice`               |
+| `output_compressed`    | 输出经过压缩且需要告知模型                         | `opencode_notice`               |
+| `command_summary`      | pytest/docker/tsc/npm adapter 摘要                 | `opencode_notice`               |
+| `execution`            | timeout、user_abort、非正常执行元信息              | `opencode_notice`               |
+| `shell_high_signal`    | shell 错误高信号摘录                               | `opencode_excerpt`              |
 | `compaction_truncated` | compaction 中 tool output 或 recent memento 被截断 | `opencode_notice` 或内联 marker |
-| `compaction_cleared` | 旧 tool result 被 compact/prune 清理 | `opencode_notice` |
+| `compaction_cleared`   | 旧 tool result 被 compact/prune 清理               | `opencode_notice`               |
 
 内联 marker 的 reason 不需要成为严格枚举，但建议先收敛为：
 
@@ -429,19 +429,19 @@ total="12438L"
 
 ## 现有格式迁移映射
 
-| 旧格式 | 新格式 |
-| --- | --- |
-| `...output truncated...` + `Full output saved to:` | `<opencode_notice type="output_truncated" ... />` |
-| `The tool call succeeded but the output was truncated...` | `<opencode_notice type="output_truncated" source="tool" ... />` |
-| `<shell_metadata>` | `<opencode_notice type="execution" source="shell" ... />` |
-| `<bash_high_signal_excerpt>` | `<opencode_excerpt type="shell_high_signal" ... />`（已完成） |
-| `<pytest_summary>` / `<docker_build_summary>` / `<docker_failed_step>` / `<tsc_diagnostics_summary>` | 适配器为死代码已删除（零调用方，2026-09-06）；`command_summary` 类型保留备用，暂无生产者 |
-| `<high-entropy ...>` | `[..., high-entropy ...]` 内联 marker（已完成，含 `head=` 头部） |
-| `<REDACTED_API-KEY>` / `<REDACTED_CREDENTIAL>` 等 | `[redacted api-key]` 等特定值型 + `password=[redacted]` 键值型（保留键名；原值 ≥16 字符保留首 7 字符头，如 `sk-abcd…[redacted api-key]`；已完成） |
-| `... [same line repeated ...]` | `[... same line Nx]` |
-| `... [previous N lines repeated ...]` | `[... repeated block Nx, XL->YL]` |
-| `[Tool output truncated for compaction: omitted N chars]` | `[... compaction truncated N chars]` 或 `opencode_notice` |
-| `[Old tool result content cleared]` | `<opencode_notice type="compaction_cleared" ... />` |
+| 旧格式                                                                                               | 新格式                                                                                                                                            |
+| ---------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `...output truncated...` + `Full output saved to:`                                                   | `<opencode_notice type="output_truncated" ... />`                                                                                                 |
+| `The tool call succeeded but the output was truncated...`                                            | `<opencode_notice type="output_truncated" source="tool" ... />`                                                                                   |
+| `<shell_metadata>`                                                                                   | `<opencode_notice type="execution" source="shell" ... />`                                                                                         |
+| `<bash_high_signal_excerpt>`                                                                         | `<opencode_excerpt type="shell_high_signal" ... />`（已完成）                                                                                     |
+| `<pytest_summary>` / `<docker_build_summary>` / `<docker_failed_step>` / `<tsc_diagnostics_summary>` | 适配器为死代码已删除（零调用方，2026-09-06）；`command_summary` 类型保留备用，暂无生产者                                                          |
+| `<high-entropy ...>`                                                                                 | `[..., high-entropy ...]` 内联 marker（已完成，含 `head=` 头部）                                                                                  |
+| `<REDACTED_API-KEY>` / `<REDACTED_CREDENTIAL>` 等                                                    | `[redacted api-key]` 等特定值型 + `password=[redacted]` 键值型（保留键名；原值 ≥16 字符保留首 7 字符头，如 `sk-abcd…[redacted api-key]`；已完成） |
+| `... [same line repeated ...]`                                                                       | `[... same line Nx]`                                                                                                                              |
+| `... [previous N lines repeated ...]`                                                                | `[... repeated block Nx, XL->YL]`                                                                                                                 |
+| `[Tool output truncated for compaction: omitted N chars]`                                            | `[... compaction truncated N chars]` 或 `opencode_notice`                                                                                         |
+| `[Old tool result content cleared]`                                                                  | `<opencode_notice type="compaction_cleared" ... />`                                                                                               |
 
 ## 非目标
 

@@ -251,7 +251,9 @@ async function runInstall(args: string[], env: Record<string, string | undefined
 // #292：Windows 下通过 WSL bash 运行安装后的二进制
 async function runBinary(file: string) {
   const result = await runCommand(
-    process.platform === "win32" ? bashCommand(bashPathForFile(file), ["--version"], { PATH: bashPath() }) : [file, "--version"],
+    process.platform === "win32"
+      ? bashCommand(bashPathForFile(file), ["--version"], { PATH: bashPath() })
+      : [file, "--version"],
     path.dirname(file),
     process.env,
   )
@@ -325,16 +327,34 @@ function bashCommand(script: string, args: string[], env: Record<string, string 
   return [
     BASH,
     "-c",
-    ["exec", "/usr/bin/env", "-u", "BASH_ENV", ...assignments, "/bin/bash", quoteForSh(script), ...args.map((arg) => quoteForSh(bashPathForFile(arg)))].join(" "),
+    [
+      "exec",
+      "/usr/bin/env",
+      "-u",
+      "BASH_ENV",
+      ...assignments,
+      "/bin/bash",
+      quoteForSh(script),
+      ...args.map((arg) => quoteForSh(bashPathForFile(arg))),
+    ].join(" "),
   ]
 }
 
 // #292：构建 bash 可用的 PATH——Windows 下使用固定 POSIX 基础 PATH 保持测试隔离
 function bashPath(...entries: string[]) {
-  if (process.platform !== "win32") return [...entries, process.env.PATH].filter((item): item is string => Boolean(item)).join(":")
+  if (process.platform !== "win32")
+    return [...entries, process.env.PATH].filter((item): item is string => Boolean(item)).join(":")
   // Windows POSIX 层不会可靠解析原生 PATH 里的 `C:\...` drive colon；测试只需要
   // fake-bin 中的桩命令和基础工具链，所以固定基础 PATH 来隔离用户环境。
-  return [...entries.map(bashPathForFile), "/usr/local/sbin", "/usr/local/bin", "/usr/sbin", "/usr/bin", "/sbin", "/bin"].join(":")
+  return [
+    ...entries.map(bashPathForFile),
+    "/usr/local/sbin",
+    "/usr/local/bin",
+    "/usr/sbin",
+    "/usr/bin",
+    "/sbin",
+    "/bin",
+  ].join(":")
 }
 
 // #292：Windows 路径转 WSL /mnt/<drive> 形式——仅测试内部使用，生产 install 脚本保持 POSIX-only
@@ -369,4 +389,3 @@ function windowsBashFlavor() {
   if (process.platform !== "win32") return "posix"
   return BASH.replaceAll("\\", "/").toLowerCase().endsWith("/windows/system32/bash.exe") ? "wsl" : "git"
 }
-

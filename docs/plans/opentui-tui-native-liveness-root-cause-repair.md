@@ -41,6 +41,7 @@ R18 执行结论：HTTP/SSE snapshot 排序、跨 transport revision、orphan de
 **主线（唯一）**：`Diff/Theme 正常生命周期 → native owner 退休 → 20k 次循环不耗尽 → 压力后新内容可渲染、错误界面可构造、Ctrl-C 退出回调可达`。
 
 Non-goals：
+
 - HTTP/SSE/快照/并发同步/Part 数据一致性（未证明导致失响应）。
 - 191–195 补丁回放；Provider compaction；daemon/网络/Shell worker。
 - 扩大 registry、吞异常、ErrorBoundary 成功化、备用 renderer、缩短历史、feature flag。
@@ -49,32 +50,32 @@ Non-goals：
 
 ## 3. Evidence（当前有效，全部已实际运行）
 
-| 证据 | 结果 | 含义 |
-| --- | --- | --- |
-| installed Diff split→unified→destroy ×10（`D:\Temp\opencode\opentui-diff-destroy-retention-probe.ts`，cwd `packages/opencode`） | registry 4→7→…→31；renderer+style 清理后仍 30 残留 | 正常路径每次退休泄漏 3 个 owner（side+code+gutter） |
-| 同实例 20 次交替 view（installed `bun -e`） | registry 恒 8；unified 后 destroy 留 4 | 缓存复用本身不泄漏；泄漏条件=经过 split 的实例在非 split 态退休 |
-| 单次退休断言（installed `bun -e` assert） | exit 1：actual=4, expected=1，`normal Diff retirement must release every descendant` | 严格 red |
-| 残留对象核验（installed `bun -e`） | `right-code.parent=null`、`isDestroyed=false`、`textBuffer.getPlainText()` 返回正文 | 泄漏的是活 native 资源，非仅 JS 名字 |
-| 正常压力 16,378 次（installed `bun -e`，无人工耗尽） | `Failed to create SyntaxStyle`，registry=49136 | 正常生命周期可耗尽共享 registry |
-| 真实 TSX 反馈环（`D:\Temp\opencode\liveness-boundary-bootstrap-r14.ts`，经真实 solid transform + 当前 workspace 依赖 + 真实 ErrorComponent）：无压力 | `{caught:1, exits:1, visible:true}`，exit 0 | 基线：错误界面可见、Ctrl-C 进入退出回调 |
-| 同环 `--pressure --native-trigger`（真实 `<text>` 触发，无手动 throw） | 16,378 次后 text 创建失败进 ErrorBoundary（caught=1），fallback 构造再败于 `Failed to create TextBuffer`，exits=0、不可见，exit 1 | **完整故障链**：正常泄漏 → 耗尽 → 错误界面无法构造 → 退出路径失效 |
-| 一致 source modules 20,000 次循环（cwd `thirdparty/opentui/packages/core`，`bun -e` 全部导入 `src/`） | registry 精确回基线 1，新正文可见，Ctrl-C=1 | 修复后源码目标状态；但当前源码含未撤回异常事务，精简后必须重跑 |
-| Theme 机制（raw memo probe + `dialog-prompt.test.tsx` 敏感性对照：旧 memo 0 pass/1 fail，cleanup-aware 1 pass/14 assertions） | memo 重算创建新 SyntaxStyle 无退休；修复后旧值失效 | Theme 泄漏与修复敏感性均已证明 |
-| `bun run script/upgrade-opentui.ts 0.4.3-smark.10`（root） | exit 1 `Unsupported OpenTUI release`（白名单只有 `.1`）；`upgrade-opentui.test.ts` 1 pass/6 assertions（只测 `.1`） | 升级工具与实际 `.10` 失配，测试无法捕获 |
-| `verify-opentui-closure.ts:8` | 硬编码 `0.4.3-smark.10`；另硬编码 solid `1.9.12` 期望 | 与 package.json 信源重复 |
-| 硬编码分类核查 | Action pins=工具锁定（保留）；bun.lock SHA-512=生成完整性；closure/build SHA-256=运行时计算；交付脚本无固定 DLL SHA-256 字面量 | 只有版本白名单需要修 |
+| 证据                                                                                                                                                 | 结果                                                                                                                              | 含义                                                              |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
+| installed Diff split→unified→destroy ×10（`D:\Temp\opencode\opentui-diff-destroy-retention-probe.ts`，cwd `packages/opencode`）                      | registry 4→7→…→31；renderer+style 清理后仍 30 残留                                                                                | 正常路径每次退休泄漏 3 个 owner（side+code+gutter）               |
+| 同实例 20 次交替 view（installed `bun -e`）                                                                                                          | registry 恒 8；unified 后 destroy 留 4                                                                                            | 缓存复用本身不泄漏；泄漏条件=经过 split 的实例在非 split 态退休   |
+| 单次退休断言（installed `bun -e` assert）                                                                                                            | exit 1：actual=4, expected=1，`normal Diff retirement must release every descendant`                                              | 严格 red                                                          |
+| 残留对象核验（installed `bun -e`）                                                                                                                   | `right-code.parent=null`、`isDestroyed=false`、`textBuffer.getPlainText()` 返回正文                                               | 泄漏的是活 native 资源，非仅 JS 名字                              |
+| 正常压力 16,378 次（installed `bun -e`，无人工耗尽）                                                                                                 | `Failed to create SyntaxStyle`，registry=49136                                                                                    | 正常生命周期可耗尽共享 registry                                   |
+| 真实 TSX 反馈环（`D:\Temp\opencode\liveness-boundary-bootstrap-r14.ts`，经真实 solid transform + 当前 workspace 依赖 + 真实 ErrorComponent）：无压力 | `{caught:1, exits:1, visible:true}`，exit 0                                                                                       | 基线：错误界面可见、Ctrl-C 进入退出回调                           |
+| 同环 `--pressure --native-trigger`（真实 `<text>` 触发，无手动 throw）                                                                               | 16,378 次后 text 创建失败进 ErrorBoundary（caught=1），fallback 构造再败于 `Failed to create TextBuffer`，exits=0、不可见，exit 1 | **完整故障链**：正常泄漏 → 耗尽 → 错误界面无法构造 → 退出路径失效 |
+| 一致 source modules 20,000 次循环（cwd `thirdparty/opentui/packages/core`，`bun -e` 全部导入 `src/`）                                                | registry 精确回基线 1，新正文可见，Ctrl-C=1                                                                                       | 修复后源码目标状态；但当前源码含未撤回异常事务，精简后必须重跑    |
+| Theme 机制（raw memo probe + `dialog-prompt.test.tsx` 敏感性对照：旧 memo 0 pass/1 fail，cleanup-aware 1 pass/14 assertions）                        | memo 重算创建新 SyntaxStyle 无退休；修复后旧值失效                                                                                | Theme 泄漏与修复敏感性均已证明                                    |
+| `bun run script/upgrade-opentui.ts 0.4.3-smark.10`（root）                                                                                           | exit 1 `Unsupported OpenTUI release`（白名单只有 `.1`）；`upgrade-opentui.test.ts` 1 pass/6 assertions（只测 `.1`）               | 升级工具与实际 `.10` 失配，测试无法捕获                           |
+| `verify-opentui-closure.ts:8`                                                                                                                        | 硬编码 `0.4.3-smark.10`；另硬编码 solid `1.9.12` 期望                                                                             | 与 package.json 信源重复                                          |
+| 硬编码分类核查                                                                                                                                       | Action pins=工具锁定（保留）；bun.lock SHA-512=生成完整性；closure/build SHA-256=运行时计算；交付脚本无固定 DLL SHA-256 字面量    | 只有版本白名单需要修                                              |
 
 生产触发条件：`routes/session/index.tsx:289-295` 内容宽度、`:3055/:3345/:3424` `ctx.width > 120` 选 split/unified，`:1353-1447` Message 窗口淘汰触发 Solid 卸载 → 实际退休路径。
 
 ## 4. Required Invariants（liveness-only）
 
-| ID | Invariant | 依据 |
-| --- | --- | --- |
+| ID    | Invariant                                                                                                                                              | 依据                             |
+| ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------- |
 | INV-A | Diff 退休（destroy 或 destroyRecursively）终结其创建的全部子树，含 detached side/error 缓存及 Diff-owned 默认 SyntaxStyle；外部 style 永不由 Diff 释放 | 残留/耗尽/ErrorBoundary 三级证据 |
-| INV-B | Theme syntax/subtleSyntax 替换后旧 style 于 renderer idle 后失效；Provider 销毁后最后 style 失效 | memo probe + 敏感性对照 |
-| INV-C | 正常 20,000 次构造/切换/退休后 registry 回基线、新内容可渲染、错误界面可构造、Ctrl-C 回调可达 | source 20k 循环 + TSX 反馈环 |
-| INV-D | 版本信源唯一为 root `package.json` catalog；verifier/测试从它派生预期；provenance（sourceGitlink/releaseTag/releaseCommit）独立核验不自证 | 用户版本信源要求 + 失配实测 |
-| INV-E | 既有 Diff 渲染语义（视图内容、复用身份、setter 行为）不变；只改退休边界 | 基线复用行为 + setter 对照 |
+| INV-B | Theme syntax/subtleSyntax 替换后旧 style 于 renderer idle 后失效；Provider 销毁后最后 style 失效                                                       | memo probe + 敏感性对照          |
+| INV-C | 正常 20,000 次构造/切换/退休后 registry 回基线、新内容可渲染、错误界面可构造、Ctrl-C 回调可达                                                          | source 20k 循环 + TSX 反馈环     |
+| INV-D | 版本信源唯一为 root `package.json` catalog；verifier/测试从它派生预期；provenance（sourceGitlink/releaseTag/releaseCommit）独立核验不自证              | 用户版本信源要求 + 失配实测      |
+| INV-E | 既有 Diff 渲染语义（视图内容、复用身份、setter 行为）不变；只改退休边界                                                                                | 基线复用行为 + setter 对照       |
 
 ## 5. First Divergence
 
@@ -89,6 +90,7 @@ Non-goals：
 **模型**：保留基线固定缓存复用（`createOrUpdateSide`/`createOrUpdateCodeRenderable`/`buildErrorView` 复用 leftSide/rightSide/errorText/errorCode），切换只 `super.remove` 不销毁；父级退休统一终结全部缓存。
 
 **(a) 撤回本任务新增的异常事务 hunks**（起点 = 当前 worktree diff，全部 hunks 已核认属本任务）：
+
 - constructor 的 `try { parseDiff(); buildView() } catch { rollbackConstruction(); throw }` → 恢复 HEAD 的直接两条调用（无 try/catch）。
 - `buildView` 的 try/catch 删除；`buildViewContents` 拆分形状保留但内容恢复 HEAD 逻辑；`buildOwners` 字段、`trackBuildOwner`、`forgetBuildOwner`、`destroyOwnedSyntaxStyle` 三个方法整体删除。
 - `buildUnifiedView`/`buildSplitView` 中本任务改为 `destroySide(...)` 的调用 → 恢复 HEAD 的 `super.remove(x); xAdded = false`（缓存复用）；`buildErrorView` 中同样恢复 `super.remove` 而非销毁。
@@ -96,6 +98,7 @@ Non-goals：
 - 最终 Diff.ts 差异 = 撤回上述事务 hunks + (b)/(c) 新增，行为上等于“HEAD 渲染逻辑 + 正常退休补充”。
 
 **(b) owned 默认样式集合**：字段 `private ownedSyntaxStyles = new Set<SyntaxStyle>()`。在基线仅有的两个创建点：
+
 ```ts
 // buildErrorView 内：
 const style = this._syntaxStyle ?? SyntaxStyle.create()
@@ -103,9 +106,11 @@ if (!this._syntaxStyle) this.ownedSyntaxStyles.add(style)
 // ... syntaxStyle: style,
 // createOrUpdateCodeRenderable 内同构。
 ```
+
 外部 style 永不入集合；setter 换外部 style 不移除已登记默认值（退休责任保持到父级销毁）。集合上界 3（left/right/error）。
 
 **(c) 统一退休入口 destroySelf**：
+
 ```ts
 protected override destroySelf(): void {
   this.detachLineInfoListeners()
@@ -120,6 +125,7 @@ protected override destroySelf(): void {
   this.ownedSyntaxStyles.clear()
 }
 ```
+
 `Renderable.destroy()` 内部调用 `destroySelf()`，因此 `destroy()` 与 `destroyRecursively()` 两入口都被覆盖；attached 子节点先被递归销毁，`isDestroyed` 判空跳过，detached 由本方法收尾。LineNumberRenderable 的 remove 保护通过 `destroyRecursively`（其内部置 `_isDestroying`）满足。净变化估算：撤回 ~70 行，新增 ~25 行。
 
 ### 6.2 撤回三个构造事务文件（恢复 HEAD）
@@ -132,6 +138,7 @@ protected override destroySelf(): void {
 ### 6.3 `packages/opencode/src/cli/cmd/tui/context/theme.tsx`
 
 `createSyntaxStyleMemo`（保持模块私有，syntax/subtleSyntax 各一次调用）精简为：
+
 ```ts
 function createSyntaxStyleMemo(factory: () => SyntaxStyle) {
   const renderer = useRenderer()
@@ -151,6 +158,7 @@ function createSyntaxStyleMemo(factory: () => SyntaxStyle) {
   })
 }
 ```
+
 删除本任务新增 `retained` Set 与去重判断（previous 每次来自不同 factory 调用；cleanup 与 replacement 处理不同对象）。`CliRenderer.idle()` 在 renderer destroy 时 resolve 且不 reject，cleanup 后安排销毁不会因 renderer 已销毁而悬挂。保留 `:438-439` 两个调用点与现有 idle 语义；外部 Code 借用合同不变。
 
 ### 6.4 `packages/opencode/script/verify-opentui-closure.ts`
@@ -167,6 +175,7 @@ function createSyntaxStyleMemo(factory: () => SyntaxStyle) {
 ### 6.6 测试修改（全部为既有文件内修改）
 
 **`Diff.regression.test.ts`**：
+
 - 删除本任务新增 exhaustion 用例：`DiffRenderable - rolls back failed aggregate construction`（:482）、`DiffRenderable - rolls back a default syntax style when Code construction fails`（:235）（均依赖人工耗尽，非正常 producer 证据）。
 - 新增正常生命周期用例（公开 seam：children 遍历 + `Code.syntaxStyle` + `getRegisteredNames` throw 判失效）：
   1. split→unified→split：左右 Code/side 对象引用相同（复用身份）且帧断言通过。
@@ -191,41 +200,41 @@ function createSyntaxStyleMemo(factory: () => SyntaxStyle) {
 
 ## 7. TDD Slices
 
-| 序 | Red（当前实测失败） | Green |
-| --- | --- | --- |
-| 1 | 单次 split→unified→destroy：registry 4≠1（已实测 exit 1） | 6.1(c) 后回基线 |
-| 2 | 压力 TSX 环 `--pressure --native-trigger`：exits=0/不可见（已实测 exit 1） | 修复源码进 installed 后同环 exit 0 |
-| 3 | Theme 旧 memo：superseded style 不失效（敏感性对照已实测 fail） | 6.3 后 green 且精简版仍 green |
-| 4 | upgrade helper 拒绝 `.10`（已实测 exit 1） | 6.5 后接受任意合法 smark 版本 |
-| 5 | 复用身份/两入口等价/外部 style 存活 | 6.6 新增用例 |
+| 序  | Red（当前实测失败）                                                        | Green                              |
+| --- | -------------------------------------------------------------------------- | ---------------------------------- |
+| 1   | 单次 split→unified→destroy：registry 4≠1（已实测 exit 1）                  | 6.1(c) 后回基线                    |
+| 2   | 压力 TSX 环 `--pressure --native-trigger`：exits=0/不可见（已实测 exit 1） | 修复源码进 installed 后同环 exit 0 |
+| 3   | Theme 旧 memo：superseded style 不失效（敏感性对照已实测 fail）            | 6.3 后 green 且精简版仍 green      |
+| 4   | upgrade helper 拒绝 `.10`（已实测 exit 1）                                 | 6.5 后接受任意合法 smark 版本      |
+| 5   | 复用身份/两入口等价/外部 style 存活                                        | 6.6 新增用例                       |
 
 ## 8. Verification
 
-| 命令 | cwd | 证明 |
-| --- | --- | --- |
-| `bun test ./src/renderables/Diff.regression.test.ts` | `thirdparty/opentui/packages/core` | 正常生命周期 + 既有回归 |
-| `bun test ./src/renderables/Code.test.ts ./src/renderables/EditBufferRenderable.test.ts` | 同上 | 撤回后无回归 |
-| `bun run build:lib && bun typecheck` | 同上 | 生产类型面（build:lib 经 tsconfig.build.json，typecheck 为包脚本） |
-| `bun test ./test/cli/cmd/tui/dialog-prompt.test.tsx` | `packages/opencode` | Theme 生命周期 |
-| `bun test ./test/script/upgrade-opentui.test.ts ./test/script/opentui-provenance.test.ts` | `packages/opencode` | 版本信源 |
-| `bun typecheck` | `packages/opencode` | Theme/工具类型面 |
-| `bun test ./test/cli/cmd/tui/session-message-render.test.tsx -t "resize"` | `packages/opencode` | 消费者不回归 |
-| source 20k 循环 `bun -e`（§3 同命令） | `thirdparty/opentui/packages/core` | INV-C 源码态 |
-| `bun "D:\Temp\opencode\liveness-boundary-bootstrap-r14.ts" --native-trigger / --pressure --native-trigger` | `packages/opencode` | INV-C installed 态（需 artifact 后） |
-| `bun run script/upgrade-opentui.ts <当前声明版本>` | root | INV-D |
+| 命令                                                                                                       | cwd                                | 证明                                                               |
+| ---------------------------------------------------------------------------------------------------------- | ---------------------------------- | ------------------------------------------------------------------ |
+| `bun test ./src/renderables/Diff.regression.test.ts`                                                       | `thirdparty/opentui/packages/core` | 正常生命周期 + 既有回归                                            |
+| `bun test ./src/renderables/Code.test.ts ./src/renderables/EditBufferRenderable.test.ts`                   | 同上                               | 撤回后无回归                                                       |
+| `bun run build:lib && bun typecheck`                                                                       | 同上                               | 生产类型面（build:lib 经 tsconfig.build.json，typecheck 为包脚本） |
+| `bun test ./test/cli/cmd/tui/dialog-prompt.test.tsx`                                                       | `packages/opencode`                | Theme 生命周期                                                     |
+| `bun test ./test/script/upgrade-opentui.test.ts ./test/script/opentui-provenance.test.ts`                  | `packages/opencode`                | 版本信源                                                           |
+| `bun typecheck`                                                                                            | `packages/opencode`                | Theme/工具类型面                                                   |
+| `bun test ./test/cli/cmd/tui/session-message-render.test.tsx -t "resize"`                                  | `packages/opencode`                | 消费者不回归                                                       |
+| source 20k 循环 `bun -e`（§3 同命令）                                                                      | `thirdparty/opentui/packages/core` | INV-C 源码态                                                       |
+| `bun "D:\Temp\opencode\liveness-boundary-bootstrap-r14.ts" --native-trigger / --pressure --native-trigger` | `packages/opencode`                | INV-C installed 态（需 artifact 后）                               |
+| `bun run script/upgrade-opentui.ts <当前声明版本>`                                                         | root                               | INV-D                                                              |
 
 不启动 `opencode.exe`、不改用户数据库、不 push。
 
 ## 9. Budget
 
-| 项 | 值 |
-| --- | --- |
-| 生产文件 | 7：Diff.ts、theme.tsx、verify-opentui-closure.ts、upgrade-opentui.ts + 3 个撤回文件（Renderable/TextBuffer/EditBuffer） |
-| 生产净行 | 撤回 124（Renderable 26 + TextBuffer 54 + EditBuffer 44）+ 撤回约 -70（Diff 事务）+ 新增约 90（destroySelf/Set/memo/verifier/helper）≈ 净 -100 以内；上限 1,200 绝对满足 |
-| 测试文件 | 5（Diff.regression/Code/EditBuffer/dialog-prompt/upgrade-opentui） |
-| E 估算 | 150–320（含撤回 hunks，实测为准） |
-| C 估算 | max(1, ceil(E×0.15)) = 23–48；分布在：destroySelf 退休边界与两入口等价、owned Set 上界与外部 style 豁免、idle 退休边界、package.json 信源与 provenance 独立性、fixture 版本预期来源 |
-| 异常处理占比 | 0（无新增 catch/rollback；撤回为负向） |
+| 项           | 值                                                                                                                                                                                  |
+| ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 生产文件     | 7：Diff.ts、theme.tsx、verify-opentui-closure.ts、upgrade-opentui.ts + 3 个撤回文件（Renderable/TextBuffer/EditBuffer）                                                             |
+| 生产净行     | 撤回 124（Renderable 26 + TextBuffer 54 + EditBuffer 44）+ 撤回约 -70（Diff 事务）+ 新增约 90（destroySelf/Set/memo/verifier/helper）≈ 净 -100 以内；上限 1,200 绝对满足            |
+| 测试文件     | 5（Diff.regression/Code/EditBuffer/dialog-prompt/upgrade-opentui）                                                                                                                  |
+| E 估算       | 150–320（含撤回 hunks，实测为准）                                                                                                                                                   |
+| C 估算       | max(1, ceil(E×0.15)) = 23–48；分布在：destroySelf 退休边界与两入口等价、owned Set 上界与外部 style 豁免、idle 退休边界、package.json 信源与 provenance 独立性、fixture 版本预期来源 |
+| 异常处理占比 | 0（无新增 catch/rollback；撤回为负向）                                                                                                                                              |
 
 ## 10. Risks / Rejected Speculation
 
@@ -237,15 +246,15 @@ function createSyntaxStyleMemo(factory: () => SyntaxStyle) {
 
 ## 11. Audit Record
 
-| Round | Revision | Verdict | Task |
-| --- | --- | --- | --- |
-| R18 full-scope plan audit | R18 | **APPROVE**，`No blocking findings`；6 条 non-blocking 记录修正（见下） | `ses_f7ef02539ffeS3S8nvrxIwNodY` |
-| R18 implementation audit | R18 实际 diff | **APPROVE**，`No blocking findings`；5 条 non-blocking（§12 合并计数已修正；buildView 委托为 plan-sanctioned；core typecheck 失败为既有问题；E/C 为 builder 算术但审计独立重算同区间；`as string` 在 typeof 守卫后） | `ses_f7e39c995ffeqdBDuXZJxW4L1g` |
-| R18 implementation audit round 2 | R18 + Diff.regression 断言稳健化 | **APPROVE**，`No blocking findings`；3 条 non-blocking（计数口径表述、移除 non-strict oracle 断言不削弱判定、无关测试噪音） | `ses_f7e39c995ffeqdBDuXZJxW4L1g` |
-| 最新完整 plan audit | R17 前身 | BLOCK：网络同步仍留在 invariant/主路径；方案未收敛为唯一可实施路径 | `ses_f7efa4b1fffe4EV30z73kfGzFj` |
-| 此前完整 plan audit | R16 前身 | BLOCK：B-01 版本信源未入文件清单；B-02 orphan admission 冲突；B-03 time.end 语义未定 | `ses_f80a4dc1fffenvZ4D6LwmtMKfb` |
-| 更早 plan audit | R10 前身 | BLOCK：orphan 生命周期/Theme owner/artifact 传播 | `ses_f8200e43affewOyvq1f29xJZQ` |
-| 历史 R2–R7 | 已撤销 | R4/R5 曾 plan APPROVE（不适用）；R7 implementation REJECT；正文已删，仅此索引 | `ses_f8a5…`/`ses_f8379…`/`ses_f8352…`/`ses_f82dd…`/`ses_f8283…` |
+| Round                            | Revision                         | Verdict                                                                                                                                                                                                              | Task                                                            |
+| -------------------------------- | -------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------- |
+| R18 full-scope plan audit        | R18                              | **APPROVE**，`No blocking findings`；6 条 non-blocking 记录修正（见下）                                                                                                                                              | `ses_f7ef02539ffeS3S8nvrxIwNodY`                                |
+| R18 implementation audit         | R18 实际 diff                    | **APPROVE**，`No blocking findings`；5 条 non-blocking（§12 合并计数已修正；buildView 委托为 plan-sanctioned；core typecheck 失败为既有问题；E/C 为 builder 算术但审计独立重算同区间；`as string` 在 typeof 守卫后） | `ses_f7e39c995ffeqdBDuXZJxW4L1g`                                |
+| R18 implementation audit round 2 | R18 + Diff.regression 断言稳健化 | **APPROVE**，`No blocking findings`；3 条 non-blocking（计数口径表述、移除 non-strict oracle 断言不削弱判定、无关测试噪音）                                                                                          | `ses_f7e39c995ffeqdBDuXZJxW4L1g`                                |
+| 最新完整 plan audit              | R17 前身                         | BLOCK：网络同步仍留在 invariant/主路径；方案未收敛为唯一可实施路径                                                                                                                                                   | `ses_f7efa4b1fffe4EV30z73kfGzFj`                                |
+| 此前完整 plan audit              | R16 前身                         | BLOCK：B-01 版本信源未入文件清单；B-02 orphan admission 冲突；B-03 time.end 语义未定                                                                                                                                 | `ses_f80a4dc1fffenvZ4D6LwmtMKfb`                                |
+| 更早 plan audit                  | R10 前身                         | BLOCK：orphan 生命周期/Theme owner/artifact 传播                                                                                                                                                                     | `ses_f8200e43affewOyvq1f29xJZQ`                                 |
+| 历史 R2–R7                       | 已撤销                           | R4/R5 曾 plan APPROVE（不适用）；R7 implementation REJECT；正文已删，仅此索引                                                                                                                                        | `ses_f8a5…`/`ses_f8379…`/`ses_f8352…`/`ses_f82dd…`/`ses_f8283…` |
 
 R18 对三轮 BLOCK 的处置：范围冲突→§2 显式排除并以 §1 最新原文为据；版本信源→§6.4/6.5/6.7 落入文件清单；orphan/time.end→随网络范围一并移出（不修复、不作为 gate）；唯一主路径→§6 收敛为 Diff/Theme + 交付工具，代码级落地。
 
@@ -257,33 +266,33 @@ R18 批准 verdict（原样记录）：`Release verdict: APPROVE — 仅适用�
 
 **实际 diff**（`git diff --numstat` 实测）：
 
-| 仓库 | 文件 | +/− | 内容 |
-| --- | --- | --- | --- |
-| thirdparty/opentui | `packages/core/src/renderables/Diff.ts` | +30/−4 | 撤回全部事务 hunk；新增 owned Set（§6.1b）与 destroySelf（§6.1c） |
-| thirdparty/opentui | `packages/core/src/renderables/Diff.regression.test.ts` | +139/−0 | 删除两个 exhaustion 用例；扩展 :389 生命周期用例；新增 destroy 入口用例；三个生命周期用例的断言从全局绝对基线改为本用例新增 key 集合（CI 全量套件下跨文件异步销毁会使全局计数漂移，见下） |
-| thirdparty/opentui | `Renderable.ts` / `TextBufferRenderable.ts` / `EditBufferRenderable.ts` / `Code.test.ts` / `EditBufferRenderable.test.ts` | 0/0 | 撤回后 byte-identical 回到 HEAD |
-| parent | `packages/opencode/src/cli/cmd/tui/context/theme.tsx` | +24/−2 | memo 精简为无 Set 版本（§6.3） |
-| parent | `packages/opencode/script/verify-opentui-closure.ts` | +17/−3 | 版本与 solid 版本改读 root catalog（§6.4） |
-| parent | `script/upgrade-opentui.ts` | +3/−2 | 白名单改形状校验（§6.5） |
-| parent | `packages/opencode/test/cli/cmd/tui/dialog-prompt.test.tsx` | +56/−1 | 既有 Theme 生命周期用例（前轮成果，本 revision 保留） |
-| parent | `packages/opencode/test/script/upgrade-opentui.test.ts` | +102/−91 | fixture 版本参数化 + byte-identical nested 负例 + 形状拒绝负例 |
+| 仓库               | 文件                                                                                                                      | +/−      | 内容                                                                                                                                                                                      |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------- | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| thirdparty/opentui | `packages/core/src/renderables/Diff.ts`                                                                                   | +30/−4   | 撤回全部事务 hunk；新增 owned Set（§6.1b）与 destroySelf（§6.1c）                                                                                                                         |
+| thirdparty/opentui | `packages/core/src/renderables/Diff.regression.test.ts`                                                                   | +139/−0  | 删除两个 exhaustion 用例；扩展 :389 生命周期用例；新增 destroy 入口用例；三个生命周期用例的断言从全局绝对基线改为本用例新增 key 集合（CI 全量套件下跨文件异步销毁会使全局计数漂移，见下） |
+| thirdparty/opentui | `Renderable.ts` / `TextBufferRenderable.ts` / `EditBufferRenderable.ts` / `Code.test.ts` / `EditBufferRenderable.test.ts` | 0/0      | 撤回后 byte-identical 回到 HEAD                                                                                                                                                           |
+| parent             | `packages/opencode/src/cli/cmd/tui/context/theme.tsx`                                                                     | +24/−2   | memo 精简为无 Set 版本（§6.3）                                                                                                                                                            |
+| parent             | `packages/opencode/script/verify-opentui-closure.ts`                                                                      | +17/−3   | 版本与 solid 版本改读 root catalog（§6.4）                                                                                                                                                |
+| parent             | `script/upgrade-opentui.ts`                                                                                               | +3/−2    | 白名单改形状校验（§6.5）                                                                                                                                                                  |
+| parent             | `packages/opencode/test/cli/cmd/tui/dialog-prompt.test.tsx`                                                               | +56/−1   | 既有 Theme 生命周期用例（前轮成果，本 revision 保留）                                                                                                                                     |
+| parent             | `packages/opencode/test/script/upgrade-opentui.test.ts`                                                                   | +102/−91 | fixture 版本参数化 + byte-identical nested 负例 + 形状拒绝负例                                                                                                                            |
 
 **Red-green 证据**：installed .10 运行时 --pressure --native-trigger 仍 red（`iterations=16378, allocationError="Failed to create SyntaxStyle", exits=0, visible=false`，exit 1——预期，修复在源码侧，installed 验证属 §6.7 交付前提）；源码侧 20,000 次正常构造/切换/退休循环 `baseline=1, after=1, leak=0`（green）；`--native-trigger` 无压力 baseline exit 0；boundary control `{caught:1, exits:1, visible:true}` exit 0。
 
 **验证结果**（命令/cwd/结果）：
 
-| 命令 | cwd | 结果 |
-| --- | --- | --- |
-| `bun test ./src/renderables/Diff.regression.test.ts` | `thirdparty/opentui/packages/core` | 8 pass / 0 fail / 47 assertions |
-| `bun test ./src/renderables/Code.test.ts ./src/renderables/EditBufferRenderable.test.ts ./src/renderables/Diff.regression.test.ts` | 同上 | 102 pass / 1 skip / 0 fail |
-| `bun test ./src/renderables/`（全量回归） | 同上 | 1330 pass / 3 skip / 0 fail / 4870 assertions |
-| `bun run build:lib` | 同上 | 构建与声明生成成功 |
-| `bun typecheck` | 同上 | 失败为既有 yoga-upstream 测试文件问题（clean HEAD 同样失败，已 stash 对照证实），与本 diff 无关 |
-| `bun test ./test/cli/cmd/tui/dialog-prompt.test.tsx` | `packages/opencode` | 3 pass / 0 fail / 16 assertions（精简 memo 后仍 green） |
-| `bun test ./test/script/upgrade-opentui.test.ts ./test/script/opentui-provenance.test.ts` | 同上 | 5 pass / 0 fail / 21 assertions（参数化 2 + 形状拒绝 1 + provenance 2；审计复跑核实，修正初次记录的合并计数） |
-| `bun typecheck` | `packages/opencode` | 通过 |
-| `bun test ./test/cli/cmd/tui/session-message-render.test.tsx -t "resize"` | 同上 | 1 pass / 0 fail |
-| 源码 20k 循环 `bun -e` | `thirdparty/opentui/packages/core` | leak=0 |
+| 命令                                                                                                                               | cwd                                | 结果                                                                                                          |
+| ---------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| `bun test ./src/renderables/Diff.regression.test.ts`                                                                               | `thirdparty/opentui/packages/core` | 8 pass / 0 fail / 47 assertions                                                                               |
+| `bun test ./src/renderables/Code.test.ts ./src/renderables/EditBufferRenderable.test.ts ./src/renderables/Diff.regression.test.ts` | 同上                               | 102 pass / 1 skip / 0 fail                                                                                    |
+| `bun test ./src/renderables/`（全量回归）                                                                                          | 同上                               | 1330 pass / 3 skip / 0 fail / 4870 assertions                                                                 |
+| `bun run build:lib`                                                                                                                | 同上                               | 构建与声明生成成功                                                                                            |
+| `bun typecheck`                                                                                                                    | 同上                               | 失败为既有 yoga-upstream 测试文件问题（clean HEAD 同样失败，已 stash 对照证实），与本 diff 无关               |
+| `bun test ./test/cli/cmd/tui/dialog-prompt.test.tsx`                                                                               | `packages/opencode`                | 3 pass / 0 fail / 16 assertions（精简 memo 后仍 green）                                                       |
+| `bun test ./test/script/upgrade-opentui.test.ts ./test/script/opentui-provenance.test.ts`                                          | 同上                               | 5 pass / 0 fail / 21 assertions（参数化 2 + 形状拒绝 1 + provenance 2；审计复跑核实，修正初次记录的合并计数） |
+| `bun typecheck`                                                                                                                    | `packages/opencode`                | 通过                                                                                                          |
+| `bun test ./test/cli/cmd/tui/session-message-render.test.tsx -t "resize"`                                                          | 同上                               | 1 pass / 0 fail                                                                                               |
+| 源码 20k 循环 `bun -e`                                                                                                             | `thirdparty/opentui/packages/core` | leak=0                                                                                                        |
 
 **E/C 实测（round 2 终态）**：E=292，C=49，required=⌈292×0.15⌉=44，达标（审计独立重算 49/292≈0.168）。排除项：撤回文件（byte-identical 回 HEAD，0 增行）；import-only 行未计 E。注释分布：destroySelf 退休边界与两入口汇聚/缓存清空/consumer-资源次序（5）、owned Set 借用豁免（1）、测试 seam/断言意图/跨文件漂移边界（20）、memo replacement/cleanup 分工（4）、catalog 信源（4）、形状校验理由（2）、版本工具测试意图（13）。
 

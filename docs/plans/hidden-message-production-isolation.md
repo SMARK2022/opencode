@@ -36,58 +36,58 @@ not implementation authority.
 
 ## 3. Repository Context
 
-| Source | Why it constrains this task |
-| --- | --- |
-| `CONTEXT.md` | Message 是 part-based persisted Session record；Compaction 管理 Provider context；v1 `session/` 是当前生产 owner。 |
-| `AGENTS.md` | 默认分支 `dev`；优先自动化；tests/typecheck 必须从 package 目录运行。 |
-| `packages/opencode/AGENTS.md` | Message/Part schema、SQLite/Drizzle、Effect service 与 module-shape 约束。 |
-| `packages/opencode/test/AGENTS.md` | 行为测试使用 public seam、Effect fixture 与自动清理的 instance，不使用 sleep/mocks 复制 production logic。 |
-| `packages/opencode/src/server/routes/instance/httpapi/AGENTS.md` | SDK-visible HTTP error 必须由 handler adapter 显式映射，domain service 不吸收 HttpApi 类型。 |
-| `packages/app/AGENTS.md` | App 不得由实现流程重启；App event reducer 已有正确 tombstone 行为，只作为对照。 |
-| `docs/adr/README.md` | 本任务不新增 ADR：visibility 修复属于既有 Message contract 的 bug repair，不建立新的跨任务架构决策。 |
-| `.opencode/policy/first-principles-engineering.md` | 必须修 first divergence、禁止 fallback、完整 traceability、独立审计和 15% 中文解释注释。 |
-| `docs/workflow.md` | exact revision 获得 full-scope plan approval 前禁止 implementation。 |
+| Source                                                           | Why it constrains this task                                                                                        |
+| ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| `CONTEXT.md`                                                     | Message 是 part-based persisted Session record；Compaction 管理 Provider context；v1 `session/` 是当前生产 owner。 |
+| `AGENTS.md`                                                      | 默认分支 `dev`；优先自动化；tests/typecheck 必须从 package 目录运行。                                              |
+| `packages/opencode/AGENTS.md`                                    | Message/Part schema、SQLite/Drizzle、Effect service 与 module-shape 约束。                                         |
+| `packages/opencode/test/AGENTS.md`                               | 行为测试使用 public seam、Effect fixture 与自动清理的 instance，不使用 sleep/mocks 复制 production logic。         |
+| `packages/opencode/src/server/routes/instance/httpapi/AGENTS.md` | SDK-visible HTTP error 必须由 handler adapter 显式映射，domain service 不吸收 HttpApi 类型。                       |
+| `packages/app/AGENTS.md`                                         | App 不得由实现流程重启；App event reducer 已有正确 tombstone 行为，只作为对照。                                    |
+| `docs/adr/README.md`                                             | 本任务不新增 ADR：visibility 修复属于既有 Message contract 的 bug repair，不建立新的跨任务架构决策。               |
+| `.opencode/policy/first-principles-engineering.md`               | 必须修 first divergence、禁止 fallback、完整 traceability、独立审计和 15% 中文解释注释。                           |
+| `docs/workflow.md`                                               | exact revision 获得 full-scope plan approval 前禁止 implementation。                                               |
 
 ## 4. Files and Evidence Read
 
-| Evidence | Relevance | Evidence class |
-| --- | --- | --- |
-| `packages/opencode/src/session/message-v2.ts:71-130, 791-887, 989-1158, 1328-1445, 1508-1732` | Hidden schema、chronology、Provider conversion、page/stream/filterCompacted 所有核心 visibility seam。 | observed |
-| `packages/opencode/src/session/compaction-boundary.ts:1-74` | completed Compaction structural cutoff 权威。 | observed |
-| `packages/opencode/src/session/compaction.ts:156-235, 639-668, 796-815, 890-951, 1241-1316` | 已有成功 pair、tail、memento、prune、failed-pair hidden producer。 | observed |
-| `packages/opencode/src/session/prompt.ts:144-173, 2440-2519, 2575-2595, 2815-2990` | Goal chronology、Provider window、plugin 后 Provider conversion。 | observed |
-| `packages/opencode/src/session/prompt.ts:2873-3005`、`src/token/estimate.ts:246-299` | plugin transform 后 raw `requestMsgs` 同时驱动 input breakdown、chars/token learning 和 auto Compaction。 | reachable |
-| `packages/plugin/src/index.ts:281-289` | public plugin hook 可修改 Message/Part，包括设置 hidden。 | contracted |
-| `packages/opencode/src/session/goal.ts:325-450`、`src/tool/goal.ts:12-123` | `current/previous` turn 控制 blocked streak 与 terminal transition。 | observed |
-| `packages/opencode/src/session/session.ts:726-745, 878-900` | raw hidden event producer；bounded/unbounded Message read。 | observed |
-| `packages/opencode/src/session/revert.ts:157-208` | normal producer 可按 Message 或 Part 独立标记 hidden。 | reachable |
-| `packages/opencode/src/session/processor.ts:650-705` | current assistant doom-loop window 使用 raw Parts。 | reachable |
-| `packages/opencode/src/session/search.ts:47-129` | Search 在 SQL 层排除 hidden Message/Part，属于 clean control。 | observed |
-| `packages/opencode/src/session/summary-cache.ts:91-164` | Diff/Summary owner 排除 hidden，属于 clean control。 | observed |
-| `packages/opencode/src/session/projectors.ts:25-60, 205-257` | hidden 不退款 accounting；summary cache invalidation 已区分 visibility。 | contracted |
-| `packages/opencode/src/storage/cold.ts:900-945` | hidden subagent Message 只影响 physical activity clock；实测最大 10.4 秒，无正常业务损害证据。 | observed |
-| `packages/opencode/src/cli/cmd/tui/context/sync.tsx:769-855, 1047-1117` | TUI store 正确消费 tombstone；HTTP snapshot 的 physical limit 造成可见深度缩水。 | observed |
-| `packages/app/src/context/global-sync/event-reducer.ts:186-259` | Web App 正确删除 hidden Message/Part，证明 raw event 的 tombstone 语义可由 adapter 承载。 | observed |
-| `packages/opencode/src/cli/cmd/tui/routes/session/index.tsx:380-395` | plan agent raw Part listener 绕过 TUI tombstone store。 | reachable |
-| `packages/opencode/src/cli/cmd/run.ts:607-687` | legacy `opencode run` 直接输出 raw hidden updates。 | reachable |
-| `packages/opencode/src/cli/cmd/run/session-data.ts:55-117, 669-907` | current run reducer 将 hidden assistant/tool 转成 commits/footer/state。 | observed |
-| `packages/opencode/src/cli/cmd/run/subagent-data.ts:300-338, 735-804` | hidden task Part 可创建/保留 subagent tab。 | reachable |
-| `packages/opencode/src/cli/cmd/run/stream.transport.ts:119-209, 739-859` | hidden assistant event 可满足 live-activity completion gate。 | reachable |
-| `packages/opencode/src/acp/agent.ts:277-301` | ACP 将 raw hidden Tool update 当正常 lifecycle。 | reachable |
-| `packages/opencode/src/cli/cmd/github.ts:898-926` | GitHub adapter 输出 raw hidden Tool/Text。 | reachable |
-| `packages/slack/src/index.ts:23-49` | Slack adapter 可为 hidden completed Tool 再次发送外部消息。 | reachable |
-| `packages/opencode/src/share/share-next.ts:165-200, 271-295` | live share 传 hidden tombstone，full snapshot 排除 hidden；远端 consumer 不在仓库。 | contracted pass-through |
-| `packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts:134-181` | collection 使用 visible page；single-message endpoint 直接暴露 raw `get()`。 | observed |
-| `packages/opencode/src/server/routes/instance/httpapi/groups/session.ts:355-377` | public API 描述是普通 Message retrieval，没有 raw/audit contract。 | contracted |
-| `packages/opencode/test/session/messages-pagination.test.ts:814-1240` | 覆盖成功 tail 和无 tail/失败 marker，但缺 newer failed tail、partial hidden pair、visible-limit refill。 | observed |
-| `packages/opencode/test/session/compaction.test.ts:1498-1754, 2188-2259` | failed lifecycle/accounting 和 memento 已覆盖；不得削弱。 | observed |
-| `packages/opencode/test/session/prompt.test.ts:4329-4437` | Goal chronology seam 已有 technical-wrapper fixtures，缺 hidden canonical turn。 | observed |
-| `packages/opencode/test/session/processor-effect.test.ts:1075-1260` | doom-loop public behavior seam，缺 hidden current Tool。 | observed |
-| `packages/opencode/test/cli/run/session-data.test.ts`、`subagent-data.test.ts`、`stream.transport.test.ts` | exported reducer/transport seam，均缺 MessageV2.hidden cases。 | observed |
-| `packages/opencode/test/server/httpapi-sdk.test.ts:652-691` | generated SDK route parity seam，缺 hidden direct lookup。 | observed |
-| `packages/opencode/test/acp/event-subscription.test.ts` | ACP event adapter seam，缺 hidden terminal Tool。 | observed |
-| live `opencode.db` read-only queries | 4,727 hidden Messages；0 hidden Parts；目标 Session visible page 247/300；67 Goal current/previous divergences；1 active Goal divergence。 | observed |
-| live same-process SQL/JS benchmark on three representative Sessions | 最大 6326 Message；高 hidden density 161/274；page/chronology raw 与 proposed refill/projection p50/p95 baseline。 | observed |
+| Evidence                                                                                                   | Relevance                                                                                                                                  | Evidence class          |
+| ---------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------- |
+| `packages/opencode/src/session/message-v2.ts:71-130, 791-887, 989-1158, 1328-1445, 1508-1732`              | Hidden schema、chronology、Provider conversion、page/stream/filterCompacted 所有核心 visibility seam。                                     | observed                |
+| `packages/opencode/src/session/compaction-boundary.ts:1-74`                                                | completed Compaction structural cutoff 权威。                                                                                              | observed                |
+| `packages/opencode/src/session/compaction.ts:156-235, 639-668, 796-815, 890-951, 1241-1316`                | 已有成功 pair、tail、memento、prune、failed-pair hidden producer。                                                                         | observed                |
+| `packages/opencode/src/session/prompt.ts:144-173, 2440-2519, 2575-2595, 2815-2990`                         | Goal chronology、Provider window、plugin 后 Provider conversion。                                                                          | observed                |
+| `packages/opencode/src/session/prompt.ts:2873-3005`、`src/token/estimate.ts:246-299`                       | plugin transform 后 raw `requestMsgs` 同时驱动 input breakdown、chars/token learning 和 auto Compaction。                                  | reachable               |
+| `packages/plugin/src/index.ts:281-289`                                                                     | public plugin hook 可修改 Message/Part，包括设置 hidden。                                                                                  | contracted              |
+| `packages/opencode/src/session/goal.ts:325-450`、`src/tool/goal.ts:12-123`                                 | `current/previous` turn 控制 blocked streak 与 terminal transition。                                                                       | observed                |
+| `packages/opencode/src/session/session.ts:726-745, 878-900`                                                | raw hidden event producer；bounded/unbounded Message read。                                                                                | observed                |
+| `packages/opencode/src/session/revert.ts:157-208`                                                          | normal producer 可按 Message 或 Part 独立标记 hidden。                                                                                     | reachable               |
+| `packages/opencode/src/session/processor.ts:650-705`                                                       | current assistant doom-loop window 使用 raw Parts。                                                                                        | reachable               |
+| `packages/opencode/src/session/search.ts:47-129`                                                           | Search 在 SQL 层排除 hidden Message/Part，属于 clean control。                                                                             | observed                |
+| `packages/opencode/src/session/summary-cache.ts:91-164`                                                    | Diff/Summary owner 排除 hidden，属于 clean control。                                                                                       | observed                |
+| `packages/opencode/src/session/projectors.ts:25-60, 205-257`                                               | hidden 不退款 accounting；summary cache invalidation 已区分 visibility。                                                                   | contracted              |
+| `packages/opencode/src/storage/cold.ts:900-945`                                                            | hidden subagent Message 只影响 physical activity clock；实测最大 10.4 秒，无正常业务损害证据。                                             | observed                |
+| `packages/opencode/src/cli/cmd/tui/context/sync.tsx:769-855, 1047-1117`                                    | TUI store 正确消费 tombstone；HTTP snapshot 的 physical limit 造成可见深度缩水。                                                           | observed                |
+| `packages/app/src/context/global-sync/event-reducer.ts:186-259`                                            | Web App 正确删除 hidden Message/Part，证明 raw event 的 tombstone 语义可由 adapter 承载。                                                  | observed                |
+| `packages/opencode/src/cli/cmd/tui/routes/session/index.tsx:380-395`                                       | plan agent raw Part listener 绕过 TUI tombstone store。                                                                                    | reachable               |
+| `packages/opencode/src/cli/cmd/run.ts:607-687`                                                             | legacy `opencode run` 直接输出 raw hidden updates。                                                                                        | reachable               |
+| `packages/opencode/src/cli/cmd/run/session-data.ts:55-117, 669-907`                                        | current run reducer 将 hidden assistant/tool 转成 commits/footer/state。                                                                   | observed                |
+| `packages/opencode/src/cli/cmd/run/subagent-data.ts:300-338, 735-804`                                      | hidden task Part 可创建/保留 subagent tab。                                                                                                | reachable               |
+| `packages/opencode/src/cli/cmd/run/stream.transport.ts:119-209, 739-859`                                   | hidden assistant event 可满足 live-activity completion gate。                                                                              | reachable               |
+| `packages/opencode/src/acp/agent.ts:277-301`                                                               | ACP 将 raw hidden Tool update 当正常 lifecycle。                                                                                           | reachable               |
+| `packages/opencode/src/cli/cmd/github.ts:898-926`                                                          | GitHub adapter 输出 raw hidden Tool/Text。                                                                                                 | reachable               |
+| `packages/slack/src/index.ts:23-49`                                                                        | Slack adapter 可为 hidden completed Tool 再次发送外部消息。                                                                                | reachable               |
+| `packages/opencode/src/share/share-next.ts:165-200, 271-295`                                               | live share 传 hidden tombstone，full snapshot 排除 hidden；远端 consumer 不在仓库。                                                        | contracted pass-through |
+| `packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts:134-181`                         | collection 使用 visible page；single-message endpoint 直接暴露 raw `get()`。                                                               | observed                |
+| `packages/opencode/src/server/routes/instance/httpapi/groups/session.ts:355-377`                           | public API 描述是普通 Message retrieval，没有 raw/audit contract。                                                                         | contracted              |
+| `packages/opencode/test/session/messages-pagination.test.ts:814-1240`                                      | 覆盖成功 tail 和无 tail/失败 marker，但缺 newer failed tail、partial hidden pair、visible-limit refill。                                   | observed                |
+| `packages/opencode/test/session/compaction.test.ts:1498-1754, 2188-2259`                                   | failed lifecycle/accounting 和 memento 已覆盖；不得削弱。                                                                                  | observed                |
+| `packages/opencode/test/session/prompt.test.ts:4329-4437`                                                  | Goal chronology seam 已有 technical-wrapper fixtures，缺 hidden canonical turn。                                                           | observed                |
+| `packages/opencode/test/session/processor-effect.test.ts:1075-1260`                                        | doom-loop public behavior seam，缺 hidden current Tool。                                                                                   | observed                |
+| `packages/opencode/test/cli/run/session-data.test.ts`、`subagent-data.test.ts`、`stream.transport.test.ts` | exported reducer/transport seam，均缺 MessageV2.hidden cases。                                                                             | observed                |
+| `packages/opencode/test/server/httpapi-sdk.test.ts:652-691`                                                | generated SDK route parity seam，缺 hidden direct lookup。                                                                                 | observed                |
+| `packages/opencode/test/acp/event-subscription.test.ts`                                                    | ACP event adapter seam，缺 hidden terminal Tool。                                                                                          | observed                |
+| live `opencode.db` read-only queries                                                                       | 4,727 hidden Messages；0 hidden Parts；目标 Session visible page 247/300；67 Goal current/previous divergences；1 active Goal divergence。 | observed                |
+| live same-process SQL/JS benchmark on three representative Sessions                                        | 最大 6326 Message；高 hidden density 161/274；page/chronology raw 与 proposed refill/projection p50/p95 baseline。                         | observed                |
 
 ## 5. Current Behavior
 
@@ -116,53 +116,53 @@ fully hidden completed Compaction pair -> structural-only cutoff
 
 ## 6. Supported Input Domain and Reachability
 
-| Input or condition | Producer | Upstream guarantees | Reachable path | Owner | Classification |
-| --- | --- | --- | --- | --- | --- |
-| hidden Message among visible history | undo, stale-turn repair, reviewer retry, failed Compaction | row remains durable; `hidden.reason/time` valid | `MessageV2.page`, `chronology`, HTTP get | MessageV2 / HTTP adapter | observed |
-| hidden Part | public part-level Revert/undo | parent Message may remain visible | Provider replay, event adapters, doom loop | MessageV2 / output adapter / Processor | reachable |
-| older completed Compaction + newer failed hidden marker with `tail_start_id` | normal auto/manual Compaction failure after tail selection | summary lacks successful `finish && !error` | `filterCompacted` post-pass | MessageV2 | observed |
-| visible marker + hidden successful summary | message-level Revert beginning at summary | completed summary remains durable | `filterCompacted` / Provider conversion | MessageV2 | reachable |
-| marker with hidden Compaction Part + visible summary | part-level Revert | hidden Part remains durable | `CompactionBoundary.latest`, `filterCompacted` | CompactionBoundary / MessageV2 | reachable |
-| hidden canonical user turn | undo | visible Provider window excludes it | `chronology -> deriveGoalTurn -> GoalTool` | MessageV2 chronology | observed |
-| hidden assistant/tool event | all hidden producers; public part update | event transports full object by design | run/ACP/GitHub/TUI/Slack adapters | each visible output adapter | observed / reachable |
-| visible Part PATCH under hidden parent Message | public `part.update` with IDs learned before Revert | handler validates IDs only；parent Message remains durable hidden | hidden parent -> ordinary `PartUpdated` event -> output adapters | SessionHttpApi public mutation seam | reachable defect |
-| direct lookup of known hidden ID | public SDK caller | ID is valid and row exists | HTTP `session.message -> MessageV2.get` | HTTP adapter | observed |
-| hidden post-plugin prompt input | `experimental.chat.messages.transform` can mutate filtered clone | plugin runs after initial filter | Provider wire、input breakdown、token-history learning、overflow | SessionPrompt post-plugin projection / Provider conversion | reachable |
-| hidden post-plugin Compaction input | 同一 plugin hook 修改 `selected.head` clone | hook runs before compaction conversion/estimate | compaction Provider wire 和 upload estimate history | SessionCompaction post-plugin projection | reachable |
-| hidden current Tool in doom-loop window | public part update or concurrent undo/import | raw `MessageV2.parts()` returns it | Processor identical-error window | Processor | reachable |
-| hidden usage/cost/Stats | actual Provider work already occurred | accounting must preserve spend | projector/RequestUsage/Stats | accounting owner | contracted, not a defect |
-| fully hidden successful Compaction pair | undo after completed Compaction | marker 与 summary 都 hidden，Compaction Part visible | structural cutoff only | CompactionBoundary | contracted, not a defect |
-| partial-hidden successful Compaction pair | public API Revert starts at summary or Part | marker/summary hidden 状态不同，或 Compaction Part hidden | persisted pre-read cutoff | CompactionBoundary | reachable defect |
-| remote share rendering hidden payload | remote service outside repository | local wire carries tombstone | external consumer unknown | remote share adapter | speculative result; cannot drive local guard |
+| Input or condition                                                           | Producer                                                         | Upstream guarantees                                               | Reachable path                                                   | Owner                                                      | Classification                               |
+| ---------------------------------------------------------------------------- | ---------------------------------------------------------------- | ----------------------------------------------------------------- | ---------------------------------------------------------------- | ---------------------------------------------------------- | -------------------------------------------- |
+| hidden Message among visible history                                         | undo, stale-turn repair, reviewer retry, failed Compaction       | row remains durable; `hidden.reason/time` valid                   | `MessageV2.page`, `chronology`, HTTP get                         | MessageV2 / HTTP adapter                                   | observed                                     |
+| hidden Part                                                                  | public part-level Revert/undo                                    | parent Message may remain visible                                 | Provider replay, event adapters, doom loop                       | MessageV2 / output adapter / Processor                     | reachable                                    |
+| older completed Compaction + newer failed hidden marker with `tail_start_id` | normal auto/manual Compaction failure after tail selection       | summary lacks successful `finish && !error`                       | `filterCompacted` post-pass                                      | MessageV2                                                  | observed                                     |
+| visible marker + hidden successful summary                                   | message-level Revert beginning at summary                        | completed summary remains durable                                 | `filterCompacted` / Provider conversion                          | MessageV2                                                  | reachable                                    |
+| marker with hidden Compaction Part + visible summary                         | part-level Revert                                                | hidden Part remains durable                                       | `CompactionBoundary.latest`, `filterCompacted`                   | CompactionBoundary / MessageV2                             | reachable                                    |
+| hidden canonical user turn                                                   | undo                                                             | visible Provider window excludes it                               | `chronology -> deriveGoalTurn -> GoalTool`                       | MessageV2 chronology                                       | observed                                     |
+| hidden assistant/tool event                                                  | all hidden producers; public part update                         | event transports full object by design                            | run/ACP/GitHub/TUI/Slack adapters                                | each visible output adapter                                | observed / reachable                         |
+| visible Part PATCH under hidden parent Message                               | public `part.update` with IDs learned before Revert              | handler validates IDs only；parent Message remains durable hidden | hidden parent -> ordinary `PartUpdated` event -> output adapters | SessionHttpApi public mutation seam                        | reachable defect                             |
+| direct lookup of known hidden ID                                             | public SDK caller                                                | ID is valid and row exists                                        | HTTP `session.message -> MessageV2.get`                          | HTTP adapter                                               | observed                                     |
+| hidden post-plugin prompt input                                              | `experimental.chat.messages.transform` can mutate filtered clone | plugin runs after initial filter                                  | Provider wire、input breakdown、token-history learning、overflow | SessionPrompt post-plugin projection / Provider conversion | reachable                                    |
+| hidden post-plugin Compaction input                                          | 同一 plugin hook 修改 `selected.head` clone                      | hook runs before compaction conversion/estimate                   | compaction Provider wire 和 upload estimate history              | SessionCompaction post-plugin projection                   | reachable                                    |
+| hidden current Tool in doom-loop window                                      | public part update or concurrent undo/import                     | raw `MessageV2.parts()` returns it                                | Processor identical-error window                                 | Processor                                                  | reachable                                    |
+| hidden usage/cost/Stats                                                      | actual Provider work already occurred                            | accounting must preserve spend                                    | projector/RequestUsage/Stats                                     | accounting owner                                           | contracted, not a defect                     |
+| fully hidden successful Compaction pair                                      | undo after completed Compaction                                  | marker 与 summary 都 hidden，Compaction Part visible              | structural cutoff only                                           | CompactionBoundary                                         | contracted, not a defect                     |
+| partial-hidden successful Compaction pair                                    | public API Revert starts at summary or Part                      | marker/summary hidden 状态不同，或 Compaction Part hidden         | persisted pre-read cutoff                                        | CompactionBoundary                                         | reachable defect                             |
+| remote share rendering hidden payload                                        | remote service outside repository                                | local wire carries tombstone                                      | external consumer unknown                                        | remote share adapter                                       | speculative result; cannot drive local guard |
 
 ## 7. Required Invariants
 
-| ID | Behavioral invariant | Evidence | Existing test |
-| --- | --- | --- | --- |
-| INV-01 | Raw hidden rows remain durable for audit/accounting, while normal visible reads never return or count them. | user accounting requirement; page/API evidence | partial only |
-| INV-02 | A visible `limit=N` returns up to N visible Messages; hidden rows cannot consume capacity or terminate older visible paging. | target Session 247/300 reproduction | missing |
+| ID     | Behavioral invariant                                                                                                                                                                                                                                                                                               | Evidence                                                                          | Existing test                          |
+| ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------- | -------------------------------------- |
+| INV-01 | Raw hidden rows remain durable for audit/accounting, while normal visible reads never return or count them.                                                                                                                                                                                                        | user accounting requirement; page/API evidence                                    | partial only                           |
+| INV-02 | A visible `limit=N` returns up to N visible Messages; hidden rows cannot consume capacity or terminate older visible paging.                                                                                                                                                                                       | target Session 247/300 reproduction                                               | missing                                |
 | INV-03 | Provider Compaction boundary has exactly two valid states: fully visible successful pair provides cutoff+replay；fully hidden marker+summary with visible Compaction Part provides structural-only cutoff。partial-hidden pair、hidden Part、failed/incomplete pair 均不构成 boundary，不能 pre-read 裁掉旧 head。 | real `filterCompacted` repro；public Revert producer；existing hidden-anchor test | missing persisted partial/failed cases |
-| INV-04 | Goal current/previous canonical turns contain only visible Messages and visible qualifying Parts. | 67 live divergences; active target Goal | missing |
-| INV-05 | A hidden update is a tombstone for visible event adapters: it cannot create output, footer usage/error, live activity, Tool lifecycle, tab, agent switch or external notification. | real run reducer repro; TUI/App clean controls | missing outside TUI/App |
-| INV-06 | Ordinary public single-Message retrieval and Part mutation obey parent Message visibility：hidden Message is public not-found，known Part ID cannot resurrect it through PATCH；visible parent may still receive a hidden Part tombstone. | endpoint descriptions + raw handlers + public Revert path | missing |
-| INV-07 | Plugin transform 后建立一次权威 visible projection；Provider payload、input breakdown、chars/token learning、upload snapshot 和 auto Compaction 必须消费同一投影，converter 独立 public seam 也拒绝 hidden。 | plugin order and split `requestMsgs` consumers | missing |
-| INV-08 | Hidden Tool Parts cannot satisfy doom-loop failure count. | raw current Part path vs filtered historical path | missing |
-| INV-09 | Hiding transcript content does not refund or remove token/cost/RequestUsage/Stats. | user requirement and existing tests | existing coverage |
-| INV-10 | Visibility repair does not materially regress bounded page or per-turn Goal chronology performance on representative large/high-hidden Sessions. | explicit user performance requirement + measured hot paths | missing before R5 |
+| INV-04 | Goal current/previous canonical turns contain only visible Messages and visible qualifying Parts.                                                                                                                                                                                                                  | 67 live divergences; active target Goal                                           | missing                                |
+| INV-05 | A hidden update is a tombstone for visible event adapters: it cannot create output, footer usage/error, live activity, Tool lifecycle, tab, agent switch or external notification.                                                                                                                                 | real run reducer repro; TUI/App clean controls                                    | missing outside TUI/App                |
+| INV-06 | Ordinary public single-Message retrieval and Part mutation obey parent Message visibility：hidden Message is public not-found，known Part ID cannot resurrect it through PATCH；visible parent may still receive a hidden Part tombstone.                                                                          | endpoint descriptions + raw handlers + public Revert path                         | missing                                |
+| INV-07 | Plugin transform 后建立一次权威 visible projection；Provider payload、input breakdown、chars/token learning、upload snapshot 和 auto Compaction 必须消费同一投影，converter 独立 public seam 也拒绝 hidden。                                                                                                       | plugin order and split `requestMsgs` consumers                                    | missing                                |
+| INV-08 | Hidden Tool Parts cannot satisfy doom-loop failure count.                                                                                                                                                                                                                                                          | raw current Part path vs filtered historical path                                 | missing                                |
+| INV-09 | Hiding transcript content does not refund or remove token/cost/RequestUsage/Stats.                                                                                                                                                                                                                                 | user requirement and existing tests                                               | existing coverage                      |
+| INV-10 | Visibility repair does not materially regress bounded page or per-turn Goal chronology performance on representative large/high-hidden Sessions.                                                                                                                                                                   | explicit user performance requirement + measured hot paths                        | missing before R5                      |
 
 ## 8. First Divergence and Root Cause
 
-| Invariant | First divergence | Owning module/interface | Proof |
-| --- | --- | --- | --- |
-| INV-01 / INV-02 | `MessageV2.page` applies physical SQL limit before Message visibility and hydrates hidden Parts before filtering. | `MessageV2.page/hydrate` | live target query returns 247 visible while 300 are available |
-| INV-03 | `CompactionBoundary.latest` 在 pre-read cutoff 前未证明 pair 是 fully visible 或 fully hidden，且接受 hidden Part；`filterCompacted` post-pass 又选择任意 latest tail marker。 | MessageV2 Compaction filter / CompactionBoundary | failed-tail pure output；public Revert 可产生 visible marker + hidden summary；partial-hidden pure repro |
-| INV-04 | `chronology` selects every Message/Part and omits Part hidden state before Goal classification. | MessageV2 chronology projection | live active Goal has hidden previous turn |
-| INV-05 | Raw event publication is correct; each visible output adapter first diverges when it interprets `hidden` payload as ordinary update instead of tombstone. | run/ACP/GitHub/TUI/Slack adapters | reducer emits visible error/footer for hidden assistant |
-| INV-06 | HTTP handler routes ordinary `session.message` directly to raw internal `MessageV2.get`. | SessionHttpApi adapter | source path has no visibility branch |
-| INV-06 | public `updatePart` validates payload IDs but never reads parent Message visibility, then publishes raw Part update. | SessionHttpApi adapter | Revert hides Message while leaving Parts；known ID PATCH is SDK-visible and reachable |
-| INV-07 | plugin transform 后没有权威 visible projection：converter 可过滤 wire，但 `requestMsgs` 仍被 breakdown、ratio learning 与 overflow 消费；Compaction hook 也需保持同一投影。 | SessionPrompt post-plugin projection + `toModelMessagesEffect` independent seam | public plugin transform 后存在多个 raw/converted consumers |
-| INV-08 | Processor appends raw current-assistant Parts to an otherwise visible historical Tool window. | Processor doom-loop window | `MessageV2.parts(...).filter` lacks hidden predicate |
-| INV-10 | R4 changed indexed Message/Part query shapes without an executable baseline/threshold; direct SQL JSON predicates measured material Message-query overhead. | MessageV2 visible read owner / verification contract | raw-vs-SQL benchmark and R4 audit B-01 |
+| Invariant       | First divergence                                                                                                                                                               | Owning module/interface                                                         | Proof                                                                                                    |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| INV-01 / INV-02 | `MessageV2.page` applies physical SQL limit before Message visibility and hydrates hidden Parts before filtering.                                                              | `MessageV2.page/hydrate`                                                        | live target query returns 247 visible while 300 are available                                            |
+| INV-03          | `CompactionBoundary.latest` 在 pre-read cutoff 前未证明 pair 是 fully visible 或 fully hidden，且接受 hidden Part；`filterCompacted` post-pass 又选择任意 latest tail marker。 | MessageV2 Compaction filter / CompactionBoundary                                | failed-tail pure output；public Revert 可产生 visible marker + hidden summary；partial-hidden pure repro |
+| INV-04          | `chronology` selects every Message/Part and omits Part hidden state before Goal classification.                                                                                | MessageV2 chronology projection                                                 | live active Goal has hidden previous turn                                                                |
+| INV-05          | Raw event publication is correct; each visible output adapter first diverges when it interprets `hidden` payload as ordinary update instead of tombstone.                      | run/ACP/GitHub/TUI/Slack adapters                                               | reducer emits visible error/footer for hidden assistant                                                  |
+| INV-06          | HTTP handler routes ordinary `session.message` directly to raw internal `MessageV2.get`.                                                                                       | SessionHttpApi adapter                                                          | source path has no visibility branch                                                                     |
+| INV-06          | public `updatePart` validates payload IDs but never reads parent Message visibility, then publishes raw Part update.                                                           | SessionHttpApi adapter                                                          | Revert hides Message while leaving Parts；known ID PATCH is SDK-visible and reachable                    |
+| INV-07          | plugin transform 后没有权威 visible projection：converter 可过滤 wire，但 `requestMsgs` 仍被 breakdown、ratio learning 与 overflow 消费；Compaction hook 也需保持同一投影。    | SessionPrompt post-plugin projection + `toModelMessagesEffect` independent seam | public plugin transform 后存在多个 raw/converted consumers                                               |
+| INV-08          | Processor appends raw current-assistant Parts to an otherwise visible historical Tool window.                                                                                  | Processor doom-loop window                                                      | `MessageV2.parts(...).filter` lacks hidden predicate                                                     |
+| INV-10          | R4 changed indexed Message/Part query shapes without an executable baseline/threshold; direct SQL JSON predicates measured material Message-query overhead.                    | MessageV2 visible read owner / verification contract                            | raw-vs-SQL benchmark and R4 audit B-01                                                                   |
 
 ### Red-capable feedback loops already run
 
@@ -197,26 +197,33 @@ bun -e 'import { Database } from "bun:sqlite"; const db=new Database("C:/Users/L
 Observed:
 
 ```json
-{"all":[{"id":"msg_f9a82f41b001z3M6oJ7rW6fTv1","hidden":null},{"id":"msg_f9a77197c001Gz3X3saFijGVyr","hidden":"undo"}],"visible":[{"id":"msg_f9a82f41b001z3M6oJ7rW6fTv1"},{"id":"msg_f92f09fdd001TkIdRFd5NyYu35"}],"goal":{"status":"active"}}
+{
+  "all": [
+    { "id": "msg_f9a82f41b001z3M6oJ7rW6fTv1", "hidden": null },
+    { "id": "msg_f9a77197c001Gz3X3saFijGVyr", "hidden": "undo" }
+  ],
+  "visible": [{ "id": "msg_f9a82f41b001z3M6oJ7rW6fTv1" }, { "id": "msg_f92f09fdd001TkIdRFd5NyYu35" }],
+  "goal": { "status": "active" }
+}
 ```
 
 Plan audit R1 additionally proved the post-plugin feedback gap: a plugin can hide a Message after `filterCompactedEffect`; current `prompt.ts` can omit it from `modelMsgs` while still iterating the raw `requestMsgs` for `inputBreakdown` and passing the same raw history to `TokenEstimate.estimateUploadInput`, whose learned ratio drives `compaction.isOverflow`. R2 adds a pre-implementation red slice at the existing SessionPrompt Plugin layer: a plugin-hidden high-usage Message must be absent from the persisted input snapshot and must not trigger auto Compaction.
 
 ## 9. Responsibility and Seam
 
-| Concern | Owner | Interface promise | Why it belongs here | Why another module does not own it |
-| --- | --- | --- | --- | --- |
-| visible persisted range | MessageV2 `page/hydrate` | visible collection with bounded limit and indexed range performance | first Message/Part selection seam | Session/TUI cannot refill correctly after physical range is lost |
-| Goal chronology | MessageV2 `chronology` | canonical persistent visible turns without Provider compaction | first hot projection seam | Goal service receives already-classified trusted IDs |
-| Compaction structural/replay proof | MessageV2 filter + CompactionBoundary | pre-read cutoff 只接受 fully visible 或 fully hidden successful pair；partial pair 无 boundary | owns marker/summary/Part relationship before irreversible range selection | Prompt/Provider cannot reconstruct head after cutoff discarded it |
-| post-plugin prompt visibility | SessionPrompt immediately after plugin transform | every downstream request representation and decision consumes one visible array | first common owner before requestMsgs/modelMsgs/breakdown/estimate split | converter alone is too late for token snapshot and overflow |
-| post-plugin Compaction visibility | SessionCompaction immediately after plugin transform | compaction wire and upload history consume the same visible head | first common owner for transformed compaction input | TokenEstimate cannot infer Message visibility from text/history separately |
-| independent Provider conversion visibility | `toModelMessagesEffect` | direct/public conversion never emits hidden input | independently public/untrusted conversion seam | prompt projection cannot constrain other callers |
-| raw event persistence | SyncEvent | persist and publish complete lifecycle state | tombstone must remain transportable | visible consumers must not weaken audit projection |
-| terminal/live output | each run/ACP/GitHub/TUI/Slack adapter | convert raw events into visible output/state | first view/output seam after raw event | upstream cannot suppress tombstone without breaking TUI/App removal |
-| public direct Message visibility | Session HTTP handler | ordinary SDK-visible retrieval | public adapter defines raw/visible wire contract | internal `MessageV2.get` is legitimately raw for repair/reviewer |
-| public Part mutation visibility | Session HTTP handler | ordinary SDK mutation cannot target public-not-found hidden parent | first untrusted mutation seam has session/message/part IDs and existing 404 contract | output adapters must not duplicate parent DB lookup；internal updatePart must stay raw |
-| doom-loop visible failures | Processor | three visible identical Tool failures | combines current and historical Tool window | raw Part storage must remain available elsewhere |
+| Concern                                    | Owner                                                | Interface promise                                                                              | Why it belongs here                                                                  | Why another module does not own it                                                     |
+| ------------------------------------------ | ---------------------------------------------------- | ---------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------- |
+| visible persisted range                    | MessageV2 `page/hydrate`                             | visible collection with bounded limit and indexed range performance                            | first Message/Part selection seam                                                    | Session/TUI cannot refill correctly after physical range is lost                       |
+| Goal chronology                            | MessageV2 `chronology`                               | canonical persistent visible turns without Provider compaction                                 | first hot projection seam                                                            | Goal service receives already-classified trusted IDs                                   |
+| Compaction structural/replay proof         | MessageV2 filter + CompactionBoundary                | pre-read cutoff 只接受 fully visible 或 fully hidden successful pair；partial pair 无 boundary | owns marker/summary/Part relationship before irreversible range selection            | Prompt/Provider cannot reconstruct head after cutoff discarded it                      |
+| post-plugin prompt visibility              | SessionPrompt immediately after plugin transform     | every downstream request representation and decision consumes one visible array                | first common owner before requestMsgs/modelMsgs/breakdown/estimate split             | converter alone is too late for token snapshot and overflow                            |
+| post-plugin Compaction visibility          | SessionCompaction immediately after plugin transform | compaction wire and upload history consume the same visible head                               | first common owner for transformed compaction input                                  | TokenEstimate cannot infer Message visibility from text/history separately             |
+| independent Provider conversion visibility | `toModelMessagesEffect`                              | direct/public conversion never emits hidden input                                              | independently public/untrusted conversion seam                                       | prompt projection cannot constrain other callers                                       |
+| raw event persistence                      | SyncEvent                                            | persist and publish complete lifecycle state                                                   | tombstone must remain transportable                                                  | visible consumers must not weaken audit projection                                     |
+| terminal/live output                       | each run/ACP/GitHub/TUI/Slack adapter                | convert raw events into visible output/state                                                   | first view/output seam after raw event                                               | upstream cannot suppress tombstone without breaking TUI/App removal                    |
+| public direct Message visibility           | Session HTTP handler                                 | ordinary SDK-visible retrieval                                                                 | public adapter defines raw/visible wire contract                                     | internal `MessageV2.get` is legitimately raw for repair/reviewer                       |
+| public Part mutation visibility            | Session HTTP handler                                 | ordinary SDK mutation cannot target public-not-found hidden parent                             | first untrusted mutation seam has session/message/part IDs and existing 404 contract | output adapters must not duplicate parent DB lookup；internal updatePart must stay raw |
+| doom-loop visible failures                 | Processor                                            | three visible identical Tool failures                                                          | combines current and historical Tool window                                          | raw Part storage must remain available elsewhere                                       |
 
 ## 10. Single Approved Primary-Path Design
 
@@ -278,99 +285,99 @@ This repairs each first divergence at its owner. No path retries a failed primar
 
 ## 11. Secondary and Replacement Path Inventory
 
-| Path | Current or proposed | Classification | Produces success? | Decision-surface share | Disposition |
-| --- | --- | --- | --- | --- | --- |
-| visible Message page/chronology/replay | proposed | primary-contract branch | yes | primary | repair |
-| `includeHidden: true` raw page/stream | current | existing compatibility / structural branch | no visible success | unchanged | preserve |
-| fully hidden successful Compaction structural cutoff | current | supported-domain branch | no replay output | unchanged | preserve |
-| raw SyncEvent hidden payload | current | contracted pass-through | no visible output itself | unchanged | preserve |
-| accounting/Stats/fork raw history | current | contracted pass-through | accounting only | unchanged | preserve |
-| public `includeHidden` query fallback | proposed nowhere | forbidden fallback | n/a | 0% | reject |
-| DB repair/startup scan | proposed nowhere | forbidden fallback | n/a | 0% | reject |
-| remote share inference | proposed nowhere | speculative | n/a | 0% | reject |
+| Path                                                 | Current or proposed | Classification                             | Produces success?        | Decision-surface share | Disposition |
+| ---------------------------------------------------- | ------------------- | ------------------------------------------ | ------------------------ | ---------------------- | ----------- |
+| visible Message page/chronology/replay               | proposed            | primary-contract branch                    | yes                      | primary                | repair      |
+| `includeHidden: true` raw page/stream                | current             | existing compatibility / structural branch | no visible success       | unchanged              | preserve    |
+| fully hidden successful Compaction structural cutoff | current             | supported-domain branch                    | no replay output         | unchanged              | preserve    |
+| raw SyncEvent hidden payload                         | current             | contracted pass-through                    | no visible output itself | unchanged              | preserve    |
+| accounting/Stats/fork raw history                    | current             | contracted pass-through                    | accounting only          | unchanged              | preserve    |
+| public `includeHidden` query fallback                | proposed nowhere    | forbidden fallback                         | n/a                      | 0%                     | reject      |
+| DB repair/startup scan                               | proposed nowhere    | forbidden fallback                         | n/a                      | 0%                     | reject      |
+| remote share inference                               | proposed nowhere    | speculative                                | n/a                      | 0%                     | reject      |
 
 New alternate success paths: 0. Diagnostic decision surface: 0%. Fallback ratio: 0%.
 
 ## 12. Workaround Deletion and Replacement
 
-| Existing workaround or duplicate | Why it existed | Why the approved route supersedes it | Delete or collapse location |
-| --- | --- | --- | --- |
-| `page()` post-hydrate Message/Part filtering | allowed raw and visible callers to share one query | indexed hot-row refill establishes visible capacity before hydrate；raw branch remains explicit | collapse into visibility-aware row selection/hydrate branch in `message-v2.ts` |
-| `filterCompacted` independent post-pass search for any tail marker/summary | repaired retained-tail order after structural walk | exact completed-pair map carries the same ordering fact without accepting failed/partial pair | replace lines around current `compactionIndex/summaryIndex` |
-| downstream assumptions that raw event means visible update | event schema carries hidden for tombstone transport | output adapters explicitly interpret tombstone at first view seam | run/ACP/GitHub/TUI/Slack adapters |
+| Existing workaround or duplicate                                           | Why it existed                                      | Why the approved route supersedes it                                                            | Delete or collapse location                                                    |
+| -------------------------------------------------------------------------- | --------------------------------------------------- | ----------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| `page()` post-hydrate Message/Part filtering                               | allowed raw and visible callers to share one query  | indexed hot-row refill establishes visible capacity before hydrate；raw branch remains explicit | collapse into visibility-aware row selection/hydrate branch in `message-v2.ts` |
+| `filterCompacted` independent post-pass search for any tail marker/summary | repaired retained-tail order after structural walk  | exact completed-pair map carries the same ordering fact without accepting failed/partial pair   | replace lines around current `compactionIndex/summaryIndex`                    |
+| downstream assumptions that raw event means visible update                 | event schema carries hidden for tombstone transport | output adapters explicitly interpret tombstone at first view seam                               | run/ACP/GitHub/TUI/Slack adapters                                              |
 
 The one-off database removal of the target failed Part `tail_start_id` is incident data repair outside the repository. The implementation must not codify or repeat that workaround.
 
 ## 13. Forward Traceability
 
-| Requirement or invariant | Production path | Planned file/change | Behavioral test |
-| --- | --- | --- | --- |
-| INV-01 / INV-02 | indexed visible hot-row refill and Part hydration | `message-v2.ts` | `messages-pagination.test.ts`: hidden rows do not consume limit; hidden-only physical page cannot block older visible history |
-| INV-03 | completed pair map + tri-state persisted boundary + atomic replay | `message-v2.ts`, `compaction-boundary.ts` | `messages-pagination.test.ts`: newer failed tail；public Revert 成功 summary 后 `filterCompactedEffect` 不截 head；hidden Part invalid；fully hidden structural pair preserved |
-| INV-04 | visible chronology projection | `message-v2.ts` | `prompt.test.ts`: hidden user/Part cannot become Goal current/previous or blocked predecessor |
-| INV-05 run | tombstone reducers and activity gate | `run.ts`, `run/session-data.ts`, `run/subagent-data.ts`, `run/stream.transport.ts`, `run/types.ts` | reducer/transport tests assert zero output/footer/live/tab and Message-level parent cleanup |
-| INV-05 adapters | visible terminal adapters | `acp/agent.ts`, `github.ts`, TUI session route, Slack index | ACP event test; adapter guards verified by package tests/typecheck where no injectable output seam exists |
-| INV-06 | public visible direct lookup and mutation | HTTP session handler | `httpapi-sdk.test.ts`: hidden Message is 404；hidden Part absent；Revert/cleanup hidden parent then known Part PATCH is 404 and raw Part remains unchanged |
-| INV-07 | authoritative post-plugin projection + final conversion | `message-v2.ts`, `prompt.ts`, `compaction.ts` | `prompt.test.ts`: plugin-hidden history changes neither input snapshot nor overflow; `compaction.test.ts`: transformed hidden head is absent from wire/history; `message-v2.test.ts`: direct conversion drops hidden |
-| INV-08 | visible current Tool window | `processor.ts` | `processor-effect.test.ts`: hidden identical error does not complete threshold |
-| INV-09 | unchanged accounting | no production accounting change | existing compaction/revert RequestUsage and cold Stats tests remain green |
-| INV-10 | actual production-seam benchmark over fixed test cohorts | no extra production concept；verification owner | focused test invokes `MessageV2.page`, `MessageV2.chronology`, and their real hydrate path before/after implementation and enforces the recorded threshold |
+| Requirement or invariant | Production path                                                   | Planned file/change                                                                                | Behavioral test                                                                                                                                                                                                      |
+| ------------------------ | ----------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| INV-01 / INV-02          | indexed visible hot-row refill and Part hydration                 | `message-v2.ts`                                                                                    | `messages-pagination.test.ts`: hidden rows do not consume limit; hidden-only physical page cannot block older visible history                                                                                        |
+| INV-03                   | completed pair map + tri-state persisted boundary + atomic replay | `message-v2.ts`, `compaction-boundary.ts`                                                          | `messages-pagination.test.ts`: newer failed tail；public Revert 成功 summary 后 `filterCompactedEffect` 不截 head；hidden Part invalid；fully hidden structural pair preserved                                       |
+| INV-04                   | visible chronology projection                                     | `message-v2.ts`                                                                                    | `prompt.test.ts`: hidden user/Part cannot become Goal current/previous or blocked predecessor                                                                                                                        |
+| INV-05 run               | tombstone reducers and activity gate                              | `run.ts`, `run/session-data.ts`, `run/subagent-data.ts`, `run/stream.transport.ts`, `run/types.ts` | reducer/transport tests assert zero output/footer/live/tab and Message-level parent cleanup                                                                                                                          |
+| INV-05 adapters          | visible terminal adapters                                         | `acp/agent.ts`, `github.ts`, TUI session route, Slack index                                        | ACP event test; adapter guards verified by package tests/typecheck where no injectable output seam exists                                                                                                            |
+| INV-06                   | public visible direct lookup and mutation                         | HTTP session handler                                                                               | `httpapi-sdk.test.ts`: hidden Message is 404；hidden Part absent；Revert/cleanup hidden parent then known Part PATCH is 404 and raw Part remains unchanged                                                           |
+| INV-07                   | authoritative post-plugin projection + final conversion           | `message-v2.ts`, `prompt.ts`, `compaction.ts`                                                      | `prompt.test.ts`: plugin-hidden history changes neither input snapshot nor overflow; `compaction.test.ts`: transformed hidden head is absent from wire/history; `message-v2.test.ts`: direct conversion drops hidden |
+| INV-08                   | visible current Tool window                                       | `processor.ts`                                                                                     | `processor-effect.test.ts`: hidden identical error does not complete threshold                                                                                                                                       |
+| INV-09                   | unchanged accounting                                              | no production accounting change                                                                    | existing compaction/revert RequestUsage and cold Stats tests remain green                                                                                                                                            |
+| INV-10                   | actual production-seam benchmark over fixed test cohorts          | no extra production concept；verification owner                                                    | focused test invokes `MessageV2.page`, `MessageV2.chronology`, and their real hydrate path before/after implementation and enforces the recorded threshold                                                           |
 
 No automated route-level harness currently injects a hidden plan Tool into the full TUI Session component, starts the top-level GitHub command without external GitHub I/O, or imports Slack without starting Bolt/createOpencode. Those three one-line output guards are verified by source-path inspection plus package typecheck/build; extracting test-only wrappers or mocking external clients would violate the line budget and repository no-mock preference. Their common raw-event behavior remains behaviorally covered at the exported run reducer and ACP event seam.
 
 ## 14. Reverse Traceability
 
-| Proposed production concept | Requirement ID | Evidence | Why existing logic cannot carry it |
-| --- | --- | --- | --- |
-| visibility-aware Message/Part selection before limit | INV-01, INV-02 | live 247/300 result | post-filter has already lost range capacity and hydrated hidden payload |
-| exact completed Compaction pair map | INV-03 | real failed-tail and partial-pair outputs | independent `findLastIndex` forgets completion proof |
-| Compaction visibility-parity boundary proof | INV-03 | public API Revert produces visible marker + hidden summary before `filterCompactedEffect` | replay suppression happens after pre-read cutoff and cannot restore discarded head |
-| atomic pair replay visibility | INV-03 | hidden summary/Part pure repro | filtering components independently creates unpaired Provider roles |
-| visible chronology SQL projection | INV-04 | 67 DB divergences, one active | classifier cannot recover Part hidden state omitted by projection |
-| stateful event tombstone reduction | INV-05 | run reducer visible error/footer repro | skipping only output leaves buffered Tool/text/tab state authoritative |
-| append-only adapter hidden guard | INV-05 | raw event producer plus output source paths | append-only protocols cannot retract; accepting tombstone causes a second side effect |
-| public visible direct lookup branch | INV-06 | 4,727 hidden rows + ordinary endpoint contract | internal raw get is required by repair/reviewer and cannot change globally |
-| public Part parent-visibility guard | INV-06 | Revert leaves visible Parts under hidden Message；public PATCH accepts known IDs | Part-only event cannot carry parent visibility，so downstream adapters cannot own rejection |
-| shared `MessageV2.visible` projection | INV-01, INV-03, INV-07 | page/filter duplication and plugin split consumers | existing local filters run at different times and permit semantic drift |
-| SessionPrompt post-plugin projection | INV-07 | raw `requestMsgs` drives breakdown/estimate/overflow | converter filtering is too late for three sibling consumers |
-| SessionCompaction post-plugin projection | INV-07 | transformed head and raw `history` currently diverge | Provider wire and learned upload ratio need the same supported history |
-| independent Provider conversion gate | INV-07 | converter is exported and has non-prompt callers | prompt/compaction projection cannot guarantee direct caller input |
-| current Tool hidden filter | INV-08 | current path uses raw `parts()` | historical helper already filters but cannot own current message read |
-| indexed visible refill instead of SQL hidden predicate | INV-02, INV-10 | SQL predicate benchmark regressed large Message query while refill restored 301 visible at baseline-like p95 | post-filter loses capacity；SQL predicate changes hot query cost；refill preserves existing index path |
-| chronology JS projection + narrow Part discriminator | INV-04, INV-10 | existing Message rows are already decoded；Part query intentionally projects only locator fields | SQL WHERE predicate is unnecessary；full Part hydration would violate performance/cold contract |
+| Proposed production concept                            | Requirement ID         | Evidence                                                                                                     | Why existing logic cannot carry it                                                                     |
+| ------------------------------------------------------ | ---------------------- | ------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------ |
+| visibility-aware Message/Part selection before limit   | INV-01, INV-02         | live 247/300 result                                                                                          | post-filter has already lost range capacity and hydrated hidden payload                                |
+| exact completed Compaction pair map                    | INV-03                 | real failed-tail and partial-pair outputs                                                                    | independent `findLastIndex` forgets completion proof                                                   |
+| Compaction visibility-parity boundary proof            | INV-03                 | public API Revert produces visible marker + hidden summary before `filterCompactedEffect`                    | replay suppression happens after pre-read cutoff and cannot restore discarded head                     |
+| atomic pair replay visibility                          | INV-03                 | hidden summary/Part pure repro                                                                               | filtering components independently creates unpaired Provider roles                                     |
+| visible chronology SQL projection                      | INV-04                 | 67 DB divergences, one active                                                                                | classifier cannot recover Part hidden state omitted by projection                                      |
+| stateful event tombstone reduction                     | INV-05                 | run reducer visible error/footer repro                                                                       | skipping only output leaves buffered Tool/text/tab state authoritative                                 |
+| append-only adapter hidden guard                       | INV-05                 | raw event producer plus output source paths                                                                  | append-only protocols cannot retract; accepting tombstone causes a second side effect                  |
+| public visible direct lookup branch                    | INV-06                 | 4,727 hidden rows + ordinary endpoint contract                                                               | internal raw get is required by repair/reviewer and cannot change globally                             |
+| public Part parent-visibility guard                    | INV-06                 | Revert leaves visible Parts under hidden Message；public PATCH accepts known IDs                             | Part-only event cannot carry parent visibility，so downstream adapters cannot own rejection            |
+| shared `MessageV2.visible` projection                  | INV-01, INV-03, INV-07 | page/filter duplication and plugin split consumers                                                           | existing local filters run at different times and permit semantic drift                                |
+| SessionPrompt post-plugin projection                   | INV-07                 | raw `requestMsgs` drives breakdown/estimate/overflow                                                         | converter filtering is too late for three sibling consumers                                            |
+| SessionCompaction post-plugin projection               | INV-07                 | transformed head and raw `history` currently diverge                                                         | Provider wire and learned upload ratio need the same supported history                                 |
+| independent Provider conversion gate                   | INV-07                 | converter is exported and has non-prompt callers                                                             | prompt/compaction projection cannot guarantee direct caller input                                      |
+| current Tool hidden filter                             | INV-08                 | current path uses raw `parts()`                                                                              | historical helper already filters but cannot own current message read                                  |
+| indexed visible refill instead of SQL hidden predicate | INV-02, INV-10         | SQL predicate benchmark regressed large Message query while refill restored 301 visible at baseline-like p95 | post-filter loses capacity；SQL predicate changes hot query cost；refill preserves existing index path |
+| chronology JS projection + narrow Part discriminator   | INV-04, INV-10         | existing Message rows are already decoded；Part query intentionally projects only locator fields             | SQL WHERE predicate is unnecessary；full Part hydration would violate performance/cold contract        |
 
 No new setting, schema, dependency, migration, cache, retry, fallback or public raw endpoint is proposed.
 
 ## 15. File-Level Change Plan
 
-| File | Add / modify / delete | Exact responsibility of the change | Expected line delta |
-| --- | --- | --- | --- |
-| `packages/opencode/src/session/message-v2.ts` | modify | shared visible projection, indexed page refill/hydrate, chronology, completed pair replay, final Provider gate | 42-55 |
-| `packages/opencode/src/session/compaction-boundary.ts` | modify | tri-state marker/summary visibility parity + hidden Part exclusion before cutoff | 5-9 |
-| `packages/opencode/src/session/processor.ts` | modify | exclude hidden current Tool from doom-loop window | 2-4 |
-| `packages/opencode/src/session/prompt.ts` | modify | project transformed messages before request snapshot/breakdown/estimate/overflow split | 3-6 |
-| `packages/opencode/src/session/compaction.ts` | modify | transformed visible head owns compaction wire and upload history | 3-6 |
-| `packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts` | modify | visible direct Message API + hidden-parent Part mutation rejection | 10-16 |
-| `packages/opencode/src/cli/cmd/run.ts` | modify | append-only legacy run ignores hidden updates | 4-7 |
-| `packages/opencode/src/cli/cmd/run/session-data.ts` | modify | stateful Message/Part tombstone handling | 18-28 |
-| `packages/opencode/src/cli/cmd/run/subagent-data.ts` | modify | hidden task/child event cannot create tab/detail | 8-15 |
-| `packages/opencode/src/cli/cmd/run/types.ts` | modify | retain the parent MessageID on task tabs so a Message tombstone can revoke derived tab/detail state | 2-5 |
-| `packages/opencode/src/cli/cmd/run/stream.transport.ts` | modify | hidden assistant is not live activity | 2-4 |
-| `packages/opencode/src/acp/agent.ts` | modify | ignore hidden Tool lifecycle update | 2-4 |
-| `packages/opencode/src/cli/cmd/github.ts` | modify | ignore hidden Tool/Text output | 2-4 |
-| `packages/opencode/src/cli/cmd/tui/routes/session/index.tsx` | modify | ignore hidden plan transition | 2-4 |
-| `packages/slack/src/index.ts` | modify | do not send hidden completed Tool notification | 2-4 |
-| `packages/opencode/test/session/messages-pagination.test.ts` | modify | visible range + pure/persisted Compaction pair regressions through Revert | 40-55 |
-| `packages/opencode/test/session/message-v2.test.ts` | modify | final Provider conversion visibility | 12-20 |
-| `packages/opencode/test/session/prompt.test.ts` | modify | Goal chronology + post-plugin input snapshot/overflow | 30-45 |
-| `packages/opencode/test/session/compaction.test.ts` | modify | post-plugin visible compaction head/history | 12-20 |
-| `packages/opencode/test/session/processor-effect.test.ts` | modify | hidden current Tool doom-loop behavior | 12-20 |
-| `packages/opencode/test/cli/run/session-data.test.ts` | modify | hidden Message/Part tombstones | 18-28 |
-| `packages/opencode/test/cli/run/subagent-data.test.ts` | modify | hidden task tab behavior | 10-18 |
-| `packages/opencode/test/cli/run/stream.transport.test.ts` | modify | hidden assistant activity behavior | 8-15 |
-| `packages/opencode/test/server/httpapi-sdk.test.ts` | modify | direct hidden Message/Part + hidden-parent Part PATCH behavior | 18-28 |
-| `packages/opencode/test/acp/event-subscription.test.ts` | modify | hidden terminal Tool ignored | 8-15 |
-| `docs/plans/hidden-message-production-isolation.md` | add | canonical plan/audit/implementation evidence | documentation only |
+| File                                                                       | Add / modify / delete | Exact responsibility of the change                                                                             | Expected line delta |
+| -------------------------------------------------------------------------- | --------------------- | -------------------------------------------------------------------------------------------------------------- | ------------------- |
+| `packages/opencode/src/session/message-v2.ts`                              | modify                | shared visible projection, indexed page refill/hydrate, chronology, completed pair replay, final Provider gate | 42-55               |
+| `packages/opencode/src/session/compaction-boundary.ts`                     | modify                | tri-state marker/summary visibility parity + hidden Part exclusion before cutoff                               | 5-9                 |
+| `packages/opencode/src/session/processor.ts`                               | modify                | exclude hidden current Tool from doom-loop window                                                              | 2-4                 |
+| `packages/opencode/src/session/prompt.ts`                                  | modify                | project transformed messages before request snapshot/breakdown/estimate/overflow split                         | 3-6                 |
+| `packages/opencode/src/session/compaction.ts`                              | modify                | transformed visible head owns compaction wire and upload history                                               | 3-6                 |
+| `packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts` | modify                | visible direct Message API + hidden-parent Part mutation rejection                                             | 10-16               |
+| `packages/opencode/src/cli/cmd/run.ts`                                     | modify                | append-only legacy run ignores hidden updates                                                                  | 4-7                 |
+| `packages/opencode/src/cli/cmd/run/session-data.ts`                        | modify                | stateful Message/Part tombstone handling                                                                       | 18-28               |
+| `packages/opencode/src/cli/cmd/run/subagent-data.ts`                       | modify                | hidden task/child event cannot create tab/detail                                                               | 8-15                |
+| `packages/opencode/src/cli/cmd/run/types.ts`                               | modify                | retain the parent MessageID on task tabs so a Message tombstone can revoke derived tab/detail state            | 2-5                 |
+| `packages/opencode/src/cli/cmd/run/stream.transport.ts`                    | modify                | hidden assistant is not live activity                                                                          | 2-4                 |
+| `packages/opencode/src/acp/agent.ts`                                       | modify                | ignore hidden Tool lifecycle update                                                                            | 2-4                 |
+| `packages/opencode/src/cli/cmd/github.ts`                                  | modify                | ignore hidden Tool/Text output                                                                                 | 2-4                 |
+| `packages/opencode/src/cli/cmd/tui/routes/session/index.tsx`               | modify                | ignore hidden plan transition                                                                                  | 2-4                 |
+| `packages/slack/src/index.ts`                                              | modify                | do not send hidden completed Tool notification                                                                 | 2-4                 |
+| `packages/opencode/test/session/messages-pagination.test.ts`               | modify                | visible range + pure/persisted Compaction pair regressions through Revert                                      | 40-55               |
+| `packages/opencode/test/session/message-v2.test.ts`                        | modify                | final Provider conversion visibility                                                                           | 12-20               |
+| `packages/opencode/test/session/prompt.test.ts`                            | modify                | Goal chronology + post-plugin input snapshot/overflow                                                          | 30-45               |
+| `packages/opencode/test/session/compaction.test.ts`                        | modify                | post-plugin visible compaction head/history                                                                    | 12-20               |
+| `packages/opencode/test/session/processor-effect.test.ts`                  | modify                | hidden current Tool doom-loop behavior                                                                         | 12-20               |
+| `packages/opencode/test/cli/run/session-data.test.ts`                      | modify                | hidden Message/Part tombstones                                                                                 | 18-28               |
+| `packages/opencode/test/cli/run/subagent-data.test.ts`                     | modify                | hidden task tab behavior                                                                                       | 10-18               |
+| `packages/opencode/test/cli/run/stream.transport.test.ts`                  | modify                | hidden assistant activity behavior                                                                             | 8-15                |
+| `packages/opencode/test/server/httpapi-sdk.test.ts`                        | modify                | direct hidden Message/Part + hidden-parent Part PATCH behavior                                                 | 18-28               |
+| `packages/opencode/test/acp/event-subscription.test.ts`                    | modify                | hidden terminal Tool ignored                                                                                   | 8-15                |
+| `docs/plans/hidden-message-production-isolation.md`                        | add                   | canonical plan/audit/implementation evidence                                                                   | documentation only  |
 
 No generated file change is planned. If implementation requires a production or test file outside this table, the plan must be revised and re-audited before that change.
 
@@ -378,31 +385,31 @@ No generated file change is planned. If implementation requires a production or 
 
 Confirmed public seams: `Session.messages/MessageV2.page/filterCompactedEffect`, SessionPrompt+GoalTool behavior, exported run reducers/transport, SDK HTTP `session.message`, ACP event subscription, and Provider conversion.
 
-| Order | Red behavior | Why current code fails | Minimal green behavior | Regression protected |
-| --- | --- | --- | --- | --- |
-| 1 | bounded/full visible history loses rows behind hidden Messages | limit precedes visibility | indexed hot-row refill before visible Part hydration | TUI/API/export/revert range |
-| 2 | newer failed hidden Compaction tail removes older valid boundary | post-pass ignores completed set | reorder from exact successful pair only | original 43-47K context collapse |
-| 3 | public Revert hides successful summary but persisted cutoff still drops old head | boundary ignores visibility XOR before range selection | partial-hidden candidate skipped；earlier valid boundary/full history remains | silent head loss before replay filtering |
-| 4 | hidden summary or Part leaves unpaired replay component in pure full-history caller | pair proof precedes component visibility | same tri-state proof applies without pre-read | invalid Provider role/prompt sequence |
-| 5 | hidden user/Part becomes Goal previous turn | chronology includes raw rows | visible chronology only | blocked streak/recovery authority |
-| 6 | plugin-hidden history leaves Provider wire but still changes breakdown/learned estimate/overflow | projection occurs only inside converter | one visible array immediately after transform feeds every sibling consumer | post-plugin token snapshot and auto Compaction |
-| 7 | compaction plugin hides selected head but raw history still learns upload ratio | transformed wire and raw estimate history diverge | transformed visible head feeds both | Compaction snapshot parity |
-| 8 | hidden run Message/Part emits commit/footer and stale state | reducer treats tombstone as replacement | consume tombstone with zero visible output and cleanup | terminal CLI output/state |
-| 9 | hidden task/assistant event creates tab or satisfies live gate | subagent/transport lack visibility; Message tombstone does not identify an existing task tab | retain task parent MessageID and remove matching tab/detail on hidden parent Message; suppress hidden activity | run completion/subagent UI |
-| 10 | direct SDK lookup returns hidden Message/Part | handler uses raw get | 404 hidden Message; visible Message filters hidden Parts | API collection/detail parity |
-| 11 | known Part PATCH under hidden parent emits ordinary update | public mutation never checks parent visibility | Revert/cleanup hidden parent then PATCH returns 404 before mutation | Message tombstone resurrection |
-| 12 | hidden Tool satisfies doom-loop threshold | current Tool read is raw | current visible Tool filter | false permission interruption |
-| 13 | hidden ACP Tool emits lifecycle | adapter accepts tombstone | zero ACP update | ACP client parity |
-| 14 | visibility query repair exceeds measured performance threshold | no executable gate in R4 | index-preserving refill/JS projection measured against fixed baseline | explicit no-performance-regression requirement |
+| Order | Red behavior                                                                                     | Why current code fails                                                                       | Minimal green behavior                                                                                         | Regression protected                           |
+| ----- | ------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- | ---------------------------------------------- |
+| 1     | bounded/full visible history loses rows behind hidden Messages                                   | limit precedes visibility                                                                    | indexed hot-row refill before visible Part hydration                                                           | TUI/API/export/revert range                    |
+| 2     | newer failed hidden Compaction tail removes older valid boundary                                 | post-pass ignores completed set                                                              | reorder from exact successful pair only                                                                        | original 43-47K context collapse               |
+| 3     | public Revert hides successful summary but persisted cutoff still drops old head                 | boundary ignores visibility XOR before range selection                                       | partial-hidden candidate skipped；earlier valid boundary/full history remains                                  | silent head loss before replay filtering       |
+| 4     | hidden summary or Part leaves unpaired replay component in pure full-history caller              | pair proof precedes component visibility                                                     | same tri-state proof applies without pre-read                                                                  | invalid Provider role/prompt sequence          |
+| 5     | hidden user/Part becomes Goal previous turn                                                      | chronology includes raw rows                                                                 | visible chronology only                                                                                        | blocked streak/recovery authority              |
+| 6     | plugin-hidden history leaves Provider wire but still changes breakdown/learned estimate/overflow | projection occurs only inside converter                                                      | one visible array immediately after transform feeds every sibling consumer                                     | post-plugin token snapshot and auto Compaction |
+| 7     | compaction plugin hides selected head but raw history still learns upload ratio                  | transformed wire and raw estimate history diverge                                            | transformed visible head feeds both                                                                            | Compaction snapshot parity                     |
+| 8     | hidden run Message/Part emits commit/footer and stale state                                      | reducer treats tombstone as replacement                                                      | consume tombstone with zero visible output and cleanup                                                         | terminal CLI output/state                      |
+| 9     | hidden task/assistant event creates tab or satisfies live gate                                   | subagent/transport lack visibility; Message tombstone does not identify an existing task tab | retain task parent MessageID and remove matching tab/detail on hidden parent Message; suppress hidden activity | run completion/subagent UI                     |
+| 10    | direct SDK lookup returns hidden Message/Part                                                    | handler uses raw get                                                                         | 404 hidden Message; visible Message filters hidden Parts                                                       | API collection/detail parity                   |
+| 11    | known Part PATCH under hidden parent emits ordinary update                                       | public mutation never checks parent visibility                                               | Revert/cleanup hidden parent then PATCH returns 404 before mutation                                            | Message tombstone resurrection                 |
+| 12    | hidden Tool satisfies doom-loop threshold                                                        | current Tool read is raw                                                                     | current visible Tool filter                                                                                    | false permission interruption                  |
+| 13    | hidden ACP Tool emits lifecycle                                                                  | adapter accepts tombstone                                                                    | zero ACP update                                                                                                | ACP client parity                              |
+| 14    | visibility query repair exceeds measured performance threshold                                   | no executable gate in R4                                                                     | index-preserving refill/JS projection measured against fixed baseline                                          | explicit no-performance-regression requirement |
 
 Each cycle is red -> minimal green -> narrow regression before the next slice. Expected IDs, counts, commits and statuses are fixed literals; tests do not inspect private helpers, SQL text or call counts.
 
 ## 17. Chinese Comment Budget
 
-| Metric | Estimate | Method |
-| --- | --- | --- |
-| Effective changed code lines `E` | 315 maximum | substantive production + test code only; exclude comment-only, imports, formatting, generated and pure moves |
-| Required Chinese explanatory comments `C` | at least 48 | `ceil(315 * 0.15) = 48` |
+| Metric                                    | Estimate    | Method                                                                                                       |
+| ----------------------------------------- | ----------- | ------------------------------------------------------------------------------------------------------------ |
+| Effective changed code lines `E`          | 315 maximum | substantive production + test code only; exclude comment-only, imports, formatting, generated and pure moves |
+| Required Chinese explanatory comments `C` | at least 48 | `ceil(315 * 0.15) = 48`                                                                                      |
 
 Planned qualifying explanations are distributed beside:
 
@@ -420,23 +427,23 @@ Planned qualifying explanations are distributed beside:
 
 ## 18. Verification
 
-| Command | Working directory | Evidence produced |
-| --- | --- | --- |
-| `bun test test/session/messages-pagination.test.ts` | `packages/opencode` | visible paging、Compaction structural/replay pair、actual MessageV2 page/chronology performance seam |
-| `bun test test/session/message-v2.test.ts` | `packages/opencode` | Provider conversion visibility |
-| `bun test test/session/prompt.test.ts -t "Goal|post-plugin hidden"` | `packages/opencode` | hidden chronology 不控制 Goal turn；request snapshot/overflow 共用 visible projection |
-| `bun test test/session/compaction.test.ts -t "plugin-hidden"` | `packages/opencode` | compaction wire 与 upload history 共用 transformed visible head |
-| `bun test test/session/processor-effect.test.ts -t "doom_loop"` | `packages/opencode` | hidden Tool 不计入 threshold |
-| `bun test test/cli/run/session-data.test.ts test/cli/run/subagent-data.test.ts test/cli/run/stream.transport.test.ts` | `packages/opencode` | run event tombstone behavior |
-| `bun test test/server/httpapi-sdk.test.ts -t "session message|hidden parent"` | `packages/opencode` | direct lookup visibility + public Part mutation cannot resurrect hidden parent |
-| `bun test test/acp/event-subscription.test.ts` | `packages/opencode` | ACP hidden Tool behavior |
-| `bun test test/session/compaction.test.ts test/session/revert-compact.test.ts` | `packages/opencode` | existing lifecycle/accounting/fully hidden structural compatibility |
-| `bun test test/storage/cold.test.ts` | `packages/opencode` | cold/raw accounting and structural cutoff regressions |
-| `bun typecheck` | `packages/opencode` | all changed opencode adapters/types |
-| `bun typecheck` | `packages/slack` | Slack hidden guard compiles without SDK regeneration |
-| original four Section 8 feedback commands | stated directories | failed-tail, event output, visible limit and active Goal divergence become green/not reproducible |
-| `bun test test/session/messages-pagination.test.ts -t "visibility performance"` | `packages/opencode` | actual `MessageV2.page`/`chronology`/hydrate p95 candidate `<= baseline + max(5ms, baseline*25%)`; visible page returns requested 301 probe rows |
-| `git diff --check` | repository root | whitespace integrity |
+| Command                                                                                                               | Working directory    | Evidence produced                                                                                                                                |
+| --------------------------------------------------------------------------------------------------------------------- | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------- |
+| `bun test test/session/messages-pagination.test.ts`                                                                   | `packages/opencode`  | visible paging、Compaction structural/replay pair、actual MessageV2 page/chronology performance seam                                             |
+| `bun test test/session/message-v2.test.ts`                                                                            | `packages/opencode`  | Provider conversion visibility                                                                                                                   |
+| `bun test test/session/prompt.test.ts -t "Goal                                                                        | post-plugin hidden"` | `packages/opencode`                                                                                                                              | hidden chronology 不控制 Goal turn；request snapshot/overflow 共用 visible projection |
+| `bun test test/session/compaction.test.ts -t "plugin-hidden"`                                                         | `packages/opencode`  | compaction wire 与 upload history 共用 transformed visible head                                                                                  |
+| `bun test test/session/processor-effect.test.ts -t "doom_loop"`                                                       | `packages/opencode`  | hidden Tool 不计入 threshold                                                                                                                     |
+| `bun test test/cli/run/session-data.test.ts test/cli/run/subagent-data.test.ts test/cli/run/stream.transport.test.ts` | `packages/opencode`  | run event tombstone behavior                                                                                                                     |
+| `bun test test/server/httpapi-sdk.test.ts -t "session message                                                         | hidden parent"`      | `packages/opencode`                                                                                                                              | direct lookup visibility + public Part mutation cannot resurrect hidden parent        |
+| `bun test test/acp/event-subscription.test.ts`                                                                        | `packages/opencode`  | ACP hidden Tool behavior                                                                                                                         |
+| `bun test test/session/compaction.test.ts test/session/revert-compact.test.ts`                                        | `packages/opencode`  | existing lifecycle/accounting/fully hidden structural compatibility                                                                              |
+| `bun test test/storage/cold.test.ts`                                                                                  | `packages/opencode`  | cold/raw accounting and structural cutoff regressions                                                                                            |
+| `bun typecheck`                                                                                                       | `packages/opencode`  | all changed opencode adapters/types                                                                                                              |
+| `bun typecheck`                                                                                                       | `packages/slack`     | Slack hidden guard compiles without SDK regeneration                                                                                             |
+| original four Section 8 feedback commands                                                                             | stated directories   | failed-tail, event output, visible limit and active Goal divergence become green/not reproducible                                                |
+| `bun test test/session/messages-pagination.test.ts -t "visibility performance"`                                       | `packages/opencode`  | actual `MessageV2.page`/`chronology`/hydrate p95 candidate `<= baseline + max(5ms, baseline*25%)`; visible page returns requested 301 probe rows |
+| `git diff --check`                                                                                                    | repository root      | whitespace integrity                                                                                                                             |
 
 ### Performance Benchmark Protocol
 
@@ -462,17 +469,17 @@ Historical read-only SQL measurements remain design evidence only, not the accep
 
 ## 19. Diff Budget
 
-| Metric | Estimate | Justification |
-| --- | --- | --- |
-| Files added | 1 plan only | no new production/test module |
-| Files modified | at most 25 | plan + 14 production owners + 10 existing behavior-test files |
-| Files deleted | 0 | no obsolete file/module |
-| Production substantive lines | 116 maximum | indexed refill + shared projection + orchestration/public guards + parent Message tombstone identity |
-| Test substantive lines | 220 maximum | behavior slices reuse existing fixtures；performance calls real production seams and creates no benchmark artifact |
-| Effective implementation lines `E` | 336 maximum | policy excludes qualifying comment-only/import/format lines |
-| Qualifying Chinese comment lines `C` | at least 51 | recompute from actual E |
-| Total implementation changed lines | 399 hard maximum | code、tests、imports、comments 总和，保留 1-line hard margin |
-| Generated lines | 0 | SDK regeneration explicitly excluded |
+| Metric                               | Estimate         | Justification                                                                                                      |
+| ------------------------------------ | ---------------- | ------------------------------------------------------------------------------------------------------------------ |
+| Files added                          | 1 plan only      | no new production/test module                                                                                      |
+| Files modified                       | at most 25       | plan + 14 production owners + 10 existing behavior-test files                                                      |
+| Files deleted                        | 0                | no obsolete file/module                                                                                            |
+| Production substantive lines         | 116 maximum      | indexed refill + shared projection + orchestration/public guards + parent Message tombstone identity               |
+| Test substantive lines               | 220 maximum      | behavior slices reuse existing fixtures；performance calls real production seams and creates no benchmark artifact |
+| Effective implementation lines `E`   | 336 maximum      | policy excludes qualifying comment-only/import/format lines                                                        |
+| Qualifying Chinese comment lines `C` | at least 51      | recompute from actual E                                                                                            |
+| Total implementation changed lines   | 399 hard maximum | code、tests、imports、comments 总和，保留 1-line hard margin                                                       |
+| Generated lines                      | 0                | SDK regeneration explicitly excluded                                                                               |
 
 The 400-line user limit is a hard gate. If complete mapped behavior cannot fit, implementation stops and revises the plan instead of dropping a requirement or exceeding the limit.
 
@@ -521,14 +528,14 @@ The independent auditor must:
 
 ## 22. Plan Audit Record
 
-| Round | Audited revision | Full scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | R1 | yes | B-01 | 3 | BLOCK | `ses_0654a79d0ffeLqV2ZEg03yag8a` |
-| 2 | R2 | yes | B-01 | 3 | BLOCK | `ses_065406154ffeXxvfSY6nNHL5K6` |
-| 3 | R3 | yes | B-01 | 2 | BLOCK | `ses_0653634e3ffeILgoApLBp77Hnu` |
-| 4 | R4 | yes | B-01 | 0 | BLOCK | `ses_0652a8c50ffeEzApXJ6ME207m2` |
-| 5 | R5 | yes | B-01, B-02 | 2 | BLOCK | `ses_0651ce30fffeR0d1lKcWveVMQN` |
-| 6 | R6 | yes | none | 3 | APPROVE | `ses_065101142ffeqdMs8j5rKy43PE` |
+| Round | Audited revision | Full scope? | Blocking findings | Non-blocking findings | Result  | Invocation reference             |
+| ----- | ---------------- | ----------- | ----------------- | --------------------- | ------- | -------------------------------- |
+| 1     | R1               | yes         | B-01              | 3                     | BLOCK   | `ses_0654a79d0ffeLqV2ZEg03yag8a` |
+| 2     | R2               | yes         | B-01              | 3                     | BLOCK   | `ses_065406154ffeXxvfSY6nNHL5K6` |
+| 3     | R3               | yes         | B-01              | 2                     | BLOCK   | `ses_0653634e3ffeILgoApLBp77Hnu` |
+| 4     | R4               | yes         | B-01              | 0                     | BLOCK   | `ses_0652a8c50ffeEzApXJ6ME207m2` |
+| 5     | R5               | yes         | B-01, B-02        | 2                     | BLOCK   | `ses_0651ce30fffeR0d1lKcWveVMQN` |
+| 6     | R6               | yes         | none              | 3                     | APPROVE | `ses_065101142ffeqdMs8j5rKy43PE` |
 
 ### Round 1 Verbatim Verdict
 
@@ -612,18 +619,18 @@ R1 尚未完整隔离 post-plugin hidden history 对 token snapshot 和自动 Co
 
 #### Requirement and traceability coverage
 
-| 范围 | 审计结果 |
-| --- | --- |
-| 可见分页和 visible limit | owner、SQL-before-limit 修复、敏感测试均已映射 |
-| Goal chronology | Message/Part visibility owner 和 public Goal test 已映射 |
-| Provider conversion及 post-plugin sibling consumers | R2 已覆盖 request snapshot、ratio learning、overflow 和 Compaction upload |
-| run/ACP/GitHub/TUI/Slack event adapters | raw event 保留、stateful tombstone 与 append-only guard 的责任边界已映射 |
-| HTTP direct Message lookup | public visible adapter 与 internal raw `get` 已正确分离 |
-| doom-loop | current Tool raw read 的 first divergence 和测试已映射 |
-| accounting/audit/cold raw facts | preservation decisions 已明确 |
-| Compaction partial-hidden pair | **未满足**：supported reachable input 与 structural cutoff 设计互相冲突 |
-| 400 行限制 | 按各文件下限和共享 projection 设计具备可行性；实施仍需以实际 diff 作为硬门槛 |
-| Reverse traceability | 除 partial-hidden structural cutoff 外，新增 helper、branch、adapter guard 均有 requirement ID 和 reachable/contracted evidence |
+| 范围                                                | 审计结果                                                                                                                        |
+| --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| 可见分页和 visible limit                            | owner、SQL-before-limit 修复、敏感测试均已映射                                                                                  |
+| Goal chronology                                     | Message/Part visibility owner 和 public Goal test 已映射                                                                        |
+| Provider conversion及 post-plugin sibling consumers | R2 已覆盖 request snapshot、ratio learning、overflow 和 Compaction upload                                                       |
+| run/ACP/GitHub/TUI/Slack event adapters             | raw event 保留、stateful tombstone 与 append-only guard 的责任边界已映射                                                        |
+| HTTP direct Message lookup                          | public visible adapter 与 internal raw `get` 已正确分离                                                                         |
+| doom-loop                                           | current Tool raw read 的 first divergence 和测试已映射                                                                          |
+| accounting/audit/cold raw facts                     | preservation decisions 已明确                                                                                                   |
+| Compaction partial-hidden pair                      | **未满足**：supported reachable input 与 structural cutoff 设计互相冲突                                                         |
+| 400 行限制                                          | 按各文件下限和共享 projection 设计具备可行性；实施仍需以实际 diff 作为硬门槛                                                    |
+| Reverse traceability                                | 除 partial-hidden structural cutoff 外，新增 helper、branch、adapter guard 均有 requirement ID 和 reachable/contracted evidence |
 
 #### Primary-path and fallback verdict
 
@@ -696,20 +703,20 @@ R2 不能获准实施。必须修正 partial-hidden Compaction pair 在 persiste
 
 #### Requirement and traceability coverage
 
-| 范围 | 审计结果 |
-| --- | --- |
-| visible paging、limit 与 hidden Part hydration | owner、first divergence、SQL-before-limit 修复及敏感测试已映射 |
-| Compaction completed pair、failed tail、partial-hidden pair | R3 已把 visibility parity 放在 persisted cutoff 前；pure/persisted/Revert 测试已映射 |
-| Goal chronology | hidden Message/Part SQL projection和 Goal行为测试已映射 |
-| post-plugin Provider、input breakdown、ratio learning、overflow | 一个 authoritative visible projection及行为测试已映射 |
-| post-plugin Compaction wire/upload history | transformed visible head及测试已映射 |
-| run/ACP/GitHub/TUI/Slack tombstones | `Part.hidden` 和 `Message.hidden` 的常规路径已映射；hidden parent 下的后续 visible Part mutation未覆盖 |
-| public direct Message lookup | hidden Message→404、visible Message过滤 hidden Parts已映射 |
-| public Part mutation | **未满足**：公开 `updatePart` 可绕过父 Message visibility |
-| doom-loop | hidden current Tool过滤及测试已映射 |
-| accounting、Stats、fork、cold raw facts | preservation decision明确 |
-| 400 行限制 | 计划下限具备可行性；新增缺失路径后必须重新核算，仍需保持总 implementation changed lines `<=400` |
-| Reverse traceability | 已提出的概念基本具备 evidence；public Part mutation这一现有成功路径未进入设计和测试映射 |
+| 范围                                                            | 审计结果                                                                                               |
+| --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| visible paging、limit 与 hidden Part hydration                  | owner、first divergence、SQL-before-limit 修复及敏感测试已映射                                         |
+| Compaction completed pair、failed tail、partial-hidden pair     | R3 已把 visibility parity 放在 persisted cutoff 前；pure/persisted/Revert 测试已映射                   |
+| Goal chronology                                                 | hidden Message/Part SQL projection和 Goal行为测试已映射                                                |
+| post-plugin Provider、input breakdown、ratio learning、overflow | 一个 authoritative visible projection及行为测试已映射                                                  |
+| post-plugin Compaction wire/upload history                      | transformed visible head及测试已映射                                                                   |
+| run/ACP/GitHub/TUI/Slack tombstones                             | `Part.hidden` 和 `Message.hidden` 的常规路径已映射；hidden parent 下的后续 visible Part mutation未覆盖 |
+| public direct Message lookup                                    | hidden Message→404、visible Message过滤 hidden Parts已映射                                             |
+| public Part mutation                                            | **未满足**：公开 `updatePart` 可绕过父 Message visibility                                              |
+| doom-loop                                                       | hidden current Tool过滤及测试已映射                                                                    |
+| accounting、Stats、fork、cold raw facts                         | preservation decision明确                                                                              |
+| 400 行限制                                                      | 计划下限具备可行性；新增缺失路径后必须重新核算，仍需保持总 implementation changed lines `<=400`        |
+| Reverse traceability                                            | 已提出的概念基本具备 evidence；public Part mutation这一现有成功路径未进入设计和测试映射                |
 
 #### Primary-path and fallback verdict
 
@@ -775,22 +782,22 @@ R3 尚未覆盖公开 `updatePart` 对 hidden 父 Message visibility 的绕过�
 
 #### Requirement and traceability coverage
 
-| 范围 | 审计结果 |
-| --- | --- |
-| hidden Message/Part producer inventory | Revert、stale-turn repair、Permission Reviewer retry、failed Compaction、public Part mutation 和 plugin transform 均已盘点 |
-| visible collection与 limit | first divergence、SQL-before-limit owner、hidden Part hydration 和 red-capable test 已映射 |
-| Compaction boundary | completed pair、failed tail、partial-hidden pair、hidden Part、fully hidden structural-only pair均已映射到 persisted 与 pure seams |
-| Goal chronology | Message/Part visibility投影、真实 Goal control path 和行为测试已映射 |
-| post-plugin Provider path | Provider wire、input breakdown、ratio learning、overflow 和 Compaction upload history共用 authoritative projection |
-| event adapters | raw event 保留；run、ACP、GitHub、TUI、Slack 的 tombstone责任和 append-only/stateful 差异已分类 |
-| public HTTP | hidden Message detail、hidden Part过滤、hidden-parent Part PATCH拒绝均映射到 HTTP adapter |
-| doom-loop | raw current Tool read 的 first divergence 和 hidden Tool threshold测试已映射 |
-| accounting/audit/fork/cold | raw token、cost、RequestUsage、Stats和结构数据的保留决定明确 |
-| fallback与兼容路径 | 新 alternate success path 为 0；fully hidden Compaction cutoff 和 raw event均有现存合同 |
-| 功能保持 | 相关行为测试、Compaction/Revert/Cold回归和 package typecheck 已规划 |
-| 性能保持 | **未满足**：没有基准、阈值或其他可执行验收信号 |
-| 400 行限制 | `E <= 310`、`C >= 47`、总 implementation changed lines `<=398` 在计划层面可行，实施时仍须按实际 diff 重算 |
-| Reverse traceability | 共享 projection、pair map、HTTP guard、adapter tombstone和 doom-loop filter均有 observed/contracted/reachable evidence |
+| 范围                                   | 审计结果                                                                                                                           |
+| -------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| hidden Message/Part producer inventory | Revert、stale-turn repair、Permission Reviewer retry、failed Compaction、public Part mutation 和 plugin transform 均已盘点         |
+| visible collection与 limit             | first divergence、SQL-before-limit owner、hidden Part hydration 和 red-capable test 已映射                                         |
+| Compaction boundary                    | completed pair、failed tail、partial-hidden pair、hidden Part、fully hidden structural-only pair均已映射到 persisted 与 pure seams |
+| Goal chronology                        | Message/Part visibility投影、真实 Goal control path 和行为测试已映射                                                               |
+| post-plugin Provider path              | Provider wire、input breakdown、ratio learning、overflow 和 Compaction upload history共用 authoritative projection                 |
+| event adapters                         | raw event 保留；run、ACP、GitHub、TUI、Slack 的 tombstone责任和 append-only/stateful 差异已分类                                    |
+| public HTTP                            | hidden Message detail、hidden Part过滤、hidden-parent Part PATCH拒绝均映射到 HTTP adapter                                          |
+| doom-loop                              | raw current Tool read 的 first divergence 和 hidden Tool threshold测试已映射                                                       |
+| accounting/audit/fork/cold             | raw token、cost、RequestUsage、Stats和结构数据的保留决定明确                                                                       |
+| fallback与兼容路径                     | 新 alternate success path 为 0；fully hidden Compaction cutoff 和 raw event均有现存合同                                            |
+| 功能保持                               | 相关行为测试、Compaction/Revert/Cold回归和 package typecheck 已规划                                                                |
+| 性能保持                               | **未满足**：没有基准、阈值或其他可执行验收信号                                                                                     |
+| 400 行限制                             | `E <= 310`、`C >= 47`、总 implementation changed lines `<=398` 在计划层面可行，实施时仍须按实际 diff 重算                          |
+| Reverse traceability                   | 共享 projection、pair map、HTTP guard、adapter tombstone和 doom-loop filter均有 observed/contracted/reachable evidence             |
 
 #### Primary-path and fallback verdict
 
@@ -883,18 +890,18 @@ R4 的 root-cause、owner、primary path、fallback 和功能行为映射已经�
 
 #### Requirement and traceability coverage
 
-| 范围 | 审计结果 |
-| --- | --- |
+| 范围                      | 审计结果                                                                                             |
+| ------------------------- | ---------------------------------------------------------------------------------------------------- |
 | hidden producer inventory | 已覆盖 Revert、stale-turn、Reviewer retry、failed Compaction、plugin transform、public Part mutation |
-| visible pagination/limit | first divergence、owner、refill设计和行为测试已映射 |
-| Compaction boundary | completed、failed、partial-hidden、hidden Part、fully-hidden structural cutoff 已映射 |
-| Goal chronology | Message/Part projection和行为测试已映射 |
-| post-plugin Provider path | wire、breakdown、ratio learning、overflow和Compaction history共享 projection |
-| public HTTP visibility | hidden detail、Part过滤、hidden-parent PATCH拒绝已映射 |
-| stateful run adapter | **未满足**：hidden parent Message无法清理已有 subagent tab/detail |
-| 性能保持 | **未满足**：benchmark执行独立 SQL candidate，不执行修改后的生产 seam |
-| 400行限制 | 文件级计划仍可能在400行内；修复 B-02 后必须重新核算，不得删除已确认覆盖 |
-| 中文注释 | 计划承诺按实际 `E` 满足 `C >= max(1, ceil(E × 0.15))` |
+| visible pagination/limit  | first divergence、owner、refill设计和行为测试已映射                                                  |
+| Compaction boundary       | completed、failed、partial-hidden、hidden Part、fully-hidden structural cutoff 已映射                |
+| Goal chronology           | Message/Part projection和行为测试已映射                                                              |
+| post-plugin Provider path | wire、breakdown、ratio learning、overflow和Compaction history共享 projection                         |
+| public HTTP visibility    | hidden detail、Part过滤、hidden-parent PATCH拒绝已映射                                               |
+| stateful run adapter      | **未满足**：hidden parent Message无法清理已有 subagent tab/detail                                    |
+| 性能保持                  | **未满足**：benchmark执行独立 SQL candidate，不执行修改后的生产 seam                                 |
+| 400行限制                 | 文件级计划仍可能在400行内；修复 B-02 后必须重新核算，不得删除已确认覆盖                              |
+| 中文注释                  | 计划承诺按实际 `E` 满足 `C >= max(1, ceil(E × 0.15))`                                                |
 
 #### Primary-path and fallback verdict
 
@@ -916,7 +923,7 @@ No blocking findings.
 
 #### Non-blocking findings
 
-1. **Section 8 feedback-loop commands cannot report process success by exit code.**  The documented commands intentionally call `process.exit(1)` after a successful non-reproduction, so the verification section's “green/not reproducible” wording is ambiguous. The output assertions remain usable, but the implementation verification should state explicitly that these commands are judged by their output or revise the exit-code contract.
+1. **Section 8 feedback-loop commands cannot report process success by exit code.** The documented commands intentionally call `process.exit(1)` after a successful non-reproduction, so the verification section's “green/not reproducible” wording is ambiguous. The output assertions remain usable, but the implementation verification should state explicitly that these commands are judged by their output or revise the exit-code contract.
 2. **Revision R6 audit metadata was not yet recorded in the plan's audit table.** Section 22 recorded only R1–R5 while the current canonical revision was R6. This is an administrative traceability gap, not a behavioral defect; this verdict is copied and the table is updated now.
 3. **Several adapter checks remain source-inspection/typecheck verification rather than behavior-sensitive tests.** The plan explicitly documents this for TUI, GitHub, and Slack. Given the absence of injectable seams and the stated no-mock/line-budget constraints, this is acceptable, but the implementation audit must verify that each guard is placed before the first append-only side effect.
 
@@ -931,23 +938,23 @@ No blocking findings.
 
 #### Requirement and traceability coverage
 
-| Requirement area | Audit result |
-|---|---|
-| Original requirement preserved | The verbatim Chinese requirement is quoted without narrowing in §1. |
-| Hidden producer inventory | Undo/Revert, stale-turn repair, reviewer retry, failed Compaction, public Part mutation, plugin transformation, and hidden event updates are covered. |
-| Raw persistence and accounting | Raw Message/Part durability, event transport, token/cost/RequestUsage/Stats, fork, and cold facts are explicitly preserved. |
-| Visible page capacity | `MessageV2.page` is the owner; the plan moves visibility before bounded capacity and Part hydration, with refill behavior and tests. |
-| Compaction | Failed tails, partial-hidden pairs, hidden Parts, fully hidden structural-only pairs, persisted pre-read cutoff, and pure replay are all mapped to the Compaction owners and tests. |
-| Goal chronology | `MessageV2.chronology` owns Message/Part visibility before Goal classification; a real Goal behavior test is planned. |
-| Post-plugin prompt behavior | Provider payload, request snapshot, breakdown, token-history learning, overflow, and Compaction upload history share one post-transform visible projection. |
-| Event adapters | Stateful run reducers, subagent tabs, stream activity, ACP, GitHub, Slack, and TUI plan transitions are mapped; raw event publication remains unchanged. |
-| Public HTTP behavior | Direct hidden Message lookup, hidden Part filtering, and hidden-parent Part mutation rejection are mapped to the HTTP handler seam. |
-| Doom-loop | Hidden current Tool Parts are excluded before threshold evaluation. |
-| Function preservation | Existing accounting, structural recovery, raw event, search, summary-cache, and cold behavior are explicitly preserved. |
-| Performance preservation | `MessageV2.page`, `MessageV2.chronology`, and real hydration/refill paths are included in fixed-cohort p95 verification with an explicit threshold. |
-| Reverse traceability | Each proposed production concept has an invariant, evidence, owner, and reason existing logic cannot safely carry it. |
-| Scope and line budget | The plan sets a hard total of 399 changed implementation lines, retains a 400-line margin, forbids dropping confirmed coverage, and requires re-planning if the actual diff exceeds the limit. |
-| Chinese-comment feasibility | The plan commits to qualifying explanatory comments beside actual ownership and invariant boundaries, with implementation-time recomputation of `E` and `C`. |
+| Requirement area               | Audit result                                                                                                                                                                                   |
+| ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Original requirement preserved | The verbatim Chinese requirement is quoted without narrowing in §1.                                                                                                                            |
+| Hidden producer inventory      | Undo/Revert, stale-turn repair, reviewer retry, failed Compaction, public Part mutation, plugin transformation, and hidden event updates are covered.                                          |
+| Raw persistence and accounting | Raw Message/Part durability, event transport, token/cost/RequestUsage/Stats, fork, and cold facts are explicitly preserved.                                                                    |
+| Visible page capacity          | `MessageV2.page` is the owner; the plan moves visibility before bounded capacity and Part hydration, with refill behavior and tests.                                                           |
+| Compaction                     | Failed tails, partial-hidden pairs, hidden Parts, fully hidden structural-only pairs, persisted pre-read cutoff, and pure replay are all mapped to the Compaction owners and tests.            |
+| Goal chronology                | `MessageV2.chronology` owns Message/Part visibility before Goal classification; a real Goal behavior test is planned.                                                                          |
+| Post-plugin prompt behavior    | Provider payload, request snapshot, breakdown, token-history learning, overflow, and Compaction upload history share one post-transform visible projection.                                    |
+| Event adapters                 | Stateful run reducers, subagent tabs, stream activity, ACP, GitHub, Slack, and TUI plan transitions are mapped; raw event publication remains unchanged.                                       |
+| Public HTTP behavior           | Direct hidden Message lookup, hidden Part filtering, and hidden-parent Part mutation rejection are mapped to the HTTP handler seam.                                                            |
+| Doom-loop                      | Hidden current Tool Parts are excluded before threshold evaluation.                                                                                                                            |
+| Function preservation          | Existing accounting, structural recovery, raw event, search, summary-cache, and cold behavior are explicitly preserved.                                                                        |
+| Performance preservation       | `MessageV2.page`, `MessageV2.chronology`, and real hydration/refill paths are included in fixed-cohort p95 verification with an explicit threshold.                                            |
+| Reverse traceability           | Each proposed production concept has an invariant, evidence, owner, and reason existing logic cannot safely carry it.                                                                          |
+| Scope and line budget          | The plan sets a hard total of 399 changed implementation lines, retains a 400-line margin, forbids dropping confirmed coverage, and requires re-planning if the actual diff exceeds the limit. |
+| Chinese-comment feasibility    | The plan commits to qualifying explanatory comments beside actual ownership and invariant boundaries, with implementation-time recomputation of `E` and `C`.                                   |
 
 #### Primary-path and fallback verdict
 
@@ -1048,21 +1055,21 @@ Implementation diff: `331 additions + 69 deletions = 400 changed lines`. The unr
 
 ### Verification Commands and Results
 
-| Command (`packages/opencode` unless noted) | Final result |
-| --- | --- |
-| `bun test --timeout 60000 test/session/messages-pagination.test.ts` | `57 pass`, `0 fail`, `143 expect()` |
-| performance test, three consecutive isolated runs | each `1 pass`, `0 fail`; public page returned 301 rows and both thresholds passed |
-| `bun test --timeout 30000 test/session/message-v2.test.ts test/cli/run/session-data.test.ts test/cli/run/subagent-data.test.ts test/cli/run/stream.transport.test.ts test/acp/event-subscription.test.ts` | `102 pass`, `0 fail`, `202 expect()` |
-| `bun test --timeout 30000 test/session/compaction.test.ts` | `71 pass`, `0 fail`, `293 expect()` |
-| `bun test --timeout 30000 test/session/revert-compact.test.ts` | `16 pass`, `0 fail`, `83 expect()` |
-| `bun test --timeout 30000 test/session/prompt.test.ts -t "invalidates file-reference proof"` | `1 pass`, `0 fail`; Provider wire, persisted input snapshot and no overflow Compaction asserted |
-| `bun test --timeout 30000 test/session/prompt.test.ts -t "late technical Message"` | `1 pass`, `0 fail`; real hidden chronology/Goal control path |
-| `bun test --timeout 30000 test/session/processor-effect.test.ts -t "doom_loop"` | `4 pass`, `0 fail`, `18 expect()` |
-| `bun test --timeout 30000 test/server/httpapi-sdk.test.ts -t "matches generated SDK session message and part routes"` | `1 pass`, `0 fail`, `3 expect()` |
-| `bun test --timeout 30000 test/storage/cold.test.ts` | `32 pass`, `0 fail`, `181 expect()` |
-| `bun typecheck` | pass after the authorized generated-dependency identity repair |
-| `bun typecheck` in `packages/slack` | pass |
-| `git diff --check` on implementation-owned files and this plan | pass |
+| Command (`packages/opencode` unless noted)                                                                                                                                                                | Final result                                                                                    |
+| --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| `bun test --timeout 60000 test/session/messages-pagination.test.ts`                                                                                                                                       | `57 pass`, `0 fail`, `143 expect()`                                                             |
+| performance test, three consecutive isolated runs                                                                                                                                                         | each `1 pass`, `0 fail`; public page returned 301 rows and both thresholds passed               |
+| `bun test --timeout 30000 test/session/message-v2.test.ts test/cli/run/session-data.test.ts test/cli/run/subagent-data.test.ts test/cli/run/stream.transport.test.ts test/acp/event-subscription.test.ts` | `102 pass`, `0 fail`, `202 expect()`                                                            |
+| `bun test --timeout 30000 test/session/compaction.test.ts`                                                                                                                                                | `71 pass`, `0 fail`, `293 expect()`                                                             |
+| `bun test --timeout 30000 test/session/revert-compact.test.ts`                                                                                                                                            | `16 pass`, `0 fail`, `83 expect()`                                                              |
+| `bun test --timeout 30000 test/session/prompt.test.ts -t "invalidates file-reference proof"`                                                                                                              | `1 pass`, `0 fail`; Provider wire, persisted input snapshot and no overflow Compaction asserted |
+| `bun test --timeout 30000 test/session/prompt.test.ts -t "late technical Message"`                                                                                                                        | `1 pass`, `0 fail`; real hidden chronology/Goal control path                                    |
+| `bun test --timeout 30000 test/session/processor-effect.test.ts -t "doom_loop"`                                                                                                                           | `4 pass`, `0 fail`, `18 expect()`                                                               |
+| `bun test --timeout 30000 test/server/httpapi-sdk.test.ts -t "matches generated SDK session message and part routes"`                                                                                     | `1 pass`, `0 fail`, `3 expect()`                                                                |
+| `bun test --timeout 30000 test/storage/cold.test.ts`                                                                                                                                                      | `32 pass`, `0 fail`, `181 expect()`                                                             |
+| `bun typecheck`                                                                                                                                                                                           | pass after the authorized generated-dependency identity repair                                  |
+| `bun typecheck` in `packages/slack`                                                                                                                                                                       | pass                                                                                            |
+| `git diff --check` on implementation-owned files and this plan                                                                                                                                            | pass                                                                                            |
 
 The broad Prompt `-t "Goal"` command still times out in two pre-existing 20-second long-flow tests: `legacy compaction marker without lineage does not create a Goal turn` and `only a later real user Goal turn authorizes model terminal recovery`. The implementation-owned plugin projection and hidden chronology Goal tests pass independently. No other required command remains red.
 
@@ -1072,26 +1079,26 @@ The four original loops were re-run after implementation. The failed-tail loop e
 
 ### Actual Secondary and Replacement Path Inventory
 
-| Path | Classification | Implementation result |
-| --- | --- | --- |
-| visible Message page/chronology/replay | primary | repaired at MessageV2 owner |
-| `includeHidden: true` raw page/stream | existing compatibility | preserved |
-| fully hidden successful Compaction structural cutoff | supported-domain branch | preserved with marker/summary parity proof |
-| raw SyncEvent hidden payload | contracted pass-through | unchanged |
-| accounting/Stats/fork/raw audit | contracted pass-through | unchanged |
-| run/ACP/GitHub/TUI/Slack hidden tombstone guards | primary adapter boundaries | append-only side effects suppressed without alternate success paths |
-| public HTTP hidden Message/parent Part | public adapter contract | hidden parent rejected before mutation; visible parent still accepts hidden Part tombstone |
+| Path                                                 | Classification             | Implementation result                                                                      |
+| ---------------------------------------------------- | -------------------------- | ------------------------------------------------------------------------------------------ |
+| visible Message page/chronology/replay               | primary                    | repaired at MessageV2 owner                                                                |
+| `includeHidden: true` raw page/stream                | existing compatibility     | preserved                                                                                  |
+| fully hidden successful Compaction structural cutoff | supported-domain branch    | preserved with marker/summary parity proof                                                 |
+| raw SyncEvent hidden payload                         | contracted pass-through    | unchanged                                                                                  |
+| accounting/Stats/fork/raw audit                      | contracted pass-through    | unchanged                                                                                  |
+| run/ACP/GitHub/TUI/Slack hidden tombstone guards     | primary adapter boundaries | append-only side effects suppressed without alternate success paths                        |
+| public HTTP hidden Message/parent Part               | public adapter contract    | hidden parent rejected before mutation; visible parent still accepts hidden Part tombstone |
 
 New alternate success paths: `0`. Diagnostic decision surface: `0%`. No DB repair, retry, fallback, feature flag, second parser, second data source, generated SDK change, temporary script or backup artifact was added.
 
 ### Chinese Comment Calculation
 
-| Metric | Actual | Exclusions and evidence |
-| --- | --- | --- |
-| Effective changed code lines `E` | 279 | added lines excluding blank, comment-only and import-only lines across implementation-owned files |
-| Qualifying Chinese comment lines `C` | 42 | projection ownership, physical/public cursor, pre-thaw, Compaction parity, raw tombstones and public parent guards |
-| Ratio `C / E` | 15.05% | `42 / 279` |
-| Required minimum `C` | 42 | `ceil(279 * 0.15)`; gate passes |
+| Metric                               | Actual | Exclusions and evidence                                                                                            |
+| ------------------------------------ | ------ | ------------------------------------------------------------------------------------------------------------------ |
+| Effective changed code lines `E`     | 279    | added lines excluding blank, comment-only and import-only lines across implementation-owned files                  |
+| Qualifying Chinese comment lines `C` | 42     | projection ownership, physical/public cursor, pre-thaw, Compaction parity, raw tombstones and public parent guards |
+| Ratio `C / E`                        | 15.05% | `42 / 279`                                                                                                         |
+| Required minimum `C`                 | 42     | `ceil(279 * 0.15)`; gate passes                                                                                    |
 
 ### Remaining Risks
 
@@ -1101,11 +1108,11 @@ New alternate success paths: `0`. Diagnostic decision surface: `0%`. No DB repai
 
 ## 24. Implementation Audit Record
 
-| Round | Plan revision | Full original scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | R6 | yes | B-01, B-02, B-03, B-04 | 4 | BLOCK | `ses_064e5e7ecffe4FWCImSBrd6qpb` |
-| 2 | R6 | yes | B-01 through B-07 | 0 recorded | BLOCK; primary path PASS | `ses_064aa12b1ffeP33A1uWodcszlx` |
-| 3 | R6 | yes | B-01 through B-07 | 3 | BLOCK | `ses_062ec0640ffellZmjzxviBtxmc` |
+| Round | Plan revision | Full original scope? | Blocking findings      | Non-blocking findings | Result                   | Invocation reference             |
+| ----- | ------------- | -------------------- | ---------------------- | --------------------- | ------------------------ | -------------------------------- |
+| 1     | R6            | yes                  | B-01, B-02, B-03, B-04 | 4                     | BLOCK                    | `ses_064e5e7ecffe4FWCImSBrd6qpb` |
+| 2     | R6            | yes                  | B-01 through B-07      | 0 recorded            | BLOCK; primary path PASS | `ses_064aa12b1ffeP33A1uWodcszlx` |
+| 3     | R6            | yes                  | B-01 through B-07      | 3                     | BLOCK                    | `ses_062ec0640ffellZmjzxviBtxmc` |
 
 ### Round 1 Verbatim Classification and Verdict
 

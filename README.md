@@ -46,6 +46,7 @@
 > 这是 OpenCode 的 `dev-smark` 增强分支（当前版本 `1.19.17-smark`），基于上游 `dev` 分支，重点打磨 TUI 交互、会话管理、Token 统计、Windows 兼容、VSCode 集成、网络代理与安装体验。
 
 <!-- TODO: 替换为实际的 TUI 主界面截图 -->
+
 [![OpenCode Terminal UI](packages/web/src/assets/lander/screenshot.png)](https://opencode.ai)
 
 ---
@@ -118,13 +119,13 @@ XDG_BIN_DIR=$HOME/.local/bin curl -fsSL https://opencode.ai/install | bash
 
 OpenCode 也提供桌面版应用（BETA）。可直接从 [发布页](https://github.com/anomalyco/opencode/releases) 或 [opencode.ai/download](https://opencode.ai/download) 下载。
 
-| 平台                  | 下载文件                           |
-| --------------------- | ---------------------------------- |
-| macOS (Apple Silicon) | `opencode-desktop-mac-arm64.dmg`   |
-| macOS (Intel)         | `opencode-desktop-mac-x64.dmg`     |
-| Windows (x64)         | `opencode-desktop-windows-x64.exe` |
+| 平台                  | 下载文件                             |
+| --------------------- | ------------------------------------ |
+| macOS (Apple Silicon) | `opencode-desktop-mac-arm64.dmg`     |
+| macOS (Intel)         | `opencode-desktop-mac-x64.dmg`       |
+| Windows (x64)         | `opencode-desktop-windows-x64.exe`   |
 | Windows (arm64)       | `opencode-desktop-windows-arm64.exe` |
-| Linux                 | `.deb`、`.rpm` 或 `.AppImage`      |
+| Linux                 | `.deb`、`.rpm` 或 `.AppImage`        |
 
 ```bash
 # macOS (Homebrew Cask)

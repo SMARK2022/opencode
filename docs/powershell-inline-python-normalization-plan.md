@@ -99,16 +99,16 @@ python -c 'print("hello")'
 
 以下方案不得在实现中恢复：
 
-| 方案 | 废弃原因 |
-|---|---|
-| stdin + Python bootstrap | 接管 Python 启动路径，改变 traceback/audit hook/compile 行为并增加 stdin 生命周期和 EPIPE 风险；不符合用户最新约束 |
-| 临时 `.py` 文件 | 改变 `__file__`、`sys.argv[0]`，引入清理、取消和并发残留问题 |
-| 环境变量传源码 | PowerShell 5.1 native argv 仍会吞引号，长源码还会触发 Windows 长度限制 |
-| here-string 转 stdin | 仍属于源码转接，并改变 stdin EOF/交互语义 |
-| base64/hex + `exec` | 增加 Python wrapper frame、globals/compile/audit 差异，不是纯命令格式化 |
-| 预启动 Python 做 `compile()` | 无法可靠确定 conda/venv/launcher/flags，增加一次启动和环境漂移 |
-| 完整 Bash 双引号 decoder | 历史上会改变大量合法字符串 AST；比修复观察到的 quote transport 问题更宽 |
-| 发现问题后拒绝命令 | 与自适应要求冲突；模糊命令必须保持原样执行 |
+| 方案                         | 废弃原因                                                                                                           |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| stdin + Python bootstrap     | 接管 Python 启动路径，改变 traceback/audit hook/compile 行为并增加 stdin 生命周期和 EPIPE 风险；不符合用户最新约束 |
+| 临时 `.py` 文件              | 改变 `__file__`、`sys.argv[0]`，引入清理、取消和并发残留问题                                                       |
+| 环境变量传源码               | PowerShell 5.1 native argv 仍会吞引号，长源码还会触发 Windows 长度限制                                             |
+| here-string 转 stdin         | 仍属于源码转接，并改变 stdin EOF/交互语义                                                                          |
+| base64/hex + `exec`          | 增加 Python wrapper frame、globals/compile/audit 差异，不是纯命令格式化                                            |
+| 预启动 Python 做 `compile()` | 无法可靠确定 conda/venv/launcher/flags，增加一次启动和环境漂移                                                     |
+| 完整 Bash 双引号 decoder     | 历史上会改变大量合法字符串 AST；比修复观察到的 quote transport 问题更宽                                            |
+| 发现问题后拒绝命令           | 与自适应要求冲突；模糊命令必须保持原样执行                                                                         |
 
 ## 4. 设计摘要
 
@@ -353,14 +353,14 @@ function shellEvidenceRisk(command: string, metadata: Readonly<Record<string, un
 
 从本文件开始到完整实现最多涉及以下 6 个文件，不得额外创建 helper、config 或 snapshot 文件：
 
-| 文件 | 结果 | 实际 diff（相对 HEAD） |
-|---|---|---:|
-| `docs/powershell-inline-python-normalization-plan.md` | 本规范与审计记录 | +约 515 行 |
-| `docs/harness-improvement-plan.md` | 旧 P2-5 改为引用本规范 | +1/-1 |
-| `packages/opencode/src/tool/shell.ts` | 私有 scanner/formatter、shared evidence、executeCommand | +215/-3 |
-| `packages/opencode/src/permission/precheck.ts` | inline source max-risk helper及两个入口复用 | +25/-3 |
-| `packages/opencode/test/tool/shell.test.ts` | 两代 PowerShell 真实行为与 fallback 测试 | +358 |
-| `packages/opencode/test/permission/precheck.test.ts` | 单调风险、双 gate、畸形附加证据测试 | +82 |
+| 文件                                                  | 结果                                                    | 实际 diff（相对 HEAD） |
+| ----------------------------------------------------- | ------------------------------------------------------- | ---------------------: |
+| `docs/powershell-inline-python-normalization-plan.md` | 本规范与审计记录                                        |             +约 515 行 |
+| `docs/harness-improvement-plan.md`                    | 旧 P2-5 改为引用本规范                                  |                  +1/-1 |
+| `packages/opencode/src/tool/shell.ts`                 | 私有 scanner/formatter、shared evidence、executeCommand |                +215/-3 |
+| `packages/opencode/src/permission/precheck.ts`        | inline source max-risk helper及两个入口复用             |                 +25/-3 |
+| `packages/opencode/test/tool/shell.test.ts`           | 两代 PowerShell 真实行为与 fallback 测试                |                   +358 |
+| `packages/opencode/test/permission/precheck.test.ts`  | 单调风险、双 gate、畸形附加证据测试                     |                    +82 |
 
 最终结果：
 
@@ -469,14 +469,14 @@ git status --short
 
 ## 13. 已知风险与取舍
 
-| 风险 | 处理 |
-|---|---|
-| `\"` 修复改变 20 条 raw-valid 历史 AST | raw 是未做 Bash quote 解码的中间文本；剩余风险是有意混用 PowerShell 反斜杠语义的输入。用字符串/JSON/regex/SQL 代表测试锁定，且不做更宽 `\\`/`\$` 解码 |
-| 一条历史 payload 仍需完整 Bash `\\` 解码 | 有意不修；宁可保留一次 Python SyntaxError，也不扩大合法字符串改写面 |
-| PowerShell Legacy binder 边界复杂 | 强制统一 Legacy 规则，空源码/尾随反斜杠/超长命令原样 fallback，并用两代 shell 做 code-point 对照 |
-| normalization 让以前失败的危险 Python 真正执行 | 原命令 + inline source max-risk，同时进入 external_directory 和 bash gate |
-| `conda run` 选项面较宽 | 只支持显式白名单并完整消费，原样保留 prefix；未知、动态或引号化结构 fallback，不猜测环境 |
-| 旧 P2-5 文档仍主张禁止 python -c | 实施时在允许的第 2 个文档文件中改为引用本规范 |
+| 风险                                           | 处理                                                                                                                                                  |
+| ---------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `\"` 修复改变 20 条 raw-valid 历史 AST         | raw 是未做 Bash quote 解码的中间文本；剩余风险是有意混用 PowerShell 反斜杠语义的输入。用字符串/JSON/regex/SQL 代表测试锁定，且不做更宽 `\\`/`\$` 解码 |
+| 一条历史 payload 仍需完整 Bash `\\` 解码       | 有意不修；宁可保留一次 Python SyntaxError，也不扩大合法字符串改写面                                                                                   |
+| PowerShell Legacy binder 边界复杂              | 强制统一 Legacy 规则，空源码/尾随反斜杠/超长命令原样 fallback，并用两代 shell 做 code-point 对照                                                      |
+| normalization 让以前失败的危险 Python 真正执行 | 原命令 + inline source max-risk，同时进入 external_directory 和 bash gate                                                                             |
+| `conda run` 选项面较宽                         | 只支持显式白名单并完整消费，原样保留 prefix；未知、动态或引号化结构 fallback，不猜测环境                                                              |
+| 旧 P2-5 文档仍主张禁止 python -c               | 实施时在允许的第 2 个文档文件中改为引用本规范                                                                                                         |
 
 ## 14. Subagent 审计合同
 
@@ -504,12 +504,12 @@ subagent 必须以本文件为输入，并重新检查真实源码，不得只�
 
 ## 15. 审计记录
 
-| 轮次 | 方案 | 结果 |
-|---|---|---|
-| 1 | stdin binary framing + Python bootstrap | subagent 提出 globals、warning policy、双 permission gate、畸形 evidence 四项阻塞；随后用户明确否定完整 Python 转接，方案整体废弃 |
-| 2 | 修订 stdin bootstrap | 审计任务运行中被用户中止，未形成可采信结论 |
-| 3 | 本文件的纯命令/argv 规范化 | subagent：无阻塞性意见，放行；7 项非阻塞澄清已写回规范 |
-| 4 | 第 3 轮建议写回后的最终文档一致性确认 | subagent：1 项阻塞——`Select-Object` 多参数未覆盖且未与统计对齐；已验证历史 109 条均为单参数，规范已明确排除多参数并补充 whitespace 定义 |
-| 5 | 阻塞解决确认 | subagent：无阻塞性意见，放行；N1 source-content sanity check 已采纳并写入 §5.3 |
-| 6 | 全库历史 SyntaxError/ParserError 无执行回放 | 536/536 条经真实 ShellTool 预执行链并在 permission gate 中断；发现并修复 compound quote 吸收、合法 Python 分号误拒与 conda run 缺口。独立复核后又收紧动态 conda/backtick 边界并补齐 attached flags。最终 97 条转译均通过 PowerShell 7/5.1 AST，94 条 Python compile 成功，3 条为原始模型源码错误 |
-| 7 | 实现独立复核（3 轮上限） | 第 1-2 轮的动态 conda、flags、backtick 和 operator-in-value 阻塞均已修复；第 3 轮发现 PowerShell `@args` splatting 未拒绝，已在共享 static validator 中修复并补测试。按实现复核三轮上限不再追加第 4 轮，因此该最后一项只有本地主测试证据，没有新的 subagent 放行结论 |
+| 轮次 | 方案                                        | 结果                                                                                                                                                                                                                                                                                             |
+| ---- | ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 1    | stdin binary framing + Python bootstrap     | subagent 提出 globals、warning policy、双 permission gate、畸形 evidence 四项阻塞；随后用户明确否定完整 Python 转接，方案整体废弃                                                                                                                                                                |
+| 2    | 修订 stdin bootstrap                        | 审计任务运行中被用户中止，未形成可采信结论                                                                                                                                                                                                                                                       |
+| 3    | 本文件的纯命令/argv 规范化                  | subagent：无阻塞性意见，放行；7 项非阻塞澄清已写回规范                                                                                                                                                                                                                                           |
+| 4    | 第 3 轮建议写回后的最终文档一致性确认       | subagent：1 项阻塞——`Select-Object` 多参数未覆盖且未与统计对齐；已验证历史 109 条均为单参数，规范已明确排除多参数并补充 whitespace 定义                                                                                                                                                          |
+| 5    | 阻塞解决确认                                | subagent：无阻塞性意见，放行；N1 source-content sanity check 已采纳并写入 §5.3                                                                                                                                                                                                                   |
+| 6    | 全库历史 SyntaxError/ParserError 无执行回放 | 536/536 条经真实 ShellTool 预执行链并在 permission gate 中断；发现并修复 compound quote 吸收、合法 Python 分号误拒与 conda run 缺口。独立复核后又收紧动态 conda/backtick 边界并补齐 attached flags。最终 97 条转译均通过 PowerShell 7/5.1 AST，94 条 Python compile 成功，3 条为原始模型源码错误 |
+| 7    | 实现独立复核（3 轮上限）                    | 第 1-2 轮的动态 conda、flags、backtick 和 operator-in-value 阻塞均已修复；第 3 轮发现 PowerShell `@args` splatting 未拒绝，已在共享 static validator 中修复并补测试。按实现复核三轮上限不再追加第 4 轮，因此该最后一项只有本地主测试证据，没有新的 subagent 放行结论                             |

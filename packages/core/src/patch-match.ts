@@ -275,7 +275,6 @@ export function formatAmbiguityHint(
   return `\n\nMatches at ${listing}.${advice}`
 }
 
-
 // #533：Patch 与 Edit 共用一个 PI normalization contract，避免标点、空格或 NFKC 集合静默分叉。
 function normalizeLineForFuzzy(line: string) {
   return normalizeForMatch(line)
@@ -357,7 +356,12 @@ function hasInternalGap(gaps: number[], start: number, end: number) {
 
 // #533：context 是导航下界，不是 old block 候选：保留 first eligible whole-line，后备唯一 literal substring。
 // context 不做 PI normalize，否则仅用于导航的宽松文本会意外改变 old block 的匹配域。
-export function locateContext(lines: ReadonlyArray<string>, pattern: ReadonlyArray<string>, cursorOffset: number, terminated = false): ExactResult {
+export function locateContext(
+  lines: ReadonlyArray<string>,
+  pattern: ReadonlyArray<string>,
+  cursorOffset: number,
+  terminated = false,
+): ExactResult {
   if (pattern.length === 0) return { type: "not-found" }
   const starts: number[] = []
   let offset = 0
@@ -449,7 +453,7 @@ function measureNormalized(text: string, deadline: number) {
   let pointCount = 0
   let lineCount = 1
   let nextCheck = 0
-  for (let offset = 0; offset < text.length;) {
+  for (let offset = 0; offset < text.length; ) {
     if (offset >= nextCheck) {
       if (expired(deadline)) return undefined
       nextCheck = offset + 4096
@@ -477,7 +481,7 @@ function normalizePattern(text: string, deadline: number) {
   // pattern 不需要 raw boundary；只保留距离计算所需的数据，减小每次失败诊断的固定工作集。
   let pointIndex = 0
   let nextCheck = 0
-  for (let offset = 0; offset < text.length;) {
+  for (let offset = 0; offset < text.length; ) {
     if (offset >= nextCheck) {
       if (expired(deadline)) return undefined
       nextCheck = offset + 4096
@@ -509,7 +513,7 @@ function normalizeContent(text: string, deadline: number): NormalizedText | unde
   let lineIndex = 0
   let nextCheck = 0
   lineStarts[0] = 0
-  for (let offset = 0; offset < text.length;) {
+  for (let offset = 0; offset < text.length; ) {
     if (offset >= nextCheck) {
       if (expired(deadline)) return undefined
       nextCheck = offset + 4096
@@ -861,7 +865,8 @@ export function closestWindow(content: string, expected: string): ClosestWindow 
   let excerpt: string
   if (isEquivalentCandidate) {
     // normalized 零距离只提示当前位置存在原文，不回显 requested；后者已经完整存在于 Tool input。
-    excerpt = "Exact requested text exists at this location in the original file but is unavailable to the current patch step."
+    excerpt =
+      "Exact requested text exists at this location in the original file but is unavailable to the current patch step."
   } else if (candidate.length === expectedLines.length) {
     // raw UTF-16 length 是 code-point 数的保守上界；超限必须抑制 actual，而不是改用另一种 renderer。
     if (expected.length + renderedText.length > MATCH_RENDER_DIFF_POINTS) return undefined

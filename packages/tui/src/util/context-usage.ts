@@ -30,7 +30,8 @@ function truthy(key: string) {
 function enabledByExperimental(key: string, inheritExperimental = true) {
   const provider = ConfigProvider.fromEnv()
   // withDefault 只处理缺失值；实际 Config.boolean 保留 yes/on/1 等编码及非法值失败，不自行复制真值表。
-  const experimental = inheritExperimental && Effect.runSync(boolean("OPENCODE_EXPERIMENTAL").pipe(withDefault(false)).parse(provider))
+  const experimental =
+    inheritExperimental && Effect.runSync(boolean("OPENCODE_EXPERIMENTAL").pipe(withDefault(false)).parse(provider))
   return Effect.runSync(boolean(key).pipe(withDefault(experimental)).parse(provider))
 }
 
@@ -127,7 +128,13 @@ Focus text output on:
 If you can say it in one sentence, do not use three. Do not narrate each step or list every file you read. This does not apply to code or tool calls.`
 
 function staticSections() {
-  return [actionCareSection, sharedWorktreeSection, verificationSection, contextContinuitySection, outputEfficiencySection]
+  return [
+    actionCareSection,
+    sharedWorktreeSection,
+    verificationSection,
+    contextContinuitySection,
+    outputEfficiencySection,
+  ]
 }
 
 function escapeHtml(value: string) {
@@ -141,10 +148,7 @@ function escapeHtml(value: string) {
 }
 
 // 技能公告与 skill 工具描述使用不同格式，token 估算必须计入实际 XML 标签而非只加名称。
-function skillFmt(
-  list: Array<{ name: string; description?: string; location: string }>,
-  opts: { verbose: boolean },
-) {
+function skillFmt(list: Array<{ name: string; description?: string; location: string }>, opts: { verbose: boolean }) {
   const described = list.filter((skill) => skill.description !== undefined)
   if (described.length === 0) return "No skills are currently available."
   if (opts.verbose) {
@@ -307,26 +311,56 @@ function estimate(text: string, ratio = 4) {
   return Math.max(0, Math.round(text.length / ratio))
 }
 
-function latestInputEstimate(messages: WithParts[], raw: WithParts[], model: { providerID: string; modelID: string }): Partial<NonNullable<AssistantMessage["inputEstimate"]>> {
+function latestInputEstimate(
+  messages: WithParts[],
+  raw: WithParts[],
+  model: { providerID: string; modelID: string },
+): Partial<NonNullable<AssistantMessage["inputEstimate"]>> {
   // 仅无请求投影的旧 V1 数据扫描确认点；当前请求缺失估算不等于可以借用旧轮次。
   // 已有 inputChars 的助手只取确认 parts，不能再叠加同一助手旧 carrier 的相同样本。
-  const samples = raw.toReversed().flatMap(message => {
+  const samples = raw.toReversed().flatMap((message) => {
     const info = message.info
     if (info.role !== "assistant" || info.providerID !== model.providerID || info.modelID !== model.modelID) return []
-    const parts = message.parts.toReversed().flatMap(part => part.type === "step-finish" && part.inputChars !== undefined
-      ? [{ bodyChars: part.inputChars, inputBreakdown: part.inputBreakdown, input: part.tokens.input + part.tokens.cache.read + part.tokens.cache.write }] : [])
-    return parts.length > 0 ? parts : info.inputEstimate?.confirmed
-      ? [{ bodyChars: info.inputEstimate.bodyChars, inputBreakdown: info.inputEstimate.inputBreakdown, input: info.tokens.input + info.tokens.cache.read + info.tokens.cache.write }] : []
+    const parts = message.parts.toReversed().flatMap((part) =>
+      part.type === "step-finish" && part.inputChars !== undefined
+        ? [
+            {
+              bodyChars: part.inputChars,
+              inputBreakdown: part.inputBreakdown,
+              input: part.tokens.input + part.tokens.cache.read + part.tokens.cache.write,
+            },
+          ]
+        : [],
+    )
+    return parts.length > 0
+      ? parts
+      : info.inputEstimate?.confirmed
+        ? [
+            {
+              bodyChars: info.inputEstimate.bodyChars,
+              inputBreakdown: info.inputEstimate.inputBreakdown,
+              input: info.tokens.input + info.tokens.cache.read + info.tokens.cache.write,
+            },
+          ]
+        : []
   })
   for (const message of messages.toReversed()) {
     const info = message.info
     if (info.role !== "assistant" || info.providerID !== model.providerID || info.modelID !== model.modelID) continue
-    if (info.inputEstimate) return { ...info.inputEstimate, charsPerToken: info.inputEstimate.charsPerToken ?? Token.charsPerTokenFromHistory(samples) }
-    const part = message.parts.findLast(part => part.type === "step-finish" && part.inputBreakdown !== undefined)
+    if (info.inputEstimate)
+      return {
+        ...info.inputEstimate,
+        charsPerToken: info.inputEstimate.charsPerToken ?? Token.charsPerTokenFromHistory(samples),
+      }
+    const part = message.parts.findLast((part) => part.type === "step-finish" && part.inputBreakdown !== undefined)
     if (part?.type !== "step-finish") continue
-    return { input: part.tokens.input + part.tokens.cache.read + part.tokens.cache.write,
-      bodyChars: part.inputChars ?? 0, confirmed: true, inputBreakdown: part.inputBreakdown,
-      charsPerToken: Token.charsPerTokenFromHistory(samples) }
+    return {
+      input: part.tokens.input + part.tokens.cache.read + part.tokens.cache.write,
+      bodyChars: part.inputChars ?? 0,
+      confirmed: true,
+      inputBreakdown: part.inputBreakdown,
+      charsPerToken: Token.charsPerTokenFromHistory(samples),
+    }
   }
   return { charsPerToken: Token.charsPerTokenFromHistory(samples) }
 }
@@ -728,17 +762,32 @@ async function gatherSkills(input: ComputeContextDataInput) {
 }
 
 // 两份 Task 参数都是手工运输的完整 JSON；字段说明也参与字符估算，不能当作自动生成资产排除。
-export function resolveToolDescriptions(paths: ContextUsagePaths, background = enabledByExperimental("OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS")) {
+export function resolveToolDescriptions(
+  paths: ContextUsagePaths,
+  background = enabledByExperimental("OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS"),
+) {
   return Object.entries(EMBEDDED_TOOL_CATALOG).map(([name, entry]) => {
     // TaskTool 默认广告 BaseParameters；后台开关开启才同时广告完整参数与后台运行说明。
     const parameters = name === "task" && !background ? EMBEDDED_TOOL_CATALOG.task.baseParameters : entry.parameters
     // V1 description 已从 Shell.guidance 消费共享 Git 文本；目录估算使用同一资产，旧 catalog 不再复制政策。
-    const description = name === "bash" ? [GIT_SAFETY, SHELL_DESCRIPTION].join("\n\n") : name === "task"
-      ? [TaskPrompt.description, ...(background ? [EMBEDDED_TOOL_CATALOG.task.backgroundDescription] : [])].join("\n\n")
-      : entry.description
+    const description =
+      name === "bash"
+        ? [GIT_SAFETY, SHELL_DESCRIPTION].join("\n\n")
+        : name === "task"
+          ? [TaskPrompt.description, ...(background ? [EMBEDDED_TOOL_CATALOG.task.backgroundDescription] : [])].join(
+              "\n\n",
+            )
+          : entry.description
     // 序列化必须保留 optional/required/default 与嵌套字段；这里只选择 owner 资产，不重建 Schema。
     // 参数文档不做 shell 占位符替换；字段说明中的特殊字符属于契约，不能在渲染时修改。
-    return { name, text: [`Tool: ${name}`, resolveTemplateVars(description, paths), `Parameters: ${JSON.stringify(parameters)}`].join("\n") }
+    return {
+      name,
+      text: [
+        `Tool: ${name}`,
+        resolveTemplateVars(description, paths),
+        `Parameters: ${JSON.stringify(parameters)}`,
+      ].join("\n"),
+    }
   })
 }
 
@@ -747,65 +796,96 @@ function resolveTemplateVars(text: string, paths: ContextUsagePaths): string {
   if (!text.includes("${") && !text.includes("{{year}}")) return text
   // 已配置 shell 优先于环境变量，路径末尾的 .exe 不影响 Windows 语法选择。
   const shell = paths.shell ?? process.env.SHELL ?? (process.platform === "win32" ? "powershell" : "bash")
-  const shellName = path.basename(shell.replaceAll("\\", "/")).toLowerCase().replace(/\.exe$/, "")
+  const shellName = path
+    .basename(shell.replaceAll("\\", "/"))
+    .toLowerCase()
+    .replace(/\.exe$/, "")
   // 5.1 不支持链式运算符；7+ 与 cmd 使用各自的条件执行语法。
-  const chain = shellName === "powershell"
-    ? "If commands depend on each other, do NOT use '&&' or '||'. Use `cmd1; if ($?) { cmd2 }`."
-    : shellName === "pwsh"
-      ? "If commands depend on each other, use `&&` when the second command should only run after the first succeeds. Use `;` only for unconditional sequencing."
-      : shellName === "cmd"
-        ? "If commands depend on each other, use `&&` for conditional sequencing in cmd.exe."
-        : "If commands depend on each other, use a single shell call with '&&' to chain them together."
+  const chain =
+    shellName === "powershell"
+      ? "If commands depend on each other, do NOT use '&&' or '||'. Use `cmd1; if ($?) { cmd2 }`."
+      : shellName === "pwsh"
+        ? "If commands depend on each other, use `&&` when the second command should only run after the first succeeds. Use `;` only for unconditional sequencing."
+        : shellName === "cmd"
+          ? "If commands depend on each other, use `&&` for conditional sequencing in cmd.exe."
+          : "If commands depend on each other, use a single shell call with '&&' to chain them together."
   // Windows 文件操作提示必须跟随 shell，而非统一声称使用 PowerShell。
-  const shellGuidance = process.platform !== "win32" ? "" : shellName === "powershell" ? [
-    "PowerShell notes:",
-    "- This shell is Windows PowerShell 5.1 unless configured otherwise.",
-    "- Do NOT use Unix utilities such as tail, head, sed, awk, or grep.",
-    "- Use dedicated tools for file operations: read, grep, glob, edit, write.",
-    "- If shell text processing is truly required, use Get-Content -Tail, Select-String, Get-ChildItem, Test-Path, and $null.",
-    "- Do NOT use /dev/null. Use $null.",
-    "- Do NOT use && or ||. Use `A; if ($?) { B }` when B depends on A succeeding.",
-    "- Read environment variables with `$env:NAME`, not `export NAME=...`.",
-  ].join("\n") : shellName === "pwsh" ? [
-    "PowerShell notes:",
-    "- This shell is PowerShell 7+.",
-    "- Bash-like && and || are supported, but Unix utilities such as tail/head/sed/awk/grep may still be unavailable.",
-    "- Use dedicated tools for file operations: read, grep, glob, edit, write.",
-    "- If shell text processing is truly required, use Get-Content -Tail, Select-String, Get-ChildItem, Test-Path, and $null.",
-    "- Read environment variables with `$env:NAME`, not `export NAME=...`.",
-  ].join("\n") : shellName === "cmd" ? [
-    "Windows cmd notes:",
-    "- Use cmd.exe syntax, not Bash or PowerShell syntax.",
-    "- Use `dir` for directory listing and `type` for simple file output.",
-    "- Do NOT use Unix utilities such as ls, tail, head, sed, awk, or grep.",
-    "- Use dedicated tools for file operations: read, grep, glob, edit, write.",
-    "- Use `NUL` for the null device, not `/dev/null`.",
-  ].join("\n") : "Windows shell notes: prefer dedicated OpenCode tools for file operations."
+  const shellGuidance =
+    process.platform !== "win32"
+      ? ""
+      : shellName === "powershell"
+        ? [
+            "PowerShell notes:",
+            "- This shell is Windows PowerShell 5.1 unless configured otherwise.",
+            "- Do NOT use Unix utilities such as tail, head, sed, awk, or grep.",
+            "- Use dedicated tools for file operations: read, grep, glob, edit, write.",
+            "- If shell text processing is truly required, use Get-Content -Tail, Select-String, Get-ChildItem, Test-Path, and $null.",
+            "- Do NOT use /dev/null. Use $null.",
+            "- Do NOT use && or ||. Use `A; if ($?) { B }` when B depends on A succeeding.",
+            "- Read environment variables with `$env:NAME`, not `export NAME=...`.",
+          ].join("\n")
+        : shellName === "pwsh"
+          ? [
+              "PowerShell notes:",
+              "- This shell is PowerShell 7+.",
+              "- Bash-like && and || are supported, but Unix utilities such as tail/head/sed/awk/grep may still be unavailable.",
+              "- Use dedicated tools for file operations: read, grep, glob, edit, write.",
+              "- If shell text processing is truly required, use Get-Content -Tail, Select-String, Get-ChildItem, Test-Path, and $null.",
+              "- Read environment variables with `$env:NAME`, not `export NAME=...`.",
+            ].join("\n")
+          : shellName === "cmd"
+            ? [
+                "Windows cmd notes:",
+                "- Use cmd.exe syntax, not Bash or PowerShell syntax.",
+                "- Use `dir` for directory listing and `type` for simple file output.",
+                "- Do NOT use Unix utilities such as ls, tail, head, sed, awk, or grep.",
+                "- Use dedicated tools for file operations: read, grep, glob, edit, write.",
+                "- Use `NUL` for the null device, not `/dev/null`.",
+              ].join("\n")
+            : "Windows shell notes: prefer dedicated OpenCode tools for file operations."
   // cwd 与 worktree 是调用方快照；不以本进程的工作目录覆盖它们。
-  return text
-    .replaceAll("${cwd}", paths.cwd)
-    .replaceAll("${worktree}", paths.worktree ?? paths.cwd)
-    .replaceAll("${intro}", "Executes a given bash command in a persistent shell session with optional timeout, ensuring proper handling and security measures.")
-    .replaceAll("${workdirSection}", "All commands run in the current working directory by default. Use the workdir parameter if you need to run a command in a different directory.")
-    .replaceAll("${commandSection}", "Before executing the command, please follow directory verification and quoting rules for paths with spaces.")
-    // 临时目录、操作系统和 shell 身份仍是估算文本，不参与工具执行。
-    .replaceAll("${tmp}", os.tmpdir())
-    .replaceAll("${os}", process.platform)
-    .replaceAll("${shell}", shellName)
-    .replaceAll("${directory}", paths.cwd)
-    .replaceAll("${chaining}", chain)
-    .replaceAll("${shellGuidance}", shellGuidance)
-    // 列目录示例使用 shell 原生命令，避免 Windows 出现 ls 示例。
-    .replaceAll("${listCommand}", process.platform !== "win32" ? "`ls`" : ["powershell", "pwsh"].includes(shellName) ? "`Get-ChildItem`" : shellName === "cmd" ? "`dir`" : "the shell-native directory listing command")
-    .replaceAll("${maxLines}", "1000")
-    .replaceAll("${maxBytes}", "16384")
-    // 压缩指引由运行时提供，此处没有虚构第二套配置。
-    .replaceAll("${compressionGuidance}", "")
-    // websearch 的年度提示也属于 catalog 文本渲染，不能留下未展开标记。
-    .replaceAll("{{year}}", String(new Date().getFullYear()))
+  return (
+    text
+      .replaceAll("${cwd}", paths.cwd)
+      .replaceAll("${worktree}", paths.worktree ?? paths.cwd)
+      .replaceAll(
+        "${intro}",
+        "Executes a given bash command in a persistent shell session with optional timeout, ensuring proper handling and security measures.",
+      )
+      .replaceAll(
+        "${workdirSection}",
+        "All commands run in the current working directory by default. Use the workdir parameter if you need to run a command in a different directory.",
+      )
+      .replaceAll(
+        "${commandSection}",
+        "Before executing the command, please follow directory verification and quoting rules for paths with spaces.",
+      )
+      // 临时目录、操作系统和 shell 身份仍是估算文本，不参与工具执行。
+      .replaceAll("${tmp}", os.tmpdir())
+      .replaceAll("${os}", process.platform)
+      .replaceAll("${shell}", shellName)
+      .replaceAll("${directory}", paths.cwd)
+      .replaceAll("${chaining}", chain)
+      .replaceAll("${shellGuidance}", shellGuidance)
+      // 列目录示例使用 shell 原生命令，避免 Windows 出现 ls 示例。
+      .replaceAll(
+        "${listCommand}",
+        process.platform !== "win32"
+          ? "`ls`"
+          : ["powershell", "pwsh"].includes(shellName)
+            ? "`Get-ChildItem`"
+            : shellName === "cmd"
+              ? "`dir`"
+              : "the shell-native directory listing command",
+      )
+      .replaceAll("${maxLines}", "1000")
+      .replaceAll("${maxBytes}", "16384")
+      // 压缩指引由运行时提供，此处没有虚构第二套配置。
+      .replaceAll("${compressionGuidance}", "")
+      // websearch 的年度提示也属于 catalog 文本渲染，不能留下未展开标记。
+      .replaceAll("{{year}}", String(new Date().getFullYear()))
+  )
 }
-
-
 
 type PermissionRuleLike = Agent["permission"][number]
 const EDIT_TOOL_NAMES = new Set(["edit", "write", "apply_patch"])
@@ -813,7 +893,11 @@ const EDIT_TOOL_NAMES = new Set(["edit", "write", "apply_patch"])
 function evaluateRule(permission: string, pattern: string, ruleset: readonly PermissionRuleLike[] = []) {
   for (let i = ruleset.length - 1; i >= 0; i--) {
     const rule = ruleset[i]
-    if (Wildcard.match(permission, rule.permission, process.platform === "win32") && Wildcard.match(pattern, rule.pattern, process.platform === "win32")) return rule
+    if (
+      Wildcard.match(permission, rule.permission, process.platform === "win32") &&
+      Wildcard.match(pattern, rule.pattern, process.platform === "win32")
+    )
+      return rule
   }
   return undefined
 }
@@ -821,17 +905,18 @@ function evaluateRule(permission: string, pattern: string, ruleset: readonly Per
 function disabledTools(names: string[], ruleset: readonly PermissionRuleLike[] = []) {
   return new Set(
     names.filter((name) => {
-      const permission = EDIT_TOOL_NAMES.has(name) ? "edit" : ["list_mcp_resources", "list_mcp_resource_templates", "read_mcp_resource"].includes(name) ? "read" : name
+      const permission = EDIT_TOOL_NAMES.has(name)
+        ? "edit"
+        : ["list_mcp_resources", "list_mcp_resource_templates", "read_mcp_resource"].includes(name)
+          ? "read"
+          : name
       const rule = ruleset.findLast((rule) => Wildcard.match(permission, rule.permission, process.platform === "win32"))
       return rule?.pattern === "*" && rule.action === "deny"
     }),
   )
 }
 // catalog 提供序列化定义，当前模型、开关及权限过滤决定集合，历史调用不覆写这些输入。
-function baseToolDefinitions(
-  input: ComputeContextDataInput,
-  modelInfo: ReturnType<typeof currentModel>,
-) {
+function baseToolDefinitions(input: ComputeContextDataInput, modelInfo: ReturnType<typeof currentModel>) {
   // 注入 definitions 是完整测试覆盖，包括空数组；不能再合并真实 catalog 扩大这个集合。
   if (input.toolDefinitions) return input.toolDefinitions
   // registry 收到解析后的 API ID；显示别名保留给面板，缺失模型不能猜测它的后端身份。
@@ -840,28 +925,32 @@ function baseToolDefinitions(
   const resolved = resolveToolDescriptions(input.paths)
   // EXA 合并实验伞，Parallel/question 缺省 false；先解析全部键，不能用 provider/client 旁路掩盖非法值。
   const flags = {
-    exa: ["OPENCODE_EXPERIMENTAL", "OPENCODE_ENABLE_EXA", "OPENCODE_EXPERIMENTAL_EXA"].map((key) => enabledByExperimental(key, false)).some(Boolean),
-    parallel: ["OPENCODE_ENABLE_PARALLEL", "OPENCODE_EXPERIMENTAL_PARALLEL"].map((key) => enabledByExperimental(key, false)).some(Boolean),
+    exa: ["OPENCODE_EXPERIMENTAL", "OPENCODE_ENABLE_EXA", "OPENCODE_EXPERIMENTAL_EXA"]
+      .map((key) => enabledByExperimental(key, false))
+      .some(Boolean),
+    parallel: ["OPENCODE_ENABLE_PARALLEL", "OPENCODE_EXPERIMENTAL_PARALLEL"]
+      .map((key) => enabledByExperimental(key, false))
+      .some(Boolean),
     question: enabledByExperimental("OPENCODE_ENABLE_QUESTION_TOOL", false),
   }
-  return resolved
-    .filter((item) => {
-      if (item.name === "question") {
-        const client = process.env["OPENCODE_CLIENT"] ?? "cli"
-        return ["app", "cli", "desktop"].includes(client) || flags.question
-      }
-      // 专用关闭值优先于实验伞；只有后端会提供 LSP 时才估算其定义 token。
-      if (item.name === "lsp") return enabledByExperimental("OPENCODE_EXPERIMENTAL_LSP_TOOL")
-      // plan_exit 还受 client=cli 限制，桌面客户端即使启用实验 plan 也不能看到不可执行工具。
-      if (item.name === "plan_exit") {
-        const client = process.env["OPENCODE_CLIENT"] ?? "cli"
-        return enabledByExperimental("OPENCODE_EXPERIMENTAL_PLAN_MODE") && client === "cli"
-      }
-      // 与实际 registry 对齐：Go provider 与 Parallel 开关同样广告 websearch。
-      if (item.name === "websearch") return ["opencode", "opencode-go"].includes(modelInfo.providerID) || flags.exa || flags.parallel
-      if (usePatch) return item.name !== "edit" && item.name !== "write"
-      return item.name !== "apply_patch"
-    })
+  return resolved.filter((item) => {
+    if (item.name === "question") {
+      const client = process.env["OPENCODE_CLIENT"] ?? "cli"
+      return ["app", "cli", "desktop"].includes(client) || flags.question
+    }
+    // 专用关闭值优先于实验伞；只有后端会提供 LSP 时才估算其定义 token。
+    if (item.name === "lsp") return enabledByExperimental("OPENCODE_EXPERIMENTAL_LSP_TOOL")
+    // plan_exit 还受 client=cli 限制，桌面客户端即使启用实验 plan 也不能看到不可执行工具。
+    if (item.name === "plan_exit") {
+      const client = process.env["OPENCODE_CLIENT"] ?? "cli"
+      return enabledByExperimental("OPENCODE_EXPERIMENTAL_PLAN_MODE") && client === "cli"
+    }
+    // 与实际 registry 对齐：Go provider 与 Parallel 开关同样广告 websearch。
+    if (item.name === "websearch")
+      return ["opencode", "opencode-go"].includes(modelInfo.providerID) || flags.exa || flags.parallel
+    if (usePatch) return item.name !== "edit" && item.name !== "write"
+    return item.name !== "apply_patch"
+  })
 }
 
 // 活跃集合以定义列表为基线，避免历史 tool parts 折叠
@@ -894,9 +983,15 @@ function toolDefinitionTokens(
   const scanned = baseToolDefinitions(input, modelInfo)
   const agent = lastUser?.role === "user" ? input.agents?.find((item) => item.name === lastUser.agent) : undefined
   // Session 规则排在 agent 后；同一过滤也作用于完整注入定义，不能绕过持久 deny。
-  const disabled = disabledTools(scanned.map((item) => item.name), [...(agent?.permission ?? []), ...(input.session?.permission ?? [])])
+  const disabled = disabledTools(
+    scanned.map((item) => item.name),
+    [...(agent?.permission ?? []), ...(input.session?.permission ?? [])],
+  )
   // 可用定义先过滤权限与用户禁用项，历史调用不能重新广告已禁用工具。
-  const active = activeToolNames(scanned.filter((item) => !disabled.has(item.name)), lastUser)
+  const active = activeToolNames(
+    scanned.filter((item) => !disabled.has(item.name)),
+    lastUser,
+  )
   const byName = new Map(scanned.map((item) => [item.name, item.text]))
   const details: Array<{ name: string; tokens: number }> = []
   for (const name of active) {
@@ -906,7 +1001,12 @@ function toolDefinitionTokens(
   return details.toSorted((a, b) => a.name.localeCompare(b.name))
 }
 
-function dynamicToolText(name: string, input: ComputeContextDataInput, skills: Array<{ name: string; description: string; path: string }>, lastUser?: Message) {
+function dynamicToolText(
+  name: string,
+  input: ComputeContextDataInput,
+  skills: Array<{ name: string; description: string; path: string }>,
+  lastUser?: Message,
+) {
   if (name === "task") {
     // task 子代理名称按同一 Wildcard 规则过滤；revie? deny 必须影响动态描述而不仅是工具集合。
     const agent = lastUser?.role === "user" ? input.agents?.find((item) => item.name === lastUser.agent) : undefined
@@ -919,14 +1019,16 @@ function dynamicToolText(name: string, input: ComputeContextDataInput, skills: A
         return !(rule && rule.action === "deny")
       })
       .toSorted((a, b) => a.name.localeCompare(b.name))
-      .map((item) => "- " + item.name + ": " + (item.description ?? "This subagent should only be called manually by the user."))
+      .map(
+        (item) =>
+          "- " + item.name + ": " + (item.description ?? "This subagent should only be called manually by the user."),
+      )
       .join(String.fromCharCode(10))
     return ["Available agent types and the tools they have access to:", description].join(String.fromCharCode(10))
   }
   if (name === "skill") return skillFmt(skillInfo(skills), { verbose: false })
   return ""
 }
-
 
 // agent 自定义 prompt 完整替换模型模板，不能同时拼入两份族模板把系统开销翻倍。
 function baseSystemPrompt(
@@ -989,7 +1091,11 @@ function windowTokens(input: ComputeContextDataInput, model: Provider["models"][
 }
 
 // 两种预留拥有不同来源：provider input 差额不是自动压缩的阈值，不能合并显示。
-function windowDetails(input: ComputeContextDataInput, model: Provider["models"][string] | undefined, contextLimit = model?.limit.context ?? 0) {
+function windowDetails(
+  input: ComputeContextDataInput,
+  model: Provider["models"][string] | undefined,
+  contextLimit = model?.limit.context ?? 0,
+) {
   // catalog 的 input 可能大于 context，先夹住才能让 reserve 与 buffer 保持非负。
   const inputLimit = model?.limit.input ? Math.min(model.limit.input, contextLimit) : contextLimit
   const usableInput = windowTokens(input, model)
@@ -1030,7 +1136,11 @@ function gridSize(contextLimit: number, columns?: number, rows?: number) {
 
 // 上下文网格：累积水位线（waterline）分配席位——整数刻度被谁的累积区间跨过格子就归谁。
 // 分母用 Σ weights（非 contextLimit），保证 Σ counts === total，且不把舍入误差整段倒给 Free。
-export function contextGrid(categories: ContextCategory[], contextLimit: number, options?: { columns?: number; rows?: number }) {
+export function contextGrid(
+  categories: ContextCategory[],
+  contextLimit: number,
+  options?: { columns?: number; rows?: number },
+) {
   const { width: gridW, height: gridH } = gridSize(contextLimit, options?.columns, options?.rows)
   const total = gridW * gridH
   const cells: GridSquare[] = []
@@ -1040,8 +1150,12 @@ export function contextGrid(categories: ContextCategory[], contextLimit: number,
   const counts = waterlineCounts(weights, total)
 
   // Autocompact 只调整序列化贴尾，不二次 round seat（INV-04）。
-  const body = categories.flatMap((category, index) => (category.name === "Autocompact buffer" ? [] : [{ category, index }]))
-  const tail = categories.flatMap((category, index) => (category.name === "Autocompact buffer" ? [{ category, index }] : []))
+  const body = categories.flatMap((category, index) =>
+    category.name === "Autocompact buffer" ? [] : [{ category, index }],
+  )
+  const tail = categories.flatMap((category, index) =>
+    category.name === "Autocompact buffer" ? [{ category, index }] : [],
+  )
 
   for (const item of [...body, ...tail]) {
     const count = counts[item.index] ?? 0
@@ -1084,7 +1198,6 @@ function waterlineCounts(weights: number[], seats: number) {
   })
 }
 
-
 // 窗口分类使用裁剪结果；确认消费独立交给 usageTotals，不能从字符估算的 used 反算计费用量。
 export async function computeContextData(input: ComputeContextDataInput): Promise<ContextUsageData> {
   // filter 接受新到旧的序列，源数组仍保持原顺序，不能原位 reverse 改掉 Sync 的消息顺序。
@@ -1093,34 +1206,52 @@ export async function computeContextData(input: ComputeContextDataInput): Promis
   // 旧数据按已配对助手选择模型，避免排队中的 user 改变当前轮；无助手时保留首次输入估算。
   const latestAssistantMsg = compacted.findLast((msg) => msg.info.role === "assistant")
   const latestAssistantInfo = latestAssistantMsg?.info
-  const latestAssistantParentID = latestAssistantInfo && latestAssistantInfo.role === "assistant" ? latestAssistantInfo.parentID : undefined
+  const latestAssistantParentID =
+    latestAssistantInfo && latestAssistantInfo.role === "assistant" ? latestAssistantInfo.parentID : undefined
   const lastUser = latestAssistantParentID
     ? compacted.findLast((msg) => msg.info.role === "user" && msg.info.id === latestAssistantParentID)?.info
     : compacted.findLast((msg) => msg.info.role === "user")?.info
   const modelInfo = currentModel(input, lastUser)
   // 请求投影包含 native 首包前与确认后的细分；只有没有投影的旧 V1 才读取确认 part。
-  const prepared = input.session?.request ? input.session.request.inputEstimate : latestInputEstimate(compacted, raw, modelInfo)
+  const prepared = input.session?.request
+    ? input.session.request.inputEstimate
+    : latestInputEstimate(compacted, raw, modelInfo)
   const bd = prepared?.inputBreakdown
   // 密度冻结自本轮输入侧校准；显示窗口或模型选择变化不能重新解释服务端 prepared input。
-  const ratio = prepared?.charsPerToken && Number.isFinite(prepared.charsPerToken) && prepared.charsPerToken > 0 ? prepared.charsPerToken : 4
+  const ratio =
+    prepared?.charsPerToken && Number.isFinite(prepared.charsPerToken) && prepared.charsPerToken > 0
+      ? prepared.charsPerToken
+      : 4
   // Catalog 消失或助手被淘汰仍保留本轮预算，零不能被当前同 API 的其他 alias 替换。
   const frozen = input.session?.request?.model?.contextLimit ?? prepared?.contextLimit
-  const windowModel = modelInfo.model && frozen !== undefined
-    ? { ...modelInfo.model, limit: { ...modelInfo.model.limit, context: frozen } } : modelInfo.model
+  const windowModel =
+    modelInfo.model && frozen !== undefined
+      ? { ...modelInfo.model, limit: { ...modelInfo.model.limit, context: frozen } }
+      : modelInfo.model
   const maxTokens = frozen ?? modelInfo.model?.limit.context ?? 0
 
-  const last = input.messages.findLast((item): item is AssistantMessage => item.role === "assistant" &&
-    (input.session?.request
-      ? item.id === input.session.request.assistantID
-      : item.providerID === modelInfo.providerID && item.modelID === modelInfo.modelID))
-  const acc = tokenAccounting(input.messages, (id) => input.parts[id] ?? [], maxTokens,
-    { session: input.session, last, parts: last ? input.parts[last.id] ?? [] : [] })
+  const last = input.messages.findLast(
+    (item): item is AssistantMessage =>
+      item.role === "assistant" &&
+      (input.session?.request
+        ? item.id === input.session.request.assistantID
+        : item.providerID === modelInfo.providerID && item.modelID === modelInfo.modelID),
+  )
+  const acc = tokenAccounting(input.messages, (id) => input.parts[id] ?? [], maxTokens, {
+    session: input.session,
+    last,
+    parts: last ? (input.parts[last.id] ?? []) : [],
+  })
   // 分类与统计消费同一入口；会话累计来自持久 Session，不受可见消息窗口限制。
   const msg = messageTokens(compacted, ratio)
-  const usage = { ...acc.session, total: acc.session.input + acc.session.output + acc.session.reasoning
-    + acc.session.cacheRead + acc.session.cacheWrite }
+  const usage = {
+    ...acc.session,
+    total:
+      acc.session.input + acc.session.output + acc.session.reasoning + acc.session.cacheRead + acc.session.cacheWrite,
+  }
   // 发送中的快照已有分类总量，文件明细等确认后读取；历史无快照仍沿原路径展示。
-  const instructions = input.instructionFiles ?? (bd && prepared?.confirmed === false ? [] : await gatherInstructionFiles(input))
+  const instructions =
+    input.instructionFiles ?? (bd && prepared?.confirmed === false ? [] : await gatherInstructionFiles(input))
   const instructionDetails = instructions.map((item) => ({ path: item.path, tokens: estimate(item.content, ratio) }))
   const messageText = msg.text.join("\n")
   // Read 的指令可能在工具 output 而非 text 部件；只为未在已计数正文内出现的 loaded 路径读盘。
@@ -1128,7 +1259,8 @@ export async function computeContextData(input: ComputeContextDataInput): Promis
   for (const filepath of prepared?.confirmed === false ? [] : msg.loadedInstructionPaths) {
     if (messageText.includes(`Instructions from: ${filepath}`)) continue
     const content = await readText(filepath)
-    if (content && !bd) loadedInstructions.push({ path: filepath, tokens: estimate(`Instructions from: ${filepath}\n${content}`, ratio) })
+    if (content && !bd)
+      loadedInstructions.push({ path: filepath, tokens: estimate(`Instructions from: ${filepath}\n${content}`, ratio) })
   }
 
   // 跳过技能读盘不跳过现有静态工具目录，避免历史工具调用分类塌缩。
@@ -1144,35 +1276,58 @@ export async function computeContextData(input: ComputeContextDataInput): Promis
   // 用户 system 是同一请求的附加系统载荷；存在自定义 agent prompt 也不能省略该字段。
   const systemText = [
     baseSystemPrompt(input, lastUser, modelInfo.model),
-    environmentText(input, modelInfo.modelID, modelInfo.providerID, toolDefs.map((item) => item.name)),
+    environmentText(
+      input,
+      modelInfo.modelID,
+      modelInfo.providerID,
+      toolDefs.map((item) => item.name),
+    ),
     lastUser?.role === "user" ? lastUser.system : undefined,
-  ].filter(Boolean).join("\n")
+  ]
+    .filter(Boolean)
+    .join("\n")
   // 文本分类消费服务端字符证明；本地文件仅为旧数据或明细名称提供展示权重。
   const envTokens = acc.breakdown?.system ?? estimate(systemText, ratio)
-  const instructionTokens = acc.breakdown?.instructions ?? instructionDetails.reduce((sum, item) => sum + item.tokens, 0)
+  const instructionTokens =
+    acc.breakdown?.instructions ?? instructionDetails.reduce((sum, item) => sum + item.tokens, 0)
   const loadedInstructionTokens = loadedInstructions.reduce((sum, item) => sum + item.tokens, 0)
   const toolDefTokens = acc.breakdown?.tools ?? toolDefs.reduce((sum, item) => sum + item.tokens, 0)
   // 上传历史与当前输出的分配只由 accounting 计算，分类和明细读取同一份整数。
-  const messageDetails = acc.breakdown ? {
-    userText: acc.breakdown.userMessages, assistantText: acc.breakdown.assistantText,
-    reasoning: acc.breakdown.reasoning, toolCalls: acc.breakdown.toolCalls,
-    toolResults: acc.breakdown.toolResults + acc.breakdown.pending,
-    attachments: acc.breakdown.attachments, compactionSummary: 0,
-  } : msg.details
+  const messageDetails = acc.breakdown
+    ? {
+        userText: acc.breakdown.userMessages,
+        assistantText: acc.breakdown.assistantText,
+        reasoning: acc.breakdown.reasoning,
+        toolCalls: acc.breakdown.toolCalls,
+        toolResults: acc.breakdown.toolResults + acc.breakdown.pending,
+        attachments: acc.breakdown.attachments,
+        compactionSummary: 0,
+      }
+    : msg.details
   const userMessageTokens = messageDetails.userText
-  const assistantMessageTokens = messageDetails.assistantText + messageDetails.reasoning + messageDetails.compactionSummary
+  const assistantMessageTokens =
+    messageDetails.assistantText + messageDetails.reasoning + messageDetails.compactionSummary
   // 源消息分类已区分工具入参与返回；部件归助手不能把工具结果并入助手正文，工具定义也只归广告开销。
   const toolCallTokens = messageDetails.toolCalls
   const pendingTokens = acc.breakdown?.pending ?? 0
   const toolResultTokens = messageDetails.toolResults - pendingTokens
   // 附件与 pending 等额拆出，详情仍保留原口径；不重新按字符估算或把同一 pending 计两次。
-  const messageTotal = userMessageTokens + toolResultTokens + assistantMessageTokens + toolCallTokens + messageDetails.attachments + pendingTokens
+  const messageTotal =
+    userMessageTokens +
+    toolResultTokens +
+    assistantMessageTokens +
+    toolCallTokens +
+    messageDetails.attachments +
+    pendingTokens
   const window = windowDetails(input, windowModel, maxTokens)
   // used 包含上传输入与本 step 输出；free、模型预留和压缩缓冲不计入消费。
   // 分类分别 round 后相加会有短文本舍入误差；确认消费仍独立读取 provider 字段。
   const used = envTokens + instructionTokens + loadedInstructionTokens + skillTokens + toolDefTokens + messageTotal
   // Free 与顶栏消费同一当前窗口；显式请求零值不借历史估算，旧 transcript 仍保留原重建路径。
-  const stepWindowTokens = input.session?.request && !input.session.request.assistantID ? prepared?.input ?? 0 : acc.step.input + acc.step.output
+  const stepWindowTokens =
+    input.session?.request && !input.session.request.assistantID
+      ? (prepared?.input ?? 0)
+      : acc.step.input + acc.step.output
   const totalTokens = stepWindowTokens > 0 || input.session?.request ? stepWindowTokens : used
   const free = maxTokens ? Math.max(0, window.usableInput - totalTokens) : 0
 
@@ -1206,14 +1361,22 @@ export async function computeContextData(input: ComputeContextDataInput): Promis
   // 返回脱离流式 proxy 的数值与字符串，resize 消费同一轮完成的估算结果。
   // 首包前没有助手时仍使用服务端准备值；旧历史无统计时保留分类估算。
   return {
-    model: [input.session?.request?.model?.providerID ?? modelInfo.providerID, input.session?.request?.model?.modelID ?? modelInfo.modelID].filter(Boolean).join("/") || "(unknown)",
+    model:
+      [
+        input.session?.request?.model?.providerID ?? modelInfo.providerID,
+        input.session?.request?.model?.modelID ?? modelInfo.modelID,
+      ]
+        .filter(Boolean)
+        .join("/") || "(unknown)",
     totalTokens,
     maxTokens,
     // #136：percentage 与 totalTokens 同源窗口，避免主柱与百分比分叉
     percentage: maxTokens ? totalTokens / maxTokens : 0,
     categories,
     // 未知窗口只选择可渲染的网格分母，maxTokens 与百分比仍保留未知值 0。
-    gridRows: contextGrid(categories, maxTokens || Math.max(used + window.compactionBuffer + free, 1), { columns: input.columns }),
+    gridRows: contextGrid(categories, maxTokens || Math.max(used + window.compactionBuffer + free, 1), {
+      columns: input.columns,
+    }),
     details: {
       // 服务端零总额也要清零本地明细，不能只在正值分支覆盖默认估算而残留上一轮数值。
       instructions: bd ? distribute(instructionDetails, instructionTokens) : instructionDetails,

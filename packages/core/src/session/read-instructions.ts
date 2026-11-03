@@ -19,18 +19,36 @@ export const make = Effect.gen(function* () {
     const root = yield* fs.realPath(location.directory)
     if (!FSUtil.contains(root, target)) return []
     const excluded = new Set(
-      (yield* store.context(sessionID)).flatMap(message => message.type === "assistant" ? message.content.flatMap(part => {
-        if (part.type !== "tool" || part.name !== "read" || part.time.pruned !== undefined || part.state.status !== "completed") return []
-        const files = Schema.decodeUnknownOption(Files)(part.state.structured.instructions)
-        if (Option.isNone(files)) return []
-        const body = part.state.content.flatMap(content => content.type === "text" ? [content.text] : []).join("\n")
-        // 只有实际保留给模型的完整正文才能证明已加载；pruned、限幅或压缩不能延长去重证明。
-        return files.value.filter(file => body.includes(`Instructions from: ${file.path}\n${file.content}`)).map(file => file.path)
-      }) : []),
+      (yield* store.context(sessionID)).flatMap((message) =>
+        message.type === "assistant"
+          ? message.content.flatMap((part) => {
+              if (
+                part.type !== "tool" ||
+                part.name !== "read" ||
+                part.time.pruned !== undefined ||
+                part.state.status !== "completed"
+              )
+                return []
+              const files = Schema.decodeUnknownOption(Files)(part.state.structured.instructions)
+              if (Option.isNone(files)) return []
+              const body = part.state.content
+                .flatMap((content) => (content.type === "text" ? [content.text] : []))
+                .join("\n")
+              // 只有实际保留给模型的完整正文才能证明已加载；pruned、限幅或压缩不能延长去重证明。
+              return files.value
+                .filter((file) => body.includes(`Instructions from: ${file.path}\n${file.content}`))
+                .map((file) => file.path)
+            })
+          : [],
+      ),
     )
     const result: InstructionContext.File[] = []
     // 逐目录取首个规则类型；不扫描子树，Location根及以上由ambient Context Source承担。
-    for (let directory = path.dirname(target); path.relative(root, directory) !== "" && FSUtil.contains(root, directory); directory = path.dirname(directory)) {
+    for (
+      let directory = path.dirname(target);
+      path.relative(root, directory) !== "" && FSUtil.contains(root, directory);
+      directory = path.dirname(directory)
+    ) {
       for (const name of InstructionContext.names()) {
         const file = AbsolutePath.make(yield* fs.resolve(path.join(directory, name)))
         if (!(yield* fs.existsSafe(file))) continue

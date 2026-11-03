@@ -18,7 +18,14 @@ import { Shell } from "@opencode-ai/core/shell"
 import { ShellRemote } from "@opencode-ai/core/shell-remote"
 import { parts, permissionPattern, rawPattern } from "@opencode-ai/core/shell-permission"
 import { ShellID } from "./shell/id"
-import { BashDiagnosticCollector, bashCompressionMetadata, compressVisibleOutput, createTerminalDisplay, normalizePowerShellOutput, renderDiagnosticAppendix } from "@opencode-ai/core/tool/bash-compress"
+import {
+  BashDiagnosticCollector,
+  bashCompressionMetadata,
+  compressVisibleOutput,
+  createTerminalDisplay,
+  normalizePowerShellOutput,
+  renderDiagnosticAppendix,
+} from "@opencode-ai/core/tool/bash-compress"
 // #282：超时/中止/截断改用统一 notice 信封
 import { formatOutputTruncatedNotice, formatShellExecutionNotice, outputStats } from "@/util/output-notice"
 
@@ -33,9 +40,35 @@ import { createAutoTextDecoder, type TextEncodingMode } from "@/util/text-decodi
 // #126：自动检测 UTF-8/UTF-16/GB18030 的流式解码
 
 // 只有写操作失去 always 前缀建议；只读 Git 仍保留现有权限匹配路径。
-const GIT_WRITES = new Set(["add", "commit", "merge", "rebase", "cherry-pick", "revert", "pull", "push", "checkout", "switch", "restore", "reset", "clean"])
+const GIT_WRITES = new Set([
+  "add",
+  "commit",
+  "merge",
+  "rebase",
+  "cherry-pick",
+  "revert",
+  "pull",
+  "push",
+  "checkout",
+  "switch",
+  "restore",
+  "reset",
+  "clean",
+])
 // stash 的默认行为是 push，不能把消息文本误当成只读子命令。
-const GIT_STASH_WRITES = new Set(["push", "pop", "apply", "drop", "clear", "branch", "save", "create", "store", "export", "import"])
+const GIT_STASH_WRITES = new Set([
+  "push",
+  "pop",
+  "apply",
+  "drop",
+  "clear",
+  "branch",
+  "save",
+  "create",
+  "store",
+  "export",
+  "import",
+])
 
 function riskyGit(tokens: string[]) {
   // AST 直接命令的建议收窄不等于执行授权；alias/eval 与间接脚本仍由原权限链决定。
@@ -44,7 +77,18 @@ function riskyGit(tokens: string[]) {
   let i = 1
   while (i < tokens.length) {
     const token = tokens[i]
-    if (["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env", "--super-prefix", "--attr-source"].includes(token)) {
+    if (
+      [
+        "-C",
+        "-c",
+        "--git-dir",
+        "--work-tree",
+        "--namespace",
+        "--config-env",
+        "--super-prefix",
+        "--attr-source",
+      ].includes(token)
+    ) {
       i += 2
       continue
     }
@@ -139,8 +183,6 @@ type Chunk = {
   text: string
   size: number
 }
-
-
 
 function commands(node: Node) {
   return node.descendantsOfType("command").filter((child): child is Node => Boolean(child))
@@ -289,9 +331,12 @@ function truncateWindow(text: string, maxLines: number, maxBytes: number, direct
   }
   const visible = out.join("\n")
   // hidden 语义按方向区分：head 丢弃后缀，tail 丢弃前缀（与 #293 一致）
-  const hidden = direction === "head"
-    ? source.slice(visible.length)
-    : visible ? source.slice(0, Math.max(0, source.length - visible.length)) : source
+  const hidden =
+    direction === "head"
+      ? source.slice(visible.length)
+      : visible
+        ? source.slice(0, Math.max(0, source.length - visible.length))
+        : source
   return { text: visible, cut: true, hidden }
 }
 
@@ -300,7 +345,11 @@ const parse = Effect.fn("ShellTool.parse")(function* (command: string, dialect: 
   return yield* Effect.promise(() => ShellParse.parse(command, dialect))
 })
 
-const ask = Effect.fn("ShellTool.ask")(function* (ctx: Tool.Context, scan: Scan, input: { command: string; cwd: string; shell: string }) {
+const ask = Effect.fn("ShellTool.ask")(function* (
+  ctx: Tool.Context,
+  scan: Scan,
+  input: { command: string; cwd: string; shell: string },
+) {
   // 两个门禁使用同一原命令；源码与stdin角色由共享分析层识别，执行正文始终保持原样。
   if (scan.dirs.size > 0) {
     const directories = Array.from(scan.dirs)
@@ -365,7 +414,10 @@ function cmd(shell: string, command: string, cwd: string, env: NodeJS.ProcessEnv
 // 只检查解析出的命令头，不能把 echo 参数或路径里的 grep 当成执行工具。
 function shellCompatibilityError(root: Node, shellName: string) {
   // V1 保留完整 AST 提取；分类与错误文字复用 Core 的同一 guard。
-  return Shell.compatibilityError(localCommands(root, shellName).flatMap((node) => parts(node)[0]?.text ?? []), shellName)
+  return Shell.compatibilityError(
+    localCommands(root, shellName).flatMap((node) => parts(node)[0]?.text ?? []),
+    shellName,
+  )
 }
 
 // #158：只扫描本地 command 节点；祖先含 string 视为远程/WSL 引号载荷
@@ -388,7 +440,6 @@ function localCommands(root: Node, shellName: string) {
     return true
   })
 }
-
 
 // #128：config.tool_output.shell_encoding，默认 auto
 function shellOutputEncoding(config?: { tool_output?: { shell_encoding?: TextEncodingMode } }): TextEncodingMode {
@@ -425,7 +476,9 @@ export const ShellTool = Tool.define(
         const textPath = FSUtil.windowsPath(text)
         // PowerShell 盘符相对路径按命令 cwd 解析，避免使用进程的盘符 cwd。
         // 保留 C:/file 与 C:\file 这类绝对路径，权限扫描仍以可见 cwd 为边界。
-        return FSUtil.normalizePath(path.resolve(root, Shell.ps(shell) ? textPath.replace(/^[A-Za-z]:(?![\\/])/, "") : textPath))
+        return FSUtil.normalizePath(
+          path.resolve(root, Shell.ps(shell) ? textPath.replace(/^[A-Za-z]:(?![\\/])/, "") : textPath),
+        )
       }
       return path.resolve(root, text)
     })
@@ -479,7 +532,8 @@ export const ShellTool = Tool.define(
           // 仍保留完整请求 pattern，只撤销危险写操作的自动前缀建议。
           const always = BashArity.prefix(tokens)
           // #197：高风险 git 写操作与宽泛 wrapper 前缀不自动加入 always-allow
-          if (!riskyGit(tokens) && PermissionPrecheck.canAlwaysAllowPrefix(always)) scan.always.add(always.join(" ") + " *")
+          if (!riskyGit(tokens) && PermissionPrecheck.canAlwaysAllowPrefix(always))
+            scan.always.add(always.join(" ") + " *")
         }
       }
 
@@ -521,8 +575,8 @@ export const ShellTool = Tool.define(
         env: NodeJS.ProcessEnv
         timeout: number
         compressOutput: boolean
-      // #128：输出文本编码策略
-      encoding: TextEncodingMode
+        // #128：输出文本编码策略
+        encoding: TextEncodingMode
       },
       ctx: Tool.Context,
     ) {
@@ -635,9 +689,7 @@ export const ShellTool = Tool.define(
             lastVisible = visible
             // metadata 是 replace 型终端快照；raw chunk 仍走原有内存/截断路径，
             // 所以 latest-wins 只减少 UI/SQLite 更新，不会丢失模型可见字节。
-            return spill.pipe(
-              Effect.andThen(progress.update({ output: visible })),
-            )
+            return spill.pipe(Effect.andThen(progress.update({ output: visible })))
           }
 
           // spawn握手、双流消费和root退出同属可中断scope；传输仍使用授权后的原始输入。
@@ -645,7 +697,14 @@ export const ShellTool = Tool.define(
           const execute = Effect.scoped(
             Effect.gen(function* () {
               const handle = yield* spawner.spawn(cmd(input.shell, input.command, input.cwd, input.env)).pipe(
-                Effect.tapCause(() => Effect.logError({ service: "tool.shell", message: "spawn failed", sessionID: ctx.sessionID, callID: ctx.callID })),
+                Effect.tapCause(() =>
+                  Effect.logError({
+                    service: "tool.shell",
+                    message: "spawn failed",
+                    sessionID: ctx.sessionID,
+                    callID: ctx.callID,
+                  }),
+                ),
               )
               const output = Stream.runForEach(handle.all, (bytes) => onChunk(decoder.write(bytes))).pipe(
                 Effect.ensuring(Effect.suspend(() => onChunk(decoder.end()))),
@@ -709,7 +768,14 @@ export const ShellTool = Tool.define(
       // 诊断采样遗漏也必须能恢复，不能因压缩禁用而省掉原始日志。
       // CLIXML解码可能净增长；呈现变化仍须生成并广告未经改写的原文。
       const transformed = compressed.text !== raw
-      if (!file && (transformed || end.cut || compressed.stats.applied || compressed.stats.secretsRedacted > 0 || diagnostic.discardedChars > 0)) {
+      if (
+        !file &&
+        (transformed ||
+          end.cut ||
+          compressed.stats.applied ||
+          compressed.stats.secretsRedacted > 0 ||
+          diagnostic.discardedChars > 0)
+      ) {
         file = yield* trunc.write(raw)
       }
 
@@ -748,12 +814,23 @@ export const ShellTool = Tool.define(
       }
 
       // 呈现变化与单独脱敏都广告原文路径，不能把收益布尔值当作恢复条件。
-      if (file && !cut && (transformed || compressed.stats.applied || compressed.stats.secretsRedacted > 0 || diagnostic.discardedChars > 0)) {
+      if (
+        file &&
+        !cut &&
+        (transformed ||
+          compressed.stats.applied ||
+          compressed.stats.secretsRedacted > 0 ||
+          diagnostic.discardedChars > 0)
+      ) {
         output = `...output compacted or diagnostic frames sampled...\n\nFull output saved to: ${file}\n\n` + output
       }
 
       // 附录只读取隐藏诊断；采样遗漏的恢复路径仍指向不可变原始归档。
-      const appendix = renderDiagnosticAppendix(diagnostic, { durationMs: Date.now() - started, exitCode: code, config: { enabled: input.compressOutput } })
+      const appendix = renderDiagnosticAppendix(diagnostic, {
+        durationMs: Date.now() - started,
+        exitCode: code,
+        config: { enabled: input.compressOutput },
+      })
       if (appendix) output += "\n\n" + appendix
       // 退出 notice 独立描述进程结束，隐藏诊断不能抑制失败退出码。
       // 这里刻意不回放命令文本、环境变量或原始 metadata，保持模型可见信息的最小安全边界。
@@ -779,14 +856,15 @@ export const ShellTool = Tool.define(
       // 检测 error pattern 并设置 hasErrors flag，帮助模型识别验证失败。
       // 使用独立 regex 限定检测范围（与 compaction.ts renderExecutedCommands 无关），
       // 避免对非验证命令误判。error pattern 覆盖 tsc/eslint/python/mypy 等常见工具。
-      const isVerificationCmd = /^(bun|npm|pnpm|yarn)\s+(run\s+)?(typecheck|test|build|lint|check|audit)(\s|$)/.test(input.command.trim().toLowerCase()) ||
+      const isVerificationCmd =
+        /^(bun|npm|pnpm|yarn)\s+(run\s+)?(typecheck|test|build|lint|check|audit)(\s|$)/.test(
+          input.command.trim().toLowerCase(),
+        ) ||
         /^node\s+--check(\s|$)/.test(input.command.trim().toLowerCase()) ||
         /^python\s+-m\s+py_compile(\s|$)/.test(input.command.trim().toLowerCase()) ||
         /^tsc\s+--noemit(\s|$)/.test(input.command.trim().toLowerCase())
-      const hasErrors = isVerificationCmd && (
-        code !== null && code !== 0 ||
-        /error TS\d|SyntaxError|FAIL|Error:|✗/i.test(output)
-      )
+      const hasErrors =
+        isVerificationCmd && ((code !== null && code !== 0) || /error TS\d|SyntaxError|FAIL|Error:|✗/i.test(output))
 
       return {
         title: input.command,
@@ -795,7 +873,14 @@ export const ShellTool = Tool.define(
           output: userOutput,
           exit: code,
           truncated: cut,
-          ...((transformed || cut || compressed.stats.applied || compressed.stats.secretsRedacted > 0 || diagnostic.discardedChars > 0) && file ? { outputPath: file } : {}),
+          ...((transformed ||
+            cut ||
+            compressed.stats.applied ||
+            compressed.stats.secretsRedacted > 0 ||
+            diagnostic.discardedChars > 0) &&
+          file
+            ? { outputPath: file }
+            : {}),
           // truncated 只表示窗口损失，compressed 的收益针对本次可见捕获计算。
           ...bashCompressionMetadata(compressed.stats),
           durationMs: Date.now() - started,
@@ -850,8 +935,9 @@ export const ShellTool = Tool.define(
               const compressOutput = (cfg.tool_output?.bash_compression ?? true) && (params.compress_output ?? true)
               yield* Effect.scoped(
                 Effect.gen(function* () {
-                  const tree = yield* Effect.acquireRelease(parse(params.command, ps ? "powershell" : name === "cmd" ? "cmd" : "bash"), (tree) =>
-                    Effect.sync(() => tree.delete()),
+                  const tree = yield* Effect.acquireRelease(
+                    parse(params.command, ps ? "powershell" : name === "cmd" ? "cmd" : "bash"),
+                    (tree) => Effect.sync(() => tree.delete()),
                   )
                   // 检查发生在权限与执行之前，tree 的 acquireRelease 仍负责失败释放。
                   const compatibility = shellCompatibilityError(tree.rootNode, name)
@@ -859,7 +945,9 @@ export const ShellTool = Tool.define(
                   const scan = yield* collect(tree.rootNode, cwd, ps, shell, instanceCtx)
                   if (!containsPath(cwd, instanceCtx)) scan.dirs.add(cwd)
                   yield* ask(ctx, scan, {
-                    command: params.command, cwd, shell: name,
+                    command: params.command,
+                    cwd,
+                    shell: name,
                   })
                 }),
               )

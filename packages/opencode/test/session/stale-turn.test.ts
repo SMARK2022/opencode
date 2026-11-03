@@ -31,28 +31,39 @@ import { testEffect } from "../lib/effect"
 
 // 测试和生产消费同一Effect入口；只为测试提供空执行协调器，绝不启动native runner或daemon。
 const it = testEffect(
-  Layer.mergeAll(LayerNode.compile(
-    LayerNode.group([
-      SessionNs.node,
-      MessageV2.node,
-      SessionProjector.node,
-      CrossSpawnSpawner.node,
-      Database.node,
-      EventV2Bridge.node,
-      Storage.node,
-      SessionRequestUsage.node,
-    ]),
-  ), SessionExecution.noopLayer),
+  Layer.mergeAll(
+    LayerNode.compile(
+      LayerNode.group([
+        SessionNs.node,
+        MessageV2.node,
+        SessionProjector.node,
+        CrossSpawnSpawner.node,
+        Database.node,
+        EventV2Bridge.node,
+        Storage.node,
+        SessionRequestUsage.node,
+      ]),
+    ),
+    SessionExecution.noopLayer,
+  ),
 )
 
 // Native同责回归只用真实内存DB/投影和空执行协调器；不绑定Git实例或启动产品生命周期。
-const native = testEffect(AppNodeBuilder.build(
-  LayerNode.group([Database.node, SessionProjector.node, EventV2Bridge.node, SessionRequestUsage.node, SessionExecution.node]),
-  [[Database.node, Database.layerFromPath(":memory:")], [SessionExecution.node, SessionExecution.noopLayer]],
-).pipe(
-  Layer.provide(Layer.succeed(InstanceRef, undefined)),
-  Layer.provide(Layer.succeed(WorkspaceRef, undefined)),
-))
+const native = testEffect(
+  AppNodeBuilder.build(
+    LayerNode.group([
+      Database.node,
+      SessionProjector.node,
+      EventV2Bridge.node,
+      SessionRequestUsage.node,
+      SessionExecution.node,
+    ]),
+    [
+      [Database.node, Database.layerFromPath(":memory:")],
+      [SessionExecution.node, SessionExecution.noopLayer],
+    ],
+  ).pipe(Layer.provide(Layer.succeed(InstanceRef, undefined)), Layer.provide(Layer.succeed(WorkspaceRef, undefined))),
+)
 
 // 构造 crash 残留：incomplete assistant + pending tool + running usage。
 // 对应真实 daemon 死亡现场，而不是 live cancel 的内存 runner 状态。
@@ -103,7 +114,8 @@ function seedIncompleteTurn(sessions: SessionNs.Interface, sessionID: SessionID)
     // usage 直接插 running 行：绕过 begin() 的 Effect 服务，聚焦 reconcile 的 SQL 终态。
     // 只写本fixture所持的同一连接，不借用全局数据库或最后打开的sync引用。
     const { sync } = yield* Database.Service
-    sync.insert(RequestUsageTable)
+    sync
+      .insert(RequestUsageTable)
       .values({
         session_id: sessionID,
         request_id: userID,
@@ -186,11 +198,7 @@ describe("SessionStaleTurn", () => {
 
         // usage 断言直接查表——status 是计费聚合的输入，不经事件重放。
         const { sync } = yield* Database.Service
-        const row = sync
-          .select()
-          .from(RequestUsageTable)
-          .where(eq(RequestUsageTable.request_id, seeded.userID))
-          .get()
+        const row = sync.select().from(RequestUsageTable).where(eq(RequestUsageTable.request_id, seeded.userID)).get()
         // status 与 time_completed 对齐 RequestUsage.complete(aborted) 字段合同。
         expect(row?.status).toBe("aborted")
         expect(row?.time_completed).toBeDefined()
@@ -216,7 +224,8 @@ describe("SessionStaleTurn", () => {
 
         // 显式去掉两个实例引用，仍须经真实数据库和projector写终态。
         yield* SessionStaleTurn.reconcile({ kind: "recent", limit: 16 }).pipe(
-          Effect.provideService(InstanceRef, undefined), Effect.provideService(WorkspaceRef, undefined),
+          Effect.provideService(InstanceRef, undefined),
+          Effect.provideService(WorkspaceRef, undefined),
         )
 
         const msg = yield* MessageV2.get({ sessionID: chat.id, messageID: seeded.assistant.id })
@@ -271,7 +280,7 @@ describe("SessionStaleTurn", () => {
           state: { status: "running", input: {}, time: { start: Date.now() } },
         })
 
-          // exit-full 走完整 D/E/C 链：先 incomplete 后孤儿，预算 5s 覆盖两段。
+        // exit-full 走完整 D/E/C 链：先 incomplete 后孤儿，预算 5s 覆盖两段。
         yield* SessionStaleTurn.reconcile({ kind: "exit-full" }, { budgetMs: 5_000 })
 
         const msg = yield* MessageV2.get({ sessionID: chat.id, messageID: assistantID })
@@ -313,38 +322,84 @@ describe("SessionStaleTurn", () => {
       const events = yield* EventV2Bridge.Service
       const timestamp = yield* DateTime.now
       const chat = { id: SessionSchema.ID.make("ses_stale_native") }
-      yield* database.db.insert(ProjectTable).values({ id: Project.ID.global, worktree: AbsolutePath.make("/project"), sandboxes: [] }).run().pipe(Effect.orDie)
-      yield* database.db.insert(SessionTable).values({ id: chat.id, project_id: Project.ID.global, slug: "stale-native", directory: "/project", title: "stale-native", version: "test" }).run().pipe(Effect.orDie)
+      yield* database.db
+        .insert(ProjectTable)
+        .values({ id: Project.ID.global, worktree: AbsolutePath.make("/project"), sandboxes: [] })
+        .run()
+        .pipe(Effect.orDie)
+      yield* database.db
+        .insert(SessionTable)
+        .values({
+          id: chat.id,
+          project_id: Project.ID.global,
+          slug: "stale-native",
+          directory: "/project",
+          title: "stale-native",
+          version: "test",
+        })
+        .run()
+        .pipe(Effect.orDie)
       const ids = [SessionMessage.ID.create(), SessionMessage.ID.create()] as const
       for (const [index, id] of ids.entries()) {
         // 由真实admission/promotion projector分配序列；夹具不伪造会与durable身份冲突的输入行。
         yield* events.publish(SessionEvent.PromptAdmitted, {
-          sessionID: chat.id, messageID: id, prompt: { text: "native request" }, delivery: "steer", timestamp,
+          sessionID: chat.id,
+          messageID: id,
+          prompt: { text: "native request" },
+          delivery: "steer",
+          timestamp,
         })
-        if (index === 0) yield* events.publish(SessionEvent.Prompted, {
-          sessionID: chat.id, messageID: id, prompt: { text: "native request" }, delivery: "steer", timestamp,
-        })
+        if (index === 0)
+          yield* events.publish(SessionEvent.Prompted, {
+            sessionID: chat.id,
+            messageID: id,
+            prompt: { text: "native request" },
+            delivery: "steer",
+            timestamp,
+          })
       }
       const assistant = SessionMessage.ID.create()
       yield* events.publish(SessionEvent.Step.Started, {
-        sessionID: chat.id, assistantMessageID: assistant, agent: "build", timestamp,
+        sessionID: chat.id,
+        assistantMessageID: assistant,
+        agent: "build",
+        timestamp,
         model: { id: ModelV2.ID.make("test"), providerID: ProviderV2.ID.make("test") },
       })
       yield* events.publish(SessionEvent.Tool.Input.Started, {
-        sessionID: chat.id, assistantMessageID: assistant, callID: "native-stale", name: "edit", timestamp,
+        sessionID: chat.id,
+        assistantMessageID: assistant,
+        callID: "native-stale",
+        name: "edit",
+        timestamp,
       })
       yield* SessionStaleTurn.reconcile({ kind: "recent", limit: 16 })
-      const row = yield* database.db.select().from(SessionMessageTable).where(eq(SessionMessageTable.id, assistant)).get().pipe(Effect.orDie)
+      const row = yield* database.db
+        .select()
+        .from(SessionMessageTable)
+        .where(eq(SessionMessageTable.id, assistant))
+        .get()
+        .pipe(Effect.orDie)
       if (!row) throw new Error("expected native assistant")
       const data = Schema.decodeUnknownSync(SessionMessage.Message)({ ...row.data, id: row.id, type: row.type })
       if (data.type !== "assistant") throw new Error("expected native assistant data")
       // completed与tool error必须来自projector；不存在V1影子助手或重复消费重建。
       expect(data.time.completed).toBeDefined()
       expect(data.content.filter((part) => part.type === "tool").map((part) => part.state.status)).toEqual(["error"])
-      const stored = yield* database.db.select().from(RequestUsageTable).where(eq(RequestUsageTable.session_id, chat.id)).all().pipe(Effect.orDie)
+      const stored = yield* database.db
+        .select()
+        .from(RequestUsageTable)
+        .where(eq(RequestUsageTable.session_id, chat.id))
+        .all()
+        .pipe(Effect.orDie)
       expect(stored.find((item) => item.request_id === MessageID.make(ids[0]))?.status).toBe("aborted")
       expect(stored.find((item) => item.request_id === MessageID.make(ids[1]))?.status).toBe("running")
-      const pending = yield* database.db.select().from(SessionInputTable).where(eq(SessionInputTable.id, ids[1])).get().pipe(Effect.orDie)
+      const pending = yield* database.db
+        .select()
+        .from(SessionInputTable)
+        .where(eq(SessionInputTable.id, ids[1]))
+        .get()
+        .pipe(Effect.orDie)
       expect(pending?.promoted_seq).toBeNull()
       const usage = yield* SessionRequestUsage.Service
       const details = yield* usage.assistants({ sessionID: chat.id, requestID: MessageID.make(ids[0]) })
@@ -352,43 +407,154 @@ describe("SessionStaleTurn", () => {
 
       // 完成助手仍可能遗留open工具；非零用量已确认，C只能修工具，不得退款或重新累计。
       const orphanSession = SessionSchema.ID.make("ses_native_orphan")
-      yield* database.db.insert(SessionTable).values({ id: orphanSession, project_id: Project.ID.global, slug: "orphan", directory: "/project", title: "orphan", version: "test" }).run().pipe(Effect.orDie)
+      yield* database.db
+        .insert(SessionTable)
+        .values({
+          id: orphanSession,
+          project_id: Project.ID.global,
+          slug: "orphan",
+          directory: "/project",
+          title: "orphan",
+          version: "test",
+        })
+        .run()
+        .pipe(Effect.orDie)
       const orphanRequest = SessionMessage.ID.create()
-      yield* events.publish(SessionEvent.PromptAdmitted, { sessionID: orphanSession, messageID: orphanRequest, prompt: { text: "orphan" }, delivery: "steer", timestamp })
-      yield* events.publish(SessionEvent.Prompted, { sessionID: orphanSession, messageID: orphanRequest, prompt: { text: "orphan" }, delivery: "steer", timestamp })
+      yield* events.publish(SessionEvent.PromptAdmitted, {
+        sessionID: orphanSession,
+        messageID: orphanRequest,
+        prompt: { text: "orphan" },
+        delivery: "steer",
+        timestamp,
+      })
+      yield* events.publish(SessionEvent.Prompted, {
+        sessionID: orphanSession,
+        messageID: orphanRequest,
+        prompt: { text: "orphan" },
+        delivery: "steer",
+        timestamp,
+      })
       const orphanAssistant = SessionMessage.ID.create()
-      yield* events.publish(SessionEvent.Step.Started, { sessionID: orphanSession, assistantMessageID: orphanAssistant, agent: "build", timestamp, model: { id: ModelV2.ID.make("test"), providerID: ProviderV2.ID.make("test") } })
-      yield* events.publish(SessionEvent.Tool.Input.Started, { sessionID: orphanSession, assistantMessageID: orphanAssistant, callID: "orphan-tool", name: "edit", timestamp })
-      yield* events.publish(SessionEvent.Tool.Called, { sessionID: orphanSession, assistantMessageID: orphanAssistant, callID: "orphan-tool", tool: "edit", input: {}, provider: { executed: false }, timestamp })
+      yield* events.publish(SessionEvent.Step.Started, {
+        sessionID: orphanSession,
+        assistantMessageID: orphanAssistant,
+        agent: "build",
+        timestamp,
+        model: { id: ModelV2.ID.make("test"), providerID: ProviderV2.ID.make("test") },
+      })
+      yield* events.publish(SessionEvent.Tool.Input.Started, {
+        sessionID: orphanSession,
+        assistantMessageID: orphanAssistant,
+        callID: "orphan-tool",
+        name: "edit",
+        timestamp,
+      })
+      yield* events.publish(SessionEvent.Tool.Called, {
+        sessionID: orphanSession,
+        assistantMessageID: orphanAssistant,
+        callID: "orphan-tool",
+        tool: "edit",
+        input: {},
+        provider: { executed: false },
+        timestamp,
+      })
       const tokens = { input: 5, output: 3, reasoning: 1, cache: { read: 0, write: 0 } }
-      yield* events.publish(SessionEvent.Step.Ended, { sessionID: orphanSession, assistantMessageID: orphanAssistant, timestamp, finish: "tool-calls", cost: 1, tokens })
-      const before = yield* database.db.select().from(SessionMessageTable).where(eq(SessionMessageTable.id, orphanAssistant)).get().pipe(Effect.orDie)
+      yield* events.publish(SessionEvent.Step.Ended, {
+        sessionID: orphanSession,
+        assistantMessageID: orphanAssistant,
+        timestamp,
+        finish: "tool-calls",
+        cost: 1,
+        tokens,
+      })
+      const before = yield* database.db
+        .select()
+        .from(SessionMessageTable)
+        .where(eq(SessionMessageTable.id, orphanAssistant))
+        .get()
+        .pipe(Effect.orDie)
       if (!before) throw new Error("expected orphan assistant")
-      const confirmed = Schema.decodeUnknownSync(SessionMessage.Message)({ ...before.data, id: before.id, type: before.type })
+      const confirmed = Schema.decodeUnknownSync(SessionMessage.Message)({
+        ...before.data,
+        id: before.id,
+        type: before.type,
+      })
       if (confirmed.type !== "assistant") throw new Error("expected confirmed assistant")
       expect(confirmed).toMatchObject({ cost: 1, tokens })
-      const balance = yield* database.db.select().from(RequestUsageTable).where(eq(RequestUsageTable.session_id, orphanSession)).get().pipe(Effect.orDie)
-      const priorDetails = yield* usage.assistants({ sessionID: orphanSession, requestID: MessageID.make(orphanRequest) })
+      const balance = yield* database.db
+        .select()
+        .from(RequestUsageTable)
+        .where(eq(RequestUsageTable.session_id, orphanSession))
+        .get()
+        .pipe(Effect.orDie)
+      const priorDetails = yield* usage.assistants({
+        sessionID: orphanSession,
+        requestID: MessageID.make(orphanRequest),
+      })
       // 零预算与recent均不执行C；用完整行比较约束其不写入，而非只检查最终状态。
       yield* SessionStaleTurn.reconcile({ kind: "exit-full" }, { budgetMs: 0 })
-      expect(yield* database.db.select().from(SessionMessageTable).where(eq(SessionMessageTable.id, orphanAssistant)).get().pipe(Effect.orDie)).toEqual(before)
+      expect(
+        yield* database.db
+          .select()
+          .from(SessionMessageTable)
+          .where(eq(SessionMessageTable.id, orphanAssistant))
+          .get()
+          .pipe(Effect.orDie),
+      ).toEqual(before)
       yield* SessionStaleTurn.reconcile({ kind: "recent", limit: 16 })
-      expect(yield* database.db.select().from(SessionMessageTable).where(eq(SessionMessageTable.id, orphanAssistant)).get().pipe(Effect.orDie)).toEqual(before)
+      expect(
+        yield* database.db
+          .select()
+          .from(SessionMessageTable)
+          .where(eq(SessionMessageTable.id, orphanAssistant))
+          .get()
+          .pipe(Effect.orDie),
+      ).toEqual(before)
       yield* SessionStaleTurn.reconcile({ kind: "exit-full" }, { budgetMs: 2000 })
-      const after = yield* database.db.select().from(SessionMessageTable).where(eq(SessionMessageTable.id, orphanAssistant)).get().pipe(Effect.orDie)
+      const after = yield* database.db
+        .select()
+        .from(SessionMessageTable)
+        .where(eq(SessionMessageTable.id, orphanAssistant))
+        .get()
+        .pipe(Effect.orDie)
       if (!after) throw new Error("expected settled orphan")
-      const settled = Schema.decodeUnknownSync(SessionMessage.Message)({ ...after.data, id: after.id, type: after.type })
+      const settled = Schema.decodeUnknownSync(SessionMessage.Message)({
+        ...after.data,
+        id: after.id,
+        type: after.type,
+      })
       if (settled.type !== "assistant") throw new Error("expected assistant")
-      expect(settled.content.filter(part => part.type === "tool").map(part => part.state.status)).toEqual(["error"])
+      expect(settled.content.filter((part) => part.type === "tool").map((part) => part.state.status)).toEqual(["error"])
       // Tool.Failed不改变助手的原有完成时间/费用/Token或请求账本，幂等重扫也不改变它们。
       expect(after.data.time).toEqual(before.data.time)
       expect(settled.tokens).toEqual(confirmed.tokens)
       expect(settled.cost).toEqual(confirmed.cost)
-      expect(yield* database.db.select().from(RequestUsageTable).where(eq(RequestUsageTable.session_id, orphanSession)).get().pipe(Effect.orDie)).toEqual(balance)
-      expect(yield* usage.assistants({ sessionID: orphanSession, requestID: MessageID.make(orphanRequest) })).toEqual(priorDetails)
+      expect(
+        yield* database.db
+          .select()
+          .from(RequestUsageTable)
+          .where(eq(RequestUsageTable.session_id, orphanSession))
+          .get()
+          .pipe(Effect.orDie),
+      ).toEqual(balance)
+      expect(yield* usage.assistants({ sessionID: orphanSession, requestID: MessageID.make(orphanRequest) })).toEqual(
+        priorDetails,
+      )
       yield* SessionStaleTurn.reconcile({ kind: "exit-full" }, { budgetMs: 2000 })
-      expect(yield* database.db.select().from(SessionMessageTable).where(eq(SessionMessageTable.id, orphanAssistant)).get().pipe(Effect.orDie)).toEqual(after)
-      const waiting = yield* database.db.select().from(SessionInputTable).where(eq(SessionInputTable.id, ids[1])).get().pipe(Effect.orDie)
+      expect(
+        yield* database.db
+          .select()
+          .from(SessionMessageTable)
+          .where(eq(SessionMessageTable.id, orphanAssistant))
+          .get()
+          .pipe(Effect.orDie),
+      ).toEqual(after)
+      const waiting = yield* database.db
+        .select()
+        .from(SessionInputTable)
+        .where(eq(SessionInputTable.id, ids[1]))
+        .get()
+        .pipe(Effect.orDie)
       expect(waiting?.promoted_seq).toBeNull()
     }),
   )

@@ -71,7 +71,8 @@ const layer = Layer.effect(
     const available = (provider: ProviderV2.Info, integration: Integration.Info | undefined) => {
       if (provider.disabled) return false
       // 环境只决定可用性，不写入配置 body；解析密钥时显式 api.settings 仍先于环境。
-      if (provider.id === "claudecode" && (process.env.ANTHROPIC_AUTH_TOKEN || process.env.CLAUDECODE_API_KEY)) return true
+      if (provider.id === "claudecode" && (process.env.ANTHROPIC_AUTH_TOKEN || process.env.CLAUDECODE_API_KEY))
+        return true
       if (typeof provider.request.body.apiKey === "string") return true
       if (integration?.connections.length) return true
       return provider.integrationID === undefined && !integration
@@ -89,10 +90,24 @@ const layer = Layer.effect(
               : model.api
       // 合并后的 SDK baseURL 保持优先；无效设置仍由 SDK 校验，不能用默认值掩盖配置错误。
       // 专用缺省只补合并后仍缺失的地址，显式 URL/settings 继续领取 75 的优先级。
-      const api = inherited.type === "aisdk" && inherited.url === undefined &&
+      const api =
+        inherited.type === "aisdk" &&
+        inherited.url === undefined &&
         (inherited.settings?.baseURL === undefined || typeof inherited.settings?.baseURL === "string")
-        ? { ...inherited, url: ProviderV2.apiUrl({ npm: inherited.package, api: typeof inherited.settings?.baseURL === "string" ? inherited.settings.baseURL : ProviderV2.isClaudeCode({ providerID: model.providerID, api: inherited }) ? process.env.CLAUDECODE_BASE_URL || "https://api.cubence.com" : undefined }) || undefined }
-        : inherited
+          ? {
+              ...inherited,
+              url:
+                ProviderV2.apiUrl({
+                  npm: inherited.package,
+                  api:
+                    typeof inherited.settings?.baseURL === "string"
+                      ? inherited.settings.baseURL
+                      : ProviderV2.isClaudeCode({ providerID: model.providerID, api: inherited })
+                        ? process.env.CLAUDECODE_BASE_URL || "https://api.cubence.com"
+                        : undefined,
+                }) || undefined,
+            }
+          : inherited
       const request = {
         headers: { ...provider.request.headers, ...model.request.headers },
         body: { ...provider.request.body, ...model.request.body },

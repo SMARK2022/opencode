@@ -26,7 +26,8 @@ export function parts(node: Node) {
       child.type !== "string" &&
       child.type !== "raw_string" &&
       child.type !== "concatenation"
-    ) continue
+    )
+      continue
     out.push({ type: child.type, text: child.text })
   }
   return out
@@ -35,11 +36,12 @@ export function parts(node: Node) {
 // 两代共用规则键，去掉POSIX赋值前缀时仍完整保留重定向。
 export function permissionPattern(node: Node, tokens: string[]) {
   const command = tokens.join(" ")
-  const redirect = node
-    .descendantsOfType("redirection")
-    .filter((item): item is Node => Boolean(item))
-    .map((item) => item.text.trim())
-    .join(" ") || redirectedSuffix(node)
+  const redirect =
+    node
+      .descendantsOfType("redirection")
+      .filter((item): item is Node => Boolean(item))
+      .map((item) => item.text.trim())
+      .join(" ") || redirectedSuffix(node)
   return redirect ? `${command} ${redirect}` : command
 }
 

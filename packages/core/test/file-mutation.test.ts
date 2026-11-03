@@ -90,41 +90,63 @@ describe("FileMutation", () => {
   )
 
   it.live("preserves text endings through overwrite, conditional edit, and formatted move", () =>
-    withTmp(directory =>
+    withTmp((directory) =>
       Effect.gen(function* () {
         const mutation = yield* LocationMutation.Service
         const files = yield* FileMutation.Service
-        const format = (file: string) => Effect.promise(async () => {
-          const text = await fs.readFile(file, "utf8")
-          await fs.writeFile(file, text.replace("new", "formatted").replace(/\r\n?/g, "\n"))
-          return true
-        })
+        const format = (file: string) =>
+          Effect.promise(async () => {
+            const text = await fs.readFile(file, "utf8")
+            await fs.writeFile(file, text.replace("new", "formatted").replace(/\r\n?/g, "\n"))
+            return true
+          })
         for (const ending of ["\r\n", "\r"]) {
           const target = yield* mutation.resolve({ path: `eol-${ending.length}.txt` })
           const before = `\uFEFFold${ending}line${ending}`
           yield* Effect.promise(() => fs.writeFile(target.canonical, before))
           // 无formatter的覆写也继承既有EOL/BOM；有formatter时语义变化与物理属性必须同时保留。
           yield* files.writeTextPreservingBom({ target, content: "new\nline\n" })
-          expect(yield* Effect.promise(() => fs.readFile(target.canonical, "utf8"))).toBe(`\uFEFFnew${ending}line${ending}`)
+          expect(yield* Effect.promise(() => fs.readFile(target.canonical, "utf8"))).toBe(
+            `\uFEFFnew${ending}line${ending}`,
+          )
           const formatted = yield* files.writeTextPreservingBom({ target, content: "new\nline\n", format })
           expect(formatted.text).toBe(`formatted${ending}line${ending}`)
           // 锁内最终diff和计数同源；物理EOL恢复不能造成全文件虚假增删。
           expect(formatted.rendered).toMatchObject({ additions: 1, deletions: 1 })
           expect(formatted.rendered?.patch).toBe(formatted.diff)
-          expect(yield* Effect.promise(() => fs.readFile(target.canonical, "utf8"))).toBe(`\uFEFFformatted${ending}line${ending}`)
+          expect(yield* Effect.promise(() => fs.readFile(target.canonical, "utf8"))).toBe(
+            `\uFEFFformatted${ending}line${ending}`,
+          )
           const expected = yield* Effect.promise(() => fs.readFile(target.canonical))
           yield* files.writeIfUnchanged({ target, expected, content: "\uFEFFnew\nline\n", format })
-          expect(yield* Effect.promise(() => fs.readFile(target.canonical, "utf8"))).toBe(`\uFEFFformatted${ending}line${ending}`)
+          expect(yield* Effect.promise(() => fs.readFile(target.canonical, "utf8"))).toBe(
+            `\uFEFFformatted${ending}line${ending}`,
+          )
           const destination = yield* mutation.resolve({ path: `dest-${ending.length}.txt` })
           yield* Effect.promise(() => fs.writeFile(destination.canonical, "destination\n"))
-          const moved = yield* files.moveIfUnchanged({ target, destination, expected: yield* Effect.promise(() => fs.readFile(target.canonical)), content: "\uFEFFnew\nline\n", format })
+          const moved = yield* files.moveIfUnchanged({
+            target,
+            destination,
+            expected: yield* Effect.promise(() => fs.readFile(target.canonical)),
+            content: "\uFEFFnew\nline\n",
+            format,
+          })
           // destination已有LF只负责真实diff前像，不得接管source的CRLF/CR内容属性。
           expect(moved.text).toBe(`formatted${ending}line${ending}`)
-          expect(yield* Effect.promise(() => fs.readFile(destination.canonical, "utf8"))).toBe(`\uFEFFformatted${ending}line${ending}`)
+          expect(yield* Effect.promise(() => fs.readFile(destination.canonical, "utf8"))).toBe(
+            `\uFEFFformatted${ending}line${ending}`,
+          )
           expect(moved.diff).toContain("-destination")
           expect(moved.rendered).toMatchObject({ additions: 2, deletions: 1 })
           expect(moved.rendered?.patch).toBe(moved.diff)
-          expect(yield* Effect.promise(() => fs.access(target.canonical).then(() => true, () => false))).toBe(false)
+          expect(
+            yield* Effect.promise(() =>
+              fs.access(target.canonical).then(
+                () => true,
+                () => false,
+              ),
+            ),
+          ).toBe(false)
         }
         const fresh = yield* mutation.resolve({ path: "new.txt" })
         const missing = yield* files.create({ target: fresh, content: "new\r\nline\r\n", format })
@@ -287,9 +309,13 @@ describe("FileMutation", () => {
           const files = yield* FileMutation.Service
           const firstPlan = yield* mutation.resolve({ path: "shared.txt" })
           const secondPlan = yield* mutation.resolve({ path: "shared.txt" })
-          const first = yield* files.writeTextPreservingBom({ target: firstPlan, content: "first" }).pipe(Effect.forkChild)
+          const first = yield* files
+            .writeTextPreservingBom({ target: firstPlan, content: "first" })
+            .pipe(Effect.forkChild)
           yield* Deferred.await(firstStarted)
-          const second = yield* files.writeTextPreservingBom({ target: secondPlan, content: "second" }).pipe(Effect.forkChild)
+          const second = yield* files
+            .writeTextPreservingBom({ target: secondPlan, content: "second" })
+            .pipe(Effect.forkChild)
           yield* Effect.yieldNow
           expect(yield* Deferred.isDone(secondStarted)).toBe(false)
 
@@ -362,17 +388,37 @@ describe("FileMutation", () => {
         const destination = yield* mutation.resolve({ path: "destination.txt" })
         yield* Effect.promise(() => fs.writeFile(destination.canonical, "sentinel"))
         // stale源必须在目的写入前拒绝；两端原文均不能因此改变。
-        expect(yield* files.moveIfUnchanged({ target, destination, expected: new TextEncoder().encode("older"), content: "replacement" }).pipe(Effect.flip)).toMatchObject({ _tag: "FileMutation.StaleContentError" })
+        expect(
+          yield* files
+            .moveIfUnchanged({
+              target,
+              destination,
+              expected: new TextEncoder().encode("older"),
+              content: "replacement",
+            })
+            .pipe(Effect.flip),
+        ).toMatchObject({ _tag: "FileMutation.StaleContentError" })
         expect(yield* Effect.promise(() => fs.readFile(targetPath, "utf8"))).toBe("current")
         expect(yield* Effect.promise(() => fs.readFile(destination.canonical, "utf8"))).toBe("sentinel")
         // 真正Move仍调用同一个formatter并回报最终磁盘正文，而非请求片段。
-        const moved = yield* files.moveIfUnchanged({ target, destination, expected: new TextEncoder().encode("current"), content: "submitted",
-          format: file => Effect.promise(() => fs.writeFile(file, "formatted")).pipe(Effect.as(true)),
+        const moved = yield* files.moveIfUnchanged({
+          target,
+          destination,
+          expected: new TextEncoder().encode("current"),
+          content: "submitted",
+          format: (file) => Effect.promise(() => fs.writeFile(file, "formatted")).pipe(Effect.as(true)),
         })
         expect(moved).toMatchObject({ previous: "sentinel", text: "formatted", formattedContent: "formatted" })
         expect(moved.diff).toContain("+formatted")
         expect(yield* Effect.promise(() => fs.readFile(destination.canonical, "utf8"))).toBe("formatted")
-        expect(yield* Effect.promise(() => fs.stat(targetPath).then(() => true, () => false))).toBe(false)
+        expect(
+          yield* Effect.promise(() =>
+            fs.stat(targetPath).then(
+              () => true,
+              () => false,
+            ),
+          ),
+        ).toBe(false)
       }).pipe(provide(directory)),
     ),
   )

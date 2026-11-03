@@ -42,30 +42,30 @@
 
 ## 3. Repository Context
 
-| Source | Why it constrains this task |
-| --- | --- |
-| `docs/plans/tool-diff-bounding-performance-repair.md`（已批准并实施） | 前置设计：三分表示（binary/超限/正常）+ 64KiB 中段界 + 计数单一权威。本计划修订其门B 判据与标记格式，其余承诺全部继承 |
-| `packages/opencode/AGENTS.md` | 测试从包目录运行；Effect/module 约定 |
-| `CONTEXT.md` | Snapshot 与工具 diff 是两套数据源；Revert 走 git patch，不受本 seam 影响 |
-| `AGENTS.md`（根） | 默认分支 dev；bun 工作流 |
-| jsdiff 版本现状 | 服务端 `node_modules/diff@8.0.2`（工具生成 seam）；TUI 侧 `thirdparty/opentui/node_modules/diff@9.0.0`（Diff renderable 的 parsePatch） |
+| Source                                                                | Why it constrains this task                                                                                                             |
+| --------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `docs/plans/tool-diff-bounding-performance-repair.md`（已批准并实施） | 前置设计：三分表示（binary/超限/正常）+ 64KiB 中段界 + 计数单一权威。本计划修订其门B 判据与标记格式，其余承诺全部继承                   |
+| `packages/opencode/AGENTS.md`                                         | 测试从包目录运行；Effect/module 约定                                                                                                    |
+| `CONTEXT.md`                                                          | Snapshot 与工具 diff 是两套数据源；Revert 走 git patch，不受本 seam 影响                                                                |
+| `AGENTS.md`（根）                                                     | 默认分支 dev；bun 工作流                                                                                                                |
+| jsdiff 版本现状                                                       | 服务端 `node_modules/diff@8.0.2`（工具生成 seam）；TUI 侧 `thirdparty/opentui/node_modules/diff@9.0.0`（Diff renderable 的 parsePatch） |
 
 ## 4. Files and Evidence Read
 
-| Evidence | Relevance | Evidence class |
-| --- | --- | --- |
-| `packages/opencode/src/tool/file-diff.ts`（全文 116 行） | 唯一 diff 生成 seam；门B `oldMid+newMid chars > 64KiB` 在 Myers 之前跳过；标记正文行无前缀 | observed |
-| `node_modules/diff/libesm/diff/base.js:34-137`（diff@8 源码） | `options.maxEditLength` 原生支持：同步路径 `while (editLength <= maxEditLength ...)`，预算耗尽**无 return → undefined**；对角剪枝（:47-64）使"小 D 大文件"为快路径；`options.timeout` 亦存在但非确定 | observed |
-| `node_modules/diff/libesm/diff/line.js:36-38` | `diffLines(old, new, options)` 直通 base.diff，选项透传 | observed |
-| `thirdparty/opentui/node_modules/diff/libesm/patch/parse.js:37,444,478`（diff@9） | hunk 头识别 `^@@\s`；正文行必须以 空格/`+`/`-`/`\` 开头，否则 `throw 'Hunk at line N contained invalid line <line>'`——与用户所见红字逐字吻合（N=5、line=`old: 1093 mid lines...`） | observed |
-| `thirdparty/opentui/packages/core/src/renderables/Diff.ts:153-175,310-365` | TUI Diff renderable：parsePatch 抛错 → `buildErrorView` = 红字横幅 + 原文降级渲染——即用户看到的画面 | observed |
-| `packages/opencode/src/cli/cmd/tui/feature-plugins/system/session-v2.tsx:929-977` | Edit 卡片把 `metadata.diff` 无差别喂 `<diff>` renderable（split/unified） | observed |
-| `packages/opencode/src/session/summary-cache.ts:87-129,161-201` | 摄入端：显式 additions/deletions 优先，`countPatchStats(diff)` 文本重扫只服务已入库遗留行（遗留行早于标记存在，永不包含标记）→ 标记格式变化对计数零影响 | observed |
-| `packages/opencode/src/session/prompt.ts:254-331` | 压缩/摘要 prompt 消费 `metadata.diff`/`filediff`：标记保持紧凑即满足；小改得到真实小 diff 同样紧凑 | observed |
-| `packages/opencode/src/tool/edit.ts:296-306,365-384` | ask metadata `{filepath, diff}`（权限预览）与成功后 `renderFileDiff` → `filediff{patch,additions,deletions}` 双出口共用同一 seam | observed |
-| `packages/opencode/test/tool/apply_patch.test.ts:1280-1377` | 现有钉死面：write 大重写（中段 8000 行）与 edit 大中段（中段 2000 行）出标记、计数 = 中段行数字面量、`diff < 64*1024` | observed |
-| 用户终端粘贴 + SQLite 查询（`C:/Users/Lenovo/.local/share/opencode/opencode.db`，只读） | 卡片 part `prt_062db5305001x1yKDdI6uvYjp1`：`edits[2]`（203ch/5L→611ch/12L；154ch/3L→897ch/16L），`metadata.diff` 644 字符标记；同会话 16:02:43 的 2 行小改正常出 939 字符 unified diff；全库 edit parts=14524、rewrite 标记=39、binary 标记=8 | observed |
-| `git diff --numstat` + HEAD sha256 比对 | 真实变更 `+21/-1`，3 hunk（~91、~1182、~1198 行）；卡片 old sha256 === HEAD 版本哈希 `6a4a0c9e...`（该 edit 是会话首改） | observed |
+| Evidence                                                                                | Relevance                                                                                                                                                                                                                                      | Evidence class |
+| --------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------- |
+| `packages/opencode/src/tool/file-diff.ts`（全文 116 行）                                | 唯一 diff 生成 seam；门B `oldMid+newMid chars > 64KiB` 在 Myers 之前跳过；标记正文行无前缀                                                                                                                                                     | observed       |
+| `node_modules/diff/libesm/diff/base.js:34-137`（diff@8 源码）                           | `options.maxEditLength` 原生支持：同步路径 `while (editLength <= maxEditLength ...)`，预算耗尽**无 return → undefined**；对角剪枝（:47-64）使"小 D 大文件"为快路径；`options.timeout` 亦存在但非确定                                           | observed       |
+| `node_modules/diff/libesm/diff/line.js:36-38`                                           | `diffLines(old, new, options)` 直通 base.diff，选项透传                                                                                                                                                                                        | observed       |
+| `thirdparty/opentui/node_modules/diff/libesm/patch/parse.js:37,444,478`（diff@9）       | hunk 头识别 `^@@\s`；正文行必须以 空格/`+`/`-`/`\` 开头，否则 `throw 'Hunk at line N contained invalid line <line>'`——与用户所见红字逐字吻合（N=5、line=`old: 1093 mid lines...`）                                                             | observed       |
+| `thirdparty/opentui/packages/core/src/renderables/Diff.ts:153-175,310-365`              | TUI Diff renderable：parsePatch 抛错 → `buildErrorView` = 红字横幅 + 原文降级渲染——即用户看到的画面                                                                                                                                            | observed       |
+| `packages/opencode/src/cli/cmd/tui/feature-plugins/system/session-v2.tsx:929-977`       | Edit 卡片把 `metadata.diff` 无差别喂 `<diff>` renderable（split/unified）                                                                                                                                                                      | observed       |
+| `packages/opencode/src/session/summary-cache.ts:87-129,161-201`                         | 摄入端：显式 additions/deletions 优先，`countPatchStats(diff)` 文本重扫只服务已入库遗留行（遗留行早于标记存在，永不包含标记）→ 标记格式变化对计数零影响                                                                                        | observed       |
+| `packages/opencode/src/session/prompt.ts:254-331`                                       | 压缩/摘要 prompt 消费 `metadata.diff`/`filediff`：标记保持紧凑即满足；小改得到真实小 diff 同样紧凑                                                                                                                                             | observed       |
+| `packages/opencode/src/tool/edit.ts:296-306,365-384`                                    | ask metadata `{filepath, diff}`（权限预览）与成功后 `renderFileDiff` → `filediff{patch,additions,deletions}` 双出口共用同一 seam                                                                                                               | observed       |
+| `packages/opencode/test/tool/apply_patch.test.ts:1280-1377`                             | 现有钉死面：write 大重写（中段 8000 行）与 edit 大中段（中段 2000 行）出标记、计数 = 中段行数字面量、`diff < 64*1024`                                                                                                                          | observed       |
+| 用户终端粘贴 + SQLite 查询（`C:/Users/Lenovo/.local/share/opencode/opencode.db`，只读） | 卡片 part `prt_062db5305001x1yKDdI6uvYjp1`：`edits[2]`（203ch/5L→611ch/12L；154ch/3L→897ch/16L），`metadata.diff` 644 字符标记；同会话 16:02:43 的 2 行小改正常出 939 字符 unified diff；全库 edit parts=14524、rewrite 标记=39、binary 标记=8 | observed       |
+| `git diff --numstat` + HEAD sha256 比对                                                 | 真实变更 `+21/-1`，3 hunk（~91、~1182、~1198 行）；卡片 old sha256 === HEAD 版本哈希 `6a4a0c9e...`（该 edit 是会话首改）                                                                                                                       | observed       |
 
 ## 5. Current Behavior
 
@@ -87,32 +87,32 @@ edit/write/apply_patch execute
 
 ## 6. Supported Input Domain and Reachability
 
-| Input or condition | Producer | Upstream guarantees | Reachable path | Owner | Classification |
-| --- | --- | --- | --- | --- | --- |
-| 小改大文件（首末变更跨度 > 32KiB chars，D ≤ 预算） | edit/write/apply_patch 对任意大小文本 | 归一化行尾文本 | 本次事故（DB part 已证） | file-diff.ts | observed |
-| 真实大重写/删文件（D > 预算） | 同上 | 同上 | 事故原文（407MB/139s）、既有测试 fixture（D=4000/16000） | file-diff.ts | observed |
-| 巨行小改（D 小但单行 > ~32KiB chars，patch 超 64KiB） | bundle/minified JSON 等 | 同上 | 门B 现口径同样标记（span>64KiB） | file-diff.ts | reachable |
-| 二进制（含 U+0000） | 既有 | 门A | 既有测试 | file-diff.ts | observed |
-| legacy 已入库巨 metadata | DB 历史 | 摄入界 | summary-cache 遗留扫描分支 | summary-cache.ts | observed（不在本任务改动面） |
+| Input or condition                                    | Producer                              | Upstream guarantees | Reachable path                                           | Owner            | Classification               |
+| ----------------------------------------------------- | ------------------------------------- | ------------------- | -------------------------------------------------------- | ---------------- | ---------------------------- |
+| 小改大文件（首末变更跨度 > 32KiB chars，D ≤ 预算）    | edit/write/apply_patch 对任意大小文本 | 归一化行尾文本      | 本次事故（DB part 已证）                                 | file-diff.ts     | observed                     |
+| 真实大重写/删文件（D > 预算）                         | 同上                                  | 同上                | 事故原文（407MB/139s）、既有测试 fixture（D=4000/16000） | file-diff.ts     | observed                     |
+| 巨行小改（D 小但单行 > ~32KiB chars，patch 超 64KiB） | bundle/minified JSON 等               | 同上                | 门B 现口径同样标记（span>64KiB）                         | file-diff.ts     | reachable                    |
+| 二进制（含 U+0000）                                   | 既有                                  | 门A                 | 既有测试                                                 | file-diff.ts     | observed                     |
+| legacy 已入库巨 metadata                              | DB 历史                               | 摄入界              | summary-cache 遗留扫描分支                               | summary-cache.ts | observed（不在本任务改动面） |
 
 ## 7. Required Invariants
 
-| ID | Behavioral invariant | Evidence | Existing test |
-| --- | --- | --- | --- |
-| INV-01 | 元数据 patch 有界（≤ 64 KiB chars） | 407MB 事故；前置计划 INV-01 | apply_patch.test.ts:1301 |
-| INV-02 | 预算内可计算、可表示的编辑产出**真实行级 unified diff**，判据是真实计算成本与产物体积，不是输入中段体积猜测 | 本次事故（D=36、真实 patch ~1.5KB 被误标）；用户要求 | 无（本计划新增，红切片） |
-| INV-03 | additions/deletions 单一权威且反映真实变更行；标记路径计数 = 中段行数（此时中段≈真实变更） | 前置计划 INV-08；apply_patch.test.ts:1305/1373 | apply_patch.test.ts:1305,1373 |
-| INV-04 | 降级标记本身是**合法 unified diff**（任意 parsePatch 消费者可解析，计数重扫 0/0） | TUI 红字事故（parse.js:478 抛错）；file-diff.ts:100 注释"天然不计数"承诺需在新格式下保持 | 无（本计划新增，红切片） |
-| INV-05 | 摘要摄入界（1 MiB merged cap）与显式计数优先级不动 | 前置计划 INV-05；summary-cache.ts:87-129 | summary-tool-diff.test.ts |
-| INV-06 | diff 生成单一 seam（renderFileDiff）不变，三工具共用 | 前置计划 §9 | apply_patch.test.ts 既有三工具切片 |
+| ID     | Behavioral invariant                                                                                        | Evidence                                                                                 | Existing test                      |
+| ------ | ----------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- | ---------------------------------- |
+| INV-01 | 元数据 patch 有界（≤ 64 KiB chars）                                                                         | 407MB 事故；前置计划 INV-01                                                              | apply_patch.test.ts:1301           |
+| INV-02 | 预算内可计算、可表示的编辑产出**真实行级 unified diff**，判据是真实计算成本与产物体积，不是输入中段体积猜测 | 本次事故（D=36、真实 patch ~1.5KB 被误标）；用户要求                                     | 无（本计划新增，红切片）           |
+| INV-03 | additions/deletions 单一权威且反映真实变更行；标记路径计数 = 中段行数（此时中段≈真实变更）                  | 前置计划 INV-08；apply_patch.test.ts:1305/1373                                           | apply_patch.test.ts:1305,1373      |
+| INV-04 | 降级标记本身是**合法 unified diff**（任意 parsePatch 消费者可解析，计数重扫 0/0）                           | TUI 红字事故（parse.js:478 抛错）；file-diff.ts:100 注释"天然不计数"承诺需在新格式下保持 | 无（本计划新增，红切片）           |
+| INV-05 | 摘要摄入界（1 MiB merged cap）与显式计数优先级不动                                                          | 前置计划 INV-05；summary-cache.ts:87-129                                                 | summary-tool-diff.test.ts          |
+| INV-06 | diff 生成单一 seam（renderFileDiff）不变，三工具共用                                                        | 前置计划 §9                                                                              | apply_patch.test.ts 既有三工具切片 |
 
 ## 8. First Divergence and Root Cause
 
-| Invariant | First divergence | Owning module/interface | Proof |
-| --- | --- | --- | --- |
-| INV-02 | `file-diff.ts:85` 门B 在跑 Myers 之前以 `(oldMid+newMid) chars > 64KiB` 判定"超限"——该量既不是计算成本（jsdiff@8 对角剪枝下小 D 大文件是快路径，base.js:47-64 注释明示 O(n+d)）也不是产物体积（真实 patch ~1.5KB），是无关代理变量 | `renderFileDiff` 门B | DB part prt_062db5305001：D=36/真实 +21/-1 被标记；28 秒后同文件 D=2 正常出 diff |
-| INV-04 | `file-diff.ts:68-76` rewriteMarker 正文行（`old:`/`new:`）不以 空格/`+`/`-`/`\` 开头，`@@ rewrite @@` 无 range 数字（oldStart=NaN 隐患） | `rewriteMarker` | parse.js:478 throw 逐字复现用户红字；binaryMarker 无 hunk → Diff renderable 空渲染 |
-| INV-03（症状） | 标记计数 = 中段行数（1113/1093），在误杀场景虚高 | 门B 下游症状，随 INV-02 修复消失 | DB 记录 vs git numstat |
+| Invariant      | First divergence                                                                                                                                                                                                                   | Owning module/interface          | Proof                                                                              |
+| -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------- | ---------------------------------------------------------------------------------- |
+| INV-02         | `file-diff.ts:85` 门B 在跑 Myers 之前以 `(oldMid+newMid) chars > 64KiB` 判定"超限"——该量既不是计算成本（jsdiff@8 对角剪枝下小 D 大文件是快路径，base.js:47-64 注释明示 O(n+d)）也不是产物体积（真实 patch ~1.5KB），是无关代理变量 | `renderFileDiff` 门B             | DB part prt_062db5305001：D=36/真实 +21/-1 被标记；28 秒后同文件 D=2 正常出 diff   |
+| INV-04         | `file-diff.ts:68-76` rewriteMarker 正文行（`old:`/`new:`）不以 空格/`+`/`-`/`\` 开头，`@@ rewrite @@` 无 range 数字（oldStart=NaN 隐患）                                                                                           | `rewriteMarker`                  | parse.js:478 throw 逐字复现用户红字；binaryMarker 无 hunk → Diff renderable 空渲染 |
+| INV-03（症状） | 标记计数 = 中段行数（1113/1093），在误杀场景虚高                                                                                                                                                                                   | 门B 下游症状，随 INV-02 修复消失 | DB 记录 vs git numstat                                                             |
 
 红反馈回路：`bun test test/tool/apply_patch.test.ts`（packages/opencode 目录）新增切片 1
 （§16）今日红：构造 1662 行 fixture、两处小改相距 ~1100 行，期望真实 unified diff，
@@ -120,11 +120,11 @@ edit/write/apply_patch execute
 
 ## 9. Responsibility and Seam
 
-| Concern | Owner | Interface promise | Why it belongs here | Why another module does not own it |
-| --- | --- | --- | --- | --- |
-| diff 可行性判据（计算预算 + 产物界） | `file-diff.ts` `renderFileDiff` | 同一 `{patch, additions, deletions}` 契约 | 唯一生成 seam；判据即生成成本本身 | TUI/摄入端只消费字符串，不承担表示选择 |
-| 标记格式合法性 | `file-diff.ts` 标记构造 | 标记 = 合法 unified diff 最小 hunk | 生产者对自己的输出格式负责 | 消费者特判 = 责任泄漏（用户明确否决） |
-| 计数口径 | 不变（renderFileDiff 单一推导；摄入端显式优先） | 同前 | 前置计划 §9 已钉死 | — |
+| Concern                              | Owner                                           | Interface promise                         | Why it belongs here               | Why another module does not own it     |
+| ------------------------------------ | ----------------------------------------------- | ----------------------------------------- | --------------------------------- | -------------------------------------- |
+| diff 可行性判据（计算预算 + 产物界） | `file-diff.ts` `renderFileDiff`                 | 同一 `{patch, additions, deletions}` 契约 | 唯一生成 seam；判据即生成成本本身 | TUI/摄入端只消费字符串，不承担表示选择 |
+| 标记格式合法性                       | `file-diff.ts` 标记构造                         | 标记 = 合法 unified diff 最小 hunk        | 生产者对自己的输出格式负责        | 消费者特判 = 责任泄漏（用户明确否决）  |
+| 计数口径                             | 不变（renderFileDiff 单一推导；摄入端显式优先） | 同前                                      | 前置计划 §9 已钉死                | —                                      |
 
 ## 10. Single Approved Primary-Path Design
 
@@ -195,79 +195,79 @@ TUI 渲染效果（R2 依审计 NB-1 校正）：unified 视图只渲染 hunk �
 
 ## 11. Secondary and Replacement Path Inventory
 
-| Path | Current or proposed | Classification | Produces success? | Decision-surface share | Disposition |
-| --- | --- | --- | --- | --- | --- |
-| 正常行级 diff（探测 + createTwoFilesPatch + countPatchStats） | 修订 | primary-contract branch | yes | 主路径 | preserve |
-| rewrite 标记（编辑距离超预算） | 修订（判据+格式） | primary-contract branch（表示降级，非成功降级；大重写为 observed 输入） | yes | 1/3 分支 | preserve |
-| rewrite 标记（产物超 64KiB） | proposed | primary-contract branch（巨行为 observed-reachable 输入，旧门同判） | yes | 1 分支 | preserve |
-| binary 标记 | 修订（格式合法化） | primary-contract branch | yes | 1/3 分支 | preserve |
-| summary 摄入界/显式计数优先 | 当前 | 既有兼容（不动） | yes | 0 | preserve |
-| diff@8 `timeout` 选项 | 存在 | 非确定墙钟界 | — | 0 | reject（非确定性，无已证需求；记录为非阻塞注记） |
-| TUI 侧标记识别/文本渲染 | proposed（用户否决） | 消费者特判 = 责任泄漏 | — | 0 | reject |
-| 对编辑量设限（把 maxEditLength 当作编辑约束） | — | 语义越界 | — | 0 | reject |
+| Path                                                          | Current or proposed  | Classification                                                          | Produces success? | Decision-surface share | Disposition                                      |
+| ------------------------------------------------------------- | -------------------- | ----------------------------------------------------------------------- | ----------------- | ---------------------- | ------------------------------------------------ |
+| 正常行级 diff（探测 + createTwoFilesPatch + countPatchStats） | 修订                 | primary-contract branch                                                 | yes               | 主路径                 | preserve                                         |
+| rewrite 标记（编辑距离超预算）                                | 修订（判据+格式）    | primary-contract branch（表示降级，非成功降级；大重写为 observed 输入） | yes               | 1/3 分支               | preserve                                         |
+| rewrite 标记（产物超 64KiB）                                  | proposed             | primary-contract branch（巨行为 observed-reachable 输入，旧门同判）     | yes               | 1 分支                 | preserve                                         |
+| binary 标记                                                   | 修订（格式合法化）   | primary-contract branch                                                 | yes               | 1/3 分支               | preserve                                         |
+| summary 摄入界/显式计数优先                                   | 当前                 | 既有兼容（不动）                                                        | yes               | 0                      | preserve                                         |
+| diff@8 `timeout` 选项                                         | 存在                 | 非确定墙钟界                                                            | —                 | 0                      | reject（非确定性，无已证需求；记录为非阻塞注记） |
+| TUI 侧标记识别/文本渲染                                       | proposed（用户否决） | 消费者特判 = 责任泄漏                                                   | —                 | 0                      | reject                                           |
+| 对编辑量设限（把 maxEditLength 当作编辑约束）                 | —                    | 语义越界                                                                | —                 | 0                      | reject                                           |
 
 无 fallback：探测就是主路径计算本身（带预算），不是失败后另起一条成功路径；标记分支
 是支持输入域成员的确定性表示分派，与前置计划 §11 同构。
 
 ## 12. Workaround Deletion and Replacement
 
-| Existing workaround or duplicate | Why it existed | Why the approved route supersedes it | Delete or collapse location |
-| --- | --- | --- | --- |
-| 门B 中段体积预判（trimCommonLines chars > 64KiB 跳过 Myers） | 防二次方 Myers 事故 | 成本模型纠正：真实驱动是编辑距离与产物体积；预算探测 + 产物直测双界取代 | file-diff.ts:84-87 收敛为 marker 计数用途（trimCommonLines 保留，仅服务标记的 N/K 计数） |
-| 标记裸正文行 + 无 range 的 `@@ rewrite @@` | 当时假设消费面按纯文本展示（前置计划 §验收残留自认） | 合法 hunk 后任意 unified 消费者零特判 | file-diff.ts:64-80 |
+| Existing workaround or duplicate                             | Why it existed                                       | Why the approved route supersedes it                                    | Delete or collapse location                                                              |
+| ------------------------------------------------------------ | ---------------------------------------------------- | ----------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| 门B 中段体积预判（trimCommonLines chars > 64KiB 跳过 Myers） | 防二次方 Myers 事故                                  | 成本模型纠正：真实驱动是编辑距离与产物体积；预算探测 + 产物直测双界取代 | file-diff.ts:84-87 收敛为 marker 计数用途（trimCommonLines 保留，仅服务标记的 N/K 计数） |
+| 标记裸正文行 + 无 range 的 `@@ rewrite @@`                   | 当时假设消费面按纯文本展示（前置计划 §验收残留自认） | 合法 hunk 后任意 unified 消费者零特判                                   | file-diff.ts:64-80                                                                       |
 
 ## 13. Forward Traceability
 
-| Requirement or invariant | Production path | Planned file/change | Behavioral test |
-| --- | --- | --- | --- |
-| INV-02 小改大文件出真实 diff | 探测通过 + createTwoFilesPatch | file-diff.ts 门B 重写 | 切片 1（红） |
-| INV-02 反向：真实大改仍标记 | 探测 abort → rewriteMarker | 同上 | 既有 apply_patch.test.ts:1349（保持绿） |
-| INV-02 巨行产物界 | patch.length 直测 → rewriteMarker | 同上 | 切片 3 |
-| INV-04 标记可解析 | 标记 = 合法 hunk + context 行（binary 保留大写 `Binary file` 措辞，:1247 钉死子串不变） | file-diff.ts 标记构造 | 切片 2（红：parsePatch 现状抛错）；既有 :1229 binary 切片保持绿 |
-| INV-04 计数重扫 0/0 | context 行不以 +/- 开头 | 同上 | 切片 2 断言 countPatchStats(marker)===0/0 |
-| INV-01 patch ≤ 64KiB | 产物直测（比旧 ~4×64KiB 更紧） | 同上 | 既有 :1301（保持绿） |
-| INV-03 计数真实/中段口径 | 正常路径 countPatchStats 不变；标记路径中段计数不变 | 不动 | 既有 :1305/:1373（保持绿） |
-| INV-05/06 | 不动 | 不动 | 既有 summary-tool-diff / 三工具切片 |
-| 性能界不回退 | abort 工作量 O((N+M)+K²) | 常量 + 注释 | 切片 5（事故 fixture 实测 <1s） |
+| Requirement or invariant     | Production path                                                                         | Planned file/change   | Behavioral test                                                 |
+| ---------------------------- | --------------------------------------------------------------------------------------- | --------------------- | --------------------------------------------------------------- |
+| INV-02 小改大文件出真实 diff | 探测通过 + createTwoFilesPatch                                                          | file-diff.ts 门B 重写 | 切片 1（红）                                                    |
+| INV-02 反向：真实大改仍标记  | 探测 abort → rewriteMarker                                                              | 同上                  | 既有 apply_patch.test.ts:1349（保持绿）                         |
+| INV-02 巨行产物界            | patch.length 直测 → rewriteMarker                                                       | 同上                  | 切片 3                                                          |
+| INV-04 标记可解析            | 标记 = 合法 hunk + context 行（binary 保留大写 `Binary file` 措辞，:1247 钉死子串不变） | file-diff.ts 标记构造 | 切片 2（红：parsePatch 现状抛错）；既有 :1229 binary 切片保持绿 |
+| INV-04 计数重扫 0/0          | context 行不以 +/- 开头                                                                 | 同上                  | 切片 2 断言 countPatchStats(marker)===0/0                       |
+| INV-01 patch ≤ 64KiB         | 产物直测（比旧 ~4×64KiB 更紧）                                                          | 同上                  | 既有 :1301（保持绿）                                            |
+| INV-03 计数真实/中段口径     | 正常路径 countPatchStats 不变；标记路径中段计数不变                                     | 不动                  | 既有 :1305/:1373（保持绿）                                      |
+| INV-05/06                    | 不动                                                                                    | 不动                  | 既有 summary-tool-diff / 三工具切片                             |
+| 性能界不回退                 | abort 工作量 O((N+M)+K²)                                                                | 常量 + 注释           | 切片 5（事故 fixture 实测 <1s）                                 |
 
 ## 14. Reverse Traceability
 
-| Proposed production concept | Requirement ID | Evidence | Why existing logic cannot carry it |
-| --- | --- | --- | --- |
-| diffLines maxEditLength 探测 | INV-02 | base.js:35-36,131 源码；事故 D=36 被误杀 | 中段体积是无关代理变量，猜测无法区分 D=36 与 D=8000 |
-| patch.length 产物直测 | INV-01/02 | 巨行 reachable（minified 一行 500KB：D=1，产物无界） | 编辑距离界不住单行长度 |
-| 标记 context 行 + 合法 range | INV-04 | parse.js:37/444/478 源码；用户红字逐字复现 | 裸行必然触发 strict 解析抛错；无 range 有 NaN 隐患 |
-| MAX_DIFF_EDIT_LINES=2000 | INV-02+性能界 | 既有 fixture D=4000 需仍标记；事故 8000 行 30s 外推 | — |
-| binary 标记同构合法化 | INV-04 | parsePatch 无 hunk → 0 patches → 空渲染（Diff.ts:186 早退） | 同族缺陷，同 seam 一次修齐 |
+| Proposed production concept  | Requirement ID | Evidence                                                    | Why existing logic cannot carry it                  |
+| ---------------------------- | -------------- | ----------------------------------------------------------- | --------------------------------------------------- |
+| diffLines maxEditLength 探测 | INV-02         | base.js:35-36,131 源码；事故 D=36 被误杀                    | 中段体积是无关代理变量，猜测无法区分 D=36 与 D=8000 |
+| patch.length 产物直测        | INV-01/02      | 巨行 reachable（minified 一行 500KB：D=1，产物无界）        | 编辑距离界不住单行长度                              |
+| 标记 context 行 + 合法 range | INV-04         | parse.js:37/444/478 源码；用户红字逐字复现                  | 裸行必然触发 strict 解析抛错；无 range 有 NaN 隐患  |
+| MAX_DIFF_EDIT_LINES=2000     | INV-02+性能界  | 既有 fixture D=4000 需仍标记；事故 8000 行 30s 外推         | —                                                   |
+| binary 标记同构合法化        | INV-04         | parsePatch 无 hunk → 0 patches → 空渲染（Diff.ts:186 早退） | 同族缺陷，同 seam 一次修齐                          |
 
 ## 15. File-Level Change Plan
 
-| File | Add / modify / delete | Exact responsibility of the change | Expected line delta |
-| --- | --- | --- | --- |
-| `packages/opencode/src/tool/file-diff.ts` | modify | 门B 重写（探测 + 产物直测）、标记格式合法化、常量更替与中文注释 | ~+45/−20 |
-| `packages/opencode/test/tool/apply_patch.test.ts` | modify | 新增切片 1/2/3/5（红→绿）+ 标记断言扩展 | ~+75 |
-| `packages/opencode/test/tool/edit.test.ts` | modify | 切片 4：edit 双出口（ask 与 filediff）同串合法（可选并入 apply_patch.test） | ~+25 |
-| `docs/plans/tool-diff-edit-budget-gate-repair.md` | add | 本计划 | — |
+| File                                              | Add / modify / delete | Exact responsibility of the change                                          | Expected line delta |
+| ------------------------------------------------- | --------------------- | --------------------------------------------------------------------------- | ------------------- |
+| `packages/opencode/src/tool/file-diff.ts`         | modify                | 门B 重写（探测 + 产物直测）、标记格式合法化、常量更替与中文注释             | ~+45/−20            |
+| `packages/opencode/test/tool/apply_patch.test.ts` | modify                | 新增切片 1/2/3/5（红→绿）+ 标记断言扩展                                     | ~+75                |
+| `packages/opencode/test/tool/edit.test.ts`        | modify                | 切片 4：edit 双出口（ask 与 filediff）同串合法（可选并入 apply_patch.test） | ~+25                |
+| `docs/plans/tool-diff-edit-budget-gate-repair.md` | add                   | 本计划                                                                      | —                   |
 
 ## 16. TDD Behavior Slices
 
-| Order | Red behavior | Why current code fails | Minimal green behavior | Regression protected |
-| --- | --- | --- | --- | --- |
-| 1 | 1662 行 fixture（~40ch/行），两处小改分别位于 ~91 与 ~1182 行（镜像事故）：metadata diff 含 `@@ -` hunk、不含 `whole-file rewrite`，计数 = 独立期望字面量（如 +9/-1） | 门B 中段 chars>64KiB 误判 → 标记 | 探测通过出真实 diff | INV-02 主断言 |
-| 2 | parsePatch(rewrite 标记) 与 parsePatch(binary 标记) 不抛错、恰 1 hunk、hunk 行数与正文一致（rewrite 2/2，binary 4/4）；countPatchStats(两标记)===0/0 | 裸 `old:` 行触发 parse.js:478；binary 无 hunk | 标记合法 hunk + context 行 | INV-04 |
-| 3 | 2 行 × 35KB 巨行文件两行全改：出标记、含 `old: 2 mid lines`、计数 2/2 | 现状也标记（本切片为边界守护，非红）——防新门只看 D 放行巨产物 | patch.length 直测 | INV-01 在新门下的连续性 |
-| 4 | edit 工具双出口（ask.metadata.diff 与 metadata.filediff.patch）各自等于 renderFileDiff 对其自身输入的输出且可 parsePatch；不要求两出口字节相等（formatter 可能往 commit 后内容上变更，R5 语义） | 同切片 2 根因 | 生产者单 seam 保证 | INV-06 |
-| 5 | 事故 fixture（中段 8000 行重写、640KB 全重写）在预算内完成且 <1s、出标记 | —（性能守护，非红） | abort 路径 O((N+M)+K²) 实测 | 事故不回退 |
-| 6 | 既有 :1229/:1288/:1349 三切片保持绿（binary `Binary file` 子串、D=16000/4000 仍标记、计数 = 中段字面量、`diff<64*1024`） | — | K=2000 < 4000 保证；binary 标记保留大写措辞（B-01 修正） | INV-03/04/01 兼容 |
+| Order | Red behavior                                                                                                                                                                                    | Why current code fails                                        | Minimal green behavior                                   | Regression protected    |
+| ----- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------- | -------------------------------------------------------- | ----------------------- |
+| 1     | 1662 行 fixture（~40ch/行），两处小改分别位于 ~91 与 ~1182 行（镜像事故）：metadata diff 含 `@@ -` hunk、不含 `whole-file rewrite`，计数 = 独立期望字面量（如 +9/-1）                           | 门B 中段 chars>64KiB 误判 → 标记                              | 探测通过出真实 diff                                      | INV-02 主断言           |
+| 2     | parsePatch(rewrite 标记) 与 parsePatch(binary 标记) 不抛错、恰 1 hunk、hunk 行数与正文一致（rewrite 2/2，binary 4/4）；countPatchStats(两标记)===0/0                                            | 裸 `old:` 行触发 parse.js:478；binary 无 hunk                 | 标记合法 hunk + context 行                               | INV-04                  |
+| 3     | 2 行 × 35KB 巨行文件两行全改：出标记、含 `old: 2 mid lines`、计数 2/2                                                                                                                           | 现状也标记（本切片为边界守护，非红）——防新门只看 D 放行巨产物 | patch.length 直测                                        | INV-01 在新门下的连续性 |
+| 4     | edit 工具双出口（ask.metadata.diff 与 metadata.filediff.patch）各自等于 renderFileDiff 对其自身输入的输出且可 parsePatch；不要求两出口字节相等（formatter 可能往 commit 后内容上变更，R5 语义） | 同切片 2 根因                                                 | 生产者单 seam 保证                                       | INV-06                  |
+| 5     | 事故 fixture（中段 8000 行重写、640KB 全重写）在预算内完成且 <1s、出标记                                                                                                                        | —（性能守护，非红）                                           | abort 路径 O((N+M)+K²) 实测                              | 事故不回退              |
+| 6     | 既有 :1229/:1288/:1349 三切片保持绿（binary `Binary file` 子串、D=16000/4000 仍标记、计数 = 中段字面量、`diff<64*1024`）                                                                        | —                                                             | K=2000 < 4000 保证；binary 标记保留大写措辞（B-01 修正） | INV-03/04/01 兼容       |
 
 运行目录：`packages/opencode`（根目录有 do-not-run-tests-from-root 守卫）。
 
 ## 17. Chinese Comment Budget
 
-| Metric | Estimate | Method |
-| --- | --- | --- |
-| E | ~45 | file-diff.ts 门B + 标记 + 常量（测试注释不计入生产 E） |
-| C | ≥ 7 | ceil(45×0.15)=7 |
+| Metric | Estimate | Method                                                 |
+| ------ | -------- | ------------------------------------------------------ |
+| E      | ~45      | file-diff.ts 门B + 标记 + 常量（测试注释不计入生产 E） |
+| C      | ≥ 7      | ceil(45×0.15)=7                                        |
 
 需中文注释钉死：① 成本模型（O((N+M)+D²)、对角剪枝、为何探测即主路径非 fallback）；
 ② `MAX_DIFF_EDIT_LINES=2000` 依据（fixture 兼容 + 事故外推 + 切片 5 实测）；
@@ -278,24 +278,24 @@ TUI 渲染效果（R2 依审计 NB-1 校正）：unified 视图只渲染 hunk �
 
 ## 18. Verification
 
-| Command | Working directory | Evidence produced |
-| --- | --- | --- |
-| `bun test test/tool/apply_patch.test.ts` | packages/opencode | 切片 1/2/3/5/6 + 既有界不回退 |
-| `bun test test/tool/edit.test.ts` | packages/opencode | 切片 4 + edit 既有行为 |
-| `bun test test/tool/write.test.ts` | packages/opencode | write 路径继承 |
-| `bun test test/session/summary-tool-diff.test.ts` | packages/opencode | 摄入计数/口径不漂移 |
-| `bun typecheck` | packages/opencode | 类型安全 |
+| Command                                           | Working directory | Evidence produced             |
+| ------------------------------------------------- | ----------------- | ----------------------------- |
+| `bun test test/tool/apply_patch.test.ts`          | packages/opencode | 切片 1/2/3/5/6 + 既有界不回退 |
+| `bun test test/tool/edit.test.ts`                 | packages/opencode | 切片 4 + edit 既有行为        |
+| `bun test test/tool/write.test.ts`                | packages/opencode | write 路径继承                |
+| `bun test test/session/summary-tool-diff.test.ts` | packages/opencode | 摄入计数/口径不漂移           |
+| `bun typecheck`                                   | packages/opencode | 类型安全                      |
 
 ## 19. Diff Budget
 
-| Metric | Estimate | Justification |
-| --- | --- | --- |
-| Files added | 1 | 本计划文档 |
-| Files modified | 3 | 单 seam + 两个测试文件 |
-| Files deleted | 0 | — |
+| Metric           | Estimate      | Justification                |
+| ---------------- | ------------- | ---------------------------- |
+| Files added      | 1             | 本计划文档                   |
+| Files modified   | 3             | 单 seam + 两个测试文件       |
+| Files deleted    | 0             | —                            |
 | Production lines | ~45（净 +25） | 门B 重写 + 两标记格式 + 常量 |
-| Test lines | ~100 | 5 个新切片 + 断言扩展 |
-| Generated lines | 0 | — |
+| Test lines       | ~100          | 5 个新切片 + 断言扩展        |
+| Generated lines  | 0             | —                            |
 
 ## 20. Real Risks and Open Decisions
 
@@ -329,20 +329,20 @@ TUI 渲染效果（R2 依审计 NB-1 校正）：unified 视图只渲染 hunk �
 
 ## 22. Audit Record
 
-| Round | Verdict | Findings | 处置 |
-| --- | --- | --- | --- |
-| 1（R1） | BLOCK | B-01：§10 binary 标记新格式小写化 `Binary file`，确定性击穿 `apply_patch.test.ts:1247` 钉死断言，与“避免任何红测”需求及计划自身“既有切片保持绿”声明冲突；NB：unified 视图不渲染文件头（描述校正）、双版本 parsePatch 行为差异已独立验证消除 | R2 修订：binary 正文行保留大写 `Binary file <filePath> changed:` 措辞仅加空格前缀（:1229 切片保持绿，零测试改动）；§10 渲染描述校正；§20 双版本风险标记消除；切片 2/6 同步更新 |
-| 2（R2） | APPROVE | "No blocking findings." / "**APPROVE** — canonical plan `docs/plans/tool-diff-edit-budget-gate-repair.md` Revision R2 (plan audit, round 2 of 6). B-01 is resolved exactly at the owning assertion (`apply_patch.test.ts:1247`) with zero test edits required, and the full-scope re-audit of every other region produced no blocking findings. Approval covers only R2 as written; any substantive change requires revision increment and a fresh full-scope audit before implementation." NB（记录性，不触发重审）：①§1 补控制性原文逐字引用；②切片 4 改为“各自等于 renderFileDiff 对其自身输入的输出”，不要求两出口字节相等；③产物界前向瞬时分配属线性有界可接受；④短行真实域收窄已披露为真实风险 | 行政性记录：置 Status: approved / Approved revision: R2 / Implementation allowed: yes；同批落实 NB①② 记录修正（非实质性，不递增版本） |
+| Round   | Verdict | Findings                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             | 处置                                                                                                                                                                           |
+| ------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 1（R1） | BLOCK   | B-01：§10 binary 标记新格式小写化 `Binary file`，确定性击穿 `apply_patch.test.ts:1247` 钉死断言，与“避免任何红测”需求及计划自身“既有切片保持绿”声明冲突；NB：unified 视图不渲染文件头（描述校正）、双版本 parsePatch 行为差异已独立验证消除                                                                                                                                                                                                                                                                                                                                                                                                                                                          | R2 修订：binary 正文行保留大写 `Binary file <filePath> changed:` 措辞仅加空格前缀（:1229 切片保持绿，零测试改动）；§10 渲染描述校正；§20 双版本风险标记消除；切片 2/6 同步更新 |
+| 2（R2） | APPROVE | "No blocking findings." / "**APPROVE** — canonical plan `docs/plans/tool-diff-edit-budget-gate-repair.md` Revision R2 (plan audit, round 2 of 6). B-01 is resolved exactly at the owning assertion (`apply_patch.test.ts:1247`) with zero test edits required, and the full-scope re-audit of every other region produced no blocking findings. Approval covers only R2 as written; any substantive change requires revision increment and a fresh full-scope audit before implementation." NB（记录性，不触发重审）：①§1 补控制性原文逐字引用；②切片 4 改为“各自等于 renderFileDiff 对其自身输入的输出”，不要求两出口字节相等；③产物界前向瞬时分配属线性有界可接受；④短行真实域收窄已披露为真实风险 | 行政性记录：置 Status: approved / Approved revision: R2 / Implementation allowed: yes；同批落实 NB①② 记录修正（非实质性，不递增版本）                                          |
 
 ## 23. Implementation Evidence（R2）
 
 ### 变更文件
 
-| 文件 | 性质 | 内容 |
-| --- | --- | --- |
-| `packages/opencode/src/tool/file-diff.ts` | production | 门B 重写（maxEditLength 探测 + 产物直测）、两标记合法化、常量更替（`MAX_DIFF_MIDDLE_CHARS` → `MAX_DIFF_EDIT_LINES` + `MAX_DIFF_PATCH_CHARS`）、中文注释 |
-| `packages/opencode/test/tool/apply_patch.test.ts` | test | 新增 describe “tool diff gate budgets by real cost”：切片 1-5（切片 4 依 §15 可选项并入本文件） |
-| `docs/plans/tool-diff-edit-budget-gate-repair.md` | docs | 本计划（含审计记录与实施证据） |
+| 文件                                              | 性质       | 内容                                                                                                                                                    |
+| ------------------------------------------------- | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `packages/opencode/src/tool/file-diff.ts`         | production | 门B 重写（maxEditLength 探测 + 产物直测）、两标记合法化、常量更替（`MAX_DIFF_MIDDLE_CHARS` → `MAX_DIFF_EDIT_LINES` + `MAX_DIFF_PATCH_CHARS`）、中文注释 |
+| `packages/opencode/test/tool/apply_patch.test.ts` | test       | 新增 describe “tool diff gate budgets by real cost”：切片 1-5（切片 4 依 §15 可选项并入本文件）                                                         |
+| `docs/plans/tool-diff-edit-budget-gate-repair.md` | docs       | 本计划（含审计记录与实施证据）                                                                                                                          |
 
 ### Red-Green 证据
 
@@ -352,13 +352,13 @@ TUI 渲染效果（R2 依审计 NB-1 校正）：unified 视图只渲染 hunk �
 
 ### 验证命令与结果（均在 packages/opencode）
 
-| 命令 | 结果 |
-| --- | --- |
-| `bun test test/tool/apply_patch.test.ts` | 66 pass / 0 fail（含既有 :1229 binary / :1288 write / :1349 edit 三切片保持绿，B-01 修正验证） |
-| `bun test test/tool/edit.test.ts` | 87 pass / 0 fail |
-| `bun test test/tool/write.test.ts` | 25 pass / 0 fail |
-| `bun test test/session/summary-tool-diff.test.ts` | 6 pass / 0 fail（摄入计数/口径零漂移） |
-| `bun typecheck` | 通过（tsgo --noEmit 无错误） |
+| 命令                                              | 结果                                                                                           |
+| ------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| `bun test test/tool/apply_patch.test.ts`          | 66 pass / 0 fail（含既有 :1229 binary / :1288 write / :1349 edit 三切片保持绿，B-01 修正验证） |
+| `bun test test/tool/edit.test.ts`                 | 87 pass / 0 fail                                                                               |
+| `bun test test/tool/write.test.ts`                | 25 pass / 0 fail                                                                               |
+| `bun test test/session/summary-tool-diff.test.ts` | 6 pass / 0 fail（摄入计数/口径零漂移）                                                         |
+| `bun typecheck`                                   | 通过（tsgo --noEmit 无错误）                                                                   |
 
 ### 实际路径面与 workaround 删除
 
@@ -381,6 +381,6 @@ TUI 渲染效果（R2 依审计 NB-1 校正）：unified 视图只渲染 hunk �
 
 ## 24. Implementation Audit Record
 
-| Round | Verdict | Findings | 处置 |
-| --- | --- | --- |
+| Round        | Verdict | Findings                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 | 处置                                                                                                                                       |
+| ------------ | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
 | 1（R2 实现） | APPROVE | "No blocking findings." / "**APPROVE** — implementation audit round 1 of 3 for canonical plan `docs/plans/tool-diff-edit-budget-gate-repair.md` Revision R2. The actual working-tree diff (2 files + the plan) maps hunk-for-hunk to the approved R2 design with no material decision living only in chat, no unauthorized fallback, no weakened assertion, and every §18 verification command independently reproduced green. Approval covers only this exact diff against R2; any substantive change requires a fresh full-scope audit." 审计方独立复跑全部验证：66/0、87/0、25/0、6/0、tsgo clean；NB：①成功路径双跑（同被 D≤2000 界住，质量注记）；②产物界前向瞬时分配（计划轮已接受）；③短行域收窄（已披露风险+用户开放决策）；④§23 E/C 算术偏差（本版已按审计重算口径校正）；拒绝的推测：jsdiff 版本漂移/timeout 硬界/恶意 filePath/TUI 端到端需求 | 行政性记录：置 Status: verified；依 NB④ 校正 §23 E/C 数字（非实质性，不清空 verdict）；invocation ref: task ses_f9cbe88c4ffenT00bXmJTWyCd9 |

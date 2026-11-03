@@ -96,7 +96,11 @@ function envProxy(url: URL): SystemProxy | undefined {
 async function execText(command: string, args: string[], timeout = 1500) {
   // 系统代理探测有独立短期限，系统命令卡住不能占满每次 HTTP 请求的预算。
   // Windows 系统代理读取会定期调用 reg.exe；必须隐藏 helper 控制台，否则 daemon 每次刷新代理都会弹出 conhost。
-  const proc = Bun.spawn([command, ...args], { stdout: "pipe", stderr: "ignore", windowsHide: process.platform === "win32" })
+  const proc = Bun.spawn([command, ...args], {
+    stdout: "pipe",
+    stderr: "ignore",
+    windowsHide: process.platform === "win32",
+  })
   const timer = setTimeout(() => proc.kill(), timeout)
   try {
     const [code, stdout] = await Promise.all([proc.exited, new Response(proc.stdout).text()])
@@ -153,9 +157,18 @@ async function macProxy(): Promise<SystemProxy | undefined> {
     const match = line.match(/^\s*([^:]+)\s*:\s*(.+)$/)
     if (match) values.set(match[1].trim(), match[2].trim())
   }
-  const https = values.get("HTTPSEnable") === "1" ? normalizeProxy(`${values.get("HTTPSProxy")}:${values.get("HTTPSPort")}`) : undefined
-  const http = values.get("HTTPEnable") === "1" ? normalizeProxy(`${values.get("HTTPProxy")}:${values.get("HTTPPort")}`) : undefined
-  const socks = values.get("SOCKSEnable") === "1" ? normalizeProxy(`socks5://${values.get("SOCKSProxy")}:${values.get("SOCKSPort")}`) : undefined
+  const https =
+    values.get("HTTPSEnable") === "1"
+      ? normalizeProxy(`${values.get("HTTPSProxy")}:${values.get("HTTPSPort")}`)
+      : undefined
+  const http =
+    values.get("HTTPEnable") === "1"
+      ? normalizeProxy(`${values.get("HTTPProxy")}:${values.get("HTTPPort")}`)
+      : undefined
+  const socks =
+    values.get("SOCKSEnable") === "1"
+      ? normalizeProxy(`socks5://${values.get("SOCKSProxy")}:${values.get("SOCKSPort")}`)
+      : undefined
   // 分协议启用位各自生效；缺 HTTPS 代理仍可由后续路由选择 HTTP 或 SOCKS。
   return { http, https, socks, bypass: [] }
 }
@@ -189,7 +202,11 @@ async function configuredProxy(url: URL, refresh = false) {
 }
 
 // 回环在系统探测之前直连，健康检查不承担探测耗时或受外部 bypass 配置影响。
-export async function resolveProxyRoute(input: string | URL, purpose: Purpose = "unknown", refresh = false): Promise<Route> {
+export async function resolveProxyRoute(
+  input: string | URL,
+  purpose: Purpose = "unknown",
+  refresh = false,
+): Promise<Route> {
   const url = input instanceof URL ? input : new URL(input)
   if (purpose === "local" || isLocal(url)) return { type: "direct", reason: "local" }
   const proxy = await configuredProxy(url, refresh)
@@ -213,7 +230,7 @@ export const infrastructureHttpClientLayer = HttpClient.layerMergedContext(
             (cause) =>
               new HttpClientError.HttpClientError({
                 reason: new HttpClientError.TransportError({ request, cause }),
-  // #268：错误统一映射 TransportError——消费方拿到的是 Effect HttpClient 错误契约而非裸 fetch 异常
+                // #268：错误统一映射 TransportError——消费方拿到的是 Effect HttpClient 错误契约而非裸 fetch 异常
               }),
           ),
         )
@@ -229,7 +246,6 @@ export const infrastructureHttpClientLayer = HttpClient.layerMergedContext(
     ),
   ),
 )
-
 
 // 统一入口在当前路由上发送一次，请求失败直接交给调用方处理。
 export async function fetch(input: FetchInput, init?: RoutedInit): Promise<Response> {

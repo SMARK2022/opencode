@@ -245,7 +245,14 @@ const layer = Layer.effectDiscard(
                 provider,
                 text: text ?? NO_RESULTS,
               }
-            }).pipe(Effect.mapError((error) => new ToolFailure({ message: PermissionV2.autoDeniedMessage(error) ?? `Unable to search the web for ${input.query}` })))
+            }).pipe(
+              Effect.mapError(
+                (error) =>
+                  new ToolFailure({
+                    message: PermissionV2.autoDeniedMessage(error) ?? `Unable to search the web for ${input.query}`,
+                  }),
+              ),
+            )
           },
         }),
       })

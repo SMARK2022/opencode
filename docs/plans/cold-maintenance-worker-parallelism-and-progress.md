@@ -56,13 +56,13 @@ R8容量样本：24 个常规 0.5–1MiB 冷帧共 22,517,397 raw bytes，现存
 
 新证据（均未修改生产数据库）：
 
-| Evidence | Observed result | Next behavioral seam |
-| --- | --- | --- |
-| 实际 cold-pack-worker.ts，单 worker 顺序发送 129 个各自合法的 v3 scan 请求，每个包仅一个 text 字段、无 owner 行；15 秒超时上限 | completed=128, expected=129, timeout=true。cachePut 达到第 129 项时最老键仍 pinned，while 循环没有向前推进 | 真实 worker 超过 128 个在飞源仍可完成；drop 释放批次所有权；失败与取消后回收 |
-| Bun structuredClone 消息引用原 payload，而 transfer 列表仅放另建的 copy.buffer | originalBytes=3, transferBytes=0, receivedBytes=3；对照消息引用 actual.buffer 时 actualOriginalBytes=0 | worker encode/recode 回复携带的视图须引用实际转移的 backing buffer |
-| 内存 SQLite 两行 NOT NULL data，一行命中 CASE、另一行不命中且没有 ELSE | NOT NULL constraint failed: sample.data；事务语句原子失败，两行保留原值 | maintain 混合 merge/carry owner 批次，完整恢复正文且统计保持精确 |
-| 内存 SQLite 2,000 行、5 次写回，同一事务保护与 RETURNING | CASE 207.48ms，复用参数化 UPDATE 89.04ms；2,000 行正文均保持 | 替换 SQL 构建和逐行分支匹配，不降低写回完整性检查 |
-| 生产库只读一致性快照（R7） | allocated=2,988,437,504 bytes（2.988 GB / 2.783 GiB），active=2,986,086,400 bytes；冷包 message 737、part 5470、summary 365 | 最终容量明确报告 bytes/GB/GiB；不得将单位换算当作空间优化 |
+| Evidence                                                                                                                       | Observed result                                                                                                             | Next behavioral seam                                                         |
+| ------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| 实际 cold-pack-worker.ts，单 worker 顺序发送 129 个各自合法的 v3 scan 请求，每个包仅一个 text 字段、无 owner 行；15 秒超时上限 | completed=128, expected=129, timeout=true。cachePut 达到第 129 项时最老键仍 pinned，while 循环没有向前推进                  | 真实 worker 超过 128 个在飞源仍可完成；drop 释放批次所有权；失败与取消后回收 |
+| Bun structuredClone 消息引用原 payload，而 transfer 列表仅放另建的 copy.buffer                                                 | originalBytes=3, transferBytes=0, receivedBytes=3；对照消息引用 actual.buffer 时 actualOriginalBytes=0                      | worker encode/recode 回复携带的视图须引用实际转移的 backing buffer           |
+| 内存 SQLite 两行 NOT NULL data，一行命中 CASE、另一行不命中且没有 ELSE                                                         | NOT NULL constraint failed: sample.data；事务语句原子失败，两行保留原值                                                     | maintain 混合 merge/carry owner 批次，完整恢复正文且统计保持精确             |
+| 内存 SQLite 2,000 行、5 次写回，同一事务保护与 RETURNING                                                                       | CASE 207.48ms，复用参数化 UPDATE 89.04ms；2,000 行正文均保持                                                                | 替换 SQL 构建和逐行分支匹配，不降低写回完整性检查                            |
+| 生产库只读一致性快照（R7）                                                                                                     | allocated=2,988,437,504 bytes（2.988 GB / 2.783 GiB），active=2,986,086,400 bytes；冷包 message 737、part 5470、summary 365 | 最终容量明确报告 bytes/GB/GiB；不得将单位换算当作空间优化                    |
 
 这些机制验证为确定性秒级反馈。SQL 与 structuredClone 探针是运行时机制证据，后续 TDD 必须通过实际维护/worker 接口覆盖 producer 到 consumer；不把探针当作完整产品回归。
 
@@ -110,30 +110,30 @@ R2 审计（BLOCK）修订摘要：B-03 证伪§18 基准条件——生产库�
 
 ## 3. Repository Context
 
-| Source | Why it constrains this task |
-| --- | --- |
-| `AGENTS.md`（仓库根 + packages/opencode） | 测试从包目录运行；`bun typecheck`；Bun API 优先；函数内聚；模块自导出形态 |
-| `CONTEXT.md` | storage/ 是 SQLite/Drizzle 持久层；Message = MessageV2 part 形态 |
-| `docs/plans/manual-cold-storage-transparency.md`（Status: verified） | R4 冷存储 v3 包格式的已审计基线；:198-203 合约规定显式 compress 会对既有包做 newly-eligible merge |
-| `.opencode/policy/first-principles-engineering.md` | 单一主路径、禁止 fallback、证据模型、secondary-path 预算 |
-| `script/test-ci.ts:81` | Windows 三分片、Linux/macOS core 合并单进程 → 共享内存库是 CI 环境固有属性 |
-| `test/preload.ts:86` | `OPENCODE_DB=:memory:` → 单进程全部测试共享一个内存库，全库绝对断言在合并分片下不成立 |
-| `src/storage/db.ts:92-98` | Client 懒加载单例：worker import cold.ts 无顶层连接副作用 |
-| `cold.ts:2292-2368`（replaceMessage/replacePart/releaseMessage/releasePart） | 冷 owner 变更必清 cold_ref 并 release 引用 → 提交复核只需查 ref_count+owner 集合即可覆盖并发窗口 |
+| Source                                                                       | Why it constrains this task                                                                       |
+| ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| `AGENTS.md`（仓库根 + packages/opencode）                                    | 测试从包目录运行；`bun typecheck`；Bun API 优先；函数内聚；模块自导出形态                         |
+| `CONTEXT.md`                                                                 | storage/ 是 SQLite/Drizzle 持久层；Message = MessageV2 part 形态                                  |
+| `docs/plans/manual-cold-storage-transparency.md`（Status: verified）         | R4 冷存储 v3 包格式的已审计基线；:198-203 合约规定显式 compress 会对既有包做 newly-eligible merge |
+| `.opencode/policy/first-principles-engineering.md`                           | 单一主路径、禁止 fallback、证据模型、secondary-path 预算                                          |
+| `script/test-ci.ts:81`                                                       | Windows 三分片、Linux/macOS core 合并单进程 → 共享内存库是 CI 环境固有属性                        |
+| `test/preload.ts:86`                                                         | `OPENCODE_DB=:memory:` → 单进程全部测试共享一个内存库，全库绝对断言在合并分片下不成立             |
+| `src/storage/db.ts:92-98`                                                    | Client 懒加载单例：worker import cold.ts 无顶层连接副作用                                         |
+| `cold.ts:2292-2368`（replaceMessage/replacePart/releaseMessage/releasePart） | 冷 owner 变更必清 cold_ref 并 release 引用 → 提交复核只需查 ref_count+owner 集合即可覆盖并发窗口  |
 
 ## 4. Files and Evidence Read
 
-| Evidence | Relevance | Evidence class |
-| --- | --- | --- |
-| `packages/opencode/src/storage/cold.ts`（HEAD） | maintain 循环、repackColdBatch/collectRepackRows/planPackWrites、decodePack、eligibility/eligible（:1140-1192）、merge 谓词（:3706-3713, :3731-3742）、payload 枚举（:4053-4072）、parseMaintenanceTask | observed |
-| `packages/opencode/src/cli/cmd/db.ts` paint() ~281-296 | 脉冲进度条无百分比（注释"轨道固定 20 格，不定百分比"） | observed |
-| `packages/opencode/script/build.ts` voiceWorkerPath 注册模式 | worker entrypoint + define 的既有先例 | observed |
-| `packages/opencode/test/storage/cold-v3.test.ts` 全文 + `test/storage/cold.test.ts:1296,1380-1384` | CI 失败点（:121/305/443/460 共 4 处断言点）、共享库基线范式、parseMaintenanceTask 测试落点 | observed |
-| `packages/opencode/src/cli/cmd/tui/worker.ts`（:149，审计间漂移为 :138，事实不变） | daemon 路径也调用 `ColdStorage.maintain` → 池为长生命周期进程驻留 | observed |
-| 插桩基准（R1 审计前实测，记录值）：v2 形态 3.45GB 快照，wall 561.2s、整机 CPU 6.8%；payload:repack 517.7s（92%）；compress 122.7s/5.65GB；decodePack 118.2s（解压仅 6.3s）；canonical 82s；owner 段 41s+35.8s | 瓶颈定位与 Amdahl 输入 | observed（原始记录；快照文件已随 `D:\Temp\opencode` 清理丢失，§18 以合成负载重建） |
-| 生产库只读实测（R2 审计者测量） | `opencode.db` = 2,917,879,808 字节；43 字符 message-pack 737 / part-pack 5470；64 字符仅剩 364 个 session-summary（~176MB）；legacy message/part 包 = 0；待 merge 候选 = 0 | observed |
-| worker 探针（R1 审计前实测，记录值） | data-url worker 可用；worker import cold.ts 首载 731ms；decode+encode 往返 hash 完全一致；node:zlib 异步 zstd 仅 1.44x | observed（同上） |
-| CI 失败签名：run 36914070037，Linux/macOS core 分片 3 用例 `refCountMismatches: 1`，Windows 绿 | CI 根因 | observed（审计者经 `gh` 独立复核一致） |
+| Evidence                                                                                                                                                                                                      | Relevance                                                                                                                                                                                               | Evidence class                                                                     |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
+| `packages/opencode/src/storage/cold.ts`（HEAD）                                                                                                                                                               | maintain 循环、repackColdBatch/collectRepackRows/planPackWrites、decodePack、eligibility/eligible（:1140-1192）、merge 谓词（:3706-3713, :3731-3742）、payload 枚举（:4053-4072）、parseMaintenanceTask | observed                                                                           |
+| `packages/opencode/src/cli/cmd/db.ts` paint() ~281-296                                                                                                                                                        | 脉冲进度条无百分比（注释"轨道固定 20 格，不定百分比"）                                                                                                                                                  | observed                                                                           |
+| `packages/opencode/script/build.ts` voiceWorkerPath 注册模式                                                                                                                                                  | worker entrypoint + define 的既有先例                                                                                                                                                                   | observed                                                                           |
+| `packages/opencode/test/storage/cold-v3.test.ts` 全文 + `test/storage/cold.test.ts:1296,1380-1384`                                                                                                            | CI 失败点（:121/305/443/460 共 4 处断言点）、共享库基线范式、parseMaintenanceTask 测试落点                                                                                                              | observed                                                                           |
+| `packages/opencode/src/cli/cmd/tui/worker.ts`（:149，审计间漂移为 :138，事实不变）                                                                                                                            | daemon 路径也调用 `ColdStorage.maintain` → 池为长生命周期进程驻留                                                                                                                                       | observed                                                                           |
+| 插桩基准（R1 审计前实测，记录值）：v2 形态 3.45GB 快照，wall 561.2s、整机 CPU 6.8%；payload:repack 517.7s（92%）；compress 122.7s/5.65GB；decodePack 118.2s（解压仅 6.3s）；canonical 82s；owner 段 41s+35.8s | 瓶颈定位与 Amdahl 输入                                                                                                                                                                                  | observed（原始记录；快照文件已随 `D:\Temp\opencode` 清理丢失，§18 以合成负载重建） |
+| 生产库只读实测（R2 审计者测量）                                                                                                                                                                               | `opencode.db` = 2,917,879,808 字节；43 字符 message-pack 737 / part-pack 5470；64 字符仅剩 364 个 session-summary（~176MB）；legacy message/part 包 = 0；待 merge 候选 = 0                              | observed                                                                           |
+| worker 探针（R1 审计前实测，记录值）                                                                                                                                                                          | data-url worker 可用；worker import cold.ts 首载 731ms；decode+encode 往返 hash 完全一致；node:zlib 异步 zstd 仅 1.44x                                                                                  | observed（同上）                                                                   |
+| CI 失败签名：run 36914070037，Linux/macOS core 分片 3 用例 `refCountMismatches: 1`，Windows 绿                                                                                                                | CI 根因                                                                                                                                                                                                 | observed（审计者经 `gh` 独立复核一致）                                             |
 
 ## 5. Baseline And Current Behavior
 
@@ -155,41 +155,41 @@ CI 方面：cold-v3.test.ts 4 处 `verify` 全库绝对零断言（:121/305/443/
 
 ## 6. Supported Input Domain and Reachability
 
-| Input or condition | Producer | Upstream guarantees | Reachable path | Owner | Classification |
-| --- | --- | --- | --- | --- | --- |
-| legacy 包（64-hex hash，v2 时代产物） | 8e9181e314 之前的压缩运行 | cold_storage 行 | payload 枚举 | cold.ts | observed |
-| v3 干净包（43 字符，所有 entry 已按当时资格 merge） | R4 后的压缩运行 | 枚举谓词不命中 | payload 枚举跳过 | cold.ts | observed |
-| v3 待 merge 包（含未 merge entry 且 owner 现已具备资格） | v2→v3 repack 时 session 未 aged（cold.ts:3706/3731 的 `additional && !eligible` 分支）+ 之后 session 老化（:1160-1165） | 热行 JSON 仍携带深层字段 | payload 枚举谓词命中 | cold.ts | reachable（生产库当前实测为 0；已验证的主产生路径 = v2→v3 repack 时 session 未 aged 的进位分支 + 后续老化） |
-| 并发写窗口（读源→worker→提交之间） | daemon 存活时的另一个写进程 | lease + SQLite 单写者；冷行变更必清 ref（:2292-2368） | CLI 未停 daemon 时可达 | cold.ts commit | reachable |
-| worker 崩溃/退出 | Bun Worker 运行时 | 无 | onerror/exit 事件 | cold.ts pool | reachable |
-| 老旧任务记录（无 progress 字段） | 本变更前写入的 maintenance task 行 | parseMaintenanceTask 白名单 | db.ts paint | db.ts | reachable |
-| 共享内存库中的外文件漂移行 | CI core 分片全部测试 | 无隔离 | cold-v3 verify 断言 | cold-v3.test.ts | observed |
+| Input or condition                                       | Producer                                                                                                                | Upstream guarantees                                   | Reachable path         | Owner           | Classification                                                                                              |
+| -------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------- | ---------------------- | --------------- | ----------------------------------------------------------------------------------------------------------- |
+| legacy 包（64-hex hash，v2 时代产物）                    | 8e9181e314 之前的压缩运行                                                                                               | cold_storage 行                                       | payload 枚举           | cold.ts         | observed                                                                                                    |
+| v3 干净包（43 字符，所有 entry 已按当时资格 merge）      | R4 后的压缩运行                                                                                                         | 枚举谓词不命中                                        | payload 枚举跳过       | cold.ts         | observed                                                                                                    |
+| v3 待 merge 包（含未 merge entry 且 owner 现已具备资格） | v2→v3 repack 时 session 未 aged（cold.ts:3706/3731 的 `additional && !eligible` 分支）+ 之后 session 老化（:1160-1165） | 热行 JSON 仍携带深层字段                              | payload 枚举谓词命中   | cold.ts         | reachable（生产库当前实测为 0；已验证的主产生路径 = v2→v3 repack 时 session 未 aged 的进位分支 + 后续老化） |
+| 并发写窗口（读源→worker→提交之间）                       | daemon 存活时的另一个写进程                                                                                             | lease + SQLite 单写者；冷行变更必清 ref（:2292-2368） | CLI 未停 daemon 时可达 | cold.ts commit  | reachable                                                                                                   |
+| worker 崩溃/退出                                         | Bun Worker 运行时                                                                                                       | 无                                                    | onerror/exit 事件      | cold.ts pool    | reachable                                                                                                   |
+| 老旧任务记录（无 progress 字段）                         | 本变更前写入的 maintenance task 行                                                                                      | parseMaintenanceTask 白名单                           | db.ts paint            | db.ts           | reachable                                                                                                   |
+| 共享内存库中的外文件漂移行                               | CI core 分片全部测试                                                                                                    | 无隔离                                                | cold-v3 verify 断言    | cold-v3.test.ts | observed                                                                                                    |
 
 ## 7. Required Invariants
 
-| ID | Behavioral invariant | Evidence | Existing test |
-| --- | --- | --- | --- |
-| INV-01 | repack 的 canonical raw、hash、slot 与恢复业务值保持一致；标准 zstd 帧按实际编码参数生成 | worker 探针往返 hash 一致 | cold-v3 repack 测试 |
-| INV-02 | 提交事务保持 retain→assign→release 顺序；批次仍是唯一 checkpoint 粒度 | 8e9181e314 已审计语义 | cold-v3 test 4（resumed repack） |
-| INV-03 | 内容身份独立于压缩级别与执行线程数 | canonical/hash 协议 | cold.test.ts identity 断言 |
-| INV-04 | 无 schema 变更；worker 不触碰 SQLite | migration diff 为空；worker 文件无 DB import | 人工 diff 检查 |
-| INV-05 | 进度数据不参与恢复语义；缺失时 CLI 行为与现状一致（脉冲） | progress 为可选字段 | 老记录解析用例 |
-| INV-06 | 测试断言在共享内存库环境下只断言本测试造成的增量 | cold.test.ts:1296 既有范式 | 修复后的 cold-v3 |
-| INV-07 | 完整 compress 在代表性负载上显著缩短并保留小于300秒时间目标；CPU只记录作诊断，不设利用率门槛。保持完整计时范围，拒绝无效计算 | 用户最新时间要求 | 原始负载完整路径验证；先定向小型检查，避免反复全库基准 |
-| INV-09 | 冷域建议三个文件、允许四个，cold.ts可保留并精简至1000行以内、总量≤6000行。按真实职责解耦并合并重复逻辑，避免众多浅 helper；注释完整、相关且分布合理 | 用户最新结构、注释及行数要求 | 格式化行数、依赖方向、公开接口、注释相关性与编译 worker 验证 |
-| INV-08 | newly-eligible merge 行为保留：未 merge entry 在 owner 老化后的下一次运行必须仍可被处理（R4 合约） | manual-cold-storage-transparency.md:198-203；cold.ts:3706/3731 | 新增待 merge v3 用例（§16 slice 3） |
-| INV-10 | worker 任务必结算，批次结束释放缓存；取消和失败不提交预取结果，进度与 cursor 仅跟随已提交批次 | 129 scan 卡死实测、现有取消/恢复合同 | 真实 worker 生命周期及 maintain 中断/恢复回归 |
-| INV-11 | 混合 merge/carry 行完整保留业务值；共享包按实际 owner 引用计数，session 范围操作只改变选中 owner | CASE 实测与 fork/session scope 合同 | 混合投影、跨 session 共享包、并发变化回归 |
-| INV-12 | 最终数据库约 2.8 GB 以下并保留有效数据、正文搜索和精确 token 统计；容量单位及 WAL/freelist 单列 | 原始用户目标 | 副本最终物理容量、完整性与读值/搜索/统计比对 |
+| ID     | Behavioral invariant                                                                                                                                | Evidence                                                       | Existing test                                                |
+| ------ | --------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------- | ------------------------------------------------------------ |
+| INV-01 | repack 的 canonical raw、hash、slot 与恢复业务值保持一致；标准 zstd 帧按实际编码参数生成                                                            | worker 探针往返 hash 一致                                      | cold-v3 repack 测试                                          |
+| INV-02 | 提交事务保持 retain→assign→release 顺序；批次仍是唯一 checkpoint 粒度                                                                               | 8e9181e314 已审计语义                                          | cold-v3 test 4（resumed repack）                             |
+| INV-03 | 内容身份独立于压缩级别与执行线程数                                                                                                                  | canonical/hash 协议                                            | cold.test.ts identity 断言                                   |
+| INV-04 | 无 schema 变更；worker 不触碰 SQLite                                                                                                                | migration diff 为空；worker 文件无 DB import                   | 人工 diff 检查                                               |
+| INV-05 | 进度数据不参与恢复语义；缺失时 CLI 行为与现状一致（脉冲）                                                                                           | progress 为可选字段                                            | 老记录解析用例                                               |
+| INV-06 | 测试断言在共享内存库环境下只断言本测试造成的增量                                                                                                    | cold.test.ts:1296 既有范式                                     | 修复后的 cold-v3                                             |
+| INV-07 | 完整 compress 在代表性负载上显著缩短并保留小于300秒时间目标；CPU只记录作诊断，不设利用率门槛。保持完整计时范围，拒绝无效计算                        | 用户最新时间要求                                               | 原始负载完整路径验证；先定向小型检查，避免反复全库基准       |
+| INV-09 | 冷域建议三个文件、允许四个，cold.ts可保留并精简至1000行以内、总量≤6000行。按真实职责解耦并合并重复逻辑，避免众多浅 helper；注释完整、相关且分布合理 | 用户最新结构、注释及行数要求                                   | 格式化行数、依赖方向、公开接口、注释相关性与编译 worker 验证 |
+| INV-08 | newly-eligible merge 行为保留：未 merge entry 在 owner 老化后的下一次运行必须仍可被处理（R4 合约）                                                  | manual-cold-storage-transparency.md:198-203；cold.ts:3706/3731 | 新增待 merge v3 用例（§16 slice 3）                          |
+| INV-10 | worker 任务必结算，批次结束释放缓存；取消和失败不提交预取结果，进度与 cursor 仅跟随已提交批次                                                       | 129 scan 卡死实测、现有取消/恢复合同                           | 真实 worker 生命周期及 maintain 中断/恢复回归                |
+| INV-11 | 混合 merge/carry 行完整保留业务值；共享包按实际 owner 引用计数，session 范围操作只改变选中 owner                                                    | CASE 实测与 fork/session scope 合同                            | 混合投影、跨 session 共享包、并发变化回归                    |
+| INV-12 | 最终数据库约 2.8 GB 以下并保留有效数据、正文搜索和精确 token 统计；容量单位及 WAL/freelist 单列                                                     | 原始用户目标                                                   | 副本最终物理容量、完整性与读值/搜索/统计比对                 |
 
 ## 8. First Divergence and Root Cause
 
-| Invariant | First divergence | Owning module/interface | Proof |
-| --- | --- | --- | --- |
-| INV-07 | repackColdBatch 在单事务回调内串行执行 decode/canonical/compress，CPU 密集段无任何并行度 | cold.ts repackColdBatch | 插桩：517.7s 占 92%，整机 CPU 6.8% |
-| INV-08 | （R1 方案的）`length(hash)=64` 过滤基于假前提"v3 必是完整抽取"，使待 merge 包永久不可达 | cold.ts payload 枚举 | cold.ts:3706-3713/3731-3742 进位分支 + :4053-4072 现状枚举 |
-| （进度） | paint() 只渲染脉冲；MaintenanceTask 无总量字段，百分比在数据层不可得 | cold.ts MaintenanceTask / db.ts paint | db.ts:286 注释"不定百分比" |
-| INV-06 | cold-v3 4 处 verify 用全库绝对零断言，违反共享库环境固有属性 | cold-v3.test.ts | CI run 36914070037 |
+| Invariant | First divergence                                                                         | Owning module/interface               | Proof                                                      |
+| --------- | ---------------------------------------------------------------------------------------- | ------------------------------------- | ---------------------------------------------------------- |
+| INV-07    | repackColdBatch 在单事务回调内串行执行 decode/canonical/compress，CPU 密集段无任何并行度 | cold.ts repackColdBatch               | 插桩：517.7s 占 92%，整机 CPU 6.8%                         |
+| INV-08    | （R1 方案的）`length(hash)=64` 过滤基于假前提"v3 必是完整抽取"，使待 merge 包永久不可达  | cold.ts payload 枚举                  | cold.ts:3706-3713/3731-3742 进位分支 + :4053-4072 现状枚举 |
+| （进度）  | paint() 只渲染脉冲；MaintenanceTask 无总量字段，百分比在数据层不可得                     | cold.ts MaintenanceTask / db.ts paint | db.ts:286 注释"不定百分比"                                 |
+| INV-06    | cold-v3 4 处 verify 用全库绝对零断言，违反共享库环境固有属性                             | cold-v3.test.ts                       | CI run 36914070037                                         |
 
 **历史测量与推断分离**：记录过 444.9s/18.6%、489.9s/16.3%、364.7s/22.6% 三组结果，最后一组 payload 稳态记录为 23.6%。这些是特定实现和 harness 的测量记录，不是物理上限。process.cpuUsage 的采样覆盖、计时窗口、源数据差异及原始日志须在最终证据中说明。约 190 秒提交耗时也可能包含可优化的 SQL 构建、CASE 比较、重复校验及 checkpoint；不能将其认定为不可压缩的串行地板。
 
@@ -199,15 +199,15 @@ CI 方面：cold-v3.test.ts 4 处 `verify` 全库绝对零断言（:121/305/443/
 
 ## 9. Responsibility and Seam
 
-| Concern | Owner | Interface promise | Why it belongs here | Why another module does not own it |
-| --- | --- | --- | --- | --- |
-| 包字节协议（decode/encode/validate） | cold-codec.ts | 唯一协议来源，worker 只分发 | 线程无关字节语义与恢复校验内聚 | worker 文件只是传输层 |
-| 编码 worker 生命周期 | cold-codec.ts 的编码执行器 | 每次维护调用持有执行器，关闭时结束在飞任务并释放缓存 | 压缩执行与字节协议同属行为侧 | maintain 只提交任务和关闭，不操作线程事件 |
-| SQLite 全部读写与事务 | 主线程 cold-store.ts | 单写者语义 | bun:sqlite连接由存储模块持有 | worker只处理字节与JSON |
-| 待 merge 检测谓词 | cold-store.ts payload枚举 | R4 merge合约的到达性 | 枚举与存储资格共用同一owner | maintain消费候选结果 |
-| 进度总量估算 | cold-maintain.ts maintain | 面向人类的估算快照 | 只有循环知道阶段口径 | db.ts 只渲染 |
-| 进度渲染与脉冲回退 | db.ts paint() | CLI 展示 | 已有渲染位置 | — |
-| 共享库断言范式 | cold-v3.test.ts | 增量断言 | 与 cold.test.ts:1296 一致 | — |
+| Concern                              | Owner                      | Interface promise                                    | Why it belongs here            | Why another module does not own it        |
+| ------------------------------------ | -------------------------- | ---------------------------------------------------- | ------------------------------ | ----------------------------------------- |
+| 包字节协议（decode/encode/validate） | cold-codec.ts              | 唯一协议来源，worker 只分发                          | 线程无关字节语义与恢复校验内聚 | worker 文件只是传输层                     |
+| 编码 worker 生命周期                 | cold-codec.ts 的编码执行器 | 每次维护调用持有执行器，关闭时结束在飞任务并释放缓存 | 压缩执行与字节协议同属行为侧   | maintain 只提交任务和关闭，不操作线程事件 |
+| SQLite 全部读写与事务                | 主线程 cold-store.ts       | 单写者语义                                           | bun:sqlite连接由存储模块持有   | worker只处理字节与JSON                    |
+| 待 merge 检测谓词                    | cold-store.ts payload枚举  | R4 merge合约的到达性                                 | 枚举与存储资格共用同一owner    | maintain消费候选结果                      |
+| 进度总量估算                         | cold-maintain.ts maintain  | 面向人类的估算快照                                   | 只有循环知道阶段口径           | db.ts 只渲染                              |
+| 进度渲染与脉冲回退                   | db.ts paint()              | CLI 展示                                             | 已有渲染位置                   | —                                         |
+| 共享库断言范式                       | cold-v3.test.ts            | 增量断言                                             | 与 cold.test.ts:1296 一致      | —                                         |
 
 ## 10. Single Approved Primary-Path Design
 
@@ -260,6 +260,7 @@ payload 枚举选择两个不相交的集合：
 2. **待 merge v3 包**：43 字符 hash，且存在 owner 行满足 `cold_ref = hash` 且热行 JSON 仍携带深层字段且该 owner 行当前 eligible。
 
 谓词精度锁定（NB-08，实现与实现审计必须逐项核对）：
+
 - message 侧：extractMessage 的缩减投影会删除四个键（cold.ts:490-493），故未 merge 判定 = `$.path`、`$.inputChars`、`$.inputTokens`、`$.inputBreakdown` 任一键存在；只查 `$.path` 会漏掉"无 path 但有 inputBreakdown"的 entry。
 - part 侧：extractPartV2 的投影保留 `text:""` 键（cold.ts:879），故判定必须是非空（`json_extract(data,'$.text') != ''`），键存在性会把干净包永久误选。
 - 资格判定保持 per-owner：`eligible(state, id)`（含 boundary 排序，:1179-1192）；batchEligibility 仅作 session 状态缓存，禁止按 session 粒度整体判定（未 aged session 的 boundary 前 entry 会被漏选）。
@@ -319,146 +320,146 @@ payload 枚举选择两个不相交的集合：
 
 ## 11. Secondary and Replacement Path Inventory
 
-| Path | Current or proposed | Classification | Produces success? | Decision-surface share | Disposition |
-| --- | --- | --- | --- | --- | --- |
-| 串行 repack（现状） | current | 被替换的主路径 | yes | — | 被 10.1 替换 |
-| worker 并行 repack | proposed | primary-contract | yes | ~80% | 主路径 |
-| 提交时并发复核跳过源 | proposed | guard（reachable 写窗口） | no（跳过=工作未做） | ~6% | 保留 |
-| 待 merge v3 谓词枚举分支 | proposed | primary-contract 定义域分支（R4 合约到达性） | yes（merge 本身是合约行为） | ~8% | 主路径组成 |
-| 脉冲动画回退（无 progress 字段） | proposed | existing compatibility（老任务记录） | n/a（纯展示） | ~3% | 保留 |
-| worker 崩溃拒绝 RPC 并关闭本次执行器 | proposed | guard（reachable 运行时事件） | no（异常继续上抛） | ~3% | 替代补员循环 |
-| R1 的 length(hash)=64 唯一过滤 | rejected | 基于假格式不变量，破坏 INV-08 | — | — | 拒绝 |
-| WIP 的同步 fallback 编码（reused-target-missing） | rejected | forbidden fallback | yes | — | 拒绝：复核不符即跳过 |
+| Path                                              | Current or proposed | Classification                               | Produces success?           | Decision-surface share | Disposition          |
+| ------------------------------------------------- | ------------------- | -------------------------------------------- | --------------------------- | ---------------------- | -------------------- |
+| 串行 repack（现状）                               | current             | 被替换的主路径                               | yes                         | —                      | 被 10.1 替换         |
+| worker 并行 repack                                | proposed            | primary-contract                             | yes                         | ~80%                   | 主路径               |
+| 提交时并发复核跳过源                              | proposed            | guard（reachable 写窗口）                    | no（跳过=工作未做）         | ~6%                    | 保留                 |
+| 待 merge v3 谓词枚举分支                          | proposed            | primary-contract 定义域分支（R4 合约到达性） | yes（merge 本身是合约行为） | ~8%                    | 主路径组成           |
+| 脉冲动画回退（无 progress 字段）                  | proposed            | existing compatibility（老任务记录）         | n/a（纯展示）               | ~3%                    | 保留                 |
+| worker 崩溃拒绝 RPC 并关闭本次执行器              | proposed            | guard（reachable 运行时事件）                | no（异常继续上抛）          | ~3%                    | 替代补员循环         |
+| R1 的 length(hash)=64 唯一过滤                    | rejected            | 基于假格式不变量，破坏 INV-08                | —                           | —                      | 拒绝                 |
+| WIP 的同步 fallback 编码（reused-target-missing） | rejected            | forbidden fallback                           | yes                         | —                      | 拒绝：复核不符即跳过 |
 
 ## 12. Workaround Deletion and Replacement
 
-| Existing workaround or duplicate | Why it existed | Why the approved route supersedes it | Delete or collapse location |
-| --- | --- | --- | --- |
-| paint() 脉冲条"不定百分比" | 当时无总量数据 | progress 字段使百分比可得 | db.ts paint() 脉冲仅作老记录回退 |
-| repackColdBatch 单事务全串行 | 实现简单 | 读/算/写三段拆分 | cold.ts repackColdBatch 重写 |
-| pin/LRU 128 项缓存循环、无效 exact transfer、CASE SQL、payloadDrained | 本轮中间实现 | 有界任务生命周期、真实 transfer、参数化写回、提交后 checkpoint | 删除旧分支与废弃 helper；不并存 |
+| Existing workaround or duplicate                                      | Why it existed | Why the approved route supersedes it                           | Delete or collapse location      |
+| --------------------------------------------------------------------- | -------------- | -------------------------------------------------------------- | -------------------------------- |
+| paint() 脉冲条"不定百分比"                                            | 当时无总量数据 | progress 字段使百分比可得                                      | db.ts paint() 脉冲仅作老记录回退 |
+| repackColdBatch 单事务全串行                                          | 实现简单       | 读/算/写三段拆分                                               | cold.ts repackColdBatch 重写     |
+| pin/LRU 128 项缓存循环、无效 exact transfer、CASE SQL、payloadDrained | 本轮中间实现   | 有界任务生命周期、真实 transfer、参数化写回、提交后 checkpoint | 删除旧分支与废弃 helper；不并存  |
 
 ## 13. Forward Traceability
 
-| Requirement or invariant | Production path | Planned file/change | Behavioral test |
-| --- | --- | --- | --- |
-| INV-01 字节一致 | worker processPack/encode 复用 packCodec | cold.ts + cold-pack-worker.ts | cold-v3 repack 测试（identity 断言）+ 基准 hash 比对 |
-| INV-02 事务语义 | 主线程单事务提交，retain→assign→release 顺序不变 | cold.ts | cold-v3 test 4（resumed repack，fixtures 改 v2 legacy 形态） |
-| INV-04 无 schema 变更 | 不改 migration；worker 无 DB import | 全 diff | `git diff --name-only` 检查 + typecheck |
-| INV-05 进度可缺失 | progress 可选 + paint 回退 | cold.ts + db.ts | cold.test.ts parseMaintenanceTask 用例扩展（:1380-1384） |
-| INV-06 共享库增量断言 | verifyDelta/payloadHashes 基线 | cold-v3.test.ts | CI Linux/macOS core 分片转绿 + 本地 core 合并复现 |
-| INV-07 完整流程显著提速 / <300s | 有界 worker 计算 + 原子参数化写回 | 三职责模块内实现 worker | 定向机制检查后完整时间验收，CPU仅诊断 |
-| INV-08 merge 保留 | 待 merge 谓词枚举 + 正常 repack 路径 | cold.ts | 新增：v3 包 + 未 merge entry + 老化 session → 被选中并完成 merge |
-| INV-09 模块归属与版本收敛 | §10.5 三文件重组 + codec seam 合一 + ColdMaintain 命名空间迁移 | cold.ts / cold-maintain.ts / cold-pack-worker.ts + 消费点 | 47/47 既有测试原样通过 + typecheck |
-| INV-10 生命周期 | 编码执行器 scan/encode/drop/close 与 maintain finally | cold-codec.ts / cold-pack-worker.ts / cold-maintain.ts | 129 源请求、失败后结算、取消后缓存释放 |
-| INV-11 完整 owner 数据 | 两种参数化写回、事务内选中 owner 快照复核 | cold.ts | 混合 merge/carry、跨 session 共享、重复维护幂等 |
-| INV-12 容量与业务保真 | level17标准帧、既有去重身份和热正文/统计投影 | cold.ts / codec | 完整性、search/stats/replay 回归及最终 bytes |
-| INV-07 首次冷冻 | owner 只读准备→pack worker→快照/资格重验→原子提交 | cold.ts / cold-codec.ts / cold-maintain.ts / worker | 常规内存反馈、维护取消与同毫秒热更新、完整读取与统计 |
-| INV-12 现有帧减容 | 显式 recompress→原字节验证→level17→较小帧原位提交 | 同上及 db.ts | 现有 v3 低级别帧缩小，ref/key/Stats 不变；无收益帧保留；原始物理容量验收 |
-| 进度百分比/ETA 可见 | 总量 SQL 计数 + paint 渲染 | cold.ts + db.ts | 基准运行时帧观察（人工）+ parse 用例（自动） |
+| Requirement or invariant        | Production path                                                | Planned file/change                                       | Behavioral test                                                          |
+| ------------------------------- | -------------------------------------------------------------- | --------------------------------------------------------- | ------------------------------------------------------------------------ |
+| INV-01 字节一致                 | worker processPack/encode 复用 packCodec                       | cold.ts + cold-pack-worker.ts                             | cold-v3 repack 测试（identity 断言）+ 基准 hash 比对                     |
+| INV-02 事务语义                 | 主线程单事务提交，retain→assign→release 顺序不变               | cold.ts                                                   | cold-v3 test 4（resumed repack，fixtures 改 v2 legacy 形态）             |
+| INV-04 无 schema 变更           | 不改 migration；worker 无 DB import                            | 全 diff                                                   | `git diff --name-only` 检查 + typecheck                                  |
+| INV-05 进度可缺失               | progress 可选 + paint 回退                                     | cold.ts + db.ts                                           | cold.test.ts parseMaintenanceTask 用例扩展（:1380-1384）                 |
+| INV-06 共享库增量断言           | verifyDelta/payloadHashes 基线                                 | cold-v3.test.ts                                           | CI Linux/macOS core 分片转绿 + 本地 core 合并复现                        |
+| INV-07 完整流程显著提速 / <300s | 有界 worker 计算 + 原子参数化写回                              | 三职责模块内实现 worker                                   | 定向机制检查后完整时间验收，CPU仅诊断                                    |
+| INV-08 merge 保留               | 待 merge 谓词枚举 + 正常 repack 路径                           | cold.ts                                                   | 新增：v3 包 + 未 merge entry + 老化 session → 被选中并完成 merge         |
+| INV-09 模块归属与版本收敛       | §10.5 三文件重组 + codec seam 合一 + ColdMaintain 命名空间迁移 | cold.ts / cold-maintain.ts / cold-pack-worker.ts + 消费点 | 47/47 既有测试原样通过 + typecheck                                       |
+| INV-10 生命周期                 | 编码执行器 scan/encode/drop/close 与 maintain finally          | cold-codec.ts / cold-pack-worker.ts / cold-maintain.ts    | 129 源请求、失败后结算、取消后缓存释放                                   |
+| INV-11 完整 owner 数据          | 两种参数化写回、事务内选中 owner 快照复核                      | cold.ts                                                   | 混合 merge/carry、跨 session 共享、重复维护幂等                          |
+| INV-12 容量与业务保真           | level17标准帧、既有去重身份和热正文/统计投影                   | cold.ts / codec                                           | 完整性、search/stats/replay 回归及最终 bytes                             |
+| INV-07 首次冷冻                 | owner 只读准备→pack worker→快照/资格重验→原子提交              | cold.ts / cold-codec.ts / cold-maintain.ts / worker       | 常规内存反馈、维护取消与同毫秒热更新、完整读取与统计                     |
+| INV-12 现有帧减容               | 显式 recompress→原字节验证→level17→较小帧原位提交              | 同上及 db.ts                                              | 现有 v3 低级别帧缩小，ref/key/Stats 不变；无收益帧保留；原始物理容量验收 |
+| 进度百分比/ETA 可见             | 总量 SQL 计数 + paint 渲染                                     | cold.ts + db.ts                                           | 基准运行时帧观察（人工）+ parse 用例（自动）                             |
 
 ## 14. Reverse Traceability
 
-| Proposed production concept | Requirement ID | Evidence | Why existing logic cannot carry it |
-| --- | --- | --- | --- |
-| cold-pack-worker.ts 新文件 | INV-07 | worker 探针实证可用且 hash 一致 | Bun Worker 必须是独立 entrypoint |
-| packCodec 导出 | INV-01/04 | 协议唯一来源原则 | worker 与主线程必须共享同一实现，否则协议分叉 |
-| 每次维护持有编码执行器 | INV-07/10 | worker 缓存需在失败/取消后释放；批次间复用保持吞吐 | 单例 pin/LRU 状态已复现卡死且难结算 |
-| readRepackSources 读/写分离 | INV-02/07 | 串行段拆解实测 | worker 不能持事务 |
-| 提交复核 | §6 并发窗口 | daemon 存活时 CLI 可达；:2292-2368 合约使复核完备 | lease 不覆盖跨进程 CLI |
-| 待 merge v3 谓词（json_extract + batchEligibility） | INV-08 | cold.ts:3706/3731 分支 + :1160-1165 老化 | 长度过滤基于假格式不变量（B-02） |
-| legacy length=64 枚举分支 | 迁移效率 | v2 hash 恒 64 hex | 无 |
-| MaintenanceTask.progress + parse 校验 | 进度需求 | 用户逐字要求 | 现任务记录无总量 |
-| paint() 百分比/ETA 分支 | 进度需求 | 用户逐字要求 | 脉冲条无数据 |
-| verifyDelta/payloadHashes | INV-06 | CI 日志 + cold.test.ts:1296 范式 | 绝对断言在共享库下恒假 |
-| cold-maintain.ts 新模块 | INV-09 | 用户逐字模块归属要求 | 主流程只拥有任务进度/取消/顺序，具体编码和 SQL 留在行为模块 |
-| codec 版本归一 seam（decodePayload 统一入口） | INV-09 | parseEnvelope/parsePackEnvelope 近同构实测 | 版本分支散落两处使每次格式演进双点修改 |
-| ColdMaintain 命名空间 | INV-09（B-05 修订） | 单向依赖下 facade re-export 结构性不可能 | 公开维护 API 必须有宿主 |
-| 参数化引用/投影 UPDATE | INV-07/11 | CASE 机制失败与小型执行耗时比较 | 当前拼接对非命中 data 赋 NULL，且重复比较 id |
-| scan 唯一句柄与 drop 删除 | INV-10 | 129 pinned 源触发停滞 | hash 缓存缺少独立调用生命周期，不应再添加驱逐状态 |
-| cold-store.ts 存储操作 | INV-09/02/11 | cold.ts同时承担业务读取与维护SQL，现为2941行 | 包存取和事务被业务操作与维护流程复用，集中一致性合同 |
-| codec内worker dispatcher | INV-09/10 | 源码及编译态模块入口探针通过 | 执行器与协议共享生命周期，workerData标识实际运行身份 |
-| 首次冷冻 read/commit 与 pack 操作 | INV-07/02/11 | 常规 48 Tool 实测 worker=0/ticks=0 | 当前 batch 内同步编码，既有 repack 输入要求已存在冷包，不能代替首次冻结 |
-| level17 与显式已有帧 recompress | INV-12/07 | §23同输入样本的耗时/密度校准；现存v3默认跳过 | 显式范围提供现有帧维护，常规调用保持快速幂等；沿用原schema与索引 |
+| Proposed production concept                         | Requirement ID      | Evidence                                           | Why existing logic cannot carry it                                      |
+| --------------------------------------------------- | ------------------- | -------------------------------------------------- | ----------------------------------------------------------------------- |
+| cold-pack-worker.ts 新文件                          | INV-07              | worker 探针实证可用且 hash 一致                    | Bun Worker 必须是独立 entrypoint                                        |
+| packCodec 导出                                      | INV-01/04           | 协议唯一来源原则                                   | worker 与主线程必须共享同一实现，否则协议分叉                           |
+| 每次维护持有编码执行器                              | INV-07/10           | worker 缓存需在失败/取消后释放；批次间复用保持吞吐 | 单例 pin/LRU 状态已复现卡死且难结算                                     |
+| readRepackSources 读/写分离                         | INV-02/07           | 串行段拆解实测                                     | worker 不能持事务                                                       |
+| 提交复核                                            | §6 并发窗口         | daemon 存活时 CLI 可达；:2292-2368 合约使复核完备  | lease 不覆盖跨进程 CLI                                                  |
+| 待 merge v3 谓词（json_extract + batchEligibility） | INV-08              | cold.ts:3706/3731 分支 + :1160-1165 老化           | 长度过滤基于假格式不变量（B-02）                                        |
+| legacy length=64 枚举分支                           | 迁移效率            | v2 hash 恒 64 hex                                  | 无                                                                      |
+| MaintenanceTask.progress + parse 校验               | 进度需求            | 用户逐字要求                                       | 现任务记录无总量                                                        |
+| paint() 百分比/ETA 分支                             | 进度需求            | 用户逐字要求                                       | 脉冲条无数据                                                            |
+| verifyDelta/payloadHashes                           | INV-06              | CI 日志 + cold.test.ts:1296 范式                   | 绝对断言在共享库下恒假                                                  |
+| cold-maintain.ts 新模块                             | INV-09              | 用户逐字模块归属要求                               | 主流程只拥有任务进度/取消/顺序，具体编码和 SQL 留在行为模块             |
+| codec 版本归一 seam（decodePayload 统一入口）       | INV-09              | parseEnvelope/parsePackEnvelope 近同构实测         | 版本分支散落两处使每次格式演进双点修改                                  |
+| ColdMaintain 命名空间                               | INV-09（B-05 修订） | 单向依赖下 facade re-export 结构性不可能           | 公开维护 API 必须有宿主                                                 |
+| 参数化引用/投影 UPDATE                              | INV-07/11           | CASE 机制失败与小型执行耗时比较                    | 当前拼接对非命中 data 赋 NULL，且重复比较 id                            |
+| scan 唯一句柄与 drop 删除                           | INV-10              | 129 pinned 源触发停滞                              | hash 缓存缺少独立调用生命周期，不应再添加驱逐状态                       |
+| cold-store.ts 存储操作                              | INV-09/02/11        | cold.ts同时承担业务读取与维护SQL，现为2941行       | 包存取和事务被业务操作与维护流程复用，集中一致性合同                    |
+| codec内worker dispatcher                            | INV-09/10           | 源码及编译态模块入口探针通过                       | 执行器与协议共享生命周期，workerData标识实际运行身份                    |
+| 首次冷冻 read/commit 与 pack 操作                   | INV-07/02/11        | 常规 48 Tool 实测 worker=0/ticks=0                 | 当前 batch 内同步编码，既有 repack 输入要求已存在冷包，不能代替首次冻结 |
+| level17 与显式已有帧 recompress                     | INV-12/07           | §23同输入样本的耗时/密度校准；现存v3默认跳过       | 显式范围提供现有帧维护，常规调用保持快速幂等；沿用原schema与索引        |
 
 ## 15. File-Level Change Plan
 
-| File | Add / modify / delete | Exact responsibility of the change | Expected line delta |
-| --- | --- | --- | --- |
-| `packages/opencode/src/storage/cold-codec.ts` | add | 字节/恢复/统计/执行器及worker协议 | 约1400–1700 |
-| `packages/opencode/src/storage/cold.ts` | modify | 公开业务读取、写入和派生状态合同 | 700–1000 |
-| `packages/opencode/src/storage/cold-maintain.ts` | add | 请求/任务、队列、取消、进度和checkpoint | 约800–1100 |
-| `packages/opencode/src/storage/cold-store.ts` | add | 包/引用、资格、冷冻和repack批次、报告 | 约1600–2000 |
-| `packages/opencode/src/storage/cold-pack-worker.ts` | remove working addition | 协议归入codec并同步编译入口 | 最终0行 |
-| `packages/opencode/src/cli/cmd/tui/server-lock.ts` | modify | parseMaintenanceTask/MaintenanceTask 具名 import 改自 ./cold-maintain（B-05 消费点） | ~2 |
-| `packages/opencode/src/cli/cmd/db.ts` | modify | paint() 百分比/ETA 分支；ColdStorage.* 维护 API 调用点迁移 ColdMaintain.*（B-05 消费点） | +22/-4 加 ~15 处接收者更新 |
-| `packages/opencode/src/cli/cmd/tui/worker.ts` | modify | ColdStorage.* 维护 API 调用点迁移 ColdMaintain.*（B-05 消费点） | ~7 处接收者更新 |
-| `packages/opencode/test/session/messages-pagination.test.ts` | modify | ColdStorage.status 调用点迁移（B-05 消费点） | ~1 |
-| `packages/opencode/test/cli/db-maintenance.test.ts` | modify | MaintenanceTask导入迁移；真实PTY断言百分比与ETA | import及2条展示断言 |
-| `packages/opencode/test/cli/tui/daemon.test.ts` | modify | MaintenanceTask 类型 import 机械迁移；保留其他任务修改，不启动 daemon | import-only |
-| `packages/opencode/script/build.ts` | modify | pack worker entrypoint + define（复刻 voice 模式） | +6 |
-| `packages/opencode/test/storage/cold-v3.test.ts` | modify | 基线增量断言（4 处）+ cold_ref 精确定位 + test 4 v2 fixtures + 新增待 merge v3 用例 + ~8 处 ColdMaintain 接收者更新 | +130/-30 |
-| `packages/opencode/test/storage/cold.test.ts` | modify | parseMaintenanceTask progress 解析用例（:1380-1384 邻域） | +30 |
-| `docs/plans/cold-maintenance-worker-parallelism-and-progress.md` | add | 本计划 | （文档不计） |
+| File                                                             | Add / modify / delete   | Exact responsibility of the change                                                                                  | Expected line delta        |
+| ---------------------------------------------------------------- | ----------------------- | ------------------------------------------------------------------------------------------------------------------- | -------------------------- |
+| `packages/opencode/src/storage/cold-codec.ts`                    | add                     | 字节/恢复/统计/执行器及worker协议                                                                                   | 约1400–1700                |
+| `packages/opencode/src/storage/cold.ts`                          | modify                  | 公开业务读取、写入和派生状态合同                                                                                    | 700–1000                   |
+| `packages/opencode/src/storage/cold-maintain.ts`                 | add                     | 请求/任务、队列、取消、进度和checkpoint                                                                             | 约800–1100                 |
+| `packages/opencode/src/storage/cold-store.ts`                    | add                     | 包/引用、资格、冷冻和repack批次、报告                                                                               | 约1600–2000                |
+| `packages/opencode/src/storage/cold-pack-worker.ts`              | remove working addition | 协议归入codec并同步编译入口                                                                                         | 最终0行                    |
+| `packages/opencode/src/cli/cmd/tui/server-lock.ts`               | modify                  | parseMaintenanceTask/MaintenanceTask 具名 import 改自 ./cold-maintain（B-05 消费点）                                | ~2                         |
+| `packages/opencode/src/cli/cmd/db.ts`                            | modify                  | paint() 百分比/ETA 分支；ColdStorage._ 维护 API 调用点迁移 ColdMaintain._（B-05 消费点）                            | +22/-4 加 ~15 处接收者更新 |
+| `packages/opencode/src/cli/cmd/tui/worker.ts`                    | modify                  | ColdStorage._ 维护 API 调用点迁移 ColdMaintain._（B-05 消费点）                                                     | ~7 处接收者更新            |
+| `packages/opencode/test/session/messages-pagination.test.ts`     | modify                  | ColdStorage.status 调用点迁移（B-05 消费点）                                                                        | ~1                         |
+| `packages/opencode/test/cli/db-maintenance.test.ts`              | modify                  | MaintenanceTask导入迁移；真实PTY断言百分比与ETA                                                                     | import及2条展示断言        |
+| `packages/opencode/test/cli/tui/daemon.test.ts`                  | modify                  | MaintenanceTask 类型 import 机械迁移；保留其他任务修改，不启动 daemon                                               | import-only                |
+| `packages/opencode/script/build.ts`                              | modify                  | pack worker entrypoint + define（复刻 voice 模式）                                                                  | +6                         |
+| `packages/opencode/test/storage/cold-v3.test.ts`                 | modify                  | 基线增量断言（4 处）+ cold_ref 精确定位 + test 4 v2 fixtures + 新增待 merge v3 用例 + ~8 处 ColdMaintain 接收者更新 | +130/-30                   |
+| `packages/opencode/test/storage/cold.test.ts`                    | modify                  | parseMaintenanceTask progress 解析用例（:1380-1384 邻域）                                                           | +30                        |
+| `docs/plans/cold-maintenance-worker-parallelism-and-progress.md` | add                     | 本计划                                                                                                              | （文档不计）               |
 
 最终生产文件为8个（cold.ts / cold-store.ts / cold-codec.ts / cold-maintain.ts / build.ts / db.ts / tui/worker.ts / tui/server-lock.ts）。cold-pack-worker.ts是本任务新增工作文件，协议并入codec后相对任务基线的文件增量为0。测试范围沿用表内5个文件；完整有效生产编辑≤1600行，冷域≤6000行，cold.ts≤1000行。
 
 ## 16. TDD Behavior Slices
 
-| Order | Red behavior | Why current code fails | Minimal green behavior | Regression protected |
-| --- | --- | --- | --- | --- |
-| 1 | cold-v3 全量套件在共享内存库下绿 | 全库绝对断言遇外文件漂移即红 | 基线增量断言（4 处） | CI Linux/macOS core 分片 |
-| 2 | repack 结果字节一致 + resumed repack 断点恢复（test 4，fixtures 为 v2 legacy 包） | 现串行实现不存在"并行下一致"的断言对象 | worker 流水线后同一测试绿 | INV-01/02/03 |
-| 3 | v3 待 merge 包被枚举选中并完成 merge（构造：v3 包 + 热行携带深层字段的 entry + 老化 session；另断言干净 v3 包不被选中） | 现枚举无谓词（全选），实现谓词后待 merge 包必须仍可达、干净包必须跳过 | 谓词枚举 + 正常 repack | INV-08 |
-| 4 | maintain 任务记录携带 progress 且老记录（无字段）照常解析（cold.test.ts:1380-1384 扩展） | parseMaintenanceTask 无 progress 概念 | 字段+校验+循环更新 | INV-05 |
-| 5 | 实际 worker 129 个小源任务全部完成；同 hash 独立 scan 与 drop 可重复使用 | 当前第 129 个 scan 实测超时 | 唯一句柄及显式释放，删除 LRU/pin | INV-10 |
-| 6 | 同次维护中 merge 与 carry owner 均恢复完整且 cold_stats 保持 | CASE 分支不命中产生 NULL，机制探针已红 | 参数化更新仅写对应行的投影 | INV-11 |
-| 7 | 中断后提交数等于 done；恢复不丢源；worker 失败不留下未处理 rejection | 当前 done 包含已预取批次，空转旗标与清理分散 | 有界 FIFO + 逐提交 checkpoint + finally 关闭 | INV-02/05/10 |
-| 8 | v1/v2/v3 与 Unicode entry 独立校验、范围打包、读取/搜索/统计保持 | 重组和 byteLength 复用须保护协议边界 | 集中 codec，复用当前字段恢复，不做尝试式降级 | INV-01/03/08/12 |
-| 9 | 常规首次冻结期间保持进度事件可运行，完整 Tool/Message 与 Stats 保持 | 内存反馈 0 timer ticks、0 worker | pack 编码与存储事务分离 | 默认 freeze 资格、scope、root Text 搜索 |
-| 10 | 计算期间同毫秒更新或删除 owner、Session 活跃度变化、取消，均保留新业务值 | 新异步窗口需原子复核；原同步路径无此窗口 | chunk 快照/资格重验，仅提交完整有效 chunk | 不复活删除行，不遗留无引用包，恢复后完整读值 |
-| 11 | 显式 recompress 缩小既有低级别帧且保持所有 owner/ref/key/Stats；常规运行仍跳过干净 v3 | 当前请求忽略该范围，干净帧不会进入队列 | 参数贯穿 CLI/parse/持久任务及单一帧编码路径 | 老任务兼容、坏帧拒绝、无收益帧保持、进度与取消/恢复 |
-| 12 | 源码/编译codec worker往返、正常模块import、关闭均保持 | 同文件入口须绑定所属线程 | workerData与既有编译entrypoint绑定 | 主线程与其他worker的原有消息处理 |
+| Order | Red behavior                                                                                                            | Why current code fails                                                | Minimal green behavior                       | Regression protected                                |
+| ----- | ----------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------- | -------------------------------------------- | --------------------------------------------------- |
+| 1     | cold-v3 全量套件在共享内存库下绿                                                                                        | 全库绝对断言遇外文件漂移即红                                          | 基线增量断言（4 处）                         | CI Linux/macOS core 分片                            |
+| 2     | repack 结果字节一致 + resumed repack 断点恢复（test 4，fixtures 为 v2 legacy 包）                                       | 现串行实现不存在"并行下一致"的断言对象                                | worker 流水线后同一测试绿                    | INV-01/02/03                                        |
+| 3     | v3 待 merge 包被枚举选中并完成 merge（构造：v3 包 + 热行携带深层字段的 entry + 老化 session；另断言干净 v3 包不被选中） | 现枚举无谓词（全选），实现谓词后待 merge 包必须仍可达、干净包必须跳过 | 谓词枚举 + 正常 repack                       | INV-08                                              |
+| 4     | maintain 任务记录携带 progress 且老记录（无字段）照常解析（cold.test.ts:1380-1384 扩展）                                | parseMaintenanceTask 无 progress 概念                                 | 字段+校验+循环更新                           | INV-05                                              |
+| 5     | 实际 worker 129 个小源任务全部完成；同 hash 独立 scan 与 drop 可重复使用                                                | 当前第 129 个 scan 实测超时                                           | 唯一句柄及显式释放，删除 LRU/pin             | INV-10                                              |
+| 6     | 同次维护中 merge 与 carry owner 均恢复完整且 cold_stats 保持                                                            | CASE 分支不命中产生 NULL，机制探针已红                                | 参数化更新仅写对应行的投影                   | INV-11                                              |
+| 7     | 中断后提交数等于 done；恢复不丢源；worker 失败不留下未处理 rejection                                                    | 当前 done 包含已预取批次，空转旗标与清理分散                          | 有界 FIFO + 逐提交 checkpoint + finally 关闭 | INV-02/05/10                                        |
+| 8     | v1/v2/v3 与 Unicode entry 独立校验、范围打包、读取/搜索/统计保持                                                        | 重组和 byteLength 复用须保护协议边界                                  | 集中 codec，复用当前字段恢复，不做尝试式降级 | INV-01/03/08/12                                     |
+| 9     | 常规首次冻结期间保持进度事件可运行，完整 Tool/Message 与 Stats 保持                                                     | 内存反馈 0 timer ticks、0 worker                                      | pack 编码与存储事务分离                      | 默认 freeze 资格、scope、root Text 搜索             |
+| 10    | 计算期间同毫秒更新或删除 owner、Session 活跃度变化、取消，均保留新业务值                                                | 新异步窗口需原子复核；原同步路径无此窗口                              | chunk 快照/资格重验，仅提交完整有效 chunk    | 不复活删除行，不遗留无引用包，恢复后完整读值        |
+| 11    | 显式 recompress 缩小既有低级别帧且保持所有 owner/ref/key/Stats；常规运行仍跳过干净 v3                                   | 当前请求忽略该范围，干净帧不会进入队列                                | 参数贯穿 CLI/parse/持久任务及单一帧编码路径  | 老任务兼容、坏帧拒绝、无收益帧保持、进度与取消/恢复 |
+| 12    | 源码/编译codec worker往返、正常模块import、关闭均保持                                                                   | 同文件入口须绑定所属线程                                              | workerData与既有编译entrypoint绑定           | 主线程与其他worker的原有消息处理                    |
 
 slice 2 的行为断言语义已存在于 test 4，本计划调整其 fixtures 形态；INV-07 是无法单测化的整机指标，用快照复测验收并在 §23 记录实测值。
 
 ## 17. Chinese Comment Budget
 
-| Metric | Estimate | Method |
-| --- | --- | --- |
-| Effective changed code lines `E` | R7 加 R8 预计约1,400（含行为测试），最终按完整差异实算 | 排除 import/格式化/文档/纯移动 |
-| Required Chinese explanatory comments `C` | 估算≥210，实际始终≥ceil(E×0.15) | 解释同毫秒快照、资格重验、事务边界、范围参数、帧身份与真实测试意图 |
+| Metric                                    | Estimate                                               | Method                                                             |
+| ----------------------------------------- | ------------------------------------------------------ | ------------------------------------------------------------------ |
+| Effective changed code lines `E`          | R7 加 R8 预计约1,400（含行为测试），最终按完整差异实算 | 排除 import/格式化/文档/纯移动                                     |
+| Required Chinese explanatory comments `C` | 估算≥210，实际始终≥ceil(E×0.15)                        | 解释同毫秒快照、资格重验、事务边界、范围参数、帧身份与真实测试意图 |
 
 注释落点：池规模 75% 核数的取舍；Buffer slice 传输陷阱；待 merge 谓词的"热行携带深层字段 ⟺ entry 未 merge"依据；提交复核的跨进程窗口与"跳过非成功"语义；daemon 池驻留理由；progress 总量是估算且不参与恢复；ETA 外推口径；共享库基线断言的 CI 环境依据；模块边界（cold-maintain 为何持有池生命周期）；codec seam 的版本归一选择规则（持久判别式唯一确定 decoder，写入只出 v3）。
 
 ## 18. Verification
 
-| Command | Working directory | Evidence produced |
-| --- | --- | --- |
-| `bun typecheck` | packages/opencode | 类型零错误 |
-| `bun test test/storage/cold.test.ts test/storage/cold-v3.test.ts` | packages/opencode | 全绿（单进程共享内存库，直接覆盖 INV-06 环境） |
-| `bun test test/storage/cold-v3.test.ts -t '<当前切片名称>'` | packages/opencode | 每个批准切片先红后绿；同文件追加真实 worker/混合 owner/取消用例 |
-| `bun test test/storage/cold.test.ts test/storage/cold-v3.test.ts test/server/session-messages.test.ts test/session/messages-pagination.test.ts` | packages/opencode | 最终相关共享库回归；各切片期间不反复跑全组 |
-| 编译worker smoke（缓存区Bun.build，真实codec入口，define/compile与build.ts同口径） | packages/opencode，输出缓存目录 | scan/encode/recode往返、正常import与clean close |
-| 本地 core 合并分片复现（NB-04/NB-09：只跑 core 分片等价布局——单进程跑 integration+runtime 文件集合，不跑 tui 分片；精确命令以实现期对 script/test-ci.ts 分片参数的核对为准） | packages/opencode | cold-v3 在多文件共享库下转绿 |
-| 历史基准记录（三代实现） | packages/opencode | 只供历史比较，§23 不是最新代码的达标证据 |
-| 最终容量/速度验收 | 缓存区内复用一个可验证来源的副本 | 记录源状态、完整 compress 时间、进程含 worker CPU 时间/墙钟/逻辑核心数、RSS、页数与 GB/GiB；不从小样本外推达标，不反复新建副本 |
-| `bun run D:\Temp\opencode\cold-owner-feedback.mjs` | packages/opencode | 有界普通首次冻结机制反馈；完整读取相等与主线程可响应，不替代整机验收 |
-| `git diff --name-only HEAD -- '*migration*'` | 仓库根 | 为空（INV-04） |
-| CI test 工作流（push 后） | GitHub | Linux/macOS core 分片转绿 |
+| Command                                                                                                                                                                      | Working directory                | Evidence produced                                                                                                              |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| `bun typecheck`                                                                                                                                                              | packages/opencode                | 类型零错误                                                                                                                     |
+| `bun test test/storage/cold.test.ts test/storage/cold-v3.test.ts`                                                                                                            | packages/opencode                | 全绿（单进程共享内存库，直接覆盖 INV-06 环境）                                                                                 |
+| `bun test test/storage/cold-v3.test.ts -t '<当前切片名称>'`                                                                                                                  | packages/opencode                | 每个批准切片先红后绿；同文件追加真实 worker/混合 owner/取消用例                                                                |
+| `bun test test/storage/cold.test.ts test/storage/cold-v3.test.ts test/server/session-messages.test.ts test/session/messages-pagination.test.ts`                              | packages/opencode                | 最终相关共享库回归；各切片期间不反复跑全组                                                                                     |
+| 编译worker smoke（缓存区Bun.build，真实codec入口，define/compile与build.ts同口径）                                                                                           | packages/opencode，输出缓存目录  | scan/encode/recode往返、正常import与clean close                                                                                |
+| 本地 core 合并分片复现（NB-04/NB-09：只跑 core 分片等价布局——单进程跑 integration+runtime 文件集合，不跑 tui 分片；精确命令以实现期对 script/test-ci.ts 分片参数的核对为准） | packages/opencode                | cold-v3 在多文件共享库下转绿                                                                                                   |
+| 历史基准记录（三代实现）                                                                                                                                                     | packages/opencode                | 只供历史比较，§23 不是最新代码的达标证据                                                                                       |
+| 最终容量/速度验收                                                                                                                                                            | 缓存区内复用一个可验证来源的副本 | 记录源状态、完整 compress 时间、进程含 worker CPU 时间/墙钟/逻辑核心数、RSS、页数与 GB/GiB；不从小样本外推达标，不反复新建副本 |
+| `bun run D:\Temp\opencode\cold-owner-feedback.mjs`                                                                                                                           | packages/opencode                | 有界普通首次冻结机制反馈；完整读取相等与主线程可响应，不替代整机验收                                                           |
+| `git diff --name-only HEAD -- '*migration*'`                                                                                                                                 | 仓库根                           | 为空（INV-04）                                                                                                                 |
+| CI test 工作流（push 后）                                                                                                                                                    | GitHub                           | Linux/macOS core 分片转绿                                                                                                      |
 
 优先定向测试后统一相关回归。实际维护验收复用有来源记录的cold-final.sqlite当前v3数据，显式参数recompress=true、olderThanMs=1d、全Session；默认7d保持。完整计时包括owner扫描/新冻结、实际存在的legacy或待merge源、全部现存帧重编码、线程启动与最终checkpoint，并记录实际源包数/raw字节以核实工作量。物理回收另计，报告起始及最终bytes、GB/GiB、freelist与WAL/checkpoint；业务读取、正文搜索、统计、分页及完整性均须验证。全库合成legacy的压力结果独立保留，跨负载分别报告。生产库保持只读，复用同一缓存副本。
 
 ## 19. Diff Budget
 
-| Metric | Estimate | Justification |
-| --- | --- | --- |
-| Files added | 4 | cold-codec.ts + cold-maintain.ts + cold-store.ts + plan |
-| Files modified | 10 | cold.ts / build.ts / db.ts / worker.ts / server-lock.ts及§15的5个测试文件 |
-| Files deleted | 0 | — |
-| Production lines | 非纯移动有效编辑至多 1,600；冷域格式化物理行数至多 6,000 | 两种口径分别报告，不能用净 diff 掩盖代码增长 |
-| Test lines | ~160 | — |
-| Generated lines | 0 | — |
+| Metric           | Estimate                                                 | Justification                                                             |
+| ---------------- | -------------------------------------------------------- | ------------------------------------------------------------------------- |
+| Files added      | 4                                                        | cold-codec.ts + cold-maintain.ts + cold-store.ts + plan                   |
+| Files modified   | 10                                                       | cold.ts / build.ts / db.ts / worker.ts / server-lock.ts及§15的5个测试文件 |
+| Files deleted    | 0                                                        | —                                                                         |
+| Production lines | 非纯移动有效编辑至多 1,600；冷域格式化物理行数至多 6,000 | 两种口径分别报告，不能用净 diff 掩盖代码增长                              |
+| Test lines       | ~160                                                     | —                                                                         |
+| Generated lines  | 0                                                        | —                                                                         |
 
 ## 20. Real Risks and Open Decisions
 
@@ -495,13 +496,13 @@ The independent auditor must:
 
 ## 22. Plan Audit Record
 
-| Round | Audited revision | Full scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | R1 | yes | B-01（INV-07 整程口径在自身数据下不可达）、B-02（length 过滤假前提破坏 newly-eligible merge） | NB-01~NB-07 | BLOCK | ses_f047dc33bffeozzhCgq80U5d8y |
-| 2 | R2 | yes | B-03（§18 基准条件声明为假：生产库已是 v3 形态，INV-07 按计划不可测量） | NB-08（谓词三处精度锁定）、NB-09（本地复现只跑 core 分片） | BLOCK | ses_f047dc33bffeozzhCgq80U5d8y |
-| 3 | R3 | yes | No blocking findings | NB-10（§18 夹具引用错位：v2 构造实为 test 2 :126-149 非 test 4）、NB-11（§6 待 merge 行的 fork/低 olderThanMs 举例方向存疑，主产生路径独立支撑 reachable 分类）、NB-12（合成 harness 重指后宜删除被替换的 v3 包行）、NB-13（worker.ts 引用 :149 漂移为 :138） | APPROVE | ses_f047dc33bffeozzhCgq80U5d8y |
-| 4 | R4 | yes | B-04（头部门禁字段假声明 Implementation allowed）、B-05（§10.5 单向依赖下公共维护 API 不可能经 facade 保持、验收条件联合不可满足、§15 遗漏消费文件）、B-06（INV-09 数值上限与引证约束矛盾、行数算术不闭合） | NB-14~NB-20 | BLOCK | ses_f047dc33bffeozzhCgq80U5d8y |
-| 5 | R5 | yes | No blocking findings | NB-21（§15 三处路径前缀修正）、NB-22（表尾计数同步）、NB-23（§9 归属表随重组更新）、NB-24（C=101）、NB-25（补登第 4 轮）、NB-26（§10.5 实施等待 §20-2 答复的排序规则）、NB-27（§23 测试计数以运行输出为准） | APPROVE | ses_f047dc33bffeozzhCgq80U5d8y |
+| Round | Audited revision | Full scope? | Blocking findings                                                                                                                                                                                           | Non-blocking findings                                                                                                                                                                                                                                         | Result  | Invocation reference           |
+| ----- | ---------------- | ----------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- | ------------------------------ |
+| 1     | R1               | yes         | B-01（INV-07 整程口径在自身数据下不可达）、B-02（length 过滤假前提破坏 newly-eligible merge）                                                                                                               | NB-01~NB-07                                                                                                                                                                                                                                                   | BLOCK   | ses_f047dc33bffeozzhCgq80U5d8y |
+| 2     | R2               | yes         | B-03（§18 基准条件声明为假：生产库已是 v3 形态，INV-07 按计划不可测量）                                                                                                                                     | NB-08（谓词三处精度锁定）、NB-09（本地复现只跑 core 分片）                                                                                                                                                                                                    | BLOCK   | ses_f047dc33bffeozzhCgq80U5d8y |
+| 3     | R3               | yes         | No blocking findings                                                                                                                                                                                        | NB-10（§18 夹具引用错位：v2 构造实为 test 2 :126-149 非 test 4）、NB-11（§6 待 merge 行的 fork/低 olderThanMs 举例方向存疑，主产生路径独立支撑 reachable 分类）、NB-12（合成 harness 重指后宜删除被替换的 v3 包行）、NB-13（worker.ts 引用 :149 漂移为 :138） | APPROVE | ses_f047dc33bffeozzhCgq80U5d8y |
+| 4     | R4               | yes         | B-04（头部门禁字段假声明 Implementation allowed）、B-05（§10.5 单向依赖下公共维护 API 不可能经 facade 保持、验收条件联合不可满足、§15 遗漏消费文件）、B-06（INV-09 数值上限与引证约束矛盾、行数算术不闭合） | NB-14~NB-20                                                                                                                                                                                                                                                   | BLOCK   | ses_f047dc33bffeozzhCgq80U5d8y |
+| 5     | R5               | yes         | No blocking findings                                                                                                                                                                                        | NB-21（§15 三处路径前缀修正）、NB-22（表尾计数同步）、NB-23（§9 归属表随重组更新）、NB-24（C=101）、NB-25（补登第 4 轮）、NB-26（§10.5 实施等待 §20-2 答复的排序规则）、NB-27（§23 测试计数以运行输出为准）                                                   | APPROVE | ses_f047dc33bffeozzhCgq80U5d8y |
 
 Any substantive revision invalidates earlier approval.
 
@@ -646,15 +647,15 @@ No blocking findings.
 
 本轮保留原始完整范围，覆盖容量、时间、进度、CI、旧格式、业务功能、模块边界和新增线程路径。
 
-| 范围 | 独立核查结论 |
-|---|---|
+| 范围             | 独立核查结论                                                                                                                           |
+| ---------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
 | 独占大源线程预算 | `cold-maintain.ts:548` 的队列约束支持独占；当前 `cold-codec.ts:287` 仍走单线程编码。预算由维护调度传至执行器和字节核心，修复位置正确。 |
-| 首次冻结并行编码 | `cold-store.ts:813` 读取快照，编码后在 `cold-store.ts:864` 的事务中重新核对完整行及资格。计划覆盖同毫秒更新、删除、取消和资格变化。 |
-| 重压缩与引用安全 | 保持内容地址、owner定位和统计；`cold-store.ts:2117` 只提交更小帧。无收益结果保持原帧，错误继续失败。 |
-| 生命周期及进度 | 编码执行器拥有线程和RPC，关闭时拒绝待结算请求并等待线程结束；提交前检查lease/abort，提交后推进cursor、done和checkpoint。 |
-| 兼容、搜索与统计 | 持久版本决定校验路径；保留v1/v2读取、热正文搜索和统计恢复合同，没有通过删数据或降低校验强度提速。 |
-| 模块与构建 | 四文件职责和依赖方向明确；codec同时承载专属worker入口，`build.ts:484`、`:522`、`:534` 已对应入口和define。计划包含源码及编译态验证。 |
-| 测试与验收 | 定向切片覆盖普通/独占encode与recode、坏hash、关闭、混合owner、scope、恢复及进度；最终统一回归和缓存副本验收仍保留。 |
+| 首次冻结并行编码 | `cold-store.ts:813` 读取快照，编码后在 `cold-store.ts:864` 的事务中重新核对完整行及资格。计划覆盖同毫秒更新、删除、取消和资格变化。    |
+| 重压缩与引用安全 | 保持内容地址、owner定位和统计；`cold-store.ts:2117` 只提交更小帧。无收益结果保持原帧，错误继续失败。                                   |
+| 生命周期及进度   | 编码执行器拥有线程和RPC，关闭时拒绝待结算请求并等待线程结束；提交前检查lease/abort，提交后推进cursor、done和checkpoint。               |
+| 兼容、搜索与统计 | 持久版本决定校验路径；保留v1/v2读取、热正文搜索和统计恢复合同，没有通过删数据或降低校验强度提速。                                      |
+| 模块与构建       | 四文件职责和依赖方向明确；codec同时承载专属worker入口，`build.ts:484`、`:522`、`:534` 已对应入口和define。计划包含源码及编译态验证。   |
+| 测试与验收       | 定向切片覆盖普通/独占encode与recode、坏hash、关闭、混合owner、scope、恢复及进度；最终统一回归和缓存副本验收仍保留。                    |
 
 本轮未运行测试或基准，未调用daemon，未修改代码、计划或生产数据库。因此，上述结论是**方案可实施性与完整性结论**，不是对当前实现测试结果的认证。
 
@@ -774,16 +775,17 @@ Non-blocking findings：同步§18/§20验收映射；明确1d为非默认显式
 
 ## 24. Implementation Audit Record
 
-| Round | Plan revision | Full original scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | R9 | yes | B-10：完整计时补充真实lease与持久checkpoint | NB-I01：merge完整性基线前置；NB-I02：同步独立预算 | BLOCK — R9 尚不能标记为 Verified Implementation。 | ses_f047dc33bffeozzhCgq80U5d8y |
-| 2 | R9 | yes | B-10已关闭 | NB-I01、NB-I02已关闭 | APPROVE — R9 全范围独立实现审计通过。 | ses_f047dc33bffeozzhCgq80U5d8y |
+| Round | Plan revision | Full original scope? | Blocking findings                           | Non-blocking findings                             | Result                                            | Invocation reference           |
+| ----- | ------------- | -------------------- | ------------------------------------------- | ------------------------------------------------- | ------------------------------------------------- | ------------------------------ |
+| 1     | R9            | yes                  | B-10：完整计时补充真实lease与持久checkpoint | NB-I01：merge完整性基线前置；NB-I02：同步独立预算 | BLOCK — R9 尚不能标记为 Verified Implementation。 | ses_f047dc33bffeozzhCgq80U5d8y |
+| 2     | R9            | yes                  | B-10已关闭                                  | NB-I01、NB-I02已关闭                              | APPROVE — R9 全范围独立实现审计通过。             | ses_f047dc33bffeozzhCgq80U5d8y |
 
 - B-10补证：同一缓存恢复2938 Message/12346 Part，再将7154帧规范化为level1；hash/raw/身份元数据核验一致。完整维护282.6634399s，7275帧/5,560,577,131 raw bytes，700次真实checkpoint，包含lease获取/检查/释放与worker关闭；完成记录`cold-final.sqlite.maintenance/tasks/dbm_9dc7c990-d6aa-4142-a8d7-8b5d151c8927.json`与返回task深度相等。64 Message/256 Part业务与Stats、64 root热Text样本一致。
-- 缓存脚本随后物理回收的临时taskID前缀修正为生产约定vacuum_，独立继续回收56.8584717s；完整压缩计时保持上述原始记录。最终文件/page均2,792,460,288 bytes（2.792460288GB / 2.600681305GiB），freelist/WAL均0，checkpoint busy/log/checkpointed均0。7275 payload、1,677,030 distinct owner locators校验通过，missing/mismatches/orphans=0，integrity_check=ok，foreign_key_check为空。
+- 缓存脚本随后物理回收的临时taskID前缀修正为生产约定vacuum\_，独立继续回收56.8584717s；完整压缩计时保持上述原始记录。最终文件/page均2,792,460,288 bytes（2.792460288GB / 2.600681305GiB），freelist/WAL均0，checkpoint busy/log/checkpointed均0。7275 payload、1,677,030 distinct owner locators校验通过，missing/mismatches/orphans=0，integrity_check=ok，foreign_key_check为空。
 - NB-I01修正后包目录`bun test test/storage/cold-v3.test.ts -t 'repack merges newly eligible'`：1 pass/0 fail/11 expects。NB-I02预算已同步；生产代码维持R9实现。
 
 最终独立裁决原文：
+
 > No blocking findings.
 >
 > **APPROVE — R9 全范围独立实现审计通过。**

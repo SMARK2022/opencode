@@ -520,9 +520,7 @@ it.instance("resolves keybind lookup from canonical keybinds", () =>
       expect(config.keybinds.get("model.dialog.favorite")?.[0]?.key).toBe("ctrl+f")
       expect(config.keybinds.get("dialog.plugins.install")?.[0]?.key).toBe("shift+i")
       // voice 默认值属于 TUI 配置解析结果；macOS 单独避开 Option/Alt 和粘贴键，其它平台保持既有 Alt+V。
-      expect(config.keybinds.get("prompt.voice.toggle")?.[0]?.key).toBe(
-        process.platform === "darwin" ? "f8" : "alt+v",
-      )
+      expect(config.keybinds.get("prompt.voice.toggle")?.[0]?.key).toBe(process.platform === "darwin" ? "f8" : "alt+v")
       // TUI 只保留快捷键，执行目标由共享后端用户配置提供。
       expect("voice" in config).toBe(false)
       expect(
@@ -722,12 +720,25 @@ it.instance("keeps the voice auth node invisible to the mcp config schema", () =
         // 直接检查writer真实产物经过Native schema和共享host；不能拿Legacy lower的结果冒充两代覆盖。
         const native = ConfigParse.jsonc(text ?? "{}", config)
         if (!isRecord(native) || !isRecord(native.mcp)) throw new Error("expected raw MCP config")
-        const rawServer = Object.hasOwn(native.mcp, "chatgpt") ? native.mcp.chatgpt : isRecord(native.mcp.servers) ? native.mcp.servers.chatgpt : undefined
+        const rawServer = Object.hasOwn(native.mcp, "chatgpt")
+          ? native.mcp.chatgpt
+          : isRecord(native.mcp.servers)
+            ? native.mcp.servers.chatgpt
+            : undefined
         expect(Schema.decodeUnknownSync(ConfigMCP.Local)(rawServer)).not.toHaveProperty("auth")
         // 前端已退休选择职责；布局、禁用和写回合同继续由真实后端验证。
-        if (item.enabled) expect(yield* Effect.promise(() => resolveVoiceTarget([config])))
-          .toMatchObject({ config, key: "chatgpt", script: path.join(agentDir, "chatgpt.js") })
-        if (!item.enabled) yield* Effect.promise(async () => { await expect(resolveVoiceTarget([config])).rejects.toThrow("Voice input requires a user-configured ChatGPT MCP") })
+        if (item.enabled)
+          expect(yield* Effect.promise(() => resolveVoiceTarget([config]))).toMatchObject({
+            config,
+            key: "chatgpt",
+            script: path.join(agentDir, "chatgpt.js"),
+          })
+        if (!item.enabled)
+          yield* Effect.promise(async () => {
+            await expect(resolveVoiceTarget([config])).rejects.toThrow(
+              "Voice input requires a user-configured ChatGPT MCP",
+            )
+          })
         const resolved = yield* getTuiConfig(test.directory)
         expect(resolved).not.toHaveProperty("voice")
       }

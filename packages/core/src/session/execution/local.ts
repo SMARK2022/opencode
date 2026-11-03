@@ -17,18 +17,21 @@ const layer = Layer.effect(
     const coordinator = yield* SessionRunCoordinator.make<SessionSchema.ID, SessionRunner.RunError>({
       drain: Effect.fnUntraced(function* (sessionID: SessionSchema.ID, force, maintenance) {
         // 进程级drain贯穿位置解析、执行与退出清理；SSE断线不能误判仍活动的V2工作。
-        return yield* SessionActivity.track(`native:${sessionID}`, Effect.gen(function* () {
-        const session = yield* store.get(sessionID)
-        if (!session) return yield* Effect.die(`Session not found: ${sessionID}`)
-        return yield* SessionRunner.Service.use((runner) => runner.run({ sessionID, force, maintenance })).pipe(
-          Effect.provide(locations.get(session.location)),
-          Effect.tapCause((cause) =>
-            Cause.hasInterruptsOnly(cause)
-              ? Effect.void
-              : Effect.logError("Failed to drain Session", cause).pipe(Effect.annotateLogs({ sessionID })),
-          ),
+        return yield* SessionActivity.track(
+          `native:${sessionID}`,
+          Effect.gen(function* () {
+            const session = yield* store.get(sessionID)
+            if (!session) return yield* Effect.die(`Session not found: ${sessionID}`)
+            return yield* SessionRunner.Service.use((runner) => runner.run({ sessionID, force, maintenance })).pipe(
+              Effect.provide(locations.get(session.location)),
+              Effect.tapCause((cause) =>
+                Cause.hasInterruptsOnly(cause)
+                  ? Effect.void
+                  : Effect.logError("Failed to drain Session", cause).pipe(Effect.annotateLogs({ sessionID })),
+              ),
+            )
+          }),
         )
-        }))
       }),
     })
 

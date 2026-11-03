@@ -64,8 +64,17 @@ export function useVscodeNotebookToolView(props: {
   }
 
   // #224：notebook inline 视图——pending 态从流式参数提取摘要，完成态回退到 inline
-  function inlineView(tool: string, input: Record<string, unknown>, status: string, stats?: PendingToolInputStats): VscodeNotebookToolView {
-    const op = stats?.operation ?? stringValue(input.editType) ?? stringValue(input.operation) ?? tool.replace("vscode_notebook_", "")
+  function inlineView(
+    tool: string,
+    input: Record<string, unknown>,
+    status: string,
+    stats?: PendingToolInputStats,
+  ): VscodeNotebookToolView {
+    const op =
+      stats?.operation ??
+      stringValue(input.editType) ??
+      stringValue(input.operation) ??
+      tool.replace("vscode_notebook_", "")
     // #224：target 从 filePath 或 stats.filePath 派生——pathFormatter 统一格式化
     const target = notebookTarget(stringValue(input.filePath) ?? stats?.filePath)
     const cell = stats?.cellId ?? stringValue(input.cellId)
@@ -74,12 +83,13 @@ export function useVscodeNotebookToolView(props: {
     const lineStats = <NotebookPendingStats stats={stats} />
     const content = (
       <>
-        {label} <Show when={target}>{target}</Show> <Show when={cell}>{cell}</Show>{lineStats}
+        {label} <Show when={target}>{target}</Show> <Show when={cell}>{cell}</Show>
+        {lineStats}
       </>
     )
     return {
       mode: "inline",
-    // #224：icon 用 ← 表示 edit（写入），⚙ 表示其他 notebook 工具
+      // #224：icon 用 ← 表示 edit（写入），⚙ 表示其他 notebook 工具
       icon: tool === "vscode_notebook_edit" ? "←" : "⚙",
       complete: status !== "pending",
       pending: (
@@ -98,7 +108,8 @@ export function useVscodeNotebookToolView(props: {
     // #233：insert 编辑优先从 diff 还原源码，其次用 bridge 的 insertedSourcePreview
     // #233：还原失败（diff 过大被省略）时 preview 为 undefined，body 退回 summary
     const insertSourceFromDiff = editType === "insert" ? notebookInsertSourceFromDiff(diff) : undefined
-    const insertSource = insertSourceFromDiff ?? (editType === "insert" ? stringValue(metadata.insertedSourcePreview) : undefined)
+    const insertSource =
+      insertSourceFromDiff ?? (editType === "insert" ? stringValue(metadata.insertedSourcePreview) : undefined)
     // #224：stats 从 metadata.added/removed 派生——如果 diff 被省略，stats 仍保留行数
     const stats = { added: numberValue(metadata.added) ?? 0, removed: numberValue(metadata.removed) ?? 0 }
     const visibleText = insertSource ?? diff
@@ -109,7 +120,9 @@ export function useVscodeNotebookToolView(props: {
     const language = stringValue(metadata.language)
     // #233：diff 被省略时折叠尺寸仍按真实变更规模计算——否则 3000 行插入预览
     // #233：会以展开形态挂载，击穿 BlockTool 的 10 行首屏预算。
-    const totalLines = stringValue(metadata.diffOmitted) ? Math.max(visibleLines, stats.added + stats.removed + 3) : visibleLines
+    const totalLines = stringValue(metadata.diffOmitted)
+      ? Math.max(visibleLines, stats.added + stats.removed + 3)
+      : visibleLines
     const title = [
       "←",
       notebookEditLabel(editType),
@@ -117,8 +130,10 @@ export function useVscodeNotebookToolView(props: {
       stringValue(metadata.cellLabel),
       // 旧锚点仅用于追踪，箭头右侧为SDK实际返回的新句柄。
       [stringValue(metadata.requestedCellId), stringValue(metadata.cellId)].filter(Boolean).join(" -> "),
-        stats.added > 0 || stats.removed > 0 ? `+${stats.added} -${stats.removed}` : undefined,
-    ].filter(Boolean).join(" ")
+      stats.added > 0 || stats.removed > 0 ? `+${stats.added} -${stats.removed}` : undefined,
+    ]
+      .filter(Boolean)
+      .join(" ")
     const filePath = notebookDiffPath(metadata)
     // #224：preview 用 previewDiff 截断到 10 行，body 用完整 diff
     return {
@@ -128,24 +143,34 @@ export function useVscodeNotebookToolView(props: {
       threshold: 20,
       totalLines,
       totalChars: visibleText.length,
-      preview: insertSource !== undefined
-        ? <NotebookSourceCode source={insertSource} filePath={filePath} language={language} maxLines={10} />
-        : diff ? <NotebookDiff diff={previewDiff(diff, 10)} filePath={filePath} language={language} maxLines={10} /> : undefined,
+      preview:
+        insertSource !== undefined ? (
+          <NotebookSourceCode source={insertSource} filePath={filePath} language={language} maxLines={10} />
+        ) : diff ? (
+          <NotebookDiff diff={previewDiff(diff, 10)} filePath={filePath} language={language} maxLines={10} />
+        ) : undefined,
       // #233：body 在插入源码、diff 和 summary 之间用嵌套 Show 切换
       body: () => (
         <box gap={1} flexDirection="column">
-          <Show when={insertSource !== undefined} fallback={
-            <Show when={diff} fallback={<text fg={theme.text}>{summaryLine(metadata)}</text>}>
-              <NotebookDiff diff={diff} filePath={filePath} language={language} />
-            </Show>
-          }>
+          <Show
+            when={insertSource !== undefined}
+            fallback={
+              <Show when={diff} fallback={<text fg={theme.text}>{summaryLine(metadata)}</text>}>
+                <NotebookDiff diff={diff} filePath={filePath} language={language} />
+              </Show>
+            }
+          >
             <NotebookSourceCode source={insertSource ?? ""} filePath={filePath} language={language} />
             <Show when={booleanValue(metadata.insertedSourcePreviewTruncated) && insertSourceFromDiff === undefined}>
-              <text fg={theme.textMuted}>Inserted source preview is truncated; use vscode_notebook_source for the full cell.</text>
+              <text fg={theme.textMuted}>
+                Inserted source preview is truncated; use vscode_notebook_source for the full cell.
+              </text>
             </Show>
           </Show>
           <Show when={stringValue(metadata.diffOmitted) && insertSource === undefined}>
-            <text fg={theme.textMuted}>Diff omitted from metadata because it exceeds the notebook inline display budget.</text>
+            <text fg={theme.textMuted}>
+              Diff omitted from metadata because it exceeds the notebook inline display budget.
+            </text>
           </Show>
           <text fg={theme.textMuted}>{summaryLine(metadata)}</text>
         </box>
@@ -167,12 +192,19 @@ export function useVscodeNotebookToolView(props: {
       totalChars: JSON.stringify(metadata).length,
       preview: (
         <box flexDirection="column">
-          <text fg={theme.textMuted}>runtime={stringValue(metadata.runtime) ?? "unknown"} dirty={String(booleanValue(metadata.dirty) ?? "unknown")}</text>
+          <text fg={theme.textMuted}>
+            runtime={stringValue(metadata.runtime) ?? "unknown"} dirty=
+            {String(booleanValue(metadata.dirty) ?? "unknown")}
+          </text>
           {/* #233：折叠预览优先展示最近失败的 cell——late failure 不被前 6 个成功 cell 掩盖 */}
-          <For each={previewCells(cells)}>{(cell) => <text fg={execColor(stringValue(cell.exec))}>{previewCellLine(cell)}</text>}</For>
+          <For each={previewCells(cells)}>
+            {(cell) => <text fg={execColor(stringValue(cell.exec))}>{previewCellLine(cell)}</text>}
+          </For>
         </box>
       ),
-      body: () => <NotebookCells cells={cells} runtime={stringValue(metadata.runtime)} dirty={booleanValue(metadata.dirty)} />,
+      body: () => (
+        <NotebookCells cells={cells} runtime={stringValue(metadata.runtime)} dirty={booleanValue(metadata.dirty)} />
+      ),
     }
   }
 
@@ -205,7 +237,9 @@ export function useVscodeNotebookToolView(props: {
       totalChars: JSON.stringify(metadata).length,
       preview: (
         <box flexDirection="column">
-          <For each={previewCells(cells)}>{(cell) => <text fg={execColor(stringValue(cell.exec))}>{previewCellLine(cell)}</text>}</For>
+          <For each={previewCells(cells)}>
+            {(cell) => <text fg={execColor(stringValue(cell.exec))}>{previewCellLine(cell)}</text>}
+          </For>
           <Show when={artifacts.length}>
             {/* #233：折叠态只报数量——artifact 明细在展开后的 body 中呈现 */}
             <text fg={theme.textMuted}>Artifacts: {artifacts.length} available after expand</text>
@@ -230,7 +264,9 @@ export function useVscodeNotebookToolView(props: {
       preview: <NotebookArtifacts artifacts={artifacts.slice(0, 6)} />,
       body: () => (
         <box flexDirection="column">
-          <text fg={theme.textMuted}>Cell: {cellLabel(cell)} {stringValue(cell.kind)}/{stringValue(cell.lang)}</text>
+          <text fg={theme.textMuted}>
+            Cell: {cellLabel(cell)} {stringValue(cell.kind)}/{stringValue(cell.lang)}
+          </text>
           <NotebookArtifacts artifacts={artifacts} />
         </box>
       ),
@@ -249,11 +285,15 @@ export function useVscodeNotebookToolView(props: {
       totalChars: JSON.stringify(metadata).length,
       body: () => (
         <box flexDirection="column">
-          <Show when={stringValue(metadata.operation)}>{(operation) => <text fg={theme.textMuted}>Operation: {operation()}</text>}</Show>
+          <Show when={stringValue(metadata.operation)}>
+            {(operation) => <text fg={theme.textMuted}>Operation: {operation()}</text>}
+          </Show>
           <Show when={status}>{(item) => <text fg={statusColor(item())}>Status: {item()}</text>}</Show>
           <Show when={stringValue(metadata.guidance)}>{(guidance) => <text fg={theme.text}>{guidance()}</text>}</Show>
           <Show when={metadata.beforeDirty !== undefined || metadata.afterDirty !== undefined}>
-            <text fg={theme.textMuted}>Dirty: {String(booleanValue(metadata.beforeDirty))} -&gt; {String(booleanValue(metadata.afterDirty))}</text>
+            <text fg={theme.textMuted}>
+              Dirty: {String(booleanValue(metadata.beforeDirty))} -&gt; {String(booleanValue(metadata.afterDirty))}
+            </text>
           </Show>
         </box>
       ),
@@ -307,8 +347,12 @@ export function useVscodeNotebookToolView(props: {
   function NotebookPendingStats(statProps: { stats?: PendingToolInputStats }) {
     return (
       <>
-        <Show when={statProps.stats?.added}><span style={{ fg: theme.diffAdded }}> +{statProps.stats!.added}</span></Show>
-        <Show when={statProps.stats?.removed}><span style={{ fg: theme.diffRemoved }}> -{statProps.stats!.removed}</span></Show>
+        <Show when={statProps.stats?.added}>
+          <span style={{ fg: theme.diffAdded }}> +{statProps.stats!.added}</span>
+        </Show>
+        <Show when={statProps.stats?.removed}>
+          <span style={{ fg: theme.diffRemoved }}> -{statProps.stats!.removed}</span>
+        </Show>
       </>
     )
   }
@@ -317,8 +361,12 @@ export function useVscodeNotebookToolView(props: {
   function NotebookCells(cellProps: { cells: Record<string, unknown>[]; runtime?: string; dirty?: boolean }) {
     return (
       <box flexDirection="column">
-        <text fg={theme.textMuted}>runtime={cellProps.runtime ?? "unknown"} dirty={String(cellProps.dirty ?? "unknown")}</text>
-        <For each={cellProps.cells}>{(cell) => <text fg={execColor(stringValue(cell.exec))}>{cellLine(cell)}</text>}</For>
+        <text fg={theme.textMuted}>
+          runtime={cellProps.runtime ?? "unknown"} dirty={String(cellProps.dirty ?? "unknown")}
+        </text>
+        <For each={cellProps.cells}>
+          {(cell) => <text fg={execColor(stringValue(cell.exec))}>{cellLine(cell)}</text>}
+        </For>
       </box>
     )
   }
@@ -328,7 +376,9 @@ export function useVscodeNotebookToolView(props: {
     const artifacts = artifactRows(runProps.cells)
     return (
       <box flexDirection="column">
-        <For each={runProps.cells}>{(cell) => <text fg={execColor(stringValue(cell.exec))}>{cellLine(cell)}</text>}</For>
+        <For each={runProps.cells}>
+          {(cell) => <text fg={execColor(stringValue(cell.exec))}>{cellLine(cell)}</text>}
+        </For>
         <Show when={artifacts.length}>
           <text fg={theme.textMuted}>Artifacts:</text>
           <NotebookArtifacts artifacts={artifacts} />
@@ -388,7 +438,11 @@ function notebookToolLabel(tool: string) {
 
 // #224：diff 路径标签——path + cellLabel + language 组成虚拟文件名供语法高亮
 function notebookDiffPath(metadata: Record<string, unknown>) {
-  return [stringValue(metadata.path), stringValue(metadata.cellLabel), stringValue(metadata.language) ? `.${stringValue(metadata.language)}` : undefined]
+  return [
+    stringValue(metadata.path),
+    stringValue(metadata.cellLabel),
+    stringValue(metadata.language) ? `.${stringValue(metadata.language)}` : undefined,
+  ]
     .filter((item): item is string => Boolean(item))
     .join("")
 }
@@ -416,7 +470,9 @@ function summaryLine(metadata: Record<string, unknown>) {
   const before = numberValue(metadata.cellCountBefore)
   const after = numberValue(metadata.cellCountAfter)
   const count = before === undefined || after === undefined ? undefined : `${before} -> ${after} cells`
-  return [count, `dirty=${String(booleanValue(metadata.dirty) ?? "unknown")}`, stringValue(metadata.editType)].filter(Boolean).join(" · ")
+  return [count, `dirty=${String(booleanValue(metadata.dirty) ?? "unknown")}`, stringValue(metadata.editType)]
+    .filter(Boolean)
+    .join(" · ")
 }
 
 // #224：cell 单行摘要——label/id/kind/lang/lines/exec/outs/first 七段拼接
@@ -429,7 +485,9 @@ function cellLine(cell: Record<string, unknown>) {
     stringValue(cell.exec),
     arrayStrings(cell.existing_outs).length ? `outs=${arrayStrings(cell.existing_outs).join(",")}` : undefined,
     stringValue(cell.first) ? `first=${JSON.stringify(stringValue(cell.first))}` : undefined,
-  ].filter(Boolean).join("  ")
+  ]
+    .filter(Boolean)
+    .join("  ")
 }
 
 // #224：cell 标签——有 index 显示 cN，否则用 id 或默认 'cell'
@@ -442,7 +500,9 @@ function previewCellLine(cell: Record<string, unknown>) {
     [stringValue(cell.kind), stringValue(cell.lang)].filter(Boolean).join("/"),
     exec?.match(/\b(failed|error|skipped|succeeded|not-run)\b/)?.[1] ?? exec,
     stringValue(cell.first) ? `first=${JSON.stringify(stringValue(cell.first))}` : undefined,
-  ].filter(Boolean).join("  ")
+  ]
+    .filter(Boolean)
+    .join("  ")
 }
 
 // #233：预览优先展示最近失败的 cells（最多 6 个）——late failure 在折叠态可见
@@ -458,7 +518,7 @@ function failedCell(cell: Record<string, unknown>) {
 
 function cellLabel(cell: Record<string, unknown>) {
   const index = numberValue(cell.i)
-  return index === undefined ? stringValue(cell.id) ?? "cell" : `c${index}`
+  return index === undefined ? (stringValue(cell.id) ?? "cell") : `c${index}`
 }
 
 // #224：从 run cells 中收集所有 artifacts 供 summary 展示
@@ -468,7 +528,14 @@ function artifactRows(cells: Record<string, unknown>[]) {
 
 // #224：artifact 单行摘要——mime/bytes/path/preview 四段
 function artifactLine(artifact: Record<string, unknown>) {
-  return [stringValue(artifact.mime), bytesText(numberValue(artifact.bytes)), stringValue(artifact.artifactPath), stringValue(artifact.preview)].filter(Boolean).join("  ")
+  return [
+    stringValue(artifact.mime),
+    bytesText(numberValue(artifact.bytes)),
+    stringValue(artifact.artifactPath),
+    stringValue(artifact.preview),
+  ]
+    .filter(Boolean)
+    .join("  ")
 }
 
 // #224：env 状态从 saved 布尔值派生——save 操作没有显式 status 字段
@@ -498,7 +565,11 @@ function recordValue(value: unknown): Record<string, unknown> {
 
 // #224：类型安全守卫——非数组返回空数组
 function arrayRecords(value: unknown) {
-  return Array.isArray(value) ? value.flatMap((item) => (item && typeof item === "object" && !Array.isArray(item) ? [item as Record<string, unknown>] : [])) : []
+  return Array.isArray(value)
+    ? value.flatMap((item) =>
+        item && typeof item === "object" && !Array.isArray(item) ? [item as Record<string, unknown>] : [],
+      )
+    : []
 }
 
 // #224：类型安全守卫——过滤出 string 元素

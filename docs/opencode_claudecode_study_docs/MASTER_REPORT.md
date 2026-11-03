@@ -70,16 +70,19 @@ OpenCode 给你可维护的骨架，Claude Code Rebuilt 给你一批已经在强
 ## 0.5 三个最终判断
 
 ### 判断一：如果只比“今天谁更像强力 Claude Code”
+
 Claude Code Rebuilt 赢。
 
 因为它的主循环、工具面、上下文治理层、session memory、skill 处理、计划模式和提示词逻辑都更接近一个已经被长期调过的高阶 agent。它不是一套干净的开源工程，但它非常像一台高度实战化的机器。
 
 ### 判断二：如果只比“哪个更适合后续开发”
+
 OpenCode 赢。
 
 因为它的抽象边界更清楚，服务化更明显，插件和工具注册机制更干净，agent 角色层次也比 Claude Code Rebuilt 更适合做“策略层创新”。
 
 ### 判断三：如果要做一个兼顾质量、效率、上下文成本的长期 CLI
+
 最优方案不是二选一，而是：
 
 **主项目选 OpenCode；  
@@ -95,16 +98,18 @@ OpenCode 赢。
 **产品级任务连续性与交互细节参考：Cline**
 
 ### 为什么不是直接选 Claude Code Rebuilt 做主线
+
 因为它的强，建立在非常厚的历史层和高度耦合的运行路径之上。你当然可以基于它继续开发，但长期来看，新增一个高阶特性、替换一类工具、调整一种压缩策略、统一一个 agent 路由，都更容易触碰到隐式行为。它适合研究、借鉴、对照，甚至适合特定实验版本继续跑，但不适合成为你未来几个月最主要的产品底座。
 
 ### 为什么不是选 Cline
+
 因为你当前的问题不是“IDE 插件产品谁更成熟”，而是“我要选一个 CLI 项目，后续怎么优化开发”。在这个语境里，Cline 的很多优势是编辑器生态优势，不是 CLI runtime 优势。它更适合被你拆来学习 task continuity、checkpoints、Memory Bank、/smol、/newtask 这些具体机制，而不是直接拿来当 CLI 中心项目。
 
 ### 为什么是 OpenCode
+
 因为它是三者里**最适合吸收别人优点**、又最不容易被自己拖垮的那个。
 
 后面所有模块分析和改造建议，都以这个选择为前提展开。
-
 
 ---
 
@@ -142,13 +147,13 @@ Claude Code Rebuilt 的上下文治理，必须从 `query.ts` 看，而不能只
 
 在每轮核心请求前，它会经历这样一条路线：
 
-1. 启动 memory prefetch  
-2. 启动 skill discovery prefetch  
-3. 应用 `applyToolResultBudget`  
-4. 视情况执行 `snipCompactIfNeeded`  
-5. 视情况执行 `microcompact`  
-6. 视情况执行 `contextCollapse`  
-7. 再决定是否 `shouldAutoCompact`  
+1. 启动 memory prefetch
+2. 启动 skill discovery prefetch
+3. 应用 `applyToolResultBudget`
+4. 视情况执行 `snipCompactIfNeeded`
+5. 视情况执行 `microcompact`
+6. 视情况执行 `contextCollapse`
+7. 再决定是否 `shouldAutoCompact`
 8. 之后才进入真正的模型回合与工具执行
 
 这条顺序意味着一个重要事实：  
@@ -295,12 +300,15 @@ OpenCode 目前主要仍然依赖会话内部状态和 compact summary。
 ## 1.5 OpenCode 应当如何吸收 Claude Code Rebuilt 的优点
 
 ### 第一项：引入显式 Tool Result Budget 层
+
 不要等 overflow 才考虑清理。应当在每轮发送前，先统计“旧工具输出占比”，尤其是 bash/read/webfetch/code search 这类高膨胀工具，并给它们单独预算。超过预算时，优先把旧输出换成简短摘要、preview 或路径引用，而不是直接留原文。
 
 ### 第二项：引入 Session Memory Service
+
 OpenCode 应该新增独立的 `session/memory.ts` 或 `session/long_memory.ts`，在满足一定 token 增长或工具调用阈值后，把阶段性状态提炼成 markdown 记忆文件。这个记忆不应自动常驻系统 prompt，而应按需注入，或者在 compact 后作为一部分补回信息使用。
 
 ### 第三项：引入轻量 Micro-Compaction
+
 在 prune 之后、full compaction 之前，加一个轻量层。它不做完整对话摘要，而只处理局部块：
 
 - 将连续工具输出折叠成“已执行 X 次 read / grep / bash，结论如下”；
@@ -308,6 +316,7 @@ OpenCode 应该新增独立的 `session/memory.ts` 或 `session/long_memory.ts`�
 - 将多个 explore 子任务的中间结果折叠成一组 bullet summary。
 
 ### 第四项：把 compact 的恢复内容设计成一等公民
+
 至少应恢复：
 
 - 当前 agent 模式；
@@ -498,6 +507,7 @@ OpenCode 在 `prompt.ts` 的 plan workflow 中，已经明确鼓励 explore agen
 ## 2.5 OpenCode 应当如何改造主循环
 
 ### 第一项：在 `session/prompt.ts` 发送模型前插入统一 Preflight Pipeline
+
 建议增加一个 `PreflightPipeline`，至少包含以下步骤：
 
 1. `ToolResultBudget`
@@ -508,6 +518,7 @@ OpenCode 在 `prompt.ts` 的 plan workflow 中，已经明确鼓励 explore agen
 6. `FullCompactionIfNeeded`
 
 ### 第二项：把 task 子代理结果收敛成统一中间格式
+
 建议给每个子代理结果加统一 envelope，包括：
 
 - 子代理 id
@@ -518,6 +529,7 @@ OpenCode 在 `prompt.ts` 的 plan workflow 中，已经明确鼓励 explore agen
 - token 花费与轮次
 
 ### 第三项：建立只读工具并行执行器
+
 在 registry 或 prompt 执行层增加工具元数据，例如：
 
 - `readonly`
@@ -528,6 +540,7 @@ OpenCode 在 `prompt.ts` 的 plan workflow 中，已经明确鼓励 explore agen
 然后对满足条件的工具支持 batch/parallel execution。
 
 ### 第四项：增加主循环观测指标
+
 主循环一旦继续复杂化，必须同步增强可观测性。建议所有关键阶段都打点：
 
 - preflight 前 token
@@ -547,8 +560,6 @@ OpenCode 在 `prompt.ts` 的 plan workflow 中，已经明确鼓励 explore agen
 - 保留 OpenCode 的显式 agent / task / server / registry 结构；
 - 引入 Claude Code Rebuilt 的 preflight 多层治理思想；
 - 用清晰的服务边界去承载那些本来在 Claude query loop 中混在一起的高阶逻辑。
-
-
 
 ## 2.7 更细一级的源码观察：OpenCode 与 Claude 在“谁驱动谁”上的差异
 
@@ -582,7 +593,9 @@ Claude Code Rebuilt 的优势在于“减少盲目试错”；OpenCode 的优势
 当前 `session/prompt.ts` 已经承担很多职责。后续如果直接继续往里塞功能，很容易慢慢走向 Claude query 的复杂度，但又没有 Claude 那么多历史调优积累。为避免这条路，建议把 OpenCode 的执行设计正式分成三层：
 
 ### 层一：Preflight Layer
+
 职责是“发给模型前的治理”，包括：
+
 - 工作集摘要
 - 旧工具结果预算
 - 记忆回收
@@ -590,7 +603,9 @@ Claude Code Rebuilt 的优势在于“减少盲目试错”；OpenCode 的优势
 - overflow 检查
 
 ### 层二：Reasoning & Tooling Layer
+
 职责是“与模型交互以及驱动工具”，包括：
+
 - system prompt 装配
 - tool schema 暴露
 - provider transform
@@ -599,7 +614,9 @@ Claude Code Rebuilt 的优势在于“减少盲目试错”；OpenCode 的优势
 - task 子代理调用
 
 ### 层三：Postflight Layer
+
 职责是“本轮完成后的沉淀和恢复准备”，包括：
+
 - 会话记忆提取
 - tool summary
 - 关键工作集更新
@@ -618,7 +635,6 @@ Claude Code Rebuilt 的优势在于“减少盲目试错”；OpenCode 的优势
 因此，OpenCode 的正确方向不是“把 `session/prompt.ts` 改成另一个 `query.ts`”，而是：
 
 **把 Claude 那些高价值策略抽成前置层、后置层与任务层的独立服务。**
-
 
 ---
 
@@ -739,6 +755,7 @@ OpenCode 的 MCP 则更多体现在：
 ## 3.5 两者在工具与代理体系上的真正差异
 
 ### Claude Code Rebuilt 的强项
+
 - 工具生态更全面；
 - 技能生命周期更完整；
 - 子代理与系统主循环结合得更深；
@@ -746,6 +763,7 @@ OpenCode 的 MCP 则更多体现在：
 - 并发与只读工具调度更成熟。
 
 ### OpenCode 的强项
+
 - registry 设计更干净；
 - agent、tool、plugin、provider 的边界更明晰；
 - task 作为工具的设计更利于持续扩展；
@@ -755,6 +773,7 @@ OpenCode 的 MCP 则更多体现在：
 ## 3.6 OpenCode 的建议改造方向
 
 ### 第一项：给 Tool.Def 增加更多元数据
+
 建议在 registry 层为工具补充元数据，例如：
 
 - `readonly`
@@ -765,6 +784,7 @@ OpenCode 的 MCP 则更多体现在：
 - `compactPriority`
 
 ### 第二项：把 Skill 做成跨 compact 的弱持久资源
+
 可以做轻量版：
 
 - 记录本 session 已调用 skills；
@@ -772,6 +792,7 @@ OpenCode 的 MCP 则更多体现在：
 - 必要时允许在 compact 后自动重提示已调用 skills。
 
 ### 第三项：为 TaskTool 建立子代理结果标准化协议
+
 建议所有子代理结果统一输出：
 
 - `summary`
@@ -782,6 +803,7 @@ OpenCode 的 MCP 则更多体现在：
 - `cost`
 
 ### 第四项：在 MCP 层增加统一输出瘦身器
+
 高噪声 MCP 工具非常容易把上下文炸掉。建议对 MCP tool output 加统一的：
 
 - preview
@@ -796,10 +818,8 @@ OpenCode 的工程秩序更好，更适合你继续做体系化增强。
 
 如果你后续只做两件事，我建议优先做：
 
-1. **TaskTool 结果标准化 + 角色化模型路由**  
+1. **TaskTool 结果标准化 + 角色化模型路由**
 2. **Skill 与 MCP 输出的跨 compact 轻持久化**
-
-
 
 ## 3.8 从“工程整洁度”再看一遍：为什么 OpenCode 的 registry 值得你珍惜
 
@@ -808,6 +828,7 @@ OpenCode 的工程秩序更好，更适合你继续做体系化增强。
 这两个概念看似接近，实际上天差地别。
 
 一个项目可以在内部安装二十种工具，但当前回合不一定都该暴露给模型。比如：
+
 - plan agent 不应该看到 edit/write 这类执行工具；
 - compaction agent 根本不应该看到 bash；
 - 某个 provider 或某类模型不适合暴露 patch 类工具；
@@ -838,7 +859,9 @@ OpenCode 今天的 TaskTool 已经能把子代理跑起来，但真正要把多 
 所谓“可运营”，至少包括以下几件事：
 
 ### 一，能度量
+
 每个子代理要知道：
+
 - 自己用了多少 token；
 - 读了多少文件；
 - 调了多少工具；
@@ -846,12 +869,15 @@ OpenCode 今天的 TaskTool 已经能把子代理跑起来，但真正要把多 
 - 是否真的减少了主线程负担。
 
 ### 二，能压缩
+
 Explore 类子代理的输出特别容易变成长段观察日志。必须要求它们以结构化 envelope 返回，否则越多子代理，主上下文越快膨胀。
 
 ### 三，能恢复
+
 如果用户下一轮继续同一问题，或者任务被 compact 过一次，系统应该尽量恢复已有 task session，而不是再新开一个“几乎重复”的子任务。
 
 ### 四，能分档
+
 并不是所有子代理都值得上强模型。  
 Explore 可能更适合便宜模型；  
 Plan 可能需要更强模型；  
@@ -874,11 +900,11 @@ Summary/Compaction 则应该极便宜。
 工具、MCP、Skill、子代理这块，Claude Code Rebuilt 给你的是一个“高完成度样板”；OpenCode 给你的是一个“高可塑性平台”。
 
 如果你的目标是继续建设自己的体系，那么工具系统的核心不是“赶紧变多”，而是：
+
 - 让 registry 成为真正的能力总线；
 - 让 Skill 保持轻而可进化；
 - 让 Task 成为多 agent 的运营中心；
 - 让 MCP 输出变成被治理的资源，而不是被动洪水。
-
 
 ---
 
@@ -934,6 +960,7 @@ Claude Code Rebuilt 的 `prompts.ts` 非常能说明问题。它不是一段单�
 一起变化。
 
 ### plan mode 与角色切换在 Claude Code Rebuilt 中更偏“原生状态机”
+
 Claude Code Rebuilt 不只是“有个计划模式工具”，而是 plan mode 会影响权限、影响 prompt 注入、影响 compact 恢复，并且在主系统里被明确视为一种状态。
 
 ## 4.3 OpenCode：提示词系统更加模块化，模式控制更显式
@@ -1005,6 +1032,7 @@ OpenCode 则更像：
 ## 4.5 OpenCode 最值得做的路由增强
 
 ### 4.5.1 真正的角色化模型路由
+
 默认路由表建议：
 
 - build -> 强模型
@@ -1015,6 +1043,7 @@ OpenCode 则更像：
 - summary/title -> 极便宜模型
 
 ### 4.5.2 Prompt Layer 应该开始输出“角色成本意识”
+
 比如 explore agent 提示：
 
 - 优先列出关键文件，不要过度展开；
@@ -1022,6 +1051,7 @@ OpenCode 则更像：
 - 对长输出生成结构化 findings。
 
 ### 4.5.3 compact / summary agent 应采用专门的高度结构化 prompt
+
 OpenCode 已经有 compact/summary agent，但还可以进一步升级成：
 
 - 当前目标
@@ -1055,8 +1085,6 @@ OpenCode 的可设计空间更大。
 - 借鉴 Claude Code Rebuilt 的 section 化思想和动态恢复意识；
 - 在 OpenCode 里建立更清晰的角色化模型路由与 compact/summary 结构化输出。
 
-
-
 ## 4.8 系统提示词真正要解决的，不只是“说什么”，而是“如何少说却不失控”
 
 系统提示词经常被做得越来越长，尤其在 coding agent 里，很容易出现一种坏习惯：一旦发现模型在某件事上做得不好，就往 system prompt 里再加一条规定。久而久之，prompt 变成巨大的规章制度集合。
@@ -1066,13 +1094,17 @@ Claude Code Rebuilt 之所以虽然复杂、却仍然显得相对成熟，关键
 OpenCode 当前已经具备 provider prompt 层和 agent prompt 层，这是很好的开始。后续你应该重点强化的，不是单纯把 prompt 变长，而是做三件事：
 
 ### 一，建立“常驻信息”和“动态信息”的明确边界
+
 比如：
+
 - 常驻：基本行为规范、工具哲学、风险原则；
 - 角色常驻：某 agent 的工作职责；
 - 动态：当前工作目录、当前 agent、当前可用 skills、当前 plan 文件、当前 workset。
 
 ### 二，让提示词尽量消费结构化状态，而不是重复自然语言叙事
+
 如果系统已经知道：
+
 - 当前计划文件路径；
 - 最近工作集；
 - 已调用技能；
@@ -1082,6 +1114,7 @@ OpenCode 当前已经具备 provider prompt 层和 agent prompt 层，这是很�
 那么 prompt 不应再长篇累牍地“解释世界”，而应尽量使用结构化区块，让模型快速对齐状态。
 
 ### 三，让模式控制成为对象化状态，而不是继续堆文字规则
+
 OpenCode 现在这一点做得比很多项目好。plan/build/general/explore/compaction 都是对象，不只是 prompt 中的一句“你现在扮演……”。你后续应继续沿着这条路走，而不是退回到“为了省事，把模式差异都写进一长段 system prompt 里”。
 
 ## 4.9 对 OpenCode 的一个重要建议：把 Agent Prompt 设计成“可组合块”而不是“整段模板”
@@ -1096,6 +1129,7 @@ OpenCode 现在这一点做得比很多项目好。plan/build/general/explore/co
 - `safety_policy`：高风险动作的确认规则
 
 然后不同 agent 去组合不同块：
+
 - build：role + tooling_policy + verification_policy + safety_policy
 - plan：role + tooling_policy（只读版） + handoff_policy
 - explore：role + cost_policy + handoff_policy
@@ -1128,7 +1162,6 @@ OpenCode 的 `system.ts` 已经有 provider-specific prompt，这是非常好的
 - 模式切换显式化。
 
 只要你把这两组优点结合起来，OpenCode 在这块不需要照抄 Claude，也能走到非常强的水平。
-
 
 ---
 
@@ -1171,6 +1204,7 @@ OpenCode 的 `read.ts` 则展示了另一种风格。它的边界相当清晰：
 这类 Read 设计非常利于做“高性价比上下文控制”。
 
 ### OpenCode 的可优化方向
+
 - 增加重复读取抑制
 - 支持“摘要替代原文”的可选模式
 - 维护一个工作集视图
@@ -1187,6 +1221,7 @@ OpenCode 的 `edit.ts` 是一个非常好的基础实现。它具备几个很关
 - 再跑 LSP diagnostics，把错误反馈回输出。
 
 ### OpenCode Edit 应继续增强的方向
+
 - 增加“多处候选匹配解释”
 - 把 edit 结果摘要化写入工作集日志
 - 为 edit 工具补充“连续编辑批次”概念
@@ -1199,10 +1234,11 @@ Claude Code Rebuilt 的 Bash 融入整体权限与风险系统，它在高阶任
 OpenCode 当前的优势在于，Bash 处于统一 permission、plugin before/after hook、tool metadata 路径下，说明它天然适合被预算治理系统接管。
 
 ### OpenCode 对 Bash 的建议强化
-- 建立 Bash Output Normalizer  
-- 区分“验证型”与“探索型”命令  
-- 把 Bash 结果纳入 ToolResultBudget 的重点治理对象  
-- 在 compact 摘要中单独保留“已运行验证步骤”与“失败命令”  
+
+- 建立 Bash Output Normalizer
+- 区分“验证型”与“探索型”命令
+- 把 Bash 结果纳入 ToolResultBudget 的重点治理对象
+- 在 compact 摘要中单独保留“已运行验证步骤”与“失败命令”
 
 ## 5.5 Task：OpenCode 当前最强资产之一
 
@@ -1226,42 +1262,47 @@ Claude Code Rebuilt 中子代理是整个系统的天然部分，因此表现得
 - 子代理 token 账本。
 
 ### TaskTool 的下一步应当是什么
-- 标准化结果输出，不要只是自由文本 `<task_result>`  
-- 引入 resume policy  
-- 给 explore/build/general/summary 等角色建立不同预算和 compact 策略  
-- 把 task 生命周期纳入 benchmark harness  
+
+- 标准化结果输出，不要只是自由文本 `<task_result>`
+- 引入 resume policy
+- 给 explore/build/general/summary 等角色建立不同预算和 compact 策略
+- 把 task 生命周期纳入 benchmark harness
 
 ## 5.6 四个核心工具的总体判断
 
 ### Read
+
 OpenCode 更适合继续做成“成本敏感的上下文入口”。  
 Claude Code Rebuilt 更像“强 agent 生态中的读取器”。
 
 ### Edit
+
 OpenCode 的 Edit 很漂亮，是非常好的长期打磨基础。  
 Claude Code Rebuilt 的 Edit 胜在系统协同，而不一定胜在单模块优雅。
 
 ### Bash
+
 OpenCode 当前结构更适合把 Bash 做成受预算治理的高价值工具。  
 Claude Code Rebuilt 已经证明 Bash 必须被纳入整体上下文系统治理。
 
 ### Task
+
 OpenCode 的 TaskTool 是当前最值得下注的基础设施。  
 它未必今天就比 Claude Code Rebuilt 更强，但它是更适合你继续做深的一块。
-
-
 
 ## 5.7 进一步的源码级观察：Read 与 Edit 为什么构成了 OpenCode 的“舒适基础”
 
 OpenCode 这两个工具有一个共同特点：**都在工具层就开始做约束，而不是把约束全部留给主循环或 prompt。**
 
 Read 的约束包括：
+
 - 默认读取上限；
 - 目录分页；
 - 图片/PDF 特别处理；
 - preview 与 loaded 元数据；
 
 Edit 的约束包括：
+
 - 同文件锁；
 - old/new string 的严格替换语义；
 - permission ask；
@@ -1283,6 +1324,7 @@ Edit 的约束包括：
 - `metadata.compactPriority`
 
 为什么这件事重要？因为只要工具输出形状统一了：
+
 - Tool Result Budget 才能做得更聪明；
 - Micro-Compaction 才能跨工具工作；
 - Session Memory 才能知道哪些结果值得沉淀；
@@ -1297,6 +1339,7 @@ Claude Code Rebuilt 虽然在单个工具实现上未必总是更优雅，但它
 比如读取工具不只是把文件内容给模型，还会影响后续工作集、技能发现、compact 恢复与任务路线；bash 不只是运行命令，而会变成预算治理对象和验证历史；skill 与 task 更是直接参与 agent 行为学。
 
 所以 OpenCode 后续加强工具时，也不要只想着“把每个工具做强”，还要问：
+
 - 这个工具如何被 compact 理解？
 - 这个工具如何被 memory 提炼？
 - 这个工具的结果如何进入 task handoff？
@@ -1313,8 +1356,6 @@ Claude Code Rebuilt 虽然在单个工具实现上未必总是更优雅，但它
 
 **给它们建立统一的输出治理层与会话级协同关系。**
 
-
-
 ## 5.11 再进一步：四类工具之间其实应该形成“工具链协同”而不是彼此孤立
 
 真正强的 coding agent，不会把 Read、Edit、Bash、Task 看成四个相互独立的按钮，而会让它们形成一个闭环。Claude Code Rebuilt 给人的“完成任务很顺”之感，某种意义上正来自这种闭环感。
@@ -1322,11 +1363,14 @@ Claude Code Rebuilt 虽然在单个工具实现上未必总是更优雅，但它
 理想状态下，这四类工具之间应该形成如下关系：
 
 ### Read -> Task
+
 读取不是终点，而是决定是否值得派发 explore/general/build 子代理的依据。  
 如果某文件群已经被 Read 命中并确认为关键工作集，TaskTool 在拆任务时就应该直接携带这些文件线索，而不是让子代理重新从零搜索。
 
 ### Task -> Read
+
 子代理返回的结果，不应只是“我看完了，结论如下”，而应明确指出：
+
 - 哪些文件已经足够读过；
 - 哪些文件只是可能相关；
 - 哪些文件建议主线程继续深读。
@@ -1334,9 +1378,11 @@ Claude Code Rebuilt 虽然在单个工具实现上未必总是更优雅，但它
 这样主线程后续的 Read 才不会盲目重复。
 
 ### Read/Edit -> Bash
+
 如果这轮编辑修改了某个测试文件、某个构建入口、某个接口实现，那么 Bash 的下一步验证命令就不应由模型自由发挥，而应尽量从工作集和修改信息中推导。也就是说，Edit 不只是改文件，还应把“建议验证入口”沉淀为结构化元数据。
 
 ### Bash -> Session Memory / Compact
+
 验证命令的通过与失败，不应只是短期输出。  
 对复杂任务来说，“哪些命令已经跑过、结果如何、失败在哪里”本身就是重要状态，应该在 compact 或 session memory 中被保留。
 
@@ -1377,7 +1423,6 @@ OpenCode 当前最大的机会，就在于它的工具层已经足够结构化�
 
 如果你后续认真做 Tool Lifecycle、工作集、预算与 memory 的联动，那么 OpenCode 在工具层的长期上限会非常高。
 
-
 ---
 
 # OpenCode 改造蓝图与文件级落地方案
@@ -1391,6 +1436,7 @@ OpenCode 当前最大的机会，就在于它的工具层已经足够结构化�
 因此，本蓝图坚持三个原则：
 
 ### 原则一：只引入高回报、低破坏的机制
+
 优先移植那些能显著提升上下文性价比、长任务连续性、任务完成稳定性，但不要求重写整个运行时的东西。例如：
 
 - Tool Result Budget
@@ -1400,6 +1446,7 @@ OpenCode 当前最大的机会，就在于它的工具层已经足够结构化�
 - Task 结果标准化
 
 ### 原则二：机制以独立服务形式接入，不破坏现有骨架
+
 OpenCode 当前最大的优点是结构分层清楚。所有增强都应优先做成：
 
 - service
@@ -1408,31 +1455,38 @@ OpenCode 当前最大的优点是结构分层清楚。所有增强都应优先�
 - metadata layer
 
 ### 原则三：每一项增强都必须能被 benchmark harness 衡量
+
 否则“感觉更聪明了”这种主观反馈很快会误导你。
 
 ## 6.2 第一阶段改造：Preflight Pipeline
 
 ### 目标
+
 把当前 OpenCode 在模型请求前较为简洁的准备流程，升级为一个清晰的预处理管线。目标不是无限复杂，而是把“发送前治理”做成显式系统能力。
 
 ### 新增模块建议
+
 - `packages/opencode/src/session/preflight.ts`
 - `packages/opencode/src/session/tool_budget.ts`
 - `packages/opencode/src/session/workset.ts`
 - `packages/opencode/src/session/micro_compaction.ts`
 
 ### 为什么从这里开始
+
 因为这是影响全局成本与稳定性的最大杠杆，而且对现有结构侵入最小。
 
 ## 6.3 第二阶段改造：Tool Result Budget
 
 ### 目标
+
 不等 overflow 才治理，而是在每轮前把旧工具输出压到预算内。
 
 ### 新增文件
+
 - `packages/opencode/src/session/tool_budget.ts`
 
 ### 核心策略
+
 按工具类型分预算：
 
 - bash / webfetch / mcp：高风险膨胀工具，优先治理
@@ -1441,6 +1495,7 @@ OpenCode 当前最大的优点是结构分层清楚。所有增强都应优先�
 - edit / write：保留 diff 摘要和结果，不保留不必要重复描述
 
 ### 应修改的现有文件
+
 - `session/prompt.ts`：模型调用前注入 budget
 - `tool/registry.ts`：为 Tool.Def 补充 `returnsLargeText`、`compactPriority` 等元数据
 - `tool/*`：逐步让高膨胀工具输出更多结构化 metadata
@@ -1448,14 +1503,17 @@ OpenCode 当前最大的优点是结构分层清楚。所有增强都应优先�
 ## 6.4 第三阶段改造：Session Memory
 
 ### 目标
+
 建立“主上下文之外的慢变状态存储”。
 
 ### 新增文件
+
 - `packages/opencode/src/session/memory.ts`
 - `packages/opencode/src/session/memory_prompt.txt`
 - `packages/opencode/src/session/memory_store.ts`
 
 ### 触发条件建议
+
 满足以下条件之一时触发 memory 提取：
 
 - token 较上次增长超过阈值；
@@ -1465,6 +1523,7 @@ OpenCode 当前最大的优点是结构分层清楚。所有增强都应优先�
 - full compaction 之前或之后。
 
 ### 注入方式建议
+
 不要每轮都自动把 entire memory 注入 system prompt。  
 更好的方式是：
 
@@ -1475,12 +1534,15 @@ OpenCode 当前最大的优点是结构分层清楚。所有增强都应优先�
 ## 6.5 第四阶段改造：Micro-Compaction
 
 ### 目标
+
 在 full compaction 之前，新增一个低成本中间层。
 
 ### 新增文件
+
 - `packages/opencode/src/session/micro_compaction.ts`
 
 ### 适用对象
+
 - 多段连续 read 输出
 - 多段 grep / code search 输出
 - 多段 bash 错误输出
@@ -1489,9 +1551,11 @@ OpenCode 当前最大的优点是结构分层清楚。所有增强都应优先�
 ## 6.6 第五阶段改造：角色化模型路由
 
 ### 目标
+
 让 agent 架构真正成为“高质量 / 高性价比”的核心抓手。
 
 ### 应修改的现有文件
+
 - `agent/agent.ts`
 - `session/prompt.ts`
 - `provider/*`
@@ -1499,6 +1563,7 @@ OpenCode 当前最大的优点是结构分层清楚。所有增强都应优先�
 - 可新增 `agent/router.ts`
 
 ### 建议策略
+
 默认路由表：
 
 - build：强模型
@@ -1511,15 +1576,18 @@ OpenCode 当前最大的优点是结构分层清楚。所有增强都应优先�
 ## 6.7 第六阶段改造：TaskTool 结果标准化
 
 ### 目标
+
 把多 agent 协同从“好用”升级为“可运营、可压缩、可评测”。
 
 ### 应修改的文件
+
 - `tool/task.ts`
 - `session/prompt.ts`
 - `agent/agent.ts`
 - 可新增 `session/task_result.ts`
 
 ### 推荐结果结构
+
 - `summary`
 - `key_files`
 - `open_questions`
@@ -1530,12 +1598,15 @@ OpenCode 当前最大的优点是结构分层清楚。所有增强都应优先�
 ## 6.8 第七阶段改造：工作集 Workset
 
 ### 目标
+
 让系统显式知道“当前真正相关的文件集合”。
 
 ### 新增文件
+
 - `session/workset.ts`
 
 ### 输入来源
+
 - ReadTool
 - EditTool
 - TaskTool 结果
@@ -1543,6 +1614,7 @@ OpenCode 当前最大的优点是结构分层清楚。所有增强都应优先�
 - bash 中出现的文件路径
 
 ### 输出用途
+
 - compact 摘要重点保留
 - preflight recall 提示
 - build agent prompt 提示
@@ -1551,14 +1623,17 @@ OpenCode 当前最大的优点是结构分层清楚。所有增强都应优先�
 ## 6.9 第八阶段改造：观测与评测钩子
 
 ### 目标
+
 所有策略升级都必须可量化。
 
 ### 建议新增
+
 - `metrics/session_metrics.ts`
 - `metrics/tool_metrics.ts`
 - `metrics/agent_metrics.ts`
 
 ### 关键指标
+
 - 单任务总 token
 - compact 次数
 - budget 减少量
@@ -1592,14 +1667,14 @@ OpenCode 当前最大的优点是结构分层清楚。所有增强都应优先�
 
 **永远以服务与策略的方式增强它，而不是把所有聪明逻辑重新塞回一个巨大的 prompt 主循环。**
 
-
-
 ## 6.10 再往前一步：建议把改造分成“硬机制”和“软机制”两类
 
 如果把所有改造都放在一个迭代里，你很难判断哪项真正有效。建议你把它们拆成两大类：
 
 ### 硬机制
+
 直接影响数据流或会话状态：
+
 - Tool Result Budget
 - Session Memory
 - Micro-Compaction
@@ -1607,7 +1682,9 @@ OpenCode 当前最大的优点是结构分层清楚。所有增强都应优先�
 - Task 结果标准化
 
 ### 软机制
+
 更多影响行为策略或成本选择：
+
 - 角色化模型路由
 - Prompt cost policy
 - Agent-specific output schema
@@ -1620,49 +1697,64 @@ OpenCode 当前最大的优点是结构分层清楚。所有增强都应优先�
 ## 6.11 文件级落地顺序的一个更细版本
 
 ### Sprint 1：观测打底
+
 改：
+
 - `session/prompt.ts`
 - `tool/registry.ts`
 - 新增 `metrics/*`
 
 目标：
+
 - 能测每轮 token、每次 tool output 大小、每个 agent 成本。
 
 ### Sprint 2：预算层
+
 改：
+
 - 新增 `session/tool_budget.ts`
 - `session/prompt.ts`
 - 为高噪声工具补 metadata
 
 目标：
+
 - 压低长任务中旧工具输出占比。
 
 ### Sprint 3：Session Memory
+
 改：
+
 - 新增 `session/memory.ts`
 - `session/compaction.ts`
 - `task.ts`
 
 目标：
+
 - 把慢变状态移出主上下文。
 
 ### Sprint 4：Task 标准化 + 路由
+
 改：
+
 - `task.ts`
 - `agent.ts`
 - `session/prompt.ts`
 - 新增 `agent/router.ts`
 
 目标：
+
 - 多 agent 成本可控、结果可运营。
 
 ### Sprint 5：Micro-Compaction + Workset
+
 改：
+
 - 新增 `session/micro_compaction.ts`
 - 新增 `session/workset.ts`
 - `read.ts` / `edit.ts` / `bash.ts` 接入工作集更新
 
 目标：
+
 - full compaction 次数下降，长任务连续性上升。
 
 ## 6.12 再强调一次：OpenCode 的正确胜法不是变成另一个 Claude
@@ -1678,6 +1770,7 @@ Claude Code Rebuilt 给你的是大量宝贵启发，但 OpenCode 要走的是�
 ## 6.13 最终建议
 
 如果你要让 OpenCode 在未来成为一个：
+
 - 任务质量不差；
 - 上下文成本可控；
 - 长任务不容易失忆；
@@ -1691,7 +1784,6 @@ Claude Code Rebuilt 给你的是大量宝贵启发，但 OpenCode 要走的是�
 OpenCode 的成功，不会来自“越来越像 Claude Code Rebuilt”，而会来自：
 
 **在保持自身架构整洁的前提下，有节制地吸收 Claude Code Rebuilt 那些真正高回报的机制。**
-
 
 ---
 
@@ -1714,6 +1806,7 @@ OpenCode 的成功，不会来自“越来越像 Claude Code Rebuilt”，而会
 建议把评测分成三层。
 
 ### 第一层：任务结果层
+
 - 是否完成任务
 - 是否第一次就完成
 - 是否引入明显回归
@@ -1721,6 +1814,7 @@ OpenCode 的成功，不会来自“越来越像 Claude Code Rebuilt”，而会
 - 是否满足用户约束
 
 ### 第二层：过程成本层
+
 - 总输入 token
 - 总输出 token
 - 总工具输出 token
@@ -1730,6 +1824,7 @@ OpenCode 的成功，不会来自“越来越像 Claude Code Rebuilt”，而会
 - 总回合数
 
 ### 第三层：人工返工层
+
 - 用户需要追加澄清的轮次
 - 用户需要纠正的次数
 - 用户需要自己手改的文件数
@@ -1740,15 +1835,19 @@ OpenCode 的成功，不会来自“越来越像 Claude Code Rebuilt”，而会
 建议至少构建四类任务集。
 
 ### 小修小补集
+
 修一个明确报错、改一个 API 字段名、加一个参数、修一个测试。
 
 ### 中型重构集
+
 提取公共逻辑、修改一组相关文件、加一层中间抽象、替换旧接口实现。
 
 ### 长任务探索集
+
 用户只给高层目标，需要 explore + plan + build，需要读多个目录与配置，需要运行命令验证。
 
 ### 高噪声工具集
+
 大量 grep/read/bash 输出，MCP 返回长文本，日志分析与错误定位。
 
 ## 7.4 对比维度设计
@@ -1803,12 +1902,12 @@ benchmark harness 不是后话，而应该与第一批改造同步进行。
 4. 同时建立小规模 benchmark；
 5. 然后用数据决定后续是否继续加 Micro-Compaction、复杂路由与更多 agent 角色。
 
-
 ---
 
 # 源码检查清单与引用文件列表
 
 ## Claude Code Rebuilt
+
 本研究重点参考的源码文件：
 
 - `src/query.ts`
@@ -1821,6 +1920,7 @@ benchmark harness 不是后话，而应该与第一批改造同步进行。
 - `src/constants/prompts.ts`
 
 ### 核心观察摘要
+
 - `query.ts`：主循环中包含 memory prefetch、skill prefetch、tool result budget、snip、microcompact、contextCollapse、autoCompact、runTools、stop hooks 等。
 - `autoCompact.ts`：auto-compact 采用保守阈值与缓冲区策略，不贴着模型上限执行。
 - `compact.ts`：compact 前会剥离不适合总结的块，compact 后会重建最小工作环境，包含 skills 与模式恢复。
@@ -1830,6 +1930,7 @@ benchmark harness 不是后话，而应该与第一批改造同步进行。
 - `prompts.ts`：系统提示词不是静态文案，而是动态 section 装配系统。
 
 ## OpenCode
+
 本研究重点参考的源码文件：
 
 - `packages/opencode/src/agent/agent.ts`
@@ -1846,6 +1947,7 @@ benchmark harness 不是后话，而应该与第一批改造同步进行。
 - `packages/opencode/src/tool/plan.ts`
 
 ### 核心观察摘要
+
 - `agent.ts`：agent 角色对象化，包含 build/plan/general/explore/compaction/summary/title。
 - `prompt.ts`：会话 prompt 装配中心，处理模式控制、工具注入、MCP、structured output、task 调用等。
 - `system.ts`：provider-specific 系统 prompt 模板分层清晰。

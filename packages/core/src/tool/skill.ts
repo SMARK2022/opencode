@@ -86,15 +86,35 @@ const layer = Layer.effectDiscard(
                 })
                 const directory = path.dirname(skill.location)
                 // structured可能完整但content已限幅；只有模型仍可见的全文才授权去重。
-                const loaded = (yield* sessions.context(context.sessionID)).some(message => message.type === "assistant" && message.content.some(part => {
-                  if (part.type !== "tool" || part.name !== name || part.provider?.executed === true || part.time.pruned !== undefined || part.state.status !== "completed" || part.state.input.name !== input.name) return false
-                  const output = part.state.structured.output
-                  return typeof output === "string" && output.startsWith(`<skill_content name="${skill.name}">`) && output.endsWith("</skill_content>") && part.state.content.some(item => item.type === "text" && item.text === output)
-                }))
-                if (loaded) return {
-                  name: skill.name, directory, deduped: true,
-                  output: `Skill '${input.name}' was already loaded in this session. Refer to the prior tool output for instructions.`,
-                }
+                const loaded = (yield* sessions.context(context.sessionID)).some(
+                  (message) =>
+                    message.type === "assistant" &&
+                    message.content.some((part) => {
+                      if (
+                        part.type !== "tool" ||
+                        part.name !== name ||
+                        part.provider?.executed === true ||
+                        part.time.pruned !== undefined ||
+                        part.state.status !== "completed" ||
+                        part.state.input.name !== input.name
+                      )
+                        return false
+                      const output = part.state.structured.output
+                      return (
+                        typeof output === "string" &&
+                        output.startsWith(`<skill_content name="${skill.name}">`) &&
+                        output.endsWith("</skill_content>") &&
+                        part.state.content.some((item) => item.type === "text" && item.text === output)
+                      )
+                    }),
+                )
+                if (loaded)
+                  return {
+                    name: skill.name,
+                    directory,
+                    deduped: true,
+                    output: `Skill '${input.name}' was already loaded in this session. Refer to the prior tool output for instructions.`,
+                  }
                 const files =
                   path.basename(skill.location) === "SKILL.md"
                     ? (yield* fs.glob("**/*", { cwd: directory, absolute: true, include: "file", dot: true }))

@@ -115,10 +115,14 @@ for (const item of targets) {
   if (item.os === process.platform && item.arch === process.arch && !item.abi) {
     const smoke = Bun.spawn([path.resolve(dir, `dist/${name}/bin/${binary}`)], {
       env: { ...process.env, OPENCODE_PROCESS_ROLE: "voice-smoke" },
-      stdout: "pipe", stderr: "pipe", windowsHide: true,
+      stdout: "pipe",
+      stderr: "pipe",
+      windowsHide: true,
     })
     const [exit, stdout, stderr] = await Promise.all([
-      smoke.exited, new Response(smoke.stdout).text(), new Response(smoke.stderr).text(),
+      smoke.exited,
+      new Response(smoke.stdout).text(),
+      new Response(smoke.stderr).text(),
     ])
     if (exit !== 0 || stdout.trim() !== "voice-worker-probe-ok")
       throw new Error(stderr.trim() || `voice worker smoke exited ${exit} without marker`)

@@ -20,23 +20,41 @@ test("formatTranscript renders the full daemon message list including messages o
   const messages = [
     {
       info: {
-        id: "msg_old", sessionID: session.id, role: "user", time: { created: 1 },
-        agent: "build", model: { providerID: "provider", modelID: "model" },
+        id: "msg_old",
+        sessionID: session.id,
+        role: "user",
+        time: { created: 1 },
+        agent: "build",
+        model: { providerID: "provider", modelID: "model" },
       } satisfies UserMessage, // #254：created 顺序即导出顺序——旧消息必须排在窗口消息之前
-      parts: [{
-        id: "part_old", sessionID: session.id, messageID: "msg_old", type: "text",
-        text: "old message only available from daemon full export",
-      } satisfies Extract<Part, { type: "text" }>],
+      parts: [
+        {
+          id: "part_old",
+          sessionID: session.id,
+          messageID: "msg_old",
+          type: "text",
+          text: "old message only available from daemon full export",
+        } satisfies Extract<Part, { type: "text" }>,
+      ],
     },
     {
       info: {
-        id: "msg_recent", sessionID: session.id, role: "user", time: { created: 2 },
-        agent: "build", model: { providerID: "provider", modelID: "model" },
+        id: "msg_recent",
+        sessionID: session.id,
+        role: "user",
+        time: { created: 2 },
+        agent: "build",
+        model: { providerID: "provider", modelID: "model" },
       } satisfies UserMessage,
-      parts: [{
-        id: "part_recent", sessionID: session.id, messageID: "msg_recent", type: "text",
-        text: "recent message in TUI render window",
-      } satisfies Extract<Part, { type: "text" }>],
+      parts: [
+        {
+          id: "part_recent",
+          sessionID: session.id,
+          messageID: "msg_recent",
+          type: "text",
+          text: "recent message in TUI render window",
+        } satisfies Extract<Part, { type: "text" }>,
+      ],
     },
   ]
 

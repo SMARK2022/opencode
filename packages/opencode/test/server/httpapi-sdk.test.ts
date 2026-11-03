@@ -675,16 +675,20 @@ describe("HttpApi SDK", () => {
             sessionID,
             messageID: seeded.message.id,
             partID: seeded.part.id,
-            part: { ...seeded.part, text: "updated message", hidden: { time: Date.now(), reason: "undo" } } as NonNullable<
-              Parameters<Sdk["part"]["update"]>[0]["part"]
-            >,
+            part: {
+              ...seeded.part,
+              text: "updated message",
+              hidden: { time: Date.now(), reason: "undo" },
+            } as NonNullable<Parameters<Sdk["part"]["update"]>[0]["part"]>,
           }),
         )
         const hiddenPart = yield* capture(() => sdk.session.message({ sessionID, messageID: seeded.message.id }))
         yield* InstanceStore.Service.use((store) =>
           store.provide(
             { directory },
-            SessionNs.Service.use((svc) => svc.updateMessage({ ...seeded.message, hidden: { time: Date.now(), reason: "undo" } })),
+            SessionNs.Service.use((svc) =>
+              svc.updateMessage({ ...seeded.message, hidden: { time: Date.now(), reason: "undo" } }),
+            ),
           ),
         )
         const hiddenMessage = yield* capture(() => sdk.session.message({ sessionID, messageID: seeded.message.id }))
@@ -702,12 +706,22 @@ describe("HttpApi SDK", () => {
         const rawPart = yield* InstanceStore.Service.use((store) =>
           store.provide(
             { directory },
-            SessionNs.Service.use((svc) => svc.getPart({ sessionID: SessionID.make(sessionID), messageID: seeded.message.id, partID: seeded.part.id, includeHidden: true })),
+            SessionNs.Service.use((svc) =>
+              svc.getPart({
+                sessionID: SessionID.make(sessionID),
+                messageID: seeded.message.id,
+                partID: seeded.part.id,
+                includeHidden: true,
+              }),
+            ),
           ),
         )
         expect([
-          hiddenPart.status, array(record(hiddenPart.data).parts).length,
-          hiddenMessage.status, hiddenParentPatch.status, record(rawPart).text,
+          hiddenPart.status,
+          array(record(hiddenPart.data).parts).length,
+          hiddenMessage.status,
+          hiddenParentPatch.status,
+          record(rawPart).text,
         ]).toEqual([200, 0, 404, 404, "updated message"])
         const partDelete = yield* capture(() =>
           sdk.part.delete({ sessionID, messageID: seeded.message.id, partID: seeded.part.id }),
@@ -808,7 +822,7 @@ describe("HttpApi SDK", () => {
   // #494：场景体改为子进程 worker 断言——204 acceptance、公开可观察性与 usage 终态
   // 都在隔离 DB/环境中验证；parent 仅保留 parity 注册与 afterEach，不再持有活跃 fiber。
   serverPathParity("matches generated SDK prompt no-reply routes", (serverPath) =>
-    Effect.promise(() => runPromptAsyncWorker(serverPath))
+    Effect.promise(() => runPromptAsyncWorker(serverPath)),
   )
 
   serverPathParity("matches generated SDK prompt streaming through fake LLM", (serverPath) =>

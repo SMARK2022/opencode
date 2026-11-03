@@ -15,11 +15,12 @@ export function make(onChange?: (count: number) => void): Interface {
       Effect.sync(() => {
         count++
       }),
-      () => Effect.sync(() => {
-        // 正常结束、编码失败与取消共用 finalizer，每次 acquisition 只减一次。
-        count--
-        onChange?.(count)
-      }),
+      () =>
+        Effect.sync(() => {
+          // 正常结束、编码失败与取消共用 finalizer，每次 acquisition 只减一次。
+          count--
+          onChange?.(count)
+        }),
     ).pipe(Effect.tap(() => Effect.sync(() => onChange?.(count)))),
   })
 }

@@ -29,46 +29,46 @@
 
 ### 2.1 已阅读的生产代码
 
-| 文件 | 相关性 |
-|---|---|
-| `packages/opencode/src/cli/cmd/stats.ts` | 命令树、参数边界、兼容别名、Effect handler、interactive 输入与清理 |
-| `packages/opencode/src/cli/cmd/stats/data.ts` | Session/RequestUsage/Message/Part 读取、过滤、聚合和最终 `StatsReport` |
-| `packages/opencode/src/cli/cmd/stats/render.ts` | Dashboard、Breakdown、Timeline、Sessions 的页面组合与响应式规则 |
-| `packages/opencode/src/cli/cmd/stats/charts.ts` | ANSI、可见宽度、panel、折线、面积图、热力图、表格和矩阵 primitive |
-| `packages/opencode/src/cli/cmd/stats/insights.ts` | Insights、Actions、Forecast 的计算与渲染 |
-| `packages/opencode/src/cli/effect-cmd.ts` | Instance 加载、handler 运行和 `store.dispose()` 生命周期 |
-| `packages/opencode/src/index.ts` | `StatsCommand` 的顶层注册 |
-| `packages/opencode/src/session/request-usage.ts` | 新 RequestUsage 的写入、完成、错误和兼容语义 |
-| `packages/opencode/src/session/request-usage.sql.ts` | Request 与 Assistant usage 的持久化字段 |
-| `packages/opencode/src/token/accounting.ts` | Input component 与 token accounting 口径 |
-| `packages/opencode/src/session/message-v2.ts` | Assistant 身份、ToolPart 状态、Tool 调用时间和字符数据 |
-| `packages/opencode/src/session/session.ts` | Session 列表中的 Project 映射模式及 fork 复制行为 |
-| `packages/opencode/src/session/session.sql.ts` | `parent_id` 已存在的事实 |
-| `packages/opencode/src/project/project.sql.ts` | `ProjectTable.name/worktree` 已存在，无需迁移 |
-| `packages/opencode/src/cli/cmd/tui/context/theme.tsx` | ThemeProvider、system theme、terminal palette 与 dark/light 语义 |
-| `packages/opencode/src/cli/cmd/tui/context/theme/opencode.json` | OpenCode 默认主题的语义 token |
-| `packages/opencode/src/cli/cmd/run/theme.ts` | 非主 TUI 消费主题的 adapter 先例及 renderer 依赖 |
-| `packages/opencode/src/cli/ui.ts` | 普通 CLI 的 ANSI status color 约定 |
-| `packages/opencode/src/cli/cmd/tui/app.tsx` | renderer palette/theme mode 和 Unicode width 设置 |
-| `packages/opencode/script/build.ts` | stats 的静态打包与 smoke test 边界 |
-| `packages/opencode/script/generate.ts` | 正式 build 会额外生成 models snapshot 的副作用 |
-| `packages/opencode/bin/opencode` | npm launcher、stdio 继承和 signal 转发 |
+| 文件                                                            | 相关性                                                                 |
+| --------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| `packages/opencode/src/cli/cmd/stats.ts`                        | 命令树、参数边界、兼容别名、Effect handler、interactive 输入与清理     |
+| `packages/opencode/src/cli/cmd/stats/data.ts`                   | Session/RequestUsage/Message/Part 读取、过滤、聚合和最终 `StatsReport` |
+| `packages/opencode/src/cli/cmd/stats/render.ts`                 | Dashboard、Breakdown、Timeline、Sessions 的页面组合与响应式规则        |
+| `packages/opencode/src/cli/cmd/stats/charts.ts`                 | ANSI、可见宽度、panel、折线、面积图、热力图、表格和矩阵 primitive      |
+| `packages/opencode/src/cli/cmd/stats/insights.ts`               | Insights、Actions、Forecast 的计算与渲染                               |
+| `packages/opencode/src/cli/effect-cmd.ts`                       | Instance 加载、handler 运行和 `store.dispose()` 生命周期               |
+| `packages/opencode/src/index.ts`                                | `StatsCommand` 的顶层注册                                              |
+| `packages/opencode/src/session/request-usage.ts`                | 新 RequestUsage 的写入、完成、错误和兼容语义                           |
+| `packages/opencode/src/session/request-usage.sql.ts`            | Request 与 Assistant usage 的持久化字段                                |
+| `packages/opencode/src/token/accounting.ts`                     | Input component 与 token accounting 口径                               |
+| `packages/opencode/src/session/message-v2.ts`                   | Assistant 身份、ToolPart 状态、Tool 调用时间和字符数据                 |
+| `packages/opencode/src/session/session.ts`                      | Session 列表中的 Project 映射模式及 fork 复制行为                      |
+| `packages/opencode/src/session/session.sql.ts`                  | `parent_id` 已存在的事实                                               |
+| `packages/opencode/src/project/project.sql.ts`                  | `ProjectTable.name/worktree` 已存在，无需迁移                          |
+| `packages/opencode/src/cli/cmd/tui/context/theme.tsx`           | ThemeProvider、system theme、terminal palette 与 dark/light 语义       |
+| `packages/opencode/src/cli/cmd/tui/context/theme/opencode.json` | OpenCode 默认主题的语义 token                                          |
+| `packages/opencode/src/cli/cmd/run/theme.ts`                    | 非主 TUI 消费主题的 adapter 先例及 renderer 依赖                       |
+| `packages/opencode/src/cli/ui.ts`                               | 普通 CLI 的 ANSI status color 约定                                     |
+| `packages/opencode/src/cli/cmd/tui/app.tsx`                     | renderer palette/theme mode 和 Unicode width 设置                      |
+| `packages/opencode/script/build.ts`                             | stats 的静态打包与 smoke test 边界                                     |
+| `packages/opencode/script/generate.ts`                          | 正式 build 会额外生成 models snapshot 的副作用                         |
+| `packages/opencode/bin/opencode`                                | npm launcher、stdio 继承和 signal 转发                                 |
 
 ### 2.2 已阅读的测试与文档
 
-| 文件 | 相关性 |
-|---|---|
-| `packages/opencode/test/cli/stats-data.test.ts` | 参数校验、自然日窗口、Tool context attribution、legacy 零回退 |
-| `packages/opencode/test/cli/stats-render-width.test.ts` | 所有页面的可见内容、宽度、长标签、空数据和背景 ANSI |
-| `packages/web/src/content/docs/cli.mdx` | 英文 stats 参数说明 |
-| `packages/web/src/content/docs/zh-cn/cli.mdx` | 简体中文 stats 参数说明 |
-| `packages/web/src/content/docs/*/cli.mdx` | 其他本地化版本仍保留旧默认值的兼容风险 |
-| `README.md` 与 `docs/readme/README.*.md` | 旧 `stats --models` 入口的公开描述 |
-| `CONTEXT.md` | SMARK fork 中 token breakdown 的 load-bearing 定位 |
-| `docs/adr/README.md` | 本方案属于单模块 proposal，不需要新增 ADR |
-| `docs/proposal/tui-reasoning-run-rendering-proposal.md` | proposal 的证据、边界、测试和风险组织方式 |
-| `docs/proposal/database-cold-storage-compression.md` | 大型方案的分阶段和兼容性记录方式 |
-| `docs/proposal/rg-filesystem-permission-handling.md` | 行为不变量和验证矩阵写法 |
+| 文件                                                    | 相关性                                                        |
+| ------------------------------------------------------- | ------------------------------------------------------------- |
+| `packages/opencode/test/cli/stats-data.test.ts`         | 参数校验、自然日窗口、Tool context attribution、legacy 零回退 |
+| `packages/opencode/test/cli/stats-render-width.test.ts` | 所有页面的可见内容、宽度、长标签、空数据和背景 ANSI           |
+| `packages/web/src/content/docs/cli.mdx`                 | 英文 stats 参数说明                                           |
+| `packages/web/src/content/docs/zh-cn/cli.mdx`           | 简体中文 stats 参数说明                                       |
+| `packages/web/src/content/docs/*/cli.mdx`               | 其他本地化版本仍保留旧默认值的兼容风险                        |
+| `README.md` 与 `docs/readme/README.*.md`                | 旧 `stats --models` 入口的公开描述                            |
+| `CONTEXT.md`                                            | SMARK fork 中 token breakdown 的 load-bearing 定位            |
+| `docs/adr/README.md`                                    | 本方案属于单模块 proposal，不需要新增 ADR                     |
+| `docs/proposal/tui-reasoning-run-rendering-proposal.md` | proposal 的证据、边界、测试和风险组织方式                     |
+| `docs/proposal/database-cold-storage-compression.md`    | 大型方案的分阶段和兼容性记录方式                              |
+| `docs/proposal/rg-filesystem-permission-handling.md`    | 行为不变量和验证矩阵写法                                      |
 
 ### 2.3 搜索确认的调用点和旧逻辑
 
@@ -101,13 +101,13 @@ bun test test/cli/stats-data.test.ts test/cli/stats-render-width.test.ts
 固定 RGB 的 WCAG 对比实验还确认了亮色背景问题：
 
 | 当前角色 | 黑色背景对比度 | 白色背景对比度 |
-|---|---:|---:|
-| title | 18.86 | 1.11 |
-| blue | 10.33 | 2.00 |
-| green | 11.69 | 1.80 |
-| yellow | 13.32 | 1.58 |
-| pink | 7.97 | 2.64 |
-| red | 7.51 | 2.80 |
+| -------- | -------------: | -------------: |
+| title    |          18.86 |           1.11 |
+| blue     |          10.33 |           2.00 |
+| green    |          11.69 |           1.80 |
+| yellow   |          13.32 |           1.58 |
+| pink     |           7.97 |           2.64 |
+| red      |           7.51 |           2.80 |
 
 因此“不画背景”只解决背景覆盖，并没有解决前景色在亮色终端上的可读性。
 
@@ -136,15 +136,15 @@ src/index.ts
 
 ### 3.2 页面职责
 
-| 页面 | 用户问题 | 不应承担的职责 |
-|---|---|---|
-| Dashboard | 整体发生了什么，哪里值得继续看 | 展开所有实体细节 |
-| Timeline | 何时变化，波动、峰值和组成如何 | 完整实体排行榜 |
-| Breakdown | 谁或什么贡献了用量、费用、失败和上下文 | 单会话诊断 |
-| Sessions | 哪些会话形成长尾、成本和异常 | 全局 Tool 排名 |
-| Insights | 哪些跨维关系和离群值值得验证 | 用长篇固定文案替用户下结论 |
-| Forecast | 按已观测活跃率，当前 run rate 会走向哪里 | 默认混入观测事实页 |
-| Interactive | 在相同数据与页面间快速切换 | 维护第二套统计口径 |
+| 页面        | 用户问题                                 | 不应承担的职责             |
+| ----------- | ---------------------------------------- | -------------------------- |
+| Dashboard   | 整体发生了什么，哪里值得继续看           | 展开所有实体细节           |
+| Timeline    | 何时变化，波动、峰值和组成如何           | 完整实体排行榜             |
+| Breakdown   | 谁或什么贡献了用量、费用、失败和上下文   | 单会话诊断                 |
+| Sessions    | 哪些会话形成长尾、成本和异常             | 全局 Tool 排名             |
+| Insights    | 哪些跨维关系和离群值值得验证             | 用长篇固定文案替用户下结论 |
+| Forecast    | 按已观测活跃率，当前 run rate 会走向哪里 | 默认混入观测事实页         |
+| Interactive | 在相同数据与页面间快速切换               | 维护第二套统计口径         |
 
 ### 3.3 不允许回归的不变量
 
@@ -253,19 +253,19 @@ Stats 不是卡片型 Web dashboard，而是继承终端字体、背景和行高
 
 未来实现不新增 `stats.theme`，也不读取 TUI 最近一次主题选择。`ChartColor` 可保持现有调用接口，但内部映射替换为 terminal-defined ANSI：
 
-| 语义角色 | ANSI | 用途 |
-|---|---|---|
-| text/title/value | default foreground `39` | 所有关键文字和精确值 |
-| grid/border/decorative muted | dim default foreground `2;39` | 网格、分隔线、未填充 bar；不能承载唯一信息 |
-| axis/unit/help/unavailable | default foreground `39` | 刻度、单位、说明和空态，避免 aggressive dim 主题使语义消失 |
-| primary/info/cyan | cyan `36` | active tab、主要提示、主序列 |
-| secondary/purple | magenta `35` | 次要系列 |
-| success/green | green `32` | completed、健康值、output |
-| warning/yellow | yellow `33` | aborted、cache、阈值提醒；用户取消不等同执行错误 |
-| error/red | red `31` | error、综合失败率 |
-| blue | blue `34` | input、常规分类系列 |
-| pink | bright magenta `95` | cost 系列 |
-| orange | bright yellow `93` | 第七分类系列；不承担 warning 的唯一编码 |
+| 语义角色                     | ANSI                          | 用途                                                       |
+| ---------------------------- | ----------------------------- | ---------------------------------------------------------- |
+| text/title/value             | default foreground `39`       | 所有关键文字和精确值                                       |
+| grid/border/decorative muted | dim default foreground `2;39` | 网格、分隔线、未填充 bar；不能承载唯一信息                 |
+| axis/unit/help/unavailable   | default foreground `39`       | 刻度、单位、说明和空态，避免 aggressive dim 主题使语义消失 |
+| primary/info/cyan            | cyan `36`                     | active tab、主要提示、主序列                               |
+| secondary/purple             | magenta `35`                  | 次要系列                                                   |
+| success/green                | green `32`                    | completed、健康值、output                                  |
+| warning/yellow               | yellow `33`                   | aborted、cache、阈值提醒；用户取消不等同执行错误           |
+| error/red                    | red `31`                      | error、综合失败率                                          |
+| blue                         | blue `34`                     | input、常规分类系列                                        |
+| pink                         | bright magenta `95`           | cost 系列                                                  |
+| orange                       | bright yellow `93`            | 第七分类系列；不承担 warning 的唯一编码                    |
 
 这与 OpenCode `generateSystem()` 的关键语义一致：primary 为 terminal cyan，secondary 为 terminal magenta，error/warning/success/info 分别来自 terminal red/yellow/green/cyan，text 来自 terminal default foreground。
 
@@ -297,27 +297,27 @@ Stats 不是卡片型 Web dashboard，而是继承终端字体、背景和行高
 
 ### 5.4 字符和单位
 
-| 数据 | 展示规则 |
-|---|---|
-| token | `4.1B`、`673.6M`、`430.6K`，列头写 `tokens` 或 `tok/call` |
-| 费用 | `$842`、`$5.65`；总计或实体没有记录到正费用时为 `-` 并附 unavailable 说明；现有 schema 不声明“免费”还是“未知” |
-| 比例 | 一位小数，例如 `82.7%` |
-| 时长 | `820ms`、`12.4s`、`1.7m`，列头写 `avg/req` 或 `avg/call` |
-| Tool input/output | 明确写 `in chars/call`、`out chars/call` |
-| Tool context | 明确写 `est ctx tok`，不能写成 billed token |
-| 日期 | 主轴 `MM-DD`，明细需要年份时用 `YYYY-MM-DD` |
-| 缺失值 | ASCII `-`，不用省略号，不把未知格式化成零 |
+| 数据              | 展示规则                                                                                                      |
+| ----------------- | ------------------------------------------------------------------------------------------------------------- |
+| token             | `4.1B`、`673.6M`、`430.6K`，列头写 `tokens` 或 `tok/call`                                                     |
+| 费用              | `$842`、`$5.65`；总计或实体没有记录到正费用时为 `-` 并附 unavailable 说明；现有 schema 不声明“免费”还是“未知” |
+| 比例              | 一位小数，例如 `82.7%`                                                                                        |
+| 时长              | `820ms`、`12.4s`、`1.7m`，列头写 `avg/req` 或 `avg/call`                                                      |
+| Tool input/output | 明确写 `in chars/call`、`out chars/call`                                                                      |
+| Tool context      | 明确写 `est ctx tok`，不能写成 billed token                                                                   |
+| 日期              | 主轴 `MM-DD`，明细需要年份时用 `YYYY-MM-DD`                                                                   |
+| 缺失值            | ASCII `-`，不用省略号，不把未知格式化成零                                                                     |
 
 ### 5.5 响应式规则
 
 响应式只改变排版，不改变统计结论或实体身份：
 
-| content width | 布局 |
-|---:|---|
-| `>=130` | Dashboard 三栏；详细页可并排两个低高度二级区块 |
-| `100-129` | 目标桌面布局；主图全宽，比较表横向，二级区块顺序堆叠 |
-| `60-99` | 主图全宽；表格变逐实体两行；组成条与 mix 自动换行 |
-| `<60` | compact header；主图高度 6；每个实体为 identity + metrics + mix 三行 |
+| content width | 布局                                                                 |
+| ------------: | -------------------------------------------------------------------- |
+|       `>=130` | Dashboard 三栏；详细页可并排两个低高度二级区块                       |
+|     `100-129` | 目标桌面布局；主图全宽，比较表横向，二级区块顺序堆叠                 |
+|       `60-99` | 主图全宽；表格变逐实体两行；组成条与 mix 自动换行                    |
+|         `<60` | compact header；主图高度 6；每个实体为 identity + metrics + mix 三行 |
 
 详细页在所有宽度必须保留：header、页面摘要、主趋势、核心绝对值和至少一个维度专属视图。窄屏允许页面变长，不允许删除整个分析问题。
 
@@ -493,34 +493,34 @@ Project/Agent/Source/Status 的 model/provider token mix 已存在于 `UsageGrou
 
 ### 7.1 Canonical 入口
 
-| 命令 | 页面 | 主指标/附加行为 |
-|---|---|---|
-| `opencode stats` | Dashboard | 默认 60 天 |
-| `opencode stats dashboard` | Dashboard | `--interactive` 可进入循环视图 |
-| `opencode stats breakdown [dimension]` | Breakdown | dimension 默认为 model |
-| `opencode stats timeline` | Timeline | metric 默认 tokens，`--heatmap` 可追加日历 |
-| `opencode stats sessions` | Sessions | 默认按 tokens 排序 |
-| `opencode stats insights` | Insights | `--forecast` 才追加预测 |
+| 命令                                   | 页面      | 主指标/附加行为                            |
+| -------------------------------------- | --------- | ------------------------------------------ |
+| `opencode stats`                       | Dashboard | 默认 60 天                                 |
+| `opencode stats dashboard`             | Dashboard | `--interactive` 可进入循环视图             |
+| `opencode stats breakdown [dimension]` | Breakdown | dimension 默认为 model                     |
+| `opencode stats timeline`              | Timeline  | metric 默认 tokens，`--heatmap` 可追加日历 |
+| `opencode stats sessions`              | Sessions  | 默认按 tokens 排序                         |
+| `opencode stats insights`              | Insights  | `--forecast` 才追加预测                    |
 
 Breakdown dimensions：`model`、`provider`、`agent`、`source`、`project`、`tool`、`status`。
 
 ### 7.2 兼容入口必须复用 canonical renderer 和语义
 
-| 入口 | 等价入口 |
-|---|---|
-| `stats dash` / `stats overview` / `stats summary` | `stats dashboard` |
-| `stats by model` | `stats breakdown model` |
-| `stats models` / `stats model` | `stats breakdown model` |
-| `stats providers` / `stats provider` | `stats breakdown provider` |
-| `stats daily` | `stats timeline` |
-| `stats heatmap` / `stats heat` | `stats timeline --heatmap` |
-| `stats costs` / `stats cost` | `stats timeline --metric cost` |
-| `stats tokens` / `stats token` | `stats timeline --metric tokens` |
-| `stats session` | `stats sessions` |
-| `stats insight` | `stats insights` |
-| `stats forecast` / `stats run-rate` | `stats insights --forecast` |
-| `stats --models[=N]` | `stats breakdown model [-n N]` |
-| `stats --tools=N` | `stats breakdown tool -n N` |
+| 入口                                              | 等价入口                         |
+| ------------------------------------------------- | -------------------------------- |
+| `stats dash` / `stats overview` / `stats summary` | `stats dashboard`                |
+| `stats by model`                                  | `stats breakdown model`          |
+| `stats models` / `stats model`                    | `stats breakdown model`          |
+| `stats providers` / `stats provider`              | `stats breakdown provider`       |
+| `stats daily`                                     | `stats timeline`                 |
+| `stats heatmap` / `stats heat`                    | `stats timeline --heatmap`       |
+| `stats costs` / `stats cost`                      | `stats timeline --metric cost`   |
+| `stats tokens` / `stats token`                    | `stats timeline --metric tokens` |
+| `stats session`                                   | `stats sessions`                 |
+| `stats insight`                                   | `stats insights`                 |
+| `stats forecast` / `stats run-rate`               | `stats insights --forecast`      |
+| `stats --models[=N]`                              | `stats breakdown model [-n N]`   |
+| `stats --tools=N`                                 | `stats breakdown tool -n N`      |
 
 兼容入口不拥有独立样式、数据逻辑或测试 snapshot。等价参数归一化后必须调用同一 renderer，并产生相同可见正文；命令名、builder 默认值和错误 help 不要求字节级相同。
 
@@ -2031,17 +2031,17 @@ Project name/worktree、Session title、model/provider/tool ID 都是显示数�
 
 未来核心实现，不含本 proposal：
 
-| 文件 | 预计新增 | 预计删除 | 原因 |
-|---|---:|---:|---|
-| `stats/data.ts` | 100-150 | 8-20 | Project metadata、Tool call attribution、source/status 关联 |
-| `stats/render.ts` | 260-350 | 190-280 | 替换 Timeline stack、通用 Breakdown 与编号矩阵，不叠加第二套页面 |
-| `stats/charts.ts` | 35-60 | 110-150 | ANSI palette、Heatmap legend、删除 stacked area 与 matrix |
-| `stats/insights.ts` | 12-25 | 5-12 | 空数据阈值与格式统一 |
-| `stats-data.test.ts` | 100-140 | 5-15 | 真实 Project/Tool/filters/fork-like 行为 |
-| `stats-render-width.test.ts` | 150-210 | 70-110 | 用正向信息断言替换负向黑名单并覆盖极端组成比 |
-| 英文 `cli.mdx` | 18-30 | 4-8 | 页面/参数/alias 参考 |
-| 简中 `cli.mdx` | 20-35 | 4-8 | 同步维护语言 |
-| 合计 | 695-1000 | 396-603 | 8 文件，目标净增 150-450 行 |
+| 文件                         | 预计新增 | 预计删除 | 原因                                                             |
+| ---------------------------- | -------: | -------: | ---------------------------------------------------------------- |
+| `stats/data.ts`              |  100-150 |     8-20 | Project metadata、Tool call attribution、source/status 关联      |
+| `stats/render.ts`            |  260-350 |  190-280 | 替换 Timeline stack、通用 Breakdown 与编号矩阵，不叠加第二套页面 |
+| `stats/charts.ts`            |    35-60 |  110-150 | ANSI palette、Heatmap legend、删除 stacked area 与 matrix        |
+| `stats/insights.ts`          |    12-25 |     5-12 | 空数据阈值与格式统一                                             |
+| `stats-data.test.ts`         |  100-140 |     5-15 | 真实 Project/Tool/filters/fork-like 行为                         |
+| `stats-render-width.test.ts` |  150-210 |   70-110 | 用正向信息断言替换负向黑名单并覆盖极端组成比                     |
+| 英文 `cli.mdx`               |    18-30 |      4-8 | 页面/参数/alias 参考                                             |
+| 简中 `cli.mdx`               |    20-35 |      4-8 | 同步维护语言                                                     |
+| 合计                         | 695-1000 |  396-603 | 8 文件，目标净增 150-450 行                                      |
 
 这是基于当前方案的审计区间，不是精确承诺。若实现超过 1000 新增行或净增 450 行，必须暂停检查是否在旧 stack/matrix/通用分支上叠加了第二套 renderer；正确实现应以替换和复用降低净增量。
 

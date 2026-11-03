@@ -15,16 +15,16 @@
 
 ## 2. 已阅读并确认的现有文件
 
-| 文件 | 相关性 |
-| --- | --- |
-| `src/cli/cmd/tui/attention.ts:55,210-213` | `DEFAULT_TITLE = "opencode"`；`triggerNotification` 总是收到非空 title，导致 OSC 99 双 payload |
-| `src/cli/cmd/tui/feature-plugins/system/notifications.ts` | 通知触发入口；error handler 对 `MessageAbortedError` 仍播放 error 音效 |
-| `src/effect/runner.ts:188-192` | `cancel` 先 `idleIfCurrent()` 后 `Fiber.interrupt()`，是通用并发契约不能交换 |
-| `src/session/processor.ts:991-1017` | `halt` 先发 `session.error` 后发 `session.status idle`；`MessageAbortedError` 在此产生 |
-| `src/cli/cmd/tui/config/tui.ts:332` | 当前 `notifications` 默认值 |
-| `test/cli/cmd/tui/attention.test.ts:176,191,253` | 3 处无显式 title 的断言 `title: "opencode"` 需改为 `title: undefined`；line 204 显式传了 `title: "opencode"` 不改 |
-| `test/cli/cmd/tui/notifications.test.ts` | abort 测试需更新为 `sound: false` |
-| OpenTUI `terminal.zig:writeNotification` | 确认 OSC 99 在 title 非空时发两个 payload，title 为 null/空时只发 body |
+| 文件                                                      | 相关性                                                                                                            |
+| --------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `src/cli/cmd/tui/attention.ts:55,210-213`                 | `DEFAULT_TITLE = "opencode"`；`triggerNotification` 总是收到非空 title，导致 OSC 99 双 payload                    |
+| `src/cli/cmd/tui/feature-plugins/system/notifications.ts` | 通知触发入口；error handler 对 `MessageAbortedError` 仍播放 error 音效                                            |
+| `src/effect/runner.ts:188-192`                            | `cancel` 先 `idleIfCurrent()` 后 `Fiber.interrupt()`，是通用并发契约不能交换                                      |
+| `src/session/processor.ts:991-1017`                       | `halt` 先发 `session.error` 后发 `session.status idle`；`MessageAbortedError` 在此产生                            |
+| `src/cli/cmd/tui/config/tui.ts:332`                       | 当前 `notifications` 默认值                                                                                       |
+| `test/cli/cmd/tui/attention.test.ts:176,191,253`          | 3 处无显式 title 的断言 `title: "opencode"` 需改为 `title: undefined`；line 204 显式传了 `title: "opencode"` 不改 |
+| `test/cli/cmd/tui/notifications.test.ts`                  | abort 测试需更新为 `sound: false`                                                                                 |
+| OpenTUI `terminal.zig:writeNotification`                  | 确认 OSC 99 在 title 非空时发两个 payload，title 为 null/空时只发 body                                            |
 
 ## 3. 推荐最小实现方案
 
@@ -33,10 +33,7 @@
 当前（`attention.ts:210-213`）：
 
 ```ts
-return input.renderer.triggerNotification(
-  message,
-  normalizeText(request.title, DEFAULT_TITLE, TITLE_LIMIT),
-)
+return input.renderer.triggerNotification(message, normalizeText(request.title, DEFAULT_TITLE, TITLE_LIMIT))
 ```
 
 `normalizeText` 在 `request.title` 为空时回退到 `DEFAULT_TITLE`（`"opencode"`），导致 `triggerNotification` 总是收到非空 title。
@@ -91,15 +88,15 @@ api.event.on("session.error", (event) => {
 
 当前工作区有之前未授权的 staged 改动。需要：
 
-| 文件 | 当前 staged 状态 | 目标状态 |
-| --- | --- | --- |
-| `notifications.ts` | 有 completedTurn/errored 删除/question 静音/subagent 静音 | 保留 + 增加 abort 静音 |
-| `notifications.test.ts` | 有更新测试 | 保留 + 更新 abort 断言为 `sound: false` |
-| `config/tui.ts` | `notifications: false`（错误） | 恢复为 HEAD（`notifications: true`） |
-| `tui.test.ts` | `notifications: false`（错误） | 恢复为 HEAD（`notifications: true`） |
-| `specs/tui-plugins.md` | 有描述改动 | 恢复为 HEAD |
-| `attention.ts` | 无改动 | 新增 title 修复 |
-| `attention.test.ts` | 无改动 | 新增 title 断言更新 |
+| 文件                    | 当前 staged 状态                                          | 目标状态                                |
+| ----------------------- | --------------------------------------------------------- | --------------------------------------- |
+| `notifications.ts`      | 有 completedTurn/errored 删除/question 静音/subagent 静音 | 保留 + 增加 abort 静音                  |
+| `notifications.test.ts` | 有更新测试                                                | 保留 + 更新 abort 断言为 `sound: false` |
+| `config/tui.ts`         | `notifications: false`（错误）                            | 恢复为 HEAD（`notifications: true`）    |
+| `tui.test.ts`           | `notifications: false`（错误）                            | 恢复为 HEAD（`notifications: true`）    |
+| `specs/tui-plugins.md`  | 有描述改动                                                | 恢复为 HEAD                             |
+| `attention.ts`          | 无改动                                                    | 新增 title 修复                         |
+| `attention.test.ts`     | 无改动                                                    | 新增 title 断言更新                     |
 
 ## 4. 必须保持的既有行为
 
@@ -116,29 +113,29 @@ api.event.on("session.error", (event) => {
 
 ## 5. 预计修改文件
 
-| # | 文件 | 具体改动 |
-| ---: | --- | --- |
-| 1 | `src/cli/cmd/tui/attention.ts` | `triggerNotification` 传 `undefined` 而非 `DEFAULT_TITLE` |
-| 2 | `src/cli/cmd/tui/feature-plugins/system/notifications.ts` | error handler 对 `MessageAbortedError` 传 `sound: false` |
-| 3 | `test/cli/cmd/tui/attention.test.ts` | 3 处无显式 title 的 `title: "opencode"` 改为 `title: undefined`（line 204 显式传 title 不改） |
-| 4 | `test/cli/cmd/tui/notifications.test.ts` | abort 测试断言 `sound: false` |
-| 5 | `src/cli/cmd/tui/config/tui.ts` | 恢复为 HEAD（`notifications: true`） |
-| 6 | `test/config/tui.test.ts` | 恢复为 HEAD（`notifications: true`） |
-| 7 | `specs/tui-plugins.md` | 恢复为 HEAD |
+|   # | 文件                                                      | 具体改动                                                                                      |
+| --: | --------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
+|   1 | `src/cli/cmd/tui/attention.ts`                            | `triggerNotification` 传 `undefined` 而非 `DEFAULT_TITLE`                                     |
+|   2 | `src/cli/cmd/tui/feature-plugins/system/notifications.ts` | error handler 对 `MessageAbortedError` 传 `sound: false`                                      |
+|   3 | `test/cli/cmd/tui/attention.test.ts`                      | 3 处无显式 title 的 `title: "opencode"` 改为 `title: undefined`（line 204 显式传 title 不改） |
+|   4 | `test/cli/cmd/tui/notifications.test.ts`                  | abort 测试断言 `sound: false`                                                                 |
+|   5 | `src/cli/cmd/tui/config/tui.ts`                           | 恢复为 HEAD（`notifications: true`）                                                          |
+|   6 | `test/config/tui.test.ts`                                 | 恢复为 HEAD（`notifications: true`）                                                          |
+|   7 | `specs/tui-plugins.md`                                    | 恢复为 HEAD                                                                                   |
 
 实际 vs HEAD 有改动的文件：4 个（attention.ts、notifications.ts、attention.test.ts、notifications.test.ts）。其余 3 个恢复为 HEAD。
 
 ## 6. 正常路径、错误路径、边界处理
 
-| 场景 | 事件顺序 | 声音 | 视觉通知 |
-| --- | --- | --- | --- |
-| 正常完成 | `busy → idle`（assistant 已 completed） | done | 有（title 为 session 标题或 undefined） |
-| 用户 abort | `busy → idle`（未 completed）→ `session.error` → `idle` | **无声** | 有 "Session aborted" |
-| 模型错误 | `busy → session.error` → `idle` | error | 有 "Session error" |
-| 模型超时 | `busy → session.error` → `idle` | error | 有 "Model stopped responding" |
-| question | `question.asked` | 无声 | 有 |
-| permission | `permission.asked` | 无声 | 有 |
-| subagent 完成 | `busy → idle`（有 parentID） | 无声 | 无 |
+| 场景          | 事件顺序                                                | 声音     | 视觉通知                                |
+| ------------- | ------------------------------------------------------- | -------- | --------------------------------------- |
+| 正常完成      | `busy → idle`（assistant 已 completed）                 | done     | 有（title 为 session 标题或 undefined） |
+| 用户 abort    | `busy → idle`（未 completed）→ `session.error` → `idle` | **无声** | 有 "Session aborted"                    |
+| 模型错误      | `busy → session.error` → `idle`                         | error    | 有 "Session error"                      |
+| 模型超时      | `busy → session.error` → `idle`                         | error    | 有 "Model stopped responding"           |
+| question      | `question.asked`                                        | 无声     | 有                                      |
+| permission    | `permission.asked`                                      | 无声     | 有                                      |
+| subagent 完成 | `busy → idle`（有 parentID）                            | 无声     | 无                                      |
 
 ## 7. 行为级测试计划
 
@@ -170,14 +167,14 @@ bun typecheck
 
 ## 9. 预估
 
-| 项目 | 数值 |
-| --- | --- |
-| 实际改动文件（vs HEAD） | 4 |
-| 恢复 HEAD 文件 | 3 |
-| 净增 | 约 20-30 行 |
-| 删除 | 约 10 行 |
-| 生成文件 | 无 |
-| 迁移 | 无 |
+| 项目                    | 数值        |
+| ----------------------- | ----------- |
+| 实际改动文件（vs HEAD） | 4           |
+| 恢复 HEAD 文件          | 3           |
+| 净增                    | 约 20-30 行 |
+| 删除                    | 约 10 行    |
+| 生成文件                | 无          |
+| 迁移                    | 无          |
 
 ## 10. 真实风险与开放问题
 

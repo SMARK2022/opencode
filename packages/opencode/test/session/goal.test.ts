@@ -146,14 +146,10 @@ it.instance(
       const session = yield* sessions.create({})
 
       // 0 和负数 budget 均非法；只有正数或 null（清除）合法
-      const result = yield* goalSvc
-        .set(session.id, { objective: "test", tokenBudget: 0 })
-        .pipe(Effect.exit)
+      const result = yield* goalSvc.set(session.id, { objective: "test", tokenBudget: 0 }).pipe(Effect.exit)
       expect(Exit.isFailure(result)).toBe(true)
 
-      const result2 = yield* goalSvc
-        .set(session.id, { objective: "test", tokenBudget: -100 })
-        .pipe(Effect.exit)
+      const result2 = yield* goalSvc.set(session.id, { objective: "test", tokenBudget: -100 }).pipe(Effect.exit)
       expect(Exit.isFailure(result2)).toBe(true)
     }),
   { git: true },
@@ -302,7 +298,9 @@ it.instance(
       const session = yield* sessions.create({})
 
       // 不存在 goal 时计费不应报错，静默跳过——不存在的 goalID 走同一 WHERE 路径，UPDATE 影响 0 行
-      const result = yield* goalSvc.accountUsage(session.id, 500, 10, { goalID: "nonexistent", generation: 1 }).pipe(Effect.exit)
+      const result = yield* goalSvc
+        .accountUsage(session.id, 500, 10, { goalID: "nonexistent", generation: 1 })
+        .pipe(Effect.exit)
       expect(Exit.isSuccess(result)).toBe(true)
     }),
   { git: true },
@@ -389,7 +387,9 @@ it.instance(
         expect(prompt).toContain('call the goal tool with operate "complete"')
         // 确认边界必须指向下一条续跑消息，不能让同一消息里的重试自证 blocked。
         expect(prompt).toContain("after the next goal-continuation message arrives")
-        expect(prompt).toContain("a repeated call while answering the same message does not count as the second confirmation")
+        expect(prompt).toContain(
+          "a repeated call while answering the same message does not count as the second confirmation",
+        )
         expect(prompt).toContain("delegate the blocker audit to a subagent with the task tool")
         expect(prompt).toContain("the same trimmed reason")
         // 允许拆步骤，但每步完成后必须继续；不能把下一步建议当作已执行工作。
@@ -440,8 +440,12 @@ it.instance(
         expect(prompt).toContain("<long-run-notice>")
         expect(prompt).toContain("drive it to full completion")
         expect(prompt).toContain("do not stop halfway through")
-        expect(prompt).toContain('If everything is verifiably complete, call the goal tool with operate "complete" and finish.')
-        expect(prompt).toContain("choose the next or the largest unfinished requirement you are authorized to advance and complete it now")
+        expect(prompt).toContain(
+          'If everything is verifiably complete, call the goal tool with operate "complete" and finish.',
+        )
+        expect(prompt).toContain(
+          "choose the next or the largest unfinished requirement you are authorized to advance and complete it now",
+        )
         expect(prompt).toContain("advance any other authorized, unfinished part")
         expect(prompt).toContain("follow the blocked verification rules and mark the goal blocked")
         // 插入位置固定在预算之后、证据指引之前，避免与 BFS 策略块互相覆盖。
@@ -479,7 +483,9 @@ it.instance(
       expect(prompt).not.toContain("at least one concrete evidence-producing action")
       // 两种输出都要去掉分段指令，不能只修普通续跑而遗漏策略分支。
       for (const text of [prompt, SessionGoal.continuationPrompt(goal)]) {
-        expect(text).not.toMatch(/this turn|each turn|next turn|across turns|eligible Goal turn|End-of-turn|The session loop will end/i)
+        expect(text).not.toMatch(
+          /this turn|each turn|next turn|across turns|eligible Goal turn|End-of-turn|The session loop will end/i,
+        )
       }
       // strategy 必须位于 Work from evidence 之后、Fidelity 之前。
       expect(prompt.indexOf("Work from evidence:")).toBeLessThan(prompt.indexOf("<strategy-switch"))
@@ -550,142 +556,141 @@ it.instance(
   { git: true },
 )
 
-  // [local-smark] 验证 complete → active 转换：用户 Resume 已完成的 goal
-  // 数据层 set 函数无状态转换限制，complete → active 应直接生效。
-  // 累计用量必须保留——budget 跨 resume 边界持续追踪，不能重置。
-  it.instance(
-    "resume complete goal back to active preserves usage",
-    () =>
-      Effect.gen(function* () {
-        const goalSvc = yield* SessionGoal.Service
-        const sessions = yield* SessionNs.Service
-        const session = yield* sessions.create({})
+// [local-smark] 验证 complete → active 转换：用户 Resume 已完成的 goal
+// 数据层 set 函数无状态转换限制，complete → active 应直接生效。
+// 累计用量必须保留——budget 跨 resume 边界持续追踪，不能重置。
+it.instance(
+  "resume complete goal back to active preserves usage",
+  () =>
+    Effect.gen(function* () {
+      const goalSvc = yield* SessionGoal.Service
+      const sessions = yield* SessionNs.Service
+      const session = yield* sessions.create({})
 
-        const goal = yield* goalSvc.set(session.id, { objective: "finish project", tokenBudget: 10_000 })
-        // 模拟 goal 运行中累计用量
-        yield* goalSvc.accountUsage(session.id, 3000, 120, { goalID: goal.id, generation: goal.generation })
-        // 模型标记 complete（terminal 状态需要 reason）
-        yield* goalSvc.set(session.id, { status: "complete", reason: "all done" })
+      const goal = yield* goalSvc.set(session.id, { objective: "finish project", tokenBudget: 10_000 })
+      // 模拟 goal 运行中累计用量
+      yield* goalSvc.accountUsage(session.id, 3000, 120, { goalID: goal.id, generation: goal.generation })
+      // 模型标记 complete（terminal 状态需要 reason）
+      yield* goalSvc.set(session.id, { status: "complete", reason: "all done" })
 
-        // [local-smark] complete 后同 generation 的 final usage 仍计入（不丢失）
-        yield* goalSvc.accountUsage(session.id, 999, 99, { goalID: goal.id, generation: goal.generation })
+      // [local-smark] complete 后同 generation 的 final usage 仍计入（不丢失）
+      yield* goalSvc.accountUsage(session.id, 999, 99, { goalID: goal.id, generation: goal.generation })
 
-        const completed = yield* goalSvc.get(session.id)
-        expect(Option.isSome(completed)).toBe(true)
-        if (Option.isSome(completed)) {
-          expect(completed.value.status).toBe("complete")
-          // 3000 + 999 = 3999（terminal 后同 generation usage 不丢失）
-          expect(completed.value.tokensUsed).toBe(3999)
-        }
+      const completed = yield* goalSvc.get(session.id)
+      expect(Option.isSome(completed)).toBe(true)
+      if (Option.isSome(completed)) {
+        expect(completed.value.status).toBe("complete")
+        // 3000 + 999 = 3999（terminal 后同 generation usage 不丢失）
+        expect(completed.value.tokensUsed).toBe(3999)
+      }
 
-        // 用户 Resume：complete → active
-        const resumed = yield* goalSvc.set(session.id, { status: "active" })
-        expect(resumed.status).toBe("active")
-        // 累计用量保留，budget 跨 resume 边界持续追踪
-        // 累计用量保留（3000 + 999 = 3999），budget 跨 resume 边界持续追踪
-        expect(resumed.tokensUsed).toBe(3999)
-        expect(resumed.timeUsedSeconds).toBe(219)
-        expect(resumed.tokenBudget).toBe(10_000)
-      }),
-    { git: true },
-  )
+      // 用户 Resume：complete → active
+      const resumed = yield* goalSvc.set(session.id, { status: "active" })
+      expect(resumed.status).toBe("active")
+      // 累计用量保留，budget 跨 resume 边界持续追踪
+      // 累计用量保留（3000 + 999 = 3999），budget 跨 resume 边界持续追踪
+      expect(resumed.tokensUsed).toBe(3999)
+      expect(resumed.timeUsedSeconds).toBe(219)
+      expect(resumed.tokenBudget).toBe(10_000)
+    }),
+  { git: true },
+)
 
-  // [local-smark] continueOnError 字段测试：验证错误后续跑策略的持久化行为。
-  // 默认 false 保证升级后旧 GOAL 行为不变；局部更新不得重置该字段
-  it.instance(
-    "new goal defaults to continueOnError false",
-    () =>
-      Effect.gen(function* () {
-        const goalSvc = yield* SessionGoal.Service
-        const sessions = yield* SessionNs.Service
-        const session = yield* sessions.create({})
+// [local-smark] continueOnError 字段测试：验证错误后续跑策略的持久化行为。
+// 默认 false 保证升级后旧 GOAL 行为不变；局部更新不得重置该字段
+it.instance(
+  "new goal defaults to continueOnError false",
+  () =>
+    Effect.gen(function* () {
+      const goalSvc = yield* SessionGoal.Service
+      const sessions = yield* SessionNs.Service
+      const session = yield* sessions.create({})
 
-        // 新建 GOAL 不传 continueOnError，默认必须为 false
-        const goal = yield* goalSvc.set(session.id, { objective: "test" })
-        expect(goal.continueOnError).toBe(false)
-      }),
-    { git: true },
-  )
+      // 新建 GOAL 不传 continueOnError，默认必须为 false
+      const goal = yield* goalSvc.set(session.id, { objective: "test" })
+      expect(goal.continueOnError).toBe(false)
+    }),
+  { git: true },
+)
 
-  it.instance(
-    "create goal with continueOnError true",
-    () =>
-      Effect.gen(function* () {
-        const goalSvc = yield* SessionGoal.Service
-        const sessions = yield* SessionNs.Service
-        const session = yield* sessions.create({})
+it.instance(
+  "create goal with continueOnError true",
+  () =>
+    Effect.gen(function* () {
+      const goalSvc = yield* SessionGoal.Service
+      const sessions = yield* SessionNs.Service
+      const session = yield* sessions.create({})
 
-        // 显式开启错误续跑策略
-        const goal = yield* goalSvc.set(session.id, { objective: "test", continueOnError: true })
-        expect(goal.continueOnError).toBe(true)
+      // 显式开启错误续跑策略
+      const goal = yield* goalSvc.set(session.id, { objective: "test", continueOnError: true })
+      expect(goal.continueOnError).toBe(true)
 
-        // 持久化后读取仍为 true
-        const result = yield* goalSvc.get(session.id)
-        if (Option.isSome(result)) {
-          expect(result.value.continueOnError).toBe(true)
-        }
-      }),
-    { git: true },
-  )
+      // 持久化后读取仍为 true
+      const result = yield* goalSvc.get(session.id)
+      if (Option.isSome(result)) {
+        expect(result.value.continueOnError).toBe(true)
+      }
+    }),
+  { git: true },
+)
 
-  it.instance(
-    "toggle continueOnError between true and false",
-    () =>
-      Effect.gen(function* () {
-        const goalSvc = yield* SessionGoal.Service
-        const sessions = yield* SessionNs.Service
-        const session = yield* sessions.create({})
+it.instance(
+  "toggle continueOnError between true and false",
+  () =>
+    Effect.gen(function* () {
+      const goalSvc = yield* SessionGoal.Service
+      const sessions = yield* SessionNs.Service
+      const session = yield* sessions.create({})
 
-        yield* goalSvc.set(session.id, { objective: "test", continueOnError: true })
-        // 关闭：false 应覆盖 true
-        const disabled = yield* goalSvc.set(session.id, { continueOnError: false })
-        expect(disabled.continueOnError).toBe(false)
+      yield* goalSvc.set(session.id, { objective: "test", continueOnError: true })
+      // 关闭：false 应覆盖 true
+      const disabled = yield* goalSvc.set(session.id, { continueOnError: false })
+      expect(disabled.continueOnError).toBe(false)
 
-        // 再次开启
-        const enabled = yield* goalSvc.set(session.id, { continueOnError: true })
-        expect(enabled.continueOnError).toBe(true)
-      }),
-    { git: true },
-  )
+      // 再次开启
+      const enabled = yield* goalSvc.set(session.id, { continueOnError: true })
+      expect(enabled.continueOnError).toBe(true)
+    }),
+  { git: true },
+)
 
-  it.instance(
-    "objective update preserves continueOnError",
-    () =>
-      Effect.gen(function* () {
-        const goalSvc = yield* SessionGoal.Service
-        const sessions = yield* SessionNs.Service
-        const session = yield* sessions.create({})
+it.instance(
+  "objective update preserves continueOnError",
+  () =>
+    Effect.gen(function* () {
+      const goalSvc = yield* SessionGoal.Service
+      const sessions = yield* SessionNs.Service
+      const session = yield* sessions.create({})
 
-        yield* goalSvc.set(session.id, { objective: "original", continueOnError: true })
-        // 编辑 objective 不传 continueOnError，策略必须保留
-        const updated = yield* goalSvc.set(session.id, { objective: "revised" })
-        expect(updated.objective).toBe("revised")
-        expect(updated.continueOnError).toBe(true)
-      }),
-    { git: true },
-  )
+      yield* goalSvc.set(session.id, { objective: "original", continueOnError: true })
+      // 编辑 objective 不传 continueOnError，策略必须保留
+      const updated = yield* goalSvc.set(session.id, { objective: "revised" })
+      expect(updated.objective).toBe("revised")
+      expect(updated.continueOnError).toBe(true)
+    }),
+  { git: true },
+)
 
-  it.instance(
-    "status update preserves continueOnError",
-    () =>
-      Effect.gen(function* () {
-        const goalSvc = yield* SessionGoal.Service
-        const sessions = yield* SessionNs.Service
-        const session = yield* sessions.create({})
+it.instance(
+  "status update preserves continueOnError",
+  () =>
+    Effect.gen(function* () {
+      const goalSvc = yield* SessionGoal.Service
+      const sessions = yield* SessionNs.Service
+      const session = yield* sessions.create({})
 
-        yield* goalSvc.set(session.id, { objective: "test", continueOnError: true })
-        // Pause 不传 continueOnError，策略必须保留
-        const paused = yield* goalSvc.set(session.id, { status: "paused" })
-        expect(paused.status).toBe("paused")
-        expect(paused.continueOnError).toBe(true)
+      yield* goalSvc.set(session.id, { objective: "test", continueOnError: true })
+      // Pause 不传 continueOnError，策略必须保留
+      const paused = yield* goalSvc.set(session.id, { status: "paused" })
+      expect(paused.status).toBe("paused")
+      expect(paused.continueOnError).toBe(true)
 
-        // Resume 也不传 continueOnError
-        const resumed = yield* goalSvc.set(session.id, { status: "active" })
-        expect(resumed.continueOnError).toBe(true)
-      }),
-    { git: true },
-  )
-
+      // Resume 也不传 continueOnError
+      const resumed = yield* goalSvc.set(session.id, { status: "active" })
+      expect(resumed.continueOnError).toBe(true)
+    }),
+  { git: true },
+)
 
 // [local-smark] terminal status 必须带非空 reason——用户明确要求 block/complete 需要理由
 it.instance(
@@ -929,15 +934,23 @@ it.instance(
 
       // Turn 1: pending, attempt 1
       const r1 = yield* goalSvc.modelTransition(session.id, {
-        snapshot: snap, turnID: "turn1", userInitiated: true, status: "blocked", reason: "stuck on X",
+        snapshot: snap,
+        turnID: "turn1",
+        userInitiated: true,
+        status: "blocked",
+        reason: "stuck on X",
       })
       expect(r1.type).toBe("blocked-pending")
       if (r1.type === "blocked-pending") expect(r1.attempt).toBe(1)
 
       // previousID 显式证明 turn adjacency；文本相同本身不能替代连续性证据。
       const r2 = yield* goalSvc.modelTransition(session.id, {
-        snapshot: snap, turnID: "turn2", previousTurnID: "turn1", userInitiated: true,
-        status: "blocked", reason: "stuck on X",
+        snapshot: snap,
+        turnID: "turn2",
+        previousTurnID: "turn1",
+        userInitiated: true,
+        status: "blocked",
+        reason: "stuck on X",
       })
       expect(r2.type).toBe("updated")
       if (r2.type === "updated") expect(r2.goal.status).toBe("blocked")
@@ -958,12 +971,20 @@ it.instance(
 
       // 首次调用写入唯一 pending baseline，后续同 turn 调用只能幂等读取它。
       const r1 = yield* goalSvc.modelTransition(session.id, {
-        snapshot: snap, turnID: "turn1", userInitiated: true, status: "blocked", reason: "stuck",
+        snapshot: snap,
+        turnID: "turn1",
+        userInitiated: true,
+        status: "blocked",
+        reason: "stuck",
       })
       if (r1.type === "blocked-pending") expect(r1.attempt).toBe(1)
       // 若同一 turn 能增加 streak，模型一次 provider loop 内即可绕过跨 turn 门禁。
       const r2 = yield* goalSvc.modelTransition(session.id, {
-        snapshot: snap, turnID: "turn1", userInitiated: true, status: "blocked", reason: "stuck",
+        snapshot: snap,
+        turnID: "turn1",
+        userInitiated: true,
+        status: "blocked",
+        reason: "stuck",
       })
       if (r2.type === "blocked-pending") expect(r2.attempt).toBe(1)
     }),
@@ -985,18 +1006,30 @@ it.instance(
       const snap = { goalID: goal.id, generation: goal.generation, status: "active" as const }
 
       yield* goalSvc.modelTransition(session.id, {
-        snapshot: snap, turnID: "turn1", userInitiated: true, status: "blocked", reason: "blocker A",
+        snapshot: snap,
+        turnID: "turn1",
+        userInitiated: true,
+        status: "blocked",
+        reason: "blocker A",
       })
       const changed = yield* goalSvc.modelTransition(session.id, {
-        snapshot: snap, turnID: "turn1", userInitiated: true, status: "blocked", reason: "blocker B",
+        snapshot: snap,
+        turnID: "turn1",
+        userInitiated: true,
+        status: "blocked",
+        reason: "blocker B",
       })
       expect(changed.type).toBe("blocked-pending")
       if (changed.type === "blocked-pending") expect(changed.attempt).toBe(1)
 
       // 旧 reason A 已被 B 替换，因此下一 turn 使用 A 必须重新从 attempt 1 开始。
       const oldReason = yield* goalSvc.modelTransition(session.id, {
-        snapshot: snap, turnID: "turn2", previousTurnID: "turn1", userInitiated: true,
-        status: "blocked", reason: "blocker A",
+        snapshot: snap,
+        turnID: "turn2",
+        previousTurnID: "turn1",
+        userInitiated: true,
+        status: "blocked",
+        reason: "blocker A",
       })
       expect(oldReason.type).toBe("blocked-pending")
       if (oldReason.type === "blocked-pending") expect(oldReason.attempt).toBe(1)
@@ -1004,23 +1037,22 @@ it.instance(
   { git: true },
 )
 
-
-  // [local-smark] 多 daemon 共享同一 SQLite 文件；第二个 writer 在生产 set 获锁前提交 C，
-  // set 必须在 immediate transaction 内重新读取 C，不能基于锁外旧 A 复用 generation 2。
-  it.live(
-    "concurrent objective edits preserve a unique generation",
-    () =>
-      Effect.gen(function* () {
-        const directory = yield* tmpdirScoped({ git: true })
-        const dbPath = path.join(directory, "goal-concurrency.db")
-        // 在同一替换图内创建 Project/Session/Goal，保留真实迁移和外键，避免 fixture 另建内存库。
-        // local memo map 隔离外层测试图；文件连接释放后才清理临时目录，不修改全局 DB 配置。
-        return yield* Effect.gen(function* () {
-          const goalSvc = yield* SessionGoal.Service
-          const sessions = yield* SessionNs.Service
-          const session = yield* sessions.create({})
-          const initial = yield* goalSvc.set(session.id, { objective: "objective A" })
-          const script = `
+// [local-smark] 多 daemon 共享同一 SQLite 文件；第二个 writer 在生产 set 获锁前提交 C，
+// set 必须在 immediate transaction 内重新读取 C，不能基于锁外旧 A 复用 generation 2。
+it.live(
+  "concurrent objective edits preserve a unique generation",
+  () =>
+    Effect.gen(function* () {
+      const directory = yield* tmpdirScoped({ git: true })
+      const dbPath = path.join(directory, "goal-concurrency.db")
+      // 在同一替换图内创建 Project/Session/Goal，保留真实迁移和外键，避免 fixture 另建内存库。
+      // local memo map 隔离外层测试图；文件连接释放后才清理临时目录，不修改全局 DB 配置。
+      return yield* Effect.gen(function* () {
+        const goalSvc = yield* SessionGoal.Service
+        const sessions = yield* SessionNs.Service
+        const session = yield* sessions.create({})
+        const initial = yield* goalSvc.set(session.id, { objective: "objective A" })
+        const script = `
             import { Database } from "bun:sqlite"
             const [path, sessionID] = process.argv.slice(-2)
             const db = new Database(path)
@@ -1032,44 +1064,48 @@ it.instance(
             db.exec("COMMIT")
             db.close()
           `
-          // 并发 writer 子进程在 Windows 上隐藏 console，锁竞争验证不弹窗。
-          const worker = Bun.spawn([process.execPath, "-e", script, dbPath, session.id], {
-            stdout: "pipe",
-            stderr: "pipe",
-            windowsHide: process.platform === "win32",
-          })
-          const ready = yield* Effect.promise(async () => {
-            const chunk = await worker.stdout.getReader().read()
-            if (chunk.done) {
-              throw new Error(`lock worker exited before readiness for ${dbPath}: ${await new Response(worker.stderr).text()}`)
-            }
-            return new TextDecoder().decode(chunk.value)
-          })
-          expect(ready).toContain("lock-ready")
+        // 并发 writer 子进程在 Windows 上隐藏 console，锁竞争验证不弹窗。
+        const worker = Bun.spawn([process.execPath, "-e", script, dbPath, session.id], {
+          stdout: "pipe",
+          stderr: "pipe",
+          windowsHide: process.platform === "win32",
+        })
+        const ready = yield* Effect.promise(async () => {
+          const chunk = await worker.stdout.getReader().read()
+          if (chunk.done) {
+            throw new Error(
+              `lock worker exited before readiness for ${dbPath}: ${await new Response(worker.stderr).text()}`,
+            )
+          }
+          return new TextDecoder().decode(chunk.value)
+        })
+        expect(ready).toContain("lock-ready")
 
-          const updated = yield* goalSvc.set(session.id, { objective: "objective B" }).pipe(
-            Effect.ensuring(Effect.promise(() => worker.exited).pipe(Effect.ignore)),
-          )
-          expect(updated.objective).toBe("objective B")
-          // set 在 immediate 事务内读到 C 的 generation=2 并递增为 3，证明未复用锁外旧快照
-          expect(updated.generation).toBe(3)
+        const updated = yield* goalSvc
+          .set(session.id, { objective: "objective B" })
+          .pipe(Effect.ensuring(Effect.promise(() => worker.exited).pipe(Effect.ignore)))
+        expect(updated.objective).toBe("objective B")
+        // set 在 immediate 事务内读到 C 的 generation=2 并递增为 3，证明未复用锁外旧快照
+        expect(updated.generation).toBe(3)
 
-          // C 的 generation-2 snapshot 在 B 提交后必须 stale，不能终态化当前 Goal。
-          const stale = yield* goalSvc.modelTransition(session.id, {
+        // C 的 generation-2 snapshot 在 B 提交后必须 stale，不能终态化当前 Goal。
+        const stale = yield* goalSvc
+          .modelTransition(session.id, {
             snapshot: { goalID: initial.id, generation: 2, status: "active" },
             turnID: "turn1",
             userInitiated: true,
             status: "complete",
             reason: "finished C",
-          }).pipe(Effect.exit)
-          expect(Exit.isFailure(stale)).toBe(true)
-        }).pipe(
-          provideInstance(directory),
-          Effect.provide(testLayer([[Database.node, Database.layerFromPath(dbPath)]]), { local: true }),
-        )
-      }),
-    10_000,
-  )
+          })
+          .pipe(Effect.exit)
+        expect(Exit.isFailure(stale)).toBe(true)
+      }).pipe(
+        provideInstance(directory),
+        Effect.provide(testLayer([[Database.node, Database.layerFromPath(dbPath)]]), { local: true }),
+      )
+    }),
+  10_000,
+)
 it.instance(
   "modelTransition skipped turn resets streak",
   () =>
@@ -1083,12 +1119,20 @@ it.instance(
 
       // DB 保留 turn1 作为上次真实 attempt，供下一次调用比较 raw chronology。
       yield* goalSvc.modelTransition(session.id, {
-        snapshot: snap, turnID: "turn1", userInitiated: true, status: "blocked", reason: "stuck",
+        snapshot: snap,
+        turnID: "turn1",
+        userInitiated: true,
+        status: "blocked",
+        reason: "stuck",
       })
       // previousTurnID 指向没有 attempt 的 turn2；即使 reason 相同也必须打断 streak。
       const r = yield* goalSvc.modelTransition(session.id, {
-        snapshot: snap, turnID: "turn3", previousTurnID: "turn2", userInitiated: true,
-        status: "blocked", reason: "stuck",
+        snapshot: snap,
+        turnID: "turn3",
+        previousTurnID: "turn2",
+        userInitiated: true,
+        status: "blocked",
+        reason: "stuck",
       })
       if (r.type === "blocked-pending") expect(r.attempt).toBe(1)
     }),
@@ -1109,13 +1153,21 @@ it.instance(
 
       // reason A 只为下一 turn 验证 A 保留证据，不能为另一个 blocker B 提供次数。
       yield* goalSvc.modelTransition(session.id, {
-        snapshot: snap, turnID: "turn1", userInitiated: true, status: "blocked", reason: "blocker A",
+        snapshot: snap,
+        turnID: "turn1",
+        userInitiated: true,
+        status: "blocked",
+        reason: "blocker A",
       })
 
       // previous 虽连续但 reason 已变化，B 必须建立自己的首轮 baseline。
       const r = yield* goalSvc.modelTransition(session.id, {
-        snapshot: snap, turnID: "turn2", previousTurnID: "turn1", userInitiated: true,
-        status: "blocked", reason: "blocker B",
+        snapshot: snap,
+        turnID: "turn2",
+        previousTurnID: "turn1",
+        userInitiated: true,
+        status: "blocked",
+        reason: "blocker B",
       })
       if (r.type === "blocked-pending") expect(r.attempt).toBe(1)
     }),
@@ -1134,13 +1186,18 @@ it.instance(
       // 模型标记 complete
       yield* goalSvc.modelTransition(session.id, {
         snapshot: { goalID: goal.id, generation: goal.generation, status: "active" },
-        turnID: "turn1", userInitiated: true, status: "complete", reason: "done",
+        turnID: "turn1",
+        userInitiated: true,
+        status: "complete",
+        reason: "done",
       })
 
       // 后续新真实用户 turn 恢复 active
       const r = yield* goalSvc.modelTransition(session.id, {
         snapshot: { goalID: goal.id, generation: goal.generation, status: "complete" },
-        turnID: "turn2", userInitiated: true, status: "active",
+        turnID: "turn2",
+        userInitiated: true,
+        status: "active",
       })
       expect(r.type).toBe("updated")
       if (r.type === "updated") expect(r.goal.status).toBe("active")
@@ -1160,14 +1217,19 @@ it.instance(
       const goal = yield* goalSvc.set(session.id, { objective: "test" })
       yield* goalSvc.modelTransition(session.id, {
         snapshot: { goalID: goal.id, generation: goal.generation, status: "active" },
-        turnID: "turn1", userInitiated: true, status: "complete", reason: "done",
+        turnID: "turn1",
+        userInitiated: true,
+        status: "complete",
+        reason: "done",
       })
 
       // 同一 turn 尝试恢复 → 拒绝
       const result = yield* goalSvc
         .modelTransition(session.id, {
           snapshot: { goalID: goal.id, generation: goal.generation, status: "complete" },
-          turnID: "turn1", userInitiated: true, status: "active",
+          turnID: "turn1",
+          userInitiated: true,
+          status: "active",
         })
         .pipe(Effect.exit)
       expect(Exit.isFailure(result)).toBe(true)
@@ -1192,7 +1254,9 @@ it.instance(
       const result = yield* goalSvc
         .modelTransition(session.id, {
           snapshot: { goalID: goal.id, generation: goal.generation, status: "paused" },
-          turnID: "turn1", userInitiated: true, status: "active",
+          turnID: "turn1",
+          userInitiated: true,
+          status: "active",
         })
         .pipe(Effect.exit)
       expect(Exit.isFailure(result)).toBe(true)
@@ -1217,7 +1281,9 @@ it.instance(
       const result = yield* goalSvc
         .modelTransition(session.id, {
           snapshot: { goalID: goal.id, generation: goal.generation, status: "complete" },
-          turnID: "turn1", userInitiated: true, status: "active",
+          turnID: "turn1",
+          userInitiated: true,
+          status: "active",
         })
         .pipe(Effect.exit)
       expect(Exit.isFailure(result)).toBe(true)

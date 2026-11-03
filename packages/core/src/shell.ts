@@ -182,7 +182,11 @@ export function cmd(file: string, command: string, platform: string = process.pl
   if (platform !== "win32" || !ps(file)) {
     // 显式shell argv避开Bun/macOS shell+detached丢stdout；cmd保留AutoRun与引号控制。
     // cmd /s会剥去最外层引号；包装整个脚本才能保留可执行路径与参数原有引号。
-    return { command: file, args: name(file) === "cmd" ? ["/d", "/s", "/c", `"${command}"`] : ["-c", command], shell: false }
+    return {
+      command: file,
+      args: name(file) === "cmd" ? ["/d", "/s", "/c", `"${command}"`] : ["-c", command],
+      shell: false,
+    }
   }
   // Windows PowerShell仍走既有UTF-16传输及UTF-8输出，不重复解释脚本文本。
   // UTF-16LE base64 只传输脚本文本；Console 与管道生产端使用无 BOM 的 UTF-8。
@@ -209,7 +213,15 @@ export function cmd(file: string, command: string, platform: string = process.pl
   return {
     command: file,
     // 显式文本格式降低 PowerShell 信息流被序列化为 CLIXML 的概率。
-    args: ["-NoLogo", "-NoProfile", "-NonInteractive", "-OutputFormat", "Text", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")],
+    args: [
+      "-NoLogo",
+      "-NoProfile",
+      "-NonInteractive",
+      "-OutputFormat",
+      "Text",
+      "-EncodedCommand",
+      Buffer.from(script, "utf16le").toString("base64"),
+    ],
     // 显式 argv 不能再经 shell 包装，否则引号和中文会被第二次解释。
     shell: false,
   }
@@ -348,33 +360,59 @@ function normalizeBareDoubleDash(source: string) {
       continue
     }
     // 反引号不是引用定界符；跳过被保护字符后立刻恢复普通扫描。
-    if (char === "`") { result += char + (source[++index] ?? ""); continue }
+    if (char === "`") {
+      result += char + (source[++index] ?? "")
+      continue
+    }
     // 块注释允许嵌套；整段前进，避免为每个字符重扫此前的源码。
     if (source.startsWith("<#", index)) {
       const start = index
       let depth = 1
       index += 2
       while (index < source.length && depth > 0) {
-        if (source.startsWith("<#", index)) { depth++; index += 2; continue }
-        if (source.startsWith("#>", index)) { depth--; index += 2; continue }
+        if (source.startsWith("<#", index)) {
+          depth++
+          index += 2
+          continue
+        }
+        if (source.startsWith("#>", index)) {
+          depth--
+          index += 2
+          continue
+        }
         index++
       }
       result += source.slice(start, index--)
       continue
     }
     // 行注释与stop-parsing正文保持原样，换行本身仍恢复下一条语句的边界。
-    if ((char === "#" && (index === 0 || /[\s;|&({]/.test(source[index - 1]))) || (command && source.startsWith("--%", index))) {
+    if (
+      (char === "#" && (index === 0 || /[\s;|&({]/.test(source[index - 1]))) ||
+      (command && source.startsWith("--%", index))
+    ) {
       const end = source.indexOf("\n", index)
-      if (end < 0) { result += source.slice(index); break }
+      if (end < 0) {
+        result += source.slice(index)
+        break
+      }
       result += source.slice(index, end)
       index = end - 1
       continue
     }
     // 括号上下文只决定是否允许横线兼容；运算表达式的含义仍完全交给grammar。
     if (/[;|&\r\n(){}=]/.test(char)) {
-      if (/[;|\r\n]/.test(char)) { command = undefined; invocation = false }
-      if (char === "&") { command = true; invocation = true }
-      if (char === "(" || char === "{") { groups.push(command ?? false); command = undefined }
+      if (/[;|\r\n]/.test(char)) {
+        command = undefined
+        invocation = false
+      }
+      if (char === "&") {
+        command = true
+        invocation = true
+      }
+      if (char === "(" || char === "{") {
+        groups.push(command ?? false)
+        command = undefined
+      }
       if (char === ")" || char === "}") command = groups.pop()
       if (char === "=" && !command) command = undefined
       result += char
@@ -383,9 +421,17 @@ function normalizeBareDoubleDash(source: string) {
     if (!/\s/.test(char)) {
       // 只恢复旧conda/Python前缀的三个静态等号选项；引用/动态值与其它子程序不匹配。
       if ((command === undefined || invocation) && /c/i.test(char)) {
-        const prefix = /^(conda(?:\.exe)?[ \t]+run[ \t]+(?:(?:--(?:dev|debug-wrapper-scripts|no-capture-output|live-stream)|-v{1,3})[ \t]+|(?:-n|--name|-p|--prefix|--cwd)[ \t]+[^-\s"'`$@;&|<>(){}][^\s"'`$@;&|<>(){}]*[ \t]+|--(?:name|prefix|cwd)=[^\s"'`$@;&|<>(){}]+[ \t]+)*)(python(?:3(?:\.\d+)?)?|py)(?:\.exe)?(?=$|[ \t])/i.exec(source.slice(index))
+        const prefix =
+          /^(conda(?:\.exe)?[ \t]+run[ \t]+(?:(?:--(?:dev|debug-wrapper-scripts|no-capture-output|live-stream)|-v{1,3})[ \t]+|(?:-n|--name|-p|--prefix|--cwd)[ \t]+[^-\s"'`$@;&|<>(){}][^\s"'`$@;&|<>(){}]*[ \t]+|--(?:name|prefix|cwd)=[^\s"'`$@;&|<>(){}]+[ \t]+)*)(python(?:3(?:\.\d+)?)?|py)(?:\.exe)?(?=$|[ \t])/i.exec(
+            source.slice(index),
+          )
         // 只有旧flags后的-c或本次字面stdin入口适用；脚本文件和模块不恢复等号选项。
-        if (prefix && /^(?:[ \t]+(?:-3(?:\.\d+)?(?:-32|-64)?|-32|-64|-B|-E|-I|-O|-OO|-P|-b|-bb|-d|-q|-s|-S|-u|-v|-x|-[WX](?:[ \t]+)?[^\s"'`$@;&|<>(){}]+))*[ \t]+(?:-c(?=[ \t]+['"])|-(?=$|[ \t;|]))/.test(source.slice(index + prefix[0].length))) {
+        if (
+          prefix &&
+          /^(?:[ \t]+(?:-3(?:\.\d+)?(?:-32|-64)?|-32|-64|-B|-E|-I|-O|-OO|-P|-b|-bb|-d|-q|-s|-S|-u|-v|-x|-[WX](?:[ \t]+)?[^\s"'`$@;&|<>(){}]+))*[ \t]+(?:-c(?=[ \t]+['"])|-(?=$|[ \t;|]))/.test(
+            source.slice(index + prefix[0].length),
+          )
+        ) {
           // 只改grammar表示，选项值不解码；该段消费一次，避免逐字符重扫前缀。
           result += prefix[1].replace(/--(?:name|prefix|cwd)=[^\s]+/g, (option) => `'${option}'`)
           index += prefix[1].length - 1
@@ -433,29 +479,43 @@ export function guidance(file: string, platform: NodeJS.Platform) {
     `Shell: ${file}`,
     "JSON decoding happens once; execute native quoting and newlines without extra escaping. Native multiline scripts are allowed.",
     // PowerShell 跨平台仍使用自身语法，不能根据 OS 把它误判为 Bash。
-    ...(ps(file) ? [
-      "Use PowerShell syntax; read environment variables with $env:NAME, not export NAME=...; use $null, not /dev/null.",
-      // stderr已由同一个进程handle采集，保留源提示原话而非另行合并流。
-      "Do not append `2>&1` to PowerShell commands; the shell tool already captures stderr.",
-      // 引用合同随实际Shell source共享给V1/V2，不在两个工具入口各造一份解释器说明。
-      '- PowerShell expands $name and evaluates $(...) inside double quotes; use "..." when you want those local values.',
-      "- In single-quoted strings, PowerShell leaves $name and $(...) unevaluated; backslash is ordinary. Write '' for a single quote.",
-      '- Inside double quotes, `$name keeps $name as text and `" inserts a double quote; \\$name still expands $name, and \\" does not escape a quote.',
-      "- For multiline text without variable substitution, start with @' followed by a newline; close with '@ at the start of a new line.",
-      '- To run a Linux program through WSL, use wsl --exec <program> ...; for Bash use wsl --exec bash -lc \'echo "$HOME"\'. wsl -- bash -lc adds another shell that can expand variables first.',
-      ...(shell === "powershell" ? ["Windows PowerShell 5.1 rebuilds native arguments as a command line, consuming embedded double quotes; use a program's stdin interface for quoted code."] : []),
-      // 5.1 与 7+ 链式能力不同，分号始终是无条件顺序执行。
-      shell === "powershell" ? "Windows PowerShell 5.1: do NOT use && or ||. Use A; if ($?) { B } for success-dependent commands." : "PowerShell 7+: && and || are supported; use ; only for unconditional sequencing.",
-    ] : shell === "cmd" ? [
-      // cmd 的变量与空设备均不同于 PowerShell 和 POSIX。
-      "Use cmd.exe syntax, %NAME% for environment variables, NUL instead of /dev/null, and && for success-dependent commands.",
-    ] : ["Use this shell's native syntax."]),
+    ...(ps(file)
+      ? [
+          "Use PowerShell syntax; read environment variables with $env:NAME, not export NAME=...; use $null, not /dev/null.",
+          // stderr已由同一个进程handle采集，保留源提示原话而非另行合并流。
+          "Do not append `2>&1` to PowerShell commands; the shell tool already captures stderr.",
+          // 引用合同随实际Shell source共享给V1/V2，不在两个工具入口各造一份解释器说明。
+          '- PowerShell expands $name and evaluates $(...) inside double quotes; use "..." when you want those local values.',
+          "- In single-quoted strings, PowerShell leaves $name and $(...) unevaluated; backslash is ordinary. Write '' for a single quote.",
+          '- Inside double quotes, `$name keeps $name as text and `" inserts a double quote; \\$name still expands $name, and \\" does not escape a quote.',
+          "- For multiline text without variable substitution, start with @' followed by a newline; close with '@ at the start of a new line.",
+          "- To run a Linux program through WSL, use wsl --exec <program> ...; for Bash use wsl --exec bash -lc 'echo \"$HOME\"'. wsl -- bash -lc adds another shell that can expand variables first.",
+          ...(shell === "powershell"
+            ? [
+                "Windows PowerShell 5.1 rebuilds native arguments as a command line, consuming embedded double quotes; use a program's stdin interface for quoted code.",
+              ]
+            : []),
+          // 5.1 与 7+ 链式能力不同，分号始终是无条件顺序执行。
+          shell === "powershell"
+            ? "Windows PowerShell 5.1: do NOT use && or ||. Use A; if ($?) { B } for success-dependent commands."
+            : "PowerShell 7+: && and || are supported; use ; only for unconditional sequencing.",
+        ]
+      : shell === "cmd"
+        ? [
+            // cmd 的变量与空设备均不同于 PowerShell 和 POSIX。
+            "Use cmd.exe syntax, %NAME% for environment variables, NUL instead of /dev/null, and && for success-dependent commands.",
+          ]
+        : ["Use this shell's native syntax."]),
     // Git Bash 保留 Unix 工具；严格禁用仅面向 Windows 原生 shell。
-    ...(platform === "win32" && ["powershell", "pwsh", "cmd"].includes(shell) ? [
-      "Do NOT use Unix text utilities tail/head/sed/awk/grep for file operations. Prefer available dedicated tools.",
-      // 仅必要的终端处理给出等价命令，不宣称当前请求拥有未注册工具。
-      shell === "cmd" ? "For necessary terminal checks use dir/type/findstr." : "For necessary terminal checks use Test-Path, Get-Content -Tail or Select-String.",
-    ] : []),
+    ...(platform === "win32" && ["powershell", "pwsh", "cmd"].includes(shell)
+      ? [
+          "Do NOT use Unix text utilities tail/head/sed/awk/grep for file operations. Prefer available dedicated tools.",
+          // 仅必要的终端处理给出等价命令，不宣称当前请求拥有未注册工具。
+          shell === "cmd"
+            ? "For necessary terminal checks use dir/type/findstr."
+            : "For necessary terminal checks use Test-Path, Get-Content -Tail or Select-String.",
+        ]
+      : []),
     // 两条执行路径都按 UTF-8 解码，非 ASCII 程序输出必须使用相同编码。
     "For non-ASCII output, configure the shell/native program to emit UTF-8; captured output is decoded as UTF-8.",
     // BashTool 的 Location source 与 V1 description 都调用此入口，配置 refresh 仍由原 Context Epoch 去重。
@@ -470,27 +530,55 @@ export function* commandHeads(command: string, shellName: string) {
   if (!["powershell", "pwsh", "cmd"].includes(shellName)) return
   const powershell = shellName !== "cmd"
   const separators = powershell ? ";|&\r\n" : "|&\r\n"
-  const escapes: Record<string, string> = { "0": "\0", a: "\x07", b: "\b", f: "\f", n: "\n", r: "\r", t: "\t", v: "\v", ...(shellName === "pwsh" ? { e: "\x1b" } : {}) }
+  const escapes: Record<string, string> = {
+    "0": "\0",
+    a: "\x07",
+    b: "\b",
+    f: "\f",
+    n: "\n",
+    r: "\r",
+    t: "\t",
+    v: "\v",
+    ...(shellName === "pwsh" ? { e: "\x1b" } : {}),
+  }
   let head = true
   let invoked = false
   let depth = 0
-  for (let index = 0; index < command.length;) {
+  for (let index = 0; index < command.length; ) {
     const character = command[index]
     if (powershell && character === "#") {
       while (index < command.length && command[index] !== "\n") index++
       continue
     }
     // cmd 在命令起点的括号是命令组，不应遮掉组内首个实际命令。
-    if (!powershell && head && character === "(") { index++; continue }
-    // 嵌套表达式和脚本块不属于此浅层检查，避免把标签、数组值或哈希键当命令。
-    if ("({".includes(character)) { depth++; head = false; index++; continue }
-    if (")}".includes(character)) { depth = Math.max(0, depth - 1); index++; continue }
-    if (separators.includes(character)) {
-      if (!depth) { invoked = powershell && character === "&" && head; head = true }
+    if (!powershell && head && character === "(") {
       index++
       continue
     }
-    if (/\s/.test(character)) { index++; continue }
+    // 嵌套表达式和脚本块不属于此浅层检查，避免把标签、数组值或哈希键当命令。
+    if ("({".includes(character)) {
+      depth++
+      head = false
+      index++
+      continue
+    }
+    if (")}".includes(character)) {
+      depth = Math.max(0, depth - 1)
+      index++
+      continue
+    }
+    if (separators.includes(character)) {
+      if (!depth) {
+        invoked = powershell && character === "&" && head
+        head = true
+      }
+      index++
+      continue
+    }
+    if (/\s/.test(character)) {
+      index++
+      continue
+    }
     const quoted = character === '"' || (powershell && character === "'")
     let quote = ""
     let text = ""
@@ -505,20 +593,31 @@ export function* commandHeads(command: string, shellName: string) {
       }
       if (quote) {
         if (current === quote) {
-          if (powershell && command[index + 1] === quote) { text += current; index += 2; continue }
+          if (powershell && command[index + 1] === quote) {
+            text += current
+            index += 2
+            continue
+          }
           quote = ""
         } else text += current
         index++
         continue
       }
-      if (current === '"' || (powershell && current === "'")) { quote = current; index++; continue }
+      if (current === '"' || (powershell && current === "'")) {
+        quote = current
+        index++
+        continue
+      }
       if (/\s/.test(current) || separators.includes(current) || "(){}".includes(current)) break
       text += current
       index++
     }
     if (!head || depth) continue
     // 保留常见显式调用形式，不把 PowerShell 裸字符串当成可执行文件。
-    if ((powershell && text === ".") || (!powershell && text.toLowerCase() === "call")) { invoked = true; continue }
+    if ((powershell && text === ".") || (!powershell && text.toLowerCase() === "call")) {
+      invoked = true
+      continue
+    }
     if (text && (!powershell || !quoted || invoked)) yield text
     head = false
     invoked = false
@@ -540,8 +639,10 @@ export function compatibilityError(heads: Iterable<string>, shellName: string) {
       return `The current shell is ${shellName}, but the command uses Unix utility ${raw}. Prefer available dedicated file tools; if terminal processing is required, use ${shellName === "cmd" ? "dir/type/findstr" : "Get-Content -Tail or Select-String"}.`
     }
     // ls 是 PS 的目录别名，只有 cmd 需要拦截；find 在 PS 语义含糊。
-    if (shellName === "cmd" && command === "ls") return "The current shell is cmd.exe; use available directory tools or dir instead of ls."
-    if (shellName !== "cmd" && command === "find") return `The current shell is ${shellName}; find is ambiguous on Windows. Prefer available dedicated search tools.`
+    if (shellName === "cmd" && command === "ls")
+      return "The current shell is cmd.exe; use available directory tools or dir instead of ls."
+    if (shellName !== "cmd" && command === "find")
+      return `The current shell is ${shellName}; find is ambiguous on Windows. Prefer available dedicated search tools.`
   }
 }
 
@@ -555,4 +656,3 @@ function powershellUnixAlternative(name: string) {
   // #158：默认回退到通用 PowerShell 工具提示
   return "Prefer PowerShell-native commands, or run the Unix utility inside ssh/wsl."
 }
-

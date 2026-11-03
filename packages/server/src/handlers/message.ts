@@ -75,11 +75,14 @@ export const MessageHandler = HttpApiBuilder.group(Api, "server.message", (handl
         const last = messages.at(-1)
         return {
           // native消息只在私有viewer返回边界剪重复字段，runner/SDK查询及分页cursor保持原合同。
-          data: request.headers["x-opencode-tui-message-projection"] === "viewer"
-            ? messages.map((message) => message.type === "assistant"
-              ? { ...message, content: message.content.map((part) => PartView.project(part)) }
-              : message)
-            : messages,
+          data:
+            request.headers["x-opencode-tui-message-projection"] === "viewer"
+              ? messages.map((message) =>
+                  message.type === "assistant"
+                    ? { ...message, content: message.content.map((part) => PartView.project(part)) }
+                    : message,
+                )
+              : messages,
           cursor: {
             previous: first ? cursor.encode(first, order, "previous") : undefined,
             next: last ? cursor.encode(last, order, "next") : undefined,

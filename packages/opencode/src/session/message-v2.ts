@@ -38,7 +38,12 @@ import { ProviderError } from "@/provider/error"
 import { iife } from "@/util/iife"
 import { errorMessage } from "@/util/error"
 import { isMedia } from "@/util/media"
-import { ensureTaskResumeVisible, formatCompactionClearedNotice, formatExecutionNotice, truncateForCompaction } from "@/util/output-notice"
+import {
+  ensureTaskResumeVisible,
+  formatCompactionClearedNotice,
+  formatExecutionNotice,
+  truncateForCompaction,
+} from "@/util/output-notice"
 import type { SystemError } from "bun"
 import type { Provider } from "@/provider/provider"
 import { Effect, Schema } from "effect"
@@ -77,8 +82,7 @@ const TRANSIENT_TRANSPORT_CODES = new Set([
   "SSE_READ_TIMEOUT",
   // #191：SSE_READ_TIMEOUT 是自研超时码，与其他 Node/undici 网络码同属 transport 层重试类
 ])
-  // #191：ECONNRESET 被排除在集合外，由 fromError 顶层 case 按嵌套深度单独判定，避免双重分类
-
+// #191：ECONNRESET 被排除在集合外，由 fromError 顶层 case 按嵌套深度单独判定，避免双重分类
 
 export const SYNTHETIC_ATTACHMENT_PROMPT = "Attached media from tool result:"
 export { isMedia }
@@ -286,7 +290,12 @@ export const goalChronology = Effect.fn("MessageV2.goalChronology")(function* (s
         hidden: sql<string | null>`json_type(${PartTable.data}, '$.hidden')`,
       })
       .from(PartTable)
-      .where(inArray(PartTable.message_id, rows.map((row) => row.id)))
+      .where(
+        inArray(
+          PartTable.message_id,
+          rows.map((row) => row.id),
+        ),
+      )
       .orderBy(PartTable.message_id, PartTable.id)
       .all()
       .pipe(Effect.orDie)
@@ -308,9 +317,7 @@ export const goalChronology = Effect.fn("MessageV2.goalChronology")(function* (s
       const continuation = message.parts.some(
         (part) => part.type === "text" && part.synthetic && part.metadata?.goal_continuation === true,
       )
-      const userInitiated = message.parts.some(
-        (part) => part.type !== "compaction" && part.synthetic !== true,
-      )
+      const userInitiated = message.parts.some((part) => part.type !== "compaction" && part.synthetic !== true)
       // compaction-only user rows 是技术标记，不消耗 Goal slot。
       if (continuation || userInitiated) result.push(message)
       if (result.length === 2) break
@@ -364,25 +371,41 @@ export const reviewerEvidence = Effect.fn("MessageV2.reviewerEvidence")(function
   return yield* Database.withSync(database, (db) => {
     // 子会话Text已可冷冻，全文授权和首条豁免都从同一只读恢复边界取得原文。
     const readTexts = (rows: (typeof PartTable.$inferSelect)[]) =>
-      ColdStorage.inspectPartRows(db, rows).flatMap(row => {
+      ColdStorage.inspectPartRows(db, rows).flatMap((row) => {
         const value = partFromRestored(row)
         return value.type === "text" ? [{ messageID: row.message_id, text: value.text }] : []
       })
 
     // 冷包只恢复返回值，不thaw；input/答案/审查metadata不能从空skeleton猜测。
     const readTools = (rows: (typeof PartTable.$inferSelect)[]): ReviewerEvidenceTool[] =>
-      ColdStorage.inspectPartRows(db, rows).flatMap(row => {
+      ColdStorage.inspectPartRows(db, rows).flatMap((row) => {
         const value = partFromRestored(row)
         if (value.type !== "tool" || value.state.status === "pending") return []
         const review: unknown = value.state.metadata?.autoReview
-        const status = review && typeof review === "object" && "status" in review && typeof review.status === "string" ? review.status : undefined
+        const status =
+          review && typeof review === "object" && "status" in review && typeof review.status === "string"
+            ? review.status
+            : undefined
         const result = review && typeof review === "object" && "result" in review ? review.result : undefined
-        const rationale = result && typeof result === "object" && "rationale" in result && typeof result.rationale === "string" ? result.rationale : undefined
-        return [{ id: row.id, time: row.time_created, tool: value.tool, stateStatus: value.state.status,
-          ...(status ? { autoReviewStatus: status } : {}), ...(rationale ? { autoReviewRationale: rationale } : {}),
-          ...(value.state.status === "error" ? { error: value.state.error } : {}), input: JSON.stringify(value.state.input),
-          ...(value.state.status === "completed" && value.state.metadata.answers !== undefined ? { answers: JSON.stringify(value.state.metadata.answers) } : {}),
-        }]
+        const rationale =
+          result && typeof result === "object" && "rationale" in result && typeof result.rationale === "string"
+            ? result.rationale
+            : undefined
+        return [
+          {
+            id: row.id,
+            time: row.time_created,
+            tool: value.tool,
+            stateStatus: value.state.status,
+            ...(status ? { autoReviewStatus: status } : {}),
+            ...(rationale ? { autoReviewRationale: rationale } : {}),
+            ...(value.state.status === "error" ? { error: value.state.error } : {}),
+            input: JSON.stringify(value.state.input),
+            ...(value.state.status === "completed" && value.state.metadata.answers !== undefined
+              ? { answers: JSON.stringify(value.state.metadata.answers) }
+              : {}),
+          },
+        ]
       })
     // QA 行与决定行分开取：两者配额独立，且决定行需要「最新 N 条」的尾锚语义。
     // N-03/N-04：timed_out/failed 等基础设施状态与 hidden 行在查询层排除。
@@ -390,39 +413,63 @@ export const reviewerEvidence = Effect.fn("MessageV2.reviewerEvidence")(function
       .select({ row: PartTable })
       .from(PartTable)
       .innerJoin(MessageTable, eq(PartTable.message_id, MessageTable.id))
-      .where(and(
-        eq(PartTable.session_id, sessionID),
-        sql`json_extract(${PartTable.data}, '$.type') = 'tool'`,
-        sql`json_extract(${PartTable.data}, '$.tool') = 'question'`,
-        sql`json_extract(${PartTable.data}, '$.state.status') = 'completed'`,
-        sql`json_type(${PartTable.data}, '$.hidden') is null`,
-        sql`json_type(${MessageTable.data}, '$.hidden') is null`,
-      ))
+      .where(
+        and(
+          eq(PartTable.session_id, sessionID),
+          sql`json_extract(${PartTable.data}, '$.type') = 'tool'`,
+          sql`json_extract(${PartTable.data}, '$.tool') = 'question'`,
+          sql`json_extract(${PartTable.data}, '$.state.status') = 'completed'`,
+          sql`json_type(${PartTable.data}, '$.hidden') is null`,
+          sql`json_type(${MessageTable.data}, '$.hidden') is null`,
+        ),
+      )
       .orderBy(PartTable.time_created, PartTable.id)
       .limit(SNAPSHOT_QA_LIMIT + 1)
       .all()
     const qaOmitted = qaRows.length > SNAPSHOT_QA_LIMIT
-    const qa = readTools(qaRows.slice(0, SNAPSHOT_QA_LIMIT).map(row => row.row))
+    const qa = readTools(qaRows.slice(0, SNAPSHOT_QA_LIMIT).map((row) => row.row))
 
     const decisionRows: ReviewerEvidenceTool[] = []
     let decisionBefore: { id: PartID; time: number } | undefined
     // 冷态metadata不在SQL热投影中，分批inspect候选并在真实决定达到配额后停止。
     while (decisionRows.length <= SNAPSHOT_DECISION_LIMIT) {
-      const rows = db.select({ row: PartTable }).from(PartTable)
+      const rows = db
+        .select({ row: PartTable })
+        .from(PartTable)
         .innerJoin(MessageTable, eq(PartTable.message_id, MessageTable.id))
-        .where(and(eq(PartTable.session_id, sessionID),
-          sql`json_extract(${PartTable.data}, '$.type') = 'tool'`,
-          sql`json_type(${PartTable.data}, '$.hidden') is null`, sql`json_type(${MessageTable.data}, '$.hidden') is null`,
-          or(sql`${PartTable.cold_ref} is not null`,
-            sql`json_extract(${PartTable.data}, '$.state.metadata.autoReview.status') in ('allowed', 'denied', 'fallback_user')`,
-            sql`json_extract(${PartTable.data}, '$.state.error') like 'The user rejected permission%'`),
-          decisionBefore ? or(lt(PartTable.time_created, decisionBefore.time),
-            and(eq(PartTable.time_created, decisionBefore.time), lt(PartTable.id, decisionBefore.id))) : undefined,
-        )).orderBy(desc(PartTable.time_created), desc(PartTable.id)).limit(64).all()
+        .where(
+          and(
+            eq(PartTable.session_id, sessionID),
+            sql`json_extract(${PartTable.data}, '$.type') = 'tool'`,
+            sql`json_type(${PartTable.data}, '$.hidden') is null`,
+            sql`json_type(${MessageTable.data}, '$.hidden') is null`,
+            or(
+              sql`${PartTable.cold_ref} is not null`,
+              sql`json_extract(${PartTable.data}, '$.state.metadata.autoReview.status') in ('allowed', 'denied', 'fallback_user')`,
+              sql`json_extract(${PartTable.data}, '$.state.error') like 'The user rejected permission%'`,
+            ),
+            decisionBefore
+              ? or(
+                  lt(PartTable.time_created, decisionBefore.time),
+                  and(eq(PartTable.time_created, decisionBefore.time), lt(PartTable.id, decisionBefore.id)),
+                )
+              : undefined,
+          ),
+        )
+        .orderBy(desc(PartTable.time_created), desc(PartTable.id))
+        .limit(64)
+        .all()
       if (!rows.length) break
-      decisionRows.push(...readTools(rows.map(row => row.row)).filter(row =>
-        ["allowed", "denied"].includes(row.autoReviewStatus ?? "") || row.autoReviewStatus === "fallback_user" && row.stateStatus === "completed" || row.error?.startsWith("The user rejected permission"))
-        .slice(0, SNAPSHOT_DECISION_LIMIT + 1 - decisionRows.length))
+      decisionRows.push(
+        ...readTools(rows.map((row) => row.row))
+          .filter(
+            (row) =>
+              ["allowed", "denied"].includes(row.autoReviewStatus ?? "") ||
+              (row.autoReviewStatus === "fallback_user" && row.stateStatus === "completed") ||
+              row.error?.startsWith("The user rejected permission"),
+          )
+          .slice(0, SNAPSHOT_DECISION_LIMIT + 1 - decisionRows.length),
+      )
       const last = rows.at(-1)?.row
       if (!last || rows.length < 64) break
       decisionBefore = { id: last.id, time: last.time_created }
@@ -432,7 +479,10 @@ export const reviewerEvidence = Effect.fn("MessageV2.reviewerEvidence")(function
 
     // user 文本尾锚走查：QA 的 JSON 长度从 24000 共享预算中扣除（含语法开销的
     // 保守估计，只会提前逐出不会超支）；从最新向最旧分页累计，重复文本按标记价。
-    let budget = Math.max(0, SNAPSHOT_CHAR_LIMIT - qa.reduce((sum, row) => sum + (row.input?.length ?? 0) + (row.answers?.length ?? 0), 0))
+    let budget = Math.max(
+      0,
+      SNAPSHOT_CHAR_LIMIT - qa.reduce((sum, row) => sum + (row.input?.length ?? 0) + (row.answers?.length ?? 0), 0),
+    )
     const seen = new Set<string>()
     const selected: ReviewerEvidenceUser[] = []
     let userOmitted = false
@@ -446,7 +496,17 @@ export const reviewerEvidence = Effect.fn("MessageV2.reviewerEvidence")(function
       const messages = db
         .select()
         .from(MessageTable)
-        .where(before ? and(base, or(lt(MessageTable.time_created, before.time), and(eq(MessageTable.time_created, before.time), lt(MessageTable.id, before.id)))) : base)
+        .where(
+          before
+            ? and(
+                base,
+                or(
+                  lt(MessageTable.time_created, before.time),
+                  and(eq(MessageTable.time_created, before.time), lt(MessageTable.id, before.id)),
+                ),
+              )
+            : base,
+        )
         .orderBy(desc(MessageTable.time_created), desc(MessageTable.id))
         .limit(SNAPSHOT_USER_PAGE)
         .all()
@@ -454,11 +514,16 @@ export const reviewerEvidence = Effect.fn("MessageV2.reviewerEvidence")(function
       const texts = db
         .select()
         .from(PartTable)
-        .where(and(
-          inArray(PartTable.message_id, messages.map((row) => row.id)),
-          sql`json_extract(${PartTable.data}, '$.type') = 'text'`,
-          sql`json_type(${PartTable.data}, '$.hidden') is null`,
-        ))
+        .where(
+          and(
+            inArray(
+              PartTable.message_id,
+              messages.map((row) => row.id),
+            ),
+            sql`json_extract(${PartTable.data}, '$.type') = 'text'`,
+            sql`json_type(${PartTable.data}, '$.hidden') is null`,
+          ),
+        )
         .orderBy(PartTable.id)
         .all()
       const byMessage = new Map<MessageID, string[]>()
@@ -494,11 +559,13 @@ export const reviewerEvidence = Effect.fn("MessageV2.reviewerEvidence")(function
       const first = db
         .select()
         .from(MessageTable)
-        .where(and(
-          eq(MessageTable.session_id, sessionID),
-          sql`json_extract(${MessageTable.data}, '$.role') = 'user'`,
-          sql`json_type(${MessageTable.data}, '$.hidden') is null`,
-        ))
+        .where(
+          and(
+            eq(MessageTable.session_id, sessionID),
+            sql`json_extract(${MessageTable.data}, '$.role') = 'user'`,
+            sql`json_type(${MessageTable.data}, '$.hidden') is null`,
+          ),
+        )
         .orderBy(MessageTable.time_created, MessageTable.id)
         .limit(1)
         .all()[0]
@@ -506,11 +573,13 @@ export const reviewerEvidence = Effect.fn("MessageV2.reviewerEvidence")(function
         const firstTexts = db
           .select()
           .from(PartTable)
-          .where(and(
-            eq(PartTable.message_id, first.id),
-            sql`json_extract(${PartTable.data}, '$.type') = 'text'`,
-            sql`json_type(${PartTable.data}, '$.hidden') is null`,
-          ))
+          .where(
+            and(
+              eq(PartTable.message_id, first.id),
+              sql`json_extract(${PartTable.data}, '$.type') = 'text'`,
+              sql`json_type(${PartTable.data}, '$.hidden') is null`,
+            ),
+          )
           .orderBy(PartTable.id)
           .all()
         for (const row of readTexts(firstTexts)) {
@@ -527,7 +596,9 @@ export const reviewerEvidence = Effect.fn("MessageV2.reviewerEvidence")(function
         tool: row.tool,
         stateStatus: row.stateStatus,
         ...("autoReviewStatus" in row && row.autoReviewStatus ? { autoReviewStatus: row.autoReviewStatus } : {}),
-        ...("autoReviewRationale" in row && row.autoReviewRationale ? { autoReviewRationale: row.autoReviewRationale } : {}),
+        ...("autoReviewRationale" in row && row.autoReviewRationale
+          ? { autoReviewRationale: row.autoReviewRationale }
+          : {}),
         ...("error" in row && row.error ? { error: row.error } : {}),
         ...(row.input ? { input: row.input } : {}),
         ...("answers" in row && row.answers ? { answers: row.answers } : {}),
@@ -541,21 +612,27 @@ export const reviewerEvidence = Effect.fn("MessageV2.reviewerEvidence")(function
 
 // #0500：cancel ownership 只依赖 Message parent/time hot fields。Parts 由 caller 仅为选中的 incomplete assistant
 // 定点 hydrate，已完成 assistant 的冷 Tool history 不会因一次取消操作被扫描并预热。
-export const cancelSnapshot = Effect.fn("MessageV2.cancelSnapshot")(function* (sessionID: SessionID, options?: { includeHidden?: boolean }) {
+export const cancelSnapshot = Effect.fn("MessageV2.cancelSnapshot")(function* (
+  sessionID: SessionID,
+  options?: { includeHidden?: boolean },
+) {
   const { db } = yield* Database.Service
   const messages = yield* db
     .select()
     .from(MessageTable)
-    .where(and(
-      eq(MessageTable.session_id, sessionID),
-      options?.includeHidden ? undefined : sql`json_type(${MessageTable.data}, '$.hidden') is null`,
-    ))
+    .where(
+      and(
+        eq(MessageTable.session_id, sessionID),
+        options?.includeHidden ? undefined : sql`json_type(${MessageTable.data}, '$.hidden') is null`,
+      ),
+    )
     .orderBy(MessageTable.time_created, MessageTable.id)
     .all()
-    .pipe(Effect.map((rows) => rows.map(hotInfo)), Effect.orDie)
-  const parentIDs = new Set(
-    messages.flatMap((message) => (message.role === "assistant" ? [message.parentID] : [])),
-  )
+    .pipe(
+      Effect.map((rows) => rows.map(hotInfo)),
+      Effect.orDie,
+    )
+  const parentIDs = new Set(messages.flatMap((message) => (message.role === "assistant" ? [message.parentID] : [])))
   return {
     pendingAssistantIDs: messages.flatMap((message) =>
       message.role === "assistant" && !message.time.completed ? [message.id] : [],
@@ -575,7 +652,10 @@ const older = (row: Cursor) =>
 // #557：older 的补——inclusive suffix 起点解析用，包含后来写入的 lexical-low ID。
 // #557：inclusive suffix 谓词——later-written lexical-low ID 仍属同一窗口。
 const atOrNewer = (row: Cursor) =>
-  or(gt(MessageTable.time_created, row.time), and(eq(MessageTable.time_created, row.time), gte(MessageTable.id, row.id)))
+  or(
+    gt(MessageTable.time_created, row.time),
+    and(eq(MessageTable.time_created, row.time), gte(MessageTable.id, row.id)),
+  )
 
 function hydrate(
   db: Database.Interface["db"],
@@ -594,7 +674,10 @@ function hydrate(
     // viewer只省略user summary，assistant同包批量恢复而不逐条解压。
     const selected = messageProjection === "viewer" ? admitted.filter((row) => row.data.role === "assistant") : admitted
     const restored = new Map(
-      (yield* Database.withSync({ db, sync }, () => ColdStorage.inspectMessageRows(sync, selected))).map((row) => [row.id, row]),
+      (yield* Database.withSync({ db, sync }, () => ColdStorage.inspectMessageRows(sync, selected))).map((row) => [
+        row.id,
+        row,
+      ]),
     )
     const infos = admitted.map((row) => {
       const complete = restored.get(row.id) ?? row
@@ -604,13 +687,22 @@ function hydrate(
     const partByMessage = new Map<string, Part[]>()
     if (ids.length > 0) {
       // SELECT与冷读取在同一次连接预约和快照中完成，不能跨await携带已失效的cold locator。
-      const restoredParts = yield* Database.withSync({ db, sync }, () => sync.transaction((tx) => {
-        const partRows = tx.select().from(PartTable).where(inArray(PartTable.message_id, ids))
-          .orderBy(PartTable.message_id, PartTable.id).all()
-        const visible = includeHidden ? partRows : partRows.filter((row) => !row.data.hidden)
-        // 普通SDK与viewer共享只读恢复，保留同连接查询快照和完整性检查。
-        return ColdStorage.inspectPartRows(tx, visible)
-      }, { behavior: "deferred" }))
+      const restoredParts = yield* Database.withSync({ db, sync }, () =>
+        sync.transaction(
+          (tx) => {
+            const partRows = tx
+              .select()
+              .from(PartTable)
+              .where(inArray(PartTable.message_id, ids))
+              .orderBy(PartTable.message_id, PartTable.id)
+              .all()
+            const visible = includeHidden ? partRows : partRows.filter((row) => !row.data.hidden)
+            // 普通SDK与viewer共享只读恢复，保留同连接查询快照和完整性检查。
+            return ColdStorage.inspectPartRows(tx, visible)
+          },
+          { behavior: "deferred" },
+        ),
+      )
       for (const row of restoredParts) {
         const next = partFromRestored(row)
         // [0624] viewer 路径再过一次 TUI 专用纯投影，剪掉同 Part 内逐字重复的大字段。
@@ -633,8 +725,10 @@ function providerMeta(metadata: Record<string, any> | undefined) {
   if (!metadata) return undefined
   // 内部 primitive 标记不属于 providerOptions；保留对象 namespace 及自定义供应商签名。
   const rest = Object.fromEntries(
-    Object.entries(metadata).filter(([key, value]) =>
-      key !== "providerExecuted" && typeof value === "object" && value !== null && !Array.isArray(value)),
+    Object.entries(metadata).filter(
+      ([key, value]) =>
+        key !== "providerExecuted" && typeof value === "object" && value !== null && !Array.isArray(value),
+    ),
   )
   return Object.keys(rest).length > 0 ? rest : undefined
 }
@@ -784,7 +878,8 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
         // 加密续接状态属于账号域；历史只记录 Provider，因此不同 Provider 不共享密文。
         model.providerID === msg.info.providerID &&
         // 同 Provider 切换 GPT 模型仍可回放，避免把隔离边界扩大为每个模型独立。
-        model.id.toLowerCase().startsWith("gpt") && msg.info.modelID.toLowerCase().startsWith("gpt")
+        model.id.toLowerCase().startsWith("gpt") &&
+        msg.info.modelID.toLowerCase().startsWith("gpt")
       // 两端都检查，避免非 GPT 模型的签名因目标为 GPT 而被放行。
       // 此处保留语义信息；最终 wire 字段由目标协议适配器编码。
       const media: Array<{ mime: string; url: string; filename?: string }> = []
@@ -837,7 +932,10 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
           if (part.state.status === "completed") {
             // 剪枝占位与共享Search History一起保留partial，不能把无正文当作完整阴性。
             const outputText = part.state.time.compacted
-              ? formatCompactionClearedNotice() + ((part.tool === "glob" || part.tool === "grep") && part.state.metadata.partial === true ? "\nSearch incomplete: some paths were inaccessible and skipped." : "")
+              ? formatCompactionClearedNotice() +
+                ((part.tool === "glob" || part.tool === "grep") && part.state.metadata.partial === true
+                  ? "\nSearch incomplete: some paths were inaccessible and skipped."
+                  : "")
               : truncateToolOutput(
                   part.state.output,
                   options?.toolOutputTruncation?.head,
@@ -880,14 +978,22 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
             // [local-smark] 只有新记录携带 server 写入的 executionElapsedMs 才追加
             // abort Notice；旧记录无此字段，保持原样不追溯伪造 elapsed
             const rawElapsed = interrupted ? part.state.metadata?.executionElapsedMs : undefined
-            const abortNotice = typeof rawElapsed === "number" && Number.isFinite(rawElapsed) && rawElapsed >= 0
-              ? formatExecutionNotice({ source: "tool", severity: "warning", reason: "user_abort", elapsed_ms: Math.floor(rawElapsed) })
-              : undefined
+            const abortNotice =
+              typeof rawElapsed === "number" && Number.isFinite(rawElapsed) && rawElapsed >= 0
+                ? formatExecutionNotice({
+                    source: "tool",
+                    severity: "warning",
+                    reason: "user_abort",
+                    elapsed_ms: Math.floor(rawElapsed),
+                  })
+                : undefined
             const partialOutput = interrupted ? part.state.metadata?.output : undefined
             // Task创建后已保存真实子会话身份；即使没有partial也须交付恢复行，其他工具不变。
             // 恢复行先于既有abort notice，不把中断伪装为完成。
             const taskSessionId =
-              part.tool === "task" && typeof part.state.metadata?.sessionId === "string" ? part.state.metadata.sessionId : undefined
+              part.tool === "task" && typeof part.state.metadata?.sessionId === "string"
+                ? part.state.metadata.sessionId
+                : undefined
             if (typeof partialOutput === "string") {
               const body = taskSessionId ? ensureTaskResumeVisible(partialOutput, taskSessionId) : partialOutput
               assistantMessage.parts.push({
@@ -902,7 +1008,9 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
               })
             } else {
               // #528：无 partial 时仍走 output-error，不把 abort 伪装成 completed（INV-04）
-              const errorBody = taskSessionId ? ensureTaskResumeVisible(part.state.error, taskSessionId) : part.state.error
+              const errorBody = taskSessionId
+                ? ensureTaskResumeVisible(part.state.error, taskSessionId)
+                : part.state.error
               assistantMessage.parts.push({
                 type: ("tool-" + part.tool) as `tool-${string}`,
                 state: "output-error",
@@ -951,7 +1059,11 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
           // 只在投影副本去掉源ID；持久原件和同模型store引用均保持原样。
           const replayMetadata = differentModel
             ? replaysForeignOpenAIReasoning && providerMetadata?.openai
-              ? { openai: Object.fromEntries(Object.entries(providerMetadata.openai).filter(([key]) => key !== "itemId")) }
+              ? {
+                  openai: Object.fromEntries(
+                    Object.entries(providerMetadata.openai).filter(([key]) => key !== "itemId"),
+                  ),
+                }
               : undefined
             : providerMetadata
           assistantMessage.parts.push({
@@ -1013,10 +1125,7 @@ export function toModelMessages(
 }
 // #557：每个 persisted Message 自成转换块，prefix contraction 才能截断到任意命中点；
 // concurrency 只并行纯转换，拼接仍服从 input 顺序。
-export const toModelMessageChunksEffect = Effect.fnUntraced(function* (
-  input: WithParts[],
-  model: Provider.Model,
-) {
+export const toModelMessageChunksEffect = Effect.fnUntraced(function* (input: WithParts[], model: Provider.Model) {
   return yield* Effect.forEach(input, (message) => toModelMessagesEffect([message], model), {
     concurrency: "unbounded",
   })
@@ -1036,23 +1145,27 @@ export const page = Effect.fn("MessageV2.page")(function* (input: {
   const { db, sync } = yield* Database.Service
   if (input.limit === 0) {
     // #493：零范围只验证 Session existence，不读取 Message 探针，更不触发任何 thaw。
-    const exists = yield* db.select({ id: SessionTable.id }).from(SessionTable).where(eq(SessionTable.id, input.sessionID)).get().pipe(Effect.orDie)
+    const exists = yield* db
+      .select({ id: SessionTable.id })
+      .from(SessionTable)
+      .where(eq(SessionTable.id, input.sessionID))
+      .get()
+      .pipe(Effect.orDie)
     if (!exists) return yield* Effect.fail(new NotFoundError({ message: `Session not found: ${input.sessionID}` }))
     const items: WithParts[] = []
     return { items, more: false }
   }
   const before = input.before ? cursor.decode(input.before) : undefined
   const anchor = input.fromMessageID
-    ? yield* db.select({ id: MessageTable.id, time: MessageTable.time_created })
-        .from(MessageTable).where(and(eq(MessageTable.session_id, input.sessionID), eq(MessageTable.id, input.fromMessageID)))
-        .get().pipe(Effect.orDie)
+    ? yield* db
+        .select({ id: MessageTable.id, time: MessageTable.time_created })
+        .from(MessageTable)
+        .where(and(eq(MessageTable.session_id, input.sessionID), eq(MessageTable.id, input.fromMessageID)))
+        .get()
+        .pipe(Effect.orDie)
     : undefined
   // 导入及回绕ID不保证时间单调，范围必须与现有(time_created,id)分页顺序一致。
-  const lower = input.fromMessageID
-    ? anchor
-      ? atOrNewer(anchor)
-      : sql`0`
-    : undefined
+  const lower = input.fromMessageID ? (anchor ? atOrNewer(anchor) : sql`0`) : undefined
   const where = and(eq(MessageTable.session_id, input.sessionID), lower, before ? older(before) : undefined)
   // #98：隐藏消息在 LIMIT 前过滤，保留可见页容量和游标。
   const rows = yield* db
@@ -1099,13 +1212,21 @@ export const findHot = Effect.fn("MessageV2.findHot")(function* (input: {
   predicate: (info: HotInfo) => boolean
 }) {
   const { db, sync } = yield* Database.Service
-  const exists = yield* db.select({ id: SessionTable.id }).from(SessionTable).where(eq(SessionTable.id, input.sessionID)).get().pipe(Effect.orDie)
+  const exists = yield* db
+    .select({ id: SessionTable.id })
+    .from(SessionTable)
+    .where(eq(SessionTable.id, input.sessionID))
+    .get()
+    .pipe(Effect.orDie)
   if (!exists) return yield* Effect.fail(new NotFoundError({ message: `Session not found: ${input.sessionID}` }))
 
   const size = 50
   let before: Cursor | undefined
   while (true) {
-    const base = and(eq(MessageTable.session_id, input.sessionID), sql`json_type(${MessageTable.data}, '$.hidden') is null`)
+    const base = and(
+      eq(MessageTable.session_id, input.sessionID),
+      sql`json_type(${MessageTable.data}, '$.hidden') is null`,
+    )
     const where = before ? and(base, older(before)) : base
     const rows = yield* db
       .select()
@@ -1182,9 +1303,17 @@ export const targetWithAssistantChildren = Effect.fn("MessageV2.targetWithAssist
 // #493：fork 只读取 raw storage rows，不经 decoder，不会把 source prefix 持久 thaw。
 // messageID按同会话持久tuple定位exclusive前缀，显式缺失边界在创建子会话前拒绝。
 export function rawForkRows(db: ColdStorage.TxOrDb, input: { sessionID: SessionID; messageID?: MessageID }) {
-  const conditions = [eq(MessageTable.session_id, input.sessionID), sql`json_type(${MessageTable.data}, '$.hidden') is null`]
-  const anchor = input.messageID ? db.select({ id: MessageTable.id, time: MessageTable.time_created }).from(MessageTable)
-    .where(and(...conditions, eq(MessageTable.id, input.messageID))).get() : undefined
+  const conditions = [
+    eq(MessageTable.session_id, input.sessionID),
+    sql`json_type(${MessageTable.data}, '$.hidden') is null`,
+  ]
+  const anchor = input.messageID
+    ? db
+        .select({ id: MessageTable.id, time: MessageTable.time_created })
+        .from(MessageTable)
+        .where(and(...conditions, eq(MessageTable.id, input.messageID)))
+        .get()
+    : undefined
   // 保留同Session、hidden过滤和Part join；不能以缺失边界放大为全量复制。
   if (input.messageID && !anchor) return { messages: [], parts: [], missing: true as const }
   if (anchor) conditions.push(sql`(${MessageTable.time_created}, ${MessageTable.id}) < (${anchor.time}, ${anchor.id})`)
@@ -1198,8 +1327,17 @@ export function rawForkRows(db: ColdStorage.TxOrDb, input: { sessionID: SessionI
     ? db
         .select({ id: PartTable.id, message_id: PartTable.message_id })
         .from(PartTable)
-        .innerJoin(MessageTable, and(eq(MessageTable.id, PartTable.message_id), eq(MessageTable.session_id, PartTable.session_id)))
-        .where(and(...conditions, eq(PartTable.session_id, input.sessionID), sql`json_type(${PartTable.data}, '$.hidden') is null`))
+        .innerJoin(
+          MessageTable,
+          and(eq(MessageTable.id, PartTable.message_id), eq(MessageTable.session_id, PartTable.session_id)),
+        )
+        .where(
+          and(
+            ...conditions,
+            eq(PartTable.session_id, input.sessionID),
+            sql`json_type(${PartTable.data}, '$.hidden') is null`,
+          ),
+        )
         .orderBy(MessageTable.time_created, MessageTable.id, PartTable.id)
         .all()
     : []
@@ -1215,7 +1353,13 @@ export function stream(sessionID: SessionID, opts?: { includeHidden?: boolean; f
     let before: string | undefined
     while (true) {
       // 已有 page 以 persisted time/ID 锚定边界，同时在 SQL 保留 hidden 过滤和范围外不预热。
-      const next = yield* page({ sessionID, limit: size, before, includeHidden: opts?.includeHidden, fromMessageID: opts?.fromMessageID }).pipe(
+      const next = yield* page({
+        sessionID,
+        limit: size,
+        before,
+        includeHidden: opts?.includeHidden,
+        fromMessageID: opts?.fromMessageID,
+      }).pipe(
         Effect.catchIf(NotFoundError.isInstance, () =>
           Effect.succeed({ items: [] as WithParts[], more: false, cursor: undefined }),
         ),
@@ -1239,15 +1383,19 @@ export function parts(messageID: MessageID, options?: { includeHidden?: boolean 
     const rows = yield* db
       .select()
       .from(PartTable)
-      .where(and(
-        eq(PartTable.message_id, messageID),
-        // 已知ID不能越过父级隐藏；过滤必须发生在cold decoder前。
-        options?.includeHidden ? undefined : sql`json_type(${PartTable.data}, '$.hidden') is null`,
-        options?.includeHidden ? undefined : sql`exists (
+      .where(
+        and(
+          eq(PartTable.message_id, messageID),
+          // 已知ID不能越过父级隐藏；过滤必须发生在cold decoder前。
+          options?.includeHidden ? undefined : sql`json_type(${PartTable.data}, '$.hidden') is null`,
+          options?.includeHidden
+            ? undefined
+            : sql`exists (
           select 1 from ${MessageTable} where ${MessageTable.id} = ${PartTable.message_id}
           and json_type(${MessageTable.data}, '$.hidden') is null
         )`,
-      ))
+        ),
+      )
       .orderBy(PartTable.id)
       .all()
       .pipe(Effect.orDie)
@@ -1264,16 +1412,20 @@ export function stepFinishParts(messageID: MessageID, options?: { includeHidden?
     const rows = yield* db
       .select({ data: PartTable.data })
       .from(PartTable)
-      .where(and(
-        eq(PartTable.message_id, messageID),
-        sql`json_extract(${PartTable.data}, '$.type') = 'step-finish'`,
-        // 计费owner采用原始热字段，其他调用仍遵守父子可见性。
-        options?.includeHidden ? undefined : sql`json_type(${PartTable.data}, '$.hidden') is null`,
-        options?.includeHidden ? undefined : sql`exists (
+      .where(
+        and(
+          eq(PartTable.message_id, messageID),
+          sql`json_extract(${PartTable.data}, '$.type') = 'step-finish'`,
+          // 计费owner采用原始热字段，其他调用仍遵守父子可见性。
+          options?.includeHidden ? undefined : sql`json_type(${PartTable.data}, '$.hidden') is null`,
+          options?.includeHidden
+            ? undefined
+            : sql`exists (
           select 1 from ${MessageTable} where ${MessageTable.id} = ${PartTable.message_id}
           and json_type(${MessageTable.data}, '$.hidden') is null
         )`,
-      ))
+        ),
+      )
       .orderBy(PartTable.id)
       .all()
       .pipe(Effect.orDie)
@@ -1336,21 +1488,29 @@ export function previousAssistantToolTail(input: {
       .limit(input.limit)
       .all()
       .pipe(Effect.orDie)
-    return yield* Database.withSync({ db, sync }, () => ColdStorage.thawPartRows(sync, rows).map(partFromRestored).reverse())
+    return yield* Database.withSync({ db, sync }, () =>
+      ColdStorage.thawPartRows(sync, rows).map(partFromRestored).reverse(),
+    )
   })
 }
 
-export const get = Effect.fn("MessageV2.get")(function* (input: { sessionID: SessionID; messageID: MessageID; includeHidden?: boolean }) {
+export const get = Effect.fn("MessageV2.get")(function* (input: {
+  sessionID: SessionID
+  messageID: MessageID
+  includeHidden?: boolean
+}) {
   const { db, sync } = yield* Database.Service
   const row = yield* db
     .select()
     .from(MessageTable)
-    .where(and(
-      eq(MessageTable.id, input.messageID),
-      eq(MessageTable.session_id, input.sessionID),
-      // 普通读取在owner查询返回NotFound，不先恢复隐藏正文再交调用方丢弃。
-      input.includeHidden ? undefined : sql`json_type(${MessageTable.data}, '$.hidden') is null`,
-    ))
+    .where(
+      and(
+        eq(MessageTable.id, input.messageID),
+        eq(MessageTable.session_id, input.sessionID),
+        // 普通读取在owner查询返回NotFound，不先恢复隐藏正文再交调用方丢弃。
+        input.includeHidden ? undefined : sql`json_type(${MessageTable.data}, '$.hidden') is null`,
+      ),
+    )
     .get()
     .pipe(Effect.orDie)
   // #106：message 缺失同样 Effect.fail
@@ -1379,7 +1539,7 @@ export function filterCompacted(msgs: Iterable<WithParts>) {
   let retain: MessageID | undefined
   // 隐藏普通消息仍可定位有效tail；被撤销的Compaction不再拥有裁剪边界。
   // 配对证明先于visible投影，避免悬挂marker或summary复活旧压缩。
-const visibleWindow = (items: SessionV1.WithParts[]) => visible(visibleCompactions(items))
+  const visibleWindow = (items: SessionV1.WithParts[]) => visible(visibleCompactions(items))
   // #204：遍历 newest-first 序列，发现 summary→compaction 边界并锁定 retained tail
   for (const msg of ordered) {
     result.push(msg)
@@ -1456,7 +1616,13 @@ function visibleCompactions(items: SessionV1.WithParts[]) {
       if (!msg.info.summary || !msg.info.finish || msg.info.error) return []
       const marker = compactions.get(msg.info.parentID)
       // 任一侧隐藏，回放与裁剪同时失效；不能让两侧同为hidden反而重新合法。
-      if (!marker || marker.info.hidden || msg.info.hidden || !marker.parts.some((part) => part.type === "compaction" && !part.hidden)) return []
+      if (
+        !marker ||
+        marker.info.hidden ||
+        msg.info.hidden ||
+        !marker.parts.some((part) => part.type === "compaction" && !part.hidden)
+      )
+        return []
       return [msg.info.parentID]
     }),
   )
@@ -1495,16 +1661,23 @@ export const warmExecutionWindow = Effect.fn("MessageV2.warmExecutionWindow")(fu
     // 已热owner不重复搬运正文，仍由ColdStorage管理实际引用和清理。
     ColdStorage.thawMessageRows(
       sync,
-      sync.select().from(MessageTable)
-        .where(and(inArray(MessageTable.id, ids), sql`${MessageTable.cold_ref} is not null`)).all(),
+      sync
+        .select()
+        .from(MessageTable)
+        .where(and(inArray(MessageTable.id, ids), sql`${MessageTable.cold_ref} is not null`))
+        .all(),
     )
     const parts = messages.flatMap((message) => message.parts.map((part) => part.id))
     // 最终窗口未选择的隐藏Part不随父Message预热。
-    if (parts.length) ColdStorage.thawPartRows(
-      sync,
-      sync.select().from(PartTable)
-        .where(and(inArray(PartTable.id, parts), sql`${PartTable.cold_ref} is not null`)).all(),
-    )
+    if (parts.length)
+      ColdStorage.thawPartRows(
+        sync,
+        sync
+          .select()
+          .from(PartTable)
+          .where(and(inArray(PartTable.id, parts), sql`${PartTable.cold_ref} is not null`))
+          .all(),
+      )
   })
 })
 
@@ -1515,7 +1688,7 @@ export type PromptWindowProof = {
   messages: Array<{ id: MessageID; key: string }>
 }
 
-  // #557：proof 是 cache 唯一 admission 依据——不读 thaw 后的业务对象，避免自身成为预热源。
+// #557：proof 是 cache 唯一 admission 依据——不读 thaw 后的业务对象，避免自身成为预热源。
 export const promptWindowProof = Effect.fn("MessageV2.promptWindowProof")(function* (sessionID: SessionID) {
   const { db, sync } = yield* Database.Service
   const boundary = yield* Database.withSync({ db, sync }, () => CompactionBoundary.latest(sync, sessionID))
@@ -1540,9 +1713,7 @@ export const promptWindowProof = Effect.fn("MessageV2.promptWindowProof")(functi
     })
     .from(MessageTable)
     .where(
-      cutoff
-        ? and(eq(MessageTable.session_id, sessionID), atOrNewer(cutoff))
-        : eq(MessageTable.session_id, sessionID),
+      cutoff ? and(eq(MessageTable.session_id, sessionID), atOrNewer(cutoff)) : eq(MessageTable.session_id, sessionID),
     )
     .orderBy(MessageTable.time_created, MessageTable.id)
     .all()
@@ -1586,22 +1757,24 @@ export const promptWindowProof = Effect.fn("MessageV2.promptWindowProof")(functi
     messages: messageRows.map((row) => ({
       id: row.id,
       // zstd(level 1)转latin1无损保存完整tuple，保留exact相等且不让warm槽重复常驻原文。
-      key: encodeProofKey(JSON.stringify([
-        row.id,
-        row.timeCreated,
-        row.timeUpdated,
-        row.data,
-        row.coldRef,
-        row.coldKey,
-        parts.get(row.id) ?? [],
-      ])),
+      key: encodeProofKey(
+        JSON.stringify([
+          row.id,
+          row.timeCreated,
+          row.timeUpdated,
+          row.data,
+          row.coldRef,
+          row.coldKey,
+          parts.get(row.id) ?? [],
+        ]),
+      ),
     })),
   }
 })
 
 // #557：首个 mismatch 必须 inclusive hydrate，同一 Assistant 新增 Part 才会替换旧版本；
 // hidden row 也进入 suffix，最终可见性仍由唯一 filterCompacted owner 决定。
-  // #557：suffix loader 与 proof 同源——mismatch 点 inclusive，保证同 Message 原位更新可重载。
+// #557：suffix loader 与 proof 同源——mismatch 点 inclusive，保证同 Message 原位更新可重载。
 export function promptWindowSuffix(sessionID: SessionID, fromMessageID: MessageID) {
   return stream(sessionID, { fromMessageID, includeHidden: true })
 }
@@ -1618,7 +1791,8 @@ export function latest(msgs: WithParts[]) {
     const info = msg.info
     if (info.role === "user" && (!user || compareChronology(info, user) > 0)) user = info
     if (info.role === "assistant" && (!assistant || compareChronology(info, assistant) > 0)) assistant = info
-    if (info.role === "assistant" && info.finish && (!finished || compareChronology(info, finished) > 0)) finished = info
+    if (info.role === "assistant" && info.finish && (!finished || compareChronology(info, finished) > 0))
+      finished = info
   }
   // #557：tasks 只属于最新 completed Assistant 之后的 persisted chronology；Provider window 的重排位置不能改变这个消费边界。
   const tasks = msgs.flatMap((m) =>
@@ -1718,28 +1892,41 @@ export function fromError(
       }
 
       // #192：statusless 非重试 APIError 的 cause 可能是 transport
-        // #192：仅当无 statusCode 时才查 cause，4xx 有明确状态码不应被 cause 改写
+      // #192：仅当无 statusCode 时才查 cause，4xx 有明确状态码不应被 cause 改写
       if (!parsed.isRetryable && parsed.statusCode === undefined) {
         const transport = transportError(e.cause)
-          // #192：此处返回的是升级后的 APIError，重试性与 message 来自 transport 判定
-        if (transport) return new APIError({ message: transport.message, isRetryable: true, metadata: transport.metadata }, { cause: e }).toObject()
+        // #192：此处返回的是升级后的 APIError，重试性与 message 来自 transport 判定
+        if (transport)
+          return new APIError(
+            { message: transport.message, isRetryable: true, metadata: transport.metadata },
+            { cause: e },
+          ).toObject()
       }
       return new APIError(
-        { message: parsed.message, statusCode: parsed.statusCode, isRetryable: parsed.isRetryable, responseHeaders: parsed.responseHeaders, responseBody: parsed.responseBody, metadata: parsed.metadata },
+        {
+          message: parsed.message,
+          statusCode: parsed.statusCode,
+          isRetryable: parsed.isRetryable,
+          responseHeaders: parsed.responseHeaders,
+          responseBody: parsed.responseBody,
+          metadata: parsed.metadata,
+        },
         { cause: e },
       ).toObject()
-    case !ctx.aborted && !APICallError.isInstance(e) && (() => {
-      // #191：ctx.aborted 表示用户主动取消，不得转为可重试错误
-      // #191：在 catch-all 之前检查 transport 层瞬时故障
-      // #192：先解包 RetryError，再查 apiCallErrorCause/streamError/transportError
-      if (retryErrorCause(e)) return true
-      // #192：非 APICallError 的 cause 链中可能藏 APICallError，需优先解析
-      if (apiCallErrorCause(e)) return true
-      // #192：结构化 stream 错误（含 code/type）比 transport 判定更具体，优先采用，防 context_overflow 被误重试
-      if (streamError(e)) return true
-      // #191：transportError 命中时返回 true
-      return Boolean(transportError(e))
-    })():
+    case !ctx.aborted &&
+      !APICallError.isInstance(e) &&
+      (() => {
+        // #191：ctx.aborted 表示用户主动取消，不得转为可重试错误
+        // #191：在 catch-all 之前检查 transport 层瞬时故障
+        // #192：先解包 RetryError，再查 apiCallErrorCause/streamError/transportError
+        if (retryErrorCause(e)) return true
+        // #192：非 APICallError 的 cause 链中可能藏 APICallError，需优先解析
+        if (apiCallErrorCause(e)) return true
+        // #192：结构化 stream 错误（含 code/type）比 transport 判定更具体，优先采用，防 context_overflow 被误重试
+        if (streamError(e)) return true
+        // #191：transportError 命中时返回 true
+        return Boolean(transportError(e))
+      })():
       // #191：RetryError 解包后递归调用 fromError
       {
         const retried = retryErrorCause(e)
@@ -1751,7 +1938,7 @@ export function fromError(
         const stream = streamError(e)
         if (stream) return fromStreamError(e, stream)
         // #191：transport 层瞬时故障转为可重试 APIError
-          // #191：isRetryable=true 是 retryable() 的入口契约，metadata 保留原始错误信息
+        // #191：isRetryable=true 是 retryable() 的入口契约，metadata 保留原始错误信息
         const transport = transportError(e)
         if (transport) {
           return new APIError(
@@ -1800,7 +1987,6 @@ export function fromError(
       return new NamedError.Unknown({ message: JSON.stringify(e) }, { cause: e }).toObject()
   }
 }
-
 
 // #191：errorLike 统一 Error 与裸对象两种形态，使 cause 链检查覆盖非标准错误包装
 type ErrorLike = {
@@ -1853,18 +2039,18 @@ function transportError(value: unknown, depth = 0): { message: string; metadata:
   const message = errorMessage(value)
   const syscall = stringValue(error.syscall)
   const retryCode = code
-  // #191：ECONNRESET 仅在嵌套 cause 时视为可重试，顶层由既有 case 处理，避免重复分类
-    ? code === "ECONNRESET" && depth > 0
+    ? // #191：ECONNRESET 仅在嵌套 cause 时视为可重试，顶层由既有 case 处理，避免重复分类
+      code === "ECONNRESET" && depth > 0
       ? code
       : TRANSIENT_TRANSPORT_CODES.has(code)
-        // #191：transport 码集合是跨 provider 的稳定性契约，新增码需同步测试
-        ? code
+        ? // #191：transport 码集合是跨 provider 的稳定性契约，新增码需同步测试
+          code
         : undefined
     : name === "TimeoutError"
       ? "TimeoutError"
       : message === "SSE read timed out"
-        // #191：消息兜底用于未携带 code 的 provider 超时错误，保证重试语义一致
-        ? "SSE_READ_TIMEOUT"
+        ? // #191：消息兜底用于未携带 code 的 provider 超时错误，保证重试语义一致
+          "SSE_READ_TIMEOUT"
         : undefined
   // #191：fetch failed / cannot connect 也视为可重试
   const retryable =
@@ -1874,15 +2060,15 @@ function transportError(value: unknown, depth = 0): { message: string; metadata:
     message.startsWith("Cannot connect to API:") ||
     // 仅在无 code 时兜底匹配 socket close message；有 code 的 ECONNRESET 等
     // 由 fromError switch(true) 中的专用 case 处理，保持 "Connection reset by server" 消息
-    !code && message.includes("socket connection was closed")
-    // #191：fetch failed 是 Node/undici 网络层通用包装，Cannot connect 是代理层提示，二者均属瞬时故障
+    (!code && message.includes("socket connection was closed"))
+  // #191：fetch failed 是 Node/undici 网络层通用包装，Cannot connect 是代理层提示，二者均属瞬时故障
 
   if (retryable) {
     // #191：部分 provider 用裸消息而非错误码表达网络失败，因此消息匹配不可省略
     return {
       message,
       // #191：仅附加非空元数据
-        // #191：metadata.message 恒存在供下游展示，code/name/syscall 仅在有值时附加
+      // #191：metadata.message 恒存在供下游展示，code/name/syscall 仅在有值时附加
       metadata: {
         message,
         ...(retryCode ? { code: retryCode } : {}),
@@ -1942,5 +2128,5 @@ function fromStreamError(e: unknown, parsed: NonNullable<ReturnType<typeof Provi
   ).toObject()
 }
 
-export * as MessageV2 from "./message-v2" 
+export * as MessageV2 from "./message-v2"
 export const node = LayerNode.group([Database.node])

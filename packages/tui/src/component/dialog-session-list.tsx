@@ -368,7 +368,10 @@ export function DialogSessionList() {
 
               void (async () => {
                 try {
-                  const data = await loadPreviewsBatch(missing.map((w) => w.id), controller.signal)
+                  const data = await loadPreviewsBatch(
+                    missing.map((w) => w.id),
+                    controller.signal,
+                  )
                   // 传输可能在 abort 后仍交付响应；查询 owner 失效后阻止缓存及展示写回。
                   if (!data || controller.signal.aborted) return
                   // 响应缺省 ID 表示无可见文本；记空数组，避免零新增批次反复请求。

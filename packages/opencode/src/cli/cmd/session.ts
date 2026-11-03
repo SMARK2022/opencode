@@ -54,7 +54,8 @@ function pagerCmd(): string[] {
 export const SessionCommand = cmd({
   command: "session",
   describe: "manage sessions",
-  builder: (yargs: Argv) => yargs.command(SessionListCommand).command(SessionInfoCommand).command(SessionDeleteCommand).demandCommand(),
+  builder: (yargs: Argv) =>
+    yargs.command(SessionListCommand).command(SessionInfoCommand).command(SessionDeleteCommand).demandCommand(),
   async handler() {},
 })
 
@@ -62,30 +63,51 @@ export const SessionCommand = cmd({
 export const SessionInfoCommand = effectCmd({
   command: "info",
   describe: "show detailed session info with token usage by model",
-  builder: (yargs) => yargs
-    .option("session", { alias: "s", describe: "session ID", type: "string", demandOption: true }),
+  builder: (yargs) =>
+    yargs.option("session", { alias: "s", describe: "session ID", type: "string", demandOption: true }),
   handler: Effect.fn("Cli.session.info")(function* (args) {
     // 保留原入口 --session/-s；让 builder 推导字符串，避免断言掩盖参数契约。
     const sessionID = SessionID.make(args.session)
     const session = yield* Session.Service.use((svc) => svc.get(sessionID)).pipe(
-      Effect.catchIf(NotFoundError.isInstance, () => { UI.error(`Session not found: ${args.session}`); return fail(`Session not found: ${args.session}`) }),
+      Effect.catchIf(NotFoundError.isInstance, () => {
+        UI.error(`Session not found: ${args.session}`)
+        return fail(`Session not found: ${args.session}`)
+      }),
     )
     const { db } = yield* Database.Service
     // 模型分组只影响展示，calls 仍按助手明细行计数而不是按分组数计数。
-    const rows = yield* db.select({
-      providerId: RequestUsageAssistantTable.provider_id, modelId: RequestUsageAssistantTable.model_id,
-      calls: sql<number>`count(*)`, inputTokens: sql<number>`sum(${RequestUsageAssistantTable.tokens_input})`,
-      cacheWrite: sql<number>`sum(${RequestUsageAssistantTable.tokens_cache_write})`, cacheRead: sql<number>`sum(${RequestUsageAssistantTable.tokens_cache_read})`,
-      outputTokens: sql<number>`sum(${RequestUsageAssistantTable.tokens_output})`,
-      reasoningTokens: sql<number>`sum(${RequestUsageAssistantTable.tokens_reasoning})`, costMicros: sql<number>`sum(${RequestUsageAssistantTable.cost_micros})`,
-    }).from(RequestUsageAssistantTable).where(sql`${RequestUsageAssistantTable.session_id} = ${sessionID}`)
-      .groupBy(RequestUsageAssistantTable.provider_id, RequestUsageAssistantTable.model_id).all().pipe(Effect.orDie)
+    const rows = yield* db
+      .select({
+        providerId: RequestUsageAssistantTable.provider_id,
+        modelId: RequestUsageAssistantTable.model_id,
+        calls: sql<number>`count(*)`,
+        inputTokens: sql<number>`sum(${RequestUsageAssistantTable.tokens_input})`,
+        cacheWrite: sql<number>`sum(${RequestUsageAssistantTable.tokens_cache_write})`,
+        cacheRead: sql<number>`sum(${RequestUsageAssistantTable.tokens_cache_read})`,
+        outputTokens: sql<number>`sum(${RequestUsageAssistantTable.tokens_output})`,
+        reasoningTokens: sql<number>`sum(${RequestUsageAssistantTable.tokens_reasoning})`,
+        costMicros: sql<number>`sum(${RequestUsageAssistantTable.cost_micros})`,
+      })
+      .from(RequestUsageAssistantTable)
+      .where(sql`${RequestUsageAssistantTable.session_id} = ${sessionID}`)
+      .groupBy(RequestUsageAssistantTable.provider_id, RequestUsageAssistantTable.model_id)
+      .all()
+      .pipe(Effect.orDie)
     // 命令详情使用已持久化模型明细；不调用模型也不从当前 provider 配置反推历史费用。
-    displaySessionInfo(session, rows.map(r => ({
-      providerId: r.providerId, modelId: r.modelId, calls: r.calls,
-      tokensInput: r.inputTokens, tokensOutput: r.outputTokens, tokensReasoning: r.reasoningTokens,
-      tokensCacheRead: r.cacheRead, tokensCacheWrite: r.cacheWrite, costMicros: r.costMicros,
-    })))
+    displaySessionInfo(
+      session,
+      rows.map((r) => ({
+        providerId: r.providerId,
+        modelId: r.modelId,
+        calls: r.calls,
+        tokensInput: r.inputTokens,
+        tokensOutput: r.outputTokens,
+        tokensReasoning: r.reasoningTokens,
+        tokensCacheRead: r.cacheRead,
+        tokensCacheWrite: r.cacheWrite,
+        costMicros: r.costMicros,
+      })),
+    )
   }),
 })
 
@@ -119,8 +141,13 @@ export const SessionListCommand = effectCmd({
         type: "number",
       })
       // 默认不查账本，--cost 只扩展表格输出，JSON 保留既有字段契约。
-    .option("cost", { alias: "c", describe: "show token and cost summary per session", type: "boolean", default: false })
-    .option("format", {
+      .option("cost", {
+        alias: "c",
+        describe: "show token and cost summary per session",
+        type: "boolean",
+        default: false,
+      })
+      .option("format", {
         describe: "output format",
         type: "string",
         choices: ["table", "json"],
@@ -144,8 +171,19 @@ export const SessionListCommand = effectCmd({
     let costBySession: Map<string, { costMicros: number; tokensTotal: number }> | undefined
     if (args.cost && args.format !== "json") {
       const { db } = yield* Database.Service
-      const costRows = yield* db.select({ sessionId: RequestUsageTable.session_id, costMicros: sql<number>`sum(${RequestUsageTable.cost_micros})`, tokensTotal: sql<number>`sum(${RequestUsageTable.tokens_total})` }).from(RequestUsageTable).groupBy(RequestUsageTable.session_id).all().pipe(Effect.orDie)
-      costBySession = new Map(costRows.map((r) => [r.sessionId, { costMicros: r.costMicros, tokensTotal: r.tokensTotal }]))
+      const costRows = yield* db
+        .select({
+          sessionId: RequestUsageTable.session_id,
+          costMicros: sql<number>`sum(${RequestUsageTable.cost_micros})`,
+          tokensTotal: sql<number>`sum(${RequestUsageTable.tokens_total})`,
+        })
+        .from(RequestUsageTable)
+        .groupBy(RequestUsageTable.session_id)
+        .all()
+        .pipe(Effect.orDie)
+      costBySession = new Map(
+        costRows.map((r) => [r.sessionId, { costMicros: r.costMicros, tokensTotal: r.tokensTotal }]),
+      )
     }
     const output = args.format === "json" ? formatSessionJSON(sessions) : formatSessionTable(sessions, costBySession)
 
@@ -173,7 +211,6 @@ export const SessionListCommand = effectCmd({
     }
   }),
 })
-
 
 type ModelRow = {
   providerId: string
@@ -258,7 +295,10 @@ function displaySessionInfo(session: Session.Info, rows: ModelRow[]): void {
   console.log("└" + "─".repeat(width) + "┘")
 }
 
-function formatSessionTable(sessions: Session.Info[], costBySession?: Map<string, { costMicros: number; tokensTotal: number }>): string {
+function formatSessionTable(
+  sessions: Session.Info[],
+  costBySession?: Map<string, { costMicros: number; tokensTotal: number }>,
+): string {
   const lines: string[] = []
   // 空 Map 也表示用户显式请求费用列，不能以是否存在计费记录决定隐藏表头。
   const showCost = !!costBySession
@@ -279,7 +319,9 @@ function formatSessionTable(sessions: Session.Info[], costBySession?: Map<string
       const cost = costBySession?.get(session.id)
       const costStr = cost ? `$${(cost.costMicros / MICROS).toFixed(3)}` : "—"
       const tokensStr = cost ? formatNumber(cost.tokensTotal) : "—"
-      lines.push(`${session.id.padEnd(maxIdWidth)}  ${truncatedTitle.padEnd(maxTitleWidth)}  ${timeStr.padEnd(16)}  ${costStr.padStart(10)}  ${tokensStr.padStart(12)}`)
+      lines.push(
+        `${session.id.padEnd(maxIdWidth)}  ${truncatedTitle.padEnd(maxTitleWidth)}  ${timeStr.padEnd(16)}  ${costStr.padStart(10)}  ${tokensStr.padStart(12)}`,
+      )
     } else {
       lines.push(`${session.id.padEnd(maxIdWidth)}  ${truncatedTitle.padEnd(maxTitleWidth)}  ${timeStr}`)
     }

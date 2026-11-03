@@ -63,44 +63,44 @@ an evidence-seeking re-plan mode.
 
 ## 3. Repository Context
 
-| Source | Why it constrains this task |
-| --- | --- |
-| `CONTEXT.md` Goal vocabulary and Session relationships | A Goal is a structured objective owned by a Session; Goal lifecycle and Session run state are distinct concerns. |
-| Root `AGENTS.md` | Tests and typechecks must run from package directories; edits should follow repository style and use parallel inspection where applicable. |
-| `packages/opencode/AGENTS.md` | Effect/module shape, no unnecessary public API, and package-local verification rules constrain the implementation seam. |
-| `packages/opencode/test/AGENTS.md` | Behavior tests should use the real Effect/LLM fixtures and avoid scheduler sleeps or implementation mocks. |
-| `.opencode/policy/first-principles-engineering.md` | The plan must repair the owning primary path, preserve one semantic path, map every concept to evidence, and avoid speculative fallback behavior. |
-| `.opencode/templates/canonical-plan.md` | Defines the required plan sections, status metadata, traceability tables, audit record, and comment-budget fields. |
-| `docs/plans/session-goal-transition-integrity.md` | Existing Goal lifecycle, turn lineage, model terminal ownership, and continuation contract are shipped/verified boundaries that this task must preserve. |
-| `docs/plans/goal-slash-inline-arguments.md` | Confirms Goal domain and TUI control responsibilities are separate from prompt/template behavior. |
-| `docs/adr/0001-triage-labels-and-team-assignment-coexist.md` | No direct Goal rule; read to confirm the only accepted ADR is unrelated to this Session path. |
+| Source                                                       | Why it constrains this task                                                                                                                              |
+| ------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CONTEXT.md` Goal vocabulary and Session relationships       | A Goal is a structured objective owned by a Session; Goal lifecycle and Session run state are distinct concerns.                                         |
+| Root `AGENTS.md`                                             | Tests and typechecks must run from package directories; edits should follow repository style and use parallel inspection where applicable.               |
+| `packages/opencode/AGENTS.md`                                | Effect/module shape, no unnecessary public API, and package-local verification rules constrain the implementation seam.                                  |
+| `packages/opencode/test/AGENTS.md`                           | Behavior tests should use the real Effect/LLM fixtures and avoid scheduler sleeps or implementation mocks.                                               |
+| `.opencode/policy/first-principles-engineering.md`           | The plan must repair the owning primary path, preserve one semantic path, map every concept to evidence, and avoid speculative fallback behavior.        |
+| `.opencode/templates/canonical-plan.md`                      | Defines the required plan sections, status metadata, traceability tables, audit record, and comment-budget fields.                                       |
+| `docs/plans/session-goal-transition-integrity.md`            | Existing Goal lifecycle, turn lineage, model terminal ownership, and continuation contract are shipped/verified boundaries that this task must preserve. |
+| `docs/plans/goal-slash-inline-arguments.md`                  | Confirms Goal domain and TUI control responsibilities are separate from prompt/template behavior.                                                        |
+| `docs/adr/0001-triage-labels-and-team-assignment-coexist.md` | No direct Goal rule; read to confirm the only accepted ADR is unrelated to this Session path.                                                            |
 
 ## 4. Files and Evidence Read
 
-| Evidence | Relevance | Evidence class |
-| --- | --- | --- |
-| `packages/opencode/src/session/prompt.ts:2262-2415` | Current `runLoop` completion/error path, `goalTurns`, active Goal check, unconditional continuation injection, and existing max-turn pause. | observed |
-| `packages/opencode/src/session/goal.ts:107-129` | `SessionGoal.Interface` ownership boundary; Goal service owns persistence and model transitions, not Message evidence. | observed |
-| `packages/opencode/src/session/goal.ts:549-606` | Current continuation prompt construction, completion audit, and blocked audit language. | observed |
-| `packages/opencode/src/tool/goal.ts:6-149` | GoalTool read/transition contract and model-visible terminal behavior. | observed |
-| `packages/opencode/src/tool/goal.txt:1-14` | Second model-visible Goal contract surface that must remain consistent with the prompt. | observed |
-| `packages/opencode/src/session/message-v2.ts:354-435` | Structured tool-part states and metadata available to a progress classifier. | observed |
-| `packages/opencode/src/session/message-v2.ts:1700-1731` | Current provider-window latest-message behavior; array position cannot be used as chronology after compaction. | observed |
-| `packages/opencode/src/tool/todo.ts:17-53` | Todo updates persist a full list and return structured `metadata.todos`. | observed |
-| `packages/opencode/src/session/todo.ts:19-75` | Todo persistence/event owner and absence of a stable Todo ID. | observed |
-| `packages/opencode/src/tool/read.ts:76-100,204-285` | Read metadata includes canonical path, file version, line range, stub status, and visible-read deduplication semantics. | observed |
-| `packages/opencode/src/tool/grep.ts:24-42,50-65,123-140,226-239` | Grep exposes normalized search input and completed metadata/output for a reachable BFS search branch. | observed |
-| `packages/opencode/src/tool/glob.ts:11-16,18-28,53-108` | Glob exposes pattern/path input and completed metadata/output for a reachable BFS frontier-discovery branch. | observed |
-| `packages/opencode/src/tool/edit.ts:205-266` | Edit result exposes actual diff/file-diff and diagnostics metadata after the write. | observed |
-| `packages/opencode/src/tool/write.ts:152-169` | Write result exposes final diff and diagnostic metadata; no-op writes can be distinguished from effective content changes. | observed |
-| `packages/opencode/src/tool/apply_patch.ts:345-356` | Apply-patch result exposes changed files, diff, and diagnostic summary. | observed |
-| `packages/opencode/src/tool/shell.ts:1324-1355` | Shell metadata exposes command output, exit code, verification-command `hasErrors`, and diagnostic lines. | observed |
-| `packages/opencode/src/config/config.ts:289-292` | `goal_max_turns` is an existing top-level hard bound with default 32. | contracted |
-| `packages/opencode/test/session/prompt.test.ts:4012-4274` | Existing real Prompt/LLM Goal tests cover lineage, recovery, and error continuation but not normal no-progress gating. | observed |
-| `packages/opencode/test/session/goal.test.ts:381-413` | Existing continuation prompt contract tests. | observed |
-| `packages/opencode/test/tool/goal.test.ts:203-245` | Existing two-turn blocked behavior and model-visible exploration guidance. | observed |
-| `bun test test/session/prompt.test.ts -t 'goal error continuation enabled\|goal error continuation disabled'` from `packages/opencode` | Existing error continuation baseline: 2 tests passed, 0 failed. | observed |
-| `bun test test/session/goal.test.ts -t 'continuationPrompt\|goal_max_turns'` from `packages/opencode` | Existing continuation prompt/config baseline: 3 tests passed, 0 failed. | observed |
+| Evidence                                                                                                                               | Relevance                                                                                                                                   | Evidence class |
+| -------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- | -------------- |
+| `packages/opencode/src/session/prompt.ts:2262-2415`                                                                                    | Current `runLoop` completion/error path, `goalTurns`, active Goal check, unconditional continuation injection, and existing max-turn pause. | observed       |
+| `packages/opencode/src/session/goal.ts:107-129`                                                                                        | `SessionGoal.Interface` ownership boundary; Goal service owns persistence and model transitions, not Message evidence.                      | observed       |
+| `packages/opencode/src/session/goal.ts:549-606`                                                                                        | Current continuation prompt construction, completion audit, and blocked audit language.                                                     | observed       |
+| `packages/opencode/src/tool/goal.ts:6-149`                                                                                             | GoalTool read/transition contract and model-visible terminal behavior.                                                                      | observed       |
+| `packages/opencode/src/tool/goal.txt:1-14`                                                                                             | Second model-visible Goal contract surface that must remain consistent with the prompt.                                                     | observed       |
+| `packages/opencode/src/session/message-v2.ts:354-435`                                                                                  | Structured tool-part states and metadata available to a progress classifier.                                                                | observed       |
+| `packages/opencode/src/session/message-v2.ts:1700-1731`                                                                                | Current provider-window latest-message behavior; array position cannot be used as chronology after compaction.                              | observed       |
+| `packages/opencode/src/tool/todo.ts:17-53`                                                                                             | Todo updates persist a full list and return structured `metadata.todos`.                                                                    | observed       |
+| `packages/opencode/src/session/todo.ts:19-75`                                                                                          | Todo persistence/event owner and absence of a stable Todo ID.                                                                               | observed       |
+| `packages/opencode/src/tool/read.ts:76-100,204-285`                                                                                    | Read metadata includes canonical path, file version, line range, stub status, and visible-read deduplication semantics.                     | observed       |
+| `packages/opencode/src/tool/grep.ts:24-42,50-65,123-140,226-239`                                                                       | Grep exposes normalized search input and completed metadata/output for a reachable BFS search branch.                                       | observed       |
+| `packages/opencode/src/tool/glob.ts:11-16,18-28,53-108`                                                                                | Glob exposes pattern/path input and completed metadata/output for a reachable BFS frontier-discovery branch.                                | observed       |
+| `packages/opencode/src/tool/edit.ts:205-266`                                                                                           | Edit result exposes actual diff/file-diff and diagnostics metadata after the write.                                                         | observed       |
+| `packages/opencode/src/tool/write.ts:152-169`                                                                                          | Write result exposes final diff and diagnostic metadata; no-op writes can be distinguished from effective content changes.                  | observed       |
+| `packages/opencode/src/tool/apply_patch.ts:345-356`                                                                                    | Apply-patch result exposes changed files, diff, and diagnostic summary.                                                                     | observed       |
+| `packages/opencode/src/tool/shell.ts:1324-1355`                                                                                        | Shell metadata exposes command output, exit code, verification-command `hasErrors`, and diagnostic lines.                                   | observed       |
+| `packages/opencode/src/config/config.ts:289-292`                                                                                       | `goal_max_turns` is an existing top-level hard bound with default 32.                                                                       | contracted     |
+| `packages/opencode/test/session/prompt.test.ts:4012-4274`                                                                              | Existing real Prompt/LLM Goal tests cover lineage, recovery, and error continuation but not normal no-progress gating.                      | observed       |
+| `packages/opencode/test/session/goal.test.ts:381-413`                                                                                  | Existing continuation prompt contract tests.                                                                                                | observed       |
+| `packages/opencode/test/tool/goal.test.ts:203-245`                                                                                     | Existing two-turn blocked behavior and model-visible exploration guidance.                                                                  | observed       |
+| `bun test test/session/prompt.test.ts -t 'goal error continuation enabled\|goal error continuation disabled'` from `packages/opencode` | Existing error continuation baseline: 2 tests passed, 0 failed.                                                                             | observed       |
+| `bun test test/session/goal.test.ts -t 'continuationPrompt\|goal_max_turns'` from `packages/opencode`                                  | Existing continuation prompt/config baseline: 3 tests passed, 0 failed.                                                                     | observed       |
 
 ## 5. Current Behavior
 
@@ -141,19 +141,19 @@ remain ordinary continuation turns.
 
 ## 6. Supported Input Domain and Reachability
 
-| Input or condition | Producer | Upstream guarantees | Reachable path | Owner | Classification |
-| --- | --- | --- | --- | --- | --- |
-| Normal assistant completion while Goal is active | Provider/`SessionProcessor` | `lastAssistant.finish`, no error, no unfinished tool call, parent matches latest user | `SessionPrompt.runLoop` completion branch | `SessionPrompt` | observed |
-| Eligible terminal API/unknown error with `continueOnError=true` | Provider/`SessionProcessor` + Goal setting | Error marker and exact assistant provenance; Goal policy allows continuation | Same completion branch, `errorCompletion` path | `SessionPrompt` | observed |
-| Two consecutive completed Goal turns with no new evidence | Current tool/message chain | Existing tool parts persist structured input/output/metadata | Current loop can compare current turn evidence with in-memory prior ledger | `SessionPrompt` | reachable |
-| Newly completed Todo | `todowrite` Tool | Completed list is persisted in tool metadata and Todo service | Assistant completed ToolPart in current turn | `SessionPrompt` reads evidence; `Todo` remains writer | reachable, advancement |
-| Effective file change | `edit`, `write`, `apply_patch`, or snapshot patch | Tool metadata/patch contains actual additions/deletions or changed files | Assistant completed ToolPart/current assistant patch part | `SessionPrompt` reads evidence; file tools remain writers | reachable, advancement |
-| Changed verification result | `bash` Tool | Shell metadata contains normalized command, exit, `hasErrors`, and output; a prior comparable result exists | Assistant completed verification ToolPart | `SessionPrompt` reads evidence; Shell remains executor | reachable, advancement |
-| New read evidence for a file version/range | `read` Tool | Read metadata contains canonical path, version, range, and stub flag | Assistant completed non-stub read ToolPart | `SessionPrompt` reads evidence; Read remains producer | reachable, exploration only |
-| New search evidence from a distinct normalized scope | `grep` or `glob` Tool | Completed ToolPart contains tool name, structured input, and result metadata/output | Assistant completed search ToolPart | `SessionPrompt` reads evidence; Grep/Glob remain producers | reachable, exploration only |
-| New actionable result from a distinct non-verification command | `bash` Tool | Completed command has structured exit/output metadata | Assistant completed shell ToolPart | `SessionPrompt` reads evidence; Shell remains executor | reachable, exploration only |
-| Model claims progress only in text/reasoning | Provider text | No authoritative structured producer | Assistant text part | None; not counted | speculative/untrusted |
-| “Goal intermediate status update” | None in current public/model interface | Goal status has no intermediate producer/consumer | No reachable path without a new state contract | None | speculative |
+| Input or condition                                              | Producer                                          | Upstream guarantees                                                                                         | Reachable path                                                             | Owner                                                      | Classification              |
+| --------------------------------------------------------------- | ------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------- | ---------------------------------------------------------- | --------------------------- |
+| Normal assistant completion while Goal is active                | Provider/`SessionProcessor`                       | `lastAssistant.finish`, no error, no unfinished tool call, parent matches latest user                       | `SessionPrompt.runLoop` completion branch                                  | `SessionPrompt`                                            | observed                    |
+| Eligible terminal API/unknown error with `continueOnError=true` | Provider/`SessionProcessor` + Goal setting        | Error marker and exact assistant provenance; Goal policy allows continuation                                | Same completion branch, `errorCompletion` path                             | `SessionPrompt`                                            | observed                    |
+| Two consecutive completed Goal turns with no new evidence       | Current tool/message chain                        | Existing tool parts persist structured input/output/metadata                                                | Current loop can compare current turn evidence with in-memory prior ledger | `SessionPrompt`                                            | reachable                   |
+| Newly completed Todo                                            | `todowrite` Tool                                  | Completed list is persisted in tool metadata and Todo service                                               | Assistant completed ToolPart in current turn                               | `SessionPrompt` reads evidence; `Todo` remains writer      | reachable, advancement      |
+| Effective file change                                           | `edit`, `write`, `apply_patch`, or snapshot patch | Tool metadata/patch contains actual additions/deletions or changed files                                    | Assistant completed ToolPart/current assistant patch part                  | `SessionPrompt` reads evidence; file tools remain writers  | reachable, advancement      |
+| Changed verification result                                     | `bash` Tool                                       | Shell metadata contains normalized command, exit, `hasErrors`, and output; a prior comparable result exists | Assistant completed verification ToolPart                                  | `SessionPrompt` reads evidence; Shell remains executor     | reachable, advancement      |
+| New read evidence for a file version/range                      | `read` Tool                                       | Read metadata contains canonical path, version, range, and stub flag                                        | Assistant completed non-stub read ToolPart                                 | `SessionPrompt` reads evidence; Read remains producer      | reachable, exploration only |
+| New search evidence from a distinct normalized scope            | `grep` or `glob` Tool                             | Completed ToolPart contains tool name, structured input, and result metadata/output                         | Assistant completed search ToolPart                                        | `SessionPrompt` reads evidence; Grep/Glob remain producers | reachable, exploration only |
+| New actionable result from a distinct non-verification command  | `bash` Tool                                       | Completed command has structured exit/output metadata                                                       | Assistant completed shell ToolPart                                         | `SessionPrompt` reads evidence; Shell remains executor     | reachable, exploration only |
+| Model claims progress only in text/reasoning                    | Provider text                                     | No authoritative structured producer                                                                        | Assistant text part                                                        | None; not counted                                          | speculative/untrusted       |
+| “Goal intermediate status update”                               | None in current public/model interface            | Goal status has no intermediate producer/consumer                                                           | No reachable path without a new state contract                             | None                                                       | speculative                 |
 
 The gate operates only on evidence reachable from completed Message parts in
 the current `runLoop`. It does not infer semantic relevance to the objective,
@@ -165,24 +165,24 @@ can demonstrate that the strategy produced a stronger task artifact.
 
 ## 7. Required Invariants
 
-| ID | Behavioral invariant | Evidence | Existing test |
-| --- | --- | --- | --- |
-| INV-01 | An active long-running Goal remains active when the progress gate observes stagnation; the gate never calls `SessionGoal.set({ status: "paused" })`. | Explicit clarification; existing Goal status ownership. | No existing test; new Prompt integration test required. |
-| INV-02 | The first two consecutive eligible completion turns without measurable evidence may use ordinary continuation, but the next continuation must use the re-plan/BFS strategy rather than the unchanged ordinary strategy. | User requirement; current unconditional continuation gap. | Missing; new Prompt integration test required. |
-| INV-03 | Re-plan mode persists until a later eligible turn produces an advancement signal; a re-plan instruction or exploratory read/command alone cannot restore ordinary continuation. | User requirement to switch method; reachable shell/read seams; structured Todo/file/verification artifacts are the restrained progress proxies. | Missing; new Prompt integration test required. |
-| INV-04 | Evidence is monotonic within one `runLoop`: duplicate reads, duplicate command results, no-op edits, and repeated Todo snapshots do not count as new activity or advancement. | Existing structured metadata and read dedup semantics. | Missing; new Prompt integration test required. |
-| INV-05 | At least one qualifying evidence category is sufficient to continue the loop and reset the raw no-activity count, including read-only Goal work; only the stronger advancement subset clears re-plan mode. | User's multi-signal requirement; read tool metadata; no evaluator contract. | Missing; new Prompt integration test required. |
-| INV-06 | Explicit model `complete`/`blocked` transitions and existing blocked two-turn validation remain authoritative; the gate only chooses automatic continuation strategy after an eligible completion. | `SessionGoal.modelTransition`, `GoalTool`, existing tests. | `test/tool/goal.test.ts` and existing Prompt lifecycle tests. |
-| INV-07 | The existing `goal_max_turns`, `continueOnError`, parent-session, decide-agent, compaction, and terminal ownership rules retain their current behavior. | Existing `prompt.ts` predicates and verified transition plan. | Existing Prompt/Goal suites; regression additions required. |
-| INV-08 | The re-plan prompt preserves the full user objective and asks for breadth-first evidence exploration without creating a second executor or redefining completion. | Existing continuation contract plus user BFS request. | `test/session/goal.test.ts` prompt contract test. |
+| ID     | Behavioral invariant                                                                                                                                                                                                    | Evidence                                                                                                                                        | Existing test                                                 |
+| ------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------- |
+| INV-01 | An active long-running Goal remains active when the progress gate observes stagnation; the gate never calls `SessionGoal.set({ status: "paused" })`.                                                                    | Explicit clarification; existing Goal status ownership.                                                                                         | No existing test; new Prompt integration test required.       |
+| INV-02 | The first two consecutive eligible completion turns without measurable evidence may use ordinary continuation, but the next continuation must use the re-plan/BFS strategy rather than the unchanged ordinary strategy. | User requirement; current unconditional continuation gap.                                                                                       | Missing; new Prompt integration test required.                |
+| INV-03 | Re-plan mode persists until a later eligible turn produces an advancement signal; a re-plan instruction or exploratory read/command alone cannot restore ordinary continuation.                                         | User requirement to switch method; reachable shell/read seams; structured Todo/file/verification artifacts are the restrained progress proxies. | Missing; new Prompt integration test required.                |
+| INV-04 | Evidence is monotonic within one `runLoop`: duplicate reads, duplicate command results, no-op edits, and repeated Todo snapshots do not count as new activity or advancement.                                           | Existing structured metadata and read dedup semantics.                                                                                          | Missing; new Prompt integration test required.                |
+| INV-05 | At least one qualifying evidence category is sufficient to continue the loop and reset the raw no-activity count, including read-only Goal work; only the stronger advancement subset clears re-plan mode.              | User's multi-signal requirement; read tool metadata; no evaluator contract.                                                                     | Missing; new Prompt integration test required.                |
+| INV-06 | Explicit model `complete`/`blocked` transitions and existing blocked two-turn validation remain authoritative; the gate only chooses automatic continuation strategy after an eligible completion.                      | `SessionGoal.modelTransition`, `GoalTool`, existing tests.                                                                                      | `test/tool/goal.test.ts` and existing Prompt lifecycle tests. |
+| INV-07 | The existing `goal_max_turns`, `continueOnError`, parent-session, decide-agent, compaction, and terminal ownership rules retain their current behavior.                                                                 | Existing `prompt.ts` predicates and verified transition plan.                                                                                   | Existing Prompt/Goal suites; regression additions required.   |
+| INV-08 | The re-plan prompt preserves the full user objective and asks for breadth-first evidence exploration without creating a second executor or redefining completion.                                                       | Existing continuation contract plus user BFS request.                                                                                           | `test/session/goal.test.ts` prompt contract test.             |
 
 ## 8. First Divergence and Root Cause
 
-| Invariant | First divergence | Owning module/interface | Proof |
-| --- | --- | --- | --- |
-| INV-01/INV-02/INV-03 | The completion branch has no progress ledger or strategy mode; it unconditionally calls the ordinary `SessionGoal.continuationPrompt` whenever Goal eligibility checks pass. | `SessionPrompt.runLoop` continuation decision | `packages/opencode/src/session/prompt.ts:2342-2401` reads Goal/max-turn conditions but no tool/message progress. |
-| INV-04/INV-05 | No owner computes a per-turn evidence delta. Tool producers emit metadata, but the consumer that decides whether to inject continuation never compares it. | `SessionPrompt` at the continuation seam | Tool metadata exists in `message-v2.ts`, `read.ts`, edit/write/apply-patch, shell, and todo paths; no progress consumer exists. |
-| INV-08 | `SessionGoal.continuationPrompt` has one static strategy and no mode-specific re-plan section. | `SessionGoal.continuationPrompt` prompt-construction function | `packages/opencode/src/session/goal.ts:553-605`. |
+| Invariant            | First divergence                                                                                                                                                             | Owning module/interface                                       | Proof                                                                                                                           |
+| -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| INV-01/INV-02/INV-03 | The completion branch has no progress ledger or strategy mode; it unconditionally calls the ordinary `SessionGoal.continuationPrompt` whenever Goal eligibility checks pass. | `SessionPrompt.runLoop` continuation decision                 | `packages/opencode/src/session/prompt.ts:2342-2401` reads Goal/max-turn conditions but no tool/message progress.                |
+| INV-04/INV-05        | No owner computes a per-turn evidence delta. Tool producers emit metadata, but the consumer that decides whether to inject continuation never compares it.                   | `SessionPrompt` at the continuation seam                      | Tool metadata exists in `message-v2.ts`, `read.ts`, edit/write/apply-patch, shell, and todo paths; no progress consumer exists. |
+| INV-08               | `SessionGoal.continuationPrompt` has one static strategy and no mode-specific re-plan section.                                                                               | `SessionGoal.continuationPrompt` prompt-construction function | `packages/opencode/src/session/goal.ts:553-605`.                                                                                |
 
 This is a feature seam/root-cause gap, not a downstream Goal-state defect. The
 first divergence is the missing decision at the `SessionPrompt` continuation
@@ -203,15 +203,15 @@ Feedback signal for the feature:
 
 ## 9. Responsibility and Seam
 
-| Concern | Owner | Interface promise | Why it belongs here | Why another module does not own it |
-| --- | --- | --- | --- | --- |
-| Aggregate per-turn observable evidence | `SessionPrompt` private run-loop state | Decide whether an automatic continuation is ordinary or re-plan | The loop already owns completion, continuation count, provider-window messages, and lifecycle exclusions | Tools should emit results; `SessionGoal` owns durable state, not transient Message topology |
-| Detect effective file changes | `SessionPrompt` evidence reader over existing ToolPart/patch metadata | Count only structured, actual changes | The decision needs a cross-tool view, which no single file Tool can provide | File tools cannot know whether another Tool in the same Goal turn also produced evidence |
-| Detect new read/version/range evidence | `SessionPrompt` evidence reader over existing read metadata | Count unseen non-stub evidence within the run | The loop has the full current Message context and can maintain a monotonic ledger | `ReadTool` correctly owns read execution and output suppression, not Goal continuation policy |
-| Detect Todo completion | `SessionPrompt` comparison of existing `metadata.todos` | Count newly completed items without changing Todo schema | Cross-turn comparison belongs at the continuation consumer | `Todo` service owns persistence; adding Goal coupling would leak responsibility |
-| Detect command/verification result | `SessionPrompt` comparison of existing shell metadata | Count first/new structured result under a conservative command/result key | The loop decides whether the result changed continuation strategy | Shell owns command execution and already classifies verification output |
-| Construct ordinary/re-plan text | `SessionGoal.continuationPrompt` with a mode argument or equivalent private prompt branch | Preserve objective/budget/audit contract and add bounded BFS instructions | This function is the existing canonical continuation prompt owner | `GoalTool` text is a separate operation contract and should not duplicate continuation prose |
-| Persist Goal lifecycle | Existing `SessionGoal` | Existing statuses/transitions/usage | No new durable state is needed | Adding a status or pause reason would contradict the clarified scope |
+| Concern                                | Owner                                                                                     | Interface promise                                                         | Why it belongs here                                                                                      | Why another module does not own it                                                            |
+| -------------------------------------- | ----------------------------------------------------------------------------------------- | ------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
+| Aggregate per-turn observable evidence | `SessionPrompt` private run-loop state                                                    | Decide whether an automatic continuation is ordinary or re-plan           | The loop already owns completion, continuation count, provider-window messages, and lifecycle exclusions | Tools should emit results; `SessionGoal` owns durable state, not transient Message topology   |
+| Detect effective file changes          | `SessionPrompt` evidence reader over existing ToolPart/patch metadata                     | Count only structured, actual changes                                     | The decision needs a cross-tool view, which no single file Tool can provide                              | File tools cannot know whether another Tool in the same Goal turn also produced evidence      |
+| Detect new read/version/range evidence | `SessionPrompt` evidence reader over existing read metadata                               | Count unseen non-stub evidence within the run                             | The loop has the full current Message context and can maintain a monotonic ledger                        | `ReadTool` correctly owns read execution and output suppression, not Goal continuation policy |
+| Detect Todo completion                 | `SessionPrompt` comparison of existing `metadata.todos`                                   | Count newly completed items without changing Todo schema                  | Cross-turn comparison belongs at the continuation consumer                                               | `Todo` service owns persistence; adding Goal coupling would leak responsibility               |
+| Detect command/verification result     | `SessionPrompt` comparison of existing shell metadata                                     | Count first/new structured result under a conservative command/result key | The loop decides whether the result changed continuation strategy                                        | Shell owns command execution and already classifies verification output                       |
+| Construct ordinary/re-plan text        | `SessionGoal.continuationPrompt` with a mode argument or equivalent private prompt branch | Preserve objective/budget/audit contract and add bounded BFS instructions | This function is the existing canonical continuation prompt owner                                        | `GoalTool` text is a separate operation contract and should not duplicate continuation prose  |
+| Persist Goal lifecycle                 | Existing `SessionGoal`                                                                    | Existing statuses/transitions/usage                                       | No new durable state is needed                                                                           | Adding a status or pause reason would contradict the clarified scope                          |
 
 ## 10. Single Approved Primary-Path Design
 
@@ -345,13 +345,13 @@ the model to mark the Goal complete or blocked based solely on the gate.
 
 ## 11. Secondary and Replacement Path Inventory
 
-| Path | Current or proposed | Classification | Produces success? | Decision-surface share | Disposition |
-| --- | --- | --- | --- | --- | --- |
-| Existing ordinary Goal continuation | current | primary-contract branch | yes | existing | preserve |
-| Re-plan/BFS wording through the same synthetic continuation call | proposed | primary-contract branch within one continuation contract | yes | approximately 20-30% of modified continuation decision surface; no alternate executor | preserve |
-| New persisted Goal `replan`/`paused-by-gate` state | rejected | forbidden replacement/state path | no | 0% | reject |
-| Second model/evaluator deciding whether progress is meaningful | rejected | forbidden alternate evaluator path | no | 0% | reject |
-| Catching failed provider work and treating the prompt as progress | rejected | forbidden fallback | yes | 0% | reject |
+| Path                                                              | Current or proposed | Classification                                           | Produces success? | Decision-surface share                                                                | Disposition |
+| ----------------------------------------------------------------- | ------------------- | -------------------------------------------------------- | ----------------- | ------------------------------------------------------------------------------------- | ----------- |
+| Existing ordinary Goal continuation                               | current             | primary-contract branch                                  | yes               | existing                                                                              | preserve    |
+| Re-plan/BFS wording through the same synthetic continuation call  | proposed            | primary-contract branch within one continuation contract | yes               | approximately 20-30% of modified continuation decision surface; no alternate executor | preserve    |
+| New persisted Goal `replan`/`paused-by-gate` state                | rejected            | forbidden replacement/state path                         | no                | 0%                                                                                    | reject      |
+| Second model/evaluator deciding whether progress is meaningful    | rejected            | forbidden alternate evaluator path                       | no                | 0%                                                                                    | reject      |
+| Catching failed provider work and treating the prompt as progress | rejected            | forbidden fallback                                       | yes               | 0%                                                                                    | reject      |
 
 The re-plan branch is not activated after a failed primary operation to produce
 success; it is a mode selection before the same continuation operation. The
@@ -360,49 +360,49 @@ an alternate success path.
 
 ## 12. Workaround Deletion and Replacement
 
-| Existing workaround or duplicate | Why it existed | Why the approved route supersedes it | Delete or collapse location |
-| --- | --- | --- | --- |
-| None identified | Current code has no progress gate or alternate stagnation workaround. | The approved route adds the missing owner-local strategy decision without replacing existing lifecycle logic. | None |
-| Any proposed unconditional “keep continuing until 32” assumption in continuation comments/tests | The current loop uses the hard cap as the only persistence guard. | Tests and comments should describe the progress-aware strategy while retaining the cap as a separate upper bound. | `src/session/prompt.ts` comments and affected test expectations, if present |
+| Existing workaround or duplicate                                                                | Why it existed                                                        | Why the approved route supersedes it                                                                              | Delete or collapse location                                                 |
+| ----------------------------------------------------------------------------------------------- | --------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
+| None identified                                                                                 | Current code has no progress gate or alternate stagnation workaround. | The approved route adds the missing owner-local strategy decision without replacing existing lifecycle logic.     | None                                                                        |
+| Any proposed unconditional “keep continuing until 32” assumption in continuation comments/tests | The current loop uses the hard cap as the only persistence guard.     | Tests and comments should describe the progress-aware strategy while retaining the cap as a separate upper bound. | `src/session/prompt.ts` comments and affected test expectations, if present |
 
 ## 13. Forward Traceability
 
-| Requirement or invariant | Production path | Planned file/change | Behavioral test |
-| --- | --- | --- | --- |
-| REQ-01 / INV-01: preserve active long-running Goal | `SessionPrompt` strategy branch never calls Goal pause | `src/session/prompt.ts` | Real Prompt loop asserts Goal remains `active` after repeated no-progress turns |
-| REQ-02 / INV-02: switch after two no-progress turns | completion -> evidence delta -> `replanRequired` | `src/session/prompt.ts` | Real LLM seam asserts the next synthetic prompt has re-plan marker, not ordinary-only wording |
-| REQ-03 / INV-04: reject duplicate/no-op evidence | metadata ledger and normalized keys | `src/session/prompt.ts` | Duplicate read, same command/result, no-op edit, repeated Todo snapshot do not clear re-plan mode |
-| REQ-03 / INV-05: accept exploration and advancement categories at their proper strength | existing ToolPart metadata reader | `src/session/prompt.ts` | Separate vertical cases for exploration-only read/search/command evidence and advancement from Todo completion, effective diff, or changed verification result |
-| REQ-04 / INV-03: remain in BFS until advancement | `replanRequired` cleared only by an advancement delta | `src/session/prompt.ts` | Re-plan turn with only text, new read, or new generic command remains in BFS; later advancement returns to ordinary wording |
-| REQ-05 / INV-06: preserve terminal behavior | existing GoalTool/SessionGoal paths run before/around continuation gate | No Goal domain behavior change; regression test only | Existing complete/blocked Tool tests plus Prompt regression |
-| REQ-06 / INV-07: preserve max/error/compaction exclusions | existing predicates and `goalTurns` budget remain authoritative | `src/session/prompt.ts` narrow branch integration | Existing filtered Goal tests plus max-turn, error, child/decide/compaction regression cases |
-| REQ-07 / INV-08: construct BFS prompt without narrowing objective | mode-aware `SessionGoal.continuationPrompt` | `src/session/goal.ts` | Prompt contract test asserts objective/budget/audit text and BFS instructions coexist |
+| Requirement or invariant                                                                | Production path                                                         | Planned file/change                                  | Behavioral test                                                                                                                                                |
+| --------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- | ---------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| REQ-01 / INV-01: preserve active long-running Goal                                      | `SessionPrompt` strategy branch never calls Goal pause                  | `src/session/prompt.ts`                              | Real Prompt loop asserts Goal remains `active` after repeated no-progress turns                                                                                |
+| REQ-02 / INV-02: switch after two no-progress turns                                     | completion -> evidence delta -> `replanRequired`                        | `src/session/prompt.ts`                              | Real LLM seam asserts the next synthetic prompt has re-plan marker, not ordinary-only wording                                                                  |
+| REQ-03 / INV-04: reject duplicate/no-op evidence                                        | metadata ledger and normalized keys                                     | `src/session/prompt.ts`                              | Duplicate read, same command/result, no-op edit, repeated Todo snapshot do not clear re-plan mode                                                              |
+| REQ-03 / INV-05: accept exploration and advancement categories at their proper strength | existing ToolPart metadata reader                                       | `src/session/prompt.ts`                              | Separate vertical cases for exploration-only read/search/command evidence and advancement from Todo completion, effective diff, or changed verification result |
+| REQ-04 / INV-03: remain in BFS until advancement                                        | `replanRequired` cleared only by an advancement delta                   | `src/session/prompt.ts`                              | Re-plan turn with only text, new read, or new generic command remains in BFS; later advancement returns to ordinary wording                                    |
+| REQ-05 / INV-06: preserve terminal behavior                                             | existing GoalTool/SessionGoal paths run before/around continuation gate | No Goal domain behavior change; regression test only | Existing complete/blocked Tool tests plus Prompt regression                                                                                                    |
+| REQ-06 / INV-07: preserve max/error/compaction exclusions                               | existing predicates and `goalTurns` budget remain authoritative         | `src/session/prompt.ts` narrow branch integration    | Existing filtered Goal tests plus max-turn, error, child/decide/compaction regression cases                                                                    |
+| REQ-07 / INV-08: construct BFS prompt without narrowing objective                       | mode-aware `SessionGoal.continuationPrompt`                             | `src/session/goal.ts`                                | Prompt contract test asserts objective/budget/audit text and BFS instructions coexist                                                                          |
 
 ## 14. Reverse Traceability
 
-| Proposed production concept | Requirement ID | Evidence | Why existing logic cannot carry it |
-| --- | --- | --- | --- |
-| Run-local `noProgressTurns` | REQ-02 | Current loop has only `goalTurns`; no evidence-based counter | `goalTurns` counts attempts, not progress, so it cannot distinguish productive from repetitive turns |
-| Run-local monotonic evidence ledger | REQ-03/REQ-04 | Tool producers expose structured metadata and read versions/ranges | No existing consumer compares evidence across continuation turns; persisting it would add an unsupported history contract |
-| Exploration-versus-advancement classification | REQ-03/REQ-04 | Shell/read producers cannot establish Goal relevance; file/Todo/verification deltas are stronger structured artifacts | Treating all activity as equivalent would let arbitrary commands or reads leave BFS mode; a second evaluator is not justified |
-| Effective-diff/read/search/Todo/shell metadata readers | REQ-03 | Existing producer-specific metadata listed in §4 | A single generic “tool ran” signal would count no-op/repeated work and violate measurable-progress intent; search needs a normalized scope key to represent BFS branch discovery |
-| `replanRequired` strategy mode | REQ-02/REQ-04 | User explicitly requires switching method, not pausing Goal | Static continuation text cannot communicate that ordinary strategy has stalled or preserve the mode until evidence |
-| Mode-aware continuation prompt section | REQ-07/INV-08 | Existing canonical continuation prompt is in `SessionGoal.continuationPrompt` | Adding BFS text only in `prompt.ts` would split the canonical prompt contract; adding it to Goal persistence would leak transient policy |
-| No new Goal status or migration | REQ-01 | User rejects continuity loss; current statuses are durable lifecycle semantics | No reachable requirement needs durable re-plan state, and a new status would duplicate run-local orchestration |
+| Proposed production concept                            | Requirement ID | Evidence                                                                                                              | Why existing logic cannot carry it                                                                                                                                               |
+| ------------------------------------------------------ | -------------- | --------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Run-local `noProgressTurns`                            | REQ-02         | Current loop has only `goalTurns`; no evidence-based counter                                                          | `goalTurns` counts attempts, not progress, so it cannot distinguish productive from repetitive turns                                                                             |
+| Run-local monotonic evidence ledger                    | REQ-03/REQ-04  | Tool producers expose structured metadata and read versions/ranges                                                    | No existing consumer compares evidence across continuation turns; persisting it would add an unsupported history contract                                                        |
+| Exploration-versus-advancement classification          | REQ-03/REQ-04  | Shell/read producers cannot establish Goal relevance; file/Todo/verification deltas are stronger structured artifacts | Treating all activity as equivalent would let arbitrary commands or reads leave BFS mode; a second evaluator is not justified                                                    |
+| Effective-diff/read/search/Todo/shell metadata readers | REQ-03         | Existing producer-specific metadata listed in §4                                                                      | A single generic “tool ran” signal would count no-op/repeated work and violate measurable-progress intent; search needs a normalized scope key to represent BFS branch discovery |
+| `replanRequired` strategy mode                         | REQ-02/REQ-04  | User explicitly requires switching method, not pausing Goal                                                           | Static continuation text cannot communicate that ordinary strategy has stalled or preserve the mode until evidence                                                               |
+| Mode-aware continuation prompt section                 | REQ-07/INV-08  | Existing canonical continuation prompt is in `SessionGoal.continuationPrompt`                                         | Adding BFS text only in `prompt.ts` would split the canonical prompt contract; adding it to Goal persistence would leak transient policy                                         |
+| No new Goal status or migration                        | REQ-01         | User rejects continuity loss; current statuses are durable lifecycle semantics                                        | No reachable requirement needs durable re-plan state, and a new status would duplicate run-local orchestration                                                                   |
 
 ## 15. File-Level Change Plan
 
-| File | Add / modify / delete | Exact responsibility of the change | Expected line delta |
-| --- | --- | --- | --- |
-| `packages/opencode/src/session/prompt.ts` | modify | Add run-local progress ledger, structured evidence classification, two-turn strategy gate, and selection of ordinary vs re-plan continuation without changing existing Goal status/terminal predicates. | +90 to +170 |
-| `packages/opencode/src/session/goal.ts` | modify | Add a mode-specific re-plan section to the existing continuation prompt while preserving objective, budget, completion, and blocked contracts. | +25 to +55 |
-| `packages/opencode/src/tool/goal.ts` | modify | Replace only the first blocked-pending model-visible guidance and align the parameter description; preserve `modelTransition` and terminal state behavior. | +12 to +25 |
-| `packages/opencode/src/tool/goal.txt` | modify | Align the pre-call model description with the first blocked exploration and exact-reason contract. | +4 to +10 |
-| `packages/opencode/test/session/prompt.test.ts` | modify | Add real Prompt/LLM behavior slices for no-progress detection, evidence categories, mode persistence/reset, and existing lifecycle exclusions. | +180 to +320 |
-| `packages/opencode/test/session/goal.test.ts` | modify | Assert ordinary and re-plan prompt text retain the full objective and existing audit language while adding BFS instructions only in re-plan mode. | +25 to +60 |
-| `packages/opencode/test/tool/goal.test.ts` | modify | Assert first blocked-pending output is concise, exploratory, active-preserving, and consistent with the two-turn transition. | +25 to +55 |
-| `packages/opencode/test/tool/parameters.test.ts` | modify | Assert the provider-visible Goal parameter description includes the first blocked guidance. | +5 to +15 |
-| Database schema/migration/config/SDK/generated files | no change | No durable state or public API is required. | 0 |
+| File                                                 | Add / modify / delete | Exact responsibility of the change                                                                                                                                                                      | Expected line delta |
+| ---------------------------------------------------- | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------- |
+| `packages/opencode/src/session/prompt.ts`            | modify                | Add run-local progress ledger, structured evidence classification, two-turn strategy gate, and selection of ordinary vs re-plan continuation without changing existing Goal status/terminal predicates. | +90 to +170         |
+| `packages/opencode/src/session/goal.ts`              | modify                | Add a mode-specific re-plan section to the existing continuation prompt while preserving objective, budget, completion, and blocked contracts.                                                          | +25 to +55          |
+| `packages/opencode/src/tool/goal.ts`                 | modify                | Replace only the first blocked-pending model-visible guidance and align the parameter description; preserve `modelTransition` and terminal state behavior.                                              | +12 to +25          |
+| `packages/opencode/src/tool/goal.txt`                | modify                | Align the pre-call model description with the first blocked exploration and exact-reason contract.                                                                                                      | +4 to +10           |
+| `packages/opencode/test/session/prompt.test.ts`      | modify                | Add real Prompt/LLM behavior slices for no-progress detection, evidence categories, mode persistence/reset, and existing lifecycle exclusions.                                                          | +180 to +320        |
+| `packages/opencode/test/session/goal.test.ts`        | modify                | Assert ordinary and re-plan prompt text retain the full objective and existing audit language while adding BFS instructions only in re-plan mode.                                                       | +25 to +60          |
+| `packages/opencode/test/tool/goal.test.ts`           | modify                | Assert first blocked-pending output is concise, exploratory, active-preserving, and consistent with the two-turn transition.                                                                            | +25 to +55          |
+| `packages/opencode/test/tool/parameters.test.ts`     | modify                | Assert the provider-visible Goal parameter description includes the first blocked guidance.                                                                                                             | +5 to +15           |
+| Database schema/migration/config/SDK/generated files | no change             | No durable state or public API is required.                                                                                                                                                             | 0                   |
 
 The line ranges are estimates for audit calibration, not permission to omit a
 confirmed behavior or add unrelated refactoring.
@@ -413,16 +413,16 @@ The confirmed public seam is the real `SessionPrompt.loop` with the existing
 test LLM server and `SessionGoal` service. Tests must observe persisted
 synthetic Messages and Goal status, not private helper calls or source text.
 
-| Order | Red behavior | Why current code fails | Minimal green behavior | Regression protected |
-| --- | --- | --- | --- | --- |
-| 1 | Two consecutive active-Goal completions with no Tool evidence produce a next synthetic prompt containing the re-plan marker/BFS instructions. | Current completion branch always calls ordinary `continuationPrompt`. | Count consecutive no-evidence turns and select re-plan mode on the next continuation. | Prevents the 32-turn-only persistence illusion. |
-| 2 | A re-plan turn containing only text, a new unrelated read, or a new generic command remains in re-plan mode. | No current mode state exists and generic producers cannot prove Goal relevance. | Keep `replanRequired` until an advancement signal appears; record exploration separately. | Prevents activity from falsely restoring ordinary strategy. |
-| 3 | A new non-stub read range/version is recorded as exploration but does not by itself clear re-plan mode. | Current code has no cross-turn read ledger or relevance contract. | Record canonical read evidence and compare against prior keys; retain BFS mode. | Supports read-only BFS without allowing arbitrary reads to bypass the gate. |
-| 4 | A new normalized `grep`/`glob` search is recorded as exploration; the same search key does not count again and neither clears re-plan mode. | Current code does not inspect search ToolParts. | Record Tool name plus semantic path/pattern/include/exclude key. | Keeps the exact BFS prompt and runtime classifier aligned without adding a search evaluator. |
-| 5 | An effective edit/write/apply-patch diff clears re-plan mode; a no-op edit does not. | Current code does not inspect file evidence. | Use existing diff/file metadata with non-zero actual change criteria. | Prevents cosmetic/no-op edits from hiding stagnation. |
-| 6 | A newly completed Todo clears re-plan mode; an unchanged Todo snapshot does not. | Current code does not inspect Todo metadata. | Compare normalized Todo completion keys. | Preserves checklist-driven long tasks. |
-| 7 | A first verification result is exploration only; a changed verification result clears re-plan mode, while an identical repeated result does not. | Current code does not compare shell result signatures. | Use existing command/exit/`hasErrors`/output metadata and require a prior comparable result for advancement. | Supports test-fix-test loops without rewarding arbitrary or repeated commands. |
-| 8 | Goal `complete`/`blocked`, user pause/terminal, `continueOnError`, `goal_max_turns`, child/decide agent, and compaction paths retain current behavior. | A broad gate could accidentally intercept existing ownership and budget predicates. | Apply the gate only at the ordinary continuation selection point and preserve all existing predicates. | Protects existing verified Goal lifecycle contracts. |
+| Order | Red behavior                                                                                                                                           | Why current code fails                                                              | Minimal green behavior                                                                                       | Regression protected                                                                         |
+| ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------- |
+| 1     | Two consecutive active-Goal completions with no Tool evidence produce a next synthetic prompt containing the re-plan marker/BFS instructions.          | Current completion branch always calls ordinary `continuationPrompt`.               | Count consecutive no-evidence turns and select re-plan mode on the next continuation.                        | Prevents the 32-turn-only persistence illusion.                                              |
+| 2     | A re-plan turn containing only text, a new unrelated read, or a new generic command remains in re-plan mode.                                           | No current mode state exists and generic producers cannot prove Goal relevance.     | Keep `replanRequired` until an advancement signal appears; record exploration separately.                    | Prevents activity from falsely restoring ordinary strategy.                                  |
+| 3     | A new non-stub read range/version is recorded as exploration but does not by itself clear re-plan mode.                                                | Current code has no cross-turn read ledger or relevance contract.                   | Record canonical read evidence and compare against prior keys; retain BFS mode.                              | Supports read-only BFS without allowing arbitrary reads to bypass the gate.                  |
+| 4     | A new normalized `grep`/`glob` search is recorded as exploration; the same search key does not count again and neither clears re-plan mode.            | Current code does not inspect search ToolParts.                                     | Record Tool name plus semantic path/pattern/include/exclude key.                                             | Keeps the exact BFS prompt and runtime classifier aligned without adding a search evaluator. |
+| 5     | An effective edit/write/apply-patch diff clears re-plan mode; a no-op edit does not.                                                                   | Current code does not inspect file evidence.                                        | Use existing diff/file metadata with non-zero actual change criteria.                                        | Prevents cosmetic/no-op edits from hiding stagnation.                                        |
+| 6     | A newly completed Todo clears re-plan mode; an unchanged Todo snapshot does not.                                                                       | Current code does not inspect Todo metadata.                                        | Compare normalized Todo completion keys.                                                                     | Preserves checklist-driven long tasks.                                                       |
+| 7     | A first verification result is exploration only; a changed verification result clears re-plan mode, while an identical repeated result does not.       | Current code does not compare shell result signatures.                              | Use existing command/exit/`hasErrors`/output metadata and require a prior comparable result for advancement. | Supports test-fix-test loops without rewarding arbitrary or repeated commands.               |
+| 8     | Goal `complete`/`blocked`, user pause/terminal, `continueOnError`, `goal_max_turns`, child/decide agent, and compaction paths retain current behavior. | A broad gate could accidentally intercept existing ownership and budget predicates. | Apply the gate only at the ordinary continuation selection point and preserve all existing predicates.       | Protects existing verified Goal lifecycle contracts.                                         |
 
 Each slice must be run red before the minimal corresponding implementation,
 then green, then the relevant existing regression suite. Expected values must be
@@ -432,10 +432,10 @@ private counters, helper names, or call counts.
 
 ## 17. Chinese Comment Budget
 
-| Metric | Estimate | Method |
-| --- | --- | --- |
-| Effective changed code lines `E` | 409-753 | Include substantive production **and test** lines: R5 estimate `345-605` plus R7 blocked-guidance increment `64-148`; exclude imports, formatting-only lines, generated files, and pure moves. |
-| Required Chinese explanatory comments `C` | 62-113 | `if E = 0: C = 0`; otherwise `C >= ceil(E * 0.15)`. The implementation audit must recalculate the actual diff; the planned range is `ceil(409 * .15)=62` through `ceil(753 * .15)=113`. Comments must be adjacent to the transient-ledger boundary, duplicate-evidence rules, two-turn threshold, blocked-pending boundary, BFS mode persistence, and non-tautological test intent. |
+| Metric                                    | Estimate | Method                                                                                                                                                                                                                                                                                                                                                                              |
+| ----------------------------------------- | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Effective changed code lines `E`          | 409-753  | Include substantive production **and test** lines: R5 estimate `345-605` plus R7 blocked-guidance increment `64-148`; exclude imports, formatting-only lines, generated files, and pure moves.                                                                                                                                                                                      |
+| Required Chinese explanatory comments `C` | 62-113   | `if E = 0: C = 0`; otherwise `C >= ceil(E * 0.15)`. The implementation audit must recalculate the actual diff; the planned range is `ceil(409 * .15)=62` through `ceil(753 * .15)=113`. Comments must be adjacent to the transient-ledger boundary, duplicate-evidence rules, two-turn threshold, blocked-pending boundary, BFS mode persistence, and non-tautological test intent. |
 
 Qualifying comments must explain non-obvious invariants, not restate code. The
 planned comment topics are:
@@ -453,15 +453,15 @@ planned comment topics are:
 
 ## 18. Verification
 
-| Command | Working directory | Evidence produced |
-| --- | --- | --- |
-| `bun test test/session/prompt.test.ts -t 'goal'` | `packages/opencode` | Real provider/Tool/Message evidence for ordinary continuation, re-plan mode, no-progress ledger, and lifecycle exclusions. |
-| `bun test test/session/goal.test.ts -t 'continuationPrompt'` | `packages/opencode` | Ordinary/re-plan prompt contract, objective preservation, budget and audit language. |
-| `bun test test/tool/goal.test.ts -t 'blocked|complete|active'` | `packages/opencode` | Confirms GoalTool terminal/read/recovery behavior was not changed. |
-| `bun test test/tool/parameters.test.ts -t 'goal'` | `packages/opencode` | Confirms the model-visible Goal parameter description contains the first blocked exploration contract. |
-| `bun test test/session/prompt.test.ts test/session/goal.test.ts test/tool/goal.test.ts` | `packages/opencode` | Broader Goal regression across the affected interface chain. |
-| `bun test test/tool/parameters.test.ts test/tool/goal.test.ts` | `packages/opencode` | Full Tool schema and first blocked-pending response regression. |
-| `bun typecheck` | `packages/opencode` | Type safety for prompt metadata guards, mode contract, and test fixtures. |
+| Command                                                                                 | Working directory   | Evidence produced                                                                                                          |
+| --------------------------------------------------------------------------------------- | ------------------- | -------------------------------------------------------------------------------------------------------------------------- | ------------------- | ------------------------------------------------------------------ |
+| `bun test test/session/prompt.test.ts -t 'goal'`                                        | `packages/opencode` | Real provider/Tool/Message evidence for ordinary continuation, re-plan mode, no-progress ledger, and lifecycle exclusions. |
+| `bun test test/session/goal.test.ts -t 'continuationPrompt'`                            | `packages/opencode` | Ordinary/re-plan prompt contract, objective preservation, budget and audit language.                                       |
+| `bun test test/tool/goal.test.ts -t 'blocked                                            | complete            | active'`                                                                                                                   | `packages/opencode` | Confirms GoalTool terminal/read/recovery behavior was not changed. |
+| `bun test test/tool/parameters.test.ts -t 'goal'`                                       | `packages/opencode` | Confirms the model-visible Goal parameter description contains the first blocked exploration contract.                     |
+| `bun test test/session/prompt.test.ts test/session/goal.test.ts test/tool/goal.test.ts` | `packages/opencode` | Broader Goal regression across the affected interface chain.                                                               |
+| `bun test test/tool/parameters.test.ts test/tool/goal.test.ts`                          | `packages/opencode` | Full Tool schema and first blocked-pending response regression.                                                            |
+| `bun typecheck`                                                                         | `packages/opencode` | Type safety for prompt metadata guards, mode contract, and test fixtures.                                                  |
 
 No implementation or generated-file command is authorized in the current
 `approved-plan-only` goal. The commands above are the post-approval
@@ -469,14 +469,14 @@ verification contract, not evidence that implementation has already occurred.
 
 ## 19. Diff Budget
 
-| Metric | Estimate | Justification |
-| --- | --- | --- |
-| Files added | 0 production/test; 1 canonical plan in this phase | No new runtime module or fixture is needed. |
-| Files modified | 8 after approval | Two continuation owners, three GoalTool/model-visible carriers, and three affected behavior suites. |
-| Files deleted | 0 | No existing workaround or public path is superseded. |
-| Production lines | 139-278 | R5 continuation strategy plus the R7 first blocked-pending guidance carriers; no schema/API/migration. |
-| Test lines | 270-475 | R5 Prompt/continuation slices plus R7 GoalTool, parameter description, and blocked audit tests. |
-| Generated lines | 0 | No public schema or generated SDK change. |
+| Metric           | Estimate                                          | Justification                                                                                          |
+| ---------------- | ------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| Files added      | 0 production/test; 1 canonical plan in this phase | No new runtime module or fixture is needed.                                                            |
+| Files modified   | 8 after approval                                  | Two continuation owners, three GoalTool/model-visible carriers, and three affected behavior suites.    |
+| Files deleted    | 0                                                 | No existing workaround or public path is superseded.                                                   |
+| Production lines | 139-278                                           | R5 continuation strategy plus the R7 first blocked-pending guidance carriers; no schema/API/migration. |
+| Test lines       | 270-475                                           | R5 Prompt/continuation slices plus R7 GoalTool, parameter description, and blocked audit tests.        |
+| Generated lines  | 0                                                 | No public schema or generated SDK change.                                                              |
 
 ## 20. Real Risks and Open Decisions
 
@@ -546,13 +546,13 @@ The independent auditor must:
 
 ## 22. Plan Audit Record
 
-| Round | Audited revision | Full scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | R1 | yes | B-01 | `--filter` versus `-t` command-selection form | BLOCK | `ses_07e2fea6dffeqAdlII1bV6G29I` |
-| 2 | R2 | yes | B-01 | none | BLOCK | `ses_07e2c3c66ffeB1IV380xrpotAe` |
-| 3 | R3 | yes | none | deterministic verification-result signature; final `E/C` recalculation | APPROVE | `ses_07e23debbffeIS5HPEzAbdRMOt` |
-| 4 | R4 | yes | B-01 | deterministic verification-result signature; prompt length/context risk | BLOCK | `ses_07dfb90ddffe9vTypQkz9ojsZP` |
-| 5 | R5 | yes | B-01 (auditor) | verification-result fingerprint; prompt length | BLOCK by auditor; USER FORCE-APPROVE | `ses_07c960d53ffeeCldyWG4xKkNcl` + user force-approval messages |
+| Round | Audited revision | Full scope? | Blocking findings | Non-blocking findings                                                   | Result                               | Invocation reference                                            |
+| ----- | ---------------- | ----------- | ----------------- | ----------------------------------------------------------------------- | ------------------------------------ | --------------------------------------------------------------- |
+| 1     | R1               | yes         | B-01              | `--filter` versus `-t` command-selection form                           | BLOCK                                | `ses_07e2fea6dffeqAdlII1bV6G29I`                                |
+| 2     | R2               | yes         | B-01              | none                                                                    | BLOCK                                | `ses_07e2c3c66ffeB1IV380xrpotAe`                                |
+| 3     | R3               | yes         | none              | deterministic verification-result signature; final `E/C` recalculation  | APPROVE                              | `ses_07e23debbffeIS5HPEzAbdRMOt`                                |
+| 4     | R4               | yes         | B-01              | deterministic verification-result signature; prompt length/context risk | BLOCK                                | `ses_07dfb90ddffe9vTypQkz9ojsZP`                                |
+| 5     | R5               | yes         | B-01 (auditor)    | verification-result fingerprint; prompt length                          | BLOCK by auditor; USER FORCE-APPROVE | `ses_07c960d53ffeeCldyWG4xKkNcl` + user force-approval messages |
 
 ### Round 1 verdict (copied verbatim)
 
@@ -742,12 +742,12 @@ state, or downstream terminal workaround was introduced; see §27.3 and §27.7.
 
 ### Chinese Comment Calculation
 
-| Metric | Actual | Exclusions and evidence |
-| --- | --- | --- |
-| Effective changed code lines `E` | Recomputed by final implementation audit | Current estimate is superseded after audit corrections. |
-| Qualifying Chinese comment lines `C` | Recomputed by final implementation audit | Only nearby Chinese explanations count. |
-| Ratio `C / E` | Pending final verdict | Must satisfy `C >= ceil(E * 0.15)`. |
-| Required minimum `C` | `max(1, ceil(E * 0.15))` | The gate includes substantive test lines. |
+| Metric                               | Actual                                   | Exclusions and evidence                                 |
+| ------------------------------------ | ---------------------------------------- | ------------------------------------------------------- |
+| Effective changed code lines `E`     | Recomputed by final implementation audit | Current estimate is superseded after audit corrections. |
+| Qualifying Chinese comment lines `C` | Recomputed by final implementation audit | Only nearby Chinese explanations count.                 |
+| Ratio `C / E`                        | Pending final verdict                    | Must satisfy `C >= ceil(E * 0.15)`.                     |
+| Required minimum `C`                 | `max(1, ceil(E * 0.15))`                 | The gate includes substantive test lines.               |
 
 ### Remaining Unverified Items
 
@@ -758,13 +758,13 @@ state, or downstream terminal workaround was introduced; see §27.3 and §27.7.
 
 ## 24. Implementation Audit Record
 
-| Round | Plan revision | Full original scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | R7 | yes | B-01 incomplete structured-evidence coverage | verification evidence not independently reproduced | BLOCK | `ses_07c5dd1b3ffelkk2wDNk2uE6xb` |
-| 2 | R7 | yes | B-01 duplicate tests; B-02 raw identity; B-03 `any`; B-04 comment gate | full prompt timeout/503 | BLOCK | `ses_07c476b70ffetu7D9I7NZTj5mI` |
-| 3 | R7 | yes | B-01 search key not producer realpath-canonical | full prompt timeout/503 | BLOCK | `ses_07c2e4687ffeU4M70nrolXSmgc` |
-| 4 | R7 | yes | B-01 active test; B-02 read test; B-03 verification intermediate assertions | stale §23 record | BLOCK | `ses_07c23cca9ffeF2pWeIhBijIDYd` |
-| 5 | R7 | user override | B-01 full-suite transient timeout during audit | current rerun 91 pass, 0 fail; expected 503 log | CLOSED BY USER OVERRIDE | `ses_07c0126d1ffemGlIz2T4X7GhhZ` + user override |
+| Round | Plan revision | Full original scope? | Blocking findings                                                           | Non-blocking findings                              | Result                  | Invocation reference                             |
+| ----- | ------------- | -------------------- | --------------------------------------------------------------------------- | -------------------------------------------------- | ----------------------- | ------------------------------------------------ |
+| 1     | R7            | yes                  | B-01 incomplete structured-evidence coverage                                | verification evidence not independently reproduced | BLOCK                   | `ses_07c5dd1b3ffelkk2wDNk2uE6xb`                 |
+| 2     | R7            | yes                  | B-01 duplicate tests; B-02 raw identity; B-03 `any`; B-04 comment gate      | full prompt timeout/503                            | BLOCK                   | `ses_07c476b70ffetu7D9I7NZTj5mI`                 |
+| 3     | R7            | yes                  | B-01 search key not producer realpath-canonical                             | full prompt timeout/503                            | BLOCK                   | `ses_07c2e4687ffeU4M70nrolXSmgc`                 |
+| 4     | R7            | yes                  | B-01 active test; B-02 read test; B-03 verification intermediate assertions | stale §23 record                                   | BLOCK                   | `ses_07c23cca9ffeF2pWeIhBijIDYd`                 |
+| 5     | R7            | user override        | B-01 full-suite transient timeout during audit                              | current rerun 91 pass, 0 fail; expected 503 log    | CLOSED BY USER OVERRIDE | `ses_07c0126d1ffemGlIz2T4X7GhhZ` + user override |
 
 The user explicitly overrode the final audit blocker after the complete Prompt
 suite rerun passed. The implementation is therefore recorded as `verified`
@@ -818,12 +818,12 @@ session-goal-continuation close tag
 
 只有以下值允许动态替换：
 
-| Placeholder | Source | Rule |
-| --- | --- | --- |
-| `{{ESCAPED_OBJECTIVE}}` | `goal.objective` | 沿用现有 XML escaping；用户文本只能作为 objective data。 |
-| `{{TOKENS_USED}}` | `goal.tokensUsed` | 十进制数值。 |
-| `{{TOKEN_BUDGET}}` | `goal.tokenBudget` | `null` 时写 `unbounded`。 |
-| `{{TOKENS_REMAINING}}` | `max(0, tokenBudget - tokensUsed)` | 无预算时写 `unbounded`。 |
+| Placeholder             | Source                             | Rule                                                     |
+| ----------------------- | ---------------------------------- | -------------------------------------------------------- |
+| `{{ESCAPED_OBJECTIVE}}` | `goal.objective`                   | 沿用现有 XML escaping；用户文本只能作为 objective data。 |
+| `{{TOKENS_USED}}`       | `goal.tokensUsed`                  | 十进制数值。                                             |
+| `{{TOKEN_BUDGET}}`      | `goal.tokenBudget`                 | `null` 时写 `unbounded`。                                |
+| `{{TOKENS_REMAINING}}`  | `max(0, tokenBudget - tokensUsed)` | 无预算时写 `unbounded`。                                 |
 
 `noProgressTurns`、ledger key、内部 fingerprint、MessageID 和 Tool metadata
 不得进入 prompt。模型只需要知道 strategy 已切换及证据合同，不需要看到内部
@@ -1010,13 +1010,13 @@ Do not call the goal tool unless the goal is complete or the strict blocked audi
 
 示例输入：
 
-| Field | Example value |
-| --- | --- |
-| Goal objective | `Audit 400 files, identify every affected interface, producer, consumer, and behavior path, then deliver a requirement-by-requirement report with verification evidence.` |
-| Tokens used | `125000` |
-| Token budget | `400000` |
-| Tokens remaining | `275000` |
-| Strategy state | `replanRequired=true` |
+| Field            | Example value                                                                                                                                                             |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Goal objective   | `Audit 400 files, identify every affected interface, producer, consumer, and behavior path, then deliver a requirement-by-requirement report with verification evidence.` |
+| Tokens used      | `125000`                                                                                                                                                                  |
+| Token budget     | `400000`                                                                                                                                                                  |
+| Tokens remaining | `275000`                                                                                                                                                                  |
+| Strategy state   | `replanRequired=true`                                                                                                                                                     |
 
 系统最终注入的 synthetic user Message text 必须完整等于以下英文结果：
 
@@ -1140,8 +1140,8 @@ Blocked attempt 1 of 2. Before marking as blocked, re-read relevant files, searc
   条件。
 
 优化目标是提高继续探索的成功率，不是让模型永远拒绝 blocked。首次响应必须同时
-  保留：`attempt 1 of 2`、Goal active、四类探索动作、发现路径后继续、下一 eligible
-  turn exact same trimmed reason、以及“困难/不确定/未完成不等于 blocked”。
+保留：`attempt 1 of 2`、Goal active、四类探索动作、发现路径后继续、下一 eligible
+turn exact same trimmed reason、以及“困难/不确定/未完成不等于 blocked”。
 
 ### 26.2 唯一英文响应文本
 
@@ -1165,11 +1165,11 @@ If the same blocker still prevents meaningful progress after this exploration, c
 
 ### 26.3 三个模型可见面的组装规则
 
-| Surface | Required change | Ownership |
-| --- | --- | --- |
-| `GoalTool.execute` blocked-pending output | 返回上面的完整英文 guidance，并动态保留 `attempt`/`required`；实际第二次确认仍由 domain transaction 决定。 | `packages/opencode/src/tool/goal.ts` |
-| `GoalTool.Parameters` description + `goal.txt` | 让模型在调用工具前就看到“first call keeps active / explore / viable path continues / same reason only next turn”的短版契约。 | `packages/opencode/src/tool/goal.ts`, `packages/opencode/src/tool/goal.txt` |
-| `SessionGoal.continuationPrompt` blocked audit | 把旧的泛化 “call blocked when blocker prevents progress” 前置为同一探索边界：先重新检查，找到路径就继续，只有相同条件仍成立才在下一 eligible turn 复用 reason。 | `packages/opencode/src/session/goal.ts` |
+| Surface                                        | Required change                                                                                                                                                 | Ownership                                                                   |
+| ---------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
+| `GoalTool.execute` blocked-pending output      | 返回上面的完整英文 guidance，并动态保留 `attempt`/`required`；实际第二次确认仍由 domain transaction 决定。                                                      | `packages/opencode/src/tool/goal.ts`                                        |
+| `GoalTool.Parameters` description + `goal.txt` | 让模型在调用工具前就看到“first call keeps active / explore / viable path continues / same reason only next turn”的短版契约。                                    | `packages/opencode/src/tool/goal.ts`, `packages/opencode/src/tool/goal.txt` |
+| `SessionGoal.continuationPrompt` blocked audit | 把旧的泛化 “call blocked when blocker prevents progress” 前置为同一探索边界：先重新检查，找到路径就继续，只有相同条件仍成立才在下一 eligible turn 复用 reason。 | `packages/opencode/src/session/goal.ts`                                     |
 
 不向 response 拼接 objective、Tool output、path、command、reason 或模型自述，避免
 上下文膨胀和 prompt injection。`reason` 仍只由 transition 输入持久化和 exact-match
@@ -1195,24 +1195,24 @@ If the same blocker still prevents meaningful progress after this exploration, c
 
 ### 26.5 R7 文件与注释预算增量
 
-| File | Responsibility | Estimated effective lines |
-| --- | --- | --- |
-| `packages/opencode/src/tool/goal.ts` | 首次 pending response 与参数 description 对齐。 | +12 to +25 |
-| `packages/opencode/src/tool/goal.txt` | 模型调用前的短版 blocked contract 对齐。 | +4 to +10 |
-| `packages/opencode/src/session/goal.ts` | continuation blocked audit 文案对齐。 | +8 to +18 |
-| `packages/opencode/test/tool/goal.test.ts` | 首次 response 的完整行为契约和长度测试。 | +25 to +55 |
-| `packages/opencode/test/tool/parameters.test.ts` | schema description 对齐测试。 | +5 to +15 |
-| `packages/opencode/test/session/goal.test.ts` | continuation blocked guidance 测试。 | +10 to +25 |
+| File                                             | Responsibility                                  | Estimated effective lines |
+| ------------------------------------------------ | ----------------------------------------------- | ------------------------- |
+| `packages/opencode/src/tool/goal.ts`             | 首次 pending response 与参数 description 对齐。 | +12 to +25                |
+| `packages/opencode/src/tool/goal.txt`            | 模型调用前的短版 blocked contract 对齐。        | +4 to +10                 |
+| `packages/opencode/src/session/goal.ts`          | continuation blocked audit 文案对齐。           | +8 to +18                 |
+| `packages/opencode/test/tool/goal.test.ts`       | 首次 response 的完整行为契约和长度测试。        | +25 to +55                |
+| `packages/opencode/test/tool/parameters.test.ts` | schema description 对齐测试。                   | +5 to +15                 |
+| `packages/opencode/test/session/goal.test.ts`    | continuation blocked guidance 测试。            | +10 to +25                |
 
 这些增量纳入现有 `E/C` 计算，implementation audit 必须按最终 diff 重新计算；中文
 解释性注释继续按 `C >= ceil(E * 0.15)` 执行，不能用文案本身代替代码注释门禁。
 
 ### 26.6 R7 审计与用户放行状态
 
-| Round | Revision | Full scope? | Result | Invocation |
-| --- | --- | --- | --- | --- |
-| 6 | R6 | yes | BLOCK | `ses_07c7506c5ffeb4gRnEp733Hugf` |
-| 7 | R7 | user force-approval | APPROVED BY USER | `user message: R7可以了` |
+| Round | Revision | Full scope?         | Result           | Invocation                       |
+| ----- | -------- | ------------------- | ---------------- | -------------------------------- |
+| 6     | R6       | yes                 | BLOCK            | `ses_07c7506c5ffeb4gRnEp733Hugf` |
+| 7     | R7       | user force-approval | APPROVED BY USER | `user message: R7可以了`         |
 
 R5 implementation 已经开始；R7 的 blocked-pending guidance 现在由用户明确放行，
 可以继续 TDD。R6 auditor 的 B-01/B-02 保留为历史记录，不改变用户对 R7 的强制
@@ -1248,26 +1248,26 @@ Administrative status:
 
 ### 27.2 Verification
 
-| Command | cwd | Result |
-| --- | --- | --- |
-| `bun test test/tool/goal.test.ts` | `packages/opencode` | 11 pass, 0 fail |
-| `bun test test/tool/parameters.test.ts` | `packages/opencode` | 63 pass, 0 fail, 16 snapshots |
-| `bun test test/session/goal.test.ts` | `packages/opencode` | 48 pass, 0 fail |
-| `bun test test/session/prompt.test.ts` | `packages/opencode` | 91 pass, 0 fail; fixture emitted the expected transient 503 log |
-| `bun test test/session/prompt.test.ts -t 'goal progress gate|normalized probes|verification results|completed Todo'` | `packages/opencode` | 6 pass, 0 fail |
-| `bun test test/session/prompt.test.ts -t 'suppresses duplicate normalized'` | `packages/opencode` | 1 pass, 0 fail; includes symlink-equivalent search scope |
-| `bun typecheck` | `packages/opencode` | pass (`tsgo --noEmit`) |
-| `git diff --check -- <scoped files>` | repository root | pass |
+| Command                                                                     | cwd                 | Result                                                          |
+| --------------------------------------------------------------------------- | ------------------- | --------------------------------------------------------------- | ---------------- | ------------------- | -------------- |
+| `bun test test/tool/goal.test.ts`                                           | `packages/opencode` | 11 pass, 0 fail                                                 |
+| `bun test test/tool/parameters.test.ts`                                     | `packages/opencode` | 63 pass, 0 fail, 16 snapshots                                   |
+| `bun test test/session/goal.test.ts`                                        | `packages/opencode` | 48 pass, 0 fail                                                 |
+| `bun test test/session/prompt.test.ts`                                      | `packages/opencode` | 91 pass, 0 fail; fixture emitted the expected transient 503 log |
+| `bun test test/session/prompt.test.ts -t 'goal progress gate                | normalized probes   | verification results                                            | completed Todo'` | `packages/opencode` | 6 pass, 0 fail |
+| `bun test test/session/prompt.test.ts -t 'suppresses duplicate normalized'` | `packages/opencode` | 1 pass, 0 fail; includes symlink-equivalent search scope        |
+| `bun typecheck`                                                             | `packages/opencode` | pass (`tsgo --noEmit`)                                          |
+| `git diff --check -- <scoped files>`                                        | repository root     | pass                                                            |
 
 ### 27.3 Final implementation scope
 
-| Area | Files | Responsibility |
-| --- | --- | --- |
-| Continuation prompt | `packages/opencode/src/session/goal.ts` | ordinary/replan mode and first blocked continuation guidance |
-| Progress gate | `packages/opencode/src/session/prompt.ts` | run-local evidence ledger, exploration/advancement classification, two-turn replan switch |
-| First blocked Tool result | `packages/opencode/src/tool/goal.ts` | concise BFS guidance while preserving `blocked-pending` transition |
-| Tool description | `packages/opencode/src/tool/goal.txt` | pre-call model-visible contract aligned with the Tool result |
-| Behavior tests | `packages/opencode/test/session/goal.test.ts`, `packages/opencode/test/session/prompt.test.ts`, `packages/opencode/test/tool/goal.test.ts`, `packages/opencode/test/tool/parameters.test.ts` | red-green behavior and wire-shape coverage |
+| Area                      | Files                                                                                                                                                                                        | Responsibility                                                                            |
+| ------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| Continuation prompt       | `packages/opencode/src/session/goal.ts`                                                                                                                                                      | ordinary/replan mode and first blocked continuation guidance                              |
+| Progress gate             | `packages/opencode/src/session/prompt.ts`                                                                                                                                                    | run-local evidence ledger, exploration/advancement classification, two-turn replan switch |
+| First blocked Tool result | `packages/opencode/src/tool/goal.ts`                                                                                                                                                         | concise BFS guidance while preserving `blocked-pending` transition                        |
+| Tool description          | `packages/opencode/src/tool/goal.txt`                                                                                                                                                        | pre-call model-visible contract aligned with the Tool result                              |
+| Behavior tests            | `packages/opencode/test/session/goal.test.ts`, `packages/opencode/test/session/prompt.test.ts`, `packages/opencode/test/tool/goal.test.ts`, `packages/opencode/test/tool/parameters.test.ts` | red-green behavior and wire-shape coverage                                                |
 
 ### 27.4 Comment gate evidence
 

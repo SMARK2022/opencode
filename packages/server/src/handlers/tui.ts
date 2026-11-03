@@ -12,17 +12,26 @@ export const TuiHandler = HttpApiBuilder.group(Api, "server.tui", (handlers) =>
       const operation = transcribeVoiceUpload(payload, signal)
       void operation.then(
         (value) => resume(Effect.succeed(value)),
-        (error) => resume(Effect.fail(new VoiceError({ message: error instanceof Error ? error.message : String(error) }))),
+        (error) =>
+          resume(Effect.fail(new VoiceError({ message: error instanceof Error ? error.message : String(error) }))),
       )
       // 不以abort即返回冒充操作完成，避免下一请求抢在锁或WAV清理之前开始。
-      return Effect.promise(() => operation.then(() => undefined, () => undefined))
+      return Effect.promise(() =>
+        operation.then(
+          () => undefined,
+          () => undefined,
+        ),
+      )
     }),
   ),
 ).pipe(
   Layer.provide(
-    Layer.succeed(VoiceUpload, VoiceUpload.of((effect) =>
-      // 限额作用于解码过程，不先把任意大的上传装进内存再拒绝。
-      effect.pipe(Effect.provideService(HttpIncomingMessage.MaxBodySize, FileSystem.Size(50 * 1024 * 1024))),
-    )),
+    Layer.succeed(
+      VoiceUpload,
+      VoiceUpload.of((effect) =>
+        // 限额作用于解码过程，不先把任意大的上传装进内存再拒绝。
+        effect.pipe(Effect.provideService(HttpIncomingMessage.MaxBodySize, FileSystem.Size(50 * 1024 * 1024))),
+      ),
+    ),
   ),
 )

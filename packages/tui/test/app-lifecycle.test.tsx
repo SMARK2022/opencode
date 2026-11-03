@@ -32,8 +32,7 @@ test("SIGHUP clears title and disposes scoped resources once", async () => {
       run({
         url: "http://test",
         directory,
-        config: createTuiResolvedConfig({ plugin_enabled: {} })
-        ,
+        config: createTuiResolvedConfig({ plugin_enabled: {} }),
         testTransport: { events: events.source, fetch: calls.fetch },
         args: {},
         pluginHost: {
@@ -98,8 +97,7 @@ test("app.exit prints the session epilogue after scoped cleanup", async () => {
       run({
         url: "http://test",
         directory,
-        config: createTuiResolvedConfig({ plugin_enabled: {} })
-        ,
+        config: createTuiResolvedConfig({ plugin_enabled: {} }),
         testTransport: { events: events.source, fetch: calls.fetch },
         args: { continue: true },
         pluginHost: {

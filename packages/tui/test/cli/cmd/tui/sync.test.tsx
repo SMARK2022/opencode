@@ -7,7 +7,16 @@ import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { tmpdir } from "../../../fixture/fixture"
 import { directory, json, mount, wait, worktree } from "./sync-fixture"
 import type { useSync } from "../../../../src/context/sync"
-import type { AssistantMessage, GlobalEvent, Message, Part, PermissionRequest, QuestionRequest, ToolPart, UserMessage } from "@opencode-ai/sdk/v2"
+import type {
+  AssistantMessage,
+  GlobalEvent,
+  Message,
+  Part,
+  PermissionRequest,
+  QuestionRequest,
+  ToolPart,
+  UserMessage,
+} from "@opencode-ai/sdk/v2"
 import type { TuiSlotPlugin, TuiPluginApi } from "@opencode-ai/plugin/tui"
 import type { JSX } from "solid-js"
 import { createBuiltinPlugins } from "../../../../src/feature-plugins/builtins"
@@ -110,20 +119,38 @@ test("tool raw deltas update pending state and ignore late running fragments", a
   const part = {
     id: SessionV1.PartID.ascending(),
     messageID: SessionV1.MessageID.ascending(),
-    sessionID: SessionSchema.ID.create(), type: "tool" as const,
-    callID: "call-raw", tool: "bash", state: { status: "pending" as const, input: {}, raw: "" },
+    sessionID: SessionSchema.ID.create(),
+    type: "tool" as const,
+    callID: "call-raw",
+    tool: "bash",
+    state: { status: "pending" as const, input: {}, raw: "" },
   } satisfies SessionV1.ToolPart
   const update = (state: typeof part.state | { status: "running"; input: { cmd: string }; time: { start: number } }) =>
-    emit({ directory: "/tmp/other", project: "proj_test", payload: {
-      id: EventV2.ID.create(),
-      type: "message.part.updated", properties: { sessionID: part.sessionID, part: { ...part, state }, time: 1 },
-    } })
-  const delta = (text: string) => emit({ directory: "/tmp/other", project: "proj_test", payload: {
-    id: EventV2.ID.create(),
-    type: "message.part.delta", properties: {
-      sessionID: part.sessionID, messageID: part.messageID, partID: part.id, field: "raw", delta: text,
-    },
-  } })
+    emit({
+      directory: "/tmp/other",
+      project: "proj_test",
+      payload: {
+        id: EventV2.ID.create(),
+        type: "message.part.updated",
+        properties: { sessionID: part.sessionID, part: { ...part, state }, time: 1 },
+      },
+    })
+  const delta = (text: string) =>
+    emit({
+      directory: "/tmp/other",
+      project: "proj_test",
+      payload: {
+        id: EventV2.ID.create(),
+        type: "message.part.delta",
+        properties: {
+          sessionID: part.sessionID,
+          messageID: part.messageID,
+          partID: part.id,
+          field: "raw",
+          delta: text,
+        },
+      },
+    })
   try {
     // 走真实 SDK event 与 SyncProvider，避免在测试中复制 reducer 算法。
     update(part.state)
@@ -147,7 +174,9 @@ test("tool raw deltas update pending state and ignore late running fragments", a
     await wait(() => sync.data.vcs?.branch === "raw-done")
     expect(sync.data.part[part.messageID][0]).toMatchObject({ state: { status: "running", input: { cmd: "pwd" } } })
     expect(Object.hasOwn(sync.data.part[part.messageID][0], "raw")).toBe(false)
-  } finally { app.renderer.destroy() }
+  } finally {
+    app.renderer.destroy()
+  }
 })
 
 test("unloaded deletion events preserve projection absence and later live delivery", async () => {
@@ -155,21 +184,30 @@ test("unloaded deletion events preserve projection absence and later live delive
   await Bun.write(`${tmp.path}/kv.json`, "{}")
   const { app, emit, sync } = await mount(undefined, tmp.path)
   const info = assistantMessage()
-  const hidden = { ...info, id: "msg_unloaded", sessionID: "ses_unloaded", hidden: { time: 1, reason: "undo" } } satisfies AssistantMessage
+  const hidden = {
+    ...info,
+    id: "msg_unloaded",
+    sessionID: "ses_unloaded",
+    hidden: { time: 1, reason: "undo" },
+  } satisfies AssistantMessage
   try {
     // 合法但未加载的投影事件必须走真实队列，不能因缺席数组击穿后续消费。
     emit(messageEvent(hidden))
     emit({
-      directory, project: "proj_test",
+      directory,
+      project: "proj_test",
       payload: {
-        id: "evt_unloaded_message_removed", type: "message.removed",
+        id: "evt_unloaded_message_removed",
+        type: "message.removed",
         properties: { sessionID: hidden.sessionID, messageID: hidden.id },
       },
     })
     emit({
-      directory, project: "proj_test",
+      directory,
+      project: "proj_test",
       payload: {
-        id: "evt_unloaded_part_removed", type: "message.part.removed",
+        id: "evt_unloaded_part_removed",
+        type: "message.part.removed",
         properties: { sessionID: hidden.sessionID, messageID: hidden.id, partID: "part_unloaded" },
       },
     })
@@ -213,13 +251,17 @@ describe("tui sync", () => {
     const { app, emit, sync } = await mount((url, request, init) => {
       if (url.pathname === "/session/ses_1") return json({ id: "ses_1", time: { created: 1, updated: 1 }, directory })
       if (url.pathname === "/session/ses_1/messages" || url.pathname === "/session/ses_1/message") {
-        const projection = request?.headers.get("x-opencode-tui-message-projection") ?? new Headers(init?.headers).get("x-opencode-tui-message-projection")
+        const projection =
+          request?.headers.get("x-opencode-tui-message-projection") ??
+          new Headers(init?.headers).get("x-opencode-tui-message-projection")
         if (projection) messageProjections.push(projection)
         return json([{ info: message, parts: [] }])
       }
       if (url.pathname === "/session/ses_1/todo") return json([])
       if (url.pathname === "/session/ses_1/diff") {
-        const projection = request?.headers.get("x-opencode-tui-message-projection") ?? new Headers(init?.headers).get("x-opencode-tui-message-projection")
+        const projection =
+          request?.headers.get("x-opencode-tui-message-projection") ??
+          new Headers(init?.headers).get("x-opencode-tui-message-projection")
         if (projection) diffProjections.push(projection)
         return json(diffs, {
           headers: {
@@ -336,7 +378,10 @@ describe("tui sync", () => {
       if (content) view = () => content({} as never, { session_id: "ses_1" })
       return "files-test"
     }
-    const register = spyOn(api.slots as { register: (definition: TuiSlotPlugin) => string }, "register").mockImplementation(capture)
+    const register = spyOn(
+      api.slots as { register: (definition: TuiSlotPlugin) => string },
+      "register",
+    ).mockImplementation(capture)
     await plugin.tui(api, undefined, {
       id: plugin.id,
       source: "internal",
@@ -377,7 +422,12 @@ describe("tui sync", () => {
     const pending = await testRender(view, { width: 60, height: 8, footerHeight: 0, useThread: false })
     try {
       await pending.renderOnce()
-      expect(pending.captureCharFrame().split("\n").map((line) => line.trim())).not.toContain("...")
+      expect(
+        pending
+          .captureCharFrame()
+          .split("\n")
+          .map((line) => line.trim()),
+      ).not.toContain("...")
     } finally {
       pending.renderer.destroy()
     }
@@ -769,7 +819,8 @@ describe("tui sync", () => {
       await wait(() => sync.data.permission.ses_1?.[0]?.id === permission.id)
       await wait(() => sync.data.question.ses_1?.[0]?.id === question.id)
 
-      if (!stalePermissionSnapshot || !staleQuestionSnapshot) throw new Error("stale reconnect snapshots were not requested")
+      if (!stalePermissionSnapshot || !staleQuestionSnapshot)
+        throw new Error("stale reconnect snapshots were not requested")
       // #192：竞态守卫比较 refreshVersion，旧响应即使后到也不写 store
       stalePermissionSnapshot()
       staleQuestionSnapshot()
@@ -841,11 +892,7 @@ describe("tui sync", () => {
   test("delivers cross-project session events into the active session projection", async () => {
     await using tmp = await tmpdir()
     await Bun.write(`${tmp.path}/kv.json`, "{}")
-    const { app, emit, sync, route } = await mount(
-      () => undefined,
-      tmp.path,
-      { type: "session", sessionID: "ses_1" },
-    )
+    const { app, emit, sync, route } = await mount(() => undefined, tmp.path, { type: "session", sessionID: "ses_1" })
     try {
       const foreignProject = "proj_session_owner"
       const info = assistantMessage()
@@ -859,7 +906,11 @@ describe("tui sync", () => {
       emit({
         directory: "/tmp/other",
         project: foreignProject,
-        payload: { id: "evt_cross_part", type: "message.part.updated", properties: { sessionID: part.sessionID, part, time: 1 } },
+        payload: {
+          id: "evt_cross_part",
+          type: "message.part.updated",
+          properties: { sessionID: part.sessionID, part, time: 1 },
+        },
       })
       await wait(() => sync.data.part[part.messageID]?.[0]?.id === part.id)
       expect(sync.data.message.ses_1?.[0]).toMatchObject(info)
@@ -867,10 +918,26 @@ describe("tui sync", () => {
       // route切换必须重新判定Session资格，不能把初始会话缓存进订阅。
       route.navigate({ type: "session", sessionID: "ses_other" })
       const other = { ...info, id: "msg_other", sessionID: "ses_other" }
-      emit({ directory, project: foreignProject, payload: { id: "evt_cross_other", type: "message.updated", properties: { sessionID: other.sessionID, info: other } } })
+      emit({
+        directory,
+        project: foreignProject,
+        payload: {
+          id: "evt_cross_other",
+          type: "message.updated",
+          properties: { sessionID: other.sessionID, info: other },
+        },
+      })
       await wait(() => sync.data.message.ses_other?.[0]?.id === other.id)
       const rejected = { ...info, id: "msg_rejected", sessionID: "ses_rejected" }
-      emit({ directory, project: foreignProject, payload: { id: "evt_cross_rejected", type: "message.updated", properties: { sessionID: rejected.sessionID, info: rejected } } })
+      emit({
+        directory,
+        project: foreignProject,
+        payload: {
+          id: "evt_cross_rejected",
+          type: "message.updated",
+          properties: { sessionID: rejected.sessionID, info: rejected },
+        },
+      })
       emit(branchEvent("route-switch-processed"))
       await wait(() => sync.data.vcs?.branch === "route-switch-processed")
       expect(sync.data.message.ses_rejected).toBeUndefined()
@@ -893,8 +960,7 @@ describe("tui sync", () => {
     // 与 snapshot 末条同毫秒，较大的 ID 是服务端合同规定的稳定 tie-break。
     const target = userMessage("msg_000100000001", 300)
     const { app, emit, sync } = await mount((url) => {
-      if (url.pathname === "/session/ses_1")
-        return json({ id: "ses_1", time: { created: 1, updated: 1 }, directory })
+      if (url.pathname === "/session/ses_1") return json({ id: "ses_1", time: { created: 1, updated: 1 }, directory })
       if (url.pathname === "/session/ses_1/message" || url.pathname === "/session/ses_1/messages")
         return json(history.map((info) => ({ info, parts: [] })))
       if (url.pathname === "/session/ses_1/todo") return json([])
@@ -981,8 +1047,7 @@ describe("tui sync", () => {
     const bmp = userMessage("msg_\ue000", 100)
     const nonBmp = userMessage("msg_\u{10000}", 100)
     const { app, emit, sync } = await mount((url) => {
-      if (url.pathname === "/session/ses_1")
-        return json({ id: "ses_1", time: { created: 1, updated: 1 }, directory })
+      if (url.pathname === "/session/ses_1") return json({ id: "ses_1", time: { created: 1, updated: 1 }, directory })
       if (url.pathname === "/session/ses_1/message" || url.pathname === "/session/ses_1/messages")
         return json([upper, lower, bmp, nonBmp].map((info) => ({ info, parts: [] })))
       if (url.pathname === "/session/ses_1/todo") return json([])
@@ -993,13 +1058,23 @@ describe("tui sync", () => {
     try {
       await sync.session.sync("ses_1", { force: true })
       // 字面expected独立规定UTF-8顺序，非BMP必须在U+E000之后，不能复用生产比较器生成答案。
-      expect(sync.data.message.ses_1?.map((message) => message.id)).toEqual(["msg_B", "msg_a", "msg_\ue000", "msg_\u{10000}"])
+      expect(sync.data.message.ses_1?.map((message) => message.id)).toEqual([
+        "msg_B",
+        "msg_a",
+        "msg_\ue000",
+        "msg_\u{10000}",
+      ])
 
       emit(messageEvent({ ...upper, agent: "binary-updated" }))
       emit(branchEvent("binary-updated"))
       await wait(() => sync.data.vcs?.branch === "binary-updated")
       // update 必须命中 snapshot 原位；locale 顺序不一致会在末尾插入第二条 msg_B。
-      expect(sync.data.message.ses_1?.map((message) => message.id)).toEqual(["msg_B", "msg_a", "msg_\ue000", "msg_\u{10000}"])
+      expect(sync.data.message.ses_1?.map((message) => message.id)).toEqual([
+        "msg_B",
+        "msg_a",
+        "msg_\ue000",
+        "msg_\u{10000}",
+      ])
       expect(sync.data.message.ses_1?.[0]).toMatchObject({ agent: "binary-updated" })
 
       emit(messageEvent({ ...upper, hidden: { time: 101, reason: "undo" } }))
@@ -1153,7 +1228,6 @@ function reasoningPart(id = "part_reasoning", text = ""): Part {
   } as Part
 }
 
-
 // 构造 text delta 事件，模拟流式 token 到达（field="text"）
 function textDeltaEvent(id: string, delta: string, partID = "part_text"): GlobalEvent {
   return {
@@ -1166,7 +1240,6 @@ function textDeltaEvent(id: string, delta: string, partID = "part_text"): Global
     },
   }
 }
-
 
 function deltaEvent(id: string, delta: string, partID = "part_1"): GlobalEvent {
   // #186：测试事件工厂：field 固定 raw，覆盖 pending tool 路径
@@ -1345,8 +1418,7 @@ describe("tui sync part delta coalesce (#186)", () => {
 
       emit(partEvent(completedShellPart("done")))
       await wait(
-        () =>
-          sync.data.part.msg_1?.[0]?.type === "tool" && sync.data.part.msg_1[0].state.status === "completed",
+        () => sync.data.part.msg_1?.[0]?.type === "tool" && sync.data.part.msg_1[0].state.status === "completed",
       )
       await sync.session.sync("ses_1", { force: true })
       expect(sync.data.part.msg_1?.[0]).toMatchObject({ state: { status: "completed", output: "done" } })
@@ -1613,16 +1685,35 @@ describe("tui sync memory lifetime", () => {
   const sid = "ses_1"
   let lifeSeq = 0
   function lifeMessage(id: string, session = sid, created = 1): UserMessage {
-    return { id, sessionID: session, role: "user", time: { created }, agent: "build", model: { providerID: "provider", modelID: "model" } }
+    return {
+      id,
+      sessionID: session,
+      role: "user",
+      time: { created },
+      agent: "build",
+      model: { providerID: "provider", modelID: "model" },
+    }
   }
   function lifePart(messageID: string, session = sid, text = "payload", id = `prt_${messageID}`): Part {
     return { id, sessionID: session, messageID, type: "text", text } as Part
   }
   function lifeEvent(type: string, properties: object): GlobalEvent {
-    return { directory, project: "proj_test", payload: { id: `evt_life_${++lifeSeq}`, type, properties } } as GlobalEvent
+    return {
+      directory,
+      project: "proj_test",
+      payload: { id: `evt_life_${++lifeSeq}`, type, properties },
+    } as GlobalEvent
   }
   function lifeSession(id = sid) {
-    return { id, directory, projectID: "proj_test", slug: id, version: "1", title: id, time: { created: 1, updated: 1 } }
+    return {
+      id,
+      directory,
+      projectID: "proj_test",
+      slug: id,
+      version: "1",
+      title: id,
+      time: { created: 1, updated: 1 },
+    }
   }
   function lifeTransport(rows: () => { info: UserMessage; parts: Part[] }[]) {
     // [0624] 服务任意 Session：正文消费计数下，测试可对 sibling Session 显式 acquireParts；
@@ -1649,7 +1740,11 @@ describe("tui sync memory lifetime", () => {
   for (const mode of ["removed", "hidden"] as const) {
     test(`${mode} Message releases only its own Part payload`, async () => {
       // [0624] sid 由 route 持有正文使用权；ses_other 用显式 acquisition（与可见 Task 卡片同级）持有。
-      const { app, emit, sync } = await mount(lifeTransport(() => []), undefined, { type: "session", sessionID: sid })
+      const { app, emit, sync } = await mount(
+        lifeTransport(() => []),
+        undefined,
+        { type: "session", sessionID: sid },
+      )
       const otherParts = await sync.session.acquireParts("ses_other")
       try {
         put(emit, "msg_drop")
@@ -1657,7 +1752,13 @@ describe("tui sync memory lifetime", () => {
         put(emit, "msg_other", "ses_other", "other")
         await pump(emit, sync)
         if (mode === "removed") emit(lifeEvent("message.removed", { sessionID: sid, messageID: "msg_drop" }))
-        if (mode === "hidden") emit(lifeEvent("message.updated", { sessionID: sid, info: { ...lifeMessage("msg_drop"), hidden: { time: 2, reason: "undo" } } }))
+        if (mode === "hidden")
+          emit(
+            lifeEvent("message.updated", {
+              sessionID: sid,
+              info: { ...lifeMessage("msg_drop"), hidden: { time: 2, reason: "undo" } },
+            }),
+          )
         await pump(emit, sync)
         // sibling 与其他 Session 不受影响；只有失效 Message 的正文离开公开 store。
         expect(sync.data.message[sid].map((m) => m.id)).toEqual(["msg_keep"])
@@ -1673,13 +1774,22 @@ describe("tui sync memory lifetime", () => {
 
   // 四个桶分属不同 reducer 分支；一次性断言全覆盖，防止实现只清 message 而留下 todo/status 残留。
   test("deleted Session releases its message, part, todo, and status buckets", async () => {
-    const { app, emit, sync } = await mount(lifeTransport(() => []), undefined, { type: "session", sessionID: sid })
+    const { app, emit, sync } = await mount(
+      lifeTransport(() => []),
+      undefined,
+      { type: "session", sessionID: sid },
+    )
     const otherParts = await sync.session.acquireParts("ses_other")
     try {
       emit(lifeEvent("session.updated", { sessionID: sid, info: lifeSession() }))
       put(emit, "msg_owned")
       put(emit, "msg_other", "ses_other", "other")
-      emit(lifeEvent("todo.updated", { sessionID: sid, todos: [{ content: "owned", status: "pending", priority: "high" }] }))
+      emit(
+        lifeEvent("todo.updated", {
+          sessionID: sid,
+          todos: [{ content: "owned", status: "pending", priority: "high" }],
+        }),
+      )
       emit(lifeEvent("session.status", { sessionID: sid, status: { type: "busy" } }))
       await pump(emit, sync)
       emit(lifeEvent("session.deleted", { sessionID: sid, info: lifeSession() }))
@@ -1702,15 +1812,38 @@ describe("tui sync memory lifetime", () => {
     test(`buffered orphan delta cannot rehydrate after ${mode}`, async () => {
       const { app, emit, sync } = await mount()
       try {
-        emit(lifeEvent("message.part.delta", { sessionID: sid, messageID: "msg_late", partID: "prt_msg_late", field: "text", delta: "STALE" }))
+        emit(
+          lifeEvent("message.part.delta", {
+            sessionID: sid,
+            messageID: "msg_late",
+            partID: "prt_msg_late",
+            field: "text",
+            delta: "STALE",
+          }),
+        )
         const aliveSession = mode === "session.deleted" ? "ses_alive" : sid
-        emit(lifeEvent("message.part.delta", { sessionID: aliveSession, messageID: "msg_alive", partID: "prt_msg_alive", field: "text", delta: "ALIVE" }))
+        emit(
+          lifeEvent("message.part.delta", {
+            sessionID: aliveSession,
+            messageID: "msg_alive",
+            partID: "prt_msg_alive",
+            field: "text",
+            delta: "ALIVE",
+          }),
+        )
         if (mode === "message.removed") emit(lifeEvent(mode, { sessionID: sid, messageID: "msg_late" }))
-        if (mode === "message.part.removed") emit(lifeEvent(mode, { sessionID: sid, messageID: "msg_late", partID: "prt_msg_late" }))
+        if (mode === "message.part.removed")
+          emit(lifeEvent(mode, { sessionID: sid, messageID: "msg_late", partID: "prt_msg_late" }))
         if (mode === "session.deleted") emit(lifeEvent(mode, { sessionID: sid, info: lifeSession() }))
         await pump(emit, sync)
         emit(lifeEvent("message.part.updated", { sessionID: sid, part: lifePart("msg_late", sid, ""), time: 1 }))
-        emit(lifeEvent("message.part.updated", { sessionID: aliveSession, part: lifePart("msg_alive", aliveSession, ""), time: 1 }))
+        emit(
+          lifeEvent("message.part.updated", {
+            sessionID: aliveSession,
+            part: lifePart("msg_alive", aliveSession, ""),
+            time: 1,
+          }),
+        )
         await pump(emit, sync)
         expect(sync.data.part.msg_late).toBeUndefined()
         expect((sync.data.part.msg_alive?.[0] as { text?: string } | undefined)?.text).toBe("ALIVE")
@@ -1790,7 +1923,9 @@ describe("tui sync memory lifetime", () => {
   test("in-flight force sync cannot resurrect a deleted Session", async () => {
     const gate = Promise.withResolvers<Response>()
     const normal = lifeTransport(() => [{ info: lifeMessage("msg_old"), parts: [lifePart("msg_old")] }])
-    const { app, emit, sync } = await mount((url) => (url.pathname === `/session/${sid}/message` ? gate.promise : normal(url)))
+    const { app, emit, sync } = await mount((url) =>
+      url.pathname === `/session/${sid}/message` ? gate.promise : normal(url),
+    )
     let pending: Promise<void> | undefined
     try {
       emit(lifeEvent("session.updated", { sessionID: sid, info: lifeSession() }))

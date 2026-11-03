@@ -29,17 +29,17 @@ HTTP、TUI、OpenAPI/SDK 只传播用户控制和持久化结果，不复制 Goa
 
 ## 2. Requirements
 
-| ID | 必须满足的行为 | 证据/验证 |
-|---|---|---|
-| REQ-01 | 模型只能在当前 Goal turn 已成功读取当前 Goal 后写入模型状态；无 Goal 或未读取时写入失败且不产生写入。 | `GoalTool` 行为测试；现有红色 harness |
-| REQ-02 | `complete`、`blocked` 必须带非空、受长度限制的 reason；reason 进入持久化结果和 API/SDK 响应。 | Tool、domain、HTTP 测试 |
-| REQ-03 | 模型可从 `blocked` 或 `complete` 恢复到 `active`，但只能在新的真实用户 Goal turn、先读取当前 Goal 后执行；模型不能把 `paused` 自行恢复。 | prompt/Tool 行为测试 |
-| REQ-04 | objective 或用户状态变更后，旧 turn 的终态写入必须因 Goal ID/revision 不匹配而失败，不能覆盖新目标。 | 并发/CAS 测试 |
-| REQ-05 | 每个 Goal turn 使用权威 objective/status/revision；continuation、compaction、错误和退出路径不能继续执行旧代际。 | prompt 集成测试 |
-| REQ-06 | provider 请求已开始后发生编辑/clear，不要求立即取消 provider；但旧请求的最终写入和 usage 不能污染新 Goal。 | 时序测试 |
-| REQ-07 | 用户通过 HTTP/TUI 将 terminal Goal 恢复为 `active` 后，idle session 能进入现有 prompt loop；busy session 不创建重复 loop。 | HTTP/TUI 测试 |
-| REQ-08 | 当前 continue-on-error、`goal_max_turns`、permission、abort、compaction 和旧 HTTP contract 的既有安全边界继续有效。 | 回归测试和边界矩阵 |
-| REQ-09 | 公开字段变更同步 OpenAPI、生成 SDK、TUI 类型和事件；不手改生成文件。 | SDK build/typecheck |
+| ID     | 必须满足的行为                                                                                                                           | 证据/验证                             |
+| ------ | ---------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------- |
+| REQ-01 | 模型只能在当前 Goal turn 已成功读取当前 Goal 后写入模型状态；无 Goal 或未读取时写入失败且不产生写入。                                    | `GoalTool` 行为测试；现有红色 harness |
+| REQ-02 | `complete`、`blocked` 必须带非空、受长度限制的 reason；reason 进入持久化结果和 API/SDK 响应。                                            | Tool、domain、HTTP 测试               |
+| REQ-03 | 模型可从 `blocked` 或 `complete` 恢复到 `active`，但只能在新的真实用户 Goal turn、先读取当前 Goal 后执行；模型不能把 `paused` 自行恢复。 | prompt/Tool 行为测试                  |
+| REQ-04 | objective 或用户状态变更后，旧 turn 的终态写入必须因 Goal ID/revision 不匹配而失败，不能覆盖新目标。                                     | 并发/CAS 测试                         |
+| REQ-05 | 每个 Goal turn 使用权威 objective/status/revision；continuation、compaction、错误和退出路径不能继续执行旧代际。                          | prompt 集成测试                       |
+| REQ-06 | provider 请求已开始后发生编辑/clear，不要求立即取消 provider；但旧请求的最终写入和 usage 不能污染新 Goal。                               | 时序测试                              |
+| REQ-07 | 用户通过 HTTP/TUI 将 terminal Goal 恢复为 `active` 后，idle session 能进入现有 prompt loop；busy session 不创建重复 loop。               | HTTP/TUI 测试                         |
+| REQ-08 | 当前 continue-on-error、`goal_max_turns`、permission、abort、compaction 和旧 HTTP contract 的既有安全边界继续有效。                      | 回归测试和边界矩阵                    |
+| REQ-09 | 公开字段变更同步 OpenAPI、生成 SDK、TUI 类型和事件；不手改生成文件。                                                                     | SDK build/typecheck                   |
 
 ## 3. Repository and Process Constraints
 
@@ -55,69 +55,69 @@ HTTP、TUI、OpenAPI/SDK 只传播用户控制和持久化结果，不复制 Goa
 
 ### OpenCode production and tests
 
-| 文件 | 关联职责 |
-|---|---|
-| `packages/opencode/src/session/goal.ts` | Goal service、CRUD、状态写入、usage、continuation prompt |
-| `packages/opencode/src/session/goal.sql.ts` | `session_goal` 表和现有状态/字段 |
-| `packages/opencode/src/tool/goal.ts` | 模型可见 Goal read/write tool |
-| `packages/opencode/src/tool/goal.txt` | 当前 prompt-only completion/blocked 规则 |
-| `packages/opencode/src/tool/registry.ts` | GoalTool 注册、service layer 注入 |
-| `packages/opencode/src/tool/selection.ts` | permission/tool 可见性过滤 |
-| `packages/opencode/src/session/prompt.ts` | run loop、Goal continuation、provider dispatch、usage、abort |
-| `packages/opencode/src/session/processor.ts` | provider stream、tool settle、retry、stop、error、abort |
-| `packages/opencode/src/session/run-state.ts` | busy/idle、ensureRunning、cancel、运行互斥 |
-| `packages/opencode/src/session/request-usage.ts` | request/assistant usage 聚合和错误边界 |
-| `packages/opencode/src/session/compaction.ts` | compaction、summary、synthetic continuation |
-| `packages/opencode/src/session/message-v2.ts` | 消息类型、metadata、parts、latest/compacted 读取 |
-| `packages/opencode/src/session/schema.ts` | Session/Prompt 输入 schema |
-| `packages/opencode/src/session/session.sql.ts` | session 状态和消息关联 |
-| `packages/opencode/src/session/request-usage.sql.ts` | request usage 持久化结构 |
-| `packages/opencode/src/session/todo.ts` | 同 session 内另一种模型任务状态边界，用于避免复制其抽象 |
-| `packages/opencode/src/storage/db.ts` | SQLite transaction、migration、事务行为 |
-| `packages/opencode/src/storage/db.bun.ts` | Bun 数据库实现入口 |
-| `packages/opencode/src/tool/truncate.ts` | Tool wrapper 的输出截断依赖 |
-| `packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts` | Goal HTTP handler、service layer、错误转换 |
-| `packages/opencode/src/server/routes/instance/httpapi/groups/session.ts` | Goal endpoint、OpenAPI payload/response |
-| `packages/opencode/src/server/routes/instance/httpapi/server.ts` | HTTP layer 注入 SessionPrompt/SessionGoal |
-| `packages/opencode/src/server/routes/instance/httpapi/api.ts` | HTTP API 共享 contract |
-| `packages/opencode/src/cli/cmd/tui/component/dialog-goal.tsx` | TUI create/edit/pause/resume/clear |
-| `packages/opencode/src/cli/cmd/tui/context/sync.tsx` | TUI Goal store、SSE/POST reconcile |
-| `packages/opencode/src/cli/cmd/tui/feature-plugins/sidebar/goal.tsx` | Goal 状态/usage 展示 |
-| `packages/opencode/src/config/config.ts` | `goal_max_turns` 和配置边界 |
-| `packages/opencode/migration/20260704053848_session_goal/migration.sql` | 原始 Goal schema |
-| `packages/opencode/migration/20260710195446_goal_continue_on_error/migration.sql` | `continue_on_error` 历史 migration |
-| `packages/opencode/test/session/goal.test.ts` | Goal CRUD、resume、continueOnError |
-| `packages/opencode/test/server/httpapi-goal.test.ts` | Goal HTTP 行为 contract |
-| `packages/opencode/test/storage/goal-migration.test.ts` | 旧 schema/default/migration 兼容 |
-| `packages/opencode/test/session/prompt.test.ts` | continuation、terminal error、usage、prompt 时序 |
-| `packages/opencode/test/lib/effect.ts` | readiness/poll 测试辅助，避免固定 sleep |
+| 文件                                                                              | 关联职责                                                     |
+| --------------------------------------------------------------------------------- | ------------------------------------------------------------ |
+| `packages/opencode/src/session/goal.ts`                                           | Goal service、CRUD、状态写入、usage、continuation prompt     |
+| `packages/opencode/src/session/goal.sql.ts`                                       | `session_goal` 表和现有状态/字段                             |
+| `packages/opencode/src/tool/goal.ts`                                              | 模型可见 Goal read/write tool                                |
+| `packages/opencode/src/tool/goal.txt`                                             | 当前 prompt-only completion/blocked 规则                     |
+| `packages/opencode/src/tool/registry.ts`                                          | GoalTool 注册、service layer 注入                            |
+| `packages/opencode/src/tool/selection.ts`                                         | permission/tool 可见性过滤                                   |
+| `packages/opencode/src/session/prompt.ts`                                         | run loop、Goal continuation、provider dispatch、usage、abort |
+| `packages/opencode/src/session/processor.ts`                                      | provider stream、tool settle、retry、stop、error、abort      |
+| `packages/opencode/src/session/run-state.ts`                                      | busy/idle、ensureRunning、cancel、运行互斥                   |
+| `packages/opencode/src/session/request-usage.ts`                                  | request/assistant usage 聚合和错误边界                       |
+| `packages/opencode/src/session/compaction.ts`                                     | compaction、summary、synthetic continuation                  |
+| `packages/opencode/src/session/message-v2.ts`                                     | 消息类型、metadata、parts、latest/compacted 读取             |
+| `packages/opencode/src/session/schema.ts`                                         | Session/Prompt 输入 schema                                   |
+| `packages/opencode/src/session/session.sql.ts`                                    | session 状态和消息关联                                       |
+| `packages/opencode/src/session/request-usage.sql.ts`                              | request usage 持久化结构                                     |
+| `packages/opencode/src/session/todo.ts`                                           | 同 session 内另一种模型任务状态边界，用于避免复制其抽象      |
+| `packages/opencode/src/storage/db.ts`                                             | SQLite transaction、migration、事务行为                      |
+| `packages/opencode/src/storage/db.bun.ts`                                         | Bun 数据库实现入口                                           |
+| `packages/opencode/src/tool/truncate.ts`                                          | Tool wrapper 的输出截断依赖                                  |
+| `packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts`        | Goal HTTP handler、service layer、错误转换                   |
+| `packages/opencode/src/server/routes/instance/httpapi/groups/session.ts`          | Goal endpoint、OpenAPI payload/response                      |
+| `packages/opencode/src/server/routes/instance/httpapi/server.ts`                  | HTTP layer 注入 SessionPrompt/SessionGoal                    |
+| `packages/opencode/src/server/routes/instance/httpapi/api.ts`                     | HTTP API 共享 contract                                       |
+| `packages/opencode/src/cli/cmd/tui/component/dialog-goal.tsx`                     | TUI create/edit/pause/resume/clear                           |
+| `packages/opencode/src/cli/cmd/tui/context/sync.tsx`                              | TUI Goal store、SSE/POST reconcile                           |
+| `packages/opencode/src/cli/cmd/tui/feature-plugins/sidebar/goal.tsx`              | Goal 状态/usage 展示                                         |
+| `packages/opencode/src/config/config.ts`                                          | `goal_max_turns` 和配置边界                                  |
+| `packages/opencode/migration/20260704053848_session_goal/migration.sql`           | 原始 Goal schema                                             |
+| `packages/opencode/migration/20260710195446_goal_continue_on_error/migration.sql` | `continue_on_error` 历史 migration                           |
+| `packages/opencode/test/session/goal.test.ts`                                     | Goal CRUD、resume、continueOnError                           |
+| `packages/opencode/test/server/httpapi-goal.test.ts`                              | Goal HTTP 行为 contract                                      |
+| `packages/opencode/test/storage/goal-migration.test.ts`                           | 旧 schema/default/migration 兼容                             |
+| `packages/opencode/test/session/prompt.test.ts`                                   | continuation、terminal error、usage、prompt 时序             |
+| `packages/opencode/test/lib/effect.ts`                                            | readiness/poll 测试辅助，避免固定 sleep                      |
 
 ### Contract and generation
 
-| 文件 | 关联职责 |
-|---|---|
-| `packages/sdk/openapi.json` | 当前生成输入 contract；现有 HTTP Goal 描述未完整同步到 SDK v2 |
-| `packages/sdk/js/script/build.ts` | SDK 生成链，未来不能手改 generated output |
-| `packages/sdk/js/src/v2/gen/sdk.gen.ts` | 当前生成 client；无完整 Goal method |
-| `packages/sdk/js/src/v2/gen/types.gen.ts` | 当前生成 types；无完整 Goal schema |
-| `packages/sdk/js/src/v2/gen/client.gen.ts` | 生成 client 基础实现 |
-| `packages/sdk/js/src/v2/gen/client/types.gen.ts` | 生成 client types |
-| `packages/sdk/js/src/v2/gen/core/*.gen.ts` | 生成基础序列化/SSE/auth/query 支撑 |
+| 文件                                             | 关联职责                                                      |
+| ------------------------------------------------ | ------------------------------------------------------------- |
+| `packages/sdk/openapi.json`                      | 当前生成输入 contract；现有 HTTP Goal 描述未完整同步到 SDK v2 |
+| `packages/sdk/js/script/build.ts`                | SDK 生成链，未来不能手改 generated output                     |
+| `packages/sdk/js/src/v2/gen/sdk.gen.ts`          | 当前生成 client；无完整 Goal method                           |
+| `packages/sdk/js/src/v2/gen/types.gen.ts`        | 当前生成 types；无完整 Goal schema                            |
+| `packages/sdk/js/src/v2/gen/client.gen.ts`       | 生成 client 基础实现                                          |
+| `packages/sdk/js/src/v2/gen/client/types.gen.ts` | 生成 client types                                             |
+| `packages/sdk/js/src/v2/gen/core/*.gen.ts`       | 生成基础序列化/SSE/auth/query 支撑                            |
 
 ### Existing design and repository constraints
 
-| 文件 | 关联职责 |
-|---|---|
-| `CONTEXT.md` | 当前 v1/v2 边界和领域上下文 |
-| `AGENTS.md` | 测试、类型检查、SDK 生成和工作树约束 |
-| `docs/adr/README.md` | ADR/领域文档布局约定 |
-| `docs/goal-error-continuation-control-plan.md` | 既有 continue-on-error、race、usage 和上限设计 |
-| `docs/prompts.md` | 本次 workflow 的调研、审计、TDD 和 commit 要求；文件有预存修改，未覆盖 |
-| `.opencode/policy/first-principles-engineering.md` | canonical plan 和审计门槛 |
-| `.opencode/templates/canonical-plan.md` | plan 必须包含的结构和 traceability 要求 |
-| `.opencode/skills/first-principles-planning/SKILL.md` | first-principles 调研和方案流程 |
-| `.opencode/skills/adversarial-audit/SKILL.md` | 独立 full-scope plan/diff audit 规则 |
-| `.opencode/skills/tdd/SKILL.md` | 未来 implementation 的 TDD 约束 |
+| 文件                                                  | 关联职责                                                               |
+| ----------------------------------------------------- | ---------------------------------------------------------------------- |
+| `CONTEXT.md`                                          | 当前 v1/v2 边界和领域上下文                                            |
+| `AGENTS.md`                                           | 测试、类型检查、SDK 生成和工作树约束                                   |
+| `docs/adr/README.md`                                  | ADR/领域文档布局约定                                                   |
+| `docs/goal-error-continuation-control-plan.md`        | 既有 continue-on-error、race、usage 和上限设计                         |
+| `docs/prompts.md`                                     | 本次 workflow 的调研、审计、TDD 和 commit 要求；文件有预存修改，未覆盖 |
+| `.opencode/policy/first-principles-engineering.md`    | canonical plan 和审计门槛                                              |
+| `.opencode/templates/canonical-plan.md`               | plan 必须包含的结构和 traceability 要求                                |
+| `.opencode/skills/first-principles-planning/SKILL.md` | first-principles 调研和方案流程                                        |
+| `.opencode/skills/adversarial-audit/SKILL.md`         | 独立 full-scope plan/diff audit 规则                                   |
+| `.opencode/skills/tdd/SKILL.md`                       | 未来 implementation 的 TDD 约束                                        |
 
 ## 5. External First-Party Evidence
 
@@ -150,12 +150,12 @@ HTTP、TUI、OpenAPI/SDK 只传播用户控制和持久化结果，不复制 Goa
 
 ### OpenCode upstream PR evidence
 
-| PR | 状态/结论 | 本方案的取舍 |
-|---|---|---|
-| [#27163](https://github.com/anomalyco/opencode/pull/27163) | OPEN；native per-session Goal、持久化、continuation、SDK/TUI；模型写入仍偏终态，不提供本需求的 read/CAS/reason 不变量 | 借鉴 ownership，不直接 cherry-pick |
-| [#32743](https://github.com/anomalyco/opencode/pull/32743) | OPEN；`/goal`、active/paused/completed、model update/complete/pause/resume、auto continuation；仍未证明旧 turn revision 和真实 read gate | 借鉴公开 contract 方向，拒绝直接扩大为另一套状态实现 |
-| [#31770](https://github.com/anomalyco/opencode/pull/31770) | CLOSED；evaluator-based auto continuation、fail-open、`MAX_GOAL_REACT` | 不采用第二模型/evaluator；fail-open 与本需求的安全不变量冲突 |
-| [#33944](https://github.com/anomalyco/opencode/pull/33944) | CLOSED；evaluator stop-condition，主要是 judge/service seam | 不采用 evaluator；本次只修复当前 Goal state ownership |
+| PR                                                         | 状态/结论                                                                                                                                | 本方案的取舍                                                 |
+| ---------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------ |
+| [#27163](https://github.com/anomalyco/opencode/pull/27163) | OPEN；native per-session Goal、持久化、continuation、SDK/TUI；模型写入仍偏终态，不提供本需求的 read/CAS/reason 不变量                    | 借鉴 ownership，不直接 cherry-pick                           |
+| [#32743](https://github.com/anomalyco/opencode/pull/32743) | OPEN；`/goal`、active/paused/completed、model update/complete/pause/resume、auto continuation；仍未证明旧 turn revision 和真实 read gate | 借鉴公开 contract 方向，拒绝直接扩大为另一套状态实现         |
+| [#31770](https://github.com/anomalyco/opencode/pull/31770) | CLOSED；evaluator-based auto continuation、fail-open、`MAX_GOAL_REACT`                                                                   | 不采用第二模型/evaluator；fail-open 与本需求的安全不变量冲突 |
+| [#33944](https://github.com/anomalyco/opencode/pull/33944) | CLOSED；evaluator stop-condition，主要是 judge/service seam                                                                              | 不采用 evaluator；本次只修复当前 Goal state ownership        |
 
 ## 6. Current Behavior and Call Chain
 
@@ -196,13 +196,13 @@ bun -e '... GoalTool ... def.execute({ status: "complete" }, ctx) ...'
 
 责任边界固定如下：
 
-| 不变量 | 唯一 owner | 不能放在哪里 |
-|---|---|---|
-| row schema、revision、CAS、reason/audit streak | `SessionGoal` | 不能只放 prompt 或 TUI |
-| 模型必须先 read、模型可写状态集合 | `GoalTool` + 本 turn context | 不能相信模型自报的 id/revision |
-| 当前 turn 权威上下文、stale continuation、provider 起始 Goal snapshot | `SessionPrompt` | 不能让 HTTP handler 重复 loop 规则 |
-| 用户 active resume 是否启动 idle loop | HTTP/TUI integration seam，调用 `SessionPrompt.loop` | 不能把 loop 复制到 Goal service |
-| API schema、SDK 类型、TUI transport | OpenAPI/generated SDK | 不能手改 generated files |
+| 不变量                                                                | 唯一 owner                                           | 不能放在哪里                       |
+| --------------------------------------------------------------------- | ---------------------------------------------------- | ---------------------------------- |
+| row schema、revision、CAS、reason/audit streak                        | `SessionGoal`                                        | 不能只放 prompt 或 TUI             |
+| 模型必须先 read、模型可写状态集合                                     | `GoalTool` + 本 turn context                         | 不能相信模型自报的 id/revision     |
+| 当前 turn 权威上下文、stale continuation、provider 起始 Goal snapshot | `SessionPrompt`                                      | 不能让 HTTP handler 重复 loop 规则 |
+| 用户 active resume 是否启动 idle loop                                 | HTTP/TUI integration seam，调用 `SessionPrompt.loop` | 不能把 loop 复制到 Goal service    |
+| API schema、SDK 类型、TUI transport                                   | OpenAPI/generated SDK                                | 不能手改 generated files           |
 
 ## 8. Required State Invariants
 
@@ -234,7 +234,7 @@ bun -e '... GoalTool ... def.execute({ status: "complete" }, ctx) ...'
 - `SessionGoal` 在同一个 SQLite immediate transaction 中重新确认 row ID/revision/objective 状态，再更新并递增 revision。
 - mismatch 返回 typed stale transition error；不写 status、reason、streak，不吞错，不自动 fallback 到当前 Goal。
 - HTTP/TUI 用户写入也使用 revision；若 UI 未携带 revision，先读当前 row 后按用户动作提交，冲突则返回明确 conflict，而不是覆盖。
- 
+
 ## 9. Recommended Minimal Implementation
 
 ### 9.1 `SessionGoal` domain
@@ -309,31 +309,31 @@ goalTurn: {
 
 本方案不是在现有逻辑旁边叠加兼容分支，以下旧行为必须收敛：
 
-| 旧逻辑 | 处理 |
-|---|---|
-| `GoalTool` 直接把可选 `status` 传给 `goalSvc.set` | 替换为 read-gated `modelTransition`，删除无 reason/无 snapshot 的写路径 |
-| `goal.txt` 单独要求模型记住三轮 blocked | 保留解释性文本，删除其作为唯一约束的含义；runtime/domain 成为唯一强制路径 |
-| `SessionGoal.set` 允许所有调用者无 revision 覆盖 | 收敛为 transaction/CAS；用户/system 与 model 使用明确不同入口 |
-| `accountUsage` 只看当前 row status | 保留旧调用兼容，同时让 prompt 使用 expected Goal ID；删除按 session ID 无条件归属的路径 |
-| HTTP/TUI Resume 只写 `active` | 写成功后调用统一 idle-loop integration seam；不在 TUI 增加另一套 loop |
-| TUI raw fetch/手写 Goal type | SDK 生成完成后删除重复 transport 代码 |
-| 旧 prompt continuation 只看 status/turn count | 增加 revision/snapshot guard；不增加 evaluator fallback |
+| 旧逻辑                                            | 处理                                                                                    |
+| ------------------------------------------------- | --------------------------------------------------------------------------------------- |
+| `GoalTool` 直接把可选 `status` 传给 `goalSvc.set` | 替换为 read-gated `modelTransition`，删除无 reason/无 snapshot 的写路径                 |
+| `goal.txt` 单独要求模型记住三轮 blocked           | 保留解释性文本，删除其作为唯一约束的含义；runtime/domain 成为唯一强制路径               |
+| `SessionGoal.set` 允许所有调用者无 revision 覆盖  | 收敛为 transaction/CAS；用户/system 与 model 使用明确不同入口                           |
+| `accountUsage` 只看当前 row status                | 保留旧调用兼容，同时让 prompt 使用 expected Goal ID；删除按 session ID 无条件归属的路径 |
+| HTTP/TUI Resume 只写 `active`                     | 写成功后调用统一 idle-loop integration seam；不在 TUI 增加另一套 loop                   |
+| TUI raw fetch/手写 Goal type                      | SDK 生成完成后删除重复 transport 代码                                                   |
+| 旧 prompt continuation 只看 status/turn count     | 增加 revision/snapshot guard；不增加 evaluator fallback                                 |
 
 不删除 `docs/goal-error-continuation-control-plan.md` 的历史设计；实现后只在必要处增加“revision/usage 规则已由本方案 supersede”的链接，避免读者把旧 best-effort 描述当成新不变量。
 
 ## 11. Traceability: Requirement to Code and Test
 
-| Req | Production owner | 行为测试 | 当前红色缺口 |
-|---|---|---|---|
-| REQ-01 | `tool/goal.ts`, `session/goal.ts` | GoalTool 无 read 不能 write；read 后可 write | 当前 `get=0,set=1` |
-| REQ-02 | `tool/goal.ts`, `session/goal.ts`, API schema | 空 reason、超长 reason、complete/blocked 持久化 | 当前无 reason 参数 |
-| REQ-03 | `tool/goal.ts`, `session/prompt.ts` | blocked/complete 新用户 turn 恢复；同 turn/paused 拒绝 | 当前不存在模型 active recovery contract |
-| REQ-04 | `session/goal.ts`, migration | objective edit/clear/recreate 后 stale write 被拒绝 | 当前无 revision/CAS |
-| REQ-05 | `session/prompt.ts`, `message-v2.ts` | continuation 使用最新 objective；compaction 不复活旧 snapshot | 当前没有 Goal revision 注入 |
-| REQ-06 | `session/prompt.ts`, `request-usage` | edit/clear 与 provider 完成竞态；旧 usage 不污染新 Goal | 当前按 session/current status 归属 |
-| REQ-07 | HTTP handler、run-state、TUI sync | idle resume 启动一次；busy resume 不重复启动 | 当前 handler 只写 DB |
-| REQ-08 | prompt/processor/selection | continue-on-error、max turns、abort、permission、terminal error 回归 | 既有测试未覆盖新 revision 边界 |
-| REQ-09 | OpenAPI、SDK、TUI | generated client 调用和 typecheck | 当前 SDK v2 缺 Goal schema/method |
+| Req    | Production owner                              | 行为测试                                                             | 当前红色缺口                            |
+| ------ | --------------------------------------------- | -------------------------------------------------------------------- | --------------------------------------- |
+| REQ-01 | `tool/goal.ts`, `session/goal.ts`             | GoalTool 无 read 不能 write；read 后可 write                         | 当前 `get=0,set=1`                      |
+| REQ-02 | `tool/goal.ts`, `session/goal.ts`, API schema | 空 reason、超长 reason、complete/blocked 持久化                      | 当前无 reason 参数                      |
+| REQ-03 | `tool/goal.ts`, `session/prompt.ts`           | blocked/complete 新用户 turn 恢复；同 turn/paused 拒绝               | 当前不存在模型 active recovery contract |
+| REQ-04 | `session/goal.ts`, migration                  | objective edit/clear/recreate 后 stale write 被拒绝                  | 当前无 revision/CAS                     |
+| REQ-05 | `session/prompt.ts`, `message-v2.ts`          | continuation 使用最新 objective；compaction 不复活旧 snapshot        | 当前没有 Goal revision 注入             |
+| REQ-06 | `session/prompt.ts`, `request-usage`          | edit/clear 与 provider 完成竞态；旧 usage 不污染新 Goal              | 当前按 session/current status 归属      |
+| REQ-07 | HTTP handler、run-state、TUI sync             | idle resume 启动一次；busy resume 不重复启动                         | 当前 handler 只写 DB                    |
+| REQ-08 | prompt/processor/selection                    | continue-on-error、max turns、abort、permission、terminal error 回归 | 既有测试未覆盖新 revision 边界          |
+| REQ-09 | OpenAPI、SDK、TUI                             | generated client 调用和 typecheck                                    | 当前 SDK v2 缺 Goal schema/method       |
 
 ### Reverse traceability
 
@@ -343,24 +343,24 @@ goalTurn: {
 
 ## 12. Concurrency and Failure Matrix
 
-| 场景 | 预期结果 | 防线 |
-|---|---|---|
-| 两个 model tool writes 同一 revision | 一个成功，一个 stale；只有一个 event/revision++ | immediate transaction + CAS |
-| 用户 edit 与 model complete 同时发生 | 以 transaction 先后为准；旧 snapshot 失败，不覆盖新 objective | Goal ID + revision |
-| clear 后 recreate 同 session | 旧 provider usage 不记入新 row；旧 terminal write 失败 | expected Goal ID + revision |
-| 用户 pause 在 provider 执行中 | 不取消 provider；返回后不自动继续，usage 仍计入 provider 起始 Goal | initial expected ID + current paused status |
-| 用户 resume blocked/complete，session idle | 一次 fork loop，进入 active continuation | handler integration seam + RunState |
-| 用户 resume 时 session busy | 不 fork 第二 loop；现有运行完成后由状态/事件收敛 | RunState mutex |
-| model 在同 turn `blocked` 后 `active` | active transition 拒绝；blocked audit 不被绕过 | `goalTurn.id` + userInitiated |
-| model 从 paused 写 active | 拒绝；必须用户/system resume | actor boundary |
-| blocked reason 改变 | streak 清零，从新 reason 第一次开始 | normalized reason + revision |
-| 同一 blocked reason 重复 tool call | streak 不增加 | last turn ID |
-| provider error/abort | 按现有 error/abort 结束；若有 usage 则按 expected ID 计入；不自动把失败伪装成 complete | prompt accounting ordering |
-| compaction 期间 objective 改变 | synthetic continuation 使用最新 revision；旧 summary 不能覆盖 | snapshot before dispatch |
-| GoalTool 被 permission 禁用 | 保持现有工具选择行为；不新增绕过 permission 的写入口 | `ToolSelection.enabled` |
-| DB busy/transaction failure | 向上返回错误，不静默 fallback、不重复写 | existing Effect error path |
-| 进程重启后 blocked streak | 从持久化字段恢复；不依赖内存 | schema fields |
-| 旧 row 无新增字段 | 默认值可读，第一次有效更新补齐 revision | migration default/backfill |
+| 场景                                       | 预期结果                                                                               | 防线                                        |
+| ------------------------------------------ | -------------------------------------------------------------------------------------- | ------------------------------------------- |
+| 两个 model tool writes 同一 revision       | 一个成功，一个 stale；只有一个 event/revision++                                        | immediate transaction + CAS                 |
+| 用户 edit 与 model complete 同时发生       | 以 transaction 先后为准；旧 snapshot 失败，不覆盖新 objective                          | Goal ID + revision                          |
+| clear 后 recreate 同 session               | 旧 provider usage 不记入新 row；旧 terminal write 失败                                 | expected Goal ID + revision                 |
+| 用户 pause 在 provider 执行中              | 不取消 provider；返回后不自动继续，usage 仍计入 provider 起始 Goal                     | initial expected ID + current paused status |
+| 用户 resume blocked/complete，session idle | 一次 fork loop，进入 active continuation                                               | handler integration seam + RunState         |
+| 用户 resume 时 session busy                | 不 fork 第二 loop；现有运行完成后由状态/事件收敛                                       | RunState mutex                              |
+| model 在同 turn `blocked` 后 `active`      | active transition 拒绝；blocked audit 不被绕过                                         | `goalTurn.id` + userInitiated               |
+| model 从 paused 写 active                  | 拒绝；必须用户/system resume                                                           | actor boundary                              |
+| blocked reason 改变                        | streak 清零，从新 reason 第一次开始                                                    | normalized reason + revision                |
+| 同一 blocked reason 重复 tool call         | streak 不增加                                                                          | last turn ID                                |
+| provider error/abort                       | 按现有 error/abort 结束；若有 usage 则按 expected ID 计入；不自动把失败伪装成 complete | prompt accounting ordering                  |
+| compaction 期间 objective 改变             | synthetic continuation 使用最新 revision；旧 summary 不能覆盖                          | snapshot before dispatch                    |
+| GoalTool 被 permission 禁用                | 保持现有工具选择行为；不新增绕过 permission 的写入口                                   | `ToolSelection.enabled`                     |
+| DB busy/transaction failure                | 向上返回错误，不静默 fallback、不重复写                                                | existing Effect error path                  |
+| 进程重启后 blocked streak                  | 从持久化字段恢复；不依赖内存                                                           | schema fields                               |
+| 旧 row 无新增字段                          | 默认值可读，第一次有效更新补齐 revision                                                | migration default/backfill                  |
 
 ## 13. TDD Implementation Slices (Future, Not Authorized Now)
 
@@ -405,26 +405,26 @@ goalTurn: {
 
 ### Expected modified/added files
 
-| 文件 | 预计动作 | 预计有效增量 | 原因 |
-|---|---|---:|---|
-| `packages/opencode/src/session/goal.sql.ts` | 修改 | +10~25 | revision/reason/streak schema |
-| `packages/opencode/src/session/goal.ts` | 修改 | +120~220/-30~60 | CAS、model transition、usage expected ID |
-| `packages/opencode/src/tool/goal.ts` | 修改 | +60~120/-15~35 | read gate、reason、recovery boundary |
-| `packages/opencode/src/tool/goal.txt` | 修改 | +15~30/-5~15 | 与 runtime 规则对齐的模型说明 |
-| `packages/opencode/src/session/prompt.ts` | 修改 | +100~180/-20~50 | GoalTurn、snapshot、usage ordering、resume guard |
-| `packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts` | 修改 | +25~70 | user resume idle-loop seam、conflict/error mapping |
-| `packages/opencode/src/server/routes/instance/httpapi/groups/session.ts` | 修改 | +10~40 | request/response/OpenAPI fields |
-| `packages/opencode/src/cli/cmd/tui/component/dialog-goal.tsx` | 修改 | +10~40/-20~60 | generated SDK transport、reason/conflict display |
-| `packages/opencode/src/cli/cmd/tui/context/sync.tsx` | 修改 | +10~35/-15~45 | generated response/event reconcile |
-| `packages/opencode/migration/<generated-session-goal-revision>/migration.sql` | 新增 | +15~35 | schema default/backfill |
-| `packages/opencode/test/session/goal.test.ts` | 修改 | +100~220 | domain behavior |
-| `packages/opencode/test/tool/goal.test.ts` | 新增 | +100~220 | public Tool behavior |
-| `packages/opencode/test/session/prompt.test.ts` | 修改 | +120~260 | turn/continuation/usage races |
-| `packages/opencode/test/server/httpapi-goal.test.ts` | 修改 | +70~160 | HTTP/resume behavior |
-| `packages/opencode/test/storage/goal-migration.test.ts` | 修改 | +20~60 | migration compatibility |
-| `packages/sdk/openapi.json` | 生成/必要源更新 | generator-dependent | public contract |
-| `packages/sdk/js/src/v2/gen/sdk.gen.ts` | 生成 | generator-dependent | Goal methods |
-| `packages/sdk/js/src/v2/gen/types.gen.ts` | 生成 | generator-dependent | Goal types |
+| 文件                                                                          | 预计动作        |        预计有效增量 | 原因                                               |
+| ----------------------------------------------------------------------------- | --------------- | ------------------: | -------------------------------------------------- |
+| `packages/opencode/src/session/goal.sql.ts`                                   | 修改            |              +10~25 | revision/reason/streak schema                      |
+| `packages/opencode/src/session/goal.ts`                                       | 修改            |     +120~220/-30~60 | CAS、model transition、usage expected ID           |
+| `packages/opencode/src/tool/goal.ts`                                          | 修改            |      +60~120/-15~35 | read gate、reason、recovery boundary               |
+| `packages/opencode/src/tool/goal.txt`                                         | 修改            |        +15~30/-5~15 | 与 runtime 规则对齐的模型说明                      |
+| `packages/opencode/src/session/prompt.ts`                                     | 修改            |     +100~180/-20~50 | GoalTurn、snapshot、usage ordering、resume guard   |
+| `packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts`    | 修改            |              +25~70 | user resume idle-loop seam、conflict/error mapping |
+| `packages/opencode/src/server/routes/instance/httpapi/groups/session.ts`      | 修改            |              +10~40 | request/response/OpenAPI fields                    |
+| `packages/opencode/src/cli/cmd/tui/component/dialog-goal.tsx`                 | 修改            |       +10~40/-20~60 | generated SDK transport、reason/conflict display   |
+| `packages/opencode/src/cli/cmd/tui/context/sync.tsx`                          | 修改            |       +10~35/-15~45 | generated response/event reconcile                 |
+| `packages/opencode/migration/<generated-session-goal-revision>/migration.sql` | 新增            |              +15~35 | schema default/backfill                            |
+| `packages/opencode/test/session/goal.test.ts`                                 | 修改            |            +100~220 | domain behavior                                    |
+| `packages/opencode/test/tool/goal.test.ts`                                    | 新增            |            +100~220 | public Tool behavior                               |
+| `packages/opencode/test/session/prompt.test.ts`                               | 修改            |            +120~260 | turn/continuation/usage races                      |
+| `packages/opencode/test/server/httpapi-goal.test.ts`                          | 修改            |             +70~160 | HTTP/resume behavior                               |
+| `packages/opencode/test/storage/goal-migration.test.ts`                       | 修改            |              +20~60 | migration compatibility                            |
+| `packages/sdk/openapi.json`                                                   | 生成/必要源更新 | generator-dependent | public contract                                    |
+| `packages/sdk/js/src/v2/gen/sdk.gen.ts`                                       | 生成            | generator-dependent | Goal methods                                       |
+| `packages/sdk/js/src/v2/gen/types.gen.ts`                                     | 生成            | generator-dependent | Goal types                                         |
 
 ### Budget and scope guard
 
@@ -481,8 +481,8 @@ git diff --check
 
 本方案由当前调研建立，尚未获得独立 auditor 放行：
 
-| revision | auditor | result | blocking findings | disposition |
-|---|---|---|---|---|
-| R1 | pending | pending | pending | implementation forbidden |
+| revision | auditor | result  | blocking findings | disposition              |
+| -------- | ------- | ------- | ----------------- | ------------------------ |
+| R1       | pending | pending | pending           | implementation forbidden |
 
 审计要求：subagent 必须从仓库和本文件独立重建 full scope，检查行为、依赖、并发、错误、退出、清理、生成、兼容、安全和 15% 中文注释预算；不能只检查摘要或选定文件。若存在任意 blocking finding，新增 R2+ 并重新审计完整范围。

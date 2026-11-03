@@ -45,11 +45,14 @@ export class TargetExistsError extends Schema.TaggedErrorClass<TargetExistsError
   path: Schema.String,
 }) {}
 
-export class MoveIncompleteError extends Schema.TaggedErrorClass<MoveIncompleteError>()("FileMutation.MoveIncompleteError", {
-  path: Schema.String,
-  destination: Schema.String,
-  reason: Schema.String,
-}) {}
+export class MoveIncompleteError extends Schema.TaggedErrorClass<MoveIncompleteError>()(
+  "FileMutation.MoveIncompleteError",
+  {
+    path: Schema.String,
+    destination: Schema.String,
+    reason: Schema.String,
+  },
+) {}
 
 export interface WriteResult {
   readonly operation: "write"
@@ -89,7 +92,9 @@ export interface Interface {
   readonly writeIfUnchanged: (
     input: ConditionalWriteInput,
   ) => Effect.Effect<WriteResult, StaleContentError | FSUtil.Error>
-  readonly moveIfUnchanged: (input: ConditionalMoveInput) => Effect.Effect<WriteResult, StaleContentError | MoveIncompleteError | FSUtil.Error>
+  readonly moveIfUnchanged: (
+    input: ConditionalMoveInput,
+  ) => Effect.Effect<WriteResult, StaleContentError | MoveIncompleteError | FSUtil.Error>
   readonly remove: (input: RemoveInput) => Effect.Effect<RemoveResult, FSUtil.Error>
 }
 
@@ -117,7 +122,13 @@ const layer = Layer.effect(
       existed,
     })
 
-    const finishText = Effect.fn("FileMutation.finishText")(function* (input: TextWriteInput, previous: string, bom: boolean, existed: boolean, ending?: LineEnding) {
+    const finishText = Effect.fn("FileMutation.finishText")(function* (
+      input: TextWriteInput,
+      previous: string,
+      bom: boolean,
+      existed: boolean,
+      ending?: LineEnding,
+    ) {
       // 外部格式化可中断；最终回读与 BOM 修复始终受目标锁和退出收尾保护。
       const readFinal = Effect.gen(function* () {
         const final = yield* fs.readFile(input.target.canonical)
@@ -132,10 +143,12 @@ const layer = Layer.effect(
         }
         return new TextDecoder().decode(final.subarray(offset))
       })
-      const formatted = input.format ? yield* input.format(input.target.canonical).pipe(
-        Effect.interruptible,
-        Effect.onExit((exit) => Exit.isFailure(exit) ? readFinal.pipe(Effect.asVoid) : Effect.void),
-      ) : false
+      const formatted = input.format
+        ? yield* input.format(input.target.canonical).pipe(
+            Effect.interruptible,
+            Effect.onExit((exit) => (Exit.isFailure(exit) ? readFinal.pipe(Effect.asVoid) : Effect.void)),
+          )
+        : false
       const formattedText = yield* readFinal
       // 仅成功文本收尾恢复已继承的EOL；失败/取消仍走原始字节BOM修复，不重编码半写内容。
       const restoredText = ending ? convertToLineEnding(normalizeLineEndings(formattedText), ending) : formattedText
@@ -151,14 +164,15 @@ const layer = Layer.effect(
         diff: rendered.patch,
         rendered,
         ...(formatted ? { text } : {}),
-        ...(formatted && submitted !== after ? {
-          // 回传请求与最终落盘之间的实际变化，不能用请求片段伪造 formatter 结果。
-          formattedDiff: renderFileDiff(input.target.resource, submitted, after).patch,
-          formattedContent: text,
-        } : {}),
+        ...(formatted && submitted !== after
+          ? {
+              // 回传请求与最终落盘之间的实际变化，不能用请求片段伪造 formatter 结果。
+              formattedDiff: renderFileDiff(input.target.resource, submitted, after).patch,
+              formattedContent: text,
+            }
+          : {}),
       }
     })
-
 
     const removeResult = (target: Target, existed: boolean): RemoveResult => ({
       operation: "remove",
@@ -168,81 +182,106 @@ const layer = Layer.effect(
     })
 
     const write = Effect.fn("FileMutation.write")((input: WriteInput) =>
-        Effect.gen(function* () {
-          const existed = yield* fs.exists(input.target.canonical)
-          yield* fs.writeWithDirs(input.target.canonical, input.content)
-          return writeResult(input.target, existed)
-        }),
+      Effect.gen(function* () {
+        const existed = yield* fs.exists(input.target.canonical)
+        yield* fs.writeWithDirs(input.target.canonical, input.content)
+        return writeResult(input.target, existed)
+      }),
     )
 
     const writeTextPreservingBom = Effect.fn("FileMutation.writeTextPreservingBom")((input: TextWriteInput) =>
-        Effect.gen(function* () {
-          const next = splitBom(input.content)
-          const current = yield* fs
-            .readFile(input.target.canonical)
-            .pipe(Effect.catchReason("PlatformError", "NotFound", () => Effect.succeed(undefined)))
-          // Write和Add-overwrite共享前像属性；缺失文件不从邻近目录或提交内容猜默认行尾。
-          const ending = current === undefined ? undefined : detectLineEnding(new TextDecoder().decode(current))
-          const content = ending ? convertToLineEnding(normalizeLineEndings(next.text), ending) : next.text
-          yield* fs.writeWithDirs(
-            input.target.canonical,
-            joinBom(content, Boolean(current && hasUtf8Bom(current)) || next.bom),
-          )
-          if (current === undefined && !input.format) return writeResult(input.target, false)
-          return yield* finishText(input, current ? splitBom(new TextDecoder().decode(current)).text : "", Boolean(current && hasUtf8Bom(current)) || next.bom, current !== undefined, ending)
-        }),
+      Effect.gen(function* () {
+        const next = splitBom(input.content)
+        const current = yield* fs
+          .readFile(input.target.canonical)
+          .pipe(Effect.catchReason("PlatformError", "NotFound", () => Effect.succeed(undefined)))
+        // Write和Add-overwrite共享前像属性；缺失文件不从邻近目录或提交内容猜默认行尾。
+        const ending = current === undefined ? undefined : detectLineEnding(new TextDecoder().decode(current))
+        const content = ending ? convertToLineEnding(normalizeLineEndings(next.text), ending) : next.text
+        yield* fs.writeWithDirs(
+          input.target.canonical,
+          joinBom(content, Boolean(current && hasUtf8Bom(current)) || next.bom),
+        )
+        if (current === undefined && !input.format) return writeResult(input.target, false)
+        return yield* finishText(
+          input,
+          current ? splitBom(new TextDecoder().decode(current)).text : "",
+          Boolean(current && hasUtf8Bom(current)) || next.bom,
+          current !== undefined,
+          ending,
+        )
+      }),
     )
 
     const create = Effect.fn("FileMutation.create")((input: WriteInput) =>
-        Effect.gen(function* () {
-          const write =
-            typeof input.content === "string"
-              ? fs.writeFileString(input.target.canonical, input.content, { flag: "wx" })
-              : fs.writeFile(input.target.canonical, input.content, { flag: "wx" })
-          yield* write.pipe(
-            Effect.catchReason("PlatformError", "NotFound", () =>
-              fs.ensureDir(dirname(input.target.canonical)).pipe(Effect.andThen(write)),
-            ),
-            Effect.catchReason("PlatformError", "AlreadyExists", () =>
-              Effect.fail(new TargetExistsError({ path: input.target.canonical })),
-            ),
-          )
-          if (input.format && typeof input.content === "string")
-            return yield* finishText({ ...input, content: input.content }, "", splitBom(input.content).bom, false)
-          return writeResult(input.target, false)
-
-        }),
+      Effect.gen(function* () {
+        const write =
+          typeof input.content === "string"
+            ? fs.writeFileString(input.target.canonical, input.content, { flag: "wx" })
+            : fs.writeFile(input.target.canonical, input.content, { flag: "wx" })
+        yield* write.pipe(
+          Effect.catchReason("PlatformError", "NotFound", () =>
+            fs.ensureDir(dirname(input.target.canonical)).pipe(Effect.andThen(write)),
+          ),
+          Effect.catchReason("PlatformError", "AlreadyExists", () =>
+            Effect.fail(new TargetExistsError({ path: input.target.canonical })),
+          ),
+        )
+        if (input.format && typeof input.content === "string")
+          return yield* finishText({ ...input, content: input.content }, "", splitBom(input.content).bom, false)
+        return writeResult(input.target, false)
+      }),
     )
 
     const writeIfUnchanged = Effect.fn("FileMutation.writeIfUnchanged")((input: ConditionalWriteInput) =>
-        Effect.gen(function* () {
-          const current = yield* fs.readFile(input.target.canonical)
-          if (!sameBytes(current, input.expected)) {
-            return yield* new StaleContentError({ path: input.target.canonical })
-          }
-          yield* typeof input.content === "string"
-            ? fs.writeFileString(input.target.canonical, input.content)
-            : fs.writeFile(input.target.canonical, input.content)
-          if (input.format && typeof input.content === "string")
-            return yield* finishText({ ...input, content: input.content }, splitBom(new TextDecoder().decode(current)).text, splitBom(input.content).bom, true, detectLineEnding(new TextDecoder().decode(current)))
-          return writeResult(input.target, true)
-        }),
+      Effect.gen(function* () {
+        const current = yield* fs.readFile(input.target.canonical)
+        if (!sameBytes(current, input.expected)) {
+          return yield* new StaleContentError({ path: input.target.canonical })
+        }
+        yield* typeof input.content === "string"
+          ? fs.writeFileString(input.target.canonical, input.content)
+          : fs.writeFile(input.target.canonical, input.content)
+        if (input.format && typeof input.content === "string")
+          return yield* finishText(
+            { ...input, content: input.content },
+            splitBom(new TextDecoder().decode(current)).text,
+            splitBom(input.content).bom,
+            true,
+            detectLineEnding(new TextDecoder().decode(current)),
+          )
+        return writeResult(input.target, true)
+      }),
     )
 
     const moveIfUnchanged = Effect.fn("FileMutation.moveIfUnchanged")((input: ConditionalMoveInput) => {
       const commit = Effect.gen(function* () {
         const source = yield* fs.readFile(input.target.canonical)
         if (!sameBytes(source, input.expected)) return yield* new StaleContentError({ path: input.target.canonical })
-        const previous = yield* fs.readFile(input.destination.canonical)
+        const previous = yield* fs
+          .readFile(input.destination.canonical)
           .pipe(Effect.catchReason("PlatformError", "NotFound", () => Effect.succeed(undefined)))
         // 目的地继承源BOM，格式化与最终回读沿用唯一文本收尾路径。
         yield* fs.writeWithDirs(input.destination.canonical, input.content)
         // Move的EOL来自source，不能用为了真实diff读取的destination前像覆盖内容属性。
-        const result = yield* finishText({ ...input, target: input.destination }, previous ? splitBom(new TextDecoder().decode(previous)).text : "", splitBom(input.content).bom, previous !== undefined, detectLineEnding(new TextDecoder().decode(source)))
+        const result = yield* finishText(
+          { ...input, target: input.destination },
+          previous ? splitBom(new TextDecoder().decode(previous)).text : "",
+          splitBom(input.content).bom,
+          previous !== undefined,
+          detectLineEnding(new TextDecoder().decode(source)),
+        )
         if (input.destination.canonical !== input.target.canonical) {
-          yield* fs.remove(input.target.canonical).pipe(Effect.mapError(error => new MoveIncompleteError({
-            path: input.target.canonical, destination: input.destination.canonical, reason: error.message,
-          })))
+          yield* fs.remove(input.target.canonical).pipe(
+            Effect.mapError(
+              (error) =>
+                new MoveIncompleteError({
+                  path: input.target.canonical,
+                  destination: input.destination.canonical,
+                  reason: error.message,
+                }),
+            ),
+          )
         }
         return result
       })
@@ -250,44 +289,51 @@ const layer = Layer.effect(
     })
 
     const remove = Effect.fn("FileMutation.remove")((input: RemoveInput) =>
-        Effect.gen(function* () {
-          const existed = yield* fs.remove(input.target.canonical).pipe(
-            Effect.as(true),
-            Effect.catchReason("PlatformError", "NotFound", () => Effect.succeed(false)),
-          )
-          return removeResult(input.target, existed)
-        }),
+      Effect.gen(function* () {
+        const existed = yield* fs.remove(input.target.canonical).pipe(
+          Effect.as(true),
+          Effect.catchReason("PlatformError", "NotFound", () => Effect.succeed(false)),
+        )
+        return removeResult(input.target, existed)
+      }),
     )
 
     const operations = { create, write, writeTextPreservingBom, writeIfUnchanged, moveIfUnchanged, remove }
     const withTargets = <A, E, R>(targets: readonly Target[], effect: Effect.Effect<A, E, R>) =>
-      [...new Set(targets.map(target => target.canonical))].sort().reduceRight(
+      [...new Set(targets.map((target) => target.canonical))].sort().reduceRight(
         // 等锁仍可取消；仅全部锁到手后的提交不可中断，formatter 保持其原有退出收尾。
-        (next, key) => locks.withLock(key)(next), Effect.uninterruptible(effect),
+        (next, key) => locks.withLock(key)(next),
+        Effect.uninterruptible(effect),
       )
-    const commit: Interface["commit"] = input => withTargets(
-      input.expected.map(item => item.target),
-      Effect.gen(function* () {
-        for (const expected of input.expected) {
-          const current = yield* fs.readFile(expected.target.canonical)
-            .pipe(Effect.catchReason("PlatformError", "NotFound", () => Effect.succeed(undefined)))
-          // undefined 是缺失，空字节是已有空文件；任一漂移都须在首写前拒绝。
-          if (expected.content === undefined ? current !== undefined : current === undefined || !sameBytes(expected.content, current)) {
-            return yield* new StaleContentError({ path: expected.target.canonical })
+    const commit: Interface["commit"] = (input) =>
+      withTargets(
+        input.expected.map((item) => item.target),
+        Effect.gen(function* () {
+          for (const expected of input.expected) {
+            const current = yield* fs
+              .readFile(expected.target.canonical)
+              .pipe(Effect.catchReason("PlatformError", "NotFound", () => Effect.succeed(undefined)))
+            // undefined 是缺失，空字节是已有空文件；任一漂移都须在首写前拒绝。
+            if (
+              expected.content === undefined
+                ? current !== undefined
+                : current === undefined || !sameBytes(expected.content, current)
+            ) {
+              return yield* new StaleContentError({ path: expected.target.canonical })
+            }
           }
-        }
-        return yield* input.execute(operations)
-      }),
-    )
+          return yield* input.execute(operations)
+        }),
+      )
     // 无锁原语仅交给已持有完整键集的 commit；单文件公开入口仍使用同一组锁。
     return Service.of({
       commit,
-      create: input => withTargetLock(input.target)(create(input)),
-      write: input => withTargetLock(input.target)(write(input)),
-      writeTextPreservingBom: input => withTargetLock(input.target)(writeTextPreservingBom(input)),
-      writeIfUnchanged: input => withTargetLock(input.target)(writeIfUnchanged(input)),
-      moveIfUnchanged: input => withTargets([input.target, input.destination], moveIfUnchanged(input)),
-      remove: input => withTargetLock(input.target)(remove(input)),
+      create: (input) => withTargetLock(input.target)(create(input)),
+      write: (input) => withTargetLock(input.target)(write(input)),
+      writeTextPreservingBom: (input) => withTargetLock(input.target)(writeTextPreservingBom(input)),
+      writeIfUnchanged: (input) => withTargetLock(input.target)(writeIfUnchanged(input)),
+      moveIfUnchanged: (input) => withTargets([input.target, input.destination], moveIfUnchanged(input)),
+      remove: (input) => withTargetLock(input.target)(remove(input)),
     })
   }),
 )

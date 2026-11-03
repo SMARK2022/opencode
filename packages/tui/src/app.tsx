@@ -664,28 +664,31 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
         },
       },
       {
-      name: "bash.output_compression.toggle",
-      title: bashCompressionEnabled() ? "Disable Bash output compression" : "Enable Bash output compression",
-      category: "System",
-      slashName: "bash-compression",
-      slashAliases: ["toggle-bash-compression"],
-      run: async () => {
-        const next = !bashCompressionEnabled()
-        const workspace = project.workspace.current()
-        setBashCompressionOverride(next)
-        // 工作区路由与配置持久化沿用同一 SDK，不在 TUI 创建另一份执行开关。
-        const result = await sdk.client.config.update({ workspace, config: { tool_output: { bash_compression: next } } }, { throwOnError: false })
-        // 更新失败必须回滚显示值，否则命令标题会声称未持久化的设置已生效。
-        if (result.error) {
-          setBashCompressionOverride(!next)
-          toast.show({ message: "Failed to toggle bash compression", variant: "error" })
-          return
-        }
-        await sync.bootstrap({ fatal: false })
-        toast.show({ message: next ? "Bash compression enabled" : "Bash compression disabled", variant: "success" })
+        name: "bash.output_compression.toggle",
+        title: bashCompressionEnabled() ? "Disable Bash output compression" : "Enable Bash output compression",
+        category: "System",
+        slashName: "bash-compression",
+        slashAliases: ["toggle-bash-compression"],
+        run: async () => {
+          const next = !bashCompressionEnabled()
+          const workspace = project.workspace.current()
+          setBashCompressionOverride(next)
+          // 工作区路由与配置持久化沿用同一 SDK，不在 TUI 创建另一份执行开关。
+          const result = await sdk.client.config.update(
+            { workspace, config: { tool_output: { bash_compression: next } } },
+            { throwOnError: false },
+          )
+          // 更新失败必须回滚显示值，否则命令标题会声称未持久化的设置已生效。
+          if (result.error) {
+            setBashCompressionOverride(!next)
+            toast.show({ message: "Failed to toggle bash compression", variant: "error" })
+            return
+          }
+          await sync.bootstrap({ fatal: false })
+          toast.show({ message: next ? "Bash compression enabled" : "Bash compression disabled", variant: "success" })
+        },
       },
-    },
-    {
+      {
         name: "session.list",
         title: "Switch session",
         category: "Session",

@@ -46,7 +46,10 @@ export const make = Effect.gen(function* () {
     // 单页后续编码本身完整解码，不额外生成一份raw副本。
     if (withinLimits || !limits.autoResize || (metadata.pages ?? 1) > 1)
       yield* Effect.tryPromise({
-        try: async () => void (await sharp(buffer, (metadata.pages ?? 1) > 1 ? { pages: -1 } : undefined).raw().toBuffer()),
+        try: async () =>
+          void (await sharp(buffer, (metadata.pages ?? 1) > 1 ? { pages: -1 } : undefined)
+            .raw()
+            .toBuffer()),
         catch: () => new Image.DecodeError({ resource }),
       })
 
@@ -75,16 +78,18 @@ export const make = Effect.gen(function* () {
               ? rotated.resize(size.width, size.height, { fit: "inside", withoutEnlargement: true })
               : rotated
           if (metadata.hasAlpha) {
-            const data = (await resized.clone().png({ compressionLevel: 9, adaptiveFiltering: true }).toBuffer()).toString(
-              "base64",
-            )
+            const data = (
+              await resized.clone().png({ compressionLevel: 9, adaptiveFiltering: true }).toBuffer()
+            ).toString("base64")
             if (Buffer.byteLength(data, "utf-8") <= limits.maxBase64Bytes) return { data, mime: "image/png" }
           }
           for (const quality of [85, 70, 55, 40]) {
             // 透明图转 JPEG 时沿用原始白底语义，避免透明像素变成黑色。
-            const data = (await (metadata.hasAlpha ? resized.clone().flatten({ background: "#ffffff" }) : resized.clone())
-              .jpeg({ quality })
-              .toBuffer()).toString("base64")
+            const data = (
+              await (metadata.hasAlpha ? resized.clone().flatten({ background: "#ffffff" }) : resized.clone())
+                .jpeg({ quality })
+                .toBuffer()
+            ).toString("base64")
             if (Buffer.byteLength(data, "utf-8") <= limits.maxBase64Bytes) return { data, mime: "image/jpeg" }
           }
         },
@@ -103,24 +108,30 @@ async function prepareCompiledSharp() {
   const embedded = (await import("opencode-sharp.gen.ts")).default as EmbeddedSharp
   if (!embedded.addon) throw new Error(`Sharp is unavailable for ${embedded.target}`)
   const root = path.join(Global.Path.cache, "native", "sharp", embedded.version, embedded.target)
-  await Promise.all(Object.entries(embedded.files).map(async ([relative, source]) => {
-    const target = path.join(root, ...relative.split("/"))
-    if (await sameFileContent(source, target)) return
-    await fs.mkdir(path.dirname(target), { recursive: true })
-    const temp = `${target}.tmp-${process.pid}-${randomUUID()}`
-    try {
-      await Bun.write(temp, Bun.file(source))
-      try { await fs.rename(temp, target) } catch (error) {
-        // Windows的并发winner可能已加载DLL；只有内容完全一致才复用，否则保留原错误。
-        if (!(await sameFileContent(source, target))) throw error
+  await Promise.all(
+    Object.entries(embedded.files).map(async ([relative, source]) => {
+      const target = path.join(root, ...relative.split("/"))
+      if (await sameFileContent(source, target)) return
+      await fs.mkdir(path.dirname(target), { recursive: true })
+      const temp = `${target}.tmp-${process.pid}-${randomUUID()}`
+      try {
+        await Bun.write(temp, Bun.file(source))
+        try {
+          await fs.rename(temp, target)
+        } catch (error) {
+          // Windows的并发winner可能已加载DLL；只有内容完全一致才复用，否则保留原错误。
+          if (!(await sameFileContent(source, target))) throw error
+        }
+        if (!(await sameFileContent(source, target)))
+          throw new Error(`Extracted Sharp resource failed verification: ${target}`)
+      } finally {
+        await fs.rm(temp, { force: true }).catch(() => {})
       }
-      if (!(await sameFileContent(source, target))) throw new Error(`Extracted Sharp resource failed verification: ${target}`)
-    } finally {
-      await fs.rm(temp, { force: true }).catch(() => {})
-    }
-  }))
+    }),
+  )
   // 所有shared library校验完成后才公开addon路径，不能让加载器观察到半释放状态。
-  ;(globalThis as typeof globalThis & { __OPENCODE_SHARP_NATIVE_PATH?: string }).__OPENCODE_SHARP_NATIVE_PATH = path.join(root, ...embedded.addon.split("/"))
+  ;(globalThis as typeof globalThis & { __OPENCODE_SHARP_NATIVE_PATH?: string }).__OPENCODE_SHARP_NATIVE_PATH =
+    path.join(root, ...embedded.addon.split("/"))
 }
 
 async function sameFileContent(source: string, target: string) {
@@ -129,5 +140,7 @@ async function sameFileContent(source: string, target: string) {
 }
 
 async function fileDigest(file: string) {
-  return createHash("sha256").update(Buffer.from(await Bun.file(file).arrayBuffer())).digest("hex")
+  return createHash("sha256")
+    .update(Buffer.from(await Bun.file(file).arrayBuffer()))
+    .digest("hex")
 }

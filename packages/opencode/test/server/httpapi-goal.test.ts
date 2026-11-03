@@ -204,12 +204,23 @@ describe("session goal HttpApi", () => {
         const headers = { "x-opencode-directory": test.directory, "content-type": "application/json" }
         const rejected = yield* request(url, { method: "POST", headers, body: JSON.stringify({ status: "complete" }) })
         expect(rejected.status).toBe(400)
-        expect(yield* responseJson(rejected)).toEqual({ name: "GoalError", data: { message: "Marking the goal as complete requires a non-empty reason." } })
-        const completed = yield* request(url, { method: "POST", headers, body: JSON.stringify({ status: "complete", reason: " Verified end state " }) })
+        expect(yield* responseJson(rejected)).toEqual({
+          name: "GoalError",
+          data: { message: "Marking the goal as complete requires a non-empty reason." },
+        })
+        const completed = yield* request(url, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ status: "complete", reason: " Verified end state " }),
+        })
         expect(completed.status).toBe(200)
-        expect(yield* responseJson(completed)).toMatchObject({ goal: { status: "complete", generation: 1, reason: "Verified end state" } })
+        expect(yield* responseJson(completed)).toMatchObject({
+          goal: { status: "complete", generation: 1, reason: "Verified end state" },
+        })
         const fetched = yield* request(url, { headers })
-        expect(yield* responseJson(fetched)).toMatchObject({ goal: { status: "complete", reason: "Verified end state" } })
+        expect(yield* responseJson(fetched)).toMatchObject({
+          goal: { status: "complete", reason: "Verified end state" },
+        })
         const resumed = yield* request(url, { method: "POST", headers, body: JSON.stringify({ status: "active" }) })
         expect(resumed.status).toBe(200)
         expect(yield* responseJson(resumed)).toMatchObject({ goal: { status: "active", generation: 1, reason: null } })
@@ -263,7 +274,13 @@ describe("session goal HttpApi", () => {
           model: { providerID: ProviderV2.ID.make("missing"), modelID: ModelV2.ID.make("missing") },
           time: { created: Date.now() },
         })
-        yield* sessions.updatePart({ id: PartID.ascending(), messageID: user.id, sessionID: session.id, type: "text", text: "withdrawn request" })
+        yield* sessions.updatePart({
+          id: PartID.ascending(),
+          messageID: user.id,
+          sessionID: session.id,
+          type: "text",
+          text: "withdrawn request",
+        })
         // 用公开撤回端点留下边界；不直接写 hidden，才能验证 HTTP 恢复接线确实执行清理。
         const reverted = yield* request(pathFor(SessionPaths.revert, { sessionID: session.id }), {
           method: "POST",
@@ -380,7 +397,7 @@ describe("session goal HttpApi", () => {
           const chunk = yield* Queue.take(eventQueue).pipe(Effect.timeoutOption("20 seconds"))
           if (chunk._tag === "None") break
           const text = decoder.decode(chunk.value)
-          if (text.includes("session.error") || text.includes("\"type\":\"error\"")) sawErrorEvent = true
+          if (text.includes("session.error") || text.includes('"type":"error"')) sawErrorEvent = true
         }
         expect(sawErrorEvent).toBe(true)
       }),

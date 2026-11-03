@@ -4,10 +4,10 @@ The `triage` skill speaks in terms of **two category roles** and **five state ro
 
 ## Category roles (exactly one per issue)
 
-| Role in mattpocock/skills | Label in our tracker | Meaning                          |
-| ------------------------- | -------------------- | -------------------------------- |
-| `bug`                     | `bug`                | Something is broken              |
-| `enhancement`             | `enhancement`        | New feature or improvement       |
+| Role in mattpocock/skills | Label in our tracker | Meaning                    |
+| ------------------------- | -------------------- | -------------------------- |
+| `bug`                     | `bug`                | Something is broken        |
+| `enhancement`             | `enhancement`        | New feature or improvement |
 
 ## State roles (exactly one per issue)
 
@@ -27,9 +27,9 @@ The existing `.opencode/agent/triage.md` assigns an owner from five teams (`tui`
 
 The two triage systems operate on orthogonal axes and must not be conflated:
 
-| System                         | Axis            | Mechanism                  | Owner                              |
-| ------------------------------ | --------------- | -------------------------- | ---------------------------------- |
-| Team-assignment agent          | Who works on it | Issue assignee             | `.opencode/agent/triage.md` (auto) |
-| mattpocock `triage` skill      | Lifecycle state | Labels (the 5 above)       | Invoked on demand by a skill       |
+| System                    | Axis            | Mechanism            | Owner                              |
+| ------------------------- | --------------- | -------------------- | ---------------------------------- |
+| Team-assignment agent     | Who works on it | Issue assignee       | `.opencode/agent/triage.md` (auto) |
+| mattpocock `triage` skill | Lifecycle state | Labels (the 5 above) | Invoked on demand by a skill       |
 
 When the mattpocock `triage` skill runs, it should add/remove the lifecycle labels above and **leave assignment untouched** (the team-assignment agent owns that). See ADR-0001 in `docs/adr/` for the rationale.

@@ -865,36 +865,36 @@ describe("Anthropic Messages route", () => {
     Effect.gen(function* () {
       const hint = new CacheHint({ type: "ephemeral" })
       const input = LLM.request({
-          model,
-          tools: [
-            {
-              name: "t1",
-              description: "t1",
-              inputSchema: { type: "object", properties: {} },
-              cache: hint,
-            },
-            {
-              name: "t2",
-              description: "t2",
-              inputSchema: { type: "object", properties: {} },
-              cache: hint,
-            },
-            {
-              name: "t3",
-              description: "t3",
-              inputSchema: { type: "object", properties: {} },
-              cache: hint,
-            },
-            {
-              name: "t4",
-              description: "t4",
-              inputSchema: { type: "object", properties: {} },
-              cache: hint,
-            },
-          ],
-          system: [{ type: "text", text: "system-tail", cache: hint }],
-          messages: [Message.user([{ type: "text", text: "message-tail", cache: hint }])],
-        })
+        model,
+        tools: [
+          {
+            name: "t1",
+            description: "t1",
+            inputSchema: { type: "object", properties: {} },
+            cache: hint,
+          },
+          {
+            name: "t2",
+            description: "t2",
+            inputSchema: { type: "object", properties: {} },
+            cache: hint,
+          },
+          {
+            name: "t3",
+            description: "t3",
+            inputSchema: { type: "object", properties: {} },
+            cache: hint,
+          },
+          {
+            name: "t4",
+            description: "t4",
+            inputSchema: { type: "object", properties: {} },
+            cache: hint,
+          },
+        ],
+        system: [{ type: "text", text: "system-tail", cache: hint }],
+        messages: [Message.user([{ type: "text", text: "message-tail", cache: hint }])],
+      })
       const prepared = yield* LLMClient.prepare(input)
 
       const body = prepared.body as {
@@ -911,20 +911,34 @@ describe("Anthropic Messages route", () => {
         LLM.updateRequest(input, { model: model.route.with({ provider: "claudecode" }).model({ id: model.id }) }),
       )
       // 独立列出四个工具名，确保身份预算不会让最后两个上游标记悄然丢失。
-      expect(claude.body.tools?.filter((tool) => tool.cache_control !== undefined).map((tool) => tool.name)).toEqual(["t1", "t2", "t3", "t4"])
+      expect(claude.body.tools?.filter((tool) => tool.cache_control !== undefined).map((tool) => tool.name)).toEqual([
+        "t1",
+        "t2",
+        "t3",
+        "t4",
+      ])
       // 四名额已由工具用完；system 与 history 保持原有裁剪，身份不额外发出第五个标记。
       expect(claude.body.system?.filter((block) => block.cache_control !== undefined)).toEqual([])
-      expect(claude.body.messages.every((message) => message.content.every((block) => !("cache_control" in block) || block.cache_control === undefined))).toBe(true)
+      expect(
+        claude.body.messages.every((message) =>
+          message.content.every((block) => !("cache_control" in block) || block.cache_control === undefined),
+        ),
+      ).toBe(true)
       // 24 只恢复计费首块，上游 system-tail 与四个工具缓存保持原有顺序和预算。
       expect(claude.body.system?.map((block) => block.text)).toEqual([
-        expect.stringMatching(/^x-anthropic-billing-header: cc_version=2\.1\.117\.[0-9a-f]{3}; cc_entrypoint=cli; cch=00000;$/),
+        expect.stringMatching(
+          /^x-anthropic-billing-header: cc_version=2\.1\.117\.[0-9a-f]{3}; cc_entrypoint=cli; cch=00000;$/,
+        ),
         "system-tail",
       ])
 
       // 首次接纳必须在13成立：缺省才 enabled，普通 Anthropic 不共享专用默认。
       expect(claude.body.thinking).toEqual({ type: "enabled", budget_tokens: 4095 })
       // 原生请求头也必须真正发出 redact；保持同一 prepare 输入和 disabled/adaptive 验证。
-      const wire = yield* AnthropicMessages.route.prepareTransport(claude.body, LLM.updateRequest(input, { model: claude.model }))
+      const wire = yield* AnthropicMessages.route.prepareTransport(
+        claude.body,
+        LLM.updateRequest(input, { model: claude.model }),
+      )
       const web = yield* HttpClientRequest.toWeb(wire.request).pipe(Effect.orDie)
       expect(web.headers.get("anthropic-beta")).toContain("redact-thinking-2026-02-12")
       expect(prepared.body).toHaveProperty("thinking", undefined)
@@ -944,52 +958,101 @@ describe("Anthropic Messages route", () => {
     }),
   )
   it.effect("preserves raw ClaudeCode system and fixed zero CCH on the wire", () =>
-    Effect.forEach([undefined, "2.1.200"], (version) => Effect.gen(function* () {
-      const route = AnthropicMessages.route.with({ provider: "claudecode" })
-      // 原始 5m/1h 显式 TTL 与 0/3/4 个工具标记组合，均经过真实 Schema/prepare。
-      for (const raw of ["原始字符串", [
-        { type: "text", text: "原始数组", cache_control: { type: "ephemeral", ttl: "5m" }, source: "retained" },
-        { type: "text", text: "第二块", cache_control: { type: "ephemeral", ttl: "1h" }, source: "second" },
-      ]]) {
-        for (const count of [0, 3, 4]) {
-          const input = LLM.request({ model: route.model({ id: "claude-sonnet-4-5" }), cache: "none",
-            system: "Session system", messages: [Message.user([{ type: "text", text: "abcdefghijklmnopqrstuv", cache: new CacheHint({ type: "ephemeral" }) }])],
-            // 四工具的优先级在所有 system 之前，history 只能领取 system 之后的剩余预算。
-            tools: ["t1", "t2", "t3", "t4"].slice(0, count).map((name) => ({ name, description: name, inputSchema: { type: "object", properties: {} }, cache: new CacheHint({ type: "ephemeral" }) })),
-            providerOptions: { anthropic: { version, system: raw, metadata: { retained: "yes" }, thinking: { type: "disabled" }, output_config: { effort: "high" } } },
-            http: { body: { extra: "中文 cch=00000;" } },
-          })
-          const prepared = yield* LLMClient.prepare<AnthropicMessages.AnthropicMessagesBody>(input)
-          // 手工列出原始块预期，额外属性和缓存标记不能被 typed 编码剥离。
-          expect(prepared.body.system?.slice(1)).toEqual(typeof raw === "string"
-            ? [{ type: "text", text: "Session system" }, { type: "text", text: "原始字符串" }]
-            : [{ type: "text", text: "Session system" },
-              { type: "text", text: "原始数组", cache_control: count < 4 ? { type: "ephemeral", ttl: "5m" } : undefined, source: "retained" },
-              { type: "text", text: "第二块", cache_control: count < 3 ? { type: "ephemeral", ttl: "1h" } : undefined, source: "second" },
+    Effect.forEach([undefined, "2.1.200"], (version) =>
+      Effect.gen(function* () {
+        const route = AnthropicMessages.route.with({ provider: "claudecode" })
+        // 原始 5m/1h 显式 TTL 与 0/3/4 个工具标记组合，均经过真实 Schema/prepare。
+        for (const raw of [
+          "原始字符串",
+          [
+            { type: "text", text: "原始数组", cache_control: { type: "ephemeral", ttl: "5m" }, source: "retained" },
+            { type: "text", text: "第二块", cache_control: { type: "ephemeral", ttl: "1h" }, source: "second" },
+          ],
+        ]) {
+          for (const count of [0, 3, 4]) {
+            const input = LLM.request({
+              model: route.model({ id: "claude-sonnet-4-5" }),
+              cache: "none",
+              system: "Session system",
+              messages: [
+                Message.user([
+                  { type: "text", text: "abcdefghijklmnopqrstuv", cache: new CacheHint({ type: "ephemeral" }) },
+                ]),
+              ],
+              // 四工具的优先级在所有 system 之前，history 只能领取 system 之后的剩余预算。
+              tools: ["t1", "t2", "t3", "t4"].slice(0, count).map((name) => ({
+                name,
+                description: name,
+                inputSchema: { type: "object", properties: {} },
+                cache: new CacheHint({ type: "ephemeral" }),
+              })),
+              providerOptions: {
+                anthropic: {
+                  version,
+                  system: raw,
+                  metadata: { retained: "yes" },
+                  thinking: { type: "disabled" },
+                  output_config: { effort: "high" },
+                },
+              },
+              http: { body: { extra: "中文 cch=00000;" } },
+            })
+            const prepared = yield* LLMClient.prepare<AnthropicMessages.AnthropicMessagesBody>(input)
+            // 手工列出原始块预期，额外属性和缓存标记不能被 typed 编码剥离。
+            expect(prepared.body.system?.slice(1)).toEqual(
+              typeof raw === "string"
+                ? [
+                    { type: "text", text: "Session system" },
+                    { type: "text", text: "原始字符串" },
+                  ]
+                : [
+                    { type: "text", text: "Session system" },
+                    {
+                      type: "text",
+                      text: "原始数组",
+                      cache_control: count < 4 ? { type: "ephemeral", ttl: "5m" } : undefined,
+                      source: "retained",
+                    },
+                    {
+                      type: "text",
+                      text: "第二块",
+                      cache_control: count < 3 ? { type: "ephemeral", ttl: "1h" } : undefined,
+                      source: "second",
+                    },
+                  ],
+            )
+            // 显式 raw 标记必须先消耗预算，不能先给 history 标记再凑数删 system。
+            expect(prepared.body.messages[0]?.content[0]?.cache_control).toEqual(
+              count === 0 || (count === 3 && typeof raw === "string") ? { type: "ephemeral" } : undefined,
+            )
+            expect(prepared.body.system?.[0]?.cache_control).toBeUndefined()
+            expect(prepared.body.metadata).toMatchObject({ retained: "yes" })
+            expect(prepared.body.thinking).toEqual({ type: "disabled" })
+            expect(prepared.body.output_config).toEqual({ effort: "high" })
+            expect(prepared.body.tools?.map((tool) => tool.name)).toEqual([
+              ...["t1", "t2", "t3", "t4"].slice(0, count),
+              "Read",
             ])
-          // 显式 raw 标记必须先消耗预算，不能先给 history 标记再凑数删 system。
-          expect(prepared.body.messages[0]?.content[0]?.cache_control).toEqual(count === 0 || (count === 3 && typeof raw === "string") ? { type: "ephemeral" } : undefined)
-          expect(prepared.body.system?.[0]?.cache_control).toBeUndefined()
-          expect(prepared.body.metadata).toMatchObject({ retained: "yes" })
-          expect(prepared.body.thinking).toEqual({ type: "disabled" })
-          expect(prepared.body.output_config).toEqual({ effort: "high" })
-          expect(prepared.body.tools?.map((tool) => tool.name)).toEqual([...(["t1", "t2", "t3", "t4"].slice(0, count)), "Read"])
-          expect(prepared.body.tools?.filter((tool) => tool.cache_control !== undefined)).toHaveLength(count)
-          const wire = yield* route.prepareTransport(prepared.body, input)
-          const web = yield* HttpClientRequest.toWeb(wire.request).pipe(Effect.orDie)
-          const text = yield* Effect.promise(() => web.text())
-          // 固定样本的采样字符为 e/h/u；预期输入独立于生产采样代码。
-          const fp = createHash("sha256").update(`59cf53e54c78ehu${version ?? "2.1.117"}`).digest("hex").slice(0, 3)
-          const prefix = `{"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=${version ?? "2.1.117"}.${fp}; cc_entrypoint=cli; cch=`
-          // 断言真实发包前缀固定五位零；raw/cache/metadata 的既有矩阵继续执行。
-          expect(text.startsWith(`${prefix}00000;`)).toBe(true)
-          expect(text).toContain("中文 cch=00000;")
-          expect(text).not.toContain("You are Claude Code")
-          expect(web.headers.get("anthropic-beta")).toContain("redact-thinking-2026-02-12")
-          expect(web.headers.get("user-agent")).toBe(`claude-cli/${version ?? "2.1.117"} (external, cli)`)
-          expect(text).not.toContain('"version":')
+            expect(prepared.body.tools?.filter((tool) => tool.cache_control !== undefined)).toHaveLength(count)
+            const wire = yield* route.prepareTransport(prepared.body, input)
+            const web = yield* HttpClientRequest.toWeb(wire.request).pipe(Effect.orDie)
+            const text = yield* Effect.promise(() => web.text())
+            // 固定样本的采样字符为 e/h/u；预期输入独立于生产采样代码。
+            const fp = createHash("sha256")
+              .update(`59cf53e54c78ehu${version ?? "2.1.117"}`)
+              .digest("hex")
+              .slice(0, 3)
+            const prefix = `{"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=${version ?? "2.1.117"}.${fp}; cc_entrypoint=cli; cch=`
+            // 断言真实发包前缀固定五位零；raw/cache/metadata 的既有矩阵继续执行。
+            expect(text.startsWith(`${prefix}00000;`)).toBe(true)
+            expect(text).toContain("中文 cch=00000;")
+            expect(text).not.toContain("You are Claude Code")
+            expect(web.headers.get("anthropic-beta")).toContain("redact-thinking-2026-02-12")
+            expect(web.headers.get("user-agent")).toBe(`claude-cli/${version ?? "2.1.117"} (external, cli)`)
+            expect(text).not.toContain('"version":')
+          }
         }
-      }
-    })),
+      }),
+    ),
   )
 })

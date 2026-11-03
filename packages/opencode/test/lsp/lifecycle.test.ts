@@ -314,48 +314,59 @@ describe("LSP.Diagnostic", () => {
   })
 })
 
-it.instance("retains local VSCode protocol semantics without enabling product LSP", () =>
-  Effect.gen(function* () {
-    const ctx = yield* InstanceState.context
-    const flags = yield* RuntimeFlags.Service
-    const file = path.join(ctx.directory, "protocol.repro")
-    const uri = pathToFileURL(file).href
-    const range = { start: { line: 0, character: 0 }, end: { line: 0, character: 3 } }
-    const calls = spyOn(VscodeBridge, "callBridge").mockImplementation(async ({ path: endpoint }) => {
-      if (endpoint.endsWith("touch")) return { diagnostics: [{ line: 2, column: 3, severity: "Error", message: "fixture" }] }
-      if (endpoint.endsWith("hover")) return { hovers: [{ contents: ["hover text"] }] }
-      return { symbols: [{ name: "Example", kind: 4, range, selectionRange: range, location: { uri, range } }] }
-    })
-    try {
-      const handle = yield* Effect.promise(() => LSPServer.Vscode.spawn(ctx.directory, ctx, flags))
-      if (!handle || !("connection" in handle)) return yield* Effect.die("Missing external handle")
+it.instance(
+  "retains local VSCode protocol semantics without enabling product LSP",
+  () =>
+    Effect.gen(function* () {
+      const ctx = yield* InstanceState.context
+      const flags = yield* RuntimeFlags.Service
+      const file = path.join(ctx.directory, "protocol.repro")
+      const uri = pathToFileURL(file).href
+      const range = { start: { line: 0, character: 0 }, end: { line: 0, character: 3 } }
+      const calls = spyOn(VscodeBridge, "callBridge").mockImplementation(async ({ path: endpoint }) => {
+        if (endpoint.endsWith("touch"))
+          return { diagnostics: [{ line: 2, column: 3, severity: "Error", message: "fixture" }] }
+        if (endpoint.endsWith("hover")) return { hovers: [{ contents: ["hover text"] }] }
+        return { symbols: [{ name: "Example", kind: 4, range, selectionRange: range, location: { uri, range } }] }
+      })
       try {
-        // 直接验证source本地协议转换，不注册产品服务、不打开HTTP或宿主进程。
-        handle.connection.listen()
-        const initialized = yield* Effect.promise(() => handle.connection.sendRequest("initialize", {}))
-        expect(initialized).toMatchObject({ capabilities: { workspaceSymbolProvider: true, hoverProvider: true } })
-        expect(initialized).not.toHaveProperty("capabilities.implementationProvider")
-        expect(initialized).not.toHaveProperty("capabilities.callHierarchyProvider")
-        const query = { textDocument: { uri } }
-        expect(yield* Effect.promise(() => handle.connection.sendRequest("workspace/symbol", { query: "Example" }))).toEqual([expect.objectContaining({ kind: 5 })])
-        expect(yield* Effect.promise(() => handle.connection.sendRequest("textDocument/documentSymbol", query))).toEqual([expect.objectContaining({ kind: 5 })])
-        expect(yield* Effect.promise(() => handle.connection.sendRequest("textDocument/hover", query))).toEqual({ contents: ["hover text"] })
-        expect(yield* Effect.promise(() => handle.connection.sendRequest("textDocument/diagnostic", query))).toMatchObject({ kind: "full", items: [{ range: { start: { line: 1, character: 2 } }, severity: 1 }] })
-        // 本地定义存在仍不能让true配置复活，服务请求不能再触发一次桥接调用。
-        const lsp = yield* LSP.Service
-        const count = calls.mock.calls.length
-        yield* lsp.init()
-        yield* lsp.touchFile(file, "document")
-        expect(yield* lsp.workspaceSymbol("Example")).toEqual([])
-        expect(yield* lsp.status()).toEqual([])
-        expect(calls).toHaveBeenCalledTimes(count)
+        const handle = yield* Effect.promise(() => LSPServer.Vscode.spawn(ctx.directory, ctx, flags))
+        if (!handle || !("connection" in handle)) return yield* Effect.die("Missing external handle")
+        try {
+          // 直接验证source本地协议转换，不注册产品服务、不打开HTTP或宿主进程。
+          handle.connection.listen()
+          const initialized = yield* Effect.promise(() => handle.connection.sendRequest("initialize", {}))
+          expect(initialized).toMatchObject({ capabilities: { workspaceSymbolProvider: true, hoverProvider: true } })
+          expect(initialized).not.toHaveProperty("capabilities.implementationProvider")
+          expect(initialized).not.toHaveProperty("capabilities.callHierarchyProvider")
+          const query = { textDocument: { uri } }
+          expect(
+            yield* Effect.promise(() => handle.connection.sendRequest("workspace/symbol", { query: "Example" })),
+          ).toEqual([expect.objectContaining({ kind: 5 })])
+          expect(
+            yield* Effect.promise(() => handle.connection.sendRequest("textDocument/documentSymbol", query)),
+          ).toEqual([expect.objectContaining({ kind: 5 })])
+          expect(yield* Effect.promise(() => handle.connection.sendRequest("textDocument/hover", query))).toEqual({
+            contents: ["hover text"],
+          })
+          expect(
+            yield* Effect.promise(() => handle.connection.sendRequest("textDocument/diagnostic", query)),
+          ).toMatchObject({ kind: "full", items: [{ range: { start: { line: 1, character: 2 } }, severity: 1 }] })
+          // 本地定义存在仍不能让true配置复活，服务请求不能再触发一次桥接调用。
+          const lsp = yield* LSP.Service
+          const count = calls.mock.calls.length
+          yield* lsp.init()
+          yield* lsp.touchFile(file, "document")
+          expect(yield* lsp.workspaceSymbol("Example")).toEqual([])
+          expect(yield* lsp.status()).toEqual([])
+          expect(calls).toHaveBeenCalledTimes(count)
+        } finally {
+          // 只释放两条本地流，Notebook共用的宿主与传输不归此句柄所有。
+          handle.dispose()
+        }
       } finally {
-        // 只释放两条本地流，Notebook共用的宿主与传输不归此句柄所有。
-        handle.dispose()
+        calls.mockRestore()
       }
-    } finally {
-      calls.mockRestore()
-    }
-  }),
+    }),
   { config: { lsp: true } },
 )

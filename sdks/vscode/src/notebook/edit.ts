@@ -15,14 +15,7 @@
  * 编辑拒绝或同步超时沿错误边界传播；差分只来自已同步修改，不隐式保存。
  */
 import vscode from "vscode"
-import {
-  stringProp,
-  sourceProp,
-  fullDocumentRange,
-  documentEol,
-  previewText,
-  quoteForSummary,
-} from "../util"
+import { stringProp, sourceProp, fullDocumentRange, documentEol, previewText, quoteForSummary } from "../util"
 import { c1, copilotLikeCellId, cellTypeLabel, computeVirtualRanges, notebookHeader, cellRef } from "./format"
 import { resolveNotebook, resolveNotebookCell } from "./resolve"
 
@@ -69,7 +62,12 @@ export async function editNotebook(input: Record<string, unknown>, signal?: Abor
   return await handleEdit(notebook, input, cellId, beforeCount)
 }
 
-async function handleDelete(notebook: vscode.NotebookDocument, cellId: string, beforeCount: number, input: Record<string, unknown>) {
+async function handleDelete(
+  notebook: vscode.NotebookDocument,
+  cellId: string,
+  beforeCount: number,
+  input: Record<string, unknown>,
+) {
   const targetCell = resolveNotebookCell(notebook, undefined, cellId)
   // 删除后 targetCell.index 可能为 -1，范围和删除摘要都使用这个提交前位置。
   const deletedIndex = targetCell.index
@@ -124,7 +122,12 @@ async function handleDelete(notebook: vscode.NotebookDocument, cellId: string, b
   })
 }
 
-async function handleInsert(notebook: vscode.NotebookDocument, input: Record<string, unknown>, cellId: string, beforeCount: number) {
+async function handleInsert(
+  notebook: vscode.NotebookDocument,
+  input: Record<string, unknown>,
+  cellId: string,
+  beforeCount: number,
+) {
   const sourceRaw = sourceProp(input, "newCode", "\n")
   // 空字符串可插入空格，只有 undefined 表示没有提交 newCode。
   if (sourceRaw === undefined) throw new Error("newCode is required for insert")
@@ -156,7 +159,9 @@ async function handleInsert(notebook: vscode.NotebookDocument, input: Record<str
   // 插入前的位置用于说明被推后一格的邻居；append 没有这个邻居。
   const shiftedOldIdx = insertIndex < notebook.cellCount ? insertIndex : undefined
   const edit = new vscode.WorkspaceEdit()
-  edit.set(notebook.uri, [vscode.NotebookEdit.replaceCells(new vscode.NotebookRange(insertIndex, insertIndex), [newCell])])
+  edit.set(notebook.uri, [
+    vscode.NotebookEdit.replaceCells(new vscode.NotebookRange(insertIndex, insertIndex), [newCell]),
+  ])
   // 新格和移位邻居取已同步的结构，不能先按旧 cellCount 读取 index+1。
   const applied = await applyNotebookEditAndWait(notebook, edit)
   // 同步应用后才存在新格，Inserted行与结构化身份共用它，不改显式保存顺序。
@@ -165,10 +170,32 @@ async function handleInsert(notebook: vscode.NotebookDocument, input: Record<str
   const shiftedCell = applied && shiftedOldIdx !== undefined ? notebook.cellAt(shiftedOldIdx + 1) : undefined
   if (input.save === true) await saveNotebook(notebook)
   // 新格差分以空源码为起点；实际位置、身份与失败状态沿用结构编辑结果。
-  return compactEditResult(notebook, { applied, editType: "insert", opIndex: String(insertIndex + 1), beforeCount, afterCount: notebook.cellCount, anchorCell, anchorCellIndex, insertedCell, affectedCellIndex: applied ? insertIndex : undefined, shiftedCell, shiftedOldIdx, kind: cellTypeLabel(kind), language: lang, sourcePreview: source, beforeSource: "", afterSource: source })
+  return compactEditResult(notebook, {
+    applied,
+    editType: "insert",
+    opIndex: String(insertIndex + 1),
+    beforeCount,
+    afterCount: notebook.cellCount,
+    anchorCell,
+    anchorCellIndex,
+    insertedCell,
+    affectedCellIndex: applied ? insertIndex : undefined,
+    shiftedCell,
+    shiftedOldIdx,
+    kind: cellTypeLabel(kind),
+    language: lang,
+    sourcePreview: source,
+    beforeSource: "",
+    afterSource: source,
+  })
 }
 
-async function handleEdit(notebook: vscode.NotebookDocument, input: Record<string, unknown>, cellId: string, beforeCount: number) {
+async function handleEdit(
+  notebook: vscode.NotebookDocument,
+  input: Record<string, unknown>,
+  cellId: string,
+  beforeCount: number,
+) {
   let targetCell: vscode.NotebookCell
   try {
     targetCell = resolveNotebookCell(notebook, undefined, cellId)
@@ -178,14 +205,15 @@ async function handleEdit(notebook: vscode.NotebookDocument, input: Record<strin
     if (!oldCodeRaw) throw resolveErr
     const candidates = scanNotebookCellsForOldCode(notebook, oldCodeRaw)
     if (candidates.length === 0) throw resolveErr
-    const parts = candidates.map((c) =>
-      `c${c1(c)} id=${copilotLikeCellId(c)} ${cellTypeLabel(c.kind)}/${c.document.languageId} first=${JSON.stringify(previewText((c.document.getText().split("\n")[0] ?? ""), 40))}`,
+    const parts = candidates.map(
+      (c) =>
+        `c${c1(c)} id=${copilotLikeCellId(c)} ${cellTypeLabel(c.kind)}/${c.document.languageId} first=${JSON.stringify(previewText(c.document.getText().split("\n")[0] ?? "", 40))}`,
     )
     throw new Error(
       `Cell not found: ${cellId}. ` +
-      (candidates.length === 1
-        ? `Did you mean ${parts[0]}? Retry with this cellId.`
-        : `oldCode matches ${candidates.length} cells:\n  ${parts.join("\n  ")}\nSpecify the correct cellId.`),
+        (candidates.length === 1
+          ? `Did you mean ${parts[0]}? Retry with this cellId.`
+          : `oldCode matches ${candidates.length} cells:\n  ${parts.join("\n  ")}\nSpecify the correct cellId.`),
     )
   }
   const language = stringProp(input, "language")
@@ -193,19 +221,43 @@ async function handleEdit(notebook: vscode.NotebookDocument, input: Record<strin
   const oldCodeRaw = sourceProp(input, "oldCode")
   // 语言与结构类型联合判定，Code格已有markdown语言时仍须转换为Markup。
   const newKind = language === undefined ? undefined : kindFromLang(language)
-  const typeChange = language !== undefined && (language !== targetCell.document.languageId || newKind !== targetCell.kind)
+  const typeChange =
+    language !== undefined && (language !== targetCell.document.languageId || newKind !== targetCell.kind)
 
   if (typeChange) {
     // 旧语言和类型在替换前捕获，不能从新格反推转换箭头的左侧。
     const oldKind = cellTypeLabel(targetCell.kind)
     const oldLang = targetCell.document.languageId
-    return await handleTypeChange(notebook, targetCell, input, newKind!, language!, oldKind, oldLang, oldCodeRaw, beforeCount)
+    return await handleTypeChange(
+      notebook,
+      targetCell,
+      input,
+      newKind!,
+      language!,
+      oldKind,
+      oldLang,
+      oldCodeRaw,
+      beforeCount,
+    )
   }
 
   // 源码字段省略才是语言幂等操作；显式空字符串仍代表清空源码。
   if (language !== undefined && input.oldCode === undefined && input.newCode === undefined) {
     const source = targetCell.document.getText()
-    return compactEditResult(notebook, { applied: true, editType: "edit", opIndex: String(c1(targetCell)), beforeCount, afterCount: notebook.cellCount, anchorCell: targetCell, anchorCellIndex: targetCell.index, kind: cellTypeLabel(targetCell.kind), language, sourcePreview: source, beforeSource: source, afterSource: source })
+    return compactEditResult(notebook, {
+      applied: true,
+      editType: "edit",
+      opIndex: String(c1(targetCell)),
+      beforeCount,
+      afterCount: notebook.cellCount,
+      anchorCell: targetCell,
+      anchorCellIndex: targetCell.index,
+      kind: cellTypeLabel(targetCell.kind),
+      language,
+      sourcePreview: source,
+      beforeSource: source,
+      afterSource: source,
+    })
   }
 
   if (oldCodeRaw) {
@@ -228,7 +280,20 @@ async function handleEdit(notebook: vscode.NotebookDocument, input: Record<strin
   // 内容不变的 TextEdit 不产生新版本，有效空操作不能等到同步超时。
   const applied = await applyTextEditAndWait(targetCell.document, edit, source !== targetCell.document.getText())
   if (input.save === true) await saveNotebook(notebook)
-  return compactEditResult(notebook, { applied, editType: "edit", opIndex: String(c1(targetCell)), beforeCount, afterCount: notebook.cellCount, anchorCell: targetCell, anchorCellIndex: targetCell.index, kind: cellTypeLabel(targetCell.kind), language: targetCell.document.languageId, sourcePreview: source, beforeSource, afterSource: source })
+  return compactEditResult(notebook, {
+    applied,
+    editType: "edit",
+    opIndex: String(c1(targetCell)),
+    beforeCount,
+    afterCount: notebook.cellCount,
+    anchorCell: targetCell,
+    anchorCellIndex: targetCell.index,
+    kind: cellTypeLabel(targetCell.kind),
+    language: targetCell.document.languageId,
+    sourcePreview: source,
+    beforeSource,
+    afterSource: source,
+  })
 }
 
 async function handleTypeChange(
@@ -269,16 +334,41 @@ async function handleTypeChange(
   newCell.metadata = targetCell.metadata ? { ...targetCell.metadata } : undefined
   const anchorCellIndex = targetCell.index
   const edit = new vscode.WorkspaceEdit()
-  edit.set(notebook.uri, [vscode.NotebookEdit.replaceCells(new vscode.NotebookRange(anchorCellIndex, anchorCellIndex + 1), [newCell])])
+  edit.set(notebook.uri, [
+    vscode.NotebookEdit.replaceCells(new vscode.NotebookRange(anchorCellIndex, anchorCellIndex + 1), [newCell]),
+  ])
   // 新身份锚点沿同步后的原槽位获取，不按失效 targetCell.index 重新定位。
   const applied = await applyNotebookEditAndWait(notebook, edit)
   // applyEdit=false 时原格仍是有效锚点，不能假造已经创建的新格。
   const anchorCell = applied ? notebook.cellAt(anchorCellIndex) : targetCell
   if (input.save === true) await saveNotebook(notebook)
-  return compactEditResult(notebook, { applied, editType: "edit", opIndex: String(anchorCellIndex + 1), beforeCount, afterCount: notebook.cellCount, anchorCell, anchorCellIndex, kind: cellTypeLabel(newKind), language: newLang, oldKind, oldLang, sourcePreview: newSource, contextSummary, beforeSource, afterSource: newSource })
+  return compactEditResult(notebook, {
+    applied,
+    editType: "edit",
+    opIndex: String(anchorCellIndex + 1),
+    beforeCount,
+    afterCount: notebook.cellCount,
+    anchorCell,
+    anchorCellIndex,
+    kind: cellTypeLabel(newKind),
+    language: newLang,
+    oldKind,
+    oldLang,
+    sourcePreview: newSource,
+    contextSummary,
+    beforeSource,
+    afterSource: newSource,
+  })
 }
 
-async function handleStringEdit(notebook: vscode.NotebookDocument, targetCell: vscode.NotebookCell, oldCode: string, newCode: string, beforeCount: number, input: Record<string, unknown>) {
+async function handleStringEdit(
+  notebook: vscode.NotebookDocument,
+  targetCell: vscode.NotebookCell,
+  oldCode: string,
+  newCode: string,
+  beforeCount: number,
+  input: Record<string, unknown>,
+) {
   // 片段替换的差分仍比较完整源码，Preview不代替合成结果。
   const beforeSource = targetCell.document.getText()
   const result = matchAndReplace(targetCell, oldCode, newCode)
@@ -292,7 +382,21 @@ async function handleStringEdit(notebook: vscode.NotebookDocument, targetCell: v
   const applied = await applyTextEditAndWait(targetCell.document, edit, result.source !== targetCell.document.getText())
   if (input.save === true) await saveNotebook(notebook)
   // Preview 只展示替换片段，完整合成源码由 TextEdit 写入而不塞进差分摘要。
-  return compactEditResult(notebook, { applied, editType: "edit", opIndex: String(c1(targetCell)), beforeCount, afterCount: notebook.cellCount, anchorCell: targetCell, anchorCellIndex: targetCell.index, kind: cellTypeLabel(targetCell.kind), language: targetCell.document.languageId, sourcePreview: newCode, contextSummary, beforeSource, afterSource: result.source })
+  return compactEditResult(notebook, {
+    applied,
+    editType: "edit",
+    opIndex: String(c1(targetCell)),
+    beforeCount,
+    afterCount: notebook.cellCount,
+    anchorCell: targetCell,
+    anchorCellIndex: targetCell.index,
+    kind: cellTypeLabel(targetCell.kind),
+    language: targetCell.document.languageId,
+    sourcePreview: newCode,
+    contextSummary,
+    beforeSource,
+    afterSource: result.source,
+  })
 }
 
 function matchAndReplace(targetCell: vscode.NotebookCell, oldCode: string, newCode: string) {
@@ -332,7 +436,9 @@ function matchAndReplace(targetCell: vscode.NotebookCell, oldCode: string, newCo
       matchIdx = src.indexOf(trimmedOld)
       if (matchIdx !== -1) {
         if (src.indexOf(trimmedOld, matchIdx + 1) !== -1) {
-          throw new Error(`oldCode matches multiple locations in cell c${c1(targetCell)}. Provide more surrounding context.`)
+          throw new Error(
+            `oldCode matches multiple locations in cell c${c1(targetCell)}. Provide more surrounding context.`,
+          )
         }
         matchLen = trimmedOld.length
         strategy = "border-trimmed"
@@ -342,17 +448,23 @@ function matchAndReplace(targetCell: vscode.NotebookCell, oldCode: string, newCo
 
   // 空白降级只可替换真实片段，零长命中会把未匹配请求误当成插入。
   if (matchIdx !== -1 && matchLen === 0 && strategy !== "exact") {
-    throw new Error(`oldCode has no non-empty match after whitespace trimming in cell c${c1(targetCell)}. Try re-reading the source with vscode_notebook_source.`)
+    throw new Error(
+      `oldCode has no non-empty match after whitespace trimming in cell c${c1(targetCell)}. Try re-reading the source with vscode_notebook_source.`,
+    )
   }
   // 未命中在创建 WorkspaceEdit 前失败，不能静默转成整格替换。
   if (matchIdx === -1) {
-    throw new Error(`oldCode not found in cell c${c1(targetCell)}. Try re-reading the source with vscode_notebook_source.`)
+    throw new Error(
+      `oldCode not found in cell c${c1(targetCell)}. Try re-reading the source with vscode_notebook_source.`,
+    )
   }
 
   // 精确命中重复时直接报错，不能改走宽松策略选择任意位置。
   const secondIdx = src.indexOf(old, matchIdx + 1)
   if (secondIdx !== -1 && strategy === "exact") {
-    throw new Error(`oldCode matches multiple locations in cell c${c1(targetCell)}. Provide more surrounding context to make the match unique.`)
+    throw new Error(
+      `oldCode matches multiple locations in cell c${c1(targetCell)}. Provide more surrounding context to make the match unique.`,
+    )
   }
 
   // #105：line/border 策略携带源缩进到 newCode
@@ -415,7 +527,12 @@ function lineTrimmedMatch(src: string, old: string) {
   return found
 }
 
-function buildContext(notebook: vscode.NotebookDocument, targetCell: vscode.NotebookCell, result: { matchStartLine: number; matchEndLine: number; strategy: string }, newCode: string) {
+function buildContext(
+  notebook: vscode.NotebookDocument,
+  targetCell: vscode.NotebookCell,
+  result: { matchStartLine: number; matchEndLine: number; strategy: string },
+  newCode: string,
+) {
   const cellLines = targetCell.document.getText().split(/\r?\n/)
   const vr = computeVirtualRanges(notebook)
   // 共享虚拟起点包含前格正文和空分隔行，不能仅累计其它格的正文行数。
@@ -428,7 +545,9 @@ function buildContext(notebook: vscode.NotebookDocument, targetCell: vscode.Note
     ctxLines.push(`${gStart - 1}: ${cellLines[result.matchStartLine - 2]}`)
   } else {
     // 格边界没有正文行号，Context 的标记不能伪装成可编辑的源码行。
-    ctxLines.push(`--: <cell_top> --- c${c1(targetCell)} ${cellTypeLabel(targetCell.kind)}/${targetCell.document.languageId}`)
+    ctxLines.push(
+      `--: <cell_top> --- c${c1(targetCell)} ${cellTypeLabel(targetCell.kind)}/${targetCell.document.languageId}`,
+    )
   }
 
   const label = gStart === gEnd ? `${gStart}` : `${gStart}~${gEnd}`
@@ -456,7 +575,9 @@ function stripCodeFence(source: string) {
 
 function rejectEmptySourceArray(input: Record<string, unknown>, key: "oldCode" | "newCode") {
   if (Array.isArray(input[key]) && input[key].length === 0) {
-    throw new Error(`${key} cannot be an empty array. Omit ${key} for language-only edits, or pass an explicit empty string to clear source.`)
+    throw new Error(
+      `${key} cannot be an empty array. Omit ${key} for language-only edits, or pass an explicit empty string to clear source.`,
+    )
   }
 }
 
@@ -467,7 +588,9 @@ function rejectEmptySourceArray(input: Record<string, unknown>, key: "oldCode" |
 function rejectNonStringSourceArray(input: Record<string, unknown>, key: "oldCode" | "newCode") {
   const value = input[key]
   if (Array.isArray(value) && !value.every((item) => typeof item === "string")) {
-    throw new Error(`${key} must be a string or an array of strings, but contains non-string items. Pass source code text, not structured objects.`)
+    throw new Error(
+      `${key} must be a string or an array of strings, but contains non-string items. Pass source code text, not structured objects.`,
+    )
   }
 }
 
@@ -478,16 +601,16 @@ function afterSourcePreview(source: string) {
   const rawLines = source.replace(/\r\n/g, "\n").split("\n")
   const lines = rawLines.at(-1) === "" ? rawLines.slice(0, -1) : rawLines
   const linePreview = lines.slice(0, AFTER_SOURCE_PREVIEW_LINES).join("\n")
-  const text = linePreview.length > AFTER_SOURCE_PREVIEW_MAX_CHARS
-    ? linePreview.slice(0, AFTER_SOURCE_PREVIEW_MAX_CHARS)
-    : linePreview
+  const text =
+    linePreview.length > AFTER_SOURCE_PREVIEW_MAX_CHARS
+      ? linePreview.slice(0, AFTER_SOURCE_PREVIEW_MAX_CHARS)
+      : linePreview
   return {
     text,
     truncated: lines.length > AFTER_SOURCE_PREVIEW_LINES || text.length < linePreview.length,
     remainingLines: Math.max(0, lines.length - AFTER_SOURCE_PREVIEW_LINES),
   }
 }
-
 
 async function applyNotebookEditAndWait(notebook: vscode.NotebookDocument, edit: vscode.WorkspaceEdit) {
   // 提交前版本是本次修改的基线，不能在 applyEdit 的 await 返回后才采样。
@@ -499,7 +622,11 @@ async function applyNotebookEditAndWait(notebook: vscode.NotebookDocument, edit:
   return applied
 }
 
-async function applyTextEditAndWait(document: vscode.TextDocument, edit: vscode.WorkspaceEdit, expectContentChange: boolean) {
+async function applyTextEditAndWait(
+  document: vscode.TextDocument,
+  edit: vscode.WorkspaceEdit,
+  expectContentChange: boolean,
+) {
   const beforeVersion = document.version
   const applied = await vscode.workspace.applyEdit(edit)
   if (!applied) throw new Error("VS Code text edit was not applied")
@@ -508,7 +635,11 @@ async function applyTextEditAndWait(document: vscode.TextDocument, edit: vscode.
   return applied
 }
 
-async function waitForNotebookVersionChange(notebook: vscode.NotebookDocument, beforeVersion: number, timeoutMs: number) {
+async function waitForNotebookVersionChange(
+  notebook: vscode.NotebookDocument,
+  beforeVersion: number,
+  timeoutMs: number,
+) {
   // applyEdit 等待期间可能已收到事件，版本快检覆盖已经落地的结构修改。
   if (notebook.version !== beforeVersion) return
   await new Promise<void>((resolve, reject) => {
@@ -527,11 +658,18 @@ async function waitForNotebookVersionChange(notebook: vscode.NotebookDocument, b
       error ? reject(error) : resolve()
     }
     // applyEdit=true 只证明已接受修改，同步超时仍须拒绝而非发布旧结构摘要。
-    timer = setTimeout(() => finish(new Error("Timed out waiting for VS Code notebook edit events to finish")), timeoutMs)
+    timer = setTimeout(
+      () => finish(new Error("Timed out waiting for VS Code notebook edit events to finish")),
+      timeoutMs,
+    )
   })
 }
 
-async function waitForTextDocumentVersionChange(document: vscode.TextDocument, beforeVersion: number, timeoutMs: number) {
+async function waitForTextDocumentVersionChange(
+  document: vscode.TextDocument,
+  beforeVersion: number,
+  timeoutMs: number,
+) {
   if (document.version !== beforeVersion) return
   await new Promise<void>((resolve, reject) => {
     let timer: ReturnType<typeof setTimeout> | undefined
@@ -546,7 +684,10 @@ async function waitForTextDocumentVersionChange(document: vscode.TextDocument, b
       subscription.dispose()
       error ? reject(error) : resolve()
     }
-    timer = setTimeout(() => finish(new Error("Timed out waiting for VS Code cell text edit events to finish")), timeoutMs)
+    timer = setTimeout(
+      () => finish(new Error("Timed out waiting for VS Code cell text edit events to finish")),
+      timeoutMs,
+    )
   })
 }
 
@@ -591,15 +732,16 @@ function compactEditResult(
   },
 ) {
   // 插入区分锚点与新格，删除使用提交前快照，避免复用失效格代理。
-  const target = info.editType === "insert" && info.anchorCell
-    ? `after ${cellRef(info.anchorCell)}`
-    : info.editType === "insert" && info.insertedCell
-      ? `at ${cellRef(info.insertedCell)}`
-      : info.editType === "delete" && info.deletedId
-        ? `c${(info.deletedCellIndex ?? 0) + 1} id=${info.deletedId} ${info.deletedKind}/${info.deletedLang}`
-        : info.anchorCell
-          ? cellRef(info.anchorCell)
-          : `index=${info.opIndex}`
+  const target =
+    info.editType === "insert" && info.anchorCell
+      ? `after ${cellRef(info.anchorCell)}`
+      : info.editType === "insert" && info.insertedCell
+        ? `at ${cellRef(info.insertedCell)}`
+        : info.editType === "delete" && info.deletedId
+          ? `c${(info.deletedCellIndex ?? 0) + 1} id=${info.deletedId} ${info.deletedKind}/${info.deletedLang}`
+          : info.anchorCell
+            ? cellRef(info.anchorCell)
+            : `index=${info.opIndex}`
   const lines: Array<string | undefined> = [
     ...notebookHeader(notebook, "Edit", [
       `op=${info.editType}`,
@@ -613,7 +755,9 @@ function compactEditResult(
   if (info.editType === "delete" && info.deletedId) {
     const dIdx = (info.deletedCellIndex ?? 0) + 1
     // Deleted标记失效的旧ID；存在继任格时由Shifted提供续接身份。
-    lines.push(`Deleted: c${dIdx} id=${info.deletedId} ${info.deletedKind}/${info.deletedLang} lines=${info.deletedLineCount} first=${JSON.stringify(info.deletedFirst)}`)
+    lines.push(
+      `Deleted: c${dIdx} id=${info.deletedId} ${info.deletedKind}/${info.deletedLang} lines=${info.deletedLineCount} first=${JSON.stringify(info.deletedFirst)}`,
+    )
   } else if (info.anchorCell) {
     const anchorId = copilotLikeCellId(info.anchorCell)
     const typePart = info.oldKind
@@ -627,13 +771,17 @@ function compactEditResult(
 
   // Inserted单独标识新格，并在Shifted之前给出可续用ID。
   if (info.editType === "insert" && info.insertedCell) {
-    lines.push(`Inserted: c${c1(info.insertedCell)} id=${copilotLikeCellId(info.insertedCell)} ${cellTypeLabel(info.insertedCell.kind)}/${info.insertedCell.document.languageId}.`)
+    lines.push(
+      `Inserted: c${c1(info.insertedCell)} id=${copilotLikeCellId(info.insertedCell)} ${cellTypeLabel(info.insertedCell.kind)}/${info.insertedCell.document.languageId}.`,
+    )
   }
   // Shifted只描述邻居位置移动，不能冒充新插入格。
   if ((info.editType === "delete" || info.editType === "insert") && info.shiftedCell) {
     const oldIdx = (info.shiftedOldIdx ?? 0) + 1
     const newIdx = c1(info.shiftedCell)
-    lines.push(`Shifted: c${oldIdx}->c${newIdx} id=${copilotLikeCellId(info.shiftedCell)} ${cellTypeLabel(info.shiftedCell.kind)}/${info.shiftedCell.document.languageId} lines=${info.shiftedCell.document.lineCount} first=${JSON.stringify(previewText((info.shiftedCell.document.getText().split("\n")[0] ?? "").trim(), 50))}`)
+    lines.push(
+      `Shifted: c${oldIdx}->c${newIdx} id=${copilotLikeCellId(info.shiftedCell)} ${cellTypeLabel(info.shiftedCell.kind)}/${info.shiftedCell.document.languageId} lines=${info.shiftedCell.document.lineCount} first=${JSON.stringify(previewText((info.shiftedCell.document.getText().split("\n")[0] ?? "").trim(), 50))}`,
+    )
   }
 
   if (info.contextSummary) {
@@ -655,11 +803,12 @@ function compactEditResult(
       if (preview.remainingLines > 0) {
         lines.push(`(... ${preview.remainingLines} more lines, use vscode_notebook_source for full cell)`)
       } else {
-        lines.push(`(... line content truncated at ${AFTER_SOURCE_PREVIEW_MAX_CHARS} chars, use vscode_notebook_source for full cell)`)
+        lines.push(
+          `(... line content truncated at ${AFTER_SOURCE_PREVIEW_MAX_CHARS} chars, use vscode_notebook_source for full cell)`,
+        )
       }
     }
   }
-
 
   return {
     ran: false,

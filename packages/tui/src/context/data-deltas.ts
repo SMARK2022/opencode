@@ -1,7 +1,10 @@
 import type { V2Event } from "@opencode-ai/sdk/v2"
 import { batch, onCleanup } from "solid-js"
 
-type Delta = Extract<V2Event, { type: "session.next.text.delta" | "session.next.reasoning.delta" | "session.next.tool.input.delta" }>
+type Delta = Extract<
+  V2Event,
+  { type: "session.next.text.delta" | "session.next.reasoning.delta" | "session.next.tool.input.delta" }
+>
 
 export function createDataEventQueue(apply: (event: V2Event) => void) {
   let pending: Delta[] = []

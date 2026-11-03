@@ -135,10 +135,18 @@ it.effect("preserves running tool start time across metadata updates", () =>
           if (state.state.status === "running") updates.push(state.state.time.start)
           return state
         }).pipe(
-          Effect.flatMap((part) => !blocking ? Effect.succeed(part) : Deferred.succeed(entered, undefined).pipe(
-            Effect.andThen(Effect.never),
-            Effect.onInterrupt(() => Effect.sync(() => { finalized = true })),
-          )),
+          Effect.flatMap((part) =>
+            !blocking
+              ? Effect.succeed(part)
+              : Deferred.succeed(entered, undefined).pipe(
+                  Effect.andThen(Effect.never),
+                  Effect.onInterrupt(() =>
+                    Effect.sync(() => {
+                      finalized = true
+                    }),
+                  ),
+                ),
+          ),
         ),
       completeToolCall: () => Effect.void,
     } satisfies Pick<SessionProcessor.Handle, "message" | "updateToolCall" | "completeToolCall">
@@ -152,7 +160,12 @@ it.effect("preserves running tool start time across metadata updates", () =>
       messages: [],
       // #364：SessionTools.resolve 新增必填 goalSvc——本测试不触达 goal tool，
       // 以最小 stub 满足 Interface（方法均返回空值 Effect）。
-      goalSvc: { get: () => Effect.succeed(null), set: () => Effect.succeed(null), clear: () => Effect.succeed(false), accountUsage: () => Effect.void } as never,
+      goalSvc: {
+        get: () => Effect.succeed(null),
+        set: () => Effect.succeed(null),
+        clear: () => Effect.succeed(false),
+        accountUsage: () => Effect.void,
+      } as never,
       promptOps: {} as never,
     })
     const execute = tools.timing.execute
@@ -177,10 +190,12 @@ it.effect("preserves running tool start time across metadata updates", () =>
     // 已有metadata用例再走真实非Bash adapter，中断必须到达其Effect finalizer。
     blocking = true
     const controller = new AbortController()
-    const pending = Promise.resolve(execute(
-      {},
-      { toolCallId: callID, abortSignal: controller.signal, messages: [] },
-    )).then(() => false, () => true)
+    const pending = Promise.resolve(
+      execute({}, { toolCallId: callID, abortSignal: controller.signal, messages: [] }),
+    ).then(
+      () => false,
+      () => true,
+    )
     yield* Deferred.await(entered)
     controller.abort()
     expect(yield* Effect.promise(() => pending)).toBe(true)

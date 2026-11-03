@@ -4,9 +4,9 @@ run-name: ${{ github.event.head_commit.message || github.workflow }}
 
 on:
   push:
-    branches: [dev-smark]
+    branches: [dev1-smark]
   pull_request:
-    branches: [dev-smark]
+    branches: [dev1-smark]
   workflow_dispatch:
 
 jobs:

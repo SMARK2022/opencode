@@ -71,35 +71,35 @@ and `EditTool` execution proves file results and user-visible diagnostics.
 
 ## 3. Repository Context
 
-| Source | Why it constrains this task |
-| --- | --- |
-| `CONTEXT.md` | Defines Tool, Session, Message, Project, and the `tool/` and `patch/` module responsibilities. |
-| Root `AGENTS.md` | Requires `dev` as the default base, package-local test execution, parallel tools, and SDK generation only when SDK changes occur. |
-| `packages/opencode/AGENTS.md` | Requires Effect/module conventions, package-local `bun typecheck`, and existing namespace shape. |
-| `packages/opencode/test/AGENTS.md` | Requires behavior-oriented Effect fixtures, real implementation over mocks, and readiness signals rather than fixed sleeps. |
+| Source                                             | Why it constrains this task                                                                                                                                         |
+| -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CONTEXT.md`                                       | Defines Tool, Session, Message, Project, and the `tool/` and `patch/` module responsibilities.                                                                      |
+| Root `AGENTS.md`                                   | Requires `dev` as the default base, package-local test execution, parallel tools, and SDK generation only when SDK changes occur.                                   |
+| `packages/opencode/AGENTS.md`                      | Requires Effect/module conventions, package-local `bun typecheck`, and existing namespace shape.                                                                    |
+| `packages/opencode/test/AGENTS.md`                 | Requires behavior-oriented Effect fixtures, real implementation over mocks, and readiness signals rather than fixed sleeps.                                         |
 | `.opencode/policy/first-principles-engineering.md` | Requires owner-level first-divergence repair, one authoritative semantic path, full traceability, independent audits, and the 15% Chinese explanatory-comment gate. |
-| `.opencode/templates/canonical-plan.md` | Defines this artifact's required structure and approval/implementation state transitions. |
-| `docs/adr/README.md` and ADR-0001 | No ADR governs text matching; ADR-0001 is unrelated triage policy and imposes no matching constraint. |
-| User-confirmed TDD seam | Owner + Tool is the agreed public testing boundary; private matching helpers must not be tested directly. |
+| `.opencode/templates/canonical-plan.md`            | Defines this artifact's required structure and approval/implementation state transitions.                                                                           |
+| `docs/adr/README.md` and ADR-0001                  | No ADR governs text matching; ADR-0001 is unrelated triage policy and imposes no matching constraint.                                                               |
+| User-confirmed TDD seam                            | Owner + Tool is the agreed public testing boundary; private matching helpers must not be tested directly.                                                           |
 
 ## 4. Files and Evidence Read
 
-| Evidence | Relevance | Evidence class |
-| --- | --- | --- |
-| `/Users/sunbenteng/.local/share/opencode/opencode.db` queried read-only with `PRAGMA query_only=ON` | Full local inventory: 61 failed `apply_patch` expected-line hunks and 32 `edit` not-found calls; 38 + 27 emitted match hints. Full `PRAGMA integrity_check` returned `ok`. | observed |
-| DB rows `prt_f555bdc0e002mHAePRp3bqTg6m`, `prt_f609e341900179Ps6ilNzc4B5Z`, and the other 63 hinted failures | Reproducible local examples of unique-substring rejection, long-line bias, incorrect candidate selection, and incorrect edit line labels. | observed |
-| User-provided other-host row `prt_f609c0428001` and successful retry `prt_f60a210b3001` | Original expected text was a unique suffix of line 60, while the diagnostic selected line 438; adding the missing prefix then succeeded. | observed |
-| `packages/opencode/src/patch/index.ts` | Owns Patch parsing, line matching, chunk replacement, all exported Patch application consumers, and the first missing-match throw. | observed |
-| `packages/opencode/src/tool/apply_patch.ts` | Tool producer/consumer boundary; currently recomputes a diagnostic from all hunk chunks after Patch matching throws. | observed |
-| `packages/opencode/src/tool/edit.ts` | Existing exact substring success behavior plus the duplicated unbounded diagnostic scorer and off-by-one label. | observed |
-| `packages/opencode/src/util/line-ending.ts` | Establishes LF-normalized logical comparison and write-back preservation of LF/CRLF/CR. | contracted |
-| `packages/opencode/src/tool/apply_patch.txt`, `edit.txt` | Model-visible Tool contracts; `edit` promises exact string replacement, while `apply_patch` currently omits matching/recovery semantics. | contracted |
-| `packages/opencode/src/tool/registry.ts`, `selection.ts` | Proves both Tools are registered and can be model-exposed independently; permission grouping is separate and out of scope. | reachable |
-| `packages/opencode/test/patch/patch.test.ts` | Existing owner-seam coverage for Patch parsing/application, multi-chunk updates, moves, errors, and file endings. | observed |
-| `packages/opencode/test/tool/apply_patch.test.ts` | Existing real Tool coverage for matching passes, EOF/context, partial success, diagnostics, permissions, and writes. Its Unicode-normalized success test records behavior superseded by the explicit exact-only requirement. | observed |
-| `packages/opencode/test/tool/edit.test.ts` | Existing real Tool coverage; line 171 already proves a unique literal substring preserves surrounding text. Diagnostic fixtures have no adversarial decoy. | observed |
-| Git commits `bbc91c6530` and `20d6946a935` | Introduced the duplicated character-overlap diagnostics and later edit excerpt/diff rendering; current tests only assert some file content appears. | observed |
-| Baseline command `bun test test/patch/patch.test.ts test/tool/apply_patch.test.ts test/tool/edit.test.ts` in `packages/opencode` | Existing suite passes 83/83 and therefore does not catch the reported behavior. | observed |
+| Evidence                                                                                                                         | Relevance                                                                                                                                                                                                                    | Evidence class |
+| -------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------- |
+| `/Users/sunbenteng/.local/share/opencode/opencode.db` queried read-only with `PRAGMA query_only=ON`                              | Full local inventory: 61 failed `apply_patch` expected-line hunks and 32 `edit` not-found calls; 38 + 27 emitted match hints. Full `PRAGMA integrity_check` returned `ok`.                                                   | observed       |
+| DB rows `prt_f555bdc0e002mHAePRp3bqTg6m`, `prt_f609e341900179Ps6ilNzc4B5Z`, and the other 63 hinted failures                     | Reproducible local examples of unique-substring rejection, long-line bias, incorrect candidate selection, and incorrect edit line labels.                                                                                    | observed       |
+| User-provided other-host row `prt_f609c0428001` and successful retry `prt_f60a210b3001`                                          | Original expected text was a unique suffix of line 60, while the diagnostic selected line 438; adding the missing prefix then succeeded.                                                                                     | observed       |
+| `packages/opencode/src/patch/index.ts`                                                                                           | Owns Patch parsing, line matching, chunk replacement, all exported Patch application consumers, and the first missing-match throw.                                                                                           | observed       |
+| `packages/opencode/src/tool/apply_patch.ts`                                                                                      | Tool producer/consumer boundary; currently recomputes a diagnostic from all hunk chunks after Patch matching throws.                                                                                                         | observed       |
+| `packages/opencode/src/tool/edit.ts`                                                                                             | Existing exact substring success behavior plus the duplicated unbounded diagnostic scorer and off-by-one label.                                                                                                              | observed       |
+| `packages/opencode/src/util/line-ending.ts`                                                                                      | Establishes LF-normalized logical comparison and write-back preservation of LF/CRLF/CR.                                                                                                                                      | contracted     |
+| `packages/opencode/src/tool/apply_patch.txt`, `edit.txt`                                                                         | Model-visible Tool contracts; `edit` promises exact string replacement, while `apply_patch` currently omits matching/recovery semantics.                                                                                     | contracted     |
+| `packages/opencode/src/tool/registry.ts`, `selection.ts`                                                                         | Proves both Tools are registered and can be model-exposed independently; permission grouping is separate and out of scope.                                                                                                   | reachable      |
+| `packages/opencode/test/patch/patch.test.ts`                                                                                     | Existing owner-seam coverage for Patch parsing/application, multi-chunk updates, moves, errors, and file endings.                                                                                                            | observed       |
+| `packages/opencode/test/tool/apply_patch.test.ts`                                                                                | Existing real Tool coverage for matching passes, EOF/context, partial success, diagnostics, permissions, and writes. Its Unicode-normalized success test records behavior superseded by the explicit exact-only requirement. | observed       |
+| `packages/opencode/test/tool/edit.test.ts`                                                                                       | Existing real Tool coverage; line 171 already proves a unique literal substring preserves surrounding text. Diagnostic fixtures have no adversarial decoy.                                                                   | observed       |
+| Git commits `bbc91c6530` and `20d6946a935`                                                                                       | Introduced the duplicated character-overlap diagnostics and later edit excerpt/diff rendering; current tests only assert some file content appears.                                                                          | observed       |
+| Baseline command `bun test test/patch/patch.test.ts test/tool/apply_patch.test.ts test/tool/edit.test.ts` in `packages/opencode` | Existing suite passes 83/83 and therefore does not catch the reported behavior.                                                                                                                                              | observed       |
 
 ## 5. Current Behavior
 
@@ -147,19 +147,19 @@ were excluded. It also counted failures in `state.output`: 12 completed
 
 ## 6. Supported Input Domain and Reachability
 
-| Input or condition | Producer | Upstream guarantees | Reachable path | Owner | Classification |
-| --- | --- | --- | --- | --- | --- |
-| Exact whole-line Patch old block | Model-generated `patchText` | Patch parser provides ordered `old_lines`/`new_lines` | Tool or Patch exported APIs -> `deriveNewContentsFromChunks` | Patch chunk resolver | contracted |
-| Old block is an exact unique substring of eligible file text, e.g. file `ABCDEFG`, old `CDEFG` | Model omits a same-line prefix/suffix | Raw text is syntactically valid; no line-boundary guarantee | Same Patch path; observed on another host and local fixtures | Patch chunk resolver | contracted + observed |
-| Exact substring occurs more than once | Repeated identifiers/text in a file | No unique location guarantee | Same public Tool input | Patch chunk resolver rejects ambiguity | reachable |
-| Later chunk fails after an earlier chunk matched | Multi-`@@` update | Chunks retain order | `computeReplacements` advances `lineIndex` then throws | Patch chunk resolver/error | observed (23/38 hinted Patch failures diagnosed from the wrong chunk) |
-| `@@` context is an exact whole line or exact unique substring of one eligible line | Model-generated patch | Parser records raw single-line `change_context`; no whole-line-boundary guarantee | `computeReplacements` context location before old-block resolution | Patch context/chunk resolver | contracted + reachable |
-| EOF anchor is present | Model-generated patch | Parser records `is_end_of_file` | exact whole-line preference and old-block substring resolver | Patch chunk resolver | contracted + tested |
-| LF, CRLF, CR, or BOM text | Existing files | `splitLines`, `Bom`, and write-back utilities preserve current contracts | All Patch/Edit update paths | Existing line-ending/BOM owners | contracted + tested |
-| Near text plus a much longer unrelated line using common characters | Real code/Markdown files | No semantic ordering guarantee | Failure diagnostic scan | Shared diagnostic matcher | observed |
-| Very short candidate lines | Real source punctuation/short code | Current score can falsely reach 1 | Failure diagnostic scan | Shared diagnostic matcher | observed |
-| Low-confidence file with no related region | Any failed model edit | File is readable, but no candidate is guaranteed | Failure diagnostic scan | Tool/Patch error contract | observed |
-| Exact unique `edit.oldString` substring | Model `edit` input | Existing read gate and literal string | `SimpleReplacer` -> `replace` | Existing Edit resolver | observed + tested |
+| Input or condition                                                                             | Producer                              | Upstream guarantees                                                               | Reachable path                                                     | Owner                                  | Classification                                                        |
+| ---------------------------------------------------------------------------------------------- | ------------------------------------- | --------------------------------------------------------------------------------- | ------------------------------------------------------------------ | -------------------------------------- | --------------------------------------------------------------------- |
+| Exact whole-line Patch old block                                                               | Model-generated `patchText`           | Patch parser provides ordered `old_lines`/`new_lines`                             | Tool or Patch exported APIs -> `deriveNewContentsFromChunks`       | Patch chunk resolver                   | contracted                                                            |
+| Old block is an exact unique substring of eligible file text, e.g. file `ABCDEFG`, old `CDEFG` | Model omits a same-line prefix/suffix | Raw text is syntactically valid; no line-boundary guarantee                       | Same Patch path; observed on another host and local fixtures       | Patch chunk resolver                   | contracted + observed                                                 |
+| Exact substring occurs more than once                                                          | Repeated identifiers/text in a file   | No unique location guarantee                                                      | Same public Tool input                                             | Patch chunk resolver rejects ambiguity | reachable                                                             |
+| Later chunk fails after an earlier chunk matched                                               | Multi-`@@` update                     | Chunks retain order                                                               | `computeReplacements` advances `lineIndex` then throws             | Patch chunk resolver/error             | observed (23/38 hinted Patch failures diagnosed from the wrong chunk) |
+| `@@` context is an exact whole line or exact unique substring of one eligible line             | Model-generated patch                 | Parser records raw single-line `change_context`; no whole-line-boundary guarantee | `computeReplacements` context location before old-block resolution | Patch context/chunk resolver           | contracted + reachable                                                |
+| EOF anchor is present                                                                          | Model-generated patch                 | Parser records `is_end_of_file`                                                   | exact whole-line preference and old-block substring resolver       | Patch chunk resolver                   | contracted + tested                                                   |
+| LF, CRLF, CR, or BOM text                                                                      | Existing files                        | `splitLines`, `Bom`, and write-back utilities preserve current contracts          | All Patch/Edit update paths                                        | Existing line-ending/BOM owners        | contracted + tested                                                   |
+| Near text plus a much longer unrelated line using common characters                            | Real code/Markdown files              | No semantic ordering guarantee                                                    | Failure diagnostic scan                                            | Shared diagnostic matcher              | observed                                                              |
+| Very short candidate lines                                                                     | Real source punctuation/short code    | Current score can falsely reach 1                                                 | Failure diagnostic scan                                            | Shared diagnostic matcher              | observed                                                              |
+| Low-confidence file with no related region                                                     | Any failed model edit                 | File is readable, but no candidate is guaranteed                                  | Failure diagnostic scan                                            | Tool/Patch error contract              | observed                                                              |
+| Exact unique `edit.oldString` substring                                                        | Model `edit` input                    | Existing read gate and literal string                                             | `SimpleReplacer` -> `replace`                                      | Existing Edit resolver                 | observed + tested                                                     |
 
 Speculative binary text, malformed JSON, concurrent write protocols, hostile
 plugins, remote filesystems, and semantic/AST matching are not established by
@@ -167,39 +167,39 @@ this producer-to-consumer path and do not justify production logic here.
 
 ## 7. Required Invariants
 
-| ID | Behavioral invariant | Evidence | Existing test |
-| --- | --- | --- | --- |
-| INV-01 | If a failed whole-line Patch old block occurs exactly once as a literal substring in the eligible search range, replacement changes only that span and preserves all surrounding prefix/suffix text. | Verbatim requirement; red owner repro | No |
-| INV-02 | Zero or multiple exact substring matches never produce a Patch success. | Verbatim unique-match condition; current ambiguity safety | Partial whole-line coverage only |
-| INV-03 | Patch success priority is exact whole-line using the complete parsed old block, then exact unique literal of that same complete block, then failure. Ordered chunks, matched `@@` context, and EOF preference constrain both exact modes; no rstrip/trim/Unicode-normalized or trailing-empty-shortened success may preempt or follow the literal mode. | Verbatim "整行精确匹配失败之后应该只进行字符串搜索" requirement | Existing tests cover only current behavior |
-| INV-04 | A Patch failure diagnostic is derived from the chunk that actually failed, not the first chunk in the hunk. | DB: 23/38 wrong-chunk hints | No |
-| INV-05 | Candidate similarity is bounded to `[0,1]`, preserves local character order/multiplicity, penalizes unrelated length, and does not claim a low-confidence result is the actual location. | DB: at least 37/38 Patch and 25/27 Edit hints exhibit scores above 1 | No |
-| INV-06 | Reported line number names the candidate start, while surrounding context is labeled separately and truncation is explicit around the candidate. | DB: 27/27 Edit labels point to the preceding excerpt line | No |
-| INV-07 | The Patch owner exposes the same replacement/error semantics to ApplyPatchTool, `applyPatch`, `applyHunksToFiles`, and verified shell parsing. | Current shared owner/call graph | No cross-consumer regression |
-| INV-08 | Existing exact-literal Edit outcomes, Patch exact whole-line behavior, BOM/endings, permission, LSP, events, and per-file atomicity do not regress; explicitly superseded normalized successes are excluded. | Existing contracts, user override of matching domain, and 83-test baseline | Yes, but no new focused regression |
-| INV-09 | Only the exact implementation diff that receives a clean full-scope implementation audit may be committed; commit creation and post-commit identity/status evidence are required for the requested terminal state. | Verbatim `<verified-implementation-and-commit>` target | No |
-| INV-10 | Edit has one replacement success semantic: an exact literal `oldString` span. One occurrence replaces once, multiple occurrences require `replaceAll` or fail, and no normalized/fuzzy replacer runs after literal search fails. | Verbatim requirement names `edit/apply_patch`; R2 B-01 reachable example | Existing tests cover exact success but not rejection of current nonliteral successes |
-| INV-11 | Every `@@ change_context`, including one attached to a pure-insertion chunk, uses the same exact location contract: exact whole-line first, then one exact literal substring in the eligible range, then failure; a substring context locates its containing line but never mutates it. | Public Patch syntax plus R3/R8 B-01/B-02 | Existing tests cover exact whole-line context only |
-| INV-12 | Ordered Patch chunks validate and transform one LF-normalized in-memory working text in patch order. A substring match advances to the end of its replacement, allowing a later chunk on the same surviving line; a line/context match advances past its replacement/located line. No chunk can match text introduced by an earlier replacement. | Public multi-chunk syntax and R4 B-01 | Existing tests cover multi-chunk only on different lines |
-| INV-13 | Exact whole-line replacement retains line-array semantics while exact-substring replacement owns only its literal character range. First/middle/final/only and multiline deletion therefore remove logical lines without manufacturing blank rows or deleting surviving partial-line text. | Existing exact-line behavior and R5 B-01 | No explicit update-line deletion characterization |
-| INV-14 | Pure insertion chunks remain EOF line additions: collect them in patch order while validating other chunks, then append their lines once to the fully transformed working lines. Empty/non-empty files, multiple insertions, and deletion of all original lines therefore use the same line-array owner and final-newline reconstruction. | Existing insert-only branch plus R6/R7 B-01 | Existing Tool test covers one insertion in a multi-line file, not empty/no-tail/multiple/delete-all composition |
+| ID     | Behavioral invariant                                                                                                                                                                                                                                                                                                                                    | Evidence                                                                   | Existing test                                                                                                   |
+| ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| INV-01 | If a failed whole-line Patch old block occurs exactly once as a literal substring in the eligible search range, replacement changes only that span and preserves all surrounding prefix/suffix text.                                                                                                                                                    | Verbatim requirement; red owner repro                                      | No                                                                                                              |
+| INV-02 | Zero or multiple exact substring matches never produce a Patch success.                                                                                                                                                                                                                                                                                 | Verbatim unique-match condition; current ambiguity safety                  | Partial whole-line coverage only                                                                                |
+| INV-03 | Patch success priority is exact whole-line using the complete parsed old block, then exact unique literal of that same complete block, then failure. Ordered chunks, matched `@@` context, and EOF preference constrain both exact modes; no rstrip/trim/Unicode-normalized or trailing-empty-shortened success may preempt or follow the literal mode. | Verbatim "整行精确匹配失败之后应该只进行字符串搜索" requirement            | Existing tests cover only current behavior                                                                      |
+| INV-04 | A Patch failure diagnostic is derived from the chunk that actually failed, not the first chunk in the hunk.                                                                                                                                                                                                                                             | DB: 23/38 wrong-chunk hints                                                | No                                                                                                              |
+| INV-05 | Candidate similarity is bounded to `[0,1]`, preserves local character order/multiplicity, penalizes unrelated length, and does not claim a low-confidence result is the actual location.                                                                                                                                                                | DB: at least 37/38 Patch and 25/27 Edit hints exhibit scores above 1       | No                                                                                                              |
+| INV-06 | Reported line number names the candidate start, while surrounding context is labeled separately and truncation is explicit around the candidate.                                                                                                                                                                                                        | DB: 27/27 Edit labels point to the preceding excerpt line                  | No                                                                                                              |
+| INV-07 | The Patch owner exposes the same replacement/error semantics to ApplyPatchTool, `applyPatch`, `applyHunksToFiles`, and verified shell parsing.                                                                                                                                                                                                          | Current shared owner/call graph                                            | No cross-consumer regression                                                                                    |
+| INV-08 | Existing exact-literal Edit outcomes, Patch exact whole-line behavior, BOM/endings, permission, LSP, events, and per-file atomicity do not regress; explicitly superseded normalized successes are excluded.                                                                                                                                            | Existing contracts, user override of matching domain, and 83-test baseline | Yes, but no new focused regression                                                                              |
+| INV-09 | Only the exact implementation diff that receives a clean full-scope implementation audit may be committed; commit creation and post-commit identity/status evidence are required for the requested terminal state.                                                                                                                                      | Verbatim `<verified-implementation-and-commit>` target                     | No                                                                                                              |
+| INV-10 | Edit has one replacement success semantic: an exact literal `oldString` span. One occurrence replaces once, multiple occurrences require `replaceAll` or fail, and no normalized/fuzzy replacer runs after literal search fails.                                                                                                                        | Verbatim requirement names `edit/apply_patch`; R2 B-01 reachable example   | Existing tests cover exact success but not rejection of current nonliteral successes                            |
+| INV-11 | Every `@@ change_context`, including one attached to a pure-insertion chunk, uses the same exact location contract: exact whole-line first, then one exact literal substring in the eligible range, then failure; a substring context locates its containing line but never mutates it.                                                                 | Public Patch syntax plus R3/R8 B-01/B-02                                   | Existing tests cover exact whole-line context only                                                              |
+| INV-12 | Ordered Patch chunks validate and transform one LF-normalized in-memory working text in patch order. A substring match advances to the end of its replacement, allowing a later chunk on the same surviving line; a line/context match advances past its replacement/located line. No chunk can match text introduced by an earlier replacement.        | Public multi-chunk syntax and R4 B-01                                      | Existing tests cover multi-chunk only on different lines                                                        |
+| INV-13 | Exact whole-line replacement retains line-array semantics while exact-substring replacement owns only its literal character range. First/middle/final/only and multiline deletion therefore remove logical lines without manufacturing blank rows or deleting surviving partial-line text.                                                              | Existing exact-line behavior and R5 B-01                                   | No explicit update-line deletion characterization                                                               |
+| INV-14 | Pure insertion chunks remain EOF line additions: collect them in patch order while validating other chunks, then append their lines once to the fully transformed working lines. Empty/non-empty files, multiple insertions, and deletion of all original lines therefore use the same line-array owner and final-newline reconstruction.               | Existing insert-only branch plus R6/R7 B-01                                | Existing Tool test covers one insertion in a multi-line file, not empty/no-tail/multiple/delete-all composition |
 
 ## 8. First Divergence and Root Cause
 
-| Invariant | First divergence | Owning module/interface | Proof |
-| --- | --- | --- | --- |
-| INV-01/02/03 | After exact fails, `seekSequence` permits rstrip/trim/Unicode-normalized whole-line success and therefore may splice the entire actual line before a literal substring can preserve its outer characters; if all passes fail, `computeReplacements` throws without resolving a unique character span. | `src/patch/index.ts` / `deriveNewContentsFromChunks` | For actual `"  CDEFG"`, old `"CDEFG"`, current trim success replaces the whole line; the minimal owner repro also throws for `ABCDEFG` / `CDEFG`. |
-| INV-04/07 | Patch throws only a formatted string; `ApplyPatchTool` then receives no failed-chunk identity and passes all `hunk.chunks` to `extractActualExcerpt`, which always selects the first non-empty old line. | Patch error boundary first; downstream Tool extractor is the workaround | Source lines 26-47 and 121-126; DB wrong-chunk count 23/38. |
-| INV-05 | Both diagnostic implementations build a `Set` from one expected line, count every candidate character found in that set, and divide by `min(expected.length, candidate.length)`. | Duplicated diagnostic scorer in `tool/edit.ts` and `tool/apply_patch.ts` | Scores are unbounded; local stable replay selected line 795 at score 3.372 instead of unique substring line 299. |
-| INV-06 | Edit returns `fileStart + 1`, where `fileStart = bestLine - 1`, as the `Closest match at line`; Apply Patch slices the first 500 chars from one line before the candidate. | Tool diagnostic rendering | Source lines 758-768 and apply lines 67-69; 27/27 stored Edit hints are affected. |
-| INV-09 | R1 stopped after recording a verified implementation and had no staged-diff identity, commit, or post-commit evidence step. | Workflow orchestrator | R1 audit B-02 against the explicit terminal target. |
-| INV-10 | After `SimpleReplacer` cannot produce a literal match, `replace()` continues through seven whitespace/anchor/indent/escape/boundary/context replacers that can still return success. | `src/tool/edit.ts` / `replace` | R2 audit B-01; actual `"\tCDEFG"` with old `"  CDEFG"` is reachable and succeeds through trimmed matching. |
-| INV-11 | `computeReplacements` resolves `change_context` through whole-line `seekSequence` and throws immediately on `-1`, before the planned unique old-block substring resolver can run. | `src/patch/index.ts` context location | R3 B-01; actual `ABCDEFG\nold\n` with `@@ CDEFG` and old `old` fails despite one literal context substring. |
-| INV-12 | Existing `computeReplacements` stores whole-line tuples against an unchanged source and advances a line cursor; extending that tuple model to partial substrings either skips a second same-line target or overwrites a prior change. | `src/patch/index.ts` replacement representation | R4 B-01; `abcDEFghiJKL` with ordered `DEF -> X`, `JKL -> Y` cannot compose through whole-line tuples. |
-| INV-13 | Converting exact whole-line updates to generic character spans forces new delimiter-ownership rules and regresses pure deletion. | `src/patch/index.ts` proposed replacement boundary | R5 B-01; deleting `line2` through a content-only span produces `line1\n\nline3`. Keeping exact-line mutation as line splice avoids that divergence. |
-| INV-14 | Defining insertion separators from original text or independent zero-width spans cannot compose deletion of all original lines with a later insertion. | `src/patch/index.ts` proposed insertion boundary | R6/R7 B-01; a leading LF derived from original `alpha` survives its deletion and produces `\nbeta\n`. Deferring line additions until validated working-line mutation completes avoids the split ownership. |
-| INV-03 | After all nonliteral comparison passes, current code drops a parsed trailing empty old line and retries a shorter pattern, allowing `foo\n` to match a no-tail `foo`. | `src/patch/index.ts` lines 380-387 | R8 B-01; the parser preserves explicit empty `-`/context lines, so shortening changes the requested literal rather than canonicalizing syntax. |
-| INV-11/14 | Current code validates `change_context` before pure insertion, but an R8 design sentence restricted context lookup to non-insertion chunks. | `src/patch/index.ts` lines 355-372 | R8 B-02; `@@ missing` plus `+beta` currently fails and must not become unconditional EOF success. |
+| Invariant    | First divergence                                                                                                                                                                                                                                                                                      | Owning module/interface                                                  | Proof                                                                                                                                                                                                      |
+| ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| INV-01/02/03 | After exact fails, `seekSequence` permits rstrip/trim/Unicode-normalized whole-line success and therefore may splice the entire actual line before a literal substring can preserve its outer characters; if all passes fail, `computeReplacements` throws without resolving a unique character span. | `src/patch/index.ts` / `deriveNewContentsFromChunks`                     | For actual `"  CDEFG"`, old `"CDEFG"`, current trim success replaces the whole line; the minimal owner repro also throws for `ABCDEFG` / `CDEFG`.                                                          |
+| INV-04/07    | Patch throws only a formatted string; `ApplyPatchTool` then receives no failed-chunk identity and passes all `hunk.chunks` to `extractActualExcerpt`, which always selects the first non-empty old line.                                                                                              | Patch error boundary first; downstream Tool extractor is the workaround  | Source lines 26-47 and 121-126; DB wrong-chunk count 23/38.                                                                                                                                                |
+| INV-05       | Both diagnostic implementations build a `Set` from one expected line, count every candidate character found in that set, and divide by `min(expected.length, candidate.length)`.                                                                                                                      | Duplicated diagnostic scorer in `tool/edit.ts` and `tool/apply_patch.ts` | Scores are unbounded; local stable replay selected line 795 at score 3.372 instead of unique substring line 299.                                                                                           |
+| INV-06       | Edit returns `fileStart + 1`, where `fileStart = bestLine - 1`, as the `Closest match at line`; Apply Patch slices the first 500 chars from one line before the candidate.                                                                                                                            | Tool diagnostic rendering                                                | Source lines 758-768 and apply lines 67-69; 27/27 stored Edit hints are affected.                                                                                                                          |
+| INV-09       | R1 stopped after recording a verified implementation and had no staged-diff identity, commit, or post-commit evidence step.                                                                                                                                                                           | Workflow orchestrator                                                    | R1 audit B-02 against the explicit terminal target.                                                                                                                                                        |
+| INV-10       | After `SimpleReplacer` cannot produce a literal match, `replace()` continues through seven whitespace/anchor/indent/escape/boundary/context replacers that can still return success.                                                                                                                  | `src/tool/edit.ts` / `replace`                                           | R2 audit B-01; actual `"\tCDEFG"` with old `"  CDEFG"` is reachable and succeeds through trimmed matching.                                                                                                 |
+| INV-11       | `computeReplacements` resolves `change_context` through whole-line `seekSequence` and throws immediately on `-1`, before the planned unique old-block substring resolver can run.                                                                                                                     | `src/patch/index.ts` context location                                    | R3 B-01; actual `ABCDEFG\nold\n` with `@@ CDEFG` and old `old` fails despite one literal context substring.                                                                                                |
+| INV-12       | Existing `computeReplacements` stores whole-line tuples against an unchanged source and advances a line cursor; extending that tuple model to partial substrings either skips a second same-line target or overwrites a prior change.                                                                 | `src/patch/index.ts` replacement representation                          | R4 B-01; `abcDEFghiJKL` with ordered `DEF -> X`, `JKL -> Y` cannot compose through whole-line tuples.                                                                                                      |
+| INV-13       | Converting exact whole-line updates to generic character spans forces new delimiter-ownership rules and regresses pure deletion.                                                                                                                                                                      | `src/patch/index.ts` proposed replacement boundary                       | R5 B-01; deleting `line2` through a content-only span produces `line1\n\nline3`. Keeping exact-line mutation as line splice avoids that divergence.                                                        |
+| INV-14       | Defining insertion separators from original text or independent zero-width spans cannot compose deletion of all original lines with a later insertion.                                                                                                                                                | `src/patch/index.ts` proposed insertion boundary                         | R6/R7 B-01; a leading LF derived from original `alpha` survives its deletion and produces `\nbeta\n`. Deferring line additions until validated working-line mutation completes avoids the split ownership. |
+| INV-03       | After all nonliteral comparison passes, current code drops a parsed trailing empty old line and retries a shorter pattern, allowing `foo\n` to match a no-tail `foo`.                                                                                                                                 | `src/patch/index.ts` lines 380-387                                       | R8 B-01; the parser preserves explicit empty `-`/context lines, so shortening changes the requested literal rather than canonicalizing syntax.                                                             |
+| INV-11/14    | Current code validates `change_context` before pure insertion, but an R8 design sentence restricted context lookup to non-insertion chunks.                                                                                                                                                           | `src/patch/index.ts` lines 355-372                                       | R8 B-02; `@@ missing` plus `+beta` currently fails and must not become unconditional EOF success.                                                                                                          |
 
 ### Red-Capable Feedback Loops
 
@@ -212,27 +212,36 @@ bun -e 'import { Patch } from "./packages/opencode/src/patch/index.ts"; try { co
 Observed:
 
 ```json
-{"error":"Failed to find expected lines in fixture.txt:\nCDEFG","expected":"ABfixed\\n","verdict":"RED_UNIQUE_SUBSTRING_REJECTED"}
+{
+  "error": "Failed to find expected lines in fixture.txt:\nCDEFG",
+  "expected": "ABfixed\\n",
+  "verdict": "RED_UNIQUE_SUBSTRING_REJECTED"
+}
 ```
 
 The corresponding Edit control is green today:
 
 ```json
-{"actual":"ABfixed","expected":"ABfixed","verdict":"GREEN_EXISTING_EDIT_CONTRACT"}
+{ "actual": "ABfixed", "expected": "ABfixed", "verdict": "GREEN_EXISTING_EDIT_CONTRACT" }
 ```
 
 Local original-symptom diagnostic replay from DB part
 `prt_f555bdc0e002mHAePRp3bqTg6m`:
 
 ```json
-{"uniqueExactSubstringLine":299,"algorithmSelectedLine":795,"algorithmScore":3.372093023255814,"verdict":"RED_WRONG_ACTUAL_CONTENT"}
+{
+  "uniqueExactSubstringLine": 299,
+  "algorithmSelectedLine": 795,
+  "algorithmScore": 3.372093023255814,
+  "verdict": "RED_WRONG_ACTUAL_CONTENT"
+}
 ```
 
 Edit replay from DB part `prt_f609e341900179Ps6ilNzc4B5Z` invokes the real
 exported `replace()` and deterministically reports:
 
 ```json
-{"trueLine":576,"reported":571,"distance":5,"verdict":"RED_WRONG_CLOSEST"}
+{ "trueLine": 576, "reported": 571, "distance": 5, "verdict": "RED_WRONG_CLOSEST" }
 ```
 
 The minimized cases retain only one true candidate, one unrelated long decoy
@@ -271,14 +280,14 @@ context is red until it shares the new exact locator.
 
 ## 9. Responsibility and Seam
 
-| Concern | Owner | Interface promise | Why it belongs here | Why another module does not own it |
-| --- | --- | --- | --- | --- |
-| Resolve and apply Patch context/old text in order | `patch/index.ts` | All Patch consumers receive one authoritative current-text cursor and atomic in-memory transformation | It already owns context, ordering, EOF, and replacements | `ApplyPatchTool` is only one consumer and cannot repair shell/exported paths |
-| Exact unique substring range and bounded closest-window primitive | New private `patch/match.ts` module | Pure text range/candidate calculation for Patch and Edit owners | One implementation removes the duplicated broken scorer and supports the owner resolver | UI, registry, permission, and LSP do not own text matching |
-| Failed-chunk error identity and message | Patch chunk resolver | Failure names the exact unresolved block and reliable candidate, if any | The resolver knows the failed chunk and current lower bound before information is discarded | Tool catch cannot reconstruct which chunk failed |
-| Apply Patch Tool aggregation | `tool/apply_patch.ts` | Preserve per-file success/failure aggregation and propagate owner errors | It owns Tool result composition only | It must not run a second matching algorithm |
-| Edit exact literal resolution and not-found diagnostic | `tool/edit.ts` | Exact unique/multiple/replaceAll semantics followed by a reliable diagnostic-only error | Edit owns its public `oldString` contract and user-facing error | Patch chunk ordering does not own Edit's raw string input |
-| Behavioral verification | `test/patch`, `test/tool` | Owner + Tool public outcomes | User-confirmed TDD seams | Private helper tests would couple implementation |
+| Concern                                                           | Owner                               | Interface promise                                                                                     | Why it belongs here                                                                         | Why another module does not own it                                           |
+| ----------------------------------------------------------------- | ----------------------------------- | ----------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| Resolve and apply Patch context/old text in order                 | `patch/index.ts`                    | All Patch consumers receive one authoritative current-text cursor and atomic in-memory transformation | It already owns context, ordering, EOF, and replacements                                    | `ApplyPatchTool` is only one consumer and cannot repair shell/exported paths |
+| Exact unique substring range and bounded closest-window primitive | New private `patch/match.ts` module | Pure text range/candidate calculation for Patch and Edit owners                                       | One implementation removes the duplicated broken scorer and supports the owner resolver     | UI, registry, permission, and LSP do not own text matching                   |
+| Failed-chunk error identity and message                           | Patch chunk resolver                | Failure names the exact unresolved block and reliable candidate, if any                               | The resolver knows the failed chunk and current lower bound before information is discarded | Tool catch cannot reconstruct which chunk failed                             |
+| Apply Patch Tool aggregation                                      | `tool/apply_patch.ts`               | Preserve per-file success/failure aggregation and propagate owner errors                              | It owns Tool result composition only                                                        | It must not run a second matching algorithm                                  |
+| Edit exact literal resolution and not-found diagnostic            | `tool/edit.ts`                      | Exact unique/multiple/replaceAll semantics followed by a reliable diagnostic-only error               | Edit owns its public `oldString` contract and user-facing error                             | Patch chunk ordering does not own Edit's raw string input                    |
+| Behavioral verification                                           | `test/patch`, `test/tool`           | Owner + Tool public outcomes                                                                          | User-confirmed TDD seams                                                                    | Private helper tests would couple implementation                             |
 
 ## 10. Single Approved Primary-Path Design
 
@@ -445,23 +454,23 @@ failed-chunk identity is lost.
 
 ## 11. Secondary and Replacement Path Inventory
 
-| Path | Current or proposed | Classification | Produces success? | Decision-surface share | Disposition |
-| --- | --- | --- | --- | --- | --- |
-| Patch exact whole-line pass | current | supported-domain branch in primary contract | yes | existing | preserve as first branch |
-| Patch rstrip/trim/Unicode-normalized whole-line passes | current | superseded compatibility branches conflicting with explicit requirement | yes | existing | remove from Patch resolver |
-| Patch trailing-empty shortened-pattern retry | current | superseded nonliteral compatibility branch | yes | existing | remove; preserve the complete parsed old block |
-| Exact unique old-block substring in eligible range | proposed, explicitly required by user | supported-domain branch in primary contract | yes | about 20% of modified primary decisions | apply exact range immediately to atomic working copy |
-| Exact unique `change_context` substring locator | proposed, explicitly required by dual Patch location contract | supported-domain location branch in primary contract | no mutation; enables the same chunk path | modified | add at Patch owner and return next current-text offset |
-| Ordered current-working-text transformation | proposed | primary replacement representation | yes | modified | replace deferred whole-line tuples; validate/apply locally per chunk |
-| Exact-line pure deletion | current behavior under retained line splice | primary exact-line contract | yes | existing + characterized | preserve line-array mutation; do not convert to generic content span |
-| Deferred pure insertion at transformed EOF | current behavior under sequential representation | primary insertion contract | yes | modified | validate its context first, then collect line blocks in patch order and append after all chunks validate |
-| Edit exact literal unique/multiple/replaceAll resolver | current, simplified | primary contract | yes | modified | preserve exact behavior in one direct resolver |
-| Edit trimmed/anchor/whitespace/indent/escape/boundary/context replacers | current | superseded competing success paths | yes | existing | delete from Edit owner |
-| Shared closest-window result on true failure | proposed | diagnostic | no | 3/31 = 9.68% of estimated modified production decision surface | add; suppress low confidence/ties |
-| `ApplyPatchTool.extractActualExcerpt` | current | diagnostic workaround/duplicate | no | current duplicate | remove |
-| Edit `charOverlap` global first-line scan | current | diagnostic workaround/duplicate | no | current duplicate | remove |
-| Fuzzy substring success based on similarity | proposed nowhere | forbidden fallback | yes | zero | reject |
-| Choosing first of multiple literal substring matches | proposed nowhere | forbidden fallback | yes | zero | reject |
+| Path                                                                    | Current or proposed                                           | Classification                                                          | Produces success?                        | Decision-surface share                                         | Disposition                                                                                              |
+| ----------------------------------------------------------------------- | ------------------------------------------------------------- | ----------------------------------------------------------------------- | ---------------------------------------- | -------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| Patch exact whole-line pass                                             | current                                                       | supported-domain branch in primary contract                             | yes                                      | existing                                                       | preserve as first branch                                                                                 |
+| Patch rstrip/trim/Unicode-normalized whole-line passes                  | current                                                       | superseded compatibility branches conflicting with explicit requirement | yes                                      | existing                                                       | remove from Patch resolver                                                                               |
+| Patch trailing-empty shortened-pattern retry                            | current                                                       | superseded nonliteral compatibility branch                              | yes                                      | existing                                                       | remove; preserve the complete parsed old block                                                           |
+| Exact unique old-block substring in eligible range                      | proposed, explicitly required by user                         | supported-domain branch in primary contract                             | yes                                      | about 20% of modified primary decisions                        | apply exact range immediately to atomic working copy                                                     |
+| Exact unique `change_context` substring locator                         | proposed, explicitly required by dual Patch location contract | supported-domain location branch in primary contract                    | no mutation; enables the same chunk path | modified                                                       | add at Patch owner and return next current-text offset                                                   |
+| Ordered current-working-text transformation                             | proposed                                                      | primary replacement representation                                      | yes                                      | modified                                                       | replace deferred whole-line tuples; validate/apply locally per chunk                                     |
+| Exact-line pure deletion                                                | current behavior under retained line splice                   | primary exact-line contract                                             | yes                                      | existing + characterized                                       | preserve line-array mutation; do not convert to generic content span                                     |
+| Deferred pure insertion at transformed EOF                              | current behavior under sequential representation              | primary insertion contract                                              | yes                                      | modified                                                       | validate its context first, then collect line blocks in patch order and append after all chunks validate |
+| Edit exact literal unique/multiple/replaceAll resolver                  | current, simplified                                           | primary contract                                                        | yes                                      | modified                                                       | preserve exact behavior in one direct resolver                                                           |
+| Edit trimmed/anchor/whitespace/indent/escape/boundary/context replacers | current                                                       | superseded competing success paths                                      | yes                                      | existing                                                       | delete from Edit owner                                                                                   |
+| Shared closest-window result on true failure                            | proposed                                                      | diagnostic                                                              | no                                       | 3/31 = 9.68% of estimated modified production decision surface | add; suppress low confidence/ties                                                                        |
+| `ApplyPatchTool.extractActualExcerpt`                                   | current                                                       | diagnostic workaround/duplicate                                         | no                                       | current duplicate                                              | remove                                                                                                   |
+| Edit `charOverlap` global first-line scan                               | current                                                       | diagnostic workaround/duplicate                                         | no                                       | current duplicate                                              | remove                                                                                                   |
+| Fuzzy substring success based on similarity                             | proposed nowhere                                              | forbidden fallback                                                      | yes                                      | zero                                                           | reject                                                                                                   |
+| Choosing first of multiple literal substring matches                    | proposed nowhere                                              | forbidden fallback                                                      | yes                                      | zero                                                           | reject                                                                                                   |
 
 No new alternate success path exists outside the user-contracted unique-span
 resolver. Diagnostic branches never produce success.
@@ -496,78 +505,78 @@ inflate the denominator.
 
 ## 12. Workaround Deletion and Replacement
 
-| Existing workaround or duplicate | Why it existed | Why the approved route supersedes it | Delete or collapse location |
-| --- | --- | --- | --- |
-| `extractActualExcerpt(oldContent, hunk.chunks)` | Tool catch lacked failed-chunk data | Patch owner now creates the diagnostic with the exact failed chunk | Delete from `tool/apply_patch.ts` |
-| Apply Patch character-set overlap scan | Attempted no-read recovery | Shared bounded window matcher owns candidate selection | Deleted with extractor |
-| Edit `findClosestMatch` candidate scan and `charOverlap` | Attempted closest content after not-found | Shared matcher supplies candidate/start line; Edit keeps only rendering | Collapse in `tool/edit.ts` |
-| Misleading `Closest match at line <excerpt-start>` label | Context was conflated with candidate | Matcher returns candidate start separately | Replace error formatting |
-| Patch rstrip/trim/Unicode-normalized whole-line success | Historical tolerance for nonliteral line differences | Explicit requirement now permits only exact line then exact unique string span; literal span preserves outer whitespace instead of splicing it | Delete comparators and `normalizeUnicode` from `patch/index.ts`; replace Unicode success test with exact-only failure/unchanged behavior |
-| Trailing-empty shortened-pattern retry | Historical tolerance for no-tail files | Explicit parsed empty lines are part of the complete literal old block; shortening creates a third success semantic | Delete retry and its `pattern`/`newSlice` shortening from `patch/index.ts` |
-| Edit nonliteral replacer pipeline and supporting Levenshtein/threshold logic | Historical tolerance copied from external edit correctors | Explicit dual-Tool requirement permits only exact literal replacement before failure diagnostics | Delete from `tool/edit.ts`; replace generator loop with direct exact occurrence resolution |
-| Deferred whole-line replacement tuple list | Existing Patch matching only produced line-aligned updates against an immutable source | Cannot compose multiple partial matches on one line | Replace with local per-chunk transformation of current working lines/text |
-| Content-only exact-line spans | R5 unification proposal | Manufacture blank rows or require delimiter algebra | Retain exact-line line splice inside the same owner path |
-| Independent zero-width insertion spans | R6/R7 translation proposal | Concatenate, reverse, or retain a delimiter after deleting all source text | Keep insertion as deferred EOF line additions in the same owner path |
+| Existing workaround or duplicate                                             | Why it existed                                                                         | Why the approved route supersedes it                                                                                                           | Delete or collapse location                                                                                                              |
+| ---------------------------------------------------------------------------- | -------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `extractActualExcerpt(oldContent, hunk.chunks)`                              | Tool catch lacked failed-chunk data                                                    | Patch owner now creates the diagnostic with the exact failed chunk                                                                             | Delete from `tool/apply_patch.ts`                                                                                                        |
+| Apply Patch character-set overlap scan                                       | Attempted no-read recovery                                                             | Shared bounded window matcher owns candidate selection                                                                                         | Deleted with extractor                                                                                                                   |
+| Edit `findClosestMatch` candidate scan and `charOverlap`                     | Attempted closest content after not-found                                              | Shared matcher supplies candidate/start line; Edit keeps only rendering                                                                        | Collapse in `tool/edit.ts`                                                                                                               |
+| Misleading `Closest match at line <excerpt-start>` label                     | Context was conflated with candidate                                                   | Matcher returns candidate start separately                                                                                                     | Replace error formatting                                                                                                                 |
+| Patch rstrip/trim/Unicode-normalized whole-line success                      | Historical tolerance for nonliteral line differences                                   | Explicit requirement now permits only exact line then exact unique string span; literal span preserves outer whitespace instead of splicing it | Delete comparators and `normalizeUnicode` from `patch/index.ts`; replace Unicode success test with exact-only failure/unchanged behavior |
+| Trailing-empty shortened-pattern retry                                       | Historical tolerance for no-tail files                                                 | Explicit parsed empty lines are part of the complete literal old block; shortening creates a third success semantic                            | Delete retry and its `pattern`/`newSlice` shortening from `patch/index.ts`                                                               |
+| Edit nonliteral replacer pipeline and supporting Levenshtein/threshold logic | Historical tolerance copied from external edit correctors                              | Explicit dual-Tool requirement permits only exact literal replacement before failure diagnostics                                               | Delete from `tool/edit.ts`; replace generator loop with direct exact occurrence resolution                                               |
+| Deferred whole-line replacement tuple list                                   | Existing Patch matching only produced line-aligned updates against an immutable source | Cannot compose multiple partial matches on one line                                                                                            | Replace with local per-chunk transformation of current working lines/text                                                                |
+| Content-only exact-line spans                                                | R5 unification proposal                                                                | Manufacture blank rows or require delimiter algebra                                                                                            | Retain exact-line line splice inside the same owner path                                                                                 |
+| Independent zero-width insertion spans                                       | R6/R7 translation proposal                                                             | Concatenate, reverse, or retain a delimiter after deleting all source text                                                                     | Keep insertion as deferred EOF line additions in the same owner path                                                                     |
 
 ## 13. Forward Traceability
 
-| Requirement or invariant | Production path | Planned file/change | Behavioral test |
-| --- | --- | --- | --- |
-| INV-01 unique substring preserves prefix/suffix | Patch exact-range resolver + current-copy splice | `src/patch/match.ts`, `src/patch/index.ts` | `test/patch/patch.test.ts`: `ABCDEFG` / `CDEFG`; multiline boundary case |
-| INV-02 ambiguity rejects | Patch exact-range resolver | same | Owner test with two eligible occurrences; Tool test asserts unchanged file |
-| INV-03 complete-pattern ordering/context/EOF | Patch lower-bound-aware exact search | `src/patch/index.ts` | Multi-chunk substring after prior match; occurrence before context/cursor rejected; EOF preference; explicit trailing-empty block fails against no-tail file |
-| INV-04 failed chunk identity | Patch error built at failure | `src/patch/index.ts`, remove Tool extractor | ApplyPatchTool multi-chunk test asserts second expected block/candidate only |
-| INV-05 bounded relevant candidate | Shared bigram multiset matcher | `src/patch/match.ts`, both Tools | Long unrelated decoy loses to local near text; low-confidence case emits no false candidate |
-| INV-06 true line/truncation | Matcher result + Tool renderers | `src/tool/edit.ts`, Patch error formatting | Edit Tool asserts true candidate line; long candidate has explicit omission marker |
-| INV-07 all Patch consumers | Owner implementation | `src/patch/index.ts` | Owner derive/`Patch.applyPatch`, ApplyPatchTool, and `maybeParseApplyPatchVerified` Body/CorrectnessError behaviors |
-| INV-08 preserve adjacent behavior | Existing paths unchanged | all modified production files | Existing focused suites + full package tests/typecheck |
-| Model-visible matching contract | Tool descriptions | `src/tool/apply_patch.txt`, `src/tool/edit.txt` | Tool behavior tests are authoritative; description reviewed against implementation |
-| INV-09 verified implementation and commit | Post-audit workflow only | Plan Section 25; no production file | Staged diff hash/paths equal audited diff, commit succeeds with hooks, post-commit diff/hash/status prove exact contents |
-| INV-10 Edit exact-only success domain | Direct literal occurrence resolver | `src/tool/edit.ts`, `src/tool/edit.txt` | Real EditTool table cases for trim, internal whitespace, escape, indentation, and anchor differences all fail and preserve file; exact unique and `replaceAll` remain green; duplicate exact oldString without `replaceAll` returns ambiguity and leaves file unchanged |
-| INV-11 exact `@@` context location | Shared Patch exact locator before every chunk classification | `src/patch/match.ts`, `src/patch/index.ts` | Owner + ApplyPatchTool: unique suffix context locates containing line; zero/multiple fail for ordinary and pure-insertion chunks; valid pure-insertion context still appends at EOF |
-| INV-12 same-line multi-chunk composition | Current-working-text cursor and immediate local application | `src/patch/match.ts`, `src/patch/index.ts` | Owner + ApplyPatchTool: `abcDEFghiJKL` with ordered `DEF -> X`, `JKL -> Y` yields exactly `abcXghiY\n`; neither change is rejected or overwritten |
-| INV-13 exact-line delimiter preservation | Existing line-array splice inside sequential owner | `src/patch/index.ts` | Owner characterization for first/middle/final/only and multiline deletion; real ApplyPatchTool middle-line deletion yields no blank row |
-| INV-14 pure insertion delimiter/order/composition | Deferred EOF line additions after local validation | `src/patch/index.ts` | Owner + ApplyPatchTool: no-tail, empty, multiple insertion order, and delete-only-line then insert yield no concatenation/leading blank |
+| Requirement or invariant                          | Production path                                              | Planned file/change                             | Behavioral test                                                                                                                                                                                                                                                         |
+| ------------------------------------------------- | ------------------------------------------------------------ | ----------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| INV-01 unique substring preserves prefix/suffix   | Patch exact-range resolver + current-copy splice             | `src/patch/match.ts`, `src/patch/index.ts`      | `test/patch/patch.test.ts`: `ABCDEFG` / `CDEFG`; multiline boundary case                                                                                                                                                                                                |
+| INV-02 ambiguity rejects                          | Patch exact-range resolver                                   | same                                            | Owner test with two eligible occurrences; Tool test asserts unchanged file                                                                                                                                                                                              |
+| INV-03 complete-pattern ordering/context/EOF      | Patch lower-bound-aware exact search                         | `src/patch/index.ts`                            | Multi-chunk substring after prior match; occurrence before context/cursor rejected; EOF preference; explicit trailing-empty block fails against no-tail file                                                                                                            |
+| INV-04 failed chunk identity                      | Patch error built at failure                                 | `src/patch/index.ts`, remove Tool extractor     | ApplyPatchTool multi-chunk test asserts second expected block/candidate only                                                                                                                                                                                            |
+| INV-05 bounded relevant candidate                 | Shared bigram multiset matcher                               | `src/patch/match.ts`, both Tools                | Long unrelated decoy loses to local near text; low-confidence case emits no false candidate                                                                                                                                                                             |
+| INV-06 true line/truncation                       | Matcher result + Tool renderers                              | `src/tool/edit.ts`, Patch error formatting      | Edit Tool asserts true candidate line; long candidate has explicit omission marker                                                                                                                                                                                      |
+| INV-07 all Patch consumers                        | Owner implementation                                         | `src/patch/index.ts`                            | Owner derive/`Patch.applyPatch`, ApplyPatchTool, and `maybeParseApplyPatchVerified` Body/CorrectnessError behaviors                                                                                                                                                     |
+| INV-08 preserve adjacent behavior                 | Existing paths unchanged                                     | all modified production files                   | Existing focused suites + full package tests/typecheck                                                                                                                                                                                                                  |
+| Model-visible matching contract                   | Tool descriptions                                            | `src/tool/apply_patch.txt`, `src/tool/edit.txt` | Tool behavior tests are authoritative; description reviewed against implementation                                                                                                                                                                                      |
+| INV-09 verified implementation and commit         | Post-audit workflow only                                     | Plan Section 25; no production file             | Staged diff hash/paths equal audited diff, commit succeeds with hooks, post-commit diff/hash/status prove exact contents                                                                                                                                                |
+| INV-10 Edit exact-only success domain             | Direct literal occurrence resolver                           | `src/tool/edit.ts`, `src/tool/edit.txt`         | Real EditTool table cases for trim, internal whitespace, escape, indentation, and anchor differences all fail and preserve file; exact unique and `replaceAll` remain green; duplicate exact oldString without `replaceAll` returns ambiguity and leaves file unchanged |
+| INV-11 exact `@@` context location                | Shared Patch exact locator before every chunk classification | `src/patch/match.ts`, `src/patch/index.ts`      | Owner + ApplyPatchTool: unique suffix context locates containing line; zero/multiple fail for ordinary and pure-insertion chunks; valid pure-insertion context still appends at EOF                                                                                     |
+| INV-12 same-line multi-chunk composition          | Current-working-text cursor and immediate local application  | `src/patch/match.ts`, `src/patch/index.ts`      | Owner + ApplyPatchTool: `abcDEFghiJKL` with ordered `DEF -> X`, `JKL -> Y` yields exactly `abcXghiY\n`; neither change is rejected or overwritten                                                                                                                       |
+| INV-13 exact-line delimiter preservation          | Existing line-array splice inside sequential owner           | `src/patch/index.ts`                            | Owner characterization for first/middle/final/only and multiline deletion; real ApplyPatchTool middle-line deletion yields no blank row                                                                                                                                 |
+| INV-14 pure insertion delimiter/order/composition | Deferred EOF line additions after local validation           | `src/patch/index.ts`                            | Owner + ApplyPatchTool: no-tail, empty, multiple insertion order, and delete-only-line then insert yield no concatenation/leading blank                                                                                                                                 |
 
 No confirmed requirement is unmapped.
 
 ## 14. Reverse Traceability
 
-| Proposed production concept | Requirement ID | Evidence | Why existing logic cannot carry it |
-| --- | --- | --- | --- |
-| Exact unique substring range result | INV-01/02/03 | User requirement and red owner repro | Existing `seekSequence` only returns whole-line indexes |
-| Atomic sequential working copy | INV-01/03/08/12/13/14 | Same-line multi-chunk plus R5-R7 composition evidence | Existing deferred tuples cannot represent partial ranges; proposed immutable spans require fragile delimiter algebra |
-| Shared bounded closest-window matcher | INV-04/05/06 | Two duplicated broken scorers; DB-wide score/ranking evidence | Changing only the denominator leaves short-line bias; local stable cases select <=10-char candidates |
-| Patch failure carrying exact chunk/candidate | INV-04/07 | 23/38 wrong-chunk diagnostics and three Patch consumers | Downstream Tool receives only a string and cannot recover failed chunk identity |
-| Ambiguity and confidence outcomes | INV-02/05 | Unique-only user requirement and unrelated DB hints | Current implementation either throws generic not-found or reports false precision |
-| Model-visible contract clarification | INV-01/02/05 | Tool descriptions are sent to the model | Current `apply_patch.txt` does not state substring uniqueness; `edit.txt` cites stale error wording |
-| Remove Patch nonliteral whole-line passes | INV-01/03 | Explicit exact-line-then-string requirement and R1 B-01 concrete prefix loss | Reordering after substring would still create a nonliteral success after the user-required only branch |
-| Remove trailing-empty shortening | INV-03 | Parser evidence and R8 B-01 | An explicit empty old line is literal content; shortening can succeed when the complete old block is absent |
-| Verified-parse behavior tests | INV-07 | Exported reachable consumer and R1 B-04 | Typecheck cannot prove Body/new_content or CorrectnessError semantics |
-| Post-verification commit gate | INV-09 | Explicit terminal target and R1 B-02 | Verification alone does not create or identify a commit |
-| Delete Edit nonliteral replacers | INV-10 | Explicit dual-Tool exact-string requirement and R2 B-01 | Running them after literal failure creates unauthorized competing success semantics |
-| Exact context locator for every chunk kind | INV-03/07/11/14 | Public `@@` producer and R3/R8 B-01/B-02 | Existing locator lacks substring outcome; bypassing it for insertion expands success |
-| Edit duplicate-literal rejection test | INV-10 | Existing Tool contract and R3 B-02 | Unique and replaceAll tests cannot detect an implementation that silently chooses/replaces duplicate occurrences |
-| Current-text character cursor and immediate local application | INV-03/12 | Public multi-chunk parser and R4 B-01 | Line cursor/deferred tuples skip or overwrite same-line targets; local application keeps later coordinates truthful |
-| Retained exact-line splice | INV-08/13 | Existing line semantics and R5 B-01 | Generic literal spans cannot infer logical-line delimiter ownership |
-| Deferred EOF line additions | INV-08/12/14 | Existing pure-add branch and R6/R7 B-01 | Zero-width spans cannot safely compose original deletion, separator ownership, and equal-offset order |
+| Proposed production concept                                   | Requirement ID        | Evidence                                                                     | Why existing logic cannot carry it                                                                                   |
+| ------------------------------------------------------------- | --------------------- | ---------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| Exact unique substring range result                           | INV-01/02/03          | User requirement and red owner repro                                         | Existing `seekSequence` only returns whole-line indexes                                                              |
+| Atomic sequential working copy                                | INV-01/03/08/12/13/14 | Same-line multi-chunk plus R5-R7 composition evidence                        | Existing deferred tuples cannot represent partial ranges; proposed immutable spans require fragile delimiter algebra |
+| Shared bounded closest-window matcher                         | INV-04/05/06          | Two duplicated broken scorers; DB-wide score/ranking evidence                | Changing only the denominator leaves short-line bias; local stable cases select <=10-char candidates                 |
+| Patch failure carrying exact chunk/candidate                  | INV-04/07             | 23/38 wrong-chunk diagnostics and three Patch consumers                      | Downstream Tool receives only a string and cannot recover failed chunk identity                                      |
+| Ambiguity and confidence outcomes                             | INV-02/05             | Unique-only user requirement and unrelated DB hints                          | Current implementation either throws generic not-found or reports false precision                                    |
+| Model-visible contract clarification                          | INV-01/02/05          | Tool descriptions are sent to the model                                      | Current `apply_patch.txt` does not state substring uniqueness; `edit.txt` cites stale error wording                  |
+| Remove Patch nonliteral whole-line passes                     | INV-01/03             | Explicit exact-line-then-string requirement and R1 B-01 concrete prefix loss | Reordering after substring would still create a nonliteral success after the user-required only branch               |
+| Remove trailing-empty shortening                              | INV-03                | Parser evidence and R8 B-01                                                  | An explicit empty old line is literal content; shortening can succeed when the complete old block is absent          |
+| Verified-parse behavior tests                                 | INV-07                | Exported reachable consumer and R1 B-04                                      | Typecheck cannot prove Body/new_content or CorrectnessError semantics                                                |
+| Post-verification commit gate                                 | INV-09                | Explicit terminal target and R1 B-02                                         | Verification alone does not create or identify a commit                                                              |
+| Delete Edit nonliteral replacers                              | INV-10                | Explicit dual-Tool exact-string requirement and R2 B-01                      | Running them after literal failure creates unauthorized competing success semantics                                  |
+| Exact context locator for every chunk kind                    | INV-03/07/11/14       | Public `@@` producer and R3/R8 B-01/B-02                                     | Existing locator lacks substring outcome; bypassing it for insertion expands success                                 |
+| Edit duplicate-literal rejection test                         | INV-10                | Existing Tool contract and R3 B-02                                           | Unique and replaceAll tests cannot detect an implementation that silently chooses/replaces duplicate occurrences     |
+| Current-text character cursor and immediate local application | INV-03/12             | Public multi-chunk parser and R4 B-01                                        | Line cursor/deferred tuples skip or overwrite same-line targets; local application keeps later coordinates truthful  |
+| Retained exact-line splice                                    | INV-08/13             | Existing line semantics and R5 B-01                                          | Generic literal spans cannot infer logical-line delimiter ownership                                                  |
+| Deferred EOF line additions                                   | INV-08/12/14          | Existing pure-add branch and R6/R7 B-01                                      | Zero-width spans cannot safely compose original deletion, separator ownership, and equal-offset order                |
 
 No proposed production concept is justified only by best practice or future
 extensibility.
 
 ## 15. File-Level Change Plan
 
-| File | Add / modify / delete | Exact responsibility of the change | Expected line delta |
-| --- | --- | --- | --- |
-| `packages/opencode/src/patch/match.ts` | add | Pure exact line/unique character-range locator and bounded closest-window calculations; no I/O or Tool formatting | +100 to +150 |
-| `packages/opencode/src/patch/index.ts` | modify | Replace deferred tuple computation with atomic sequential working-copy transformation; validate context for every chunk; retain exact-line splice; add current-text substring cursor; defer EOF line additions; remove nonliteral/trailing-empty retries; construct failed-target diagnostic; preserve all consumers | +90 to +160 / -50 to -90 |
-| `packages/opencode/src/tool/apply_patch.ts` | modify | Remove duplicate extractor/scorer and propagate Patch owner errors through existing per-file aggregation | +3 to +10 / -45 to -55 |
-| `packages/opencode/src/tool/edit.ts` | modify | Replace generator pipeline with direct exact literal unique/multiple/replaceAll resolution; delete all nonliteral replacers and their support; use shared diagnostic candidate and correct rendering | +25 to +50 / -390 to -440 |
-| `packages/opencode/src/tool/apply_patch.txt` | modify | State exact unique old-block substring contract and ambiguity rejection | +3 to +7 |
-| `packages/opencode/src/tool/edit.txt` | modify | Align description/error recovery wording with actual unique literal behavior | +2 to +5 / -2 to -4 |
-| `packages/opencode/test/patch/patch.test.ts` | modify | Owner deletion/insertion/generated-text/trailing-empty characterization plus old-block/context substring, ambiguity, multiline, ordering/EOF, and verified-parse behaviors | +135 to +205 |
-| `packages/opencode/test/tool/apply_patch.test.ts` | modify | Real Tool trailing-empty and insertion-context composition plus old-block/context result, unchanged-on-ambiguity, failed-target, decoy, low-confidence diagnostics | +120 to +185 |
-| `packages/opencode/test/tool/edit.test.ts` | modify | Exact-only rejection table, unique/duplicate/replaceAll outcomes, adversarial candidate selection, true line label, and low-confidence diagnostic | +65 to +105 |
+| File                                              | Add / modify / delete | Exact responsibility of the change                                                                                                                                                                                                                                                                                   | Expected line delta       |
+| ------------------------------------------------- | --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------- |
+| `packages/opencode/src/patch/match.ts`            | add                   | Pure exact line/unique character-range locator and bounded closest-window calculations; no I/O or Tool formatting                                                                                                                                                                                                    | +100 to +150              |
+| `packages/opencode/src/patch/index.ts`            | modify                | Replace deferred tuple computation with atomic sequential working-copy transformation; validate context for every chunk; retain exact-line splice; add current-text substring cursor; defer EOF line additions; remove nonliteral/trailing-empty retries; construct failed-target diagnostic; preserve all consumers | +90 to +160 / -50 to -90  |
+| `packages/opencode/src/tool/apply_patch.ts`       | modify                | Remove duplicate extractor/scorer and propagate Patch owner errors through existing per-file aggregation                                                                                                                                                                                                             | +3 to +10 / -45 to -55    |
+| `packages/opencode/src/tool/edit.ts`              | modify                | Replace generator pipeline with direct exact literal unique/multiple/replaceAll resolution; delete all nonliteral replacers and their support; use shared diagnostic candidate and correct rendering                                                                                                                 | +25 to +50 / -390 to -440 |
+| `packages/opencode/src/tool/apply_patch.txt`      | modify                | State exact unique old-block substring contract and ambiguity rejection                                                                                                                                                                                                                                              | +3 to +7                  |
+| `packages/opencode/src/tool/edit.txt`             | modify                | Align description/error recovery wording with actual unique literal behavior                                                                                                                                                                                                                                         | +2 to +5 / -2 to -4       |
+| `packages/opencode/test/patch/patch.test.ts`      | modify                | Owner deletion/insertion/generated-text/trailing-empty characterization plus old-block/context substring, ambiguity, multiline, ordering/EOF, and verified-parse behaviors                                                                                                                                           | +135 to +205              |
+| `packages/opencode/test/tool/apply_patch.test.ts` | modify                | Real Tool trailing-empty and insertion-context composition plus old-block/context result, unchanged-on-ambiguity, failed-target, decoy, low-confidence diagnostics                                                                                                                                                   | +120 to +185              |
+| `packages/opencode/test/tool/edit.test.ts`        | modify                | Exact-only rejection table, unique/duplicate/replaceAll outcomes, adversarial candidate selection, true line label, and low-confidence diagnostic                                                                                                                                                                    | +65 to +105               |
 
 No production, test, config, migration, or generated file may be changed before
 this exact revision is approved.
@@ -578,35 +587,35 @@ Agreed seams: exported Patch owner (`deriveNewContentsFromChunks` or
 `Patch.applyPatch`) plus real `ApplyPatchTool.execute` and `EditTool.execute`.
 Private `patch/match.ts` helpers are not direct test seams.
 
-| Order | Red behavior | Why current code fails | Minimal green behavior | Regression protected |
-| --- | --- | --- | --- | --- |
-| 1 | Patch owner transforms `ABCDEFG\n` with old `CDEFG` into `ABfixed\n` | Whole-line resolver throws | Resolve one exact eligible substring and preserve prefix | Original requested success behavior |
-| 2 | File `"  CDEFG  "`, old `"CDEFG"` becomes `"  fixed  "` | Current trim whole-line path replaces the entire line | Exact substring runs immediately after exact line and preserves both sides | R1 B-01 concrete prefix/suffix loss |
-| 3 | Unicode-only nonliteral old text now fails and leaves the file unchanged | Current normalized whole-line path succeeds | Remove nonliteral Patch success branches | Explicit exact-only contract |
-| 4 | Owner preserves both boundaries for an exact multiline substring | Deferred replacement tuple only represents whole lines | Splice exact current-text range, then rebuild canonical working lines | Multiline literal semantics |
-| 5 | Owner rejects two exact eligible substring occurrences | No substring branch/ambiguity result | Accept only one occurrence | Wrong-location mutation prevention |
-| 6 | Ordered multi-chunk and EOF cases retain current lower-bound/preference behavior | New branch does not yet know cursor/EOF | Thread existing bounds into one resolver | Current Patch ordering contract |
-| 7 | ApplyPatchTool applies unique substring, reports correct diff, and preserves file boundaries | Owner currently throws | Consume owner success unchanged | User-visible Tool path |
-| 8 | ApplyPatchTool ambiguity fails and leaves the file untouched | No branch-specific rejection test | Propagate owner ambiguity error before write | Atomicity/safety |
-| 9 | `maybeParseApplyPatchVerified` returns Body with exact `new_content` for unique substring | Current owner throws and adapter returns CorrectnessError | Reuse owner success through existing adapter | R1 B-04 success path |
-| 10 | Verified parse returns CorrectnessError preserving ambiguity/not-found semantics | No behavior test protects conversion | Preserve owner error through adapter | R1 B-04 failure path |
-| 11 | Later failed chunk diagnostic names the later expected text and local candidate, not the first chunk | Tool extractor always reads first chunk | Build diagnostic at Patch failure | 23/38 wrong-chunk class |
-| 12 | Long unrelated line loses to the real near line and score/line are truthful | Character-set score is unbounded/orderless | Use bounded full-window bigram multiset score | Other-host line 60/438 and local 299/795 classes |
-| 13 | Low-confidence/tied candidates are not labeled actual/closest | Current threshold is inflated by bad score | Return explicit no-reliable-candidate error | False precision |
-| 14 | Edit Tool reports the real near line and not the long decoy; existing exact substring success remains green | Duplicate scorer and preceding-line label | Delegate candidate selection only | Edit DB failures and no success regression |
-| 15 | Long candidate rendering keeps the candidate and marks omission explicitly | Apply path blindly slices first 500 chars | Candidate-centered head/tail rendering | Truncated-hint class |
-| 16 | Edit rejects trim-only, whitespace-normalized, indent-only, escape-only, and anchor-only old strings without changing the file | Current nonliteral replacers make these cases succeed | Delete all post-literal success paths | R2 B-01 and exact-only dual-Tool contract |
-| 17 | Edit exact unique and `replaceAll` cases remain green through the simplified resolver | Resolver rewrite could regress current literal behavior | Directly count literal occurrences and preserve current outcomes | Existing user-visible behavior retained |
-| 18 | Owner and ApplyPatchTool locate `@@ CDEFG` inside unique line `ABCDEFG`, then update exact old text on the following line | Context exact-line lookup throws before old-block resolution | Reuse exact locator and advance to containing line + 1 | R3 B-01 context path |
-| 19 | Zero or multiple eligible context substrings fail and leave all files unchanged | New context substring branch could select first/continue | Require one literal context occurrence in current lower bound | Context ambiguity and atomicity |
-| 20 | Edit with duplicate exact `oldString` and no `replaceAll` returns multiple-match error and preserves the file | Resolver rewrite could choose first or replace all | Explicit ambiguity outcome before write | R3 B-02 and `edit.txt` contract |
-| 21 | Owner and ApplyPatchTool apply ordered `DEF -> X` and `JKL -> Y` chunks within `abcDEFghiJKL` to produce exactly `abcXghiY\n` | Line cursor skips the second target or deferred line tuples overwrite one result | Apply each chunk to local current text and advance to the replacement end | R4 B-01 same-line composition |
-| 22 | Before sequential refactor, characterize exact-line pure deletion for first/middle/final/only and multiline blocks; after refactor, ApplyPatchTool deletion of middle `line2` yields `line1\nline3\n` with no blank row | Current code is green; generic content spans turn this guard red | Retain exact-line line-array splice inside the sequential owner | R5 B-01 and existing INV-08 behavior |
-| 23 | Characterize non-empty no-tail, empty, and two pure insertions; after refactor `alpha + beta` is `alpha\nbeta\n` and empty + `beta`,`gamma` is `beta\ngamma\n` | Current line splice is green; zero-width spans concatenate/reverse | Collect insertion lines in patch order and append after validation | R6 B-01 and INV-14 |
-| 24 | Owner and ApplyPatchTool delete the only original line `alpha` and include a pure insertion `beta`, yielding exactly `beta\n` with no leading blank | R7 original-text delimiter rule yields `\nbeta\n` | Apply deletion to working lines, then append deferred insertion lines | R7 B-01 composition |
-| 25 | An earlier replacement introducing text sought by a later chunk still causes the later chunk to fail and leaves the file unchanged | Naive current-text search from the replacement start can match generated text | Advance current cursor after replacement and keep deferred additions outside matching | Existing ordered-chunk semantics under R8 representation |
-| 26 | Owner and ApplyPatchTool reject complete old block `foo\n` against no-tail file `foo`, leaving it unchanged | Current trailing-empty retry drops the final empty line and succeeds with `foo` | Remove shortened-pattern retry; both exact modes use complete parsed old block | R8 B-01 exact-only path |
-| 27 | Pure insertion with valid exact/unique-substring `@@` context appends at EOF; missing or multiple substring contexts fail and preserve the file | R8 wording bypassed context for insertion chunks | Resolve context for every chunk before deferring insertion lines | R8 B-02 context consistency |
+| Order | Red behavior                                                                                                                                                                                                            | Why current code fails                                                           | Minimal green behavior                                                                | Regression protected                                     |
+| ----- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- | -------------------------------------------------------- |
+| 1     | Patch owner transforms `ABCDEFG\n` with old `CDEFG` into `ABfixed\n`                                                                                                                                                    | Whole-line resolver throws                                                       | Resolve one exact eligible substring and preserve prefix                              | Original requested success behavior                      |
+| 2     | File `"  CDEFG  "`, old `"CDEFG"` becomes `"  fixed  "`                                                                                                                                                                 | Current trim whole-line path replaces the entire line                            | Exact substring runs immediately after exact line and preserves both sides            | R1 B-01 concrete prefix/suffix loss                      |
+| 3     | Unicode-only nonliteral old text now fails and leaves the file unchanged                                                                                                                                                | Current normalized whole-line path succeeds                                      | Remove nonliteral Patch success branches                                              | Explicit exact-only contract                             |
+| 4     | Owner preserves both boundaries for an exact multiline substring                                                                                                                                                        | Deferred replacement tuple only represents whole lines                           | Splice exact current-text range, then rebuild canonical working lines                 | Multiline literal semantics                              |
+| 5     | Owner rejects two exact eligible substring occurrences                                                                                                                                                                  | No substring branch/ambiguity result                                             | Accept only one occurrence                                                            | Wrong-location mutation prevention                       |
+| 6     | Ordered multi-chunk and EOF cases retain current lower-bound/preference behavior                                                                                                                                        | New branch does not yet know cursor/EOF                                          | Thread existing bounds into one resolver                                              | Current Patch ordering contract                          |
+| 7     | ApplyPatchTool applies unique substring, reports correct diff, and preserves file boundaries                                                                                                                            | Owner currently throws                                                           | Consume owner success unchanged                                                       | User-visible Tool path                                   |
+| 8     | ApplyPatchTool ambiguity fails and leaves the file untouched                                                                                                                                                            | No branch-specific rejection test                                                | Propagate owner ambiguity error before write                                          | Atomicity/safety                                         |
+| 9     | `maybeParseApplyPatchVerified` returns Body with exact `new_content` for unique substring                                                                                                                               | Current owner throws and adapter returns CorrectnessError                        | Reuse owner success through existing adapter                                          | R1 B-04 success path                                     |
+| 10    | Verified parse returns CorrectnessError preserving ambiguity/not-found semantics                                                                                                                                        | No behavior test protects conversion                                             | Preserve owner error through adapter                                                  | R1 B-04 failure path                                     |
+| 11    | Later failed chunk diagnostic names the later expected text and local candidate, not the first chunk                                                                                                                    | Tool extractor always reads first chunk                                          | Build diagnostic at Patch failure                                                     | 23/38 wrong-chunk class                                  |
+| 12    | Long unrelated line loses to the real near line and score/line are truthful                                                                                                                                             | Character-set score is unbounded/orderless                                       | Use bounded full-window bigram multiset score                                         | Other-host line 60/438 and local 299/795 classes         |
+| 13    | Low-confidence/tied candidates are not labeled actual/closest                                                                                                                                                           | Current threshold is inflated by bad score                                       | Return explicit no-reliable-candidate error                                           | False precision                                          |
+| 14    | Edit Tool reports the real near line and not the long decoy; existing exact substring success remains green                                                                                                             | Duplicate scorer and preceding-line label                                        | Delegate candidate selection only                                                     | Edit DB failures and no success regression               |
+| 15    | Long candidate rendering keeps the candidate and marks omission explicitly                                                                                                                                              | Apply path blindly slices first 500 chars                                        | Candidate-centered head/tail rendering                                                | Truncated-hint class                                     |
+| 16    | Edit rejects trim-only, whitespace-normalized, indent-only, escape-only, and anchor-only old strings without changing the file                                                                                          | Current nonliteral replacers make these cases succeed                            | Delete all post-literal success paths                                                 | R2 B-01 and exact-only dual-Tool contract                |
+| 17    | Edit exact unique and `replaceAll` cases remain green through the simplified resolver                                                                                                                                   | Resolver rewrite could regress current literal behavior                          | Directly count literal occurrences and preserve current outcomes                      | Existing user-visible behavior retained                  |
+| 18    | Owner and ApplyPatchTool locate `@@ CDEFG` inside unique line `ABCDEFG`, then update exact old text on the following line                                                                                               | Context exact-line lookup throws before old-block resolution                     | Reuse exact locator and advance to containing line + 1                                | R3 B-01 context path                                     |
+| 19    | Zero or multiple eligible context substrings fail and leave all files unchanged                                                                                                                                         | New context substring branch could select first/continue                         | Require one literal context occurrence in current lower bound                         | Context ambiguity and atomicity                          |
+| 20    | Edit with duplicate exact `oldString` and no `replaceAll` returns multiple-match error and preserves the file                                                                                                           | Resolver rewrite could choose first or replace all                               | Explicit ambiguity outcome before write                                               | R3 B-02 and `edit.txt` contract                          |
+| 21    | Owner and ApplyPatchTool apply ordered `DEF -> X` and `JKL -> Y` chunks within `abcDEFghiJKL` to produce exactly `abcXghiY\n`                                                                                           | Line cursor skips the second target or deferred line tuples overwrite one result | Apply each chunk to local current text and advance to the replacement end             | R4 B-01 same-line composition                            |
+| 22    | Before sequential refactor, characterize exact-line pure deletion for first/middle/final/only and multiline blocks; after refactor, ApplyPatchTool deletion of middle `line2` yields `line1\nline3\n` with no blank row | Current code is green; generic content spans turn this guard red                 | Retain exact-line line-array splice inside the sequential owner                       | R5 B-01 and existing INV-08 behavior                     |
+| 23    | Characterize non-empty no-tail, empty, and two pure insertions; after refactor `alpha + beta` is `alpha\nbeta\n` and empty + `beta`,`gamma` is `beta\ngamma\n`                                                          | Current line splice is green; zero-width spans concatenate/reverse               | Collect insertion lines in patch order and append after validation                    | R6 B-01 and INV-14                                       |
+| 24    | Owner and ApplyPatchTool delete the only original line `alpha` and include a pure insertion `beta`, yielding exactly `beta\n` with no leading blank                                                                     | R7 original-text delimiter rule yields `\nbeta\n`                                | Apply deletion to working lines, then append deferred insertion lines                 | R7 B-01 composition                                      |
+| 25    | An earlier replacement introducing text sought by a later chunk still causes the later chunk to fail and leaves the file unchanged                                                                                      | Naive current-text search from the replacement start can match generated text    | Advance current cursor after replacement and keep deferred additions outside matching | Existing ordered-chunk semantics under R8 representation |
+| 26    | Owner and ApplyPatchTool reject complete old block `foo\n` against no-tail file `foo`, leaving it unchanged                                                                                                             | Current trailing-empty retry drops the final empty line and succeeds with `foo`  | Remove shortened-pattern retry; both exact modes use complete parsed old block        | R8 B-01 exact-only path                                  |
+| 27    | Pure insertion with valid exact/unique-substring `@@` context appends at EOF; missing or multiple substring contexts fail and preserve the file                                                                         | R8 wording bypassed context for insertion chunks                                 | Resolve context for every chunk before deferring insertion lines                      | R8 B-02 context consistency                              |
 
 Slices 22-25 are green characterization gates written before the sequential
 refactor and rerun immediately after it; they are red-sensitive to coordinate,
@@ -620,10 +629,10 @@ tests must not recompute the production score or assert private helper calls.
 
 ## 17. Chinese Comment Budget
 
-| Metric | Estimate | Method |
-| --- | --- | --- |
-| Effective changed code lines `E` | 375 | Estimated added/substantively modified non-blank production + test lines; excludes imports, formatting, Tool prose, plan text, and pure deletion |
-| Required Chinese explanatory comments `C` | 57 | `ceil(375 * 0.15) = 57` |
+| Metric                                    | Estimate | Method                                                                                                                                           |
+| ----------------------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Effective changed code lines `E`          | 375      | Estimated added/substantively modified non-blank production + test lines; excludes imports, formatting, Tool prose, plan text, and pure deletion |
+| Required Chinese explanatory comments `C` | 57       | `ceil(375 * 0.15) = 57`                                                                                                                          |
 
 Qualifying comments will be distributed next to:
 
@@ -660,35 +669,35 @@ before implementation audit.
 
 ## 18. Verification
 
-| Command | Working directory | Evidence produced |
-| --- | --- | --- |
-| `bun test test/patch/patch.test.ts --filter "unique substring"` | `packages/opencode` | Owner red/green for literal range semantics |
-| `bun test test/patch/patch.test.ts --filter "verified apply patch"` | `packages/opencode` | Exported verified-parse Body and CorrectnessError semantics |
-| `bun test test/tool/apply_patch.test.ts --filter "substring|candidate|chunk"` | `packages/opencode` | ApplyPatchTool success, ambiguity, and diagnostics |
-| `bun test test/tool/edit.test.ts --filter "closest|substring"` | `packages/opencode` | Edit diagnostic and existing success contract |
-| `bun test test/patch/patch.test.ts test/tool/apply_patch.test.ts test/tool/edit.test.ts` | `packages/opencode` | Full focused regression suite; baseline was 83 pass / 0 fail |
-| `bun typecheck` | `packages/opencode` | Type safety through all Patch consumers |
-| `bun test` | `packages/opencode` | Package-wide regression evidence |
-| Owner feedback-loop `bun -e` command from Section 8 | repository root | Original `ABCDEFG` / `CDEFG` symptom is green |
-| Re-run deterministic adversarial fixtures through real Tool tests | `packages/opencode` | Original irrelevant-candidate symptoms are absent |
-| `git diff --check` | repository root | No whitespace errors |
-| `git status --short` and `git diff --name-only` before implementation audit | repository root | Exact task changed-file boundary; unrelated user files remain untouched |
-| `git diff -- <task implementation paths> \| shasum -a 256` before implementation audit and `git diff --cached -- <same paths> \| shasum -a 256` before commit | repository root | Staged implementation input is byte-identical to the independently audited implementation diff without hashing unrelated worktree changes |
-| `git show --format=fuller --stat --oneline HEAD` and `git status --short` after commit | repository root | Commit exists, contains only audited task files, hooks succeeded, and unrelated work remains uncommitted |
+| Command                                                                                                                                                       | Working directory   | Evidence produced                                                                                                                         |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------- | -------------------------------------------------- |
+| `bun test test/patch/patch.test.ts --filter "unique substring"`                                                                                               | `packages/opencode` | Owner red/green for literal range semantics                                                                                               |
+| `bun test test/patch/patch.test.ts --filter "verified apply patch"`                                                                                           | `packages/opencode` | Exported verified-parse Body and CorrectnessError semantics                                                                               |
+| `bun test test/tool/apply_patch.test.ts --filter "substring                                                                                                   | candidate           | chunk"`                                                                                                                                   | `packages/opencode`                           | ApplyPatchTool success, ambiguity, and diagnostics |
+| `bun test test/tool/edit.test.ts --filter "closest                                                                                                            | substring"`         | `packages/opencode`                                                                                                                       | Edit diagnostic and existing success contract |
+| `bun test test/patch/patch.test.ts test/tool/apply_patch.test.ts test/tool/edit.test.ts`                                                                      | `packages/opencode` | Full focused regression suite; baseline was 83 pass / 0 fail                                                                              |
+| `bun typecheck`                                                                                                                                               | `packages/opencode` | Type safety through all Patch consumers                                                                                                   |
+| `bun test`                                                                                                                                                    | `packages/opencode` | Package-wide regression evidence                                                                                                          |
+| Owner feedback-loop `bun -e` command from Section 8                                                                                                           | repository root     | Original `ABCDEFG` / `CDEFG` symptom is green                                                                                             |
+| Re-run deterministic adversarial fixtures through real Tool tests                                                                                             | `packages/opencode` | Original irrelevant-candidate symptoms are absent                                                                                         |
+| `git diff --check`                                                                                                                                            | repository root     | No whitespace errors                                                                                                                      |
+| `git status --short` and `git diff --name-only` before implementation audit                                                                                   | repository root     | Exact task changed-file boundary; unrelated user files remain untouched                                                                   |
+| `git diff -- <task implementation paths> \| shasum -a 256` before implementation audit and `git diff --cached -- <same paths> \| shasum -a 256` before commit | repository root     | Staged implementation input is byte-identical to the independently audited implementation diff without hashing unrelated worktree changes |
+| `git show --format=fuller --stat --oneline HEAD` and `git status --short` after commit                                                                        | repository root     | Commit exists, contains only audited task files, hooks succeeded, and unrelated work remains uncommitted                                  |
 
 No SDK generation, migration, build, or database write command is applicable
 because no corresponding artifact is changed.
 
 ## 19. Diff Budget
 
-| Metric | Estimate | Justification |
-| --- | --- | --- |
-| Files added | 1 | One private pure matching module |
-| Files modified | 8 | Two owners/wrappers, two Tool contracts, three test files, Patch index |
-| Files deleted | 0 | Duplicate functions are removed inside existing files |
-| Production lines | +210 to +335 / -480 to -570 | Shared matcher, atomic sequential Patch transformation, exact-only Patch/Edit integration, renderer changes, duplicate/nonliteral/trailing-empty/deferred-tuple deletion |
-| Test lines | +330 to +510 / -5 to -20 | Twenty-seven slices/characterizations including trailing-empty rejection, insertion context, deletion-insertion composition, generated-text exclusion, same-line chunks, Edit exact-only, and verified parse |
-| Generated lines | 0 | No generated contract changes |
+| Metric           | Estimate                    | Justification                                                                                                                                                                                                |
+| ---------------- | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Files added      | 1                           | One private pure matching module                                                                                                                                                                             |
+| Files modified   | 8                           | Two owners/wrappers, two Tool contracts, three test files, Patch index                                                                                                                                       |
+| Files deleted    | 0                           | Duplicate functions are removed inside existing files                                                                                                                                                        |
+| Production lines | +210 to +335 / -480 to -570 | Shared matcher, atomic sequential Patch transformation, exact-only Patch/Edit integration, renderer changes, duplicate/nonliteral/trailing-empty/deferred-tuple deletion                                     |
+| Test lines       | +330 to +510 / -5 to -20    | Twenty-seven slices/characterizations including trailing-empty rejection, insertion context, deletion-insertion composition, generated-text exclusion, same-line chunks, Edit exact-only, and verified parse |
+| Generated lines  | 0                           | No generated contract changes                                                                                                                                                                                |
 
 The budget is an audit signal, not permission to omit confirmed behavior. Any
 new dependency, config, migration, public Tool parameter, or generated file is
@@ -790,17 +799,17 @@ The independent auditor must:
 
 ## 22. Plan Audit Record
 
-| Round | Audited revision | Full scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | R1 | yes | B-01, B-02, B-03, B-04 | 无 | BLOCK | `ses_09f17d624ffeD5uE3Bx0jisfvQ` |
-| 2 | R2 | yes | B-01, B-02 | 无 | BLOCK | `ses_09f0aafedffec24q0ALWZZeM1W` |
-| 3 | R3 | yes | B-01, B-02 | N-01 | BLOCK | `ses_09f048a0dffejXnSlNIzgBN5xe` |
-| 4 | R4 | yes | B-01 | 无 | BLOCK | `ses_09efe4cb2ffec73kweRvKXhxyh` |
-| 5 | R5 | yes | B-01 | 无 | BLOCK | `ses_09ef4700cffe1Fg02kqpbIdoxl` |
-| 6 | R6 | yes | B-01 | 无 | BLOCK | `ses_09eedde15ffeEix826Avcwe407` |
-| reset-1 | R7 | yes | B-01 | 无 | BLOCK | `ses_09ed502fbffezFXDPGGMgDGImh` |
-| reset-2 | R8 | yes | B-01, B-02 | 无 | BLOCK | `ses_09ec8111bffeQCW9s1pku0JXyY` |
-| reset-3 | R9 | yes | none | 无 | APPROVE | `ses_09ebe39c3ffeo1OpKHi3n8waiq` |
+| Round   | Audited revision | Full scope? | Blocking findings      | Non-blocking findings | Result  | Invocation reference             |
+| ------- | ---------------- | ----------- | ---------------------- | --------------------- | ------- | -------------------------------- |
+| 1       | R1               | yes         | B-01, B-02, B-03, B-04 | 无                    | BLOCK   | `ses_09f17d624ffeD5uE3Bx0jisfvQ` |
+| 2       | R2               | yes         | B-01, B-02             | 无                    | BLOCK   | `ses_09f0aafedffec24q0ALWZZeM1W` |
+| 3       | R3               | yes         | B-01, B-02             | N-01                  | BLOCK   | `ses_09f048a0dffejXnSlNIzgBN5xe` |
+| 4       | R4               | yes         | B-01                   | 无                    | BLOCK   | `ses_09efe4cb2ffec73kweRvKXhxyh` |
+| 5       | R5               | yes         | B-01                   | 无                    | BLOCK   | `ses_09ef4700cffe1Fg02kqpbIdoxl` |
+| 6       | R6               | yes         | B-01                   | 无                    | BLOCK   | `ses_09eedde15ffeEix826Avcwe407` |
+| reset-1 | R7               | yes         | B-01                   | 无                    | BLOCK   | `ses_09ed502fbffezFXDPGGMgDGImh` |
+| reset-2 | R8               | yes         | B-01, B-02             | 无                    | BLOCK   | `ses_09ec8111bffeQCW9s1pku0JXyY` |
+| reset-3 | R9               | yes         | none                   | 无                    | APPROVE | `ses_09ebe39c3ffeo1OpKHi3n8waiq` |
 
 ### Reset Round 3 / Overall Round 9 Independent Verdict (verbatim)
 
@@ -825,35 +834,35 @@ No blocking findings.
 
 # Requirement and traceability coverage
 
-| 范围 | 审计结论 |
-|---|---|
-| 原始需求保真 | Section 1 逐字保留原始需求、`<verified-implementation-and-commit>` 终态、B-02 用户裁决和“计数器归零”裁决。 |
-| Intended invariants | `INV-01`–`INV-14` 覆盖唯一 literal substring、歧义拒绝、匹配顺序、失败 chunk 身份、诊断可信度、行号、所有 Patch consumers、Edit exact-only、context、chunk 顺序、整行 delimiter 和 pure insertion。 |
-| Producer-to-consumer 路径 | 已从 Agent 生成的 Tool 输入追踪至 `ApplyPatchTool` / `EditTool`，再到 `Patch.deriveNewContentsFromChunks`、`applyHunksToFiles`、`applyPatch` 和 `maybeParseApplyPatchVerified`。 |
-| First divergence | Patch 的首个错误转换定位在 `seekSequence` 的非精确整行 passes、substring 缺失以及 trailing-empty retry；诊断首个错误转换定位在两个重复的无界字符集合 scorer；Edit 的竞争成功路径定位在 `replace()` replacer sequence。 |
-| Responsibility owner | Patch 更新匹配、context、chunk 顺序和失败身份由 Patch owner 修复；ApplyPatchTool 仅聚合 owner error；Edit 的 occurrence contract 保留在 Edit owner；共享 matcher 仅承载两个 owner 都需要的纯文本定位和诊断计算。 |
-| Patch 成功顺序 | 明确为 complete old block 的 exact whole-line → eligible range 中 exact unique literal substring → failure；`rstrip`、`trim`、Unicode-normalized 和 shortened trailing-empty retry 均删除。 |
-| Patch substring 内容所有权 | 只替换 `[startOffset, endOffset)` 的字面跨度，保留首行前缀、末行后缀和多行边界；有 owner 与真实 Tool 测试映射。 |
-| 零匹配与多匹配 | 两者均失败，不选择第一个 occurrence；歧义和文件不变分别映射至 owner/Tool 测试。 |
-| `@@ change_context` | 每个 chunk（包括 pure insertion）都走 exact-line → unique literal substring → context failure；substring 只定位包含行、不修改该行，并从下一行开始 old-block 搜索。 |
-| Ordered chunks | 使用当前内存工作文本的 character cursor；同一行 `DEF → X`、`JKL → Y` 有独立 owner + Tool 行为测试；生成的新 replacement 文本不会被后续 chunk 重新匹配。 |
-| Exact whole-line delimiter | 保留 line-array splice，不把整行更新转换为 content-only span；首行、中间、末行、唯一行和多行删除均有 characterization。 |
-| Pure insertion | 在验证其 context 后按 patch 顺序收集，所有普通 chunk 成功后统一追加到 transformed EOF；覆盖空文件、无尾换行、多个 insertion、删除唯一原行后插入及生成文本不可重匹配。 |
-| Trailing empty old line | 明确属于 complete literal old block，不再缩短重试；`foo\n` 对无尾换行的 `foo` 必须失败并保持文件不变。 |
-| Edit success domain | exact literal occurrence count 是唯一 replacement 语义：唯一匹配替换一次，多匹配且 `replaceAll` 为真时全部替换，否则 ambiguity failure；所有非字面 replacers 删除。 |
-| Actual/closest diagnostics | 使用完整 expected block 与同逻辑行数 window，采用有界 bigram-multiset score，保留顺序和 multiplicity，惩罚无关长行；低于 `0.5` 或并列时抑制候选。 |
-| Diagnostic rendering | 返回候选真实一基起始行；候选与 surrounding context 分别标识；500 字符预算采用显式 head/tail omission，而非从前一行静默截断。 |
-| Failed-chunk identity | Patch owner 在身份丢失前使用实际失败 chunk 构造 error；ApplyPatchTool 的 `extractActualExcerpt` 和重复 scorer 删除。 |
-| Patch consumers | `deriveNewContentsFromChunks`、`applyHunksToFiles` / `applyPatch`、ApplyPatchTool 和 verified parse 的 Body/CorrectnessError 均有明确行为映射。 |
-| Adjacent contracts | BOM、LF/CRLF/CR、Permission、LSP、Format、事件、move、per-file atomicity 明确保留，并由现有集中测试和 package-wide verification 覆盖。 |
-| Test sensitivity | 原始 `ABCDEFG` / `CDEFG` owner fixture 当前会失败；长无关行 decoy、错误行号、非字面 Edit/Patch success、trailing-empty retry、substring insertion context 等均有能在当前行为上变红的测试切片。 |
-| Forward traceability | 每个确认 invariant 均映射到 production path、明确文件和行为测试。 |
-| Reverse traceability | 新 matcher、current-text cursor、failed-chunk diagnostic、Edit occurrence resolver、context locator、line splice 和 deferred insertion 均有 requirement ID、可达证据及现有逻辑无法承载的理由。 |
-| Workaround 清理 | 明确删除 Patch 非字面 passes、trailing-empty retry、deferred tuple 表示、ApplyPatchTool 重算诊断、Edit 非字面 replacers 和重复诊断 scorer。 |
-| Verification | 测试与 `bun typecheck` 均指定在 `packages/opencode` 执行；另含原始反馈循环、package-wide tests、`git diff --check` 和审计后 staged-diff identity。 |
-| Commit 终态 | Section 25 要求 clean implementation audit 后才精确 staging、正常运行 hooks、创建非空 commit，并以 commit hash、内容边界和 post-commit status 证明 `<verified-implementation-and-commit>`。 |
-| 代码质量计划 | 文件范围受约束；共享 matcher 有 Patch/Edit 两个真实消费者；无新增 public Tool 参数、配置、依赖、迁移、SDK 或 generated artifact；superseded helpers 将删除。 |
-| 中文解释注释计划 | 估算 `E = 375`，要求 `C = ceil(375 × 0.15) = 57`；计划列出的注释位置覆盖匹配唯一性、cursor、delimiter、insertion、diagnostic formula、failed-chunk identity 和行为测试边界。实际 implementation audit 仍须独立重算。 |
+| 范围                       | 审计结论                                                                                                                                                                                                               |
+| -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 原始需求保真               | Section 1 逐字保留原始需求、`<verified-implementation-and-commit>` 终态、B-02 用户裁决和“计数器归零”裁决。                                                                                                             |
+| Intended invariants        | `INV-01`–`INV-14` 覆盖唯一 literal substring、歧义拒绝、匹配顺序、失败 chunk 身份、诊断可信度、行号、所有 Patch consumers、Edit exact-only、context、chunk 顺序、整行 delimiter 和 pure insertion。                    |
+| Producer-to-consumer 路径  | 已从 Agent 生成的 Tool 输入追踪至 `ApplyPatchTool` / `EditTool`，再到 `Patch.deriveNewContentsFromChunks`、`applyHunksToFiles`、`applyPatch` 和 `maybeParseApplyPatchVerified`。                                       |
+| First divergence           | Patch 的首个错误转换定位在 `seekSequence` 的非精确整行 passes、substring 缺失以及 trailing-empty retry；诊断首个错误转换定位在两个重复的无界字符集合 scorer；Edit 的竞争成功路径定位在 `replace()` replacer sequence。 |
+| Responsibility owner       | Patch 更新匹配、context、chunk 顺序和失败身份由 Patch owner 修复；ApplyPatchTool 仅聚合 owner error；Edit 的 occurrence contract 保留在 Edit owner；共享 matcher 仅承载两个 owner 都需要的纯文本定位和诊断计算。       |
+| Patch 成功顺序             | 明确为 complete old block 的 exact whole-line → eligible range 中 exact unique literal substring → failure；`rstrip`、`trim`、Unicode-normalized 和 shortened trailing-empty retry 均删除。                            |
+| Patch substring 内容所有权 | 只替换 `[startOffset, endOffset)` 的字面跨度，保留首行前缀、末行后缀和多行边界；有 owner 与真实 Tool 测试映射。                                                                                                        |
+| 零匹配与多匹配             | 两者均失败，不选择第一个 occurrence；歧义和文件不变分别映射至 owner/Tool 测试。                                                                                                                                        |
+| `@@ change_context`        | 每个 chunk（包括 pure insertion）都走 exact-line → unique literal substring → context failure；substring 只定位包含行、不修改该行，并从下一行开始 old-block 搜索。                                                     |
+| Ordered chunks             | 使用当前内存工作文本的 character cursor；同一行 `DEF → X`、`JKL → Y` 有独立 owner + Tool 行为测试；生成的新 replacement 文本不会被后续 chunk 重新匹配。                                                                |
+| Exact whole-line delimiter | 保留 line-array splice，不把整行更新转换为 content-only span；首行、中间、末行、唯一行和多行删除均有 characterization。                                                                                                |
+| Pure insertion             | 在验证其 context 后按 patch 顺序收集，所有普通 chunk 成功后统一追加到 transformed EOF；覆盖空文件、无尾换行、多个 insertion、删除唯一原行后插入及生成文本不可重匹配。                                                  |
+| Trailing empty old line    | 明确属于 complete literal old block，不再缩短重试；`foo\n` 对无尾换行的 `foo` 必须失败并保持文件不变。                                                                                                                 |
+| Edit success domain        | exact literal occurrence count 是唯一 replacement 语义：唯一匹配替换一次，多匹配且 `replaceAll` 为真时全部替换，否则 ambiguity failure；所有非字面 replacers 删除。                                                    |
+| Actual/closest diagnostics | 使用完整 expected block 与同逻辑行数 window，采用有界 bigram-multiset score，保留顺序和 multiplicity，惩罚无关长行；低于 `0.5` 或并列时抑制候选。                                                                      |
+| Diagnostic rendering       | 返回候选真实一基起始行；候选与 surrounding context 分别标识；500 字符预算采用显式 head/tail omission，而非从前一行静默截断。                                                                                           |
+| Failed-chunk identity      | Patch owner 在身份丢失前使用实际失败 chunk 构造 error；ApplyPatchTool 的 `extractActualExcerpt` 和重复 scorer 删除。                                                                                                   |
+| Patch consumers            | `deriveNewContentsFromChunks`、`applyHunksToFiles` / `applyPatch`、ApplyPatchTool 和 verified parse 的 Body/CorrectnessError 均有明确行为映射。                                                                        |
+| Adjacent contracts         | BOM、LF/CRLF/CR、Permission、LSP、Format、事件、move、per-file atomicity 明确保留，并由现有集中测试和 package-wide verification 覆盖。                                                                                 |
+| Test sensitivity           | 原始 `ABCDEFG` / `CDEFG` owner fixture 当前会失败；长无关行 decoy、错误行号、非字面 Edit/Patch success、trailing-empty retry、substring insertion context 等均有能在当前行为上变红的测试切片。                         |
+| Forward traceability       | 每个确认 invariant 均映射到 production path、明确文件和行为测试。                                                                                                                                                      |
+| Reverse traceability       | 新 matcher、current-text cursor、failed-chunk diagnostic、Edit occurrence resolver、context locator、line splice 和 deferred insertion 均有 requirement ID、可达证据及现有逻辑无法承载的理由。                         |
+| Workaround 清理            | 明确删除 Patch 非字面 passes、trailing-empty retry、deferred tuple 表示、ApplyPatchTool 重算诊断、Edit 非字面 replacers 和重复诊断 scorer。                                                                            |
+| Verification               | 测试与 `bun typecheck` 均指定在 `packages/opencode` 执行；另含原始反馈循环、package-wide tests、`git diff --check` 和审计后 staged-diff identity。                                                                     |
+| Commit 终态                | Section 25 要求 clean implementation audit 后才精确 staging、正常运行 hooks、创建非空 commit，并以 commit hash、内容边界和 post-commit status 证明 `<verified-implementation-and-commit>`。                            |
+| 代码质量计划               | 文件范围受约束；共享 matcher 有 Patch/Edit 两个真实消费者；无新增 public Tool 参数、配置、依赖、迁移、SDK 或 generated artifact；superseded helpers 将删除。                                                           |
+| 中文解释注释计划           | 估算 `E = 375`，要求 `C = ceil(375 × 0.15) = 57`；计划列出的注释位置覆盖匹配唯一性、cursor、delimiter、insertion、diagnostic formula、failed-chunk identity 和行为测试边界。实际 implementation audit 仍须独立重算。   |
 
 # Primary-path and fallback verdict
 
@@ -942,24 +951,24 @@ Implementation allowed: yes
 
 # Requirement and traceability coverage
 
-| 范围 | 审计结论 |
-|---|---|
-| Patch 唯一 literal substring 恢复 | 已定位到 Patch owner，并映射 `ABCDEFG` / `CDEFG`、外围字符和多行边界测试 |
-| Patch 零匹配和多 substring 匹配 | 已要求失败，不得选择其中一个 |
-| Patch exact-only 顺序 | **不完整**；`M15 trailing-empty-pattern retry` 仍允许缩短旧块后成功 |
-| Patch rstrip/trim/Unicode 成功路径 | 已明确删除，并计划把 Unicode 成功测试改为失败且文件不变 |
-| Edit exact-only 成功域 | 已收敛为唯一字面 occurrence、显式 `replaceAll` 和重复匹配拒绝 |
-| Edit 非字面 replacers | 已计划删除 trim、anchor、whitespace、indent、escape、boundary、context 等竞争路径 |
-| `@@ change_context` | 普通 old-block chunk 已映射 exact-line/unique-substring locator；**pure-insertion chunk 的 context 被计划绕过** |
-| 同一行多个有序 chunk | 当前文本 cursor、即时局部变换及 owner + Tool 测试映射完整 |
-| Exact-line 删除 | 保留 line-array splice，并覆盖首行、中间、末行、唯一行和多行删除 |
-| Pure insertion | 空文件、非空文件、多插入和 delete-all 组合已映射；但带 `@@ context` 的可达分支未覆盖 |
-| Generated-text exclusion | 已要求 cursor 位于 replacement 之后并有红敏感 characterization |
-| Actual/closest hint | 已规划完整窗口、有界且顺序/重复敏感的 bigram score、长度惩罚、低置信度/并列抑制、真实起始行和显式截断 |
-| Failed-chunk identity | 已在 Patch owner 中构造诊断，并删除 ApplyPatchTool 的错误重算 workaround |
-| Patch consumers | derive、`applyHunksToFiles`/`applyPatch`、ApplyPatchTool 和 verified parse 均有映射，但会共同继承上述两个 owner 缺陷 |
-| BOM、换行、Permission、LSP、事件、per-file atomicity | 明确保留，并映射到聚焦测试、package-wide test 和 typecheck |
-| Verified implementation and commit | Section 25 已映射独立 implementation audit、精确 diff identity、正常 hooks、commit 和 post-commit 证据 |
+| 范围                                                 | 审计结论                                                                                                             |
+| ---------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| Patch 唯一 literal substring 恢复                    | 已定位到 Patch owner，并映射 `ABCDEFG` / `CDEFG`、外围字符和多行边界测试                                             |
+| Patch 零匹配和多 substring 匹配                      | 已要求失败，不得选择其中一个                                                                                         |
+| Patch exact-only 顺序                                | **不完整**；`M15 trailing-empty-pattern retry` 仍允许缩短旧块后成功                                                  |
+| Patch rstrip/trim/Unicode 成功路径                   | 已明确删除，并计划把 Unicode 成功测试改为失败且文件不变                                                              |
+| Edit exact-only 成功域                               | 已收敛为唯一字面 occurrence、显式 `replaceAll` 和重复匹配拒绝                                                        |
+| Edit 非字面 replacers                                | 已计划删除 trim、anchor、whitespace、indent、escape、boundary、context 等竞争路径                                    |
+| `@@ change_context`                                  | 普通 old-block chunk 已映射 exact-line/unique-substring locator；**pure-insertion chunk 的 context 被计划绕过**      |
+| 同一行多个有序 chunk                                 | 当前文本 cursor、即时局部变换及 owner + Tool 测试映射完整                                                            |
+| Exact-line 删除                                      | 保留 line-array splice，并覆盖首行、中间、末行、唯一行和多行删除                                                     |
+| Pure insertion                                       | 空文件、非空文件、多插入和 delete-all 组合已映射；但带 `@@ context` 的可达分支未覆盖                                 |
+| Generated-text exclusion                             | 已要求 cursor 位于 replacement 之后并有红敏感 characterization                                                       |
+| Actual/closest hint                                  | 已规划完整窗口、有界且顺序/重复敏感的 bigram score、长度惩罚、低置信度/并列抑制、真实起始行和显式截断                |
+| Failed-chunk identity                                | 已在 Patch owner 中构造诊断，并删除 ApplyPatchTool 的错误重算 workaround                                             |
+| Patch consumers                                      | derive、`applyHunksToFiles`/`applyPatch`、ApplyPatchTool 和 verified parse 均有映射，但会共同继承上述两个 owner 缺陷 |
+| BOM、换行、Permission、LSP、事件、per-file atomicity | 明确保留，并映射到聚焦测试、package-wide test 和 typecheck                                                           |
+| Verified implementation and commit                   | Section 25 已映射独立 implementation audit、精确 diff identity、正常 hooks、commit 和 post-commit 证据               |
 
 # Primary-path and fallback verdict
 
@@ -1035,24 +1044,24 @@ exact literal occurrence count
 
 # Requirement and traceability coverage
 
-| 范围 | 审计结论 |
-|---|---|
-| Patch 唯一 literal substring 恢复 | 已定位到 Patch owner，并映射 `ABCDEFG` / `CDEFG`、前后缀和多行边界行为 |
-| 匹配优先级 | 已收敛为 exact whole-line → exact unique literal substring → failure |
-| Patch 非字面成功路径 | `rstrip`、`trim`、Unicode-normalized passes 均计划删除 |
-| Patch 零匹配/多 substring 匹配 | 已要求失败且不得选择其中一个，并映射文件不变测试 |
-| Edit 成功域 | 已收敛为 exact literal occurrence count；保留 unique 与显式 `replaceAll`，重复匹配无 `replaceAll` 时失败 |
-| Edit 非字面 replacers | 已计划删除 trim、anchor、whitespace、indent、escape、boundary、context 等竞争成功路径 |
-| `@@ change_context` | 已纳入相同 exact-line/unique-substring locator，并明确只定位、不修改 |
-| 同一行多个有序 chunk | 已使用 immutable-original offsets、end cursor 和 reverse application，并有 owner + Tool 测试映射 |
-| Exact-line 删除 | 首行、中间、末行、唯一行和多行 delimiter ownership 已单独定义 |
-| Pure insertion | 独立插入及同 offset 顺序已定义，但与“删除全部原文”的组合仍违反 B-01 |
-| Actual/closest 提示 | 已规划完整窗口、顺序和 multiplicity 敏感的有界 bigram score、长度惩罚、低置信度/并列抑制、真实起始行和显式截断 |
-| Failed-chunk identity | 已由 Patch owner 在身份丢失前构造诊断，并删除 Tool 层重复推断 |
-| Patch consumers | `deriveNewContentsFromChunks`、`applyHunksToFiles`/`applyPatch`、`ApplyPatchTool`、verified parse 均有映射，但都会继承 B-01 |
-| BOM、换行风格、Permission、LSP、事件、per-file atomicity | 明确保留并映射到聚焦测试、package-wide tests 与 typecheck |
-| Verified implementation and commit | Section 25 已映射 clean implementation audit、精确 diff identity、正常 hooks、commit 与 post-commit 证据 |
-| 中文解释注释计划 | 已提供 `E = 350`、`C = 53` 和 `ceil(E × 0.15)` 计算及分布位置；实现审计仍须按真实 diff 重算 |
+| 范围                                                     | 审计结论                                                                                                                    |
+| -------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| Patch 唯一 literal substring 恢复                        | 已定位到 Patch owner，并映射 `ABCDEFG` / `CDEFG`、前后缀和多行边界行为                                                      |
+| 匹配优先级                                               | 已收敛为 exact whole-line → exact unique literal substring → failure                                                        |
+| Patch 非字面成功路径                                     | `rstrip`、`trim`、Unicode-normalized passes 均计划删除                                                                      |
+| Patch 零匹配/多 substring 匹配                           | 已要求失败且不得选择其中一个，并映射文件不变测试                                                                            |
+| Edit 成功域                                              | 已收敛为 exact literal occurrence count；保留 unique 与显式 `replaceAll`，重复匹配无 `replaceAll` 时失败                    |
+| Edit 非字面 replacers                                    | 已计划删除 trim、anchor、whitespace、indent、escape、boundary、context 等竞争成功路径                                       |
+| `@@ change_context`                                      | 已纳入相同 exact-line/unique-substring locator，并明确只定位、不修改                                                        |
+| 同一行多个有序 chunk                                     | 已使用 immutable-original offsets、end cursor 和 reverse application，并有 owner + Tool 测试映射                            |
+| Exact-line 删除                                          | 首行、中间、末行、唯一行和多行 delimiter ownership 已单独定义                                                               |
+| Pure insertion                                           | 独立插入及同 offset 顺序已定义，但与“删除全部原文”的组合仍违反 B-01                                                         |
+| Actual/closest 提示                                      | 已规划完整窗口、顺序和 multiplicity 敏感的有界 bigram score、长度惩罚、低置信度/并列抑制、真实起始行和显式截断              |
+| Failed-chunk identity                                    | 已由 Patch owner 在身份丢失前构造诊断，并删除 Tool 层重复推断                                                               |
+| Patch consumers                                          | `deriveNewContentsFromChunks`、`applyHunksToFiles`/`applyPatch`、`ApplyPatchTool`、verified parse 均有映射，但都会继承 B-01 |
+| BOM、换行风格、Permission、LSP、事件、per-file atomicity | 明确保留并映射到聚焦测试、package-wide tests 与 typecheck                                                                   |
+| Verified implementation and commit                       | Section 25 已映射 clean implementation audit、精确 diff identity、正常 hooks、commit 与 post-commit 证据                    |
+| 中文解释注释计划                                         | 已提供 `E = 350`、`C = 53` 和 `ceil(E × 0.15)` 计算及分布位置；实现审计仍须按真实 diff 重算                                 |
 
 # Primary-path and fallback verdict
 
@@ -1115,25 +1124,25 @@ exact literal occurrence count
 
 # Requirement and traceability coverage
 
-| 范围 | 审计结论 |
-|---|---|
-| Patch 唯一 literal substring 恢复 | 已定位到 Patch owner，并映射了 `ABCDEFG` / `CDEFG`、前后缀及多行边界 |
-| Patch 零匹配和多匹配 | 已要求 owner 拒绝，不选择任一 substring occurrence，并映射到 Tool 文件不变测试 |
-| Patch 匹配顺序 | 已正确收敛为 exact whole-line → exact unique literal substring → failure；`rstrip`、`trim`、Unicode-normalized success 均计划删除 |
-| Exact whole-line 删除 | R6 已补充首行、中间、末行、唯一行和多行删除的 delimiter ownership 与 owner/Tool characterization |
-| 同一行多 chunk | 已采用 immutable-original character offsets、end-offset cursor 和 reverse span application，并有 owner + Tool 测试映射 |
-| Pure insertion | **不完整**；新的零宽字符 span 没有定义插入分隔符或等 offset 顺序，Section 11/13/16 也没有完整路径和红敏感测试映射 |
-| `@@ change_context` | 已纳入同一 exact-line/unique-substring locator，明确只定位、不修改，并从下一原始行继续 |
-| EOF 与 lower bound | exact-line EOF preference、substring 唯一性和 original-offset cursor 已定义；pure insertion 的 EOF delimiter 仍受 B-01 影响 |
-| Failed-chunk identity | 正确由 Patch owner 在身份丢失前构造错误，并删除 ApplyPatchTool 的重算 workaround |
-| Edit 成功域 | 已收敛为 exact literal occurrence count，保留 unique 与显式 `replaceAll`，拒绝无 `replaceAll` 的重复匹配 |
-| Edit 非字面 replacers | 已计划删除 whitespace、trim、anchor、indent、escape、boundary、context 等竞争成功路径 |
-| Actual/closest hint | 已规划完整窗口、顺序和 multiplicity 敏感、长度受罚、低置信度/并列抑制、真实起始行及显式截断 |
-| Patch consumers | `deriveNewContentsFromChunks`、`applyHunksToFiles`/`applyPatch`、ApplyPatchTool、verified parse 均有映射，但都会继承 B-01 |
-| BOM、换行风格、Permission、LSP、事件、per-file atomicity | 明确保留，并映射到集中测试和 package-wide verification |
-| Verified implementation and commit | Section 25 已规定 clean implementation audit、精确 staged-diff identity、正常 hooks、commit 和 post-commit 证据 |
-| 代码质量计划 | 共享 matcher 有 Patch/Edit 两个真实消费者；重复诊断和 superseded replacers 会删除；未引入无依据的依赖、配置或公开参数 |
-| 中文解释注释计划 | 计划估算 `E = 335`、`C = 51`，且 `ceil(335 × 0.15) = 51`；公式和解释位置满足计划阶段要求，implementation audit 仍须从真实 diff 重算 |
+| 范围                                                     | 审计结论                                                                                                                            |
+| -------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| Patch 唯一 literal substring 恢复                        | 已定位到 Patch owner，并映射了 `ABCDEFG` / `CDEFG`、前后缀及多行边界                                                                |
+| Patch 零匹配和多匹配                                     | 已要求 owner 拒绝，不选择任一 substring occurrence，并映射到 Tool 文件不变测试                                                      |
+| Patch 匹配顺序                                           | 已正确收敛为 exact whole-line → exact unique literal substring → failure；`rstrip`、`trim`、Unicode-normalized success 均计划删除   |
+| Exact whole-line 删除                                    | R6 已补充首行、中间、末行、唯一行和多行删除的 delimiter ownership 与 owner/Tool characterization                                    |
+| 同一行多 chunk                                           | 已采用 immutable-original character offsets、end-offset cursor 和 reverse span application，并有 owner + Tool 测试映射              |
+| Pure insertion                                           | **不完整**；新的零宽字符 span 没有定义插入分隔符或等 offset 顺序，Section 11/13/16 也没有完整路径和红敏感测试映射                   |
+| `@@ change_context`                                      | 已纳入同一 exact-line/unique-substring locator，明确只定位、不修改，并从下一原始行继续                                              |
+| EOF 与 lower bound                                       | exact-line EOF preference、substring 唯一性和 original-offset cursor 已定义；pure insertion 的 EOF delimiter 仍受 B-01 影响         |
+| Failed-chunk identity                                    | 正确由 Patch owner 在身份丢失前构造错误，并删除 ApplyPatchTool 的重算 workaround                                                    |
+| Edit 成功域                                              | 已收敛为 exact literal occurrence count，保留 unique 与显式 `replaceAll`，拒绝无 `replaceAll` 的重复匹配                            |
+| Edit 非字面 replacers                                    | 已计划删除 whitespace、trim、anchor、indent、escape、boundary、context 等竞争成功路径                                               |
+| Actual/closest hint                                      | 已规划完整窗口、顺序和 multiplicity 敏感、长度受罚、低置信度/并列抑制、真实起始行及显式截断                                         |
+| Patch consumers                                          | `deriveNewContentsFromChunks`、`applyHunksToFiles`/`applyPatch`、ApplyPatchTool、verified parse 均有映射，但都会继承 B-01           |
+| BOM、换行风格、Permission、LSP、事件、per-file atomicity | 明确保留，并映射到集中测试和 package-wide verification                                                                              |
+| Verified implementation and commit                       | Section 25 已规定 clean implementation audit、精确 staged-diff identity、正常 hooks、commit 和 post-commit 证据                     |
+| 代码质量计划                                             | 共享 matcher 有 Patch/Edit 两个真实消费者；重复诊断和 superseded replacers 会删除；未引入无依据的依赖、配置或公开参数               |
+| 中文解释注释计划                                         | 计划估算 `E = 335`、`C = 51`，且 `ceil(335 × 0.15) = 51`；公式和解释位置满足计划阶段要求，implementation audit 仍须从真实 diff 重算 |
 
 # Primary-path and fallback verdict
 
@@ -1195,24 +1204,24 @@ exact literal occurrence count
 
 # Requirement and traceability coverage
 
-| 范围 | 审计结论 |
-|---|---|
-| Patch 唯一 literal substring 恢复 | 已定位到 Patch owner，并映射了 `ABCDEFG` / `CDEFG`、前后缀及多行边界测试 |
-| Patch 零匹配和多匹配 | 已要求 owner 拒绝，不选择任一 occurrence，并映射到 Tool 文件不变测试 |
-| Patch 匹配顺序 | 已正确收敛为 exact whole-line → exact unique literal substring → failure；`rstrip`、`trim`、Unicode-normalized success 均计划删除 |
-| Exact whole-line 保持 | **不完整**；content-only span 没有定义整行删除时的换行分隔符所有权，违反 `INV-08` |
-| 同一行多 chunk | R5 已改为 immutable-original character offsets、end-offset cursor 和 reverse span application，并有 owner + Tool 测试映射 |
-| `@@ change_context` | 已纳入同一 exact-line/unique-substring locator，明确只定位、不修改，并从下一原始行继续 |
-| EOF 与 lower bound | 已定义 exact whole-line EOF preference、substring 唯一性和 original-offset cursor |
-| Failed-chunk identity | 正确由 Patch owner 在身份丢失前构造错误，并删除 ApplyPatchTool 的重算 workaround |
-| Edit 成功域 | 已收敛为 exact literal occurrence count，保留 unique 与显式 `replaceAll`，拒绝无 `replaceAll` 的重复匹配 |
-| Edit 非字面 replacers | 已计划删除 whitespace、trim、anchor、indent、escape、boundary、context 等竞争成功路径 |
-| Actual/closest hint | 已规划完整窗口、顺序和 multiplicity 敏感、长度受罚、低置信度/并列抑制、真实起始行及显式截断 |
-| Patch consumers | `deriveNewContentsFromChunks`、`applyHunksToFiles`/`applyPatch`、ApplyPatchTool、verified parse 均有行为映射，但都会继承 B-01 |
-| BOM、换行风格、Permission、LSP、事件、per-file atomicity | 明确保留，并映射到现有集中套件和 package-wide verification |
-| Verified implementation and commit | Section 25 已规定 clean implementation audit、精确 staged-diff identity、正常 hooks、commit 和 post-commit 证据 |
-| 代码质量计划 | 新 matcher 有 Patch/Edit 两个真实消费者；计划删除重复 diagnostics 和 superseded replacers；未引入无依据的依赖、配置或公共参数 |
-| 中文解释注释计划 | 估算 `E = 320`、`C = 48`，`ceil(320 × 0.15) = 48` 计算正确，位置分布覆盖关键约束；实际 `E/C` 仍须在 implementation audit 根据真实 diff 重算 |
+| 范围                                                     | 审计结论                                                                                                                                    |
+| -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| Patch 唯一 literal substring 恢复                        | 已定位到 Patch owner，并映射了 `ABCDEFG` / `CDEFG`、前后缀及多行边界测试                                                                    |
+| Patch 零匹配和多匹配                                     | 已要求 owner 拒绝，不选择任一 occurrence，并映射到 Tool 文件不变测试                                                                        |
+| Patch 匹配顺序                                           | 已正确收敛为 exact whole-line → exact unique literal substring → failure；`rstrip`、`trim`、Unicode-normalized success 均计划删除           |
+| Exact whole-line 保持                                    | **不完整**；content-only span 没有定义整行删除时的换行分隔符所有权，违反 `INV-08`                                                           |
+| 同一行多 chunk                                           | R5 已改为 immutable-original character offsets、end-offset cursor 和 reverse span application，并有 owner + Tool 测试映射                   |
+| `@@ change_context`                                      | 已纳入同一 exact-line/unique-substring locator，明确只定位、不修改，并从下一原始行继续                                                      |
+| EOF 与 lower bound                                       | 已定义 exact whole-line EOF preference、substring 唯一性和 original-offset cursor                                                           |
+| Failed-chunk identity                                    | 正确由 Patch owner 在身份丢失前构造错误，并删除 ApplyPatchTool 的重算 workaround                                                            |
+| Edit 成功域                                              | 已收敛为 exact literal occurrence count，保留 unique 与显式 `replaceAll`，拒绝无 `replaceAll` 的重复匹配                                    |
+| Edit 非字面 replacers                                    | 已计划删除 whitespace、trim、anchor、indent、escape、boundary、context 等竞争成功路径                                                       |
+| Actual/closest hint                                      | 已规划完整窗口、顺序和 multiplicity 敏感、长度受罚、低置信度/并列抑制、真实起始行及显式截断                                                 |
+| Patch consumers                                          | `deriveNewContentsFromChunks`、`applyHunksToFiles`/`applyPatch`、ApplyPatchTool、verified parse 均有行为映射，但都会继承 B-01               |
+| BOM、换行风格、Permission、LSP、事件、per-file atomicity | 明确保留，并映射到现有集中套件和 package-wide verification                                                                                  |
+| Verified implementation and commit                       | Section 25 已规定 clean implementation audit、精确 staged-diff identity、正常 hooks、commit 和 post-commit 证据                             |
+| 代码质量计划                                             | 新 matcher 有 Patch/Edit 两个真实消费者；计划删除重复 diagnostics 和 superseded replacers；未引入无依据的依赖、配置或公共参数               |
+| 中文解释注释计划                                         | 估算 `E = 320`、`C = 48`，`ceil(320 × 0.15) = 48` 计算正确，位置分布覆盖关键约束；实际 `E/C` 仍须在 implementation audit 根据真实 diff 重算 |
 
 # Primary-path and fallback verdict
 
@@ -1274,22 +1283,22 @@ exact literal occurrence count
 
 # Requirement and traceability coverage
 
-| 范围 | 审计结论 |
-|---|---|
-| Patch 单个唯一 substring 恢复 | 已定位到正确 Patch owner，并计划保留首行前缀、末行后缀及多行边界 |
-| Patch 零匹配和多匹配拒绝 | 已映射到 owner 与真实 Tool 测试 |
-| Patch exact-only 顺序 | 已计划删除 `rstrip`、`trim`、Unicode-normalized 成功路径，形成 exact whole-line → exact unique substring → failure |
-| Patch 多 chunk 顺序 | 不完整；未覆盖多个 substring span 位于同一原始行时的游标和 replacement composition |
-| `@@ change_context` | R4 已纳入 exact whole-line → unique substring → failure，并明确只定位、不修改、随后从下一行搜索 |
-| EOF 与 lower bound | 单个或跨行 chunk 的规则已描述；同一行多 span 的 lower-bound 表示仍是缺口 |
-| Failed-chunk identity | 正确放在 Patch owner，并计划删除 ApplyPatchTool 的错误 chunk 重算 workaround |
-| Patch 导出 consumers | `deriveNewContentsFromChunks`、`applyPatch`、ApplyPatchTool、`maybeParseApplyPatchVerified` 均有成功及失败映射 |
-| Edit exact-only 成功域 | 已计划保留唯一字面匹配、`replaceAll`，拒绝未启用 `replaceAll` 的多匹配，并删除所有非字面 replacer |
-| Edit actual/closest hint | 已映射到完整窗口、顺序敏感且有长度惩罚的候选算法，以及真实行号、低置信度和并列抑制测试 |
-| Apply Patch actual hint | 已映射到真实失败 chunk、长行 decoy、低置信度及截断标记测试 |
-| BOM、换行、Permission、LSP、事件、per-file atomicity | 明确保留，并映射到现有集中测试及 package-wide verification |
-| Verified implementation and commit | Section 25 已规定 clean implementation audit、精确 staging、diff identity、正常 hooks、commit 和 post-commit 证据 |
-| 用户裁决的历史 B-02 | 已逐字记录并按用户优先级作为非阻塞事项处理 |
+| 范围                                                 | 审计结论                                                                                                           |
+| ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| Patch 单个唯一 substring 恢复                        | 已定位到正确 Patch owner，并计划保留首行前缀、末行后缀及多行边界                                                   |
+| Patch 零匹配和多匹配拒绝                             | 已映射到 owner 与真实 Tool 测试                                                                                    |
+| Patch exact-only 顺序                                | 已计划删除 `rstrip`、`trim`、Unicode-normalized 成功路径，形成 exact whole-line → exact unique substring → failure |
+| Patch 多 chunk 顺序                                  | 不完整；未覆盖多个 substring span 位于同一原始行时的游标和 replacement composition                                 |
+| `@@ change_context`                                  | R4 已纳入 exact whole-line → unique substring → failure，并明确只定位、不修改、随后从下一行搜索                    |
+| EOF 与 lower bound                                   | 单个或跨行 chunk 的规则已描述；同一行多 span 的 lower-bound 表示仍是缺口                                           |
+| Failed-chunk identity                                | 正确放在 Patch owner，并计划删除 ApplyPatchTool 的错误 chunk 重算 workaround                                       |
+| Patch 导出 consumers                                 | `deriveNewContentsFromChunks`、`applyPatch`、ApplyPatchTool、`maybeParseApplyPatchVerified` 均有成功及失败映射     |
+| Edit exact-only 成功域                               | 已计划保留唯一字面匹配、`replaceAll`，拒绝未启用 `replaceAll` 的多匹配，并删除所有非字面 replacer                  |
+| Edit actual/closest hint                             | 已映射到完整窗口、顺序敏感且有长度惩罚的候选算法，以及真实行号、低置信度和并列抑制测试                             |
+| Apply Patch actual hint                              | 已映射到真实失败 chunk、长行 decoy、低置信度及截断标记测试                                                         |
+| BOM、换行、Permission、LSP、事件、per-file atomicity | 明确保留，并映射到现有集中测试及 package-wide verification                                                         |
+| Verified implementation and commit                   | Section 25 已规定 clean implementation audit、精确 staging、diff identity、正常 hooks、commit 和 post-commit 证据  |
+| 用户裁决的历史 B-02                                  | 已逐字记录并按用户优先级作为非阻塞事项处理                                                                         |
 
 # Primary-path and fallback verdict
 
@@ -1371,20 +1380,20 @@ exact literal occurrence count
 
 # Requirement and traceability coverage
 
-| 范围 | 审计结论 |
-|---|---|
-| Patch 唯一字面 substring 恢复 | 已定位到 `deriveNewContentsFromChunks`/chunk resolver，并计划保留首尾外围字符 |
-| Patch 零匹配和多匹配 | 已映射为失败，并有 owner 与 Tool 行为测试 |
-| Patch 非字面整行成功路径 | R2 正确计划删除 rstrip、trim 和 Unicode-normalized 成功分支 |
-| Edit 字面 substring 示例 | 当前 `SimpleReplacer` 已可完成 `ABCDEFG` / `CDEFG`，计划正确避免重复实现 |
-| Edit 的完整目标成功域 | 未覆盖；计划保留精确字符串失败后的多个非字面成功路径，违反原始双 Tool 范围 |
-| chunk cursor、`@@`、EOF | 已明确 substring 搜索下界及 EOF 只影响 exact whole-line preference，并有测试映射 |
-| failed-chunk identity | 已放在信息尚未丢失的 Patch owner，并计划删除 Tool 侧重算 workaround |
-| actual/closest candidate 质量 | 已计划采用有界、顺序敏感、长度受罚且可抑制低置信度/并列结果的诊断 |
-| 诊断决策面预算 | `3/31` 的分母含未修改 consumer 路径，当前不可接受 |
-| Patch 导出 consumers | derive、`applyPatch`、ApplyPatchTool、verified parse 均有行为映射；`applyPatch` 穿透 `applyHunksToFiles` |
-| BOM、换行、Permission、LSP、事件、per-file atomicity | 明确保持并通过现有集中测试验证 |
-| verified implementation and commit | Section 25 已规定审计后 diff identity、精确 staging、正常 hooks、commit 及 post-commit 证据 |
+| 范围                                                 | 审计结论                                                                                                 |
+| ---------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| Patch 唯一字面 substring 恢复                        | 已定位到 `deriveNewContentsFromChunks`/chunk resolver，并计划保留首尾外围字符                            |
+| Patch 零匹配和多匹配                                 | 已映射为失败，并有 owner 与 Tool 行为测试                                                                |
+| Patch 非字面整行成功路径                             | R2 正确计划删除 rstrip、trim 和 Unicode-normalized 成功分支                                              |
+| Edit 字面 substring 示例                             | 当前 `SimpleReplacer` 已可完成 `ABCDEFG` / `CDEFG`，计划正确避免重复实现                                 |
+| Edit 的完整目标成功域                                | 未覆盖；计划保留精确字符串失败后的多个非字面成功路径，违反原始双 Tool 范围                               |
+| chunk cursor、`@@`、EOF                              | 已明确 substring 搜索下界及 EOF 只影响 exact whole-line preference，并有测试映射                         |
+| failed-chunk identity                                | 已放在信息尚未丢失的 Patch owner，并计划删除 Tool 侧重算 workaround                                      |
+| actual/closest candidate 质量                        | 已计划采用有界、顺序敏感、长度受罚且可抑制低置信度/并列结果的诊断                                        |
+| 诊断决策面预算                                       | `3/31` 的分母含未修改 consumer 路径，当前不可接受                                                        |
+| Patch 导出 consumers                                 | derive、`applyPatch`、ApplyPatchTool、verified parse 均有行为映射；`applyPatch` 穿透 `applyHunksToFiles` |
+| BOM、换行、Permission、LSP、事件、per-file atomicity | 明确保持并通过现有集中测试验证                                                                           |
+| verified implementation and commit                   | Section 25 已规定审计后 diff identity、精确 staging、正常 hooks、commit 及 post-commit 证据              |
 
 # Primary-path and fallback verdict
 
@@ -1470,20 +1479,20 @@ Section 10 lines 259-277、Section 12 line 386 和文件计划明确要求删除
 
 # Requirement and traceability coverage
 
-| 范围 | 审计结论 |
-|---|---|
-| Patch old block 唯一字面 substring 恢复 | 已定位到正确 Patch owner，并计划保留首行前缀和末行后缀 |
-| Patch 零匹配/多匹配拒绝 | 已映射到 owner 与 Tool 行为测试 |
-| Patch rstrip/trim/Unicode 非字面成功 | R3 正确计划删除，并有现有行为可使相应测试先红 |
-| `@@ change_context` 的整行失败恢复 | **缺失**；仍在 exact-only `seekSequence` 失败后立即抛错 |
-| chunk cursor、顺序和 EOF | old-block substring 路径已有明确约束和测试映射；context 缺口修正后仍需保持这些约束 |
-| failed-chunk identity | 正确放在信息尚未丢失的 Patch owner，并计划删除 Tool 侧重算 workaround |
-| ApplyPatchTool 不相关 actual hint | 有长行 decoy、完整窗口、低置信度、并列抑制和真实行号测试映射 |
-| Edit exact-only 成功域 | 已计划删除所有非字面 replacers，并保留唯一字面匹配及 `replaceAll` |
-| Edit 多次精确匹配拒绝 | **生产语义已声明，但缺少明确的行为测试映射** |
-| Patch 导出 consumers | derive、`applyPatch`、ApplyPatchTool 和 verified parse 均有行为映射 |
-| BOM、换行、Permission、LSP、事件、per-file atomicity | 明确保持并由现有集中测试及 package verification 覆盖 |
-| verified implementation and commit | Section 25 已规定审计后 diff identity、精确 staging、hooks、commit 和 post-commit 证据 |
+| 范围                                                 | 审计结论                                                                               |
+| ---------------------------------------------------- | -------------------------------------------------------------------------------------- |
+| Patch old block 唯一字面 substring 恢复              | 已定位到正确 Patch owner，并计划保留首行前缀和末行后缀                                 |
+| Patch 零匹配/多匹配拒绝                              | 已映射到 owner 与 Tool 行为测试                                                        |
+| Patch rstrip/trim/Unicode 非字面成功                 | R3 正确计划删除，并有现有行为可使相应测试先红                                          |
+| `@@ change_context` 的整行失败恢复                   | **缺失**；仍在 exact-only `seekSequence` 失败后立即抛错                                |
+| chunk cursor、顺序和 EOF                             | old-block substring 路径已有明确约束和测试映射；context 缺口修正后仍需保持这些约束     |
+| failed-chunk identity                                | 正确放在信息尚未丢失的 Patch owner，并计划删除 Tool 侧重算 workaround                  |
+| ApplyPatchTool 不相关 actual hint                    | 有长行 decoy、完整窗口、低置信度、并列抑制和真实行号测试映射                           |
+| Edit exact-only 成功域                               | 已计划删除所有非字面 replacers，并保留唯一字面匹配及 `replaceAll`                      |
+| Edit 多次精确匹配拒绝                                | **生产语义已声明，但缺少明确的行为测试映射**                                           |
+| Patch 导出 consumers                                 | derive、`applyPatch`、ApplyPatchTool 和 verified parse 均有行为映射                    |
+| BOM、换行、Permission、LSP、事件、per-file atomicity | 明确保持并由现有集中测试及 package verification 覆盖                                   |
+| verified implementation and commit                   | Section 25 已规定审计后 diff identity、精确 staging、hooks、commit 和 post-commit 证据 |
 
 # Primary-path and fallback verdict
 
@@ -1587,18 +1596,18 @@ exact whole-line context
 
 # Requirement and traceability coverage
 
-| 范围 | 审计结论 |
-|---|---|
-| Patch 唯一字面字符串恢复 | 已定位到正确 owner，但匹配优先级仍与原始需求及 `INV-01` 冲突 |
-| 零匹配/多匹配拒绝 | 已映射到 owner 与 Tool 测试 |
-| chunk cursor、`@@`、EOF | 已计划覆盖，但 EOF preference 与“非整行字符串仅唯一时成功”的关系需在修订时消除歧义 |
-| failed-chunk identity | 已正确放在 Patch owner，计划删除 Tool 侧重算 workaround |
-| 不相关 actual/closest hint | 已提出有界、顺序敏感且可抑制的算法，但诊断预算未得到可审计证明 |
-| Edit 既有字面 substring 成功 | 已确认当前 `SimpleReplacer` 能处理示例，计划没有重复创建成功路径 |
-| Patch consumers 一致性 | derive、`applyPatch`、ApplyPatchTool 有计划覆盖；verified-parse 仅 typecheck，不足 |
-| BOM/换行、Permission、LSP、事件、per-file atomicity | 计划明确保持并运行现有集中测试 |
-| Chinese explanatory-comment plan | 已估算 `E=220`、`C=33`，公式正确；实际值只能在 implementation audit 根据真实 diff 重算 |
-| Commit 终态 | 未映射，阻塞原始目标完成 |
+| 范围                                                | 审计结论                                                                               |
+| --------------------------------------------------- | -------------------------------------------------------------------------------------- |
+| Patch 唯一字面字符串恢复                            | 已定位到正确 owner，但匹配优先级仍与原始需求及 `INV-01` 冲突                           |
+| 零匹配/多匹配拒绝                                   | 已映射到 owner 与 Tool 测试                                                            |
+| chunk cursor、`@@`、EOF                             | 已计划覆盖，但 EOF preference 与“非整行字符串仅唯一时成功”的关系需在修订时消除歧义     |
+| failed-chunk identity                               | 已正确放在 Patch owner，计划删除 Tool 侧重算 workaround                                |
+| 不相关 actual/closest hint                          | 已提出有界、顺序敏感且可抑制的算法，但诊断预算未得到可审计证明                         |
+| Edit 既有字面 substring 成功                        | 已确认当前 `SimpleReplacer` 能处理示例，计划没有重复创建成功路径                       |
+| Patch consumers 一致性                              | derive、`applyPatch`、ApplyPatchTool 有计划覆盖；verified-parse 仅 typecheck，不足     |
+| BOM/换行、Permission、LSP、事件、per-file atomicity | 计划明确保持并运行现有集中测试                                                         |
+| Chinese explanatory-comment plan                    | 已估算 `E=220`、`C=33`，公式正确；实际值只能在 implementation audit 根据真实 diff 重算 |
+| Commit 终态                                         | 未映射，阻塞原始目标完成                                                               |
 
 # Primary-path and fallback verdict
 
@@ -1641,17 +1650,17 @@ Implementation-audit instruction from the user (verbatim):
 
 ### Actual Files and Diff
 
-| File | Actual responsibility | Numstat |
-| --- | --- | --- |
-| `packages/opencode/src/patch/match.ts` | Shared exact locator and bounded diagnostic window | +156 / -0 |
-| `packages/opencode/src/patch/index.ts` | Sequential atomic working-copy owner, terminal-LF state, generated-line cursor, context, insertion, and owner failure identity | +71 / -131 |
-| `packages/opencode/src/tool/apply_patch.ts` | Remove Tool-side matcher and propagate owner error | +2 / -52 |
-| `packages/opencode/src/tool/edit.ts` | Direct exact occurrence resolver and shared failure diagnostic; remove nonliteral replacers | +17 / -607 |
-| `packages/opencode/src/tool/apply_patch.txt` | Model-visible exact-line/unique-substring contract | +3 / -0 |
-| `packages/opencode/src/tool/edit.txt` | Model-visible exact-literal contract | +2 / -2 |
-| `packages/opencode/test/patch/patch.test.ts` | Patch owner and verified-consumer behavior matrix | +256 / -0 |
-| `packages/opencode/test/tool/apply_patch.test.ts` | Real ApplyPatchTool success, failure, composition, and diagnostic matrix | +269 / -25 |
-| `packages/opencode/test/tool/edit.test.ts` | Real EditTool exact-only, typed prior-read fixture, and reliable-diagnostic matrix | +132 / -19 |
+| File                                              | Actual responsibility                                                                                                          | Numstat    |
+| ------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ | ---------- |
+| `packages/opencode/src/patch/match.ts`            | Shared exact locator and bounded diagnostic window                                                                             | +156 / -0  |
+| `packages/opencode/src/patch/index.ts`            | Sequential atomic working-copy owner, terminal-LF state, generated-line cursor, context, insertion, and owner failure identity | +71 / -131 |
+| `packages/opencode/src/tool/apply_patch.ts`       | Remove Tool-side matcher and propagate owner error                                                                             | +2 / -52   |
+| `packages/opencode/src/tool/edit.ts`              | Direct exact occurrence resolver and shared failure diagnostic; remove nonliteral replacers                                    | +17 / -607 |
+| `packages/opencode/src/tool/apply_patch.txt`      | Model-visible exact-line/unique-substring contract                                                                             | +3 / -0    |
+| `packages/opencode/src/tool/edit.txt`             | Model-visible exact-literal contract                                                                                           | +2 / -2    |
+| `packages/opencode/test/patch/patch.test.ts`      | Patch owner and verified-consumer behavior matrix                                                                              | +256 / -0  |
+| `packages/opencode/test/tool/apply_patch.test.ts` | Real ApplyPatchTool success, failure, composition, and diagnostic matrix                                                       | +269 / -25 |
+| `packages/opencode/test/tool/edit.test.ts`        | Real EditTool exact-only, typed prior-read fixture, and reliable-diagnostic matrix                                             | +132 / -19 |
 
 Implementation total excluding this plan: `+908 / -836`. Exact changed-file
 boundary contains only the nine files above. Current implementation diff SHA-256
@@ -1688,15 +1697,15 @@ this plan evidence update is not part of that hash.
 
 ### Verification Commands and Results
 
-| Command | Working directory | Result |
-| --- | --- | --- |
-| `bun test test/patch/patch.test.ts test/tool/apply_patch.test.ts test/tool/edit.test.ts` | `packages/opencode` | PASS after Round 2 rework: 114 tests, 0 failures, 279 assertions |
-| `bun typecheck` | `packages/opencode` | PASS: `tsgo --noEmit` |
-| `git diff --check HEAD` | repository root | PASS |
-| Comment-gate calculation over combined `git diff HEAD` task TypeScript paths | repository root | PASS under conservative policy count: `E=805`, `C=121`, required `121`, ratio `15.0311%` |
-| `bun test` | `packages/opencode` | INCOMPLETE/UNRELATED: reached 300s limit after two unchanged-suite timeouts |
-| `bun test test/file/watcher.test.ts` | `packages/opencode` | Existing unrelated failure reproduced: symlinked `.git/HEAD` watcher timeout, 5 pass / 1 fail |
-| `bun test test/fixture/fixture.test.ts` | `packages/opencode` | Existing unrelated failure reproduced: disposal timeout, 6 pass / 1 fail |
+| Command                                                                                  | Working directory   | Result                                                                                        |
+| ---------------------------------------------------------------------------------------- | ------------------- | --------------------------------------------------------------------------------------------- |
+| `bun test test/patch/patch.test.ts test/tool/apply_patch.test.ts test/tool/edit.test.ts` | `packages/opencode` | PASS after Round 2 rework: 114 tests, 0 failures, 279 assertions                              |
+| `bun typecheck`                                                                          | `packages/opencode` | PASS: `tsgo --noEmit`                                                                         |
+| `git diff --check HEAD`                                                                  | repository root     | PASS                                                                                          |
+| Comment-gate calculation over combined `git diff HEAD` task TypeScript paths             | repository root     | PASS under conservative policy count: `E=805`, `C=121`, required `121`, ratio `15.0311%`      |
+| `bun test`                                                                               | `packages/opencode` | INCOMPLETE/UNRELATED: reached 300s limit after two unchanged-suite timeouts                   |
+| `bun test test/file/watcher.test.ts`                                                     | `packages/opencode` | Existing unrelated failure reproduced: symlinked `.git/HEAD` watcher timeout, 5 pass / 1 fail |
+| `bun test test/fixture/fixture.test.ts`                                                  | `packages/opencode` | Existing unrelated failure reproduced: disposal timeout, 6 pass / 1 fail                      |
 
 The two package-wide failures are in files and owners untouched by this task and
 reproduce in isolation. No watcher/fixture workaround or timeout relaxation was
@@ -1719,28 +1728,28 @@ added because it would violate the approved scope.
 
 ### Actual Secondary and Replacement Path Inventory
 
-| Path | Actual classification | Produces success? | Verdict |
-| --- | --- | --- | --- |
-| Patch exact whole-line | Supported primary branch | yes | retained first |
-| Patch exact unique literal substring | User-required primary branch | yes | owner-level, preserves outer text |
-| Patch zero/multiple substring | Contracted failure | no | no first-occurrence fallback |
-| Patch rstrip/trim/Unicode/trailing-empty shortening | Superseded workaround | no | deleted |
-| Edit exact unique / explicit `replaceAll` | Supported primary branch | yes | direct occurrence resolver |
-| Edit nonliteral replacers | Superseded workaround | no | deleted with support code |
-| Shared closest window | Diagnostic only | no | bounded; low/tied candidates suppressed |
-| ApplyPatchTool extractor/scorer | Duplicate downstream workaround | no | deleted |
+| Path                                                | Actual classification           | Produces success? | Verdict                                 |
+| --------------------------------------------------- | ------------------------------- | ----------------- | --------------------------------------- |
+| Patch exact whole-line                              | Supported primary branch        | yes               | retained first                          |
+| Patch exact unique literal substring                | User-required primary branch    | yes               | owner-level, preserves outer text       |
+| Patch zero/multiple substring                       | Contracted failure              | no                | no first-occurrence fallback            |
+| Patch rstrip/trim/Unicode/trailing-empty shortening | Superseded workaround           | no                | deleted                                 |
+| Edit exact unique / explicit `replaceAll`           | Supported primary branch        | yes               | direct occurrence resolver              |
+| Edit nonliteral replacers                           | Superseded workaround           | no                | deleted with support code               |
+| Shared closest window                               | Diagnostic only                 | no                | bounded; low/tied candidates suppressed |
+| ApplyPatchTool extractor/scorer                     | Duplicate downstream workaround | no                | deleted                                 |
 
 No diagnostic branch, Tool catch, fuzzy matcher, or first-occurrence choice can
 convert a primary failure into success.
 
 ### Chinese Comment Calculation
 
-| Metric | Actual | Exclusions and evidence |
-| --- | --- | --- |
-| Effective changed code lines `E` | 805 | Conservative count retaining qualifying comments in the denominator; excludes imports, Tool prose, plan, generated files, formatter-only lines, and pure deletion |
-| Qualifying Chinese comment lines `C` | 121 | Adjacent rationale/invariant/test-boundary comments identified from the combined task diff |
-| Ratio `C / E` | 15.0311% | `121 / 805` |
-| Required minimum `C` | 121 | `ceil(805 * 0.15) = 121`; PASS |
+| Metric                               | Actual   | Exclusions and evidence                                                                                                                                           |
+| ------------------------------------ | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Effective changed code lines `E`     | 805      | Conservative count retaining qualifying comments in the denominator; excludes imports, Tool prose, plan, generated files, formatter-only lines, and pure deletion |
+| Qualifying Chinese comment lines `C` | 121      | Adjacent rationale/invariant/test-boundary comments identified from the combined task diff                                                                        |
+| Ratio `C / E`                        | 15.0311% | `121 / 805`                                                                                                                                                       |
+| Required minimum `C`                 | 121      | `ceil(805 * 0.15) = 121`; PASS                                                                                                                                    |
 
 ### Remaining Unverified Items
 
@@ -1757,11 +1766,11 @@ convert a primary failure into success.
 
 ## 24. Implementation Audit Record
 
-| Round | Plan revision | Full original scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | R9 | yes | B-01 | 无 | BLOCK | `ses_09e7b25ebffeWfnDJnml860D10` |
-| 2 | R9 | yes | B-01, B-02 | N-01 | BLOCK | `ses_09e720162ffeF3EMUv4FvLcEJw` |
-| 3 | R9 | yes | none | N-01 | APPROVE | `ses_09e5cc899ffe4wOchXiGj6DoZV` |
+| Round | Plan revision | Full original scope? | Blocking findings | Non-blocking findings | Result  | Invocation reference             |
+| ----- | ------------- | -------------------- | ----------------- | --------------------- | ------- | -------------------------------- |
+| 1     | R9            | yes                  | B-01              | 无                    | BLOCK   | `ses_09e7b25ebffeWfnDJnml860D10` |
+| 2     | R9            | yes                  | B-01, B-02        | N-01                  | BLOCK   | `ses_09e720162ffeF3EMUv4FvLcEJw` |
+| 3     | R9            | yes                  | none              | N-01                  | APPROVE | `ses_09e5cc899ffe4wOchXiGj6DoZV` |
 
 ### Implementation Round 3 Independent Verdict (verbatim)
 
@@ -1789,28 +1798,28 @@ No blocking findings.
 
 # Requirement and traceability coverage
 
-| 范围 | 独立审计结论 |
-|---|---|
-| Canonical revision | 当前计划为 R9，Approved revision 同为 R9；计划状态为 `implementation-audit-required`，符合审计入口要求。 |
-| 冻结实现身份 | 九路径 combined staged+unstaged diff 的 SHA-256 独立重算为 `8fbfd525260b7ca5cb56446066ca60e711f5f3f569cc0422a40653f595754804`，与提供值一致。 |
+| 范围                          | 独立审计结论                                                                                                                                                                                                                     |
+| ----------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Canonical revision            | 当前计划为 R9，Approved revision 同为 R9；计划状态为 `implementation-audit-required`，符合审计入口要求。                                                                                                                         |
+| 冻结实现身份                  | 九路径 combined staged+unstaged diff 的 SHA-256 独立重算为 `8fbfd525260b7ca5cb56446066ca60e711f5f3f569cc0422a40653f595754804`，与提供值一致。                                                                                    |
 | 原始 `ABCDEFG` / `CDEFG` 症状 | `Patch.deriveNewContentsFromChunks` 经 `locateExact` 在整行失败后解析唯一字面跨度，只替换 `CDEFG`，保留外围 `AB`；owner 测试位于 `test/patch/patch.test.ts:95-117`，真实 Tool 测试位于 `test/tool/apply_patch.test.ts:207-221`。 |
-| Patch 匹配顺序 | `packages/opencode/src/patch/match.ts:25-76` 实现 exact whole-line → exact unique literal substring → zero/multiple failure；没有 rstrip、trim、Unicode normalization 或 trailing-empty shortening success。 |
-| Substring 唯一性 | `match.ts:68-76` 从 eligible cursor 搜索完整 `pattern.join("\n")`，第二个包括重叠 occurrence 会返回 ambiguity；owner 与 Tool 均验证多匹配拒绝及文件不变。 |
-| 外围文本和多行边界 | `patch/index.ts:401-410` 只 splice 命中字面范围；owner 测试覆盖单行前后缀及多行首尾边界。 |
-| Ordered chunks | `patch/index.ts:344-416` 在同一局部 working copy 上按序处理；cursor 越过 replacement，包括空逻辑行，不重新匹配生成文本。同行多 chunk 和零长度 replacement 均有 owner + Tool 测试。 |
-| Exact-line 删除 | `patch/index.ts:385-398` 保留 line-array splice；首行、中间、末行、唯一行、多行删除以及 delete-all + insertion 均有行为断言。 |
-| Pure insertion | `patch/index.ts:368-371,413-416` 验证 context 后延迟按 patch 顺序追加；空文件、非空文件、多 insertion 和删除全部原文后的组合均被覆盖。 |
-| `@@ change_context` | `patch/index.ts:352-366` 对普通和 pure-insertion chunk 共用 exact locator；substring context 只定位包含行并前进到下一行，零匹配和多匹配失败。 |
-| Terminal LF | `match.ts:65-67` 将真实 terminal LF 恢复进 substring 搜索文本；terminated `foo\n` 可匹配完整 `["foo", ""]`，无尾换行 `foo` 仍失败。 |
-| Edit replacement | `tool/edit.ts:308-332` 只保留 exact literal occurrence resolver：唯一匹配替换、显式 `replaceAll` 替换全部、重复匹配拒绝、零匹配只生成诊断。旧非字面 replacers 已删除。 |
-| Actual/closest 诊断 | `match.ts:85-155` 使用完整等行数窗口、有界 bigram multiset、重复频次、长度惩罚、`0.5` 阈值、并列抑制、真实一基起始行和显式长文本省略。诊断不能产生 replacement success。 |
-| Failed-chunk identity | `patch/index.ts:380-382,424-429` 在 owner 尚持有失败 chunk 时构造提示；`tool/apply_patch.ts:70-77` 只传播该错误，不再重扫第一个 chunk。 |
-| Patch consumers | `deriveNewContentsFromChunks` 是 `applyHunksToFiles`、`applyPatch`、ApplyPatchTool 和 verified parser 的共同 owner；owner、真实 Tool、verified Body/CorrectnessError 以及既有 `applyPatch` 路径测试共同验证调用链。 |
-| 原行为测试敏感度 | 原实现会拒绝 `ABCDEFG` / `CDEFG`、接受若干非字面 Patch/Edit success，并使用错误的无界 character-set scorer；新增断言分别会在这些旧行为上变红。 |
-| 聚焦测试 | 在 `packages/opencode` 独立执行：`114 pass / 0 fail / 279 assertions`。 |
-| Package-local typecheck | 在 `packages/opencode` 执行 `bun typecheck`，`tsgo --noEmit` 成功。 |
-| Diff quality | Scoped `git diff --check HEAD -- <nine paths>` 成功，无 whitespace error。 |
-| Commit 终态 | 当前 clean audit 允许编排者记录 verified verdict 并执行计划 Section 25 的精确暂存、正常 hooks、commit 和 post-commit identity 步骤；目标 commit 尚未由本只读审计创建。 |
+| Patch 匹配顺序                | `packages/opencode/src/patch/match.ts:25-76` 实现 exact whole-line → exact unique literal substring → zero/multiple failure；没有 rstrip、trim、Unicode normalization 或 trailing-empty shortening success。                     |
+| Substring 唯一性              | `match.ts:68-76` 从 eligible cursor 搜索完整 `pattern.join("\n")`，第二个包括重叠 occurrence 会返回 ambiguity；owner 与 Tool 均验证多匹配拒绝及文件不变。                                                                        |
+| 外围文本和多行边界            | `patch/index.ts:401-410` 只 splice 命中字面范围；owner 测试覆盖单行前后缀及多行首尾边界。                                                                                                                                        |
+| Ordered chunks                | `patch/index.ts:344-416` 在同一局部 working copy 上按序处理；cursor 越过 replacement，包括空逻辑行，不重新匹配生成文本。同行多 chunk 和零长度 replacement 均有 owner + Tool 测试。                                               |
+| Exact-line 删除               | `patch/index.ts:385-398` 保留 line-array splice；首行、中间、末行、唯一行、多行删除以及 delete-all + insertion 均有行为断言。                                                                                                    |
+| Pure insertion                | `patch/index.ts:368-371,413-416` 验证 context 后延迟按 patch 顺序追加；空文件、非空文件、多 insertion 和删除全部原文后的组合均被覆盖。                                                                                           |
+| `@@ change_context`           | `patch/index.ts:352-366` 对普通和 pure-insertion chunk 共用 exact locator；substring context 只定位包含行并前进到下一行，零匹配和多匹配失败。                                                                                    |
+| Terminal LF                   | `match.ts:65-67` 将真实 terminal LF 恢复进 substring 搜索文本；terminated `foo\n` 可匹配完整 `["foo", ""]`，无尾换行 `foo` 仍失败。                                                                                              |
+| Edit replacement              | `tool/edit.ts:308-332` 只保留 exact literal occurrence resolver：唯一匹配替换、显式 `replaceAll` 替换全部、重复匹配拒绝、零匹配只生成诊断。旧非字面 replacers 已删除。                                                           |
+| Actual/closest 诊断           | `match.ts:85-155` 使用完整等行数窗口、有界 bigram multiset、重复频次、长度惩罚、`0.5` 阈值、并列抑制、真实一基起始行和显式长文本省略。诊断不能产生 replacement success。                                                         |
+| Failed-chunk identity         | `patch/index.ts:380-382,424-429` 在 owner 尚持有失败 chunk 时构造提示；`tool/apply_patch.ts:70-77` 只传播该错误，不再重扫第一个 chunk。                                                                                          |
+| Patch consumers               | `deriveNewContentsFromChunks` 是 `applyHunksToFiles`、`applyPatch`、ApplyPatchTool 和 verified parser 的共同 owner；owner、真实 Tool、verified Body/CorrectnessError 以及既有 `applyPatch` 路径测试共同验证调用链。              |
+| 原行为测试敏感度              | 原实现会拒绝 `ABCDEFG` / `CDEFG`、接受若干非字面 Patch/Edit success，并使用错误的无界 character-set scorer；新增断言分别会在这些旧行为上变红。                                                                                   |
+| 聚焦测试                      | 在 `packages/opencode` 独立执行：`114 pass / 0 fail / 279 assertions`。                                                                                                                                                          |
+| Package-local typecheck       | 在 `packages/opencode` 执行 `bun typecheck`，`tsgo --noEmit` 成功。                                                                                                                                                              |
+| Diff quality                  | Scoped `git diff --check HEAD -- <nine paths>` 成功，无 whitespace error。                                                                                                                                                       |
+| Commit 终态                   | 当前 clean audit 允许编排者记录 verified verdict 并执行计划 Section 25 的精确暂存、正常 hooks、commit 和 post-commit identity 步骤；目标 commit 尚未由本只读审计创建。                                                           |
 
 # Primary-path and fallback verdict
 
@@ -1940,27 +1949,27 @@ C / E = 121 / 805 = 15.0311%
 
 # Requirement and traceability coverage
 
-| 范围 | 审计结论 |
-|---|---|
-| Patch `ABCDEFG` / `CDEFG` 恢复 | 已实现并通过 owner 与真实 Tool 测试；结果保留外围 `"AB"` |
-| 完整 old block 的唯一 substring | 已在 Patch owner 实现；零匹配失败，多匹配拒绝 |
-| Exact-line → exact literal → failure 顺序 | 已删除 rstrip、trim、Unicode-normalized 和 trailing-empty shortening 成功路径 |
-| Edit exact-only 语义 | 已删除非字面 replacers；保留唯一 exact、显式 `replaceAll` 和 ambiguity 拒绝 |
-| 同一行多个 ordered substring chunk | 普通非空 replacement 已通过 owner 与 Tool 测试 |
-| Generated-text exclusion | 非空 replacement 已覆盖；**零长度 exact-line replacement 仍可被后续 chunk 重新匹配，见 B-01** |
-| `@@ change_context` | 普通和 pure-insertion 路径均使用同一 exact locator；缺失和 substring ambiguity 会失败 |
-| Trailing empty old block | no-tail 文件拒绝，terminated 文件按完整 `foo\n` 成功 |
-| Exact-line 删除和 pure insertion | 首/中/末/唯一删除及 delete-all + insertion 已覆盖 |
-| Failed-chunk identity | Patch owner 构造错误；ApplyPatchTool 的重复重扫 workaround 已删除 |
-| Actual/closest 诊断 | 使用完整窗口、有界 bigram multiset、低置信度/并列抑制和真实一基起始行 |
-| Patch consumers | derive、ApplyPatchTool 与 verified parse 已覆盖；共享 owner 路径保持一致 |
-| Tool descriptions | `apply_patch.txt` 与 exact substring 合同一致；`edit.txt` ambiguity 引文仍有非实质文案偏差 |
-| 测试 seam 类型完整性 | **新增 Edit fixture 使用 `as any`，见 B-02** |
-| 冻结 diff 身份 | 重算 SHA-256 为 `0297909087abdc717630dbbe1f660652725961ef5663a27e548b1936e30b175d`，与提供值一致 |
-| 聚焦验证 | `112 pass / 0 fail` |
-| Package-local typecheck | `bun typecheck` 通过，但 B-02 使新增 fixture 的结构未被完整检查 |
-| Diff whitespace | `git diff --check` 通过 |
-| Package-wide test | 本轮未运行；当前授权明确列出聚焦测试与 package-local typecheck，且实现已因上述 findings 阻塞 |
+| 范围                                      | 审计结论                                                                                         |
+| ----------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| Patch `ABCDEFG` / `CDEFG` 恢复            | 已实现并通过 owner 与真实 Tool 测试；结果保留外围 `"AB"`                                         |
+| 完整 old block 的唯一 substring           | 已在 Patch owner 实现；零匹配失败，多匹配拒绝                                                    |
+| Exact-line → exact literal → failure 顺序 | 已删除 rstrip、trim、Unicode-normalized 和 trailing-empty shortening 成功路径                    |
+| Edit exact-only 语义                      | 已删除非字面 replacers；保留唯一 exact、显式 `replaceAll` 和 ambiguity 拒绝                      |
+| 同一行多个 ordered substring chunk        | 普通非空 replacement 已通过 owner 与 Tool 测试                                                   |
+| Generated-text exclusion                  | 非空 replacement 已覆盖；**零长度 exact-line replacement 仍可被后续 chunk 重新匹配，见 B-01**    |
+| `@@ change_context`                       | 普通和 pure-insertion 路径均使用同一 exact locator；缺失和 substring ambiguity 会失败            |
+| Trailing empty old block                  | no-tail 文件拒绝，terminated 文件按完整 `foo\n` 成功                                             |
+| Exact-line 删除和 pure insertion          | 首/中/末/唯一删除及 delete-all + insertion 已覆盖                                                |
+| Failed-chunk identity                     | Patch owner 构造错误；ApplyPatchTool 的重复重扫 workaround 已删除                                |
+| Actual/closest 诊断                       | 使用完整窗口、有界 bigram multiset、低置信度/并列抑制和真实一基起始行                            |
+| Patch consumers                           | derive、ApplyPatchTool 与 verified parse 已覆盖；共享 owner 路径保持一致                         |
+| Tool descriptions                         | `apply_patch.txt` 与 exact substring 合同一致；`edit.txt` ambiguity 引文仍有非实质文案偏差       |
+| 测试 seam 类型完整性                      | **新增 Edit fixture 使用 `as any`，见 B-02**                                                     |
+| 冻结 diff 身份                            | 重算 SHA-256 为 `0297909087abdc717630dbbe1f660652725961ef5663a27e548b1936e30b175d`，与提供值一致 |
+| 聚焦验证                                  | `112 pass / 0 fail`                                                                              |
+| Package-local typecheck                   | `bun typecheck` 通过，但 B-02 使新增 fixture 的结构未被完整检查                                  |
+| Diff whitespace                           | `git diff --check` 通过                                                                          |
+| Package-wide test                         | 本轮未运行；当前授权明确列出聚焦测试与 package-local typecheck，且实现已因上述 findings 阻塞     |
 
 旧实现中 `ABCDEFG` / `CDEFG` 会在 whole-line resolver 失败，新增 owner/Tool 测试能够对原始缺陷变红；旧 character-set scorer、错误 chunk 重算和 Edit 非字面成功路径也分别被行为测试覆盖。
 
@@ -2036,6 +2045,7 @@ C / E = 17.75%
   - `"foo\n\n"`：成功。
 
   这意味着 implementation 只能在文件额外包含一个空逻辑行时找到该字面值。缺陷传播到 `deriveNewContentsFromChunks`、`applyHunksToFiles`、`applyPatch`、`ApplyPatchTool` 和 `maybeParseApplyPatchVerified`。
+
 - Why this is not speculative: 公开 Patch parser 明确接受空删除行，并逐字保留为 `old_lines` 中的空字符串。该输入已被 canonical R9 纳入 exact-only contract。以上行为已通过当前冻结实现直接复现，不依赖恶意输入、未来调用方或无关边界推测。
 - Minimal correction direction: Patch owner 必须让 exact-literal locator 看到 current working text 中真实存在的终止换行，同时继续区分 no-tail `"foo"` 与 terminated `"foo\n"`，不得恢复 shortened-pattern retry 或增加另一套 fallback。Owner 和真实 `ApplyPatchTool` 测试应同时锁定 `"foo\n"` 成功与 `"foo"` 失败。
 
@@ -2054,24 +2064,24 @@ C / E = 17.75%
 
 # Requirement and traceability coverage
 
-| 范围 | 审计结论 |
-|---|---|
-| 原始 `ABCDEFG` / `CDEFG` 场景 | 通过 Patch owner 和真实 `ApplyPatchTool` 测试；外围 `AB` 得以保留 |
-| Exact-line → unique literal substring → failure | 主体已实现，但 B-01 证明 terminal-LF literal 在进入 substring locator 前丢失 |
-| 零/multiple substring | 由 owner 拒绝；没有选择第一处 |
-| Edit exact literal | 已收敛为 unique、显式 `replaceAll`、ambiguity/not-found；旧非字面 replacers 已删除 |
-| Patch 非字面 success | `rstrip`、`trim`、Unicode normalization、shortened-pattern retry 已删除 |
-| Ordered chunks/current cursor | 同行多 chunk、generated-text exclusion、context lower bound 均有 owner/Tool 测试 |
-| `@@ change_context` | ordinary 与 pure-insertion chunk 共用 locator；零/多匹配失败 |
-| Pure insertion与整行删除 | deferred EOF insertion、delete-all composition 和 line splice 均有测试 |
-| Actual/closest 提示 | 共享 bounded bigram-multiset matcher；长行 decoy、低置信度、tie、真实行号和显式截断均有 Tool 测试 |
-| Failed-chunk identity | 在 Patch owner 构造 error；Tool 侧重复 extractor/scorer 已删除 |
-| Patch consumers | Owner、ApplyPatchTool 和 verified parser 有行为测试；B-01 会传播到所有 owner consumers |
-| Permission/LSP/events/BOM/line endings | 未发现本 diff 对这些路径的无关修改或安全弱化 |
-| Test sensitivity | 原始 substring、旧非字面 success、错误 diagnostic scorer 均有 red-capable assertions；缺少 B-01 的 terminated-file 正向断言 |
-| Frozen diff identity | 独立计算结果与提供值一致：`5f460fe421d10d635768a1d7b4dbca6158d8e41714276920e3335f7194926da0` |
-| Verification | 聚焦测试 `110 pass / 0 fail / 273 assertions`；`bun typecheck` 通过；audited-path `git diff --check` 通过 |
-| Commit 终态 | 尚不得执行；冻结实现存在 B-01，未达到 `<verified-implementation-and-commit>` |
+| 范围                                            | 审计结论                                                                                                                    |
+| ----------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| 原始 `ABCDEFG` / `CDEFG` 场景                   | 通过 Patch owner 和真实 `ApplyPatchTool` 测试；外围 `AB` 得以保留                                                           |
+| Exact-line → unique literal substring → failure | 主体已实现，但 B-01 证明 terminal-LF literal 在进入 substring locator 前丢失                                                |
+| 零/multiple substring                           | 由 owner 拒绝；没有选择第一处                                                                                               |
+| Edit exact literal                              | 已收敛为 unique、显式 `replaceAll`、ambiguity/not-found；旧非字面 replacers 已删除                                          |
+| Patch 非字面 success                            | `rstrip`、`trim`、Unicode normalization、shortened-pattern retry 已删除                                                     |
+| Ordered chunks/current cursor                   | 同行多 chunk、generated-text exclusion、context lower bound 均有 owner/Tool 测试                                            |
+| `@@ change_context`                             | ordinary 与 pure-insertion chunk 共用 locator；零/多匹配失败                                                                |
+| Pure insertion与整行删除                        | deferred EOF insertion、delete-all composition 和 line splice 均有测试                                                      |
+| Actual/closest 提示                             | 共享 bounded bigram-multiset matcher；长行 decoy、低置信度、tie、真实行号和显式截断均有 Tool 测试                           |
+| Failed-chunk identity                           | 在 Patch owner 构造 error；Tool 侧重复 extractor/scorer 已删除                                                              |
+| Patch consumers                                 | Owner、ApplyPatchTool 和 verified parser 有行为测试；B-01 会传播到所有 owner consumers                                      |
+| Permission/LSP/events/BOM/line endings          | 未发现本 diff 对这些路径的无关修改或安全弱化                                                                                |
+| Test sensitivity                                | 原始 substring、旧非字面 success、错误 diagnostic scorer 均有 red-capable assertions；缺少 B-01 的 terminated-file 正向断言 |
+| Frozen diff identity                            | 独立计算结果与提供值一致：`5f460fe421d10d635768a1d7b4dbca6158d8e41714276920e3335f7194926da0`                                |
+| Verification                                    | 聚焦测试 `110 pass / 0 fail / 273 assertions`；`bun typecheck` 通过；audited-path `git diff --check` 通过                   |
+| Commit 终态                                     | 尚不得执行；冻结实现存在 B-01，未达到 `<verified-implementation-and-commit>`                                                |
 
 # Primary-path and fallback verdict
 

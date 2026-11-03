@@ -21,7 +21,9 @@ import { httpApiLayer, requestInDirectory } from "./httpapi-layer"
 
 // Storage.node 需显式入组：httpapi 的 diff 读取与测试写入共用同一 storage 实例；
 // Database.node 供 cold 探针直接读取 cold_ref（freezeOwner 消费同层 sync 事务）。
-const it = testEffect(Layer.mergeAll(LayerNode.compile(LayerNode.group([SessionNs.node, Storage.node, Database.node])), httpApiLayer))
+const it = testEffect(
+  Layer.mergeAll(LayerNode.compile(LayerNode.group([SessionNs.node, Storage.node, Database.node])), httpApiLayer),
+)
 
 const model = {
   providerID: ProviderV2.ID.make("test"),
@@ -161,12 +163,20 @@ describe("session messages endpoint", () => {
         const database = yield* Database.Service
         const created = Date.now()
         // 本例只测分页边界：一次预约建立520条真实投影行，不让逐条事件写入耗尽原30秒预算。
-        yield* Database.withSync(database, (sync) => sync.insert(MessageTable).values(
-          Array.from({ length: 520 }, (_, index) => ({
-            id: MessageID.ascending(), session_id: session.id, time_created: created + index, time_updated: created + index,
-            data: { role: "user" as const, time: { created: created + index }, agent: "test", model, tools: {} },
-          })),
-        ).run())
+        yield* Database.withSync(database, (sync) =>
+          sync
+            .insert(MessageTable)
+            .values(
+              Array.from({ length: 520 }, (_, index) => ({
+                id: MessageID.ascending(),
+                session_id: session.id,
+                time_created: created + index,
+                time_updated: created + index,
+                data: { role: "user" as const, time: { created: created + index }, agent: "test", model, tools: {} },
+              })),
+            )
+            .run(),
+        )
 
         const res = yield* request(`/session/${session.id}/message?limit=510`)
         expect(res.status).toBe(200)
@@ -358,7 +368,9 @@ describe("session messages endpoint", () => {
         const viewerPart = viewerBody[0]?.parts[0]
         // viewer 只剪掉与 diff 逐字重复的 patch；diff、input、output 与轻量元数据必须保留。
         expect(
-          viewerPart?.type === "tool" && viewerPart.state.status === "completed" ? viewerPart.state.metadata : undefined,
+          viewerPart?.type === "tool" && viewerPart.state.status === "completed"
+            ? viewerPart.state.metadata
+            : undefined,
         ).toEqual({
           diff: patch,
           filediff: { file: "a.ts", additions: 64, deletions: 0 },

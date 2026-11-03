@@ -17,8 +17,10 @@ export const load = Effect.fn("SessionPreview.load")(function* (
   // 旧IN为集合且整数排名隐含floor；逐会话查询保持同一输入域，不重复追加。
   for (const sessionID of new Set(input.sessionIDs)) {
     // 两代各沿现有索引早停，不给另一代历史或冷正文增加补查路径。
-    const rows = yield* db.all<{ joined_text: string | null }>(
-      version === "v1" ? sql`
+    const rows = yield* db
+      .all<{ joined_text: string | null }>(
+        version === "v1"
+          ? sql`
         SELECT joined_text FROM (
           SELECT ${MessageTable.id} as message_id, ${MessageTable.time_created} as time_created,
             (
@@ -51,7 +53,8 @@ export const load = Effect.fn("SessionPreview.load")(function* (
         )
         -- 先选最新N条再反转，等时戳仍以message.id决定方向。
         ORDER BY time_created ASC, message_id ASC
-      ` : sql`
+      `
+          : sql`
         SELECT joined_text FROM (
           SELECT ${SessionMessageTable.seq} as seq, json_extract(${SessionMessageTable.data}, '$.text') as joined_text
           FROM ${SessionMessageTable}
@@ -74,7 +77,8 @@ export const load = Effect.fn("SessionPreview.load")(function* (
         -- Native保自己的durable seq顺序，不套V1时间排名或压缩后的历史边界。
         ORDER BY seq ASC
       `,
-    ).pipe(Effect.orDie)
+      )
+      .pipe(Effect.orDie)
     // LIMIT后归一化并丢弃空白，不为凑满行数再扫描更早正文。
     for (const row of rows) {
       const text = (row.joined_text ?? "").replace(/\s+/g, " ").trim()

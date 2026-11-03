@@ -18,7 +18,9 @@ function goalObjective(text: string) {
 
 export function goalContinuation(parts: Part[]) {
   const part = parts.find(
-    item => item.type === "text" && item.synthetic &&
+    (item) =>
+      item.type === "text" &&
+      item.synthetic &&
       (item.metadata?.goal_continuation === true || GOAL_CONTINUATION_ENVELOPE.test(item.text)),
   )
   if (!part || part.type !== "text") return

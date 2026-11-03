@@ -33,14 +33,14 @@ Scope: `packages/tui` 的主 TUI Session Message 区域。本文只设计渲染�
 
 ## 2. 术语
 
-| 术语 | 本文定义 | 是否持久化 |
-| --- | --- | --- |
-| Message | MessageV2 的一条 Message，包含有序 Part | 是 |
-| Reasoning Part | `type: "reasoning"` 的原始 Part；拥有独立 ID、text、metadata 和 time | 是 |
-| Source segment | 一个可显示的原始 Reasoning Part。它是 UI 用语，不代表新的领域对象 | 否 |
-| Reasoning Run | 同一 Message 内，原始 Part 顺序中一个最大连续 reasoning 序列 | 否 |
-| Markdown section | 一个 Reasoning Part 文本内部的标题、段落、列表或代码块 | 只是文本内容 |
-| Preview row budget | 一个 Reasoning Run 在折叠态允许使用的正文终端行数，建议继续使用 5 | 否 |
+| 术语               | 本文定义                                                             | 是否持久化   |
+| ------------------ | -------------------------------------------------------------------- | ------------ |
+| Message            | MessageV2 的一条 Message，包含有序 Part                              | 是           |
+| Reasoning Part     | `type: "reasoning"` 的原始 Part；拥有独立 ID、text、metadata 和 time | 是           |
+| Source segment     | 一个可显示的原始 Reasoning Part。它是 UI 用语，不代表新的领域对象    | 否           |
+| Reasoning Run      | 同一 Message 内，原始 Part 顺序中一个最大连续 reasoning 序列         | 否           |
+| Markdown section   | 一个 Reasoning Part 文本内部的标题、段落、列表或代码块               | 只是文本内容 |
+| Preview row budget | 一个 Reasoning Run 在折叠态允许使用的正文终端行数，建议继续使用 5    | 否           |
 
 本文刻意使用 `ReasoningRun` 而不是 “merged reasoning”。前者表达的是显示聚合；后者容易被理解为 Part 数据被改写或 Provider 语义被合并。
 
@@ -65,19 +65,19 @@ Provider / AI SDK stream
 
 关键源码定位如下。
 
-| 阶段 | 当前行为 | 源码 |
-| --- | --- | --- |
-| reasoning 开始 | 按 stream reasoning ID 创建独立 `ReasoningPart` 和新的 ascending Part ID | `packages/opencode/src/session/processor.ts:322-345` |
-| reasoning 增量 | 只向对应 Part ID 的 `text` 追加 delta | `packages/opencode/src/session/processor.ts:347-359` |
-| reasoning 结束 | 写入该 Part 的 `time.end`，发布最终快照 | `packages/opencode/src/session/processor.ts:361-378` |
-| 未正常结束清理 | 为 reasoning map 中每个 Part 分别补终止时间 | `packages/opencode/src/session/processor.ts:896-903` |
-| TUI 增量归并 | 只合并同一 session/message/part/field 的相邻 delta，不跨 Part | `packages/opencode/src/cli/cmd/tui/context/sync.tsx:163-197` |
-| TUI delta 应用 | 按 `partID` 二分定位并更新原 Part | `packages/opencode/src/cli/cmd/tui/context/sync.tsx:211-245` |
-| TUI Part 更新 | 按 Part ID 插入或 reconcile，继续保持每 Part 独立 | `packages/opencode/src/cli/cmd/tui/context/sync.tsx:726-766` |
-| Session 读取 | `AssistantMessage` 直接收到 `sync.data.part[message.id]` | `packages/opencode/src/cli/cmd/tui/routes/session/index.tsx:1372-1378` |
-| Message 渲染 | `AssistantMessage` 直接遍历原始 `props.parts` | `packages/opencode/src/cli/cmd/tui/routes/session/index.tsx:1650-1676` |
-| Part 分发 | `reasoning` 映射到 `ReasoningPart` | `packages/opencode/src/cli/cmd/tui/routes/session/index.tsx:1729-1733` |
-| reasoning 渲染 | 每 Part 独立计算内容、行数、overflow 和 expanded | `packages/opencode/src/cli/cmd/tui/routes/session/index.tsx:1735-1815` |
+| 阶段           | 当前行为                                                                 | 源码                                                                   |
+| -------------- | ------------------------------------------------------------------------ | ---------------------------------------------------------------------- |
+| reasoning 开始 | 按 stream reasoning ID 创建独立 `ReasoningPart` 和新的 ascending Part ID | `packages/opencode/src/session/processor.ts:322-345`                   |
+| reasoning 增量 | 只向对应 Part ID 的 `text` 追加 delta                                    | `packages/opencode/src/session/processor.ts:347-359`                   |
+| reasoning 结束 | 写入该 Part 的 `time.end`，发布最终快照                                  | `packages/opencode/src/session/processor.ts:361-378`                   |
+| 未正常结束清理 | 为 reasoning map 中每个 Part 分别补终止时间                              | `packages/opencode/src/session/processor.ts:896-903`                   |
+| TUI 增量归并   | 只合并同一 session/message/part/field 的相邻 delta，不跨 Part            | `packages/opencode/src/cli/cmd/tui/context/sync.tsx:163-197`           |
+| TUI delta 应用 | 按 `partID` 二分定位并更新原 Part                                        | `packages/opencode/src/cli/cmd/tui/context/sync.tsx:211-245`           |
+| TUI Part 更新  | 按 Part ID 插入或 reconcile，继续保持每 Part 独立                        | `packages/opencode/src/cli/cmd/tui/context/sync.tsx:726-766`           |
+| Session 读取   | `AssistantMessage` 直接收到 `sync.data.part[message.id]`                 | `packages/opencode/src/cli/cmd/tui/routes/session/index.tsx:1372-1378` |
+| Message 渲染   | `AssistantMessage` 直接遍历原始 `props.parts`                            | `packages/opencode/src/cli/cmd/tui/routes/session/index.tsx:1650-1676` |
+| Part 分发      | `reasoning` 映射到 `ReasoningPart`                                       | `packages/opencode/src/cli/cmd/tui/routes/session/index.tsx:1729-1733` |
+| reasoning 渲染 | 每 Part 独立计算内容、行数、overflow 和 expanded                         | `packages/opencode/src/cli/cmd/tui/routes/session/index.tsx:1735-1815` |
 
 ### 3.2 Part 的持久化和顺序
 
@@ -119,16 +119,16 @@ Part ID 使用 ascending 时间部分和同毫秒计数器，见 `packages/openc
 
 当前 `ReasoningPart` 样式和交互如下：
 
-| 项目 | 当前行为 |
-| --- | --- |
-| 根容器 | `paddingLeft={2}`，左边框，`flexShrink={0}` |
-| Part 间距 | 不是首个可见 Part 时 `marginTop={1}` |
-| 标题 | italic `theme.markdownEmph`，显示 `Thinking (N chars):` |
-| 正文 | Markdown `code` renderer，`theme.textMuted`，使用 `subtleSyntax()` |
-| 流式 | 每 Part 使用 50ms throttled display content；父 Message 未完成时 `streaming={true}` |
-| 完成态 | key 为 `width + preview text`，宽度或内容变化时重新挂载 completed renderer |
-| 点击 | mouse up 切换本 Part 的 `expanded`；存在文本选择时不切换 |
-| 提示 | overflow 时显示 `▼ expand` 或 `▲ collapse` |
+| 项目      | 当前行为                                                                            |
+| --------- | ----------------------------------------------------------------------------------- |
+| 根容器    | `paddingLeft={2}`，左边框，`flexShrink={0}`                                         |
+| Part 间距 | 不是首个可见 Part 时 `marginTop={1}`                                                |
+| 标题      | italic `theme.markdownEmph`，显示 `Thinking (N chars):`                             |
+| 正文      | Markdown `code` renderer，`theme.textMuted`，使用 `subtleSyntax()`                  |
+| 流式      | 每 Part 使用 50ms throttled display content；父 Message 未完成时 `streaming={true}` |
+| 完成态    | key 为 `width + preview text`，宽度或内容变化时重新挂载 completed renderer          |
+| 点击      | mouse up 切换本 Part 的 `expanded`；存在文本选择时不切换                            |
+| 提示      | overflow 时显示 `▼ expand` 或 `▲ collapse`                                          |
 
 源码位于 `packages/opencode/src/cli/cmd/tui/routes/session/index.tsx:1735-1815`。
 
@@ -139,9 +139,7 @@ Part ID 使用 ascending 时间部分和同毫秒计数器，见 `packages/openc
 ```ts
 const lines = renderedContent.split("\n")
 const overflow = lines.length > 5
-const preview = overflow && !expanded
-  ? [...lines.slice(0, 5), "…"].join("\n")
-  : renderedContent
+const preview = overflow && !expanded ? [...lines.slice(0, 5), "…"].join("\n") : renderedContent
 ```
 
 它有三个重要性质：
@@ -165,12 +163,12 @@ R12: 2 lines
 
 当前算法对每个 Part 都得到 `2 <= 5`，所以 12 个 Part 全部展开。粗略占用为：
 
-| 来源 | 行数 |
-| --- | ---: |
-| 12 个标题 | 12 |
-| 12 个正文，每个 2 行 | 24 |
-| 11 个 Part 内间距 | 11 |
-| 合计 | 47 |
+| 来源                 | 行数 |
+| -------------------- | ---: |
+| 12 个标题            |   12 |
+| 12 个正文，每个 2 行 |   24 |
+| 11 个 Part 内间距    |   11 |
+| 合计                 |   47 |
 
 这还没有计算终端换行、Markdown 布局和 Message footer。单 Part 阈值没有违反自身规则，但完全没有实现“限制整段 thinking 占屏”的产品目标。
 
@@ -244,11 +242,11 @@ Second paragraph.
 
 因此必须遵守以下显示规则：
 
-| 场景 | 正确显示语义 |
-| --- | --- |
-| 一个 Part 内有 4 个 Markdown 标题 | 1 个 source segment，4 个内部 section |
-| 4 个相邻 Part，每个只有一段文本 | 4 个 source segment，1 个 Reasoning Run |
-| 两个 Part，中间有 text/tool/step-start | 2 个 Reasoning Run |
+| 场景                                                 | 正确显示语义                                       |
+| ---------------------------------------------------- | -------------------------------------------------- |
+| 一个 Part 内有 4 个 Markdown 标题                    | 1 个 source segment，4 个内部 section              |
+| 4 个相邻 Part，每个只有一段文本                      | 4 个 source segment，1 个 Reasoning Run            |
+| 两个 Part，中间有 text/tool/step-start               | 2 个 Reasoning Run                                 |
 | 一个 Part 以未闭合代码围栏结束，下一 Part 是普通文本 | 两个独立 Markdown renderer，不能让围栏跨 Part 生效 |
 
 仅仅执行 `parts.map(x => x.text).join("\n\n")` 会产生以下问题：
@@ -312,30 +310,30 @@ R Snapshot R                  -> [R] Snapshot [R]
 
 实现必须满足以下不变量。
 
-| 编号 | 不变量 |
-| --- | --- |
-| I1 | 每个输入 Part 在投影结果中恰好出现一次，直接出现或作为一个 run 的成员出现 |
-| I2 | 展平投影结果后，Part 对象身份和顺序与输入完全一致 |
-| I3 | 不创建合成 Part ID，不修改原 Part 的 ID、text、metadata、time 或 hidden |
-| I4 | 分组只在同一 Message 内发生 |
-| I5 | 每个 run 是原始序列中的最大连续 reasoning 序列 |
-| I6 | 任意非 reasoning Part 都终止当前 run，不受可见性影响 |
-| I7 | grouping 是纯、同步、`O(n)` 的 in-process 计算，没有 I/O 和 Solid side effect |
-| I8 | delta 继续按原 Part ID 更新，grouping 不进入 SyncProvider |
-| I9 | 展开态每个 source segment 使用独立 Markdown renderer |
-| I10 | 折叠态的行数预算属于整个 run，不按成员数倍增 |
-| I11 | run key 不依赖 text、字符数、完成状态或最后一个成员 |
-| I12 | transcript/export 继续遍历原始 Part，不消费 ReasoningRun |
+| 编号 | 不变量                                                                        |
+| ---- | ----------------------------------------------------------------------------- |
+| I1   | 每个输入 Part 在投影结果中恰好出现一次，直接出现或作为一个 run 的成员出现     |
+| I2   | 展平投影结果后，Part 对象身份和顺序与输入完全一致                             |
+| I3   | 不创建合成 Part ID，不修改原 Part 的 ID、text、metadata、time 或 hidden       |
+| I4   | 分组只在同一 Message 内发生                                                   |
+| I5   | 每个 run 是原始序列中的最大连续 reasoning 序列                                |
+| I6   | 任意非 reasoning Part 都终止当前 run，不受可见性影响                          |
+| I7   | grouping 是纯、同步、`O(n)` 的 in-process 计算，没有 I/O 和 Solid side effect |
+| I8   | delta 继续按原 Part ID 更新，grouping 不进入 SyncProvider                     |
+| I9   | 展开态每个 source segment 使用独立 Markdown renderer                          |
+| I10  | 折叠态的行数预算属于整个 run，不按成员数倍增                                  |
+| I11  | run key 不依赖 text、字符数、完成状态或最后一个成员                           |
+| I12  | transcript/export 继续遍历原始 Part，不消费 ReasoningRun                      |
 
 ## 9. 方案比较
 
-| 方案 | 优点 | 主要问题 | 结论 |
-| --- | --- | --- | --- |
-| 在 processor 合并相邻 reasoning | TUI 无需新抽象 | 改写数据库和事件语义；破坏 Provider segment 身份、delta 路由和历史回放 | 拒绝 |
-| 在 SyncProvider 生成合成 Part | 数据库不变 | reducer 必须维护成员 delta、最终快照、删除、乱序和 synthetic ID；同步层承担显示策略 | 拒绝 |
-| TUI 拼接多个 `text` 后复用 `ReasoningPart` | 改动看起来较小 | Markdown 边界、Part 身份、流式 key 和歧义问题仍存在 | 拒绝 |
-| TUI `ReasoningRun` 外壳，成员独立渲染 | 只改显示；能共享预算；保留所有 Part 语义 | 需要组级状态、preview 分配和行为测试 | 推荐 |
-| 建立通用可配置 display-node policy registry | 可扩展到 tool/context 等分组 | 当前只有一个新策略，公开 policy seam 会过度设计 | 暂缓 |
+| 方案                                        | 优点                                     | 主要问题                                                                            | 结论 |
+| ------------------------------------------- | ---------------------------------------- | ----------------------------------------------------------------------------------- | ---- |
+| 在 processor 合并相邻 reasoning             | TUI 无需新抽象                           | 改写数据库和事件语义；破坏 Provider segment 身份、delta 路由和历史回放              | 拒绝 |
+| 在 SyncProvider 生成合成 Part               | 数据库不变                               | reducer 必须维护成员 delta、最终快照、删除、乱序和 synthetic ID；同步层承担显示策略 | 拒绝 |
+| TUI 拼接多个 `text` 后复用 `ReasoningPart`  | 改动看起来较小                           | Markdown 边界、Part 身份、流式 key 和歧义问题仍存在                                 | 拒绝 |
+| TUI `ReasoningRun` 外壳，成员独立渲染       | 只改显示；能共享预算；保留所有 Part 语义 | 需要组级状态、preview 分配和行为测试                                                | 推荐 |
+| 建立通用可配置 display-node policy registry | 可扩展到 tool/context 等分组             | 当前只有一个新策略，公开 policy seam 会过度设计                                     | 暂缓 |
 
 仓库的 Web UI 已经有扫描最大连续 run 的先例：`packages/ui/src/components/message-part.tsx:547-589` 会把连续 context tools 生成 group descriptor，并通过 Part ref 在渲染时重新解析成员，见 `packages/ui/src/components/message-part.tsx:638-716`。这个先例证明 render-only group 是仓库已有模式，但其“先过滤可见 Part 再分组”的具体边界策略不能直接复制到 reasoning。
 
@@ -379,9 +377,7 @@ function projectMessageParts(messageID: string, parts: readonly Part[]): readonl
 ### 10.3 前置边界锚定的 key
 
 ```ts
-const key = precedingBoundary
-  ? `${messageID}:reasoning:after:${precedingBoundary.id}`
-  : `${messageID}:reasoning:start`
+const key = precedingBoundary ? `${messageID}:reasoning:after:${precedingBoundary.id}` : `${messageID}:reasoning:start`
 ```
 
 run key 依赖 Message 和 run 前面的原始硬边界，而不依赖任何 reasoning 成员：
@@ -406,9 +402,7 @@ function projectMessageParts(messageID: string, parts: readonly Part[]) {
     if (run.length === 0) return
     result.push({
       kind: "reasoning-run",
-      key: precedingBoundary
-        ? `${messageID}:reasoning:after:${precedingBoundary.id}`
-        : `${messageID}:reasoning:start`,
+      key: precedingBoundary ? `${messageID}:reasoning:after:${precedingBoundary.id}` : `${messageID}:reasoning:start`,
       parts: run,
     })
     run = []
@@ -531,12 +525,12 @@ Thinking (1,284 chars):
 
 建议布局预算：
 
-| 区域 | 折叠态预算 |
-| --- | ---: |
-| Group header | 1 行 |
+| 区域                                |      折叠态预算 |
+| ----------------------------------- | --------------: |
+| Group header                        |            1 行 |
 | Preview body，包括 segment boundary | 最多 5 个视觉行 |
-| Toggle/hidden summary | 1 行 |
-| 总计 | 通常最多 7 行 |
+| Toggle/hidden summary               |            1 行 |
+| 总计                                |   通常最多 7 行 |
 
 所有成员标记都必须位于 preview body 的 5 行 clipping 容器内，或者被 footer 汇总。不能为每个隐藏成员额外保留一行。
 
@@ -696,9 +690,9 @@ type RunOverride = "expanded" | "collapsed" | undefined
 
 建议拆分概念：
 
-| 概念 | 用途 |
-| --- | --- |
-| `thinkingMode` | 只控制屏幕中的 ReasoningRun 展开/折叠 |
+| 概念                          | 用途                                                              |
+| ----------------------------- | ----------------------------------------------------------------- |
+| `thinkingMode`                | 只控制屏幕中的 ReasoningRun 展开/折叠                             |
 | `includeThinkingInTranscript` | 保持 copy/export 当前默认和显式 dialog 选择，不从折叠状态隐式推导 |
 
 ReasoningRun 不进入 `formatTranscript()`。copy/export 继续遍历原始 Part。
@@ -769,16 +763,16 @@ ReasoningRun 对这个规则应表现为一个非 tool item：
 
 ### 15.3 建议样式
 
-| 元素 | 建议 |
-| --- | --- |
-| Message 外层左边框 | 完全不变 |
-| ReasoningRun 左边框 | 复用当前 `SplitBorder` 和 `theme.backgroundElement` |
-| Group header | 复用 `theme.markdownEmph` 和 italic |
-| 正文 | 复用 `subtleSyntax()`、`theme.textMuted`、conceal |
-| Segment boundary | 紧凑 `[seg N/M]`，`theme.textMuted`，普通非 italic text，不进入 Markdown，不再嵌套左边框 |
-| Toggle | 复用 `▼ expand` / `▲ collapse`，只显示一次 |
-| 字符数 | header 显示所有可见成员规范化文本字符数之和 |
-| source segment 数 | 多成员时显示，单成员时可省略以保持现有视觉 |
+| 元素                | 建议                                                                                     |
+| ------------------- | ---------------------------------------------------------------------------------------- |
+| Message 外层左边框  | 完全不变                                                                                 |
+| ReasoningRun 左边框 | 复用当前 `SplitBorder` 和 `theme.backgroundElement`                                      |
+| Group header        | 复用 `theme.markdownEmph` 和 italic                                                      |
+| 正文                | 复用 `subtleSyntax()`、`theme.textMuted`、conceal                                        |
+| Segment boundary    | 紧凑 `[seg N/M]`，`theme.textMuted`，普通非 italic text，不进入 Markdown，不再嵌套左边框 |
+| Toggle              | 复用 `▼ expand` / `▲ collapse`，只显示一次                                               |
+| 字符数              | header 显示所有可见成员规范化文本字符数之和                                              |
+| source segment 数   | 多成员时显示，单成员时可省略以保持现有视觉                                               |
 
 字符数仍然只是信息展示，不参与 identity。当前 `.length` 是 UTF-16 code unit 数而不是 grapheme 或终端 cell 数；视觉行估算应使用 `Bun.stringWidth`，不要用 header 字符数代替。
 
@@ -819,13 +813,13 @@ ReasoningRun 对这个规则应表现为一个非 tool item：
 
 所有实现和解释只维护在本设计文档及以下既有文件中，不新增源码、测试或解释性文档：
 
-| 文件 | 修改 |
-| --- | --- |
-| `packages/opencode/src/cli/cmd/tui/routes/session/index.tsx` | 增加私有投影 helper；把 `AssistantMessage` 改为稳定 render-item key；用 `ReasoningRun` 和成员 renderer 替换当前局部 `ReasoningPart`；消费 `thinkingMode` |
-| `packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx` | 真实 TUI 行为、流式、宽度、点击和间距回归测试 |
-| `packages/opencode/test/cli/cmd/tui/session-layout.test.ts` | 证明 reasoning shell 的实际正文宽度等于 `ctx.width` |
-| `packages/opencode/test/cli/cmd/tui/session-integration.test.ts` | 删除或收窄已经被行为测试替代的脆弱源码字符串断言 |
-| `docs/Proposal/tui-reasoning-run-rendering-proposal.md` | 唯一设计和实施说明，随最终实现保持一致 |
+| 文件                                                                 | 修改                                                                                                                                                     |
+| -------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `packages/opencode/src/cli/cmd/tui/routes/session/index.tsx`         | 增加私有投影 helper；把 `AssistantMessage` 改为稳定 render-item key；用 `ReasoningRun` 和成员 renderer 替换当前局部 `ReasoningPart`；消费 `thinkingMode` |
+| `packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx` | 真实 TUI 行为、流式、宽度、点击和间距回归测试                                                                                                            |
+| `packages/opencode/test/cli/cmd/tui/session-layout.test.ts`          | 证明 reasoning shell 的实际正文宽度等于 `ctx.width`                                                                                                      |
+| `packages/opencode/test/cli/cmd/tui/session-integration.test.ts`     | 删除或收窄已经被行为测试替代的脆弱源码字符串断言                                                                                                         |
+| `docs/Proposal/tui-reasoning-run-rendering-proposal.md`              | 唯一设计和实施说明，随最终实现保持一致                                                                                                                   |
 
 目标只修改 1 个源码文件、3 个测试文件和本 proposal。总代码与测试净改动必须小于 1000 行，预计为 550 至 800 行。若实现需要新增文件、超过这个行数，或者扩展到 6 个以上源码/测试文件，必须停止并重新审计，而不是继续堆叠抽象。
 
@@ -867,21 +861,21 @@ bun typecheck
 
 ## 19. 风险和缓解
 
-| 风险 | 影响 | 缓解 |
-| --- | --- | --- |
-| descriptor 每次更新都重建 | Solid 重挂，展开状态和流式 renderer 抖动 | `<For>` 只遍历 primitive string key，通过 reactive Map 读取当前 descriptor |
-| 乱序前插新 segment 让 key 改变 | 用户展开状态丢失 | key 使用 Message 起点或前置 raw hard boundary，不使用 reasoning Part ID |
-| 先过滤不可见 Part | 跨 step/tool/empty text 错误聚合 | grouping 必须先于可见性过滤 |
-| 拼接 Markdown | 语义歧义和跨 Part 解析污染 | 每成员独立 renderer，boundary 在 Markdown 外 |
-| segment label 自己占满屏幕 | 聚合后仍不能控制高度 | `[seg N/M]` 必须计入同一个 5 行 clipped preview budget |
-| 逻辑行漏算自动换行 | 窄终端仍占屏 | `ctx.width` 实测、preview char wrap、保守 cell estimator 和 hard clipping |
-| async highlight 尚未显示正文 | 出现孤立 marker | `onChunks` 只根据 post-conceal chunk 的已分配可见前缀揭示 marker |
-| 旧 highlight callback 晚到 | 已替换或销毁的成员被错误更新 | content、generation、active 和 cleanup guard |
-| collapsed 时完整渲染超长 Markdown | 首屏性能下降 | obvious-overflow 快速路径、bounded preview、full body 首次展开才挂载 |
-| full body 反复卸载重挂 | OpenTUI 空白或状态丢失 | 首次挂载后常驻，使用 `visible` 切换 |
-| 把 screen mode 复用于 transcript | copy/export 内容意外变化 | 独立 `includeThinkingInTranscript` 概念 |
-| hard boundary 删除合并 | 成员重复或右侧状态复活 | 左侧 boundary key 胜出，并用真实 `part.removed` 测试 dispose 和成员去重 |
-| 修改范围失控 | 小问题演变为跨层重构 | 不新增文件，1 个源码文件、3 个测试文件、总代码与测试净改动小于 1000 行 |
+| 风险                              | 影响                                     | 缓解                                                                       |
+| --------------------------------- | ---------------------------------------- | -------------------------------------------------------------------------- |
+| descriptor 每次更新都重建         | Solid 重挂，展开状态和流式 renderer 抖动 | `<For>` 只遍历 primitive string key，通过 reactive Map 读取当前 descriptor |
+| 乱序前插新 segment 让 key 改变    | 用户展开状态丢失                         | key 使用 Message 起点或前置 raw hard boundary，不使用 reasoning Part ID    |
+| 先过滤不可见 Part                 | 跨 step/tool/empty text 错误聚合         | grouping 必须先于可见性过滤                                                |
+| 拼接 Markdown                     | 语义歧义和跨 Part 解析污染               | 每成员独立 renderer，boundary 在 Markdown 外                               |
+| segment label 自己占满屏幕        | 聚合后仍不能控制高度                     | `[seg N/M]` 必须计入同一个 5 行 clipped preview budget                     |
+| 逻辑行漏算自动换行                | 窄终端仍占屏                             | `ctx.width` 实测、preview char wrap、保守 cell estimator 和 hard clipping  |
+| async highlight 尚未显示正文      | 出现孤立 marker                          | `onChunks` 只根据 post-conceal chunk 的已分配可见前缀揭示 marker           |
+| 旧 highlight callback 晚到        | 已替换或销毁的成员被错误更新             | content、generation、active 和 cleanup guard                               |
+| collapsed 时完整渲染超长 Markdown | 首屏性能下降                             | obvious-overflow 快速路径、bounded preview、full body 首次展开才挂载       |
+| full body 反复卸载重挂            | OpenTUI 空白或状态丢失                   | 首次挂载后常驻，使用 `visible` 切换                                        |
+| 把 screen mode 复用于 transcript  | copy/export 内容意外变化                 | 独立 `includeThinkingInTranscript` 概念                                    |
+| hard boundary 删除合并            | 成员重复或右侧状态复活                   | 左侧 boundary key 胜出，并用真实 `part.removed` 测试 dispose 和成员去重    |
+| 修改范围失控                      | 小问题演变为跨层重构                     | 不新增文件，1 个源码文件、3 个测试文件、总代码与测试净改动小于 1000 行     |
 
 ## 20. v2 和其他 UI 的范围
 

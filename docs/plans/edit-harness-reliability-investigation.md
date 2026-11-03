@@ -38,10 +38,10 @@
 统一截止北京时间 **2026-09-08 04:00:00**，epoch ms `1788811200000`。窗口起点分别为8月25日、8月18日、8月9日04:00。排除 pending，终态率为 `error / (completed + error)`。
 
 | 窗口 | apply_patch completed / error | 失败率 | edit completed / error | 失败率 |
-| --- | --- | --- | --- | --- |
-| 14天 | 1082 / 370 | 25.48% | 1972 / 500 | 20.23% |
-| 21天 | 2495 / 823 | 24.80% | 2847 / 556 | 16.34% |
-| 30天 | 3308 / 950 | 22.31% | 3538 / 640 | 15.32% |
+| ---- | ----------------------------- | ------ | ---------------------- | ------ |
+| 14天 | 1082 / 370                    | 25.48% | 1972 / 500             | 20.23% |
+| 21天 | 2495 / 823                    | 24.80% | 2847 / 556             | 16.34% |
+| 30天 | 3308 / 950                    | 22.31% | 3538 / 640             | 15.32% |
 
 30天合计8436条编辑记录、72个 Session；14天3924条、41个 Session；21天6721条、59个 Session。一次全量解压批次校验204个冷存储 payload 的长度及带 kind 前缀的 SHA-256。
 
@@ -55,33 +55,33 @@
 
 ### 3.2 最近两周模型/Provider 分布
 
-| 模型 / Provider | 工具 | error / 总调用 | 比例 |
-| --- | --- | --- | --- |
-| GLM-5.3 / smark | edit | 215 / 1364 | 15.76% |
-| GLM-5.3-flash / smark | edit | 230 / 779 | 29.53% |
-| DeepSeek-v4-flash-0731 / smark | edit | 55 / 329 | 16.72% |
-| GPT-5.6-sol / DaXiao Codex | apply_patch | 245 / 855 | 28.65% |
-| GPT-5.6-sol / smark-codex | apply_patch | 84 / 350 | 24.00% |
-| GPT-5.6-sol / openai | apply_patch | 13 / 158 | 8.23% |
-| GPT-6-astra / smark-codex | apply_patch | 28 / 89 | 31.46% |
+| 模型 / Provider                | 工具        | error / 总调用 | 比例   |
+| ------------------------------ | ----------- | -------------- | ------ |
+| GLM-5.3 / smark                | edit        | 215 / 1364     | 15.76% |
+| GLM-5.3-flash / smark          | edit        | 230 / 779      | 29.53% |
+| DeepSeek-v4-flash-0731 / smark | edit        | 55 / 329       | 16.72% |
+| GPT-5.6-sol / DaXiao Codex     | apply_patch | 245 / 855      | 28.65% |
+| GPT-5.6-sol / smark-codex      | apply_patch | 84 / 350       | 24.00% |
+| GPT-5.6-sol / openai           | apply_patch | 13 / 158       | 8.23%  |
+| GPT-6-astra / smark-codex      | apply_patch | 28 / 89        | 31.46% |
 
 这不是公平模型比较。工具、项目、任务、上下文长度、运行版本和 fork 不同。**Flash 的230条失败全部集中于 `ses_041cd5549ffeSiDWyPpcy8Xrsl` 这个补丁迁移 Session。**
 
 ### 3.3 GLM 全量失败分解
 
-| 直接失败阶段 | GLM-5.3 | GLM-5.3-flash |
-| --- | --- | --- |
-| oldString 不匹配 | 94 | 140 |
-| 流未完成或取消 | 87 | 1 |
-| 未读门禁 | 13 | 69 |
-| 文件写入异常 | 8 | 0 |
-| 歧义 | 4 | 5 |
-| 重叠 | 2 | 0 |
-| 无变化 | 2 | 12 |
-| 参数/schema | 2 | 1 |
-| 文件不存在 | 0 | 2 |
-| 其他待细分 | 3 | 0 |
-| 总计 | 215 | 230 |
+| 直接失败阶段     | GLM-5.3 | GLM-5.3-flash |
+| ---------------- | ------- | ------------- |
+| oldString 不匹配 | 94      | 140           |
+| 流未完成或取消   | 87      | 1             |
+| 未读门禁         | 13      | 69            |
+| 文件写入异常     | 8       | 0             |
+| 歧义             | 4       | 5             |
+| 重叠             | 2       | 0             |
+| 无变化           | 2       | 12            |
+| 参数/schema      | 2       | 1             |
+| 文件不存在       | 0       | 2             |
+| 其他待细分       | 3       | 0             |
+| 总计             | 215     | 230           |
 
 以上是阶段分类，不是根因覆盖率。234条不匹配才是需要逐条追 oldString 的主要集合。
 
@@ -216,28 +216,28 @@ Session `ses_fb40f26b4ffeY3VjfG4svSLFqh`，80条edit `Tool execution did not com
 
 下列20条是不同Session的定点失败抽样，并非随机样本。相邻窗口检索为失败前1小时、后10分钟；“未见先前读取”不等于整个Session从未读过。第7/8条为fork复制事件，不能算独立根因样本。
 
-| # | Session | 失败Part | 文件/观察 |
-| --- | --- | --- | --- |
-| 1 | ses_fa174e32dffeTCMApGdW6PJvHv | prt_07d74676a001wtSFiVuMu3IQXe | state.dart，单行赋值与实际格式化换行不符 |
-| 2 | ses_f9a9dfba4ffegVZ576cr3ZzMGz | prt_07d7253810011CClzMnawXqjQJ | Diff.ts，多个匹配；另有H01完整链 |
-| 3 | ses_f8b378e68ffePzMwT7iii55Nw7 | prt_07c29224e002uib94CwxKk7FYq | update.sh，dirname缺少--；read后成功 |
-| 4 | ses_041cd5549ffeSiDWyPpcy8Xrsl | prt_079837474001R75OB5TIizWE7l | 0259.patch，空格上下文行被当成+行 |
-| 5 | ses_10fb7b41cfferSWcJIpOXdJIGj | prt_07880706f001cWXk0lX5g6dyVl | dorm_audit_aug.py，前次修改后第二块不符 |
-| 6 | ses_fc166ef8effeHjRt8s7WK0azSM | prt_0774effcd001uaRsRhETju5hvc | transcribe.py，成功改写后再次大块修改失败 |
-| 7 | ses_1762e23a2ffeYBi6TXLUSjJuKP | prt_076acb096001HkGjuedifRY8Uf | r6_probe_caps.py，write后转义不符，read后成功 |
-| 8 | ses_f8925cc15ffeEPWfz0EMkdwK4O | prt_076da340d017mzt0DzTFicE6JK | 上条fork复制，不算独立事件 |
-| 9 | ses_fa4a6f985ffewzbdTRgY6NxHyM | prt_07686ab38001zPgLJlKU1uXgBL | reviewer-prompt.test.ts，门禁；完整历史其实有旧edit |
-| 10 | ses_f8aefd1efffer9qxMHqUeLpEtq | prt_0764b4671002S8nik39A898V9Y | chatgpt-core.js，第二块不符，定点read后成功 |
-| 11 | ses_f8af288a6ffemmYSZ0brd66JKQ | prt_075bd3ecf0011auEl4ua7g8Mb5 | bash-compress.ts，九块成功后又用不同旧片段 |
-| 12 | ses_00ebf47e6ffejc0zWNlqQRaO0w | prt_070b5fa8a001QT8UT4C5i6dqZT | test_generate_provider.py，门禁，旧历史有读/改 |
-| 13 | ses_f9d14159cffeNPomj2tKlu5QhH | prt_0633e18ef001wfOw4NGakC83MX | file-diff.ts，第四块不符 |
-| 14 | ses_fa1e77e60ffeBsVgoixXfzndY6 | prt_05e6192c5001td2tQ6O8Eu46J4 | settings.json，门禁，read后两块成功 |
-| 15 | ses_fa2ef8cd2ffeDlBpRloUME3nOC | prt_05d812ea2001pVR2jPN1FyvnlQ | audio.test.ts，前次edit后第二块不符，read后成功 |
-| 16 | ses_fb0592160ffekmK38a40bM58vb | prt_0580cb0b4001XR7JgWvmnK2coI | mesh-node.sh，反斜杠数量不同，修正后成功 |
-| 17 | ses_fb40f26b4ffeY3VjfG4svSLFqh | prt_051f1ec620012zVluSfNkrbk0m | scroll计划文件门禁；另有M03异常输出群 |
-| 18 | ses_fb39b7c1effeTceet1hCpuPwmW | prt_0517a2868001jtO3SP4W7hj5Iz | Markdown待核验段遗漏空行，随后成功 |
-| 19 | ses_fbdc39136ffeZ2bTXGcvoEAMNK | prt_04f4cccce001s7v43AS3f2K2Je | write.ts第六块不符，恢复read被stub |
-| 20 | ses_05d28b468ffet146EjFFXLGrhD | prt_0458410c00017zVvSoas41yNPj | control-plane-migrate.sh，刚read仍歧义，扩大上下文成功 |
+| #   | Session                        | 失败Part                       | 文件/观察                                              |
+| --- | ------------------------------ | ------------------------------ | ------------------------------------------------------ |
+| 1   | ses_fa174e32dffeTCMApGdW6PJvHv | prt_07d74676a001wtSFiVuMu3IQXe | state.dart，单行赋值与实际格式化换行不符               |
+| 2   | ses_f9a9dfba4ffegVZ576cr3ZzMGz | prt_07d7253810011CClzMnawXqjQJ | Diff.ts，多个匹配；另有H01完整链                       |
+| 3   | ses_f8b378e68ffePzMwT7iii55Nw7 | prt_07c29224e002uib94CwxKk7FYq | update.sh，dirname缺少--；read后成功                   |
+| 4   | ses_041cd5549ffeSiDWyPpcy8Xrsl | prt_079837474001R75OB5TIizWE7l | 0259.patch，空格上下文行被当成+行                      |
+| 5   | ses_10fb7b41cfferSWcJIpOXdJIGj | prt_07880706f001cWXk0lX5g6dyVl | dorm_audit_aug.py，前次修改后第二块不符                |
+| 6   | ses_fc166ef8effeHjRt8s7WK0azSM | prt_0774effcd001uaRsRhETju5hvc | transcribe.py，成功改写后再次大块修改失败              |
+| 7   | ses_1762e23a2ffeYBi6TXLUSjJuKP | prt_076acb096001HkGjuedifRY8Uf | r6_probe_caps.py，write后转义不符，read后成功          |
+| 8   | ses_f8925cc15ffeEPWfz0EMkdwK4O | prt_076da340d017mzt0DzTFicE6JK | 上条fork复制，不算独立事件                             |
+| 9   | ses_fa4a6f985ffewzbdTRgY6NxHyM | prt_07686ab38001zPgLJlKU1uXgBL | reviewer-prompt.test.ts，门禁；完整历史其实有旧edit    |
+| 10  | ses_f8aefd1efffer9qxMHqUeLpEtq | prt_0764b4671002S8nik39A898V9Y | chatgpt-core.js，第二块不符，定点read后成功            |
+| 11  | ses_f8af288a6ffemmYSZ0brd66JKQ | prt_075bd3ecf0011auEl4ua7g8Mb5 | bash-compress.ts，九块成功后又用不同旧片段             |
+| 12  | ses_00ebf47e6ffejc0zWNlqQRaO0w | prt_070b5fa8a001QT8UT4C5i6dqZT | test_generate_provider.py，门禁，旧历史有读/改         |
+| 13  | ses_f9d14159cffeNPomj2tKlu5QhH | prt_0633e18ef001wfOw4NGakC83MX | file-diff.ts，第四块不符                               |
+| 14  | ses_fa1e77e60ffeBsVgoixXfzndY6 | prt_05e6192c5001td2tQ6O8Eu46J4 | settings.json，门禁，read后两块成功                    |
+| 15  | ses_fa2ef8cd2ffeDlBpRloUME3nOC | prt_05d812ea2001pVR2jPN1FyvnlQ | audio.test.ts，前次edit后第二块不符，read后成功        |
+| 16  | ses_fb0592160ffekmK38a40bM58vb | prt_0580cb0b4001XR7JgWvmnK2coI | mesh-node.sh，反斜杠数量不同，修正后成功               |
+| 17  | ses_fb40f26b4ffeY3VjfG4svSLFqh | prt_051f1ec620012zVluSfNkrbk0m | scroll计划文件门禁；另有M03异常输出群                  |
+| 18  | ses_fb39b7c1effeTceet1hCpuPwmW | prt_0517a2868001jtO3SP4W7hj5Iz | Markdown待核验段遗漏空行，随后成功                     |
+| 19  | ses_fbdc39136ffeZ2bTXGcvoEAMNK | prt_04f4cccce001s7v43AS3f2K2Je | write.ts第六块不符，恢复read被stub                     |
+| 20  | ses_05d28b468ffet146EjFFXLGrhD | prt_0458410c00017zVvSoas41yNPj | control-plane-migrate.sh，刚read仍歧义，扩大上下文成功 |
 
 ## 7. 来源扫描结果与80%目标差距
 
@@ -274,13 +274,13 @@ Session `ses_fb40f26b4ffeY3VjfG4svSLFqh`，80条edit `Tool execution did not com
 
 对234条不匹配定位错误消息中的 `edits[i]`（单条错误取0），检查失败oldString是否完整包含于另一个条目的newString、且不包含于该条目的oldString。找到5条：GLM-5.3为3条，Flash为2条。
 
-| 失败Part | 失败索引 | 产生该文本的索引 | 事件 |
-| --- | --- | --- | --- |
-| prt_058093723001pHOy2wEsYYt5RF | 4 | 1 | Flash逆向重建prompt版本，后续条目引用同次替换将恢复的hasInFlightTail块 |
-| prt_05d812ea2001pVR2jPN1FyvnlQ | 1 | 0 | GLM在audio.test.ts同次添加测试后，再修改新测试中的sleep/断言段 |
-| prt_072b8abc0001lbnG6aG0xApLz6 | 3 | 0 | Flash后续条目引用同次新加的Entry/Match import |
-| prt_075c853a4001MobbgiyvRm05MP | 1 | 0 | GLM后续条目引用同次新加的bisect-mid调试行 |
-| prt_07a5401af001gqQJQO5ZPt46Jo | 5 | 4 | GLM文档条目引用同次替换后才形成的编号段落 |
+| 失败Part                       | 失败索引 | 产生该文本的索引 | 事件                                                                   |
+| ------------------------------ | -------- | ---------------- | ---------------------------------------------------------------------- |
+| prt_058093723001pHOy2wEsYYt5RF | 4        | 1                | Flash逆向重建prompt版本，后续条目引用同次替换将恢复的hasInFlightTail块 |
+| prt_05d812ea2001pVR2jPN1FyvnlQ | 1        | 0                | GLM在audio.test.ts同次添加测试后，再修改新测试中的sleep/断言段         |
+| prt_072b8abc0001lbnG6aG0xApLz6 | 3        | 0                | Flash后续条目引用同次新加的Entry/Match import                          |
+| prt_075c853a4001MobbgiyvRm05MP | 1        | 0                | GLM后续条目引用同次新加的bisect-mid调试行                              |
+| prt_07a5401af001gqQJQO5ZPt46Jo | 5        | 4                | GLM文档条目引用同次替换后才形成的编号段落                              |
 
 失败事实说明owner在修改前文件中未找到目标；参数结构证明存在新文本依赖。仍不能仅凭包含关系证明模型主观意图，或证明全部条目除此以外均正确。
 
@@ -294,16 +294,16 @@ Session `ses_fb40f26b4ffeY3VjfG4svSLFqh`，80条edit `Tool execution did not com
 
 统计以持久化input.edits长度分桶，输入可能已做真值回写；保留fork重复，包含门禁/权限等失败，不能解释为纯匹配概率或公平性能评测。
 
-| 模型 | 条目数 | completed | error | error占比 |
-| --- | --- | --- | --- | --- |
-| GLM-5.3 | 0 | 0 | 87 | 100%（流类空解析input） |
-| GLM-5.3 | 1 | 679 | 51 | 6.99% |
-| GLM-5.3 | 2–4 | 361 | 44 | 10.86% |
-| GLM-5.3 | 5+ | 109 | 33 | 23.24% |
-| Flash | 0 | 0 | 1 | 100% |
-| Flash | 1 | 346 | 134 | 27.92% |
-| Flash | 2–4 | 179 | 74 | 29.25% |
-| Flash | 5+ | 24 | 21 | 46.67% |
+| 模型    | 条目数 | completed | error | error占比               |
+| ------- | ------ | --------- | ----- | ----------------------- |
+| GLM-5.3 | 0      | 0         | 87    | 100%（流类空解析input） |
+| GLM-5.3 | 1      | 679       | 51    | 6.99%                   |
+| GLM-5.3 | 2–4    | 361       | 44    | 10.86%                  |
+| GLM-5.3 | 5+     | 109       | 33    | 23.24%                  |
+| Flash   | 0      | 0         | 1     | 100%                    |
+| Flash   | 1      | 346       | 134   | 27.92%                  |
+| Flash   | 2–4    | 179       | 74    | 29.25%                  |
+| Flash   | 5+     | 24        | 21    | 46.67%                  |
 
 GLM的94条不匹配中61条来自多条目调用，Flash的140条中66条来自多条目调用。批大小与失败相关，但可能由任务复杂度、长上下文和同文件原子性共同影响，不能据此证明“批量工具本身有bug”。
 
@@ -311,12 +311,12 @@ GLM的94条不匹配中61条来自多条目调用，Flash的140条中66条来自
 
 同一组普通源码行，使用真实 `compressVisibleOutput`，结果如下：
 
-| 输入 | 输出空行 | applied | carriageReturnGroups |
-| --- | --- | --- | --- |
-| LF | 保留 | false | 0 |
-| CRLF | 删除 | true | 1 |
-| CRLF + enabled:false | 保留 | false | 0 |
-| ANSI reset + LF | 保留 | false | 0 |
+| 输入                 | 输出空行 | applied | carriageReturnGroups |
+| -------------------- | -------- | ------- | -------------------- |
+| LF                   | 保留     | false   | 0                    |
+| CRLF                 | 删除     | true    | 1                    |
+| CRLF + enabled:false | 保留     | false   | 0                    |
+| ANSI reset + LF      | 保留     | false   | 0                    |
 
 这个反证限制H03范围：不能笼统断言所有ANSI输出都会丢空行。内部虚拟终端可能删空行，但最终是否返回压缩文本还受applied判定约束；测试中的ANSI reset场景最终返回原文本。CRLF的缺陷在本对照中稳定可复现。
 
@@ -351,39 +351,39 @@ R2增加了可核验机制与反证，但仍未达到80%因果解释目标。剩
 
 2835 次调用、25 个 Session；edit 2026 次（错误 304，**15.0%**），apply_patch 809 次（错误 161，**19.9%**）。对照 R2 固定窗口（edit 20.23% / apply_patch 25.48%）均有下降，但基数仍高。
 
-| 模型 | 工具 | 错误 / 总调用 | 比例 |
-| --- | --- | --- | --- |
-| glm-5.3-flash | edit | 176 / 717 | 24.5%（全部仍属补丁迁徙 Session `ses_041cd5549ffeSiDWyPpcy8Xrsl`） |
-| glm-5.3 | edit | 48 / 465 | 10.3% |
-| kimi-k3 | edit | 80 / 844 | 9.5% |
-| gpt-6-astra | apply_patch | 99 / 568 | 17.4% |
-| gpt-5.6-sol | apply_patch | 40 / 145 | 27.6% |
-| gpt-5.6-luna | apply_patch | 22 / 96 | 22.9% |
+| 模型          | 工具        | 错误 / 总调用 | 比例                                                               |
+| ------------- | ----------- | ------------- | ------------------------------------------------------------------ |
+| glm-5.3-flash | edit        | 176 / 717     | 24.5%（全部仍属补丁迁徙 Session `ses_041cd5549ffeSiDWyPpcy8Xrsl`） |
+| glm-5.3       | edit        | 48 / 465      | 10.3%                                                              |
+| kimi-k3       | edit        | 80 / 844      | 9.5%                                                               |
+| gpt-6-astra   | apply_patch | 99 / 568      | 17.4%                                                              |
+| gpt-5.6-sol   | apply_patch | 40 / 145      | 27.6%                                                              |
+| gpt-5.6-luna  | apply_patch | 22 / 96       | 22.9%                                                              |
 
 排除迁徙 Session 后 edit 错误 128 / 1309 ≈ **9.8%**。这不是公平模型比较（任务/项目/上下文不同）。
 
 ### 11.2 失败阶段分类（465 条错误）
 
-| 阶段 | edit | apply_patch |
-| --- | --- | --- |
-| oldString 不匹配 / Failed to find expected lines | 236 | 148 全量 hunk 失败（按文件行细分：99 找不到、53 多处匹配、2 重叠） |
-| 未读门禁 | 39 | — |
-| 多处匹配（Found N occurrences） | ~8 | （计入上行 53） |
-| 流未完成 / aborted | 3+3 | 3+6 |
-| schema/参数、无变化、写入异常、权限预检、冲突等 | ~13 | 4 |
+| 阶段                                             | edit | apply_patch                                                        |
+| ------------------------------------------------ | ---- | ------------------------------------------------------------------ |
+| oldString 不匹配 / Failed to find expected lines | 236  | 148 全量 hunk 失败（按文件行细分：99 找不到、53 多处匹配、2 重叠） |
+| 未读门禁                                         | 39   | —                                                                  |
+| 多处匹配（Found N occurrences）                  | ~8   | （计入上行 53）                                                    |
+| 流未完成 / aborted                               | 3+3  | 3+6                                                                |
+| schema/参数、无变化、写入异常、权限预检、冲突等  | ~13  | 4                                                                  |
 
 ### 11.3 事件级一致性还原（681 事件）
 
 方法：对每个失败条目，在同 Session 全部先前语料（read 输出去行号前缀、bash 输出、成功 edit/write/patch 的 old/new 文本、reasoning）中检索 verbatim 与归一化变体；写入者识别修复了 R2 的盲点——**apply_patch 的文件列表必须解析 patchText 分段**，否则同 Session 的 patch 写入全部漏计。修正后桶分布发生决定性迁移：
 
-| 一致性桶 | 事件数 | 占比 | 机制 |
-| --- | --- | --- | --- |
-| not-in-visible-context | 215 | 31.6% | 见 11.4 G01/G03/G04 细分 |
-| verbatim-but-ambiguous | 199 | 29.2% | G02 最小上下文 hunk 在重复文本中多匹配 |
-| source-then-overwritten / read-then-overwritten | 132 | 19.4% | G01 自写后陈旧 |
-| hit-other-context（read/bash/patch-new/reasoning/write/edit-new） | 91 | 13.4% | G05 跨文件复制、reasoning 重建 |
-| never-read-in-session | 35 | 5.1% | G04 全部经 write/edit 触痕过门禁 |
-| verbatim-in-context-but-failed 真异常 | 9 | 1.3% | 见 11.5，无一确认为 matcher 缺陷 |
+| 一致性桶                                                          | 事件数 | 占比  | 机制                                   |
+| ----------------------------------------------------------------- | ------ | ----- | -------------------------------------- |
+| not-in-visible-context                                            | 215    | 31.6% | 见 11.4 G01/G03/G04 细分               |
+| verbatim-but-ambiguous                                            | 199    | 29.2% | G02 最小上下文 hunk 在重复文本中多匹配 |
+| source-then-overwritten / read-then-overwritten                   | 132    | 19.4% | G01 自写后陈旧                         |
+| hit-other-context（read/bash/patch-new/reasoning/write/edit-new） | 91     | 13.4% | G05 跨文件复制、reasoning 重建         |
+| never-read-in-session                                             | 35     | 5.1%  | G04 全部经 write/edit 触痕过门禁       |
+| verbatim-in-context-but-failed 真异常                             | 9      | 1.3%  | 见 11.5，无一确认为 matcher 缺陷       |
 
 中间写入者总数 299（修正前误报 168）。读取-失败间经历 compaction 的仅 2 例，compaction 不是本周失败的主要因子。最后读取为 stub 的 0 例（H05 的 stub 死循环在本周样本未出现）。
 
@@ -453,11 +453,11 @@ edit 失败且 oldString 不在任何已展示 read 页内时，附加事实句�
 
 最近一周 3304 次成功写调用的 metadata.diff 实测：
 
-| 工具 | 次数 | diff p50 | p90 | p99 | max | output 被裁 |
-| --- | --- | --- | --- | --- | --- | --- |
-| edit | 1853 | 1.5KB / 22 行 | 4.4KB / 78 行 | 11KB | 19.3KB | **全周仅 1 次**（48 行省略） |
-| apply_patch | 666 | 2.4KB / 36 行 | 6.2KB / 101 行 | 20KB | 50.7KB | 0（当前 output 无 diff） |
-| write | 785 | 3.2KB / 64 行 | 10.7KB / 193 行 | 28.5KB | 45.4KB | 0（当前 output 无 diff） |
+| 工具        | 次数 | diff p50      | p90             | p99    | max    | output 被裁                  |
+| ----------- | ---- | ------------- | --------------- | ------ | ------ | ---------------------------- |
+| edit        | 1853 | 1.5KB / 22 行 | 4.4KB / 78 行   | 11KB   | 19.3KB | **全周仅 1 次**（48 行省略） |
+| apply_patch | 666  | 2.4KB / 36 行 | 6.2KB / 101 行  | 20KB   | 50.7KB | 0（当前 output 无 diff）     |
+| write       | 785  | 3.2KB / 64 行 | 10.7KB / 193 行 | 28.5KB | 45.4KB | 0（当前 output 无 diff）     |
 
 write 拆分：新建 677 次（86%，diff=全文，与模型刚写入的内容完全重复）、覆写 109 次（14%）。
 

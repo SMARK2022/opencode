@@ -50,10 +50,7 @@ export const layer = Layer.effect(
       // #198：连续拒绝超阈值或滑动窗口内拒绝超阈值时触发熔断——triggered 一旦置位则永久中断该 session 的 auto 审批
       // #198：连续计数器捕获突发拒绝——短时间内多次 deny 可能表示 reviewer 与用户意图严重偏离
       // #198：滑动窗口捕获长期拒绝密度——窗口内高 deny 比率可能表示 session 环境不稳定
-      if (
-        !current.triggered &&
-        (current.consecutive >= limit.maxConsecutive || recent >= limit.maxRecent)
-      ) {
+      if (!current.triggered && (current.consecutive >= limit.maxConsecutive || recent >= limit.maxRecent)) {
         // #198：triggered 是粘性标志——一旦熔断不自动恢复，需 session 重启或显式重置
         current.triggered = true
         return { kind: "interrupt", consecutive: current.consecutive, recent } as const

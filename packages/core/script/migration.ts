@@ -106,11 +106,13 @@ export default { ...config, out: ${JSON.stringify(output)} }
 }
 
 async function generatedMigrations(directory: string) {
-  return (await Array.fromAsync(new Bun.Glob("*/migration.sql").scan({ cwd: directory })))
-    // Bun Glob在Windows可返回反斜杠；先归一化再取目录，避免重复拼接migration.sql。
-    .map((file) => file.replaceAll("\\", "/").split("/")[0])
-    .filter((name): name is string => name !== undefined)
-    .sort()
+  return (
+    (await Array.fromAsync(new Bun.Glob("*/migration.sql").scan({ cwd: directory })))
+      // Bun Glob在Windows可返回反斜杠；先归一化再取目录，避免重复拼接migration.sql。
+      .map((file) => file.replaceAll("\\", "/").split("/")[0])
+      .filter((name): name is string => name !== undefined)
+      .sort()
+  )
 }
 
 async function generatedSql(directory: string) {

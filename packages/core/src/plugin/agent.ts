@@ -138,9 +138,10 @@ export const Plugin = define({
             item.permissions.push({ action: "*", resource: "*", effect: "deny" })
             return
           }
-          item.description = id === "auto"
-            ? "Build-like agent that routes shell commands through auto permission review."
-            : "The default agent. Executes tools based on configured permissions."
+          item.description =
+            id === "auto"
+              ? "Build-like agent that routes shell commands through auto permission review."
+              : "The default agent. Executes tools based on configured permissions."
           // 默认族正文由runner逐轮选择；不设置通用system遮蔽实际模型或已有显式配置。
           item.mode = "primary"
           // 配置插件随后追加全局和代理专属规则，保留用户最后覆盖的优先级。
@@ -153,9 +154,19 @@ export const Plugin = define({
               // edit统一承接write、edit和apply_patch，不新增按工具名分裂的规则。
               ...(id === "auto" ? [{ action: "edit", resource: "*", effect: "auto" as const }] : []),
               // auto的项目外shell门禁共享命令预检，既有白名单继续直接允许。
-              ...(id === "auto" ? readonlyExternalDirectory.map((rule): PermissionV2.Rule => ({ ...rule, effect: rule.effect === "ask" ? "auto" : rule.effect })) : []),
+              ...(id === "auto"
+                ? readonlyExternalDirectory.map(
+                    (rule): PermissionV2.Rule => ({ ...rule, effect: rule.effect === "ask" ? "auto" : rule.effect }),
+                  )
+                : []),
               // interactive 的运行与内核操作沿用命令审批，review 规则由前项保留。
-              ...(id === "interactive" ? ["vscode_notebook_run", "vscode_notebook_env"].map((action) => ({ action, resource: "*", effect: "ask" as const })) : []),
+              ...(id === "interactive"
+                ? ["vscode_notebook_run", "vscode_notebook_env"].map((action) => ({
+                    action,
+                    resource: "*",
+                    effect: "ask" as const,
+                  }))
+                : []),
             ]),
           )
         })

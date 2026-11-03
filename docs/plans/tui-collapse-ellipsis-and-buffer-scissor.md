@@ -49,44 +49,44 @@ GOAL 原始需求（用户逐字）：
 
 ## 3. Repository Context
 
-| Source | Why it constrains this task |
-| --- | --- |
-| `.opencode/policy/first-principles-engineering.md` | 修复 first divergence；禁止 fallback、竞争成功路径、speculative production guard；secondary-path 预算为 0；中文注释硬门 `C >= max(1, ceil(E*0.15))`。 |
-| `.opencode/templates/canonical-plan.md` | 本计划的结构与硬门。 |
-| `CONTEXT.md` | 使用 `Project`/`Session`/`Message`/`Tool` 等术语；TUI 位于 `packages/opencode/src/cli/cmd/tui`。 |
-| `packages/opencode/AGENTS.md` | 测试与 typecheck 必须在 package 目录运行；保留无关 dirty worktree；单函数优先、避免过早抽取 helper、`const`/早返回。 |
-| `packages/opencode/test/AGENTS.md` | TUI readiness 用行为信号，不用固定 sleep。 |
-| `thirdparty/opentui/AGENTS.md` | native 变更须从 `packages/core` 运行 `bun run test:native`；native 变更前需从 OpenTUI repo 根 `bun run build`；用 `bun test`、不在 TS 用 Bun-only API。 |
-| `docs/adr/README.md` + `0001` | 当前 accepted ADR 仅约束 triage 标签，不约束 TUI 渲染/折叠。 |
-| `docs/plans/opentui-cjk-overlay-and-terminal-corruption-repair.md` (verified R16) | 同区域（buffer.zig 宽字符/alpha）既有约束：宽 span 语义、`[]` placeholder、scissor 不可写越界 cell 的既定方向。 |
-| `docs/plans/message-text-collapse-expand.md` (approved R3) | 折叠交互的“house style”：`expanded` signal、preview/body 双区、footer disclosure；本计划复用其模式但不迁移实现。 |
+| Source                                                                            | Why it constrains this task                                                                                                                             |
+| --------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `.opencode/policy/first-principles-engineering.md`                                | 修复 first divergence；禁止 fallback、竞争成功路径、speculative production guard；secondary-path 预算为 0；中文注释硬门 `C >= max(1, ceil(E*0.15))`。   |
+| `.opencode/templates/canonical-plan.md`                                           | 本计划的结构与硬门。                                                                                                                                    |
+| `CONTEXT.md`                                                                      | 使用 `Project`/`Session`/`Message`/`Tool` 等术语；TUI 位于 `packages/opencode/src/cli/cmd/tui`。                                                        |
+| `packages/opencode/AGENTS.md`                                                     | 测试与 typecheck 必须在 package 目录运行；保留无关 dirty worktree；单函数优先、避免过早抽取 helper、`const`/早返回。                                    |
+| `packages/opencode/test/AGENTS.md`                                                | TUI readiness 用行为信号，不用固定 sleep。                                                                                                              |
+| `thirdparty/opentui/AGENTS.md`                                                    | native 变更须从 `packages/core` 运行 `bun run test:native`；native 变更前需从 OpenTUI repo 根 `bun run build`；用 `bun test`、不在 TS 用 Bun-only API。 |
+| `docs/adr/README.md` + `0001`                                                     | 当前 accepted ADR 仅约束 triage 标签，不约束 TUI 渲染/折叠。                                                                                            |
+| `docs/plans/opentui-cjk-overlay-and-terminal-corruption-repair.md` (verified R16) | 同区域（buffer.zig 宽字符/alpha）既有约束：宽 span 语义、`[]` placeholder、scissor 不可写越界 cell 的既定方向。                                         |
+| `docs/plans/message-text-collapse-expand.md` (approved R3)                        | 折叠交互的“house style”：`expanded` signal、preview/body 双区、footer disclosure；本计划复用其模式但不迁移实现。                                        |
 
 ## 4. Files and Evidence Read
 
-| Evidence | Relevance | Evidence class |
-| --- | --- | --- |
-| `packages/opencode/src/cli/cmd/tui/routes/session/index.tsx:2262-2270` `previewText` | 默认路由 Shell/GenericTool/Write-code 预览生产者；`return preview ? [preview, "…"].join("\n") : "…"` 注入独立 `…` 行。 | observed |
-| `packages/opencode/src/cli/cmd/tui/routes/session/index.tsx:2700-2832` `BlockTool` | 折叠 owner：`collapsible()` 由 `totalLines>threshold \|\| totalChars>charThreshold` 决定（:2741），footer `Click to expand/collapse`（:2822）已是折叠语义。 | observed |
-| `packages/opencode/src/cli/cmd/tui/util/preview-diff.ts:1-117` `previewDiff` | Edit/Write/ApplyPatch diff 预览生产者；:24 `body.push(" …")` 注入 ` …` 行；hunk header 已用 `oldVisible()`/`newVisible()` 重算（:27）。 | observed |
-| `packages/opencode/src/cli/cmd/tui/routes/session/notebook-tool.tsx:432-435` `previewText` | VSCode Notebook 工具预览生产者；`[...lines.slice(0, maxLines), "…"].join("\n")`。 | observed |
-| `packages/opencode/src/cli/cmd/tui/feature-plugins/system/session-v2.tsx:225,595,780` | 实验路由另外 3 处相同 `…` 注入；GOAL 文件数约束下排除（见 §2/§20）。 | observed |
-| `packages/opencode/src/cli/cmd/tui/plugin/internal.ts:37` | `SessionV2Debug` 仅在 `flags.experimentalEventSystem` 时注册，证明其实验性。 | observed |
-| `thirdparty/opentui/packages/core/src/zig/buffer.zig:475-609` `setInternal` | 所有 cell 写入的共享 owner。grapheme continuation 写入 `max_right = @min(right, row_end_index - index)`（:583），只对齐 buffer 行尾，未对齐当前 scissor 右边界。 | observed |
-| `thirdparty/opentui/packages/core/src/zig/buffer.zig:308-354` scissor helpers | `isPointInScissor`/`isRectInScissor`/`clipRectToScissor`/`getCurrentScissorRect` 已存在，供 setInternal 复用。 | observed |
-| `thirdparty/opentui/packages/core/src/zig/buffer.zig:893-941` `setCellWithAlphaBlendingCell` | 文本/边框慢路径，:894 对起始 cell 做 `isPointInScissor`；宽 grapheme 不用 transparent fast path（:975），必经 setInternal。 | observed |
-| `thirdparty/opentui/packages/core/src/renderables/ScrollBox.ts:326-351` | ScrollBox viewport scissor owner；会话视图内容经 ScrollBox 裁剪。 | observed |
-| `packages/opencode/src/cli/cmd/tui/routes/session/index.tsx:270` `diff_wrap_mode` | 默认 `"word"`；line 2473/2681/3405 等为 `wrapMode="none"` 的 nowrap 场景（InlineTool、ApplyPatch header 等）。 | observed |
-| `thirdparty/opentui/packages/core/src/zig/tests/buffer_test.zig:2025-2099` | 已有 drawBox/fillRect 测试位置与风格蓝本。 | observed |
-| `packages/opencode/test/cli/cmd/tui/preview-diff.test.ts:49-172` | 现有 previewDiff 测试断言含 ` …`（:61,:161,:168），是本任务要反转的行为断言。 | observed |
-| `packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx` | 真实 OpenTUI renderer + `withRenderedSession` 的 render-level seam（含既有 `Click to expand` 断言 :676 等）。 | observed |
-| 只读探针 `probe-buffer-scissor.ts`（bun -e） | B1：scissor 0..3 下在 x=3 绘制 `一`，continuation 写入 x=4（0xc40100ff）越出 scissor；B2：透明背景 drawBox 右边框写入 scissor 外 x=9。 | observed red |
-| 只读探针 `probe-render-overflow.ts`（test-renderer） | `abcdef一`+`overflow=hidden`+`wrap=none`：右边框 `│` 被宽字符 continuation 覆盖消失；`abcdefgh`（纯 ASCII）干净裁剪为 `abcdefg` 边框完整；`abcdef一`+`wrap=word` 正确换行边框完整。 | observed red |
-| 只读探针 `probe-render-wordwrap-mismatch.ts`（test-renderer） | word-wrap + 文本宽度 > clip 宽度（宽度不匹配）时，`你好世界` 行右边框仍被 continuation 覆盖；宽度匹配时换行干净、边框完整。锁定 B1 可达条件。 | observed red |
-| 只读探针 `probe-preview-ellipsis.ts`（bun -e） | `previewDiff(sample, 5)` 输出 12 行，含注入的 ` …` 行（index 11），hunk 计数 6/6（5 内容行 + 1 省略行）。 | observed red |
-| `packages/opencode/src/cli/cmd/tui/plugin/internal.ts:23-38` + `feature-plugins/system/session-v2.tsx:217-242,586-617,770-798` | `SessionV2Debug` 仅在 `experimentalEventSystem` flag 下注册；其 Shell/GenericTool/Bash 仍各自追加 `…`，证明该实验 surface 可达但不属于本 R2 的默认 production route。 | reachable |
-| `thirdparty/opentui/.github/workflows/build-native.yml:24-124` | 既有唯一 native release closure：Zig 0.15.2、focused native regression、native suite、8 个 native package、core/solid/keymap build、JS/dist/pack verifier。 | contracted |
-| `thirdparty/opentui/.github/workflows/release.yml:21-137` | 既有 immutable release owner：tag/source SHA 校验、lockstep package version、跨平台 verify、GitHub draft release 后 publish。 | contracted |
-| `thirdparty/opentui/scripts/verify-release-packages.ts:5-142` + root `package.json:131-141` + `bun.lock:712-740,1619-1640` | 11 个 tarball 的真实 HTTP 安装合同与 opencode 当前 `0.4.3-smark.5` package source；source 修复尚未进入 runtime artifact。 | observed |
+| Evidence                                                                                                                       | Relevance                                                                                                                                                                           | Evidence class |
+| ------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------- |
+| `packages/opencode/src/cli/cmd/tui/routes/session/index.tsx:2262-2270` `previewText`                                           | 默认路由 Shell/GenericTool/Write-code 预览生产者；`return preview ? [preview, "…"].join("\n") : "…"` 注入独立 `…` 行。                                                              | observed       |
+| `packages/opencode/src/cli/cmd/tui/routes/session/index.tsx:2700-2832` `BlockTool`                                             | 折叠 owner：`collapsible()` 由 `totalLines>threshold \|\| totalChars>charThreshold` 决定（:2741），footer `Click to expand/collapse`（:2822）已是折叠语义。                         | observed       |
+| `packages/opencode/src/cli/cmd/tui/util/preview-diff.ts:1-117` `previewDiff`                                                   | Edit/Write/ApplyPatch diff 预览生产者；:24 `body.push(" …")` 注入 ` …` 行；hunk header 已用 `oldVisible()`/`newVisible()` 重算（:27）。                                             | observed       |
+| `packages/opencode/src/cli/cmd/tui/routes/session/notebook-tool.tsx:432-435` `previewText`                                     | VSCode Notebook 工具预览生产者；`[...lines.slice(0, maxLines), "…"].join("\n")`。                                                                                                   | observed       |
+| `packages/opencode/src/cli/cmd/tui/feature-plugins/system/session-v2.tsx:225,595,780`                                          | 实验路由另外 3 处相同 `…` 注入；GOAL 文件数约束下排除（见 §2/§20）。                                                                                                                | observed       |
+| `packages/opencode/src/cli/cmd/tui/plugin/internal.ts:37`                                                                      | `SessionV2Debug` 仅在 `flags.experimentalEventSystem` 时注册，证明其实验性。                                                                                                        | observed       |
+| `thirdparty/opentui/packages/core/src/zig/buffer.zig:475-609` `setInternal`                                                    | 所有 cell 写入的共享 owner。grapheme continuation 写入 `max_right = @min(right, row_end_index - index)`（:583），只对齐 buffer 行尾，未对齐当前 scissor 右边界。                    | observed       |
+| `thirdparty/opentui/packages/core/src/zig/buffer.zig:308-354` scissor helpers                                                  | `isPointInScissor`/`isRectInScissor`/`clipRectToScissor`/`getCurrentScissorRect` 已存在，供 setInternal 复用。                                                                      | observed       |
+| `thirdparty/opentui/packages/core/src/zig/buffer.zig:893-941` `setCellWithAlphaBlendingCell`                                   | 文本/边框慢路径，:894 对起始 cell 做 `isPointInScissor`；宽 grapheme 不用 transparent fast path（:975），必经 setInternal。                                                         | observed       |
+| `thirdparty/opentui/packages/core/src/renderables/ScrollBox.ts:326-351`                                                        | ScrollBox viewport scissor owner；会话视图内容经 ScrollBox 裁剪。                                                                                                                   | observed       |
+| `packages/opencode/src/cli/cmd/tui/routes/session/index.tsx:270` `diff_wrap_mode`                                              | 默认 `"word"`；line 2473/2681/3405 等为 `wrapMode="none"` 的 nowrap 场景（InlineTool、ApplyPatch header 等）。                                                                      | observed       |
+| `thirdparty/opentui/packages/core/src/zig/tests/buffer_test.zig:2025-2099`                                                     | 已有 drawBox/fillRect 测试位置与风格蓝本。                                                                                                                                          | observed       |
+| `packages/opencode/test/cli/cmd/tui/preview-diff.test.ts:49-172`                                                               | 现有 previewDiff 测试断言含 ` …`（:61,:161,:168），是本任务要反转的行为断言。                                                                                                       | observed       |
+| `packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx`                                                           | 真实 OpenTUI renderer + `withRenderedSession` 的 render-level seam（含既有 `Click to expand` 断言 :676 等）。                                                                       | observed       |
+| 只读探针 `probe-buffer-scissor.ts`（bun -e）                                                                                   | B1：scissor 0..3 下在 x=3 绘制 `一`，continuation 写入 x=4（0xc40100ff）越出 scissor；B2：透明背景 drawBox 右边框写入 scissor 外 x=9。                                              | observed red   |
+| 只读探针 `probe-render-overflow.ts`（test-renderer）                                                                           | `abcdef一`+`overflow=hidden`+`wrap=none`：右边框 `│` 被宽字符 continuation 覆盖消失；`abcdefgh`（纯 ASCII）干净裁剪为 `abcdefg` 边框完整；`abcdef一`+`wrap=word` 正确换行边框完整。 | observed red   |
+| 只读探针 `probe-render-wordwrap-mismatch.ts`（test-renderer）                                                                  | word-wrap + 文本宽度 > clip 宽度（宽度不匹配）时，`你好世界` 行右边框仍被 continuation 覆盖；宽度匹配时换行干净、边框完整。锁定 B1 可达条件。                                       | observed red   |
+| 只读探针 `probe-preview-ellipsis.ts`（bun -e）                                                                                 | `previewDiff(sample, 5)` 输出 12 行，含注入的 ` …` 行（index 11），hunk 计数 6/6（5 内容行 + 1 省略行）。                                                                           | observed red   |
+| `packages/opencode/src/cli/cmd/tui/plugin/internal.ts:23-38` + `feature-plugins/system/session-v2.tsx:217-242,586-617,770-798` | `SessionV2Debug` 仅在 `experimentalEventSystem` flag 下注册；其 Shell/GenericTool/Bash 仍各自追加 `…`，证明该实验 surface 可达但不属于本 R2 的默认 production route。               | reachable      |
+| `thirdparty/opentui/.github/workflows/build-native.yml:24-124`                                                                 | 既有唯一 native release closure：Zig 0.15.2、focused native regression、native suite、8 个 native package、core/solid/keymap build、JS/dist/pack verifier。                         | contracted     |
+| `thirdparty/opentui/.github/workflows/release.yml:21-137`                                                                      | 既有 immutable release owner：tag/source SHA 校验、lockstep package version、跨平台 verify、GitHub draft release 后 publish。                                                       | contracted     |
+| `thirdparty/opentui/scripts/verify-release-packages.ts:5-142` + root `package.json:131-141` + `bun.lock:712-740,1619-1640`     | 11 个 tarball 的真实 HTTP 安装合同与 opencode 当前 `0.4.3-smark.5` package source；source 修复尚未进入 runtime artifact。                                                           | observed       |
 
 ## 5. Current Behavior
 
@@ -122,39 +122,39 @@ OpenTUI source buffer.zig -> native build/package closure -> immutable GitHub re
 
 ## 6. Supported Input Domain and Reachability
 
-| Input or condition | Producer | Upstream guarantees | Reachable path | Owner | Classification |
-| --- | --- | --- | --- | --- | --- |
-| 截断的纯文本预览（Shell output、GenericTool、Write code、notebook text/source） | `previewText`（index.tsx / notebook-tool.tsx） | 纯 string | `BlockTool` preview 区 | 各 previewText | observed |
-| 截断的 diff 预览（Edit/Write/ApplyPatch、notebook diff） | `previewDiff` | unified diff string | `DiffPreview`/`NotebookDiff` | `previewDiff` | observed |
-| 未截断内容（行数/字符数均不超阈值） | 同上 | 同上 | `previewText`/`previewDiff` 早返回原文（index.tsx:2267；preview-diff.ts:116 `changed==false`） | 同上 | observed |
-| 宽字符跨 scissor 右边界（起始在内、continuation 在外） | Text/Code/Diff 内容含 CJK + ScrollBox/overflow=hidden 建立 scissor + 宽度不匹配或 nowrap | 起始 cell 经 `isPointInScissor` | `drawTextBufferInternal`/`drawText` -> `setInternal` continuation | `buffer.zig setInternal` | observed |
-| OpenTUI source fix 进入 opencode runtime | OpenTUI release workflow + root tarball overrides | 11 个包必须同一 source SHA、同一版本并通过 packed consumer verifier | release artifacts -> root `bun install` -> TUI renderer | OpenTUI release workflow + root dependency metadata | contracted/reachable |
-| `experimentalEventSystem=true` 下的 v2 debug previews | `SessionV2Debug` | flag 显式开启才注册 | `internalTuiPlugins` -> `session-v2.tsx` | v2 debug surface | reachable, R3 in scope（用户授权） |
-| 纯 ASCII 超宽文本 | 同上 | 同上 | 同一路径，但单宽 glyph 起始 cell 越界即被 :1613 跳过，干净裁剪 | `buffer.zig` | observed（探针确认不泄漏） |
+| Input or condition                                                              | Producer                                                                                 | Upstream guarantees                                                 | Reachable path                                                                                 | Owner                                               | Classification                     |
+| ------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- | ------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- | --------------------------------------------------- | ---------------------------------- |
+| 截断的纯文本预览（Shell output、GenericTool、Write code、notebook text/source） | `previewText`（index.tsx / notebook-tool.tsx）                                           | 纯 string                                                           | `BlockTool` preview 区                                                                         | 各 previewText                                      | observed                           |
+| 截断的 diff 预览（Edit/Write/ApplyPatch、notebook diff）                        | `previewDiff`                                                                            | unified diff string                                                 | `DiffPreview`/`NotebookDiff`                                                                   | `previewDiff`                                       | observed                           |
+| 未截断内容（行数/字符数均不超阈值）                                             | 同上                                                                                     | 同上                                                                | `previewText`/`previewDiff` 早返回原文（index.tsx:2267；preview-diff.ts:116 `changed==false`） | 同上                                                | observed                           |
+| 宽字符跨 scissor 右边界（起始在内、continuation 在外）                          | Text/Code/Diff 内容含 CJK + ScrollBox/overflow=hidden 建立 scissor + 宽度不匹配或 nowrap | 起始 cell 经 `isPointInScissor`                                     | `drawTextBufferInternal`/`drawText` -> `setInternal` continuation                              | `buffer.zig setInternal`                            | observed                           |
+| OpenTUI source fix 进入 opencode runtime                                        | OpenTUI release workflow + root tarball overrides                                        | 11 个包必须同一 source SHA、同一版本并通过 packed consumer verifier | release artifacts -> root `bun install` -> TUI renderer                                        | OpenTUI release workflow + root dependency metadata | contracted/reachable               |
+| `experimentalEventSystem=true` 下的 v2 debug previews                           | `SessionV2Debug`                                                                         | flag 显式开启才注册                                                 | `internalTuiPlugins` -> `session-v2.tsx`                                                       | v2 debug surface                                    | reachable, R3 in scope（用户授权） |
+| 纯 ASCII 超宽文本                                                               | 同上                                                                                     | 同上                                                                | 同一路径，但单宽 glyph 起始 cell 越界即被 :1613 跳过，干净裁剪                                 | `buffer.zig`                                        | observed（探针确认不泄漏）         |
 
 speculative 行（不驱动生产改动）：
 
-| Input or condition | Why speculative |
-| --- | --- |
-| 多 cell（>+1）纯布局溢宽 | 未证明根因；显而易见的修复被用户约束；见 §20 Open Decisions。 |
+| Input or condition                | Why speculative                                                             |
+| --------------------------------- | --------------------------------------------------------------------------- |
+| 多 cell（>+1）纯布局溢宽          | 未证明根因；显而易见的修复被用户约束；见 §20 Open Decisions。               |
 | `drawBox` 透明边框 fast path 越界 | 会话视图无全透明背景边框盒，fast path 不可达；见 §20 Rejected Speculation。 |
-| `drawGrid` 越界 | 会话视图无表格 grid，不可达。 |
+| `drawGrid` 越界                   | 会话视图无表格 grid，不可达。                                               |
 
 ## 7. Required Invariants
 
-| ID | Behavioral invariant | Evidence | Existing test |
-| --- | --- | --- | --- |
-| INV-01 | 所有可达 TUI 折叠预览（默认路由与 flag-gated `SessionV2Debug` 路由）的内容不得超过预览行预算且不含不携带正文的 sentinel 行；`Click to expand/collapse` 是“还有更多”的唯一信号。 | 默认 `previewText`/`previewDiff` 注入 `…`/` …`（observed）；session-v2 三处注入（reachable）；用户逐字要求移除 + 用户授权纳入 v2（contracted） | 无（preview-diff.test.ts 当前断言相反行为） |
+| ID     | Behavioral invariant                                                                                                                                                                          | Evidence                                                                                                                                                                                                  | Existing test                                         |
+| ------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------- |
+| INV-01 | 所有可达 TUI 折叠预览（默认路由与 flag-gated `SessionV2Debug` 路由）的内容不得超过预览行预算且不含不携带正文的 sentinel 行；`Click to expand/collapse` 是“还有更多”的唯一信号。               | 默认 `previewText`/`previewDiff` 注入 `…`/` …`（observed）；session-v2 三处注入（reachable）；用户逐字要求移除 + 用户授权纳入 v2（contracted）                                                            | 无（preview-diff.test.ts 当前断言相反行为）           |
 | INV-02 | 会话文本渲染路径中经 `setInternal` 写入的 grapheme span（含 continuation）必须完整落入当前 scissor；跨右边界的写入必须整字拒绝，且拒绝不得产生任何 buffer/tracker mutation（atomic reject）。 | B1 探针 continuation 越界（observed red）；R2 审计发现 R1 检查位于 span_cleanup/tracker 更新之后，被拒绝写入可先清除已有 span（reachable）；buffer.zig 既有左边界“起始越界即跳过整字”对称行为（observed） | buffer_test.zig straddle 测试（未覆盖 mutation 顺序） |
-| INV-03 | OpenTUI source 修复只有在同一 source SHA 生成并通过 11-package packed consumer verification 后，才能声明 opencode runtime 已加载该修复。 | 现有 workflow 的 source SHA、lockstep version、11 个 package、跨平台 verify 合同（contracted）；当前 root 仍指向 `0.4.3-smark.5`（observed） | 无（当前 release verifier 尚未执行本修复版本） |
+| INV-03 | OpenTUI source 修复只有在同一 source SHA 生成并通过 11-package packed consumer verification 后，才能声明 opencode runtime 已加载该修复。                                                      | 现有 workflow 的 source SHA、lockstep version、11 个 package、跨平台 verify 合同（contracted）；当前 root 仍指向 `0.4.3-smark.5`（observed）                                                              | 无（当前 release verifier 尚未执行本修复版本）        |
 
 ## 8. First Divergence and Root Cause
 
-| Invariant | First divergence | Owning module/interface | Proof |
-| --- | --- | --- | --- |
-| INV-01 | `previewText` 返回 `[preview, "…"].join("\n")`；`previewDiff` 在 hunk body 末尾 `body.push(" …")`；session-v2 三个 inline `limited` memo 返回 `[..., "…"].join("\n")` | 各预览生产者（`previewText`×2、`previewDiff`、session-v2 inline memo×3） | `probe-preview-ellipsis.ts` 输出含 ` …` 行且计数 6/6（observed red）；session-v2.tsx:225/:595/:780 源码证据（reachable） |
-| INV-02 | `setInternal` continuation 上限 `max_right = @min(right, row_end_index - index)` 只对齐 buffer 行尾，未对齐 scissor 右边界；R1 的 scissor span 检查位于 tracker replace/span_cleanup 之后（:565 vs :481-532），被拒绝的跨界写入可先清除目标处已有 grapheme span 并更新 tracker | `buffer.zig setInternal`（所有 cell 写入的共享 owner） | `probe-buffer-scissor.ts`/`probe-render-overflow.ts`/`probe-render-wordwrap-mismatch.ts` continuation 覆盖边框 cell（observed red）；`set()` → `setInternal(true)` → cleanup → check 代码顺序（observed） |
-| INV-03 | Source fix 停留在 dirty OpenTUI source，root `package.json`/`bun.lock` 仍解析 `v0.4.3-smark.5`，且 build/release verifier 尚未完成 | OpenTUI release workflow + root dependency metadata | 当前 runtime 仍使用旧 precompiled native asset；`zig` 缺失导致 build/test 未执行（observed） |
+| Invariant | First divergence                                                                                                                                                                                                                                                               | Owning module/interface                                                  | Proof                                                                                                                                                                                                     |
+| --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| INV-01    | `previewText` 返回 `[preview, "…"].join("\n")`；`previewDiff` 在 hunk body 末尾 `body.push(" …")`；session-v2 三个 inline `limited` memo 返回 `[..., "…"].join("\n")`                                                                                                          | 各预览生产者（`previewText`×2、`previewDiff`、session-v2 inline memo×3） | `probe-preview-ellipsis.ts` 输出含 ` …` 行且计数 6/6（observed red）；session-v2.tsx:225/:595/:780 源码证据（reachable）                                                                                  |
+| INV-02    | `setInternal` continuation 上限 `max_right = @min(right, row_end_index - index)` 只对齐 buffer 行尾，未对齐 scissor 右边界；R1 的 scissor span 检查位于 tracker replace/span_cleanup 之后（:565 vs :481-532），被拒绝的跨界写入可先清除目标处已有 grapheme span 并更新 tracker | `buffer.zig setInternal`（所有 cell 写入的共享 owner）                   | `probe-buffer-scissor.ts`/`probe-render-overflow.ts`/`probe-render-wordwrap-mismatch.ts` continuation 覆盖边框 cell（observed red）；`set()` → `setInternal(true)` → cleanup → check 代码顺序（observed） |
+| INV-03    | Source fix 停留在 dirty OpenTUI source，root `package.json`/`bun.lock` 仍解析 `v0.4.3-smark.5`，且 build/release verifier 尚未完成                                                                                                                                             | OpenTUI release workflow + root dependency metadata                      | 当前 runtime 仍使用旧 precompiled native asset；`zig` 缺失导致 build/test 未执行（observed）                                                                                                              |
 
 下游症状 vs 根因：
 
@@ -164,20 +164,20 @@ speculative 行（不驱动生产改动）：
 
 Red-capable feedback loop（已实际运行）：
 
-| Loop | Command (workdir) | Catches | Observed |
-| --- | --- | --- | --- |
-| Branch A | `bun D:\Temp\opencode\probe-preview-ellipsis.ts`（`packages/opencode`） | previewDiff 注入 ` …` 行 | 输出含 ` …`，计数 6/6 → red |
-| Branch B | `bun D:\Temp\opencode\probe-buffer-scissor.ts`（`thirdparty/opentui/packages/core`） | continuation 越 scissor | x=4 写入 continuation → red |
+| Loop                   | Command (workdir)                                                                                                           | Catches                  | Observed                                 |
+| ---------------------- | --------------------------------------------------------------------------------------------------------------------------- | ------------------------ | ---------------------------------------- |
+| Branch A               | `bun D:\Temp\opencode\probe-preview-ellipsis.ts`（`packages/opencode`）                                                     | previewDiff 注入 ` …` 行 | 输出含 ` …`，计数 6/6 → red              |
+| Branch B               | `bun D:\Temp\opencode\probe-buffer-scissor.ts`（`thirdparty/opentui/packages/core`）                                        | continuation 越 scissor  | x=4 写入 continuation → red              |
 | Branch B (render path) | `bun D:\Temp\opencode\probe-render-overflow.ts` + `probe-render-wordwrap-mismatch.ts`（`thirdparty/opentui/packages/core`） | 真实渲染路径越界覆盖边框 | `│abcdef一`/`│你好世界` 右边框消失 → red |
 
 ## 9. Responsibility and Seam
 
-| Concern | Owner | Interface promise | Why it belongs here | Why another module does not own it |
-| --- | --- | --- | --- | --- |
-| 预览内容（含是否截断） | `previewText`（index.tsx / notebook-tool.tsx）、`previewDiff`、session-v2 三个 inline `limited` memo | 返回给定预算内的预览文本 | 它们已是预览内容唯一生产者；sentinel 由它们注入 | `BlockTool` 只负责折叠交互与 footer，不生产预览文本 |
-| “还有更多”信号 | `BlockTool` footer `Click to expand/collapse` | 折叠态显示展开入口 | 已是既有 disclosure，无需 sentinel 重复 | 预览生产者不应重复交互层的信号 |
-| cell 写入的 scissor 约束 | `buffer.zig setInternal` | 任何写入都落在当前 scissor 内 | 它是所有 cell 写入（文本/边框/填充）的共享终点；scissor 状态在 OptimizedBuffer 上 | 消费端（Text/Code/Diff/Session）不应各自补偿同一公共裁剪契约 |
-| OpenTUI runtime artifact | `.github/workflows/build-native.yml` + `.github/workflows/release.yml` | 同一 source SHA 生成、验证并发布完整 package closure | 既有 workflow 已拥有 native build、pack、跨平台 consumer verification 和 immutable publish | 不在 opencode consumer 中复制 native 构建/发布逻辑 |
+| Concern                  | Owner                                                                                                | Interface promise                                    | Why it belongs here                                                                        | Why another module does not own it                           |
+| ------------------------ | ---------------------------------------------------------------------------------------------------- | ---------------------------------------------------- | ------------------------------------------------------------------------------------------ | ------------------------------------------------------------ |
+| 预览内容（含是否截断）   | `previewText`（index.tsx / notebook-tool.tsx）、`previewDiff`、session-v2 三个 inline `limited` memo | 返回给定预算内的预览文本                             | 它们已是预览内容唯一生产者；sentinel 由它们注入                                            | `BlockTool` 只负责折叠交互与 footer，不生产预览文本          |
+| “还有更多”信号           | `BlockTool` footer `Click to expand/collapse`                                                        | 折叠态显示展开入口                                   | 已是既有 disclosure，无需 sentinel 重复                                                    | 预览生产者不应重复交互层的信号                               |
+| cell 写入的 scissor 约束 | `buffer.zig setInternal`                                                                             | 任何写入都落在当前 scissor 内                        | 它是所有 cell 写入（文本/边框/填充）的共享终点；scissor 状态在 OptimizedBuffer 上          | 消费端（Text/Code/Diff/Session）不应各自补偿同一公共裁剪契约 |
+| OpenTUI runtime artifact | `.github/workflows/build-native.yml` + `.github/workflows/release.yml`                               | 同一 source SHA 生成、验证并发布完整 package closure | 既有 workflow 已拥有 native build、pack、跨平台 consumer verification 和 immutable publish | 不在 opencode consumer 中复制 native 构建/发布逻辑           |
 
 ## 10. Single Approved Primary-Path Design
 
@@ -226,30 +226,30 @@ OpenTUI source commit on smark/main
 
 ## 11. Secondary and Replacement Path Inventory
 
-| Path | Current or proposed | Classification | Produces success? | Decision-surface share | Disposition |
-| --- | --- | --- | --- | --- | --- |
-| 移除 `previewText` 的 `…` 注入 | proposed | primary-contract（预览内容的正确形态） | yes（预览即成功输出） | 主路径 | implement |
-| 移除 `previewDiff` 的 ` …` 注入 | proposed | primary-contract | yes | 主路径 | implement |
-| `previewDiff` hunk 计数重算 | current | primary-contract branch（既有） | yes | 无新增 | preserve |
-| `BlockTool` footer disclosure | current | primary-contract（既有交互） | yes | 无新增 | preserve |
-| `setInternal` 入口 atomic scissor-span 约束 | proposed | primary-contract（cell 写入的裁剪契约） | yes | 主路径 | implement |
-| `setInternal` 左边界“起始越界跳过整字” | current | primary-contract branch（既有） | yes | 无新增 | preserve |
-| `setInternal` EOL 行尾放不下清理分支 | current | primary-contract branch（既有，x + width > self.width） | yes | 无新增 | preserve |
-| 移除 `session-v2.tsx` 三处 sentinel 注入 | proposed | primary-contract（用户授权纳入 INV-01） | yes | 主路径 | implement |
-| OpenTUI existing native/release closure | proposed | primary-contract（source fix 的 runtime delivery） | yes | 主路径 | implement |
-| `drawBox`/`drawGrid` 越界修复 | rejected | forbidden（当前不可达，speculative） | n/a | 0% | reject |
+| Path                                        | Current or proposed | Classification                                          | Produces success?     | Decision-surface share | Disposition |
+| ------------------------------------------- | ------------------- | ------------------------------------------------------- | --------------------- | ---------------------- | ----------- |
+| 移除 `previewText` 的 `…` 注入              | proposed            | primary-contract（预览内容的正确形态）                  | yes（预览即成功输出） | 主路径                 | implement   |
+| 移除 `previewDiff` 的 ` …` 注入             | proposed            | primary-contract                                        | yes                   | 主路径                 | implement   |
+| `previewDiff` hunk 计数重算                 | current             | primary-contract branch（既有）                         | yes                   | 无新增                 | preserve    |
+| `BlockTool` footer disclosure               | current             | primary-contract（既有交互）                            | yes                   | 无新增                 | preserve    |
+| `setInternal` 入口 atomic scissor-span 约束 | proposed            | primary-contract（cell 写入的裁剪契约）                 | yes                   | 主路径                 | implement   |
+| `setInternal` 左边界“起始越界跳过整字”      | current             | primary-contract branch（既有）                         | yes                   | 无新增                 | preserve    |
+| `setInternal` EOL 行尾放不下清理分支        | current             | primary-contract branch（既有，x + width > self.width） | yes                   | 无新增                 | preserve    |
+| 移除 `session-v2.tsx` 三处 sentinel 注入    | proposed            | primary-contract（用户授权纳入 INV-01）                 | yes                   | 主路径                 | implement   |
+| OpenTUI existing native/release closure     | proposed            | primary-contract（source fix 的 runtime delivery）      | yes                   | 主路径                 | implement   |
+| `drawBox`/`drawGrid` 越界修复               | rejected            | forbidden（当前不可达，speculative）                    | n/a                   | 0%                     | reject      |
 
 新 alternate success path 数量：0。diagnostic path：无。
 
 ## 12. Workaround Deletion and Replacement
 
-| Existing workaround or duplicate | Why it existed | Why the approved route supersedes it | Delete or collapse location |
-| --- | --- | --- | --- |
-| `previewText` 追加 `…` 行（index.tsx:2269） | 作为“还有更多”的视觉 hint | `BlockTool` footer 已表达同一语义；sentinel 是冗余且引发高度不变 | index.tsx:2269 |
-| `previewDiff` 注入 ` …` 行（preview-diff.ts:24） | 同上 | 同上；hunk 计数已由 oldVisible/newVisible 重算，无需 sentinel 占位 | preview-diff.ts:24 |
-| `previewText` 追加 `…` 行（notebook-tool.tsx:434） | 同上 | 同上 | notebook-tool.tsx:434 |
-| session-v2 三处追加 `…`（:225/:595/:780） | 作为“还有更多”的视觉 hint | 各组件既有 `Click to expand/collapse` disclosure 已表达同一语义 | session-v2.tsx:225/:595/:780 |
-| R1 位于写入段的 scissor 检查（buffer.zig:562-565） | R1 首次修复位置 | 位于 mutation 之后，无法保证 atomic reject；入口检查覆盖同一 invariant 且无副作用 | buffer.zig:562-565 |
+| Existing workaround or duplicate                   | Why it existed            | Why the approved route supersedes it                                              | Delete or collapse location  |
+| -------------------------------------------------- | ------------------------- | --------------------------------------------------------------------------------- | ---------------------------- |
+| `previewText` 追加 `…` 行（index.tsx:2269）        | 作为“还有更多”的视觉 hint | `BlockTool` footer 已表达同一语义；sentinel 是冗余且引发高度不变                  | index.tsx:2269               |
+| `previewDiff` 注入 ` …` 行（preview-diff.ts:24）   | 同上                      | 同上；hunk 计数已由 oldVisible/newVisible 重算，无需 sentinel 占位                | preview-diff.ts:24           |
+| `previewText` 追加 `…` 行（notebook-tool.tsx:434） | 同上                      | 同上                                                                              | notebook-tool.tsx:434        |
+| session-v2 三处追加 `…`（:225/:595/:780）          | 作为“还有更多”的视觉 hint | 各组件既有 `Click to expand/collapse` disclosure 已表达同一语义                   | session-v2.tsx:225/:595/:780 |
+| R1 位于写入段的 scissor 检查（buffer.zig:562-565） | R1 首次修复位置           | 位于 mutation 之后，无法保证 atomic reject；入口检查覆盖同一 invariant 且无副作用 | buffer.zig:562-565           |
 
 无“禁用一个再用另一个恢复”的结构；被删的 sentinel 由既有 footer disclosure 自然取代，不引入新代码路径。
 
@@ -257,40 +257,40 @@ OpenTUI 当前旧 release 不是 workaround，而是本任务尚未完成的 run
 
 ## 13. Forward Traceability
 
-| Requirement or invariant | Production path | Planned file/change | Behavioral test |
-| --- | --- | --- | --- |
-| INV-01（纯文本预览） | `previewText` 直接返回截断内容 | `routes/session/index.tsx:2269`；`routes/session/notebook-tool.tsx:434` | `session-message-render.test.tsx`：折叠卡无 `…` 行且展开后行数严格增加 |
-| INV-01（diff 预览） | `previewDiff` 不注入 ` …` 且保持可解析 | `util/preview-diff.ts:24` | `preview-diff.test.ts`：截断预览无 ` …` 行、parsePatch 计数等于实际保留行 |
-| INV-01（v2 路由预览） | session-v2 三个 inline `limited` memo 直接返回截断内容 | `feature-plugins/system/session-v2.tsx:225/:595/:780` | `session-v2-error.test.tsx`：v2 bash 卡折叠态无 `…` 行且显示 disclosure |
-| INV-02（渲染行宽） | `setInternal` 入口在任何 mutation 前拒绝跨界 span | `thirdparty/opentui/packages/core/src/zig/buffer.zig` | `buffer_test.zig`：straddle 不越界写 continuation，且被拒绝写入不改变已有 grapheme cell/tracker |
-| INV-03（runtime delivery） | OpenTUI build/release closure -> root tarball bump -> consumer install | root `package.json`、`bun.lock`（workflows 仅执行不编辑） | `verify-release-packages.ts` + root install/runtime probe：consumer 只解析新 immutable release |
+| Requirement or invariant   | Production path                                                        | Planned file/change                                                     | Behavioral test                                                                                 |
+| -------------------------- | ---------------------------------------------------------------------- | ----------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| INV-01（纯文本预览）       | `previewText` 直接返回截断内容                                         | `routes/session/index.tsx:2269`；`routes/session/notebook-tool.tsx:434` | `session-message-render.test.tsx`：折叠卡无 `…` 行且展开后行数严格增加                          |
+| INV-01（diff 预览）        | `previewDiff` 不注入 ` …` 且保持可解析                                 | `util/preview-diff.ts:24`                                               | `preview-diff.test.ts`：截断预览无 ` …` 行、parsePatch 计数等于实际保留行                       |
+| INV-01（v2 路由预览）      | session-v2 三个 inline `limited` memo 直接返回截断内容                 | `feature-plugins/system/session-v2.tsx:225/:595/:780`                   | `session-v2-error.test.tsx`：v2 bash 卡折叠态无 `…` 行且显示 disclosure                         |
+| INV-02（渲染行宽）         | `setInternal` 入口在任何 mutation 前拒绝跨界 span                      | `thirdparty/opentui/packages/core/src/zig/buffer.zig`                   | `buffer_test.zig`：straddle 不越界写 continuation，且被拒绝写入不改变已有 grapheme cell/tracker |
+| INV-03（runtime delivery） | OpenTUI build/release closure -> root tarball bump -> consumer install | root `package.json`、`bun.lock`（workflows 仅执行不编辑）               | `verify-release-packages.ts` + root install/runtime probe：consumer 只解析新 immutable release  |
 
 ## 14. Reverse Traceability
 
-| Proposed production concept | Requirement ID | Evidence | Why existing logic cannot carry it |
-| --- | --- | --- | --- |
-| 移除 `previewText`/`previewDiff` 的 sentinel 注入 | INV-01 | 用户逐字要求（contracted）+ 探针证明注入行（observed） | `BlockTool` footer 已是唯一 disclosure；现有 sentinel 正是要移除的冗余，无法靠保留它来满足 INV-01 |
-| `setInternal` 入口 atomic scissor-span 约束 | INV-02 | 三处探针证明 continuation 越界（observed red）；mutation-before-check 顺序证据（observed） | 现有 continuation 上限只对齐 buffer 行尾；R1 写入段检查无法阻止 cleanup/tracker 先行 mutation，必须前置到 validateAndIndex 之后 |
-| 移除 `session-v2.tsx` 的 sentinel 注入 | INV-01 | 用户授权（contracted）+ 三处可达生产点（reachable） | v2 组件 footer disclosure 已存在；sentinel 是同一冗余模式，无法靠保留满足 INV-01 |
-| OpenTUI source/release/root dependency chain | INV-03 | 既有 release workflow 的 source SHA/11-package/cross-platform contract + 当前 root `0.4.3-smark.5` source | source tree 的 native 修复不会自动改变已安装 tarball；必须由既有 release owner 生成并由 root metadata 接入 |
+| Proposed production concept                       | Requirement ID | Evidence                                                                                                  | Why existing logic cannot carry it                                                                                              |
+| ------------------------------------------------- | -------------- | --------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| 移除 `previewText`/`previewDiff` 的 sentinel 注入 | INV-01         | 用户逐字要求（contracted）+ 探针证明注入行（observed）                                                    | `BlockTool` footer 已是唯一 disclosure；现有 sentinel 正是要移除的冗余，无法靠保留它来满足 INV-01                               |
+| `setInternal` 入口 atomic scissor-span 约束       | INV-02         | 三处探针证明 continuation 越界（observed red）；mutation-before-check 顺序证据（observed）                | 现有 continuation 上限只对齐 buffer 行尾；R1 写入段检查无法阻止 cleanup/tracker 先行 mutation，必须前置到 validateAndIndex 之后 |
+| 移除 `session-v2.tsx` 的 sentinel 注入            | INV-01         | 用户授权（contracted）+ 三处可达生产点（reachable）                                                       | v2 组件 footer disclosure 已存在；sentinel 是同一冗余模式，无法靠保留满足 INV-01                                                |
+| OpenTUI source/release/root dependency chain      | INV-03         | 既有 release workflow 的 source SHA/11-package/cross-platform contract + 当前 root `0.4.3-smark.5` source | source tree 的 native 修复不会自动改变已安装 tarball；必须由既有 release owner 生成并由 root metadata 接入                      |
 
 无未映射的生产概念。
 
 ## 15. File-Level Change Plan
 
-| File | Add / modify / delete | Exact responsibility of the change | Expected line delta |
-| --- | --- | --- | --- |
-| `packages/opencode/src/cli/cmd/tui/routes/session/index.tsx` | modify | `previewText` 移除 `…` 注入，直接返回截断内容 | ~1 |
-| `packages/opencode/src/cli/cmd/tui/util/preview-diff.ts` | modify | `previewDiff` 移除 `body.push(" …")` 及相关过期注释（含 :94-98 NB-01 误导注释修正） | ~3 |
-| `packages/opencode/src/cli/cmd/tui/feature-plugins/system/session-v2.tsx` | modify | 三处 inline `limited` memo 移除 `…` 注入（:225/:595/:780） | ~9 |
-| `packages/opencode/src/cli/cmd/tui/routes/session/notebook-tool.tsx` | modify | `previewText` 移除 `…` 注入 | ~1 |
-| `thirdparty/opentui/packages/core/src/zig/buffer.zig` | modify | `setInternal` 入口 atomic scissor span 拒绝（前置到 mutation 之前），移除 R1 写入段旧检查 | ~+6/-5 |
-| `packages/opencode/test/cli/cmd/tui/preview-diff.test.ts` | modify | 反转 ` …` 断言为“无 sentinel 行且计数=实际行” | ~6 |
-| `packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx` | modify | 新增/调整折叠卡无 `…`、展开行数增加的 render 断言 | ~20 |
-| `thirdparty/opentui/packages/core/src/zig/tests/buffer_test.zig` | modify | 新增 straddle 测试 + 新增“被拒绝跨界写入保持已有 grapheme”测试 | ~55 |
-| `packages/opencode/test/cli/cmd/tui/session-v2-error.test.tsx` | modify | 新增 v2 路由折叠无 `…` 的 render 测试（复用既有 Harness） | ~60 |
-| `package.json` | modify after immutable release exists | 将 root catalog/overrides 从 `0.4.3-smark.5` 指向同一 OpenTUI release | ~12 |
-| `bun.lock` | regenerate after root dependency bump | 锁定新 release 的 11 个 tarball URL、版本和完整性哈希 | generated |
+| File                                                                      | Add / modify / delete                 | Exact responsibility of the change                                                        | Expected line delta |
+| ------------------------------------------------------------------------- | ------------------------------------- | ----------------------------------------------------------------------------------------- | ------------------- |
+| `packages/opencode/src/cli/cmd/tui/routes/session/index.tsx`              | modify                                | `previewText` 移除 `…` 注入，直接返回截断内容                                             | ~1                  |
+| `packages/opencode/src/cli/cmd/tui/util/preview-diff.ts`                  | modify                                | `previewDiff` 移除 `body.push(" …")` 及相关过期注释（含 :94-98 NB-01 误导注释修正）       | ~3                  |
+| `packages/opencode/src/cli/cmd/tui/feature-plugins/system/session-v2.tsx` | modify                                | 三处 inline `limited` memo 移除 `…` 注入（:225/:595/:780）                                | ~9                  |
+| `packages/opencode/src/cli/cmd/tui/routes/session/notebook-tool.tsx`      | modify                                | `previewText` 移除 `…` 注入                                                               | ~1                  |
+| `thirdparty/opentui/packages/core/src/zig/buffer.zig`                     | modify                                | `setInternal` 入口 atomic scissor span 拒绝（前置到 mutation 之前），移除 R1 写入段旧检查 | ~+6/-5              |
+| `packages/opencode/test/cli/cmd/tui/preview-diff.test.ts`                 | modify                                | 反转 ` …` 断言为“无 sentinel 行且计数=实际行”                                             | ~6                  |
+| `packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx`      | modify                                | 新增/调整折叠卡无 `…`、展开行数增加的 render 断言                                         | ~20                 |
+| `thirdparty/opentui/packages/core/src/zig/tests/buffer_test.zig`          | modify                                | 新增 straddle 测试 + 新增“被拒绝跨界写入保持已有 grapheme”测试                            | ~55                 |
+| `packages/opencode/test/cli/cmd/tui/session-v2-error.test.tsx`            | modify                                | 新增 v2 路由折叠无 `…` 的 render 测试（复用既有 Harness）                                 | ~60                 |
+| `package.json`                                                            | modify after immutable release exists | 将 root catalog/overrides 从 `0.4.3-smark.5` 指向同一 OpenTUI release                     | ~12                 |
+| `bun.lock`                                                                | regenerate after root dependency bump | 锁定新 release 的 11 个 tarball URL、版本和完整性哈希                                     | generated           |
 
 生产代码文件 5（index.tsx、preview-diff.ts、notebook-tool.tsx、buffer.zig、session-v2.tsx）——在用户 R3 授权的扩展范围内（原 4 文件 + 额外 ≤6 文件、额外 ≤100 行；实际额外 1 文件、约 10 行）。`package.json`/`bun.lock` 是 release integration metadata，不增加生产代码文件数。
 
@@ -302,22 +302,22 @@ OpenTUI 当前旧 release 不是 workaround，而是本任务尚未完成的 run
 2. 折叠工具卡的 render 行为（`withRenderedSession` 真实 renderer）→ `session-message-render.test.tsx`。
 3. `OptimizedBuffer` native cell 写入（Zig 行为测试）→ `buffer_test.zig`。
 
-| Order | Red behavior | Why current code fails | Minimal green behavior | Regression protected |
-| --- | --- | --- | --- | --- |
-| 1 | `previewDiff(sample, 5)` 不含 ` …` 行且 parsePatch hunk 计数等于实际保留的 old/new 行 | 当前注入 ` …`，计数把它算成内容行（6/6） | 移除注入；计数=实际保留行（5/5） | 截断预览仍可被 parsePatch 解析、不丢 hunk 结构 |
-| 2 | 折叠 Shell/Edit 卡（内容超阈值）不出现 `…` 行，且点击展开后内容行数严格大于折叠态 | 当前 previewText 追加 `…`，折叠态含幻影行 | 移除注入；折叠态只有真实预览行 | 未超阈值卡片不出现 disclosure；展开仍显示完整内容 |
-| 3 | 宽字符跨 scissor 右边界时整字拒绝，且当目标处已有 grapheme span 时，被拒绝写入不得改变既有 cell/tracker | R1 检查位于 span_cleanup 之后，被拒绝写入先清除旧 span | 入口 atomic reject：旧 grapheme 完整保留、scissor 外 cell 保持原值 | 行尾 EOL 分支、宽度匹配/纯 ASCII/word-wrap 不回归（探针 baseline） |
-| 4a | v2 路由 bash 卡（输出 >10 行）折叠态不出现 `…` 行，且显示 `Click to expand` | 当前 v2 三处 memo 追加 `…` | 移除注入；折叠态只有真实预览行 | v2 路由其他消息类型（error/text）渲染不回归 |
-| 4 | 同一 OpenTUI source SHA 生成的 11 个包可通过 packed consumer verifier，并且 root install/runtime 解析新 release | 当前 root 固定旧 `0.4.3-smark.5`，native build/release 尚未完成 | 先完成既有 build-native/release closure，再 bump root metadata；验证新包而非 source-only 路径 | 防止 source fix 未进入用户 runtime，防止 11 包版本或 provenance 不一致 |
+| Order | Red behavior                                                                                                    | Why current code fails                                          | Minimal green behavior                                                                        | Regression protected                                                   |
+| ----- | --------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------- | --------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| 1     | `previewDiff(sample, 5)` 不含 ` …` 行且 parsePatch hunk 计数等于实际保留的 old/new 行                           | 当前注入 ` …`，计数把它算成内容行（6/6）                        | 移除注入；计数=实际保留行（5/5）                                                              | 截断预览仍可被 parsePatch 解析、不丢 hunk 结构                         |
+| 2     | 折叠 Shell/Edit 卡（内容超阈值）不出现 `…` 行，且点击展开后内容行数严格大于折叠态                               | 当前 previewText 追加 `…`，折叠态含幻影行                       | 移除注入；折叠态只有真实预览行                                                                | 未超阈值卡片不出现 disclosure；展开仍显示完整内容                      |
+| 3     | 宽字符跨 scissor 右边界时整字拒绝，且当目标处已有 grapheme span 时，被拒绝写入不得改变既有 cell/tracker         | R1 检查位于 span_cleanup 之后，被拒绝写入先清除旧 span          | 入口 atomic reject：旧 grapheme 完整保留、scissor 外 cell 保持原值                            | 行尾 EOL 分支、宽度匹配/纯 ASCII/word-wrap 不回归（探针 baseline）     |
+| 4a    | v2 路由 bash 卡（输出 >10 行）折叠态不出现 `…` 行，且显示 `Click to expand`                                     | 当前 v2 三处 memo 追加 `…`                                      | 移除注入；折叠态只有真实预览行                                                                | v2 路由其他消息类型（error/text）渲染不回归                            |
+| 4     | 同一 OpenTUI source SHA 生成的 11 个包可通过 packed consumer verifier，并且 root install/runtime 解析新 release | 当前 root 固定旧 `0.4.3-smark.5`，native build/release 尚未完成 | 先完成既有 build-native/release closure，再 bump root metadata；验证新包而非 source-only 路径 | 防止 source fix 未进入用户 runtime，防止 11 包版本或 provenance 不一致 |
 
 每个测试的期望值来自独立来源（截断后应有的真实行、parsePatch 计数、scissor 外 cell 应保持的原值），不断言 private helper、不复制生产算法、不做 horizontal slicing。
 
 ## 17. Chinese Comment Budget
 
-| Metric | Estimate | Method |
-| --- | --- | --- |
-| Effective changed code lines `E` | ~160 | 现有生产/测试变更约 63；R3 新增 v2 生产 ~9 + buffer 前置净增 ~5 + buffer_test ~30 + v2 测试 ~60；release integration metadata 不计入 E。排除 generated lockfile、import/format/pure-move |
-| Required Chinese explanatory comments `C` | ~26 | `ceil(170 * 0.15) = 26`；现有 qualifying comments 20 + R3 计划新增约 11（v2×3、buffer 入口、两个新测试），合计 ~31 |
+| Metric                                    | Estimate | Method                                                                                                                                                                                   |
+| ----------------------------------------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Effective changed code lines `E`          | ~160     | 现有生产/测试变更约 63；R3 新增 v2 生产 ~9 + buffer 前置净增 ~5 + buffer_test ~30 + v2 测试 ~60；release integration metadata 不计入 E。排除 generated lockfile、import/format/pure-move |
+| Required Chinese explanatory comments `C` | ~26      | `ceil(170 * 0.15) = 26`；现有 qualifying comments 20 + R3 计划新增约 11（v2×3、buffer 入口、两个新测试），合计 ~31                                                                       |
 
 计划注释点（邻近改动、解释 invariant/边界/测试意图，非复述代码）：
 
@@ -335,31 +335,31 @@ OpenTUI 当前旧 release 不是 workaround，而是本任务尚未完成的 run
 
 ## 18. Verification
 
-| Command | Working directory | Evidence produced |
-| --- | --- | --- |
-| `bun test test/cli/cmd/tui/preview-diff.test.ts` | `packages/opencode` | previewDiff 无 sentinel、可解析（slice 1） |
-| `bun test test/cli/cmd/tui/session-message-render.test.tsx` | `packages/opencode` | 折叠卡无 `…`、展开增高（slice 2） |
-| `bun typecheck` | `packages/opencode` | TS 类型不回归 |
-| `bun run build`（native 改动后） | `thirdparty/opentui`（repo 根） | 生成新 native 库供 native 测试 |
-| `bun run test:native -Dtest-filter="scissor"`（或新增测试名） | `thirdparty/opentui/packages/core` | 宽字符 straddle 不越界、被拒绝写入保持已有 grapheme（slice 3） |
-| `bun test test/cli/cmd/tui/session-v2-error.test.tsx` | `packages/opencode` | v2 路由折叠无 `…`、error 渲染不回归（slice 4a） |
-| `bun run --cwd packages/core build:native --all && bun run --cwd packages/core build:lib && bun run --cwd packages/solid build && bun run --cwd packages/keymap build` | `thirdparty/opentui` | 同一 source SHA 生成完整 native/JS package closure |
-| `bun run --cwd packages/core test:js && bun run --cwd packages/solid test && bun run --cwd packages/keymap test` | `thirdparty/opentui` | source JavaScript/framework regression |
-| `bun run --cwd packages/core test:dist --skip-build && bun run --cwd packages/solid test:dist --skip-build && bun run --cwd packages/keymap test:dist --skip-build` | `thirdparty/opentui` | packed dist consumer regression |
-| `bun scripts/verify-release-packages.ts --directory artifacts/npm-packages --version 0.4.3-smark.6` | `thirdparty/opentui` | 11 tarball HTTP install、版本/provenance/native 闭包与 CJK consumer 行为 |
-| `bun install --frozen-lockfile` | repository root | root metadata 只解析 immutable `0.4.3-smark.6` release |
-| `bun test src/renderables/Diff.regression.test.ts src/renderables/Code.test.ts` | `thirdparty/opentui/packages/core` | Diff/Code 换行/裁剪不回归 |
-| 原始 loop 复跑：`bun D:\Temp\opencode\probe-*.ts` | 对应 package 目录 | 三个探针由 red 转 green |
+| Command                                                                                                                                                                | Working directory                  | Evidence produced                                                        |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------- | ------------------------------------------------------------------------ |
+| `bun test test/cli/cmd/tui/preview-diff.test.ts`                                                                                                                       | `packages/opencode`                | previewDiff 无 sentinel、可解析（slice 1）                               |
+| `bun test test/cli/cmd/tui/session-message-render.test.tsx`                                                                                                            | `packages/opencode`                | 折叠卡无 `…`、展开增高（slice 2）                                        |
+| `bun typecheck`                                                                                                                                                        | `packages/opencode`                | TS 类型不回归                                                            |
+| `bun run build`（native 改动后）                                                                                                                                       | `thirdparty/opentui`（repo 根）    | 生成新 native 库供 native 测试                                           |
+| `bun run test:native -Dtest-filter="scissor"`（或新增测试名）                                                                                                          | `thirdparty/opentui/packages/core` | 宽字符 straddle 不越界、被拒绝写入保持已有 grapheme（slice 3）           |
+| `bun test test/cli/cmd/tui/session-v2-error.test.tsx`                                                                                                                  | `packages/opencode`                | v2 路由折叠无 `…`、error 渲染不回归（slice 4a）                          |
+| `bun run --cwd packages/core build:native --all && bun run --cwd packages/core build:lib && bun run --cwd packages/solid build && bun run --cwd packages/keymap build` | `thirdparty/opentui`               | 同一 source SHA 生成完整 native/JS package closure                       |
+| `bun run --cwd packages/core test:js && bun run --cwd packages/solid test && bun run --cwd packages/keymap test`                                                       | `thirdparty/opentui`               | source JavaScript/framework regression                                   |
+| `bun run --cwd packages/core test:dist --skip-build && bun run --cwd packages/solid test:dist --skip-build && bun run --cwd packages/keymap test:dist --skip-build`    | `thirdparty/opentui`               | packed dist consumer regression                                          |
+| `bun scripts/verify-release-packages.ts --directory artifacts/npm-packages --version 0.4.3-smark.6`                                                                    | `thirdparty/opentui`               | 11 tarball HTTP install、版本/provenance/native 闭包与 CJK consumer 行为 |
+| `bun install --frozen-lockfile`                                                                                                                                        | repository root                    | root metadata 只解析 immutable `0.4.3-smark.6` release                   |
+| `bun test src/renderables/Diff.regression.test.ts src/renderables/Code.test.ts`                                                                                        | `thirdparty/opentui/packages/core` | Diff/Code 换行/裁剪不回归                                                |
+| 原始 loop 复跑：`bun D:\Temp\opencode\probe-*.ts`                                                                                                                      | 对应 package 目录                  | 三个探针由 red 转 green                                                  |
 
 ## 19. Diff Budget
 
-| Metric | Estimate | Justification |
-| --- | --- | --- |
-| Files added | 0 | 复用既有测试文件 |
-| Files modified | 10 root | Files modified | 9 root paths + 2 OpenTUI source paths（共 11 files） | 5 生产 + 3 测试 + `package.json`/`bun.lock`；OpenTUI submodule 内 1 source + 1 test 文件 |inel 为行内移除，非整文件 |
-| Production lines | ~19 | 6 处 sentinel 移除 + buffer.zig 入口净增 ~2 + preview-diff 注释修正；release metadata 不计入 production code file budget |
-| Test lines | ~141 | preview-diff ~6 + render ~20 + buffer_test ~55 + session-v2 ~60 |
-| Generated lines | lockfile delta only | `bun.lock` 只由 release URL/version/hash 生成，不手工添加第二份依赖语义 |
+| Metric           | Estimate            | Justification                                                                                                            |
+| ---------------- | ------------------- | ------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------- | ---------------------------------------------------------------------------------------- | ------------------------- |
+| Files added      | 0                   | 复用既有测试文件                                                                                                         |
+| Files modified   | 10 root             | Files modified                                                                                                           | 9 root paths + 2 OpenTUI source paths（共 11 files） | 5 生产 + 3 测试 + `package.json`/`bun.lock`；OpenTUI submodule 内 1 source + 1 test 文件 | inel 为行内移除，非整文件 |
+| Production lines | ~19                 | 6 处 sentinel 移除 + buffer.zig 入口净增 ~2 + preview-diff 注释修正；release metadata 不计入 production code file budget |
+| Test lines       | ~141                | preview-diff ~6 + render ~20 + buffer_test ~55 + session-v2 ~60                                                          |
+| Generated lines  | lockfile delta only | `bun.lock` 只由 release URL/version/hash 生成，不手工添加第二份依赖语义                                                  |
 
 预算为审计信号，不作为省略已确认行为的许可。满足 GOAL 及 R3 用户授权：生产代码 5 文件（原上限 4 + 授权额外 ≤6）、总改动 ≤400 行。
 
@@ -396,11 +396,11 @@ The independent auditor must:
 
 ## 22. Plan Audit Record
 
-| Round | Audited revision | Full scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | R1 | yes | none（`No blocking findings.`） | NB-01（INV-02 表述宽于实际修复面，drawGrid/drawBox fast path 不修复但已证明不可达，语义自洽）；NB-02（Branch B 运行时生效依赖后续 release 机械步骤，已如实声明）；NB-03（§17 注释点 6 处对应所需 C≈10，计划模式可行，实现阶段须达最小值）；NB-04（previewText 空预览分支行为变化已隐含覆盖，符合反分支要求） | APPROVE | ses_03bf90a64ffezHCMA597HbL9s2 |
-| 2 | R2 | yes | B-01（session-v2 三处可达 sentinel 被未经授权地排除在 INV-01 之外）；B-02（scissor 检查位于 tracker/span_cleanup mutation 之后，无法保证保持原值） | NB-01（preview-diff.ts:94-98 过期注释）；NB-02（INV-02 措辞宽于实际设计）；NB-03（notebook 无独立行为测试）；NB-04（release closure 外部机械依赖） | BLOCK | ses_03a60ec10ffeGXnY41l72F4eVO |
-| 3 | R3 | yes | none（`No blocking findings.`） | NB-01（§19 12 paths vs §15 11 files 算术漂移）；NB-02（§13 INV-03 Planned file 列 wording 松散，§15 为准）；NB-03（§16 slice 编号 1,2,3,4a,4）；NB-04（§17 E≈170 vs §19 ≈160，C 承诺双向满足） | APPROVE | ses_03a489facffednanqYmBU4RPwP |
+| Round | Audited revision | Full scope? | Blocking findings                                                                                                                                  | Non-blocking findings                                                                                                                                                                                                                                                                                        | Result  | Invocation reference           |
+| ----- | ---------------- | ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------- | ------------------------------ |
+| 1     | R1               | yes         | none（`No blocking findings.`）                                                                                                                    | NB-01（INV-02 表述宽于实际修复面，drawGrid/drawBox fast path 不修复但已证明不可达，语义自洽）；NB-02（Branch B 运行时生效依赖后续 release 机械步骤，已如实声明）；NB-03（§17 注释点 6 处对应所需 C≈10，计划模式可行，实现阶段须达最小值）；NB-04（previewText 空预览分支行为变化已隐含覆盖，符合反分支要求） | APPROVE | ses_03bf90a64ffezHCMA597HbL9s2 |
+| 2     | R2               | yes         | B-01（session-v2 三处可达 sentinel 被未经授权地排除在 INV-01 之外）；B-02（scissor 检查位于 tracker/span_cleanup mutation 之后，无法保证保持原值） | NB-01（preview-diff.ts:94-98 过期注释）；NB-02（INV-02 措辞宽于实际设计）；NB-03（notebook 无独立行为测试）；NB-04（release closure 外部机械依赖）                                                                                                                                                           | BLOCK   | ses_03a60ec10ffeGXnY41l72F4eVO |
+| 3     | R3               | yes         | none（`No blocking findings.`）                                                                                                                    | NB-01（§19 12 paths vs §15 11 files 算术漂移）；NB-02（§13 INV-03 Planned file 列 wording 松散，§15 为准）；NB-03（§16 slice 编号 1,2,3,4a,4）；NB-04（§17 E≈170 vs §19 ≈160，C 承诺双向满足）                                                                                                               | APPROVE | ses_03a489facffednanqYmBU4RPwP |
 
 独立审计 verdict（round 1，原样记录）：`No blocking findings.` Release verdict: **APPROVE**（仅适用于 R1，full-scope）。
 
@@ -417,12 +417,14 @@ Any substantive revision invalidates earlier approval.
 ### Actual Files and Diff
 
 生产代码（4 文件）：
+
 - `packages/opencode/src/cli/cmd/tui/routes/session/index.tsx`（previewText 移除 `…`，-2/+2）
 - `packages/opencode/src/cli/cmd/tui/util/preview-diff.ts`（previewDiff 移除 ` …` 注入与失效 incomplete 变量，-5/+3）
 - `packages/opencode/src/cli/cmd/tui/routes/session/notebook-tool.tsx`（previewText 移除 `…`，-1/+2）
 - `thirdparty/opentui/packages/core/src/zig/buffer.zig`（setInternal 宽 grapheme scissor span 约束，+5）
 
 测试代码（3 文件）：
+
 - `packages/opencode/test/cli/cmd/tui/preview-diff.test.ts`（反转 3 处 ` …` 断言，-9/+9）
 - `packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx`（新增折叠无 `…`/展开增高 render 测试，+33）
 - `thirdparty/opentui/packages/core/src/zig/tests/buffer_test.zig`（新增 straddle scissor native 测试，+27）
@@ -444,21 +446,21 @@ R3 Red-Green 证据：
 
 R3 Verification：
 
-| Command | Working directory | Result |
-| --- | --- | --- |
-| `bun test test/cli/cmd/tui/preview-diff.test.ts test/cli/cmd/tui/session-message-render.test.tsx test/cli/cmd/tui/session-v2-error.test.tsx` | `packages/opencode` | 90 pass, 0 fail |
-| `bun test test/cli/cmd/tui/`（整目录回归） | `packages/opencode` | 300 pass, 0 fail（32 文件，较 R1 +1 测试） |
-| `bun typecheck` | `packages/opencode` | pass |
-| `bun run test:native -Dtest-filter=...` | `thirdparty/opentui/packages/core` | 阻塞：`zig: command not found`（环境，非代码缺陷） |
+| Command                                                                                                                                      | Working directory                  | Result                                             |
+| -------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------- | -------------------------------------------------- |
+| `bun test test/cli/cmd/tui/preview-diff.test.ts test/cli/cmd/tui/session-message-render.test.tsx test/cli/cmd/tui/session-v2-error.test.tsx` | `packages/opencode`                | 90 pass, 0 fail                                    |
+| `bun test test/cli/cmd/tui/`（整目录回归）                                                                                                   | `packages/opencode`                | 300 pass, 0 fail（32 文件，较 R1 +1 测试）         |
+| `bun typecheck`                                                                                                                              | `packages/opencode`                | pass                                               |
+| `bun run test:native -Dtest-filter=...`                                                                                                      | `thirdparty/opentui/packages/core` | 阻塞：`zig: command not found`（环境，非代码缺陷） |
 
 R3 Chinese Comment Calculation：
 
-| Metric | Actual | Exclusions and evidence |
-| --- | --- | --- |
-| Effective changed code lines `E` | ~150 | R1 约 63 + R3：session-v2 3 + buffer.zig 3 + buffer_test 18 + session-v2 测试 60；排除空行/注释/import/format/generated |
-| Qualifying Chinese comment lines `C` | ~35 | R1 20 + R3：session-v2×3、buffer.zig 入口 4、buffer_test 5、session-v2 测试 5 |
-| Ratio `C / E` | ~0.23 | 35 / 150 |
-| Required minimum `C` | 23 | `ceil(150 * 0.15) = 23`，满足 |
+| Metric                               | Actual | Exclusions and evidence                                                                                                 |
+| ------------------------------------ | ------ | ----------------------------------------------------------------------------------------------------------------------- |
+| Effective changed code lines `E`     | ~150   | R1 约 63 + R3：session-v2 3 + buffer.zig 3 + buffer_test 18 + session-v2 测试 60；排除空行/注释/import/format/generated |
+| Qualifying Chinese comment lines `C` | ~35    | R1 20 + R3：session-v2×3、buffer.zig 入口 4、buffer_test 5、session-v2 测试 5                                           |
+| Ratio `C / E`                        | ~0.23  | 35 / 150                                                                                                                |
+| Required minimum `C`                 | 23     | `ceil(150 * 0.15) = 23`，满足                                                                                           |
 
 Branch C（runtime delivery）已于 2026-08-03 经用户授权执行完成：
 
@@ -480,14 +482,14 @@ R3 Remaining Unverified Items：
 
 ### Verification Commands and Results
 
-| Command | Working directory | Result |
-| --- | --- | --- |
-| `bun test test/cli/cmd/tui/preview-diff.test.ts` | `packages/opencode` | 8 pass, 0 fail |
-| `bun test test/cli/cmd/tui/session-message-render.test.tsx` | `packages/opencode` | 80 pass, 0 fail |
-| `bun test test/cli/cmd/tui/`（整目录回归） | `packages/opencode` | 299 pass, 0 fail（32 文件；ENOENT 为既有测试环境噪音） |
-| `bun typecheck` | `packages/opencode` | pass |
-| `bun run test:native -Dtest-filter=...` | `thirdparty/opentui/packages/core` | **阻塞：`zig: command not found`** |
-| `bun run build`（native） | `thirdparty/opentui` | **阻塞：依赖 zig 0.15.2** |
+| Command                                                     | Working directory                  | Result                                                 |
+| ----------------------------------------------------------- | ---------------------------------- | ------------------------------------------------------ |
+| `bun test test/cli/cmd/tui/preview-diff.test.ts`            | `packages/opencode`                | 8 pass, 0 fail                                         |
+| `bun test test/cli/cmd/tui/session-message-render.test.tsx` | `packages/opencode`                | 80 pass, 0 fail                                        |
+| `bun test test/cli/cmd/tui/`（整目录回归）                  | `packages/opencode`                | 299 pass, 0 fail（32 文件；ENOENT 为既有测试环境噪音） |
+| `bun typecheck`                                             | `packages/opencode`                | pass                                                   |
+| `bun run test:native -Dtest-filter=...`                     | `thirdparty/opentui/packages/core` | **阻塞：`zig: command not found`**                     |
+| `bun run build`（native）                                   | `thirdparty/opentui`               | **阻塞：依赖 zig 0.15.2**                              |
 
 ### Original Feedback-Loop Result
 
@@ -500,12 +502,12 @@ R3 Remaining Unverified Items：
 
 ### Chinese Comment Calculation
 
-| Metric | Actual | Exclusions and evidence |
-| --- | --- | --- |
-| Effective changed code lines `E` | ~63 | 生产 ~4 + 测试 ~59；排除空行、纯注释、无 import/format/generated 改动 |
-| Qualifying Chinese comment lines `C` | 20 | index.tsx×1、notebook-tool.tsx×1、preview-diff.ts×2、buffer.zig×3、preview-diff.test.ts×3、session-message-render.test.tsx×4、buffer_test.zig×6 |
-| Ratio `C / E` | ~0.32 | 20 / 63 |
-| Required minimum `C` | 10 | `ceil(63 * 0.15) = 10`，满足 |
+| Metric                               | Actual | Exclusions and evidence                                                                                                                         |
+| ------------------------------------ | ------ | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| Effective changed code lines `E`     | ~63    | 生产 ~4 + 测试 ~59；排除空行、纯注释、无 import/format/generated 改动                                                                           |
+| Qualifying Chinese comment lines `C` | 20     | index.tsx×1、notebook-tool.tsx×1、preview-diff.ts×2、buffer.zig×3、preview-diff.test.ts×3、session-message-render.test.tsx×4、buffer_test.zig×6 |
+| Ratio `C / E`                        | ~0.32  | 20 / 63                                                                                                                                         |
+| Required minimum `C`                 | 10     | `ceil(63 * 0.15) = 10`，满足                                                                                                                    |
 
 ### Remaining Unverified Items
 
@@ -514,9 +516,9 @@ R3 Remaining Unverified Items：
 
 ## 24. Implementation Audit Record
 
-| Round | Plan revision | Full original scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | R1 | yes | none（`No blocking findings.`） | NB-01（notebook `previewText` sentinel 移除无行为敏感测试，INV-01 已在主会话与 previewDiff seam 验证）；NB-02（clip-overwrite 时 grapheme_tracker 可能留幻影 id，后果限于 hasAny() 慢路径选择与统计，无 cell 编码该 id）；NB-03（全空白截断预览现渲染空预览区，为契约性 sentinel 移除的直接后果）；NB-04（Branch B 运行时生效依赖独立 OpenTUI build/release/bump，已披露） | APPROVE | ses_03bcf12f1ffed2hDcbm5K3gcYr |
+| Round | Plan revision | Full original scope? | Blocking findings               | Non-blocking findings                                                                                                                                                                                                                                                                                                                                                      | Result  | Invocation reference           |
+| ----- | ------------- | -------------------- | ------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- | ------------------------------ |
+| 1     | R1            | yes                  | none（`No blocking findings.`） | NB-01（notebook `previewText` sentinel 移除无行为敏感测试，INV-01 已在主会话与 previewDiff seam 验证）；NB-02（clip-overwrite 时 grapheme_tracker 可能留幻影 id，后果限于 hasAny() 慢路径选择与统计，无 cell 编码该 id）；NB-03（全空白截断预览现渲染空预览区，为契约性 sentinel 移除的直接后果）；NB-04（Branch B 运行时生效依赖独立 OpenTUI build/release/bump，已披露） | APPROVE | ses_03bcf12f1ffed2hDcbm5K3gcYr |
 
 | 2 | R1 | yes | B-01（`session-v2.tsx` :225/:595/:780 在 `experimentalEventSystem` 下 reachable，但 R1 将其排除且仍声称 INV-01 全局成立）；B-02（native build/test 未执行，source fix 未进入实际 runtime release artifact） | NB-01（notebook sentinel 独立行为测试仍可增强）；NB-02（grapheme_tracker phantom id 风险未证明为用户可见）；NB-03（全空白截断预览为空是直接契约结果） | BLOCK | ses_03a6d1a29ffeDHOecVsqSSexca |
 | 3 | R3 | yes | none（`No blocking findings.`） | NB-01（INV-03 runtime delivery 未执行，plan-carried execution dependency，本 verdict 仅认证 source diff）；NB-02（native 测试 red/green 由分析而非执行建立，CI 执行仍是 INV-02 runtime-verified 的前提）；NB-03（session-v2 Shell/GenericTool 与 notebook previewText 无独立行为测试，plan 已接受 residual） | APPROVE | ses_03a2f09b1ffe349g5vjScZXdpO |

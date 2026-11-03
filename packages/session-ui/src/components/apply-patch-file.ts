@@ -43,8 +43,17 @@ export function patchFile(raw: unknown): ApplyPatchFile | undefined {
 
   const value = raw as Raw
   // 删除diff已经存在，不能因为字段改名把正文和统计一起过滤。
-  const type = kind(value.type) ?? (value.status === "added" ? "add" : value.status === "deleted" ? "delete" : value.status === "modified" ? "update" : undefined)
-  const filePath = typeof value.filePath === "string" ? value.filePath : typeof value.file === "string" ? value.file : undefined
+  const type =
+    kind(value.type) ??
+    (value.status === "added"
+      ? "add"
+      : value.status === "deleted"
+        ? "delete"
+        : value.status === "modified"
+          ? "update"
+          : undefined)
+  const filePath =
+    typeof value.filePath === "string" ? value.filePath : typeof value.file === "string" ? value.file : undefined
   const relativePath = typeof value.relativePath === "string" ? value.relativePath : filePath
   const patch = typeof value.patch === "string" ? value.patch : typeof value.diff === "string" ? value.diff : undefined
   const before = typeof value.before === "string" ? value.before : undefined

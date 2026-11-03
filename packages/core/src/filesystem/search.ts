@@ -33,32 +33,36 @@ export const ripgrepLayer = Layer.effect(
     const scan = Effect.fnUntraced(function* () {
       const files: string[] = []
       const directories = new Set<string>()
-      yield* ripgrep.find({
-        cwd: location.directory,
-        pattern: "*",
-        limit: location.vcs ? Number.MAX_SAFE_INTEGER : 100_000,
-        onEntry: (entry) => Effect.sync(() => {
-          files.push(entry.path)
-          const parts = entry.path.split("/")
-          parts.slice(0, -1).forEach((_, index) => directories.add(parts.slice(0, index + 1).join("/") + path.sep))
-        }),
-      }).pipe(Effect.orDie)
+      yield* ripgrep
+        .find({
+          cwd: location.directory,
+          pattern: "*",
+          limit: location.vcs ? Number.MAX_SAFE_INTEGER : 100_000,
+          onEntry: (entry) =>
+            Effect.sync(() => {
+              files.push(entry.path)
+              const parts = entry.path.split("/")
+              parts.slice(0, -1).forEach((_, index) => directories.add(parts.slice(0, index + 1).join("/") + path.sep))
+            }),
+        })
+        .pipe(Effect.orDie)
       return { files, directories: Array.from(directories) }
     })
     const scanOnce = Effect.fnUntraced(function* () {
-      return yield* Effect.uninterruptibleMask((restore) => Effect.gen(function* () {
-        if (state.pending) return yield* restore(Deferred.await(state.pending))
-        const pending = Deferred.makeUnsafe<Index, never>()
-        state.pending = pending
-        const raw = yield* restore(scan().pipe(Effect.exit))
-        // 延续source扫描失败为空结果；中断原样传给等待者，不伪造成功。
-        const exit = Exit.isFailure(raw) && !Cause.hasInterrupts(raw.cause)
-          ? Exit.succeed({ files: [], directories: [] })
-          : raw
-        state.pending = undefined
-        yield* Deferred.done(pending, exit)
-        return yield* exit
-      }))
+      return yield* Effect.uninterruptibleMask((restore) =>
+        Effect.gen(function* () {
+          if (state.pending) return yield* restore(Deferred.await(state.pending))
+          const pending = Deferred.makeUnsafe<Index, never>()
+          state.pending = pending
+          const raw = yield* restore(scan().pipe(Effect.exit))
+          // 延续source扫描失败为空结果；中断原样传给等待者，不伪造成功。
+          const exit =
+            Exit.isFailure(raw) && !Cause.hasInterrupts(raw.cause) ? Exit.succeed({ files: [], directories: [] }) : raw
+          state.pending = undefined
+          yield* Deferred.done(pending, exit)
+          return yield* exit
+        }),
+      )
     })
     return Service.of({
       glob: (input) =>
@@ -124,7 +128,9 @@ export const ripgrepLayer = Layer.effect(
                 ? index.directories
                 : [...index.files, ...index.directories]
           const query = input.query.trim()
-          const paths = query ? fuzzysort.go(query, items, { limit: input.limit ?? 50 }).map((item) => item.target) : items.slice(0, input.limit ?? 50)
+          const paths = query
+            ? fuzzysort.go(query, items, { limit: input.limit ?? 50 }).map((item) => item.target)
+            : items.slice(0, input.limit ?? 50)
           return paths.map((relative) => {
             const type = relative.endsWith(path.sep) ? ("directory" as const) : ("file" as const)
             return Entry.make({

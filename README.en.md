@@ -107,7 +107,6 @@ OPENCODE_INSTALL_DIR=/usr/local/bin curl -fsSL https://opencode.ai/install | bas
 XDG_BIN_DIR=$HOME/.local/bin curl -fsSL https://opencode.ai/install | bash
 ```
 
-
 ### VS Code Notebook 集成
 
 使用 Notebook 工具前，请安装 VS Code 扩展 [SMARK2022.opencode-ide-bridge](https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge)。仓库内扩展版本为 `1.19.13`，推荐配合 SMARK CLI `1.19.17-smark`；两者独立版本化，Marketplace 可能仍显示旧版 `1.19.12` 直至新构建发布。该扩展在 VS Code 与 OpenCode CLI 之间建立本地鉴权 bridge；未安装或未连接时，CLI 无法可靠读取、编辑或执行 notebook 单元格。
@@ -116,14 +115,14 @@ XDG_BIN_DIR=$HOME/.local/bin curl -fsSL https://opencode.ai/install | bash
 
 V1 和 V2 的 LSP 功能固定禁用，统一提示 unavailable；扩展不启用语言诊断、跳转或符号查询，CLI 也不使用内置 LSP 或语言服务回退。Notebook 操作和文件编辑后的 formatter 最终内容及 diff 反馈仍然可用；unavailable 不能视为诊断通过或代替完整项目 typecheck。
 
-| 工具 | 用途 |
-| --- | --- |
+| 工具                      | 用途                                                                                                       |
+| ------------------------- | ---------------------------------------------------------------------------------------------------------- |
 | `vscode_notebook_summary` | 获取 notebook cell 的稳定 `#VSC-*` ID、显示序号、类型、语言、执行状态、输出摘要、dirty 状态和 runtime 信息 |
-| `vscode_notebook_source` | 以 1-based 全局虚拟行号分页读取 notebook 源码，返回内容默认限制在 16KB 内 |
-| `vscode_notebook_edit` | 插入、修改、删除 cell，支持 `oldCode/newCode` 精确字符串替换，也支持 code/markdown 类型切换 |
-| `vscode_notebook_run` | 通过 VS Code/Jupyter 执行单个代码 cell 或稳定 ID 范围，范围执行遇到失败或超时会停止 |
-| `vscode_notebook_output` | 读取文本、图片、HTML、JSON 等输出；大输出会写入 `.opencode/cache/notebook-outputs/` 并返回 artifact 路径 |
-| `vscode_notebook_env` | 查看 kernel/runtime，选择、重启或停止 kernel，并在用户明确要求时创建或保存 notebook |
+| `vscode_notebook_source`  | 以 1-based 全局虚拟行号分页读取 notebook 源码，返回内容默认限制在 16KB 内                                  |
+| `vscode_notebook_edit`    | 插入、修改、删除 cell，支持 `oldCode/newCode` 精确字符串替换，也支持 code/markdown 类型切换                |
+| `vscode_notebook_run`     | 通过 VS Code/Jupyter 执行单个代码 cell 或稳定 ID 范围，范围执行遇到失败或超时会停止                        |
+| `vscode_notebook_output`  | 读取文本、图片、HTML、JSON 等输出；大输出会写入 `.opencode/cache/notebook-outputs/` 并返回 artifact 路径   |
+| `vscode_notebook_env`     | 查看 kernel/runtime，选择、重启或停止 kernel，并在用户明确要求时创建或保存 notebook                        |
 
 推荐流程：先用 `vscode_notebook_summary` 获取当前 cell ID，再用 `vscode_notebook_source` 读取目标 cell，修改后用 `vscode_notebook_run` 验证，最后用 `vscode_notebook_output` 查看结果。不要把显示序号 `cN` 当成长期稳定引用；插入、删除或类型切换后应使用工具返回的新 `#VSC-*` ID 或重新 summary。
 
@@ -133,12 +132,12 @@ If you need ChatGPT Web assistance, consider connecting [chatgpt-browser-agent-s
 
 ### Session Management
 
-| Capability | Description |
-|---|---|
-| Session search | Search history sessions by keyword and narrow the scope with path filters |
-| Manual compaction | Trigger an optimized compaction on demand; compaction selection is asynchronous and reports errors while keeping a context summary |
-| Interrupt recovery | Interrupt counts and confirmation time are recorded; parent-session interrupts propagate to subtasks |
-| Session Warping | Long sessions keep advancing across contexts without a rebuild |
+| Capability         | Description                                                                                                                        |
+| ------------------ | ---------------------------------------------------------------------------------------------------------------------------------- |
+| Session search     | Search history sessions by keyword and narrow the scope with path filters                                                          |
+| Manual compaction  | Trigger an optimized compaction on demand; compaction selection is asynchronous and reports errors while keeping a context summary |
+| Interrupt recovery | Interrupt counts and confirmation time are recorded; parent-session interrupts propagate to subtasks                               |
+| Session Warping    | Long sessions keep advancing across contexts without a rebuild                                                                     |
 
 ### Agents
 

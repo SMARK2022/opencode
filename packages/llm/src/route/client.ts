@@ -371,15 +371,16 @@ const prepareWith = Effect.fn("LLMClient.prepare")(function* (request: LLMReques
   })
 })
 
-const streamRequestWith = (runtime: TransportRuntime) => (request: LLMRequest, onPrepared?: Parameters<StreamMethod>[1]) =>
-  Stream.unwrap(
-    Effect.gen(function* () {
-      const compiled = yield* compile(request)
-      // 估算复用 compile 的协议正文；运输 metadata 和信封不扩展 token 观察接口。
-      if (onPrepared) yield* onPrepared(compiled.body)
-      return compiled.route.streamPrepared(compiled.prepared, compiled.request, runtime)
-    }),
-  )
+const streamRequestWith =
+  (runtime: TransportRuntime) => (request: LLMRequest, onPrepared?: Parameters<StreamMethod>[1]) =>
+    Stream.unwrap(
+      Effect.gen(function* () {
+        const compiled = yield* compile(request)
+        // 估算复用 compile 的协议正文；运输 metadata 和信封不扩展 token 观察接口。
+        if (onPrepared) yield* onPrepared(compiled.body)
+        return compiled.route.streamPrepared(compiled.prepared, compiled.request, runtime)
+      }),
+    )
 
 const generateWith = (stream: Interface["stream"]) =>
   Effect.fn("LLM.generate")(function* (request: LLMRequest) {
@@ -395,7 +396,10 @@ const generateWith = (stream: Interface["stream"]) =>
 export const prepare = <Body = unknown>(request: LLMRequest) =>
   prepareWith(request) as Effect.Effect<PreparedRequestOf<Body>, LLMError>
 
-export function stream(request: LLMRequest, onPrepared?: Parameters<StreamMethod>[1]): Stream.Stream<LLMEvent, LLMError> {
+export function stream(
+  request: LLMRequest,
+  onPrepared?: Parameters<StreamMethod>[1],
+): Stream.Stream<LLMEvent, LLMError> {
   return Stream.unwrap(
     Effect.gen(function* () {
       const client = yield* Service

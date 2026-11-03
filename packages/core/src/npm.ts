@@ -96,7 +96,9 @@ const layer = Layer.effect(
         // 保留用户 npm 配置再覆盖本次路由，registry 选源与包下载必须使用同一路径。
         const npmOptions = {
           ...loadedOptions,
-          ...(yield* Effect.promise(() => NetworkProxy.npmProxyOptions(String(loadedOptions.registry ?? "https://registry.npmjs.org")))),
+          ...(yield* Effect.promise(() =>
+            NetworkProxy.npmProxyOptions(String(loadedOptions.registry ?? "https://registry.npmjs.org")),
+          )),
           // npm 自身不做长串重试，安装错误交回插件 loader 的现有重试与报告 owner。
           fetchRetries: 0,
           // 下载有独立上限，慢代理不能让后台插件任务永远占有安装锁。

@@ -27,13 +27,7 @@ async function runShard(name: "core" | keyof ReturnType<typeof partitionTestFile
   console.log(`Running ${name} test shard (${files.length} files)`)
   // 每个 child 独占 JUnit 路径；复用同一文件会覆盖先完成 shard 的失败证据。
   const proc = Bun.spawn(
-    [
-      process.execPath,
-      "test",
-      ...files,
-      ...REPORTER_ARGS,
-      `--reporter-outfile=.artifacts/unit/junit-${name}.xml`,
-    ],
+    [process.execPath, "test", ...files, ...REPORTER_ARGS, `--reporter-outfile=.artifacts/unit/junit-${name}.xml`],
     {
       cwd: PACKAGE_ROOT,
       stdin: "inherit",

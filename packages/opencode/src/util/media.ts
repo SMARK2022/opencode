@@ -38,8 +38,7 @@ export function sniffAttachmentMime(bytes: Uint8Array, fallback: string) {
       // avif/avis take precedence over the generic HEIF container brands.
       if (brands.some((brand) => brand === 0x61766966 || brand === 0x61766973)) return "image/avif"
       // heic/heix/hevc/hevx encode HEVC images; mif1/msf1 denote HEIF containers.
-      if (brands.some((brand) => [0x68656963, 0x68656978, 0x68657663, 0x68657678].includes(brand)))
-        return "image/heic"
+      if (brands.some((brand) => [0x68656963, 0x68656978, 0x68657663, 0x68657678].includes(brand))) return "image/heic"
       if (brands.some((brand) => brand === 0x6d696631 || brand === 0x6d736631)) return "image/heif"
     }
   }

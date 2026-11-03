@@ -20,23 +20,43 @@ const model = Model.make({ id: "model", provider: "provider", route: OpenAIChat.
 test("classifies Native goal progress from structured producer receipts", () => {
   const ledger = SessionGoalProgress.createGoalProgressLedger()
   const gate = { noProgressTurns: 0, replanRequired: false }
-  const signal = (messages: readonly SessionMessage.Message[]) => SessionGoalProgress.absorbGoalTurnEvidence(SessionGoalProgress.nativeEvidence(messages), "/project", ledger)
-  const tool = (value: string, name: string, input: Record<string, unknown>, structured: Record<string, unknown>, output = "stable") => SessionMessage.Assistant.make({
-    id: id(value), type: "assistant", agent: "build",
-    model: { id: ModelV2.ID.make("model"), providerID: ProviderV2.ID.make("provider") },
-    content: [SessionMessage.AssistantTool.make({
-      type: "tool", id: value, name, time: { created, completed: created },
-      state: SessionMessage.ToolStateCompleted.make({
-        status: "completed", input, structured, content: [{ type: "text", text: output }],
-      }),
-    })],
-    time: { created, completed: created },
-  })
+  const signal = (messages: readonly SessionMessage.Message[]) =>
+    SessionGoalProgress.absorbGoalTurnEvidence(SessionGoalProgress.nativeEvidence(messages), "/project", ledger)
+  const tool = (
+    value: string,
+    name: string,
+    input: Record<string, unknown>,
+    structured: Record<string, unknown>,
+    output = "stable",
+  ) =>
+    SessionMessage.Assistant.make({
+      id: id(value),
+      type: "assistant",
+      agent: "build",
+      model: { id: ModelV2.ID.make("model"), providerID: ProviderV2.ID.make("provider") },
+      content: [
+        SessionMessage.AssistantTool.make({
+          type: "tool",
+          id: value,
+          name,
+          time: { created, completed: created },
+          state: SessionMessage.ToolStateCompleted.make({
+            status: "completed",
+            input,
+            structured,
+            content: [{ type: "text", text: output }],
+          }),
+        }),
+      ],
+      time: { created, completed: created },
+    })
   SessionGoalProgress.updateGoalProgressGate(gate, { exploration: false, advancement: false })
   SessionGoalProgress.updateGoalProgressGate(gate, { exploration: false, advancement: false })
   expect(gate).toEqual({ noProgressTurns: 2, replanRequired: true })
   // 背景运行通知不能冒充完成；真实Native task_id在完成后才成为去重身份。
-  expect(signal([tool("task-running", "task", {}, { task_id: "ses_child", state: "running", output: "running" })])).toEqual({ exploration: false, advancement: false })
+  expect(
+    signal([tool("task-running", "task", {}, { task_id: "ses_child", state: "running", output: "running" })]),
+  ).toEqual({ exploration: false, advancement: false })
   const task = tool("task-completed", "task", {}, { task_id: "ses_child", state: "completed", output: "finished" })
   const explored = signal([task])
   expect(explored).toEqual({ exploration: true, advancement: false })
@@ -44,19 +64,44 @@ test("classifies Native goal progress from structured producer receipts", () => 
   // 子代理文字并非主任务状态变化，同一子会话重复返回也不能解除replan锁定。
   expect(gate).toEqual({ noProgressTurns: 0, replanRequired: true })
   expect(signal([task])).toEqual({ exploration: false, advancement: false })
-  expect(signal([tool("task-other", "task", {}, { task_id: "ses_other", state: "completed", output: "finished" })])).toEqual({ exploration: true, advancement: false })
+  expect(
+    signal([tool("task-other", "task", {}, { task_id: "ses_other", state: "completed", output: "finished" })]),
+  ).toEqual({ exploration: true, advancement: false })
   SessionGoalProgress.updateGoalProgressGate(gate, { exploration: false, advancement: false })
-  const read = { canonicalPath: "/project/receipt.txt", size: 3, modifiedMs: 1, fp: "head-v1", start: 1, end: 1, stub: false }
+  const read = {
+    canonicalPath: "/project/receipt.txt",
+    size: 3,
+    modifiedMs: 1,
+    fp: "head-v1",
+    start: 1,
+    end: 1,
+    stub: false,
+  }
   const receipt = tool("read", "read", { path: "receipt.txt" }, { content: "one", encoding: "utf8", read })
   const first = signal([receipt])
   expect(first).toEqual({ exploration: true, advancement: false })
   SessionGoalProgress.updateGoalProgressGate(gate, first)
   expect(gate).toEqual({ noProgressTurns: 0, replanRequired: true })
   expect(signal([receipt])).toEqual({ exploration: false, advancement: false })
-  expect(signal([tool("changed", "read", { path: "receipt.txt" }, { content: "one", encoding: "utf8", read: { ...read, fp: "head-v2" } })])).toEqual({ exploration: true, advancement: false })
+  expect(
+    signal([
+      tool(
+        "changed",
+        "read",
+        { path: "receipt.txt" },
+        { content: "one", encoding: "utf8", read: { ...read, fp: "head-v2" } },
+      ),
+    ]),
+  ).toEqual({ exploration: true, advancement: false })
   // 同一正文也须识别版本改变；缺指纹或 stub 都不能制造新的探索。
-  for (const invalid of [{ ...read, fp: undefined }, { ...read, fp: "" }, { ...read, stub: true }]) {
-    expect(signal([tool("invalid", "read", { path: "receipt.txt" }, { content: "one", encoding: "utf8", read: invalid })])).toEqual({ exploration: false, advancement: false })
+  for (const invalid of [
+    { ...read, fp: undefined },
+    { ...read, fp: "" },
+    { ...read, stub: true },
+  ]) {
+    expect(
+      signal([tool("invalid", "read", { path: "receipt.txt" }, { content: "one", encoding: "utf8", read: invalid })]),
+    ).toEqual({ exploration: false, advancement: false })
   }
   const command = (hasErrors: boolean) => tool("verify", "bash", { command: "bun test" }, { exit: 0, hasErrors })
   expect(signal([command(true)])).toEqual({ exploration: true, advancement: false })
@@ -67,7 +112,13 @@ test("classifies Native goal progress from structured producer receipts", () => 
   // 与V1外部状态fixture同序：baseline和重复结果不能把已进入的replan清掉。
   SessionGoalProgress.updateGoalProgressGate(gate, { exploration: false, advancement: false })
   SessionGoalProgress.updateGoalProgressGate(gate, { exploration: false, advancement: false })
-  const verify = (exit: number) => tool("verify-file", "bash", { command: "bun test --timeout 30000 verification.test.ts > verification-output.log 2>&1" }, { exit, hasErrors: exit !== 0 })
+  const verify = (exit: number) =>
+    tool(
+      "verify-file",
+      "bash",
+      { command: "bun test --timeout 30000 verification.test.ts > verification-output.log 2>&1" },
+      { exit, hasErrors: exit !== 0 },
+    )
   const baseline = signal([verify(0)])
   expect(baseline).toEqual({ exploration: true, advancement: false })
   SessionGoalProgress.updateGoalProgressGate(gate, baseline)
@@ -77,7 +128,9 @@ test("classifies Native goal progress from structured producer receipts", () => 
   SessionGoalProgress.updateGoalProgressGate(gate, repeat)
   expect(gate.replanRequired).toBe(true)
   // 普通mutation回执没有文件diff或snapshot证据；只有后来验证结果改变才是推进。
-  const mutation = signal([tool("change-state", "bash", { command: "bun verification-change.ts" }, { exit: 0, hasErrors: false })])
+  const mutation = signal([
+    tool("change-state", "bash", { command: "bun verification-change.ts" }, { exit: 0, hasErrors: false }),
+  ])
   expect(mutation).toEqual({ exploration: true, advancement: false })
   SessionGoalProgress.updateGoalProgressGate(gate, mutation)
   expect(gate.replanRequired).toBe(true)
@@ -85,29 +138,64 @@ test("classifies Native goal progress from structured producer receipts", () => 
   expect(different).toEqual({ exploration: false, advancement: true })
   SessionGoalProgress.updateGoalProgressGate(gate, different)
   expect(gate.replanRequired).toBe(false)
-  const completed = tool("todo", "todowrite", { todos: [{ content: "inspect", priority: "high", status: "completed" }] }, {})
+  const completed = tool(
+    "todo",
+    "todowrite",
+    { todos: [{ content: "inspect", priority: "high", status: "completed" }] },
+    {},
+  )
   expect(signal([completed])).toEqual({ exploration: false, advancement: true })
   expect(signal([completed])).toEqual({ exploration: false, advancement: false })
-  expect(signal([tool("noop", "write", { path: "receipt.txt" }, { diff: "" })])).toEqual({ exploration: false, advancement: false })
+  expect(signal([tool("noop", "write", { path: "receipt.txt" }, { diff: "" })])).toEqual({
+    exploration: false,
+    advancement: false,
+  })
 })
 
 describe("toLLMMessages", () => {
   test("deduplicates complete Read versions only within the supplied visible history", () => {
-    const metadata = { path: "/note.txt", canonicalPath: "/note.txt", type: "file" as const, size: 2, modified: "version1", modifiedMs: 1, fp: "head-v1", start: 1, end: 1, returned: 1, total: 1, totalExact: true, stub: false }
+    const metadata = {
+      path: "/note.txt",
+      canonicalPath: "/note.txt",
+      type: "file" as const,
+      size: 2,
+      modified: "version1",
+      modifiedMs: 1,
+      fp: "head-v1",
+      start: 1,
+      end: 1,
+      returned: 1,
+      total: 1,
+      totalExact: true,
+      stub: false,
+    }
     const output = { uri: "file:///note.txt", encoding: "utf8", mime: "text/plain", content: "v1", read: metadata }
-    const read = (value: string, structured: Record<string, unknown> = output,
+    const read = (
+      value: string,
+      structured: Record<string, unknown> = output,
       input: SessionMessage.ToolStateCompleted["input"] = { path: "note.txt" },
-      content: SessionMessage.ToolStateCompleted["content"] = []) => SessionMessage.Assistant.make({
-      id: id(value), type: "assistant", agent: "build",
-      model: { id: ModelV2.ID.make("model"), providerID: ProviderV2.ID.make("provider") },
-      content: [SessionMessage.AssistantTool.make({
-        type: "tool", id: value, name: "read", time: { created, completed: created },
-        state: SessionMessage.ToolStateCompleted.make({ status: "completed", input, structured, content }),
-      })],
-      time: { created, completed: created },
-    })
-    const results = (...history: SessionMessage.Message[]) => toLLMMessages(history, model)
-      .flatMap((message) => message.content.flatMap((part) => part.type === "tool-result" ? [part.result] : []))
+      content: SessionMessage.ToolStateCompleted["content"] = [],
+    ) =>
+      SessionMessage.Assistant.make({
+        id: id(value),
+        type: "assistant",
+        agent: "build",
+        model: { id: ModelV2.ID.make("model"), providerID: ProviderV2.ID.make("provider") },
+        content: [
+          SessionMessage.AssistantTool.make({
+            type: "tool",
+            id: value,
+            name: "read",
+            time: { created, completed: created },
+            state: SessionMessage.ToolStateCompleted.make({ status: "completed", input, structured, content }),
+          }),
+        ],
+        time: { created, completed: created },
+      })
+    const results = (...history: SessionMessage.Message[]) =>
+      toLLMMessages(history, model).flatMap((message) =>
+        message.content.flatMap((part) => (part.type === "tool-result" ? [part.result] : [])),
+      )
     const first = read("first")
     const second = read("second", output, { path: "./note.txt", offset: 1, limit: 200 })
     // 仅模型重复正文缩为 stub；第一个完整结果和原始 durable 结果都须保留。
@@ -120,41 +208,109 @@ describe("toLLMMessages", () => {
     expect(JSON.stringify(results(first, second)[1])).toContain("grep to locate symbols")
     expect(second.content[0]).toMatchObject({ state: { structured: output, content: [] } })
     // 新版本或请求范围变化必须重新呈现正文，不能从路径相同推断版本。
-    expect(results(first, read("v2", { ...output, content: "v2", read: { ...metadata, modifiedMs: 2 } }))[1]).toMatchObject({ type: "json" })
+    expect(
+      results(first, read("v2", { ...output, content: "v2", read: { ...metadata, modifiedMs: 2 } }))[1],
+    ).toMatchObject({ type: "json" })
     // 指纹变化或任一侧缺失都返回正文，不能回退到相同 size/mtime。
     for (const fp of [undefined, "", "head-v2"]) {
-      expect(results(first, read("fp-change", { ...output, read: { ...metadata, fp } }))[1]).toMatchObject({ type: "json" })
+      expect(results(first, read("fp-change", { ...output, read: { ...metadata, fp } }))[1]).toMatchObject({
+        type: "json",
+      })
     }
-    expect(results(first, read("range", { ...output, read: { ...metadata, end: 2, returned: 2 } }))[1]).toMatchObject({ type: "json" })
-    expect(results(first, read("path", { ...output, read: { ...metadata, canonicalPath: "/other.txt" } }, { path: "other.txt" }))[1]).toMatchObject({ type: "json" })
+    expect(results(first, read("range", { ...output, read: { ...metadata, end: 2, returned: 2 } }))[1]).toMatchObject({
+      type: "json",
+    })
+    expect(
+      results(
+        first,
+        read("path", { ...output, read: { ...metadata, canonicalPath: "/other.txt" } }, { path: "other.txt" }),
+      )[1],
+    ).toMatchObject({ type: "json" })
     // 没有先前可见完整结果的新 batch/Session 不继承上一调用的证明。
     expect(results(second)).toEqual([{ type: "json", value: output }])
     const checkpoint = SessionMessage.Compaction.make({
-      id: id("checkpoint"), type: "compaction", reason: "auto", summary: "summary", recent: "recent", time: { created },
+      id: id("checkpoint"),
+      type: "compaction",
+      reason: "auto",
+      summary: "summary",
+      recent: "recent",
+      time: { created },
     })
     expect(results(first, checkpoint, second)[1]).toEqual({ type: "json", value: output })
-    const page = { type: "text-page", content: "first line", mime: "text/plain", offset: 1, truncated: true, next: 2, read: metadata }
+    const page = {
+      type: "text-page",
+      content: "first line",
+      mime: "text/plain",
+      offset: 1,
+      truncated: true,
+      next: 2,
+      read: metadata,
+    }
     const range = { path: "note.txt", offset: 1, limit: 1 }
     // 文件有后续页不等于本次请求被截断；相同完整页保留首份并只压缩重复模型结果。
-    expect(JSON.stringify(results(read("page1", page, range), read("page2", page, range))[1]))
-      .toContain("stub_same_range_visible")
+    expect(JSON.stringify(results(read("page1", page, range), read("page2", page, range))[1])).toContain(
+      "stub_same_range_visible",
+    )
     // 版本与请求范围仍独立参与证明，不能用相同前缀冒充新版或更大页面。
     const changed = { ...page, content: "changed", read: { ...metadata, size: 7, modifiedMs: 2 } }
-    expect(results(read("page3", page, range), read("page4", changed, range))[1]).toEqual({ type: "json", value: changed })
-    expect(results(read("page5", page, range), read("page6", { ...page, read: { ...metadata, end: 2, returned: 2 } }, { ...range, limit: 2 }))[1]).toMatchObject({ type: "json" })
+    expect(results(read("page3", page, range), read("page4", changed, range))[1]).toEqual({
+      type: "json",
+      value: changed,
+    })
+    expect(
+      results(
+        read("page5", page, range),
+        read("page6", { ...page, read: { ...metadata, end: 2, returned: 2 } }, { ...range, limit: 2 }),
+      )[1],
+    ).toMatchObject({ type: "json" })
     // 压缩边界后重新提供正文，stub 不能把旧页证明带入新的可见历史。
-    expect(results(read("page7", page, range), checkpoint, read("page8", page, range))[1]).toEqual({ type: "json", value: page })
-    const defaultPage = { ...page, content: Array.from({ length: 200 }, () => "line").join("\n"), next: 201,
-      read: { ...metadata, size: 5000, end: 200, total: 1000, returned: 200 } }
-    expect(JSON.stringify(results(read("default1", defaultPage), read("default2", defaultPage, { path: "note.txt", limit: 200 }))[1])).toContain("stub_same_range_visible")
-    expect(JSON.stringify(results(read("next1", defaultPage), read("next2", defaultPage))[1])).toContain("offset=201 for unread lines")
-    const wider = { ...defaultPage, truncated: false, next: undefined, content: "line\n".repeat(999) + "line", read: { ...defaultPage.read, end: 1000, returned: 1000 } }
-    expect(results(read("default3", defaultPage), read("default4", wider, { path: "note.txt", limit: 2000 }))[1]).toEqual({ type: "json", value: wider })
+    expect(results(read("page7", page, range), checkpoint, read("page8", page, range))[1]).toEqual({
+      type: "json",
+      value: page,
+    })
+    const defaultPage = {
+      ...page,
+      content: Array.from({ length: 200 }, () => "line").join("\n"),
+      next: 201,
+      read: { ...metadata, size: 5000, end: 200, total: 1000, returned: 200 },
+    }
+    expect(
+      JSON.stringify(
+        results(read("default1", defaultPage), read("default2", defaultPage, { path: "note.txt", limit: 200 }))[1],
+      ),
+    ).toContain("stub_same_range_visible")
+    expect(JSON.stringify(results(read("next1", defaultPage), read("next2", defaultPage))[1])).toContain(
+      "offset=201 for unread lines",
+    )
+    const wider = {
+      ...defaultPage,
+      truncated: false,
+      next: undefined,
+      content: "line\n".repeat(999) + "line",
+      read: { ...defaultPage.read, end: 1000, returned: 1000 },
+    }
+    expect(
+      results(read("default3", defaultPage), read("default4", wider, { path: "note.txt", limit: 2000 }))[1],
+    ).toEqual({ type: "json", value: wider })
     // 按实际区间判断覆盖，不能把请求 limit 当作已经交付的正文；小交集不额外提示。
-    const covering = { ...defaultPage, content: "line\n".repeat(99) + "line", read: { ...defaultPage.read, end: 100, returned: 100 } }
-    const covered = { ...page, content: "line\n".repeat(10) + "line", offset: 10, next: 21, read: { ...defaultPage.read, start: 10, end: 20, returned: 11 } }
-    expect(JSON.stringify(results(read("wide", covering), read("covered", covered))[1])).toContain("stub_covered_range_visible")
-    expect(JSON.stringify(results(read("wide-next", covering), read("covered-next", covered))[1])).toContain("offset=101 for unread lines")
+    const covering = {
+      ...defaultPage,
+      content: "line\n".repeat(99) + "line",
+      read: { ...defaultPage.read, end: 100, returned: 100 },
+    }
+    const covered = {
+      ...page,
+      content: "line\n".repeat(10) + "line",
+      offset: 10,
+      next: 21,
+      read: { ...defaultPage.read, start: 10, end: 20, returned: 11 },
+    }
+    expect(JSON.stringify(results(read("wide", covering), read("covered", covered))[1])).toContain(
+      "stub_covered_range_visible",
+    )
+    expect(JSON.stringify(results(read("wide-next", covering), read("covered-next", covered))[1])).toContain(
+      "offset=101 for unread lines",
+    )
     // 覆盖源的末行决定出口；同样的总行数下界不能伪装成已到 EOF。
     const eofCovering = { ...covering, read: { ...covering.read, total: 100 } }
     const eofCovered = { ...covered, read: { ...covered.read, total: 100 } }
@@ -164,42 +320,95 @@ describe("toLLMMessages", () => {
     expect(atEof).toContain("grep to locate symbols")
     const unknownCovering = { ...eofCovering, read: { ...eofCovering.read, totalExact: false } }
     const unknownCovered = { ...eofCovered, read: { ...eofCovered.read, totalExact: false } }
-    expect(JSON.stringify(results(read("unknown-wide", unknownCovering), read("unknown-covered", unknownCovered))[1]))
-      .toContain("offset=101 for unread lines")
+    expect(
+      JSON.stringify(results(read("unknown-wide", unknownCovering), read("unknown-covered", unknownCovered))[1]),
+    ).toContain("offset=101 for unread lines")
     // 覆盖源的较大下界不能被子页伪装成更小的精确 EOF。
     const weaker = { ...unknownCovered, read: { ...unknownCovered.read, total: 50, totalExact: true } }
     const projected = results(read("owner-wide", unknownCovering), read("weaker-child", weaker))[1]
-    expect(projected).toEqual({ type: "text", value: expect.stringContaining('<range start="10" end="20" total="100" total_exact="false" returned="0" />') })
-    const overlap = { ...defaultPage, content: "line\n".repeat(99) + "line", offset: 151, next: 251, read: { ...defaultPage.read, start: 151, end: 250, returned: 100 } }
-    expect(JSON.stringify(results(read("overlap-first", defaultPage), read("overlap-next", overlap))[1])).toContain('type=\\"overlap\\"')
+    expect(projected).toEqual({
+      type: "text",
+      value: expect.stringContaining('<range start="10" end="20" total="100" total_exact="false" returned="0" />'),
+    })
+    const overlap = {
+      ...defaultPage,
+      content: "line\n".repeat(99) + "line",
+      offset: 151,
+      next: 251,
+      read: { ...defaultPage.read, start: 151, end: 250, returned: 100 },
+    }
+    expect(JSON.stringify(results(read("overlap-first", defaultPage), read("overlap-next", overlap))[1])).toContain(
+      'type=\\"overlap\\"',
+    )
     const high = { ...overlap, offset: 121, next: 221, read: { ...overlap.read, start: 121, end: 220 } }
-    const highResult = JSON.stringify(results(read("high-first", defaultPage), read("high-next", high, { path: "note.txt", offset: 121, limit: 100 }))[1])
+    const highResult = JSON.stringify(
+      results(
+        read("high-first", defaultPage),
+        read("high-next", high, { path: "note.txt", offset: 121, limit: 100 }),
+      )[1],
+    )
     expect(highResult).toContain("stub_high_overlap_visible")
     expect(highResult).toContain("Lines 121-200 already in context (latest version, file unchanged).")
     expect(highResult).toContain("Read offset=201 limit=20 for just the new content.")
     const below = { ...high, offset: 122, next: 222, read: { ...high.read, start: 122, end: 221 } }
-    expect(JSON.stringify(results(read("below-first", defaultPage), read("below-next", below, { path: "note.txt", offset: 122, limit: 100 }))[1])).not.toContain("stub_high_overlap_visible")
+    expect(
+      JSON.stringify(
+        results(
+          read("below-first", defaultPage),
+          read("below-next", below, { path: "note.txt", offset: 122, limit: 100 }),
+        )[1],
+      ),
+    ).not.toContain("stub_high_overlap_visible")
     // 25行/20行交集真正跨过重叠门，短正文仍交付内容而非更长的stub。
-    const shortSeen = { ...defaultPage, content: "x\n".repeat(19) + "x", read: { ...defaultPage.read, end: 20, total: 25, returned: 20 } }
-    const shortPage = { ...shortSeen, content: "x\n".repeat(24) + "x", read: { ...shortSeen.read, end: 25, returned: 25 } }
+    const shortSeen = {
+      ...defaultPage,
+      content: "x\n".repeat(19) + "x",
+      read: { ...defaultPage.read, end: 20, total: 25, returned: 20 },
+    }
+    const shortPage = {
+      ...shortSeen,
+      content: "x\n".repeat(24) + "x",
+      read: { ...shortSeen.read, end: 25, returned: 25 },
+    }
     const shortResult = JSON.stringify(results(read("short-first", shortSeen), read("short-next", shortPage))[1])
     expect(shortResult).toContain("<content>")
     expect(shortResult).toContain("avoid re-reading this range unnecessarily")
     expect(shortResult).not.toContain("<stub")
     // 联合覆盖只决定未读指引；旧版本的尾页不能减去当前版本未读内容。
-    const seen = { ...defaultPage, content: "line\n".repeat(159) + "line", read: { ...defaultPage.read, end: 160, returned: 160 } }
-    const tailSeen = { ...defaultPage, content: "line\n".repeat(39) + "line", read: { ...defaultPage.read, start: 161, end: 200, returned: 40 } }
-    const fullyCovered = JSON.stringify(results(read("seen", seen), read("seen-tail", tailSeen), read("full", defaultPage))[2])
+    const seen = {
+      ...defaultPage,
+      content: "line\n".repeat(159) + "line",
+      read: { ...defaultPage.read, end: 160, returned: 160 },
+    }
+    const tailSeen = {
+      ...defaultPage,
+      content: "line\n".repeat(39) + "line",
+      read: { ...defaultPage.read, start: 161, end: 200, returned: 40 },
+    }
+    const fullyCovered = JSON.stringify(
+      results(read("seen", seen), read("seen-tail", tailSeen), read("full", defaultPage))[2],
+    )
     expect(fullyCovered).toContain("no new content to read")
     const changedTail = { ...tailSeen, read: { ...tailSeen.read, fp: "head-v2" } }
-    const stillUnread = JSON.stringify(results(read("seen2", seen), read("changed-tail", changedTail), read("full2", defaultPage))[2])
+    const stillUnread = JSON.stringify(
+      results(read("seen2", seen), read("changed-tail", changedTail), read("full2", defaultPage))[2],
+    )
     expect(stillUnread).toContain("New unread lines: 161-200")
     expect(stillUnread).toContain("Read offset=161 limit=40")
     // 被省略页的未见尾部不能反过来作为下一次去重凭证。
-    const tail = { ...high, offset: 201, content: "line\n".repeat(19) + "line", read: { ...high.read, start: 201, end: 220, returned: 20 } }
-    expect(results(read("tail-first", defaultPage), read("tail-high", high), read("tail-unseen", tail))[2]).toMatchObject({ type: "json" })
+    const tail = {
+      ...high,
+      offset: 201,
+      content: "line\n".repeat(19) + "line",
+      read: { ...high.read, start: 201, end: 220, returned: 20 },
+    }
+    expect(
+      results(read("tail-first", defaultPage), read("tail-high", high), read("tail-unseen", tail))[2],
+    ).toMatchObject({ type: "json" })
     const changedHigh = { ...high, read: { ...high.read, modifiedMs: 2 } }
-    expect(results(read("changed-first", defaultPage), read("changed-high", changedHigh))[1]).toMatchObject({ type: "json" })
+    expect(results(read("changed-first", defaultPage), read("changed-high", changedHigh))[1]).toMatchObject({
+      type: "json",
+    })
     // 缺少稳定版本、只有 stub 或未交付正文的结果仍不能证明覆盖。
     for (const partial of [
       { ...page, read: undefined },
@@ -207,18 +416,27 @@ describe("toLLMMessages", () => {
       { ...page, read: { ...metadata, returned: 0 } },
       { ...page, read: { ...metadata, stub: true } },
       { ...output, encoding: "base64", mime: "image/png" },
-    ]) expect(results(read("p1", partial), read("p2", partial))[1]).toMatchObject({ type: "json" })
+    ])
+      expect(results(read("p1", partial), read("p2", partial))[1]).toMatchObject({ type: "json" })
     // structured 仍完整不代表模型看到了全文：generic 限幅后的 content 不能预热去重。
     const bounded = [{ type: "text" as const, text: "... output truncated ..." }]
-    expect(results(read("b1", output, undefined, bounded), read("b2", output, undefined, bounded))[1])
-      .toEqual({ type: "text", value: bounded[0].text })
+    expect(results(read("b1", output, undefined, bounded), read("b2", output, undefined, bounded))[1]).toEqual({
+      type: "text",
+      value: bounded[0].text,
+    })
     // 完整安全提醒投影可以去重；提醒变化本身也会改变相等性证明。
-    const visible = [{ type: "text" as const, text: "reminder" }, { type: "text" as const, text: ReadPresentation.renderNativeRead(output) }]
-    expect(JSON.stringify(results(read("r1", output, undefined, visible), read("r2", output, undefined, visible))[1]))
-      .toContain("stub_same_range_visible")
+    const visible = [
+      { type: "text" as const, text: "reminder" },
+      { type: "text" as const, text: ReadPresentation.renderNativeRead(output) },
+    ]
+    expect(
+      JSON.stringify(results(read("r1", output, undefined, visible), read("r2", output, undefined, visible))[1]),
+    ).toContain("stub_same_range_visible")
     expect(JSON.stringify(results(read("r3", output), read("r4", output, undefined, visible))[1])).toContain("reminder")
     const pruned = read("pruned")
-    const prunedContent = pruned.content.map(tool => tool.type === "tool" ? { ...tool, time: { ...tool.time, pruned: DateTime.makeUnsafe(0) } } : tool)
+    const prunedContent = pruned.content.map((tool) =>
+      tool.type === "tool" ? { ...tool, time: { ...tool.time, pruned: DateTime.makeUnsafe(0) } } : tool,
+    )
     expect(results({ ...pruned, content: prunedContent }, second)[1]).toEqual({ type: "json", value: output })
   })
 
@@ -756,8 +974,10 @@ Recent work
   })
 
   test.each([
-    [false, "openai"], [true, "openai"],
-    [false, "smark-codex"], [true, "smark-codex"],
+    [false, "openai"],
+    [true, "openai"],
+    [false, "smark-codex"],
+    [true, "smark-codex"],
   ] as const)("isolates encrypted GPT reasoning (failed=%s, provider=%s)", (failed, targetProvider) => {
     // 真实投影同时覆盖跨域隔离、同域续接和失败轮次不能复用密文。
     const gpt = Model.make({ id: "gpt-5.5", provider: targetProvider, route: OpenAIResponses.route })
@@ -789,11 +1009,13 @@ Recent work
 
     expect(messages[0]?.content).toEqual([
       // 跨域只留可见文本；同域仍剥离源ID，持久历史和明文兼容路径保持不变。
-      targetProvider === "smark-codex" ? {
-          type: "reasoning",
-          text: "foreign summary",
-          providerMetadata: failed ? undefined : { openai: { reasoningEncryptedContent: "encrypted-state" } },
-        } : { type: "text", text: "foreign summary" },
+      targetProvider === "smark-codex"
+        ? {
+            type: "reasoning",
+            text: "foreign summary",
+            providerMetadata: failed ? undefined : { openai: { reasoningEncryptedContent: "encrypted-state" } },
+          }
+        : { type: "text", text: "foreign summary" },
       { type: "text", text: "answer" },
     ])
   })

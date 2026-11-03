@@ -7,4 +7,3 @@ export function sanitizedProcessEnv() {
   delete env.OPENCODE_PROCESS_ROLE
   return env
 }
-

@@ -7,17 +7,34 @@ describe("PowerShell analysis facts", () => {
     for (const option of ["--name=agent", String.raw`--prefix=C:\envs\agent`, String.raw`--cwd=H:\work`]) {
       const result = await ShellParse.analyze(`conda run ${option} python -c "print(1)"`, "powershell")
       expect(result.incomplete).toBe(false)
-      expect(result.commands[0]?.words.map((word) => word.value)).toEqual(["conda", "run", option, "python", "-c", "print(1)"])
+      expect(result.commands[0]?.words.map((word) => word.value)).toEqual([
+        "conda",
+        "run",
+        option,
+        "python",
+        "-c",
+        "print(1)",
+      ])
     }
     // 未改执行方式保留原grammar边界，不把修复扩展为所有等号参数的恢复框架。
     for (const suffix of ["node -e '1'", "bash -c 'echo ok'", "python script.py", "python -m json.tool"]) {
-      expect(await ShellParse.analyze(`conda run --name=agent ${suffix}`, "powershell")).toMatchObject({ incomplete: true })
+      expect(await ShellParse.analyze(`conda run --name=agent ${suffix}`, "powershell")).toMatchObject({
+        incomplete: true,
+      })
     }
-    expect(await ShellParse.analyze('conda run --name=$env:NAME python -c "print(1)"', "powershell")).toMatchObject({ incomplete: true })
+    expect(await ShellParse.analyze('conda run --name=$env:NAME python -c "print(1)"', "powershell")).toMatchObject({
+      incomplete: true,
+    })
     // 字符串内即使包含完整conda调用也只是数据，不能被兼容变换改写。
-    expect((await ShellParse.analyze(`Write-Output 'conda run --name=agent python -c "print(1)"'`, "powershell")).commands[0]?.words[1]?.value).toBe('conda run --name=agent python -c "print(1)"')
+    expect(
+      (await ShellParse.analyze(`Write-Output 'conda run --name=agent python -c "print(1)"'`, "powershell")).commands[0]
+        ?.words[1]?.value,
+    ).toBe('conda run --name=agent python -c "print(1)"')
     // 选项值内的同名子串不是另一个选项，兼容扫描必须保持整个环境名。
-    expect((await ShellParse.analyze(`conda run --name=foo--cwd=bar python -c 'print(1)'`, "powershell")).commands[0]?.words[2]?.value).toBe("--name=foo--cwd=bar")
+    expect(
+      (await ShellParse.analyze(`conda run --name=foo--cwd=bar python -c 'print(1)'`, "powershell")).commands[0]
+        ?.words[2]?.value,
+    ).toBe("--name=foo--cwd=bar")
   })
 
   test("keeps native quote boundaries around bare dash arguments", async () => {
@@ -28,7 +45,10 @@ describe("PowerShell analysis facts", () => {
       expect(result.commands[0]?.words.at(-1)?.value).toBe("-")
     }
     // 引号内的横线与成对引号属于同一参数，不能被分析兼容变换插入新字符。
-    for (const [source, value] of [[`python 'it''s -- -' -`, "it's -- -"], ['python "say ""--""" -', 'say "--"']]) {
+    for (const [source, value] of [
+      [`python 'it''s -- -' -`, "it's -- -"],
+      ['python "say ""--""" -', 'say "--"'],
+    ]) {
       const result = await ShellParse.analyze(source, "powershell")
       expect(result.incomplete).toBe(false)
       expect(result.commands[0]?.words.map((word) => word.value)).toEqual(["python", value, "-"])
@@ -50,7 +70,9 @@ describe("PowerShell analysis facts", () => {
       expect(result.commands[0]?.words.map((word) => word.value)).toEqual(["python", "-"])
     }
     // 嵌套块注释同样保留grammar既有的不完整标记，不伪造可执行命令。
-    expect(await ShellParse.analyze("<# outer <# ' - #> -- #>\npython -", "powershell")).toMatchObject({ incomplete: true })
+    expect(await ShellParse.analyze("<# outer <# ' - #> -- #>\npython -", "powershell")).toMatchObject({
+      incomplete: true,
+    })
   })
 
   test("distinguishes invocation arguments from arithmetic and flags", async () => {
@@ -58,11 +80,20 @@ describe("PowerShell analysis facts", () => {
     const invoked = await ShellParse.analyze("& 'C:\\Python\\python.exe' -", "powershell")
     expect(invoked.incomplete).toBe(false)
     expect(invoked.commands[0]?.words.map((word) => word.value)).toEqual(["C:\\Python\\python.exe", "-"])
-    const arithmetic = await ShellParse.analyze("Write-Output (1 - 2); 4 - 3; $x--; python -B --version -- -", "powershell")
+    const arithmetic = await ShellParse.analyze(
+      "Write-Output (1 - 2); 4 - 3; $x--; python -B --version -- -",
+      "powershell",
+    )
     expect(arithmetic.incomplete).toBe(false)
     // 括号内减法仍是原表达式；负数、自减和长选项不进入bare-dash兼容分支。
     expect(arithmetic.commands[0]?.words[1]?.value).toBe("(1 - 2)")
-    expect(arithmetic.commands.at(-1)?.words.map((word) => word.value)).toEqual(["python", "-B", "--version", "--", "-"])
+    expect(arithmetic.commands.at(-1)?.words.map((word) => word.value)).toEqual([
+      "python",
+      "-B",
+      "--version",
+      "--",
+      "-",
+    ])
     expect((await ShellParse.analyze("Write-Output -2", "powershell")).commands[0]?.words[1]?.value).toBe("-2")
     // --%后的横线由PowerShell原生stop-parsing解释，整个尾部不插入分析引号。
     expect((await ShellParse.analyze("python --% - --", "powershell")).commands[0]?.words[1]?.value).toBe("--% - --")

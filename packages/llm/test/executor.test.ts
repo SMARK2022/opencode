@@ -1,7 +1,14 @@
 import { describe, expect } from "bun:test"
 import { Cause, Deferred, Effect, Exit, Fiber, Layer, Logger, Queue, Random, Ref, References, Stream } from "effect"
 import * as TestClock from "effect/testing/TestClock"
-import { FetchHttpClient, Headers, HttpClient, HttpClientError, HttpClientRequest, HttpClientResponse } from "effect/unstable/http"
+import {
+  FetchHttpClient,
+  Headers,
+  HttpClient,
+  HttpClientError,
+  HttpClientRequest,
+  HttpClientResponse,
+} from "effect/unstable/http"
 import { LLM, LLMError } from "../src"
 import { LLMClient, RequestExecutor } from "../src/route"
 import * as OpenAIChat from "../src/protocols/openai-chat"
@@ -253,23 +260,27 @@ describe("RequestExecutor", () => {
   it.effect("retries only identified Cloudflare blocks and preserves cancellation", () =>
     Effect.gen(function* () {
       const headers = { server: " CloudFlare ", "cf-ray": "test-HKG", "retry-after-ms": "0" }
-      const challenge = '<html>window._cf_chl_opt={};/cdn-cgi/challenge-platform/</html>'
+      const challenge = "<html>window._cf_chl_opt={};/cdn-cgi/challenge-platform/</html>"
       // 四种source指纹都走真实executor；第五例把标记放在诊断截断边界之后。
       for (const [body, extra] of [
         ["<!DOCTYPE HTML><html>challenge</html>", { "cf-mitigated": "challenge" }],
         [challenge, {}],
         ['<html><div id="cf-error-details"></div>/cdn-cgi/styles/cf.errors.css</html>', {}],
-        ['<html>Unable to load site. Please try again later. https://status.openai.com/</html>', {}],
+        ["<html>Unable to load site. Please try again later. https://status.openai.com/</html>", {}],
         [`<html>${"x".repeat(17000)}window._cf_chl_opt={};/cdn-cgi/challenge-platform/</html>`, {}],
       ] as const) {
         const attempts = yield* Ref.make(0)
         const response = yield* Effect.gen(function* () {
           const executor = yield* RequestExecutor.Service
           return yield* executor.execute(request)
-        }).pipe(Effect.provide(countedResponsesLayer(attempts, [
-          new Response(body, { status: 403, headers: { ...headers, ...extra } }),
-          new Response("ok", { status: 200 }),
-        ])))
+        }).pipe(
+          Effect.provide(
+            countedResponsesLayer(attempts, [
+              new Response(body, { status: 403, headers: { ...headers, ...extra } }),
+              new Response("ok", { status: 200 }),
+            ]),
+          ),
+        )
         expect(response.status).toBe(200)
         expect(yield* Ref.get(attempts)).toBe(2)
       }
@@ -281,17 +292,21 @@ describe("RequestExecutor", () => {
         [400, challenge, headers, "InvalidRequest"],
         [403, "<html>Permission denied</html>", headers, "Authentication"],
         [401, challenge, headers, "Authentication"],
-        [403, '<html>content_policy window._cf_chl_opt /cdn-cgi/challenge-platform/</html>', headers, "ContentPolicy"],
+        [403, "<html>content_policy window._cf_chl_opt /cdn-cgi/challenge-platform/</html>", headers, "ContentPolicy"],
         [429, '{"error":"insufficient_quota"}', headers, "QuotaExceeded"],
       ] as const) {
         const attempts = yield* Ref.make(0)
         const error = yield* Effect.gen(function* () {
           const executor = yield* RequestExecutor.Service
           return yield* executor.execute(request).pipe(Effect.flip)
-        }).pipe(Effect.provide(countedResponsesLayer(attempts, [
-          new Response(body, { status, headers: responseHeaders }),
-          new Response("unexpected retry", { status: 200 }),
-        ])))
+        }).pipe(
+          Effect.provide(
+            countedResponsesLayer(attempts, [
+              new Response(body, { status, headers: responseHeaders }),
+              new Response("unexpected retry", { status: 200 }),
+            ]),
+          ),
+        )
         expectLLMError(error)
         expect(error.reason._tag).toBe(tag)
         expect(error.retryable).toBe(false)
@@ -302,9 +317,17 @@ describe("RequestExecutor", () => {
       const fiber = yield* Effect.gen(function* () {
         const executor = yield* RequestExecutor.Service
         return yield* executor.execute(request)
-      }).pipe(Effect.provide(countedResponsesLayer(attempts, [
-        new Response(challenge, { status: 403, headers: { server: "cloudflare", "cf-ray": "test", "retry-after": "7" } }),
-      ])), Effect.forkChild)
+      }).pipe(
+        Effect.provide(
+          countedResponsesLayer(attempts, [
+            new Response(challenge, {
+              status: 403,
+              headers: { server: "cloudflare", "cf-ray": "test", "retry-after": "7" },
+            }),
+          ]),
+        ),
+        Effect.forkChild,
+      )
       yield* Effect.yieldNow
       expect(yield* Ref.get(attempts)).toBe(1)
       yield* Fiber.interrupt(fiber)
@@ -423,32 +446,35 @@ describe("RequestExecutor", () => {
   it.effect("honors Retry-After delta seconds before retrying", () =>
     Effect.gen(function* () {
       for (const status of [503, 403, 429]) {
-      const attempts = yield* Ref.make(0)
-      yield* Effect.gen(function* () {
-        const executor = yield* RequestExecutor.Service
-        const fiber = yield* executor.execute(request).pipe(Effect.forkChild)
+        const attempts = yield* Ref.make(0)
+        yield* Effect.gen(function* () {
+          const executor = yield* RequestExecutor.Service
+          const fiber = yield* executor.execute(request).pipe(Effect.forkChild)
 
-        yield* Effect.yieldNow
-        expect(yield* Ref.get(attempts)).toBe(1)
+          yield* Effect.yieldNow
+          expect(yield* Ref.get(attempts)).toBe(1)
 
-        yield* TestClock.adjust(1_999)
-        yield* Effect.yieldNow
-        expect(yield* Ref.get(attempts)).toBe(1)
+          yield* TestClock.adjust(1_999)
+          yield* Effect.yieldNow
+          expect(yield* Ref.get(attempts)).toBe(1)
 
-        yield* TestClock.adjust(1)
-        const response = yield* Fiber.join(fiber)
+          yield* TestClock.adjust(1)
+          const response = yield* Fiber.join(fiber)
 
-        expect(response.status).toBe(200)
-        expect(yield* Ref.get(attempts)).toBe(2)
-      }).pipe(
-        Effect.provide(
-          countedResponsesLayer(attempts, [
-            // 只替换失败证据，仍使用真实时钟/请求数断言验证503、403和429的同一退避入口。
-            new Response(status === 403 ? "<html>challenge</html>" : "busy", { status, headers: { "retry-after": "2", "server": "cloudflare", "cf-ray": "test", "cf-mitigated": "challenge" } }),
-            new Response("ok", { status: 200 }),
-          ]),
-        ),
-      )
+          expect(response.status).toBe(200)
+          expect(yield* Ref.get(attempts)).toBe(2)
+        }).pipe(
+          Effect.provide(
+            countedResponsesLayer(attempts, [
+              // 只替换失败证据，仍使用真实时钟/请求数断言验证503、403和429的同一退避入口。
+              new Response(status === 403 ? "<html>challenge</html>" : "busy", {
+                status,
+                headers: { "retry-after": "2", server: "cloudflare", "cf-ray": "test", "cf-mitigated": "challenge" },
+              }),
+              new Response("ok", { status: 200 }),
+            ]),
+          ),
+        )
       }
     }),
   )
@@ -496,21 +522,34 @@ describe("RequestExecutor", () => {
   it.live("retries response-body transport failure before the first provider frame", () =>
     Effect.gen(function* () {
       const attempts = yield* Ref.make(0)
-      const model = OpenAIChat.route.with({ endpoint: { baseURL: "https://api.openai.test/v1" } }).model({ id: "gpt-4o-mini" })
+      const model = OpenAIChat.route
+        .with({ endpoint: { baseURL: "https://api.openai.test/v1" } })
+        .model({ id: "gpt-4o-mini" })
       const response = yield* LLMClient.generate(LLM.request({ model, prompt: "Say hello." })).pipe(
-        Effect.provide(dynamicResponse((input) => Effect.gen(function* () {
-          const attempt = yield* Ref.getAndUpdate(attempts, (value) => value + 1)
-          if (attempt === 0) return input.respond(new ReadableStream({
-            start(controller) {
-              controller.error(Object.assign(new Error("SSE read timed out"), { code: "SSE_READ_TIMEOUT" }))
-            },
-          }), { headers: { "content-type": "text/event-stream" } })
-          return input.respond(sseRaw(
-            `data: ${JSON.stringify(deltaChunk({ role: "assistant", content: "Hello" }))}`,
-            `data: ${JSON.stringify(deltaChunk({}, "stop"))}`,
-            "data: [DONE]",
-          ), { headers: { "content-type": "text/event-stream" } })
-        }))),
+        Effect.provide(
+          dynamicResponse((input) =>
+            Effect.gen(function* () {
+              const attempt = yield* Ref.getAndUpdate(attempts, (value) => value + 1)
+              if (attempt === 0)
+                return input.respond(
+                  new ReadableStream({
+                    start(controller) {
+                      controller.error(Object.assign(new Error("SSE read timed out"), { code: "SSE_READ_TIMEOUT" }))
+                    },
+                  }),
+                  { headers: { "content-type": "text/event-stream" } },
+                )
+              return input.respond(
+                sseRaw(
+                  `data: ${JSON.stringify(deltaChunk({ role: "assistant", content: "Hello" }))}`,
+                  `data: ${JSON.stringify(deltaChunk({}, "stop"))}`,
+                  "data: [DONE]",
+                ),
+                { headers: { "content-type": "text/event-stream" } },
+              )
+            }),
+          ),
+        ),
       )
       // 真实协议成功收口且只重取一次，不在Session层另开provider turn。
       expect(response.events.some((event) => event.type === "finish")).toBe(true)
@@ -521,13 +560,26 @@ describe("RequestExecutor", () => {
   it.live("bounds response-body retries and preserves their transport classification", () =>
     Effect.gen(function* () {
       const attempts = yield* Ref.make(0)
-      const model = OpenAIChat.route.with({ endpoint: { baseURL: "https://api.openai.test/v1" } }).model({ id: "gpt-4o-mini" })
+      const model = OpenAIChat.route
+        .with({ endpoint: { baseURL: "https://api.openai.test/v1" } })
+        .model({ id: "gpt-4o-mini" })
       const error = yield* LLMClient.generate(LLM.request({ model, prompt: "Say hello." })).pipe(
-        Effect.provide(dynamicResponse((input) => Ref.update(attempts, (value) => value + 1).pipe(
-          Effect.as(input.respond(new ReadableStream({
-            start(controller) { controller.error(new Error("connection reset")) },
-          }), { headers: { "content-type": "text/event-stream" } })),
-        ))),
+        Effect.provide(
+          dynamicResponse((input) =>
+            Ref.update(attempts, (value) => value + 1).pipe(
+              Effect.as(
+                input.respond(
+                  new ReadableStream({
+                    start(controller) {
+                      controller.error(new Error("connection reset"))
+                    },
+                  }),
+                  { headers: { "content-type": "text/event-stream" } },
+                ),
+              ),
+            ),
+          ),
+        ),
         Effect.flip,
       )
       // 耗尽仍是真实失败，不伪造完成结果，也不无限重连。
@@ -548,24 +600,48 @@ describe("RequestExecutor", () => {
         const reading = Promise.withResolvers<void>()
         const controller = Promise.withResolvers<ReadableStreamDefaultController<Uint8Array>>()
         let cancelled = false
-        const body = () => new ReadableStream<Uint8Array>({
-          start(value) { controller.resolve(value) },
-          pull() { reading.resolve() },
-          cancel() { cancelled = true },
-        }, { highWaterMark: 0 })
-        const fiber = yield* LLMClient.generate(LLM.request({
-          model, prompt: "Hello", http: phase === "disabled" ? { chunkTimeout: false } : undefined,
-        })).pipe(
-          Effect.provide(dynamicResponse((input) => Effect.gen(function* () {
-            const init = yield* Effect.serviceOption(FetchHttpClient.RequestInit)
-            expect(init).toMatchObject({ value: { cache: "no-store", timeout: false } })
-            yield* Deferred.succeed(ready, undefined)
-            if (phase === "headers") return yield* Effect.never.pipe(
-              Effect.ensuring(Effect.sync(() => { cancelled = true })),
-            )
-            if (phase === "disabled" || phase === "headers-and-body") yield* Effect.sleep(phase === "disabled" ? 200 : 30)
-            return input.respond(body(), { headers: { "content-type": "text/event-stream" } })
-          }))),
+        const body = () =>
+          new ReadableStream<Uint8Array>(
+            {
+              start(value) {
+                controller.resolve(value)
+              },
+              pull() {
+                reading.resolve()
+              },
+              cancel() {
+                cancelled = true
+              },
+            },
+            { highWaterMark: 0 },
+          )
+        const fiber = yield* LLMClient.generate(
+          LLM.request({
+            model,
+            prompt: "Hello",
+            http: phase === "disabled" ? { chunkTimeout: false } : undefined,
+          }),
+        ).pipe(
+          Effect.provide(
+            dynamicResponse((input) =>
+              Effect.gen(function* () {
+                const init = yield* Effect.serviceOption(FetchHttpClient.RequestInit)
+                expect(init).toMatchObject({ value: { cache: "no-store", timeout: false } })
+                yield* Deferred.succeed(ready, undefined)
+                if (phase === "headers")
+                  return yield* Effect.never.pipe(
+                    Effect.ensuring(
+                      Effect.sync(() => {
+                        cancelled = true
+                      }),
+                    ),
+                  )
+                if (phase === "disabled" || phase === "headers-and-body")
+                  yield* Effect.sleep(phase === "disabled" ? 200 : 30)
+                return input.respond(body(), { headers: { "content-type": "text/event-stream" } })
+              }),
+            ),
+          ),
           Effect.provideService(FetchHttpClient.RequestInit, { cache: "no-store" }),
           Effect.match({ onFailure: (error) => ({ error }), onSuccess: (response) => ({ response }) }),
           Effect.forkChild,
@@ -602,10 +678,14 @@ describe("RequestExecutor", () => {
             yield* Effect.yieldNow
           }
         }
-        output.enqueue(encoder.encode(sseRaw(
-          `data: ${JSON.stringify(deltaChunk({ role: "assistant", content: "Hello" }, "stop"))}`,
-          "data: [DONE]",
-        )))
+        output.enqueue(
+          encoder.encode(
+            sseRaw(
+              `data: ${JSON.stringify(deltaChunk({ role: "assistant", content: "Hello" }, "stop"))}`,
+              "data: [DONE]",
+            ),
+          ),
+        )
         output.close()
         expect(yield* Fiber.join(fiber)).toMatchObject({ response: { text: "Hello" } })
         // 正常 EOF 同样收尾；继续推进时钟不会把已完成请求变成超时失败。
@@ -652,24 +732,44 @@ describe("RequestExecutor", () => {
         const state = { ended: false, cancelled: false, attempts: 0 }
         const body = yield* Stream.fromQueue(raw).pipe(
           Stream.tap(() => Queue.offer(consumed, undefined)),
-          Stream.ensuring(Effect.sync(() => { state.cancelled = true })),
-          stream => Stream.toReadableStreamEffect(stream),
+          Stream.ensuring(
+            Effect.sync(() => {
+              state.cancelled = true
+            }),
+          ),
+          (stream) => Stream.toReadableStreamEffect(stream),
         )
         const native = LLM.request({ model, prompt: "idle", http: { chunkTimeout } })
-        const response = HttpClientResponse.fromWeb(request, new Response(body, { headers: { "content-type": "text/event-stream" } }))
-        const running = yield* HttpTransport.sseJson.with<unknown>().frames({ request, framing: Framing.sse }, native, {
-          http: { execute: () => Effect.sync(() => { state.attempts++; return response }) },
-        }).pipe(
-          Stream.tap(() => Deferred.succeed(ready, undefined)),
-          Stream.runDrain,
-          Effect.exit,
-          Effect.ensuring(Effect.sync(() => { state.ended = true })),
-          Effect.forkChild,
+        const response = HttpClientResponse.fromWeb(
+          request,
+          new Response(body, { headers: { "content-type": "text/event-stream" } }),
         )
+        const running = yield* HttpTransport.sseJson
+          .with<unknown>()
+          .frames({ request, framing: Framing.sse }, native, {
+            http: {
+              execute: () =>
+                Effect.sync(() => {
+                  state.attempts++
+                  return response
+                }),
+            },
+          })
+          .pipe(
+            Stream.tap(() => Deferred.succeed(ready, undefined)),
+            Stream.runDrain,
+            Effect.exit,
+            Effect.ensuring(
+              Effect.sync(() => {
+                state.ended = true
+              }),
+            ),
+            Effect.forkChild,
+          )
         yield* Queue.offer(raw, encoder.encode("data: ready\n\n"))
         yield* Deferred.await(ready)
         yield* Queue.take(consumed)
-        const window = chunkTimeout === false ? 180_000 : chunkTimeout ?? 180_000
+        const window = chunkTimeout === false ? 180_000 : (chunkTimeout ?? 180_000)
         yield* TestClock.adjust(window - 1)
         expect(state.ended).toBe(false)
         // 注释没有provider frame，仍必须重置唯一原始字节期限。
@@ -692,82 +792,144 @@ describe("RequestExecutor", () => {
     }),
   )
 
-  it.live("correlates native fetch and raw SSE timing without exposing payload or changing cancellation", () => Effect.suspend(() => {
-    const logs: Record<string, unknown>[] = []
-    const all: Record<string, unknown>[] = []
-    let firstRaw: (() => void) | undefined
-    const logger = Logger.make((options) => {
-      for (const value of Array.isArray(options.message) ? options.message : [options.message]) {
-        if (!value || typeof value !== "object" || !("phase" in value)) continue
-        const entry = { ...options.fiber.getRef(References.CurrentLogAnnotations), ...value }
-        logs.push(entry)
-        all.push(entry)
-        if (value.phase === "sse.first_chunk") firstRaw?.()
-      }
-    })
-    return Effect.gen(function* () {
-      const encoder = new TextEncoder()
-      const native = LLM.request({ model: OpenAIChat.route.model({ id: "timed-native" }), prompt: "PRIVATE_PAYLOAD" })
-      const prepared = { request: request.pipe(HttpClientRequest.bodyText("PRIVATE_PAYLOAD"), HttpClientRequest.setHeader("x-session-affinity", "ses_timing")), framing: Framing.sse }
-      const collect = (responses: Response[]) => Effect.gen(function* () {
-        const executor = yield* RequestExecutor.Service
-        return yield* HttpTransport.sseJson.with<unknown>().frames(prepared, native, { http: executor }).pipe(Stream.runCollect)
-      }).pipe(Effect.provide(responsesLayer(responses)), Effect.scoped)
-      const body = new ReadableStream<Uint8Array>({ start(controller) {
-        controller.enqueue(encoder.encode(": heartbeat\n\n"))
-        controller.enqueue(encoder.encode("data: ok\n\n"))
-        controller.close()
-      } })
-      expect(yield* collect([new Response(body, { headers: { "content-type": "text/event-stream" } })])).toEqual(["ok"])
-      expect(logs.map((entry) => entry.phase)).toEqual(["fetch.start", "fetch.response", "sse.first_chunk", "sse.end"])
-      expect(new Set(logs.map((entry) => entry.requestID)).size).toBe(1)
-      expect(logs[0]).toMatchObject({ method: "POST", service: "provider.fetch", providerID: native.model.provider, modelID: "timed-native", sessionID: "ses_timing", bodyBytes: 15 })
-      expect(logs.at(-1)).toMatchObject({ chunkCount: 2, bytes: encoder.encode(": heartbeat\n\ndata: ok\n\n").byteLength })
-      // 状态失败也必须先记录真实响应，不能把HTTP错误当成尚未收到响应头。
-      logs.length = 0
-      const denied = yield* collect([new Response("PRIVATE_RESPONSE", { status: 400 })]).pipe(Effect.exit)
-      expect(denied._tag).toBe("Failure")
-      expect(logs.map((entry) => entry.phase)).toEqual(["fetch.start", "fetch.response"])
-      logs.length = 0
-      const failedHTTP = RequestExecutor.layer.pipe(Layer.provide(Layer.succeed(HttpClient.HttpClient,
-        HttpClient.make((request) => Effect.fail(new HttpClientError.HttpClientError({ reason: new HttpClientError.TransportError({ request, cause: new Error("PRIVATE_TRANSPORT_ERROR") }) }))),
-      )))
-      const failed = yield* Effect.gen(function* () {
-        const executor = yield* RequestExecutor.Service
-        return yield* executor.execute(prepared.request)
-      }).pipe(Effect.provide(failedHTTP), Effect.exit)
-      expect(failed._tag).toBe("Failure")
-      expect(logs.map((entry) => entry.phase)).toEqual(Array.from({ length: 3 }, () => ["fetch.start", "fetch.error"]).flat())
-      expect(new Set(logs.map((entry) => entry.requestID)).size).toBe(3)
-      // 已有typed timeout与普通读错误保持失败，不额外设置计时器或重放已交付frame。
-      for (const timeout of [false, true]) {
-        logs.length = 0
-        let pulls = 0
-        const broken = new ReadableStream<Uint8Array>({ pull(controller) {
-          if (pulls++ === 0) {
-            controller.enqueue(encoder.encode(": heartbeat\n\ndata: ok\n\n"))
-            return
-          }
-          controller.error(timeout ? new Cause.TimeoutError() : new Error("PRIVATE_BODY_ERROR"))
-        } })
-        const exit = yield* collect([new Response(broken, { headers: { "content-type": "text/event-stream" } })]).pipe(Effect.exit)
-        expect(exit._tag).toBe("Failure")
-        expect(logs.map((entry) => entry.phase)).toEqual(["fetch.start", "fetch.response", "sse.first_chunk", timeout ? "sse.timeout" : "sse.error"])
+  it.live("correlates native fetch and raw SSE timing without exposing payload or changing cancellation", () =>
+    Effect.suspend(() => {
+      const logs: Record<string, unknown>[] = []
+      const all: Record<string, unknown>[] = []
+      let firstRaw: (() => void) | undefined
+      const logger = Logger.make((options) => {
+        for (const value of Array.isArray(options.message) ? options.message : [options.message]) {
+          if (!value || typeof value !== "object" || !("phase" in value)) continue
+          const entry = { ...options.fiber.getRef(References.CurrentLogAnnotations), ...value }
+          logs.push(entry)
+          all.push(entry)
+          if (value.phase === "sse.first_chunk") firstRaw?.()
+        }
+      })
+      return Effect.gen(function* () {
+        const encoder = new TextEncoder()
+        const native = LLM.request({ model: OpenAIChat.route.model({ id: "timed-native" }), prompt: "PRIVATE_PAYLOAD" })
+        const prepared = {
+          request: request.pipe(
+            HttpClientRequest.bodyText("PRIVATE_PAYLOAD"),
+            HttpClientRequest.setHeader("x-session-affinity", "ses_timing"),
+          ),
+          framing: Framing.sse,
+        }
+        const collect = (responses: Response[]) =>
+          Effect.gen(function* () {
+            const executor = yield* RequestExecutor.Service
+            return yield* HttpTransport.sseJson
+              .with<unknown>()
+              .frames(prepared, native, { http: executor })
+              .pipe(Stream.runCollect)
+          }).pipe(Effect.provide(responsesLayer(responses)), Effect.scoped)
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(encoder.encode(": heartbeat\n\n"))
+            controller.enqueue(encoder.encode("data: ok\n\n"))
+            controller.close()
+          },
+        })
+        expect(yield* collect([new Response(body, { headers: { "content-type": "text/event-stream" } })])).toEqual([
+          "ok",
+        ])
+        expect(logs.map((entry) => entry.phase)).toEqual([
+          "fetch.start",
+          "fetch.response",
+          "sse.first_chunk",
+          "sse.end",
+        ])
         expect(new Set(logs.map((entry) => entry.requestID)).size).toBe(1)
-        expect(JSON.stringify(logs)).not.toContain("PRIVATE_BODY_ERROR")
-      }
-      logs.length = 0
-      const ready = Promise.withResolvers<void>()
-      firstRaw = () => ready.resolve()
-      const stalled = new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(encoder.encode(": heartbeat\n\n")) } })
-      const pending = yield* collect([new Response(stalled, { headers: { "content-type": "text/event-stream" } })]).pipe(Effect.forkScoped)
-      yield* Effect.promise(() => ready.promise)
-      yield* Fiber.interrupt(pending)
-      expect(logs.map((entry) => entry.phase)).toEqual(["fetch.start", "fetch.response", "sse.first_chunk"])
-      // 所有阶段均只输出计数/分类；不能把error.message、请求URL或正文送入日志。
-      expect(JSON.stringify(all)).not.toContain("PRIVATE_")
-      expect(JSON.stringify(all)).not.toContain("secret")
-      expect(JSON.stringify(all)).not.toContain("heartbeat")
-    }).pipe(Effect.provideService(Logger.CurrentLoggers, new Set([logger])))
-  }))
+        expect(logs[0]).toMatchObject({
+          method: "POST",
+          service: "provider.fetch",
+          providerID: native.model.provider,
+          modelID: "timed-native",
+          sessionID: "ses_timing",
+          bodyBytes: 15,
+        })
+        expect(logs.at(-1)).toMatchObject({
+          chunkCount: 2,
+          bytes: encoder.encode(": heartbeat\n\ndata: ok\n\n").byteLength,
+        })
+        // 状态失败也必须先记录真实响应，不能把HTTP错误当成尚未收到响应头。
+        logs.length = 0
+        const denied = yield* collect([new Response("PRIVATE_RESPONSE", { status: 400 })]).pipe(Effect.exit)
+        expect(denied._tag).toBe("Failure")
+        expect(logs.map((entry) => entry.phase)).toEqual(["fetch.start", "fetch.response"])
+        logs.length = 0
+        const failedHTTP = RequestExecutor.layer.pipe(
+          Layer.provide(
+            Layer.succeed(
+              HttpClient.HttpClient,
+              HttpClient.make((request) =>
+                Effect.fail(
+                  new HttpClientError.HttpClientError({
+                    reason: new HttpClientError.TransportError({
+                      request,
+                      cause: new Error("PRIVATE_TRANSPORT_ERROR"),
+                    }),
+                  }),
+                ),
+              ),
+            ),
+          ),
+        )
+        const failed = yield* Effect.gen(function* () {
+          const executor = yield* RequestExecutor.Service
+          return yield* executor.execute(prepared.request)
+        }).pipe(Effect.provide(failedHTTP), Effect.exit)
+        expect(failed._tag).toBe("Failure")
+        expect(logs.map((entry) => entry.phase)).toEqual(
+          Array.from({ length: 3 }, () => ["fetch.start", "fetch.error"]).flat(),
+        )
+        expect(new Set(logs.map((entry) => entry.requestID)).size).toBe(3)
+        // 已有typed timeout与普通读错误保持失败，不额外设置计时器或重放已交付frame。
+        for (const timeout of [false, true]) {
+          logs.length = 0
+          let pulls = 0
+          const broken = new ReadableStream<Uint8Array>({
+            pull(controller) {
+              if (pulls++ === 0) {
+                controller.enqueue(encoder.encode(": heartbeat\n\ndata: ok\n\n"))
+                return
+              }
+              controller.error(timeout ? new Cause.TimeoutError() : new Error("PRIVATE_BODY_ERROR"))
+            },
+          })
+          const exit = yield* collect([
+            new Response(broken, { headers: { "content-type": "text/event-stream" } }),
+          ]).pipe(Effect.exit)
+          expect(exit._tag).toBe("Failure")
+          expect(logs.map((entry) => entry.phase)).toEqual([
+            "fetch.start",
+            "fetch.response",
+            "sse.first_chunk",
+            timeout ? "sse.timeout" : "sse.error",
+          ])
+          expect(new Set(logs.map((entry) => entry.requestID)).size).toBe(1)
+          expect(JSON.stringify(logs)).not.toContain("PRIVATE_BODY_ERROR")
+        }
+        logs.length = 0
+        const ready = Promise.withResolvers<void>()
+        firstRaw = () => ready.resolve()
+        const stalled = new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(encoder.encode(": heartbeat\n\n"))
+          },
+        })
+        const pending = yield* collect([
+          new Response(stalled, { headers: { "content-type": "text/event-stream" } }),
+        ]).pipe(Effect.forkScoped)
+        yield* Effect.promise(() => ready.promise)
+        yield* Fiber.interrupt(pending)
+        expect(logs.map((entry) => entry.phase)).toEqual(["fetch.start", "fetch.response", "sse.first_chunk"])
+        // 所有阶段均只输出计数/分类；不能把error.message、请求URL或正文送入日志。
+        expect(JSON.stringify(all)).not.toContain("PRIVATE_")
+        expect(JSON.stringify(all)).not.toContain("secret")
+        expect(JSON.stringify(all)).not.toContain("heartbeat")
+      }).pipe(Effect.provideService(Logger.CurrentLoggers, new Set([logger])))
+    }),
+  )
 })

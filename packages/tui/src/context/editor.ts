@@ -359,7 +359,11 @@ export const { use: useEditorContext, provider: EditorContextProvider } = create
     return {
       // enabled 含 registry：无 websocket/zed 时仍可展示 bridge 绑定文件
       enabled() {
-        return Boolean(resolveBridgeRegistryActiveFile(directory) || resolveEditorConnection(directory, port, editor.connection) || (zedTerminal && editor.selection))
+        return Boolean(
+          resolveBridgeRegistryActiveFile(directory) ||
+            resolveEditorConnection(directory, port, editor.connection) ||
+            (zedTerminal && editor.selection),
+        )
       },
       connected() {
         return store.status === "connected"
@@ -425,7 +429,6 @@ export function editorSelectionKey(selection: EditorSelection | undefined) {
     ]),
   ].join("\0")
 }
-
 
 // 从 opencode IDE registry 读取最近 active notebook/text 文件（按 workspace 路径打分）
 // 读 ~/.local/state/opencode/ide 注册表 JSON，按 workspace 路径最长前缀打分
@@ -516,7 +519,7 @@ function bridgeRegistryWorkspaceScore(entry: Record<string, unknown>, activeDire
     ...folders.map((folder) => {
       const fsPath = typeof folder.fsPath === "string" ? folder.fsPath : ""
       // #125：workspace folder.uri 同样可能是 file://
-      const uri = typeof folder.uri === "string" ? bridgeUriToPath(folder.uri) ?? folder.uri : ""
+      const uri = typeof folder.uri === "string" ? (bridgeUriToPath(folder.uri) ?? folder.uri) : ""
       return Math.max(
         fsPath ? pathContainsLength(fsPath, activeDirectory) : 0,
         uri ? pathContainsLength(uri, activeDirectory) : 0,

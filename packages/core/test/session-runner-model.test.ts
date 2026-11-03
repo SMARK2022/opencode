@@ -50,7 +50,12 @@ describe("SessionRunnerModel", () => {
       const resolved = yield* SessionRunnerModel.fromCatalogModel(
         // 与 Catalog 相同的真实 limit 进入 route.with/ModelLimits，避免只测手造 LLM Model。
         ModelV2.Info.make({
-          ...model({ type: "aisdk", package: "@ai-sdk/openai", url: "https://openai.example/v1", settings: { chunkTimeout: false } }),
+          ...model({
+            type: "aisdk",
+            package: "@ai-sdk/openai",
+            url: "https://openai.example/v1",
+            settings: { chunkTimeout: false },
+          }),
           limit: { context: 204_800, input: 73_700, output: 20_000 },
         }),
       )
@@ -71,21 +76,23 @@ describe("SessionRunnerModel", () => {
       // 关闭空闲期限只影响运输，不能作为OpenAI协议字段发出。
       expect(prepared.body).not.toHaveProperty("chunkTimeout")
       // request 的显式 false 位于 model 默认之后，不能被默认 true 再次覆盖。
-      const serial = yield* LLMClient.prepare(LLM.request({ model: resolved, prompt: "Hello",
-        providerOptions: { openai: { parallelToolCalls: false } },
-      }))
+      const serial = yield* LLMClient.prepare(
+        LLM.request({ model: resolved, prompt: "Hello", providerOptions: { openai: { parallelToolCalls: false } } }),
+      )
       expect(serial.body).toHaveProperty("parallel_tool_calls", false)
       expect(serial.body).not.toHaveProperty("parallelToolCalls")
       // 上面的第三方路由保持原头；真实 OpenAI 的默认身份和显式 UA 均走同一 resolver。
       for (const userAgent of [undefined, "configured-agent"]) {
-        const openai = yield* SessionRunnerModel.fromCatalogModel(ModelV2.Info.make({
-          ...model({ type: "aisdk", package: "@ai-sdk/openai", url: "https://openai.example/v1" }),
-          providerID: ProviderV2.ID.openai,
-          request: {
-            headers: Object.fromEntries([["x-custom", "kept"], ...(userAgent ? [["uSeR-aGeNt", userAgent]] : [])]),
-            body: { apiKey: "secret" },
-          },
-        }))
+        const openai = yield* SessionRunnerModel.fromCatalogModel(
+          ModelV2.Info.make({
+            ...model({ type: "aisdk", package: "@ai-sdk/openai", url: "https://openai.example/v1" }),
+            providerID: ProviderV2.ID.openai,
+            request: {
+              headers: Object.fromEntries([["x-custom", "kept"], ...(userAgent ? [["uSeR-aGeNt", userAgent]] : [])]),
+              body: { apiKey: "secret" },
+            },
+          }),
+        )
         expect(openai.route.defaults.headers).toMatchObject({
           "content-type": "application/json",
           originator: "codex-tui",
@@ -93,7 +100,9 @@ describe("SessionRunnerModel", () => {
           "x-custom": "kept",
         })
         // 配置的身份不进入协议正文，也不会变成两个仅大小写不同的 UA 字段。
-        expect(Object.keys(openai.route.defaults.headers ?? {}).filter(key => key.toLowerCase() === "user-agent")).toHaveLength(1)
+        expect(
+          Object.keys(openai.route.defaults.headers ?? {}).filter((key) => key.toLowerCase() === "user-agent"),
+        ).toHaveLength(1)
         const prepared = yield* LLMClient.prepare(LLM.request({ model: openai, prompt: "Hello" }))
         expect(prepared.body).not.toHaveProperty("originator")
         expect(prepared.body).not.toHaveProperty("headers")
@@ -141,9 +150,13 @@ describe("SessionRunnerModel", () => {
       expect(resolved.route.defaults.http?.chunkTimeout).toBe(false)
       const compiled = yield* LLMClient.prepare(request)
       expect(compiled.body).not.toHaveProperty("chunkTimeout")
-      const timed = yield* SessionRunnerModel.fromCatalogModel(model({
-        type: "aisdk", package: "@ai-sdk/openai", settings: { chunkTimeout: 25 },
-      }))
+      const timed = yield* SessionRunnerModel.fromCatalogModel(
+        model({
+          type: "aisdk",
+          package: "@ai-sdk/openai",
+          settings: { chunkTimeout: 25 },
+        }),
+      )
       expect(timed.route.defaults.http?.chunkTimeout).toBe(25)
       // 在唯一HTTP准备路径观察最终body，不把未合并HTTP扩展的protocol body当wire。
       const bodies: unknown[] = []
@@ -155,18 +168,30 @@ describe("SessionRunnerModel", () => {
         ["zai", "glm-5.2", "@ai-sdk/openai", {}],
       ] as const) {
         const fixture = model({ type: "aisdk", package: pkg, url: "https://compatible.example/v1" })
-        const selected = yield* SessionRunnerModel.fromCatalogModel(ModelV2.Info.make({
-          ...fixture, providerID: ProviderV2.ID.make(provider),
-          api: { ...fixture.api, id: ModelV2.ID.make(id) },
-          request: { ...fixture.request, body: { ...fixture.request.body, ...body } },
-        }))
-        const route = selected.route.with({ auth: selected.route.auth.andThen(Auth.custom(input => Effect.sync(() => {
-          bodies.push(Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Unknown))(input.body))
-          return input.headers
-        }))) })
+        const selected = yield* SessionRunnerModel.fromCatalogModel(
+          ModelV2.Info.make({
+            ...fixture,
+            providerID: ProviderV2.ID.make(provider),
+            api: { ...fixture.api, id: ModelV2.ID.make(id) },
+            request: { ...fixture.request, body: { ...fixture.request.body, ...body } },
+          }),
+        )
+        const route = selected.route.with({
+          auth: selected.route.auth.andThen(
+            Auth.custom((input) =>
+              Effect.sync(() => {
+                bodies.push(Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Unknown))(input.body))
+                return input.headers
+              }),
+            ),
+          ),
+        })
         yield* LLMClient.prepare(LLM.request({ model: route.model({ id: selected.id }), prompt: "Hello" }))
       }
-      expect(bodies.slice(0, 2)).toMatchObject([{ model: "GLM-5.2", tool_stream: true }, { model: "glm-5.2", tool_stream: false }])
+      expect(bodies.slice(0, 2)).toMatchObject([
+        { model: "GLM-5.2", tool_stream: true },
+        { model: "glm-5.2", tool_stream: false },
+      ])
       // provider、API模型ID和包三个条件各自有效，目录别名不能误启用。
       for (const body of bodies.slice(2)) expect(body).not.toHaveProperty("tool_stream")
     }),
@@ -218,34 +243,60 @@ describe("SessionRunnerModel", () => {
       expect(resolved.route.defaults.http?.body).not.toHaveProperty("parallel_tool_calls")
       // 原 fixture 仅保证 body 合并；执行时 temperature overlay 必须仍被 transport 拒绝。
       const rejected = yield* LLMClient.prepare(LLM.request({ model: resolved, prompt: "Hello" })).pipe(Effect.flip)
-      expect(rejected.reason).toMatchObject({ _tag: "InvalidRequest", message: "http.body cannot overlay protocol-owned field(s): temperature" })
+      expect(rejected.reason).toMatchObject({
+        _tag: "InvalidRequest",
+        message: "http.body cannot overlay protocol-owned field(s): temperature",
+      })
       // 并行测试使用合法 variant；已知协议的温度改从 typed Generation 输入，不改生产解析器。
-      const executable = yield* SessionRunnerModel.resolve(session,
-        ModelV2.Info.make({ ...catalog,
+      const executable = yield* SessionRunnerModel.resolve(
+        session,
+        ModelV2.Info.make({
+          ...catalog,
           variants: catalog.variants.map((variant) => ({
-            ...variant, body: Object.fromEntries(Object.entries(variant.body).filter(([key]) => key !== "temperature")),
+            ...variant,
+            body: Object.fromEntries(Object.entries(variant.body).filter(([key]) => key !== "temperature")),
           })),
         }),
       )
-      const prepared = yield* LLMClient.prepare(LLM.request({
-        model: executable, prompt: "Hello", generation: { temperature: 0.2 },
-      }))
+      const prepared = yield* LLMClient.prepare(
+        LLM.request({
+          model: executable,
+          prompt: "Hello",
+          generation: { temperature: 0.2 },
+        }),
+      )
       expect(prepared.body).toHaveProperty("parallel_tool_calls", false)
       expect(prepared.body).toHaveProperty("temperature", 0.2)
       // 在唯一HTTP准备链观察最终body，prepare.body尚未合并合法的HTTP扩展。
       for (const serviceTier of ["ultrafast", "priority", undefined] as const) {
-        const selected = yield* SessionRunnerModel.resolve(serviceTier === undefined ? SessionV2.Info.make({ ...session, model: { id: catalog.id, providerID: catalog.providerID } }) : session, ModelV2.Info.make({
-          ...catalog, variants: catalog.variants.map(variant => ({
-            ...variant, body: ConfigProviderOptionsV1.get("@ai-sdk/openai").request({ ...(serviceTier === undefined ? {} : { serviceTier }), reasoningEffort: "high" }),
-          })),
-        }))
-        const route = selected.route.with({ auth: selected.route.auth.andThen(Auth.custom(input => Effect.sync(() => {
-          const body = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Unknown))(input.body)
+        const selected = yield* SessionRunnerModel.resolve(
           serviceTier === undefined
-            ? expect(body).not.toHaveProperty("service_tier")
-            : expect(body).toHaveProperty("service_tier", serviceTier)
-          return input.headers
-        }))) })
+            ? SessionV2.Info.make({ ...session, model: { id: catalog.id, providerID: catalog.providerID } })
+            : session,
+          ModelV2.Info.make({
+            ...catalog,
+            variants: catalog.variants.map((variant) => ({
+              ...variant,
+              body: ConfigProviderOptionsV1.get("@ai-sdk/openai").request({
+                ...(serviceTier === undefined ? {} : { serviceTier }),
+                reasoningEffort: "high",
+              }),
+            })),
+          }),
+        )
+        const route = selected.route.with({
+          auth: selected.route.auth.andThen(
+            Auth.custom((input) =>
+              Effect.sync(() => {
+                const body = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Unknown))(input.body)
+                serviceTier === undefined
+                  ? expect(body).not.toHaveProperty("service_tier")
+                  : expect(body).toHaveProperty("service_tier", serviceTier)
+                return input.headers
+              }),
+            ),
+          ),
+        })
         yield* LLMClient.prepare(LLM.request({ model: route.model({ id: selected.id }), prompt: "Hello" }))
       }
     }),
@@ -455,34 +506,61 @@ describe("SessionRunnerModel", () => {
         const input = LLM.request({
           model: route.model({ id: resolved.id }),
           http: { body: { metadata: { fixture: raw } } },
-          system: "Session system", prompt: "hello", cache: "none",
-          tools: [{ name: "echo", description: "Echo", inputSchema: { type: "object", properties: { text: { type: "string" } } } }],
+          system: "Session system",
+          prompt: "hello",
+          cache: "none",
+          tools: [
+            {
+              name: "echo",
+              description: "Echo",
+              inputSchema: { type: "object", properties: { text: { type: "string" } } },
+            },
+          ],
           providerOptions: { anthropic: { thinking: { type: "disabled" } } },
         })
         expect(input.providerOptions?.anthropic?.system).toBeUndefined()
-        yield* client.stream(input, (body) => Effect.sync(() => {
-          estimates.push(Token.estimateRequest(body, [], [{ kind: "instructions", text: "Session system" }]))
-          expect(body).toMatchObject({
-            system: expect.arrayContaining([{ type: "text", text: "Session system" }, { type: "text", text: raw }]),
-            messages: [{ role: "user", content: [{ type: "text", text: "hello" }] }],
-            tools: expect.arrayContaining([{ name: "echo", description: "Echo", input_schema: { type: "object", properties: { text: { type: "string" } } } }]),
-          })
-          // metadata 与 system 同增 8000，估算仍只增长正文的 8000；运输附加字段不能再计一遍。
-          expect(body).not.toHaveProperty("metadata.fixture")
-        })).pipe(Stream.runDrain)
+        yield* client
+          .stream(input, (body) =>
+            Effect.sync(() => {
+              estimates.push(Token.estimateRequest(body, [], [{ kind: "instructions", text: "Session system" }]))
+              expect(body).toMatchObject({
+                system: expect.arrayContaining([
+                  { type: "text", text: "Session system" },
+                  { type: "text", text: raw },
+                ]),
+                messages: [{ role: "user", content: [{ type: "text", text: "hello" }] }],
+                tools: expect.arrayContaining([
+                  {
+                    name: "echo",
+                    description: "Echo",
+                    input_schema: { type: "object", properties: { text: { type: "string" } } },
+                  },
+                ]),
+              })
+              // metadata 与 system 同增 8000，估算仍只增长正文的 8000；运输附加字段不能再计一遍。
+              expect(body).not.toHaveProperty("metadata.fixture")
+            }),
+          )
+          .pipe(Stream.runDrain)
       }
       expect(calls).toEqual({ prepare: 2, frames: 2 })
       expect(estimates).toHaveLength(2)
-      expect(Math.max(...estimates.map(item => item.bodyChars)) - Math.min(...estimates.map(item => item.bodyChars))).toBe(8000)
-      expect(Math.max(...estimates.map(item => item.input)) - Math.min(...estimates.map(item => item.input))).toBe(2000)
+      expect(
+        Math.max(...estimates.map((item) => item.bodyChars)) - Math.min(...estimates.map((item) => item.bodyChars)),
+      ).toBe(8000)
+      expect(Math.max(...estimates.map((item) => item.input)) - Math.min(...estimates.map((item) => item.input))).toBe(
+        2000,
+      )
       // 协议正文只增长模型默认system；8000增量与固定指令14分别归桶，运输metadata不参与。
       expect(estimates[1]?.inputBreakdown?.system).toBe((estimates[0]?.inputBreakdown?.system ?? 0) + 8000)
-      expect(estimates.map(item => item.inputBreakdown?.instructions)).toEqual([14, 14])
-      expect(estimates.map(item => item.charsPerToken)).toEqual([4, 4])
-      expect(estimates.every(item => (item.inputBreakdown?.tools ?? 0) > 0)).toBe(true)
+      expect(estimates.map((item) => item.inputBreakdown?.instructions)).toEqual([14, 14])
+      expect(estimates.map((item) => item.charsPerToken)).toEqual([4, 4])
+      expect(estimates.every((item) => (item.inputBreakdown?.tools ?? 0) > 0)).toBe(true)
     }).pipe(
       Effect.provide(LLMClient.layer),
-      Effect.provideService(RequestExecutor.Service, { execute: () => Effect.die("Prepared fixture must not send provider IO") }),
+      Effect.provideService(RequestExecutor.Service, {
+        execute: () => Effect.die("Prepared fixture must not send provider IO"),
+      }),
     ),
   )
 

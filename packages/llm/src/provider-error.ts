@@ -2,7 +2,11 @@ import { Schema } from "effect"
 import { LLMError, ProviderErrorEvent } from "./schema"
 
 // 来源头、HTML和页面指纹缺一不可，不能把普通鉴权或JSON策略拒绝误判为拦截。
-export const isCloudflareBlock = (status: number | undefined, headers: Readonly<Record<string, string>> | undefined, body: string) =>
+export const isCloudflareBlock = (
+  status: number | undefined,
+  headers: Readonly<Record<string, string>> | undefined,
+  body: string,
+) =>
   status === 403 &&
   headers?.server?.trim().toLowerCase() === "cloudflare" &&
   !!headers["cf-ray"]?.trim() &&

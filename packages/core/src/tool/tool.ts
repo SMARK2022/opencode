@@ -104,7 +104,8 @@ export function make<
         Effect.flatMap((input) =>
           (config.worktree && config.worktree !== "none" && context.captureWorktree
             ? context.captureWorktree(config.worktree)
-            : Effect.void).pipe(
+            : Effect.void
+          ).pipe(
             // 输入校验成功后、插件/权限和真实执行前才支付baseline成本。
             Effect.andThen(() => config.execute(input, context)),
             Effect.flatMap((output) =>

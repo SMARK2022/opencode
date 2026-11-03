@@ -6,10 +6,10 @@ Issues and PRDs for this repo live as GitHub issues on the **SMARK fork**, `SMAR
 
 This repo has two remotes:
 
-| Remote  | Repo                       | Role                                           |
-| ------- | -------------------------- | ---------------------------------------------- |
-| `origin`    | `SMARK2022/opencode`   | **SMARK fork — track issues here**             |
-| `upstream`  | `anomalyco/opencode`   | Upstream; do NOT open SMARK-specific issues here |
+| Remote     | Repo                 | Role                                             |
+| ---------- | -------------------- | ------------------------------------------------ |
+| `origin`   | `SMARK2022/opencode` | **SMARK fork — track issues here**               |
+| `upstream` | `anomalyco/opencode` | Upstream; do NOT open SMARK-specific issues here |
 
 `gh` infers the repo from `git remote -v`. Because `origin` is the SMARK fork, plain `gh issue ...` commands target `SMARK2022/opencode` by default. If a command ever resolves to the wrong repo, be explicit: `gh issue create --repo SMARK2022/opencode ...`.
 

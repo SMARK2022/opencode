@@ -26,24 +26,24 @@
 
 ### 1.1 关键常量
 
-| 常量 | 值 | 位置 | 作用 |
-|---|---|---|---|
-| `MAX_BYTES` | 16 KB | `read.ts:23` | 单次 read 字节上限，超出则 `cut` 截断 |
-| `DEFAULT_READ_LIMIT` | 200 | `read.ts:22` | 未传 limit 时的默认行数上限 |
-| `MAX_CONTENT_TOKENS` | 16000 | `read.ts:25` | token 预算硬上限，超出则整次 read 失败 |
-| `OVERLAP_MIN_LINES` | 20 | `read.ts:28` | 触发 overlap note 的最小重叠行数 |
-| `OVERLAP_MIN_RATIO` | 0.3 | `read.ts:29` | 触发 overlap note 的最小重叠率 |
-| `OVERLAP_SUPPRESS_RATIO` | 0.8 | `read.ts:34` | 触发 suppress(stub) 的高重叠阈值 |
+| 常量                     | 值    | 位置         | 作用                                   |
+| ------------------------ | ----- | ------------ | -------------------------------------- |
+| `MAX_BYTES`              | 16 KB | `read.ts:23` | 单次 read 字节上限，超出则 `cut` 截断  |
+| `DEFAULT_READ_LIMIT`     | 200   | `read.ts:22` | 未传 limit 时的默认行数上限            |
+| `MAX_CONTENT_TOKENS`     | 16000 | `read.ts:25` | token 预算硬上限，超出则整次 read 失败 |
+| `OVERLAP_MIN_LINES`      | 20    | `read.ts:28` | 触发 overlap note 的最小重叠行数       |
+| `OVERLAP_MIN_RATIO`      | 0.3   | `read.ts:29` | 触发 overlap note 的最小重叠率         |
+| `OVERLAP_SUPPRESS_RATIO` | 0.8   | `read.ts:34` | 触发 suppress(stub) 的高重叠阈值       |
 
 ### 1.2 关键函数
 
-| 函数 | 位置 | 职责 |
-|---|---|---|
+| 函数                  | 位置          | 职责                                                                            |
+| --------------------- | ------------- | ------------------------------------------------------------------------------- |
 | `collectVisibleReads` | `read.ts:204` | 扫描 `ctx.messages`，收集同 canonicalPath、非 stub、未 compacted 的 read 元数据 |
-| `findReadStub` | `read.ts:226` | 同版本下判断 same_range / covered_range |
-| `findOverlapNote` | `read.ts:241` | 找**单条**最优重叠历史 read，决定是否加 overlap note |
-| `computeUnreadRanges` | `read.ts:264` | 用**所有**同版本历史 read 的并集，计算当前请求的未覆盖区间 |
-| `lines` | `read.ts:860` | 实际读文件，受 limit + 16KB 双约束 |
+| `findReadStub`        | `read.ts:226` | 同版本下判断 same_range / covered_range                                         |
+| `findOverlapNote`     | `read.ts:241` | 找**单条**最优重叠历史 read，决定是否加 overlap note                            |
+| `computeUnreadRanges` | `read.ts:264` | 用**所有**同版本历史 read 的并集，计算当前请求的未覆盖区间                      |
+| `lines`               | `read.ts:860` | 实际读文件，受 limit + 16KB 双约束                                              |
 
 ### 1.3 stub 触发链
 
@@ -57,18 +57,18 @@
 
 ## 2. 取证方法与数据集
 
-| 数据库 | 路径 | 大小 | read 调用 | stub 总数 | stub 率 | 环境 |
-|---|---|---|---|---|---|---|
-| Windows 巨量库 | `.temp/testing/opencode.db` | 1.66 GB | 33,935 | 824 | 2.4% | PowerShell（`F:\`、`C:\Users\Lenovo`） |
-| 本地库 | `~/.local/share/opencode/opencode.db` | 465 MB | 12,098 | 561 | 4.6% | macOS / zsh |
+| 数据库         | 路径                                  | 大小    | read 调用 | stub 总数 | stub 率 | 环境                                   |
+| -------------- | ------------------------------------- | ------- | --------- | --------- | ------- | -------------------------------------- |
+| Windows 巨量库 | `.temp/testing/opencode.db`           | 1.66 GB | 33,935    | 824       | 2.4%    | PowerShell（`F:\`、`C:\Users\Lenovo`） |
+| 本地库         | `~/.local/share/opencode/opencode.db` | 465 MB  | 12,098    | 561       | 4.6%    | macOS / zsh                            |
 
 stub 子类型分布（两库序位一致 covered > same_range > high_overlap，但占比有差异）：
 
-| 子类型 | Windows | 本地 | Windows 占比 | 本地占比 |
-|---|---|---|---|---|
-| `stub_covered_range_visible` | 570 | 416 | 69.2% | 74.2% |
-| `stub_same_range_visible` | 250 | 140 | 30.3% | 25.0% |
-| `stub_high_overlap_visible` | 4 | 5 | 0.5% | 0.9% |
+| 子类型                       | Windows | 本地 | Windows 占比 | 本地占比 |
+| ---------------------------- | ------- | ---- | ------------ | -------- |
+| `stub_covered_range_visible` | 570     | 416  | 69.2%        | 74.2%    |
+| `stub_same_range_visible`    | 250     | 140  | 30.3%        | 25.0%    |
+| `stub_high_overlap_visible`  | 4       | 5    | 0.5%         | 0.9%     |
 
 方法：对 `part` 表（JSON 列 `data`）用 SQLite `json_extract` 提取 read metadata、stub 状态、bash 命令；用窗口函数（`ROW_NUMBER() OVER PARTITION BY stub`）追踪每个 stub 后续 N 个工具调用；对命中案例人工提取 ±10 条上下文时间线（含 `reasoning`/`text` part）核对模型困惑度。
 
@@ -83,11 +83,13 @@ stub 子类型分布（两库序位一致 covered > same_range > high_overlap，
 **结论：非 bug。**
 
 `read.ts:699-714`：
+
 ```ts
 const start = file.offset                                                    // 请求 offset
 const end = file.raw.length === 0 ? file.offset - 1 : file.offset + file.raw.length - 1   // 实际返回
 const current: ReadMetadata = { ..., start, end, total: file.count, returned: file.raw.length, stub: false }
 ```
+
 `file.raw.length` 受 `opts.limit`（行上限，`read.ts:880`）+ `MAX_BYTES`（字节上限，`read.ts:892`，命中后该行不入 raw）+ EOF 三重约束。请求 `limit=400` 但字节截断只返回 50 行时，**记录 `start=1, end=50`，而非 `end=400`**。
 
 实证：`read.test.ts:452-466` 固化此行为（`expect(returned).toBeLessThan(100)`）。git 历史（`17b9d5b4f`）显示 `end` 自重构起即基于 `raw.length`，从未用 `params.limit`。
@@ -99,6 +101,7 @@ const current: ReadMetadata = { ..., start, end, total: file.count, returned: fi
 #### A2. 80% 阈值不是 IoU — 设计如此（保守方向）
 
 `read.ts:745-750`：
+
 ```ts
 const overlapLines = overlapEnd - overlapStart + 1          // 分子：与单条历史 read 的交集
 const requestedLines = Math.max(1, end - start + 1)         // 分母：当前【实际返回】行数
@@ -118,6 +121,7 @@ if (overlapLines / requestedLines >= OVERLAP_SUPPRESS_RATIO) // 0.8
 版本键 = `size + modifiedMs`（`read.ts:230`、`244`、`270`）。这是**整文件、全有或全无**的门控：同版本则历史 read 全部生效；异版本则历史 read 全部作废。**不存在"只 stub A、C，只重读 B"的行级中间态**。
 
 场景：读 ABC → 改 B → 读 ABC：
+
 - 改动被检测到（size 或 mtime ms 变）→ **A、B、C 全部重读**（A、C 被白白重读，浪费但正确）。
 - 改动未检测到（见 A4）→ **A、B、C 全部 stub**（含脏 B）。
 
@@ -132,6 +136,7 @@ if (overlapLines / requestedLines >= OVERLAP_SUPPRESS_RATIO) // 0.8
 触发条件：**等长替换**（`foo`→`bar`，size 不变）**且** 写入发生在与旧 mtime 同一 ms。
 
 后果链：
+
 1. `current.size === read.size && current.modifiedMs === read.modifiedMs` → 判定同版本。
 2. `findReadStub` → `same_range` 命中 → stub。
 3. stub 文案（`read.ts:363-366`）断言 "Lines X-Y are the latest version and already in context; do NOT re-read"。
@@ -146,6 +151,7 @@ if (overlapLines / requestedLines >= OVERLAP_SUPPRESS_RATIO) // 0.8
 #### A5. stub 文案基于弱键"硬断言最新版" — 真实缺陷（严重度：高）
 
 两类 stub 文案语气不同，需区分：
+
 - `read.ts:363-366`（`stub_same_range_visible` / `stub_covered_range_visible`，合计占 stub ~99%）：明确写 "are the latest version and already in context; **do NOT re-read**"。语气最硬，用绝对禁止。
 - `read.ts:761-767`（`stub_high_overlap_visible`，占 <1%）：用 "avoid re-reading this range unnecessarily"，语气较温和。
 
@@ -162,12 +168,14 @@ if (overlapLines / requestedLines >= OVERLAP_SUPPRESS_RATIO) // 0.8
 两库合计 **83 次**（Windows 57 / 本地 26）：模型读完某区间被 stub 后，**在后续 10 个工具调用内重读完全相同的 offset**，再次被 stub。
 
 实证案例（本地库 `ses_1b9622abbffeHqLjV2UkiRi0G2`，`session-pending.ts`）：
+
 ```
 1779302952018 | READ off=1 lim=80 session-pending.ts [STUB:stub_same_range_visible]
 1779302964308 | reasoning: "Exploring helper creation"
 1779302966691 | GREP
 1779302966697 | READ off=1 lim=80 session-pending.ts [STUB:stub_same_range_visible]  ← 重读同一区间，再次 stub
 ```
+
 模型读 `off=1 lim=80` → stub（被告知"已在上下文，勿重读"）→ 思考 → grep → **再次读完全相同的 off=1 lim=80** → 再 stub。这正是 `read.ts:344` 注释提到的"连续 13 次 stub 死循环"。
 
 **根因**：stub 断言"已在上下文"，但模型在上下文里找不到（已滚动很远 / 注意力窗口外 / compaction 边缘）。stub 的 `offset=81` 引导出口（`read.ts:346-356`）被模型忽略。
@@ -179,6 +187,7 @@ if (overlapLines / requestedLines >= OVERLAP_SUPPRESS_RATIO) // 0.8
 #### B2. reread_same_file 高占比但多为引导跟随 — 非缺陷
 
 后续 10 调用内重读同文件：Windows 302 (37%) / 本地 237 (43%)。但细分为：
+
 - `guided_forward_read`（读 stub 末行之后的引导区间）：Windows 79 / 本地 53 — **预期行为**，stub 引导生效。
 - `read_no_offset`（同文件从头读，无 offset）：Windows 20 / 本地 85 — 部分是困惑（想刷新全文），部分是合理探索。
 - `retry_same_range`：见 B1。
@@ -191,6 +200,7 @@ if (overlapLines / requestedLines >= OVERLAP_SUPPRESS_RATIO) // 0.8
 #### B3. stub_high_overlap 引导出口小样本有效 — 非缺陷
 
 `stub_high_overlap_visible` 仅 9 例（4W+5H）。抽取样本：
+
 - 请求 `80-179`，coveredBy `80-178`（99/100=0.99）→ suppress → 引导"New unread lines: 179. Read offset=179 limit=1"。
 - 请求 `275-304`，coveredBy `280-304`（25/30=0.83）→ suppress → 引导"New unread lines: 275-279"。
 
@@ -203,6 +213,7 @@ if (overlapLines / requestedLines >= OVERLAP_SUPPRESS_RATIO) // 0.8
 #### C1. read 200 行默认 limit + 16KB 字节上限把模型推向 sed — 工具设计问题（严重度：中）
 
 实证（本地库 `ses_1c9612892…`，`app.tsx` 1388 行）：
+
 ```
 READ off=1 lim=60 ret=60            ← 小区间正常
 READ off=230 lim=35 ret=35          ← 小区间正常
@@ -210,31 +221,38 @@ SED  sed -n '518,877p' app.tsx | grep -E "DialogTool|reconnect"   ← 360 行大
 SED  sed -n '877,1153p' app.tsx     ← 276 行
 SED  sed -n '845,1119p' app.tsx > /tmp/...   ← 274 行重定向到文件
 ```
+
 字节截断实证：`off=1 lim=220 ret=172`（请求 220 行只返回 172）。模型要 518–877 共 360 行，read 至少 2 次调用且仍可能被字节截断；`sed -n '518,877p'` 一次拿到。**这是 read 工具自身限制逼出来的，不是 stub 逼出来的。**
 
 ---
 
 #### C2. 区间 + grep 组合 read 无法做到 — 工具能力缺口（严重度：低）
+
 ```
 sed -n '518,877p' app.tsx | grep -E "DialogTool|reconnect"
 ```
+
 模型想"在某行区间内 grep"，read 不支持区间内过滤，sed+grep 一条 bash 搞定。
 
 ---
 
 #### C3. 读取 git 修订版 read 做不到 — 完全合理（非缺陷）
+
 ```
 git show 7508670af:.../session/index.tsx | sed -n '60,12p'
 ```
+
 read 无法读取 git 对象，sed 是正当手段。
 
 ---
 
 #### C4. 小区间也用 sed — 习惯 / 规避 read XML 冗余 / 不信任（严重度：低）
+
 ```
 sed -n '485p' app.tsx          ← 单行
 sed -n '1202,1210p' session/index.tsx   ← 9 行
 ```
+
 这些小区间 `read offset=X limit=N` 完全能胜任且不会被 stub。模型仍用 sed，因 read 输出带 XML 包裹 + outline + metadata 冗长；部分是对"read 可能被 stub"的不信任。
 
 ---
@@ -242,6 +260,7 @@ sed -n '1202,1210p' session/index.tsx   ← 9 行
 #### C5. shell 旁路读取对 visibleReads 完全不可见 — 设计缺陷（严重度：中）
 
 `collectVisibleReads`（`read.ts:204`）只扫描 `tool==="read"` 的 part。模型通过 sed/Get-Content 读过的区间**不进入 visibleReads**，导致：
+
 - 后续 read 工具读同区间不会被 stub（重复返回已在上下文的内容，浪费 token）；
 - `computeUnreadRanges` 不知道这些区间已读，可能错误地"引导"模型去读其实已通过 sed 看过的行。
 
@@ -249,11 +268,11 @@ sed -n '1202,1210p' session/index.tsx   ← 9 行
 
 实证相关度：本地库 **212 个 stub 后续 10 调用内出现 `sed -n` 读同文件**（精确匹配，38%）。但逐一比对 stub 区间 vs sed 区间：
 
-| stub 区间（被隐去） | 紧随 sed 区间 | 关系 |
-|---|---|---|
+| stub 区间（被隐去）      | 紧随 sed 区间       | 关系           |
+| ------------------------ | ------------------- | -------------- |
 | 1-120（coveredBy 1-200） | `sed -n '430,470p'` | 新区间，不重叠 |
-| 1-50（coveredBy 1-85） | `sed -n '130,215p'` | 新区间，不重叠 |
-| 1-50（coveredBy 1-85） | `sed -n '475,565p'` | 新区间，不重叠 |
+| 1-50（coveredBy 1-85）   | `sed -n '130,215p'` | 新区间，不重叠 |
+| 1-50（coveredBy 1-85）   | `sed -n '475,565p'` | 新区间，不重叠 |
 
 **所有案例 sed 读取的都是 stub 区间之外的新内容**，而非捞被 stub 隐去的旧内容。即 stub 正确阻止了重读已在上下文的内容；模型接受 stub，转而用 sed 探索文件其他部分。**sed 不是用来突破 stub 封锁，而是读 read 服务不了的大区间。** 但 C5 的追踪盲区副作用仍成立。
 
@@ -272,6 +291,7 @@ Windows 库 sed=0（PowerShell 环境），模型改用 `Select-String`（109 �
 `estimateTokensForContent > MAX_CONTENT_TOKENS(16000)` 触发整次 read 失败（`read.ts:797-806`），错误信息建议 `limit=N`。
 
 实证：Windows 64 次 / 本地 9 次。失败后模型动作：
+
 - Windows：read 重试 39、grep 12、edit 7、apply_patch 3、glob 2、bash 1。
 - 本地：read 重试 8、grep 1。
 
@@ -282,6 +302,7 @@ Windows 库 sed=0（PowerShell 环境），模型改用 `Select-String`（109 �
 #### D2. read 错误（非 token）— 部分缓解（严重度：低）
 
 read `status=error`：Windows 369 / 本地 108。失败后：
+
 - Windows：read 重试 209、glob 62、grep 46、bash 38、sed -n 1。
 - 本地：read 重试 58、glob 16、bash 16、grep 15。
 
@@ -361,18 +382,18 @@ suppress 判定用单条最优（保守，宁不误杀），未读引导用并�
 
 ## 4. 根因综合：是工具设计问题还是模型问题？
 
-| 问题项 | 根因归属 |
-|---|---|
-| A1（实际范围记录） | 非缺陷，设计正确 |
-| A3（整文件粒度） | **工具设计**：无行级追踪 |
-| A4/A5（弱版本键 + 硬断言） | **工具设计**：版本键脆弱 + 文案过度自信 |
-| B1（retry 死循环） | **混合**：stub 文案断言"在上下文"但模型找不到（工具断言与模型可达性脱节） |
-| C1（200行+16KB→sed） | **工具设计**：read 能力上限把模型推向 shell |
-| C2（区间内 grep） | **工具设计**：read 不支持区间过滤 |
-| C3（git 修订版） | 非缺陷，read 本就不应读 git 对象 |
-| C4（小区间用 sed） | **模型习惯** + read XML 冗余 |
-| C5（shell 旁路不可见） | **工具设计**：追踪系统 read-tool-only |
-| D1/D2/D3（错误处理） | 基本可控，模型多按提示重试 |
+| 问题项                     | 根因归属                                                                  |
+| -------------------------- | ------------------------------------------------------------------------- |
+| A1（实际范围记录）         | 非缺陷，设计正确                                                          |
+| A3（整文件粒度）           | **工具设计**：无行级追踪                                                  |
+| A4/A5（弱版本键 + 硬断言） | **工具设计**：版本键脆弱 + 文案过度自信                                   |
+| B1（retry 死循环）         | **混合**：stub 文案断言"在上下文"但模型找不到（工具断言与模型可达性脱节） |
+| C1（200行+16KB→sed）       | **工具设计**：read 能力上限把模型推向 shell                               |
+| C2（区间内 grep）          | **工具设计**：read 不支持区间过滤                                         |
+| C3（git 修订版）           | 非缺陷，read 本就不应读 git 对象                                          |
+| C4（小区间用 sed）         | **模型习惯** + read XML 冗余                                              |
+| C5（shell 旁路不可见）     | **工具设计**：追踪系统 read-tool-only                                     |
+| D1/D2/D3（错误处理）       | 基本可控，模型多按提示重试                                                |
 
 **结论**：核心可修复问题集中在**工具设计层**——版本键粒度（A3/A4）、stub 文案断言（A5/B1）、read 能力上限（C1）、追踪盲区（C5）。模型行为（B1 重试、C4 习惯）是这些设计缺陷的下游表现，而非独立 bug。
 
@@ -403,6 +424,7 @@ if (stub) {
   }
 }
 ```
+
 `countConsecutiveSameRangeStub` 从消息末尾向前扫描，遇到同区间 `stub_same_range_visible` 计数+1，遇到任何其他 tool part 即停止。这样只对"连续紧邻的重试"降级，不影响模型合理回读。
 
 **风险**：轻微增加 token（重发内容），但打破死循环收益更大。连续定义确保不误伤合理回读。
@@ -435,6 +457,7 @@ const sameVersion = visibleReads.filter(r => r.size === current.size && r.modifi
 **问题**：文案 "are the latest version and already in context; do NOT re-read" 在模型找不到内容时有害。
 
 **方案**：`renderReadStub`（`read.ts:332-376`）文案改为提供**可定位锚点**而非绝对禁止：
+
 - 指明"最近一次读取在消息 #N"（需把 message 序号或时间戳纳入 metadata）。
 - 语气从 "do NOT re-read" 改为 "已在上下文（消息 #N），如需查看可向上回溯；若未找到可重读 offset=M"。
 - 保留 `offset` 出口（已有，`read.ts:346-356`），但不再用绝对禁止语气。
@@ -460,12 +483,19 @@ const message =
 **方案**：当模型**显式传 `limit`**（非默认）且请求区间合理时，将 `MAX_BYTES` 上限按 `limit` 比例放宽，上限封顶（如 64KB）。默认 limit 仍维持 16KB 以保护无意的大请求。
 
 落点：`read.ts:691` `lines()` 调用，传入动态字节上限：
+
 ```ts
-const dynamicMaxBytes = params.limit && params.limit > DEFAULT_READ_LIMIT
-  ? Math.min(MAX_BYTES * (params.limit / DEFAULT_READ_LIMIT), 64 * 1024)
-  : MAX_BYTES
-const file = yield* Effect.promise(() => lines(filepath, { limit: params.limit ?? DEFAULT_READ_LIMIT, offset: params.offset || 1 }, dynamicMaxBytes))
+const dynamicMaxBytes =
+  params.limit && params.limit > DEFAULT_READ_LIMIT
+    ? Math.min(MAX_BYTES * (params.limit / DEFAULT_READ_LIMIT), 64 * 1024)
+    : MAX_BYTES
+const file =
+  yield *
+  Effect.promise(() =>
+    lines(filepath, { limit: params.limit ?? DEFAULT_READ_LIMIT, offset: params.offset || 1 }, dynamicMaxBytes),
+  )
 ```
+
 `lines()` 签名增加 `maxBytes` 参数（`read.ts:860`），内部 `MAX_BYTES` 改用传入值。
 
 **权衡**：单次返回更多内容，减少 sed 逃离动机；但增加单次 token。需配合 token 预算检查（已有 `read.ts:793-806`）。
@@ -489,7 +519,8 @@ const file = yield* Effect.promise(() => lines(filepath, { limit: params.limit ?
 **问题**：shell 旁路读取完全绕过 visibleReads 追踪。
 
 **方案**：在 bash 工具（`shell.ts`）的输出后处理中，识别命令模式：
-- `sed -n 'X,Yp' <file>` / `sed -n 'X,Yp' <file> | grep` 
+
+- `sed -n 'X,Yp' <file>` / `sed -n 'X,Yp' <file> | grep`
 - `Get-Content <file> | Select-Object -Skip X -First Y`
 
 命中时，向当前 part 的 metadata 写入一条 `read` 等价记录（canonicalPath、start=X、end=Y、stub:false、returned=匹配行数、size+modifiedMs 从 stat 取）。这样 `collectVisibleReads` 会把它纳入追踪。
@@ -520,25 +551,25 @@ const file = yield* Effect.promise(() => lines(filepath, { limit: params.limit ?
 
 ### 7.1 stub 后续 10 调用行为
 
-| 指标 | Windows | 本地 |
-|---|---|---|
-| retry_same_range（重读被 stub 同区间） | 57 (7.0%) | 26 (4.7%) |
-| reread_same_file（含引导跟随） | 302 (37%) | 237 (43%) |
-| sed/Get-Content 出现 | 83 | 138 |
-| grep 出现 | 472 (58%) | — |
-| sed -n 读同文件（精确） | 0（PowerShell） | 212 (38%) |
+| 指标                                   | Windows         | 本地      |
+| -------------------------------------- | --------------- | --------- |
+| retry_same_range（重读被 stub 同区间） | 57 (7.0%)       | 26 (4.7%) |
+| reread_same_file（含引导跟随）         | 302 (37%)       | 237 (43%) |
+| sed/Get-Content 出现                   | 83              | 138       |
+| grep 出现                              | 472 (58%)       | —         |
+| sed -n 读同文件（精确）                | 0（PowerShell） | 212 (38%) |
 
 ### 7.2 紧接 stub 的下一个动作（Windows 824 stub）
 
-| 动作 | 次数 | 占比 |
-|---|---|---|
-| read 其他文件 | 375 | 45.5% |
-| read 同文件 | 128 | 15.5% |
-| other | 104 | 12.6% |
-| grep | 96 | 11.7% |
-| bash(非sed) | 66 | 8.0% |
-| edit | 43 | 5.2% |
-| bash+sed | 5 | 0.6% |
+| 动作          | 次数 | 占比  |
+| ------------- | ---- | ----- |
+| read 其他文件 | 375  | 45.5% |
+| read 同文件   | 128  | 15.5% |
+| other         | 104  | 12.6% |
+| grep          | 96   | 11.7% |
+| bash(非sed)   | 66   | 8.0%  |
+| edit          | 43   | 5.2%  |
+| bash+sed      | 5    | 0.6%  |
 
 ### 7.3 stub → sed 同文件：stub 区间 vs sed 区间（本地库样本）
 
@@ -546,12 +577,12 @@ const file = yield* Effect.promise(() => lines(filepath, { limit: params.limit ?
 
 ### 7.4 read 错误路径
 
-| 错误类型 | Windows | 本地 | 失败后主要动作 |
-|---|---|---|---|
-| token 预算超限 | 64 | 9 | read 重试（按建议 limit） |
-| read status=error | 369 | 108 | read 重试 / glob / grep |
-| offset 越界 | 92 | 22 | 改 offset 重试 |
+| 错误类型          | Windows | 本地 | 失败后主要动作            |
+| ----------------- | ------- | ---- | ------------------------- |
+| token 预算超限    | 64      | 9    | read 重试（按建议 limit） |
+| read status=error | 369     | 108  | read 重试 / glob / grep   |
+| offset 越界       | 92      | 22   | 改 offset 重试            |
 
 ---
 
-*报告结束。本文档为唯一写入产物，未改动任何源码。*
+_报告结束。本文档为唯一写入产物，未改动任何源码。_

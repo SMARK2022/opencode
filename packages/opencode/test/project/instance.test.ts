@@ -147,7 +147,10 @@ describe("InstanceStore", () => {
       // #523：若不取消 producer，disposeAll 会挂在 Deferred.await(entry.deferred) 上直到 release。
       const disposal = yield* store.disposeAll().pipe(Effect.forkScoped)
       const finished = yield* Fiber.join(disposal).pipe(
-        Effect.timeoutOrElse({ duration: Duration.millis(500), orElse: () => Effect.fail(new Error("dispose timeout")) }),
+        Effect.timeoutOrElse({
+          duration: Duration.millis(500),
+          orElse: () => Effect.fail(new Error("dispose timeout")),
+        }),
         Effect.exit,
       )
 
@@ -293,21 +296,39 @@ testEffect(Layer.empty).live("cancels and re-arms pending bootstrap with isolate
     let boots = 0
     let stopped = false
     const layer = LayerNode.compile(InstanceStore.node, [
-      [Project.node, Layer.mock(Project.Service, {
-        fromDirectory: directory => Effect.succeed({
-          sandbox: directory,
-          project: { id: ProjectV2.ID.make("global"), worktree: directory, sandboxes: [], time: { created: 0, updated: 0 } },
+      [
+        Project.node,
+        Layer.mock(Project.Service, {
+          fromDirectory: (directory) =>
+            Effect.succeed({
+              sandbox: directory,
+              project: {
+                id: ProjectV2.ID.make("global"),
+                worktree: directory,
+                sandboxes: [],
+                time: { created: 0, updated: 0 },
+              },
+            }),
         }),
-      })],
-      [InstanceStore.bootstrapNode, Layer.succeed(InstanceBootstrap.Service, {
-        // 只有首个producer被Deferred挂住；本测试不装配默认Project/DB/Git或应用启动图。
-        run: Effect.gen(function* () {
-          boots++
-          if (boots !== 1) return
-          yield* Deferred.succeed(started, undefined)
-          yield* Deferred.await(release)
-        }).pipe(Effect.ensuring(Effect.sync(() => { stopped = true }))),
-      })],
+      ],
+      [
+        InstanceStore.bootstrapNode,
+        Layer.succeed(InstanceBootstrap.Service, {
+          // 只有首个producer被Deferred挂住；本测试不装配默认Project/DB/Git或应用启动图。
+          run: Effect.gen(function* () {
+            boots++
+            if (boots !== 1) return
+            yield* Deferred.succeed(started, undefined)
+            yield* Deferred.await(release)
+          }).pipe(
+            Effect.ensuring(
+              Effect.sync(() => {
+                stopped = true
+              }),
+            ),
+          ),
+        }),
+      ],
     ])
     yield* Effect.gen(function* () {
       const store = yield* InstanceStore.Service
@@ -315,7 +336,13 @@ testEffect(Layer.empty).live("cancels and re-arms pending bootstrap with isolate
       const loading = yield* store.load(input).pipe(Effect.forkScoped)
       yield* Deferred.await(started)
       // release前的500ms合同与source相同，失败也先释放fixture再断言，避免测试自身挂起。
-      const finished = yield* store.disposeAll().pipe(Effect.timeoutOrElse({ duration: Duration.millis(500), orElse: () => Effect.fail(new Error("dispose timeout")) }), Effect.exit)
+      const finished = yield* store.disposeAll().pipe(
+        Effect.timeoutOrElse({
+          duration: Duration.millis(500),
+          orElse: () => Effect.fail(new Error("dispose timeout")),
+        }),
+        Effect.exit,
+      )
       const stoppedBeforeRelease = stopped
       yield* Deferred.succeed(release, undefined)
       const loadingExit = yield* Fiber.join(loading).pipe(Effect.exit)

@@ -98,7 +98,10 @@ type Dependencies = {
   readonly db: Database.Interface["db"]
   readonly events: EventV2.Interface
   readonly llm: {
-    readonly stream: (request: LLMRequest, onPrepared?: (body: unknown) => Effect.Effect<void>) => Stream.Stream<LLMEvent, LLMError>
+    readonly stream: (
+      request: LLMRequest,
+      onPrepared?: (body: unknown) => Effect.Effect<void>,
+    ) => Stream.Stream<LLMEvent, LLMError>
   }
   readonly config: readonly Config.Entry[]
   readonly fs: FSUtil.Interface
@@ -226,70 +229,113 @@ export const make = (dependencies: Dependencies) => {
     const usable = context - Math.max(output, config.buffer ?? DEFAULT_BUFFER)
     const inputLimit = input.model.route.defaults.limits?.input
     const inputUsable = inputLimit
-      ? Math.max(0, inputLimit - (config.buffer ?? Math.max(DEFAULT_BUFFER_MIN, DEFAULT_BUFFER - Math.max(0, context - inputLimit))))
+      ? Math.max(
+          0,
+          inputLimit -
+            (config.buffer ?? Math.max(DEFAULT_BUFFER_MIN, DEFAULT_BUFFER - Math.max(0, context - inputLimit))),
+        )
       : usable
     return Math.min(usable, inputUsable)
   }
-  const compactAfterOverflow = Effect.fn("SessionCompaction.compactAfterOverflow")(function* (input: Input, reason: "auto" | "manual" = "auto") {
+  const compactAfterOverflow = Effect.fn("SessionCompaction.compactAfterOverflow")(function* (
+    input: Input,
+    reason: "auto" | "manual" = "auto",
+  ) {
     const context = input.model.route.defaults.limits?.context
     if (reason === "auto" && (context === undefined || context <= 0)) return false
     const output = input.request.generation?.maxTokens ?? input.model.route.defaults.limits?.output ?? 0
     // 保留Native既有8K基线并承接source的16K长窗口收益；显式零仍关闭tail保留。
-    const keep = config.tokens ?? Math.max(DEFAULT_KEEP_TOKENS, Math.min(16_000, Math.floor(Math.max(0, inputBudget(input)) / 4)))
+    const keep =
+      config.tokens ?? Math.max(DEFAULT_KEEP_TOKENS, Math.min(16_000, Math.floor(Math.max(0, inputBudget(input)) / 4)))
     const selected = select(input.entries, keep, reason === "manual")
     const previousSummary = input.entries.find((entry) => entry.message.type === "compaction")?.message
     if (!selected || (selected.head.length === 0 && previousSummary?.type !== "compaction")) return false
     // 原话是额外交接通道：无input限制时按context-output，不能误扣自动压缩缓冲。
     const inputLimit = input.model.route.defaults.limits?.input
     const usable = inputLimit
-      ? inputLimit - (config.buffer ?? Math.max(DEFAULT_BUFFER_MIN, DEFAULT_BUFFER - Math.max(0, (context ?? 0) - inputLimit)))
+      ? inputLimit -
+        (config.buffer ?? Math.max(DEFAULT_BUFFER_MIN, DEFAULT_BUFFER - Math.max(0, (context ?? 0) - inputLimit)))
       : (context ?? 0) - output
     // 普通模型仍只读活动窗；原话单独读取真实历史，截止本次快照以免吞入并发新输入。
     const throughSeq = input.entries.reduce((seq, entry) => Math.max(seq, entry.seq), 0)
     const rawUsers = yield* SessionHistory.rawUserMessages(dependencies.db, input.sessionID, throughSeq)
     const evidence = yield* SessionHistory.evidence(dependencies.db, input.sessionID, throughSeq)
-    const recentUserMessages = SessionMemento.collect(
-      rawUsers, Math.min(20_000, Math.max(0, Math.floor(usable * 0.2))))
+    const recentUserMessages = SessionMemento.collect(rawUsers, Math.min(20_000, Math.max(0, Math.floor(usable * 0.2))))
     const summaryPrompt = buildPrompt({
       previousSummary: previousSummary?.type === "compaction" ? previousSummary.summary : undefined,
       context: [previousSummary?.type === "compaction" ? previousSummary.recent : "", selected.head].filter(Boolean),
     })
     const summaryOutput = Math.min(output || SUMMARY_OUTPUT_TOKENS, SUMMARY_OUTPUT_TOKENS)
-    const samples = Token.inputHistory(input.entries.map((entry) => entry.message), input.model)
+    const samples = Token.inputHistory(
+      input.entries.map((entry) => entry.message),
+      input.model,
+    )
     // 摘要上传也用同模型确认密度；tail选择仍保留原来的粗略大小启发式。
-    if (context !== undefined && context > 0 && Token.estimateRequest({ messages: [Message.user(summaryPrompt)] }, samples).input >
-      Math.min(input.model.route.defaults.limits?.input || context, context - summaryOutput)) return false
+    if (
+      context !== undefined &&
+      context > 0 &&
+      Token.estimateRequest({ messages: [Message.user(summaryPrompt)] }, samples).input >
+        Math.min(input.model.route.defaults.limits?.input || context, context - summaryOutput)
+    )
+      return false
     const messageID = SessionMessage.ID.create()
     const startedEventID = EventV2.ID.create()
     const terminalEventID = EventV2.ID.create()
     // 一个现有压缩 stream 只有一个 provider turn，结算快照不另外驱动模型。
     let usage = { tokens: tokens(undefined), cost: 0, stepCount: 0 }
     const fail = Effect.fnUntraced(function* (aborted: boolean, message: string, finalizer = false) {
-      yield* dependencies.events.publish(SessionEvent.Compaction.Failed, {
-        sessionID: input.sessionID, messageID, timestamp: yield* DateTime.now,
-        error: { type: "unknown", message }, aborted, usage,
-      }, { id: terminalEventID, finalizer })
+      yield* dependencies.events.publish(
+        SessionEvent.Compaction.Failed,
+        {
+          sessionID: input.sessionID,
+          messageID,
+          timestamp: yield* DateTime.now,
+          error: { type: "unknown", message },
+          aborted,
+          usage,
+        },
+        { id: terminalEventID, finalizer },
+      )
     })
     // 在 Started 之前注册，publish 的 commit 后 listener 与 terminal notify 都属于同一 scope。
-    yield* Effect.addFinalizer((exit) => Effect.gen(function* () {
-      if (Exit.isSuccess(exit)) return
-      const committed = yield* dependencies.db.select({ id: EventTable.id }).from(EventTable)
-        .where(and(eq(EventTable.aggregate_id, input.sessionID), inArray(EventTable.id, [startedEventID, terminalEventID]))).all().pipe(Effect.orDie)
-      // commit hook 和返回前标志不能证明 SQL commit；已有 terminal 时不能重复 Ended/Failed。
-      if (!committed.some(row => row.id === startedEventID) || committed.some(row => row.id === terminalEventID)) return
-      // 只在真实 scope 退出启用短通知；运行时无摘要失败继续通知全部原 observer。
-      yield* fail(Cause.hasInterrupts(exit.cause), String(Cause.squash(exit.cause)), true)
-    }))
-    const modelRef = { id: ModelV2.ID.make(input.model.id), providerID: ProviderV2.ID.make(input.model.provider),
-      ...(input.variant === undefined ? {} : { variant: input.variant }) }
-    yield* dependencies.events.publish(SessionEvent.Compaction.Started, {
-      sessionID: input.sessionID,
-      messageID,
-      timestamp: yield* DateTime.now,
-      reason,
-      // Started 冻结真实调用的 variant；未选择时仍省略，不在 finish 时查询会话或猜默认值。
-      model: modelRef,
-    }, { id: startedEventID })
+    yield* Effect.addFinalizer((exit) =>
+      Effect.gen(function* () {
+        if (Exit.isSuccess(exit)) return
+        const committed = yield* dependencies.db
+          .select({ id: EventTable.id })
+          .from(EventTable)
+          .where(
+            and(
+              eq(EventTable.aggregate_id, input.sessionID),
+              inArray(EventTable.id, [startedEventID, terminalEventID]),
+            ),
+          )
+          .all()
+          .pipe(Effect.orDie)
+        // commit hook 和返回前标志不能证明 SQL commit；已有 terminal 时不能重复 Ended/Failed。
+        if (!committed.some((row) => row.id === startedEventID) || committed.some((row) => row.id === terminalEventID))
+          return
+        // 只在真实 scope 退出启用短通知；运行时无摘要失败继续通知全部原 observer。
+        yield* fail(Cause.hasInterrupts(exit.cause), String(Cause.squash(exit.cause)), true)
+      }),
+    )
+    const modelRef = {
+      id: ModelV2.ID.make(input.model.id),
+      providerID: ProviderV2.ID.make(input.model.provider),
+      ...(input.variant === undefined ? {} : { variant: input.variant }),
+    }
+    yield* dependencies.events.publish(
+      SessionEvent.Compaction.Started,
+      {
+        sessionID: input.sessionID,
+        messageID,
+        timestamp: yield* DateTime.now,
+        reason,
+        // Started 冻结真实调用的 variant；未选择时仍省略，不在 finish 时查询会话或猜默认值。
+        model: modelRef,
+      },
+      { id: startedEventID },
+    )
 
     const chunks: string[] = []
     let failed = false
@@ -305,13 +351,19 @@ export const make = (dependencies: Dependencies) => {
           generation: { maxTokens: summaryOutput },
         }),
         // 与普通上传复用真实compile回调，估算归压缩独立身份而不是当前用户输入。
-        (body) => Effect.gen(function* () {
-          yield* dependencies.events.publish(SessionEvent.RequestEstimated, {
-            sessionID: input.sessionID, messageID, timestamp: yield* DateTime.now, model: modelRef,
-            inputEstimate: { ...Token.estimateRequest(body, samples, []),
-              contextLimit: input.model.defaults?.limits?.context ?? input.model.route.defaults.limits?.context ?? 0 },
-          })
-        }),
+        (body) =>
+          Effect.gen(function* () {
+            yield* dependencies.events.publish(SessionEvent.RequestEstimated, {
+              sessionID: input.sessionID,
+              messageID,
+              timestamp: yield* DateTime.now,
+              model: modelRef,
+              inputEstimate: {
+                ...Token.estimateRequest(body, samples, []),
+                contextLimit: input.model.defaults?.limits?.context ?? input.model.route.defaults.limits?.context ?? 0,
+              },
+            })
+          }),
       )
       .pipe(
         Stream.runForEach((event) => {
@@ -325,7 +377,7 @@ export const make = (dependencies: Dependencies) => {
         }),
         Effect.as(true),
         // 显式维护必须向调用者保留提供者失败，不能用 false 伪装成功。
-        Effect.catchTag("LLM.Error", (error) => reason === "manual" ? Effect.fail(error) : Effect.succeed(false)),
+        Effect.catchTag("LLM.Error", (error) => (reason === "manual" ? Effect.fail(error) : Effect.succeed(false))),
       )
     const summary = chunks.join("")
     if (!summarized || failed || !summary.trim()) {
@@ -335,19 +387,27 @@ export const make = (dependencies: Dependencies) => {
     // 只有可用摘要才stat当前磁盘；失败和取消不生成或替换旧交接快照。
     // 成功摘要才读取当前任务；失败和取消仍保留原交接快照。
     const todos = yield* dependencies.todos(input.sessionID)
-    const fileEvidence = yield* FileEvidence.render(evidence.receipts, dependencies.fs, dependencies.worktree, { ...evidence, todos, directory: dependencies.directory })
-    yield* dependencies.events.publish(SessionEvent.Compaction.Ended, {
-      sessionID: input.sessionID,
-      messageID,
-      timestamp: yield* DateTime.now,
-      reason,
-      text: summary,
-      recent: selected.recent,
-      // 只有成功Ended携带本次快照，失败与取消继续保留旧压缩边界。
-      recent_user_messages: recentUserMessages.length ? recentUserMessages : undefined,
-      file_evidence: fileEvidence,
-      usage,
-    }, { id: terminalEventID })
+    const fileEvidence = yield* FileEvidence.render(evidence.receipts, dependencies.fs, dependencies.worktree, {
+      ...evidence,
+      todos,
+      directory: dependencies.directory,
+    })
+    yield* dependencies.events.publish(
+      SessionEvent.Compaction.Ended,
+      {
+        sessionID: input.sessionID,
+        messageID,
+        timestamp: yield* DateTime.now,
+        reason,
+        text: summary,
+        recent: selected.recent,
+        // 只有成功Ended携带本次快照，失败与取消继续保留旧压缩边界。
+        recent_user_messages: recentUserMessages.length ? recentUserMessages : undefined,
+        file_evidence: fileEvidence,
+        usage,
+      },
+      { id: terminalEventID },
+    )
     return true
     // 压缩返回前关闭自己的生命周期，不借用外层 prompt 的终态保护。
   }, Effect.scoped)
@@ -357,9 +417,13 @@ export const make = (dependencies: Dependencies) => {
     if (context === undefined || context <= 0) return false
     if (
       // 媒体预算必须在压缩判定前生效，不能等 provider 准备完成才纠正 base64 的文本估值。
-      Token.estimateRequest({ system: input.request.system, messages: input.request.messages, tools: input.request.tools },
-        Token.inputHistory(input.entries.map((entry) => entry.message), input.model)).input <=
-      inputBudget(input)
+      Token.estimateRequest(
+        { system: input.request.system, messages: input.request.messages, tools: input.request.tools },
+        Token.inputHistory(
+          input.entries.map((entry) => entry.message),
+          input.model,
+        ),
+      ).input <= inputBudget(input)
     )
       return false
     return yield* compactAfterOverflow(input)

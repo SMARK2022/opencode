@@ -77,121 +77,113 @@ describe("lsp.spawn", () => {
     { config: { lsp: false } },
   )
 
-  it.instance(
-    "does not spawn builtin LSP for files inside instance when LSP is unset (product disabled)",
-    () =>
-      LSP.Service.use((lsp) =>
-        Effect.gen(function* () {
-          const dir = (yield* TestInstance).directory
-          const spy = spyOn(LSPServer.Typescript, "spawn").mockResolvedValue(undefined)
+  it.instance("does not spawn builtin LSP for files inside instance when LSP is unset (product disabled)", () =>
+    LSP.Service.use((lsp) =>
+      Effect.gen(function* () {
+        const dir = (yield* TestInstance).directory
+        const spy = spyOn(LSPServer.Typescript, "spawn").mockResolvedValue(undefined)
 
-          try {
-            yield* lsp.hover({
-              file: path.join(dir, "src", "inside.ts"),
-              line: 0,
-              character: 0,
-            })
-            // 默认值也不能恢复LSP，与既有true/custom配置防复活测试一致。
-            expect(spy).toHaveBeenCalledTimes(0)
-            expect(yield* lsp.status()).toEqual([])
-          } finally {
-            spy.mockRestore()
-          }
-        }),
-      ),
+        try {
+          yield* lsp.hover({
+            file: path.join(dir, "src", "inside.ts"),
+            line: 0,
+            character: 0,
+          })
+          // 默认值也不能恢复LSP，与既有true/custom配置防复活测试一致。
+          expect(spy).toHaveBeenCalledTimes(0)
+          expect(yield* lsp.status()).toEqual([])
+        } finally {
+          spy.mockRestore()
+        }
+      }),
+    ),
   )
 
-  it.instance(
-    "skips VSCode bridge touch for light warm without diagnostics",
-    () =>
-      LSP.Service.use((lsp) =>
-        Effect.gen(function* () {
-          const file = path.join((yield* TestInstance).directory, "src", "inside.ts")
-          const resolve = spyOn(VscodeBridge, "resolveBridge").mockResolvedValue({
-            id: "bridge",
-            port: 1,
-            token: "token",
-            host: "127.0.0.1",
-            source: "registry",
-            capabilities: { lsp: true },
-          } satisfies VscodeBridge.BridgeRef)
-          const call = spyOn(VscodeBridge, "callBridge").mockResolvedValue({ ok: true })
-          const spawn = spyOn(LSPServer.Typescript, "spawn").mockResolvedValue(undefined)
+  it.instance("skips VSCode bridge touch for light warm without diagnostics", () =>
+    LSP.Service.use((lsp) =>
+      Effect.gen(function* () {
+        const file = path.join((yield* TestInstance).directory, "src", "inside.ts")
+        const resolve = spyOn(VscodeBridge, "resolveBridge").mockResolvedValue({
+          id: "bridge",
+          port: 1,
+          token: "token",
+          host: "127.0.0.1",
+          source: "registry",
+          capabilities: { lsp: true },
+        } satisfies VscodeBridge.BridgeRef)
+        const call = spyOn(VscodeBridge, "callBridge").mockResolvedValue({ ok: true })
+        const spawn = spyOn(LSPServer.Typescript, "spawn").mockResolvedValue(undefined)
 
-          try {
-            yield* lsp.touchFile(file)
-            // read warm 使用无 diagnostics touch：bridge 环境下不能打开 VSCode，也不回退 spawn 内置 LSP
-            expect(call).toHaveBeenCalledTimes(0)
-            expect(spawn).toHaveBeenCalledTimes(0)
-          } finally {
-            resolve.mockRestore()
-            call.mockRestore()
-            spawn.mockRestore()
-          }
-        }),
-      ),
+        try {
+          yield* lsp.touchFile(file)
+          // read warm 使用无 diagnostics touch：bridge 环境下不能打开 VSCode，也不回退 spawn 内置 LSP
+          expect(call).toHaveBeenCalledTimes(0)
+          expect(spawn).toHaveBeenCalledTimes(0)
+        } finally {
+          resolve.mockRestore()
+          call.mockRestore()
+          spawn.mockRestore()
+        }
+      }),
+    ),
   )
-  it.instance(
-    "keeps document diagnostics disabled despite an advertised bridge",
-    () =>
-      LSP.Service.use((lsp) =>
-        Effect.gen(function* () {
-          const file = path.join((yield* TestInstance).directory, "src", "inside.ts")
-          const resolve = spyOn(VscodeBridge, "resolveBridge").mockResolvedValue({
-            id: "bridge",
-            port: 1,
-            token: "token",
-            host: "127.0.0.1",
-            source: "registry",
-            capabilities: { lsp: true },
-          } satisfies VscodeBridge.BridgeRef)
-          const call = spyOn(VscodeBridge, "callBridge").mockResolvedValue({ ok: true, diagnostics: [] })
+  it.instance("keeps document diagnostics disabled despite an advertised bridge", () =>
+    LSP.Service.use((lsp) =>
+      Effect.gen(function* () {
+        const file = path.join((yield* TestInstance).directory, "src", "inside.ts")
+        const resolve = spyOn(VscodeBridge, "resolveBridge").mockResolvedValue({
+          id: "bridge",
+          port: 1,
+          token: "token",
+          host: "127.0.0.1",
+          source: "registry",
+          capabilities: { lsp: true },
+        } satisfies VscodeBridge.BridgeRef)
+        const call = spyOn(VscodeBridge, "callBridge").mockResolvedValue({ ok: true, diagnostics: [] })
 
-          try {
-            yield* lsp.touchFile(file, "document")
-            // 用户已停用整个LSP能力，显式document也不能调用IDE后端。
-            // bridge广告或空快照不能恢复产品能力，更不能把未执行误报成clean。
-            expect(call).toHaveBeenCalledTimes(0)
-            expect(yield* lsp.diagnostics()).toEqual({})
-            expect(yield* lsp.hasClients(FSUtil.normalizePath(file))).toBe(false)
-          } finally {
-            resolve.mockRestore()
-            call.mockRestore()
-          }
-        }),
-      ),
+        try {
+          yield* lsp.touchFile(file, "document")
+          // 用户已停用整个LSP能力，显式document也不能调用IDE后端。
+          // bridge广告或空快照不能恢复产品能力，更不能把未执行误报成clean。
+          expect(call).toHaveBeenCalledTimes(0)
+          expect(yield* lsp.diagnostics()).toEqual({})
+          expect(yield* lsp.hasClients(FSUtil.normalizePath(file))).toBe(false)
+        } finally {
+          resolve.mockRestore()
+          call.mockRestore()
+        }
+      }),
+    ),
   )
 
-  it.instance(
-    "does not report an advertised VSCode bridge as diagnostics-ready while disabled",
-    () =>
-      LSP.Service.use((lsp) =>
-        Effect.gen(function* () {
-          const dir = (yield* TestInstance).directory
-          const file = path.join(dir, "src", "inside.ts")
-          const resolve = spyOn(VscodeBridge, "resolveBridge").mockResolvedValue({
-            id: "bridge",
-            port: 1,
-            token: "token",
-            host: "127.0.0.1",
-            source: "registry",
-            capabilities: { lsp: true },
-          } satisfies VscodeBridge.BridgeRef)
-          const call = spyOn(VscodeBridge, "callBridge").mockResolvedValue(undefined)
+  it.instance("does not report an advertised VSCode bridge as diagnostics-ready while disabled", () =>
+    LSP.Service.use((lsp) =>
+      Effect.gen(function* () {
+        const dir = (yield* TestInstance).directory
+        const file = path.join(dir, "src", "inside.ts")
+        const resolve = spyOn(VscodeBridge, "resolveBridge").mockResolvedValue({
+          id: "bridge",
+          port: 1,
+          token: "token",
+          host: "127.0.0.1",
+          source: "registry",
+          capabilities: { lsp: true },
+        } satisfies VscodeBridge.BridgeRef)
+        const call = spyOn(VscodeBridge, "callBridge").mockResolvedValue(undefined)
 
-          try {
-            yield* lsp.touchFile(file, "document")
-            // 固定停用不消费失败bridge，空诊断和空status不能被解释为已运行成功。
-            // 连续读取仍为不可用，不恢复内置后端或追加第二次请求。
-            expect(yield* lsp.status()).toEqual([])
-            expect(call).toHaveBeenCalledTimes(0)
-            expect(yield* lsp.diagnostics()).toEqual({})
-          } finally {
-            resolve.mockRestore()
-            call.mockRestore()
-          }
-        }),
-      ),
+        try {
+          yield* lsp.touchFile(file, "document")
+          // 固定停用不消费失败bridge，空诊断和空status不能被解释为已运行成功。
+          // 连续读取仍为不可用，不恢复内置后端或追加第二次请求。
+          expect(yield* lsp.status()).toEqual([])
+          expect(call).toHaveBeenCalledTimes(0)
+          expect(yield* lsp.diagnostics()).toEqual({})
+        } finally {
+          resolve.mockRestore()
+          call.mockRestore()
+        }
+      }),
+    ),
   )
 
   it.instance(

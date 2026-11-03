@@ -489,14 +489,14 @@ Provider, request, call, message, Tool, cache, failure, and latency details.
 
 #### Flags
 
-| Flag                                    | Description                                                                 |
-| --------------------------------------- | --------------------------------------------------------------------------- |
-| <nobr><code>{"--days"}</code></nobr>    | Show the last N calendar days (60 by default; 0 means today)                |
-| <nobr><code>{"--all-time"}</code></nobr> | Include all recorded usage instead of the default 60 days                  |
-| <nobr><code>{"--interactive"}</code></nobr> | Browse views and date ranges interactively                                |
-| <nobr><code>{"--tools"}</code></nobr>   | Shortcut to tool breakdown; pass a number for top N                        |
-| <nobr><code>{"--models"}</code></nobr>  | Show model usage breakdown (hidden by default). Pass a number to show top N |
-| <nobr><code>{"--project"}</code></nobr> | Filter by project (all projects, empty string: current project)             |
+| Flag                                        | Description                                                                 |
+| ------------------------------------------- | --------------------------------------------------------------------------- |
+| <nobr><code>{"--days"}</code></nobr>        | Show the last N calendar days (60 by default; 0 means today)                |
+| <nobr><code>{"--all-time"}</code></nobr>    | Include all recorded usage instead of the default 60 days                   |
+| <nobr><code>{"--interactive"}</code></nobr> | Browse views and date ranges interactively                                  |
+| <nobr><code>{"--tools"}</code></nobr>       | Shortcut to tool breakdown; pass a number for top N                         |
+| <nobr><code>{"--models"}</code></nobr>      | Show model usage breakdown (hidden by default). Pass a number to show top N |
+| <nobr><code>{"--project"}</code></nobr>     | Filter by project (all projects, empty string: current project)             |
 
 `--interactive`, `--tools`, and `--models` are root Dashboard shortcuts. Breakdown
 and Sessions expose their own `-n` / `--limit`; other detailed views reject that flag

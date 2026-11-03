@@ -46,33 +46,33 @@ Interpreted without narrowing:
 
 ## 3. Repository Context
 
-| Source | Why it constrains this task |
-| --- | --- |
-| `CONTEXT.md` | Tool returns ExecuteResult with model-facing output; Message/Part persist tool state; vocabulary: Tool, Session, Message |
-| `docs/tool-output-notice-format-design.md` | Contract: `opencode_notice` is model-visible harness; detailed stats stay in metadata; raw output stays plain text |
-| `docs/plans/tui-bash-command-output-spacing.md` | Documents dual read of `metadata.output` (user) vs `props.output` (model / “returned to model”) in TUI Shell |
-| `packages/opencode/AGENTS.md` | Tests/typecheck run from package dirs; module shape; Effect rules |
-| `packages/opencode/test/AGENTS.md` | Effect/live test patterns; public seam assertions |
-| `.opencode/policy/first-principles-engineering.md` | Root-cause repair, one primary path, no fallback cascade, Chinese comment gate |
-| `docs/workflow.md` | GOAL phases: plan → plan audit → TDD implement → implementation audit → commit |
+| Source                                             | Why it constrains this task                                                                                              |
+| -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `CONTEXT.md`                                       | Tool returns ExecuteResult with model-facing output; Message/Part persist tool state; vocabulary: Tool, Session, Message |
+| `docs/tool-output-notice-format-design.md`         | Contract: `opencode_notice` is model-visible harness; detailed stats stay in metadata; raw output stays plain text       |
+| `docs/plans/tui-bash-command-output-spacing.md`    | Documents dual read of `metadata.output` (user) vs `props.output` (model / “returned to model”) in TUI Shell             |
+| `packages/opencode/AGENTS.md`                      | Tests/typecheck run from package dirs; module shape; Effect rules                                                        |
+| `packages/opencode/test/AGENTS.md`                 | Effect/live test patterns; public seam assertions                                                                        |
+| `.opencode/policy/first-principles-engineering.md` | Root-cause repair, one primary path, no fallback cascade, Chinese comment gate                                           |
+| `docs/workflow.md`                                 | GOAL phases: plan → plan audit → TDD implement → implementation audit → commit                                           |
 
 ## 4. Files and Evidence Read
 
-| Evidence | Relevance | Evidence class |
-| --- | --- | --- |
-| `packages/opencode/src/tool/shell.ts` ~1108–1355 | Agent ShellTool dual outputs; first divergence `displayed ? displayOutput : preview(output)` | observed |
-| `packages/opencode/src/session/prompt.ts` ~1666–1736, ~1775–1781 | User-run `prompt.shell` creates same `tool: bash` ToolPart; dual-writes harnessed string to both panels | observed |
-| `packages/opencode/src/util/output-notice.ts` | Formats model harness notices only | observed |
-| `packages/opencode/src/tool/bash-compress.ts` `createTerminalDisplay`, `renderDiagnosticAppendix` | User display stream vs model diagnostic appendix | observed |
-| `packages/opencode/src/cli/cmd/tui/routes/session/index.tsx` Shell + toolprops | Default UI reads `metadata.output`; right-click reads `state.output`; both producers use Shell | observed |
-| `packages/web/src/components/share/part.tsx` `BashTool` | Share UI reads `metadata.output` | observed |
-| `packages/opencode/src/session/message-v2.ts` `toModelMessagesEffect` | Model context uses `part.state.output` for completed tools | observed |
-| `packages/opencode/src/tool/tool.ts` | Outer truncate skipped when shell sets `metadata.truncated` | observed |
-| `packages/opencode/test/tool/shell.test.ts` | Locks model `result.output` notices/`(no output)`; does not lock user-panel isolation | observed |
-| `packages/opencode/test/session/prompt.test.ts` shell suite | Locks stdout/stderr capture and abort notice on `state.output`; asserts metadata contains stdout but not isolation | observed |
-| `docs/tool-output-notice-format-design.md` | Model-visible notice contract | contracted |
-| Live ShellTool repro 2026-07-23 empty success + timeout empty | RED: agent path user panel polluted | observed |
-| Source reconstruction of `prompt.shell` finish dual-write | Same UI contract broken on user-run bash | observed |
+| Evidence                                                                                          | Relevance                                                                                                          | Evidence class |
+| ------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ | -------------- |
+| `packages/opencode/src/tool/shell.ts` ~1108–1355                                                  | Agent ShellTool dual outputs; first divergence `displayed ? displayOutput : preview(output)`                       | observed       |
+| `packages/opencode/src/session/prompt.ts` ~1666–1736, ~1775–1781                                  | User-run `prompt.shell` creates same `tool: bash` ToolPart; dual-writes harnessed string to both panels            | observed       |
+| `packages/opencode/src/util/output-notice.ts`                                                     | Formats model harness notices only                                                                                 | observed       |
+| `packages/opencode/src/tool/bash-compress.ts` `createTerminalDisplay`, `renderDiagnosticAppendix` | User display stream vs model diagnostic appendix                                                                   | observed       |
+| `packages/opencode/src/cli/cmd/tui/routes/session/index.tsx` Shell + toolprops                    | Default UI reads `metadata.output`; right-click reads `state.output`; both producers use Shell                     | observed       |
+| `packages/web/src/components/share/part.tsx` `BashTool`                                           | Share UI reads `metadata.output`                                                                                   | observed       |
+| `packages/opencode/src/session/message-v2.ts` `toModelMessagesEffect`                             | Model context uses `part.state.output` for completed tools                                                         | observed       |
+| `packages/opencode/src/tool/tool.ts`                                                              | Outer truncate skipped when shell sets `metadata.truncated`                                                        | observed       |
+| `packages/opencode/test/tool/shell.test.ts`                                                       | Locks model `result.output` notices/`(no output)`; does not lock user-panel isolation                              | observed       |
+| `packages/opencode/test/session/prompt.test.ts` shell suite                                       | Locks stdout/stderr capture and abort notice on `state.output`; asserts metadata contains stdout but not isolation | observed       |
+| `docs/tool-output-notice-format-design.md`                                                        | Model-visible notice contract                                                                                      | contracted     |
+| Live ShellTool repro 2026-07-23 empty success + timeout empty                                     | RED: agent path user panel polluted                                                                                | observed       |
+| Source reconstruction of `prompt.shell` finish dual-write                                         | Same UI contract broken on user-run bash                                                                           | observed       |
 
 ## 5. Current Behavior
 
@@ -113,35 +113,35 @@ TUI `Shell` (and Web `BashTool` for metadata) read the dual fields the same way 
 
 ## 6. Supported Input Domain and Reachability
 
-| Input or condition | Producer | Upstream guarantees | Reachable path | Owner | Classification |
-| --- | --- | --- | --- | --- | --- |
-| Agent bash with stdout/stderr | ShellTool | chunks | displayed true → clean metadata | shell.ts | observed |
-| Agent bash empty success | ShellTool | no chunks | pollution via `preview(output)` | shell.ts | observed |
-| Agent bash timeout empty | ShellTool | no chunks | pollution + timeout prose | shell.ts | observed |
-| Agent bash non-zero/abort empty | ShellTool | no chunks | pollution + exit/abort notice | shell.ts | observed |
-| User-run shell with stdout/stderr | prompt.shell | chunks | dual-write raw (clean until notices) | prompt.ts | observed |
-| User-run shell empty success | prompt.shell | no chunks | both panels `""` | prompt.ts | observed |
-| User-run shell abort / long run | prompt.shell | optional raw + notice | dual-write includes notice | prompt.ts | observed |
-| Control-only agent stream → empty display | ShellTool | displayed true, empty display | currently `""` | shell.ts | reachable |
+| Input or condition                        | Producer     | Upstream guarantees           | Reachable path                       | Owner     | Classification |
+| ----------------------------------------- | ------------ | ----------------------------- | ------------------------------------ | --------- | -------------- |
+| Agent bash with stdout/stderr             | ShellTool    | chunks                        | displayed true → clean metadata      | shell.ts  | observed       |
+| Agent bash empty success                  | ShellTool    | no chunks                     | pollution via `preview(output)`      | shell.ts  | observed       |
+| Agent bash timeout empty                  | ShellTool    | no chunks                     | pollution + timeout prose            | shell.ts  | observed       |
+| Agent bash non-zero/abort empty           | ShellTool    | no chunks                     | pollution + exit/abort notice        | shell.ts  | observed       |
+| User-run shell with stdout/stderr         | prompt.shell | chunks                        | dual-write raw (clean until notices) | prompt.ts | observed       |
+| User-run shell empty success              | prompt.shell | no chunks                     | both panels `""`                     | prompt.ts | observed       |
+| User-run shell abort / long run           | prompt.shell | optional raw + notice         | dual-write includes notice           | prompt.ts | observed       |
+| Control-only agent stream → empty display | ShellTool    | displayed true, empty display | currently `""`                       | shell.ts  | reachable      |
 
 ## 7. Required Invariants
 
-| ID | Behavioral invariant | Evidence | Existing test |
-| --- | --- | --- | --- |
-| INV-01 | Model body (`state.output` / tool `output`) keeps today’s harness for each producer (ShellTool A–E; prompt.shell raw + abort/long-completed notices) | shell.ts; prompt.ts finish; tests | yes (model side) |
-| INV-02 | User panel (`metadata.output`) never contains `<opencode_notice…>` or model-only diagnostic prose for any bash ToolPart | design doc; shared TUI Shell | no (gap both producers) |
-| INV-03 | Empty effective terminal view shows exactly `(no output)` on the user panel | user requirement; empty agent RED; empty prompt.shell → `""` | no |
-| INV-04 | Non-empty terminal/raw body on user panel without harness suffix | has-output green; prompt.shell stdout tests | partial |
-| INV-05 | Structured metadata fields on ShellTool (`exit`, `truncated`, `outputPath`, …) unchanged | shell return shape | yes |
-| INV-06 | TUI “returned to model” shows full model body when it differs from user body | session/index.tsx | consumer only |
-| INV-07 | Both live producers of `tool: bash` ToolParts implement the same dual-panel contract | tool id + shared Shell UI | incomplete today |
+| ID     | Behavioral invariant                                                                                                                                 | Evidence                                                     | Existing test           |
+| ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------ | ----------------------- |
+| INV-01 | Model body (`state.output` / tool `output`) keeps today’s harness for each producer (ShellTool A–E; prompt.shell raw + abort/long-completed notices) | shell.ts; prompt.ts finish; tests                            | yes (model side)        |
+| INV-02 | User panel (`metadata.output`) never contains `<opencode_notice…>` or model-only diagnostic prose for any bash ToolPart                              | design doc; shared TUI Shell                                 | no (gap both producers) |
+| INV-03 | Empty effective terminal view shows exactly `(no output)` on the user panel                                                                          | user requirement; empty agent RED; empty prompt.shell → `""` | no                      |
+| INV-04 | Non-empty terminal/raw body on user panel without harness suffix                                                                                     | has-output green; prompt.shell stdout tests                  | partial                 |
+| INV-05 | Structured metadata fields on ShellTool (`exit`, `truncated`, `outputPath`, …) unchanged                                                             | shell return shape                                           | yes                     |
+| INV-06 | TUI “returned to model” shows full model body when it differs from user body                                                                         | session/index.tsx                                            | consumer only           |
+| INV-07 | Both live producers of `tool: bash` ToolParts implement the same dual-panel contract                                                                 | tool id + shared Shell UI                                    | incomplete today        |
 
 ## 8. First Divergence and Root Cause
 
-| Invariant | First divergence | Owning module/interface | Proof |
-| --- | --- | --- | --- |
-| INV-02/03/07 agent | `metadata.output = displayed ? displayOutput : preview(output)` copies harness into user panel when empty | ShellTool terminal result (`shell.ts`) | Live RED empty success / timeout empty 2026-07-23 |
-| INV-02/03/07 user-run | finish dual-write `metadata.output = output` after appending notices; empty raw stays `""` | SessionPrompt.shell finish (`prompt.ts`) | Source dual-write; cancel tests only assert model `state.output` notice |
+| Invariant             | First divergence                                                                                          | Owning module/interface                  | Proof                                                                   |
+| --------------------- | --------------------------------------------------------------------------------------------------------- | ---------------------------------------- | ----------------------------------------------------------------------- |
+| INV-02/03/07 agent    | `metadata.output = displayed ? displayOutput : preview(output)` copies harness into user panel when empty | ShellTool terminal result (`shell.ts`)   | Live RED empty success / timeout empty 2026-07-23                       |
+| INV-02/03/07 user-run | finish dual-write `metadata.output = output` after appending notices; empty raw stays `""`                | SessionPrompt.shell finish (`prompt.ts`) | Source dual-write; cancel tests only assert model `state.output` notice |
 
 These are two first divergences of the **same dual-panel responsibility** for the same ToolPart shape and UI. One approved primary **contract**; two owner-local repairs at each producer’s finish (no UI compensation).
 
@@ -153,19 +153,19 @@ Echo hello: user clean → GREEN for non-empty agent path.
 
 ### Red-capable feedback (user-run path — source-proven; lock in TDD)
 
-| Case | Current metadata.output | Required |
-| --- | --- | --- |
-| command produces no bytes, normal exit | `""` | `(no output)` |
-| abort with notice on model body | includes `opencode_notice` | raw or `(no output)` only |
-| long completed with notice | includes `opencode_notice` | raw body only |
+| Case                                   | Current metadata.output    | Required                  |
+| -------------------------------------- | -------------------------- | ------------------------- |
+| command produces no bytes, normal exit | `""`                       | `(no output)`             |
+| abort with notice on model body        | includes `opencode_notice` | raw or `(no output)` only |
+| long completed with notice             | includes `opencode_notice` | raw body only             |
 
 ## 9. Responsibility and Seam
 
-| Concern | Owner | Interface promise | Why it belongs here | Why another module does not own it |
-| --- | --- | --- | --- | --- |
-| Agent dual-panel split | ShellTool execute result | `output` model; `metadata.output` user display | Only owner of display vs harness assembly | TUI must not re-parse |
-| User-run dual-panel split | SessionPrompt.shell finish | same field contract on bash ToolPart | Only owner of stream accumulation + notice append | ShellTool is not on this path |
-| Shared dual views | TUI Shell | default metadata; optional state.output | Consumer | Must not invent isolation |
+| Concern                   | Owner                      | Interface promise                              | Why it belongs here                               | Why another module does not own it |
+| ------------------------- | -------------------------- | ---------------------------------------------- | ------------------------------------------------- | ---------------------------------- |
+| Agent dual-panel split    | ShellTool execute result   | `output` model; `metadata.output` user display | Only owner of display vs harness assembly         | TUI must not re-parse              |
+| User-run dual-panel split | SessionPrompt.shell finish | same field contract on bash ToolPart           | Only owner of stream accumulation + notice append | ShellTool is not on this path      |
+| Shared dual views         | TUI Shell                  | default metadata; optional state.output        | Consumer                                          | Must not invent isolation          |
 
 ## 10. Single Approved Primary-Path Design
 
@@ -221,78 +221,78 @@ Both owners implement the same dual-panel contract at their finish seams. No UI 
 
 ## 11. Secondary and Replacement Path Inventory
 
-| Path | Current or proposed | Classification | Produces success? | Decision-surface share | Disposition |
-| --- | --- | --- | --- | --- | --- |
-| ShellTool model A–E | current | primary-contract branch | yes (model) | high | preserve |
-| ShellTool non-empty display | current | primary-contract branch | yes | high | preserve |
-| ShellTool empty `preview(output)` | current | forbidden user←model coupling | yes wrong panel | low impact high severity | **remove** |
-| ShellTool empty user `(no output)` | proposed | primary-contract branch | yes | low | **add** |
-| prompt.shell dual-write harness | current | forbidden same-string dual panel | yes wrong panel | medium | **remove** |
-| prompt.shell raw user + harness model | proposed | primary-contract branch | yes | medium | **add** |
-| TUI strip notice | not proposed | forbidden workaround | n/a | 0 | reject |
+| Path                                  | Current or proposed | Classification                   | Produces success? | Decision-surface share   | Disposition |
+| ------------------------------------- | ------------------- | -------------------------------- | ----------------- | ------------------------ | ----------- |
+| ShellTool model A–E                   | current             | primary-contract branch          | yes (model)       | high                     | preserve    |
+| ShellTool non-empty display           | current             | primary-contract branch          | yes               | high                     | preserve    |
+| ShellTool empty `preview(output)`     | current             | forbidden user←model coupling    | yes wrong panel   | low impact high severity | **remove**  |
+| ShellTool empty user `(no output)`    | proposed            | primary-contract branch          | yes               | low                      | **add**     |
+| prompt.shell dual-write harness       | current             | forbidden same-string dual panel | yes wrong panel   | medium                   | **remove**  |
+| prompt.shell raw user + harness model | proposed            | primary-contract branch          | yes               | medium                   | **add**     |
+| TUI strip notice                      | not proposed        | forbidden workaround             | n/a               | 0                        | reject      |
 
 ## 12. Workaround Deletion and Replacement
 
-| Existing workaround or duplicate | Why it existed | Why the approved route supersedes it | Delete or collapse location |
-| --- | --- | --- | --- |
-| `metadata.output = preview(output)` when `!displayed` | show something when display empty | fixed placeholder `(no output)` | shell.ts final assignment |
-| `displayed` flag if only for that branch | chunk tracking | non-empty displayText sufficient | shell.ts |
-| prompt.shell dual-write one string | simplicity | violates dual-panel contract | prompt.ts finish |
+| Existing workaround or duplicate                      | Why it existed                    | Why the approved route supersedes it | Delete or collapse location |
+| ----------------------------------------------------- | --------------------------------- | ------------------------------------ | --------------------------- |
+| `metadata.output = preview(output)` when `!displayed` | show something when display empty | fixed placeholder `(no output)`      | shell.ts final assignment   |
+| `displayed` flag if only for that branch              | chunk tracking                    | non-empty displayText sufficient     | shell.ts                    |
+| prompt.shell dual-write one string                    | simplicity                        | violates dual-panel contract         | prompt.ts finish            |
 
 ## 13. Forward Traceability
 
-| Requirement or invariant | Production path | Planned file/change | Behavioral test |
-| --- | --- | --- | --- |
-| INV-01 ShellTool model | A–E assembly | no change to assembly | existing shell.test model cases |
-| INV-01 prompt.shell model | notice append | only split fields; keep notice on model | existing cancel/abort `state.output` notice tests |
-| INV-02/03 ShellTool user empty | userOutput assignment | shell.ts | new: empty success + timeout empty `metadata.output === "(no output)"` and no `opencode_notice` / no block-buffering |
-| INV-02/03/04 prompt.shell | finish split | prompt.ts | new: empty success metadata exact `(no output)`; abort: metadata has no `opencode_notice`, model still has; non-empty metadata has stdout only |
-| INV-04 agent non-empty | display path | shell.ts | existing/lock echo metadata clean |
-| INV-05 | metadata fields | no change | existing |
-| INV-06 | TUI | no change | model body differs after fix |
-| INV-07 | both producers | shell.ts + prompt.ts | tests on both seams |
-| Restraint simplify | remove forbidden couplings | both files | covered above |
+| Requirement or invariant       | Production path            | Planned file/change                     | Behavioral test                                                                                                                                |
+| ------------------------------ | -------------------------- | --------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| INV-01 ShellTool model         | A–E assembly               | no change to assembly                   | existing shell.test model cases                                                                                                                |
+| INV-01 prompt.shell model      | notice append              | only split fields; keep notice on model | existing cancel/abort `state.output` notice tests                                                                                              |
+| INV-02/03 ShellTool user empty | userOutput assignment      | shell.ts                                | new: empty success + timeout empty `metadata.output === "(no output)"` and no `opencode_notice` / no block-buffering                           |
+| INV-02/03/04 prompt.shell      | finish split               | prompt.ts                               | new: empty success metadata exact `(no output)`; abort: metadata has no `opencode_notice`, model still has; non-empty metadata has stdout only |
+| INV-04 agent non-empty         | display path               | shell.ts                                | existing/lock echo metadata clean                                                                                                              |
+| INV-05                         | metadata fields            | no change                               | existing                                                                                                                                       |
+| INV-06                         | TUI                        | no change                               | model body differs after fix                                                                                                                   |
+| INV-07                         | both producers             | shell.ts + prompt.ts                    | tests on both seams                                                                                                                            |
+| Restraint simplify             | remove forbidden couplings | both files                              | covered above                                                                                                                                  |
 
 ## 14. Reverse Traceability
 
-| Proposed production concept | Requirement ID | Evidence | Why existing logic cannot carry it |
-| --- | --- | --- | --- |
-| Empty user body `(no output)` (ShellTool) | INV-03 | red repro; user quote | empty path uses full model string |
-| Empty user body `(no output)` (prompt.shell) | INV-03, INV-07 | empty dual-write `""` | no placeholder today |
-| User panel = non-empty raw/display only | INV-02, INV-04 | design + shared UI | harness dual-write / preview(output) |
-| Drop unused `displayed` | restraint | flag only gates bad fallback | optional equivalent simplification |
+| Proposed production concept                  | Requirement ID | Evidence                     | Why existing logic cannot carry it   |
+| -------------------------------------------- | -------------- | ---------------------------- | ------------------------------------ |
+| Empty user body `(no output)` (ShellTool)    | INV-03         | red repro; user quote        | empty path uses full model string    |
+| Empty user body `(no output)` (prompt.shell) | INV-03, INV-07 | empty dual-write `""`        | no placeholder today                 |
+| User panel = non-empty raw/display only      | INV-02, INV-04 | design + shared UI           | harness dual-write / preview(output) |
+| Drop unused `displayed`                      | restraint      | flag only gates bad fallback | optional equivalent simplification   |
 
 No stripper helper module; no second empty dialect.
 
 ## 15. File-Level Change Plan
 
-| File | Add / modify / delete | Exact responsibility of the change | Expected line delta |
-| --- | --- | --- | --- |
-| `packages/opencode/src/tool/shell.ts` | modify | User-panel assignment; remove `preview(output)` coupling; optional remove `displayed` | ~−3 to +6 |
-| `packages/opencode/src/session/prompt.ts` | modify | Finish: split raw user vs harness model; empty → `(no output)` | ~+6 to +15 |
-| `packages/opencode/test/tool/shell.test.ts` | modify | Isolation assertions for empty success + timeout empty | ~+30–60 |
-| `packages/opencode/test/session/prompt.test.ts` | modify | Isolation assertions for empty + abort metadata | ~+25–50 |
-| `docs/plans/shell-user-model-output-panel-isolation.md` | this plan | Authority artifact | plan only |
+| File                                                    | Add / modify / delete | Exact responsibility of the change                                                    | Expected line delta |
+| ------------------------------------------------------- | --------------------- | ------------------------------------------------------------------------------------- | ------------------- |
+| `packages/opencode/src/tool/shell.ts`                   | modify                | User-panel assignment; remove `preview(output)` coupling; optional remove `displayed` | ~−3 to +6           |
+| `packages/opencode/src/session/prompt.ts`               | modify                | Finish: split raw user vs harness model; empty → `(no output)`                        | ~+6 to +15          |
+| `packages/opencode/test/tool/shell.test.ts`             | modify                | Isolation assertions for empty success + timeout empty                                | ~+30–60             |
+| `packages/opencode/test/session/prompt.test.ts`         | modify                | Isolation assertions for empty + abort metadata                                       | ~+25–50             |
+| `docs/plans/shell-user-model-output-panel-isolation.md` | this plan             | Authority artifact                                                                    | plan only           |
 
 ## 16. TDD Behavior Slices
 
 Public seams: `ShellTool.execute` return; `prompt.shell` completed ToolPart.
 
-| Order | Red behavior | Why current code fails | Minimal green behavior | Regression protected |
-| --- | --- | --- | --- | --- |
-| 1 | ShellTool empty success: `metadata.output === "(no output)"`; no `opencode_notice`; model still has notice | `preview(output)` | user empty branch | model exit notice |
-| 2 | ShellTool timeout empty: user exact placeholder; no block-buffering; model keeps prose + notice | same | same | timeout diagnostic |
-| 3 | ShellTool non-empty: metadata has text, no notice | already green | lock | display path |
-| 4 | prompt.shell empty success (`true`/`:`/exit 0 style): metadata exact `(no output)`; model without user pollution requirement on empty (may equal placeholder if no notice) | dual-write `""` | user empty branch | busy/cancel suite |
-| 5 | prompt.shell abort: `state.output` still has `user_abort` notice; `metadata.output` has no `opencode_notice` and is raw or `(no output)` | dual-write after notice | split fields | cancel tests |
+| Order | Red behavior                                                                                                                                                               | Why current code fails  | Minimal green behavior | Regression protected |
+| ----- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------- | ---------------------- | -------------------- |
+| 1     | ShellTool empty success: `metadata.output === "(no output)"`; no `opencode_notice`; model still has notice                                                                 | `preview(output)`       | user empty branch      | model exit notice    |
+| 2     | ShellTool timeout empty: user exact placeholder; no block-buffering; model keeps prose + notice                                                                            | same                    | same                   | timeout diagnostic   |
+| 3     | ShellTool non-empty: metadata has text, no notice                                                                                                                          | already green           | lock                   | display path         |
+| 4     | prompt.shell empty success (`true`/`:`/exit 0 style): metadata exact `(no output)`; model without user pollution requirement on empty (may equal placeholder if no notice) | dual-write `""`         | user empty branch      | busy/cancel suite    |
+| 5     | prompt.shell abort: `state.output` still has `user_abort` notice; `metadata.output` has no `opencode_notice` and is raw or `(no output)`                                   | dual-write after notice | split fields           | cancel tests         |
 
 Independent expected values: literal `"(no output)"`, substring `opencode_notice`, `block-buffering`, `reason="user_abort"`. No private helper or source-text assertions.
 
 ## 17. Chinese Comment Budget
 
-| Metric | Estimate | Method |
-| --- | --- | --- |
-| Effective changed code lines `E` | 10–25 | both finish assignments; exclude tests |
+| Metric                                    | Estimate                                          | Method                                                      |
+| ----------------------------------------- | ------------------------------------------------- | ----------------------------------------------------------- |
+| Effective changed code lines `E`          | 10–25                                             | both finish assignments; exclude tests                      |
 | Required Chinese explanatory comments `C` | ≥2 (`max(1, ceil(E*0.15))` → at least 2 for E≥10) | one at ShellTool user assignment; one at prompt.shell split |
 
 Comment content:
@@ -302,31 +302,31 @@ Comment content:
 
 ## 18. Verification
 
-| Command | Working directory | Evidence produced |
-| --- | --- | --- |
-| `bun test test/tool/shell.test.ts` | `packages/opencode` | isolation + existing model cases |
+| Command                                                                                                                              | Working directory   | Evidence produced                              |
+| ------------------------------------------------------------------------------------------------------------------------------------ | ------------------- | ---------------------------------------------- |
+| `bun test test/tool/shell.test.ts`                                                                                                   | `packages/opencode` | isolation + existing model cases               |
 | `bun test test/session/prompt.test.ts` (or filtered shell-related cases if suite runtime requires; must include new isolation cases) | `packages/opencode` | prompt.shell isolation + abort notice on model |
-| Re-run original ShellTool empty/timeout harness assertions | `packages/opencode` | GREEN under new definition |
-| `bun typecheck` | `packages/opencode` | types clean |
+| Re-run original ShellTool empty/timeout harness assertions                                                                           | `packages/opencode` | GREEN under new definition                     |
+| `bun typecheck`                                                                                                                      | `packages/opencode` | types clean                                    |
 
 ## 19. Diff Budget
 
-| Metric | Estimate | Justification |
-| --- | --- | --- |
-| Files added | 0 production | dessert |
-| Files modified | 4 production/test + plan | two producers + tests |
-| Files deleted | 0 | — |
-| Production lines | ≤40 | two finish-site repairs |
-| Test lines | ≤120 | five slices |
-| Generated lines | 0 | — |
+| Metric           | Estimate                 | Justification           |
+| ---------------- | ------------------------ | ----------------------- |
+| Files added      | 0 production             | dessert                 |
+| Files modified   | 4 production/test + plan | two producers + tests   |
+| Files deleted    | 0                        | —                       |
+| Production lines | ≤40                      | two finish-site repairs |
+| Test lines       | ≤120                     | five slices             |
+| Generated lines  | 0                        | —                       |
 
 ## 20. Real Risks and Open Decisions
 
-| Risk | Evidence | Mitigation |
-| --- | --- | --- |
+| Risk                                                 | Evidence                                  | Mitigation                   |
+| ---------------------------------------------------- | ----------------------------------------- | ---------------------------- |
 | Consumers relied on notices inside `metadata.output` | `stableVerificationOutput` strips notices | producer fix; leave stripper |
-| Empty control-only agent streams | reachable | `(no output)` user |
-| Event `Shell.Ended.output` content | currently post-notice | keep modelOutput on event |
+| Empty control-only agent streams                     | reachable                                 | `(no output)` user           |
+| Event `Shell.Ended.output` content                   | currently post-notice                     | keep modelOutput on event    |
 
 ### Open Decisions Requiring the User
 
@@ -353,15 +353,15 @@ The independent auditor must:
 
 ## 22. Plan Audit Record
 
-| Round | Audited revision | Full scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | R1 | yes | B-01 dual-panel incomplete for `prompt.shell` | N-01 residual non-decision; N-02 soft vs hard empty assert wording; N-03 vestigial stableVerificationOutput | BLOCK | plan-audit R1 / adversarial-auditor session `ses_07129346dffeIVq3T4AJnQhZrN` |
+| Round | Audited revision | Full scope? | Blocking findings                             | Non-blocking findings                                                                                       | Result | Invocation reference                                                         |
+| ----- | ---------------- | ----------- | --------------------------------------------- | ----------------------------------------------------------------------------------------------------------- | ------ | ---------------------------------------------------------------------------- |
+| 1     | R1               | yes         | B-01 dual-panel incomplete for `prompt.shell` | N-01 residual non-decision; N-02 soft vs hard empty assert wording; N-03 vestigial stableVerificationOutput | BLOCK  | plan-audit R1 / adversarial-auditor session `ses_07129346dffeIVq3T4AJnQhZrN` |
 
 R1 verbatim blocking finding summary (not paraphrased design change): second live producer `SessionPrompt.shell` dual-writes harnessed string into both panels / omits `(no output)` on empty; must be included in primary path or user-quoted residual acceptance. R2 includes the owner.
 
-| Round | Audited revision | Full scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
-| --- | --- | --- | --- | --- | --- | --- |
-| 2 | R2 | yes | No blocking findings | N-01 vestigial stableVerificationOutput; N-02 long-completed no separate slice; N-03 empty model asymmetry preserved; N-04 E estimate scopes production only | APPROVE | plan-audit R2 / adversarial-auditor session `ses_0711ba617ffe1si600At7lmbLs` |
+| Round | Audited revision | Full scope? | Blocking findings    | Non-blocking findings                                                                                                                                        | Result  | Invocation reference                                                         |
+| ----- | ---------------- | ----------- | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------- | ---------------------------------------------------------------------------- |
+| 2     | R2               | yes         | No blocking findings | N-01 vestigial stableVerificationOutput; N-02 long-completed no separate slice; N-03 empty model asymmetry preserved; N-04 E estimate scopes production only | APPROVE | plan-audit R2 / adversarial-auditor session `ses_0711ba617ffe1si600At7lmbLs` |
 
 Any substantive revision invalidates earlier approval.
 
@@ -369,13 +369,13 @@ Any substantive revision invalidates earlier approval.
 
 ### Actual Files and Diff
 
-| File | Change |
-| --- | --- |
-| `packages/opencode/src/tool/shell.ts` | User panel = non-empty display or `(no output)`; removed `displayed` / `preview(output)` coupling |
-| `packages/opencode/src/session/prompt.ts` | Finish splits raw user vs harness model; empty user `(no output)` |
-| `packages/opencode/test/tool/shell.test.ts` | Isolation asserts empty success/fail/timeout user panel |
-| `packages/opencode/test/session/prompt.test.ts` | Empty success + abort user panel isolation; non-empty no notice |
-| `docs/plans/shell-user-model-output-panel-isolation.md` | Plan + evidence |
+| File                                                    | Change                                                                                            |
+| ------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| `packages/opencode/src/tool/shell.ts`                   | User panel = non-empty display or `(no output)`; removed `displayed` / `preview(output)` coupling |
+| `packages/opencode/src/session/prompt.ts`               | Finish splits raw user vs harness model; empty user `(no output)`                                 |
+| `packages/opencode/test/tool/shell.test.ts`             | Isolation asserts empty success/fail/timeout user panel                                           |
+| `packages/opencode/test/session/prompt.test.ts`         | Empty success + abort user panel isolation; non-empty no notice                                   |
+| `docs/plans/shell-user-model-output-panel-isolation.md` | Plan + evidence                                                                                   |
 
 Approx production/test: 4 files, ~50 insertions / 10 deletions on code paths (plan separate).
 
@@ -388,11 +388,11 @@ Approx production/test: 4 files, ~50 insertions / 10 deletions on code paths (pl
 
 ### Verification Commands and Results
 
-| Command | cwd | Result |
-| --- | --- | --- |
-| `bun test test/tool/shell.test.ts` | packages/opencode | 55 pass, 0 fail |
-| `bun test test/session/prompt.test.ts -t "shell\|cancel interrupts\|cancel persists aborted"` | packages/opencode | 20 pass, 0 fail |
-| `bun typecheck` | packages/opencode | pass (no output) |
+| Command                                                                                       | cwd               | Result           |
+| --------------------------------------------------------------------------------------------- | ----------------- | ---------------- |
+| `bun test test/tool/shell.test.ts`                                                            | packages/opencode | 55 pass, 0 fail  |
+| `bun test test/session/prompt.test.ts -t "shell\|cancel interrupts\|cancel persists aborted"` | packages/opencode | 20 pass, 0 fail  |
+| `bun typecheck`                                                                               | packages/opencode | pass (no output) |
 
 ### Original Feedback-Loop Result
 
@@ -400,23 +400,24 @@ Pre-fix empty success ShellTool: user `metadata.output` included `opencode_notic
 
 ### Actual Secondary and Replacement Path Inventory
 
-| Path | Disposition |
-| --- | --- |
-| ShellTool model A–E | preserved |
-| ShellTool `preview(output)` user fallback | removed |
-| prompt.shell dual-write harness | removed |
-| UI notice stripper | not added |
+| Path                                      | Disposition |
+| ----------------------------------------- | ----------- |
+| ShellTool model A–E                       | preserved   |
+| ShellTool `preview(output)` user fallback | removed     |
+| prompt.shell dual-write harness           | removed     |
+| UI notice stripper                        | not added   |
 
 ### Chinese Comment Calculation
 
-| Metric | Actual | Exclusions and evidence |
-| --- | --- | --- |
-| Effective changed code lines `E` | ~50 | Non-blank production+test added/modified; exclude plan-only, import-only, pure quote-style on one timeout expect |
-| Qualifying Chinese comment lines `C` | 8 | Dual-panel boundary + test intent at both finish sites and isolation asserts |
-| Ratio `C / E` | ~0.16 |  |
-| Required minimum `C` | 8 | `ceil(50 * 0.15) = 8` |
+| Metric                               | Actual | Exclusions and evidence                                                                                          |
+| ------------------------------------ | ------ | ---------------------------------------------------------------------------------------------------------------- |
+| Effective changed code lines `E`     | ~50    | Non-blank production+test added/modified; exclude plan-only, import-only, pure quote-style on one timeout expect |
+| Qualifying Chinese comment lines `C` | 8      | Dual-panel boundary + test intent at both finish sites and isolation asserts                                     |
+| Ratio `C / E`                        | ~0.16  |                                                                                                                  |
+| Required minimum `C`                 | 8      | `ceil(50 * 0.15) = 8`                                                                                            |
 
 Representative comments:
+
 - shell.ts: 用户面板只反映终端画面；空画面固定 "(no output)"，不得回灌模型 harness。
 - prompt.ts: 终态先保留 raw 再拼 notice；metadata.output 仅 raw/"(no output)"，model output 保留 harness。
 
@@ -428,9 +429,9 @@ Representative comments:
 
 ## 24. Implementation Audit Record
 
-| Round | Plan revision | Full original scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | R2 | yes | No blocking findings | N-01 long-completed no dedicated slice; N-02 vestigial stableVerificationOutput; N-03 full prompt.test not end-to-end; N-04 agent non-empty no explicit no-notice assert | APPROVE | implementation-audit R2 / adversarial-auditor session `ses_070ffb2dfffeOvLSWKAL7STF1e` |
+| Round | Plan revision | Full original scope? | Blocking findings    | Non-blocking findings                                                                                                                                                    | Result  | Invocation reference                                                                   |
+| ----- | ------------- | -------------------- | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------- | -------------------------------------------------------------------------------------- |
+| 1     | R2            | yes                  | No blocking findings | N-01 long-completed no dedicated slice; N-02 vestigial stableVerificationOutput; N-03 full prompt.test not end-to-end; N-04 agent non-empty no explicit no-notice assert | APPROVE | implementation-audit R2 / adversarial-auditor session `ses_070ffb2dfffeOvLSWKAL7STF1e` |
 
 Independent recount: E≈43, C=8, required 7, ratio ≈0.186 PASS.
 

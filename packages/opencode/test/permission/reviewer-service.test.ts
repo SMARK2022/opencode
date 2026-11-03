@@ -82,7 +82,10 @@ const emptyReviewerDb = (() => {
   // 生命周期fixture维持空历史合同，补齐650证据查询需要的预约和同步空链；真实SQLite由独立用例覆盖。
   const rows = { orderBy: () => ({ limit: () => ({ all: () => [] }) }) }
   const sync = { select: () => ({ from: () => ({ where: () => rows, innerJoin: () => ({ where: () => rows }) }) }) }
-  return { db: { $client: { reserve: Effect.void }, select: () => ({ from: () => ({ where: () => chain }) }) } as never, sync: sync as never }
+  return {
+    db: { $client: { reserve: Effect.void }, select: () => ({ from: () => ({ where: () => chain }) }) } as never,
+    sync: sync as never,
+  }
 })()
 
 // #497：closure 用例的 fixture 注册表——it 实例与 body 共享同一 fixture（单一实例，committed barrier 才可观测）。
@@ -107,7 +110,10 @@ describe("permission reviewer service", () => {
   const apiKeyFixture = reviewerFixture({ type: "api", key: "test-key" }, { requireInstructions: false })
   // OAuth 凭据本身不是 Codex 契约；这个 fixture 防止未来把条件误放宽成
   // “任意 OAuth provider 都移除 system message 并写 instructions”。
-  const customOauthFixture = reviewerFixture(oauthAuth(), { requireInstructions: false, providerID: CUSTOM_PROVIDER_ID })
+  const customOauthFixture = reviewerFixture(oauthAuth(), {
+    requireInstructions: false,
+    providerID: CUSTOM_PROVIDER_ID,
+  })
   // #261：OAuth + plugin hook fixture——验证 reviewer 复用 chat.params/chat.headers hook
   const oauthHookFixture = reviewerFixture(oauthAuth(), {
     requireInstructions: true,
@@ -274,28 +280,29 @@ describe("permission reviewer service", () => {
   const persistResendFixture = reviewerPersistResendFixture()
   const persistResend = testEffect(persistResendFixture.layer)
 
-  persistResend.effect("resends without tool_choice on the persist path and completes the reused message row once", () =>
-    Effect.gen(function* () {
-      const reviewer = yield* PermissionReviewer.Service
-      const decision = yield* reviewer.review(
-        reviewInput("review_toolchoice_persist", undefined, SessionID.make("session_parent_persist")),
-      )
+  persistResend.effect(
+    "resends without tool_choice on the persist path and completes the reused message row once",
+    () =>
+      Effect.gen(function* () {
+        const reviewer = yield* PermissionReviewer.Service
+        const decision = yield* reviewer.review(
+          reviewInput("review_toolchoice_persist", undefined, SessionID.make("session_parent_persist")),
+        )
 
-      expect(decision.action).toBe("allow")
-      expect(persistResendFixture.bodies.length).toBe(2)
-      expect(persistResendFixture.bodies[0]!.tool_choice).toBe("required")
-      expect(persistResendFixture.bodies[1]!.tool_choice).not.toBe("required")
-      const assistantMessages = [...persistResendFixture.messages.values()].filter(
-        (m): m is MessageV2.Assistant => m.role === "assistant",
-      )
-      expect(assistantMessages).toHaveLength(1)
-      const child = assistantMessages[0]!
-      expect(child.finish).toBe("tool-calls")
-      expect(child.error).toBeUndefined()
-      expect(child.time.completed).toBeGreaterThan(0)
-    }),
+        expect(decision.action).toBe("allow")
+        expect(persistResendFixture.bodies.length).toBe(2)
+        expect(persistResendFixture.bodies[0]!.tool_choice).toBe("required")
+        expect(persistResendFixture.bodies[1]!.tool_choice).not.toBe("required")
+        const assistantMessages = [...persistResendFixture.messages.values()].filter(
+          (m): m is MessageV2.Assistant => m.role === "assistant",
+        )
+        expect(assistantMessages).toHaveLength(1)
+        const child = assistantMessages[0]!
+        expect(child.finish).toBe("tool-calls")
+        expect(child.error).toBeUndefined()
+        expect(child.time.completed).toBeGreaterThan(0)
+      }),
   )
-
 
   // 以下测试验证：未配置 permission.auto_review.model 时，hidden reviewer 应当
   // 跟随父会话当前模型，而不是受全局 state/model.json recent 漂移到另一个 provider。
@@ -303,20 +310,22 @@ describe("permission reviewer service", () => {
   const parentModelFixture = parentSessionModelFixture()
   const parentModel = testEffect(parentModelFixture.layer)
 
-  parentModel.effect("uses parent session model instead of global default when auto_review.model is not configured", () =>
-    Effect.gen(function* () {
-      const reviewer = yield* PermissionReviewer.Service
-      const decision = yield* reviewer.review(
-        reviewInput("review_parent_model", undefined, SessionID.make("session_parent")),
-      )
+  parentModel.effect(
+    "uses parent session model instead of global default when auto_review.model is not configured",
+    () =>
+      Effect.gen(function* () {
+        const reviewer = yield* PermissionReviewer.Service
+        const decision = yield* reviewer.review(
+          reviewInput("review_parent_model", undefined, SessionID.make("session_parent")),
+        )
 
-      // 当前实现如果用 defaultModel() 会选到 zhipuai（未注册），导致 reviewer 失败。
-      // 修复后应使用父会话模型 openai/gpt-5 并返回 allow。
-      expect(decision.action).toBe("allow")
-      expect(decision.reason).toBe(REVIEWER_ASSESSMENT.rationale)
-      // 请求实际打到了父会话 provider，而不是 defaultModel 返回的 zhipuai
-      expect(parentModelFixture.bodies.length).toBeGreaterThan(0)
-    }),
+        // 当前实现如果用 defaultModel() 会选到 zhipuai（未注册），导致 reviewer 失败。
+        // 修复后应使用父会话模型 openai/gpt-5 并返回 allow。
+        expect(decision.action).toBe("allow")
+        expect(decision.reason).toBe(REVIEWER_ASSESSMENT.rationale)
+        // 请求实际打到了父会话 provider，而不是 defaultModel 返回的 zhipuai
+        expect(parentModelFixture.bodies.length).toBeGreaterThan(0)
+      }),
   )
 
   // 显式 auto_review.model 应优先于父会话模型；使用独立 fixture 配置不同的 reviewer model
@@ -433,7 +442,6 @@ describe("permission reviewer service", () => {
   )
   // [local-smark] reviewer token/breakdown 持久化测试结束
 
-
   // #261：验证 reviewer 路径经过 chat.params/chat.headers hook——max_output_tokens 被清理、header 被注入
   oauthHook.effect("applies chat provider hooks before sending OpenAI OAuth reviewer requests", () =>
     Effect.gen(function* () {
@@ -449,7 +457,6 @@ describe("permission reviewer service", () => {
       expect(typeof request.body.instructions).toBe("string")
       expectPreservedShellEvidence(inputText(request.body))
     }),
-
   )
   // #497：三个 closure 行为用例——durable Part identity 注册先于首次写、
   // completed winner 不被 cleanup 覆盖、协议失败前 drain 闭合 open tools。
@@ -707,7 +714,7 @@ function parentSessionModelFixture() {
     children: () => Effect.succeed([]),
     create: (input) => Effect.succeed({ ...childSession, ...input } as Session.Info),
     updateMessage: (msg) => Effect.succeed(msg),
-    ...partStore,  // #497：getPart/updatePart 共享 durable store——生产代码新增权威读取边界
+    ...partStore, // #497：getPart/updatePart 共享 durable store——生产代码新增权威读取边界
     // #327：resolveImplicitReviewerModel 会走 findMessage 找最近带 model 的 user message；
     // mock 返回 none 让其回退到 SessionTable.model（本 fixture 的主路径）
     findMessage: () => Effect.succeed(Option.none()),
@@ -794,7 +801,7 @@ function explicitModelOverrideFixture() {
     children: () => Effect.succeed([]),
     create: (input) => Effect.succeed({ ...childSession, ...input } as Session.Info),
     updateMessage: (msg) => Effect.succeed(msg),
-    ...partStore,  // #497：getPart/updatePart 共享 durable store——生产代码新增权威读取边界
+    ...partStore, // #497：getPart/updatePart 共享 durable store——生产代码新增权威读取边界
     // #327：resolveImplicitReviewerModel 会走 findMessage 找最近带 model 的 user message；
     // mock 返回 none 让其回退到 SessionTable.model（本 fixture 的主路径）
     findMessage: () => Effect.succeed(Option.none()),
@@ -901,7 +908,7 @@ function staleParentModelFixture() {
     children: () => Effect.succeed([]),
     create: (input) => Effect.succeed({ ...childSession, ...input } as Session.Info),
     updateMessage: (msg) => Effect.succeed(msg),
-    ...partStore,  // #497：getPart/updatePart 共享 durable store——生产代码新增权威读取边界
+    ...partStore, // #497：getPart/updatePart 共享 durable store——生产代码新增权威读取边界
     // #327：resolveImplicitReviewerModel 会走 findMessage 找最近带 model 的 user message；
     // mock 返回 none 让其回退到 SessionTable.model（本 fixture 的主路径）
     findMessage: () => Effect.succeed(Option.none()),
@@ -986,10 +993,7 @@ function reviewerTokenCaptureFixture(authInfo: Auth.Info) {
     updateMessage: (msg) => Effect.succeed(msg),
     // #497：捕获仍推 parts 数组供断言；getPart/updatePart 共享同一 durable store——
     // 生产代码新增的权威读取边界（getPart）在该 fixture 同样生效。
-    getPart: (input) =>
-      Effect.succeed(
-        [...parts].reverse().find((part) => part.id === input.partID),
-      ),
+    getPart: (input) => Effect.succeed([...parts].reverse().find((part) => part.id === input.partID)),
     updatePart: (part) => {
       parts.push(part)
       return Effect.succeed(part)
@@ -1160,9 +1164,7 @@ function reviewerFixture(
       // SDK 在未强制时默认发 tool_choice:"auto"（今日生产请求同形且被 provider 接受），
       // 与生产一致，400 发生在任何 stream 事件之前。
       if ((options.rejectToolChoice || options.rejectToolChoiceUnrelated) && body.tool_choice === "required") {
-        const detail = options.rejectToolChoice
-          ? "Unsupported parameter: tool_choice"
-          : "Instructions are required"
+        const detail = options.rejectToolChoice ? "Unsupported parameter: tool_choice" : "Instructions are required"
         return new Response(JSON.stringify({ detail }), {
           status: 400,
           headers: { "content-type": "application/json" },
@@ -1217,7 +1219,13 @@ function pluginLayer(options: { clearMaxOutputTokens?: boolean; header?: string 
           if (name === "chat.params" && options.clearMaxOutputTokens && output && typeof output === "object") {
             ;(output as { maxOutputTokens?: number }).maxOutputTokens = undefined
           }
-          if (name === "chat.headers" && options.header && output && typeof output === "object" && "headers" in output) {
+          if (
+            name === "chat.headers" &&
+            options.header &&
+            output &&
+            typeof output === "object" &&
+            "headers" in output
+          ) {
             const headers = (output as { headers: Record<string, string> }).headers
             headers[options.header] = "applied"
           }
@@ -1228,7 +1236,7 @@ function pluginLayer(options: { clearMaxOutputTokens?: boolean; header?: string 
     }),
   )
 }
- 
+
 function reviewerModel(providerID: ProviderV2.ID) {
   return ProviderTest.model({
     id: ModelV2.ID.make("gpt-5"),
@@ -1247,7 +1255,9 @@ function inputText(body: ReviewerRequestBody) {
   return body.input
     .flatMap((item) =>
       Array.isArray(item.content)
-        ? item.content.flatMap((part) => (typeof part === "object" && part && "text" in part && typeof part.text === "string" ? [part.text] : []))
+        ? item.content.flatMap((part) =>
+            typeof part === "object" && part && "text" in part && typeof part.text === "string" ? [part.text] : [],
+          )
         : typeof item.content === "string"
           ? [item.content]
           : [],
@@ -1267,11 +1277,7 @@ function expectPreservedShellEvidence(text: string) {
   expect(text).toContain("$(pwd)/danger")
 }
 
-function reviewInput(
-  reviewID: string,
-  metadata?: Readonly<Record<string, unknown>>,
-  sessionID?: SessionID,
-) {
+function reviewInput(reviewID: string, metadata?: Readonly<Record<string, unknown>>, sessionID?: SessionID) {
   return {
     reviewID,
     // 传入 sessionID 时，reviewer 可以读取父会话当前模型；不传时保持原有行为
@@ -1321,7 +1327,13 @@ function openAIReviewDecisionStream(usage?: { input: number; output: number; cac
     {
       type: "response.output_item.added",
       output_index: 0,
-      item: { type: "function_call", id: "fc_review", call_id: "call_review", name: "permission_review_decision", arguments: "" },
+      item: {
+        type: "function_call",
+        id: "fc_review",
+        call_id: "call_review",
+        name: "permission_review_decision",
+        arguments: "",
+      },
     },
     { type: "response.function_call_arguments.delta", item_id: "fc_review", output_index: 0, delta: args },
     {
@@ -1354,7 +1366,6 @@ function openAIReviewDecisionStream(usage?: { input: number; output: number; cac
     .join("")
 }
 
-
 // #546：timeout 共终态夹具——SSE 发出 tool-input-start 后永不关流，per-attempt timeout_ms=80
 // 触发 timeoutOrElse 中断（而非 drain incomplete）；messages/parts 内存快照供终态断言。
 function reviewerTimeoutClosureFixture(options: { failErrorWrites?: boolean } = {}) {
@@ -1371,8 +1382,21 @@ function reviewerTimeoutClosureFixture(options: { failErrorWrites?: boolean } = 
         start(controller) {
           // 只发工具开始和未完成参数；不能复用含response.completed的drain夹具来伪装timeout。
           const events = [
-            { type: "response.created", response: { id: "resp_timeout", created_at: 0, model: "gpt-5", service_tier: null } },
-            { type: "response.output_item.added", output_index: 0, item: { type: "function_call", id: "fc_timeout", call_id: "call_timeout", name: "permission_review_decision", arguments: "" } },
+            {
+              type: "response.created",
+              response: { id: "resp_timeout", created_at: 0, model: "gpt-5", service_tier: null },
+            },
+            {
+              type: "response.output_item.added",
+              output_index: 0,
+              item: {
+                type: "function_call",
+                id: "fc_timeout",
+                call_id: "call_timeout",
+                name: "permission_review_decision",
+                arguments: "",
+              },
+            },
             { type: "response.function_call_arguments.delta", item_id: "fc_timeout", output_index: 0, delta: "{" },
           ]
           controller.enqueue(encoder.encode(events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join("")))
@@ -1421,7 +1445,15 @@ function reviewerTimeoutClosureFixture(options: { failErrorWrites?: boolean } = 
     updateMessage: (message) =>
       Effect.sync(() => {
         // 在写入完成消息的当刻检查tool，不能仅凭最终快照证明先tool后message。
-        if (message.role === "assistant" && message.time.completed !== undefined) expect([...parts.values()].filter((part) => part.messageID === message.id && part.type === "tool" && (part.state.status === "pending" || part.state.status === "running"))).toEqual([])
+        if (message.role === "assistant" && message.time.completed !== undefined)
+          expect(
+            [...parts.values()].filter(
+              (part) =>
+                part.messageID === message.id &&
+                part.type === "tool" &&
+                (part.state.status === "pending" || part.state.status === "running"),
+            ),
+          ).toEqual([])
         messages.set(message.id, structuredClone(message) as MessageV2.Assistant)
         return message
       }),
@@ -1667,9 +1699,20 @@ function openAIReviewPendingStream() {
     {
       type: "response.output_item.added",
       output_index: 0,
-      item: { type: "function_call", id: "fc_pending", call_id: "call_pending", name: "permission_review_decision", arguments: "" },
+      item: {
+        type: "function_call",
+        id: "fc_pending",
+        call_id: "call_pending",
+        name: "permission_review_decision",
+        arguments: "",
+      },
     },
-    { type: "response.function_call_arguments.delta", item_id: "fc_pending", output_index: 0, delta: JSON.stringify({ outcome: "bogus", rationale: 42 }).slice(0, 12) },
+    {
+      type: "response.function_call_arguments.delta",
+      item_id: "fc_pending",
+      output_index: 0,
+      delta: JSON.stringify({ outcome: "bogus", rationale: 42 }).slice(0, 12),
+    },
     {
       type: "response.output_item.done",
       output_index: 0,
@@ -1703,13 +1746,19 @@ describe("permission reviewer effort", () => {
     expect(
       resolve({
         ...base,
-        variants: { high: { reasoningEffort: "high" }, low: { reasoningEffort: "low" }, none: { reasoningEffort: "none" } },
+        variants: {
+          high: { reasoningEffort: "high" },
+          low: { reasoningEffort: "low" },
+          none: { reasoningEffort: "none" },
+        },
       }),
     ).toEqual({ name: "low", options: { reasoningEffort: "low" } })
     expect(
       resolve({ ...base, variants: { minimal: { reasoningEffort: "minimal" }, none: { reasoningEffort: "none" } } }),
     ).toEqual({ name: "minimal", options: { reasoningEffort: "minimal" } })
-    expect(resolve({ ...base, variants: { none: { reasoningEffort: "none" }, max: { reasoningEffort: "max" } } })).toEqual({
+    expect(
+      resolve({ ...base, variants: { none: { reasoningEffort: "none" }, max: { reasoningEffort: "max" } } }),
+    ).toEqual({
       name: "none",
       options: { reasoningEffort: "none" },
     })
@@ -1722,13 +1771,22 @@ describe("permission reviewer effort", () => {
       ...reviewerModel(OPENAI_PROVIDER_ID),
       variants: { low: { reasoningEffort: "low" }, high: { reasoningEffort: "high" } },
     }
-    expect(PermissionReviewer.resolveReviewerVariant(model, "high")).toEqual({ name: "high", options: { reasoningEffort: "high" } })
-    expect(PermissionReviewer.resolveReviewerVariant(model, "missing")).toEqual({ name: "low", options: { reasoningEffort: "low" } })
+    expect(PermissionReviewer.resolveReviewerVariant(model, "high")).toEqual({
+      name: "high",
+      options: { reasoningEffort: "high" },
+    })
+    expect(PermissionReviewer.resolveReviewerVariant(model, "missing")).toEqual({
+      name: "low",
+      options: { reasoningEffort: "low" },
+    })
   })
 
   const effortHeuristicFixture = reviewerFixture(
     { type: "api", key: "test-key" },
-    { requireInstructions: false, modelVariants: { low: { reasoningEffort: "low" }, high: { reasoningEffort: "high" } } },
+    {
+      requireInstructions: false,
+      modelVariants: { low: { reasoningEffort: "low" }, high: { reasoningEffort: "high" } },
+    },
   )
   const effortHeuristic = testEffect(effortHeuristicFixture.layer)
 
@@ -1766,18 +1824,29 @@ describe("permission reviewer effort", () => {
   )
 })
 
-
 // [local-smark] reviewerEvidence 定位查询的行为测试：真实 Session + SQLite 种子，
 // 与生产读取同路径；不用 mock store，避免定位语义被内存回显掩盖。
 describe("permission reviewer evidence", () => {
-  const evidence = testEffect(AppNodeBuilder.build(
-    LayerNode.group([Session.node, EventV2Bridge.node, SessionProjector.node, Database.node, CrossSpawnSpawner.node, InstanceStore.node]),
-    [
-      [RuntimeFlags.node, RuntimeFlags.layer({ experimentalWorkspaces: false })],
-      // 真实Session与projector写SQLite，仅阻断实例bootstrap的产品启动副作用。
-      [InstanceStore.bootstrapNode, Layer.succeed(InstanceBootstrap.Service, InstanceBootstrap.Service.of({ run: Effect.void }))],
-    ],
-  ))
+  const evidence = testEffect(
+    AppNodeBuilder.build(
+      LayerNode.group([
+        Session.node,
+        EventV2Bridge.node,
+        SessionProjector.node,
+        Database.node,
+        CrossSpawnSpawner.node,
+        InstanceStore.node,
+      ]),
+      [
+        [RuntimeFlags.node, RuntimeFlags.layer({ experimentalWorkspaces: false })],
+        // 真实Session与projector写SQLite，仅阻断实例bootstrap的产品启动副作用。
+        [
+          InstanceStore.bootstrapNode,
+          Layer.succeed(InstanceBootstrap.Service, InstanceBootstrap.Service.of({ run: Effect.void })),
+        ],
+      ],
+    ),
+  )
 
   const addUser = (sessions: Session.Interface, sessionID: SessionID, created: number, text: string) =>
     Effect.gen(function* () {
@@ -1844,7 +1913,10 @@ describe("permission reviewer evidence", () => {
     Effect.gen(function* () {
       const sessions = yield* Session.Service
       const chat = yield* sessions.create({ title: "evidence-decisions" })
-      const addAssistantWithTool = (created: number, part: Omit<SessionV1.ToolPart, "id" | "sessionID" | "messageID" | "type">) =>
+      const addAssistantWithTool = (
+        created: number,
+        part: Omit<SessionV1.ToolPart, "id" | "sessionID" | "messageID" | "type">,
+      ) =>
         Effect.gen(function* () {
           const messageID = MessageID.ascending()
           yield* sessions.updateMessage({
@@ -1865,7 +1937,11 @@ describe("permission reviewer evidence", () => {
           yield* sessions.updatePart({ ...part, id: partID, sessionID: chat.id, messageID, type: "tool" })
           return partID
         })
-      const completedState = (tool: string, input: Record<string, unknown>, metadata: Record<string, unknown> = {}) => ({
+      const completedState = (
+        tool: string,
+        input: Record<string, unknown>,
+        metadata: Record<string, unknown> = {},
+      ) => ({
         status: "completed" as const,
         input,
         output: "ok",
@@ -1878,28 +1954,42 @@ describe("permission reviewer evidence", () => {
       yield* addAssistantWithTool(1, {
         tool: "question",
         callID: "call_q",
-        state: completedState(
-          "question",
-          { questions: [{ question: "选哪个？" }] },
-          { answers: [["方案B"]] },
-        ),
+        state: completedState("question", { questions: [{ question: "选哪个？" }] }, { answers: [["方案B"]] }),
       })
       yield* addAssistantWithTool(2, {
         tool: "bash",
         callID: "call_allowed",
-        state: { status: "running", input: { command: "ls" }, metadata: { autoReview: { status: "allowed" } }, time: { start: 0 } },
+        state: {
+          status: "running",
+          input: { command: "ls" },
+          metadata: { autoReview: { status: "allowed" } },
+          time: { start: 0 },
+        },
       })
       yield* addAssistantWithTool(3, {
         tool: "bash",
         callID: "call_rejected",
-        state: { status: "error", input: { command: "rm -rf x" }, error: "The user rejected permission for this specific tool call. Do not retry the same call or re-ask immediately; switch to a safer alternative or continue other authorized work. If the task is blocked, explain what was rejected and ask the user once.", time },
+        state: {
+          status: "error",
+          input: { command: "rm -rf x" },
+          error:
+            "The user rejected permission for this specific tool call. Do not retry the same call or re-ask immediately; switch to a safer alternative or continue other authorized work. If the task is blocked, explain what was rejected and ask the user once.",
+          time,
+        },
       })
       yield* addAssistantWithTool(4, {
         tool: "bash",
         callID: "call_denied",
-        state: completedState("bash", { command: "rm -rf y" }, {
-          autoReview: { status: "denied", result: { risk_level: "high", user_authorization: "low", rationale: "目标过宽" } },
-        }),
+        state: completedState(
+          "bash",
+          { command: "rm -rf y" },
+          {
+            autoReview: {
+              status: "denied",
+              result: { risk_level: "high", user_authorization: "low", rationale: "目标过宽" },
+            },
+          },
+        ),
       })
       yield* addAssistantWithTool(5, {
         tool: "bash",
@@ -1910,7 +2000,13 @@ describe("permission reviewer evidence", () => {
       yield* addAssistantWithTool(6, {
         tool: "bash",
         callID: "call_timed_out",
-        state: { status: "error", input: { command: "x" }, error: "auto reviewer timed out", metadata: { autoReview: { status: "timed_out" } }, time },
+        state: {
+          status: "error",
+          input: { command: "x" },
+          error: "auto reviewer timed out",
+          metadata: { autoReview: { status: "timed_out" } },
+          time,
+        },
       })
       // 普通 error（非权限拒绝）不得进入决定证据。
       yield* addAssistantWithTool(7, {
@@ -1941,15 +2037,28 @@ describe("permission reviewer evidence", () => {
         type: "tool",
         tool: "bash",
         callID: "call_hidden",
-        state: { status: "error", input: {}, error: "The user rejected permission for this specific tool call. Do not retry the same call or re-ask immediately; switch to a safer alternative or continue other authorized work. If the task is blocked, explain what was rejected and ask the user once.", time },
+        state: {
+          status: "error",
+          input: {},
+          error:
+            "The user rejected permission for this specific tool call. Do not retry the same call or re-ask immediately; switch to a safer alternative or continue other authorized work. If the task is blocked, explain what was rejected and ask the user once.",
+          time,
+        },
         hidden: { time: Date.now(), reason: "undo" },
       })
 
       const result = yield* MessageV2.reviewerEvidence(chat.id)
-      expect(result.tools.map((row) => ({ tool: row.tool, autoReviewStatus: row.autoReviewStatus, error: row.error }))).toEqual([
+      expect(
+        result.tools.map((row) => ({ tool: row.tool, autoReviewStatus: row.autoReviewStatus, error: row.error })),
+      ).toEqual([
         { tool: "question", autoReviewStatus: undefined, error: undefined },
         { tool: "bash", autoReviewStatus: "allowed", error: undefined },
-        { tool: "bash", autoReviewStatus: undefined, error: "The user rejected permission for this specific tool call. Do not retry the same call or re-ask immediately; switch to a safer alternative or continue other authorized work. If the task is blocked, explain what was rejected and ask the user once." },
+        {
+          tool: "bash",
+          autoReviewStatus: undefined,
+          error:
+            "The user rejected permission for this specific tool call. Do not retry the same call or re-ask immediately; switch to a safer alternative or continue other authorized work. If the task is blocked, explain what was rejected and ask the user once.",
+        },
         { tool: "bash", autoReviewStatus: "denied", error: undefined },
         { tool: "bash", autoReviewStatus: "fallback_user", error: undefined },
       ])
@@ -1958,15 +2067,26 @@ describe("permission reviewer evidence", () => {
       expect(result.tools[3].autoReviewRationale).toBe("目标过宽")
       // 同一证据集冷藏后仍逐字相同，inspect不能顺带清除持久cold_ref。
       const database = yield* Database.Service
-      const refs = yield* Database.withSync(database, db => {
+      const refs = yield* Database.withSync(database, (db) => {
         const rows = db.select().from(PartTable).where(eq(PartTable.session_id, chat.id)).all()
-        const results = rows.map(row => ColdStorage.freezeOwner(db, { type: "part", id: row.id, olderThanMs: 0 }))
-        expect(results.some(result => result.type === "frozen")).toBe(true)
-        return db.select({ id: PartTable.id, ref: PartTable.cold_ref }).from(PartTable).where(eq(PartTable.session_id, chat.id)).all()
+        const results = rows.map((row) => ColdStorage.freezeOwner(db, { type: "part", id: row.id, olderThanMs: 0 }))
+        expect(results.some((result) => result.type === "frozen")).toBe(true)
+        return db
+          .select({ id: PartTable.id, ref: PartTable.cold_ref })
+          .from(PartTable)
+          .where(eq(PartTable.session_id, chat.id))
+          .all()
       })
       expect(yield* MessageV2.reviewerEvidence(chat.id)).toEqual(result)
-      expect(yield* Database.withSync(database, db => db.select({ id: PartTable.id, ref: PartTable.cold_ref })
-        .from(PartTable).where(eq(PartTable.session_id, chat.id)).all())).toEqual(refs)
+      expect(
+        yield* Database.withSync(database, (db) =>
+          db
+            .select({ id: PartTable.id, ref: PartTable.cold_ref })
+            .from(PartTable)
+            .where(eq(PartTable.session_id, chat.id))
+            .all(),
+        ),
+      ).toEqual(refs)
     }),
   )
 

@@ -108,10 +108,26 @@ test("session methods use the public HTTP contract", async () => {
       if (url.endsWith("/api/session/active")) return Response.json({ data: { ses_test: { type: "running" } } })
       if (init?.method === "POST" && url.endsWith("/api/session")) return Response.json(session)
       if (url.endsWith("/api/session/preview")) return Response.json({ ses_test: ["latest user", "earlier user"] })
-      if (url.endsWith("/goal")) return Response.json(init?.method === "DELETE" ? { cleared: false } : {
-        goal: init?.method === "POST" ? { id: "goal_test", sessionID: "ses_test", objective: "test objective", status: "active",
-          tokenBudget: null, tokensUsed: 0, timeUsedSeconds: 0, time: { created: 1, updated: 1 } } : null,
-      })
+      if (url.endsWith("/goal"))
+        return Response.json(
+          init?.method === "DELETE"
+            ? { cleared: false }
+            : {
+                goal:
+                  init?.method === "POST"
+                    ? {
+                        id: "goal_test",
+                        sessionID: "ses_test",
+                        objective: "test objective",
+                        status: "active",
+                        tokenBudget: null,
+                        tokensUsed: 0,
+                        timeUsedSeconds: 0,
+                        time: { created: 1, updated: 1 },
+                      }
+                    : null,
+              },
+        )
       if (init?.method === "POST") return new Response(null, { status: 204 })
       return Response.json({ data: [session.data], cursor: { next: "next" } })
     },
@@ -144,7 +160,9 @@ test("session methods use the public HTTP contract", async () => {
   const message = await client.sessions.message({ sessionID: "ses_test", messageID: "msg_model" })
   // Native官方生成方法已消除旧SDK死调用根因，检查真实合同而非锁定SDK缺方法。
   expect(await client.sessions.goal({ sessionID: "ses_test" })).toEqual({ goal: null })
-  expect((await client.sessions.goalSet({ sessionID: "ses_test", objective: "test objective", tokenBudget: null })).goal).toMatchObject({ objective: "test objective", status: "active" })
+  expect(
+    (await client.sessions.goalSet({ sessionID: "ses_test", objective: "test objective", tokenBudget: null })).goal,
+  ).toMatchObject({ objective: "test objective", status: "active" })
   expect(await client.sessions.goalClear({ sessionID: "ses_test" })).toEqual({ cleared: false })
   // 生成客户端必须暴露真实批量POST，不得回到逐会话分页。
   const previews = await client.sessions.preview({ sessionIDs: ["ses_test", "ses_missing"], limit: 2 })
@@ -180,7 +198,9 @@ test("session methods use the public HTTP contract", async () => {
     ["POST", "http://localhost:3000/api/session/preview"],
   ])
   expect(requests.at(-1)?.init?.body).toBe(JSON.stringify({ sessionIDs: ["ses_test", "ses_missing"], limit: 2 }))
-  expect(requests.find(request => request.url.endsWith("/goal") && request.init?.method === "POST")?.init?.body).toBe(JSON.stringify({ objective: "test objective", tokenBudget: null }))
+  expect(requests.find((request) => request.url.endsWith("/goal") && request.init?.method === "POST")?.init?.body).toBe(
+    JSON.stringify({ objective: "test objective", tokenBudget: null }),
+  )
   const body = requests.find((request) => request.url.endsWith("/api/session/ses_test/prompt"))?.init?.body
   if (typeof body !== "string") throw new Error("Expected JSON request body")
   expect(JSON.parse(body)).toEqual({

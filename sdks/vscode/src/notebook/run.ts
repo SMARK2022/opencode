@@ -30,14 +30,16 @@ export async function runNotebook(input: Record<string, unknown>, signal?: Abort
   if (!filePath) throw new Error("filePath is required")
   const type = input.type
   // 显式非字符串、null 或未知类型仍按原严格边界拒绝，不能被 stringProp 隐去。
-  if (type !== undefined && type !== "cell" && type !== "range") throw new Error(`Invalid run type: ${String(type)}. Expected one of: cell, range.`)
+  if (type !== undefined && type !== "cell" && type !== "range")
+    throw new Error(`Invalid run type: ${String(type)}. Expected one of: cell, range.`)
   const cellId = stringProp(input, "cellId")
   if (!cellId) throw new Error("cellId is required")
   const notebook = await resolveNotebook(filePath)
   // UI 等待前按共享 resolver 固定格对象，不能在每次执行时按漂移索引重新选格。
   const cells = resolveRunTarget(notebook, cellId, stringProp(input, "endCellId"))
   // 使用解析后的身份允许同格别名，但不能把明确的单格请求扩成多格执行。
-  if (type === "cell" && cells.length > 1) throw new Error("endCellId must not be set when type is cell unless it equals cellId")
+  if (type === "cell" && cells.length > 1)
+    throw new Error("endCellId must not be set when type is cell unless it equals cellId")
   const positions = cells.map((cell) => cell.index)
   // await 前保留目标格对象；其它格的源码或输出变化不应阻止本次执行。
   // showNotebookDocument 为官方 URI 解析提供已打开的编辑器，不把焦点当身份。
@@ -51,8 +53,8 @@ export async function runNotebook(input: Record<string, unknown>, signal?: Abort
     // 引导 agent 安装 Jupyter 扩展并配置 kernel
     throw new Error(
       "VS Code command notebook.cell.execute is not available. " +
-      "Ensure the Jupyter extension (ms-toolsai.jupyter) is installed and activated, " +
-      "then call vscode_notebook_env with operation=configure to select a kernel."
+        "Ensure the Jupyter extension (ms-toolsai.jupyter) is installed and activated, " +
+        "then call vscode_notebook_env with operation=configure to select a kernel.",
     )
   }
   // 冷启动由原生执行入口负责，metadata和已启动kernel都不是执行资格。
@@ -72,18 +74,33 @@ export async function runNotebook(input: Record<string, unknown>, signal?: Abort
     signal?.throwIfAborted()
     // Markup 保留在范围显示中，但不能提交给原生代码执行命令。
     if (cell.kind !== vscode.NotebookCellKind.Code) {
-      results.push({ i: c1(cell), id: copilotLikeCellId(cell), exec: "skipped (not code)", execution: executionState(cell), existing_outs: [], artifacts: [] })
+      results.push({
+        i: c1(cell),
+        id: copilotLikeCellId(cell),
+        exec: "skipped (not code)",
+        execution: executionState(cell),
+        existing_outs: [],
+        artifacts: [],
+      })
       continue
     }
     if (stopped) {
       // 跳过格的已有 MIME 是历史证据，stale 标签不能被解释为本次执行输出。
       const outs = existingOuts(cell)
-      results.push({ i: c1(cell), id: copilotLikeCellId(cell), exec: "skipped (previous cell failed)", execution: executionState(cell), existing_outs: outs.length > 0 ? [`stale:${outs.join(",")}`] : outs, artifacts: [] })
+      results.push({
+        i: c1(cell),
+        id: copilotLikeCellId(cell),
+        exec: "skipped (previous cell failed)",
+        execution: executionState(cell),
+        existing_outs: outs.length > 0 ? [`stale:${outs.join(",")}`] : outs,
+        artifacts: [],
+      })
       continue
     }
 
     // 前一格的执行和导出都有 await，开始下一格前必须再次验证同一组保留对象。
-    if (notebook.isClosed || cells.some((target) => notebook.getCells()[target.index] !== target)) throw new Error("Notebook target cells changed during execution")
+    if (notebook.isClosed || cells.some((target) => notebook.getCells()[target.index] !== target))
+      throw new Error("Notebook target cells changed during execution")
     editor.selection = new vscode.NotebookRange(cell.index, cell.index + 1)
     editor.revealRange(new vscode.NotebookRange(cell.index, cell.index + 1))
 
@@ -94,11 +111,18 @@ export async function runNotebook(input: Record<string, unknown>, signal?: Abort
       // 命令可能不返回，deadline须覆盖原生命令等待；目标仍是已保留文档与格。
       executionSummary = await Promise.race([
         wait.promise,
-        vscode.commands.executeCommand("notebook.cell.execute", { ranges: [{ start: cell.index, end: cell.index + 1 }], document: notebook.uri, autoReveal: false }).then(() => wait.promise),
+        vscode.commands
+          .executeCommand("notebook.cell.execute", {
+            ranges: [{ start: cell.index, end: cell.index + 1 }],
+            document: notebook.uri,
+            autoReveal: false,
+          })
+          .then(() => wait.promise),
       ])
       signal?.throwIfAborted()
       // 等待器因目标失效唤醒时仍由原身份守卫报错，不把它降级成超时结果。
-      if (notebook.isClosed || cells.some((target) => notebook.getCells()[target.index] !== target)) throw new Error("Notebook target cells changed during execution")
+      if (notebook.isClosed || cells.some((target) => notebook.getCells()[target.index] !== target))
+        throw new Error("Notebook target cells changed during execution")
     } finally {
       // 命令拒绝也释放预注册资源，不能只在正常完成或超时事件中清理。
       wait.dispose()
@@ -118,7 +142,9 @@ export async function runNotebook(input: Record<string, unknown>, signal?: Abort
     // 超时文案只改展示字段，原生执行状态及已捕获输出不能补成成功或取消。
     // 只给恢复指引，不自动中断；原生状态与捕获输出仍由既有owner负责。
     // 超时不证明取消，用户可显式stop或info检查内核。
-    if (!executionSummary) result.exec = "timed out — the cell may still be running. Use vscode_notebook_env operation=stop to interrupt the kernel, or operation=info to check kernel status."
+    if (!executionSummary)
+      result.exec =
+        "timed out — the cell may still be running. Use vscode_notebook_env operation=stop to interrupt the kernel, or operation=info to check kernel status."
     results.push(result)
   }
 
@@ -126,7 +152,14 @@ export async function runNotebook(input: Record<string, unknown>, signal?: Abort
   return await compactRunResult(notebook, targetDesc, !stopped, cells, results, failedIndex)
 }
 
-async function compactRunResult(notebook: vscode.NotebookDocument, target: string, completed: boolean, targets: vscode.NotebookCell[], results: Array<Awaited<ReturnType<typeof compactRunCell>>>, failedIndex?: number) {
+async function compactRunResult(
+  notebook: vscode.NotebookDocument,
+  target: string,
+  completed: boolean,
+  targets: vscode.NotebookCell[],
+  results: Array<Awaited<ReturnType<typeof compactRunCell>>>,
+  failedIndex?: number,
+) {
   const info = {
     path: notebook.uri.fsPath || notebook.uri.toString(),
     // 串行各格分别捕获结果；整次响应只报告收敛时的文档状态，不刷新单格快照。
@@ -136,7 +169,8 @@ async function compactRunResult(notebook: vscode.NotebookDocument, target: strin
     target,
   }
   // artifact 导出也有异步边界，目标在导出期间被删除或替换时明确拒绝返回完成结果。
-  if (notebook.isClosed || targets.some((cell) => notebook.getCells()[cell.index] !== cell)) throw new Error("Notebook target cells changed during execution")
+  if (notebook.isClosed || targets.some((cell) => notebook.getCells()[cell.index] !== cell))
+    throw new Error("Notebook target cells changed during execution")
   // 身份判定不能重选目标或重采字节，results 已由每次实际执行后的快照固定。
   return {
     ran: true,
@@ -167,7 +201,8 @@ function resolveRunTarget(notebook: vscode.NotebookDocument, cellId: string, end
   if (!endCellId) return [startCell]
   const endCell = resolveCell(endCellId)
   // 逆序直接拒绝，不能让空 slice 被当作一次成功执行。
-  if (endCell.index < startCell.index) throw new Error("endCellId must refer to the same cell or a later cell than cellId")
+  if (endCell.index < startCell.index)
+    throw new Error("endCellId must refer to the same cell or a later cell than cellId")
   return notebook.getCells().slice(startCell.index, endCell.index + 1)
 }
 
@@ -177,7 +212,11 @@ function describeRunTarget(cells: vscode.NotebookCell[]) {
   return `${cellRef(cells[0])}..${cellRef(cells[cells.length - 1])}`
 }
 
-async function compactRunCell(notebook: vscode.NotebookDocument, cell: vscode.NotebookCell, snapshot: ReturnType<typeof captureNotebookCellOutput>) {
+async function compactRunCell(
+  notebook: vscode.NotebookDocument,
+  cell: vscode.NotebookCell,
+  snapshot: ReturnType<typeof captureNotebookCellOutput>,
+) {
   return {
     // 当前 index 只用于解释范围和输出归属，插入删除后应重新读取 summary。
     i: snapshot.data.cell.i,

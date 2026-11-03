@@ -42,34 +42,34 @@ Current Session GOAL:
 
 ## 3. Repository Context
 
-| Source | Why it constrains this task |
-| --- | --- |
-| `CONTEXT.md` | `session/` owns Session lifecycle; `effect/` owns `InstanceState`; v1 `session/` is current production. |
-| Root `AGENTS.md` | Default branch is `dev`; package tests and `bun typecheck` run from `packages/opencode`; current dirty work must remain untouched. |
-| `packages/opencode/AGENTS.md` | `InstanceState` is for state that must differ by directory; shared state must not be forced through directory ownership. |
-| `packages/opencode/test/AGENTS.md` | Use Effect fixtures, readiness/public seams, package-local tests, and avoid duplicated production logic. |
-| `docs/adr/README.md` | A one-module correction of transient identity ownership is not a new load-bearing ADR. |
-| `.opencode/policy/first-principles-engineering.md` | Repair the first divergence at the owning primary path; no fallback or downstream UI compensation. |
+| Source                                                | Why it constrains this task                                                                                                                                                                                                                                  |
+| ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `CONTEXT.md`                                          | `session/` owns Session lifecycle; `effect/` owns `InstanceState`; v1 `session/` is current production.                                                                                                                                                      |
+| Root `AGENTS.md`                                      | Default branch is `dev`; package tests and `bun typecheck` run from `packages/opencode`; current dirty work must remain untouched.                                                                                                                           |
+| `packages/opencode/AGENTS.md`                         | `InstanceState` is for state that must differ by directory; shared state must not be forced through directory ownership.                                                                                                                                     |
+| `packages/opencode/test/AGENTS.md`                    | Use Effect fixtures, readiness/public seams, package-local tests, and avoid duplicated production logic.                                                                                                                                                     |
+| `docs/adr/README.md`                                  | A one-module correction of transient identity ownership is not a new load-bearing ADR.                                                                                                                                                                       |
+| `.opencode/policy/first-principles-engineering.md`    | Repair the first divergence at the owning primary path; no fallback or downstream UI compensation.                                                                                                                                                           |
 | `docs/plans/session-runner-ownership-tool-closure.md` | Current routing already binds Session-specific local requests to persisted `session.directory`; this task must not globalize Run state or undo that repair. Its old non-goal for `/session/status` is superseded only by the new explicit requirement above. |
 
 ## 4. Files and Evidence Read
 
-| Evidence | Relevance | Evidence class |
-| --- | --- | --- |
-| `packages/opencode/src/session/status.ts` | `SessionStatus` stores a separate active map in each directory-keyed `InstanceState`; `idle` deletes entries. | observed |
-| `packages/opencode/src/effect/instance-state.ts` | `InstanceState.get` keys its `ScopedCache` by current `InstanceRef.directory`. | contracted |
-| `packages/opencode/src/session/run-state.ts` | Runner transitions call `status.set(busy/idle)` and continue to own per-directory execution resources. | contracted |
-| `packages/opencode/src/effect/runner.ts` | `ensureRunning` joins an existing run; status display is not responsible for queue semantics. | contracted |
-| `packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts` | `/session/status` returns `Object.fromEntries(statusSvc.list())`; it has no Session ID from which to select another directory. | observed |
-| `packages/opencode/src/server/routes/instance/httpapi/middleware/workspace-routing.ts` | Session-specific local requests use persisted `session.directory`; status snapshot requests without Session ID use caller context. | observed |
-| `packages/opencode/src/cli/cmd/tui/context/sync.tsx` | Bootstrap/reconnect loads one `/session/status` snapshot; SSE then updates `session_status[sessionID]`. | observed |
-| `packages/opencode/src/cli/cmd/tui/component/dialog-session-list.tsx` | Each Session row shows a spinner only for its exact `session_status[sessionID]` busy/retry value. | contracted |
-| `packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx` | Entered Session Prompt/Footer uses the same exact Session ID status map. | contracted |
-| `packages/opencode/src/cli/cmd/tui/context/event.ts` | Same-Project status events are accepted independently of directory; a newly attached TUI still needs a correct non-replay snapshot. | observed |
-| Incident DB row `ses_07f7bd73affeuQMK5YHFFr4op3` | Session directory was `/Users/sunbenteng/Project/opencode/thirdparty` while the TUI daemon client ran from `/Users/sunbenteng/Project/opencode`; Project identity was the same. | observed |
-| Live daemon/DB timeline from the incident | The parent request remained active while a newly opened TUI displayed no running marker, proving a false-idle observation rather than true Runner idle. | observed |
-| `/var/folders/x9/wyq90jb50kxf62wvbs505q4nn7ltx4/T/opencode/session-status-cross-directory-red.test.ts` | Minimal public-interface reproduction: set busy in directory A, read list/get in B. | observed |
-| `packages/opencode/test/fixture/fixture.ts` and `test/lib/effect.ts` | Existing multi-directory Effect fixtures support one durable regression test without mocks. | contracted |
+| Evidence                                                                                               | Relevance                                                                                                                                                                       | Evidence class |
+| ------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------- |
+| `packages/opencode/src/session/status.ts`                                                              | `SessionStatus` stores a separate active map in each directory-keyed `InstanceState`; `idle` deletes entries.                                                                   | observed       |
+| `packages/opencode/src/effect/instance-state.ts`                                                       | `InstanceState.get` keys its `ScopedCache` by current `InstanceRef.directory`.                                                                                                  | contracted     |
+| `packages/opencode/src/session/run-state.ts`                                                           | Runner transitions call `status.set(busy/idle)` and continue to own per-directory execution resources.                                                                          | contracted     |
+| `packages/opencode/src/effect/runner.ts`                                                               | `ensureRunning` joins an existing run; status display is not responsible for queue semantics.                                                                                   | contracted     |
+| `packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts`                             | `/session/status` returns `Object.fromEntries(statusSvc.list())`; it has no Session ID from which to select another directory.                                                  | observed       |
+| `packages/opencode/src/server/routes/instance/httpapi/middleware/workspace-routing.ts`                 | Session-specific local requests use persisted `session.directory`; status snapshot requests without Session ID use caller context.                                              | observed       |
+| `packages/opencode/src/cli/cmd/tui/context/sync.tsx`                                                   | Bootstrap/reconnect loads one `/session/status` snapshot; SSE then updates `session_status[sessionID]`.                                                                         | observed       |
+| `packages/opencode/src/cli/cmd/tui/component/dialog-session-list.tsx`                                  | Each Session row shows a spinner only for its exact `session_status[sessionID]` busy/retry value.                                                                               | contracted     |
+| `packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx`                                         | Entered Session Prompt/Footer uses the same exact Session ID status map.                                                                                                        | contracted     |
+| `packages/opencode/src/cli/cmd/tui/context/event.ts`                                                   | Same-Project status events are accepted independently of directory; a newly attached TUI still needs a correct non-replay snapshot.                                             | observed       |
+| Incident DB row `ses_07f7bd73affeuQMK5YHFFr4op3`                                                       | Session directory was `/Users/sunbenteng/Project/opencode/thirdparty` while the TUI daemon client ran from `/Users/sunbenteng/Project/opencode`; Project identity was the same. | observed       |
+| Live daemon/DB timeline from the incident                                                              | The parent request remained active while a newly opened TUI displayed no running marker, proving a false-idle observation rather than true Runner idle.                         | observed       |
+| `/var/folders/x9/wyq90jb50kxf62wvbs505q4nn7ltx4/T/opencode/session-status-cross-directory-red.test.ts` | Minimal public-interface reproduction: set busy in directory A, read list/get in B.                                                                                             | observed       |
+| `packages/opencode/test/fixture/fixture.ts` and `test/lib/effect.ts`                                   | Existing multi-directory Effect fixtures support one durable regression test without mocks.                                                                                     | contracted     |
 
 ## 5. Current Behavior
 
@@ -99,36 +99,36 @@ active snapshot registry ownership changes.
 
 ## 6. Supported Input Domain and Reachability
 
-| Input or condition | Producer | Upstream guarantees | Reachable path | Owner | Classification |
-| --- | --- | --- | --- | --- | --- |
-| One local Session is busy in its persisted directory | `SessionRunState` | Session ID is globally unique in the database; Session-specific requests use persisted directory | Runner `onBusy` -> `SessionStatus.set` | `SessionStatus` | observed |
-| A TUI lists or enters that Session from another related directory | Session list/path query + TUI bootstrap | The rendered row carries exact Session ID; `/session/status` has no Session ID | `refreshStatus` -> status handler -> `SessionStatus.list` | `SessionStatus` | observed |
-| Newly connected TUI missed earlier busy SSE | daemon SSE is non-replay | Bootstrap status snapshot is the recovery authority | `server.connected/bootstrap` -> `refreshStatus` | `SessionStatus.list` | observed |
-| Busy/retry changes after bootstrap | Runner/Retry producer | Event payload carries exact Session ID | `set` -> Bus/GlobalBus -> TUI sync store | existing event path | contracted |
-| Session becomes idle | Runner completion/cancel | `onIdle` calls status idle | `set(idle)` -> event + delete | `SessionStatus` | contracted |
-| Remote selected Workspace | TUI Workspace routing | Existing status request is forwarded to the owning daemon | remote daemon executes same status contract | Workspace routing | reachable |
-| Historical inactive Sessions | SQLite/list endpoint | Runtime status is absent by definition | no status registry entry | no new owner | contracted |
+| Input or condition                                                | Producer                                | Upstream guarantees                                                                              | Reachable path                                            | Owner                | Classification |
+| ----------------------------------------------------------------- | --------------------------------------- | ------------------------------------------------------------------------------------------------ | --------------------------------------------------------- | -------------------- | -------------- |
+| One local Session is busy in its persisted directory              | `SessionRunState`                       | Session ID is globally unique in the database; Session-specific requests use persisted directory | Runner `onBusy` -> `SessionStatus.set`                    | `SessionStatus`      | observed       |
+| A TUI lists or enters that Session from another related directory | Session list/path query + TUI bootstrap | The rendered row carries exact Session ID; `/session/status` has no Session ID                   | `refreshStatus` -> status handler -> `SessionStatus.list` | `SessionStatus`      | observed       |
+| Newly connected TUI missed earlier busy SSE                       | daemon SSE is non-replay                | Bootstrap status snapshot is the recovery authority                                              | `server.connected/bootstrap` -> `refreshStatus`           | `SessionStatus.list` | observed       |
+| Busy/retry changes after bootstrap                                | Runner/Retry producer                   | Event payload carries exact Session ID                                                           | `set` -> Bus/GlobalBus -> TUI sync store                  | existing event path  | contracted     |
+| Session becomes idle                                              | Runner completion/cancel                | `onIdle` calls status idle                                                                       | `set(idle)` -> event + delete                             | `SessionStatus`      | contracted     |
+| Remote selected Workspace                                         | TUI Workspace routing                   | Existing status request is forwarded to the owning daemon                                        | remote daemon executes same status contract               | Workspace routing    | reachable      |
+| Historical inactive Sessions                                      | SQLite/list endpoint                    | Runtime status is absent by definition                                                           | no status registry entry                                  | no new owner         | contracted     |
 
 Speculative rows cannot justify production logic or blocking findings.
 
 ## 7. Required Invariants
 
-| ID | Behavioral invariant | Evidence | Existing test |
-| --- | --- | --- | --- |
-| INV-01 | A non-idle status is keyed only by its globally unique Session ID and is observable from any local directory context in the same daemon. | User requirement + incident + Session ID schema | No; red harness fails. |
-| INV-02 | Session list and entered Session consume the same authoritative `sessionID -> status` snapshot and SSE updates. | TUI consumers | Existing UI tests cover event consumption, not cross-directory snapshot. |
-| INV-03 | Idle removes the active registry entry, so memory and snapshot work scale with active Sessions only. | Existing `status.set` behavior | Existing status callers assume idle-default; new test will assert cleanup. |
-| INV-04 | Status get/set remain average O(1); list remains O(A), where A is daemon-active non-idle Sessions, with no DB or directory traversal. | Performance requirement + Map contract | Structural verification and one active-only behavior test. |
-| INV-05 | Per-directory Runner/resource ownership and prompt queue behavior remain unchanged. | Existing routing plan and Runner contract | Existing prompt/server suites. |
-| INV-06 | Wire schema, endpoint count, event payload, and generated SDK remain unchanged. | User scope/minimality | Typecheck and diff inspection. |
-| INV-07 | Exactly one new behavioral test covers cross-directory visibility and idle cleanup through `SessionStatus.Interface`. | Session GOAL | Planned new test. |
+| ID     | Behavioral invariant                                                                                                                     | Evidence                                        | Existing test                                                              |
+| ------ | ---------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------- | -------------------------------------------------------------------------- |
+| INV-01 | A non-idle status is keyed only by its globally unique Session ID and is observable from any local directory context in the same daemon. | User requirement + incident + Session ID schema | No; red harness fails.                                                     |
+| INV-02 | Session list and entered Session consume the same authoritative `sessionID -> status` snapshot and SSE updates.                          | TUI consumers                                   | Existing UI tests cover event consumption, not cross-directory snapshot.   |
+| INV-03 | Idle removes the active registry entry, so memory and snapshot work scale with active Sessions only.                                     | Existing `status.set` behavior                  | Existing status callers assume idle-default; new test will assert cleanup. |
+| INV-04 | Status get/set remain average O(1); list remains O(A), where A is daemon-active non-idle Sessions, with no DB or directory traversal.    | Performance requirement + Map contract          | Structural verification and one active-only behavior test.                 |
+| INV-05 | Per-directory Runner/resource ownership and prompt queue behavior remain unchanged.                                                      | Existing routing plan and Runner contract       | Existing prompt/server suites.                                             |
+| INV-06 | Wire schema, endpoint count, event payload, and generated SDK remain unchanged.                                                          | User scope/minimality                           | Typecheck and diff inspection.                                             |
+| INV-07 | Exactly one new behavioral test covers cross-directory visibility and idle cleanup through `SessionStatus.Interface`.                    | Session GOAL                                    | Planned new test.                                                          |
 
 ## 8. First Divergence and Root Cause
 
-| Invariant | First divergence | Owning module/interface | Proof |
-| --- | --- | --- | --- |
+| Invariant      | First divergence                                                                                                                                                  | Owning module/interface                          | Proof                                                                    |
+| -------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------ | ------------------------------------------------------------------------ |
 | INV-01, INV-02 | `SessionStatus.set/list/get` obtains a directory-specific Map via `InstanceState.get(state)`, so the same Session ID is absent to an observer in another context. | `SessionStatus.Interface` in `session/status.ts` | Red harness receives `undefined` in directory B after busy was set in A. |
-| INV-03, INV-04 | No current violation of idle deletion or Map complexity; the repair must preserve deletion while removing ScopedCache lookup from get/set. | `SessionStatus.Interface` | Current source and Map behavior. |
+| INV-03, INV-04 | No current violation of idle deletion or Map complexity; the repair must preserve deletion while removing ScopedCache lookup from get/set.                        | `SessionStatus.Interface`                        | Current source and Map behavior.                                         |
 
 Red-capable command:
 
@@ -152,13 +152,13 @@ Session ID proves whether the public interface partitions it.
 
 ## 9. Responsibility and Seam
 
-| Concern | Owner | Interface promise | Why it belongs here | Why another module does not own it |
-| --- | --- | --- | --- | --- |
-| Active Session status registry | `SessionStatus` | get/list/set status by Session ID | It creates, stores, removes, and publishes the status | TUI and HTTP only consume the interface. |
-| Runner/resource ownership | `SessionRunState` | Single-flight execution in canonical directory | Resource lifetime genuinely differs by directory | This task does not change it. |
-| Snapshot serialization | Session HTTP handler | Encode current status map | Existing `statusSvc.list` is sufficient once owner is correct | Handler must not traverse Sessions or directories. |
-| Row rendering | TUI Session list/Prompt | Render exact Session ID status | Existing behavior is already correct | UI inference would duplicate runtime truth. |
-| Cross-directory behavior test | `SessionStatus.Interface` test seam | Observe set/list/get/idle contract | It isolates the first divergence without private access | HTTP/UI tests would add unrelated routing/render setup. |
+| Concern                        | Owner                               | Interface promise                              | Why it belongs here                                           | Why another module does not own it                      |
+| ------------------------------ | ----------------------------------- | ---------------------------------------------- | ------------------------------------------------------------- | ------------------------------------------------------- |
+| Active Session status registry | `SessionStatus`                     | get/list/set status by Session ID              | It creates, stores, removes, and publishes the status         | TUI and HTTP only consume the interface.                |
+| Runner/resource ownership      | `SessionRunState`                   | Single-flight execution in canonical directory | Resource lifetime genuinely differs by directory              | This task does not change it.                           |
+| Snapshot serialization         | Session HTTP handler                | Encode current status map                      | Existing `statusSvc.list` is sufficient once owner is correct | Handler must not traverse Sessions or directories.      |
+| Row rendering                  | TUI Session list/Prompt             | Render exact Session ID status                 | Existing behavior is already correct                          | UI inference would duplicate runtime truth.             |
+| Cross-directory behavior test  | `SessionStatus.Interface` test seam | Observe set/list/get/idle contract             | It isolates the first divergence without private access       | HTTP/UI tests would add unrelated routing/render setup. |
 
 ## 10. Single Approved Primary-Path Design
 
@@ -192,53 +192,53 @@ is introduced.
 
 ## 11. Secondary and Replacement Path Inventory
 
-| Path | Current or proposed | Classification | Produces success? | Decision-surface share | Disposition |
-| --- | --- | --- | --- | --- | --- |
-| Layer-local active Map keyed by Session ID | proposed | primary-contract branch | yes | 100% | implement |
-| `idle` publish then delete | current/preserved | primary-contract branch | yes | existing branch | preserve |
-| Bus/GlobalBus SSE event | current | contracted pass-through | yes | unchanged | preserve |
-| TUI Message/Part inference | rejected | forbidden fallback | yes | 0% | do not add |
-| Ancestor/descendant status traversal | rejected | forbidden alternate implementation | yes | 0% | do not add |
-| Batch/per-Session status query parameters | rejected | forbidden alternate implementation | yes | 0% | do not add |
+| Path                                       | Current or proposed | Classification                     | Produces success? | Decision-surface share | Disposition |
+| ------------------------------------------ | ------------------- | ---------------------------------- | ----------------- | ---------------------- | ----------- |
+| Layer-local active Map keyed by Session ID | proposed            | primary-contract branch            | yes               | 100%                   | implement   |
+| `idle` publish then delete                 | current/preserved   | primary-contract branch            | yes               | existing branch        | preserve    |
+| Bus/GlobalBus SSE event                    | current             | contracted pass-through            | yes               | unchanged              | preserve    |
+| TUI Message/Part inference                 | rejected            | forbidden fallback                 | yes               | 0%                     | do not add  |
+| Ancestor/descendant status traversal       | rejected            | forbidden alternate implementation | yes               | 0%                     | do not add  |
+| Batch/per-Session status query parameters  | rejected            | forbidden alternate implementation | yes               | 0%                     | do not add  |
 
 New alternate success paths: 0. Diagnostic paths: 0. Fallback ratio: 0%.
 
 ## 12. Workaround Deletion and Replacement
 
-| Existing workaround or duplicate | Why it existed | Why the approved route supersedes it | Delete or collapse location |
-| --- | --- | --- | --- |
+| Existing workaround or duplicate                       | Why it existed                                                                                          | Why the approved route supersedes it                                                                     | Delete or collapse location                                                           |
+| ------------------------------------------------------ | ------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
 | Directory-keyed `InstanceState` inside `SessionStatus` | Followed a broad per-instance state pattern although Session ID already supplies global daemon identity | It causes the false snapshot and adds a ScopedCache lookup without protecting a directory-owned resource | Remove state wrapper/import and four `InstanceState.get` uses in `session/status.ts`. |
 
 No downstream UI workaround exists or will be added.
 
 ## 13. Forward Traceability
 
-| Requirement or invariant | Production path | Planned file/change | Behavioral test |
-| --- | --- | --- | --- |
-| Session list row shows true busy state | Runner set -> global active Map -> `/session/status` -> exact Session ID | `src/session/status.ts`: layer-local Map | One test sets in A and lists in B. |
-| Entered Session shows true busy state | Same snapshot/store -> Prompt exact Session ID | No TUI change | Same test also calls `get` in B. |
-| No directory traversal/redundant filters | Direct Map read | Remove `InstanceState` dependency; add no query/filter | Diff inspection. |
-| High performance | O(1) get/set; O(A) list; active-only deletion | Direct Map and preserved idle delete | Same test verifies idle removes entry; type/diff inspection proves no I/O. |
-| One test only | Public status seam | Add `test/session/status.test.ts` containing one test | Focused command. |
-| No schema/API changes | Existing interface and endpoint | No schema/generated/TUI edits | Typecheck and changed-file inspection. |
-| <=4 code files and <=600 lines | One production + one test file | Two code files, expected <50 net lines | `git diff --stat` and line count. |
+| Requirement or invariant                 | Production path                                                          | Planned file/change                                    | Behavioral test                                                            |
+| ---------------------------------------- | ------------------------------------------------------------------------ | ------------------------------------------------------ | -------------------------------------------------------------------------- |
+| Session list row shows true busy state   | Runner set -> global active Map -> `/session/status` -> exact Session ID | `src/session/status.ts`: layer-local Map               | One test sets in A and lists in B.                                         |
+| Entered Session shows true busy state    | Same snapshot/store -> Prompt exact Session ID                           | No TUI change                                          | Same test also calls `get` in B.                                           |
+| No directory traversal/redundant filters | Direct Map read                                                          | Remove `InstanceState` dependency; add no query/filter | Diff inspection.                                                           |
+| High performance                         | O(1) get/set; O(A) list; active-only deletion                            | Direct Map and preserved idle delete                   | Same test verifies idle removes entry; type/diff inspection proves no I/O. |
+| One test only                            | Public status seam                                                       | Add `test/session/status.test.ts` containing one test  | Focused command.                                                           |
+| No schema/API changes                    | Existing interface and endpoint                                          | No schema/generated/TUI edits                          | Typecheck and changed-file inspection.                                     |
+| <=4 code files and <=600 lines           | One production + one test file                                           | Two code files, expected <50 net lines                 | `git diff --stat` and line count.                                          |
 
 ## 14. Reverse Traceability
 
-| Proposed production concept | Requirement ID | Evidence | Why existing logic cannot carry it |
-| --- | --- | --- | --- |
-| Layer-local Session-ID active Map | INV-01, INV-02, INV-04 | Red harness and user identity requirement | Existing Map is hidden behind directory-keyed `InstanceState`, so observers select different maps. |
-| Preserve idle deletion on shared Map | INV-03, INV-04 | Existing behavior and bounded-memory requirement | Omitting deletion would retain inactive history and violate performance scope. |
+| Proposed production concept          | Requirement ID         | Evidence                                         | Why existing logic cannot carry it                                                                 |
+| ------------------------------------ | ---------------------- | ------------------------------------------------ | -------------------------------------------------------------------------------------------------- |
+| Layer-local Session-ID active Map    | INV-01, INV-02, INV-04 | Red harness and user identity requirement        | Existing Map is hidden behind directory-keyed `InstanceState`, so observers select different maps. |
+| Preserve idle deletion on shared Map | INV-03, INV-04         | Existing behavior and bounded-memory requirement | Omitting deletion would retain inactive history and violate performance scope.                     |
 
 No other production concept is proposed.
 
 ## 15. File-Level Change Plan
 
-| File | Add / modify / delete | Exact responsibility of the change | Expected line delta |
-| --- | --- | --- | --- |
-| `packages/opencode/src/session/status.ts` | modify | Replace directory-keyed status state with one layer-local active Map; preserve interface/events/idle cleanup. | +3/-9 executable/comment lines, plus import cleanup |
-| `packages/opencode/test/session/status.test.ts` | add | One cross-directory public-interface test covering busy list/get and idle removal. | +25 to +35 |
-| `docs/plans/session-status-cross-directory-visibility.md` | add/modify | Canonical plan, audit and implementation evidence. | documentation only |
+| File                                                      | Add / modify / delete | Exact responsibility of the change                                                                            | Expected line delta                                 |
+| --------------------------------------------------------- | --------------------- | ------------------------------------------------------------------------------------------------------------- | --------------------------------------------------- |
+| `packages/opencode/src/session/status.ts`                 | modify                | Replace directory-keyed status state with one layer-local active Map; preserve interface/events/idle cleanup. | +3/-9 executable/comment lines, plus import cleanup |
+| `packages/opencode/test/session/status.test.ts`           | add                   | One cross-directory public-interface test covering busy list/get and idle removal.                            | +25 to +35                                          |
+| `docs/plans/session-status-cross-directory-visibility.md` | add/modify            | Canonical plan, audit and implementation evidence.                                                            | documentation only                                  |
 
 ## 16. TDD Behavior Slices
 
@@ -246,9 +246,9 @@ Agreed seam: `SessionStatus.Interface` (`set`, `list`, `get`) under two real
 `InstanceRef` contexts. This is the interface consumed by the HTTP handler and
 Runner; it avoids private state and independently uses a literal expected status.
 
-| Order | Red behavior | Why current code fails | Minimal green behavior | Regression protected |
-| --- | --- | --- | --- | --- |
-| 1 | One test sets Session S busy in directory A; list/get in B must report busy; then idle must remove S. | `InstanceState.get` selects separate Maps for A and B. | Use one layer-local Map keyed by S while preserving idle delete. | False idle in Session list/entered TUI after cross-directory bootstrap and active-map boundedness. |
+| Order | Red behavior                                                                                          | Why current code fails                                 | Minimal green behavior                                           | Regression protected                                                                               |
+| ----- | ----------------------------------------------------------------------------------------------------- | ------------------------------------------------------ | ---------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| 1     | One test sets Session S busy in directory A; list/get in B must report busy; then idle must remove S. | `InstanceState.get` selects separate Maps for A and B. | Use one layer-local Map keyed by S while preserving idle delete. | False idle in Session list/entered TUI after cross-directory bootstrap and active-map boundedness. |
 
 No second test is planned because the user explicitly requested one test and
 the single vertical slice covers production identity plus cleanup. Existing
@@ -256,10 +256,10 @@ prompt/server/TUI suites provide regression breadth.
 
 ## 17. Chinese Comment Budget
 
-| Metric | Estimate | Method |
-| --- | --- | --- |
-| Effective changed code lines `E` | 24-30 | Production executable changes plus the new test body; imports/blank/format-only excluded. |
-| Required Chinese explanatory comments `C` | 4-5 | `ceil(E * 0.15)` over the upper observed implementation count. |
+| Metric                                    | Estimate | Method                                                                                    |
+| ----------------------------------------- | -------- | ----------------------------------------------------------------------------------------- |
+| Effective changed code lines `E`          | 24-30    | Production executable changes plus the new test body; imports/blank/format-only excluded. |
+| Required Chinese explanatory comments `C` | 4-5      | `ceil(E * 0.15)` over the upper observed implementation count.                            |
 
 Planned qualifying nearby Chinese comments:
 
@@ -271,17 +271,17 @@ Planned qualifying nearby Chinese comments:
 
 ## 18. Verification
 
-| Command | Working directory | Evidence produced |
-| --- | --- | --- |
-| `bun test test/session/status.test.ts` | `packages/opencode` | New cross-directory behavior is green. |
-| `bun test test/session/prompt.test.ts` | `packages/opencode` | Runner busy/idle, queue, cancel, and Task regressions remain green. |
-| `bun test test/server/httpapi-session.test.ts` | `packages/opencode` | Existing `/session/status` and Session HTTP behavior remain green. |
-| `bun test test/cli/cmd/tui/prompt-submit-transport.test.tsx` | `packages/opencode` | Prompt/Footer status event consumption remains green. |
-| `bun test test/cli/cmd/tui/session-message-render.test.tsx` | `packages/opencode` | Session/Subagent status rendering remains green. |
-| `bun typecheck` | `packages/opencode` | Package types and unchanged public interface compile. |
-| `bun test /var/folders/x9/wyq90jb50kxf62wvbs505q4nn7ltx4/T/opencode/session-status-cross-directory-red.test.ts` | `packages/opencode` | Original minimized feedback loop is green after implementation. |
-| `git diff --check -- packages/opencode/src/session/status.ts packages/opencode/test/session/status.test.ts docs/plans/session-status-cross-directory-visibility.md` | repository root | No whitespace errors in owned paths. |
-| `git diff --stat -- packages/opencode/src/session/status.ts packages/opencode/test/session/status.test.ts` | repository root | Code-file and line budgets remain within 4/600. |
+| Command                                                                                                                                                             | Working directory   | Evidence produced                                                   |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------- | ------------------------------------------------------------------- |
+| `bun test test/session/status.test.ts`                                                                                                                              | `packages/opencode` | New cross-directory behavior is green.                              |
+| `bun test test/session/prompt.test.ts`                                                                                                                              | `packages/opencode` | Runner busy/idle, queue, cancel, and Task regressions remain green. |
+| `bun test test/server/httpapi-session.test.ts`                                                                                                                      | `packages/opencode` | Existing `/session/status` and Session HTTP behavior remain green.  |
+| `bun test test/cli/cmd/tui/prompt-submit-transport.test.tsx`                                                                                                        | `packages/opencode` | Prompt/Footer status event consumption remains green.               |
+| `bun test test/cli/cmd/tui/session-message-render.test.tsx`                                                                                                         | `packages/opencode` | Session/Subagent status rendering remains green.                    |
+| `bun typecheck`                                                                                                                                                     | `packages/opencode` | Package types and unchanged public interface compile.               |
+| `bun test /var/folders/x9/wyq90jb50kxf62wvbs505q4nn7ltx4/T/opencode/session-status-cross-directory-red.test.ts`                                                     | `packages/opencode` | Original minimized feedback loop is green after implementation.     |
+| `git diff --check -- packages/opencode/src/session/status.ts packages/opencode/test/session/status.test.ts docs/plans/session-status-cross-directory-visibility.md` | repository root     | No whitespace errors in owned paths.                                |
+| `git diff --stat -- packages/opencode/src/session/status.ts packages/opencode/test/session/status.test.ts`                                                          | repository root     | Code-file and line budgets remain within 4/600.                     |
 
 No lint/build/generation/migration command is required: the change adds no
 generated surface, schema, migration, package, or build artifact. Package
@@ -289,14 +289,14 @@ typecheck is the broad static gate.
 
 ## 19. Diff Budget
 
-| Metric | Estimate | Justification |
-| --- | --- | --- |
-| Files added | 2 | One test code file and this plan. |
-| Files modified | 1 | `session/status.ts`. |
-| Files deleted | 0 | None. |
+| Metric           | Estimate                           | Justification                             |
+| ---------------- | ---------------------------------- | ----------------------------------------- |
+| Files added      | 2                                  | One test code file and this plan.         |
+| Files modified   | 1                                  | `session/status.ts`.                      |
+| Files deleted    | 0                                  | None.                                     |
 | Production lines | <=15 changed, likely net reduction | Remove InstanceState wrapper and lookups. |
-| Test lines | 25-35 | Exactly one behavior test. |
-| Generated lines | 0 | No schema or public contract change. |
+| Test lines       | 25-35                              | Exactly one behavior test.                |
+| Generated lines  | 0                                  | No schema or public contract change.      |
 
 Code files: 2, below the user limit of 4. Total code changes remain far below
 600 lines. The budget is an audit signal, not permission to omit confirmed
@@ -339,9 +339,9 @@ The independent auditor must:
 
 ## 22. Plan Audit Record
 
-| Round | Audited revision | Full scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | R1 | yes | No blocking findings | E estimate slightly optimistic; code-file budget should exclude the canonical plan document | APPROVE — canonical plan revision R1 passes the full-scope plan audit. | independent adversarial-auditor task `ses_066545c15ffeJY7Ogt97P1k8yV` |
+| Round | Audited revision | Full scope? | Blocking findings    | Non-blocking findings                                                                       | Result                                                                 | Invocation reference                                                  |
+| ----- | ---------------- | ----------- | -------------------- | ------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- | --------------------------------------------------------------------- |
+| 1     | R1               | yes         | No blocking findings | E estimate slightly optimistic; code-file budget should exclude the canonical plan document | APPROVE — canonical plan revision R1 passes the full-scope plan audit. | independent adversarial-auditor task `ses_066545c15ffeJY7Ogt97P1k8yV` |
 
 Any substantive revision invalidates earlier approval.
 
@@ -371,7 +371,7 @@ Complete only after implementation.
 - Green: the same loop returned `1 pass, 0 fail, 2 expect() calls` after the
   owner repair.
 - Green: `bun test test/session/status.test.ts` returned `1 pass, 0 fail,
-  3 expect() calls`.
+3 expect() calls`.
 
 ### Verification Commands and Results
 
@@ -408,12 +408,12 @@ approved primary-path repair.
 
 ### Chinese Comment Calculation
 
-| Metric | Actual | Exclusions and evidence |
-| --- | --- | --- |
-| Effective changed code lines `E` | 18 | Excludes import-only, blank, pure deletion, and documentation lines; includes the production owner change and one test body. |
-| Qualifying Chinese comment lines `C` | 4 | Two production invariant comments and two test topology/cleanup intent comments. |
-| Ratio `C / E` | 22.2% | `4 / 18`. |
-| Required minimum `C` | 3 | `ceil(18 * 0.15) = 3`. |
+| Metric                               | Actual | Exclusions and evidence                                                                                                      |
+| ------------------------------------ | ------ | ---------------------------------------------------------------------------------------------------------------------------- |
+| Effective changed code lines `E`     | 18     | Excludes import-only, blank, pure deletion, and documentation lines; includes the production owner change and one test body. |
+| Qualifying Chinese comment lines `C` | 4      | Two production invariant comments and two test topology/cleanup intent comments.                                             |
+| Ratio `C / E`                        | 22.2%  | `4 / 18`.                                                                                                                    |
+| Required minimum `C`                 | 3      | `ceil(18 * 0.15) = 3`.                                                                                                       |
 
 ### Remaining Unverified Items
 
@@ -423,9 +423,9 @@ task's release scope.
 
 ## 24. Implementation Audit Record
 
-| Round | Plan revision | Full original scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | R1 | yes | No blocking findings | Duplicate `CrossSpawnSpawner` test layer; concurrent unrelated worktree drift and non-portable temporary red harness import | APPROVE — exact R1 implementation diff passes the full-scope implementation audit. | independent adversarial-auditor task `ses_06641651dffe17g1X2QHOzX1Dz` |
+| Round | Plan revision | Full original scope? | Blocking findings    | Non-blocking findings                                                                                                       | Result                                                                             | Invocation reference                                                  |
+| ----- | ------------- | -------------------- | -------------------- | --------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- | --------------------------------------------------------------------- |
+| 1     | R1            | yes                  | No blocking findings | Duplicate `CrossSpawnSpawner` test layer; concurrent unrelated worktree drift and non-portable temporary red harness import | APPROVE — exact R1 implementation diff passes the full-scope implementation audit. | independent adversarial-auditor task `ses_06641651dffe17g1X2QHOzX1Dz` |
 
 The task may be marked `verified` only after an independent full-scope result of
 `No blocking findings` for the current implementation and approved plan

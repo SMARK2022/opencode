@@ -88,7 +88,12 @@ const ReviewStarted = define({
 })
 const ReviewCompleted = define({
   type: "permission.review.completed",
-  schema: { sessionID: SessionID, reviewID: Schema.String, outcome: Schema.Literals(["allow", "deny"]), rationale: Schema.String },
+  schema: {
+    sessionID: SessionID,
+    reviewID: Schema.String,
+    outcome: Schema.Literals(["allow", "deny"]),
+    rationale: Schema.String,
+  },
 })
 // #199：ReviewFailed 在 reviewer 异常退出（超时/provider 错误）时发布，reviewID 缺失
 // #199：时记为 unknown；permission 层据此 fail-closed 而非静默放行。

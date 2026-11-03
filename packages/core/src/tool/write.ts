@@ -46,13 +46,14 @@ export type Output = typeof Output.Type
 export const toModelOutput = (output: Output) =>
   [
     `${output.existed ? "Wrote" : "Created"} file successfully: ${output.resource}`,
-    ...(output.formattedDiff ? ["", "Formatted changes (auto-format adjusted the file):", "```diff", output.formattedDiff, "```"] : []),
+    ...(output.formattedDiff
+      ? ["", "Formatted changes (auto-format adjusted the file):", "```diff", output.formattedDiff, "```"]
+      : []),
     // 保留格式化后的真实变化，并明确写入成功不等于类型检查通过。
     "\nLSP diagnostics unavailable (no language server running). Run bun typecheck to verify type safety.",
   ].join("\n")
 
 // 最终内容反馈来自锁内实际回读；后续历史投影消费相同格式化结果。
-
 
 /** Deferred V2 write UX integrations remain visible at the model-facing seam. */
 // TODO: Publish watcher/file-edit events after V2 watcher integration exists.
@@ -92,7 +93,13 @@ const layer = Layer.effectDiscard(
                   yield* permission.assert({
                     ...LocationMutation.externalDirectoryPermission(external),
                     // 外部目录审批发生在写入前，包括清空文件的空字符串负载。
-                    metadata: { action_kind: "tool", tool: "write", operation: "write", content: input.content, filepath: target.canonical },
+                    metadata: {
+                      action_kind: "tool",
+                      tool: "write",
+                      operation: "write",
+                      content: input.content,
+                      filepath: target.canonical,
+                    },
                     sessionID: context.sessionID,
                     agent: context.agent,
                     source,
@@ -105,9 +112,25 @@ const layer = Layer.effectDiscard(
                   agent: context.agent,
                   source,
                 })
-                const result = yield* files.writeTextPreservingBom({ target, content: input.content, format: format.file })
-                return { ...result, ...(result.rendered ? { additions: result.rendered.additions, deletions: result.rendered.deletions } : {}) }
-              }).pipe(Effect.mapError((error) => new ToolFailure({ message: PermissionV2.autoDeniedMessage(error) ?? `Unable to write ${input.path}` }))),
+                const result = yield* files.writeTextPreservingBom({
+                  target,
+                  content: input.content,
+                  format: format.file,
+                })
+                return {
+                  ...result,
+                  ...(result.rendered
+                    ? { additions: result.rendered.additions, deletions: result.rendered.deletions }
+                    : {}),
+                }
+              }).pipe(
+                Effect.mapError(
+                  (error) =>
+                    new ToolFailure({
+                      message: PermissionV2.autoDeniedMessage(error) ?? `Unable to write ${input.path}`,
+                    }),
+                ),
+              ),
           }),
           "edit",
         ),

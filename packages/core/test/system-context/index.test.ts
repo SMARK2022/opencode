@@ -63,9 +63,20 @@ describe("SystemContext", () => {
         },
       })
       expect(loads).toBe(1)
-      expect(rendered).toEqual([{ key: "core/date", text: "Today's date is 2026-06-03." }, { key: "core/location", text: "Directory: /repo" }])
+      expect(rendered).toEqual([
+        { key: "core/date", text: "Today's date is 2026-06-03." },
+        { key: "core/location", text: "Directory: /repo" },
+      ])
       // 未变来源若为归属统计再次渲染会直接抛错，能区分正常刷新观察与额外生成第二份baseline。
-      expect(yield* SystemContext.reconcile(context, { "core/date": { value: "2026-06-03" }, "core/location": { value: "/repo" } }, () => { throw new Error("Unchanged sources must not render again") })).toEqual({ _tag: "Unchanged" })
+      expect(
+        yield* SystemContext.reconcile(
+          context,
+          { "core/date": { value: "2026-06-03" }, "core/location": { value: "/repo" } },
+          () => {
+            throw new Error("Unchanged sources must not render again")
+          },
+        ),
+      ).toEqual({ _tag: "Unchanged" })
     }),
   )
 

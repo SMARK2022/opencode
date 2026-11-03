@@ -1,8 +1,5 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js"
-import {
-  ListToolsResultSchema,
-  ToolSchema,
-} from "@modelcontextprotocol/sdk/types.js"
+import { ListToolsResultSchema, ToolSchema } from "@modelcontextprotocol/sdk/types.js"
 import { Effect } from "effect"
 
 const DEFAULT_TIMEOUT = 30_000

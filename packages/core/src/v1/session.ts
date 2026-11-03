@@ -51,7 +51,9 @@ export {
 } from "@opencode-ai/schema/session-v1"
 
 // 同一 V1 协议的 HTTP 与事件投影共用此映射，字段演进时只维护一处。
-export function fromRow(row: typeof SessionTable.$inferSelect & { request?: Session.RequestUsage }): Types.DeepMutable<typeof SessionInfo.Type> {
+export function fromRow(
+  row: typeof SessionTable.$inferSelect & { request?: Session.RequestUsage },
+): Types.DeepMutable<typeof SessionInfo.Type> {
   // summary_files 单独存在也代表有效摘要，不能只检查增删行数。
   const summary =
     row.summary_additions !== null || row.summary_deletions !== null || row.summary_files !== null
@@ -100,17 +102,24 @@ export function fromRow(row: typeof SessionTable.$inferSelect & { request?: Sess
     cost: row.cost,
     // 复制请求快照供旧可变调用方使用；不能让插件改写查询结果的嵌套模型信息。
     // tokens 和 cost 仍是原有全局范围，request 只是并列的公开读投影。
-    request: row.request ? {
-      ...row.request, model: row.request.model ? { ...row.request.model } : undefined,
-      // 兼容调用方可变；复制新细分对象，避免修改返回值时污染同一查询快照。
-      inputEstimate: row.request.inputEstimate ? {
-        ...row.request.inputEstimate,
-        inputBreakdown: row.request.inputEstimate.inputBreakdown ? {
-          ...row.request.inputEstimate.inputBreakdown,
-          messages: { ...row.request.inputEstimate.inputBreakdown.messages },
-        } : undefined,
-      } : undefined,
-    } : undefined,
+    request: row.request
+      ? {
+          ...row.request,
+          model: row.request.model ? { ...row.request.model } : undefined,
+          // 兼容调用方可变；复制新细分对象，避免修改返回值时污染同一查询快照。
+          inputEstimate: row.request.inputEstimate
+            ? {
+                ...row.request.inputEstimate,
+                inputBreakdown: row.request.inputEstimate.inputBreakdown
+                  ? {
+                      ...row.request.inputEstimate.inputBreakdown,
+                      messages: { ...row.request.inputEstimate.inputBreakdown.messages },
+                    }
+                  : undefined,
+              }
+            : undefined,
+        }
+      : undefined,
     // cache 两项保持独立；消费方会加回输入流量，提前折入 input 会重复计数。
     tokens: {
       input: row.tokens_input,

@@ -141,7 +141,7 @@ export namespace PluginLoader {
       mod = await import(
         process.platform === "win32" && row.entry.startsWith("file://")
           ? fileURLToPath(row.entry).replaceAll("\\", "/")
-          : row.entry,
+          : row.entry
       )
     } catch (error) {
       return { ok: false, error }

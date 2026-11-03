@@ -58,7 +58,17 @@ export const ColdStorageTable = sqliteTable(
   "cold_storage",
   {
     hash: text().primaryKey(),
-    kind: text().$type<"message" | "part" | "session_message" | "message-pack" | "part-pack" | "session-message-pack" | "session-summary">().notNull(),
+    kind: text()
+      .$type<
+        | "message"
+        | "part"
+        | "session_message"
+        | "message-pack"
+        | "part-pack"
+        | "session-message-pack"
+        | "session-summary"
+      >()
+      .notNull(),
     codec: text().$type<"zstd">().notNull(),
     payload: blob({ mode: "buffer" }).notNull(),
     raw_bytes: integer().notNull(),
@@ -188,7 +198,6 @@ export const SessionTable = sqliteTable(
 
 // #493/#0500：cold_storage 的完整语义见上方表定义；hash 针对未压缩 canonical bytes，
 // codec/压缩级别变化不会破坏内容去重身份，ref_count 由 verify 反算真实引用。
-
 
 export const MessageTable = sqliteTable(
   "message",

@@ -44,34 +44,34 @@ canonical plan records evidence but adds no runtime behavior.
 
 ## 3. Repository Context
 
-| Source | Why it constrains this task |
-| --- | --- |
-| `CONTEXT.md` Session, Session search, Project, Workspace vocabulary | Preserves domain terms and distinguishes Project/Workspace/Session ownership |
-| `.opencode/policy/first-principles-engineering.md` | Requires first-divergence repair, no fallback, bounded evidence, and independent audits |
-| `docs/plans/tui-session-search-progressive.md` | Blocked historical R3-R8 evidence, prior route repair, and audit ceiling; not implementation authority after this successor is approved |
-| `packages/opencode/AGENTS.md` | Package-local tests/typecheck and module rules |
-| `packages/opencode/src/server/routes/instance/httpapi/AGENTS.md` | Existing HttpApi group/handler ownership |
-| `packages/opencode/test/server/AGENTS.md` | Public HTTP/test seam and scoped fixture guidance |
-| `packages/opencode/test/cli/cmd/tui` existing OpenTUI harnesses | Real renderer, provider stack, SDK test transport, and cleanup conventions |
+| Source                                                              | Why it constrains this task                                                                                                             |
+| ------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `CONTEXT.md` Session, Session search, Project, Workspace vocabulary | Preserves domain terms and distinguishes Project/Workspace/Session ownership                                                            |
+| `.opencode/policy/first-principles-engineering.md`                  | Requires first-divergence repair, no fallback, bounded evidence, and independent audits                                                 |
+| `docs/plans/tui-session-search-progressive.md`                      | Blocked historical R3-R8 evidence, prior route repair, and audit ceiling; not implementation authority after this successor is approved |
+| `packages/opencode/AGENTS.md`                                       | Package-local tests/typecheck and module rules                                                                                          |
+| `packages/opencode/src/server/routes/instance/httpapi/AGENTS.md`    | Existing HttpApi group/handler ownership                                                                                                |
+| `packages/opencode/test/server/AGENTS.md`                           | Public HTTP/test seam and scoped fixture guidance                                                                                       |
+| `packages/opencode/test/cli/cmd/tui` existing OpenTUI harnesses     | Real renderer, provider stack, SDK test transport, and cleanup conventions                                                              |
 
 ## 4. Files and Evidence Read
 
-| Evidence | Relevance | Evidence class |
-| --- | --- | --- |
-| `packages/opencode/src/cli/cmd/tui/component/dialog-session-list.tsx:40-183,253-282,452-464` | Progressive request lifecycle, title/scan response handling, terminal state, and empty-label projection | observed |
-| `packages/opencode/src/cli/cmd/tui/util/session-list-params.ts:1-129` | Search phases, loading state, empty labels, display-hit projection | observed/contracted |
-| `packages/opencode/test/cli/cmd/tui/session-list-params.test.ts:50-128` | Existing phase, Spinner, successful empty, and retained-hit assertions | observed |
-| Existing OpenTUI harnesses `dialog-prompt.test.tsx`, `session-exit.test.tsx`, `prompt-submit-transport.test.tsx`, `sync-fixture.tsx` | Real provider and `SDKProvider.testTransport` seam for new failure tests | observed |
-| `packages/opencode/src/session/search.ts`, `src/session/session.ts:340-364,1029-1106` | Title/all search contract and full-condition keyset scan | contracted/observed |
-| `packages/opencode/src/server/routes/instance/httpapi/groups/session.ts:204-247,677-689` | `POST /session/search/scan` public contract | observed |
-| `packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts:88-103,673` | Request-to-Session service handler path | observed |
-| `packages/opencode/src/server/shared/workspace-routing.ts:20-32` | R5 exact collection-route classification repair already present in worktree | observed |
-| `packages/opencode/test/server/workspace-routing.test.ts:33-58` | R5 routing regression already present in worktree | observed |
-| `packages/opencode/test/server/httpapi-exercise/index.ts:1371-1410` | R4 public seeded route scenario already present in worktree | observed |
-| Local red routing test and focused Effect traces | R5 first divergence and green route behavior | observed |
-| CI run `30208861589` Ubuntu effect log | The pre-repair run exercised 156 existing routes; the current registry has 157 and the only missing pre-repair scenario was `searchScan` | observed |
-| R6 implementation audit `ses_0606b900dffeid8FbmZ2ENRdue` | Full-scope B-01: title non-2xx falls through to scan | observed |
-| S3 plan audit `ses_056ea98ddffexdYLj3scYJlGoK` | B-01 current requirement forbids the added `Search failed` projection; B-02 plain-text title 503 can reach the same terminal through JSON parse failure | contracted/observed |
+| Evidence                                                                                                                             | Relevance                                                                                                                                               | Evidence class      |
+| ------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------- |
+| `packages/opencode/src/cli/cmd/tui/component/dialog-session-list.tsx:40-183,253-282,452-464`                                         | Progressive request lifecycle, title/scan response handling, terminal state, and empty-label projection                                                 | observed            |
+| `packages/opencode/src/cli/cmd/tui/util/session-list-params.ts:1-129`                                                                | Search phases, loading state, empty labels, display-hit projection                                                                                      | observed/contracted |
+| `packages/opencode/test/cli/cmd/tui/session-list-params.test.ts:50-128`                                                              | Existing phase, Spinner, successful empty, and retained-hit assertions                                                                                  | observed            |
+| Existing OpenTUI harnesses `dialog-prompt.test.tsx`, `session-exit.test.tsx`, `prompt-submit-transport.test.tsx`, `sync-fixture.tsx` | Real provider and `SDKProvider.testTransport` seam for new failure tests                                                                                | observed            |
+| `packages/opencode/src/session/search.ts`, `src/session/session.ts:340-364,1029-1106`                                                | Title/all search contract and full-condition keyset scan                                                                                                | contracted/observed |
+| `packages/opencode/src/server/routes/instance/httpapi/groups/session.ts:204-247,677-689`                                             | `POST /session/search/scan` public contract                                                                                                             | observed            |
+| `packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts:88-103,673`                                                | Request-to-Session service handler path                                                                                                                 | observed            |
+| `packages/opencode/src/server/shared/workspace-routing.ts:20-32`                                                                     | R5 exact collection-route classification repair already present in worktree                                                                             | observed            |
+| `packages/opencode/test/server/workspace-routing.test.ts:33-58`                                                                      | R5 routing regression already present in worktree                                                                                                       | observed            |
+| `packages/opencode/test/server/httpapi-exercise/index.ts:1371-1410`                                                                  | R4 public seeded route scenario already present in worktree                                                                                             | observed            |
+| Local red routing test and focused Effect traces                                                                                     | R5 first divergence and green route behavior                                                                                                            | observed            |
+| CI run `30208861589` Ubuntu effect log                                                                                               | The pre-repair run exercised 156 existing routes; the current registry has 157 and the only missing pre-repair scenario was `searchScan`                | observed            |
+| R6 implementation audit `ses_0606b900dffeid8FbmZ2ENRdue`                                                                             | Full-scope B-01: title non-2xx falls through to scan                                                                                                    | observed            |
+| S3 plan audit `ses_056ea98ddffexdYLj3scYJlGoK`                                                                                       | B-01 current requirement forbids the added `Search failed` projection; B-02 plain-text title 503 can reach the same terminal through JSON parse failure | contracted/observed |
 
 ## 5. Current Behavior
 
@@ -101,50 +101,50 @@ POST /session/search/scan
 
 ## 6. Supported Input Domain and Reachability
 
-| Input or condition | Producer | Upstream guarantees | Reachable path | Owner | Classification |
-| --- | --- | --- | --- | --- | --- |
-| Non-empty committed query | DialogSessionList debounce | Query is a string from the filter input | `runProgressiveSearch` | DialogSessionList | contracted |
-| Title HTTP 2xx | SDK/server | Response has JSON title list | title branch -> partial | DialogSessionList | reachable |
-| Title HTTP non-2xx | SDK/server or test transport | `Response.ok === false` is public fetch behavior | title branch currently falls through | DialogSessionList | observed/reachable |
-| Scan HTTP 2xx | SDK/server | Response has scan JSON contract | serial scan loop | DialogSessionList | contracted |
-| Scan HTTP non-2xx | SDK/server or test transport | `Response.ok === false` is public fetch behavior | scan branch -> existing error terminal | DialogSessionList | reachable |
-| Fetch throw/abort | SDK transport or query change | Outer catch and AbortController are existing seams | catch/abort branch | DialogSessionList | contracted |
-| Empty successful result | Session search | `done`/no cursor terminates scan | complete success -> Not Found | DialogSessionList + view projection | contracted |
-| Empty failed result | HTTP failure | error terminal has no hits | complete error -> existing Not Found projection | DialogSessionList + view projection | contracted by current user requirement |
-| `/session/search/scan` collection route | TUI hand-written fetch | Path contains no SessionID | workspace routing -> HttpApi handler | shared workspace routing | observed |
+| Input or condition                      | Producer                      | Upstream guarantees                                | Reachable path                                  | Owner                               | Classification                         |
+| --------------------------------------- | ----------------------------- | -------------------------------------------------- | ----------------------------------------------- | ----------------------------------- | -------------------------------------- |
+| Non-empty committed query               | DialogSessionList debounce    | Query is a string from the filter input            | `runProgressiveSearch`                          | DialogSessionList                   | contracted                             |
+| Title HTTP 2xx                          | SDK/server                    | Response has JSON title list                       | title branch -> partial                         | DialogSessionList                   | reachable                              |
+| Title HTTP non-2xx                      | SDK/server or test transport  | `Response.ok === false` is public fetch behavior   | title branch currently falls through            | DialogSessionList                   | observed/reachable                     |
+| Scan HTTP 2xx                           | SDK/server                    | Response has scan JSON contract                    | serial scan loop                                | DialogSessionList                   | contracted                             |
+| Scan HTTP non-2xx                       | SDK/server or test transport  | `Response.ok === false` is public fetch behavior   | scan branch -> existing error terminal          | DialogSessionList                   | reachable                              |
+| Fetch throw/abort                       | SDK transport or query change | Outer catch and AbortController are existing seams | catch/abort branch                              | DialogSessionList                   | contracted                             |
+| Empty successful result                 | Session search                | `done`/no cursor terminates scan                   | complete success -> Not Found                   | DialogSessionList + view projection | contracted                             |
+| Empty failed result                     | HTTP failure                  | error terminal has no hits                         | complete error -> existing Not Found projection | DialogSessionList + view projection | contracted by current user requirement |
+| `/session/search/scan` collection route | TUI hand-written fetch        | Path contains no SessionID                         | workspace routing -> HttpApi handler            | shared workspace routing            | observed                               |
 
 ## 7. Required Invariants
 
-| ID | Behavioral invariant | Evidence | Existing/required test |
-| --- | --- | --- | --- |
-| INV-01 | Non-empty query before complete is never presented as Not Found. | R3 requirement | existing params tests |
-| INV-02 | Spinner remains visible during awaiting_first and partial, and is off at complete. | R3 requirement | OpenTUI regression required for terminal failures |
-| INV-03 | Empty query returns browse without loading. | R3 requirement | existing params tests |
-| INV-04 | Title first paint is title-only and may be a subset. | R3 contract | Session search tests |
-| INV-05 | Scan uses the same list universe, serial candidate windows, and full search condition. | R3 contract | Session service tests |
-| INV-06 | Query generation and AbortController discard stale responses. | R3 contract | existing component lifecycle |
-| INV-07 | Content scan waits the contracted content delay after title phase. | R3 contract | existing implementation |
-| INV-08 | Successful complete results are full-condition scan results, not title overlay. | R3 contract | existing params/session tests |
-| INV-09 | Early stop counts scanFullHits only and caps at 400. | R3 contract | existing params tests |
-| INV-10 | Path/start/directory scope matches list. | R3 contract | Session service tests |
-| INV-11 | Progressive title/scan use hand-written SDK fetch because generated SDK lacks searchMode. | R3 contract | current component path |
-| INV-12 | Any title or scan HTTP failure ends the current generation as error+complete, stops Spinner, preserves visible hits, emits no fallback request, and keeps the existing empty-label text. | Current user contract plus reachable title/scan response chain | successor OpenTUI title+scan transport tests |
-| INV-13 | No FTS/materialized/SSE/parallel/fallback search path is introduced. | R3 non-goals/policy | diff audit |
-| INV-14 | Every registered Effect HttpApi route has an exerciser scenario. | R4 CI failure | coverage/auth/effect accounting |
-| INV-15 | The searchScan scenario exercises the public route and seeded response contract. | R4 contract | httpapi exerciser |
-| INV-16 | Collection-level `/session/search/scan` is not parsed as a SessionID. | R5 500 trace | workspace-routing unit test |
-| INV-17 | The searchScan endpoint reaches its declared handler/response after workspace routing. | R5 500 trace | focused and Session-filtered Effect exerciser |
-| INV-18 | Production/test/config changes stay within six files and 800 code lines, and no user-visible string or successful Session-search behavior changes. | Current verbatim requirement | file/diff audit plus focused success regressions |
+| ID     | Behavioral invariant                                                                                                                                                                     | Evidence                                                       | Existing/required test                            |
+| ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------- | ------------------------------------------------- |
+| INV-01 | Non-empty query before complete is never presented as Not Found.                                                                                                                         | R3 requirement                                                 | existing params tests                             |
+| INV-02 | Spinner remains visible during awaiting_first and partial, and is off at complete.                                                                                                       | R3 requirement                                                 | OpenTUI regression required for terminal failures |
+| INV-03 | Empty query returns browse without loading.                                                                                                                                              | R3 requirement                                                 | existing params tests                             |
+| INV-04 | Title first paint is title-only and may be a subset.                                                                                                                                     | R3 contract                                                    | Session search tests                              |
+| INV-05 | Scan uses the same list universe, serial candidate windows, and full search condition.                                                                                                   | R3 contract                                                    | Session service tests                             |
+| INV-06 | Query generation and AbortController discard stale responses.                                                                                                                            | R3 contract                                                    | existing component lifecycle                      |
+| INV-07 | Content scan waits the contracted content delay after title phase.                                                                                                                       | R3 contract                                                    | existing implementation                           |
+| INV-08 | Successful complete results are full-condition scan results, not title overlay.                                                                                                          | R3 contract                                                    | existing params/session tests                     |
+| INV-09 | Early stop counts scanFullHits only and caps at 400.                                                                                                                                     | R3 contract                                                    | existing params tests                             |
+| INV-10 | Path/start/directory scope matches list.                                                                                                                                                 | R3 contract                                                    | Session service tests                             |
+| INV-11 | Progressive title/scan use hand-written SDK fetch because generated SDK lacks searchMode.                                                                                                | R3 contract                                                    | current component path                            |
+| INV-12 | Any title or scan HTTP failure ends the current generation as error+complete, stops Spinner, preserves visible hits, emits no fallback request, and keeps the existing empty-label text. | Current user contract plus reachable title/scan response chain | successor OpenTUI title+scan transport tests      |
+| INV-13 | No FTS/materialized/SSE/parallel/fallback search path is introduced.                                                                                                                     | R3 non-goals/policy                                            | diff audit                                        |
+| INV-14 | Every registered Effect HttpApi route has an exerciser scenario.                                                                                                                         | R4 CI failure                                                  | coverage/auth/effect accounting                   |
+| INV-15 | The searchScan scenario exercises the public route and seeded response contract.                                                                                                         | R4 contract                                                    | httpapi exerciser                                 |
+| INV-16 | Collection-level `/session/search/scan` is not parsed as a SessionID.                                                                                                                    | R5 500 trace                                                   | workspace-routing unit test                       |
+| INV-17 | The searchScan endpoint reaches its declared handler/response after workspace routing.                                                                                                   | R5 500 trace                                                   | focused and Session-filtered Effect exerciser     |
+| INV-18 | Production/test/config changes stay within six files and 800 code lines, and no user-visible string or successful Session-search behavior changes.                                       | Current verbatim requirement                                   | file/diff audit plus focused success regressions  |
 
 ## 8. First Divergence and Root Cause
 
-| Invariant | First divergence | Owning module/interface | Proof |
-| --- | --- | --- | --- |
-| INV-14/15 | Route registry had no scenario for a registered route. | HttpApi exerciser scenario registry | CI/local `missing=1`; R4 scenario is now present |
-| INV-16/17 | `getWorkspaceRouteSessionID` parsed `search` from `/session/search/scan`. | `src/server/shared/workspace-routing.ts` | server log: `Expected a string starting with "ses", got "search"`; R5 repair is present |
-| INV-12 title | `titleRes.ok === false` still reaches `setSearchPhase("partial")` and scan delay. | `DialogSessionList.runProgressiveSearch` | independent implementation audit B-01 |
-| INV-18 projection | Current unapproved working tree replaces existing `Not Found` with `Search failed`. | DialogSessionList view projection | S3 plan audit B-01 plus current requirement |
-| INV-12 scan coverage | Existing scan error branch has no behaviorally sensitive public transport regression proving terminal loading and no later rendered scan page. | DialogSessionList public test seam | S3 full-scope audit |
+| Invariant            | First divergence                                                                                                                               | Owning module/interface                  | Proof                                                                                   |
+| -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------- | --------------------------------------------------------------------------------------- |
+| INV-14/15            | Route registry had no scenario for a registered route.                                                                                         | HttpApi exerciser scenario registry      | CI/local `missing=1`; R4 scenario is now present                                        |
+| INV-16/17            | `getWorkspaceRouteSessionID` parsed `search` from `/session/search/scan`.                                                                      | `src/server/shared/workspace-routing.ts` | server log: `Expected a string starting with "ses", got "search"`; R5 repair is present |
+| INV-12 title         | `titleRes.ok === false` still reaches `setSearchPhase("partial")` and scan delay.                                                              | `DialogSessionList.runProgressiveSearch` | independent implementation audit B-01                                                   |
+| INV-18 projection    | Current unapproved working tree replaces existing `Not Found` with `Search failed`.                                                            | DialogSessionList view projection        | S3 plan audit B-01 plus current requirement                                             |
+| INV-12 scan coverage | Existing scan error branch has no behaviorally sensitive public transport regression proving terminal loading and no later rendered scan page. | DialogSessionList public test seam       | S3 full-scope audit                                                                     |
 
 Red-capable commands already run:
 
@@ -170,14 +170,14 @@ temporary HEAD-baseline snapshot + revised public component test
 
 ## 9. Responsibility and Seam
 
-| Concern | Owner | Interface promise | Why it belongs here | Why another module does not own it |
-| --- | --- | --- | --- | --- |
-| Query generation, phase, terminal, abort, and request sequencing | DialogSessionList | Progressive search lifecycle | It owns the component state and fetch order | Session service owns search semantics, not UI request lifecycle |
-| Existing empty-label projection | DialogSessionList view call + `sessionListEmptyLabel` | Preserve existing user-visible empty text | Current user contract forbids a new failure string | No other module should synthesize replacement text |
-| Search SQL and keyset semantics | Session service/search module | Search and scan response contract | Existing domain owner | UI must not duplicate SQL |
-| Collection route SessionID classification | shared workspace routing | Workspace/session routing contract | First middleware seam before handler | HttpApi handler cannot repair pre-handler brand failure |
-| Route scenario accounting | HttpApi exerciser registry | Every public route has an executable scenario | Existing gate owner | Production route cannot infer expected test payload/assertions |
-| Failure regression | OpenTUI `SDKProvider.testTransport` + renderer frame | Public component behavior | Real caller/provider/renderer seam | Private signals and source assertions are insufficient |
+| Concern                                                          | Owner                                                 | Interface promise                             | Why it belongs here                                | Why another module does not own it                              |
+| ---------------------------------------------------------------- | ----------------------------------------------------- | --------------------------------------------- | -------------------------------------------------- | --------------------------------------------------------------- |
+| Query generation, phase, terminal, abort, and request sequencing | DialogSessionList                                     | Progressive search lifecycle                  | It owns the component state and fetch order        | Session service owns search semantics, not UI request lifecycle |
+| Existing empty-label projection                                  | DialogSessionList view call + `sessionListEmptyLabel` | Preserve existing user-visible empty text     | Current user contract forbids a new failure string | No other module should synthesize replacement text              |
+| Search SQL and keyset semantics                                  | Session service/search module                         | Search and scan response contract             | Existing domain owner                              | UI must not duplicate SQL                                       |
+| Collection route SessionID classification                        | shared workspace routing                              | Workspace/session routing contract            | First middleware seam before handler               | HttpApi handler cannot repair pre-handler brand failure         |
+| Route scenario accounting                                        | HttpApi exerciser registry                            | Every public route has an executable scenario | Existing gate owner                                | Production route cannot infer expected test payload/assertions  |
+| Failure regression                                               | OpenTUI `SDKProvider.testTransport` + renderer frame  | Public component behavior                     | Real caller/provider/renderer seam                 | Private signals and source assertions are insufficient          |
 
 ## 10. Single Approved Primary-Path Design
 
@@ -200,56 +200,56 @@ unapproved terminal-specific label and reuses the existing projection unchanged.
 
 ## 11. Secondary and Replacement Path Inventory
 
-| Path | Classification | Produces success? | Disposition |
-| --- | --- | --- | --- |
-| Title -> serial full-condition scan on success | primary contract | yes | preserve |
-| Title non-2xx -> error complete/no scan | primary diagnostic branch | no | implement |
-| Scan non-2xx -> error complete/no later scan | primary diagnostic branch | no | preserve and verify |
-| Empty successful complete -> Not Found | primary contract | no | preserve |
-| Empty failed complete -> existing Not Found | user-visible compatibility | no | preserve exactly |
-| Existing list endpoint without searchMode | shipped compatibility | yes | preserve |
-| Retry, all-search fallback, skip, timeout relaxation, generic invalid-ID catch | forbidden fallback | would hide failure | reject |
+| Path                                                                           | Classification             | Produces success?  | Disposition         |
+| ------------------------------------------------------------------------------ | -------------------------- | ------------------ | ------------------- |
+| Title -> serial full-condition scan on success                                 | primary contract           | yes                | preserve            |
+| Title non-2xx -> error complete/no scan                                        | primary diagnostic branch  | no                 | implement           |
+| Scan non-2xx -> error complete/no later scan                                   | primary diagnostic branch  | no                 | preserve and verify |
+| Empty successful complete -> Not Found                                         | primary contract           | no                 | preserve            |
+| Empty failed complete -> existing Not Found                                    | user-visible compatibility | no                 | preserve exactly    |
+| Existing list endpoint without searchMode                                      | shipped compatibility      | yes                | preserve            |
+| Retry, all-search fallback, skip, timeout relaxation, generic invalid-ID catch | forbidden fallback         | would hide failure | reject              |
 
 ## 12. Workaround Deletion and Replacement
 
-| Existing workaround or duplicate | Why it existed | Successor disposition |
-| --- | --- | --- |
-| None in the R4/R5 route repair | R4/R5 are primary-path repairs | Preserve exact route classification and scenario |
-| `titleRes.ok` fall-through to partial | Incomplete R3 failure handling | Collapse into error+complete+return |
+| Existing workaround or duplicate      | Why it existed                                            | Successor disposition                                  |
+| ------------------------------------- | --------------------------------------------------------- | ------------------------------------------------------ |
+| None in the R4/R5 route repair        | R4/R5 are primary-path repairs                            | Preserve exact route classification and scenario       |
+| `titleRes.ok` fall-through to partial | Incomplete R3 failure handling                            | Collapse into error+complete+return                    |
 | Unapproved `Search failed` projection | Added under an earlier requirement that no longer governs | Remove; preserve existing `sessionListEmptyLabel` call |
 
 ## 13. Forward Traceability
 
-| Requirement or invariant | Production path | Planned file/change | Behavioral test |
-| --- | --- | --- | --- |
-| INV-01/02/03/08/09 | Existing phase/display path | preserve existing component/util behavior | existing params tests + OpenTUI frame |
-| INV-04/05/07/10/11 | Existing title/scan orchestration and Session service | no semantic change | existing Session tests + Session-filtered Effect |
-| INV-06 | committed-query generation and abort guards | preserve production guards | public `old -> new` delayed-title race frame test |
-| INV-12 title | `runProgressiveSearch` title response branch | `dialog-session-list.tsx` early error return | title 503 OpenTUI transport/frame test |
-| INV-12/18 empty projection | component empty-label projection | remove terminal-specific text and preserve existing helper | title failure terminal frame plus existing successful-empty tests |
-| INV-12 scan | existing scan non-2xx branch | no fallback; regression only | scan 503 public frame test with second-page mutation marker |
-| INV-14/15 | existing route registry/route | preserve R4 scenario | coverage/auth/effect accounting |
-| INV-16/17 | existing workspace route classifier | preserve R5 exact exemption | routing unit + Session-filtered Effect |
+| Requirement or invariant   | Production path                                       | Planned file/change                                        | Behavioral test                                                   |
+| -------------------------- | ----------------------------------------------------- | ---------------------------------------------------------- | ----------------------------------------------------------------- |
+| INV-01/02/03/08/09         | Existing phase/display path                           | preserve existing component/util behavior                  | existing params tests + OpenTUI frame                             |
+| INV-04/05/07/10/11         | Existing title/scan orchestration and Session service | no semantic change                                         | existing Session tests + Session-filtered Effect                  |
+| INV-06                     | committed-query generation and abort guards           | preserve production guards                                 | public `old -> new` delayed-title race frame test                 |
+| INV-12 title               | `runProgressiveSearch` title response branch          | `dialog-session-list.tsx` early error return               | title 503 OpenTUI transport/frame test                            |
+| INV-12/18 empty projection | component empty-label projection                      | remove terminal-specific text and preserve existing helper | title failure terminal frame plus existing successful-empty tests |
+| INV-12 scan                | existing scan non-2xx branch                          | no fallback; regression only                               | scan 503 public frame test with second-page mutation marker       |
+| INV-14/15                  | existing route registry/route                         | preserve R4 scenario                                       | coverage/auth/effect accounting                                   |
+| INV-16/17                  | existing workspace route classifier                   | preserve R5 exact exemption                                | routing unit + Session-filtered Effect                            |
 
 ## 14. Reverse Traceability
 
-| Proposed concept | Requirement ID | Evidence | Why existing logic cannot carry it |
-| --- | --- | --- | --- |
-| Title error early return | INV-12 | independent audit B-01 and reachable `titleRes.ok` branch | Existing code falls through to partial/scan |
-| Removal of terminal-specific `Search failed` label | INV-18 | Current verbatim requirement and S3 B-01 | Existing helper already carries the required user-visible compatibility |
-| Two transport failure cases in one real component test | INV-12 | S3 B-02 plus missing scan coverage | Existing params tests do not exercise the public transport/render lifecycle |
-| R5 exact route exemption | INV-16/17 | observed 500 trace | Generic extractor cannot infer collection routes |
-| R4 seeded route scenario | INV-14/15 | observed CI missing route | Registry cannot infer expected HTTP body/assertions |
+| Proposed concept                                       | Requirement ID | Evidence                                                  | Why existing logic cannot carry it                                          |
+| ------------------------------------------------------ | -------------- | --------------------------------------------------------- | --------------------------------------------------------------------------- |
+| Title error early return                               | INV-12         | independent audit B-01 and reachable `titleRes.ok` branch | Existing code falls through to partial/scan                                 |
+| Removal of terminal-specific `Search failed` label     | INV-18         | Current verbatim requirement and S3 B-01                  | Existing helper already carries the required user-visible compatibility     |
+| Two transport failure cases in one real component test | INV-12         | S3 B-02 plus missing scan coverage                        | Existing params tests do not exercise the public transport/render lifecycle |
+| R5 exact route exemption                               | INV-16/17      | observed 500 trace                                        | Generic extractor cannot infer collection routes                            |
+| R4 seeded route scenario                               | INV-14/15      | observed CI missing route                                 | Registry cannot infer expected HTTP body/assertions                         |
 
 ## 15. File-Level Change Plan
 
-| File | Add / modify / preserve | Exact responsibility | Expected line delta |
-| --- | --- | --- | --- |
-| `packages/opencode/src/server/shared/workspace-routing.ts` | preserve current worktree repair | Exact `/session/search/scan` collection exemption | 0 successor lines |
-| `packages/opencode/test/server/workspace-routing.test.ts` | preserve current regression | Routing helper assertion | 0 successor lines |
-| `packages/opencode/test/server/httpapi-exercise/index.ts` | preserve current scenario | Public route accounting and response contract | 0 successor lines |
-| `packages/opencode/src/cli/cmd/tui/component/dialog-session-list.tsx` | modify | Preserve title failure terminal return; remove unapproved terminal-specific label | +3 to +5 |
-| `packages/opencode/test/cli/cmd/tui/dialog-session-list.test.tsx` | add | Real provider-stack schema-valid title/scan 503 and mutation-sensitive rendered-frame regressions | +120 to +190 |
+| File                                                                  | Add / modify / preserve          | Exact responsibility                                                                              | Expected line delta |
+| --------------------------------------------------------------------- | -------------------------------- | ------------------------------------------------------------------------------------------------- | ------------------- |
+| `packages/opencode/src/server/shared/workspace-routing.ts`            | preserve current worktree repair | Exact `/session/search/scan` collection exemption                                                 | 0 successor lines   |
+| `packages/opencode/test/server/workspace-routing.test.ts`             | preserve current regression      | Routing helper assertion                                                                          | 0 successor lines   |
+| `packages/opencode/test/server/httpapi-exercise/index.ts`             | preserve current scenario        | Public route accounting and response contract                                                     | 0 successor lines   |
+| `packages/opencode/src/cli/cmd/tui/component/dialog-session-list.tsx` | modify                           | Preserve title failure terminal return; remove unapproved terminal-specific label                 | +3 to +5            |
+| `packages/opencode/test/cli/cmd/tui/dialog-session-list.test.tsx`     | add                              | Real provider-stack schema-valid title/scan 503 and mutation-sensitive rendered-frame regressions | +120 to +190        |
 
 The five unique code/test files stay within the user-authorized six-file limit;
 the canonical plan file is documentation, and the unrelated dirty core file is
@@ -257,56 +257,56 @@ excluded.
 
 ## 16. TDD Behavior Slices
 
-| Order | Red behavior | Why current code fails | Minimal green behavior | Regression protected |
-| --- | --- | --- | --- | --- |
-| 1 | Existing R5 route test/Effect scenario | Old classifier parsed `search` as SessionID | Already present in worktree; verify unchanged | Route repair stays connected |
-| 2 | Existing R4 coverage scenario | Route had no scenario | Already present in worktree; verify unchanged | Every route remains accounted |
-| 3 | Schema-valid title 503 falls through to a pending scan and leaves `Searching needle` visible | Plain-text 503 is insensitive because JSON parse reaches the same outer catch | Return JSON `[]` with status 503; keep scan pending so only owner early-return reaches terminal `Not Found needle` | Title non-2xx is handled at `Response.ok`, not by a later parse error |
-| 4 | Removing scan non-2xx return leaves the public Spinner active and then renders a second valid page with `Forbidden later scan` | Existing scan branch lacks a public terminal observation | First scan returns schema-valid 503 page with a next cursor; observe title hit plus braille Spinner, then wait until Spinner disappears before asserting retained hit and marker absence | Scan failure reaches complete and cannot continue to a later page |
-| 5 | Successful zero-hit title+scan still shows `Not Found needle` | Failure tests must not change normal empty semantics | Run valid 2xx title/scan responses through the same renderer | Existing user-visible behavior is preserved |
-| 6 | Delayed `old` title response rewinds a completed `new` query to stale hits/partial loading when generation guards are removed | Existing tests do not control two overlapping public transport generations | Hold `old` title, complete `new` title+scan with `Fresh new result`, resolve `old` as `Stale old result`, then assert fresh frame remains terminal with no stale marker or Spinner | Query changes cannot accept stale responses or restart loading |
+| Order | Red behavior                                                                                                                   | Why current code fails                                                        | Minimal green behavior                                                                                                                                                                   | Regression protected                                                  |
+| ----- | ------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------- |
+| 1     | Existing R5 route test/Effect scenario                                                                                         | Old classifier parsed `search` as SessionID                                   | Already present in worktree; verify unchanged                                                                                                                                            | Route repair stays connected                                          |
+| 2     | Existing R4 coverage scenario                                                                                                  | Route had no scenario                                                         | Already present in worktree; verify unchanged                                                                                                                                            | Every route remains accounted                                         |
+| 3     | Schema-valid title 503 falls through to a pending scan and leaves `Searching needle` visible                                   | Plain-text 503 is insensitive because JSON parse reaches the same outer catch | Return JSON `[]` with status 503; keep scan pending so only owner early-return reaches terminal `Not Found needle`                                                                       | Title non-2xx is handled at `Response.ok`, not by a later parse error |
+| 4     | Removing scan non-2xx return leaves the public Spinner active and then renders a second valid page with `Forbidden later scan` | Existing scan branch lacks a public terminal observation                      | First scan returns schema-valid 503 page with a next cursor; observe title hit plus braille Spinner, then wait until Spinner disappears before asserting retained hit and marker absence | Scan failure reaches complete and cannot continue to a later page     |
+| 5     | Successful zero-hit title+scan still shows `Not Found needle`                                                                  | Failure tests must not change normal empty semantics                          | Run valid 2xx title/scan responses through the same renderer                                                                                                                             | Existing user-visible behavior is preserved                           |
+| 6     | Delayed `old` title response rewinds a completed `new` query to stale hits/partial loading when generation guards are removed  | Existing tests do not control two overlapping public transport generations    | Hold `old` title, complete `new` title+scan with `Fresh new result`, resolve `old` as `Stale old result`, then assert fresh frame remains terminal with no stale marker or Spinner       | Query changes cannot accept stale responses or restart loading        |
 
 ## 17. Chinese Comment Budget
 
-| Metric | Estimate | Method |
-| --- | --- | --- |
-| Effective changed code lines `E` | 120-220 | Production branch plus real OpenTUI transport tests; exclude comments, blanks, plan, and preserved R4/R5 files |
-| Required qualifying comments `C` | 18-33 | `ceil(E*0.15)`; implementation must recompute actual values and place comments beside provider seam, readiness signal, non-2xx terminal, no-later-page invariant, generation race, retained hits, and compatibility projection |
+| Metric                           | Estimate | Method                                                                                                                                                                                                                         |
+| -------------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Effective changed code lines `E` | 120-220  | Production branch plus real OpenTUI transport tests; exclude comments, blanks, plan, and preserved R4/R5 files                                                                                                                 |
+| Required qualifying comments `C` | 18-33    | `ceil(E*0.15)`; implementation must recompute actual values and place comments beside provider seam, readiness signal, non-2xx terminal, no-later-page invariant, generation race, retained hits, and compatibility projection |
 
 ## 18. Verification
 
-| Command | Working directory | Evidence |
-| --- | --- | --- |
-| `bun test test/cli/cmd/tui/dialog-session-list.test.tsx` | `packages/opencode` | Title and scan HTTP failure through real UI/SDK/renderer seam |
-| `bun test test/cli/cmd/tui/session-list-params.test.ts` | `packages/opencode` | Existing phase/display successful empty contract |
-| `bun test test/server/workspace-routing.test.ts` | `packages/opencode` | R5 routing regression |
-| `bun run script/httpapi-exercise.ts --mode effect --include session --fail-on-missing --fail-on-skip` | `packages/opencode` | R4/R5 Session route contract |
-| `bun run script/httpapi-exercise.ts --mode coverage --fail-on-missing --fail-on-skip` | `packages/opencode` | All 157 route keys accounted |
-| `bun run script/httpapi-exercise.ts --mode auth --fail-on-missing --fail-on-skip` | `packages/opencode` | Auth accounting |
-| `bun typecheck` | `packages/opencode` | Type safety |
-| WSL2 Bun 1.3.14 full `effect`, `coverage`, and `auth` exercisers | `packages/opencode` | Pre-commit exact-diff Linux route gates; each must report `157 pass / 0 fail / missing=0 / extra=0` |
-| Official Ubuntu baseline/package and route-owner evidence listed in S3 | GitHub Actions artifacts | Confirms unchanged daemon/package owner and equivalent route repair on GitHub-hosted Ubuntu without requiring a forbidden push |
+| Command                                                                                               | Working directory        | Evidence                                                                                                                       |
+| ----------------------------------------------------------------------------------------------------- | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------ |
+| `bun test test/cli/cmd/tui/dialog-session-list.test.tsx`                                              | `packages/opencode`      | Title and scan HTTP failure through real UI/SDK/renderer seam                                                                  |
+| `bun test test/cli/cmd/tui/session-list-params.test.ts`                                               | `packages/opencode`      | Existing phase/display successful empty contract                                                                               |
+| `bun test test/server/workspace-routing.test.ts`                                                      | `packages/opencode`      | R5 routing regression                                                                                                          |
+| `bun run script/httpapi-exercise.ts --mode effect --include session --fail-on-missing --fail-on-skip` | `packages/opencode`      | R4/R5 Session route contract                                                                                                   |
+| `bun run script/httpapi-exercise.ts --mode coverage --fail-on-missing --fail-on-skip`                 | `packages/opencode`      | All 157 route keys accounted                                                                                                   |
+| `bun run script/httpapi-exercise.ts --mode auth --fail-on-missing --fail-on-skip`                     | `packages/opencode`      | Auth accounting                                                                                                                |
+| `bun typecheck`                                                                                       | `packages/opencode`      | Type safety                                                                                                                    |
+| WSL2 Bun 1.3.14 full `effect`, `coverage`, and `auth` exercisers                                      | `packages/opencode`      | Pre-commit exact-diff Linux route gates; each must report `157 pass / 0 fail / missing=0 / extra=0`                            |
+| Official Ubuntu baseline/package and route-owner evidence listed in S3                                | GitHub Actions artifacts | Confirms unchanged daemon/package owner and equivalent route repair on GitHub-hosted Ubuntu without requiring a forbidden push |
 
 ## 19. Diff Budget
 
-| Metric | Estimate | Justification |
-| --- | --- | --- |
-| Files added | 1 | One component integration test |
-| Files modified | 1 successor production file plus 3 preserved R5 files | No new route/schema/helper files |
-| Files deleted | 0 | No deletion required |
-| Production lines | 3-5 | Early return only; terminal-specific projection removed |
-| Test lines | 120-220 | Real provider-stack and renderer harness with title, scan, successful-empty, and generation-race cases |
-| Generated lines | 0 | No SDK/OpenAPI generation |
-| Total successor implementation lines | <200 | User limit remains below 800 lines |
+| Metric                               | Estimate                                              | Justification                                                                                          |
+| ------------------------------------ | ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| Files added                          | 1                                                     | One component integration test                                                                         |
+| Files modified                       | 1 successor production file plus 3 preserved R5 files | No new route/schema/helper files                                                                       |
+| Files deleted                        | 0                                                     | No deletion required                                                                                   |
+| Production lines                     | 3-5                                                   | Early return only; terminal-specific projection removed                                                |
+| Test lines                           | 120-220                                               | Real provider-stack and renderer harness with title, scan, successful-empty, and generation-race cases |
+| Generated lines                      | 0                                                     | No SDK/OpenAPI generation                                                                              |
+| Total successor implementation lines | <200                                                  | User limit remains below 800 lines                                                                     |
 
 ## 20. Real Risks and Open Decisions
 
-| Risk | Mitigation |
-| --- | --- |
+| Risk                                                             | Mitigation                                                                                                                |
+| ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
 | OpenTUI test lifecycle can leak native renderer state on Windows | Use `baseTest.serial`, `useThread: false` where supported, explicit renderer/event cleanup, and existing harness patterns |
-| Debounce/content delay makes red test slow | Wait on observed title-request call and then bounded render/frame polling; do not replace the production delay |
-| Failure rework could alter existing empty text | Assert the same `Not Found needle` frame for terminal title failure and successful zero-hit search |
-| Full Effect is platform-sensitive on Windows | Require WSL2 Bun 1.3.14 full route gates and retain Windows timeout as non-pass evidence |
+| Debounce/content delay makes red test slow                       | Wait on observed title-request call and then bounded render/frame polling; do not replace the production delay            |
+| Failure rework could alter existing empty text                   | Assert the same `Not Found needle` frame for terminal title failure and successful zero-hit search                        |
+| Full Effect is platform-sensitive on Windows                     | Require WSL2 Bun 1.3.14 full route gates and retain Windows timeout as non-pass evidence                                  |
 
 ### Open Decisions Requiring the User
 
@@ -333,9 +333,9 @@ The independent auditor must:
 
 ## 22. Plan Audit Record
 
-| Round | Audited revision | Full scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | S1 | yes | None | NB-01 stale route count; NB-02 conditional successful-zero-hit wording; NB-03 preserved-file bookkeeping | APPROVE | ses_0600350bbffe3P6lLC0ZKqfGET |
+| Round | Audited revision | Full scope? | Blocking findings | Non-blocking findings                                                                                    | Result  | Invocation reference           |
+| ----- | ---------------- | ----------- | ----------------- | -------------------------------------------------------------------------------------------------------- | ------- | ------------------------------ |
+| 1     | S1               | yes         | None              | NB-01 stale route count; NB-02 conditional successful-zero-hit wording; NB-03 preserved-file bookkeeping | APPROVE | ses_0600350bbffe3P6lLC0ZKqfGET |
 
 ## 23. Implementation Evidence
 
@@ -347,13 +347,13 @@ transport tests; none of these historical rows authorize S4 implementation.
 
 The approved five code/test-file scope is implemented:
 
-| File | Actual change | Scope disposition |
-| --- | --- | --- |
-| `packages/opencode/src/cli/cmd/tui/component/dialog-session-list.tsx` | S2 added title non-2xx early return plus an unauthorized `Search failed` projection. | S4 must preserve the early return and remove the projection |
-| `packages/opencode/test/cli/cmd/tui/dialog-session-list.test.tsx` | S2 used plain-text 503 fixtures and request counts. | S4 must use schema-valid/mutation-sensitive public-frame cases |
-| `packages/opencode/src/server/shared/workspace-routing.ts` | Preserved exact collection-route exemption for `/session/search/scan`. | R5 preserved, zero S2 lines |
-| `packages/opencode/test/server/workspace-routing.test.ts` | Preserved collection-route regression. | R5 preserved, zero S2 lines |
-| `packages/opencode/test/server/httpapi-exercise/index.ts` | Preserved seeded public `session.search.scan` scenario. | R4 preserved, zero S2 lines |
+| File                                                                  | Actual change                                                                        | Scope disposition                                              |
+| --------------------------------------------------------------------- | ------------------------------------------------------------------------------------ | -------------------------------------------------------------- |
+| `packages/opencode/src/cli/cmd/tui/component/dialog-session-list.tsx` | S2 added title non-2xx early return plus an unauthorized `Search failed` projection. | S4 must preserve the early return and remove the projection    |
+| `packages/opencode/test/cli/cmd/tui/dialog-session-list.test.tsx`     | S2 used plain-text 503 fixtures and request counts.                                  | S4 must use schema-valid/mutation-sensitive public-frame cases |
+| `packages/opencode/src/server/shared/workspace-routing.ts`            | Preserved exact collection-route exemption for `/session/search/scan`.               | R5 preserved, zero S2 lines                                    |
+| `packages/opencode/test/server/workspace-routing.test.ts`             | Preserved collection-route regression.                                               | R5 preserved, zero S2 lines                                    |
+| `packages/opencode/test/server/httpapi-exercise/index.ts`             | Preserved seeded public `session.search.scan` scenario.                              | R4 preserved, zero S2 lines                                    |
 
 The two plan documents record the blocked predecessor and this implementation
 evidence. `packages/core/src/models-snapshot.js` is unrelated dirty worktree
@@ -362,28 +362,28 @@ fallback path was added.
 
 ### Red-Green Test Evidence
 
-| Behavior | Red evidence | Green evidence |
-| --- | --- | --- |
-| `/session/search/scan` collection routing | Existing R5 red: `SessionID.make("search")` rejected the route. | `bun test test/server/workspace-routing.test.ts` → `16 pass / 0 fail`. |
-| Title HTTP failure terminal | S2 red was insufficient because plain-text 503 could terminate at JSON parse. | Pending S4 red/green with schema-valid 503 and pending scan. |
-| Scan HTTP failure terminal | S2 asserted a transport count coupled to implementation. | Pending S4 mutation-sensitive forbidden-page frame and retained title hit. |
-| Route accounting | R4 red: `missing=1`, `MISS POST /session/search/scan`. | Coverage/auth each report `157 pass / 0 fail / missing=0 / extra=0`. |
+| Behavior                                  | Red evidence                                                                  | Green evidence                                                             |
+| ----------------------------------------- | ----------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
+| `/session/search/scan` collection routing | Existing R5 red: `SessionID.make("search")` rejected the route.               | `bun test test/server/workspace-routing.test.ts` → `16 pass / 0 fail`.     |
+| Title HTTP failure terminal               | S2 red was insufficient because plain-text 503 could terminate at JSON parse. | Pending S4 red/green with schema-valid 503 and pending scan.               |
+| Scan HTTP failure terminal                | S2 asserted a transport count coupled to implementation.                      | Pending S4 mutation-sensitive forbidden-page frame and retained title hit. |
+| Route accounting                          | R4 red: `missing=1`, `MISS POST /session/search/scan`.                        | Coverage/auth each report `157 pass / 0 fail / missing=0 / extra=0`.       |
 
 ### Verification Commands and Results
 
 All commands below ran from `packages/opencode` unless stated otherwise:
 
-| Command | Result |
-| --- | --- |
-| `bun test test/cli/cmd/tui/dialog-session-list.test.tsx` | `2 pass / 0 fail` |
-| `bun test test/cli/cmd/tui/session-list-params.test.ts` | `12 pass / 0 fail` |
-| `bun test test/server/workspace-routing.test.ts` | `16 pass / 0 fail` |
-| `bun run script/httpapi-exercise.ts --mode effect --include session --fail-on-missing --fail-on-skip --progress` | Clean environment: `54 pass / 0 fail / missing=0 / extra=0` |
-| `bun run script/httpapi-exercise.ts --mode effect --fail-on-missing --fail-on-skip --progress` | Clean Windows environment entered all `157` scenarios but timed out after `900000ms` before emitting a summary; not a pass. |
-| `bun run script/httpapi-exercise.ts --mode coverage --fail-on-missing --fail-on-skip` | `157 pass / 0 fail / missing=0 / extra=0` |
-| `bun run script/httpapi-exercise.ts --mode auth --fail-on-missing --fail-on-skip` | `157 pass / 0 fail / missing=0 / extra=0` |
-| `bun typecheck` | `tsgo --noEmit` passed |
-| `bun test test/cli/run test/cli/tui test/cli/cmd/tui --timeout 30000 --reporter=junit --reporter-outfile=.artifacts/unit/junit-tui-followup.xml` | `621 pass / 12 skip / 0 fail`, `633 tests`, `1699 expect()`, 71 files |
+| Command                                                                                                                                          | Result                                                                                                                      |
+| ------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------- |
+| `bun test test/cli/cmd/tui/dialog-session-list.test.tsx`                                                                                         | `2 pass / 0 fail`                                                                                                           |
+| `bun test test/cli/cmd/tui/session-list-params.test.ts`                                                                                          | `12 pass / 0 fail`                                                                                                          |
+| `bun test test/server/workspace-routing.test.ts`                                                                                                 | `16 pass / 0 fail`                                                                                                          |
+| `bun run script/httpapi-exercise.ts --mode effect --include session --fail-on-missing --fail-on-skip --progress`                                 | Clean environment: `54 pass / 0 fail / missing=0 / extra=0`                                                                 |
+| `bun run script/httpapi-exercise.ts --mode effect --fail-on-missing --fail-on-skip --progress`                                                   | Clean Windows environment entered all `157` scenarios but timed out after `900000ms` before emitting a summary; not a pass. |
+| `bun run script/httpapi-exercise.ts --mode coverage --fail-on-missing --fail-on-skip`                                                            | `157 pass / 0 fail / missing=0 / extra=0`                                                                                   |
+| `bun run script/httpapi-exercise.ts --mode auth --fail-on-missing --fail-on-skip`                                                                | `157 pass / 0 fail / missing=0 / extra=0`                                                                                   |
+| `bun typecheck`                                                                                                                                  | `tsgo --noEmit` passed                                                                                                      |
+| `bun test test/cli/run test/cli/tui test/cli/cmd/tui --timeout 30000 --reporter=junit --reporter-outfile=.artifacts/unit/junit-tui-followup.xml` | `621 pass / 12 skip / 0 fail`, `633 tests`, `1699 expect()`, 71 files                                                       |
 
 The full TUI/CLI shard passed in one process, including tests after the new
 file, so the test-local scheduler module seam did not contaminate the shard.
@@ -399,23 +399,23 @@ timed-out command as green.
 
 ### Actual Secondary and Replacement Path Inventory
 
-| Path | Classification | Result |
-| --- | --- | --- |
-| Title 2xx → partial → serial full-condition scan | Primary supported path | Preserved and covered by existing route/session checks |
-| Title non-2xx → error + complete + return | Primary diagnostic branch | Implemented; no scan request |
-| Scan non-2xx → error + complete + return | Primary diagnostic branch | Preserved and behaviorally covered; no later scan |
-| Successful empty completion → `Not Found` | Primary success contract | Preserved by params tests |
-| Failed empty completion → existing `Not Found` | User-visible compatibility | S4 must restore and verify |
-| Existing list endpoint, retries, fallback search, timeout relaxation | Compatibility/forbidden alternatives | No new path added |
+| Path                                                                 | Classification                       | Result                                                 |
+| -------------------------------------------------------------------- | ------------------------------------ | ------------------------------------------------------ |
+| Title 2xx → partial → serial full-condition scan                     | Primary supported path               | Preserved and covered by existing route/session checks |
+| Title non-2xx → error + complete + return                            | Primary diagnostic branch            | Implemented; no scan request                           |
+| Scan non-2xx → error + complete + return                             | Primary diagnostic branch            | Preserved and behaviorally covered; no later scan      |
+| Successful empty completion → `Not Found`                            | Primary success contract             | Preserved by params tests                              |
+| Failed empty completion → existing `Not Found`                       | User-visible compatibility           | S4 must restore and verify                             |
+| Existing list endpoint, retries, fallback search, timeout relaxation | Compatibility/forbidden alternatives | No new path added                                      |
 
 ### Chinese Comment Calculation
 
-| Metric | Actual | Exclusions and evidence |
-| --- | --- | --- |
-| Effective changed code lines `E` | 199 | S2 production component plus new OpenTUI test; excludes imports, blanks, comments, JSX pragma, preserved R4/R5 files, plan docs, and unrelated core file. |
-| Qualifying Chinese comment lines `C` | 30 | Comments beside scheduler seam, terminal invariant, public transport, readiness, renderer cleanup, provider topology, retained hits, and diagnostic frame. |
-| Ratio `C / E` | 15.08% | `30 / 199` |
-| Required minimum `C` | 30 | `ceil(199 * 0.15)` |
+| Metric                               | Actual | Exclusions and evidence                                                                                                                                    |
+| ------------------------------------ | ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Effective changed code lines `E`     | 199    | S2 production component plus new OpenTUI test; excludes imports, blanks, comments, JSX pragma, preserved R4/R5 files, plan docs, and unrelated core file.  |
+| Qualifying Chinese comment lines `C` | 30     | Comments beside scheduler seam, terminal invariant, public transport, readiness, renderer cleanup, provider topology, retained hits, and diagnostic frame. |
+| Ratio `C / E`                        | 15.08% | `30 / 199`                                                                                                                                                 |
+| Required minimum `C`                 | 30     | `ceil(199 * 0.15)`                                                                                                                                         |
 
 ### Remaining Unverified Items
 
@@ -429,9 +429,9 @@ timed-out command as green.
 
 ## 24. Implementation Audit Record
 
-| Round | Plan revision | Full original scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | S2 | yes | B-01 mandatory post-fix official Ubuntu Effect gate had not been executed | Stale route count; scan empty diagnostic covered through title case; untracked release files; predecessor doc size | BLOCK | ses_05f85a298ffeDt340ijJ6zpDeT |
+| Round | Plan revision | Full original scope? | Blocking findings                                                         | Non-blocking findings                                                                                              | Result | Invocation reference           |
+| ----- | ------------- | -------------------- | ------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ | ------ | ------------------------------ |
+| 1     | S2            | yes                  | B-01 mandatory post-fix official Ubuntu Effect gate had not been executed | Stale route count; scan empty diagnostic covered through title case; untracked release files; predecessor doc size | BLOCK  | ses_05f85a298ffeDt340ijJ6zpDeT |
 
 ## S2 Amendment: Preserve the Real Search Seam Under Solid Test Runtime
 
@@ -503,9 +503,9 @@ the previously noted fixed wait for the scan no-later-request assertion.
 
 ## S2 Plan Audit Record
 
-| Round | Audited revision | Full scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | S2 | yes | None | NB-01 stale S1 audit rows; NB-02 historical route count; NB-03 fixed wait in current test artifact | APPROVE | ses_05fe47c8effe8073FLdceCK78i |
+| Round | Audited revision | Full scope? | Blocking findings | Non-blocking findings                                                                              | Result  | Invocation reference           |
+| ----- | ---------------- | ----------- | ----------------- | -------------------------------------------------------------------------------------------------- | ------- | ------------------------------ |
+| 1     | S2               | yes         | None              | NB-01 stale S1 audit rows; NB-02 historical route count; NB-03 fixed wait in current test artifact | APPROVE | ses_05fe47c8effe8073FLdceCK78i |
 
 ### S2 independent plan audit verdict (verbatim)
 
@@ -584,9 +584,9 @@ No alternate success path, retry, catch-and-default, parser sequence, compatibil
 
 ## S1 Plan Audit Record
 
-| Round | Audited revision | Full scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | S1 | yes | None | NB-01 stale route count; NB-02 conditional successful-zero-hit wording; NB-03 preserved-file bookkeeping | APPROVE | ses_0600350bbffe3P6lLC0ZKqfGET |
+| Round | Audited revision | Full scope? | Blocking findings | Non-blocking findings                                                                                    | Result  | Invocation reference           |
+| ----- | ---------------- | ----------- | ----------------- | -------------------------------------------------------------------------------------------------------- | ------- | ------------------------------ |
+| 1     | S1               | yes         | None              | NB-01 stale route count; NB-02 conditional successful-zero-hit wording; NB-03 preserved-file bookkeeping | APPROVE | ses_0600350bbffe3P6lLC0ZKqfGET |
 
 ### S1 independent plan audit verdict (verbatim)
 
@@ -594,7 +594,7 @@ Historical verbatim record only. S4 supersedes its requirement and
 failure-projection conclusions; it is not implementation authority for the
 current revision.
 
-```text
+````text
 ## Blocking findings
 
 No blocking findings.
@@ -671,7 +671,8 @@ Status: approved
 Revision: S1
 Approved revision: S1
 Implementation allowed: yes
-```
+````
+
 ```
 
 ## S3 Amendment: Pre-Commit Linux Verification Without a Push-Only Circular Gate
@@ -854,3 +855,4 @@ successor canonical plan that separates the two public transport behaviors:
 
 Both cases stay in the existing OpenTUI test file and add no production seam,
 fallback, timeout change, user-visible behavior, or extra code file.
+```

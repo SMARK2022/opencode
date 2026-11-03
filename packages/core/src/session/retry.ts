@@ -6,7 +6,8 @@ import { iife } from "../util/iife"
 import { GO_UPSELL_MESSAGE, GO_UPSELL_URL } from "./retry-constants"
 export { GO_UPSELL_MESSAGE, GO_UPSELL_URL }
 
-const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value)
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value)
 
 export type Err = ReturnType<NamedError["toObject"]>
 

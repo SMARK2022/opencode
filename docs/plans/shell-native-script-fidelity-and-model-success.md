@@ -90,16 +90,16 @@
 
 本轮授权定位到 `powershellNotes` 中的单引号说明：移除 `to pass ... as text` 的传递承诺，采用§10.2的准确展开规则。此项同步到对应行为测试，其他提示文字保持。全过程持续推进至真实verified-implementation，遇到返工继续按授权范围处理。
 
-| ID | 可验收要求 |
-| --- | --- |
-| R1 | 一个 `bash` Tool，既有参数 shape、默认 shell 选择与配置兼容性保持。 |
-| R2 | 正确表达本层展开、下一层展开、字面 `$`，以及反斜杠、引号和换行。 |
-| R3 | JSON 标准解码一次；执行正文保真；移除 Python 内容猜测改写。 |
-| R4 | 原生引用指导的目标保留；当前文字冻结，每次修改按§1.1单独取得用户同意。 |
-| R5 | 本任务所有模型可见提示合计净增 <=9 行，各渲染 profile 同样 <=9 行。 |
-| R6 | 保留源码风险审查、精确 native 退出码、输出、取消、超时及执行证据。 |
-| R7 | 工具保真与模型生成质量分别验收；成功包含预期值检查。 |
-| R8 | 每次提示词修改须有用户明确授权；审计发现适用§21的范围与已接受缺陷处理。 |
+| ID  | 可验收要求                                                              |
+| --- | ----------------------------------------------------------------------- |
+| R1  | 一个 `bash` Tool，既有参数 shape、默认 shell 选择与配置兼容性保持。     |
+| R2  | 正确表达本层展开、下一层展开、字面 `$`，以及反斜杠、引号和换行。        |
+| R3  | JSON 标准解码一次；执行正文保真；移除 Python 内容猜测改写。             |
+| R4  | 原生引用指导的目标保留；当前文字冻结，每次修改按§1.1单独取得用户同意。  |
+| R5  | 本任务所有模型可见提示合计净增 <=9 行，各渲染 profile 同样 <=9 行。     |
+| R6  | 保留源码风险审查、精确 native 退出码、输出、取消、超时及执行证据。      |
+| R7  | 工具保真与模型生成质量分别验收；成功包含预期值检查。                    |
+| R8  | 每次提示词修改须有用户明确授权；审计发现适用§21的范围与已接受缺陷处理。 |
 
 ## 2. Explicit Non-Goals
 
@@ -120,19 +120,19 @@
 
 以下 `src/`、`test/` 相对 `packages/opencode/`。
 
-| Source | 证据 | Class |
-| --- | --- | --- |
-| `src/tool/shell.ts:410,543,556,1368,1403` | normalizer 折半反斜杠、改引号和插值语义，执行另一份 command | observed |
-| `src/tool/shell.ts:620,661,1009,1143,1270` | 原生传输、UTF-8 环境、runner、终态与生命周期 | observed |
-| `src/tool/shell/prompt.ts:22,55,126,172,222` | 已有引用提示、通用字段说明、换行限制及重复指导 | observed |
-| `src/session/system.ts:206`、`src/tool/shell.ts:1327` | `acceptable()` 与 `acceptable(cfg.shell)` 分裂 | observed |
-| `src/shell/shell.ts:159`、`src/session/prompt.ts:1714` | direct shell 的 command 插入 eval 字符串后提前展开 | observed |
-| `src/shell/parse.ts:46,86,110` | bare dash、PowerShell 引用边界和 literal pipeline 事实遗漏 | observed |
-| `src/permission/precheck.ts:501,550,605,726,733`、`auto.ts:70` | stdin/source 风险入口、包装器覆盖及 general allow | observed |
-| `src/util/output-notice.ts`、`test/tool/shell.test.ts:2292,2314,2333,2662` | 精确 native code、notice 与真实反斜杠测试合同 | contracted |
-| `test/shell/shell.test.ts`、`test/session/system.test.ts`、`test/permission/precheck.test.ts` | 可复用公共 seam | observed |
-| `.temp/thirdparty/pi/packages/coding-agent/src/core/tools/bash.ts:95`、`tools/index.ts:195` | Pi command-string 主接口；本地 revision `e4ce7b449f4d91589c8760d6fbfa6eaaf82b05fe` | observed |
-| `thirdparty/opencode-11720/packages/opencode/src/tool/shell.ts:293` | 本地上游基线的 command-string 执行路径 | observed |
+| Source                                                                                        | 证据                                                                               | Class      |
+| --------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- | ---------- |
+| `src/tool/shell.ts:410,543,556,1368,1403`                                                     | normalizer 折半反斜杠、改引号和插值语义，执行另一份 command                        | observed   |
+| `src/tool/shell.ts:620,661,1009,1143,1270`                                                    | 原生传输、UTF-8 环境、runner、终态与生命周期                                       | observed   |
+| `src/tool/shell/prompt.ts:22,55,126,172,222`                                                  | 已有引用提示、通用字段说明、换行限制及重复指导                                     | observed   |
+| `src/session/system.ts:206`、`src/tool/shell.ts:1327`                                         | `acceptable()` 与 `acceptable(cfg.shell)` 分裂                                     | observed   |
+| `src/shell/shell.ts:159`、`src/session/prompt.ts:1714`                                        | direct shell 的 command 插入 eval 字符串后提前展开                                 | observed   |
+| `src/shell/parse.ts:46,86,110`                                                                | bare dash、PowerShell 引用边界和 literal pipeline 事实遗漏                         | observed   |
+| `src/permission/precheck.ts:501,550,605,726,733`、`auto.ts:70`                                | stdin/source 风险入口、包装器覆盖及 general allow                                  | observed   |
+| `src/util/output-notice.ts`、`test/tool/shell.test.ts:2292,2314,2333,2662`                    | 精确 native code、notice 与真实反斜杠测试合同                                      | contracted |
+| `test/shell/shell.test.ts`、`test/session/system.test.ts`、`test/permission/precheck.test.ts` | 可复用公共 seam                                                                    | observed   |
+| `.temp/thirdparty/pi/packages/coding-agent/src/core/tools/bash.ts:95`、`tools/index.ts:195`   | Pi command-string 主接口；本地 revision `e4ce7b449f4d91589c8760d6fbfa6eaaf82b05fe` | observed   |
+| `thirdparty/opencode-11720/packages/opencode/src/tool/shell.ts:293`                           | 本地上游基线的 command-string 执行路径                                             | observed   |
 
 ### 4.1 历史与实验基线
 
@@ -142,13 +142,13 @@
 
 最新 WSL 精确对照（pwsh，纯打印）：
 
-| command | 输出 |
-| --- | --- |
-| `wsl -- bash -lc 'echo "$HOME"'` | `/root` |
-| `wsl -- bash -lc 'HOME=/__target_probe__; echo "$HOME"'` | `/root` |
+| command                                                      | 输出                |
+| ------------------------------------------------------------ | ------------------- |
+| `wsl -- bash -lc 'echo "$HOME"'`                             | `/root`             |
+| `wsl -- bash -lc 'HOME=/__target_probe__; echo "$HOME"'`     | `/root`             |
 | `wsl --exec bash -lc 'HOME=/__target_probe__; echo "$HOME"'` | `/__target_probe__` |
-| `wsl -- bash -lc 'echo \"\$HOME\"'` | `"/root"` |
-| `wsl --exec bash -lc 'echo \"\$HOME\"'` | `"$HOME"` |
+| `wsl -- bash -lc 'echo \"\$HOME\"'`                          | `"/root"`           |
+| `wsl --exec bash -lc 'echo \"\$HOME\"'`                      | `"$HOME"`           |
 
 含义：单引号让 PowerShell 保留字符串中的字符；WSL `--` 仍带默认 shell，`--exec` 指定直接程序。单独打印 HOME 会掩盖展开层差异。此区别同时进入测试和一行可执行的 WSL 提醒。
 
@@ -172,43 +172,43 @@ R4 实施准备中的评测器遗漏 Windows `PATHEXT`。真实隔离子进程�
 
 ## 6. Supported Input Domain and Reachability
 
-| 输入 | 实际入口/owner | Class |
-| --- | --- | --- |
-| JSON `\n/\\n/\\/\"` | SDK 已解码字符串，ShellTool 原文执行 | contracted |
-| 本层/下一层/字面 `$`、引号、路径与正则 | 公开 command 的原生引用语法 | observed |
-| 单引号 payload、here-string、heredoc | shell 原生参数或管道 | observed |
-| bare `-`、versioned Python、py、静态 conda run | 语法事实与解释器参数角色 | observed |
-| stdin 数据、argv[0]、文件入口 | 程序既有接口，由调用者明确选择 | reachable |
-| SSH/WSL 嵌套解释 | 本地引用及目标程序的明确调用参数 | observed |
-| 非默认 cfg.shell、用户 direct shell | SystemPrompt、Shell.args、SessionPrompt.shell | observed |
+| 输入                                           | 实际入口/owner                                | Class      |
+| ---------------------------------------------- | --------------------------------------------- | ---------- |
+| JSON `\n/\\n/\\/\"`                            | SDK 已解码字符串，ShellTool 原文执行          | contracted |
+| 本层/下一层/字面 `$`、引号、路径与正则         | 公开 command 的原生引用语法                   | observed   |
+| 单引号 payload、here-string、heredoc           | shell 原生参数或管道                          | observed   |
+| bare `-`、versioned Python、py、静态 conda run | 语法事实与解释器参数角色                      | observed   |
+| stdin 数据、argv[0]、文件入口                  | 程序既有接口，由调用者明确选择                | reachable  |
+| SSH/WSL 嵌套解释                               | 本地引用及目标程序的明确调用参数              | observed   |
+| 非默认 cfg.shell、用户 direct shell            | SystemPrompt、Shell.args、SessionPrompt.shell | observed   |
 
 ## 7. Required Invariants
 
-| ID | 不变量 |
-| --- | --- |
-| I1 | 单 `bash` 和原 schema；当前配置及查找政策保持。 |
-| I2 | 解码后的用户 command 正文逐字符保留，无内容猜测或自动重试。 |
-| I3 | 系统、工具、权限和执行采用同一配置解析规则。 |
-| I4 | `$`、反斜杠、引号、JSON/脚本/输出换行由独立语义 oracle 验证。 |
-| I5 | 单引号表示“本层字面量”；后续解释取决于目标程序，here-string 仅是字面值构造。 |
-| I6 | 原有源码风险在两个权限 gate 保留；stdin 的代码与数据角色分开。 |
-| I7 | 最终成功 0；失败保留本脚本已有 native 非零码，否则 1；显式 exit 保留原码。 |
-| I8 | 提示合计及各渲染 profile 净增 <=9 行，UTF-8 文本净增 <=600 bytes。 |
-| I9 | 模型成功率有 baseline/candidate 实证，exit 0 同时检查预期值。 |
-| I10 | 输出、超时、取消、排空、压缩、worktree 与历史兼容由既有 owner 承担。 |
+| ID  | 不变量                                                                                           |
+| --- | ------------------------------------------------------------------------------------------------ |
+| I1  | 单 `bash` 和原 schema；当前配置及查找政策保持。                                                  |
+| I2  | 解码后的用户 command 正文逐字符保留，无内容猜测或自动重试。                                      |
+| I3  | 系统、工具、权限和执行采用同一配置解析规则。                                                     |
+| I4  | `$`、反斜杠、引号、JSON/脚本/输出换行由独立语义 oracle 验证。                                    |
+| I5  | 单引号表示“本层字面量”；后续解释取决于目标程序，here-string 仅是字面值构造。                     |
+| I6  | 原有源码风险在两个权限 gate 保留；stdin 的代码与数据角色分开。                                   |
+| I7  | 最终成功 0；失败保留本脚本已有 native 非零码，否则 1；显式 exit 保留原码。                       |
+| I8  | 提示合计及各渲染 profile 净增 <=9 行，UTF-8 文本净增 <=600 bytes。                               |
+| I9  | 模型成功率有 baseline/candidate 实证，exit 0 同时检查预期值。                                    |
+| I10 | 输出、超时、取消、排空、压缩、worktree 与历史兼容由既有 owner 承担。                             |
 | I11 | 正式评测先证明同一最小环境能调用各目标程序；诊断请求计入总预算，环境故障与命令语义失败分别记录。 |
 
 ## 8. First Divergence and Root Cause
 
-| 失真点 | Owner | 修复 |
-| --- | --- | --- |
-| JSON 之后又折半反斜杠并改写 Python 引用 | ShellTool | 删除 normalization，执行原 command |
-| 系统提示忽略 cfg.shell | SystemPrompt | 使用同一 Config 服务结果 |
-| 模型混用宿主/下游转义 | ShellPrompt | 简短的单引号优先、明确当前层插值规则 |
-| bare `-` / literal pipeline 未成为正确权限事实 | ShellParse | 修复分析表示及 stdin 绑定 |
-| direct shell 在 eval 前提前展开正文 | Shell.args | 独立位置参数传递 |
-| block 外残留 LASTEXITCODE 误判 | psEncoded | 同一 block 内观察最终状态并保留 native code |
-| 评测最小环境遗漏 Windows 程序后缀查找变量 | eval-shell-intent | 补齐必要环境并通过真实 Python/Node/子 shell 预检后冻结 |
+| 失真点                                         | Owner             | 修复                                                   |
+| ---------------------------------------------- | ----------------- | ------------------------------------------------------ |
+| JSON 之后又折半反斜杠并改写 Python 引用        | ShellTool         | 删除 normalization，执行原 command                     |
+| 系统提示忽略 cfg.shell                         | SystemPrompt      | 使用同一 Config 服务结果                               |
+| 模型混用宿主/下游转义                          | ShellPrompt       | 简短的单引号优先、明确当前层插值规则                   |
+| bare `-` / literal pipeline 未成为正确权限事实 | ShellParse        | 修复分析表示及 stdin 绑定                              |
+| direct shell 在 eval 前提前展开正文            | Shell.args        | 独立位置参数传递                                       |
+| block 外残留 LASTEXITCODE 误判                 | psEncoded         | 同一 block 内观察最终状态并保留 native code            |
+| 评测最小环境遗漏 Windows 程序后缀查找变量      | eval-shell-intent | 补齐必要环境并通过真实 Python/Node/子 shell 预检后冻结 |
 
 已运行的失败反馈环（真实 Bash Tool，纯计算）：
 
@@ -297,67 +297,67 @@ PowerShell 保留编码、输出流和 scriptblock，删除 block 外 LASTEXITCO
 
 ## 11. Secondary and Replacement Path Inventory
 
-| Path | 分类 | 处置 |
-| --- | --- | --- |
-| 配置 shell 的 command 执行 | primary contract | 唯一生产执行路径 |
-| 原生引用、字面块、-c/文件/管道 | 支持的语言输入域 | 调用者显式表达 |
-| Python 猜测改写 | 首次语义失真 | 删除 |
-| bare-dash 分析表示、现有 shell 查找/kill 行为 | existing compatibility | 保留并修复归属内行为 |
-| 失败 notice shell 属性 | diagnostic | 沿用现有分支，新增诊断决策分支 0 |
-| 离线模型评测 | test-only | 显式授权运行 |
+| Path                                          | 分类                   | 处置                             |
+| --------------------------------------------- | ---------------------- | -------------------------------- |
+| 配置 shell 的 command 执行                    | primary contract       | 唯一生产执行路径                 |
+| 原生引用、字面块、-c/文件/管道                | 支持的语言输入域       | 调用者显式表达                   |
+| Python 猜测改写                               | 首次语义失真           | 删除                             |
+| bare-dash 分析表示、现有 shell 查找/kill 行为 | existing compatibility | 保留并修复归属内行为             |
+| 失败 notice shell 属性                        | diagnostic             | 沿用现有分支，新增诊断决策分支 0 |
+| 离线模型评测                                  | test-only              | 显式授权运行                     |
 
 新增 alternate success path 0；诊断 decision-surface 增量 0%。自动转译、自动文件、Exec、失败后替代执行均排除。
 
 ## 12. Workaround Deletion and Replacement
 
-删除 INLINE_PYTHON_*、normalizer/helper、executeCommand/adaptation、normalization audit、新 adaptation 标签和专属附加证据；用原 command 的参数及 stdin 风险识别承接。此前已合并的 shellGuidance 保留当前状态，后续文字与组装调整适用§1.1；用独立参数替换 eval 字符串嵌入；用 block 内真实状态替换外层残留码汇聚。历史记录保留。
+删除 INLINE*PYTHON*\*、normalizer/helper、executeCommand/adaptation、normalization audit、新 adaptation 标签和专属附加证据；用原 command 的参数及 stdin 风险识别承接。此前已合并的 shellGuidance 保留当前状态，后续文字与组装调整适用§1.1；用独立参数替换 eval 字符串嵌入；用 block 内真实状态替换外层残留码汇聚。历史记录保留。
 
 ## 13. Forward Traceability
 
-| 要求 | 修改路径 | 行为测试 |
-| --- | --- | --- |
-| R1 | ShellTool/schema | 原字段/默认值、单 bash 工具 |
-| R2/R3 | shell.ts、shell/shell.ts | JSON、码点、各层变量、路径/正则/换行 |
+| 要求     | 修改路径                       | 行为测试                                                                |
+| -------- | ------------------------------ | ----------------------------------------------------------------------- |
+| R1       | ShellTool/schema               | 原字段/默认值、单 bash 工具                                             |
+| R2/R3    | shell.ts、shell/shell.ts       | JSON、码点、各层变量、路径/正则/换行                                    |
 | R4/R5/R8 | ShellPrompt/SystemPrompt及§1.1 | 配置数据一致、提示冻结与原行/字节实测记录；具体文案变更逐项匹配用户授权 |
-| R6 | ShellParse/Precheck | 两 gate、literal/data、bare dash、解释器/conda |
-| R6 | psEncoded/runner | 精确退出码、cmdlet 失败、输出、超时/取消 |
-| R7 | 固定夹具与 opt-in eval | 首次语义正确率、最多一次修正、成本 |
-| I11 | eval CLI / ShellTool.execute | 三 shell 中 Python、Node、子 shell 的纯打印预检与固定独立预期 |
+| R6       | ShellParse/Precheck            | 两 gate、literal/data、bare dash、解释器/conda                          |
+| R6       | psEncoded/runner               | 精确退出码、cmdlet 失败、输出、超时/取消                                |
+| R7       | 固定夹具与 opt-in eval         | 首次语义正确率、最多一次修正、成本                                      |
+| I11      | eval CLI / ShellTool.execute   | 三 shell 中 Python、Node、子 shell 的纯打印预检与固定独立预期           |
 
 ## 14. Reverse Traceability
 
-| Concept | 需求与证据 |
-| --- | --- |
-| SystemPrompt 获取 cfg.shell | R4/R5：直接观察到提示/执行分裂 |
-| 已有引用指导的保留 | R2/R4/R8：当前文本冻结；历史措辞问题按用户指定的既有缺陷处理 |
-| literal stdin/解释器角色 | R6：真实删除源码当前被判 general |
-| bare - / 原生引用分析 | R6：grammar 节点缺失及旧引用假设 |
-| 状态汇聚与位置参数 | R2/R6：真实误判与提前展开实验 |
-| prompt 预算和模型评测 | R5/R7：用户硬约束及真实成功率目标 |
-| 环境预检与诊断批次隔离 | I11：实测 PATHEXT 遗漏使语义评测变成程序查找失败；原纯 shell 打印预检覆盖不到 native 程序查找 |
+| Concept                     | 需求与证据                                                                                    |
+| --------------------------- | --------------------------------------------------------------------------------------------- |
+| SystemPrompt 获取 cfg.shell | R4/R5：直接观察到提示/执行分裂                                                                |
+| 已有引用指导的保留          | R2/R4/R8：当前文本冻结；历史措辞问题按用户指定的既有缺陷处理                                  |
+| literal stdin/解释器角色    | R6：真实删除源码当前被判 general                                                              |
+| bare - / 原生引用分析       | R6：grammar 节点缺失及旧引用假设                                                              |
+| 状态汇聚与位置参数          | R2/R6：真实误判与提前展开实验                                                                 |
+| prompt 预算和模型评测       | R5/R7：用户硬约束及真实成功率目标                                                             |
+| 环境预检与诊断批次隔离      | I11：实测 PATHEXT 遗漏使语义评测变成程序查找失败；原纯 shell 打印预检覆盖不到 native 程序查找 |
 
 ## 15. File-Level Change Plan
 
 `packages/opencode/` 下的文件：
 
-| 文件 | 操作/责任 |
-| --- | --- |
-| `src/tool/shell.ts` | 修改：删除Python执行改写、固定终态、保留runner；模型可见文字与组装冻结 |
-| `src/tool/shell/prompt.ts` | 仅替换§10.2明确授权的单引号说明，其余内容冻结 |
-| `src/session/system.ts` | 修改：读取相同配置 shell |
-| `src/shell/shell.ts` | 修改：direct shell 正文位置参数 |
-| `src/shell/parse.ts` | 修改：原生引用、bare dash、stdin 事实与 offset |
-| `src/permission/precheck.ts` | 修改：程序/数据角色、解释器和包装器、退出旧证据 |
-| `src/util/output-notice.ts` | 保留当前已有失败notice实现；新增或改写模型可见内容逐次取得用户同意 |
-| `test/tool/shell.test.ts` | 修改：替换适配语义测试，执行/权限/终态矩阵 |
-| `test/tool/shell-prompt.test.ts` | 按授权更新单引号说明预期，保留schema及其他文字断言，复核全量预算 |
-| `test/tool/__snapshots__/parameters.test.ts.snap` | 冻结当前快照；具体用户批准的字段说明变更才同步对应快照 |
-| `test/shell/parse.test.ts` | 新增：公开 analyze 事实 |
-| `test/shell/shell.test.ts`、`test/session/prompt.test.ts` | 修改：真实 direct-shell 参数、rc 与用户入口 |
-| `test/session/system.test.ts` | 修改：Config 供给、配置 shell 一致 |
-| `test/permission/precheck.test.ts` | 修改：literal source/data、两 gate 与旧政策 |
-| `test/fixture/shell-intent.ts` | 保留固定任务及独立语义预期，模型可见任务文字冻结 |
-| `test/eval-shell-intent.ts` | 显式授权模型评测；原始记录、当前批次与累计预算保持可追溯；以独立同输入基线证据区分新增/继承字符失真 |
+| 文件                                                      | 操作/责任                                                                                           |
+| --------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| `src/tool/shell.ts`                                       | 修改：删除Python执行改写、固定终态、保留runner；模型可见文字与组装冻结                              |
+| `src/tool/shell/prompt.ts`                                | 仅替换§10.2明确授权的单引号说明，其余内容冻结                                                       |
+| `src/session/system.ts`                                   | 修改：读取相同配置 shell                                                                            |
+| `src/shell/shell.ts`                                      | 修改：direct shell 正文位置参数                                                                     |
+| `src/shell/parse.ts`                                      | 修改：原生引用、bare dash、stdin 事实与 offset                                                      |
+| `src/permission/precheck.ts`                              | 修改：程序/数据角色、解释器和包装器、退出旧证据                                                     |
+| `src/util/output-notice.ts`                               | 保留当前已有失败notice实现；新增或改写模型可见内容逐次取得用户同意                                  |
+| `test/tool/shell.test.ts`                                 | 修改：替换适配语义测试，执行/权限/终态矩阵                                                          |
+| `test/tool/shell-prompt.test.ts`                          | 按授权更新单引号说明预期，保留schema及其他文字断言，复核全量预算                                    |
+| `test/tool/__snapshots__/parameters.test.ts.snap`         | 冻结当前快照；具体用户批准的字段说明变更才同步对应快照                                              |
+| `test/shell/parse.test.ts`                                | 新增：公开 analyze 事实                                                                             |
+| `test/shell/shell.test.ts`、`test/session/prompt.test.ts` | 修改：真实 direct-shell 参数、rc 与用户入口                                                         |
+| `test/session/system.test.ts`                             | 修改：Config 供给、配置 shell 一致                                                                  |
+| `test/permission/precheck.test.ts`                        | 修改：literal source/data、两 gate 与旧政策                                                         |
+| `test/fixture/shell-intent.ts`                            | 保留固定任务及独立语义预期，模型可见任务文字冻结                                                    |
+| `test/eval-shell-intent.ts`                               | 显式授权模型评测；原始记录、当前批次与累计预算保持可追溯；以独立同输入基线证据区分新增/继承字符失真 |
 
 实施时在旧 `docs/powershell-inline-python-normalization-plan.md` 增加本计划指针，保留原历史事实。其它第三方、SDK、数据库 schema、agent 默认权限和 CI 保持。额外必要改动先修订本计划。
 
@@ -365,17 +365,17 @@ PowerShell 保留编码、输出流和 scriptblock，删除 block 外 LASTEXITCO
 
 公共 seams：ShellTool.execute、Shell.args 实际 argv、ShellParse.analyze、PermissionPrecheck.evaluate、SystemPrompt.environment、ShellPrompt.render、SessionPrompt.shell。
 
-| 顺序 | Red -> Green |
-| --- | --- |
-| 1 | 冻结提示计数、脱敏任务及当前生成基准 |
-| 2 | 配置提示分裂 -> 同一 cfg.shell |
-| 3 | literal/bare - 风险遗漏 -> 精确语法事实与两 gate 分级 |
-| 4 | 合法引用被 normalizer 改写 -> 原文执行；保留明确插值 |
-| 5 | 单引号说明越过PowerShell本层 -> 授权的准确展开说明；真实PowerShell字符串码点及其他提示保持回归 |
-| 6 | direct shell 提前展开 -> 位置参数保真及初始化回归 |
-| 7 | cmdlet 失败 exit 0 -> 精确 native code + 最终状态；lifecycle 回归 |
-| 8 | 模型质量未知 -> Gate-Q 对照通过 |
-| 9 | 报告将继承失真计作新增 -> 同输入基线证据分类；验证未知为pending、基线正常/当前失真为rework、共同失真单列继承，成功率与失败次数保持 |
+| 顺序 | Red -> Green                                                                                                                       |
+| ---- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| 1    | 冻结提示计数、脱敏任务及当前生成基准                                                                                               |
+| 2    | 配置提示分裂 -> 同一 cfg.shell                                                                                                     |
+| 3    | literal/bare - 风险遗漏 -> 精确语法事实与两 gate 分级                                                                              |
+| 4    | 合法引用被 normalizer 改写 -> 原文执行；保留明确插值                                                                               |
+| 5    | 单引号说明越过PowerShell本层 -> 授权的准确展开说明；真实PowerShell字符串码点及其他提示保持回归                                     |
+| 6    | direct shell 提前展开 -> 位置参数保真及初始化回归                                                                                  |
+| 7    | cmdlet 失败 exit 0 -> 精确 native code + 最终状态；lifecycle 回归                                                                  |
+| 8    | 模型质量未知 -> Gate-Q 对照通过                                                                                                    |
+| 9    | 报告将继承失真计作新增 -> 同输入基线证据分类；验证未知为pending、基线正常/当前失真为rework、共同失真单列继承，成功率与失败次数保持 |
 
 逐 slice 红绿推进。真实反斜杠用 String.raw/程序化数量构造并先断言输入；预期来自固定码点、值和语言合同，不复制 normalizer 或 epilogue 算法。
 
@@ -435,17 +435,17 @@ R5原采集细则（历史预算，当前有效上限见本节）：
 
 ## 20. Real Risks and Open Decisions
 
-| 风险 | 验收处理 |
-| --- | --- |
-| 771 条旧成功调用原样重放有语法回退 | 既有提示条件下的历史静态检查与Gate-Q；提示改动按§1.1逐次授权 |
-| 单引号只保护本层 | 子程序/WSL 目标层对照；避免用单独 HOME 输出作证据 |
-| here-string 值仍需选择参数/stdin接口，PS5.1 有 Legacy binder | 实际进程测试，保持显式输入角色；不自动转写 |
-| stdin/-c/file 的 argv/traceback 差异与 delimiter 碰撞 | 固定边界夹具，模型用合法原生接口，Harness 不模拟模式 |
-| CRLF 对 Bash stdin 的影响 | 明确的 LF/合法 argv 回归，保留目标程序原生语义 |
-| bare-dash 分析污染字符或 offset | 原文执行、字面块、注释、算术交叉回归 |
-| 状态修改丢 native 码 | 保留7/9/42旧断言，补恢复与cmdlet失败矩阵 |
-| 模型评测随机性/成本 | 固定条件、完整逐例记录、硬预算和上线门槛 |
-| 评测器自身环境故障污染基线 | R4诊断批次保留并计费；R5先通过真实 native 程序预检，再采正式基线 |
+| 风险                                                         | 验收处理                                                         |
+| ------------------------------------------------------------ | ---------------------------------------------------------------- |
+| 771 条旧成功调用原样重放有语法回退                           | 既有提示条件下的历史静态检查与Gate-Q；提示改动按§1.1逐次授权     |
+| 单引号只保护本层                                             | 子程序/WSL 目标层对照；避免用单独 HOME 输出作证据                |
+| here-string 值仍需选择参数/stdin接口，PS5.1 有 Legacy binder | 实际进程测试，保持显式输入角色；不自动转写                       |
+| stdin/-c/file 的 argv/traceback 差异与 delimiter 碰撞        | 固定边界夹具，模型用合法原生接口，Harness 不模拟模式             |
+| CRLF 对 Bash stdin 的影响                                    | 明确的 LF/合法 argv 回归，保留目标程序原生语义                   |
+| bare-dash 分析污染字符或 offset                              | 原文执行、字面块、注释、算术交叉回归                             |
+| 状态修改丢 native 码                                         | 保留7/9/42旧断言，补恢复与cmdlet失败矩阵                         |
+| 模型评测随机性/成本                                          | 固定条件、完整逐例记录、硬预算和上线门槛                         |
+| 评测器自身环境故障污染基线                                   | R4诊断批次保留并计费；R5先通过真实 native 程序预检，再采正式基线 |
 
 实施评测前由用户指定两个模型及调用授权。其余路线、接口、预算与通过标准已确定。
 
@@ -465,17 +465,17 @@ Rejected speculation：新增Exec或全局切shell并非本任务路线；JSON�
 
 ## 22. Plan Audit Record
 
-| Round | Revision | Full scope | Blocking | Non-blocking | Verdict | Reference |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | R1 | yes | B-01 PowerShell 终态修复丢弃既有 native 退出码 | N-01 历史统计尚未独立复核 | BLOCK | ses_f47318a58ffeEfZFyEfUP8H5fK |
-| 2 | R2 | yes | No blocking findings. | N-01 历史统计尚未独立复核，继续保留 | APPROVE | ses_f47318a58ffeEfZFyEfUP8H5fK |
-| 3 | R3 | yes | No blocking findings. | N-01 历史统计及探针尚未独立复核，继续保留 | APPROVE | ses_f47318a58ffeEfZFyEfUP8H5fK |
-| 4 | R4 | yes | No blocking findings. | N-01 历史统计及探针尚未独立复核，继续保留 | APPROVE | ses_f47318a58ffeEfZFyEfUP8H5fK |
-| 5 | R5 | yes | No blocking findings. | N-01 部分实验与统计仍未独立复现，继续保留 | APPROVE | ses_f47318a58ffeEfZFyEfUP8H5fK |
-| 6 | R6 | yes | No blocking findings. | N-01 部分统计和实验仍未独立复现，继续保留 | APPROVE | ses_f47318a58ffeEfZFyEfUP8H5fK |
-| 7 | R7 | yes | B-02 Gate-Q未通过时，新增“授权范围验收”缺少明确的放行约束 | N-01 部分实验和汇总仍未独立复现；N-02 评测续接合同需要保持一致 | BLOCK | ses_f47318a58ffeEfZFyEfUP8H5fK |
-| 8 | R8 | yes | No blocking findings. | N-01 部分实验和汇总仍未独立复现；N-02 评测续接合同仍需保持一致 | APPROVE | ses_f47318a58ffeEfZFyEfUP8H5fK |
-| 9 | R9 | yes | No blocking findings. | N-01 部分实验和汇总仍未独立复现；N-02 评测续接记录仍需统一 | APPROVE | ses_f47318a58ffeEfZFyEfUP8H5fK |
+| Round | Revision | Full scope | Blocking                                                  | Non-blocking                                                   | Verdict | Reference                      |
+| ----- | -------- | ---------- | --------------------------------------------------------- | -------------------------------------------------------------- | ------- | ------------------------------ |
+| 1     | R1       | yes        | B-01 PowerShell 终态修复丢弃既有 native 退出码            | N-01 历史统计尚未独立复核                                      | BLOCK   | ses_f47318a58ffeEfZFyEfUP8H5fK |
+| 2     | R2       | yes        | No blocking findings.                                     | N-01 历史统计尚未独立复核，继续保留                            | APPROVE | ses_f47318a58ffeEfZFyEfUP8H5fK |
+| 3     | R3       | yes        | No blocking findings.                                     | N-01 历史统计及探针尚未独立复核，继续保留                      | APPROVE | ses_f47318a58ffeEfZFyEfUP8H5fK |
+| 4     | R4       | yes        | No blocking findings.                                     | N-01 历史统计及探针尚未独立复核，继续保留                      | APPROVE | ses_f47318a58ffeEfZFyEfUP8H5fK |
+| 5     | R5       | yes        | No blocking findings.                                     | N-01 部分实验与统计仍未独立复现，继续保留                      | APPROVE | ses_f47318a58ffeEfZFyEfUP8H5fK |
+| 6     | R6       | yes        | No blocking findings.                                     | N-01 部分统计和实验仍未独立复现，继续保留                      | APPROVE | ses_f47318a58ffeEfZFyEfUP8H5fK |
+| 7     | R7       | yes        | B-02 Gate-Q未通过时，新增“授权范围验收”缺少明确的放行约束 | N-01 部分实验和汇总仍未独立复现；N-02 评测续接合同需要保持一致 | BLOCK   | ses_f47318a58ffeEfZFyEfUP8H5fK |
+| 8     | R8       | yes        | No blocking findings.                                     | N-01 部分实验和汇总仍未独立复现；N-02 评测续接合同仍需保持一致 | APPROVE | ses_f47318a58ffeEfZFyEfUP8H5fK |
+| 9     | R9       | yes        | No blocking findings.                                     | N-01 部分实验和汇总仍未独立复现；N-02 评测续接记录仍需统一     | APPROVE | ses_f47318a58ffeEfZFyEfUP8H5fK |
 
 R9原始结论：**APPROVE — 仅批准 `docs/plans/shell-native-script-fidelity-and-model-success.md` 的 R9，full-scope。**
 
@@ -539,13 +539,13 @@ R6 伴生快照复核原文：**允许作为 R6 的伴生快照修正记录并�
 
 以下命令工作目录均为 `packages/opencode`：
 
-| 命令 | 结果 |
-| --- | --- |
-| `bun test test/tool/shell.test.ts --timeout 30000` | 204 pass，688 assertions |
-| `bun test test/shell/parse.test.ts test/permission/precheck.test.ts test/tool/shell-prompt.test.ts test/session/system.test.ts test/tool/parameters.test.ts` | 257 pass，16 snapshots，1466 assertions |
-| `bun test test/session/prompt.test.ts -t "auto permission reviewer retries transient provider failures before recording the decision" --timeout 30000` | 1 pass，3 assertions，8.62秒；模拟503后正常恢复 |
-| `bun test test/session/prompt.test.ts --timeout 30000 --dots` | 105 pass，14既有skip，472 assertions，542.17秒；诊断任务 `ses_f44c14c69ffebtTL3zMFZBx6np` 实跑 |
-| `bun typecheck` | exit 0 |
+| 命令                                                                                                                                                         | 结果                                                                                           |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------- |
+| `bun test test/tool/shell.test.ts --timeout 30000`                                                                                                           | 204 pass，688 assertions                                                                       |
+| `bun test test/shell/parse.test.ts test/permission/precheck.test.ts test/tool/shell-prompt.test.ts test/session/system.test.ts test/tool/parameters.test.ts` | 257 pass，16 snapshots，1466 assertions                                                        |
+| `bun test test/session/prompt.test.ts -t "auto permission reviewer retries transient provider failures before recording the decision" --timeout 30000`       | 1 pass，3 assertions，8.62秒；模拟503后正常恢复                                                |
+| `bun test test/session/prompt.test.ts --timeout 30000 --dots`                                                                                                | 105 pass，14既有skip，472 assertions，542.17秒；诊断任务 `ses_f44c14c69ffebtTL3zMFZBx6np` 实跑 |
+| `bun typecheck`                                                                                                                                              | exit 0                                                                                         |
 
 先前整文件测试在外层360秒截止，完整运行542.17秒通过；保留原测试断言与每测试超时。Zsh本机缺失，相关执行项继续列为环境未验证。仓库根 `git diff --check` 通过，输出包含checkout的LF/CRLF提示。
 
@@ -553,12 +553,12 @@ R6 伴生快照复核原文：**允许作为 R6 的伴生快照修正记录并�
 
 正式四组生成、独立命令审批、实际执行、一次修正及独立语义评估已完成。报告命令：`bun run test/eval-shell-intent.ts --phase report --artifacts D:\Temp\opencode\shell-intent-gate-q-r5`。最终 `gate: rework`；累计231/288请求，余57，包含R4诊断51。正式baseline91请求，candidate89请求。provider超时及无效调用全部计入失败与成本。
 
-| 模型/条件 | 请求 | 首次正确/36 | 两次内正确/36 | 引用/解析失败 |
-| --- | ---: | ---: | ---: | ---: |
-| GPT baseline | 43 | 29 | 36 | 7 |
-| GPT candidate | 44 | 28 | 34 | 4 |
-| Kimi baseline | 48 | 24 | 35 | 2 |
-| Kimi candidate | 45 | 27 | 35 | 2 |
+| 模型/条件      | 请求 | 首次正确/36 | 两次内正确/36 | 引用/解析失败 |
+| -------------- | ---: | ----------: | ------------: | ------------: |
+| GPT baseline   |   43 |          29 |            36 |             7 |
+| GPT candidate  |   44 |          28 |            34 |             4 |
+| Kimi baseline  |   48 |          24 |            35 |             2 |
+| Kimi candidate |   45 |          27 |            35 |             2 |
 
 合计首次正确53/72→55/72；两次内71/72→69/72；引用失败9→6（目标最多4）；每成功任务请求91/71→89/69。pwsh两次内24/24→24/24；PS5.1为24/24→22/24；Bash为23/24→23/24。Python首次10/12→9/12，Node首次4/6→3/6。权限误放行在这些离线样本中为0。
 
@@ -602,24 +602,24 @@ R5旧candidate结果保持rework；当前评测与实施结果见§23.6。其他
 
 所有下列命令在 `packages/opencode` 执行：
 
-| 验证 | 结果 |
-| --- | --- |
-| `bun test test/shell/parse.test.ts test/permission/precheck.test.ts test/tool/shell-prompt.test.ts test/session/system.test.ts test/tool/parameters.test.ts` | 257 pass，16 snapshots，1466 assertions |
-| `bun test test/tool/shell.test.ts test/shell/shell.test.ts --timeout 30000` | 215 pass，1 skip，713 assertions；skip为本机Zsh缺失 |
-| `bun test test/session/prompt.test.ts --timeout 30000 --dots` | 105 pass，14既有skip，472 assertions，582.40秒；保留原每测试时限 |
-| `bun typecheck` | exit 0 |
-| 仓库根 `git diff --check` | exit 0，包含LF/CRLF checkout提示 |
+| 验证                                                                                                                                                         | 结果                                                             |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------- |
+| `bun test test/shell/parse.test.ts test/permission/precheck.test.ts test/tool/shell-prompt.test.ts test/session/system.test.ts test/tool/parameters.test.ts` | 257 pass，16 snapshots，1466 assertions                          |
+| `bun test test/tool/shell.test.ts test/shell/shell.test.ts --timeout 30000`                                                                                  | 215 pass，1 skip，713 assertions；skip为本机Zsh缺失              |
+| `bun test test/session/prompt.test.ts --timeout 30000 --dots`                                                                                                | 105 pass，14既有skip，472 assertions，582.40秒；保留原每测试时限 |
+| `bun typecheck`                                                                                                                                              | exit 0                                                           |
+| 仓库根 `git diff --check`                                                                                                                                    | exit 0，包含LF/CRLF checkout提示                                 |
 
 一次整文件会话测试在外层650秒时限终止；随后以充足外层时限完整运行通过，测试本身的超时、断言和跳过项保持。测试覆盖终态、输出排空、取消、超时、worktree与两权限gate，旧normalizer专属行为已移除。
 
 评测实际使用原R5基线与R8候选数据；canonical revision与数据批次分别标识设计和已冻结采样。累计313/375请求，余62；当前candidate共82请求。原51诊断及旧89候选请求继续计费，原始生成/结果/判断全部保留。报告命令：`bun run test/eval-shell-intent.ts --phase report --artifacts D:\Temp\opencode\shell-intent-gate-q-r5`，最终 `gate: pass`。
 
-| 模型/条件 | 请求 | 首次成功 | 两次内成功 | 引用错误 |
-| --- | ---: | ---: | ---: | ---: |
-| GPT baseline | 43 | 29/36 | 36/36 | 7 |
-| GPT candidate | 38 | 34/36 | 36/36 | 0 |
-| Kimi baseline | 48 | 24/36 | 35/36 | 2 |
-| Kimi candidate | 44 | 28/36 | 36/36 | 3 |
+| 模型/条件      | 请求 | 首次成功 | 两次内成功 | 引用错误 |
+| -------------- | ---: | -------: | ---------: | -------: |
+| GPT baseline   |   43 |    29/36 |      36/36 |        7 |
+| GPT candidate  |   38 |    34/36 |      36/36 |        0 |
+| Kimi baseline  |   48 |    24/36 |      35/36 |        2 |
+| Kimi candidate |   44 |    28/36 |      36/36 |        3 |
 
 合计首次53/72→62/72，两次内71/72→72/72，引用错误9→3，每成功任务请求91/71→82/72。Python首次10/12→11/12，Node首次4/6→5/6；三个shell两次内均24/24。原始分组诊断继续展示pwsh首轮与成本等变化，正式门禁沿用§18列出的总量/子集/两次指标。provider超时6次仍按失败计费。
 
@@ -635,9 +635,9 @@ R5旧candidate结果保持rework；当前评测与实施结果见§23.6。其他
 
 ## 24. Implementation Audit Record
 
-| Round | Approved revision | Full scope | Blocking | Verdict | Reference |
-| --- | --- | --- | --- | --- | --- |
-| 1 | R9 | yes | No blocking findings. | APPROVE | ses_f47318a58ffeEfZFyEfUP8H5fK |
+| Round | Approved revision | Full scope | Blocking              | Verdict | Reference                      |
+| ----- | ----------------- | ---------- | --------------------- | ------- | ------------------------------ |
+| 1     | R9                | yes        | No blocking findings. | APPROVE | ses_f47318a58ffeEfZFyEfUP8H5fK |
 
 原始放行结论：**APPROVE — 当前任务归属的完整实现 diff，基于批准计划 R9，full-scope。**
 

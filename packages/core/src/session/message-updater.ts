@@ -176,12 +176,17 @@ export function update(adapter: Adapter, event: SessionEvent.Event) {
         )
       },
       "session.next.messages.hidden": (event) =>
-        Effect.forEach(event.data.messageIDs, (messageID) => Effect.gen(function* () {
-          const message = yield* adapter.getMessage(messageID)
-          if (!message) return
-          // 合并标记而非替换metadata，保留审查关联、真实正文与已有终态。
-          yield* adapter.updateMessage({ ...message, metadata: { ...message.metadata, hidden: event.data.hidden } })
-        }), { discard: true }),
+        Effect.forEach(
+          event.data.messageIDs,
+          (messageID) =>
+            Effect.gen(function* () {
+              const message = yield* adapter.getMessage(messageID)
+              if (!message) return
+              // 合并标记而非替换metadata，保留审查关联、真实正文与已有终态。
+              yield* adapter.updateMessage({ ...message, metadata: { ...message.metadata, hidden: event.data.hidden } })
+            }),
+          { discard: true },
+        ),
       "session.next.shell.started": (event) => {
         return adapter.appendMessage(
           SessionMessage.Shell.make({
@@ -211,9 +216,11 @@ export function update(adapter: Adapter, event: SessionEvent.Event) {
       "session.next.step.started": (event) => {
         return Effect.gen(function* () {
           // 审查child复用但模型并行，明确绑定的独立请求不能提前完成另一助手。
-          const currentAssistant = event.data.agent === "permission-reviewer" && typeof event.metadata?.permissionReviewerRequestID === "string"
-            ? undefined
-            : yield* adapter.getCurrentAssistant()
+          const currentAssistant =
+            event.data.agent === "permission-reviewer" &&
+            typeof event.metadata?.permissionReviewerRequestID === "string"
+              ? undefined
+              : yield* adapter.getCurrentAssistant()
           if (currentAssistant) {
             yield* adapter.updateAssistant(
               produce(currentAssistant, (draft) => {
@@ -245,33 +252,33 @@ export function update(adapter: Adapter, event: SessionEvent.Event) {
       "session.next.step.ended": (event) => {
         return Effect.gen(function* () {
           yield* updateOwnedAssistant(event.data.assistantMessageID, (draft) => {
-          draft.time.completed = event.data.timestamp
-          // 迟到的用量结算可更新快照，但不能将已有失败投影成成功 finish。
-          draft.finish = draft.error ? "error" : event.data.finish
-          draft.cost = event.data.cost
-          draft.tokens = event.data.tokens
-          // 零输入也完成确认；迟到结算继续修订同一助手快照。
-          if (draft.inputEstimate) draft.inputEstimate.confirmed = true
-          if (event.data.snapshot || event.data.files)
-            draft.snapshot = {
-              ...draft.snapshot,
-              end: event.data.snapshot,
-              files: event.data.files ? Array.from(event.data.files) : undefined,
-            }
+            draft.time.completed = event.data.timestamp
+            // 迟到的用量结算可更新快照，但不能将已有失败投影成成功 finish。
+            draft.finish = draft.error ? "error" : event.data.finish
+            draft.cost = event.data.cost
+            draft.tokens = event.data.tokens
+            // 零输入也完成确认；迟到结算继续修订同一助手快照。
+            if (draft.inputEstimate) draft.inputEstimate.confirmed = true
+            if (event.data.snapshot || event.data.files)
+              draft.snapshot = {
+                ...draft.snapshot,
+                end: event.data.snapshot,
+                files: event.data.files ? Array.from(event.data.files) : undefined,
+              }
           })
           if (event.data.summary) {
             const user = yield* adapter.getMessage(event.data.summary.messageID)
             // 更新同一用户消息而非Session全局summary；重放相同快照只替换，不重复累加。
-            if (user?.type === "user") yield* adapter.updateMessage({ ...user,
-              summary: { ...user.summary, diffs: event.data.summary.diffs },
-            })
+            if (user?.type === "user")
+              yield* adapter.updateMessage({ ...user, summary: { ...user.summary, diffs: event.data.summary.diffs } })
           }
         })
       },
       "session.next.step.failed": (event) => {
         return updateOwnedAssistant(event.data.assistantMessageID, (draft) => {
           // 只撤回失败正文和推理；实际Tool及其副作用结算仍须保留，普通失败不改partial。
-          if (event.data.discardIncompleteAttempt === true) draft.content = draft.content.filter(part => part.type === "tool")
+          if (event.data.discardIncompleteAttempt === true)
+            draft.content = draft.content.filter((part) => part.type === "tool")
           draft.time.completed = event.data.timestamp
           draft.finish = "error"
           draft.error = event.data.error
@@ -340,12 +347,17 @@ export function update(adapter: Adapter, event: SessionEvent.Event) {
           const match = latestTool(draft, event.data.callID)
           if (match && match.state.status === "running") {
             // 普通工具进度不能擦掉已完成的权限审查；reviewer自己的新状态仍可覆盖旧状态。
-            match.state.structured = { ...event.data.structured,
+            match.state.structured = {
+              ...event.data.structured,
               ...(event.data.structured.autoReview === undefined && match.state.structured.autoReview !== undefined
-                ? { autoReview: match.state.structured.autoReview } : {}),
+                ? { autoReview: match.state.structured.autoReview }
+                : {}),
               // 通用取消进度没有Task身份，须保留leaf在创建后写入的真实恢复ID。
-              ...(match.name === "task" && typeof match.state.structured.task_id === "string" && event.data.structured.task_id === undefined
-                ? { task_id: match.state.structured.task_id } : {}),
+              ...(match.name === "task" &&
+              typeof match.state.structured.task_id === "string" &&
+              event.data.structured.task_id === undefined
+                ? { task_id: match.state.structured.task_id }
+                : {}),
             }
             match.state.content = [...event.data.content]
           }
@@ -363,23 +375,45 @@ export function update(adapter: Adapter, event: SessionEvent.Event) {
             match.time.completed = event.data.timestamp
             const sync = event.data.structured.syncInput
             // 只有本地 Edit 的完整真值回写输入；provider 同名字段不能改写调用历史。
-            const syncInput = match.name === "edit" && !event.data.provider.executed && sync !== null && typeof sync === "object" &&
-              "path" in sync && typeof sync.path === "string" && "edits" in sync && Array.isArray(sync.edits)
-              ? { path: sync.path, edits: sync.edits }
-              : undefined
+            const syncInput =
+              match.name === "edit" &&
+              !event.data.provider.executed &&
+              sync !== null &&
+              typeof sync === "object" &&
+              "path" in sync &&
+              typeof sync.path === "string" &&
+              "edits" in sync &&
+              Array.isArray(sync.edits)
+                ? { path: sync.path, edits: sync.edits }
+                : undefined
             // 只有本地 Write 的格式化真值改写历史输入；空文件同样是有效最终内容。
-            const formattedContent = match.name === "write" && !event.data.provider.executed && typeof event.data.structured.formattedContent === "string"
-              ? event.data.structured.formattedContent
-              : undefined
+            const formattedContent =
+              match.name === "write" &&
+              !event.data.provider.executed &&
+              typeof event.data.structured.formattedContent === "string"
+                ? event.data.structured.formattedContent
+                : undefined
             match.state = castDraft(
               SessionMessage.ToolStateCompleted.make({
                 status: "completed",
-                input: syncInput ?? (formattedContent === undefined ? match.state.input : { ...match.state.input, content: formattedContent }),
+                input:
+                  syncInput ??
+                  (formattedContent === undefined
+                    ? match.state.input
+                    : { ...match.state.input, content: formattedContent }),
                 // 完成投影后去掉临时整文，避免在 input 与 structured 重复保存。
                 structured: {
-                  ...Object.fromEntries(Object.entries(event.data.structured).filter(([key]) => !(key === "formattedContent" && formattedContent !== undefined) && !(key === "syncInput" && syncInput !== undefined))),
+                  ...Object.fromEntries(
+                    Object.entries(event.data.structured).filter(
+                      ([key]) =>
+                        !(key === "formattedContent" && formattedContent !== undefined) &&
+                        !(key === "syncInput" && syncInput !== undefined),
+                    ),
+                  ),
                   // 终态继续保留本轮reviewID/导航/裁决，不由工具返回值抹去或替换审批事实。
-                  ...(match.state.structured.autoReview === undefined ? {} : { autoReview: match.state.structured.autoReview }),
+                  ...(match.state.structured.autoReview === undefined
+                    ? {}
+                    : { autoReview: match.state.structured.autoReview }),
                 },
                 content: [...event.data.content],
                 outputPaths: event.data.outputPaths ? [...event.data.outputPaths] : [],
@@ -443,10 +477,10 @@ export function update(adapter: Adapter, event: SessionEvent.Event) {
           }
         })
       },
-      "session.next.retried": event => {
+      "session.next.retried": (event) => {
         const messageID = event.data.assistantMessageID
         if (messageID === undefined) return Effect.void
-        return updateOwnedAssistant(SessionMessage.ID.make(messageID), draft => {
+        return updateOwnedAssistant(SessionMessage.ID.make(messageID), (draft) => {
           // 只重置此重试拥有的助手，后到的输入和其它错误不能被跨轮清空。
           draft.content = []
           delete draft.time.completed

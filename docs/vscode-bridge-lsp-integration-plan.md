@@ -7,28 +7,32 @@
 ## 一、vscode-mcp-server 分析
 
 ### 架构
+
 - VSCode 扩展内嵌 MCP server（express HTTP + `@modelcontextprotocol/sdk` StreamableHTTPServerTransport）
 - 监听 `localhost:3000/mcp`，MCP 客户端通过 HTTP 连接
 - 默认禁用，用户通过状态栏切换
 
 ### LSP 能力来源（核心借鉴点）
+
 vscode-mcp-server 不安装任何 LSP 服务器，而是直接调用 VSCode 内置 API：
 
-| 工具 | VSCode API | 说明 |
-| --- | --- | --- |
-| get_diagnostics_code | `vscode.languages.getDiagnostics(uri?)` | 获取 VSCode 已计算的诊断 |
-| search_symbols_code | `vscode.commands.executeCommand('vscode.executeWorkspaceSymbolProvider', query)` | 工作区符号搜索 |
-| get_symbol_definition_code | `vscode.commands.executeCommand('vscode.executeHoverProvider', uri, position)` | hover/定义信息 |
-| get_document_symbols_code | `vscode.commands.executeCommand('vscode.executeDocumentSymbolProvider', uri)` | 文档符号层次 |
+| 工具                       | VSCode API                                                                       | 说明                     |
+| -------------------------- | -------------------------------------------------------------------------------- | ------------------------ |
+| get_diagnostics_code       | `vscode.languages.getDiagnostics(uri?)`                                          | 获取 VSCode 已计算的诊断 |
+| search_symbols_code        | `vscode.commands.executeCommand('vscode.executeWorkspaceSymbolProvider', query)` | 工作区符号搜索           |
+| get_symbol_definition_code | `vscode.commands.executeCommand('vscode.executeHoverProvider', uri, position)`   | hover/定义信息           |
+| get_document_symbols_code  | `vscode.commands.executeCommand('vscode.executeDocumentSymbolProvider', uri)`    | 文档符号层次             |
 
 VSCode 通过扩展市场安装的 LSP 扩展（TypeScript、Python、Go、Rust、C/C++ 等）已提供完整 LSP 能力。vscode-mcp-server 只是把这些能力通过 MCP 暴露给外部 AI agent。
 
 ### 优势
+
 - **零安装**：不需要安装任何 LSP 服务器二进制
 - **全语言覆盖**：支持所有 VSCode 扩展支持的语言
 - **实时诊断**：VSCode 内部管理 LSP 生命周期，诊断是现成的
 
 ### 局限
+
 - **依赖 VSCode 运行**：VSCode 必须打开且扩展激活
 - **文件需打开**：`getDiagnostics(uri)` 对未打开的文件可能返回空
 - **MCP 协议**：引入 `@modelcontextprotocol/sdk` 依赖
@@ -39,14 +43,15 @@ VSCode 通过扩展市场安装的 LSP 扩展（TypeScript、Python、Go、Rust�
 
 ### 已有基础设施（可直接复用）
 
-| 组件 | 文件 | 说明 |
-| --- | --- | --- |
-| HTTP bridge server | `sdks/vscode/src/bridge.ts` | `127.0.0.1:<random port>`，Bearer token 认证，已有 `/health` `/manifest` `/notebook/*` 端点 |
-| Bridge registry | `sdks/vscode/src/bridge-registry.ts` | 注册到 `~/.local/state/opencode/ide/<uuid>.json`，manifest 含 `capabilities` 字段 |
-| Bridge 发现 | `packages/opencode/src/ide/vscode-bridge.ts` | `discoverBridges()` / `resolveBridge()` / `callBridge()` — opencode 端发现和调用 bridge |
-| Bridge 插件 | `packages/opencode/src/plugin/vscode-bridge.ts` | 已注册 notebook 工具插件，通过 `callRaw()` 调用 bridge |
+| 组件               | 文件                                            | 说明                                                                                        |
+| ------------------ | ----------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| HTTP bridge server | `sdks/vscode/src/bridge.ts`                     | `127.0.0.1:<random port>`，Bearer token 认证，已有 `/health` `/manifest` `/notebook/*` 端点 |
+| Bridge registry    | `sdks/vscode/src/bridge-registry.ts`            | 注册到 `~/.local/state/opencode/ide/<uuid>.json`，manifest 含 `capabilities` 字段           |
+| Bridge 发现        | `packages/opencode/src/ide/vscode-bridge.ts`    | `discoverBridges()` / `resolveBridge()` / `callBridge()` — opencode 端发现和调用 bridge     |
+| Bridge 插件        | `packages/opencode/src/plugin/vscode-bridge.ts` | 已注册 notebook 工具插件，通过 `callRaw()` 调用 bridge                                      |
 
 ### manifest capabilities 当前值
+
 ```ts
 capabilities: {
   notebook: true,
@@ -57,9 +62,11 @@ capabilities: {
   lmToolsProxy: false,
 }
 ```
+
 **没有 `lsp` 能力**。添加 `lsp: true` 后，opencode 端就知道这个 bridge 支持 LSP。
 
 ### bridge 调用流程（已有）
+
 ```
 opencode agent → plugin/vscode-bridge.ts callRaw()
   → ide/vscode-bridge.ts callBridge()
@@ -74,6 +81,7 @@ opencode agent → plugin/vscode-bridge.ts callRaw()
 ## 三、融合可行性评估
 
 ### 可行性：高
+
 1. **已有 HTTP bridge**：不需要新建 server，只需添加端点
 2. **已有认证机制**：Bearer token，安全
 3. **已有发现机制**：registry + resolveBridge，opencode 端已能发现 bridge
@@ -81,19 +89,21 @@ opencode agent → plugin/vscode-bridge.ts callRaw()
 5. **不需要 MCP SDK**：直接用现有 HTTP bridge，不引入 `@modelcontextprotocol/sdk` 依赖
 
 ### 对比 vscode-mcp-server 的优势
-| 方面 | vscode-mcp-server | 我们的方案 |
-| --- | --- | --- |
-| 传输 | MCP streamable HTTP | 现有 bridge HTTP（更简单） |
-| 发现 | 手动配置 `localhost:3000` | 自动 registry 发现 |
-| 认证 | 无 | Bearer token |
+
+| 方面 | vscode-mcp-server                     | 我们的方案                     |
+| ---- | ------------------------------------- | ------------------------------ |
+| 传输 | MCP streamable HTTP                   | 现有 bridge HTTP（更简单）     |
+| 发现 | 手动配置 `localhost:3000`             | 自动 registry 发现             |
+| 认证 | 无                                    | Bearer token                   |
 | 依赖 | `@modelcontextprotocol/sdk` + express | 无新增依赖（已有 `node:http`） |
-| 集成 | 独立 MCP 客户端 | opencode 原生 LSP Service |
+| 集成 | 独立 MCP 客户端                       | opencode 原生 LSP Service      |
 
 ---
 
 ## 四、推荐方案
 
 ### 核心思路
+
 在现有 bridge HTTP server 上添加 LSP 端点，opencode 端 LSP Service 优先使用 bridge 获取诊断和 LSP 查询。无 bridge 时回退到内置 LSP（spawn 服务器）。
 
 ### 两端改动
@@ -179,18 +189,28 @@ export async function lspDiagnostics(args: { filePath?: string }) {
 }
 
 // [B6 修复] 统一 VSCode API 返回类型：Location | Location[] | DefinitionLink[] → Location[]
-function normalizeLocations(result: unknown): Array<{ uri: string; range: { start: { line: number; character: number }; end: { line: number; character: number } } }> {
+function normalizeLocations(result: unknown): Array<{
+  uri: string
+  range: { start: { line: number; character: number }; end: { line: number; character: number } }
+}> {
   if (!result) return []
   const items = Array.isArray(result) ? result : [result]
   return items.flatMap((item): Array<{ uri: string; range: any }> => {
     if (!item || typeof item !== "object") return []
     // Location: { uri, range }
     if ("uri" in item && "range" in item) {
-      return [{ uri: (item as any).uri.toString?.() ?? String((item as any).uri), range: formatRange((item as any).range) }]
+      return [
+        { uri: (item as any).uri.toString?.() ?? String((item as any).uri), range: formatRange((item as any).range) },
+      ]
     }
     // DefinitionLink: { targetUri, targetRange }
     if ("targetUri" in item && "targetRange" in item) {
-      return [{ uri: (item as any).targetUri.toString?.() ?? String((item as any).targetUri), range: formatRange((item as any).targetRange) }]
+      return [
+        {
+          uri: (item as any).targetUri.toString?.() ?? String((item as any).targetUri),
+          range: formatRange((item as any).targetRange),
+        },
+      ]
     }
     return []
   })
@@ -237,7 +257,9 @@ function formatSymbolInfo(sym: vscode.SymbolInformation): any {
 export async function lspHover(args: { filePath: string; line: number; character: number }) {
   const uri = await ensureOpen(args.filePath)
   const result = await vscode.commands.executeCommand<vscode.Hover | vscode.Hover[] | undefined>(
-    "vscode.executeHoverProvider", uri, new vscode.Position(args.line, args.character)
+    "vscode.executeHoverProvider",
+    uri,
+    new vscode.Position(args.line, args.character),
   )
   const hovers = result ? (Array.isArray(result) ? result : [result]) : []
   return { hovers: hovers.map(formatHover) }
@@ -246,7 +268,9 @@ export async function lspHover(args: { filePath: string; line: number; character
 export async function lspDefinition(args: { filePath: string; line: number; character: number }) {
   const uri = await ensureOpen(args.filePath)
   const result = await vscode.commands.executeCommand<unknown>(
-    "vscode.executeDefinitionProvider", uri, new vscode.Position(args.line, args.character)
+    "vscode.executeDefinitionProvider",
+    uri,
+    new vscode.Position(args.line, args.character),
   )
   return { definitions: normalizeLocations(result) }
 }
@@ -254,7 +278,9 @@ export async function lspDefinition(args: { filePath: string; line: number; char
 export async function lspReferences(args: { filePath: string; line: number; character: number }) {
   const uri = await ensureOpen(args.filePath)
   const result = await vscode.commands.executeCommand<unknown>(
-    "vscode.executeReferenceProvider", uri, new vscode.Position(args.line, args.character)
+    "vscode.executeReferenceProvider",
+    uri,
+    new vscode.Position(args.line, args.character),
   )
   return { references: normalizeLocations(result) }
 }
@@ -262,7 +288,8 @@ export async function lspReferences(args: { filePath: string; line: number; char
 export async function lspDocumentSymbol(args: { filePath: string }) {
   const uri = await ensureOpen(args.filePath)
   const result = await vscode.commands.executeCommand<vscode.DocumentSymbol[] | vscode.SymbolInformation[] | undefined>(
-    "vscode.executeDocumentSymbolProvider", uri
+    "vscode.executeDocumentSymbolProvider",
+    uri,
   )
   const symbols = result ?? []
   // DocumentSymbol 和 SymbolInformation 都可能有，统一处理
@@ -277,7 +304,8 @@ export async function lspDocumentSymbol(args: { filePath: string }) {
 
 export async function lspWorkspaceSymbol(args: { query: string }) {
   const result = await vscode.commands.executeCommand<vscode.SymbolInformation[] | undefined>(
-    "vscode.executeWorkspaceSymbolProvider", args.query
+    "vscode.executeWorkspaceSymbolProvider",
+    args.query,
   )
   return { symbols: (result ?? []).slice(0, 10).map(formatSymbolInfo) }
 }
@@ -286,6 +314,7 @@ export async function lspWorkspaceSymbol(args: { query: string }) {
 **修改文件**：`sdks/vscode/src/bridge.ts`
 
 在 `routeRequest()` 中添加 LSP 路由：
+
 ```ts
 case "/lsp/touch":
   return await lspTouch(body)
@@ -304,17 +333,27 @@ case "/lsp/workspace-symbol":
 ```
 
 LSP 路由是只读的（不修改 notebook/kernel），应加入 `READONLY_ROUTES` 避免不必要的 withFileLock 串行化：
+
 ```ts
 const READONLY_ROUTES = new Set([
-  "/notebook/summary", "/notebook/source", "/notebook/output", "/notebook/cell-output",
-  "/lsp/touch", "/lsp/diagnostics", "/lsp/hover", "/lsp/definition",
-  "/lsp/references", "/lsp/document-symbol", "/lsp/workspace-symbol",
+  "/notebook/summary",
+  "/notebook/source",
+  "/notebook/output",
+  "/notebook/cell-output",
+  "/lsp/touch",
+  "/lsp/diagnostics",
+  "/lsp/hover",
+  "/lsp/definition",
+  "/lsp/references",
+  "/lsp/document-symbol",
+  "/lsp/workspace-symbol",
 ])
 ```
 
 **修改文件**：`sdks/vscode/src/bridge-registry.ts`
 
 manifest capabilities 添加 `lsp: true`：
+
 ```ts
 capabilities: {
   notebook: true,
@@ -355,7 +394,7 @@ const bridge = {
   host: best.entry.host ?? "127.0.0.1",
   port: best.entry.port,
   token: best.entry.token,
-  capabilities: best.entry.capabilities,  // 新增
+  capabilities: best.entry.capabilities, // 新增
   score: best.score,
   source: "registry",
 } satisfies BridgeRef
@@ -385,11 +424,7 @@ const resolveLspBridge = Effect.fnUntraced(function* (filePath?: string) {
 })
 
 // [local-smark] 通过 bridge 调用 LSP 端点。失败返回 undefined（触发回退）。
-const callLspBridge = Effect.fnUntraced(function* (
-  endpoint: string,
-  body: Record<string, unknown>,
-  filePath?: string,
-) {
+const callLspBridge = Effect.fnUntraced(function* (endpoint: string, body: Record<string, unknown>, filePath?: string) {
   const ctx = yield* InstanceState.context
   return yield* Effect.promise(async () => {
     try {
@@ -411,7 +446,14 @@ function bridgeDiagnosticsToMap(result: unknown): Record<string, LSPClient.Diagn
   const results: Record<string, LSPClient.Diagnostic[]> = {}
   for (const d of diags) {
     if (!d || typeof d !== "object") continue
-    const item = d as { file?: string; line?: number; column?: number; severity?: string; message?: string; source?: string }
+    const item = d as {
+      file?: string
+      line?: number
+      column?: number
+      severity?: string
+      message?: string
+      source?: string
+    }
     if (!item.file || typeof item.line !== "number" || typeof item.column !== "number") continue
     const diagnostic: LSPClient.Diagnostic = {
       range: {
@@ -467,16 +509,24 @@ const diagnostics = Effect.fn("LSP.diagnostics")(function* () {
 const hover = Effect.fn("LSP.hover")(function* (input: LocInput) {
   const bridge = yield* resolveLspBridge(input.file)
   if (bridge) {
-    const result = yield* callLspBridge("/lsp/hover", {
-      filePath: input.file, line: input.line, character: input.character,
-    }, input.file)
+    const result = yield* callLspBridge(
+      "/lsp/hover",
+      {
+        filePath: input.file,
+        line: input.line,
+        character: input.character,
+      },
+      input.file,
+    )
     if (result) return (result as { hovers?: unknown[] }).hovers ?? []
   }
   return yield* run(input.file, (client) =>
-    client.connection.sendRequest("textDocument/hover", {
-      textDocument: { uri: pathToFileURL(input.file).href },
-      position: { line: input.line, character: input.character },
-    }).catch(() => null),
+    client.connection
+      .sendRequest("textDocument/hover", {
+        textDocument: { uri: pathToFileURL(input.file).href },
+        position: { line: input.line, character: input.character },
+      })
+      .catch(() => null),
   )
 })
 // definition/references/implementation 同理，提取 .definitions / .references
@@ -484,45 +534,46 @@ const hover = Effect.fn("LSP.hover")(function* (input: LocInput) {
 
 // documentSymbol: 优先 bridge，回退内置
 const documentSymbol = Effect.fn("LSP.documentSymbol")(function* (uri: string) {
-  const file = fileURLToPath(uri)
-  const bridge = yield* resolveLspBridge(file)
-  if (bridge) {
-    const result = yield* callLspBridge("/lsp/document-symbol", { filePath: file }, file)
-    if (result) return (result as { symbols?: unknown[] }).symbols ?? []
-  }
-  // ... 现有内置 LSP 逻辑不变
+const file = fileURLToPath(uri)
+const bridge = yield* resolveLspBridge(file)
+if (bridge) {
+const result = yield\* callLspBridge("/lsp/document-symbol", { filePath: file }, file)
+if (result) return (result as { symbols?: unknown[] }).symbols ?? []
+}
+// ... 现有内置 LSP 逻辑不变
 })
 
 // workspaceSymbol: 优先 bridge，回退内置
 const workspaceSymbol = Effect.fn("LSP.workspaceSymbol")(function* (query: string) {
-  const bridge = yield* resolveLspBridge()
-  if (bridge) {
-    const result = yield* callLspBridge("/lsp/workspace-symbol", { query })
-    if (result) return (result as { symbols?: unknown[] }).symbols ?? []
-  }
-  // ... 现有内置 LSP 逻辑不变
+const bridge = yield* resolveLspBridge()
+if (bridge) {
+const result = yield\* callLspBridge("/lsp/workspace-symbol", { query })
+if (result) return (result as { symbols?: unknown[] }).symbols ?? []
+}
+// ... 现有内置 LSP 逻辑不变
 })
 
 // hasClients: 有 bridge 时返回 true
 const hasClients = Effect.fn("LSP.hasClients")(function* (file: string) {
-  const bridge = yield* resolveLspBridge(file)
-  if (bridge) return true
-  // ... 现有内置 LSP 逻辑不变
+const bridge = yield* resolveLspBridge(file)
+if (bridge) return true
+// ... 现有内置 LSP 逻辑不变
 })
 
 // status: 有 bridge 时返回 VSCode 状态
 const status = Effect.fn("LSP.status")(function* () {
-  const bridge = yield* resolveLspBridge()
-  if (bridge) {
-    return [{
-      id: "vscode",
-      name: "VSCode",
-      root: ".",
-      status: "connected" as const,
-    }]
-  }
-  // ... 现有内置 LSP 逻辑不变
+const bridge = yield* resolveLspBridge()
+if (bridge) {
+return [{
+id: "vscode",
+name: "VSCode",
+root: ".",
+status: "connected" as const,
+}]
+}
+// ... 现有内置 LSP 逻辑不变
 })
+
 ```
 
 ---
@@ -542,11 +593,13 @@ const status = Effect.fn("LSP.status")(function* () {
 
 ### 渐进回退流程
 ```
+
 agent 调用 lsp.diagnostics()
-  → tryBridge("/lsp/diagnostics")
-    → resolveBridge() 成功？
-      → YES: fetch bridge → 返回 VSCode 诊断
-      → NO: 回退到内置 LSP → runAll(clients) → 返回内置诊断
+→ tryBridge("/lsp/diagnostics")
+→ resolveBridge() 成功？
+→ YES: fetch bridge → 返回 VSCode 诊断
+→ NO: 回退到内置 LSP → runAll(clients) → 返回内置诊断
+
 ```
 
 ---
@@ -625,3 +678,4 @@ agent 调用 lsp.diagnostics()
 - **有 VSCode 时**：通过 bridge 获取 LSP，不需要安装服务器
 - **无 VSCode 时**：默认启用内置 LSP，自动安装服务器
 - 两者结合，实现"全场景 LSP 可用"
+```

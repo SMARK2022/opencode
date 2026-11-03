@@ -7,7 +7,12 @@ const id = "internal:notifications"
 type SessionError = Extract<Event, { type: "session.error" }>["properties"]["error"]
 
 // sound 参数支持 false：单次调用静音（如 abort）；其余传入语义音效名
-function notify(api: TuiPluginApi, sessionID: string | undefined, message: string, sound: TuiAttentionSoundName | false) {
+function notify(
+  api: TuiPluginApi,
+  sessionID: string | undefined,
+  message: string,
+  sound: TuiAttentionSoundName | false,
+) {
   const session = sessionID ? api.state.session.get(sessionID) : undefined
   const isSubagent = session?.parentID !== undefined
   void api.attention.notify({

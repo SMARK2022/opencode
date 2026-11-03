@@ -51,7 +51,9 @@ type AnthropicTextBlock = Schema.Schema.Type<typeof AnthropicTextBlock>
 
 // 原始 system 的附加 JSON 字段属于调用方，不能在 typed 编码时静默剥离。
 const AnthropicSystemBlock = Schema.StructWithRest(AnthropicTextBlock, [Schema.Record(Schema.String, Schema.Unknown)])
-const decodeSystem = ProviderShared.validateWith(Schema.decodeUnknownEffect(Schema.Union([Schema.String, Schema.Array(AnthropicSystemBlock)])))
+const decodeSystem = ProviderShared.validateWith(
+  Schema.decodeUnknownEffect(Schema.Union([Schema.String, Schema.Array(AnthropicSystemBlock)])),
+)
 
 const AnthropicImageBlock = Schema.Struct({
   type: Schema.tag("image"),
@@ -163,9 +165,13 @@ const AnthropicThinking = Schema.Struct({
 })
 
 // 13 的 nullish 默认不能吞掉显式 disabled/adaptive；型号默认策略仍由15引入。
-const ClaudeCodeThinking = Schema.Union([AnthropicThinking,
+const ClaudeCodeThinking = Schema.Union([
+  AnthropicThinking,
   // display 只属于 adaptive；typed 编码保留合法摘要选择，不向 disabled 混入预算或显示属性。
-  Schema.Struct({ type: Schema.Literal("adaptive"), display: Schema.optional(Schema.Literals(["omitted", "summarized"])) }),
+  Schema.Struct({
+    type: Schema.Literal("adaptive"),
+    display: Schema.optional(Schema.Literals(["omitted", "summarized"])),
+  }),
   Schema.Struct({ type: Schema.Literal("disabled") }),
 ])
 const AnthropicBodyFields = {
@@ -517,40 +523,47 @@ const anthropicOptions = (request: LLMRequest) => {
   // #147：版本只用于指纹、计费与 UA，缺省保持源版本。
   return Object.assign({}, options, { version: typeof options?.version === "string" ? options.version : "2.1.117" })
 }
-const isClaudeCode = (request: LLMRequest) => request.model.provider === "claudecode" || anthropicOptions(request)?.claudeCode === true
+const isClaudeCode = (request: LLMRequest) =>
+  request.model.provider === "claudecode" || anthropicOptions(request)?.claudeCode === true
 
 const lowerThinking = Effect.fn("AnthropicMessages.lowerThinking")(function* (request: LLMRequest) {
   const thinking = anthropicOptions(request)?.thinking
   // 专用策略由 provider 身份限定，普通 Anthropic 的预算验证仍沿用上游。
   if (isClaudeCode(request)) {
-    if (thinking !== undefined && thinking !== null && !ProviderShared.isRecord(thinking)) return yield* invalid("ClaudeCode thinking must be an object")
+    if (thinking !== undefined && thinking !== null && !ProviderShared.isRecord(thinking))
+      return yield* invalid("ClaudeCode thinking must be an object")
     // disabled 优先于模型默认，不能把用户关闭思考的选择改成 adaptive。
     if (ProviderShared.isRecord(thinking) && thinking.type === "disabled") return { type: "disabled" as const }
     const id = String(request.model.id)
     // 只保留 SDK 支持的 display 值，typed Schema 编码时也不能再次剥离摘要选择。
-    const adaptive = { type: "adaptive" as const,
+    const adaptive = {
+      type: "adaptive" as const,
       ...(ProviderShared.isRecord(thinking) && (thinking.display === "omitted" || thinking.display === "summarized")
-        ? { display: thinking.display } as const : {}),
+        ? ({ display: thinking.display } as const)
+        : {}),
     }
     // 只匹配源 15 明确支持的三种型号，不向新型号猜测或扩大默认策略。
-    if (["opus-4-7", "opus-4-6", "sonnet-4-6"].some((model) => id.includes(model)))
-      return adaptive
+    if (["opus-4-7", "opus-4-6", "sonnet-4-6"].some((model) => id.includes(model))) return adaptive
     // Haiku 与未指定 thinking 的旧型号使用预算；显式旧型号配置继续由原验证处理。
     if (id.includes("haiku") || !thinking) {
-      const max = request.generation?.maxTokens ?? request.model.defaults?.limits?.output ?? request.model.route.defaults.limits?.output ?? 4096
+      const max =
+        request.generation?.maxTokens ??
+        request.model.defaults?.limits?.output ??
+        request.model.route.defaults.limits?.output ??
+        4096
       return { type: "enabled" as const, budget_tokens: Math.min(32000, Math.max(1, max - 1)) }
     }
     // 其他旧型号保留调用方显式 adaptive，不因通用 enabled-only lowering 而静默丢弃。
     if (ProviderShared.isRecord(thinking) && thinking.type === "adaptive") return adaptive
     // 非 nullish 的无效配置必须走 typed 错误，不能被 fromRequest 的缺省 enabled 掩盖。
-    if (ProviderShared.isRecord(thinking) && thinking.type !== "enabled") return yield* invalid("Unsupported ClaudeCode thinking type")
+    if (ProviderShared.isRecord(thinking) && thinking.type !== "enabled")
+      return yield* invalid("Unsupported ClaudeCode thinking type")
   }
   // 普通 Anthropic 推断的变体也由同一 Schema 编码，不能为了专用策略把 adaptive 静默丢弃。
   if (ProviderShared.isRecord(thinking) && thinking.type === "adaptive")
     return { ...thinking, type: "adaptive" as const }
   // disabled 不携带 budget/display，不能把旧 enabled 参数残留进这一有效关闭分支。
-  if (ProviderShared.isRecord(thinking) && thinking.type === "disabled")
-    return { type: "disabled" as const }
+  if (ProviderShared.isRecord(thinking) && thinking.type === "disabled") return { type: "disabled" as const }
   if (!ProviderShared.isRecord(thinking) || thinking.type !== "enabled") return undefined
   const budget =
     typeof thinking.budgetTokens === "number"
@@ -592,14 +605,23 @@ const fromRequest = Effect.fn("AnthropicMessages.fromRequest")(function* (reques
   const rawSystem = isClaudeCode(request) ? anthropicOptions(request)?.system : undefined
   const originalSystem = rawSystem === undefined ? undefined : yield* decodeSystem(rawSystem)
   // 全部 system 必须先于 history 领取同一预算，原始块不能绕过四断点上限。
-  const retainedSystem = originalSystem === undefined ? [] : typeof originalSystem === "string"
-    ? [{ type: "text" as const, text: originalSystem }] : originalSystem.map((block) => ({
-      ...block,
-      // none 只禁用自动标记；显式原始 TTL 保留，但超额标记由上游 cacheControl 裁剪。
-      cache_control: block.cache_control && cacheControl(breakpoints, {
-        type: "ephemeral", ttlSeconds: block.cache_control.ttl === "1h" ? 3600 : undefined,
-      }) ? block.cache_control : undefined,
-    }))
+  const retainedSystem =
+    originalSystem === undefined
+      ? []
+      : typeof originalSystem === "string"
+        ? [{ type: "text" as const, text: originalSystem }]
+        : originalSystem.map((block) => ({
+            ...block,
+            // none 只禁用自动标记；显式原始 TTL 保留，但超额标记由上游 cacheControl 裁剪。
+            cache_control:
+              block.cache_control &&
+              cacheControl(breakpoints, {
+                type: "ephemeral",
+                ttlSeconds: block.cache_control.ttl === "1h" ? 3600 : undefined,
+              })
+                ? block.cache_control
+                : undefined,
+          }))
   const messages = yield* lowerMessages(request, breakpoints)
   if (breakpoints.dropped > 0) {
     yield* Effect.logWarning(
@@ -612,19 +634,32 @@ const fromRequest = Effect.fn("AnthropicMessages.fromRequest")(function* (reques
   // 先保留已有 metadata，再替换 adapter 拥有的 user_id；不覆盖其他字段。
   const claudeCodeMetadata = {
     ...(ProviderShared.isRecord(metadata) ? metadata : {}),
-    user_id: encodeMetadata({ device_id: claudeCodeSession.deviceId, account_uuid: "", session_id: claudeCodeSession.sessionId }),
+    user_id: encodeMetadata({
+      device_id: claudeCodeSession.deviceId,
+      account_uuid: "",
+      session_id: claudeCodeSession.sessionId,
+    }),
   }
   const outputConfig = anthropicOptions(request)?.output_config
   // 指纹只服务于专用计费块；普通 Anthropic 不采样消息，也不执行无消费者的 SHA。
-  const billing = claudecode ? (() => {
-    const version = anthropicOptions(request).version
-    // 首 user 的首 text 采样与源 helper 一致，短消息缺失位置补字符零。
-    const firstUserText = messages.find((message) => message.role === "user")?.content.find((block) => block.type === "text")?.text ?? ""
-    const chars = [4, 7, 20].map((index) => firstUserText[index] ?? "0").join("")
-    const fp = createHash("sha256").update(`59cf53e54c78${chars}${version}`, "utf8").digest("hex").slice(0, 3)
-    // 三位版本后缀和五位占位保持源 wire 契约，不添加身份或缓存断点。
-    return [{ type: "text" as const, text: `x-anthropic-billing-header: cc_version=${version}.${fp}; cc_entrypoint=cli; cch=00000;` }]
-  })() : []
+  const billing = claudecode
+    ? (() => {
+        const version = anthropicOptions(request).version
+        // 首 user 的首 text 采样与源 helper 一致，短消息缺失位置补字符零。
+        const firstUserText =
+          messages.find((message) => message.role === "user")?.content.find((block) => block.type === "text")?.text ??
+          ""
+        const chars = [4, 7, 20].map((index) => firstUserText[index] ?? "0").join("")
+        const fp = createHash("sha256").update(`59cf53e54c78${chars}${version}`, "utf8").digest("hex").slice(0, 3)
+        // 三位版本后缀和五位占位保持源 wire 契约，不添加身份或缓存断点。
+        return [
+          {
+            type: "text" as const,
+            text: `x-anthropic-billing-header: cc_version=${version}.${fp}; cc_entrypoint=cli; cch=00000;`,
+          },
+        ]
+      })()
+    : []
   return {
     // 只恢复 billing，20 撤销的两段身份没有任何新消费者。
     system: claudecode ? [...billing, ...(system ?? []), ...retainedSystem] : system,
@@ -636,9 +671,13 @@ const fromRequest = Effect.fn("AnthropicMessages.fromRequest")(function* (reques
     messages,
     // ClaudeCode 的同一 wire 占位也适用于 native lowering；普通 Anthropic 与 none 保持上游语义。
     // unsupported 调用沿用 registry 的 Unknown tool 错误结果，不注册假执行器或提升为 hosted tool。
-    tools: claudecode && request.toolChoice?.type !== "none" && !tools?.some((tool) => tool.name === "Read")
-      ? [...(tools ?? []), { name: "Read", description: "unsupported", input_schema: { type: "object", properties: {} } }]
-      : tools,
+    tools:
+      claudecode && request.toolChoice?.type !== "none" && !tools?.some((tool) => tool.name === "Read")
+        ? [
+            ...(tools ?? []),
+            { name: "Read", description: "unsupported", input_schema: { type: "object", properties: {} } },
+          ]
+        : tools,
     tool_choice: toolChoice,
     stream: true as const,
     max_tokens: generation?.maxTokens ?? outputLimit,
@@ -954,18 +993,29 @@ export const route = Route.make({
     const betas = anthropicOptions(request)?.betas
     return {
       "anthropic-version": "2023-06-01",
-      ...(isClaudeCode(request) ? {
-        "anthropic-beta": [...new Set([
-          // 23 原生恢复 redact；1M 仍只随 15 的三个型号添加，不改变 disabled/adaptive。
-          "claude-code-20250219,prompt-caching-scope-2026-01-05,context-management-2025-06-27,redact-thinking-2026-02-12" +
-            (["opus-4-7", "opus-4-6", "sonnet-4-6"].some((id) => String(request.model.id).includes(id)) ? ",context-1m-2025-08-07" : ""),
-          ...(Array.isArray(betas) ? betas.filter((beta): beta is string => typeof beta === "string") : []),
-        ].flatMap((beta) => beta.split(",")).map((beta) => beta.trim()).filter((beta) => beta && beta !== "interleaved-thinking-2025-05-14"))].join(","),
-        "x-app": "cli",
-        "user-agent": `claude-cli/${anthropicOptions(request).version} (external, cli)`,
-        // 与 metadata 使用同一个身份，不能每个 provider turn 生成新的随机 Session。
-        "x-claude-code-session-id": claudeCodeSession.sessionId,
-      } : {}),
+      ...(isClaudeCode(request)
+        ? {
+            "anthropic-beta": [
+              ...new Set(
+                [
+                  // 23 原生恢复 redact；1M 仍只随 15 的三个型号添加，不改变 disabled/adaptive。
+                  "claude-code-20250219,prompt-caching-scope-2026-01-05,context-management-2025-06-27,redact-thinking-2026-02-12" +
+                    (["opus-4-7", "opus-4-6", "sonnet-4-6"].some((id) => String(request.model.id).includes(id))
+                      ? ",context-1m-2025-08-07"
+                      : ""),
+                  ...(Array.isArray(betas) ? betas.filter((beta): beta is string => typeof beta === "string") : []),
+                ]
+                  .flatMap((beta) => beta.split(","))
+                  .map((beta) => beta.trim())
+                  .filter((beta) => beta && beta !== "interleaved-thinking-2025-05-14"),
+              ),
+            ].join(","),
+            "x-app": "cli",
+            "user-agent": `claude-cli/${anthropicOptions(request).version} (external, cli)`,
+            // 与 metadata 使用同一个身份，不能每个 provider turn 生成新的随机 Session。
+            "x-claude-code-session-id": claudeCodeSession.sessionId,
+          }
+        : {}),
     }
   },
 })

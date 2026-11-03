@@ -64,10 +64,7 @@ function statusWithFetch(
   if (npm !== "@ai-sdk/openai" && npm !== "@ai-sdk/openai-compatible" && npm !== "@ai-sdk/anthropic")
     return { type: "unsupported", reason: "provider package is not OpenAI, OpenAI-compatible, or Anthropic" }
   // #114：oauth + openai(含别名 npm) + fetch 才支持 native
-  if (
-    input.auth?.type === "oauth" &&
-    !(isOpenaiOauthByModelNpm(input.provider.id, input.model.api.npm) && fetch)
-  ) {
+  if (input.auth?.type === "oauth" && !(isOpenaiOauthByModelNpm(input.provider.id, input.model.api.npm) && fetch)) {
     return { type: "unsupported", reason: "OAuth auth requires a provider fetch override" }
   }
 
@@ -123,8 +120,10 @@ export function stream(input: StreamInput): StreamResult {
     // 内部repair保留执行注册，但与SDK的activeTools一致，不向模型广告invalid。
     tools: [...request.tools, ...toDefinitions(tools).filter((tool) => tool.name !== "invalid")],
     // 运输选项留在HTTP合同，原headers/body/query不能因增加期限而被覆盖。
-    http: HttpOptions.make({ ...request.http,
-      chunkTimeout: chunkTimeout === false || typeof chunkTimeout === "number" ? chunkTimeout : undefined }),
+    http: HttpOptions.make({
+      ...request.http,
+      chunkTimeout: chunkTimeout === false || typeof chunkTimeout === "number" ? chunkTimeout : undefined,
+    }),
   })
   const stream = Stream.scoped(
     Stream.unwrap(
@@ -137,13 +136,21 @@ export function stream(input: StreamInput): StreamResult {
           .pipe(
             // 固定总期限只包 provider 流，活跃 chunks 不续期，结束后的本地工具等待仍归 settlement。
             // 同一provider的native入口也使用十分钟缺省，显式值与false不变。
-            Stream.interruptWhen(timeout === false ? Effect.never : Effect.sleep(typeof timeout === "number" ? timeout : 600_000).pipe(
-              Effect.andThen(Effect.fail(new LLMError({
-                module: "LLMNativeRuntime",
-                method: "stream",
-                reason: new TransportReason({ message: "Provider request timed out", kind: "timeout" }),
-              }))),
-            )),
+            Stream.interruptWhen(
+              timeout === false
+                ? Effect.never
+                : Effect.sleep(typeof timeout === "number" ? timeout : 600_000).pipe(
+                    Effect.andThen(
+                      Effect.fail(
+                        new LLMError({
+                          module: "LLMNativeRuntime",
+                          method: "stream",
+                          reason: new TransportReason({ message: "Provider request timed out", kind: "timeout" }),
+                        }),
+                      ),
+                    ),
+                  ),
+            ),
             Stream.flatMap((event) =>
               event.type !== "tool-call" || event.providerExecuted
                 ? Stream.make(event)
@@ -173,14 +180,19 @@ export function stream(input: StreamInput): StreamResult {
 
   return {
     ...current,
-    stream: fetch ? stream.pipe(Stream.provideService(
-      FetchHttpClient.Fetch,
-      Object.assign(
-        (value: Parameters<typeof globalThis.fetch>[0], init?: RequestInit) => NetworkProxy.fetchWithRoute(fetch, value, { ...init, purpose: "provider" }),
-        // OAuth fetch 仍负责鉴权；局部 reference 取代默认 transport，不能再绕过代理或改写信号。
-        { preconnect: fetch.preconnect },
-      ),
-    )) : stream,
+    stream: fetch
+      ? stream.pipe(
+          Stream.provideService(
+            FetchHttpClient.Fetch,
+            Object.assign(
+              (value: Parameters<typeof globalThis.fetch>[0], init?: RequestInit) =>
+                NetworkProxy.fetchWithRoute(fetch, value, { ...init, purpose: "provider" }),
+              // OAuth fetch 仍负责鉴权；局部 reference 取代默认 transport，不能再绕过代理或改写信号。
+              { preconnect: fetch.preconnect },
+            ),
+          ),
+        )
+      : stream,
   }
 }
 

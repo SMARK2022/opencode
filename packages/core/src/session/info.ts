@@ -185,15 +185,27 @@ export const selection = (sessionID: SessionSchema.ID) => ({
     if (value === null) return undefined
     const parsed = Schema.decodeUnknownSync(Schema.UnknownFromJsonString)(value)
     // SQLite json_object 的缺省键是 null，转成契约的省略属性再校验。
-    const fields = Schema.decodeUnknownSync(Schema.Struct({
-      messageID: Schema.String, input: Schema.Finite, output: Schema.Finite, cost: Schema.Finite,
-      assistantID: Schema.NullOr(Schema.String),
-      stepInput: Schema.Finite, stepOutput: Schema.Finite,
-      pendingInput: Schema.NullOr(Schema.Finite),
-      estimatedInput: Schema.NullOr(Schema.Finite),
-      inputEstimate: Schema.NullOr(SessionMessage.InputEstimate),
-      model: Schema.NullOr(Schema.Struct({ providerID: Schema.String, modelID: Schema.String, contextLimit: Schema.NullOr(Schema.Finite) })),
-    }))(parsed)
+    const fields = Schema.decodeUnknownSync(
+      Schema.Struct({
+        messageID: Schema.String,
+        input: Schema.Finite,
+        output: Schema.Finite,
+        cost: Schema.Finite,
+        assistantID: Schema.NullOr(Schema.String),
+        stepInput: Schema.Finite,
+        stepOutput: Schema.Finite,
+        pendingInput: Schema.NullOr(Schema.Finite),
+        estimatedInput: Schema.NullOr(Schema.Finite),
+        inputEstimate: Schema.NullOr(SessionMessage.InputEstimate),
+        model: Schema.NullOr(
+          Schema.Struct({
+            providerID: Schema.String,
+            modelID: Schema.String,
+            contextLimit: Schema.NullOr(Schema.Finite),
+          }),
+        ),
+      }),
+    )(parsed)
     return Session.RequestUsage.make({
       ...fields,
       assistantID: fields.assistantID ?? undefined,
@@ -208,14 +220,21 @@ export const selection = (sessionID: SessionSchema.ID) => ({
 // 调用者在同一读事务内先固定页面，再复用同一参数化投影，不丢请求字段或解冻历史。
 export function withRequests(db: Database.Interface["db"], rows: (typeof SessionTable.$inferSelect)[]) {
   return Effect.forEach(rows, (row) =>
-    db.select({ request: selection(row.id).request }).from(SessionTable).where(eq(SessionTable.id, row.id)).get().pipe(
-      Effect.orDie,
-      Effect.map((projection) => ({ ...row, request: projection?.request })),
-    ),
+    db
+      .select({ request: selection(row.id).request })
+      .from(SessionTable)
+      .where(eq(SessionTable.id, row.id))
+      .get()
+      .pipe(
+        Effect.orDie,
+        Effect.map((projection) => ({ ...row, request: projection?.request })),
+      ),
   )
 }
 
-export function fromRow(row: typeof SessionTable.$inferSelect & { request?: Session.RequestUsage }): SessionSchema.Info {
+export function fromRow(
+  row: typeof SessionTable.$inferSelect & { request?: Session.RequestUsage },
+): SessionSchema.Info {
   return SessionSchema.Info.make({
     id: SessionSchema.ID.make(row.id),
     projectID: ProjectV2.ID.make(row.project_id),

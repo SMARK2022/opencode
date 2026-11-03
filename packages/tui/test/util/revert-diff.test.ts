@@ -4,8 +4,10 @@ import { createTwoFilesPatch } from "diff"
 import { getRevertDiffFiles } from "../../src/util/revert-diff"
 
 describe("revert diff", () => {
-  test.skipIf(process.platform === "win32")("prefers the actual file path over /dev/null for added and deleted files", () => {
-    const files = getRevertDiffFiles(`diff --git a/new.txt b/new.txt
+  test.skipIf(process.platform === "win32")(
+    "prefers the actual file path over /dev/null for added and deleted files",
+    () => {
+      const files = getRevertDiffFiles(`diff --git a/new.txt b/new.txt
 new file mode 100644
 index 0000000..3b18e51
 --- /dev/null
@@ -23,19 +25,20 @@ index 3b18e51..0000000
 ---counter
 `)
 
-    expect(files).toEqual([
-      {
-        filename: "new.txt",
-        additions: 2,
-        deletions: 0,
-      },
-      {
-        filename: "old.txt",
-        additions: 0,
-        deletions: 2,
-      },
-    ])
-  })
+      expect(files).toEqual([
+        {
+          filename: "new.txt",
+          additions: 2,
+          deletions: 0,
+        },
+        {
+          filename: "old.txt",
+          additions: 0,
+          deletions: 2,
+        },
+      ])
+    },
+  )
 
   test("counts header-like content in producer-generated diffs", () => {
     // 使用工具相同的 producer，验证文件头之外的三符号前缀仍是内容。

@@ -75,10 +75,14 @@ describe("OpenAI Responses route", () => {
           // 真实route/executor编码到HTTP边界，避免只验证prepare而漏掉后续合并或序列化。
           yield* LLMClient.stream(input).pipe(
             Stream.runDrain,
-            Effect.provide(dynamicResponse((capture) => Effect.sync(() => {
-              expect(JSON.parse(capture.text)).toMatchObject({ service_tier: serviceTier })
-              return capture.respond(sseEvents(), { headers: { "content-type": "text/event-stream" } })
-            }))),
+            Effect.provide(
+              dynamicResponse((capture) =>
+                Effect.sync(() => {
+                  expect(JSON.parse(capture.text)).toMatchObject({ service_tier: serviceTier })
+                  return capture.respond(sseEvents(), { headers: { "content-type": "text/event-stream" } })
+                }),
+              ),
+            ),
           )
         }
       }
@@ -89,19 +93,43 @@ describe("OpenAI Responses route", () => {
         provider.configure({ baseURL: "https://copilot.test", apiKey: "test" }).responses("gpt-5"),
         OpenAI.configure({ apiKey: "test" }).responsesWebSocket("gpt-4o-mini"),
       ]
-      yield* Effect.forEach(models, (model) => Effect.gen(function* () {
-        expect((yield* LLMClient.prepare(LLM.request({ model, prompt: "Hello" }))).body).toHaveProperty("parallel_tool_calls", true)
-        // HTTP 与 WebSocket 的显式 request false 同样覆盖 facade 默认。
-        expect((yield* LLMClient.prepare(LLM.request({ model, prompt: "Hello",
-          providerOptions: { openai: { parallelToolCalls: false } },
-        }))).body).toHaveProperty("parallel_tool_calls", false)
-      }))
-      const recorded = { method: "POST", url: "https://api.openai.test/v1/responses", headers: {}, body: '{"model":"gpt-4.1-mini"}' }
+      yield* Effect.forEach(models, (model) =>
+        Effect.gen(function* () {
+          expect((yield* LLMClient.prepare(LLM.request({ model, prompt: "Hello" }))).body).toHaveProperty(
+            "parallel_tool_calls",
+            true,
+          )
+          // HTTP 与 WebSocket 的显式 request false 同样覆盖 facade 默认。
+          expect(
+            (yield* LLMClient.prepare(
+              LLM.request({ model, prompt: "Hello", providerOptions: { openai: { parallelToolCalls: false } } }),
+            )).body,
+          ).toHaveProperty("parallel_tool_calls", false)
+        }),
+      )
+      const recorded = {
+        method: "POST",
+        url: "https://api.openai.test/v1/responses",
+        headers: {},
+        body: '{"model":"gpt-4.1-mini"}',
+      }
       // 仅升级旧录制期望；省略真实字段、错误false或其他body变化仍须失败。
-      expect(matchOpenAIParallelDefaults({ ...recorded, body: '{"model":"gpt-4.1-mini","parallel_tool_calls":true}' }, recorded)).toBe(true)
+      expect(
+        matchOpenAIParallelDefaults(
+          { ...recorded, body: '{"model":"gpt-4.1-mini","parallel_tool_calls":true}' },
+          recorded,
+        ),
+      ).toBe(true)
       expect(matchOpenAIParallelDefaults(recorded, recorded)).toBe(false)
-      expect(matchOpenAIParallelDefaults({ ...recorded, body: '{"model":"gpt-4.1-mini","parallel_tool_calls":false}' }, recorded)).toBe(false)
-      expect(matchOpenAIParallelDefaults({ ...recorded, body: '{"model":"other","parallel_tool_calls":true}' }, recorded)).toBe(false)
+      expect(
+        matchOpenAIParallelDefaults(
+          { ...recorded, body: '{"model":"gpt-4.1-mini","parallel_tool_calls":false}' },
+          recorded,
+        ),
+      ).toBe(false)
+      expect(
+        matchOpenAIParallelDefaults({ ...recorded, body: '{"model":"other","parallel_tool_calls":true}' }, recorded),
+      ).toBe(false)
     }),
   )
 
@@ -1433,14 +1461,22 @@ describe("OpenAI Responses route", () => {
             LLM.request({
               model,
               providerOptions: { openai: { store } },
-              messages: [Message.assistant({ type: "reasoning", text, providerMetadata: { openai: { reasoningEncryptedContent: "encrypted-state" } } })],
+              messages: [
+                Message.assistant({
+                  type: "reasoning",
+                  text,
+                  providerMetadata: { openai: { reasoningEncryptedContent: "encrypted-state" } },
+                }),
+              ],
             }),
           )
-          expect(withoutID.body.input).toEqual([{
-            type: "reasoning",
-            summary: text ? [{ type: "summary_text", text }] : [],
-            encrypted_content: "encrypted-state",
-          }])
+          expect(withoutID.body.input).toEqual([
+            {
+              type: "reasoning",
+              summary: text ? [{ type: "summary_text", text }] : [],
+              encrypted_content: "encrypted-state",
+            },
+          ])
         }
       }
     }),

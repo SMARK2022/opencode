@@ -42,24 +42,24 @@ Follow-on refinements retained:
 
 ## 3. Repository Context
 
-| Source | Constraint |
-| --- | --- |
-| `CONTEXT.md` | Tool results → message metadata → stubs / compaction display |
-| `read.txt` | 200 lines / 16KB / `<range>` / `<more>` |
-| `read.ts` | `lines()`, render, stubs; `more` means **content remainder** today; `MAX_BYTES=16 KiB` is the returned-content budget |
+| Source                              | Constraint                                                                                                                         |
+| ----------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| `CONTEXT.md`                        | Tool results → message metadata → stubs / compaction display                                                                       |
+| `read.txt`                          | 200 lines / 16KB / `<range>` / `<more>`                                                                                            |
+| `read.ts`                           | `lines()`, render, stubs; `more` means **content remainder** today; `MAX_BYTES=16 KiB` is the returned-content budget              |
 | Current worktree `ReadMetadata.fp?` | Existing optional head-sample identity field; preserve it and its legacy-compatibility behavior; R8 adds no further metadata field |
-| `read.test.ts` | Truncation keeps `<more>` **and** can expose exact total on small files |
-| R1–R4 audits | Stub ownership; R4 BLOCK on `more` cleared after cheap count |
+| `read.test.ts`                      | Truncation keeps `<more>` **and** can expose exact total on small files                                                            |
+| R1–R4 audits                        | Stub ownership; R4 BLOCK on `more` cleared after cheap count                                                                       |
 
 ## 4. Evidence
 
-| Evidence | Class |
-| --- | --- |
-| `lines()` post-window `continue` to EOF for exact `count` | observed |
-| execute: `truncated = more \|\| cut`; `<more>` when truncated | observed |
-| tests: limit truncation requires more **and** exact total on 100-line file | observed |
-| 20MB harness: full I/O after window fill | observed |
-| R4 B-01: plan wrongly set `more=false` on stream EOF after count-only | reachable |
+| Evidence                                                                   | Class     |
+| -------------------------------------------------------------------------- | --------- |
+| `lines()` post-window `continue` to EOF for exact `count`                  | observed  |
+| execute: `truncated = more \|\| cut`; `<more>` when truncated              | observed  |
+| tests: limit truncation requires more **and** exact total on 100-line file | observed  |
+| 20MB harness: full I/O after window fill                                   | observed  |
+| R4 B-01: plan wrongly set `more=false` on stream EOF after count-only      | reachable |
 
 ### Red signal
 
@@ -67,19 +67,19 @@ Follow-on refinements retained:
 
 ### Revision posture
 
-| Rev | Result | Material note |
-| --- | --- | --- |
-| R1–R2 | BLOCK | stub EOF / covering total ownership |
-| R3 | APPROVE | closed stubs with new metadata field |
-| R4 | BLOCK | Option C good; **`more` conflated with stream EOF** |
-| R5 | BLOCK | sticky `more` closed; medium ~100KiB fixture wrongly mapped to lower-bound |
-| R6 | BLOCK | fixture branch split fixed; missing **lower-bound covering** stub red fixture |
-| R7 | APPROVE | add large-remainder covering + nested covered stub lock (INV-06/10) |
-| R8 | BLOCK | 256KiB budget escaped through an arbitrary complete `readline` line; outline gate created an unbudgeted second scan |
-| R9 | BLOCK | monitor starts after the first oversized post-window line; threshold allows two read-ahead chunks; lower-bound totals suppress existing large-source outline |
-| R10 | BLOCK | cumulative content admission, unterminated auxiliary-line lower bound, and lone-CR compatibility remain incomplete |
-| R11 | BLOCK | full Read Tool auxiliary budget, physical I/O observation, and CR/CRLF boundary state remained incomplete |
-| R12 | this | share one bounded line parser and one auxiliary budget across page counting and outline; add an internal physical-I/O seam |
+| Rev   | Result  | Material note                                                                                                                                                |
+| ----- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| R1–R2 | BLOCK   | stub EOF / covering total ownership                                                                                                                          |
+| R3    | APPROVE | closed stubs with new metadata field                                                                                                                         |
+| R4    | BLOCK   | Option C good; **`more` conflated with stream EOF**                                                                                                          |
+| R5    | BLOCK   | sticky `more` closed; medium ~100KiB fixture wrongly mapped to lower-bound                                                                                   |
+| R6    | BLOCK   | fixture branch split fixed; missing **lower-bound covering** stub red fixture                                                                                |
+| R7    | APPROVE | add large-remainder covering + nested covered stub lock (INV-06/10)                                                                                          |
+| R8    | BLOCK   | 256KiB budget escaped through an arbitrary complete `readline` line; outline gate created an unbudgeted second scan                                          |
+| R9    | BLOCK   | monitor starts after the first oversized post-window line; threshold allows two read-ahead chunks; lower-bound totals suppress existing large-source outline |
+| R10   | BLOCK   | cumulative content admission, unterminated auxiliary-line lower bound, and lone-CR compatibility remain incomplete                                           |
+| R11   | BLOCK   | full Read Tool auxiliary budget, physical I/O observation, and CR/CRLF boundary state remained incomplete                                                    |
+| R12   | this    | share one bounded line parser and one auxiliary budget across page counting and outline; add an internal physical-I/O seam                                   |
 
 ## 5. Current Behavior
 
@@ -95,25 +95,25 @@ Head/mid/high-offset text pages; cheap small-file truncation; expensive multi‑
 
 ## 7. Invariants
 
-| ID | Invariant |
-| --- | --- |
-| INV-01 | Do not pay unbounded post-window I/O only to refine exact line totals; after the content window fills, the single chunk parser consumes at most `256 KiB` post-window bytes plus one configured `highWaterMark` read-ahead chunk, including oversized-line input. Required prefix and normal-window bytes remain outside this post-window budget. |
-| INV-02 | Returned content admission remains cumulative: `contentBytes + separatorBytes + candidateEncodedBytes <= MAX_BYTES`; auxiliary bytes never increase `raw` or the returned content budget. |
+| ID     | Invariant                                                                                                                                                                                                                                                                                                                                                    |
+| ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| INV-01 | Do not pay unbounded post-window I/O only to refine exact line totals; after the content window fills, the single chunk parser consumes at most `256 KiB` post-window bytes plus one configured `highWaterMark` read-ahead chunk, including oversized-line input. Required prefix and normal-window bytes remain outside this post-window budget.            |
+| INV-02 | Returned content admission remains cumulative: `contentBytes + separatorBytes + candidateEncodedBytes <= MAX_BYTES`; auxiliary bytes never increase `raw` or the returned content budget.                                                                                                                                                                    |
 | INV-03 | **`more` / top-level `truncated` mean returned content is incomplete relative to the file**, not “stream not fully scanned”. If the content window filled (limit or byte cut) and unread content remains, keep `more=true`, emit `<more>`, `metadata.truncated=true` **even if** a cheap count-only tail later reaches physical EOF and makes `total` exact. |
-| INV-04 | `more=false` only when the **returned page includes the last line of the file** (content-complete). Stream EOF during count-only must **not** clear `more`. |
-| INV-05 | Offset past EOF fails. |
-| INV-06 | Stubs: no false EOF; no offset past true EOF when coverage finished the file. |
-| INV-07 | The outline owner keeps its existing `MIN_LINES=600` gate; `more` alone does not authorize a new outline scan when the bounded count is below that gate. |
-| INV-08 | Non-total contracts compatible. |
-| INV-09 | Schema-free exactness for EOF: content reached file end ⇔ **`returned > 0 && end === total`** (empty file: `total===0`). Lower-bound early-stop pages use **`total >= end + 1`**. Cheap count-only with content remainder: **`end < total`** with exact `total` and `more=true`. |
-| INV-10 | Covered stubs: published `total` + next offset owned by **covering** `end`/`total`. |
-| INV-11 | No new `ReadMetadata` fields; no migration. |
-| INV-12 | The normal returned-content budget remains `16 KiB`; the additional `256 KiB` is count-only/auxiliary input and cannot increase `raw`, output content, or the public metadata shape. |
-| INV-13 | The outline scanner keeps its existing `MIN_LINES=600` eligibility and `MAX_SCAN_LINES=3000` cap; the optimized path may conservatively omit outline when the bounded lower-bound count has not reached 600. |
-| INV-14 | When the auxiliary boundary interrupts an unterminated logical line, the parser records one observed unread line (`total >= end + 1`) before stopping; stub EOF logic must treat it as lower-bound, never exact EOF. |
-| INV-15 | Text line boundaries preserve current `readline` behavior for LF, CRLF, lone CR, empty lines, and a terminal unterminated line. |
-| INV-16 | The single `256 KiB` auxiliary budget is shared by post-window page accounting and any outline scan performed during the same `ReadTool.execute`; no auxiliary consumer can bypass it. |
-| INV-17 | Physical post-window bytes are observable at an internal parser seam for deterministic tests, but no byte counters enter `ReadMetadata`, Tool output, Message schema, or persistence. |
+| INV-04 | `more=false` only when the **returned page includes the last line of the file** (content-complete). Stream EOF during count-only must **not** clear `more`.                                                                                                                                                                                                  |
+| INV-05 | Offset past EOF fails.                                                                                                                                                                                                                                                                                                                                       |
+| INV-06 | Stubs: no false EOF; no offset past true EOF when coverage finished the file.                                                                                                                                                                                                                                                                                |
+| INV-07 | The outline owner keeps its existing `MIN_LINES=600` gate; `more` alone does not authorize a new outline scan when the bounded count is below that gate.                                                                                                                                                                                                     |
+| INV-08 | Non-total contracts compatible.                                                                                                                                                                                                                                                                                                                              |
+| INV-09 | Schema-free exactness for EOF: content reached file end ⇔ **`returned > 0 && end === total`** (empty file: `total===0`). Lower-bound early-stop pages use **`total >= end + 1`**. Cheap count-only with content remainder: **`end < total`** with exact `total` and `more=true`.                                                                             |
+| INV-10 | Covered stubs: published `total` + next offset owned by **covering** `end`/`total`.                                                                                                                                                                                                                                                                          |
+| INV-11 | No new `ReadMetadata` fields; no migration.                                                                                                                                                                                                                                                                                                                  |
+| INV-12 | The normal returned-content budget remains `16 KiB`; the additional `256 KiB` is count-only/auxiliary input and cannot increase `raw`, output content, or the public metadata shape.                                                                                                                                                                         |
+| INV-13 | The outline scanner keeps its existing `MIN_LINES=600` eligibility and `MAX_SCAN_LINES=3000` cap; the optimized path may conservatively omit outline when the bounded lower-bound count has not reached 600.                                                                                                                                                 |
+| INV-14 | When the auxiliary boundary interrupts an unterminated logical line, the parser records one observed unread line (`total >= end + 1`) before stopping; stub EOF logic must treat it as lower-bound, never exact EOF.                                                                                                                                         |
+| INV-15 | Text line boundaries preserve current `readline` behavior for LF, CRLF, lone CR, empty lines, and a terminal unterminated line.                                                                                                                                                                                                                              |
+| INV-16 | The single `256 KiB` auxiliary budget is shared by post-window page accounting and any outline scan performed during the same `ReadTool.execute`; no auxiliary consumer can bypass it.                                                                                                                                                                       |
+| INV-17 | Physical post-window bytes are observable at an internal parser seam for deterministic tests, but no byte counters enter `ReadMetadata`, Tool output, Message schema, or persistence.                                                                                                                                                                        |
 
 ## 8. Root Cause
 
@@ -123,22 +123,22 @@ Co-repairs (same contract, not fallbacks): stub covering ownership under non-exa
 
 ## 9. Ownership
 
-| Concern | Owner |
-| --- | --- |
-| Post-window I/O + `more`/`total` | `lines()` / execute |
-| Stub navigation | `findReadStub` + `renderReadStub` + execute stub wiring |
-| Outline eligibility | call site / `readOutline` gate (runtime only) |
+| Concern                          | Owner                                                   |
+| -------------------------------- | ------------------------------------------------------- |
+| Post-window I/O + `more`/`total` | `lines()` / execute                                     |
+| Stub navigation                  | `findReadStub` + `renderReadStub` + execute stub wiring |
+| Outline eligibility              | call site / `readOutline` gate (runtime only)           |
 
 ## 10. Primary Design
 
 ### Operations analysis (unchanged preference)
 
-| Option | Verdict |
-| --- | --- |
-| A always full-count | reject (20MB cost) |
-| B always hard-break | coarser; loses free exact totals on small files |
-| **C bounded post-window auxiliary scan** | **primary** |
-| D dual APIs / new exactness field | reject |
+| Option                                   | Verdict                                         |
+| ---------------------------------------- | ----------------------------------------------- |
+| A always full-count                      | reject (20MB cost)                              |
+| B always hard-break                      | coarser; loses free exact totals on small files |
+| **C bounded post-window auxiliary scan** | **primary**                                     |
+| D dual APIs / new exactness field        | reject                                          |
 
 ### Primary algorithm
 
@@ -208,25 +208,25 @@ seam; `physicalBytesRead` and `postWindowBytes` never enter Tool metadata.
 
 ### Delimiter and budget state table
 
-| Boundary | Required transition |
-| --- | --- |
-| LF | End the current logical line and count it once. |
-| CR followed by LF | Treat the pair as one delimiter and count one line. A CR at a chunk/budget edge may consume the next byte from the single read-ahead chunk. |
-| CR followed by non-LF | Treat CR as a lone delimiter; the non-LF byte starts the next line and, if auxiliary, establishes its lower-bound count. |
-| CR at physical EOF | Treat CR as a lone delimiter; do not synthesize an extra trailing empty line. |
-| UTF-8 sequence split at chunk edge | Carry decoder state. If the auxiliary boundary stops before completion, discard the partial character/text but keep the observed-line lower bound. |
-| Empty line | A delimiter with no preceding content counts one empty line; a final delimiter does not create another line after EOF. |
-| Unterminated line at EOF | Count the line once, matching current `readline` behavior. |
-| Unterminated line at auxiliary stop | Count the line once as observed unread content; publish lower-bound `total`, keep `more=true`, and prohibit EOF stub prose. |
+| Boundary                            | Required transition                                                                                                                                |
+| ----------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| LF                                  | End the current logical line and count it once.                                                                                                    |
+| CR followed by LF                   | Treat the pair as one delimiter and count one line. A CR at a chunk/budget edge may consume the next byte from the single read-ahead chunk.        |
+| CR followed by non-LF               | Treat CR as a lone delimiter; the non-LF byte starts the next line and, if auxiliary, establishes its lower-bound count.                           |
+| CR at physical EOF                  | Treat CR as a lone delimiter; do not synthesize an extra trailing empty line.                                                                      |
+| UTF-8 sequence split at chunk edge  | Carry decoder state. If the auxiliary boundary stops before completion, discard the partial character/text but keep the observed-line lower bound. |
+| Empty line                          | A delimiter with no preceding content counts one empty line; a final delimiter does not create another line after EOF.                             |
+| Unterminated line at EOF            | Count the line once, matching current `readline` behavior.                                                                                         |
+| Unterminated line at auxiliary stop | Count the line once as observed unread content; publish lower-bound `total`, keep `more=true`, and prohibit EOF stub prose.                        |
 
 ### Semantic split (R4 B-01 fix)
 
-| Flag / field | Meaning after policy |
-| --- | --- |
-| `more` / `cut` | Content window incomplete (unread file content beyond returned page) |
-| `total` | Exact whole-file line count if the bounded auxiliary scan reaches EOF; otherwise a lower bound (`>= end+1`) when the 256KiB auxiliary budget or its read-ahead boundary is exhausted |
-| top-level `truncated` | `more \|\| cut` (existing) |
-| `<more>` | emitted when `truncated` (existing) |
+| Flag / field          | Meaning after policy                                                                                                                                                                 |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `more` / `cut`        | Content window incomplete (unread file content beyond returned page)                                                                                                                 |
+| `total`               | Exact whole-file line count if the bounded auxiliary scan reaches EOF; otherwise a lower bound (`>= end+1`) when the 256KiB auxiliary budget or its read-ahead boundary is exhausted |
+| top-level `truncated` | `more \|\| cut` (existing)                                                                                                                                                           |
+| `<more>`              | emitted when `truncated` (existing)                                                                                                                                                  |
 
 **Never** clear `more` merely because count-only reached physical EOF.
 
@@ -273,21 +273,21 @@ Read Tool auxiliary surface shares the 256KiB allowance.
 
 ### Examples
 
-1. **20MB head, limit 200:** window fills → consume at most 256KiB auxiliary input → break; `more=true`; `total>=end+1`; content OK.  
-2. **100-line file, limit 10, file ≪ budget:** window fills → count-only to EOF → `more=true`; `total=100` exact; `<more offset=11>`.  
-3. **50-line file, limit 50:** content hits EOF → `more=false`; `total=50`; no `<more>`.  
-4. **Covering 1–10 of 100 with cheap exact total 100 + nested covered stub:** published total 100; next offset 11; not EOF.  
-5. **Covering complete 1–50 of 50:** nested covered stub → EOF prose.  
+1. **20MB head, limit 200:** window fills → consume at most 256KiB auxiliary input → break; `more=true`; `total>=end+1`; content OK.
+2. **100-line file, limit 10, file ≪ budget:** window fills → count-only to EOF → `more=true`; `total=100` exact; `<more offset=11>`.
+3. **50-line file, limit 50:** content hits EOF → `more=false`; `total=50`; no `<more>`.
+4. **Covering 1–10 of 100 with cheap exact total 100 + nested covered stub:** published total 100; next offset 11; not EOF.
+5. **Covering complete 1–50 of 50:** nested covered stub → EOF prose.
 6. **Large-remainder covering (required red lock):** multi‑MB covering page consumes the 256KiB auxiliary budget and stops, e.g. limit 100 → `end=100`, lower-bound `total>=101`, `more=true`; nested covered re-read inside 1–100 → stub publishes the **covering** `total` (not nested weaker bound), next offset **101**, **no** “end of file reached”.
 
 ## 11. Secondary Paths
 
-| Path | Class | Disposition |
-| --- | --- | --- |
-| Count-only within 256KiB vs bounded break | primary domain branches | implement |
-| Always full-count | superseded | remove as default |
-| Always hard-break only | rejected as sole policy | — |
-| New metadata exactness field | over-design | reject |
+| Path                                      | Class                   | Disposition       |
+| ----------------------------------------- | ----------------------- | ----------------- |
+| Count-only within 256KiB vs bounded break | primary domain branches | implement         |
+| Always full-count                         | superseded              | remove as default |
+| Always hard-break only                    | rejected as sole policy | —                 |
+| New metadata exactness field              | over-design             | reject            |
 
 ## 12. Workarounds Removed
 
@@ -295,64 +295,64 @@ Unbounded post-window full-count; R3 extra `ReadMetadata.truncated`; R4 `more=fa
 
 ## 13. Forward Traceability
 
-| ID | Path | Test |
-| --- | --- | --- |
-| INV-01 large remainder | bounded chunk scan, then stop at the first chunk boundary after the auxiliary budget | **Large** fixture: multi‑MB: `more` + `total>=end+1` + `total < trueN`; verify no post-window physical input beyond `256KiB + 16KiB` |
-| INV-01/03/04 small | count-only until EOF when EOF arrives within 256KiB | (a) short 100-line limit 10: **more true**, exact total 100, `<more>`; (b) existing ~100×1KiB byte-truncation: exact total 100 + sticky `more`/`truncated`/`<more>` |
-| INV-02/05/08/15 | cumulative content admission + offset/error/line semantics | existing suite plus CR-only and terminal-unterminated fixtures |
-| INV-06/09 complete EOF | totalExact end===total | complete-file same/covered EOF stubs (small full-file fixtures) |
-| INV-06/10 lower-bound covered | covering-owned total under bounded early-stop | **Large-remainder covering** page that exhausts the 256KiB auxiliary budget + nested covered stub: published `total === covering.total` (lower bound), `nextOffset === covering.end+1`, **no** EOF prose; must not use nested `total` for `reachedEof` |
-| INV-07/13 | existing `MIN_LINES` + `MAX_SCAN_LINES` gate | outline regression: a `<600`-line source with `more=true` does not gain a new outline scan; bounded count reaching 600 keeps existing eligibility |
-| INV-11 | no new fields | type/shape unchanged |
-| INV-12/14 | 16KiB cumulative content + 256KiB auxiliary cap | multiline 1KiB candidates remain within 16KiB; oversized and unterminated-line fixtures assert bounded stream input and `total>=end+1` |
-| INV-16 | shared execute-level budget | source fixture where page accounting consumes part/all of budget: outline consumes only the remainder or skips without opening another stream |
-| INV-17 | internal physical-I/O seam | direct real-file `readTextPage` test asserts `postWindowBytes`/`physicalBytesRead`; Tool-level test separately asserts unchanged public metadata shape |
+| ID                            | Path                                                                                 | Test                                                                                                                                                                                                                                                   |
+| ----------------------------- | ------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| INV-01 large remainder        | bounded chunk scan, then stop at the first chunk boundary after the auxiliary budget | **Large** fixture: multi‑MB: `more` + `total>=end+1` + `total < trueN`; verify no post-window physical input beyond `256KiB + 16KiB`                                                                                                                   |
+| INV-01/03/04 small            | count-only until EOF when EOF arrives within 256KiB                                  | (a) short 100-line limit 10: **more true**, exact total 100, `<more>`; (b) existing ~100×1KiB byte-truncation: exact total 100 + sticky `more`/`truncated`/`<more>`                                                                                    |
+| INV-02/05/08/15               | cumulative content admission + offset/error/line semantics                           | existing suite plus CR-only and terminal-unterminated fixtures                                                                                                                                                                                         |
+| INV-06/09 complete EOF        | totalExact end===total                                                               | complete-file same/covered EOF stubs (small full-file fixtures)                                                                                                                                                                                        |
+| INV-06/10 lower-bound covered | covering-owned total under bounded early-stop                                        | **Large-remainder covering** page that exhausts the 256KiB auxiliary budget + nested covered stub: published `total === covering.total` (lower bound), `nextOffset === covering.end+1`, **no** EOF prose; must not use nested `total` for `reachedEof` |
+| INV-07/13                     | existing `MIN_LINES` + `MAX_SCAN_LINES` gate                                         | outline regression: a `<600`-line source with `more=true` does not gain a new outline scan; bounded count reaching 600 keeps existing eligibility                                                                                                      |
+| INV-11                        | no new fields                                                                        | type/shape unchanged                                                                                                                                                                                                                                   |
+| INV-12/14                     | 16KiB cumulative content + 256KiB auxiliary cap                                      | multiline 1KiB candidates remain within 16KiB; oversized and unterminated-line fixtures assert bounded stream input and `total>=end+1`                                                                                                                 |
+| INV-16                        | shared execute-level budget                                                          | source fixture where page accounting consumes part/all of budget: outline consumes only the remainder or skips without opening another stream                                                                                                          |
+| INV-17                        | internal physical-I/O seam                                                           | direct real-file `readTextPage` test asserts `postWindowBytes`/`physicalBytesRead`; Tool-level test separately asserts unchanged public metadata shape                                                                                                 |
 
 **Budget rule (locks R12):** lower-bound tests use files materially larger than `MAX_BYTES + 256KiB`; cheap exact-total+more tests use files that reach EOF within the 256KiB post-window logical budget (including the current ~100×1KiB byte fixture). Oversized and unterminated-line tests use a single line larger than 256KiB and assert physical stream bytes stay within `256KiB + 16KiB`, `total>=end+1`, and no complete arbitrary line is assembled. Page accounting and outline tests use one shared budget object.
 
 ## 14. Reverse Traceability
 
-| Concept | IDs |
-| --- | --- |
-| bounded auxiliary scan + budget constant | INV-01/12 |
-| more sticky after count-only EOF | INV-03/04 |
-| total lower bound vs exact | INV-09 |
-| covering-owned stub total | INV-10 |
-| existing outline MIN_LINES/MAX_SCAN_LINES gate | INV-07/13 |
-| zero new metadata fields | INV-11 |
-| bounded chunk line parser + read-ahead allowance | INV-01/12 |
-| cumulative candidate admission + partial-line count | INV-02/14 |
-| LF/CRLF/lone-CR parser state | INV-15 |
-| shared mutable auxiliary budget | INV-16 |
-| internal ReadPage physical counters | INV-17 |
-| exported module-local `readTextPage` test seam | INV-17; no existing Tool path exposes physical input | required to make the original full-scan regression red without adding Tool metadata |
+| Concept                                             | IDs                                                  |
+| --------------------------------------------------- | ---------------------------------------------------- | ----------------------------------------------------------------------------------- |
+| bounded auxiliary scan + budget constant            | INV-01/12                                            |
+| more sticky after count-only EOF                    | INV-03/04                                            |
+| total lower bound vs exact                          | INV-09                                               |
+| covering-owned stub total                           | INV-10                                               |
+| existing outline MIN_LINES/MAX_SCAN_LINES gate      | INV-07/13                                            |
+| zero new metadata fields                            | INV-11                                               |
+| bounded chunk line parser + read-ahead allowance    | INV-01/12                                            |
+| cumulative candidate admission + partial-line count | INV-02/14                                            |
+| LF/CRLF/lone-CR parser state                        | INV-15                                               |
+| shared mutable auxiliary budget                     | INV-16                                               |
+| internal ReadPage physical counters                 | INV-17                                               |
+| exported module-local `readTextPage` test seam      | INV-17; no existing Tool path exposes physical input | required to make the original full-scan regression red without adding Tool metadata |
 
 ## 15. File Plan
 
-| File | Change | Δ |
-| --- | --- | --- |
-| `read-lines.ts` | add one shared chunk line-framing parser, auxiliary budget, `ReadPage` diagnostics seam | ~140-240 |
-| `read.ts` | delegate page read; create/pass shared budget; sticky more; covering stub total; comments | ~50-100 |
-| `read-outline.ts` | consume shared remaining budget/cache rules while preserving MIN/MAX line gates | ~30-70 |
-| `read.txt` | total/more wording | ~4-10 |
-| `read.test.ts` | real-I/O seam; shared page/outline budget; oversized boundaries; UTF-8/CR/LF; cheap exact+more; stubs; outline gate regression | ~170-300 |
+| File              | Change                                                                                                                         | Δ        |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------------------ | -------- |
+| `read-lines.ts`   | add one shared chunk line-framing parser, auxiliary budget, `ReadPage` diagnostics seam                                        | ~140-240 |
+| `read.ts`         | delegate page read; create/pass shared budget; sticky more; covering stub total; comments                                      | ~50-100  |
+| `read-outline.ts` | consume shared remaining budget/cache rules while preserving MIN/MAX line gates                                                | ~30-70   |
+| `read.txt`        | total/more wording                                                                                                             | ~4-10    |
+| `read.test.ts`    | real-I/O seam; shared page/outline budget; oversized boundaries; UTF-8/CR/LF; cheap exact+more; stubs; outline gate regression | ~170-300 |
 
 ## 16. TDD Slices
 
-| # | Red → Green |
-| --- | --- |
-| 1 | **Large remainder** (multi‑MB): consume bounded auxiliary scan; more + lower-bound `total>=end+1` + `total < trueN` + stop |
-| 2 | **Cheap limit truncation** (e.g. 100 short lines, limit 10): more+truncated+`<more>` + **exact** total |
-| 3 | **Cheap byte truncation** (~100×1KiB existing fixture): more+truncated+`<more reason=byte_limit>` + **exact** total 100 (not lower-bound) |
-| 4 | Full file → !more + exact total |
-| 5 | Complete-file EOF stubs (small full file) |
-| 6 | Covered **cheap** truncated navigation (exact covering total + next offset; no EOF) |
-| 7 | Covered **large-remainder / lower-bound** covering + nested covered: published total = covering total; offset = covering.end+1; **no EOF prose** (INV-06/10 red lock under R12) |
-| 8 | Oversized **unterminated** post-window line cannot consume beyond `256KiB + 16KiB`; parser publishes `total>=end+1`, no arbitrary complete line is assembled, and a subsequent stub cannot claim EOF |
-| 9 | UTF-8, LF/CRLF/**lone-CR**, empty lines, terminal unterminated lines, offsets, and byte/line caps preserve existing behavior |
-| 10 | Outline `<600` lines with `more=true` stays suppressed; bounded observed count reaching 600 keeps existing eligibility |
-| 11 | Page accounting and outline share one 256KiB budget; cache hit costs zero, exhausted budget opens no outline stream, budget-limited outline is not cached complete |
-| 12 | Real-file parser seam reports physical/post-window bytes and current full-scan implementation fails the bound before implementation |
+| #   | Red → Green                                                                                                                                                                                          |
+| --- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | **Large remainder** (multi‑MB): consume bounded auxiliary scan; more + lower-bound `total>=end+1` + `total < trueN` + stop                                                                           |
+| 2   | **Cheap limit truncation** (e.g. 100 short lines, limit 10): more+truncated+`<more>` + **exact** total                                                                                               |
+| 3   | **Cheap byte truncation** (~100×1KiB existing fixture): more+truncated+`<more reason=byte_limit>` + **exact** total 100 (not lower-bound)                                                            |
+| 4   | Full file → !more + exact total                                                                                                                                                                      |
+| 5   | Complete-file EOF stubs (small full file)                                                                                                                                                            |
+| 6   | Covered **cheap** truncated navigation (exact covering total + next offset; no EOF)                                                                                                                  |
+| 7   | Covered **large-remainder / lower-bound** covering + nested covered: published total = covering total; offset = covering.end+1; **no EOF prose** (INV-06/10 red lock under R12)                      |
+| 8   | Oversized **unterminated** post-window line cannot consume beyond `256KiB + 16KiB`; parser publishes `total>=end+1`, no arbitrary complete line is assembled, and a subsequent stub cannot claim EOF |
+| 9   | UTF-8, LF/CRLF/**lone-CR**, empty lines, terminal unterminated lines, offsets, and byte/line caps preserve existing behavior                                                                         |
+| 10  | Outline `<600` lines with `more=true` stays suppressed; bounded observed count reaching 600 keeps existing eligibility                                                                               |
+| 11  | Page accounting and outline share one 256KiB budget; cache hit costs zero, exhausted budget opens no outline stream, budget-limited outline is not cached complete                                   |
+| 12  | Real-file parser seam reports physical/post-window bytes and current full-scan implementation fails the bound before implementation                                                                  |
 
 ## 17. Chinese Comment Budget
 
@@ -368,14 +368,14 @@ E≈220–380; C≥ceil(0.15E). Comment: sticky more vs stream EOF; cumulative 1
 
 ## 20. Risks
 
-| Risk | Mitigation |
-| --- | --- |
-| Auxiliary budget | Fixed 256KiB after the returned-content window plus one explicitly configured 16KiB read-ahead chunk |
-| Oversized line | Chunk parser never assembles post-window line text; partial-line observation publishes a lower bound before stopping |
-| Mis-mapping medium fixtures to lower-bound | ~100KiB stays cheap exact+more; only files larger than content+256KiB assert lower-bound |
-| High-overlap nested total | non-blocking (no EOF-from-total) |
-| Outline eligibility | existing `MIN_LINES=600` and `MAX_SCAN_LINES=3000` remain unchanged |
-| Outline cache | budget-exhausted/partial scans do not poison the version cache; existing complete cache hits consume no budget |
+| Risk                                       | Mitigation                                                                                                           |
+| ------------------------------------------ | -------------------------------------------------------------------------------------------------------------------- |
+| Auxiliary budget                           | Fixed 256KiB after the returned-content window plus one explicitly configured 16KiB read-ahead chunk                 |
+| Oversized line                             | Chunk parser never assembles post-window line text; partial-line observation publishes a lower bound before stopping |
+| Mis-mapping medium fixtures to lower-bound | ~100KiB stays cheap exact+more; only files larger than content+256KiB assert lower-bound                             |
+| High-overlap nested total                  | non-blocking (no EOF-from-total)                                                                                     |
+| Outline eligibility                        | existing `MIN_LINES=600` and `MAX_SCAN_LINES=3000` remain unchanged                                                  |
+| Outline cache                              | budget-exhausted/partial scans do not poison the version cache; existing complete cache hits consume no budget       |
 
 ### Open user decisions
 
@@ -398,32 +398,32 @@ and is not included in the auditor handoff.
 
 ## 22. Plan Audit Record
 
-| Round | Rev | Blocking | Result | Ref |
-| --- | --- | --- | --- | --- |
-| 1 | R1 | false EOF | BLOCK | ses_07e42dec6ffePKZKeWQkO527Na |
-| 2 | R2 | nested total vs covering offset | BLOCK | ses_07e3e7a5effe4IKG7HhqOkv9ly |
-| 3 | R3 | none | APPROVE | ses_07e3a0646ffeamyZJFoajbqpQF |
-| 4 | R4 | more cleared after cheap count-only EOF | BLOCK | ses_07e2f70dbffe1nHTf59qsszJbF |
-| 5 | R5 | ~100KiB byte fixture wrongly retargeted to lower-bound under 64KiB budget+HWM | BLOCK | ses_07e2a518affeTRdP1T8h1wRH3S |
-| 6 | R6 | lower-bound covering stub not locked by large-remainder fixture | BLOCK | ses_07e21d2e0ffeqrMCD9iGEsP2By |
-| 7 | R7 | No blocking findings. | N-01 plan audit round count 7; N-02 remainderProven optional default false; N-03 outline gate slightly wider; N-04 slice 7 red only after early-stop | APPROVE | ses_07e16d5c5ffeqrHJ5dCfTgtgmt |
-| 8 | R8 | 256KiB escaped through arbitrary readline line; outline gate introduced unbudgeted second scan | BLOCK | ses_07de775a2ffeYTkA1v0NBY87Ym |
-| 9 | R9 | monitor starts after first oversized line; threshold allows two read-ahead chunks; lower-bound total suppresses outline | BLOCK | ses_07de1fdf9ffe0ytGoZJ00R4z4J |
-| 10 | R10 | cumulative content admission; unterminated auxiliary-line lower-bound transition; lone-CR compatibility | BLOCK | ses_07dda45a7ffeqbtrAr4qfWwKep |
-| 11 | R11 | whole-tool auxiliary budget; physical-I/O observation seam; CR/CRLF budget-boundary state | BLOCK | ses_07da299fbffexoPF1MSdJfYVio |
-| 12 | R12 | No blocking findings. | N-01 stale R11 wording; N-02 E/C estimate must be recomputed during implementation audit | APPROVE | ses_07d951ce9ffeTkhtDV5fyRBRmJ |
+| Round | Rev | Blocking                                                                                                                | Result                                                                                                                                               | Ref                            |
+| ----- | --- | ----------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------ | ------------------------------ |
+| 1     | R1  | false EOF                                                                                                               | BLOCK                                                                                                                                                | ses_07e42dec6ffePKZKeWQkO527Na |
+| 2     | R2  | nested total vs covering offset                                                                                         | BLOCK                                                                                                                                                | ses_07e3e7a5effe4IKG7HhqOkv9ly |
+| 3     | R3  | none                                                                                                                    | APPROVE                                                                                                                                              | ses_07e3a0646ffeamyZJFoajbqpQF |
+| 4     | R4  | more cleared after cheap count-only EOF                                                                                 | BLOCK                                                                                                                                                | ses_07e2f70dbffe1nHTf59qsszJbF |
+| 5     | R5  | ~100KiB byte fixture wrongly retargeted to lower-bound under 64KiB budget+HWM                                           | BLOCK                                                                                                                                                | ses_07e2a518affeTRdP1T8h1wRH3S |
+| 6     | R6  | lower-bound covering stub not locked by large-remainder fixture                                                         | BLOCK                                                                                                                                                | ses_07e21d2e0ffeqrMCD9iGEsP2By |
+| 7     | R7  | No blocking findings.                                                                                                   | N-01 plan audit round count 7; N-02 remainderProven optional default false; N-03 outline gate slightly wider; N-04 slice 7 red only after early-stop | APPROVE                        | ses_07e16d5c5ffeqrHJ5dCfTgtgmt |
+| 8     | R8  | 256KiB escaped through arbitrary readline line; outline gate introduced unbudgeted second scan                          | BLOCK                                                                                                                                                | ses_07de775a2ffeYTkA1v0NBY87Ym |
+| 9     | R9  | monitor starts after first oversized line; threshold allows two read-ahead chunks; lower-bound total suppresses outline | BLOCK                                                                                                                                                | ses_07de1fdf9ffe0ytGoZJ00R4z4J |
+| 10    | R10 | cumulative content admission; unterminated auxiliary-line lower-bound transition; lone-CR compatibility                 | BLOCK                                                                                                                                                | ses_07dda45a7ffeqbtrAr4qfWwKep |
+| 11    | R11 | whole-tool auxiliary budget; physical-I/O observation seam; CR/CRLF budget-boundary state                               | BLOCK                                                                                                                                                | ses_07da299fbffexoPF1MSdJfYVio |
+| 12    | R12 | No blocking findings.                                                                                                   | N-01 stale R11 wording; N-02 E/C estimate must be recomputed during implementation audit                                                             | APPROVE                        | ses_07d951ce9ffeTkhtDV5fyRBRmJ |
 
 ## 23. Implementation Evidence
 
 ### Changed files
 
-| File | Implemented responsibility |
-| --- | --- |
-| `packages/opencode/src/tool/read-lines.ts` | Single incremental UTF-8 line parser; cumulative 16KiB content admission; shared 256KiB auxiliary budget; one 16KiB CR lookahead; internal physical-byte seam |
-| `packages/opencode/src/tool/read.ts` | Execute-level shared budget; parser delegation; sticky `more`; schema-free EOF; covering-owned stub total/navigation; removed unbounded `readline` loop |
-| `packages/opencode/src/tool/read-outline.ts` | Same parser and remaining budget; preserves 600/3000 gates; cache hit costs zero; exhausted/partial scans do not poison complete cache |
-| `packages/opencode/src/tool/read.txt` | Exact-vs-lower-bound `total`, content-remainder `<more>`, and 256KiB auxiliary-input wording |
-| `packages/opencode/test/tool/read.test.ts` | Tool behavior plus direct physical-I/O seam, boundary, stub-owner, and shared-outline regressions |
+| File                                         | Implemented responsibility                                                                                                                                    |
+| -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `packages/opencode/src/tool/read-lines.ts`   | Single incremental UTF-8 line parser; cumulative 16KiB content admission; shared 256KiB auxiliary budget; one 16KiB CR lookahead; internal physical-byte seam |
+| `packages/opencode/src/tool/read.ts`         | Execute-level shared budget; parser delegation; sticky `more`; schema-free EOF; covering-owned stub total/navigation; removed unbounded `readline` loop       |
+| `packages/opencode/src/tool/read-outline.ts` | Same parser and remaining budget; preserves 600/3000 gates; cache hit costs zero; exhausted/partial scans do not poison complete cache                        |
+| `packages/opencode/src/tool/read.txt`        | Exact-vs-lower-bound `total`, content-remainder `<more>`, and 256KiB auxiliary-input wording                                                                  |
+| `packages/opencode/test/tool/read.test.ts`   | Tool behavior plus direct physical-I/O seam, boundary, stub-owner, and shared-outline regressions                                                             |
 
 No `ReadMetadata`, Tool parameter/result schema, message, database, SDK,
 migration, configuration, or generated-file change was made.
@@ -437,13 +437,13 @@ migration, configuration, or generated-file change was made.
 
 ### Verification
 
-| Command | Working directory | Result |
-| --- | --- | --- |
-| `bun test --config bunfig.toml test/tool/read.test.ts` | `packages/opencode` | PASS: 76 tests, 263 assertions, 0 failures |
-| `bun typecheck` | `packages/opencode` | PASS |
-| `bunx prettier --check src/tool/read-lines.ts` | `packages/opencode` | PASS; all R12-added parser lines are formatted |
-| `git diff --check -- <task paths>` | repository root | PASS |
-| `bun benchmark.ts .` | `.temp/testing/read-tool-benchmark-20260721` | PASS; executes former EOF loop against production `readTextPage` |
+| Command                                                | Working directory                            | Result                                                           |
+| ------------------------------------------------------ | -------------------------------------------- | ---------------------------------------------------------------- |
+| `bun test --config bunfig.toml test/tool/read.test.ts` | `packages/opencode`                          | PASS: 76 tests, 263 assertions, 0 failures                       |
+| `bun typecheck`                                        | `packages/opencode`                          | PASS                                                             |
+| `bunx prettier --check src/tool/read-lines.ts`         | `packages/opencode`                          | PASS; all R12-added parser lines are formatted                   |
+| `git diff --check -- <task paths>`                     | repository root                              | PASS                                                             |
+| `bun benchmark.ts .`                                   | `.temp/testing/read-tool-benchmark-20260721` | PASS; executes former EOF loop against production `readTextPage` |
 
 The repository root `bunfig.toml` intentionally points tests at
 `do-not-run-tests-from-root`; `--config bunfig.toml` selects the package-local
@@ -451,16 +451,16 @@ test preload while preserving the required package working directory.
 
 ### Original feedback loop and path verdicts
 
-| Path | Evidence | Verdict |
-| --- | --- | --- |
-| 20MiB head | former 20MiB / 121.7ms; R12 278,528 bytes / 17.0ms | bounded, 7.2x warm-cache speedup |
-| 100MiB head | former 100MiB / 494.5ms; R12 278,528 bytes / 12.8ms | bounded, 38.6x warm-cache speedup |
-| 20MiB long-line head | former 20MiB / 73.3ms; R12 278,528 bytes / 25.4ms | bounded oversized-line input, 2.9x speedup |
-| Cheap 100-line line/byte truncation | existing exact-total tests pass with sticky `<more>` | exact total retained when EOF is within budget |
-| Complete small file | existing no-truncation and EOF-stub tests pass | `end===total` remains the schema-free EOF proof |
-| Large covering stub | explicit divergent lower-bound fixture passes | covering owns published total, next offset, and EOF decision |
-| Outline | existing outline suite plus exhausted-budget and `<600` lower-bound regressions pass | one shared budget; gates preserved |
-| High offset | 100MiB near-end: 100MiB / about 3.26s versus former 0.39s | required prefix remains; CPU cost is below the user's 5-second tolerance; indexes remain rejected scope |
+| Path                                | Evidence                                                                             | Verdict                                                                                                 |
+| ----------------------------------- | ------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------- |
+| 20MiB head                          | former 20MiB / 121.7ms; R12 278,528 bytes / 17.0ms                                   | bounded, 7.2x warm-cache speedup                                                                        |
+| 100MiB head                         | former 100MiB / 494.5ms; R12 278,528 bytes / 12.8ms                                  | bounded, 38.6x warm-cache speedup                                                                       |
+| 20MiB long-line head                | former 20MiB / 73.3ms; R12 278,528 bytes / 25.4ms                                    | bounded oversized-line input, 2.9x speedup                                                              |
+| Cheap 100-line line/byte truncation | existing exact-total tests pass with sticky `<more>`                                 | exact total retained when EOF is within budget                                                          |
+| Complete small file                 | existing no-truncation and EOF-stub tests pass                                       | `end===total` remains the schema-free EOF proof                                                         |
+| Large covering stub                 | explicit divergent lower-bound fixture passes                                        | covering owns published total, next offset, and EOF decision                                            |
+| Outline                             | existing outline suite plus exhausted-budget and `<600` lower-bound regressions pass | one shared budget; gates preserved                                                                      |
+| High offset                         | 100MiB near-end: 100MiB / about 3.26s versus former 0.39s                            | required prefix remains; CPU cost is below the user's 5-second tolerance; indexes remain rejected scope |
 
 Wall-clock values are cache-sensitive; `physicalBytesRead` and
 `postWindowBytes` are the deterministic regression signals. Benchmark harness
@@ -480,11 +480,11 @@ implementation/test files; exclude import-only lines, explanatory comments
 themselves, generated files, formatter-only lines, and pure moves. No generated
 or pure-move change exists.
 
-| Measure | Actual | Gate |
-| --- | ---: | ---: |
-| Effective changed code lines `E` | 456 | — |
-| Qualifying adjacent Chinese explanatory comments `C` | 73 | `>= ceil(456 * 0.15) = 69` |
-| Ratio | 16.0% | PASS |
+| Measure                                              | Actual |                       Gate |
+| ---------------------------------------------------- | -----: | -------------------------: |
+| Effective changed code lines `E`                     |    456 |                          — |
+| Qualifying adjacent Chinese explanatory comments `C` |     73 | `>= ceil(456 * 0.15) = 69` |
+| Ratio                                                |  16.0% |                       PASS |
 
 Representative comments cover: shared execute-level budget ownership;
 cumulative 16KiB admission; partial-line lower bounds; CR/CRLF lookahead;

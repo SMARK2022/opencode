@@ -2,7 +2,16 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js"
 import { CallToolResultSchema, type Tool as MCPToolDef } from "@modelcontextprotocol/sdk/types.js"
 import { dynamicTool, jsonSchema, type JSONSchema7, type Tool } from "ai"
 
-export { paginate, defs, fetch, sanitize, toolName, prompts, resources, resourceTemplates } from "@opencode-ai/core/mcp/catalog"
+export {
+  paginate,
+  defs,
+  fetch,
+  sanitize,
+  toolName,
+  prompts,
+  resources,
+  resourceTemplates,
+} from "@opencode-ai/core/mcp/catalog"
 
 export function convertTool(mcpTool: MCPToolDef, client: Client, timeout?: number): Tool {
   const inputSchema: JSONSchema7 = {

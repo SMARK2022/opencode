@@ -79,7 +79,10 @@ export function stripToolTruthMetadata(metadata: Record<string, unknown> | undef
 
 // [local-smark] elapsedMs 由 server 在终态时写入，覆盖工具 metadata 中的同名键，
 // 防止外部伪造。只有 Number.isFinite 且非负的值才写入；旧记录无此字段则不追加
-export function interruptedToolMetadata(metadata: Record<string, unknown> | undefined, elapsedMs?: number): Record<string, unknown> {
+export function interruptedToolMetadata(
+  metadata: Record<string, unknown> | undefined,
+  elapsedMs?: number,
+): Record<string, unknown> {
   const base = metadata ?? {}
   const autoReview = base.autoReview
   const result: Record<string, unknown> = isRecord(autoReview)
@@ -93,47 +96,83 @@ export function interruptedToolMetadata(metadata: Record<string, unknown> | unde
 
 export type Result = "compact" | "stop" | "continue"
 
-export const publishAssistant = Effect.fnUntraced(function* (message: SessionV1.Assistant, events: EventV2.Interface, finalizer = false) {
-  yield* events.publish(MessageV2.Event.Updated, { sessionID: message.sessionID, info: message }, {
-    // 同一 durable commit 保存快照；退出仅隔离可能阻塞的 callback，实时 fanout 保留。
-    finalizer,
-    commit: () => Effect.gen(function* () {
-      const usage = Option.getOrUndefined(yield* Effect.serviceOption(SessionRequestUsage.Service))
-      if (usage) yield* usage.recordAssistant({ sessionID: message.sessionID, requestID: message.parentID, assistant: message })
-    }),
-  })
+export const publishAssistant = Effect.fnUntraced(function* (
+  message: SessionV1.Assistant,
+  events: EventV2.Interface,
+  finalizer = false,
+) {
+  yield* events.publish(
+    MessageV2.Event.Updated,
+    { sessionID: message.sessionID, info: message },
+    {
+      // 同一 durable commit 保存快照；退出仅隔离可能阻塞的 callback，实时 fanout 保留。
+      finalizer,
+      commit: () =>
+        Effect.gen(function* () {
+          const usage = Option.getOrUndefined(yield* Effect.serviceOption(SessionRequestUsage.Service))
+          if (usage)
+            yield* usage.recordAssistant({
+              sessionID: message.sessionID,
+              requestID: message.parentID,
+              assistant: message,
+            })
+        }),
+    },
+  )
 })
 
-export const ownAssistant = Effect.fnUntraced(function* (input: { sessionID: SessionID; requestID: SessionV1.User["id"] }, dependencies: { events: EventV2.Interface; db: Database.Interface["db"] }) {
+export const ownAssistant = Effect.fnUntraced(function* (
+  input: { sessionID: SessionID; requestID: SessionV1.User["id"] },
+  dependencies: { events: EventV2.Interface; db: Database.Interface["db"] },
+) {
   const db = dependencies.db
   let message: SessionV1.Assistant | undefined
   // 注册先于首次发布；唯一助手归属随后同步交接，不从最新 user 推测。
-  yield* Effect.addFinalizer((exit) => Effect.gen(function* () {
-    if (Exit.isSuccess(exit)) return
-    const row = message ? yield* db.select().from(MessageTable).where(and(eq(MessageTable.session_id, input.sessionID), eq(MessageTable.id, message.id))).get().pipe(Effect.orDie) : undefined
-    if (row && message) {
-      const current = Schema.decodeUnknownSync(SessionV1.Info)({ ...row.data, id: row.id, sessionID: row.session_id })
-      if (current.role !== "assistant" || current.time.completed !== undefined) return
-      // 以持久化 completed 为准；内存可能已在尚未提交的 cleanup 中改写。
-      const aborted = Cause.hasInterrupts(exit.cause)
-      message.error ??= MessageV2.fromError(aborted ? new DOMException("Aborted", "AbortError") : Cause.squash(exit.cause), { providerID: message.providerID, aborted })
-      // 准备窗口中断没有 provider finish；非取消故障仍保留原 error 结束原因。
-      if (!aborted) message.finish ??= "error"
-      message.time.completed = Date.now()
-      // 退出不重入阻塞 callback；短 bridge observer、typed/all 与 durable wake 仍收到终态。
-      yield* publishAssistant(message, dependencies.events, true)
-      return
-    }
-    const usage = Option.getOrUndefined(yield* Effect.serviceOption(SessionRequestUsage.Service))
-    if (!usage) return
-    const request = yield* usage.get({ sessionID: input.sessionID, requestID: input.requestID })
-    if (!request || request.assistantCount !== 0 || request.status !== "running") return
-    const failure = Cause.squash(exit.cause)
-    // 创建未提交或摘要尚未创建时只闭合已有请求，不能制造幽灵助手或消费。
-    yield* usage.complete({ sessionID: input.sessionID, requestID: input.requestID, status: Cause.hasInterrupts(exit.cause) ? "aborted" : "error",
-      error: failure instanceof Error ? failure.message : String(failure), timeCompleted: Date.now() })
-  }))
-  return (assistant: SessionV1.Assistant) => { message = assistant }
+  yield* Effect.addFinalizer((exit) =>
+    Effect.gen(function* () {
+      if (Exit.isSuccess(exit)) return
+      const row = message
+        ? yield* db
+            .select()
+            .from(MessageTable)
+            .where(and(eq(MessageTable.session_id, input.sessionID), eq(MessageTable.id, message.id)))
+            .get()
+            .pipe(Effect.orDie)
+        : undefined
+      if (row && message) {
+        const current = Schema.decodeUnknownSync(SessionV1.Info)({ ...row.data, id: row.id, sessionID: row.session_id })
+        if (current.role !== "assistant" || current.time.completed !== undefined) return
+        // 以持久化 completed 为准；内存可能已在尚未提交的 cleanup 中改写。
+        const aborted = Cause.hasInterrupts(exit.cause)
+        message.error ??= MessageV2.fromError(
+          aborted ? new DOMException("Aborted", "AbortError") : Cause.squash(exit.cause),
+          { providerID: message.providerID, aborted },
+        )
+        // 准备窗口中断没有 provider finish；非取消故障仍保留原 error 结束原因。
+        if (!aborted) message.finish ??= "error"
+        message.time.completed = Date.now()
+        // 退出不重入阻塞 callback；短 bridge observer、typed/all 与 durable wake 仍收到终态。
+        yield* publishAssistant(message, dependencies.events, true)
+        return
+      }
+      const usage = Option.getOrUndefined(yield* Effect.serviceOption(SessionRequestUsage.Service))
+      if (!usage) return
+      const request = yield* usage.get({ sessionID: input.sessionID, requestID: input.requestID })
+      if (!request || request.assistantCount !== 0 || request.status !== "running") return
+      const failure = Cause.squash(exit.cause)
+      // 创建未提交或摘要尚未创建时只闭合已有请求，不能制造幽灵助手或消费。
+      yield* usage.complete({
+        sessionID: input.sessionID,
+        requestID: input.requestID,
+        status: Cause.hasInterrupts(exit.cause) ? "aborted" : "error",
+        error: failure instanceof Error ? failure.message : String(failure),
+        timeCompleted: Date.now(),
+      })
+    }),
+  )
+  return (assistant: SessionV1.Assistant) => {
+    message = assistant
+  }
 })
 
 export interface Handle {
@@ -264,14 +303,11 @@ const layer = Layer.effect(
         ctx.reasoningMap = {}
       })
 
-
       // 这些 milestone 只写 daemon log，不记录 prompt、token 内容、工具参数
       // 或 provider metadata。phase 字符串是后续排查的稳定连接点：
       // processor.start/ai.first_event 区分 provider 首事件延迟，part.start /
       // part.first_delta 区分 processor 内部处理延迟，processor.end 标记回合收束。
-      let timing:
-        | { startedAt: number; firstStreamEvent: boolean; firstDelta: Set<string> }
-        | undefined
+      let timing: { startedAt: number; firstStreamEvent: boolean; firstDelta: Set<string> } | undefined
       const streamTiming = (phase: string, extra?: Record<string, unknown>) =>
         Effect.logInfo("stream timing", {
           phase,
@@ -280,7 +316,8 @@ const layer = Layer.effect(
           elapsedMs: timing ? Date.now() - timing.startedAt : 0,
           ...extra,
         })
-      const logPartStart = (partType: string, extra: Record<string, unknown>) => streamTiming("part.start", { partType, ...extra })
+      const logPartStart = (partType: string, extra: Record<string, unknown>) =>
+        streamTiming("part.start", { partType, ...extra })
       const logFirstDelta = (partType: string, partID: string, field: string, deltaChars: number) => {
         if (!timing) return Effect.void
         const key = `${partID}\0${field}`
@@ -324,7 +361,7 @@ const layer = Layer.effect(
         delivery: "durable" | "ephemeral" = "durable",
         worktree: "none" | "declared" | "ambient" = "none",
       ) {
-          // #557：登记先于 plugin/Permission——拒绝执行也保留准确归因边界。
+        // #557：登记先于 plugin/Permission——拒绝执行也保留准确归因边界。
         if (worktree !== "none") {
           // #557：execute 可能早于 tool-input-start；同步登记让事件创建路径也能持久化同一 policy。
           // none 不进入 gate，纯读取 Tool 因而不启动 git 子进程；policy 在 plugin/Permission 前登记，拒绝执行也保留归因边界。
@@ -340,10 +377,7 @@ const layer = Layer.effect(
             if (!match) return undefined
             const next = update(match.part)
             // durable 与 live progress 必须从同一 latest Part 派生；worktree marker 是 server-owned primitive。
-            const marked =
-              worktree === "none"
-                ? next
-                : { ...next, metadata: { ...next.metadata, worktree } }
+            const marked = worktree === "none" ? next : { ...next, metadata: { ...next.metadata, worktree } }
             if (delivery === "ephemeral") {
               // ephemeral 进度只广播不落盘，避免高频工具输出把 PartUpdated 逐 tick 刷进 SQLite。
               yield* session.publishPartProgress(marked)
@@ -361,12 +395,15 @@ const layer = Layer.effect(
         )
       })
 
-      const prepareToolOutput = Effect.fn("SessionProcessor.prepareToolOutput")(function* (output: {
-        title: string
-        metadata: Record<string, unknown>
-        output: string
-        attachments?: SessionV1.FilePart[]
-      }, options?: { readonly tokenBudget?: number }) {
+      const prepareToolOutput = Effect.fn("SessionProcessor.prepareToolOutput")(function* (
+        output: {
+          title: string
+          metadata: Record<string, unknown>
+          output: string
+          attachments?: SessionV1.FilePart[]
+        },
+        options?: { readonly tokenBudget?: number },
+      ) {
         const normalized = yield* Effect.forEach(output.attachments ?? [], (candidate) => {
           const proof = Image.consumeNormalized(candidate)
           // #534：ReadTool 的匹配 proof 证明同一 MIME/URL 已 decode；缺失或被插件改写时必须回到唯一 Image owner。
@@ -410,7 +447,9 @@ const layer = Layer.effect(
           return
         }
         // direct completion也在既有permit内准备；普通事件复用已准备snapshot及Read预算。
-        const result = prepared ? output : yield* prepareToolOutput(output, match.part.tool === "read" ? { tokenBudget: 1600 } : undefined)
+        const result = prepared
+          ? output
+          : yield* prepareToolOutput(output, match.part.tool === "read" ? { tokenBudget: 1600 } : undefined)
         yield* session.updatePart({
           ...match.part,
           state: {
@@ -462,7 +501,9 @@ const layer = Layer.effect(
             // Keep metadata streamed while running so failures retain progress detail (e.g. execute's child calls).
             // #209：denied/failed auto-review 终态化为 error——UI 仍需 review 结果行和 reviewer 子会话链接
             // 中止时只更新审查终态，其他运行进度和普通错误metadata均保持完整。
-            metadata: toolAborted ? interruptedToolMetadata(match.part.state.metadata, Date.now() - failStart) : match.part.state.metadata,
+            metadata: toolAborted
+              ? interruptedToolMetadata(match.part.state.metadata, Date.now() - failStart)
+              : match.part.state.metadata,
             time: { start: failStart, end: Date.now() },
           },
         })
@@ -562,9 +603,7 @@ const layer = Layer.effect(
           const parts = yield* MessageV2.parts(ctx.assistantMessage.id).pipe(
             Effect.provideService(Database.Service, database),
           )
-          const currentTools = parts.filter(
-            (part) => part.type === "tool" && part.state.status !== "pending",
-          )
+          const currentTools = parts.filter((part) => part.type === "tool" && part.state.status !== "pending")
           const preceding = yield* MessageV2.previousAssistantToolTail({
             sessionID: ctx.sessionID,
             before: { id: ctx.assistantMessage.id, time: ctx.assistantMessage.time.created },
@@ -749,7 +788,10 @@ const layer = Layer.effect(
               return
             }
             const rawOutput = toolResultOutput(value)
-            const output = yield* prepareToolOutput(rawOutput, toolCall?.part.tool === "read" ? { tokenBudget: 1600 } : undefined)
+            const output = yield* prepareToolOutput(
+              rawOutput,
+              toolCall?.part.tool === "read" ? { tokenBudget: 1600 } : undefined,
+            )
             yield* completeToolCall(value.id, output, true)
             return
           }
@@ -786,7 +828,7 @@ const layer = Layer.effect(
             })
             return
 
-            // #557：completedSnapshot 仅在 active step 产生；空 turn 不再为空 Patch 启动 git 扫描。
+          // #557：completedSnapshot 仅在 active step 产生；空 turn 不再为空 Patch 启动 git 扫描。
           case "step-finish": {
             // #557：未执行 non-none Tool 时没有 baseline，也不应为了空 Patch 再启动一次 git 扫描；
             // snapshotActive 只描述当前 step，不改变跨 step 保存的 completed baseline。
@@ -814,18 +856,19 @@ const layer = Layer.effect(
             // 无真实 Tool 的 unknown（源 other）在发布成功和确认 usage 之前进入原有 retry。
             if (value.reason === "unknown" && !ctx.hasToolCall) {
               yield* discardIncompleteAttempt()
-              yield* Effect.fail(new SessionV1.APIError({
-                message: `Provider returned incomplete completion (finish_reason: ${value.reason})`,
-                isRetryable: true,
-                metadata: { finishReason: value.reason },
-              }))
+              yield* Effect.fail(
+                new SessionV1.APIError({
+                  message: `Provider returned incomplete completion (finish_reason: ${value.reason})`,
+                  isRetryable: true,
+                  metadata: { finishReason: value.reason },
+                }),
+              )
             }
             ctx.assistantMessage.finish = value.reason
             ctx.assistantMessage.cost += usage.cost
             ctx.assistantMessage.tokens = usage.tokens
             // 只有本 step 的实际确认能把请求体样本标记为可校准。
-            if (ctx.assistantMessage.inputEstimate)
-              ctx.assistantMessage.inputEstimate.confirmed = true
+            if (ctx.assistantMessage.inputEstimate) ctx.assistantMessage.inputEstimate.confirmed = true
             yield* session.updatePart({
               id: PartID.ascending(),
               reason: value.reason,
@@ -843,9 +886,9 @@ const layer = Layer.effect(
             // 多工具续轮不能以当前助手 ID 新建另一轮用户请求。
             yield* publishAssistant(ctx.assistantMessage, events)
             if (ctx.snapshot && completedSnapshot && !aborted) {
-          // #139：中断时跳过慢 git snapshot，优先完成终端态清理
-          // #139：aborted 后 snapshot 非关键路径
-          // #557：一个 step 内多个副作用 Tool 共用 before/after，Patch 只生成一次；Patch 为空仍推进 baseline。
+              // #139：中断时跳过慢 git snapshot，优先完成终端态清理
+              // #139：aborted 后 snapshot 非关键路径
+              // #557：一个 step 内多个副作用 Tool 共用 before/after，Patch 只生成一次；Patch 为空仍推进 baseline。
               const patch = yield* snapshot.patch(ctx.snapshot)
               if (patch.files.length) {
                 yield* session.updatePart({
@@ -1021,7 +1064,10 @@ const layer = Layer.effect(
                   status: "error",
                   error: aborted ? TOOL_ABORTED_ERROR : "Tool execution did not complete before stream ended",
                   // pending原文放入metadata，普通失败保留进度，中断沿用412耗时与审查信封。
-                  metadata: { ...(aborted ? interruptedToolMetadata(metadata, end - ("time" in part.state ? part.state.time.start : end)) : metadata),
+                  metadata: {
+                    ...(aborted
+                      ? interruptedToolMetadata(metadata, end - ("time" in part.state ? part.state.time.start : end))
+                      : metadata),
                     ...(part.state.status === "pending" ? { raw: part.state.raw + (pendingRaw ?? "") } : {}),
                   },
                   time: { start: "time" in part.state ? part.state.time.start : end, end },
@@ -1036,9 +1082,9 @@ const layer = Layer.effect(
         ctx.assistantMessage.time.completed = Date.now()
         // 工具终态及 raw 提交后再发布助手；中断继承 ensuring 保护，error/completed 与账本同事务提交后才通知。
         // 普通完成仍允许取消阻塞 callback；prompt caller 的 ownAssistant 继续负责其已注册的归属。
-        yield* (aborted
+        yield* aborted
           ? publishAssistant(ctx.assistantMessage, events, true)
-          : Effect.interruptible(publishAssistant(ctx.assistantMessage, events)))
+          : Effect.interruptible(publishAssistant(ctx.assistantMessage, events))
       })
 
       const halt = Effect.fn("SessionProcessor.halt")(function* (e: unknown) {
@@ -1098,46 +1144,86 @@ const layer = Layer.effect(
             ctx.hasReasoning = false
             ctx.hasToolCall = false
             yield* status.set(ctx.sessionID, { type: "busy" })
-            const stream = llm.stream({ ...streamInput, onRequestPrepared: (body) => Effect.gen(function* () {
-              const history = yield* session.messages({ sessionID: ctx.sessionID }).pipe(Effect.orDie)
-              const samples = history.toReversed().flatMap((message) => {
-                const info = message.info
-                // 重放/重试只读已保存样本；provider 或模型切换不能借用旧比率。
-                if (info.role !== "assistant" || info.providerID !== ctx.model.providerID || info.modelID !== ctx.model.id) return []
-                // V1 单助手多 step 逐确认点取样；旧64数据缺少该字段时才沿用其已确认 carrier。
-                const steps = message.parts.flatMap(part => part.type === "step-finish" && part.inputChars !== undefined
-                  ? [{ bodyChars: part.inputChars, inputBreakdown: part.inputBreakdown, input: part.tokens.input + part.tokens.cache.read + part.tokens.cache.write }] : [])
-                if (steps.length > 0) return steps.toReversed()
-                if (!info.inputEstimate?.confirmed) return []
-                return [{ bodyChars: info.inputEstimate.bodyChars, inputBreakdown: info.inputEstimate.inputBreakdown,
-                  input: info.tokens.input + info.tokens.cache.read + info.tokens.cache.write }]
-              })
-              // 每次请求准备都覆盖为未确认，旧 tokens 不得确认新请求体样本。
-              const estimate = Token.estimateRequest(body, samples, streamInput.inputSections ?? [])
-              // #194：同模型优先、会话历史回退，普通与摘要请求都在真实 prepared 入口学习。
-              const charsPerToken = TokenEstimate.learnInputCharsPerToken({ messages: history, model: ctx.model })?.charsPerToken
-                ?? estimate.charsPerToken ?? 4
-              ctx.assistantMessage.inputEstimate = {
-                ...estimate,
-                // clamp 只调整文本密度，媒体 token 固定追加一次，raw 字符只作展示基数。
-                input: Math.round((estimate.bodyChars - (estimate.inputBreakdown?.media?.rawChars ?? 0)
-                  + (estimate.inputBreakdown?.media?.textChars ?? 0)) / charsPerToken) + (estimate.inputBreakdown?.media?.tokens ?? 0),
-                charsPerToken,
-                contextLimit: ctx.model.limit.context,
-                // V1 单助手多 step：新的确认 part 会立即遮掉此轮估算。
-                afterPartID: history.find(message => message.info.id === ctx.assistantMessage.id)?.parts.at(-1)?.id,
-              }
-              // 快照提交只刷新元数据；recordAssistant 仍只从 step-finish 结算。
-              // 用即将发送的请求体判断，压缩保留的旧 tail 不再触发连续压缩。
-              if (!ctx.assistantMessage.summary && isOverflow({
-                cfg: yield* config.get(), model: ctx.model,
-                tokens: { input: ctx.assistantMessage.inputEstimate.input, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
-              })) {
-                ctx.needsCompaction = true
-                return yield* Effect.die(preflightCompaction)
-              }
-              yield* publishAssistant(ctx.assistantMessage, events)
-            }) })
+            const stream = llm.stream({
+              ...streamInput,
+              onRequestPrepared: (body) =>
+                Effect.gen(function* () {
+                  const history = yield* session.messages({ sessionID: ctx.sessionID }).pipe(Effect.orDie)
+                  const samples = history.toReversed().flatMap((message) => {
+                    const info = message.info
+                    // 重放/重试只读已保存样本；provider 或模型切换不能借用旧比率。
+                    if (
+                      info.role !== "assistant" ||
+                      info.providerID !== ctx.model.providerID ||
+                      info.modelID !== ctx.model.id
+                    )
+                      return []
+                    // V1 单助手多 step 逐确认点取样；旧64数据缺少该字段时才沿用其已确认 carrier。
+                    const steps = message.parts.flatMap((part) =>
+                      part.type === "step-finish" && part.inputChars !== undefined
+                        ? [
+                            {
+                              bodyChars: part.inputChars,
+                              inputBreakdown: part.inputBreakdown,
+                              input: part.tokens.input + part.tokens.cache.read + part.tokens.cache.write,
+                            },
+                          ]
+                        : [],
+                    )
+                    if (steps.length > 0) return steps.toReversed()
+                    if (!info.inputEstimate?.confirmed) return []
+                    return [
+                      {
+                        bodyChars: info.inputEstimate.bodyChars,
+                        inputBreakdown: info.inputEstimate.inputBreakdown,
+                        input: info.tokens.input + info.tokens.cache.read + info.tokens.cache.write,
+                      },
+                    ]
+                  })
+                  // 每次请求准备都覆盖为未确认，旧 tokens 不得确认新请求体样本。
+                  const estimate = Token.estimateRequest(body, samples, streamInput.inputSections ?? [])
+                  // #194：同模型优先、会话历史回退，普通与摘要请求都在真实 prepared 入口学习。
+                  const charsPerToken =
+                    TokenEstimate.learnInputCharsPerToken({ messages: history, model: ctx.model })?.charsPerToken ??
+                    estimate.charsPerToken ??
+                    4
+                  ctx.assistantMessage.inputEstimate = {
+                    ...estimate,
+                    // clamp 只调整文本密度，媒体 token 固定追加一次，raw 字符只作展示基数。
+                    input:
+                      Math.round(
+                        (estimate.bodyChars -
+                          (estimate.inputBreakdown?.media?.rawChars ?? 0) +
+                          (estimate.inputBreakdown?.media?.textChars ?? 0)) /
+                          charsPerToken,
+                      ) + (estimate.inputBreakdown?.media?.tokens ?? 0),
+                    charsPerToken,
+                    contextLimit: ctx.model.limit.context,
+                    // V1 单助手多 step：新的确认 part 会立即遮掉此轮估算。
+                    afterPartID: history.find((message) => message.info.id === ctx.assistantMessage.id)?.parts.at(-1)
+                      ?.id,
+                  }
+                  // 快照提交只刷新元数据；recordAssistant 仍只从 step-finish 结算。
+                  // 用即将发送的请求体判断，压缩保留的旧 tail 不再触发连续压缩。
+                  if (
+                    !ctx.assistantMessage.summary &&
+                    isOverflow({
+                      cfg: yield* config.get(),
+                      model: ctx.model,
+                      tokens: {
+                        input: ctx.assistantMessage.inputEstimate.input,
+                        output: 0,
+                        reasoning: 0,
+                        cache: { read: 0, write: 0 },
+                      },
+                    })
+                  ) {
+                    ctx.needsCompaction = true
+                    return yield* Effect.die(preflightCompaction)
+                  }
+                  yield* publishAssistant(ctx.assistantMessage, events)
+                }),
+            })
 
             yield* stream.pipe(
               Stream.tap((event) =>
@@ -1154,10 +1240,17 @@ const layer = Layer.effect(
             )
           }).pipe(
             // 保留 adapter 对 raw network_error 的更强失败路径，只补同一 no-Tool 撤回责任。
-            Effect.tapError((error) => error instanceof ProviderError.ResponseStreamError && error.message === "Provider finish_reason: network_error" && !ctx.hasToolCall ? discardIncompleteAttempt() : Effect.void),
+            Effect.tapError((error) =>
+              error instanceof ProviderError.ResponseStreamError &&
+              error.message === "Provider finish_reason: network_error" &&
+              !ctx.hasToolCall
+                ? discardIncompleteAttempt()
+                : Effect.void,
+            ),
             // 转入已有 compact 结果，保留 cleanup 且不发布虚构的 provider 错误。
             Effect.catchCauseIf(
-              (cause) => Cause.squash(cause) === preflightCompaction, () => Effect.void,
+              (cause) => Cause.squash(cause) === preflightCompaction,
+              () => Effect.void,
             ),
             Effect.onInterrupt(() =>
               Effect.gen(function* () {

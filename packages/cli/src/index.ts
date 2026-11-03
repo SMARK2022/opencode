@@ -12,9 +12,13 @@ if (process.env.OPENCODE_PROCESS_ROLE === "voice-smoke") {
   const worker = new Worker(voiceWorkerPath(), { ref: true })
   const acknowledged = Promise.withResolvers<void>()
   const closed = Promise.withResolvers<void>()
-  const timeout = Bun.sleep(10_000).then(() => { throw new Error("Compiled voice Worker probe timed out") })
-  worker.onmessage = event => { if (event.data?.type === "probe") acknowledged.resolve() }
-  worker.onerror = event => acknowledged.reject(new Error(event.message || "Compiled voice Worker failed"))
+  const timeout = Bun.sleep(10_000).then(() => {
+    throw new Error("Compiled voice Worker probe timed out")
+  })
+  worker.onmessage = (event) => {
+    if (event.data?.type === "probe") acknowledged.resolve()
+  }
+  worker.onerror = (event) => acknowledged.reject(new Error(event.message || "Compiled voice Worker failed"))
   worker.addEventListener("close", () => closed.resolve(), { once: true })
   worker.postMessage({ type: "probe" })
   try {

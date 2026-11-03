@@ -15,7 +15,14 @@ import { RouteProvider } from "../../../src/context/route"
 import { ReasoningRun, context } from "../../../src/routes/session"
 
 function makePart(text: string, id = "prt_test", done = true): ReasoningPart {
-  return { id, sessionID: "ses_test", messageID: "msg_test", type: "reasoning", text, time: { start: 0, end: done ? 10 : undefined } }
+  return {
+    id,
+    sessionID: "ses_test",
+    messageID: "msg_test",
+    type: "reasoning",
+    text,
+    time: { start: 0, end: done ? 10 : undefined },
+  }
 }
 
 async function waitForFrame(app: Awaited<ReturnType<typeof testRender>>, predicate: (frame: string) => boolean) {
@@ -35,11 +42,19 @@ async function setup() {
   return stateDir
 }
 
-function Harness(props: { showThinking: () => boolean; parts: ReasoningPart[]; stateDir: string; width?: number; conceal?: () => boolean }) {
+function Harness(props: {
+  showThinking: () => boolean
+  parts: ReasoningPart[]
+  stateDir: string
+  width?: number
+  conceal?: () => boolean
+}) {
   // 响应式交互存储才能验证真实点击，不使用不会通知渲染的普通对象。
   const [interaction, setInteraction] = createSignal<Record<string, boolean>>({})
   const value = {
-    get width() { return props.width ?? 60 },
+    get width() {
+      return props.width ?? 60
+    },
     sessionID: "ses_test",
     conceal: () => props.conceal?.() ?? false,
     showThinking: props.showThinking,
@@ -80,7 +95,10 @@ function Harness(props: { showThinking: () => boolean; parts: ReasoningPart[]; s
 
 test("done reasoning renders Thought header for short content", async () => {
   const stateDir = await setup()
-  const app = await testRender(() => <Harness showThinking={() => true} parts={[makePart("第一行推理\n第二行推理")]} stateDir={stateDir} />, { width: 60, height: 30, useThread: false })
+  const app = await testRender(
+    () => <Harness showThinking={() => true} parts={[makePart("第一行推理\n第二行推理")]} stateDir={stateDir} />,
+    { width: 60, height: 30, useThread: false },
+  )
   try {
     await waitForFrame(app, (frame) => frame.includes("Thought"))
     expect(app.captureCharFrame()).not.toContain("展开查看完整推理")
@@ -92,10 +110,16 @@ test("done reasoning renders Thought header for short content", async () => {
 
 test("clicking short reasoning does not preset disclosure", async () => {
   const stateDir = await setup()
-  const app = await testRender(() => <Harness showThinking={() => true} parts={[makePart("短内容")]} stateDir={stateDir} />, { width: 60, height: 30, useThread: false })
+  const app = await testRender(
+    () => <Harness showThinking={() => true} parts={[makePart("短内容")]} stateDir={stateDir} />,
+    { width: 60, height: 30, useThread: false },
+  )
   try {
     await waitForFrame(app, (frame) => frame.includes("Thought"))
-    const row = app.captureCharFrame().split("\n").findIndex((line) => line.includes("Thought"))
+    const row = app
+      .captureCharFrame()
+      .split("\n")
+      .findIndex((line) => line.includes("Thought"))
     await app.mockMouse.click(5, row)
     expect(app.captureCharFrame()).toContain("Thought")
     expect(app.captureCharFrame()).not.toContain("展开查看完整推理")
@@ -107,7 +131,10 @@ test("clicking short reasoning does not preset disclosure", async () => {
 
 test("visibility off hides header and body without hiding the answer", async () => {
   const stateDir = await setup()
-  const app = await testRender(() => <Harness showThinking={() => false} parts={[makePart("隐藏推理")]} stateDir={stateDir} />, { width: 60, height: 30, useThread: false })
+  const app = await testRender(
+    () => <Harness showThinking={() => false} parts={[makePart("隐藏推理")]} stateDir={stateDir} />,
+    { width: 60, height: 30, useThread: false },
+  )
   try {
     await waitForFrame(app, (frame) => frame.includes("answer remains visible"))
     expect(app.captureCharFrame()).not.toContain("Thought")
@@ -123,9 +150,15 @@ test("real run preserves word-wrap, shared budget, streaming and conceal disclos
   const [visible, setVisible] = createSignal(true)
   const [conceal, setConceal] = createSignal(true)
   const [parts, setParts] = createSignal([makePart("short stream thought", "prt_test", false)])
-  const app = await testRender(() => <Harness showThinking={visible} conceal={conceal} parts={parts()} width={21} stateDir={stateDir} />, { width: 31, height: 30, useThread: false })
+  const app = await testRender(
+    () => <Harness showThinking={visible} conceal={conceal} parts={parts()} width={21} stateDir={stateDir} />,
+    { width: 31, height: 30, useThread: false },
+  )
   const click = async (label: string) => {
-    const row = app.captureCharFrame().split("\n").findIndex((line) => line.includes(label))
+    const row = app
+      .captureCharFrame()
+      .split("\n")
+      .findIndex((line) => line.includes(label))
     expect(row).toBeGreaterThanOrEqual(0)
     await app.mockMouse.click(5, row)
   }
@@ -133,7 +166,8 @@ test("real run preserves word-wrap, shared budget, streaming and conceal disclos
     await waitForFrame(app, (frame) => frame.includes("short stream thought"))
     expect(app.captureCharFrame()).not.toContain("展开查看完整推理")
     await click("short stream thought")
-    const grown = "short stream thought" + Array.from({ length: 6 }, (_, index) => `\nstream line ${index + 2}`).join("")
+    const grown =
+      "short stream thought" + Array.from({ length: 6 }, (_, index) => `\nstream line ${index + 2}`).join("")
     setParts([makePart(grown, "prt_test", false)])
     await app.renderOnce()
     // 不等待最终toggle才检查首帧，避免漏掉流式增长时的短暂尾部泄漏。
@@ -151,7 +185,11 @@ test("real run preserves word-wrap, shared budget, streaming and conceal disclos
     await waitForFrame(app, (frame) => frame.includes("收起推理"))
     expect(app.captureCharFrame().replace(/\s/g, "")).toContain(wrapped.replace(/\s/g, ""))
     await click("收起推理")
-    setParts(Array.from({ length: 8 }, (_, index) => makePart(`mode source ${index + 1}`, index === 0 ? "prt_test" : `prt_${index}`)))
+    setParts(
+      Array.from({ length: 8 }, (_, index) =>
+        makePart(`mode source ${index + 1}`, index === 0 ? "prt_test" : `prt_${index}`),
+      ),
+    )
     await waitForFrame(app, (frame) => frame.includes("mode source 1") && frame.includes("展开查看完整推理"))
     expect(app.captureCharFrame()).not.toContain("mode source 8")
     await click("展开查看完整推理")

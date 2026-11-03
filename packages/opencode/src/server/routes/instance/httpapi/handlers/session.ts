@@ -429,21 +429,24 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
         ctx.params.sessionID,
         Effect.gen(function* () {
           // 同步拒绝发生在fork之前，不能把revert冲突藏进后台Error事件。
-          yield* runState.assertNotReverting(ctx.params.sessionID).pipe(
-            Effect.catchTag("SessionBusyError", () => new HttpApiError.BadRequest({})),
-          )
-          yield* promptSvc.prompt({ ...ctx.payload, sessionID: ctx.params.sessionID }).pipe(
-          // catchCause 后统一转 Error 事件，单次失败不影响请求作用域内其他 fiber
-          Effect.catchCause((cause) =>
-            Effect.gen(function* () {
-              yield* Effect.logError("prompt_async failed", { sessionID: ctx.params.sessionID, cause })
-              yield* events.publish(Session.Event.Error, {
-                sessionID: ctx.params.sessionID,
-                error: new NamedError.Unknown({ message: Cause.pretty(cause) }).toObject(),
-              })
-            }),
-          ),
-          ).pipe(Effect.forkIn(scope, { startImmediately: true }))
+          yield* runState
+            .assertNotReverting(ctx.params.sessionID)
+            .pipe(Effect.catchTag("SessionBusyError", () => new HttpApiError.BadRequest({})))
+          yield* promptSvc
+            .prompt({ ...ctx.payload, sessionID: ctx.params.sessionID })
+            .pipe(
+              // catchCause 后统一转 Error 事件，单次失败不影响请求作用域内其他 fiber
+              Effect.catchCause((cause) =>
+                Effect.gen(function* () {
+                  yield* Effect.logError("prompt_async failed", { sessionID: ctx.params.sessionID, cause })
+                  yield* events.publish(Session.Event.Error, {
+                    sessionID: ctx.params.sessionID,
+                    error: new NamedError.Unknown({ message: Cause.pretty(cause) }).toObject(),
+                  })
+                }),
+              ),
+            )
+            .pipe(Effect.forkIn(scope, { startImmediately: true }))
         }),
       )
       return HttpApiSchema.NoContent.make()
@@ -473,7 +476,9 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       return yield* inSessionDirectory(
         ctx.params.sessionID,
         SessionError.mapBusy(
-          runState.assertNotReverting(ctx.params.sessionID).pipe(Effect.andThen(promptSvc.shell({ ...ctx.payload, sessionID: ctx.params.sessionID }))),
+          runState
+            .assertNotReverting(ctx.params.sessionID)
+            .pipe(Effect.andThen(promptSvc.shell({ ...ctx.payload, sessionID: ctx.params.sessionID }))),
         ),
       )
     })
@@ -520,11 +525,14 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       params: { sessionID: SessionID; messageID: MessageID }
     }) {
       yield* requireSession(ctx.params.sessionID)
-      yield* inSessionDirectory(ctx.params.sessionID, Effect.gen(function* () {
-        // assertNotBusy新增reverting语义后，删除检查也要消费同一目录状态。
-        yield* SessionError.mapBusy(runState.assertNotBusy(ctx.params.sessionID))
-        yield* session.removeMessage(ctx.params)
-      }))
+      yield* inSessionDirectory(
+        ctx.params.sessionID,
+        Effect.gen(function* () {
+          // assertNotBusy新增reverting语义后，删除检查也要消费同一目录状态。
+          yield* SessionError.mapBusy(runState.assertNotBusy(ctx.params.sessionID))
+          yield* session.removeMessage(ctx.params)
+        }),
+      )
       return true
     })
 
@@ -558,151 +566,157 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
 
     // 沿用原始 wire 对象；只有数据库边界把整数微美元转换成美元。
     const requestUsageList = Effect.fn("SessionHttpApi.requestUsageList")(function* (ctx: {
-    params: { sessionID: SessionID }
-    query: { limit?: number; before?: number; rootRequestID?: MessageID; source?: SessionRequestUsage.Source }
-  }) {
-    yield* requireSession(ctx.params.sessionID)
-    return yield* usageSvc.list({ sessionID: ctx.params.sessionID, ...ctx.query })
-  })
-  // 资源缺失保持 404，不把有效 requestID 当成格式错误。
-    const requestUsageGet = Effect.fn("SessionHttpApi.requestUsageGet")(function* (ctx: { params: { sessionID: SessionID; requestID: MessageID } }) {
-    yield* requireSession(ctx.params.sessionID)
-    const result = yield* usageSvc.get({ sessionID: ctx.params.sessionID, requestID: ctx.params.requestID })
-    // 复用现有 name/data.message 404 body，不能用内建空错误改掉 source JSON 契约。
-    if (!result) return yield* notFound(`Request usage not found: ${ctx.params.requestID}`)
-    return result
-  })
-  // assistant明细属于具体父请求，缺失请求不能被解释为空的成功列表。
-    const requestUsageAssistants = Effect.fn("SessionHttpApi.requestUsageAssistants")(function* (ctx: { params: { sessionID: SessionID; requestID: MessageID } }) {
-    yield* requireSession(ctx.params.sessionID)
-    const result = yield* usageSvc.get(ctx.params)
-    // 复用get端点的已声明JSON错误，不增加内建空错误的第二种wire格式。
-    if (!result) return yield* notFound(`Request usage not found: ${ctx.params.requestID}`)
-    return yield* usageSvc.assistants(ctx.params)
-  })
+      params: { sessionID: SessionID }
+      query: { limit?: number; before?: number; rootRequestID?: MessageID; source?: SessionRequestUsage.Source }
+    }) {
+      yield* requireSession(ctx.params.sessionID)
+      return yield* usageSvc.list({ sessionID: ctx.params.sessionID, ...ctx.query })
+    })
+    // 资源缺失保持 404，不把有效 requestID 当成格式错误。
+    const requestUsageGet = Effect.fn("SessionHttpApi.requestUsageGet")(function* (ctx: {
+      params: { sessionID: SessionID; requestID: MessageID }
+    }) {
+      yield* requireSession(ctx.params.sessionID)
+      const result = yield* usageSvc.get({ sessionID: ctx.params.sessionID, requestID: ctx.params.requestID })
+      // 复用现有 name/data.message 404 body，不能用内建空错误改掉 source JSON 契约。
+      if (!result) return yield* notFound(`Request usage not found: ${ctx.params.requestID}`)
+      return result
+    })
+    // assistant明细属于具体父请求，缺失请求不能被解释为空的成功列表。
+    const requestUsageAssistants = Effect.fn("SessionHttpApi.requestUsageAssistants")(function* (ctx: {
+      params: { sessionID: SessionID; requestID: MessageID }
+    }) {
+      yield* requireSession(ctx.params.sessionID)
+      const result = yield* usageSvc.get(ctx.params)
+      // 复用get端点的已声明JSON错误，不增加内建空错误的第二种wire格式。
+      if (!result) return yield* notFound(`Request usage not found: ${ctx.params.requestID}`)
+      return yield* usageSvc.assistants(ctx.params)
+    })
 
-  // #364：goal handler：读取当前 session 的持久化 goal
-  const goalGet = Effect.fn("SessionHttpApi.goalGet")(function* (ctx: {
-    params: { sessionID: SessionID }
-  }) {
-    // requireSession 先校验 session 存在性，未命中直接 404
-    yield* requireSession(ctx.params.sessionID)
-    const result = yield* goalSvc.get(ctx.params.sessionID)
-    // Option → null 映射，便于 JSON 序列化
-    return { goal: result._tag === "Some" ? result.value : null }
-  })
+    // #364：goal handler：读取当前 session 的持久化 goal
+    const goalGet = Effect.fn("SessionHttpApi.goalGet")(function* (ctx: { params: { sessionID: SessionID } }) {
+      // requireSession 先校验 session 存在性，未命中直接 404
+      yield* requireSession(ctx.params.sessionID)
+      const result = yield* goalSvc.get(ctx.params.sessionID)
+      // Option → null 映射，便于 JSON 序列化
+      return { goal: result._tag === "Some" ? result.value : null }
+    })
 
-  // #364：goal set handler：创建或更新 goal
-  // objective 缺省时仅更新 status/budget，要求已有 goal
-  // GoalError（校验失败）映射为 400，其他错误正常传播
-  const goalSet = Effect.fn("SessionHttpApi.goalSet")(function* (ctx: {
-    params: { sessionID: SessionID }
-    payload: typeof GoalSetPayload.Type
-  }) {
-    yield* requireSession(ctx.params.sessionID)
-    const goal = yield* inSessionDirectory(ctx.params.sessionID, goalSvc.set(ctx.params.sessionID, {
-      objective: ctx.payload.objective,
-      status: ctx.payload.status,
-      tokenBudget: ctx.payload.tokenBudget,
-      // [local-smark] 透传错误续跑策略到 domain service
-      continueOnError: ctx.payload.continueOnError,
-      // [local-smark] terminal reason 透传到 domain service
-      reason: ctx.payload.reason,
-    })).pipe(
-      // GoalError 的具体原因（空/超长/budget/无goal）透传到 wire 体 data.message，
-      // 让 TUI 能展示真实拒绝原因，而非通用 "Failed to update goal"；
-      // 校验失败仍映射为 4xx，保持错误面契约：不伪装成 5xx
-      Effect.catchTag("GoalError", (error) =>
-        Effect.fail(new GoalApiError({ name: "GoalError", data: { message: error.message } })),
-      ),
-    )
-    // active写入后在持久Session目录内恢复执行；busy仍由原RunState去重。
-    // [local-smark] active mutation 只在已有 user Message 时恢复现有 loop；
-    // empty Session 保留 active Goal，等待第一条真实 prompt 自然启动执行。
-    if (goal.status === "active") {
-      // 此处只判断 loop 是否有可消费的 user history，不重复 Goal-turn classifier；
-      // canonical/technical 身份仍由 SessionPrompt 在唯一执行路径中权威判定。
-      const user = yield* session
-        // #493：role predicate 走热索引式分页——无 user 时不因一次 Goal mutation 展开任何 cold Part。
-        .findMessage(ctx.params.sessionID, (info) => info.role === "user")
-        .pipe(Effect.orDie)
-      if (Option.isSome(user)) {
-        // busy Session 继续由 RunState.ensureRunning 去重；后台 failure 必须沿用现有
-        // prompt_async observability，不能静默吞掉或伪造 mutation 成功后的执行结果。
-        // startImmediately 让 fork 在 handler scope 内开始，随后仍由 RunState 决定 start/join；
-        // HTTP 200 只承诺 mutation 已提交，不把后台执行成败混入 response contract。
-        yield* inSessionDirectory(ctx.params.sessionID, promptSvc.loop({ sessionID: ctx.params.sessionID, cleanupRevert: true }).pipe(
-          Effect.catchCause((cause) =>
-            Effect.gen(function* () {
-              yield* Effect.logError("goal resume loop failed").pipe(
-                Effect.annotateLogs({ sessionID: ctx.params.sessionID, cause }),
-              )
-              yield* events.publish(Session.Event.Error, {
-                sessionID: ctx.params.sessionID,
-                error: new NamedError.Unknown({ message: Cause.pretty(cause) }).toObject(),
-              })
-            }),
-          ),
-        )).pipe(Effect.forkIn(scope, { startImmediately: true }))
+    // #364：goal set handler：创建或更新 goal
+    // objective 缺省时仅更新 status/budget，要求已有 goal
+    // GoalError（校验失败）映射为 400，其他错误正常传播
+    const goalSet = Effect.fn("SessionHttpApi.goalSet")(function* (ctx: {
+      params: { sessionID: SessionID }
+      payload: typeof GoalSetPayload.Type
+    }) {
+      yield* requireSession(ctx.params.sessionID)
+      const goal = yield* inSessionDirectory(
+        ctx.params.sessionID,
+        goalSvc.set(ctx.params.sessionID, {
+          objective: ctx.payload.objective,
+          status: ctx.payload.status,
+          tokenBudget: ctx.payload.tokenBudget,
+          // [local-smark] 透传错误续跑策略到 domain service
+          continueOnError: ctx.payload.continueOnError,
+          // [local-smark] terminal reason 透传到 domain service
+          reason: ctx.payload.reason,
+        }),
+      ).pipe(
+        // GoalError 的具体原因（空/超长/budget/无goal）透传到 wire 体 data.message，
+        // 让 TUI 能展示真实拒绝原因，而非通用 "Failed to update goal"；
+        // 校验失败仍映射为 4xx，保持错误面契约：不伪装成 5xx
+        Effect.catchTag("GoalError", (error) =>
+          Effect.fail(new GoalApiError({ name: "GoalError", data: { message: error.message } })),
+        ),
+      )
+      // active写入后在持久Session目录内恢复执行；busy仍由原RunState去重。
+      // [local-smark] active mutation 只在已有 user Message 时恢复现有 loop；
+      // empty Session 保留 active Goal，等待第一条真实 prompt 自然启动执行。
+      if (goal.status === "active") {
+        // 此处只判断 loop 是否有可消费的 user history，不重复 Goal-turn classifier；
+        // canonical/technical 身份仍由 SessionPrompt 在唯一执行路径中权威判定。
+        const user = yield* session
+          // #493：role predicate 走热索引式分页——无 user 时不因一次 Goal mutation 展开任何 cold Part。
+          .findMessage(ctx.params.sessionID, (info) => info.role === "user")
+          .pipe(Effect.orDie)
+        if (Option.isSome(user)) {
+          // busy Session 继续由 RunState.ensureRunning 去重；后台 failure 必须沿用现有
+          // prompt_async observability，不能静默吞掉或伪造 mutation 成功后的执行结果。
+          // startImmediately 让 fork 在 handler scope 内开始，随后仍由 RunState 决定 start/join；
+          // HTTP 200 只承诺 mutation 已提交，不把后台执行成败混入 response contract。
+          yield* inSessionDirectory(
+            ctx.params.sessionID,
+            promptSvc.loop({ sessionID: ctx.params.sessionID, cleanupRevert: true }).pipe(
+              Effect.catchCause((cause) =>
+                Effect.gen(function* () {
+                  yield* Effect.logError("goal resume loop failed").pipe(
+                    Effect.annotateLogs({ sessionID: ctx.params.sessionID, cause }),
+                  )
+                  yield* events.publish(Session.Event.Error, {
+                    sessionID: ctx.params.sessionID,
+                    error: new NamedError.Unknown({ message: Cause.pretty(cause) }).toObject(),
+                  })
+                }),
+              ),
+            ),
+          ).pipe(Effect.forkIn(scope, { startImmediately: true }))
+        }
       }
-    }
-    return { goal }
-  })
+      return { goal }
+    })
 
-  // #364：goal clear handler：删除 goal
-  // [local-smark] DELETE 幂等：goal 不存在时 cleared=false 而非报错，
-  // 使客户端重复清除或竞态清除不产生用户可见失败
-  const goalClear = Effect.fn("SessionHttpApi.goalClear")(function* (ctx: {
-    params: { sessionID: SessionID }
-  }) {
-    yield* requireSession(ctx.params.sessionID)
-    const cleared = yield* inSessionDirectory(ctx.params.sessionID, goalSvc.clear(ctx.params.sessionID))
-    return { cleared }
-  })
+    // #364：goal clear handler：删除 goal
+    // [local-smark] DELETE 幂等：goal 不存在时 cleared=false 而非报错，
+    // 使客户端重复清除或竞态清除不产生用户可见失败
+    const goalClear = Effect.fn("SessionHttpApi.goalClear")(function* (ctx: { params: { sessionID: SessionID } }) {
+      yield* requireSession(ctx.params.sessionID)
+      const cleared = yield* inSessionDirectory(ctx.params.sessionID, goalSvc.clear(ctx.params.sessionID))
+      return { cleared }
+    })
 
-  // 两代端点共用批量查询入口；V1只读原有message/part，不与Native历史互补。
-  const preview = Effect.fn("SessionHttpApi.preview")(function* (ctx: {
-    payload: typeof PreviewPayload.Type
-  }) {
-    return yield* SessionPreview.load(database.db, ctx.payload, "v1")
-  })
+    // 两代端点共用批量查询入口；V1只读原有message/part，不与Native历史互补。
+    const preview = Effect.fn("SessionHttpApi.preview")(function* (ctx: { payload: typeof PreviewPayload.Type }) {
+      return yield* SessionPreview.load(database.db, ctx.payload, "v1")
+    })
 
-    return handlers
-      .handle("list", list)
-      .handle("status", status)
-      .handle("get", get)
-      .handle("children", children)
-      .handle("todo", todo)
-      .handle("diff", diff)
-      .handle("messages", messages)
-      .handle("message", message)
-      .handleRaw("create", createRaw)
-      .handle("remove", remove)
-      .handle("update", update)
-      .handleRaw("fork", forkRaw)
-      .handle("abort", abort)
-      .handle("init", init)
-      .handle("share", share)
-      .handle("unshare", unshare)
-      .handle("summarize", summarize)
-      .handle("prompt", prompt)
-      .handle("promptAsync", promptAsync)
-      .handle("command", command)
-      .handle("shell", shell)
-      .handle("revert", revert)
-      .handle("unrevert", unrevert)
-      .handle("permissionRespond", permissionRespond)
-      .handle("deleteMessage", deleteMessage)
-      .handle("deletePart", deletePart)
-      .handle("updatePart", updatePart)
-    .handle("requestUsageList", requestUsageList)
-    .handle("requestUsageGet", requestUsageGet)
-    .handle("requestUsageAssistants", requestUsageAssistants)
-    // #364：goal endpoint handler 注册
-    .handle("goal", goalGet)
-    .handle("goalSet", goalSet)
-    .handle("goalClear", goalClear)
-    .handle("preview", preview)
-    .handle("searchScan", searchScan)
+    return (
+      handlers
+        .handle("list", list)
+        .handle("status", status)
+        .handle("get", get)
+        .handle("children", children)
+        .handle("todo", todo)
+        .handle("diff", diff)
+        .handle("messages", messages)
+        .handle("message", message)
+        .handleRaw("create", createRaw)
+        .handle("remove", remove)
+        .handle("update", update)
+        .handleRaw("fork", forkRaw)
+        .handle("abort", abort)
+        .handle("init", init)
+        .handle("share", share)
+        .handle("unshare", unshare)
+        .handle("summarize", summarize)
+        .handle("prompt", prompt)
+        .handle("promptAsync", promptAsync)
+        .handle("command", command)
+        .handle("shell", shell)
+        .handle("revert", revert)
+        .handle("unrevert", unrevert)
+        .handle("permissionRespond", permissionRespond)
+        .handle("deleteMessage", deleteMessage)
+        .handle("deletePart", deletePart)
+        .handle("updatePart", updatePart)
+        .handle("requestUsageList", requestUsageList)
+        .handle("requestUsageGet", requestUsageGet)
+        .handle("requestUsageAssistants", requestUsageAssistants)
+        // #364：goal endpoint handler 注册
+        .handle("goal", goalGet)
+        .handle("goalSet", goalSet)
+        .handle("goalClear", goalClear)
+        .handle("preview", preview)
+        .handle("searchScan", searchScan)
+    )
   }),
 )

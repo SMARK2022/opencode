@@ -7,19 +7,24 @@ import { SessionTable } from "./sql"
 import { SessionPath } from "./path"
 
 function relatedPath(input: { path: string; directory?: string; global?: boolean; root?: boolean }) {
-  return or(...SessionPath.aliases(input).flatMap(item => {
-    const prefix = item.replace(/\/+$/, "")
-    return [
-      ...SessionPath.ancestors(item, { root: input.root }).map(ancestor => eq(SessionTable.path, ancestor)),
-      like(SessionTable.path, sql.param(prefix ? `${prefix}/%` : "%", SessionTable.path)),
-    ]
-  }))
+  return or(
+    ...SessionPath.aliases(input).flatMap((item) => {
+      const prefix = item.replace(/\/+$/, "")
+      return [
+        ...SessionPath.ancestors(item, { root: input.root }).map((ancestor) => eq(SessionTable.path, ancestor)),
+        like(SessionTable.path, sql.param(prefix ? `${prefix}/%` : "%", SessionTable.path)),
+      ]
+    }),
+  )
 }
 
 function relatedDirectory(directory: string) {
   const comparable = directoryColumn()
   const value = directoryValue(directory)
-  return or(...SessionPath.ancestors(value).map(ancestor => eq(comparable, ancestor)), like(comparable, value ? `${value}/%` : "%"))
+  return or(
+    ...SessionPath.ancestors(value).map((ancestor) => eq(comparable, ancestor)),
+    like(comparable, value ? `${value}/%` : "%"),
+  )
 }
 
 function directoryColumn() {
@@ -35,24 +40,42 @@ function directoryValue(directory: string) {
 }
 
 // 两代共用相关命名空间的唯一 SQL；调用者决定是否请求此语义，精确目录查询不隐式扩大。
-export function related(input: { projectID: ProjectV2.ID; worktree: string; path: string; directory?: string; home?: string }) {
+export function related(input: {
+  projectID: ProjectV2.ID
+  worktree: string
+  path: string
+  directory?: string
+  home?: string
+}) {
   // 隔离配置HOME不改变历史会话身份；调用方未启用home语义时仍保留原作用域。
-  const home = input.home === undefined ? undefined : process.env.OPENCODE_SESSION_HOME ?? input.home
+  const home = input.home === undefined ? undefined : (process.env.OPENCODE_SESSION_HOME ?? input.home)
   // home只移除路径边界；workspace、搜索、游标和数量限制仍由原查询保留。
-  if (home !== undefined && input.directory && directoryValue(input.directory) === directoryValue(home)) return undefined
+  if (home !== undefined && input.directory && directoryValue(input.directory) === directoryValue(home))
+    return undefined
   const isGlobal = input.projectID === ProjectV2.ID.global
   const projectPath = relatedPath({ ...input, global: isGlobal, root: true })
   const relative = input.directory === undefined ? undefined : SessionPath.relative(input.worktree, input.directory)
   const wanted = input.path.replaceAll("\\", "/")
   // directory/path 必须同源，才允许 global 与历史 directory 分支参与同一个查询。
-  const sameLocation = relative !== undefined && (process.platform === "win32" ? relative.toLowerCase() === wanted.toLowerCase() : relative === wanted)
-  const globalPath = sameLocation && input.directory ? relatedPath({
-    path: SessionPath.relative("/", input.directory), directory: input.directory, global: true,
-  }) : undefined
-  const nullPath = input.directory ? and(isNull(SessionTable.path), eq(SessionTable.directory, input.directory)) : undefined
+  const sameLocation =
+    relative !== undefined &&
+    (process.platform === "win32" ? relative.toLowerCase() === wanted.toLowerCase() : relative === wanted)
+  const globalPath =
+    sameLocation && input.directory
+      ? relatedPath({
+          path: SessionPath.relative("/", input.directory),
+          directory: input.directory,
+          global: true,
+        })
+      : undefined
+  const nullPath = input.directory
+    ? and(isNull(SessionTable.path), eq(SessionTable.directory, input.directory))
+    : undefined
   const branches = [
     and(eq(SessionTable.project_id, input.projectID), nullPath ? or(projectPath, nullPath) : projectPath),
-    ...(globalPath && !isGlobal ? [and(eq(SessionTable.project_id, ProjectV2.ID.global), nullPath ? or(globalPath, nullPath) : globalPath)] : []),
+    ...(globalPath && !isGlobal
+      ? [and(eq(SessionTable.project_id, ProjectV2.ID.global), nullPath ? or(globalPath, nullPath) : globalPath)]
+      : []),
     ...(sameLocation && input.directory ? [relatedDirectory(input.directory)] : []),
     ...(home !== undefined && input.directory !== undefined ? [eq(directoryColumn(), directoryValue(home))] : []),
   ].filter((branch): branch is SQL => branch !== undefined)

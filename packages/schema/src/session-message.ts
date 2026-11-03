@@ -258,9 +258,13 @@ export const Compaction = Schema.Struct({
   summary: Schema.String,
   recent: Schema.String,
   // 独立原话属于已完成的压缩边界；旧持久消息缺失时不制造新用户轮次。
-  recent_user_messages: Schema.Array(Schema.Struct({
-    id: ID, text: Schema.String, truncated: Schema.Boolean.pipe(optional),
-  })).pipe(optional),
+  recent_user_messages: Schema.Array(
+    Schema.Struct({
+      id: ID,
+      text: Schema.String,
+      truncated: Schema.Boolean.pipe(optional),
+    }),
+  ).pipe(optional),
   // 只保存成功压缩时生成的确定性文件交接；旧消息缺失时保持原有回放。
   file_evidence: Schema.String.pipe(optional),
   ...Base,

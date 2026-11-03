@@ -38,31 +38,31 @@ R6采用用户直接授权的P09例外：`os.remove(path)`与`fs.unlinkSync(path
 
 ## 3. 仓库上下文
 
-| 来源 | 约束 |
-| --- | --- |
-| 根 AGENTS.md、packages/opencode/AGENTS.md | 包内运行测试与 `bun typecheck`，小而内聚的接口，使用现有命名与 Effect 边界 |
-| packages/opencode/test/AGENTS.md | 通过公开行为测试，真实实现优先，资源使用既有 fixture |
-| CONTEXT.md | Permission 是工具执行权限边界，Tool 通过 ask 提交操作 |
-| .opencode/policy/first-principles-engineering.md | 先方案审计后实施，修复 first divergence，单一主路径与逐项映射 |
-| .opencode/templates/canonical-plan.md | 方案、审计与实施证据的章节结构 |
+| 来源                                             | 约束                                                                       |
+| ------------------------------------------------ | -------------------------------------------------------------------------- |
+| 根 AGENTS.md、packages/opencode/AGENTS.md        | 包内运行测试与 `bun typecheck`，小而内聚的接口，使用现有命名与 Effect 边界 |
+| packages/opencode/test/AGENTS.md                 | 通过公开行为测试，真实实现优先，资源使用既有 fixture                       |
+| CONTEXT.md                                       | Permission 是工具执行权限边界，Tool 通过 ask 提交操作                      |
+| .opencode/policy/first-principles-engineering.md | 先方案审计后实施，修复 first divergence，单一主路径与逐项映射              |
+| .opencode/templates/canonical-plan.md            | 方案、审计与实施证据的章节结构                                             |
 
 已读取 ADR 索引，当前索引仅包含 triage 标签与团队分配记录；本次权限解析由现有源码、测试及用户政策约束决定。
 
 ## 4. 当前证据
 
-| 证据 | 已确认内容 | 类型 |
-| --- | --- | --- |
-| precheck.ts:353 evaluate | 同步输入 Permission 请求，输出 `{ level, reason }` | contracted |
-| precheck.ts:370 bashEffect | 同时评估原 command、patterns 和 inline_scripts | reachable |
-| precheck.ts:483 evaluateShell | raw 检查先于参数解释，先返回 Forbidden，再处理其他层级 | observed |
-| precheck.ts:629 forbiddenRaw | RE_D_RM_RF_ROOT 扫描整个 normalized 文本 | observed |
-| precheck.ts:998 tokenizeRich | 已有引用、转义和 stripped 标记；重定向角色属于当前缺口 | observed |
-| precheck.test.ts | 既有等级、reason、wrapper、权限族回归合同 | contracted |
-| auto.ts:63 | src内唯一evaluate调用方；根据等级及原 strict 配置路由 | reachable |
-| tool/shell.ts:689 parser | 已有web-tree-sitter及Bash/PowerShell grammar初始化 | observed |
-| tool/shell.ts:571 ask | command/cwd/shell/inline_scripts由同一producer送往bash与external_directory | reachable |
-| reviewer/schema.ts:31 | precheck对reviewer的合同仅为level、reason | contracted |
-| permission/index.ts | reviewer 与原会话缓存 owner | reachable |
+| 证据                          | 已确认内容                                                                 | 类型       |
+| ----------------------------- | -------------------------------------------------------------------------- | ---------- |
+| precheck.ts:353 evaluate      | 同步输入 Permission 请求，输出 `{ level, reason }`                         | contracted |
+| precheck.ts:370 bashEffect    | 同时评估原 command、patterns 和 inline_scripts                             | reachable  |
+| precheck.ts:483 evaluateShell | raw 检查先于参数解释，先返回 Forbidden，再处理其他层级                     | observed   |
+| precheck.ts:629 forbiddenRaw  | RE_D_RM_RF_ROOT 扫描整个 normalized 文本                                   | observed   |
+| precheck.ts:998 tokenizeRich  | 已有引用、转义和 stripped 标记；重定向角色属于当前缺口                     | observed   |
+| precheck.test.ts              | 既有等级、reason、wrapper、权限族回归合同                                  | contracted |
+| auto.ts:63                    | src内唯一evaluate调用方；根据等级及原 strict 配置路由                      | reachable  |
+| tool/shell.ts:689 parser      | 已有web-tree-sitter及Bash/PowerShell grammar初始化                         | observed   |
+| tool/shell.ts:571 ask         | command/cwd/shell/inline_scripts由同一producer送往bash与external_directory | reachable  |
+| reviewer/schema.ts:31         | precheck对reviewer的合同仅为level、reason                                  | contracted |
+| permission/index.ts           | reviewer 与原会话缓存 owner                                                | reachable  |
 
 ## 5. 当前调用链
 
@@ -83,25 +83,25 @@ ShellTool 请求与其他 shell metadata producer
 
 ## 6. 输入领域
 
-| 输入 | 来源 | 角色及验证 |
-| --- | --- | --- |
-| command | ShellTool metadata | 原始 shell 文本；识别命令边界、引用、选项、操作数和重定向 |
-| patterns | Permission 请求 | 保留既有原文与 pattern 取最高风险的合同 |
-| inline_scripts | ShellTool 的 Python 规范化 | 原始源码证据，使用源码词法角色而非 Shell 参数解释 |
-| 远端脚本 | SSH/WSL 包装器 | 在已有载荷入口展开，按照目标 shell 的参数边界处理 |
-| 空输入、动态参数、语法不完整 | 已有测试与工具公开输入 | 沿用原 general 及已识别真实操作的风险等级 |
+| 输入                         | 来源                       | 角色及验证                                                |
+| ---------------------------- | -------------------------- | --------------------------------------------------------- |
+| command                      | ShellTool metadata         | 原始 shell 文本；识别命令边界、引用、选项、操作数和重定向 |
+| patterns                     | Permission 请求            | 保留既有原文与 pattern 取最高风险的合同                   |
+| inline_scripts               | ShellTool 的 Python 规范化 | 原始源码证据，使用源码词法角色而非 Shell 参数解释         |
+| 远端脚本                     | SSH/WSL 包装器             | 在已有载荷入口展开，按照目标 shell 的参数边界处理         |
+| 空输入、动态参数、语法不完整 | 已有测试与工具公开输入     | 沿用原 general 及已识别真实操作的风险等级                 |
 
 ## 7. 不变量
 
-| ID | 行为合同 |
-| --- | --- |
-| INV-01 | 删除目标来自删除命令的路径操作数；重定向源与目标独立保存 |
-| INV-02 | 输出文本、搜索模式、源码字符串及注释保留数据角色 |
-| INV-03 | 命令族、分类等级、匹配范围和 reason 与原规则逐项对应 |
-| INV-04 | 原复合命令、wrapper、远端脚本中实际风险完整传递 |
-| INV-05 | auto、reviewer、缓存和用户授权判断继续采用原政策 |
-| INV-06 | 四个生产文件以内，生产代码新增与删除合计最多1000行 |
-| INV-07 | 函数入口解释职责和输入输出，复杂步骤旁解释参数归属及复制用途 |
+| ID     | 行为合同                                                                             |
+| ------ | ------------------------------------------------------------------------------------ |
+| INV-01 | 删除目标来自删除命令的路径操作数；重定向源与目标独立保存                             |
+| INV-02 | 输出文本、搜索模式、源码字符串及注释保留数据角色                                     |
+| INV-03 | 命令族、分类等级、匹配范围和 reason 与原规则逐项对应                                 |
+| INV-04 | 原复合命令、wrapper、远端脚本中实际风险完整传递                                      |
+| INV-05 | auto、reviewer、缓存和用户授权判断继续采用原政策                                     |
+| INV-06 | 四个生产文件以内，生产代码新增与删除合计最多1000行                                   |
+| INV-07 | 函数入口解释职责和输入输出，复杂步骤旁解释参数归属及复制用途                         |
 | INV-08 | 用户指定的os.remove与fs.unlinkSync变量目标为cautious，具体目录分级仅消费已知字面路径 |
 
 ## 8. 已复现的 First Divergence
@@ -125,13 +125,13 @@ Expected cautious; Received forbidden
 
 ## 9. 责任与接口
 
-| 职责 | Owner | 当前设计方向 |
-| --- | --- | --- |
-| Shell 词法角色 | 共享既有tree-sitter grammar | 将单词、连接符及重定向角色保留到规则入口 |
-| 规则匹配 | precheck.ts | 用绑定后的 Token 应用原分类谓词 |
-| 包装器提取 | unwrap、remoteWrapper | 沿用既有支持集合，正确保留载荷参数边界 |
-| 源码调用匹配 | 预检的已有解释器规则 | 使用有限词法项区分可见调用与字符串数据 |
-| 等级、审批与缓存 | 原 Permission 路由 | 保持现状 |
+| 职责             | Owner                       | 当前设计方向                             |
+| ---------------- | --------------------------- | ---------------------------------------- |
+| Shell 词法角色   | 共享既有tree-sitter grammar | 将单词、连接符及重定向角色保留到规则入口 |
+| 规则匹配         | precheck.ts                 | 用绑定后的 Token 应用原分类谓词          |
+| 包装器提取       | unwrap、remoteWrapper       | 沿用既有支持集合，正确保留载荷参数边界   |
+| 源码调用匹配     | 预检的已有解释器规则        | 使用有限词法项区分可见调用与字符串数据   |
+| 等级、审批与缓存 | 原 Permission 路由          | 保持现状                                 |
 
 ## 10. 主路径设计调查
 
@@ -179,12 +179,12 @@ type Command = {
 
 ### 10.2 语法角色与政策角色
 
-| 层 | 输入 | 输出 | 具体边界 |
-| --- | --- | --- | --- |
-| 词法 | 原文及当前方言 | 单词、操作符、引用区间 | 单引号、双引号、转义、分隔符、输入输出操作符 |
-| 命令结构 | 词法项 | argv、redirects、管道连接 | 重定向的目标从argv分离，`2>&1`的1保留fd角色 |
-| 参数绑定 | 某命令的argv及既有选项元数 | flags、values、operands | `--`后的单词均为操作数；选项值保持数据 |
-| 原政策谓词 | 已绑定角色 | 原level、reason | 命令集合、路径集合和等级保持原合同 |
+| 层         | 输入                       | 输出                      | 具体边界                                     |
+| ---------- | -------------------------- | ------------------------- | -------------------------------------------- |
+| 词法       | 原文及当前方言             | 单词、操作符、引用区间    | 单引号、双引号、转义、分隔符、输入输出操作符 |
+| 命令结构   | 词法项                     | argv、redirects、管道连接 | 重定向的目标从argv分离，`2>&1`的1保留fd角色  |
+| 参数绑定   | 某命令的argv及既有选项元数 | flags、values、operands   | `--`后的单词均为操作数；选项值保持数据       |
+| 原政策谓词 | 已绑定角色                 | 原level、reason           | 命令集合、路径集合和等级保持原合同           |
 
 词法层支持的方言行为采用明确来源：请求metadata.shell确定顶层方言，缺省维持原POSIX解释；PowerShell包装器载荷采用PowerShell引用，cmd载荷采用cmd引用，SSH/WSL中的已知shell载荷由其入口决定。双引号、PowerShell反引号、cmd caret和Windows路径反斜杠分别在所属方言解释。
 
@@ -200,7 +200,7 @@ function bind(words: Word[], valued: ReadonlySet<string>, insensitive = false) {
   const flags: string[] = []
   const values = new Map<string, Word[]>()
   const operands: Word[] = []
-  const key = (value: string) => insensitive ? value.toLowerCase() : value
+  const key = (value: string) => (insensitive ? value.toLowerCase() : value)
 
   for (let index = 0; index < words.length; index++) {
     const word = words[index]
@@ -225,9 +225,10 @@ function bind(words: Word[], valued: ReadonlySet<string>, insensitive = false) {
     }
 
     // POSIX短簇遇到首个取值选项即结束：-sofile为-s及-o的值file。
-    const at = !insensitive && !text.startsWith("--")
-      ? [...text].findIndex((char, position) => position > 0 && valued.has(`-${char}`))
-      : -1
+    const at =
+      !insensitive && !text.startsWith("--")
+        ? [...text].findIndex((char, position) => position > 0 && valued.has(`-${char}`))
+        : -1
     if (at > 0) {
       if (at > 1) flags.push(text.slice(0, at))
       const name = `-${text[at]}`
@@ -245,16 +246,16 @@ function bind(words: Word[], valued: ReadonlySet<string>, insensitive = false) {
 
 ### 10.4 首批参数角色矩阵
 
-| 命令 | 消费选项值 | 接收风险谓词的角色 | 保持的数据例子 |
-| --- | --- | --- | --- |
-| rm | 原支持选项的取值 | recursive flags及`--`前后路径操作数 | `< /dev/null`与`> /etc/log`的重定向目标 |
-| Remove-Item/ri | Path/LiteralPath、Exclude/Include/Filter/ErrorAction分别绑定 | Path/LiteralPath和位置路径；Recurse选项 | `-Exclude C:\Windows` |
-| find | name/iname/path/ipath/regex/iregex/type/maxdepth等取值项 | -delete、-exec/-execdir后的原rm动作 | `-name "-delete"` |
-| rg/grep | -e/--regexp、-f/--file、glob/type/上下文取值项 | 模式文件与搜索路径 | `rg '.env' src`的模式文本 |
-| curl | 原上传项以及会遮蔽它们的header/user/output等取值项 | 原上传选项绑定的文件引用 | `-H '--data=@.env'` |
-| scp/rsync/sftp | 身份、连接及传输选项 | 原首个远端操作数之前的本地来源 | `-i ~/.ssh/id_rsa` |
-| chmod | 原mode或--reference参数 | 原u+s/g+s、777、-R条件 | 文件名`u+s` |
-| schtasks/reg | 操作位置与其数据选项 | /Create、/Query、add/delete、目标key | 任务名`/query`或/d中的Run文本 |
+| 命令           | 消费选项值                                                   | 接收风险谓词的角色                      | 保持的数据例子                          |
+| -------------- | ------------------------------------------------------------ | --------------------------------------- | --------------------------------------- |
+| rm             | 原支持选项的取值                                             | recursive flags及`--`前后路径操作数     | `< /dev/null`与`> /etc/log`的重定向目标 |
+| Remove-Item/ri | Path/LiteralPath、Exclude/Include/Filter/ErrorAction分别绑定 | Path/LiteralPath和位置路径；Recurse选项 | `-Exclude C:\Windows`                   |
+| find           | name/iname/path/ipath/regex/iregex/type/maxdepth等取值项     | -delete、-exec/-execdir后的原rm动作     | `-name "-delete"`                       |
+| rg/grep        | -e/--regexp、-f/--file、glob/type/上下文取值项               | 模式文件与搜索路径                      | `rg '.env' src`的模式文本               |
+| curl           | 原上传项以及会遮蔽它们的header/user/output等取值项           | 原上传选项绑定的文件引用                | `-H '--data=@.env'`                     |
+| scp/rsync/sftp | 身份、连接及传输选项                                         | 原首个远端操作数之前的本地来源          | `-i ~/.ssh/id_rsa`                      |
+| chmod          | 原mode或--reference参数                                      | 原u+s/g+s、777、-R条件                  | 文件名`u+s`                             |
+| schtasks/reg   | 操作位置与其数据选项                                         | /Create、/Query、add/delete、目标key    | 任务名`/query`或/d中的Run文本           |
 
 ### 10.5 AST提取与作用域
 
@@ -266,19 +267,19 @@ cmd使用明确的方言词法适配后进入共享Bash grammar：双引号保�
 
 本轮直接加载现有WASM并解析无副作用字符串，取得以下节点证据；输入只传给parser，执行器未运行这些字符串：
 
-| 输入与方言 | 已观察AST结构 | 提取约束 |
-| --- | --- | --- |
-| Bash `echo word > output.txt` | redirected_statement的body为command，file_redirect为其同级子节点 | 重定向归属于body，保持独立于argv |
-| Bash `echo word 2>&1 \| cat` | pipeline内首项为redirected_statement，file_redirect含descriptor及number destination | fd合并归属于左命令，管道顺序仍由pipeline决定 |
-| Bash `echo "a\|b"` | string内string_content | 竖线属于参数数据 |
-| Bash `echo $(pwd)` | 外command的argument内command_substitution包含内command | 内command形成独立执行事实 |
-| Bash `echo > out.txt tail` | 一个file_redirect包含两个destination节点 | 第一个为目标，后续词补回body的argv |
-| Bash `echo x \| cat > out.txt` | redirected_statement的body为pipeline | 重定向归属于body中的最后一个顶层命令cat |
-| Bash `echo $(pwd) > out.txt` | redirected_statement.body为echo，pwd嵌套在其参数内 | 重定向归属echo，避开其参数里的子命令 |
-| Bash here-doc | heredoc_start、heredoc_body、heredoc_end | 正文与标记分开，正文属于输入载荷 |
-| PowerShell文件重定向 | command_elements内redirection含file_redirection_operator、redirected_file_name | 按所属command绑定，文件名内argument_sep属于语法空白 |
-| PowerShell `2>&1` | redirection只有merging_redirection_operator | 单独识别fd合并，无文件目标 |
-| PowerShell引用参数 | array_literal_expression/unary_expression/string_literal逐层包装 | 外壳展平至一个参数；字符串正文保持整体 |
+| 输入与方言                     | 已观察AST结构                                                                       | 提取约束                                            |
+| ------------------------------ | ----------------------------------------------------------------------------------- | --------------------------------------------------- |
+| Bash `echo word > output.txt`  | redirected_statement的body为command，file_redirect为其同级子节点                    | 重定向归属于body，保持独立于argv                    |
+| Bash `echo word 2>&1 \| cat`   | pipeline内首项为redirected_statement，file_redirect含descriptor及number destination | fd合并归属于左命令，管道顺序仍由pipeline决定        |
+| Bash `echo "a\|b"`             | string内string_content                                                              | 竖线属于参数数据                                    |
+| Bash `echo $(pwd)`             | 外command的argument内command_substitution包含内command                              | 内command形成独立执行事实                           |
+| Bash `echo > out.txt tail`     | 一个file_redirect包含两个destination节点                                            | 第一个为目标，后续词补回body的argv                  |
+| Bash `echo x \| cat > out.txt` | redirected_statement的body为pipeline                                                | 重定向归属于body中的最后一个顶层命令cat             |
+| Bash `echo $(pwd) > out.txt`   | redirected_statement.body为echo，pwd嵌套在其参数内                                  | 重定向归属echo，避开其参数里的子命令                |
+| Bash here-doc                  | heredoc_start、heredoc_body、heredoc_end                                            | 正文与标记分开，正文属于输入载荷                    |
+| PowerShell文件重定向           | command_elements内redirection含file_redirection_operator、redirected_file_name      | 按所属command绑定，文件名内argument_sep属于语法空白 |
+| PowerShell `2>&1`              | redirection只有merging_redirection_operator                                         | 单独识别fd合并，无文件目标                          |
+| PowerShell引用参数             | array_literal_expression/unary_expression/string_literal逐层包装                    | 外壳展平至一个参数；字符串正文保持整体              |
 
 重定向归属算法按树结构定位，而非“最后遍历到的command”：先取最近command祖先；Bash同级形式取最近redirected_statement的body；body为pipeline时取最后一个顶层命令。这里的顶层指路径上经过的command节点中最外层命令，从而把`echo $(pwd) > out`绑定到echo。多个redirect按源码位置保序。参数原始区间随所归属命令保存。
 
@@ -299,35 +300,51 @@ function extract(root: Node, word: (node: Node) => Word) {
   const records = new Map<number, Command>()
   const standalone: Command[] = []
   for (const node of nodes) {
-    const elements = children(node).flatMap((child) =>
-      child.type === "command_elements" ? children(child) : [child],
-    )
+    const elements = children(node).flatMap((child) => (child.type === "command_elements" ? children(child) : [child]))
     // 分隔空白、赋值与重定向各有结构含义，argv只承载执行名和参数。
-    const words = elements.filter((child) => ![
-      "command_argument_sep", "command_invokation_operator", "variable_assignment",
-      "file_redirect", "redirection", "heredoc_redirect", "herestring_redirect",
-    ].includes(child.type)).map(word)
+    const words = elements
+      .filter(
+        (child) =>
+          ![
+            "command_argument_sep",
+            "command_invokation_operator",
+            "variable_assignment",
+            "file_redirect",
+            "redirection",
+            "heredoc_redirect",
+            "herestring_redirect",
+          ].includes(child.type),
+      )
+      .map(word)
     records.set(node.id, { words, redirects: [] })
   }
 
-  for (const redirect of root.descendantsOfType(["file_redirect", "redirection", "heredoc_redirect", "herestring_redirect"])) {
+  for (const redirect of root.descendantsOfType([
+    "file_redirect",
+    "redirection",
+    "heredoc_redirect",
+    "herestring_redirect",
+  ])) {
     const owner = redirectOwner(redirect)
     const record: Command | undefined = owner ? records.get(owner.id) : { words: [], redirects: [] }
     if (!record) continue
     // 无执行名的重定向仍是有效操作；空argv记录只承载目标事实，不构造虚假命令。
     if (!owner) standalone.push(record)
     if (["heredoc_redirect", "herestring_redirect"].includes(redirect.type)) {
-      const body = redirect.type === "heredoc_redirect"
-        ? children(redirect).find((child) => child.type === "heredoc_body")
-        : children(redirect).at(-1)
+      const body =
+        redirect.type === "heredoc_redirect"
+          ? children(redirect).find((child) => child.type === "heredoc_body")
+          : children(redirect).at(-1)
       // 正文是输入载荷，结束标记和这里字符串的引用外壳各自保持语法用途。
-      if (body) record.redirects.push({
-        operator: redirect.type === "heredoc_redirect" ? "<<" : "<<<",
-        content: redirect.type === "heredoc_redirect" ? body.text : word(body).value + "\n",
-      })
+      if (body)
+        record.redirects.push({
+          operator: redirect.type === "heredoc_redirect" ? "<<" : "<<<",
+          content: redirect.type === "heredoc_redirect" ? body.text : word(body).value + "\n",
+        })
       continue
     }
-    const target = redirect.childForFieldName("destination") ??
+    const target =
+      redirect.childForFieldName("destination") ??
       children(redirect).find((child) => child.type === "redirected_file_name")
     // operator取目标前的原语法；PowerShell纯fd合并直接保存整个操作符。
     record.redirects.push({
@@ -401,21 +418,31 @@ async function sourceCalls(source: string, language: "python" | "javascript") {
   if (language === "javascript") return javascriptCalls(source)
   const tokens = sourceTokens(source)
   const methods = new Map([
-    ["os", ["remove", "unlink", "rmdir"]], ["shutil", ["rmtree"]],
+    ["os", ["remove", "unlink", "rmdir"]],
+    ["shutil", ["rmtree"]],
     ["fs", ["rmSync", "rmdirSync", "unlinkSync"]],
   ])
   const calls: { owner: string; method: string; target?: string; flags?: string[] }[] = []
   for (let index = 0; index < tokens.length; index++) {
     // fs与require("fs")承载同一旧规则；其他模块名继续保持原覆盖边界。
-    const required = tokens[index]?.text === "require" && tokens[index + 1]?.text === "(" &&
-      ["'fs'", '"fs"'].includes(tokens[index + 2]?.text) && tokens[index + 3]?.text === ")"
+    const required =
+      tokens[index]?.text === "require" &&
+      tokens[index + 1]?.text === "(" &&
+      ["'fs'", '"fs"'].includes(tokens[index + 2]?.text) &&
+      tokens[index + 3]?.text === ")"
     const owner = required ? "fs" : tokens[index].text
     const member = index + (required ? 4 : 1)
     const method = tokens[member + 1]?.text
     if (tokens[member]?.text !== "." || tokens[member + 2]?.text !== "(") continue
     const argument = tokens[member + 3]
-    if (methods.get(owner)?.includes(method) && argument && [",", ")"].includes(tokens[member + 4]?.text) &&
-      (argument.string ? argument.text.slice(1, -1).length > 0 : owner === "os" && method === "remove" && /^[A-Za-z_]\w*$/.test(argument.text))) {
+    if (
+      methods.get(owner)?.includes(method) &&
+      argument &&
+      [",", ")"].includes(tokens[member + 4]?.text) &&
+      (argument.string
+        ? argument.text.slice(1, -1).length > 0
+        : owner === "os" && method === "remove" && /^[A-Za-z_]\w*$/.test(argument.text))
+    ) {
       calls.push({ owner, method, target: argument.string ? argument.text.slice(1, -1) : undefined })
     }
     if (owner !== "subprocess" || !["run", "call", "Popen"].includes(method) || argument?.text !== "[") continue
@@ -426,11 +453,19 @@ async function sourceCalls(source: string, language: "python" | "javascript") {
     // 原subprocess规则以可见r/f选项触发；动态目标仍只保留原普通删除事实。
     const endOptions = args.findIndex((token) => token.string && token.text.slice(1, -1) === "--")
     const options = endOptions < 0 ? args.slice(1) : args.slice(1, endOptions)
-    const flags = options.filter((token) => token.string).map((token) => token.text.slice(1, -1))
+    const flags = options
+      .filter((token) => token.string)
+      .map((token) => token.text.slice(1, -1))
       .filter((value) => /^-[^-]*[rf]/.test(value))
     if (flags.length === 0) continue
-    const targets = args.slice(1).filter((token, at) => token.string && token.text.slice(1, -1) !== "--" &&
-      ((endOptions >= 0 && at + 1 > endOptions) || !token.text.slice(1, -1).startsWith("-")))
+    const targets = args
+      .slice(1)
+      .filter(
+        (token, at) =>
+          token.string &&
+          token.text.slice(1, -1) !== "--" &&
+          ((endOptions >= 0 && at + 1 > endOptions) || !token.text.slice(1, -1).startsWith("-")),
+      )
     if (targets.length === 0) calls.push({ owner, method, flags })
     for (const target of targets) calls.push({ owner, method, flags, target: target.text.slice(1, -1) })
   }
@@ -451,19 +486,25 @@ function sourceTokens(source: string) {
   const modes = [{ depth: 0, quote: "", group: 0 }]
   const tokens: { text: string; string: boolean }[] = []
   let groups = 0
-  for (let index = 0; index < source.length;) {
+  for (let index = 0; index < source.length; ) {
     const mode = modes[modes.length - 1]
     // quote非空表示模板文字，depth表示插值括号层级；二者只描述词法边界。
     if (mode.quote) {
       // Python反斜杠保持花括号插值，普通引用转义则保持在当前文字片段。
-      if (source[index] === "\\" && !["{", "}"].includes(source[index + 1])) { index += 2; continue }
+      if (source[index] === "\\" && !["{", "}"].includes(source[index + 1])) {
+        index += 2
+        continue
+      }
       if (source.startsWith(mode.quote, index)) {
         index += mode.quote.length
         modes.pop()
         if (mode.quote === "}") modes.pop()
         continue
       }
-      if (["{{", "}}"].includes(source.slice(index, index + 2))) { index += 2; continue }
+      if (["{{", "}}"].includes(source.slice(index, index + 2))) {
+        index += 2
+        continue
+      }
       const open = "{"
       if (source.startsWith(open, index)) {
         modes.push({ depth: 1, quote: "", group: groups })
@@ -493,7 +534,10 @@ function sourceTokens(source: string) {
     // 字符串和注释已整体消费，其中的大括号保持数据，不改变插值层级。
     if (mode.depth > 0 && match[2] === undefined) {
       if (match[0] === "{") mode.depth++
-      if (match[0] === "}" && --mode.depth === 0) { modes.pop(); continue }
+      if (match[0] === "}" && --mode.depth === 0) {
+        modes.pop()
+        continue
+      }
     }
     const text = match[0]
     // 普通括号内的冒号属于Python表达式，只有字段顶层冒号转入格式文字。
@@ -526,14 +570,26 @@ async function javascriptCalls(source: string) {
   types.traverseFast(tree, (node) => {
     if (!types.isCallExpression(node) || !types.isMemberExpression(node.callee) || node.callee.computed) return
     const member = node.callee
-    if (!types.isIdentifier(member.property) || !["rmSync", "rmdirSync", "unlinkSync"].includes(member.property.name)) return
+    if (!types.isIdentifier(member.property) || !["rmSync", "rmdirSync", "unlinkSync"].includes(member.property.name))
+      return
     const object = member.object
-    const fs = types.isIdentifier(object, { name: "fs" }) ||
-      (types.isCallExpression(object) && types.isIdentifier(object.callee, { name: "require" }) &&
-       types.isStringLiteral(object.arguments[0], { value: "fs" }))
+    const fs =
+      types.isIdentifier(object, { name: "fs" }) ||
+      (types.isCallExpression(object) &&
+        types.isIdentifier(object.callee, { name: "require" }) &&
+        types.isStringLiteral(object.arguments[0], { value: "fs" }))
     // 只保留原fs及require("fs")调用集合，正则和模板文字自然保持数据节点。
-    if (fs && (types.isStringLiteral(node.arguments[0]) ? node.arguments[0].value.length > 0 : member.property.name === "unlinkSync" && types.isIdentifier(node.arguments[0])))
-      calls.push({ owner: "fs", method: member.property.name, target: types.isStringLiteral(node.arguments[0]) ? node.arguments[0].value : undefined })
+    if (
+      fs &&
+      (types.isStringLiteral(node.arguments[0])
+        ? node.arguments[0].value.length > 0
+        : member.property.name === "unlinkSync" && types.isIdentifier(node.arguments[0]))
+    )
+      calls.push({
+        owner: "fs",
+        method: member.property.name,
+        target: types.isStringLiteral(node.arguments[0]) ? node.arguments[0].value : undefined,
+      })
   })
   return calls
 }
@@ -555,19 +611,31 @@ function readWord(node: Node, dialect: "bash" | "powershell" | "cmd"): Word {
   const double = raw.startsWith('"') && raw.endsWith('"')
   const body = single || double ? raw.slice(1, -1) : raw
   // 相邻引用片段属于一个argv，例如pre"fix"；子片段各自按引用方式解释。
-  const value = node.type === "concatenation"
-    ? parts.map((part) => readWord(part, dialect).value).join("")
-    : single ? (dialect === "powershell" ? body.replaceAll("''", "'") : body)
-    : dialect === "powershell" ? body.replace(/`(.)/gs, "$1")
-    : dialect === "cmd" ? body.replace(/\\([\\'"$`#;^&|<> ()])/g, "$1")
-    : double ? body.replace(/\\([\\$`"\n])/g, "$1") : body.replace(/\\(.)/gs, "$1")
+  const value =
+    node.type === "concatenation"
+      ? parts.map((part) => readWord(part, dialect).value).join("")
+      : single
+        ? dialect === "powershell"
+          ? body.replaceAll("''", "'")
+          : body
+        : dialect === "powershell"
+          ? body.replace(/`(.)/gs, "$1")
+          : dialect === "cmd"
+            ? body.replace(/\\([\\'"$`#;^&|<> ()])/g, "$1")
+            : double
+              ? body.replace(/\\([\\$`"\n])/g, "$1")
+              : body.replace(/\\(.)/gs, "$1")
   const expansion = ["expansion", "simple_expansion", "command_substitution", "sub_expression", "variable"]
   return {
-    value, start: node.startIndex, end: node.endIndex,
+    value,
+    start: node.startIndex,
+    end: node.endIndex,
     quoted: single || double,
     stripped: dialect === "bash" && !single && raw.includes("\\"),
     // 动态性仅维持原普通分类下限；变量取值与风险升级保持分离。
-    dynamic: expansion.includes(node.type) || node.descendantsOfType(expansion).length > 0 ||
+    dynamic:
+      expansion.includes(node.type) ||
+      node.descendantsOfType(expansion).length > 0 ||
       (node.type === "word" && /[*?\[]/.test(raw)),
   }
 }
@@ -585,30 +653,30 @@ cmd分支接收的是适配后的解析文本，因此解除的是适配层为Ba
 
 ### 10.11 分类验证矩阵
 
-| 切片 | 误匹配修正对照 | 真实操作保护对照 | 验证seam |
-| --- | --- | --- | --- |
-| 重定向角色 | `rm -r ./out < /dev/null`为cautious | `rm -r /dev/null`保留Forbidden及原reason | evaluate |
-| 原始远端事故 | 完整SSH守卫、nohup/setsid、日志重定向、后台连接符中的项目out删除为cautious | 同一实际删除目标换成保护根时为Forbidden | evaluate + ShellTool权限证据 |
-| 选项值 | `find . -name '-delete' -print`沿用只读分类 | `find . -delete`为cautious | evaluate |
-| 过滤值 | `Remove-Item ./out -Recurse -Exclude C:\Windows`按out分类 | `Remove-Item C:\Windows -Recurse`保留Forbidden | evaluate，PowerShell方言 |
-| 搜索数据 | `rg '.env' src`是搜索模式 | `rg token .env`是敏感读取 | evaluate |
-| HTTP参数 | `curl -H '--data=@.env' URL`为普通请求 | `curl --data @.env URL`保留dangerous | evaluate |
-| 源码字符串 | `python -c 'print("os.remove(\"/\")")'`为数据 | 实际`os.remove("/")`保留原解释器规则 | evaluate + inline_scripts |
-| 复合命令 | 前序普通读写保持各自等级 | 后续保护根删除的level与reason保留 | evaluate |
-| 动态和空白 | `git status "$ARG"`及空白保持原general | 已确定的`git commit`风险仍为cautious | evaluate + auto |
-| 政策守恒 | 普通HTTP、tee、chmod、解析错误维持原等级 | 原Git变更、进程终止、安装、账户、防火墙、计划任务、注册表、磁盘规则逐类保留 | 原120项测试及补充参数对照 |
+| 切片         | 误匹配修正对照                                                             | 真实操作保护对照                                                            | 验证seam                     |
+| ------------ | -------------------------------------------------------------------------- | --------------------------------------------------------------------------- | ---------------------------- |
+| 重定向角色   | `rm -r ./out < /dev/null`为cautious                                        | `rm -r /dev/null`保留Forbidden及原reason                                    | evaluate                     |
+| 原始远端事故 | 完整SSH守卫、nohup/setsid、日志重定向、后台连接符中的项目out删除为cautious | 同一实际删除目标换成保护根时为Forbidden                                     | evaluate + ShellTool权限证据 |
+| 选项值       | `find . -name '-delete' -print`沿用只读分类                                | `find . -delete`为cautious                                                  | evaluate                     |
+| 过滤值       | `Remove-Item ./out -Recurse -Exclude C:\Windows`按out分类                  | `Remove-Item C:\Windows -Recurse`保留Forbidden                              | evaluate，PowerShell方言     |
+| 搜索数据     | `rg '.env' src`是搜索模式                                                  | `rg token .env`是敏感读取                                                   | evaluate                     |
+| HTTP参数     | `curl -H '--data=@.env' URL`为普通请求                                     | `curl --data @.env URL`保留dangerous                                        | evaluate                     |
+| 源码字符串   | `python -c 'print("os.remove(\"/\")")'`为数据                              | 实际`os.remove("/")`保留原解释器规则                                        | evaluate + inline_scripts    |
+| 复合命令     | 前序普通读写保持各自等级                                                   | 后续保护根删除的level与reason保留                                           | evaluate                     |
+| 动态和空白   | `git status "$ARG"`及空白保持原general                                     | 已确定的`git commit`风险仍为cautious                                        | evaluate + auto              |
+| 政策守恒     | 普通HTTP、tee、chmod、解析错误维持原等级                                   | 原Git变更、进程终止、安装、账户、防火墙、计划任务、注册表、磁盘规则逐类保留 | 原120项测试及补充参数对照    |
 
 每个新断言标注来自原合同或已确认误匹配，补充测试只调用分类函数。保留所有既有测试；因异步接口调整仅改await和测试声明。确实锁定旧误报的断言须在方案中逐项记录角色证据和新独立期望，随后进入全范围审计。
 
 ## 11. 路径清单
 
-| 路径 | 处置 |
-| --- | --- |
-| 原 command 与 canonical patterns 双证据 | 保留原合同 |
-| inline_scripts 附加证据 | 保留原合同并准确解释源码角色 |
-| 已有 wrapper/远端载荷递归 | 保留已有入口集合 |
-| malformed/动态 general 分类 | 保留原政策 |
-| 失败后另用解析器重试 | 当前设计份额0 |
+| 路径                                    | 处置                         |
+| --------------------------------------- | ---------------------------- |
+| 原 command 与 canonical patterns 双证据 | 保留原合同                   |
+| inline_scripts 附加证据                 | 保留原合同并准确解释源码角色 |
+| 已有 wrapper/远端载荷递归               | 保留已有入口集合             |
+| malformed/动态 general 分类             | 保留原政策                   |
+| 失败后另用解析器重试                    | 当前设计份额0                |
 
 ## 12. 替换清单调查
 
@@ -618,41 +686,41 @@ cmd分支接收的是适配后的解析文本，因此解除的是适配层为Ba
 
 以下是迁移对象的原政策合同，Token 实现只替换事实取得方式。局部路径、模式及参数值的正则继续用于原有值域；跨命令文本扫描改为角色明确的 Token 谓词。
 
-| 原规则 | 等级与原 reason | Token 输入角色 |
-| --- | --- | --- |
-| rm 保护目录递归删除 | forbidden：`FORBIDDEN_ROOT_DELETE`；恰好系统二级 dangerous：`DANGEROUS_SUBTREE_DELETE` | rm 的递归选项及路径操作数，独立于输入/输出重定向 |
-| Windows递归删除 | forbidden：`WIN_FORBIDDEN_DELETE`；dangerous：`DANGEROUS_SUBTREE_DELETE` | 原cmd/PowerShell命令集合的递归参数及目标 |
-| Windows format | forbidden：`Windows drive format` | format 的盘符参数 |
-| Python shutil.rmtree | forbidden：`recursive delete of filesystem root, home, or top-level system directory via Python — forbidden (cannot be authorized)` | 可见调用的字面路径，采用原解释器路径集合 |
-| Python os.remove/unlink/rmdir | forbidden：`file removal targeting filesystem root, home, or top-level system directory via Python — forbidden (cannot be authorized)` | 原API集合及字面路径 |
-| Node fs/require("fs") 删除 | forbidden：`file removal targeting filesystem root, home, or top-level system directory via Node.js — forbidden (cannot be authorized)` | 原rmSync/rmdirSync/unlinkSync调用及字面路径 |
-| subprocess run/call/Popen rm | forbidden：`recursive delete of filesystem root, home, or top-level system directory through interpreter — forbidden (cannot be authorized)` | 原可见rm、原r/f参数条件和字面路径 |
-| 解释器系统二级删除 | dangerous：`DANGEROUS_INTERPRETER_DELETE` | 原API的系统二级路径 |
-| /dev/tcp、nc执行、socat EXEC、mkfifo组合、TCPClient | forbidden：`reverse shell pattern` | 重定向目标、执行选项、地址类型、原命令组合、构造类型，逐分支保留原集合 |
-| 全进程终止 | forbidden：`mass process kill` | kill的信号与进程操作数及原killall5分支 |
-| curl/wget到解释器 | dangerous：`remote download piped to interpreter; review the script locally before running safe commands` | 管道左命令与原右侧解释器集合 |
-| PowerShell下载执行 | dangerous：`remote PowerShell download executed as code; review the script locally before running safe commands` | 原iwr/irm族与iex/Invoke-Expression管道 |
-| 解码/解压到解释器 | dangerous：`decoded/decompressed payload piped to interpreter` | 原工具族及原消费者集合，原规则按工具族匹配 |
-| 敏感读取到HTTP工具 | dangerous：`credential read piped to network transfer` | 原读取命令族的敏感路径与管道右侧HTTP工具 |
-| 上传标志 | dangerous：`credential file sent with network transfer` | 原data/data-binary/data-raw/data-urlencode/d/form/F/upload-file/form-string/T集合；准确区分实际文件引用与普通数据 |
-| scp/rsync/sftp出向凭据 | dangerous：`credential file sent with remote transfer` | 原首个远端参数之前的敏感本地源、原身份参数和.pub豁免 |
-| sudoers写入 | dangerous：`sudoers modification grants privilege escalation` | 原重定向、tee、visudo、cp/mv/install目的位置 |
-| chmod u+s/g+s | dangerous：`setuid/setgid bit creates privilege escalation surface` | 权限模式参数；文件名和其他命令的数据保持各自角色 |
-| 普通文件删除 | cautious：`file deletion requires explicit approval` | 原删除命令族及原help/version边界 |
-| 文件移动 | cautious：`file move or rename requires explicit approval` | 原移动命令族及路径参数 |
-| shell RC写入 | cautious：`shell RC file modification enables persistent code execution` | 原RC路径集合的输出重定向目标 |
-| Git hook写入 | cautious：`git hook modification runs code on git operations` | 原.git/hooks路径模式的输出目标 |
-| cron写入 | cautious：`cron directory write enables persistent scheduled execution` | 原/etc/cron与/var/spool/cron输出目标 |
-| systemd写入 | cautious：`systemd unit file write enables persistent service execution` | 原/etc/systemd与~/.config/systemd目标 |
-| schtasks Create | cautious：`Windows scheduled task creation enables persistent execution` | 操作参数/Create，任务名/数据中的同词保持参数值 |
-| Register-ScheduledTask | cautious：`PowerShell scheduled task registration enables persistent execution` | 原命令身份 |
-| echo/printf到解释器 | cautious：`visible payload piped to interpreter requires review` | 真实管道与原解释器集合；可见真实高风险操作继续使用对应规则 |
-| 敏感本地读取 | cautious：`sensitive file read requires explicit approval` | 原读取命令族的文件参数；搜索模式保持数据 |
-| authorized_keys写入 | cautious：`SSH authorized_keys modification requires explicit approval` | 原家目录路径集合的输出目标 |
-| 防火墙保护移除 | cautious：`firewall protection removal requires explicit approval` | 原iptables/ip6tables flush/delete-chain、ufw disable参数 |
-| find删除 | cautious：`find file deletion requires explicit approval` | 原-delete或-exec/-execdir rm动作；取值选项里的同词保持数据 |
-| Python普通删除 | cautious：`Python file deletion requires explicit approval` | 原可见Python API字面目标 |
-| Node/subprocess普通删除 | cautious：`interpreter file deletion requires explicit approval` | 原API、rm参数条件与字面目标 |
+| 原规则                                              | 等级与原 reason                                                                                                                              | Token 输入角色                                                                                                    |
+| --------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| rm 保护目录递归删除                                 | forbidden：`FORBIDDEN_ROOT_DELETE`；恰好系统二级 dangerous：`DANGEROUS_SUBTREE_DELETE`                                                       | rm 的递归选项及路径操作数，独立于输入/输出重定向                                                                  |
+| Windows递归删除                                     | forbidden：`WIN_FORBIDDEN_DELETE`；dangerous：`DANGEROUS_SUBTREE_DELETE`                                                                     | 原cmd/PowerShell命令集合的递归参数及目标                                                                          |
+| Windows format                                      | forbidden：`Windows drive format`                                                                                                            | format 的盘符参数                                                                                                 |
+| Python shutil.rmtree                                | forbidden：`recursive delete of filesystem root, home, or top-level system directory via Python — forbidden (cannot be authorized)`          | 可见调用的字面路径，采用原解释器路径集合                                                                          |
+| Python os.remove/unlink/rmdir                       | forbidden：`file removal targeting filesystem root, home, or top-level system directory via Python — forbidden (cannot be authorized)`       | 原API集合及字面路径                                                                                               |
+| Node fs/require("fs") 删除                          | forbidden：`file removal targeting filesystem root, home, or top-level system directory via Node.js — forbidden (cannot be authorized)`      | 原rmSync/rmdirSync/unlinkSync调用及字面路径                                                                       |
+| subprocess run/call/Popen rm                        | forbidden：`recursive delete of filesystem root, home, or top-level system directory through interpreter — forbidden (cannot be authorized)` | 原可见rm、原r/f参数条件和字面路径                                                                                 |
+| 解释器系统二级删除                                  | dangerous：`DANGEROUS_INTERPRETER_DELETE`                                                                                                    | 原API的系统二级路径                                                                                               |
+| /dev/tcp、nc执行、socat EXEC、mkfifo组合、TCPClient | forbidden：`reverse shell pattern`                                                                                                           | 重定向目标、执行选项、地址类型、原命令组合、构造类型，逐分支保留原集合                                            |
+| 全进程终止                                          | forbidden：`mass process kill`                                                                                                               | kill的信号与进程操作数及原killall5分支                                                                            |
+| curl/wget到解释器                                   | dangerous：`remote download piped to interpreter; review the script locally before running safe commands`                                    | 管道左命令与原右侧解释器集合                                                                                      |
+| PowerShell下载执行                                  | dangerous：`remote PowerShell download executed as code; review the script locally before running safe commands`                             | 原iwr/irm族与iex/Invoke-Expression管道                                                                            |
+| 解码/解压到解释器                                   | dangerous：`decoded/decompressed payload piped to interpreter`                                                                               | 原工具族及原消费者集合，原规则按工具族匹配                                                                        |
+| 敏感读取到HTTP工具                                  | dangerous：`credential read piped to network transfer`                                                                                       | 原读取命令族的敏感路径与管道右侧HTTP工具                                                                          |
+| 上传标志                                            | dangerous：`credential file sent with network transfer`                                                                                      | 原data/data-binary/data-raw/data-urlencode/d/form/F/upload-file/form-string/T集合；准确区分实际文件引用与普通数据 |
+| scp/rsync/sftp出向凭据                              | dangerous：`credential file sent with remote transfer`                                                                                       | 原首个远端参数之前的敏感本地源、原身份参数和.pub豁免                                                              |
+| sudoers写入                                         | dangerous：`sudoers modification grants privilege escalation`                                                                                | 原重定向、tee、visudo、cp/mv/install目的位置                                                                      |
+| chmod u+s/g+s                                       | dangerous：`setuid/setgid bit creates privilege escalation surface`                                                                          | 权限模式参数；文件名和其他命令的数据保持各自角色                                                                  |
+| 普通文件删除                                        | cautious：`file deletion requires explicit approval`                                                                                         | 原删除命令族及原help/version边界                                                                                  |
+| 文件移动                                            | cautious：`file move or rename requires explicit approval`                                                                                   | 原移动命令族及路径参数                                                                                            |
+| shell RC写入                                        | cautious：`shell RC file modification enables persistent code execution`                                                                     | 原RC路径集合的输出重定向目标                                                                                      |
+| Git hook写入                                        | cautious：`git hook modification runs code on git operations`                                                                                | 原.git/hooks路径模式的输出目标                                                                                    |
+| cron写入                                            | cautious：`cron directory write enables persistent scheduled execution`                                                                      | 原/etc/cron与/var/spool/cron输出目标                                                                              |
+| systemd写入                                         | cautious：`systemd unit file write enables persistent service execution`                                                                     | 原/etc/systemd与~/.config/systemd目标                                                                             |
+| schtasks Create                                     | cautious：`Windows scheduled task creation enables persistent execution`                                                                     | 操作参数/Create，任务名/数据中的同词保持参数值                                                                    |
+| Register-ScheduledTask                              | cautious：`PowerShell scheduled task registration enables persistent execution`                                                              | 原命令身份                                                                                                        |
+| echo/printf到解释器                                 | cautious：`visible payload piped to interpreter requires review`                                                                             | 真实管道与原解释器集合；可见真实高风险操作继续使用对应规则                                                        |
+| 敏感本地读取                                        | cautious：`sensitive file read requires explicit approval`                                                                                   | 原读取命令族的文件参数；搜索模式保持数据                                                                          |
+| authorized_keys写入                                 | cautious：`SSH authorized_keys modification requires explicit approval`                                                                      | 原家目录路径集合的输出目标                                                                                        |
+| 防火墙保护移除                                      | cautious：`firewall protection removal requires explicit approval`                                                                           | 原iptables/ip6tables flush/delete-chain、ufw disable参数                                                          |
+| find删除                                            | cautious：`find file deletion requires explicit approval`                                                                                    | 原-delete或-exec/-execdir rm动作；取值选项里的同词保持数据                                                        |
+| Python普通删除                                      | cautious：`Python file deletion requires explicit approval`                                                                                  | 原可见Python API字面目标                                                                                          |
+| Node/subprocess普通删除                             | cautious：`interpreter file deletion requires explicit approval`                                                                             | 原API、rm参数条件与字面目标                                                                                       |
 
 ### 12.2 已有 Token 规则的保持范围
 
@@ -660,36 +728,36 @@ cmd分支接收的是适配后的解析文本，因此解除的是适配层为Ba
 
 ## 13. 正向映射
 
-| 合同 | 生产路径 | 验证 |
-| --- | --- | --- |
-| INV-01 | Token 重定向角色 -> 删除路径绑定 | 同一 /dev/null 分别作为输入源和删除目标；原始SSH日志命令 |
-| INV-02 | 引用/源码词法角色 -> 对应规则 | 搜索与输出字符串对照真实执行 |
-| INV-03 | 原规则映射 -> level/reason | 全部旧规则回归，逐项解释有意纠正的误匹配 |
-| INV-04 | 复合结构与已有 wrapper | 分隔符、远端载荷、参数取值 |
-| INV-05 | 原level/reason接口，auto等待解析结果 | auto/reviewer/cache 既有测试 |
-| INV-06 | 正式文件计划与 diff 计量 | 生产文件数与代码增删量 |
-| INV-07 | 实施注释设计 | 函数职责、输入输出、关键分支审计 |
+| 合同   | 生产路径                                 | 验证                                                      |
+| ------ | ---------------------------------------- | --------------------------------------------------------- |
+| INV-01 | Token 重定向角色 -> 删除路径绑定         | 同一 /dev/null 分别作为输入源和删除目标；原始SSH日志命令  |
+| INV-02 | 引用/源码词法角色 -> 对应规则            | 搜索与输出字符串对照真实执行                              |
+| INV-03 | 原规则映射 -> level/reason               | 全部旧规则回归，逐项解释有意纠正的误匹配                  |
+| INV-04 | 复合结构与已有 wrapper                   | 分隔符、远端载荷、参数取值                                |
+| INV-05 | 原level/reason接口，auto等待解析结果     | auto/reviewer/cache 既有测试                              |
+| INV-06 | 正式文件计划与 diff 计量                 | 生产文件数与代码增删量                                    |
+| INV-07 | 实施注释设计                             | 函数职责、输入输出、关键分支审计                          |
 | INV-08 | sourceRisk现有调用事实与缺省cautious分支 | 两个用户样例；空字面量、其他API变量目标及字面保护路径对照 |
 
 ## 14. 反向映射
 
-| 概念 | 合同 | 引入理由 |
-| --- | --- | --- |
-| 重定向与 argv 分离 | INV-01 | 原字符串扫描丢失参数角色 |
-| 引用和源码 Token 边界 | INV-02 | 原全文匹配把数据当操作 |
-| 保留等级与 reason 的规则映射 | INV-03 | 确保解析重写与政策变化分别管理 |
-| 单一词法入口 | INV-04 | 共享ShellTool现有grammar，替换独立宽扫描 |
-| 异步调用适配 | INV-01、INV-04 | 现有grammar以异步Promise装载；auto是唯一生产调用方，等待结果保持原分级路由 |
-| 两个API的变量目标事实 | INV-08、用户P09授权 | 复用target可选的现有调用记录及普通删除reason；原字面筛选会丢掉这两个调用 |
+| 概念                         | 合同                | 引入理由                                                                   |
+| ---------------------------- | ------------------- | -------------------------------------------------------------------------- |
+| 重定向与 argv 分离           | INV-01              | 原字符串扫描丢失参数角色                                                   |
+| 引用和源码 Token 边界        | INV-02              | 原全文匹配把数据当操作                                                     |
+| 保留等级与 reason 的规则映射 | INV-03              | 确保解析重写与政策变化分别管理                                             |
+| 单一词法入口                 | INV-04              | 共享ShellTool现有grammar，替换独立宽扫描                                   |
+| 异步调用适配                 | INV-01、INV-04      | 现有grammar以异步Promise装载；auto是唯一生产调用方，等待结果保持原分级路由 |
+| 两个API的变量目标事实        | INV-08、用户P09授权 | 复用target可选的现有调用记录及普通删除reason；原字面筛选会丢掉这两个调用   |
 
 ## 15. 文件计划
 
-| 文件 | 改动职责 | 代码增删预算目标 |
-| --- | --- | --- |
-| packages/opencode/src/shell/parse.ts | 新共享grammar owner；承接现有初始化、裸--归一化与Token角色提取 | 195 |
-| packages/opencode/src/permission/precheck.ts | 原raw规则迁移；清除被替代的整句扫描；保留原规则集合和reason；复用Babel AST减少JS自定义词法 | 710 |
-| packages/opencode/src/tool/shell.ts | 原parser/normalize移至共享owner，原执行与ask入口保持 | 75 |
-| packages/opencode/src/permission/auto.ts | `evaluate`等待异步解析结果，原分支保持 | 4 |
+| 文件                                         | 改动职责                                                                                   | 代码增删预算目标 |
+| -------------------------------------------- | ------------------------------------------------------------------------------------------ | ---------------- |
+| packages/opencode/src/shell/parse.ts         | 新共享grammar owner；承接现有初始化、裸--归一化与Token角色提取                             | 195              |
+| packages/opencode/src/permission/precheck.ts | 原raw规则迁移；清除被替代的整句扫描；保留原规则集合和reason；复用Babel AST减少JS自定义词法 | 710              |
+| packages/opencode/src/tool/shell.ts          | 原parser/normalize移至共享owner，原执行与ask入口保持                                       | 75               |
+| packages/opencode/src/permission/auto.ts     | `evaluate`等待异步解析结果，原分支保持                                                     | 4                |
 
 合计估算984行生产代码增删，实施硬上限1000行；达到预算上限时先在相同路径内精简重复逻辑，完整行为仍为验收条件。新共享模块从HEAD已有parser职责重新编写，封存实现保持封存。`index.ts`、缓存、reviewer prompt、schema和配置保持HEAD。
 
@@ -709,23 +777,23 @@ cmd分支接收的是适配后的解析文本，因此解除的是适配层为Ba
 
 ## 18. 验证计划
 
-| 命令 | 目录 | 作用 |
-| --- | --- | --- |
-| `bun test test/permission/precheck.test.ts` | packages/opencode | 原规则与误报回归 |
-| `bun test test/permission/ --timeout 30000` | packages/opencode | 预检及授权路由兼容 |
-| `bun test test/tool/shell.test.ts --timeout 30000` | packages/opencode | 工具侧原入口保持 |
-| `bun typecheck` | packages/opencode | 异步解析接线与原Decision类型合同 |
+| 命令                                               | 目录              | 作用                             |
+| -------------------------------------------------- | ----------------- | -------------------------------- |
+| `bun test test/permission/precheck.test.ts`        | packages/opencode | 原规则与误报回归                 |
+| `bun test test/permission/ --timeout 30000`        | packages/opencode | 预检及授权路由兼容               |
+| `bun test test/tool/shell.test.ts --timeout 30000` | packages/opencode | 工具侧原入口保持                 |
+| `bun typecheck`                                    | packages/opencode | 异步解析接线与原Decision类型合同 |
 
 完整 Session 测试的选择根据最终触及的调用链确定。原始症状单独验证，方案记录静态命令字符串，测试执行器只调用分类函数。
 
 ## 19. 预算
 
-| 指标 | 硬上限及计量 |
-| --- | --- |
-| 生产文件 | 最多4个，包括新文件 |
-| 生产代码行 | 新增与删除合计≤1000，import和类型计入；代码移动也计入 |
-| 测试 | 与行为切片对应，保留旧断言的实际合同 |
-| 配置、迁移、依赖 | 当前改动份额0 |
+| 指标             | 硬上限及计量                                          |
+| ---------------- | ----------------------------------------------------- |
+| 生产文件         | 最多4个，包括新文件                                   |
+| 生产代码行       | 新增与删除合计≤1000，import和类型计入；代码移动也计入 |
+| 测试             | 与行为切片对应，保留旧断言的实际合同                  |
+| 配置、迁移、依赖 | 当前改动份额0                                         |
 
 逐文件估算见第15节，注释与空行另列物理diff量。实施记录同时报告新增、删除和纯移动，使用HEAD作为基准，新增未跟踪文件一并计入；格式化与并列短列表保持用户指定风格。预算不足时修订同一设计，保留完整规则合同。
 
@@ -861,16 +929,16 @@ R5处置：该问题归属已有JavaScript数据与执行的语法解释。使�
 
 语法事实由共享grammar取得，原全文扫描、独立split/tokenize及raw包装器扫描退出生产路径。JavaScript调用由Babel AST识别，Python沿用本方案有限词法入口。原路径值域、等级、reason、Git分类、auto路由及会话缓存保持各自owner。FIFO组合使用grammar中的分号/管道节点分组；分组游标随源码顺序前进，原组合范围中的执行名与参数文字分别处理。内部命令序号在入表时确定，管道直接引用该序号。
 
-| Red → Green切片 | 实际观察与验收 |
-| --- | --- |
-| 原始重定向事故 | HEAD把`rm -r ./output < /dev/null`判为forbidden；迁移后为cautious，真正删除`/dev/null`仍为forbidden |
-| 选项与搜索数据 | `find -name '-delete'`、`rg '.env' src`红测后通过，真实删除及敏感路径读取保持原等级 |
-| 脚本入口边界 | `bash script.sh -c 'rm -rf /'`及PowerShell-File后-Command曾误判forbidden；按入口元数绑定后general，真实-c/-Command仍保持风险 |
-| 原FIFO组合 | `mkfifo fifo && bash`初次迁移返回general，恢复原组合规则后forbidden；分号边界和输出数据对照保持general |
-| 远传参数元数 | `rsync -P .env host:/backup`曾因-P吃掉路径而降为cautious；区分rsync与scp取值协议后dangerous |
-| 原非空字面边界 | 空字符串删除目标曾升为cautious；恢复原非空字面约束后general |
-| P09用户例外 | 两个变量目标用例先观察到general，再按用户授权改为cautious；os.unlink/fs.rmSync变量目标及空字符串仍为general |
-| auto事件关联 | grammar异步装载后，先等待evaluate结果，再验证返回reviewID与启动事件相同；保持原关联断言 |
+| Red → Green切片 | 实际观察与验收                                                                                                               |
+| --------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| 原始重定向事故  | HEAD把`rm -r ./output < /dev/null`判为forbidden；迁移后为cautious，真正删除`/dev/null`仍为forbidden                          |
+| 选项与搜索数据  | `find -name '-delete'`、`rg '.env' src`红测后通过，真实删除及敏感路径读取保持原等级                                          |
+| 脚本入口边界    | `bash script.sh -c 'rm -rf /'`及PowerShell-File后-Command曾误判forbidden；按入口元数绑定后general，真实-c/-Command仍保持风险 |
+| 原FIFO组合      | `mkfifo fifo && bash`初次迁移返回general，恢复原组合规则后forbidden；分号边界和输出数据对照保持general                       |
+| 远传参数元数    | `rsync -P .env host:/backup`曾因-P吃掉路径而降为cautious；区分rsync与scp取值协议后dangerous                                  |
+| 原非空字面边界  | 空字符串删除目标曾升为cautious；恢复原非空字面约束后general                                                                  |
+| P09用户例外     | 两个变量目标用例先观察到general，再按用户授权改为cautious；os.unlink/fs.rmSync变量目标及空字符串仍为general                  |
+| auto事件关联    | grammar异步装载后，先等待evaluate结果，再验证返回reviewID与启动事件相同；保持原关联断言                                      |
 
 原始完整SSH命令已直接纳入`separates redirected input from recursive deletion targets`测试，保留用户提供的主机、两个test守卫、nohup/setsid、完整路径、两个rm长选项、日志重定向、fd合并、stdin和后台PID输出。测试仅把该文本提交分类器，结果为cautious。
 
@@ -880,15 +948,15 @@ R5处置：该问题归属已有JavaScript数据与执行的语法解释。使�
 
 下列Bun测试及类型检查均在`packages/opencode`运行：
 
-| 命令 | 结果 |
-| --- | --- |
-| `bun test test/permission/precheck.test.ts test/permission/auto.test.ts --timeout 30000` | 153 pass，0 fail，720 assertions |
-| `bun test test/permission/ --timeout 30000` | 305 pass，0 fail，1096 assertions，132.24s |
-| `bun test test/tool/shell.test.ts --timeout 30000` | 204 pass，0 fail，742 assertions，96.56s |
-| `bun test test/session/prompt.test.ts --timeout 30000` | 104 pass，14 skip，0 fail，461 assertions，500.17s；该测试文件保持HEAD |
-| `bun test test/permission/precheck.test.ts -t "separates redirected input"` | 原始完整SSH文本替换缩略样本后，1 pass，0 fail，3 assertions |
-| `bun typecheck` | exit 0 |
-| `git diff --check`，仓库根目录 | exit 0 |
+| 命令                                                                                     | 结果                                                                   |
+| ---------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| `bun test test/permission/precheck.test.ts test/permission/auto.test.ts --timeout 30000` | 153 pass，0 fail，720 assertions                                       |
+| `bun test test/permission/ --timeout 30000`                                              | 305 pass，0 fail，1096 assertions，132.24s                             |
+| `bun test test/tool/shell.test.ts --timeout 30000`                                       | 204 pass，0 fail，742 assertions，96.56s                               |
+| `bun test test/session/prompt.test.ts --timeout 30000`                                   | 104 pass，14 skip，0 fail，461 assertions，500.17s；该测试文件保持HEAD |
+| `bun test test/permission/precheck.test.ts -t "separates redirected input"`              | 原始完整SSH文本替换缩略样本后，1 pass，0 fail，3 assertions            |
+| `bun typecheck`                                                                          | exit 0                                                                 |
+| `git diff --check`，仓库根目录                                                           | exit 0                                                                 |
 
 reviewer套件中的400及Session套件中的503输出来自既有错误响应测试；套件最终均为0 fail。完整CLI发布构建保持原状，编译验证限定于变更的预检入口及其grammar/Babel依赖。
 
@@ -897,13 +965,19 @@ reviewer套件中的400及Session套件中的503输出来自既有错误响应�
 ```ts
 import { PermissionPrecheck } from "../../src/permission/precheck"
 const cases = [
-  ["git status", "bash", "safe"], ["git status", "pwsh", "safe"], ["git status", "cmd", "safe"],
+  ["git status", "bash", "safe"],
+  ["git status", "pwsh", "safe"],
+  ["git status", "cmd", "safe"],
   ["node -e 'fs.unlinkSync(\"stale.tmp\")'", "bash", "cautious"],
   ["python -c 'os.remove(path)'", "bash", "cautious"],
   ["node -e 'fs.unlinkSync(path)'", "bash", "cautious"],
 ]
 for (const [command, shell, expected] of cases) {
-  const result = await PermissionPrecheck.evaluate({ permission: "bash", patterns: [command], metadata: { command, shell } })
+  const result = await PermissionPrecheck.evaluate({
+    permission: "bash",
+    patterns: [command],
+    metadata: { command, shell },
+  })
   if (result.level !== expected) throw new Error(JSON.stringify({ command, result }))
 }
 ```
@@ -1025,8 +1099,11 @@ Invocation：`ses_f562b90c1ffeDDrga6vQd2tuVP`。审计员对照HEAD `3f0981d2c32
 Invocation：`ses_f562b90c1ffeDDrga6vQd2tuVP`，完整R6范围。审计发现标题和放行结论原文：
 
 > ### B-04 Python 相邻字符串字面量使原删除规则失效
+>
 > ### B-05 printf 的普通格式化输出被错当成格式字符串源码
+>
 > ### B-06 新包装器路径使旧 env 解析分支和 helper 成为死代码
+>
 > ### B-07 实际中文解释比例未达到权威政策的 15% 要求
 >
 > **上一轮 B-01、B-02、B-03 的具体缺陷关闭。** 命令名 literal 外壳、直接 Shell stdin、外传路径集合已接回对应 owner；新增回归在本轮独立测试中通过。
@@ -1129,14 +1206,14 @@ Invocation：`ses_f562b90c1ffeDDrga6vQd2tuVP`。完整R6范围，发现分类及
 
 本节仅收集额外政策变化，当前Token等价迁移采用HEAD原政策。填写A为授权该项变化，R为沿用原政策，空白为待决定。各项在完整旧规则核对后填写真实条件与完整reason；旧实现的自述和旧审计要求分别保存在封存记录中。
 
-| 编号 | 触发条件与匹配格式 | 具体命令 | 原分类和reason | 拟议结果和reason | 修改原因及影响范围 | 用户决定A/R |
-| --- | --- | --- | --- | --- | --- | --- |
-| P01 | 原cautious操作增加用户授权评分校验；匹配Git commit等操作，reviewer返回allow但user_authorization非high | `git commit -m update` | cautious，`git state-changing command requires explicit approval`；最终由原reviewer政策及原返回值校验决定 | 代码改为deny，reason拟为`this operation requires explicit user authorization; goal-level authorization is insufficient` | 将明确授权从模型政策变成硬分数门槛，可能否决reviewer的allow；本轮保留原行为 | |
-| P02 | 普通HTTP工具统一升级 | `curl https://example.test` | general，`unknown shell command` | cautious，拟为`network transfer requires review` | 普通请求会增加模型审批次数；本轮保留general | |
-| P03 | 普通文件重定向/tee统一升级 | `echo hello > out.txt` | general，`opaque shell segment requires explicit approval`；原level决定默认allow | cautious，拟为`file redirection writes require explicit approval` | 将通用文件输出升级审查；本轮保留普通general及原专项持久化规则 | |
-| P04 | 语法错误或动态参数增加强制审查 | `git status "$ARG"` | 原general，`opaque shell segment requires explicit approval` | cautious，拟为`dynamic argument requires review` | 以解析状态增加审批；本轮保留原等级规则 | |
-| P05 | wipefs -o/--offset增加Forbidden | `wipefs --offset 0 /dev/example` | cautious，`disk partition inspection is read-only` | forbidden，`disk formatting or partition table destruction is irreversible` | 原写盘判据只有-a/--all，此项增加操作模式；本轮保留原判据 | |
-| P06 | 明确授权类cautious请求每次绕过会话缓存 | 两次完全相同的`git add file`请求 | 原cautious reviewer allow可写缓存并复用；命中时由Permission缓存路径返回 | 每次review；没有独立预检reason，沿用`git state-changing command requires explicit approval` | 改变重复请求审批频率；本轮保持原缓存合同 | |
-| P07 | 凭据读取管道增加必须显式上传stdin条件 | `cat .env \| curl https://example.test` | dangerous，`credential read piped to network transfer` | 仅敏感读取cautious，`sensitive file read requires explicit approval` | 限定真正上传可降低误报，同时收窄旧政策；本轮保留原工具集合与管道规则 | |
-| P08 | 解码工具管道按编码/解码模式细分 | `base64 file \| sh` | dangerous，`decoded/decompressed payload piped to interpreter` | 编码模式保持普通general/原可见载荷规则；仅解码模式保留dangerous | 原规则按工具族，此项改变模式范围；本轮保留原工具族匹配 | |
-| P09 | 已识别os.remove或fs.unlinkSync成员调用，目标为变量名 | `python -c 'os.remove(path)'`；`node -e 'fs.unlinkSync(path)'` | general，`interpreter eval command requires explicit approval` | cautious；Python为`Python file deletion requires explicit approval`，Node为`interpreter file deletion requires explicit approval` | 用户明确指定这两个调用进入普通删除审查；复用现有事实与分级流程，其他API和政策沿用既定范围 | A：用户本轮明确授权 |
+| 编号 | 触发条件与匹配格式                                                                                    | 具体命令                                                       | 原分类和reason                                                                                            | 拟议结果和reason                                                                                                                  | 修改原因及影响范围                                                                        | 用户决定A/R         |
+| ---- | ----------------------------------------------------------------------------------------------------- | -------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- | ------------------- |
+| P01  | 原cautious操作增加用户授权评分校验；匹配Git commit等操作，reviewer返回allow但user_authorization非high | `git commit -m update`                                         | cautious，`git state-changing command requires explicit approval`；最终由原reviewer政策及原返回值校验决定 | 代码改为deny，reason拟为`this operation requires explicit user authorization; goal-level authorization is insufficient`           | 将明确授权从模型政策变成硬分数门槛，可能否决reviewer的allow；本轮保留原行为               |                     |
+| P02  | 普通HTTP工具统一升级                                                                                  | `curl https://example.test`                                    | general，`unknown shell command`                                                                          | cautious，拟为`network transfer requires review`                                                                                  | 普通请求会增加模型审批次数；本轮保留general                                               |                     |
+| P03  | 普通文件重定向/tee统一升级                                                                            | `echo hello > out.txt`                                         | general，`opaque shell segment requires explicit approval`；原level决定默认allow                          | cautious，拟为`file redirection writes require explicit approval`                                                                 | 将通用文件输出升级审查；本轮保留普通general及原专项持久化规则                             |                     |
+| P04  | 语法错误或动态参数增加强制审查                                                                        | `git status "$ARG"`                                            | 原general，`opaque shell segment requires explicit approval`                                              | cautious，拟为`dynamic argument requires review`                                                                                  | 以解析状态增加审批；本轮保留原等级规则                                                    |                     |
+| P05  | wipefs -o/--offset增加Forbidden                                                                       | `wipefs --offset 0 /dev/example`                               | cautious，`disk partition inspection is read-only`                                                        | forbidden，`disk formatting or partition table destruction is irreversible`                                                       | 原写盘判据只有-a/--all，此项增加操作模式；本轮保留原判据                                  |                     |
+| P06  | 明确授权类cautious请求每次绕过会话缓存                                                                | 两次完全相同的`git add file`请求                               | 原cautious reviewer allow可写缓存并复用；命中时由Permission缓存路径返回                                   | 每次review；没有独立预检reason，沿用`git state-changing command requires explicit approval`                                       | 改变重复请求审批频率；本轮保持原缓存合同                                                  |                     |
+| P07  | 凭据读取管道增加必须显式上传stdin条件                                                                 | `cat .env \| curl https://example.test`                        | dangerous，`credential read piped to network transfer`                                                    | 仅敏感读取cautious，`sensitive file read requires explicit approval`                                                              | 限定真正上传可降低误报，同时收窄旧政策；本轮保留原工具集合与管道规则                      |                     |
+| P08  | 解码工具管道按编码/解码模式细分                                                                       | `base64 file \| sh`                                            | dangerous，`decoded/decompressed payload piped to interpreter`                                            | 编码模式保持普通general/原可见载荷规则；仅解码模式保留dangerous                                                                   | 原规则按工具族，此项改变模式范围；本轮保留原工具族匹配                                    |                     |
+| P09  | 已识别os.remove或fs.unlinkSync成员调用，目标为变量名                                                  | `python -c 'os.remove(path)'`；`node -e 'fs.unlinkSync(path)'` | general，`interpreter eval command requires explicit approval`                                            | cautious；Python为`Python file deletion requires explicit approval`，Node为`interpreter file deletion requires explicit approval` | 用户明确指定这两个调用进入普通删除审查；复用现有事实与分级流程，其他API和政策沿用既定范围 | A：用户本轮明确授权 |

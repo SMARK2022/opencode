@@ -143,14 +143,16 @@ test("migrates persisted review agents to interactive", async () => {
       expect(yield* db.get(sql`SELECT agent AS value FROM session WHERE id = 'ses_review'`)).toEqual({
         value: "interactive",
       })
-      expect(
-        yield* db.get(sql`SELECT agent AS value FROM request_usage WHERE request_id = 'msg_user_review'`),
-      ).toEqual({ value: "interactive" })
+      expect(yield* db.get(sql`SELECT agent AS value FROM request_usage WHERE request_id = 'msg_user_review'`)).toEqual(
+        { value: "interactive" },
+      )
       expect(
         yield* db.get(sql`SELECT json_extract(data, '$.agent') AS value FROM message WHERE id = 'msg_user_review'`),
       ).toEqual({ value: "interactive" })
       expect(
-        yield* db.get(sql`SELECT json_extract(data, '$.agent') AS value FROM message WHERE id = 'msg_assistant_review'`),
+        yield* db.get(
+          sql`SELECT json_extract(data, '$.agent') AS value FROM message WHERE id = 'msg_assistant_review'`,
+        ),
       ).toEqual({ value: "interactive" })
       expect(
         yield* db.get(sql`SELECT json_extract(data, '$.mode') AS value FROM message WHERE id = 'msg_assistant_review'`),
@@ -158,9 +160,9 @@ test("migrates persisted review agents to interactive", async () => {
       expect(
         yield* db.get(sql`SELECT json_extract(data, '$.agent') AS value FROM session_message WHERE id = 'sm_review'`),
       ).toEqual({ value: "interactive" })
-      expect(yield* db.get(sql`SELECT json_extract(data, '$.agent') AS value FROM event WHERE id = 'evt_review'`)).toEqual(
-        { value: "interactive" },
-      )
+      expect(
+        yield* db.get(sql`SELECT json_extract(data, '$.agent') AS value FROM event WHERE id = 'evt_review'`),
+      ).toEqual({ value: "interactive" })
     }),
   )
 })

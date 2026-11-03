@@ -21,7 +21,8 @@ export function parameterSchema(name = "the configured shell") {
     }),
     // 调用说明是可选元数据，不能拼入实际 command 或改变权限匹配。
     description: Schema.optional(Schema.String).annotate({
-      description: "Clear, concise description of what this command does in 5-10 words. Example: git status -> Shows working tree status.",
+      description:
+        "Clear, concise description of what this command does in 5-10 words. Example: git status -> Shows working tree status.",
     }),
     timeout: Schema.optional(PositiveInt).annotate({ description: "Optional timeout in milliseconds" }),
     workdir: Schema.optional(Schema.String).annotate({
@@ -282,19 +283,22 @@ export function render(name: string, platform: NodeJS.Platform, limits: Limits, 
   const selected = profile(name, platform, limits, defaultTimeoutMs)
   return {
     // 完整工具说明复用既有 profile，平台编码与环境变量约束由 Core Shell 提供，避免追加第二份工具列表或复制 V1 模板。
-    description: Shell.guidance(name, platform) + "\n\n" + renderPrompt(DESCRIPTION, {
-      intro: selected.intro,
-      os: platform,
-      shell: name,
-      tmp: Global.Path.tmp,
-      workdirSection: selected.workdirSection,
-      commandSection: selected.commandSection,
-      gitCommands: selected.gitCommands,
-      toolName: ShellID.ToolID,
-      gitCommandRestriction: selected.gitCommandRestriction,
-      createPrInstruction: selected.createPrInstruction,
-      createPrExample: selected.createPrExample,
-    }),
+    description:
+      Shell.guidance(name, platform) +
+      "\n\n" +
+      renderPrompt(DESCRIPTION, {
+        intro: selected.intro,
+        os: platform,
+        shell: name,
+        tmp: Global.Path.tmp,
+        workdirSection: selected.workdirSection,
+        commandSection: selected.commandSection,
+        gitCommands: selected.gitCommands,
+        toolName: ShellID.ToolID,
+        gitCommandRestriction: selected.gitCommandRestriction,
+        createPrInstruction: selected.createPrInstruction,
+        createPrExample: selected.createPrExample,
+      }),
     parameters: parameterSchema(name),
   }
 }

@@ -28,10 +28,7 @@ function PreviewCard(props: { text: string }) {
           <TuiConfigProvider config={{ theme: undefined } as never}>
             <ThemeProvider mode="dark" source={{ discover: async () => ({}) }}>
               <RouteProvider>
-                <BlockTool
-                  title="bash"
-                  autoReview={false}
-                  preview={<text>{props.text}</text>}>
+                <BlockTool title="bash" autoReview={false} preview={<text>{props.text}</text>}>
                   <text>{`${props.text}\napplied`}</text>
                 </BlockTool>
               </RouteProvider>
@@ -45,7 +42,11 @@ function PreviewCard(props: { text: string }) {
 
 test("preview card mounts without leaking discarded preview tree", async () => {
   const before = new Set((Renderable as { renderablesByNumber: Map<number, unknown> }).renderablesByNumber.keys())
-  const app = await testRender(() => <PreviewCard text="$ patch preview" />, { width: 60, height: 40, useThread: false })
+  const app = await testRender(() => <PreviewCard text="$ patch preview" />, {
+    width: 60,
+    height: 40,
+    useThread: false,
+  })
   try {
     // Provider 初始化（KV/主题）需要沉淀——与 block-tool-visible-once 同款 100ms。
     await new Promise((resolve) => setTimeout(resolve, 100))
@@ -59,7 +60,9 @@ test("preview card mounts without leaking discarded preview tree", async () => {
     for (const key of (Renderable as { renderablesByNumber: Map<number, Renderable> }).renderablesByNumber.keys()) {
       if (before.has(key)) continue
       // 父链深度界沿用源判据；仍存活但无法到root的对象才计为脱树泄漏。
-      let node: Renderable | undefined = (Renderable as { renderablesByNumber: Map<number, Renderable> }).renderablesByNumber.get(key)
+      let node: Renderable | undefined = (
+        Renderable as { renderablesByNumber: Map<number, Renderable> }
+      ).renderablesByNumber.get(key)
       let top: Renderable | undefined = node
       for (let depth = 0; depth < 100 && top; depth++) {
         node = top

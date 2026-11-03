@@ -80,10 +80,7 @@ test("scan HTTP failure stops later scans and preserves visible title hits", asy
       await enterSearch(app, "needle")
       // title hits 必须先可见：error complete 不清空已展示集合（INV-12）。
       await waitForFrame(app, (value) => value.includes("Visible search session") && SPINNER.test(value))
-      const frame = await waitForFrame(
-        app,
-        (value) => value.includes("Visible search session") && !SPINNER.test(value),
-      )
+      const frame = await waitForFrame(app, (value) => value.includes("Visible search session") && !SPINNER.test(value))
       // 第二页 503 后不允许第三页：串行 keyset 在 error 终态停止（INV-04）。
       expect(frame).not.toContain("Forbidden later scan")
       expect(frame).not.toContain("Search failed")
@@ -738,7 +735,11 @@ function Harness(props: {
             <KVProvider>
               <RouteProvider initialRoute={{ type: "home" }}>
                 <TuiConfigProvider config={config}>
-                  <SDKProvider url="http://test" directory={directory} testTransport={{ fetch: props.fetch, events: props.events }}>
+                  <SDKProvider
+                    url="http://test"
+                    directory={directory}
+                    testTransport={{ fetch: props.fetch, events: props.events }}
+                  >
                     <PermissionProvider>
                       <ProjectProvider>
                         <SyncProvider>
@@ -815,11 +816,7 @@ function neverResponse(signal: AbortSignal) {
       reject(new DOMException("Aborted", "AbortError"))
       return
     }
-    signal.addEventListener(
-      "abort",
-      () => reject(new DOMException("Aborted", "AbortError")),
-      { once: true },
-    )
+    signal.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true })
   })
 }
 async function waitFor(predicate: () => boolean, timeout = 2_000, label = "Session list signal") {

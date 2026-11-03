@@ -43,7 +43,28 @@ const layer = Layer.effect(
         async function getCommand(item: Formatter.Info) {
           let cmd = commands[item.name]
           if (cmd === false || cmd === undefined) {
-            cmd = await item.enabled({ ...ctx, experimentalOxfmt: flags.experimentalOxfmt, probe: (command) => Effect.runPromise(appProcess.run(ChildProcess.make(command[0]!, command.slice(1), { cwd: ctx.directory, stdin: "ignore", stdout: "pipe", stderr: "pipe" })).pipe(Effect.match({ onFailure: () => ({ code: 1, text: "" }), onSuccess: (result) => ({ code: result.exitCode, text: result.stdout.toString("utf8") }) }))) })
+            cmd = await item.enabled({
+              ...ctx,
+              experimentalOxfmt: flags.experimentalOxfmt,
+              probe: (command) =>
+                Effect.runPromise(
+                  appProcess
+                    .run(
+                      ChildProcess.make(command[0]!, command.slice(1), {
+                        cwd: ctx.directory,
+                        stdin: "ignore",
+                        stdout: "pipe",
+                        stderr: "pipe",
+                      }),
+                    )
+                    .pipe(
+                      Effect.match({
+                        onFailure: () => ({ code: 1, text: "" }),
+                        onSuccess: (result) => ({ code: result.exitCode, text: result.stdout.toString("utf8") }),
+                      }),
+                    ),
+                ),
+            })
             commands[item.name] = cmd
           }
           return cmd

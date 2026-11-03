@@ -32,7 +32,9 @@ function projectViewerEvent(event: GlobalBusEvent): GlobalBusEvent {
     const part = (payload.properties as { part?: MessageV2.Part }).part
     if (!part) return event
     const next = PartView.project(part)
-    return next === part ? event : { ...event, payload: { ...payload, properties: { ...payload.properties, part: next } } }
+    return next === part
+      ? event
+      : { ...event, payload: { ...payload, properties: { ...payload.properties, part: next } } }
   }
   // native Success没有工具身份；普通帧和sync副本都保留完整，不增加传输侧状态。
   if (payload.type === "session.next.tool.success") return event
@@ -43,7 +45,9 @@ function projectViewerEvent(event: GlobalBusEvent): GlobalBusEvent {
     const part = (data as { part?: MessageV2.Part }).part
     if (!part) return event
     const next = PartView.project(part)
-    return next === part ? event : { ...event, payload: { ...payload, syncEvent: { ...syncEvent, data: { ...data, part: next } } } }
+    return next === part
+      ? event
+      : { ...event, payload: { ...payload, syncEvent: { ...syncEvent, data: { ...data, part: next } } } }
   }
   return event
 }
@@ -65,13 +69,18 @@ function eventResponse(clients: EventClients.Interface, viewer: boolean) {
 
     return HttpServerResponse.stream(
       // 计数属于响应 body 的 scope；未消费响应不虚增，取消流自动释放。
-      Stream.unwrap(Effect.as(clients.acquire, Stream.make({ payload: { id: EventV2.ID.create(), type: "server.connected", properties: {} } }).pipe(
-        Stream.concat(events.pipe(Stream.merge(heartbeat, { haltStrategy: "left" }))),
-        Stream.map((event) => eventData(viewer ? projectViewerEvent(event) : event)),
-        Stream.pipeThroughChannel(Sse.encode()),
-        Stream.encodeText,
-        Stream.ensuring(Effect.logInfo("global event disconnected")),
-      ))),
+      Stream.unwrap(
+        Effect.as(
+          clients.acquire,
+          Stream.make({ payload: { id: EventV2.ID.create(), type: "server.connected", properties: {} } }).pipe(
+            Stream.concat(events.pipe(Stream.merge(heartbeat, { haltStrategy: "left" }))),
+            Stream.map((event) => eventData(viewer ? projectViewerEvent(event) : event)),
+            Stream.pipeThroughChannel(Sse.encode()),
+            Stream.encodeText,
+            Stream.ensuring(Effect.logInfo("global event disconnected")),
+          ),
+        ),
+      ),
       {
         contentType: "text/event-stream",
         headers: {

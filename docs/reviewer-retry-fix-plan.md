@@ -7,19 +7,19 @@ reviewer "生成一半就不生了"，然后显示 unavailable。用户期望未
 
 ### 数据库证据
 
-| 数据库 | 总审查请求 | 成功返回决策 | 悬空(无工具返回) | 悬空率 |
-|--------|-----------|-------------|----------------|--------|
-| MAIN (`~/.local/share/opencode/opencode.db`) | 524 | 514 | 10 | 1.9% |
-| TESTING (`.temp/testing/opencode.db`) | 605 (采样) | 570 | 33 | 5.5% |
+| 数据库                                       | 总审查请求 | 成功返回决策 | 悬空(无工具返回) | 悬空率 |
+| -------------------------------------------- | ---------- | ------------ | ---------------- | ------ |
+| MAIN (`~/.local/share/opencode/opencode.db`) | 524        | 514          | 10               | 1.9%   |
+| TESTING (`.temp/testing/opencode.db`)        | 605 (采样) | 570          | 33               | 5.5%   |
 
-| 错误类型 | MAIN | TESTING | 占比 |
-|---------|------|---------|------|
-| `auto reviewer timed out` (超时) | 3 | 8 | **42%** |
-| `Bad Request` (400) | 2 | 5 | 27% |
-| `reviewer did not call permission_review_decision` (协议错误) | 3 | 0 | 12% |
-| `身份验证失败。` / `令牌已过期` (认证失败) | 0 | 3 | 12% |
-| `socket connection closed` (连接断开) | 1 | 0 | 4% |
-| `[object Object]` (序列化bug) | 0 | 1 | 4% |
+| 错误类型                                                      | MAIN | TESTING | 占比    |
+| ------------------------------------------------------------- | ---- | ------- | ------- |
+| `auto reviewer timed out` (超时)                              | 3    | 8       | **42%** |
+| `Bad Request` (400)                                           | 2    | 5       | 27%     |
+| `reviewer did not call permission_review_decision` (协议错误) | 3    | 0       | 12%     |
+| `身份验证失败。` / `令牌已过期` (认证失败)                    | 0    | 3       | 12%     |
+| `socket connection closed` (连接断开)                         | 1    | 0       | 4%      |
+| `[object Object]` (序列化bug)                                 | 0    | 1       | 4%      |
 
 ## 1. 已阅读的文件/测试/文档（及相关性）
 
@@ -56,6 +56,7 @@ runReviewerAttempt(messages, true)           ← 第1次尝试
 ```
 
 **关键问题**：`timeoutOrElse` (B) 在 `catchIf` (A) 的**外层**。超时时：
+
 1. `timeoutOrElse` 以 **interruption**（中断）方式杀死内部 fiber
 2. `SessionRetry.retry` (D) 看到的是 cancellation，不是 failure → **不重试**
 3. `orElse` 返回 `Effect.fail(ReviewerTimedOut)` —— 这是 (B) 产生的**新 failure**，在 (A) 的**外层**
@@ -86,28 +87,28 @@ AI SDK `streamText` 的内置重试（默认 `maxRetries: 2`，共 3 次尝试�
 
 ## 3. 必须保持的既有行为
 
-| 行为 | 依据 |
-|------|------|
-| precheck 四级路由（safe/general → allow, cautious → reviewer, dangerous → deny） | `auto.ts:68-77` |
-| 协议重试时隐藏第一次尝试 + 附加 protocol nudge | `service.ts:160-165,174`；`prompt.test.ts:946` |
-| `fallback=user` 默认回退到 ask；`fallback=deny` 保持 fail-closed | `auto.ts:86-90`；`auto.test.ts:564` |
-| `invalidReviewContract` 语义守卫（allow+critical → deny 等） | `auto.ts:167-178`；`auto.test.ts:603` |
-| `Schema.decodeUnknownSync(Assessment)` 结构校验 | `service.ts:957,968` |
-| `SessionRetry.retry` 只重试 429/5xx/rate-limit | `retry.ts:71-155` |
-| `maxRetries: 0` 禁用 AI SDK 内置重试 | `service.ts:560` |
-| reviewer 子会话复用（每父会话一个 permission-reviewer 子会话） | `service.ts:306-323` |
-| `markToolReviewFailed` 的 `Effect.catch(() => Effect.void)` best-effort 写入 | `service.ts:209-215` |
+| 行为                                                                             | 依据                                           |
+| -------------------------------------------------------------------------------- | ---------------------------------------------- |
+| precheck 四级路由（safe/general → allow, cautious → reviewer, dangerous → deny） | `auto.ts:68-77`                                |
+| 协议重试时隐藏第一次尝试 + 附加 protocol nudge                                   | `service.ts:160-165,174`；`prompt.test.ts:946` |
+| `fallback=user` 默认回退到 ask；`fallback=deny` 保持 fail-closed                 | `auto.ts:86-90`；`auto.test.ts:564`            |
+| `invalidReviewContract` 语义守卫（allow+critical → deny 等）                     | `auto.ts:167-178`；`auto.test.ts:603`          |
+| `Schema.decodeUnknownSync(Assessment)` 结构校验                                  | `service.ts:957,968`                           |
+| `SessionRetry.retry` 只重试 429/5xx/rate-limit                                   | `retry.ts:71-155`                              |
+| `maxRetries: 0` 禁用 AI SDK 内置重试                                             | `service.ts:560`                               |
+| reviewer 子会话复用（每父会话一个 permission-reviewer 子会话）                   | `service.ts:306-323`                           |
+| `markToolReviewFailed` 的 `Effect.catch(() => Effect.void)` best-effort 写入     | `service.ts:209-215`                           |
 
 ## 4. 推荐的最小实现方案
 
 ### 方案选择
 
-| 方案 | 优点 | 缺点 | 选择 |
-|------|------|------|------|
-| 仅交换 pipe 顺序（catchIf 在 timeoutOrElse 外层） | 最小改动 | 仍只重试 1 次 | ❌ |
-| **交换 pipe 顺序 + 递归 3 次重试** | 修复超时零重试 + 协议 1→3 次 | `timeout_ms` 语义从 total 变 per-attempt | ✅ |
-| 新增 `max_retries` 配置项 | 可配置 | 违反"不新增不必要配置项" | ❌ |
-| 重新启用 `maxRetries: 2` | 利用 AI SDK 内置重试 | 与 `SessionRetry.retry` 双重重试 | ❌ |
+| 方案                                              | 优点                         | 缺点                                     | 选择 |
+| ------------------------------------------------- | ---------------------------- | ---------------------------------------- | ---- |
+| 仅交换 pipe 顺序（catchIf 在 timeoutOrElse 外层） | 最小改动                     | 仍只重试 1 次                            | ❌   |
+| **交换 pipe 顺序 + 递归 3 次重试**                | 修复超时零重试 + 协议 1→3 次 | `timeout_ms` 语义从 total 变 per-attempt | ✅   |
+| 新增 `max_retries` 配置项                         | 可配置                       | 违反"不新增不必要配置项"                 | ❌   |
+| 重新启用 `maxRetries: 2`                          | 利用 AI SDK 内置重试         | 与 `SessionRetry.retry` 双重重试         | ❌   |
 
 **选择方案**：交换 pipe 顺序 + 递归 3 次重试。不新增配置项，`MAX_REVIEWER_ATTEMPTS` 硬编码为 3
 （匹配 AI SDK 默认 `maxRetries: 2` 的 3 次总尝试语义）。
@@ -119,19 +120,22 @@ AI SDK `streamText` 的内置重试（默认 `maxRetries: 2`，共 3 次尝试�
 #### Change 1（核心修复）: 交换 pipe 顺序 + 递归重试 + per-attempt 超时
 
 **删除** 169-187 行的管道：
+
 ```ts
-const assessment = yield* runReviewerAttempt(messages, true).pipe(
-  Effect.catchIf(isReviewerDecisionProtocolError, () =>
-    runReviewerAttempt(buildMessages({ system, userItems: [...userItems, PROTOCOL_RETRY_USER_ITEM] }), false),
-  ),
-  Effect.timeoutOrElse({
-    duration: `${autoReview?.timeout_ms ?? 90_000} millis`,
-    orElse: () => Effect.fail(new ReviewerTimedOut()),
-  }),
-  Effect.mapError((error) =>
-    isReviewerError(error) ? error : new ReviewerRunError({ reason: errorMessage(error) }),
-  ),
-)
+const assessment =
+  yield *
+  runReviewerAttempt(messages, true).pipe(
+    Effect.catchIf(isReviewerDecisionProtocolError, () =>
+      runReviewerAttempt(buildMessages({ system, userItems: [...userItems, PROTOCOL_RETRY_USER_ITEM] }), false),
+    ),
+    Effect.timeoutOrElse({
+      duration: `${autoReview?.timeout_ms ?? 90_000} millis`,
+      orElse: () => Effect.fail(new ReviewerTimedOut()),
+    }),
+    Effect.mapError((error) =>
+      isReviewerError(error) ? error : new ReviewerRunError({ reason: errorMessage(error) }),
+    ),
+  )
 ```
 
 **替换**为递归重试函数 + per-attempt 超时：
@@ -174,22 +178,24 @@ function reviewerRetry(
   )
 }
 
-const assessment = yield* reviewerRetry(0, messages, true).pipe(
-  Effect.mapError((error) =>
-    isReviewerError(error) ? error : new ReviewerRunError({ reason: errorMessage(error) }),
-  ),
-)
+const assessment =
+  yield *
+  reviewerRetry(0, messages, true).pipe(
+    Effect.mapError((error) =>
+      isReviewerError(error) ? error : new ReviewerRunError({ reason: errorMessage(error) }),
+    ),
+  )
 ```
 
 **时序分析：**
 
-| 场景 | 流程 | 重试次数 |
-|------|------|---------|
-| 超时 | `timeoutOrElse` 中断 `runReviewerAttempt` → `orElse` 产生 `ReviewerTimedOut` → `catchIf` 捕获 → 递归重试 | 最多 2 次 |
-| 协议错误 | `runReviewerAttempt` 失败 → `timeoutOrElse` 透传 → `catchIf` 捕获 → 递归重试（附加 nudge） | 最多 2 次 |
-| 429/503 | `SessionRetry.retry` 在 `runReviewerStream` 内重试 → 如果耗尽，错误传播为非 ReviewerError → `mapError` 包装 → `catchIf` 不捕获 → `handleReviewerFailure` | 由 SessionRetry 处理 |
-| 400/401 | 不重试，直接传播 | 0 |
-| 所有 3 次都失败 | 最后一次错误传播 → `mapError` → `handleReviewerFailure` | — |
+| 场景            | 流程                                                                                                                                                     | 重试次数             |
+| --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------- |
+| 超时            | `timeoutOrElse` 中断 `runReviewerAttempt` → `orElse` 产生 `ReviewerTimedOut` → `catchIf` 捕获 → 递归重试                                                 | 最多 2 次            |
+| 协议错误        | `runReviewerAttempt` 失败 → `timeoutOrElse` 透传 → `catchIf` 捕获 → 递归重试（附加 nudge）                                                               | 最多 2 次            |
+| 429/503         | `SessionRetry.retry` 在 `runReviewerStream` 内重试 → 如果耗尽，错误传播为非 ReviewerError → `mapError` 包装 → `catchIf` 不捕获 → `handleReviewerFailure` | 由 SessionRetry 处理 |
+| 400/401         | 不重试，直接传播                                                                                                                                         | 0                    |
+| 所有 3 次都失败 | 最后一次错误传播 → `mapError` → `handleReviewerFailure`                                                                                                  | —                    |
 
 #### Change 2: `runReviewerAgent` 添加 `Effect.onInterrupt`（~line 394）
 
@@ -197,56 +203,65 @@ const assessment = yield* reviewerRetry(0, messages, true).pipe(
 复用 `prompt.ts:2246-2262` 的 `finalizeInterruptedAssistant` 模式：
 
 ```ts
-const assessment = yield* runReviewerStream(input.messages, input.model, {
-  sessionID: session.id,
-  messageID: message.id,
-  reviewID: input.reviewID,
-  message,
-}).pipe(
-  Effect.tapError((error) =>
-    Effect.gen(function* () {
-      message.error = MessageV2.fromError(error, { providerID: input.model.providerID })
-      message.time.completed = Date.now()
-      yield* sessions.updateMessage(message)
-    }),
-  ),
-  // 超时中断不会触发 tapError；onInterrupt 确保子会话 assistant 消息始终
-  // 写入终态，避免 repair-empty-dangling-assistant 延迟修复。
-  Effect.onInterrupt(() =>
-    Effect.gen(function* () {
-      if (message.time.completed) return
-      message.error ??= MessageV2.fromError(
-        new DOMException("Aborted", "AbortError"),
-        { providerID: input.model.providerID, aborted: true },
-      )
-      message.time.completed = Date.now()
-      yield* sessions.updateMessage(message)
-    }).pipe(Effect.catch(() => Effect.void), Effect.catchDefect(() => Effect.void)),
-  ),
-)
+const assessment =
+  yield *
+  runReviewerStream(input.messages, input.model, {
+    sessionID: session.id,
+    messageID: message.id,
+    reviewID: input.reviewID,
+    message,
+  }).pipe(
+    Effect.tapError((error) =>
+      Effect.gen(function* () {
+        message.error = MessageV2.fromError(error, { providerID: input.model.providerID })
+        message.time.completed = Date.now()
+        yield* sessions.updateMessage(message)
+      }),
+    ),
+    // 超时中断不会触发 tapError；onInterrupt 确保子会话 assistant 消息始终
+    // 写入终态，避免 repair-empty-dangling-assistant 延迟修复。
+    Effect.onInterrupt(() =>
+      Effect.gen(function* () {
+        if (message.time.completed) return
+        message.error ??= MessageV2.fromError(new DOMException("Aborted", "AbortError"), {
+          providerID: input.model.providerID,
+          aborted: true,
+        })
+        message.time.completed = Date.now()
+        yield* sessions.updateMessage(message)
+      }).pipe(
+        Effect.catch(() => Effect.void),
+        Effect.catchDefect(() => Effect.void),
+      ),
+    ),
+  )
 ```
 
 #### Change 3: `review` 函数添加外部 `Effect.onInterrupt`（~line 226）
 
 ```ts
-return yield* run.pipe(
-  Effect.catchDefect((defect) => Effect.fail(defect)),
-  Effect.catch(handleReviewerFailure),
-  // 外部取消（session cancel/compaction）不触发 handleReviewerFailure；
-  // onInterrupt 作为 processor.interruptedToolMetadata 的补充，
-  // 覆盖 processor 清理未触达的边界（stuck reviewing 案例）。
-  Effect.onInterrupt(() =>
-    markToolReviewFailed(input, "aborted", "reviewer interrupted").pipe(
-      Effect.catch(() => Effect.void),
-      Effect.catchDefect(() => Effect.void),
+return (
+  yield *
+  run.pipe(
+    Effect.catchDefect((defect) => Effect.fail(defect)),
+    Effect.catch(handleReviewerFailure),
+    // 外部取消（session cancel/compaction）不触发 handleReviewerFailure；
+    // onInterrupt 作为 processor.interruptedToolMetadata 的补充，
+    // 覆盖 processor 清理未触达的边界（stuck reviewing 案例）。
+    Effect.onInterrupt(() =>
+      markToolReviewFailed(input, "aborted", "reviewer interrupted").pipe(
+        Effect.catch(() => Effect.void),
+        Effect.catchDefect(() => Effect.void),
+      ),
     ),
-  ),
+  )
 )
 ```
 
 #### Change 4: `updateToolAutoReview` 添加守卫 + 类型更新（~line 826）
 
 在 `current` 计算后添加：
+
 ```ts
 // onInterrupt 可能在 handleReviewerFailure 写入终态后延迟触发；
 // "aborted" 不应覆盖更具体的终态（timed_out/failed/fallback_user/allowed/denied）。
@@ -254,6 +269,7 @@ if (patch.status === "aborted" && current.status && current.status !== "reviewin
 ```
 
 `markToolReviewFailed` 和 `updateToolAutoReview` 的 `status` 联合类型添加 `"aborted"`：
+
 ```ts
 // markToolReviewFailed (line 798)
 status: "timed_out" | "failed" | "fallback_user" | "aborted"
@@ -276,7 +292,8 @@ function errorMessage(error: unknown) {
     }
     return error.message
   }
-  if (error && typeof error === "object" && "message" in error && typeof error.message === "string") return error.message
+  if (error && typeof error === "object" && "message" in error && typeof error.message === "string")
+    return error.message
   if (error && typeof error === "object") {
     try {
       return JSON.stringify(error) ?? String(error)
@@ -348,7 +365,7 @@ const retryable =
   message === "fetch failed" ||
   message === "failed to fetch" ||
   message.startsWith("Cannot connect to API:") ||
-  message.includes("socket connection was closed")  // undici socket close 在 AI SDK 包装后可能丢失 code
+  message.includes("socket connection was closed") // undici socket close 在 AI SDK 包装后可能丢失 code
 ```
 
 ### 文件 3: `packages/opencode/src/config/permission.ts`
@@ -407,8 +424,12 @@ it.instance(
       if (!reviewer) return
 
       const visible = yield* MessageV2.filterCompactedEffect(reviewer.id)
-      expect(visible.some((msg) => msg.parts.some((part) => part.type === "text" && part.text.includes("first malformed")))).toBe(false)
-      expect(visible.some((msg) => msg.parts.some((part) => part.type === "text" && part.text.includes("second malformed")))).toBe(true)
+      expect(
+        visible.some((msg) => msg.parts.some((part) => part.type === "text" && part.text.includes("first malformed"))),
+      ).toBe(false)
+      expect(
+        visible.some((msg) => msg.parts.some((part) => part.type === "text" && part.text.includes("second malformed"))),
+      ).toBe(true)
     }),
   { git: true },
 )
@@ -522,11 +543,13 @@ it.instance(
 ## 6. 正常路径、错误路径、并发/退出/清理/安全边界
 
 ### 正常路径（reviewer 成功）
+
 1. `reviewerRetry(0, messages, true)` → `runReviewerAttempt` → `runReviewerStream` 成功
 2. `timeoutOrElse` 未触发 → `catchIf` 不触发
 3. `markToolReviewed` 写入 "allowed"/"denied" → 返回 assessment
 
 ### 错误路径——超时（核心修复）
+
 1. `reviewerRetry(0, ...)` → `runReviewerAttempt` → stream 运行中
 2. `timeoutOrElse(perAttemptTimeout)` 中断 fiber → `onInterrupt`(Change 2) 写入子 assistant 终态
 3. `acquireUseRelease` release 运行 `abort.abort()` → `SessionRetry.retry` 看到 cancellation 停止
@@ -535,22 +558,26 @@ it.instance(
 6. 重复直到成功或 3 次用完 → 最后一次错误到 `mapError` → `handleReviewerFailure`
 
 ### 错误路径——协议错误（reviewer 完成但未调用工具）
+
 1. `runReviewerStream` 完成 → `!assessment` → `assessmentFromJsonText` 失败 → `ReviewerRunError(PROTOCOL_ERROR)`
 2. `timeoutOrElse` 透传 → `catchIf` 捕获 → `tapError` 隐藏第一次尝试 → `reviewerRetry(1, nudgedMessages, false)` 重试
 3. 重复直到成功或 3 次用完
 
 ### 错误路径——socket 断开（Change 7 修复）
+
 1. stream error 事件 → `Effect.fail(event.error)` → `SessionRetry.retry` 检查 `retryable()`
 2. `transportError` 现在匹配 `"socket connection was closed"` → `isRetryable: true` → `SessionRetry.retry` 重试
 3. 如果 `SessionRetry.retry` 耗尽 → 错误传播为非 ReviewerError → `mapError` 包装 → `catchIf` 不捕获 → `handleReviewerFailure`
 
 ### 错误路径——外部取消
+
 1. fiber 被中断 → `onInterrupt`(Change 2) 写入子 assistant 终态
 2. `onInterrupt`(Change 3) 写入父工具 part "aborted"
 3. `handleReviewerFailure` 不触发（中断不是 failure）
 4. 守卫(Change 4) 防止 "aborted" 覆盖已写入的终态
 
 ### 并发/时序安全
+
 - `tapError`（failure）和 `onInterrupt`（interruption）互斥
 - `handleReviewerFailure`（failure）和外部 `onInterrupt`（interruption）互斥
 - 递归 `reviewerRetry` 深度 ≤ 2，每次尝试顺序执行（前一次 fiber 完全终止后才启动下一次）
@@ -559,6 +586,7 @@ it.instance(
 - 守卫 `if (patch.status === "aborted" && current.status !== "reviewing") return` 防止覆盖终态
 
 ### 安全边界
+
 - `Schema.decodeUnknownSync(Assessment)` 结构校验不变
 - `invalidReviewContract` 语义守卫不变
 - `extractFirstJsonObject` 只提取第一个 `{...}` 块，Schema 校验仍拒绝无关 JSON
@@ -568,21 +596,21 @@ it.instance(
 
 ### 先写的测试（TDD 红灯）
 
-| 测试 | 验证内容 | 当前实现预期 |
-|------|---------|------------|
-| 超时重试 | `llm.hang` 后正常响应 → 2 次 calls | **失败**：当前超时零重试，只有 1 次 call |
-| prose-prefixed JSON | 混合文本提取 JSON → `json_fallback` | **失败**：当前只接受纯 JSON |
-| 协议重试 3 次 | 3 个 malformed → `llm.calls` 为 3 | **失败**：当前只重试 1 次，`llm.calls` 为 2 |
+| 测试                | 验证内容                            | 当前实现预期                                |
+| ------------------- | ----------------------------------- | ------------------------------------------- |
+| 超时重试            | `llm.hang` 后正常响应 → 2 次 calls  | **失败**：当前超时零重试，只有 1 次 call    |
+| prose-prefixed JSON | 混合文本提取 JSON → `json_fallback` | **失败**：当前只接受纯 JSON                 |
+| 协议重试 3 次       | 3 个 malformed → `llm.calls` 为 3   | **失败**：当前只重试 1 次，`llm.calls` 为 2 |
 
 ### 现有测试验证（不应回归）
 
-| 测试 | 文件:行 | 验证 |
-|------|--------|------|
-| "accepts structured JSON text decisions" | `prompt.test.ts:894` | 纯 JSON → `json_fallback` ✓ |
-| "hides malformed protocol attempts before retrying" | `prompt.test.ts:946` | 1 malformed + 1 valid → 2 calls ✓ |
-| "retries malformed decision tool input" | `prompt.test.ts:1058` | 1 malformed tool + 1 valid → 2 calls ✓ |
-| "retries transient provider failures" | `prompt.test.ts:1110` | 503 + valid → `SessionRetry.retry` 处理 ✓ |
-| "cancel aborts an in-flight shell auto review" | `prompt.test.ts:1292` | cancel → "aborted" ✓ |
+| 测试                                                | 文件:行               | 验证                                      |
+| --------------------------------------------------- | --------------------- | ----------------------------------------- |
+| "accepts structured JSON text decisions"            | `prompt.test.ts:894`  | 纯 JSON → `json_fallback` ✓               |
+| "hides malformed protocol attempts before retrying" | `prompt.test.ts:946`  | 1 malformed + 1 valid → 2 calls ✓         |
+| "retries malformed decision tool input"             | `prompt.test.ts:1058` | 1 malformed tool + 1 valid → 2 calls ✓    |
+| "retries transient provider failures"               | `prompt.test.ts:1110` | 503 + valid → `SessionRetry.retry` 处理 ✓ |
+| "cancel aborts an in-flight shell auto review"      | `prompt.test.ts:1292` | cancel → "aborted" ✓                      |
 
 ## 8. 建议运行的验证命令
 
@@ -596,13 +624,13 @@ cd packages/opencode && bun test test/permission/
 
 ## 9. 预估 git 文件数、增删行数
 
-| 文件 | 类型 | 增 | 删 | 净 |
-|------|------|---|---|---|
-| `packages/opencode/src/permission/reviewer/service.ts` | 修改 | ~95 | ~20 | +75 |
-| `packages/opencode/src/session/message-v2.ts` | 修改 | ~2 | 0 | +2 |
-| `packages/opencode/src/config/permission.ts` | 修改 | ~1 | ~1 | 0 |
-| `packages/opencode/test/session/prompt.test.ts` | 修改 | ~90 | ~5 | +85 |
-| **总计** | 4 文件 | ~188 | ~26 | +162 |
+| 文件                                                   | 类型   | 增   | 删  | 净   |
+| ------------------------------------------------------ | ------ | ---- | --- | ---- |
+| `packages/opencode/src/permission/reviewer/service.ts` | 修改   | ~95  | ~20 | +75  |
+| `packages/opencode/src/session/message-v2.ts`          | 修改   | ~2   | 0   | +2   |
+| `packages/opencode/src/config/permission.ts`           | 修改   | ~1   | ~1  | 0    |
+| `packages/opencode/test/session/prompt.test.ts`        | 修改   | ~90  | ~5  | +85  |
+| **总计**                                               | 4 文件 | ~188 | ~26 | +162 |
 
 不涉及生成文件、迁移、文档（本文件除外）。
 
@@ -610,14 +638,14 @@ cd packages/opencode && bun test test/permission/
 
 ### 已确认风险（已在方案中处理）
 
-| 风险 | 处理方式 |
-|------|---------|
-| `timeout_ms` 语义从 total 变 per-attempt | 更新 config 描述；无现有测试配置 `timeout_ms` |
-| 协议重试 3 次（原 1 次） | 更新测试推送 3 个 malformed 响应 |
-| `extractFirstJsonObject` 安全性 | Schema 校验 + `invalidReviewContract` 不变 |
-| `onInterrupt` 清理写入可能失败 | `Effect.catch(() => Effect.void)` |
-| `JSON.stringify(undefined)` 返回 undefined | `?? String(error)` 兜底 |
-| `JSON.stringify` 循环引用 | try-catch 兜底 |
+| 风险                                       | 处理方式                                      |
+| ------------------------------------------ | --------------------------------------------- |
+| `timeout_ms` 语义从 total 变 per-attempt   | 更新 config 描述；无现有测试配置 `timeout_ms` |
+| 协议重试 3 次（原 1 次）                   | 更新测试推送 3 个 malformed 响应              |
+| `extractFirstJsonObject` 安全性            | Schema 校验 + `invalidReviewContract` 不变    |
+| `onInterrupt` 清理写入可能失败             | `Effect.catch(() => Effect.void)`             |
+| `JSON.stringify(undefined)` 返回 undefined | `?? String(error)` 兜底                       |
+| `JSON.stringify` 循环引用                  | try-catch 兜底                                |
 
 ### 开放问题（不阻塞）
 

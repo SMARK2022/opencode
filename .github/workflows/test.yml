@@ -1,21 +1,21 @@
 name: test
 # 显式设置 run-name 为 commit 消息；GitHub Actions 默认 display_title 不再自动回退到 commit 消息
 run-name: ${{ github.event.head_commit.message || github.workflow }}
-# #263：触发面收敛到 dev-smark——fork 分支的自有 CI，不随上游 dev 分支空转
+# 1.x产品分支独立触发完整CI，迁移归档分支继续保留原用途。
 
 on:
   push:
     branches:
-      - dev-smark
+      - dev1-smark
   pull_request:
     branches:
-      - dev-smark
+      - dev1-smark
   workflow_dispatch:
 
 concurrency:
-  group: ${{ github.ref == 'refs/heads/dev-smark' && format('{0}-{1}', github.workflow, github.run_id) || format('{0}-{1}', github.workflow, github.event.pull_request.number || github.ref) }}
+  group: ${{ github.ref == 'refs/heads/dev1-smark' && format('{0}-{1}', github.workflow, github.run_id) || format('{0}-{1}', github.workflow, github.event.pull_request.number || github.ref) }}
   cancel-in-progress: true
-# #263：同分支 run 串行、PR 按 PR 号互斥并取消旧 run——避免并发写共享缓存与抢占 runner
+# 产品分支保留每次运行，PR按编号取消旧运行；不改变既有矩阵执行语义。
 
 permissions:
   contents: read
@@ -30,7 +30,7 @@ env:
   OPENCODE_DISABLE_LSP_DOWNLOAD: "true"
 
 jobs:
-# #263：核心必过/上游警告的分层契约——只有 core/httpapi/vscode 挡合并，上游兼容性只出告警
+  # #263：核心必过/上游警告的分层契约——只有 core/httpapi/vscode 挡合并，上游兼容性只出告警
   core-required:
     name: 必过核心测试 / ${{ matrix.label }} / ${{ matrix.os_label }}
     runs-on: ${{ matrix.runner }}
@@ -38,7 +38,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-# #263：fail-fast 关闭——一个 OS 失败不取消其余矩阵，保证单平台问题可独立定位
+        # #263：fail-fast 关闭——一个 OS 失败不取消其余矩阵，保证单平台问题可独立定位
         include:
           - id: opencode-linux
             label: packages/opencode
@@ -265,7 +265,6 @@ jobs:
             echo "| 500 次 marked spawn | ${result} | 必过稳定性分支 |"
           } >> "$GITHUB_STEP_SUMMARY"
 
-
   opentui-required:
     # #489：consumer 回归与 typecheck 必须同一 job 执行，避免不同安装图互相掩盖 peer 漂移。
     # 版本名不写死：gate 钉住的是 user-visible seam 行为，OpenTUI 版本由 catalog 决策单独管理。
@@ -301,7 +300,7 @@ jobs:
           done
 
   httpapi-required:
-# #263：HttpApi gate 是 wire 契约的机器可校验入口——缺场景/跳过场景一律视为失败，
+    # #263：HttpApi gate 是 wire 契约的机器可校验入口——缺场景/跳过场景一律视为失败，
     name: 必过 HttpApi gate / ${{ matrix.mode }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -360,7 +359,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   vscode-required:
-# #263：VSCode SDK 编译/打包必过——扩展市场的发布面不允许回归
+    # #263：VSCode SDK 编译/打包必过——扩展市场的发布面不允许回归
     name: 必过 VSCode SDK 检查
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -419,7 +418,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 75
     continue-on-error: true
-# #263：continue-on-error 是警告语义的落点——job 失败仅标红不阻塞合并，与 core-required 形成对照
+    # #263：continue-on-error 是警告语义的落点——job 失败仅标红不阻塞合并，与 core-required 形成对照
     strategy:
       fail-fast: false
       matrix:
@@ -458,7 +457,6 @@ jobs:
           # 只去掉同平台必过项，目标新增包继续走test与原有^build链，不误裁成App/UI。
           # 单条串行命令保留真实退出码、JUnit和流式日志，安装图仍覆盖全部兼容消费者。
           GITHUB_ACTIONS=false bun turbo test --filter='!opencode' --filter='!@opencode-ai/core' --filter='!@opencode-ai/http-recorder' --filter='!@opencode-ai/tui' --continue=always --summarize --concurrency=1 --log-order=stream -- --reporter=junit --reporter-outfile=.artifacts/unit/junit.xml
-
 
       - name: Warn on upstream unit failures
         if: always() && steps.upstream.outcome != 'success'
@@ -508,7 +506,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     continue-on-error: true
-# #263：continue-on-error 是警告语义的落点——job 失败仅标红不阻塞合并，与 core-required 形成对照
+    # #263：continue-on-error 是警告语义的落点——job 失败仅标红不阻塞合并，与 core-required 形成对照
     strategy:
       fail-fast: false
       matrix:
@@ -625,7 +623,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     continue-on-error: true
-# #263：continue-on-error 是警告语义的落点——job 失败仅标红不阻塞合并，与 core-required 形成对照
+    # #263：continue-on-error 是警告语义的落点——job 失败仅标红不阻塞合并，与 core-required 形成对照
     strategy:
       fail-fast: false
       matrix:

@@ -67,17 +67,17 @@ R9实施反馈：录音完整回归为10通过/1失败，失败用例是 `releas
 
 ## 4. 当前证据与反馈信号
 
-| 证据 | 当前事实 |
-| --- | --- |
-| prompt-voice-input.ts:44,172；三个组件调用点 | TUI 本地执行转录，五个录音状态及 generation 已存在 |
-| tui/config/tui.ts:110,215,316；voice-auth.ts:38,195,249,296 | 前端配置选择、Bearer/session 刷新、进程内缓存与写回 |
-| thread.ts:123；daemon.ts:345；server-lock.ts:62 | TUI 已复用一个 OpenCode daemon |
-| sdk.tsx:43；HttpApi tui group/handler | 现有认证 HTTP 通道和可加入 binary endpoint 的位置 |
-| recorder.ts:89,113；Worker:43 | closePromise 已有；abort 可先于 stop 写入完成执行 rm |
-| Process.run:123；Flock.withLock:352 | pipe/exit Promise.all 与 await using 锁租约 |
-| NodeHttpServer:175；effect internal:1043 | HTTP close 中断 fiber；callback 取消 finalizer 可等待原 Promise |
-| chatgpt.js:873；core.js:2048 | auth-export 当前准备浏览器后读取 bootstrap/CDP |
-| core.js:1966,2030；dom.js:188,760 | 页面 requestID、controller、取消及租约清理已有 |
+| 证据                                                        | 当前事实                                                        |
+| ----------------------------------------------------------- | --------------------------------------------------------------- |
+| prompt-voice-input.ts:44,172；三个组件调用点                | TUI 本地执行转录，五个录音状态及 generation 已存在              |
+| tui/config/tui.ts:110,215,316；voice-auth.ts:38,195,249,296 | 前端配置选择、Bearer/session 刷新、进程内缓存与写回             |
+| thread.ts:123；daemon.ts:345；server-lock.ts:62             | TUI 已复用一个 OpenCode daemon                                  |
+| sdk.tsx:43；HttpApi tui group/handler                       | 现有认证 HTTP 通道和可加入 binary endpoint 的位置               |
+| recorder.ts:89,113；Worker:43                               | closePromise 已有；abort 可先于 stop 写入完成执行 rm            |
+| Process.run:123；Flock.withLock:352                         | pipe/exit Promise.all 与 await using 锁租约                     |
+| NodeHttpServer:175；effect internal:1043                    | HTTP close 中断 fiber；callback 取消 finalizer 可等待原 Promise |
+| chatgpt.js:873；core.js:2048                                | auth-export 当前准备浏览器后读取 bootstrap/CDP                  |
+| core.js:1966,2030；dom.js:188,760                           | 页面 requestID、controller、取消及租约清理已有                  |
 
 以上为 observed 源码证据；目标 R01–R10 为 contracted。
 
@@ -111,7 +111,13 @@ type CookieExport = {
   cookies: Array<{ name: string; value: string; domain: string; path: string; expires: number }>
   fetchedAt: string
 }
-type VoiceTarget = { config: string; key: string; interpreter: string; script: string; environment: Record<string, string> }
+type VoiceTarget = {
+  config: string
+  key: string
+  interpreter: string
+  script: string
+  environment: Record<string, string>
+}
 ```
 
 HTTP接收WAV bytes + directory，返回 `{text}`。auth继续存原用户级文件的 `mcp.<key>.auth`；读取Cookie及已有access_token，下一次写回替换完整快照。auth-export返回CookieExport的Cookie字段，浏览器CLI返回 `{text,auth:CookieExport}`，其中accessToken是本次成功POST实际使用的页面bootstrap值。后端唯一authFromHarvest转换成字典与access_token；JWT解析、临期判断、OpenCode session查询及刷新调用数0。
@@ -136,18 +142,18 @@ I01 所有语音请求从同一后端接口执行；I02 直连遵循SendIfAvaila
 
 ## 9. 函数输入、输出、处理
 
-| 函数 | 输入 → 输出 | 处理 |
-| --- | --- | --- |
-| createVoiceInputController | recorder/transcribe/insert 回调 → toggle/abort/status | 既有五状态、generation；调用提交函数 |
-| submitVoice | file、signal、sdk → text | Bun.file 上传；await fetch及正文；检查 signal |
-| voiceTranscribe handler | binary payload → {text} | 解析目标、单 operation Promise、音频/activity 收尾 |
-| resolveVoiceTarget | 用户级文件列表 → VoiceTarget | 现有变量展开、文件读取、MCP 推导收敛 |
-| transcribeVoiceFile | file、target、requestSignal → text | Flock.withLock 内执行 §8 |
-| read/writeVoiceAuth | config/key/snapshot/signal → snapshot/void | JSONC 定点读写与 rename |
-| transcribeDirect | file、snapshot、attemptSignal → 文字或状态 | 原FormData、NetworkProxy、Cookie及已有Bearer |
-| defaultHarvest / transcribeArgv | target、signal、音频 → CookieSnapshot / {text,auth} | 原 Process.run，固定私有 CLI |
-| exportProfileAuth | MCP profile 设置、signal → CookieExport | SQLite只读、DPAPI、AES-GCM、finally |
-| runVoiceRequest / runVoiceTranscribe | runtime、音频、signal → {ok,text,auth} | 既有voice/submission/lease，附带同页Cookie及本次Bearer |
+| 函数                                 | 输入 → 输出                                           | 处理                                                   |
+| ------------------------------------ | ----------------------------------------------------- | ------------------------------------------------------ |
+| createVoiceInputController           | recorder/transcribe/insert 回调 → toggle/abort/status | 既有五状态、generation；调用提交函数                   |
+| submitVoice                          | file、signal、sdk → text                              | Bun.file 上传；await fetch及正文；检查 signal          |
+| voiceTranscribe handler              | binary payload → {text}                               | 解析目标、单 operation Promise、音频/activity 收尾     |
+| resolveVoiceTarget                   | 用户级文件列表 → VoiceTarget                          | 现有变量展开、文件读取、MCP 推导收敛                   |
+| transcribeVoiceFile                  | file、target、requestSignal → text                    | Flock.withLock 内执行 §8                               |
+| read/writeVoiceAuth                  | config/key/snapshot/signal → snapshot/void            | JSONC 定点读写与 rename                                |
+| transcribeDirect                     | file、snapshot、attemptSignal → 文字或状态            | 原FormData、NetworkProxy、Cookie及已有Bearer           |
+| defaultHarvest / transcribeArgv      | target、signal、音频 → CookieSnapshot / {text,auth}   | 原 Process.run，固定私有 CLI                           |
+| exportProfileAuth                    | MCP profile 设置、signal → CookieExport               | SQLite只读、DPAPI、AES-GCM、finally                    |
+| runVoiceRequest / runVoiceTranscribe | runtime、音频、signal → {ok,text,auth}                | 既有voice/submission/lease，附带同页Cookie及本次Bearer |
 
 后端函数落入现有 `server/shared/tui-control.ts`；前端 submitVoice 落入现有 `prompt-voice-input.ts`；profile 函数落入现有 `chatgpt.js`。
 
@@ -167,8 +173,11 @@ const cancel = async () => {
   transcribeAbort = undefined
   setStatus({ type: closeHere ? "stopping" : "idle" })
   abort?.abort()
-  try { if (closeHere) await active?.abort() }
-  finally { if (generation === current) setStatus({ type: "idle" }) }
+  try {
+    if (closeHere) await active?.abort()
+  } finally {
+    if (generation === current) setStatus({ type: "idle" })
+  }
 }
 ```
 
@@ -191,8 +200,13 @@ try {
   if (text.trim()) input.insertText(text)
 } catch (error) {
   if (current !== generation) return
-  input.onError?.(error instanceof Error && error.name === "TimeoutError"
-    ? "语音转录超时（120 秒）" : error instanceof Error ? error.message : String(error))
+  input.onError?.(
+    error instanceof Error && error.name === "TimeoutError"
+      ? "语音转录超时（120 秒）"
+      : error instanceof Error
+        ? error.message
+        : String(error),
+  )
 } finally {
   await active.abort().catch(() => {})
   if (current === generation) {
@@ -227,14 +241,23 @@ return Effect.callback<{ text: string }, VoiceError>((resume, signal) => {
       signal.throwIfAborted()
       return { text }
     } finally {
-      try { await fs.rm(file, { force: true }) } finally { release() }
+      try {
+        await fs.rm(file, { force: true })
+      } finally {
+        release()
+      }
     }
   })()
   void operation.then(
     (value) => resume(Effect.succeed(value)),
     (error) => resume(Effect.fail(new VoiceError({ message: error instanceof Error ? error.message : String(error) }))),
   )
-  return Effect.promise(() => operation.then(() => undefined, () => undefined))
+  return Effect.promise(() =>
+    operation.then(
+      () => undefined,
+      () => undefined,
+    ),
+  )
 })
 ```
 
@@ -265,7 +288,10 @@ const out = await Promise.all(pending)
     if (!opts.nothrow) throw error
     return { code: 1, stdout: Buffer.alloc(0), stderr: Buffer.from(errorMessage(error)) }
   })
-  .finally(async () => { await Promise.allSettled(pending); await closed })
+  .finally(async () => {
+    await Promise.allSettled(pending)
+    await closed
+  })
 ```
 
 以上补齐既有进程完成合同，原code/nothrow返回规则保留；所有改写计入S11。
@@ -288,15 +314,15 @@ HTTP语音路由建立disconnect controller，response提前close时abort；与�
 
 ## 12. 删除段 D 与保留设施
 
-| 段标记 | 现有位置/完整语义段 | 处理 |
-| --- | --- | --- |
-| D01 | voice-auth.ts 的jwtExpiresAt/tokenAlive、6h/48h常量、sessionCredentialUsable、buildSessionRequest/defaultFetchSession、mergeSetCookieCookies | 删除 |
-| D02 | 同文件memoryAuth/ensureInflight/authNotices、persistCredential及scope分支 | 删除；保留函数重组后删除原文件 |
-| D03 | prompt-voice-input.ts 的direct/argv联合、activeTranscriber、requireTranscriber和本地默认执行 | 删除 |
-| D04 | tui.ts/tui-schema.ts 的voice.transcriber、PATH默认、project/env-only语音选择 | 删除；普通MCP保持 |
-| D05 | chatgpt.js auth-export的ensureDaemon/HTTP/四次重试、token摘要 | 删除，替换为S07 |
-| D06 | chatgpt-core.js runAuthExport的bootstrap/lease；makeRequestContext与remaining；重复语音计时 | 删除，Cookie片段按M03/S08归类 |
-| D07 | transcribe-file外层四次尝试；1237/30/80秒等旧语音预算 | 删除，固定120/40秒 |
+| 段标记 | 现有位置/完整语义段                                                                                                                          | 处理                           |
+| ------ | -------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------ |
+| D01    | voice-auth.ts 的jwtExpiresAt/tokenAlive、6h/48h常量、sessionCredentialUsable、buildSessionRequest/defaultFetchSession、mergeSetCookieCookies | 删除                           |
+| D02    | 同文件memoryAuth/ensureInflight/authNotices、persistCredential及scope分支                                                                    | 删除；保留函数重组后删除原文件 |
+| D03    | prompt-voice-input.ts 的direct/argv联合、activeTranscriber、requireTranscriber和本地默认执行                                                 | 删除                           |
+| D04    | tui.ts/tui-schema.ts 的voice.transcriber、PATH默认、project/env-only语音选择                                                                 | 删除；普通MCP保持              |
+| D05    | chatgpt.js auth-export的ensureDaemon/HTTP/四次重试、token摘要                                                                                | 删除，替换为S07                |
+| D06    | chatgpt-core.js runAuthExport的bootstrap/lease；makeRequestContext与remaining；重复语音计时                                                  | 删除，Cookie片段按M03/S08归类  |
+| D07    | transcribe-file外层四次尝试；1237/30/80秒等旧语音预算                                                                                        | 删除，固定120/40秒             |
 
 保留全集：五个UI状态与generation；recorder closePromise/Worker/native停止/terminal/旧音频清理；sdk认证与HTTP close；Effect callback；Flock心跳和租约；Process终止/stdio；JSONC原子写；SessionActivity；browser withVoice/withSubmission/voiceLease/页面稳定与隔离/fatal；页面requestID/controller；共享daemon选主、冷启动、登录及ask/image。全部保留项在 §9–10 有调用位置，§12之外的新增相关设施须先修订审计。
 
@@ -304,30 +330,30 @@ HTTP语音路由建立disconnect controller，response提前close时abort；与�
 
 M是可逐块核对的候选，只有目标代码和完整关联注释与源一致时扣除；编辑过的部分标为S。格式行单列，语义与注释改变均计S。
 
-| 段标记 | 源起止锚点 → 目标 | 关联S |
-| --- | --- | --- |
-| M01 | voice-auth.ts 中 formatting前解释注释及const formatting；writeVoiceAuth内“定点替换”注释至const next → server/shared/tui-control.ts | S04；函数签名、取消和异常处理计S |
-| M02 | prompt-voice-input.ts 的commandExists完整函数；Process.run旁killTree解释及保持原样的调用选项 → tui-control.ts | S04；调用参数/结果形状调整计S |
-| M03 | core.js runAuthExport中CDP形状解释与校验、slim映射及完整关联注释 → runVoiceTranscribe同一submission闭包 | S08；try/finally和返回auth计S |
-| M04 | tui.ts 中MCP命令数组筛选及mcp-server.js识别、interpreter/script推导的原样子段与注释 → resolveVoiceTarget | S03；来源、路径基准、disabled覆盖、environment计S |
+| 段标记 | 源起止锚点 → 目标                                                                                                                  | 关联S                                             |
+| ------ | ---------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------- |
+| M01    | voice-auth.ts 中 formatting前解释注释及const formatting；writeVoiceAuth内“定点替换”注释至const next → server/shared/tui-control.ts | S04；函数签名、取消和异常处理计S                  |
+| M02    | prompt-voice-input.ts 的commandExists完整函数；Process.run旁killTree解释及保持原样的调用选项 → tui-control.ts                      | S04；调用参数/结果形状调整计S                     |
+| M03    | core.js runAuthExport中CDP形状解释与校验、slim映射及完整关联注释 → runVoiceTranscribe同一submission闭包                            | S08；try/finally和返回auth计S                     |
+| M04    | tui.ts 中MCP命令数组筛选及mcp-server.js识别、interpreter/script推导的原样子段与注释 → resolveVoiceTarget                           | S03；来源、路径基准、disabled覆盖、environment计S |
 
 其余跨层级函数整体标为S，内部只有经过上述对应证明的原样子段按M扣除。移出旧文件产生的删除行按D单列。每个M条目实施记录源文件/行段、目标文件/行段、原样非空行数及对应diff锚点。
 
 ## 14. 实质增加段 S 与必要性
 
-| 段 | 所有新增/改写内容 | 对应要求 |
-| --- | --- | --- |
-| S01 | controller取消及120秒、submitVoice、结果与文件完成点 | R01/R07/R09 |
-| S02 | 三个组件注入提交函数及提示接线 | R01 |
-| S03 | 后端用户配置来源、覆盖、environment；前端删除后的类型接线 | R04/R08 |
-| S04 | Cookie及可选Bearer快照读写/解析、文件锁内三步编排、CLI结果解析 | R02/R04/R07 |
-| S05 | SendIfAvailable请求、固定attemptSignal、正文消费与状态输出 | R02/R03/R09 |
-| S06 | binary endpoint、消息型错误、operation完成点、临时WAV/activity | R01/R07 |
-| S07 | 原CLI中的profile SQLite/DPAPI解密、signal、输出及纯导入接线 | R02/R03 |
-| S08 | core事件取消、固定40秒、浏览器text+Cookie+Bearer、语音CLI简化、协议版本同步递增 | R02/R07/R09 |
-| S09 | DOM固定40秒、成功结果携带实际使用的Bearer及原页面取消语义接线 | R02/R07/R09 |
-| S10 | recorder.abort等待已有closePromise再删除 | R07 |
-| S11 | Process.run错误时终止并等待全部完成 | R07 |
+| 段  | 所有新增/改写内容                                                                                                                           | 对应要求    |
+| --- | ------------------------------------------------------------------------------------------------------------------------------------------- | ----------- |
+| S01 | controller取消及120秒、submitVoice、结果与文件完成点                                                                                        | R01/R07/R09 |
+| S02 | 三个组件注入提交函数及提示接线                                                                                                              | R01         |
+| S03 | 后端用户配置来源、覆盖、environment；前端删除后的类型接线                                                                                   | R04/R08     |
+| S04 | Cookie及可选Bearer快照读写/解析、文件锁内三步编排、CLI结果解析                                                                              | R02/R04/R07 |
+| S05 | SendIfAvailable请求、固定attemptSignal、正文消费与状态输出                                                                                  | R02/R03/R09 |
+| S06 | binary endpoint、消息型错误、operation完成点、临时WAV/activity                                                                              | R01/R07     |
+| S07 | 原CLI中的profile SQLite/DPAPI解密、signal、输出及纯导入接线                                                                                 | R02/R03     |
+| S08 | core事件取消、固定40秒、浏览器text+Cookie+Bearer、语音CLI简化、协议版本同步递增                                                             | R02/R07/R09 |
+| S09 | DOM固定40秒、成功结果携带实际使用的Bearer及原页面取消语义接线                                                                               | R02/R07/R09 |
+| S10 | recorder.abort等待已有closePromise再删除                                                                                                    | R07         |
+| S11 | Process.run错误时终止并等待全部完成                                                                                                         | R07         |
 | S12 | server.ts通过公开IncomingMessage/ServerResponse扩展点保留请求体EOF后的断连通知；响应finish/close归还原生销毁方法，仅补做已延期的正常EOF清理 | R07/R09/I11 |
 
 上述每段包含其新增或修改的注释。跨文件重新组织代码、改函数参数、调整调用时机、改错误处理均归入S。
@@ -336,24 +362,24 @@ M是可逐块核对的候选，只有目标代码和完整关联注释与源一�
 
 前12项均位于 `packages/opencode/src/`；操作数16，符合16上限。
 
-| 文件 | 操作 | 段 |
-| --- | --- | --- |
-| cli/cmd/tui/prompt-voice-input.ts | 修改 | S01/D03/M02 |
-| cli/cmd/tui/component/prompt/index.tsx | 修改 | S02 |
-| cli/cmd/tui/ui/dialog-prompt.tsx | 修改 | S02 |
-| cli/cmd/tui/routes/session/question.tsx | 修改 | S02 |
-| cli/cmd/tui/config/tui.ts | 修改 | S03/D04/M04 |
-| cli/cmd/tui/config/tui-schema.ts | 删除voice段 | D04/S03 |
-| cli/cmd/tui/util/voice-auth.ts | 删除文件 | D01/D02/M01 |
-| server/shared/tui-control.ts | 接收移动和更新 | S03/S04/S05/M01/M02/M04 |
-| server/routes/instance/httpapi/groups/tui.ts | 修改 | S06 |
-| server/routes/instance/httpapi/handlers/tui.ts | 修改 | S06 |
-| cli/cmd/tui/prompt-voice-recorder.ts | 修改 | S10 |
-| util/process.ts | 修改 | S11 |
-| thirdparty/chatgpt-browser-agent/chatgpt.js | 修改 | S07/S08/D05/D07 |
-| thirdparty/chatgpt-browser-agent/chatgpt-core.js | 修改 | S08/M03/D06 |
-| thirdparty/chatgpt-browser-agent/chatgpt-dom.js | 修改 | S09 |
-| server/server.ts | Node HTTP请求销毁完成点与标准socket绑定 | S12 |
+| 文件                                             | 操作                                    | 段                      |
+| ------------------------------------------------ | --------------------------------------- | ----------------------- |
+| cli/cmd/tui/prompt-voice-input.ts                | 修改                                    | S01/D03/M02             |
+| cli/cmd/tui/component/prompt/index.tsx           | 修改                                    | S02                     |
+| cli/cmd/tui/ui/dialog-prompt.tsx                 | 修改                                    | S02                     |
+| cli/cmd/tui/routes/session/question.tsx          | 修改                                    | S02                     |
+| cli/cmd/tui/config/tui.ts                        | 修改                                    | S03/D04/M04             |
+| cli/cmd/tui/config/tui-schema.ts                 | 删除voice段                             | D04/S03                 |
+| cli/cmd/tui/util/voice-auth.ts                   | 删除文件                                | D01/D02/M01             |
+| server/shared/tui-control.ts                     | 接收移动和更新                          | S03/S04/S05/M01/M02/M04 |
+| server/routes/instance/httpapi/groups/tui.ts     | 修改                                    | S06                     |
+| server/routes/instance/httpapi/handlers/tui.ts   | 修改                                    | S06                     |
+| cli/cmd/tui/prompt-voice-recorder.ts             | 修改                                    | S10                     |
+| util/process.ts                                  | 修改                                    | S11                     |
+| thirdparty/chatgpt-browser-agent/chatgpt.js      | 修改                                    | S07/S08/D05/D07         |
+| thirdparty/chatgpt-browser-agent/chatgpt-core.js | 修改                                    | S08/M03/D06             |
+| thirdparty/chatgpt-browser-agent/chatgpt-dom.js  | 修改                                    | S09                     |
+| server/server.ts                                 | Node HTTP请求销毁完成点与标准socket绑定 | S12                     |
 
 总计修改15个、删除1个、新增0个；package.json恢复基线，新增修改位置为既有server/server.ts。测试使用既有文件，生成文件变更0。普通TUI control queue及工作流接线保持。
 
@@ -361,19 +387,19 @@ M是可逐块核对的候选，只有目标代码和完整关联注释与源一�
 
 按一项RED→最小实现→GREEN推进，测试入口是实际HTTP、CLI、controller、recorder和Process接口。
 
-| 切片 | 既有测试文件 | 可观察结果 |
-| --- | --- | --- |
-| 认证请求、来源与写回 | test/cli/tui/voice-auth.test.ts | 匿名请求429、浏览器返回快照、第二次发送保存的Bearer及Cookie并成功；profile保持Cookie-only输出 |
-| profile导出 | agent test-mcp.js | 独立已知明文SQLite fixture解密一致，浏览器启动0 |
-| 三入口及取消 | test/cli/tui/prompt-voice-input.test.ts | HTTP回调收到WAV；迟到文字丢弃；新录音保持 |
-| HTTP、等锁、资源完成 | test/server/tui-provider-endpoint-status.test.ts | 两客户端顺序转录；取消后操作先完成再释放WAV/activity/锁 |
-| 文件来源 | test/config/tui.test.ts | 用户级覆盖与environment一致，项目文件保持 |
-| stop写入期间abort | test/cli/tui/prompt-voice-recorder.test.ts | 先等写入、再删除、上传0；stop错误保持原反馈，随后abort完成清理 |
-| 子进程完成 | test/util/process.test.ts | exit/pipe错误和abort后等待close；原nothrow结果保持 |
-| 页面及结果 | agent test-mcp.js | 同次text+Cookie；HTTP关闭中止页面；保留fatal回调及下一请求；旧版本经原选主路径切换 |
-| 固定计时 | 上述voice/server/agent文件 | 每TUI独立120秒；三次固定40秒；正文计时；早到401立即推进 |
-| 运行时断连与连接复用 | 同一HTTP生命周期文件、httpapi-listen.test.ts与最小TCP探针 | Bun1.3.14取消红/绿，以及R13同连接第二次请求超时红/§30修复绿；真实SSE收尾及后继请求保持 |
-| rename与取消 | voice-auth.test.ts | 提交前清理临时文件；提交后保留快照并结束文字交付 |
+| 切片                 | 既有测试文件                                              | 可观察结果                                                                                    |
+| -------------------- | --------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
+| 认证请求、来源与写回 | test/cli/tui/voice-auth.test.ts                           | 匿名请求429、浏览器返回快照、第二次发送保存的Bearer及Cookie并成功；profile保持Cookie-only输出 |
+| profile导出          | agent test-mcp.js                                         | 独立已知明文SQLite fixture解密一致，浏览器启动0                                               |
+| 三入口及取消         | test/cli/tui/prompt-voice-input.test.ts                   | HTTP回调收到WAV；迟到文字丢弃；新录音保持                                                     |
+| HTTP、等锁、资源完成 | test/server/tui-provider-endpoint-status.test.ts          | 两客户端顺序转录；取消后操作先完成再释放WAV/activity/锁                                       |
+| 文件来源             | test/config/tui.test.ts                                   | 用户级覆盖与environment一致，项目文件保持                                                     |
+| stop写入期间abort    | test/cli/tui/prompt-voice-recorder.test.ts                | 先等写入、再删除、上传0；stop错误保持原反馈，随后abort完成清理                                |
+| 子进程完成           | test/util/process.test.ts                                 | exit/pipe错误和abort后等待close；原nothrow结果保持                                            |
+| 页面及结果           | agent test-mcp.js                                         | 同次text+Cookie；HTTP关闭中止页面；保留fatal回调及下一请求；旧版本经原选主路径切换            |
+| 固定计时             | 上述voice/server/agent文件                                | 每TUI独立120秒；三次固定40秒；正文计时；早到401立即推进                                       |
+| 运行时断连与连接复用 | 同一HTTP生命周期文件、httpapi-listen.test.ts与最小TCP探针 | Bun1.3.14取消红/绿，以及R13同连接第二次请求超时红/§30修复绿；真实SSE收尾及后继请求保持        |
+| rename与取消         | voice-auth.test.ts                                        | 提交前清理临时文件；提交后保留快照并结束文字交付                                              |
 
 网络fixture验证实际请求；测试用就绪信号控制并发完成点。计时由测试时钟/AbortSignal控制；真实取消使用HTTP断开和CLI退出。生产测试接口新增数0。
 
@@ -383,13 +409,13 @@ E/C按仓库规则独立计算；总量继续采用 `C >= floor(E*0.15)+1`，E=0
 
 ## 18. 验证与真实验收
 
-| 命令 | 目录 |
-| --- | --- |
-| bun test test/cli/tui/voice-auth.test.ts test/cli/tui/prompt-voice-input.test.ts test/config/tui.test.ts | packages/opencode |
-| bun test test/server/tui-provider-endpoint-status.test.ts test/cli/tui/prompt-voice-recorder.test.ts test/util/process.test.ts | packages/opencode |
-| bun typecheck | packages/opencode |
-| npm test | thirdparty/chatgpt-browser-agent |
-| git diff --check；逐段S/D/M核对 | 根与子模块 |
+| 命令                                                                                                                           | 目录                             |
+| ------------------------------------------------------------------------------------------------------------------------------ | -------------------------------- |
+| bun test test/cli/tui/voice-auth.test.ts test/cli/tui/prompt-voice-input.test.ts test/config/tui.test.ts                       | packages/opencode                |
+| bun test test/server/tui-provider-endpoint-status.test.ts test/cli/tui/prompt-voice-recorder.test.ts test/util/process.test.ts | packages/opencode                |
+| bun typecheck                                                                                                                  | packages/opencode                |
+| npm test                                                                                                                       | thirdparty/chatgpt-browser-agent |
+| git diff --check；逐段S/D/M核对                                                                                                | 根与子模块                       |
 
 真实验收依次完成：profile关闭落盘时原auth-export读取，匿名结果按服务端响应推进；浏览器末级text+Cookie+Bearer写回；后继账户认证直连hello/world且浏览器提交增量保持1；两TUI共用后端及缓存复用；录音/等锁/上传/页面期间取消和新请求成功。session刷新请求0。测试失败保留真实错误，按批准范围修复。
 
@@ -397,25 +423,25 @@ E/C按仓库规则独立计算；总量继续采用 `C >= floor(E*0.15)+1`，E=0
 
 `A = 生产diff中新增或改写后的非空行 − 经逐段证明的原样移动行`。新增/修改注释计A；改变参数、机制、执行时机或层级绑定的行计A。删除行D独立统计，A采用增加侧计数。格式整理单列并保持最小。原样移动须同时满足代码和关联注释完整；匹配失败即计S，移动名义本身提供的扣减为0。
 
-| S段 | A预算上限 |
-| --- | ---: |
-| S01 controller与提交 | 70 |
-| S02 三处UI接线 | 15 |
-| S03 用户配置解析与类型接线 | 45 |
-| S04 快照、事务、CLI及写回 | 105 |
-| S05 Cookie请求与尝试 | 40 |
-| S06 HTTP接口及完成点 | 80 |
-| S07 profile与原CLI导出 | 110 |
-| S08 core浏览器结果与取消 | 75 |
-| S09 DOM | 8 |
-| S10 recorder | 6 |
-| S11 Process | 24 |
-| 语义接线余量 | 22 |
-| 既有分段预算合计 | 600 |
-| S12 原版本HTTP完成点及说明 | 45 |
-| R12已批准认证传递改写预算 | 40 |
-| 用户调整的剩余额度，使用仍须归属批准机制 | 115 |
-| 合计上限 | 800 |
+| S段                                      | A预算上限 |
+| ---------------------------------------- | --------: |
+| S01 controller与提交                     |        70 |
+| S02 三处UI接线                           |        15 |
+| S03 用户配置解析与类型接线               |        45 |
+| S04 快照、事务、CLI及写回                |       105 |
+| S05 Cookie请求与尝试                     |        40 |
+| S06 HTTP接口及完成点                     |        80 |
+| S07 profile与原CLI导出                   |       110 |
+| S08 core浏览器结果与取消                 |        75 |
+| S09 DOM                                  |         8 |
+| S10 recorder                             |         6 |
+| S11 Process                              |        24 |
+| 语义接线余量                             |        22 |
+| 既有分段预算合计                         |       600 |
+| S12 原版本HTTP完成点及说明               |        45 |
+| R12已批准认证传递改写预算                |        40 |
+| 用户调整的剩余额度，使用仍须归属批准机制 |       115 |
+| 合计上限                                 |       800 |
 
 R12生产diff增加侧非空行484、删除侧非空行840，包含父仓库与子模块；此数包含imports且M扣减采用0，作为A的保守上界。M01–M04候选全部按S计入额度，本次主计量M=0；完整保留的移动块仅在独立E/C核算时按规则排除。删除侧独立展示，增加侧484保持原值。
 
@@ -545,36 +571,36 @@ R8 全新上下文审计：`ses_f4fb35913ffeSCPLBjLVshpqNC`。原文：
 
 已完成Cookie请求、三来源转录、用户配置、TUI提交、录音写入/取消、Process管道故障的RED→GREEN。旧voice-auth.ts已在用户明确授权删除后移除，旧JWT/session刷新和前端认证调用退出实现。
 
-| 验证命令 | 工作目录 | 当前结果 |
-| --- | --- | --- |
-| npx --yes --package=bun@1.4.2 bun typecheck | packages/opencode | R12通过 |
-| npx --yes --package=bun@1.4.2 bun test test/cli/tui/voice-auth.test.ts test/cli/tui/prompt-voice-input.test.ts test/cli/tui/prompt-voice-recorder.test.ts test/config/tui.test.ts test/util/process.test.ts test/cli/cmd/tui/prompt-submit-transport.test.tsx test/server/tui-provider-endpoint-status.test.ts | packages/opencode | R12最终174通过、4个opt-in用例跳过、583断言；包含真实120秒独立预算与完整HTTP取消 |
-| bun test test/cli/tui/prompt-voice-recorder.test.ts test/util/process.test.ts | packages/opencode | 最新录音断言加强后24通过、59断言 |
-| npm test | thirdparty/chatgpt-browser-agent | R12最终73通过，syntax/deps通过；前轮EPERM单项与完整重跑记录保留 |
-| npx --yes --package=bun@1.4.2 bun run script/build.ts --single --skip-install --skip-embed-web-ui | packages/opencode | Windows EXE、版本启动及compiled voice Worker smoke通过；构建自动改写的models-snapshot.js已恢复至构建前干净基线 |
-| git diff --check | 根与子模块 | 通过 |
+| 验证命令                                                                                                                                                                                                                                                                                                       | 工作目录                         | 当前结果                                                                                                       |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| npx --yes --package=bun@1.4.2 bun typecheck                                                                                                                                                                                                                                                                    | packages/opencode                | R12通过                                                                                                        |
+| npx --yes --package=bun@1.4.2 bun test test/cli/tui/voice-auth.test.ts test/cli/tui/prompt-voice-input.test.ts test/cli/tui/prompt-voice-recorder.test.ts test/config/tui.test.ts test/util/process.test.ts test/cli/cmd/tui/prompt-submit-transport.test.tsx test/server/tui-provider-endpoint-status.test.ts | packages/opencode                | R12最终174通过、4个opt-in用例跳过、583断言；包含真实120秒独立预算与完整HTTP取消                                |
+| bun test test/cli/tui/prompt-voice-recorder.test.ts test/util/process.test.ts                                                                                                                                                                                                                                  | packages/opencode                | 最新录音断言加强后24通过、59断言                                                                               |
+| npm test                                                                                                                                                                                                                                                                                                       | thirdparty/chatgpt-browser-agent | R12最终73通过，syntax/deps通过；前轮EPERM单项与完整重跑记录保留                                                |
+| npx --yes --package=bun@1.4.2 bun run script/build.ts --single --skip-install --skip-embed-web-ui                                                                                                                                                                                                              | packages/opencode                | Windows EXE、版本启动及compiled voice Worker smoke通过；构建自动改写的models-snapshot.js已恢复至构建前干净基线 |
+| git diff --check                                                                                                                                                                                                                                                                                               | 根与子模块                       | 通过                                                                                                           |
 
 生产文件为15修改、1删除、0新增，总计16。逐文件非空新增侧粗计如下，全部改写及注释纳入，原样移动扣减0；E/C为diff机械候选值，最终由独立审计核验语义与M排除。
 
-| 生产文件（缩写，对应§15） | A上界 | E候选 | C候选 |
-| --- | ---: | ---: | ---: |
-| prompt-voice-input.ts | 48 | 37 | 10 |
-| component/prompt/index.tsx | 3 | 2 | 1 |
-| ui/dialog-prompt.tsx | 6 | 3 | 2 |
-| routes/session/question.tsx | 3 | 2 | 1 |
-| config/tui.ts | 2 | 1 | 1 |
-| config/tui-schema.ts | 0 | 0 | 0 |
-| util/voice-auth.ts（删除） | 0 | 0 | 0 |
-| shared/tui-control.ts | 193 | 147 | 33 |
-| httpapi/groups/tui.ts | 12 | 9 | 2 |
-| httpapi/handlers/tui.ts | 46 | 29 | 8 |
-| prompt-voice-recorder.ts | 4 | 2 | 2 |
-| util/process.ts | 10 | 7 | 3 |
-| chatgpt.js | 84 | 69 | 15 |
-| chatgpt-core.js | 59 | 50 | 9 |
-| chatgpt-dom.js | 12 | 4 | 8 |
-| package.json | 2 | 1 | 1 |
-| 合计 | 484 | 363 | 96 |
+| 生产文件（缩写，对应§15）   | A上界 | E候选 | C候选 |
+| --------------------------- | ----: | ----: | ----: |
+| prompt-voice-input.ts       |    48 |    37 |    10 |
+| component/prompt/index.tsx  |     3 |     2 |     1 |
+| ui/dialog-prompt.tsx        |     6 |     3 |     2 |
+| routes/session/question.tsx |     3 |     2 |     1 |
+| config/tui.ts               |     2 |     1 |     1 |
+| config/tui-schema.ts        |     0 |     0 |     0 |
+| util/voice-auth.ts（删除）  |     0 |     0 |     0 |
+| shared/tui-control.ts       |   193 |   147 |    33 |
+| httpapi/groups/tui.ts       |    12 |     9 |     2 |
+| httpapi/handlers/tui.ts     |    46 |    29 |     8 |
+| prompt-voice-recorder.ts    |     4 |     2 |     2 |
+| util/process.ts             |    10 |     7 |     3 |
+| chatgpt.js                  |    84 |    69 |    15 |
+| chatgpt-core.js             |    59 |    50 |     9 |
+| chatgpt-dom.js              |    12 |     4 |     8 |
+| package.json                |     2 |     1 |     1 |
+| 合计                        |   484 |   363 |    96 |
 
 生产候选C/E为26.45%；含测试的机械候选E=1693、C=330、19.49%，测试逐文件最低13.51%、生产最低18%。解释分布在配置来源、三步编排、认证解析、提交点、临时文件完成点及profile解密关键位置；最终合格C及pure-move排除见§24。审计时提交数量0；verified后按本GOAL路径提交，其他工作区内容保持原状。
 
@@ -640,18 +666,23 @@ Windows产物：`packages/opencode/dist/opencode-windows-x64/bin/opencode.exe`�
 
 测试修复仅三处：删除已完成诊断的一次性differentialE2E及其私有node_modules静态导入，保留真实profile/browser验收；DialogPrompt测试用真实SDKProvider及原事件清理；exerciser登记真实binary WAV路由并断言401和缺配置502，保留fail-on-missing与fail-on-skip。
 
-HTTP根因：Bun1.3.14的IncomingMessage._destroy在正常body EOF时清掉原handle.onabort；ServerResponse优化绑定还省略socket.close到response.close的标准监听。调用点修复为serverLayer的createServer公开options：
+HTTP根因：Bun1.3.14的IncomingMessage.\_destroy在正常body EOF时清掉原handle.onabort；ServerResponse优化绑定还省略socket.close到response.close的标准监听。调用点修复为serverLayer的createServer公开options：
 
 ```ts
 const server = createServer({
   IncomingMessage: class extends IncomingMessage {
     _destroy(error: Error | null, callback: (error?: Error | null) => void) {
-      if (!error && this.complete && this.readableEnded) { callback(null); return }
+      if (!error && this.complete && this.readableEnded) {
+        callback(null)
+        return
+      }
       super._destroy(error, callback)
     }
   },
   ServerResponse: class extends ServerResponse {
-    assignSocket(socket: Socket) { super.assignSocket(socket) }
+    assignSocket(socket: Socket) {
+      super.assignSocket(socket)
+    }
   },
 })
 server.on("request", (request, response) => {
@@ -665,7 +696,7 @@ server.on("request", (request, response) => {
 })
 ```
 
-正常EOF只移动原清理时机；响应完成或断开执行原清理，提前上传错误仍走原_destroy。复用NodeHttpServer/Effect取消及原WebSocket/shutdown合同，版本判断、私有symbol读取、新取消registry与新状态数0。内存loopback实证：基线无response.close；上述组合在Bun1.3.14得到aborted=1、cleaned=101（一次取消+100次正常请求）。
+正常EOF只移动原清理时机；响应完成或断开执行原清理，提前上传错误仍走原\_destroy。复用NodeHttpServer/Effect取消及原WebSocket/shutdown合同，版本判断、私有symbol读取、新取消registry与新状态数0。内存loopback实证：基线无response.close；上述组合在Bun1.3.14得到aborted=1、cleaned=101（一次取消+100次正常请求）。
 
 行为验证由原voice HTTP集成测试改为调用真实Server.listen，借既有Effect scope管理listener；上游仍是既有独立NodeHttpServer fixture。保留双客户端、等待者取消、原operation完成前资源存活、正文取消、后继请求及50MiB全部断言。集中执行原CI consumer、HttpApi三模式、包级typecheck、相关回归、core原有测试；独立实现审计按全部原需求与当前工作区范围核验。该节为当前修复的具体覆盖，历史R11/R12运行时升级叙述由本节取代。
 
@@ -673,15 +704,15 @@ server.on("request", (request, response) => {
 
 用户最新执行要求：先解决已知失败，逐项最小复现与相关回归；全部修复和审计收敛后才执行最终全量检查。前次600秒全量调用被终端时限中断，后次调用由用户中断；两次均无完整汇总，均不计通过。中断后进程查询未发现对应test-ci或reporter-outfile子进程。后续没有启动新的全量测试。本节只补充证据，不改变R13生产合同或允许增加修改范围。
 
-| 检查与工作目录 | 当前证据 |
-| --- | --- |
-| `bun typecheck`，packages/opencode | R13通过，Bun1.3.14 |
-| `bun run test:ci`，packages/core | 360通过、0失败、658断言、48文件；这是已完成的前轮结果 |
-| server/provider/listen/mdns及原OpenTUI四文件组合，packages/opencode | 32通过、7项既有跳过、0失败、143断言；Windows PTY upgrade仍未验证 |
-| HttpApi auth、coverage，packages/opencode | 各158通过，fail/skip/missing/extra均0 |
+| 检查与工作目录                                                                                                            | 当前证据                                                                                                                               |
+| ------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `bun typecheck`，packages/opencode                                                                                        | R13通过，Bun1.3.14                                                                                                                     |
+| `bun run test:ci`，packages/core                                                                                          | 360通过、0失败、658断言、48文件；这是已完成的前轮结果                                                                                  |
+| server/provider/listen/mdns及原OpenTUI四文件组合，packages/opencode                                                       | 32通过、7项既有跳过、0失败、143断言；Windows PTY upgrade仍未验证                                                                       |
+| HttpApi auth、coverage，packages/opencode                                                                                 | 各158通过，fail/skip/missing/extra均0                                                                                                  |
 | `bun run script/httpapi-exercise.ts --mode effect --fail-on-missing --fail-on-skip --progress --trace`，packages/opencode | 完整结果156通过、2失败、skip/missing/extra均0；失败为pty.create与worktree.reset；语音场景通过。原始输出tool_0b2c7840e001PBq5N639ww0V2Q |
-| `npm test`，thirdparty/chatgpt-browser-agent | syntax/deps通过；MCP在viewport用例断言500x400失败后退出，不能计为完整73项通过 |
-| `node test-mcp.js testViewportResyncClearsStaleLayoutSize`，同上 | 单项通过；随后与testPrivateBrowserDoesNotExposeAutomationFlag组合2项通过。原失败尚未稳定复现，重跑通过不等于修复 |
+| `npm test`，thirdparty/chatgpt-browser-agent                                                                              | syntax/deps通过；MCP在viewport用例断言500x400失败后退出，不能计为完整73项通过                                                          |
+| `node test-mcp.js testViewportResyncClearsStaleLayoutSize`，同上                                                          | 单项通过；随后与testPrivateBrowserDoesNotExposeAutomationFlag组合2项通过。原失败尚未稳定复现，重跑通过不等于修复                       |
 
 ### 已知失败的窄范围归因
 
@@ -717,7 +748,7 @@ PTY：设置绝对TMPDIR后仅运行`--include pty.create`仍是正常创建500�
 
 **Observed RED：** `packages/opencode`中Bun1.3.14内存探针创建隔离XDG目录、内存DB和真实Server.listen；一个net.Socket先发送`GET /global/health`，收到healthy后在原socket再次发送。首个响应200、156字节，第二个无响应，5秒上界报`keepalive timeout; bytes=156; sentSecond=true`。探针finally销毁自有socket、停止listener、关闭DB并删除其专属临时目录。最初探针的HTTP framing亦用CRLF明确构造后复核，故不把探针编码问题作为生产结论。
 
-最小对照同样只用一个net.Socket发送两次GET：原生createServer、仅IncomingMessage子类、仅ServerResponse子类、两个子类均得到responses=2；增加R13的finish清理后responses=1且socket关闭。清理时实际request.complete=false、readableEnded=false、destroyed=false。首次偏离就是server.ts:218无条件调用原生_destroy，原运行时把仍未读完的请求当作中断销毁其连接；调用者重连、客户端重试或替换HTTP栈均不属于修复。
+最小对照同样只用一个net.Socket发送两次GET：原生createServer、仅IncomingMessage子类、仅ServerResponse子类、两个子类均得到responses=2；增加R13的finish清理后responses=1且socket关闭。清理时实际request.complete=false、readableEnded=false、destroyed=false。首次偏离就是server.ts:218无条件调用原生\_destroy，原运行时把仍未读完的请求当作中断销毁其连接；调用者重连、客户端重试或替换HTTP栈均不属于修复。
 
 ### 同一primary path的修正
 
@@ -731,16 +762,16 @@ if (request.destroyed && request.complete && request.readableEnded)
   IncomingMessage.prototype._destroy.call(request, null, () => {})
 ```
 
-赋回的是该请求原有方法，判断依赖已有stream生命周期属性；不增加标志、注册表、版本分支、独立超时或恢复状态。响应已完成后新发生的请求EOF沿恢复后的原生_destroy收尾，避免继续延期到已经触发过的finish事件。正常已延期、尚未销毁、提前错误是同一请求合同内的完成时序，不是失败后的备用成功路径。删去R13的无条件手工销毁；原注释保留并补充其适用时序。仅在内存探针尝试该修正，responses=2；当前生产文件仍是RED版本，审批前不实施。
+赋回的是该请求原有方法，判断依赖已有stream生命周期属性；不增加标志、注册表、版本分支、独立超时或恢复状态。响应已完成后新发生的请求EOF沿恢复后的原生\_destroy收尾，避免继续延期到已经触发过的finish事件。正常已延期、尚未销毁、提前错误是同一请求合同内的完成时序，不是失败后的备用成功路径。删去R13的无条件手工销毁；原注释保留并补充其适用时序。仅在内存探针尝试该修正，responses=2；当前生产文件仍是RED版本，审批前不实施。
 
 ### 映射、文件及验证
 
-| 映射 | 所属与证据 | 变更与行为证明 |
-| --- | --- | --- |
-| I11 → 请求清理owner | serverLayer同时提供普通HTTP和语音listener；上游业务handler不拥有请求销毁 | 修改既有src/server/server.ts的finish；既有test/server/httpapi-listen.test.ts加入一个socket两个成功响应的敏感测试 |
-| R07/I07 → 延期正常EOF | WAV读完仍需response.close中断原operation | 保留tui-provider-endpoint-status中的完整取消/锁/文件完成点六场景；不得以keepalive修复撤掉取消 |
-| I11 → 流式收尾 | global.ts的onSseClientCountChange本来就向daemon公开连接计数 | 在既有httpapi-listen.test.ts通过真实/global/event收到server.connected后断开，等待既有计数回零及后继health成功，finally复原该测试注册的回调 |
-| 方法归还与既有状态条件 → I11 | 当前无条件清理提前关闭连接；仅删除调用又会遗漏已延期EOF收尾 | 复用原生方法和stream状态，不将业务判断或新状态放入transport |
+| 映射                         | 所属与证据                                                               | 变更与行为证明                                                                                                                             |
+| ---------------------------- | ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| I11 → 请求清理owner          | serverLayer同时提供普通HTTP和语音listener；上游业务handler不拥有请求销毁 | 修改既有src/server/server.ts的finish；既有test/server/httpapi-listen.test.ts加入一个socket两个成功响应的敏感测试                           |
+| R07/I07 → 延期正常EOF        | WAV读完仍需response.close中断原operation                                 | 保留tui-provider-endpoint-status中的完整取消/锁/文件完成点六场景；不得以keepalive修复撤掉取消                                              |
+| I11 → 流式收尾               | global.ts的onSseClientCountChange本来就向daemon公开连接计数              | 在既有httpapi-listen.test.ts通过真实/global/event收到server.connected后断开，等待既有计数回零及后继health成功，finally复原该测试注册的回调 |
+| 方法归还与既有状态条件 → I11 | 当前无条件清理提前关闭连接；仅删除调用又会遗漏已延期EOF收尾              | 复用原生方法和stream状态，不将业务判断或新状态放入transport                                                                                |
 
 仅额外修改上述1个既有生产文件和1个既有测试文件，生产总数仍16、新增仓库文件0。S12总预算45行；相对R13预计实质代码E增加约4行、邻近中文解释C增加至少2行。两个测试预计E不超过90、C至少14，分别解释同socket判定、等待真实响应而非sleep、stream完成信号、断开前后资源归属和finally清理；不弱化已有注释。整体当前A/E/C最终仍须独立复算，不能沿用历史值。
 
@@ -750,14 +781,14 @@ TDD顺序：先写同socket两请求测试并运行RED；按本节改finish并�
 
 ## 31. R14 实施证据（尚未完成最终验收）
 
-R14批准后仅修改既有server.ts与httpapi-listen.test.ts。生产finish先归还请求的原生_destroy，再针对destroyed/complete/readableEnded的正常EOF补做延期清理；原五条相关中文注释保持，新增两条解释请求/响应完成顺序和未消费GET的连接复用边界。新增测试通过一个原始TCP socket顺序发送两个health请求，SSE测试通过真实/global/event首事件、客户端断开、daemon原有连接计数通知回零及后继health响应观察完整收尾。
+R14批准后仅修改既有server.ts与httpapi-listen.test.ts。生产finish先归还请求的原生\_destroy，再针对destroyed/complete/readableEnded的正常EOF补做延期清理；原五条相关中文注释保持，新增两条解释请求/响应完成顺序和未消费GET的连接复用边界。新增测试通过一个原始TCP socket顺序发送两个health请求，SSE测试通过真实/global/event首事件、客户端断开、daemon原有连接计数通知回零及后继health响应观察完整收尾。
 
-| 顺序 | 命令（工作目录packages/opencode，Bun1.3.14） | 结果 |
-| --- | --- | --- |
-| RED，生产finish未修改 | `bun test test/server/httpapi-listen.test.ts --test-name-pattern "keepalive"` | 0通过、1失败、11过滤；`keepalive connection closed before both responses`，约3.4秒 |
-| GREEN，按批准R14修改finish | 同上 | 1通过、0失败、11过滤、2断言，约3.2秒 |
-| 相关回归 | `bun test test/server/httpapi-listen.test.ts test/server/tui-provider-endpoint-status.test.ts test/server/httpapi-mdns.test.ts` | 20通过、7项既有平台跳过、0失败、95断言，约26.6秒；含真实SSE和原语音取消 |
-| 类型检查 | `bun typecheck` | tsgo --noEmit退出0 |
+| 顺序                       | 命令（工作目录packages/opencode，Bun1.3.14）                                                                                    | 结果                                                                               |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
+| RED，生产finish未修改      | `bun test test/server/httpapi-listen.test.ts --test-name-pattern "keepalive"`                                                   | 0通过、1失败、11过滤；`keepalive connection closed before both responses`，约3.4秒 |
+| GREEN，按批准R14修改finish | 同上                                                                                                                            | 1通过、0失败、11过滤、2断言，约3.2秒                                               |
+| 相关回归                   | `bun test test/server/httpapi-listen.test.ts test/server/tui-provider-endpoint-status.test.ts test/server/httpapi-mdns.test.ts` | 20通过、7项既有平台跳过、0失败、95断言，约26.6秒；含真实SSE和原语音取消            |
+| 类型检查                   | `bun typecheck`                                                                                                                 | tsgo --noEmit退出0                                                                 |
 
 未启动全量套件，未修改Bun版本、暂存区或远端。Windows跳过项不作upgrade验证证据；Linux执行域、viewport波动、当前全范围A/E/C与最终独立实现审计仍待闭环。当前结果只证明上述R14定向修复，尚不具备verified或完成声明条件。
 
@@ -771,10 +802,10 @@ R14批准后仅修改既有server.ts与httpapi-listen.test.ts。生产finish先�
 
 **唯一修正：** 在既有测试的page CDP session中取得Browser.getWindowForTarget结果，先通过Browser.setWindowBounds设windowState=normal，再设width=1200、height=900。用有界page.waitForFunction等待实际布局达到宽>700、高>500后才设置500x400 override；原fixture pin断言、sync调用和最终恢复断言完整保持。等待观察布局就绪，不增加固定sleep、断言重试包装、扩大测试超时、skip或生产fallback。5秒上界与同仓测试短时就绪检查一致，仅限制测试准备阶段。
 
-| 双向映射 | 责任与证据 | 修改/验证 |
-| --- | --- | --- |
-| 既有viewport恢复验证可靠性 → 测试窗口fixture | 小窗口时生产明确保持正常布局差值，原测试阈值不能成立 | 仅修改thirdparty/chatgpt-browser-agent/test-mcp.js既有函数，建立大窗口前提 |
-| 固定窗口与就绪谓词 → 保留现有同步断言 | 单独设置500x400 override无法保证与真实窗口存在stale差值 | 保留500宽pin及恢复宽>700/高>500；测试仍调用真实syncPageViewportWithWindow |
+| 双向映射                                     | 责任与证据                                              | 修改/验证                                                                  |
+| -------------------------------------------- | ------------------------------------------------------- | -------------------------------------------------------------------------- |
+| 既有viewport恢复验证可靠性 → 测试窗口fixture | 小窗口时生产明确保持正常布局差值，原测试阈值不能成立    | 仅修改thirdparty/chatgpt-browser-agent/test-mcp.js既有函数，建立大窗口前提 |
+| 固定窗口与就绪谓词 → 保留现有同步断言        | 单独设置500x400 override无法保证与真实窗口存在stale差值 | 保留500宽pin及恢复宽>700/高>500；测试仍调用真实syncPageViewportWithWindow  |
 
 TDD反馈沿前轮npm test的500x400失败及上述受控窗口实验；批准后先运行原单测记录当前结果，再修改fixture并执行`node test-mcp.js testViewportResyncClearsStaleLayoutSize`及与`testPrivateBrowserDoesNotExposeAutomationFlag`组合。可在小窗口启动的有界诊断中复验前提恢复，结果不能用重复直到通过代替。全量MCP及仓库全量继续留到定向修复收敛后的最终一轮。
 
@@ -788,13 +819,13 @@ TDD反馈沿前轮npm test的500x400失败及上述受控窗口实验；批准�
 
 在临时目录`D:/Temp/opencode/bun-linux-1.3.14`准备npm发布的同版本Linux运行时，WSL中输出1.3.14；Windows Bun、package.json和锁文件未变。此步骤补齐本地等价执行环境，不升级已有运行时。WSL工作目录为`/mnt/f/ML/PythonAIProject/Claude-Code/opencode/packages/opencode`，执行文件为`/mnt/d/Temp/opencode/bun-linux-1.3.14/package/bin/bun`。
 
-| Linux命令 | 结果 |
-| --- | --- |
-| `bun run script/httpapi-exercise.ts --mode effect --include pty.create --fail-on-missing --fail-on-skip --trace` | 2通过、0失败，正常创建200、非法输入400 |
-| `bun run script/httpapi-exercise.ts --mode effect --include worktree.reset --fail-on-missing --fail-on-skip --trace` | 1通过、0失败，reset返回200 |
-| `bun test test/server/httpapi-listen.test.ts test/server/tui-provider-endpoint-status.test.ts test/server/httpapi-mdns.test.ts` | 默认5秒上界下26通过、1个目录绑定测试超时；其余upgrade、shutdown、取消均完成 |
-| `bun test test/server/httpapi-listen.test.ts --test-name-pattern "PTY connect token requires matching directory" --timeout 30000` | 1通过，目标用例约5464毫秒 |
-| `bun test test/server/httpapi-listen.test.ts test/server/tui-provider-endpoint-status.test.ts test/server/httpapi-mdns.test.ts --timeout 30000` | 27通过、0失败、无skip、126断言，29.81秒 |
+| Linux命令                                                                                                                                       | 结果                                                                        |
+| ----------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
+| `bun run script/httpapi-exercise.ts --mode effect --include pty.create --fail-on-missing --fail-on-skip --trace`                                | 2通过、0失败，正常创建200、非法输入400                                      |
+| `bun run script/httpapi-exercise.ts --mode effect --include worktree.reset --fail-on-missing --fail-on-skip --trace`                            | 1通过、0失败，reset返回200                                                  |
+| `bun test test/server/httpapi-listen.test.ts test/server/tui-provider-endpoint-status.test.ts test/server/httpapi-mdns.test.ts`                 | 默认5秒上界下26通过、1个目录绑定测试超时；其余upgrade、shutdown、取消均完成 |
+| `bun test test/server/httpapi-listen.test.ts --test-name-pattern "PTY connect token requires matching directory" --timeout 30000`               | 1通过，目标用例约5464毫秒                                                   |
+| `bun test test/server/httpapi-listen.test.ts test/server/tui-provider-endpoint-status.test.ts test/server/httpapi-mdns.test.ts --timeout 30000` | 27通过、0失败、无skip、126断言，29.81秒                                     |
 
 30000是仓库script/test-ci.ts既有REPORTER_ARGS，不是修改测试源码或为本次错误新增放宽值。测试使用原有临时fixture仓库；没有操作主/子仓库索引、提交或远端。Linux环境前轮“无可执行Bun”的缺口现已补齐；最终完整套件仍按用户要求留到定向修复收敛之后。
 
@@ -806,17 +837,17 @@ TDD反馈沿前轮npm test的500x400失败及上述受控窗口实验；批准�
 
 N-02由auditor自行读取旧unified diff、恢复删除/移动源文、计算blob身份，并与历史Turbo 2.8.13的opencode#test:ci inputs清单核对。历史清单位于`tool_0ab44e71d001nL6bUGbeMNiow8`，补齐server.ts、dialog-prompt.test.tsx、httpapi-exercise/index.ts和httpapi-listen.test.ts的身份。整个过程没有新Git命令或Git内部读取。
 
-| 当前独立实测 | 数值 |
-| --- | ---: |
-| 生产操作文件 | 16：15修改、1删除、0新增 |
-| 测试文件 | 11 |
-| 生产增加侧非空行A₀，含import/注释且不扣移动 | 518 |
-| 已核实代码及完整注释原样移动M | 31 |
-| 扣除已核实移动的A | 487 |
-| 生产E / C | 366 / 93 |
-| 测试E / C | 1392 / 246 |
-| 总E / C | 1758 / 339 |
-| 总C/E | 19.2833% |
+| 当前独立实测                                |                     数值 |
+| ------------------------------------------- | -----------------------: |
+| 生产操作文件                                | 16：15修改、1删除、0新增 |
+| 测试文件                                    |                       11 |
+| 生产增加侧非空行A₀，含import/注释且不扣移动 |                      518 |
+| 已核实代码及完整注释原样移动M               |                       31 |
+| 扣除已核实移动的A                           |                      487 |
+| 生产E / C                                   |                 366 / 93 |
+| 测试E / C                                   |               1392 / 246 |
+| 总E / C                                     |               1758 / 339 |
+| 总C/E                                       |                 19.2833% |
 
 auditor确认所有实质增加文件的C/E均超过10%，总量超过15%，增加量低于800；删除行没有抵扣增加量。E排除注释、完整import及已核实纯移动，C排除原样旧注释与无关说明；主交付采用更保守的A₀=518，不依赖相似度扣减。
 
@@ -858,10 +889,10 @@ N-01原文要点：auditor独立运行LinuxBun版本得到1.3.14，核对CI的30
 
 首个偏离是test-mcp.js同步调用后立即读取布局的断言时机；CDP应答并未承诺同tick页面布局已可见。生产helper维持协议调用合同，不添加轮询。仅在原单次sync后使用page.waitForFunction等待现有最终宽>700/高>500条件（5秒上界），然后执行原最终断言；不重试sync、不修改断言阈值、不增加固定sleep、不扩大已有每项60秒期限。新增等待仅观察结果，负对照证明它本身不能修复故障注入。
 
-| 要求/反向映射 | owner与理由 | 文件/敏感验证 |
-| --- | --- | --- |
-| I07/I11及CI无资源残留 → SSE请求abort | 原fixture持有两个请求；生产已提供正确signal清理入口 | 既有test/server/httpapi-event.test.ts；同一进程先event再listen的17项组合从归零失败转绿 |
-| 既有viewport恢复断言 → 可观察布局完成 | renderer异步完成，CDP确认不是布局barrier；测试拥有等待观察的责任 | 既有agent test-mcp.js；保留500pin、单次sync及恢复断言；负对照缺sync仍失败 |
+| 要求/反向映射                         | owner与理由                                                      | 文件/敏感验证                                                                          |
+| ------------------------------------- | ---------------------------------------------------------------- | -------------------------------------------------------------------------------------- |
+| I07/I11及CI无资源残留 → SSE请求abort  | 原fixture持有两个请求；生产已提供正确signal清理入口              | 既有test/server/httpapi-event.test.ts；同一进程先event再listen的17项组合从归零失败转绿 |
+| 既有viewport恢复断言 → 可观察布局完成 | renderer异步完成，CDP确认不是布局barrier；测试拥有等待观察的责任 | 既有agent test-mcp.js；保留500pin、单次sync及恢复断言；负对照缺sync仍失败              |
 
 新增生产文件/行/机制0，测试新增文件0。预计SSE E增加4行、C增加2行；viewport E增加1行、C增加2行；原注释完整保留。既有518生产A₀不变；整体E/C实施后重新计量，不直接沿用旧比率。删除/替换仅限SSE缺signal的请求参数与测试即时读取时序，无新备用成功路径，诊断生产决策面0%。
 
@@ -875,13 +906,13 @@ TDD：保留r15-sse-event-order.log的16pass/1fail及r15-mcp-final.err.log原500
 
 Linux普通用户smark、Bun1.3.14、Node24.16.0，源码与依赖位于原生文件系统/home/smark/.cache/opencode-r16-worktree。依赖仅从本机现有安装复制，无安装或下载（一次隔离安装请求被策略拒绝后未重试）。完整依赖闭包核对1870包、5060关系、948链接，必需缺失0；源码、测试、脚本逐文件checksum与主工作区一致，.git未复制。记录为r16-snapshot-dependencies.json、r16-import-readiness.json。最初不完整副本产生缺包失败，均保留原始日志；最终结果单列如下，不能把准备期失败删去。
 
-| 最终验证 | 原始证据（D:/Temp/opencode/） | 结果 |
-| --- | --- | --- |
-| 原生Linux `bun run test:ci`，packages/opencode | r16-native-final-complete.log | core片3656通过/19既有skip/0失败；TUI片769通过/9既有skip/0失败；父runner退出0 |
-| Linux普通用户 `bun run test:ci`，packages/core | r16-core-final.log | 360通过、0失败、658断言 |
-| Linux `bun run test:httpapi`，packages/opencode | r15-httpapi-final.log | coverage/auth/effect各158通过、0fail/skip/missing/extra；R16仅两个测试fixture修正，没有改变这些路由 |
-| Windows `bun typecheck`，packages/opencode | 工具原始退出0记录；r15-typecheck-final.log为前轮同生产版本 | R16修改后tsgo --noEmit退出0 |
-| 隔离Linux构建及smoke | r16-build-final.log | 指定channel/version、--single --skip-install --skip-embed-web-ui；编译、Sharp、版本启动、voice Worker全部退出0 |
+| 最终验证                                        | 原始证据（D:/Temp/opencode/）                              | 结果                                                                                                           |
+| ----------------------------------------------- | ---------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| 原生Linux `bun run test:ci`，packages/opencode  | r16-native-final-complete.log                              | core片3656通过/19既有skip/0失败；TUI片769通过/9既有skip/0失败；父runner退出0                                   |
+| Linux普通用户 `bun run test:ci`，packages/core  | r16-core-final.log                                         | 360通过、0失败、658断言                                                                                        |
+| Linux `bun run test:httpapi`，packages/opencode | r15-httpapi-final.log                                      | coverage/auth/effect各158通过、0fail/skip/missing/extra；R16仅两个测试fixture修正，没有改变这些路由            |
+| Windows `bun typecheck`，packages/opencode      | 工具原始退出0记录；r15-typecheck-final.log为前轮同生产版本 | R16修改后tsgo --noEmit退出0                                                                                    |
+| 隔离Linux构建及smoke                            | r16-build-final.log                                        | 指定channel/version、--single --skip-install --skip-embed-web-ui；编译、Sharp、版本启动、voice Worker全部退出0 |
 
 构建产物为快照packages/opencode/dist/opencode-linux-x64/bin/opencode，版本0.0.0-r16-verification。使用无网络命名空间及现有模型源码，不更新主仓库生成文件。build首次缺显式channel及has-flag依赖，分别通过既有环境入口和本地版本一致链接补齐；没有修改构建逻辑或安装包。
 
@@ -913,10 +944,10 @@ R16全范围实现审计ses_f4b6f187cffejjiqKogFcKIjpI最终原文：
 
 在既有testVoiceDeadlineAndForeground中强化最后stalled场景：前项已进入挂起的页面准备后，提交后项进入同一withVoice队列；后项使用同一fixture WAV，在前项仍持有队列时删除该文件，再取消前项以触发现有隔离失败。断言后项立即返回同一VOICE_RUNTIME_FATAL实例，不能返回ENOENT或等待自身取消。等待任务进入以fixture newPage就绪信号同步，不用sleep估计。保留已有fatal回调、页面隔离期限及取消后正常请求的断言。测试在缺fatal检查时确定性捕获后项非法继续，修复后绿。
 
-| 双向映射 | 证据与owner | 文件与验证 |
-| --- | --- | --- |
-| R07/I07 → fatal先于文件读取/排队提交 | 前项取消不能隔离时runtime已产生fatal；旧context消费该事实 | chatgpt-core.js原runVoiceRequest入口恢复判定；test-mcp.js既有deadline用例覆盖排队后继 |
-| 既有fatal检查 → 原可靠性不下降 | onFatal的setImmediate退出晚于Promise队列启动，不代替入口判定 | 后项必须传播同一错误且不消费已删除音频 |
+| 双向映射                             | 证据与owner                                                  | 文件与验证                                                                            |
+| ------------------------------------ | ------------------------------------------------------------ | ------------------------------------------------------------------------------------- |
+| R07/I07 → fatal先于文件读取/排队提交 | 前项取消不能隔离时runtime已产生fatal；旧context消费该事实    | chatgpt-core.js原runVoiceRequest入口恢复判定；test-mcp.js既有deadline用例覆盖排队后继 |
+| 既有fatal检查 → 原可靠性不下降       | onFatal的setImmediate退出晚于Promise队列启动，不代替入口判定 | 后项必须传播同一错误且不消费已删除音频                                                |
 
 预计生产增加侧+2行（1代码、1中文解释），E+1/C+1；测试E约12/C至少3，原注释完整保留。生产A₀预计520，低于800，新增文件0，新增生产诊断/备用路径0。当前实际R16独立计量E1763/C343、19.46%，该数为历史R16，R17实施后重新核算。R16审计已核验73个MCP默认用例跨平台覆盖、HttpApi三门158各通过、完整OpenCode4425通过、core360通过及构建smoke；Windows单次MCP套件的EPERM依然单列执行环境边界，不能推定为本修正对象。
 
@@ -978,12 +1009,12 @@ Observed：截图崩溃发生于Windows Bun1.3.14 standalone；解码链为Fetch
 
 ### 双向映射、范围和TDD
 
-| 要求/不变量 | owner与生产链 | 文件与行为证明 |
-| --- | --- | --- |
-| R01/R07/I12 | submitVoice拥有上传bytes的生命周期；已有SDK负责认证与目标连接 | 既有prompt-voice-input.ts仅改正文准备；既有prompt-voice-input.test.ts编译真实函数、加载native、单次回环上传后正常退出 |
-| R07/R09/I13 | 模拟外部转录上游拥有连接断开事实；请求体完成不代表响应完成 | 既有voice-auth.test.ts调整backendFixture和handler表达；保留四项及全部相关原断言，macOS必须实跑 |
-| owned bytes → I12 | native加载后的file正文原生释放已确定性崩溃，内存字节同条件通过 | 不能只断言类型或重新抄写submitVoice，回归必须import真实生产函数 |
-| 原生Request.signal → I13 | 旧aborted事件仅保证未完成请求体，不能承载响应取消观测 | 请求正文先完成再取消仍观察服务端断连；不把client抛错代替server资源收尾 |
+| 要求/不变量              | owner与生产链                                                  | 文件与行为证明                                                                                                        |
+| ------------------------ | -------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| R01/R07/I12              | submitVoice拥有上传bytes的生命周期；已有SDK负责认证与目标连接  | 既有prompt-voice-input.ts仅改正文准备；既有prompt-voice-input.test.ts编译真实函数、加载native、单次回环上传后正常退出 |
+| R07/R09/I13              | 模拟外部转录上游拥有连接断开事实；请求体完成不代表响应完成     | 既有voice-auth.test.ts调整backendFixture和handler表达；保留四项及全部相关原断言，macOS必须实跑                        |
+| owned bytes → I12        | native加载后的file正文原生释放已确定性崩溃，内存字节同条件通过 | 不能只断言类型或重新抄写submitVoice，回归必须import真实生产函数                                                       |
+| 原生Request.signal → I13 | 旧aborted事件仅保证未完成请求体，不能承载响应取消观测          | 请求正文先完成再取消仍观察服务端断连；不把client抛错代替server资源收尾                                                |
 
 生产文件仍16（修改现有submitVoice所在文件），新增仓库文件0。测试编译产物及源入口仅放测试专属tmp并在finally释放；Windows用已安装pvrecorder包解析native路径，fixture WAV由已知PCM字节生成，不依赖未checkout的子模块音频或录音权限。兼容回归属于Windows standalone输入域，在Windows CI自动运行，其他平台仍运行原上传/取消测试。构建使用当前process.execPath及Bun.build，不安装或升级工具。
 
@@ -1032,17 +1063,17 @@ No blocking findings.
 
 所有测试和typecheck从packages/opencode执行。
 
-| 命令/反馈 | 实际结果 |
-| --- | --- |
-| bun test test/cli/tui/prompt-voice-input.test.ts --test-name-pattern "native-loaded standalone executable"，修正前 | RED：真实生产import、已安装native、回环HTTP的EXE segmentation fault，exit3；构建准备错误不计为RED |
-| bun test test/cli/tui/prompt-voice-input.test.ts --test-name-pattern "native-loaded standalone executable\|already cancelled\|after the file has been read"，修正后 | 3 pass、0 fail、8断言 |
-| bun test test/cli/tui/prompt-voice-input.test.ts | 34 pass、3既有账户E2E skip、0 fail、109断言，含真实120秒测试 |
-| 旧Node HTTP fixture先消费完正文，再跑 never advances after cancellation / keeps body consumption | RED：7 pass、4 fail；cache/profile/profile-post/browser旧aborted观测在约30秒超时，随后移除诊断变更 |
-| bun test test/cli/tui/voice-auth.test.ts --timeout 30000 | 51 pass、0 fail、188断言 |
-| bun test test/server/tui-provider-endpoint-status.test.ts --timeout 30000 | 11 pass、0 fail、76断言 |
-| bun test test/cli/tui/prompt-voice-input.test.ts test/cli/tui/voice-auth.test.ts test/cli/tui/prompt-voice-recorder.test.ts test/server/tui-provider-endpoint-status.test.ts --timeout 30000 | primary集成实跑：107 pass、3既有skip、0 fail、410断言，194.51秒 |
-| bun typecheck | agent并行准备期曾出现编译target类型错误；最终agent及primary独立执行均退出0 |
-| git diff --check（仓库根） | 退出0 |
+| 命令/反馈                                                                                                                                                                                    | 实际结果                                                                                           |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| bun test test/cli/tui/prompt-voice-input.test.ts --test-name-pattern "native-loaded standalone executable"，修正前                                                                           | RED：真实生产import、已安装native、回环HTTP的EXE segmentation fault，exit3；构建准备错误不计为RED  |
+| bun test test/cli/tui/prompt-voice-input.test.ts --test-name-pattern "native-loaded standalone executable\|already cancelled\|after the file has been read"，修正后                          | 3 pass、0 fail、8断言                                                                              |
+| bun test test/cli/tui/prompt-voice-input.test.ts                                                                                                                                             | 34 pass、3既有账户E2E skip、0 fail、109断言，含真实120秒测试                                       |
+| 旧Node HTTP fixture先消费完正文，再跑 never advances after cancellation / keeps body consumption                                                                                             | RED：7 pass、4 fail；cache/profile/profile-post/browser旧aborted观测在约30秒超时，随后移除诊断变更 |
+| bun test test/cli/tui/voice-auth.test.ts --timeout 30000                                                                                                                                     | 51 pass、0 fail、188断言                                                                           |
+| bun test test/server/tui-provider-endpoint-status.test.ts --timeout 30000                                                                                                                    | 11 pass、0 fail、76断言                                                                            |
+| bun test test/cli/tui/prompt-voice-input.test.ts test/cli/tui/voice-auth.test.ts test/cli/tui/prompt-voice-recorder.test.ts test/server/tui-provider-endpoint-status.test.ts --timeout 30000 | primary集成实跑：107 pass、3既有skip、0 fail、410断言，194.51秒                                    |
+| bun typecheck                                                                                                                                                                                | agent并行准备期曾出现编译target类型错误；最终agent及primary独立执行均退出0                         |
+| git diff --check（仓库根）                                                                                                                                                                   | 退出0                                                                                              |
 
 实现主路径为预取消检查→读取独立ArrayBuffer→读后取消检查→原sdk.fetch；没有新重试或fallback、没有生产HTTP/Worker/状态机变更。fixture统一完整读取请求体后交给handler，并使用原生Request.signal观察响应取消；旧依赖未消费请求体触发aborted的临时策略已移除。行为测试保留协议字节、认证、directory、文字结果、请求禁止推进、配置原字节和40秒尝试期限。
 
@@ -1084,12 +1115,12 @@ Invocation: ses_f4a5c4f71ffe5taTTmOWKa9Vjj；Audit mode: implementation；Revisi
 
 **上一轮“本地独立复跑未执行”的验证缺口已关闭。** 本轮从 `packages/opencode` 独立执行，运行时为 Bun 1.3.14：
 
-| 验证 | 实际结果 |
-|---|---|
-| standalone 上传、预取消、读取后取消 | 3 pass、0 fail、8 断言；6.08 秒 |
+| 验证                                         | 实际结果                                      |
+| -------------------------------------------- | --------------------------------------------- |
+| standalone 上传、预取消、读取后取消          | 3 pass、0 fail、8 断言；6.08 秒               |
 | 两个修改测试文件＋录音器＋生产 HTTP 生命周期 | 107 pass、3 skip、0 fail、410 断言；196.03 秒 |
-| `bun typecheck` | 成功退出 |
-| 定向 `git diff --check` | 成功退出，仅 LF/CRLF 提示 |
+| `bun typecheck`                              | 成功退出                                      |
+| 定向 `git diff --check`                      | 成功退出，仅 LF/CRLF 提示                     |
 
 显式关闭账户 E2E，3 个 skip 为既有账户用例。没有访问账户、重启用户 daemon、修改实现或计划、进行远端写操作。修复前 standalone RED 的历史证据未在本轮重新执行；本轮直接确认了当前实现的 GREEN。
 
@@ -1117,16 +1148,16 @@ WSL Ubuntu-22.04可用，普通用户smark/UID1000，Linux6.6.114.1 x86_64、gli
 
 ### 等价映射与命令
 
-| 原验收责任 | 本版执行证据 | 保留限制 |
-| --- | --- | --- |
-| I12 Windows native + standalone原始崩溃闭环 | 保留当前真实生产import RED/GREEN、完整EXE Alt+V四轮、native/正文/清理证据 | 仅Windows x64，账户服务使用隔离回环 |
-| I13原macOS四项失败的取消语义 | 当前相同测试在独立Linux/POSIX Bun1.3.14执行；fixture完整消费正文，原生Request.signal、禁止推进、配置字节与40秒断言全部保留；Windows对应敏感旧fixture RED已实跑 | 不证明Darwin特定运行时或内核实现 |
-| 完整testCI回归 | 从当前工作树隔离复制，真实运行原Turbo依赖构建与opencode test:ci，禁用旧缓存命中，不设置shard，不删测试 | 当前源码哈希、命令、日志和JUnit关联；不能用旧R16成绩替代 |
-| 类型与资源清理 | Linux及Windows包级typecheck；原fixture显式收尾、真实进程退出码及无残留WAV | 本轮不执行真实账户E2E，其既有skip保持 |
+| 原验收责任                                  | 本版执行证据                                                                                                                                                   | 保留限制                                                 |
+| ------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------- |
+| I12 Windows native + standalone原始崩溃闭环 | 保留当前真实生产import RED/GREEN、完整EXE Alt+V四轮、native/正文/清理证据                                                                                      | 仅Windows x64，账户服务使用隔离回环                      |
+| I13原macOS四项失败的取消语义                | 当前相同测试在独立Linux/POSIX Bun1.3.14执行；fixture完整消费正文，原生Request.signal、禁止推进、配置字节与40秒断言全部保留；Windows对应敏感旧fixture RED已实跑 | 不证明Darwin特定运行时或内核实现                         |
+| 完整testCI回归                              | 从当前工作树隔离复制，真实运行原Turbo依赖构建与opencode test:ci，禁用旧缓存命中，不设置shard，不删测试                                                         | 当前源码哈希、命令、日志和JUnit关联；不能用旧R16成绩替代 |
+| 类型与资源清理                              | Linux及Windows包级typecheck；原fixture显式收尾、真实进程退出码及无残留WAV                                                                                      | 本轮不执行真实账户E2E，其既有skip保持                    |
 
 隔离位置为Linux /tmp/opencode-r19.XXXXXX，复制当前受跟踪源码的工作树内容（含未提交修复），排除真实账户配置、.git、Windows node_modules和缓存；使用独立HOME/XDG/TMPDIR，无继承账户凭据。复制历史Linux依赖但不硬链接、不改源副本，检查workspace manifest/lock/patch哈希、符号链接与native加载。必要正常依赖构建只发生在副本；不改CI配置、不操作远端。测试在专属临时fixture内的git init/commit/config和fixture daemon收尾属于测试自身资源，不涉及用户仓库或现用daemon；最新完整验证/commit要求允许这些既有测试步骤，不能误读成禁止运行测试。
 
-packages/opencode工作目录：bun test test/cli/tui/voice-auth.test.ts --test-name-pattern 'never advances after cancellation|keeps .* body consumption' --timeout 30000；bun test test/cli/tui/voice-auth.test.ts test/cli/tui/prompt-voice-input.test.ts --timeout 30000；bun typecheck。隔离repo根只运行Turbo编排（不直接bun test）：bun turbo test:ci --filter=opencode --continue=dependencies-successful --log-order=stream --force --cache=local:。以45分钟外层上限和原测试30秒期限保留真实失败；全量依赖构建及退出结果写专属evidence。完整CI环境保持OPENCODE_DISABLE_LSP_DOWNLOAD=true、Linux FILEWATCHER=false、关闭账户E2E，NODE/Bun路径明确。禁用测试缓存不改变行为或断言。
+packages/opencode工作目录：bun test test/cli/tui/voice-auth.test.ts --test-name-pattern 'never advances after cancellation|keeps .\* body consumption' --timeout 30000；bun test test/cli/tui/voice-auth.test.ts test/cli/tui/prompt-voice-input.test.ts --timeout 30000；bun typecheck。隔离repo根只运行Turbo编排（不直接bun test）：bun turbo test:ci --filter=opencode --continue=dependencies-successful --log-order=stream --force --cache=local:。以45分钟外层上限和原测试30秒期限保留真实失败；全量依赖构建及退出结果写专属evidence。完整CI环境保持OPENCODE_DISABLE_LSP_DOWNLOAD=true、Linux FILEWATCHER=false、关闭账户E2E，NODE/Bun路径明确。禁用测试缓存不改变行为或断言。
 
 所有失败先判断是否本轮实际引入或环境配置问题，只修正隔离环境中确证缺失条件；新生产/测试范围变更必须重新修订审计。最终完整full-scope实现审计覆盖原需求及当前全部diff，核对等价矩阵每项真实结果与未验证限制。只有R19审计APPROVE和本地验证完成后才标记verified，并按用户原要求仅本地commit相关四文件，保留hooks和无关改动、不push。
 
@@ -1201,12 +1232,12 @@ No blocking findings.
 
 **通过。** 独立按实际 diff 增加侧计算：
 
-| 文件 | E | 合格 C | C/E |
-|---|---:|---:|---:|
-| `prompt-voice-input.ts` | 4 | 2 | 50.00% |
-| `prompt-voice-input.test.ts` | 135 | 21 | 15.56% |
-| `voice-auth.test.ts` | 74 | 12 | 16.22% |
-| 合计 | 213 | 35 | 16.43% |
+| 文件                         |   E | 合格 C |    C/E |
+| ---------------------------- | --: | -----: | -----: |
+| `prompt-voice-input.ts`      |   4 |      2 | 50.00% |
+| `prompt-voice-input.test.ts` | 135 |     21 | 15.56% |
+| `voice-auth.test.ts`         |  74 |     12 | 16.22% |
+| 合计                         | 213 |     35 | 16.43% |
 
 排除空行、文档、import-only，以及两处仅复述行为的注释；没有使用纯移动或格式化扣减。三个文件均达到 15% 目标。未发现新增类型逃逸、测试断言弱化、生产职责泄漏或无依据的实现概念。
 
@@ -1244,17 +1275,17 @@ No blocking findings.
 
 缓存直连与 profile HTTP 不调用 DOM。浏览器启动和 voice lease 都消费 DOM 的 sessionPageFact，因而末级恢复会受 DOM 影响。浏览器恢复失败时没有新快照提交；后继 Alt+V 仍使用此前快照。此为可达因果链，不证明用户那次第一步的具体状态码。
 
-| 证据/源文件 | 观察与用途 | 分类 |
-|---|---|---|
-| chatgpt-dom.js:856-906、15 处旧输入框引用 | 要求旧 ID 才判 authenticated；还影响 Project 状态、等待、fill/send、附件及 image 表单范围 | observed |
-| chatgpt-core.js:1700-1735、2382-2514 | startup/voice 共用上述事实；不收敛会刷新/退出；不能只修 TUI | reachable |
-| chatgpt.js:898-955 | Node24、DPAPI/v10、只读 SQLite 离线导出 Cookie，不产出 Bearer | observed |
-| tui-control.ts 全部 voice 路径 | HTTP 现有 Cookie/Bearer、multipart、代理、分支与原子写回；前两步异常未保留给最终调用者 | observed |
-| prompt-voice-input.ts、handlers/tui.ts:134-166 | 真实 TUI 到后端路径、WAV/活动租约清理、末级错误交付 | reachable |
-| packages/core/src/network-proxy.ts；src/util/process.ts | provider fetch 保留 headers/body/signal；Process.run timeout=1000 是 abort 后 kill grace，不是一秒执行期限 | observed |
-| test-mcp.js:2798、voice lifecycle/export 测试 | 旧 fixture 自带 prompt-textarea，无法发现当前真实网页移除 ID | observed |
-| voice-auth.test.ts:188-205、209-240、取消/期限测试 | 已有 HTTP 持久化与恢复分支的行为 seam，不能拿假 browser text 代替本轮真实页面验收 | observed |
-| 用户手动网页听写 | 用户报告当前网页输入与听写正常 | contracted |
+| 证据/源文件                                             | 观察与用途                                                                                                 | 分类       |
+| ------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- | ---------- |
+| chatgpt-dom.js:856-906、15 处旧输入框引用               | 要求旧 ID 才判 authenticated；还影响 Project 状态、等待、fill/send、附件及 image 表单范围                  | observed   |
+| chatgpt-core.js:1700-1735、2382-2514                    | startup/voice 共用上述事实；不收敛会刷新/退出；不能只修 TUI                                                | reachable  |
+| chatgpt.js:898-955                                      | Node24、DPAPI/v10、只读 SQLite 离线导出 Cookie，不产出 Bearer                                              | observed   |
+| tui-control.ts 全部 voice 路径                          | HTTP 现有 Cookie/Bearer、multipart、代理、分支与原子写回；前两步异常未保留给最终调用者                     | observed   |
+| prompt-voice-input.ts、handlers/tui.ts:134-166          | 真实 TUI 到后端路径、WAV/活动租约清理、末级错误交付                                                        | reachable  |
+| packages/core/src/network-proxy.ts；src/util/process.ts | provider fetch 保留 headers/body/signal；Process.run timeout=1000 是 abort 后 kill grace，不是一秒执行期限 | observed   |
+| test-mcp.js:2798、voice lifecycle/export 测试           | 旧 fixture 自带 prompt-textarea，无法发现当前真实网页移除 ID                                               | observed   |
+| voice-auth.test.ts:188-205、209-240、取消/期限测试      | 已有 HTTP 持久化与恢复分支的行为 seam，不能拿假 browser text 代替本轮真实页面验收                          | observed   |
+| 用户手动网页听写                                        | 用户报告当前网页输入与听写正常                                                                             | contracted |
 
 日志位置为用户目录 C:/Users/Lenovo/AppData/Local/opencode/chatgpt-browser-agent/state/daemon.log；不复制凭据。14256 行记录 08:22:50Z `...after one reload: inconsistent`。最新 14274-14277 行记录 09:13:23Z 启动、09:13:27Z `Navigating frame was detached`。本轮探针与用户操作曾时间重叠，frame/Target closed 不能直接归因于新的生产竞态；不据此新增生命周期机制。C:/Users/Lenovo/.local/share/opencode/log/2026-09-29T082132.log 仍只有启动记录，dev.log 为空，未找到该次直连上游状态。
 
@@ -1277,18 +1308,18 @@ const before = await dom.sessionPageFact(page, { waitForTerminal: false })
 // 页面由 MCP 原启动方式取得；只在实验新页面临时改变一个属性并恢复。
 const saved = await page.evaluate(() => {
   const el = document.querySelector('form [contenteditable="true"][role="textbox"]')
-  const id = el.getAttribute('id')
-  el.id = 'prompt-textarea'
+  const id = el.getAttribute("id")
+  el.id = "prompt-textarea"
   return id
 })
 try {
   const during = await dom.sessionPageFact(page, { waitForTerminal: false })
   console.log(before.kind, during.kind) // 实测 inconsistent authenticated
 } finally {
-  await page.evaluate(id => {
-    const el = document.querySelector('#prompt-textarea')
-    if (id === null) el.removeAttribute('id')
-    else el.setAttribute('id', id)
+  await page.evaluate((id) => {
+    const el = document.querySelector("#prompt-textarea")
+    if (id === null) el.removeAttribute("id")
+    else el.setAttribute("id", id)
   }, saved)
 }
 console.log((await dom.sessionPageFact(page, { waitForTerminal: false })).kind)
@@ -1297,14 +1328,14 @@ console.log((await dom.sessionPageFact(page, { waitForTerminal: false })).kind)
 
 ### 47.4 不变量、首个分歧与责任
 
-| ID | 不变量/支持输入域 | 首个分歧与 owner | 修复/验证 |
-|---|---|---|---|
-| V20-1 | 正常已登录的当前网页可完成启动与 voice page 准备 | DOM adapter 把旧 ID 等同 composer 存在 | 替换定位合同；原 sessionPageFact 在无 ID 当前 DOM 上返回 authenticated |
-| V20-2 | 同一 composer 的 Project、文字、附件和发送消费者一致 | 15 个 literal 仍绑定旧 ID | 全部一次替换，保持表单归属和原操作顺序；submit/附件/Project seam 回归 |
-| V20-3 | 有效缓存 HTTP 成功时不进入 browser；恢复成功写回供下一轮直连 | HTTP 实验可成功，用户该次首步原因未观测 | 保持 HTTP 代码；cache401/403→profile429→browser成功→下一轮cache200 闭环验收 |
-| V20-4 | 正常调用使用修复版 daemon | CLI 同版本会复用已加载旧 adapter 的进程 | 沿既有版本淘汰合同同时 bump CLI/core；不新增重启机制 |
-| V20-5 | 取消、固定期限、无秘密日志、无重复提交保持 | 尚无本轮违反证据 | 重跑既有行为回归，禁止为了通过而弱化认证或增时 |
-| V20-6 | ≤4生产文件、≤200生产修改行；无过度防御 | 用户约束 | 计划3文件；同时报告新增侧及增删总量，删除不抵扣；不新增 helper/state/fallback |
+| ID    | 不变量/支持输入域                                            | 首个分歧与 owner                        | 修复/验证                                                                     |
+| ----- | ------------------------------------------------------------ | --------------------------------------- | ----------------------------------------------------------------------------- |
+| V20-1 | 正常已登录的当前网页可完成启动与 voice page 准备             | DOM adapter 把旧 ID 等同 composer 存在  | 替换定位合同；原 sessionPageFact 在无 ID 当前 DOM 上返回 authenticated        |
+| V20-2 | 同一 composer 的 Project、文字、附件和发送消费者一致         | 15 个 literal 仍绑定旧 ID               | 全部一次替换，保持表单归属和原操作顺序；submit/附件/Project seam 回归         |
+| V20-3 | 有效缓存 HTTP 成功时不进入 browser；恢复成功写回供下一轮直连 | HTTP 实验可成功，用户该次首步原因未观测 | 保持 HTTP 代码；cache401/403→profile429→browser成功→下一轮cache200 闭环验收   |
+| V20-4 | 正常调用使用修复版 daemon                                    | CLI 同版本会复用已加载旧 adapter 的进程 | 沿既有版本淘汰合同同时 bump CLI/core；不新增重启机制                          |
+| V20-5 | 取消、固定期限、无秘密日志、无重复提交保持                   | 尚无本轮违反证据                        | 重跑既有行为回归，禁止为了通过而弱化认证或增时                                |
+| V20-6 | ≤4生产文件、≤200生产修改行；无过度防御                       | 用户约束                                | 计划3文件；同时报告新增侧及增删总量，删除不抵扣；不新增 helper/state/fallback |
 
 支持范围：当前 ChatGPT 首页、Project/对话内实际 composer；非表单的其它 editable 不属于 composer。定位不依赖中文 aria-label、CSS 构建哈希、ProseMirror-focused 或旧 ID。没有证据要求 selector 候选数组、按失败逐个尝试、token 解析器或代理切换。现有 frame 导航恢复不扩展。
 
@@ -1320,15 +1351,15 @@ CLI/core DAEMON_VERSION 从26同步改27，仅触发既有正常调用的版本�
 
 ### 47.6 文件清单与预算
 
-| 文件 | 拟议变更 | 生产新增侧/增删总量预算 |
-|---|---|---|
-| thirdparty/chatgpt-browser-agent/chatgpt-dom.js | 替换15处输入框 literal；邻近补充3条解释，保留原注释 | 18 / 33 |
-| thirdparty/chatgpt-browser-agent/chatgpt.js | DAEMON_VERSION 26→27，补1条版本原因注释，保留凭据合同注释 | 2 / 3 |
-| thirdparty/chatgpt-browser-agent/chatgpt-core.js | 同步 DAEMON_VERSION，补1条版本原因注释 | 2 / 3 |
-| thirdparty/chatgpt-browser-agent/test-mcp.js | 修正现有网页 fixtures，覆盖无旧ID真实DOM、submit/Project/附件及认证反例；版本复用回归 | 非生产，预计80–180行实质修改 |
-| thirdparty/chatgpt-browser-agent/test-voice-robustness.js | 更新现有独立页面断言的旧ID fixture/定位，使实测不再绑定退休属性 | 非生产，预计5–15行 |
-| packages/opencode/test/cli/tui/voice-auth.test.ts | 新增完整401/403→profile429→browser快照→第二次cache200一项行为切片，沿用fixture | 非生产，预计25–45行 |
-| 本 canonical | R20 方案、拟议diff、审计 | 非生产 |
+| 文件                                                      | 拟议变更                                                                              | 生产新增侧/增删总量预算      |
+| --------------------------------------------------------- | ------------------------------------------------------------------------------------- | ---------------------------- |
+| thirdparty/chatgpt-browser-agent/chatgpt-dom.js           | 替换15处输入框 literal；邻近补充3条解释，保留原注释                                   | 18 / 33                      |
+| thirdparty/chatgpt-browser-agent/chatgpt.js               | DAEMON_VERSION 26→27，补1条版本原因注释，保留凭据合同注释                             | 2 / 3                        |
+| thirdparty/chatgpt-browser-agent/chatgpt-core.js          | 同步 DAEMON_VERSION，补1条版本原因注释                                                | 2 / 3                        |
+| thirdparty/chatgpt-browser-agent/test-mcp.js              | 修正现有网页 fixtures，覆盖无旧ID真实DOM、submit/Project/附件及认证反例；版本复用回归 | 非生产，预计80–180行实质修改 |
+| thirdparty/chatgpt-browser-agent/test-voice-robustness.js | 更新现有独立页面断言的旧ID fixture/定位，使实测不再绑定退休属性                       | 非生产，预计5–15行           |
+| packages/opencode/test/cli/tui/voice-auth.test.ts         | 新增完整401/403→profile429→browser快照→第二次cache200一项行为切片，沿用fixture        | 非生产，预计25–45行          |
+| 本 canonical                                              | R20 方案、拟议diff、审计                                                              | 非生产                       |
 
 生产新增侧预计22行、增删总量39行，保守上限60行；3生产文件，新增文件0，依赖/config/generated修改0。不能以净增代替计量。若证据证明另有生产缺陷，先修订本 canonical 并重审，仍受4文件/200行约束，不能占第四文件猜修。
 
@@ -1452,15 +1483,15 @@ No blocking findings.
 
 审计对象为 `docs/plans/chatgpt-voice-direct-transcribe-mcp-auth.md` **R20，§47 全部有效增量**。
 
-| 要求／不变量 | 独立核验与覆盖结论 |
-|---|---|
-| Alt+V 的 HTTP 与浏览器职责边界 | 三个 TUI 入口共用 `submitVoice`；后端缓存和 profile 请求不读取 DOM。浏览器末级通过 CLI、daemon、页面稳定检查后才执行转录。 |
-| V20-1：修复错误的页面就绪判定 | `chatgpt-dom.js:868` 确实将旧 ID 存在性作为认证条件；`chatgpt-core.js:1714` 和 `chatgpt-core.js:2382` 消费该事实。修改位于 DOM adapter，未绕过 token 或登录态检查。 |
-| V20-2：所有 composer 消费者一致 | 独立检索确认生产文件中恰有 15 处旧 selector，拟议 diff 全部覆盖；包括 Project、等待、输入、发送、附件及 image 表单定位。计划包含公共行为测试。 |
-| V20-3：恢复后下一轮 HTTP 复用 | `tui-control.ts:125` 接收浏览器文字及认证快照，成功后写回；下一轮在锁内重新读取。计划新增三阶段失败／恢复及第二轮直连测试，并另设真实 Alt+V 验收。 |
-| V20-4：正常调用取得新代码 | `chatgpt.js:546` 已按版本决定复用或淘汰 daemon；CLI/core 同步升级常量有直接消费者，不需要新生命周期机制。 |
-| V20-5：取消、期限和错误语义 | 拟议生产修改不改变这些机制；计划保留并重跑相关回归，不以增加期限或重复提交掩盖故障。 |
-| V20-6：修改规模和简洁性 | 3 个生产文件；15 处参数替换、2 处版本替换及邻近说明。按拟议 diff 为新增侧 22 行、删除侧 17 行，总量 39 行，低于两项用户限制。 |
+| 要求／不变量                    | 独立核验与覆盖结论                                                                                                                                                  |
+| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Alt+V 的 HTTP 与浏览器职责边界  | 三个 TUI 入口共用 `submitVoice`；后端缓存和 profile 请求不读取 DOM。浏览器末级通过 CLI、daemon、页面稳定检查后才执行转录。                                          |
+| V20-1：修复错误的页面就绪判定   | `chatgpt-dom.js:868` 确实将旧 ID 存在性作为认证条件；`chatgpt-core.js:1714` 和 `chatgpt-core.js:2382` 消费该事实。修改位于 DOM adapter，未绕过 token 或登录态检查。 |
+| V20-2：所有 composer 消费者一致 | 独立检索确认生产文件中恰有 15 处旧 selector，拟议 diff 全部覆盖；包括 Project、等待、输入、发送、附件及 image 表单定位。计划包含公共行为测试。                      |
+| V20-3：恢复后下一轮 HTTP 复用   | `tui-control.ts:125` 接收浏览器文字及认证快照，成功后写回；下一轮在锁内重新读取。计划新增三阶段失败／恢复及第二轮直连测试，并另设真实 Alt+V 验收。                  |
+| V20-4：正常调用取得新代码       | `chatgpt.js:546` 已按版本决定复用或淘汰 daemon；CLI/core 同步升级常量有直接消费者，不需要新生命周期机制。                                                           |
+| V20-5：取消、期限和错误语义     | 拟议生产修改不改变这些机制；计划保留并重跑相关回归，不以增加期限或重复提交掩盖故障。                                                                                |
+| V20-6：修改规模和简洁性         | 3 个生产文件；15 处参数替换、2 处版本替换及邻近说明。按拟议 diff 为新增侧 22 行、删除侧 17 行，总量 39 行，低于两项用户限制。                                       |
 
 测试敏感性成立：无旧 ID、具有表单内可编辑 textbox 的 fixture，会使当前 `sessionPageFact` 返回 `inconsistent`；替换后才能满足预期的 `authenticated`。提交测试继续验证可信点击和新增 user turn，未降低成功标准。
 
@@ -1531,13 +1562,13 @@ You've hit the limit for dictation without an account. Log in or sign up to cont
 
 只用合成凭据、隔离 HOME/XDG/TEMP，调用原 `Config.Service.updateGlobal({model:'synthetic/after'})`，不是复制写回算法。真实fs和Config.layer，账号/安装依赖沿用test/config/config.test.ts的既有测试层，禁止真实MCP执行。运行记录 invocation ses_f132dcdf8ffe7T1SqWZIfQhhCq，临时根 D:/Temp/opencode/config-auth-probe-a0dcd2c7bba24c51bb0427e34f636afa，Global.Path全部位于该根。
 
-| 原入口观察 | Cookie-only 合成字段 | Cookie+access_token 合成字段 |
-|---|---|---|
-| 更新前auth存在且内容相同 | true | true |
-| 无关model更新成功 | true | true |
-| 更新后磁盘auth存在 | false | false |
-| 返回配置auth存在 | false | false |
-| command/enabled保留 | true | true |
+| 原入口观察               | Cookie-only 合成字段 | Cookie+access_token 合成字段 |
+| ------------------------ | -------------------- | ---------------------------- |
+| 更新前auth存在且内容相同 | true                 | true                         |
+| 无关model更新成功        | true                 | true                         |
+| 更新后磁盘auth存在       | false                | false                        |
+| 返回配置auth存在         | false                | false                        |
+| command/enabled保留      | true                 | true                         |
 
 独立primary纯内存原ConfigParse.schema(Config.Info,...)重现：beforeAuthPresent=true，afterAuthPresent=false，remainingMcpKeys=[type,command]。服务实验使用opaque合成payload来证明整个字段丢失；正式回归另用真实VoiceAuth字典形状和fetched_at，避免无效fixture掩盖生产兼容。
 
@@ -1699,16 +1730,16 @@ No blocking findings.
 
 审计对象：`docs/plans/chatgpt-voice-direct-transcribe-mcp-auth.md`，**Revision R22，§47、§48、§49 的全部有效拟议变更**。
 
-| 要求／不变量 | 独立核验结论 |
-|---|---|
-| 内置 HTTP 与浏览器职责分离 | 三个 TUI 入口调用同一 `submitVoice`。缓存和 profile 转录经 `NetworkProxy.fetch`，不读取 DOM；浏览器末级才经过页面稳定检查。见 `packages/opencode/src/server/shared/tui-control.ts:99`。 |
-| V20-1：修复页面就绪误判 | `thirdparty/chatgpt-browser-agent/chatgpt-dom.js:868` 将旧 ID 存在性作为认证条件；startup 和 voice 均消费该事实。替换定位参数落在正确 owner，保留 bootstrap、Bearer 和登录入口检查。 |
-| V20-2：全部 composer 消费者一致 | 独立检索并阅读确认 15 处旧 selector，拟议 diff 全覆盖 Project、模式、附件、等待、输入及发送。表单归属、可信点击和新增 user turn 成功标准保持。 |
-| V20-3：浏览器恢复后复用 HTTP | 页面请求返回实际使用的 Bearer，core 与 CLI 保留它，后端转换并写回。见 `thirdparty/chatgpt-browser-agent/chatgpt-core.js:1978`、`packages/opencode/src/server/shared/tui-control.ts:185`。计划覆盖恢复后第二轮缓存直连，并在中间加入无关配置更新。 |
-| V20-4：正常调用取得新代码 | CLI/core 同步升级版本，复用现有版本淘汰机制。见 `thirdparty/chatgpt-browser-agent/chatgpt.js:548`。没有新增重启机制。 |
-| V21-1／V21-2：保留私有认证且不扩大公开返回 | 当前 `.json` 分支先 schema 解码再整份序列化，确实会删除 MCP schema 未定义的 `auth`。R22 改为原文定点更新，公开结果仍由原 schema 生成。见 `packages/opencode/src/config/config.ts:815`、`packages/opencode/src/config/mcp.ts:4`。 |
-| V22-1：合法类型切换保持 | R22 在目标与补丁均为对象时递归，其余整体替换节点。布尔值转对象不再深入布尔父节点，因而避开依赖明确抛错的路径。见 `node_modules/jsonc-parser/lib/umd/impl/edit.js:159`。R21 B-01 的具体回归已在方案中消除。 |
-| 简洁性、修改规模与验证 | 四个生产文件；没有新增 helper、状态、配置项或依赖。拟议增删约 66 行，低于 200 行。取消、期限、错误提交语义保持，并有回归及真实两轮录音验收。 |
+| 要求／不变量                               | 独立核验结论                                                                                                                                                                                                                                      |
+| ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 内置 HTTP 与浏览器职责分离                 | 三个 TUI 入口调用同一 `submitVoice`。缓存和 profile 转录经 `NetworkProxy.fetch`，不读取 DOM；浏览器末级才经过页面稳定检查。见 `packages/opencode/src/server/shared/tui-control.ts:99`。                                                           |
+| V20-1：修复页面就绪误判                    | `thirdparty/chatgpt-browser-agent/chatgpt-dom.js:868` 将旧 ID 存在性作为认证条件；startup 和 voice 均消费该事实。替换定位参数落在正确 owner，保留 bootstrap、Bearer 和登录入口检查。                                                              |
+| V20-2：全部 composer 消费者一致            | 独立检索并阅读确认 15 处旧 selector，拟议 diff 全覆盖 Project、模式、附件、等待、输入及发送。表单归属、可信点击和新增 user turn 成功标准保持。                                                                                                    |
+| V20-3：浏览器恢复后复用 HTTP               | 页面请求返回实际使用的 Bearer，core 与 CLI 保留它，后端转换并写回。见 `thirdparty/chatgpt-browser-agent/chatgpt-core.js:1978`、`packages/opencode/src/server/shared/tui-control.ts:185`。计划覆盖恢复后第二轮缓存直连，并在中间加入无关配置更新。 |
+| V20-4：正常调用取得新代码                  | CLI/core 同步升级版本，复用现有版本淘汰机制。见 `thirdparty/chatgpt-browser-agent/chatgpt.js:548`。没有新增重启机制。                                                                                                                             |
+| V21-1／V21-2：保留私有认证且不扩大公开返回 | 当前 `.json` 分支先 schema 解码再整份序列化，确实会删除 MCP schema 未定义的 `auth`。R22 改为原文定点更新，公开结果仍由原 schema 生成。见 `packages/opencode/src/config/config.ts:815`、`packages/opencode/src/config/mcp.ts:4`。                  |
+| V22-1：合法类型切换保持                    | R22 在目标与补丁均为对象时递归，其余整体替换节点。布尔值转对象不再深入布尔父节点，因而避开依赖明确抛错的路径。见 `node_modules/jsonc-parser/lib/umd/impl/edit.js:159`。R21 B-01 的具体回归已在方案中消除。                                        |
+| 简洁性、修改规模与验证                     | 四个生产文件；没有新增 helper、状态、配置项或依赖。拟议增删约 66 行，低于 200 行。取消、期限、错误提交语义保持，并有回归及真实两轮录音验收。                                                                                                      |
 
 **测试敏感性成立：**
 
@@ -1763,13 +1794,16 @@ R23不更改R22修复路径或增添生产概念。沿用§47-49四文件拟议d
 Invocation ses_f1291f811ffexZ7X6A9Fgfk88L；full-scope plan audit；R23；第4轮。以下分类及裁决原文：
 
 #### Blocking findings
+
 No blocking findings.
 
 #### Non-blocking findings
+
 - **N-01：缺少 Bearer 的历史来源仍不能确定。** 当前源码证明，无关 `.json` 全局配置更新会通过 schema 解码后整体写回，丢弃私有 `auth`，见 `packages/opencode/src/config/config.ts:815`。这足以支持持久化修复，但不能证明它就是当天 Cookie-only 快照的唯一来源。R23 保留了这一证据边界。
 - **N-02：本轮是静态方案审计。** 已独立读取源码、相关测试、依赖实现及全部有效拟议修改；未执行测试、联网转录或浏览器实验。方案中的现场 HTTP 结果未被当作本审计独立复现的结果。
 
 #### Rejected speculation
+
 - 不要求增加 selector 候选链、认证刷新、额外重试、代理切换或更长超时。
 - 不从 `frame detached`、`Target closed` 推导新的生命周期缺陷。
 - 不要求离线 profile Cookie 导出提供 Bearer；该 producer 当前只返回 Cookie，见 `thirdparty/chatgpt-browser-agent/chatgpt.js:951`。
@@ -1777,6 +1811,7 @@ No blocking findings.
 - 不将未被本次修改引入或加重的既有恢复逻辑、并发写入问题扩大为本轮阻断项。
 
 #### Release verdict
+
 **APPROVE — 仅批准 R23 方案。**
 
 该批准允许实施 §47–50 的准确范围，不代表 Alt+V 已恢复或达到 `verified-implementation`。完成仍须取得定向 RED/GREEN、相关回归与 typecheck、真实转录后下一轮缓存直连、隔离配置中的认证保留验证、真实页面消费者验收，以及全范围独立实施批准。
@@ -1793,7 +1828,7 @@ R23配置和DOM修改已实施，production四文件+32/-34；原配置公开服
 
 随后执行真实MCP公共验证 `node test-mcp.js testE2EAskBasic testE2EAskWithFileUpload`（cwd子仓库），daemon检测通过，basic因等待发送按钮10秒失败。纯CDP只读检查当前Project页面：有1个正常可编辑表单textbox，文本已填充，1个启用的`button type=submit aria-label=发送`，但所有按钮均无旧data-testid。未发生user turn，故没有重复发送风险；不把填字成功当提交成功。
 
-同一页面及首页均有3个表单file input，全部multiple、动态React id；accept依次image/*,video/*、image/*、属性缺席。`form input[type="file"][multiple]:not([accept])`恰好匹配1个通用文件输入。当前添加内容按钮没有composer-plus-btn ID，具有`data-composer-navigation-target="add-context"`；模型菜单则为reasoning，scope可明确区分。上述属性为真实DOM读取，不根据未来可能的页面猜测。
+同一页面及首页均有3个表单file input，全部multiple、动态React id；accept依次image/_,video/_、image/\*、属性缺席。`form input[type="file"][multiple]:not([accept])`恰好匹配1个通用文件输入。当前添加内容按钮没有composer-plus-btn ID，具有`data-composer-navigation-target="add-context"`；模型菜单则为reasoning，scope可明确区分。上述属性为真实DOM读取，不根据未来可能的页面猜测。
 
 ### 51.2 Owner、替换与完整diff增量
 
@@ -1846,14 +1881,17 @@ R23配置和DOM修改已实施，production四文件+32/-34；原配置公开服
 Invocation ses_f1276544affeuJL2uiFF5geeDT；full-scope plan audit；R24；第5轮。分类及裁决原文：
 
 #### Blocking findings
+
 No blocking findings.
 
 #### Non-blocking findings
+
 - **N-01：现有验证脚本未覆盖真实快捷键和录音器。** `D:/Temp/opencode/r23-voice-verify.ts:100` 将已有 WAV 交给源码版 `submitVoice`，第二轮在 `D:/Temp/opencode/r23-voice-verify.ts:139` 直接调用 `transcribeVoiceFile`。它可以验证后端恢复、持久化和缓存复用，但不能独立证明实际安装版本的 Alt+V 录音入口恢复。R24 保留了 §47.8 的原场景验收，因此不阻止方案批准；实现验收仍须区分这两类证据。
 - **N-02：最终验收必须确认运行进程已加载 R24。** `thirdparty/chatgpt-browser-agent/chatgpt.js:549` 会直接复用健康的同版本 daemon。§51.2 已允许同步升级至28或使用自行创建的新进程；仅修改磁盘代码、继续调用旧27进程不能验证新增修复。
 - **N-03：本轮为静态、只读方案审计。** 独立检查了源码、测试、依赖实现及现有差异，没有执行测试或联网实验。方案记载的真实 DOM、HTTP 状态和通过数量未被当作本审计独立复现的结果。
 
 #### Rejected speculation
+
 - 不以未来网页改版、假想多个 composer、未知 Cookie 格式要求增加候选 selector、重试或状态机。
 - 不从 `frame detached`、`Target closed` 推导未经证明的新生命周期缺陷。
 - 不要求离线 profile 导出产生 Bearer；现有 producer 明确只返回 Cookie。
@@ -1861,6 +1899,7 @@ No blocking findings.
 - 不将未修改的既有浏览器恢复和 image 行为自动纳入本轮缺陷修复范围。
 
 #### Release verdict
+
 **APPROVE — 仅批准 R24 方案。**
 
 该批准覆盖四个生产文件的完整修复计划及直接影响行为，不代表当前实现已达到 `verified-implementation`。完成仍须通过 R24 新增切片、真实 MCP ask／附件验收、原 Alt+V 场景验证及全范围独立实现审计。
@@ -1883,12 +1922,12 @@ R24参数替换已实施，离线完整73项通过。真实`node test-mcp.js tes
 
 完整替换表（不是候选列表）：
 
-| 原定位/字段 | 新定位/字段 | 消费者 |
-|---|---|---|
-| `[data-message-author-role="user"]` | `[data-chatgpt-search-unit-key$=":user"]` | clickSend前后计数、assistantState、空turn归属 |
-| `[data-message-author-role="assistant"]` | `[data-chatgpt-search-unit-key$=":assistant"]` | state、dump、extractAssistant、sandbox发现/点击、空turn归属 |
-| `[data-testid^="conversation-turn"]` | `[data-content-search-turn-key]` | assistantState turn计数、scrollToEnd |
-| dump的`[data-message-author-role]`与角色读取 | 两种上述role单元的集合，角色值取key最后的冒号字段 | 仅非敏感诊断结构，不输出完整key或正文 |
+| 原定位/字段                                  | 新定位/字段                                       | 消费者                                                      |
+| -------------------------------------------- | ------------------------------------------------- | ----------------------------------------------------------- |
+| `[data-message-author-role="user"]`          | `[data-chatgpt-search-unit-key$=":user"]`         | clickSend前后计数、assistantState、空turn归属               |
+| `[data-message-author-role="assistant"]`     | `[data-chatgpt-search-unit-key$=":assistant"]`    | state、dump、extractAssistant、sandbox发现/点击、空turn归属 |
+| `[data-testid^="conversation-turn"]`         | `[data-content-search-turn-key]`                  | assistantState turn计数、scrollToEnd                        |
+| dump的`[data-message-author-role]`与角色读取 | 两种上述role单元的集合，角色值取key最后的冒号字段 | 仅非敏感诊断结构，不输出完整key或正文                       |
 
 CSS `$=`匹配的是已有角色后缀，不绑定临时turn编号或message ID。dump union表示两个支持的角色，不是失败后回退。所有查询在原位置替换，不新增函数。旧没有role的空回答case继续按最新turn与既有固定标签判定，不引入新的空成功规则。四处生产文件保持，CLI/core版本同步29，以原正常调用使已启动28加载最终代码。
 
@@ -1919,21 +1958,25 @@ CSS `$=`匹配的是已有角色后缀，不绑定临时turn编号或message ID�
 Invocation ses_f123bb4faffefdTkSyB1hZJIGw；full-scope plan audit；R25；第6轮。分类与裁决原文：
 
 #### Blocking findings
+
 No blocking findings.
 
 #### Non-blocking findings
+
 - **N-01：完整验证尚未结束。** §52明确保留 version29 下真实 MCP ask、同会话附件读取、语音恢复与后继缓存 HTTP 验证。已有测试记录不能替代这些最终验收；全量 CI 超时也不能计为通过。
 - **N-02：Alt+V 证据应保持准确边界。** 已直接读取 `D:/Temp/opencode/r24-altv-owned-faYXeH/events.jsonl:10`：安装版 TUI attach 到源码服务，两轮真实录音上传均返回 HTTP200，并完成 WAV 清理；两轮 `textLength` 均为0。这支持快捷键、录音、上传和缓存直连链路，不单独证明有声识别、文字插入或浏览器恢复。
 - **N-03：当天缺失 Bearer 的历史来源仍未确定。** 原配置写回确实存在删除私有 auth 的路径，但不能据此认定它是当天快照的唯一来源。方案保留了这一区分。
 - **N-04：本轮是只读方案审计。** 未执行测试或操作真实 browser、daemon、配置；方案记载的现场 DOM 和联网实验未被冒充为本审计独立复现。
 
 #### Rejected speculation
+
 - 不根据未来 DOM 改版、假想重复 composer 或未知角色格式要求增加 selector 候选链。
 - 不从 `detached`、`Target closed` 推导新的生命周期缺陷或要求新增重试、状态机。
 - 不要求离线 profile 导出产生 Bearer；其实际返回合同只有 Cookie 与时间，见 `thirdparty/chatgpt-browser-agent/chatgpt.js:952`。
 - 不把同文件内未修改、且本次未加重的既有兼容行为自动列为阻断项。
 
 #### Release verdict
+
 **APPROVE — 仅批准 `docs/plans/chatgpt-voice-direct-transcribe-mcp-auth.md` 的 R25 方案。**
 
 批准覆盖§47–52全部有效范围，不构成当前实现发布批准。达到 `verified-implementation` 仍须完成 R25 RED/GREEN、version29 真实页面及语音闭环、规定回归与类型检查，并取得全范围独立实现批准。
@@ -1982,15 +2025,18 @@ R26需针对§47–53全部有效需求和五文件完整重审；不得只审�
 Invocation ses_f119498b8ffeuW20cY6gTusP2z；full-scope plan audit；R26；本次实施目标第4轮。以下分类和裁决原文：
 
 #### Blocking findings
+
 No blocking findings.
 
 #### Non-blocking findings
+
 - **N-01：最终运行验证仍未完成。** R26 的临时 URL 修复尚未实施；version30 下的新会话 ask、同会话附件读取、语音自动认证写回及后继 HTTP 复用仍是实现验收门禁。方案批准不能替代这些结果。
 - **N-02：已有 Alt+V 证据有明确边界。** 独立读取 `D:/Temp/opencode/r24-altv-owned-faYXeH/events.jsonl:10`，确认安装版 TUI attach 到源码后端，两轮录音上传返回 HTTP200、完成 WAV 清理；两轮文字长度均为0。它证明快捷键、录音、上传和缓存直连链路，不单独证明有声识别、文字插入或最终部署版本已经恢复。
 - **N-03：缺失 Bearer 的历史来源仍不能确定。** 原全局配置写回存在删除私有认证的路径，但不能据此认定它就是当天 Cookie-only 快照的唯一来源。方案正确保留了这一证据边界。
 - **N-04：本轮为静态、只读方案审计。** 核验了源码、现有差异、测试及上述事件记录；未执行测试、联网转录或操作真实 browser、daemon、配置。canonical 中其他现场实验没有被当作本审计独立复现的结果。
 
 #### Rejected speculation
+
 - 不因未来 DOM 改版、假想重复 composer 或未知角色格式要求增加 selector 候选链。
 - 不从 `detached`、`Target closed` 推导新的生命周期缺陷。
 - 不要求离线 profile 导出提供 Bearer；其返回合同明确只有 Cookie 与时间，见 `thirdparty/chatgpt-browser-agent/chatgpt.js:952`。
@@ -1998,6 +2044,7 @@ No blocking findings.
 - 不把同文件内未改变、且本轮未加重的既有兼容或恢复行为自动列为阻断项。
 
 #### Release verdict
+
 **APPROVE — 仅批准 `docs/plans/chatgpt-voice-direct-transcribe-mcp-auth.md` 的 R26 方案，full-scope。**
 
 批准覆盖§47–53全部有效范围，不构成实现发布批准。达到 `verified-implementation` 仍须完成R26定向RED/GREEN、version30真实MCP与语音闭环、必要回归和类型检查，并取得完整独立实现批准。
@@ -2056,21 +2103,25 @@ V27-1：每个已挂载附件卡片计一次且可验证文件名，不能把输
 Invocation ses_f117a055dffeeaez56DLYZMSSt；full-scope plan audit；R27；本次实施目标第5轮。分类和裁决原文：
 
 #### Blocking findings
+
 No blocking findings.
 
 #### Non-blocking findings
+
 - **N-01：最终运行验收仍待完成。** R27 的附件解析替换和 version31 尚未形成最终验证证据。真实附件标记读取、当前进程的语音自动认证写回及后继 HTTP 复用，仍须按方案完成。
 - **N-02：Alt+V 证据有明确边界。** 独立读取 `D:/Temp/opencode/r24-altv-owned-faYXeH/events.jsonl:10`：安装版 TUI 连接源码后端，两轮真实录音上传返回 HTTP200、完成 WAV 清理，但文字长度均为0。它证明快捷键、录音、上传和缓存直连链路，不单独证明有声识别、文字插入或最终部署版本恢复。
 - **N-03：缺失 Bearer 的历史来源仍不能确定。** 原配置整体写回存在丢弃私有 auth 的路径；这支持持久化修复，但不足以认定其为当天 Cookie-only 快照的唯一来源。
 - **N-04：本轮为静态、只读方案审计。** 已核验源码、差异、测试和上述事件记录；未执行测试、联网转录或操作现用 browser、daemon、真实配置。方案记载的其他现场实验未被视为本审计独立复现。
 
 #### Rejected speculation
+
 - 不依据未来 DOM 改版、假想嵌套卡片或重复 composer，要求增加 selector 后备链。
 - 不从 `detached`、`Target closed` 推导未经证明的生命周期缺陷。
 - 不要求离线 profile Cookie 导出凭空提供 Bearer，也不要求手填凭据或新增刷新机制。
 - 不把同文件内未改变、且本轮未加重的既有兼容、重试和恢复行为列为阻断项。
 
 #### Release verdict
+
 **APPROVE — 仅批准 R27 方案，full-scope。**
 
 批准覆盖§47–54全部有效范围，不构成 `verified-implementation` 批准。完成仍须取得 R27 定向 RED/GREEN、version31 真实附件与语音闭环、必要回归及类型检查，并通过完整独立实现审计。
@@ -2083,17 +2134,17 @@ No blocking findings.
 
 ### 55.1 当前差异与计量
 
-| 文件 | 新增/删除 | E | C |
-|---|---|---|---|
-| packages/opencode/src/config/config.ts | 10/17 | 6 | 3 |
-| thirdparty/chatgpt-browser-agent/chatgpt-dom.js | 49/53 | 38 | 11 |
-| thirdparty/chatgpt-browser-agent/chatgpt-project.js | 4/2 | 2 | 2 |
-| thirdparty/chatgpt-browser-agent/chatgpt.js | 2/1 | 1 | 1 |
-| thirdparty/chatgpt-browser-agent/chatgpt-core.js | 2/1 | 1 | 1 |
-| packages/opencode/test/config/config.test.ts | 100/0 | 81 | 16 |
-| packages/opencode/test/cli/tui/voice-auth.test.ts | 7/5 | 5 | 2 |
-| thirdparty/chatgpt-browser-agent/test-mcp.js | 127/70 | 99 | 24 |
-| thirdparty/chatgpt-browser-agent/test-voice-robustness.js | 2/1 | 1 | 1 |
+| 文件                                                      | 新增/删除 | E   | C   |
+| --------------------------------------------------------- | --------- | --- | --- |
+| packages/opencode/src/config/config.ts                    | 10/17     | 6   | 3   |
+| thirdparty/chatgpt-browser-agent/chatgpt-dom.js           | 49/53     | 38  | 11  |
+| thirdparty/chatgpt-browser-agent/chatgpt-project.js       | 4/2       | 2   | 2   |
+| thirdparty/chatgpt-browser-agent/chatgpt.js               | 2/1       | 1   | 1   |
+| thirdparty/chatgpt-browser-agent/chatgpt-core.js          | 2/1       | 1   | 1   |
+| packages/opencode/test/config/config.test.ts              | 100/0     | 81  | 16  |
+| packages/opencode/test/cli/tui/voice-auth.test.ts         | 7/5       | 5   | 2   |
+| thirdparty/chatgpt-browser-agent/test-mcp.js              | 127/70    | 99  | 24  |
+| thirdparty/chatgpt-browser-agent/test-voice-robustness.js | 2/1       | 1   | 1   |
 
 生产5文件，新增侧67、删除74、总修改141（不以删除抵扣）；全部E234/C61≈26.1%，生产E48/C18=37.5%。E排除注释、空行、import-only，C按邻近解释单列，实际独立计量以审计结果为准。没有新增仓库文件。主仓库其它计划/VSCode暂存及thirdparty/opencode-11720保留，未git add/commit/push；过程中其它agent提交的shell/OpenTUI内容不纳入本次diff。
 
@@ -2138,14 +2189,17 @@ R27当前全部实际diff进入独立full-scope implementation audit；目前状
 Invocation ses_f115f539fffevtq3tG7VrfJGR0；full-scope implementation audit；Revision R27；实现审计第1轮，同会话补齐独立执行。初次因等待定向执行确认而暂缓，没有代码blocking finding；明确既有本地验证授权后独立执行并作最终裁决。以下分类、结论及执行结果为原文：
 
 ### Blocking findings
+
 No blocking findings.
 
 ### Non-blocking findings
+
 - **N-01：部署边界保持。** 本次批准源码实现；安装版 TUI 已连接源码后端验证，用户已安装后端尚未部署配置修复。不能将实现批准表述为所有现用进程均已升级。
 - **N-02：历史归因保持不确定性。** 原配置写回存在删除私有认证的确定路径，但不能据此断言它是当天 Cookie-only 快照的唯一来源。
 - **N-03：不宣称全量 CI 全绿。** 既有广域运行存在超时和 TUI 失败。本轮没有重复全量，也没有发现这些结果与本次修改之间的证据链；当前变更的必要定向验证已独立通过。
 
 ### Rejected speculation
+
 - 不要求新增 selector 后备链、认证刷新、额外重试、状态机或延长生产期限。
 - 不以假想重复 composer、嵌套卡片、未来网页改版作为阻断依据。
 - 不要求离线 profile 导出凭空提供 Bearer。
@@ -2155,20 +2209,21 @@ No blocking findings.
 
 本轮延续原完整范围，审计 **R27 §47–54、全部指定实际 diff、直接影响的生产者与消费者，以及相关测试**，未缩减为最后一处附件修复。
 
-| 要求 | 核验结论 |
-|---|---|
-| 页面认证与输入框一致 | 表单 textbox 合同覆盖认证、Project、模式、输入、附件与发送；认证条件保持。 |
-| 提交与回答归属 | 新角色/turn 属性贯穿计数、状态、正文、产物与滚动；新增用户消息仍是接受事实。 |
-| 附件完整提交 | 当前卡片解析替换退休属性；文件名、数量、残留清理、可信发送保持。 |
-| 持久会话身份 | 临时 ID 在 URL 策略 owner 被排除；原轮询等待永久地址，跨会话保护保持。 |
-| 私有认证持久化 | 原文 patch 保存未修改的认证；公开返回继续由 schema 限定，合法类型切换保持。 |
-| 新实现加载 | CLI/core 同步31，使用原版本淘汰机制。 |
-| 语音恢复与复用 | 缓存/profile/browser 既有编排保持；成功快照自动写回，后继 HTTP 消费同一快照。 |
-| 取消与期限 | 独立回归确认取消、固定期限、资源释放及后继请求可用。 |
+| 要求                 | 核验结论                                                                      |
+| -------------------- | ----------------------------------------------------------------------------- |
+| 页面认证与输入框一致 | 表单 textbox 合同覆盖认证、Project、模式、输入、附件与发送；认证条件保持。    |
+| 提交与回答归属       | 新角色/turn 属性贯穿计数、状态、正文、产物与滚动；新增用户消息仍是接受事实。  |
+| 附件完整提交         | 当前卡片解析替换退休属性；文件名、数量、残留清理、可信发送保持。              |
+| 持久会话身份         | 临时 ID 在 URL 策略 owner 被排除；原轮询等待永久地址，跨会话保护保持。        |
+| 私有认证持久化       | 原文 patch 保存未修改的认证；公开返回继续由 schema 限定，合法类型切换保持。   |
+| 新实现加载           | CLI/core 同步31，使用原版本淘汰机制。                                         |
+| 语音恢复与复用       | 缓存/profile/browser 既有编排保持；成功快照自动写回，后继 HTTP 消费同一快照。 |
+| 取消与期限           | 独立回归确认取消、固定期限、资源释放及后继请求可用。                          |
 
 关键路径已直接核验：`packages/opencode/src/config/config.ts:352`、`packages/opencode/src/config/config.ts:810`、`packages/opencode/src/server/shared/tui-control.ts:99`、`thirdparty/chatgpt-browser-agent/chatgpt-project.js:71`、`thirdparty/chatgpt-browser-agent/chatgpt-core.js:1400`。
 
 **本轮独立执行结果：**
+
 - global 配置：**15 pass，0 fail**。
 - `voice-auth.test.ts`：**53 pass，0 fail，198断言**；包含先前单独通过的3项账户快照复用测试。
 - DOM、身份、Project、上传、image、回答与产物读取：**13 pass**。
@@ -2192,11 +2247,11 @@ No blocking findings.
 
 实际 diff 独立计量：
 
-| 范围 | E | 合格 C | C/E |
-|---|---:|---:|---:|
-| 五个生产文件 | 48 | 18 | 37.50% |
-| 四个测试文件 | 186 | 43 | 23.12% |
-| 合计 | **234** | **61** | **26.07%** |
+| 范围         |       E | 合格 C |        C/E |
+| ------------ | ------: | -----: | ---------: |
+| 五个生产文件 |      48 |     18 |     37.50% |
+| 四个测试文件 |     186 |     43 |     23.12% |
+| 合计         | **234** | **61** | **26.07%** |
 
 排除空行、import-only 和文档；没有生成代码或纯移动扣减。合格注释邻近解释认证保存、DOM合同、身份边界及测试意图，达到15%目标。
 

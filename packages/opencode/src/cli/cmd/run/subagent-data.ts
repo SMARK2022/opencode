@@ -802,7 +802,9 @@ export function reduceSubagentData(input: {
   const event = input.event
   // #553：Message-level Revert 不一定另发 Part updates，因此必须从 tab identity 直接撤销 detail。
   if (event.type === "message.updated" && "hidden" in event.properties.info && event.properties.info.hidden) {
-    const sessions = [...input.data.tabs].filter(([, tab]) => tab.messageID === event.properties.info.id).map(([sessionID]) => sessionID)
+    const sessions = [...input.data.tabs]
+      .filter(([, tab]) => tab.messageID === event.properties.info.id)
+      .map(([sessionID]) => sessionID)
     sessions.forEach((sessionID) => input.data.tabs.delete(sessionID) && input.data.details.delete(sessionID))
     if (sessions.length) return true
   }

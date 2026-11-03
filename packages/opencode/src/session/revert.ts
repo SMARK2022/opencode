@@ -52,101 +52,105 @@ const layer = Layer.effect(
           Effect.gen(function* () {
             // 只加载 input.messageID 及之后的尾部消息，避免大 session 全量分页加载。
             // partID 场景（部分撤回）需要 lastUser，仍加载全部作为安全回退。
-            const all = yield* sessions.messages(
-              input.partID
-                ? { sessionID: input.sessionID }
-                : { sessionID: input.sessionID, fromMessageID: input.messageID },
-            ).pipe(Effect.orDie)
+            const all = yield* sessions
+              .messages(
+                input.partID
+                  ? { sessionID: input.sessionID }
+                  : { sessionID: input.sessionID, fromMessageID: input.messageID },
+              )
+              .pipe(Effect.orDie)
             let lastUser: SessionV1.User | undefined
-      const session = yield* sessions.get(input.sessionID).pipe(Effect.orDie)
+            const session = yield* sessions.get(input.sessionID).pipe(Effect.orDie)
 
-      let rev: Session.Info["revert"]
-      const patches: SessionV1.PatchPart[] = []
-      for (const msg of all) {
-        if (msg.info.role === "user") lastUser = msg.info
-        const remaining = []
-        for (const part of msg.parts) {
-          if (rev) {
-            if (part.type === "patch") patches.push(part)
-            continue
-          }
+            let rev: Session.Info["revert"]
+            const patches: SessionV1.PatchPart[] = []
+            for (const msg of all) {
+              if (msg.info.role === "user") lastUser = msg.info
+              const remaining = []
+              for (const part of msg.parts) {
+                if (rev) {
+                  if (part.type === "patch") patches.push(part)
+                  continue
+                }
 
-          if (!rev) {
-            if ((msg.info.id === input.messageID && !input.partID) || part.id === input.partID) {
-              const partID = remaining.some((item) => ["text", "tool"].includes(item.type)) ? input.partID : undefined
-              rev = {
-                messageID: !partID && lastUser ? lastUser.id : msg.info.id,
-                partID,
+                if (!rev) {
+                  if ((msg.info.id === input.messageID && !input.partID) || part.id === input.partID) {
+                    const partID = remaining.some((item) => ["text", "tool"].includes(item.type))
+                      ? input.partID
+                      : undefined
+                    rev = {
+                      messageID: !partID && lastUser ? lastUser.id : msg.info.id,
+                      partID,
+                    }
+                  }
+                  remaining.push(part)
+                }
               }
             }
-            remaining.push(part)
-          }
-        }
-      }
 
-      if (!rev) return session
+            if (!rev) return session
 
-      // #557：Revert range 与 Prompt 使用同一个 persisted comparator，不能恢复 lexical-low 后继之外的行。
-      const boundaryRow = all.find((msg) => msg.info.id === rev.messageID)
-      if (!boundaryRow) throw new Error(`Revert boundary missing from Session history: ${rev.messageID}`)
-      const range = all.filter((msg) => MessageV2.compareChronology(msg.info, boundaryRow.info) >= 0)
-      // range 可包含 hidden audit rows；真正文件 admission 仍由各 Tool policy 决定。
-      const ictx = yield* InstanceState.context
-      // #557：declared diff 按 Assistant 单独计算，禁止后续 Tool 把文件 authority 回传给早期 Patch。
-      // #557：per-Assistant ownership——文件 authority 不跨 Assistant 传递。
-      const ownership = yield* Effect.forEach(range, (msg) =>
-        Effect.gen(function* () {
-          const diffs = yield* summary.computeDiff({
-            messages: [
-              {
-                ...msg,
-                parts: msg.parts.filter((part) => part.type !== "tool" || part.metadata?.worktree === "declared"),
+            // #557：Revert range 与 Prompt 使用同一个 persisted comparator，不能恢复 lexical-low 后继之外的行。
+            const boundaryRow = all.find((msg) => msg.info.id === rev.messageID)
+            if (!boundaryRow) throw new Error(`Revert boundary missing from Session history: ${rev.messageID}`)
+            const range = all.filter((msg) => MessageV2.compareChronology(msg.info, boundaryRow.info) >= 0)
+            // range 可包含 hidden audit rows；真正文件 admission 仍由各 Tool policy 决定。
+            const ictx = yield* InstanceState.context
+            // #557：declared diff 按 Assistant 单独计算，禁止后续 Tool 把文件 authority 回传给早期 Patch。
+            // #557：per-Assistant ownership——文件 authority 不跨 Assistant 传递。
+            const ownership = yield* Effect.forEach(range, (msg) =>
+              Effect.gen(function* () {
+                const diffs = yield* summary.computeDiff({
+                  messages: [
+                    {
+                      ...msg,
+                      parts: msg.parts.filter((part) => part.type !== "tool" || part.metadata?.worktree === "declared"),
+                    },
+                  ],
+                })
+                const files = new Set(
+                  diffs.flatMap((d) => (d.file ? [path.join(ictx.worktree, d.file).replaceAll("\\", "/")] : [])),
+                )
+                // authority 必须停留在所属 Assistant；后续 ambient 不能反向授权更早 Patch。
+                if (msg.parts.some((part) => part.type === "tool" && part.metadata?.worktree === "ambient"))
+                  msg.parts
+                    .filter((part) => part.type === "patch")
+                    .flatMap((part) => part.files)
+                    .forEach((file) => files.add(file))
+                return { id: msg.info.id, diffs, files }
+              }),
+            )
+            const toolDiffs = ownership.flatMap((item) => item.diffs)
+            // #557：messageID 是 Patch 与 authority 的稳定关联键，不能退化为 range 级文件并集。
+            // #557：ownership 键是 messageID——Patch 文件 admission 不退化为 range 并集。
+            const toolFiles = new Map<string, Set<string>>(ownership.map((item) => [item.id, item.files]))
+            // #545：无条件交集——空 toolFiles 不再回退全量 revert，避免只读 turn 误撤 ambient 改动。
+            // Patch 未被 declared 或 ambient owner 接纳时保留空 files，hash 顺序不改写。
+            const filteredPatches = patches.map((p) => ({
+              ...p,
+              files: p.files.filter((f) => toolFiles.get(p.messageID)?.has(f)),
+            }))
+            // 记录被 revert 的文件列表（revertedPaths），供 unrevert/二次 revert 精确恢复
+            const revertedFiles = Array.from(new Set(filteredPatches.flatMap((p) => p.files)))
+
+            rev.snapshot = session.revert?.snapshot ?? (yield* snap.track())
+            // 二次 revert：先恢复到上次 revert 前的状态，只恢复上次被 revert 的文件
+            if (session.revert?.snapshot) yield* snap.restore(session.revert.snapshot, session.revert.revertedPaths)
+            yield* snap.revert(filteredPatches)
+            if (rev.snapshot) rev.diff = yield* snap.diff(rev.snapshot)
+            const diffs = toolDiffs
+            yield* storage.write(["session_diff", input.sessionID], diffs).pipe(Effect.ignore)
+            yield* events.publish(Session.Event.Diff, { sessionID: input.sessionID, diff: diffs })
+            yield* sessions.setRevert({
+              sessionID: input.sessionID,
+              revert: { ...rev, revertedPaths: revertedFiles.length > 0 ? revertedFiles : undefined },
+              summary: {
+                additions: diffs.reduce((sum, x) => sum + x.additions, 0),
+                deletions: diffs.reduce((sum, x) => sum + x.deletions, 0),
+                files: diffs.length,
               },
-            ],
-          })
-          const files = new Set(
-            diffs.flatMap((d) => (d.file ? [path.join(ictx.worktree, d.file).replaceAll("\\", "/")] : [])),
-          )
-          // authority 必须停留在所属 Assistant；后续 ambient 不能反向授权更早 Patch。
-          if (msg.parts.some((part) => part.type === "tool" && part.metadata?.worktree === "ambient"))
-            msg.parts
-              .filter((part) => part.type === "patch")
-              .flatMap((part) => part.files)
-              .forEach((file) => files.add(file))
-          return { id: msg.info.id, diffs, files }
-        }),
-      )
-      const toolDiffs = ownership.flatMap((item) => item.diffs)
-      // #557：messageID 是 Patch 与 authority 的稳定关联键，不能退化为 range 级文件并集。
-      // #557：ownership 键是 messageID——Patch 文件 admission 不退化为 range 并集。
-      const toolFiles = new Map<string, Set<string>>(ownership.map((item) => [item.id, item.files]))
-      // #545：无条件交集——空 toolFiles 不再回退全量 revert，避免只读 turn 误撤 ambient 改动。
-      // Patch 未被 declared 或 ambient owner 接纳时保留空 files，hash 顺序不改写。
-      const filteredPatches = patches.map((p) => ({
-        ...p,
-        files: p.files.filter((f) => toolFiles.get(p.messageID)?.has(f)),
-      }))
-      // 记录被 revert 的文件列表（revertedPaths），供 unrevert/二次 revert 精确恢复
-      const revertedFiles = Array.from(new Set(filteredPatches.flatMap((p) => p.files)))
-
-      rev.snapshot = session.revert?.snapshot ?? (yield* snap.track())
-      // 二次 revert：先恢复到上次 revert 前的状态，只恢复上次被 revert 的文件
-      if (session.revert?.snapshot) yield* snap.restore(session.revert.snapshot, session.revert.revertedPaths)
-      yield* snap.revert(filteredPatches)
-      if (rev.snapshot) rev.diff = yield* snap.diff(rev.snapshot)
-      const diffs = toolDiffs
-      yield* storage.write(["session_diff", input.sessionID], diffs).pipe(Effect.ignore)
-      yield* events.publish(Session.Event.Diff, { sessionID: input.sessionID, diff: diffs })
-      yield* sessions.setRevert({
-        sessionID: input.sessionID,
-        revert: { ...rev, revertedPaths: revertedFiles.length > 0 ? revertedFiles : undefined },
-        summary: {
-          additions: diffs.reduce((sum, x) => sum + x.additions, 0),
-          deletions: diffs.reduce((sum, x) => sum + x.deletions, 0),
-          files: diffs.length,
-        },
-      })
-      return yield* sessions.get(input.sessionID).pipe(Effect.orDie)
+            })
+            return yield* sessions.get(input.sessionID).pipe(Effect.orDie)
           }),
         () => state.endRevert(input.sessionID),
       )
@@ -180,7 +184,9 @@ const layer = Layer.effect(
       if (!session.revert) return
       const boundary = session.revert
       // cleanup 可在边界已隐藏后重入；只读本次边界之后的原始范围，避免扩到完整审计历史。
-      const msgs = yield* sessions.messages({ sessionID, fromMessageID: boundary.messageID, includeHidden: true }).pipe(Effect.orDie)
+      const msgs = yield* sessions
+        .messages({ sessionID, fromMessageID: boundary.messageID, includeHidden: true })
+        .pipe(Effect.orDie)
       const messageID = boundary.messageID
       const boundaryMessage = msgs.find((msg) => msg.info.id === messageID)
       // #557：cleanup 与首次 revert 共用同一 boundary tuple，hidden/删除不能重新解释范围。
@@ -225,7 +231,12 @@ const layer = Layer.effect(
           // hide 已提交而记账中断时仍需重放此幂等 owner，之后才能清除 revert 边界。
           const usage = Option.getOrUndefined(yield* Effect.serviceOption(SessionRequestUsage.Service))
           // Interface 声明为 Effect<any, any>，收窄以维持 cleanup 的 never 契约
-          if (usage) yield* usage.recordAssistant({ sessionID, requestID: next.parentID, assistant: next }) as Effect.Effect<void>
+          if (usage)
+            yield* usage.recordAssistant({
+              sessionID,
+              requestID: next.parentID,
+              assistant: next,
+            }) as Effect.Effect<void>
         }
       }
       if (boundary.partID && target) {

@@ -20,7 +20,10 @@ function normalizeCmd(source: string) {
   for (let index = 0; index < source.length; index++) {
     const char = source[index]
     // caret只在引号外保护后一个字符，转成grammar能识别的转义表示。
-    if (!quoted && char === "^" && source[index + 1]) { result += "\\" + source[++index]; continue }
+    if (!quoted && char === "^" && source[index + 1]) {
+      result += "\\" + source[++index]
+      continue
+    }
     if (char === '"') quoted = !quoted
     if (["\\", "$", "`"].includes(char) || (!quoted && ["'", "#", ";"].includes(char))) result += "\\"
     result += char
@@ -40,17 +43,38 @@ function word(node: Node, dialect: Dialect): Word {
   const double = here ? raw.startsWith('@"') : raw.startsWith('"') && raw.endsWith('"')
   const body = here ? raw.replace(/^@['"]\r?\n|\r?\n['"]@$/g, "") : single || double ? raw.slice(1, -1) : raw
   // 相邻引用片段共同组成一个argv；分别解释片段后拼接，避免拆成多个操作数。
-  const value = node.type === "concatenation" ? parts.map((part) => word(part, dialect).value).join("")
-    : single ? dialect === "powershell" && !here ? body.replaceAll("''", "'") : body
-    : dialect === "powershell" ? body.replace(/`(.)|""/gs, (text, char: string | undefined) => char === undefined ? double && !here ? '"' : text : ({ n: "\n", r: "\r", t: "\t", "0": "\0" })[char] ?? char)
-    : dialect === "cmd" ? body.replace(/\\([\\'"$`#;^&|<> ()])/g, "$1")
-    : double ? body.replace(/\\([\\$`"\n])/g, "$1") : body.replace(/\\(.)/gs, "$1")
+  const value =
+    node.type === "concatenation"
+      ? parts.map((part) => word(part, dialect).value).join("")
+      : single
+        ? dialect === "powershell" && !here
+          ? body.replaceAll("''", "'")
+          : body
+        : dialect === "powershell"
+          ? body.replace(/`(.)|""/gs, (text, char: string | undefined) =>
+              char === undefined
+                ? double && !here
+                  ? '"'
+                  : text
+                : ({ n: "\n", r: "\r", t: "\t", "0": "\0" }[char] ?? char),
+            )
+          : dialect === "cmd"
+            ? body.replace(/\\([\\'"$`#;^&|<> ()])/g, "$1")
+            : double
+              ? body.replace(/\\([\\$`"\n])/g, "$1")
+              : body.replace(/\\(.)/gs, "$1")
   const expansion = ["expansion", "simple_expansion", "command_substitution", "sub_expression", "variable"]
   return {
-    value, start: node.startIndex, end: node.endIndex, quoted: single || double,
+    value,
+    start: node.startIndex,
+    end: node.endIndex,
+    quoted: single || double,
     // stripped沿用Git路径的转义证据，动态属性仅用于既有general下限。
     stripped: dialect === "bash" && !single && raw.includes("\\"),
-    dynamic: expansion.includes(node.type) || node.descendantsOfType(expansion).length > 0 || (node.type === "word" && /[*?\[]/.test(raw)),
+    dynamic:
+      expansion.includes(node.type) ||
+      node.descendantsOfType(expansion).length > 0 ||
+      (node.type === "word" && /[*?\[]/.test(raw)),
   }
 }
 
@@ -68,34 +92,65 @@ export async function analyze(source: string, dialect: Dialect) {
     for (const node of nodes) {
       // 两个节点序列均按源码排序，游标只前进一次，组合边界的提取保持线性。
       while ((separators[group]?.startIndex ?? Infinity) < node.startIndex) group++
-      const elements = children(node).flatMap((child) => child.type === "command_elements" ? children(child) : [child])
+      const elements = children(node).flatMap((child) =>
+        child.type === "command_elements" ? children(child) : [child],
+      )
       // 赋值与重定向从argv中移出，命令替换仍在自己的command节点单独取得。
-      const words = elements.filter((child) => !["command_argument_sep", "command_invokation_operator", "variable_assignment", "file_redirect", "redirection", "heredoc_redirect", "herestring_redirect"].includes(child.type))
+      const words = elements
+        .filter(
+          (child) =>
+            ![
+              "command_argument_sep",
+              "command_invokation_operator",
+              "variable_assignment",
+              "file_redirect",
+              "redirection",
+              "heredoc_redirect",
+              "herestring_redirect",
+            ].includes(child.type),
+        )
         .map((child) => word(child, dialect))
       records.set(node.id, { words, redirects: [], group, index: records.size })
     }
-    for (const redirect of tree.rootNode.descendantsOfType(["file_redirect", "redirection", "heredoc_redirect", "herestring_redirect"]).filter((node) => node !== null)) {
+    for (const redirect of tree.rootNode
+      .descendantsOfType(["file_redirect", "redirection", "heredoc_redirect", "herestring_redirect"])
+      .filter((node) => node !== null)) {
       const owner = redirectOwner(redirect)
       const record: Command | undefined = owner ? records.get(owner.id) : { words: [], redirects: [], group: -1 }
       if (!record) continue
       // 无命令名的重定向同样是操作，空argv记录让原专项写入规则看到它。
       if (!owner) standalone.push(record)
       if (["heredoc_redirect", "herestring_redirect"].includes(redirect.type)) {
-        const body = redirect.type === "heredoc_redirect" ? children(redirect).find((child) => child.type === "heredoc_body") : children(redirect).at(-1)
-        if (body) record.redirects.push({
-          operator: redirect.type === "heredoc_redirect" ? "<<" : "<<<",
-          content: redirect.type === "heredoc_redirect" ? (redirect.text.includes("<<-") ? body.text.replace(/^\t+/gm, "") : body.text) : word(body, dialect).value + "\n",
-        })
+        const body =
+          redirect.type === "heredoc_redirect"
+            ? children(redirect).find((child) => child.type === "heredoc_body")
+            : children(redirect).at(-1)
+        if (body)
+          record.redirects.push({
+            operator: redirect.type === "heredoc_redirect" ? "<<" : "<<<",
+            content:
+              redirect.type === "heredoc_redirect"
+                ? redirect.text.includes("<<-")
+                  ? body.text.replace(/^\t+/gm, "")
+                  : body.text
+                : word(body, dialect).value + "\n",
+          })
         continue
       }
-      const target = redirect.childForFieldName("destination") ?? children(redirect).find((child) => child.type === "redirected_file_name")
+      const target =
+        redirect.childForFieldName("destination") ??
+        children(redirect).find((child) => child.type === "redirected_file_name")
       record.redirects.push({
         operator: target ? redirect.text.slice(0, target.startIndex - redirect.startIndex).trim() : redirect.text,
         target: target ? word(target, dialect) : undefined,
       })
       // Bash将目标后的argv也放在destination中；仅首个目标归重定向，其余补回参数。
       if (redirect.type === "file_redirect" && target) {
-        record.words.push(...children(redirect).filter((child) => child.startIndex > target.startIndex).map((child) => word(child, dialect)))
+        record.words.push(
+          ...children(redirect)
+            .filter((child) => child.startIndex > target.startIndex)
+            .map((child) => word(child, dialect)),
+        )
         record.words.sort((left, right) => left.start - right.start)
       }
     }
@@ -120,8 +175,17 @@ export async function analyze(source: string, dialect: Dialect) {
     // 后台和换行组成的普通只读序列沿用原general下限；引用内部换行不属于命令间隙。
     const top = topCommands(tree.rootNode)
     // Word与node的offset都属于实际解析表示，不能回切长度不同的原执行正文。
-    const opaque = tree.rootNode.children.some((child) => child?.type === "&") || top.some((node, index) => index > 0 && /[\r\n]/.test(tree.rootNode.text.slice(top[index - 1].endIndex, node.startIndex)))
-    return { commands, incomplete: tree.rootNode.hasError, opaque, environment: tree.rootNode.descendantsOfType("variable_assignment").length > 0 }
+    const opaque =
+      tree.rootNode.children.some((child) => child?.type === "&") ||
+      top.some(
+        (node, index) => index > 0 && /[\r\n]/.test(tree.rootNode.text.slice(top[index - 1].endIndex, node.startIndex)),
+      )
+    return {
+      commands,
+      incomplete: tree.rootNode.hasError,
+      opaque,
+      environment: tree.rootNode.descendantsOfType("variable_assignment").length > 0,
+    }
   } finally {
     // 导出的记录与树分离，异常退出时也及时释放WASM分配。
     tree.delete()
@@ -129,7 +193,12 @@ export async function analyze(source: string, dialect: Dialect) {
 }
 
 // 返回语句的顶层命令；参数内部的执行子树另行分类，不占用外层管道位置。
-const topCommands = (node: Node): Node[] => node.type === "command" ? [node] : ["command_substitution", "sub_expression"].includes(node.type) ? [] : children(node).flatMap(topCommands)
+const topCommands = (node: Node): Node[] =>
+  node.type === "command"
+    ? [node]
+    : ["command_substitution", "sub_expression"].includes(node.type)
+      ? []
+      : children(node).flatMap(topCommands)
 
 // 按父子关系寻找重定向所属命令，避免把echo的输出误挂到$(pwd)内部命令。
 function redirectOwner(node: Node): Node | undefined {

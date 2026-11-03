@@ -27,7 +27,6 @@ function wordmark(pad = "") {
   })
 }
 
-
 // #490：退出文本沿用 sidebar 的 USD 两位小数格式，避免永久记录和实时面板出现不同 cost 文案。
 // formatter 不负责计算 cost，只接受 accounting 已经归属到 Session 的数值。
 const money = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" })

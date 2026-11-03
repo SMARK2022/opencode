@@ -46,8 +46,9 @@ const withoutWatcher = <A, E, R>(effect: Effect.Effect<A, E, R>) => {
   )
 }
 
-const sessionScoped = Effect.acquireRelease(SessionNs.Service.use((svc) => svc.create({})), (session) =>
-  SessionNs.Service.use((svc) => svc.remove(session.id)).pipe(Effect.ignore),
+const sessionScoped = Effect.acquireRelease(
+  SessionNs.Service.use((svc) => svc.create({})),
+  (session) => SessionNs.Service.use((svc) => svc.remove(session.id)).pipe(Effect.ignore),
 )
 
 // 创建一条用户消息 + 一个 text part；text 可省略表示无 text part。
@@ -122,9 +123,7 @@ function postPreview(body: unknown) {
       }),
     ),
     Effect.flatMap((res) =>
-      res.json.pipe(
-        Effect.map((json) => ({ status: res.status, json: json as Record<string, string[]> })),
-      ),
+      res.json.pipe(Effect.map((json) => ({ status: res.status, json: json as Record<string, string[]> }))),
     ),
   )
 }

@@ -61,45 +61,45 @@ The retained session requirement also applies:
 
 ## 3. Repository Context
 
-| Source | Why it constrains this task |
-| --- | --- |
-| `AGENTS.md` | Requires package-local tests/typecheck, minimal primary-path changes, parallel inspection, and preservation of unrelated worktree changes. |
-| `packages/opencode/AGENTS.md` | Defines Effect/module conventions and makes orchestration the owner of retry/timeout policy. No production policy change is justified here. |
-| `packages/opencode/test/AGENTS.md` | Requires published readiness signals instead of scheduler sleeps; permits real time only when time/network latency is the behavior under test. |
-| `CONTEXT.md` | Defines Provider, Session, Message, Status, Run state, and current v1 `session/` ownership. |
-| `docs/adr/README.md` | No load-bearing architectural decision is introduced; this is a one-test behavioral correction, so no ADR is required. |
-| `.opencode/policy/first-principles-engineering.md` | Requires the first-divergence owner, zero new fallback paths, forward/reverse traceability, independent audit, and the Chinese-comment gate. |
-| `.opencode/templates/canonical-plan.md` | Defines this plan's required sections and state transitions. |
+| Source                                             | Why it constrains this task                                                                                                                    |
+| -------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `AGENTS.md`                                        | Requires package-local tests/typecheck, minimal primary-path changes, parallel inspection, and preservation of unrelated worktree changes.     |
+| `packages/opencode/AGENTS.md`                      | Defines Effect/module conventions and makes orchestration the owner of retry/timeout policy. No production policy change is justified here.    |
+| `packages/opencode/test/AGENTS.md`                 | Requires published readiness signals instead of scheduler sleeps; permits real time only when time/network latency is the behavior under test. |
+| `CONTEXT.md`                                       | Defines Provider, Session, Message, Status, Run state, and current v1 `session/` ownership.                                                    |
+| `docs/adr/README.md`                               | No load-bearing architectural decision is introduced; this is a one-test behavioral correction, so no ADR is required.                         |
+| `.opencode/policy/first-principles-engineering.md` | Requires the first-divergence owner, zero new fallback paths, forward/reverse traceability, independent audit, and the Chinese-comment gate.   |
+| `.opencode/templates/canonical-plan.md`            | Defines this plan's required sections and state transitions.                                                                                   |
 
 The only accepted ADR concerns triage labels and is unrelated to Session or
 Provider timeout behavior.
 
 ## 4. Files and Evidence Read
 
-| Evidence | Relevance | Evidence class |
-| --- | --- | --- |
-| GitHub Actions run `29681810694`, attempt 1, macOS job `88179163226` | Original symptom: test passed retry message/result assertions, then failed at `llm.calls === 2` with actual `3`; 3822 pass, 16 skip, 1 fail. | observed |
-| Same run attempt 1, Linux and Windows jobs | Both `packages/opencode` jobs passed; narrows the observed incident to loaded macOS execution without defining a platform-specific product branch. | observed |
-| Same run attempt 2, macOS job `88181942932` | Same test passed in 2512.25ms and full report was 3823 pass, 16 skip, 0 fail; proves non-determinism rather than a permanent product failure. | observed |
-| `packages/opencode/test/session/processor-effect.test.ts:752-820` | Owns the failing 25ms configuration, 100ms `Promise.race`, retry Status observation, exact call-count assertion, and delayed HTTP fixture sequence. | observed |
-| `packages/opencode/test/lib/llm-server.ts:608-779` | Real local HTTP fixture; `hits` increments per received request, queued items are removed when a request arrives, `wait(n)` is a published request-readiness signal, and an empty queue supplies an automatic success response. | observed |
-| `packages/opencode/test/fixture/fixture.ts:225-273` | `provideTmpdirServer` scopes the real server and Project fixture; test finalizers can own gate/subscription cleanup. | observed |
-| `packages/opencode/test/lib/effect.ts:27-36,113-123` | `testEffect.run` scopes the Effect but does not bridge Bun's external timeout into interruption; `awaitWithTimeout` supplies an in-scope failure-only boundary that closes the scope. | observed |
-| `packages/opencode/src/provider/provider.ts:127-275,1920-2012` | One progress deadline is armed for every Provider attempt before dispatch; the configured value applies independently to the first and all later attempts. | observed |
-| `packages/opencode/src/session/llm.ts:357-457` | AI SDK retries are disabled (`maxRetries=0`); the full stream forwards Provider errors to SessionProcessor. | observed |
-| `packages/opencode/src/session/message-v2.ts:1604-1725,1806-1847` | Maps `SSE read timed out`/`SSE_READ_TIMEOUT` to retryable APIError while preserving user-abort precedence. | observed |
-| `packages/opencode/src/session/processor.ts:1020-1109` | Runs the LLM stream through the existing `SessionRetry.retry` schedule and publishes retry Status before the next attempt. | observed |
-| `packages/opencode/src/session/retry.ts:25-69,179-210` | Retryable attempts have backoff but no fixed attempt cap; any later 25ms no-progress attempt may correctly issue another request. | contracted/observed |
-| `packages/opencode/src/session/status.ts:51-88` | `set(retry)` publishes the user-visible Status before storing it. | observed |
-| `packages/opencode/src/bus/index.ts:98-180` | Callback subscribers consume PubSub messages on a forked stream and Promise microtask; callback delivery is behaviorally ordered but not bounded to 100ms. | observed |
-| Commit `c54ad516c19` | Introduced the real first-progress Processor test and production timeout feature. The test uses a 25ms deadline on every attempt and an exact two-call assertion. | observed |
-| Commit `209091bd26` diff against its parent | Changed watcher and SessionPrompt tests only; it did not modify this test or any Provider/Processor production owner. | observed |
-| `docs/plans/provider-timeout-transport-integrity.md` | Historical R5 contract explicitly preserves no retry cap and says the Processor vertical test should observe behavior without a fixed cap; it is evidence, not implementation authority. | contracted historical evidence |
-| Local focused test without load | 1 pass, 0 fail in 4.98s; confirms the defect is load-sensitive. | observed |
-| Local 48-worker contention loop without instrumentation | Three consecutive focused runs failed at `observed?.attempt` receiving `undefined`; proves the 100ms observation window can beat the real Status path. | observed |
-| Throwaway preload probe outside the repository | Injecting one additional valid second-attempt progress expiry produced the exact CI result: expected calls 2, received 3, while all other assertions passed. | observed |
-| Same probe with 500ms test progress window under 48-worker contention | Three consecutive runs passed; validates a separation window while retaining real Provider timeout and retry behavior. | observed |
-| Post-change second-attempt-expiry probe | Against the R2 candidate, forced the current 500ms second attempt to expire once; timeout Status and `continue` passed, but final literal `after` was absent and the test failed. | observed |
+| Evidence                                                              | Relevance                                                                                                                                                                                                                       | Evidence class                 |
+| --------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------ |
+| GitHub Actions run `29681810694`, attempt 1, macOS job `88179163226`  | Original symptom: test passed retry message/result assertions, then failed at `llm.calls === 2` with actual `3`; 3822 pass, 16 skip, 1 fail.                                                                                    | observed                       |
+| Same run attempt 1, Linux and Windows jobs                            | Both `packages/opencode` jobs passed; narrows the observed incident to loaded macOS execution without defining a platform-specific product branch.                                                                              | observed                       |
+| Same run attempt 2, macOS job `88181942932`                           | Same test passed in 2512.25ms and full report was 3823 pass, 16 skip, 0 fail; proves non-determinism rather than a permanent product failure.                                                                                   | observed                       |
+| `packages/opencode/test/session/processor-effect.test.ts:752-820`     | Owns the failing 25ms configuration, 100ms `Promise.race`, retry Status observation, exact call-count assertion, and delayed HTTP fixture sequence.                                                                             | observed                       |
+| `packages/opencode/test/lib/llm-server.ts:608-779`                    | Real local HTTP fixture; `hits` increments per received request, queued items are removed when a request arrives, `wait(n)` is a published request-readiness signal, and an empty queue supplies an automatic success response. | observed                       |
+| `packages/opencode/test/fixture/fixture.ts:225-273`                   | `provideTmpdirServer` scopes the real server and Project fixture; test finalizers can own gate/subscription cleanup.                                                                                                            | observed                       |
+| `packages/opencode/test/lib/effect.ts:27-36,113-123`                  | `testEffect.run` scopes the Effect but does not bridge Bun's external timeout into interruption; `awaitWithTimeout` supplies an in-scope failure-only boundary that closes the scope.                                           | observed                       |
+| `packages/opencode/src/provider/provider.ts:127-275,1920-2012`        | One progress deadline is armed for every Provider attempt before dispatch; the configured value applies independently to the first and all later attempts.                                                                      | observed                       |
+| `packages/opencode/src/session/llm.ts:357-457`                        | AI SDK retries are disabled (`maxRetries=0`); the full stream forwards Provider errors to SessionProcessor.                                                                                                                     | observed                       |
+| `packages/opencode/src/session/message-v2.ts:1604-1725,1806-1847`     | Maps `SSE read timed out`/`SSE_READ_TIMEOUT` to retryable APIError while preserving user-abort precedence.                                                                                                                      | observed                       |
+| `packages/opencode/src/session/processor.ts:1020-1109`                | Runs the LLM stream through the existing `SessionRetry.retry` schedule and publishes retry Status before the next attempt.                                                                                                      | observed                       |
+| `packages/opencode/src/session/retry.ts:25-69,179-210`                | Retryable attempts have backoff but no fixed attempt cap; any later 25ms no-progress attempt may correctly issue another request.                                                                                               | contracted/observed            |
+| `packages/opencode/src/session/status.ts:51-88`                       | `set(retry)` publishes the user-visible Status before storing it.                                                                                                                                                               | observed                       |
+| `packages/opencode/src/bus/index.ts:98-180`                           | Callback subscribers consume PubSub messages on a forked stream and Promise microtask; callback delivery is behaviorally ordered but not bounded to 100ms.                                                                      | observed                       |
+| Commit `c54ad516c19`                                                  | Introduced the real first-progress Processor test and production timeout feature. The test uses a 25ms deadline on every attempt and an exact two-call assertion.                                                               | observed                       |
+| Commit `209091bd26` diff against its parent                           | Changed watcher and SessionPrompt tests only; it did not modify this test or any Provider/Processor production owner.                                                                                                           | observed                       |
+| `docs/plans/provider-timeout-transport-integrity.md`                  | Historical R5 contract explicitly preserves no retry cap and says the Processor vertical test should observe behavior without a fixed cap; it is evidence, not implementation authority.                                        | contracted historical evidence |
+| Local focused test without load                                       | 1 pass, 0 fail in 4.98s; confirms the defect is load-sensitive.                                                                                                                                                                 | observed                       |
+| Local 48-worker contention loop without instrumentation               | Three consecutive focused runs failed at `observed?.attempt` receiving `undefined`; proves the 100ms observation window can beat the real Status path.                                                                          | observed                       |
+| Throwaway preload probe outside the repository                        | Injecting one additional valid second-attempt progress expiry produced the exact CI result: expected calls 2, received 3, while all other assertions passed.                                                                    | observed                       |
+| Same probe with 500ms test progress window under 48-worker contention | Three consecutive runs passed; validates a separation window while retaining real Provider timeout and retry behavior.                                                                                                          | observed                       |
+| Post-change second-attempt-expiry probe                               | Against the R2 candidate, forced the current 500ms second attempt to expire once; timeout Status and `continue` passed, but final literal `after` was absent and the test failed.                                               | observed                       |
 
 The throwaway probe is diagnostic only, is not part of the repository or the
 approved implementation, and must be removed after verification once deletion
@@ -175,36 +175,36 @@ this path in 8.94s.
 
 ## 6. Supported Input Domain and Reachability
 
-| Input or condition | Producer | Upstream guarantees | Reachable path | Owner | Classification |
-| --- | --- | --- | --- | --- | --- |
-| First request remains silent beyond configured progress deadline | `httpError(..., gate.promise)` fixture | Gate cannot resolve until test releases it | Provider timeout -> retry Status | Existing Provider/Processor path | observed |
-| Any retry attempt produces first raw progress within the configured deadline | Explicit repeatable queued `after` response | Real loopback HTTP/SSE; repeat item remains configured for every later request | Provider -> SessionProcessor -> Message text | TestLLMServer queue + existing production path | reachable from approved design |
-| Retry attempt exceeds 25ms under loaded macOS scheduler | GitHub Actions attempt 1; deterministic probe | Same deadline applies to each attempt | Another valid retry and third request | SessionRetry | observed |
-| Retry Status callback arrives after the test's 100ms race | Local 48-worker stress | Callback uses a forked Bus stream/microtask | Race returns `undefined` before callback | Test synchronization | observed |
-| Default production `chunkTimeout=180000` | Normal Provider config | Not used by this test, which explicitly sets 25ms | Production Sessions | Provider config | reachable but out of change scope |
-| Arbitrary platform-specific Provider semantics | None | Linux/Windows passed and production path is shared | No proven separate owner | — | speculative |
+| Input or condition                                                           | Producer                                      | Upstream guarantees                                                            | Reachable path                               | Owner                                          | Classification                    |
+| ---------------------------------------------------------------------------- | --------------------------------------------- | ------------------------------------------------------------------------------ | -------------------------------------------- | ---------------------------------------------- | --------------------------------- |
+| First request remains silent beyond configured progress deadline             | `httpError(..., gate.promise)` fixture        | Gate cannot resolve until test releases it                                     | Provider timeout -> retry Status             | Existing Provider/Processor path               | observed                          |
+| Any retry attempt produces first raw progress within the configured deadline | Explicit repeatable queued `after` response   | Real loopback HTTP/SSE; repeat item remains configured for every later request | Provider -> SessionProcessor -> Message text | TestLLMServer queue + existing production path | reachable from approved design    |
+| Retry attempt exceeds 25ms under loaded macOS scheduler                      | GitHub Actions attempt 1; deterministic probe | Same deadline applies to each attempt                                          | Another valid retry and third request        | SessionRetry                                   | observed                          |
+| Retry Status callback arrives after the test's 100ms race                    | Local 48-worker stress                        | Callback uses a forked Bus stream/microtask                                    | Race returns `undefined` before callback     | Test synchronization                           | observed                          |
+| Default production `chunkTimeout=180000`                                     | Normal Provider config                        | Not used by this test, which explicitly sets 25ms                              | Production Sessions                          | Provider config                                | reachable but out of change scope |
+| Arbitrary platform-specific Provider semantics                               | None                                          | Linux/Windows passed and production path is shared                             | No proven separate owner                     | —                                              | speculative                       |
 
 ## 7. Required Invariants
 
-| ID | Behavioral invariant | Evidence | Existing test status |
-| --- | --- | --- | --- |
-| INV-01 | A real first-progress timeout must enter MessageV2 as `SSE read timed out`, publish retry Status attempt 1, and not become a terminal failure. | Actions attempt 1 and current production chain | Assertions already passed in failed CI |
+| ID     | Behavioral invariant                                                                                                                                                                                           | Evidence                                                                                                            | Existing test status                                                                                               |
+| ------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| INV-01 | A real first-progress timeout must enter MessageV2 as `SSE read timed out`, publish retry Status attempt 1, and not become a terminal failure.                                                                 | Actions attempt 1 and current production chain                                                                      | Assertions already passed in failed CI                                                                             |
 | INV-02 | The test must complete positively only after a real request is observed, a real retry Status is delivered, and an explicitly configured repeatable same-Provider response writes `after` to the final Message. | User requires behavior-based synchronization; TestLLMServer queue is the response producer; MessageV2 exposes parts | Original test uses timing/count proxies; R2 binds success to one finite response; R3 uses implicit default success |
-| INV-03 | A timeout test may use real time to cause the timeout, but wall clock must not synthesize or decide success. An in-scope Effect timeout may only fail and close resources. | Test AGENTS, user requirement, and `awaitWithTimeout` contract | Current 100ms race can decide `observed` |
-| INV-04 | Retryable transport behavior has no fixed attempt count; one explicit success producer must remain available after any supported extra no-progress expiry. | `SessionRetry.policy`, Actions three-request path, post-change probe, and R3 audit B-01 | Original exact count, R2 finite `after`, and R3 queue-miss default all violate part of this contract |
-| INV-05 | The intentionally blocked request, Processor fiber, and callback subscription must be released on success, assertion failure, missing request/Status/recovery, and interruption. | Scoped fixture plus in-scope failure boundary | Bun's external timeout does not interrupt `testEffect.run`; current cleanup is happy-path-only |
-| INV-06 | The repair must preserve Provider deadline, error classification, retry Status, backoff, final Message, and user-cancellation semantics without production changes. | Actions failure already proves the production path | Production files remain unchanged |
-| INV-07 | The implementation must stay within zero production files, two test-scope files, and far below the 600-line user budget unless new evidence forces a revised/audited plan. | Explicit user constraint | Planned route satisfies it |
+| INV-03 | A timeout test may use real time to cause the timeout, but wall clock must not synthesize or decide success. An in-scope Effect timeout may only fail and close resources.                                     | Test AGENTS, user requirement, and `awaitWithTimeout` contract                                                      | Current 100ms race can decide `observed`                                                                           |
+| INV-04 | Retryable transport behavior has no fixed attempt count; one explicit success producer must remain available after any supported extra no-progress expiry.                                                     | `SessionRetry.policy`, Actions three-request path, post-change probe, and R3 audit B-01                             | Original exact count, R2 finite `after`, and R3 queue-miss default all violate part of this contract               |
+| INV-05 | The intentionally blocked request, Processor fiber, and callback subscription must be released on success, assertion failure, missing request/Status/recovery, and interruption.                               | Scoped fixture plus in-scope failure boundary                                                                       | Bun's external timeout does not interrupt `testEffect.run`; current cleanup is happy-path-only                     |
+| INV-06 | The repair must preserve Provider deadline, error classification, retry Status, backoff, final Message, and user-cancellation semantics without production changes.                                            | Actions failure already proves the production path                                                                  | Production files remain unchanged                                                                                  |
+| INV-07 | The implementation must stay within zero production files, two test-scope files, and far below the 600-line user budget unless new evidence forces a revised/audited plan.                                     | Explicit user constraint                                                                                            | Planned route satisfies it                                                                                         |
 
 ## 8. First Divergence and Root Cause
 
-| Invariant | First divergence | Owning module/interface | Proof |
-| --- | --- | --- | --- |
-| INV-02/03 | After forking `process`, the test starts a 100ms `Promise.race` before waiting for `llm.wait(1)` or the retry Status itself. The timeout branch can therefore decide the observation and release the gate. | Test synchronization in `processor-effect.test.ts` | Local 48-worker loop failed 3/3 with `observed?.attempt === undefined`; focused unloaded run passed. |
-| INV-04 | The test configures every attempt with a 25ms no-progress contract, then asserts exactly two received HTTP calls even though SessionRetry has no attempt cap. | Test expectation/configuration in `processor-effect.test.ts` | macOS attempt 1 received 3 after all user-visible behavior assertions passed; attempt 2 passed; deterministic probe reproduces exact 3-call failure. |
-| INV-05 | Gate release and `off()` are ordinary statements after asynchronous waits rather than scoped finalizers. | Test resource lifecycle | Any interruption before those lines bypasses explicit cleanup. |
-| INV-02/04 | R2 queues one `after` response and requires that literal, but TestLLMServer consumes it when the second request arrives even if that attempt later expires. | Test success-fixture contract in `processor-effect.test.ts` | Current-source probe forced the second 500ms expiry: `attempt/message/continue` passed and `after` failed. |
-| INV-02/04 | R3 deliberately leaves retries unqueued, making TestLLMServer synthesize `ok` from `next === undefined`. | Test producer ownership | R3 plan audit B-01 proves missing explicit response configuration is indistinguishable from correct recovery. |
+| Invariant | First divergence                                                                                                                                                                                           | Owning module/interface                                      | Proof                                                                                                                                                |
+| --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| INV-02/03 | After forking `process`, the test starts a 100ms `Promise.race` before waiting for `llm.wait(1)` or the retry Status itself. The timeout branch can therefore decide the observation and release the gate. | Test synchronization in `processor-effect.test.ts`           | Local 48-worker loop failed 3/3 with `observed?.attempt === undefined`; focused unloaded run passed.                                                 |
+| INV-04    | The test configures every attempt with a 25ms no-progress contract, then asserts exactly two received HTTP calls even though SessionRetry has no attempt cap.                                              | Test expectation/configuration in `processor-effect.test.ts` | macOS attempt 1 received 3 after all user-visible behavior assertions passed; attempt 2 passed; deterministic probe reproduces exact 3-call failure. |
+| INV-05    | Gate release and `off()` are ordinary statements after asynchronous waits rather than scoped finalizers.                                                                                                   | Test resource lifecycle                                      | Any interruption before those lines bypasses explicit cleanup.                                                                                       |
+| INV-02/04 | R2 queues one `after` response and requires that literal, but TestLLMServer consumes it when the second request arrives even if that attempt later expires.                                                | Test success-fixture contract in `processor-effect.test.ts`  | Current-source probe forced the second 500ms expiry: `attempt/message/continue` passed and `after` failed.                                           |
+| INV-02/04 | R3 deliberately leaves retries unqueued, making TestLLMServer synthesize `ok` from `next === undefined`.                                                                                                   | Test producer ownership                                      | R3 plan audit B-01 proves missing explicit response configuration is indistinguishable from correct recovery.                                        |
 
 The first production transition is not divergent. The Provider correctly
 expires each silent attempt, MessageV2 correctly classifies the error,
@@ -263,15 +263,15 @@ This secondary signal catches the same unsupported short observation contract.
 
 ## 9. Responsibility and Seam
 
-| Concern | Owner | Interface promise | Why it belongs here | Why another module does not own it |
-| --- | --- | --- | --- | --- |
-| Request readiness | `TestLLMServer.wait(1)` | Resolve only after one real HTTP request reaches the fixture | It is the existing published producer signal | A test wall-clock cannot prove request dispatch |
-| Retry observation | SessionStatus public Bus event consumed by the test | Exposes attempt/message/next for the Session | This is the user-visible retry seam already under test | Processor internals/counters would couple to implementation |
-| Final recovery | `SessionProcessor.process` result plus Message parts | Returns `continue` and writes Provider output | Directly expresses Session behavior | HTTP call count cannot prove semantic recovery |
-| Timeout production/classification | Provider + MessageV2 | Expire no-progress attempt and classify retryable | Existing implementation passed the failed CI assertions | Test code must not reimplement or bypass it |
-| Retry multiplicity | SessionRetry | Retry each retryable failure under existing schedule | Existing orchestration owns it and has no cap | Test must not impose an exact request count |
-| Gate/subscription cleanup | Scoped test effect | Release owned fixture resources on every exit | Test created both resources | Production modules do not own test gates |
-| Repeatable explicit success response | Existing TestLLMServer queue | A configured item can remain available for every matching later request | Queue owner must distinguish one-shot and repeat items | SessionProcessor must not know fixture retry multiplicity |
+| Concern                              | Owner                                                | Interface promise                                                       | Why it belongs here                                     | Why another module does not own it                          |
+| ------------------------------------ | ---------------------------------------------------- | ----------------------------------------------------------------------- | ------------------------------------------------------- | ----------------------------------------------------------- |
+| Request readiness                    | `TestLLMServer.wait(1)`                              | Resolve only after one real HTTP request reaches the fixture            | It is the existing published producer signal            | A test wall-clock cannot prove request dispatch             |
+| Retry observation                    | SessionStatus public Bus event consumed by the test  | Exposes attempt/message/next for the Session                            | This is the user-visible retry seam already under test  | Processor internals/counters would couple to implementation |
+| Final recovery                       | `SessionProcessor.process` result plus Message parts | Returns `continue` and writes Provider output                           | Directly expresses Session behavior                     | HTTP call count cannot prove semantic recovery              |
+| Timeout production/classification    | Provider + MessageV2                                 | Expire no-progress attempt and classify retryable                       | Existing implementation passed the failed CI assertions | Test code must not reimplement or bypass it                 |
+| Retry multiplicity                   | SessionRetry                                         | Retry each retryable failure under existing schedule                    | Existing orchestration owns it and has no cap           | Test must not impose an exact request count                 |
+| Gate/subscription cleanup            | Scoped test effect                                   | Release owned fixture resources on every exit                           | Test created both resources                             | Production modules do not own test gates                    |
+| Repeatable explicit success response | Existing TestLLMServer queue                         | A configured item can remain available for every matching later request | Queue owner must distinguish one-shot and repeat items  | SessionProcessor must not know fixture retry multiplicity   |
 
 The agreed TDD seam is the existing `SessionProcessor.process` integration test
 with real TestLLMServer HTTP, public SessionStatus, and final Message parts.
@@ -326,42 +326,42 @@ hook.
 
 ## 11. Secondary and Replacement Path Inventory
 
-| Path | Current or proposed | Classification | Produces success? | Decision-surface share | Disposition |
-| --- | --- | --- | --- | --- | --- |
-| Real Provider timeout -> Status -> one or more retries -> repeat `after` Message | proposed assertion path | primary contract | yes | 100% | configure explicitly and observe directly |
-| In-scope 20s `awaitWithTimeout` | proposed | diagnostic failure boundary and cleanup trigger | no | 0% alternate success | add around the complete asynchronous operation |
-| Package-level 30s Bun test timeout | current | outer diagnostic guard | no cancellation bridge | 0% alternate success | preserve as last guard, not cleanup owner |
-| 100ms `Promise.race` returning `undefined` | current | forbidden timing substitute | no valid behavior success | current test decision only | remove |
-| Exact two-call assertion | current | implementation detail / invalid cap proxy | no | current terminal assertion | remove |
-| TestLLMServer queue-miss `ok` | current fixture fallback behavior | existing fixture convenience | yes | 0% of proposed green | preserve unchanged; explicit repeat item prevents this test from reaching it |
-| Additional retry after another genuine timeout | current production branch | supported-domain branch | eventually | existing SessionRetry path | preserve; do not count attempts |
-| One finite queued `after` response | R2 candidate | invalid attempt-bound test fixture | only if that specific attempt succeeds | R2-only | remove from this test |
-| Explicit repeat queue item | proposed | supported test-domain branch within the existing queue contract | yes | 100% of retry success responses | add at TestLLMServer owner |
+| Path                                                                             | Current or proposed               | Classification                                                  | Produces success?                      | Decision-surface share          | Disposition                                                                  |
+| -------------------------------------------------------------------------------- | --------------------------------- | --------------------------------------------------------------- | -------------------------------------- | ------------------------------- | ---------------------------------------------------------------------------- |
+| Real Provider timeout -> Status -> one or more retries -> repeat `after` Message | proposed assertion path           | primary contract                                                | yes                                    | 100%                            | configure explicitly and observe directly                                    |
+| In-scope 20s `awaitWithTimeout`                                                  | proposed                          | diagnostic failure boundary and cleanup trigger                 | no                                     | 0% alternate success            | add around the complete asynchronous operation                               |
+| Package-level 30s Bun test timeout                                               | current                           | outer diagnostic guard                                          | no cancellation bridge                 | 0% alternate success            | preserve as last guard, not cleanup owner                                    |
+| 100ms `Promise.race` returning `undefined`                                       | current                           | forbidden timing substitute                                     | no valid behavior success              | current test decision only      | remove                                                                       |
+| Exact two-call assertion                                                         | current                           | implementation detail / invalid cap proxy                       | no                                     | current terminal assertion      | remove                                                                       |
+| TestLLMServer queue-miss `ok`                                                    | current fixture fallback behavior | existing fixture convenience                                    | yes                                    | 0% of proposed green            | preserve unchanged; explicit repeat item prevents this test from reaching it |
+| Additional retry after another genuine timeout                                   | current production branch         | supported-domain branch                                         | eventually                             | existing SessionRetry path      | preserve; do not count attempts                                              |
+| One finite queued `after` response                                               | R2 candidate                      | invalid attempt-bound test fixture                              | only if that specific attempt succeeds | R2-only                         | remove from this test                                                        |
+| Explicit repeat queue item                                                       | proposed                          | supported test-domain branch within the existing queue contract | yes                                    | 100% of retry success responses | add at TestLLMServer owner                                                   |
 
 New alternate success paths: zero. New production diagnostic paths: zero.
 
 ## 12. Workaround Deletion and Replacement
 
-| Existing workaround or duplicate | Why it existed | Why the approved route supersedes it | Delete or collapse location |
-| --- | --- | --- | --- |
-| 100ms `Promise.race` around retry Status | Tried to make a timeout regression fail quickly | Real request readiness + real Status + in-scope failure boundary provide correct synchronization | `processor-effect.test.ts:798-801` |
-| Exact `llm.calls === 2` | Indirectly tried to prove one failed and one successful request | Timeout Status plus explicit final Message content prove the vertical behavior without imposing retry multiplicity | `processor-effect.test.ts:816` |
-| One finite queued `after` response | R2 tried to replace call count with semantic content but bound the producer to one request | Explicit repeat item remains available for every supported retry while the final Message assertion stays semantic | Same test's `llm.push` configuration |
-| Queue-miss default `ok` as intended success | R3 tried to make retries attempt-independent without a new fixture API | Explicit repeat configuration distinguishes a valid producer from missing setup | R3 design only; reject |
-| Success-only manual `off()` and gate release | Basic cleanup in the happy path | Scoped finalizers cover success, failure, and interruption | Same test body |
-| Bun outer timeout as implicit cleanup | Assumed rejecting the returned test Promise would cancel the Effect | In-scope failure interrupts the child operation and closes `Effect.scoped` before the outer guard | Same test body via `awaitWithTimeout` |
+| Existing workaround or duplicate             | Why it existed                                                                             | Why the approved route supersedes it                                                                               | Delete or collapse location           |
+| -------------------------------------------- | ------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------ | ------------------------------------- |
+| 100ms `Promise.race` around retry Status     | Tried to make a timeout regression fail quickly                                            | Real request readiness + real Status + in-scope failure boundary provide correct synchronization                   | `processor-effect.test.ts:798-801`    |
+| Exact `llm.calls === 2`                      | Indirectly tried to prove one failed and one successful request                            | Timeout Status plus explicit final Message content prove the vertical behavior without imposing retry multiplicity | `processor-effect.test.ts:816`        |
+| One finite queued `after` response           | R2 tried to replace call count with semantic content but bound the producer to one request | Explicit repeat item remains available for every supported retry while the final Message assertion stays semantic  | Same test's `llm.push` configuration  |
+| Queue-miss default `ok` as intended success  | R3 tried to make retries attempt-independent without a new fixture API                     | Explicit repeat configuration distinguishes a valid producer from missing setup                                    | R3 design only; reject                |
+| Success-only manual `off()` and gate release | Basic cleanup in the happy path                                                            | Scoped finalizers cover success, failure, and interruption                                                         | Same test body                        |
+| Bun outer timeout as implicit cleanup        | Assumed rejecting the returned test Promise would cancel the Effect                        | In-scope failure interrupts the child operation and closes `Effect.scoped` before the outer guard                  | Same test body via `awaitWithTimeout` |
 
 ## 13. Forward Traceability
 
-| Requirement or invariant | Production path | Planned file/change | Behavioral test |
-| --- | --- | --- | --- |
-| INV-01 real timeout remains retryable and visible | Provider -> MessageV2 -> SessionRetry -> Status | No production change; preserve attempt/message assertions | Existing focused Processor test |
-| INV-02 behavior-based success | TestLLMServer -> Processor -> Status -> Message | `llm-server.ts`: explicit repeat queue item; `processor-effect.test.ts`: held first item + repeat `after`, readiness/Status/Message | Same vertical test and current-source extra-expiry probe |
-| INV-03 wall clock cannot create success | In-scope failure boundary plus outer package guard | Remove 100ms race; add failure-only 20s Effect boundary | 48-worker stress, deadline-suppression mutation, and full CI |
-| INV-04 no exact attempt cap | SessionRetry existing schedule | Remove exact call count | Deterministic extra-expiry probe turns from red to green without suppressing retry |
-| INV-05 cleanup on every exit | Scoped test lifecycle | Add gate/subscription finalizers and in-scope failure boundary | Focused test, deadline-suppression red mutation, stress test, package cleanup |
-| INV-06 production semantics preserved | Existing Provider/Session chain | Zero production files | LLM, retry, Processor regression suites |
-| INV-07 user diff budget | Two test-scope owners only | Two existing test-scope files, under 55 changed lines | Final diff inventory |
+| Requirement or invariant                          | Production path                                    | Planned file/change                                                                                                                 | Behavioral test                                                                    |
+| ------------------------------------------------- | -------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
+| INV-01 real timeout remains retryable and visible | Provider -> MessageV2 -> SessionRetry -> Status    | No production change; preserve attempt/message assertions                                                                           | Existing focused Processor test                                                    |
+| INV-02 behavior-based success                     | TestLLMServer -> Processor -> Status -> Message    | `llm-server.ts`: explicit repeat queue item; `processor-effect.test.ts`: held first item + repeat `after`, readiness/Status/Message | Same vertical test and current-source extra-expiry probe                           |
+| INV-03 wall clock cannot create success           | In-scope failure boundary plus outer package guard | Remove 100ms race; add failure-only 20s Effect boundary                                                                             | 48-worker stress, deadline-suppression mutation, and full CI                       |
+| INV-04 no exact attempt cap                       | SessionRetry existing schedule                     | Remove exact call count                                                                                                             | Deterministic extra-expiry probe turns from red to green without suppressing retry |
+| INV-05 cleanup on every exit                      | Scoped test lifecycle                              | Add gate/subscription finalizers and in-scope failure boundary                                                                      | Focused test, deadline-suppression red mutation, stress test, package cleanup      |
+| INV-06 production semantics preserved             | Existing Provider/Session chain                    | Zero production files                                                                                                               | LLM, retry, Processor regression suites                                            |
+| INV-07 user diff budget                           | Two test-scope owners only                         | Two existing test-scope files, under 55 changed lines                                                                               | Final diff inventory                                                               |
 
 No confirmed requirement is unmapped.
 
@@ -369,23 +369,23 @@ No confirmed requirement is unmapped.
 
 No production concept is proposed.
 
-| Proposed test concept | Requirement ID | Evidence | Why existing logic cannot carry it |
-| --- | --- | --- | --- |
-| `llm.wait(1)` before retry observation | INV-02/03 | Existing published readiness API; 100ms race failed locally | Current test has no request-dispatch synchronization |
-| Direct retry Status await | INV-01/02/03 | Status is the public user-visible contract | 100ms race can return without Status |
-| One 20s in-scope failure boundary | INV-03/05 | `testEffect.run` has no Bun-timeout cancellation bridge; auditor B-01 | Package timeout can report failure but cannot deterministically close the Effect scope |
-| 500ms test-only progress deadline | INV-01/02 | First response is indefinitely gated; 25ms caused a valid third attempt in macOS CI; 500ms probe passed 3/3 under 48-worker load | 25ms conflates intended first failure with nominal success scheduling |
-| Explicit repeat queue entry and `pushRepeat` service method | INV-02/04 | Current-source extra-expiry probe proves one-shot queue is insufficient; R3 audit B-01 forbids queue-miss default success | Existing one-shot `push` removes the item on request arrival; no explicit repeat lifetime exists |
-| Repeat `after` Message assertion | INV-02/04 | Explicit fixture literal is independent and remains configured across attempts | Exact count, finite queue, and implicit default each fail a confirmed boundary |
-| Scoped gate/subscription finalizers | INV-05 | Current statements are bypassed by interruption | Existing fixture scope cannot invoke a test-owned unresolved Promise resolver or returned `off` unless registered |
+| Proposed test concept                                       | Requirement ID | Evidence                                                                                                                         | Why existing logic cannot carry it                                                                                |
+| ----------------------------------------------------------- | -------------- | -------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `llm.wait(1)` before retry observation                      | INV-02/03      | Existing published readiness API; 100ms race failed locally                                                                      | Current test has no request-dispatch synchronization                                                              |
+| Direct retry Status await                                   | INV-01/02/03   | Status is the public user-visible contract                                                                                       | 100ms race can return without Status                                                                              |
+| One 20s in-scope failure boundary                           | INV-03/05      | `testEffect.run` has no Bun-timeout cancellation bridge; auditor B-01                                                            | Package timeout can report failure but cannot deterministically close the Effect scope                            |
+| 500ms test-only progress deadline                           | INV-01/02      | First response is indefinitely gated; 25ms caused a valid third attempt in macOS CI; 500ms probe passed 3/3 under 48-worker load | 25ms conflates intended first failure with nominal success scheduling                                             |
+| Explicit repeat queue entry and `pushRepeat` service method | INV-02/04      | Current-source extra-expiry probe proves one-shot queue is insufficient; R3 audit B-01 forbids queue-miss default success        | Existing one-shot `push` removes the item on request arrival; no explicit repeat lifetime exists                  |
+| Repeat `after` Message assertion                            | INV-02/04      | Explicit fixture literal is independent and remains configured across attempts                                                   | Exact count, finite queue, and implicit default each fail a confirmed boundary                                    |
+| Scoped gate/subscription finalizers                         | INV-05         | Current statements are bypassed by interruption                                                                                  | Existing fixture scope cannot invoke a test-owned unresolved Promise resolver or returned `off` unless registered |
 
 ## 15. File-Level Change Plan
 
-| File | Add / modify / delete | Exact responsibility of the change | Expected line delta |
-| --- | --- | --- | ---: |
-| `packages/opencode/test/session/processor-effect.test.ts` | modify | Import existing timeout helper; queue the held first item plus explicit repeat `after`; replace timer/count proxies with request, Status, in-scope failure/cleanup, and final Message behavior; use a separated test-only timeout | <= +16 / -9 |
-| `packages/opencode/test/lib/llm-server.ts` | modify | Add explicit repeat lifetime to the existing response queue and expose `pushRepeat`; preserve one-shot/default behavior | <= +10 / -1 |
-| `docs/plans/session-processor-first-progress-timeout-ci-stability.md` | add | Canonical workflow, evidence, audit, and implementation record | report excluded from user's 600-line implementation budget |
+| File                                                                  | Add / modify / delete | Exact responsibility of the change                                                                                                                                                                                                |                                        Expected line delta |
+| --------------------------------------------------------------------- | --------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------: |
+| `packages/opencode/test/session/processor-effect.test.ts`             | modify                | Import existing timeout helper; queue the held first item plus explicit repeat `after`; replace timer/count proxies with request, Status, in-scope failure/cleanup, and final Message behavior; use a separated test-only timeout |                                                <= +16 / -9 |
+| `packages/opencode/test/lib/llm-server.ts`                            | modify                | Add explicit repeat lifetime to the existing response queue and expose `pushRepeat`; preserve one-shot/default behavior                                                                                                           |                                                <= +10 / -1 |
+| `docs/plans/session-processor-first-progress-timeout-ci-stability.md` | add                   | Canonical workflow, evidence, audit, and implementation record                                                                                                                                                                    | report excluded from user's 600-line implementation budget |
 
 Production files: 0. Test-scope files: 2. Existing files are preferred exactly as
 requested; the only new file is the required canonical report.
@@ -396,11 +396,11 @@ The behavioral seam is the existing `SessionProcessor.process` integration
 path. R4 adds only the approved `TestLLMServer.Service.pushRepeat` fixture seam
 at the existing queue owner; it adds no new test or production seam.
 
-| Order | Red behavior | Why current code fails | Minimal green behavior | Regression protected |
-| --- | --- | --- | --- | --- |
-| 1 | Current-source preload causes a valid extra timeout; original test fails with calls 3 and R2 fails with missing `after` | Fixed count and one-shot success both bind recovery to an attempt; R3 default success hides missing setup | Add explicit repeat `after` producer; assert real retry Status + final `after` after the third request | macOS Actions attempt-1, R2 implementation B-01, R3 plan B-01 |
-| 2 | 48-worker loop lets 100ms observer win; current test receives `undefined` | Observer begins before request/Status readiness and releases gate by time | Wait for `llm.wait(1)` and retry Status directly; 20s in-scope timeout can only fail and the 30s package timeout remains the last guard | load-sensitive observer race |
-| 3 | Suppress the Provider deadline so request/Status/recovery never completes; Bun-only timeout cannot close the scope | Cleanup is happy-path-only and outer timeout does not interrupt Effect | Register scoped finalizers and wrap the complete async operation in a failure-only 20s Effect boundary | timeout/failure cleanup without success synthesis |
+| Order | Red behavior                                                                                                            | Why current code fails                                                                                    | Minimal green behavior                                                                                                                  | Regression protected                                          |
+| ----- | ----------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------- |
+| 1     | Current-source preload causes a valid extra timeout; original test fails with calls 3 and R2 fails with missing `after` | Fixed count and one-shot success both bind recovery to an attempt; R3 default success hides missing setup | Add explicit repeat `after` producer; assert real retry Status + final `after` after the third request                                  | macOS Actions attempt-1, R2 implementation B-01, R3 plan B-01 |
+| 2     | 48-worker loop lets 100ms observer win; current test receives `undefined`                                               | Observer begins before request/Status readiness and releases gate by time                                 | Wait for `llm.wait(1)` and retry Status directly; 20s in-scope timeout can only fail and the 30s package timeout remains the last guard | load-sensitive observer race                                  |
+| 3     | Suppress the Provider deadline so request/Status/recovery never completes; Bun-only timeout cannot close the scope      | Cleanup is happy-path-only and outer timeout does not interrupt Effect                                    | Register scoped finalizers and wrap the complete async operation in a failure-only 20s Effect boundary                                  | timeout/failure cleanup without success synthesis             |
 
 Expected values are independent literals from the public seams:
 `attempt=1`, `message="SSE read timed out"`, `result="continue"`, and final text
@@ -408,10 +408,10 @@ Expected values are independent literals from the public seams:
 
 ## 17. Chinese Comment Budget
 
-| Metric | Estimate | Method |
-| --- | ---: | --- |
-| Effective changed code lines `E` | 22-28 | Includes Processor synchronization/finalizers and TestLLMServer repeat queue semantics; excludes import-only, formatting, removed lines, and this report |
-| Required Chinese explanatory comments `C` | 5 | `max(1, ceil(E * 0.15))`; plan at least 7 qualifying lines across the two decision owners |
+| Metric                                    | Estimate | Method                                                                                                                                                   |
+| ----------------------------------------- | -------: | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Effective changed code lines `E`          |    22-28 | Includes Processor synchronization/finalizers and TestLLMServer repeat queue semantics; excludes import-only, formatting, removed lines, and this report |
+| Required Chinese explanatory comments `C` |        5 | `max(1, ceil(E * 0.15))`; plan at least 7 qualifying lines across the two decision owners                                                                |
 
 Planned nearby explanations:
 
@@ -432,18 +432,18 @@ Comments will explain boundaries and intent, not restate assignments.
 
 ## 18. Verification
 
-| Command | Working directory | Evidence produced |
-| --- | --- | --- |
-| Focused test, normal | `packages/opencode` | Real timeout Status and explicit successful Message pass |
-| Same focused test with current-source extra-expiry diagnostic preload | `packages/opencode` | Original code is red with calls 3, R2 is red with missing `after`, and R4 remains green with repeat `after` after the real third request |
-| Three focused runs under 48-worker contention | `packages/opencode` | No 100ms readiness race; all runs complete from real Status/Message behavior |
-| Deadline-suppression diagnostic preload, expected red | `packages/opencode` | In-scope 20s failure appears before Bun's 30s guard and the command exits without a live Processor/server/subscription |
-| `CI=1 bun test test/session/processor-effect.test.ts --timeout 30000 -t "session.processor retries a real first-progress timeout"` | `packages/opencode` | CI environment does not skip or alter the test |
-| `bun test test/session/processor-effect.test.ts --timeout 30000` | `packages/opencode` | All Processor effect tests remain green |
-| `bun test test/session/llm.test.ts test/session/retry.test.ts test/session/processor-effect.test.ts --timeout 30000` | `packages/opencode` | Provider timeout, classification, retry, cancellation, and Processor boundaries remain green |
-| `bun typecheck` | `packages/opencode` | Test change remains type-safe |
-| `bun turbo test:ci --filter=opencode --continue=dependencies-successful` | repository root | Full local CI-equivalent suite has zero failures |
-| `git diff --check` | repository root | Final implementation/report has no whitespace errors |
+| Command                                                                                                                            | Working directory   | Evidence produced                                                                                                                        |
+| ---------------------------------------------------------------------------------------------------------------------------------- | ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| Focused test, normal                                                                                                               | `packages/opencode` | Real timeout Status and explicit successful Message pass                                                                                 |
+| Same focused test with current-source extra-expiry diagnostic preload                                                              | `packages/opencode` | Original code is red with calls 3, R2 is red with missing `after`, and R4 remains green with repeat `after` after the real third request |
+| Three focused runs under 48-worker contention                                                                                      | `packages/opencode` | No 100ms readiness race; all runs complete from real Status/Message behavior                                                             |
+| Deadline-suppression diagnostic preload, expected red                                                                              | `packages/opencode` | In-scope 20s failure appears before Bun's 30s guard and the command exits without a live Processor/server/subscription                   |
+| `CI=1 bun test test/session/processor-effect.test.ts --timeout 30000 -t "session.processor retries a real first-progress timeout"` | `packages/opencode` | CI environment does not skip or alter the test                                                                                           |
+| `bun test test/session/processor-effect.test.ts --timeout 30000`                                                                   | `packages/opencode` | All Processor effect tests remain green                                                                                                  |
+| `bun test test/session/llm.test.ts test/session/retry.test.ts test/session/processor-effect.test.ts --timeout 30000`               | `packages/opencode` | Provider timeout, classification, retry, cancellation, and Processor boundaries remain green                                             |
+| `bun typecheck`                                                                                                                    | `packages/opencode` | Test change remains type-safe                                                                                                            |
+| `bun turbo test:ci --filter=opencode --continue=dependencies-successful`                                                           | repository root     | Full local CI-equivalent suite has zero failures                                                                                         |
+| `git diff --check`                                                                                                                 | repository root     | Final implementation/report has no whitespace errors                                                                                     |
 
 Implementation must record exact commands, durations, pass/fail counts, stress
 rate, and any unrelated failures. A focused pass cannot replace the full CI
@@ -452,16 +452,16 @@ the local full command and stress loop are required before implementation audit.
 
 ## 19. Diff Budget
 
-| Metric | Estimate | Justification |
-| --- | ---: | --- |
-| Production files modified | 0 | Production behavior is already correct |
-| Test-scope files modified | 2 | Existing failing vertical test plus its existing explicit HTTP response queue owner |
-| Reports added | 1 | User explicitly requires a completely new canonical document; excluded from implementation line budget |
-| Production lines | 0 | No new production concept |
-| Test lines changed | < 55 | Synchronization, queue repeat lifetime, in-scope failure boundary, cleanup, semantic assertion, one test-only configuration value |
-| Total implementation lines | < 55 | Far below the user maximum of 600 |
-| Generated lines | 0 | No schema/API change |
-| Migrations/dependencies | 0 | No persistence or package change |
+| Metric                     | Estimate | Justification                                                                                                                     |
+| -------------------------- | -------: | --------------------------------------------------------------------------------------------------------------------------------- |
+| Production files modified  |        0 | Production behavior is already correct                                                                                            |
+| Test-scope files modified  |        2 | Existing failing vertical test plus its existing explicit HTTP response queue owner                                               |
+| Reports added              |        1 | User explicitly requires a completely new canonical document; excluded from implementation line budget                            |
+| Production lines           |        0 | No new production concept                                                                                                         |
+| Test lines changed         |     < 55 | Synchronization, queue repeat lifetime, in-scope failure boundary, cleanup, semantic assertion, one test-only configuration value |
+| Total implementation lines |     < 55 | Far below the user maximum of 600                                                                                                 |
+| Generated lines            |        0 | No schema/API change                                                                                                              |
+| Migrations/dependencies    |        0 | No persistence or package change                                                                                                  |
 
 The user caps are hard maxima, not targets. Any evidence requiring more than
 four production files, four test files, or 600 implementation lines requires a
@@ -471,13 +471,13 @@ new revision and full-scope audit before implementation.
 
 ### Real Risks
 
-| Risk | Evidence | Mitigation in approved route |
-| --- | --- | --- |
-| A timeout behavior test necessarily uses real time | The feature itself is a no-progress deadline and uses a real HTTP server | Gate the first response indefinitely, use 500ms only to cause failure, and derive green from request/Status/Message signals |
-| Queue-miss `ok` can hide missing response setup | `llm-server.ts:679-685` and R3 audit B-01 | Configure one explicit repeat item; current test never needs the default branch to pass |
-| Bun package timeout does not interrupt the scoped Effect while the HTTP handler waits on a JS Promise | `testEffect.run` returns `Effect.runPromise` without a timeout signal bridge; audit B-01 | Fail inside the Effect at 20s, then let scope finalizers release the gate and interrupt work before the outer 30s guard |
-| Callback subscription may survive an early assertion failure | `subscribeCallback` creates an explicit scope closed by `off` | Register `off` as a test-scope finalizer |
-| Native macOS Actions scheduling cannot be reproduced exactly locally | Attempt 1 failed and attempt 2 passed | Use deterministic exact-symptom probe, high-load stress, full CI-equivalent run, and report native post-push verification as remaining environment evidence |
+| Risk                                                                                                  | Evidence                                                                                 | Mitigation in approved route                                                                                                                                |
+| ----------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| A timeout behavior test necessarily uses real time                                                    | The feature itself is a no-progress deadline and uses a real HTTP server                 | Gate the first response indefinitely, use 500ms only to cause failure, and derive green from request/Status/Message signals                                 |
+| Queue-miss `ok` can hide missing response setup                                                       | `llm-server.ts:679-685` and R3 audit B-01                                                | Configure one explicit repeat item; current test never needs the default branch to pass                                                                     |
+| Bun package timeout does not interrupt the scoped Effect while the HTTP handler waits on a JS Promise | `testEffect.run` returns `Effect.runPromise` without a timeout signal bridge; audit B-01 | Fail inside the Effect at 20s, then let scope finalizers release the gate and interrupt work before the outer 30s guard                                     |
+| Callback subscription may survive an early assertion failure                                          | `subscribeCallback` creates an explicit scope closed by `off`                            | Register `off` as a test-scope finalizer                                                                                                                    |
+| Native macOS Actions scheduling cannot be reproduced exactly locally                                  | Attempt 1 failed and attempt 2 passed                                                    | Use deterministic exact-symptom probe, high-load stress, full CI-equivalent run, and report native post-push verification as remaining environment evidence |
 
 ### Open Decisions Requiring the User
 
@@ -525,12 +525,12 @@ The independent auditor must:
 
 ## 22. Plan Audit Record
 
-| Round | Audited revision | Full scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | R1 | yes | B-01: external Bun timeout cannot trigger planned scoped cleanup | 2 | BLOCK | adversarial-auditor task `ses_08607602dffeQK02zf2dDk1rs9` |
-| 2 | R2 | yes | 0 | 3 | APPROVE — No blocking findings | adversarial-auditor task `ses_08607602dffeQK02zf2dDk1rs9` |
-| 3 | R3 | yes | B-01: queue-miss default success was promoted to the test primary path | 3 | BLOCK | adversarial-auditor task `ses_08607602dffeQK02zf2dDk1rs9` |
-| 4 | R4 | yes | 0 | 4 | APPROVE — No blocking findings | adversarial-auditor task `ses_08607602dffeQK02zf2dDk1rs9` |
+| Round | Audited revision | Full scope? | Blocking findings                                                      | Non-blocking findings | Result                         | Invocation reference                                      |
+| ----- | ---------------- | ----------- | ---------------------------------------------------------------------- | --------------------- | ------------------------------ | --------------------------------------------------------- |
+| 1     | R1               | yes         | B-01: external Bun timeout cannot trigger planned scoped cleanup       | 2                     | BLOCK                          | adversarial-auditor task `ses_08607602dffeQK02zf2dDk1rs9` |
+| 2     | R2               | yes         | 0                                                                      | 3                     | APPROVE — No blocking findings | adversarial-auditor task `ses_08607602dffeQK02zf2dDk1rs9` |
+| 3     | R3               | yes         | B-01: queue-miss default success was promoted to the test primary path | 3                     | BLOCK                          | adversarial-auditor task `ses_08607602dffeQK02zf2dDk1rs9` |
+| 4     | R4               | yes         | 0                                                                      | 4                     | APPROVE — No blocking findings | adversarial-auditor task `ses_08607602dffeQK02zf2dDk1rs9` |
 
 Any substantive revision invalidates earlier approval. A clean independent
 verdict may update only the administrative approval fields and this record for
@@ -828,11 +828,11 @@ production success path changed.
 
 ### Actual Files and Diff
 
-| File | Raw added | Raw removed | Responsibility |
-| --- | ---: | ---: | --- |
-| `packages/opencode/test/lib/llm-server.ts` | 13 | 1 | Add the approved explicit repeat lifetime to the existing queue and expose `pushRepeat`; preserve one-shot and queue-miss behavior. |
-| `packages/opencode/test/session/processor-effect.test.ts` | 28 | 17 | Replace timer/count proxies and finite success response with request readiness, retry Status, scoped failure/cleanup, repeat `after`, and final Message behavior. |
-| `docs/plans/session-processor-first-progress-timeout-ci-stability.md` | report | 0 | Canonical evidence and audit record; excluded from the user's implementation-line budget. |
+| File                                                                  | Raw added | Raw removed | Responsibility                                                                                                                                                    |
+| --------------------------------------------------------------------- | --------: | ----------: | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `packages/opencode/test/lib/llm-server.ts`                            |        13 |           1 | Add the approved explicit repeat lifetime to the existing queue and expose `pushRepeat`; preserve one-shot and queue-miss behavior.                               |
+| `packages/opencode/test/session/processor-effect.test.ts`             |        28 |          17 | Replace timer/count proxies and finite success response with request readiness, retry Status, scoped failure/cleanup, repeat `after`, and final Message behavior. |
+| `docs/plans/session-processor-first-progress-timeout-ci-stability.md` |    report |           0 | Canonical evidence and audit record; excluded from the user's implementation-line budget.                                                                         |
 
 Actual implementation scope: zero production files, two existing test-scope
 files, 59 raw changed implementation lines, and zero generated/dependency/migration lines. The
@@ -884,19 +884,19 @@ the external timeout.
 
 ### Verification Commands and Results
 
-| Command | Working directory | Result |
-| --- | --- | --- |
-| `bun test test/session/processor-effect.test.ts --timeout 30000 -t "session.processor retries a real first-progress timeout"` | `packages/opencode` | 1 pass, 0 fail, 4 assertions, 5.10s |
-| Current-source second-attempt-expiry preload, before R4 | `packages/opencode` | Expected red: real third request completed, final `after` absent, 0 pass / 1 fail, 4 assertions, 8.63s |
-| Same current-source preload, after R4 | `packages/opencode` | 1 pass, 0 fail, 4 assertions, 8.92s; diagnostic log confirmed the second Provider attempt expired |
-| Deadline-suppression preload with focused + adjacent test | `packages/opencode` | Expected red at in-scope 20s boundary; adjacent test passed; process ended in 22.91s |
-| Three focused runs with 48 CPU competitors per run | `packages/opencode` | 3/3 pass, 0 fail; 11.33s / 10.10s / 12.26s |
-| `CI=1 bun test test/session/processor-effect.test.ts --timeout 30000 -t "session.processor retries a real first-progress timeout"` | `packages/opencode` | 1 pass, 0 fail, 4 assertions, 4.85s |
-| `bun test test/session/processor-effect.test.ts --timeout 30000` | `packages/opencode` | 19 pass, 0 fail, 80 assertions, 31.96s |
-| `bun test test/session/llm.test.ts test/session/retry.test.ts test/session/processor-effect.test.ts --timeout 30000` | `packages/opencode` | 86 pass, 0 fail, 241 assertions, 38.01s |
-| `bun typecheck` | `packages/opencode` | Pass (`tsgo --noEmit`) |
-| `bun turbo test:ci --filter=opencode --continue=dependencies-successful` | repository root | 3824 pass, 16 skip, 0 fail, 3840 tests, 11193 assertions; 3/3 tasks successful; 9m39.528s |
-| `git diff --check` | repository root | Pass, no output |
+| Command                                                                                                                            | Working directory   | Result                                                                                                 |
+| ---------------------------------------------------------------------------------------------------------------------------------- | ------------------- | ------------------------------------------------------------------------------------------------------ |
+| `bun test test/session/processor-effect.test.ts --timeout 30000 -t "session.processor retries a real first-progress timeout"`      | `packages/opencode` | 1 pass, 0 fail, 4 assertions, 5.10s                                                                    |
+| Current-source second-attempt-expiry preload, before R4                                                                            | `packages/opencode` | Expected red: real third request completed, final `after` absent, 0 pass / 1 fail, 4 assertions, 8.63s |
+| Same current-source preload, after R4                                                                                              | `packages/opencode` | 1 pass, 0 fail, 4 assertions, 8.92s; diagnostic log confirmed the second Provider attempt expired      |
+| Deadline-suppression preload with focused + adjacent test                                                                          | `packages/opencode` | Expected red at in-scope 20s boundary; adjacent test passed; process ended in 22.91s                   |
+| Three focused runs with 48 CPU competitors per run                                                                                 | `packages/opencode` | 3/3 pass, 0 fail; 11.33s / 10.10s / 12.26s                                                             |
+| `CI=1 bun test test/session/processor-effect.test.ts --timeout 30000 -t "session.processor retries a real first-progress timeout"` | `packages/opencode` | 1 pass, 0 fail, 4 assertions, 4.85s                                                                    |
+| `bun test test/session/processor-effect.test.ts --timeout 30000`                                                                   | `packages/opencode` | 19 pass, 0 fail, 80 assertions, 31.96s                                                                 |
+| `bun test test/session/llm.test.ts test/session/retry.test.ts test/session/processor-effect.test.ts --timeout 30000`               | `packages/opencode` | 86 pass, 0 fail, 241 assertions, 38.01s                                                                |
+| `bun typecheck`                                                                                                                    | `packages/opencode` | Pass (`tsgo --noEmit`)                                                                                 |
+| `bun turbo test:ci --filter=opencode --continue=dependencies-successful`                                                           | repository root     | 3824 pass, 16 skip, 0 fail, 3840 tests, 11193 assertions; 3/3 tasks successful; 9m39.528s              |
+| `git diff --check`                                                                                                                 | repository root     | Pass, no output                                                                                        |
 
 ### Original Feedback-Loop Result
 
@@ -914,14 +914,14 @@ are all recorded.
 
 ### Actual Secondary and Replacement Path Inventory
 
-| Path | Classification | Produces success? | Actual disposition |
-| --- | --- | --- | --- |
-| Real request -> first-progress timeout -> retry Status -> explicit repeat `after` Message -> `continue` | R4 primary test path | yes through the configured HTTP/SSE producer after any supported retry | implemented and green under the real third-request probe |
-| In-scope 20s `awaitWithTimeout` | diagnostic failure/cleanup boundary | no | Preserved; expected-red mutation proved it fails and closes scope |
-| Outer Bun 30s test timeout | outer diagnostic guard | no | Preserved; no longer owns Effect cleanup |
-| TestLLMServer queue-miss `ok` | existing fixture behavior | yes through real HTTP/SSE | Preserved unchanged; the target test's retained repeat item prevents this branch from being reached |
-| Additional retry after a real no-progress expiry | supported production branch | eventually | Preserved without count assertion or cap |
-| Explicit repeat queue item | supported test-domain branch in the existing queue | yes | Implemented at the queue owner; ordinary `push`/`pushMatch` remain one-shot |
+| Path                                                                                                    | Classification                                     | Produces success?                                                      | Actual disposition                                                                                  |
+| ------------------------------------------------------------------------------------------------------- | -------------------------------------------------- | ---------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| Real request -> first-progress timeout -> retry Status -> explicit repeat `after` Message -> `continue` | R4 primary test path                               | yes through the configured HTTP/SSE producer after any supported retry | implemented and green under the real third-request probe                                            |
+| In-scope 20s `awaitWithTimeout`                                                                         | diagnostic failure/cleanup boundary                | no                                                                     | Preserved; expected-red mutation proved it fails and closes scope                                   |
+| Outer Bun 30s test timeout                                                                              | outer diagnostic guard                             | no                                                                     | Preserved; no longer owns Effect cleanup                                                            |
+| TestLLMServer queue-miss `ok`                                                                           | existing fixture behavior                          | yes through real HTTP/SSE                                              | Preserved unchanged; the target test's retained repeat item prevents this branch from being reached |
+| Additional retry after a real no-progress expiry                                                        | supported production branch                        | eventually                                                             | Preserved without count assertion or cap                                                            |
+| Explicit repeat queue item                                                                              | supported test-domain branch in the existing queue | yes                                                                    | Implemented at the queue owner; ordinary `push`/`pushMatch` remain one-shot                         |
 
 Removed workarounds: 100ms `Promise.race`, exact `llm.calls === 2`, the finite
 one-request `after` producer, success-only manual cleanup, and R3's proposed
@@ -930,12 +930,12 @@ decision-surface change: zero.
 
 ### Chinese Comment Calculation
 
-| Metric | Actual | Exclusions and evidence |
-| --- | --- | --- |
-| Effective changed code lines `E` | 26 | Processor: 17 from 28 additions after excluding one import-only line, seven comments, and three formatter-only config-object lines. TestLLMServer: 9 from 13 additions after excluding three comments and one blank line. Removed lines are not added to E. |
-| Qualifying Chinese comment lines `C` | 10 | Processor: gate ownership, exact 500ms boundary, repeat response invariant, behavior-only positive result/failure boundary, no fixed retry multiplicity, final Message contract, and loopback separation. TestLLMServer: repeat lifetime, explicit producer vs default success, and one-shot preservation. |
-| Ratio `C / E` | 0.385 | `10 / 26 = 38.5%` |
-| Required minimum `C` | 4 | `max(1, ceil(26 * 0.15)) = 4` |
+| Metric                               | Actual | Exclusions and evidence                                                                                                                                                                                                                                                                                    |
+| ------------------------------------ | ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Effective changed code lines `E`     | 26     | Processor: 17 from 28 additions after excluding one import-only line, seven comments, and three formatter-only config-object lines. TestLLMServer: 9 from 13 additions after excluding three comments and one blank line. Removed lines are not added to E.                                                |
+| Qualifying Chinese comment lines `C` | 10     | Processor: gate ownership, exact 500ms boundary, repeat response invariant, behavior-only positive result/failure boundary, no fixed retry multiplicity, final Message contract, and loopback separation. TestLLMServer: repeat lifetime, explicit producer vs default success, and one-shot preservation. |
+| Ratio `C / E`                        | 0.385  | `10 / 26 = 38.5%`                                                                                                                                                                                                                                                                                          |
+| Required minimum `C`                 | 4      | `max(1, ceil(26 * 0.15)) = 4`                                                                                                                                                                                                                                                                              |
 
 ### Remaining Unverified Items
 
@@ -949,11 +949,11 @@ decision-surface change: zero.
 
 ## 24. Implementation Audit Record
 
-| Round | Plan revision | Full original scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | R2 | yes | B-01: original three-request path was not rerun against current source; actual replay fails at finite `after` assertion | 3 | BLOCK | adversarial-auditor task `ses_08607602dffeQK02zf2dDk1rs9` |
-| — | R3 | not invoked | Plan blocked before implementation | — | superseded by R4 | — |
-| 2 | R4 | yes | 0 | 4 | APPROVE — No blocking findings | adversarial-auditor task `ses_08607602dffeQK02zf2dDk1rs9` |
+| Round | Plan revision | Full original scope? | Blocking findings                                                                                                       | Non-blocking findings | Result                         | Invocation reference                                      |
+| ----- | ------------- | -------------------- | ----------------------------------------------------------------------------------------------------------------------- | --------------------- | ------------------------------ | --------------------------------------------------------- |
+| 1     | R2            | yes                  | B-01: original three-request path was not rerun against current source; actual replay fails at finite `after` assertion | 3                     | BLOCK                          | adversarial-auditor task `ses_08607602dffeQK02zf2dDk1rs9` |
+| —     | R3            | not invoked          | Plan blocked before implementation                                                                                      | —                     | superseded by R4               | —                                                         |
+| 2     | R4            | yes                  | 0                                                                                                                       | 4                     | APPROVE — No blocking findings | adversarial-auditor task `ses_08607602dffeQK02zf2dDk1rs9` |
 
 ### R2 implementation verdict (verbatim)
 

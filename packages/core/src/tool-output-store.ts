@@ -114,14 +114,20 @@ const preview = (text: string, maxLines: number, maxBytes: number, direction?: "
   return { head: takePrefix(sampled, headBytes), tail: takeSuffix(sampled, tailBytes) }
 }
 
-const boundedPreview = (text: string, format: (shown: ReturnType<typeof outputStats>, direction: "head" | "tail" | "head+tail") => string, maxLines: number, maxBytes: number, direction?: "head" | "tail") => {
+const boundedPreview = (
+  text: string,
+  format: (shown: ReturnType<typeof outputStats>, direction: "head" | "tail" | "head+tail") => string,
+  maxLines: number,
+  maxBytes: number,
+  direction?: "head" | "tail",
+) => {
   const markerBytes = Buffer.byteLength(format({ lines: maxLines, bytes: maxBytes }, direction ?? "head+tail"), "utf-8")
   // 极小预算优先保住完整恢复路径；不能裁断标签后声称原文仍可恢复。
   if (maxLines <= 4 || maxBytes <= markerBytes + 8) return format(outputStats(""), direction ?? "head")
   // 八字节覆盖分隔换行和KB/MB边界处的显示长度变化，不改变原head/tail选择。
   const bounded = preview(text, maxLines - 4, maxBytes - markerBytes - 8, direction)
   const shown = bounded.tail ? `${bounded.head}\n${bounded.tail}` : bounded.head
-  const marker = format(outputStats(shown), bounded.tail ? bounded.head ? "head+tail" : "tail" : "head")
+  const marker = format(outputStats(shown), bounded.tail ? (bounded.head ? "head+tail" : "tail") : "head")
   return bounded.tail ? `${bounded.head}\n\n${marker}\n\n${bounded.tail}` : `${bounded.head}\n\n${marker}`
 }
 
@@ -138,9 +144,20 @@ const layer = Layer.effect(
     const global = yield* Global.Service
     const config = yield* Effect.serviceOption(Config.Service)
     // 暂存引用只属于本次 settlement，成功、失败与中断都由 registry 收尾。
-    const captures = new Map<string, { path: string; retain: boolean; totalBytes: number; direction?: "head" | "tail"; flush: () => Effect.Effect<string, Error>; onInterrupted?: () => Effect.Effect<ToolOutput> }>()
+    const captures = new Map<
+      string,
+      {
+        path: string
+        retain: boolean
+        totalBytes: number
+        direction?: "head" | "tail"
+        flush: () => Effect.Effect<string, Error>
+        onInterrupted?: () => Effect.Effect<ToolOutput>
+      }
+    >()
     // Session 与 call 联合定位，避免不同 Session 的同名 call 串用原文。
-    const captureKey = (input: Pick<BoundInput, "sessionID" | "toolCallID">) => JSON.stringify([input.sessionID, input.toolCallID])
+    const captureKey = (input: Pick<BoundInput, "sessionID" | "toolCallID">) =>
+      JSON.stringify([input.sessionID, input.toolCallID])
     const directory = path.join(global.data, MANAGED_DIRECTORY)
     const limits = Effect.fn("ToolOutputStore.limits")(function* () {
       if (Option.isNone(config)) return { maxLines: MAX_LINES, maxBytes: MAX_BYTES }
@@ -161,7 +178,9 @@ const layer = Layer.effect(
       return file
     })
 
-    const discard = Effect.fn("ToolOutputStore.discard")(function* (input: Pick<BoundInput, "sessionID" | "toolCallID">) {
+    const discard = Effect.fn("ToolOutputStore.discard")(function* (
+      input: Pick<BoundInput, "sessionID" | "toolCallID">,
+    ) {
       const key = captureKey(input)
       const captured = captures.get(key)
       captures.delete(key)
@@ -170,61 +189,87 @@ const layer = Layer.effect(
     })
     const capture = <A, E>(
       input: CaptureInput,
-      body: (write: (chunk: Uint8Array) => Effect.Effect<void, Error>) => Effect.Effect<{ value: A; retain: boolean }, E>,
+      body: (
+        write: (chunk: Uint8Array) => Effect.Effect<void, Error>,
+      ) => Effect.Effect<{ value: A; retain: boolean }, E>,
       onInterrupted?: () => Effect.Effect<ToolOutput>,
-    ) => Effect.gen(function* () {
-      // 小输出先在固定字节窗口中保存，不因托管目录不可写而阻止普通命令。
-      const chunks: Uint8Array[] = []
-      let bytes = 0
-      const captured = { path: "", retain: false, totalBytes: 0, direction: input.direction, onInterrupted, flush: (): Effect.Effect<string, Error> => Effect.uninterruptible(Effect.gen(function* () {
-        // 排他创建、窗口追加与登记连续完成；wx 失败没有所有权，不能删除碰撞文件。
-        if (!captured.path) captured.path = yield* write("")
-        // 窗口最多 MAX_BYTES；一次追加和消费登记不可分割，取消后不能重放已写前缀。
-        if (chunks.length) yield* fs.writeFile(captured.path, Buffer.concat(chunks), { flag: "a" }).pipe(Effect.mapError((cause) => new StorageError({ operation: "write", cause })))
-        // 只有追加成功才清空窗口；写盘失败仍由原有 typed error 和所有权清理处理。
-        chunks.length = 0
-        bytes = 0
-        return captured.path
-      })) }
-      let completed = false
-      const key = captureKey(input)
-      captures.set(key, captured)
-      return yield* Effect.gen(function* () {
-        const result = yield* body((chunk) => Effect.gen(function* () {
-          if (!chunk.byteLength) return
-          // 原始归档计数跨flush累加；编码未确认时不把解码窗口行数冒充原文行数。
-          captured.totalBytes += chunk.byteLength
-          // 固定 MAX_BYTES 限制采集内存，不随用户模型预算放大或关闭。
-          if (!captured.path && bytes + chunk.byteLength <= MAX_BYTES) {
-            // 复制观察窗口，不能持有进程可能复用的缓冲；空 chunk 不增加对象数。
-            chunks.push(Uint8Array.from(chunk))
-            bytes += chunk.byteLength
-            return
-          }
-          // 跨过限额前先写已有窗口，当前大块直接追加，不扩大内存副本。
-          yield* captured.flush()
-          // 直接追加原始字节保留跨块 UTF-8；ENOSPC 等映射为同类存储失败并保留 cause，不升级为会话 defect。
-          yield* fs.writeFile(captured.path, chunk, { flag: "a" }).pipe(Effect.mapError((cause) => new StorageError({ operation: "write", cause })))
-        }))
-        captured.retain = result.retain
-        // 压缩或诊断损失要求原文时必须成功落盘；失败不能伪装成普通内存路径。
-        if (result.retain) yield* captured.flush()
-        // 未落盘窗口留到 bound 决定最终投影是否超限，退出状态也可能触发保留。
-        completed = true
-        return result.value
-      }).pipe(
-        Effect.onExit((exit) => Effect.sync(() => {
-          // 仅纯取消保留暂存；失败/defect 仍清理，registry 随后负责发布或丢弃。
-          if (exit._tag === "Failure" && Cause.hasInterruptsOnly(exit.cause) && onInterrupted) completed = true
-        })),
-        Effect.ensuring(Effect.suspend(() => {
-          if (completed) return Effect.void
-          captures.delete(key)
-          return captured.path ? fs.remove(captured.path).pipe(Effect.orDie) : Effect.void
-        })),
-      )
-    })
-    const interrupted = Effect.fn("ToolOutputStore.interrupted")(function* (input: Pick<BoundInput, "sessionID" | "toolCallID">) {
+    ) =>
+      Effect.gen(function* () {
+        // 小输出先在固定字节窗口中保存，不因托管目录不可写而阻止普通命令。
+        const chunks: Uint8Array[] = []
+        let bytes = 0
+        const captured = {
+          path: "",
+          retain: false,
+          totalBytes: 0,
+          direction: input.direction,
+          onInterrupted,
+          flush: (): Effect.Effect<string, Error> =>
+            Effect.uninterruptible(
+              Effect.gen(function* () {
+                // 排他创建、窗口追加与登记连续完成；wx 失败没有所有权，不能删除碰撞文件。
+                if (!captured.path) captured.path = yield* write("")
+                // 窗口最多 MAX_BYTES；一次追加和消费登记不可分割，取消后不能重放已写前缀。
+                if (chunks.length)
+                  yield* fs
+                    .writeFile(captured.path, Buffer.concat(chunks), { flag: "a" })
+                    .pipe(Effect.mapError((cause) => new StorageError({ operation: "write", cause })))
+                // 只有追加成功才清空窗口；写盘失败仍由原有 typed error 和所有权清理处理。
+                chunks.length = 0
+                bytes = 0
+                return captured.path
+              }),
+            ),
+        }
+        let completed = false
+        const key = captureKey(input)
+        captures.set(key, captured)
+        return yield* Effect.gen(function* () {
+          const result = yield* body((chunk) =>
+            Effect.gen(function* () {
+              if (!chunk.byteLength) return
+              // 原始归档计数跨flush累加；编码未确认时不把解码窗口行数冒充原文行数。
+              captured.totalBytes += chunk.byteLength
+              // 固定 MAX_BYTES 限制采集内存，不随用户模型预算放大或关闭。
+              if (!captured.path && bytes + chunk.byteLength <= MAX_BYTES) {
+                // 复制观察窗口，不能持有进程可能复用的缓冲；空 chunk 不增加对象数。
+                chunks.push(Uint8Array.from(chunk))
+                bytes += chunk.byteLength
+                return
+              }
+              // 跨过限额前先写已有窗口，当前大块直接追加，不扩大内存副本。
+              yield* captured.flush()
+              // 直接追加原始字节保留跨块 UTF-8；ENOSPC 等映射为同类存储失败并保留 cause，不升级为会话 defect。
+              yield* fs
+                .writeFile(captured.path, chunk, { flag: "a" })
+                .pipe(Effect.mapError((cause) => new StorageError({ operation: "write", cause })))
+            }),
+          )
+          captured.retain = result.retain
+          // 压缩或诊断损失要求原文时必须成功落盘；失败不能伪装成普通内存路径。
+          if (result.retain) yield* captured.flush()
+          // 未落盘窗口留到 bound 决定最终投影是否超限，退出状态也可能触发保留。
+          completed = true
+          return result.value
+        }).pipe(
+          Effect.onExit((exit) =>
+            Effect.sync(() => {
+              // 仅纯取消保留暂存；失败/defect 仍清理，registry 随后负责发布或丢弃。
+              if (exit._tag === "Failure" && Cause.hasInterruptsOnly(exit.cause) && onInterrupted) completed = true
+            }),
+          ),
+          Effect.ensuring(
+            Effect.suspend(() => {
+              if (completed) return Effect.void
+              captures.delete(key)
+              return captured.path ? fs.remove(captured.path).pipe(Effect.orDie) : Effect.void
+            }),
+          ),
+        )
+      })
+    const interrupted = Effect.fn("ToolOutputStore.interrupted")(function* (
+      input: Pick<BoundInput, "sessionID" | "toolCallID">,
+    ) {
       const captured = captures.get(captureKey(input))
       if (!captured?.onInterrupted) return
       // 中断本身也是呈现变化；即使小输出未超限，也应保留已观察的原文字节。
@@ -246,11 +291,18 @@ const layer = Layer.effect(
       // 领域structured和媒体不改写，避免formatter真值/文件路径被当作展示metadata消毒。
       const output = {
         ...input.output,
-        content: input.output.content.map((item) => item.type === "text" ? { ...item, text: sanitizeVisibleText(item.text) } : item),
+        content: input.output.content.map((item) =>
+          item.type === "text" ? { ...item, text: sanitizeVisibleText(item.text) } : item,
+        ),
       }
-      const contextual = output.content.length === 0 ? sanitizeVisibleText(raw) : output.content.flatMap((item) => item.type === "text" ? [item.text] : []).join("")
+      const contextual =
+        output.content.length === 0
+          ? sanitizeVisibleText(raw)
+          : output.content.flatMap((item) => (item.type === "text" ? [item.text] : [])).join("")
       const captured = captures.get(captureKey(input))
-      const fits = lineCount(contextual) <= outputLimits.maxLines && Buffer.byteLength(contextual, "utf-8") <= outputLimits.maxBytes
+      const fits =
+        lineCount(contextual) <= outputLimits.maxLines &&
+        Buffer.byteLength(contextual, "utf-8") <= outputLimits.maxBytes
       // 压缩未截断也需要恢复标记；不能只靠 outputPaths 向模型广告原文。
       if (fits && !captured?.retain && raw === contextual)
         return {
@@ -266,28 +318,40 @@ const layer = Layer.effect(
         formatOutputTruncatedNotice({ source: "tool", total, shown: { direction, ...shown }, path: outputPath })
       // 未截断呈现变化仍沿原恢复广告；真实限幅才报告output_truncated。
       const marker = fits
-        ? captured ? `... output presentation changed; captured raw output saved to ${outputPath} ...` : `... output presentation changed; full content saved to ${outputPath} ...`
+        ? captured
+          ? `... output presentation changed; captured raw output saved to ${outputPath} ...`
+          : `... output presentation changed; full content saved to ${outputPath} ...`
         : notice(outputStats(""), "head")
       captures.delete(captureKey(input))
       // 通用预算仍只在这里执行；仅完整路径本身超额时允许固定notice开销。
       const withMarker = `${contextual}\n\n${marker}`
       // 若总预算允许就保留原 content 分段，退出状态与媒体位置不能因增加路径而变化。
-      const preserveParts = lineCount(withMarker) <= outputLimits.maxLines && Buffer.byteLength(withMarker) <= outputLimits.maxBytes
+      const preserveParts =
+        lineCount(withMarker) <= outputLimits.maxLines && Buffer.byteLength(withMarker) <= outputLimits.maxBytes
 
       // Bash的独立末段承载退出/超时/取消通知，选择正文方向不能把执行结果截掉。
       const suffix = captured?.direction && text.length > 1 ? sanitizeVisibleText(text.at(-1)?.text ?? "") : ""
       const window = suffix ? contextual.slice(0, -suffix.length) : contextual
-      const bounded = () => boundedPreview(window, notice, outputLimits.maxLines - (suffix ? lineCount(suffix) + 2 : 0), outputLimits.maxBytes - (suffix ? Buffer.byteLength(suffix) + 2 : 0), captured?.direction) + (suffix ? `\n\n${sanitizeVisibleText(suffix)}` : "")
+      const bounded = () =>
+        boundedPreview(
+          window,
+          notice,
+          outputLimits.maxLines - (suffix ? lineCount(suffix) + 2 : 0),
+          outputLimits.maxBytes - (suffix ? Buffer.byteLength(suffix) + 2 : 0),
+          captured?.direction,
+        ) + (suffix ? `\n\n${sanitizeVisibleText(suffix)}` : "")
       return {
         output: {
           structured: input.output.structured,
-          content: preserveParts ? [...output.content, { type: "text" as const, text: `\n\n${marker}` }] : [
-            {
-              type: "text" as const,
-              text: bounded(),
-            },
-            ...media,
-          ],
+          content: preserveParts
+            ? [...output.content, { type: "text" as const, text: `\n\n${marker}` }]
+            : [
+                {
+                  type: "text" as const,
+                  text: bounded(),
+                },
+                ...media,
+              ],
         },
         outputPaths: [outputPath],
       }

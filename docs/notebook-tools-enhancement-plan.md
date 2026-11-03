@@ -4,27 +4,27 @@
 
 ### 已阅读的文件
 
-| 文件 | 行数 | 为何相关 |
-|---|---|---|
-| `sdks/vscode/src/notebook/env.ts` | 959 | env 工具全部实现：info/configure/restart/save，kernel 探测，selectKernel 超时 |
-| `sdks/vscode/src/notebook/run.ts` | 238 | run 工具实现：cell 执行、超时等待、范围执行停止逻辑 |
-| `sdks/vscode/src/notebook/edit.ts` | 681 | edit 工具实现：insert/edit/delete、string-match、after-source 预览 |
-| `sdks/vscode/src/notebook/source.ts` | 238 | source 工具实现：分页读取、cellId 自动扩展 |
-| `sdks/vscode/src/notebook/summary.ts` | 81 | summary 工具实现 |
-| `sdks/vscode/src/notebook/output.ts` | 136 | output 工具实现：artifact 落盘 |
-| `sdks/vscode/src/notebook/resolve.ts` | 53 | notebook/cell 解析（无创建路径） |
-| `sdks/vscode/src/notebook/format.ts` | 327 | 共享格式化工具 |
-| `sdks/vscode/src/notebook/commands.ts` | 276 | 调试命令面板 |
-| `sdks/vscode/src/bridge.ts` | 225 | HTTP bridge：路由、withFileLock、readJson |
-| `sdks/vscode/src/util.ts` | 145 | 共享工具函数 |
-| `packages/opencode/src/plugin/vscode-bridge.ts` | 437 | CLI 侧工具注册、权限、超时配置 |
-| `packages/opencode/src/plugin/vscode-bridge-descriptions.ts` | 53 | tool description |
-| `packages/opencode/src/ide/vscode-bridge.ts` | 439 | bridge 客户端、路径规范化 |
-| `packages/opencode/src/agent/agent.ts` | 565 | 权限配置（interactive ask, plan deny） |
-| `packages/opencode/test/plugin/vscode-notebook-tool-summary.test.ts` | 579 | 唯一 notebook 测试文件（fake vscode module） |
-| `packages/opencode/test/plugin/vscode-bridge.test.ts` | 501 | CLI 侧测试（权限、metadata） |
-| `packages/opencode/test/ide/vscode-bridge.test.ts` | 194 | bridge 发现测试 |
-| hamelnb `jupyter_live_kernel.py` | 2153 | 外部对比：变量检查、kernel 空闲等待、transport 重试安全 |
+| 文件                                                                 | 行数 | 为何相关                                                                      |
+| -------------------------------------------------------------------- | ---- | ----------------------------------------------------------------------------- |
+| `sdks/vscode/src/notebook/env.ts`                                    | 959  | env 工具全部实现：info/configure/restart/save，kernel 探测，selectKernel 超时 |
+| `sdks/vscode/src/notebook/run.ts`                                    | 238  | run 工具实现：cell 执行、超时等待、范围执行停止逻辑                           |
+| `sdks/vscode/src/notebook/edit.ts`                                   | 681  | edit 工具实现：insert/edit/delete、string-match、after-source 预览            |
+| `sdks/vscode/src/notebook/source.ts`                                 | 238  | source 工具实现：分页读取、cellId 自动扩展                                    |
+| `sdks/vscode/src/notebook/summary.ts`                                | 81   | summary 工具实现                                                              |
+| `sdks/vscode/src/notebook/output.ts`                                 | 136  | output 工具实现：artifact 落盘                                                |
+| `sdks/vscode/src/notebook/resolve.ts`                                | 53   | notebook/cell 解析（无创建路径）                                              |
+| `sdks/vscode/src/notebook/format.ts`                                 | 327  | 共享格式化工具                                                                |
+| `sdks/vscode/src/notebook/commands.ts`                               | 276  | 调试命令面板                                                                  |
+| `sdks/vscode/src/bridge.ts`                                          | 225  | HTTP bridge：路由、withFileLock、readJson                                     |
+| `sdks/vscode/src/util.ts`                                            | 145  | 共享工具函数                                                                  |
+| `packages/opencode/src/plugin/vscode-bridge.ts`                      | 437  | CLI 侧工具注册、权限、超时配置                                                |
+| `packages/opencode/src/plugin/vscode-bridge-descriptions.ts`         | 53   | tool description                                                              |
+| `packages/opencode/src/ide/vscode-bridge.ts`                         | 439  | bridge 客户端、路径规范化                                                     |
+| `packages/opencode/src/agent/agent.ts`                               | 565  | 权限配置（interactive ask, plan deny）                                        |
+| `packages/opencode/test/plugin/vscode-notebook-tool-summary.test.ts` | 579  | 唯一 notebook 测试文件（fake vscode module）                                  |
+| `packages/opencode/test/plugin/vscode-bridge.test.ts`                | 501  | CLI 侧测试（权限、metadata）                                                  |
+| `packages/opencode/test/ide/vscode-bridge.test.ts`                   | 194  | bridge 发现测试                                                               |
+| hamelnb `jupyter_live_kernel.py`                                     | 2153 | 外部对比：变量检查、kernel 空闲等待、transport 重试安全                       |
 
 ### 通过搜索确认的调用点
 
@@ -68,74 +68,74 @@
 
 ### 维度说明
 
-| 维度 | 含义 |
-|---|---|
-| 超时 | 工具调用是否有超时？超时后行为？ |
-| 阻塞 | 是否被 withFileLock 阻塞？阻塞时长？ |
+| 维度     | 含义                                 |
+| -------- | ------------------------------------ |
+| 超时     | 工具调用是否有超时？超时后行为？     |
+| 阻塞     | 是否被 withFileLock 阻塞？阻塞时长？ |
 | 错误恢复 | 错误消息是否可操作？agent 能否恢复？ |
-| 缺失能力 | 工具缺少什么关键操作？ |
-| 并发安全 | 并发请求是否安全？ |
+| 缺失能力 | 工具缺少什么关键操作？               |
+| 并发安全 | 并发请求是否安全？                   |
 
 ### 1.1 vscode_notebook_summary
 
-| 维度 | 现状 | 问题 |
-|---|---|---|
-| 超时 | CLI 10s | ✅ 合理 |
-| 阻塞 | 被 withFileLock 阻塞 | ❌ 只读操作不应被 run 阻塞 |
-| 错误恢复 | resolveNotebook 失败抛错 | ✅ 可接受 |
-| 缺失能力 | — | ✅ 无 |
-| 并发安全 | ✅ | — |
+| 维度     | 现状                     | 问题                       |
+| -------- | ------------------------ | -------------------------- |
+| 超时     | CLI 10s                  | ✅ 合理                    |
+| 阻塞     | 被 withFileLock 阻塞     | ❌ 只读操作不应被 run 阻塞 |
+| 错误恢复 | resolveNotebook 失败抛错 | ✅ 可接受                  |
+| 缺失能力 | —                        | ✅ 无                      |
+| 并发安全 | ✅                       | —                          |
 
 ### 1.2 vscode_notebook_source
 
-| 维度 | 现状 | 问题 |
-|---|---|---|
-| 超时 | CLI 10s | ✅ 合理 |
-| 阻塞 | 被 withFileLock 阻塞 | ❌ 只读操作不应被 run 阻塞 |
-| 错误恢复 | cell not found 带恢复建议 | ✅ 已修复 |
-| 缺失能力 | — | ✅ 无 |
-| 并发安全 | ✅ | — |
+| 维度     | 现状                      | 问题                       |
+| -------- | ------------------------- | -------------------------- |
+| 超时     | CLI 10s                   | ✅ 合理                    |
+| 阻塞     | 被 withFileLock 阻塞      | ❌ 只读操作不应被 run 阻塞 |
+| 错误恢复 | cell not found 带恢复建议 | ✅ 已修复                  |
+| 缺失能力 | —                         | ✅ 无                      |
+| 并发安全 | ✅                        | —                          |
 
 ### 1.3 vscode_notebook_run
 
-| 维度 | 现状 | 问题 |
-|---|---|---|
-| 超时 | 默认 300s/cell，最大 3000s | ⚠️ 超时后 cell 仍在运行，不取消 |
-| 阻塞 | 持有 withFileLock 整个执行时长 | ❌ 阻塞同 notebook 的所有操作 |
-| 错误恢复 | "timed out (may still be running...)" | ❌ 不可操作，无恢复指引 |
-| 缺失能力 | 无 kernel 预检 | ❌ 无 kernel 时静默失败或弹 picker |
-| 并发安全 | withFileLock 保护 | ✅ |
+| 维度     | 现状                                  | 问题                               |
+| -------- | ------------------------------------- | ---------------------------------- |
+| 超时     | 默认 300s/cell，最大 3000s            | ⚠️ 超时后 cell 仍在运行，不取消    |
+| 阻塞     | 持有 withFileLock 整个执行时长        | ❌ 阻塞同 notebook 的所有操作      |
+| 错误恢复 | "timed out (may still be running...)" | ❌ 不可操作，无恢复指引            |
+| 缺失能力 | 无 kernel 预检                        | ❌ 无 kernel 时静默失败或弹 picker |
+| 并发安全 | withFileLock 保护                     | ✅                                 |
 
 ### 1.4 vscode_notebook_output
 
-| 维度 | 现状 | 问题 |
-|---|---|---|
-| 超时 | CLI 30s | ✅ 合理 |
-| 阻塞 | 被 withFileLock 阻塞 | ❌ 只读操作不应被 run 阻塞 |
-| 错误恢复 | cell not found 带恢复建议 | ✅ 已修复 |
-| 缺失能力 | — | ✅ 无 |
-| 并发安全 | ✅ | — |
+| 维度     | 现状                      | 问题                       |
+| -------- | ------------------------- | -------------------------- |
+| 超时     | CLI 30s                   | ✅ 合理                    |
+| 阻塞     | 被 withFileLock 阻塞      | ❌ 只读操作不应被 run 阻塞 |
+| 错误恢复 | cell not found 带恢复建议 | ✅ 已修复                  |
+| 缺失能力 | —                         | ✅ 无                      |
+| 并发安全 | ✅                        | —                          |
 
 ### 1.5 vscode_notebook_edit
 
-| 维度 | 现状 | 问题 |
-|---|---|---|
-| 超时 | CLI 30s, server 10s sync | ✅ 合理 |
-| 阻塞 | 被 withFileLock 阻塞 | ✅ 变更操作应被阻塞 |
-| 错误恢复 | oldCode/cell/newCode 错误均带建议 | ✅ 已修复 |
-| 缺失能力 | — | ✅ 无 |
-| 并发安全 | withFileLock 保护 | ✅ |
+| 维度     | 现状                              | 问题                |
+| -------- | --------------------------------- | ------------------- |
+| 超时     | CLI 30s, server 10s sync          | ✅ 合理             |
+| 阻塞     | 被 withFileLock 阻塞              | ✅ 变更操作应被阻塞 |
+| 错误恢复 | oldCode/cell/newCode 错误均带建议 | ✅ 已修复           |
+| 缺失能力 | —                                 | ✅ 无               |
+| 并发安全 | withFileLock 保护                 | ✅                  |
 
 ### 1.6 vscode_notebook_env
 
-| 维度 | 现状 | 问题 |
-|---|---|---|
-| 超时 | CLI 120s, selectKernel 15s, probe 30s | ✅ 已修复 |
-| 阻塞 | 被 withFileLock 阻塞 | ✅ env 操作应被阻塞（含 kernel 交互） |
-| 错误恢复 | configure 5 种状态 + guidance | ✅ 已修复 |
-| 缺失能力 | ❌ 无 stop/interrupt；❌ 无 create | **核心缺口** |
-| 并发安全 | withFileLock 保护 | ✅ |
-| restart 验证 | ❌ 不验证实际重启 | 返回 "requested" 不确认 |
+| 维度         | 现状                                  | 问题                                  |
+| ------------ | ------------------------------------- | ------------------------------------- |
+| 超时         | CLI 120s, selectKernel 15s, probe 30s | ✅ 已修复                             |
+| 阻塞         | 被 withFileLock 阻塞                  | ✅ env 操作应被阻塞（含 kernel 交互） |
+| 错误恢复     | configure 5 种状态 + guidance         | ✅ 已修复                             |
+| 缺失能力     | ❌ 无 stop/interrupt；❌ 无 create    | **核心缺口**                          |
+| 并发安全     | withFileLock 保护                     | ✅                                    |
+| restart 验证 | ❌ 不验证实际重启                     | 返回 "requested" 不确认               |
 
 ---
 
@@ -143,15 +143,15 @@
 
 ### 方案总览
 
-| # | 优先级 | 改进 | 文件 | 借鉴 |
-|---|---|---|---|---|
-| 1 | P0 | withFileLock 旁路只读操作 | bridge.ts | — |
-| 2 | P0 | env 新增 `stop` 操作（interrupt kernel） | env.ts, vscode-bridge.ts, descriptions.ts, commands.ts | hamelnb `_ensure_kernel_idle` |
-| 3 | P0 | env 新增 `create` 操作（创建空白 notebook） | env.ts, vscode-bridge.ts, descriptions.ts, commands.ts | hamelnb "create minimal notebook" |
-| 4 | P1 | run 执行前 kernel 预检 | run.ts | hamelnb `_ensure_kernel_idle` |
-| 5 | P1 | restart 后轻量级验证 kernel 状态 | env.ts | hamelnb `_wait_for_kernel_idle` |
-| 6 | P2 | readJson 错误处理增强 | bridge.ts | — |
-| 7 | P0 | 全工具错误路径增加 agent 恢复指引 | run.ts, env.ts, resolve.ts, bridge.ts | — |
+| #   | 优先级 | 改进                                        | 文件                                                   | 借鉴                              |
+| --- | ------ | ------------------------------------------- | ------------------------------------------------------ | --------------------------------- |
+| 1   | P0     | withFileLock 旁路只读操作                   | bridge.ts                                              | —                                 |
+| 2   | P0     | env 新增 `stop` 操作（interrupt kernel）    | env.ts, vscode-bridge.ts, descriptions.ts, commands.ts | hamelnb `_ensure_kernel_idle`     |
+| 3   | P0     | env 新增 `create` 操作（创建空白 notebook） | env.ts, vscode-bridge.ts, descriptions.ts, commands.ts | hamelnb "create minimal notebook" |
+| 4   | P1     | run 执行前 kernel 预检                      | run.ts                                                 | hamelnb `_ensure_kernel_idle`     |
+| 5   | P1     | restart 后轻量级验证 kernel 状态            | env.ts                                                 | hamelnb `_wait_for_kernel_idle`   |
+| 6   | P2     | readJson 错误处理增强                       | bridge.ts                                              | —                                 |
+| 7   | P0     | 全工具错误路径增加 agent 恢复指引           | run.ts, env.ts, resolve.ts, bridge.ts                  | —                                 |
 
 ### 改进 1: withFileLock 旁路只读操作（P0）
 
@@ -171,12 +171,11 @@ const READONLY_ROUTES = new Set(["/notebook/summary", "/notebook/source", "/note
 // bridge.ts line 102 改为：
 const filePath = stringProp(body, "filePath") ?? url.pathname
 const handler = () => routeRequest(url.pathname, body, output)
-const result = READONLY_ROUTES.has(url.pathname)
-  ? await handler()
-  : await withFileLock(filePath, handler)
+const result = READONLY_ROUTES.has(url.pathname) ? await handler() : await withFileLock(filePath, handler)
 ```
 
 **不改变的行为**:
+
 - run/edit/env 仍被 withFileLock 序列化
 - 只读操作并发安全（VS Code notebook document 读取线程安全）
 
@@ -191,6 +190,7 @@ const result = READONLY_ROUTES.has(url.pathname)
 **env.ts 改动**:
 
 1. 新增常量：
+
 ```ts
 // interrupt 命令与 restart 类似，由 Jupyter 扩展贡献，可能隐藏在公共命令列表之外
 const INTERRUPT_CMD = "jupyter.interruptkernel"
@@ -199,12 +199,14 @@ const INTERRUPT_CMD = "jupyter.interruptkernel"
 2. operation 验证数组更新：`["info", "configure", "restart", "save", "stop"]`
 
 3. switch 新增 case：
+
 ```ts
 case "stop":
   return await stopNotebookKernel(notebook, reason)
 ```
 
 4. 新增 `stopNotebookKernel` 函数（模式与 `restartNotebookKernel` 一致）：
+
 ```ts
 async function stopNotebookKernel(notebook: vscode.NotebookDocument, reason?: string) {
   // 确认 Jupyter 扩展可用 + 命令注册
@@ -215,14 +217,16 @@ async function stopNotebookKernel(notebook: vscode.NotebookDocument, reason?: st
 ```
 
 **与 restart 的差异**:
+
 - interrupt 不需要抑制确认弹窗（restart 需要 `jupyter.askForKernelRestart=false`）
 - interrupt 不清除 kernel 状态（变量/导入保持）
 - interrupt 只停止当前正在执行的 cell
 - interrupt 更轻量、更快
 
 **CLI 侧改动**:
+
 - `envArgs.operation` enum 增加 `"stop"`
-- `vscode-bridge-descriptions.ts` env description 增加_stop 说明
+- `vscode-bridge-descriptions.ts` env description 增加\_stop 说明
 - `commands.ts` quick-pick 增加 stop 条目
 
 ### 改进 3: env 新增 `create` 操作（P0）
@@ -238,12 +242,14 @@ async function stopNotebookKernel(notebook: vscode.NotebookDocument, reason?: st
 1. operation 验证数组更新：增加 `"create"`
 
 2. switch 新增 case：
+
 ```ts
 case "create":
   return await createNotebook(notebook, reason, input)
 ```
 
 注意：`create` 不需要先 `resolveNotebook`（文件还不存在）。handler 入口需要特殊处理：
+
 ```ts
 // create 操作在文件不存在时创建新 notebook，不能走 resolveNotebook 路径
 if (operation === "create") {
@@ -254,6 +260,7 @@ const notebook = await resolveNotebook(filePath)
 ```
 
 3. 新增 `createNotebook` 函数：
+
 ```ts
 async function createNotebook(filePath: string, reason?: string) {
   const uri = uriFromInput(filePath)
@@ -268,19 +275,25 @@ async function createNotebook(filePath: string, reason?: string) {
         `Env: operation=create status=already-exists`,
         `Notebook file already exists. Use vscode_notebook_summary to inspect it.`,
         reason ? `Reason: ${reason}` : "",
-      ].filter(Boolean).join("\n"),
+      ]
+        .filter(Boolean)
+        .join("\n"),
       data: { path: filePath, operation: "create", created: false, alreadyExists: true },
     }
   } catch {
     // stat 抛 ENOENT 是预期行为——文件不存在，继续创建
   }
   // 创建最小 .ipynb JSON（nbformat 4.5 标准）
-  const minimalNotebook = JSON.stringify({
-    cells: [],
-    metadata: {},
-    nbformat: 4,
-    nbformat_minor: 5,
-  }, null, 2)
+  const minimalNotebook = JSON.stringify(
+    {
+      cells: [],
+      metadata: {},
+      nbformat: 4,
+      nbformat_minor: 5,
+    },
+    null,
+    2,
+  )
   try {
     await vscode.workspace.fs.writeFile(uri, new TextEncoder().encode(minimalNotebook))
     // 打开创建的 notebook
@@ -292,7 +305,9 @@ async function createNotebook(filePath: string, reason?: string) {
         `Notebook created successfully with empty cell list.`,
         `Use vscode_notebook_edit with editType=insert to add cells, or vscode_notebook_env with operation=configure to select a kernel.`,
         reason ? `Reason: ${reason}` : "",
-      ].filter(Boolean).join("\n"),
+      ]
+        .filter(Boolean)
+        .join("\n"),
       data: {
         path: filePath,
         operation: "create",
@@ -311,7 +326,9 @@ async function createNotebook(filePath: string, reason?: string) {
         `Env: operation=create status=failed`,
         `Notebook creation failed: ${message}`,
         reason ? `Reason: ${reason}` : "",
-      ].filter(Boolean).join("\n"),
+      ]
+        .filter(Boolean)
+        .join("\n"),
       data: { path: filePath, operation: "create", created: false, error: message },
     }
   }
@@ -319,6 +336,7 @@ async function createNotebook(filePath: string, reason?: string) {
 ```
 
 **CLI 侧改动**:
+
 - `envArgs.operation` enum 增加 `"create"`
 - description 增加 create 说明
 - `vscode_notebook_env` 的 `ask` 权限覆盖 create（创建文件是变更操作）
@@ -333,6 +351,7 @@ async function createNotebook(filePath: string, reason?: string) {
 **方案**: 执行前检查 kernel 是否活跃。无 kernel 时返回 "no-active-kernel" 引导先 configure。
 
 **run.ts 改动**（line 47-53 之间）:
+
 ```ts
 // 执行前检查 kernel 是否可用。注意：configure 的 "selected" 状态意味着
 // kernel 已选定但未启动——getKernel 此时返回 undefined 是正常的，
@@ -393,6 +412,7 @@ if (jupyter) {
 **env.ts 改动**:
 
 1. 新增轻量级 kernel 检查函数（不调用 executeCode，避免 probePythonRuntime 的 30s 延迟）：
+
 ```ts
 // 轻量级 kernel 可访问性检查：只调 getKernel 不调 executeCode。
 // 用于 restart 验证等不需要 Python 运行时详情的场景，
@@ -411,6 +431,7 @@ async function isKernelAccessible(uri: vscode.Uri): Promise<boolean> {
 ```
 
 2. restartNotebookKernel 函数内，`return` 前追加验证：
+
 ```ts
 // restart 后轻量级验证：只检查 kernel 是否仍可访问，不执行探测代码。
 // jupyter.restartkernel 内部 .catch(noop) 吞错误，不验证则不知道是否成功。
@@ -427,15 +448,18 @@ const restartVerified = await isKernelAccessible(notebook.uri)
 **方案**: 捕获失败，返回包含 body 长度和连接中断提示的友好错误。
 
 **bridge.ts 改动**（line 217-221）:
+
 ```ts
 try {
   resolve(body ? JSON.parse(body) : {})
 } catch (error) {
-  reject(new Error(
-    `Failed to parse ${body.length} byte request body as JSON. ` +
-    `The connection may have been interrupted. ` +
-    `Original error: ${error instanceof Error ? error.message : String(error)}`
-  ))
+  reject(
+    new Error(
+      `Failed to parse ${body.length} byte request body as JSON. ` +
+        `The connection may have been interrupted. ` +
+        `Original error: ${error instanceof Error ? error.message : String(error)}`,
+    ),
+  )
 }
 ```
 
@@ -450,24 +474,28 @@ try {
 **具体改动**:
 
 1. **run.ts — `notebook.cell.execute` 不可用**（line 49-50）:
+
 ```ts
 // 旧：throw new Error("VS Code command notebook.cell.execute is not available")
 // 新：补充恢复指引
 throw new Error(
   "VS Code command notebook.cell.execute is not available. " +
-  "Ensure the Jupyter extension (ms-toolsai.jupyter) is installed and activated, " +
-  "then call vscode_notebook_env with operation=configure to select a kernel."
+    "Ensure the Jupyter extension (ms-toolsai.jupyter) is installed and activated, " +
+    "then call vscode_notebook_env with operation=configure to select a kernel.",
 )
 ```
 
 2. **run.ts — 超时消息**（line 101）:
+
 ```ts
 // 旧：result.exec = "timed out (may still be running, waiting for kernel selection, or failed to start)"
 // 新：引导 agent 使用 env stop 中断，env info 检查状态
-result.exec = "timed out — the cell may still be running. Use vscode_notebook_env operation=stop to interrupt the kernel, or operation=info to check kernel status."
+result.exec =
+  "timed out — the cell may still be running. Use vscode_notebook_env operation=stop to interrupt the kernel, or operation=info to check kernel status."
 ```
 
 3. **resolve.ts — `resolveNotebook` 文件未找到**（line 19）:
+
 ```ts
 // resolveNotebook 在文件不存在时 openNotebookDocument 会失败。
 // 补充 create 引导，让 agent 知道可以用 env create 创建新 notebook
@@ -475,42 +503,44 @@ result.exec = "timed out — the cell may still be running. Use vscode_notebook_
 // 注意：此错误被所有工具共用，消息不能只提某个工具的操作。
 throw new Error(
   `Notebook not found: ${filePath}. ` +
-  `If this is a new notebook, use vscode_notebook_env with operation=create to create it. ` +
-  `Otherwise, check the exact path from vscode_notebook_summary.`
+    `If this is a new notebook, use vscode_notebook_env with operation=create to create it. ` +
+    `Otherwise, check the exact path from vscode_notebook_summary.`,
 )
 ```
 
 4. **env.ts — stop 操作无 kernel 运行时的指引**（stopNotebookKernel 内）:
+
 ```ts
 // interrupt 命令调用后，如果返回结果表示没有 kernel 在运行，
 // 补充指引让 agent 知道无需 stop
 "Interrupt requested. If no cell was running, this operation is harmless. " +
-"Use vscode_notebook_env operation=info to verify kernel status."
+  "Use vscode_notebook_env operation=info to verify kernel status."
 ```
 
 5. **env.ts — create 操作失败时的指引**（createNotebook catch 块内）:
+
 ```ts
 // 创建失败时补充指引，帮助 agent 诊断原因
-`Notebook creation failed: ${message}. ` +
-`Check that the parent directory exists and is writable.`
+;`Notebook creation failed: ${message}. ` + `Check that the parent directory exists and is writable.`
 ```
 
 **不改变的行为**:
+
 - 已有恢复指引的错误路径不变（如 oldCode not found、cell not found after type-change）
 - 错误的 HTTP 状态码不变（resolveNotebook 失败仍是 bridge 500，因为 throw 在 routeRequest 内）
 - 错误的 `ran` / `data` 结构不变
 
-| 操作 | 文件 | 改动行数 |
-|---|---|---|
-| 修改 | `sdks/vscode/src/bridge.ts` | +8 行（withFileLock 旁路 + readJson 错误） |
-| 修改 | `sdks/vscode/src/notebook/env.ts` | +90 行（stop + create + isKernelAccessible + restart 验证 + INTERRUPT_CMD + 错误指引） |
-| 修改 | `sdks/vscode/src/notebook/run.ts` | +25 行（kernel 预检 + 超时消息 + execute 不可用指引） |
-| 修改 | `sdks/vscode/src/notebook/resolve.ts` | +3 行（文件未找到 create 引导） |
-| 修改 | `sdks/vscode/src/notebook/commands.ts` | +20 行（stop/create quick-pick） |
-| 修改 | `packages/opencode/src/plugin/vscode-bridge.ts` | +4 行（envArgs enum 更新） |
-| 修改 | `packages/opencode/src/plugin/vscode-bridge-descriptions.ts` | +8 行（stop/create 说明） |
-| 修改 | `packages/opencode/test/plugin/vscode-notebook-tool-summary.test.ts` | +110 行（新测试） |
-| 修改 | `README.md` | +2 行（env 工具表更新） |
+| 操作 | 文件                                                                 | 改动行数                                                                               |
+| ---- | -------------------------------------------------------------------- | -------------------------------------------------------------------------------------- |
+| 修改 | `sdks/vscode/src/bridge.ts`                                          | +8 行（withFileLock 旁路 + readJson 错误）                                             |
+| 修改 | `sdks/vscode/src/notebook/env.ts`                                    | +90 行（stop + create + isKernelAccessible + restart 验证 + INTERRUPT_CMD + 错误指引） |
+| 修改 | `sdks/vscode/src/notebook/run.ts`                                    | +25 行（kernel 预检 + 超时消息 + execute 不可用指引）                                  |
+| 修改 | `sdks/vscode/src/notebook/resolve.ts`                                | +3 行（文件未找到 create 引导）                                                        |
+| 修改 | `sdks/vscode/src/notebook/commands.ts`                               | +20 行（stop/create quick-pick）                                                       |
+| 修改 | `packages/opencode/src/plugin/vscode-bridge.ts`                      | +4 行（envArgs enum 更新）                                                             |
+| 修改 | `packages/opencode/src/plugin/vscode-bridge-descriptions.ts`         | +8 行（stop/create 说明）                                                              |
+| 修改 | `packages/opencode/test/plugin/vscode-notebook-tool-summary.test.ts` | +110 行（新测试）                                                                      |
+| 修改 | `README.md`                                                          | +2 行（env 工具表更新）                                                                |
 
 **总计**: 9 文件修改，0 新增，净增 ~270 行。无生成文件/迁移/配置项。
 
@@ -520,73 +550,73 @@ throw new Error(
 
 ### 改进 1: withFileLock 旁路
 
-| 路径 | 处理 |
-|---|---|
+| 路径 | 处理                                                |
+| ---- | --------------------------------------------------- |
 | 正常 | summary/source/output 直接执行，不经过 withFileLock |
-| 并发 | 只读操作并发安全（VS Code document 读取线程安全） |
-| 回归 | run/edit/env 仍被 withFileLock 保护，行为不变 |
+| 并发 | 只读操作并发安全（VS Code document 读取线程安全）   |
+| 回归 | run/edit/env 仍被 withFileLock 保护，行为不变       |
 
 ### 改进 2: env stop
 
-| 路径 | 处理 |
-|---|---|
-| 正常 | Jupyter 扩展活跃 + interrupt 命令注册 → 调用 → "stopped" |
-| 无 Jupyter | 返回 "failed: Jupyter extension not installed" |
-| 命令未注册 | 返回 "failed: interrupt command not registered" |
-| 命令异常 | 返回 "failed: <error message>" |
-| 无 kernel 运行 | interrupt 仍执行（无害），返回 "requested" |
-| 并发 | withFileLock 保护（env 操作仍序列化） |
-| 权限 | 继承 vscode_notebook_env ask/deny（同 restart） |
+| 路径           | 处理                                                     |
+| -------------- | -------------------------------------------------------- |
+| 正常           | Jupyter 扩展活跃 + interrupt 命令注册 → 调用 → "stopped" |
+| 无 Jupyter     | 返回 "failed: Jupyter extension not installed"           |
+| 命令未注册     | 返回 "failed: interrupt command not registered"          |
+| 命令异常       | 返回 "failed: <error message>"                           |
+| 无 kernel 运行 | interrupt 仍执行（无害），返回 "requested"               |
+| 并发           | withFileLock 保护（env 操作仍序列化）                    |
+| 权限           | 继承 vscode_notebook_env ask/deny（同 restart）          |
 
 ### 改进 3: env create
 
-| 路径 | 处理 |
-|---|---|
-| 正常 | 文件不存在(fs.stat ENOENT) → 创建最小 .ipynb → openNotebookDocument → "created" |
-| 文件已存在(磁盘) | fs.stat 成功 → 返回 "already exists: use vscode_notebook_summary" |
-| 文件已打开 | notebookDocuments 检查 + fs.stat 检查 → 返回 "already exists" |
-| 目录不存在 | writeFile 抛错 → try/catch → 结构化 "failed: <error>" |
-| 权限不足 | writeFile 抛错 → try/catch → 结构化 "failed: <error>" |
-| openNotebookDocument 失败 | try/catch → 结构化 "failed: <error>"（非 bridge 500） |
-| 并发 | withFileLock 保护 |
-| 权限 | 继承 vscode_notebook_env ask/deny + 通用 edit 门禁（创建文件是写入操作） |
+| 路径                      | 处理                                                                            |
+| ------------------------- | ------------------------------------------------------------------------------- |
+| 正常                      | 文件不存在(fs.stat ENOENT) → 创建最小 .ipynb → openNotebookDocument → "created" |
+| 文件已存在(磁盘)          | fs.stat 成功 → 返回 "already exists: use vscode_notebook_summary"               |
+| 文件已打开                | notebookDocuments 检查 + fs.stat 检查 → 返回 "already exists"                   |
+| 目录不存在                | writeFile 抛错 → try/catch → 结构化 "failed: <error>"                           |
+| 权限不足                  | writeFile 抛错 → try/catch → 结构化 "failed: <error>"                           |
+| openNotebookDocument 失败 | try/catch → 结构化 "failed: <error>"（非 bridge 500）                           |
+| 并发                      | withFileLock 保护                                                               |
+| 权限                      | 继承 vscode_notebook_env ask/deny + 通用 edit 门禁（创建文件是写入操作）        |
 
 ### 改进 4: run kernel 预检
 
-| 路径 | 处理 |
-|---|---|
-| 正常 | kernel 活跃 → 继续执行 |
-| 无 kernel + 无 kernelspec | 返回 "no-active-kernel" + configure 引导 |
+| 路径                      | 处理                                          |
+| ------------------------- | --------------------------------------------- |
+| 正常                      | kernel 活跃 → 继续执行                        |
+| 无 kernel + 无 kernelspec | 返回 "no-active-kernel" + configure 引导      |
 | 无 kernel + 有 kernelspec | 继续执行（notebook.cell.execute 启动 kernel） |
-| Jupyter 未安装 | 跳过预检（不阻塞），继续执行 |
-| getKernel 异常 | 跳过预检（try/catch），继续执行 |
+| Jupyter 未安装            | 跳过预检（不阻塞），继续执行                  |
+| getKernel 异常            | 跳过预检（try/catch），继续执行               |
 
 ### 改进 5: restart 验证
 
-| 路径 | 处理 |
-|---|---|
-| 正常 | restart → isKernelAccessible 确认 kernel 可访问 → "verified" |
-| 验证失败 | 不影响 "requested" 结果，附加 "verification failed" |
-| 超时 | isKernelAccessible 只调 getKernel（快速返回），不调 executeCode，无 30s 延迟 |
+| 路径     | 处理                                                                         |
+| -------- | ---------------------------------------------------------------------------- |
+| 正常     | restart → isKernelAccessible 确认 kernel 可访问 → "verified"                 |
+| 验证失败 | 不影响 "requested" 结果，附加 "verification failed"                          |
+| 超时     | isKernelAccessible 只调 getKernel（快速返回），不调 executeCode，无 30s 延迟 |
 
 ### 改进 6: readJson 错误
 
-| 路径 | 处理 |
-|---|---|
-| 正常 | JSON.parse 成功 → 不变 |
-| 空 body | 返回 {} → 不变 |
-| 解析失败 | 返回友好错误（body 长度 + 连接中断提示） |
-| request error | request.on("error") → 不变 |
+| 路径          | 处理                                     |
+| ------------- | ---------------------------------------- |
+| 正常          | JSON.parse 成功 → 不变                   |
+| 空 body       | 返回 {} → 不变                           |
+| 解析失败      | 返回友好错误（body 长度 + 连接中断提示） |
+| request error | request.on("error") → 不变               |
 
 ### 改进 7: 全工具错误恢复指引
 
-| 错误场景 | 旧消息 | 新增指引 |
-|---|---|---|
-| run: notebook.cell.execute 不可用 | "is not available" | "Ensure Jupyter extension installed, then call env configure" |
-| run: 超时 | "may still be running..." | "Use env stop to interrupt, or env info to check status" |
-| resolveNotebook: 文件未找到 | 原始 VS Code 错误 | "Use env create to create a new notebook, or check path from summary" |
-| env stop: 无 kernel 运行 | — | "harmless, use env info to verify" |
-| env create: 创建失败 | — | "Check parent directory exists and is writable" |
+| 错误场景                          | 旧消息                    | 新增指引                                                              |
+| --------------------------------- | ------------------------- | --------------------------------------------------------------------- |
+| run: notebook.cell.execute 不可用 | "is not available"        | "Ensure Jupyter extension installed, then call env configure"         |
+| run: 超时                         | "may still be running..." | "Use env stop to interrupt, or env info to check status"              |
+| resolveNotebook: 文件未找到       | 原始 VS Code 错误         | "Use env create to create a new notebook, or check path from summary" |
+| env stop: 无 kernel 运行          | —                         | "harmless, use env info to verify"                                    |
+| env create: 创建失败              | —                         | "Check parent directory exists and is writable"                       |
 
 ---
 
@@ -731,12 +761,12 @@ bun typecheck
 
 7 项改进，9 个文件，~270 行净增。核心目标：让 agent 能自主管理 notebook 生命周期（创建→配置→执行→中断→重启→保存），且任何错误都能获得明确的恢复指引。
 
-| 改进 | 核心价值 |
-|---|---|
-| withFileLock 旁路 | 50 分钟 run 期间 agent 仍可检查 notebook 状态 |
-| env stop | agent 可中断超时 cell，不必重启整个 kernel |
-| env create | agent 创建结构化 notebook，不再写原始 JSON |
-| run kernel 预检 | 无 kernel 且无 kernelspec 时引导 configure |
-| restart 验证 | 确认 restart 实际生效 |
-| readJson 错误 | 6 个 JSON 解析错误获得可诊断的错误消息 |
-| 全工具错误指引 | 任何错误都告诉 agent 下一步该调用什么工具/操作 |
+| 改进              | 核心价值                                       |
+| ----------------- | ---------------------------------------------- |
+| withFileLock 旁路 | 50 分钟 run 期间 agent 仍可检查 notebook 状态  |
+| env stop          | agent 可中断超时 cell，不必重启整个 kernel     |
+| env create        | agent 创建结构化 notebook，不再写原始 JSON     |
+| run kernel 预检   | 无 kernel 且无 kernelspec 时引导 configure     |
+| restart 验证      | 确认 restart 实际生效                          |
+| readJson 错误     | 6 个 JSON 解析错误获得可诊断的错误消息         |
+| 全工具错误指引    | 任何错误都告诉 agent 下一步该调用什么工具/操作 |

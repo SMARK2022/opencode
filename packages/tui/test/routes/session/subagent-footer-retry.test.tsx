@@ -30,8 +30,13 @@ test("child footer consumes retry events and opens original error details", asyn
   const parentID = "ses_footer_retry_parent"
   const events = createEventSource()
   const child = {
-    id: childID, parentID, projectID: "proj_test", directory,
-    slug: "footer-retry", version: "1", title: "retry child (@permission-reviewer subagent)",
+    id: childID,
+    parentID,
+    projectID: "proj_test",
+    directory,
+    slug: "footer-retry",
+    version: "1",
+    title: "retry child (@permission-reviewer subagent)",
     time: { created: 1, updated: 1 },
   }
   // 沿真实SDK传输提供子会话身份，绝不直接修改Sync store来伪造可见状态。
@@ -53,17 +58,35 @@ test("child footer consumes retry events and opens original error details", asyn
     return (
       <TestTuiContexts paths={{ state: tmp.path }}>
         <OpencodeKeymapProvider keymap={keymap}>
-          <ArgsProvider><ExitProvider exit={() => {}}><KVProvider><ToastProvider>
-            <RouteProvider initialRoute={{ type: "session", sessionID: childID }}>
-              <TuiConfigProvider config={config}>
-                <SDKProvider url="http://test" directory={directory} testTransport={{ fetch: calls.fetch, events: events.source }}>
-                  <PermissionProvider><ProjectProvider><SyncProvider><ThemeProvider mode="dark">
-                    <DialogProvider><Probe /></DialogProvider>
-                  </ThemeProvider></SyncProvider></ProjectProvider></PermissionProvider>
-                </SDKProvider>
-              </TuiConfigProvider>
-            </RouteProvider>
-          </ToastProvider></KVProvider></ExitProvider></ArgsProvider>
+          <ArgsProvider>
+            <ExitProvider exit={() => {}}>
+              <KVProvider>
+                <ToastProvider>
+                  <RouteProvider initialRoute={{ type: "session", sessionID: childID }}>
+                    <TuiConfigProvider config={config}>
+                      <SDKProvider
+                        url="http://test"
+                        directory={directory}
+                        testTransport={{ fetch: calls.fetch, events: events.source }}
+                      >
+                        <PermissionProvider>
+                          <ProjectProvider>
+                            <SyncProvider>
+                              <ThemeProvider mode="dark">
+                                <DialogProvider>
+                                  <Probe />
+                                </DialogProvider>
+                              </ThemeProvider>
+                            </SyncProvider>
+                          </ProjectProvider>
+                        </PermissionProvider>
+                      </SDKProvider>
+                    </TuiConfigProvider>
+                  </RouteProvider>
+                </ToastProvider>
+              </KVProvider>
+            </ExitProvider>
+          </ArgsProvider>
         </OpencodeKeymapProvider>
       </TestTuiContexts>
     )
@@ -76,10 +99,15 @@ test("child footer consumes retry events and opens original error details", asyn
     return app.captureCharFrame().split("\n")
   }
   function retry(id: string, message: string) {
-    events.emit({ directory, project: "proj_test", payload: {
-      id: `evt-${id}`, type: "session.status",
-      properties: { sessionID: id, status: { type: "retry", attempt: 3, next: Date.now() + 9000, message } },
-    } })
+    events.emit({
+      directory,
+      project: "proj_test",
+      payload: {
+        id: `evt-${id}`,
+        type: "session.status",
+        properties: { sessionID: id, status: { type: "retry", attempt: 3, next: Date.now() + 9000, message } },
+      },
+    })
   }
   try {
     await wait(() => !!sync && sync.status === "complete")
@@ -120,6 +148,10 @@ test("child footer consumes retry events and opens original error details", asyn
   } finally {
     // 同步销毁真实组件owner，停止retry clock并退订SDK事件，再分离headless engine。
     events.dispose()
-    try { app.renderer.destroy() } finally { engine.detach() }
+    try {
+      app.renderer.destroy()
+    } finally {
+      engine.detach()
+    }
   }
 })

@@ -134,7 +134,11 @@ export const WriteTool = Tool.define(
           if (finalSource) {
             if (exists) {
               // 覆写仍取锁内最终文本，不能复用格式化前审批结果。
-              const overwrite = renderFileDiff(filepath, normalizeLineEndings(contentOld), normalizeLineEndings(finalSource.text))
+              const overwrite = renderFileDiff(
+                filepath,
+                normalizeLineEndings(contentOld),
+                normalizeLineEndings(finalSource.text),
+              )
               metadataDiff = overwrite.patch
               diffCounts = { additions: overwrite.additions, deletions: overwrite.deletions }
             } else {

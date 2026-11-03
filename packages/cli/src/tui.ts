@@ -8,17 +8,22 @@ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 
 export function runTui(transport: { url: string; headers: RequestInit["headers"] }) {
   // Native必须读取真实host配置；保留该入口的终端挂起策略，避免空配置禁用语音。
-  return TuiConfigHost.load(process.cwd(), { terminalSuspend: false }).pipe(Effect.flatMap((config) => run({
-    ...transport,
-    args: {},
-    config,
-    // #165：native CLI 的既有 HTTP 适配承接 legacy 查询，与被移除的线程 RPC 无关。
-    fetch: gracefulFetch,
-    pluginHost: {
-      async start() {},
-      async dispose() {},
-    },
-  })), Effect.provide(AppNodeBuilder.build(LayerNode.group([Global.node, FSUtil.node]))))
+  return TuiConfigHost.load(process.cwd(), { terminalSuspend: false }).pipe(
+    Effect.flatMap((config) =>
+      run({
+        ...transport,
+        args: {},
+        config,
+        // #165：native CLI 的既有 HTTP 适配承接 legacy 查询，与被移除的线程 RPC 无关。
+        fetch: gracefulFetch,
+        pluginHost: {
+          async start() {},
+          async dispose() {},
+        },
+      }),
+    ),
+    Effect.provide(AppNodeBuilder.build(LayerNode.group([Global.node, FSUtil.node]))),
+  )
 }
 
 const legacyDefaults: Record<string, unknown> = {

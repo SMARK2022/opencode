@@ -210,7 +210,7 @@ TUI sync store 的 Goal 类型必须显式包含 `continueOnError`。不能在 d
 内层 prompt processing outcome 应局部收敛为：
 
 ```ts
-"continue" | "break" | "terminal-error"
+;"continue" | "break" | "terminal-error"
 ```
 
 分类规则：

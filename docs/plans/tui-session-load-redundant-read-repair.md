@@ -53,31 +53,31 @@ approved revision.
 
 ## 3. Repository Context
 
-| Source | Why it constrains this task |
-| --- | --- |
-| `CONTEXT.md` | Message 是 MessageV2 + Parts；Snapshot 是 Revert 所用 git-patch 工作树状态，不是 Session 状态快照。v1 `session/` 是当前生产路径。 |
-| `AGENTS.md` | 默认分支为 `dev`；必须并行工具；测试和 typecheck 必须从 package 目录执行。 |
-| `packages/opencode/AGENTS.md` | Effect 与 Session 模块约定；测试不得从仓库根运行。 |
-| `packages/opencode/test/AGENTS.md` | 使用真实 instance/DB fixture，避免 mocks；并发测试使用 readiness signal。 |
-| `packages/opencode/test/server/AGENTS.md` | Server 路由行为应通过真实 HttpApi seam 验证。 |
-| `.opencode/policy/first-principles-engineering.md` | 必须修复 first divergence，禁止下游补偿和备用成功路径；实现需满足 15% 中文解释性注释门禁。 |
-| `docs/adr/README.md` | 本任务是现有接口的局部读取修复，不新增 load-bearing 架构决策，因此不新增 ADR。 |
+| Source                                             | Why it constrains this task                                                                                                       |
+| -------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| `CONTEXT.md`                                       | Message 是 MessageV2 + Parts；Snapshot 是 Revert 所用 git-patch 工作树状态，不是 Session 状态快照。v1 `session/` 是当前生产路径。 |
+| `AGENTS.md`                                        | 默认分支为 `dev`；必须并行工具；测试和 typecheck 必须从 package 目录执行。                                                        |
+| `packages/opencode/AGENTS.md`                      | Effect 与 Session 模块约定；测试不得从仓库根运行。                                                                                |
+| `packages/opencode/test/AGENTS.md`                 | 使用真实 instance/DB fixture，避免 mocks；并发测试使用 readiness signal。                                                         |
+| `packages/opencode/test/server/AGENTS.md`          | Server 路由行为应通过真实 HttpApi seam 验证。                                                                                     |
+| `.opencode/policy/first-principles-engineering.md` | 必须修复 first divergence，禁止下游补偿和备用成功路径；实现需满足 15% 中文解释性注释门禁。                                        |
+| `docs/adr/README.md`                               | 本任务是现有接口的局部读取修复，不新增 load-bearing 架构决策，因此不新增 ADR。                                                    |
 
 ## 4. Evidence And Current Path
 
-| Evidence | Finding | Class |
-| --- | --- | --- |
-| live target `ses_041cd...` | newest 300 = 2.94MB/147ms/1230 Parts; `/diff` = 697 files/3.69MB/3.16M patch chars/772ms. | observed |
-| live extreme `ses_138a...` | newest 300 = 125.1-131MB/5.2-9.9s, including 114.2MB user `summary.diffs`; `/diff` = 53.2MB/9.2s. | observed |
-| exact DB/page ID comparison | response is exactly newest 300, not the complete Session. | observed |
-| `message-v2.ts` / `handlers/session.ts` | bounded Message page thaws cold summaries; Message and diff default responses serialize complete data. | observed |
-| `sync.tsx` | get/messages/todo/diff/status share one barrier; complete HTTP/SSE diff enters TUI store. | observed |
-| `plugin/api.tsx` / `sidebar/files.tsx` | Files consumes only file/additions/deletions, but patch reaches store and every row is rendered. | observed |
-| production Files frame with summary 101 and empty diff | renders no file rows but still renders final `...`; this is a false truncation marker. | observed |
-| `Snapshot.FileDiff` + plugin adapter | persisted/imported entries may omit `file`; plugin state filters them after current viewer totals count them. | contracted/reachable |
-| real Files component benchmark | 100/697/2055 rows add about 15.3/51.2/151.5MB RSS. | observed |
-| DB compatibility probe | 34 of 628 compressed aggregate owners lack hot Session totals; truncation cannot assume summary exists. | observed |
-| Web App/share inventory | default Message pages need per-user diffs; default diff/share need complete patches. | contracted/reachable |
+| Evidence                                               | Finding                                                                                                       | Class                |
+| ------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------- | -------------------- |
+| live target `ses_041cd...`                             | newest 300 = 2.94MB/147ms/1230 Parts; `/diff` = 697 files/3.69MB/3.16M patch chars/772ms.                     | observed             |
+| live extreme `ses_138a...`                             | newest 300 = 125.1-131MB/5.2-9.9s, including 114.2MB user `summary.diffs`; `/diff` = 53.2MB/9.2s.             | observed             |
+| exact DB/page ID comparison                            | response is exactly newest 300, not the complete Session.                                                     | observed             |
+| `message-v2.ts` / `handlers/session.ts`                | bounded Message page thaws cold summaries; Message and diff default responses serialize complete data.        | observed             |
+| `sync.tsx`                                             | get/messages/todo/diff/status share one barrier; complete HTTP/SSE diff enters TUI store.                     | observed             |
+| `plugin/api.tsx` / `sidebar/files.tsx`                 | Files consumes only file/additions/deletions, but patch reaches store and every row is rendered.              | observed             |
+| production Files frame with summary 101 and empty diff | renders no file rows but still renders final `...`; this is a false truncation marker.                        | observed             |
+| `Snapshot.FileDiff` + plugin adapter                   | persisted/imported entries may omit `file`; plugin state filters them after current viewer totals count them. | contracted/reachable |
+| real Files component benchmark                         | 100/697/2055 rows add about 15.3/51.2/151.5MB RSS.                                                            | observed             |
+| DB compatibility probe                                 | 34 of 628 compressed aggregate owners lack hot Session totals; truncation cannot assume summary exists.       | observed             |
+| Web App/share inventory                                | default Message pages need per-user diffs; default diff/share need complete patches.                          | contracted/reachable |
 
 ```text
 TUI open -> Promise.all(required resources + complete diff)
@@ -95,14 +95,14 @@ Message/Part trees and OpenTUI renderables amplify the payload.
 All TUI Sessions follow one uniform viewer path. Shared/default HTTP, complete
 transcripts and share/event producers remain complete.
 
-| ID | Invariant | First divergence / owner |
-| --- | --- | --- |
-| INV-01 | TUI reads newest 300 Message infos and complete visible Parts without per-user summary payload; defaults remain complete. | `MessageV2.page` cannot select viewer info before cold thaw. |
-| INV-02 | Session/Message/Part/Todo/Status publish before diff work starts. | `sync.session.sync` starts diff inside the visible-history barrier. |
+| ID     | Invariant                                                                                                                                                                                                                                             | First divergence / owner                                                                                                                                                  |
+| ------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| INV-01 | TUI reads newest 300 Message infos and complete visible Parts without per-user summary payload; defaults remain complete.                                                                                                                             | `MessageV2.page` cannot select viewer info before cold thaw.                                                                                                              |
+| INV-02 | Session/Message/Part/Todo/Status publish before diff work starts.                                                                                                                                                                                     | `sync.session.sync` starts diff inside the visible-history barrier.                                                                                                       |
 | INV-03 | Every TUI diff normalizes to entries with a displayable `file`, carries/stores/renders at most 100 patch-free stats, and derives file/addition/deletion totals from that same displayable source; default complete contracts remain raw and complete. | HTTP adapter and SSE reducer currently count legacy entries that Files later filters, while a later full `session.updated` can overwrite the local normalized projection. |
-| INV-04 | Existing Files default-open semantics remain; title uses normalized authoritative totals, and the list ends with `...` only when more than 100 displayable entries were actually capped. | Files currently infers truncation from persisted/raw totals versus visible rows, so error, legacy, and Revert event ordering can produce a false marker. |
-| INV-05 | Resolved SDK HTTP error remains `data ?? []`; genuine rejection propagates after visible publication without full-sync marking. | Barrier movement must preserve caller-visible errors. |
-| INV-06 | No size branch, fallback, public schema, generated code, migration, alternate source or fixed explanatory title text. | user/policy constraint. |
+| INV-04 | Existing Files default-open semantics remain; title uses normalized authoritative totals, and the list ends with `...` only when more than 100 displayable entries were actually capped.                                                              | Files currently infers truncation from persisted/raw totals versus visible rows, so error, legacy, and Revert event ordering can produce a false marker.                  |
+| INV-05 | Resolved SDK HTTP error remains `data ?? []`; genuine rejection propagates after visible publication without full-sync marking.                                                                                                                       | Barrier movement must preserve caller-visible errors.                                                                                                                     |
+| INV-06 | No size branch, fallback, public schema, generated code, migration, alternate source or fixed explanatory title text.                                                                                                                                 | user/policy constraint.                                                                                                                                                   |
 
 Red-capable baseline already run: target `2.94MB + 3.69MB/697 rows`; extreme
 `125.1MB + 53.2MB`. Deterministic tests assert publication order, absence of
@@ -111,12 +111,12 @@ known large literals, `<=100` stored/rendered rows and conditional trailing
 
 ## 6. Responsibility And One Primary Path
 
-| Concern | Owner | Reason |
-| --- | --- | --- |
-| summary-free bounded Message | `MessageV2.page` + HTTP adapter | projection must happen before cold thaw/serialization; shared default cannot infer TUI intent |
-| visible publication order | TUI SyncProvider | it owns request composition and store publication |
-| patch-free capped HTTP diff | HTTP adapter | last owner before response text/JSON; shared SummaryCache remains complete |
-| patch-free capped live diff | TUI reducer | first TUI-owned seam after shared SSE; shared event remains complete |
+| Concern                               | Owner                                     | Reason                                                                                                                                       |
+| ------------------------------------- | ----------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| summary-free bounded Message          | `MessageV2.page` + HTTP adapter           | projection must happen before cold thaw/serialization; shared default cannot infer TUI intent                                                |
+| visible publication order             | TUI SyncProvider                          | it owns request composition and store publication                                                                                            |
+| patch-free capped HTTP diff           | HTTP adapter                              | last owner before response text/JSON; shared SummaryCache remains complete                                                                   |
+| patch-free capped live diff           | TUI reducer                               | first TUI-owned seam after shared SSE; shared event remains complete                                                                         |
 | displayable totals and trailing `...` | HTTP viewer + TUI reducer + Files sidebar | producers own normalization before totals/cap; Sync owns ordering against full Session updates; presentation only marks a proven 100-row cap |
 
 ```text
@@ -152,14 +152,14 @@ the TUI store.
 
 ## 7. Traceability And File Plan
 
-| Invariant | Files | Behavioral test |
-| --- | --- | --- |
-| INV-01 | `message-v2.ts`, `handlers/session.ts`, `sync.tsx` | frozen Message viewer omits summary but preserves cold_ref/Parts; default returns/thaws full summary |
-| INV-02 | `sync.tsx` | held required response proves diff has not started; release publishes history before diff request |
-| INV-03 | `handlers/session.ts`, `sync.tsx` | default diff retains known patch; viewer HTTP/SSE normalize displayable entries, cap at 100 patch-free rows, and reconcile totals from the same source |
-| INV-04 | `sync.tsx`, `sidebar/files.tsx` | default-open frame renders first 100 names and final `...` only when normalized source exceeds 100; total=100, legacy hidden entries, and empty error state have no marker |
-| INV-05 | `sync.tsx` | resolved HTTP error yields `[]`/full-sync; malformed JSON rejects after history with no diff/full-sync write |
-| INV-06 | all | no size predicate, public API, generated/config/migration file or fallback |
+| Invariant | Files                                              | Behavioral test                                                                                                                                                            |
+| --------- | -------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| INV-01    | `message-v2.ts`, `handlers/session.ts`, `sync.tsx` | frozen Message viewer omits summary but preserves cold_ref/Parts; default returns/thaws full summary                                                                       |
+| INV-02    | `sync.tsx`                                         | held required response proves diff has not started; release publishes history before diff request                                                                          |
+| INV-03    | `handlers/session.ts`, `sync.tsx`                  | default diff retains known patch; viewer HTTP/SSE normalize displayable entries, cap at 100 patch-free rows, and reconcile totals from the same source                     |
+| INV-04    | `sync.tsx`, `sidebar/files.tsx`                    | default-open frame renders first 100 names and final `...` only when normalized source exceeds 100; total=100, legacy hidden entries, and empty error state have no marker |
+| INV-05    | `sync.tsx`                                         | resolved HTTP error yields `[]`/full-sync; malformed JSON rejects after history with no diff/full-sync write                                                               |
+| INV-06    | all                                                | no size predicate, public API, generated/config/migration file or fallback                                                                                                 |
 
 Reverse mapping: Message projection is required before cold thaw; HTTP projection
 is required before response text/JSON; ordered sync is required because endpoints
@@ -169,12 +169,12 @@ owns the final `...` because it alone owns visible list semantics. Error summary
 reconciliation and `session.updated` ordering stay in Sync because it owns the
 atomic rows/Session projection and receives both producer event types.
 
-| Production file | Responsibility | Expected effective delta |
-| --- | --- | ---: |
-| `packages/opencode/src/session/message-v2.ts` | bounded viewer info before Message thaw | 25-40 |
-| `packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts` | exact viewer Message selection; normalized displayable totals and first-100 patch-free diff response | 20-34 |
-| `packages/opencode/src/cli/cmd/tui/context/sync.tsx` | viewer headers, ordered publication, normalized HTTP/SSE source, error total reconciliation, Session update ordering and first-100 store | 55-86 |
-| `packages/opencode/src/cli/cmd/tui/feature-plugins/sidebar/files.tsx` | existing default-open rows, normalized totals in header, only-successful-cap trailing `...` | 10-22 |
+| Production file                                                            | Responsibility                                                                                                                           | Expected effective delta |
+| -------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- | -----------------------: |
+| `packages/opencode/src/session/message-v2.ts`                              | bounded viewer info before Message thaw                                                                                                  |                    25-40 |
+| `packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts` | exact viewer Message selection; normalized displayable totals and first-100 patch-free diff response                                     |                    20-34 |
+| `packages/opencode/src/cli/cmd/tui/context/sync.tsx`                       | viewer headers, ordered publication, normalized HTTP/SSE source, error total reconciliation, Session update ordering and first-100 store |                    55-86 |
+| `packages/opencode/src/cli/cmd/tui/feature-plugins/sidebar/files.tsx`      | existing default-open rows, normalized totals in header, only-successful-cap trailing `...`                                              |                    10-22 |
 
 Hard maximum: four production files, 200 effective production lines, no generated
 or config changes. Existing tests change only in `session-messages.test.ts` and
@@ -191,14 +191,14 @@ an old nonzero summary; (7) resolved versus genuine diff errors; (8) existing
 complete-consumer regressions. Tests use public HTTP, real SDK transport,
 readiness signals and OpenTUI frames, not helper call counts.
 
-| Command | cwd | Evidence |
-| --- | --- | --- |
-| `bun test test/server/session-messages.test.ts` | `packages/opencode` | Message/diff projections and complete defaults |
-| `bun test test/cli/cmd/tui/sync.test.tsx` | `packages/opencode` | order, caps, SSE, Files rendering and errors |
-| `bun test test/session/message-v2.test.ts test/session/messages-pagination.test.ts test/session/summary-tool-diff.test.ts test/session/revert-compact.test.ts test/cli/tui/plugin-loader.test.ts` | `packages/opencode` | cold/page/summary/Revert/plugin compatibility |
-| `bun typecheck` | `packages/opencode` | types |
-| isolated daemon/TUI replay of both measured Sessions | `packages/opencode` | history first; bounded projected payload/store/render; default APIs complete |
-| `git diff --check` | repository root | whitespace |
+| Command                                                                                                                                                                                           | cwd                 | Evidence                                                                     |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------- | ---------------------------------------------------------------------------- |
+| `bun test test/server/session-messages.test.ts`                                                                                                                                                   | `packages/opencode` | Message/diff projections and complete defaults                               |
+| `bun test test/cli/cmd/tui/sync.test.tsx`                                                                                                                                                         | `packages/opencode` | order, caps, SSE, Files rendering and errors                                 |
+| `bun test test/session/message-v2.test.ts test/session/messages-pagination.test.ts test/session/summary-tool-diff.test.ts test/session/revert-compact.test.ts test/cli/tui/plugin-loader.test.ts` | `packages/opencode` | cold/page/summary/Revert/plugin compatibility                                |
+| `bun typecheck`                                                                                                                                                                                   | `packages/opencode` | types                                                                        |
+| isolated daemon/TUI replay of both measured Sessions                                                                                                                                              | `packages/opencode` | history first; bounded projected payload/store/render; default APIs complete |
+| `git diff --check`                                                                                                                                                                                | repository root     | whitespace                                                                   |
 
 Estimated total effective production+test `E <= 300`; qualifying Chinese comment
 lines `C >= ceil(E*0.15)` (45 at estimate; recalculate actual). Comments explain
@@ -238,19 +238,19 @@ The independent auditor must:
 
 ## 22. Plan Audit Record
 
-| Round | Audited revision | Full scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | R1 | yes | B-01, B-02; B-02 withdrawn on reconsideration | file/comment budgets; live timing variability; residual diff transfer | BLOCK | `ses_00879fbe6ffehH67nAb8iEzkPp` |
-| 2 | R2 | yes | B-01 schema shape, B-02 feedback path, B-03 header producer test, B-04 diff rejection test | file/comment budgets; residual diff transfer | BLOCK | `ses_00879fbe6ffehH67nAb8iEzkPp` |
-| 3 | R3 | yes | B-01 cold-thaw behavior test sensitivity | file/comment budgets; residual diff transfer; corrected 4-file record | BLOCK | `ses_00879fbe6ffehH67nAb8iEzkPp` |
-| 4 | R4 | yes | No blocking findings. | E estimate reconciliation; TUI header assertion wording; goal request outside measured hot path; residual Session diff transfer. | APPROVE | `ses_00879fbe6ffehH67nAb8iEzkPp` |
-| 5 | R4 | yes | B-01 existing diff HTTP failure semantics were misclassified as rejection/retry contract. |  | BLOCK | `ses_00879fbe6ffehH67nAb8iEzkPp` |
-| 6 | R5 | yes | B-01 delayed await could expose a fast genuine diff rejection as unhandled. |  | BLOCK | `ses_00879fbe6ffehH67nAb8iEzkPp` |
-| 7 | R7 | no, withdrawn before invocation | user rejected size branch |  | WITHDRAWN | not invoked |
-| 8 (additional 1/6) | R8 | yes | B-01 audit-limit evidence | R8 behavior/traceability otherwise clean | BLOCK | `ses_004cdf6c5ffeZhq0V8AHRrTnq7` |
-| 9 (additional 2/6) | R9 | yes | No blocking findings. | R9 count corrected from additional 1/6; residual aggregate decode/shared SSE transfer; remove obsolete untracked constants module during implementation. | APPROVE | `ses_004cdf6c5ffeZhq0V8AHRrTnq7` |
-| 10 (additional 3/6) | R10 | yes | B-01 normalized totals can be overwritten by reachable Revert `session.updated` after `session.diff` | Add Revert event-order coverage; no independent command rerun | BLOCK | `ses_003cb3c9dffeL0zLdwnRLEY1HT` |
-| 11 (additional 4/6) | R11 | yes | No blocking findings. | Residual aggregate decode/shared SSE transfer; implementation verification pending | APPROVE | `ses_003c270e4ffeOXhbmGJyaOGLgP` |
+| Round               | Audited revision | Full scope?                     | Blocking findings                                                                                    | Non-blocking findings                                                                                                                                    | Result    | Invocation reference             |
+| ------------------- | ---------------- | ------------------------------- | ---------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- | --------- | -------------------------------- |
+| 1                   | R1               | yes                             | B-01, B-02; B-02 withdrawn on reconsideration                                                        | file/comment budgets; live timing variability; residual diff transfer                                                                                    | BLOCK     | `ses_00879fbe6ffehH67nAb8iEzkPp` |
+| 2                   | R2               | yes                             | B-01 schema shape, B-02 feedback path, B-03 header producer test, B-04 diff rejection test           | file/comment budgets; residual diff transfer                                                                                                             | BLOCK     | `ses_00879fbe6ffehH67nAb8iEzkPp` |
+| 3                   | R3               | yes                             | B-01 cold-thaw behavior test sensitivity                                                             | file/comment budgets; residual diff transfer; corrected 4-file record                                                                                    | BLOCK     | `ses_00879fbe6ffehH67nAb8iEzkPp` |
+| 4                   | R4               | yes                             | No blocking findings.                                                                                | E estimate reconciliation; TUI header assertion wording; goal request outside measured hot path; residual Session diff transfer.                         | APPROVE   | `ses_00879fbe6ffehH67nAb8iEzkPp` |
+| 5                   | R4               | yes                             | B-01 existing diff HTTP failure semantics were misclassified as rejection/retry contract.            |                                                                                                                                                          | BLOCK     | `ses_00879fbe6ffehH67nAb8iEzkPp` |
+| 6                   | R5               | yes                             | B-01 delayed await could expose a fast genuine diff rejection as unhandled.                          |                                                                                                                                                          | BLOCK     | `ses_00879fbe6ffehH67nAb8iEzkPp` |
+| 7                   | R7               | no, withdrawn before invocation | user rejected size branch                                                                            |                                                                                                                                                          | WITHDRAWN | not invoked                      |
+| 8 (additional 1/6)  | R8               | yes                             | B-01 audit-limit evidence                                                                            | R8 behavior/traceability otherwise clean                                                                                                                 | BLOCK     | `ses_004cdf6c5ffeZhq0V8AHRrTnq7` |
+| 9 (additional 2/6)  | R9               | yes                             | No blocking findings.                                                                                | R9 count corrected from additional 1/6; residual aggregate decode/shared SSE transfer; remove obsolete untracked constants module during implementation. | APPROVE   | `ses_004cdf6c5ffeZhq0V8AHRrTnq7` |
+| 10 (additional 3/6) | R10              | yes                             | B-01 normalized totals can be overwritten by reachable Revert `session.updated` after `session.diff` | Add Revert event-order coverage; no independent command rerun                                                                                            | BLOCK     | `ses_003cb3c9dffeL0zLdwnRLEY1HT` |
+| 11 (additional 4/6) | R11              | yes                             | No blocking findings.                                                                                | Residual aggregate decode/shared SSE transfer; implementation verification pending                                                                       | APPROVE   | `ses_003c270e4ffeOXhbmGJyaOGLgP` |
 
 Any substantive revision invalidates earlier approval.
 
@@ -324,12 +324,12 @@ Post-change replay used the production `Server.Default().app.request` HttpApi
 path against the daemon database via the repository-supported `OPENCODE_DB`
 override. It did not write production or test files.
 
-| Session / endpoint | Viewer result | Default result |
-| --- | --- | --- |
-| `ses_041cd...` Message, latest 300 | 2,869,230 B; 300 items; 0 user summaries | 2,943,671 B; 300 items; 4 user summaries |
-| `ses_041cd...` diff | 9,506 B; 100 items; 0 patches; totals 697 / +54,245 / -2,268 | 3,685,946 B; 697 items; 697 patches |
-| `ses_138a...` Message, latest 300 | 6,562,046 B; 300 items; 0 user summaries | 131,181,764 B; 300 items; 18 user summaries |
-| `ses_138a...` diff | 11,674 B; 100 items; 0 patches; totals 3,282 / +701,056 / -859,837 | 53,211,795 B; 3,282 items; 3,282 patches |
+| Session / endpoint                 | Viewer result                                                      | Default result                              |
+| ---------------------------------- | ------------------------------------------------------------------ | ------------------------------------------- |
+| `ses_041cd...` Message, latest 300 | 2,869,230 B; 300 items; 0 user summaries                           | 2,943,671 B; 300 items; 4 user summaries    |
+| `ses_041cd...` diff                | 9,506 B; 100 items; 0 patches; totals 697 / +54,245 / -2,268       | 3,685,946 B; 697 items; 697 patches         |
+| `ses_138a...` Message, latest 300  | 6,562,046 B; 300 items; 0 user summaries                           | 131,181,764 B; 300 items; 18 user summaries |
+| `ses_138a...` diff                 | 11,674 B; 100 items; 0 patches; totals 3,282 / +701,056 / -859,837 | 53,211,795 B; 3,282 items; 3,282 patches    |
 
 This closes the measured redundant wire/object path without changing the latest
 300 range or default complete contracts. The readiness test proves the visible
@@ -360,12 +360,12 @@ default-open 100-row renderer and conditional final ellipsis.
 
 ### Chinese Comment Calculation
 
-| Metric | Actual | Exclusions and evidence |
-| --- | --- | --- |
-| Effective changed code lines `E` | 503 | Excludes blank, import-only, formatter-only, generated and pure-move lines across production and tests. Production-only `E=142`. |
-| Qualifying Chinese comment lines `C` | 76 | Adjacent comments explain cold/wire ownership, compatibility, normalized source/cap invariants, event ordering, error topology and renderer semantics. |
-| Ratio `C / E` | 15.11% | `76 / 503` |
-| Required minimum `C` | 76 | `ceil(503 * 0.15) = 76`; actual exactly meets the gate. |
+| Metric                               | Actual | Exclusions and evidence                                                                                                                                |
+| ------------------------------------ | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Effective changed code lines `E`     | 503    | Excludes blank, import-only, formatter-only, generated and pure-move lines across production and tests. Production-only `E=142`.                       |
+| Qualifying Chinese comment lines `C` | 76     | Adjacent comments explain cold/wire ownership, compatibility, normalized source/cap invariants, event ordering, error topology and renderer semantics. |
+| Ratio `C / E`                        | 15.11% | `76 / 503`                                                                                                                                             |
+| Required minimum `C`                 | 76     | `ceil(503 * 0.15) = 76`; actual exactly meets the gate.                                                                                                |
 
 ### Remaining Unverified Items
 
@@ -405,11 +405,11 @@ default-open 100-row renderer and conditional final ellipsis.
 
 ## 24. Implementation Audit Record
 
-| Round | Plan revision | Full original scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | R9 | yes | B-01 false `...` on resolved diff error and legacy missing-file entries | Missing negative Files cases; no independent command rerun | BLOCK | `ses_003e08e61ffev3L4OoH5LD8THm` |
-| 2 | R10 | yes | B-01 normalized totals can be overwritten by reachable Revert `session.updated` after `session.diff` | Revert event-order test required; no independent command rerun | BLOCK | `ses_003cb3c9dffeL0zLdwnRLEY1HT` |
-| 3 | R11 | yes | No blocking findings. | SummaryCache still decodes the complete aggregate; shared SSE remains complete until the TUI reducer; sync suite prints the existing temporary `kv.json` diagnostic while all tests pass. | APPROVE | `ses_003a4885cffeRsePevd0CpBlzJ` |
+| Round | Plan revision | Full original scope? | Blocking findings                                                                                    | Non-blocking findings                                                                                                                                                                     | Result  | Invocation reference             |
+| ----- | ------------- | -------------------- | ---------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- | -------------------------------- |
+| 1     | R9            | yes                  | B-01 false `...` on resolved diff error and legacy missing-file entries                              | Missing negative Files cases; no independent command rerun                                                                                                                                | BLOCK   | `ses_003e08e61ffev3L4OoH5LD8THm` |
+| 2     | R10           | yes                  | B-01 normalized totals can be overwritten by reachable Revert `session.updated` after `session.diff` | Revert event-order test required; no independent command rerun                                                                                                                            | BLOCK   | `ses_003cb3c9dffeL0zLdwnRLEY1HT` |
+| 3     | R11           | yes                  | No blocking findings.                                                                                | SummaryCache still decodes the complete aggregate; shared SSE remains complete until the TUI reducer; sync suite prints the existing temporary `kv.json` diagnostic while all tests pass. | APPROVE | `ses_003a4885cffeRsePevd0CpBlzJ` |
 
 Independent auditor verdict for R11 (verbatim):
 

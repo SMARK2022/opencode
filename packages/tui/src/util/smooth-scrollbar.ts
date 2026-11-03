@@ -113,10 +113,15 @@ function drawSmoothMarkers(
 
   for (const marker of markers) {
     // #109：与 thumb 共用 scrollRange 映射
-    const tick = Math.max(0, Math.min(
-      slider.height * MARKER_PRECISION - 1,
-      Math.round((Math.min(marker.offset, thumb.scrollRange) / thumb.scrollRange) * (slider.height * MARKER_PRECISION - 1)),
-    ))
+    const tick = Math.max(
+      0,
+      Math.min(
+        slider.height * MARKER_PRECISION - 1,
+        Math.round(
+          (Math.min(marker.offset, thumb.scrollRange) / thumb.scrollRange) * (slider.height * MARKER_PRECISION - 1),
+        ),
+      ),
+    )
     const row = Math.floor(tick / MARKER_PRECISION)
 
     // #109：thumb 覆盖行不画 marker

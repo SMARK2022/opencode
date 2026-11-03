@@ -986,19 +986,25 @@ const scenarios: Scenario[] = [
   // Native公开路径也进入同一覆盖表；V1场景不能代替不同的method+path。
   http.protected
     .get("/api/session/{sessionID}/goal", "v2.session.goal")
-    .seeded(ctx => ctx.session({ title: "Native goal get" }))
-    .at(ctx => ({ path: route("/api/session/{sessionID}/goal", { sessionID: ctx.state.id }), headers: ctx.headers() }))
-    .json(200, body => {
+    .seeded((ctx) => ctx.session({ title: "Native goal get" }))
+    .at((ctx) => ({
+      path: route("/api/session/{sessionID}/goal", { sessionID: ctx.state.id }),
+      headers: ctx.headers(),
+    }))
+    .json(200, (body) => {
       object(body)
       check(body.goal === null, "new native session should have no goal")
     }),
   http.protected
     .post("/api/session/{sessionID}/goal", "v2.session.goal.set")
     .mutating()
-    .seeded(ctx => ctx.session({ title: "Native goal set" }))
-    .at(ctx => ({ path: route("/api/session/{sessionID}/goal", { sessionID: ctx.state.id }), headers: ctx.headers(),
-      body: { objective: "test objective" } }))
-    .json(200, body => {
+    .seeded((ctx) => ctx.session({ title: "Native goal set" }))
+    .at((ctx) => ({
+      path: route("/api/session/{sessionID}/goal", { sessionID: ctx.state.id }),
+      headers: ctx.headers(),
+      body: { objective: "test objective" },
+    }))
+    .json(200, (body) => {
       object(body)
       object(body.goal)
       check(body.goal.objective === "test objective", "native goal objective should match")
@@ -1007,9 +1013,12 @@ const scenarios: Scenario[] = [
   http.protected
     .delete("/api/session/{sessionID}/goal", "v2.session.goal.clear")
     .mutating()
-    .seeded(ctx => ctx.session({ title: "Native goal clear" }))
-    .at(ctx => ({ path: route("/api/session/{sessionID}/goal", { sessionID: ctx.state.id }), headers: ctx.headers() }))
-    .json(200, body => {
+    .seeded((ctx) => ctx.session({ title: "Native goal clear" }))
+    .at((ctx) => ({
+      path: route("/api/session/{sessionID}/goal", { sessionID: ctx.state.id }),
+      headers: ctx.headers(),
+    }))
+    .json(200, (body) => {
       object(body)
       check(body.cleared === false, "clearing absent native goal should return false")
     }),
@@ -1756,8 +1765,8 @@ const scenarios: Scenario[] = [
   http.protected
     .post("/api/session/preview", "v2.session.preview")
     .inProject({ git: false })
-    .at(ctx => ({ path: "/api/session/preview", headers: ctx.headers(), body: { sessionIDs: [], limit: 2 } }))
-    .json(200, body => {
+    .at((ctx) => ({ path: "/api/session/preview", headers: ctx.headers(), body: { sessionIDs: [], limit: 2 } }))
+    .json(200, (body) => {
       object(body)
       check(Object.keys(body).length === 0, "empty native sessionIDs should return empty object")
     }),
@@ -1765,7 +1774,11 @@ const scenarios: Scenario[] = [
   http.protected
     .post("/session/search/scan", "session.search.scan")
     .seeded((ctx) => ctx.session({ title: "Progressive search session" }))
-    .at((ctx) => ({ path: "/session/search/scan", headers: ctx.headers(), body: { search: "Progressive", batch: 100 } }))
+    .at((ctx) => ({
+      path: "/session/search/scan",
+      headers: ctx.headers(),
+      body: { search: "Progressive", batch: 100 },
+    }))
     .json(200, (body) => {
       const result = body as { sessions?: { title?: string }[]; done?: boolean; nextCursor?: unknown }
       check(Array.isArray(result.sessions), "search scan should return sessions array")
@@ -1787,14 +1800,23 @@ const scenarios: Scenario[] = [
     .jsonEffect(502, (body, ctx) =>
       Effect.gen(function* () {
         object(body)
-        check(body.message === "Voice input requires a user-configured ChatGPT MCP", "voice should report missing user MCP")
+        check(
+          body.message === "Voice input requires a user-configured ChatGPT MCP",
+          "voice should report missing user MCP",
+        )
         const modules = yield* Effect.promise(() => runtime())
         // 沿用 backend 的完整路由和认证层；不直调业务函数，也不改生产代码绕过上传解码。
         const app = HttpRouter.toWebHandler(
-          modules.HttpApiApp.routes.pipe(Layer.provide(ConfigProvider.layer(ConfigProvider.fromUnknown({
-            OPENCODE_SERVER_PASSWORD: "secret",
-            OPENCODE_SERVER_USERNAME: "opencode",
-          })))),
+          modules.HttpApiApp.routes.pipe(
+            Layer.provide(
+              ConfigProvider.layer(
+                ConfigProvider.fromUnknown({
+                  OPENCODE_SERVER_PASSWORD: "secret",
+                  OPENCODE_SERVER_USERNAME: "opencode",
+                }),
+              ),
+            ),
+          ),
           { disableLogger: true },
         )
         // 请求无论成功或断言失败都释放 handler 的作用域，避免跨场景残留订阅和资源。
@@ -1816,21 +1838,34 @@ const scenarios: Scenario[] = [
         wav.writeUInt32LE(2, 40)
         // 两次请求共享音频和目录，只改变认证；不能把解码错误或任意非 401 当成成功。
         for (const authenticated of [false, true]) {
-          const response = yield* Effect.promise(() => app.handler(new Request("http://localhost/tui/voice/transcribe", {
-            method: "POST",
-            headers: ctx.headers({
-              "content-type": "audio/wav",
-              ...(authenticated ? { authorization: `Basic ${Buffer.from("opencode:secret").toString("base64")}` } : {}),
-            }),
-            body: wav,
-          }), modules.HttpApiApp.context))
+          const response = yield* Effect.promise(() =>
+            app.handler(
+              new Request("http://localhost/tui/voice/transcribe", {
+                method: "POST",
+                headers: ctx.headers({
+                  "content-type": "audio/wav",
+                  ...(authenticated
+                    ? { authorization: `Basic ${Buffer.from("opencode:secret").toString("base64")}` }
+                    : {}),
+                }),
+                body: wav,
+              }),
+              modules.HttpApiApp.context,
+            ),
+          )
           check(response.status === (authenticated ? 502 : 401), "binary voice upload should enforce authentication")
           if (!authenticated) continue
           // 隔离用户配置故意没有 ChatGPT MCP；精确错误证明请求已通过认证和二进制解码。
-          check(response.headers.get("content-type")?.includes("application/json") === true, "voice error should be JSON")
+          check(
+            response.headers.get("content-type")?.includes("application/json") === true,
+            "voice error should be JSON",
+          )
           const error: unknown = yield* Effect.promise(() => response.json())
           object(error)
-          check(error.message === "Voice input requires a user-configured ChatGPT MCP", "binary voice should report missing user MCP")
+          check(
+            error.message === "Voice input requires a user-configured ChatGPT MCP",
+            "binary voice should report missing user MCP",
+          )
         }
       }).pipe(Effect.scoped),
     ),

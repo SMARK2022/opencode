@@ -298,8 +298,16 @@ describe("tool.task", () => {
       const sessions = yield* Session.Service
       const { chat, assistant } = yield* seed()
       // 真实 Task 中的父默认 ask 也须覆盖旧会话 grant，保留 source 的更强审批。
-      yield* sessions.setAgentModel({ sessionID: chat.id, agent: "build", model: { id: ref.modelID, providerID: ref.providerID }, time: Date.now() })
-      yield* sessions.setPermission({ sessionID: chat.id, permission: [{ permission: "external_directory", pattern: "/tmp/allowed/*", action: "allow" }] })
+      yield* sessions.setAgentModel({
+        sessionID: chat.id,
+        agent: "build",
+        model: { id: ref.modelID, providerID: ref.providerID },
+        time: Date.now(),
+      })
+      yield* sessions.setPermission({
+        sessionID: chat.id,
+        permission: [{ permission: "external_directory", pattern: "/tmp/allowed/*", action: "allow" }],
+      })
       const tool = yield* TaskTool
       const def = yield* tool.init()
 
@@ -1017,9 +1025,7 @@ describe("tool.task", () => {
         title: "Existing child",
         permission: [{ permission: "external_directory", pattern: "/outside/project/*", action: "allow" }],
       })
-      const parentRuntimePermission = [
-        { permission: "read", pattern: "/parent-blocked/*", action: "deny" },
-      ] as const
+      const parentRuntimePermission = [{ permission: "read", pattern: "/parent-blocked/*", action: "deny" }] as const
       // 旧子会话创建后更新父 Session，恢复必须读取最新的持久化 runtime ceiling。
       yield* sessions.setPermission({
         sessionID: chat.id,
@@ -1702,7 +1708,13 @@ describe("tool.task", () => {
         model: inputs[0]?.model,
         agent: inputs[0]?.agent,
         variant: "xhigh",
-        parts: [{ type: "text", synthetic: true, text: "No text output was produced in your previous turn. Please provide a text response to the task above." }],
+        parts: [
+          {
+            type: "text",
+            synthetic: true,
+            text: "No text output was produced in your previous turn. Please provide a text response to the task above.",
+          },
+        ],
       })
       expect(inputs[1]?.messageID).not.toBe(inputs[0]?.messageID)
     }),
@@ -1726,15 +1738,28 @@ describe("tool.task", () => {
               return reply(
                 input,
                 "partial response",
-                toolError ? undefined : new SessionV1.APIError({ message: "nudge failed", isRetryable: false }).toObject(),
+                toolError
+                  ? undefined
+                  : new SessionV1.APIError({ message: "nudge failed", isRetryable: false }).toObject(),
                 toolError ? "nudge failed" : undefined,
               )
             }),
         }
-        const exit = yield* def.execute(
-          { description: "inspect bug", prompt: "inspect the cache", subagent_type: "general" },
-          { sessionID: chat.id, messageID: assistant.id, agent: "build", abort: new AbortController().signal, extra: { promptOps }, messages: [], metadata: () => Effect.void, ask: () => Effect.void },
-        ).pipe(Effect.exit)
+        const exit = yield* def
+          .execute(
+            { description: "inspect bug", prompt: "inspect the cache", subagent_type: "general" },
+            {
+              sessionID: chat.id,
+              messageID: assistant.id,
+              agent: "build",
+              abort: new AbortController().signal,
+              extra: { promptOps },
+              messages: [],
+              metadata: () => Effect.void,
+              ask: () => Effect.void,
+            },
+          )
+          .pipe(Effect.exit)
         expect(promptCalls).toBe(2)
         expect(Exit.isFailure(exit)).toBe(true)
         if (Exit.isFailure(exit)) {

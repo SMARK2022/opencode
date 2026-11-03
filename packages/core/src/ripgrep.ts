@@ -25,7 +25,6 @@ export const MAX_SEARCH_FILES = 5_000
 // #138：默认匹配结果上限
 export const MAX_SEARCH_RESULTS = 1_000
 
-
 const RawMatch = Schema.Struct({
   type: Schema.Literal("match"),
   data: Schema.Struct({
@@ -104,11 +103,12 @@ export interface SearchResult {
 
 export interface Interface {
   readonly find: (input: FindInput) => Effect.Effect<readonly Entry[], Error>
-  readonly glob: (input: GlobInput) => Effect.Effect<
-    { files: readonly Entry[]; partial: boolean; truncated: boolean; timedOut?: boolean },
-    Error
-  >
-  readonly grep: (input: GrepInput) => Effect.Effect<readonly Match[], Error | InvalidPatternError | SearchTooBroadError>
+  readonly glob: (
+    input: GlobInput,
+  ) => Effect.Effect<{ files: readonly Entry[]; partial: boolean; truncated: boolean; timedOut?: boolean }, Error>
+  readonly grep: (
+    input: GrepInput,
+  ) => Effect.Effect<readonly Match[], Error | InvalidPatternError | SearchTooBroadError>
   readonly search: (input: GrepInput) => Effect.Effect<SearchResult, Error | InvalidPatternError | SearchTooBroadError>
 }
 
@@ -150,7 +150,11 @@ const layer = Layer.effect(
           if (input.timeout !== false && input.timeout !== undefined && input.timeout > 0) {
             yield* Effect.forkScoped(
               Effect.sleep(`${input.timeout} millis`).pipe(
-                Effect.tap(() => Effect.sync(() => { timedOut = true })),
+                Effect.tap(() =>
+                  Effect.sync(() => {
+                    timedOut = true
+                  }),
+                ),
                 Effect.flatMap(() => handle.kill({ forceKillAfter: "3 seconds" })),
                 Effect.ignore,
               ),
@@ -167,7 +171,7 @@ const layer = Layer.effect(
             Stream.mapEffect((line) =>
               input.parse(line).pipe(
                 // 超时kill可能截断末行JSON；普通解析失败依旧暴露，不丢此前完整匹配。
-                Effect.catch((err) => timedOut ? Effect.succeed(undefined) : Effect.fail(err)),
+                Effect.catch((err) => (timedOut ? Effect.succeed(undefined) : Effect.fail(err))),
               ),
             ),
             Stream.filter((row): row is A => row !== undefined),
@@ -188,14 +192,15 @@ const layer = Layer.effect(
 
           const code = yield* handle.exitCode.pipe(
             // 主动预算中止不是运输失败，外部取消和其他进程故障保持原错误通道。
-            Effect.catch((err) => timedOut ? Effect.succeed(0) : Effect.fail(err)),
+            Effect.catch((err) => (timedOut ? Effect.succeed(0) : Effect.fail(err))),
           )
           const stderr = yield* Fiber.join(stderrFiber)
           if (input.pattern && code === 2 && isInvalidPattern(stderr)) {
             return yield* new InvalidPatternError({ pattern: input.pattern, message: stderr.trim() })
           }
           // 交互搜索抑制遍历诊断后仍有stderr就是真错误；find保留原前缀语义。
-          if (code === 2 && stderr.trim() && (input.args.includes("--no-messages") || rows.length === 0 && !timedOut)) return yield* failure(stderr.trim())
+          if (code === 2 && stderr.trim() && (input.args.includes("--no-messages") || (rows.length === 0 && !timedOut)))
+            return yield* failure(stderr.trim())
           if (code !== 0 && code !== 1 && code !== 2) {
             return yield* failure(stderr.trim() || `ripgrep failed with code ${code}`)
           }
@@ -307,16 +312,18 @@ const layer = Layer.effect(
           // 排除项放在包含项之后收窄候选，已有!保持原意，两个扫描阶段共用顺序。
           const globs = [
             ...patterns(input.include),
-            ...patterns(input.exclude).map((item) => item.startsWith("!") ? item : `!${item}`),
+            ...patterns(input.exclude).map((item) => (item.startsWith("!") ? item : `!${item}`)),
           ]
           // #138：先限制候选文件数
           const maxFiles = input.maxFiles === false ? undefined : (input.maxFiles ?? MAX_SEARCH_FILES)
           if (maxFiles !== undefined) {
             // 单文件豁免不能扩大为目录豁免；显式目录沿用相同候选预算。
-            const directory = input.file === undefined || (yield* fs.stat(path.resolve(input.cwd, input.file)).pipe(
-              Effect.map((info) => info.type === "Directory"),
-              Effect.mapError((cause) => failure("Unable to inspect search target", cause)),
-            ))
+            const directory =
+              input.file === undefined ||
+              (yield* fs.stat(path.resolve(input.cwd, input.file)).pipe(
+                Effect.map((info) => info.type === "Directory"),
+                Effect.mapError((cause) => failure("Unable to inspect search target", cause)),
+              ))
             if (directory) {
               // #138：--files 预扫候选，超过 maxFiles 则拒绝
               const candidates = yield* run<string>({
@@ -350,67 +357,67 @@ const layer = Layer.effect(
           // #138：结果条数默认 MAX_SEARCH_RESULTS
           const limit = input.limit && input.limit > 0 ? input.limit : MAX_SEARCH_RESULTS
           return yield* run<RawMatchData>({
-          ...input,
-          limit,
-          args: [
-            "--no-config",
-            "--json",
-            "--hidden",
-            "--no-messages",
-            ...globs.map((item) => `--glob=${item}`),
-            "--glob=!**/.git/**",
-            "--",
-            input.pattern,
-            input.file ?? ".",
-          ],
-          parse: (line) =>
-            (Buffer.byteLength(line, "utf8") > MAX_RECORD_BYTES
-              ? Effect.fail(failure(`Ripgrep JSON record exceeded ${MAX_RECORD_BYTES} bytes`))
-              : Effect.try({
-                  try: () => JSON.parse(line) as unknown,
-                  catch: (cause) => failure("Invalid ripgrep JSON output", cause),
-                })
-            ).pipe(
-              Effect.flatMap((json) => {
-                if (!json || typeof json !== "object" || !("type" in json) || json.type !== "match")
-                  return Effect.succeed(undefined)
-                return Schema.decodeUnknownEffect(RawMatch)(json).pipe(
-                  Effect.map((match) => ({
-                    ...match.data,
-                    path: { text: match.data.path.text.replace(/^\.[\\/]/, "") },
-                    submatches: match.data.submatches.slice(0, MAX_SUBMATCHES),
-                  })),
-                  Effect.mapError((cause) => failure("Invalid ripgrep match output", cause)),
-                )
-              }),
-            ),
-        }).pipe(
-          Effect.map((result) => ({
-            ...result,
-            items: result.items.map((match) => {
-              const relative = match.path.text
-                .replace(/^(?:\.[\\/])+/u, "")
-                .replace(/^[\\/]+/u, "")
-                .replaceAll("\\", "/")
-              return Match.make({
-                entry: Entry.make({
-                  path: RelativePath.make(relative),
-                  type: "file",
+            ...input,
+            limit,
+            args: [
+              "--no-config",
+              "--json",
+              "--hidden",
+              "--no-messages",
+              ...globs.map((item) => `--glob=${item}`),
+              "--glob=!**/.git/**",
+              "--",
+              input.pattern,
+              input.file ?? ".",
+            ],
+            parse: (line) =>
+              (Buffer.byteLength(line, "utf8") > MAX_RECORD_BYTES
+                ? Effect.fail(failure(`Ripgrep JSON record exceeded ${MAX_RECORD_BYTES} bytes`))
+                : Effect.try({
+                    try: () => JSON.parse(line) as unknown,
+                    catch: (cause) => failure("Invalid ripgrep JSON output", cause),
+                  })
+              ).pipe(
+                Effect.flatMap((json) => {
+                  if (!json || typeof json !== "object" || !("type" in json) || json.type !== "match")
+                    return Effect.succeed(undefined)
+                  return Schema.decodeUnknownEffect(RawMatch)(json).pipe(
+                    Effect.map((match) => ({
+                      ...match.data,
+                      path: { text: match.data.path.text.replace(/^\.[\\/]/, "") },
+                      submatches: match.data.submatches.slice(0, MAX_SUBMATCHES),
+                    })),
+                    Effect.mapError((cause) => failure("Invalid ripgrep match output", cause)),
+                  )
                 }),
-                line: match.line_number,
-                offset: match.absolute_offset,
-                text:
-                  match.lines.text.length > 2_000
-                    ? match.lines.text.slice(0, 2_000).replace(/[\uD800-\uDBFF]$/, "") + "..."
-                    : match.lines.text,
-                submatches: match.submatches.map((submatch) => ({
-                  text: submatch.match.text,
-                  start: submatch.start,
-                  end: submatch.end,
-                })),
-              })
-            }),
-          })),
+              ),
+          }).pipe(
+            Effect.map((result) => ({
+              ...result,
+              items: result.items.map((match) => {
+                const relative = match.path.text
+                  .replace(/^(?:\.[\\/])+/u, "")
+                  .replace(/^[\\/]+/u, "")
+                  .replaceAll("\\", "/")
+                return Match.make({
+                  entry: Entry.make({
+                    path: RelativePath.make(relative),
+                    type: "file",
+                  }),
+                  line: match.line_number,
+                  offset: match.absolute_offset,
+                  text:
+                    match.lines.text.length > 2_000
+                      ? match.lines.text.slice(0, 2_000).replace(/[\uD800-\uDBFF]$/, "") + "..."
+                      : match.lines.text,
+                  submatches: match.submatches.map((submatch) => ({
+                    text: submatch.match.text,
+                    start: submatch.start,
+                    end: submatch.end,
+                  })),
+                })
+              }),
+            })),
           )
         }),
     }
@@ -418,4 +425,8 @@ const layer = Layer.effect(
   }),
 )
 
-export const node = makeGlobalNode({ service: Service, layer: layer, deps: [RipgrepBinary.node, AppProcess.node, FSUtil.node] })
+export const node = makeGlobalNode({
+  service: Service,
+  layer: layer,
+  deps: [RipgrepBinary.node, AppProcess.node, FSUtil.node],
+})

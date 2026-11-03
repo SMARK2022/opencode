@@ -168,56 +168,148 @@ describe("SessionV2.history", () => {
       const ids = Array.from({ length: 4 }, () => SessionMessage.ID.create())
       for (const [index, id] of ids.entries())
         yield* events.publish(SessionEvent.Synthetic, {
-          sessionID: created.id, messageID: id, timestamp: DateTime.makeUnsafe(index), text: `visible-${index}`,
+          sessionID: created.id,
+          messageID: id,
+          timestamp: DateTime.makeUnsafe(index),
+          text: `visible-${index}`,
           ...(index === 2 ? { metadata: { hidden: { time: 0, reason: "unrelated" } } } : {}),
         })
       // 仅合法Native tombstone隐藏记录；其他metadata不误判，隐藏行不占正反向分页容量。
       yield* events.publish(SessionEvent.MessagesHidden, {
-        sessionID: created.id, messageIDs: [ids[1], ids[3]], timestamp: DateTime.makeUnsafe(4),
+        sessionID: created.id,
+        messageIDs: [ids[1], ids[3]],
+        timestamp: DateTime.makeUnsafe(4),
         hidden: { time: 4, reason: "permission-reviewer-protocol-retry" },
       })
-      const before = yield* db.select().from(SessionMessageTable).where(eq(SessionMessageTable.session_id, created.id)).orderBy(asc(SessionMessageTable.seq)).all().pipe(Effect.orDie)
-      expect((yield* session.messages({ sessionID: created.id, limit: 1 })).map(message => message.id)).toEqual([ids[2]])
-      expect((yield* session.messages({ sessionID: created.id, limit: 1, cursor: { id: ids[2], direction: "next" } })).map(message => message.id)).toEqual([ids[0]])
-      expect((yield* session.messages({ sessionID: created.id, limit: 1, cursor: { id: ids[0], direction: "previous" } })).map(message => message.id)).toEqual([ids[2]])
-      expect((yield* session.messages({ sessionID: created.id, order: "asc", limit: 2 })).map(message => message.id)).toEqual([ids[0], ids[2]])
+      const before = yield* db
+        .select()
+        .from(SessionMessageTable)
+        .where(eq(SessionMessageTable.session_id, created.id))
+        .orderBy(asc(SessionMessageTable.seq))
+        .all()
+        .pipe(Effect.orDie)
+      expect((yield* session.messages({ sessionID: created.id, limit: 1 })).map((message) => message.id)).toEqual([
+        ids[2],
+      ])
+      expect(
+        (yield* session.messages({ sessionID: created.id, limit: 1, cursor: { id: ids[2], direction: "next" } })).map(
+          (message) => message.id,
+        ),
+      ).toEqual([ids[0]])
+      expect(
+        (yield* session.messages({
+          sessionID: created.id,
+          limit: 1,
+          cursor: { id: ids[0], direction: "previous" },
+        })).map((message) => message.id),
+      ).toEqual([ids[2]])
+      expect(
+        (yield* session.messages({ sessionID: created.id, order: "asc", limit: 2 })).map((message) => message.id),
+      ).toEqual([ids[0], ids[2]])
       expect(yield* session.message({ sessionID: created.id, messageID: ids[3] })).toBeUndefined()
       expect(yield* session.message({ sessionID: created.id, messageID: ids[2] })).toMatchObject({ id: ids[2] })
       // raw Store仍服务审计/结构恢复；公开读取既不删除记录，也不重写元数据。
-      expect((yield* store.message(ids[3], created.id))?.message).toMatchObject({ id: ids[3], metadata: { hidden: { reason: "permission-reviewer-protocol-retry" } } })
-      expect(yield* db.select().from(SessionMessageTable).where(eq(SessionMessageTable.session_id, created.id)).orderBy(asc(SessionMessageTable.seq)).all().pipe(Effect.orDie)).toEqual(before)
+      expect((yield* store.message(ids[3], created.id))?.message).toMatchObject({
+        id: ids[3],
+        metadata: { hidden: { reason: "permission-reviewer-protocol-retry" } },
+      })
+      expect(
+        yield* db
+          .select()
+          .from(SessionMessageTable)
+          .where(eq(SessionMessageTable.session_id, created.id))
+          .orderBy(asc(SessionMessageTable.seq))
+          .all()
+          .pipe(Effect.orDie),
+      ).toEqual(before)
       // 同毫秒原位修改必须让后缀重载；稳定前缀保留同一解码对象，而非只比较最终文本。
       const cache = SessionHistory.makeCache()
       const cold = yield* SessionHistory.entriesForRunner(db, created.id, -1, cache)
       const warm = yield* SessionHistory.entriesForRunner(db, created.id, -1, cache)
-      expect(warm.map(entry => entry.message.id)).toEqual([ids[0], ids[2]])
+      expect(warm.map((entry) => entry.message.id)).toEqual([ids[0], ids[2]])
       expect(warm[0]?.message).toBe(cold[0]?.message)
       expect(warm[1]?.message).toBe(cold[1]?.message)
-      yield* db.update(SessionMessageTable).set({ data: Schema.encodeSync(SessionMessage.Synthetic)(SessionMessage.Synthetic.make({
-        id: ids[2], sessionID: created.id, type: "synthetic", text: "changed", time: { created: DateTime.makeUnsafe(2) },
-      })) }).where(eq(SessionMessageTable.id, ids[2])).run().pipe(Effect.orDie)
+      yield* db
+        .update(SessionMessageTable)
+        .set({
+          data: Schema.encodeSync(SessionMessage.Synthetic)(
+            SessionMessage.Synthetic.make({
+              id: ids[2],
+              sessionID: created.id,
+              type: "synthetic",
+              text: "changed",
+              time: { created: DateTime.makeUnsafe(2) },
+            }),
+          ),
+        })
+        .where(eq(SessionMessageTable.id, ids[2]))
+        .run()
+        .pipe(Effect.orDie)
       const changed = yield* SessionHistory.entriesForRunner(db, created.id, -1, cache)
       expect(changed[0]?.message).toBe(cold[0]?.message)
       expect(changed[1]?.message).not.toBe(cold[1]?.message)
       expect(changed[1]?.message).toMatchObject({ text: "changed" })
       // 继续使用真实Native row和原位修改：大正文不复制进常驻proof，但逐字段编码可完整还原。
       const text = "large proof payload ".repeat(64 * 1024)
-      yield* db.update(SessionMessageTable).set({ data: Schema.encodeSync(SessionMessage.Synthetic)(SessionMessage.Synthetic.make({ id: ids[2], sessionID: created.id, type: "synthetic", text, time: { created: DateTime.makeUnsafe(2) } })) }).where(eq(SessionMessageTable.id, ids[2])).run().pipe(Effect.orDie)
+      yield* db
+        .update(SessionMessageTable)
+        .set({
+          data: Schema.encodeSync(SessionMessage.Synthetic)(
+            SessionMessage.Synthetic.make({
+              id: ids[2],
+              sessionID: created.id,
+              type: "synthetic",
+              text,
+              time: { created: DateTime.makeUnsafe(2) },
+            }),
+          ),
+        })
+        .where(eq(SessionMessageTable.id, ids[2]))
+        .run()
+        .pipe(Effect.orDie)
       yield* SessionHistory.entriesForRunner(db, created.id, -1, cache)
-      const row = yield* db.select().from(SessionMessageTable).where(eq(SessionMessageTable.id, ids[2])).get().pipe(Effect.orDie)
-      const decodedKeys = cache.proof.map(key => Buffer.from(Bun.zstdDecompressSync(Buffer.from(key, "latin1"))).toString("utf8"))
+      const row = yield* db
+        .select()
+        .from(SessionMessageTable)
+        .where(eq(SessionMessageTable.id, ids[2]))
+        .get()
+        .pipe(Effect.orDie)
+      const decodedKeys = cache.proof.map((key) =>
+        Buffer.from(Bun.zstdDecompressSync(Buffer.from(key, "latin1"))).toString("utf8"),
+      )
       expect(decodedKeys).toContain(JSON.stringify(row))
-      expect(cache.proof.every(key => key.length < 64 * 1024)).toBe(true)
+      expect(cache.proof.every((key) => key.length < 64 * 1024)).toBe(true)
       // 最新隐藏用户不得消耗limit(2)；普通技术Synthetic也不产生Goal turn。
       const turns = Array.from({ length: 3 }, () => SessionMessage.ID.create())
-      for (const [index, id] of turns.entries()) yield* db.insert(SessionMessageTable).values({
-        id, session_id: created.id, type: "user", seq: 100 + index,
-        data: Schema.encodeSync(SessionMessage.User)(SessionMessage.User.make({
-          id, type: "user", text: "goal", files: [], agents: [], time: { created: DateTime.makeUnsafe(5) },
-          ...(index === 2 ? { metadata: { hidden: { time: 0, reason: "permission-reviewer-protocol-retry" } } } : {}),
-        })),
-      }).run().pipe(Effect.orDie)
-      expect(yield* SessionHistory.goalTurn(db, created.id)).toEqual({ id: turns[1], previousID: turns[0], userInitiated: true })
+      for (const [index, id] of turns.entries())
+        yield* db
+          .insert(SessionMessageTable)
+          .values({
+            id,
+            session_id: created.id,
+            type: "user",
+            seq: 100 + index,
+            data: Schema.encodeSync(SessionMessage.User)(
+              SessionMessage.User.make({
+                id,
+                type: "user",
+                text: "goal",
+                files: [],
+                agents: [],
+                time: { created: DateTime.makeUnsafe(5) },
+                ...(index === 2
+                  ? { metadata: { hidden: { time: 0, reason: "permission-reviewer-protocol-retry" } } }
+                  : {}),
+              }),
+            ),
+          })
+          .run()
+          .pipe(Effect.orDie)
+      expect(yield* SessionHistory.goalTurn(db, created.id)).toEqual({
+        id: turns[1],
+        previousID: turns[0],
+        userInitiated: true,
+      })
     }),
   )
 
@@ -233,32 +325,52 @@ describe("SessionV2.history", () => {
       for (const [index, id] of ids.slice(0, 5).entries()) {
         if (index === 0 || index === 3) {
           yield* events.publish(SessionEvent.Compaction.Ended, {
-            sessionID: created.id, messageID: id, timestamp: DateTime.makeUnsafe(index),
-            reason: "manual", text: index === 0 ? "summary A" : "summary B", recent: "",
+            sessionID: created.id,
+            messageID: id,
+            timestamp: DateTime.makeUnsafe(index),
+            reason: "manual",
+            text: index === 0 ? "summary A" : "summary B",
+            recent: "",
           })
           continue
         }
         yield* events.publish(SessionEvent.Synthetic, {
-          sessionID: created.id, messageID: id, timestamp: DateTime.makeUnsafe(index), text: `sentinel-${index}`,
+          sessionID: created.id,
+          messageID: id,
+          timestamp: DateTime.makeUnsafe(index),
+          text: `sentinel-${index}`,
         })
       }
       const cache = SessionHistory.makeCache()
       const warm = yield* SessionHistory.entriesForRunner(db, created.id, -1, cache)
-      expect(warm.map(entry => entry.message.id)).toEqual([ids[3], ids[4]])
+      expect(warm.map((entry) => entry.message.id)).toEqual([ids[3], ids[4]])
       expect((yield* SessionHistory.entriesForRunner(db, created.id, -1, cache))[0]?.message).toBe(warm[0]?.message)
       // 只准备合法撤回状态，公开commit执行真实事件投影；不调用文件快照或复制删除算法。
       yield* events.publish(SessionEvent.RevertEvent.Staged, {
-        sessionID: created.id, timestamp: DateTime.makeUnsafe(5), revert: { messageID: ids[2] },
+        sessionID: created.id,
+        timestamp: DateTime.makeUnsafe(5),
+        revert: { messageID: ids[2] },
       })
       yield* session.revert.commit(created.id)
       const restored = yield* SessionHistory.entriesForRunner(db, created.id, -1, cache)
-      expect(restored.map(entry => entry.message.id)).toEqual(ids.slice(0, 3))
-      expect(restored.map(entry => entry.message)).toMatchObject([{ summary: "summary A" }, { text: "sentinel-1" }, { text: "sentinel-2" }])
+      expect(restored.map((entry) => entry.message.id)).toEqual(ids.slice(0, 3))
+      expect(restored.map((entry) => entry.message)).toMatchObject([
+        { summary: "summary A" },
+        { text: "sentinel-1" },
+        { text: "sentinel-2" },
+      ])
       expect(yield* store.message(ids[3], created.id)).toBeUndefined()
       expect((yield* store.get(created.id))?.revert).toBeUndefined()
       // 后续消息沿同一cache追加，不能重新启用已删除的B窗口。
-      yield* events.publish(SessionEvent.Synthetic, { sessionID: created.id, messageID: ids[5], timestamp: DateTime.makeUnsafe(6), text: "after undo" })
-      expect((yield* SessionHistory.entriesForRunner(db, created.id, -1, cache)).map(entry => entry.message.id)).toEqual([...ids.slice(0, 3), ids[5]])
+      yield* events.publish(SessionEvent.Synthetic, {
+        sessionID: created.id,
+        messageID: ids[5],
+        timestamp: DateTime.makeUnsafe(6),
+        text: "after undo",
+      })
+      expect(
+        (yield* SessionHistory.entriesForRunner(db, created.id, -1, cache)).map((entry) => entry.message.id),
+      ).toEqual([...ids.slice(0, 3), ids[5]])
     }),
   )
 

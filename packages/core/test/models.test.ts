@@ -97,7 +97,10 @@ describe("ModelsDev Service", () => {
     Effect.gen(function* () {
       yield* writeCache(fixture)
       const state = yield* Ref.make(initialState)
-      const result = yield* provided(state, ModelsDev.Service.use((s) => s.get()))
+      const result = yield* provided(
+        state,
+        ModelsDev.Service.use((s) => s.get()),
+      )
       expect(result).toEqual(fixture)
       const final = yield* Ref.get(state)
       expect(final.calls).toEqual([])
@@ -134,7 +137,10 @@ describe("ModelsDev Service", () => {
     Effect.gen(function* () {
       yield* writeCacheText("{")
       const state = yield* Ref.make({ ...initialState, body: JSON.stringify(fixture2) })
-      const result = yield* provided(state, ModelsDev.Service.use((s) => s.get()))
+      const result = yield* provided(
+        state,
+        ModelsDev.Service.use((s) => s.get()),
+      )
       expect(result).toEqual(fixture2)
       expect(yield* Effect.promise(() => readFile(cacheFile, "utf8"))).toBe(JSON.stringify(fixture2))
       const final = yield* Ref.get(state)
@@ -211,7 +217,10 @@ describe("ModelsDev Service", () => {
     Effect.gen(function* () {
       yield* writeCache(fixture, Date.now() - 1000)
       const state = yield* Ref.make({ ...initialState, body: JSON.stringify(fixture2) })
-      yield* provided(state, ModelsDev.Service.use((s) => s.refresh(false)))
+      yield* provided(
+        state,
+        ModelsDev.Service.use((s) => s.refresh(false)),
+      )
       const final = yield* Ref.get(state)
       expect(final.calls).toEqual([])
     }),

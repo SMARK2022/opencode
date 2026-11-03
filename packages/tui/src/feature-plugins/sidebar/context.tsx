@@ -32,7 +32,16 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
   // 主值属于请求，total 字段属于全局，不能复用一个变量伪装两种范围。
   // 费用随 token 同一快照发布，不能继续读取独立的会话 cost memo。
   // 零值状态也必须含 cost，避免新请求等待时保留上一请求费用。
-  type StateValue = { tokens: number; totalTokens: number; input: number; output: number; totalInput: number; totalOutput: number; percent: number | null; cost: number }
+  type StateValue = {
+    tokens: number
+    totalTokens: number
+    input: number
+    output: number
+    totalInput: number
+    totalOutput: number
+    percent: number | null
+    cost: number
+  }
 
   const stateRaw = createMemo((): StateValue => {
     const messages = msg()
@@ -59,12 +68,24 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
     // 确认值低于估算时仍取真实 step，百分比和其他视图保持同一口径。
     // 插件读取同一冻结密度，不能另扫 sidebar 的消息窗口建立第二份历史估算。
     // 侧栏使用同一会话投影，保留未到首个助手及窗口外累计的显示。
-    const { input, output, totalInput, totalOutput } = tokenAccounting(messages, (id) => props.api.state.part(id), undefined, { session: session(), last, parts: lastParts }).request
+    const { input, output, totalInput, totalOutput } = tokenAccounting(
+      messages,
+      (id) => props.api.state.part(id),
+      undefined,
+      { session: session(), last, parts: lastParts },
+    ).request
     const tokens = input + output
     const totalTokens = totalInput + totalOutput
     // 未确认请求可用其用户模型；已确认 native 请求不依赖用户仍在显示窗口。
-    const modelRef = request.model ?? messages.find((item): item is UserMessage => item.role === "user" && item.id === request.messageID)?.model
-    const contextLimit = getContextLimit(props.api.state.provider, modelRef?.providerID, modelRef?.modelID, request.model?.contextLimit)
+    const modelRef =
+      request.model ??
+      messages.find((item): item is UserMessage => item.role === "user" && item.id === request.messageID)?.model
+    const contextLimit = getContextLimit(
+      props.api.state.provider,
+      modelRef?.providerID,
+      modelRef?.modelID,
+      request.model?.contextLimit,
+    )
     return {
       tokens,
       totalTokens,
@@ -83,7 +104,10 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
   // tokens、input、output、percent 整体发布，避免侧栏在同一帧显示不同版本的统计字段。
   // 初始值补齐 total 字段，保留 50ms 发布节奏与原来的箭头脉冲 API。
   // 保留既有节流与脉冲生命周期，只把请求费用并入同一初始快照。
-  const [state, setStateThrottled] = createThrottledSignal<StateValue>({ tokens: 0, totalTokens: 0, input: 0, output: 0, totalInput: 0, totalOutput: 0, percent: null, cost: 0 }, 50)
+  const [state, setStateThrottled] = createThrottledSignal<StateValue>(
+    { tokens: 0, totalTokens: 0, input: 0, output: 0, totalInput: 0, totalOutput: 0, percent: null, cost: 0 },
+    50,
+  )
   createEffect(() => setStateThrottled(stateRaw()))
 
   // sidebar 总有零值 state，零值到正值可触发增长；tokens/percent 的单独变化不会续期。
@@ -100,7 +124,8 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
     if (!model) return null
     // 提供者 baseURL 沿实际 SDK/native 适配器的优先级，显示与发往的端点保持一致。
     const configuredBaseUrl = provider?.options.baseURL
-    const baseUrl = typeof configuredBaseUrl === "string" && configuredBaseUrl !== "" ? configuredBaseUrl : model.api.url
+    const baseUrl =
+      typeof configuredBaseUrl === "string" && configuredBaseUrl !== "" ? configuredBaseUrl : model.api.url
     // 配置缺失或地址非法时不创建探测，不能把未解析的配置误报为网络离线。
     if (typeof baseUrl !== "string" || !URL.canParse(baseUrl)) return null
     const url = new URL(baseUrl)
@@ -141,7 +166,11 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
           if (sdk.directory) target.searchParams.set("directory", sdk.directory)
           const res = await sdk.fetch(target, { method: "GET", signal })
           if (!res.ok) throw new Error(`endpoint status failed: ${res.status}`)
-          const status = (await res.json()) as { status: "ok" | "down"; latency: number | null; route: { type: "direct" | "proxy" } }
+          const status = (await res.json()) as {
+            status: "ok" | "down"
+            latency: number | null
+            route: { type: "direct" | "proxy" }
+          }
           if (!active) return
           setIsProxy(status.route.type === "proxy")
           // 网关故障判定沿daemon口径，不把业务认证状态另判为网络故障。
@@ -166,7 +195,10 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
     if (pingStatus() === "down") return { text: `${icon} offline`, fg: theme().error }
     const value = latency()
     if (value === null) return { text: `${icon} ...`, fg: theme().textMuted }
-    return { text: `${icon} ${value}ms`, fg: value < 300 ? theme().success : value < 800 ? theme().warning : theme().error }
+    return {
+      text: `${icon} ${value}ms`,
+      fg: value < 300 ? theme().success : value < 800 ? theme().warning : theme().error,
+    }
   })
 
   return (
@@ -176,12 +208,25 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
       </text>
       {/* 插件主题在渲染时读取，脉冲只存布尔值，不缓存可能被换肤替换的颜色。 */}
       {/* 上下载当前值与累积量改用 K/M 缩略(Locale.number)，与 prompt footer 流量格式对齐 */}
-      <text fg={theme().textMuted}><span style={{ fg: flow().input ? theme().text : theme().textMuted }}>↑</span> {Locale.number(state().input)}({Locale.number(state().totalInput)}) · <span style={{ fg: flow().output ? theme().text : theme().textMuted }}>↓</span> {Locale.number(state().output)}({Locale.number(state().totalOutput)})</text>
-      <text fg={theme().textMuted}>{state().tokens.toLocaleString()} ({state().totalTokens.toLocaleString()}) tokens{state().percent != null ? ` · ${state().percent}%` : ""}</text>
+      <text fg={theme().textMuted}>
+        <span style={{ fg: flow().input ? theme().text : theme().textMuted }}>↑</span> {Locale.number(state().input)}(
+        {Locale.number(state().totalInput)}) ·{" "}
+        <span style={{ fg: flow().output ? theme().text : theme().textMuted }}>↓</span> {Locale.number(state().output)}(
+        {Locale.number(state().totalOutput)})
+      </text>
+      <text fg={theme().textMuted}>
+        {state().tokens.toLocaleString()} ({state().totalTokens.toLocaleString()}) tokens
+        {state().percent != null ? ` · ${state().percent}%` : ""}
+      </text>
       {/* 未解析到 origin 时隐藏探测，避免冷启动一直显示没有目标的等待状态。 */}
       <text fg={theme().textMuted}>
         {money.format(state().cost)} spent
-        {targetApiUrl() && <>{" · "}<span style={{ fg: latencyDisplay().fg }}>{latencyDisplay().text}</span></>}
+        {targetApiUrl() && (
+          <>
+            {" · "}
+            <span style={{ fg: latencyDisplay().fg }}>{latencyDisplay().text}</span>
+          </>
+        )}
       </text>
     </box>
   )

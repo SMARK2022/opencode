@@ -18,14 +18,17 @@ export function fromMessages(messages: readonly WithParts[]): PermissionReviewer
   // #206：过滤 hidden 消息——page 默认 includeHidden=false 已过滤，此处显式过滤保持 fromMessages 独立可用
   const visibleMessages = messages.filter((message) => !message.info.hidden)
   const rendered = visibleMessages.map((message) => {
-      const text = message.parts.map(renderPart).filter((part): part is string => Boolean(part?.trim())).join("\n")
-      const entry = truncateWithFlag(text, ENTRY_CHAR_LIMIT)
-      return {
-        role: message.info.role,
-        text: entry.text,
-        truncated: entry.truncated,
-      }
-    })
+    const text = message.parts
+      .map(renderPart)
+      .filter((part): part is string => Boolean(part?.trim()))
+      .join("\n")
+    const entry = truncateWithFlag(text, ENTRY_CHAR_LIMIT)
+    return {
+      role: message.info.role,
+      text: entry.text,
+      truncated: entry.truncated,
+    }
+  })
   // #206：过滤渲染后无可见文本的条目——reasoning/synthetic 被排除后可能整条消息为空，需单独标记 emptyEntries
   const visibleRendered = rendered.filter((entry) => entry.text.trim())
   const entries = selectEntries(visibleRendered)
@@ -66,7 +69,8 @@ function renderPart(part: Part) {
   if (part.type === "text") return truncate(part.text)
   if (part.type === "tool") return renderTool(part)
   if (part.type === "file") return `<file mime="${part.mime}" filename="${part.filename ?? ""}" />`
-  if (part.type === "subtask") return `<subtask agent="${part.agent}" description="${truncate(part.description, 400)}" />`
+  if (part.type === "subtask")
+    return `<subtask agent="${part.agent}" description="${truncate(part.description, 400)}" />`
   if (part.type === "patch") return `<patch files="${part.files.join(",")}" />`
   if (part.type === "agent") return `<agent name="${part.name}" />`
   return `<${part.type} />`
@@ -74,7 +78,8 @@ function renderPart(part: Part) {
 
 // #198：渲染 tool part——按状态 pending/running/completed/error 分别展示输入输出，超长截断
 function renderTool(part: ToolPart) {
-  if (part.state.status === "pending") return `<tool name="${part.tool}" status="pending">${truncate(part.state.raw)}</tool>`
+  if (part.state.status === "pending")
+    return `<tool name="${part.tool}" status="pending">${truncate(part.state.raw)}</tool>`
   if (part.state.status === "running") {
     return `<tool name="${part.tool}" status="running">${truncate(JSON.stringify(part.state.input))}</tool>`
   }
@@ -112,7 +117,10 @@ export function fromEvidence(input: {
   window: readonly WithParts[]
 }): ReviewerTranscript {
   const merged = [
-    ...input.snapshot.user.map((row) => ({ time: row.time, entry: { kind: "user", text: row.text } satisfies ReviewerSnapshotEntry })),
+    ...input.snapshot.user.map((row) => ({
+      time: row.time,
+      entry: { kind: "user", text: row.text } satisfies ReviewerSnapshotEntry,
+    })),
     ...input.snapshot.tools.flatMap(qaEntries),
     ...input.snapshot.tools.flatMap(decisionEntries),
   ].sort((left, right) => left.time - right.time)
@@ -156,7 +164,8 @@ function qaEntries(row: MessageV2.ReviewerEvidenceTool): { time: number; entry: 
         .filter((option): option is string => typeof option === "string")
         .join(", ")
       if (!answer) return []
-      const question = item.question.length > QA_QUESTION_LIMIT ? item.question.slice(0, QA_QUESTION_LIMIT) + "…" : item.question
+      const question =
+        item.question.length > QA_QUESTION_LIMIT ? item.question.slice(0, QA_QUESTION_LIMIT) + "…" : item.question
       return [{ time: row.time, entry: { kind: "qa", question, answer } satisfies ReviewerSnapshotEntry }]
     })
   } catch {

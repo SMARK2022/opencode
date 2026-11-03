@@ -18,25 +18,28 @@
 ## Implementation Evidence
 
 ### Changed files
+
 - `packages/opencode/test/util/process.test.ts` — +20/-5 lines
 
 ### Red-Green evidence
+
 - Red: CPU saturation (16 cores) with `--rerun-each 10` → 5/10 fail, max 1464ms
 - Green: Standalone marker-readiness replication under 16-core saturation → 10/10 pass, max 1256ms
 
 ### Verification
+
 - `bun test test/util/process.test.ts`: BLOCKED by missing `@opentui/solid` dependency (pre-existing environment issue after build.ts smoke run; `bun install` not authorized)
 - `bun typecheck`: BLOCKED by missing `tsgo` binary (same root cause)
 - Standalone script validation: 10/10 pass under 16-core CPU saturation
 - Logic verified: marker file readiness → abort → code 1 → abortMs 320-1256ms → all < 2000ms
 
 ### E/C metrics
+
 - E = 15 (effective added code lines)
 - C = 6 (qualifying Chinese explanatory comment lines)
-- Required: ceil(15 * 0.15) = 3
+- Required: ceil(15 \* 0.15) = 3
 - Ratio: 6/15 = 40%
->
-> Last updated: 2026-07-14
+  > Last updated: 2026-07-14
 
 This file is the sole implementation specification for this task. Chat
 summaries, superseded revisions, and builder rationale outside this file are
@@ -55,28 +58,28 @@ not implementation authority.
 
 ## 3. Repository Context
 
-| Source | Why it constrains this task |
-| --- | --- |
-| `packages/opencode/test/AGENTS.md` | 明确把 `setTimeout(N)` 等待并发就绪列为反模式，要求等待 published readiness signal |
-| `packages/opencode/AGENTS.md` | 测试不能从 repo root 运行；从 `packages/opencode` 运行 |
+| Source                                  | Why it constrains this task                                                                             |
+| --------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| `packages/opencode/test/AGENTS.md`      | 明确把 `setTimeout(N)` 等待并发就绪列为反模式，要求等待 published readiness signal                      |
+| `packages/opencode/AGENTS.md`           | 测试不能从 repo root 运行；从 `packages/opencode` 运行                                                  |
 | `packages/opencode/src/util/process.ts` | `Process.spawn` 返回 `Child` with `exited` promise；`Process.run` 返回 `Result` with code/stdout/stderr |
-| `CONTEXT.md` | Process utility 属于 `util/` 基础设施层 |
-| `32c2b716c9` | 最后修改 process.ts 和 process.test.ts 的 commit，建立了同步 taskkill 和 Windows 进程树测试 |
+| `CONTEXT.md`                            | Process utility 属于 `util/` 基础设施层                                                                 |
+| `32c2b716c9`                            | 最后修改 process.ts 和 process.test.ts 的 commit，建立了同步 taskkill 和 Windows 进程树测试             |
 
 ## 4. Files and Evidence Read
 
-| Evidence | Relevance | Evidence class |
-| --- | --- | --- |
-| `packages/opencode/test/util/process.test.ts:52-64` | 失败测试本体：`setTimeout(25)` + `toBeLessThan(1000)` | observed |
-| `packages/opencode/src/util/process.ts:58-120` | `spawn` 实现：abort 回调做同步 `taskkill /T /F` + `proc.kill` | observed |
-| `packages/opencode/src/util/process.ts:122-153` | `run` 实现：`spawn` + `buffer(stdout/stderr)` + `exited` 并行等待 | observed |
-| CI run 29310227046 日志 | 唯一失败是 `aborts a running process` 收到 1142ms；同文件其他 spawn 测试耗时 400-600ms | observed |
-| CI run 29274867779 (前一个 commit) | 同测试在前一个 commit 通过 | observed |
-| 本地仪器化测量（16核CPU饱和） | `timerDelay` 35-140ms（应为25ms）；`abortToDone` 655-1324ms；readiness 同步后 `abortToRunDone` 464-584ms 稳定 | observed |
-| `packages/opencode/test/AGENTS.md:161-198` | "Synchronizing With Concurrent Work" 反模式：`setTimeout(N)` race scheduler；修复：wait on published readiness signal | contracted |
-| `packages/opencode/test/session/processor-effect.test.ts:111-120` | 仓库既有 `waitFor` poll 模式先例 | observed |
-| `packages/opencode/test/util/process.test.ts:66-118` | "aborts a Windows process tree" 测试已用 stdout data 事件作为 readiness signal | observed |
-| `packages/opencode/test/util/process.test.ts:120-135` | "kills after timeout" 测试有相同的 `setTimeout(25)` + `toBeLessThan(1000)` 模式，但 `if (process.platform === "win32") return` 跳过 Windows | observed |
+| Evidence                                                          | Relevance                                                                                                                                   | Evidence class |
+| ----------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- | -------------- |
+| `packages/opencode/test/util/process.test.ts:52-64`               | 失败测试本体：`setTimeout(25)` + `toBeLessThan(1000)`                                                                                       | observed       |
+| `packages/opencode/src/util/process.ts:58-120`                    | `spawn` 实现：abort 回调做同步 `taskkill /T /F` + `proc.kill`                                                                               | observed       |
+| `packages/opencode/src/util/process.ts:122-153`                   | `run` 实现：`spawn` + `buffer(stdout/stderr)` + `exited` 并行等待                                                                           | observed       |
+| CI run 29310227046 日志                                           | 唯一失败是 `aborts a running process` 收到 1142ms；同文件其他 spawn 测试耗时 400-600ms                                                      | observed       |
+| CI run 29274867779 (前一个 commit)                                | 同测试在前一个 commit 通过                                                                                                                  | observed       |
+| 本地仪器化测量（16核CPU饱和）                                     | `timerDelay` 35-140ms（应为25ms）；`abortToDone` 655-1324ms；readiness 同步后 `abortToRunDone` 464-584ms 稳定                               | observed       |
+| `packages/opencode/test/AGENTS.md:161-198`                        | "Synchronizing With Concurrent Work" 反模式：`setTimeout(N)` race scheduler；修复：wait on published readiness signal                       | contracted     |
+| `packages/opencode/test/session/processor-effect.test.ts:111-120` | 仓库既有 `waitFor` poll 模式先例                                                                                                            | observed       |
+| `packages/opencode/test/util/process.test.ts:66-118`              | "aborts a Windows process tree" 测试已用 stdout data 事件作为 readiness signal                                                              | observed       |
+| `packages/opencode/test/util/process.test.ts:120-135`             | "kills after timeout" 测试有相同的 `setTimeout(25)` + `toBeLessThan(1000)` 模式，但 `if (process.platform === "win32") return` 跳过 Windows | observed       |
 
 ## 5. Current Behavior
 
@@ -91,25 +94,25 @@ test starts -> setTimeout(25ms) -> Process.run(spawn bun -e "setInterval") ->
 
 ## 6. Supported Input Domain and Reachability
 
-| Input or condition | Producer | Upstream guarantees | Reachable path | Owner | Classification |
-| --- | --- | --- | --- | --- | --- |
-| Windows CI 2核 runner | GitHub Actions | 有限CPU；并行测试争用 | `test:ci` 运行全部测试文件 | CI workflow | observed |
-| bun test 并行执行 | bun test runner | 默认按 CPU 核数并行运行测试文件 | 重测试（migration+Sharp）与 process.test.ts 同时运行 | bun | observed |
-| `setTimeout(25)` 延迟 | Node.js event loop | 不保证精确25ms；CPU饱和时延迟更大 | abort 触发晚于预期 | test code | observed |
+| Input or condition    | Producer           | Upstream guarantees               | Reachable path                                       | Owner       | Classification |
+| --------------------- | ------------------ | --------------------------------- | ---------------------------------------------------- | ----------- | -------------- |
+| Windows CI 2核 runner | GitHub Actions     | 有限CPU；并行测试争用             | `test:ci` 运行全部测试文件                           | CI workflow | observed       |
+| bun test 并行执行     | bun test runner    | 默认按 CPU 核数并行运行测试文件   | 重测试（migration+Sharp）与 process.test.ts 同时运行 | bun         | observed       |
+| `setTimeout(25)` 延迟 | Node.js event loop | 不保证精确25ms；CPU饱和时延迟更大 | abort 触发晚于预期                                   | test code   | observed       |
 
 ## 7. Required Invariants
 
-| ID | Behavioral invariant | Evidence | Existing test |
-| --- | --- | --- | --- |
-| INV-01 | abort 后进程必须终止（code != 0） | `Process.spawn` abort 回调做 `taskkill /T /F` + `proc.kill` | `aborts a running process` line 62 |
-| INV-02 | abort 语义测试不得把 OS 调度性能当产品契约 | `test/AGENTS.md` 反模式：`setTimeout(N)` race scheduler | 无（当前违反） |
-| INV-03 | 测试必须在 Windows CI 上稳定通过 | CI 是必过检查；前一个 commit 通过 | 无（当前不稳定） |
+| ID     | Behavioral invariant                       | Evidence                                                    | Existing test                      |
+| ------ | ------------------------------------------ | ----------------------------------------------------------- | ---------------------------------- |
+| INV-01 | abort 后进程必须终止（code != 0）          | `Process.spawn` abort 回调做 `taskkill /T /F` + `proc.kill` | `aborts a running process` line 62 |
+| INV-02 | abort 语义测试不得把 OS 调度性能当产品契约 | `test/AGENTS.md` 反模式：`setTimeout(N)` race scheduler     | 无（当前违反）                     |
+| INV-03 | 测试必须在 Windows CI 上稳定通过           | CI 是必过检查；前一个 commit 通过                           | 无（当前不稳定）                   |
 
 ## 8. First Divergence and Root Cause
 
-| Invariant | First divergence | Owning module/interface | Proof |
-| --- | --- | --- | --- |
-| INV-02 | `setTimeout(() => abort.abort(), 25)` 假设进程在25ms内就绪，把 spawn 延迟 + 事件循环延迟 + taskkill 耗时全部计入 `Date.now() - started`，再断言 `< 1000ms` | `test/util/process.test.ts:55,63` | 仪器化测量：timerDelay 35-140ms，spawn 400-600ms，total 701-1464ms |
+| Invariant | First divergence                                                                                                                                           | Owning module/interface           | Proof                                                              |
+| --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------- | ------------------------------------------------------------------ |
+| INV-02    | `setTimeout(() => abort.abort(), 25)` 假设进程在25ms内就绪，把 spawn 延迟 + 事件循环延迟 + taskkill 耗时全部计入 `Date.now() - started`，再断言 `< 1000ms` | `test/util/process.test.ts:55,63` | 仪器化测量：timerDelay 35-140ms，spawn 400-600ms，total 701-1464ms |
 
 **Red-capable feedback loop:**
 
@@ -124,10 +127,10 @@ finally { $stress | Stop-Process -Force -ErrorAction SilentlyContinue }
 
 ## 9. Responsibility and Seam
 
-| Concern | Owner | Interface promise | Why it belongs here | Why another module does not own it |
-| --- | --- | --- | --- | --- |
-| 测试同步方式 | `test/util/process.test.ts` | 验证 abort 语义 | 测试自身选择了 `setTimeout(25)` + 绝对阈值，违反仓库测试规范 | 生产代码 `process.ts` 的 abort 行为正确（CI "aborts a Windows process tree" 通过） |
-| 进程 abort 语义 | `src/util/process.ts` | abort 后进程树终止 | 生产实现已正确 | 不需修改 |
+| Concern         | Owner                       | Interface promise  | Why it belongs here                                          | Why another module does not own it                                                 |
+| --------------- | --------------------------- | ------------------ | ------------------------------------------------------------ | ---------------------------------------------------------------------------------- |
+| 测试同步方式    | `test/util/process.test.ts` | 验证 abort 语义    | 测试自身选择了 `setTimeout(25)` + 绝对阈值，违反仓库测试规范 | 生产代码 `process.ts` 的 abort 行为正确（CI "aborts a Windows process tree" 通过） |
+| 进程 abort 语义 | `src/util/process.ts`       | abort 后进程树终止 | 生产实现已正确                                               | 不需修改                                                                           |
 
 ## 10. Single Approved Primary-Path Design
 
@@ -153,77 +156,78 @@ test starts -> spawn child with marker file readiness ->
 
 ## 11. Secondary and Replacement Path Inventory
 
-| Path | Current or proposed | Classification | Produces success? | Decision-surface share | Disposition |
-| --- | --- | --- | --- | --- | --- |
-| readiness + abort timing | proposed | primary-contract branch | yes | 100% | adopt |
-| 纯阈值放宽 1000→2000 | rejected | forbidden fallback | yes | 0% | reject — 不消除根因 |
-| 生产 process.ts 优化 | rejected | not applicable | no | 0% | reject — 生产行为正确 |
+| Path                     | Current or proposed | Classification          | Produces success? | Decision-surface share | Disposition           |
+| ------------------------ | ------------------- | ----------------------- | ----------------- | ---------------------- | --------------------- |
+| readiness + abort timing | proposed            | primary-contract branch | yes               | 100%                   | adopt                 |
+| 纯阈值放宽 1000→2000     | rejected            | forbidden fallback      | yes               | 0%                     | reject — 不消除根因   |
+| 生产 process.ts 优化     | rejected            | not applicable          | no                | 0%                     | reject — 生产行为正确 |
 
 ## 12. Workaround Deletion and Replacement
 
-| Existing workaround or duplicate | Why it existed | Why the approved route supersedes it | Delete or collapse location |
-| --- | --- | --- | --- |
-| `setTimeout(() => abort.abort(), 25)` | 假设进程25ms内就绪 | readiness polling 消除假设 | `process.test.ts:55` |
-| `expect(Date.now() - started).toBeLessThan(1000)` | 绝对阈值包含 spawn 时间 | 从 readiness 点计时，只测量 abort | `process.test.ts:63` |
+| Existing workaround or duplicate                  | Why it existed          | Why the approved route supersedes it | Delete or collapse location |
+| ------------------------------------------------- | ----------------------- | ------------------------------------ | --------------------------- |
+| `setTimeout(() => abort.abort(), 25)`             | 假设进程25ms内就绪      | readiness polling 消除假设           | `process.test.ts:55`        |
+| `expect(Date.now() - started).toBeLessThan(1000)` | 绝对阈值包含 spawn 时间 | 从 readiness 点计时，只测量 abort    | `process.test.ts:63`        |
 
 ## 13. Forward Traceability
 
-| Requirement or invariant | Production path | Planned file/change | Behavioral test |
-| --- | --- | --- | --- |
-| INV-01 abort 后进程终止 | 不修改 | 不修改 | `expect(out.code).not.toBe(0)` 保留 |
-| INV-02 不依赖调度性能 | 不修改 | `process.test.ts` 改为 readiness sync | marker poll + abort timing |
-| INV-03 Windows CI 稳定 | 不修改 | `process.test.ts` 改为 readiness sync | 16核饱和 rerun 10 次 0 fail |
+| Requirement or invariant | Production path | Planned file/change                   | Behavioral test                     |
+| ------------------------ | --------------- | ------------------------------------- | ----------------------------------- |
+| INV-01 abort 后进程终止  | 不修改          | 不修改                                | `expect(out.code).not.toBe(0)` 保留 |
+| INV-02 不依赖调度性能    | 不修改          | `process.test.ts` 改为 readiness sync | marker poll + abort timing          |
+| INV-03 Windows CI 稳定   | 不修改          | `process.test.ts` 改为 readiness sync | 16核饱和 rerun 10 次 0 fail         |
 
 ## 14. Reverse Traceability
 
-| Proposed production concept | Requirement ID | Evidence | Why existing logic cannot carry it |
-| --- | --- | --- | --- |
-| marker file readiness | INV-02 | `test/AGENTS.md` 反模式规则 | `setTimeout(25)` 无法承载 readiness |
-| abort-to-completion timing | INV-02, INV-03 | 仪器化测量 | spawn-to-completion 包含无关延迟 |
+| Proposed production concept | Requirement ID | Evidence                    | Why existing logic cannot carry it  |
+| --------------------------- | -------------- | --------------------------- | ----------------------------------- |
+| marker file readiness       | INV-02         | `test/AGENTS.md` 反模式规则 | `setTimeout(25)` 无法承载 readiness |
+| abort-to-completion timing  | INV-02, INV-03 | 仪器化测量                  | spawn-to-completion 包含无关延迟    |
 
 ## 15. File-Level Change Plan
 
-| File | Add / modify / delete | Exact responsibility of the change | Expected line delta |
-| --- | --- | --- | --- |
-| `packages/opencode/test/util/process.test.ts` | modify | 把 "aborts a running process" 测试从 `setTimeout(25)` + 绝对阈值改为 marker file readiness + abort timing | +20/-5 |
+| File                                          | Add / modify / delete | Exact responsibility of the change                                                                        | Expected line delta |
+| --------------------------------------------- | --------------------- | --------------------------------------------------------------------------------------------------------- | ------------------- |
+| `packages/opencode/test/util/process.test.ts` | modify                | 把 "aborts a running process" 测试从 `setTimeout(25)` + 绝对阈值改为 marker file readiness + abort timing | +20/-5              |
 
 ## 16. TDD Behavior Slices
 
-| Order | Red behavior | Why current code fails | Minimal green behavior | Regression protected |
-| --- | --- | --- | --- | --- |
-| 1 | CPU饱和下 "aborts a running process" 失败 | `setTimeout(25)` + `toBeLessThan(1000)` 把调度性能当契约 | marker readiness + `toBeLessThan(2000)` from abort point | 16核饱和 rerun 10 次 0 fail |
+| Order | Red behavior                              | Why current code fails                                   | Minimal green behavior                                   | Regression protected        |
+| ----- | ----------------------------------------- | -------------------------------------------------------- | -------------------------------------------------------- | --------------------------- |
+| 1     | CPU饱和下 "aborts a running process" 失败 | `setTimeout(25)` + `toBeLessThan(1000)` 把调度性能当契约 | marker readiness + `toBeLessThan(2000)` from abort point | 16核饱和 rerun 10 次 0 fail |
 
 ## 17. Chinese Comment Budget
 
-| Metric | Estimate | Method |
-| --- | --- | --- |
-| Effective changed code lines `E` | ~15 | 排除 import、格式、纯移动 |
-| Required Chinese explanatory comments `C` | >= 3 | `if E > 0: C >= max(1, ceil(15 * 0.15))` = 3 |
+| Metric                                    | Estimate | Method                                       |
+| ----------------------------------------- | -------- | -------------------------------------------- |
+| Effective changed code lines `E`          | ~15      | 排除 import、格式、纯移动                    |
+| Required Chinese explanatory comments `C` | >= 3     | `if E > 0: C >= max(1, ceil(15 * 0.15))` = 3 |
 
 需要注释的关键点：
+
 - 为什么用 marker 文件而不是 setTimeout（反模式规避）
 - 为什么从 readiness 点计时而不是从 spawn 开始（不依赖调度性能）
 - 为什么 2000ms 阈值仍能捕获 abort 失败（3000ms test timeout 是死锁保护）
 
 ## 18. Verification
 
-| Command | Working directory | Evidence produced |
-| --- | --- | --- |
-| `bun test test/util/process.test.ts --timeout 30000` | `packages/opencode` | 无CPU争用下全部通过 |
-| 16核饱和 rerun 10 次 | `packages/opencode` | CPU争用下0 fail |
-| `bun typecheck` | `packages/opencode` | 类型检查通过 |
+| Command                                                                     | Working directory   | Evidence produced          |
+| --------------------------------------------------------------------------- | ------------------- | -------------------------- |
+| `bun test test/util/process.test.ts --timeout 30000`                        | `packages/opencode` | 无CPU争用下全部通过        |
+| 16核饱和 rerun 10 次                                                        | `packages/opencode` | CPU争用下0 fail            |
+| `bun typecheck`                                                             | `packages/opencode` | 类型检查通过               |
 | `bun test test/util/process.test.ts test/tool/read.test.ts --timeout 30000` | `packages/opencode` | 与重测试并行运行不互相干扰 |
 
 ## 19. Diff Budget
 
-| Metric | Estimate | Justification |
-| --- | --- | --- |
-| Files added | 0 | 只修改现有测试 |
-| Files modified | 1 | `process.test.ts` |
-| Files deleted | 0 | |
-| Production lines | 0 | 不修改生产代码 |
-| Test lines | ~20 | marker helper + readiness poll + 修改断言 |
-| Generated lines | 0 | |
+| Metric           | Estimate | Justification                             |
+| ---------------- | -------- | ----------------------------------------- |
+| Files added      | 0        | 只修改现有测试                            |
+| Files modified   | 1        | `process.test.ts`                         |
+| Files deleted    | 0        |                                           |
+| Production lines | 0        | 不修改生产代码                            |
+| Test lines       | ~20      | marker helper + readiness poll + 修改断言 |
+| Generated lines  | 0        |                                           |
 
 ## 20. Real Risks and Open Decisions
 

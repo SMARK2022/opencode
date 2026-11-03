@@ -144,9 +144,15 @@ const targets = singleFlag
       return true
     })
   : osFilter
-  // 定向构建供原生环境快速验证，兼容变体留给完整矩阵，避免本机验证重复编译。
-  ? allTargets.filter((item) => item.os === osFilter && item.abi === undefined && item.avx2 !== false && (!archFilter || item.arch === archFilter))
-  : allTargets
+    ? // 定向构建供原生环境快速验证，兼容变体留给完整矩阵，避免本机验证重复编译。
+      allTargets.filter(
+        (item) =>
+          item.os === osFilter &&
+          item.abi === undefined &&
+          item.avx2 !== false &&
+          (!archFilter || item.arch === archFilter),
+      )
+    : allTargets
 
 await $`rm -rf dist`
 
@@ -170,24 +176,49 @@ async function verifyOpenTuiClosure() {
   const tag = `v${version}`
   const release = `${repository}/releases/download/${tag}`
   // 同一catalog派生整个family；检查锁与override，避免声明版本正确却消费registry或旧tarball。
-  const family = ["@opentui/core", "@opentui/keymap", "@opentui/solid", ...["darwin-arm64", "darwin-x64", "linux-arm64", "linux-arm64-musl", "linux-x64", "linux-x64-musl", "win32-arm64", "win32-x64"].map(target => `@opentui/core-${target}`)]
+  const family = [
+    "@opentui/core",
+    "@opentui/keymap",
+    "@opentui/solid",
+    ...[
+      "darwin-arm64",
+      "darwin-x64",
+      "linux-arm64",
+      "linux-arm64-musl",
+      "linux-x64",
+      "linux-x64-musl",
+      "win32-arm64",
+      "win32-x64",
+    ].map((target) => `@opentui/core-${target}`),
+  ]
   const lock = await Bun.file(path.join(root, "bun.lock")).text()
   for (const name of family) {
     const expected = `${release}/${name.replace("@opentui/", "opentui-")}-${version}.tgz`
-    if (manifest.overrides[name] !== expected || !lock.includes(`"${name}": "${expected}"`) || !lock.includes(`"${name}@${expected}"`)) throw new Error(`${name} is not locked to ${expected}`)
+    if (
+      manifest.overrides[name] !== expected ||
+      !lock.includes(`"${name}": "${expected}"`) ||
+      !lock.includes(`"${name}@${expected}"`)
+    )
+      throw new Error(`${name} is not locked to ${expected}`)
   }
   // 从实际runtime消费者解析，版本相同但加载两份core或Solid仍会分裂owner；不扫描安装器缓存。
   const consumers = [root, dir, path.join(root, "packages/tui"), path.join(root, "packages/cli")]
   for (const name of ["@opentui/core", "@opentui/keymap", "@opentui/solid"]) {
-    const owners = await Promise.all(consumers.map(from => packageRoot(name, from)))
+    const owners = await Promise.all(consumers.map((from) => packageRoot(name, from)))
     if (new Set(owners).size !== 1) throw new Error(`${name} resolves to multiple realpaths: ${owners.join(", ")}`)
     const installed = await Bun.file(path.join(owners[0], "package.json")).json()
-    if (installed.name !== name || installed.version !== version || installed.repository?.url !== repository) throw new Error(`${name} installed manifest does not match ${tag}`)
+    if (installed.name !== name || installed.version !== version || installed.repository?.url !== repository)
+      throw new Error(`${name} installed manifest does not match ${tag}`)
   }
   // 保留目标Solid版本及补丁，只要求所有真实入口与同一catalog和realpath一致。
-  const solidOwners = await Promise.all([...consumers, await packageRoot("@opentui/solid"), await packageRoot("@opentui/keymap")].map(from => packageRoot("solid-js", from)))
+  const solidOwners = await Promise.all(
+    [...consumers, await packageRoot("@opentui/solid"), await packageRoot("@opentui/keymap")].map((from) =>
+      packageRoot("solid-js", from),
+    ),
+  )
   const solid = await Bun.file(path.join(solidOwners[0], "package.json")).json()
-  if (new Set(solidOwners).size !== 1 || solid.version !== manifest.workspaces.catalog["solid-js"]) throw new Error("solid-js closure mismatch")
+  if (new Set(solidOwners).size !== 1 || solid.version !== manifest.workspaces.catalog["solid-js"])
+    throw new Error("solid-js closure mismatch")
   // 源码身份取父仓索引，版本及发布tag只取root catalog，不再读取手写清单。
   // 完整annotated/peeled远端证据仍独立核对，声明不能冒充授权。
   const gitlink = (await $`git ls-files --stage -- thirdparty/opentui`.cwd(root).quiet().text()).trim().split(/\s+/)[1]
@@ -195,11 +226,18 @@ async function verifyOpenTuiClosure() {
   const ref = `refs/tags/${tag}`
   // 完整ref与peeled ref缺一不可，不能把lightweight tag或同名branch当作发布授权。
   const output = await $`git ls-remote --tags ${repository} ${ref} ${`${ref}^{}`}`.cwd(root).quiet().text()
-  const refs = new Map(output.trim().split(/\r?\n/).filter(Boolean).map(line => {
-    const [commit, name] = line.trim().split(/\s+/, 2)
-    return [name, commit] as const
-  }))
-  if (!refs.has(ref) || refs.get(`${ref}^{}`) !== gitlink) throw new Error(`OpenTUI ${tag} is not annotated at gitlink ${gitlink}`)
+  const refs = new Map(
+    output
+      .trim()
+      .split(/\r?\n/)
+      .filter(Boolean)
+      .map((line) => {
+        const [commit, name] = line.trim().split(/\s+/, 2)
+        return [name, commit] as const
+      }),
+  )
+  if (!refs.has(ref) || refs.get(`${ref}^{}`) !== gitlink)
+    throw new Error(`OpenTUI ${tag} is not annotated at gitlink ${gitlink}`)
 }
 
 async function sha256(file: string) {
@@ -208,7 +246,7 @@ async function sha256(file: string) {
 }
 
 async function writeOpenTuiBuildEvidence(item: (typeof allTargets)[number], name: string) {
-// musl 变体的包名后缀与 optionalDependencies 的命名契约一致，拼错会导致 resolve 到 glibc 包。
+  // musl 变体的包名后缀与 optionalDependencies 的命名契约一致，拼错会导致 resolve 到 glibc 包。
   const suffix = item.os === "linux" && item.abi === "musl" ? "-musl" : ""
   const nativeName = `@opentui/core-${item.os}-${item.arch}${suffix}`
   const nativeRoot = await packageRoot(nativeName)
@@ -234,7 +272,7 @@ async function writeOpenTuiBuildEvidence(item: (typeof allTargets)[number], name
   ) {
     throw new Error(`OpenTUI native manifest does not match ${name}: ${JSON.stringify(nativeManifest)}`)
   }
-// FFI 库扫描覆盖包内全部层级：vendor 把 .so 放在子目录时同样要被证据捕捉。
+  // FFI 库扫描覆盖包内全部层级：vendor 把 .so 放在子目录时同样要被证据捕捉。
   const nativeFiles = (await Array.fromAsync(new Bun.Glob("**/*").scan({ cwd: nativeRoot, onlyFiles: true }))).filter(
     (file) => /\.(?:dll|dylib|so)$/.test(file),
   )
@@ -261,10 +299,9 @@ async function writeOpenTuiBuildEvidence(item: (typeof allTargets)[number], name
   }
   // bytes 和 hash 共同保留：hash 证明内容，size 还能发现意外空壳或截断产物。
   await Bun.write(`dist/${name}/opentui-build.json`, JSON.stringify(evidence, null, 2) + "\n")
-// stdout 同时供 CI 日志抓取：workflow 失败时可直接从 build step 输出读到 hash 而无需翻 artifact。
+  // stdout 同时供 CI 日志抓取：workflow 失败时可直接从 build step 输出读到 hash 而无需翻 artifact。
   console.log(JSON.stringify(evidence))
 }
-
 
 const binaries: Record<string, string> = {}
 if (!skipInstall) {

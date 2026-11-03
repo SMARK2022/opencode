@@ -273,7 +273,9 @@ export function createTextPageParser(opts: ReadTextPageOptions) {
 
   if (mode === "auxiliary" && budget.remaining === 0) stopped = true
   return {
-    get done() { return stopped || stopAfterChunk },
+    get done() {
+      return stopped || stopAfterChunk
+    },
     push(chunk: Uint8Array) {
       if (stopped || stopAfterChunk) return
       physicalBytesRead += chunk.byteLength

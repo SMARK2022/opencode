@@ -153,7 +153,13 @@ const layer = Layer.effect(
           if (options?.combineOutput) {
             const [output, exitCode] = yield* Effect.all(
               // 同一 handle.all 只消费一次，磁盘保留和诊断看到相同的 stdout/stderr 顺序。
-              [collectStream(options.onOutput ? handle.all.pipe(Stream.tap(options.onOutput)) : handle.all, options.maxOutputBytes), handle.exitCode],
+              [
+                collectStream(
+                  options.onOutput ? handle.all.pipe(Stream.tap(options.onOutput)) : handle.all,
+                  options.maxOutputBytes,
+                ),
+                handle.exitCode,
+              ],
               { concurrency: "unbounded" },
             )
             return {

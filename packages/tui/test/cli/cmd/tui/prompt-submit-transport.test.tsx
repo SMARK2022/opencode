@@ -429,7 +429,15 @@ test("home TUI /goal creates session posts objective and navigates", async () =>
       // submit 在 props.sessionID 为空时创建 session
       if (url.pathname === "/session" && (init?.method === "POST" || _request?.method === "POST")) {
         // #0503：directory 回显 fixture 常量——create 后 sync bootstrap 依赖它判定工作区
-        return json({ id: createdID, slug: "x", version: "1", projectID: "proj_test", directory, title: "t", time: { created: 1 } })
+        return json({
+          id: createdID,
+          slug: "x",
+          version: "1",
+          projectID: "proj_test",
+          directory,
+          title: "t",
+          time: { created: 1 },
+        })
       }
       // Goal 必须写到刚创建的 session，而不是旧常量 sessionID
       if (url.pathname === `/session/${createdID}/goal` && (init?.method === "POST" || _request?.method === "POST")) {
@@ -464,9 +472,7 @@ test("home TUI /goal creates session posts objective and navigates", async () =>
       expect(postedObjective).toBe("a b c")
       expect(promptAsync).toBe(0)
       // 共享尾 setTimeout(50) navigate；等到 route 进入新 session
-      await wait(
-        () => route.data.type === "session" && (route.data as { sessionID?: string }).sessionID === createdID,
-      )
+      await wait(() => route.data.type === "session" && (route.data as { sessionID?: string }).sessionID === createdID)
       expect(route.data).toEqual({ type: "session", sessionID: createdID })
     },
     tmp.path,
@@ -508,7 +514,11 @@ test("keeps the constrained Prompt extension bar on one row across active states
   // recorder 只隔离本机麦克风边界；状态切换仍走真实 controller、快捷键和挂起 HTTP 提交。
   const voiceFile = path.join(tmp.path, "voice.wav")
   await Bun.write(voiceFile, "RIFF....WAVE")
-  const recorder = spyOn(PromptVoiceRecorder, "startPromptVoiceRecorder").mockResolvedValue({ file: voiceFile, stop: async () => {}, abort: async () => {} })
+  const recorder = spyOn(PromptVoiceRecorder, "startPromptVoiceRecorder").mockResolvedValue({
+    file: voiceFile,
+    stop: async () => {},
+    abort: async () => {},
+  })
 
   try {
     await withPrompt(
@@ -587,21 +597,27 @@ test("keeps the constrained Prompt extension bar on one row across active states
   }
 })
 
-  // #491：长度落在旧 80/120 门槛夹缝内，并携带换行与重复空格以区分摘要和原始详情。
-  // 点击路径同时覆盖 DialogAlert 的原始文本保真：压平只发生在 footer 展示层。
+// #491：长度落在旧 80/120 门槛夹缝内，并携带换行与重复空格以区分摘要和原始详情。
+// 点击路径同时覆盖 DialogAlert 的原始文本保真：压平只发生在 footer 展示层。
 test("opens the original retry error from the compact details affordance", async () => {
   await using tmp = await tmpdir()
   const stateDir = path.join(tmp.path, "state")
   await fs.mkdir(stateDir, { recursive: true })
   await Bun.write(path.join(stateDir, "kv.json"), "{}")
-  const message = "Retry provider request failed:\nThe socket   closed before the response completed. diagnostic-tail-81-to-120"
+  const message =
+    "Retry provider request failed:\nThe socket   closed before the response completed. diagnostic-tail-81-to-120"
 
   await withPrompt(
     () => undefined,
     async (prompt, _route, app, context) => {
       // 模块级 draft stash 会跨同文件用例保留，先清空以免前一条草稿污染对话框帧。
       prompt.reset()
-      emitSessionStatus(context, "evt-prompt-footer-details", { type: "retry", attempt: 2, next: Date.now() + 9_000, message })
+      emitSessionStatus(context, "evt-prompt-footer-details", {
+        type: "retry",
+        attempt: 2,
+        next: Date.now() + 9_000,
+        message,
+      })
       await wait(() => context.sync.data.session_status?.[sessionID]?.type === "retry")
       let frame = await settlePromptFrame(app)
 
@@ -661,7 +677,9 @@ test("keeps short retry details left-aligned and error-colored", async () => {
       expect(footerLine).toContain("Short error (details)")
 
       // 色彩断言走 spans： fg 归一为字符串后比较，两个 span 必须同色（error）。
-      const spans = (app as unknown as { captureSpans: () => { lines: Array<{ spans: Array<{ text: string; fg?: unknown }> }> } }).captureSpans()
+      const spans = (
+        app as unknown as { captureSpans: () => { lines: Array<{ spans: Array<{ text: string; fg?: unknown }> }> } }
+      ).captureSpans()
       const line = spans.lines.find((item) => item.spans.some((span) => span.text.includes("(details)")))
       const errorSpan = line?.spans.find((span) => span.text.includes("Short error"))
       const detailsSpan = line?.spans.find((span) => span.text.includes("(details)"))
@@ -682,7 +700,11 @@ type PromptContext = { emit: ReturnType<typeof createEventSource>["emit"]; sync:
 type PromptStatus = NonNullable<PromptContext["sync"]["data"]["session_status"]>[string]
 
 function emitSessionStatus(context: PromptContext, id: string, status: PromptStatus) {
-  context.emit({ directory, project: "proj_test", payload: { id, type: "session.status", properties: { sessionID, status } } })
+  context.emit({
+    directory,
+    project: "proj_test",
+    payload: { id, type: "session.status", properties: { sessionID, status } },
+  })
 }
 
 async function settlePromptFrame(app: Awaited<ReturnType<typeof testRender>>) {
@@ -790,36 +812,40 @@ function PromptHarness(props: {
               <ToastProvider>
                 <RouteProvider initialRoute={props.initialRoute}>
                   <TuiConfigProvider config={config}>
-                    <SDKProvider url="http://test" directory={directory} testTransport={{ fetch: props.fetch, events: props.events }}>
+                    <SDKProvider
+                      url="http://test"
+                      directory={directory}
+                      testTransport={{ fetch: props.fetch, events: props.events }}
+                    >
                       <ProjectProvider>
                         <PermissionProvider>
                           <LocationProvider>
                             <DataProvider>
-                            <SyncProvider>
-                          <ThemeProvider mode="dark">
-                            <LocalProvider>
-                              <PromptStashProvider>
-                                <DialogProvider>
-                                  <FrecencyProvider>
-                                    <PromptHistoryProvider>
-                                      <PromptRefProvider>
-                                        <EditorContextProvider>
-                                          <PromptProbe
-                                            sessionID={props.promptSessionID}
-                                            width={props.promptWidth}
-                                            onContext={props.onContext}
-                                            onRoute={props.onRoute}
-                                            onPrompt={props.onPrompt}
-                                          />
-                                        </EditorContextProvider>
-                                      </PromptRefProvider>
-                                    </PromptHistoryProvider>
-                                  </FrecencyProvider>
-                                </DialogProvider>
-                              </PromptStashProvider>
-                            </LocalProvider>
-                          </ThemeProvider>
-                        </SyncProvider>
+                              <SyncProvider>
+                                <ThemeProvider mode="dark">
+                                  <LocalProvider>
+                                    <PromptStashProvider>
+                                      <DialogProvider>
+                                        <FrecencyProvider>
+                                          <PromptHistoryProvider>
+                                            <PromptRefProvider>
+                                              <EditorContextProvider>
+                                                <PromptProbe
+                                                  sessionID={props.promptSessionID}
+                                                  width={props.promptWidth}
+                                                  onContext={props.onContext}
+                                                  onRoute={props.onRoute}
+                                                  onPrompt={props.onPrompt}
+                                                />
+                                              </EditorContextProvider>
+                                            </PromptRefProvider>
+                                          </PromptHistoryProvider>
+                                        </FrecencyProvider>
+                                      </DialogProvider>
+                                    </PromptStashProvider>
+                                  </LocalProvider>
+                                </ThemeProvider>
+                              </SyncProvider>
                             </DataProvider>
                           </LocationProvider>
                         </PermissionProvider>

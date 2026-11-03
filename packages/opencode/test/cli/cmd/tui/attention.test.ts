@@ -174,9 +174,9 @@ describe("createTuiAttention", () => {
       notification: true,
       sound: false,
     })
-// [local-smark] 目标语义（#0424 后）：request.title 缺省时不回退 DEFAULT_TITLE——
+    // [local-smark] 目标语义（#0424 后）：request.title 缺省时不回退 DEFAULT_TITLE——
     // OpenTUI OSC 99 title+body 双 payload 在部分终端渲染成两条横幅，省略 title 只发 body
-        // [local-smark] 0424 语义：request.title 缺省时不回退 DEFAULT_TITLE——
+    // [local-smark] 0424 语义：request.title 缺省时不回退 DEFAULT_TITLE——
     // OpenTUI OSC 99 title+body 双 payload 在部分终端渲染成两条横幅，省略 title 只发 body
     expect(renderer.notifications).toEqual([{ title: undefined, message: "focused" }])
   })
@@ -193,9 +193,9 @@ describe("createTuiAttention", () => {
       sound: true,
     })
     expect(audio.playCalls).toBe(1)
-// [local-smark] 目标语义（#0424 后）：request.title 缺省时不回退 DEFAULT_TITLE——
+    // [local-smark] 目标语义（#0424 后）：request.title 缺省时不回退 DEFAULT_TITLE——
     // OpenTUI OSC 99 title+body 双 payload 在部分终端渲染成两条横幅，省略 title 只发 body
-        // [local-smark] 0424 语义：request.title 缺省时不回退 DEFAULT_TITLE——
+    // [local-smark] 0424 语义：request.title 缺省时不回退 DEFAULT_TITLE——
     // OpenTUI OSC 99 title+body 双 payload 在部分终端渲染成两条横幅，省略 title 只发 body
     expect(renderer.notifications).toEqual([{ title: undefined, message: "hello" }])
   })
@@ -259,9 +259,9 @@ describe("createTuiAttention", () => {
       notification: true,
       sound: true,
     })
-// [local-smark] 目标语义（#0424 后）：request.title 缺省时不回退 DEFAULT_TITLE——
+    // [local-smark] 目标语义（#0424 后）：request.title 缺省时不回退 DEFAULT_TITLE——
     // OpenTUI OSC 99 title+body 双 payload 在部分终端渲染成两条横幅，省略 title 只发 body
-        // [local-smark] 0424 语义：request.title 缺省时不回退 DEFAULT_TITLE——
+    // [local-smark] 0424 语义：request.title 缺省时不回退 DEFAULT_TITLE——
     // OpenTUI OSC 99 title+body 双 payload 在部分终端渲染成两条横幅，省略 title 只发 body
     expect(renderer.notifications).toEqual([{ title: undefined, message: "hello again" }])
   })

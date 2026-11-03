@@ -32,9 +32,7 @@ process.on("unhandledRejection", onUnhandledRejection)
 process.on("uncaughtException", onUncaughtException)
 
 // #493：daemon 内唯一 maintenance 运行态；task promise 只在 terminal/interrupted checkpoint 后释放。
-let activeMaintenance:
-  | { taskID: string; controller: AbortController; promise: Promise<void> }
-  | undefined
+let activeMaintenance: { taskID: string; controller: AbortController; promise: Promise<void> } | undefined
 let maintenanceRecoveryPromise: Promise<void> | undefined
 let maintenanceShutdownRequested = false
 // #535：pending 覆盖 accepted request 到 activeMaintenance 发布之间的 await 窗口；active 单独覆盖 runner 生命周期。
@@ -57,16 +55,22 @@ if (isDaemon) {
   // daemon 插件可能直接调用 fetch，入口安装一次使其共享实时代理策略。
   NetworkProxy.installGlobalFetch()
   // 日志资源仅依赖FS，错误处理不能为写日志提前初始化AppRuntime或数据库。
-  const daemonLogging = ManagedRuntime.make(Logger.layer([Logging.fileLogger()]).pipe(Layer.provide(NodeFileSystem.layer)))
+  const daemonLogging = ManagedRuntime.make(
+    Logger.layer([Logging.fileLogger()]).pipe(Layer.provide(NodeFileSystem.layer)),
+  )
   const log = {
     info: (message: string, fields: Record<string, unknown> = {}) => {
       console.log(`[daemon] ${message}`, fields)
-      return daemonLogging.runPromiseExit(Effect.logInfo(message, { service: "daemon", ...fields })).then(() => undefined)
+      return daemonLogging
+        .runPromiseExit(Effect.logInfo(message, { service: "daemon", ...fields }))
+        .then(() => undefined)
     },
     error: (message: string, fields: Record<string, unknown> = {}) => {
       console.log(`[daemon] [ERROR] ${message}`, fields)
       // Exit吸收诊断I/O失败，不能让rejection记录再次制造孤儿Promise。
-      return daemonLogging.runPromiseExit(Effect.logError(message, { service: "daemon", ...fields })).then(() => undefined)
+      return daemonLogging
+        .runPromiseExit(Effect.logError(message, { service: "daemon", ...fields }))
+        .then(() => undefined)
     },
   }
   // Windows relay 在 Bun 启动前为两种模式都建立非 console pipe，默认双流连续排到 Null。
@@ -88,7 +92,7 @@ if (isDaemon) {
   let externalUrl: string | undefined
 
   // 只有启动成功写锁后才拥有 token；绑定失败的清理不能删除磁盘上的其他 owner。
-  
+
   let lockToken: string | undefined
   // idle/upgrade timer 先于首次 await 声明，启动期间致命退出也可安全取消它们。
   let idleTimer: ReturnType<typeof setTimeout> | undefined
@@ -100,8 +104,11 @@ if (isDaemon) {
   let shutdownInProgress = false
 
   // 所有退出入口收敛到这个闭包，不能从事件 callback 单独调用 Database.close。
-  
-  async function maintain(prepared: ColdMaintain.PreparedMaintenance, runtime: ColdMaintain.MaintenanceRuntime = { checkpoint: async () => {} }) {
+
+  async function maintain(
+    prepared: ColdMaintain.PreparedMaintenance,
+    runtime: ColdMaintain.MaintenanceRuntime = { checkpoint: async () => {} },
+  ) {
     const database = await AppRuntime.runPromise(Database.Service)
     // 每批只预约本 runtime 的同一连接；文件 checkpoint 期间释放预约，普通会话仍可继续。
     return ColdMaintain.maintain(database.sync, prepared, {
@@ -211,7 +218,8 @@ if (isDaemon) {
     }
     if (activeMaintenance) throw new ServerLock.MaintenanceBusyError()
     const prepared = ColdMaintain.prepareMaintenance(task.args)
-    if (prepared.type !== "task") throw new ColdStorage.ValidationError({ message: "Interrupted task is not resumable" })
+    if (prepared.type !== "task")
+      throw new ColdStorage.ValidationError({ message: "Interrupted task is not resumable" })
     await runMaintenance(prepared, task)
     return { status: 202 as const, body: { taskID: task.taskID, operation: task.operation, status: "running" } }
   }
@@ -238,7 +246,8 @@ if (isDaemon) {
     const task = await ServerLock.findNonterminalMaintenanceTask()
     if (!task || task.status !== "interrupted") return
     const prepared = ColdMaintain.prepareMaintenance(task.args)
-    if (prepared.type !== "task") throw new ColdStorage.ValidationError({ message: "Interrupted task is not resumable" })
+    if (prepared.type !== "task")
+      throw new ColdStorage.ValidationError({ message: "Interrupted task is not resumable" })
     await runMaintenance(prepared, task)
   }
 
@@ -276,22 +285,26 @@ if (isDaemon) {
     await log.info("daemon shutting down", { reason, hadClient, sseClients, sessionActivity: SessionActivity.count() })
     if (upgradeTimer) clearTimeout(upgradeTimer)
     // 主动停机先通知全局订阅；广播失败也计入退出码，不跳过后续清理。
-    const notified = await Promise.allSettled([Promise.resolve().then(() => {
-      if (reason !== DisposedReason.DaemonStop) return
-      GlobalBus.emit("event", {
-        directory: "global",
-        payload: {
-          type: Event.Disposed.type,
-          properties: { reason: DisposedReason.DaemonStop },
-        },
-      })
-    })])
+    const notified = await Promise.allSettled([
+      Promise.resolve().then(() => {
+        if (reason !== DisposedReason.DaemonStop) return
+        GlobalBus.emit("event", {
+          directory: "global",
+          payload: {
+            type: Event.Disposed.type,
+            properties: { reason: DisposedReason.DaemonStop },
+          },
+        })
+      }),
+    ])
     // 每个资源独立清理；dispose 失败不能跳过停监听或关闭 runtime 的数据库 scope。
     const disposed = await Promise.allSettled([InstanceRuntime.disposeAllInstances()])
     // 清理失败仍保留原退出码，但不能把仍可能运行的实例当成stale；五秒总截止保持原样。
     const remaining = 5_000 - (Date.now() - shutdownStartedAt) - SessionStaleTurn.SAFETY_MARGIN_MS
     if (disposed.every((item) => item.status === "fulfilled") && remaining > 0 && reconcileStale) {
-      await reconcileStale({ kind: "exit-full" }, { budgetMs: remaining }).catch((error) => log.error("stale-turn exit-full failed", { error: String(error) }))
+      await reconcileStale({ kind: "exit-full" }, { budgetMs: remaining }).catch((error) =>
+        log.error("stale-turn exit-full failed", { error: String(error) }),
+      )
     } else log.info("stale-turn exit-full skipped: services unavailable or no cleanup budget")
 
     // 监听资源归 daemon 所有，共享它的 TUI 退出只释放自己的连接。
@@ -306,7 +319,12 @@ if (isDaemon) {
     // 数据库 scope 关闭后才释放锁，避免替换 owner 过早打开仍被旧进程持有的 SQLite。
     const cleared = await Promise.allSettled([lockToken ? ServerLock.clearIfOwner(lockToken) : Promise.resolve()])
     clearTimeout(shutdownTimer)
-    process.exit(exitCode || ([...notified, ...disposed, ...stopped, ...cleared, ...runtime].some((item) => item.status === "rejected") ? 1 : 0))
+    process.exit(
+      exitCode ||
+        ([...notified, ...disposed, ...stopped, ...cleared, ...runtime].some((item) => item.status === "rejected")
+          ? 1
+          : 0),
+    )
   }
 
   // SIGTERM 也必须经过 token/scope 清理；正常信号退出码与 fatal 的非零退出码分开。
@@ -483,7 +501,6 @@ if (isDaemon) {
     log.info("daemon launcher watcher started", { launcherPID: LAUNCHER_PID, intervalMs: LAUNCHER_POLL_MS })
   }
 
-
   // 内外 listener 继续共用一个计数源，活动变更只重算退出时机。
   const eventClients = EventClients.make((count) => {
     log.info(count > sseClients ? "global event connected" : "global event disconnected", { sseClientCount: count })
@@ -507,16 +524,27 @@ if (isDaemon) {
     const sharedServices = HttpApiApp.createSharedServices()
     // 监听与健康路由保留 ServerAuth，客户端计数由两个 listener 共用。
     // 内部监听必须真正绑定 0，不能消费公开零端口偏好的 4096。
-    internalServer = await Server.listen({ port: 0, hostname: "127.0.0.1", ephemeral: true, eventClients, sharedServices })
+    internalServer = await Server.listen({
+      port: 0,
+      hostname: "127.0.0.1",
+      ephemeral: true,
+      eventClients,
+      sharedServices,
+    })
     // 借用listener已构建的同一服务图；临时scope只持有引用，不新建数据库或native coordinator。
-    reconcileStale = (scope, options) => Effect.runPromise(Effect.scoped(Effect.gen(function* () {
-      const owner = yield* Scope.Scope
-      const services = yield* Layer.buildWithMemoMap(sharedServices.layer, sharedServices.memoMap, owner)
-      yield* SessionStaleTurn.reconcile(scope, options).pipe(Effect.provide(services))
-    })))
+    reconcileStale = (scope, options) =>
+      Effect.runPromise(
+        Effect.scoped(
+          Effect.gen(function* () {
+            const owner = yield* Scope.Scope
+            const services = yield* Layer.buildWithMemoMap(sharedServices.layer, sharedServices.memoMap, owner)
+            yield* SessionStaleTurn.reconcile(scope, options).pipe(Effect.provide(services))
+          }),
+        ),
+      )
 
     const network = process.env.OPENCODE_EXTERNAL_NETWORK
-      ? JSON.parse(process.env.OPENCODE_EXTERNAL_NETWORK) as NonNullable<ServerLock.ServerLock["network"]>
+      ? (JSON.parse(process.env.OPENCODE_EXTERNAL_NETWORK) as NonNullable<ServerLock.ServerLock["network"]>)
       : undefined
     if (network) {
       // 外部网络选项完整运输，cors/mdnsDomain 与共享客户端计数不因内部预热而丢失。
@@ -531,78 +559,82 @@ if (isDaemon) {
         if (!lockToken || request.headers.get(ServerLock.CONTROL_TOKEN_HEADER) !== lockToken)
           return new Response("unauthorized", { status: 401 })
         const url = new URL(request.url)
-      // #493：maintenance start 是 daemon 私有控制面，不进入 public HTTP/OpenAPI/SDK。
-      // handler 只解析 JSON、调用共同 dispatcher 并返回 task/report，不能复制 eligibility 或 SQL。
-      // task-backed response 只暴露 identity/status/createdAt，不把 payload、cursor 内部对象或 lock token 回传。
-      if (request.method === "POST" && url.pathname === ServerLock.CONTROL_MAINTENANCE_PATH) {
-        return request
-          .json()
-          .then((body: unknown) => startMaintenance(body))
-          .then((body) =>
-            body.type === "task"
-              ? Response.json(
-                  {
-                    taskID: body.task.taskID,
-                    operation: body.task.operation,
-                    status: body.task.status,
-                    createdAt: body.task.createdAt,
-                  },
-                  { status: 202 },
-                )
-              : Response.json(body, { status: 200 }),
-          )
-          .catch((error) => {
-            const mapped = maintenanceError(error)
-            return Response.json({ error: mapped.message }, { status: mapped.status })
-          })
-      }
-      // task status 与 daemon health 分离；不存在返回 404，损坏 record 返回错误而不是伪造空任务。
-      // reconcile 让强制终止进程留下的 running/queued 状态在查询时变为可恢复 interrupted。
-      if (request.method === "GET" && url.pathname === ServerLock.CONTROL_MAINTENANCE_STATUS_PATH) {
-        const taskID = url.searchParams.get("task")
-        if (!taskID) return Response.json({ error: "task query is required" }, { status: 400 })
-        return ServerLock.reconcileMaintenanceTask(taskID)
-          .then(async (task) => {
-            if (!task) return Response.json({ error: "task not found" }, { status: 404 })
-            const terminal = task.status === "completed" || task.status === "failed" || task.status === "interrupted"
-            // capture exact promise 后再 await，后续 activeMaintenance 清空不会让本请求错等另一个任务。
-            const active = activeMaintenance?.taskID === taskID ? activeMaintenance.promise : undefined
-            // #535：terminal checkpoint 早于 lease release；只有等待同一 promise 后返回，CLI 才能安全衔接 vacuum。
-            if (terminal && active) {
-              await active
-              const settled = await ServerLock.reconcileMaintenanceTask(taskID)
-              if (!settled) return Response.json({ error: "task not found" }, { status: 404 })
-              return Response.json(settled)
-            }
-            return Response.json(task)
-          })
-          .catch((error) => {
-            const mapped = maintenanceError(error)
-            return Response.json({ error: mapped.message }, { status: mapped.status })
-          })
-      }
-      // resume 参数只含 taskID，operation/args 必须来自持久 record，防止控制调用改变原任务语义。
-      // conflict 状态保留 409，调用方不能把重复 resume 当成幂等 completed 成功。
-      if (request.method === "POST" && url.pathname === ServerLock.CONTROL_MAINTENANCE_RESUME_PATH) {
-        return request
-          .json()
-          .then((body: unknown) => {
-            const taskID = maintenanceTaskID(body)
-            if (!taskID) throw new ColdStorage.ValidationError({ message: "taskID is required" })
-            return resumeMaintenance(taskID)
-          })
-          .then((result) => {
-            if ("body" in result) return Response.json(result.body, { status: result.status })
-            return Response.json(result)
-          })
-          .catch((error) => {
-            const mapped = maintenanceError(error)
-            return Response.json({ error: mapped.message }, { status: mapped.status })
-          })
-      }
+        // #493：maintenance start 是 daemon 私有控制面，不进入 public HTTP/OpenAPI/SDK。
+        // handler 只解析 JSON、调用共同 dispatcher 并返回 task/report，不能复制 eligibility 或 SQL。
+        // task-backed response 只暴露 identity/status/createdAt，不把 payload、cursor 内部对象或 lock token 回传。
+        if (request.method === "POST" && url.pathname === ServerLock.CONTROL_MAINTENANCE_PATH) {
+          return request
+            .json()
+            .then((body: unknown) => startMaintenance(body))
+            .then((body) =>
+              body.type === "task"
+                ? Response.json(
+                    {
+                      taskID: body.task.taskID,
+                      operation: body.task.operation,
+                      status: body.task.status,
+                      createdAt: body.task.createdAt,
+                    },
+                    { status: 202 },
+                  )
+                : Response.json(body, { status: 200 }),
+            )
+            .catch((error) => {
+              const mapped = maintenanceError(error)
+              return Response.json({ error: mapped.message }, { status: mapped.status })
+            })
+        }
+        // task status 与 daemon health 分离；不存在返回 404，损坏 record 返回错误而不是伪造空任务。
+        // reconcile 让强制终止进程留下的 running/queued 状态在查询时变为可恢复 interrupted。
+        if (request.method === "GET" && url.pathname === ServerLock.CONTROL_MAINTENANCE_STATUS_PATH) {
+          const taskID = url.searchParams.get("task")
+          if (!taskID) return Response.json({ error: "task query is required" }, { status: 400 })
+          return ServerLock.reconcileMaintenanceTask(taskID)
+            .then(async (task) => {
+              if (!task) return Response.json({ error: "task not found" }, { status: 404 })
+              const terminal = task.status === "completed" || task.status === "failed" || task.status === "interrupted"
+              // capture exact promise 后再 await，后续 activeMaintenance 清空不会让本请求错等另一个任务。
+              const active = activeMaintenance?.taskID === taskID ? activeMaintenance.promise : undefined
+              // #535：terminal checkpoint 早于 lease release；只有等待同一 promise 后返回，CLI 才能安全衔接 vacuum。
+              if (terminal && active) {
+                await active
+                const settled = await ServerLock.reconcileMaintenanceTask(taskID)
+                if (!settled) return Response.json({ error: "task not found" }, { status: 404 })
+                return Response.json(settled)
+              }
+              return Response.json(task)
+            })
+            .catch((error) => {
+              const mapped = maintenanceError(error)
+              return Response.json({ error: mapped.message }, { status: mapped.status })
+            })
+        }
+        // resume 参数只含 taskID，operation/args 必须来自持久 record，防止控制调用改变原任务语义。
+        // conflict 状态保留 409，调用方不能把重复 resume 当成幂等 completed 成功。
+        if (request.method === "POST" && url.pathname === ServerLock.CONTROL_MAINTENANCE_RESUME_PATH) {
+          return request
+            .json()
+            .then((body: unknown) => {
+              const taskID = maintenanceTaskID(body)
+              if (!taskID) throw new ColdStorage.ValidationError({ message: "taskID is required" })
+              return resumeMaintenance(taskID)
+            })
+            .then((result) => {
+              if ("body" in result) return Response.json(result.body, { status: result.status })
+              return Response.json(result)
+            })
+            .catch((error) => {
+              const mapped = maintenanceError(error)
+              return Response.json({ error: mapped.message }, { status: mapped.status })
+            })
+        }
         if (request.method === "GET" && url.pathname === ServerLock.CONTROL_STATUS_PATH)
           // 私有状态在入口置位，控制面保留到 disposer 完成后，供发现方等待真实退出。
-          return Response.json({ tuiClients: sseClients, sessionActivity: SessionActivity.count(), stopping: shutdownInProgress })
+          return Response.json({
+            tuiClients: sseClients,
+            sessionActivity: SessionActivity.count(),
+            stopping: shutdownInProgress,
+          })
         if (request.method !== "POST" || url.pathname !== ServerLock.CONTROL_SHUTDOWN_PATH)
           return new Response("not found", { status: 404 })
         // DB preflight没有中断其他维护的授权；普通stop保留既有abort与退出责任。
@@ -625,35 +657,51 @@ if (isDaemon) {
     maintenanceRecoveryPromise = recoverInterruptedMaintenance()
     await maintenanceRecoveryPromise
     // L1先写入中断终态再发布发现锁，失败仍沿source约定记录并允许启动。
-    await reconcileStale({ kind: "recent", limit: SessionStaleTurn.RECENT_ACTIVE_SESSION_LIMIT }).catch((error) => log.error("stale-turn recent L1 failed", { error: String(error) }))
+    await reconcileStale({ kind: "recent", limit: SessionStaleTurn.RECENT_ACTIVE_SESSION_LIMIT }).catch((error) =>
+      log.error("stale-turn recent L1 failed", { error: String(error) }),
+    )
     lockToken = await ServerLock.write(internalServer.port, externalUrl, network, controlServer.port)
-    log.info("daemon lock written", { pid: process.pid, port: internalServer.port, controlPort: controlServer.port, externalUrl, launcherPID: LAUNCHER_PID })
+    log.info("daemon lock written", {
+      pid: process.pid,
+      port: internalServer.port,
+      controlPort: controlServer.port,
+      externalUrl,
+      launcherPID: LAUNCHER_PID,
+    })
     // 锁发布后才启用启动期保护，首个订阅到达后转由运行期空闲路径负责。
     maybeScheduleStartupIdleShutdown()
     startLauncherWatcher()
     // #71：锁可见后再做 best-effort 外部插件预热，避免 npm/代理阻塞 TUI 健康等待。
-    setTimeout(() => void AppRuntime.runPromise(Effect.gen(function* () {
-      const { RuntimeFlags } = yield* Effect.promise(() => import("@/effect/runtime-flags"))
-      const flags = yield* RuntimeFlags.Service
-      // pure 不建立预热项目上下文，避免为本应跳过的用户插件读取配置或准备依赖。
-      if (flags.pure) return
-      const { Project } = yield* Effect.promise(() => import("@/project/project"))
-      const { InstanceRef } = yield* Effect.promise(() => import("@/effect/instance-ref"))
-      const { FSUtil } = yield* Effect.promise(() => import("@opencode-ai/core/fs-util"))
-      const { Plugin } = yield* Effect.promise(() => import("@/plugin"))
-      const project = yield* Project.Service
-      const directory = FSUtil.resolve(process.cwd())
-      const resolved = yield* project.fromDirectory(directory)
-      // 仅绑定真实目录/工作树供 Config 合并；不调用 InstanceStore.load 的 bootstrap 提前执行 hook。
-      yield* Plugin.warmupExternalPlugins().pipe(Effect.provideService(InstanceRef, {
-        directory,
-        worktree: resolved.sandbox,
-        project: resolved.project,
-      }))
-    }).pipe(
-      // 上下文解析自身失败也只取消预热，监听启动失败仍走外层非零退出清理。
-      Effect.catchCause((cause) => Effect.logWarning("daemon plugin warmup skipped", { cause: String(cause) })),
-    )), 0).unref?.()
+    setTimeout(
+      () =>
+        void AppRuntime.runPromise(
+          Effect.gen(function* () {
+            const { RuntimeFlags } = yield* Effect.promise(() => import("@/effect/runtime-flags"))
+            const flags = yield* RuntimeFlags.Service
+            // pure 不建立预热项目上下文，避免为本应跳过的用户插件读取配置或准备依赖。
+            if (flags.pure) return
+            const { Project } = yield* Effect.promise(() => import("@/project/project"))
+            const { InstanceRef } = yield* Effect.promise(() => import("@/effect/instance-ref"))
+            const { FSUtil } = yield* Effect.promise(() => import("@opencode-ai/core/fs-util"))
+            const { Plugin } = yield* Effect.promise(() => import("@/plugin"))
+            const project = yield* Project.Service
+            const directory = FSUtil.resolve(process.cwd())
+            const resolved = yield* project.fromDirectory(directory)
+            // 仅绑定真实目录/工作树供 Config 合并；不调用 InstanceStore.load 的 bootstrap 提前执行 hook。
+            yield* Plugin.warmupExternalPlugins().pipe(
+              Effect.provideService(InstanceRef, {
+                directory,
+                worktree: resolved.sandbox,
+                project: resolved.project,
+              }),
+            )
+          }).pipe(
+            // 上下文解析自身失败也只取消预热，监听启动失败仍走外层非零退出清理。
+            Effect.catchCause((cause) => Effect.logWarning("daemon plugin warmup skipped", { cause: String(cause) })),
+          ),
+        ),
+      0,
+    ).unref?.()
   } catch {
     // 启动失败走相同资源清理，明确非零退出，不伪造成功锁。
     await gracefulShutdown(1, "startup-failed")
@@ -664,7 +712,9 @@ if (isDaemon) {
     // shutdown 已开始时 callback 不再加载新实例。
     if (shutdownInProgress) return
     // 仅升级任务为 advisory；实例加载失败同样观测，不能变成致命拒绝。
-    void InstanceRuntime.load({ directory: process.cwd() }).then(() => upgrade()).catch(() => {})
+    void InstanceRuntime.load({ directory: process.cwd() })
+      .then(() => upgrade())
+      .catch(() => {})
   }, 1_000)
   // unref 避免 upgrade timer 独自续命。
   upgradeTimer.unref?.()

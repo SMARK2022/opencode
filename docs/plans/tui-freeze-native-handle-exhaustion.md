@@ -28,14 +28,14 @@
 
 ### 1.2 进程级取证（卡死 TUI = PID 5068）
 
-| 维度 | 卡死 TUI | 健康 TUI 对比 |
-|---|---|---|
-| 主线程 (22244，创建最早) | **Running 状态，累计 5841s CPU，提交栈 415KB**，RIP 在 bun.exe 内执行 JIT 代码，栈上同一批 JIT 函数地址重复几十次（深度递归/热循环特征） | — |
-| 其余 27 个线程（含 tree-sitter worker 池） | 全部 idle（Wait） | — |
-| 网络连接 | **0 条，30 秒内零重连尝试**（SSE 彻底死亡且不再重连） | 各持 2-3 条到 daemon:4096 |
-| 内存 RSS | **2086MB**（健康 TUI 的 ~2 倍），稳定不再增长 | 878MB–1.3GB |
-| daemon (2140) | **完全健康**（health 200，仍在写该会话 DB） | — |
-| 二进制 | 含 .11 修复（`ownedSyntaxStyles` 标记在） | — |
+| 维度                                       | 卡死 TUI                                                                                                                                 | 健康 TUI 对比             |
+| ------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------- | ------------------------- |
+| 主线程 (22244，创建最早)                   | **Running 状态，累计 5841s CPU，提交栈 415KB**，RIP 在 bun.exe 内执行 JIT 代码，栈上同一批 JIT 函数地址重复几十次（深度递归/热循环特征） | —                         |
+| 其余 27 个线程（含 tree-sitter worker 池） | 全部 idle（Wait）                                                                                                                        | —                         |
+| 网络连接                                   | **0 条，30 秒内零重连尝试**（SSE 彻底死亡且不再重连）                                                                                    | 各持 2-3 条到 daemon:4096 |
+| 内存 RSS                                   | **2086MB**（健康 TUI 的 ~2 倍），稳定不再增长                                                                                            | 878MB–1.3GB               |
+| daemon (2140)                              | **完全健康**（health 200，仍在写该会话 DB）                                                                                              | —                         |
+| 二进制                                     | 含 .11 修复（`ownedSyntaxStyles` 标记在）                                                                                                | —                         |
 
 **症状矛盾的解答**：滚动正常 + spinner 在转 + 内容冻结 + resize 失效 + SSE 死亡——因为 Windows 默认 **threaded renderer（`useThread=true`）**：native 渲染线程持续把最后一帧重绘（所以滚动/ spinner 还在），但 **JS 主线程被同步计算彻底卡死**（所以 SSE、新内容、resize、输入全死）。
 
@@ -52,11 +52,11 @@
 
 实测当前日志真实内容：
 
-| 进程 | 真实内容 |
-|---|---|
-| 卡死 TUI (040705.log) | **4677 字节**（含错误信号）|
-| 健康 TUI (040812.log) | 1833 字节 |
-| 健康 TUI (040630.log) | 1380 字节 |
+| 进程                  | 真实内容                    |
+| --------------------- | --------------------------- |
+| 卡死 TUI (040705.log) | **4677 字节**（含错误信号） |
+| 健康 TUI (040812.log) | 1833 字节                   |
+| 健康 TUI (040630.log) | 1380 字节                   |
 
 ### 2.2 日志服务实际可用且暴露了卡死信号
 
@@ -77,10 +77,10 @@
 
 ### 3.1 日志暴露的两个 native 资源错误（卡死 TUI 独有）
 
-| 时间（本地） | 错误 | 含义 |
-|---|---|---|
-| 13:00 | `Failed to create TextBuffer`（`zig.ts:3772`）| **native handle 注册表耗尽**（最早错误）|
-| 13:07 起 ×17 | `NativeSyntaxStyle is destroyed`（`syntax-style.ts:117`）| **共享 SyntaxStyle 被销毁后仍被引用（use-after-destroy）** |
+| 时间（本地） | 错误                                                      | 含义                                                       |
+| ------------ | --------------------------------------------------------- | ---------------------------------------------------------- |
+| 13:00        | `Failed to create TextBuffer`（`zig.ts:3772`）            | **native handle 注册表耗尽**（最早错误）                   |
+| 13:07 起 ×17 | `NativeSyntaxStyle is destroyed`（`syntax-style.ts:117`） | **共享 SyntaxStyle 被销毁后仍被引用（use-after-destroy）** |
 
 这两个错误**只在卡死 TUI 出现**（健康 TUI 全 0 错误）。
 
@@ -92,13 +92,13 @@
 
 **③ 持续负载下销毁追不上创建（暂时性累积）**：实测窗口滑动时——
 
-| 滑窗次数 | treeRenderables（渲染树，有界在缩） | registry（JS 注册表） | heap | RSS |
-|---|---|---|---|---|
-| 0 | 5691 | 4306 | 595MB | 1490MB |
-| 30 | 5356 | 4486 | 643MB | 2122MB |
-| 60 | 5006 | 4666 | 705MB | 2229MB |
-| 90 | 4690 | **4846** | 756MB | 2304MB |
-| **settle 空闲 3s 后** | 5008 | **3896（回落 950）** | **281MB（回落 424MB）** | **893MB（回落 1336MB）** |
+| 滑窗次数              | treeRenderables（渲染树，有界在缩） | registry（JS 注册表） | heap                    | RSS                      |
+| --------------------- | ----------------------------------- | --------------------- | ----------------------- | ------------------------ |
+| 0                     | 5691                                | 4306                  | 595MB                   | 1490MB                   |
+| 30                    | 5356                                | 4486                  | 643MB                   | 2122MB                   |
+| 60                    | 5006                                | 4666                  | 705MB                   | 2229MB                   |
+| 90                    | 4690                                | **4846**              | 756MB                   | 2304MB                   |
+| **settle 空闲 3s 后** | 5008                                | **3896（回落 950）**  | **281MB（回落 424MB）** | **893MB（回落 1336MB）** |
 
 - 渲染树有界且正常裁剪（窗口滑动正确），但 **renderable 注册表线性 +6/次滑窗、RSS +9MB/次滑窗**
 - **空闲后（settle）注册表/RSS 回落** → 证明是"deferred destroy 追不上创建"的**暂时性累积**，不是永久泄漏
@@ -129,12 +129,12 @@
 
 **4. 决定性 A/B 实测（钉死根因）**：隔离实验 `.temp/Testing/repro-reconciler-leak.tsx` 用 `<Show>` 反复挂载/卸载一个复杂子树（走真实 reconciler 销毁路径）：
 
-| 阶段 | registry | 积压 |
-|---|---|---|
-| baseline | 10 | 0 |
+| 阶段                                                  | registry | 积压                           |
+| ----------------------------------------------------- | -------- | ------------------------------ |
+| baseline                                              | 10       | 0                              |
 | **A：紧凑循环（仅 renderOnce，不让出事件循环）× 400** | **3210** | **+3200（每轮净 +8，无上限）** |
-| A 后 settle（空闲） | 10 | 完全排干 |
-| **B：同样操作但每轮 setTimeout 让出事件循环 × 400** | **10** | **0** |
+| A 后 settle（空闲）                                   | 10       | 完全排干                       |
+| **B：同样操作但每轮 setTimeout 让出事件循环 × 400**   | **10**   | **0**                          |
 
 这证明：**reconciler 把销毁 defer 到 `process.nextTick`（`reconciler.ts:133`），当主线程被连续同步渲染/协调占满（不 yield 事件循环）时，这些 nextTick 回调被饿死，待销毁 renderable 积压无上限增长；一旦让出事件循环立即排干。** native 容量压测后仍 ≈16382（全新），**无 native-only 泄漏、无 reconciler 永久泄漏**——纯粹是“饿死导致积压”。
 
@@ -160,10 +160,10 @@
 **2. 真正随消息总数超线性膨胀的是“每个事件的计算成本”——`tokenAccounting`**（`.temp/Testing/zz-emit-timing.test.tsx` 插桩实测）：
 
 | 消息总数 | emit(store更新) | render | **tokenAccounting（30 个 delta 累计）** |
-|---|---|---|---|
-| 50 | 0.01ms | 1.15ms | 0 次 / 0ms |
-| 150 | 1.33ms | 3.43ms | 5 次 / 32ms |
-| 300 | 19.2ms | 6.2ms | **34 次 / 456.9ms ≈ 15ms/delta** |
+| -------- | --------------- | ------ | --------------------------------------- |
+| 50       | 0.01ms          | 1.15ms | 0 次 / 0ms                              |
+| 150      | 1.33ms          | 3.43ms | 5 次 / 32ms                             |
+| 300      | 19.2ms          | 6.2ms  | **34 次 / 456.9ms ≈ 15ms/delta**        |
 
 - **位置**：`session/index.tsx:236` `sessionUsage = createMemo(() => tokenAccounting(messages(), (id) => sync.data.part[id] ?? []))`，被 `:486` 的 `createEffect`（exit message 快照）读取——**每个 part delta 都触发它重算**；另有 `:1842` 每条 assistant footer 的 `turnUsage`。
 - **为何 O(总数)**：`tokenAccounting`（`accounting.ts:176-186,223-225`）对每个 part 做 `parts.slice(0,i).findLastIndex()`（**O(parts²)**）+ tool part `JSON.stringify(input)`，最后 `learnInputCharsPerToken` 再 map 全部消息。任何 part 变化都让它读全表重算。
@@ -175,26 +175,27 @@
 
 **消费者与实时性需求**（决定能怎么改）：
 
-| 消费者 | 位置 | 读取时机 | 需要实时吗 |
-|---|---|---|---|
-| `sessionUsage` → exit message | `session/index.tsx:236` 定义、`:486` createEffect 读取 | **仅退出时**（`context/exit.tsx` 的 `exit()` 里 `store.get()` → `stdout.write`） | **不需要** |
-| `turnUsage` → footer | `:1842` 定义、`:1964` 显示 | 每条 assistant footer 实时显示 | 需要（但只需当前 request） |
+| 消费者                        | 位置                                                   | 读取时机                                                                         | 需要实时吗                 |
+| ----------------------------- | ------------------------------------------------------ | -------------------------------------------------------------------------------- | -------------------------- |
+| `sessionUsage` → exit message | `session/index.tsx:236` 定义、`:486` createEffect 读取 | **仅退出时**（`context/exit.tsx` 的 `exit()` 里 `store.get()` → `stdout.write`） | **不需要**                 |
+| `turnUsage` → footer          | `:1842` 定义、`:1964` 显示                             | 每条 assistant footer 实时显示                                                   | 需要（但只需当前 request） |
 
 `exit.message` 是个纯 store（`set` 存变量，唯一读取点在 `exit()` 函数），**退出那一刻才被消费**。
 
 **兼容性结论（回答“会不会计数出错/异常退出问题”）**：
+
 - exit 快照改为**退出时惰计算**：用退出那一刻的最终 store 状态算一次，结果与现在**完全一致**（甚至更准）。
 - **异常退出（崩溃/强杀）**：现有写法同样打不出来（`exit()` 根本没机会跑），所以惰计算**不引入任何回归**；正常退出（SIGINT/SIGTERM）走 `exit()`，惰计算照常给出正确计数。
 - 唯一代价：退出时多花 ~15ms（300 条会话），换运行期每分钟省掉成百上千次 O(总数) 重算。
 
 **冗余清单**（用户原则“需要时才遍历、需要记录时才记录”）：
 
-| 冗余点 | 位置 | 问题 | 修法 |
-|---|---|---|---|
-| exit 快照随 delta 重算 | `:486` createEffect | 退出才用的值，却每个 delta O(总数) 全量遍历 | **退出时惰计算**（主凶，治本） |
-| turnUsage 全表遍历 | `:1842` | 只求当前 request，却 `for (msg of messages)` 遍历全部（`accounting.ts:144`） | 按 parentID 只算当前 request |
-| O(parts²) 内层循环 | `accounting.ts:176-186` | 每个 step-finish `parts.slice(0,i).findLastIndex()` 回扫 | 一次正向遍历即可 O(parts) |
-| 每次调用 map 全表 | `accounting.ts:223-225` | `learnInputCharsPerToken` 每次 `messages.map(...)` 全部 | 可增量缓存 ratio |
+| 冗余点                 | 位置                    | 问题                                                                         | 修法                           |
+| ---------------------- | ----------------------- | ---------------------------------------------------------------------------- | ------------------------------ |
+| exit 快照随 delta 重算 | `:486` createEffect     | 退出才用的值，却每个 delta O(总数) 全量遍历                                  | **退出时惰计算**（主凶，治本） |
+| turnUsage 全表遍历     | `:1842`                 | 只求当前 request，却 `for (msg of messages)` 遍历全部（`accounting.ts:144`） | 按 parentID 只算当前 request   |
+| O(parts²) 内层循环     | `accounting.ts:176-186` | 每个 step-finish `parts.slice(0,i).findLastIndex()` 回扫                     | 一次正向遍历即可 O(parts)      |
+| 每次调用 map 全表      | `accounting.ts:223-225` | `learnInputCharsPerToken` 每次 `messages.map(...)` 全部                      | 可增量缓存 ratio               |
 
 **串起来的因果**：`sessionUsage` createEffect 是主凶——每个 delta 跑 tokenAccounting（300 条时 ~15ms），占满主线程 → `reconciler.ts:133` 的 nextTick 销毁饿死 → 积压涨满 65535 → 卡死。修复 sessionUsage 冗余重算既消除生产侧主线程占用，又间接解除销毁被饿死的根源。
 
@@ -206,12 +207,12 @@
 
 **实测结论：不是，消息列表是增量更新的。**
 
-| 测量 | 结果 | 含义 |
-|---|---|---|
-| ScrollBox 子树 renderable **身份保留率** | **99.7%**（slide 5→6，5594/5610 个是同一个对象）| `<For>` 正确做了"移除顶部 + 底部新增 + 中间不动" |
-| renderOnce（native 渲染） | **30ms，稳定不降级** | 渲染不是瓶颈 |
-| **emit（store 更新）** | **1554ms/次滑窗** | **瓶颈在 store 更新层** |
-| tokenAccounting | 3-5ms | 已排除 |
+| 测量                                     | 结果                                             | 含义                                             |
+| ---------------------------------------- | ------------------------------------------------ | ------------------------------------------------ |
+| ScrollBox 子树 renderable **身份保留率** | **99.7%**（slide 5→6，5594/5610 个是同一个对象） | `<For>` 正确做了"移除顶部 + 底部新增 + 中间不动" |
+| renderOnce（native 渲染）                | **30ms，稳定不降级**                             | 渲染不是瓶颈                                     |
+| **emit（store 更新）**                   | **1554ms/次滑窗**                                | **瓶颈在 store 更新层**                          |
+| tokenAccounting                          | 3-5ms                                            | 已排除                                           |
 
 - 消息列表的 Solid `<For each={messages()}>`（`session/index.tsx:1353`）keyed reconciliation 工作正常
 - store 更新是增量的（`sync.tsx` 用 splice/shift/reconcile 保留未变消息引用）
@@ -257,18 +258,18 @@
 
 所有临时脚本在 `.temp/Testing/`（工作区保持清洁）：
 
-| 脚本 | 验证内容 | 结果 |
-|---|---|---|
-| `repro-tui-log.ts` / `repro-log-compile.ts` | Log 服务在源码/编译二进制下能否落盘 | 能（stay/loop 模式 flush 正常）|
-| `repro-syntax-destroy.ts` | 共享 SyntaxStyle 在异步高亮在途时销毁 → use-after-destroy | **复现成功**（`NativeSyntaxStyle is destroyed`）|
-| `repro-handle-cap.ts` | native handle 注册表容量 | **16383 个存活 renderable 耗尽（每个 4 handle，上限 65535）** |
-| `repro-native-leak.ts` | renderable create/destroy 是否平衡 | JS 注册表有界（无 JS 层泄漏）|
-| `zz-repro-freeze.test.tsx` | 真实 300 消息会话的滑窗泄漏 + 渲染耗时 + 身份保留率 | 注册表 +6/次滑窗、RSS +9MB/次滑窗、保留率 99.7%、settle 后回落 |
-| `bench-destroy-leak.ts` | 各类型 renderable 300 次创建/销毁循环后 native 容量 | **code/diff/markdown/text/table 全干净，零泄漏** |
-| `bench-streaming-churn.ts` | 流式单条 markdown 的 renderable churn | **223 delta 仅建 3 个 renderable，0 churn** |
-| `zz-capacity-repro.test.tsx` | 真实 300 消息连续滑窗 + settle 后 registry | settle 后净增≈复杂度差（非泄漏）；每窗 churn 超线性 184→378 |
-| `zz-churn-source.test.tsx` | 滑窗时 renderable 创建（按 id 聚合） | **每次滑窗同步仅新建 ~30 个（一条新消息），是正确增量**；超线性增长发生在 settle 异步阶段 |
-| `repro-reconciler-leak.tsx` | **A/B：紧凑循环 vs 让出事件循环 对 deferred-destroy 积压的影响** | **紧凑循环积压无上限（+8/轮→3210），让出即排干为 0；native 容量无损漏** |
+| 脚本                                        | 验证内容                                                         | 结果                                                                                      |
+| ------------------------------------------- | ---------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| `repro-tui-log.ts` / `repro-log-compile.ts` | Log 服务在源码/编译二进制下能否落盘                              | 能（stay/loop 模式 flush 正常）                                                           |
+| `repro-syntax-destroy.ts`                   | 共享 SyntaxStyle 在异步高亮在途时销毁 → use-after-destroy        | **复现成功**（`NativeSyntaxStyle is destroyed`）                                          |
+| `repro-handle-cap.ts`                       | native handle 注册表容量                                         | **16383 个存活 renderable 耗尽（每个 4 handle，上限 65535）**                             |
+| `repro-native-leak.ts`                      | renderable create/destroy 是否平衡                               | JS 注册表有界（无 JS 层泄漏）                                                             |
+| `zz-repro-freeze.test.tsx`                  | 真实 300 消息会话的滑窗泄漏 + 渲染耗时 + 身份保留率              | 注册表 +6/次滑窗、RSS +9MB/次滑窗、保留率 99.7%、settle 后回落                            |
+| `bench-destroy-leak.ts`                     | 各类型 renderable 300 次创建/销毁循环后 native 容量              | **code/diff/markdown/text/table 全干净，零泄漏**                                          |
+| `bench-streaming-churn.ts`                  | 流式单条 markdown 的 renderable churn                            | **223 delta 仅建 3 个 renderable，0 churn**                                               |
+| `zz-capacity-repro.test.tsx`                | 真实 300 消息连续滑窗 + settle 后 registry                       | settle 后净增≈复杂度差（非泄漏）；每窗 churn 超线性 184→378                               |
+| `zz-churn-source.test.tsx`                  | 滑窗时 renderable 创建（按 id 聚合）                             | **每次滑窗同步仅新建 ~30 个（一条新消息），是正确增量**；超线性增长发生在 settle 异步阶段 |
+| `repro-reconciler-leak.tsx`                 | **A/B：紧凑循环 vs 让出事件循环 对 deferred-destroy 积压的影响** | **紧凑循环积压无上限（+8/轮→3210），让出即排干为 0；native 容量无损漏**                   |
 
 ---
 
@@ -341,7 +342,7 @@ TextRenderable 泄漏栈同样终于 **BlockTool 的同一个 createMemo**（走
 
 ```ts
 // 2789 附近
-const previewTree = createMemo(() => props.preview)      // 只构造一次
+const previewTree = createMemo(() => props.preview) // 只构造一次
 const hasPreview = createMemo(() => previewTree() !== undefined)
 // 2849: {props.preview} → {previewTree()}
 ```
@@ -375,14 +376,14 @@ const hasPreview = createMemo(() => previewTree() !== undefined)
 
 **验证命令与结果**（cwd 均为 `packages/opencode`）：
 
-| 命令 | 结果 |
-|---|---|
-| `bun test test/cli/cmd/tui/session-message-render.test.tsx -t "leaking discarded preview tree"`（修复前） | red：detached 含 DiffPreview 子树 |
-| 同上（修复后） | green：1 pass |
-| `bun test test/cli/cmd/tui/zz-repro-freeze.test.tsx`（原始反馈环，修复后） | 泄漏子树 0 棵；registry 200 滑窗净增长 0 |
-| `bun test test/cli/cmd/tui/session-message-render.test.tsx` | 90 pass / 0 fail |
-| `bun test test/cli/cmd/tui/`（34 文件全套件） | 325 pass / 0 fail |
-| `bun typecheck` | 通过（tsgo --noEmit 无输出） |
+| 命令                                                                                                      | 结果                                     |
+| --------------------------------------------------------------------------------------------------------- | ---------------------------------------- |
+| `bun test test/cli/cmd/tui/session-message-render.test.tsx -t "leaking discarded preview tree"`（修复前） | red：detached 含 DiffPreview 子树        |
+| 同上（修复后）                                                                                            | green：1 pass                            |
+| `bun test test/cli/cmd/tui/zz-repro-freeze.test.tsx`（原始反馈环，修复后）                                | 泄漏子树 0 棵；registry 200 滑窗净增长 0 |
+| `bun test test/cli/cmd/tui/session-message-render.test.tsx`                                               | 90 pass / 0 fail                         |
+| `bun test test/cli/cmd/tui/`（34 文件全套件）                                                             | 325 pass / 0 fail                        |
+| `bun typecheck`                                                                                           | 通过（tsgo --noEmit 无输出）             |
 
 **E/C**：E=3（生产：previewTree 行 + hasPreview 修改行 + 挂载点修改行）+ 测试 E≈50；C=4（生产 invariant 注释块）+ 测试 C=6。合计 C=10 ≥ ceil(53×0.15)=8 ✓。
 
@@ -408,13 +409,13 @@ const hasPreview = createMemo(() => previewTree() !== undefined)
 
 命令（cwd `.temp/Testing`）：`bun test garbled-render.test.tsx --test-name-pattern "late CPR"`。等待真实启动探测超时 5.2 秒，再通过 stdin 注入完整光标位置报告 `ESC[1;80R`；初次复现和扩展重绘复测均出现 red。扩展复测耗时约 5.7 秒：
 
-| 阶段 | capabilityTimeoutId | explicit_width | 内存画布 | 终端画面 |
-|---|---|---|---|---|
-| 超时后、未注入 | null | false | A中文B | A中文B |
-| 注入 ESC[1;80R | null | true | A中文B | AB |
-| 再注入 ESC[1;1R | null | true | A中文B | AB |
-| 强制完整重绘 | null | true | A中文B | AB |
-| resize 40→32 | null | true | A中文B | AB |
+| 阶段            | capabilityTimeoutId | explicit_width | 内存画布 | 终端画面 |
+| --------------- | ------------------- | -------------- | -------- | -------- |
+| 超时后、未注入  | null                | false          | A中文B   | A中文B   |
+| 注入 ESC[1;80R  | null                | true           | A中文B   | AB       |
+| 再注入 ESC[1;1R | null                | true           | A中文B   | AB       |
+| 强制完整重绘    | null                | true           | A中文B   | AB       |
+| resize 40→32    | null                | true           | A中文B   | AB       |
 
 确认的传导链（以下路径均相对 `thirdparty/opentui/packages/core/src`）：
 
@@ -451,12 +452,12 @@ const hasPreview = createMemo(() => previewTree() !== undefined)
 
 脚本 `.temp/Testing/garbled-render.test.tsx`。每个实验必须单独启动 Bun 进程，以隔离故意耗尽的全局池。cwd `.temp/Testing`：
 
-| 命令/环境 | 结果 |
-|---|---|
-| `CJK_DRAWS=65533`，`bun test garbled-render.test.tsx --test-name-pattern "clipped CJK"` | PASS，`中试文ABC` 完整 |
-| `CJK_DRAWS=65534`，同命令 | RED，`中  文ABC`，只缺 `试`，ASCII 完整 |
-| `CJK_DRAWS=100000 CJK_CLIP_WIDTH=2`，同命令 | PASS，整字可容纳时 10 万次绘制不耗尽 |
-| `bun test garbled-render.test.tsx --test-name-pattern "real clipped"` | RED，真实 Box/Text 组件树令另一处普通 TextRenderable 输出 `中  文ABC` |
+| 命令/环境                                                                               | 结果                                                                  |
+| --------------------------------------------------------------------------------------- | --------------------------------------------------------------------- |
+| `CJK_DRAWS=65533`，`bun test garbled-render.test.tsx --test-name-pattern "clipped CJK"` | PASS，`中试文ABC` 完整                                                |
+| `CJK_DRAWS=65534`，同命令                                                               | RED，`中  文ABC`，只缺 `试`，ASCII 完整                               |
+| `CJK_DRAWS=100000 CJK_CLIP_WIDTH=2`，同命令                                             | PASS，整字可容纳时 10 万次绘制不耗尽                                  |
+| `bun test garbled-render.test.tsx --test-name-pattern "real clipped"`                   | RED，真实 Box/Text 组件树令另一处普通 TextRenderable 输出 `中  文ABC` |
 
 PowerShell 设置环境使用 `$env:CJK_DRAWS='65534'` 等；表中环境项不是 Bash 命令。容量实验约 0.6 秒/进程，真实组件树实验约 0.5 秒/进程。
 
@@ -491,15 +492,15 @@ PowerShell 设置环境使用 `$env:CJK_DRAWS='65534'` 等；表中环境项不�
 
 只读核查 `C:/Users/Lenovo/.local/share/opencode/log` 内 13 个日志，统计固定截止本地 2026-09-12 12:44:34（UTC 04:44:34），仅统计真正行首 severity，不把 permission 中的实验命令当作故障。当前六个 TUI 的启动记录均为 1.15.14-smark；PID 除 daemon 外按实际进程启动时间关联，日志本身没有 TUI PID。
 
-| PID / 角色 | 日志文件 | ERROR / WARN | 结论 |
-|---|---|---|---|
-| 33160 daemon | 2026-09-11T190839.log | 59 / 9 | 共享后端记录，非单个 TUI |
-| 12104 TUI | 2026-09-11T190841.log | 0 / 0 | 启动 Session `ses_f6e2c6ab7ffevJGNceQ26VbQIv` |
-| 61492 TUI | 2026-09-11T190844.log | 0 / 0 | 启动 Session `ses_1762e23a2ffeYBi6TXLUSjJuKP` |
-| 68736 TUI | 2026-09-11T190848.log | 1 / 0 | `ses_041cd5549ffeSiDWyPpcy8Xrsl`，重复 tui-smoke 插件 ID |
-| 54464 TUI | 2026-09-11T190851.log | 0 / 0 | 启动 Session `ses_f8b378e68ffePzMwT7iii55Nw7` |
-| 18112 TUI | 2026-09-11T192614.log | 0 / 0 | args=[]，无法据启动日志确定后来打开的 Session |
-| 70948 TUI | 2026-09-12T042118.log | 0 / 0 | args=[]，同上 |
+| PID / 角色   | 日志文件              | ERROR / WARN | 结论                                                     |
+| ------------ | --------------------- | ------------ | -------------------------------------------------------- |
+| 33160 daemon | 2026-09-11T190839.log | 59 / 9       | 共享后端记录，非单个 TUI                                 |
+| 12104 TUI    | 2026-09-11T190841.log | 0 / 0        | 启动 Session `ses_f6e2c6ab7ffevJGNceQ26VbQIv`            |
+| 61492 TUI    | 2026-09-11T190844.log | 0 / 0        | 启动 Session `ses_1762e23a2ffeYBi6TXLUSjJuKP`            |
+| 68736 TUI    | 2026-09-11T190848.log | 1 / 0        | `ses_041cd5549ffeSiDWyPpcy8Xrsl`，重复 tui-smoke 插件 ID |
+| 54464 TUI    | 2026-09-11T190851.log | 0 / 0        | 启动 Session `ses_f8b378e68ffePzMwT7iii55Nw7`            |
+| 18112 TUI    | 2026-09-11T192614.log | 0 / 0        | args=[]，无法据启动日志确定后来打开的 Session            |
+| 70948 TUI    | 2026-09-12T042118.log | 0 / 0        | args=[]，同上                                            |
 
 daemon 错误分类：34 次 HTTP 502、1 次 HTTP 500、3 次未记录状态码 API 错误、5 次 Provider stream failed、7 次 Copilot 模型元数据缺字段、7 次 claudecode provider 不在列表、2 次 Aborted process。警告为 6 次 plugin@1.15.14-smark 无匹配 npm 版本、3 次 snapshot GC 已运行。可说明请求重试/配置问题，不能据此归因缺字。
 

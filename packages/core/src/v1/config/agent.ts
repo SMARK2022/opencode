@@ -81,7 +81,12 @@ const normalize = (agent: Schema.Schema.Type<typeof AgentSchema>): Schema.Schema
   globalThis.Object.assign(permission, agent.permission)
 
   const steps = agent.steps ?? agent.maxSteps
-  return { ...agent, options, permission: permission as Schema.Schema.Type<typeof ConfigPermissionV1.Info>, ...(steps !== undefined ? { steps } : {}) }
+  return {
+    ...agent,
+    options,
+    permission: permission as Schema.Schema.Type<typeof ConfigPermissionV1.Info>,
+    ...(steps !== undefined ? { steps } : {}),
+  }
 }
 
 export const Info = AgentSchema.pipe(

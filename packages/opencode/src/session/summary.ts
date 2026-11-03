@@ -16,7 +16,6 @@ import { Config } from "@/config/config"
 import { Storage } from "@/storage/storage"
 import { Database } from "@opencode-ai/core/database/database"
 
-
 export interface Interface {
   readonly summarize: (input: { sessionID: SessionID; messageID: MessageID }) => Effect.Effect<void>
   readonly diff: (input: { sessionID: SessionID; messageID?: MessageID }) => Effect.Effect<Snapshot.FileDiff[]>
@@ -40,10 +39,16 @@ const layer = Layer.effect(
       // Bash/MCP/手工改动不进入此列表是source明确取舍，隐藏或撤回消息也不能重新计入。
       const ctx = yield* InstanceState.context
       const base = ctx.worktree && ctx.worktree !== "/" ? ctx.worktree : ctx.directory
-      return ToolDiffs.collect(input.messages.flatMap((message) => message.info.hidden ? [] :
-        message.parts.flatMap((part) => part.hidden || part.type !== "tool" || part.state.status !== "completed"
-          ? [] : [part.state.metadata]),
-      ), base)
+      return ToolDiffs.collect(
+        input.messages.flatMap((message) =>
+          message.info.hidden
+            ? []
+            : message.parts.flatMap((part) =>
+                part.hidden || part.type !== "tool" || part.state.status !== "completed" ? [] : [part.state.metadata],
+              ),
+        ),
+        base,
+      )
     })
 
     const summarize = Effect.fn("SessionSummary.summarize")(function* (input: {
@@ -93,7 +98,7 @@ const layer = Layer.effect(
       if (input.messageID) {
         // Native保留精确per-user摘要；身份与Session同时限定，不能退化为旧消息表聚合。
         const native = yield* nativeMessages.message(SessionMessage.ID.make(input.messageID), input.sessionID)
-        if (native?.message.type === "user") return native.message.summary?.diffs.map(item => ({ ...item })) ?? []
+        if (native?.message.type === "user") return native.message.summary?.diffs.map((item) => ({ ...item })) ?? []
       }
       // #0500：DB 权威聚合经 SummaryCache 读取；路径归一化后同步镜像，用户清理后可重建。
       const diffs = yield* SummaryCache.load({ sessionID: input.sessionID, storage }).pipe(
@@ -107,8 +112,6 @@ const layer = Layer.effect(
     return Service.of({ summarize, diff, computeDiff })
   }),
 )
-
-
 
 export const DiffInput = Schema.Struct({
   sessionID: SessionID,

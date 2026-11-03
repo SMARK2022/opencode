@@ -43,37 +43,37 @@ is not an implementation authority for this revision.
 
 ## 3. Repository Context
 
-| Source | Why it constrains this task |
-| --- | --- |
-| `CONTEXT.md` | Defines Tool, Project, Message, Patch-related module boundaries, and the `packages/opencode` ownership map. |
-| Root `AGENTS.md` | Requires package-local test/typecheck commands, parallel investigation, and no unrequested SDK generation. |
-| `packages/opencode/AGENTS.md` | Requires existing module conventions, inferred TypeScript types, and package-local verification. |
-| `packages/opencode/test/AGENTS.md` | Requires real Effect Tool seams, independent expected values, and no implementation-coupled tests. |
-| `docs/adr/README.md` and ADR-0001 | No accepted ADR governs text matching; ADR-0001 is unrelated triage policy. |
-| `.opencode/policy/first-principles-engineering.md` | Requires first-divergence repair, one primary semantic path, no fallback, traceability, and the Chinese-comment gate. |
-| `.opencode/templates/canonical-plan.md` | Defines the canonical plan fields and audit/implementation state transitions. |
-| Historical `docs/plans/edit-apply-patch-match-recovery.md` | Read-only historical context; it must remain byte-identical and is not modified or extended. |
+| Source                                                     | Why it constrains this task                                                                                           |
+| ---------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `CONTEXT.md`                                               | Defines Tool, Project, Message, Patch-related module boundaries, and the `packages/opencode` ownership map.           |
+| Root `AGENTS.md`                                           | Requires package-local test/typecheck commands, parallel investigation, and no unrequested SDK generation.            |
+| `packages/opencode/AGENTS.md`                              | Requires existing module conventions, inferred TypeScript types, and package-local verification.                      |
+| `packages/opencode/test/AGENTS.md`                         | Requires real Effect Tool seams, independent expected values, and no implementation-coupled tests.                    |
+| `docs/adr/README.md` and ADR-0001                          | No accepted ADR governs text matching; ADR-0001 is unrelated triage policy.                                           |
+| `.opencode/policy/first-principles-engineering.md`         | Requires first-divergence repair, one primary semantic path, no fallback, traceability, and the Chinese-comment gate. |
+| `.opencode/templates/canonical-plan.md`                    | Defines the canonical plan fields and audit/implementation state transitions.                                         |
+| Historical `docs/plans/edit-apply-patch-match-recovery.md` | Read-only historical context; it must remain byte-identical and is not modified or extended.                          |
 
 ## 4. Files and Evidence Read
 
-| Evidence | Relevance | Evidence class |
-| --- | --- | --- |
-| `packages/opencode/src/patch/match.ts` | Shared exact locator, current `closestWindow`, bigram scorer, renderer, and current reliability gate. | observed |
-| `packages/opencode/src/patch/index.ts` | Patch owner calls `closestWindow` from the failed chunk path with persisted file text and the complete failed expected block. | observed |
-| `packages/opencode/src/tool/edit-apply.ts` | `applyEdits` processes multiple edits, knows the failing `editIndex`, and currently exposes only a formatted error message. | observed |
-| `packages/opencode/src/tool/edit.ts` | Edit failure path selects a diagnostic probe and currently falls back to the first edit when normalized matching is active. | observed |
-| `packages/opencode/src/tool/apply_patch.ts` | Groups Patch operations, preserves per-file aggregation, and consumes owner errors without owning text matching. | observed |
-| `packages/opencode/test/tool/edit.test.ts` | Real Edit Tool diagnostics, ties, long decoys, normalized matching, and multi-edit behavior. | observed |
-| `packages/opencode/test/tool/apply_patch.test.ts` | Real ApplyPatchTool diagnostics, failed chunks, partial file success, and duplicate-output assertions. | observed |
-| `packages/opencode/test/patch/patch.test.ts` | Exported Patch owner and multi-chunk behavior seam. | observed |
-| `packages/opencode/package.json` | Confirms existing `diff` dependency and no need for a new matching dependency. | observed |
-| Current direct replay: `bun -e` importing `closestWindow` | Expected `target sequence ... gamxa` is present after a decoy, but current scorer selects line 1 `...deltta`. | observed |
-| Current direct replay: `bun -e` importing `applyEdits` and `closestWindow` | In normalized multi-edit failure, current probe selection chooses the first normalized edit while `edits[1]` is missing. | observed |
-| `bun test test/tool/edit.test.ts -t "closest match rejects an unrelated long-line decoy|closest match shows actual candidate for a single-char mismatch|suppresses tied closest candidates"` from `packages/opencode` | Existing diagnostic tests pass but do not cover the semiglobal failure shape or normalized multi-edit probe attribution. | observed |
-| `bun test test/tool/apply_patch.test.ts -t "reports the reliable candidate for the chunk that actually failed|suppresses unrelated candidates when context mismatches"` from `packages/opencode` | Existing Patch diagnostics pass but do not prove global edit-distance ranking. | observed |
-| Myers, `A Fast Bit-Vector Algorithm for Approximate String Matching Based on Dynamic Programming` | Establishes approximate substring matching and the semiglobal DP boundary `D[0][j] = 0`; it supports the selected primary algorithm. | contracted external evidence |
-| GNU `patch` inexact matching documentation | Shows fuzz-factor matching is context/location-oriented and is not the requested global closest-text objective. | contracted external evidence |
-| Google `diff-match-patch` API and JavaScript source | Shows `match_main` combines accuracy with location and has pattern/threshold policy unlike the requested global minimum. | contracted external evidence |
+| Evidence                                                                                                      | Relevance                                                                                                                            | Evidence class                                                                 |
+| ------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------ | -------- |
+| `packages/opencode/src/patch/match.ts`                                                                        | Shared exact locator, current `closestWindow`, bigram scorer, renderer, and current reliability gate.                                | observed                                                                       |
+| `packages/opencode/src/patch/index.ts`                                                                        | Patch owner calls `closestWindow` from the failed chunk path with persisted file text and the complete failed expected block.        | observed                                                                       |
+| `packages/opencode/src/tool/edit-apply.ts`                                                                    | `applyEdits` processes multiple edits, knows the failing `editIndex`, and currently exposes only a formatted error message.          | observed                                                                       |
+| `packages/opencode/src/tool/edit.ts`                                                                          | Edit failure path selects a diagnostic probe and currently falls back to the first edit when normalized matching is active.          | observed                                                                       |
+| `packages/opencode/src/tool/apply_patch.ts`                                                                   | Groups Patch operations, preserves per-file aggregation, and consumes owner errors without owning text matching.                     | observed                                                                       |
+| `packages/opencode/test/tool/edit.test.ts`                                                                    | Real Edit Tool diagnostics, ties, long decoys, normalized matching, and multi-edit behavior.                                         | observed                                                                       |
+| `packages/opencode/test/tool/apply_patch.test.ts`                                                             | Real ApplyPatchTool diagnostics, failed chunks, partial file success, and duplicate-output assertions.                               | observed                                                                       |
+| `packages/opencode/test/patch/patch.test.ts`                                                                  | Exported Patch owner and multi-chunk behavior seam.                                                                                  | observed                                                                       |
+| `packages/opencode/package.json`                                                                              | Confirms existing `diff` dependency and no need for a new matching dependency.                                                       | observed                                                                       |
+| Current direct replay: `bun -e` importing `closestWindow`                                                     | Expected `target sequence ... gamxa` is present after a decoy, but current scorer selects line 1 `...deltta`.                        | observed                                                                       |
+| Current direct replay: `bun -e` importing `applyEdits` and `closestWindow`                                    | In normalized multi-edit failure, current probe selection chooses the first normalized edit while `edits[1]` is missing.             | observed                                                                       |
+| `bun test test/tool/edit.test.ts -t "closest match rejects an unrelated long-line decoy                       | closest match shows actual candidate for a single-char mismatch                                                                      | suppresses tied closest candidates"`from`packages/opencode`                    | Existing diagnostic tests pass but do not cover the semiglobal failure shape or normalized multi-edit probe attribution. | observed |
+| `bun test test/tool/apply_patch.test.ts -t "reports the reliable candidate for the chunk that actually failed | suppresses unrelated candidates when context mismatches"`from`packages/opencode`                                                     | Existing Patch diagnostics pass but do not prove global edit-distance ranking. | observed                                                                                                                 |
+| Myers, `A Fast Bit-Vector Algorithm for Approximate String Matching Based on Dynamic Programming`             | Establishes approximate substring matching and the semiglobal DP boundary `D[0][j] = 0`; it supports the selected primary algorithm. | contracted external evidence                                                   |
+| GNU `patch` inexact matching documentation                                                                    | Shows fuzz-factor matching is context/location-oriented and is not the requested global closest-text objective.                      | contracted external evidence                                                   |
+| Google `diff-match-patch` API and JavaScript source                                                           | Shows `match_main` combines accuracy with location and has pattern/threshold policy unlike the requested global minimum.             | contracted external evidence                                                   |
 
 External references:
 
@@ -115,41 +115,41 @@ probe incorrect while leaving the replacement failure itself correct.
 
 ## 6. Supported Input Domain and Reachability
 
-| Input or condition | Producer | Upstream guarantees | Reachable path | Owner | Classification |
-| --- | --- | --- | --- | --- | --- |
-| Non-empty failed Patch old block or `change_context` | Model-generated Patch text | Parser produces ordered logical lines and exact context fields | `Patch.deriveNewContentsFromChunks` -> `withCandidate` -> `closestWindow` | `patch/match.ts` diagnostic owner | observed |
-| Failed Edit `oldString` | Model-generated Edit input | `applyEdits` validates non-empty strings before matching | `EditTool.execute` catch -> `closestWindow` | `edit-apply.ts` failure identity plus `match.ts` scorer | observed |
-| Multi-chunk Patch update | Model-generated multiple `@@` chunks | Chunk order and current cursor are already owned by Patch | `applyChunks` first unresolved chunk -> owner error | Patch owner | observed/reachable |
-| Multi-edit Edit call | Model-generated `edits[]` | All ranges resolve against one pre-edit/normalized base | `applyEdits` loop throws at a known edit index | Edit replacement owner | observed |
-| Candidate with prefix/suffix context | Existing file text | Diagnostic does not mutate the file | Shared full-text scan | Shared matcher | observed |
-| Candidate with line insertion/deletion | Existing file text | No fixed candidate-height guarantee exists in diagnostic contract | Shared semiglobal substring scan | Shared matcher | reachable |
-| CRLF/CR/BOM input | Existing files and Tool normalization | Existing callers normalize for matching and restore output endings | Both Tool failure paths | Existing line-ending/BOM owners; matcher receives text | contracted |
-| Repeated equally-best candidate | Existing source/Markdown text | No contract authorizes choosing one occurrence | Shared matcher tie result | Shared matcher | reachable |
-| Unrelated low-similarity file | Any failed Tool input | A failed input does not guarantee a meaningful candidate | Shared matcher reliability gate | Shared matcher | observed |
-| Binary data, AST semantics, remote writes, hostile plugins | No producer in this call path | No relevant public contract or threat model | None established | Not applicable | speculative; excluded |
+| Input or condition                                         | Producer                              | Upstream guarantees                                                | Reachable path                                                            | Owner                                                   | Classification        |
+| ---------------------------------------------------------- | ------------------------------------- | ------------------------------------------------------------------ | ------------------------------------------------------------------------- | ------------------------------------------------------- | --------------------- |
+| Non-empty failed Patch old block or `change_context`       | Model-generated Patch text            | Parser produces ordered logical lines and exact context fields     | `Patch.deriveNewContentsFromChunks` -> `withCandidate` -> `closestWindow` | `patch/match.ts` diagnostic owner                       | observed              |
+| Failed Edit `oldString`                                    | Model-generated Edit input            | `applyEdits` validates non-empty strings before matching           | `EditTool.execute` catch -> `closestWindow`                               | `edit-apply.ts` failure identity plus `match.ts` scorer | observed              |
+| Multi-chunk Patch update                                   | Model-generated multiple `@@` chunks  | Chunk order and current cursor are already owned by Patch          | `applyChunks` first unresolved chunk -> owner error                       | Patch owner                                             | observed/reachable    |
+| Multi-edit Edit call                                       | Model-generated `edits[]`             | All ranges resolve against one pre-edit/normalized base            | `applyEdits` loop throws at a known edit index                            | Edit replacement owner                                  | observed              |
+| Candidate with prefix/suffix context                       | Existing file text                    | Diagnostic does not mutate the file                                | Shared full-text scan                                                     | Shared matcher                                          | observed              |
+| Candidate with line insertion/deletion                     | Existing file text                    | No fixed candidate-height guarantee exists in diagnostic contract  | Shared semiglobal substring scan                                          | Shared matcher                                          | reachable             |
+| CRLF/CR/BOM input                                          | Existing files and Tool normalization | Existing callers normalize for matching and restore output endings | Both Tool failure paths                                                   | Existing line-ending/BOM owners; matcher receives text  | contracted            |
+| Repeated equally-best candidate                            | Existing source/Markdown text         | No contract authorizes choosing one occurrence                     | Shared matcher tie result                                                 | Shared matcher                                          | reachable             |
+| Unrelated low-similarity file                              | Any failed Tool input                 | A failed input does not guarantee a meaningful candidate           | Shared matcher reliability gate                                           | Shared matcher                                          | observed              |
+| Binary data, AST semantics, remote writes, hostile plugins | No producer in this call path         | No relevant public contract or threat model                        | None established                                                          | Not applicable                                          | speculative; excluded |
 
 ## 7. Required Invariants
 
-| ID | Behavioral invariant | Evidence | Existing test |
-| --- | --- | --- | --- |
-| INV-01 | The diagnostic candidate is selected by the minimum Semiglobal Levenshtein edit distance between the complete expected text and a continuous substring of the supplied file text. | User GOAL explicitly requires Semiglobal Levenshtein; Myers/Sellers formulation. | No |
-| INV-02 | Insertions, deletions, replacements, prefix/suffix context, and multiline length differences participate in one ordered primary distance calculation. | Reachable candidate shapes and current fixed-height failure. | No |
-| INV-03 | Patch diagnostics explain the first unresolved Patch chunk already identified by the Patch owner; they never rescan a different chunk. | Current `withCandidate` receives the failing `expected`; multi-chunk tests. | Partial |
-| INV-04 | Edit diagnostics explain the exact missing `edits[i]` known by `applyEdits`, including when the batch uses normalized matching. | Current owner loop has `i`; direct replay proves current probe drift. | No |
-| INV-05 | The diagnostic result never performs replacement success, never changes file content, and never acts as a fallback matcher. | Current callers use `closestWindow` only after failure. | Partial |
-| INV-06 | The existing user-facing error header, no-duplicate expected-text rule, candidate-centered excerpt budget, and low-confidence/tie behavior remain valid. Reliability is `1 - distance / max(expectedCodePointLength, candidateCodePointLength)`, bounded to `[0,1]`; scores below `0.5` are suppressed, and distinct equal-distance spans are suppressed. | Existing Tool tests, user constraint, and R2 formula definition. | Partial |
-| INV-07 | `apply_patch` and `edit` keep their public Tool schemas and successful exact/normalized replacement contracts unchanged. | Tool parameters and current owner tests. | Yes |
-| INV-08 | Multi-block failure does not cause an unrelated successful block to be used as the diagnostic expected text, and failed files remain unmodified. | Patch/Edit atomicity and multi-block behavior. | Partial |
-| INV-09 | The shared matcher has one authoritative semantic implementation; no parallel scorer remains in Patch or Edit. | Shared import in current code and duplicated historical scorer risk. | No |
-| INV-10 | Every rolling DP state preserves the minimum distance, one representative candidate span, and whether another distinct span has the same minimum cost; global ties are suppressed independent of transition order. | R2 audit B-02 and reachable equal-distance candidates. | No |
-| INV-11 | A variable-length candidate is rendered from the exact raw span returned by the same DP; the renderer never indexes an absent expected line and never runs a second candidate search. | R2 audit B-01 and current `formatClosestDifference` line-count assumption. | No |
+| ID     | Behavioral invariant                                                                                                                                                                                                                                                                                                                                      | Evidence                                                                         | Existing test |
+| ------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- | ------------- |
+| INV-01 | The diagnostic candidate is selected by the minimum Semiglobal Levenshtein edit distance between the complete expected text and a continuous substring of the supplied file text.                                                                                                                                                                         | User GOAL explicitly requires Semiglobal Levenshtein; Myers/Sellers formulation. | No            |
+| INV-02 | Insertions, deletions, replacements, prefix/suffix context, and multiline length differences participate in one ordered primary distance calculation.                                                                                                                                                                                                     | Reachable candidate shapes and current fixed-height failure.                     | No            |
+| INV-03 | Patch diagnostics explain the first unresolved Patch chunk already identified by the Patch owner; they never rescan a different chunk.                                                                                                                                                                                                                    | Current `withCandidate` receives the failing `expected`; multi-chunk tests.      | Partial       |
+| INV-04 | Edit diagnostics explain the exact missing `edits[i]` known by `applyEdits`, including when the batch uses normalized matching.                                                                                                                                                                                                                           | Current owner loop has `i`; direct replay proves current probe drift.            | No            |
+| INV-05 | The diagnostic result never performs replacement success, never changes file content, and never acts as a fallback matcher.                                                                                                                                                                                                                               | Current callers use `closestWindow` only after failure.                          | Partial       |
+| INV-06 | The existing user-facing error header, no-duplicate expected-text rule, candidate-centered excerpt budget, and low-confidence/tie behavior remain valid. Reliability is `1 - distance / max(expectedCodePointLength, candidateCodePointLength)`, bounded to `[0,1]`; scores below `0.5` are suppressed, and distinct equal-distance spans are suppressed. | Existing Tool tests, user constraint, and R2 formula definition.                 | Partial       |
+| INV-07 | `apply_patch` and `edit` keep their public Tool schemas and successful exact/normalized replacement contracts unchanged.                                                                                                                                                                                                                                  | Tool parameters and current owner tests.                                         | Yes           |
+| INV-08 | Multi-block failure does not cause an unrelated successful block to be used as the diagnostic expected text, and failed files remain unmodified.                                                                                                                                                                                                          | Patch/Edit atomicity and multi-block behavior.                                   | Partial       |
+| INV-09 | The shared matcher has one authoritative semantic implementation; no parallel scorer remains in Patch or Edit.                                                                                                                                                                                                                                            | Shared import in current code and duplicated historical scorer risk.             | No            |
+| INV-10 | Every rolling DP state preserves the minimum distance, one representative candidate span, and whether another distinct span has the same minimum cost; global ties are suppressed independent of transition order.                                                                                                                                        | R2 audit B-02 and reachable equal-distance candidates.                           | No            |
+| INV-11 | A variable-length candidate is rendered from the exact raw span returned by the same DP; the renderer never indexes an absent expected line and never runs a second candidate search.                                                                                                                                                                     | R2 audit B-01 and current `formatClosestDifference` line-count assumption.       | No            |
 
 ## 8. First Divergence and Root Cause
 
-| Invariant | First divergence | Owning module/interface | Proof |
-| --- | --- | --- | --- |
-| INV-01/02/06/09 | `closestWindow` converts each same-height window into a trimmed bigram multiset and ranks Dice overlap instead of calculating ordered minimum edit distance over continuous substrings. | `packages/opencode/src/patch/match.ts` | Current `similarity()` lines 98-110 and `closestWindow()` lines 180-205; direct replay selects the `deltta` line over the `gamxa` candidate. |
-| INV-04/08 | `EditTool` reconstructs the failed edit with raw `baseLF.indexOf()` after `applyEdits` has already selected normalized matching, so the first normalized edit can be selected instead of the failing index. | `packages/opencode/src/tool/edit-apply.ts` and `packages/opencode/src/tool/edit.ts` | Direct replay with smart quotes selects `"hello"` while `edits[1].oldString = "world"` is the thrown failure. |
+| Invariant       | First divergence                                                                                                                                                                                            | Owning module/interface                                                             | Proof                                                                                                                                        |
+| --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| INV-01/02/06/09 | `closestWindow` converts each same-height window into a trimmed bigram multiset and ranks Dice overlap instead of calculating ordered minimum edit distance over continuous substrings.                     | `packages/opencode/src/patch/match.ts`                                              | Current `similarity()` lines 98-110 and `closestWindow()` lines 180-205; direct replay selects the `deltta` line over the `gamxa` candidate. |
+| INV-04/08       | `EditTool` reconstructs the failed edit with raw `baseLF.indexOf()` after `applyEdits` has already selected normalized matching, so the first normalized edit can be selected instead of the failing index. | `packages/opencode/src/tool/edit-apply.ts` and `packages/opencode/src/tool/edit.ts` | Direct replay with smart quotes selects `"hello"` while `edits[1].oldString = "world"` is the thrown failure.                                |
 
 ### Red-Capable Feedback Loops
 
@@ -162,7 +162,11 @@ bun -e 'import { closestWindow } from "./src/patch/match.ts"; const content="tar
 Observed:
 
 ```json
-{"line":1,"excerpt":"line 1 actual: \"target sequence alpha beta deltta\"\ndifference: requested columns 28-32 differ from actual columns 28-32","score":0.8253968253968254}
+{
+  "line": 1,
+  "excerpt": "line 1 actual: \"target sequence alpha beta deltta\"\ndifference: requested columns 28-32 differ from actual columns 28-32",
+  "score": 0.8253968253968254
+}
 ```
 
 The true near candidate is on line 2 with one middle-character typo and surrounding
@@ -178,7 +182,7 @@ bun -e 'import { applyEdits } from "./src/tool/edit-apply.ts"; const content="sa
 Observed:
 
 ```json
-{"failedEditIndex":-1,"selectedProbe":null}
+{ "failedEditIndex": -1, "selectedProbe": null }
 ```
 
 The thrown error is for `edits[1]`; the owner-metadata probe is absent in the
@@ -189,14 +193,14 @@ turn green.
 
 ## 9. Responsibility and Seam
 
-| Concern | Owner | Interface promise | Why it belongs here | Why another module does not own it |
-| --- | --- | --- | --- | --- |
-| Global closest-candidate calculation | `packages/opencode/src/patch/match.ts` | Pure text matching result used by both Tool failure paths | It is the existing shared matcher and owns candidate boundaries, score, tie, and excerpt data | Tool wrappers must not implement competing scorers |
-| Failed Edit index propagation | `packages/opencode/src/tool/edit-apply.ts` | Failure retains the owner-known edit index without changing message text | The loop that detects the failure owns the index | `edit.ts` cannot reconstruct normalized coordinates reliably |
-| Edit diagnostic probe selection | `packages/opencode/src/tool/edit.ts` | Uses the failed edit only for diagnostic rendering | It owns the public Tool catch and existing error composition | It must not guess from raw content or re-run matching |
-| Patch diagnostic invocation | `packages/opencode/src/patch/index.ts` | Passes the complete failed expected block to the shared matcher | Patch owner knows the first unresolved chunk and persisted input | `apply_patch.ts` only aggregates files and cannot recover chunk identity |
-| ApplyPatchTool aggregation | `packages/opencode/src/tool/apply_patch.ts` | Preserves existing per-file output/error behavior | It owns Tool result composition, not text ranking | Shared matcher already owns the diagnostic semantics |
-| Behavior verification | Exported Patch owner plus real `ApplyPatchTool.execute` and `EditTool.execute` | Tests observe replacement and failure output | These are the confirmed public seams | Private DP helpers would couple tests to implementation |
+| Concern                              | Owner                                                                          | Interface promise                                                        | Why it belongs here                                                                           | Why another module does not own it                                       |
+| ------------------------------------ | ------------------------------------------------------------------------------ | ------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
+| Global closest-candidate calculation | `packages/opencode/src/patch/match.ts`                                         | Pure text matching result used by both Tool failure paths                | It is the existing shared matcher and owns candidate boundaries, score, tie, and excerpt data | Tool wrappers must not implement competing scorers                       |
+| Failed Edit index propagation        | `packages/opencode/src/tool/edit-apply.ts`                                     | Failure retains the owner-known edit index without changing message text | The loop that detects the failure owns the index                                              | `edit.ts` cannot reconstruct normalized coordinates reliably             |
+| Edit diagnostic probe selection      | `packages/opencode/src/tool/edit.ts`                                           | Uses the failed edit only for diagnostic rendering                       | It owns the public Tool catch and existing error composition                                  | It must not guess from raw content or re-run matching                    |
+| Patch diagnostic invocation          | `packages/opencode/src/patch/index.ts`                                         | Passes the complete failed expected block to the shared matcher          | Patch owner knows the first unresolved chunk and persisted input                              | `apply_patch.ts` only aggregates files and cannot recover chunk identity |
+| ApplyPatchTool aggregation           | `packages/opencode/src/tool/apply_patch.ts`                                    | Preserves existing per-file output/error behavior                        | It owns Tool result composition, not text ranking                                             | Shared matcher already owns the diagnostic semantics                     |
+| Behavior verification                | Exported Patch owner plus real `ApplyPatchTool.execute` and `EditTool.execute` | Tests observe replacement and failure output                             | These are the confirmed public seams                                                          | Private DP helpers would couple tests to implementation                  |
 
 ## 10. Single Approved Primary-Path Design
 
@@ -293,75 +297,75 @@ the failed chunk; its aggregation path remains unchanged.
 
 ## 11. Secondary and Replacement Path Inventory
 
-| Path | Current or proposed | Classification | Produces success? | Decision-surface share | Disposition |
-| --- | --- | --- | --- | --- | --- |
-| Existing Patch exact/current-text application | current | primary-contract branch | yes | existing | preserve |
-| Existing Edit exact/closed-normalization application | current | primary-contract branch | yes | existing | preserve |
-| Shared Semiglobal Levenshtein candidate calculation | proposed | diagnostic | no | 1 primary diagnostic algorithm | add as the sole matcher |
-| Existing same-height bigram scorer | current | superseded diagnostic workaround | no | existing | remove |
-| Edit raw `baseLF.indexOf` probe heuristic | current | superseded diagnostic workaround | no | existing | remove |
-| Existing low-confidence/tie suppression with the R2 formula | current | diagnostic contract | no | existing | preserve without escalation |
-| Fuzzy replacement based on DP similarity | proposed nowhere | forbidden fallback | yes | zero | reject |
-| Bitap/DMP/GNU-fuzz retry after DP uncertainty | proposed nowhere | forbidden fallback | yes/no | zero | reject |
+| Path                                                        | Current or proposed | Classification                   | Produces success? | Decision-surface share         | Disposition                 |
+| ----------------------------------------------------------- | ------------------- | -------------------------------- | ----------------- | ------------------------------ | --------------------------- |
+| Existing Patch exact/current-text application               | current             | primary-contract branch          | yes               | existing                       | preserve                    |
+| Existing Edit exact/closed-normalization application        | current             | primary-contract branch          | yes               | existing                       | preserve                    |
+| Shared Semiglobal Levenshtein candidate calculation         | proposed            | diagnostic                       | no                | 1 primary diagnostic algorithm | add as the sole matcher     |
+| Existing same-height bigram scorer                          | current             | superseded diagnostic workaround | no                | existing                       | remove                      |
+| Edit raw `baseLF.indexOf` probe heuristic                   | current             | superseded diagnostic workaround | no                | existing                       | remove                      |
+| Existing low-confidence/tie suppression with the R2 formula | current             | diagnostic contract              | no                | existing                       | preserve without escalation |
+| Fuzzy replacement based on DP similarity                    | proposed nowhere    | forbidden fallback               | yes               | zero                           | reject                      |
+| Bitap/DMP/GNU-fuzz retry after DP uncertainty               | proposed nowhere    | forbidden fallback               | yes/no            | zero                           | reject                      |
 
 The primary diagnostic path has no alternate success path. The existing
 replacement owners remain the only success paths.
 
 ## 12. Workaround Deletion and Replacement
 
-| Existing workaround or duplicate | Why it existed | Why the approved route supersedes it | Delete or collapse location |
-| --- | --- | --- | --- |
-| `bigrams()` and `similarity()` Dice scorer | Attempted to rank nearby text cheaply | It does not optimize ordered edit distance and misranks contextual typos | Collapse in `packages/opencode/src/patch/match.ts` |
-| Fixed same-height scan in `closestWindow()` | Assumed expected line count identifies the candidate span | Semiglobal DP must compare all continuous substrings and recover actual boundaries | Replace in `packages/opencode/src/patch/match.ts` |
-| `EditTool` raw `baseLF.indexOf` probe selection | Attempted to reconstruct failed multi-edit identity | The owner already knows `editIndex`; reconstruction is wrong in normalized space | Remove in `packages/opencode/src/tool/edit.ts` |
-| Missing internal failed-index carrier | Error text was the only propagated state | A non-user-facing owner field preserves identity without schema/message changes | Add in `packages/opencode/src/tool/edit-apply.ts` |
+| Existing workaround or duplicate                | Why it existed                                            | Why the approved route supersedes it                                               | Delete or collapse location                        |
+| ----------------------------------------------- | --------------------------------------------------------- | ---------------------------------------------------------------------------------- | -------------------------------------------------- |
+| `bigrams()` and `similarity()` Dice scorer      | Attempted to rank nearby text cheaply                     | It does not optimize ordered edit distance and misranks contextual typos           | Collapse in `packages/opencode/src/patch/match.ts` |
+| Fixed same-height scan in `closestWindow()`     | Assumed expected line count identifies the candidate span | Semiglobal DP must compare all continuous substrings and recover actual boundaries | Replace in `packages/opencode/src/patch/match.ts`  |
+| `EditTool` raw `baseLF.indexOf` probe selection | Attempted to reconstruct failed multi-edit identity       | The owner already knows `editIndex`; reconstruction is wrong in normalized space   | Remove in `packages/opencode/src/tool/edit.ts`     |
+| Missing internal failed-index carrier           | Error text was the only propagated state                  | A non-user-facing owner field preserves identity without schema/message changes    | Add in `packages/opencode/src/tool/edit-apply.ts`  |
 
 ## 13. Forward Traceability
 
-| Requirement or invariant | Production path | Planned file/change | Behavioral test |
-| --- | --- | --- | --- |
-| INV-01 global nearest continuous candidate | Shared DP matcher | `src/patch/match.ts` | Edit and Patch real Tool typo/context fixtures |
-| INV-02 insertion/deletion/order robustness | Semiglobal boundaries and candidate origin | `src/patch/match.ts` | Multiline candidate with inserted/deleted line and reordered decoy |
-| INV-03 failed Patch block only | Existing Patch owner expected argument | No Patch Tool schema change; preserve `src/patch/index.ts` path | Multi-chunk Patch failure identifies the unresolved block |
-| INV-04 failed Edit block only | Owner error carries `editIndex` | `src/tool/edit-apply.ts`, `src/tool/edit.ts` | Normalized multi-edit where first edit matches and second fails |
-| INV-05 diagnostic-only behavior | `closestWindow` remains called after failure | `src/patch/match.ts` and existing callers | Failed files remain unchanged; exact/normalized successes stay green |
-| INV-06 useful non-duplicated output | Existing renderer with raw candidate span | `src/patch/match.ts` | Long candidate, tie, low-confidence, and expected-text count assertions |
-| INV-07 public contracts unchanged | Existing owners and Tool parameters | No schema/config changes | Focused Patch/Edit success suites |
-| INV-08 multi-block atomicity and attribution | Existing `applyEdits`/Patch grouping plus metadata | `src/tool/edit-apply.ts` only for identity | Real Tool multi-block tests |
-| INV-09 one matcher | Shared import path | Remove old scorer in `src/patch/match.ts` | Search plus both Tool diagnostics |
-| INV-10 complete tie enumeration | DP state equivalence flag and final-span deduplication | `src/patch/match.ts` | Equal-distance candidates with different starts/ends remain suppressed |
-| INV-11 variable-span rendering | Same DP raw span plus line-count-aware renderer | `src/patch/match.ts` | Inserted/deleted-line candidate renders actual content without runtime error or expected duplication |
+| Requirement or invariant                     | Production path                                        | Planned file/change                                             | Behavioral test                                                                                      |
+| -------------------------------------------- | ------------------------------------------------------ | --------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| INV-01 global nearest continuous candidate   | Shared DP matcher                                      | `src/patch/match.ts`                                            | Edit and Patch real Tool typo/context fixtures                                                       |
+| INV-02 insertion/deletion/order robustness   | Semiglobal boundaries and candidate origin             | `src/patch/match.ts`                                            | Multiline candidate with inserted/deleted line and reordered decoy                                   |
+| INV-03 failed Patch block only               | Existing Patch owner expected argument                 | No Patch Tool schema change; preserve `src/patch/index.ts` path | Multi-chunk Patch failure identifies the unresolved block                                            |
+| INV-04 failed Edit block only                | Owner error carries `editIndex`                        | `src/tool/edit-apply.ts`, `src/tool/edit.ts`                    | Normalized multi-edit where first edit matches and second fails                                      |
+| INV-05 diagnostic-only behavior              | `closestWindow` remains called after failure           | `src/patch/match.ts` and existing callers                       | Failed files remain unchanged; exact/normalized successes stay green                                 |
+| INV-06 useful non-duplicated output          | Existing renderer with raw candidate span              | `src/patch/match.ts`                                            | Long candidate, tie, low-confidence, and expected-text count assertions                              |
+| INV-07 public contracts unchanged            | Existing owners and Tool parameters                    | No schema/config changes                                        | Focused Patch/Edit success suites                                                                    |
+| INV-08 multi-block atomicity and attribution | Existing `applyEdits`/Patch grouping plus metadata     | `src/tool/edit-apply.ts` only for identity                      | Real Tool multi-block tests                                                                          |
+| INV-09 one matcher                           | Shared import path                                     | Remove old scorer in `src/patch/match.ts`                       | Search plus both Tool diagnostics                                                                    |
+| INV-10 complete tie enumeration              | DP state equivalence flag and final-span deduplication | `src/patch/match.ts`                                            | Equal-distance candidates with different starts/ends remain suppressed                               |
+| INV-11 variable-span rendering               | Same DP raw span plus line-count-aware renderer        | `src/patch/match.ts`                                            | Inserted/deleted-line candidate renders actual content without runtime error or expected duplication |
 
 No confirmed requirement is unmapped.
 
 ## 14. Reverse Traceability
 
-| Proposed production concept | Requirement ID | Evidence | Why existing logic cannot carry it |
-| --- | --- | --- | --- |
-| Semiglobal DP rows and candidate origin | INV-01/02 | Direct current misranking and established algorithm definition | Bigram fixed windows do not represent minimum edit distance or variable spans |
-| Raw candidate span and start line | INV-02/06 | User requires complete useful location evidence; current line-only windows are fixed | Existing scorer has no start/end for a variable best substring |
-| Internal `EditApplyError.editIndex` | INV-04/08 | `applyEdits` loop has the exact failing `i`; direct normalized replay loses it in Tool catch | Raw `baseLF.indexOf` cannot identify normalized-space failures |
-| Sole shared matcher | INV-01/05/09 | Patch and Edit already import `closestWindow` | Parallel Tool scorers would drift again |
-| Exact normalized reliability formula and equal-distance span gate | INV-05/06 | Existing tests reject ties and unrelated candidates; R2 defines the score and removes length preference | Choosing a low-confidence or equal-distance candidate would create false precision |
-| DP equal-span equivalence state | INV-10 | R2 audit requires every distinct equal minimum span to reach the tie gate | One representative origin alone cannot prove all distinct spans were seen |
-| Variable-span raw renderer | INV-11 | R2 audit proves current per-index renderer is undefined for inserted/deleted lines | Existing renderer assumes equal expected/candidate line counts |
-| Normalized-code-point to raw UTF-16 boundary map | INV-02/06/07/11 | R3 audit identifies CRLF and astral offsets as reachable raw-evidence risks | Directly slicing a normalized/code-point index can corrupt or mislabel the raw excerpt |
+| Proposed production concept                                       | Requirement ID  | Evidence                                                                                                | Why existing logic cannot carry it                                                     |
+| ----------------------------------------------------------------- | --------------- | ------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------- |
+| Semiglobal DP rows and candidate origin                           | INV-01/02       | Direct current misranking and established algorithm definition                                          | Bigram fixed windows do not represent minimum edit distance or variable spans          |
+| Raw candidate span and start line                                 | INV-02/06       | User requires complete useful location evidence; current line-only windows are fixed                    | Existing scorer has no start/end for a variable best substring                         |
+| Internal `EditApplyError.editIndex`                               | INV-04/08       | `applyEdits` loop has the exact failing `i`; direct normalized replay loses it in Tool catch            | Raw `baseLF.indexOf` cannot identify normalized-space failures                         |
+| Sole shared matcher                                               | INV-01/05/09    | Patch and Edit already import `closestWindow`                                                           | Parallel Tool scorers would drift again                                                |
+| Exact normalized reliability formula and equal-distance span gate | INV-05/06       | Existing tests reject ties and unrelated candidates; R2 defines the score and removes length preference | Choosing a low-confidence or equal-distance candidate would create false precision     |
+| DP equal-span equivalence state                                   | INV-10          | R2 audit requires every distinct equal minimum span to reach the tie gate                               | One representative origin alone cannot prove all distinct spans were seen              |
+| Variable-span raw renderer                                        | INV-11          | R2 audit proves current per-index renderer is undefined for inserted/deleted lines                      | Existing renderer assumes equal expected/candidate line counts                         |
+| Normalized-code-point to raw UTF-16 boundary map                  | INV-02/06/07/11 | R3 audit identifies CRLF and astral offsets as reachable raw-evidence risks                             | Directly slicing a normalized/code-point index can corrupt or mislabel the raw excerpt |
 
 No other production concept is proposed.
 
 ## 15. File-Level Change Plan
 
-| File | Add / modify / delete | Exact responsibility of the change | Expected line delta |
-| --- | --- | --- | --- |
-| `packages/opencode/src/patch/match.ts` | modify | Replace fixed-height bigram ranking with one semiglobal DP matcher; preserve result interface, line label, tie/reliability gate, raw UTF-16 coordinate mapping, and non-duplicating excerpt behavior | +75 to +120 / -50 to -80 |
-| `packages/opencode/src/tool/edit-apply.ts` | modify | Preserve the failing `editIndex` in internal error state while retaining current error messages and replacement behavior | +8 to +20 |
-| `packages/opencode/src/tool/edit.ts` | modify | Use owner-provided failed index instead of raw probe reconstruction; keep existing Tool output and schema | -5 to +8 |
-| `packages/opencode/src/patch/index.ts` | preserve | Continue passing the actual failed Patch expected block; no new matcher or error wording | 0 |
-| `packages/opencode/src/tool/apply_patch.ts` | preserve | Continue aggregating owner errors; no duplicate scoring or schema change | 0 |
-| `packages/opencode/test/tool/edit.test.ts` | modify | Add real Tool tests for DP ranking, variable candidate span, equal-distance tie enumeration, formula boundaries, and normalized multi-edit failed index | +90 to +150 |
-| `packages/opencode/test/tool/apply_patch.test.ts` | modify | Add real Tool tests for shared DP ranking and failed-chunk-only output | +35 to +70 |
-| `packages/opencode/test/patch/patch.test.ts` | modify if owner boundary needs characterization | Confirm Patch owner supplies the failed complete block without changing replacement semantics | +10 to +35 |
-| `docs/plans/semiglobal-levenshtein-closest-match.md` | add | This new canonical plan only | plan-only |
+| File                                                 | Add / modify / delete                           | Exact responsibility of the change                                                                                                                                                                   | Expected line delta      |
+| ---------------------------------------------------- | ----------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------ |
+| `packages/opencode/src/patch/match.ts`               | modify                                          | Replace fixed-height bigram ranking with one semiglobal DP matcher; preserve result interface, line label, tie/reliability gate, raw UTF-16 coordinate mapping, and non-duplicating excerpt behavior | +75 to +120 / -50 to -80 |
+| `packages/opencode/src/tool/edit-apply.ts`           | modify                                          | Preserve the failing `editIndex` in internal error state while retaining current error messages and replacement behavior                                                                             | +8 to +20                |
+| `packages/opencode/src/tool/edit.ts`                 | modify                                          | Use owner-provided failed index instead of raw probe reconstruction; keep existing Tool output and schema                                                                                            | -5 to +8                 |
+| `packages/opencode/src/patch/index.ts`               | preserve                                        | Continue passing the actual failed Patch expected block; no new matcher or error wording                                                                                                             | 0                        |
+| `packages/opencode/src/tool/apply_patch.ts`          | preserve                                        | Continue aggregating owner errors; no duplicate scoring or schema change                                                                                                                             | 0                        |
+| `packages/opencode/test/tool/edit.test.ts`           | modify                                          | Add real Tool tests for DP ranking, variable candidate span, equal-distance tie enumeration, formula boundaries, and normalized multi-edit failed index                                              | +90 to +150              |
+| `packages/opencode/test/tool/apply_patch.test.ts`    | modify                                          | Add real Tool tests for shared DP ranking and failed-chunk-only output                                                                                                                               | +35 to +70               |
+| `packages/opencode/test/patch/patch.test.ts`         | modify if owner boundary needs characterization | Confirm Patch owner supplies the failed complete block without changing replacement semantics                                                                                                        | +10 to +35               |
+| `docs/plans/semiglobal-levenshtein-closest-match.md` | add                                             | This new canonical plan only                                                                                                                                                                         | plan-only                |
 
 The historical R9 plan is intentionally not in the change list.
 
@@ -371,27 +375,27 @@ Agreed seams are the exported Patch owner plus real `ApplyPatchTool.execute`
 and `EditTool.execute`. The pure matcher is exercised through these consumers;
 the direct red replay remains a diagnosis probe, not the sole regression test.
 
-| Order | Red behavior | Why current code fails | Minimal green behavior | Regression protected |
-| --- | --- | --- | --- | --- |
-| 1 | Edit reports the line containing `prefix target sequence alpha beta gamxa suffix` when a farther line ends in `deltta`. | Bigram Dice penalizes the true line's context and ignores edit-order cost. | Semiglobal DP selects the minimum ordered edit candidate. | Original wrong-closest symptom. |
-| 2 | Patch reports the same true candidate through the real Tool failure path. | Patch shares the same scorer and fixed-height window. | Shared matcher result is consumed without Tool-side rescoring. | Shared-consumer parity. |
-| 3 | A multiline oldString finds a candidate with one inserted or deleted line and reports its actual start line/content without throwing. | Fixed-height windows cannot represent the best continuous span and the current renderer assumes equal line counts. | DP span plus line-count-aware raw renderer uses the actual candidate. | Variable-length candidate correctness. |
-| 4 | Two distinct candidates with the same minimum distance still produce the existing no-reliable-candidate behavior, including equal endpoints with different origins. | A single origin chosen by transition order cannot prove uniqueness. | Carry equal-span state and suppress all distinct minimum spans. | No unsupported location claim. |
-| 5 | Candidate scores at the formula boundary are deterministic: `expected="abcd"`, candidate `"ab"` gives `0.5` and is accepted; candidate `"a"` gives `0.25` and is suppressed. | The old `0.5` gate needs one defined DP scale. | Use `1 - d / max(m,n)` once, without retry. | Reliability contract. |
-| 6 | A low-similarity file keeps the existing no-reliable-candidate behavior. | A global minimum exists mathematically but is not useful evidence below the existing reliability contract. | Apply the defined gate once; do not add a retry/fallback. | No degraded diagnostic behavior. |
-| 7 | In normalized multi-edit failure, the message describes only `edits[1]`, the actual missing edit. | `edit.ts` currently selects the first raw-absent oldString and can choose `edits[0]`. | Propagate internal failed index from `applyEdits` and render only that oldString. | Multi-edit attribution and no duplicate expected text. |
-| 8 | A file containing `😀 prefix\r\nactual content\r\n` and failed expected `actual contxnt` reports line 2 and raw excerpt `actual content`, through Edit or Patch. | Code-point indexes and UTF-16 offsets differ, and CRLF normalization removes one comparison unit. | Use the DP-owned raw boundary map and assert the actual Tool error evidence. | Raw-coordinate validity. |
-| 9 | Existing exact, normalized, `replaceAll`, overlap, Patch multi-chunk, and atomicity tests remain green. | Matcher/metadata changes could accidentally enter replacement success. | Keep diagnostic-only boundary and existing owner behavior. | Adjacent contract preservation. |
+| Order | Red behavior                                                                                                                                                                 | Why current code fails                                                                                             | Minimal green behavior                                                            | Regression protected                                   |
+| ----- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------- | ------------------------------------------------------ |
+| 1     | Edit reports the line containing `prefix target sequence alpha beta gamxa suffix` when a farther line ends in `deltta`.                                                      | Bigram Dice penalizes the true line's context and ignores edit-order cost.                                         | Semiglobal DP selects the minimum ordered edit candidate.                         | Original wrong-closest symptom.                        |
+| 2     | Patch reports the same true candidate through the real Tool failure path.                                                                                                    | Patch shares the same scorer and fixed-height window.                                                              | Shared matcher result is consumed without Tool-side rescoring.                    | Shared-consumer parity.                                |
+| 3     | A multiline oldString finds a candidate with one inserted or deleted line and reports its actual start line/content without throwing.                                        | Fixed-height windows cannot represent the best continuous span and the current renderer assumes equal line counts. | DP span plus line-count-aware raw renderer uses the actual candidate.             | Variable-length candidate correctness.                 |
+| 4     | Two distinct candidates with the same minimum distance still produce the existing no-reliable-candidate behavior, including equal endpoints with different origins.          | A single origin chosen by transition order cannot prove uniqueness.                                                | Carry equal-span state and suppress all distinct minimum spans.                   | No unsupported location claim.                         |
+| 5     | Candidate scores at the formula boundary are deterministic: `expected="abcd"`, candidate `"ab"` gives `0.5` and is accepted; candidate `"a"` gives `0.25` and is suppressed. | The old `0.5` gate needs one defined DP scale.                                                                     | Use `1 - d / max(m,n)` once, without retry.                                       | Reliability contract.                                  |
+| 6     | A low-similarity file keeps the existing no-reliable-candidate behavior.                                                                                                     | A global minimum exists mathematically but is not useful evidence below the existing reliability contract.         | Apply the defined gate once; do not add a retry/fallback.                         | No degraded diagnostic behavior.                       |
+| 7     | In normalized multi-edit failure, the message describes only `edits[1]`, the actual missing edit.                                                                            | `edit.ts` currently selects the first raw-absent oldString and can choose `edits[0]`.                              | Propagate internal failed index from `applyEdits` and render only that oldString. | Multi-edit attribution and no duplicate expected text. |
+| 8     | A file containing `😀 prefix\r\nactual content\r\n` and failed expected `actual contxnt` reports line 2 and raw excerpt `actual content`, through Edit or Patch.             | Code-point indexes and UTF-16 offsets differ, and CRLF normalization removes one comparison unit.                  | Use the DP-owned raw boundary map and assert the actual Tool error evidence.      | Raw-coordinate validity.                               |
+| 9     | Existing exact, normalized, `replaceAll`, overlap, Patch multi-chunk, and atomicity tests remain green.                                                                      | Matcher/metadata changes could accidentally enter replacement success.                                             | Keep diagnostic-only boundary and existing owner behavior.                        | Adjacent contract preservation.                        |
 
 Each slice must run red before its minimal implementation and green afterward.
 Expected values are hand-written literals; tests must not reimplement DP.
 
 ## 17. Chinese Comment Budget
 
-| Metric | Estimate | Method |
-| --- | --- | --- |
-| Effective changed production lines `E` | 110 | Counts substantive matcher, failed-index, and rendering changes; excludes imports, formatting, tests, and plan text. |
-| Required qualifying Chinese comments `C` | 17 | `ceil(110 * 0.15) = 17`. |
+| Metric                                   | Estimate | Method                                                                                                               |
+| ---------------------------------------- | -------- | -------------------------------------------------------------------------------------------------------------------- |
+| Effective changed production lines `E`   | 110      | Counts substantive matcher, failed-index, and rendering changes; excludes imports, formatting, tests, and plan text. |
+| Required qualifying Chinese comments `C` | 17       | `ceil(110 * 0.15) = 17`.                                                                                             |
 
 Qualifying comments must explain only non-obvious constraints:
 
@@ -413,34 +417,34 @@ loops, assignments, identifiers, or test names do not count.
 
 ## 18. Verification
 
-| Command | Working directory | Evidence produced |
-| --- | --- | --- |
-| `bun test test/tool/edit.test.ts -t "closest|multi-edit"` | `packages/opencode` | Real Edit Tool DP ranking, tie/low-confidence, and failed-edit attribution. |
-| `bun test test/tool/apply_patch.test.ts -t "candidate|chunk|multi-file"` | `packages/opencode` | Real ApplyPatchTool shared matcher and failed-chunk behavior. |
-| `bun test test/patch/patch.test.ts` | `packages/opencode` | Patch owner replacement/cursor/atomicity compatibility. |
-| `bun test test/patch/patch.test.ts test/tool/apply_patch.test.ts test/tool/edit.test.ts` | `packages/opencode` | Complete focused matching regression suite. |
-| `bun typecheck` | `packages/opencode` | Type safety through Patch, Edit, and all `applyEdits` consumers. |
-| `bun test` | `packages/opencode` | Package-wide regression evidence. |
-| The two red-capable `bun -e` replays from Section 8 | `packages/opencode` | Original wrong-candidate and wrong-failed-edit probes turn green. |
-| `git diff --check` | repository root | No whitespace errors. |
-| `git status --short` and `git diff --name-only` | repository root | Only approved implementation paths plus pre-existing unrelated work remain. |
-| Independent plan audit and independent implementation audit | repository root | Full-scope release gates required before verified state. |
-| `git diff -- <audited paths> | shasum -a 256` and staged equivalent | repository root | Audited implementation bytes equal staged commit input. |
-| `git show --format=fuller --stat --oneline HEAD` and `git status --short` | repository root | Final commit identity, path boundary, hooks, and clean task state. |
+| Command                                                                                  | Working directory                    | Evidence produced                                                           |
+| ---------------------------------------------------------------------------------------- | ------------------------------------ | --------------------------------------------------------------------------- | --------------------------------------------------------------------------- | ------------------------------------------------------------- |
+| `bun test test/tool/edit.test.ts -t "closest                                             | multi-edit"`                         | `packages/opencode`                                                         | Real Edit Tool DP ranking, tie/low-confidence, and failed-edit attribution. |
+| `bun test test/tool/apply_patch.test.ts -t "candidate                                    | chunk                                | multi-file"`                                                                | `packages/opencode`                                                         | Real ApplyPatchTool shared matcher and failed-chunk behavior. |
+| `bun test test/patch/patch.test.ts`                                                      | `packages/opencode`                  | Patch owner replacement/cursor/atomicity compatibility.                     |
+| `bun test test/patch/patch.test.ts test/tool/apply_patch.test.ts test/tool/edit.test.ts` | `packages/opencode`                  | Complete focused matching regression suite.                                 |
+| `bun typecheck`                                                                          | `packages/opencode`                  | Type safety through Patch, Edit, and all `applyEdits` consumers.            |
+| `bun test`                                                                               | `packages/opencode`                  | Package-wide regression evidence.                                           |
+| The two red-capable `bun -e` replays from Section 8                                      | `packages/opencode`                  | Original wrong-candidate and wrong-failed-edit probes turn green.           |
+| `git diff --check`                                                                       | repository root                      | No whitespace errors.                                                       |
+| `git status --short` and `git diff --name-only`                                          | repository root                      | Only approved implementation paths plus pre-existing unrelated work remain. |
+| Independent plan audit and independent implementation audit                              | repository root                      | Full-scope release gates required before verified state.                    |
+| `git diff -- <audited paths>                                                             | shasum -a 256` and staged equivalent | repository root                                                             | Audited implementation bytes equal staged commit input.                     |
+| `git show --format=fuller --stat --oneline HEAD` and `git status --short`                | repository root                      | Final commit identity, path boundary, hooks, and clean task state.          |
 
 No database, SDK generation, migration, or build command is applicable to this
 text-matching-only change.
 
 ## 19. Diff Budget
 
-| Metric | Estimate | Justification |
-| --- | --- | --- |
-| Files added | 1 | This canonical plan only; no production module is added. |
-| Files modified | 6 | Existing matcher, Edit owner/wrapper, and three behavior-test files. |
-| Files deleted | 0 | Superseded scorer is removed inside the existing matcher. |
-| Production lines | +70 to +130 / -45 to -85 | One DP path replaces one scorer; failed-index metadata is small. |
-| Test lines | +115 to +225 | Real Patch/Edit regression slices and multi-block attribution. |
-| Generated lines | 0 | No generated artifacts. |
+| Metric           | Estimate                 | Justification                                                        |
+| ---------------- | ------------------------ | -------------------------------------------------------------------- |
+| Files added      | 1                        | This canonical plan only; no production module is added.             |
+| Files modified   | 6                        | Existing matcher, Edit owner/wrapper, and three behavior-test files. |
+| Files deleted    | 0                        | Superseded scorer is removed inside the existing matcher.            |
+| Production lines | +70 to +130 / -45 to -85 | One DP path replaces one scorer; failed-index metadata is small.     |
+| Test lines       | +115 to +225             | Real Patch/Edit regression slices and multi-block attribution.       |
+| Generated lines  | 0                        | No generated artifacts.                                              |
 
 The budget is an audit signal, not permission to omit a mapped invariant. A new
 dependency, Tool parameter, fallback, or unrelated file requires a new plan
@@ -502,15 +506,15 @@ The independent auditor must:
 
 ## 22. Plan Audit Record
 
-| Round | Audited revision | Full scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | R1 | yes | B-01, B-02 | metadata audit mode; comment estimate | BLOCK | `ses_07a1b0f2affeHpK1kNYlK1wFBk` |
-| 2 | R2 | yes | B-01, B-02 | comment estimate; no implementation evidence | BLOCK | `ses_07a158f75ffeP2WMxoyb6IJg6l` |
-| 3 | R3 | yes | B-01, B-02 | comment estimate; optional file-count estimate | BLOCK | `ses_07a1068c2ffe1FS7ryRPTy4VrO` |
-| 4 | R4 | yes | none | file-count estimate; implementation evidence pending | APPROVE | `ses_07a09c583ffemwOLrLGFuu7dCY` |
-| 5 | R5 | yes | none | estimate scope; implementation evidence pending | APPROVE | `ses_07a022e3effeQAK9r4fT7ktB21` |
-| 6 | R6 | yes | none | estimate scope; TDD characterization wording; implementation evidence pending | APPROVE | `ses_079f8d159ffeCdAaQN7wXGee8b` |
-| 7 | R7 | yes | none | estimate scope; TDD wording; implementation evidence pending | APPROVE | `ses_079e91c5effe04VY0IUq7mk1N5` |
+| Round | Audited revision | Full scope? | Blocking findings | Non-blocking findings                                                         | Result  | Invocation reference             |
+| ----- | ---------------- | ----------- | ----------------- | ----------------------------------------------------------------------------- | ------- | -------------------------------- |
+| 1     | R1               | yes         | B-01, B-02        | metadata audit mode; comment estimate                                         | BLOCK   | `ses_07a1b0f2affeHpK1kNYlK1wFBk` |
+| 2     | R2               | yes         | B-01, B-02        | comment estimate; no implementation evidence                                  | BLOCK   | `ses_07a158f75ffeP2WMxoyb6IJg6l` |
+| 3     | R3               | yes         | B-01, B-02        | comment estimate; optional file-count estimate                                | BLOCK   | `ses_07a1068c2ffe1FS7ryRPTy4VrO` |
+| 4     | R4               | yes         | none              | file-count estimate; implementation evidence pending                          | APPROVE | `ses_07a09c583ffemwOLrLGFuu7dCY` |
+| 5     | R5               | yes         | none              | estimate scope; implementation evidence pending                               | APPROVE | `ses_07a022e3effeQAK9r4fT7ktB21` |
+| 6     | R6               | yes         | none              | estimate scope; TDD characterization wording; implementation evidence pending | APPROVE | `ses_079f8d159ffeCdAaQN7wXGee8b` |
+| 7     | R7               | yes         | none              | estimate scope; TDD wording; implementation evidence pending                  | APPROVE | `ses_079e91c5effe04VY0IUq7mk1N5` |
 
 ### R7 Independent Verdict (verbatim)
 
@@ -741,19 +745,19 @@ No blocking findings.
 
 ## Requirement and traceability coverage
 
-| 范围 | 审计结论 |
-|---|---|
-| Semiglobal Levenshtein 主算法 | 已映射到 `src/patch/match.ts`，DP 边界和连续 substring 目标明确 |
-| Patch 多 chunk 归因 | 现有 `applyChunks` 在首个 unresolved chunk 直接传递对应 `expected`，R1 保留该 owner path |
-| Edit 多 edit 归因 | R1 将 owner 已知的 `editIndex` 从 `applyEdits` 传递给 `edit.ts`，能够删除 raw `indexOf` 猜测 |
-| 诊断不得产生 replacement success | 已明确；`closestWindow` 仍只由失败路径调用 |
-| 不添加 fallback | 路径清单完整，bigram scorer计划删除，没有规划备用 matcher |
-| Tool schema 与成功语义 | 明确保留；没有 schema、依赖、配置或迁移变更 |
-| 返回信息有效且避免重复 | expected-text 去重、500 字符 omission 和 failed-block attribution 已映射 |
-| 低置信度与 tie 输出准确性 | **未通过**；可靠性 score 未定义，且新增的 span-length tie-break 缺乏契约依据 |
-| TDD 敏感性 | 错误候选和 normalized multi-edit attribution 用例可在当前实现上变红；还缺少区分可靠性公式及不同跨度等距候选的测试 |
-| Forward/reverse traceability | DP、failed index 和共享 matcher 已覆盖；normalized score 公式没有生产概念定义，span-length tie-break 也未出现在 reverse traceability 中 |
-| 中文注释硬门槛 | 计划承诺可行；implementation audit 必须按生产、测试和配置实际变更重新统计 |
+| 范围                             | 审计结论                                                                                                                                |
+| -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| Semiglobal Levenshtein 主算法    | 已映射到 `src/patch/match.ts`，DP 边界和连续 substring 目标明确                                                                         |
+| Patch 多 chunk 归因              | 现有 `applyChunks` 在首个 unresolved chunk 直接传递对应 `expected`，R1 保留该 owner path                                                |
+| Edit 多 edit 归因                | R1 将 owner 已知的 `editIndex` 从 `applyEdits` 传递给 `edit.ts`，能够删除 raw `indexOf` 猜测                                            |
+| 诊断不得产生 replacement success | 已明确；`closestWindow` 仍只由失败路径调用                                                                                              |
+| 不添加 fallback                  | 路径清单完整，bigram scorer计划删除，没有规划备用 matcher                                                                               |
+| Tool schema 与成功语义           | 明确保留；没有 schema、依赖、配置或迁移变更                                                                                             |
+| 返回信息有效且避免重复           | expected-text 去重、500 字符 omission 和 failed-block attribution 已映射                                                                |
+| 低置信度与 tie 输出准确性        | **未通过**；可靠性 score 未定义，且新增的 span-length tie-break 缺乏契约依据                                                            |
+| TDD 敏感性                       | 错误候选和 normalized multi-edit attribution 用例可在当前实现上变红；还缺少区分可靠性公式及不同跨度等距候选的测试                       |
+| Forward/reverse traceability     | DP、failed index 和共享 matcher 已覆盖；normalized score 公式没有生产概念定义，span-length tie-break 也未出现在 reverse traceability 中 |
+| 中文注释硬门槛                   | 计划承诺可行；implementation audit 必须按生产、测试和配置实际变更重新统计                                                               |
 
 ## Primary-path and fallback verdict
 
@@ -782,14 +786,14 @@ Complete only after the approved revision is implemented.
 
 ### Actual Files and Diff
 
-| Path | Actual change | Scope check |
-| --- | --- | --- |
-| `packages/opencode/src/patch/match.ts` | Replaced the bigram scorer with one Semiglobal Levenshtein DP, code-point/raw-boundary mapping, deterministic tie gate, normalized score, and shared renderer. | Approved primary matcher only; no replacement-success path. |
-| `packages/opencode/src/tool/edit-apply.ts` | Added internal `EditApplyError.editIndex` propagation and kept the existing apply success path unchanged. | No schema, metadata, or user-facing message change. |
-| `packages/opencode/src/tool/edit.ts` | Uses the owner-provided failed edit index for closest diagnostics. | No first-edit probe, fallback, retry, or second matcher. |
-| `packages/opencode/test/tool/edit.test.ts` | Added ordered-distance, inner-tie, raw-offset, variable-span, score-boundary, and normalized multi-edit behavior coverage. | Real Edit Tool seam with hand-written expected evidence. |
-| `packages/opencode/test/tool/apply_patch.test.ts` | Added/updated shared matcher candidate and failed-chunk evidence coverage. | Real ApplyPatchTool seam; Patch owner behavior preserved. |
-| `docs/plans/semiglobal-levenshtein-closest-match.md` | Recorded this implementation evidence and release gate transition. | New canonical plan only. |
+| Path                                                 | Actual change                                                                                                                                                  | Scope check                                                 |
+| ---------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
+| `packages/opencode/src/patch/match.ts`               | Replaced the bigram scorer with one Semiglobal Levenshtein DP, code-point/raw-boundary mapping, deterministic tie gate, normalized score, and shared renderer. | Approved primary matcher only; no replacement-success path. |
+| `packages/opencode/src/tool/edit-apply.ts`           | Added internal `EditApplyError.editIndex` propagation and kept the existing apply success path unchanged.                                                      | No schema, metadata, or user-facing message change.         |
+| `packages/opencode/src/tool/edit.ts`                 | Uses the owner-provided failed edit index for closest diagnostics.                                                                                             | No first-edit probe, fallback, retry, or second matcher.    |
+| `packages/opencode/test/tool/edit.test.ts`           | Added ordered-distance, inner-tie, raw-offset, variable-span, score-boundary, and normalized multi-edit behavior coverage.                                     | Real Edit Tool seam with hand-written expected evidence.    |
+| `packages/opencode/test/tool/apply_patch.test.ts`    | Added/updated shared matcher candidate and failed-chunk evidence coverage.                                                                                     | Real ApplyPatchTool seam; Patch owner behavior preserved.   |
+| `docs/plans/semiglobal-levenshtein-closest-match.md` | Recorded this implementation evidence and release gate transition.                                                                                             | New canonical plan only.                                    |
 
 The historical `docs/plans/edit-apply-patch-match-recovery.md` remains clean and
 was not used as an implementation authority.
@@ -806,18 +810,18 @@ was not used as an implementation authority.
 
 ### Verification Commands and Results
 
-| Command | Result |
-| --- | --- |
-| `bun test test/patch/patch.test.ts test/tool/apply_patch.test.ts test/tool/edit.test.ts` | PASS: 140 tests, 0 failures. |
-| `bun typecheck` | PASS: `tsgo --noEmit` exited 0. |
-| `git diff --check` | PASS: no output. |
-| `bun run test` | COMPLETED WITH UNRELATED FAILURES: `3937 pass, 16 skip, 2 fail` across 3955 tests. The failures were `shell completion resumes queued loop callers` after a temporary reviewer 503 and `session.processor retries a real first-progress timeout`; neither file is in the implementation diff. |
-| Original `bun -e` Semiglobal replay from `HEAD` | RED: line 1, score `0.8253968253968254`. |
-| Current `bun -e` Semiglobal replay | PASS: unique line-2 candidate, score `0.96875`. |
-| Inner-span tie replay | PASS: no candidate for `xb` vs `ab`. |
-| CRLF cursor candidate regression | PASS: expected LF block is not repeated for normalized-equivalent CRLF raw text. |
-| Long variable-span regression | PASS: DP-owned `alpha\n\nbeta` span remains visible despite 400-character line prefixes/suffixes. |
-| `git status --short` on approved paths | PASS: only the five implementation/test paths and the new canonical plan are changed; historical plan is absent from the status output. |
+| Command                                                                                  | Result                                                                                                                                                                                                                                                                                        |
+| ---------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `bun test test/patch/patch.test.ts test/tool/apply_patch.test.ts test/tool/edit.test.ts` | PASS: 140 tests, 0 failures.                                                                                                                                                                                                                                                                  |
+| `bun typecheck`                                                                          | PASS: `tsgo --noEmit` exited 0.                                                                                                                                                                                                                                                               |
+| `git diff --check`                                                                       | PASS: no output.                                                                                                                                                                                                                                                                              |
+| `bun run test`                                                                           | COMPLETED WITH UNRELATED FAILURES: `3937 pass, 16 skip, 2 fail` across 3955 tests. The failures were `shell completion resumes queued loop callers` after a temporary reviewer 503 and `session.processor retries a real first-progress timeout`; neither file is in the implementation diff. |
+| Original `bun -e` Semiglobal replay from `HEAD`                                          | RED: line 1, score `0.8253968253968254`.                                                                                                                                                                                                                                                      |
+| Current `bun -e` Semiglobal replay                                                       | PASS: unique line-2 candidate, score `0.96875`.                                                                                                                                                                                                                                               |
+| Inner-span tie replay                                                                    | PASS: no candidate for `xb` vs `ab`.                                                                                                                                                                                                                                                          |
+| CRLF cursor candidate regression                                                         | PASS: expected LF block is not repeated for normalized-equivalent CRLF raw text.                                                                                                                                                                                                              |
+| Long variable-span regression                                                            | PASS: DP-owned `alpha\n\nbeta` span remains visible despite 400-character line prefixes/suffixes.                                                                                                                                                                                             |
+| `git status --short` on approved paths                                                   | PASS: only the five implementation/test paths and the new canonical plan are changed; historical plan is absent from the status output.                                                                                                                                                       |
 
 ### Original Feedback-Loop Result
 
@@ -841,12 +845,12 @@ The multi-edit owner feedback loop reports the second failed edit only:
 
 ### Chinese Comment Calculation
 
-| Metric | Actual | Exclusions and evidence |
-| --- | --- | --- |
-| Effective changed code lines `E` | 316 | Added/substantively modified non-blank production and test code lines; excluded pure comments, blank lines, import-only lines, and formatting-only lines. Counted as 267 additions + 49 deletions. |
-| Qualifying Chinese comment lines `C` | 56 | Added or substantively modified comments adjacent to DP state/tie/raw-boundary decisions, failed-edit ownership, diagnostic-only boundaries, candidate provenance, and behavioral assertions; non-explanatory comments excluded. |
-| Ratio `C / E` | 17.72% | `56 / 316`. |
-| Required minimum `C` | 48 | `ceil(316 * 0.15) = 48`. |
+| Metric                               | Actual | Exclusions and evidence                                                                                                                                                                                                          |
+| ------------------------------------ | ------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Effective changed code lines `E`     | 316    | Added/substantively modified non-blank production and test code lines; excluded pure comments, blank lines, import-only lines, and formatting-only lines. Counted as 267 additions + 49 deletions.                               |
+| Qualifying Chinese comment lines `C` | 56     | Added or substantively modified comments adjacent to DP state/tie/raw-boundary decisions, failed-edit ownership, diagnostic-only boundaries, candidate provenance, and behavioral assertions; non-explanatory comments excluded. |
+| Ratio `C / E`                        | 17.72% | `56 / 316`.                                                                                                                                                                                                                      |
+| Required minimum `C`                 | 48     | `ceil(316 * 0.15) = 48`.                                                                                                                                                                                                         |
 
 ### Remaining Unverified Items
 
@@ -856,11 +860,11 @@ The multi-edit owner feedback loop reports the second failed edit only:
 
 ## 24. Implementation Audit Record
 
-| Round | Plan revision | Full original scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | R7 | yes | B-01, B-02, B-03, B-04 | none material | BLOCK | `ses_079c9bcd3ffeD3pEz41Q3XMRBA` |
-| 2 | R7 | yes | B-01 | unrelated Session failures; comment recount correction | BLOCK | `ses_079c9bcd3ffeD3pEz41Q3XMRBA` |
-| 3 | R7 | yes | B-01 | all matcher, renderer, attribution, fallback, and comment gates pass | BLOCK; user accepted B-01 as unrelated and non-blocking | `ses_079c9bcd3ffeD3pEz41Q3XMRBA` |
+| Round | Plan revision | Full original scope? | Blocking findings      | Non-blocking findings                                                | Result                                                  | Invocation reference             |
+| ----- | ------------- | -------------------- | ---------------------- | -------------------------------------------------------------------- | ------------------------------------------------------- | -------------------------------- |
+| 1     | R7            | yes                  | B-01, B-02, B-03, B-04 | none material                                                        | BLOCK                                                   | `ses_079c9bcd3ffeD3pEz41Q3XMRBA` |
+| 2     | R7            | yes                  | B-01                   | unrelated Session failures; comment recount correction               | BLOCK                                                   | `ses_079c9bcd3ffeD3pEz41Q3XMRBA` |
+| 3     | R7            | yes                  | B-01                   | all matcher, renderer, attribution, fallback, and comment gates pass | BLOCK; user accepted B-01 as unrelated and non-blocking | `ses_079c9bcd3ffeD3pEz41Q3XMRBA` |
 
 ### User Decision on Residual Verification Finding
 

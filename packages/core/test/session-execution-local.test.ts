@@ -44,7 +44,15 @@ it.effect("tracks Native drains across isolated runtimes and releases activity",
             }),
         }),
       ],
-      [LocationServiceMap.node, Layer.effect(LocationServiceMap.Service, LayerMap.make((_ref: Location.Ref) => Layer.unwrap<LocationServices, never, never, never, never>(Effect.die("unexpected Location lookup"))))],
+      [
+        LocationServiceMap.node,
+        Layer.effect(
+          LocationServiceMap.Service,
+          LayerMap.make((_ref: Location.Ref) =>
+            Layer.unwrap<LocationServices, never, never, never, never>(Effect.die("unexpected Location lookup")),
+          ),
+        ),
+      ],
     ])
     const scope = yield* Effect.acquireRelease(Scope.make(), (scope) => Scope.close(scope, Exit.void))
     // #235：复用层定义但隔离 MemoMap，贴近内部/外部监听分别装配服务的边界。
@@ -79,13 +87,6 @@ it.effect("tracks Native drains across isolated runtimes and releases activity",
     expect(SessionActivity.count()).toBe(baseline + 1)
     yield* Scope.close(scope, Exit.void)
     expect(SessionActivity.count()).toBe(baseline)
-    expect(counts).toEqual([
-      baseline + 1,
-      baseline + 2,
-      baseline + 1,
-      baseline,
-      baseline + 1,
-      baseline,
-    ])
+    expect(counts).toEqual([baseline + 1, baseline + 2, baseline + 1, baseline, baseline + 1, baseline])
   }),
 )

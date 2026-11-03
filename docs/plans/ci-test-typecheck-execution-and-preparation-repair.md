@@ -66,62 +66,62 @@ R3实施与验收指令原文：
 
 规划基线：`1c8f4e5376585ccc6850d95783d8e502e4d8c317`；调查期间主工作区新增`361aeb664b`语音参数提交，不属于本任务。原生复现固定到实际失败源版本`f9b0b6c89f`，诊断配置提交`bf7986ad47`，仅依赖补丁的对照提交`eca0d91e6`。根依赖中的Effect仍为4.0.0-beta.65，未通过升级依赖图混淆因果。主工作区当前仅本计划新增；实验都在隔离目录/诊断分支。
 
-| 来源 | 对本任务的约束 |
-| --- | --- |
-| 根 AGENTS.md、CONTEXT.md | 保持既有结构；Session/Instance/Pty 资源生命周期有独立 owner；从 package 目录执行测试/typecheck |
-| packages/opencode/AGENTS.md、test/AGENTS.md、test/server/AGENTS.md | Effect 资源绑定到 scope；服务测试遵守真实入口与清理合同 |
-| packages/app/AGENTS.md | 不在本地擅自重启 app/server；只研究原 CI 启动流程 |
-| packages/desktop/AGENTS.md | app/desktop 项目引用由现有 tsconfig 决定 |
-| docs/adr/README.md | 当前无规定 CI 缓存/分片的 accepted ADR；triage ADR 不控制这些实现 |
-| .opencode/policy/first-principles-engineering.md | 根因位于 first divergence；无证据不新增防御；未知根因不准假批准；每轮全范围审计 |
-| .opencode/templates/canonical-plan.md | 本文 24 节、双向追溯和审计记录 |
-| .github/ 下 AGENTS 查找 | 无额外局部规则 |
+| 来源                                                               | 对本任务的约束                                                                                 |
+| ------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------- |
+| 根 AGENTS.md、CONTEXT.md                                           | 保持既有结构；Session/Instance/Pty 资源生命周期有独立 owner；从 package 目录执行测试/typecheck |
+| packages/opencode/AGENTS.md、test/AGENTS.md、test/server/AGENTS.md | Effect 资源绑定到 scope；服务测试遵守真实入口与清理合同                                        |
+| packages/app/AGENTS.md                                             | 不在本地擅自重启 app/server；只研究原 CI 启动流程                                              |
+| packages/desktop/AGENTS.md                                         | app/desktop 项目引用由现有 tsconfig 决定                                                       |
+| docs/adr/README.md                                                 | 当前无规定 CI 缓存/分片的 accepted ADR；triage ADR 不控制这些实现                              |
+| .opencode/policy/first-principles-engineering.md                   | 根因位于 first divergence；无证据不新增防御；未知根因不准假批准；每轮全范围审计                |
+| .opencode/templates/canonical-plan.md                              | 本文 24 节、双向追溯和审计记录                                                                 |
+| .github/ 下 AGENTS 查找                                            | 无额外局部规则                                                                                 |
 
 ## 4. Files and Evidence Read
 
 重要证据按 observed / contracted / reachable 分类。旧调查结论不能替代原始 job 日志。
 
-| 证据 | 用途 | 分类 |
-| --- | --- | --- |
-| `.github/workflows/test.yml` 全文 | 24 个 job、门禁/警告、超时、命令、报告和缓存调用 | observed |
-| `.github/workflows/typecheck.yml` 全文 | 单 Linux job、全量安装、Turbo typecheck、缺省超时及调度 | observed |
-| `.github/actions/setup-bun/action.yml`、根 package.json/bunfig.toml | 共享安装、scope、v2 key、root tools/hooks、Windows 不缓存 | observed |
-| `turbo.json` | typecheck task、test ^build、env、outputs、当前未恢复 task cache | observed |
-| `packages/opencode/script/test-ci.ts`、`test/script/test-ci.test.ts` | 三域分片、core/TUI 串行、等待真实 child exit、JUnit 清理与唯一性 | observed |
-| CLI/Core/Recorder/App/UI/SDK/Plugin/Script/Desktop/Console/LLM 等 manifests | test:ci 范围、开发工具、传递及反向源码依赖 | observed |
-| `packages/sdk/js/script/build.ts`、`packages/opencode/src/cli/cmd/generate.ts` | SDK 调回 OpenCode 生成、prettier、Node tsc、源码产物 | observed |
-| `packages/app/tsconfig.json`、`packages/desktop/tsconfig.json` | app 发声明、desktop references app、潜在同产物并发写 | reachable |
-| `packages/app/playwright.config.ts`、`e2e/todo.spec.ts`、`test/ci/upstream-e2e-workflow.test.ts` | 浏览器准备、Playwright配置与Vite webServer路径保留；功能用例全skip且不请求browser/page，不能证明Chromium实际启动 | observed |
-| `packages/opencode/script/verify-opentui-closure.ts` | 同 job 安装图、11 包 family、10 个 consumer typechecks 不得被跨图缓存代替 | contracted |
-| `test/lib/effect.ts`、`test/fixture/fixture.ts`、`test/preload.ts` | Bun 超时、Effect 生命周期、disposal timeout、GC 与文件清理 | observed |
-| `src/pty/index.ts`、`pty.ts`、`pty.bun.ts`、`pty.node.ts` | PTY create/remove/finalizer/native 退出语义 | observed |
-| `src/effect/instance-state.ts`、`instance-registry.ts` | cache invalidate、所有 disposer 的调度 | observed |
-| `test/pty/pty-output-isolation.test.ts`、`test/server/httpapi-pty.test.ts`、`httpapi-listen.test.ts` | cat producer、请求/实例 owner、作用域与清理边界 | observed |
-| `src/tool/shell.ts:1143-1187` 及 d3d430db5f diff | 修复过的父进程 exit/后代输出管道差异 | observed |
-| 历史 GH runs / attempts / check annotations / JUnit | 下表时间及失败点，可通过 GH 独立复查 | observed |
-| `docs/plans/ci-windows-test-suite-performance-investigation.md` | 旧解释和建议逐项核对，不作为诊断权威 | observed（文档存在，不代表其因果已证实） |
-| `docs/plans/ci-red-ripgrep-timeout-daemon-reconcile.md`、其他 ci-* 历史计划 | 区分已修复的竞态、语料问题与本次未知挂起，避免重复或回退 | observed |
-| `docs/plans/ci-build-dependency-preparation-optimization.md` | 已批准并实施的 shared cache key 修复与 Build scope，保持其合同 | contracted |
-| Effect4.0.0-beta.65 `src/Deferred.ts:207-216,1154-1163`、`dist/Deferred.js`、`src/internal/effect.ts:1011-1068` | 同步resume触发中断finalizer并splice当前遍历数组，漏掉后续等待者 | observed |
-| `.opencode/references/effect-smol/packages/effect/src/Deferred.ts` | 当前仓库Effect参考源也具有同形实现；修复依实际已安装的固定版本，不从旧API记忆推导 | observed |
-| `test/fixture/db.ts:5`、`test/server/httpapi-workspace.test.ts:274`、`src/worktree/index.ts:242-297` | worktree异步boot与dispose并发；afterEach和resetDatabase两次加入同一悬挂disposal | observed |
-| `test/cli/db-maintenance.test.ts:410-468`、`server-lock.ts:230-265`、`db.ts:374` | fixture原地覆写checkpoint，读取空内容返回undefined；生产写入本已原子化 | observed |
-| GH run35199675101、35207763300与本地隔离探针 | 旧实现3组中1组45m截止；最小Deferred红/绿；补丁后三组完整macOS正常退出 | observed |
+| 证据                                                                                                            | 用途                                                                                                             | 分类                                     |
+| --------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- | ---------------------------------------- |
+| `.github/workflows/test.yml` 全文                                                                               | 24 个 job、门禁/警告、超时、命令、报告和缓存调用                                                                 | observed                                 |
+| `.github/workflows/typecheck.yml` 全文                                                                          | 单 Linux job、全量安装、Turbo typecheck、缺省超时及调度                                                          | observed                                 |
+| `.github/actions/setup-bun/action.yml`、根 package.json/bunfig.toml                                             | 共享安装、scope、v2 key、root tools/hooks、Windows 不缓存                                                        | observed                                 |
+| `turbo.json`                                                                                                    | typecheck task、test ^build、env、outputs、当前未恢复 task cache                                                 | observed                                 |
+| `packages/opencode/script/test-ci.ts`、`test/script/test-ci.test.ts`                                            | 三域分片、core/TUI 串行、等待真实 child exit、JUnit 清理与唯一性                                                 | observed                                 |
+| CLI/Core/Recorder/App/UI/SDK/Plugin/Script/Desktop/Console/LLM 等 manifests                                     | test:ci 范围、开发工具、传递及反向源码依赖                                                                       | observed                                 |
+| `packages/sdk/js/script/build.ts`、`packages/opencode/src/cli/cmd/generate.ts`                                  | SDK 调回 OpenCode 生成、prettier、Node tsc、源码产物                                                             | observed                                 |
+| `packages/app/tsconfig.json`、`packages/desktop/tsconfig.json`                                                  | app 发声明、desktop references app、潜在同产物并发写                                                             | reachable                                |
+| `packages/app/playwright.config.ts`、`e2e/todo.spec.ts`、`test/ci/upstream-e2e-workflow.test.ts`                | 浏览器准备、Playwright配置与Vite webServer路径保留；功能用例全skip且不请求browser/page，不能证明Chromium实际启动 | observed                                 |
+| `packages/opencode/script/verify-opentui-closure.ts`                                                            | 同 job 安装图、11 包 family、10 个 consumer typechecks 不得被跨图缓存代替                                        | contracted                               |
+| `test/lib/effect.ts`、`test/fixture/fixture.ts`、`test/preload.ts`                                              | Bun 超时、Effect 生命周期、disposal timeout、GC 与文件清理                                                       | observed                                 |
+| `src/pty/index.ts`、`pty.ts`、`pty.bun.ts`、`pty.node.ts`                                                       | PTY create/remove/finalizer/native 退出语义                                                                      | observed                                 |
+| `src/effect/instance-state.ts`、`instance-registry.ts`                                                          | cache invalidate、所有 disposer 的调度                                                                           | observed                                 |
+| `test/pty/pty-output-isolation.test.ts`、`test/server/httpapi-pty.test.ts`、`httpapi-listen.test.ts`            | cat producer、请求/实例 owner、作用域与清理边界                                                                  | observed                                 |
+| `src/tool/shell.ts:1143-1187` 及 d3d430db5f diff                                                                | 修复过的父进程 exit/后代输出管道差异                                                                             | observed                                 |
+| 历史 GH runs / attempts / check annotations / JUnit                                                             | 下表时间及失败点，可通过 GH 独立复查                                                                             | observed                                 |
+| `docs/plans/ci-windows-test-suite-performance-investigation.md`                                                 | 旧解释和建议逐项核对，不作为诊断权威                                                                             | observed（文档存在，不代表其因果已证实） |
+| `docs/plans/ci-red-ripgrep-timeout-daemon-reconcile.md`、其他 ci-\* 历史计划                                    | 区分已修复的竞态、语料问题与本次未知挂起，避免重复或回退                                                         | observed                                 |
+| `docs/plans/ci-build-dependency-preparation-optimization.md`                                                    | 已批准并实施的 shared cache key 修复与 Build scope，保持其合同                                                   | contracted                               |
+| Effect4.0.0-beta.65 `src/Deferred.ts:207-216,1154-1163`、`dist/Deferred.js`、`src/internal/effect.ts:1011-1068` | 同步resume触发中断finalizer并splice当前遍历数组，漏掉后续等待者                                                  | observed                                 |
+| `.opencode/references/effect-smol/packages/effect/src/Deferred.ts`                                              | 当前仓库Effect参考源也具有同形实现；修复依实际已安装的固定版本，不从旧API记忆推导                                | observed                                 |
+| `test/fixture/db.ts:5`、`test/server/httpapi-workspace.test.ts:274`、`src/worktree/index.ts:242-297`            | worktree异步boot与dispose并发；afterEach和resetDatabase两次加入同一悬挂disposal                                  | observed                                 |
+| `test/cli/db-maintenance.test.ts:410-468`、`server-lock.ts:230-265`、`db.ts:374`                                | fixture原地覆写checkpoint，读取空内容返回undefined；生产写入本已原子化                                           | observed                                 |
+| GH run35199675101、35207763300与本地隔离探针                                                                    | 旧实现3组中1组45m截止；最小Deferred红/绿；补丁后三组完整macOS正常退出                                            | observed                                 |
 
 ### 4.1 历史故障不是同一种原因
 
-| run / attempt | 直接证据 | 能确定的结论 |
-| --- | --- | --- |
-| 34270727000 / 1 | Windows 60m19s；install 666s；测试步骤运行 2917s 后被取消 | install 慢已观测；未完成测试的速度/卡点未知 |
-| 34270727000 / 2，同 SHA | Windows 37m27s；install 320s；测试步骤 1905s；core 1556.80s、TUI 332.20s | 相同提交可成功；不能排除间歇故障；两阶段日志约 0.4s 内集中输出，缓冲已实证 |
-| 34943767078 | Windows 安装正常量级 314s 仍超时；macOS shell abort 在 15s 超时 | “只因安装慢”解释不成立；有独立 shell 取消缺陷 |
-| 35072303771 | Windows 35m38s 成功；macOS 同一个 preserves output when aborted 在 15032.76ms 失败 | shell 失败可重复，不等于整个 job 卡死 |
-| 35104871572 | Windows 37m31s 成功；macOS 19m09s 成功；Linux prompt proof 的 GC 可达性断言失败 | GC 观察点不稳定，不是小时级挂起证据 |
-| 35139390345 @d3d430 | 三平台全绿；macOS 修正后的 TERM-ignoring descendant 用例 585.41ms 通过；Windows 三片约 15m06s/20m35s/11m56s | 具体 shell 修复和分片已生效 |
-| 35189336630 @f9b0b6 | macOS job 60m20s，test step3435s；安装168s；末尾清理9 cat+2 bun；无 OpenCode JUnit | 修复后仍有未知间歇故障；annotation 明确 exceeding1h |
-| 35194733368 @1c8f4e | 全流程17m49s成功；macOS16m24s，core669.86s/TUI211.34s；Windows三片18分钟内 | 当前不是每次必挂；新的成功样本仍不能定位上次根因 |
-| 35199675101 @bf7986ad4，基于f9b0b6的相同源码 | 三组macOS，两组11m09s/11m49s绿，一组46m27s失败（测试step45m截止）；首次真实InstanceRuntime timeout出现在builtin worktree用例 | 重现同类级联；与安装速度及SDK生成无关 |
-| 35207763300 @eca0d91e6 | 仅新增Effect补丁和注册；三组macOS全部绿：834s、881s、1002s；233 core文件+77 TUI文件，3657+744 tests/组 | 保留完整原执行链，InstanceRuntime级联timeout与orphan cat清理未再出现 |
+| run / attempt                                | 直接证据                                                                                                                     | 能确定的结论                                                               |
+| -------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
+| 34270727000 / 1                              | Windows 60m19s；install 666s；测试步骤运行 2917s 后被取消                                                                    | install 慢已观测；未完成测试的速度/卡点未知                                |
+| 34270727000 / 2，同 SHA                      | Windows 37m27s；install 320s；测试步骤 1905s；core 1556.80s、TUI 332.20s                                                     | 相同提交可成功；不能排除间歇故障；两阶段日志约 0.4s 内集中输出，缓冲已实证 |
+| 34943767078                                  | Windows 安装正常量级 314s 仍超时；macOS shell abort 在 15s 超时                                                              | “只因安装慢”解释不成立；有独立 shell 取消缺陷                              |
+| 35072303771                                  | Windows 35m38s 成功；macOS 同一个 preserves output when aborted 在 15032.76ms 失败                                           | shell 失败可重复，不等于整个 job 卡死                                      |
+| 35104871572                                  | Windows 37m31s 成功；macOS 19m09s 成功；Linux prompt proof 的 GC 可达性断言失败                                              | GC 观察点不稳定，不是小时级挂起证据                                        |
+| 35139390345 @d3d430                          | 三平台全绿；macOS 修正后的 TERM-ignoring descendant 用例 585.41ms 通过；Windows 三片约 15m06s/20m35s/11m56s                  | 具体 shell 修复和分片已生效                                                |
+| 35189336630 @f9b0b6                          | macOS job 60m20s，test step3435s；安装168s；末尾清理9 cat+2 bun；无 OpenCode JUnit                                           | 修复后仍有未知间歇故障；annotation 明确 exceeding1h                        |
+| 35194733368 @1c8f4e                          | 全流程17m49s成功；macOS16m24s，core669.86s/TUI211.34s；Windows三片18分钟内                                                   | 当前不是每次必挂；新的成功样本仍不能定位上次根因                           |
+| 35199675101 @bf7986ad4，基于f9b0b6的相同源码 | 三组macOS，两组11m09s/11m49s绿，一组46m27s失败（测试step45m截止）；首次真实InstanceRuntime timeout出现在builtin worktree用例 | 重现同类级联；与安装速度及SDK生成无关                                      |
+| 35207763300 @eca0d91e6                       | 仅新增Effect补丁和注册；三组macOS全部绿：834s、881s、1002s；233 core文件+77 TUI文件，3657+744 tests/组                       | 保留完整原执行链，InstanceRuntime级联timeout与orphan cat清理未再出现       |
 
 已执行只读命令示例：
 
@@ -161,55 +161,55 @@ Typecheck 冷 run35189336674：总139s、setup94s、实际34s。**热 run3519473
 
 ## 6. Supported Input Domain and Reachability
 
-| 条件 | producer → seam → consumer | 分类及边界 |
-| --- | --- | --- |
-| fixed matrix路径 | workflow常量 → install-flags → Bun | contracted；不是用户自由输入，不加自定义解析器 |
-| root工具依赖 | root turbo/prettier/typescript/sst → task与console-resource | observed；测试安装不能照搬Build的单CLI filter |
-| SDK反向源码消费 | app/UI ^build → SDK script → opencode generate | observed；排除CLI测试不等于能排除CLI安装 |
-| cold缓存并发 | 多个job相同primary key → immutable cache save | observed；相同key是正确配对，不是旧hash漂移复发 |
-| 基本测试完成但子进程未退出 | Bun body/finalizer/native handle → proc.exited | reachable；本次观察到Deferred漏通知使共享清理悬挂、后续fixture持续等待，详见第8节 |
-| instance销毁与PTY创建交错 | create拿state → await shell.env → dispose invalidate → spawn写旧map | reachable；独立缺陷线索，尚无本次CI因果 |
-| 手工/PR/push测试 | 现有on/concurrency | contracted；保留Test默认分支每提交运行策略 |
-| App占位测试 | 浏览器准备+Playwright配置+Vite webServer → test.fixme | observed；未请求browser/page，不能证明Chromium实际启动；保留自动兼容检查 |
+| 条件                       | producer → seam → consumer                                          | 分类及边界                                                                        |
+| -------------------------- | ------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
+| fixed matrix路径           | workflow常量 → install-flags → Bun                                  | contracted；不是用户自由输入，不加自定义解析器                                    |
+| root工具依赖               | root turbo/prettier/typescript/sst → task与console-resource         | observed；测试安装不能照搬Build的单CLI filter                                     |
+| SDK反向源码消费            | app/UI ^build → SDK script → opencode generate                      | observed；排除CLI测试不等于能排除CLI安装                                          |
+| cold缓存并发               | 多个job相同primary key → immutable cache save                       | observed；相同key是正确配对，不是旧hash漂移复发                                   |
+| 基本测试完成但子进程未退出 | Bun body/finalizer/native handle → proc.exited                      | reachable；本次观察到Deferred漏通知使共享清理悬挂、后续fixture持续等待，详见第8节 |
+| instance销毁与PTY创建交错  | create拿state → await shell.env → dispose invalidate → spawn写旧map | reachable；独立缺陷线索，尚无本次CI因果                                           |
+| 手工/PR/push测试           | 现有on/concurrency                                                  | contracted；保留Test默认分支每提交运行策略                                        |
+| App占位测试                | 浏览器准备+Playwright配置+Vite webServer → test.fixme               | observed；未请求browser/page，不能证明Chromium实际启动；保留自动兼容检查          |
 
 ## 7. Required Invariants
 
-| ID | 要求 / 不变量 | 当前信号 |
-| --- | --- | --- |
-| INV-01 | 不漏现有包/平台的真实测试及前置生成验证 | 现有matrix、脚本、报告 |
-| INV-02 | 准备依赖与job消费闭包一致，同时保留root工具/可信lifecycle/patch | 安装日志、干净host完整运行 |
-| INV-03 | 失败与超时保留真实状态及已经输出的进展，日志不以JUnit存在为前提 | 流式输出、artifact、step结论 |
+| ID     | 要求 / 不变量                                                                                  | 当前信号                                          |
+| ------ | ---------------------------------------------------------------------------------------------- | ------------------------------------------------- |
+| INV-01 | 不漏现有包/平台的真实测试及前置生成验证                                                        | 现有matrix、脚本、报告                            |
+| INV-02 | 准备依赖与job消费闭包一致，同时保留root工具/可信lifecycle/patch                                | 安装日志、干净host完整运行                        |
+| INV-03 | 失败与超时保留真实状态及已经输出的进展，日志不以JUnit存在为前提                                | 流式输出、artifact、step结论                      |
 | INV-04 | 同一Deferred结果通知全部已注册等待者，使已取消bootstrap的调用者与dispose都能完成；超时不是成功 | 确定性fanout红/绿、原生完整片退出、原清理路径完成 |
-| INV-05 | 重复包测试去重但保留对应required验证及app/UI兼容入口 | task图、JUnit包/平台映射 |
-| INV-06 | typecheck仍覆盖14任务且声明输出只有一个并发owner | Turbo summary与app→desktop依赖 |
-| INV-07 | 已修复的shell/GC/fixture竞态不回退；不新增宽泛fallback | 历史差异及原回归 |
-| INV-08 | App E2E保留自动执行及原浏览器/服务准备行为 | 用户澄清与既有workflow断言 |
-| INV-09 | 计划逐项列明问题、机制、diff、验证及未证实边界，并独立全范围审计 | 本文 |
+| INV-05 | 重复包测试去重但保留对应required验证及app/UI兼容入口                                           | task图、JUnit包/平台映射                          |
+| INV-06 | typecheck仍覆盖14任务且声明输出只有一个并发owner                                               | Turbo summary与app→desktop依赖                    |
+| INV-07 | 已修复的shell/GC/fixture竞态不回退；不新增宽泛fallback                                         | 历史差异及原回归                                  |
+| INV-08 | App E2E保留自动执行及原浏览器/服务准备行为                                                     | 用户澄清与既有workflow断言                        |
+| INV-09 | 计划逐项列明问题、机制、diff、验证及未证实边界，并独立全范围审计                               | 本文                                              |
 
 ## 8. First Divergence and Root Cause
 
 ### 问题台账（全部覆盖，不把有成本的项都称为缺陷）
 
-| ID | 问题与首次分歧 | owner | 定案程度 / 本计划处置 |
-| --- | --- | --- | --- |
-| P1 | 小包仍调用默认全仓install，材料范围首次扩大 | workflow setup inputs | observed；D1按消费闭包过滤 |
-| P2 | 同一包/平台同时被required和warning选中 | warning Turbo selection | observed；D2去重；保留app/UI和SDK前置构建 |
-| P3 | Linux/macOS Turbo grouped阻止测试运行时输出外露 | workflow Turbo invocation | observed；D1/D2/D3全部stream |
-| P4 | artifact只在JUnit存在才上传，进程未退出时无报告也无本地原始日志 | workflow日志/报告编排 | observed；D1 tee+always上传两类产物；45m step保留清理余量 |
-| P5 | root hooks/tools不在CLI manifest，裸CLI filter不能表达Test闭包 | workflow/root工具声明 | reachable；安装包含root，不自动下载缺失的turbo |
-| P6 | SDK ^build输出覆盖src/v2/gen而cache只声明dist；读取反向OpenCode源码 | SDK build/Turbo | observed；保留build，不增加持久化task cache；结构性复用待单独证明等价 |
-| P7 | app和desktop独立调度，desktop references app可同时写声明产物 | Turbo typecheck graph | reachable；D4显式desktop等待app；不增全图 ^build |
-| P8 | 24 jobs冷缓存相同key重复压缩保存 | setup-bun orchestration | observed；保留immutable语义，D1 scopes先减少碰撞，热样本已精准命中；不引入中央等待 |
-| P9 | typecheck无显式job budget，日志未stream | typecheck workflow | contracted bounded gate需求；D3 15m上限+stream；不声称有实测hang |
-| P10 | E2E实际功能0 passed但仍有环境兼容检查成本 | E2E workflow | observed；D2只缩安装闭包，原执行保留；不移除占位或改manual |
-| P11 | Windows已三分片，TUI较短，其他平台core→TUI串行 | test-ci编排 | observed；保留已验证拓扑，先解决安装/挂起，不能用新增分片隐藏H1 |
-| P12 | Git fixture每仓重复五次config、真实daemon/CLI多次spawn | fixture/测试owner | observed耗时热点，归因未profile；不盲改共享daemon或取消真实进程覆盖 |
-| H1 | 中断结果恢复第一个Deferred等待者时，其finalizer原地删除数组元素；doneUnsafe继续增加index，跳过第二个等待者 | Effect Deferred.doneUnsafe | observed+确定性复现；D6快照广播修复所属owner，不改应用disposal算法 |
-| H2 | 调查过PTY创建/销毁交错和native kill是否未退出 | PTY/instance adapter | 没有证据是本次首个分歧；实际级联发生在后续PTY创建之前，不能扩大为本次补丁 |
-| H3 | cached disposal保留in-flight；fixture5秒只放弃等待，下一次继续join；每测试可调用两次 | InstanceStore single-flight与fixture | observed放大机制；D6让最初等待恢复，保留缓存与真实清理，不缩短timeout掩盖缺陷 |
-| F3 | 既有维护测试Bun.write原地更新checkpoint，读者可能在truncate窗口得到空文件并报task not found | db-maintenance fixture生产者 | 本地原错误输出已捕获；D7复用ServerLock.writeMaintenanceTask，原用例10次连续通过 |
-| F1 | shell父进程exit早于后代pipe排空，旧升级没有覆盖输出drain | shell cancellation | 已由d3d430修复且macOS回归585ms绿，保持 |
-| F2 | GC可达性/PTY分块prompt/端口抢占/daemon contender清理竞态 | 各测试fixture | 已修复，不能当成新的未知hang根因；保持回归 |
+| ID  | 问题与首次分歧                                                                                             | owner                                | 定案程度 / 本计划处置                                                              |
+| --- | ---------------------------------------------------------------------------------------------------------- | ------------------------------------ | ---------------------------------------------------------------------------------- |
+| P1  | 小包仍调用默认全仓install，材料范围首次扩大                                                                | workflow setup inputs                | observed；D1按消费闭包过滤                                                         |
+| P2  | 同一包/平台同时被required和warning选中                                                                     | warning Turbo selection              | observed；D2去重；保留app/UI和SDK前置构建                                          |
+| P3  | Linux/macOS Turbo grouped阻止测试运行时输出外露                                                            | workflow Turbo invocation            | observed；D1/D2/D3全部stream                                                       |
+| P4  | artifact只在JUnit存在才上传，进程未退出时无报告也无本地原始日志                                            | workflow日志/报告编排                | observed；D1 tee+always上传两类产物；45m step保留清理余量                          |
+| P5  | root hooks/tools不在CLI manifest，裸CLI filter不能表达Test闭包                                             | workflow/root工具声明                | reachable；安装包含root，不自动下载缺失的turbo                                     |
+| P6  | SDK ^build输出覆盖src/v2/gen而cache只声明dist；读取反向OpenCode源码                                        | SDK build/Turbo                      | observed；保留build，不增加持久化task cache；结构性复用待单独证明等价              |
+| P7  | app和desktop独立调度，desktop references app可同时写声明产物                                               | Turbo typecheck graph                | reachable；D4显式desktop等待app；不增全图 ^build                                   |
+| P8  | 24 jobs冷缓存相同key重复压缩保存                                                                           | setup-bun orchestration              | observed；保留immutable语义，D1 scopes先减少碰撞，热样本已精准命中；不引入中央等待 |
+| P9  | typecheck无显式job budget，日志未stream                                                                    | typecheck workflow                   | contracted bounded gate需求；D3 15m上限+stream；不声称有实测hang                   |
+| P10 | E2E实际功能0 passed但仍有环境兼容检查成本                                                                  | E2E workflow                         | observed；D2只缩安装闭包，原执行保留；不移除占位或改manual                         |
+| P11 | Windows已三分片，TUI较短，其他平台core→TUI串行                                                             | test-ci编排                          | observed；保留已验证拓扑，先解决安装/挂起，不能用新增分片隐藏H1                    |
+| P12 | Git fixture每仓重复五次config、真实daemon/CLI多次spawn                                                     | fixture/测试owner                    | observed耗时热点，归因未profile；不盲改共享daemon或取消真实进程覆盖                |
+| H1  | 中断结果恢复第一个Deferred等待者时，其finalizer原地删除数组元素；doneUnsafe继续增加index，跳过第二个等待者 | Effect Deferred.doneUnsafe           | observed+确定性复现；D6快照广播修复所属owner，不改应用disposal算法                 |
+| H2  | 调查过PTY创建/销毁交错和native kill是否未退出                                                              | PTY/instance adapter                 | 没有证据是本次首个分歧；实际级联发生在后续PTY创建之前，不能扩大为本次补丁          |
+| H3  | cached disposal保留in-flight；fixture5秒只放弃等待，下一次继续join；每测试可调用两次                       | InstanceStore single-flight与fixture | observed放大机制；D6让最初等待恢复，保留缓存与真实清理，不缩短timeout掩盖缺陷      |
+| F3  | 既有维护测试Bun.write原地更新checkpoint，读者可能在truncate窗口得到空文件并报task not found                | db-maintenance fixture生产者         | 本地原错误输出已捕获；D7复用ServerLock.writeMaintenanceTask，原用例10次连续通过    |
+| F1  | shell父进程exit早于后代pipe排空，旧升级没有覆盖输出drain                                                   | shell cancellation                   | 已由d3d430修复且macOS回归585ms绿，保持                                             |
+| F2  | GC可达性/PTY分块prompt/端口抢占/daemon contender清理竞态                                                   | 各测试fixture                        | 已修复，不能当成新的未知hang根因；保持回归                                         |
 
 ### H1 根因闭环：Deferred漏通知如何放大到45–60分钟
 
@@ -241,16 +241,16 @@ bun -e 'import {Deferred,Effect,Fiber,Exit} from "effect"; const d=Deferred.make
 
 ## 9. Responsibility and Seam
 
-| 职责 | 唯一owner | 不应下放到 |
-| --- | --- | --- |
-| job安装闭包、Turbo选择、预算及原始输出存档 | workflows | 业务代码、手工包名单生成器 |
-| cache key配对/下载材料 | 已修复setup-bun | 测试结束时清全局cache的hook |
-| child阶段开始/真实退出标记 | test-ci runShard | 测试用例伪造进度心跳 |
-| app声明输出顺序 | Turbo task graph | CI sleep或两套独立检查器 |
-| PTY acquire/dispose及native退出 | PTY/instance adapter | workflow kill所有cat/bun |
-| 某个测试的socket/Effect关闭 | 创建该资源的fixture/scope | 全局process.exit或缩短timeout吞掉错误 |
-| 一个Deferred完成时通知全部等待者 | Effect库的doneUnsafe，通过现有依赖patch交付 | InstanceStore加入第二个Deferred/超时回退 |
-| fixture checkpoint的原子发布 | 既有ServerLock.writeMaintenanceTask，由fixture调用 | reader容忍空record或重试直到碰巧成功 |
+| 职责                                       | 唯一owner                                          | 不应下放到                               |
+| ------------------------------------------ | -------------------------------------------------- | ---------------------------------------- |
+| job安装闭包、Turbo选择、预算及原始输出存档 | workflows                                          | 业务代码、手工包名单生成器               |
+| cache key配对/下载材料                     | 已修复setup-bun                                    | 测试结束时清全局cache的hook              |
+| child阶段开始/真实退出标记                 | test-ci runShard                                   | 测试用例伪造进度心跳                     |
+| app声明输出顺序                            | Turbo task graph                                   | CI sleep或两套独立检查器                 |
+| PTY acquire/dispose及native退出            | PTY/instance adapter                               | workflow kill所有cat/bun                 |
+| 某个测试的socket/Effect关闭                | 创建该资源的fixture/scope                          | 全局process.exit或缩短timeout吞掉错误    |
+| 一个Deferred完成时通知全部等待者           | Effect库的doneUnsafe，通过现有依赖patch交付        | InstanceStore加入第二个Deferred/超时回退 |
+| fixture checkpoint的原子发布               | 既有ServerLock.writeMaintenanceTask，由fixture调用 | reader容忍空record或重试直到碰巧成功     |
 
 ## 10. Single Primary-Path Design and Approval Gates
 
@@ -268,14 +268,14 @@ G0历史复核（已完成）
 
 ### 安装闭包的准确选择
 
-| 调用者 | flags | scope |
-| --- | --- | --- |
-| required matrix10实例 | `--filter './' --filter './${{ matrix.label }}'` | `test-${{ matrix.label }}-root-v1` |
-| HttpApi3 | `--filter './' --filter './packages/opencode'` | `test-packages/opencode-root-v1` |
-| warning-unit2及E2E2 | `--filter './' --filter './packages/app' --filter './packages/opencode'` | `test-app-cli-root-v1` |
-| extra5 | `--filter './' --filter './${{ matrix.path }}'` | `test-${{ matrix.path }}-root-v1` |
-| OpenTUI1 / standalone typecheck | 原full workspace | 原workspace |
-| VSCode1 | 原sdks/vscode独立安装 | 原独立行为 |
+| 调用者                          | flags                                                                    | scope                              |
+| ------------------------------- | ------------------------------------------------------------------------ | ---------------------------------- |
+| required matrix10实例           | `--filter './' --filter './${{ matrix.label }}'`                         | `test-${{ matrix.label }}-root-v1` |
+| HttpApi3                        | `--filter './' --filter './packages/opencode'`                           | `test-packages/opencode-root-v1`   |
+| warning-unit2及E2E2             | `--filter './' --filter './packages/app' --filter './packages/opencode'` | `test-app-cli-root-v1`             |
+| extra5                          | `--filter './' --filter './${{ matrix.path }}'`                          | `test-${{ matrix.path }}-root-v1`  |
+| OpenTUI1 / standalone typecheck | 原full workspace                                                         | 原workspace                        |
+| VSCode1                         | 原sdks/vscode独立安装                                                    | 原独立行为                         |
 
 scope中`/`是cache key字符串，不是缓存目录；其余版本/OS/arch/key逻辑复用setup-bun，仍按Bun自身完整性规则安装。root+CLI的缓存不冒充Build的CLI-only scope。root提供Turbo和SST等工具，也意味着此轮不追求最窄的record-only安装；若要去掉root需后续干净运行与直接导入核对，不能顺便新增依赖或取消hooks。
 
@@ -292,63 +292,63 @@ OpenTUI保持原full图与10包串行检查：最新热图57秒job、其类型�
 
 ## 11. Secondary and Replacement Path Inventory
 
-| 路径 | 分类 | 处置 |
-| --- | --- | --- |
-| profile不同但统一Bun resolver | primary-contract branch | 保留，无失败后全仓重试 |
-| app/UI warning + required去重 | primary-contract partition | 同包平台保留权威required信号 |
-| stream/tee/child阶段标记 | 本任务明确要求的主日志路径 | 不构成第二成功算法；不声称打印即进度正常 |
-| 45m step终止+always归档 | diagnostic failure path | 保留cancel/failure；不能宣称H1被修复 |
-| 原warning continue-on-error | existing compatibility | 仅原warning jobs保留，不能扩到required |
-| 原withDisposalTimeout/native kill语义 | existing行为 | 本次不改变；D6修复其上游通知丢失，不声称覆盖所有未来native关闭故障 |
-| Deferred快照通知 | primary-contract repair | 同一结果、同一等待者集合，不创建第二Deferred或备用取消算法 |
-| fixture原子checkpoint | primary-contract reuse | 复用现有ServerLock写入接口，不复制协议 |
-| process.exit(0)、失败fallback install、全局killall | forbidden fallback | 拒绝 |
+| 路径                                               | 分类                       | 处置                                                               |
+| -------------------------------------------------- | -------------------------- | ------------------------------------------------------------------ |
+| profile不同但统一Bun resolver                      | primary-contract branch    | 保留，无失败后全仓重试                                             |
+| app/UI warning + required去重                      | primary-contract partition | 同包平台保留权威required信号                                       |
+| stream/tee/child阶段标记                           | 本任务明确要求的主日志路径 | 不构成第二成功算法；不声称打印即进度正常                           |
+| 45m step终止+always归档                            | diagnostic failure path    | 保留cancel/failure；不能宣称H1被修复                               |
+| 原warning continue-on-error                        | existing compatibility     | 仅原warning jobs保留，不能扩到required                             |
+| 原withDisposalTimeout/native kill语义              | existing行为               | 本次不改变；D6修复其上游通知丢失，不声称覆盖所有未来native关闭故障 |
+| Deferred快照通知                                   | primary-contract repair    | 同一结果、同一等待者集合，不创建第二Deferred或备用取消算法         |
+| fixture原子checkpoint                              | primary-contract reuse     | 复用现有ServerLock写入接口，不复制协议                             |
+| process.exit(0)、失败fallback install、全局killall | forbidden fallback         | 拒绝                                                               |
 
 新增alternate success path=0。D6仍只有一个完成算法，D7仍使用同一个checkpoint协议。诊断失败的执行分支只包括existing upload guard放宽与一个step截止，不增加原生采样器、复杂进程管理器或心跳到最终实现；诊断辅助决策面实际实现应≤10%，显式要求的主日志输送不算备用成功路径。
 
 ## 12. Workaround Deletion and Replacement
 
-| 现有重复/错误耦合 | 替换 |
-| --- | --- |
-| 全仓安装所有workspace用于单包job | D1/D2 profile安装，root必需工具保留 |
-| required同包平台被warning再测 | D2明确app/UI任务选择与准确summary |
-| grouped输出导致任务结束才可见 | D1-D3全部Turbo stream |
-| JUnit存在才上传，挂起没有诊断产物 | D1原始日志独立路径+无条件尝试上传 |
-| app/desktop互不等待写同项目 | D4 desktop依赖app |
-| 已修复shell/GC问题 | 保留既有修复，不删除以替换新绕行 |
+| 现有重复/错误耦合                          | 替换                                 |
+| ------------------------------------------ | ------------------------------------ |
+| 全仓安装所有workspace用于单包job           | D1/D2 profile安装，root必需工具保留  |
+| required同包平台被warning再测              | D2明确app/UI任务选择与准确summary    |
+| grouped输出导致任务结束才可见              | D1-D3全部Turbo stream                |
+| JUnit存在才上传，挂起没有诊断产物          | D1原始日志独立路径+无条件尝试上传    |
+| app/desktop互不等待写同项目                | D4 desktop依赖app                    |
+| 已修复shell/GC问题                         | 保留既有修复，不删除以替换新绕行     |
 | Deferred广播过程中遍历可被回调修改的原数组 | D6遍历同一集合快照，保留原完成状态机 |
-| fixture直接截断已有checkpoint、覆写伪owner | D7原子发布并在终态之后删除owner目录 |
+| fixture直接截断已有checkpoint、覆写伪owner | D7原子发布并在终态之后删除owner目录  |
 
 ## 13. Forward Traceability
 
-| 需求/问题 | 文件/路径 | 当前可给出动作 | 完成证据 |
-| --- | --- | --- | --- |
-| INV-02 P1/P5 | test.yml setup调用 | D1/D2 | 全24 job原覆盖、filtered install、native闭包 |
-| INV-05 P2 | warning-unit | D2 | app/UI仍跑，required三包双平台仍跑 |
-| INV-03 P3/P4 | workflow/test-ci | D1-D3/D5 | 实时输出、失败前日志、真实非零status |
-| INV-06 P7/P9 | typecheck.yml/turbo.json | D3/D4 | 14任务、app先于desktop、原参数语义 |
-| INV-08 P10 | E2E | D2仅scope | 原browser缓存/安装/Vite启动、skip报告真实 |
-| INV-04 H1/H3 | Worktree→InstanceStore→Deferred→dispose | D6依赖owner补丁 | 最小红/绿+macOS原片三组绿，无级联超时 |
-| H2调查 | PTY/instance ownership | 不把未证明因果混入修复 | 已定位的失败发生在后续PTY创建之前 |
-| INV-07 F3 | 维护fixture→真实CLI observer | D7 | 原task-not-found失败→同用例10次绿，断言不变 |
-| INV-07 F1/F2 | 原shell/lifecycle回归 | 原测试保留 | 精准回归与全平台既有测试 |
-| P6/P8/P11/P12 | cache/build/shards/fixture | 保留安全部分、记录收益边界 | 之后的profile与热样本决定下一修订 |
-| INV-09 | 本文件 | 24节与全范围审计 | 审计不能跳过H1 |
+| 需求/问题     | 文件/路径                               | 当前可给出动作             | 完成证据                                     |
+| ------------- | --------------------------------------- | -------------------------- | -------------------------------------------- |
+| INV-02 P1/P5  | test.yml setup调用                      | D1/D2                      | 全24 job原覆盖、filtered install、native闭包 |
+| INV-05 P2     | warning-unit                            | D2                         | app/UI仍跑，required三包双平台仍跑           |
+| INV-03 P3/P4  | workflow/test-ci                        | D1-D3/D5                   | 实时输出、失败前日志、真实非零status         |
+| INV-06 P7/P9  | typecheck.yml/turbo.json                | D3/D4                      | 14任务、app先于desktop、原参数语义           |
+| INV-08 P10    | E2E                                     | D2仅scope                  | 原browser缓存/安装/Vite启动、skip报告真实    |
+| INV-04 H1/H3  | Worktree→InstanceStore→Deferred→dispose | D6依赖owner补丁            | 最小红/绿+macOS原片三组绿，无级联超时        |
+| H2调查        | PTY/instance ownership                  | 不把未证明因果混入修复     | 已定位的失败发生在后续PTY创建之前            |
+| INV-07 F3     | 维护fixture→真实CLI observer            | D7                         | 原task-not-found失败→同用例10次绿，断言不变  |
+| INV-07 F1/F2  | 原shell/lifecycle回归                   | 原测试保留                 | 精准回归与全平台既有测试                     |
+| P6/P8/P11/P12 | cache/build/shards/fixture              | 保留安全部分、记录收益边界 | 之后的profile与热样本决定下一修订            |
+| INV-09        | 本文件                                  | 24节与全范围审计           | 审计不能跳过H1                               |
 
 ## 14. Reverse Traceability
 
-| 新概念 | 依据 | 为何不是过度设计 |
-| --- | --- | --- |
-| per-job flags/scope | P1/P5及已存在action接口 | 不新增安装器/manifest/备用graph |
-| warning explicit app/UI filters | P2确切五个test:ci清单 | 不靠跳过源码文件降低覆盖 |
-| tee到package artifacts/ci | P3/P4，现有上传与用户日志要求 | 本地单份原始输出，不新增日志服务 |
-| step45m / job60m余量 | H1跑满job导致无产物；正常post-fix单job≤21m量级 | 失败预算而非通过捷径；不作为生产修复 |
-| typecheck15m | P9检查22s+setup30s量级 | 保留大余量，不提高执行并发 |
-| app→desktop edge | tsconfig references、共享声明输出 | 一条真实依赖，不添加全图build |
-| emitting任务不缓存 | P7 outputs未恢复风险 | 只影响两个emit任务；不全局取消性能优化 |
-| phase/PID/elapsed/exit标记 | H1无进展无法定位owner | 无定时心跳，无stdout解析，无秘密dump |
-| 固定Effect补丁 | H1确定性fanout漏通知、既有patchedDependencies机制 | 修首个分歧，不升级整个依赖图、不在业务代码绕行 |
-| fixture使用writeMaintenanceTask | F3非原子生产者、真实task-not-found日志 | 生产接口已经拥有原子性，无需新重试或格式解析 |
+| 新概念                          | 依据                                              | 为何不是过度设计                               |
+| ------------------------------- | ------------------------------------------------- | ---------------------------------------------- |
+| per-job flags/scope             | P1/P5及已存在action接口                           | 不新增安装器/manifest/备用graph                |
+| warning explicit app/UI filters | P2确切五个test:ci清单                             | 不靠跳过源码文件降低覆盖                       |
+| tee到package artifacts/ci       | P3/P4，现有上传与用户日志要求                     | 本地单份原始输出，不新增日志服务               |
+| step45m / job60m余量            | H1跑满job导致无产物；正常post-fix单job≤21m量级    | 失败预算而非通过捷径；不作为生产修复           |
+| typecheck15m                    | P9检查22s+setup30s量级                            | 保留大余量，不提高执行并发                     |
+| app→desktop edge                | tsconfig references、共享声明输出                 | 一条真实依赖，不添加全图build                  |
+| emitting任务不缓存              | P7 outputs未恢复风险                              | 只影响两个emit任务；不全局取消性能优化         |
+| phase/PID/elapsed/exit标记      | H1无进展无法定位owner                             | 无定时心跳，无stdout解析，无秘密dump           |
+| 固定Effect补丁                  | H1确定性fanout漏通知、既有patchedDependencies机制 | 修首个分歧，不升级整个依赖图、不在业务代码绕行 |
+| fixture使用writeMaintenanceTask | F3非原子生产者、真实task-not-found日志            | 生产接口已经拥有原子性，无需新重试或格式解析   |
 
 ## 15. File-Level Change Plan and Exact Diffs
 
@@ -660,37 +660,37 @@ D1-D7估计E约60–80、邻近中文解释C约18；最低ceil(E×0.15)，上界
 
 已在明确授权下完成隔离诊断分支、本地干净profile安装、现有测试与两轮原生macOS实验。Windows证据与macOS证据分开记录，不互相冒充。
 
-| 隔离验证 | 实际结果 |
-| --- | --- |
-| 原Effect两等待者interrupt探针 | exit1，第二观察者不恢复 |
-| 快照补丁同命令 | exit0，两者完成；独立reviewer重验多观察者/取消/重入 |
-| 原生run35199675101（原代码，三组） | 两组绿；一组复现持续disposal timeout并45m截止，完整日志成功归档 |
-| 原生run35207763300（只加D6，三组） | 三组绿834/881/1002s，每组4401 tests；无InstanceRuntime级联超时、无orphan cat日志 |
-| 既有workspace/instance-state/instance/fixture组合 | 37pass/0fail；D6后的workspace全文件8pass且不再级联等待 |
-| D7原维护用例 | 捕获task-not-found exit1；修fixture后连续10次1pass/0fail，类型检查通过 |
-| root+Recorder过滤图 | 575包，20pass |
-| root+Core过滤图 | 826包，360pass |
-| root+CLI过滤图 | 1227包，SDK/plugin实际build通过，随后36项现有CI/integration检查通过 |
-| root+App+CLI过滤图 | 1281包，SDK build+App336/UI15pass |
+| 隔离验证                                          | 实际结果                                                                         |
+| ------------------------------------------------- | -------------------------------------------------------------------------------- |
+| 原Effect两等待者interrupt探针                     | exit1，第二观察者不恢复                                                          |
+| 快照补丁同命令                                    | exit0，两者完成；独立reviewer重验多观察者/取消/重入                              |
+| 原生run35199675101（原代码，三组）                | 两组绿；一组复现持续disposal timeout并45m截止，完整日志成功归档                  |
+| 原生run35207763300（只加D6，三组）                | 三组绿834/881/1002s，每组4401 tests；无InstanceRuntime级联超时、无orphan cat日志 |
+| 既有workspace/instance-state/instance/fixture组合 | 37pass/0fail；D6后的workspace全文件8pass且不再级联等待                           |
+| D7原维护用例                                      | 捕获task-not-found exit1；修fixture后连续10次1pass/0fail，类型检查通过           |
+| root+Recorder过滤图                               | 575包，20pass                                                                    |
+| root+Core过滤图                                   | 826包，360pass                                                                   |
+| root+CLI过滤图                                    | 1227包，SDK/plugin实际build通过，随后36项现有CI/integration检查通过              |
+| root+App+CLI过滤图                                | 1281包，SDK build+App336/UI15pass                                                |
 
 实验错误也保留：第一次本地SDK生成与测试被错误并行，生成器清src/v2/gen导致缺模块；按原^build顺序重跑36项通过，此结果不归因为过滤安装失败。一次共享开发cache的ghostty tar解包ENOTEMPTY，改用独立空cache验证同profile成功，未给生产安装器增加fallback。Windows普通clone把两个120000声明链接检出成文本，重建原链接后14项pre-push typecheck通过；未跳过hook。最初isolated worktree的submodule hook无法正常定位，通过普通隔离clone和固定submodule完成同一检查，主工作区未受影响。
 
 ### R3本地验收命令及观察
 
-| 命令 | cwd | 证据 |
-| --- | --- | --- |
-| `actionlint` | repo根 | workflows语法、引用与表达式 |
-| `git diff --check` | repo根 | 实际变更可读性 |
-| `bun test ./test/ci ./test/script/test-ci.test.ts ./test/script/install-target.test.ts` | packages/opencode | 原E2E配置约束、分区和错误入口保持 |
-| `bun typecheck` | packages/opencode | 日志脚本类型检查 |
-| 第8节Deferred fanout命令 | 使用锁定Effect的隔离repo根 | 修复前后通知完整性，exit1→0 |
-| `bun test ./test/server/httpapi-workspace.test.ts ./test/project/instance.test.ts ./test/effect/instance-state.test.ts ./test/fixture/fixture.test.ts --timeout 30000` | packages/opencode | 真实bootstrap取消、共享disposal及scope清理 |
-| `bun test ./test/cli/db-maintenance.test.ts --test-name-pattern 'online observe completes' --timeout 30000` | packages/opencode | D7原故障用例重复运行，原断言保留 |
-| `bun install --linker hoisted` | repo根 | 应用固定patch、生成唯一lock注册变更 |
-| `bun test ./test/cli/db-maintenance.test.ts --timeout 30000` | packages/opencode | 全部既有维护CLI行为 |
-| `bun ../../node_modules/turbo/bin/turbo typecheck --filter=* --log-order=stream` | packages/opencode | 实际运行14任务，App先于Desktop |
-| `bun x --no-install oxlint packages/opencode/script/test-ci.ts packages/opencode/test/cli/db-maintenance.test.ts` | repo根 | 变更TS的静态检查 |
-| Prettier检查及HEAD格式对照 | repo根 | 区分既有格式/行尾与本次变更，保持局部改动 |
+| 命令                                                                                                                                                                   | cwd                        | 证据                                       |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------- | ------------------------------------------ |
+| `actionlint`                                                                                                                                                           | repo根                     | workflows语法、引用与表达式                |
+| `git diff --check`                                                                                                                                                     | repo根                     | 实际变更可读性                             |
+| `bun test ./test/ci ./test/script/test-ci.test.ts ./test/script/install-target.test.ts`                                                                                | packages/opencode          | 原E2E配置约束、分区和错误入口保持          |
+| `bun typecheck`                                                                                                                                                        | packages/opencode          | 日志脚本类型检查                           |
+| 第8节Deferred fanout命令                                                                                                                                               | 使用锁定Effect的隔离repo根 | 修复前后通知完整性，exit1→0                |
+| `bun test ./test/server/httpapi-workspace.test.ts ./test/project/instance.test.ts ./test/effect/instance-state.test.ts ./test/fixture/fixture.test.ts --timeout 30000` | packages/opencode          | 真实bootstrap取消、共享disposal及scope清理 |
+| `bun test ./test/cli/db-maintenance.test.ts --test-name-pattern 'online observe completes' --timeout 30000`                                                            | packages/opencode          | D7原故障用例重复运行，原断言保留           |
+| `bun install --linker hoisted`                                                                                                                                         | repo根                     | 应用固定patch、生成唯一lock注册变更        |
+| `bun test ./test/cli/db-maintenance.test.ts --timeout 30000`                                                                                                           | packages/opencode          | 全部既有维护CLI行为                        |
+| `bun ../../node_modules/turbo/bin/turbo typecheck --filter=* --log-order=stream`                                                                                       | packages/opencode          | 实际运行14任务，App先于Desktop             |
+| `bun x --no-install oxlint packages/opencode/script/test-ci.ts packages/opencode/test/cli/db-maintenance.test.ts`                                                      | repo根                     | 变更TS的静态检查                           |
+| Prettier检查及HEAD格式对照                                                                                                                                             | repo根                     | 区分既有格式/行尾与本次变更，保持局部改动  |
 
 当前验收只运行本地检查。根因probe必须在当前工作区修复前失败、修复后通过；已有CI配置约束、分片、生命周期和维护用例全部通过，14任务类型检查成功，actionlint及diff检查通过，独立实现审计给出No blocking findings后commit。此前四种安装profile和原生实验保留为已有证据。本次云端完整矩阵、首次/缓存命中耗时测量属于用户明确排除的执行范围，最终报告单列这一验证边界。
 
@@ -698,14 +698,14 @@ D1日志包只能记录已输出内容，不能保证native全冻结时有stack�
 
 ## 19. Diff Budget
 
-| 项目 | 完整R2预算 | 依据 |
-| --- | --- | --- |
-| 新增文件 | 文档1、依赖patch1 | 单一canonical、已有Bun patch机制 |
-| 修改实现文件 | 7 | 两workflow、Turbo、test-ci、manifest、lock、既有fixture |
-| 删除文件 | 0 | 不删除覆盖、脚本或缓存 |
-| 有效变更行 | 约60–80 | 复用已有接口；不含生成lock/import/纯文档 |
-| 新增/修改测试断言 | 0 | D7仅fixture生产者变更 |
-| manifest/lock | 各Effect patchedDependencies一项 | 无版本/普通依赖增删 |
+| 项目              | 完整R2预算                       | 依据                                                    |
+| ----------------- | -------------------------------- | ------------------------------------------------------- |
+| 新增文件          | 文档1、依赖patch1                | 单一canonical、已有Bun patch机制                        |
+| 修改实现文件      | 7                                | 两workflow、Turbo、test-ci、manifest、lock、既有fixture |
+| 删除文件          | 0                                | 不删除覆盖、脚本或缓存                                  |
+| 有效变更行        | 约60–80                          | 复用已有接口；不含生成lock/import/纯文档                |
+| 新增/修改测试断言 | 0                                | D7仅fixture生产者变更                                   |
+| manifest/lock     | 各Effect patchedDependencies一项 | 无版本/普通依赖增删                                     |
 
 ## 20. Real Risks and Open Decisions
 
@@ -741,11 +741,11 @@ auditor必须审核原始完整目标及D1-D7全部范围，独立核对历史/�
 
 ## 22. Plan Audit Record
 
-| Round | Revision | Full scope | Blocking | Non-blocking | Result | Invocation |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | R1 | yes | B-01 | E2E信号措辞；filtered安装待验证；历史数据本轮未独立复取 | BLOCK | `ses_f519fd387ffeiZb8QjM4OvDKAp` |
-| 2 | R2 | yes | No blocking findings | 实验结果的独立核验边界；用户例外指令的原文记录不完整 | APPROVE | `ses_f51151b7cffehDr1XBak8EwaXq` |
-| 3 | R3 | yes | No blocking findings | N-01；N-02 | APPROVE | `ses_f50d1b4ebffe3Wz73t1k7mrZNN` |
+| Round | Revision | Full scope | Blocking             | Non-blocking                                            | Result  | Invocation                       |
+| ----- | -------- | ---------- | -------------------- | ------------------------------------------------------- | ------- | -------------------------------- |
+| 1     | R1       | yes        | B-01                 | E2E信号措辞；filtered安装待验证；历史数据本轮未独立复取 | BLOCK   | `ses_f519fd387ffeiZb8QjM4OvDKAp` |
+| 2     | R2       | yes        | No blocking findings | 实验结果的独立核验边界；用户例外指令的原文记录不完整    | APPROVE | `ses_f51151b7cffehDr1XBak8EwaXq` |
+| 3     | R3       | yes        | No blocking findings | N-01；N-02                                              | APPROVE | `ses_f50d1b4ebffe3Wz73t1k7mrZNN` |
 
 以下为独立审计2026-09-17的R1历史原文finding与release verdict。此为历史行政记录，当时Approved revision为none，Implementation allowed为no；当前R2状态以文首metadata和本节R2审计为准。
 
@@ -800,15 +800,15 @@ No blocking findings.
 
 本轮覆盖原始需求、R2 全文及 D1–D7 全部拟议变更，没有沿用 R1 的局部审计范围。
 
-| 范围 | 独立核验结果 |
-|---|---|
-| D1：required 安装与日志 | 保留十个实例及原测试命令语义；显式 Bash 的 `pipefail` 保留管道失败；原始日志上传不再依赖 JUnit 完成。 |
-| D2：去重与兼容性 | 当前恰有五个 `test:ci` 包。App/UI 显式选择配合同平台 required jobs，未发现漏测；SDK `^build`、CLI 生成依赖、自动 E2E 和原 warning 属性保留。 |
-| D3–D4：Typecheck | 当前十四个 typecheck 脚本仍全部参与。Desktop 的 App project reference 与 App 声明输出，支持新增任务依赖及两项禁用缓存的设计。 |
-| D5：shard 日志 | 仍等待同一个 `proc.exited` 并返回真实退出码；分区、执行顺序和报告名称不变。 |
-| D6：退出链根因 | 已从 Worktree、InstanceStore、Deferred callback/finalizer 和 cached disposal 重建完整路径，快照广播修复首个错误转换。 |
-| D7：维护 fixture | 原地覆写存在空读窗口；改用既有原子发布接口，数据满足现有 parser，原 CLI 行为断言保持。 |
-| 既有 CI 断言 | 找到并检查 `packages/opencode/test/ci/upstream-e2e-workflow.test.ts:9`；D2 不改变其断言的 CLI、目录、超时、版本及 JUnit 合同。也核对了现有 shard 测试。 |
+| 范围                    | 独立核验结果                                                                                                                                            |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| D1：required 安装与日志 | 保留十个实例及原测试命令语义；显式 Bash 的 `pipefail` 保留管道失败；原始日志上传不再依赖 JUnit 完成。                                                   |
+| D2：去重与兼容性        | 当前恰有五个 `test:ci` 包。App/UI 显式选择配合同平台 required jobs，未发现漏测；SDK `^build`、CLI 生成依赖、自动 E2E 和原 warning 属性保留。            |
+| D3–D4：Typecheck        | 当前十四个 typecheck 脚本仍全部参与。Desktop 的 App project reference 与 App 声明输出，支持新增任务依赖及两项禁用缓存的设计。                           |
+| D5：shard 日志          | 仍等待同一个 `proc.exited` 并返回真实退出码；分区、执行顺序和报告名称不变。                                                                             |
+| D6：退出链根因          | 已从 Worktree、InstanceStore、Deferred callback/finalizer 和 cached disposal 重建完整路径，快照广播修复首个错误转换。                                   |
+| D7：维护 fixture        | 原地覆写存在空读窗口；改用既有原子发布接口，数据满足现有 parser，原 CLI 行为断言保持。                                                                  |
+| 既有 CI 断言            | 找到并检查 `packages/opencode/test/ci/upstream-e2e-workflow.test.ts:9`；D2 不改变其断言的 CLI、目录、超时、版本及 JUnit 合同。也核对了现有 shard 测试。 |
 
 **R1 B-01 的设计缺口已关闭。** 依据来自直接读取的执行链：
 
@@ -869,16 +869,16 @@ No blocking findings.
 
 本轮审核 **R3 全文及 D1–D7 完整范围**，没有将范围缩减为验收条款的修订。
 
-| 范围 | 独立核验结论 |
-|---|---|
-| D1：required 准备与日志 | 十个矩阵实例、原分片及测试入口保留。显式 Bash 配合 `pipefail` 保留失败状态；原始日志上传脱离 JUnit 完成条件。 |
-| D2：去重及安装闭包 | 当前五个 `test:ci` 包由 required 三包与 warning App/UI 覆盖；SDK `^build` 及 OpenCode 反向生成依赖保留。HttpApi、额外包、OpenTUI、VSCode 和自动 E2E 的原覆盖未被删除。 |
-| D3–D4：Typecheck | 当前十四个包的 typecheck 入口保留。`packages/desktop/tsconfig.json:20` 引用 App，`packages/app/tsconfig.json:17` 发出声明，支持新增 App→Desktop 顺序约束。 |
-| D5：shard 日志 | `packages/opencode/script/test-ci.ts:45` 仍等待真实 `proc.exited`；日志没有新增成功出口，原退出码、分区和顺序不变。 |
-| D6：退出链根因 | 修复位于 Deferred 广播 owner，覆盖 source 与 runtime dist；没有修改 InstanceStore 的清理语义或用超时替代修复。 |
-| D7：维护 fixture | `packages/opencode/src/cli/cmd/tui/server-lock.ts:230` 已提供原子发布；fixture 复用该接口，保留原 CLI 退出与输出断言。 |
-| 既有 CI 文件断言 | 已检索并读取 `packages/opencode/test/ci/upstream-e2e-workflow.test.ts:9`；拟议变更保留其检查的 CLI、版本、目录、安装预算和 JUnit 合同。现有 shard 测试也保留。 |
-| 本地验收与提交 | R3 第 18 节给出具体命令、cwd、Deferred 红绿探针、生命周期回归、维护用例及十四任务类型检查；提交前仍要求独立完整实施审计。 |
+| 范围                    | 独立核验结论                                                                                                                                                           |
+| ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| D1：required 准备与日志 | 十个矩阵实例、原分片及测试入口保留。显式 Bash 配合 `pipefail` 保留失败状态；原始日志上传脱离 JUnit 完成条件。                                                          |
+| D2：去重及安装闭包      | 当前五个 `test:ci` 包由 required 三包与 warning App/UI 覆盖；SDK `^build` 及 OpenCode 反向生成依赖保留。HttpApi、额外包、OpenTUI、VSCode 和自动 E2E 的原覆盖未被删除。 |
+| D3–D4：Typecheck        | 当前十四个包的 typecheck 入口保留。`packages/desktop/tsconfig.json:20` 引用 App，`packages/app/tsconfig.json:17` 发出声明，支持新增 App→Desktop 顺序约束。             |
+| D5：shard 日志          | `packages/opencode/script/test-ci.ts:45` 仍等待真实 `proc.exited`；日志没有新增成功出口，原退出码、分区和顺序不变。                                                    |
+| D6：退出链根因          | 修复位于 Deferred 广播 owner，覆盖 source 与 runtime dist；没有修改 InstanceStore 的清理语义或用超时替代修复。                                                         |
+| D7：维护 fixture        | `packages/opencode/src/cli/cmd/tui/server-lock.ts:230` 已提供原子发布；fixture 复用该接口，保留原 CLI 退出与输出断言。                                                 |
+| 既有 CI 文件断言        | 已检索并读取 `packages/opencode/test/ci/upstream-e2e-workflow.test.ts:9`；拟议变更保留其检查的 CLI、版本、目录、安装预算和 JUnit 合同。现有 shard 测试也保留。         |
+| 本地验收与提交          | R3 第 18 节给出具体命令、cwd、Deferred 红绿探针、生命周期回归、维护用例及十四任务类型检查；提交前仍要求独立完整实施审计。                                              |
 
 **D6 的首个分歧具有源码支持：**
 
@@ -916,16 +916,16 @@ D1–D7已完整应用于本地dev-smark工作区，并通过第三轮独立全�
 
 实现文件共8个，另含本canonical文档。相对实施起点HEAD，7个已有实现文件为+65/-25；新增Effect补丁36行，合计+101/-25（含注释、import、生成lock和补丁上下文）。用户已有thirdparty变更、旧调查文档和sdks/vscode/out独立保留。
 
-| 文件 | 改动 | 必要性 |
-| --- | --- | --- |
-| .github/workflows/test.yml | +37/-11 | job依赖范围、去重、实时日志、原始日志上传 |
-| .github/workflows/typecheck.yml | +4/-1 | 实时类型检查日志及15分钟预算 |
-| turbo.json | +7/-0 | App声明先完成，Desktop随后消费 |
-| packages/opencode/script/test-ci.ts | +7/-1 | child起止、PID、耗时与真实exit |
-| package.json | +2/-1 | 使用既有patchedDependencies登记修复 |
-| bun.lock | +1/-0 | 安装器生成的Effect补丁注册 |
-| patches/effect@4.0.0-beta.65.patch | +36/-0 | Deferred source/runtime同时修复通知遗漏 |
-| packages/opencode/test/cli/db-maintenance.test.ts | +7/-11 | 既有fixture复用原子checkpoint writer，原断言保持 |
+| 文件                                              | 改动    | 必要性                                           |
+| ------------------------------------------------- | ------- | ------------------------------------------------ |
+| .github/workflows/test.yml                        | +37/-11 | job依赖范围、去重、实时日志、原始日志上传        |
+| .github/workflows/typecheck.yml                   | +4/-1   | 实时类型检查日志及15分钟预算                     |
+| turbo.json                                        | +7/-0   | App声明先完成，Desktop随后消费                   |
+| packages/opencode/script/test-ci.ts               | +7/-1   | child起止、PID、耗时与真实exit                   |
+| package.json                                      | +2/-1   | 使用既有patchedDependencies登记修复              |
+| bun.lock                                          | +1/-0   | 安装器生成的Effect补丁注册                       |
+| patches/effect@4.0.0-beta.65.patch                | +36/-0  | Deferred source/runtime同时修复通知遗漏          |
+| packages/opencode/test/cli/db-maintenance.test.ts | +7/-11  | 既有fixture复用原子checkpoint writer，原断言保持 |
 
 ### Red-Green Test Evidence
 
@@ -935,19 +935,19 @@ D1–D7已完整应用于本地dev-smark工作区，并通过第三轮独立全�
 
 以下均在本次实际工作区执行。测试设置`OPENCODE_DISABLE_LSP_DOWNLOAD=true`及Windows的`OPENCODE_EXPERIMENTAL_DISABLE_FILEWATCHER=true`。
 
-| 命令 | cwd | 本地结果 |
-| --- | --- | --- |
-| `bun install --linker hoisted` | repo根 | 13.87s；patch安装成功，原fix-node-pty/prepare执行，lock仅增加1条补丁注册 |
-| 第8节双等待者命令 | repo根 | 旧包exit1 → 固定patch后exit0 |
-| `bun test ./test/ci ./test/script/test-ci.test.ts ./test/script/install-target.test.ts --timeout 30000` | packages/opencode | 10pass/0fail，4.23s |
-| `bun test ./test/server/httpapi-workspace.test.ts ./test/project/instance.test.ts ./test/effect/instance-state.test.ts ./test/fixture/fixture.test.ts --timeout 30000` | packages/opencode | 37pass/0fail，86.33s |
-| `bun test ./test/cli/db-maintenance.test.ts --timeout 30000` | packages/opencode | 15pass/0fail，165.86s |
-| `bun test ./test/cli/db-maintenance.test.ts --test-name-pattern 'online observe completes' --timeout 30000` | packages/opencode | 1pass/0fail、14filtered，12.52s；该项为前述15项之一 |
-| `bun typecheck` | packages/opencode | 成功，当前fixture和script类型检查通过 |
-| `bun ../../node_modules/turbo/bin/turbo typecheck --filter=* --log-order=stream` | packages/opencode | 14successful/14total，6cache hits，16.695s；App完成后Desktop开始 |
-| `D:\Temp\opencode\actionlint-1.7.12\bin\actionlint.exe -shellcheck= .github/workflows/test.yml .github/workflows/typecheck.yml` | repo根 | exit0；actionlint语法/表达式通过，ShellCheck独立工具未启用 |
-| `git diff --check` | repo根 | exit0 |
-| `bun x --no-install oxlint packages/opencode/script/test-ci.ts packages/opencode/test/cli/db-maintenance.test.ts` | repo根 | exit0，0errors；3条warning位于既有类型断言/server.stop行，本次未改动这些行 |
+| 命令                                                                                                                                                                   | cwd               | 本地结果                                                                   |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------- | -------------------------------------------------------------------------- |
+| `bun install --linker hoisted`                                                                                                                                         | repo根            | 13.87s；patch安装成功，原fix-node-pty/prepare执行，lock仅增加1条补丁注册   |
+| 第8节双等待者命令                                                                                                                                                      | repo根            | 旧包exit1 → 固定patch后exit0                                               |
+| `bun test ./test/ci ./test/script/test-ci.test.ts ./test/script/install-target.test.ts --timeout 30000`                                                                | packages/opencode | 10pass/0fail，4.23s                                                        |
+| `bun test ./test/server/httpapi-workspace.test.ts ./test/project/instance.test.ts ./test/effect/instance-state.test.ts ./test/fixture/fixture.test.ts --timeout 30000` | packages/opencode | 37pass/0fail，86.33s                                                       |
+| `bun test ./test/cli/db-maintenance.test.ts --timeout 30000`                                                                                                           | packages/opencode | 15pass/0fail，165.86s                                                      |
+| `bun test ./test/cli/db-maintenance.test.ts --test-name-pattern 'online observe completes' --timeout 30000`                                                            | packages/opencode | 1pass/0fail、14filtered，12.52s；该项为前述15项之一                        |
+| `bun typecheck`                                                                                                                                                        | packages/opencode | 成功，当前fixture和script类型检查通过                                      |
+| `bun ../../node_modules/turbo/bin/turbo typecheck --filter=* --log-order=stream`                                                                                       | packages/opencode | 14successful/14total，6cache hits，16.695s；App完成后Desktop开始           |
+| `D:\Temp\opencode\actionlint-1.7.12\bin\actionlint.exe -shellcheck= .github/workflows/test.yml .github/workflows/typecheck.yml`                                        | repo根            | exit0；actionlint语法/表达式通过，ShellCheck独立工具未启用                 |
+| `git diff --check`                                                                                                                                                     | repo根            | exit0                                                                      |
+| `bun x --no-install oxlint packages/opencode/script/test-ci.ts packages/opencode/test/cli/db-maintenance.test.ts`                                                      | repo根            | exit0，0errors；3条warning位于既有类型断言/server.stop行，本次未改动这些行 |
 
 共62项不同的现有测试通过，另重复执行目标用例1次。首次将这些测试组合到单一240秒外层命令时达到命令预算，随后按生命周期与维护文件分别运行通过（86.33s+165.86s）。查询该次命令PID确认已退出；未终止其它并行开发进程。
 
@@ -983,16 +983,16 @@ Prettier默认检查出现5文件warning；使用原CRLF规则检查后，两个
 
 按`git diff --unified=0`统计新增/实质修改的非空行，剔除import-only、生成lock、文档、补丁元数据/上下文及删除行。补丁内src/dist的4行实际手工代码保守计入E；dist重复中文注释不计入C。
 
-| 文件 | E | C |
-| --- | --- | --- |
-| test.yml | 27 | 10 |
-| typecheck.yml | 2 | 2 |
-| turbo.json | 7 | 0 |
-| package.json | 1 | 0 |
-| test-ci.ts | 5 | 2 |
-| db-maintenance.test.ts | 4 | 2 |
-| Effect补丁实际source/runtime修改 | 4 | 1 |
-| 合计 | 50 | 17 |
+| 文件                             | E   | C   |
+| -------------------------------- | --- | --- |
+| test.yml                         | 27  | 10  |
+| typecheck.yml                    | 2   | 2   |
+| turbo.json                       | 7   | 0   |
+| package.json                     | 1   | 0   |
+| test-ci.ts                       | 5   | 2   |
+| db-maintenance.test.ts           | 4   | 2   |
+| Effect补丁实际source/runtime修改 | 4   | 1   |
+| 合计                             | 50  | 17  |
 
 独立审计进一步剔除package.json仅补逗号的既有行，E由51精确为50。最低要求ceil(50×0.15)=8，实际17/50=34%。解释均分布在安装闭包、日志归档、执行顺序语境、真实child退出、Deferred中断同步改数组、checkpoint原子发布等改动处。没有为提高比例新增额外代码；即使将注释也加入分母，17/(50+17)=25.37%。
 
@@ -1004,11 +1004,11 @@ Prettier默认检查出现5文件warning；使用原CRLF规则检查后，两个
 
 当前批准计划R3，完整实现D1–D7，目标为本地verified-implementation-and-commit。
 
-| Round | Revision | Full scope | Blocking findings | Result | Invocation |
-| --- | --- | --- | --- | --- | --- |
-| 1 | R3 | yes | No blocking findings；原始验证输出待核验 | BLOCK（证据核验） | `ses_f50ca666fffeC17BmWJNs6utP6` |
-| 2 | R3 | yes | B-01：转录未捕获命令结果 | BLOCK（证据采集） | `ses_f50ca666fffeC17BmWJNs6utP6` |
-| 3 | R3 | yes | No blocking findings；B-01已关闭 | APPROVE | `ses_f50ca666fffeC17BmWJNs6utP6` |
+| Round | Revision | Full scope | Blocking findings                        | Result            | Invocation                       |
+| ----- | -------- | ---------- | ---------------------------------------- | ----------------- | -------------------------------- |
+| 1     | R3       | yes        | No blocking findings；原始验证输出待核验 | BLOCK（证据核验） | `ses_f50ca666fffeC17BmWJNs6utP6` |
+| 2     | R3       | yes        | B-01：转录未捕获命令结果                 | BLOCK（证据采集） | `ses_f50ca666fffeC17BmWJNs6utP6` |
+| 3     | R3       | yes        | No blocking findings；B-01已关闭         | APPROVE           | `ses_f50ca666fffeC17BmWJNs6utP6` |
 
 ### 第一轮审计原文
 
@@ -1034,15 +1034,15 @@ No blocking findings.
 
 已对照当前工作区核验提供的 tracked diff，并读取新增 Effect patch；实际改动与 R3 的 D1–D7 一致。
 
-| 范围 | 独立核验结果 |
-|---|---|
-| D1：required 安装与日志 | 十个矩阵实例及分片保留；显式 Bash 保留管道失败语义；日志上传脱离 JUnit 存在条件。 |
-| D2：安装闭包与去重 | 当前五个 `test:ci` 包由 required 三包及 warning App/UI 覆盖；root 工具、SDK 反向生成所需 OpenCode 依赖及 `^build` 保留。 |
-| D3–D4：Typecheck | 原任务入口保留；Desktop 对 App 的项目引用支持新增顺序边；两个产物相关任务禁用缓存，避免仅恢复成功日志。 |
-| D5：shard 日志 | 仍等待真实 `proc.exited`，原退出码、文件分区和运行顺序不变。 |
-| D6：退出链 | 修复位于 Deferred 广播 owner；source 与 runtime dist 一致，未改变应用 disposal 算法。 |
-| D7：维护 fixture | 复用既有原子 writer；终态先提交再删除 owner；CLI 输出、退出码和超时断言保持。 |
-| 既有 CI 断言 | 已读取 E2E workflow 和 shard 测试，改动保持其现有检查合同；运行结果待独立核验。 |
+| 范围                    | 独立核验结果                                                                                                             |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| D1：required 安装与日志 | 十个矩阵实例及分片保留；显式 Bash 保留管道失败语义；日志上传脱离 JUnit 存在条件。                                        |
+| D2：安装闭包与去重      | 当前五个 `test:ci` 包由 required 三包及 warning App/UI 覆盖；root 工具、SDK 反向生成所需 OpenCode 依赖及 `^build` 保留。 |
+| D3–D4：Typecheck        | 原任务入口保留；Desktop 对 App 的项目引用支持新增顺序边；两个产物相关任务禁用缓存，避免仅恢复成功日志。                  |
+| D5：shard 日志          | 仍等待真实 `proc.exited`，原退出码、文件分区和运行顺序不变。                                                             |
+| D6：退出链              | 修复位于 Deferred 广播 owner；source 与 runtime dist 一致，未改变应用 disposal 算法。                                    |
+| D7：维护 fixture        | 复用既有原子 writer；终态先提交再删除 owner；CLI 输出、退出码和超时断言保持。                                            |
+| 既有 CI 断言            | 已读取 E2E workflow 和 shard 测试，改动保持其现有检查合同；运行结果待独立核验。                                          |
 
 根因链具有直接源码支持：
 
@@ -1062,16 +1062,16 @@ No blocking findings.
 
 独立按实际 diff 重算：
 
-| 文件 | E | C |
-|---|---:|---:|
-| `test.yml` | 27 | 10 |
-| `typecheck.yml` | 2 | 2 |
-| `turbo.json` | 7 | 0 |
-| `package.json` | 1 | 0 |
-| `test-ci.ts` | 5 | 2 |
-| `db-maintenance.test.ts` | 4 | 2 |
-| Effect source/runtime patch | 4 | 1 |
-| **合计** | **50** | **17** |
+| 文件                        |      E |      C |
+| --------------------------- | -----: | -----: |
+| `test.yml`                  |     27 |     10 |
+| `typecheck.yml`             |      2 |      2 |
+| `turbo.json`                |      7 |      0 |
+| `package.json`              |      1 |      0 |
+| `test-ci.ts`                |      5 |      2 |
+| `db-maintenance.test.ts`    |      4 |      2 |
+| Effect source/runtime patch |      4 |      1 |
+| **合计**                    | **50** | **17** |
 
 排除 import-only、生成 lock、文档、patch 元数据与上下文，以及 manifest 中仅补逗号的原有行；重复的 dist 中文注释不重复计数。
 
@@ -1117,16 +1117,16 @@ No blocking findings.
 
 本轮重新核对当前完整 diff、Effect patch、R3 验收条款及新增证据，结合本会话直接读取且未变化的调用链、测试和 manifests，覆盖仍为 **D1–D7 全范围**。
 
-| 范围 | 审计结论 |
-|---|---|
-| D1：required 准备与日志 | 原矩阵、分片和测试入口保留；Bash 管道传播失败；原始日志上传不再依赖 JUnit。 |
-| D2：安装闭包与去重 | required 三包与 warning App/UI 覆盖当前五个 `test:ci` 包；root 工具、SDK 反向生成依赖和 `^build` 保留。 |
-| D3–D4：Typecheck | 保留原任务入口；App→Desktop 顺序符合项目引用和声明输出关系；两个相关任务禁用缓存。 |
-| D5：shard 日志 | 仍等待真实 `proc.exited`，保留退出码、分区和运行顺序。 |
-| D6：Deferred 修复 | source/runtime 一致；快照遍历修复同步取消修改数组造成的漏通知，保留完成状态与幂等语义。 |
-| D7：维护 fixture | 复用既有原子 writer；终态先提交再释放 owner；原 CLI 行为断言不变。 |
-| CI 文件断言 | E2E workflow 和 shard 的既有合同保持，实际运行结果仍待核验。 |
-| 本地验收 | 检查路径齐全；新增转录未包含结果，B-01 未闭合。 |
+| 范围                    | 审计结论                                                                                                |
+| ----------------------- | ------------------------------------------------------------------------------------------------------- |
+| D1：required 准备与日志 | 原矩阵、分片和测试入口保留；Bash 管道传播失败；原始日志上传不再依赖 JUnit。                             |
+| D2：安装闭包与去重      | required 三包与 warning App/UI 覆盖当前五个 `test:ci` 包；root 工具、SDK 反向生成依赖和 `^build` 保留。 |
+| D3–D4：Typecheck        | 保留原任务入口；App→Desktop 顺序符合项目引用和声明输出关系；两个相关任务禁用缓存。                      |
+| D5：shard 日志          | 仍等待真实 `proc.exited`，保留退出码、分区和运行顺序。                                                  |
+| D6：Deferred 修复       | source/runtime 一致；快照遍历修复同步取消修改数组造成的漏通知，保留完成状态与幂等语义。                 |
+| D7：维护 fixture        | 复用既有原子 writer；终态先提交再释放 owner；原 CLI 行为断言不变。                                      |
+| CI 文件断言             | E2E workflow 和 shard 的既有合同保持，实际运行结果仍待核验。                                            |
+| 本地验收                | 检查路径齐全；新增转录未包含结果，B-01 未闭合。                                                         |
 
 根因与 owner 判断保持：异步 worktree boot 与 disposal 可等待同一 Deferred；同步中断清理修改原等待者数组，原索引循环可能漏通知。修复位于广播 owner，没有将责任转移到 InstanceStore 或 workflow。
 
@@ -1142,16 +1142,16 @@ No blocking findings.
 
 **通过。** 当前 diff 未新增类型抑制、重复 helper、无依据公共接口或弱化断言。
 
-| 文件 | E | C |
-|---|---:|---:|
-| `test.yml` | 27 | 10 |
-| `typecheck.yml` | 2 | 2 |
-| `turbo.json` | 7 | 0 |
-| `package.json` | 1 | 0 |
-| `test-ci.ts` | 5 | 2 |
-| `db-maintenance.test.ts` | 4 | 2 |
-| Effect source/runtime patch | 4 | 1 |
-| **合计** | **50** | **17** |
+| 文件                        |      E |      C |
+| --------------------------- | -----: | -----: |
+| `test.yml`                  |     27 |     10 |
+| `typecheck.yml`             |      2 |      2 |
+| `turbo.json`                |      7 |      0 |
+| `package.json`              |      1 |      0 |
+| `test-ci.ts`                |      5 |      2 |
+| `db-maintenance.test.ts`    |      4 |      2 |
+| Effect source/runtime patch |      4 |      1 |
+| **合计**                    | **50** | **17** |
 
 排除 import-only、生成 lock、文档、patch 元数据和上下文，以及仅补逗号的原有行；重复 dist 注释不重复计数。
 
@@ -1190,16 +1190,16 @@ No blocking findings.
 
 本轮覆盖原始需求、当前 **R3**、全部八个实现文件的实际 diff，以及此前直接读取且未变化的 producer-to-consumer 调用链、测试和依赖合同。没有将审计范围缩减为日志补交。
 
-| 范围 | 全范围核验结论 |
-|---|---|
-| D1：required 准备与日志 | 原矩阵、分片、测试入口及失败语义保留；安装按消费闭包选择；原始日志归档脱离 JUnit 存在条件。 |
-| D2：安装闭包与测试去重 | 当前五个 `test:ci` 包仍由 required 三包及 warning App/UI 覆盖；root 工具、SDK 反向生成所需 OpenCode 依赖和 `^build` 保留。 |
-| D3–D4：Typecheck | 原任务入口保留；App→Desktop 顺序符合项目引用和声明输出关系；两个相关任务禁用缓存。 |
-| D5：shard 日志 | 仍等待真实 `proc.exited`；退出码、分区和运行顺序不变。 |
-| D6：退出链根因 | 快照广播修复同步取消修改数组导致的漏通知；source/runtime 一致，完成状态及幂等保护保留。 |
-| D7：维护 fixture | 复用既有原子 checkpoint writer；终态先提交再释放 owner；原 CLI 输出、退出码和超时断言保持。 |
-| 既有 CI 断言 | E2E workflow、分片及安装目标测试包含在通过的本地回归命令中。 |
-| 本地验收 | 原始结果与退出码已可直接核验，第二轮证据缺口关闭。 |
+| 范围                    | 全范围核验结论                                                                                                             |
+| ----------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| D1：required 准备与日志 | 原矩阵、分片、测试入口及失败语义保留；安装按消费闭包选择；原始日志归档脱离 JUnit 存在条件。                                |
+| D2：安装闭包与测试去重  | 当前五个 `test:ci` 包仍由 required 三包及 warning App/UI 覆盖；root 工具、SDK 反向生成所需 OpenCode 依赖和 `^build` 保留。 |
+| D3–D4：Typecheck        | 原任务入口保留；App→Desktop 顺序符合项目引用和声明输出关系；两个相关任务禁用缓存。                                         |
+| D5：shard 日志          | 仍等待真实 `proc.exited`；退出码、分区和运行顺序不变。                                                                     |
+| D6：退出链根因          | 快照广播修复同步取消修改数组导致的漏通知；source/runtime 一致，完成状态及幂等保护保留。                                    |
+| D7：维护 fixture        | 复用既有原子 checkpoint writer；终态先提交再释放 owner；原 CLI 输出、退出码和超时断言保持。                                |
+| 既有 CI 断言            | E2E workflow、分片及安装目标测试包含在通过的本地回归命令中。                                                               |
+| 本地验收                | 原始结果与退出码已可直接核验，第二轮证据缺口关闭。                                                                         |
 
 本轮直接核验的结果：
 
@@ -1225,16 +1225,16 @@ No blocking findings.
 
 独立核算保持如下：
 
-| 文件 | E | C |
-|---|---:|---:|
-| `test.yml` | 27 | 10 |
-| `typecheck.yml` | 2 | 2 |
-| `turbo.json` | 7 | 0 |
-| `package.json` | 1 | 0 |
-| `test-ci.ts` | 5 | 2 |
-| `db-maintenance.test.ts` | 4 | 2 |
-| Effect source/runtime patch | 4 | 1 |
-| **合计** | **50** | **17** |
+| 文件                        |      E |      C |
+| --------------------------- | -----: | -----: |
+| `test.yml`                  |     27 |     10 |
+| `typecheck.yml`             |      2 |      2 |
+| `turbo.json`                |      7 |      0 |
+| `package.json`              |      1 |      0 |
+| `test-ci.ts`                |      5 |      2 |
+| `db-maintenance.test.ts`    |      4 |      2 |
+| Effect source/runtime patch |      4 |      1 |
+| **合计**                    | **50** | **17** |
 
 排除 import-only、生成 lock、文档、patch 元数据和上下文，以及仅补逗号的原有行；重复 dist 注释不重复计数。临时证据采集器不属于提交实现。
 

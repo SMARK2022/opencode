@@ -97,7 +97,13 @@ export function formatShellExecutionNotice(input: {
   const elapsed = normalizeElapsed(input.elapsedMs)
   // timeout 优先：即使后续 exitCode 有值，也是 kill 后的残留，不是真实退出
   if (input.expired) {
-    return formatExecutionNotice({ severity: "warning", reason: "timeout", timeout_ms: input.timeoutMs, elapsed_ms: elapsed, shell: input.shell })
+    return formatExecutionNotice({
+      severity: "warning",
+      reason: "timeout",
+      timeout_ms: input.timeoutMs,
+      elapsed_ms: elapsed,
+      shell: input.shell,
+    })
   }
   if (input.aborted) {
     return formatExecutionNotice({ severity: "warning", reason: "user_abort", elapsed_ms: elapsed, shell: input.shell })
@@ -105,7 +111,13 @@ export function formatShellExecutionNotice(input: {
   if (input.exitCode !== null) {
     // non-zero exit 始终显示 error exit Notice + elapsed
     if (input.exitCode !== 0) {
-      return formatExecutionNotice({ severity: "error", reason: "exit", exit_code: input.exitCode, elapsed_ms: elapsed, shell: input.shell })
+      return formatExecutionNotice({
+        severity: "error",
+        reason: "exit",
+        exit_code: input.exitCode,
+        elapsed_ms: elapsed,
+        shell: input.shell,
+      })
     }
     // exit 0 + 空输出：保留既有 info exit Notice，不改成 completed
     if (input.emptyOutput) {
@@ -123,7 +135,6 @@ export function formatExitNotice(code: number | null, emptyOutput: boolean) {
   if (code === null || (!emptyOutput && code === 0)) return
   return formatExecutionNotice({ severity: code === 0 ? "info" : "error", reason: "exit", exit_code: code })
 }
-
 
 // #282：compaction 已在持久层清理旧输出；给模型一个稳定的占位语义而不是空串
 export function formatCompactionClearedNotice() {
@@ -175,7 +186,9 @@ export function truncateForCompaction(text: string, maxChars?: number, tailChars
 function formatNotice(input: Notice) {
   // #282：空值属性直接省略，保持单行、稳定属性顺序（对象字面量序）
   return `<opencode_notice ${Object.entries(input)
-    .flatMap(([key, value]) => (value === undefined || value === "" ? [] : [`${key}="${escapeAttribute(String(value))}"`]))
+    .flatMap(([key, value]) =>
+      value === undefined || value === "" ? [] : [`${key}="${escapeAttribute(String(value))}"`],
+    )
     .join(" ")} />`
 }
 

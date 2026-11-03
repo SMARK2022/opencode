@@ -50,6 +50,7 @@ Claude Code Rebuilt 的 `prompts.ts` 非常能说明问题。它不是一段单�
 一起变化。
 
 ### plan mode 与角色切换在 Claude Code Rebuilt 中更偏“原生状态机”
+
 Claude Code Rebuilt 不只是“有个计划模式工具”，而是 plan mode 会影响权限、影响 prompt 注入、影响 compact 恢复，并且在主系统里被明确视为一种状态。
 
 ## 4.3 OpenCode：提示词系统更加模块化，模式控制更显式
@@ -121,6 +122,7 @@ OpenCode 则更像：
 ## 4.5 OpenCode 最值得做的路由增强
 
 ### 4.5.1 真正的角色化模型路由
+
 默认路由表建议：
 
 - build -> 强模型
@@ -131,6 +133,7 @@ OpenCode 则更像：
 - summary/title -> 极便宜模型
 
 ### 4.5.2 Prompt Layer 应该开始输出“角色成本意识”
+
 比如 explore agent 提示：
 
 - 优先列出关键文件，不要过度展开；
@@ -138,6 +141,7 @@ OpenCode 则更像：
 - 对长输出生成结构化 findings。
 
 ### 4.5.3 compact / summary agent 应采用专门的高度结构化 prompt
+
 OpenCode 已经有 compact/summary agent，但还可以进一步升级成：
 
 - 当前目标
@@ -171,8 +175,6 @@ OpenCode 的可设计空间更大。
 - 借鉴 Claude Code Rebuilt 的 section 化思想和动态恢复意识；
 - 在 OpenCode 里建立更清晰的角色化模型路由与 compact/summary 结构化输出。
 
-
-
 ## 4.8 系统提示词真正要解决的，不只是“说什么”，而是“如何少说却不失控”
 
 系统提示词经常被做得越来越长，尤其在 coding agent 里，很容易出现一种坏习惯：一旦发现模型在某件事上做得不好，就往 system prompt 里再加一条规定。久而久之，prompt 变成巨大的规章制度集合。
@@ -182,13 +184,17 @@ Claude Code Rebuilt 之所以虽然复杂、却仍然显得相对成熟，关键
 OpenCode 当前已经具备 provider prompt 层和 agent prompt 层，这是很好的开始。后续你应该重点强化的，不是单纯把 prompt 变长，而是做三件事：
 
 ### 一，建立“常驻信息”和“动态信息”的明确边界
+
 比如：
+
 - 常驻：基本行为规范、工具哲学、风险原则；
 - 角色常驻：某 agent 的工作职责；
 - 动态：当前工作目录、当前 agent、当前可用 skills、当前 plan 文件、当前 workset。
 
 ### 二，让提示词尽量消费结构化状态，而不是重复自然语言叙事
+
 如果系统已经知道：
+
 - 当前计划文件路径；
 - 最近工作集；
 - 已调用技能；
@@ -198,6 +204,7 @@ OpenCode 当前已经具备 provider prompt 层和 agent prompt 层，这是很�
 那么 prompt 不应再长篇累牍地“解释世界”，而应尽量使用结构化区块，让模型快速对齐状态。
 
 ### 三，让模式控制成为对象化状态，而不是继续堆文字规则
+
 OpenCode 现在这一点做得比很多项目好。plan/build/general/explore/compaction 都是对象，不只是 prompt 中的一句“你现在扮演……”。你后续应继续沿着这条路走，而不是退回到“为了省事，把模式差异都写进一长段 system prompt 里”。
 
 ## 4.9 对 OpenCode 的一个重要建议：把 Agent Prompt 设计成“可组合块”而不是“整段模板”
@@ -212,6 +219,7 @@ OpenCode 现在这一点做得比很多项目好。plan/build/general/explore/co
 - `safety_policy`：高风险动作的确认规则
 
 然后不同 agent 去组合不同块：
+
 - build：role + tooling_policy + verification_policy + safety_policy
 - plan：role + tooling_policy（只读版） + handoff_policy
 - explore：role + cost_policy + handoff_policy

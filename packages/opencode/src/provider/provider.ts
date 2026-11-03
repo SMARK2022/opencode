@@ -47,7 +47,8 @@ export function requestHeaders(options: Readonly<Record<string, unknown>>) {
     headers && typeof headers === "object" && !Array.isArray(headers)
       ? Object.fromEntries(
           Object.entries(headers).filter(
-            (entry): entry is [string, string] => entry[0].toLowerCase() !== "user-agent" && typeof entry[1] === "string",
+            (entry): entry is [string, string] =>
+              entry[0].toLowerCase() !== "user-agent" && typeof entry[1] === "string",
           ),
         )
       : {}
@@ -69,10 +70,10 @@ export function requestUserAgent(options: Readonly<Record<string, unknown>>) {
 }
 
 // 进程内关联 id：只串联同一次 daemon log 内的 fetch.start/response 与 SSE 里程碑，不跨运行
-  // #240：请求序号只用于日志关联——单调递增，不参与任何控制流
+// #240：请求序号只用于日志关联——单调递增，不参与任何控制流
 let providerFetchRequestID = 0
 
-  // #240：timing 载荷契约：requestID 贯穿 fetch/SSE 全阶段，字段统一字符串化便于结构化日志
+// #240：timing 载荷契约：requestID 贯穿 fetch/SSE 全阶段，字段统一字符串化便于结构化日志
 type FetchTiming = {
   requestID: number
   providerID: string
@@ -82,7 +83,7 @@ type FetchTiming = {
   log: (fields: Record<string, unknown>) => void
 }
 
-  // #240：诊断直写 Effect logger——payload-free，不改变调用方错误通道
+// #240：诊断直写 Effect logger——payload-free，不改变调用方错误通道
 function timing(input: FetchTiming, phase: string, extra?: Record<string, unknown>) {
   // phase 字符串是稳定契约：区分停滞发生在响应头前、原始 SSE 块前还是 AI SDK 语义事件前
   // 原生回调必须复用所属 Provider 的 logger；裸 runSync 会把诊断写进 CLI stdout。
@@ -97,7 +98,7 @@ function timing(input: FetchTiming, phase: string, extra?: Record<string, unknow
   })
 }
 
-  // #240：错误字段白名单提取——未知错误形状不进日志，防敏感信息泄漏
+// #240：错误字段白名单提取——未知错误形状不进日志，防敏感信息泄漏
 function errorFields(error: unknown) {
   if (error instanceof Error) {
     const code = "code" in error && typeof error.code === "string" ? error.code : undefined
@@ -106,7 +107,7 @@ function errorFields(error: unknown) {
   return { errorMessage: String(error) }
 }
 
-  // #240：体积探测只取已知形状——避免对大响应体做昂贵序列化
+// #240：体积探测只取已知形状——避免对大响应体做昂贵序列化
 function bodyBytes(body: unknown) {
   // 只度量已缓冲的 body；流与表单不读取——诊断不得消费或复制 provider 请求
   if (typeof body === "string") return new TextEncoder().encode(body).byteLength
@@ -153,7 +154,9 @@ function progressDeadline(ms: number, ctl: AbortController, timingInput: FetchTi
     // 保留目标的 ResponseStreamError 类型及 retryable transport code，不退化成普通 Error。
     // 先保存 expired 再 abort，确保迟到的 fetch fulfillment 仍会观察到同一个可分类错误。
     // rejectRead 只唤醒当前 pull；cancelReader 负责通知底层 body，二者缺一都会留下悬挂请求。
-    const error = Object.assign(new ProviderError.ResponseStreamError("SSE read timed out"), { code: "SSE_READ_TIMEOUT" })
+    const error = Object.assign(new ProviderError.ResponseStreamError("SSE read timed out"), {
+      code: "SSE_READ_TIMEOUT",
+    })
     expired = error
     timing(timingInput, "sse.timeout", {
       chunkTimeoutMs: ms,
@@ -278,11 +281,15 @@ function timeoutController(ms: number) {
 // Applies the `headerTimeout`, `chunkTimeout` (SSE idle) and `timeout` provider options at the
 // fetch layer, on top of `options.fetch` when a custom fetch is configured.
 // 共享包装显式接收请求身份与所属日志环境，普通SDK和Gateway不再依赖旧内联闭包。
-function timeoutFetch(options: Record<string, any>, model: { providerID: string; id: string }, bridge: EffectBridge.Shape) {
+function timeoutFetch(
+  options: Record<string, any>,
+  model: { providerID: string; id: string },
+  bridge: EffectBridge.Shape,
+) {
   const customFetch = options["fetch"]
-        // [local-smark] chunk 空闲超时:两个 SSE body 字节之间无数据达此时长才中止(心跳/注释字节会重置计时器)。
-        // 上游默认 300s 收紧为 180s——挂起连接更早暴露;触发的 SSE_READ_TIMEOUT 同样可重试,显式正值/false 仍可覆盖。
-        const chunkTimeout = options["chunkTimeout"] ?? 180_000
+  // [local-smark] chunk 空闲超时:两个 SSE body 字节之间无数据达此时长才中止(心跳/注释字节会重置计时器)。
+  // 上游默认 300s 收紧为 180s——挂起连接更早暴露;触发的 SSE_READ_TIMEOUT 同样可重试,显式正值/false 仍可覆盖。
+  const chunkTimeout = options["chunkTimeout"] ?? 180_000
   const headerTimeout = options["headerTimeout"] ?? 300_000
   const timeout = options["timeout"]
 
@@ -297,73 +304,74 @@ function timeoutFetch(options: Record<string, any>, model: { providerID: string;
     if (chunkAbortCtl) signals.push(chunkAbortCtl.signal)
     if (headerTimeoutCtl) signals.push(headerTimeoutCtl.signal)
     // 总期限加入既有取消链，显式 false 仍关闭此期限；路由恢复必须保留同一组合信号。
-    if (timeout !== false)
-      signals.push(AbortSignal.timeout(typeof timeout === "number" ? timeout : DEFAULT_TIMEOUT_MS))
+    if (timeout !== false) signals.push(AbortSignal.timeout(typeof timeout === "number" ? timeout : DEFAULT_TIMEOUT_MS))
 
     const combined = signals.length === 0 ? null : signals.length === 1 ? signals[0] : AbortSignal.any(signals)
     if (combined) opts.signal = combined
 
-          const configuredUserAgent = requestUserAgent(options)
-          // #169：配置 UA 无条件覆盖；AI SDK 常追加后缀导致 startsWith 失败
-          // #169：#168 前缀守卫在 openai 别名路径不可用，本 commit 收紧为 always-set
-          if (configuredUserAgent) {
-            const headers = new Headers(opts.headers)
-            headers.set("User-Agent", configuredUserAgent)
-            opts.headers = headers
-          }
+    const configuredUserAgent = requestUserAgent(options)
+    // #169：配置 UA 无条件覆盖；AI SDK 常追加后缀导致 startsWith 失败
+    // #169：#168 前缀守卫在 openai 别名路径不可用，本 commit 收紧为 always-set
+    if (configuredUserAgent) {
+      const headers = new Headers(opts.headers)
+      headers.set("User-Agent", configuredUserAgent)
+      opts.headers = headers
+    }
 
     // 自定义鉴权不重复注入路由，两条路径保留组合取消信号与 header timer 清理。
-          const timingHeaders = new Headers(opts.headers)
-          const timingInput = {
-            requestID: ++providerFetchRequestID,
-            providerID: model.providerID,
-            modelID: model.id,
-            sessionID: timingHeaders.get("x-session-affinity") ?? timingHeaders.get("x-opencode-session") ?? undefined,
-            startedAt: Date.now(),
-            // 保留 Effect 运行环境的 logger 与级别，计时回调不自行创建全局运行时。
-            log: (fields: Record<string, unknown>) =>
-              bridge.fork(Effect.logInfo("timing", fields).pipe(Effect.annotateLogs({ service: "provider.fetch" }))),
-          }
-          // 诊断刻意只保留 provider 本地的传输里程碑与请求大小：
-          // 不记录 body 内容、鉴权头、prompt、工具输出或原始 chunk
-          timing(timingInput, "fetch.start", {
-            method: opts.method,
-            chunkTimeoutMs: typeof chunkTimeout === "number" && chunkTimeout > 0 ? chunkTimeout : undefined,
-            bodyBytes: bodyBytes(opts.body),
-            // #240：请求级超时上限入诊断——区分「停滞本应被请求超时中止」与依赖 chunk 超时
-            timeoutMs:
-              options["timeout"] === false
-                ? undefined
-                : typeof options["timeout"] === "number"
-                  ? options["timeout"]
-                  : DEFAULT_TIMEOUT_MS,
-          })
-          // [local-smark] deadline 仅在 chunk 超时配置时存在——与 chunkAbortCtl 条件同源；
-          // progressDeadline 提供连续进度窗口（首块+块间），arm 内部对 ms<=0 自守护
-          const deadline = chunkAbortCtl ? progressDeadline(chunkTimeout, chunkAbortCtl, timingInput) : undefined
-          combined?.addEventListener("abort", () => deadline?.stop(), { once: true })
-          deadline?.start()
-          // direct/custom 必须共享同一份 transport policy，否则 adapter 分支会丢失
-          // Bun idle timeout 的显式关闭意图，导致同一个 Provider 在不同 route 上出现不同等待上限。
-          const transport = { ...opts, purpose: "provider" as const, timeout: false as const }
-          const res = await (
-            customFetch ? NetworkProxy.fetchWithRoute(customFetch, input, transport) : NetworkProxy.fetch(input, transport)
-          ).catch((error) => {
-            deadline?.stop()
-            timing(timingInput, "fetch.error", errorFields(error))
-            throw error
-          }).finally(() => headerTimeoutCtl?.clear())
+    const timingHeaders = new Headers(opts.headers)
+    const timingInput = {
+      requestID: ++providerFetchRequestID,
+      providerID: model.providerID,
+      modelID: model.id,
+      sessionID: timingHeaders.get("x-session-affinity") ?? timingHeaders.get("x-opencode-session") ?? undefined,
+      startedAt: Date.now(),
+      // 保留 Effect 运行环境的 logger 与级别，计时回调不自行创建全局运行时。
+      log: (fields: Record<string, unknown>) =>
+        bridge.fork(Effect.logInfo("timing", fields).pipe(Effect.annotateLogs({ service: "provider.fetch" }))),
+    }
+    // 诊断刻意只保留 provider 本地的传输里程碑与请求大小：
+    // 不记录 body 内容、鉴权头、prompt、工具输出或原始 chunk
+    timing(timingInput, "fetch.start", {
+      method: opts.method,
+      chunkTimeoutMs: typeof chunkTimeout === "number" && chunkTimeout > 0 ? chunkTimeout : undefined,
+      bodyBytes: bodyBytes(opts.body),
+      // #240：请求级超时上限入诊断——区分「停滞本应被请求超时中止」与依赖 chunk 超时
+      timeoutMs:
+        options["timeout"] === false
+          ? undefined
+          : typeof options["timeout"] === "number"
+            ? options["timeout"]
+            : DEFAULT_TIMEOUT_MS,
+    })
+    // [local-smark] deadline 仅在 chunk 超时配置时存在——与 chunkAbortCtl 条件同源；
+    // progressDeadline 提供连续进度窗口（首块+块间），arm 内部对 ms<=0 自守护
+    const deadline = chunkAbortCtl ? progressDeadline(chunkTimeout, chunkAbortCtl, timingInput) : undefined
+    combined?.addEventListener("abort", () => deadline?.stop(), { once: true })
+    deadline?.start()
+    // direct/custom 必须共享同一份 transport policy，否则 adapter 分支会丢失
+    // Bun idle timeout 的显式关闭意图，导致同一个 Provider 在不同 route 上出现不同等待上限。
+    const transport = { ...opts, purpose: "provider" as const, timeout: false as const }
+    const res = await (
+      customFetch ? NetworkProxy.fetchWithRoute(customFetch, input, transport) : NetworkProxy.fetch(input, transport)
+    )
+      .catch((error) => {
+        deadline?.stop()
+        timing(timingInput, "fetch.error", errorFields(error))
+        throw error
+      })
+      .finally(() => headerTimeoutCtl?.clear())
 
-          const contentType = res.headers.get("content-type") ?? undefined
-          timing(timingInput, "fetch.response", {
-            status: res.status,
-            contentType,
-            isSSE: contentType?.includes("text/event-stream") ?? false,
-          })
+    const contentType = res.headers.get("content-type") ?? undefined
+    timing(timingInput, "fetch.response", {
+      status: res.status,
+      contentType,
+      isSSE: contentType?.includes("text/event-stream") ?? false,
+    })
 
-          // [local-smark] deadline 仅在配置 chunk 超时时存在；wrap 对非 event-stream / 空 body 响应会停止窗口并原样透传
-          if (!deadline) return res
-          return deadline.wrap(res)
+    // [local-smark] deadline 仅在配置 chunk 超时时存在；wrap 对非 event-stream / 空 body 响应会停止窗口并原样透传
+    if (!deadline) return res
+    return deadline.wrap(res)
   }
 }
 
@@ -492,7 +500,8 @@ function custom(dep: CustomDep): Record<string, CustomLoader> {
         autoload: false,
         options: {
           headers: {
-            "anthropic-beta": "interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14,redact-thinking-2026-02-12",
+            "anthropic-beta":
+              "interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14,redact-thinking-2026-02-12",
           },
         },
       }),
@@ -1598,7 +1607,8 @@ function cloudflareGatewayNpm(providerID: string, modelID: string) {
 
 function fromModelsDevModel(provider: ModelsDev.Provider, model: ModelsDev.Model): Model {
   // 网关可能改写 SDK，先确定实际包再补端点和生成变体，避免套用原协议的默认值。
-  const npm = cloudflareGatewayNpm(provider.id, model.id) ?? model.provider?.npm ?? provider.npm ?? "@ai-sdk/openai-compatible"
+  const npm =
+    cloudflareGatewayNpm(provider.id, model.id) ?? model.provider?.npm ?? provider.npm ?? "@ai-sdk/openai-compatible"
   const base: Model = {
     id: ModelV2.ID.make(model.id),
     providerID: ProviderV2.ID.make(provider.id),
@@ -1816,25 +1826,30 @@ const layer = Layer.effect(
           const baseType = provider.extends
           // #147：extends claudecode 缺库条目时回退 anthropic 目录
           const existing = baseType
-            ? database[baseType] ?? (baseType === "claudecode" ? database["anthropic"] : undefined)
+            ? (database[baseType] ?? (baseType === "claudecode" ? database["anthropic"] : undefined))
             : database[providerID]
           // 克隆现有提供者的模型，覆盖 providerID 和 api 配置
           const inheritedModels = existing
-            ? Object.fromEntries(Object.entries(existing.models).map(([mid, model]) => {
-                const npm = provider.npm ?? model.api.npm
-                return [mid, {
-                  ...model,
-                  providerID: ProviderV2.ID.make(providerID),
-                  api: { ...model.api, npm, url: ProviderV2.apiUrl({ npm, api: provider.api ?? model.api.url }) },
-                  // SDK 变化后须重新生成协议变体，不能复用父提供者原协议的推理参数。
-                  variants: npm === model.api.npm ? model.variants : undefined,
-                }]
-              }))
+            ? Object.fromEntries(
+                Object.entries(existing.models).map(([mid, model]) => {
+                  const npm = provider.npm ?? model.api.npm
+                  return [
+                    mid,
+                    {
+                      ...model,
+                      providerID: ProviderV2.ID.make(providerID),
+                      api: { ...model.api, npm, url: ProviderV2.apiUrl({ npm, api: provider.api ?? model.api.url }) },
+                      // SDK 变化后须重新生成协议变体，不能复用父提供者原协议的推理参数。
+                      variants: npm === model.api.npm ? model.variants : undefined,
+                    },
+                  ]
+                }),
+              )
             : {}
           const parsed: Info = {
             id: ProviderV2.ID.make(providerID),
             // 用户指定 name 优先；extends 时默认用 providerID 而非继承的 name
-            name: provider.name ?? (baseType ? providerID : existing?.name ?? providerID),
+            name: provider.name ?? (baseType ? providerID : (existing?.name ?? providerID)),
             env: provider.env ?? existing?.env ?? [],
             options: mergeDeep(existing?.options ?? {}, provider.options ?? {}),
             source: "config",
@@ -1866,7 +1881,14 @@ const layer = Layer.effect(
                 id: apiID,
                 npm: apiNpm,
                 // 用合并后的包补默认地址，同时保留模型覆盖、提供者覆盖和继承地址的原优先级。
-                url: ProviderV2.apiUrl({ npm: apiNpm, api: model.provider?.api ?? provider?.api ?? existingModel?.api.url ?? modelsDev[baseType ?? providerID]?.api }),
+                url: ProviderV2.apiUrl({
+                  npm: apiNpm,
+                  api:
+                    model.provider?.api ??
+                    provider?.api ??
+                    existingModel?.api.url ??
+                    modelsDev[baseType ?? providerID]?.api,
+                }),
               },
               status: model.status ?? existingModel?.status ?? "active",
               name,
@@ -2103,9 +2125,13 @@ const layer = Layer.effect(
           if (provider.env) partial.env = provider.env
           if (provider.name) partial.name = provider.name
           // loader 已读取配置并选择凭据/地址；重合并不能把环境优先级或规范后的 URL 覆盖回去。
-          if (provider.options) partial.options = id === "claudecode" || provider.extends === "claudecode"
-            ? Object.fromEntries(Object.entries(provider.options).filter(([key]) => !["apiKey", "baseURL"].includes(key)))
-            : provider.options
+          if (provider.options)
+            partial.options =
+              id === "claudecode" || provider.extends === "claudecode"
+                ? Object.fromEntries(
+                    Object.entries(provider.options).filter(([key]) => !["apiKey", "baseURL"].includes(key)),
+                  )
+                : provider.options
           mergeProvider(providerID, partial)
         }
 
@@ -2188,11 +2214,14 @@ const layer = Layer.effect(
 
     // #362：仅刷新 Provider.Service 的 ScopedCache（所有目录），不触碰 SessionRunState
     // 等其他服务的缓存——这是 "auth 变更不杀会话" 的结构性保证。
-    const invalidateAll = Effect.fn("Provider.invalidateAll")(() =>
-      ScopedCache.invalidateAll(state.cache),
-    )
+    const invalidateAll = Effect.fn("Provider.invalidateAll")(() => ScopedCache.invalidateAll(state.cache))
 
-    async function resolveSDK(model: Model, s: State, envs: Record<string, string | undefined>, bridge: EffectBridge.Shape) {
+    async function resolveSDK(
+      model: Model,
+      s: State,
+      envs: Record<string, string | undefined>,
+      bridge: EffectBridge.Shape,
+    ) {
       try {
         const provider = s.providers[model.providerID]
         const options = { ...provider.options }

@@ -32,7 +32,8 @@ export const name = "edit"
 
 const EditItem = Schema.Struct({
   oldString: Schema.String.annotate({
-    description: "Exact text for one targeted replacement. It must be unique in the original file (unless replaceAll) and must not overlap other edits[].oldString in the same call.",
+    description:
+      "Exact text for one targeted replacement. It must be unique in the original file (unless replaceAll) and must not overlap other edits[].oldString in the same call.",
   }),
   newString: Schema.String.annotate({ description: "Replacement text for this targeted edit." }),
   replaceAll: Schema.Boolean.pipe(Schema.optional).annotate({
@@ -46,7 +47,8 @@ export const Input = Schema.Struct({
       "File path to edit. Relative paths resolve within the active Location. Absolute paths inside that Location are accepted; external absolute paths require external_directory approval.",
   }),
   edits: Schema.mutable(Schema.Array(EditItem)).annotate({
-    description: "One or more targeted replacements. Each edit is matched against the original file, not incrementally. Do not include overlapping or nested edits. If two changes touch the same block or nearby lines, merge them into one edit instead.",
+    description:
+      "One or more targeted replacements. Each edit is matched against the original file, not incrementally. Do not include overlapping or nested edits. If two changes touch the same block or nearby lines, merge them into one edit instead.",
   }),
 })
 
@@ -66,10 +68,16 @@ export const Output = Schema.Struct({
   // 模型回执与结构化结果共用同一跳写事实，不从 formatter 后的 diff 猜测无操作数量。
   warning: Schema.optional(Schema.String),
   // 与V1 public metadata同义；完整取证随Native structured持久化，不只放在有限模型预览。
-  inputProvenance: Schema.optional(Schema.Struct({ rewrites: Schema.Array(Schema.Struct({
-    editIndex: Schema.Number,
-    original: Schema.Struct({ byteLength: Schema.Number, sha256: Schema.String }),
-  })) })),
+  inputProvenance: Schema.optional(
+    Schema.Struct({
+      rewrites: Schema.Array(
+        Schema.Struct({
+          editIndex: Schema.Number,
+          original: Schema.Struct({ byteLength: Schema.Number, sha256: Schema.String }),
+        }),
+      ),
+    }),
+  ),
 })
 export type Output = typeof Output.Type
 
@@ -142,9 +150,7 @@ const layer = Layer.effectDiscard(
             input: InvocationInput,
             inputSchema: Schema.toJsonSchemaDocument(Input).schema,
             output: Output,
-            toModelOutput: ({ output }) => [
-              { type: "text", text: toModelOutput(output) },
-            ],
+            toModelOutput: ({ output }) => [{ type: "text", text: toModelOutput(output) }],
             execute: (input, context) => {
               const unableToEdit = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
                 effect.pipe(
@@ -153,7 +159,9 @@ const layer = Layer.effectDiscard(
                       ? new ToolFailure({
                           message: "File changed after permission approval. Read it again before editing.",
                         })
-                      : new ToolFailure({ message: PermissionV2.autoDeniedMessage(error) ?? `Unable to edit ${input.path}` }),
+                      : new ToolFailure({
+                          message: PermissionV2.autoDeniedMessage(error) ?? `Unable to edit ${input.path}`,
+                        }),
                   ),
                 )
 
@@ -169,7 +177,7 @@ const layer = Layer.effectDiscard(
                   })
                 }
                 // 与 V1 一样先定位/校验，混批中的 identical 条目由共享引擎跳写。
-                if (input.edits.some(edit => edit.oldString === "")) {
+                if (input.edits.some((edit) => edit.oldString === "")) {
                   return yield* new ToolFailure({
                     message: "oldString must not be empty. Use write to create or overwrite a file.",
                   })
@@ -184,15 +192,22 @@ const layer = Layer.effectDiscard(
                 const filePath = path.resolve(location.directory, input.path)
                 // 复用同一实际可见历史供失败反馈，不新增路径缓存或第二次历史读取。
                 const history = yield* unableToEdit(sessions.context(context.sessionID))
-                const hasTouched = history.some(message =>
-                  message.type === "assistant" && message.content.some(part => {
-                    if (part.type !== "tool" || part.state.status !== "completed") return false
-                    if (part.name !== "read" && part.name !== "write" && part.name !== "edit") return false
-                    return typeof part.state.input.path === "string" && resolveForCompare(part.state.input.path) === resolveForCompare(filePath)
-                  }))
-                if (!hasTouched) return yield* new ToolFailure({
-                  message: `File has not been read in this session: ${filePath}. Read it first to verify current content, then retry the edit.`,
-                })
+                const hasTouched = history.some(
+                  (message) =>
+                    message.type === "assistant" &&
+                    message.content.some((part) => {
+                      if (part.type !== "tool" || part.state.status !== "completed") return false
+                      if (part.name !== "read" && part.name !== "write" && part.name !== "edit") return false
+                      return (
+                        typeof part.state.input.path === "string" &&
+                        resolveForCompare(part.state.input.path) === resolveForCompare(filePath)
+                      )
+                    }),
+                )
+                if (!hasTouched)
+                  return yield* new ToolFailure({
+                    message: `File has not been read in this session: ${filePath}. Read it first to verify current content, then retry the edit.`,
+                  })
                 // 目标正文仍须等两项权限通过才读取，源工具名与错误原话均不扩展。
                 const external = target.externalDirectory
                 if (external) {
@@ -203,8 +218,11 @@ const layer = Layer.effectDiscard(
                       agent: context.agent,
                       metadata: {
                         // 保留原生diff证据，补齐共享reviewer需要的操作与原始替换负载。
-                        filepath: target.canonical, diff: JSON.stringify({ edits: input.edits }),
-                        action_kind: "tool", tool: "edit", operation: "edit",
+                        filepath: target.canonical,
+                        diff: JSON.stringify({ edits: input.edits }),
+                        action_kind: "tool",
+                        tool: "edit",
+                        operation: "edit",
                         edits: input.edits,
                       },
                       source: permissionSource,
@@ -219,14 +237,14 @@ const layer = Layer.effectDiscard(
                     save: ["*"],
                     sessionID: context.sessionID,
                     agent: context.agent,
-                      metadata: { filepath: target.canonical, diff: JSON.stringify({ edits: input.edits }) },
+                    metadata: { filepath: target.canonical, diff: JSON.stringify({ edits: input.edits }) },
                     source: permissionSource,
                   }),
                 )
                 const source = decodeUtf8(yield* unableToEdit(fs.readFile(target.canonical)))
                 const ending = detectLineEnding(source.text)
                 const baseLF = normalizeLineEndings(source.text)
-                const editsLF = input.edits.map(edit => ({
+                const editsLF = input.edits.map((edit) => ({
                   oldString: normalizeLineEndings(edit.oldString),
                   newString: normalizeLineEndings(edit.newString),
                   replaceAll: edit.replaceAll,
@@ -236,20 +254,31 @@ const layer = Layer.effectDiscard(
                   try: () => EditApply.applyEdits(baseLF, editsLF, input.path),
                   catch: (error) => {
                     const message = error instanceof Error ? error.message : String(error)
-                    if (!(error instanceof EditApply.EditApplyError) || !message.includes("Could not find")) return new ToolFailure({ message })
+                    if (!(error instanceof EditApply.EditApplyError) || !message.includes("Could not find"))
+                      return new ToolFailure({ message })
                     // Native与V1消费同一失败索引，不能把前项归一化成功误判为本次失败。
                     const probe = editsLF[error.editIndex]
                     if (!probe) return new ToolFailure({ message })
                     const closest = closestMatch(source.text, convertToLineEnding(probe.oldString, ending))
                     return new ToolFailure({
-                      message: message + (closest ? `\n\nClosest match at line ${closest.line}:\n${closest.excerpt}` : "\n\nNo reliable nearby candidate was found. Read the file and retry with exact text.") +
+                      message:
+                        message +
+                        (closest
+                          ? `\n\nClosest match at line ${closest.line}:\n${closest.excerpt}`
+                          : "\n\nNo reliable nearby candidate was found. Read the file and retry with exact text.") +
                         formatMismatchHistory(scanFileTouchHistory(history, target.canonical, location.directory)),
                     })
                   },
                 })
                 // 替换次数只统计真正写入项；跳写计数按 LF 提交形态，与引擎和历史一致。
-                const unchangedEntries = editsLF.filter(edit => edit.oldString === edit.newString).length
-                const replacements = editsLF.reduce((count, edit) => edit.oldString === edit.newString ? count : count + (edit.replaceAll ? EditApply.countOccurrences(baseLF, edit.oldString) : 1), 0)
+                const unchangedEntries = editsLF.filter((edit) => edit.oldString === edit.newString).length
+                const replacements = editsLF.reduce(
+                  (count, edit) =>
+                    edit.oldString === edit.newString
+                      ? count
+                      : count + (edit.replaceAll ? EditApply.countOccurrences(baseLF, edit.oldString) : 1),
+                  0,
+                )
                 const replaced = convertToLineEnding(applied.contentNew, ending)
                 const diffOld = normalizeLineEndings(source.text)
                 const diffNew = normalizeLineEndings(replaced)
@@ -267,7 +296,14 @@ const layer = Layer.effectDiscard(
                 const rendered = result.rendered ?? renderFileDiff(result.resource, diffOld, diffNew)
                 const limits = yield* outputStore.limits()
                 // 限制尾段在通用head+tail的保留范围内，默认仍为2KiB/10行；不改变通用owner。
-                const warning = EditApply.warningTail({ rewrites, unchanged: unchangedEntries, total: input.edits.length, maxBytes: Math.min(2048, Math.floor(limits.maxBytes / 4)), maxLines: Math.min(10, Math.floor(limits.maxLines / 4)), channel: "structured" }).slice(2)
+                const warning = EditApply.warningTail({
+                  rewrites,
+                  unchanged: unchangedEntries,
+                  total: input.edits.length,
+                  maxBytes: Math.min(2048, Math.floor(limits.maxBytes / 4)),
+                  maxLines: Math.min(10, Math.floor(limits.maxLines / 4)),
+                  channel: "structured",
+                }).slice(2)
                 // slice只移除共享尾段固定的两个分隔换行；每条SHA仍完整，历史参数统一为LF。
                 return {
                   files: [
@@ -281,11 +317,14 @@ const layer = Layer.effectDiscard(
                   ...(rewrites.length > 0 ? { inputProvenance: { rewrites } } : {}),
                   ...(warning ? { warning } : {}),
                   // 真实旧needle与提交replacement保留逻辑LF，不把物理行尾或formatter整文件伪装成局部参数。
-                  syncInput: { path: input.path, edits: applied.syncEdits.map(edit => ({
-                    oldString: edit.oldString,
-                    newString: edit.newString,
-                    ...(edit.replaceAll === true ? { replaceAll: true } : {}),
-                  })) },
+                  syncInput: {
+                    path: input.path,
+                    edits: applied.syncEdits.map((edit) => ({
+                      oldString: edit.oldString,
+                      newString: edit.newString,
+                      ...(edit.replaceAll === true ? { replaceAll: true } : {}),
+                    })),
+                  },
                 } satisfies Output
               })
             },
@@ -300,5 +339,15 @@ const layer = Layer.effectDiscard(
 export const node = makeLocationNode({
   name: "tool/edit",
   layer,
-  deps: [ToolRegistry.node, LocationMutation.node, FileMutation.node, FSUtil.node, PermissionV2.node, Format.node, Location.node, SessionStore.node, ToolOutputStore.node],
+  deps: [
+    ToolRegistry.node,
+    LocationMutation.node,
+    FileMutation.node,
+    FSUtil.node,
+    PermissionV2.node,
+    Format.node,
+    Location.node,
+    SessionStore.node,
+    ToolOutputStore.node,
+  ],
 })

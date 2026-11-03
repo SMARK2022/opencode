@@ -136,7 +136,11 @@ export interface Interface {
   readonly durable: (input: { readonly aggregateID: string; readonly after?: number }) => Stream.Stream<Payload>
   /** @deprecated Use `all()` and consume the returned stream. */
   readonly listen: (listener: Subscriber, options?: { readonly finalizerSafe?: boolean }) => Effect.Effect<Unsubscribe>
-  readonly project: <D extends Definition>(definition: D, projector: Subscriber<D>, afterCommit?: Subscriber<D>) => Effect.Effect<void>
+  readonly project: <D extends Definition>(
+    definition: D,
+    projector: Subscriber<D>,
+    afterCommit?: Subscriber<D>,
+  ) => Effect.Effect<void>
   readonly replay: (
     event: SerializedEvent,
     options?: { readonly publish?: boolean; readonly ownerID?: string; readonly strictOwner?: boolean },
@@ -154,12 +158,13 @@ export class Service extends Context.Service<Service, Interface>()("@opencode/Ev
 export const allBounded = (events: Interface, capacity: number) =>
   Effect.gen(function* () {
     const queue = yield* Queue.dropping<Payload, SubscriberOverflowError>(capacity)
-    const unsubscribe = yield* events.listen((event) =>
-      Queue.offer(queue, event).pipe(
-        Effect.flatMap((accepted) =>
-          accepted ? Effect.void : Queue.fail(queue, new SubscriberOverflowError({ capacity })).pipe(Effect.asVoid),
+    const unsubscribe = yield* events.listen(
+      (event) =>
+        Queue.offer(queue, event).pipe(
+          Effect.flatMap((accepted) =>
+            accepted ? Effect.void : Queue.fail(queue, new SubscriberOverflowError({ capacity })).pipe(Effect.asVoid),
+          ),
         ),
-      ),
       // dropping 队列满时立即结束该订阅，不在退出发布中等待消费者。
       { finalizerSafe: true },
     )
@@ -375,7 +380,12 @@ export const layerWith = (options?: LayerOptions) =>
         })
       }
 
-      function publishEvent<D extends Definition>(definition: D, event: Payload<D>, commit?: PublishOptions["commit"], finalizer = false) {
+      function publishEvent<D extends Definition>(
+        definition: D,
+        event: Payload<D>,
+        commit?: PublishOptions["commit"],
+        finalizer = false,
+      ) {
         return Effect.gen(function* () {
           if (!definition?.durable && commit)
             return yield* Effect.die(
@@ -422,7 +432,7 @@ export const layerWith = (options?: LayerOptions) =>
           // 已提交 durable event 先进入实时流，取消 inline 通知不会抹掉已发生的提交。
           if (isolateListeners) yield* fanout
           yield* Effect.forEach(
-            finalizer ? listeners.filter(listener => listener.finalizerSafe) : listeners,
+            finalizer ? listeners.filter((listener) => listener.finalizerSafe) : listeners,
             (listener) => (isolateListeners ? observe(event, listener.callback) : listener.callback(event)),
             { discard: true },
           )
@@ -618,7 +628,10 @@ export const layerWith = (options?: LayerOptions) =>
           }),
         )
 
-      const listen = (listener: Subscriber, options?: { readonly finalizerSafe?: boolean }): Effect.Effect<Unsubscribe> =>
+      const listen = (
+        listener: Subscriber,
+        options?: { readonly finalizerSafe?: boolean },
+      ): Effect.Effect<Unsubscribe> =>
         Effect.sync(() => {
           const entry = { callback: listener, finalizerSafe: options?.finalizerSafe === true }
           listeners.push(entry)
@@ -628,7 +641,11 @@ export const layerWith = (options?: LayerOptions) =>
           })
         })
 
-      const project = <D extends Definition>(definition: D, projector: Subscriber<D>, afterCommit?: Subscriber<D>): Effect.Effect<void> =>
+      const project = <D extends Definition>(
+        definition: D,
+        projector: Subscriber<D>,
+        afterCommit?: Subscriber<D>,
+      ): Effect.Effect<void> =>
         Effect.sync(() => {
           const list = projectors.get(definition.type) ?? []
           list.push({

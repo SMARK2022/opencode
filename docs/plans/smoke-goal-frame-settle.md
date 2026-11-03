@@ -47,23 +47,23 @@ error: initial Goal frame duplicates CJK glyphs: "...█      检查log，\n█ 
 
 ## 3. Repository Context
 
-| Source | Why it constrains this task |
-| --- | --- |
-| 根 `AGENTS.md` | 测试/typecheck 从包目录运行；风格规则 |
-| `.opencode/policy/first-principles-engineering.md` | owner 修复、E/C 门禁、no-evidence-no-edge-case |
+| Source                                                           | Why it constrains this task                                             |
+| ---------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| 根 `AGENTS.md`                                                   | 测试/typecheck 从包目录运行；风格规则                                   |
+| `.opencode/policy/first-principles-engineering.md`               | owner 修复、E/C 门禁、no-evidence-no-edge-case                          |
 | `docs/plans/spawner-exit-signal-drain-decoupling.md`（verified） | 前任务记录；本任务为新的独立因果链（smoke 谓词缺陷先于 57d1fe064 存在） |
-| `packages/opencode/script/smoke-opentui-artifact.ts` | 谓词缺陷所在文件（:467-477/:489-494/:501-505 三处 waitFor） |
+| `packages/opencode/script/smoke-opentui-artifact.ts`             | 谓词缺陷所在文件（:467-477/:489-494/:501-505 三处 waitFor）             |
 
 ## 4. Files and Evidence Read
 
-| Evidence | Relevance | Evidence class |
-| --- | --- | --- |
-| CI Build run 33292110326 失败日志（gh 独立拉取）：smoke-macos `assertFrame :801` 抛错，捕获帧 Goal 文本止于"请你自行独立完整完成相应"，objective（:123，恰好两个"查"，:126 注释自证）后半段"的调研与检查，并进行多轮的负载并发、高压"未渲染 | 症状：**部分渲染帧**通过了 waitFor 谓词进入断言 | observed |
-| 同 run 重跑（Build run 状态 completed/success）+ 本机 Windows 全新编译二进制 smoke 全绿（sourceCount:2/renderedCount:2） | 单次竞态、非确定性；本地未触发（时序依赖） | observed |
-| **谓词缺陷机械证明**：`:472` 谓词 `frame.includes("Goal") && frame.includes("检查log")` 对 CI 捕获帧为真（帧含第一处"检查log"），而 `assertFrame`（:798-801）要求 `count(frame,"查")===count(objective,"查")===2` 对同帧必假（仅 1 个"查"）——谓词可被不满足断言的中间帧满足 | 红色回路的可归约形式：predicate(f)=true ∧ assertFrame(f)=throw，f 即 CI 在案帧 | observed（代码 + 在案帧字符串） |
-| `:489-494`（resized）与 `:501-505`（restored）两处 waitFor 使用同款弱谓词（"Goal"+"检查log"） | 同缺陷三处实例：resize 后首帧同样可能部分渲染 | observed |
-| daemon Linux 腿：CI run 33292110169 首次 attempt 失败（db compress 测试 3878ms）→ 自动重跑同腿 success；本机 4 连跑全绿（70-84s/次） | 无复现信号；排除出本任务范围（§2） | observed |
-| 50c58ea0b2 与 57d1fe064 的 Build/test 前后对照：Build 50c58ea0b2 success → 57d1fe064 首次 failure（smoke-macos）→ 重跑 success | 单次时序暴露，非确定性因果；弱谓词缺陷先于两提交存在（git blame 该脚本 2026-08-11 未动谓词） | observed |
+| Evidence                                                                                                                                                                                                                                                                    | Relevance                                                                                    | Evidence class                  |
+| --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- | ------------------------------- |
+| CI Build run 33292110326 失败日志（gh 独立拉取）：smoke-macos `assertFrame :801` 抛错，捕获帧 Goal 文本止于"请你自行独立完整完成相应"，objective（:123，恰好两个"查"，:126 注释自证）后半段"的调研与检查，并进行多轮的负载并发、高压"未渲染                                 | 症状：**部分渲染帧**通过了 waitFor 谓词进入断言                                              | observed                        |
+| 同 run 重跑（Build run 状态 completed/success）+ 本机 Windows 全新编译二进制 smoke 全绿（sourceCount:2/renderedCount:2）                                                                                                                                                    | 单次竞态、非确定性；本地未触发（时序依赖）                                                   | observed                        |
+| **谓词缺陷机械证明**：`:472` 谓词 `frame.includes("Goal") && frame.includes("检查log")` 对 CI 捕获帧为真（帧含第一处"检查log"），而 `assertFrame`（:798-801）要求 `count(frame,"查")===count(objective,"查")===2` 对同帧必假（仅 1 个"查"）——谓词可被不满足断言的中间帧满足 | 红色回路的可归约形式：predicate(f)=true ∧ assertFrame(f)=throw，f 即 CI 在案帧               | observed（代码 + 在案帧字符串） |
+| `:489-494`（resized）与 `:501-505`（restored）两处 waitFor 使用同款弱谓词（"Goal"+"检查log"）                                                                                                                                                                               | 同缺陷三处实例：resize 后首帧同样可能部分渲染                                                | observed                        |
+| daemon Linux 腿：CI run 33292110169 首次 attempt 失败（db compress 测试 3878ms）→ 自动重跑同腿 success；本机 4 连跑全绿（70-84s/次）                                                                                                                                        | 无复现信号；排除出本任务范围（§2）                                                           | observed                        |
+| 50c58ea0b2 与 57d1fe064 的 Build/test 前后对照：Build 50c58ea0b2 success → 57d1fe064 首次 failure（smoke-macos）→ 重跑 success                                                                                                                                              | 单次时序暴露，非确定性因果；弱谓词缺陷先于两提交存在（git blame 该脚本 2026-08-11 未动谓词） | observed                        |
 
 ## 5. Current Behavior
 
@@ -78,21 +78,21 @@ assertFrame：要求整段 objective 的 glyph 计数一致（两个"查"）
 
 ## 6. Supported Input Domain and Reachability
 
-| Input or condition | Producer | Upstream guarantees | Reachable path | Owner | Classification |
-| --- | --- | --- | --- | --- | --- |
-| 增量渲染的中间帧（含"Goal"+第一处"检查log"、缺 objective 尾部） | OpenTUI 分块渲染时序（不可控外部调度） | 无——谓词未要求渲染完成 | 任何一次 smoke 运行（三处 waitFor 同缺陷）；CI 已观测一次 | 测试捕获条件（smoke 脚本自身） | observed |
+| Input or condition                                              | Producer                               | Upstream guarantees    | Reachable path                                            | Owner                          | Classification |
+| --------------------------------------------------------------- | -------------------------------------- | ---------------------- | --------------------------------------------------------- | ------------------------------ | -------------- |
+| 增量渲染的中间帧（含"Goal"+第一处"检查log"、缺 objective 尾部） | OpenTUI 分块渲染时序（不可控外部调度） | 无——谓词未要求渲染完成 | 任何一次 smoke 运行（三处 waitFor 同缺陷）；CI 已观测一次 | 测试捕获条件（smoke 脚本自身） | observed       |
 
 ## 7. Required Invariants
 
-| ID | Behavioral invariant | Evidence | Existing test |
-| --- | --- | --- | --- |
+| ID     | Behavioral invariant                                                                                                                                        | Evidence                          | Existing test                  |
+| ------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------- | ------------------------------ |
 | INV-08 | settle-before-capture：三处 goal-frame waitFor 的谓词必须只能被**完整渲染**帧满足（含 objective 尾部标记），使 assertFrame 收到的帧在构造上已含全部两个"查" | CI 在案部分帧 + 谓词/断言机械证明 | smoke 自身（三处 assertFrame） |
 
 ## 8. First Divergence and Root Cause
 
-| Invariant | First divergence | Owning module/interface | Proof |
-| --- | --- | --- | --- |
-| INV-08 | `smoke-opentui-artifact.ts` 三处 waitFor 谓词以"Goal"+"检查log"为就绪条件（:472/:492/:503），首个"查"所在行到达即返回，而渲染仍在中途 | smoke 脚本 waitFor 谓词（捕获条件 owner 即该脚本） | §4 机械证明：CI 帧 f 满足谓词不满足断言 |
+| Invariant | First divergence                                                                                                                      | Owning module/interface                            | Proof                                   |
+| --------- | ------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------- | --------------------------------------- |
+| INV-08    | `smoke-opentui-artifact.ts` 三处 waitFor 谓词以"Goal"+"检查log"为就绪条件（:472/:492/:503），首个"查"所在行到达即返回，而渲染仍在中途 | smoke 脚本 waitFor 谓词（捕获条件 owner 即该脚本） | §4 机械证明：CI 帧 f 满足谓词不满足断言 |
 
 红色回路（可归约）：CI 在案帧字符串直接构成
 `predicate(f)===true ∧ assertFrame(f)===throw` 的反例输入；修复后该 f 不再
@@ -100,8 +100,8 @@ assertFrame：要求整段 objective 的 glyph 计数一致（两个"查"）
 
 ## 9. Responsibility and Seam
 
-| Concern | Owner | Interface promise | Why it belongs here | Why another module does not own it |
-| --- | --- | --- | --- | --- |
+| Concern      | Owner                       | Interface promise      | Why it belongs here    | Why another module does not own it                     |
+| ------------ | --------------------------- | ---------------------- | ---------------------- | ------------------------------------------------------ |
 | 捕获就绪条件 | smoke 脚本三处 waitFor 谓词 | 只放行满足断言前提的帧 | 捕获时机唯一由谓词决定 | assertFrame 是正确断言不改；渲染器时序不可控不归测试管 |
 
 ## 10. Single Approved Primary-Path Design
@@ -118,12 +118,12 @@ PTY 增量帧 -> waitFor(frame 含 Goal + 检查log + 高压) -> assertFrame(计
 
 ## 11. Secondary and Replacement Path Inventory
 
-| Path | Current or proposed | Classification | Produces success? | Decision-surface share | Disposition |
-| --- | --- | --- | --- | --- | --- |
-| 弱谓词（Goal+检查log） | 现有 | 待修复的 primary 路径 | yes | 主路径 | 就地收紧 |
-| sleep 后再捕获 | 不存在 | forbidden（固定 sleep 反模式，test/AGENTS 明令） | — | 0 | reject |
-| 双帧一致再捕获 | 不存在 | rejected（更慢更复杂，尾部标记已构造充分） | — | 0 | reject |
-| assertFrame 放宽为 ≥1 查 | 不存在 | forbidden（弱化正确断言） | — | 0 | reject |
+| Path                     | Current or proposed | Classification                                   | Produces success? | Decision-surface share | Disposition |
+| ------------------------ | ------------------- | ------------------------------------------------ | ----------------- | ---------------------- | ----------- |
+| 弱谓词（Goal+检查log）   | 现有                | 待修复的 primary 路径                            | yes               | 主路径                 | 就地收紧    |
+| sleep 后再捕获           | 不存在              | forbidden（固定 sleep 反模式，test/AGENTS 明令） | —                 | 0                      | reject      |
+| 双帧一致再捕获           | 不存在              | rejected（更慢更复杂，尾部标记已构造充分）       | —                 | 0                      | reject      |
+| assertFrame 放宽为 ≥1 查 | 不存在              | forbidden（弱化正确断言）                        | —                 | 0                      | reject      |
 
 ## 12. Workaround Deletion and Replacement
 
@@ -131,60 +131,60 @@ PTY 增量帧 -> waitFor(frame 含 Goal + 检查log + 高压) -> assertFrame(计
 
 ## 13. Forward Traceability
 
-| Requirement or invariant | Production path | Planned file/change | Behavioral test |
-| --- | --- | --- | --- |
-| INV-08 settle-before-capture | 三处谓词收紧 | smoke-opentui-artifact.ts | 本机 smoke ×2（编译二进制）+ CI Build 复跑（用户） |
-| 治理双审计 | 本 plan | plan 文档 | §22/§24 |
+| Requirement or invariant     | Production path | Planned file/change       | Behavioral test                                    |
+| ---------------------------- | --------------- | ------------------------- | -------------------------------------------------- |
+| INV-08 settle-before-capture | 三处谓词收紧    | smoke-opentui-artifact.ts | 本机 smoke ×2（编译二进制）+ CI Build 复跑（用户） |
+| 治理双审计                   | 本 plan         | plan 文档                 | §22/§24                                            |
 
 ## 14. Reverse Traceability
 
-| Proposed production concept | Requirement ID | Evidence | Why existing logic cannot carry it |
-| --- | --- | --- | --- |
-| objectiveTail 尾部标记谓词 | INV-08 | CI 部分帧反例 + 机械证明 | 弱谓词可被中间帧满足，无任何条件保证渲染完成 |
+| Proposed production concept | Requirement ID | Evidence                 | Why existing logic cannot carry it           |
+| --------------------------- | -------------- | ------------------------ | -------------------------------------------- |
+| objectiveTail 尾部标记谓词  | INV-08         | CI 部分帧反例 + 机械证明 | 弱谓词可被中间帧满足，无任何条件保证渲染完成 |
 
 ## 15. File-Level Change Plan
 
-| File | Add / modify / delete | Exact responsibility of the change | Expected line delta |
-| --- | --- | --- | --- |
-| `packages/opencode/script/smoke-opentui-artifact.ts` | modify | 常量 objectiveTail + 三处谓词收紧 + 3 行中文 settle 注释 | 约 +7/−3 |
-| 本 plan | add | — | — |
+| File                                                 | Add / modify / delete | Exact responsibility of the change                       | Expected line delta |
+| ---------------------------------------------------- | --------------------- | -------------------------------------------------------- | ------------------- |
+| `packages/opencode/script/smoke-opentui-artifact.ts` | modify                | 常量 objectiveTail + 三处谓词收紧 + 3 行中文 settle 注释 | 约 +7/−3            |
+| 本 plan                                              | add                   | —                                                        | —                   |
 
 （1 代码文件 + plan = 2 文件。）
 
 ## 16. TDD Behavior Slices
 
-| Order | Red behavior | Why current code fails | Minimal green behavior | Regression protected |
-| --- | --- | --- | --- | --- |
-| 1 | CI 在案部分帧 f：谓词 true ∧ assertFrame throw（§8 反例） | 弱谓词 | 收紧后 predicate(f)=false（f 无"高压"），完整帧才放行 | INV-08；三处 waitFor 一并收紧 |
+| Order | Red behavior                                              | Why current code fails | Minimal green behavior                                | Regression protected          |
+| ----- | --------------------------------------------------------- | ---------------------- | ----------------------------------------------------- | ----------------------------- |
+| 1     | CI 在案部分帧 f：谓词 true ∧ assertFrame throw（§8 反例） | 弱谓词                 | 收紧后 predicate(f)=false（f 无"高压"），完整帧才放行 | INV-08；三处 waitFor 一并收紧 |
 
 本地回路：收紧前无本地红（时序未触发，诚实记录）；反例来自 CI 在案帧（observed
 类），修复后本机 smoke ×2 全绿 + 三处谓词不再可被反例满足（构造论证）。
 
 ## 17. Chinese Comment Budget
 
-| Metric | Estimate | Method |
-| --- | --- | --- |
-| Effective changed code lines `E` | 约 4（1 常量 + 3 谓词条件） | 排除注释 |
+| Metric                                    | Estimate                                                                | Method     |
+| ----------------------------------------- | ----------------------------------------------------------------------- | ---------- |
+| Effective changed code lines `E`          | 约 4（1 常量 + 3 谓词条件）                                             | 排除注释   |
 | Required Chinese explanatory comments `C` | ≥ 1；计划 3 行（每处谓词 1 行 settle 语义：为何尾部标记等价于渲染完成） | 邻近修改点 |
 
 ## 18. Verification
 
-| Command | Working directory | Evidence produced |
-| --- | --- | --- |
-| `bun run build --skip-install --os=win32 --arch=x64` | packages/opencode | 编译 exit 0 |
+| Command                                                                                              | Working directory | Evidence produced                         |
+| ---------------------------------------------------------------------------------------------------- | ----------------- | ----------------------------------------- |
+| `bun run build --skip-install --os=win32 --arch=x64`                                                 | packages/opencode | 编译 exit 0                               |
 | `bun run script/smoke-opentui-artifact.ts --binary dist/opencode-windows-x64/bin/opencode.exe`（×2） | packages/opencode | 两次全绿（sourceCount:2/renderedCount:2） |
-| `bun typecheck` | packages/opencode | exit 0 |
-| CI Build 复跑（用户侧） | — | smoke 三腿全绿 |
-| 反例论证 | — | CI 在案帧不再满足收紧后谓词（构造检查） |
+| `bun typecheck`                                                                                      | packages/opencode | exit 0                                    |
+| CI Build 复跑（用户侧）                                                                              | —                 | smoke 三腿全绿                            |
+| 反例论证                                                                                             | —                 | CI 在案帧不再满足收紧后谓词（构造检查）   |
 
 ## 19. Diff Budget
 
-| Metric | Estimate | Justification |
-| --- | --- | --- |
-| Files added | 0（plan 除外） | — |
-| Files modified | 1 + plan = 2 | 单点谓词收紧 |
-| Production lines | 约 +7/−3 | — |
-| Test lines | 0（smoke 即测试，自身收紧） | — |
+| Metric           | Estimate                    | Justification |
+| ---------------- | --------------------------- | ------------- |
+| Files added      | 0（plan 除外）              | —             |
+| Files modified   | 1 + plan = 2                | 单点谓词收紧  |
+| Production lines | 约 +7/−3                    | —             |
+| Test lines       | 0（smoke 即测试，自身收紧） | —             |
 
 ## 20. Real Risks and Open Decisions
 
@@ -228,9 +228,9 @@ The independent auditor must:
 
 ## 22. Plan Audit Record
 
-| Round | Audited revision | Full scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | R1 | yes | 0 | 3（N-01 “高压”换行断裂风险未记入 §20——若换行边界落在两字之间谓词将不可满足，但 §18 本机 ×2 三个宽度会先红门禁住，需补记 + no-fallback 再推导规则；N-02 daemon flake 监控基线建议现在拉取 33292110169 失败 attempt 日志作对照基线；N-03 §4 证据来源列混合用户 CI 事实与 builder 本机断言，未来修订应分列） | No blocking findings — APPROVE | ses_faeeb4331ffeL81uVSrYjUa9mb |
+| Round | Audited revision | Full scope? | Blocking findings | Non-blocking findings                                                                                                                                                                                                                                                                                     | Result                         | Invocation reference           |
+| ----- | ---------------- | ----------- | ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------ | ------------------------------ |
+| 1     | R1               | yes         | 0                 | 3（N-01 “高压”换行断裂风险未记入 §20——若换行边界落在两字之间谓词将不可满足，但 §18 本机 ×2 三个宽度会先红门禁住，需补记 + no-fallback 再推导规则；N-02 daemon flake 监控基线建议现在拉取 33292110169 失败 attempt 日志作对照基线；N-03 §4 证据来源列混合用户 CI 事实与 builder 本机断言，未来修订应分列） | No blocking findings — APPROVE | ses_faeeb4331ffeL81uVSrYjUa9mb |
 
 Any substantive revision invalidates earlier approval.
 
@@ -253,12 +253,12 @@ Complete only after implementation.
 
 ### Verification Commands and Results
 
-| Command | Working directory | Result |
-| --- | --- | --- |
-| `bun run build --skip-install --os=win32 --arch=x64` | packages/opencode | exit 0（voice worker + version smoke 内置通过） |
-| `bun run script/smoke-opentui-artifact.ts --binary dist/opencode-windows-x64/bin/opencode.exe` ×2 | packages/opencode | 两次全绿（sourceCount:2/renderedCount:2） |
-| `bun typecheck` | packages/opencode | exit 0 |
-| CI Build 复跑 | 用户侧 | 待复跑（三腿） |
+| Command                                                                                           | Working directory | Result                                          |
+| ------------------------------------------------------------------------------------------------- | ----------------- | ----------------------------------------------- |
+| `bun run build --skip-install --os=win32 --arch=x64`                                              | packages/opencode | exit 0（voice worker + version smoke 内置通过） |
+| `bun run script/smoke-opentui-artifact.ts --binary dist/opencode-windows-x64/bin/opencode.exe` ×2 | packages/opencode | 两次全绿（sourceCount:2/renderedCount:2）       |
+| `bun typecheck`                                                                                   | packages/opencode | exit 0                                          |
+| CI Build 复跑                                                                                     | 用户侧            | 待复跑（三腿）                                  |
 
 ### Original Feedback-Loop Result
 
@@ -270,12 +270,12 @@ Complete only after implementation.
 
 ### Chinese Comment Calculation
 
-| Metric | Actual | Exclusions and evidence |
-| --- | --- | --- |
-| Effective changed code lines `E` | 4 | 1 常量 + 3 谓词条件（原行修改）；排除 5 行注释（审计重算一致） |
-| Qualifying Chinese comment lines `C` | 5 | 常量同源契约 2 + 三处 settle 各 1 |
-| Ratio `C / E` | 1.25 | ≥ 0.15 |
-| Required minimum `C` | 1 | `max(1, ceil(4 × 0.15))` |
+| Metric                               | Actual | Exclusions and evidence                                        |
+| ------------------------------------ | ------ | -------------------------------------------------------------- |
+| Effective changed code lines `E`     | 4      | 1 常量 + 3 谓词条件（原行修改）；排除 5 行注释（审计重算一致） |
+| Qualifying Chinese comment lines `C` | 5      | 常量同源契约 2 + 三处 settle 各 1                              |
+| Ratio `C / E`                        | 1.25   | ≥ 0.15                                                         |
+| Required minimum `C`                 | 1      | `max(1, ceil(4 × 0.15))`                                       |
 
 ### Remaining Unverified Items
 
@@ -284,9 +284,9 @@ Complete only after implementation.
 
 ## 24. Implementation Audit Record
 
-| Round | Plan revision | Full original scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | R1 | yes | 0 | 2（N-01 §23 diff 统计口径不准：实际 +9/−3 非 +11/−0、注释 5 行非 7 行，实质 E/C 不变；N-02 CI 三腿复跑仍为用户侧待办，本机 ×2 三宽度绿 + 列网格换行平台确定性支撑） | No blocking findings — APPROVE | ses_faee026a3ffewaV6cZo2YoE7PS |
+| Round | Plan revision | Full original scope? | Blocking findings | Non-blocking findings                                                                                                                                               | Result                         | Invocation reference           |
+| ----- | ------------- | -------------------- | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------ | ------------------------------ |
+| 1     | R1            | yes                  | 0                 | 2（N-01 §23 diff 统计口径不准：实际 +9/−3 非 +11/−0、注释 5 行非 7 行，实质 E/C 不变；N-02 CI 三腿复跑仍为用户侧待办，本机 ×2 三宽度绿 + 列网格换行平台确定性支撑） | No blocking findings — APPROVE | ses_faee026a3ffewaV6cZo2YoE7PS |
 
 <details><summary>Verbatim independent implementation audit verdict (Round 1, plan revision R1) — approved</summary>
 
@@ -297,9 +297,11 @@ No blocking findings.
 ## Non-blocking findings
 
 ### N-01 §23 diff-stat record inaccurate
+
 Plan §23 records the actual diff as `+11/−0`; the real diff is **+9/−3** (`git diff --stat`: `9 insertions(+), 3 deletions(-)` — the three predicate lines are modifications of existing lines, not pure additions). Likewise "排除 7 行注释/空行" — actual added comment lines are 5, with no blank lines. The substance (E=4, C=5, design content) is correct; arithmetic record drift only, non-blocking per skill rules since I recomputed the actual diff.
 
 ### N-02 CI three-leg re-run remains user-side pending
+
 Recorded honestly in §23 "Remaining Unverified Items". The original red loop was CI-observed (smoke-macos, run 33292110326); the fix is verified by mechanical counterexample rejection + local ×2 green at all three widths. Script hardcodes cols 160→150→160 on every platform and cell-grid wrap is column-deterministic (CJK advance fixed at 2 cells), so tail-marker satisfiability is platform-stable. User-side CI re-run confirms; it cannot block the diff itself.
 
 ## Rejected speculation

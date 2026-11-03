@@ -157,39 +157,41 @@ describe("tool.grep", () => {
 
   // #244：大量空文件会触发旧的候选文件硬上限；现在 grep 依赖时间预算，
   // 因此「小文件很多但搜索很快」的场景应返回真实匹配而不是 scope-too-broad
-  it.instance("searches more than the legacy candidate file limit when work is fast", () =>
-    Effect.gen(function* () {
-      const test = yield* TestInstance
-      const search = path.join(test.directory, "many-small-files")
-      yield* Effect.promise(() => fs.mkdir(search, { recursive: true }))
-      yield* Effect.forEach(
-        Array.from({ length: 5_001 }, (_, index) => path.join(search, `empty-${index}.txt`)),
-        (file) => Effect.promise(() => Bun.write(file, "")),
-        // #244：并发 64 模拟真实仓库的文件创建节奏，避免串行写入放大慢盘抖动
-        { concurrency: 64, discard: true },
-      )
-      yield* Effect.promise(() => Bun.write(path.join(search, "match.txt"), "needle\n"))
+  it.instance(
+    "searches more than the legacy candidate file limit when work is fast",
+    () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const search = path.join(test.directory, "many-small-files")
+        yield* Effect.promise(() => fs.mkdir(search, { recursive: true }))
+        yield* Effect.forEach(
+          Array.from({ length: 5_001 }, (_, index) => path.join(search, `empty-${index}.txt`)),
+          (file) => Effect.promise(() => Bun.write(file, "")),
+          // #244：并发 64 模拟真实仓库的文件创建节奏，避免串行写入放大慢盘抖动
+          { concurrency: 64, discard: true },
+        )
+        yield* Effect.promise(() => Bun.write(path.join(search, "match.txt"), "needle\n"))
 
-      const info = yield* GrepTool
-      const grep = yield* info.init()
-      const result = yield* grep.execute(
-        {
-          pattern: "needle",
-          path: search,
-          include: "*.txt",
-        },
-        ctx,
-      )
+        const info = yield* GrepTool
+        const grep = yield* info.init()
+        const result = yield* grep.execute(
+          {
+            pattern: "needle",
+            path: search,
+            include: "*.txt",
+          },
+          ctx,
+        )
 
-      // #244：单值 include 走 string 兼容分支，与数组共用同一展开逻辑；
-      // #244：核心断言是「真匹配被返回」而非仅「不再报错」——
-      // 防止未来把 maxFiles 预扫加回导致静默恢复硬拒绝；
-      // include 单值形态同步验证 string 兼容分支；
-      // 5001 个空文件全部命中 include glob，预扫若存在必然拒绝
-      expect(result.metadata.matches).toBe(1)
-      expect(result.output).toContain("match.txt")
-      expect(result.output).not.toContain("Search scope is too broad")
-    }),
+        // #244：单值 include 走 string 兼容分支，与数组共用同一展开逻辑；
+        // #244：核心断言是「真匹配被返回」而非仅「不再报错」——
+        // 防止未来把 maxFiles 预扫加回导致静默恢复硬拒绝；
+        // include 单值形态同步验证 string 兼容分支；
+        // 5001 个空文件全部命中 include glob，预扫若存在必然拒绝
+        expect(result.metadata.matches).toBe(1)
+        expect(result.output).toContain("match.txt")
+        expect(result.output).not.toContain("Search scope is too broad")
+      }),
     undefined,
     // #244：Windows 慢盘写入 5001 个空文件远超 bun 默认 5 秒预算，放宽墙钟上限
     60_000,
@@ -209,7 +211,7 @@ describe("tool.grep", () => {
             glob: () => Effect.die("unused in timeout test"),
             grep: () => Effect.die("unused in timeout test"),
             // #244：mock 直接返回 timedOut——搜索层与工具层的超时语义在此解耦验证；
-      // #244：timedOut-only 形态：items 为空时工具必须返回超时提示而非空结果
+            // #244：timedOut-only 形态：items 为空时工具必须返回超时提示而非空结果
             search: () =>
               Effect.succeed({
                 items: [],
@@ -323,7 +325,9 @@ describe("tool.grep", () => {
       const grep = yield* info.init()
       const result = yield* grep.execute({ pattern: "needle", path: test.directory, include: "*.txt" }, ctx)
 
-      expect(result.output).toContain("(Results truncated: showing first 64 matches. Consider using a more specific path or pattern.)")
+      expect(result.output).toContain(
+        "(Results truncated: showing first 64 matches. Consider using a more specific path or pattern.)",
+      )
       expect(result.output).not.toMatch(/showing \d+ of \d+ matches/)
     }),
   )
@@ -336,9 +340,15 @@ describe("tool.grep", () => {
       yield* Effect.promise(() => Bun.write(path.join(test.directory, "other.txt"), "line2 sibling"))
       const ripgrep = yield* Ripgrep.Service
       // 内部grep仍保留候选上限；交互工具改用时间预算，单文件目标继续保持精确。
-      const tooBroad = yield* ripgrep.grep({
-        cwd: test.directory, pattern: "line2", include: "*.txt", limit: 65, maxFiles: 1,
-      }).pipe(Effect.flip)
+      const tooBroad = yield* ripgrep
+        .grep({
+          cwd: test.directory,
+          pattern: "line2",
+          include: "*.txt",
+          limit: 65,
+          maxFiles: 1,
+        })
+        .pipe(Effect.flip)
       expect(tooBroad).toMatchObject({ maxFiles: 1 })
       const info = yield* GrepTool
       const grep = yield* info.init()
@@ -434,135 +444,134 @@ describe("tool.grep", () => {
       expect(result.output).toContain("Results truncated")
     }),
   )
-
 })
 
-  // [local-smark] 源 0413 核心缺陷场景：rg exit 2（TCC/ACL/EACCES）→
-  // search 零匹配 + partial——工具必须显式携带 partial 标记，与确定性
-  // empty / emptyTimedOut 三态可区分，不能把部分路径不可访问当作全量阴性
-  it.instance("flags zero matches as partial when search reports inaccessible paths", () =>
-    Effect.gen(function* () {
-      const test = yield* TestInstance
+// [local-smark] 源 0413 核心缺陷场景：rg exit 2（TCC/ACL/EACCES）→
+// search 零匹配 + partial——工具必须显式携带 partial 标记，与确定性
+// empty / emptyTimedOut 三态可区分，不能把部分路径不可访问当作全量阴性
+it.instance("flags zero matches as partial when search reports inaccessible paths", () =>
+  Effect.gen(function* () {
+    const test = yield* TestInstance
 
-      const info = yield* GrepTool.pipe(
-        Effect.provide(
-          Layer.mock(Ripgrep.Service)({
-            find: () => Effect.die("unused in partial test"),
-            glob: () => Effect.die("unused in partial test"),
-            grep: () => Effect.die("unused in partial test"),
-            search: () =>
-              Effect.succeed({
-                items: [],
-                partial: true,
-                truncated: false,
-                timedOut: false,
-              }),
-          }),
-        ),
-      )
-      const grep = yield* info.init()
-      const result = yield* grep.execute(
-        {
-          pattern: "needle",
-          path: test.directory,
-          timeout: 1,
-        },
-        ctx,
-      )
+    const info = yield* GrepTool.pipe(
+      Effect.provide(
+        Layer.mock(Ripgrep.Service)({
+          find: () => Effect.die("unused in partial test"),
+          glob: () => Effect.die("unused in partial test"),
+          grep: () => Effect.die("unused in partial test"),
+          search: () =>
+            Effect.succeed({
+              items: [],
+              partial: true,
+              truncated: false,
+              timedOut: false,
+            }),
+        }),
+      ),
+    )
+    const grep = yield* info.init()
+    const result = yield* grep.execute(
+      {
+        pattern: "needle",
+        path: test.directory,
+        timeout: 1,
+      },
+      ctx,
+    )
 
-      // partial 空结果的三态可区分：metadata.partial 是模型判断
-      // 「结果可能不完整」的唯一信号；输出不得是确定性 "No files found"
-      expect(result.metadata.matches).toBe(0)
-      expect(result.metadata.truncated).toBe(false)
-      expect((result.metadata as Record<string, unknown>).partial).toBe(true)
-      expect(result.output).toContain("could not access some paths")
-      expect(result.output).not.toBe("No files found")
-    }),
-  )
+    // partial 空结果的三态可区分：metadata.partial 是模型判断
+    // 「结果可能不完整」的唯一信号；输出不得是确定性 "No files found"
+    expect(result.metadata.matches).toBe(0)
+    expect(result.metadata.truncated).toBe(false)
+    expect((result.metadata as Record<string, unknown>).partial).toBe(true)
+    expect(result.output).toContain("could not access some paths")
+    expect(result.output).not.toBe("No files found")
+  }),
+)
 
-  // [local-smark] 有匹配 + partial：已解析结果保留的同时追加不可访问提示，
-  // 与源提交「部分路径不可访问不改变已解析结果可信度」的语义一致
-  it.instance("keeps matches and marks inaccessibility on non-empty partial results", () =>
-    Effect.gen(function* () {
-      const test = yield* TestInstance
+// [local-smark] 有匹配 + partial：已解析结果保留的同时追加不可访问提示，
+// 与源提交「部分路径不可访问不改变已解析结果可信度」的语义一致
+it.instance("keeps matches and marks inaccessibility on non-empty partial results", () =>
+  Effect.gen(function* () {
+    const test = yield* TestInstance
 
-      const info = yield* GrepTool.pipe(
-        Effect.provide(
-          Layer.mock(Ripgrep.Service)({
-            find: () => Effect.die("unused in partial test"),
-            glob: () => Effect.die("unused in partial test"),
-            grep: () => Effect.die("unused in partial test"),
-            search: () =>
-              Effect.succeed({
-                items: [
-                  Match.make({
-                    entry: Entry.make({ path: RelativePath.make("match.txt"), type: "file" }),
-                    line: 1,
-                    offset: 0,
-                    text: "needle",
-                    submatches: [],
-                  }),
-                ],
-                partial: true,
-                truncated: false,
-                timedOut: false,
-              }),
-          }),
-        ),
-      )
-      const grep = yield* info.init()
-      const result = yield* grep.execute(
-        {
-          pattern: "needle",
-          path: test.directory,
-          timeout: 1,
-        },
-        ctx,
-      )
+    const info = yield* GrepTool.pipe(
+      Effect.provide(
+        Layer.mock(Ripgrep.Service)({
+          find: () => Effect.die("unused in partial test"),
+          glob: () => Effect.die("unused in partial test"),
+          grep: () => Effect.die("unused in partial test"),
+          search: () =>
+            Effect.succeed({
+              items: [
+                Match.make({
+                  entry: Entry.make({ path: RelativePath.make("match.txt"), type: "file" }),
+                  line: 1,
+                  offset: 0,
+                  text: "needle",
+                  submatches: [],
+                }),
+              ],
+              partial: true,
+              truncated: false,
+              timedOut: false,
+            }),
+        }),
+      ),
+    )
+    const grep = yield* info.init()
+    const result = yield* grep.execute(
+      {
+        pattern: "needle",
+        path: test.directory,
+        timeout: 1,
+      },
+      ctx,
+    )
 
-      expect(result.metadata.matches).toBe(1)
-      expect(result.output).toContain("Line 1: needle")
-      expect(result.output).toContain("inaccessible")
-    }),
-  )
+    expect(result.metadata.matches).toBe(1)
+    expect(result.output).toContain("Line 1: needle")
+    expect(result.output).toContain("inaccessible")
+  }),
+)
 
-  // [local-smark] 源 :3152-3168 契约：exit 2 竞态下 timedOut 与 partial 可并存——
-  // 四态 metadata（matches/truncated/timedOut/partial）都必须持久化，文案归因
-  // timeout 但 partial 独立记录路径跳过，模型据此同时获知预算与权限两种归因
-  it.instance("preserves partial metadata when an empty search also times out", () =>
-    Effect.gen(function* () {
-      const test = yield* TestInstance
+// [local-smark] 源 :3152-3168 契约：exit 2 竞态下 timedOut 与 partial 可并存——
+// 四态 metadata（matches/truncated/timedOut/partial）都必须持久化，文案归因
+// timeout 但 partial 独立记录路径跳过，模型据此同时获知预算与权限两种归因
+it.instance("preserves partial metadata when an empty search also times out", () =>
+  Effect.gen(function* () {
+    const test = yield* TestInstance
 
-      const info = yield* GrepTool.pipe(
-        Effect.provide(
-          Layer.mock(Ripgrep.Service)({
-            find: () => Effect.die("unused in partial test"),
-            glob: () => Effect.die("unused in partial test"),
-            grep: () => Effect.die("unused in partial test"),
-            search: () =>
-              Effect.succeed({
-                items: [],
-                partial: true,
-                truncated: false,
-                timedOut: true,
-              }),
-          }),
-        ),
-      )
-      const grep = yield* info.init()
-      const result = yield* grep.execute(
-        {
-          pattern: "needle",
-          path: test.directory,
-          timeout: 1,
-        },
-        ctx,
-      )
+    const info = yield* GrepTool.pipe(
+      Effect.provide(
+        Layer.mock(Ripgrep.Service)({
+          find: () => Effect.die("unused in partial test"),
+          glob: () => Effect.die("unused in partial test"),
+          grep: () => Effect.die("unused in partial test"),
+          search: () =>
+            Effect.succeed({
+              items: [],
+              partial: true,
+              truncated: false,
+              timedOut: true,
+            }),
+        }),
+      ),
+    )
+    const grep = yield* info.init()
+    const result = yield* grep.execute(
+      {
+        pattern: "needle",
+        path: test.directory,
+        timeout: 1,
+      },
+      ctx,
+    )
 
-      expect(result.metadata.matches).toBe(0)
-      expect(result.metadata.truncated).toBe(true)
-      expect((result.metadata as Record<string, unknown>).timedOut).toBe(true)
-      expect((result.metadata as Record<string, unknown>).partial).toBe(true)
-      expect(result.output).toContain("timed out")
-    }),
-  )
+    expect(result.metadata.matches).toBe(0)
+    expect(result.metadata.truncated).toBe(true)
+    expect((result.metadata as Record<string, unknown>).timedOut).toBe(true)
+    expect((result.metadata as Record<string, unknown>).partial).toBe(true)
+    expect(result.output).toContain("timed out")
+  }),
+)

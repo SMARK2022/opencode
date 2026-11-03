@@ -8,13 +8,13 @@
 
 `SessionRevert.revert`（`session/revert.ts:44-114`）串行执行大量 git 子进程。Benchmark 实测：
 
-| 操作 | 耗时 |
-|---|---|
-| 单次 git spawn 基线 | ~12ms |
-| 逐文件 checkout ×20 | 255ms |
-| 批量 checkout ×20 | 24ms |
-| 单次 checkout ×20 | 12ms |
-| 完整 revert 序列（19 spawns） | 214ms |
+| 操作                               | 耗时  |
+| ---------------------------------- | ----- |
+| 单次 git spawn 基线                | ~12ms |
+| 逐文件 checkout ×20                | 255ms |
+| 批量 checkout ×20                  | 24ms  |
+| 单次 checkout ×20                  | 12ms  |
+| 完整 revert 序列（19 spawns）      | 214ms |
 | 数据库 messages 加载（4421 parts） | 110ms |
 
 用户感受 1-2 秒 = git 操作（~400ms）+ DB 加载（~110ms）+ computeDiff + HTTP 往返 + JSON 序列化 + Effect 开销。
@@ -31,24 +31,24 @@
 
 ## 2. 已阅读并确认的文件
 
-| 文件 | 行号 | 相关性 |
-|---|---|---|
-| `session/revert.ts` | 1-194 | revert/unrevert/cleanup 核心，B1 改动点 |
-| `session/run-state.ts` | 1-165 | assertNotBusy/runner/cancel，B1 改动点 |
-| `snapshot/index.ts` | 287-506, 730-759 | track/restore/revert/diff git 操作，A1 改动点 |
-| `session/prompt.ts` | 1214-1223, 1436-1510, 1972-2009, 2025-2026, 2569-2684 | shellImpl/createUserMessage/prompt/compact/command 调用链 |
-| `session/session.ts` | 506-520, 536, 780-811, 826-845 | BusyError/messages/setRevert/clearRevert/patch |
-| `session/message-v2.ts` | 518-542, 1100-1150, 1224-1230 | PartInput schema + page + hidden 过滤 |
-| `cli/cmd/tui/routes/session/dialog-message.tsx` | 1-108 | 消息菜单，C1 改动点 |
-| `cli/cmd/tui/routes/session/index.tsx` | 219, 746-797, 1358 | usePromptRef + Undo/Redo + DialogMessage 调用 |
-| `cli/cmd/tui/component/prompt/index.tsx` | 88-96, 763-797, 1166-1182, 1402-1430 | PromptRef.set/submit/submitInner/promptAsync |
-| `cli/cmd/tui/context/prompt.tsx` | 1-18 | usePromptRef |
-| `server/.../handlers/session.ts` | 296-350 | prompt/promptAsync/command/shell handler，B1 改动点 |
-| `server/.../handlers/session-errors.ts` | 11-12 | mapBusy → BadRequest |
-| `server/.../groups/session.ts` | 136, 509-534 | PromptPayload/RevertPayload 端点定义 |
-| `test/session/revert-compact.test.ts` | 1-732 | 核心测试，8 个用例必须通过 |
-| `test/session/snapshot-tool-race.test.ts` | 1-286 | 并发测试 |
-| `test/AGENTS.md` | — | 测试规范 |
+| 文件                                            | 行号                                                  | 相关性                                                    |
+| ----------------------------------------------- | ----------------------------------------------------- | --------------------------------------------------------- |
+| `session/revert.ts`                             | 1-194                                                 | revert/unrevert/cleanup 核心，B1 改动点                   |
+| `session/run-state.ts`                          | 1-165                                                 | assertNotBusy/runner/cancel，B1 改动点                    |
+| `snapshot/index.ts`                             | 287-506, 730-759                                      | track/restore/revert/diff git 操作，A1 改动点             |
+| `session/prompt.ts`                             | 1214-1223, 1436-1510, 1972-2009, 2025-2026, 2569-2684 | shellImpl/createUserMessage/prompt/compact/command 调用链 |
+| `session/session.ts`                            | 506-520, 536, 780-811, 826-845                        | BusyError/messages/setRevert/clearRevert/patch            |
+| `session/message-v2.ts`                         | 518-542, 1100-1150, 1224-1230                         | PartInput schema + page + hidden 过滤                     |
+| `cli/cmd/tui/routes/session/dialog-message.tsx` | 1-108                                                 | 消息菜单，C1 改动点                                       |
+| `cli/cmd/tui/routes/session/index.tsx`          | 219, 746-797, 1358                                    | usePromptRef + Undo/Redo + DialogMessage 调用             |
+| `cli/cmd/tui/component/prompt/index.tsx`        | 88-96, 763-797, 1166-1182, 1402-1430                  | PromptRef.set/submit/submitInner/promptAsync              |
+| `cli/cmd/tui/context/prompt.tsx`                | 1-18                                                  | usePromptRef                                              |
+| `server/.../handlers/session.ts`                | 296-350                                               | prompt/promptAsync/command/shell handler，B1 改动点       |
+| `server/.../handlers/session-errors.ts`         | 11-12                                                 | mapBusy → BadRequest                                      |
+| `server/.../groups/session.ts`                  | 136, 509-534                                          | PromptPayload/RevertPayload 端点定义                      |
+| `test/session/revert-compact.test.ts`           | 1-732                                                 | 核心测试，8 个用例必须通过                                |
+| `test/session/snapshot-tool-race.test.ts`       | 1-286                                                 | 并发测试                                                  |
+| `test/AGENTS.md`                                | —                                                     | 测试规范                                                  |
 
 ## 3. 已确认的调用点（grep 验证）
 
@@ -90,6 +90,7 @@
 #### 5.1.1 Interface 新增 3 个方法
 
 **当前代码（line 11-25）**：
+
 ```ts
 export interface Interface {
   readonly assertNotBusy: (sessionID: SessionID) => Effect.Effect<void, Session.BusyError>
@@ -109,6 +110,7 @@ export interface Interface {
 ```
 
 **修改后**：
+
 ```ts
 export interface Interface {
   readonly assertNotBusy: (sessionID: SessionID) => Effect.Effect<void, Session.BusyError>
@@ -133,52 +135,59 @@ export interface Interface {
 #### 5.1.2 InstanceState.make 增加 reverting Set
 
 **当前代码（line 35-49）**：
+
 ```ts
-const state = yield* InstanceState.make(
-  Effect.fn("SessionRunState.state")(function* (ctx) {
-    const scope = yield* Scope.Scope
-    const runners = new Map<SessionID, Runner.Runner<MessageV2.WithParts>>()
-    yield* Effect.addFinalizer(
-      Effect.fnUntraced(function* () {
-        yield* Effect.forEach(runners.values(), (runner) => runner.cancel, {
-          concurrency: "unbounded",
-          discard: true,
-        })
-        runners.clear()
-      }),
-    )
-    return { runners, scope }
-  }),
-)
+const state =
+  yield *
+  InstanceState.make(
+    Effect.fn("SessionRunState.state")(function* (ctx) {
+      const scope = yield* Scope.Scope
+      const runners = new Map<SessionID, Runner.Runner<MessageV2.WithParts>>()
+      yield* Effect.addFinalizer(
+        Effect.fnUntraced(function* () {
+          yield* Effect.forEach(runners.values(), (runner) => runner.cancel, {
+            concurrency: "unbounded",
+            discard: true,
+          })
+          runners.clear()
+        }),
+      )
+      return { runners, scope }
+    }),
+  )
 ```
 
 **修改后**：
+
 ```ts
-const state = yield* InstanceState.make(
-  Effect.fn("SessionRunState.state")(function* (ctx) {
-    const scope = yield* Scope.Scope
-    const runners = new Map<SessionID, Runner.Runner<MessageV2.WithParts>>()
-    // revert 进行中标记：beginRevert 原子 check-and-set，endRevert 清除。
-    // assertNotBusy 和 assertNotReverting 检查此 Set 阻止 revert 期间的 prompt/shell 竞争。
-    const reverting = new Set<SessionID>()
-    yield* Effect.addFinalizer(
-      Effect.fnUntraced(function* () {
-        yield* Effect.forEach(runners.values(), (runner) => runner.cancel, {
-          concurrency: "unbounded",
-          discard: true,
-        })
-        runners.clear()
-        reverting.clear()
-      }),
-    )
-    return { runners, scope, reverting }
-  }),
-)
+const state =
+  yield *
+  InstanceState.make(
+    Effect.fn("SessionRunState.state")(function* (ctx) {
+      const scope = yield* Scope.Scope
+      const runners = new Map<SessionID, Runner.Runner<MessageV2.WithParts>>()
+      // revert 进行中标记：beginRevert 原子 check-and-set，endRevert 清除。
+      // assertNotBusy 和 assertNotReverting 检查此 Set 阻止 revert 期间的 prompt/shell 竞争。
+      const reverting = new Set<SessionID>()
+      yield* Effect.addFinalizer(
+        Effect.fnUntraced(function* () {
+          yield* Effect.forEach(runners.values(), (runner) => runner.cancel, {
+            concurrency: "unbounded",
+            discard: true,
+          })
+          runners.clear()
+          reverting.clear()
+        }),
+      )
+      return { runners, scope, reverting }
+    }),
+  )
 ```
 
 #### 5.1.3 assertNotBusy 增加 reverting 检查
 
 **当前代码（line 71-75）**：
+
 ```ts
 const assertNotBusy = Effect.fn("SessionRunState.assertNotBusy")(function* (sessionID: SessionID) {
   const data = yield* InstanceState.get(state)
@@ -188,6 +197,7 @@ const assertNotBusy = Effect.fn("SessionRunState.assertNotBusy")(function* (sess
 ```
 
 **修改后**：
+
 ```ts
 const assertNotBusy = Effect.fn("SessionRunState.assertNotBusy")(function* (sessionID: SessionID) {
   const data = yield* InstanceState.get(state)
@@ -220,11 +230,13 @@ const endRevert = Effect.fn("SessionRunState.endRevert")(function* (sessionID: S
 #### 5.1.4 Service.of 返回新增方法
 
 **当前代码（line 118）**：
+
 ```ts
 return Service.of({ assertNotBusy, cancel, ensureRunning, startShell })
 ```
 
 **修改后**：
+
 ```ts
 return Service.of({ assertNotBusy, assertNotReverting, beginRevert, endRevert, cancel, ensureRunning, startShell })
 ```
@@ -234,6 +246,7 @@ return Service.of({ assertNotBusy, assertNotReverting, beginRevert, endRevert, c
 #### 5.2.1 revert 函数包裹 beginRevert/endRevert
 
 **当前代码（line 44-114）**：
+
 ```ts
 const revert = Effect.fn("SessionRevert.revert")(function* (input: RevertInput) {
   yield* state.assertNotBusy(input.sessionID)
@@ -256,6 +269,7 @@ const revert = Effect.fn("SessionRevert.revert")(function* (input: RevertInput) 
 ```
 
 **修改后**：
+
 ```ts
 const revert = Effect.fn("SessionRevert.revert")(function* (input: RevertInput) {
   yield* state.assertNotBusy(input.sessionID)
@@ -292,6 +306,7 @@ const revert = Effect.fn("SessionRevert.revert")(function* (input: RevertInput) 
 #### 5.2.2 unrevert 函数同样包裹
 
 **当前代码（line 116-125）**：
+
 ```ts
 const unrevert = Effect.fn("SessionRevert.unrevert")(function* (input: { sessionID: SessionID }) {
   log.info("unreverting", input)
@@ -305,6 +320,7 @@ const unrevert = Effect.fn("SessionRevert.unrevert")(function* (input: { session
 ```
 
 **修改后**：
+
 ```ts
 const unrevert = Effect.fn("SessionRevert.unrevert")(function* (input: { sessionID: SessionID }) {
   log.info("unreverting", input)
@@ -329,6 +345,7 @@ const unrevert = Effect.fn("SessionRevert.unrevert")(function* (input: { session
 #### 5.3.1 4 个 handler 加 assertNotReverting
 
 **prompt handler（当前 line 296-310）**：
+
 ```ts
 const prompt = Effect.fn("SessionHttpApi.prompt")(function* (ctx: {
   params: { sessionID: SessionID }
@@ -348,6 +365,7 @@ const prompt = Effect.fn("SessionHttpApi.prompt")(function* (ctx: {
 ```
 
 **修改后**：
+
 ```ts
 const prompt = Effect.fn("SessionHttpApi.prompt")(function* (ctx: {
   params: { sessionID: SessionID }
@@ -368,6 +386,7 @@ const prompt = Effect.fn("SessionHttpApi.prompt")(function* (ctx: {
 ```
 
 **promptAsync handler（当前 line 312-332）**：
+
 ```ts
 const promptAsync = Effect.fn("SessionHttpApi.promptAsync")(function* (ctx: {
   params: { sessionID: SessionID }
@@ -393,6 +412,7 @@ const promptAsync = Effect.fn("SessionHttpApi.promptAsync")(function* (ctx: {
 ```
 
 **修改后**（在 `Effect.forkIn` 前加同步检查，revert 期间直接返回 BadRequest，不 fork）：
+
 ```ts
 const promptAsync = Effect.fn("SessionHttpApi.promptAsync")(function* (ctx: {
   params: { sessionID: SessionID }
@@ -419,6 +439,7 @@ const promptAsync = Effect.fn("SessionHttpApi.promptAsync")(function* (ctx: {
 ```
 
 **command handler（当前 line 334-342）**：
+
 ```ts
 const command = Effect.fn("SessionHttpApi.command")(function* (ctx: {
   params: { sessionID: SessionID }
@@ -432,6 +453,7 @@ const command = Effect.fn("SessionHttpApi.command")(function* (ctx: {
 ```
 
 **修改后**：
+
 ```ts
 const command = Effect.fn("SessionHttpApi.command")(function* (ctx: {
   params: { sessionID: SessionID }
@@ -446,6 +468,7 @@ const command = Effect.fn("SessionHttpApi.command")(function* (ctx: {
 ```
 
 **shell handler（当前 line 344-349）**：
+
 ```ts
 const shell = Effect.fn("SessionHttpApi.shell")(function* (ctx: {
   params: { sessionID: SessionID }
@@ -457,6 +480,7 @@ const shell = Effect.fn("SessionHttpApi.shell")(function* (ctx: {
 ```
 
 **修改后**：
+
 ```ts
 const shell = Effect.fn("SessionHttpApi.shell")(function* (ctx: {
   params: { sessionID: SessionID }
@@ -470,17 +494,18 @@ const shell = Effect.fn("SessionHttpApi.shell")(function* (ctx: {
 
 ### 5.4 B1 覆盖完整性
 
-| cleanup 调用点 | 入口 | 守卫 |
-|---|---|---|
-| prompt.ts:1976 (prompt) | prompt/promptAsync/command handler | assertNotReverting ✅ |
-| prompt.ts:1222 (shellImpl) | shell handler | assertNotReverting ✅ |
-| prompt.ts:2026 (compact) | compact() | assertNotBusy（已含 reverting）✅ |
+| cleanup 调用点             | 入口                               | 守卫                              |
+| -------------------------- | ---------------------------------- | --------------------------------- |
+| prompt.ts:1976 (prompt)    | prompt/promptAsync/command handler | assertNotReverting ✅             |
+| prompt.ts:1222 (shellImpl) | shell handler                      | assertNotReverting ✅             |
+| prompt.ts:2026 (compact)   | compact()                          | assertNotBusy（已含 reverting）✅ |
 
 ## 6. 方案 A1: 合并 git checkout（加速撤回）
 
 ### 6.1 改动文件：`packages/opencode/src/snapshot/index.ts`
 
 **当前代码（line 405-479，revert 函数批量分支）**：
+
 ```ts
 for (let i = 0; i < ops.length; ) {
   const first = ops[i]!
@@ -496,17 +521,16 @@ for (let i = 0; i < ops.length; ) {
   }
 
   if (run.length === 1) {
-    yield* single(first)
+    yield * single(first)
     i = j
     continue
   }
 
-  const tree = yield* git(
-    [...core, ...args(["ls-tree", "--name-only", first.hash, "--", ...run.map((item) => item.rel)])],
-    {
+  const tree =
+    yield *
+    git([...core, ...args(["ls-tree", "--name-only", first.hash, "--", ...run.map((item) => item.rel)])], {
       cwd: state.worktree,
-    },
-  )
+    })
 
   if (tree.code !== 0) {
     log.info("batched ls-tree failed, falling back to single-file revert", {
@@ -514,7 +538,7 @@ for (let i = 0; i < ops.length; ) {
       files: run.length,
     })
     for (const op of run) {
-      yield* single(op)
+      yield * single(op)
     }
     i = j
     continue
@@ -530,19 +554,18 @@ for (let i = 0; i < ops.length; ) {
   const list = run.filter((item) => have.has(item.rel))
   if (list.length) {
     log.info("reverting", { hash: first.hash, files: list.length })
-    const result = yield* git(
-      [...core, ...args(["checkout", first.hash, "--", ...list.map((item) => item.file)])],
-      {
+    const result =
+      yield *
+      git([...core, ...args(["checkout", first.hash, "--", ...list.map((item) => item.file)])], {
         cwd: state.worktree,
-      },
-    )
+      })
     if (result.code !== 0) {
       log.info("batched checkout failed, falling back to single-file revert", {
         hash: first.hash,
         files: list.length,
       })
       for (const op of run) {
-        yield* single(op)
+        yield * single(op)
       }
       i = j
       continue
@@ -552,7 +575,7 @@ for (let i = 0; i < ops.length; ) {
   for (const op of run) {
     if (have.has(op.rel)) continue
     log.info("file did not exist in snapshot, deleting", { file: op.file, hash: op.hash })
-    yield* remove(op.file)
+    yield * remove(op.file)
   }
 
   i = j
@@ -560,6 +583,7 @@ for (let i = 0; i < ops.length; ) {
 ```
 
 **修改后**（在 `if (run.length === 1)` 之后、`const tree = ...` 之前插入快速路径）：
+
 ```ts
 for (let i = 0; i < ops.length; ) {
   const first = ops[i]!
@@ -575,28 +599,26 @@ for (let i = 0; i < ops.length; ) {
   }
 
   if (run.length === 1) {
-    yield* single(first)
+    yield * single(first)
     i = j
     continue
   }
 
   // 优化：先尝试单次 checkout 全部文件。成功时跳过 ls-tree 预验证（省一次 git spawn）。
   // 失败（部分文件不存在或其他 git 错误）时回退到下方 ls-tree + 逐文件逻辑，行为不变。
-  const fastCheckout = yield* git(
-    [...core, ...args(["checkout", first.hash, "--", ...run.map((item) => item.file)])],
-    { cwd: state.worktree },
-  )
+  const fastCheckout =
+    yield *
+    git([...core, ...args(["checkout", first.hash, "--", ...run.map((item) => item.file)])], { cwd: state.worktree })
   if (fastCheckout.code === 0) {
     i = j
     continue
   }
 
-  const tree = yield* git(
-    [...core, ...args(["ls-tree", "--name-only", first.hash, "--", ...run.map((item) => item.rel)])],
-    {
+  const tree =
+    yield *
+    git([...core, ...args(["ls-tree", "--name-only", first.hash, "--", ...run.map((item) => item.rel)])], {
       cwd: state.worktree,
-    },
-  )
+    })
 
   if (tree.code !== 0) {
     log.info("batched ls-tree failed, falling back to single-file revert", {
@@ -604,7 +626,7 @@ for (let i = 0; i < ops.length; ) {
       files: run.length,
     })
     for (const op of run) {
-      yield* single(op)
+      yield * single(op)
     }
     i = j
     continue
@@ -620,19 +642,18 @@ for (let i = 0; i < ops.length; ) {
   const list = run.filter((item) => have.has(item.rel))
   if (list.length) {
     log.info("reverting", { hash: first.hash, files: list.length })
-    const result = yield* git(
-      [...core, ...args(["checkout", first.hash, "--", ...list.map((item) => item.file)])],
-      {
+    const result =
+      yield *
+      git([...core, ...args(["checkout", first.hash, "--", ...list.map((item) => item.file)])], {
         cwd: state.worktree,
-      },
-    )
+      })
     if (result.code !== 0) {
       log.info("batched checkout failed, falling back to single-file revert", {
         hash: first.hash,
         files: list.length,
       })
       for (const op of run) {
-        yield* single(op)
+        yield * single(op)
       }
       i = j
       continue
@@ -642,7 +663,7 @@ for (let i = 0; i < ops.length; ) {
   for (const op of run) {
     if (have.has(op.rel)) continue
     log.info("file did not exist in snapshot, deleting", { file: op.file, hash: op.hash })
-    yield* remove(op.file)
+    yield * remove(op.file)
   }
 
   i = j
@@ -663,6 +684,7 @@ for (let i = 0; i < ops.length; ) {
 #### import 添加 gte
 
 **当前代码（line 10-15）**：
+
 ```ts
 import { and } from "drizzle-orm"
 import { desc } from "drizzle-orm"
@@ -673,6 +695,7 @@ import { or } from "drizzle-orm"
 ```
 
 **修改后**：
+
 ```ts
 import { and, desc, eq, gte, inArray, lt, or } from "drizzle-orm"
 ```
@@ -680,6 +703,7 @@ import { and, desc, eq, gte, inArray, lt, or } from "drizzle-orm"
 #### page() 加 fromMessageID 参数
 
 **当前代码（line 1101-1110）**：
+
 ```ts
 export const page = Effect.fn("MessageV2.page")(function* (input: {
   sessionID: SessionID
@@ -694,6 +718,7 @@ export const page = Effect.fn("MessageV2.page")(function* (input: {
 ```
 
 **修改后**：
+
 ```ts
 export const page = Effect.fn("MessageV2.page")(function* (input: {
   sessionID: SessionID
@@ -715,11 +740,13 @@ export const page = Effect.fn("MessageV2.page")(function* (input: {
 #### messages() Interface 加 fromMessageID
 
 **当前代码（line 536）**：
+
 ```ts
 readonly messages: (input: { sessionID: SessionID; limit?: number }) => Effect.Effect<MessageV2.WithParts[], NotFound>
 ```
 
 **修改后**：
+
 ```ts
 readonly messages: (input: { sessionID: SessionID; limit?: number; fromMessageID?: MessageID }) => Effect.Effect<MessageV2.WithParts[], NotFound>
 ```
@@ -727,6 +754,7 @@ readonly messages: (input: { sessionID: SessionID; limit?: number; fromMessageID
 #### messages() 实现透传 fromMessageID
 
 **当前代码（line 826-845）**：
+
 ```ts
 const messages: Interface["messages"] = Effect.fn("Session.messages")(function* (input) {
   if (input.limit) {
@@ -751,17 +779,27 @@ const messages: Interface["messages"] = Effect.fn("Session.messages")(function* 
 ```
 
 **修改后**（两处 page 调用透传 fromMessageID）：
+
 ```ts
 const messages: Interface["messages"] = Effect.fn("Session.messages")(function* (input) {
   if (input.limit) {
-    return (yield* MessageV2.page({ sessionID: input.sessionID, limit: input.limit, fromMessageID: input.fromMessageID })).items
+    return (yield* MessageV2.page({
+      sessionID: input.sessionID,
+      limit: input.limit,
+      fromMessageID: input.fromMessageID,
+    })).items
   }
 
   const size = 50
   const result = [] as MessageV2.WithParts[]
   let before: string | undefined
   while (true) {
-    const page = yield* MessageV2.page({ sessionID: input.sessionID, limit: size, before, fromMessageID: input.fromMessageID })
+    const page = yield* MessageV2.page({
+      sessionID: input.sessionID,
+      limit: size,
+      before,
+      fromMessageID: input.fromMessageID,
+    })
     if (page.items.length === 0) break
     for (let i = page.items.length - 1; i >= 0; i--) {
       const item = page.items[i]
@@ -779,11 +817,13 @@ const messages: Interface["messages"] = Effect.fn("Session.messages")(function* 
 #### revert 调用 messages() 时传 fromMessageID
 
 **当前代码（line 46，在 acquireUseRelease 的 use 内）**：
+
 ```ts
-const all = yield* sessions.messages({ sessionID: input.sessionID }).pipe(Effect.orDie)
+const all = yield * sessions.messages({ sessionID: input.sessionID }).pipe(Effect.orDie)
 ```
 
 **修改后**：
+
 ```ts
 // 只加载 input.messageID 及之后的尾部消息，避免大 session 全量分页加载。
 // partID 场景（部分撤回）需要 lastUser（input.messageID 之前的最近 user 消息），
@@ -791,11 +831,13 @@ const all = yield* sessions.messages({ sessionID: input.sessionID }).pipe(Effect
 // narrowing：非 partID + assistant messageID（仅 API 直传可达，TUI 不可达）时，
 // lastUser 为 undefined → rev.messageID = assistant 自身（旧行为是之前的 user）。
 // 此差异可接受——保留 user 提问不造成数据损坏。
-const all = yield* sessions.messages(
-  input.partID
-    ? { sessionID: input.sessionID }
-    : { sessionID: input.sessionID, fromMessageID: input.messageID },
-).pipe(Effect.orDie)
+const all =
+  yield *
+  sessions
+    .messages(
+      input.partID ? { sessionID: input.sessionID } : { sessionID: input.sessionID, fromMessageID: input.messageID },
+    )
+    .pipe(Effect.orDie)
 ```
 
 ### 7.4 A2 行为正确性
@@ -808,17 +850,18 @@ const all = yield* sessions.messages(
 
 ### 7.5 A2 Benchmark 验证
 
-| Session 规模 | 当前 messages() | A2 优化后 | 节省 |
-|---|---|---|---|
+| Session 规模                 | 当前 messages()    | A2 优化后           | 节省 |
+| ---------------------------- | ------------------ | ------------------- | ---- |
 | 大（4421 parts / 1110 msgs） | 110ms（22 次分页） | ~30ms（1-2 次分页） | 80ms |
-| 中（500 parts） | ~30ms | ~15ms | 15ms |
-| 小（100 parts） | ~15ms | ~10ms | 5ms |
+| 中（500 parts）              | ~30ms              | ~15ms               | 15ms |
+| 小（100 parts）              | ~15ms              | ~10ms               | 5ms  |
 
 ## 8. 方案 C1: TUI Retry 菜单项（一步重试）
 
 ### 7.1 改动文件：`packages/tui/src/routes/session/dialog-message.tsx`
 
 **当前完整代码（108 行）**：
+
 ```tsx
 import { createMemo } from "solid-js"
 import { useSync } from "@tui/context/sync"
@@ -931,6 +974,7 @@ export function DialogMessage(props: {
 ```
 
 **修改后**（新增 import + Retry 选项）：
+
 ```tsx
 import { createMemo } from "solid-js"
 import { useSync } from "@tui/context/sync"
@@ -1107,12 +1151,15 @@ T340+ 新 prompt 执行中
 ## 9. 正常/错误/并发/清理/安全路径
 
 ### 8.1 正常路径（Retry）
+
 点 Retry → dialog.clear → abort(如果 busy) → 提取内容 → await revert(B1 持 reverting) → revert 完成(reverting 清除, session.revert 已设置) → setPrompt(同步更新 store) → submit → promptAsync → handler assertNotReverting(通过) → prompt() → cleanup(标记 hidden + clearRevert) → createUserMessage → loop
 
 ### 8.2 正常路径（Revert，原有行为不变）
+
 点 Revert → void revert(fire-and-forget) → setPrompt(填回内容) → dialog.clear。revert 异步执行，B1 守卫确保 revert 期间发消息返回 BusyError。
 
 ### 8.3 错误路径
+
 - **revert 失败**（C1 Retry）：`revertResponse.error` 有值 → 只 setPrompt 不 submit → 用户手动处理
 - **revert 失败**（B1）：`Effect.ensuring(endRevert)` 清除 reverting → 后续操作不受阻
 - **revert 期间发消息**（非 Retry）：handler assertNotReverting → BadRequest → TUI `keepDraftAfterSubmitFailure`(prompt/index.tsx:1331) 保留草稿 + toast
@@ -1120,18 +1167,21 @@ T340+ 新 prompt 执行中
 - **abort 失败**：`.catch(() => {})` 吞掉 → revert 的 assertNotBusy 可能因 runner busy 失败 → revertResponse.error → 不 submit
 
 ### 8.4 并发路径
+
 - **两个 revert 同时**：beginRevert 原子 check-and-set，第二个返回 BusyError
 - **revert + prompt 同时**：4 个 handler 的 assertNotReverting 阻止 prompt/shell/command
 - **revert + compact 同时**：compact 的 assertNotBusy（含 reverting）阻止
 - **revert + cancel 同时**：cancel 不经过 assertNotReverting，但 cancel 中断 runner。revert 不持有 runner，cancel 不影响 revert。revert 的 `Effect.ensuring` 保证 reverting 被清除
 
 ### 8.5 清理路径
+
 - **revert 失败**：`Effect.ensuring(endRevert)` 清除 reverting
 - **revert 中断**：同上
 - **进程退出**：reverting 在内存 Set 中，进程重启后消失（无需持久化，安全）
 - **InstanceState dispose**：`addFinalizer` 清除 reverting（与 runners 一致）
 
 ### 8.6 安全边界
+
 - reverting 不持久化（内存 Set，进程重启清除）——安全，因为 session.revert 状态由数据库决定
 - A1 不改变恢复语义（成功路径更快，失败路径不变）
 - 不改变 cleanup 语义（hidden 不删除，terminalize 不完成 assistant）
@@ -1141,6 +1191,7 @@ T340+ 新 prompt 执行中
 ## 10. 行为级测试计划
 
 ### 9.1 现有测试必须通过
+
 - `test/session/revert-compact.test.ts` 全部 8 个用例
 - `test/session/snapshot-tool-race.test.ts`
 - `test/session/session-schema.test.ts`
@@ -1149,33 +1200,39 @@ T340+ 新 prompt 执行中
 ### 9.2 新增测试（在 `test/session/revert-compact.test.ts` 中）
 
 **测试 1: "revert blocks concurrent prompt via assertNotReverting"**
+
 - fork 一个慢 revert（mock snapshot 慢 git 或大 file）
 - 同时通过 handler 调用 promptAsync
 - 验证 promptAsync 收到 BadRequest（BusyError → mapBusy）
 
 **测试 2: "beginRevert is atomic"**
+
 - 两个 fiber 同时 beginRevert
 - 验证第二个返回 BusyError
 - 验证 reverting Set 只有一个 entry
 
 **测试 3: "revert clears reverting on failure"**
+
 - mock snapshot.revert 抛错
 - 验证 reverting 被清除（endRevert 执行）
 - 验证后续 assertNotReverting 通过
 
 **测试 4: "A1 fast checkout succeeds without ls-tree"**
+
 - 创建临时 git repo，多个文件在同 hash
 - 调用 snap.revert
 - 验证文件正确恢复
 - 验证快速路径被使用（可通过 log 或 mock git 计数验证）
 
 **测试 5: "A1 fast checkout falls back on missing file"**
+
 - 创建 patch 引用不存在的文件
 - 调用 snap.revert
 - 验证回退到 ls-tree + 逐文件
 - 验证不存在的文件被删除
 
 ### 9.3 实现后验证
+
 - `bun test test/session/revert-compact.test.ts` 全绿
 - `bun test test/session/` 全绿
 - Benchmark 对比：`bun testing/benchmark/bench-revert.ts`
@@ -1199,16 +1256,16 @@ bun /var/folders/x9/wyq90jb50kxf62wvbs505q4nn7ltx4/T/opencode/testing/benchmark/
 
 ## 12. git 文件数与行数预估
 
-| 文件 | 改动 | 预估行数 |
-|---|---|---|
-| `packages/opencode/src/session/run-state.ts` | 修改：reverting Set + 3 方法 + assertNotBusy 检查 + finalizer + Service.of | +28 |
-| `packages/opencode/src/session/revert.ts` | 修改：revert/unrevert 用 acquireUseRelease 包裹 + fromMessageID 裁剪 | +15 |
-| `packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts` | 修改：4 个 handler 加 assertNotReverting | +8 |
-| `packages/opencode/src/snapshot/index.ts` | 修改：revert 函数增加快速 checkout 路径 | +12 |
-| `packages/opencode/src/session/message-v2.ts` | 修改：page() 加 fromMessageID 参数 + gte import | +5 |
-| `packages/opencode/src/session/session.ts` | 修改：messages() Interface + 实现透传 fromMessageID | +5 |
-| `packages/tui/src/routes/session/dialog-message.tsx` | 修改：新增 Retry 选项 + import + extractPromptInfo 重构 | +40 |
-| **总计** | **7 文件修改，0 新增，0 删除** | **~113 行** |
+| 文件                                                                       | 改动                                                                       | 预估行数    |
+| -------------------------------------------------------------------------- | -------------------------------------------------------------------------- | ----------- |
+| `packages/opencode/src/session/run-state.ts`                               | 修改：reverting Set + 3 方法 + assertNotBusy 检查 + finalizer + Service.of | +28         |
+| `packages/opencode/src/session/revert.ts`                                  | 修改：revert/unrevert 用 acquireUseRelease 包裹 + fromMessageID 裁剪       | +15         |
+| `packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts` | 修改：4 个 handler 加 assertNotReverting                                   | +8          |
+| `packages/opencode/src/snapshot/index.ts`                                  | 修改：revert 函数增加快速 checkout 路径                                    | +12         |
+| `packages/opencode/src/session/message-v2.ts`                              | 修改：page() 加 fromMessageID 参数 + gte import                            | +5          |
+| `packages/opencode/src/session/session.ts`                                 | 修改：messages() Interface + 实现透传 fromMessageID                        | +5          |
+| `packages/tui/src/routes/session/dialog-message.tsx`                       | 修改：新增 Retry 选项 + import + extractPromptInfo 重构                    | +40         |
+| **总计**                                                                   | **7 文件修改，0 新增，0 删除**                                             | **~113 行** |
 
 - 0 迁移文件
 - 0 SDK 重新生成

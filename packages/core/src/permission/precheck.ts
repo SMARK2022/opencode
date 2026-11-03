@@ -11,7 +11,10 @@ export type Level = (typeof LEVELS)[number]
 export type Decision = { level: Level; reason: string }
 
 // #197：wrapper 解包结果不含 safe 分支——wrapper 执行本身永远不够安全到可确定性放行，只提取脚本用于递归检测危险模式
-type UnwrapResult = { action: "script"; script: string; reason: string } | { action: "ask"; reason: string } | { action: "none" }
+type UnwrapResult =
+  | { action: "script"; script: string; reason: string }
+  | { action: "ask"; reason: string }
+  | { action: "none" }
 type RemoteResult = { action: "remote"; script?: string; reason: string } | { action: "none" }
 
 // #202：四级预审分层刻意保持狭窄——safe 仅限直接只读无敏感路径的无害命令；general 表示未知、动态、
@@ -66,11 +69,55 @@ const FILE_WRITE_COMMANDS = new Set(["clear-content", "set-content", "out-file"]
 
 // find的这些选项会消费后一个参数；例如-name "-delete"中的-delete是匹配值。
 // 此表只描述参数元数，真正的删除动作仍由原-delete和-exec/-execdir规则判定。
-const FIND_VALUES = ["-name", "-iname", "-path", "-ipath", "-regex", "-iregex", "-type", "-maxdepth", "-mindepth", "-size", "-user", "-group"]
+const FIND_VALUES = [
+  "-name",
+  "-iname",
+  "-path",
+  "-ipath",
+  "-regex",
+  "-iregex",
+  "-type",
+  "-maxdepth",
+  "-mindepth",
+  "-size",
+  "-user",
+  "-group",
+]
 
 // curl取值表同时包含上传、请求数据、认证、代理和输出选项，用于确定值的归属。
 // -H '--data=@.env'整体是header值；列入此表不代表该选项会读取文件或触发审查。
-const CURL_VALUES = ["-d", "--data", "--data-binary", "--data-raw", "--data-urlencode", "-F", "--form", "--form-string", "-T", "--upload-file", "-H", "--header", "--proxy-header", "-u", "--user", "-U", "--proxy-user", "-o", "--output", "-A", "--user-agent", "-e", "--referer", "-X", "--request", "--url", "-x", "--proxy", "-K", "--config"]
+const CURL_VALUES = [
+  "-d",
+  "--data",
+  "--data-binary",
+  "--data-raw",
+  "--data-urlencode",
+  "-F",
+  "--form",
+  "--form-string",
+  "-T",
+  "--upload-file",
+  "-H",
+  "--header",
+  "--proxy-header",
+  "-u",
+  "--user",
+  "-U",
+  "--proxy-user",
+  "-o",
+  "--output",
+  "-A",
+  "--user-agent",
+  "-e",
+  "--referer",
+  "-X",
+  "--request",
+  "--url",
+  "-x",
+  "--proxy",
+  "-K",
+  "--config",
+]
 
 // 磁盘格式化/分区属于forbidden；mkfs.*按前缀分类，避免封闭枚举漏过文件系统变体。
 // 关机族另行可授权审查，不能继续共用旧SYSTEM_DESTRUCTIVE_COMMANDS集合。
@@ -115,18 +162,33 @@ const INTERPRETER_DANGEROUS_PATH = String.raw`\/(?:${POSIX_SYSTEM_ROOTS})\/[^\/\
 
 // 原持久化写入规则只接收已绑定的输出路径；正文中的同名路径保持普通数据。
 const redirectRules = new Map([
-  [/^(?:~|\$HOME)?\/?\.(?:bash(?:rc|_profile|_login|_logout)|zshrc|zprofile|zlogin|profile|login|cshrc|tcshrc)$/i, "shell RC file modification enables persistent code execution"],
+  [
+    /^(?:~|\$HOME)?\/?\.(?:bash(?:rc|_profile|_login|_logout)|zshrc|zprofile|zlogin|profile|login|cshrc|tcshrc)$/i,
+    "shell RC file modification enables persistent code execution",
+  ],
   [/\.git\/hooks\//i, "git hook modification runs code on git operations"],
   [/^\/(?:etc\/cron|var\/spool\/cron)/i, "cron directory write enables persistent scheduled execution"],
   [/^(?:\/etc\/systemd|~\/\.config\/systemd)\//i, "systemd unit file write enables persistent service execution"],
-  [/^(?:(?:~|\$HOME)\/|\/(?:home\/[^/]+|root|Users\/[^/]+)\/|[A-Za-z]:\/Users\/[^/]+\/)?\.ssh\/authorized_keys/i, "SSH authorized_keys modification requires explicit approval"],
+  [
+    /^(?:(?:~|\$HOME)\/|\/(?:home\/[^/]+|root|Users\/[^/]+)\/|[A-Za-z]:\/Users\/[^/]+\/)?\.ssh\/authorized_keys/i,
+    "SSH authorized_keys modification requires explicit approval",
+  ],
 ])
 
 // ============================================================
 // 第七部分：禁止自动允许前缀
 const USER_ACCOUNT_COMMANDS = new Set([
-  "useradd", "userdel", "groupadd", "groupdel", "chpasswd", "passwd",
-  "usermod", "adduser", "deluser", "addgroup", "delgroup",
+  "useradd",
+  "userdel",
+  "groupadd",
+  "groupdel",
+  "chpasswd",
+  "passwd",
+  "usermod",
+  "adduser",
+  "deluser",
+  "addgroup",
+  "delgroup",
 ])
 
 // 进程终止族共用cautious；kill/spps是Stop-Process别名，sp是Set-ItemProperty，不能纳入。
@@ -230,7 +292,7 @@ export async function evaluate(input: {
   const externalDirectory = await externalDirectoryEffect(input)
   if (externalDirectory) return externalDirectory
   const fileEffect = structuredFileEffect(input)
-    // #230：结构化文件效果优先于通用规则——delete 是不可逆效果，必须谨慎处理
+  // #230：结构化文件效果优先于通用规则——delete 是不可逆效果，必须谨慎处理
   if (fileEffect) return fileEffect
 
   // #232：bash 与所有 external_directory 边界携带足够上下文做确定性预审；其他权限
@@ -240,10 +302,7 @@ export async function evaluate(input: {
   return bashEffect(input)
 }
 
-async function bashEffect(input: {
-  patterns: readonly string[]
-  metadata: Readonly<Record<string, unknown>>
-}) {
+async function bashEffect(input: { patterns: readonly string[]; metadata: Readonly<Record<string, unknown>> }) {
   const command = typeof input.metadata.command === "string" ? input.metadata.command : undefined
   // cwd来自实际审批metadata；缺失时保守判outside，不猜测进程当前目录。
   // 原始命令、canonical与inline源码沿同一基准分类，不削弱已有最高风险。
@@ -281,15 +340,24 @@ function bind(args: string[], valued: readonly string[], insensitive = false) {
   const operands: string[] = []
   for (let index = 0; index < args.length; index++) {
     const text = args[index]
-    if (text === "--") { operands.push(...args.slice(index + 1)); break }
-    if (!text.startsWith("-") || text === "-") { operands.push(text); continue }
+    if (text === "--") {
+      operands.push(...args.slice(index + 1))
+      break
+    }
+    if (!text.startsWith("-") || text === "-") {
+      operands.push(text)
+      continue
+    }
     const equal = text.indexOf("=")
     const raw = equal < 0 ? text : text.slice(0, equal)
     // 大小写归一化只作用于声明了 insensitive 的方言（PowerShell）；
     // bash/cmd 保持原样，避免把用户的 -F 与 -f 混为同一选项。
     const option = insensitive ? raw.toLowerCase() : raw
-    const at = valued.includes(option) ? 0 : !insensitive && !text.startsWith("--")
-      ? [...text].findIndex((char, position) => position > 0 && valued.includes(`-${char}`)) : -1
+    const at = valued.includes(option)
+      ? 0
+      : !insensitive && !text.startsWith("--")
+        ? [...text].findIndex((char, position) => position > 0 && valued.includes(`-${char}`))
+        : -1
     if (at >= 0) {
       // 短簇（-abc）中遇到取值字符即止：剩余字符是值的一部分，
       // 不能再拆成新的风险标志——防止把 -rf 里的 r 误配到 -r 取值表。
@@ -297,8 +365,14 @@ function bind(args: string[], valued: readonly string[], insensitive = false) {
       if (at > 1) flags.push(text.slice(0, at))
       const key = at === 0 ? option : `-${text[at]}`
       // 两种写法共用取值记录；等号空值也是显式取值，保持原有的参数消费边界。
-      const value = at === 0 ? equal < 0 ? args[++index] : text.slice(equal + 1)
-        : text.length > at + 1 ? text.slice(at + 1) : args[++index]
+      const value =
+        at === 0
+          ? equal < 0
+            ? args[++index]
+            : text.slice(equal + 1)
+          : text.length > at + 1
+            ? text.slice(at + 1)
+            : args[++index]
       if (value !== undefined) values.set(key, [...(values.get(key) ?? []), value])
       continue
     }
@@ -310,38 +384,55 @@ function bind(args: string[], valued: readonly string[], insensitive = false) {
 // 只取得Python代码区域的Token；字符串保持整体，f-string只展开插值的语法区域。
 function pythonTokens(source: string) {
   // 捕获组分别标注注释与完整字符串，后续API匹配只消费组外的标识符和标点。
-  const lexeme = /(#[^\n]*)|("""[\s\S]*?"""|'''[\s\S]*?'''|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')|[A-Za-z_$][\w$]*|\s+|./sy
+  const lexeme =
+    /(#[^\n]*)|("""[\s\S]*?"""|'''[\s\S]*?'''|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')|[A-Za-z_$][\w$]*|\s+|./sy
   const modes = [{ depth: 0, quote: "", group: 0 }]
   const tokens: { text: string; string: boolean }[] = []
   let groups = 0
-  for (let index = 0; index < source.length;) {
+  for (let index = 0; index < source.length; ) {
     const mode = modes[modes.length - 1]
     if (mode.quote) {
       // Python反斜杠不取消花括号插值，双花括号则是实际文字。
-      if (source[index] === "\\" && !["{", "}"].includes(source[index + 1])) { index += 2; continue }
+      if (source[index] === "\\" && !["{", "}"].includes(source[index + 1])) {
+        index += 2
+        continue
+      }
       if (source.startsWith(mode.quote, index)) {
         index += mode.quote.length
         modes.pop()
         if (mode.quote === "}") modes.pop()
         continue
       }
-      if (["{{", "}}"].includes(source.slice(index, index + 2))) { index += 2; continue }
+      if (["{{", "}}"].includes(source.slice(index, index + 2))) {
+        index += 2
+        continue
+      }
       if (source[index] === "{") modes.push({ depth: 1, quote: "", group: groups })
       index++
       continue
     }
     const formatted = /^(?:fr|rf|f)("""|'''|"|')/i.exec(source.slice(index))
-    if (formatted) { modes.push({ depth: 0, quote: formatted[1], group: groups }); index += formatted[0].length; continue }
+    if (formatted) {
+      modes.push({ depth: 0, quote: formatted[1], group: groups })
+      index += formatted[0].length
+      continue
+    }
     lexeme.lastIndex = index
     const match = lexeme.exec(source)
     if (!match) break
     index = lexeme.lastIndex
     if (match[1] !== undefined || /^\s+$/.test(match[0])) continue
     // 字段顶层冒号之后是格式文字；括号内冒号仍属于Python表达式。
-    if (mode.depth === 1 && groups === mode.group && match[0] === ":") { modes.push({ depth: 0, quote: "}", group: groups }); continue }
+    if (mode.depth === 1 && groups === mode.group && match[0] === ":") {
+      modes.push({ depth: 0, quote: "}", group: groups })
+      continue
+    }
     if (mode.depth > 0 && match[2] === undefined) {
       if (match[0] === "{") mode.depth++
-      if (match[0] === "}" && --mode.depth === 0) { modes.pop(); continue }
+      if (match[0] === "}" && --mode.depth === 0) {
+        modes.pop()
+        continue
+      }
     }
     if (["(", "["].includes(match[0])) groups++
     if ([")", "]"].includes(match[0])) groups--
@@ -366,21 +457,42 @@ async function sourceRisk(source: string, language: "python" | "javascript"): Pr
       if (!(error instanceof SyntaxError)) throw error
       return { level: "general", reason: "interpreter source has invalid syntax" }
     }
-    if (tree) types.traverseFast(tree, (node) => {
-      if (!types.isCallExpression(node) || !types.isMemberExpression(node.callee) || node.callee.computed) return
-      const member = node.callee
-      if (!types.isIdentifier(member.property) || !["rmSync", "rmdirSync", "unlinkSync"].includes(member.property.name)) return
-      const object = member.object
-      const fs = types.isIdentifier(object, { name: "fs" }) || (types.isCallExpression(object) && types.isIdentifier(object.callee, { name: "require" }) && types.isStringLiteral(object.arguments[0], { value: "fs" }))
-      // Babel已区分正则文字、模板插值和除法；只消费原成员调用及字符串路径。
-      // 用户单独授权unlinkSync变量目标进入cautious；留空target沿用普通删除reason，其他API保持字面范围。
-      if (fs && (types.isStringLiteral(node.arguments[0]) ? node.arguments[0].value.length > 0 : member.property.name === "unlinkSync" && types.isIdentifier(node.arguments[0])))
-        calls.push({ owner: "fs", method: member.property.name, target: types.isStringLiteral(node.arguments[0]) ? node.arguments[0].value : undefined })
-    })
+    if (tree)
+      types.traverseFast(tree, (node) => {
+        if (!types.isCallExpression(node) || !types.isMemberExpression(node.callee) || node.callee.computed) return
+        const member = node.callee
+        if (
+          !types.isIdentifier(member.property) ||
+          !["rmSync", "rmdirSync", "unlinkSync"].includes(member.property.name)
+        )
+          return
+        const object = member.object
+        const fs =
+          types.isIdentifier(object, { name: "fs" }) ||
+          (types.isCallExpression(object) &&
+            types.isIdentifier(object.callee, { name: "require" }) &&
+            types.isStringLiteral(object.arguments[0], { value: "fs" }))
+        // Babel已区分正则文字、模板插值和除法；只消费原成员调用及字符串路径。
+        // 用户单独授权unlinkSync变量目标进入cautious；留空target沿用普通删除reason，其他API保持字面范围。
+        if (
+          fs &&
+          (types.isStringLiteral(node.arguments[0])
+            ? node.arguments[0].value.length > 0
+            : member.property.name === "unlinkSync" && types.isIdentifier(node.arguments[0]))
+        )
+          calls.push({
+            owner: "fs",
+            method: member.property.name,
+            target: types.isStringLiteral(node.arguments[0]) ? node.arguments[0].value : undefined,
+          })
+      })
   }
   if (language === "python") {
     const tokens = pythonTokens(source)
-    const methods = new Map([["os", ["remove", "unlink", "rmdir"]], ["shutil", ["rmtree"]]])
+    const methods = new Map([
+      ["os", ["remove", "unlink", "rmdir"]],
+      ["shutil", ["rmtree"]],
+    ])
     // 词法项中的引用外壳独立去除，文件API路径不会进行Shell家目录展开。
     // lexer已保证完整的配对引号；这里只解开该单个Token的单/三引号与已有转义。
     const value = (text: string) => text.replace(/^("""|'''|"|')([\s\S]*)\1$/, "$2").replace(/\\([\\'"])/g, "$1")
@@ -392,33 +504,79 @@ async function sourceRisk(source: string, language: "python" | "javascript"): Pr
       let literalEnd = i + 4
       while (tokens[literalEnd]?.string) literalEnd++
       // 只连接已分词的静态片段；变量名保持空target，继续使用用户指定的普通审查。
-      const target = literalEnd > i + 4 ? tokens.slice(i + 4, literalEnd).map((token) => value(token.text)).join("") : undefined
+      const target =
+        literalEnd > i + 4
+          ? tokens
+              .slice(i + 4, literalEnd)
+              .map((token) => value(token.text))
+              .join("")
+          : undefined
       // os.remove变量目标是用户指定的另一项cautious例外；仅记录调用，变量值交实际解释器处理。
-      if (methods.get(owner)?.includes(method) && tokens[i + 4] && [",", ")"].includes(tokens[Math.max(literalEnd, i + 5)]?.text) && (target !== undefined ? target.length > 0 : owner === "os" && method === "remove" && /^[A-Za-z_]\w*$/.test(tokens[i + 4].text)))
+      if (
+        methods.get(owner)?.includes(method) &&
+        tokens[i + 4] &&
+        [",", ")"].includes(tokens[Math.max(literalEnd, i + 5)]?.text) &&
+        (target !== undefined
+          ? target.length > 0
+          : owner === "os" && method === "remove" && /^[A-Za-z_]\w*$/.test(tokens[i + 4].text))
+      )
         calls.push({ owner, method, target })
       if (owner !== "subprocess" || !["run", "call", "Popen"].includes(method) || tokens[i + 4]?.text !== "[") continue
       const end = tokens.findIndex((token, at) => at > i + 4 && token.text === "]")
       const args = tokens.slice(i + 5, end).filter((token) => token.text !== ",")
       if (end < 0 || !args[0]?.string || value(args[0].text) !== "rm") continue
       const stop = args.findIndex((token) => token.string && value(token.text) === "--")
-      if (!(stop < 0 ? args.slice(1) : args.slice(1, stop)).some((token) => token.string && /^-[^-]*[rf]/.test(value(token.text)))) continue
+      if (
+        !(stop < 0 ? args.slice(1) : args.slice(1, stop)).some(
+          (token) => token.string && /^-[^-]*[rf]/.test(value(token.text)),
+        )
+      )
+        continue
       // 原subprocess规则以r/f为条件；--后的同名参数始终是文件操作数。
-      const targets = args.slice(1).filter((token, at) => token.string && value(token.text) !== "--" && ((stop >= 0 && at + 1 > stop) || !value(token.text).startsWith("-")))
+      const targets = args
+        .slice(1)
+        .filter(
+          (token, at) =>
+            token.string &&
+            value(token.text) !== "--" &&
+            ((stop >= 0 && at + 1 > stop) || !value(token.text).startsWith("-")),
+        )
       if (!targets.length) calls.push({ owner, method })
       for (const target of targets) calls.push({ owner, method, target: value(target.text) })
     }
   }
-  return calls.reduce<Decision>((result, call) => {
-    // 解释器沿用独立的原保护范围，不与Shell的Windows/别名规则扩大合并。
-    const level = call.target === undefined ? "cautious" : new RegExp(`^(?:${INTERPRETER_FORBIDDEN_PATH})`).test(call.target + '"') ? "forbidden"
-      : new RegExp(`^(?:${INTERPRETER_DANGEROUS_PATH})`).test(call.target + '"') ? "dangerous" : "cautious"
-    const reason = call.owner === "subprocess" ? "recursive delete of filesystem root, home, or top-level system directory through interpreter — forbidden (cannot be authorized)"
-      : call.owner === "shutil" ? "recursive delete of filesystem root, home, or top-level system directory via Python — forbidden (cannot be authorized)"
-      : `file removal targeting filesystem root, home, or top-level system directory via ${call.owner === "fs" ? "Node.js" : "Python"} — forbidden (cannot be authorized)`
-    // 沿源码顺序归并原等级；同级保持先前reason，变量目标始终停留在普通删除审查。
-    return maxRisk(result, { level, reason: level === "forbidden" ? reason : level === "dangerous" ? DANGEROUS_INTERPRETER_DELETE
-      : call.owner === "fs" || call.owner === "subprocess" ? "interpreter file deletion requires explicit approval" : "Python file deletion requires explicit approval" })
-  }, { level: "general", reason: "interpreter eval command requires explicit approval" })
+  return calls.reduce<Decision>(
+    (result, call) => {
+      // 解释器沿用独立的原保护范围，不与Shell的Windows/别名规则扩大合并。
+      const level =
+        call.target === undefined
+          ? "cautious"
+          : new RegExp(`^(?:${INTERPRETER_FORBIDDEN_PATH})`).test(call.target + '"')
+            ? "forbidden"
+            : new RegExp(`^(?:${INTERPRETER_DANGEROUS_PATH})`).test(call.target + '"')
+              ? "dangerous"
+              : "cautious"
+      const reason =
+        call.owner === "subprocess"
+          ? "recursive delete of filesystem root, home, or top-level system directory through interpreter — forbidden (cannot be authorized)"
+          : call.owner === "shutil"
+            ? "recursive delete of filesystem root, home, or top-level system directory via Python — forbidden (cannot be authorized)"
+            : `file removal targeting filesystem root, home, or top-level system directory via ${call.owner === "fs" ? "Node.js" : "Python"} — forbidden (cannot be authorized)`
+      // 沿源码顺序归并原等级；同级保持先前reason，变量目标始终停留在普通删除审查。
+      return maxRisk(result, {
+        level,
+        reason:
+          level === "forbidden"
+            ? reason
+            : level === "dangerous"
+              ? DANGEROUS_INTERPRETER_DELETE
+              : call.owner === "fs" || call.owner === "subprocess"
+                ? "interpreter file deletion requires explicit approval"
+                : "Python file deletion requires explicit approval",
+      })
+    },
+    { level: "general", reason: "interpreter eval command requires explicit approval" },
+  )
 }
 
 async function externalDirectoryEffect(input: {
@@ -449,7 +607,7 @@ async function externalDirectoryEffect(input: {
 }
 
 function structuredFileEffect(input: {
-    // #230：仅 edit/external_directory 两类携带结构化效果 metadata——其他权限无此证据
+  // #230：仅 edit/external_directory 两类携带结构化效果 metadata——其他权限无此证据
   permission: string
   metadata: Readonly<Record<string, unknown>>
 }): Decision | undefined {
@@ -458,8 +616,8 @@ function structuredFileEffect(input: {
   // 走既有 non-shell general 路径。必须限定 permission=edit，避免其他工具恰好
   // 使用 files metadata 时被误归类为 workspace edit 删除。
   if (
-  // 结构化 files 证据仅限 edit 权限：其他工具恰好携带 files 数组时不解释
-  // 为工作树删除（职责边界），delete 形状才提升 cautious，update 保持 general。
+    // 结构化 files 证据仅限 edit 权限：其他工具恰好携带 files 数组时不解释
+    // 为工作树删除（职责边界），delete 形状才提升 cautious，update 保持 general。
     input.permission === "edit" &&
     // #230：edit 权限的 files 数组含 delete 项即提升 cautious——update/add 不提升
     Array.isArray(input.metadata.files) &&
@@ -472,11 +630,10 @@ function structuredFileEffect(input: {
 }
 
 function fileEffectType(input: unknown) {
-    // #230：files 元素可能来自外部 metadata——用 type 字段而非 instanceof 判定
+  // #230：files 元素可能来自外部 metadata——用 type 字段而非 instanceof 判定
   if (!input || typeof input !== "object" || !("type" in input)) return
   return input.type
 }
-
 
 export function canAlwaysAllowPrefix(tokens: string[]) {
   // #197：前缀来自 shell 解析器的 arity 计算——需与评估时同样规范化命令名，防止 wsl.exe、/bin/bash 等变体逃逸禁用列表
@@ -491,7 +648,12 @@ export function canAlwaysAllowPrefix(tokens: string[]) {
 
 // 将一段Shell文本归并为原level/reason：先取得语法角色，再分别检查命令、目标和管道。
 // depth仅限制显式载荷的递归，cwd供原Git目录边界使用，dialect决定引用与转义语义。
-async function evaluateShell(command: string, depth: number, cwd?: string, dialect: ShellParse.Dialect = "bash"): Promise<Decision> {
+async function evaluateShell(
+  command: string,
+  depth: number,
+  cwd?: string,
+  dialect: ShellParse.Dialect = "bash",
+): Promise<Decision> {
   // 递归仅跟踪提取为纯文本的包装器载荷。深度上限防止恶意或格式错误的嵌套
   // 包装器消耗时间，同时保留失败安全行为：general/用户审批而非 safe。
   if (depth > 4) return { level: "general", reason: "nested shell wrapper requires explicit approval" }
@@ -512,9 +674,14 @@ async function evaluateShell(command: string, depth: number, cwd?: string, diale
     const producer = normalizeCommandName(words[0]?.value ?? "")
     // 保留原mkfifo后接sh/bash的组合政策；同组执行节点才关联，参数中的Shell名字保持数据。
     if (producer === "mkfifo") fifos.add(item.group)
-    if (fifos.has(item.group) && ["sh", "bash"].includes(producer)) decisions.push({ level: "forbidden", reason: "reverse shell pattern" })
+    if (fifos.has(item.group) && ["sh", "bash"].includes(producer))
+      decisions.push({ level: "forbidden", reason: "reverse shell pattern" })
     const decision = await evaluateCommand(item, depth, cwd, dialect)
-    decisions.push(decision.level === "safe" && item.words.some((word) => word.dynamic) ? { level: "general", reason: "opaque shell segment requires explicit approval" } : decision)
+    decisions.push(
+      decision.level === "safe" && item.words.some((word) => word.dynamic)
+        ? { level: "general", reason: "opaque shell segment requires explicit approval" }
+        : decision,
+    )
     // 重定向目标是写入面：/dev/tcp/ 直连反弹通道 forbidden；/dev/null 与
     // fd 复制（>&2）是丢弃/搬运不是文件写入；其余普通文件输出按原
     // sudoers/启动文件专项规则检查，输入重定向（<）不进入本循环。
@@ -522,10 +689,16 @@ async function evaluateShell(command: string, depth: number, cwd?: string, diale
       const target = redirect.target?.value
       if (!target) continue
       if (target.startsWith("/dev/tcp/")) decisions.push({ level: "forbidden", reason: "reverse shell pattern" })
-      if (target === "/dev/null" || !redirect.operator.includes(">") || (/>&$/.test(redirect.operator) && /^(?:\d+|-)$/.test(target))) continue
+      if (
+        target === "/dev/null" ||
+        !redirect.operator.includes(">") ||
+        (/>&$/.test(redirect.operator) && /^(?:\d+|-)$/.test(target))
+      )
+        continue
       // 普通文件输出保持general；原sudoers、启动文件等专项政策只检查真实写入目标。
       decisions.push({ level: "general", reason: "opaque shell segment requires explicit approval" })
-      if (target.startsWith("/etc/sudoers")) decisions.push({ level: "dangerous", reason: "sudoers modification grants privilege escalation" })
+      if (target.startsWith("/etc/sudoers"))
+        decisions.push({ level: "dangerous", reason: "sudoers modification grants privilege escalation" })
       for (const [pattern, reason] of redirectRules) {
         if (pattern.test(target.replaceAll("\\", "/"))) decisions.push({ level: "cautious", reason })
       }
@@ -535,27 +708,106 @@ async function evaluateShell(command: string, depth: number, cwd?: string, diale
     const nextTokens = next.words.map((word) => word.value)
     const consumer = normalizeCommandName(nextTokens[directStart(nextTokens)] ?? "")
     // 下载到解释器沿用原curl/wget消费者集合；这里检查AST管道边而非参数里的竖线。
-    if (["curl", "wget"].includes(producer) && ["sh", "bash", "zsh", "python", "node", "ruby", "perl", "pwsh", "powershell", "cmd", "iex", "invoke-expression"].includes(consumer))
-      decisions.push({ level: "dangerous", reason: "remote download piped to interpreter; review the script locally before running safe commands" })
+    if (
+      ["curl", "wget"].includes(producer) &&
+      [
+        "sh",
+        "bash",
+        "zsh",
+        "python",
+        "node",
+        "ruby",
+        "perl",
+        "pwsh",
+        "powershell",
+        "cmd",
+        "iex",
+        "invoke-expression",
+      ].includes(consumer)
+    )
+      decisions.push({
+        level: "dangerous",
+        reason: "remote download piped to interpreter; review the script locally before running safe commands",
+      })
     // PowerShell下载与执行组合有独立的原规则和reason，保留其命令别名集合。
-    if (["iwr", "irm", "invoke-webrequest", "invoke-restmethod"].includes(producer) && ["iex", "invoke-expression"].includes(consumer))
-      decisions.push({ level: "dangerous", reason: "remote PowerShell download executed as code; review the script locally before running safe commands" })
+    if (
+      ["iwr", "irm", "invoke-webrequest", "invoke-restmethod"].includes(producer) &&
+      ["iex", "invoke-expression"].includes(consumer)
+    )
+      decisions.push({
+        level: "dangerous",
+        reason: "remote PowerShell download executed as code; review the script locally before running safe commands",
+      })
     // 原解码管道政策按工具族匹配；此迁移保留该集合，不增加编码/解码模式分级。
-    if (["base64", "openssl", "xxd", "gunzip", "bunzip2", "unxz", "zcat"].includes(producer) && ["sh", "bash", "zsh", "dash", "fish", "ksh", "python", "python3", "node", "ruby", "perl", "pwsh", "powershell"].includes(consumer))
+    if (
+      ["base64", "openssl", "xxd", "gunzip", "bunzip2", "unxz", "zcat"].includes(producer) &&
+      [
+        "sh",
+        "bash",
+        "zsh",
+        "dash",
+        "fish",
+        "ksh",
+        "python",
+        "python3",
+        "node",
+        "ruby",
+        "perl",
+        "pwsh",
+        "powershell",
+      ].includes(consumer)
+    )
       decisions.push({ level: "dangerous", reason: "decoded/decompressed payload piped to interpreter" })
     // 敏感读取到HTTP的左右命令族来自原政策；路径敏感性仍由读取参数规则决定。
-    if (["cat", "type", "get-content", "gc", "rg", "grep", "head", "tail", "sed", "awk"].includes(producer) && readsSensitivePath(words.map((word) => word.value), true) && ["curl", "wget", "invoke-webrequest", "invoke-restmethod", "iwr", "irm"].includes(consumer))
+    if (
+      ["cat", "type", "get-content", "gc", "rg", "grep", "head", "tail", "sed", "awk"].includes(producer) &&
+      readsSensitivePath(
+        words.map((word) => word.value),
+        true,
+      ) &&
+      ["curl", "wget", "invoke-webrequest", "invoke-restmethod", "iwr", "irm"].includes(consumer)
+    )
       decisions.push({ level: "dangerous", reason: "credential read piped to network transfer" })
     // 可见文字送入解释器保留原cautious规则；后续再核对文字中已有的具体风险操作。
-    if (["echo", "printf"].includes(producer) && ["sh", "bash", "zsh", "dash", "fish", "ksh", "python", "python3", "node", "ruby", "perl", "pwsh", "powershell"].includes(consumer))
+    if (
+      ["echo", "printf"].includes(producer) &&
+      [
+        "sh",
+        "bash",
+        "zsh",
+        "dash",
+        "fish",
+        "ksh",
+        "python",
+        "python3",
+        "node",
+        "ruby",
+        "perl",
+        "pwsh",
+        "powershell",
+      ].includes(consumer)
+    )
       decisions.push({ level: "cautious", reason: "visible payload piped to interpreter requires review" })
     // 这里只取得当前命令中已可见的字面载荷，不执行程序、不读取cat指向的外部文件。
-    const output = producer === "echo" ? words.slice(1).map((word) => word.value).join(" ")
-      : producer === "printf" ? printfOutput(words)
-      : producer === "cat" ? item.redirects.findLast((redirect) => redirect.content !== undefined)?.content : undefined
+    const output =
+      producer === "echo"
+        ? words
+            .slice(1)
+            .map((word) => word.value)
+            .join(" ")
+        : producer === "printf"
+          ? printfOutput(words)
+          : producer === "cat"
+            ? item.redirects.findLast((redirect) => redirect.content !== undefined)?.content
+            : undefined
     // 同一文字只有被已有解释器作为stdin消费时才作为源码，单纯输出保持数据。
-    if (output !== undefined && !item.words.some((word) => word.dynamic) && consumesInput(nextTokens.slice(directStart(nextTokens)))) {
-      if (["python", "python3", "py", "node"].includes(consumer)) decisions.push(await sourceRisk(output, consumer === "node" ? "javascript" : "python"))
+    if (
+      output !== undefined &&
+      !item.words.some((word) => word.dynamic) &&
+      consumesInput(nextTokens.slice(directStart(nextTokens)))
+    ) {
+      if (["python", "python3", "py", "node"].includes(consumer))
+        decisions.push(await sourceRisk(output, consumer === "node" ? "javascript" : "python"))
       if (SHELL_WRAPPERS.has(consumer)) decisions.push(await evaluateShell(output, depth + 1, cwd, "bash"))
     }
   }
@@ -570,12 +822,18 @@ async function evaluateShell(command: string, depth: number, cwd?: string, diale
   const escalated = aggregate("forbidden") ?? aggregate("dangerous") ?? aggregate("cautious")
   if (escalated) return escalated
   // 所有子命令均为 safe 时整体 safe——每个子命令已独立通过只读不变量验证
-  if (decisions.every((item) => item.level === "safe")) return { level: "safe", reason: "known read-only shell command" }
+  if (decisions.every((item) => item.level === "safe"))
+    return { level: "safe", reason: "known read-only shell command" }
   // 混合决策中任一 general 即整体 general——保守策略确保模糊命令不因其他子命令安全而自动放行
   return decisions.find((item) => item.level === "general") ?? { level: "general", reason: "unknown shell command" }
 }
 
-async function evaluateCommand(command: ShellParse.Command, depth: number, cwd?: string, dialect: ShellParse.Dialect = "bash"): Promise<Decision> {
+async function evaluateCommand(
+  command: ShellParse.Command,
+  depth: number,
+  cwd?: string,
+  dialect: ShellParse.Dialect = "bash",
+): Promise<Decision> {
   const tokens = command.words.map((word) => word.value)
   const stripped = command.words.map((word) => word.stripped)
   if (!tokens[0]) return { level: "general", reason: "empty shell command requires explicit approval" }
@@ -587,11 +845,18 @@ async function evaluateCommand(command: ShellParse.Command, depth: number, cwd?:
     return inner.level === "safe" ? { level: "general", reason: "privilege wrapper requires explicit approval" } : inner
   }
   // PowerShell 的版本后缀和 conda 参数在此定位 Python 源码，随后沿用 sourceRisk。
-  const content = command.redirects.findLast((redirect) => redirect.content !== undefined)?.content
-    ?? (command.stdin?.dynamic ? undefined : command.stdin?.value)
+  const content =
+    command.redirects.findLast((redirect) => redirect.content !== undefined)?.content ??
+    (command.stdin?.dynamic ? undefined : command.stdin?.value)
   const python = dialect === "powershell" ? pythonSource(command.words, content) : undefined
   if (python !== undefined) return sourceRisk(python, "python")
-  const evalFlags = INTERPRETER_FLAGS.get(name) ?? (SHELL_WRAPPERS.has(name) ? new Set(["-c", "-lc"]) : POWERSHELL_WRAPPERS.has(name) ? new Set(["-command", "-c", "-encodedcommand", "-enc"]) : undefined)
+  const evalFlags =
+    INTERPRETER_FLAGS.get(name) ??
+    (SHELL_WRAPPERS.has(name)
+      ? new Set(["-c", "-lc"])
+      : POWERSHELL_WRAPPERS.has(name)
+        ? new Set(["-command", "-c", "-encodedcommand", "-enc"])
+        : undefined)
   // 入口扫描：解释器/包装器的选项区在首个脚本实参处结束（python script.py
   // 之后的 -c 属于脚本参数）。取值选项（-W/-o/-ExecutionPolicy 等）各消费
   // 自己的值后扫描继续——只有真正的 -c/-e 入口才承载可见源码进入 sourceRisk。
@@ -599,28 +864,63 @@ async function evaluateCommand(command: ShellParse.Command, depth: number, cwd?:
   for (let index = 1; evalFlags && index < tokens.length; index++) {
     const option = POWERSHELL_WRAPPERS.has(name) ? tokens[index].toLowerCase() : tokens[index]
     // 首个脚本文件或模块入口结束解释器选项；后续-c/-e是脚本自己的参数。
-    if (["--", "-"].includes(option) || (option === "-m" && !SHELL_WRAPPERS.has(name)) || (POWERSHELL_WRAPPERS.has(name) && option === "-file") || !option.startsWith("-")) break
-    if (option !== "-3" && evalFlags.has(option)) { evalIndex = index; break }
+    if (
+      ["--", "-"].includes(option) ||
+      (option === "-m" && !SHELL_WRAPPERS.has(name)) ||
+      (POWERSHELL_WRAPPERS.has(name) && option === "-file") ||
+      !option.startsWith("-")
+    )
+      break
+    if (option !== "-3" && evalFlags.has(option)) {
+      evalIndex = index
+      break
+    }
     // Shell的-o/-O配置与解释器的告警、运行时配置、预载模块各消费自己的值。
     // 这些值即使拼作-c/-e，也属于选项参数，而非新的源码入口。
     // PowerShell的策略、格式和启动目录也是取值选项，大小写归一化只作用于该方言。
-    if ((POWERSHELL_WRAPPERS.has(name) ? ["-executionpolicy", "-inputformat", "-outputformat", "-workingdirectory", "-windowstyle", "-configurationname", "-configurationfile"] : SHELL_WRAPPERS.has(name) ? ["-o", "-O"] : ["-W", "-X", "-r", "--require", "--import", "--loader", "--preload"]).includes(option)) index++
+    if (
+      (POWERSHELL_WRAPPERS.has(name)
+        ? [
+            "-executionpolicy",
+            "-inputformat",
+            "-outputformat",
+            "-workingdirectory",
+            "-windowstyle",
+            "-configurationname",
+            "-configurationfile",
+          ]
+        : SHELL_WRAPPERS.has(name)
+          ? ["-o", "-O"]
+          : ["-W", "-X", "-r", "--require", "--import", "--loader", "--preload"]
+      ).includes(option)
+    )
+      index++
   }
   if (evalIndex > 0 && tokens[evalIndex + 1] && ["python", "python3", "py", "node"].includes(name))
     return sourceRisk(tokens[evalIndex + 1], name === "node" ? "javascript" : "python")
   // Shell直接消费stdin时走既有Shell主路径；显式脚本文件继续把stdin作为数据。
-  if (content !== undefined && (["python", "python3", "py", "node"].includes(name) || SHELL_WRAPPERS.has(name)) && consumesInput(tokens, command.stdin !== undefined))
-    return SHELL_WRAPPERS.has(name) ? evaluateShell(content, depth + 1, cwd, "bash") : sourceRisk(content, name === "node" ? "javascript" : "python")
+  if (
+    content !== undefined &&
+    (["python", "python3", "py", "node"].includes(name) || SHELL_WRAPPERS.has(name)) &&
+    consumesInput(tokens, command.stdin !== undefined)
+  )
+    return SHELL_WRAPPERS.has(name)
+      ? evaluateShell(content, depth + 1, cwd, "bash")
+      : sourceRisk(content, name === "node" ? "javascript" : "python")
   if (["curl", "wget"].includes(name)) {
     const upload = bind(tokens.slice(1), CURL_VALUES)
     for (const [flag, values] of upload.values) {
       // 取值表包含很多普通参数；此子集才具有原上传规则中的文件引用语法。
-      if (!["-d", "--data", "--data-binary", "--data-urlencode", "-F", "--form", "-T", "--upload-file"].includes(flag)) continue
+      if (!["-d", "--data", "--data-binary", "--data-urlencode", "-F", "--form", "-T", "--upload-file"].includes(flag))
+        continue
       for (const value of values) {
         // 只有文件引用语法提供上传路径，header及普通正文保持原参数用途。
         const at = value.indexOf("@")
-        const source = ["-T", "--upload-file"].includes(flag) ? value
-          : at === 0 || (["--data-urlencode", "-F", "--form"].includes(flag) && at >= 0) ? value.slice(at + 1) : ""
+        const source = ["-T", "--upload-file"].includes(flag)
+          ? value
+          : at === 0 || (["--data-urlencode", "-F", "--form"].includes(flag) && at >= 0)
+            ? value.slice(at + 1)
+            : ""
         if (source && new RegExp(SENSITIVE_PATH_PATTERN, "i").test(source))
           return { level: "dangerous", reason: "credential file sent with network transfer" }
       }
@@ -631,21 +931,49 @@ async function evaluateCommand(command: ShellParse.Command, depth: number, cwd?:
   if (["scp", "rsync", "sftp"].includes(name)) {
     // scp/sftp的身份、跳板和端口消费取值；rsync使用-e/--rsh指定远端shell。
     // 同名-P在rsync中是布尔选项，后面的本地文件仍需保留为传输操作数。
-    if (credentialOutboundTransfer(bind(tokens.slice(1), name === "rsync" ? ["-e", "--rsh"] : ["-i", "-o", "-J", "-P"]).operands))
+    if (
+      credentialOutboundTransfer(
+        bind(tokens.slice(1), name === "rsync" ? ["-e", "--rsh"] : ["-i", "-o", "-J", "-P"]).operands,
+      )
+    )
       return { level: "dangerous", reason: "credential file sent with remote transfer" }
   }
   // 原Windows格式化规则由命令名与盘符参数共同触发，普通数据中的format保持数据。
-  if (name === "format" && /^[a-z]:/i.test(tokens[1] ?? "")) return { level: "forbidden", reason: "Windows drive format" }
+  if (name === "format" && /^[a-z]:/i.test(tokens[1] ?? ""))
+    return { level: "forbidden", reason: "Windows drive format" }
   // nc执行选项与代理/地址参数先各自取值，代理header中的--exec文字不会成为开关。
-  if (["nc", "ncat", "netcat"].includes(name) && [...bind(tokens.slice(1), ["-e", "--exec", "--sh-exec", "--proxy-header", "--proxy", "--proxy-auth", "-s", "-p", "-w"]).values.keys()].some((flag) => ["-e", "--exec", "--sh-exec"].includes(flag)))
+  if (
+    ["nc", "ncat", "netcat"].includes(name) &&
+    [
+      ...bind(tokens.slice(1), [
+        "-e",
+        "--exec",
+        "--sh-exec",
+        "--proxy-header",
+        "--proxy",
+        "--proxy-auth",
+        "-s",
+        "-p",
+        "-w",
+      ]).values.keys(),
+    ].some((flag) => ["-e", "--exec", "--sh-exec"].includes(flag))
+  )
     return { level: "forbidden", reason: "reverse shell pattern" }
   // socat的EXEC位于地址类型前缀；日志文件与缓冲参数先消费，避免误作执行地址。
-  if (name === "socat" && bind(tokens.slice(1), ["-f", "-r", "-R", "-b", "-t", "-T", "-lp", "-lf"]).operands.some((path) => /^EXEC:/i.test(path)))
+  if (
+    name === "socat" &&
+    bind(tokens.slice(1), ["-f", "-r", "-R", "-b", "-t", "-T", "-lp", "-lf"]).operands.some((path) =>
+      /^EXEC:/i.test(path),
+    )
+  )
     return { level: "forbidden", reason: "reverse shell pattern" }
   if (name === "new-object") {
     // TypeName决定构造类型；ArgumentList、ComObject与Property保持独立取值角色。
     const bound = bind(tokens.slice(1), ["-typename", "-argumentlist", "-comobject", "-property"], true)
-    if ((bound.values.get("-typename")?.[0] ?? bound.operands[0] ?? "").split("(", 1)[0].toLowerCase() === "system.net.sockets.tcpclient")
+    if (
+      (bound.values.get("-typename")?.[0] ?? bound.operands[0] ?? "").split("(", 1)[0].toLowerCase() ===
+      "system.net.sockets.tcpclient"
+    )
       return { level: "forbidden", reason: "reverse shell pattern" }
   }
   // tee只迁移原sudoers专项写入政策，普通输出文件继续沿用原分类。
@@ -656,10 +984,22 @@ async function evaluateCommand(command: ShellParse.Command, depth: number, cwd?:
   const unwrapped = unwrap(tokens, evalIndex)
   if (unwrapped.action === "script") {
     // 外层方言只解释包装器argv；载荷交给显式选择的Shell语言，保留其命令替换语义。
-    const decision = await evaluateShell(unwrapped.script, depth + 1, cwd, POWERSHELL_WRAPPERS.has(name) ? "powershell" : name === "cmd" ? "cmd" : SHELL_WRAPPERS.has(name) ? "bash" : dialect)
+    const decision = await evaluateShell(
+      unwrapped.script,
+      depth + 1,
+      cwd,
+      POWERSHELL_WRAPPERS.has(name)
+        ? "powershell"
+        : name === "cmd"
+          ? "cmd"
+          : SHELL_WRAPPERS.has(name)
+            ? "bash"
+            : dialect,
+    )
     // 包装器载荷分层传播：包装器本身不能变成 safe，因为未来同一前缀可能
     // 承载任意脚本；可见脚本为 cautious/dangerous/forbidden 时保留更高风险层级。
-    if (decision.level === "dangerous" || decision.level === "cautious" || decision.level === "forbidden") return decision
+    if (decision.level === "dangerous" || decision.level === "cautious" || decision.level === "forbidden")
+      return decision
     return { level: "general", reason: unwrapped.reason }
   }
   const remote = remoteWrapper(tokens)
@@ -668,7 +1008,8 @@ async function evaluateCommand(command: ShellParse.Command, depth: number, cwd?:
       const decision = await evaluateShell(remote.script, depth + 1, undefined, "bash")
       // SSH/WSL 跨越本机信任边界：安全的远程只读命令仍是 general；可见的远程
       // 破坏性动作保留 cautious/dangerous/forbidden。
-      if (decision.level === "dangerous" || decision.level === "cautious" || decision.level === "forbidden") return decision
+      if (decision.level === "dangerous" || decision.level === "cautious" || decision.level === "forbidden")
+        return decision
     }
     // #197：远程执行即使无可见危险载荷仍 general——远程主机可能访问不同凭证和文件系统命名空间
     return { level: "general", reason: remote.reason }
@@ -696,7 +1037,12 @@ async function evaluateCommand(command: ShellParse.Command, depth: number, cwd?:
   if (tokens.length > 1 && !/^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[0])) {
     const strippedPrefix = classifyTokens(tokens.slice(1), cwd, stripped.slice(1))
     // 原raw层已覆盖前缀后的保护目录删除；只为同一已有删除族保留其确定等级。
-    if (strippedPrefix && FILE_DELETE_COMMANDS.has(normalizeCommandName(tokens[1])) && ["forbidden", "dangerous"].includes(strippedPrefix.level)) return strippedPrefix
+    if (
+      strippedPrefix &&
+      FILE_DELETE_COMMANDS.has(normalizeCommandName(tokens[1])) &&
+      ["forbidden", "dangerous"].includes(strippedPrefix.level)
+    )
+      return strippedPrefix
     if (strippedPrefix?.level === "cautious") {
       const inner = normalizeCommandName(tokens[1])
       return {
@@ -756,21 +1102,40 @@ function sshScript(tokens: string[]) {
   return tokens.slice(start).join(" ")
 }
 
-
 // 解释可见字符串占位格式；返回实际文字，其他格式继续由原printf管道审查处理。
 // printf 的格式串与 %s 实参都是数据：只有格式本身的转义会被解码成文字，
 // 插值参数保持字面。它向解释器供给 stdin 时才由 consumesInput 判定进入源码通道。
 function printfOutput(words: ShellParse.Word[]) {
   const start = words[1]?.value === "--" ? 2 : 1
   // 格式本身的转义先解码，%s插入的参数保持字面内容，避免二次解码改变其意义。
-  const format = (words[start]?.value ?? "").replace(/\\([nrt\\])/g, (_, char: string) => ({ n: "\n", r: "\r", t: "\t", "\\": "\\" })[char] ?? char)
+  const format = (words[start]?.value ?? "").replace(
+    /\\([nrt\\])/g,
+    (_, char: string) => ({ n: "\n", r: "\r", t: "\t", "\\": "\\" })[char] ?? char,
+  )
   const slots = format.match(/%%|%./g) ?? []
   if (slots.some((slot) => !["%%", "%s", "%b"].includes(slot))) return
   let index = start + 1
   // printf用剩余参数重复格式，%%消耗零个参数；零占位格式仅输出一次。
   // %b对其参数解释转义，%s保持字面；两者同样消费一个参数并参与格式重复。
-  return Array.from({ length: Math.max(1, Math.ceil((words.length - index) / (slots.filter((slot) => slot !== "%%").length || Infinity))) }, () =>
-    format.replace(/%%|%[sb]/g, (slot) => slot === "%%" ? "%" : slot === "%s" ? (words[index++]?.value ?? "") : (words[index++]?.value ?? "").replace(/\\([nrt\\])/g, (_, char: string) => ({ n: "\n", r: "\r", t: "\t", "\\": "\\" })[char] ?? char))).join("")
+  return Array.from(
+    {
+      length: Math.max(
+        1,
+        Math.ceil((words.length - index) / (slots.filter((slot) => slot !== "%%").length || Infinity)),
+      ),
+    },
+    () =>
+      format.replace(/%%|%[sb]/g, (slot) =>
+        slot === "%%"
+          ? "%"
+          : slot === "%s"
+            ? (words[index++]?.value ?? "")
+            : (words[index++]?.value ?? "").replace(
+                /\\([nrt\\])/g,
+                (_, char: string) => ({ n: "\n", r: "\r", t: "\t", "\\": "\\" })[char] ?? char,
+              ),
+      ),
+  ).join("")
 }
 
 // Python 源码的位置由解释器名称、环境选项和 -c/stdin 入口共同确定。
@@ -784,11 +1149,16 @@ function pythonSource(words: ShellParse.Word[], input?: string) {
       if (option.dynamic) return
       if (!option.value.startsWith("-")) break
       // 选项集合来自旧INLINE_PYTHON_CONDA常量，未知模式不增加源码识别。
-      if (["--dev", "--debug-wrapper-scripts", "--no-capture-output", "--live-stream"].includes(option.value) || /^-v{1,3}$/.test(option.value)) continue
+      if (
+        ["--dev", "--debug-wrapper-scripts", "--no-capture-output", "--live-stream"].includes(option.value) ||
+        /^-v{1,3}$/.test(option.value)
+      )
+        continue
       if (/^--(?:name|prefix|cwd)=[^\s"'`$@;&|<>(){}]+$/.test(option.value)) continue
       if (!["-n", "--name", "-p", "--prefix", "--cwd"].includes(option.value)) return
       const value = words[++index]
-      if (!value || value.dynamic || !value.value || /^-/.test(value.value) || /[`$@;&|<>(){}]/.test(value.value)) return
+      if (!value || value.dynamic || !value.value || /^-/.test(value.value) || /[`$@;&|<>(){}]/.test(value.value))
+        return
     }
   }
   const executable = words[index]
@@ -809,7 +1179,10 @@ function pythonSource(words: ShellParse.Word[], input?: string) {
     if (version && /^(?:-3(?:\.\d+)?(?:-32|-64)?|-32|-64)$/.test(flag.value)) continue
     version = false
     // 旧Python布尔/取值flags决定入口位置；文件、模块、未知参数均不消费可见stdin源码。
-    if (["-B", "-E", "-I", "-O", "-OO", "-P", "-b", "-bb", "-d", "-q", "-s", "-S", "-u", "-v", "-x"].includes(flag.value)) continue
+    if (
+      ["-B", "-E", "-I", "-O", "-OO", "-P", "-b", "-bb", "-d", "-q", "-s", "-S", "-u", "-v", "-x"].includes(flag.value)
+    )
+      continue
     if (/^-[WX][^\s"'`$@;&|<>(){}]+$/.test(flag.value)) continue
     if (!["-W", "-X"].includes(flag.value)) return
     const value = words[++index]
@@ -825,8 +1198,25 @@ function pythonSource(words: ShellParse.Word[], input?: string) {
 function consumesInput(tokens: string[], literal = false) {
   // 已有管道和重定向继续使用原参数判定；新提取的字面输入按首个源码入口绑定 argv。
   if (!literal) {
-    const bound = bind(tokens.slice(1), ["-c", "-e", "-m", "-command", "-file", "-encodedcommand", "-W", "-X", "-r", "--require", "--import", "--loader", "--preload"])
-    return !["-c", "-e", "-m", "-command", "-file", "-encodedcommand"].some((flag) => bound.values.has(flag)) && bound.operands.every((path) => path === "-")
+    const bound = bind(tokens.slice(1), [
+      "-c",
+      "-e",
+      "-m",
+      "-command",
+      "-file",
+      "-encodedcommand",
+      "-W",
+      "-X",
+      "-r",
+      "--require",
+      "--import",
+      "--loader",
+      "--preload",
+    ])
+    return (
+      !["-c", "-e", "-m", "-command", "-file", "-encodedcommand"].some((flag) => bound.values.has(flag)) &&
+      bound.operands.every((path) => path === "-")
+    )
   }
   for (let index = 1; index < tokens.length; index++) {
     const option = tokens[index]
@@ -835,7 +1225,24 @@ function consumesInput(tokens: string[], literal = false) {
     if (option === "--") return tokens[index + 1] === undefined || tokens[index + 1] === "-"
     if (!option.startsWith("-")) return false
     // 完整取值表先绑定短簇，-Werror的e与-rmodule的m都属于前一个选项的值。
-    const bound = bind([option, tokens[index + 1] ?? ""], ["-c", "-e", "-m", "-command", "-file", "-encodedcommand", "-W", "-X", "-r", "--require", "--import", "--loader", "--preload"])
+    const bound = bind(
+      [option, tokens[index + 1] ?? ""],
+      [
+        "-c",
+        "-e",
+        "-m",
+        "-command",
+        "-file",
+        "-encodedcommand",
+        "-W",
+        "-X",
+        "-r",
+        "--require",
+        "--import",
+        "--loader",
+        "--preload",
+      ],
+    )
     if (["-c", "-e", "-m", "-command", "-file", "-encodedcommand"].some((flag) => bound.values.has(flag))) return false
     // 与既有eval入口相同的元数；告警和预载模块的值不会成为新的入口选项。
     if (["-W", "-X", "-r", "--require", "--import", "--loader", "--preload"].includes(option)) index++
@@ -854,14 +1261,26 @@ function directStart(tokens: string[]) {
   while (["sudo", "doas", "pkexec", "env", "nohup", "setsid"].includes(normalizeCommandName(tokens[index] ?? ""))) {
     const name = normalizeCommandName(tokens[index++])
     // env的赋值与选项由既有Token helper处理；以长度差保留原Word数组的切片位置。
-    if (name === "env") { index = tokens.length - pierceEnvTokens(tokens.slice(index)).length; continue }
+    if (name === "env") {
+      index = tokens.length - pierceEnvTokens(tokens.slice(index)).length
+      continue
+    }
     // sudo的身份、目录、提示和安全上下文参数各占一个值；doas/pkexec采用各自元数，env由专用helper消费。
     // 这里只决定跳过几个Token，例如-u root的root属于选项值，并非要运行的程序。
-    const valued = name === "sudo" ? ["-u", "--user", "-g", "--group", "-h", "--host", "-p", "--prompt", "-C", "-T", "-D", "-R", "-r", "-t"]
-      : name === "doas" ? ["-u", "-C"] : name === "pkexec" ? ["--user"] : []
+    const valued =
+      name === "sudo"
+        ? ["-u", "--user", "-g", "--group", "-h", "--host", "-p", "--prompt", "-C", "-T", "-D", "-R", "-r", "-t"]
+        : name === "doas"
+          ? ["-u", "-C"]
+          : name === "pkexec"
+            ? ["--user"]
+            : []
     for (; index < tokens.length && tokens[index].startsWith("-"); index++) {
       // --结束当前包装器选项，后续内容回到外层循环识别可执行名。
-      if (tokens[index] === "--") { index++; break }
+      if (tokens[index] === "--") {
+        index++
+        break
+      }
       if (valued.includes(tokens[index])) index++
     }
   }
@@ -887,13 +1306,11 @@ function credentialOutboundTransfer(tokens: string[]): boolean {
   // 保留旧规则的非锚定包含语义，带目录前缀的私钥/.env不能降级后重新进入缓存。
   // 公钥后缀仍由下方独立过滤，不能因敏感目录前缀误判为秘密外传。
   const sensitive = new RegExp(SENSITIVE_PATH_PATTERN, "i")
-  return tokens
-    .slice(0, firstRemote)
-    .some((token) => {
-      // .pub 公钥非秘密（R2 B-03 双机制：覆盖 .ssh 路径/Windows 家目录/裸名三分支）
-      if (/\.pub$/i.test(token)) return false
-      return sensitive.test(token)
-    })
+  return tokens.slice(0, firstRemote).some((token) => {
+    // .pub 公钥非秘密（R2 B-03 双机制：覆盖 .ssh 路径/Windows 家目录/裸名三分支）
+    if (/\.pub$/i.test(token)) return false
+    return sensitive.test(token)
+  })
 }
 
 // ============================================================
@@ -922,7 +1339,11 @@ function unwrap(tokens: string[], evalIndex: number): UnwrapResult {
     }
     const index = ["-command", "-c"].includes(tokens[evalIndex]?.toLowerCase() ?? "") ? evalIndex : -1
     if (index >= 0 && tokens[index + 1]) {
-      return { action: "script", script: tokens.slice(index + 1).join(" "), reason: "PowerShell wrapper requires explicit approval" }
+      return {
+        action: "script",
+        script: tokens.slice(index + 1).join(" "),
+        reason: "PowerShell wrapper requires explicit approval",
+      }
     }
     return { action: "ask", reason: "PowerShell wrapper without a plain script requires explicit approval" }
   }
@@ -930,7 +1351,11 @@ function unwrap(tokens: string[], evalIndex: number): UnwrapResult {
   if (cmd === "cmd") {
     const index = tokens.findIndex((item, i) => i > 0 && ["/c", "/k"].includes(item.toLowerCase()))
     if (index >= 0 && tokens[index + 1]) {
-      return { action: "script", script: tokens.slice(index + 1).join(" "), reason: "cmd wrapper requires explicit approval" }
+      return {
+        action: "script",
+        script: tokens.slice(index + 1).join(" "),
+        reason: "cmd wrapper requires explicit approval",
+      }
     }
     return { action: "ask", reason: "cmd wrapper without a plain script requires explicit approval" }
   }
@@ -947,12 +1372,15 @@ function unwrap(tokens: string[], evalIndex: number): UnwrapResult {
     // 特权包装器：提取内层命令递归评估，而非短路为 ask。
     // sudo rm file 应至少 cautious，sudo rm -rf / 应 dangerous
     if (tokens.length > 1)
-      return { action: "script", script: joinShellTokens(tokens.slice(1)), reason: "privilege wrapper requires explicit approval" }
+      return {
+        action: "script",
+        script: joinShellTokens(tokens.slice(1)),
+        reason: "privilege wrapper requires explicit approval",
+      }
     return { action: "ask", reason: "privilege wrapper requires explicit approval" }
   }
   return { action: "none" }
 }
-
 
 function classifyTokens(tokens: string[], cwd?: string, stripped?: boolean[]): Decision | undefined {
   const cmd = normalizeCommandName(tokens[0])
@@ -979,8 +1407,16 @@ function classifyTokens(tokens: string[], cwd?: string, stripped?: boolean[]): D
   // #556：ri 与 remove-item 共用递归保护根判定——别名不得稀释保护根层级。
   if ((cmd === "remove-item" || cmd === "ri") && tokens.some((item) => item.toLowerCase() === "-recurse")) {
     // Path/LiteralPath才是删除目标；过滤条件和错误处理参数的值保持数据角色。
-    const bound = bind(tokens.slice(1), ["-path", "-literalpath", "-exclude", "-include", "-filter", "-erroraction"], true)
-    const tier = highestProtectedDeleteTier([...bound.operands, ...(bound.values.get("-path") ?? []), ...(bound.values.get("-literalpath") ?? [])])
+    const bound = bind(
+      tokens.slice(1),
+      ["-path", "-literalpath", "-exclude", "-include", "-filter", "-erroraction"],
+      true,
+    )
+    const tier = highestProtectedDeleteTier([
+      ...bound.operands,
+      ...(bound.values.get("-path") ?? []),
+      ...(bound.values.get("-literalpath") ?? []),
+    ])
     if (tier === "forbidden") return { level: "forbidden", reason: WIN_FORBIDDEN_DELETE }
     if (tier === "dangerous") return { level: "dangerous", reason: DANGEROUS_SUBTREE_DELETE }
     return { level: "cautious", reason: "recursive PowerShell delete requires explicit approval" }
@@ -992,8 +1428,7 @@ function classifyTokens(tokens: string[], cwd?: string, stripped?: boolean[]): D
   if (FILE_DELETE_COMMANDS.has(cmd) && tokens.length > 1)
     return { level: "cautious", reason: "file deletion requires explicit approval" }
   // #222：find -delete / -exec rm 也属于文件删除——argv 语义判断
-  if (findDeletesFile(tokens))
-    return { level: "cautious", reason: "find file deletion requires explicit approval" }
+  if (findDeletesFile(tokens)) return { level: "cautious", reason: "find file deletion requires explicit approval" }
   // #220: 文件移动/重命名
   if (FILE_MOVE_COMMANDS.has(cmd) && tokens.length > 1)
     return { level: "cautious", reason: "file move or rename requires explicit approval" }
@@ -1050,8 +1485,7 @@ function classifyTokens(tokens: string[], cwd?: string, stripped?: boolean[]): D
   if (cmd === "chown" && tokens.some((item) => item.includes("root")))
     return { level: "cautious", reason: "root ownership change requires explicit approval" }
   // #220: 特权升级——visudo/setcap
-  if (cmd === "visudo")
-    return { level: "dangerous", reason: "sudoers modification grants privilege escalation" }
+  if (cmd === "visudo") return { level: "dangerous", reason: "sudoers modification grants privilege escalation" }
   if (cmd === "setcap")
     return { level: "dangerous", reason: "file capability setting creates privilege escalation surface" }
   // #220: 用户/组账号管理
@@ -1076,16 +1510,14 @@ function classifyTokens(tokens: string[], cwd?: string, stripped?: boolean[]): D
   // #220: 服务管理
   if (cmd === "systemctl") {
     // mask 可逆（unmask 即恢复），归 dangerous 进 reviewer；旧注释“永久阻止”不准确
-    if (tokens[1] === "mask")
-      return { level: "dangerous", reason: "service mask alters system service policy" }
+    if (tokens[1] === "mask") return { level: "dangerous", reason: "service mask alters system service policy" }
     if (["stop", "disable", "enable", "start", "restart"].includes(tokens[1]))
       return { level: "cautious", reason: "service state change requires explicit approval" }
   }
   // #220: 全进程终止
   // 全进程判定先于族规则；-1须在尾操作数位，信号位kill -1 1234仍是cautious。
   // 精确-l按crontab先例豁免只读列信号，不将无实参kill视为只读。
-  if (cmd === "killall5")
-    return { level: "forbidden", reason: "mass process kill" }
+  if (cmd === "killall5") return { level: "forbidden", reason: "mass process kill" }
   if (cmd === "kill" && tokens.at(-1) === "-1" && !tokens.slice(1).includes("-l"))
     return { level: "forbidden", reason: "mass process kill" }
   if (PROCESS_TERMINATION_COMMANDS.has(cmd)) {
@@ -1140,8 +1572,7 @@ function classifyTokens(tokens: string[], cwd?: string, stripped?: boolean[]): D
     if (["install", "i", "add"].includes(tokens[1]))
       return { level: "cautious", reason: "package install executes postinstall scripts; verify dependencies" }
     // #220: bun x 是包执行器，可能下载并运行不受信任的代码
-    if (tokens[1] === "x")
-      return { level: "cautious", reason: "package executor may run untrusted code" }
+    if (tokens[1] === "x") return { level: "cautious", reason: "package executor may run untrusted code" }
   }
   if (["pip", "pip3"].includes(cmd) && tokens[1] === "install")
     return { level: "cautious", reason: "Python package install requires explicit approval" }
@@ -1150,12 +1581,10 @@ function classifyTokens(tokens: string[], cwd?: string, stripped?: boolean[]): D
   if (cmd === "gem" && tokens[1] === "install")
     return { level: "cautious", reason: "Ruby package install requires explicit approval" }
   // #220: 包执行器——npx/pipx/uvx 可从网络下载并立即执行任意包
-  if (cmd === "npx")
-    return { level: "cautious", reason: "package executor may run untrusted code" }
+  if (cmd === "npx") return { level: "cautious", reason: "package executor may run untrusted code" }
   if (cmd === "pipx" && tokens[1] === "run")
     return { level: "cautious", reason: "package executor may run untrusted code" }
-  if (cmd === "uvx")
-    return { level: "cautious", reason: "package executor may run untrusted code" }
+  if (cmd === "uvx") return { level: "cautious", reason: "package executor may run untrusted code" }
   // #220: 远程文件传输
   if (["scp", "sftp", "rsync"].includes(cmd))
     return { level: "cautious", reason: "remote file transfer requires explicit approval" }
@@ -1170,7 +1599,10 @@ function findDeletesFile(tokens: string[]) {
   if (normalizeCommandName(tokens[0]) !== "find") return false
   // 动作的首个值就是执行名，按位置绑定避免同名-name值误占-exec的位置。
   const bound = bind(tokens.slice(1), [...FIND_VALUES, "-exec", "-execdir"])
-  return bound.flags.includes("-delete") || ["-exec", "-execdir"].some((flag) => bound.values.get(flag)?.some((name) => normalizeCommandName(name) === "rm"))
+  return (
+    bound.flags.includes("-delete") ||
+    ["-exec", "-execdir"].some((flag) => bound.values.get(flag)?.some((name) => normalizeCommandName(name) === "rm"))
+  )
 }
 
 // -C按cwd归属区分；配置/仓库/helper注入不能因路径inside而豁免。
@@ -1266,11 +1698,32 @@ function classifyGitSubcommand(tokens: string[], i: number): Decision | undefine
   // 历史、引用、工作树或远端状态，落入 general 会被自动放行。
   // #555：filter-repo 与 filter-branch 同属历史重写；仅列 filter-branch 时 filter-repo 会 general 直过 auto。
   if (
-    ["add", "commit", "merge", "rebase", "cherry-pick", "revert", "push", "pull",
-     "reset", "clean", "mv", "rm",
-     "checkout", "switch", "restore", "apply", "am",
-     "filter-branch", "filter-repo", "update-ref", "bisect", "symbolic-ref",
-     "worktree", "submodule"].includes(sub)
+    [
+      "add",
+      "commit",
+      "merge",
+      "rebase",
+      "cherry-pick",
+      "revert",
+      "push",
+      "pull",
+      "reset",
+      "clean",
+      "mv",
+      "rm",
+      "checkout",
+      "switch",
+      "restore",
+      "apply",
+      "am",
+      "filter-branch",
+      "filter-repo",
+      "update-ref",
+      "bisect",
+      "symbolic-ref",
+      "worktree",
+      "submodule",
+    ].includes(sub)
   )
     return { level: "cautious", reason: "git state-changing command requires explicit approval" }
 
@@ -1298,14 +1751,15 @@ function classifyGitSubcommand(tokens: string[], i: number): Decision | undefine
   return undefined
 }
 
-
 // #203：读取或列出 .env、SSH key、云凭据等本地敏感位置不是立即外传，因此不是
 // #203：dangerous；但它会把密钥内容或密钥存在性暴露给 shell 输出和模型上下文，
 // #203：所以从 safe/general 提升为 cautious，交给 reviewer 判断是否确有授权
 function decodePowerShell(input: string) {
   // #197：PowerShell 编码命令为 UTF-16LE base64——解码失败返回 general 而非 dangerous，因不透明编码文本有风险但无特定 dangerous 载荷证据
   try {
-    return Buffer.from(input, "base64").toString("utf16le").replace(/^\uFEFF/, "")
+    return Buffer.from(input, "base64")
+      .toString("utf16le")
+      .replace(/^\uFEFF/, "")
   } catch {
     return
   }
@@ -1340,14 +1794,28 @@ function isWindowsRecursiveDeleteFlagToken(token: string) {
   return [...body].every((ch) => WINDOWS_CMD_SWITCH_LETTERS.has(ch)) && body.includes("s")
 }
 
-
 // POSIX 保护根（与 RE 常量 POSIX_SYSTEM_ROOTS/POSIX_USER_DATA_ROOTS 同族，
 // /root 另行保持既有"仅根本身"豁免）
 const PROTECTED_POSIX_ROOTS = [
-  "/etc", "/usr", "/var", "/lib", "/lib64", "/bin", "/sbin",
-  "/boot", "/sys", "/proc", "/dev", "/opt", "/root", "/home",
+  "/etc",
+  "/usr",
+  "/var",
+  "/lib",
+  "/lib64",
+  "/bin",
+  "/sbin",
+  "/boot",
+  "/sys",
+  "/proc",
+  "/dev",
+  "/opt",
+  "/root",
+  "/home",
   // macOS 特有
-  "/Library", "/Applications", "/System", "/Users",
+  "/Library",
+  "/Applications",
+  "/System",
+  "/Users",
 ]
 
 // [local-smark] 保护删除三级分级（R3）：根/家/驱动器根与系统根根本身及其一级
@@ -1369,7 +1837,13 @@ function protectedDeleteTier(input: string): "forbidden" | "dangerous" | undefin
   if (normalized === "/" || normalized === "/*" || normalized === "/.") return "forbidden"
   // 家目录/环境变量别名（大小写不敏感）
   const alias = normalized.toLowerCase()
-  if (alias === "~" || alias === "$home" || alias === "$env:userprofile" || alias === "$env:systemdrive" || alias === "%userprofile%")
+  if (
+    alias === "~" ||
+    alias === "$home" ||
+    alias === "$env:userprofile" ||
+    alias === "$env:systemdrive" ||
+    alias === "%userprofile%"
+  )
     return "forbidden"
   // Windows 驱动器根：C:\ 或 C:
   if (/^\w:\/?$/i.test(normalized)) return "forbidden"
@@ -1412,11 +1886,14 @@ function safeTokens(tokens: string[], cwd?: string, stripped?: boolean[]) {
   if (cmd === "tail") return !tokens.some((item) => item === "-f" || item === "--follow")
   if (cmd === "rg") return !tokens.some(unsafeRipgrepFlag)
   if (cmd === "find")
-    return !bind(tokens.slice(1), FIND_VALUES).flags.some((item) => ["-delete", "-exec", "-execdir", "-ok", "-okdir", "-fls", "-fprint"].includes(item))
+    return !bind(tokens.slice(1), FIND_VALUES).flags.some((item) =>
+      ["-delete", "-exec", "-execdir", "-ok", "-okdir", "-fls", "-fprint"].includes(item),
+    )
   if (cmd === "sed") return tokens.length <= 4 && tokens[1] === "-n" && /^\d+(?:,\d+)?p$/.test(tokens[2] ?? "")
   if (cmd === "git") return gitSafe(tokens, cwd, stripped)
   // 包管理器只读子命令
-  if (["npm", "pnpm", "yarn"].includes(cmd)) return ["ls", "list", "view", "info", "why", "outdated"].includes(tokens[1] ?? "")
+  if (["npm", "pnpm", "yarn"].includes(cmd))
+    return ["ls", "list", "view", "info", "why", "outdated"].includes(tokens[1] ?? "")
   if (cmd === "bun") return false
   // 版本探测安全——但仅当所有参数为版本标志时
   return versionSafe(tokens)
@@ -1431,21 +1908,65 @@ function readsSensitivePath(tokens: string[], outbound = false) {
   const cmd = normalizeCommandName(tokens[0])
   if (cmd === "rg" || cmd === "grep") {
     // 模式值保持数据，-f读取模式文件；显式模式或--files模式让剩余操作数全部是路径。
-    const bound = bind(tokens.slice(1), ["-e", "--regexp", "-f", "--file", "-g", "--glob", "--iglob", "-t", "--type", "-T", "--type-not", "-A", "-B", "-C", "-m", "--max-count", "--encoding", "--pre", "--hostname-bin"])
+    const bound = bind(tokens.slice(1), [
+      "-e",
+      "--regexp",
+      "-f",
+      "--file",
+      "-g",
+      "--glob",
+      "--iglob",
+      "-t",
+      "--type",
+      "-T",
+      "--type-not",
+      "-A",
+      "-B",
+      "-C",
+      "-m",
+      "--max-count",
+      "--encoding",
+      "--pre",
+      "--hostname-bin",
+    ])
     const files = [...(bound.values.get("-f") ?? []), ...(bound.values.get("--file") ?? [])]
     // 仅在本函数中构造文件参数视图，调用方argv保持原样；本地与外传共用同一角色绑定。
-    tokens = [cmd, ...files, ...bound.operands.slice(files.length || bound.values.has("-e") || bound.values.has("--regexp") || bound.flags.includes("--files") ? 0 : 1)]
+    tokens = [
+      cmd,
+      ...files,
+      ...bound.operands.slice(
+        files.length || bound.values.has("-e") || bound.values.has("--regexp") || bound.flags.includes("--files")
+          ? 0
+          : 1,
+      ),
+    ]
   }
   if (
     ![
-      "cat", "type", "get-content", "gc", "get-childitem", "gci",
-      "ls", "dir", "grep", "rg", "head", "tail", "less", "more", "sed", "awk",
+      "cat",
+      "type",
+      "get-content",
+      "gc",
+      "get-childitem",
+      "gci",
+      "ls",
+      "dir",
+      "grep",
+      "rg",
+      "head",
+      "tail",
+      "less",
+      "more",
+      "sed",
+      "awk",
     ].includes(cmd)
   ) {
     return false
   }
   // 外传采用原完整路径集合；单独读取继续保留.pem/.key需要安全上下文的既有例外。
-  return outbound ? tokens.slice(1).some((path) => new RegExp(SENSITIVE_PATH_PATTERN, "i").test(path)) : hasSensitivePath(tokens)
+  return outbound
+    ? tokens.slice(1).some((path) => new RegExp(SENSITIVE_PATH_PATTERN, "i").test(path))
+    : hasSensitivePath(tokens)
 }
 
 function isSensitiveKeyFile(normalizedPath: string) {
@@ -1496,7 +2017,6 @@ function hasSensitivePath(tokens: string[]) {
     return false
   })
 }
-
 
 function gitSafe(tokens: string[], cwd?: string, stripped?: boolean[]) {
   // #197：仅只读 git 子命令安全——改变 config/worktree/exec-path 的 global flag 被拒绝，因可将安全子命令重定向到另一仓库或 helper
@@ -1550,7 +2070,15 @@ function windowsRecursiveDeleteTier(tokens: string[]): "forbidden" | "dangerous"
 }
 
 function unsafeRipgrepFlag(item: string) {
-  return item === "-z" || item === "--pre" || item.startsWith("--pre=") || item === "--hostname-bin" || item.startsWith("--hostname-bin=") || item === "--search-zip" || item.startsWith("--search-zip=")
+  return (
+    item === "-z" ||
+    item === "--pre" ||
+    item.startsWith("--pre=") ||
+    item === "--hostname-bin" ||
+    item.startsWith("--hostname-bin=") ||
+    item === "--search-zip" ||
+    item.startsWith("--search-zip=")
+  )
 }
 
 function gitBranchSafe(args: string[]) {
@@ -1566,13 +2094,11 @@ function versionSafe(tokens: string[]) {
   return tokens.length > 1 && tokens.slice(1).every((item) => item === "--version" || item === "-v" || item === "-V")
 }
 
-
 function normalizeCommandName(input: string) {
   // #197：规范化路径和 Windows 可执行后缀——使策略常量无需为 /usr/bin/git、git.exe、PowerShell.EXE 添加重复条目
   const name = input.replaceAll("\\", "/").split("/").at(-1) ?? input
   return name.replace(/\.(?:exe|cmd|bat|com)$/i, "").toLowerCase()
 }
-
 
 function pierceEnvTokens(args: string[]) {
   // 剥掉 env 的 KEY=value 与常见 flag，露出内层可执行命令 argv（token 语义，非正则扫全文）。
@@ -1602,6 +2128,5 @@ function joinShellTokens(tokens: string[]) {
     .map((item) => (/^[A-Za-z0-9_./:=@%+-]+$/.test(item) ? item : `'${item.replaceAll("'", "'\\''")}'`))
     .join(" ")
 }
-
 
 export * as PermissionPrecheck from "./precheck"

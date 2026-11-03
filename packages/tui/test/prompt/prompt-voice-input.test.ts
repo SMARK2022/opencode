@@ -27,7 +27,9 @@ async function compileVoiceUploadFixture(directory: string, file: string, native
   const entry = path.join(directory, "compiled-submit-voice.ts")
   const production = path.resolve(import.meta.dir, "../../src/prompt-voice-input.ts")
   // 入口绝对导入当前生产模块，不能复制 submitVoice 实现来制造假绿。
-  await Bun.write(entry, `
+  await Bun.write(
+    entry,
+    `
     import { createRequire } from "node:module"
     import { submitVoice } from ${JSON.stringify(production.replaceAll("\\", "/"))}
     const require = createRequire(import.meta.url)
@@ -62,8 +64,12 @@ async function compileVoiceUploadFixture(directory: string, file: string, native
       // 失败路径也关闭测试自己的 listener，避免污染后续测试。
       await server.stop(true)
     }
-  `)
-  const outfile = path.join(directory, process.platform === "win32" ? "compiled-submit-voice.exe" : "compiled-submit-voice")
+  `,
+  )
+  const outfile = path.join(
+    directory,
+    process.platform === "win32" ? "compiled-submit-voice.exe" : "compiled-submit-voice",
+  )
   const result = await Bun.build({
     entrypoints: [entry],
     // 不指定跨平台 target，直接使用当前 Bun 的 standalone runtime，避免下载不同版本掩盖回归。
@@ -80,7 +86,10 @@ describe("prompt voice input", () => {
     const text: string[] = []
     const controller = createVoiceInputController({
       startRecorder: async () => ({ file: "voice.wav", stop: async () => {}, abort: async () => {} }),
-      transcribe: async (_file, signal) => { submitted = signal; return "recorded text" },
+      transcribe: async (_file, signal) => {
+        submitted = signal
+        return "recorded text"
+      },
       insertText: (value) => text.push(value),
     })
     await controller.toggle()
@@ -96,7 +105,8 @@ describe("prompt voice input", () => {
     await Bun.write(file, new Uint8Array([82, 73, 70, 70]))
     const signal = new AbortController().signal
     const text = await PromptVoiceInput.submitVoice(file, signal, {
-      url: "http://localhost:1234", directory: tmp.path,
+      url: "http://localhost:1234",
+      directory: tmp.path,
       fetch: async (url, init) => {
         expect(new URL(String(url)).pathname).toBe("/tui/voice/transcribe")
         expect(new URL(String(url)).searchParams.get("directory")).toBe(tmp.path)
@@ -110,51 +120,63 @@ describe("prompt voice input", () => {
 
   // standalone 的 exe 只在 Windows 执行：native addon、真实生产 import 和本地回环必须处于同一进程。
   // 回环服务独立检查认证、目录、响应和完整字节，避免测试重新实现 submitVoice 的正文逻辑。
-  compiledVoice("uploads bytes safely from a native-loaded standalone executable", async () => {
-    await using tmp = await tmpdir()
-    const file = path.join(tmp.path, "standalone.wav")
-    const wav = Buffer.alloc(48)
-    // fixture 使用独立已知 PCM 字节，不依赖麦克风、Worker 或未 checkout 的音频资源。
-    wav.write("RIFF", 0, "ascii")
-    wav.writeUInt32LE(40, 4)
-    wav.write("WAVE", 8, "ascii")
-    wav.write("fmt ", 12, "ascii")
-    wav.writeUInt32LE(16, 16)
-    wav.writeUInt16LE(1, 20)
-    wav.writeUInt16LE(1, 22)
-    // 单声道 8kHz、16-bit PCM 的 byteRate 为 16000；头部长度与两个 sample 的 data 长度一致。
-    wav.writeUInt32LE(8_000, 24)
-    wav.writeUInt32LE(16_000, 28)
-    wav.writeUInt16LE(2, 32)
-    wav.writeUInt16LE(16, 34)
-    wav.write("data", 36, "ascii")
-    wav.writeUInt32LE(4, 40)
-    wav.writeInt16LE(321, 44)
-    wav.writeInt16LE(-321, 46)
-    await Bun.write(file, wav)
+  compiledVoice(
+    "uploads bytes safely from a native-loaded standalone executable",
+    async () => {
+      await using tmp = await tmpdir()
+      const file = path.join(tmp.path, "standalone.wav")
+      const wav = Buffer.alloc(48)
+      // fixture 使用独立已知 PCM 字节，不依赖麦克风、Worker 或未 checkout 的音频资源。
+      wav.write("RIFF", 0, "ascii")
+      wav.writeUInt32LE(40, 4)
+      wav.write("WAVE", 8, "ascii")
+      wav.write("fmt ", 12, "ascii")
+      wav.writeUInt32LE(16, 16)
+      wav.writeUInt16LE(1, 20)
+      wav.writeUInt16LE(1, 22)
+      // 单声道 8kHz、16-bit PCM 的 byteRate 为 16000；头部长度与两个 sample 的 data 长度一致。
+      wav.writeUInt32LE(8_000, 24)
+      wav.writeUInt32LE(16_000, 28)
+      wav.writeUInt16LE(2, 32)
+      wav.writeUInt16LE(16, 34)
+      wav.write("data", 36, "ascii")
+      wav.writeUInt32LE(4, 40)
+      wav.writeInt16LE(321, 44)
+      wav.writeInt16LE(-321, 46)
+      await Bun.write(file, wav)
 
-    const packageRoot = path.dirname(createRequire(import.meta.url).resolve("@picovoice/pvrecorder-node/package.json"))
-    const native = path.join(packageRoot, "lib", "windows", process.arch === "x64" ? "amd64" : "arm64", "pv_recorder.node")
-    // 缺少已安装 addon 时必须失败，不能回退到源码路径来绕过 native 输入域。
-    expect(await Bun.file(native).exists()).toBe(true)
-    const compiled = await compileVoiceUploadFixture(tmp.path, file, native)
-    // 子进程上界早于测试期限，挂起时先结束 exe，临时目录才不会因 Windows 文件占用而清理失败。
-    const child = Bun.spawn([compiled.outfile], { stdout: "pipe", stderr: "pipe", timeout: 10_000 })
-    const [exit, stdout, stderr] = await Promise.all([
-      // 同时消费两个管道，避免崩溃输出反压掩盖 standalone 的真实退出码。
-      child.exited,
-      new Response(child.stdout).text(),
-      new Response(child.stderr).text(),
-    ])
-    expect({ exit, stderr }).toEqual({ exit: 0, stderr: "" })
-    // 期望值来自回环协议和 fixture 字面量，不从 submitVoice 重新计算。
-    expect(JSON.parse(stdout.trim())).toEqual({
-      text: "standalone transcript",
-      authorization: "Bearer standalone-token",
-      directory: "standalone-directory",
-      bytes: [...wav],
-    })
-  }, 30_000)
+      const packageRoot = path.dirname(
+        createRequire(import.meta.url).resolve("@picovoice/pvrecorder-node/package.json"),
+      )
+      const native = path.join(
+        packageRoot,
+        "lib",
+        "windows",
+        process.arch === "x64" ? "amd64" : "arm64",
+        "pv_recorder.node",
+      )
+      // 缺少已安装 addon 时必须失败，不能回退到源码路径来绕过 native 输入域。
+      expect(await Bun.file(native).exists()).toBe(true)
+      const compiled = await compileVoiceUploadFixture(tmp.path, file, native)
+      // 子进程上界早于测试期限，挂起时先结束 exe，临时目录才不会因 Windows 文件占用而清理失败。
+      const child = Bun.spawn([compiled.outfile], { stdout: "pipe", stderr: "pipe", timeout: 10_000 })
+      const [exit, stdout, stderr] = await Promise.all([
+        // 同时消费两个管道，避免崩溃输出反压掩盖 standalone 的真实退出码。
+        child.exited,
+        new Response(child.stdout).text(),
+        new Response(child.stderr).text(),
+      ])
+      expect({ exit, stderr }).toEqual({ exit: 0, stderr: "" })
+      // 期望值来自回环协议和 fixture 字面量，不从 submitVoice 重新计算。
+      expect(JSON.parse(stdout.trim())).toEqual({
+        text: "standalone transcript",
+        authorization: "Bearer standalone-token",
+        directory: "standalone-directory",
+        bytes: [...wav],
+      })
+    },
+    30_000,
+  )
 
   // 预取消必须在读取文件前结束，避免取消请求仍建立网络副作用。
   test("does not read or fetch when submission is already cancelled", async () => {
@@ -171,13 +193,15 @@ describe("prompt voice input", () => {
     const fileCall = spyOn(Bun, "file").mockReturnValue(file)
     // 只替代文件系统边界；被测入口仍是实际 submitVoice。
     try {
-      await expect(PromptVoiceInput.submitVoice("voice.wav", abort.signal, {
-        url: "http://localhost:1234",
-        fetch: async () => {
-          fetched = true
-          return Response.json({ text: "unexpected" })
-        },
-      })).rejects.toMatchObject({ name: "AbortError" })
+      await expect(
+        PromptVoiceInput.submitVoice("voice.wav", abort.signal, {
+          url: "http://localhost:1234",
+          fetch: async () => {
+            fetched = true
+            return Response.json({ text: "unexpected" })
+          },
+        }),
+      ).rejects.toMatchObject({ name: "AbortError" })
       expect(read).toBe(false)
       expect(fetched).toBe(false)
     } finally {
@@ -204,13 +228,15 @@ describe("prompt voice input", () => {
     const fileCall = spyOn(Bun, "file").mockReturnValue(file)
     let fetched = false
     try {
-      await expect(PromptVoiceInput.submitVoice(filePath, abort.signal, {
-        url: "http://localhost:1234",
-        fetch: async () => {
-          fetched = true
-          return Response.json({ text: "unexpected" })
-        },
-      })).rejects.toMatchObject({ name: "AbortError" })
+      await expect(
+        PromptVoiceInput.submitVoice(filePath, abort.signal, {
+          url: "http://localhost:1234",
+          fetch: async () => {
+            fetched = true
+            return Response.json({ text: "unexpected" })
+          },
+        }),
+      ).rejects.toMatchObject({ name: "AbortError" })
       expect(fetched).toBe(false)
     } finally {
       // 闸门结束后恢复文件边界，保持其它上传协议测试相互独立。
@@ -232,19 +258,33 @@ describe("prompt voice input", () => {
     const errors: string[][] = [[], []]
     const inserted: string[] = []
     const cleaned: number[] = []
-    const controllers = errors.map((messages, index) => createVoiceInputController({
-      startRecorder: async () => ({ file: `${index}.wav`, stop: async () => {}, abort: async () => { cleaned.push(index) } }),
-      transcribe: (_file, signal) => {
-        signals.push(signal)
-        const start = performance.now()
-        return new Promise<string>((_resolve, reject) => signal.addEventListener("abort", () => {
-          elapsed[index] = performance.now() - start
-          reject(signal.reason)
-        }, { once: true }))
-      },
-      insertText: (text) => inserted.push(text),
-      onError: (message) => messages.push(message),
-    }))
+    const controllers = errors.map((messages, index) =>
+      createVoiceInputController({
+        startRecorder: async () => ({
+          file: `${index}.wav`,
+          stop: async () => {},
+          abort: async () => {
+            cleaned.push(index)
+          },
+        }),
+        transcribe: (_file, signal) => {
+          signals.push(signal)
+          const start = performance.now()
+          return new Promise<string>((_resolve, reject) =>
+            signal.addEventListener(
+              "abort",
+              () => {
+                elapsed[index] = performance.now() - start
+                reject(signal.reason)
+              },
+              { once: true },
+            ),
+          )
+        },
+        insertText: (text) => inserted.push(text),
+        onError: (message) => messages.push(message),
+      }),
+    )
     // Bun 的未决 Promise 检测需要活跃句柄；此 interval 不参与生产 timeout 的触发。
     const keepAlive = setInterval(() => {}, 1_000)
     const first = controllers[0]
@@ -289,7 +329,8 @@ describe("prompt voice input", () => {
     const release = Promise.withResolvers<void>()
     const abort = new AbortController()
     const server = Bun.serve({
-      hostname: "127.0.0.1", port: 0,
+      hostname: "127.0.0.1",
+      port: 0,
       async fetch(request) {
         // 先确认完整 WAV 已到达再触发取消，避免仅测试到连接尚未建立的提前 abort。
         expect(request.method).toBe("POST")
@@ -300,9 +341,14 @@ describe("prompt voice input", () => {
           await release.promise
           return Response.json({ text: "late text" })
         }
-        return new Response(new ReadableStream({
-          start(controller) { controller.enqueue(new TextEncoder().encode('{"text":"')) },
-        }), { headers: { "content-type": "application/json" } })
+        return new Response(
+          new ReadableStream({
+            start(controller) {
+              controller.enqueue(new TextEncoder().encode('{"text":"'))
+            },
+          }),
+          { headers: { "content-type": "application/json" } },
+        )
       },
     })
     try {
@@ -315,7 +361,10 @@ describe("prompt voice input", () => {
         },
       })
       // 先安装 rejection 观察者，避免真实 socket 取消被测试框架误报为未处理错误。
-      const outcome = pending.then((text) => ({ text }), (error: unknown) => ({ error }))
+      const outcome = pending.then(
+        (text) => ({ text }),
+        (error: unknown) => ({ error }),
+      )
       await ready.promise
       abort.abort()
       expect(await outcome).toMatchObject({ error: { name: "AbortError" } })
@@ -335,11 +384,22 @@ describe("prompt voice input", () => {
     const controller = createVoiceInputController({
       startRecorder: async () => ({
         file: "voice.wav",
-        stop: async () => { saving.resolve(); await saved.promise; events.push("saved") },
-        abort: async () => { events.push("removed") },
+        stop: async () => {
+          saving.resolve()
+          await saved.promise
+          events.push("saved")
+        },
+        abort: async () => {
+          events.push("removed")
+        },
       }),
-      transcribe: async () => { events.push("uploaded"); return "stale text" },
-      insertText: () => { events.push("inserted") },
+      transcribe: async () => {
+        events.push("uploaded")
+        return "stale text"
+      },
+      insertText: () => {
+        events.push("inserted")
+      },
     })
     await controller.toggle()
     const stopping = controller.toggle()
@@ -365,13 +425,20 @@ describe("prompt voice input", () => {
     const controller = createVoiceInputController({
       startRecorder: async () => {
         const file = `${++starts}.wav`
-        return { file, stop: async () => {}, abort: async () => {
-          if (file !== "1.wav") return
-          cleaning.resolve()
-          await cleaned.promise
-        } }
+        return {
+          file,
+          stop: async () => {},
+          abort: async () => {
+            if (file !== "1.wav") return
+            cleaning.resolve()
+            await cleaned.promise
+          },
+        }
       },
-      transcribe: (_file, signal) => { submitted.resolve(signal); return response.promise },
+      transcribe: (_file, signal) => {
+        submitted.resolve(signal)
+        return response.promise
+      },
       insertText: (text) => inserted.push(text),
       onError: (message) => errors.push(message),
       now: () => 1_000,
@@ -472,77 +539,114 @@ describe("prompt voice input", () => {
   // 断言文本插入的是停止后的 WAV 文件结果，而不是录音中途的旧状态。
   // stop 后仍调用 abort，是为了删除临时文件；这个 cleanup 不应影响已插入文本。
   // 状态序列锁定 TUI 用户能看到的阶段，避免后续重构跳过保存或转写提示。
-  test.each(["default", "mcp", "direct", "explicit"] as const)("host config reaches the voice controller: %s", async (scenario) => {
-    await using tmp = await tmpdir()
-    await Bun.write(path.join(tmp.path, "tui.json"), JSON.stringify({
-      tui: { theme: "ancestor", attention: { sounds: { done: "alert.wav" } }, keybinds: { prompt_voice_toggle: "alt+x" } },
-    }))
-    const script = path.join(tmp.path, "chatgpt browser agent", "chatgpt.js")
-    // 只提供配置推导所需的脚本存在证据；转写和录音均不启动真实设备或MCP进程。
-    if (scenario !== "default") {
-      await Bun.write(script, "")
-      await Bun.write(path.join(tmp.path, "opencode.json"), JSON.stringify({ mcp: {
-        other: { command: ["unrelated", path.join(path.dirname(script), "mcp-server.js")] },
-        // 同一个host入口覆盖显式runtime与直接脚本，两种配置均不启动真实进程。
-        chatgpt: { type: "local", command: scenario === "direct" ? [path.join(path.dirname(script), "mcp-server.js")] : [process.execPath, path.join(path.dirname(script), "mcp-server.js")] },
-      } }))
-    }
-    if (scenario === "explicit") {
-      await Bun.write(path.join(tmp.path, ".opencode", "tui.json"), JSON.stringify({
-        voice: { transcriber: { command: "explicit-voice", args: ["{file}"] } },
-      }))
-    }
-    // 与Native CLI调用同一个host producer，配置发现、规范化和优先级不能被手写对象替代。
-    const config = await Effect.runPromise(TuiConfigHost.load(tmp.path, { terminalSuspend: false }).pipe(
-      Effect.provide(AppNodeBuilder.build(FSUtil.node)),
-    ))
-    expect(config.theme).toBe("ancestor")
-    expect(config.attention.sounds.done).toBe(path.join(tmp.path, "alert.wav"))
-    expect(config.keybinds.get("prompt.voice.toggle")?.[0]?.key).toBe("alt+x")
-    expect(config.keybinds.get("terminal.suspend")).toEqual([])
-    expect(config).not.toHaveProperty("voice")
-    const file = path.join(tmp.path, "voice.wav")
-    await Bun.write(file, new Uint8Array([82, 73, 70, 70]))
-    const inserted: string[] = []
-    const errors: string[] = []
-    const states: string[] = []
-    let aborted = false
-    const recorder: VoiceRecorderHandle = {
-      file,
-      stop: async () => {},
-      abort: async () => {
-        aborted = true
-      },
-    }
-    const controller = createVoiceInputController({
-      startRecorder: async () => recorder,
-      // 真实controller和上传函数连到同一个Core selector，只替换HTTP与音频设备边界。
-      transcribe: (file, signal) => PromptVoiceInput.submitVoice(file, signal, {
-        url: "http://localhost:1234", directory: tmp.path,
-        fetch: async (url, init) => {
-          expect(new URL(String(url)).pathname).toBe("/tui/voice/transcribe")
-          expect(await new Response(init?.body).arrayBuffer()).toEqual(await Bun.file(file).arrayBuffer())
-          const target = await resolveVoiceTarget(scenario === "default" ? [] : [path.join(tmp.path, "opencode.json")])
-            .catch((error: unknown) => { if (!(error instanceof Error)) throw error; return error })
-          if (target instanceof Error) return Response.json({ message: target.message }, { status: 502 })
-          expect(target).toMatchObject({ config: path.join(tmp.path, "opencode.json"), key: "chatgpt", script, interpreter: scenario === "direct" ? "node" : process.execPath })
-          return Response.json({ text: `text from ${path.basename(file)}` })
+  test.each(["default", "mcp", "direct", "explicit"] as const)(
+    "host config reaches the voice controller: %s",
+    async (scenario) => {
+      await using tmp = await tmpdir()
+      await Bun.write(
+        path.join(tmp.path, "tui.json"),
+        JSON.stringify({
+          tui: {
+            theme: "ancestor",
+            attention: { sounds: { done: "alert.wav" } },
+            keybinds: { prompt_voice_toggle: "alt+x" },
+          },
+        }),
+      )
+      const script = path.join(tmp.path, "chatgpt browser agent", "chatgpt.js")
+      // 只提供配置推导所需的脚本存在证据；转写和录音均不启动真实设备或MCP进程。
+      if (scenario !== "default") {
+        await Bun.write(script, "")
+        await Bun.write(
+          path.join(tmp.path, "opencode.json"),
+          JSON.stringify({
+            mcp: {
+              other: { command: ["unrelated", path.join(path.dirname(script), "mcp-server.js")] },
+              // 同一个host入口覆盖显式runtime与直接脚本，两种配置均不启动真实进程。
+              chatgpt: {
+                type: "local",
+                command:
+                  scenario === "direct"
+                    ? [path.join(path.dirname(script), "mcp-server.js")]
+                    : [process.execPath, path.join(path.dirname(script), "mcp-server.js")],
+              },
+            },
+          }),
+        )
+      }
+      if (scenario === "explicit") {
+        await Bun.write(
+          path.join(tmp.path, ".opencode", "tui.json"),
+          JSON.stringify({
+            voice: { transcriber: { command: "explicit-voice", args: ["{file}"] } },
+          }),
+        )
+      }
+      // 与Native CLI调用同一个host producer，配置发现、规范化和优先级不能被手写对象替代。
+      const config = await Effect.runPromise(
+        TuiConfigHost.load(tmp.path, { terminalSuspend: false }).pipe(
+          Effect.provide(AppNodeBuilder.build(FSUtil.node)),
+        ),
+      )
+      expect(config.theme).toBe("ancestor")
+      expect(config.attention.sounds.done).toBe(path.join(tmp.path, "alert.wav"))
+      expect(config.keybinds.get("prompt.voice.toggle")?.[0]?.key).toBe("alt+x")
+      expect(config.keybinds.get("terminal.suspend")).toEqual([])
+      expect(config).not.toHaveProperty("voice")
+      const file = path.join(tmp.path, "voice.wav")
+      await Bun.write(file, new Uint8Array([82, 73, 70, 70]))
+      const inserted: string[] = []
+      const errors: string[] = []
+      const states: string[] = []
+      let aborted = false
+      const recorder: VoiceRecorderHandle = {
+        file,
+        stop: async () => {},
+        abort: async () => {
+          aborted = true
         },
-      }),
-      insertText: (text) => inserted.push(text),
-      onError: (message) => errors.push(message),
-      onStatus: (status) => states.push(status.type),
-      now: () => 1_000,
-    })
+      }
+      const controller = createVoiceInputController({
+        startRecorder: async () => recorder,
+        // 真实controller和上传函数连到同一个Core selector，只替换HTTP与音频设备边界。
+        transcribe: (file, signal) =>
+          PromptVoiceInput.submitVoice(file, signal, {
+            url: "http://localhost:1234",
+            directory: tmp.path,
+            fetch: async (url, init) => {
+              expect(new URL(String(url)).pathname).toBe("/tui/voice/transcribe")
+              expect(await new Response(init?.body).arrayBuffer()).toEqual(await Bun.file(file).arrayBuffer())
+              const target = await resolveVoiceTarget(
+                scenario === "default" ? [] : [path.join(tmp.path, "opencode.json")],
+              ).catch((error: unknown) => {
+                if (!(error instanceof Error)) throw error
+                return error
+              })
+              if (target instanceof Error) return Response.json({ message: target.message }, { status: 502 })
+              expect(target).toMatchObject({
+                config: path.join(tmp.path, "opencode.json"),
+                key: "chatgpt",
+                script,
+                interpreter: scenario === "direct" ? "node" : process.execPath,
+              })
+              return Response.json({ text: `text from ${path.basename(file)}` })
+            },
+          }),
+        insertText: (text) => inserted.push(text),
+        onError: (message) => errors.push(message),
+        onStatus: (status) => states.push(status.type),
+        now: () => 1_000,
+      })
 
-    await controller.toggle()
-    await controller.toggle()
+      await controller.toggle()
+      await controller.toggle()
 
-    expect(inserted).toEqual(scenario === "default" ? [] : ["text from voice.wav"])
-    expect(errors).toEqual(scenario === "default" ? ["Voice input requires a user-configured ChatGPT MCP"] : [])
-    expect(states).toEqual(["starting", "recording", "stopping", "transcribing", "idle"])
-    expect(aborted).toBe(true)
-  })
+      expect(inserted).toEqual(scenario === "default" ? [] : ["text from voice.wav"])
+      expect(errors).toEqual(scenario === "default" ? ["Voice input requires a user-configured ChatGPT MCP"] : [])
+      expect(states).toEqual(["starting", "recording", "stopping", "transcribing", "idle"])
+      expect(aborted).toBe(true)
+    },
+  )
 
   // 静音的空文字是成功结果：输入框保持不变，也不产生错误提示。
   // 后端协议切片（非 JSON 输出、缺 text 字段）在 opencode 侧 tui-control-voice 测试覆盖。
@@ -808,7 +912,10 @@ describe("prompt voice input", () => {
         // 用 polling 而非 addEventListener 避免 bun:test 的 pending promise tracker 误判测试未结束。
         return new Promise<string>((_, reject) => {
           const timer = setInterval(() => {
-            if (signal.aborted) { clearInterval(timer); reject(new Error("aborted")) }
+            if (signal.aborted) {
+              clearInterval(timer)
+              reject(new Error("aborted"))
+            }
           }, 5)
         })
       },
@@ -842,7 +949,10 @@ describe("prompt voice input", () => {
         // 网络错误仍应提示；这里仅由用户 signal 驱动拒绝，锁定主动取消静默的语义。
         return new Promise<string>((_, reject) => {
           const timer = setInterval(() => {
-            if (signal.aborted) { clearInterval(timer); reject(new Error("aborted")) }
+            if (signal.aborted) {
+              clearInterval(timer)
+              reject(new Error("aborted"))
+            }
           }, 5)
         })
       },
@@ -971,16 +1081,12 @@ describe("voiceInputStatusText compact", () => {
     expect(voiceInputStatusText(idle, "alt+v")).toBe("")
     const startedAt = 1_000
     expect(voiceInputStatusText({ type: "starting" }, "alt+v", 4_400)).toBe("Starting voice...")
-    expect(
-      voiceInputStatusText({ type: "starting" }, "alt+v", 4_400, { compact: true }),
-    ).toBe("Starting...")
+    expect(voiceInputStatusText({ type: "starting" }, "alt+v", 4_400, { compact: true })).toBe("Starting...")
     const recording = { type: "recording" as const, startedAt }
     expect(voiceInputStatusText(recording, "alt+v", 4_400, { compact: true })).toBe("Rec 00:03 · alt+v stop")
     expect(voiceInputStatusText(recording, "alt+v", 4_400, { compact: true })).toContain("alt+v stop")
     expect(voiceInputStatusText({ type: "stopping" }, "alt+v", 4_400, { compact: true })).toBe("Saving...")
-    expect(voiceInputStatusText({ type: "transcribing" }, "alt+v", 4_400, { compact: true })).toBe(
-      "Transcribing...",
-    )
+    expect(voiceInputStatusText({ type: "transcribing" }, "alt+v", 4_400, { compact: true })).toBe("Transcribing...")
   })
 
   // INV-01 硬门禁：formatter 双 profile 不能证明 call-site 选择；任一 consumer 漏传 compact 必须失败。

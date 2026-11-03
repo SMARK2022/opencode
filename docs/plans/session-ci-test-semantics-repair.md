@@ -53,48 +53,48 @@ User clarification received during planning:
 
 ## 3. Repository Context
 
-| Source | Why it constrains this task |
-| --- | --- |
-| `AGENTS.md` | Uses `dev` as the default branch, requires package-local tests/typecheck, parallel discovery, minimal changes, and no commit unless explicitly requested. The GOAL explicitly requests a final commit. |
-| `CONTEXT.md` | Defines Session, Provider, Message, Status, Goal, Project, and InstanceState vocabulary and distinguishes user-visible Status from run state. |
-| `packages/opencode/AGENTS.md` | Requires current Effect patterns, explicit layer/service boundaries, and package-local `bun typecheck`. No new service or module is planned. |
-| `packages/opencode/test/AGENTS.md` | Requires live/instance Effect fixtures for HTTP, filesystem, child process, and real-time tests; synchronization must use published readiness rather than sleeps. Both existing tests already use the correct fixture families and observable seams. |
-| `.opencode/policy/first-principles-engineering.md` | Requires the first divergence, one primary path, no fallback, forward/reverse traceability, independent audits, and the 15 percent Chinese explanatory-comment gate. |
-| `docs/adr/README.md` and ADR index | The only accepted ADR concerns triage labels, so no ADR constrains these Session test-fixture corrections and no new load-bearing ADR is justified. |
-| `.github/workflows/test.yml:31-94` | `packages/opencode` is a required matrix on Linux, Windows, and macOS and runs the same `bun turbo test:ci --filter=opencode --continue=dependencies-successful` command. |
-| `packages/opencode/package.json:8-13` | Defines the 30-second package test timeout and JUnit CI command. The repair must work inside existing limits. |
+| Source                                             | Why it constrains this task                                                                                                                                                                                                                          |
+| -------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `AGENTS.md`                                        | Uses `dev` as the default branch, requires package-local tests/typecheck, parallel discovery, minimal changes, and no commit unless explicitly requested. The GOAL explicitly requests a final commit.                                               |
+| `CONTEXT.md`                                       | Defines Session, Provider, Message, Status, Goal, Project, and InstanceState vocabulary and distinguishes user-visible Status from run state.                                                                                                        |
+| `packages/opencode/AGENTS.md`                      | Requires current Effect patterns, explicit layer/service boundaries, and package-local `bun typecheck`. No new service or module is planned.                                                                                                         |
+| `packages/opencode/test/AGENTS.md`                 | Requires live/instance Effect fixtures for HTTP, filesystem, child process, and real-time tests; synchronization must use published readiness rather than sleeps. Both existing tests already use the correct fixture families and observable seams. |
+| `.opencode/policy/first-principles-engineering.md` | Requires the first divergence, one primary path, no fallback, forward/reverse traceability, independent audits, and the 15 percent Chinese explanatory-comment gate.                                                                                 |
+| `docs/adr/README.md` and ADR index                 | The only accepted ADR concerns triage labels, so no ADR constrains these Session test-fixture corrections and no new load-bearing ADR is justified.                                                                                                  |
+| `.github/workflows/test.yml:31-94`                 | `packages/opencode` is a required matrix on Linux, Windows, and macOS and runs the same `bun turbo test:ci --filter=opencode --continue=dependencies-successful` command.                                                                            |
+| `packages/opencode/package.json:8-13`              | Defines the 30-second package test timeout and JUnit CI command. The repair must work inside existing limits.                                                                                                                                        |
 
 ## 4. Files and Evidence Read
 
-| Evidence | Relevance | Evidence class |
-| --- | --- | --- |
-| GitHub Actions run `#146` (`29889725486`) and its three `packages/opencode` job logs | Linux/macOS each fail only the first-progress Processor test; Windows fails that test plus the Goal verification test. | observed |
-| GitHub Actions run `#142` (`29825654973`, head `4b825d8b81`) | First run containing Goal progress gate: Linux/macOS green and Windows fails the verification-result test at `texts[5]`. | observed |
-| GitHub Actions run `#143` (`29861459337`, head `57180a9a54`) | First run containing generalized no-Tool `other` retry: the first-progress test starts failing on all three platforms while Windows retains the Goal failure. | observed |
-| `packages/opencode/test/session/processor-effect.test.ts:755-834` | Existing vertical test holds the first HTTP response, observes retry Status, then expects terminal recovery text. Its repeat recovery producer omits `stop`. | observed |
-| `packages/opencode/test/lib/llm-server.ts:456-557` | `Reply.text()` only appends text; `Reply.stop()` alone emits `finish_reason="stop"`; `item()` omits a finish line otherwise. | observed |
-| `packages/opencode/src/provider/provider.ts:127-275,1920-2012` | Owns the raw-progress deadline and emits `SSE_READ_TIMEOUT`; no planned change. | observed |
-| `packages/opencode/src/session/llm.ts:437-457` | Converts the AI SDK full stream into the Effect stream consumed by `SessionProcessor`; no planned change. | observed |
-| `packages/opencode/src/session/message-v2.ts:1763-1775,1940-1960` | Maps timeout errors to the retryable Message API error contract; no planned change. | observed |
-| `packages/opencode/src/session/retry.ts:25-69,179-210` | Owns retry delay/classification orchestration; no attempt cap exists and none is requested. | observed |
-| `packages/opencode/src/session/status.ts:8-41,77-86` | Defines and publishes user-visible retry Status observed by the Processor test. | contracted |
-| `packages/opencode/src/session/processor.ts:671-730,1005-1088` | Throws stream errors into existing retry and treats no-Tool `other` as incomplete/retryable. | observed |
-| `packages/opencode/test/session/llm.test.ts:550-635` | Provider-level delayed-header timeout behavior remains independently green. | observed |
-| `packages/opencode/test/session/retry.test.ts:556-566` | SSE timeout conversion remains independently covered and green. | observed |
-| Interrupted focused Processor run with isolated DEBUG log | Request 1 times out at 501ms, retry Status publishes, request 2 returns `after`, its Parts are removed, and a second retry publishes. | observed |
-| Runtime-only diagnostic preload that adds `.stop()` to the `after` Reply | The unchanged first-progress test transitions from approximately 22 seconds red to 5.05 seconds green with all four behavior assertions. | observed |
-| `git show` for `c54ad516c1`, `c62b990871`, and `57180a9a54` | Establishes test/contract introduction order: the older fixture accepted an unterminated text response; the later production contract intentionally rejects no-Tool `other`, and its new recovery tests use explicit `.stop()`. | observed |
-| `packages/opencode/test/session/prompt.test.ts:4631-4685` | Goal test builds absolute Shell commands by raw interpolation, assumes `/dev/null`, mutates Project state, and does not assert the continuation immediately after that generic mutation. | observed |
-| `packages/opencode/src/session/prompt.ts:176-220,278-433` | Owns run-local Goal evidence and changed-verification signatures; no planned change. | observed |
-| `packages/opencode/src/shell/shell.ts:91-112,159-206` | Supported Windows execution can select PowerShell, Git Bash, or cmd; no one Shell-specific null/path syntax is universal. | reachable |
-| `packages/opencode/src/tool/shell.ts:627-686,1324-1365,1383-1420` | Executes the supplied command in the Project directory and publishes exit/hasErrors/output metadata consumed by the Goal gate. | observed |
-| `packages/opencode/src/session/processor.ts:768-780` and `packages/opencode/src/snapshot/index.ts:202-267,312-340` | Step completion persists a Patch Part for modified or non-ignored untracked Project files. | observed |
-| `packages/opencode/src/session/prompt.ts:292-296,419-423` | A new Patch Part is advancement and immediately clears re-plan before verification evidence needs to change. | observed |
-| `packages/opencode/test/fixture/fixture.ts:162-192` | `tmpdirScoped()` supplies an automatically cleaned directory outside the active Project, suitable for external verification state. | observed |
-| `git show 9c7f1ce080` and `git blame -L 4631,4685` | The Windows-invalid commands were introduced with the Goal test and have never been revised. | observed |
-| Local JavaScript path probe using `D:\a\opencode\verification-status.txt` | Raw interpolation becomes `D:aopencode\u000berification-status.txt`; it cannot update the intended Windows file. | observed |
-| Local Bash argument probe using `D:\a\opencode\verification.test.ts` | Unquoted backslashes collapse to `D:aopencodeverification.test.ts`. | observed |
-| Four focused POSIX runs of the Goal test | All pass in 4.1-5.9 seconds, separating platform command construction from Goal timing. | observed |
+| Evidence                                                                                                           | Relevance                                                                                                                                                                                                                       | Evidence class |
+| ------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------- |
+| GitHub Actions run `#146` (`29889725486`) and its three `packages/opencode` job logs                               | Linux/macOS each fail only the first-progress Processor test; Windows fails that test plus the Goal verification test.                                                                                                          | observed       |
+| GitHub Actions run `#142` (`29825654973`, head `4b825d8b81`)                                                       | First run containing Goal progress gate: Linux/macOS green and Windows fails the verification-result test at `texts[5]`.                                                                                                        | observed       |
+| GitHub Actions run `#143` (`29861459337`, head `57180a9a54`)                                                       | First run containing generalized no-Tool `other` retry: the first-progress test starts failing on all three platforms while Windows retains the Goal failure.                                                                   | observed       |
+| `packages/opencode/test/session/processor-effect.test.ts:755-834`                                                  | Existing vertical test holds the first HTTP response, observes retry Status, then expects terminal recovery text. Its repeat recovery producer omits `stop`.                                                                    | observed       |
+| `packages/opencode/test/lib/llm-server.ts:456-557`                                                                 | `Reply.text()` only appends text; `Reply.stop()` alone emits `finish_reason="stop"`; `item()` omits a finish line otherwise.                                                                                                    | observed       |
+| `packages/opencode/src/provider/provider.ts:127-275,1920-2012`                                                     | Owns the raw-progress deadline and emits `SSE_READ_TIMEOUT`; no planned change.                                                                                                                                                 | observed       |
+| `packages/opencode/src/session/llm.ts:437-457`                                                                     | Converts the AI SDK full stream into the Effect stream consumed by `SessionProcessor`; no planned change.                                                                                                                       | observed       |
+| `packages/opencode/src/session/message-v2.ts:1763-1775,1940-1960`                                                  | Maps timeout errors to the retryable Message API error contract; no planned change.                                                                                                                                             | observed       |
+| `packages/opencode/src/session/retry.ts:25-69,179-210`                                                             | Owns retry delay/classification orchestration; no attempt cap exists and none is requested.                                                                                                                                     | observed       |
+| `packages/opencode/src/session/status.ts:8-41,77-86`                                                               | Defines and publishes user-visible retry Status observed by the Processor test.                                                                                                                                                 | contracted     |
+| `packages/opencode/src/session/processor.ts:671-730,1005-1088`                                                     | Throws stream errors into existing retry and treats no-Tool `other` as incomplete/retryable.                                                                                                                                    | observed       |
+| `packages/opencode/test/session/llm.test.ts:550-635`                                                               | Provider-level delayed-header timeout behavior remains independently green.                                                                                                                                                     | observed       |
+| `packages/opencode/test/session/retry.test.ts:556-566`                                                             | SSE timeout conversion remains independently covered and green.                                                                                                                                                                 | observed       |
+| Interrupted focused Processor run with isolated DEBUG log                                                          | Request 1 times out at 501ms, retry Status publishes, request 2 returns `after`, its Parts are removed, and a second retry publishes.                                                                                           | observed       |
+| Runtime-only diagnostic preload that adds `.stop()` to the `after` Reply                                           | The unchanged first-progress test transitions from approximately 22 seconds red to 5.05 seconds green with all four behavior assertions.                                                                                        | observed       |
+| `git show` for `c54ad516c1`, `c62b990871`, and `57180a9a54`                                                        | Establishes test/contract introduction order: the older fixture accepted an unterminated text response; the later production contract intentionally rejects no-Tool `other`, and its new recovery tests use explicit `.stop()`. | observed       |
+| `packages/opencode/test/session/prompt.test.ts:4631-4685`                                                          | Goal test builds absolute Shell commands by raw interpolation, assumes `/dev/null`, mutates Project state, and does not assert the continuation immediately after that generic mutation.                                        | observed       |
+| `packages/opencode/src/session/prompt.ts:176-220,278-433`                                                          | Owns run-local Goal evidence and changed-verification signatures; no planned change.                                                                                                                                            | observed       |
+| `packages/opencode/src/shell/shell.ts:91-112,159-206`                                                              | Supported Windows execution can select PowerShell, Git Bash, or cmd; no one Shell-specific null/path syntax is universal.                                                                                                       | reachable      |
+| `packages/opencode/src/tool/shell.ts:627-686,1324-1365,1383-1420`                                                  | Executes the supplied command in the Project directory and publishes exit/hasErrors/output metadata consumed by the Goal gate.                                                                                                  | observed       |
+| `packages/opencode/src/session/processor.ts:768-780` and `packages/opencode/src/snapshot/index.ts:202-267,312-340` | Step completion persists a Patch Part for modified or non-ignored untracked Project files.                                                                                                                                      | observed       |
+| `packages/opencode/src/session/prompt.ts:292-296,419-423`                                                          | A new Patch Part is advancement and immediately clears re-plan before verification evidence needs to change.                                                                                                                    | observed       |
+| `packages/opencode/test/fixture/fixture.ts:162-192`                                                                | `tmpdirScoped()` supplies an automatically cleaned directory outside the active Project, suitable for external verification state.                                                                                              | observed       |
+| `git show 9c7f1ce080` and `git blame -L 4631,4685`                                                                 | The Windows-invalid commands were introduced with the Goal test and have never been revised.                                                                                                                                    | observed       |
+| Local JavaScript path probe using `D:\a\opencode\verification-status.txt`                                          | Raw interpolation becomes `D:aopencode\u000berification-status.txt`; it cannot update the intended Windows file.                                                                                                                | observed       |
+| Local Bash argument probe using `D:\a\opencode\verification.test.ts`                                               | Unquoted backslashes collapse to `D:aopencodeverification.test.ts`.                                                                                                                                                             | observed       |
+| Four focused POSIX runs of the Goal test                                                                           | All pass in 4.1-5.9 seconds, separating platform command construction from Goal timing.                                                                                                                                         | observed       |
 
 ## 5. Current Behavior
 
@@ -141,40 +141,40 @@ or prove changed-verification semantics.
 
 ## 6. Supported Input Domain and Reachability
 
-| Input or condition | Producer | Upstream guarantees | Reachable path | Owner | Classification |
-| --- | --- | --- | --- | --- | --- |
-| First Provider attempt remains silent beyond configured progress deadline | Delayed `httpError` test item | Real loopback HTTP request and configured 500ms deadline | TestLLMServer -> Provider -> LLM -> SessionProcessor | Provider deadline and Session orchestration | observed |
-| Recovery response is intended to be terminal success | First-progress test fixture | A successful OpenAI-compatible stream requires an explicit finish event | `pushRepeat` -> `Reply.item()` -> Provider stream | Specific Processor behavior test | observed |
-| Text response intentionally has no finish event | `Reply.text()` callers | `Reply` remains composable; `stop`, `toolCalls`, `hang`, and stream errors are explicit | TestLLMServer SSE producer | TestLLMServer fixture API | contracted |
-| No-Tool `finishReason="other"` | AI SDK normalization of incomplete/unknown finish | Current Processor contract classifies it retryable | LLM stream -> Processor finish-step -> SessionRetry | SessionProcessor | observed |
-| Goal verification command runs in Project directory | Bash Tool called from `SessionPrompt.loop` | Shell Tool passes `InstanceState.context.directory` as cwd | mocked tool call -> Shell Tool child process | Shell Tool | observed |
-| CI Project path uses Windows separators | `tmpdir`/GitHub Windows runner | Absolute path contains `\`; selected Shell may be PowerShell, Git Bash, or cmd | Goal test command string -> Shell Tool | Goal test command producer | observed |
-| Relative verification and mutation script filenames | Proposed Goal test fixture | Both immutable scripts exist before `prompt.loop`; Shell Tool cwd is the Project root | same existing Shell execution path | Goal test command producer | reachable |
-| Mutable status outside the Project | Proposed `tmpdirScoped()` fixture | Scope cleanup owns the external directory; Snapshot only scans the active Project | generated fixture scripts -> external status file | Goal test data producer | reachable |
-| Relative ignored output sink | Proposed Goal test fixture | `.gitignore` exists before `prompt.loop`; Snapshot excludes ignored untracked files | Shell redirection -> ignored Project file | Goal test data producer | reachable |
-| Arbitrary user commands with unstable timing text | Real users | Output is provider/tool data and may be semantically meaningful | Shell Tool -> Goal ledger | Goal progress gate | speculative for this CI failure; rejected as a repair driver |
+| Input or condition                                                        | Producer                                          | Upstream guarantees                                                                     | Reachable path                                       | Owner                                       | Classification                                               |
+| ------------------------------------------------------------------------- | ------------------------------------------------- | --------------------------------------------------------------------------------------- | ---------------------------------------------------- | ------------------------------------------- | ------------------------------------------------------------ |
+| First Provider attempt remains silent beyond configured progress deadline | Delayed `httpError` test item                     | Real loopback HTTP request and configured 500ms deadline                                | TestLLMServer -> Provider -> LLM -> SessionProcessor | Provider deadline and Session orchestration | observed                                                     |
+| Recovery response is intended to be terminal success                      | First-progress test fixture                       | A successful OpenAI-compatible stream requires an explicit finish event                 | `pushRepeat` -> `Reply.item()` -> Provider stream    | Specific Processor behavior test            | observed                                                     |
+| Text response intentionally has no finish event                           | `Reply.text()` callers                            | `Reply` remains composable; `stop`, `toolCalls`, `hang`, and stream errors are explicit | TestLLMServer SSE producer                           | TestLLMServer fixture API                   | contracted                                                   |
+| No-Tool `finishReason="other"`                                            | AI SDK normalization of incomplete/unknown finish | Current Processor contract classifies it retryable                                      | LLM stream -> Processor finish-step -> SessionRetry  | SessionProcessor                            | observed                                                     |
+| Goal verification command runs in Project directory                       | Bash Tool called from `SessionPrompt.loop`        | Shell Tool passes `InstanceState.context.directory` as cwd                              | mocked tool call -> Shell Tool child process         | Shell Tool                                  | observed                                                     |
+| CI Project path uses Windows separators                                   | `tmpdir`/GitHub Windows runner                    | Absolute path contains `\`; selected Shell may be PowerShell, Git Bash, or cmd          | Goal test command string -> Shell Tool               | Goal test command producer                  | observed                                                     |
+| Relative verification and mutation script filenames                       | Proposed Goal test fixture                        | Both immutable scripts exist before `prompt.loop`; Shell Tool cwd is the Project root   | same existing Shell execution path                   | Goal test command producer                  | reachable                                                    |
+| Mutable status outside the Project                                        | Proposed `tmpdirScoped()` fixture                 | Scope cleanup owns the external directory; Snapshot only scans the active Project       | generated fixture scripts -> external status file    | Goal test data producer                     | reachable                                                    |
+| Relative ignored output sink                                              | Proposed Goal test fixture                        | `.gitignore` exists before `prompt.loop`; Snapshot excludes ignored untracked files     | Shell redirection -> ignored Project file            | Goal test data producer                     | reachable                                                    |
+| Arbitrary user commands with unstable timing text                         | Real users                                        | Output is provider/tool data and may be semantically meaningful                         | Shell Tool -> Goal ledger                            | Goal progress gate                          | speculative for this CI failure; rejected as a repair driver |
 
 ## 7. Required Invariants
 
-| ID | Behavioral invariant | Evidence | Existing test |
-| --- | --- | --- | --- |
-| REQ-01 | Resolve every observed Linux, macOS, and Windows required-test failure without running the full local suite. | Verbatim requirement and run #146 | Current two named failing tests |
-| REQ-02 | Correct an unreasonable test when production is correct; correct production when its contract is wrong; use introduction order when they conflict. | User clarification | Introduction history plus focused behavioral tests |
-| REQ-03 | Keep the repair within six files and 800 changed lines, without new state machines, redundant logic, or speculative boundaries. | Verbatim requirement | Diff and file-budget verification |
-| REQ-04 | Finish with independently audited verified implementation and a local commit, without push. | Session GOAL | Plan/implementation audit records and final git commit |
-| INV-01 | A real first-progress timeout publishes retry Status and can recover through a later terminal response on the same Provider. | Status schema, Processor/Retry path, observed DEBUG trace | `session.processor retries a real first-progress timeout` |
-| INV-02 | A no-Tool `finishReason="other"` is incomplete and retryable; only a recognized finish such as `stop` represents successful recovery. | Current Processor contract and its text/reasoning recovery tests | Existing `finish_reason=other` tests |
-| INV-03 | First verification establishes a baseline, an identical result does not advance, a generic external-state mutation does not advance, and only the later changed verification result clears persisted re-plan mode. | Goal progress-gate implementation | `goal progress gate distinguishes first and changed verification results` |
-| INV-04 | A cross-platform test fixture must produce the same requested file transition under every Shell selected by the supported CI platforms. | Three-platform required matrix and Shell selection code | Existing Goal verification test on the Windows matrix |
-| INV-05 | A fix must preserve all existing production paths and make each regression assertion sensitive to its named behavior rather than a competing Patch path. | User clarification and no-test-weakening policy | Focused Provider, Retry, Processor, and Goal tests |
+| ID     | Behavioral invariant                                                                                                                                                                                               | Evidence                                                         | Existing test                                                             |
+| ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------- | ------------------------------------------------------------------------- |
+| REQ-01 | Resolve every observed Linux, macOS, and Windows required-test failure without running the full local suite.                                                                                                       | Verbatim requirement and run #146                                | Current two named failing tests                                           |
+| REQ-02 | Correct an unreasonable test when production is correct; correct production when its contract is wrong; use introduction order when they conflict.                                                                 | User clarification                                               | Introduction history plus focused behavioral tests                        |
+| REQ-03 | Keep the repair within six files and 800 changed lines, without new state machines, redundant logic, or speculative boundaries.                                                                                    | Verbatim requirement                                             | Diff and file-budget verification                                         |
+| REQ-04 | Finish with independently audited verified implementation and a local commit, without push.                                                                                                                        | Session GOAL                                                     | Plan/implementation audit records and final git commit                    |
+| INV-01 | A real first-progress timeout publishes retry Status and can recover through a later terminal response on the same Provider.                                                                                       | Status schema, Processor/Retry path, observed DEBUG trace        | `session.processor retries a real first-progress timeout`                 |
+| INV-02 | A no-Tool `finishReason="other"` is incomplete and retryable; only a recognized finish such as `stop` represents successful recovery.                                                                              | Current Processor contract and its text/reasoning recovery tests | Existing `finish_reason=other` tests                                      |
+| INV-03 | First verification establishes a baseline, an identical result does not advance, a generic external-state mutation does not advance, and only the later changed verification result clears persisted re-plan mode. | Goal progress-gate implementation                                | `goal progress gate distinguishes first and changed verification results` |
+| INV-04 | A cross-platform test fixture must produce the same requested file transition under every Shell selected by the supported CI platforms.                                                                            | Three-platform required matrix and Shell selection code          | Existing Goal verification test on the Windows matrix                     |
+| INV-05 | A fix must preserve all existing production paths and make each regression assertion sensitive to its named behavior rather than a competing Patch path.                                                           | User clarification and no-test-weakening policy                  | Focused Provider, Retry, Processor, and Goal tests                        |
 
 ## 8. First Divergence and Root Cause
 
-| Invariant | First divergence | Owning module/interface | Proof |
-| --- | --- | --- | --- |
-| INV-01 / INV-02 | The first-progress test queues `reply().text("after")` as a successful repeat response without calling `.stop()`. | `processor-effect.test.ts` test-data producer | `Reply.item()` emits no finish line; DEBUG trace shows repeated `other`; runtime-only `.stop()` makes the exact test green. |
-| INV-03 / INV-04 | The Goal test embeds Windows absolute paths without JavaScript/Shell-safe representation, uses POSIX-only `/dev/null`, and mutates status inside the Snapshot-visible Project. | `prompt.test.ts` test-command/data producer | Path probes reproduce Windows corruption; Snapshot/Processor code proves Project mutation yields Patch advancement; the test omits the post-mutation continuation assertion. |
-| REQ-02 / INV-05 | The current failures could be misattributed to production merely because they execute through production integrations. | Test-versus-production decision seam | Introduction history and independent lower-level tests show production contracts are current and the fixture inputs no longer satisfy them. |
+| Invariant       | First divergence                                                                                                                                                               | Owning module/interface                       | Proof                                                                                                                                                                        |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| INV-01 / INV-02 | The first-progress test queues `reply().text("after")` as a successful repeat response without calling `.stop()`.                                                              | `processor-effect.test.ts` test-data producer | `Reply.item()` emits no finish line; DEBUG trace shows repeated `other`; runtime-only `.stop()` makes the exact test green.                                                  |
+| INV-03 / INV-04 | The Goal test embeds Windows absolute paths without JavaScript/Shell-safe representation, uses POSIX-only `/dev/null`, and mutates status inside the Snapshot-visible Project. | `prompt.test.ts` test-command/data producer   | Path probes reproduce Windows corruption; Snapshot/Processor code proves Project mutation yields Patch advancement; the test omits the post-mutation continuation assertion. |
+| REQ-02 / INV-05 | The current failures could be misattributed to production merely because they execute through production integrations.                                                         | Test-versus-production decision seam          | Introduction history and independent lower-level tests show production contracts are current and the fixture inputs no longer satisfy them.                                  |
 
 ### Red-Capable Feedback Loops
 
@@ -207,12 +207,12 @@ probes explain the platform-specific red signal but do not replace it.
 
 ## 9. Responsibility and Seam
 
-| Concern | Owner | Interface promise | Why it belongs here | Why another module does not own it |
-| --- | --- | --- | --- | --- |
-| Terminal recovery response in the first-progress regression | The specific test in `processor-effect.test.ts` | Its queued response represents successful recovery after retry | The test alone chooses whether this reply is complete | `Reply.text()` must continue supporting intentionally incomplete responses; Processor must continue rejecting `other`. |
-| Cross-platform verification fixture command and isolated state | The specific test in `prompt.test.ts` | It must invoke immutable Project-baseline scripts, mutate only external state, and supply controlled metadata without a Snapshot-visible output file | The test creates every script, state file, ignore rule, command, and assertion | Shell Tool and Snapshot must preserve their production contracts rather than rescue or hide a malformed test stimulus. |
-| First-progress deadline and retry Status | Provider plus Session orchestration | Timeout and retry are user-visible production behavior | Existing owners already satisfy the invariant | A test-only failure must not duplicate or replace production timeout/retry policy. |
-| Goal verification result classification | SessionPrompt Goal ledger | Same result is not advancement; changed result is advancement | Existing owner already satisfies Linux/macOS and controlled metadata behavior | The test must provide the promised changed result instead of changing classification to accept unchanged output. |
+| Concern                                                        | Owner                                           | Interface promise                                                                                                                                    | Why it belongs here                                                            | Why another module does not own it                                                                                     |
+| -------------------------------------------------------------- | ----------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------- |
+| Terminal recovery response in the first-progress regression    | The specific test in `processor-effect.test.ts` | Its queued response represents successful recovery after retry                                                                                       | The test alone chooses whether this reply is complete                          | `Reply.text()` must continue supporting intentionally incomplete responses; Processor must continue rejecting `other`. |
+| Cross-platform verification fixture command and isolated state | The specific test in `prompt.test.ts`           | It must invoke immutable Project-baseline scripts, mutate only external state, and supply controlled metadata without a Snapshot-visible output file | The test creates every script, state file, ignore rule, command, and assertion | Shell Tool and Snapshot must preserve their production contracts rather than rescue or hide a malformed test stimulus. |
+| First-progress deadline and retry Status                       | Provider plus Session orchestration             | Timeout and retry are user-visible production behavior                                                                                               | Existing owners already satisfy the invariant                                  | A test-only failure must not duplicate or replace production timeout/retry policy.                                     |
+| Goal verification result classification                        | SessionPrompt Goal ledger                       | Same result is not advancement; changed result is advancement                                                                                        | Existing owner already satisfies Linux/macOS and controlled metadata behavior  | The test must provide the promised changed result instead of changing classification to accept unchanged output.       |
 
 ## 10. Single Approved Primary-Path Design
 
@@ -249,7 +249,7 @@ Planned source changes:
    path with `JSON.stringify`, so no absolute path enters Shell parsing.
 3. Add `verification-output.log` to a fixture `.gitignore` before the loop and
    invoke `bun test --timeout 30000 verification.test.ts >
-   verification-output.log 2>&1`. The common relative command suppresses timing
+verification-output.log 2>&1`. The common relative command suppresses timing
    noise while the ignored sink cannot become a Snapshot Patch.
 4. Invoke `bun verification-change.ts` as the generic mutation. It changes only
    external status, so it remains exploration-only under the existing Goal
@@ -277,44 +277,44 @@ apparent conflict:
 
 ## 11. Secondary and Replacement Path Inventory
 
-| Path | Current or proposed | Classification | Produces success? | Decision-surface share | Disposition |
-| --- | --- | --- | --- | --- | --- |
-| Provider raw-progress deadline | current | primary-contract branch | no; emits typed failure | 0% changed | preserve |
-| SessionRetry handling of timeout and `other` | current | primary-contract branch | eventually, through a later valid response | 0% changed | preserve |
-| `Reply.text()` without finish | current | supported-domain fixture branch | no terminal success | 0% changed | preserve |
-| Explicit `.stop()` on intended recovery | proposed test input | primary-contract fixture branch | yes | test-only | use |
-| Goal changed-verification classification | current | primary-contract branch | yes, when evidence changes | 0% changed | preserve |
-| External mutable status through immutable Project scripts | proposed test fixture | primary-contract stimulus | only changed verification can produce Goal advancement | test-only | use |
-| Ignored relative verification output sink | proposed test fixture | diagnostic/test-only path | no | test-only | use and clean with fixture scope |
-| Project-local mutable status or non-ignored output | rejected R1/test fixture path | competing Patch advancement | yes, without changed verification | 0% | remove/reject |
-| Platform-specific `/dev/null`, `$null`, or `NUL` selection | rejected | forbidden compatibility fallback for this test | no | 0% | reject |
-| Skip/retry/timeout increase | rejected | forbidden fallback | apparent test success only | 0% | reject |
+| Path                                                       | Current or proposed           | Classification                                 | Produces success?                                      | Decision-surface share | Disposition                      |
+| ---------------------------------------------------------- | ----------------------------- | ---------------------------------------------- | ------------------------------------------------------ | ---------------------- | -------------------------------- |
+| Provider raw-progress deadline                             | current                       | primary-contract branch                        | no; emits typed failure                                | 0% changed             | preserve                         |
+| SessionRetry handling of timeout and `other`               | current                       | primary-contract branch                        | eventually, through a later valid response             | 0% changed             | preserve                         |
+| `Reply.text()` without finish                              | current                       | supported-domain fixture branch                | no terminal success                                    | 0% changed             | preserve                         |
+| Explicit `.stop()` on intended recovery                    | proposed test input           | primary-contract fixture branch                | yes                                                    | test-only              | use                              |
+| Goal changed-verification classification                   | current                       | primary-contract branch                        | yes, when evidence changes                             | 0% changed             | preserve                         |
+| External mutable status through immutable Project scripts  | proposed test fixture         | primary-contract stimulus                      | only changed verification can produce Goal advancement | test-only              | use                              |
+| Ignored relative verification output sink                  | proposed test fixture         | diagnostic/test-only path                      | no                                                     | test-only              | use and clean with fixture scope |
+| Project-local mutable status or non-ignored output         | rejected R1/test fixture path | competing Patch advancement                    | yes, without changed verification                      | 0%                     | remove/reject                    |
+| Platform-specific `/dev/null`, `$null`, or `NUL` selection | rejected                      | forbidden compatibility fallback for this test | no                                                     | 0%                     | reject                           |
+| Skip/retry/timeout increase                                | rejected                      | forbidden fallback                             | apparent test success only                             | 0%                     | reject                           |
 
 New production alternate success paths: zero. Changed production decision
 surface: zero. Diagnostic production ratio: `0 / 0`, not applicable.
 
 ## 12. Workaround Deletion and Replacement
 
-| Existing workaround or duplicate | Why it existed | Why the approved route supersedes it | Delete or collapse location |
-| --- | --- | --- | --- |
-| Raw absolute `fixturePath` in the Shell command | Directly reused the fixture path on POSIX | The Shell already runs in the Project root, so absolute interpolation is unnecessary and corrupts Windows paths | Replace in `prompt.test.ts` |
-| Project-local mutable `statusPath` | Made fixture setup simple | Its diff creates a Patch Part that independently clears re-plan | Move mutable state to scoped external temp storage in `prompt.test.ts` |
-| Raw absolute `statusPath` embedded in the Shell mutation | Directly reused the fixture path on POSIX | A pre-generated relative mutation script can safely embed the external path with `JSON.stringify` | Replace in `prompt.test.ts` |
-| `/dev/null` output suppression | Stabilized verification output on POSIX | An ignored relative fixture log provides stable Shell metadata without a platform null device or Patch Part | Replace in `prompt.test.ts` |
-| Missing post-mutation continuation assertion | The original test only checked first/same and later changed results | It allowed Project Patch advancement to masquerade as changed-verification advancement | Add `texts[4]` re-plan assertion in `prompt.test.ts` |
-| Unterminated repeat text treated as recovery | Reflected the older behavior before generalized no-Tool `other` retry | Explicit `stop` expresses the test's existing terminal-recovery intent | Replace in `processor-effect.test.ts` |
+| Existing workaround or duplicate                         | Why it existed                                                        | Why the approved route supersedes it                                                                            | Delete or collapse location                                            |
+| -------------------------------------------------------- | --------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| Raw absolute `fixturePath` in the Shell command          | Directly reused the fixture path on POSIX                             | The Shell already runs in the Project root, so absolute interpolation is unnecessary and corrupts Windows paths | Replace in `prompt.test.ts`                                            |
+| Project-local mutable `statusPath`                       | Made fixture setup simple                                             | Its diff creates a Patch Part that independently clears re-plan                                                 | Move mutable state to scoped external temp storage in `prompt.test.ts` |
+| Raw absolute `statusPath` embedded in the Shell mutation | Directly reused the fixture path on POSIX                             | A pre-generated relative mutation script can safely embed the external path with `JSON.stringify`               | Replace in `prompt.test.ts`                                            |
+| `/dev/null` output suppression                           | Stabilized verification output on POSIX                               | An ignored relative fixture log provides stable Shell metadata without a platform null device or Patch Part     | Replace in `prompt.test.ts`                                            |
+| Missing post-mutation continuation assertion             | The original test only checked first/same and later changed results   | It allowed Project Patch advancement to masquerade as changed-verification advancement                          | Add `texts[4]` re-plan assertion in `prompt.test.ts`                   |
+| Unterminated repeat text treated as recovery             | Reflected the older behavior before generalized no-Tool `other` retry | Explicit `stop` expresses the test's existing terminal-recovery intent                                          | Replace in `processor-effect.test.ts`                                  |
 
 No production workaround is deleted or added.
 
 ## 13. Forward Traceability
 
-| Requirement or invariant | Production path | Planned file/change | Behavioral test |
-| --- | --- | --- | --- |
-| REQ-01 / INV-01 | Provider deadline -> LLM -> Processor -> SessionRetry -> Status -> terminal Message | Add explicit `stop` to the existing recovery fixture | Existing first-progress Processor test transitions red to green |
+| Requirement or invariant | Production path                                                                                                            | Planned file/change                                                                            | Behavioral test                                                                |
+| ------------------------ | -------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| REQ-01 / INV-01          | Provider deadline -> LLM -> Processor -> SessionRetry -> Status -> terminal Message                                        | Add explicit `stop` to the existing recovery fixture                                           | Existing first-progress Processor test transitions red to green                |
 | REQ-01 / INV-03 / INV-04 | Relative Shell commands -> external mutable state -> stable metadata -> Goal verification ledger -> persisted continuation | Use immutable relative scripts, external status, ignored output, and a post-mutation assertion | Existing Goal verification-result test; Windows CI is original red environment |
-| REQ-02 / INV-02 / INV-05 | Existing no-Tool `other` retry remains authoritative | Test-only change; no production diff | Existing partial-text, reasoning-only, timeout, and retry tests remain green |
-| REQ-03 | Same existing test paths, no new helper/state/config | Two test files plus this plan | Diff/file budget and typecheck |
-| REQ-04 | Approved revision -> implementation -> independent implementation audit -> local commit | Plan/audit records and exact related paths only | Audit verdicts, git status/diff, and commit verification |
+| REQ-02 / INV-02 / INV-05 | Existing no-Tool `other` retry remains authoritative                                                                       | Test-only change; no production diff                                                           | Existing partial-text, reasoning-only, timeout, and retry tests remain green   |
+| REQ-03                   | Same existing test paths, no new helper/state/config                                                                       | Two test files plus this plan                                                                  | Diff/file budget and typecheck                                                 |
+| REQ-04                   | Approved revision -> implementation -> independent implementation audit -> local commit                                    | Plan/audit records and exact related paths only                                                | Audit verdicts, git status/diff, and commit verification                       |
 
 No confirmed requirement is unmapped.
 
@@ -323,22 +323,22 @@ No confirmed requirement is unmapped.
 No production concept is proposed. The test-only concepts are mapped here to
 show why changing shared production/helpers would be incorrect.
 
-| Proposed concept | Requirement ID | Evidence | Why existing logic cannot carry it |
-| --- | --- | --- | --- |
-| Explicit terminal finish on the repeat recovery reply | INV-01 / INV-02 | Runtime-only mutation makes the exact red test green; `Reply.stop()` is the existing fixture API | Plain `Reply.text()` intentionally models both partial and complete-building states and cannot globally imply stop. |
-| Project-root relative Goal script commands | INV-03 / INV-04 | Shell Tool cwd is the Project directory; generated scripts can safely carry external paths as JavaScript literals | Existing absolute Shell strings contain platform syntax before the intended operation can execute. |
-| Scoped external mutable status | INV-03 / INV-05 | Snapshot scans Project modified/untracked files and Patch is advancement | Project-local state cannot isolate verification change from Patch change. |
-| Ignored relative verification output file | INV-03 / INV-04 / INV-05 | Stable output is required so only result changes; `/dev/null` is Shell-specific; non-ignored output becomes Patch | Existing suppression is platform-specific and a plain Project output file creates a competing advancement path. |
-| Post-mutation re-plan assertion | INV-03 / INV-05 | The original test never observes the continuation at the exact competing-path boundary | Later ordinary mode alone cannot identify whether Patch or changed verification cleared re-plan. |
-| Nearby Chinese test-intent comments | REQ-03 / INV-02 / INV-04 / INV-05 | Comment policy and non-obvious terminal/Snapshot/cross-Shell constraints | Existing comments do not explain terminal finish, external-state isolation, or ignored-output requirements. |
+| Proposed concept                                      | Requirement ID                    | Evidence                                                                                                          | Why existing logic cannot carry it                                                                                  |
+| ----------------------------------------------------- | --------------------------------- | ----------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| Explicit terminal finish on the repeat recovery reply | INV-01 / INV-02                   | Runtime-only mutation makes the exact red test green; `Reply.stop()` is the existing fixture API                  | Plain `Reply.text()` intentionally models both partial and complete-building states and cannot globally imply stop. |
+| Project-root relative Goal script commands            | INV-03 / INV-04                   | Shell Tool cwd is the Project directory; generated scripts can safely carry external paths as JavaScript literals | Existing absolute Shell strings contain platform syntax before the intended operation can execute.                  |
+| Scoped external mutable status                        | INV-03 / INV-05                   | Snapshot scans Project modified/untracked files and Patch is advancement                                          | Project-local state cannot isolate verification change from Patch change.                                           |
+| Ignored relative verification output file             | INV-03 / INV-04 / INV-05          | Stable output is required so only result changes; `/dev/null` is Shell-specific; non-ignored output becomes Patch | Existing suppression is platform-specific and a plain Project output file creates a competing advancement path.     |
+| Post-mutation re-plan assertion                       | INV-03 / INV-05                   | The original test never observes the continuation at the exact competing-path boundary                            | Later ordinary mode alone cannot identify whether Patch or changed verification cleared re-plan.                    |
+| Nearby Chinese test-intent comments                   | REQ-03 / INV-02 / INV-04 / INV-05 | Comment policy and non-obvious terminal/Snapshot/cross-Shell constraints                                          | Existing comments do not explain terminal finish, external-state isolation, or ignored-output requirements.         |
 
 ## 15. File-Level Change Plan
 
-| File | Add / modify / delete | Exact responsibility of the change | Expected line delta |
-| --- | --- | --- | --- |
-| `packages/opencode/test/session/processor-effect.test.ts` | modify | Mark the repeat recovery response as terminal and update its nearby intent comment | approximately `+2 / -2` |
-| `packages/opencode/test/session/prompt.test.ts` | modify | Use an external scoped status file, immutable relative scripts, ignored relative output, and a post-mutation re-plan assertion; update nearby compatibility comments | approximately `+13 / -6` |
-| `docs/plans/session-ci-test-semantics-repair.md` | add | Canonical evidence, approved route, audit, implementation, and verification record | documentation only; combined plan and implementation remain below the 800-line cap |
+| File                                                      | Add / modify / delete | Exact responsibility of the change                                                                                                                                   | Expected line delta                                                                |
+| --------------------------------------------------------- | --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
+| `packages/opencode/test/session/processor-effect.test.ts` | modify                | Mark the repeat recovery response as terminal and update its nearby intent comment                                                                                   | approximately `+2 / -2`                                                            |
+| `packages/opencode/test/session/prompt.test.ts`           | modify                | Use an external scoped status file, immutable relative scripts, ignored relative output, and a post-mutation re-plan assertion; update nearby compatibility comments | approximately `+13 / -6`                                                           |
+| `docs/plans/session-ci-test-semantics-repair.md`          | add                   | Canonical evidence, approved route, audit, implementation, and verification record                                                                                   | documentation only; combined plan and implementation remain below the 800-line cap |
 
 Planned code/config/generated files: two test files, zero production files,
 zero configuration files, zero migrations, zero generated files.
@@ -352,10 +352,10 @@ Agreed existing public seams:
 - `SessionPrompt.loop` observed through persisted synthetic Goal continuation
   text after real Shell Tool results.
 
-| Order | Red behavior | Why current code fails | Minimal green behavior | Regression protected |
-| --- | --- | --- | --- | --- |
-| 1 | Existing first-progress test times out instead of persisting `after` | Repeat recovery omits the recognized terminal finish and is correctly retried as `other` | Add `.stop()` to that response only | Real timeout remains retryable and later valid response completes without adding a retry cap |
-| 2 | Existing Goal verification-result test retains re-plan on Windows and can pass POSIX through Patch advancement | Absolute Shell paths and `/dev/null` are platform-specific; Project-local mutation is independently classified as advancement | Use external mutable state, immutable relative scripts, ignored relative output, and assert re-plan immediately after mutation | First/same/generic-mutation/changed evidence strengths behave identically and only changed verification clears re-plan |
+| Order | Red behavior                                                                                                   | Why current code fails                                                                                                        | Minimal green behavior                                                                                                         | Regression protected                                                                                                   |
+| ----- | -------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------- |
+| 1     | Existing first-progress test times out instead of persisting `after`                                           | Repeat recovery omits the recognized terminal finish and is correctly retried as `other`                                      | Add `.stop()` to that response only                                                                                            | Real timeout remains retryable and later valid response completes without adding a retry cap                           |
+| 2     | Existing Goal verification-result test retains re-plan on Windows and can pass POSIX through Patch advancement | Absolute Shell paths and `/dev/null` are platform-specific; Project-local mutation is independently classified as advancement | Use external mutable state, immutable relative scripts, ignored relative output, and assert re-plan immediately after mutation | First/same/generic-mutation/changed evidence strengths behave identically and only changed verification clears re-plan |
 
 The expected values remain independent user-visible literals: retry attempt 1,
 `SSE read timed out`, persisted `after`, and presence/absence of
@@ -364,10 +364,10 @@ Provider call count is added.
 
 ## 17. Chinese Comment Budget
 
-| Metric | Estimate | Method |
-| --- | --- | --- |
-| Effective changed code lines `E` | approximately 10 | One terminal fixture expression plus scoped-state, fixture, ignore, command, and assertion changes; excludes comment-only and documentation lines |
-| Required Chinese explanatory comments `C` | 2 minimum; plan targets 3 | `ceil(10 * 0.15) = 2`; retain one terminal explanation and two adjacent Goal-isolation explanations |
+| Metric                                    | Estimate                  | Method                                                                                                                                            |
+| ----------------------------------------- | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Effective changed code lines `E`          | approximately 10          | One terminal fixture expression plus scoped-state, fixture, ignore, command, and assertion changes; excludes comment-only and documentation lines |
+| Required Chinese explanatory comments `C` | 2 minimum; plan targets 3 | `ceil(10 * 0.15) = 2`; retain one terminal explanation and two adjacent Goal-isolation explanations                                               |
 
 Planned qualifying explanations:
 
@@ -384,33 +384,33 @@ Comments will not restate assignments or test names.
 
 All commands run from `packages/opencode` unless noted.
 
-| Command | Working directory | Evidence produced |
-| --- | --- | --- |
-| `bun test test/session/processor-effect.test.ts --test-name-pattern "session.processor retries a real first-progress timeout" --timeout 30000` | `packages/opencode` | Original all-platform red loop now observes retry and terminal recovery |
-| `bun test test/session/prompt.test.ts --test-name-pattern "goal progress gate distinguishes first and changed verification results" --timeout 30000` | `packages/opencode` | Goal seam proves first/same/external-mutation/changed ordering locally; same command is the Windows CI regression target |
-| `bun test test/session/llm.test.ts --test-name-pattern "times out before delayed provider headers at the configured chunk boundary" --timeout 30000` | `packages/opencode` | Provider raw-progress deadline remains unchanged |
-| `bun test test/session/retry.test.ts --timeout 30000` | `packages/opencode` | Timeout and API retry classification remain unchanged |
-| `bun test test/session/processor-effect.test.ts --test-name-pattern "first-progress timeout\|finish_reason=other" --timeout 30000` | `packages/opencode` | Terminal recovery and all observed no-Tool `other` branches remain coherent |
-| `bun test test/session/prompt.test.ts --test-name-pattern "goal progress gate" --timeout 30000` | `packages/opencode` | Goal evidence categories and re-plan persistence remain coherent |
-| `bun typecheck` | `packages/opencode` | Test edits preserve package types; no direct `tsc` invocation |
-| `git diff --check -- packages/opencode/test/session/processor-effect.test.ts packages/opencode/test/session/prompt.test.ts docs/plans/session-ci-test-semantics-repair.md` | repository root | No whitespace/error-marker defects in the approved path |
-| Required `packages/opencode` Linux/Windows/macOS matrix after the commit is available remotely | GitHub Actions | Authoritative three-platform confirmation; no push is authorized in this GOAL, so absence of a post-change run must be recorded rather than fabricated |
+| Command                                                                                                                                                                    | Working directory   | Evidence produced                                                                                                                                      |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `bun test test/session/processor-effect.test.ts --test-name-pattern "session.processor retries a real first-progress timeout" --timeout 30000`                             | `packages/opencode` | Original all-platform red loop now observes retry and terminal recovery                                                                                |
+| `bun test test/session/prompt.test.ts --test-name-pattern "goal progress gate distinguishes first and changed verification results" --timeout 30000`                       | `packages/opencode` | Goal seam proves first/same/external-mutation/changed ordering locally; same command is the Windows CI regression target                               |
+| `bun test test/session/llm.test.ts --test-name-pattern "times out before delayed provider headers at the configured chunk boundary" --timeout 30000`                       | `packages/opencode` | Provider raw-progress deadline remains unchanged                                                                                                       |
+| `bun test test/session/retry.test.ts --timeout 30000`                                                                                                                      | `packages/opencode` | Timeout and API retry classification remain unchanged                                                                                                  |
+| `bun test test/session/processor-effect.test.ts --test-name-pattern "first-progress timeout\|finish_reason=other" --timeout 30000`                                         | `packages/opencode` | Terminal recovery and all observed no-Tool `other` branches remain coherent                                                                            |
+| `bun test test/session/prompt.test.ts --test-name-pattern "goal progress gate" --timeout 30000`                                                                            | `packages/opencode` | Goal evidence categories and re-plan persistence remain coherent                                                                                       |
+| `bun typecheck`                                                                                                                                                            | `packages/opencode` | Test edits preserve package types; no direct `tsc` invocation                                                                                          |
+| `git diff --check -- packages/opencode/test/session/processor-effect.test.ts packages/opencode/test/session/prompt.test.ts docs/plans/session-ci-test-semantics-repair.md` | repository root     | No whitespace/error-marker defects in the approved path                                                                                                |
+| Required `packages/opencode` Linux/Windows/macOS matrix after the commit is available remotely                                                                             | GitHub Actions      | Authoritative three-platform confirmation; no push is authorized in this GOAL, so absence of a post-change run must be recorded rather than fabricated |
 
 No repository-wide local test command is planned. Any unrelated failure is
 reported and not hidden, skipped, or repaired outside this revision.
 
 ## 19. Diff Budget
 
-| Metric | Estimate | Justification |
-| --- | --- | --- |
-| Files added | 1 | Canonical plan only |
-| Files modified | 2 | Existing behavior tests only |
-| Files deleted | 0 | No obsolete file exists |
-| Production lines | 0 | Production contracts are proven correct for these failures |
-| Test executable lines | approximately 10 | One terminal marker plus scoped-state, fixture, ignore, command, and assertion changes |
-| Test explanatory comments | 3 | Terminal recovery, external-state isolation, and ignored-output boundaries |
-| Generated lines | 0 | No SDK/schema/generated path is affected |
-| Total implementation lines excluding plan record | approximately 13 modified lines | Far below the user cap of 800 lines and six files |
+| Metric                                           | Estimate                        | Justification                                                                          |
+| ------------------------------------------------ | ------------------------------- | -------------------------------------------------------------------------------------- |
+| Files added                                      | 1                               | Canonical plan only                                                                    |
+| Files modified                                   | 2                               | Existing behavior tests only                                                           |
+| Files deleted                                    | 0                               | No obsolete file exists                                                                |
+| Production lines                                 | 0                               | Production contracts are proven correct for these failures                             |
+| Test executable lines                            | approximately 10                | One terminal marker plus scoped-state, fixture, ignore, command, and assertion changes |
+| Test explanatory comments                        | 3                               | Terminal recovery, external-state isolation, and ignored-output boundaries             |
+| Generated lines                                  | 0                               | No SDK/schema/generated path is affected                                               |
+| Total implementation lines excluding plan record | approximately 13 modified lines | Far below the user cap of 800 lines and six files                                      |
 
 The plan document remains below the user's total 800-line preference together
 with the implementation diff.
@@ -475,10 +475,10 @@ The independent auditor must:
 
 ## 22. Plan Audit Record
 
-| Round | Audited revision | Full scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | R1 | yes | B-01: Project-local mutation/output creates a competing Patch advancement path | none | BLOCK | `ses_077567266ffeyOaFb78pcFejK0` |
-| 2 | R2 | yes | none | N-01: stale plan line-count estimate | APPROVE | `ses_07749d9b6ffemoaiGuL4r21woF` |
+| Round | Audited revision | Full scope? | Blocking findings                                                              | Non-blocking findings                | Result  | Invocation reference             |
+| ----- | ---------------- | ----------- | ------------------------------------------------------------------------------ | ------------------------------------ | ------- | -------------------------------- |
+| 1     | R1               | yes         | B-01: Project-local mutation/output creates a competing Patch advancement path | none                                 | BLOCK   | `ses_077567266ffeyOaFb78pcFejK0` |
+| 2     | R2               | yes         | none                                                                           | N-01: stale plan line-count estimate | APPROVE | `ses_07749d9b6ffemoaiGuL4r21woF` |
 
 ### Round 1 Verdict (verbatim)
 
@@ -489,13 +489,13 @@ The independent auditor must:
 
 - Violated invariant: `INV-03`、`INV-05`；回归测试必须只在“同一 verification command 的结果发生变化”后退出 re-plan，并能对原始缺陷保持敏感。
 - Evidence class: reachable
-- Producer and execution path:  
-  `prompt.test.ts` 队列中的 Bash Tool  
-  → Shell Tool 以 Project 根目录为 `cwd` 执行命令  
-  → 当前 `change` 修改 `verification-status.txt`，计划中的 `verify` 还会创建 `verification-output.log`  
-  → `SessionProcessor` 在 step 前后生成 Snapshot diff 和 Patch Part  
-  → `absorbGoalTurnEvidence()` 优先把任何新 Patch Part 认定为 advancement  
-  → `updateGoalProgressGate()` 清除 `replanRequired`  
+- Producer and execution path:
+  `prompt.test.ts` 队列中的 Bash Tool
+  → Shell Tool 以 Project 根目录为 `cwd` 执行命令
+  → 当前 `change` 修改 `verification-status.txt`，计划中的 `verify` 还会创建 `verification-output.log`
+  → `SessionProcessor` 在 step 前后生成 Snapshot diff 和 Patch Part
+  → `absorbGoalTurnEvidence()` 优先把任何新 Patch Part 认定为 advancement
+  → `updateGoalProgressGate()` 清除 `replanRequired`
   → 最终断言可以在没有验证 signature 变化的情况下通过。
 - Source evidence:
   - `packages/opencode/test/session/prompt.test.ts:4647-4658`：状态文件位于 Project 内，`change` 直接修改它。
@@ -508,7 +508,7 @@ The independent auditor must:
   - `packages/opencode/src/session/prompt.ts:2642-2645`：当前 Goal turn 的 Patch/Tool 证据在生成 continuation 前被吸收。
 - Canonical-plan evidence: §10 “Single Approved Primary-Path Design” 第 218–240 行；§12 第 274–276 行；§16 “TDD Behavior Slices”；§18 “Verification”。
 - Responsibility owner: `packages/opencode/test/session/prompt.test.ts` 中 Goal verification 测试的数据和命令生产者。
-- Concrete production, test, or contract consequence, not estimate, wording, metadata, or evidence-placement discrepancy:  
+- Concrete production, test, or contract consequence, not estimate, wording, metadata, or evidence-placement discrepancy:
   当前状态文件 mutation 本身已经能够生成 Patch advancement，所以 `texts[5]` 不含 `<strategy-switch>` 并不能证明第三次 verification 的 signature 变化被正确识别。计划新增的 Project 内 `verification-output.log` 还会让第一次 verification 创建 untracked 文件并产生 advancement，可能直接破坏 `texts[2]`、`texts[3]` 应继续包含 `<strategy-switch>` 的断言。该测试因此可能假绿，也可能在三个平台上提前变红，无法验证计划声称的 Windows 根因修复。
 - Why this is not speculative: Project `cwd`、文件生产者、Snapshot 对 modified/untracked 文件的收集、Patch Part 的持久化、Goal ledger 对 Patch 的 advancement 分类均由当前源码直接连通；测试 fixture 使用 `{ git: true }`，临时仓库仅创建空 root commit，没有忽略这些 fixture 文件。
 - Minimal correction direction: 修订 Goal 测试的数据生产路径，使第三次 verification 之前的输出抑制和状态 mutation 不产生任何 Snapshot 可见的 Project 文件变化；同时增加对 mutation 后 continuation 仍处于 re-plan 的行为断言。只有随后同一 verification command 的 changed result 可以清除 re-plan。
@@ -591,7 +591,7 @@ No blocking findings.
 - **REQ-03：覆盖完整。** 计划只修改：
   - `packages/opencode/test/session/processor-effect.test.ts`
   - `packages/opencode/test/session/prompt.test.ts`
-  - canonical plan 记录  
+  - canonical plan 记录
   零生产文件、零配置、零依赖、零新状态机，远低于六文件和 800 行上限。
 - **REQ-04：流程完整。** R2 明确规定 plan approval、受批准实现、focused verification、独立 implementation audit 和本地 commit；未授权 push。
 - **INV-01 / INV-02：覆盖完整。** 路径为真实 HTTP 首进度超时 → `SSE_READ_TIMEOUT` → retry Status → 带 `finish_reason="stop"` 的合法重复响应 → 持久化 `after`。当前缺少 `.stop()` 时会持续得到 `other` 并重试，因此测试对原始错误敏感。
@@ -605,10 +605,10 @@ No blocking findings.
 
 两个责任均保持单一权威路径：
 
-1. **Processor 恢复路径**  
+1. **Processor 恢复路径**
    Provider timeout → 现有 retry → 合法 terminal response → 现有 Processor 成功完成。
 
-2. **Goal verification 路径**  
+2. **Goal verification 路径**
    first result 建立 baseline → identical result 不推进 → external generic mutation 只算 exploration → changed verification signature 才推进。
 
 R2 删除了 Project Patch 这一竞争成功路径。没有 catch-and-success、平台 fallback、替代 parser、retry cap、测试 skip 或生产行为禁用。新增生产 alternate success path 为零，生产 diagnostic decision surface 为零。
@@ -682,12 +682,12 @@ Both named CI feedback loops now pass after the approved test-only repair. No fu
 
 ### Chinese Comment Calculation
 
-| Metric | Actual | Exclusions and evidence |
-| --- | --- | --- |
-| Effective changed code lines `E` | 9 | Substantive test lines only: terminal fixture, scoped state/path/script/ignore setup, two relative commands, and the post-mutation assertion; comments and replaced syntax excluded. |
-| Qualifying Chinese comment lines `C` | 6 | Terminal finish, Snapshot isolation, script/Shell boundary, ignored output, external mutation semantics, and assertion sensitivity; no assignment restatements counted. |
-| Ratio `C / E` | 66.7% | `6 / 9`; exceeds the required threshold. |
-| Required minimum `C` | 2 | `max(1, ceil(9 * 0.15)) = 2`. |
+| Metric                               | Actual | Exclusions and evidence                                                                                                                                                              |
+| ------------------------------------ | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Effective changed code lines `E`     | 9      | Substantive test lines only: terminal fixture, scoped state/path/script/ignore setup, two relative commands, and the post-mutation assertion; comments and replaced syntax excluded. |
+| Qualifying Chinese comment lines `C` | 6      | Terminal finish, Snapshot isolation, script/Shell boundary, ignored output, external mutation semantics, and assertion sensitivity; no assignment restatements counted.              |
+| Ratio `C / E`                        | 66.7%  | `6 / 9`; exceeds the required threshold.                                                                                                                                             |
+| Required minimum `C`                 | 2      | `max(1, ceil(9 * 0.15)) = 2`.                                                                                                                                                        |
 
 ### Remaining Unverified Items
 
@@ -696,9 +696,9 @@ Both named CI feedback loops now pass after the approved test-only repair. No fu
 
 ## 24. Implementation Audit Record
 
-| Round | Plan revision | Full original scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | R2 | yes | none | N-01 Windows matrix; N-02 full `test:ci`; N-03 pending audit record | APPROVE | `ses_0773d8ef4ffe1FNZ0LbbP43pa5` |
+| Round | Plan revision | Full original scope? | Blocking findings | Non-blocking findings                                               | Result  | Invocation reference             |
+| ----- | ------------- | -------------------- | ----------------- | ------------------------------------------------------------------- | ------- | -------------------------------- |
+| 1     | R2            | yes                  | none              | N-01 Windows matrix; N-02 full `test:ci`; N-03 pending audit record | APPROVE | `ses_0773d8ef4ffe1FNZ0LbbP43pa5` |
 
 ### Round 1 Verdict Record
 

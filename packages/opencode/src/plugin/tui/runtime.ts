@@ -398,9 +398,11 @@ function createPluginScope(load: PluginLoad, id: string, disposeTimeoutMs: numbe
   const onDispose = (fn: TuiDispose) => {
     if (done) {
       // 晚注册仍执行清理，并沿用该 scope 剩余 deadline；不能因已退出而静默丢掉资源。
-      late = late.then(() => runCleanup(fn, Math.max(0, until - Date.now()))).then((out) => {
-        if (out.type !== "ok") fail("failed to clean up late tui plugin", { path: load.spec, id, result: out })
-      })
+      late = late
+        .then(() => runCleanup(fn, Math.max(0, until - Date.now())))
+        .then((out) => {
+          if (out.type !== "ok") fail("failed to clean up late tui plugin", { path: load.spec, id, result: out })
+        })
       return () => {}
     }
     const key = Symbol()

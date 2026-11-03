@@ -51,23 +51,44 @@ describe("session.message-v2.fromError APIError passthrough", () => {
 
 test("keeps internal assistant metadata out of provider replay", async () => {
   // 混合 text/reasoning 一次验证本地 primitive 被滤除、供应商对象和公开正文仍保留。
-  const input: SessionV1.WithParts[] = [{
-    info: assistantInfo("m-meta", "m-meta-user"),
-    parts: [
-      { ...basePart("m-meta", "a1"), type: "text", text: "handoff", synthetic: true, metadata: { kind: "compaction_evidence_handoff", version: 1 } },
-      { ...basePart("m-meta", "a2"), type: "text", text: "provider text", metadata: { openai: { assistant: "meta" }, kind: "internal" } },
-      { ...basePart("m-meta", "a3"), type: "reasoning", text: "signed thinking", metadata: { anthropic: { signature: "sig1" }, kind: "internal" }, time: { start: 0, end: 1 } },
-    ] as SessionV1.Part[],
-  }]
+  const input: SessionV1.WithParts[] = [
+    {
+      info: assistantInfo("m-meta", "m-meta-user"),
+      parts: [
+        {
+          ...basePart("m-meta", "a1"),
+          type: "text",
+          text: "handoff",
+          synthetic: true,
+          metadata: { kind: "compaction_evidence_handoff", version: 1 },
+        },
+        {
+          ...basePart("m-meta", "a2"),
+          type: "text",
+          text: "provider text",
+          metadata: { openai: { assistant: "meta" }, kind: "internal" },
+        },
+        {
+          ...basePart("m-meta", "a3"),
+          type: "reasoning",
+          text: "signed thinking",
+          metadata: { anthropic: { signature: "sig1" }, kind: "internal" },
+          time: { start: 0, end: 1 },
+        },
+      ] as SessionV1.Part[],
+    },
+  ]
   const result = await MessageV2.toModelMessages(input, model)
-  expect(result).toStrictEqual([{
-    role: "assistant",
-    content: [
-      { type: "text", text: "handoff" },
-      { type: "text", text: "provider text", providerOptions: { openai: { assistant: "meta" } } },
-      { type: "reasoning", text: "signed thinking", providerOptions: { anthropic: { signature: "sig1" } } },
-    ],
-  }])
+  expect(result).toStrictEqual([
+    {
+      role: "assistant",
+      content: [
+        { type: "text", text: "handoff" },
+        { type: "text", text: "provider text", providerOptions: { openai: { assistant: "meta" } } },
+        { type: "reasoning", text: "signed thinking", providerOptions: { anthropic: { signature: "sig1" } } },
+      ],
+    },
+  ])
 })
 const model: Provider.Model = {
   id: ModelV2.ID.make("test-model"),
@@ -188,7 +209,6 @@ describe("session.message-v2.compareChronology", () => {
 })
 
 describe("session.message-v2.toModelMessage", () => {
-
   // [local-smark] 新 generic interrupted 记录携带 executionElapsedMs marker：
   // 模型回放时追加 user_abort + elapsed_ms Notice，使模型能看到取消原因和耗时
   test("appends abort notice for new generic interrupted with elapsed marker", async () => {
@@ -265,7 +285,6 @@ describe("session.message-v2.toModelMessage", () => {
     expect(toolResult.output!.value).toContain('reason="user_abort"')
     expect(toolResult.output!.value).toContain('elapsed_ms="5000"')
   })
-
 
   // #528 INV-01：task 中断后 metadata.sessionId 已在，但无 state.output。
   // 模型侧必须仍见与成功路径同形的 resume 行，否则无法 task_id 续跑。
@@ -605,8 +624,19 @@ describe("session.message-v2.toModelMessage", () => {
     // #553：converter 是独立 wire seam，不能依赖 Prompt 已经做过 projection。
     const hiddenMessage = userInfo("m-hidden")
     hiddenMessage.hidden = { time: 1, reason: "undo" }
-    const input = [{ info: hiddenMessage, parts: [{ ...basePart("m-hidden", "p"), type: "text", text: "hidden" }] }, { info: userInfo("m-visible"), parts: [{ ...basePart("m-visible", "p1"), type: "text", text: "hidden", hidden: { time: 1, reason: "undo" } }, { ...basePart("m-visible", "p2"), type: "text", text: "visible" }] }] as MessageV2.WithParts[]
-    expect(await MessageV2.toModelMessages(input, model)).toStrictEqual([{ role: "user", content: [{ type: "text", text: "visible" }] }])
+    const input = [
+      { info: hiddenMessage, parts: [{ ...basePart("m-hidden", "p"), type: "text", text: "hidden" }] },
+      {
+        info: userInfo("m-visible"),
+        parts: [
+          { ...basePart("m-visible", "p1"), type: "text", text: "hidden", hidden: { time: 1, reason: "undo" } },
+          { ...basePart("m-visible", "p2"), type: "text", text: "visible" },
+        ],
+      },
+    ] as MessageV2.WithParts[]
+    expect(await MessageV2.toModelMessages(input, model)).toStrictEqual([
+      { role: "user", content: [{ type: "text", text: "visible" }] },
+    ])
   })
 
   test("filters out user messages with only empty text parts", async () => {
@@ -719,7 +749,12 @@ describe("session.message-v2.toModelMessage", () => {
           { ...basePart(messageID, "file-text"), type: "text", synthetic: true, text: "f".repeat(800) },
           { ...basePart(messageID, "editor"), type: "text", synthetic: true, text: "e".repeat(800) },
           { ...basePart(messageID, "mcp"), type: "text", synthetic: true, text: "m".repeat(800) },
-          { ...basePart(messageID, "data-text"), type: "file", mime: "text/plain", url: `data:text/plain;base64,${"x".repeat(800)}` },
+          {
+            ...basePart(messageID, "data-text"),
+            type: "file",
+            mime: "text/plain",
+            url: `data:text/plain;base64,${"x".repeat(800)}`,
+          },
           {
             ...basePart(messageID, "p3"),
             type: "file",
@@ -777,7 +812,11 @@ describe("session.message-v2.toModelMessage", () => {
         ],
       },
     ])
-    expect(Token.estimateRequest({ system: [], messages, tools: [] }, [])).toEqual({ input: 697, bodyChars: 2789, confirmed: false })
+    expect(Token.estimateRequest({ system: [], messages, tools: [] }, [])).toEqual({
+      input: 697,
+      bodyChars: 2789,
+      confirmed: false,
+    })
   })
 
   test("converts assistant tool completion into tool-call + tool-result messages with attachments", async () => {
@@ -1257,10 +1296,13 @@ describe("session.message-v2.toModelMessage", () => {
       part.state.metadata = { partial: true }
       const replay = await MessageV2.toModelMessages(input, model)
       expect(replay[2]?.content[0]).toStrictEqual({
-        type: "tool-result", toolCallId: "call-1", toolName: tool,
+        type: "tool-result",
+        toolCallId: "call-1",
+        toolName: tool,
         output: {
           type: "text",
-          value: '<opencode_notice type="compaction_cleared" source="tool_output" reason="old_result_pruned" />\nSearch incomplete: some paths were inaccessible and skipped.',
+          value:
+            '<opencode_notice type="compaction_cleared" source="tool_output" reason="old_result_pruned" />\nSearch incomplete: some paths were inaccessible and skipped.',
         },
       })
       expect(part.state.output).toBe("this should be cleared")
@@ -1378,16 +1420,16 @@ describe("session.message-v2.toModelMessage", () => {
       },
     ]
 
-    expect(
-      ProviderTransform.message(await MessageV2.toModelMessages(input, compatible), compatible, {}),
-    ).toStrictEqual([
-      {
-        role: "assistant",
-        // 源携带 Anthropic 签名：兼容路径只回放文本，不跨协议携带签名。
-        content: [{ type: "text", text: "answer" }],
-        providerOptions: { openaiCompatible: { reasoning_content: "thinking" } },
-      },
-    ])
+    expect(ProviderTransform.message(await MessageV2.toModelMessages(input, compatible), compatible, {})).toStrictEqual(
+      [
+        {
+          role: "assistant",
+          // 源携带 Anthropic 签名：兼容路径只回放文本，不跨协议携带签名。
+          content: [{ type: "text", text: "answer" }],
+          providerOptions: { openaiCompatible: { reasoning_content: "thinking" } },
+        },
+      ],
+    )
   })
 
   // 相同模型名不能跨账号域复用密文；同 Provider 的模型切换仍应保留续接能力。
@@ -1398,88 +1440,95 @@ describe("session.message-v2.toModelMessage", () => {
     ["smark-codex", "gpt-6-astra", "foreign summary", true],
     ["smark-codex", "gpt-5.5", "foreign summary", true],
     ["smark-codex", "gpt-5.5", "", true],
-  ] as const)("isolates encrypted GPT reasoning for %s/%s (%s)", async (targetProvider, targetModel, summary, replay) => {
-    const assistantID = "m-assistant"
-    // 使用真实 Responses adapter，避免只在投影对象上通过、实际 wire 仍泄漏 metadata。
-    const gpt: Provider.Model = {
-      ...model,
-      id: ModelV2.ID.make(targetModel),
-      providerID: ProviderV2.ID.make(targetProvider),
-      api: { ...model.api, id: targetModel, npm: "@ai-sdk/openai" },
-      capabilities: { ...model.capabilities, reasoning: true },
-    }
-    const input: SessionV1.WithParts[] = [
-      {
-        info: assistantInfo(assistantID, "m-user", undefined, { providerID: "smark-codex", modelID: "gpt-6-astra" }),
-        parts: [
-          {
-            ...basePart(assistantID, "a1"),
-            type: "reasoning",
-            text: summary,
-            // 持久化 metadata 会在 adapter 边界投影为 providerOptions。
-            metadata: { openai: { itemId: "rs_foreign", reasoningEncryptedContent: "encrypted-state" } },
-            time: { start: 0 },
-          },
-          {
-            ...basePart(assistantID, "a2"),
-            type: "text",
-            text: "answer",
-          },
-        ] as SessionV1.Part[],
-      },
-    ]
-
-    // 切换 Provider 只改变发送投影，不得破坏返回原 Provider 后仍可用的持久化历史。
-    const original = structuredClone(input)
-    const messages = ProviderTransform.message(await MessageV2.toModelMessages(input, gpt), gpt, { store: false })
-    const content = messages.flatMap((message) =>
-      message.role === "assistant" && Array.isArray(message.content) ? message.content : [],
-    )
-    expect(input).toEqual(original)
-    expect(content).toContainEqual(expect.objectContaining({ type: "text", text: "answer" }))
-    // 明文 summary 必须可见；空 summary 则无需制造一个空文本占位。
-    if (!replay && summary) expect(content).toContainEqual(expect.objectContaining({ type: "text", text: summary }))
-    // stateless续接保留密文与摘要，不复活上游已经剥离的源itemId。
-    expect(content.filter((part) => part.type === "reasoning")).toEqual(
-      replay
-        ? [{
-            type: "reasoning",
-            text: summary,
-            providerOptions: { openai: { reasoningEncryptedContent: "encrypted-state" } },
-          }]
-        : [],
-    )
-    if (replay && targetModel !== "gpt-6-astra") {
-      // 显式store:true也不能把跨模型的外部源ID重新变成item_reference。
-      const stored = ProviderTransform.message(await MessageV2.toModelMessages(input, gpt), gpt, { store: true })
-      expect(JSON.stringify(stored)).not.toContain('"itemId":"rs_foreign"')
-      expect(JSON.stringify(stored)).toContain("encrypted-state")
-    }
-
-    // 在发送边界终止，既不使用真实凭据，也不让 SDK 重试掩盖原始请求。
-    const requests: unknown[] = []
-    const stop = new Error("request captured")
-    const sdk = createOpenAI({
-      apiKey: "offline-test",
-      fetch: Object.assign(
-        async (url: RequestInfo | URL, init?: RequestInit) => {
-          requests.push(await new Request(url, init).json())
-          throw stop
+  ] as const)(
+    "isolates encrypted GPT reasoning for %s/%s (%s)",
+    async (targetProvider, targetModel, summary, replay) => {
+      const assistantID = "m-assistant"
+      // 使用真实 Responses adapter，避免只在投影对象上通过、实际 wire 仍泄漏 metadata。
+      const gpt: Provider.Model = {
+        ...model,
+        id: ModelV2.ID.make(targetModel),
+        providerID: ProviderV2.ID.make(targetProvider),
+        api: { ...model.api, id: targetModel, npm: "@ai-sdk/openai" },
+        capabilities: { ...model.capabilities, reasoning: true },
+      }
+      const input: SessionV1.WithParts[] = [
+        {
+          info: assistantInfo(assistantID, "m-user", undefined, { providerID: "smark-codex", modelID: "gpt-6-astra" }),
+          parts: [
+            {
+              ...basePart(assistantID, "a1"),
+              type: "reasoning",
+              text: summary,
+              // 持久化 metadata 会在 adapter 边界投影为 providerOptions。
+              metadata: { openai: { itemId: "rs_foreign", reasoningEncryptedContent: "encrypted-state" } },
+              time: { start: 0 },
+            },
+            {
+              ...basePart(assistantID, "a2"),
+              type: "text",
+              text: "answer",
+            },
+          ] as SessionV1.Part[],
         },
-        { preconnect() {} },
-      ),
-    })
-    // 生产请求使用 stateless 模式；store=true 会只发 item reference，无法证明密文回放边界。
-    await expect(generateText({
-      model: sdk.responses(targetModel),
-      messages,
-      providerOptions: { openai: { store: false } },
-      maxRetries: 0,
-    })).rejects.toBe(stop)
-    // 独立检查最终 wire 字段，防止未来转换步骤重新引入加密续接内容。
-    expect(JSON.stringify(requests)).toContain('"answer"')
-    expect(JSON.stringify(requests).includes('"encrypted_content":"encrypted-state"')).toBe(replay)
-  })
+      ]
+
+      // 切换 Provider 只改变发送投影，不得破坏返回原 Provider 后仍可用的持久化历史。
+      const original = structuredClone(input)
+      const messages = ProviderTransform.message(await MessageV2.toModelMessages(input, gpt), gpt, { store: false })
+      const content = messages.flatMap((message) =>
+        message.role === "assistant" && Array.isArray(message.content) ? message.content : [],
+      )
+      expect(input).toEqual(original)
+      expect(content).toContainEqual(expect.objectContaining({ type: "text", text: "answer" }))
+      // 明文 summary 必须可见；空 summary 则无需制造一个空文本占位。
+      if (!replay && summary) expect(content).toContainEqual(expect.objectContaining({ type: "text", text: summary }))
+      // stateless续接保留密文与摘要，不复活上游已经剥离的源itemId。
+      expect(content.filter((part) => part.type === "reasoning")).toEqual(
+        replay
+          ? [
+              {
+                type: "reasoning",
+                text: summary,
+                providerOptions: { openai: { reasoningEncryptedContent: "encrypted-state" } },
+              },
+            ]
+          : [],
+      )
+      if (replay && targetModel !== "gpt-6-astra") {
+        // 显式store:true也不能把跨模型的外部源ID重新变成item_reference。
+        const stored = ProviderTransform.message(await MessageV2.toModelMessages(input, gpt), gpt, { store: true })
+        expect(JSON.stringify(stored)).not.toContain('"itemId":"rs_foreign"')
+        expect(JSON.stringify(stored)).toContain("encrypted-state")
+      }
+
+      // 在发送边界终止，既不使用真实凭据，也不让 SDK 重试掩盖原始请求。
+      const requests: unknown[] = []
+      const stop = new Error("request captured")
+      const sdk = createOpenAI({
+        apiKey: "offline-test",
+        fetch: Object.assign(
+          async (url: RequestInfo | URL, init?: RequestInit) => {
+            requests.push(await new Request(url, init).json())
+            throw stop
+          },
+          { preconnect() {} },
+        ),
+      })
+      // 生产请求使用 stateless 模式；store=true 会只发 item reference，无法证明密文回放边界。
+      await expect(
+        generateText({
+          model: sdk.responses(targetModel),
+          messages,
+          providerOptions: { openai: { store: false } },
+          maxRetries: 0,
+        }),
+      ).rejects.toBe(stop)
+      // 独立检查最终 wire 字段，防止未来转换步骤重新引入加密续接内容。
+      expect(JSON.stringify(requests)).toContain('"answer"')
+      expect(JSON.stringify(requests).includes('"encrypted_content":"encrypted-state"')).toBe(replay)
+    },
+  )
 
   test("replaces compacted tool output with placeholder", async () => {
     const userID = "m-user"
@@ -1592,40 +1641,42 @@ describe("session.message-v2.toModelMessage", () => {
     ]
 
     // head=2 tail=2：10 字符输入，省略中间 6 字符，两端各保 2 字符
-    expect(await MessageV2.toModelMessages(input, model, { toolOutputTruncation: { head: 2, tail: 2 } })).toStrictEqual([
-      {
-        role: "user",
-        content: [{ type: "text", text: "run tool" }],
-      },
-      {
-        role: "assistant",
-        content: [
-          {
-            type: "tool-call",
-            toolCallId: "call-1",
-            toolName: "bash",
-            input: { cmd: "ls" },
-            providerExecuted: undefined,
-          },
-        ],
-      },
-      {
-        role: "tool",
-        content: [
-          {
-            type: "tool-result",
-            toolCallId: "call-1",
-            toolName: "bash",
-            output: {
-              type: "text",
-              value: "ab\n[... compaction truncated 6 chars ...]\nij",
-    // #328：head/tail 用例族——每个用例独立构造超长输出，避免共享 fixture 掩盖单侧回归。
-    // #328：测试用独立的小型对称预算（如 2/2、50/200）——用 head/tail 两段内容断言锁定方向，不依赖生产常量本身。
+    expect(await MessageV2.toModelMessages(input, model, { toolOutputTruncation: { head: 2, tail: 2 } })).toStrictEqual(
+      [
+        {
+          role: "user",
+          content: [{ type: "text", text: "run tool" }],
+        },
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "tool-call",
+              toolCallId: "call-1",
+              toolName: "bash",
+              input: { cmd: "ls" },
+              providerExecuted: undefined,
             },
-          },
-        ],
-      },
-    ])
+          ],
+        },
+        {
+          role: "tool",
+          content: [
+            {
+              type: "tool-result",
+              toolCallId: "call-1",
+              toolName: "bash",
+              output: {
+                type: "text",
+                value: "ab\n[... compaction truncated 6 chars ...]\nij",
+                // #328：head/tail 用例族——每个用例独立构造超长输出，避免共享 fixture 掩盖单侧回归。
+                // #328：测试用独立的小型对称预算（如 2/2、50/200）——用 head/tail 两段内容断言锁定方向，不依赖生产常量本身。
+              },
+            },
+          ],
+        },
+      ],
+    )
   })
   // 等长边界：输入恰好等于 head+tail 时不应触发截断，也不应插入 marker
   test("does not truncate when text fits within head+tail budget", async () => {
@@ -1665,38 +1716,40 @@ describe("session.message-v2.toModelMessage", () => {
     ]
 
     // 4 字符输入恰好等于 head+tail=2+2，原样返回，无任何 marker
-    expect(await MessageV2.toModelMessages(input, model, { toolOutputTruncation: { head: 2, tail: 2 } })).toStrictEqual([
-      {
-        role: "user",
-        content: [{ type: "text", text: "run tool" }],
-      },
-      {
-        role: "assistant",
-        content: [
-          {
-            type: "tool-call",
-            toolCallId: "call-1",
-            toolName: "bash",
-            input: { cmd: "ls" },
-            providerExecuted: undefined,
-          },
-        ],
-      },
-      {
-        role: "tool",
-        content: [
-          {
-            type: "tool-result",
-            toolCallId: "call-1",
-            toolName: "bash",
-            output: {
-              type: "text",
-              value: "abcd",
+    expect(await MessageV2.toModelMessages(input, model, { toolOutputTruncation: { head: 2, tail: 2 } })).toStrictEqual(
+      [
+        {
+          role: "user",
+          content: [{ type: "text", text: "run tool" }],
+        },
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "tool-call",
+              toolCallId: "call-1",
+              toolName: "bash",
+              input: { cmd: "ls" },
+              providerExecuted: undefined,
             },
-          },
-        ],
-      },
-    ])
+          ],
+        },
+        {
+          role: "tool",
+          content: [
+            {
+              type: "tool-result",
+              toolCallId: "call-1",
+              toolName: "bash",
+              output: {
+                type: "text",
+                value: "abcd",
+              },
+            },
+          ],
+        },
+      ],
+    )
   })
 
   // 兼容回归：标题生成 / decide / 正常 prompt / estimate 路径都不传
@@ -1803,7 +1856,8 @@ describe("session.message-v2.toModelMessage", () => {
     // 模拟 shell.ts 截断后的真实形态：notice(path 在开头) + "\n\n" + output + 末尾 execution notice
     const noticePath = "/data/tool-output/tool_shell456"
     const truncNotice = `<opencode_notice type="output_truncated" source="shell" total="800L/60000B" shown="tail 1000L/16000B" path="${noticePath}" guidance="use grep on path first" />`
-    const execNotice = '<opencode_notice type="execution" source="shell" severity="error" reason="exit" exit_code="1" />'
+    const execNotice =
+      '<opencode_notice type="execution" source="shell" severity="error" reason="exit" exit_code="1" />'
     const output = truncNotice + "\n\n" + "TAIL_LINE\n".repeat(100) + "\n\n" + execNotice
 
     const input: SessionV1.WithParts[] = [
@@ -1882,35 +1936,37 @@ describe("session.message-v2.toModelMessage", () => {
     ]
 
     // head=0 tail=3：只保留末尾 3 字符 "hij"，marker 在开头，不应有前导空行
-    expect(await MessageV2.toModelMessages(input, model, { toolOutputTruncation: { head: 0, tail: 3 } })).toStrictEqual([
-      {
-        role: "user",
-        content: [{ type: "text", text: "run tool" }],
-      },
-      {
-        role: "assistant",
-        content: [
-          {
-            type: "tool-call",
-            toolCallId: "call-1",
-            toolName: "bash",
-            input: { cmd: "ls" },
-            providerExecuted: undefined,
-          },
-        ],
-      },
-      {
-        role: "tool",
-        content: [
-          {
-            type: "tool-result",
-            toolCallId: "call-1",
-            toolName: "bash",
-            output: { type: "text", value: "[... compaction truncated 7 chars ...]\nhij" },
-          },
-        ],
-      },
-    ])
+    expect(await MessageV2.toModelMessages(input, model, { toolOutputTruncation: { head: 0, tail: 3 } })).toStrictEqual(
+      [
+        {
+          role: "user",
+          content: [{ type: "text", text: "run tool" }],
+        },
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "tool-call",
+              toolCallId: "call-1",
+              toolName: "bash",
+              input: { cmd: "ls" },
+              providerExecuted: undefined,
+            },
+          ],
+        },
+        {
+          role: "tool",
+          content: [
+            {
+              type: "tool-result",
+              toolCallId: "call-1",
+              toolName: "bash",
+              output: { type: "text", value: "[... compaction truncated 7 chars ...]\nhij" },
+            },
+          ],
+        },
+      ],
+    )
   })
 
   test("degrades to head-only when tail is 0", async () => {
@@ -1944,37 +2000,38 @@ describe("session.message-v2.toModelMessage", () => {
     ]
 
     // head=3 tail=0：只保留开头 3 字符 "abc"，marker 在末尾，不应有尾随空行
-    expect(await MessageV2.toModelMessages(input, model, { toolOutputTruncation: { head: 3, tail: 0 } })).toStrictEqual([
-      {
-        role: "user",
-        content: [{ type: "text", text: "run tool" }],
-      },
-      {
-        role: "assistant",
-        content: [
-          {
-            type: "tool-call",
-            toolCallId: "call-1",
-            toolName: "bash",
-            input: { cmd: "ls" },
-            providerExecuted: undefined,
-          },
-        ],
-      },
-      {
-        role: "tool",
-        content: [
-          {
-            type: "tool-result",
-            toolCallId: "call-1",
-            toolName: "bash",
-            output: { type: "text", value: "abc\n[... compaction truncated 7 chars]" },
-          },
-        ],
-      },
-    ])
+    expect(await MessageV2.toModelMessages(input, model, { toolOutputTruncation: { head: 3, tail: 0 } })).toStrictEqual(
+      [
+        {
+          role: "user",
+          content: [{ type: "text", text: "run tool" }],
+        },
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "tool-call",
+              toolCallId: "call-1",
+              toolName: "bash",
+              input: { cmd: "ls" },
+              providerExecuted: undefined,
+            },
+          ],
+        },
+        {
+          role: "tool",
+          content: [
+            {
+              type: "tool-result",
+              toolCallId: "call-1",
+              toolName: "bash",
+              output: { type: "text", value: "abc\n[... compaction truncated 7 chars]" },
+            },
+          ],
+        },
+      ],
+    )
   })
-
 
   test("converts assistant tool error into error-text tool result", async () => {
     const userID = "m-user"
@@ -2900,7 +2957,9 @@ describe("session.message-v2.filterCompacted", () => {
   // #204：旧历史 assistant 回复，与 oldUser 同属被 summary 排除的历史
   const oldAssistant: SessionV1.WithParts = {
     info: assistantInfo(OLD_ASSISTANT, OLD_USER),
-    parts: [{ ...basePart(OLD_ASSISTANT, "filter-old-assistant"), type: "text", text: "old answer" }] as SessionV1.Part[],
+    parts: [
+      { ...basePart(OLD_ASSISTANT, "filter-old-assistant"), type: "text", text: "old answer" },
+    ] as SessionV1.Part[],
   }
 
   // #204：retained tail——压缩边界保留的最近轮次，须在窗口内可见以维持上下文连续
@@ -2989,10 +3048,25 @@ describe("session.message-v2.filterCompacted", () => {
       info: { ...summaryAssistant.info, id: importedID },
       parts: summaryAssistant.parts.map((part) => ({ ...part, messageID: importedID })),
     }
-    const history = [oldUser, oldAssistant, tailUser, tailAssistant, compactionUser, importedSummary, continueUser].map((message, index) => ({
-      ...message, info: { ...message.info, time: { ...message.info.time, created: index + 1 } },
-    }))
-    expect(MessageV2.filterCompacted(history).map((message) => message.info.id)).toStrictEqual([COMPACTION_USER, importedID, TAIL_USER, TAIL_ASSISTANT, CONTINUE_USER])
-    expect(MessageV2.filterCompacted(history.toReversed()).map((message) => message.info.id)).toStrictEqual([COMPACTION_USER, importedID, TAIL_USER, TAIL_ASSISTANT, CONTINUE_USER])
+    const history = [oldUser, oldAssistant, tailUser, tailAssistant, compactionUser, importedSummary, continueUser].map(
+      (message, index) => ({
+        ...message,
+        info: { ...message.info, time: { ...message.info.time, created: index + 1 } },
+      }),
+    )
+    expect(MessageV2.filterCompacted(history).map((message) => message.info.id)).toStrictEqual([
+      COMPACTION_USER,
+      importedID,
+      TAIL_USER,
+      TAIL_ASSISTANT,
+      CONTINUE_USER,
+    ])
+    expect(MessageV2.filterCompacted(history.toReversed()).map((message) => message.info.id)).toStrictEqual([
+      COMPACTION_USER,
+      importedID,
+      TAIL_USER,
+      TAIL_ASSISTANT,
+      CONTINUE_USER,
+    ])
   })
 })

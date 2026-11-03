@@ -94,15 +94,10 @@ describe("text-decoding", () => {
     }
   })
 
-
-
   // #128：ASCII 前缀不锁定编码，后续可切到 gb18030
   test("does not lock ASCII prefixes before Windows codepage bytes", () => {
     const decoder = createAutoTextDecoder()
-    const output =
-      decoder.write(utf8("prefix ")) +
-      decoder.write(bytes([0xd6, 0xd0, 0xce, 0xc4, 0x0a])) +
-      decoder.end()
+    const output = decoder.write(utf8("prefix ")) + decoder.write(bytes([0xd6, 0xd0, 0xce, 0xc4, 0x0a])) + decoder.end()
     expect(output).toContain("prefix ")
     expect(output).toContain("中文")
   })
@@ -120,10 +115,7 @@ describe("text-decoding", () => {
   // #128：显式 gb18030 锁定整段流
   test("explicit gb18030 decoder locks entire stream", () => {
     const decoder = createAutoTextDecoder({ encoding: "gb18030" })
-    const output =
-      decoder.write(bytes([0xd6, 0xd0, 0xce, 0xc4])) +
-      decoder.write(utf8(" — text")) +
-      decoder.end()
+    const output = decoder.write(bytes([0xd6, 0xd0, 0xce, 0xc4])) + decoder.write(utf8(" — text")) + decoder.end()
     expect(output).toContain("中文")
     expect(decoder.encoding()).toBe("gb18030")
   })
@@ -160,9 +152,30 @@ describe("text-decoding", () => {
   test("decodes javac-style CP936 diagnostics", () => {
     const input = new Uint8Array([
       ...new TextEncoder().encode("H:\\FRCheck\\src\\verifycmd\\VerifyCommand.java:3: "),
-      0xbe, 0xaf, 0xb8, 0xe6, 0x3a, 0x20,
-      0x44, 0x4f, 0x4d, 0xca, 0xc7, 0xc4, 0xda, 0xb2, 0xbf, 0xd7, 0xa8, 0xd3, 0xc3, 0x20,
-      0x41, 0x50, 0x49, 0x0a,
+      0xbe,
+      0xaf,
+      0xb8,
+      0xe6,
+      0x3a,
+      0x20,
+      0x44,
+      0x4f,
+      0x4d,
+      0xca,
+      0xc7,
+      0xc4,
+      0xda,
+      0xb2,
+      0xbf,
+      0xd7,
+      0xa8,
+      0xd3,
+      0xc3,
+      0x20,
+      0x41,
+      0x50,
+      0x49,
+      0x0a,
     ])
     expect(decodeText(input).text).toContain("警告: DOM是内部专用 API")
   })
@@ -174,9 +187,8 @@ describe("text-decoding", () => {
     // compiled binary or encrypted stream
     // #160：随机高位字节样例（无 NUL、无已知魔数）
     const input = bytes([
-      0x80, 0x91, 0xa2, 0xb3, 0xc4, 0xd5, 0xe6, 0xf7,
-      0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff,
-      0x81, 0x92, 0xa3, 0xb4, 0xc5, 0xd6, 0xe7, 0xf8,
+      0x80, 0x91, 0xa2, 0xb3, 0xc4, 0xd5, 0xe6, 0xf7, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x81, 0x92, 0xa3,
+      0xb4, 0xc5, 0xd6, 0xe7, 0xf8,
     ])
     const result = decodeText(input)
     // #160：应走 UTF-8 替换，而非 gb18030 乱码中文
@@ -188,7 +200,8 @@ describe("text-decoding", () => {
     // Common scenario: mostly valid UTF-8 with a few corrupted bytes
     const input = new Uint8Array([
       ...utf8("hello "),
-      0xff, 0xfe, // invalid UTF-8 bytes
+      0xff,
+      0xfe, // invalid UTF-8 bytes
       ...utf8(" world\n"),
     ])
     const result = decodeText(input)

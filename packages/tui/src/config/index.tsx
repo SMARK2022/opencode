@@ -5,7 +5,6 @@ import { Schema } from "effect"
 import { createContext, type JSX, useContext } from "solid-js"
 import { TuiKeybind } from "./keybind"
 
-
 export const AttentionSoundName = Schema.Literals([
   "default",
   "question",
@@ -129,8 +128,8 @@ export function resolve(
       notifications: input.attention?.notifications ?? true,
       sound: input.attention?.sound ?? true,
       // [local-smark] 默认音量 0.5：经 BS.1770 响度分析，内嵌 done 音效在此增益下
-    // 0.4 偏轻（约 -29.7 LUFS），0.6+ 会比多数系统提示音更突出
-    volume: input.attention?.volume ?? 0.5,
+      // 0.4 偏轻（约 -29.7 LUFS），0.6+ 会比多数系统提示音更突出
+      volume: input.attention?.volume ?? 0.5,
       sound_pack: input.attention?.sound_pack ?? "opencode.default",
       sounds: input.attention?.sounds ?? {},
     },

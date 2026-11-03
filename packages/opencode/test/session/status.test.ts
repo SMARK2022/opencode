@@ -27,7 +27,9 @@ it.instance("shares active status by session ID across directory contexts", () =
     expect(yield* provideInstance(observer)(status.get(sessionID))).toEqual({ type: "busy" })
 
     // retry与busy共享精确Session身份；list返回副本，调用方清空快照不能修改owner。
-    yield* provideInstance(observer)(status.set(sessionID, { type: "retry", attempt: 2, next: Date.now() + 1000, message: "controlled retry" }))
+    yield* provideInstance(observer)(
+      status.set(sessionID, { type: "retry", attempt: 2, next: Date.now() + 1000, message: "controlled retry" }),
+    )
     expect(yield* provideInstance(source.directory)(status.get(sessionID))).toMatchObject({ type: "retry", attempt: 2 })
     snapshot.clear()
     expect((yield* status.list()).has(sessionID)).toBe(true)

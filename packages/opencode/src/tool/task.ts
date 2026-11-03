@@ -23,11 +23,25 @@ import { formatTaskIdNotice } from "@/util/output-notice"
 const SESSION_ID_BODY_LENGTH = 26
 
 // 只适配V1历史形状，聚合、预算与转义均由两代共用的Core owner承担。
-export function buildParentInspectedFilesSummary(messages: SessionV1.WithParts[], worktree: string): string | undefined {
-  return FileEvidence.parentSummary(messages.flatMap(message => message.info.role === "assistant"
-    ? message.parts.flatMap(part => part.type === "tool" && part.tool === "read" && part.state.status === "completed" && !part.state.time.compacted
-      ? [part.state.metadata.read] : [])
-    : []), worktree)
+export function buildParentInspectedFilesSummary(
+  messages: SessionV1.WithParts[],
+  worktree: string,
+): string | undefined {
+  return FileEvidence.parentSummary(
+    messages.flatMap((message) =>
+      message.info.role === "assistant"
+        ? message.parts.flatMap((part) =>
+            part.type === "tool" &&
+            part.tool === "read" &&
+            part.state.status === "completed" &&
+            !part.state.time.compacted
+              ? [part.state.metadata.read]
+              : [],
+          )
+        : [],
+    ),
+    worktree,
+  )
 }
 
 export interface TaskPromptOps {
@@ -305,11 +319,11 @@ export const TaskTool = Tool.define(
         // #507：默认必须跟真实 resolve.mode：resume→none，新建（含非法 task_id 导致的新建）→summary。
         // 不能用 raw params.task_id 真值——假 ID 会伪装成 resume 并丢掉父 inspected 摘要。
         const instance = yield* InstanceState.context
-        const inspectedFilesMode =
-          params.inspected_files ?? (resolved.mode === "resume" ? "none" : "summary")
-        const parentContext = inspectedFilesMode !== "none" && ctx.messages.length > 0
-          ? buildParentInspectedFilesSummary(ctx.messages, instance.worktree)
-          : undefined
+        const inspectedFilesMode = params.inspected_files ?? (resolved.mode === "resume" ? "none" : "summary")
+        const parentContext =
+          inspectedFilesMode !== "none" && ctx.messages.length > 0
+            ? buildParentInspectedFilesSummary(ctx.messages, instance.worktree)
+            : undefined
 
         const result = yield* ops.prompt({
           messageID: MessageID.ascending(),

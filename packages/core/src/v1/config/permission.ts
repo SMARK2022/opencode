@@ -5,7 +5,9 @@ import { Schema, SchemaGetter } from "effect"
 // #196：`auto` 是 permission action 而非审批策略，表示请求进入确定性 precheck
 // #196：并在需要时交给配置的 reviewer，最后才回退到用户审批。与 allow/ask/deny 共用
 // #196：同一 union，确保 permission map 和 SDK 类型使用统一的 action 词汇表。
-export const Action = Schema.Literals(["ask", "allow", "deny", "auto"]).annotate({ identifier: "PermissionActionConfig" })
+export const Action = Schema.Literals(["ask", "allow", "deny", "auto"]).annotate({
+  identifier: "PermissionActionConfig",
+})
 export type Action = Schema.Schema.Type<typeof Action>
 
 export const ApprovalsReviewer = Schema.Literals(["user", "auto_review"]).annotate({
@@ -20,24 +22,39 @@ export const AutoReview = Schema.Struct({
   // #196：model 指定 reviewer 使用的模型；599 起 timeout_ms 默认 120 秒（超时重试附时间预算后缀）。
   model: Schema.optional(Schema.String).annotate({ description: "Reviewer model in provider/model form." }),
   // timeout_ms限制单次执行，共1次初始加2次重试，不把清理开销计成执行总界。
-  timeout_ms: Schema.optional(Schema.Number).annotate({ description: "Reviewer execution timeout per attempt in milliseconds. At most three attempts (one initial attempt plus two retries). Timeout retries append a time-budget advisory to the prompt. Defaults to 120000." }),
+  timeout_ms: Schema.optional(Schema.Number).annotate({
+    description:
+      "Reviewer execution timeout per attempt in milliseconds. At most three attempts (one initial attempt plus two retries). Timeout retries append a time-budget advisory to the prompt. Defaults to 120000.",
+  }),
   // #196：policy_path 和 policy 追加到默认 tenant policy 之后。
-  policy_path: Schema.optional(Schema.String).annotate({ description: "Markdown policy file appended to the default tenant policy." }),
-  policy: Schema.optional(Schema.String).annotate({ description: "Inline markdown policy appended to the reviewer policy prompt." }),
+  policy_path: Schema.optional(Schema.String).annotate({
+    description: "Markdown policy file appended to the default tenant policy.",
+  }),
+  policy: Schema.optional(Schema.String).annotate({
+    description: "Inline markdown policy appended to the reviewer policy prompt.",
+  }),
   // #196：fallback 控制 reviewer 失败时的行为：deny（默认）或回退到用户审批。
   fallback: Schema.optional(Schema.Literals(["deny", "user"])).annotate({
     description: "On reviewer failure after retry, either fail closed or fall back to user approval. Defaults to user.",
   }),
   effort: Schema.optional(Schema.String).annotate({
     description:
-      "Reasoning effort variant name of the resolved reviewer model (e.g. \"low\"). Defaults to the minimal tier the reviewer model advertises (low, then minimal, then none); models without a low tier keep their configured options unchanged.",
+      'Reasoning effort variant name of the resolved reviewer model (e.g. "low"). Defaults to the minimal tier the reviewer model advertises (low, then minimal, then none); models without a low tier keep their configured options unchanged.',
   }),
   // #196：strict 为 true 时即使 precheck 判定 allow 也强制经过 reviewer。
-  strict: Schema.optional(Schema.Boolean).annotate({ description: "Route even low-risk precheck allows through reviewer." }),
+  strict: Schema.optional(Schema.Boolean).annotate({
+    description: "Route even low-risk precheck allows through reviewer.",
+  }),
   // #196：熔断器阈值，连续或滑动窗口内拒绝次数超限后中断 reviewer。
-  max_consecutive_denials: Schema.optional(Schema.Number).annotate({ description: "Circuit breaker consecutive denial threshold." }),
-  max_recent_denials: Schema.optional(Schema.Number).annotate({ description: "Circuit breaker recent denial threshold." }),
-  recent_denial_window: Schema.optional(Schema.Number).annotate({ description: "Circuit breaker recent decision window." }),
+  max_consecutive_denials: Schema.optional(Schema.Number).annotate({
+    description: "Circuit breaker consecutive denial threshold.",
+  }),
+  max_recent_denials: Schema.optional(Schema.Number).annotate({
+    description: "Circuit breaker recent denial threshold.",
+  }),
+  recent_denial_window: Schema.optional(Schema.Number).annotate({
+    description: "Circuit breaker recent decision window.",
+  }),
 }).annotate({ identifier: "AutoReviewConfig" })
 export type AutoReview = Schema.Schema.Type<typeof AutoReview>
 
@@ -90,17 +107,16 @@ const InputObjectBase = Schema.StructWithRest(
 // 按键构造合法随机配置，避免宽控制值与可选 undefined 使整体拒绝采样停滞。
 const InputObject = InputObjectBase.check(controlsOnlyOnControlKeys).annotate({
   toArbitrary: () => (fc) =>
-    fc.tuple(
-      Schema.toArbitrary(InputObjectBase.schema),
-      Schema.toArbitrary(Schema.Record(Schema.String, Rule)),
-    ).map(([known, extra]) => ({
-      ...globalThis.Object.fromEntries(
-        globalThis.Object.entries(extra).filter(
-          ([key]) => !InputObjectBase.ast.propertySignatures.some((property) => property.name === key),
+    fc
+      .tuple(Schema.toArbitrary(InputObjectBase.schema), Schema.toArbitrary(Schema.Record(Schema.String, Rule)))
+      .map(([known, extra]) => ({
+        ...globalThis.Object.fromEntries(
+          globalThis.Object.entries(extra).filter(
+            ([key]) => !InputObjectBase.ast.propertySignatures.some((property) => property.name === key),
+          ),
         ),
-      ),
-      ...globalThis.Object.fromEntries(globalThis.Object.entries(known).filter(([, value]) => value !== undefined)),
-    })),
+        ...globalThis.Object.fromEntries(globalThis.Object.entries(known).filter(([, value]) => value !== undefined)),
+      })),
 })
 
 const InputSchema = Schema.Union([Action, InputObject])

@@ -45,33 +45,33 @@ not implementation authority.
 
 ## 3. Repository Context
 
-| Source | Why it constrains this task |
-| --- | --- |
-| `CONTEXT.md` | 用词：Session / Message / Session search / Session path |
-| `packages/opencode/AGENTS.md` | 测试从 package 目录运行；Effect 与模块组织规则 |
-| `packages/opencode/test/AGENTS.md` + `test/server/AGENTS.md` | 测试夹具与同步约定 |
-| `.opencode/policy/first-principles-engineering.md` | 修 first divergence；禁 fallback；traceability；E/C 门禁 |
-| `docs/adr/0001-triage-labels-and-team-assignment-coexist.md` | 仅 triage 标签，与本任务无关 |
+| Source                                                        | Why it constrains this task                                                         |
+| ------------------------------------------------------------- | ----------------------------------------------------------------------------------- |
+| `CONTEXT.md`                                                  | 用词：Session / Message / Session search / Session path                             |
+| `packages/opencode/AGENTS.md`                                 | 测试从 package 目录运行；Effect 与模块组织规则                                      |
+| `packages/opencode/test/AGENTS.md` + `test/server/AGENTS.md`  | 测试夹具与同步约定                                                                  |
+| `.opencode/policy/first-principles-engineering.md`            | 修 first divergence；禁 fallback；traceability；E/C 门禁                            |
+| `docs/adr/0001-triage-labels-and-team-assignment-coexist.md`  | 仅 triage 标签，与本任务无关                                                        |
 | `docs/plans/tui-session-list-search-tuning.md`（已 verified） | 本任务在其引入的 progressive 搜索（B1 title + B2 scan）之上做性能修复，不改变其语义 |
 
 ## 4. Files and Evidence Read
 
-| Evidence | Relevance | Evidence class |
-| --- | --- | --- |
-| `src/cli/cmd/tui/component/dialog-session-list.tsx`（preview effect、`runProgressiveSearch`、`appendScanHits` 调用点） | 预览触发与放大链第一现场 | observed |
-| `src/cli/cmd/tui/util/session-list-params.ts`（常量与 `appendScanHits`） | 批次/上限/合并语义 | observed |
-| `src/server/routes/instance/httpapi/handlers/session.ts` `preview` handler（窗口函数 SQL） | 预览 SQL 第二现场 | observed |
-| `src/server/routes/instance/httpapi/groups/session.ts`（PreviewPayload/PreviewResponse/searchScan 路由） | wire 契约，保持不变 | observed |
-| `src/session/session.ts` `listByProject`/`searchScanByProject`/`listUniverseConditions`/`touch` | 搜索宇宙与排序；`touch` 是 `time.updated` 的唯一常规推进 | observed |
-| `src/session/search.ts` `searchCondition` | 匹配条件不改 | observed |
-| `src/session/projectors.ts`（MessageV2 Updated/PartUpdated 不推进 `time_updated`；`applyUsage` 显式写回原值） | 证明 `id+time.updated` 版本键失效时机与今日 `sessions()` 触发时机严格一致 | observed |
-| `src/cli/cmd/tui/context/sync.tsx`（`session.updated` 驱动 `sync.data.session`；`sessions()` 变化是预览唯一既有触发源） | 缓存失效时机等价性论证 | observed |
-| `src/session/session.sql.ts`（`message_session_time_created_id_idx`、`part_message_id_id_idx`、`part_session_idx`；无 search 专用索引） | 既有索引即可承载早停查询 | observed |
-| `test/server/session-preview.test.ts`（12 个既有行为用例） | 语义护栏基线 | observed |
-| `test/cli/cmd/tui/dialog-session-list.test.tsx`（`withSessionList` 假 transport 可计数 preview 请求） | 去重红测缝 | observed |
-| `test/cli/cmd/tui/session-list-params.test.ts` | 回归护栏（本任务不改该文件） | observed |
-| `D:\Temp\opencode\session-search-bench-20261007.mjs` + round-1..4 JSON | 只读真实库回放基线与对照（见 §8） | observed |
-| 真实库 `C:\Users\Lenovo\.local\share\opencode\opencode.db` 只读统计（5,343 session / 610 半年主 session / message 40.4 万 / part 187.8 万 / 主文件约 2.97 GiB） | 数据规模 | observed |
+| Evidence                                                                                                                                                        | Relevance                                                                 | Evidence class |
+| --------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------- | -------------- |
+| `src/cli/cmd/tui/component/dialog-session-list.tsx`（preview effect、`runProgressiveSearch`、`appendScanHits` 调用点）                                          | 预览触发与放大链第一现场                                                  | observed       |
+| `src/cli/cmd/tui/util/session-list-params.ts`（常量与 `appendScanHits`）                                                                                        | 批次/上限/合并语义                                                        | observed       |
+| `src/server/routes/instance/httpapi/handlers/session.ts` `preview` handler（窗口函数 SQL）                                                                      | 预览 SQL 第二现场                                                         | observed       |
+| `src/server/routes/instance/httpapi/groups/session.ts`（PreviewPayload/PreviewResponse/searchScan 路由）                                                        | wire 契约，保持不变                                                       | observed       |
+| `src/session/session.ts` `listByProject`/`searchScanByProject`/`listUniverseConditions`/`touch`                                                                 | 搜索宇宙与排序；`touch` 是 `time.updated` 的唯一常规推进                  | observed       |
+| `src/session/search.ts` `searchCondition`                                                                                                                       | 匹配条件不改                                                              | observed       |
+| `src/session/projectors.ts`（MessageV2 Updated/PartUpdated 不推进 `time_updated`；`applyUsage` 显式写回原值）                                                   | 证明 `id+time.updated` 版本键失效时机与今日 `sessions()` 触发时机严格一致 | observed       |
+| `src/cli/cmd/tui/context/sync.tsx`（`session.updated` 驱动 `sync.data.session`；`sessions()` 变化是预览唯一既有触发源）                                         | 缓存失效时机等价性论证                                                    | observed       |
+| `src/session/session.sql.ts`（`message_session_time_created_id_idx`、`part_message_id_id_idx`、`part_session_idx`；无 search 专用索引）                         | 既有索引即可承载早停查询                                                  | observed       |
+| `test/server/session-preview.test.ts`（12 个既有行为用例）                                                                                                      | 语义护栏基线                                                              | observed       |
+| `test/cli/cmd/tui/dialog-session-list.test.tsx`（`withSessionList` 假 transport 可计数 preview 请求）                                                           | 去重红测缝                                                                | observed       |
+| `test/cli/cmd/tui/session-list-params.test.ts`                                                                                                                  | 回归护栏（本任务不改该文件）                                              | observed       |
+| `D:\Temp\opencode\session-search-bench-20261007.mjs` + round-1..4 JSON                                                                                          | 只读真实库回放基线与对照（见 §8）                                         | observed       |
+| 真实库 `C:\Users\Lenovo\.local\share\opencode\opencode.db` 只读统计（5,343 session / 610 半年主 session / message 40.4 万 / part 187.8 万 / 主文件约 2.97 GiB） | 数据规模                                                                  | observed       |
 
 ## 5. Current Behavior
 
@@ -90,26 +90,26 @@ not implementation authority.
 
 ## 6. Supported Input Domain and Reachability
 
-| Input or condition | Producer | Upstream guarantees | Reachable path | Owner | Classification |
-| --- | --- | --- | --- | --- | --- |
-| 非空 debounced 搜索串 | DialogSelect onFilter | 可含空格/CJK | B1+B2+预览 | DialogSessionList | observed |
-| 浏览态（空 query） | sync.data.session | ≤1600 条 | 预览 effect 同样触发 | DialogSessionList | observed |
-| sessionIDs ≤400 / limit 1..10 | PreviewPayload schema | schema 校验 | preview handler | HttpApi | contracted |
-| session 内容在弹窗存活期内变化 | prompt `sessions.touch` → `session.updated` SSE | `sync.data.session` 更新 | 预览 effect 再触发 | sync → dialog | observed |
-| 消息/Part 写入不推进 `time_updated` | projectors.ts | `session.updated` 是 store 唯一更新源 | 预览失效时机 = `sessions()` 触发时机（改前改后一致） | projectors + sync | observed |
-| 无可见文本的 session | preview 响应省略该 ID | 响应 schema 允许缺省 | 需缓存「已取且为空」避免每批重取 | preview handler → dialog | observed |
-| 预览请求失败/abort | 网络层 | 静默忽略（既有行为） | 不写缓存，下一次触发重试 | dialog | observed |
+| Input or condition                  | Producer                                        | Upstream guarantees                   | Reachable path                                       | Owner                    | Classification |
+| ----------------------------------- | ----------------------------------------------- | ------------------------------------- | ---------------------------------------------------- | ------------------------ | -------------- |
+| 非空 debounced 搜索串               | DialogSelect onFilter                           | 可含空格/CJK                          | B1+B2+预览                                           | DialogSessionList        | observed       |
+| 浏览态（空 query）                  | sync.data.session                               | ≤1600 条                              | 预览 effect 同样触发                                 | DialogSessionList        | observed       |
+| sessionIDs ≤400 / limit 1..10       | PreviewPayload schema                           | schema 校验                           | preview handler                                      | HttpApi                  | contracted     |
+| session 内容在弹窗存活期内变化      | prompt `sessions.touch` → `session.updated` SSE | `sync.data.session` 更新              | 预览 effect 再触发                                   | sync → dialog            | observed       |
+| 消息/Part 写入不推进 `time_updated` | projectors.ts                                   | `session.updated` 是 store 唯一更新源 | 预览失效时机 = `sessions()` 触发时机（改前改后一致） | projectors + sync        | observed       |
+| 无可见文本的 session                | preview 响应省略该 ID                           | 响应 schema 允许缺省                  | 需缓存「已取且为空」避免每批重取                     | preview handler → dialog | observed       |
+| 预览请求失败/abort                  | 网络层                                          | 静默忽略（既有行为）                  | 不写缓存，下一次触发重试                             | dialog                   | observed       |
 
 ## 7. Required Invariants
 
-| ID | Behavioral invariant | Evidence | Existing test |
-| --- | --- | --- | --- |
-| INV-01 | 搜索宇宙、范围、排序、400 上限、多 token AND 语义不变 | user + tuning plan | `session-list.test.ts` progressive 系列 |
-| INV-02 | 预览内容契约逐字节保持（过滤、拼接、归一化、旧→新、limit 1..10） | user + 现有测试 | `session-preview.test.ts` 全部既有用例必须保持绿 |
-| INV-03 | 无 schema/migration/索引/存储格式变更；搜索与预览路径只读 | user | git diff 证明 + 无新 migration |
-| INV-04 | 不引入红测：本任务影响的既有测试全部保持绿 | user | package-local bun test |
-| INV-05 | 预览失效时机与既有触发时机一致：session 内容变化（`time.updated` 变化）重取该 session；弹窗关闭清理全部预览态 | observed 语义等价 | 新增 dialog 用例 |
-| INV-06 | 六个关键词回放平均总时长 ≤3 秒（真实库数据副本、真实 HTTP handler、真实渐进协议回放） | user | 验收脚本（§18） |
+| ID     | Behavioral invariant                                                                                          | Evidence           | Existing test                                    |
+| ------ | ------------------------------------------------------------------------------------------------------------- | ------------------ | ------------------------------------------------ |
+| INV-01 | 搜索宇宙、范围、排序、400 上限、多 token AND 语义不变                                                         | user + tuning plan | `session-list.test.ts` progressive 系列          |
+| INV-02 | 预览内容契约逐字节保持（过滤、拼接、归一化、旧→新、limit 1..10）                                              | user + 现有测试    | `session-preview.test.ts` 全部既有用例必须保持绿 |
+| INV-03 | 无 schema/migration/索引/存储格式变更；搜索与预览路径只读                                                     | user               | git diff 证明 + 无新 migration                   |
+| INV-04 | 不引入红测：本任务影响的既有测试全部保持绿                                                                    | user               | package-local bun test                           |
+| INV-05 | 预览失效时机与既有触发时机一致：session 内容变化（`time.updated` 变化）重取该 session；弹窗关闭清理全部预览态 | observed 语义等价  | 新增 dialog 用例                                 |
+| INV-06 | 六个关键词回放平均总时长 ≤3 秒（真实库数据副本、真实 HTTP handler、真实渐进协议回放）                         | user               | 验收脚本（§18）                                  |
 
 ## 8. First Divergence and Root Cause
 
@@ -119,21 +119,21 @@ not implementation authority.
 - 捕获的用户症状：`current` 方案完整回放 8.05–12.52 秒/词，六词三轮中位数平均 **10.72 秒**，超 3 秒验收线 —— 即 red。
 - 最小化：耗时集中于预览——`sqlite`/`session`/`搜索`/`windows shell`/`sqlite session` 五词预览占 80–95%，`冷存储` 占 53–56%（正文扫描主导）；一次搜索的预览请求实测 14–15 次、累计 441–3780 个 session·次。
 
-| Invariant | First divergence | Owning module/interface | Proof |
-| --- | --- | --- | --- |
-| INV-06 | 预览 effect 以「当前显示集合」为请求单位：每批（含零新增批）都对全部已显示 ID 重发 POST `/session/preview`；一次搜索实测 14–15 次预览、累计 441–3780 个 session·次 | `DialogSessionList` 预览 effect | 回放计数器（previewCalls/previewSessions）；`appendScanHits` 空页也返回新数组（纯函数实测 `old!==next`） |
-| INV-06 | handler SQL 先对每 session 的全部可见 user 历史做 `ROW_NUMBER()` 再过滤 `msg_rn<=2`，而非按 `(session_id,time_created,id)` 索引倒序找到 2 条即停 | `SessionHttpApi.preview` | 400 session 实测 792–945ms（窗口）vs 103ms（逐 session 索引 LIMIT），归一化文本与顺序逐字节一致；EXPLAIN 显示临时 B-tree 排名 |
+| Invariant | First divergence                                                                                                                                                   | Owning module/interface         | Proof                                                                                                                         |
+| --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| INV-06    | 预览 effect 以「当前显示集合」为请求单位：每批（含零新增批）都对全部已显示 ID 重发 POST `/session/preview`；一次搜索实测 14–15 次预览、累计 441–3780 个 session·次 | `DialogSessionList` 预览 effect | 回放计数器（previewCalls/previewSessions）；`appendScanHits` 空页也返回新数组（纯函数实测 `old!==next`）                      |
+| INV-06    | handler SQL 先对每 session 的全部可见 user 历史做 `ROW_NUMBER()` 再过滤 `msg_rn<=2`，而非按 `(session_id,time_created,id)` 索引倒序找到 2 条即停                   | `SessionHttpApi.preview`        | 400 session 实测 792–945ms（窗口）vs 103ms（逐 session 索引 LIMIT），归一化文本与顺序逐字节一致；EXPLAIN 显示临时 B-tree 排名 |
 
 两个 first divergence 同属「session 预览」这一 primary path 的两个 owner 模块（客户端取数编排 / 服务端取数 SQL），均在 owner 处直接修复；不引入第二算法、不引入失败后备用路径。
 
 ## 9. Responsibility and Seam
 
-| Concern | Owner | Interface promise | Why it belongs here | Why another module does not own it |
-| --- | --- | --- | --- | --- |
-| 预览取数编排（取哪些、何时取、失败静默、卸载清理） | `DialogSessionList` 预览 effect | 弹窗存活期内的预览加载 | 它是唯一消费者与唯一触发点 | sync 只管数据同步，不认识弹窗预览；server 无客户端批次语义 |
-| 预览内容查询（过滤/排序/拼接/归一化契约） | `SessionHttpApi.preview` handler | `POST /session/preview` wire 契约 | SQL 是该端点唯一实现 | Session 服务层无预览方法；MessageV2.page 是全量 hydrate 路径，语义不同 |
-| 版本失效键（`id:time.updated`） | `DialogSessionList`（消费 `sync.data.session` 既有字段） | `session.updated` 事件契约 | 与既有触发时机同源 | projectors/sync 语义不变，无需新事件 |
-| 搜索条件与宇宙 | `searchCondition` / `searchScanByProject` | 不变 | 本任务不改 | — |
+| Concern                                            | Owner                                                    | Interface promise                 | Why it belongs here        | Why another module does not own it                                     |
+| -------------------------------------------------- | -------------------------------------------------------- | --------------------------------- | -------------------------- | ---------------------------------------------------------------------- |
+| 预览取数编排（取哪些、何时取、失败静默、卸载清理） | `DialogSessionList` 预览 effect                          | 弹窗存活期内的预览加载            | 它是唯一消费者与唯一触发点 | sync 只管数据同步，不认识弹窗预览；server 无客户端批次语义             |
+| 预览内容查询（过滤/排序/拼接/归一化契约）          | `SessionHttpApi.preview` handler                         | `POST /session/preview` wire 契约 | SQL 是该端点唯一实现       | Session 服务层无预览方法；MessageV2.page 是全量 hydrate 路径，语义不同 |
+| 版本失效键（`id:time.updated`）                    | `DialogSessionList`（消费 `sync.data.session` 既有字段） | `session.updated` 事件契约        | 与既有触发时机同源         | projectors/sync 语义不变，无需新事件                                   |
+| 搜索条件与宇宙                                     | `searchCondition` / `searchScanByProject`                | 不变                              | 本任务不改                 | —                                                                      |
 
 ## 10. Single Approved Primary-Path Design
 
@@ -143,7 +143,7 @@ not implementation authority.
 
 Final full-scope implementation audit (round 3), `ses_ee80c2268ffeY3mAXG5XSJvjVf`: **No blocking findings.** Release verdict verbatim: **APPROVE — 仅适用于 canonical R5 与本轮实际审计的完整 HEAD→工作区任务 diff。** B-01 closed. Auditor independently ran 28 TUI/params tests, 40 server tests, typecheck, coverage inventory, scoped diff check, actual-effect probe and read-only 5353-Session SQL equivalence (limits 1/2/3/10); all passed. Performance artifact independently read: mean 1938ms. Non-blocking: warmed HTTP replay does not establish terminal-render/cold-cache SLA; superseded R4 prose remains historical.
 
-Final independent comment accounting: E=497, C=75, minimum=ceil(497*0.15)=75, ratio=15.09%. By file (E/C): dialog 32/19, handler 36/10, dialog tests 324/34, server tests 105/12. Excluded blank/import-only/indentation/pure-move/documentation lines and comments merely restating operations; qualifying examples explain query-owned closures, old-finally isolation, immutable request snapshots and legacy Set/floor semantics.
+Final independent comment accounting: E=497, C=75, minimum=ceil(497\*0.15)=75, ratio=15.09%. By file (E/C): dialog 32/19, handler 36/10, dialog tests 324/34, server tests 105/12. Excluded blank/import-only/indentation/pure-move/documentation lines and comments merely restating operations; qualifying examples explain query-owned closures, old-finally isolation, immutable request snapshots and legacy Set/floor semantics.
 
 - Current production diff: dialog +75/-32, handler +63/-59, total 229 added/deleted lines in 2 production files. Tests: dialog +381/-2, server preview +134. Existing unrelated worktree changes remain untouched.
 - RED: extracted actual-effect loop produced one request and stale-one; real component test `query changes isolate pending preview responses and cleanup` failed waiting for new query's request before implementation. GREEN: same extracted loop produces two requests and fresh-two; component regression passes. Added regression verifies old finally while new request remains pending across scan batches. A→B→A and component disposal are covered through input/frame/AbortSignal seams.
@@ -166,7 +166,7 @@ R5 supersedes the R4 lifecycle pseudocode below; server SQL, snapshots, ordering
 - Forward mapping: INV-05 → query-local preview owner → dialog component → pending old-response/new-query frame regression, including A→B→A or search-to-browse and disposal. INV-01/02/03/04/06 retain all existing mappings and verification commands.
 - Reverse mapping: query-owned Maps and cleanup → INV-05 observed RED. Existing dialog-lifetime Maps cannot isolate equal-version requests across queries; Solid owner cleanup already provides the required lifetime boundary.
 - TDD slice: retain controlled old response while new query reaches the same Session; verify fresh text appears before releasing old response, then verify fresh text survives old response completion. Include a pending new response while old finally completes and a later same-query batch, so old cleanup cannot defeat new in-flight dedupe. Existing same-query dedupe and browse snapshot tests remain required.
-- File budget: only dialog component and its existing test file receive further behavior edits; total task remains 2 production files, anticipated <300 production changed lines (<800). No schema/storage/config change. Chinese comment hard gate remains C >= ceil(E*0.15) across production plus tests, with meaningful owner/race/test explanations.
+- File budget: only dialog component and its existing test file receive further behavior edits; total task remains 2 production files, anticipated <300 production changed lines (<800). No schema/storage/config change. Chinese comment hard gate remains C >= ceil(E\*0.15) across production plus tests, with meaningful owner/race/test explanations.
 - Verification: original extracted-effect loop, component regression, all four §18 test files, package-local typecheck, coverage inventory, scoped diff check, and six-keyword HTTP protocol replay on an explicitly isolated database copy. HTTP status and <=3s average must be asserted; replay remains distinct from terminal-render timing. Warm-up runs do not establish OS cold-cache SLA.
 - Audit record: both fresh R4 implementation audits returned BLOCK on this same B-01 (`ses_ee80c2268ffeY3mAXG5XSJvjVf`, `ses_ee80c2208ffeVV40hi0OdVMU4g`). Those findings supersede the earlier R4 release claim. The supposed one-trigger residual window is withdrawn: R4 could retain stale content indefinitely within that query.
 - No open product decision: repair the newly introduced lifecycle regression at its owner, retain intra-query performance optimization. Audit is full original scope. All earlier 10% comment-threshold interpretations are superseded by the user's and policy's mandatory 15%.
@@ -238,60 +238,60 @@ R5 supersedes the R4 lifecycle pseudocode below; server SQL, snapshots, ordering
 
 ## 11. Secondary and Replacement Path Inventory
 
-| Path | Current or proposed | Classification | Produces success? | Decision-surface share | Disposition |
-| --- | --- | --- | --- | --- | --- |
-| B1 title 首屏 + B2 scan | current | primary-contract branch | yes | 本任务不改 | preserve |
-| 预览失败静默（catch 忽略） | current | existing shipped 行为（行无预览即为降级外观，非伪造成功） | no | 既有 | preserve 原样 |
-| 浏览态（空 query）预览加载 | current | primary-contract branch | yes | 与搜索共用同一 effect | preserve + 同样去重 |
-| 预览空结果缓存为 `[]` | proposed | 主合同内分支（响应缺省 ID 的客户端记账） | no（不产出数据） | 小 | 纳入设计，防重复请求 |
-| 失败时回退旧整批重取 | not proposed | forbidden fallback | would yes | — | reject |
-| 投影/FTS/新索引 | rejected by user | forbidden（存储格式变更） | — | — | reject |
+| Path                       | Current or proposed | Classification                                            | Produces success? | Decision-surface share | Disposition          |
+| -------------------------- | ------------------- | --------------------------------------------------------- | ----------------- | ---------------------- | -------------------- |
+| B1 title 首屏 + B2 scan    | current             | primary-contract branch                                   | yes               | 本任务不改             | preserve             |
+| 预览失败静默（catch 忽略） | current             | existing shipped 行为（行无预览即为降级外观，非伪造成功） | no                | 既有                   | preserve 原样        |
+| 浏览态（空 query）预览加载 | current             | primary-contract branch                                   | yes               | 与搜索共用同一 effect  | preserve + 同样去重  |
+| 预览空结果缓存为 `[]`      | proposed            | 主合同内分支（响应缺省 ID 的客户端记账）                  | no（不产出数据）  | 小                     | 纳入设计，防重复请求 |
+| 失败时回退旧整批重取       | not proposed        | forbidden fallback                                        | would yes         | —                      | reject               |
+| 投影/FTS/新索引            | rejected by user    | forbidden（存储格式变更）                                 | —                 | —                      | reject               |
 
 诊断面估算：0 新增分支超出主合同；无新建 alternate success path。
 
 ## 12. Workaround Deletion and Replacement
 
-| Existing workaround or duplicate | Why it existed | Why the approved route supersedes it | Delete or collapse location |
-| --- | --- | --- | --- |
-| 每批整集合预览重取（含全量 abort+替换） | 初版以「sessions 变化即整体刷新」为最简正确实现 | 版本键去重在同一 owner 内给出同新鲜度、子集取数 | `dialog-session-list.tsx` 预览 effect 原位置换 |
-| 窗口函数全历史排名 | 单条 SQL 替代 N×M 分页时的直接实现 | 索引早停查询在同一 handler 内给出同语义、限量读取 | `handlers/session.ts` preview SQL 原位置换 |
+| Existing workaround or duplicate        | Why it existed                                  | Why the approved route supersedes it              | Delete or collapse location                    |
+| --------------------------------------- | ----------------------------------------------- | ------------------------------------------------- | ---------------------------------------------- |
+| 每批整集合预览重取（含全量 abort+替换） | 初版以「sessions 变化即整体刷新」为最简正确实现 | 版本键去重在同一 owner 内给出同新鲜度、子集取数   | `dialog-session-list.tsx` 预览 effect 原位置换 |
+| 窗口函数全历史排名                      | 单条 SQL 替代 N×M 分页时的直接实现              | 索引早停查询在同一 handler 内给出同语义、限量读取 | `handlers/session.ts` preview SQL 原位置换     |
 
 无遗留 workaround；被替换代码直接删除，不保留并存路径。
 
 ## 13. Forward Traceability
 
-| Requirement or invariant | Production path | Planned file/change | Behavioral test |
-| --- | --- | --- | --- |
-| INV-01 搜索语义不变 | 不改 `searchCondition`/`searchScan` | 无改动 | 既有 `session-list.test.ts` progressive 系列保持绿 |
-| INV-02 预览内容契约 | 新有界 SQL，谓词逐字保留；输入侧 Set 去重 + floor(limit) | `handlers/session.ts` preview | 既有 15 用例保持绿 + 新增重复 ID/非整数 limit 用例（对 R3 实现为红） |
-| INV-03 无存储变更 | 仅查询与客户端编排 | 两个生产文件 | git diff 不含 `*.sql.ts`/`migration/` |
-| INV-04 无红测 | — | — | §18 全部测试命令绿 |
-| INV-05 失效时机等价 | 版本键 = `${id}:${time.updated}`；身份快照；缓存生命周期=单 query | `dialog-session-list.tsx` | 新增：跨批仅取新增；同版本不重取；版本变化仅重取该 session；空预览不重复请求；可变对象身份漂移守卫；改词重搜刷新恢复 |
-| INV-06 平均 ≤3 秒 | 上述两处修复叠加 | 同上 | §18 验收脚本（真实 handler + 数据副本回放）平均 ≤3s 且预览映射与基线全等 |
+| Requirement or invariant | Production path                                                   | Planned file/change           | Behavioral test                                                                                                      |
+| ------------------------ | ----------------------------------------------------------------- | ----------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| INV-01 搜索语义不变      | 不改 `searchCondition`/`searchScan`                               | 无改动                        | 既有 `session-list.test.ts` progressive 系列保持绿                                                                   |
+| INV-02 预览内容契约      | 新有界 SQL，谓词逐字保留；输入侧 Set 去重 + floor(limit)          | `handlers/session.ts` preview | 既有 15 用例保持绿 + 新增重复 ID/非整数 limit 用例（对 R3 实现为红）                                                 |
+| INV-03 无存储变更        | 仅查询与客户端编排                                                | 两个生产文件                  | git diff 不含 `*.sql.ts`/`migration/`                                                                                |
+| INV-04 无红测            | —                                                                 | —                             | §18 全部测试命令绿                                                                                                   |
+| INV-05 失效时机等价      | 版本键 = `${id}:${time.updated}`；身份快照；缓存生命周期=单 query | `dialog-session-list.tsx`     | 新增：跨批仅取新增；同版本不重取；版本变化仅重取该 session；空预览不重复请求；可变对象身份漂移守卫；改词重搜刷新恢复 |
+| INV-06 平均 ≤3 秒        | 上述两处修复叠加                                                  | 同上                          | §18 验收脚本（真实 handler + 数据副本回放）平均 ≤3s 且预览映射与基线全等                                             |
 
 ## 14. Reverse Traceability
 
-| Proposed production concept | Requirement ID | Evidence | Why existing logic cannot carry it |
-| --- | --- | --- | --- |
-| 逐 session 索引早停预览查询 | INV-06 | 实测 400 session：792–945ms → 103ms，结果逐字节一致 | 窗口排名在过滤 `msg_rn` 前必须物化每 session 全部合格行，结构性无法早停 |
-| 版本键预览缓存（弹窗局部） | INV-06/INV-05 | 实测预览占 84–94% 且 13–15 次重复请求；`time.updated` 由 `session.updated` 唯一驱动 | 现有 effect 以数组引用为触发事实，无版本记忆，必然整批重取 |
-| 空预览记账（`[]` 入缓存） | INV-06 | 响应缺省 ID 是既有契约；缺记账则每批重取空会话 | 现有「data 合并」语义无法区分「未取过」与「取过为空」 |
-| 在途代完成写缓存 + latest 版本校验（代间不 abort，abort 仅限 dispose） | INV-05/竞态 | 在途代必然完成写缓存，终止代不丢预览（审计 B-01 修正方向认可机制）；latest 校验挡住旧版本迟到写展示 record | 现有守卫面向整批替换且天然全覆盖；子集化后必须有等价完成保证，否则终止代丢键；R2 abort+carry 实测在级联触发下产生定时相关重复请求 |
-| 请求身份快照 `{id, key}`（R4） | INV-05/竞态 | 审计对照实验：reconcile 原地突变 Store 对象后，响应阶段重读 time.updated 产生错版本缓存/覆盖/在途键遗留 | HEAD 只持字符串 ID 无此问题；快照是 R3 版本键机制的正确实现前提 |
-| 缓存生命周期=单 query（R4） | 保留既有展示语义/INV-05 | 审计对照实验：同时间戳内容修改后重新搜索，HEAD 重取恢复、R3 缓存跳过 | HEAD 每次 sessions() 变化整批重取，改词重搜即刷新；去重收益主体在单搜索内跨批，不受 query 边界清空影响 |
-| 输入侧 Set 去重 + floor(limit)（R4） | INV-02 | 审计最小复现：`[id,id]` 重复追加突破 limit；`limit=1.5` 触发 SQLITE_MISMATCH | 逐 ID 循环与直接 LIMIT 丢失了旧 IN/msg_rn<=limit 的输入域语义 |
+| Proposed production concept                                            | Requirement ID          | Evidence                                                                                                   | Why existing logic cannot carry it                                                                                                |
+| ---------------------------------------------------------------------- | ----------------------- | ---------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| 逐 session 索引早停预览查询                                            | INV-06                  | 实测 400 session：792–945ms → 103ms，结果逐字节一致                                                        | 窗口排名在过滤 `msg_rn` 前必须物化每 session 全部合格行，结构性无法早停                                                           |
+| 版本键预览缓存（弹窗局部）                                             | INV-06/INV-05           | 实测预览占 84–94% 且 13–15 次重复请求；`time.updated` 由 `session.updated` 唯一驱动                        | 现有 effect 以数组引用为触发事实，无版本记忆，必然整批重取                                                                        |
+| 空预览记账（`[]` 入缓存）                                              | INV-06                  | 响应缺省 ID 是既有契约；缺记账则每批重取空会话                                                             | 现有「data 合并」语义无法区分「未取过」与「取过为空」                                                                             |
+| 在途代完成写缓存 + latest 版本校验（代间不 abort，abort 仅限 dispose） | INV-05/竞态             | 在途代必然完成写缓存，终止代不丢预览（审计 B-01 修正方向认可机制）；latest 校验挡住旧版本迟到写展示 record | 现有守卫面向整批替换且天然全覆盖；子集化后必须有等价完成保证，否则终止代丢键；R2 abort+carry 实测在级联触发下产生定时相关重复请求 |
+| 请求身份快照 `{id, key}`（R4）                                         | INV-05/竞态             | 审计对照实验：reconcile 原地突变 Store 对象后，响应阶段重读 time.updated 产生错版本缓存/覆盖/在途键遗留    | HEAD 只持字符串 ID 无此问题；快照是 R3 版本键机制的正确实现前提                                                                   |
+| 缓存生命周期=单 query（R4）                                            | 保留既有展示语义/INV-05 | 审计对照实验：同时间戳内容修改后重新搜索，HEAD 重取恢复、R3 缓存跳过                                       | HEAD 每次 sessions() 变化整批重取，改词重搜即刷新；去重收益主体在单搜索内跨批，不受 query 边界清空影响                            |
+| 输入侧 Set 去重 + floor(limit)（R4）                                   | INV-02                  | 审计最小复现：`[id,id]` 重复追加突破 limit；`limit=1.5` 触发 SQLITE_MISMATCH                               | 逐 ID 循环与直接 LIMIT 丢失了旧 IN/msg_rn<=limit 的输入域语义                                                                     |
 
 无未映射的生产概念。
 
 ## 15. File-Level Change Plan
 
-| File | Add / modify / delete | Exact responsibility of the change | Expected line delta |
-| --- | --- | --- | --- |
-| `packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts` | modify | preview handler：窗口 CTE → 逐 session 索引早停查询；谓词/归一化/响应不变；输入侧 Set 去重 + floor(limit)；修正过时「窗口函数」说明 | +75 / −58 |
-| `packages/opencode/src/cli/cmd/tui/component/dialog-session-list.tsx` | modify | 预览 effect：身份快照 + 版本键缓存（单 query 生命周期）+ 在途去重 + 缺失子集请求 + 空结果记账；静默失败语义与 dispose 时统一 abort 保留 | +95 / −40 |
-| `packages/opencode/test/server/session-preview.test.ts` | modify | 新增语义等价护栏 + 重复 ID/非整数 limit 输入域用例 | +170 / 0 |
-| `packages/opencode/test/cli/cmd/tui/dialog-session-list.test.tsx` | modify | 新增去重/失效/空结果请求计数 + 身份漂移守卫 + 改词刷新恢复用例 | +230 / 0 |
-| `docs/plans/session-list-preview-performance.md` | add | 本计划 | n/a（非生产） |
+| File                                                                       | Add / modify / delete | Exact responsibility of the change                                                                                                      | Expected line delta |
+| -------------------------------------------------------------------------- | --------------------- | --------------------------------------------------------------------------------------------------------------------------------------- | ------------------- |
+| `packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts` | modify                | preview handler：窗口 CTE → 逐 session 索引早停查询；谓词/归一化/响应不变；输入侧 Set 去重 + floor(limit)；修正过时「窗口函数」说明     | +75 / −58           |
+| `packages/opencode/src/cli/cmd/tui/component/dialog-session-list.tsx`      | modify                | 预览 effect：身份快照 + 版本键缓存（单 query 生命周期）+ 在途去重 + 缺失子集请求 + 空结果记账；静默失败语义与 dispose 时统一 abort 保留 | +95 / −40           |
+| `packages/opencode/test/server/session-preview.test.ts`                    | modify                | 新增语义等价护栏 + 重复 ID/非整数 limit 输入域用例                                                                                      | +170 / 0            |
+| `packages/opencode/test/cli/cmd/tui/dialog-session-list.test.tsx`          | modify                | 新增去重/失效/空结果请求计数 + 身份漂移守卫 + 改词刷新恢复用例                                                                          | +230 / 0            |
+| `docs/plans/session-list-preview-performance.md`                           | add                   | 本计划                                                                                                                                  | n/a（非生产）       |
 
 生产文件：2 个（≤6）；生产行变更：约 +170/−98（≤800）。不改 `session-list-params.ts`、`dialog-select.tsx`、`search.ts`、`session.ts`、schema/migration。
 
@@ -299,26 +299,26 @@ R5 supersedes the R4 lifecycle pseudocode below; server SQL, snapshots, ordering
 
 公共 seam：`POST /session/preview`（server 行为）与 `DialogSessionList` 经 `withSessionList` 假 transport 的请求序列（TUI 行为）。
 
-| Order | Red behavior | Why current code fails | Minimal green behavior | Regression protected |
-| --- | --- | --- | --- | --- |
-| 0（等价护栏，先于改动即绿） | 等时戳按 `id DESC` 定序、part 逆序插入按 `id ASC` 拼接、最新 user 消息无可见 text 时回退到更早消息、limit=1/3/10 | 现状即应通过（语义保持证明基线） | 不改代码 | INV-02 |
-| 1 | 两批渐进命中重叠时，第二次 preview POST 只含新增 ID；零新增批不发请求 | 现实现每批 POST 全量 ID（红） | 版本键缓存 + missing 子集请求 | INV-06 |
-| 2 | 某 session `time.updated` 变化后，仅该 session 被重新请求；其余沿用缓存 | 现实现全量重取（红） | 键含版本，旧键自然失配 | INV-05 |
-| 3 | 响应缺省 ID（无文本会话）在后续批次不再被请求 | 现实现每批重发（红） | 缺省 ID 记 `[]` 入缓存 | INV-06 |
-| 4 | 预览请求失败后，下次触发重试同一子集且不写缓存 | 现实现整批重试（行为差：范围）——此条验证收窄后的等价重试语义 | 失败不写缓存 | INV-05 |
-| 5 | 同版本在途键不重复请求（上一批 [a] 在途时新到 [b] 只请求 [b]）；session 版本推进后旧版本迟到响应不得覆盖展示 record | 现实现每代整批重取（对「不重复请求」为红）；R2 abort+carry 在级联触发下重复请求同内容（红）；此条钉住在途去重与 latest 守卫 | 在途集合去重 + latest 版本校验 | INV-05 |
-| 6（R4） | 请求挂起期间同一 session 对象被原地更新（模拟 reconcile），迟到旧响应不得错标新版本/覆盖新版/遗留在途键 | R3 实现响应阶段重读可变对象 time.updated（红） | 发出时身份快照贯穿请求/写回/校验/清理 | INV-05 |
-| 7（R4） | 预览缓存后改词重新搜索，同版本 session 被重新请求（恢复旧实现的刷新恢复路径） | R3 缓存跨 query 存活跳过（红） | search() 变化清空版本缓存 | 保留既有展示语义 |
-| 8（R4） | 重复 sessionID 与 limit=1.5 的响应与单 ID/floor 语义一致 | R3 逐 ID 循环重复追加、SQLite LIMIT 报错（红） | Set 去重 + Math.floor(limit) | INV-02 |
+| Order                       | Red behavior                                                                                                        | Why current code fails                                                                                                      | Minimal green behavior                | Regression protected |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- | ------------------------------------- | -------------------- |
+| 0（等价护栏，先于改动即绿） | 等时戳按 `id DESC` 定序、part 逆序插入按 `id ASC` 拼接、最新 user 消息无可见 text 时回退到更早消息、limit=1/3/10    | 现状即应通过（语义保持证明基线）                                                                                            | 不改代码                              | INV-02               |
+| 1                           | 两批渐进命中重叠时，第二次 preview POST 只含新增 ID；零新增批不发请求                                               | 现实现每批 POST 全量 ID（红）                                                                                               | 版本键缓存 + missing 子集请求         | INV-06               |
+| 2                           | 某 session `time.updated` 变化后，仅该 session 被重新请求；其余沿用缓存                                             | 现实现全量重取（红）                                                                                                        | 键含版本，旧键自然失配                | INV-05               |
+| 3                           | 响应缺省 ID（无文本会话）在后续批次不再被请求                                                                       | 现实现每批重发（红）                                                                                                        | 缺省 ID 记 `[]` 入缓存                | INV-06               |
+| 4                           | 预览请求失败后，下次触发重试同一子集且不写缓存                                                                      | 现实现整批重试（行为差：范围）——此条验证收窄后的等价重试语义                                                                | 失败不写缓存                          | INV-05               |
+| 5                           | 同版本在途键不重复请求（上一批 [a] 在途时新到 [b] 只请求 [b]）；session 版本推进后旧版本迟到响应不得覆盖展示 record | 现实现每代整批重取（对「不重复请求」为红）；R2 abort+carry 在级联触发下重复请求同内容（红）；此条钉住在途去重与 latest 守卫 | 在途集合去重 + latest 版本校验        | INV-05               |
+| 6（R4）                     | 请求挂起期间同一 session 对象被原地更新（模拟 reconcile），迟到旧响应不得错标新版本/覆盖新版/遗留在途键             | R3 实现响应阶段重读可变对象 time.updated（红）                                                                              | 发出时身份快照贯穿请求/写回/校验/清理 | INV-05               |
+| 7（R4）                     | 预览缓存后改词重新搜索，同版本 session 被重新请求（恢复旧实现的刷新恢复路径）                                       | R3 缓存跨 query 存活跳过（红）                                                                                              | search() 变化清空版本缓存             | 保留既有展示语义     |
+| 8（R4）                     | 重复 sessionID 与 limit=1.5 的响应与单 ID/floor 语义一致                                                            | R3 逐 ID 循环重复追加、SQLite LIMIT 报错（红）                                                                              | Set 去重 + Math.floor(limit)          | INV-02               |
 
 性能 red→green：§8 反馈环即 red（10.72s > 3s）；实施后 §18 验收脚本重跑为 green（≤3s）。性能断言只在外部验收脚本，不写入 CI 测试（避免计时 flake）。
 
 ## 17. Chinese Comment Budget
 
-| Metric | Estimate | Method |
-| --- | --- | --- |
-| Effective changed code lines `E` | ≈560（生产 ≈170 + 测试 ≈390，不含 import/空行/纯移动/文档） | 按 §15 估算，实施后记实际值；口径=生产+测试（R4 纠正：不得仅计生产） |
-| Required Chinese explanatory comments `C` | ≥ ceil(E×0.15)，按最终实际 E 重算；15% 为交付目标线（10% 仅为不阻塞下限） | 原始要求与 policy |
+| Metric                                    | Estimate                                                                  | Method                                                               |
+| ----------------------------------------- | ------------------------------------------------------------------------- | -------------------------------------------------------------------- |
+| Effective changed code lines `E`          | ≈560（生产 ≈170 + 测试 ≈390，不含 import/空行/纯移动/文档）               | 按 §15 估算，实施后记实际值；口径=生产+测试（R4 纠正：不得仅计生产） |
+| Required Chinese explanatory comments `C` | ≥ ceil(E×0.15)，按最终实际 E 重算；15% 为交付目标线（10% 仅为不阻塞下限） | 原始要求与 policy                                                    |
 
 注释落点（均为非显然约束，非复述）：
 
@@ -337,38 +337,38 @@ R5 supersedes the R4 lifecycle pseudocode below; server SQL, snapshots, ordering
 
 ## 18. Verification
 
-| Command | Working directory | Evidence produced |
-| --- | --- | --- |
-| `bun test test/server/session-preview.test.ts` | `packages/opencode` | 等价护栏、重复 ID/非整数 limit 用例与既有 15 用例全绿（INV-02/INV-04） |
-| `bun test test/cli/cmd/tui/dialog-session-list.test.tsx` | `packages/opencode` | 去重/失效/空记账/失败重试用例与既有用例全绿（INV-05/INV-04） |
-| `bun test test/cli/cmd/tui/session-list-params.test.ts` | `packages/opencode` | 未改文件回归绿 |
-| `bun test test/server/session-list.test.ts` | `packages/opencode` | 搜索语义回归绿（INV-01） |
-| `bun run script/httpapi-exercise.ts --mode coverage --fail-on-missing --fail-on-skip` | `packages/opencode` | 路由覆盖含 `/session/preview` 探针（INV-04）；完整三模式为 `bun run test:httpapi` |
-| `bun typecheck` | `packages/opencode` | 类型绿 |
-| `git diff --stat` 与 `git status` | repo root | 生产 2 文件、≤800 行、无 schema/migration 变更（INV-03） |
-| 验收回放：`bun D:\Temp\opencode\session-search-acceptance-20261007.mjs`（实施时新建） | `D:\Temp\opencode`（cwd 依赖 `packages/opencode` 解析，脚本置 `OPENCODE_DB` 指向真实库副本） | INV-06：真实 `Server.Default().app.request` + `provideInstance`（镜像 `session-preview.test.ts` 拓扑）对副本库回放 6 关键词的旧式/新式客户端协议；报告每词总时长与平均、预览映射与实施前基线全等 digest、平均 ≤3s。副本流程：`Copy-Item opencode.db*` 到 temp 目录后置 `OPENCODE_DB`，迁移只作用于副本。若进程内 Server 引导在该脚本环境不可行，则以同一脚本经 `opencode serve`（指向副本）HTTP 回放为记录的同口径替代验收缝 |
-| 等价参考（已运行，实施后用同脚本复核 SQL 形状）：`bun D:\Temp\opencode\session-search-bench-20261007.mjs <n>` | `D:\Temp\opencode` | SQL 级基线与对照、排序差分夹具 |
+| Command                                                                                                       | Working directory                                                                            | Evidence produced                                                                                                                                                                                                                                                                                                                                                                                                            |
+| ------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `bun test test/server/session-preview.test.ts`                                                                | `packages/opencode`                                                                          | 等价护栏、重复 ID/非整数 limit 用例与既有 15 用例全绿（INV-02/INV-04）                                                                                                                                                                                                                                                                                                                                                       |
+| `bun test test/cli/cmd/tui/dialog-session-list.test.tsx`                                                      | `packages/opencode`                                                                          | 去重/失效/空记账/失败重试用例与既有用例全绿（INV-05/INV-04）                                                                                                                                                                                                                                                                                                                                                                 |
+| `bun test test/cli/cmd/tui/session-list-params.test.ts`                                                       | `packages/opencode`                                                                          | 未改文件回归绿                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `bun test test/server/session-list.test.ts`                                                                   | `packages/opencode`                                                                          | 搜索语义回归绿（INV-01）                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `bun run script/httpapi-exercise.ts --mode coverage --fail-on-missing --fail-on-skip`                         | `packages/opencode`                                                                          | 路由覆盖含 `/session/preview` 探针（INV-04）；完整三模式为 `bun run test:httpapi`                                                                                                                                                                                                                                                                                                                                            |
+| `bun typecheck`                                                                                               | `packages/opencode`                                                                          | 类型绿                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `git diff --stat` 与 `git status`                                                                             | repo root                                                                                    | 生产 2 文件、≤800 行、无 schema/migration 变更（INV-03）                                                                                                                                                                                                                                                                                                                                                                     |
+| 验收回放：`bun D:\Temp\opencode\session-search-acceptance-20261007.mjs`（实施时新建）                         | `D:\Temp\opencode`（cwd 依赖 `packages/opencode` 解析，脚本置 `OPENCODE_DB` 指向真实库副本） | INV-06：真实 `Server.Default().app.request` + `provideInstance`（镜像 `session-preview.test.ts` 拓扑）对副本库回放 6 关键词的旧式/新式客户端协议；报告每词总时长与平均、预览映射与实施前基线全等 digest、平均 ≤3s。副本流程：`Copy-Item opencode.db*` 到 temp 目录后置 `OPENCODE_DB`，迁移只作用于副本。若进程内 Server 引导在该脚本环境不可行，则以同一脚本经 `opencode serve`（指向副本）HTTP 回放为记录的同口径替代验收缝 |
+| 等价参考（已运行，实施后用同脚本复核 SQL 形状）：`bun D:\Temp\opencode\session-search-bench-20261007.mjs <n>` | `D:\Temp\opencode`                                                                           | SQL 级基线与对照、排序差分夹具                                                                                                                                                                                                                                                                                                                                                                                               |
 
 ## 19. Diff Budget
 
-| Metric | Estimate | Justification |
-| --- | --- | --- |
-| Files added | 0 生产（计划文档 1） | 无新模块需求 |
-| Files modified | 2 生产 + 2 测试 | §15 |
-| Files deleted | 0 | — |
-| Production lines | ≈ +170 / −98（≤800，≤6 文件） | 两处 owner 内置换 + R4 修正 |
-| Test lines | ≈ +400 / 0 | 护栏 + 去重 + 身份漂移/改词刷新/输入域用例 |
-| Generated lines | 0 | 无 SDK/migration 再生成 |
+| Metric           | Estimate                      | Justification                              |
+| ---------------- | ----------------------------- | ------------------------------------------ |
+| Files added      | 0 生产（计划文档 1）          | 无新模块需求                               |
+| Files modified   | 2 生产 + 2 测试               | §15                                        |
+| Files deleted    | 0                             | —                                          |
+| Production lines | ≈ +170 / −98（≤800，≤6 文件） | 两处 owner 内置换 + R4 修正                |
+| Test lines       | ≈ +400 / 0                    | 护栏 + 去重 + 身份漂移/改词刷新/输入域用例 |
+| Generated lines  | 0                             | 无 SDK/migration 再生成                    |
 
 ## 20. Real Risks and Open Decisions
 
-| Risk | Class | Mitigation |
-| --- | --- | --- |
-| 逐 session 循环最多 400 次同步查询的调用开销 | observed（实测 400 ID 103ms 热缓存） | 保持单 HTTP 批量端点；不测冷缓存 SLA |
-| 稀有关键词（零命中/冷存储类）总时长仍约 3.2–3.9s，单批最长同步执行可达 1.3–1.9s | observed（回放实测） | 验收为六词平均；该成本属 `instr` 正文扫描，投影/FTS 已被用户否决 |
-| `time.updated` 不变而正文变化的理论窗口（part 写不 touch） | reachable（审计已证实可达） | R4：缓存生命周期收窄为单 query，恢复旧实现「改词重搜即重取」的恢复路径；弹窗关闭重建缓存兜底 |
-| 弹窗内缓存与 SSE 更新竞争（迟到响应覆盖） | reachable | latest 版本键校验 + dispose 时统一 abort；代间不 abort，在途代必完成（审计 B-01 修复即此） |
-| 计时回放不含 HTTP 传输与终端渲染，P0 代理均值 ≈1.87s 距 3s 阈值余量 ≈1.1s | observed | §18 验收脚本经真实 handler 回放兜底；若真实端到端均值 >3s，按实测热点再评估（不回退本设计） |
+| Risk                                                                            | Class                                | Mitigation                                                                                   |
+| ------------------------------------------------------------------------------- | ------------------------------------ | -------------------------------------------------------------------------------------------- |
+| 逐 session 循环最多 400 次同步查询的调用开销                                    | observed（实测 400 ID 103ms 热缓存） | 保持单 HTTP 批量端点；不测冷缓存 SLA                                                         |
+| 稀有关键词（零命中/冷存储类）总时长仍约 3.2–3.9s，单批最长同步执行可达 1.3–1.9s | observed（回放实测）                 | 验收为六词平均；该成本属 `instr` 正文扫描，投影/FTS 已被用户否决                             |
+| `time.updated` 不变而正文变化的理论窗口（part 写不 touch）                      | reachable（审计已证实可达）          | R4：缓存生命周期收窄为单 query，恢复旧实现「改词重搜即重取」的恢复路径；弹窗关闭重建缓存兜底 |
+| 弹窗内缓存与 SSE 更新竞争（迟到响应覆盖）                                       | reachable                            | latest 版本键校验 + dispose 时统一 abort；代间不 abort，在途代必完成（审计 B-01 修复即此）   |
+| 计时回放不含 HTTP 传输与终端渲染，P0 代理均值 ≈1.87s 距 3s 阈值余量 ≈1.1s       | observed                             | §18 验收脚本经真实 handler 回放兜底；若真实端到端均值 >3s，按实测热点再评估（不回退本设计）  |
 
 ### Open Decisions Requiring the User
 
@@ -398,10 +398,10 @@ The independent auditor must:
 
 （R3 实现后经双审计归因复核发现四项本次引入/扩大回归，R4 修订并清空 approval，重新全范围审计；见 §10 R3→R4 修订原因与 §24 记录。）
 
-| Round | Audited revision | Full scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | R1 | yes | B-01（abort-supersede 丢弃仍被需要的预览键，reachable，INV-05/用户体验约束）——R2 以「abort 不缩小覆盖范围，被 abort 代未缓存键随下一代携带」修复 | (1) 既有预览用例数为 12 非 10；(2) `冷存储` 预览占比实为 53–56%；(3) 预览请求数实为 14–15；(4) `httpapi-exercise` preview 探针应入验证清单；(5) 传输开销应入风险表 | BLOCK | task ses_ee9359b86ffeB8WENFNFhd6hom |
-| 2 | R2 | yes | No blocking findings. | (1) §10 「missing 为空」括号句与 abort 次序的文字瑕疵（实现时扫清，不改合同）；(2) §8 「80–95%」与重算 80.7–92.2% 的约 3pp 近似差 | APPROVE（Release verdict 原文：「APPROVE — applies exclusively to plan revision R2 as audited. Permitted transition per policy: Status: approved, Approved revision: R2, Implementation allowed: yes. Any substantive edit after this verdict invalidates it and requires a new full-scope audit.」；B-01 re-check: resolved） | task ses_ee9359b86ffeB8WENFNFhd6hom |
+| Round | Audited revision | Full scope? | Blocking findings                                                                                                                                | Non-blocking findings                                                                                                                                              | Result                                                                                                                                                                                                                                                                                                                         | Invocation reference                |
+| ----- | ---------------- | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------- |
+| 1     | R1               | yes         | B-01（abort-supersede 丢弃仍被需要的预览键，reachable，INV-05/用户体验约束）——R2 以「abort 不缩小覆盖范围，被 abort 代未缓存键随下一代携带」修复 | (1) 既有预览用例数为 12 非 10；(2) `冷存储` 预览占比实为 53–56%；(3) 预览请求数实为 14–15；(4) `httpapi-exercise` preview 探针应入验证清单；(5) 传输开销应入风险表 | BLOCK                                                                                                                                                                                                                                                                                                                          | task ses_ee9359b86ffeB8WENFNFhd6hom |
+| 2     | R2               | yes         | No blocking findings.                                                                                                                            | (1) §10 「missing 为空」括号句与 abort 次序的文字瑕疵（实现时扫清，不改合同）；(2) §8 「80–95%」与重算 80.7–92.2% 的约 3pp 近似差                                  | APPROVE（Release verdict 原文：「APPROVE — applies exclusively to plan revision R2 as audited. Permitted transition per policy: Status: approved, Approved revision: R2, Implementation allowed: yes. Any substantive edit after this verdict invalidates it and requires a new full-scope audit.」；B-01 re-check: resolved） | task ses_ee9359b86ffeB8WENFNFhd6hom |
 
 R2→R3 修订说明：R2 获 APPROVE 后进入实现；TDD 红绿中发现 R2 的 abort+carry 机制在 Solid 级联信号写下产生定时相关的重复请求（实测：title [c] 后 phase 切换即在途重发 [c]，请求序列随定时漂移），属实质行为差异，按流程递增 revision、清空 approval 并重新全范围审计。R3 仅替换预览 effect 的代际管理机制（审计 B-01 修正方向中认可的「在途代完成 + abort 仅限 dispose」），其余范围、文件计划、不变量与验收口径不变。
 
@@ -412,12 +412,12 @@ R2→R3 修订说明：R2 获 APPROVE 后进入实现；TDD 红绿中发现 R2 �
 
 ### Actual Files and Diff
 
-| File | Change | Diff（numstat） |
-| --- | --- | --- |
-| `packages/opencode/src/cli/cmd/tui/component/dialog-session-list.tsx` | 预览 effect 置换：身份快照 {id,key} + 版本键缓存（单 query 生命周期，search() 变化清空）+ 在途去重 + latest 守卫 + 空结果记账；代间不 abort，abort 仅限 dispose | +56 / −9 |
-| `packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts` | preview handler：窗口 CTE → 逐 session 索引早停查询；输入侧 Set 去重 + floor(limit)；谓词/归一化/响应形状逐字保留；修正过时「窗口函数」说明 | +63 / −59 |
-| `packages/opencode/test/cli/cmd/tui/dialog-session-list.test.tsx` | 新增 8 用例（增量去重/版本键重取/空记账/失败重试/在途去重/迟到版本守卫/browse 身份漂移守卫/改词刷新恢复）+ harness 暴露 emit/sync | +304 / −2 |
-| `packages/opencode/test/server/session-preview.test.ts` | 新增 5 用例（等时戳 id 定序/part 逆序/最新不可见回退/重复 ID 集合语义/非整数 limit floor 语义） | +134 / 0 |
+| File                                                                       | Change                                                                                                                                                          | Diff（numstat） |
+| -------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------- |
+| `packages/opencode/src/cli/cmd/tui/component/dialog-session-list.tsx`      | 预览 effect 置换：身份快照 {id,key} + 版本键缓存（单 query 生命周期，search() 变化清空）+ 在途去重 + latest 守卫 + 空结果记账；代间不 abort，abort 仅限 dispose | +56 / −9        |
+| `packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts` | preview handler：窗口 CTE → 逐 session 索引早停查询；输入侧 Set 去重 + floor(limit)；谓词/归一化/响应形状逐字保留；修正过时「窗口函数」说明                     | +63 / −59       |
+| `packages/opencode/test/cli/cmd/tui/dialog-session-list.test.tsx`          | 新增 8 用例（增量去重/版本键重取/空记账/失败重试/在途去重/迟到版本守卫/browse 身份漂移守卫/改词刷新恢复）+ harness 暴露 emit/sync                               | +304 / −2       |
+| `packages/opencode/test/server/session-preview.test.ts`                    | 新增 5 用例（等时戳 id 定序/part 逆序/最新不可见回退/重复 ID 集合语义/非整数 limit floor 语义）                                                                 | +134 / 0        |
 
 生产文件 2 个（≤6）；生产增删 119+68=187 行（≤800）；无 `*.sql.ts`/`migration/`/SDK/wire 变更。
 
@@ -429,15 +429,15 @@ R2→R3 修订说明：R2 获 APPROVE 后进入实现；TDD 红绿中发现 R2 �
 
 ### Verification Commands and Results
 
-| Command | cwd | Result |
-| --- | --- | --- |
-| `bun test test/server/session-preview.test.ts` | packages/opencode | 17 pass / 0 fail（92.7s） |
-| `bun test test/cli/cmd/tui/dialog-session-list.test.tsx` | packages/opencode | 14 pass / 0 fail（13.3s） |
-| `bun test test/cli/cmd/tui/session-list-params.test.ts` | packages/opencode | 12 pass / 0 fail |
-| `bun test test/server/session-list.test.ts` | packages/opencode | 23 pass / 0 fail（91.2s） |
-| `bun run script/httpapi-exercise.ts --mode coverage --fail-on-missing --fail-on-skip` | packages/opencode | pass=158 fail=0 skip=0 missing=0 |
-| `bun typecheck` | packages/opencode | clean |
-| `git diff --numstat` / `git status` | repo root | 生产 2 文件 +119/−68、无 schema/migration 变更 |
+| Command                                                                               | cwd               | Result                                         |
+| ------------------------------------------------------------------------------------- | ----------------- | ---------------------------------------------- |
+| `bun test test/server/session-preview.test.ts`                                        | packages/opencode | 17 pass / 0 fail（92.7s）                      |
+| `bun test test/cli/cmd/tui/dialog-session-list.test.tsx`                              | packages/opencode | 14 pass / 0 fail（13.3s）                      |
+| `bun test test/cli/cmd/tui/session-list-params.test.ts`                               | packages/opencode | 12 pass / 0 fail                               |
+| `bun test test/server/session-list.test.ts`                                           | packages/opencode | 23 pass / 0 fail（91.2s）                      |
+| `bun run script/httpapi-exercise.ts --mode coverage --fail-on-missing --fail-on-skip` | packages/opencode | pass=158 fail=0 skip=0 missing=0               |
+| `bun typecheck`                                                                       | packages/opencode | clean                                          |
+| `git diff --numstat` / `git status`                                                   | repo root         | 生产 2 文件 +119/−68、无 schema/migration 变更 |
 
 ### Original Feedback-Loop Result
 
@@ -453,22 +453,22 @@ R2→R3 修订说明：R2 获 APPROVE 后进入实现；TDD 红绿中发现 R2 �
 
 ### Actual Secondary and Replacement Path Inventory
 
-| Path | Disposition |
-| --- | --- |
-| 预览失败静默（不写缓存、下触发重试） | 保留原样 |
-| 浏览态（空 query）预览共用同一 effect | 保留，同享版本键去重与身份快照 |
-| 空预览记账 `[]` 入缓存 | 新增（防重取，不产出数据） |
-| 每批整集合预览重取 | 已删除（被单 query 生命周期的版本键缓存取代；改词重搜的刷新恢复路径经 query 边界清空保留） |
-| 窗口函数全历史排名 SQL | 已删除（被索引早停查询取代） |
+| Path                                  | Disposition                                                                                |
+| ------------------------------------- | ------------------------------------------------------------------------------------------ |
+| 预览失败静默（不写缓存、下触发重试）  | 保留原样                                                                                   |
+| 浏览态（空 query）预览共用同一 effect | 保留，同享版本键去重与身份快照                                                             |
+| 空预览记账 `[]` 入缓存                | 新增（防重取，不产出数据）                                                                 |
+| 每批整集合预览重取                    | 已删除（被单 query 生命周期的版本键缓存取代；改词重搜的刷新恢复路径经 query 边界清空保留） |
+| 窗口函数全历史排名 SQL                | 已删除（被索引早停查询取代）                                                               |
 
 ### Chinese Comment Calculation
 
-| Metric | Actual | Exclusions and evidence |
-| --- | --- | --- |
-| Effective changed code lines `E` | 427（生产+测试口径，新增代码行） | 机械统计 git diff；排除空行、注释行、11 行纯移动（含归一化/过滤行） |
-| Qualifying Chinese comment lines `C` | 83 | 排除 3 行纯移动旧注释；其余均为不变量/边界/契约解释（身份快照防 reconcile 突变、单 query 生命周期恢复改词刷新、Set 去重保持 IN 集合语义、floor 对齐 msg_rn、索引早停与窗口排名等价、在途去重边界、wire 缺省 ID 契约、失败重试语义、测试意图与视口证据边界等） |
-| Ratio `C / E` | 83/427 ≈ 19.4% | — |
-| Required minimum `C` | 65（15% 目标线） | `ceil(427 × 0.15)`；10% 下限=43 亦已越过 |
+| Metric                               | Actual                           | Exclusions and evidence                                                                                                                                                                                                                                       |
+| ------------------------------------ | -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Effective changed code lines `E`     | 427（生产+测试口径，新增代码行） | 机械统计 git diff；排除空行、注释行、11 行纯移动（含归一化/过滤行）                                                                                                                                                                                           |
+| Qualifying Chinese comment lines `C` | 83                               | 排除 3 行纯移动旧注释；其余均为不变量/边界/契约解释（身份快照防 reconcile 突变、单 query 生命周期恢复改词刷新、Set 去重保持 IN 集合语义、floor 对齐 msg_rn、索引早停与窗口排名等价、在途去重边界、wire 缺省 ID 契约、失败重试语义、测试意图与视口证据边界等） |
+| Ratio `C / E`                        | 83/427 ≈ 19.4%                   | —                                                                                                                                                                                                                                                             |
+| Required minimum `C`                 | 65（15% 目标线）                 | `ceil(427 × 0.15)`；10% 下限=43 亦已越过                                                                                                                                                                                                                      |
 
 ### Remaining Unverified Items
 
@@ -479,7 +479,7 @@ R2→R3 修订说明：R2 获 APPROVE 后进入实现；TDD 红绿中发现 R2 �
 
 ## 24. Implementation Audit Record
 
-| Round | Plan revision | Full original scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | R3 | yes | No blocking findings. | (1) §23 diff 数字口径漂移（已按 numstat 实测修正）；(2) 验收基线文件被覆写（已披露，RED 侧由 bench 基线 10.72s 兑底）；(3) E/C 重算 14.7%（生产+测试口径，高于 10% 阻塞线、略低于 15% 目标线） | APPROVE（后经双审计归因复核推翻：R3 实现存在四项本次引入/扩大回归，见 §10 R3→R4 修订原因） | task ses_ee9359b86ffeB8WENFNFhd6hom |
-| 2 | R4 | yes | No blocking findings. | (1) E/C 口径说明（两种计数均 ≈19%，达 15% 目标）；(2) §23 既有披露项保持（未肉眼渲染、冷缓存 SLA、基线日志化、跨 query 在途残余窗口） | APPROVE（Release verdict 原文：「APPROVE — the actual HEAD→final diff of dialog-session-list.tsx, handlers/session.ts, dialog-session-list.test.tsx, and session-preview.test.ts against canonical plan revision R4 is released. All hard gates pass under auditor reproduction: six verification commands green, INV-06 acceptance artifact-backed at 2301ms ≤ 3s, equivalence digest chains intact, E/C gate met at ≈19%.」；六条验证命令与验收产物由 auditor 独立复跑/复核一致） | task ses_ee9359b86ffeB8WENFNFhd6hom |
+| Round | Plan revision | Full original scope? | Blocking findings     | Non-blocking findings                                                                                                                                                                          | Result                                                                                                                                                                                                                                                                                                                                                                                                                                                                              | Invocation reference                |
+| ----- | ------------- | -------------------- | --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------- |
+| 1     | R3            | yes                  | No blocking findings. | (1) §23 diff 数字口径漂移（已按 numstat 实测修正）；(2) 验收基线文件被覆写（已披露，RED 侧由 bench 基线 10.72s 兑底）；(3) E/C 重算 14.7%（生产+测试口径，高于 10% 阻塞线、略低于 15% 目标线） | APPROVE（后经双审计归因复核推翻：R3 实现存在四项本次引入/扩大回归，见 §10 R3→R4 修订原因）                                                                                                                                                                                                                                                                                                                                                                                          | task ses_ee9359b86ffeB8WENFNFhd6hom |
+| 2     | R4            | yes                  | No blocking findings. | (1) E/C 口径说明（两种计数均 ≈19%，达 15% 目标）；(2) §23 既有披露项保持（未肉眼渲染、冷缓存 SLA、基线日志化、跨 query 在途残余窗口）                                                          | APPROVE（Release verdict 原文：「APPROVE — the actual HEAD→final diff of dialog-session-list.tsx, handlers/session.ts, dialog-session-list.test.tsx, and session-preview.test.ts against canonical plan revision R4 is released. All hard gates pass under auditor reproduction: six verification commands green, INV-06 acceptance artifact-backed at 2301ms ≤ 3s, equivalence digest chains intact, E/C gate met at ≈19%.」；六条验证命令与验收产物由 auditor 独立复跑/复核一致） | task ses_ee9359b86ffeB8WENFNFhd6hom |

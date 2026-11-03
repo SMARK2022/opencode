@@ -87,57 +87,57 @@ export type CompressionConfig = {
 
 // 统计针对进入压缩器的有界可见窗口；不能把它冒充整个磁盘日志的收益。
 export type CompressionStats = {
-  originalBytes: number        // 压缩前原始总字节数
-  compressedBytes: number      // 压缩后总字节数
-  savedBytes: number           // 节省的总字节数
-  savingRatio: number          // 节省的总体比例
+  originalBytes: number // 压缩前原始总字节数
+  compressedBytes: number // 压缩后总字节数
+  savedBytes: number // 节省的总字节数
+  savingRatio: number // 节省的总体比例
 
   carriageReturnGroups: number // 命中的回车折叠次数
-  repeatedBlockGroups: number  // 命中的多行块重复压缩次数
-  repeatedLineGroups: number   // 命中的单行重复压缩次数
-  inlinePatternGroups: number  // 命中的行内模式压缩次数
+  repeatedBlockGroups: number // 命中的多行块重复压缩次数
+  repeatedLineGroups: number // 命中的单行重复压缩次数
+  inlinePatternGroups: number // 命中的行内模式压缩次数
   templateGroups: number
   highEntropyLines: number
   // 脱敏不是收益命中，零压缩时也需要独立报告与原文恢复。
   secretsRedacted: number
 
-  applied: boolean             // 脱敏命中或有收益的压缩已提交，不再只表示净节省。
+  applied: boolean // 脱敏命中或有收益的压缩已提交，不再只表示净节省。
 }
 
 // 文本与统计同一次计算返回，避免调用者重复压缩导致比例和实际输出不一致。
 export type CompressResult = {
-  text: string                 // 压缩后的文本
-  stats: CompressionStats      // 压缩统计
+  text: string // 压缩后的文本
+  stats: CompressionStats // 压缩统计
 }
 
 // 候选收益包含替换标签，扫描阶段与最终应用阶段必须使用相同计量单位。
 type Score = {
-  originalBytes: number        // 替换前字节数
-  replacementBytes: number     // 替换后字节数
-  savedBytes: number           // 节省字节数
-  savingRatio: number          // 节省比例
-  profitable: boolean          // 是否满足 minSavedBytes 和 minSavingRatio 的“划算”阈值
+  originalBytes: number // 替换前字节数
+  replacementBytes: number // 替换后字节数
+  savedBytes: number // 节省字节数
+  savingRatio: number // 节省比例
+  profitable: boolean // 是否满足 minSavedBytes 和 minSavingRatio 的“划算”阈值
 }
 
 // 消耗行数指向原始数组，替换标签的行数不能用于推进扫描游标。
 type BlockCandidate = {
-  width: number                // 这个块包含多少行
-  repeats: number              // 连续重复了多少次
-  replacementLines: string[]   // 用于替换的文本行（通常是原始块 + 提示信息）
-  consumedLines: number        // 这次替换共消耗/涵盖了原始文本的多少行
-  score: Score                 // 评估得分
+  width: number // 这个块包含多少行
+  repeats: number // 连续重复了多少次
+  replacementLines: string[] // 用于替换的文本行（通常是原始块 + 提示信息）
+  consumedLines: number // 这次替换共消耗/涵盖了原始文本的多少行
+  score: Score // 评估得分
 }
 
 // CR 重绘也形成诊断帧；这里的编号是采集帧序号，不冒充原文件的 LF 行号。
 type LineRecord = {
-  no: number                   // 行号（从1开始）
-  text: string                 // 行内容
+  no: number // 行号（从1开始）
+  text: string // 行内容
 }
 
 // 中心帧身份用于可见性去重，重叠上下文合并后仍需保留最近错误的中心。
 export type DiagnosticContext = {
-  centerLine: number           // 触发这个上下文的中心错误行号
-  lines: LineRecord[]          // 包含上下文的所有行
+  centerLine: number // 触发这个上下文的中心错误行号
+  lines: LineRecord[] // 包含上下文的所有行
   // 优先级在错误准入时确定，收尾时不能依赖已增长的总计数。
   priority: "first" | "fatal" | "recent"
   // 合并邻域不能丢掉准入中心，也不能从已脱敏文本重新猜测错误身份。
@@ -146,11 +146,11 @@ export type DiagnosticContext = {
 
 // 命令执行完毕后的诊断快照，汇总了各项异常指标
 export type DiagnosticSnapshot = {
-  totalLines: number           // 输出总行数
-  errorLikeLines: number       // 包含错误关键词的行数
-  warningLikeLines: number     // 包含警告关键词的行数
-  fatalLikeLines: number       // 包含致命错误关键词的行数
-  contexts: DiagnosticContext[]// 合并整理后的所有诊断上下文块
+  totalLines: number // 输出总行数
+  errorLikeLines: number // 包含错误关键词的行数
+  warningLikeLines: number // 包含警告关键词的行数
+  fatalLikeLines: number // 包含致命错误关键词的行数
+  contexts: DiagnosticContext[] // 合并整理后的所有诊断上下文块
   // 首批不被滚动队列驱逐；致命与近期各自保留有限容量。
   firstErrorContexts: DiagnosticContext[]
   fatalContexts: DiagnosticContext[]
@@ -162,9 +162,9 @@ export type DiagnosticSnapshot = {
 
 // 隐藏快照可直接渲染；全流快照仍须传入最终可见窗口，避免重复摘录。
 export type RenderAppendixOptions = {
-  durationMs: number           // 命令执行耗时
-  exitCode: number | null      // 命令退出码
-  visibleOutput?: string       // 全流快照对应的最终可见窗口
+  durationMs: number // 命令执行耗时
+  exitCode: number | null // 命令退出码
+  visibleOutput?: string // 全流快照对应的最终可见窗口
   config?: Partial<CompressionConfig> // 允许传入部分配置覆盖默认
 }
 
@@ -238,12 +238,14 @@ const MAX_DIAGNOSTIC_FRAME_CHARS = 4096
 const COMPILE_ERROR_RE = /\b(?:TS\d+|error\[E\d+\]|SyntaxError|TypeError|ModuleNotFoundError|cannot find module)\b/i
 const INFRA_ERROR_RE = /\b(?:ENOENT|EACCES|ECONNREFUSED|EADDRINUSE|timeout|permission denied|connection refused)\b/i
 // 健康词只能过滤弱信号，分级判断仍优先检查真实编译与基础设施错误。
-const HEALTHY_INDICATOR_RE = /\b(?:no\s+errors?|without\s+errors?|0\s+failed|failed\s*=\s*0|errors?\s*:\s*0|warnings?\s*:\s*0|no\s+vulnerabilities\s+found|found\s+0\s+vulnerabilities|all\s+tests?\s+passed?|\d+\s+passed?,\s+0\s+failed|build\s+successful|compilation\s+successful|no\s+issues?\s+found)\b/i
+const HEALTHY_INDICATOR_RE =
+  /\b(?:no\s+errors?|without\s+errors?|0\s+failed|failed\s*=\s*0|errors?\s*:\s*0|warnings?\s*:\s*0|no\s+vulnerabilities\s+found|found\s+0\s+vulnerabilities|all\s+tests?\s+passed?|\d+\s+passed?,\s+0\s+failed|build\s+successful|compilation\s+successful|no\s+issues?\s+found)\b/i
 // 完整值与跨帧续接共用源字段定义，不增加其它秘密类别或另一套识别语法。
 // 长值保留七字符识别头；短于16字符不保留，避免短凭据大部分仍可见。
 const SECRET_HEAD_CHARS = 7
 const SECRET_HEAD_MIN_LENGTH = 16
-const secretHead = (value: string) => value.length >= SECRET_HEAD_MIN_LENGTH ? `${value.slice(0, SECRET_HEAD_CHARS)}…` : ""
+const secretHead = (value: string) =>
+  value.length >= SECRET_HEAD_MIN_LENGTH ? `${value.slice(0, SECRET_HEAD_CHARS)}…` : ""
 
 const CREDENTIAL_FIELD = String.raw`\b(?:password|passwd|pwd|secret|token|key|api[_-]?key)`
 const CREDENTIAL_LABEL = `${CREDENTIAL_FIELD}\\s*[:=]`
@@ -254,15 +256,21 @@ function redactSecrets(text: string) {
   const positions: number[] = []
   let visible = ""
   // ANSI透明匹配只定位秘密；未匹配的原格式与未知CSI不能被全局清洗。
-  for (let i = 0; i < text.length;) {
+  for (let i = 0; i < text.length; ) {
     const ansi = text[i] === "\x1b" ? /^\x1b\[[0-9;?]*[ -/]*[@-~]/.exec(text.slice(i)) : null
-    if (ansi) { i += ansi[0].length; continue }
+    if (ansi) {
+      i += ansi[0].length
+      continue
+    }
     positions.push(i)
     visible += text[i++]
   }
   const patterns = [
     // 私钥整段遮盖；缺少结束标记时遮到窗口末尾，不能只替换标题。
-    [/-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----[\s\S]*?(?:-----END (?:RSA |EC |OPENSSH )?PRIVATE KEY-----|$)/g, "private-key"],
+    [
+      /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----[\s\S]*?(?:-----END (?:RSA |EC |OPENSSH )?PRIVATE KEY-----|$)/g,
+      "private-key",
+    ],
     [/\bsk-[A-Za-z0-9_-]{20,}\b/g, "api-key"],
     [/\beyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, "jwt"],
     [/\bAKIA[0-9A-Z]{16}\b/g, "aws-access-key"],
@@ -270,15 +278,32 @@ function redactSecrets(text: string) {
     // 单词边界避免 monkey 等普通字段误匹配；保留源八字符凭据门槛。
     [new RegExp(`(${CREDENTIAL_FIELD})(\\s*[:=]\\s*)(["']?)([^"'\\s]{8,})["']?`, "gi"), "credential"],
   ] as const
-  const matches = patterns.flatMap(([regex, name]) => [...visible.matchAll(regex)].map((match) => {
-    const start = positions[match.index]
-    const end = positions[match.index + match[0].length - 1] + 1
-    // 开引号与键名保留原ANSI格式；秘密区间仍由同一映射定位，不能退回简化正则替换。
-    const prefix = name === "credential" ? text.slice(start, positions[match.index + match[1].length + match[2].length + match[3].length]) : ""
-    const value = name === "credential" ? match[4] : match[0]
-    const breaks = name === "credential" ? "" : text.slice(start, end).match(/\r\n|\r|\n/g)?.join("") ?? ""
-    return { start, end, replacement: `${prefix}${breaks}${secretHead(value)}[redacted${name === "credential" ? "" : ` ${name}`}]` }
-  })).sort((a, b) => a.start - b.start || b.end - a.end)
+  const matches = patterns
+    .flatMap(([regex, name]) =>
+      [...visible.matchAll(regex)].map((match) => {
+        const start = positions[match.index]
+        const end = positions[match.index + match[0].length - 1] + 1
+        // 开引号与键名保留原ANSI格式；秘密区间仍由同一映射定位，不能退回简化正则替换。
+        const prefix =
+          name === "credential"
+            ? text.slice(start, positions[match.index + match[1].length + match[2].length + match[3].length])
+            : ""
+        const value = name === "credential" ? match[4] : match[0]
+        const breaks =
+          name === "credential"
+            ? ""
+            : (text
+                .slice(start, end)
+                .match(/\r\n|\r|\n/g)
+                ?.join("") ?? "")
+        return {
+          start,
+          end,
+          replacement: `${prefix}${breaks}${secretHead(value)}[redacted${name === "credential" ? "" : ` ${name}`}]`,
+        }
+      }),
+    )
+    .sort((a, b) => a.start - b.start || b.end - a.end)
   const parts: string[] = []
   let cursor = 0
   // 重叠模式只提交一次掩码，计数对应真实替换，不重复计算同一凭据。
@@ -291,7 +316,8 @@ function redactSecrets(text: string) {
   }
   parts.push(text.slice(cursor))
   // 仅携带无值字段及可选分隔符，源允许字段与冒号间跨空白帧，状态不累积空白或值。
-  const continuation = new RegExp(`${CREDENTIAL_FIELD}(?:\\s*[:=])?\\s*$`, "i").exec(visible)?.[0].replace(/\s/g, "") ?? ""
+  const continuation =
+    new RegExp(`${CREDENTIAL_FIELD}(?:\\s*[:=])?\\s*$`, "i").exec(visible)?.[0].replace(/\s/g, "") ?? ""
   return { text: parts.join(""), redacted, continuation }
 }
 
@@ -309,13 +335,14 @@ function normalizeLineForGrouping(line: string, level: string) {
     .replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi, "<UUID>")
     .replace(/\b[0-9a-f]{8,}\b/gi, "<HEX>")
   // safe 保留路径、端口、错误码等定位信息，源 aggressive 只在显式选择时扩展。
-  if (level === "aggressive") normalized = normalized
-    .replace(/:\d{2,5}\b/g, ":<PORT>")
-    .replace(/\b\d+(\.\d+)?\s*(B|KB|MB|GB|TB|bytes?)\b/gi, "<SIZE>")
-    .replace(/\b\d+(\.\d+)?\s*(ms|s|sec|min|h|hours?|minutes?|seconds?)\b/gi, "<DURATION>")
-    .replace(/\b\d{4,}\b/g, "<NUM>")
-    .replace(/\/tmp\/[^\s]+/g, "<TMPPATH>")
-    .replace(/C:\\Users\\[^\\]+\\AppData\\Local\\Temp\\[^\s]+/gi, "<TMPPATH>")
+  if (level === "aggressive")
+    normalized = normalized
+      .replace(/:\d{2,5}\b/g, ":<PORT>")
+      .replace(/\b\d+(\.\d+)?\s*(B|KB|MB|GB|TB|bytes?)\b/gi, "<SIZE>")
+      .replace(/\b\d+(\.\d+)?\s*(ms|s|sec|min|h|hours?|minutes?|seconds?)\b/gi, "<DURATION>")
+      .replace(/\b\d{4,}\b/g, "<NUM>")
+      .replace(/\/tmp\/[^\s]+/g, "<TMPPATH>")
+      .replace(/C:\\Users\\[^\\]+\\AppData\\Local\\Temp\\[^\s]+/gi, "<TMPPATH>")
   return normalized
 }
 
@@ -325,13 +352,18 @@ function compressTemplateRuns(lines: string[], config: CompressionConfig) {
   const templates = lines.map((line) => normalizeLineForGrouping(line, config.templateNormalizationLevel))
   const out: string[] = []
   let groups = 0
-  for (let i = 0; i < lines.length;) {
+  for (let i = 0; i < lines.length; ) {
     let j = i + 1
     while (j < lines.length && templates[j] === templates[i]) j++
     const run = lines.slice(i, j)
     const replacement = [`[... template repeated ${j - i}x]`, `    first: ${lines[i]}`, `    last:  ${lines[j - 1]}`]
     // 检查整段而非首行；中间的诊断不能因模板相似被删去。
-    if (j - i >= config.minTemplateRepeats && templates[i] !== lines[i] && !run.some((line) => /error|failed|assert|exception/i.test(line) || isErrorLike(line)) && scoreReplacement(run.join("\n"), replacement.join("\n"), config).profitable) {
+    if (
+      j - i >= config.minTemplateRepeats &&
+      templates[i] !== lines[i] &&
+      !run.some((line) => /error|failed|assert|exception/i.test(line) || isErrorLike(line)) &&
+      scoreReplacement(run.join("\n"), replacement.join("\n"), config).profitable
+    ) {
       out.push(...replacement)
       groups++
       i = j
@@ -350,16 +382,27 @@ function compressHighEntropyLines(lines: string[], config: CompressionConfig) {
     const frequency = new Map<string, number>()
     // 用 UTF-16 单元统一频率与分母；原字节大小仍由 byteLen 精确计算。
     for (let i = 0; i < line.length; i++) frequency.set(line[i], (frequency.get(line[i]) ?? 0) + 1)
-    const entropy = [...frequency.values()].reduce((sum, count) => sum - count / line.length * Math.log2(count / line.length), 0)
+    const entropy = [...frequency.values()].reduce(
+      (sum, count) => sum - (count / line.length) * Math.log2(count / line.length),
+      0,
+    )
     // 熵和空白必须同时满足源严格不等式，普通长诊断不能只凭长度被省略。
-    if (entropy <= config.minEntropy || (line.match(/\s/g)?.length ?? 0) / line.length >= config.maxWhitespaceRatio) return line
+    if (entropy <= config.minEntropy || (line.match(/\s/g)?.length ?? 0) / line.length >= config.maxWhitespaceRatio)
+      return line
     // 类型按具体到一般排序，hex 不会被通用 base64 判定抢走。
-    const type = /^eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(line.trim()) ? "jwt"
-      : /^data:image\/[^;]+;base64,/.test(line) ? "data-uri"
-      : /^[0-9a-f]{64,}$/i.test(line.trim()) ? "hex-dump"
-      : /^[A-Za-z0-9+/]+=*$/.test(line.trim()) ? "base64"
-      : /^<Objs\b/.test(line.trim()) ? "powershell-clixml"
-      : /^[{\[].*[}\]]$/.test(line.trim()) && line.length > 1000 ? "minified-json" : "unknown"
+    const type = /^eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(line.trim())
+      ? "jwt"
+      : /^data:image\/[^;]+;base64,/.test(line)
+        ? "data-uri"
+        : /^[0-9a-f]{64,}$/i.test(line.trim())
+          ? "hex-dump"
+          : /^[A-Za-z0-9+/]+=*$/.test(line.trim())
+            ? "base64"
+            : /^<Objs\b/.test(line.trim())
+              ? "powershell-clixml"
+              : /^[{\[].*[}\]]$/.test(line.trim()) && line.length > 1000
+                ? "minified-json"
+                : "unknown"
     // 指纹与七字符识别头仍只读取已脱敏正文，不从raw取样，也不保留尾部。
     const replacement = `[... high-entropy ${type} ${byteLen(line)}B hash=${simpleHash(line)} head=${line.slice(0, 7)}]`
     // 首尾样例与标签本身也计费，净增长摘要继续原样通过。
@@ -376,7 +419,8 @@ function compressProgressBars(line: string, config: CompressionConfig) {
     const match = regex.exec(line)
     if (!match) continue
     const replacement = `[... bar ${match[0].length}x]`
-    if (scoreReplacement(match[0], replacement, config).profitable) return { line: line.replace(match[0], replacement), applied: true }
+    if (scoreReplacement(match[0], replacement, config).profitable)
+      return { line: line.replace(match[0], replacement), applied: true }
   }
   return { line, applied: false }
 }
@@ -392,7 +436,9 @@ function compressLongLists(line: string, config: CompressionConfig) {
   }
   // 保留首尾各三项和省略数量，完整中段仍可从同一 raw archive 恢复。
   const replacement = [...items.slice(0, 3), `[... ${items.length - 6} more]`, ...items.slice(-3)].join(", ")
-  return scoreReplacement(line, replacement, config).profitable ? { line: replacement, applied: true } : { line, applied: false }
+  return scoreReplacement(line, replacement, config).profitable
+    ? { line: replacement, applied: true }
+    : { line, applied: false }
 }
 
 type TerminalOptions = {
@@ -412,7 +458,8 @@ function createTerminalRenderer(options: TerminalOptions = {}) {
   let pendingControl = ""
   const CSI_REGEX = /\x1b\[([0-9;?]*)([A-Za-z])/g
   // #215：模型光标受输入窗口约束，显示光标沿用源终端坐标。
-  const position = (value: number) => options.bufferPartialControl ? Math.max(0, value) : Math.min(inputLength, Math.max(0, value))
+  const position = (value: number) =>
+    options.bufferPartialControl ? Math.max(0, value) : Math.min(inputLength, Math.max(0, value))
 
   function processChunk(input: string) {
     inputLength += input.length
@@ -437,18 +484,25 @@ function createTerminalRenderer(options: TerminalOptions = {}) {
       else if (command === "C") col = position(col + (nums[0] || 1))
       else if (command === "D") col = position(col - (nums[0] || 1))
       else if (command === "G") col = position((nums[0] || 1) - 1)
-      else if (command === "H" || command === "f") { row = position((nums[0] || 1) - 1); col = position((nums[1] || 1) - 1) }
-      else if (command === "K") {
+      else if (command === "H" || command === "f") {
+        row = position((nums[0] || 1) - 1)
+        col = position((nums[1] || 1) - 1)
+      } else if (command === "K") {
         ensureLine()
         if (options.maxChars !== undefined) col = Math.min(col, options.maxChars)
         const line = lines[row]
         // #215：清行保留目标的光标位置，字符预算在分配空格前生效。
-        const replacement = nums[0] === 2 ? "" : nums[0] === 1 ? " ".repeat(col + 1) + line.slice(col + 1) : line.slice(0, col)
+        const replacement =
+          nums[0] === 2 ? "" : nums[0] === 1 ? " ".repeat(col + 1) + line.slice(col + 1) : line.slice(0, col)
         cells += replacement.length - line.length
         if (!options.bufferPartialControl && cells > inputLength * 2) return false
         lines[row] = replacement
-      } else if (command === "J" && (nums[0] === 2 || nums[0] === 3)) { lines.length = 0; cells = 0; row = 0; col = 0 }
-      else if (command !== "m") {
+      } else if (command === "J" && (nums[0] === 2 || nums[0] === 3)) {
+        lines.length = 0
+        cells = 0
+        row = 0
+        col = 0
+      } else if (command !== "m") {
         // 模型拒绝未知控制的压缩候选；显示跳过不支持的CSI，控制字节不应占据屏幕列。
         if (!options.bufferPartialControl) return false
         pos = CSI_REGEX.lastIndex
@@ -502,7 +556,7 @@ function createTerminalRenderer(options: TerminalOptions = {}) {
 
   function writeText(text: string) {
     if (!options.bufferPartialControl && text.includes("\x1b")) return false
-    for (let pos = 0; pos < text.length;) {
+    for (let pos = 0; pos < text.length; ) {
       const char = text[pos]
       if (char === "\r") {
         col = 0
@@ -543,7 +597,8 @@ function createTerminalRenderer(options: TerminalOptions = {}) {
     const line = lines[row]
     // #215：批量写入仍模拟目标列上限处的反复覆写，并保留总单元限制。
     const available = inputLength - col
-    const run = !options.bufferPartialControl && text.length > available ? text.slice(0, available) + text.slice(-1) : text
+    const run =
+      !options.bufferPartialControl && text.length > available ? text.slice(0, available) + text.slice(-1) : text
     cells += Math.max(0, col + run.length - line.length)
     if (!options.bufferPartialControl && cells > inputLength * 2) return false
     lines[row] = line.padEnd(col, " ").slice(0, col) + run + line.slice(col + run.length)
@@ -604,8 +659,11 @@ function normalizeTerminalOutput(text: string, config: CompressionConfig) {
   const frames = terminal.getFrameCount()
   const stable = terminal.getStableOutput()
   const replacement = `[... progress ${frames} frames->final]\n${stable}`
-  return frames >= config.minCarriageReturnFrames && terminalRenderCollapsedText(text, stable) && scoreReplacement(text, replacement, config).profitable
-    ? { text: replacement, groups: 1 } : { text, groups: 0 }
+  return frames >= config.minCarriageReturnFrames &&
+    terminalRenderCollapsedText(text, stable) &&
+    scoreReplacement(text, replacement, config).profitable
+    ? { text: replacement, groups: 1 }
+    : { text, groups: 0 }
 }
 
 function terminalRenderCollapsedText(text: string, stable: string) {
@@ -680,11 +738,7 @@ export function quotePattern(pattern: string, maxChars = 40) {
   // 压缩管线的调用方在 PowerShell CLIXML 解析等边界路径可能产生 undefined
   if (typeof pattern !== "string") return ""
   // 标签中的引号和控制字符必须转义，避免被误读为日志的真实边界。
-  let text = pattern
-    .replaceAll("\\", "\\\\")
-    .replaceAll("\t", "\\t")
-    .replaceAll("\r", "\\r")
-    .replaceAll('"', '\\"')
+  let text = pattern.replaceAll("\\", "\\\\").replaceAll("\t", "\\t").replaceAll("\r", "\\r").replaceAll('"', '\\"')
 
   if (text.length > maxChars) text = text.slice(0, maxChars - 1) + "…"
   // 只缩短标签中的模式示例，重复次数仍描述完整被替换区间。
@@ -757,7 +811,7 @@ function collapseCarriageReturns(text: string, config: CompressionConfig): { tex
     // 原始输出另行保留，模型在需要中间帧时必须能读取完整日志。
     // 插入一条说明，告诉 LLM 这里折叠了多少帧
     const replacement = `[... progress ${frames.length - 1} frames->final]\n${last}`
-    
+
     // 检查这个替换操作是否划算（有些短帧折叠后可能反而体积变大）
     const score = scoreReplacement(line, replacement, config)
     if (!score.profitable) return line
@@ -773,13 +827,20 @@ function collapseCarriageReturns(text: string, config: CompressionConfig): { tex
 }
 
 // 在给定的起始索引处寻找最划算的连续重复多行块
-function findRepeatedBlockAt(lines: string[], start: number, config: CompressionConfig, bytes: number[], matches: Map<number, Uint32Array>, hashes: string[]): BlockCandidate | undefined {
+function findRepeatedBlockAt(
+  lines: string[],
+  start: number,
+  config: CompressionConfig,
+  bytes: number[],
+  matches: Map<number, Uint32Array>,
+  hashes: string[],
+): BlockCandidate | undefined {
   const remaining = lines.length - start
   let best: BlockCandidate | undefined
 
   // 块宽受扫描成本和剩余行能容纳的最小重复次数约束，避免越界；它不限制原始日志保留长度。
   const maxWidth = Math.min(config.maxBlockLines, Math.floor(remaining / config.minBlockRepeats))
-  
+
   // 逐一尝试不同的块宽度
   for (let width = 2; width <= maxWidth; width++) {
     const block = lines.slice(start, start + width)
@@ -807,10 +868,7 @@ function findRepeatedBlockAt(lines: string[], start: number, config: Compression
     // 最后一次重复也计入原始范围，否则收益会漏算被删除的字节。
     const originalBytes = bytes[start + width * repeats] - bytes[start] - 1
     // 替换内容：只留第一遍块，然后加上总结语
-    const replacementLines = [
-      ...block,
-      `[... repeated block ${repeats}x, ${width * repeats}L->${width}L]`,
-    ]
+    const replacementLines = [...block, `[... repeated block ${repeats}x, ${width * repeats}L->${width}L]`]
 
     // 评估是否划算
     const score = scoreReplacement(originalBytes, serializeLines(replacementLines), config)
@@ -906,10 +964,10 @@ function compressSameLines(lines: string[], config: CompressionConfig): { lines:
 
 // 表示一次行内压缩的候选匹配
 type InlineCandidate = {
-  start: number           // 在原始字符串中的起点
-  end: number             // 在原始字符串中的终点
-  replacement: string     // 用于替换的短语
-  savedBytes: number      // 节省了多少字节
+  start: number // 在原始字符串中的起点
+  end: number // 在原始字符串中的终点
+  replacement: string // 用于替换的短语
+  savedBytes: number // 节省了多少字节
 }
 
 /**
@@ -1223,10 +1281,16 @@ export function compressVisibleOutput(text: string, configInput?: Partial<Compre
   const redaction = redactSecrets(cr.text)
   const redactedBytes = byteLen(redaction.text)
   // 脱敏本身算已提交；后续长度/收益拒绝也不能退回未掩码正文。
-  const redactedStats = { ...emptyStats, carriageReturnGroups: cr.groups, highEntropyLines: 0,
-    applied: redaction.redacted > 0 || cr.groups > 0 && redactedBytes < originalBytes,
-    compressedBytes: redactedBytes, savedBytes: originalBytes - redactedBytes,
-    savingRatio: originalBytes ? (originalBytes - redactedBytes) / originalBytes : 0, secretsRedacted: redaction.redacted }
+  const redactedStats = {
+    ...emptyStats,
+    carriageReturnGroups: cr.groups,
+    highEntropyLines: 0,
+    applied: redaction.redacted > 0 || (cr.groups > 0 && redactedBytes < originalBytes),
+    compressedBytes: redactedBytes,
+    savedBytes: originalBytes - redactedBytes,
+    savingRatio: originalBytes ? (originalBytes - redactedBytes) / originalBytes : 0,
+    secretsRedacted: redaction.redacted,
+  }
   if (!shouldCompressOutput(redaction.text)) return { text: redaction.text, stats: redactedStats }
 
   let lines = redaction.text.split("\n")
@@ -1272,7 +1336,12 @@ export function compressVisibleOutput(text: string, configInput?: Partial<Compre
     applied:
       redaction.redacted > 0 ||
       (compressedBytes < originalBytes &&
-        (cr.groups > 0 || blocks.groups > 0 || same.groups > 0 || template.groups > 0 || highEntropy.groups > 0 || inline.groups > 0)),
+        (cr.groups > 0 ||
+          blocks.groups > 0 ||
+          same.groups > 0 ||
+          template.groups > 0 ||
+          highEntropy.groups > 0 ||
+          inline.groups > 0)),
   }
 
   return {
@@ -1309,9 +1378,9 @@ class Ring<T> {
 
 // 在提取诊断上下文时的“活跃上下文”结构
 type ActiveContext = {
-  centerLine: number          // 命中的关键错误行行号
-  lines: LineRecord[]         // 包含前面的行和后文收集的行
-  remainingAfter: number      // 还需要收集多少后文行才算完成
+  centerLine: number // 命中的关键错误行行号
+  lines: LineRecord[] // 包含前面的行和后文收集的行
+  remainingAfter: number // 还需要收集多少后文行才算完成
   // 序号记录准入顺序，与后文半径、chunk 分片、end 封存时机无关。
   ordinal: number
   priority: DiagnosticContext["priority"]
@@ -1325,7 +1394,11 @@ function isErrorLike(line: string) {
   // 零错误计数只抑制普通错误词，同帧 traceback、panic 等强信号仍须保留。
   if (ZERO_PROBLEM_RE.test(line) && !FATAL_LIKE_RE.test(line)) return false
   // 注释、示例与日志等级说明只排除弱 error 字样，不抑制真实强信号。
-  if (/^\s*(#|\/\/|\/\*|\*).*error/i.test(line) || /^(?:example|sample|demo)\b|test.*should.*error|log.*level.*error|error.*level/i.test(line)) return false
+  if (
+    /^\s*(#|\/\/|\/\*|\*).*error/i.test(line) ||
+    /^(?:example|sample|demo)\b|test.*should.*error|log.*level.*error|error.*level/i.test(line)
+  )
+    return false
   return ERROR_LIKE_RE.test(line)
 }
 
@@ -1364,13 +1437,13 @@ function scoreErrorLine(text: string) {
  * 它不需要把整个几十兆的文件都放到内存，而是顺着 chunk 分片一边看一边丢掉正常日志。
  */
 export class BashDiagnosticCollector {
-  private pending = ""        // 分片读取拼接用的残余文本缓冲
+  private pending = "" // 分片读取拼接用的残余文本缓冲
   private discardedChars = 0
   private truncatedFrames = 0
   private frameDiscarded = 0
   private afterCR = false
-  private lineNo = 0          // 绝对行号计数器
-  private prev: Ring<LineRecord>  // 保存最近遍历过的上文（比如当前行的前 3 行）
+  private lineNo = 0 // 绝对行号计数器
+  private prev: Ring<LineRecord> // 保存最近遍历过的上文（比如当前行的前 3 行）
   // 固定首批不可滚动；其余两队列继续使用既有有界 Ring。
   private contextsFirst: DiagnosticContext[] = []
   private contextsFatal = new Ring<DiagnosticContext>(5)
@@ -1379,9 +1452,9 @@ export class BashDiagnosticCollector {
   private pendingCredential = ""
   private active: ActiveContext[] = [] // 当前正在等待“后文”的上下文列表
 
-  private errorCount = 0      // 出现报错关键词的行数
-  private warningCount = 0    // 出现警告关键词的行数
-  private fatalCount = 0      // 出现致命错误的行数
+  private errorCount = 0 // 出现报错关键词的行数
+  private warningCount = 0 // 出现警告关键词的行数
+  private fatalCount = 0 // 出现致命错误的行数
 
   private readonly config: CompressionConfig
 
@@ -1439,7 +1512,9 @@ export class BashDiagnosticCollector {
       discardedChars: this.discardedChars,
       truncatedFrames: this.truncatedFrames,
       // 通用 contexts 保留合并视图；附录从三队列按优先级选择而非最后 N 个。
-      contexts: this.mergeContexts([...firstErrorContexts, ...fatalContexts, ...recentErrorContexts]).slice(-this.config.maxDiagnosticContexts),
+      contexts: this.mergeContexts([...firstErrorContexts, ...fatalContexts, ...recentErrorContexts]).slice(
+        -this.config.maxDiagnosticContexts,
+      ),
       firstErrorContexts,
       fatalContexts,
       recentErrorContexts,
@@ -1462,15 +1537,25 @@ export class BashDiagnosticCollector {
   private observeLine(text: string) {
     // 私钥跨帧携带状态，错误邻域即使不含 BEGIN 标题也不能展示其正文。
     const normalized = this.config.enabled ? collapseCarriageReturns(text, this.config).text : text
-    const privateKey = this.config.enabled && (this.redactingPrivateKey || /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/.test(stripAnsi(normalized)))
-    this.redactingPrivateKey = privateKey && !/-----END (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/.test(stripAnsi(normalized))
+    const privateKey =
+      this.config.enabled &&
+      (this.redactingPrivateKey || /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/.test(stripAnsi(normalized)))
+    this.redactingPrivateKey =
+      privateKey && !/-----END (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/.test(stripAnsi(normalized))
     // 诊断与正文遵守同一规范化后脱敏契约，分类与raw字节仍读取原始帧。
     const prefix = this.pendingCredential
     const redaction = this.config.enabled ? redactSecrets(prefix + normalized) : { text: normalized, continuation: "" }
     // 一个短前缀覆盖标签落在prev邻域外的值帧，不积累空白或另建上下文队列。
     this.pendingCredential = redaction.continuation ? redaction.continuation + "\n" : ""
-    const record: LineRecord = { no: this.lineNo + 1, text: (privateKey ? "[redacted private-key]"
-      : prefix ? redaction.text.slice(redaction.text.indexOf("\n") + 1) : redaction.text) + (this.frameDiscarded > 0 ? " [diagnostic frame sampled]" : "") }
+    const record: LineRecord = {
+      no: this.lineNo + 1,
+      text:
+        (privateKey
+          ? "[redacted private-key]"
+          : prefix
+            ? redaction.text.slice(redaction.text.indexOf("\n") + 1)
+            : redaction.text) + (this.frameDiscarded > 0 ? " [diagnostic frame sampled]" : ""),
+    }
 
     const stillActive: ActiveContext[] = []
     // 遍历所有正处在活跃收集状态的上下文
@@ -1573,7 +1658,12 @@ export class BashDiagnosticCollector {
         last.lines = [...byNo.values()].sort((a, b) => a.no - b.no)
         // 保留更靠后的中心点
         // 重叠时保持较强优先级，不能让后来的普通错误覆盖根因标签。
-        last.priority = last.priority === "first" || ctx.priority === "first" ? "first" : last.priority === "fatal" || ctx.priority === "fatal" ? "fatal" : "recent"
+        last.priority =
+          last.priority === "first" || ctx.priority === "first"
+            ? "first"
+            : last.priority === "fatal" || ctx.priority === "fatal"
+              ? "fatal"
+              : "recent"
         last.centerLines = [...new Set([...last.centerLines, ...ctx.centerLines])]
         last.centerLine = ctx.centerLine
       } else {
@@ -1623,7 +1713,9 @@ function renderDiagnosticContexts(contexts: DiagnosticContext[], config: Compres
     const last = ctx.lines[ctx.lines.length - 1]?.no ?? ctx.centerLine
     out.push("")
     // 根因与 fatal 标签说明保留理由，不把诊断帧号冒充磁盘 LF 行号。
-    out.push(`[L${first}-L${last}]${ctx.priority === "first" ? " root_cause" : ctx.priority === "fatal" ? " fatal" : ""}`)
+    out.push(
+      `[L${first}-L${last}]${ctx.priority === "first" ? " root_cause" : ctx.priority === "fatal" ? " fatal" : ""}`,
+    )
     // L 表示诊断帧序号；含 CR 的原始文件不能据此当作 LF 行范围直接定位。
 
     for (const line of ctx.lines) {
@@ -1674,19 +1766,24 @@ export function renderDiagnosticAppendix(snapshot: DiagnosticSnapshot, options: 
   const candidates = [...snapshot.firstErrorContexts, ...snapshot.fatalContexts, ...snapshot.recentErrorContexts]
   const seen = new Set<number>()
   const hiddenContexts = shouldShowDiagnostics
-    ? candidates.filter((ctx) => {
-        // 隐藏快照不再和可见输出比对，全流调用仍按最终窗口过滤。
-        if (seen.has(ctx.centerLine)) return false
-        if (options.visibleOutput !== undefined && contextAlreadyVisible(ctx, options.visibleOutput, config)) return false
-        seen.add(ctx.centerLine)
-        return true
-      }).slice(0, Math.max(0, config.maxDiagnosticContexts))
+    ? candidates
+        .filter((ctx) => {
+          // 隐藏快照不再和可见输出比对，全流调用仍按最终窗口过滤。
+          if (seen.has(ctx.centerLine)) return false
+          if (options.visibleOutput !== undefined && contextAlreadyVisible(ctx, options.visibleOutput, config))
+            return false
+          seen.add(ctx.centerLine)
+          return true
+        })
+        .slice(0, Math.max(0, config.maxDiagnosticContexts))
     : []
 
   const parts: string[] = []
   // 采样遗漏不受运行时长或退出码隐藏，否则成功的长行会被误报为完整观察。
   if (snapshot.discardedChars > 0)
-    parts.push(`[diagnostic sampling omitted ${snapshot.discardedChars} characters across ${snapshot.truncatedFrames} frames; inspect the retained raw output for complete diagnostics; L labels are frame ordinals]`)
+    parts.push(
+      `[diagnostic sampling omitted ${snapshot.discardedChars} characters across ${snapshot.truncatedFrames} frames; inspect the retained raw output for complete diagnostics; L labels are frame ordinals]`,
+    )
 
   // 拼接筛选后有效的报错上下文
   if (hiddenContexts.length > 0) {

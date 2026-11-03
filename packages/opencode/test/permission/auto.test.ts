@@ -1,39 +1,39 @@
 import { describe, expect, test } from "bun:test"
-  test("routes structured workspace deletes to reviewer as cautious", async () => {
-    let called = false
-    await expect(
-      Effect.runPromise(
-        PermissionAuto.evaluate(
-          {
-            permission: "edit",
-            patterns: ["docs/old name.md"],
-            metadata: {
-              agent: "auto",
-              files: [{ type: "delete", relativePath: "docs/old name.md", deletions: 4 }],
-            },
+test("routes structured workspace deletes to reviewer as cautious", async () => {
+  let called = false
+  await expect(
+    Effect.runPromise(
+      PermissionAuto.evaluate(
+        {
+          permission: "edit",
+          patterns: ["docs/old name.md"],
+          metadata: {
+            agent: "auto",
+            files: [{ type: "delete", relativePath: "docs/old name.md", deletions: 4 }],
           },
-          {
-            review: (input) =>
-              Effect.sync(() => {
-                called = true
-                // Delete is the security boundary under test. The reviewer should
-                // see cautious, not generic non-shell uncertainty, so policy can
-                // distinguish irreversible filesystem effects from ordinary edits.
-                expect(input.precheck.level).toBe("cautious")
-                return {
-                  action: "allow" as const,
-                  reason: "reviewer approved explicit file deletion",
-                  reviewID: "review_workspace_delete",
-                  risk_level: "medium" as const,
-                  user_authorization: "medium" as const,
-                }
-              }),
-          },
-        ),
+        },
+        {
+          review: (input) =>
+            Effect.sync(() => {
+              called = true
+              // Delete is the security boundary under test. The reviewer should
+              // see cautious, not generic non-shell uncertainty, so policy can
+              // distinguish irreversible filesystem effects from ordinary edits.
+              expect(input.precheck.level).toBe("cautious")
+              return {
+                action: "allow" as const,
+                reason: "reviewer approved explicit file deletion",
+                reviewID: "review_workspace_delete",
+                risk_level: "medium" as const,
+                user_authorization: "medium" as const,
+              }
+            }),
+        },
       ),
-    ).resolves.toMatchObject({ action: "allow", source: "reviewer" })
-    expect(called).toBe(true)
-  })
+    ),
+  ).resolves.toMatchObject({ action: "allow", source: "reviewer" })
+  expect(called).toBe(true)
+})
 
 import { Effect } from "effect"
 import { PermissionAuto } from "../../src/permission/auto"
@@ -61,7 +61,13 @@ const shellExternalDirectory = (
       {
         permission: "external_directory",
         patterns: [process.platform === "win32" ? "C:/Users/*" : "/home/*"],
-        metadata: { action_kind: "shell", command, cwd: process.cwd(), shell: process.platform === "win32" ? "powershell" : "bash", ...metadata },
+        metadata: {
+          action_kind: "shell",
+          command,
+          cwd: process.cwd(),
+          shell: process.platform === "win32" ? "powershell" : "bash",
+          ...metadata,
+        },
       },
       reviewer,
     ),
@@ -311,7 +317,8 @@ describe("permission auto routing", () => {
             patterns: [process.platform === "win32" ? "C:/Users/Alice/Logs/*" : "/Users/alice/Logs With Spaces/*"],
             metadata: {
               agent: "auto",
-              filepath: process.platform === "win32" ? "C:/Users/Alice/Logs/app.log" : "/Users/alice/Logs With Spaces/app.log",
+              filepath:
+                process.platform === "win32" ? "C:/Users/Alice/Logs/app.log" : "/Users/alice/Logs With Spaces/app.log",
             },
           },
           {
@@ -625,7 +632,6 @@ describe("permission auto routing", () => {
       }),
     ).resolves.toMatchObject({ action: "ask", source: "reviewer_unavailable" })
 
-
     // #264：SDK defect 应被视为 reviewer 不可用而非绕过权限边界
     // #264：显式 FallbackToUser tag 在默认配置下照常回退 ask——tag 语义不受 fallback 重构影响
     await expect(
@@ -662,7 +668,7 @@ describe("permission auto routing", () => {
           reviewer,
         ),
       ),
-  ).resolves.toMatchObject({ action: "deny", source: "reviewer" })
+    ).resolves.toMatchObject({ action: "deny", source: "reviewer" })
 
     // #264：FallbackToUser tag 在 deny 配置下仍是传输信号——不得降级为用户放行
     await expect(
@@ -678,7 +684,7 @@ describe("permission auto routing", () => {
           { review: () => Effect.fail({ _tag: "PermissionReviewerFallbackToUser", message: "fallback to user" }) },
         ),
       ),
-  ).resolves.toMatchObject({ action: "deny", source: "reviewer" })
+    ).resolves.toMatchObject({ action: "deny", source: "reviewer" })
   })
 
   test("reviewer contract contradictions fail closed", async () => {

@@ -221,7 +221,7 @@ export const CompactionPart = Schema.Struct({
   // #256：最近用户指令记忆存于完成的压缩边界上——结构化存储让 agent 循环不会把
   // 保留的指令当成新的用户轮次，转换 provider 请求时再重放。
   recent_user_messages: Schema.optional(
-  // #256：truncated 标记随消息持久化——重放时模型知道省略并非其过错
+    // #256：truncated 标记随消息持久化——重放时模型知道省略并非其过错
     Schema.Array(
       Schema.Struct({
         id: MessageID,

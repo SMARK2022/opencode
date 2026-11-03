@@ -36,52 +36,132 @@ import { createTuiResolvedConfig } from "../../../fixture/tui-runtime"
 import { createEventSource, createFetch, directory, json, worktree } from "./sync-fixture"
 
 const sid = "ses_residency"
-const model = { id: "model", providerID: "provider", api: { id: "model", url: "", npm: "" }, name: "Test Model",
-  capabilities: { temperature: true, reasoning: false, attachment: true, toolcall: true,
+const model = {
+  id: "model",
+  providerID: "provider",
+  api: { id: "model", url: "", npm: "" },
+  name: "Test Model",
+  capabilities: {
+    temperature: true,
+    reasoning: false,
+    attachment: true,
+    toolcall: true,
     input: { text: true, audio: false, image: false, video: false, pdf: false },
-    output: { text: true, audio: false, image: false, video: false, pdf: false }, interleaved: false },
-  cost: { input: 0, output: 0, cache: { read: 0, write: 0 } }, limit: { context: 100_000, output: 4_000 },
-  status: "active", options: {}, headers: {}, release_date: "2024-01-01" } satisfies Model
-const provider = { id: "provider", name: "Provider", source: "custom", env: [], options: {}, models: { model } } satisfies Provider
+    output: { text: true, audio: false, image: false, video: false, pdf: false },
+    interleaved: false,
+  },
+  cost: { input: 0, output: 0, cache: { read: 0, write: 0 } },
+  limit: { context: 100_000, output: 4_000 },
+  status: "active",
+  options: {},
+  headers: {},
+  release_date: "2024-01-01",
+} satisfies Model
+const provider = {
+  id: "provider",
+  name: "Provider",
+  source: "custom",
+  env: [],
+  options: {},
+  models: { model },
+} satisfies Provider
 const agent = { name: "general", mode: "primary", permission: [], options: {} } satisfies Agent
-const user = (id: string, created: number): UserMessage => ({ id, sessionID: sid, role: "user", time: { created }, agent: "general", model: { providerID: provider.id, modelID: model.id } })
-const assistant = (id: string, created: number, parentID = "msg_user"): AssistantMessage => ({
-  id, sessionID: sid, parentID, role: "assistant", agent: "general", mode: "general", modelID: model.id, providerID: provider.id,
-  path: { cwd: directory, root: worktree }, cost: 0, tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
-  time: { created, completed: created + 1 }, finish: "stop",
+const user = (id: string, created: number): UserMessage => ({
+  id,
+  sessionID: sid,
+  role: "user",
+  time: { created },
+  agent: "general",
+  model: { providerID: provider.id, modelID: model.id },
 })
-const textPart = (id: string, messageID: string, text: string): Part => ({ id, sessionID: sid, messageID, type: "text", text })
-const toolPart = (id: string, messageID: string, output: string, contextOutput = output) => ({ id, sessionID: sid, messageID, type: "tool", callID: id, tool: "bash",
-  state: { status: "completed", input: { command: "fixture" }, output: contextOutput, title: "fixture", metadata: { output }, time: { start: 1, end: 2 } },
-} satisfies Part)
+const assistant = (id: string, created: number, parentID = "msg_user"): AssistantMessage => ({
+  id,
+  sessionID: sid,
+  parentID,
+  role: "assistant",
+  agent: "general",
+  mode: "general",
+  modelID: model.id,
+  providerID: provider.id,
+  path: { cwd: directory, root: worktree },
+  cost: 0,
+  tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+  time: { created, completed: created + 1 },
+  finish: "stop",
+})
+const textPart = (id: string, messageID: string, text: string): Part => ({
+  id,
+  sessionID: sid,
+  messageID,
+  type: "text",
+  text,
+})
+const toolPart = (id: string, messageID: string, output: string, contextOutput = output) =>
+  ({
+    id,
+    sessionID: sid,
+    messageID,
+    type: "tool",
+    callID: id,
+    tool: "bash",
+    state: {
+      status: "completed",
+      input: { command: "fixture" },
+      output: contextOutput,
+      title: "fixture",
+      metadata: { output },
+      time: { start: 1, end: 2 },
+    },
+  }) satisfies Part
 type App = Awaited<ReturnType<typeof testRender>>
-type Context = { sync: ReturnType<typeof useSync>; local: ReturnType<typeof useLocal>; keymap: ReturnType<typeof useOpencodeKeymap> }
+type Context = {
+  sync: ReturnType<typeof useSync>
+  local: ReturnType<typeof useLocal>
+  keymap: ReturnType<typeof useOpencodeKeymap>
+}
 
-async function withRenderedSession(messages: Array<UserMessage | AssistantMessage>, parts: Record<string, Part[]>,
-  run: (app: App, emit: ReturnType<typeof createEventSource>["emit"], ctx: Context) => Promise<void>, size = { width: 80, height: 24 },
-  override?: Parameters<typeof createFetch>[0]) {
+async function withRenderedSession(
+  messages: Array<UserMessage | AssistantMessage>,
+  parts: Record<string, Part[]>,
+  run: (app: App, emit: ReturnType<typeof createEventSource>["emit"], ctx: Context) => Promise<void>,
+  size = { width: 80, height: 24 },
+  override?: Parameters<typeof createFetch>[0],
+) {
   await using tmp = await tmpdir()
   await Bun.write(`${tmp.path}/kv.json`, JSON.stringify({ thinking_mode: "show" }))
   const events = createEventSource()
-  const info = { id: sid, directory, projectID: "proj_test", slug: sid, version: "1", title: sid, time: { created: 1, updated: 1 } }
+  const info = {
+    id: sid,
+    directory,
+    projectID: "proj_test",
+    slug: sid,
+    version: "1",
+    title: sid,
+    time: { created: 1, updated: 1 },
+  }
   const calls = createFetch(async (url, request, init) => {
     const response = await override?.(url, request, init)
     if (response) return response
     if (url.pathname === "/session") return json([info])
     if (url.pathname === `/session/${sid}`) return json(info)
-    if (url.pathname === `/session/${sid}/message`) return json(messages.map((message) => ({ info: message, parts: parts[message.id] ?? [] })))
+    if (url.pathname === `/session/${sid}/message`)
+      return json(messages.map((message) => ({ info: message, parts: parts[message.id] ?? [] })))
     if (url.pathname.endsWith("/todo") || url.pathname.endsWith("/diff")) return json([])
     if (url.pathname.endsWith("/goal")) return json({})
     if (url.pathname === "/session/status") return json({ [sid]: { type: "idle" } })
     if (url.pathname === "/agent") return json([agent])
-    if (url.pathname === "/config/providers") return json({ providers: [provider], default: { [provider.id]: model.id } })
-    if (url.pathname === "/provider") return json({ all: [provider], default: { [provider.id]: model.id }, connected: [] })
+    if (url.pathname === "/config/providers")
+      return json({ providers: [provider], default: { [provider.id]: model.id } })
+    if (url.pathname === "/provider")
+      return json({ all: [provider], default: { [provider.id]: model.id }, connected: [] })
     return undefined
   })
   let ctx: Context | undefined
   function Probe() {
     const value = { sync: useSync(), local: useLocal(), keymap: useOpencodeKeymap() }
-    onMount(() => { ctx = value })
+    onMount(() => {
+      ctx = value
+    })
     return <Session />
   }
   function Harness() {
@@ -92,22 +172,68 @@ async function withRenderedSession(messages: Array<UserMessage | AssistantMessag
     onCleanup(registerOpencodeKeymap(keymap, renderer, config))
     onCleanup(() => runtime.clear())
     // 挂真实Session，不启动app或插件host；驻留、跟随与重测仍由生产renderAfter驱动。
-    return <TestTuiContexts paths={{ state: tmp.path }}><ClipboardProvider value={{ write: async () => {} }}>
-      <OpencodeKeymapProvider keymap={keymap}><ArgsProvider><ExitProvider exit={() => {}}><KVProvider><ToastProvider>
-      <RouteProvider initialRoute={{ type: "session", sessionID: sid }}><TuiConfigProvider config={config}>
-      <PluginRuntimeProvider value={runtime}><SDKProvider url="http://test" directory={directory} testTransport={{ fetch: calls.fetch, events: events.source }}>
-      <ProjectProvider><PermissionProvider><LocationProvider><DataProvider><SyncProvider>
-      <ThemeProvider mode="dark" source={{ discover: async () => ({}) }}><LocalProvider><PromptStashProvider><DialogProvider>
-      <FrecencyProvider><PromptHistoryProvider><PromptRefProvider><EditorContextProvider><Probe />
-      </EditorContextProvider></PromptRefProvider></PromptHistoryProvider></FrecencyProvider></DialogProvider></PromptStashProvider></LocalProvider></ThemeProvider>
-      </SyncProvider></DataProvider></LocationProvider></PermissionProvider></ProjectProvider></SDKProvider></PluginRuntimeProvider>
-      </TuiConfigProvider></RouteProvider></ToastProvider></KVProvider></ExitProvider></ArgsProvider></OpencodeKeymapProvider>
-      </ClipboardProvider></TestTuiContexts>
+    return (
+      <TestTuiContexts paths={{ state: tmp.path }}>
+        <ClipboardProvider value={{ write: async () => {} }}>
+          <OpencodeKeymapProvider keymap={keymap}>
+            <ArgsProvider>
+              <ExitProvider exit={() => {}}>
+                <KVProvider>
+                  <ToastProvider>
+                    <RouteProvider initialRoute={{ type: "session", sessionID: sid }}>
+                      <TuiConfigProvider config={config}>
+                        <PluginRuntimeProvider value={runtime}>
+                          <SDKProvider
+                            url="http://test"
+                            directory={directory}
+                            testTransport={{ fetch: calls.fetch, events: events.source }}
+                          >
+                            <ProjectProvider>
+                              <PermissionProvider>
+                                <LocationProvider>
+                                  <DataProvider>
+                                    <SyncProvider>
+                                      <ThemeProvider mode="dark" source={{ discover: async () => ({}) }}>
+                                        <LocalProvider>
+                                          <PromptStashProvider>
+                                            <DialogProvider>
+                                              <FrecencyProvider>
+                                                <PromptHistoryProvider>
+                                                  <PromptRefProvider>
+                                                    <EditorContextProvider>
+                                                      <Probe />
+                                                    </EditorContextProvider>
+                                                  </PromptRefProvider>
+                                                </PromptHistoryProvider>
+                                              </FrecencyProvider>
+                                            </DialogProvider>
+                                          </PromptStashProvider>
+                                        </LocalProvider>
+                                      </ThemeProvider>
+                                    </SyncProvider>
+                                  </DataProvider>
+                                </LocationProvider>
+                              </PermissionProvider>
+                            </ProjectProvider>
+                          </SDKProvider>
+                        </PluginRuntimeProvider>
+                      </TuiConfigProvider>
+                    </RouteProvider>
+                  </ToastProvider>
+                </KVProvider>
+              </ExitProvider>
+            </ArgsProvider>
+          </OpencodeKeymapProvider>
+        </ClipboardProvider>
+      </TestTuiContexts>
+    )
   }
   registerOpencodeSpinner()
   const app = await testRender(() => <Harness />, { ...size, footerHeight: 0, useThread: false })
   try {
-    await waitForFrame(app, () => Boolean(ctx && ctx.sync.status === "complete" && ctx.local.model.ready && ctx.sync.data.message[sid]?.length))
+    await waitForFrame(app, () =>
+      Boolean(ctx && ctx.sync.status === "complete" && ctx.local.model.ready && ctx.sync.data.message[sid]?.length),
+    )
     if (!ctx) throw new Error("Session harness did not mount")
     await run(app, events.emit, ctx)
   } finally {
@@ -160,7 +286,12 @@ const released = (app: App, id: string) => contentNode(app, id) === undefined
 async function stableHeight(app: App, scroll: ScrollBoxRenderable) {
   let last = -1
   let stable = 0
-  await waitForFrame(app, () => { const current = scroll.scrollHeight; stable = current === last ? stable + 1 : 0; last = current; return stable >= 2 })
+  await waitForFrame(app, () => {
+    const current = scroll.scrollHeight
+    stable = current === last ? stable + 1 : 0
+    last = current
+    return stable >= 2
+  })
   return last
 }
 async function click(app: App, text: string) {
@@ -179,7 +310,9 @@ function windowFixture(marker: string) {
     const second = assistant(`msg_window_assistant_${tag}`, index * 2 + 2, first.id)
     messages.push(first, second)
     parts[first.id] = [textPart(`part_window_user_${tag}`, first.id, `${marker} user ${tag}`)]
-    parts[second.id] = [textPart(`part_window_assistant_${tag}`, second.id, `${marker} assistant ${tag} ${"wrap content ".repeat(18)}`)]
+    parts[second.id] = [
+      textPart(`part_window_assistant_${tag}`, second.id, `${marker} assistant ${tag} ${"wrap content ".repeat(18)}`),
+    ]
   }
   return { messages, parts }
 }
@@ -187,34 +320,54 @@ async function withFakeNow(run: (advance: (milliseconds: number) => void) => Pro
   const original = Date.now
   let now = original()
   Date.now = () => now
-  try { await run((milliseconds) => { now += milliseconds }) } finally { Date.now = original }
+  try {
+    await run((milliseconds) => {
+      now += milliseconds
+    })
+  } finally {
+    Date.now = original
+  }
 }
 const AGE = 31_000
 
 test("tool card collapse and expand 100 times keeps identical frames and releases the body owner", async () => {
   const info = assistant("msg_hundred_toggle", 1)
   const output = Array.from({ length: 30 }, (_, index) => `hundred toggle line ${index}`).join("\n")
-  await withRenderedSession([info], { [info.id]: [toolPart("part_hundred_toggle", info.id, output)] }, async (app) => {
-    await click(app, "Click to expand")
-    await waitForFrame(app, (frame) => frame.includes("Click to collapse"))
-    await click(app, "Click to collapse")
-    const baseline = await waitForFrame(app, (frame) => frame.includes("Click to expand"))
-    const registry = (Renderable as { renderablesByNumber: Map<number, Renderable> }).renderablesByNumber
-    const size = registry.size
-    // 先预热再比较100轮稳态帧和真实renderable数，不能把visible隐藏误当资源销毁。
-    for (let round = 0; round < 100; round++) {
+  await withRenderedSession(
+    [info],
+    { [info.id]: [toolPart("part_hundred_toggle", info.id, output)] },
+    async (app) => {
       await click(app, "Click to expand")
-      await waitForFrame(app, (frame) => frame.includes("hundred toggle line 15") && frame.includes("Click to collapse"))
+      await waitForFrame(app, (frame) => frame.includes("Click to collapse"))
       await click(app, "Click to collapse")
-      expect(await waitForFrame(app, (frame) => frame.includes("Click to expand"))).toBe(baseline)
-      expect(registry.size).toBe(size)
-    }
-  }, { width: 80, height: 40 })
+      const baseline = await waitForFrame(app, (frame) => frame.includes("Click to expand"))
+      const registry = (Renderable as { renderablesByNumber: Map<number, Renderable> }).renderablesByNumber
+      const size = registry.size
+      // 先预热再比较100轮稳态帧和真实renderable数，不能把visible隐藏误当资源销毁。
+      for (let round = 0; round < 100; round++) {
+        await click(app, "Click to expand")
+        await waitForFrame(
+          app,
+          (frame) => frame.includes("hundred toggle line 15") && frame.includes("Click to collapse"),
+        )
+        await click(app, "Click to collapse")
+        expect(await waitForFrame(app, (frame) => frame.includes("Click to expand"))).toBe(baseline)
+        expect(registry.size).toBe(size)
+      }
+    },
+    { width: 80, height: 40 },
+  )
 })
 
 test("offscreen messages release content after aging while roots geometry and expanded state stay exact", async () => {
   const fixture = windowFixture("window")
-  fixture.parts[fixture.messages[1].id] = [toolPart("part_window_tool_00", fixture.messages[1].id, Array.from({ length: 30 }, (_, index) => `window expanded line ${index}`).join("\n"))]
+  fixture.parts[fixture.messages[1].id] = [
+    toolPart(
+      "part_window_tool_00",
+      fixture.messages[1].id,
+      Array.from({ length: 30 }, (_, index) => `window expanded line ${index}`).join("\n"),
+    ),
+  ]
   await withRenderedSession(fixture.messages, fixture.parts, async (app, _emit, ctx) => {
     await waitForFrame(app, (frame) => frame.includes("window assistant 23"))
     const scroll = sessionScrollBox(app, fixture.messages[47].id)
@@ -235,7 +388,10 @@ test("offscreen messages release content after aging while roots geometry and ex
       const before = app.captureCharFrame()
       await pumpFrames(app, 8)
       // 根/逐根高度/滚动全长/可见帧同时不变，才能证明释放的是正文而非布局。
-      expect({ user: released(app, fixture.messages[0].id), card: released(app, card) }).toEqual({ user: true, card: true })
+      expect({ user: released(app, fixture.messages[0].id), card: released(app, card) }).toEqual({
+        user: true,
+        card: true,
+      })
       expect(await stableHeight(app, scroll)).toBe(fullHeight)
       expect(fixture.messages.map((item) => [item.id, messageRoot(app, item.id).height])).toEqual(heights)
       expect(app.captureCharFrame()).toBe(before)
@@ -254,12 +410,30 @@ test("durable update remeasures only the offscreen frozen message exactly", asyn
   await withRenderedSession(fixture.messages, fixture.parts, async (app, emit) => {
     await waitForFrame(app, (frame) => frame.includes("stream assistant 23"))
     const scroll = sessionScrollBox(app, fixture.messages[47].id)
-    await withFakeNow(async (advance) => { advance(AGE); await pumpFrames(app, 8); expect(released(app, target)).toBe(true) })
+    await withFakeNow(async (advance) => {
+      advance(AGE)
+      await pumpFrames(app, 8)
+      expect(released(app, target)).toBe(true)
+    })
     const fullHeight = await stableHeight(app, scroll)
     const height = messageRoot(app, target).height
-    emit({ directory, project: "proj_test", payload: { id: "evt_stream_offscreen", type: "message.part.updated", properties: {
-      sessionID: sid, part: textPart("part_window_user_04", target, "stream user 04\nsecond added line\nthird added line\nfourth added line"), time: Date.now(),
-    } } } satisfies GlobalEvent)
+    emit({
+      directory,
+      project: "proj_test",
+      payload: {
+        id: "evt_stream_offscreen",
+        type: "message.part.updated",
+        properties: {
+          sessionID: sid,
+          part: textPart(
+            "part_window_user_04",
+            target,
+            "stream user 04\nsecond added line\nthird added line\nfourth added line",
+          ),
+          time: Date.now(),
+        },
+      },
+    } satisfies GlobalEvent)
     // 一行换四行，根高与scrollbar都恰好+3；不以全量重挂掩盖单条失效。
     await waitForFrame(app, () => scroll.scrollHeight === fullHeight + 3)
     expect(messageRoot(app, target).height).toBe(height + 3)
@@ -340,14 +514,23 @@ test("resize naturally reflows mounted content and remeasures shelled roots in b
     exact()
     expect(scroll.scrollHeight).toBeGreaterThan(before)
     expect(released(app, fixture.messages[0].id)).toBe(false)
-    await withFakeNow(async (advance) => { advance(AGE); await pumpFrames(app, 8); expect(released(app, fixture.messages[0].id)).toBe(true) })
+    await withFakeNow(async (advance) => {
+      advance(AGE)
+      await pumpFrames(app, 8)
+      expect(released(app, fixture.messages[0].id)).toBe(true)
+    })
     const anchor = messageRoot(app, "msg_window_user_20")
     scroll.scrollBy(anchor.y - scroll.y)
     await waitForFrame(app, () => anchor.y - scroll.y === 0)
     app.resize(80, 24)
     let last = -1
     let stable = 0
-    await waitForFrame(app, () => { const current = scroll.scrollHeight; stable = current === last ? stable + 1 : 0; last = current; return stable >= 2 && anchor.y - scroll.y === 0 && released(app, fixture.messages[0].id) })
+    await waitForFrame(app, () => {
+      const current = scroll.scrollHeight
+      stable = current === last ? stable + 1 : 0
+      last = current
+      return stable >= 2 && anchor.y - scroll.y === 0 && released(app, fixture.messages[0].id)
+    })
     expect(anchor.y - scroll.y).toBe(0)
     exact()
     expect(released(app, fixture.messages[0].id)).toBe(true)
@@ -380,7 +563,9 @@ test("scrolling within the residency budget performs zero content remounts", asy
 test("content beyond the byte budget is evicted least-recently-rendered first", async () => {
   const fixture = windowFixture("budget")
   // 真实64MiB门槛不变；大模型输出参与记账，屏幕只展示短metadata.output。
-  fixture.parts[fixture.messages[1].id] = [toolPart("part_budget_huge", fixture.messages[1].id, "small visible output", "x".repeat(64 * 1024 * 1024 + 1))]
+  fixture.parts[fixture.messages[1].id] = [
+    toolPart("part_budget_huge", fixture.messages[1].id, "small visible output", "x".repeat(64 * 1024 * 1024 + 1)),
+  ]
   await withRenderedSession(fixture.messages, fixture.parts, async (app) => {
     await waitForFrame(app, (frame) => frame.includes("budget assistant 23"))
     await pumpFrames(app, 3)
@@ -391,36 +576,77 @@ test("content beyond the byte budget is evicted least-recently-rendered first", 
 })
 
 function partUpdatedEvent(id: string, part: Part): GlobalEvent {
-  return { directory, project: "proj_test", payload: { id, type: "message.part.updated", properties: { sessionID: part.sessionID, part, time: Date.now() } } }
+  return {
+    directory,
+    project: "proj_test",
+    payload: { id, type: "message.part.updated", properties: { sessionID: part.sessionID, part, time: Date.now() } },
+  }
 }
 
 test("task card acquires the child session when its id arrives after mount", async () => {
   const childID = "ses_task_late_child"
   const info = assistant("msg_task_late", 1)
-  const task = { id: "part_task_late", sessionID: sid, messageID: info.id, type: "tool", callID: "call_task", tool: "task",
-    state: { status: "running", input: { description: "late child" }, metadata: {}, time: { start: 1 } } } satisfies Part
+  const task = {
+    id: "part_task_late",
+    sessionID: sid,
+    messageID: info.id,
+    type: "tool",
+    callID: "call_task",
+    tool: "task",
+    state: { status: "running", input: { description: "late child" }, metadata: {}, time: { start: 1 } },
+  } satisfies Part
   const childUser = { ...user("msg_task_late_child_user", 1), sessionID: childID }
   const childBase = toolPart("part_task_late_child_tool", childUser.id, "hi")
   const childTool = { ...childBase, sessionID: childID, state: { ...childBase.state, title: "child work" } }
-  await withRenderedSession([info], { [info.id]: [task] }, async (app, emit) => {
-    await waitForFrame(app, (frame) => frame.includes("late child"))
-    expect(app.captureCharFrame().includes("child work")).toBe(false)
-    // 不主动sync或导航：迟到ID必须由Task自身取得正文使用权。
-    emit(partUpdatedEvent("evt_task_late_id", { ...task, state: { ...task.state, metadata: { sessionId: childID } } }))
-    await waitForFrame(app, (frame) => frame.includes("child work"))
-  }, undefined, (url) => {
-    if (url.pathname === `/session/${childID}`) return json({ id: childID, parentID: sid, directory, projectID: "proj_test", slug: childID, version: "1", title: childID, time: { created: 1, updated: 1 } })
-    if (url.pathname === `/session/${childID}/message`) return json([{ info: childUser, parts: [childTool] }])
-    return undefined
-  })
+  await withRenderedSession(
+    [info],
+    { [info.id]: [task] },
+    async (app, emit) => {
+      await waitForFrame(app, (frame) => frame.includes("late child"))
+      expect(app.captureCharFrame().includes("child work")).toBe(false)
+      // 不主动sync或导航：迟到ID必须由Task自身取得正文使用权。
+      emit(
+        partUpdatedEvent("evt_task_late_id", { ...task, state: { ...task.state, metadata: { sessionId: childID } } }),
+      )
+      await waitForFrame(app, (frame) => frame.includes("child work"))
+    },
+    undefined,
+    (url) => {
+      if (url.pathname === `/session/${childID}`)
+        return json({
+          id: childID,
+          parentID: sid,
+          directory,
+          projectID: "proj_test",
+          slug: childID,
+          version: "1",
+          title: childID,
+          time: { created: 1, updated: 1 },
+        })
+      if (url.pathname === `/session/${childID}/message`) return json([{ info: childUser, parts: [childTool] }])
+      return undefined
+    },
+  )
 })
 
 test("offscreen shell output growth re-measures the frozen height", async () => {
   const fixture = windowFixture("shellgrow")
   const target = fixture.messages[1].id
   // metadata写在state上；running Shell仅接受递增的progressVersion。
-  const shell = { id: "part_shell_grow", sessionID: sid, messageID: target, type: "tool", callID: "call_shell", tool: "bash",
-    state: { status: "running", input: { command: "echo growing" }, metadata: { output: "shellgrow initial", progressVersion: 1 }, time: { start: 1 } } } satisfies Part
+  const shell = {
+    id: "part_shell_grow",
+    sessionID: sid,
+    messageID: target,
+    type: "tool",
+    callID: "call_shell",
+    tool: "bash",
+    state: {
+      status: "running",
+      input: { command: "echo growing" },
+      metadata: { output: "shellgrow initial", progressVersion: 1 },
+      time: { start: 1 },
+    },
+  } satisfies Part
   fixture.parts[target] = [shell]
   await withRenderedSession(fixture.messages, fixture.parts, async (app, emit) => {
     await waitForFrame(app, (frame) => frame.includes("shellgrow assistant 23"))
@@ -432,9 +658,18 @@ test("offscreen shell output growth re-measures the frozen height", async () => 
     })
     const before = await stableHeight(app, scroll)
     const heightBefore = messageRoot(app, target).height
-    emit(partUpdatedEvent("evt_shell_grow", { ...shell, state: { ...shell.state, metadata: {
-      output: "shellgrow initial\nsecond added line\nthird added line\nfourth added line", progressVersion: 2,
-    } } }))
+    emit(
+      partUpdatedEvent("evt_shell_grow", {
+        ...shell,
+        state: {
+          ...shell.state,
+          metadata: {
+            output: "shellgrow initial\nsecond added line\nthird added line\nfourth added line",
+            progressVersion: 2,
+          },
+        },
+      }),
+    )
     // status、命令均不变，根高和滚动全长精确+3只能来自metadata正文的高度失效。
     await waitForFrame(app, () => scroll.scrollHeight === before + 3)
     expect(messageRoot(app, target).height).toBe(heightBefore + 3)
@@ -452,7 +687,12 @@ test("mounted content growth counts toward the residency byte budget", async () 
     expect(released(app, "msg_window_user_00")).toBe(false)
     expect(released(app, target)).toBe(false)
     // 只增长模型output越过真实64MiB；短metadata输出不把大正文送入renderer。
-    emit(partUpdatedEvent("evt_growth_big", { ...growing, state: { ...growing.state, output: "x".repeat(64 * 1024 * 1024 + 1) } }))
+    emit(
+      partUpdatedEvent("evt_growth_big", {
+        ...growing,
+        state: { ...growing.state, output: "x".repeat(64 * 1024 * 1024 + 1) },
+      }),
+    )
     // 不推进时钟，也不重挂目标；本轮驱逐必须由挂载中容量差额触发。
     await waitForFrame(app, () => released(app, "msg_window_user_00"))
     expect(released(app, "msg_window_user_00")).toBe(true)
@@ -465,11 +705,12 @@ test.each([false, true])("session keeps every resize frame stable with released 
   await withRenderedSession(fixture.messages, fixture.parts, async (app, _emit, ctx) => {
     await waitForFrame(app, (frame) => frame.includes("stable assistant 23"))
     const scroll = sessionScrollBox(app, fixture.messages[0].id)
-    if (shelled) await withFakeNow(async (advance) => {
-      advance(AGE)
-      await pumpFrames(app, 8)
-      expect(released(app, fixture.messages[0].id)).toBe(true)
-    })
+    if (shelled)
+      await withFakeNow(async (advance) => {
+        advance(AGE)
+        await pumpFrames(app, 8)
+        expect(released(app, fixture.messages[0].id)).toBe(true)
+      })
     const reader = messageRoot(app, "msg_window_user_20")
     scroll.scrollBy(reader.y - scroll.viewport.y)
     await waitForFrame(app, () => reader.y - scroll.viewport.y === 0)
@@ -512,7 +753,12 @@ test("session preserves selected text while a preceding message grows", async ()
     const selected = app.renderer.getSelection()?.getSelectedText()
     // 先证明选区非空，再沿真实Part事件改变前方正文，拒绝undefined对照假绿。
     expect(selected).toContain("selection user 20")
-    emit(partUpdatedEvent("evt_selection_growth", textPart("part_window_user_00", fixture.messages[0].id, "selection user 00\n" + "extra line\n".repeat(60))))
+    emit(
+      partUpdatedEvent(
+        "evt_selection_growth",
+        textPart("part_window_user_00", fixture.messages[0].id, "selection user 00\n" + "extra line\n".repeat(60)),
+      ),
+    )
     for (let frame = 0; frame < 20; frame++) {
       await app.renderOnce()
       await new Promise<void>((resolve) => process.nextTick(resolve))

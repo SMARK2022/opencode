@@ -7,7 +7,15 @@
  */
 import vscode from "vscode"
 import { stringProp, numberProp, quoteForSummary } from "../util"
-import { c1, copilotLikeCellId, cellTypeLabel, computeVirtualRanges, runtimeLabel, notebookHeader, cellRef } from "./format"
+import {
+  c1,
+  copilotLikeCellId,
+  cellTypeLabel,
+  computeVirtualRanges,
+  runtimeLabel,
+  notebookHeader,
+  cellRef,
+} from "./format"
 import { resolveNotebook, resolveNotebookCell } from "./resolve"
 import { writeArtifact } from "./output"
 
@@ -59,7 +67,8 @@ export async function notebookSource(input: Record<string, unknown>) {
         globalStart = offset
       } else {
         globalStart = range.start
-        warning = "Offset is outside the target cell range; reset to the cell range start. Offsets are global virtual source line numbers."
+        warning =
+          "Offset is outside the target cell range; reset to the cell range start. Offsets are global virtual source line numbers."
       }
     } else {
       globalStart = range.start
@@ -126,8 +135,16 @@ export async function notebookSource(input: Record<string, unknown>) {
           break
         }
         // 行内尾段不能以offset+1恢复；按300码点JSON分片导出dirty全文，仍复用唯一writer。
-        const chunks = Array.from(cell.document.getText().matchAll(/[\s\S]{1,300}/gu), (match) => JSON.stringify(match[0]))
-        const artifact = await writeArtifact(notebook, cell, { mime: "application/json", data: Buffer.from(chunks.join("\n")) }, 0, 0)
+        const chunks = Array.from(cell.document.getText().matchAll(/[\s\S]{1,300}/gu), (match) =>
+          JSON.stringify(match[0]),
+        )
+        const artifact = await writeArtifact(
+          notebook,
+          cell,
+          { mime: "application/json", data: Buffer.from(chunks.join("\n")) },
+          0,
+          0,
+        )
         // 远程提供者必须保留scheme/authority，不能只交付其本地形状fsPath。
         sourceArtifact = artifact.uri.scheme === "file" ? artifact.fsPath : artifact.uri.toString()
 
@@ -170,7 +187,9 @@ export async function notebookSource(input: Record<string, unknown>) {
     ]),
     warning ? `Warning: ${warning}` : undefined,
     "",
-  ].filter((line): line is string => line !== undefined).join("\n")
+  ]
+    .filter((line): line is string => line !== undefined)
+    .join("\n")
   output += "\n"
   output +=
     [`<path>${notebook.uri.fsPath || notebook.uri.toString()}</path>`, `<type>notebook</type>`, "<content>"].join(
@@ -194,7 +213,8 @@ export async function notebookSource(input: Record<string, unknown>) {
     data: {
       path: notebook.uri.fsPath || notebook.uri.toString(),
       target: targetCellIndex !== undefined ? `cell ${targetCellIndex + 1}` : "all",
-      cellId: cellId ?? (targetCellIndex !== undefined ? copilotLikeCellId(notebook.cellAt(targetCellIndex)) : undefined),
+      cellId:
+        cellId ?? (targetCellIndex !== undefined ? copilotLikeCellId(notebook.cellAt(targetCellIndex)) : undefined),
       globalStart,
       limit,
       returned: renderedLines,

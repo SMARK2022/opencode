@@ -4,17 +4,17 @@
 
 This document describes how to build, inspect, install, and publish the SMARK OpenCode VS Code extension.
 
-| Field | Value |
-| --- | --- |
-| Extension ID | `SMARK2022.opencode-ide-bridge` |
-| Package path | `sdks/vscode` |
-| Source repository | `https://github.com/SMARK2022/opencode` |
-| Source branch | `dev-smark` |
-| Repository extension version | `1.19.14` |
-| Recommended CLI | `opencode 1.19.17-smark` |
-| Default version source | `sdks/vscode/package.json` |
-| Local VSIX name | `dist/SMARK2022.opencode-ide-bridge-<version>.vsix` |
-| CI/GitHub Release VSIX name | `dist/opencode-vscode-<version>.vsix` |
+| Field                        | Value                                               |
+| ---------------------------- | --------------------------------------------------- |
+| Extension ID                 | `SMARK2022.opencode-ide-bridge`                     |
+| Package path                 | `sdks/vscode`                                       |
+| Source repository            | `https://github.com/SMARK2022/opencode`             |
+| Source branch                | `dev-smark`                                         |
+| Repository extension version | `1.19.14`                                           |
+| Recommended CLI              | `opencode 1.19.17-smark`                            |
+| Default version source       | `sdks/vscode/package.json`                          |
+| Local VSIX name              | `dist/SMARK2022.opencode-ide-bridge-<version>.vsix` |
+| CI/GitHub Release VSIX name  | `dist/opencode-vscode-<version>.vsix`               |
 
 The extension starts a local bridge on `127.0.0.1:<random port>` and lets the SMARK OpenCode CLI call VS Code notebook and workspace APIs through authenticated localhost endpoints. The CLI and extension are versioned independently.
 
@@ -118,15 +118,15 @@ After installing locally:
 
 ## Security Checks
 
-| Check | Expected result |
-| --- | --- |
-| Local binding | Bridge listens only on `127.0.0.1`. |
-| Health endpoint | `/health` is unauthenticated. |
-| Tool endpoints | Notebook endpoints and `/manifest` require `Bearer <token>`. |
-| Cross-origin requests | Requests with an `Origin` header are rejected. |
-| Token logging | Output logs redact the token. |
-| Registry directory | Uses `0o700` on non-Windows systems. |
-| Registry file | Uses `0o600` on non-Windows systems. |
+| Check                        | Expected result                                                                                                         |
+| ---------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| Local binding                | Bridge listens only on `127.0.0.1`.                                                                                     |
+| Health endpoint              | `/health` is unauthenticated.                                                                                           |
+| Tool endpoints               | Notebook endpoints and `/manifest` require `Bearer <token>`.                                                            |
+| Cross-origin requests        | Requests with an `Origin` header are rejected.                                                                          |
+| Token logging                | Output logs redact the token.                                                                                           |
+| Registry directory           | Uses `0o700` on non-Windows systems.                                                                                    |
+| Registry file                | Uses `0o600` on non-Windows systems.                                                                                    |
 | Create/save/edit permissions | CLI plugin still asks through OpenCode permission gates; notebook create and save also require the general `edit` gate. |
 
 ## Publishing

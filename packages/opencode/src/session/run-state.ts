@@ -58,10 +58,14 @@ const layer = Layer.effect(
         yield* Effect.addFinalizer(
           Effect.fnUntraced(function* () {
             // 固定本次清理集合，并以对象身份排除已由其它目录接管的Session。
-            yield* Effect.forEach([...owned], ([id, runner]) => runners.get(id) === runner ? runner.cancel : Effect.void, {
-              concurrency: "unbounded",
-              discard: true,
-            })
+            yield* Effect.forEach(
+              [...owned],
+              ([id, runner]) => (runners.get(id) === runner ? runner.cancel : Effect.void),
+              {
+                concurrency: "unbounded",
+                discard: true,
+              },
+            )
             for (const [id, runner] of owned) {
               if (runners.get(id) === runner) runners.delete(id)
             }
@@ -132,10 +136,13 @@ const layer = Layer.effect(
       const jobs = yield* background.list()
       if (!existing) {
         // 无 runner 时仍需取消可能残留的 background jobs
-        yield* Effect.all([cancelBackgroundJobs(background, sessionID, jobs), status.set(sessionID, { type: "idle" })], {
-          concurrency: "unbounded",
-          discard: true,
-        })
+        yield* Effect.all(
+          [cancelBackgroundJobs(background, sessionID, jobs), status.set(sessionID, { type: "idle" })],
+          {
+            concurrency: "unbounded",
+            discard: true,
+          },
+        )
         return
       }
       // 先固定本次jobs再并行取消，不能在runner发布idle后扫描新命令的作业。
@@ -156,10 +163,9 @@ const layer = Layer.effect(
       const tracked = SessionActivity.track(`session:${sessionID}`, work)
       const current = yield* runner(sessionID, onInterrupt)
       // queued work可能由旧shell fiber启动，显式提供空WorkspaceRef也不能沿用旧值。
-      return yield* current.ensureRunning(tracked.pipe(
-        Effect.provideService(InstanceRef, instance),
-        Effect.provideService(WorkspaceRef, workspace),
-      ))
+      return yield* current.ensureRunning(
+        tracked.pipe(Effect.provideService(InstanceRef, instance), Effect.provideService(WorkspaceRef, workspace)),
+      )
     })
 
     // #482：compaction/cleanup 的独占执行入口——复用 shell runner 的并发控制，
@@ -210,11 +216,21 @@ const layer = Layer.effect(
       // Shell 与 loop 独立标记，拒绝启动的 shell 不影响已有运行。
       const tracked = SessionActivity.track(`shell:${sessionID}`, work)
       const current = yield* runner(sessionID, onInterrupt)
-      return yield* current.startShell(tracked, ready)
+      return yield* current
+        .startShell(tracked, ready)
         .pipe(Effect.catchTag("RunnerBusy", () => Effect.fail(busyError(sessionID))))
     })
 
-    return Service.of({ assertNotBusy, assertNotReverting, beginRevert, endRevert, cancel, ensureRunning, startExclusive, startShell })
+    return Service.of({
+      assertNotBusy,
+      assertNotReverting,
+      beginRevert,
+      endRevert,
+      cancel,
+      ensureRunning,
+      startExclusive,
+      startShell,
+    })
   }),
 )
 

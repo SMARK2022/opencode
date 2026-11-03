@@ -2,15 +2,15 @@
 
 ## 文档状态
 
-| 项目 | 值 |
-|---|---|
-| 状态 | 已实施并通过独立复核 |
-| 调研日期 | 2026-07-11 |
-| 当前分支 | `dev-smark` |
-| 当前提交 | `4498da0c3` |
-| 主线对照 | `origin/dev` / `7acb9ff2403d16baf76655acf27d60c8ef9b1fe6` |
-| bundled ripgrep | `15.1.0` |
-| 实施状态 | 5 个源码文件和 5 个测试文件已完成手术级实现 |
+| 项目            | 值                                                        |
+| --------------- | --------------------------------------------------------- |
+| 状态            | 已实施并通过独立复核                                      |
+| 调研日期        | 2026-07-11                                                |
+| 当前分支        | `dev-smark`                                               |
+| 当前提交        | `4498da0c3`                                               |
+| 主线对照        | `origin/dev` / `7acb9ff2403d16baf76655acf27d60c8ef9b1fe6` |
+| bundled ripgrep | `15.1.0`                                                  |
+| 实施状态        | 5 个源码文件和 5 个测试文件已完成手术级实现               |
 
 ## 1. 设计摘要
 
@@ -34,48 +34,48 @@
 
 ### 2.1 已阅读的源码
 
-| 文件 | 相关性与确认结果 |
-|---|---|
-| `packages/opencode/src/file/ripgrep.ts` | `files()` 的 streaming contract、`filesArgs()` 顺序、SearchResult、code `0/1/2`、limit、timeout、AbortSignal 和 child scope 的权威实现 |
-| `packages/opencode/src/tool/glob.ts` | Glob 当前通过 `rg.files()` + `Stream.take(101)` 收集结果；Stream 末尾失败会丢失全部前缀结果 |
-| `packages/opencode/src/tool/grep.ts` | Grep 已消费 `partial`，但 partial-empty 在第 128 行前后被普通空结果早退吞掉；metadata 未保存 partial |
-| `packages/opencode/src/tool/tool.ts` | completed output 和 metadata 的清洗、截断边界；布尔 metadata 会原样保留 |
-| `packages/opencode/src/session/processor.ts` | Tool error 原样写入 `state.error`；completed Tool metadata 原样写入 Message |
-| `packages/opencode/src/session/message-v2.ts` | completed output 作为普通 Tool result text 返回模型；error 作为 `error-text`；metadata 是开放 Record |
-| `packages/opencode/src/file/protected.ts` | Protected 是 index/watcher 的扫描策略，不是显式用户搜索的授权或正确性机制 |
-| `packages/opencode/src/file/index.ts` | 非 global-home 索引继续使用 streaming `files()`；错误被索引初始化降级，不应随 Glob 修复迁移 |
-| `packages/opencode/src/tool/skill.ts` | Skill 依赖 streaming `files()` 和 `Stream.take(10)`；必须保持接口与提前终止行为 |
-| `packages/opencode/src/tool/external-directory.ts` | OpenCode Permission 只判断搜索根是否在 Project 外，不等同于 OS ACL/TCC |
-| `packages/opencode/src/server/routes/instance/httpapi/handlers/file.ts` | HTTP findText 使用 `search().items`；本设计不改变 SearchResult contract |
-| `packages/opencode/src/cli/cmd/debug/ripgrep.ts` | debug files/tree 依赖 streaming `files()`，不应被 Glob Tool 的结构化结果迁移影响 |
-| `packages/opencode/src/cli/cmd/tui/routes/session/index.tsx` | classic TUI 有 Glob/Grep 专用 renderer；details 关闭时有两层 completed Tool 过滤 |
-| `packages/opencode/src/cli/cmd/tui/feature-plugins/system/session-v2.tsx` | 第二套 renderer 仅在 experimental event system 下作为 debug plugin 加载 |
-| `packages/opencode/src/cli/cmd/tui/plugin/internal.ts` | 确认 session-v2 不是默认生产 renderer，只在 feature flag 开启时注册 |
-| `packages/opencode/src/cli/cmd/run/tool.ts` | Glob/Grep 的原始 output 被隐藏，必须从 metadata 摘要显示 incomplete |
-| `packages/ui/src/components/message-part.tsx` | Shared UI 把 read/glob/grep/list 收入 context group，折叠和展开状态均不显示 Tool output |
-| `packages/opencode/src/session/compaction.ts` | Search History 只保存计数；Tool output 被 Compaction 清除后会把 partial-empty 重新表示为确定性 `0 matches`，必须纳入当前正确性链 |
-| `packages/core/src/cross-spawn-spawner.ts` | child 是 scoped resource；scope 退出会终止仍运行的进程，支持 force escalation |
-| `origin/dev:packages/core/src/ripgrep.ts` | 主线已有共享 run 和 8 KiB stderr collector，但 glob/grep 公开方法再次映射为数组并丢失 partial |
-| `origin/dev:packages/core/src/tool/glob.ts` | 主线 core Tool Output 仍是数组，不能直接作为当前分支的结构化迁移目标 |
-| `origin/dev:packages/core/src/tool/grep.ts` | 同上；当前修复不混入 1,127 个提交跨度的主线同步 |
+| 文件                                                                      | 相关性与确认结果                                                                                                                       |
+| ------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `packages/opencode/src/file/ripgrep.ts`                                   | `files()` 的 streaming contract、`filesArgs()` 顺序、SearchResult、code `0/1/2`、limit、timeout、AbortSignal 和 child scope 的权威实现 |
+| `packages/opencode/src/tool/glob.ts`                                      | Glob 当前通过 `rg.files()` + `Stream.take(101)` 收集结果；Stream 末尾失败会丢失全部前缀结果                                            |
+| `packages/opencode/src/tool/grep.ts`                                      | Grep 已消费 `partial`，但 partial-empty 在第 128 行前后被普通空结果早退吞掉；metadata 未保存 partial                                   |
+| `packages/opencode/src/tool/tool.ts`                                      | completed output 和 metadata 的清洗、截断边界；布尔 metadata 会原样保留                                                                |
+| `packages/opencode/src/session/processor.ts`                              | Tool error 原样写入 `state.error`；completed Tool metadata 原样写入 Message                                                            |
+| `packages/opencode/src/session/message-v2.ts`                             | completed output 作为普通 Tool result text 返回模型；error 作为 `error-text`；metadata 是开放 Record                                   |
+| `packages/opencode/src/file/protected.ts`                                 | Protected 是 index/watcher 的扫描策略，不是显式用户搜索的授权或正确性机制                                                              |
+| `packages/opencode/src/file/index.ts`                                     | 非 global-home 索引继续使用 streaming `files()`；错误被索引初始化降级，不应随 Glob 修复迁移                                            |
+| `packages/opencode/src/tool/skill.ts`                                     | Skill 依赖 streaming `files()` 和 `Stream.take(10)`；必须保持接口与提前终止行为                                                        |
+| `packages/opencode/src/tool/external-directory.ts`                        | OpenCode Permission 只判断搜索根是否在 Project 外，不等同于 OS ACL/TCC                                                                 |
+| `packages/opencode/src/server/routes/instance/httpapi/handlers/file.ts`   | HTTP findText 使用 `search().items`；本设计不改变 SearchResult contract                                                                |
+| `packages/opencode/src/cli/cmd/debug/ripgrep.ts`                          | debug files/tree 依赖 streaming `files()`，不应被 Glob Tool 的结构化结果迁移影响                                                       |
+| `packages/opencode/src/cli/cmd/tui/routes/session/index.tsx`              | classic TUI 有 Glob/Grep 专用 renderer；details 关闭时有两层 completed Tool 过滤                                                       |
+| `packages/opencode/src/cli/cmd/tui/feature-plugins/system/session-v2.tsx` | 第二套 renderer 仅在 experimental event system 下作为 debug plugin 加载                                                                |
+| `packages/opencode/src/cli/cmd/tui/plugin/internal.ts`                    | 确认 session-v2 不是默认生产 renderer，只在 feature flag 开启时注册                                                                    |
+| `packages/opencode/src/cli/cmd/run/tool.ts`                               | Glob/Grep 的原始 output 被隐藏，必须从 metadata 摘要显示 incomplete                                                                    |
+| `packages/ui/src/components/message-part.tsx`                             | Shared UI 把 read/glob/grep/list 收入 context group，折叠和展开状态均不显示 Tool output                                                |
+| `packages/opencode/src/session/compaction.ts`                             | Search History 只保存计数；Tool output 被 Compaction 清除后会把 partial-empty 重新表示为确定性 `0 matches`，必须纳入当前正确性链       |
+| `packages/core/src/cross-spawn-spawner.ts`                                | child 是 scoped resource；scope 退出会终止仍运行的进程，支持 force escalation                                                          |
+| `origin/dev:packages/core/src/ripgrep.ts`                                 | 主线已有共享 run 和 8 KiB stderr collector，但 glob/grep 公开方法再次映射为数组并丢失 partial                                          |
+| `origin/dev:packages/core/src/tool/glob.ts`                               | 主线 core Tool Output 仍是数组，不能直接作为当前分支的结构化迁移目标                                                                   |
+| `origin/dev:packages/core/src/tool/grep.ts`                               | 同上；当前修复不混入 1,127 个提交跨度的主线同步                                                                                        |
 
 ### 2.2 已阅读的测试与约束文档
 
-| 文件 | 相关性与确认结果 |
-|---|---|
-| `CONTEXT.md` | v1 Session/Message/Tool 是当前生产路径；v2 是进行中的迁移，不能假定 parity |
-| `AGENTS.md` | 测试必须从 package 目录运行；手工编辑使用最小修改；不应引入不必要抽象 |
-| `packages/opencode/AGENTS.md` | Effect service、scope、测试 fixture 和模块形状约束 |
-| `docs/adr/README.md` | 当前是局部 Tool/Ripgrep 修复，不需要新 ADR |
-| `packages/opencode/test/file/ripgrep.test.ts` | 现有正常、空结果、limit、timeout、invalid regex、files 测试；无权限 code `2` 结构化覆盖 |
-| `packages/opencode/test/tool/glob.test.ts` | 仅覆盖基础匹配和文件路径错误；无 partial 测试 |
-| `packages/opencode/test/tool/grep.test.ts` | 已有 Layer.mock seam，可直接构造 partial-empty/partial-items，无需新测试框架 |
-| `packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx` | 已有真实 OpenTUI 字符帧和 `tool_details_visibility:false` fixture |
-| `packages/opencode/test/cli/run/entry.body.test.ts` | 已覆盖 Grep truncated/timedOut 摘要，可扩展 partial |
-| `packages/opencode/test/session/message-v2.test.ts` | 已证明 completed output 原样成为 Tool result text、error 原样成为 error-text；无需重复新增本专项测试 |
-| `packages/core/test/effect/cross-spawn-spawner.test.ts` | 已证明 scope exit 杀 child、forceKillAfter 和 isRunning 行为；本修复不重复测试底层 spawner |
-| `packages/opencode/test/project/project.test.ts` | 提供 `ChildProcessSpawner.makeHandle` 并委托真实 spawner 的现成测试范式 |
-| `packages/opencode/test/installation/installation.test.ts` | 提供轻量 scripted stdout/stderr/exit handle 范式 |
+| 文件                                                                 | 相关性与确认结果                                                                                     |
+| -------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| `CONTEXT.md`                                                         | v1 Session/Message/Tool 是当前生产路径；v2 是进行中的迁移，不能假定 parity                           |
+| `AGENTS.md`                                                          | 测试必须从 package 目录运行；手工编辑使用最小修改；不应引入不必要抽象                                |
+| `packages/opencode/AGENTS.md`                                        | Effect service、scope、测试 fixture 和模块形状约束                                                   |
+| `docs/adr/README.md`                                                 | 当前是局部 Tool/Ripgrep 修复，不需要新 ADR                                                           |
+| `packages/opencode/test/file/ripgrep.test.ts`                        | 现有正常、空结果、limit、timeout、invalid regex、files 测试；无权限 code `2` 结构化覆盖              |
+| `packages/opencode/test/tool/glob.test.ts`                           | 仅覆盖基础匹配和文件路径错误；无 partial 测试                                                        |
+| `packages/opencode/test/tool/grep.test.ts`                           | 已有 Layer.mock seam，可直接构造 partial-empty/partial-items，无需新测试框架                         |
+| `packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx` | 已有真实 OpenTUI 字符帧和 `tool_details_visibility:false` fixture                                    |
+| `packages/opencode/test/cli/run/entry.body.test.ts`                  | 已覆盖 Grep truncated/timedOut 摘要，可扩展 partial                                                  |
+| `packages/opencode/test/session/message-v2.test.ts`                  | 已证明 completed output 原样成为 Tool result text、error 原样成为 error-text；无需重复新增本专项测试 |
+| `packages/core/test/effect/cross-spawn-spawner.test.ts`              | 已证明 scope exit 杀 child、forceKillAfter 和 isRunning 行为；本修复不重复测试底层 spawner           |
+| `packages/opencode/test/project/project.test.ts`                     | 提供 `ChildProcessSpawner.makeHandle` 并委托真实 spawner 的现成测试范式                              |
+| `packages/opencode/test/installation/installation.test.ts`           | 提供轻量 scripted stdout/stderr/exit handle 范式                                                     |
 
 ### 2.3 搜索确认的调用点和消费者
 
@@ -95,12 +95,12 @@
 
 使用 bundled ripgrep `15.1.0` 重新执行只读探针：
 
-| 场景 | stderr | exit |
-|---|---|---:|
-| 受保护的 PegasusConfiguration，普通 `--files` | `Operation not permitted (os error 1)` | 2 |
-| 同目录，增加 `--no-messages` | 空 | 2 |
-| `--files --no-messages --glob='['` | invalid glob 诊断仍存在 | 2 |
-| `--json --no-messages '(' README.md` | invalid regex 诊断仍存在 | 2 |
+| 场景                                          | stderr                                 | exit |
+| --------------------------------------------- | -------------------------------------- | ---: |
+| 受保护的 PegasusConfiguration，普通 `--files` | `Operation not permitted (os error 1)` |    2 |
+| 同目录，增加 `--no-messages`                  | 空                                     |    2 |
+| `--files --no-messages --glob='['`            | invalid glob 诊断仍存在                |    2 |
+| `--json --no-messages '(' README.md`          | invalid regex 诊断仍存在               |    2 |
 
 另验证了 ripgrep glob 的 last-match-wins：当前顺序 `--glob=!.git/*` 后接用户 `--glob=.git/config` 能返回 `.git/config`；反向顺序返回空。因此新路径必须复用当前参数顺序，不能把默认排除移到用户 glob 后面。
 
@@ -128,10 +128,10 @@ bun typecheck
 
 两份数据库均使用 `sqlite3 -readonly` 查询，没有写入或迁移。
 
-| 数据源 | Glob completed/error | 确认权限 Glob error | 涉及 Session | 最大错误字符 | Grep partial warning | Grep 精确 `No files found` |
-|---|---:|---:|---:|---:|---:|---:|
-| 当前 Mac live DB | 1679 / 36 | 8 | 5 | 32,040 | 4 | 752 |
-| `.temp/testing/opencode.db` Windows 原库 | 4734 / 113 | 40 | 16 | 18,031 | 119 | 1,449 |
+| 数据源                                   | Glob completed/error | 确认权限 Glob error | 涉及 Session | 最大错误字符 | Grep partial warning | Grep 精确 `No files found` |
+| ---------------------------------------- | -------------------: | ------------------: | -----------: | -----------: | -------------------: | -------------------------: |
+| 当前 Mac live DB                         |            1679 / 36 |                   8 |            5 |       32,040 |                    4 |                        752 |
+| `.temp/testing/opencode.db` Windows 原库 |           4734 / 113 |                  40 |           16 |       18,031 |                  119 |                      1,449 |
 
 Grep 的精确空结果无法事后区分完整空结果和 partial-empty，这正是 metadata/output 必须同时修正的原因。
 
@@ -239,15 +239,15 @@ readonly glob: (input: GlobInput) => Effect.Effect<GlobResult, PlatformError | E
 
 只采用本轮对 bundled rg 15.1.0 已验证的最小规则：
 
-| 结果 | 语义 |
-|---|---|
-| observed `0` | complete，保留 items |
-| observed `1` | complete empty |
-| observed `2` + trimmed stderr empty | completed partial，保留 items |
-| observed `2` + stderr nonempty | fatal，保留 invalid glob/参数诊断 |
-| observed 其他 code | fatal |
-| 达到 `limit + 1` | completed truncated，由 scope 清理 child |
-| AbortSignal | abort error |
+| 结果                                | 语义                                     |
+| ----------------------------------- | ---------------------------------------- |
+| observed `0`                        | complete，保留 items                     |
+| observed `1`                        | complete empty                           |
+| observed `2` + trimmed stderr empty | completed partial，保留 items            |
+| observed `2` + stderr nonempty      | fatal，保留 invalid glob/参数诊断        |
+| observed 其他 code                  | fatal                                    |
+| 达到 `limit + 1`                    | completed truncated，由 scope 清理 child |
+| AbortSignal                         | abort error                              |
 
 达到 limit 后不再等待自然 exit，也不猜测 partial。此时 `truncated=true` 已经准确说明结果不完整；进一步区分未遍历区域是否存在权限拒绝没有可用证据，也没有产品价值。
 
@@ -283,12 +283,12 @@ metadata 保留原字段并新增 partial：
 
 输出矩阵：
 
-| items | partial | 输出 |
-|---:|---|---|
-| 0 | false | `No files found` |
-| 0 | true | `No files found in accessible paths.` + incomplete warning |
-| >0 | false | 当前文件列表和 truncated warning |
-| >0 | true | 当前文件列表 + incomplete warning |
+| items | partial | 输出                                                       |
+| ----: | ------- | ---------------------------------------------------------- |
+|     0 | false   | `No files found`                                           |
+|     0 | true    | `No files found in accessible paths.` + incomplete warning |
+|    >0 | false   | 当前文件列表和 truncated warning                           |
+|    >0 | true    | 当前文件列表 + incomplete warning                          |
 
 统一 warning 保持简短，不列路径：
 
@@ -338,23 +338,23 @@ metadata 保留原字段并新增 partial：
 
 ### 5.1 源码文件，5 个，不新增
 
-| 文件 | 具体修改 | 预计增删 |
-|---|---|---:|
-| `packages/opencode/src/file/ripgrep.ts` | 增加 GlobInput/GlobResult、Interface method、`filesArgs` noMessages 选项和 bounded `glob()`；复用现有 scope/abort | `+70~110 / -5~15` |
-| `packages/opencode/src/tool/glob.ts` | 消费结构化结果，保留 count/total/truncated，增加 partial 和 warning | `+25~45 / -15~30` |
-| `packages/opencode/src/tool/grep.ts` | 修复 partial-empty 早退，completed metadata 增加 partial | `+15~30 / -5~15` |
-| `packages/opencode/src/session/compaction.ts` | Search History 的 matches 单元格保留 incomplete 标识 | `+10~20 / -2~6` |
-| `packages/opencode/src/cli/cmd/tui/routes/session/index.tsx` | partial summary 和 details=false 可见性 | `+20~35 / -4~10` |
+| 文件                                                         | 具体修改                                                                                                          |          预计增删 |
+| ------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------- | ----------------: |
+| `packages/opencode/src/file/ripgrep.ts`                      | 增加 GlobInput/GlobResult、Interface method、`filesArgs` noMessages 选项和 bounded `glob()`；复用现有 scope/abort | `+70~110 / -5~15` |
+| `packages/opencode/src/tool/glob.ts`                         | 消费结构化结果，保留 count/total/truncated，增加 partial 和 warning                                               | `+25~45 / -15~30` |
+| `packages/opencode/src/tool/grep.ts`                         | 修复 partial-empty 早退，completed metadata 增加 partial                                                          |  `+15~30 / -5~15` |
+| `packages/opencode/src/session/compaction.ts`                | Search History 的 matches 单元格保留 incomplete 标识                                                              |   `+10~20 / -2~6` |
+| `packages/opencode/src/cli/cmd/tui/routes/session/index.tsx` | partial summary 和 details=false 可见性                                                                           |  `+20~35 / -4~10` |
 
 ### 5.2 测试文件，最多 5 个，不新增
 
-| 文件 | 具体修改 | 预计增删 |
-|---|---|---:|
-| `packages/opencode/test/file/ripgrep.test.ts` | scripted spawner 覆盖 code2 empty/nonempty、正常、limit、参数顺序和 abort/scope | `+100~170 / -0~10` |
-| `packages/opencode/test/tool/glob.test.ts` | Layer.mock 覆盖 partial-empty/items、metadata、正常空结果和 truncated | `+45~80 / -0~5` |
-| `packages/opencode/test/tool/grep.test.ts` | partial-empty/items、metadata、正常空结果保持 | `+35~60 / -0~5` |
-| `packages/opencode/test/session/compaction.test.ts` | complete/partial empty 和 items 的 Search History 语义 | `+35~60 / -0~5` |
-| `packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx` | 实际字符帧覆盖 details true/false partial 和普通 completed 隐藏 | `+35~60 / -0~5` |
+| 文件                                                                 | 具体修改                                                                        |           预计增删 |
+| -------------------------------------------------------------------- | ------------------------------------------------------------------------------- | -----------------: |
+| `packages/opencode/test/file/ripgrep.test.ts`                        | scripted spawner 覆盖 code2 empty/nonempty、正常、limit、参数顺序和 abort/scope | `+100~170 / -0~10` |
+| `packages/opencode/test/tool/glob.test.ts`                           | Layer.mock 覆盖 partial-empty/items、metadata、正常空结果和 truncated           |    `+45~80 / -0~5` |
+| `packages/opencode/test/tool/grep.test.ts`                           | partial-empty/items、metadata、正常空结果保持                                   |    `+35~60 / -0~5` |
+| `packages/opencode/test/session/compaction.test.ts`                  | complete/partial empty 和 items 的 Search History 语义                          |    `+35~60 / -0~5` |
+| `packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx` | 实际字符帧覆盖 details true/false partial 和普通 completed 隐藏                 |    `+35~60 / -0~5` |
 
 不修改 `message-v2.test.ts`：其通用 completed/error 回放测试已经证明 output warning 会进入模型。
 
@@ -381,15 +381,15 @@ metadata 保留原字段并新增 partial：
 
 scripted handle 使用 `ChildProcessSpawner.makeHandle`，捕获 command args，不修改全局 PATH：
 
-| stdout | stderr | code/终止 | 预期 |
-|---|---|---|---|
-| `a.ts` | empty | 0 | complete items |
-| empty | empty | 1 | complete empty |
-| `a.ts` | empty | 2 | completed partial，保留 `a.ts` |
-| empty | invalid glob | 2 | failure |
-| empty | empty | 3 | failure |
-| 101+ lines | empty | `exitCode` 永久 pending | `glob()` 仍先返回 100 items/truncated，随后 release latch 证明 scope finalizer cleanup |
-| pending | empty | AbortSignal | abort failure，scope cleanup |
+| stdout     | stderr       | code/终止               | 预期                                                                                   |
+| ---------- | ------------ | ----------------------- | -------------------------------------------------------------------------------------- |
+| `a.ts`     | empty        | 0                       | complete items                                                                         |
+| empty      | empty        | 1                       | complete empty                                                                         |
+| `a.ts`     | empty        | 2                       | completed partial，保留 `a.ts`                                                         |
+| empty      | invalid glob | 2                       | failure                                                                                |
+| empty      | empty        | 3                       | failure                                                                                |
+| 101+ lines | empty        | `exitCode` 永久 pending | `glob()` 仍先返回 100 items/truncated，随后 release latch 证明 scope finalizer cleanup |
+| pending    | empty        | AbortSignal             | abort failure，scope cleanup                                                           |
 
 命令参数断言：
 
@@ -471,16 +471,16 @@ bun typecheck
 
 ## 9. Git 规模、生成和迁移
 
-| 指标 | 预计 |
-|---|---:|
-| 源码文件 | 5 个现有文件 |
-| 测试文件 | 5 个现有文件 |
-| 新增文件 | 0 |
-| 删除文件 | 0 |
-| insertions | 约 400 至 685 |
-| deletions | 约 30 至 90 |
-| 总 churn | 约 430 至 775 行 |
-| 硬上限 | 1,000 行；超过即暂停复审 |
+| 指标       |                     预计 |
+| ---------- | -----------------------: |
+| 源码文件   |             5 个现有文件 |
+| 测试文件   |             5 个现有文件 |
+| 新增文件   |                        0 |
+| 删除文件   |                        0 |
+| insertions |            约 400 至 685 |
+| deletions  |              约 30 至 90 |
+| 总 churn   |         约 430 至 775 行 |
+| 硬上限     | 1,000 行；超过即暂停复审 |
 
 不涉及：
 

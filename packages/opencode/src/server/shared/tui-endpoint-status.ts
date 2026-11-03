@@ -129,7 +129,8 @@ async function probe(url: string): Promise<EndpointStatus> {
       url,
       status: response.status === 502 || response.status === 503 || response.status === 504 ? "down" : "ok",
       latency,
-      route: route.type === "proxy" ? { type: "proxy", reason: route.reason } : { type: "direct", reason: route.reason },
+      route:
+        route.type === "proxy" ? { type: "proxy", reason: route.reason } : { type: "direct", reason: route.reason },
       checkedAt: Date.now(),
     }
   } catch {
@@ -137,7 +138,8 @@ async function probe(url: string): Promise<EndpointStatus> {
       url,
       status: "down",
       latency: null,
-      route: route.type === "proxy" ? { type: "proxy", reason: route.reason } : { type: "direct", reason: route.reason },
+      route:
+        route.type === "proxy" ? { type: "proxy", reason: route.reason } : { type: "direct", reason: route.reason },
       checkedAt: Date.now(),
     }
   }

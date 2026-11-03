@@ -64,17 +64,17 @@
 
 ## 2. 核心合同
 
-| ID | 必须保持的行为 | 验证依据 |
-| --- | --- | --- |
-| INV-01 | 原审批流程完整保留，审批耗时不计入执行预算 | Permission及Shell审批测试 |
-| INV-02 | 原生命令、所选shell和同步单结果接口保持 | `cmd`、`psEncoded`及原生输入测试 |
-| INV-03 | 命令正常完成后交付真实退出结果与完整输出 | 真实execute反馈环 |
-| INV-04 | 完成由实际执行与资源状态决定 | 进程退出、输出完成、资源释放及Tool返回记录 |
-| INV-05 | 静默前台、已产生的缓冲输出及通用spawner的late-output保持；Windows PowerShell Bash的完成边界见§6 | core/Shell真实进程测试 |
-| INV-06 | 提示词、schema与组装保持原样 | 实际diff及shell-prompt回归 |
-| INV-07 | 修复错误首次发生的位置，优先调整现有逻辑 | producer到consumer的因果证据 |
-| INV-08 | 全量调查保留分类与证据边界 | 历史调用索引及逐例结论 |
-| INV-09 | 变更精简、断言自然、独立审计通过后交付 | 累计diff、行为测试、审计verdict |
+| ID     | 必须保持的行为                                                                                  | 验证依据                                   |
+| ------ | ----------------------------------------------------------------------------------------------- | ------------------------------------------ |
+| INV-01 | 原审批流程完整保留，审批耗时不计入执行预算                                                      | Permission及Shell审批测试                  |
+| INV-02 | 原生命令、所选shell和同步单结果接口保持                                                         | `cmd`、`psEncoded`及原生输入测试           |
+| INV-03 | 命令正常完成后交付真实退出结果与完整输出                                                        | 真实execute反馈环                          |
+| INV-04 | 完成由实际执行与资源状态决定                                                                    | 进程退出、输出完成、资源释放及Tool返回记录 |
+| INV-05 | 静默前台、已产生的缓冲输出及通用spawner的late-output保持；Windows PowerShell Bash的完成边界见§6 | core/Shell真实进程测试                     |
+| INV-06 | 提示词、schema与组装保持原样                                                                    | 实际diff及shell-prompt回归                 |
+| INV-07 | 修复错误首次发生的位置，优先调整现有逻辑                                                        | producer到consumer的因果证据               |
+| INV-08 | 全量调查保留分类与证据边界                                                                      | 历史调用索引及逐例结论                     |
+| INV-09 | 变更精简、断言自然、独立审计通过后交付                                                          | 累计diff、行为测试、审计verdict            |
 
 正常返回的验收结果是普通成功或真实非零退出；timeout、abort和强制结束只属于取消语义。保持一个同步Bash，不增加后台交互接口或额外文件捕获。
 
@@ -94,17 +94,17 @@ Agent原始命令
   -> Tool结果与Session终态
 ```
 
-| 当前源码 | 职责与检查位置 |
-| --- | --- |
-| `packages/opencode/src/tool/shell.ts:427` | shell参数、stdin、detached及原生命令包装 |
-| `packages/opencode/src/tool/shell.ts:470` | UTF-16LE传输、编码、退出码和PowerShell流重定向 |
-| `packages/opencode/src/tool/shell.ts:788` | 子进程环境及插件覆盖 |
-| `packages/opencode/src/tool/shell.ts:913` | 实际spawn、输出消费和完成竞争 |
-| `packages/core/src/cross-spawn-spawner.ts:240` | source、tap、eager buffering与scope所有权 |
-| `packages/core/src/cross-spawn-spawner.ts:298` | 进程exit与stdio close信号 |
-| `packages/core/src/cross-spawn-spawner.ts:412` | 实际spawn选项和进程释放 |
-| `packages/opencode/src/tool/progress.ts` | 增量更新及终态flush |
-| `packages/opencode/src/session/prompt.ts`、`processor.ts` | Tool取消、结果持久化与Session终态 |
+| 当前源码                                                  | 职责与检查位置                                 |
+| --------------------------------------------------------- | ---------------------------------------------- |
+| `packages/opencode/src/tool/shell.ts:427`                 | shell参数、stdin、detached及原生命令包装       |
+| `packages/opencode/src/tool/shell.ts:470`                 | UTF-16LE传输、编码、退出码和PowerShell流重定向 |
+| `packages/opencode/src/tool/shell.ts:788`                 | 子进程环境及插件覆盖                           |
+| `packages/opencode/src/tool/shell.ts:913`                 | 实际spawn、输出消费和完成竞争                  |
+| `packages/core/src/cross-spawn-spawner.ts:240`            | source、tap、eager buffering与scope所有权      |
+| `packages/core/src/cross-spawn-spawner.ts:298`            | 进程exit与stdio close信号                      |
+| `packages/core/src/cross-spawn-spawner.ts:412`            | 实际spawn选项和进程释放                        |
+| `packages/opencode/src/tool/progress.ts`                  | 增量更新及终态flush                            |
+| `packages/opencode/src/session/prompt.ts`、`processor.ts` | Tool取消、结果持久化与Session终态              |
 
 共享spawner还服务AppProcess、MCP、ripgrep和direct shell；对公共适配器的修改须覆盖这些实际消费者。
 
@@ -114,14 +114,14 @@ Agent原始命令
 
 调查窗口为北京时间2026-07-29至2026-09-29：109,686条Bash Part，101,939次唯一调用。详细分类覆盖8,102次调用，包括全部错误、取消、时长前5%与此前候选。
 
-| 分类 | 数量或结果 |
-| --- | --- |
-| error记录 | 1,520 |
-| 取消或stream-ended | 540 |
-| 已辨识最终输出或启动确认后持续等待 | 40 |
-| 上述40条中由取消结束 | 22 |
-| Conda词法相关调用 | 2,032，异常153条逐条分类 |
-| 实际`conda run` | 60次：58次exit0，2次明确COM错误；最大30.846秒 |
+| 分类                               | 数量或结果                                    |
+| ---------------------------------- | --------------------------------------------- |
+| error记录                          | 1,520                                         |
+| 取消或stream-ended                 | 540                                           |
+| 已辨识最终输出或启动确认后持续等待 | 40                                            |
+| 上述40条中由取消结束               | 22                                            |
+| Conda词法相关调用                  | 2,032，异常153条逐条分类                      |
+| 实际`conda run`                    | 60次：58次exit0，2次明确COM错误；最大30.846秒 |
 
 索引与逐例材料位于`D:/Temp/opencode/bash-longtail-*`、`post-result-tail-cases.json`、`post-result-final-case-table.md`、`conda-historical-*`。这些是历史分类证据；新增根修须由对应真实执行路径验证。
 
@@ -129,11 +129,11 @@ Agent原始命令
 
 提交：`45d9daa2ed35f4ebc2acb277860704565c0cf349`，`fix(shell): 修复命令结束后的生命周期挂起`。
 
-| 已交付行为 | 位置 | 原因 |
-| --- | --- | --- |
-| 普通Shell复用`sanitizedProcessEnv()` | `packages/opencode/src/tool/shell.ts` | 避免继承内部worker身份后把有限CLI启动成常驻服务 |
-| destroyed owner停止下一轮streaming | `patches/@opentui%2Fcore@0.4.3-smark.13.patch` | 避免清理后重新创建worker，导致最终输出后进程仍存活 |
-| 完整调用监督及capture资源释放 | `shell.ts`与`cross-spawn-spawner.ts` | 保持取消/deadline覆盖和scope资源所有权 |
+| 已交付行为                           | 位置                                           | 原因                                               |
+| ------------------------------------ | ---------------------------------------------- | -------------------------------------------------- |
+| 普通Shell复用`sanitizedProcessEnv()` | `packages/opencode/src/tool/shell.ts`          | 避免继承内部worker身份后把有限CLI启动成常驻服务    |
+| destroyed owner停止下一轮streaming   | `patches/@opentui%2Fcore@0.4.3-smark.13.patch` | 避免清理后重新创建worker，导致最终输出后进程仍存活 |
+| 完整调用监督及capture资源释放        | `shell.ts`与`cross-spawn-spawner.ts`           | 保持取消/deadline覆盖和scope资源所有权             |
 
 前两项有自然退出的根因红绿证据；第三项是生命周期安全基线。新增截图问题仍需单独根修。
 
@@ -153,12 +153,12 @@ $log="D:\Temp\opencode\deploy_out.txt"; $err="D:\Temp\opencode\deploy_err.txt"; 
 
 截图输出为`started deploy PID=15136`。调用目标是启动后台部署；命令没有`-Wait`。
 
-| 记录 | 值 |
-| --- | --- |
-| 输入timeout | 30000ms |
-| 最终状态 | completed / exit0 |
-| metadata.durationMs | 651832ms |
-| notice.elapsed_ms | 651831ms |
+| 记录                | 值                |
+| ------------------- | ----------------- |
+| 输入timeout         | 30000ms           |
+| 最终状态            | completed / exit0 |
+| metadata.durationMs | 651832ms          |
+| notice.elapsed_ms   | 651831ms          |
 
 数据库没有该次独立的root-exit、EOF和deadline阶段时间。调查未重放用户部署。当前源码与当时运行产物的对应关系仍需保留在归因中，审批差值单独处理。
 
@@ -205,44 +205,44 @@ R11提议将Windows PowerShell Bash的捕获寿命绑定到本次前台shell：�
 - `bun:ffi`仅在标记域lazy import；未标记Node/POSIX消费图不会加载它。Win64数据结构使用Windows x64/ARM64公共ABI，32位子程序仍由原启动器启动，不存在子进程注入。
 - marked handle的ref/unref要同步控制本地I/O轮询timer，保证原handle合同；使用可ref/unref的现有Node timer机制，轮询只检查真实I/O完成，不作超时猜测。
 
-| 责任 | 当前owner | 需要证明的事实 |
-| --- | --- | --- |
-| 启动参数、包装及环境 | ShellTool | 是否在进入用户程序前引入额外等待或错误资源归属 |
-| 原始进程与捕获流 | CrossSpawnSpawner及owned output模块 | root退出、settle、固定排空、缓冲消费与释放的次序 |
-| 用户命令创建的进程与资源 | 原生命令及对应资源API | 哪个引用延长完成，是否属于本次调用的合法输出责任 |
-| 最终结果交付 | ToolProgress / Session | 输出完成后是否仍有持久化或终态等待 |
+| 责任                     | 当前owner                           | 需要证明的事实                                   |
+| ------------------------ | ----------------------------------- | ------------------------------------------------ |
+| 启动参数、包装及环境     | ShellTool                           | 是否在进入用户程序前引入额外等待或错误资源归属   |
+| 原始进程与捕获流         | CrossSpawnSpawner及owned output模块 | root退出、settle、固定排空、缓冲消费与释放的次序 |
+| 用户命令创建的进程与资源 | 原生命令及对应资源API               | 哪个引用延长完成，是否属于本次调用的合法输出责任 |
+| 最终结果交付             | ToolProgress / Session              | 输出完成后是否仍有持久化或终态等待               |
 
 ## 7. 需求与改动追溯
 
-| 需求 | 生产路径 | 文件/测试安排 |
-| --- | --- | --- |
-| 正常完成后返回 | Shell→marked spawner→owned output→Tool | §6单一路径；真实execute回归 |
-| 启动后台任务后正确返回 | 原命令启动与输出归属 | 同形Start-Process有限夹具，验证返回与后台正常工作的顺序 |
-| 前台输出完整、静默运行正确 | capture与completion | 现有core/Shell测试及必要的真实输出断言 |
-| 审批与执行预算 | Permission→run | 沿用审批门禁测试 |
-| 原生命令与零prompt变更 | cmd/psEncoded/schema | native-input与shell-prompt回归、实际diff |
-| 共享consumer兼容 | core适配器 | AppProcess、MCP、ripgrep、direct shell回归 |
-| 全量调查准确 | 数据库分类及对应复现 | 保留逐例证据，不用单一案例概括所有长尾 |
+| 需求                       | 生产路径                               | 文件/测试安排                                           |
+| -------------------------- | -------------------------------------- | ------------------------------------------------------- |
+| 正常完成后返回             | Shell→marked spawner→owned output→Tool | §6单一路径；真实execute回归                             |
+| 启动后台任务后正确返回     | 原命令启动与输出归属                   | 同形Start-Process有限夹具，验证返回与后台正常工作的顺序 |
+| 前台输出完整、静默运行正确 | capture与completion                    | 现有core/Shell测试及必要的真实输出断言                  |
+| 审批与执行预算             | Permission→run                         | 沿用审批门禁测试                                        |
+| 原生命令与零prompt变更     | cmd/psEncoded/schema                   | native-input与shell-prompt回归、实际diff                |
+| 共享consumer兼容           | core适配器                             | AppProcess、MCP、ripgrep、direct shell回归              |
+| 全量调查准确               | 数据库分类及对应复现                   | 保留逐例证据，不用单一案例概括所有长尾                  |
 
-| 新增概念 | 必要性及复用边界 |
-| --- | --- |
-| 私有command标记 | 只改变本Tool的WinPS捕获寿命，避免改变共享spawner其他consumer |
-| owned内存pipe | Bun内部在途I/O不由本scope拥有，直接取消可能丢缓冲；原spawn仍可接受fd，无需重写启动器 |
-| settle与一次排空额度 | 已产生输出完整且结束不依赖后台未来写入，分别对应INV-03/04 |
-| close/ref/unref | 沿用scope和公开handle的资源、进程存活合同 |
+| 新增概念             | 必要性及复用边界                                                                     |
+| -------------------- | ------------------------------------------------------------------------------------ |
+| 私有command标记      | 只改变本Tool的WinPS捕获寿命，避免改变共享spawner其他consumer                         |
+| owned内存pipe        | Bun内部在途I/O不由本scope拥有，直接取消可能丢缓冲；原spawn仍可接受fd，无需重写启动器 |
+| settle与一次排空额度 | 已产生输出完整且结束不依赖后台未来写入，分别对应INV-03/04                            |
+| close/ref/unref      | 沿用scope和公开handle的资源、进程存活合同                                            |
 
 仅在原支持域中选择确定的capture实现；不在读取失败后换backend。标记域原有opaque pipe创建被owned pipe替换，旧tap与结果流程复用；零新增alternate-success路径。
 
 ### 文件与预算
 
-| 文件 | 改动 | 预计新增+删除行 |
-| --- | --- | ---: |
-| `packages/core/src/windows-shell-output.ts` | 新增；标记、owned pipe、正常排空、释放/ref | 250–340 |
-| `packages/core/src/cross-spawn-spawner.ts` | 修改；capture取得、stdio fd、exit通知、source传递、ref联动 | 50–90 |
-| `packages/opencode/src/tool/shell.ts` | 修改；仅标记既有WinPS命令 | 5–12 |
-| `patches/@opentui%2Fcore@0.4.3-smark.13.patch` | 保留已提交内容 | 新增0 |
-| `packages/core/test/effect/cross-spawn-spawner.test.ts` | 修改；完整字节/晚订阅/释放与未标记兼容 | 测试不计生产预算 |
-| `packages/opencode/test/tool/shell.test.ts` | 修改；截图启动、正常返回及既有行为变化 | 测试不计生产预算 |
+| 文件                                                    | 改动                                                       |  预计新增+删除行 |
+| ------------------------------------------------------- | ---------------------------------------------------------- | ---------------: |
+| `packages/core/src/windows-shell-output.ts`             | 新增；标记、owned pipe、正常排空、释放/ref                 |          250–340 |
+| `packages/core/src/cross-spawn-spawner.ts`              | 修改；capture取得、stdio fd、exit通知、source传递、ref联动 |            50–90 |
+| `packages/opencode/src/tool/shell.ts`                   | 修改；仅标记既有WinPS命令                                  |             5–12 |
+| `patches/@opentui%2Fcore@0.4.3-smark.13.patch`          | 保留已提交内容                                             |            新增0 |
+| `packages/core/test/effect/cross-spawn-spawner.test.ts` | 修改；完整字节/晚订阅/释放与未标记兼容                     | 测试不计生产预算 |
+| `packages/opencode/test/tool/shell.test.ts`             | 修改；截图启动、正常返回及既有行为变化                     | 测试不计生产预算 |
 
 与R4累计为4个生产文件、约423–560行，包含正常格式与中文解释。新增有效代码/测试E预计350–520，合格邻近中文说明C预计55–85；最终按实际累计diff重新计数。
 
@@ -258,13 +258,13 @@ R11提议将Windows PowerShell Bash的捕获寿命绑定到本次前台shell：�
 
 公开seam使用`ShellTool.execute`和`ChildProcessSpawner.spawn`。测试以真实退出、完整字节及调用返回为结果；ready/release只建立必要的因果顺序，watchdog只负责测试失败清理。将截图red转换为仓库公开seam测试，先red再实现；后台夹具用显式release保持存活，Tool返回后才放行，避免以短时间阈值代替因果断言。
 
-| 顺序 | 行为 | 通过条件 |
-| --- | --- | --- |
-| 1 | 同形短命令的异常长尾 | 旧实现捕获原症状，修后自然返回真实结果 |
-| 2 | 已产生输出完整交付 | stdout/stderr内容完整，无提前截断 |
-| 3 | 静默前台、late subscription与未标记late output | 真实工作结束才完成，已产生字节完整；通用consumer保留原EOF合同 |
-| 4 | 审批、非零退出、取消 | 原流程及语义保持 |
-| 5 | 共享消费者与既有R4根修 | 对应package回归通过 |
+| 顺序 | 行为                                           | 通过条件                                                      |
+| ---- | ---------------------------------------------- | ------------------------------------------------------------- |
+| 1    | 同形短命令的异常长尾                           | 旧实现捕获原症状，修后自然返回真实结果                        |
+| 2    | 已产生输出完整交付                             | stdout/stderr内容完整，无提前截断                             |
+| 3    | 静默前台、late subscription与未标记late output | 真实工作结束才完成，已产生字节完整；通用consumer保留原EOF合同 |
+| 4    | 审批、非零退出、取消                           | 原流程及语义保持                                              |
+| 5    | 共享消费者与既有R4根修                         | 对应package回归通过                                           |
 
 现有`shell.test.ts:2237`真实WinPS post-root三mode夹具与新完成边界冲突：WinPS部分改为验证前台结束后正常返回，后台使用自身日志继续完成；POSIX及公开fake handle的post-root错误/取消监督保留。明确记录断言变化依据为§1正常完成返回要求及§6行为变化，不能声称原late-output语义全部保持。core未标记late-output断言保持。
 
@@ -272,29 +272,29 @@ R11提议将Windows PowerShell Bash的捕获寿命绑定到本次前台shell：�
 
 批准并实施后按影响面运行：
 
-| 命令 | cwd |
-| --- | --- |
-| `bun test test/tool/shell.test.ts test/tool/shell-prompt.test.ts --timeout 30000` | `packages/opencode` |
-| `bun test test/effect/cross-spawn-spawner.test.ts test/process/process.test.ts --timeout 30000` | `packages/core` |
-| `bun test test/shell/shell.test.ts test/file/ripgrep.test.ts test/mcp test/plugin/trigger.test.ts --timeout 30000` | `packages/opencode` |
-| `bun test test/cli/cmd/tui/opentui-streaming-runtime.test.ts test/cli/tui/scroll-layout.test.ts --timeout 30000` | 隔离patched安装的`packages/opencode` |
-| `bun test test/session/prompt.test.ts --timeout 30000` | `packages/opencode` |
-| `bun typecheck` | `packages/core`、`packages/opencode`分别执行 |
-| `bun run script/verify-opentui-closure.ts` | 隔离工作区的`packages/opencode` |
-| `bun run script/build.ts --single --skip-install --skip-embed-web-ui` | 隔离工作区的`packages/opencode` |
+| 命令                                                                                                               | cwd                                          |
+| ------------------------------------------------------------------------------------------------------------------ | -------------------------------------------- |
+| `bun test test/tool/shell.test.ts test/tool/shell-prompt.test.ts --timeout 30000`                                  | `packages/opencode`                          |
+| `bun test test/effect/cross-spawn-spawner.test.ts test/process/process.test.ts --timeout 30000`                    | `packages/core`                              |
+| `bun test test/shell/shell.test.ts test/file/ripgrep.test.ts test/mcp test/plugin/trigger.test.ts --timeout 30000` | `packages/opencode`                          |
+| `bun test test/cli/cmd/tui/opentui-streaming-runtime.test.ts test/cli/tui/scroll-layout.test.ts --timeout 30000`   | 隔离patched安装的`packages/opencode`         |
+| `bun test test/session/prompt.test.ts --timeout 30000`                                                             | `packages/opencode`                          |
+| `bun typecheck`                                                                                                    | `packages/core`、`packages/opencode`分别执行 |
+| `bun run script/verify-opentui-closure.ts`                                                                         | 隔离工作区的`packages/opencode`              |
+| `bun run script/build.ts --single --skip-install --skip-embed-web-ui`                                              | 隔离工作区的`packages/opencode`              |
 
 构建环境删除`OPENCODE_RELEASE`并隔离数据、配置和临时目录，不发布或替换live产物。测试失败保留原始结果，先核对与实际变更的关系，再决定修正范围。
 
 ## 9. 预算与审计
 
-| 项目 | 当前值或门禁 |
-| --- | --- |
-| 方案篇幅 | 目标1000行以内，硬上限1200行；只保留有效内容 |
-| 已提交生产基线 | 3文件、118变更行 |
-| 当前累计生产变更 | 4文件、417新增+删除行，详见§12 |
-| 累计生产预算 | 最多5文件、800变更行，从原始基线累计核算；方案文档篇幅另按1000/1200行限制 |
-| 中文解释注释 | E=0时C=0；否则C≥max(1, ceil(E×0.15)) |
-| 当前批准 | R11完整独立方案及实现审计通过，原样verdict见§11、§13 |
+| 项目             | 当前值或门禁                                                              |
+| ---------------- | ------------------------------------------------------------------------- |
+| 方案篇幅         | 目标1000行以内，硬上限1200行；只保留有效内容                              |
+| 已提交生产基线   | 3文件、118变更行                                                          |
+| 当前累计生产变更 | 4文件、417新增+删除行，详见§12                                            |
+| 累计生产预算     | 最多5文件、800变更行，从原始基线累计核算；方案文档篇幅另按1000/1200行限制 |
+| 中文解释注释     | E=0时C=0；否则C≥max(1, ceil(E×0.15))                                      |
+| 当前批准         | R11完整独立方案及实现审计通过，原样verdict见§11、§13                      |
 
 E排除空行、import-only、formatter-only、generated和pure-move；人工实现及模板内生产逻辑如实计入相应预算。C只计邻近修改点、解释真实约束和测试意图的有效中文注释。
 
@@ -374,12 +374,12 @@ B-01 撤回。本次未修改文件、未执行实验或测试。
 
 `ShellTool.cmd → WindowsShellOutput.mark → 原CrossSpawnSpawner/原cross-spawn → owned内存pipe → 原tap/decoder/progress → 原Tool结果`。未标记路径保持原输出实现；无失败后换backend、额外launcher或文件捕获。原opaque捕获仅在批准的标记域被替换。
 
-| 生产文件，相对原始基线 | 新增 | 删除 |
-| --- | ---: | ---: |
-| `packages/core/src/windows-shell-output.ts` | 257 | 0 |
-| `packages/core/src/cross-spawn-spawner.ts` | 72 | 22 |
-| `packages/opencode/src/tool/shell.ts` | 52 | 38 |
-| `patches/@opentui%2Fcore@0.4.3-smark.13.patch`（R4保留） | 13 | 0 |
+| 生产文件，相对原始基线                                   | 新增 | 删除 |
+| -------------------------------------------------------- | ---: | ---: |
+| `packages/core/src/windows-shell-output.ts`              |  257 |    0 |
+| `packages/core/src/cross-spawn-spawner.ts`               |   72 |   22 |
+| `packages/opencode/src/tool/shell.ts`                    |   52 |   38 |
+| `patches/@opentui%2Fcore@0.4.3-smark.13.patch`（R4保留） |   13 |    0 |
 
 累计4文件454行。测试修改位于既有core spawner及Shell测试；R4 installed-runtime测试内容未变。新模块采用DisposableStack确保部分创建与正常scope释放，poll timer支持ref/unref，错误沿原PlatformError/Readable链传播。
 
@@ -387,20 +387,20 @@ B-01 撤回。本次未修改文件、未执行实验或测试。
 
 ### 红绿与验证
 
-| primary实际执行命令 | cwd | 结果 |
-| --- | --- | --- |
-| `bun test test/tool/shell.test.ts --test-name-pattern 'returns after pwsh launches a redirected background process' --timeout 30000`，生产修改前 | `packages/opencode` | 1 fail：返回时后台done已存在，期望未完成；3断言 |
-| `bun test test/tool/shell.test.ts --test-name-pattern 'launches a redirected background process' --timeout 30000`，生产修改后 | `packages/opencode` | 2 pass，10断言；pwsh与Windows PowerShell均先返回，再放行后台完整双日志 |
-| `bun test test/tool/shell.test.ts test/tool/shell-prompt.test.ts --timeout 30000` | `packages/opencode` | 248 pass，0 fail，1248断言 |
-| `bun test test/effect/cross-spawn-spawner.test.ts test/process/process.test.ts --timeout 30000` | `packages/core` | 55 pass，0 fail，98断言 |
-| `bun test test/effect/cross-spawn-spawner.test.ts --test-name-pattern 'owned' --timeout 30000`，最终类型修正后 | `packages/core` | 5 pass，0 fail，9断言 |
-| `bun test test/shell/shell.test.ts test/file/ripgrep.test.ts test/mcp test/plugin/trigger.test.ts --timeout 30000` | `packages/opencode` | 70 pass，1 skip，0 fail |
-| `bun test test/session/prompt.test.ts --timeout 30000` | `packages/opencode` | 115 pass，14 skip，0 fail，516断言，523.22秒；503为既有reviewer夹具输出 |
-| `bun typecheck` | 两个package分别执行 | 均通过 |
-| `bun run script/verify-opentui-closure.ts` | `packages/opencode` | 11包闭包及原release身份通过 |
-| `bun build --compile --target=bun-windows-x64 --minify --conditions=browser D:/Temp/opencode/current-shell-compiled-check.ts --outfile D:/Temp/opencode/current-shell-compiled-check-final.exe`，随后执行该exe | repo root | 120模块编译通过；真实marked spawner双流为`compiled out`/`compiled err`，exit17保留 |
-| 编译consumer的`--unref-owner`模式 | repo root | 输出owned child PID后自然退出；没有生产强制exit |
-| `git diff --check -- <本任务路径>` | repo root | 通过 |
+| primary实际执行命令                                                                                                                                                                                            | cwd                 | 结果                                                                               |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------- | ---------------------------------------------------------------------------------- |
+| `bun test test/tool/shell.test.ts --test-name-pattern 'returns after pwsh launches a redirected background process' --timeout 30000`，生产修改前                                                               | `packages/opencode` | 1 fail：返回时后台done已存在，期望未完成；3断言                                    |
+| `bun test test/tool/shell.test.ts --test-name-pattern 'launches a redirected background process' --timeout 30000`，生产修改后                                                                                  | `packages/opencode` | 2 pass，10断言；pwsh与Windows PowerShell均先返回，再放行后台完整双日志             |
+| `bun test test/tool/shell.test.ts test/tool/shell-prompt.test.ts --timeout 30000`                                                                                                                              | `packages/opencode` | 248 pass，0 fail，1248断言                                                         |
+| `bun test test/effect/cross-spawn-spawner.test.ts test/process/process.test.ts --timeout 30000`                                                                                                                | `packages/core`     | 55 pass，0 fail，98断言                                                            |
+| `bun test test/effect/cross-spawn-spawner.test.ts --test-name-pattern 'owned' --timeout 30000`，最终类型修正后                                                                                                 | `packages/core`     | 5 pass，0 fail，9断言                                                              |
+| `bun test test/shell/shell.test.ts test/file/ripgrep.test.ts test/mcp test/plugin/trigger.test.ts --timeout 30000`                                                                                             | `packages/opencode` | 70 pass，1 skip，0 fail                                                            |
+| `bun test test/session/prompt.test.ts --timeout 30000`                                                                                                                                                         | `packages/opencode` | 115 pass，14 skip，0 fail，516断言，523.22秒；503为既有reviewer夹具输出            |
+| `bun typecheck`                                                                                                                                                                                                | 两个package分别执行 | 均通过                                                                             |
+| `bun run script/verify-opentui-closure.ts`                                                                                                                                                                     | `packages/opencode` | 11包闭包及原release身份通过                                                        |
+| `bun build --compile --target=bun-windows-x64 --minify --conditions=browser D:/Temp/opencode/current-shell-compiled-check.ts --outfile D:/Temp/opencode/current-shell-compiled-check-final.exe`，随后执行该exe | repo root           | 120模块编译通过；真实marked spawner双流为`compiled out`/`compiled err`，exit17保留 |
+| 编译consumer的`--unref-owner`模式                                                                                                                                                                              | repo root           | 输出owned child PID后自然退出；没有生产强制exit                                    |
+| `git diff --check -- <本任务路径>`                                                                                                                                                                             | repo root           | 通过                                                                               |
 
 重复聚焦用例不累加覆盖数量。当前完整执行的四组suite合计488 pass、15 skip、0 fail。生产反馈测试保持原Start-Process参数组合，将部署替换为受控有限任务，且只有Tool返回后才写release；验收不靠输出文本或短耗时阈值。
 
@@ -420,13 +420,13 @@ R11源码的正常返回已由生产公开seam验证；截图旧记录651832ms�
 
 隔离工作区：`D:/Temp/opencode/r11-full-build-4yGgNS/workspace`。由primary运行`bun D:/Temp/opencode/current-shell-full-build.ts`生成独立源文件快照、隔离HOME/XDG/TEMP/cache，剔除发布凭据与内部worker身份；`OPENCODE_RELEASE`缺省，构建明确记录`release:false`。未使用live依赖链接、替换系统CLI或发布产物。
 
-| 命令 | cwd | 结果 |
-| --- | --- | --- |
-| `bun install --frozen-lockfile --ignore-scripts` | 隔离workspace | exit0 |
-| `bun run script/build.ts --single --skip-install --skip-embed-web-ui` | 隔离`packages/opencode` | exit0，stderr为空 |
-| build内置version smoke | 同上 | `0.0.0-r11-verify`，通过 |
-| build内置compiled voice Worker smoke | 同上 | 通过 |
-| `bun test test/cli/cmd/tui/opentui-streaming-runtime.test.ts test/cli/tui/scroll-layout.test.ts --timeout 30000` | 同上 | 16 pass，0 fail，105断言 |
+| 命令                                                                                                             | cwd                     | 结果                     |
+| ---------------------------------------------------------------------------------------------------------------- | ----------------------- | ------------------------ |
+| `bun install --frozen-lockfile --ignore-scripts`                                                                 | 隔离workspace           | exit0                    |
+| `bun run script/build.ts --single --skip-install --skip-embed-web-ui`                                            | 隔离`packages/opencode` | exit0，stderr为空        |
+| build内置version smoke                                                                                           | 同上                    | `0.0.0-r11-verify`，通过 |
+| build内置compiled voice Worker smoke                                                                             | 同上                    | 通过                     |
+| `bun test test/cli/cmd/tui/opentui-streaming-runtime.test.ts test/cli/tui/scroll-layout.test.ts --timeout 30000` | 同上                    | 16 pass，0 fail，105断言 |
 
 直接证据：同根下`report.json`、`install.out/.err`、`build.out/.err`、`runtime-tests.out/.err`。测试总计504 pass、15 skip、0 fail，不重复累加聚焦重跑。
 
@@ -468,17 +468,17 @@ No blocking findings.
 
 本轮保持完整原始范围，复核当前累计 diff、批准 R11、全部任务文件身份及直接影响路径；没有将审计缩减为构建记录检查。
 
-| 范围 | 结论 |
-|---|---|
-| 正常返回 | root 的真实退出触发 owned capture 结算与固定排空，Tool 等待已捕获输出消费后返回。 |
-| 输出完整性 | 在途操作结算、buffer 复制、双流额度冻结及后续消费顺序符合批准算法。 |
-| 资源与失败 | capture、process、source/tap 各自所有权明确；错误沿原失败链传播，不转换为正常成功。 |
-| 审批和执行预算 | 审批保留且位于执行预算之前；同步单结果接口保持。 |
-| 原生命令 | shell、正文、参数、cwd、环境覆盖顺序及真实退出码保持；prompt/schema 未改。 |
-| 共享消费者 | 标记限定于 Windows PowerShell ShellTool；未标记消费者继续使用原 EOF 路径。 |
-| R4 根修 | 内部身份隔离和 destroyed streaming owner guard 保留；隔离安装验证了实际 patch 消费。 |
-| 测试敏感性 | 返回顺序、完整字节、晚订阅、取消、失败释放、并发隔离和自然退出均有对应反馈或回归。 |
-| 应用交付 | 当前完整应用构建与 smoke 门禁已补齐，I-01 关闭。 |
+| 范围           | 结论                                                                                 |
+| -------------- | ------------------------------------------------------------------------------------ |
+| 正常返回       | root 的真实退出触发 owned capture 结算与固定排空，Tool 等待已捕获输出消费后返回。    |
+| 输出完整性     | 在途操作结算、buffer 复制、双流额度冻结及后续消费顺序符合批准算法。                  |
+| 资源与失败     | capture、process、source/tap 各自所有权明确；错误沿原失败链传播，不转换为正常成功。  |
+| 审批和执行预算 | 审批保留且位于执行预算之前；同步单结果接口保持。                                     |
+| 原生命令       | shell、正文、参数、cwd、环境覆盖顺序及真实退出码保持；prompt/schema 未改。           |
+| 共享消费者     | 标记限定于 Windows PowerShell ShellTool；未标记消费者继续使用原 EOF 路径。           |
+| R4 根修        | 内部身份隔离和 destroyed streaming owner guard 保留；隔离安装验证了实际 patch 消费。 |
+| 测试敏感性     | 返回顺序、完整字节、晚订阅、取消、失败释放、并发隔离和自然退出均有对应反馈或回归。   |
+| 应用交付       | 当前完整应用构建与 smoke 门禁已补齐，I-01 关闭。                                     |
 
 ## Primary-path and fallback verdict
 
@@ -496,16 +496,16 @@ No blocking findings.
 
 独立累计计数保持：
 
-| 文件 | E | 合格 C |
-|---|---:|---:|
-| Windows owned output | 179 | 33 |
-| Core spawner | 54 | 8 |
-| Shell | 26 | 11 |
-| Core tests | 154 | 18 |
-| Shell tests | 325 | 41 |
-| Installed runtime tests | 111 | 19 |
-| OpenTUI patch 人工 runtime payload | 1 | 1 |
-| **合计** | **850** | **131** |
+| 文件                               |       E |  合格 C |
+| ---------------------------------- | ------: | ------: |
+| Windows owned output               |     179 |      33 |
+| Core spawner                       |      54 |       8 |
+| Shell                              |      26 |      11 |
+| Core tests                         |     154 |      18 |
+| Shell tests                        |     325 |      41 |
+| Installed runtime tests            |     111 |      19 |
+| OpenTUI patch 人工 runtime payload |       1 |       1 |
+| **合计**                           | **850** | **131** |
 
 排除顶层 import-only、空行、纯格式调整及 patch 元数据/上下文；嵌入 fixture 逻辑计入 E，范围不准确的注释不计入 C。
 

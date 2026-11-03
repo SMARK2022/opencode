@@ -33,17 +33,17 @@ Record the relevant `CONTEXT.md`, ADRs, `AGENTS.md` files, package instructions,
 and existing design conventions.
 
 | Source | Why it constrains this task |
-| --- | --- |
-|  |  |
+| ------ | --------------------------- |
+|        |                             |
 
 ## 4. Files and Evidence Read
 
 List every source file, test, configuration file, generated artifact, trace, or
 document used to establish the plan.
 
-| Evidence | Relevance | Evidence class |
-| --- | --- | --- |
-|  |  | observed / contracted / reachable |
+| Evidence | Relevance | Evidence class                    |
+| -------- | --------- | --------------------------------- |
+|          |           | observed / contracted / reachable |
 
 ## 5. Current Behavior
 
@@ -57,9 +57,9 @@ producer -> seam -> module -> adapter -> observable result
 
 ## 6. Supported Input Domain and Reachability
 
-| Input or condition | Producer | Upstream guarantees | Reachable path | Owner | Classification |
-| --- | --- | --- | --- | --- | --- |
-|  |  |  |  |  | observed / contracted / reachable / speculative |
+| Input or condition | Producer | Upstream guarantees | Reachable path | Owner | Classification                                  |
+| ------------------ | -------- | ------------------- | -------------- | ----- | ----------------------------------------------- |
+|                    |          |                     |                |       | observed / contracted / reachable / speculative |
 
 Speculative rows cannot justify production logic or blocking findings.
 
@@ -67,9 +67,9 @@ Speculative rows cannot justify production logic or blocking findings.
 
 Assign stable IDs.
 
-| ID | Behavioral invariant | Evidence | Existing test |
-| --- | --- | --- | --- |
-| INV-01 |  |  |  |
+| ID     | Behavioral invariant | Evidence | Existing test |
+| ------ | -------------------- | -------- | ------------- |
+| INV-01 |                      |          |               |
 
 ## 8. First Divergence and Root Cause
 
@@ -77,16 +77,16 @@ State where each violated invariant first becomes false. Distinguish the root
 cause from downstream symptoms and workarounds.
 
 | Invariant | First divergence | Owning module/interface | Proof |
-| --- | --- | --- | --- |
-|  |  |  |  |
+| --------- | ---------------- | ----------------------- | ----- |
+|           |                  |                         |       |
 
 For bug work, record the red-capable feedback-loop command and observed output.
 
 ## 9. Responsibility and Seam
 
 | Concern | Owner | Interface promise | Why it belongs here | Why another module does not own it |
-| --- | --- | --- | --- | --- |
-|  |  |  |  |  |
+| ------- | ----- | ----------------- | ------------------- | ---------------------------------- |
+|         |       |                   |                     |                                    |
 
 ## 10. Single Approved Primary-Path Design
 
@@ -107,9 +107,9 @@ condition.
 
 ## 11. Secondary and Replacement Path Inventory
 
-| Path | Current or proposed | Classification | Produces success? | Decision-surface share | Disposition |
-| --- | --- | --- | --- | --- | --- |
-|  |  | primary-contract branch / pass-through / diagnostic / existing compatibility / explicit user-requested rollback / forbidden fallback | yes/no |  | remove / preserve / reject |
+| Path | Current or proposed | Classification                                                                                                                       | Produces success? | Decision-surface share | Disposition                |
+| ---- | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------ | ----------------- | ---------------------- | -------------------------- |
+|      |                     | primary-contract branch / pass-through / diagnostic / existing compatibility / explicit user-requested rollback / forbidden fallback | yes/no            |                        | remove / preserve / reject |
 
 New alternate success paths are forbidden. An explicit user-requested rollback
 may replace the primary path only when its quoted, path-specific authorization
@@ -118,16 +118,16 @@ appears here.
 ## 12. Workaround Deletion and Replacement
 
 | Existing workaround or duplicate | Why it existed | Why the approved route supersedes it | Delete or collapse location |
-| --- | --- | --- | --- |
-|  |  |  |  |
+| -------------------------------- | -------------- | ------------------------------------ | --------------------------- |
+|                                  |                |                                      |                             |
 
 ## 13. Forward Traceability
 
 This table prevents under-design.
 
 | Requirement or invariant | Production path | Planned file/change | Behavioral test |
-| --- | --- | --- | --- |
-|  |  |  |  |
+| ------------------------ | --------------- | ------------------- | --------------- |
+|                          |                 |                     |                 |
 
 No confirmed requirement may remain unmapped.
 
@@ -136,33 +136,33 @@ No confirmed requirement may remain unmapped.
 This table prevents over-design.
 
 | Proposed production concept | Requirement ID | Evidence | Why existing logic cannot carry it |
-| --- | --- | --- | --- |
-|  |  |  |  |
+| --------------------------- | -------------- | -------- | ---------------------------------- |
+|                             |                |          |                                    |
 
 No production concept may remain unjustified.
 
 ## 15. File-Level Change Plan
 
 | File | Add / modify / delete | Exact responsibility of the change | Expected line delta |
-| --- | --- | --- | --- |
-|  |  |  |  |
+| ---- | --------------------- | ---------------------------------- | ------------------- |
+|      |                       |                                    |                     |
 
 ## 16. TDD Behavior Slices
 
 Use one confirmed seam and one vertical behavior slice at a time.
 
 | Order | Red behavior | Why current code fails | Minimal green behavior | Regression protected |
-| --- | --- | --- | --- | --- |
-| 1 |  |  |  |  |
+| ----- | ------------ | ---------------------- | ---------------------- | -------------------- |
+| 1     |              |                        |                        |                      |
 
 Tests must observe public behavior and use an independent expected value.
 
 ## 17. Chinese Comment Budget
 
-| Metric | Estimate | Method |
-| --- | --- | --- |
-| Effective changed code lines `E` |  | Exclude imports, formatting, generated files, and pure moves |
-| Required Chinese explanatory comments `C` |  | `if E = 0: C = 0`; `if E > 0: C >= max(1, ceil(E * 0.15))` |
+| Metric                                    | Estimate | Method                                                       |
+| ----------------------------------------- | -------- | ------------------------------------------------------------ |
+| Effective changed code lines `E`          |          | Exclude imports, formatting, generated files, and pure moves |
+| Required Chinese explanatory comments `C` |          | `if E = 0: C = 0`; `if E > 0: C >= max(1, ceil(E * 0.15))`   |
 
 List the invariants, non-obvious constraints, constants, compatibility reasons,
 test intentions, and safety decisions that require nearby Chinese explanation.
@@ -173,19 +173,19 @@ List exact commands and the behavior each command proves. Respect package-local
 test and typecheck instructions.
 
 | Command | Working directory | Evidence produced |
-| --- | --- | --- |
-|  |  |  |
+| ------- | ----------------- | ----------------- |
+|         |                   |                   |
 
 ## 19. Diff Budget
 
-| Metric | Estimate | Justification |
-| --- | --- | --- |
-| Files added |  |  |
-| Files modified |  |  |
-| Files deleted |  |  |
-| Production lines |  |  |
-| Test lines |  |  |
-| Generated lines |  |  |
+| Metric           | Estimate | Justification |
+| ---------------- | -------- | ------------- |
+| Files added      |          |               |
+| Files modified   |          |               |
+| Files deleted    |          |               |
+| Production lines |          |               |
+| Test lines       |          |               |
+| Generated lines  |          |               |
 
 The budget is an audit signal, not permission to omit confirmed behavior.
 
@@ -219,8 +219,8 @@ The independent auditor must:
 ## 22. Plan Audit Record
 
 | Round | Audited revision | Full scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
-| --- | --- | --- | --- | --- | --- | --- |
-|  |  | yes |  |  |  |  |
+| ----- | ---------------- | ----------- | ----------------- | --------------------- | ------ | -------------------- |
+|       |                  | yes         |                   |                       |        |                      |
 
 Any substantive revision invalidates earlier approval.
 
@@ -244,20 +244,20 @@ Complete only after implementation.
 
 ### Chinese Comment Calculation
 
-| Metric | Actual | Exclusions and evidence |
-| --- | --- | --- |
-| Effective changed code lines `E` |  |  |
-| Qualifying Chinese comment lines `C` |  |  |
-| Ratio `C / E` |  | `N/A` when `E = 0` |
-| Required minimum `C` |  | `if E = 0: C = 0`; `if E > 0: C >= max(1, ceil(E * 0.15))` |
+| Metric                               | Actual | Exclusions and evidence                                    |
+| ------------------------------------ | ------ | ---------------------------------------------------------- |
+| Effective changed code lines `E`     |        |                                                            |
+| Qualifying Chinese comment lines `C` |        |                                                            |
+| Ratio `C / E`                        |        | `N/A` when `E = 0`                                         |
+| Required minimum `C`                 |        | `if E = 0: C = 0`; `if E > 0: C >= max(1, ceil(E * 0.15))` |
 
 ### Remaining Unverified Items
 
 ## 24. Implementation Audit Record
 
 | Round | Plan revision | Full original scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
-| --- | --- | --- | --- | --- | --- | --- |
-|  |  | yes |  |  |  |  |
+| ----- | ------------- | -------------------- | ----------------- | --------------------- | ------ | -------------------- |
+|       |               | yes                  |                   |                       |        |                      |
 
 The task may be marked `verified` only after an independent full-scope result of
 `No blocking findings` for the current implementation and approved plan

@@ -15,11 +15,19 @@ export type V2SessionReduction = {
 export function createV2SessionReducer() {
   const pending = new Map<string, SessionPendingMessage>()
 
-  const reduce = (initial: readonly SessionMessageInfo[], input: OpenCodeEvent | NativeSessionEvent): V2SessionReduction | undefined => {
+  const reduce = (
+    initial: readonly SessionMessageInfo[],
+    input: OpenCodeEvent | NativeSessionEvent,
+  ): V2SessionReduction | undefined => {
     const summary = input.type === "session.next.step.ended" ? input.data.summary : undefined
     // 完成事件携带服务端确定的归属；不能将迟到旧轮的diff挂到当前最后一个用户上。
-    const source = summary ? initial.map(message => message.id === summary.messageID && message.type === "user"
-      ? { ...message, summary: { diffs: summary.diffs.map(item => ({ ...item })) } } : message) : initial
+    const source = summary
+      ? initial.map((message) =>
+          message.id === summary.messageID && message.type === "user"
+            ? { ...message, summary: { diffs: summary.diffs.map((item) => ({ ...item })) } }
+            : message,
+        )
+      : initial
     const event = input.type.startsWith("session.next.") ? nativeSessionEvent(source, input, pending) : input
     if (!event) return
     if ("messages" in event) return event
@@ -125,9 +133,10 @@ export function createV2SessionReducer() {
         )
       case "session.step.started": {
         // 已绑定请求的审查助手并行运行；普通会话仍自动关闭上一串行步骤。
-        const current = event.data.agent === "permission-reviewer" && typeof event.metadata?.permissionReviewerRequestID === "string"
-          ? undefined
-          : source.findLast((item): item is Assistant => item.type === "assistant" && !item.time.completed)
+        const current =
+          event.data.agent === "permission-reviewer" && typeof event.metadata?.permissionReviewerRequestID === "string"
+            ? undefined
+            : source.findLast((item): item is Assistant => item.type === "assistant" && !item.time.completed)
         const completed =
           current && current.id !== event.data.assistantMessageID
             ? update(source, current.id, (item) =>
@@ -202,7 +211,11 @@ export function createV2SessionReducer() {
       case "session.text.started":
         return updateAssistant(source, event.data.assistantMessageID, sessionID, (item) => ({
           ...item,
-          content: insertOrdinal(item.content, "text", event.data.ordinal, { type: "text", text: "", ...("textID" in event.data ? { id: event.data.textID } : {}) }),
+          content: insertOrdinal(item.content, "text", event.data.ordinal, {
+            type: "text",
+            text: "",
+            ...("textID" in event.data ? { id: event.data.textID } : {}),
+          }),
         }))
       case "session.text.delta":
         return updateContent(source, event.data.assistantMessageID, sessionID, "text", event.data.ordinal, (item) => ({
@@ -292,7 +305,12 @@ export function createV2SessionReducer() {
             ? {
                 ...tool,
                 // 实时视图保留canonical进度正文；快照和实时帧混合时structured不能停留在旧值。
-                state: { ...tool.state, metadata: event.data.metadata, ...("structured" in event.data ? { structured: event.data.structured } : {}), ...("content" in event.data ? { content: event.data.content } : {}) },
+                state: {
+                  ...tool.state,
+                  metadata: event.data.metadata,
+                  ...("structured" in event.data ? { structured: event.data.structured } : {}),
+                  ...("content" in event.data ? { content: event.data.content } : {}),
+                },
               }
             : tool,
         )
@@ -435,7 +453,8 @@ function key(sessionID: string, inputID: string) {
 
 function messageID(eventID: string, data?: unknown) {
   // canonical事件明确携带消息ID；仅旧vendor协议才沿用event ID派生约定。
-  if (data && typeof data === "object" && "messageID" in data && typeof data.messageID === "string") return data.messageID
+  if (data && typeof data === "object" && "messageID" in data && typeof data.messageID === "string")
+    return data.messageID
   return eventID.replace(/^evt_/, "msg_")
 }
 

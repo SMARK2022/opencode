@@ -215,7 +215,9 @@ function active(event: Event, sessionID: string): boolean {
 
   if (event.type === "message.updated") {
     // #553：hidden assistant 仍可作为 raw tombstone 传输，但不能延长当前 run 的 live gate。
-    return event.properties.info.role === "assistant" && !("hidden" in event.properties.info && event.properties.info.hidden)
+    return (
+      event.properties.info.role === "assistant" && !("hidden" in event.properties.info && event.properties.info.hidden)
+    )
   }
 
   if (event.type === "message.part.delta" || event.type === "message.part.updated") {
@@ -426,7 +428,7 @@ function createLayer(input: StreamInput) {
         input.signal?.addEventListener("abort", halt, { once: true })
         yield* Effect.addFinalizer(() => closeScope())
 
-                // #192：events 订阅移入 watch while 循环
+        // #192：events 订阅移入 watch while 循环
 
         const state: State = {
           data: createSessionData(),
@@ -792,7 +794,10 @@ function createLayer(input: StreamInput) {
               const observed = next.live || next.statusBusy
               if (!item) return fallback && observed
               // #192：daemon 无该 session 记录时仅当已观察到活动才允许结束 turn，防止空窗误判
-              if (item.type !== "idle") { next.statusBusy = true; return false }
+              if (item.type !== "idle") {
+                next.statusBusy = true
+                return false
+              }
               // #192：status 非 idle 说明 turn 仍在执行，标记 busy 并继续等待
               return observed
             }),
@@ -817,11 +822,16 @@ function createLayer(input: StreamInput) {
 
         const touch = (event: Event) => {
           const next = state.wait
-          if (!next || !active(event, input.sessionID)) { return }
+          if (!next || !active(event, input.sessionID)) {
+            return
+          }
           // #192：session.status 单独处理
           if (event.type === "session.status") {
             // #192：session.status 事件是 turn 活跃的直接证据，优先级高于普通事件
-            if (event.properties.status.type !== "idle") { next.statusBusy = true; next.live = true }
+            if (event.properties.status.type !== "idle") {
+              next.statusBusy = true
+              next.live = true
+            }
             return
           }
           next.live = true
@@ -1135,37 +1145,68 @@ function createLayer(input: StreamInput) {
             )
             // #192：终止条件满足时静默退出，否则真实订阅故障走 fault 路径
             if (!events) return
-            const closeCurrentStream = () => { void events.stream.return(StreamClosed).catch(() => {}) }
+            const closeCurrentStream = () => {
+              void events.stream.return(StreamClosed).catch(() => {})
+            }
             // #192：closeStream 在订阅期间指向当前流，供外部主动关闭
             // #192：确保只清理当前流的 subscription，旧流 ensure 不改 closeStream 引用
             closeStream = closeCurrentStream
             input.trace?.write("recv.subscribe", { sessionID: input.sessionID })
-            const ok = yield* Stream.fromAsyncIterable(events.stream, (error) => error instanceof Error ? error : new Error(String(error))).pipe(
+            const ok = yield* Stream.fromAsyncIterable(events.stream, (error) =>
+              error instanceof Error ? error : new Error(String(error)),
+            ).pipe(
               Stream.takeUntil(() => input.footer.isClosed || abort.signal.aborted),
               Stream.runForEach(
                 Effect.fn("RunStreamTransport.event")(function* (item: unknown) {
-                  if (input.footer.isClosed) { abort.abort(); return }
-                  if (isMatchingDisposeEvent(item, input.directory)) { yield* fail(new Error("instance disposed")); yield* closeScope(); return }
+                  if (input.footer.isClosed) {
+                    abort.abort()
+                    return
+                  }
+                  if (isMatchingDisposeEvent(item, input.directory)) {
+                    yield* fail(new Error("instance disposed"))
+                    yield* closeScope()
+                    return
+                  }
                   const event = globalPayloadEvent(item)
                   if (!event) return
                   const sessionID = sid(event)
-                  if (booting || replaying) { if (sessionID) { input.trace?.write("recv.event", event); buffered.push(event) }; return }
-                  if (!tracked(sessionID)) { if (sessionID) { input.trace?.write("recv.event", event); buffered.push(event) }; return }
+                  if (booting || replaying) {
+                    if (sessionID) {
+                      input.trace?.write("recv.event", event)
+                      buffered.push(event)
+                    }
+                    return
+                  }
+                  if (!tracked(sessionID)) {
+                    if (sessionID) {
+                      input.trace?.write("recv.event", event)
+                      buffered.push(event)
+                    }
+                    return
+                  }
                   input.trace?.write("recv.event", event)
                   yield* applyEvent(event)
                   yield* drainBuffered()
                 }),
               ),
               Effect.as(true),
-              Effect.catch((error) => (abort.signal.aborted ? Effect.succeed(false) : fail(error).pipe(Effect.as(false)))),
-              Effect.ensuring(Effect.sync(() => { if (closeStream === closeCurrentStream) closeStream = () => {}; closeCurrentStream() })),
+              Effect.catch((error) =>
+                abort.signal.aborted ? Effect.succeed(false) : fail(error).pipe(Effect.as(false)),
+              ),
+              Effect.ensuring(
+                Effect.sync(() => {
+                  if (closeStream === closeCurrentStream) closeStream = () => {}
+                  closeCurrentStream()
+                }),
+              ),
               // #192：closeStream 只在仍指向当前流时重置，旧流的 ensuring 不会误关新订阅
             )
             // #192：ok 标志区分 clean EOF 与真故障：clean EOF 外层重连，真故障退出
             // #192：ok=false 表示流正常结束或已 fault；fault 由 catch 置位，clean EOF 走重连
             if (!ok) return
             // #192：重连节流——100ms 避免死 daemon tight loop
-            if (!input.footer.isClosed && !abort.signal.aborted && !closed && !state.fault) yield* Effect.sleep("100 millis")
+            if (!input.footer.isClosed && !abort.signal.aborted && !closed && !state.fault)
+              yield* Effect.sleep("100 millis")
           }
         })
         yield* Scope.provide(scope)(watch().pipe(Effect.forkScoped))

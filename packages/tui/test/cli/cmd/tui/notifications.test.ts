@@ -52,7 +52,16 @@ async function setup(messages?: (sessionID: string) => Message[]) {
 
   // 默认返回 user + 已完成的 assistant，模拟正常完成路径
   const defaultMessages = (sessionID: string) => [
-    { id: "u1", sessionID, role: "user" as const, time: { created: 0 }, agent: "build", model: { providerID: "p", modelID: "m" }, tools: {}, parts: [] },
+    {
+      id: "u1",
+      sessionID,
+      role: "user" as const,
+      time: { created: 0 },
+      agent: "build",
+      model: { providerID: "p", modelID: "m" },
+      tools: {},
+      parts: [],
+    },
     completedAssistant(sessionID),
   ]
 
@@ -179,24 +188,36 @@ describe("internal notifications TUI plugin", () => {
     harness.emit({ id: "native-q2", type: "question.v2.asked", properties: q })
     harness.emit({ id: "compat-q", type: "question.asked", properties: q })
     // 回复与拒绝都释放同一pending键，之后相同请求身份才允许再次通知。
-    harness.emit({ id: "native-qr", type: "question.v2.replied", properties: { sessionID: "session", requestID: q.id, answers: [] } })
+    harness.emit({
+      id: "native-qr",
+      type: "question.v2.replied",
+      properties: { sessionID: "session", requestID: q.id, answers: [] },
+    })
     harness.emit({ id: "native-q3", type: "question.v2.asked", properties: q })
-    harness.emit({ id: "native-qx", type: "question.v2.rejected", properties: { sessionID: "session", requestID: q.id } })
+    harness.emit({
+      id: "native-qx",
+      type: "question.v2.rejected",
+      properties: { sessionID: "session", requestID: q.id },
+    })
     harness.emit({ id: "native-q4", type: "question.v2.asked", properties: q })
     harness.emit({ id: "native-p1", type: "permission.v2.asked", properties: p })
     harness.emit({ id: "native-p2", type: "permission.v2.asked", properties: p })
     // Native拒绝也是replied终态，不能让去重残留吞掉后续权限请求。
-    harness.emit({ id: "native-pr", type: "permission.v2.replied", properties: { sessionID: "session", requestID: p.id, reply: "reject" } })
+    harness.emit({
+      id: "native-pr",
+      type: "permission.v2.replied",
+      properties: { sessionID: "session", requestID: p.id, reply: "reject" },
+    })
     harness.emit({ id: "native-p3", type: "permission.v2.asked", properties: p })
     expect(harness.notifications).toHaveLength(5)
-    expect(harness.notifications.map(item => item.sound)).toEqual([
+    expect(harness.notifications.map((item) => item.sound)).toEqual([
       { name: "question", when: "always" },
       { name: "question", when: "always" },
       { name: "question", when: "always" },
       { name: "permission", when: "always" },
       { name: "permission", when: "always" },
     ])
-    expect(harness.notifications.every(item => item.title === "Demo session")).toBe(true)
+    expect(harness.notifications.every((item) => item.title === "Demo session")).toBe(true)
   })
 
   test("notifies done when an active session completes with a finished assistant", async () => {
@@ -257,7 +278,16 @@ describe("internal notifications TUI plugin", () => {
     // 模拟真实 abort 事件顺序：
     // Runner.cancel 先发 idle（assistant 尚未终态化），再 Fiber.interrupt 触发 halt 发 error
     const harness = await setup(() => [
-      { id: "u1", sessionID: "abort", role: "user" as const, time: { created: 0 }, agent: "build", model: { providerID: "p", modelID: "m" }, tools: {}, parts: [] },
+      {
+        id: "u1",
+        sessionID: "abort",
+        role: "user" as const,
+        time: { created: 0 },
+        agent: "build",
+        model: { providerID: "p", modelID: "m" },
+        tools: {},
+        parts: [],
+      },
       pendingAssistant("abort"),
     ])
 
@@ -389,4 +419,3 @@ describe("internal notifications TUI plugin", () => {
     expect(harness.notifications).toHaveLength(1)
   })
 })
-

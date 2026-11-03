@@ -39,7 +39,10 @@ const lockfile = path.join(root, "bun.lock")
 const skip = new Set([".git", ".opencode", ".turbo", "dist", "node_modules", "thirdparty"])
 const keys = ["@opentui/core", "@opentui/keymap", "@opentui/solid"] as const
 // 维护入口接受通用smark发布形状，版本取catalog/release；普通registry与snapshot仍保留。
-const release = !snapshot && /^\d+\.\d+\.\d+-smark\.\d+$/.test(ver) ? `https://github.com/SMARK2022/opentui/releases/download/v${ver}` : undefined
+const release =
+  !snapshot && /^\d+\.\d+\.\d+-smark\.\d+$/.test(ver)
+    ? `https://github.com/SMARK2022/opentui/releases/download/v${ver}`
+    : undefined
 // 仅映射 source 已发布的完整 family；普通 registry/snapshot 继续沿目标既有入口维护。
 const assets = {
   "@opentui/core": "opentui-core",
@@ -206,14 +209,18 @@ async function findStaleLockfileEntries() {
 }
 
 function findStaleLockfileEntriesInText(txt: string) {
-  return Array.from(txt.matchAll(/^    "([^"]+)": \["(@opentui\/(?:core(?:-[^@"]+)?|keymap|solid))@([^"]+)"/gm))
-    .map((match) => ({
-      entry: match[1]!,
-      pkg: match[2]!,
-      version: match[3]!,
-    }))
-    // URL 是此 family 的锁定身份，不把 canonical release 当作陈旧 semver 再删除。
-    .filter(
-      (item) => item.version !== ver && item.version !== (release ? `${release}/${item.pkg.slice(1).replace("/", "-")}-${ver}.tgz` : ver),
-    )
+  return (
+    Array.from(txt.matchAll(/^    "([^"]+)": \["(@opentui\/(?:core(?:-[^@"]+)?|keymap|solid))@([^"]+)"/gm))
+      .map((match) => ({
+        entry: match[1]!,
+        pkg: match[2]!,
+        version: match[3]!,
+      }))
+      // URL 是此 family 的锁定身份，不把 canonical release 当作陈旧 semver 再删除。
+      .filter(
+        (item) =>
+          item.version !== ver &&
+          item.version !== (release ? `${release}/${item.pkg.slice(1).replace("/", "-")}-${ver}.tgz` : ver),
+      )
+  )
 }

@@ -399,7 +399,11 @@ const lowerMessages = Effect.fn("OpenAIResponses.lowerMessages")(function* (requ
           flushText()
           if (reasoning.id === undefined) {
             // 无ID的外部item只能发送完整状态；store:true也不能转成源服务器引用。
-            input.push({ type: reasoning.type, summary: reasoning.summary, encrypted_content: reasoning.encrypted_content })
+            input.push({
+              type: reasoning.type,
+              summary: reasoning.summary,
+              encrypted_content: reasoning.encrypted_content,
+            })
             continue
           }
           if (store !== false) {

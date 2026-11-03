@@ -239,9 +239,13 @@ const statusReason = (input: {
     return new AuthenticationReason({ message: input.message, kind: "invalid", http: input.http })
   }
   // 既有policy拒绝优先；拦截页复用请求建立阶段重试，不重放已接受的流。
-  if (input.cloudflare) return new ProviderInternalReason({
-    message: input.message, status: input.status, retryAfterMs: input.retryAfterMs, http: input.http,
-  })
+  if (input.cloudflare)
+    return new ProviderInternalReason({
+      message: input.message,
+      status: input.status,
+      retryAfterMs: input.retryAfterMs,
+      http: input.http,
+    })
   if (input.status === 403) {
     return new AuthenticationReason({ message: input.message, kind: "insufficient-permissions", http: input.http })
   }
@@ -378,23 +382,42 @@ export const layer: Layer.Layer<Service, never, HttpClient.HttpClient> = Layer.e
     const executeOnce = (request: HttpClientRequest.HttpClientRequest) =>
       Effect.gen(function* () {
         const timing = FetchTiming.begin(yield* Clock.currentTimeMillis)
-        const log = (phase: string, fields: Record<string, unknown> = {}) => Clock.currentTimeMillis.pipe(
-          Effect.flatMap((now) => Effect.logInfo("timing", { phase, requestID: timing.requestID, elapsedMs: now - timing.startedAt, ...fields })),
-          Effect.annotateLogs({ service: "provider.fetch" }),
-        )
-        // 重试每次真实发出请求都取得独立ID；只量已缓冲字节，不读取正文或凭据。
-        yield* log("fetch.start", { method: request.method, bodyBytes: request.body._tag === "Uint8Array" ? request.body.body.byteLength : undefined })
-        const redactedNames = yield* Headers.CurrentRedactedNames
-        const response = yield* http
-          .execute(request)
-          .pipe(
-            Effect.mapError(toHttpError(redactedNames)),
-            Effect.tapError((error) => log("fetch.error", { errorName: error.name, errorKind: error.reason._tag, errorCode: error.reason._tag === "Transport" ? error.reason.kind : undefined })),
+        const log = (phase: string, fields: Record<string, unknown> = {}) =>
+          Clock.currentTimeMillis.pipe(
+            Effect.flatMap((now) =>
+              Effect.logInfo("timing", {
+                phase,
+                requestID: timing.requestID,
+                elapsedMs: now - timing.startedAt,
+                ...fields,
+              }),
+            ),
+            Effect.annotateLogs({ service: "provider.fetch" }),
           )
+        // 重试每次真实发出请求都取得独立ID；只量已缓冲字节，不读取正文或凭据。
+        yield* log("fetch.start", {
+          method: request.method,
+          bodyBytes: request.body._tag === "Uint8Array" ? request.body.body.byteLength : undefined,
+        })
+        const redactedNames = yield* Headers.CurrentRedactedNames
+        const response = yield* http.execute(request).pipe(
+          Effect.mapError(toHttpError(redactedNames)),
+          Effect.tapError((error) =>
+            log("fetch.error", {
+              errorName: error.name,
+              errorKind: error.reason._tag,
+              errorCode: error.reason._tag === "Transport" ? error.reason.kind : undefined,
+            }),
+          ),
+        )
         FetchTiming.responses.set(response, timing)
         const contentType = response.headers["content-type"]
         // 响应头先于状态分类记录，非2xx不能被误判为尚未收到HTTP响应。
-        yield* log("fetch.response", { status: response.status, contentType, isSSE: contentType?.includes("text/event-stream") ?? false })
+        yield* log("fetch.response", {
+          status: response.status,
+          contentType,
+          isSSE: contentType?.includes("text/event-stream") ?? false,
+        })
         return yield* statusError(request, redactedNames)(response)
       })
     return Service.of({

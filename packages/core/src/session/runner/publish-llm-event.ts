@@ -53,7 +53,11 @@ const settledOutput = (value: ToolOutput | undefined, result: ToolResultValue): 
 }
 
 // 仅持久化一次provider turn；请求关联放事件envelope，不混入Step的业务data。
-export const createLLMEventPublisher = (events: EventV2.Interface, input: Input, metadata?: Readonly<Record<string, unknown>>) => {
+export const createLLMEventPublisher = (
+  events: EventV2.Interface,
+  input: Input,
+  metadata?: Readonly<Record<string, unknown>>,
+) => {
   const tools = new Map<
     string,
     {
@@ -77,21 +81,28 @@ export const createLLMEventPublisher = (events: EventV2.Interface, input: Input,
   // 复用真实publisher身份；日志仅传长度和阶段，绝不携带片段正文。
   const streamTiming = (phase: string, extra: Record<string, unknown>) =>
     Effect.logInfo("stream timing", {
-      phase, sessionID: input.sessionID, messageID: assistantMessageID,
-      elapsedMs: Date.now() - startedAt, ...extra,
+      phase,
+      sessionID: input.sessionID,
+      messageID: assistantMessageID,
+      elapsedMs: Date.now() - startedAt,
+      ...extra,
     })
 
   const startAssistant = Effect.fnUntraced(function* (finalizer = false) {
     if (assistantMessageID !== undefined) return assistantMessageID
     assistantMessageID = SessionMessage.ID.create()
     assistantActive = true
-    yield* events.publish(SessionEvent.Step.Started, {
-      ...input,
-      assistantMessageID,
-      timestamp: yield* timestamp,
-      inputEstimate: input.inputEstimate?.(),
-      snapshot: input.snapshot,
-    }, { finalizer, metadata })
+    yield* events.publish(
+      SessionEvent.Step.Started,
+      {
+        ...input,
+        assistantMessageID,
+        timestamp: yield* timestamp,
+        inputEstimate: input.inputEstimate?.(),
+        snapshot: input.snapshot,
+      },
+      { finalizer, metadata },
+    )
     return assistantMessageID
   })
   const currentAssistantMessageID = () =>
@@ -101,7 +112,12 @@ export const createLLMEventPublisher = (events: EventV2.Interface, input: Input,
 
   const fragments = (
     name: string,
-    ended: (id: string, value: string, providerMetadata: ProviderMetadata | undefined, finalizer: boolean) => Effect.Effect<void>,
+    ended: (
+      id: string,
+      value: string,
+      providerMetadata: ProviderMetadata | undefined,
+      finalizer: boolean,
+    ) => Effect.Effect<void>,
   ) => {
     const chunks = new Map<string, string[]>()
     const start = (id: string) =>
@@ -118,7 +134,12 @@ export const createLLMEventPublisher = (events: EventV2.Interface, input: Input,
         const first = current.length === 0
         current.push(value)
         return first
-          ? streamTiming("part.first_delta", { partType: name === "tool input" ? "tool" : name, partID: id, field: name === "tool input" ? "raw" : "text", deltaChars: value.length })
+          ? streamTiming("part.first_delta", {
+              partType: name === "tool input" ? "tool" : name,
+              partID: id,
+              field: name === "tool input" ? "raw" : "text",
+              deltaChars: value.length,
+            })
           : Effect.void
       })
     const end = Effect.fnUntraced(function* (id: string, providerMetadata?: ProviderMetadata, finalizer = false) {
@@ -136,38 +157,50 @@ export const createLLMEventPublisher = (events: EventV2.Interface, input: Input,
 
   const text = fragments("text", (textID, value, _providerMetadata, finalizer) =>
     Effect.gen(function* () {
-      yield* events.publish(SessionEvent.Text.Ended, {
-        sessionID: input.sessionID,
-        assistantMessageID: yield* currentAssistantMessageID(),
-        timestamp: yield* timestamp,
-        textID,
-        text: value,
-      }, { finalizer })
+      yield* events.publish(
+        SessionEvent.Text.Ended,
+        {
+          sessionID: input.sessionID,
+          assistantMessageID: yield* currentAssistantMessageID(),
+          timestamp: yield* timestamp,
+          textID,
+          text: value,
+        },
+        { finalizer },
+      )
     }),
   )
   const reasoning = fragments("reasoning", (reasoningID, value, providerMetadata, finalizer) =>
     Effect.gen(function* () {
-      yield* events.publish(SessionEvent.Reasoning.Ended, {
-        sessionID: input.sessionID,
-        assistantMessageID: yield* currentAssistantMessageID(),
-        timestamp: yield* timestamp,
-        reasoningID,
-        text: value,
-        providerMetadata,
-      }, { finalizer })
+      yield* events.publish(
+        SessionEvent.Reasoning.Ended,
+        {
+          sessionID: input.sessionID,
+          assistantMessageID: yield* currentAssistantMessageID(),
+          timestamp: yield* timestamp,
+          reasoningID,
+          text: value,
+          providerMetadata,
+        },
+        { finalizer },
+      )
     }),
   )
   const toolInput = fragments("tool input", (callID, value, _providerMetadata, finalizer) =>
     Effect.gen(function* () {
       const tool = tools.get(callID)
       if (!tool) return yield* Effect.die(`Tool input end before start: ${callID}`)
-      yield* events.publish(SessionEvent.Tool.Input.Ended, {
-        sessionID: input.sessionID,
-        timestamp: yield* timestamp,
-        assistantMessageID: tool.assistantMessageID,
-        callID,
-        text: value,
-      }, { finalizer })
+      yield* events.publish(
+        SessionEvent.Tool.Input.Ended,
+        {
+          sessionID: input.sessionID,
+          timestamp: yield* timestamp,
+          assistantMessageID: tool.assistantMessageID,
+          callID,
+          text: value,
+        },
+        { finalizer },
+      )
       tool.inputEnded = true
     }),
   )
@@ -215,26 +248,42 @@ export const createLLMEventPublisher = (events: EventV2.Interface, input: Input,
     yield* flushFragments(finalizer)
   })
 
-  const failAssistant = Effect.fnUntraced(function* (message: string, aborted = false, finalizer = false, discardIncompleteAttempt = false) {
+  const failAssistant = Effect.fnUntraced(function* (
+    message: string,
+    aborted = false,
+    finalizer = false,
+    discardIncompleteAttempt = false,
+  ) {
     if (assistantFailed) return
     yield* flush(finalizer)
     const assistantMessageID = yield* startAssistant(finalizer)
     assistantActive = false
     assistantFailed = true
-    yield* events.publish(SessionEvent.Step.Failed, {
-      sessionID: input.sessionID,
-      timestamp: yield* timestamp,
-      assistantMessageID,
-      error: { type: "unknown", message },
-      aborted,
-      ...(discardIncompleteAttempt ? { discardIncompleteAttempt: true } : {}),
-    }, { finalizer })
+    yield* events.publish(
+      SessionEvent.Step.Failed,
+      {
+        sessionID: input.sessionID,
+        timestamp: yield* timestamp,
+        assistantMessageID,
+        error: { type: "unknown", message },
+        aborted,
+        ...(discardIncompleteAttempt ? { discardIncompleteAttempt: true } : {}),
+      },
+      { finalizer },
+    )
   })
 
-  const retry = Effect.fn("SessionRunner.retryIncompleteAttempt")(function* (attempt: number, error: SessionEvent.RetryError) {
+  const retry = Effect.fn("SessionRunner.retryIncompleteAttempt")(function* (
+    attempt: number,
+    error: SessionEvent.RetryError,
+  ) {
     const messageID = yield* startAssistant()
     yield* events.publish(SessionEvent.Retried, {
-      sessionID: input.sessionID, assistantMessageID: messageID, timestamp: yield* timestamp, attempt, error,
+      sessionID: input.sessionID,
+      assistantMessageID: messageID,
+      timestamp: yield* timestamp,
+      attempt,
+      error,
     })
     // 同一请求和助手继续；不重新 Started、不退款，也不让旧 fragments 在取消后复活。
     assistantActive = true
@@ -251,17 +300,21 @@ export const createLLMEventPublisher = (events: EventV2.Interface, input: Input,
   ) {
     for (const [callID, tool] of tools) {
       if (tool.settled || (hostedOnly && !tool.providerExecuted)) continue
-      yield* events.publish(SessionEvent.Tool.Failed, {
-        sessionID: input.sessionID,
-        timestamp: yield* timestamp,
-        assistantMessageID: tool.assistantMessageID,
-        callID,
-        error: { type: "unknown", message },
-        provider: {
-          executed: tool.providerExecuted,
-          ...(tool.providerMetadata === undefined ? {} : { metadata: tool.providerMetadata }),
+      yield* events.publish(
+        SessionEvent.Tool.Failed,
+        {
+          sessionID: input.sessionID,
+          timestamp: yield* timestamp,
+          assistantMessageID: tool.assistantMessageID,
+          callID,
+          error: { type: "unknown", message },
+          provider: {
+            executed: tool.providerExecuted,
+            ...(tool.providerMetadata === undefined ? {} : { metadata: tool.providerMetadata }),
+          },
         },
-      }, { finalizer })
+        { finalizer },
+      )
       // 发布失败仍保留未结算身份；提交后通知中断则由持久投影的终态guard保留winner。
       tool.settled = true
     }
@@ -272,16 +325,23 @@ export const createLLMEventPublisher = (events: EventV2.Interface, input: Input,
     return tool ? Effect.succeed(tool.assistantMessageID) : Effect.die(`Unknown tool call: ${callID}`)
   }
 
-  const interruptedOutput = Effect.fn("SessionRunner.interruptedToolOutput")(function* (callID: string, output: ToolOutput) {
+  const interruptedOutput = Effect.fn("SessionRunner.interruptedToolOutput")(function* (
+    callID: string,
+    output: ToolOutput,
+  ) {
     // 先保存正文，再由既有终态清理发布 Failed；不可用 Success 伪装取消完成。
-    yield* events.publish(SessionEvent.Tool.Progress, {
-      sessionID: input.sessionID,
-      timestamp: yield* timestamp,
-      assistantMessageID: yield* assistantMessageIDForTool(callID),
-      callID,
-      structured: record(output.structured),
-      content: output.content,
-    }, { finalizer: true })
+    yield* events.publish(
+      SessionEvent.Tool.Progress,
+      {
+        sessionID: input.sessionID,
+        timestamp: yield* timestamp,
+        assistantMessageID: yield* assistantMessageIDForTool(callID),
+        callID,
+        structured: record(output.structured),
+        content: output.content,
+      },
+      { finalizer: true },
+    )
   })
 
   const publish = Effect.fn("SessionRunner.publishLLMEvent")(function* (
@@ -410,7 +470,13 @@ export const createLLMEventPublisher = (events: EventV2.Interface, input: Input,
             provider,
           })
           tool.settled = true
-          return { failed: true, name: tool.name, input: tool.input, assistantMessageID: tool.assistantMessageID, callID: event.id }
+          return {
+            failed: true,
+            name: tool.name,
+            input: tool.input,
+            assistantMessageID: tool.assistantMessageID,
+            callID: event.id,
+          }
         }
         yield* events.publish(SessionEvent.Tool.Success, {
           sessionID: input.sessionID,
@@ -423,7 +489,13 @@ export const createLLMEventPublisher = (events: EventV2.Interface, input: Input,
           provider,
         })
         tool.settled = true
-        return { failed: false, name: tool.name, input: tool.input, assistantMessageID: tool.assistantMessageID, callID: event.id }
+        return {
+          failed: false,
+          name: tool.name,
+          input: tool.input,
+          assistantMessageID: tool.assistantMessageID,
+          callID: event.id,
+        }
       }
       case "tool-error": {
         const tool = tools.get(event.id)
@@ -443,7 +515,13 @@ export const createLLMEventPublisher = (events: EventV2.Interface, input: Input,
           },
         })
         tool.settled = true
-        return { failed: true, name: tool.name, input: tool.input, assistantMessageID: tool.assistantMessageID, callID: event.id }
+        return {
+          failed: true,
+          name: tool.name,
+          input: tool.input,
+          assistantMessageID: tool.assistantMessageID,
+          callID: event.id,
+        }
       }
       case "step-finish":
         yield* flush()

@@ -53,7 +53,10 @@ function commandSegments(command: string, powershell: boolean) {
       continue
     }
     // #207：进入引号区域——引号内分隔符不切分段
-    if (char === (powershell ? "`" : "^")) { i++; continue }
+    if (char === (powershell ? "`" : "^")) {
+      i++
+      continue
+    }
     if ((powershell && char === "'") || char === '"') {
       quote = char
       continue
@@ -109,7 +112,8 @@ function wslPayloadRange(tokens: Token[], end: number) {
   for (let i = 1; i < tokens.length; i++) {
     const token = tokens[i].text.toLowerCase()
     // #207：--/-e/--exec 后的 token 是客户机命令起点
-    if (token === "--" || token === "-e" || token === "--exec") return tokens[i + 1] ? [{ start: tokens[i + 1].start, end }] : []
+    if (token === "--" || token === "-e" || token === "--exec")
+      return tokens[i + 1] ? [{ start: tokens[i + 1].start, end }] : []
     // #207：带值选项——跳过值 token 继续扫描
     if (WSL_OPTIONS_WITH_VALUE.has(token)) {
       i++
@@ -138,4 +142,3 @@ function sshPayloadRange(tokens: Token[], end: number) {
   const start = host + 2
   return tokens[start] ? [{ start: tokens[start].start, end }] : []
 }
-

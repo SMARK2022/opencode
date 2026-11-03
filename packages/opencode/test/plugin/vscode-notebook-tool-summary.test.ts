@@ -27,8 +27,16 @@ let selectKernelResult: unknown = true
 // no Jupyter/Python extension, while restart/configure tests can provide only the
 // public shape they need; this avoids a broad mock that would hide missing-env
 // behavior exercised elsewhere in the file.
-let extensionLookup = new Map<string, { isActive: boolean; packageJSON?: Record<string, unknown>; exports?: unknown; activate(): Promise<unknown> }>()
-const notebookListeners = new Set<(event: { notebook: typeof activeNotebook; cellChanges: Array<{ cell: NotebookCell; executionSummary?: NotebookCell["executionSummary"] }> }) => void>()
+let extensionLookup = new Map<
+  string,
+  { isActive: boolean; packageJSON?: Record<string, unknown>; exports?: unknown; activate(): Promise<unknown> }
+>()
+const notebookListeners = new Set<
+  (event: {
+    notebook: typeof activeNotebook
+    cellChanges: Array<{ cell: NotebookCell; executionSummary?: NotebookCell["executionSummary"] }>
+  }) => void
+>()
 const textListeners = new Set<(event: { document: NotebookCell["document"] }) => void>()
 
 // 仅替换VS Code公开API以调用真实处理器，不启动扩展或内核，也不直接测试私有辅助函数。
@@ -38,14 +46,24 @@ const vscode = {
   EndOfLine,
   ConfigurationTarget: { Global: 1 },
   NotebookRange: class {
-    constructor(readonly start: number, readonly end: number) {}
+    constructor(
+      readonly start: number,
+      readonly end: number,
+    ) {}
   },
   NotebookCellData: class {
     metadata?: Record<string, unknown>
-    constructor(readonly kind: number, readonly value: string, readonly languageId: string) {}
+    constructor(
+      readonly kind: number,
+      readonly value: string,
+      readonly languageId: string,
+    ) {}
   },
   NotebookEdit: {
-    replaceCells: (range: { start: number; end: number }, cells: Array<{ kind: number; value: string; languageId: string }>) => ({ type: "replace", range, cells }),
+    replaceCells: (
+      range: { start: number; end: number },
+      cells: Array<{ kind: number; value: string; languageId: string }>,
+    ) => ({ type: "replace", range, cells }),
     deleteCells: (range: { start: number; end: number }) => ({ type: "delete", range }),
   },
   WorkspaceEdit: class {
@@ -58,10 +76,16 @@ const vscode = {
     }
   },
   Position: class {
-    constructor(readonly line: number, readonly character: number) {}
+    constructor(
+      readonly line: number,
+      readonly character: number,
+    ) {}
   },
   Range: class {
-    constructor(readonly start: unknown, readonly end: unknown) {}
+    constructor(
+      readonly start: unknown,
+      readonly end: unknown,
+    ) {}
   },
   Uri: {
     file: (value: string) => createUri(value),
@@ -73,11 +97,15 @@ const vscode = {
     workspaceFolders: [{ uri: createUri("/tmp") }],
     fs: {
       createDirectory: async () => undefined,
-      writeFile: async (uri: UriLike, data: Uint8Array) => { artifacts.set(uri.fsPath, data.slice()) },
+      writeFile: async (uri: UriLike, data: Uint8Array) => {
+        artifacts.set(uri.fsPath, data.slice())
+      },
       readFile: async () => new Uint8Array(),
       // stat 对不存在的文件抛错（模拟 ENOENT），对已打开的 notebook 路径也抛错
       // 因为 mock 的 fs 不跟踪实际磁盘文件
-      stat: async (uri: UriLike) => { throw new Error(`ENOENT: ${uri.fsPath}`) },
+      stat: async (uri: UriLike) => {
+        throw new Error(`ENOENT: ${uri.fsPath}`)
+      },
     },
     getWorkspaceFolder: () => ({ uri: createUri("/tmp") }),
     openNotebookDocument: async (uri: UriLike) => {
@@ -90,7 +118,12 @@ const vscode = {
     },
     // #234：notebook 内存 fake 的 executeCode 仅用于 info 探测路径
     applyEdit: async (edit: { entries: Array<Record<string, unknown>> }) => applyEdit(edit.entries),
-    onDidChangeNotebookDocument: (listener: (event: { notebook: typeof activeNotebook; cellChanges: Array<{ cell: NotebookCell; executionSummary?: NotebookCell["executionSummary"] }> }) => void) => {
+    onDidChangeNotebookDocument: (
+      listener: (event: {
+        notebook: typeof activeNotebook
+        cellChanges: Array<{ cell: NotebookCell; executionSummary?: NotebookCell["executionSummary"] }>
+      }) => void,
+    ) => {
       notebookListeners.add(listener)
       return { dispose: () => notebookListeners.delete(listener) }
     },
@@ -100,13 +133,18 @@ const vscode = {
     },
     getConfiguration: () => ({
       get: () => restartConfirmation,
-      update: async () => { throw new Error("settings must remain unchanged") },
+      update: async () => {
+        throw new Error("settings must remain unchanged")
+      },
     }),
   },
   window: {
     activeNotebookEditor: undefined as NotebookEditor | undefined,
     visibleNotebookEditors: [] as NotebookEditor[],
-    showNotebookDocument: async (notebook: typeof activeNotebook, options?: { selections?: Array<{ start: number; end: number }> }) => {
+    showNotebookDocument: async (
+      notebook: typeof activeNotebook,
+      options?: { selections?: Array<{ start: number; end: number }> },
+    ) => {
       const editor: NotebookEditor = {
         notebook,
         selection: options?.selections?.[0] ?? { start: 0, end: 1 },
@@ -118,7 +156,7 @@ const vscode = {
     },
   },
   commands: {
-    getCommands: async (filterInternal = false) => filterInternal ? commandLists.public : commandLists.all,
+    getCommands: async (filterInternal = false) => (filterInternal ? commandLists.public : commandLists.all),
     executeCommand: async (command: string) => {
       executedCommands.push(command)
       if (command === "notebook.cell.execute") executeSelectedCell()
@@ -141,16 +179,29 @@ const vscodeModule = "vscode"
 const vscodeMock = (await import(vscodeModule)) as {
   workspace: { notebookDocuments: Array<typeof activeNotebook> }
   window: { activeNotebookEditor?: NotebookEditor; visibleNotebookEditors: NotebookEditor[] }
-  commands: { getCommands: (filterInternal?: boolean) => Promise<string[]>; executeCommand: (command: string) => Promise<unknown> }
+  commands: {
+    getCommands: (filterInternal?: boolean) => Promise<string[]>
+    executeCommand: (command: string) => Promise<unknown>
+  }
 }
-const { notebookSummary } = (await import(sdkNotebookUrl("summary"))) as { notebookSummary: (filePath: string) => Promise<ToolResult> }
-const { notebookSource } = (await import(sdkNotebookUrl("source"))) as { notebookSource: (input: Record<string, unknown>) => Promise<ToolResult> }
-const { editNotebook } = (await import(sdkNotebookUrl("edit"))) as { editNotebook: (input: Record<string, unknown>) => Promise<ToolResult> }
-const { runNotebook } = (await import(sdkNotebookUrl("run"))) as { runNotebook: (input: Record<string, unknown>, signal?: AbortSignal) => Promise<ToolResult> }
+const { notebookSummary } = (await import(sdkNotebookUrl("summary"))) as {
+  notebookSummary: (filePath: string) => Promise<ToolResult>
+}
+const { notebookSource } = (await import(sdkNotebookUrl("source"))) as {
+  notebookSource: (input: Record<string, unknown>) => Promise<ToolResult>
+}
+const { editNotebook } = (await import(sdkNotebookUrl("edit"))) as {
+  editNotebook: (input: Record<string, unknown>) => Promise<ToolResult>
+}
+const { runNotebook } = (await import(sdkNotebookUrl("run"))) as {
+  runNotebook: (input: Record<string, unknown>, signal?: AbortSignal) => Promise<ToolResult>
+}
 const { readNotebookCellOutput } = (await import(sdkNotebookUrl("output"))) as {
   readNotebookCellOutput: (filePath: string, index?: number, cellId?: string) => Promise<ToolResult>
 }
-const { notebookEnv } = (await import(sdkNotebookUrl("env"))) as { notebookEnv: (input: Record<string, unknown>) => Promise<ToolResult> }
+const { notebookEnv } = (await import(sdkNotebookUrl("env"))) as {
+  notebookEnv: (input: Record<string, unknown>) => Promise<ToolResult>
+}
 
 beforeEach(() => {
   cellSequence = 0
@@ -184,7 +235,12 @@ test("same-language edit preserves source identity and outputs", async () => {
   const cell = activeNotebook.cellAt(1)
   const before = { source: cell.document.getText(), outputs: cell.outputs, version: activeNotebook.version }
   // 幂等编辑不应以replaceCells实现，否则输出与稳定ID会丢失。
-  const result = await editNotebook({ filePath: notebookPath, cellId: cellFragment(2), editType: "edit", language: "python" })
+  const result = await editNotebook({
+    filePath: notebookPath,
+    cellId: cellFragment(2),
+    editType: "edit",
+    language: "python",
+  })
   const updatedCellId = result.data.updatedCellId
   expect(result.data).toMatchObject({
     applied: true,
@@ -230,19 +286,42 @@ test("output from a long notebook name writes to the real filesystem", async () 
   }
 })
 
-test.each(["info", "configure"])("%s reads kernel status without executing code and preserves lookup errors", async (operation) => {
-  let executed = false
-  const api = { kernels: { getKernel: async () => ({ language: "python", status: "idle", executeCode: () => { executed = true; throw new Error("hidden execution") } }) } }
-  const extension = { isActive: false, exports: api, async activate() { this.isActive = true; return api } }
-  extensionLookup.set("ms-toolsai.jupyter", extension)
-  // 读取状态不应改变内核命名空间或引发额外执行授权。
-  const result = await notebookEnv({ filePath: notebookPath, operation })
-  expect(extension.isActive).toBe(true)
-  expect(result.summary).toContain(operation === "info" ? "kernelStatus=idle" : "status=configured")
-  expect(executed).toBe(false)
-  api.kernels.getKernel = async () => { throw new Error("kernel lookup failed") }
-  await expect(notebookEnv({ filePath: notebookPath, operation })).rejects.toThrow("kernel lookup failed")
-})
+test.each(["info", "configure"])(
+  "%s reads kernel status without executing code and preserves lookup errors",
+  async (operation) => {
+    let executed = false
+    const api = {
+      kernels: {
+        getKernel: async () => ({
+          language: "python",
+          status: "idle",
+          executeCode: () => {
+            executed = true
+            throw new Error("hidden execution")
+          },
+        }),
+      },
+    }
+    const extension = {
+      isActive: false,
+      exports: api,
+      async activate() {
+        this.isActive = true
+        return api
+      },
+    }
+    extensionLookup.set("ms-toolsai.jupyter", extension)
+    // 读取状态不应改变内核命名空间或引发额外执行授权。
+    const result = await notebookEnv({ filePath: notebookPath, operation })
+    expect(extension.isActive).toBe(true)
+    expect(result.summary).toContain(operation === "info" ? "kernelStatus=idle" : "status=configured")
+    expect(executed).toBe(false)
+    api.kernels.getKernel = async () => {
+      throw new Error("kernel lookup failed")
+    }
+    await expect(notebookEnv({ filePath: notebookPath, operation })).rejects.toThrow("kernel lookup failed")
+  },
+)
 
 test.each([true, false])("restart preserves confirmation=%s and never claims verification", async (confirmation) => {
   restartConfirmation = confirmation
@@ -267,7 +346,16 @@ test("notebook tools expose a consistent Notebook plus tool header before detail
   await expectHeader(source, "Source")
   expect(source.summary.split("\n")[1]).toContain("target=")
 
-  await expectHeader(await editNotebook({ filePath: notebookPath, cellId: cellFragment(1), editType: "insert", newCode: "value = 1", language: "python" }), "Edit")
+  await expectHeader(
+    await editNotebook({
+      filePath: notebookPath,
+      cellId: cellFragment(1),
+      editType: "insert",
+      newCode: "value = 1",
+      language: "python",
+    }),
+    "Edit",
+  )
   await expectHeader(await runNotebook({ filePath: notebookPath, cellId: cellFragment(2), timeoutMs: 1_000 }), "Run")
 
   const output = await readNotebookCellOutput(notebookPath, undefined, cellFragment(2))
@@ -286,7 +374,9 @@ test("notebook tools expose a consistent Notebook plus tool header before detail
 // #234：stale id 必须抛错而不是静默回退——回退会让模型误读无关源码
 // #234：resolveNotebookCell 的失败语义被 source 直接透传，此处验证硬失败
 test("source rejects stale cell IDs instead of reading a different notebook range", async () => {
-  await expect(notebookSource({ filePath: notebookPath, cellId: "#VSC-deadbeef", offset: 1, limit: 5 })).rejects.toThrow("Notebook cell not found")
+  await expect(
+    notebookSource({ filePath: notebookPath, cellId: "#VSC-deadbeef", offset: 1, limit: 5 }),
+  ).rejects.toThrow("Notebook cell not found")
 })
 
 // #234：insert 结果的 insertedCellId 是模型后续 run/source 的直接输入
@@ -296,7 +386,9 @@ test("edit rejects empty source arrays before they can clear a notebook cell", a
   // behavior should reject them before any document mutation, preserving the
   // existing explicit-empty-string path for callers that really want to clear a
   // cell.
-  await expect(editNotebook({ filePath: notebookPath, cellId: cellFragment(2), editType: "edit", newCode: [] })).rejects.toThrow("newCode cannot be an empty array")
+  await expect(
+    editNotebook({ filePath: notebookPath, cellId: cellFragment(2), editType: "edit", newCode: [] }),
+  ).rejects.toThrow("newCode cannot be an empty array")
   // #252：错误消息必须点名字段并给出两条出路，调用方才能自行纠正意图
 })
 
@@ -304,7 +396,12 @@ test("language-only edit preserves source and returns the replacement cell ID", 
   // #252：language-only 契约的完整链路——源保持不变、旧句柄失效、新句柄可用且 kind 变 Markup
   const beforeSource = activeNotebook.cellAt(1).document.getText()
   const oldCellId = cellFragment(2)
-  const result = await editNotebook({ filePath: notebookPath, cellId: oldCellId, editType: "edit", language: "markdown" })
+  const result = await editNotebook({
+    filePath: notebookPath,
+    cellId: oldCellId,
+    editType: "edit",
+    language: "markdown",
+  })
   const updatedCellId = (result.data as Record<string, unknown>).updatedCellId
 
   expect(typeof updatedCellId).toBe("string")
@@ -325,7 +422,12 @@ test("language-only edit changes kind even when the language ID already matches"
   activeNotebook.cells.push(createCell(activeNotebook, NotebookCellKind.Code, "markdown", "# markdown stored as code"))
   updateIndexes(activeNotebook)
 
-  const result = await editNotebook({ filePath: notebookPath, cellId: cellFragment(3), editType: "edit", language: "markdown" })
+  const result = await editNotebook({
+    filePath: notebookPath,
+    cellId: cellFragment(3),
+    editType: "edit",
+    language: "markdown",
+  })
   const updatedCellId = (result.data as Record<string, unknown>).updatedCellId
   const source = await notebookSource({ filePath: notebookPath, cellId: updatedCellId })
 
@@ -340,7 +442,13 @@ test("string edit preserves CRLF notebook cell content around the replacement", 
   cell.document.eol = EndOfLine.CRLF
   cell.document.setText("alpha\r\nbeta\r\ngamma")
 
-  const result = await editNotebook({ filePath: notebookPath, cellId: cellFragment(2), editType: "edit", oldCode: "beta", newCode: "BETA" })
+  const result = await editNotebook({
+    filePath: notebookPath,
+    cellId: cellFragment(2),
+    editType: "edit",
+    oldCode: "beta",
+    newCode: "BETA",
+  })
 
   expect((result.data as Record<string, unknown>).afterSource).toBe("alpha\r\nBETA\r\ngamma")
   expect(cell.document.getText()).toBe("alpha\r\nBETA\r\ngamma")
@@ -418,7 +526,13 @@ test("restart can invoke a Jupyter command that is hidden from the public comman
 
 // #234：Shifted 行不能与 Inserted 行混淆——两者语义完全不同
 test("insert result identifies the inserted cell ID before reporting shifted cells", async () => {
-  const result = await editNotebook({ filePath: notebookPath, cellId: cellFragment(1), editType: "insert", newCode: "value = 1", language: "python" })
+  const result = await editNotebook({
+    filePath: notebookPath,
+    cellId: cellFragment(1),
+    editType: "insert",
+    newCode: "value = 1",
+    language: "python",
+  })
   const data = result.data as Record<string, unknown>
   const insertedCellId = data.insertedCellId
 
@@ -435,7 +549,13 @@ test("insert result identifies the inserted cell ID before reporting shifted cel
 test("string-match edit summary includes after-source preview for the next oldCode anchor", async () => {
   activeNotebook.cellAt(1).document.setText("line_a\nline_b\nline_c\nline_d")
   // 对 cell 2 做局部替换：line_b → line_B，cell 其余行保持不变
-  const result = await editNotebook({ filePath: notebookPath, cellId: cellFragment(2), editType: "edit", oldCode: "line_b", newCode: "line_B" })
+  const result = await editNotebook({
+    filePath: notebookPath,
+    cellId: cellFragment(2),
+    editType: "edit",
+    oldCode: "line_b",
+    newCode: "line_B",
+  })
   // after-source 预览必须包含 cell 的完整首行，让 agent 知道 cell 当前从哪行开始
   expect(result.summary).toContain("AfterSource")
   expect(result.summary).toContain("line_a")
@@ -445,7 +565,12 @@ test("string-match edit summary includes after-source preview for the next oldCo
 
 test("full-cell replace edit summary includes after-source preview of the new content", async () => {
   // full-cell replace（不传 oldCode）后 agent 需要知道 cell 的完整新内容
-  const result = await editNotebook({ filePath: notebookPath, cellId: cellFragment(2), editType: "edit", newCode: "new_alpha\nnew_beta\nnew_gamma" })
+  const result = await editNotebook({
+    filePath: notebookPath,
+    cellId: cellFragment(2),
+    editType: "edit",
+    newCode: "new_alpha\nnew_beta\nnew_gamma",
+  })
   expect(result.summary).toContain("AfterSource")
   expect(result.summary).toContain("new_alpha")
   expect(result.summary).toContain("new_gamma")
@@ -461,7 +586,12 @@ test("after-source preview is bounded to ten lines with a truncation indicator",
   // 超过 10 行的 cell 只显示前 10 行，避免 edit 摘要膨胀
   const lines = Array.from({ length: 15 }, (_, i) => `row_${i + 1}`)
   activeNotebook.cellAt(1).document.setText(lines.join("\n"))
-  const result = await editNotebook({ filePath: notebookPath, cellId: cellFragment(2), editType: "edit", newCode: "replaced_first\n" + lines.slice(1).join("\n") })
+  const result = await editNotebook({
+    filePath: notebookPath,
+    cellId: cellFragment(2),
+    editType: "edit",
+    newCode: "replaced_first\n" + lines.slice(1).join("\n"),
+  })
   expect(result.summary).toContain("AfterSource")
   expect(result.summary).toContain("row_10")
   // 第 11~15 行不应出现在预览中
@@ -477,14 +607,25 @@ test("after-source preview is bounded to ten lines with a truncation indicator",
 
 test("edit rejects non-string items in newCode array with a clear type error", async () => {
   await expect(
-    editNotebook({ filePath: notebookPath, cellId: cellFragment(2), editType: "edit", newCode: [{ key: "val" }] as unknown as string[] }),
+    editNotebook({
+      filePath: notebookPath,
+      cellId: cellFragment(2),
+      editType: "edit",
+      newCode: [{ key: "val" }] as unknown as string[],
+    }),
   ).rejects.toThrow("must be a string or an array of strings")
 })
 
 test("edit rejects non-string items in oldCode array before any cell mutation", async () => {
   // oldCode 含非字符串项时必须在 notebook 变更前抛出，防止静默 full-cell replace
   await expect(
-    editNotebook({ filePath: notebookPath, cellId: cellFragment(2), editType: "edit", oldCode: [1, 2] as unknown as string[], newCode: "print('safe')" }),
+    editNotebook({
+      filePath: notebookPath,
+      cellId: cellFragment(2),
+      editType: "edit",
+      oldCode: [1, 2] as unknown as string[],
+      newCode: "print('safe')",
+    }),
   ).rejects.toThrow("must be a string or an array of strings")
   // cell 内容未被修改
   expect(activeNotebook.cellAt(1).document.getText()).toBe("print('ready')")
@@ -493,7 +634,13 @@ test("edit rejects non-string items in oldCode array before any cell mutation", 
 test("edit still accepts empty-string oldCode for full-cell replacement", async () => {
   // oldCode: "" 是 falsy，历史上有 45 次成功使用此模式做 full-cell replacement；
   // 非字符串数组检测不能破坏此兼容路径
-  const result = await editNotebook({ filePath: notebookPath, cellId: cellFragment(2), editType: "edit", oldCode: "", newCode: "print('replaced')" })
+  const result = await editNotebook({
+    filePath: notebookPath,
+    cellId: cellFragment(2),
+    editType: "edit",
+    oldCode: "",
+    newCode: "print('replaced')",
+  })
   expect((result.data as Record<string, unknown>).applied).toBe(true)
   expect(activeNotebook.cellAt(1).document.getText()).toBe("print('replaced')")
 })
@@ -528,7 +675,10 @@ test("configure returns selection-requested when selectKernel does not resolve i
     isActive: true,
     packageJSON: { version: "test" },
     exports: { kernels: { getKernel: async () => undefined } },
-    async activate() { this.isActive = true; return this.exports },
+    async activate() {
+      this.isActive = true
+      return this.exports
+    },
   })
   // 验证真实15秒期限，不修改全局计时器而污染其它处理器测试。
   const result = await notebookEnv({ filePath: notebookPath, operation: "configure" })
@@ -546,16 +696,31 @@ test("configure returns configured when selectKernel immediately accepts and ker
     packageJSON: { version: "test" },
     exports: {
       kernels: {
-        getKernel: async () => executedCommands.includes("notebook.selectKernel") ? ({
-          language: "python",
-          status: "idle",
-          async *executeCode(_code: string, _token: unknown) {
-            yield { items: [{ mime: "text/plain", data: new TextEncoder().encode("__OPENCODE_RUNTIME_PROBE_START__\n{\"language\":\"python\"}\n__OPENCODE_RUNTIME_PROBE_END__") }] }
-          },
-        }) : undefined,
+        getKernel: async () =>
+          executedCommands.includes("notebook.selectKernel")
+            ? {
+                language: "python",
+                status: "idle",
+                async *executeCode(_code: string, _token: unknown) {
+                  yield {
+                    items: [
+                      {
+                        mime: "text/plain",
+                        data: new TextEncoder().encode(
+                          '__OPENCODE_RUNTIME_PROBE_START__\n{"language":"python"}\n__OPENCODE_RUNTIME_PROBE_END__',
+                        ),
+                      },
+                    ],
+                  }
+                },
+              }
+            : undefined,
       },
     },
-    async activate() { this.isActive = true; return this.exports },
+    async activate() {
+      this.isActive = true
+      return this.exports
+    },
   })
 
   const result = await notebookEnv({ filePath: notebookPath, operation: "configure" })
@@ -579,7 +744,10 @@ test("env stop calls jupyter.interruptkernel command", async () => {
     isActive: true,
     packageJSON: { version: "test" },
     exports: {},
-    async activate() { this.isActive = true; return this.exports },
+    async activate() {
+      this.isActive = true
+      return this.exports
+    },
   })
 
   const result = await notebookEnv({ filePath: notebookPath, operation: "stop", reason: "中断超时 cell" })
@@ -601,7 +769,10 @@ test("env stop returns failed when interrupt command is not registered", async (
     isActive: true,
     packageJSON: { version: "test" },
     exports: {},
-    async activate() { this.isActive = true; return this.exports },
+    async activate() {
+      this.isActive = true
+      return this.exports
+    },
   })
 
   const result = await notebookEnv({ filePath: notebookPath, operation: "stop" })
@@ -651,7 +822,10 @@ test("run permits native cold start without metadata or an active kernel", async
     isActive: true,
     packageJSON: { version: "test" },
     exports: { kernels: { getKernel: async () => undefined } },
-    async activate() { this.isActive = true; return this.exports },
+    async activate() {
+      this.isActive = true
+      return this.exports
+    },
   })
 
   const result = await runNotebook({ filePath: notebookPath, cellId: cellFragment(2), timeoutMs: 1_000 })
@@ -672,7 +846,10 @@ test("run proceeds when kernel not started but kernelspec metadata exists", asyn
     isActive: true,
     packageJSON: { version: "test" },
     exports: { kernels: { getKernel: async () => undefined } },
-    async activate() { this.isActive = true; return this.exports },
+    async activate() {
+      this.isActive = true
+      return this.exports
+    },
   })
 
   const result = await runNotebook({ filePath: notebookPath, cellId: cellFragment(2), timeoutMs: 1_000 })
@@ -691,8 +868,12 @@ test("run deadline includes a command that never resolves", async () => {
   // 未返回的原生命令不能遮住已经到期的cell等待器。
   vscodeMock.commands.executeCommand = () => new Promise(() => {})
   try {
-    expect((await runNotebook({ filePath: notebookPath, cellId: cellFragment(2), timeoutMs: 20 })).data.completed).toBe(false)
-  } finally { vscodeMock.commands.executeCommand = original }
+    expect((await runNotebook({ filePath: notebookPath, cellId: cellFragment(2), timeoutMs: 20 })).data.completed).toBe(
+      false,
+    )
+  } finally {
+    vscodeMock.commands.executeCommand = original
+  }
 }, 1000)
 
 test("run timeout message guides agent to env stop and env info", async () => {
@@ -725,9 +906,9 @@ test("run execute-command-unavailable error includes configure guidance", async 
     all: ["notebook.selectKernel"],
   }
 
-  await expect(
-    runNotebook({ filePath: notebookPath, cellId: cellFragment(2), timeoutMs: 1_000 }),
-  ).rejects.toThrow("configure")
+  await expect(runNotebook({ filePath: notebookPath, cellId: cellFragment(2), timeoutMs: 1_000 })).rejects.toThrow(
+    "configure",
+  )
 })
 
 // ---------------------------------------------------------------------------
@@ -743,7 +924,10 @@ test("restart verifies kernel accessibility after restart", async () => {
     isActive: true,
     packageJSON: { version: "test" },
     exports: { kernels: { getKernel: async () => undefined } },
-    async activate() { this.isActive = true; return this.exports },
+    async activate() {
+      this.isActive = true
+      return this.exports
+    },
   })
 
   const result = await notebookEnv({ filePath: notebookPath, operation: "restart" })
@@ -759,9 +943,7 @@ test("restart verifies kernel accessibility after restart", async () => {
 // ---------------------------------------------------------------------------
 
 test("resolveNotebook error guides to env create for missing file", async () => {
-  await expect(
-    notebookSummary("/tmp/nonexistent_notebook_file.ipynb"),
-  ).rejects.toThrow("create")
+  await expect(notebookSummary("/tmp/nonexistent_notebook_file.ipynb")).rejects.toThrow("create")
 })
 
 async function expectHeader(result: { summary: string }, label: string) {
@@ -805,13 +987,21 @@ function createNotebook() {
   }
   notebook.cells = [
     createCell(notebook, NotebookCellKind.Markup, "markdown", "# Demo\n\nIntro"),
-    createCell(notebook, NotebookCellKind.Code, "python", "print('ready')", [{ mime: "application/vnd.code.notebook.stdout", text: "ready\n" }]),
+    createCell(notebook, NotebookCellKind.Code, "python", "print('ready')", [
+      { mime: "application/vnd.code.notebook.stdout", text: "ready\n" },
+    ]),
   ]
   updateIndexes(notebook)
   return notebook
 }
 
-function createCell(notebook: ReturnType<typeof createNotebook>, kind: number, languageId: string, text: string, outputs: Array<{ mime: string; text: string }> = []): NotebookCell {
+function createCell(
+  notebook: ReturnType<typeof createNotebook>,
+  kind: number,
+  languageId: string,
+  text: string,
+  outputs: Array<{ mime: string; text: string }> = [],
+): NotebookCell {
   const fragment = `cell-${++cellSequence}`
   const document = createDocument(`${notebookPath}#${fragment}`, fragment, languageId, text)
   return {
@@ -825,7 +1015,9 @@ function createCell(notebook: ReturnType<typeof createNotebook>, kind: number, l
       items: [{ mime: output.mime, data: new TextEncoder().encode(output.text) }],
       outputIndex,
     })),
-    executionSummary: outputs.length ? { executionOrder: ++executionOrder, success: true, timing: { startTime: 1, endTime: 2 } } : undefined,
+    executionSummary: outputs.length
+      ? { executionOrder: ++executionOrder, success: true, timing: { startTime: 1, endTime: 2 } }
+      : undefined,
   }
 }
 
@@ -863,16 +1055,27 @@ function createUri(value: string, fragment = ""): UriLike {
 function applyEdit(entries: Array<Record<string, unknown>>) {
   for (const entry of entries) {
     if (entry.type === "notebook") {
-      for (const edit of entry.edits as Array<{ type: string; range: { start: number; end: number }; cells?: Array<{ kind: number; value: string; languageId: string }> }>) {
+      for (const edit of entry.edits as Array<{
+        type: string
+        range: { start: number; end: number }
+        cells?: Array<{ kind: number; value: string; languageId: string }>
+      }>) {
         if (edit.type === "delete") activeNotebook.cells.splice(edit.range.start, edit.range.end - edit.range.start)
-        if (edit.type === "replace") activeNotebook.cells.splice(edit.range.start, edit.range.end - edit.range.start, ...(edit.cells ?? []).map((cell) => createCell(activeNotebook, cell.kind, cell.languageId, cell.value)))
+        if (edit.type === "replace")
+          activeNotebook.cells.splice(
+            edit.range.start,
+            edit.range.end - edit.range.start,
+            ...(edit.cells ?? []).map((cell) => createCell(activeNotebook, cell.kind, cell.languageId, cell.value)),
+          )
       }
       activeNotebook.version++
       activeNotebook.isDirty = true
       updateIndexes(activeNotebook)
     }
     if (entry.type === "text") {
-      const document = activeNotebook.cells.map((cell) => cell.document).find((item) => item.uri.toString() === (entry.uri as UriLike).toString())
+      const document = activeNotebook.cells
+        .map((cell) => cell.document)
+        .find((item) => item.uri.toString() === (entry.uri as UriLike).toString())
       document?.setText(String(entry.text))
       for (const listener of textListeners) if (document) listener({ document })
     }
@@ -892,18 +1095,27 @@ function executeSelectedCell() {
   cell.executionSummary = { executionOrder: ++executionOrder, success: true, timing: { startTime: 10, endTime: 12 } }
   // 原生执行摘要事件属于新文档版本，不能用旧版本事件绕过运行等待器。
   activeNotebook.version++
-  for (const listener of notebookListeners) listener({ notebook: activeNotebook, cellChanges: [{ cell, executionSummary: cell.executionSummary }] })
+  for (const listener of notebookListeners)
+    listener({ notebook: activeNotebook, cellChanges: [{ cell, executionSummary: cell.executionSummary }] })
 }
 
 type UriLike = { fsPath: string; fragment: string; scheme: string; toString(): string }
 type ToolResult = { summary: string; data: Record<string, unknown> }
-type NotebookEditor = { notebook: typeof activeNotebook; selection: { start: number; end: number }; revealRange(range: { start: number; end: number }): void }
+type NotebookEditor = {
+  notebook: typeof activeNotebook
+  selection: { start: number; end: number }
+  revealRange(range: { start: number; end: number }): void
+}
 type NotebookCell = {
   index: number
   notebook: ReturnType<typeof createNotebook>
   kind: number
   document: ReturnType<typeof createDocument>
   metadata: Record<string, unknown>
-  outputs: Array<{ metadata: Record<string, unknown>; items: Array<{ mime: string; data: Uint8Array }>; outputIndex: number }>
+  outputs: Array<{
+    metadata: Record<string, unknown>
+    items: Array<{ mime: string; data: Uint8Array }>
+    outputIndex: number
+  }>
   executionSummary?: { executionOrder?: number; success?: boolean; timing?: { startTime: number; endTime: number } }
 }

@@ -136,22 +136,28 @@ export const Info = Schema.Struct({
   tool_output: Schema.optional(
     Schema.Struct({
       // 数值分支携带缺省说明，SDK/OpenAPI 生成时不因 optional 剥离而丢失。
-      max_lines: Schema.optional(PositiveInt.annotate({
-        description: "Maximum lines of tool output before it is truncated and saved to disk (default: 1000)",
-      })),
+      max_lines: Schema.optional(
+        PositiveInt.annotate({
+          description: "Maximum lines of tool output before it is truncated and saved to disk (default: 1000)",
+        }),
+      ),
       // 默认说明绑定数值分支，公开 OpenAPI 剥离 optional 时仍保留生成文档。
-      max_bytes: Schema.optional(PositiveInt.annotate({
-        description: "Maximum bytes of tool output before it is truncated and saved to disk (default: 16384)",
-      })),
+      max_bytes: Schema.optional(
+        PositiveInt.annotate({
+          description: "Maximum bytes of tool output before it is truncated and saved to disk (default: 16384)",
+        }),
+      ),
       // V1 迁移透传此字段；公开 OpenAPI 会剥离 optional 外壳，说明须绑定保留的 Boolean 分支。
-      bash_compression: Schema.optional(Schema.Boolean.annotate({
-        description: "Enable Bash output compression before truncation. Defaults to true. When enabled, repeated lines, repeated blocks, progress redraws, and obvious inline repeated patterns may be compacted while preserving the full raw output on disk.",
-      })),
+      bash_compression: Schema.optional(
+        Schema.Boolean.annotate({
+          description:
+            "Enable Bash output compression before truncation. Defaults to true. When enabled, repeated lines, repeated blocks, progress redraws, and obvious inline repeated patterns may be compacted while preserving the full raw output on disk.",
+        }),
+      ),
       // #128：shell 输出文本编码（auto 探测或显式锁定）
-      shell_encoding: Schema.optional(
-        Schema.Literals(["auto", "utf-8", "gb18030", "utf-16le", "utf-16be"]),
-      ).annotate({
-        description: "Shell stdout/stderr text encoding. auto detects; set explicitly to lock the decoder for the whole stream.",
+      shell_encoding: Schema.optional(Schema.Literals(["auto", "utf-8", "gb18030", "utf-16le", "utf-16be"])).annotate({
+        description:
+          "Shell stdout/stderr text encoding. auto detects; set explicitly to lock the decoder for the whole stream.",
       }),
     }),
   ).annotate({

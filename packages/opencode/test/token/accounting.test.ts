@@ -46,11 +46,7 @@ describe("tokenAccounting", () => {
       "3": [stepFinishPart("3", 2_000)],
     }
 
-    const acc = tokenAccounting(
-      messages as never,
-      (id) => parts[id] ?? [],
-      200_000,
-    )
+    const acc = tokenAccounting(messages as never, (id) => parts[id] ?? [], 200_000)
 
     // request.totalInput 应累计 a1(1000)+a2(2000) 的 confirmed input，而非 0
     expect(acc.request.totalInput).toBe(3_000)
@@ -82,16 +78,28 @@ describe("tokenAccounting", () => {
     ]
     const parts = {
       "old-assistant": [stepFinishPart("old-assistant", 100, 200)],
-      "new-assistant": [stepFinishPart("new-assistant", 300, 900), { type: "text", text: "streaming output ".repeat(64) }],
+      "new-assistant": [
+        stepFinishPart("new-assistant", 300, 900),
+        { type: "text", text: "streaming output ".repeat(64) },
+      ],
     }
 
-    const acc = tokenAccounting(messages as never, (id) => parts[id as keyof typeof parts] ?? [], 200_000, undefined, "old-user")
+    const acc = tokenAccounting(
+      messages as never,
+      (id) => parts[id as keyof typeof parts] ?? [],
+      200_000,
+      undefined,
+      "old-user",
+    )
 
     // 200 与 900 的差异直接对应两个可达 assistant parent 的归属边界。
     expect(acc.request.totalOutput).toBe(200)
     // 实际增长的未完成 tail 比两个静态 finish 更能暴露全局 latest 泄漏。
     parts["new-assistant"].push({ type: "text", text: "more streaming output ".repeat(64) })
-    expect(tokenAccounting(messages as never, (id) => parts[id as keyof typeof parts] ?? [], 200_000, undefined, "old-user").request.totalOutput).toBe(200)
+    expect(
+      tokenAccounting(messages as never, (id) => parts[id as keyof typeof parts] ?? [], 200_000, undefined, "old-user")
+        .request.totalOutput,
+    ).toBe(200)
   })
 
   // #490：无 step-finish 的历史持久化 message 经 fallback 也必须保留纯 input。
@@ -110,7 +118,13 @@ describe("tokenAccounting", () => {
       "current-assistant": [stepFinishPart("current-assistant", 300, 900)],
     }
 
-    const acc = tokenAccounting(messages as never, (id) => parts[id as keyof typeof parts] ?? [], 200_000, undefined, "legacy-user")
+    const acc = tokenAccounting(
+      messages as never,
+      (id) => parts[id as keyof typeof parts] ?? [],
+      200_000,
+      undefined,
+      "legacy-user",
+    )
 
     // cache read/write 留在 fixture 里，证明 fallback 不能通过 totalInput 间接冒充 pure input。
     expect(acc.request.totalInputPure).toBe(77)
@@ -119,8 +133,13 @@ describe("tokenAccounting", () => {
 
   test("retains durable session totals outside the visible message window", () => {
     const acc = tokenAccounting([], () => [], undefined, {
-      session: { tokens: { input: 12_300, output: 1_000, reasoning: 40, cache: { read: 20, write: 5 } }, cost: 0.01, request: undefined },
-      last: undefined, parts: [],
+      session: {
+        tokens: { input: 12_300, output: 1_000, reasoning: 40, cache: { read: 20, write: 5 } },
+        cost: 0.01,
+        request: undefined,
+      },
+      last: undefined,
+      parts: [],
     })
     // 空分页不能把持久账本抹成零；退出记录仍需要完整 input、output、reasoning 与 cost。
     expect(acc.session).toMatchObject({ input: 12_300, output: 1_000, reasoning: 40, cost: 0.01 })

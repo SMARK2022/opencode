@@ -392,7 +392,8 @@ export default {
           \`time_created\` integer NOT NULL,
           \`time_updated\` integer NOT NULL
         );
-      `)
+      `,
+      )
       yield* tx.run(`CREATE INDEX \`cold_storage_ref_count_idx\` ON \`cold_storage\` (\`ref_count\`);`)
       yield* tx.run(`CREATE INDEX \`message_cold_ref_idx\` ON \`message\` (\`cold_ref\`);`)
       // #0500：summary payload cache 的 RESTRICT 引用索引——expand/cleanup 反算共用。

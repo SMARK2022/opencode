@@ -104,7 +104,10 @@ const StreamClosed = undefined as never
 function hiddenAssistant(id: string) {
   // #553：SDK wire 类型未声明 hidden——运行时对象携带；内层 info 以原类型收窄后再组装事件。
   const event = assistant(id)
-  const info = { ...event.properties.info, hidden: { time: 1, reason: "undo" as const } } as unknown as typeof event.properties.info
+  const info = {
+    ...event.properties.info,
+    hidden: { time: 1, reason: "undo" as const },
+  } as unknown as typeof event.properties.info
   return { ...event, properties: { ...event.properties, info } }
 }
 function feed<T, R = never>(returnValue: R = StreamClosed) {

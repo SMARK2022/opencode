@@ -341,7 +341,11 @@ export function applyDirectoryEvent(input: {
           if (found.found) {
             const existing = existingParts[found.index]
             // pending 阶段：本地 text 更长时跳过覆盖（保留 accum_delta 和 part.text）
-            if (existing.type === part.type && (existing as { text: string }).text.length > (part as { text: string }).text.length) break
+            if (
+              existing.type === part.type &&
+              (existing as { text: string }).text.length > (part as { text: string }).text.length
+            )
+              break
           }
         }
       }
@@ -410,12 +414,15 @@ export function applyDirectoryEvent(input: {
       if (!result.found) break
       // V1 工具参数与 text accumulator 分离，不能把 raw 片段写进 part 顶层或文字恢复缓存。
       if (props.field === "raw") {
-        input.setStore("part", props.messageID, produce((draft) => {
-          const part = draft[result.index]
-          // 状态已经解析或终结时忽略迟到参数，保留当前 input 与工具终态。
-          if (part.type === "tool" && part.state.status === "pending")
-            part.state.raw += props.delta
-        }))
+        input.setStore(
+          "part",
+          props.messageID,
+          produce((draft) => {
+            const part = draft[result.index]
+            // 状态已经解析或终结时忽略迟到参数，保留当前 input 与工具终态。
+            if (part.type === "tool" && part.state.status === "pending") part.state.raw += props.delta
+          }),
+        )
         break
       }
 

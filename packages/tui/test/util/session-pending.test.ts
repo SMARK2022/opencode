@@ -19,7 +19,12 @@ const user = (id: string, created: number): UserMessage => ({
   model: { providerID: "provider", modelID: "model" },
 })
 
-const assistant = (id: string, completed?: number, parentID = "msg_user", finish?: AssistantMessage["finish"]): AssistantMessage => ({
+const assistant = (
+  id: string,
+  completed?: number,
+  parentID = "msg_user",
+  finish?: AssistantMessage["finish"],
+): AssistantMessage => ({
   id,
   sessionID: "ses_test",
   role: "assistant",
@@ -91,11 +96,7 @@ describe("session pending helpers", () => {
     // 已完成 assistant 之后再落入 queued orphan user（例如 TaskTool 后台注入 noReply prompt
     // 在父会话 busy 期间持久化的 user message）：不应按 orphan user 重新起算耗时，
     // 而应沿用已完成 assistant 的终态——stale busy 下耗时归零，与 terminal-finish 语义一致。
-    const messages: Message[] = [
-      user("first", 1_000),
-      assistant("done", 2_000, "first", "stop"),
-      user("latest", 5_000),
-    ]
+    const messages: Message[] = [user("first", 1_000), assistant("done", 2_000, "first", "stop"), user("latest", 5_000)]
     expect(activeTurnDuration(messages, { type: "busy" }, 7_000)).toBe(0)
   })
 
@@ -120,7 +121,9 @@ describe("session pending helpers", () => {
   test("keeps active duration running while the session is retrying", () => {
     const messages: Message[] = [user("msg_user", 1_000), assistant("open", undefined, "msg_user")]
 
-    expect(activeTurnDuration(messages, { type: "retry", attempt: 2, message: "quota", next: 6_000 }, 4_500)).toBe(3_500)
+    expect(activeTurnDuration(messages, { type: "retry", attempt: 2, message: "quota", next: 6_000 }, 4_500)).toBe(
+      3_500,
+    )
   })
 
   // stale busy：status 未回落但 assistant 已 terminal——不应显示运行耗时
@@ -142,12 +145,7 @@ describe("session pending helpers", () => {
 // 和左下角计时器都会在 orphan 窗口期内归零或漂移到错误的 user 时间戳。
 describe("activeTurnPair", () => {
   test("returns the latest paired user and assistant when all turns are paired", () => {
-    const messages: Message[] = [
-      user("u1", 1),
-      assistant("a2", 2, "u1"),
-      user("u3", 3),
-      assistant("a4", 4, "u3"),
-    ]
+    const messages: Message[] = [user("u1", 1), assistant("a2", 2, "u1"), user("u3", 3), assistant("a4", 4, "u3")]
 
     const pair = activeTurnPair(messages)
     expect(pair?.user.id).toBe("u3")
@@ -157,11 +155,7 @@ describe("activeTurnPair", () => {
   test("skips queued orphan user and returns the latest assistant's parent pair", () => {
     // orphan user3 无 assistant 子节点：应跳过它，回退到最新 assistant 的 parent user，
     // 让 widget 继续展示正在运行/已完成的 A 轮次，而不是 orphan B 的空数据。
-    const messages: Message[] = [
-      user("u1", 1),
-      assistant("a2", 2, "u1", "stop"),
-      user("u3", 3),
-    ]
+    const messages: Message[] = [user("u1", 1), assistant("a2", 2, "u1", "stop"), user("u3", 3)]
 
     const pair = activeTurnPair(messages)
     expect(pair?.user.id).toBe("u1")

@@ -40,7 +40,12 @@ export const make = Effect.gen(function* () {
       const bytes = Buffer.byteLength(content.content, "utf-8")
       const withinLimits = width <= limits.maxWidth && height <= limits.maxHeight && bytes <= limits.maxBase64Bytes
       // 两代共用默认策略：仅原生支持的MIME保持原编码，BMP或未知声明仍须规整。
-      if (withinLimits && !isBmp(buffer) && ["image/jpeg", "image/png", "image/gif", "image/webp"].includes(content.mime)) return content
+      if (
+        withinLimits &&
+        !isBmp(buffer) &&
+        ["image/jpeg", "image/png", "image/gif", "image/webp"].includes(content.mime)
+      )
+        return content
       if (!limits.autoResize && !withinLimits)
         return yield* new SizeError({
           resource,

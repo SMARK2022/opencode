@@ -66,7 +66,10 @@ const reviewedShellEnv = Layer.mergeAll(
     ]),
     [
       // #203：noop bootstrap 阻止测试环境启动完整实例生命周期
-      [InstanceStore.bootstrapNode, Layer.succeed(InstanceBootstrap.Service, InstanceBootstrap.Service.of({ run: Effect.void }))],
+      [
+        InstanceStore.bootstrapNode,
+        Layer.succeed(InstanceBootstrap.Service, InstanceBootstrap.Service.of({ run: Effect.void })),
+      ],
       [
         PermissionReviewer.node,
         Layer.succeed(
@@ -185,7 +188,7 @@ const glob = (p: string) =>
   process.platform === "win32" ? Filesystem.normalizePathPattern(p) : p.replaceAll("\\", "/")
 
 const forms = (dir: string) => {
-    // #179：ERROR 节点用例主要覆盖 Windows PS
+  // #179：ERROR 节点用例主要覆盖 Windows PS
   if (process.platform !== "win32") return [dir]
   const full = Filesystem.normalizePath(dir)
   const slash = full.replaceAll("\\", "/")
@@ -365,72 +368,68 @@ describe("tool.shell", () => {
     60_000,
   )
 
-  it.live(
-    "does not repeat a durable version when close overlaps publication",
-    () =>
-      Effect.gen(function* () {
-        const first = yield* Deferred.make<void>()
-        const second = yield* Deferred.make<void>()
-        const release = yield* Deferred.make<void>()
-        const versions: number[] = []
-        const progress = yield* ToolProgress.make<{ output: string }>({
-          live: () => Effect.void,
-          durable: (metadata) =>
-            Effect.gen(function* () {
-              // 先记录版本再阻塞，模拟 SQLite 已提交但 publication 尚未返回的真实边界。
-              versions.push(metadata.progressVersion)
-              if (metadata.progressVersion === 1) yield* Deferred.succeed(first, undefined)
-              if (metadata.progressVersion !== 2) return
-              yield* Deferred.succeed(second, undefined)
-              yield* Deferred.await(release)
-            }),
-        })
-        yield* progress.update({ output: "a" })
-        yield* Deferred.await(first).pipe(Effect.timeout("2 seconds"))
-        yield* Effect.sleep("1100 millis")
-        yield* progress.update({ output: "ab" })
-        yield* Deferred.await(second).pipe(Effect.timeout("2 seconds"))
-        // close 必须与第二次 publication 重叠；短暂窗口只放大已证实的生命周期竞态。
-        const closing = yield* progress.close().pipe(Effect.forkScoped)
-        yield* Effect.sleep("20 millis")
-        yield* Deferred.succeed(release, undefined)
-        yield* Fiber.join(closing)
-        // 每个 version 对应一次 durable Part transaction，重复值就是额外磁盘写入。
-        expect(versions).toEqual([1, 2])
-      }),
+  it.live("does not repeat a durable version when close overlaps publication", () =>
+    Effect.gen(function* () {
+      const first = yield* Deferred.make<void>()
+      const second = yield* Deferred.make<void>()
+      const release = yield* Deferred.make<void>()
+      const versions: number[] = []
+      const progress = yield* ToolProgress.make<{ output: string }>({
+        live: () => Effect.void,
+        durable: (metadata) =>
+          Effect.gen(function* () {
+            // 先记录版本再阻塞，模拟 SQLite 已提交但 publication 尚未返回的真实边界。
+            versions.push(metadata.progressVersion)
+            if (metadata.progressVersion === 1) yield* Deferred.succeed(first, undefined)
+            if (metadata.progressVersion !== 2) return
+            yield* Deferred.succeed(second, undefined)
+            yield* Deferred.await(release)
+          }),
+      })
+      yield* progress.update({ output: "a" })
+      yield* Deferred.await(first).pipe(Effect.timeout("2 seconds"))
+      yield* Effect.sleep("1100 millis")
+      yield* progress.update({ output: "ab" })
+      yield* Deferred.await(second).pipe(Effect.timeout("2 seconds"))
+      // close 必须与第二次 publication 重叠；短暂窗口只放大已证实的生命周期竞态。
+      const closing = yield* progress.close().pipe(Effect.forkScoped)
+      yield* Effect.sleep("20 millis")
+      yield* Deferred.succeed(release, undefined)
+      yield* Fiber.join(closing)
+      // 每个 version 对应一次 durable Part transaction，重复值就是额外磁盘写入。
+      expect(versions).toEqual([1, 2])
+    }),
   )
 
-  it.live(
-    "keeps live progress moving while durable publication is delayed",
-    () =>
-      Effect.gen(function* () {
-        const durableStarted = yield* Deferred.make<void>()
-        const liveTwo = yield* Deferred.make<void>()
-        const release = yield* Deferred.make<void>()
-        const progress = yield* ToolProgress.make<{ output: string }>({
-          live: (metadata) =>
-            metadata.progressVersion === 2 ? Deferred.succeed(liveTwo, undefined).pipe(Effect.asVoid) : Effect.void,
-          durable: (metadata) =>
-            metadata.progressVersion === 1
-              ? Deferred.succeed(durableStarted, undefined).pipe(Effect.andThen(Deferred.await(release)))
-              : Effect.void,
-        })
+  it.live("keeps live progress moving while durable publication is delayed", () =>
+    Effect.gen(function* () {
+      const durableStarted = yield* Deferred.make<void>()
+      const liveTwo = yield* Deferred.make<void>()
+      const release = yield* Deferred.make<void>()
+      const progress = yield* ToolProgress.make<{ output: string }>({
+        live: (metadata) =>
+          metadata.progressVersion === 2 ? Deferred.succeed(liveTwo, undefined).pipe(Effect.asVoid) : Effect.void,
+        durable: (metadata) =>
+          metadata.progressVersion === 1
+            ? Deferred.succeed(durableStarted, undefined).pipe(Effect.andThen(Deferred.await(release)))
+            : Effect.void,
+      })
 
-        yield* progress.update({ output: "a" })
-        yield* Deferred.await(durableStarted).pipe(Effect.timeout("2 seconds"))
-        // 这里只推进真实 50ms cadence；durableStarted 才是 worker 已到达阻塞 seam 的 readiness。
-        yield* Effect.sleep("60 millis")
-        yield* progress.update({ output: "ab" })
-        yield* Deferred.await(liveTwo).pipe(
-          Effect.timeoutOrElse({
-            duration: "500 millis",
-            orElse: () => Effect.fail(new Error("live v2 waited for delayed durable publication")),
-          }),
-          // red 或 green 都先释放 adapter，避免失败测试把 scope finalizer 留在 blocked close。
-          Effect.ensuring(Deferred.succeed(release, undefined)),
-        )
-        yield* progress.close()
-      }),
+      yield* progress.update({ output: "a" })
+      yield* Deferred.await(durableStarted).pipe(Effect.timeout("2 seconds"))
+      // 这里只推进真实 50ms cadence；durableStarted 才是 worker 已到达阻塞 seam 的 readiness。
+      yield* Effect.sleep("60 millis")
+      yield* progress.update({ output: "ab" })
+      yield* Deferred.await(liveTwo).pipe(
+        Effect.timeoutOrElse({
+          duration: "500 millis",
+          orElse: () => Effect.fail(new Error("live v2 waited for delayed durable publication")),
+        }),
+        // red 或 green 都先释放 adapter，避免失败测试把 scope finalizer 留在 blocked close。
+        Effect.ensuring(Deferred.succeed(release, undefined)),
+      )
+      yield* progress.close()
+    }),
   )
 
   // #155：BEL 测试只注册一次，勿放进 each() 避免按 shell 组合重复
@@ -469,36 +468,37 @@ describe("tool.shell", () => {
     ),
   )
 
-  each("basic", (item) =>
-    runIn(
-      projectRoot,
-      Effect.gen(function* () {
-        const result = yield* run({
-          // #590：快退 echo 的输出保真由 spawner 急切缓冲保证（INV-01），无需 sleep 保活补丁。
-          command: "echo test",
-        })
-        expect(result.metadata.exit).toBe(0)
-        expect(result.metadata.output).toContain("test")
-        if (process.platform !== "win32" || !PS.has(item.label)) return
-        // 在既有每-shell 实进程测试中验证中文、单双引号、表格与 native 最后退出码。
-        const command = [
-          `Write-Output '桌面 大学文档 毕业设计 压缩感知 ''单引号'' "双引号"'`,
-          `[pscustomobject]@{ Name = '中文表格' } | Format-Table -HideTableHeaders`,
-          `[Console]::Error.Write("中文错误")`,
-          `& '${process.execPath.replaceAll("'", "''")}' -e 'process.exit(7)' # 尾注释`,
-        ].join("\n")
-        const requests: Array<Omit<PermissionV1.Request, "id" | "sessionID" | "tool">> = []
-        const encoded = yield* run({ command, compress_output: false }, capture(requests))
-        expect(encoded.metadata.exit).toBe(7)
-        for (const text of ["桌面 大学文档 毕业设计 压缩感知", "'单引号'", '"双引号"', "中文表格", "中文错误"]) {
-          expect(encoded.output).toContain(text)
-        }
-        expect(encoded.output).not.toContain("\uFFFD")
-        expect(requests.some((request) => request.metadata.command === command)).toBe(true)
-        expect((yield* run({ command: "Write-Output '中文'; exit 9" })).metadata.exit).toBe(9)
-
-      }),
-    ),
+  each(
+    "basic",
+    (item) =>
+      runIn(
+        projectRoot,
+        Effect.gen(function* () {
+          const result = yield* run({
+            // #590：快退 echo 的输出保真由 spawner 急切缓冲保证（INV-01），无需 sleep 保活补丁。
+            command: "echo test",
+          })
+          expect(result.metadata.exit).toBe(0)
+          expect(result.metadata.output).toContain("test")
+          if (process.platform !== "win32" || !PS.has(item.label)) return
+          // 在既有每-shell 实进程测试中验证中文、单双引号、表格与 native 最后退出码。
+          const command = [
+            `Write-Output '桌面 大学文档 毕业设计 压缩感知 ''单引号'' "双引号"'`,
+            `[pscustomobject]@{ Name = '中文表格' } | Format-Table -HideTableHeaders`,
+            `[Console]::Error.Write("中文错误")`,
+            `& '${process.execPath.replaceAll("'", "''")}' -e 'process.exit(7)' # 尾注释`,
+          ].join("\n")
+          const requests: Array<Omit<PermissionV1.Request, "id" | "sessionID" | "tool">> = []
+          const encoded = yield* run({ command, compress_output: false }, capture(requests))
+          expect(encoded.metadata.exit).toBe(7)
+          for (const text of ["桌面 大学文档 毕业设计 压缩感知", "'单引号'", '"双引号"', "中文表格", "中文错误"]) {
+            expect(encoded.output).toContain(text)
+          }
+          expect(encoded.output).not.toContain("\uFFFD")
+          expect(requests.some((request) => request.metadata.command === command)).toBe(true)
+          expect((yield* run({ command: "Write-Output '中文'; exit 9" })).metadata.exit).toBe(9)
+        }),
+      ),
     60_000,
   )
 
@@ -506,19 +506,21 @@ describe("tool.shell", () => {
   // 必须验证含引号、管道的命令仍被 shell 正确解析。
   // 仅在非 Windows 平台运行：tr 和单引号语义是 POSIX shell 专属。
   if (process.platform !== "win32") {
-    each("handles commands with quotes and shell metacharacters", () =>
-      runIn(
-        projectRoot,
-        Effect.gen(function* () {
-          // 单引号内的内容不应被 shell 二次展开；管道要求 shell 进程而非直接 exec；
-          // #590：输出保真由 spawner 急切缓冲保证（INV-01），无需 sleep 保活补丁。
-          const result = yield* run({
-            command: "echo 'hello world' | tr a-z A-Z",
-          })
-          expect(result.metadata.exit).toBe(0)
-          expect(result.metadata.output).toContain("HELLO WORLD")
-        }),
-      ),
+    each(
+      "handles commands with quotes and shell metacharacters",
+      () =>
+        runIn(
+          projectRoot,
+          Effect.gen(function* () {
+            // 单引号内的内容不应被 shell 二次展开；管道要求 shell 进程而非直接 exec；
+            // #590：输出保真由 spawner 急切缓冲保证（INV-01），无需 sleep 保活补丁。
+            const result = yield* run({
+              command: "echo 'hello world' | tr a-z A-Z",
+            })
+            expect(result.metadata.exit).toBe(0)
+            expect(result.metadata.output).toContain("HELLO WORLD")
+          }),
+        ),
       60_000,
     )
   }
@@ -577,36 +579,48 @@ describe("tool.shell", () => {
   )
 })
 
-it.live("guards Windows command heads without rejecting literal arguments", () => Effect.gen(function* () {
-  // 平台无关地验证实际共用 renderer；5.1/7+/cmd 的变量与链式规则不能混用。
-  expect(Shell.guidance("powershell", "win32")).toContain("do NOT use && or ||")
-  expect(Shell.guidance("pwsh", "win32")).toContain("PowerShell 7+: && and || are supported")
-  expect(Shell.guidance("cmd", "win32")).toContain("%NAME%")
-  expect(Shell.guidance("bash", "win32")).not.toContain("Do NOT use Unix text utilities")
-  if (process.platform !== "win32") return
-  for (const item of shells.filter((item) => PS.has(item.label) || item.label === "cmd")) {
-    // 显式配置所测 shell，环境默认值不能冒充本用例的执行配置。
-    const tmp = yield* tmpdirScoped({ config: { shell: item.shell } })
-    yield* runIn(tmp, Effect.gen(function* () {
-      const tool = yield* initShell()
-      expect(tool.description).toContain("captured output is decoded as UTF-8")
-      const requests: Array<Omit<PermissionV1.Request, "id" | "sessionID" | "tool">> = []
-      for (const command of ["head -n 1 missing", "grep.exe needle missing", item.label === "cmd" ? "ls" : "find ."]) {
-        // 真正命令头在执行与权限之前被阻止，不调用外部 Unix 程序来证明失败。
-        const error = yield* fail({ command }, capture(requests))
-        expect(error.message).toMatch(/Unix utility|instead of ls|ambiguous/)
-      }
-      expect(requests).toEqual([])
-      // 同样的文字作为参数必须正常执行，阻止基于整串关键词的假 guard。
-      const result = yield* tool.execute({
-        command: item.label === "cmd" ? "echo head grep" : "Write-Output 'head grep'",
-        description: "Prints literal words without invoking utilities",
-      }, ctx)
-      expect(result.metadata.exit).toBe(0)
-      expect(result.output).toContain("head grep")
-    }))
-  }
-}))
+it.live("guards Windows command heads without rejecting literal arguments", () =>
+  Effect.gen(function* () {
+    // 平台无关地验证实际共用 renderer；5.1/7+/cmd 的变量与链式规则不能混用。
+    expect(Shell.guidance("powershell", "win32")).toContain("do NOT use && or ||")
+    expect(Shell.guidance("pwsh", "win32")).toContain("PowerShell 7+: && and || are supported")
+    expect(Shell.guidance("cmd", "win32")).toContain("%NAME%")
+    expect(Shell.guidance("bash", "win32")).not.toContain("Do NOT use Unix text utilities")
+    if (process.platform !== "win32") return
+    for (const item of shells.filter((item) => PS.has(item.label) || item.label === "cmd")) {
+      // 显式配置所测 shell，环境默认值不能冒充本用例的执行配置。
+      const tmp = yield* tmpdirScoped({ config: { shell: item.shell } })
+      yield* runIn(
+        tmp,
+        Effect.gen(function* () {
+          const tool = yield* initShell()
+          expect(tool.description).toContain("captured output is decoded as UTF-8")
+          const requests: Array<Omit<PermissionV1.Request, "id" | "sessionID" | "tool">> = []
+          for (const command of [
+            "head -n 1 missing",
+            "grep.exe needle missing",
+            item.label === "cmd" ? "ls" : "find .",
+          ]) {
+            // 真正命令头在执行与权限之前被阻止，不调用外部 Unix 程序来证明失败。
+            const error = yield* fail({ command }, capture(requests))
+            expect(error.message).toMatch(/Unix utility|instead of ls|ambiguous/)
+          }
+          expect(requests).toEqual([])
+          // 同样的文字作为参数必须正常执行，阻止基于整串关键词的假 guard。
+          const result = yield* tool.execute(
+            {
+              command: item.label === "cmd" ? "echo head grep" : "Write-Output 'head grep'",
+              description: "Prints literal words without invoking utilities",
+            },
+            ctx,
+          )
+          expect(result.metadata.exit).toBe(0)
+          expect(result.output).toContain("head grep")
+        }),
+      )
+    }
+  }),
+)
 
 describe("tool.shell permissions", () => {
   each("asks for bash permission with correct pattern", () =>
@@ -632,8 +646,8 @@ describe("tool.shell permissions", () => {
 
   if (bash) {
     it.live("omits leading environment assignments from bash permission patterns [bash]", () =>
-    // #285：permission pattern 不含 CI=true 前缀，规则只需匹配真实命令；
-    // 原始命令进 raw_patterns 供 deny 检查
+      // #285：permission pattern 不含 CI=true 前缀，规则只需匹配真实命令；
+      // 原始命令进 raw_patterns 供 deny 检查
       withShell(
         { label: "bash", shell: bash },
         Effect.gen(function* () {
@@ -664,7 +678,7 @@ describe("tool.shell permissions", () => {
     )
 
     it.live("omits multiple environment assignments from bash permission patterns [bash]", () =>
-    // #285：多个 env 赋值全部剥离，pattern 只留 echo hello
+      // #285：多个 env 赋值全部剥离，pattern 只留 echo hello
       withShell(
         { label: "bash", shell: bash },
         Effect.gen(function* () {
@@ -784,10 +798,7 @@ describe("tool.shell permissions", () => {
             const requests: Array<Omit<PermissionV1.Request, "id" | "sessionID" | "tool">> = []
             // #158：应越过兼容检查进入 permission
             expect(
-              yield* fail(
-                { command: `ssh host "grep foo /tmp/file | sed 's/x/y/'"` },
-                capture(requests, err),
-              ),
+              yield* fail({ command: `ssh host "grep foo /tmp/file | sed 's/x/y/'"` }, capture(requests, err)),
             ).toMatchObject({ message: err.message })
           }),
         ),
@@ -807,10 +818,7 @@ describe("tool.shell permissions", () => {
             const requests: Array<Omit<PermissionV1.Request, "id" | "sessionID" | "tool">> = []
             // #158：wsl 与 ssh 同判：引号载荷不构成本地管道
             expect(
-              yield* fail(
-                { command: `wsl bash -lc "grep foo /tmp/file | head -40"` },
-                capture(requests, err),
-              ),
+              yield* fail({ command: `wsl bash -lc "grep foo /tmp/file | head -40"` }, capture(requests, err)),
             ).toMatchObject({ message: err.message })
           }),
         ),
@@ -863,7 +871,7 @@ describe("tool.shell permissions", () => {
     }),
   )
 
-each("does not suggest broad wrapper prefixes for always-allow prompts", () =>
+  each("does not suggest broad wrapper prefixes for always-allow prompts", () =>
     Effect.gen(function* () {
       const tmp = yield* tmpdirScoped()
       yield* runIn(
@@ -887,7 +895,7 @@ each("does not suggest broad wrapper prefixes for always-allow prompts", () =>
       )
     }),
   )
-each("does not suggest broad git branch prefixes for always-allow prompts", () =>
+  each("does not suggest broad git branch prefixes for always-allow prompts", () =>
     Effect.gen(function* () {
       const tmp = yield* tmpdirScoped()
       yield* runIn(
@@ -910,7 +918,6 @@ each("does not suggest broad git branch prefixes for always-allow prompts", () =
       )
     }),
   )
-
 
   // #203：恢复 original 三组 PowerShell 回归——SSH 私钥路径门禁、gci 目录列举门禁、
   // #203：Auto 端到端 reviewer fail-closed（适配：PermissionV1 类型/Bun.write 建目录/两空格缩进）。
@@ -948,7 +955,12 @@ each("does not suggest broad git branch prefixes for always-allow prompts", () =
                   const bashReq = requests.find((r) => r.permission === "bash")
                   expect(extDirReq).toBeDefined()
                   // #203：extDir 证据须携带完整 shell 上下文——precheck 的 shell-origin 分支依赖 command/cwd
-                  expect(extDirReq!.metadata).toMatchObject({ action_kind: "shell", command: String.raw`Get-Content -Path "$env:USERPROFILE\.ssh\id_rsa" -ErrorAction SilentlyContinue; Get-Content -Path "$env:USERPROFILE\.ssh\id_ed25519" -ErrorAction SilentlyContinue; Get-Content -Path "$env:USERPROFILE\.ssh\id_ecdsa" -ErrorAction SilentlyContinue`, cwd: projectRoot, agent: "build" })
+                  expect(extDirReq!.metadata).toMatchObject({
+                    action_kind: "shell",
+                    command: String.raw`Get-Content -Path "$env:USERPROFILE\.ssh\id_rsa" -ErrorAction SilentlyContinue; Get-Content -Path "$env:USERPROFILE\.ssh\id_ed25519" -ErrorAction SilentlyContinue; Get-Content -Path "$env:USERPROFILE\.ssh\id_ecdsa" -ErrorAction SilentlyContinue`,
+                    cwd: projectRoot,
+                    agent: "build",
+                  })
                   // #203：shell 字段记录实际解释器，供证据回放与审计定位
                   expect(typeof extDirReq!.metadata.shell).toBe("string")
                   expect(extDirReq!.patterns).toContain(glob(path.join(fakeHome, ".ssh", "*")))
@@ -1021,42 +1033,42 @@ each("does not suggest broad git branch prefixes for always-allow prompts", () =
               runIn(
                 projectRoot,
                 Effect.gen(function* () {
-                // #203：与 shell 工具产出的证据同构（上一组已锁定该 metadata 形状）；
-                // #203：组1 锁定工具产出形状，本组用同构输入验证 Auto 链路（Tool.Context.ask 跨 env 类型不可行，分段覆盖）
-                // #203：此处验证同一证据在 Auto 路由下经 precheck→reviewer 端到端 fail-closed。
-                const err = yield* permission
-                  .ask({
-                    sessionID: ctx.sessionID,
-                    // #203：目标 Request.tool 为 messageID/callID 对象（original 为字符串 tool 名），always 必填空集
-                    tool: {
-                      messageID: ctx.messageID,
-                      callID: "call_auto_ssh_gate",
-                    },
-                    permission: "bash",
-                    patterns: [String.raw`Get-Content -Path "$env:USERPROFILE\.ssh\id_rsa"`],
-                    metadata: {
-                      action_kind: "shell",
-            agent: "auto",
-                      command: String.raw`Get-Content -Path "$env:USERPROFILE\.ssh\id_rsa" -ErrorAction SilentlyContinue`,
-                      cwd: projectRoot,
-                      shell: item.shell,
-                    },
-                    always: [],
-                    ruleset,
-                  })
-                  .pipe(
-                    // #203：2 秒超时防 reviewer 挂起导致用例悬挂；超时即失败而非跳过
-                    Effect.timeoutOrElse({
-                      duration: "2 seconds",
-                      orElse: () => Effect.fail(new Error("timed out waiting for reviewer denial")),
-                    }),
-                    Effect.flip,
-                  )
+                  // #203：与 shell 工具产出的证据同构（上一组已锁定该 metadata 形状）；
+                  // #203：组1 锁定工具产出形状，本组用同构输入验证 Auto 链路（Tool.Context.ask 跨 env 类型不可行，分段覆盖）
+                  // #203：此处验证同一证据在 Auto 路由下经 precheck→reviewer 端到端 fail-closed。
+                  const err = yield* permission
+                    .ask({
+                      sessionID: ctx.sessionID,
+                      // #203：目标 Request.tool 为 messageID/callID 对象（original 为字符串 tool 名），always 必填空集
+                      tool: {
+                        messageID: ctx.messageID,
+                        callID: "call_auto_ssh_gate",
+                      },
+                      permission: "bash",
+                      patterns: [String.raw`Get-Content -Path "$env:USERPROFILE\.ssh\id_rsa"`],
+                      metadata: {
+                        action_kind: "shell",
+                        agent: "auto",
+                        command: String.raw`Get-Content -Path "$env:USERPROFILE\.ssh\id_rsa" -ErrorAction SilentlyContinue`,
+                        cwd: projectRoot,
+                        shell: item.shell,
+                      },
+                      always: [],
+                      ruleset,
+                    })
+                    .pipe(
+                      // #203：2 秒超时防 reviewer 挂起导致用例悬挂；超时即失败而非跳过
+                      Effect.timeoutOrElse({
+                        duration: "2 seconds",
+                        orElse: () => Effect.fail(new Error("timed out waiting for reviewer denial")),
+                      }),
+                      Effect.flip,
+                    )
 
-                expect(err).toBeInstanceOf(PermissionV1.AutoDeniedError)
-                expect(reviewedCalls).toBe(1)
-                // #203：deny 不留 pending 项——fail-closed 不得以挂起请求形式等待用户
-                expect(yield* permission.list()).toHaveLength(0)
+                  expect(err).toBeInstanceOf(PermissionV1.AutoDeniedError)
+                  expect(reviewedCalls).toBe(1)
+                  // #203：deny 不留 pending 项——fail-closed 不得以挂起请求形式等待用户
+                  expect(yield* permission.list()).toHaveLength(0)
                 }),
               ),
             (prev) =>
@@ -1749,12 +1761,9 @@ each("does not suggest broad git branch prefixes for always-allow prompts", () =
               // 600：修复前裸 -- 使 grammar 断裂，patterns 空集触发零 ask 直通。
               const err = new Error("stop after permission")
               const requests: Array<Omit<PermissionV1.Request, "id" | "sessionID" | "tool">> = []
-              expect(
-                yield* fail(
-                  { command: `git commit -m "x" -- a.ts` },
-                  capture(requests, err),
-                ),
-              ).toMatchObject({ message: err.message })
+              expect(yield* fail({ command: `git commit -m "x" -- a.ts` }, capture(requests, err))).toMatchObject({
+                message: err.message,
+              })
               const bashReq = requests.find((r) => r.permission === "bash")
               expect(bashReq).toBeDefined()
               // 600：引号化后 command 节点恢复，git commit 进入审批 pattern。
@@ -1810,12 +1819,9 @@ each("does not suggest broad git branch prefixes for always-allow prompts", () =
               // 600：git log 属只读安全类——修复不得借机把它升为 cautious 粗断言。
               const err = new Error("stop after permission")
               const requests: Array<Omit<PermissionV1.Request, "id" | "sessionID" | "tool">> = []
-              expect(
-                yield* fail(
-                  { command: `git log --oneline -2 -- path` },
-                  capture(requests, err),
-                ),
-              ).toMatchObject({ message: err.message })
+              expect(yield* fail({ command: `git log --oneline -2 -- path` }, capture(requests, err))).toMatchObject({
+                message: err.message,
+              })
               const bashReq = requests.find((r) => r.permission === "bash")
               expect(bashReq).toBeDefined()
               expect(bashReq!.patterns.some((p) => p.startsWith("git log"))).toBe(true)
@@ -1905,12 +1911,9 @@ each("does not suggest broad git branch prefixes for always-allow prompts", () =
               // 600：引号状态机验证——引号内 token 属数据域，越过引号即破坏语义。
               const err = new Error("stop after permission")
               const requests: Array<Omit<PermissionV1.Request, "id" | "sessionID" | "tool">> = []
-              expect(
-                yield* fail(
-                  { command: `echo "a -- b"` },
-                  capture(requests, err),
-                ),
-              ).toMatchObject({ message: err.message })
+              expect(yield* fail({ command: `echo "a -- b"` }, capture(requests, err))).toMatchObject({
+                message: err.message,
+              })
               const bashReq = requests.find((r) => r.permission === "bash")
               expect(bashReq).toBeDefined()
               // 600：引号内 -- 是数据；出现引号化痕迹即状态机越界改写。
@@ -1935,12 +1938,9 @@ each("does not suggest broad git branch prefixes for always-allow prompts", () =
               // 600：--% 后续 token 不经 PowerShell 解析——引号化会改变其语义。
               const err = new Error("stop after permission")
               const requests: Array<Omit<PermissionV1.Request, "id" | "sessionID" | "tool">> = []
-              expect(
-                yield* fail(
-                  { command: `git push --% --force` },
-                  capture(requests, err),
-                ),
-              ).toMatchObject({ message: err.message })
+              expect(yield* fail({ command: `git push --% --force` }, capture(requests, err))).toMatchObject({
+                message: err.message,
+              })
               const bashReq = requests.find((r) => r.permission === "bash")
               expect(bashReq).toBeDefined()
               // 600：--% 是 PowerShell stop-parsing 保留字，sequel 豁免不改写。
@@ -1966,12 +1966,9 @@ each("does not suggest broad git branch prefixes for always-allow prompts", () =
               // 600：同命令内 flag 与裸 -- 共存——只有独立 token 被引号化。
               const err = new Error("stop after permission")
               const requests: Array<Omit<PermissionV1.Request, "id" | "sessionID" | "tool">> = []
-              expect(
-                yield* fail(
-                  { command: `git log --oneline -2 -- path` },
-                  capture(requests, err),
-                ),
-              ).toMatchObject({ message: err.message })
+              expect(yield* fail({ command: `git log --oneline -2 -- path` }, capture(requests, err))).toMatchObject({
+                message: err.message,
+              })
               const bashReq = requests.find((r) => r.permission === "bash")
               expect(bashReq).toBeDefined()
               // 600：flag 形态 `--oneline` 原样保留；只有独立 `--` 被引号化，
@@ -1984,7 +1981,6 @@ each("does not suggest broad git branch prefixes for always-allow prompts", () =
       ),
     )
   }
-
 
   each("matches redirects in permission pattern", () =>
     Effect.gen(function* () {
@@ -2008,7 +2004,7 @@ each("does not suggest broad git branch prefixes for always-allow prompts", () =
   // #108：always 模式按 shell 选择命令，避免 Windows cmd/pwsh 硬编码 ls
   if (bash) {
     it.live("keeps redirects after removing environment assignments from permission pattern [bash]", () =>
-    // #285：重定向不是前缀赋值，归属于命令本体——pattern 必须包含 > output.txt
+      // #285：重定向不是前缀赋值，归属于命令本体——pattern 必须包含 > output.txt
       withShell(
         { label: "bash", shell: bash },
         Effect.gen(function* () {
@@ -2046,8 +2042,18 @@ each("does not suggest broad git branch prefixes for always-allow prompts", () =
         tmp,
         Effect.gen(function* () {
           const requests: Array<Omit<PermissionV1.Request, "id" | "sessionID" | "tool">> = []
-          const cmd = item.label === "cmd" ? "dir" : item.label === "powershell" || item.label === "pwsh" ? "Get-ChildItem" : "ls -la"
-          const always = item.label === "cmd" ? "dir *" : item.label === "powershell" || item.label === "pwsh" ? "Get-ChildItem *" : "ls *"
+          const cmd =
+            item.label === "cmd"
+              ? "dir"
+              : item.label === "powershell" || item.label === "pwsh"
+                ? "Get-ChildItem"
+                : "ls -la"
+          const always =
+            item.label === "cmd"
+              ? "dir *"
+              : item.label === "powershell" || item.label === "pwsh"
+                ? "Get-ChildItem *"
+                : "ls *"
           yield* run({ command: cmd }, capture(requests))
           const bashReq = requests.find((r) => r.permission === "bash")
           expect(bashReq).toBeDefined()
@@ -2067,8 +2073,7 @@ describe("tool.shell display output", () => {
         Effect.gen(function* () {
           // #215：数字字节跨 shell 保留 one\rtwo\rthree\nfinal\n 的真实控制字符。
           const progressBytes = [
-            111, 110, 101, 13, 116, 119, 111, 13, 116, 104, 114, 101, 101, 10, 102, 105, 110, 97,
-            108, 10,
+            111, 110, 101, 13, 116, 119, 111, 13, 116, 104, 114, 101, 101, 10, 102, 105, 110, 97, 108, 10,
           ]
           const script = `process.stdout.write(Buffer.from([${progressBytes.join(",")}]))`
           const text = `${bin} -e ${evalarg(script)}`
@@ -2080,10 +2085,11 @@ describe("tool.shell display output", () => {
             },
             {
               ...ctx,
-              metadata: (input) => Effect.sync(() => {
-                const output = input.metadata?.output
-                if (typeof output === "string") updates.push(output)
-              }),
+              metadata: (input) =>
+                Effect.sync(() => {
+                  const output = input.metadata?.output
+                  if (typeof output === "string") updates.push(output)
+                }),
             },
           )
 
@@ -2112,8 +2118,7 @@ describe("tool.shell display output", () => {
         Effect.gen(function* () {
           // #215：boot\nworking\rESC[2Kdone\n 后退出 7，失败状态不改变屏幕语义。
           const clearLineBytes = [
-            98, 111, 111, 116, 10, 119, 111, 114, 107, 105, 110, 103, 13, 27, 91, 50, 75, 100, 111,
-            110, 101, 10,
+            98, 111, 111, 116, 10, 119, 111, 114, 107, 105, 110, 103, 13, 27, 91, 50, 75, 100, 111, 110, 101, 10,
           ]
           const script = `process.stdout.write(Buffer.from([${clearLineBytes.join(",")}])); process.exit(7)`
           const text = `${bin} -e ${evalarg(script)}`
@@ -2125,10 +2130,11 @@ describe("tool.shell display output", () => {
             },
             {
               ...ctx,
-              metadata: (input) => Effect.sync(() => {
-                const output = input.metadata?.output
-                if (typeof output === "string") updates.push(output)
-              }),
+              metadata: (input) =>
+                Effect.sync(() => {
+                  const output = input.metadata?.output
+                  if (typeof output === "string") updates.push(output)
+                }),
             },
           )
 
@@ -2140,7 +2146,9 @@ describe("tool.shell display output", () => {
           expect(result.metadata.output).not.toContain("\x1b")
           expect(result.metadata.output).not.toContain("\\x0d")
           expect(updates).toContain("boot\ndone")
-          expect(updates.every((output) => !output.includes("\r") && !output.includes("\x1b") && !output.includes("\\x0d"))).toBe(true)
+          expect(
+            updates.every((output) => !output.includes("\r") && !output.includes("\x1b") && !output.includes("\\x0d")),
+          ).toBe(true)
           expect(result.output).toContain("working")
           expect(result.output).toContain("done")
         }),
@@ -2451,7 +2459,9 @@ describe("tool.shell abort", () => {
         const tmp = yield* tmpdirScoped()
         const file = path.join(tmp, "spawn-failure.log")
         // 本用例显式拥有独占文件sink；先运文件的logger选择不决定这次隐私证据的去向。
-        const logging = Logger.layer([Logging.fileLogger(file)], { mergeWithExisting: false }).pipe(Layer.provide(NodeFileSystem.layer))
+        const logging = Logger.layer([Logging.fileLogger(file)], { mergeWithExisting: false }).pipe(
+          Layer.provide(NodeFileSystem.layer),
+        )
         const secret = `command-secret-${crypto.randomUUID()}`
         // 唯一call身份排除其它Session的历史日志，不能让一条无敏感内容的旧记录代替本次失败。
         const callID = `privacy-${crypto.randomUUID()}`
@@ -2479,7 +2489,7 @@ describe("tool.shell abort", () => {
           Effect.promise(async () => {
             const text = await Bun.file(file).text()
             // 目标formatter逐条转义换行；按唯一call读取完整同一条记录，不依赖message与字段排列。
-            return text.split(/\r?\n/).find(line => line.includes(callID) && line.includes("spawn failed"))
+            return text.split(/\r?\n/).find((line) => line.includes(callID) && line.includes("spawn failed"))
           }),
           "spawn failure log was not persisted",
           "5 seconds",
@@ -2536,9 +2546,10 @@ describe("tool.shell abort", () => {
             {
               // POSIX 后代先忽略 TERM 再发布 readiness；主进程退出后仍会持有输出管道。
               // 保留原有输出触发取消及结果断言，验证强杀升级不能只等待主进程。
-              command: process.platform === "win32"
-                ? `echo before && sleep 30`
-                : `sh -c 'trap "" TERM; echo before; sleep 30' & wait`,
+              command:
+                process.platform === "win32"
+                  ? `echo before && sleep 30`
+                  : `sh -c 'trap "" TERM; echo before; sleep 30' & wait`,
             },
             {
               ...ctx,
@@ -2555,7 +2566,9 @@ describe("tool.shell abort", () => {
           )
           expect(res.output).toContain("before")
           // [local-smark] abort Notice 必须包含 elapsed_ms，让模型知道实际运行时长
-          expect(res.output).toContain('<opencode_notice type="execution" source="shell" severity="warning" reason="user_abort"')
+          expect(res.output).toContain(
+            '<opencode_notice type="execution" source="shell" severity="warning" reason="user_abort"',
+          )
           expect(res.output).toContain('elapsed_ms="')
           expect(res.output).not.toContain('reason="exit"')
           expect(collected.length).toBeGreaterThan(0)
@@ -2638,9 +2651,8 @@ describe("tool.shell abort", () => {
     ),
   )
 
-  
   it.live("reports exit notice for empty successful output", () =>
-  // #289：空输出成功（exit 0）仍需 notice——模型无法从空输出推断命令是否真的执行成功
+    // #289：空输出成功（exit 0）仍需 notice——模型无法从空输出推断命令是否真的执行成功
     runIn(
       projectRoot,
       Effect.gen(function* () {
@@ -2662,7 +2674,7 @@ describe("tool.shell abort", () => {
   )
 
   it.live("reports exit notice for empty failed output", () =>
-  // #289：空输出失败必须携带退出码，模型才能区分静默失败与结果丢失
+    // #289：空输出失败必须携带退出码，模型才能区分静默失败与结果丢失
     runIn(
       projectRoot,
       Effect.gen(function* () {
@@ -2685,7 +2697,7 @@ describe("tool.shell abort", () => {
   )
 
   it.live("reports exit notice for non-empty failed output without diagnostics", () =>
-  // #289：非空但无诊断摘录的失败靠 exit notice 兜底，避免模型误读为成功产物
+    // #289：非空但无诊断摘录的失败靠 exit notice 兜底，避免模型误读为成功产物
     runIn(
       projectRoot,
       Effect.gen(function* () {
@@ -2703,64 +2715,68 @@ describe("tool.shell abort", () => {
     ),
   )
 
-  it.live("adds hidden diagnostics without suppressing non-empty failure exit notice", () =>
-    runIn(
-      projectRoot,
-      Effect.gen(function* () {
-        const script = [
-          "console.error(String.fromCharCode(102,97,116,97,108,58,32,104,105,100,100,101,110,32,114,111,111,116,32,99,97,117,115,101))",
-          "await new Promise((resolve) => setTimeout(resolve, 2100))",
-          `for (let i = 0; i < ${Truncate.MAX_LINES + 500}; i++) console.log(String.fromCharCode(116,97,105,108,32,108,105,110,101,32) + i + String.fromCharCode(32) + String.fromCharCode(120).repeat(80))`,
-          "process.exit(9)",
-        ].join(";")
-        const command = `${bin} -e ${evalarg(script)}`
-        // #289：诊断场景脚本较慢（2.1s 等待根因行）且触发截断，15s 超时留足余量
-        const result = yield* run({
-          command: PS.has(sh()) ? `& ${command}` : command,
-          // 这个用例只验证 tail 截断隐藏区会生成诊断附录；关闭压缩，并让尾部
-          // 文本同时超过默认行数/字节阈值，避免平台输出差异让 root cause 仍可见。
-          compress_output: false,
-        })
+  it.live(
+    "adds hidden diagnostics without suppressing non-empty failure exit notice",
+    () =>
+      runIn(
+        projectRoot,
+        Effect.gen(function* () {
+          const script = [
+            "console.error(String.fromCharCode(102,97,116,97,108,58,32,104,105,100,100,101,110,32,114,111,111,116,32,99,97,117,115,101))",
+            "await new Promise((resolve) => setTimeout(resolve, 2100))",
+            `for (let i = 0; i < ${Truncate.MAX_LINES + 500}; i++) console.log(String.fromCharCode(116,97,105,108,32,108,105,110,101,32) + i + String.fromCharCode(32) + String.fromCharCode(120).repeat(80))`,
+            "process.exit(9)",
+          ].join(";")
+          const command = `${bin} -e ${evalarg(script)}`
+          // #289：诊断场景脚本较慢（2.1s 等待根因行）且触发截断，15s 超时留足余量
+          const result = yield* run({
+            command: PS.has(sh()) ? `& ${command}` : command,
+            // 这个用例只验证 tail 截断隐藏区会生成诊断附录；关闭压缩，并让尾部
+            // 文本同时超过默认行数/字节阈值，避免平台输出差异让 root cause 仍可见。
+            compress_output: false,
+          })
 
-        expect(result.metadata.exit).toBe(9)
-        expect(result.output).toContain('<opencode_excerpt type="shell_high_signal"')
-        expect(result.output).toContain("fatal: hidden root cause")
-        expect(result.output).toContain(
-          '<opencode_notice type="execution" source="shell" severity="error" reason="exit" exit_code="9"',
-        )
-      }),
-    ),
+          expect(result.metadata.exit).toBe(9)
+          expect(result.output).toContain('<opencode_excerpt type="shell_high_signal"')
+          expect(result.output).toContain("fatal: hidden root cause")
+          expect(result.output).toContain(
+            '<opencode_notice type="execution" source="shell" severity="error" reason="exit" exit_code="9"',
+          )
+        }),
+      ),
     15_000,
   )
 
-  it.live("keeps visible diagnostics out of appendix without suppressing exit notice", () =>
-    runIn(
-      projectRoot,
-      Effect.gen(function* () {
-        const script = [
-          "await new Promise((resolve) => setTimeout(resolve, 2100))",
-          "console.log(String.fromCharCode(102,97,116,97,108,58,32,118,105,115,105,98,108,101,32,114,111,111,116,32,99,97,117,115,101))",
-          "process.exit(9)",
-        ].join(";")
-        const command = `${bin} -e ${evalarg(script)}`
-        const result = yield* run({
-          command: PS.has(sh()) ? `& ${command}` : command,
-        })
+  it.live(
+    "keeps visible diagnostics out of appendix without suppressing exit notice",
+    () =>
+      runIn(
+        projectRoot,
+        Effect.gen(function* () {
+          const script = [
+            "await new Promise((resolve) => setTimeout(resolve, 2100))",
+            "console.log(String.fromCharCode(102,97,116,97,108,58,32,118,105,115,105,98,108,101,32,114,111,111,116,32,99,97,117,115,101))",
+            "process.exit(9)",
+          ].join(";")
+          const command = `${bin} -e ${evalarg(script)}`
+          const result = yield* run({
+            command: PS.has(sh()) ? `& ${command}` : command,
+          })
 
-        expect(result.metadata.exit).toBe(9)
-        expect(result.output).toContain("fatal: visible root cause")
-        // 可见 fatal 不进入隐藏摘录，失败退出码仍需独立回放。
-        expect(result.output).not.toContain("<opencode_excerpt")
-        expect(result.output).toContain(
-          '<opencode_notice type="execution" source="shell" severity="error" reason="exit" exit_code="9"',
-        )
-      }),
-    ),
+          expect(result.metadata.exit).toBe(9)
+          expect(result.output).toContain("fatal: visible root cause")
+          // 可见 fatal 不进入隐藏摘录，失败退出码仍需独立回放。
+          expect(result.output).not.toContain("<opencode_excerpt")
+          expect(result.output).toContain(
+            '<opencode_notice type="execution" source="shell" severity="error" reason="exit" exit_code="9"',
+          )
+        }),
+      ),
     15_000,
   )
 
   it.live("omits exit notice for non-empty successful output", () =>
-  // #289：非空成功是正常路径，零噪音不加 notice
+    // #289：非空成功是正常路径，零噪音不加 notice
     runIn(
       projectRoot,
       Effect.gen(function* () {
@@ -2952,7 +2968,11 @@ describe("tool.shell truncation", () => {
         const command = `${bin} -e ${evalarg(program)}`
         const decoded = yield* run({ command: PS.has(sh()) ? `& ${command}` : command })
         expect(decoded.output).toContain("<high-entropy powershell-clixml>ordinary</high-entropy>")
-        expect(decoded.metadata).toMatchObject({ compressed: false, compressionOriginalBytes: 39, compressionCompressedBytes: 55 })
+        expect(decoded.metadata).toMatchObject({
+          compressed: false,
+          compressionOriginalBytes: 39,
+          compressionCompressedBytes: 55,
+        })
         const clixmlPath = decoded.metadata.outputPath
         if (typeof clixmlPath !== "string") throw new Error("expected decoded raw output")
         expect(decoded.output).toContain(clixmlPath)
@@ -2989,88 +3009,82 @@ describe("tool.shell windows multi-encoding", () => {
   if (process.platform !== "win32") return
 
   for (const item of ps) {
-    it.live(
-      `decodes UTF-8 box drawing output from Windows commands [${item.label}]`,
-      () =>
-        withShell(
-          item,
-          Effect.gen(function* () {
-            const tmp = yield* tmpdirScoped()
-            yield* runIn(
-              tmp,
-              Effect.gen(function* () {
-                const bash = yield* initBash()
-                // #128：PS 写 UTF-8 盒线字符，验证 shell_encoding auto
-                const result = yield* bash.execute(
-                  {
-                    command: `Write-Output "┌─ TARGET OUTPUT ──"; Write-Output "— delivered"`,
-                  },
-                  ctx,
-                )
-                expect(result.output).toContain("TARGET OUTPUT")
-                expect(result.output).toContain("delivered")
-                expect(result.output).not.toContain("\uFFFD")
-              }),
-            )
-          }),
-        ),
-    )
-
-    it.live(
-      `decodes GB18030 legacy shell output from Windows commands [${item.label}]`,
-      () =>
-        withShell(
-          item,
-          Effect.gen(function* () {
-            const tmp = yield* tmpdirScoped()
-            yield* runIn(
-              tmp,
-              Effect.gen(function* () {
-                const bash = yield* initBash()
-                // #128：模拟 OpenStandardOutput 写入 GBK 字节
-                const result = yield* bash.execute(
-                  {
-                    command: `$bytes = [byte[]](0xD6,0xD0,0xCE,0xC4); [Console]::OpenStandardOutput().Write($bytes,0,$bytes.Length)`,
-                  },
-                  ctx,
-                )
-                expect(result.output).toContain("中文")
-              }),
-            )
-          }),
-        ),
-    )
-  }
-})
-
-
-// #130：javac CP936 诊断经 shell 字节路径应可读
-describe("tool.shell CP936 diagnostics", () => {
-  it.live(
-    "decodes javac-style CP936 bytes through shell stdout",
-    () =>
+    it.live(`decodes UTF-8 box drawing output from Windows commands [${item.label}]`, () =>
       withShell(
-        { label: "default", shell: Shell.acceptable() },
+        item,
         Effect.gen(function* () {
           const tmp = yield* tmpdirScoped()
           yield* runIn(
             tmp,
             Effect.gen(function* () {
               const bash = yield* initBash()
-              // 当前 Bun 直接写固定 CP936 字节，避免缺少 Python 或 shell 引号转换污染输入。
-              const code = "process.stdout.write(Buffer.from([0x48,0x3a,0x5c,0x46,0x52,0x43,0x68,0x65,0x63,0x6b,0x5c,0x73,0x72,0x63,0x5c,0x76,0x65,0x72,0x69,0x66,0x79,0x63,0x6d,0x64,0x5c,0x56,0x65,0x72,0x69,0x66,0x79,0x43,0x6f,0x6d,0x6d,0x61,0x6e,0x64,0x2e,0x6a,0x61,0x76,0x61,0x3a,0x33,0x3a,0x20,0xbe,0xaf,0xb8,0xe6,0x3a,0x20,0x44,0x4f,0x4d,0xca,0xc7,0xc4,0xda,0xb2,0xbf,0xd7,0xa8,0xd3,0xc3,0x20,0x41,0x50,0x49,0x0a]))"
+              // #128：PS 写 UTF-8 盒线字符，验证 shell_encoding auto
               const result = yield* bash.execute(
                 {
-                  command: `${PS.has(sh()) ? "& " : ""}${bin} -e ${evalarg(code)}`,
+                  command: `Write-Output "┌─ TARGET OUTPUT ──"; Write-Output "— delivered"`,
                 },
                 ctx,
               )
-              expect(result.metadata.exit).toBe(0)
-              expect(result.output).toContain("警告: DOM是内部专用 API")
+              expect(result.output).toContain("TARGET OUTPUT")
+              expect(result.output).toContain("delivered")
+              expect(result.output).not.toContain("\uFFFD")
             }),
           )
         }),
       ),
+    )
+
+    it.live(`decodes GB18030 legacy shell output from Windows commands [${item.label}]`, () =>
+      withShell(
+        item,
+        Effect.gen(function* () {
+          const tmp = yield* tmpdirScoped()
+          yield* runIn(
+            tmp,
+            Effect.gen(function* () {
+              const bash = yield* initBash()
+              // #128：模拟 OpenStandardOutput 写入 GBK 字节
+              const result = yield* bash.execute(
+                {
+                  command: `$bytes = [byte[]](0xD6,0xD0,0xCE,0xC4); [Console]::OpenStandardOutput().Write($bytes,0,$bytes.Length)`,
+                },
+                ctx,
+              )
+              expect(result.output).toContain("中文")
+            }),
+          )
+        }),
+      ),
+    )
+  }
+})
+
+// #130：javac CP936 诊断经 shell 字节路径应可读
+describe("tool.shell CP936 diagnostics", () => {
+  it.live("decodes javac-style CP936 bytes through shell stdout", () =>
+    withShell(
+      { label: "default", shell: Shell.acceptable() },
+      Effect.gen(function* () {
+        const tmp = yield* tmpdirScoped()
+        yield* runIn(
+          tmp,
+          Effect.gen(function* () {
+            const bash = yield* initBash()
+            // 当前 Bun 直接写固定 CP936 字节，避免缺少 Python 或 shell 引号转换污染输入。
+            const code =
+              "process.stdout.write(Buffer.from([0x48,0x3a,0x5c,0x46,0x52,0x43,0x68,0x65,0x63,0x6b,0x5c,0x73,0x72,0x63,0x5c,0x76,0x65,0x72,0x69,0x66,0x79,0x63,0x6d,0x64,0x5c,0x56,0x65,0x72,0x69,0x66,0x79,0x43,0x6f,0x6d,0x6d,0x61,0x6e,0x64,0x2e,0x6a,0x61,0x76,0x61,0x3a,0x33,0x3a,0x20,0xbe,0xaf,0xb8,0xe6,0x3a,0x20,0x44,0x4f,0x4d,0xca,0xc7,0xc4,0xda,0xb2,0xbf,0xd7,0xa8,0xd3,0xc3,0x20,0x41,0x50,0x49,0x0a]))"
+            const result = yield* bash.execute(
+              {
+                command: `${PS.has(sh()) ? "& " : ""}${bin} -e ${evalarg(code)}`,
+              },
+              ctx,
+            )
+            expect(result.metadata.exit).toBe(0)
+            expect(result.output).toContain("警告: DOM是内部专用 API")
+          }),
+        )
+      }),
+    ),
   )
 })
 
@@ -3222,25 +3236,22 @@ describe("tool.shell windows PS stderr and progress", () => {
       15_000,
     )
 
-    it.live(
-      "does not append block-buffering hint on normal exit with no output",
-      () =>
-        runIn(
-          projectRoot,
-          Effect.gen(function* () {
-            const command = `${bin} -e ${evalarg("process.exit(0)")}`
-            const result = yield* run({
-              command: PS.has(sh()) ? `& ${command}` : command,
-            })
+    it.live("does not append block-buffering hint on normal exit with no output", () =>
+      runIn(
+        projectRoot,
+        Effect.gen(function* () {
+          const command = `${bin} -e ${evalarg("process.exit(0)")}`
+          const result = yield* run({
+            command: PS.has(sh()) ? `& ${command}` : command,
+          })
 
-            expect(result.output).toContain("(no output)")
-            // 正常退出（非 timeout）不应追加 block-buffering 诊断
-            expect(result.output).not.toContain("block-buffering")
-          }),
-        ),
+          expect(result.output).toContain("(no output)")
+          // 正常退出（非 timeout）不应追加 block-buffering 诊断
+          expect(result.output).not.toContain("block-buffering")
+        }),
+      ),
     )
   })
-
 })
 // #179：PowerShell ERROR 恢复节点上的本地 Unix 工具拒绝/放行
 describe("tool.shell local command ERROR nodes (#179)", () => {
@@ -3336,7 +3347,7 @@ describe("tool.shell local command ERROR nodes (#179)", () => {
                 {
                   // #207：/mnt/rescue 位于 WSL 客户机文件系统中——映射到 Windows 路径解析会伪造主机路径如 F:\mnt\rescue
                   command:
-                    "wsl -d Ubuntu-22.04 -- sh -lc \"sudo mkdir -p /mnt/rescue && sudo mount -t exfat /dev/sde3 /mnt/rescue && mkdir -p /mnt/rescue/LexarE300_rescue && df -h /mnt/rescue && lsblk -o NAME,SIZE,FSTYPE,LABEL,RO,TYPE,MOUNTPOINTS /dev/sdc /dev/sde\"",
+                    'wsl -d Ubuntu-22.04 -- sh -lc "sudo mkdir -p /mnt/rescue && sudo mount -t exfat /dev/sde3 /mnt/rescue && mkdir -p /mnt/rescue/LexarE300_rescue && df -h /mnt/rescue && lsblk -o NAME,SIZE,FSTYPE,LABEL,RO,TYPE,MOUNTPOINTS /dev/sdc /dev/sde"',
                 },
                 capture(requests, err),
               ),
@@ -3498,79 +3509,80 @@ describe("tool.shell windows plain text", () => {
   if (process.platform !== "win32") return
 
   for (const item of ps) {
-    it.live(
-      `keeps PowerShell output as plain text [${item.label}]`,
-      () =>
-        withShell(
-          item,
-          Effect.gen(function* () {
-            const tmp = yield* tmpdirScoped()
-            yield* runIn(
-              tmp,
-              Effect.gen(function* () {
-                const bash = yield* initBash()
-                // #129：Write-Host + Write-Information 应保持纯文本
-                const result = yield* bash.execute(
-                  {
-                    command: `Write-Host '1/4 BUILD'; Write-Information '2/4 EXPORT'; Write-Host '3/4 TRANSFER'`,
-                  },
-                  ctx,
-                )
-                expect(result.output).toContain("1/4 BUILD")
-                expect(result.output).toContain("2/4 EXPORT")
-                expect(result.output).toContain("3/4 TRANSFER")
-                expect(result.output).not.toMatch(/<Obj\b|<Objs\b|CLIXML/)
-              }),
-            )
-          }),
-        ),
-    )
-  }
-})
-
-
-// #126：非 Windows 也可用的 UTF-16LE 字节输出解码路径
-describe("tool.shell text decoding", () => {
-  it.live(
-    "decodes raw UTF-16LE output from Windows-style byte streams",
-    () =>
+    it.live(`keeps PowerShell output as plain text [${item.label}]`, () =>
       withShell(
-        { label: "default", shell: Shell.acceptable() },
+        item,
         Effect.gen(function* () {
           const tmp = yield* tmpdirScoped()
           yield* runIn(
             tmp,
             Effect.gen(function* () {
               const bash = yield* initBash()
-              // 写出 UTF-16LE 中文再读回，验证 createAutoTextDecoder 路径
-              // 非 Windows 用当前 Bun 写原始字节；Windows PowerShell 保留原生 UTF-16LE producer。
-              const code = `process.stdout.write(Buffer.from([${Array.from(Buffer.from("默认分发: Ubuntu-22.04", "utf16le"))}]))`
+              // #129：Write-Host + Write-Information 应保持纯文本
               const result = yield* bash.execute(
                 {
-                  // #126：混入 ASCII 以触发无 BOM UTF-16LE 的 NUL 启发式（纯中文无 NUL）
-                  command: PS.has(sh())
-                    ? '$bytes = [System.Text.Encoding]::Unicode.GetBytes("默认分发: Ubuntu-22.04"); [Console]::OpenStandardOutput().Write($bytes, 0, $bytes.Length)'
-                    : `${bin} -e ${evalarg(code)}`,
+                  command: `Write-Host '1/4 BUILD'; Write-Information '2/4 EXPORT'; Write-Host '3/4 TRANSFER'`,
                 },
                 ctx,
               )
-              expect(result.metadata.exit).toBe(0)
-              expect(result.output).toContain("默认分发: Ubuntu-22.04")
-              expect(result.output).not.toContain("\u0000")
-              expect(result.output).not.toContain("\uFFFD")
+              expect(result.output).toContain("1/4 BUILD")
+              expect(result.output).toContain("2/4 EXPORT")
+              expect(result.output).toContain("3/4 TRANSFER")
+              expect(result.output).not.toMatch(/<Obj\b|<Objs\b|CLIXML/)
             }),
           )
         }),
       ),
-  )
+    )
+  }
 })
 
+// #126：非 Windows 也可用的 UTF-16LE 字节输出解码路径
+describe("tool.shell text decoding", () => {
+  it.live("decodes raw UTF-16LE output from Windows-style byte streams", () =>
+    withShell(
+      { label: "default", shell: Shell.acceptable() },
+      Effect.gen(function* () {
+        const tmp = yield* tmpdirScoped()
+        yield* runIn(
+          tmp,
+          Effect.gen(function* () {
+            const bash = yield* initBash()
+            // 写出 UTF-16LE 中文再读回，验证 createAutoTextDecoder 路径
+            // 非 Windows 用当前 Bun 写原始字节；Windows PowerShell 保留原生 UTF-16LE producer。
+            const code = `process.stdout.write(Buffer.from([${Array.from(Buffer.from("默认分发: Ubuntu-22.04", "utf16le"))}]))`
+            const result = yield* bash.execute(
+              {
+                // #126：混入 ASCII 以触发无 BOM UTF-16LE 的 NUL 启发式（纯中文无 NUL）
+                command: PS.has(sh())
+                  ? '$bytes = [System.Text.Encoding]::Unicode.GetBytes("默认分发: Ubuntu-22.04"); [Console]::OpenStandardOutput().Write($bytes, 0, $bytes.Length)'
+                  : `${bin} -e ${evalarg(code)}`,
+              },
+              ctx,
+            )
+            expect(result.metadata.exit).toBe(0)
+            expect(result.output).toContain("默认分发: Ubuntu-22.04")
+            expect(result.output).not.toContain("\u0000")
+            expect(result.output).not.toContain("\uFFFD")
+          }),
+        )
+      }),
+    ),
+  )
+})
 
 // [local-smark] execution notice policy 纯函数测试：不依赖真实子进程，
 // 确定性验证 Bash outcome 优先级、elapsed_ms 和 120 秒阈值
 describe("tool.shell execution notice policy", () => {
   test("abort 包含正整数 elapsed_ms 且不含 exit", () => {
-    const notice = formatShellExecutionNotice({ aborted: true, expired: false, exitCode: null, emptyOutput: false, timeoutMs: 120000, elapsedMs: 61742 })
+    const notice = formatShellExecutionNotice({
+      aborted: true,
+      expired: false,
+      exitCode: null,
+      emptyOutput: false,
+      timeoutMs: 120000,
+      elapsedMs: 61742,
+    })
     expect(notice).toContain('reason="user_abort"')
     expect(notice).toContain('elapsed_ms="61742"')
     expect(notice).not.toContain('reason="exit"')
@@ -3578,45 +3590,94 @@ describe("tool.shell execution notice policy", () => {
   })
 
   test("timeout 同时包含 timeout_ms 和 elapsed_ms", () => {
-    const notice = formatShellExecutionNotice({ aborted: false, expired: true, exitCode: null, emptyOutput: false, timeoutMs: 120000, elapsedMs: 120487 })
+    const notice = formatShellExecutionNotice({
+      aborted: false,
+      expired: true,
+      exitCode: null,
+      emptyOutput: false,
+      timeoutMs: 120000,
+      elapsedMs: 120487,
+    })
     expect(notice).toContain('reason="timeout"')
     expect(notice).toContain('timeout_ms="120000"')
     expect(notice).toContain('elapsed_ms="120487"')
   })
 
   test("non-zero exit 包含 exit_code 和 elapsed_ms", () => {
-    const notice = formatShellExecutionNotice({ aborted: false, expired: false, exitCode: 1, emptyOutput: false, timeoutMs: 120000, elapsedMs: 8421 })
+    const notice = formatShellExecutionNotice({
+      aborted: false,
+      expired: false,
+      exitCode: 1,
+      emptyOutput: false,
+      timeoutMs: 120000,
+      elapsedMs: 8421,
+    })
     expect(notice).toContain('reason="exit"')
     expect(notice).toContain('exit_code="1"')
     expect(notice).toContain('elapsed_ms="8421"')
   })
 
   test("exit 0 + 有输出 + 119999ms 不生成 Notice", () => {
-    const notice = formatShellExecutionNotice({ aborted: false, expired: false, exitCode: 0, emptyOutput: false, timeoutMs: 120000, elapsedMs: 119999 })
+    const notice = formatShellExecutionNotice({
+      aborted: false,
+      expired: false,
+      exitCode: 0,
+      emptyOutput: false,
+      timeoutMs: 120000,
+      elapsedMs: 119999,
+    })
     expect(notice).toBeUndefined()
   })
 
   test("exit 0 + 有输出 + 120000ms 生成 completed Notice", () => {
-    const notice = formatShellExecutionNotice({ aborted: false, expired: false, exitCode: 0, emptyOutput: false, timeoutMs: 120000, elapsedMs: 120000 })
+    const notice = formatShellExecutionNotice({
+      aborted: false,
+      expired: false,
+      exitCode: 0,
+      emptyOutput: false,
+      timeoutMs: 120000,
+      elapsedMs: 120000,
+    })
     expect(notice).toContain('reason="completed"')
   })
   // 验证 outcome 互斥：abort 优先于 long completed
   test("abort >=120000ms 只有 user_abort，不追加 completed", () => {
-    const notice = formatShellExecutionNotice({ aborted: true, expired: false, exitCode: 0, emptyOutput: false, timeoutMs: 120000, elapsedMs: 300000 })
+    const notice = formatShellExecutionNotice({
+      aborted: true,
+      expired: false,
+      exitCode: 0,
+      emptyOutput: false,
+      timeoutMs: 120000,
+      elapsedMs: 300000,
+    })
     expect(notice).toContain('reason="user_abort"')
     expect(notice).not.toContain('reason="completed"')
   })
 
   // 验证 timeout 优先于 abort
   test("timeout >=120000ms 只有 timeout", () => {
-    const notice = formatShellExecutionNotice({ aborted: true, expired: true, exitCode: null, emptyOutput: false, timeoutMs: 120000, elapsedMs: 300000 })
+    const notice = formatShellExecutionNotice({
+      aborted: true,
+      expired: true,
+      exitCode: null,
+      emptyOutput: false,
+      timeoutMs: 120000,
+      elapsedMs: 300000,
+    })
     expect(notice).toContain('reason="timeout"')
     expect(notice).not.toContain('reason="user_abort"')
   })
 
   // 空输出 exit 0 保留 exit Notice，不改成 completed
   test("空输出 exit 0 保留 exit Notice", () => {
-    const notice = formatShellExecutionNotice({ aborted: false, expired: false, exitCode: 0, emptyOutput: true, timeoutMs: 120000, elapsedMs: 500 })
+    const notice = formatShellExecutionNotice({
+      aborted: false,
+      expired: false,
+      exitCode: 0,
+      emptyOutput: true,
+      timeoutMs: 120000,
+      elapsedMs: 500,
+    })
     expect(notice).toContain('reason="exit"')
     expect(notice).toContain('exit_code="0"')
     expect(notice).not.toContain('reason="completed"')
@@ -3624,12 +3685,26 @@ describe("tool.shell execution notice policy", () => {
 
   // NaN/Infinity 被规范化为 0，不输出畸形属性
   test("NaN elapsed 被规范化为 0", () => {
-    const notice = formatShellExecutionNotice({ aborted: true, expired: false, exitCode: null, emptyOutput: false, timeoutMs: 120000, elapsedMs: NaN })
+    const notice = formatShellExecutionNotice({
+      aborted: true,
+      expired: false,
+      exitCode: null,
+      emptyOutput: false,
+      timeoutMs: 120000,
+      elapsedMs: NaN,
+    })
     expect(notice).toContain('elapsed_ms="0"')
   })
 
   test("正 Infinity elapsed 被规范化为 0", () => {
-    const notice = formatShellExecutionNotice({ aborted: true, expired: false, exitCode: null, emptyOutput: false, timeoutMs: 120000, elapsedMs: Infinity })
+    const notice = formatShellExecutionNotice({
+      aborted: true,
+      expired: false,
+      exitCode: null,
+      emptyOutput: false,
+      timeoutMs: 120000,
+      elapsedMs: Infinity,
+    })
     expect(notice).toContain('elapsed_ms="0"')
   })
 
@@ -3646,47 +3721,67 @@ describe("tool.shell execution notice policy", () => {
 
 describe.skipIf(process.platform !== "win32")("tool.shell native script fidelity", () => {
   for (const item of ps) {
-    it.live(`reports final PowerShell status with native exit codes [${item.label}]`, () =>
-      withShell(item, runIn(projectRoot, Effect.gen(function* () {
-        // 独立状态常量覆盖cmdlet失败、native码、成功恢复和显式控制流。
-        const cases = [
-          { command: "Write-Error 'probe'", exit: 1 },
-          { command: "opencode_missing_command_for_status_probe", exit: 1 },
-          { command: "cmd /d /c exit 7; Write-Output recovered", exit: 0 },
-          { command: "cmd /d /c exit 0; Write-Error 'probe'", exit: 1 },
-          { command: "cmd /d /c exit 7; Write-Error 'probe'", exit: 7 },
-          { command: "cmd /d /c exit 9", exit: 9 },
-          { command: "exit 42", exit: 42 },
-          { command: "throw 'probe'", exit: 1 },
-          { command: "param([string]$value = 'ok'); Write-Output $value", exit: 0 },
-          { command: "Write-Information 'probe'", exit: 0 },
-        ]
-        for (const entry of cases) {
-          const result = yield* run({ command: entry.command })
-          expect(result.metadata.exit).toBe(entry.exit)
-          // 模型收到同一准确退出码和真实shell名称，便于按正确方言修正错误。
-          if (entry.exit !== 0) {
-            expect(result.output).toContain(`exit_code="${entry.exit}"`)
-            expect(result.output).toContain(`shell="${item.label}"`)
-          }
-        }
-      }))), 30_000)
+    it.live(
+      `reports final PowerShell status with native exit codes [${item.label}]`,
+      () =>
+        withShell(
+          item,
+          runIn(
+            projectRoot,
+            Effect.gen(function* () {
+              // 独立状态常量覆盖cmdlet失败、native码、成功恢复和显式控制流。
+              const cases = [
+                { command: "Write-Error 'probe'", exit: 1 },
+                { command: "opencode_missing_command_for_status_probe", exit: 1 },
+                { command: "cmd /d /c exit 7; Write-Output recovered", exit: 0 },
+                { command: "cmd /d /c exit 0; Write-Error 'probe'", exit: 1 },
+                { command: "cmd /d /c exit 7; Write-Error 'probe'", exit: 7 },
+                { command: "cmd /d /c exit 9", exit: 9 },
+                { command: "exit 42", exit: 42 },
+                { command: "throw 'probe'", exit: 1 },
+                { command: "param([string]$value = 'ok'); Write-Output $value", exit: 0 },
+                { command: "Write-Information 'probe'", exit: 0 },
+              ]
+              for (const entry of cases) {
+                const result = yield* run({ command: entry.command })
+                expect(result.metadata.exit).toBe(entry.exit)
+                // 模型收到同一准确退出码和真实shell名称，便于按正确方言修正错误。
+                if (entry.exit !== 0) {
+                  expect(result.output).toContain(`exit_code="${entry.exit}"`)
+                  expect(result.output).toContain(`shell="${item.label}"`)
+                }
+              }
+            }),
+          ),
+        ),
+      30_000,
+    )
   }
 
   for (const item of ps) {
-    it.live(`preserves native Python quote codepoints [${item.label}]`, () =>
-      withShell(item, runIn(projectRoot, Effect.gen(function* () {
-        // String.raw保留测试需要的真实反斜杠，避免JS先消耗转义而测成另一条命令。
-        const command = String.raw`python -B -c "x=[ord(c) for c in r'\""']; print(x)"`
-        expect([...command].filter((char) => char === "\\")).toHaveLength(1)
-        const result = yield* run({ command })
-        // 92和34分别是反斜杠、双引号；直接调用两版PowerShell的独立探针给出原生预期。
-        // 5.1的Legacy binder消费反斜杠，7保持该字符；Harness忠实保留各自语言语义。
-        expect(result.metadata.exit).toBe(0)
-        expect(result.output.trim()).toBe(item.label === "powershell" ? "[34]" : "[92, 34]")
-        // 删除内容改写后，新调用保持原命令身份且不再写adaptation标签。
-        expect(result.metadata).not.toHaveProperty("commandAdaptation")
-      }))), 30_000)
+    it.live(
+      `preserves native Python quote codepoints [${item.label}]`,
+      () =>
+        withShell(
+          item,
+          runIn(
+            projectRoot,
+            Effect.gen(function* () {
+              // String.raw保留测试需要的真实反斜杠，避免JS先消耗转义而测成另一条命令。
+              const command = String.raw`python -B -c "x=[ord(c) for c in r'\""']; print(x)"`
+              expect([...command].filter((char) => char === "\\")).toHaveLength(1)
+              const result = yield* run({ command })
+              // 92和34分别是反斜杠、双引号；直接调用两版PowerShell的独立探针给出原生预期。
+              // 5.1的Legacy binder消费反斜杠，7保持该字符；Harness忠实保留各自语言语义。
+              expect(result.metadata.exit).toBe(0)
+              expect(result.output.trim()).toBe(item.label === "powershell" ? "[34]" : "[92, 34]")
+              // 删除内容改写后，新调用保持原命令身份且不再写adaptation标签。
+              expect(result.metadata).not.toHaveProperty("commandAdaptation")
+            }),
+          ),
+        ),
+      30_000,
+    )
   }
 })
 
@@ -3716,7 +3811,9 @@ describe.skipIf(process.platform !== "win32")("tool.shell native Python inputs",
             expect(pathResult.metadata.exit).toBe(0)
             expect(pathResult.output).toContain('{"path":1}')
             // 输出路径同时验证带空格的静态调用入口及解释器身份。
-            expect(pathResult.output.toLowerCase().replaceAll("\\", "/")).toContain(interpreter.toLowerCase().replaceAll("\\", "/"))
+            expect(pathResult.output.toLowerCase().replaceAll("\\", "/")).toContain(
+              interpreter.toLowerCase().replaceAll("\\", "/"),
+            )
             expect(pathResult.metadata).not.toHaveProperty("commandAdaptation")
           }),
         ),
@@ -3725,244 +3822,275 @@ describe.skipIf(process.platform !== "win32")("tool.shell native Python inputs",
   }
 
   for (const item of ps) {
-    it.live(`preserves valid Python semicolon statements [${item.label}]`, () =>
-      withShell(
-        item,
-        runIn(
-          projectRoot,
-          Effect.gen(function* () {
-            const result = yield* run({
-              command: `@'\nprint('{"key":1}'); print(2)\n'@ | python -`,
-            })
-            expect(result.metadata.exit).toBe(0)
-            expect(result.output).toContain('{"key":1}')
-            expect(result.output).toContain("2")
-            expect(result.metadata).not.toHaveProperty("commandAdaptation")
-          }),
+    it.live(
+      `preserves valid Python semicolon statements [${item.label}]`,
+      () =>
+        withShell(
+          item,
+          runIn(
+            projectRoot,
+            Effect.gen(function* () {
+              const result = yield* run({
+                command: `@'\nprint('{"key":1}'); print(2)\n'@ | python -`,
+              })
+              expect(result.metadata.exit).toBe(0)
+              expect(result.output).toContain('{"key":1}')
+              expect(result.output).toContain("2")
+              expect(result.metadata).not.toHaveProperty("commandAdaptation")
+            }),
+          ),
         ),
-      ),
       30_000,
     )
   }
 
   // 双引号明确请求本层展开；与字面块测试配对，覆盖两种不同的调用意图。
   for (const item of ps) {
-    it.live(`applies requested PowerShell expansion in python source [${item.label}]`, () =>
-      withShell(
-        item,
-        runIn(
-          projectRoot,
-          Effect.gen(function* () {
-            const result = yield* run({
-              command: `python -c "s='$(Write-Output EXPANDED)'; print(s)"`,
-            })
-            expect(result.metadata.exit).toBe(0)
-            expect(result.output.trim()).toBe("EXPANDED")
-          }),
+    it.live(
+      `applies requested PowerShell expansion in python source [${item.label}]`,
+      () =>
+        withShell(
+          item,
+          runIn(
+            projectRoot,
+            Effect.gen(function* () {
+              const result = yield* run({
+                command: `python -c "s='$(Write-Output EXPANDED)'; print(s)"`,
+              })
+              expect(result.metadata.exit).toBe(0)
+              expect(result.output.trim()).toBe("EXPANDED")
+            }),
+          ),
         ),
-      ),
       30_000,
     )
   }
 
   // Unicode 和各种引号组合应逐字符到达 Python
   for (const item of ps) {
-    it.live(`preserves unicode and quote combinations [${item.label}]`, () =>
-      withShell(
-        item,
-        runIn(
-          projectRoot,
-          Effect.gen(function* () {
-            // 同一字面块同时保留Unicode和JSON引号，验证UTF-8环境与正文传递。
-            const result = yield* run({
-              command: `@'\nprint('{"k":"v"} 汉字')\n'@ | python -`,
-            })
-            expect(result.metadata.exit).toBe(0)
-            // Python 应输出原始源码中的 JSON 和 Unicode
-            expect(result.output).toContain('{"k":"v"} 汉字')
-          }),
+    it.live(
+      `preserves unicode and quote combinations [${item.label}]`,
+      () =>
+        withShell(
+          item,
+          runIn(
+            projectRoot,
+            Effect.gen(function* () {
+              // 同一字面块同时保留Unicode和JSON引号，验证UTF-8环境与正文传递。
+              const result = yield* run({
+                command: `@'\nprint('{"k":"v"} 汉字')\n'@ | python -`,
+              })
+              expect(result.metadata.exit).toBe(0)
+              // Python 应输出原始源码中的 JSON 和 Unicode
+              expect(result.output).toContain('{"k":"v"} 汉字')
+            }),
+          ),
         ),
-      ),
       30_000,
     )
   }
 
   // 尾部 Select-Object -First/-Last 应保持行为
   for (const item of ps) {
-    it.live(`preserves Select-Object -First suffix [${item.label}]`, () =>
-      withShell(
-        item,
-        runIn(
-          projectRoot,
-          Effect.gen(function* () {
-            const result = yield* run({
-              command: `python -c "for i in range(10): print(i)" | Select-Object -First 3`,
-            })
-            expect(result.metadata.exit).toBe(0)
-            const lines = result.output.trim().split("\n")
-            expect(lines.length).toBeLessThanOrEqual(3)
-            expect(lines[0]).toContain("0")
-          }),
+    it.live(
+      `preserves Select-Object -First suffix [${item.label}]`,
+      () =>
+        withShell(
+          item,
+          runIn(
+            projectRoot,
+            Effect.gen(function* () {
+              const result = yield* run({
+                command: `python -c "for i in range(10): print(i)" | Select-Object -First 3`,
+              })
+              expect(result.metadata.exit).toBe(0)
+              const lines = result.output.trim().split("\n")
+              expect(lines.length).toBeLessThanOrEqual(3)
+              expect(lines[0]).toContain("0")
+            }),
+          ),
         ),
-      ),
       30_000,
     )
   }
 
   // 不支持的命令结构应原样执行，不产生 adaptation metadata
   for (const item of ps) {
-    it.live(`does not normalize compound commands [${item.label}]`, () =>
-      withShell(
-        item,
-        runIn(
-          projectRoot,
-          Effect.gen(function* () {
-            const result = yield* run({
-              command: `python -c "print(1)"; Write-Output "done"`,
-            })
-            // 复合命令交给shell原生顺序执行，保持原始命令身份。
-            expect(result.metadata).not.toHaveProperty("commandAdaptation")
-            expect(result.output).toContain("1")
-            expect(result.output).toContain("done")
-          }),
+    it.live(
+      `does not normalize compound commands [${item.label}]`,
+      () =>
+        withShell(
+          item,
+          runIn(
+            projectRoot,
+            Effect.gen(function* () {
+              const result = yield* run({
+                command: `python -c "print(1)"; Write-Output "done"`,
+              })
+              // 复合命令交给shell原生顺序执行，保持原始命令身份。
+              expect(result.metadata).not.toHaveProperty("commandAdaptation")
+              expect(result.output).toContain("1")
+              expect(result.output).toContain("done")
+            }),
+          ),
         ),
-      ),
       30_000,
     )
   }
 
   // conda保留原环境选择；在权限处中断，只检查原始命令证据。
   for (const item of ps) {
-    it.live(`preserves conda command evidence without execution [${item.label}]`, () =>
-      withShell(
-        item,
-        runIn(
-          projectRoot,
-          Effect.gen(function* () {
-            const requests: Array<Omit<PermissionV1.Request, "id" | "sessionID" | "tool">> = []
-            const stop = new Error("stop before conda execution")
-            expect(
-              yield* fail(
-                {
-                  command: String.raw`conda run -n agent python -c "print('{\"key\":1}')"`,
-                },
-                capture(requests, stop),
-              ),
-            ).toMatchObject({ message: stop.message })
-            const metadata = requests.find((request) => request.permission === "bash")?.metadata
-            expect(metadata?.command).toBe(String.raw`conda run -n agent python -c "print('{\"key\":1}')"`)
-            expect(metadata).not.toHaveProperty("inline_scripts")
-          }),
+    it.live(
+      `preserves conda command evidence without execution [${item.label}]`,
+      () =>
+        withShell(
+          item,
+          runIn(
+            projectRoot,
+            Effect.gen(function* () {
+              const requests: Array<Omit<PermissionV1.Request, "id" | "sessionID" | "tool">> = []
+              const stop = new Error("stop before conda execution")
+              expect(
+                yield* fail(
+                  {
+                    command: String.raw`conda run -n agent python -c "print('{\"key\":1}')"`,
+                  },
+                  capture(requests, stop),
+                ),
+              ).toMatchObject({ message: stop.message })
+              const metadata = requests.find((request) => request.permission === "bash")?.metadata
+              expect(metadata?.command).toBe(String.raw`conda run -n agent python -c "print('{\"key\":1}')"`)
+              expect(metadata).not.toHaveProperty("inline_scripts")
+            }),
+          ),
         ),
-      ),
       30_000,
     )
   }
 
   for (const item of ps) {
-    it.live(`leaves backtick and extra argv commands unchanged [${item.label}]`, () =>
-      withShell(
-        item,
-        runIn(
-          projectRoot,
-          Effect.gen(function* () {
-            for (const command of [
-              'python -c "print(`"hello`")"',
-              'python -c "print(1)" "extra"',
-              'python -c "print(1)" > output.txt',
-              'python -c "print(1)"\nWrite-Output done',
-            ]) {
-              const requests: Array<Omit<PermissionV1.Request, "id" | "sessionID" | "tool">> = []
-              const stop = new Error("stop before unsupported boundary")
-              expect(yield* fail({ command }, capture(requests, stop))).toMatchObject({
-                message: stop.message,
-              })
-              expect(requests.find((request) => request.permission === "bash")?.metadata).not.toHaveProperty("inline_scripts")
-            }
-          }),
+    it.live(
+      `leaves backtick and extra argv commands unchanged [${item.label}]`,
+      () =>
+        withShell(
+          item,
+          runIn(
+            projectRoot,
+            Effect.gen(function* () {
+              for (const command of [
+                'python -c "print(`"hello`")"',
+                'python -c "print(1)" "extra"',
+                'python -c "print(1)" > output.txt',
+                'python -c "print(1)"\nWrite-Output done',
+              ]) {
+                const requests: Array<Omit<PermissionV1.Request, "id" | "sessionID" | "tool">> = []
+                const stop = new Error("stop before unsupported boundary")
+                expect(yield* fail({ command }, capture(requests, stop))).toMatchObject({
+                  message: stop.message,
+                })
+                expect(requests.find((request) => request.permission === "bash")?.metadata).not.toHaveProperty(
+                  "inline_scripts",
+                )
+              }
+            }),
+          ),
         ),
-      ),
       30_000,
     )
   }
 
   // Python flags 应保留
   for (const item of ps) {
-    it.live(`preserves Python flags [${item.label}]`, () =>
-      withShell(
-        item,
-        runIn(
-          projectRoot,
-          Effect.gen(function* () {
-            // -B 设置 dont_write_bytecode flag 为 1
-            const result = yield* run({
-              command: `python -B -c "import sys; print(sys.flags.dont_write_bytecode)"`,
-            })
-            expect(result.metadata.exit).toBe(0)
-            expect(result.output).toContain("1")
-          }),
+    it.live(
+      `preserves Python flags [${item.label}]`,
+      () =>
+        withShell(
+          item,
+          runIn(
+            projectRoot,
+            Effect.gen(function* () {
+              // -B 设置 dont_write_bytecode flag 为 1
+              const result = yield* run({
+                command: `python -B -c "import sys; print(sys.flags.dont_write_bytecode)"`,
+              })
+              expect(result.metadata.exit).toBe(0)
+              expect(result.output).toContain("1")
+            }),
+          ),
         ),
-      ),
       30_000,
     )
   }
 
   // 真正的 Python SyntaxError 应由原解释器直接输出，不增加 wrapper frame
   for (const item of ps) {
-    it.live(`reports real SyntaxError without wrapper frame [${item.label}]`, () =>
-      withShell(
-        item,
-        runIn(
-          projectRoot,
-          Effect.gen(function* () {
-            const result = yield* run({
-              command: `python -c "print("`,
-            })
-            expect(result.metadata.exit).not.toBe(0)
-            // Python 语法错误应直接出现在输出中
-            expect(result.output).toMatch(/SyntaxError|Unexpected EOF|was never closed/)
-            // traceback 不应包含 bootstrap/wrapper frame
-            expect(result.output).not.toContain("__opencode")
-          }),
+    it.live(
+      `reports real SyntaxError without wrapper frame [${item.label}]`,
+      () =>
+        withShell(
+          item,
+          runIn(
+            projectRoot,
+            Effect.gen(function* () {
+              const result = yield* run({
+                command: `python -c "print("`,
+              })
+              expect(result.metadata.exit).not.toBe(0)
+              // Python 语法错误应直接出现在输出中
+              expect(result.output).toMatch(/SyntaxError|Unexpected EOF|was never closed/)
+              // traceback 不应包含 bootstrap/wrapper frame
+              expect(result.output).not.toContain("__opencode")
+            }),
+          ),
         ),
-      ),
       30_000,
     )
   }
 
   // 真实Tool依次经过两个门禁，危险源码仅分类；在第二个门禁停止以证明执行尚未发生。
   for (const item of ps) {
-    it.live(`classifies original literal source in both permission gates [${item.label}]`, () =>
-      withShell(
-        item,
-        runIn(
-          projectRoot,
-          Effect.gen(function* () {
-            const requests: Array<Omit<PermissionV1.Request, "id" | "sessionID" | "tool">> = []
-            const outside = yield* tmpdirScoped()
-            const command = "@'\nimport os; os.remove('example.tmp')\n'@ | python -"
-            const stop = new Error("stop before source execution")
-            const result = yield* fail({ command, workdir: outside }, {
-              ...ctx,
-              ask: (request) => Effect.gen(function* () {
-                requests.push(request)
-                if (request.permission === "bash") return yield* Effect.die(stop)
-              }),
-            })
-            expect(result.message).toBe(stop.message)
-            expect(requests.map((request) => request.permission)).toEqual(["external_directory", "bash"])
-            for (const request of requests) {
-              // 两个门禁都从同一正文取得源码风险，专属附加源码已退出请求合同。
-              expect(request.metadata.command).toBe(command)
-              expect(request.metadata).not.toHaveProperty("inline_scripts")
-              const risk = yield* Effect.promise(() => PermissionPrecheck.evaluate({ permission: request.permission, patterns: request.patterns, metadata: request.metadata }))
-              expect(risk.level).toBe("cautious")
-            }
-          }),
+    it.live(
+      `classifies original literal source in both permission gates [${item.label}]`,
+      () =>
+        withShell(
+          item,
+          runIn(
+            projectRoot,
+            Effect.gen(function* () {
+              const requests: Array<Omit<PermissionV1.Request, "id" | "sessionID" | "tool">> = []
+              const outside = yield* tmpdirScoped()
+              const command = "@'\nimport os; os.remove('example.tmp')\n'@ | python -"
+              const stop = new Error("stop before source execution")
+              const result = yield* fail(
+                { command, workdir: outside },
+                {
+                  ...ctx,
+                  ask: (request) =>
+                    Effect.gen(function* () {
+                      requests.push(request)
+                      if (request.permission === "bash") return yield* Effect.die(stop)
+                    }),
+                },
+              )
+              expect(result.message).toBe(stop.message)
+              expect(requests.map((request) => request.permission)).toEqual(["external_directory", "bash"])
+              for (const request of requests) {
+                // 两个门禁都从同一正文取得源码风险，专属附加源码已退出请求合同。
+                expect(request.metadata.command).toBe(command)
+                expect(request.metadata).not.toHaveProperty("inline_scripts")
+                const risk = yield* Effect.promise(() =>
+                  PermissionPrecheck.evaluate({
+                    permission: request.permission,
+                    patterns: request.patterns,
+                    metadata: request.metadata,
+                  }),
+                )
+                expect(risk.level).toBe("cautious")
+              }
+            }),
+          ),
         ),
-      ),
       30_000,
     )
   }
 })
-

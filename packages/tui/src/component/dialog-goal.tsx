@@ -40,10 +40,7 @@ function useGoalApi(sessionID: string) {
 
   // POST /session/:id/goal — 设置或更新 goal
   // [local-smark] 返回解析后的 Goal，供 toggle 调用方 reconcile 到 sync store
-  const setGoal = async (
-    input: { objective?: string; status?: string; continueOnError?: boolean },
-    close = true,
-  ) => {
+  const setGoal = async (input: { objective?: string; status?: string; continueOnError?: boolean }, close = true) => {
     const goal = await goalHttpSet(deps(), input)
     if (goal === undefined) return
     if (close) dialog.clear()
@@ -150,32 +147,32 @@ export function DialogGoalMenu(props: DialogGoalProps) {
         // 关闭显示 ○ Disabled，保存中显示 ⋯ Saving
         {
           title: "Continue after errors",
-          description: toggleLoading()
-            ? "⋯ Saving"
-            : goal()?.continueOnError
-              ? "✓ Enabled"
-              : "○ Disabled",
+          description: toggleLoading() ? "⋯ Saving" : goal()?.continueOnError ? "✓ Enabled" : "○ Disabled",
           value: "toggle-continue",
           onSelect: () => void toggleContinueOnError(),
         },
         // active 状态下显示 Pause 选项
         ...(goal()?.status === "active"
-          ? [{
-              title: "Pause",
-              description: "Pause the active goal",
-              value: "pause",
-              onSelect: () => void setGoal({ status: "paused" }),
-            }]
+          ? [
+              {
+                title: "Pause",
+                description: "Pause the active goal",
+                value: "pause",
+                onSelect: () => void setGoal({ status: "paused" }),
+              },
+            ]
           : []),
         // paused/blocked/complete 状态下显示 Resume 选项
         // complete 也允许 Resume：用户可能需要让模型重新验证或继续完善已完成的目标
         ...(goal()?.status === "paused" || goal()?.status === "blocked" || goal()?.status === "complete"
-          ? [{
-              title: "Resume",
-              description: "Resume the goal to active",
-              value: "resume",
-              onSelect: () => void setGoal({ status: "active" }),
-            }]
+          ? [
+              {
+                title: "Resume",
+                description: "Resume the goal to active",
+                value: "resume",
+                onSelect: () => void setGoal({ status: "active" }),
+              },
+            ]
           : []),
         {
           title: "Clear",
@@ -210,11 +207,7 @@ function DialogGoalEdit(props: DialogGoalProps) {
 }
 // #0503：供 prompt `/goal` 零参数路径使用：直接用 submit 权威 sessionID 打开 dialog，
 // 不走 goal.manage 的 route.type===session 守卫（home 上 create 后路由可能尚未切换）
-export function openGoalDialog(input: {
-  sessionID: string
-  hasGoal: boolean
-  replace: (view: () => unknown) => void
-}) {
+export function openGoalDialog(input: { sessionID: string; hasGoal: boolean; replace: (view: () => unknown) => void }) {
   if (input.hasGoal) {
     input.replace(() => <DialogGoalMenu sessionID={input.sessionID} />)
     return

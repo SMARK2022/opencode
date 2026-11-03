@@ -161,15 +161,26 @@ test.each(["running", "completed", "collapsed", "error", "decision", "transcript
     const review = {
       reviewID: "review_render",
       sessionID: "ses_reviewer_child",
-      status: scenario === "aborted" ? "aborted" : scenario === "running" ? "reviewing" : scenario === "error" ? "denied" : "allowed",
+      status:
+        scenario === "aborted"
+          ? "aborted"
+          : scenario === "running"
+            ? "reviewing"
+            : scenario === "error"
+              ? "denied"
+              : "allowed",
       precheck: { level: "cautious", reason: "requires review" },
       result: { risk_level: "high", user_authorization: scenario === "error" ? "unknown" : "high", rationale },
     }
     const decision = { outcome: "deny", risk_level: "high", user_authorization: "unknown", rationale }
     const input = scenario === "decision" || scenario === "transcript" ? decision : { command }
-    const metadata = scenario === "decision" || scenario === "transcript"
-      ? decision
-      : { output: scenario === "collapsed" ? Array.from({ length: 30 }, (_, i) => `line ${i}`).join("\n") : "pushed", autoReview: review }
+    const metadata =
+      scenario === "decision" || scenario === "transcript"
+        ? decision
+        : {
+            output: scenario === "collapsed" ? Array.from({ length: 30 }, (_, i) => `line ${i}`).join("\n") : "pushed",
+            autoReview: review,
+          }
     const tool: Part = {
       id: "part_review_tool",
       sessionID,
@@ -177,47 +188,84 @@ test.each(["running", "completed", "collapsed", "error", "decision", "transcript
       type: "tool",
       tool: scenario === "decision" || scenario === "transcript" ? "permission_review_decision" : "bash",
       callID: "call_review",
-      state: scenario === "error" || scenario === "aborted"
-        ? { status: "error", input, error: scenario === "aborted" ? "Tool execution aborted" : "auto reviewer denied", metadata: { autoReview: review }, time: { start: 1, end: 2 } }
-        : scenario === "running"
-          ? { status: "running", input, title: "Review", metadata: { autoReview: review }, time: { start: 1 } }
-          : { status: "completed", input, title: "Review", metadata, output: "", time: { start: 1, end: 2 } },
+      state:
+        scenario === "error" || scenario === "aborted"
+          ? {
+              status: "error",
+              input,
+              error: scenario === "aborted" ? "Tool execution aborted" : "auto reviewer denied",
+              metadata: { autoReview: review },
+              time: { start: 1, end: 2 },
+            }
+          : scenario === "running"
+            ? { status: "running", input, title: "Review", metadata: { autoReview: review }, time: { start: 1 } }
+            : { status: "completed", input, title: "Review", metadata, output: "", time: { start: 1, end: 2 } },
     }
     const assistant: AssistantMessage = {
-      id: "msg_review_answer", sessionID, role: "assistant", parentID: "msg_review_request",
-      time: { created: 2, completed: 3 }, modelID: "model", providerID: "provider", mode: "build", agent: "build",
-      path: { cwd: directory, root: directory }, cost: 0,
+      id: "msg_review_answer",
+      sessionID,
+      role: "assistant",
+      parentID: "msg_review_request",
+      time: { created: 2, completed: 3 },
+      modelID: "model",
+      providerID: "provider",
+      mode: "build",
+      agent: "build",
+      path: { cwd: directory, root: directory },
+      cost: 0,
       tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
     }
     const user: UserMessage = {
-      id: "msg_review_request", sessionID, role: "user", time: { created: 1 },
-      agent: "permission-reviewer", model: { providerID: "provider", modelID: "model" },
+      id: "msg_review_request",
+      sessionID,
+      role: "user",
+      time: { created: 1 },
+      agent: "permission-reviewer",
+      model: { providerID: "provider", modelID: "model" },
     }
     // 可见协议请求与助手解释使用不同消息，验证展示顺序而不把请求当作人类授权。
     const request: Part = {
-      id: "part_review_request", sessionID, messageID: user.id, type: "text",
-      text: ">>> TRANSCRIPT START\nuser: inspect this key\n>>> TRANSCRIPT END\n>>> APPROVAL REQUEST START\n{\"permission\":\"bash\"}\n>>> APPROVAL REQUEST END",
+      id: "part_review_request",
+      sessionID,
+      messageID: user.id,
+      type: "text",
+      text: '>>> TRANSCRIPT START\nuser: inspect this key\n>>> TRANSCRIPT END\n>>> APPROVAL REQUEST START\n{"permission":"bash"}\n>>> APPROVAL REQUEST END',
       metadata: { permissionReviewerRequest: true },
     }
     const explanation: Part = {
-      id: "part_review_explanation", sessionID, messageID: assistant.id, type: "text",
+      id: "part_review_explanation",
+      sessionID,
+      messageID: assistant.id,
+      type: "text",
       text: "The requested private key read is not explicitly authorized.",
     }
     await withRenderedReview(
       scenario === "transcript"
-        ? [{ info: user, parts: [request] }, { info: assistant, parts: [explanation, tool] }]
+        ? [
+            { info: user, parts: [request] },
+            { info: assistant, parts: [explanation, tool] },
+          ]
         : [{ info: assistant, parts: [tool] }],
       async (app, route) => {
-        const expected = scenario === "aborted" ? "! auto review · aborted · @permission-reviewer"
-          : scenario === "running" ? "◌ auto review"
-          : scenario === "error" ? "! auto review"
-          : scenario === "decision" || scenario === "transcript" ? rationale : "✓ auto review"
+        const expected =
+          scenario === "aborted"
+            ? "! auto review · aborted · @permission-reviewer"
+            : scenario === "running"
+              ? "◌ auto review"
+              : scenario === "error"
+                ? "! auto review"
+                : scenario === "decision" || scenario === "transcript"
+                  ? rationale
+                  : "✓ auto review"
         // 等待真实帧达到可观察条件，不用固定sleep冒充组件已完成异步水合。
-        await app.waitForFrame(async (frame) => {
-          if (frame.includes(expected)) return true
-          await Bun.sleep(10)
-          return false
-        }, { maxPasses: 300 })
+        await app.waitForFrame(
+          async (frame) => {
+            if (frame.includes(expected)) return true
+            await Bun.sleep(10)
+            return false
+          },
+          { maxPasses: 300 },
+        )
         // 行间距在预布局阶段写入，完成后续帧再使用屏幕坐标，避免点击时目标移动。
         await app.renderOnce()
         await app.renderOnce()
@@ -269,76 +317,141 @@ test.each(["running", "completed", "collapsed", "error", "decision", "transcript
 // 复用真实Session夹具，分别验证自动压缩标题及没有普通用户正文时的滚动条标记。
 test.each(["label", "scrollbar"] as const)("compaction boundary is rendered: %s", async (scenario) => {
   const user: UserMessage = {
-    id: "msg_compaction", sessionID, role: "user", time: { created: 1 },
-    agent: "build", model: { providerID: "provider", modelID: "model" },
+    id: "msg_compaction",
+    sessionID,
+    role: "user",
+    time: { created: 1 },
+    agent: "build",
+    model: { providerID: "provider", modelID: "model" },
   }
   const assistant: AssistantMessage = {
-    id: "msg_compaction_summary", sessionID, role: "assistant", parentID: user.id,
-    time: { created: 2, completed: 3 }, modelID: "model", providerID: "provider", mode: "build", agent: "build",
-    path: { cwd: directory, root: directory }, cost: 0,
+    id: "msg_compaction_summary",
+    sessionID,
+    role: "assistant",
+    parentID: user.id,
+    time: { created: 2, completed: 3 },
+    modelID: "model",
+    providerID: "provider",
+    mode: "build",
+    agent: "build",
+    path: { cwd: directory, root: directory },
+    cost: 0,
     tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
   }
   const compaction: Part = {
-    id: "part_compaction", sessionID, messageID: user.id, type: "compaction", auto: true,
+    id: "part_compaction",
+    sessionID,
+    messageID: user.id,
+    type: "compaction",
+    auto: true,
   }
   const summary: Part = {
-    id: "part_compaction_summary", sessionID, messageID: assistant.id, type: "text",
+    id: "part_compaction_summary",
+    sessionID,
+    messageID: assistant.id,
+    type: "text",
     text: scenario === "scrollbar" ? `${"content after compaction ".repeat(500)}SCROLL_BOTTOM` : "Compacted summary",
   }
-  await withRenderedReview([{ info: user, parts: [compaction] }, { info: assistant, parts: [summary] }], async (app) => {
-    const expected = scenario === "scrollbar" ? "SCROLL_BOTTOM" : "Auto Compaction"
-    await waitForReviewFrame(app, async (frame) => {
-      if (frame.includes(expected)) return true
-      await Bun.sleep(10)
-      return false
-    }, { maxPasses: 300 })
-    await app.renderOnce()
-    await app.renderOnce()
-    if (scenario === "label") {
-      expect(app.captureCharFrame()).toContain("Auto Compaction")
-      return
-    }
-    // 没有普通用户正文，右侧半格标记只能来自压缩边界，不能由普通prompt标记代替。
-    const rows = app.captureCharFrame().split("\n")
-    expect(rows.some((row) => /[▀▄]/.test(row.slice(-4)))).toBe(true)
-  }, { width: 100, height: scenario === "scrollbar" ? 14 : 30 })
+  await withRenderedReview(
+    [
+      { info: user, parts: [compaction] },
+      { info: assistant, parts: [summary] },
+    ],
+    async (app) => {
+      const expected = scenario === "scrollbar" ? "SCROLL_BOTTOM" : "Auto Compaction"
+      await waitForReviewFrame(
+        app,
+        async (frame) => {
+          if (frame.includes(expected)) return true
+          await Bun.sleep(10)
+          return false
+        },
+        { maxPasses: 300 },
+      )
+      await app.renderOnce()
+      await app.renderOnce()
+      if (scenario === "label") {
+        expect(app.captureCharFrame()).toContain("Auto Compaction")
+        return
+      }
+      // 没有普通用户正文，右侧半格标记只能来自压缩边界，不能由普通prompt标记代替。
+      const rows = app.captureCharFrame().split("\n")
+      expect(rows.some((row) => /[▀▄]/.test(row.slice(-4)))).toBe(true)
+    },
+    { width: 100, height: scenario === "scrollbar" ? 14 : 30 },
+  )
 })
 
 // 与原回归一样经过正文delta和Markdown布局，而非仅调用滚动计算函数。
 test("session follows streamed text from a one-row bottom gap", async () => {
   const message: AssistantMessage = {
-    id: "msg_bottom", sessionID, role: "assistant", parentID: "msg_user",
-    time: { created: 1 }, modelID: "model", providerID: "provider", mode: "build", agent: "build",
-    path: { cwd: directory, root: directory }, cost: 0,
+    id: "msg_bottom",
+    sessionID,
+    role: "assistant",
+    parentID: "msg_user",
+    time: { created: 1 },
+    modelID: "model",
+    providerID: "provider",
+    mode: "build",
+    agent: "build",
+    path: { cwd: directory, root: directory },
+    cost: 0,
     tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
   }
-  const part: Part = { id: "part_bottom", sessionID, messageID: message.id, type: "text", text: `${"wrapped content ".repeat(180)}OLD_BOTTOM` }
-  await withRenderedReview([{ info: message, parts: [part] }], async (app, _route, emit) => {
-    await waitForReviewFrame(app, async (frame) => {
-      if (frame.includes("OLD_BOTTOM")) return true
-      await Bun.sleep(10)
-      return false
-    }, { maxPasses: 300 })
-    await app.renderOnce()
-    await app.renderOnce()
-    // 沿实际快捷键进入一行容差区，未增长时仍尊重手动上滚。
-    app.mockInput.pressKey("y", { ctrl: true, meta: true })
-    await app.renderOnce()
-    await app.renderOnce()
-    expect(app.captureCharFrame()).not.toContain("OLD_BOTTOM")
-    emit({
-      directory, project: "proj_test",
-      payload: { id: "evt_bottom_growth", type: "message.part.delta", properties: {
-        sessionID, messageID: message.id, partID: part.id, field: "text", delta: `${" new content".repeat(80)} NEW_BOTTOM`,
-      } },
-    })
-    await waitForReviewFrame(app, async (frame) => {
-      if (frame.includes("NEW_BOTTOM")) return true
-      await Bun.sleep(10)
-      return false
-    }, { maxPasses: 300 })
-    expect(app.captureCharFrame()).toContain("NEW_BOTTOM")
-  }, { width: 100, height: 18 })
+  const part: Part = {
+    id: "part_bottom",
+    sessionID,
+    messageID: message.id,
+    type: "text",
+    text: `${"wrapped content ".repeat(180)}OLD_BOTTOM`,
+  }
+  await withRenderedReview(
+    [{ info: message, parts: [part] }],
+    async (app, _route, emit) => {
+      await waitForReviewFrame(
+        app,
+        async (frame) => {
+          if (frame.includes("OLD_BOTTOM")) return true
+          await Bun.sleep(10)
+          return false
+        },
+        { maxPasses: 300 },
+      )
+      await app.renderOnce()
+      await app.renderOnce()
+      // 沿实际快捷键进入一行容差区，未增长时仍尊重手动上滚。
+      app.mockInput.pressKey("y", { ctrl: true, meta: true })
+      await app.renderOnce()
+      await app.renderOnce()
+      expect(app.captureCharFrame()).not.toContain("OLD_BOTTOM")
+      emit({
+        directory,
+        project: "proj_test",
+        payload: {
+          id: "evt_bottom_growth",
+          type: "message.part.delta",
+          properties: {
+            sessionID,
+            messageID: message.id,
+            partID: part.id,
+            field: "text",
+            delta: `${" new content".repeat(80)} NEW_BOTTOM`,
+          },
+        },
+      })
+      await waitForReviewFrame(
+        app,
+        async (frame) => {
+          if (frame.includes("NEW_BOTTOM")) return true
+          await Bun.sleep(10)
+          return false
+        },
+        { maxPasses: 300 },
+      )
+      expect(app.captureCharFrame()).toContain("NEW_BOTTOM")
+    },
+    { width: 100, height: 18 },
+  )
 })
 
 // 同时覆盖正常导航与先空后有的预取，必须看到子会话正文而不只检查路由值。
@@ -346,79 +459,188 @@ test.each([false, true])("task opens its current child after stale prefetch: %s"
   const childID = "ses_task_child"
   let requests = 0
   const parent: AssistantMessage = {
-    id: "msg_task", sessionID, role: "assistant", parentID: "msg_user",
-    time: { created: 1, completed: 2 }, modelID: "model", providerID: "provider", mode: "build", agent: "build",
-    path: { cwd: directory, root: directory }, cost: 0,
+    id: "msg_task",
+    sessionID,
+    role: "assistant",
+    parentID: "msg_user",
+    time: { created: 1, completed: 2 },
+    modelID: "model",
+    providerID: "provider",
+    mode: "build",
+    agent: "build",
+    path: { cwd: directory, root: directory },
+    cost: 0,
     tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
   }
   const task: Part = {
-    id: "part_task", sessionID, messageID: parent.id, type: "tool", tool: "task", callID: "task_call",
-    state: { status: "completed", input: { description: "inspect child", subagent_type: "general" },
-      output: "", title: "inspect child", metadata: { sessionId: childID }, time: { start: 1, end: 2 } },
+    id: "part_task",
+    sessionID,
+    messageID: parent.id,
+    type: "tool",
+    tool: "task",
+    callID: "task_call",
+    state: {
+      status: "completed",
+      input: { description: "inspect child", subagent_type: "general" },
+      output: "",
+      title: "inspect child",
+      metadata: { sessionId: childID },
+      time: { start: 1, end: 2 },
+    },
   }
-  await withRenderedReview([{ info: parent, parts: [task] }], async (app) => {
-    await waitForReviewFrame(app, async (frame) => {
-      if (frame.includes("inspect child") && requests > 0) return true
-      await Bun.sleep(10)
-      return false
-    }, { maxPasses: 300 })
-    await app.renderOnce()
-    await app.renderOnce()
-    const lines = app.captureCharFrame().split("\n")
-    const y = lines.findIndex((line) => line.includes("inspect child"))
-    expect(y).toBeGreaterThanOrEqual(0)
-    await app.mockMouse.click(lines[y].indexOf("inspect child"), y)
-    await waitForReviewFrame(app, async (frame) => {
-      if (frame.includes("child session refreshed")) return true
-      await Bun.sleep(10)
-      return false
-    }, { maxPasses: 300 })
-    expect(requests).toBeGreaterThan(1)
-  }, {}, { [childID]: () => {
-    requests++
-    if (stale && requests === 1) return []
-    return [{ info: { ...parent, id: "msg_child", sessionID: childID, agent: "general" },
-      parts: [{ id: "part_child", sessionID: childID, messageID: "msg_child", type: "text", text: "child session refreshed" }] }]
-  } })
+  await withRenderedReview(
+    [{ info: parent, parts: [task] }],
+    async (app) => {
+      await waitForReviewFrame(
+        app,
+        async (frame) => {
+          if (frame.includes("inspect child") && requests > 0) return true
+          await Bun.sleep(10)
+          return false
+        },
+        { maxPasses: 300 },
+      )
+      await app.renderOnce()
+      await app.renderOnce()
+      const lines = app.captureCharFrame().split("\n")
+      const y = lines.findIndex((line) => line.includes("inspect child"))
+      expect(y).toBeGreaterThanOrEqual(0)
+      await app.mockMouse.click(lines[y].indexOf("inspect child"), y)
+      await waitForReviewFrame(
+        app,
+        async (frame) => {
+          if (frame.includes("child session refreshed")) return true
+          await Bun.sleep(10)
+          return false
+        },
+        { maxPasses: 300 },
+      )
+      expect(requests).toBeGreaterThan(1)
+    },
+    {},
+    {
+      [childID]: () => {
+        requests++
+        if (stale && requests === 1) return []
+        return [
+          {
+            info: { ...parent, id: "msg_child", sessionID: childID, agent: "general" },
+            parts: [
+              {
+                id: "part_child",
+                sessionID: childID,
+                messageID: "msg_child",
+                type: "text",
+                text: "child session refreshed",
+              },
+            ],
+          },
+        ]
+      },
+    },
+  )
 })
 
 // 覆盖源新增的共享槽位、无审查外观、多文件去重和非Shell导航，不复制生产组件布局。
-test.each(["read", "read-error", "generic", "edit", "write", "running-output", "plain-read", "patch", "plain-patch"] as const)(
-  "shared auto review is rendered by the real tool: %s", async (scenario) => {
-    const childID = "ses_reviewer_child"
-    const plain = scenario.startsWith("plain-")
-    const patch = scenario === "patch" || scenario === "plain-patch"
-    const toolName = patch ? "apply_patch" : scenario === "generic" ? "future_tool" : scenario === "running-output" ? "bash" : scenario.replace("plain-", "").replace("-error", "")
-    const review = { reviewID: "review_shared", sessionID: childID, status: scenario === "read-error" ? "denied" : "allowed",
-      result: { risk_level: "high", user_authorization: "high", rationale: "authorized" } }
-    const info: AssistantMessage = {
-      id: "msg_shared", sessionID, role: "assistant", parentID: "msg_user", time: { created: 1, completed: 2 },
-      modelID: "model", providerID: "provider", mode: "build", agent: "build", path: { cwd: directory, root: directory }, cost: 0,
-      tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
-    }
-    const files = (plain ? ["a"] : ["a", "b"]).map((name) => ({ filePath: `external/${name}.ts`, relativePath: `external/${name}.ts`,
-      type: "update", patch: `--- external/${name}.ts\n+++ external/${name}.ts\n@@ -1 +1 @@\n-old\n+new`, additions: 1, deletions: 1 }))
-    const metadata = {
-      ...(plain ? {} : { autoReview: review }),
-      ...(patch ? { files, diagnostics: {} } : {}),
-      ...(scenario === "edit" ? { diff: Array.from({ length: 30 }, (_, i) => `+line ${i}`).join("\n"), diagnostics: {} } : {}),
-      ...(scenario === "running-output" ? { output: "streamed output" } : {}),
-    }
-    const input = patch ? { patchText: "*** Begin Patch\n*** End Patch" } : scenario === "running-output" ? { command } : scenario === "edit" ? { filePath: "external/config.ts", oldString: "old", newString: "new" } : scenario === "write" ? { filePath: "external/config.ts", content: "created" } : { filePath: "external/config.ts" }
-    const part: Part = {
-      id: "part_shared", sessionID, messageID: info.id, type: "tool", tool: toolName, callID: "shared_call",
-      state: scenario === "read-error"
+test.each([
+  "read",
+  "read-error",
+  "generic",
+  "edit",
+  "write",
+  "running-output",
+  "plain-read",
+  "patch",
+  "plain-patch",
+] as const)("shared auto review is rendered by the real tool: %s", async (scenario) => {
+  const childID = "ses_reviewer_child"
+  const plain = scenario.startsWith("plain-")
+  const patch = scenario === "patch" || scenario === "plain-patch"
+  const toolName = patch
+    ? "apply_patch"
+    : scenario === "generic"
+      ? "future_tool"
+      : scenario === "running-output"
+        ? "bash"
+        : scenario.replace("plain-", "").replace("-error", "")
+  const review = {
+    reviewID: "review_shared",
+    sessionID: childID,
+    status: scenario === "read-error" ? "denied" : "allowed",
+    result: { risk_level: "high", user_authorization: "high", rationale: "authorized" },
+  }
+  const info: AssistantMessage = {
+    id: "msg_shared",
+    sessionID,
+    role: "assistant",
+    parentID: "msg_user",
+    time: { created: 1, completed: 2 },
+    modelID: "model",
+    providerID: "provider",
+    mode: "build",
+    agent: "build",
+    path: { cwd: directory, root: directory },
+    cost: 0,
+    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+  }
+  const files = (plain ? ["a"] : ["a", "b"]).map((name) => ({
+    filePath: `external/${name}.ts`,
+    relativePath: `external/${name}.ts`,
+    type: "update",
+    patch: `--- external/${name}.ts\n+++ external/${name}.ts\n@@ -1 +1 @@\n-old\n+new`,
+    additions: 1,
+    deletions: 1,
+  }))
+  const metadata = {
+    ...(plain ? {} : { autoReview: review }),
+    ...(patch ? { files, diagnostics: {} } : {}),
+    ...(scenario === "edit"
+      ? { diff: Array.from({ length: 30 }, (_, i) => `+line ${i}`).join("\n"), diagnostics: {} }
+      : {}),
+    ...(scenario === "running-output" ? { output: "streamed output" } : {}),
+  }
+  const input = patch
+    ? { patchText: "*** Begin Patch\n*** End Patch" }
+    : scenario === "running-output"
+      ? { command }
+      : scenario === "edit"
+        ? { filePath: "external/config.ts", oldString: "old", newString: "new" }
+        : scenario === "write"
+          ? { filePath: "external/config.ts", content: "created" }
+          : { filePath: "external/config.ts" }
+  const part: Part = {
+    id: "part_shared",
+    sessionID,
+    messageID: info.id,
+    type: "tool",
+    tool: toolName,
+    callID: "shared_call",
+    state:
+      scenario === "read-error"
         ? { status: "error", input, error: "auto reviewer denied", metadata, time: { start: 1, end: 2 } }
         : scenario === "running-output"
           ? { status: "running", input, metadata, title: "running", time: { start: 1 } }
-          : { status: "completed", input, metadata, output: scenario === "generic" ? "GENERIC_OUTPUT" : "", title: "completed", time: { start: 1, end: 2 } },
-    }
-    await withRenderedReview([{ info, parts: [part] }], async (app) => {
-      await waitForReviewFrame(app, async (frame) => {
-        if (plain ? frame.includes(patch ? "a.ts" : "config.ts") : frame.includes("@permission-reviewer")) return true
-        await Bun.sleep(10)
-        return false
-      }, { maxPasses: 300 })
+          : {
+              status: "completed",
+              input,
+              metadata,
+              output: scenario === "generic" ? "GENERIC_OUTPUT" : "",
+              title: "completed",
+              time: { start: 1, end: 2 },
+            },
+  }
+  await withRenderedReview(
+    [{ info, parts: [part] }],
+    async (app) => {
+      await waitForReviewFrame(
+        app,
+        async (frame) => {
+          if (plain ? frame.includes(patch ? "a.ts" : "config.ts") : frame.includes("@permission-reviewer")) return true
+          await Bun.sleep(10)
+          return false
+        },
+        { maxPasses: 300 },
+      )
       await app.renderOnce()
       await app.renderOnce()
       const lines = app.captureCharFrame().split("\n")
@@ -436,148 +658,282 @@ test.each(["read", "read-error", "generic", "edit", "write", "running-output", "
         expect(row).toBeLessThan(lines.findIndex((line) => line.includes("a.ts")))
       }
       if (scenario === "running-output") expect(row).toBeLessThan(lines.findIndex((line) => line.includes(command)))
-      if (scenario === "read" || scenario === "read-error") expect(row).toBe(lines.findIndex((line) => line.includes("config.ts")) + 1)
+      if (scenario === "read" || scenario === "read-error")
+        expect(row).toBe(lines.findIndex((line) => line.includes("config.ts")) + 1)
       if (scenario === "read" || scenario === "edit") {
         await clickVisibleText(app, "auto review")
-        await waitForReviewFrame(app, async (frame) => {
-          if (frame.includes("reviewer child visible")) return true
-          await Bun.sleep(10)
-          return false
-        }, { maxPasses: 300 })
+        await waitForReviewFrame(
+          app,
+          async (frame) => {
+            if (frame.includes("reviewer child visible")) return true
+            await Bun.sleep(10)
+            return false
+          },
+          { maxPasses: 300 },
+        )
         // 导航到真实审查子会话后，页脚必须保留含连字符的代理名。
         expect(app.captureCharFrame()).toContain("Permission-Reviewer")
         expect(app.captureCharFrame()).not.toContain("Click to collapse")
       }
-    }, {}, { [childID]: () => [{ info: { ...info, id: "msg_reviewer_shared", sessionID: childID, agent: "permission-reviewer" },
-      parts: [{ id: "part_reviewer_shared", sessionID: childID, messageID: "msg_reviewer_shared", type: "text", text: "reviewer child visible" }] }] })
+    },
+    {},
+    {
+      [childID]: () => [
+        {
+          info: { ...info, id: "msg_reviewer_shared", sessionID: childID, agent: "permission-reviewer" },
+          parts: [
+            {
+              id: "part_reviewer_shared",
+              sessionID: childID,
+              messageID: "msg_reviewer_shared",
+              type: "text",
+              text: "reviewer child visible",
+            },
+          ],
+        },
+      ],
+    },
+  )
+})
+
+// 复用现有真实Session和隔离SDK transport，断言字符帧与鼠标/SSE行为而非源码字符串。
+test.each(["bounded", "boundary", "conceal", "insert", "remove", "show"] as const)(
+  "reasoning run replay: %s",
+  async (scenario) => {
+    const messageID = `msg_reasoning_${scenario}`
+    const reasoning = (id: string, text: string): Part => ({
+      id,
+      sessionID,
+      messageID,
+      type: "reasoning",
+      text,
+      time: { start: 1, end: 2 },
+    })
+    const long = Array.from({ length: 7 }, (_, index) => `middle ${index}`).join("\n")
+    const boundary: Part = { id: "part_b", sessionID, messageID, type: "text", text: "   " }
+    const parts =
+      scenario === "bounded" || scenario === "show"
+        ? Array.from({ length: 10 }, (_, index) =>
+            reasoning(`part_${String(index).padStart(2, "0")}`, `short thought ${index + 1}`),
+          )
+        : scenario === "boundary"
+          ? [reasoning("part_a", "left source"), boundary, reasoning("part_c", "right source")]
+          : scenario === "conceal"
+            ? [reasoning("part_a", "visible first source"), reasoning("part_b", "![](private-url)")]
+            : scenario === "remove"
+              ? [reasoning("part_a", long), boundary, reasoning("part_c", "right source")]
+              : [reasoning("part_b", long)]
+    const info: AssistantMessage = {
+      id: messageID,
+      sessionID,
+      role: "assistant",
+      parentID: "msg_request",
+      finish: "stop",
+      time: { created: 1, completed: 3 },
+      modelID: "model",
+      providerID: "provider",
+      mode: "build",
+      agent: "build",
+      path: { cwd: directory, root: directory },
+      cost: 0,
+      tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+    }
+    await withRenderedReview(
+      [{ info, parts }],
+      async (app, _route, emit) => {
+        const frame = async (...texts: string[]) => {
+          await waitForReviewFrame(
+            app,
+            async (value) => {
+              if (texts.every((text) => value.includes(text))) return true
+              await Bun.sleep(5)
+              return false
+            },
+            { maxPasses: 400 },
+          )
+          // 等预布局间距落定后才使用可见文本坐标点击。
+          await app.renderOnce()
+          await app.renderOnce()
+          return app.captureCharFrame()
+        }
+        if (scenario === "boundary") {
+          const value = await frame("left source", "right source")
+          expect(value.split("\n").filter((line) => line.includes("Thought")).length).toBe(2)
+          expect(value).not.toContain("2 segments")
+          return
+        }
+        if (scenario === "conceal") {
+          await frame("visible first source")
+          for (let index = 0; index < 12; index++) {
+            await app.renderOnce()
+            expect(app.captureCharFrame()).not.toContain("private-url")
+            await Bun.sleep(5)
+          }
+          app.mockInput.pressKey("x", { ctrl: true })
+          app.mockInput.pressKey("h")
+          await frame("private-url")
+          app.mockInput.pressKey("x", { ctrl: true })
+          app.mockInput.pressKey("h")
+          // 固定分隔符属于结构；隐藏image后仍逐帧确认正文不会被晚到highlight复活。
+          await waitForReviewFrame(
+            app,
+            async (value) => {
+              if (!value.includes("private-url")) return true
+              await Bun.sleep(5)
+              return false
+            },
+            { maxPasses: 400 },
+          )
+          for (let index = 0; index < 12; index++) {
+            await app.renderOnce()
+            expect(app.captureCharFrame()).not.toContain("private-url")
+            await Bun.sleep(5)
+          }
+          return
+        }
+        if (scenario === "bounded" || scenario === "show") {
+          if (scenario === "show") {
+            // visibility=true 不预设 disclosure；原 #481 契约要求用户先展开局部 run。
+            await frame("▼ 展开查看完整推理")
+            await clickVisibleText(app, "▼ 展开查看完整推理")
+            expect(await frame("short thought 10", "▲ 收起推理")).not.toContain("▼ 展开查看完整推理")
+            await clickVisibleText(app, "▲ 收起推理")
+          }
+          const value = await frame("10 segments", "short thought 2", "▼ 展开查看完整推理")
+          const lines = value.split("\n")
+          expect(lines.filter((line) => line.includes("Thought")).length).toBe(1)
+          const header = lines.findIndex((line) => line.includes("10 segments"))
+          const footer = lines.findIndex((line) => line.includes("▼ 展开查看完整推理"))
+          expect(footer - header + 1).toBeLessThanOrEqual(7)
+          expect(value).not.toContain("short thought 10")
+          await clickVisibleText(app, "▼ 展开查看完整推理")
+          expect(await frame("short thought 10", "▲ 收起推理")).toContain("short thought 10")
+          // 再折叠再展开，完整正文不能因renderable销毁而变空。
+          await clickVisibleText(app, "▲ 收起推理")
+          await frame("▼ 展开查看完整推理")
+          await clickVisibleText(app, "▼ 展开查看完整推理")
+          await frame("short thought 10", "▲ 收起推理")
+          return
+        }
+        await frame("▼ 展开查看完整推理")
+        await clickVisibleText(app, "▼ 展开查看完整推理")
+        await frame("middle 6", "▲ 收起推理")
+        if (scenario === "insert") {
+          emit({
+            directory,
+            project: "proj_test",
+            payload: {
+              id: "evt_prepend",
+              type: "message.part.updated",
+              properties: { sessionID, part: reasoning("part_a", "earlier source"), time: 3 },
+            },
+          })
+          await frame("earlier source", "2 segments", "▲ 收起推理")
+          emit({
+            directory,
+            project: "proj_test",
+            payload: {
+              id: "evt_append",
+              type: "message.part.updated",
+              properties: { sessionID, part: reasoning("part_c", "later source"), time: 4 },
+            },
+          })
+          const value = await frame("later source", "3 segments", "▲ 收起推理")
+          expect(value.split("\n").filter((line) => line.includes("earlier source")).length).toBe(1)
+          return
+        }
+        emit({
+          directory,
+          project: "proj_test",
+          payload: {
+            id: "evt_boundary_remove",
+            type: "message.part.removed",
+            properties: { sessionID, messageID, partID: "part_b" },
+          },
+        })
+        const value = await frame("right source", "2 segments", "▲ 收起推理")
+        expect(value.split("\n").filter((line) => line.includes("right source")).length).toBe(1)
+        emit({
+          directory,
+          project: "proj_test",
+          payload: {
+            id: "evt_member_remove",
+            type: "message.part.removed",
+            properties: { sessionID, messageID, partID: "part_c" },
+          },
+        })
+        await waitForReviewFrame(
+          app,
+          async (next) => {
+            if (!next.includes("right source") && !next.includes("2 segments") && next.includes("middle 6")) return true
+            await Bun.sleep(5)
+            return false
+          },
+          { maxPasses: 400 },
+        )
+      },
+      { width: 110, height: 48 },
+      {},
+      { thinking_visibility: true },
+    )
   },
 )
 
-// 复用现有真实Session和隔离SDK transport，断言字符帧与鼠标/SSE行为而非源码字符串。
-test.each(["bounded", "boundary", "conceal", "insert", "remove", "show"] as const)("reasoning run replay: %s", async (scenario) => {
-  const messageID = `msg_reasoning_${scenario}`
-  const reasoning = (id: string, text: string): Part => ({ id, sessionID, messageID, type: "reasoning", text, time: { start: 1, end: 2 } })
-  const long = Array.from({ length: 7 }, (_, index) => `middle ${index}`).join("\n")
-  const boundary: Part = { id: "part_b", sessionID, messageID, type: "text", text: "   " }
-  const parts = scenario === "bounded" || scenario === "show"
-    ? Array.from({ length: 10 }, (_, index) => reasoning(`part_${String(index).padStart(2, "0")}`, `short thought ${index + 1}`))
-    : scenario === "boundary" ? [reasoning("part_a", "left source"), boundary, reasoning("part_c", "right source")]
-    : scenario === "conceal" ? [reasoning("part_a", "visible first source"), reasoning("part_b", "![](private-url)")]
-    : scenario === "remove" ? [reasoning("part_a", long), boundary, reasoning("part_c", "right source")]
-    : [reasoning("part_b", long)]
-  const info: AssistantMessage = {
-    id: messageID, sessionID, role: "assistant", parentID: "msg_request", finish: "stop",
-    time: { created: 1, completed: 3 }, modelID: "model", providerID: "provider", mode: "build", agent: "build",
-    path: { cwd: directory, root: directory }, cost: 0,
-    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
-  }
-  await withRenderedReview([{ info, parts }], async (app, _route, emit) => {
-    const frame = async (...texts: string[]) => {
-      await waitForReviewFrame(app, async (value) => {
-        if (texts.every((text) => value.includes(text))) return true
-        await Bun.sleep(5)
-        return false
-      }, { maxPasses: 400 })
-      // 等预布局间距落定后才使用可见文本坐标点击。
-      await app.renderOnce()
-      await app.renderOnce()
-      return app.captureCharFrame()
+test.each(["glob", "grep"] as const)(
+  "completed partial %s remains visibly incomplete with details off",
+  async (tool) => {
+    const messageID = `msg_partial_${tool}`
+    const info: AssistantMessage = {
+      id: messageID,
+      sessionID,
+      role: "assistant",
+      parentID: "msg_request",
+      finish: "stop",
+      time: { created: 1, completed: 3 },
+      modelID: "model",
+      providerID: "provider",
+      mode: "build",
+      agent: "build",
+      path: { cwd: directory, root: directory },
+      cost: 0,
+      tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
     }
-    if (scenario === "boundary") {
-      const value = await frame("left source", "right source")
-      expect(value.split("\n").filter((line) => line.includes("Thought")).length).toBe(2)
-      expect(value).not.toContain("2 segments")
-      return
+    const part: Part = {
+      id: "part_search",
+      sessionID,
+      messageID,
+      type: "tool",
+      tool,
+      callID: "call_search",
+      state: {
+        status: "completed",
+        title: "search",
+        input: { pattern: "needle", path: directory },
+        output: "No files found in accessible paths.",
+        metadata: { count: 0, matches: 0, partial: true, truncated: false },
+        time: { start: 1, end: 2 },
+      },
     }
-    if (scenario === "conceal") {
-      await frame("visible first source")
-      for (let index = 0; index < 12; index++) {
-        await app.renderOnce()
-        expect(app.captureCharFrame()).not.toContain("private-url")
-        await Bun.sleep(5)
-      }
-      app.mockInput.pressKey("x", { ctrl: true })
-      app.mockInput.pressKey("h")
-      await frame("private-url")
-      app.mockInput.pressKey("x", { ctrl: true })
-      app.mockInput.pressKey("h")
-      // 固定分隔符属于结构；隐藏image后仍逐帧确认正文不会被晚到highlight复活。
-      await waitForReviewFrame(app, async (value) => { if (!value.includes("private-url")) return true; await Bun.sleep(5); return false }, { maxPasses: 400 })
-      for (let index = 0; index < 12; index++) {
-        await app.renderOnce()
-        expect(app.captureCharFrame()).not.toContain("private-url")
-        await Bun.sleep(5)
-      }
-      return
-    }
-    if (scenario === "bounded" || scenario === "show") {
-      if (scenario === "show") {
-        // visibility=true 不预设 disclosure；原 #481 契约要求用户先展开局部 run。
-        await frame("▼ 展开查看完整推理")
-        await clickVisibleText(app, "▼ 展开查看完整推理")
-        expect(await frame("short thought 10", "▲ 收起推理")).not.toContain("▼ 展开查看完整推理")
-        await clickVisibleText(app, "▲ 收起推理")
-      }
-      const value = await frame("10 segments", "short thought 2", "▼ 展开查看完整推理")
-      const lines = value.split("\n")
-      expect(lines.filter((line) => line.includes("Thought")).length).toBe(1)
-      const header = lines.findIndex((line) => line.includes("10 segments"))
-      const footer = lines.findIndex((line) => line.includes("▼ 展开查看完整推理"))
-      expect(footer - header + 1).toBeLessThanOrEqual(7)
-      expect(value).not.toContain("short thought 10")
-      await clickVisibleText(app, "▼ 展开查看完整推理")
-      expect(await frame("short thought 10", "▲ 收起推理")).toContain("short thought 10")
-      // 再折叠再展开，完整正文不能因renderable销毁而变空。
-      await clickVisibleText(app, "▲ 收起推理")
-      await frame("▼ 展开查看完整推理")
-      await clickVisibleText(app, "▼ 展开查看完整推理")
-      await frame("short thought 10", "▲ 收起推理")
-      return
-    }
-    await frame("▼ 展开查看完整推理")
-    await clickVisibleText(app, "▼ 展开查看完整推理")
-    await frame("middle 6", "▲ 收起推理")
-    if (scenario === "insert") {
-      emit({ directory, project: "proj_test", payload: { id: "evt_prepend", type: "message.part.updated", properties: { sessionID, part: reasoning("part_a", "earlier source"), time: 3 } } })
-      await frame("earlier source", "2 segments", "▲ 收起推理")
-      emit({ directory, project: "proj_test", payload: { id: "evt_append", type: "message.part.updated", properties: { sessionID, part: reasoning("part_c", "later source"), time: 4 } } })
-      const value = await frame("later source", "3 segments", "▲ 收起推理")
-      expect(value.split("\n").filter((line) => line.includes("earlier source")).length).toBe(1)
-      return
-    }
-    emit({ directory, project: "proj_test", payload: { id: "evt_boundary_remove", type: "message.part.removed", properties: { sessionID, messageID, partID: "part_b" } } })
-    const value = await frame("right source", "2 segments", "▲ 收起推理")
-    expect(value.split("\n").filter((line) => line.includes("right source")).length).toBe(1)
-    emit({ directory, project: "proj_test", payload: { id: "evt_member_remove", type: "message.part.removed", properties: { sessionID, messageID, partID: "part_c" } } })
-    await waitForReviewFrame(app, async (next) => {
-      if (!next.includes("right source") && !next.includes("2 segments") && next.includes("middle 6")) return true
-      await Bun.sleep(5)
-      return false
-    }, { maxPasses: 400 })
-  }, { width: 110, height: 48 }, {}, { thinking_visibility: true })
-})
-
-test.each(["glob", "grep"] as const)("completed partial %s remains visibly incomplete with details off", async (tool) => {
-  const messageID = `msg_partial_${tool}`
-  const info: AssistantMessage = {
-    id: messageID, sessionID, role: "assistant", parentID: "msg_request", finish: "stop",
-    time: { created: 1, completed: 3 }, modelID: "model", providerID: "provider", mode: "build", agent: "build",
-    path: { cwd: directory, root: directory }, cost: 0,
-    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
-  }
-  const part: Part = { id: "part_search", sessionID, messageID, type: "tool", tool, callID: "call_search", state: {
-    status: "completed", title: "search", input: { pattern: "needle", path: directory }, output: "No files found in accessible paths.",
-    metadata: { count: 0, matches: 0, partial: true, truncated: false }, time: { start: 1, end: 2 },
-  } }
-  await withRenderedReview([{ info, parts: [part] }], async (app) => {
-    await waitForReviewFrame(app, async (frame) => {
-      if (frame.includes("incomplete")) return true
-      await Bun.sleep(5)
-      return false
-    }, { maxPasses: 400 })
-    expect(app.captureCharFrame()).toContain("incomplete")
-  }, {}, {}, { tool_details_visibility: false })
-})
+    await withRenderedReview(
+      [{ info, parts: [part] }],
+      async (app) => {
+        await waitForReviewFrame(
+          app,
+          async (frame) => {
+            if (frame.includes("incomplete")) return true
+            await Bun.sleep(5)
+            return false
+          },
+          { maxPasses: 400 },
+        )
+        expect(app.captureCharFrame()).toContain("incomplete")
+      },
+      {},
+      {},
+      { tool_details_visibility: false },
+    )
+  },
+)
 
 async function clickVisibleText(app: Awaited<ReturnType<typeof testRender>>, text: string) {
   const lines = app.captureCharFrame().split("\n")
@@ -590,7 +946,11 @@ async function clickVisibleText(app: Awaited<ReturnType<typeof testRender>>, tex
 }
 
 // 没有已排队的渲染不等于事件合并定时器已完成，等待可观察帧并持续推进原生绘制。
-async function waitForReviewFrame(app: Awaited<ReturnType<typeof testRender>>, predicate: (frame: string) => Promise<boolean>, options: { maxPasses: number }) {
+async function waitForReviewFrame(
+  app: Awaited<ReturnType<typeof testRender>>,
+  predicate: (frame: string) => Promise<boolean>,
+  options: { maxPasses: number },
+) {
   const start = Date.now()
   let passes = 0
   let frame = ""
@@ -603,309 +963,635 @@ async function waitForReviewFrame(app: Awaited<ReturnType<typeof testRender>>, p
     await new Promise((resolve) => process.nextTick(resolve))
     await new Promise((resolve) => setTimeout(resolve, 0))
   }
-  throw new Error(`Expected session frame did not appear after ${Date.now() - start}ms (${passes} passes, prior budget ${options.maxPasses}):\n${frame}`)
+  throw new Error(
+    `Expected session frame did not appear after ${Date.now() - start}ms (${passes} passes, prior budget ${options.maxPasses}):\n${frame}`,
+  )
 }
 
 // 两个source场景共用现有真实Session夹具：有回答定位旧返回，无回答定位请求正文。
-test.each(["pending", "completed"] as const)("auto review deep link keeps the matching region: %s", async (scenario) => {
-  const childID = "ses_reviewer_child"
-  const reviewID = "review_old_deep"
-  const request: UserMessage = {
-    id: "msg_anchor_request", sessionID: childID, role: "user", time: { created: 10 },
-    agent: "permission-reviewer", model: { providerID: "provider", modelID: "model" },
-  }
-  const answer: AssistantMessage = {
-    id: "msg_anchor_answer", sessionID: childID, role: "assistant", parentID: request.id,
-    time: { created: 11, completed: 12 }, modelID: "model", providerID: "provider",
-    mode: "permission-reviewer", agent: "permission-reviewer", finish: "stop",
-    path: { cwd: directory, root: directory }, cost: 0,
-    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
-  }
-  const text = (info: AssistantMessage | UserMessage, value: string): Extract<Part, { type: "text" }> => ({
-    id: `part_${info.id}`, sessionID: childID, messageID: info.id, type: "text", text: value,
-  })
-  const child: { info: AssistantMessage | UserMessage; parts: Part[] }[] = [
-    { info: request, parts: [{ ...text(request, "REVIEWING_REQUEST_MARKER_xyz"), metadata: { permissionReviewerRequest: true, reviewID } }] },
-    ...(scenario === "completed" ? [{ info: answer, parts: [text(answer, "OLD_REVIEW_RETURN_MARKER_xyz")] }] : []),
-  ]
-  // 每个padding回答有自己的parent，避免伪造多条同parent回答干扰真实join方向。
-  for (let index = 0; index < 18; index++) {
-    const user = { ...request, id: `msg_fill_user_${index}`, time: { created: 20 + index * 2 } }
-    const assistant = { ...answer, id: `msg_fill_answer_${index}`, parentID: user.id, time: { created: 21 + index * 2, completed: 22 + index * 2 } }
-    child.push({ info: user, parts: [text(user, "filler request")] }, { info: assistant, parts: [text(assistant, `FILLER_${index}_LONG_ENOUGH_TO_HIDE_OLD_REVIEW_WHEN_STUCK_TO_BOTTOM`)] })
-  }
-  const latestRequest = { ...request, id: "msg_latest_request", time: { created: 200 } }
-  const latestAnswer = { ...answer, id: "msg_latest_answer", parentID: latestRequest.id, time: { created: 201, completed: 202 } }
-  child.push({ info: latestRequest, parts: [text(latestRequest, "latest request")] }, { info: latestAnswer, parts: [text(latestAnswer, "LATEST_REVIEW_RETURN_MARKER_xyz")] })
-  const parent = { ...answer, id: "msg_deep_link_parent", sessionID, parentID: "msg_parent_request" }
-  const review = {
-    reviewID, sessionID: childID, status: scenario === "completed" ? "allowed" : "reviewing",
-    precheck: { level: "cautious", reason: "external file read requires reviewer approval" },
-    result: { risk_level: "high", user_authorization: "high", rationale: "requested exact file" },
-  }
-  const part: Part = {
-    id: "part_deep_link_parent", sessionID, messageID: parent.id, type: "tool", callID: "call_deep_link", tool: "read",
-    state: scenario === "completed"
-      ? { status: "completed", input: { filePath: "external folder/secret.txt" }, title: "secret.txt", output: "read", metadata: { autoReview: review }, time: { start: 1, end: 2 } }
-      : { status: "running", input: { filePath: "external folder/secret.txt" }, metadata: { autoReview: review }, time: { start: 1 } },
-  }
-  await withRenderedReview([{ info: parent, parts: [part] }], async (app, route) => {
-    const label = scenario === "completed" ? "✓ auto review · allowed · auth high" : "◌ auto review · cautious"
-    await waitForReviewFrame(app, async (value) => { if (value.includes(label)) return true; await Bun.sleep(5); return false }, { maxPasses: 400 })
-    await app.renderOnce()
-    await app.renderOnce()
-    // 点击公开状态行而非直接导航；request/answer marker均为独立字面量。
-    await clickVisibleText(app, label)
-    expect(route.data).toMatchObject({ type: "session", sessionID: childID, reviewID })
-    const marker = scenario === "completed" ? "OLD_REVIEW_RETURN_MARKER_xyz" : "REVIEWING_REQUEST_MARKER_xyz"
-    await waitForReviewFrame(app, async (value) => { if (value.includes(marker)) return true; await Bun.sleep(5); return false }, { maxPasses: 400 })
-    // 两个50ms入口都完成后仍必须停在锚点，不能以瞬间出现掩盖旧贴底timer覆盖。
-    await Bun.sleep(130)
-    await app.renderOnce()
-    await app.renderOnce()
-    expect(app.captureCharFrame()).toContain(marker)
-    expect(app.captureCharFrame()).not.toContain("LATEST_REVIEW_RETURN_MARKER_xyz")
-    // 普通导航省略reviewID后仍按既有语义贴底，并清除同Session的旧锚点。
-    route.navigate({ type: "session", sessionID: childID })
-    expect(route.data).not.toHaveProperty("reviewID")
-    await waitForReviewFrame(app, async (value) => { if (value.includes("LATEST_REVIEW_RETURN_MARKER_xyz")) return true; await Bun.sleep(5); return false }, { maxPasses: 400 })
-    expect(app.captureCharFrame()).toContain("LATEST_REVIEW_RETURN_MARKER_xyz")
-  }, { height: 14 }, { [childID]: () => child })
-})
+test.each(["pending", "completed"] as const)(
+  "auto review deep link keeps the matching region: %s",
+  async (scenario) => {
+    const childID = "ses_reviewer_child"
+    const reviewID = "review_old_deep"
+    const request: UserMessage = {
+      id: "msg_anchor_request",
+      sessionID: childID,
+      role: "user",
+      time: { created: 10 },
+      agent: "permission-reviewer",
+      model: { providerID: "provider", modelID: "model" },
+    }
+    const answer: AssistantMessage = {
+      id: "msg_anchor_answer",
+      sessionID: childID,
+      role: "assistant",
+      parentID: request.id,
+      time: { created: 11, completed: 12 },
+      modelID: "model",
+      providerID: "provider",
+      mode: "permission-reviewer",
+      agent: "permission-reviewer",
+      finish: "stop",
+      path: { cwd: directory, root: directory },
+      cost: 0,
+      tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+    }
+    const text = (info: AssistantMessage | UserMessage, value: string): Extract<Part, { type: "text" }> => ({
+      id: `part_${info.id}`,
+      sessionID: childID,
+      messageID: info.id,
+      type: "text",
+      text: value,
+    })
+    const child: { info: AssistantMessage | UserMessage; parts: Part[] }[] = [
+      {
+        info: request,
+        parts: [
+          { ...text(request, "REVIEWING_REQUEST_MARKER_xyz"), metadata: { permissionReviewerRequest: true, reviewID } },
+        ],
+      },
+      ...(scenario === "completed" ? [{ info: answer, parts: [text(answer, "OLD_REVIEW_RETURN_MARKER_xyz")] }] : []),
+    ]
+    // 每个padding回答有自己的parent，避免伪造多条同parent回答干扰真实join方向。
+    for (let index = 0; index < 18; index++) {
+      const user = { ...request, id: `msg_fill_user_${index}`, time: { created: 20 + index * 2 } }
+      const assistant = {
+        ...answer,
+        id: `msg_fill_answer_${index}`,
+        parentID: user.id,
+        time: { created: 21 + index * 2, completed: 22 + index * 2 },
+      }
+      child.push(
+        { info: user, parts: [text(user, "filler request")] },
+        {
+          info: assistant,
+          parts: [text(assistant, `FILLER_${index}_LONG_ENOUGH_TO_HIDE_OLD_REVIEW_WHEN_STUCK_TO_BOTTOM`)],
+        },
+      )
+    }
+    const latestRequest = { ...request, id: "msg_latest_request", time: { created: 200 } }
+    const latestAnswer = {
+      ...answer,
+      id: "msg_latest_answer",
+      parentID: latestRequest.id,
+      time: { created: 201, completed: 202 },
+    }
+    child.push(
+      { info: latestRequest, parts: [text(latestRequest, "latest request")] },
+      { info: latestAnswer, parts: [text(latestAnswer, "LATEST_REVIEW_RETURN_MARKER_xyz")] },
+    )
+    const parent = { ...answer, id: "msg_deep_link_parent", sessionID, parentID: "msg_parent_request" }
+    const review = {
+      reviewID,
+      sessionID: childID,
+      status: scenario === "completed" ? "allowed" : "reviewing",
+      precheck: { level: "cautious", reason: "external file read requires reviewer approval" },
+      result: { risk_level: "high", user_authorization: "high", rationale: "requested exact file" },
+    }
+    const part: Part = {
+      id: "part_deep_link_parent",
+      sessionID,
+      messageID: parent.id,
+      type: "tool",
+      callID: "call_deep_link",
+      tool: "read",
+      state:
+        scenario === "completed"
+          ? {
+              status: "completed",
+              input: { filePath: "external folder/secret.txt" },
+              title: "secret.txt",
+              output: "read",
+              metadata: { autoReview: review },
+              time: { start: 1, end: 2 },
+            }
+          : {
+              status: "running",
+              input: { filePath: "external folder/secret.txt" },
+              metadata: { autoReview: review },
+              time: { start: 1 },
+            },
+    }
+    await withRenderedReview(
+      [{ info: parent, parts: [part] }],
+      async (app, route) => {
+        const label = scenario === "completed" ? "✓ auto review · allowed · auth high" : "◌ auto review · cautious"
+        await waitForReviewFrame(
+          app,
+          async (value) => {
+            if (value.includes(label)) return true
+            await Bun.sleep(5)
+            return false
+          },
+          { maxPasses: 400 },
+        )
+        await app.renderOnce()
+        await app.renderOnce()
+        // 点击公开状态行而非直接导航；request/answer marker均为独立字面量。
+        await clickVisibleText(app, label)
+        expect(route.data).toMatchObject({ type: "session", sessionID: childID, reviewID })
+        const marker = scenario === "completed" ? "OLD_REVIEW_RETURN_MARKER_xyz" : "REVIEWING_REQUEST_MARKER_xyz"
+        await waitForReviewFrame(
+          app,
+          async (value) => {
+            if (value.includes(marker)) return true
+            await Bun.sleep(5)
+            return false
+          },
+          { maxPasses: 400 },
+        )
+        // 两个50ms入口都完成后仍必须停在锚点，不能以瞬间出现掩盖旧贴底timer覆盖。
+        await Bun.sleep(130)
+        await app.renderOnce()
+        await app.renderOnce()
+        expect(app.captureCharFrame()).toContain(marker)
+        expect(app.captureCharFrame()).not.toContain("LATEST_REVIEW_RETURN_MARKER_xyz")
+        // 普通导航省略reviewID后仍按既有语义贴底，并清除同Session的旧锚点。
+        route.navigate({ type: "session", sessionID: childID })
+        expect(route.data).not.toHaveProperty("reviewID")
+        await waitForReviewFrame(
+          app,
+          async (value) => {
+            if (value.includes("LATEST_REVIEW_RETURN_MARKER_xyz")) return true
+            await Bun.sleep(5)
+            return false
+          },
+          { maxPasses: 400 },
+        )
+        expect(app.captureCharFrame()).toContain("LATEST_REVIEW_RETURN_MARKER_xyz")
+      },
+      { height: 14 },
+      { [childID]: () => child },
+    )
+  },
+)
 
 test("assistant text applies the Markdown budget in streaming and settled frames", async () => {
   for (const body of ["within", "characters", "lines"] as const) {
     for (const streaming of [true, false]) {
       const marker = `BUDGET_${body.toUpperCase()}`
-      const text = body === "within" ? `**${marker}**`
-        : body === "characters" ? `${"x".repeat(32 * 1024)}\n**${marker}**`
-        : `${"x\n".repeat(1001)}**${marker}**`
+      const text =
+        body === "within"
+          ? `**${marker}**`
+          : body === "characters"
+            ? `${"x".repeat(32 * 1024)}\n**${marker}**`
+            : `${"x\n".repeat(1001)}**${marker}**`
       const info: AssistantMessage = {
-        id: "msg_budget", sessionID, role: "assistant", parentID: "msg_request", agent: "build", mode: "build",
-        time: { created: 1, ...(streaming ? {} : { completed: 2 }) }, modelID: "model", providerID: "provider",
-        path: { cwd: directory, root: directory }, cost: 0,
+        id: "msg_budget",
+        sessionID,
+        role: "assistant",
+        parentID: "msg_request",
+        agent: "build",
+        mode: "build",
+        time: { created: 1, ...(streaming ? {} : { completed: 2 }) },
+        modelID: "model",
+        providerID: "provider",
+        path: { cwd: directory, root: directory },
+        cost: 0,
         tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
       }
       const part: Part = { id: "part_budget", sessionID, messageID: info.id, type: "text", text }
-      await withRenderedReview([{ info, parts: [part] }], async (app) => {
-        // marker放在末尾，真实贴底视口才能观察超长正文，不能用函数返回值代替渲染分支。
-        await waitForReviewFrame(app, async (frame) => {
-          if (frame.includes(marker)) return true
-          await Bun.sleep(5)
-          return false
-        }, { maxPasses: 400 })
-        const frame = app.captureCharFrame()
-        // 预算内继续Markdown conceal；两种超限则保留字面星号，流式与完成态一致。
-        expect(frame.includes(`**${marker}**`)).toBe(body !== "within")
-      }, { width: 80, height: 16 })
+      await withRenderedReview(
+        [{ info, parts: [part] }],
+        async (app) => {
+          // marker放在末尾，真实贴底视口才能观察超长正文，不能用函数返回值代替渲染分支。
+          await waitForReviewFrame(
+            app,
+            async (frame) => {
+              if (frame.includes(marker)) return true
+              await Bun.sleep(5)
+              return false
+            },
+            { maxPasses: 400 },
+          )
+          const frame = app.captureCharFrame()
+          // 预算内继续Markdown conceal；两种超限则保留字面星号，流式与完成态一致。
+          expect(frame.includes(`**${marker}**`)).toBe(body !== "within")
+        },
+        { width: 80, height: 16 },
+      )
     }
   }
 })
 
 test("session keeps latest streamed content reachable via session.last after scrolling away", async () => {
   const message: AssistantMessage = {
-    id: "msg_cull_stream", sessionID, role: "assistant", parentID: "msg_user",
-    time: { created: 1, completed: 2 }, modelID: "model", providerID: "provider", mode: "build", agent: "build",
-    path: { cwd: directory, root: directory }, cost: 0,
+    id: "msg_cull_stream",
+    sessionID,
+    role: "assistant",
+    parentID: "msg_user",
+    time: { created: 1, completed: 2 },
+    modelID: "model",
+    providerID: "provider",
+    mode: "build",
+    agent: "build",
+    path: { cwd: directory, root: directory },
+    cost: 0,
     tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
   }
-  const part: Part = { id: "part_cull_stream", sessionID, messageID: message.id, type: "text", text: `${"wrapped content ".repeat(180)}OLD_CULL_TAIL` }
-  await withRenderedReview([{ info: message, parts: [part] }], async (app, _route, emit) => {
-    await waitForReviewFrame(app, async (frame) => {
-      if (frame.includes("OLD_CULL_TAIL")) return true
-      await Bun.sleep(10)
-      return false
-    }, { maxPasses: 300 })
-    // 越过一行粘底容差，不能把自动跟随的行为当作离底浏览。
-    for (let i = 0; i < 4; i++) app.mockInput.pressKey("y", { ctrl: true, meta: true })
-    // 等实际离屏信号，不以固定帧数或避开50ms导航窗口掩盖mount重贴。
-    await waitForReviewFrame(app, async (frame) => {
-      if (!frame.includes("OLD_CULL_TAIL")) return true
-      await Bun.sleep(5)
-      return false
-    }, { maxPasses: 300 })
-    expect(app.captureCharFrame()).not.toContain("OLD_CULL_TAIL")
-    emit({
-      directory, project: "proj_test",
-      payload: { id: "evt_cull_growth", type: "message.part.delta", properties: {
-        sessionID, messageID: message.id, partID: part.id, field: "text", delta: `${" grown tail ".repeat(40)}NEW_CULL_TAIL`,
-      } },
-    })
-    await app.renderOnce()
-    await Bun.sleep(20)
-    await app.renderOnce()
-    // 等待既有事件批次落地后，增量不能强制用户回贴底部。
-    expect(app.captureCharFrame()).not.toContain("NEW_CULL_TAIL")
-    // 公开 End 导航必须重新到达屏外增长后的正文，而非只更新路由状态。
-    app.mockInput.pressKey("END")
-    await waitForReviewFrame(app, async (frame) => {
-      if (frame.includes("NEW_CULL_TAIL")) return true
-      await Bun.sleep(10)
-      return false
-    }, { maxPasses: 300 })
-    expect(app.captureCharFrame()).toContain("NEW_CULL_TAIL")
-  }, { width: 100, height: 18 })
+  const part: Part = {
+    id: "part_cull_stream",
+    sessionID,
+    messageID: message.id,
+    type: "text",
+    text: `${"wrapped content ".repeat(180)}OLD_CULL_TAIL`,
+  }
+  await withRenderedReview(
+    [{ info: message, parts: [part] }],
+    async (app, _route, emit) => {
+      await waitForReviewFrame(
+        app,
+        async (frame) => {
+          if (frame.includes("OLD_CULL_TAIL")) return true
+          await Bun.sleep(10)
+          return false
+        },
+        { maxPasses: 300 },
+      )
+      // 越过一行粘底容差，不能把自动跟随的行为当作离底浏览。
+      for (let i = 0; i < 4; i++) app.mockInput.pressKey("y", { ctrl: true, meta: true })
+      // 等实际离屏信号，不以固定帧数或避开50ms导航窗口掩盖mount重贴。
+      await waitForReviewFrame(
+        app,
+        async (frame) => {
+          if (!frame.includes("OLD_CULL_TAIL")) return true
+          await Bun.sleep(5)
+          return false
+        },
+        { maxPasses: 300 },
+      )
+      expect(app.captureCharFrame()).not.toContain("OLD_CULL_TAIL")
+      emit({
+        directory,
+        project: "proj_test",
+        payload: {
+          id: "evt_cull_growth",
+          type: "message.part.delta",
+          properties: {
+            sessionID,
+            messageID: message.id,
+            partID: part.id,
+            field: "text",
+            delta: `${" grown tail ".repeat(40)}NEW_CULL_TAIL`,
+          },
+        },
+      })
+      await app.renderOnce()
+      await Bun.sleep(20)
+      await app.renderOnce()
+      // 等待既有事件批次落地后，增量不能强制用户回贴底部。
+      expect(app.captureCharFrame()).not.toContain("NEW_CULL_TAIL")
+      // 公开 End 导航必须重新到达屏外增长后的正文，而非只更新路由状态。
+      app.mockInput.pressKey("END")
+      await waitForReviewFrame(
+        app,
+        async (frame) => {
+          if (frame.includes("NEW_CULL_TAIL")) return true
+          await Bun.sleep(10)
+          return false
+        },
+        { maxPasses: 300 },
+      )
+      expect(app.captureCharFrame()).toContain("NEW_CULL_TAIL")
+    },
+    { width: 100, height: 18 },
+  )
 })
 
 test("switching sessions after scrolling away still opens the next session pinned to the bottom", async () => {
   const a: AssistantMessage = {
-    id: "msg_pin_a", sessionID, role: "assistant", parentID: "msg_pin_user", time: { created: 1, completed: 2 },
-    modelID: "model", providerID: "provider", mode: "build", agent: "build", path: { cwd: directory, root: directory }, cost: 0,
+    id: "msg_pin_a",
+    sessionID,
+    role: "assistant",
+    parentID: "msg_pin_user",
+    time: { created: 1, completed: 2 },
+    modelID: "model",
+    providerID: "provider",
+    mode: "build",
+    agent: "build",
+    path: { cwd: directory, root: directory },
+    cost: 0,
     tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
   }
   const extraID = "ses_extra_pin_b"
   const b: AssistantMessage = { ...a, id: "msg_pin_b", sessionID: extraID }
   // B的内容高于A携带的偏移，避免clamp到较短B底部造成空洞通过。
-  const partB: Part = { id: "part_pin_b", sessionID: extraID, messageID: b.id, type: "text", text: `${"beta content ".repeat(420)}B_PIN_TAIL` }
-  await withRenderedReview([{ info: a, parts: [{ id: "part_pin_a", sessionID, messageID: a.id, type: "text", text: `${"alpha content ".repeat(120)}A_PIN_TAIL` }] }], async (app, route) => {
-    await waitForReviewFrame(app, async (frame) => {
-      if (frame.includes("A_PIN_TAIL")) return true
-      await Bun.sleep(5)
-      return false
-    }, { maxPasses: 300 })
-    for (let i = 0; i < 4; i++) app.mockInput.pressKey("y", { ctrl: true, meta: true })
-    await waitForReviewFrame(app, async (frame) => {
-      if (!frame.includes("A_PIN_TAIL")) return true
-      await Bun.sleep(5)
-      return false
-    }, { maxPasses: 300 })
-    // 使用公开导航，不直接设置scrollTop或Session私有信号。
-    route.navigate({ type: "session", sessionID: extraID })
-    await waitForReviewFrame(app, async (frame) => {
-      if (frame.includes("B_PIN_TAIL")) return true
-      await Bun.sleep(5)
-      return false
-    }, { maxPasses: 300 })
-    expect(app.captureCharFrame()).toContain("B_PIN_TAIL")
-  }, { width: 100, height: 18 }, { [extraID]: () => [{ info: b, parts: [partB] }] })
+  const partB: Part = {
+    id: "part_pin_b",
+    sessionID: extraID,
+    messageID: b.id,
+    type: "text",
+    text: `${"beta content ".repeat(420)}B_PIN_TAIL`,
+  }
+  await withRenderedReview(
+    [
+      {
+        info: a,
+        parts: [
+          {
+            id: "part_pin_a",
+            sessionID,
+            messageID: a.id,
+            type: "text",
+            text: `${"alpha content ".repeat(120)}A_PIN_TAIL`,
+          },
+        ],
+      },
+    ],
+    async (app, route) => {
+      await waitForReviewFrame(
+        app,
+        async (frame) => {
+          if (frame.includes("A_PIN_TAIL")) return true
+          await Bun.sleep(5)
+          return false
+        },
+        { maxPasses: 300 },
+      )
+      for (let i = 0; i < 4; i++) app.mockInput.pressKey("y", { ctrl: true, meta: true })
+      await waitForReviewFrame(
+        app,
+        async (frame) => {
+          if (!frame.includes("A_PIN_TAIL")) return true
+          await Bun.sleep(5)
+          return false
+        },
+        { maxPasses: 300 },
+      )
+      // 使用公开导航，不直接设置scrollTop或Session私有信号。
+      route.navigate({ type: "session", sessionID: extraID })
+      await waitForReviewFrame(
+        app,
+        async (frame) => {
+          if (frame.includes("B_PIN_TAIL")) return true
+          await Bun.sleep(5)
+          return false
+        },
+        { maxPasses: 300 },
+      )
+      expect(app.captureCharFrame()).toContain("B_PIN_TAIL")
+    },
+    { width: 100, height: 18 },
+    { [extraID]: () => [{ info: b, parts: [partB] }] },
+  )
 })
 
-test.each(["range", "missing", "queued", "undo", "redo", "copy"] as const)("chronology boundary uses transcript positions: %s", async (scenario) => {
-  // ID 顺序与三个持久时间相反，所有帧和命令共用真实 SyncProvider 投影。
-  const messages: Parameters<typeof withRenderedReview>[0] = [
-    {
-      info: { id: "msg_z_user", sessionID, role: "user", time: { created: 1 }, agent: "build", model: { providerID: "provider", modelID: "model" } },
-      parts: [{ id: "part_z", sessionID, messageID: "msg_z_user", type: "text", text: "KEPT_USER_MARKER" }],
-    },
-    {
-      info: {
-        id: "msg_m_asst", sessionID, role: "assistant", parentID: "msg_z_user", time: { created: 2, ...(scenario === "queued" ? {} : { completed: 3 }) },
-        modelID: "model", providerID: "provider", mode: "build", agent: "build", path: { cwd: directory, root: directory }, cost: 0,
-        tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+test.each(["range", "missing", "queued", "undo", "redo", "copy"] as const)(
+  "chronology boundary uses transcript positions: %s",
+  async (scenario) => {
+    // ID 顺序与三个持久时间相反，所有帧和命令共用真实 SyncProvider 投影。
+    const messages: Parameters<typeof withRenderedReview>[0] = [
+      {
+        info: {
+          id: "msg_z_user",
+          sessionID,
+          role: "user",
+          time: { created: 1 },
+          agent: "build",
+          model: { providerID: "provider", modelID: "model" },
+        },
+        parts: [{ id: "part_z", sessionID, messageID: "msg_z_user", type: "text", text: "KEPT_USER_MARKER" }],
       },
-      parts: [{ id: "part_m", sessionID, messageID: "msg_m_asst", type: "text", text: "KEPT_ASST_MARKER" }],
-    },
-    {
-      info: { id: "msg_a_user", sessionID, role: "user", time: { created: 3 }, agent: "build", model: { providerID: "provider", modelID: "model" } },
-      parts: [{ id: "part_a", sessionID, messageID: "msg_a_user", type: "text", text: "REVERTED_USER_MARKER" }],
-    },
-  ]
-  const requests: { operation: string; messageID?: string }[] = []
-  const copies: string[] = []
-  await withRenderedReview(messages, async (app, _route, emit, commands) => {
-    if (scenario === "queued") {
-      emit({ directory, project: "proj_test", payload: { id: "evt_queued_chronology", type: "session.status", properties: { sessionID, status: { type: "busy" } } } })
-      await waitForReviewFrame(app, async (frame) => {
-        if (frame.includes("QUEUED") && frame.includes("REVERTED_USER_MARKER")) return true
-        await Bun.sleep(5)
-        return false
-      }, { maxPasses: 300 })
-      expect(app.captureCharFrame()).toContain("QUEUED")
-      return
-    }
-    if (scenario === "missing") {
-      // 数据已同步后推进实际帧，不能以尚未绘制正文的瞬间证明保守隐藏。
-      for (let pass = 0; pass < 15; pass++) await app.renderOnce()
-      expect(app.captureCharFrame()).not.toContain("KEPT_USER_MARKER")
-      expect(app.captureCharFrame()).not.toContain("KEPT_ASST_MARKER")
-      expect(app.captureCharFrame()).not.toContain("REVERTED_USER_MARKER")
-      return
-    }
-    await waitForReviewFrame(app, async (frame) => {
-      if (frame.includes("message reverted") && (scenario === "redo" || frame.includes("KEPT_ASST_MARKER") && frame.includes("KEPT_USER_MARKER"))) return true
-      await Bun.sleep(5)
-      return false
-    }, { maxPasses: 300 })
-    if (scenario === "range") {
-      expect(app.captureCharFrame()).toContain("KEPT_USER_MARKER")
-      expect(app.captureCharFrame()).toContain("KEPT_ASST_MARKER")
-      expect(app.captureCharFrame()).not.toContain("REVERTED_USER_MARKER")
-      return
-    }
-    // 公开 keymap 分发调用真实注册命令；观察 SDK 写请求或注入剪贴板，不调用系统剪贴板。
-    commands.dispatchCommand(scenario === "copy" ? "messages.copy" : `session.${scenario}`)
-    await waitForReviewFrame(app, async () => {
-      if (requests.length || copies.length) return true
-      await Bun.sleep(5)
-      return false
-    }, { maxPasses: 300 })
-    if (scenario === "copy") expect(copies).toEqual(["KEPT_ASST_MARKER"])
-    if (scenario === "undo") expect(requests).toEqual([{ operation: "revert", messageID: "msg_z_user" }])
-    if (scenario === "redo") expect(requests).toEqual([{ operation: "revert", messageID: "msg_a_user" }])
-  }, { width: 110, height: 40 }, {}, {}, {
-    revert: scenario === "queued" ? undefined : { messageID: scenario === "missing" ? "msg_missing_boundary" : scenario === "redo" ? "msg_z_user" : "msg_a_user" },
-    onRequest: async (url, request, init) => {
-      const operation = url.pathname.split("/").at(-1)
-      if (operation !== "revert" && operation !== "unrevert") return
-      const body: { messageID?: string } = await (request?.clone() ?? new Request(url, init)).json()
-      requests.push({ operation, messageID: body.messageID })
-    },
-    clipboard: { write: async (text) => { copies.push(text) } },
-  })
-})
+      {
+        info: {
+          id: "msg_m_asst",
+          sessionID,
+          role: "assistant",
+          parentID: "msg_z_user",
+          time: { created: 2, ...(scenario === "queued" ? {} : { completed: 3 }) },
+          modelID: "model",
+          providerID: "provider",
+          mode: "build",
+          agent: "build",
+          path: { cwd: directory, root: directory },
+          cost: 0,
+          tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+        },
+        parts: [{ id: "part_m", sessionID, messageID: "msg_m_asst", type: "text", text: "KEPT_ASST_MARKER" }],
+      },
+      {
+        info: {
+          id: "msg_a_user",
+          sessionID,
+          role: "user",
+          time: { created: 3 },
+          agent: "build",
+          model: { providerID: "provider", modelID: "model" },
+        },
+        parts: [{ id: "part_a", sessionID, messageID: "msg_a_user", type: "text", text: "REVERTED_USER_MARKER" }],
+      },
+    ]
+    const requests: { operation: string; messageID?: string }[] = []
+    const copies: string[] = []
+    await withRenderedReview(
+      messages,
+      async (app, _route, emit, commands) => {
+        if (scenario === "queued") {
+          emit({
+            directory,
+            project: "proj_test",
+            payload: {
+              id: "evt_queued_chronology",
+              type: "session.status",
+              properties: { sessionID, status: { type: "busy" } },
+            },
+          })
+          await waitForReviewFrame(
+            app,
+            async (frame) => {
+              if (frame.includes("QUEUED") && frame.includes("REVERTED_USER_MARKER")) return true
+              await Bun.sleep(5)
+              return false
+            },
+            { maxPasses: 300 },
+          )
+          expect(app.captureCharFrame()).toContain("QUEUED")
+          return
+        }
+        if (scenario === "missing") {
+          // 数据已同步后推进实际帧，不能以尚未绘制正文的瞬间证明保守隐藏。
+          for (let pass = 0; pass < 15; pass++) await app.renderOnce()
+          expect(app.captureCharFrame()).not.toContain("KEPT_USER_MARKER")
+          expect(app.captureCharFrame()).not.toContain("KEPT_ASST_MARKER")
+          expect(app.captureCharFrame()).not.toContain("REVERTED_USER_MARKER")
+          return
+        }
+        await waitForReviewFrame(
+          app,
+          async (frame) => {
+            if (
+              frame.includes("message reverted") &&
+              (scenario === "redo" || (frame.includes("KEPT_ASST_MARKER") && frame.includes("KEPT_USER_MARKER")))
+            )
+              return true
+            await Bun.sleep(5)
+            return false
+          },
+          { maxPasses: 300 },
+        )
+        if (scenario === "range") {
+          expect(app.captureCharFrame()).toContain("KEPT_USER_MARKER")
+          expect(app.captureCharFrame()).toContain("KEPT_ASST_MARKER")
+          expect(app.captureCharFrame()).not.toContain("REVERTED_USER_MARKER")
+          return
+        }
+        // 公开 keymap 分发调用真实注册命令；观察 SDK 写请求或注入剪贴板，不调用系统剪贴板。
+        commands.dispatchCommand(scenario === "copy" ? "messages.copy" : `session.${scenario}`)
+        await waitForReviewFrame(
+          app,
+          async () => {
+            if (requests.length || copies.length) return true
+            await Bun.sleep(5)
+            return false
+          },
+          { maxPasses: 300 },
+        )
+        if (scenario === "copy") expect(copies).toEqual(["KEPT_ASST_MARKER"])
+        if (scenario === "undo") expect(requests).toEqual([{ operation: "revert", messageID: "msg_z_user" }])
+        if (scenario === "redo") expect(requests).toEqual([{ operation: "revert", messageID: "msg_a_user" }])
+      },
+      { width: 110, height: 40 },
+      {},
+      {},
+      {
+        revert:
+          scenario === "queued"
+            ? undefined
+            : {
+                messageID:
+                  scenario === "missing" ? "msg_missing_boundary" : scenario === "redo" ? "msg_z_user" : "msg_a_user",
+              },
+        onRequest: async (url, request, init) => {
+          const operation = url.pathname.split("/").at(-1)
+          if (operation !== "revert" && operation !== "unrevert") return
+          const body: { messageID?: string } = await (request?.clone() ?? new Request(url, init)).json()
+          requests.push({ operation, messageID: body.messageID })
+        },
+        clipboard: {
+          write: async (text) => {
+            copies.push(text)
+          },
+        },
+      },
+    )
+  },
+)
 
 test("lazy session epilogue keeps final ledger without per-delta registration", async () => {
   for (const scenario of ["partial", "empty", "daemon"] as const) {
-    const captured: { value?: string | (() => string | undefined); registrations: number; exits: number; reason?: unknown } = { registrations: 0, exits: 0 }
+    const captured: {
+      value?: string | (() => string | undefined)
+      registrations: number
+      exits: number
+      reason?: unknown
+    } = { registrations: 0, exits: 0 }
     const messageID = "msg_exit_lazy"
-    const info: AssistantMessage = { id: messageID, sessionID, role: "assistant", parentID: "msg_request", finish: "stop", time: { created: 1, completed: 3 }, modelID: "model", providerID: "provider", mode: "build", agent: "build", path: { cwd: directory, root: directory }, cost: 0, tokens: { input: 1, output: 1, reasoning: 0, cache: { read: 0, write: 0 } } }
-    const finish = { id: "part_exit_finish", sessionID, messageID, type: "step-finish" as const, reason: "stop", cost: 0.001, tokens: info.tokens }
+    const info: AssistantMessage = {
+      id: messageID,
+      sessionID,
+      role: "assistant",
+      parentID: "msg_request",
+      finish: "stop",
+      time: { created: 1, completed: 3 },
+      modelID: "model",
+      providerID: "provider",
+      mode: "build",
+      agent: "build",
+      path: { cwd: directory, root: directory },
+      cost: 0,
+      tokens: { input: 1, output: 1, reasoning: 0, cache: { read: 0, write: 0 } },
+    }
+    const finish = {
+      id: "part_exit_finish",
+      sessionID,
+      messageID,
+      type: "step-finish" as const,
+      reason: "stop",
+      cost: 0.001,
+      tokens: info.tokens,
+    }
     const messages = scenario === "empty" ? [] : [{ info, parts: [finish] }]
     // 不在setter内执行producer；五次真实Sync更新必须各自可见，避免批处理掩盖急重算。
     // 账本故意大于窗口内统计，同时覆盖部分历史、空历史及daemon字符串覆盖。
-    await withRenderedReview(messages, async (app, _route, emit, _commands, sync) => {
-      const producer = captured.value
-      if (typeof producer !== "function") throw new Error("expected lazy Session epilogue")
-      const baseline = captured.registrations
-      if (scenario !== "empty") {
-        for (let i = 0; i < 5; i++) {
-          const output = 971 + i
-          emit({ directory, project: "proj_test", payload: { id: `evt_exit_${i}`, type: "message.part.updated", properties: { sessionID, part: { ...finish, tokens: { ...finish.tokens, output } }, time: 4 + i } } })
-          await waitForReviewFrame(app, async () => {
-            const part = sync.data.part[messageID]?.find((item) => item.id === finish.id)
-            if (part?.type === "step-finish" && part.tokens.output === output) return true
-            await Bun.sleep(0)
-            return false
-          }, { maxPasses: 300 })
-          expect(captured.registrations).toBe(baseline)
+    await withRenderedReview(
+      messages,
+      async (app, _route, emit, _commands, sync) => {
+        const producer = captured.value
+        if (typeof producer !== "function") throw new Error("expected lazy Session epilogue")
+        const baseline = captured.registrations
+        if (scenario !== "empty") {
+          for (let i = 0; i < 5; i++) {
+            const output = 971 + i
+            emit({
+              directory,
+              project: "proj_test",
+              payload: {
+                id: `evt_exit_${i}`,
+                type: "message.part.updated",
+                properties: { sessionID, part: { ...finish, tokens: { ...finish.tokens, output } }, time: 4 + i },
+              },
+            })
+            await waitForReviewFrame(
+              app,
+              async () => {
+                const part = sync.data.part[messageID]?.find((item) => item.id === finish.id)
+                if (part?.type === "step-finish" && part.tokens.output === output) return true
+                await Bun.sleep(0)
+                return false
+              },
+              { maxPasses: 300 },
+            )
+            expect(captured.registrations).toBe(baseline)
+          }
         }
-      }
-      if (scenario === "daemon") {
-        emit({ directory, project: "proj_test", payload: { id: "evt_exit_daemon", type: "global.disposed", properties: { reason: "daemon-stop" } } })
-        await waitForReviewFrame(app, async () => captured.exits === 1, { maxPasses: 300 })
-        expect(captured.value).toBe("opencode daemon stopped.")
-        expect(captured.reason).toBeUndefined()
+        if (scenario === "daemon") {
+          emit({
+            directory,
+            project: "proj_test",
+            payload: { id: "evt_exit_daemon", type: "global.disposed", properties: { reason: "daemon-stop" } },
+          })
+          await waitForReviewFrame(app, async () => captured.exits === 1, { maxPasses: 300 })
+          expect(captured.value).toBe("opencode daemon stopped.")
+          expect(captured.reason).toBeUndefined()
+          app.renderer.destroy()
+          expect(captured.value).toBe("opencode daemon stopped.")
+          return
+        }
         app.renderer.destroy()
-        expect(captured.value).toBe("opencode daemon stopped.")
-        return
-      }
-      app.renderer.destroy()
-      expect(captured.registrations).toBe(baseline)
-      const summary = producer()
-      expect(summary).toContain("Review render")
-      expect(summary).toContain(sessionID)
-      expect(summary).toContain("↑ 12.3K ↓ 1.0K · $0.01")
-    }, {}, {}, {}, {
-      totals: { cost: 0.01, tokens: { input: 12300, output: 970, reasoning: 30, cache: { read: 100, write: 50 } } },
-      onEpilogue: (value) => { captured.value = value; captured.registrations++ },
-      onExit: (reason) => { captured.reason = reason; captured.exits++ },
-    })
+        expect(captured.registrations).toBe(baseline)
+        const summary = producer()
+        expect(summary).toContain("Review render")
+        expect(summary).toContain(sessionID)
+        expect(summary).toContain("↑ 12.3K ↓ 1.0K · $0.01")
+      },
+      {},
+      {},
+      {},
+      {
+        totals: { cost: 0.01, tokens: { input: 12300, output: 970, reasoning: 30, cache: { read: 100, write: 50 } } },
+        onEpilogue: (value) => {
+          captured.value = value
+          captured.registrations++
+        },
+        onExit: (reason) => {
+          captured.reason = reason
+          captured.exits++
+        },
+      },
+    )
   }
 })
 
 async function withRenderedReview(
   messages: { info: AssistantMessage | UserMessage; parts: Part[] }[],
-  run: (app: Awaited<ReturnType<typeof testRender>>, route: ReturnType<typeof useRoute>, emit: ReturnType<typeof createEventSource>["emit"], commands: OpenTuiKeymap, sync: ReturnType<typeof useSync>) => Promise<void>,
+  run: (
+    app: Awaited<ReturnType<typeof testRender>>,
+    route: ReturnType<typeof useRoute>,
+    emit: ReturnType<typeof createEventSource>["emit"],
+    commands: OpenTuiKeymap,
+    sync: ReturnType<typeof useSync>,
+  ) => Promise<void>,
   dimensions: { width?: number; height?: number } = {},
   children: Record<string, () => typeof messages> = {},
   kv: Record<string, unknown> = {},
@@ -921,20 +1607,35 @@ async function withRenderedReview(
   await using tmp = await tmpdir()
   await Bun.write(`${tmp.path}/kv.json`, JSON.stringify(kv))
   const info = {
-    id: sessionID, slug: "review-render", projectID: "proj_test", directory,
-    version: "1", title: "Review render", time: { created: 1, updated: 3 },
+    id: sessionID,
+    slug: "review-render",
+    projectID: "proj_test",
+    directory,
+    version: "1",
+    title: "Review render",
+    time: { created: 1, updated: 3 },
     ...(options.revert ? { revert: options.revert } : {}),
     ...options.totals,
   }
   const events = createEventSource()
   // 默认审查子会话和Task子会话共用按ID分发的真实响应形状。
-  const sessions: Record<string, () => typeof messages> = { [sessionID]: () => messages, ses_reviewer_child: () => [], ...children }
+  const sessions: Record<string, () => typeof messages> = {
+    [sessionID]: () => messages,
+    ses_reviewer_child: () => [],
+    ...children,
+  }
   const calls = createFetch(async (url, request, init) => {
     await options.onRequest?.(url, request, init)
-    const details = (id: string) => ({ ...info, id, ...(id === sessionID ? {} : { parentID: sessionID }), ...(id === "ses_reviewer_child" ? { title: "Permission review (@permission-reviewer subagent)" } : {}) })
+    const details = (id: string) => ({
+      ...info,
+      id,
+      ...(id === sessionID ? {} : { parentID: sessionID }),
+      ...(id === "ses_reviewer_child" ? { title: "Permission review (@permission-reviewer subagent)" } : {}),
+    })
     // mutation 响应保持既有 SDK 形状，观察请求不启动 Server 或第二条写入路径。
     if (url.pathname === `/session/${sessionID}/abort`) return json(true)
-    if (url.pathname === `/session/${sessionID}/revert` || url.pathname === `/session/${sessionID}/unrevert`) return json(info)
+    if (url.pathname === `/session/${sessionID}/revert` || url.pathname === `/session/${sessionID}/unrevert`)
+      return json(info)
     if (url.pathname === "/session") return json(Object.keys(sessions).map(details))
     const match = url.pathname.match(/^\/session\/([^/]+)(?:\/(message|todo|diff))?$/)
     if (match && sessions[match[1]]) {
@@ -945,21 +1646,55 @@ async function withRenderedReview(
     if (url.pathname.startsWith("/session/")) return json([])
   }, events)
   const messageIDs = messages.map((message) => message.info.id)
-  const observed: { route?: ReturnType<typeof useRoute>; commands?: OpenTuiKeymap; sync?: ReturnType<typeof useSync>; syncReady: boolean } = { syncReady: false }
-  const app = await testRender(() => <ReviewHarness state={tmp.path} fetch={calls.fetch} events={events.source} observe={(route) => { observed.route = route }} onKeymap={(keymap) => { observed.commands = keymap }} clipboard={options.clipboard} messageIDs={messageIDs} onSyncReady={(sync) => { observed.sync = sync; observed.syncReady = true }} onEpilogue={options.onEpilogue} onExit={options.onExit} />, {
-    width: dimensions.width ?? 110, height: dimensions.height ?? 56, footerHeight: 0, screenMode: "alternate-screen", useThread: false,
-  })
+  const observed: {
+    route?: ReturnType<typeof useRoute>
+    commands?: OpenTuiKeymap
+    sync?: ReturnType<typeof useSync>
+    syncReady: boolean
+  } = { syncReady: false }
+  const app = await testRender(
+    () => (
+      <ReviewHarness
+        state={tmp.path}
+        fetch={calls.fetch}
+        events={events.source}
+        observe={(route) => {
+          observed.route = route
+        }}
+        onKeymap={(keymap) => {
+          observed.commands = keymap
+        }}
+        clipboard={options.clipboard}
+        messageIDs={messageIDs}
+        onSyncReady={(sync) => {
+          observed.sync = sync
+          observed.syncReady = true
+        }}
+        onEpilogue={options.onEpilogue}
+        onExit={options.onExit}
+      />
+    ),
+    {
+      width: dimensions.width ?? 110,
+      height: dimensions.height ?? 56,
+      footerHeight: 0,
+      screenMode: "alternate-screen",
+      useThread: false,
+    },
+  )
   try {
     // 根挂载不代表 Session transcript 已入库；单循环成功即退出，不留下并行 loser 绘制。
     const syncDeadline = Date.now() + 10_000
     while (!observed.syncReady) {
-      if (Date.now() >= syncDeadline) throw new Error(`session sync data missing: ${sessionID}, ${messageIDs.join(",")}`)
+      if (Date.now() >= syncDeadline)
+        throw new Error(`session sync data missing: ${sessionID}, ${messageIDs.join(",")}`)
       await app.renderOnce()
       await Promise.resolve()
       await new Promise((resolve) => process.nextTick(resolve))
       await new Promise((resolve) => setTimeout(resolve, 0))
     }
-    if (!observed.route || !observed.commands || !observed.sync) throw new Error("review route, commands and Sync were not mounted")
+    if (!observed.route || !observed.commands || !observed.sync)
+      throw new Error("review route, commands and Sync were not mounted")
     await run(app, observed.route, events.emit, observed.commands, observed.sync)
   } finally {
     app.renderer.destroy()
@@ -987,29 +1722,71 @@ function ReviewHarness(props: {
   return (
     <TestTuiContexts paths={{ state: props.state }}>
       <OpencodeKeymapProvider keymap={keymap}>
-        <ArgsProvider><ExitProvider exit={props.onExit ?? (() => {})}><EpilogueProvider set={props.onEpilogue ?? (() => {})}>
-          <ClipboardProvider value={props.clipboard ?? {}}><KVProvider><ToastProvider>
-            <RouteProvider initialRoute={{ type: "session", sessionID }}><TuiConfigProvider config={config}>
-              <PluginRuntimeProvider value={runtime}>
-                <SDKProvider url="http://test" directory={directory} testTransport={{ fetch: props.fetch, events: props.events }}>
-                  <ProjectProvider><PermissionProvider><LocationProvider><DataProvider><SyncProvider>
-                    <ThemeProvider mode="dark"><LocalProvider><PromptStashProvider><DialogProvider>
-                      <FrecencyProvider><PromptHistoryProvider><PromptRefProvider><EditorContextProvider integration={{}}>
-                        <ReviewProbe observe={props.observe} messageIDs={props.messageIDs} onSyncReady={props.onSyncReady} />
-                      </EditorContextProvider></PromptRefProvider></PromptHistoryProvider></FrecencyProvider>
-                    </DialogProvider></PromptStashProvider></LocalProvider></ThemeProvider>
-                  </SyncProvider></DataProvider></LocationProvider></PermissionProvider></ProjectProvider>
-                </SDKProvider>
-              </PluginRuntimeProvider>
-            </TuiConfigProvider></RouteProvider>
-          </ToastProvider></KVProvider></ClipboardProvider>
-        </EpilogueProvider></ExitProvider></ArgsProvider>
+        <ArgsProvider>
+          <ExitProvider exit={props.onExit ?? (() => {})}>
+            <EpilogueProvider set={props.onEpilogue ?? (() => {})}>
+              <ClipboardProvider value={props.clipboard ?? {}}>
+                <KVProvider>
+                  <ToastProvider>
+                    <RouteProvider initialRoute={{ type: "session", sessionID }}>
+                      <TuiConfigProvider config={config}>
+                        <PluginRuntimeProvider value={runtime}>
+                          <SDKProvider
+                            url="http://test"
+                            directory={directory}
+                            testTransport={{ fetch: props.fetch, events: props.events }}
+                          >
+                            <ProjectProvider>
+                              <PermissionProvider>
+                                <LocationProvider>
+                                  <DataProvider>
+                                    <SyncProvider>
+                                      <ThemeProvider mode="dark">
+                                        <LocalProvider>
+                                          <PromptStashProvider>
+                                            <DialogProvider>
+                                              <FrecencyProvider>
+                                                <PromptHistoryProvider>
+                                                  <PromptRefProvider>
+                                                    <EditorContextProvider integration={{}}>
+                                                      <ReviewProbe
+                                                        observe={props.observe}
+                                                        messageIDs={props.messageIDs}
+                                                        onSyncReady={props.onSyncReady}
+                                                      />
+                                                    </EditorContextProvider>
+                                                  </PromptRefProvider>
+                                                </PromptHistoryProvider>
+                                              </FrecencyProvider>
+                                            </DialogProvider>
+                                          </PromptStashProvider>
+                                        </LocalProvider>
+                                      </ThemeProvider>
+                                    </SyncProvider>
+                                  </DataProvider>
+                                </LocationProvider>
+                              </PermissionProvider>
+                            </ProjectProvider>
+                          </SDKProvider>
+                        </PluginRuntimeProvider>
+                      </TuiConfigProvider>
+                    </RouteProvider>
+                  </ToastProvider>
+                </KVProvider>
+              </ClipboardProvider>
+            </EpilogueProvider>
+          </ExitProvider>
+        </ArgsProvider>
       </OpencodeKeymapProvider>
     </TestTuiContexts>
   )
 }
 
-function ReviewProbe(props: { observe: (route: ReturnType<typeof useRoute>) => void; messageIDs: string[]; onSyncReady: (sync: ReturnType<typeof useSync>) => void }) {
+function ReviewProbe(props: {
+  observe: (route: ReturnType<typeof useRoute>) => void
+  messageIDs: string[]
+  onSyncReady: (sync: ReturnType<typeof useSync>) => void
+}) {
   const sync = useSync()
   props.observe(useRoute())
   let fired = false
@@ -1017,7 +1794,11 @@ function ReviewProbe(props: { observe: (route: ReturnType<typeof useRoute>) => v
   createEffect(() => {
     if (fired || !sync.session.get(sessionID)) return
     const infos = sync.data.message[sessionID]
-    if (!infos || props.messageIDs.some((id) => !infos.some((info) => info.id === id) || sync.data.part[id] === undefined)) return
+    if (
+      !infos ||
+      props.messageIDs.some((id) => !infos.some((info) => info.id === id) || sync.data.part[id] === undefined)
+    )
+      return
     fired = true
     props.onSyncReady(sync)
   })
@@ -1025,177 +1806,387 @@ function ReviewProbe(props: { observe: (route: ReturnType<typeof useRoute>) => v
 }
 
 // 在真实Session树测量两个正文renderable，不用私有组件名字或手工复制chrome替代布局。
-test.each([
-  { terminalWidth: 80, sidebarVisible: false, scrollbarEnabled: false },
-  { terminalWidth: 80, sidebarVisible: false, scrollbarEnabled: true },
-  { terminalWidth: 160, sidebarVisible: false, scrollbarEnabled: true },
-  { terminalWidth: 160, sidebarVisible: true, scrollbarEnabled: true },
-  { terminalWidth: 160, sidebarVisible: true, scrollbarEnabled: false },
-].flatMap((input) => (["hide", "show"] as const).map((thinkingMode) => ({ ...input, thinkingMode }))))("measures actual reasoning and text width: %j", async (input) => {
+test.each(
+  [
+    { terminalWidth: 80, sidebarVisible: false, scrollbarEnabled: false },
+    { terminalWidth: 80, sidebarVisible: false, scrollbarEnabled: true },
+    { terminalWidth: 160, sidebarVisible: false, scrollbarEnabled: true },
+    { terminalWidth: 160, sidebarVisible: true, scrollbarEnabled: true },
+    { terminalWidth: 160, sidebarVisible: true, scrollbarEnabled: false },
+  ].flatMap((input) => (["hide", "show"] as const).map((thinkingMode) => ({ ...input, thinkingMode }))),
+)("measures actual reasoning and text width: %j", async (input) => {
   const messageID = "msg_layout"
   const info: AssistantMessage = {
-    id: messageID, sessionID, role: "assistant", parentID: "msg_request", finish: "stop",
-    time: { created: 1, completed: 3 }, modelID: "model", providerID: "provider", mode: "build", agent: "build",
-    path: { cwd: directory, root: directory }, cost: 0,
+    id: messageID,
+    sessionID,
+    role: "assistant",
+    parentID: "msg_request",
+    finish: "stop",
+    time: { created: 1, completed: 3 },
+    modelID: "model",
+    providerID: "provider",
+    mode: "build",
+    agent: "build",
+    path: { cwd: directory, root: directory },
+    cost: 0,
     tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
   }
   const parts: Part[] = [
     { id: "part_a_text", sessionID, messageID, type: "text", text: "reference width" },
-    { id: "part_b_reasoning", sessionID, messageID, type: "reasoning", text: "推理宽度".repeat(200), time: { start: 1, end: 2 } },
+    {
+      id: "part_b_reasoning",
+      sessionID,
+      messageID,
+      type: "reasoning",
+      text: "推理宽度".repeat(200),
+      time: { start: 1, end: 2 },
+    },
   ]
-  await withRenderedReview([{ info, parts }], async (app) => {
-    const id = "text-part_b_reasoning"
-    await waitForReviewFrame(app, async () => {
+  await withRenderedReview(
+    [{ info, parts }],
+    async (app) => {
+      const id = "text-part_b_reasoning"
+      await waitForReviewFrame(
+        app,
+        async () => {
+          const code = app.renderer.root.findDescendantById(id)
+          const text = app.renderer.root.findDescendantById(messageID)?.getChildren()[0]?.getChildren()[0]
+          if (code && text && code.width > 0 && text.width > 0 && (code.parent?.height ?? 0) > 0) return true
+          await Bun.sleep(5)
+          return false
+        },
+        { maxPasses: 400 },
+      )
+      // 异步highlight和预布局都落定后再读几何，不以刚挂载时的零尺寸通过。
+      await app.renderOnce()
+      await app.renderOnce()
       const code = app.renderer.root.findDescendantById(id)
       const text = app.renderer.root.findDescendantById(messageID)?.getChildren()[0]?.getChildren()[0]
-      if (code && text && code.width > 0 && text.width > 0 && (code.parent?.height ?? 0) > 0) return true
-      await Bun.sleep(5)
-      return false
-    }, { maxPasses: 400 })
-    // 异步highlight和预布局都落定后再读几何，不以刚挂载时的零尺寸通过。
-    await app.renderOnce()
-    await app.renderOnce()
-    const code = app.renderer.root.findDescendantById(id)
-    const text = app.renderer.root.findDescendantById(messageID)?.getChildren()[0]?.getChildren()[0]
-    if (!code || !text) throw new Error("expected measured message bodies")
-    const expected = sessionMessageContentWidth({ terminalWidth: input.terminalWidth, sidebarInLayout: input.sidebarVisible && input.terminalWidth > 120, scrollbarEnabled: input.scrollbarEnabled })
-    expect({ text: text.width, reasoning: code.width }).toEqual({ text: expected, reasoning: expected })
-    expect(code.parent?.height).toBeGreaterThan(0)
-    // 单个source常驻完整高度，共享run容器负责五行裁尾；实际同宽断言不变。
-    if (input.thinkingMode === "hide") expect(code.parent?.parent?.height).toBeLessThanOrEqual(5)
-  }, { width: input.terminalWidth, height: 48 }, {}, { sidebar: input.sidebarVisible ? "auto" : "hide", scrollbar_enabled: input.scrollbarEnabled, thinking_mode: input.thinkingMode })
+      if (!code || !text) throw new Error("expected measured message bodies")
+      const expected = sessionMessageContentWidth({
+        terminalWidth: input.terminalWidth,
+        sidebarInLayout: input.sidebarVisible && input.terminalWidth > 120,
+        scrollbarEnabled: input.scrollbarEnabled,
+      })
+      expect({ text: text.width, reasoning: code.width }).toEqual({ text: expected, reasoning: expected })
+      expect(code.parent?.height).toBeGreaterThan(0)
+      // 单个source常驻完整高度，共享run容器负责五行裁尾；实际同宽断言不变。
+      if (input.thinkingMode === "hide") expect(code.parent?.parent?.height).toBeLessThanOrEqual(5)
+    },
+    { width: input.terminalWidth, height: 48 },
+    {},
+    {
+      sidebar: input.sidebarVisible ? "auto" : "hide",
+      scrollbar_enabled: input.scrollbarEnabled,
+      thinking_mode: input.thinkingMode,
+    },
+  )
 })
 
 // 复用真实Session/事件/鼠标，单树回归必须观察首帧和原生renderable身份。
-test.each(["first-frame", "streaming", "resize", "selection", "errors"] as const)("single reasoning tree replay: %s", async (scenario) => {
-  const messageID = `msg_single_${scenario}`
-  const content = scenario === "first-frame" ? Array.from({ length: 400 }, (_, index) => `stable thought ${index + 1}`).join("\n")
-    : scenario === "resize" ? `${"resize content ".repeat(24)}RESIZE_TAIL`
-    : Array.from({ length: 7 }, (_, index) => `single thought ${index}`).join("\n")
-  const source = { id: "part_source", sessionID, messageID, type: "reasoning" as const, text: content, time: { start: 1, ...(scenario === "streaming" ? {} : { end: 2 }) } }
-  const info: AssistantMessage = {
-    id: messageID, sessionID, role: "assistant", parentID: "msg_request", finish: scenario === "streaming" ? undefined : "stop",
-    time: { created: 1, ...(scenario === "streaming" ? {} : { completed: 3 }) }, modelID: "model", providerID: "provider", mode: "build", agent: "build",
-    path: { cwd: directory, root: directory }, cost: 0,
-    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
-  }
-  const failed: AssistantMessage = { ...info, id: "msg_single_failed", finish: "error", error: { name: "APIError", data: { message: "provider reasoning failed", isRetryable: false } } }
-  const messages = scenario === "errors" ? [
-    { info: { ...info, error: { name: "MessageAbortedError" as const, data: { message: "interrupted by user" } } }, parts: [{ ...source, text: "partial aborted thought" }] },
-    { info: failed, parts: [{ ...source, id: "part_failed", messageID: failed.id, text: "partial failed thought" }] },
-  ] : [{ info, parts: [source] }]
-  await withRenderedReview(messages, async (app, _route, emit) => {
-    const frame = async (...texts: string[]) => {
-      await waitForReviewFrame(app, async (value) => { if (texts.every((text) => value.includes(text))) return true; await Bun.sleep(5); return false }, { maxPasses: 400 })
-      await app.renderOnce()
-      await app.renderOnce()
-      return app.captureCharFrame()
+test.each(["first-frame", "streaming", "resize", "selection", "errors"] as const)(
+  "single reasoning tree replay: %s",
+  async (scenario) => {
+    const messageID = `msg_single_${scenario}`
+    const content =
+      scenario === "first-frame"
+        ? Array.from({ length: 400 }, (_, index) => `stable thought ${index + 1}`).join("\n")
+        : scenario === "resize"
+          ? `${"resize content ".repeat(24)}RESIZE_TAIL`
+          : Array.from({ length: 7 }, (_, index) => `single thought ${index}`).join("\n")
+    const source = {
+      id: "part_source",
+      sessionID,
+      messageID,
+      type: "reasoning" as const,
+      text: content,
+      time: { start: 1, ...(scenario === "streaming" ? {} : { end: 2 }) },
     }
-    if (scenario === "errors") {
-      const value = await frame("partial aborted thought", "partial failed thought", "interrupted", "provider reasoning failed")
-      expect(value).toContain("partial aborted thought")
-      expect(value).toContain("partial failed thought")
-      return
+    const info: AssistantMessage = {
+      id: messageID,
+      sessionID,
+      role: "assistant",
+      parentID: "msg_request",
+      finish: scenario === "streaming" ? undefined : "stop",
+      time: { created: 1, ...(scenario === "streaming" ? {} : { completed: 3 }) },
+      modelID: "model",
+      providerID: "provider",
+      mode: "build",
+      agent: "build",
+      path: { cwd: directory, root: directory },
+      cost: 0,
+      tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
     }
-    await frame("▼ 展开查看完整推理", scenario === "first-frame" ? "stable thought 1" : scenario === "resize" ? "resize content" : "single thought 0")
-    const body = app.renderer.root.findDescendantById(`text-${source.id}`)
-    if (!body) throw new Error("expected mounted reasoning body")
-    if (scenario === "selection") {
-      const lines = app.captureCharFrame().split("\n")
-      const y = lines.findIndex((line) => line.includes("single thought 0"))
-      const x = lines[y].indexOf("single thought")
-      await app.mockMouse.drag(x, y, x + 12, y)
-      await app.renderOnce()
-      expect(app.renderer.getSelection()?.getSelectedText()?.length).toBeGreaterThan(0)
-      expect(app.captureCharFrame()).toContain("▼ 展开查看完整推理")
-      return
+    const failed: AssistantMessage = {
+      ...info,
+      id: "msg_single_failed",
+      finish: "error",
+      error: { name: "APIError", data: { message: "provider reasoning failed", isRetryable: false } },
     }
-    await clickVisibleText(app, "▼ 展开查看完整推理")
-    await app.renderOnce()
-    if (scenario === "first-frame") {
-      // 只检查点击后第一帧，不能以等待最终高亮掩盖双树切换的正文空窗。
-      expect(app.captureCharFrame()).toContain("stable thought")
-      expect(app.captureCharFrame()).toContain("▲ 收起推理")
-      expect(app.renderer.root.findDescendantById(`text-${source.id}`)).toBe(body)
-      await frame("stable thought 400", "▲ 收起推理")
-    }
-    if (scenario === "streaming") {
-      await frame("single thought 6", "▲ 收起推理")
-      emit({ directory, project: "proj_test", payload: { id: "evt_stream_delta", type: "message.part.delta", properties: { sessionID, messageID, partID: source.id, field: "text", delta: "\nstream final delta" } } })
-      await frame("stream final delta")
-      // Part先完成而父Message仍pending，沿上游生命周期结束推理，不重挂正文。
-      emit({ directory, project: "proj_test", payload: { id: "evt_part_done", type: "message.part.updated", properties: { sessionID, part: { ...source, text: content + "\nstream final delta", time: { start: 1, end: 2 } }, time: 3 } } })
-      await frame("Thought", "stream final delta")
-      expect(app.renderer.root.findDescendantById(`text-${source.id}`)).toBe(body)
-      emit({ directory, project: "proj_test", payload: { id: "evt_message_done", type: "message.updated", properties: { sessionID, info: { ...info, finish: "stop", time: { created: 1, completed: 3 } } } } })
-      await frame("stream final delta")
-    }
-    await frame("▲ 收起推理")
-    await clickVisibleText(app, "▲ 收起推理")
-    await frame("▼ 展开查看完整推理")
-    if (scenario === "resize") {
-      app.resize(160, 48)
-      await waitForReviewFrame(app, async (value) => { if (value.includes("RESIZE_TAIL") && !value.includes("▼ 展开查看完整推理")) return true; await Bun.sleep(5); return false }, { maxPasses: 400 })
-      expect(app.captureCharFrame()).not.toContain("▲ 收起推理")
-      app.resize(60, 48)
-      expect(await frame("▼ 展开查看完整推理")).not.toContain("RESIZE_TAIL")
-      expect(app.renderer.root.findDescendantById(`text-${source.id}`)).toBe(body)
-      return
-    }
-    await clickVisibleText(app, "▼ 展开查看完整推理")
-    await app.renderOnce()
-    if (scenario === "first-frame") {
-      expect(app.captureCharFrame()).toContain("stable thought")
-      expect(app.captureCharFrame()).toContain("▲ 收起推理")
-    }
-    if (scenario === "streaming") expect((await frame("stream final delta")).split("\n").filter((line) => line.includes("stream final delta"))).toHaveLength(1)
-    expect(app.renderer.root.findDescendantById(`text-${source.id}`)).toBe(body)
-  }, { width: scenario === "resize" ? 60 : 110, height: 48 }, {}, { thinking_mode: "hide", sidebar: "hide" })
-})
+    const messages =
+      scenario === "errors"
+        ? [
+            {
+              info: {
+                ...info,
+                error: { name: "MessageAbortedError" as const, data: { message: "interrupted by user" } },
+              },
+              parts: [{ ...source, text: "partial aborted thought" }],
+            },
+            {
+              info: failed,
+              parts: [{ ...source, id: "part_failed", messageID: failed.id, text: "partial failed thought" }],
+            },
+          ]
+        : [{ info, parts: [source] }]
+    await withRenderedReview(
+      messages,
+      async (app, _route, emit) => {
+        const frame = async (...texts: string[]) => {
+          await waitForReviewFrame(
+            app,
+            async (value) => {
+              if (texts.every((text) => value.includes(text))) return true
+              await Bun.sleep(5)
+              return false
+            },
+            { maxPasses: 400 },
+          )
+          await app.renderOnce()
+          await app.renderOnce()
+          return app.captureCharFrame()
+        }
+        if (scenario === "errors") {
+          const value = await frame(
+            "partial aborted thought",
+            "partial failed thought",
+            "interrupted",
+            "provider reasoning failed",
+          )
+          expect(value).toContain("partial aborted thought")
+          expect(value).toContain("partial failed thought")
+          return
+        }
+        await frame(
+          "▼ 展开查看完整推理",
+          scenario === "first-frame"
+            ? "stable thought 1"
+            : scenario === "resize"
+              ? "resize content"
+              : "single thought 0",
+        )
+        const body = app.renderer.root.findDescendantById(`text-${source.id}`)
+        if (!body) throw new Error("expected mounted reasoning body")
+        if (scenario === "selection") {
+          const lines = app.captureCharFrame().split("\n")
+          const y = lines.findIndex((line) => line.includes("single thought 0"))
+          const x = lines[y].indexOf("single thought")
+          await app.mockMouse.drag(x, y, x + 12, y)
+          await app.renderOnce()
+          expect(app.renderer.getSelection()?.getSelectedText()?.length).toBeGreaterThan(0)
+          expect(app.captureCharFrame()).toContain("▼ 展开查看完整推理")
+          return
+        }
+        await clickVisibleText(app, "▼ 展开查看完整推理")
+        await app.renderOnce()
+        if (scenario === "first-frame") {
+          // 只检查点击后第一帧，不能以等待最终高亮掩盖双树切换的正文空窗。
+          expect(app.captureCharFrame()).toContain("stable thought")
+          expect(app.captureCharFrame()).toContain("▲ 收起推理")
+          expect(app.renderer.root.findDescendantById(`text-${source.id}`)).toBe(body)
+          await frame("stable thought 400", "▲ 收起推理")
+        }
+        if (scenario === "streaming") {
+          await frame("single thought 6", "▲ 收起推理")
+          emit({
+            directory,
+            project: "proj_test",
+            payload: {
+              id: "evt_stream_delta",
+              type: "message.part.delta",
+              properties: { sessionID, messageID, partID: source.id, field: "text", delta: "\nstream final delta" },
+            },
+          })
+          await frame("stream final delta")
+          // Part先完成而父Message仍pending，沿上游生命周期结束推理，不重挂正文。
+          emit({
+            directory,
+            project: "proj_test",
+            payload: {
+              id: "evt_part_done",
+              type: "message.part.updated",
+              properties: {
+                sessionID,
+                part: { ...source, text: content + "\nstream final delta", time: { start: 1, end: 2 } },
+                time: 3,
+              },
+            },
+          })
+          await frame("Thought", "stream final delta")
+          expect(app.renderer.root.findDescendantById(`text-${source.id}`)).toBe(body)
+          emit({
+            directory,
+            project: "proj_test",
+            payload: {
+              id: "evt_message_done",
+              type: "message.updated",
+              properties: { sessionID, info: { ...info, finish: "stop", time: { created: 1, completed: 3 } } },
+            },
+          })
+          await frame("stream final delta")
+        }
+        await frame("▲ 收起推理")
+        await clickVisibleText(app, "▲ 收起推理")
+        await frame("▼ 展开查看完整推理")
+        if (scenario === "resize") {
+          app.resize(160, 48)
+          await waitForReviewFrame(
+            app,
+            async (value) => {
+              if (value.includes("RESIZE_TAIL") && !value.includes("▼ 展开查看完整推理")) return true
+              await Bun.sleep(5)
+              return false
+            },
+            { maxPasses: 400 },
+          )
+          expect(app.captureCharFrame()).not.toContain("▲ 收起推理")
+          app.resize(60, 48)
+          expect(await frame("▼ 展开查看完整推理")).not.toContain("RESIZE_TAIL")
+          expect(app.renderer.root.findDescendantById(`text-${source.id}`)).toBe(body)
+          return
+        }
+        await clickVisibleText(app, "▼ 展开查看完整推理")
+        await app.renderOnce()
+        if (scenario === "first-frame") {
+          expect(app.captureCharFrame()).toContain("stable thought")
+          expect(app.captureCharFrame()).toContain("▲ 收起推理")
+        }
+        if (scenario === "streaming")
+          expect(
+            (await frame("stream final delta")).split("\n").filter((line) => line.includes("stream final delta")),
+          ).toHaveLength(1)
+        expect(app.renderer.root.findDescendantById(`text-${source.id}`)).toBe(body)
+      },
+      { width: scenario === "resize" ? 60 : 110, height: 48 },
+      {},
+      { thinking_mode: "hide", sidebar: "hide" },
+    )
+  },
+)
 
 test.each(["short", "long"] as const)("streaming reasoning defaults to stable collapse: %s", async (scenario) => {
   const messageID = "msg_stream_default"
-  const source = { id: "part_stream", sessionID, messageID, type: "reasoning" as const, text: "short stream thought", time: { start: 1 } }
-  const info: AssistantMessage = {
-    id: messageID, sessionID, role: "assistant", parentID: "msg_request", time: { created: 1 }, modelID: "model", providerID: "provider", mode: "build", agent: "build",
-    path: { cwd: directory, root: directory }, cost: 0, tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+  const source = {
+    id: "part_stream",
+    sessionID,
+    messageID,
+    type: "reasoning" as const,
+    text: "short stream thought",
+    time: { start: 1 },
   }
-  const suffix = scenario === "short" ? "\nsecond stream line" : "\nsecond stream line\nline 3\nline 4\nline 5\nline 6\nSTREAM_TAIL"
-  const opaque = { ...source, id: "part_opaque", messageID: "msg_stream_opaque", text: "[REDACTED]", metadata: { encrypted: true } }
-  await withRenderedReview([{ info, parts: [source] }, { info: { ...info, id: opaque.messageID }, parts: [opaque] }], async (app, _route, emit) => {
-    const frame = async (text: string) => {
-      await waitForReviewFrame(app, async (value) => { if (value.includes(text)) return true; await Bun.sleep(5); return false }, { maxPasses: 400 })
-      return app.captureCharFrame()
-    }
-    // #481：首个短正文没有虚假 overflow；先点短正文也不能预写后续 expanded。
-    const initial = await frame("short stream thought")
-    expect(initial).not.toContain("▼ 展开查看完整推理")
-    expect(initial.split("\n").filter((line) => line.includes("▼ 展开查看完整推理"))).toHaveLength(0)
-    // 再增长仍受共享五行预算，不能以短内容点击绕过默认收缩。
-    await clickVisibleText(app, "short stream thought")
-    emit({ directory, project: "proj_test", payload: { id: "evt_default_grow", type: "message.part.delta", properties: { sessionID, messageID, partID: source.id, field: "text", delta: suffix } } })
-    const grown = await frame("second stream line")
-    if (scenario === "short") expect(grown).not.toContain("▼ 展开查看完整推理")
-    if (scenario === "long") expect(await frame("▼ 展开查看完整推理")).not.toContain("STREAM_TAIL")
-    const body = app.renderer.root.findDescendantById(`text-${source.id}`)
-    expect(body?.parent?.parent?.height).toBeLessThanOrEqual(5)
-    // 父Message仍pending，只以原始Part的end解除流式guard。
-    emit({ directory, project: "proj_test", payload: { id: "evt_default_done", type: "message.part.updated", properties: { sessionID, part: { ...source, text: source.text + suffix, time: { start: 1, end: 2 } }, time: 3 } } })
-    await waitForReviewFrame(app, async (value) => {
-      if (value.includes("Thought") && value.includes("second stream line") && (scenario === "long" || !value.includes("▼ 展开查看完整推理"))) return true
-      await Bun.sleep(5)
-      return false
-    }, { maxPasses: 400 })
-    expect(app.renderer.root.findDescendantById(`text-${source.id}`)).toBe(body)
-    if (scenario === "short") {
-      expect(app.captureCharFrame()).not.toContain("▼ 展开查看完整推理")
-      expect(app.captureCharFrame()).toContain("short stream thought")
-      expect(app.captureCharFrame()).toContain("second stream line")
-      return
-    }
-    expect(app.captureCharFrame()).toContain("▼ 展开查看完整推理")
-    expect(app.captureCharFrame()).not.toContain("STREAM_TAIL")
-    await clickVisibleText(app, "▼ 展开查看完整推理")
-    expect(await frame("STREAM_TAIL")).toContain("STREAM_TAIL")
-  }, { width: 80, height: 48 }, {}, { thinking_visibility: true, sidebar: "hide" })
+  const info: AssistantMessage = {
+    id: messageID,
+    sessionID,
+    role: "assistant",
+    parentID: "msg_request",
+    time: { created: 1 },
+    modelID: "model",
+    providerID: "provider",
+    mode: "build",
+    agent: "build",
+    path: { cwd: directory, root: directory },
+    cost: 0,
+    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+  }
+  const suffix =
+    scenario === "short" ? "\nsecond stream line" : "\nsecond stream line\nline 3\nline 4\nline 5\nline 6\nSTREAM_TAIL"
+  const opaque = {
+    ...source,
+    id: "part_opaque",
+    messageID: "msg_stream_opaque",
+    text: "[REDACTED]",
+    metadata: { encrypted: true },
+  }
+  await withRenderedReview(
+    [
+      { info, parts: [source] },
+      { info: { ...info, id: opaque.messageID }, parts: [opaque] },
+    ],
+    async (app, _route, emit) => {
+      const frame = async (text: string) => {
+        await waitForReviewFrame(
+          app,
+          async (value) => {
+            if (value.includes(text)) return true
+            await Bun.sleep(5)
+            return false
+          },
+          { maxPasses: 400 },
+        )
+        return app.captureCharFrame()
+      }
+      // #481：首个短正文没有虚假 overflow；先点短正文也不能预写后续 expanded。
+      const initial = await frame("short stream thought")
+      expect(initial).not.toContain("▼ 展开查看完整推理")
+      expect(initial.split("\n").filter((line) => line.includes("▼ 展开查看完整推理"))).toHaveLength(0)
+      // 再增长仍受共享五行预算，不能以短内容点击绕过默认收缩。
+      await clickVisibleText(app, "short stream thought")
+      emit({
+        directory,
+        project: "proj_test",
+        payload: {
+          id: "evt_default_grow",
+          type: "message.part.delta",
+          properties: { sessionID, messageID, partID: source.id, field: "text", delta: suffix },
+        },
+      })
+      const grown = await frame("second stream line")
+      if (scenario === "short") expect(grown).not.toContain("▼ 展开查看完整推理")
+      if (scenario === "long") expect(await frame("▼ 展开查看完整推理")).not.toContain("STREAM_TAIL")
+      const body = app.renderer.root.findDescendantById(`text-${source.id}`)
+      expect(body?.parent?.parent?.height).toBeLessThanOrEqual(5)
+      // 父Message仍pending，只以原始Part的end解除流式guard。
+      emit({
+        directory,
+        project: "proj_test",
+        payload: {
+          id: "evt_default_done",
+          type: "message.part.updated",
+          properties: {
+            sessionID,
+            part: { ...source, text: source.text + suffix, time: { start: 1, end: 2 } },
+            time: 3,
+          },
+        },
+      })
+      await waitForReviewFrame(
+        app,
+        async (value) => {
+          if (
+            value.includes("Thought") &&
+            value.includes("second stream line") &&
+            (scenario === "long" || !value.includes("▼ 展开查看完整推理"))
+          )
+            return true
+          await Bun.sleep(5)
+          return false
+        },
+        { maxPasses: 400 },
+      )
+      expect(app.renderer.root.findDescendantById(`text-${source.id}`)).toBe(body)
+      if (scenario === "short") {
+        expect(app.captureCharFrame()).not.toContain("▼ 展开查看完整推理")
+        expect(app.captureCharFrame()).toContain("short stream thought")
+        expect(app.captureCharFrame()).toContain("second stream line")
+        return
+      }
+      expect(app.captureCharFrame()).toContain("▼ 展开查看完整推理")
+      expect(app.captureCharFrame()).not.toContain("STREAM_TAIL")
+      await clickVisibleText(app, "▼ 展开查看完整推理")
+      expect(await frame("STREAM_TAIL")).toContain("STREAM_TAIL")
+    },
+    { width: 80, height: 48 },
+    {},
+    { thinking_visibility: true, sidebar: "hide" },
+  )
 })

@@ -117,6 +117,7 @@ proxy_enforced || matches!(sandbox_level, WindowsSandboxLevel::Elevated)
 - 即使配置是 restricted-token，只要有 managed network/proxy enforcement，也会强制走 elevated 后端，因为网络隔离依赖专用 sandbox 用户身份。
 
 **二、整体抽象架构图**
+
 ```text
 +--------------------------------------------------------------------------------+
 |                                Codex Frontend / API                             |
@@ -1124,6 +1125,7 @@ legacy 后端限制：
 这点很重要：代码里多处出现“refusing to run unsandboxed”，说明无法 enforce 时宁可失败，也不悄悄放行。
 
 **十七、Elevated 与 Legacy 对比图**
+
 ```text
 +----------------------+-----------------------------+-----------------------------+
 | 维度                 | Legacy RestrictedToken      | Elevated                    |
@@ -1142,6 +1144,7 @@ legacy 后端限制：
 ```
 
 **十八、端到端主流程图：Elevated Shell Tool**
+
 ```text
 +--------------------------------------------------------------------------------+
 | User / Model Tool Call                                                          |
@@ -1214,6 +1217,7 @@ legacy 后端限制：
 ```
 
 **十九、完整抽象设计图**
+
 ```text
 +================================================================================+
 |                           WINDOWS SANDBOX ABSTRACT DESIGN                       |

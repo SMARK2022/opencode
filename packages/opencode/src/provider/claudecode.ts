@@ -6,7 +6,6 @@ export const VERSION = "2.1.117"
 // 指纹盐值与 Claude Code 官方二进制一致，修改会导致计费头校验失败。
 const SALT = "59cf53e54c78"
 
-
 // --- 会话状态管理 ---
 // 随机设备与会话身份属于进程，不可按请求重建，否则同一次对话的 metadata 与 headers 会漂移。
 export interface CubenceSession {
@@ -53,7 +52,6 @@ export function buildBillingHeaderBlock(fp: string, version = VERSION) {
   }
 }
 
-
 // user_id 是紧凑 JSON 字符串而非对象；空 account_uuid 仍需保留以符合网关格式。
 export function buildMetadataUserId(opts: { deviceId: string; sessionId: string; accountUuid?: string }) {
   return JSON.stringify({
@@ -64,7 +62,11 @@ export function buildMetadataUserId(opts: { deviceId: string; sessionId: string;
 }
 
 // 构建请求头，beta 特性按模型动态生成，鉴权由 fetch wrapper 处理
-export function buildRequestHeaders(opts: { sessionId: string; modelId: string; version?: string }): Record<string, string> {
+export function buildRequestHeaders(opts: {
+  sessionId: string
+  modelId: string
+  version?: string
+}): Record<string, string> {
   // #147：UA 版本与 billing/指纹共用 override
   const version = opts.version ?? VERSION
   // 23 恢复 redact beta；不改 15 的 disabled/adaptive 策略，也不恢复已弃用 interleaved。
@@ -72,15 +74,11 @@ export function buildRequestHeaders(opts: { sessionId: string; modelId: string; 
     "claude-code-20250219",
     "prompt-caching-scope-2026-01-05",
     "context-management-2025-06-27",
-    "redact-thinking-2026-02-12"
+    "redact-thinking-2026-02-12",
   ]
 
   // 检查服务端实际 modelId 而非配置显示名，别名不应决定可用 context beta。
-  if (
-    opts.modelId.includes("opus-4-7") ||
-    opts.modelId.includes("opus-4-6") ||
-    opts.modelId.includes("sonnet-4-6")
-  ) {
+  if (opts.modelId.includes("opus-4-7") || opts.modelId.includes("opus-4-6") || opts.modelId.includes("sonnet-4-6")) {
     betas.push("context-1m-2025-08-07")
   }
 
@@ -95,7 +93,12 @@ export function buildRequestHeaders(opts: { sessionId: string; modelId: string; 
 }
 
 // --- Fetch 拦截与重写包装器 ---
-export function createClaudeCodeFetch(opts: { session: CubenceSession; token: string; authMode: "bearer" | "x-api-key"; version?: string }) {
+export function createClaudeCodeFetch(opts: {
+  session: CubenceSession
+  token: string
+  authMode: "bearer" | "x-api-key"
+  version?: string
+}) {
   const { session, token, authMode } = opts
   // #147：身份三元组（指纹/billing/UA）共用 version
   const version = opts.version ?? VERSION
@@ -113,13 +116,15 @@ export function createClaudeCodeFetch(opts: { session: CubenceSession; token: st
       : {}
 
     // 24 仅恢复计费消费者；首 user 的首 text 决定指纹，不拼接工具或附件文字。
-    const content: unknown = (originalBody.messages ?? []).find((message: { role?: string }) => message.role === "user")?.content
-    const firstText: unknown = Array.isArray(content)
-      ? content.find((block) => block?.type === "text")?.text : content
+    const content: unknown = (originalBody.messages ?? []).find(
+      (message: { role?: string }) => message.role === "user",
+    )?.content
+    const firstText: unknown = Array.isArray(content) ? content.find((block) => block?.type === "text")?.text : content
     const fp = computeFingerprint(typeof firstText === "string" ? firstText : "", version)
     // 数组的缓存属性和附加字段原样保留，字符串包括空串也转换为 text block。
     const system: unknown = originalBody.system
-    const newSystem: unknown[] = [buildBillingHeaderBlock(fp, version),
+    const newSystem: unknown[] = [
+      buildBillingHeaderBlock(fp, version),
       ...(Array.isArray(system) ? system : typeof system === "string" ? [{ type: "text", text: system }] : []),
     ]
     // 不恢复 buildSystemBlocks 或两段身份；真正的 agent/project 指令仍来自原始 system。
@@ -144,11 +149,7 @@ export function createClaudeCodeFetch(opts: { session: CubenceSession; token: st
     if (originalThinking?.type === "disabled") {
       // 显式关闭思考同样是一份有效配置，不能用 truthy 判断重新启用默认预算。
       thinking = originalThinking
-    } else if (
-      modelId.includes("opus-4-7") ||
-      modelId.includes("opus-4-6") ||
-      modelId.includes("sonnet-4-6")
-    ) {
+    } else if (modelId.includes("opus-4-7") || modelId.includes("opus-4-6") || modelId.includes("sonnet-4-6")) {
       // SDK 已验证 adaptive 属性；保留 display/block_binding，避免 Opus4.7 默认为 omitted。
       thinking = { ...(originalThinking?.type === "adaptive" ? originalThinking : {}), type: "adaptive" }
     } else if (modelId.includes("haiku")) {
@@ -195,9 +196,18 @@ export function createClaudeCodeFetch(opts: { session: CubenceSession; token: st
 
     for (const [key, value] of Object.entries(customHeaders)) {
       // SDK beta 与实际 body 配套，合并时去重并仅排除弃用 interleaved，恢复的 redact 也必须发出。
-      requestHeaders.set(key, key === "anthropic-beta"
-        ? [...new Set([...(requestHeaders.get(key) ?? "").split(","), ...value.split(",")].map((beta) => beta.trim()).filter((beta) => beta && beta !== "interleaved-thinking-2025-05-14"))].join(",")
-        : value)
+      requestHeaders.set(
+        key,
+        key === "anthropic-beta"
+          ? [
+              ...new Set(
+                [...(requestHeaders.get(key) ?? "").split(","), ...value.split(",")]
+                  .map((beta) => beta.trim())
+                  .filter((beta) => beta && beta !== "interleaved-thinking-2025-05-14"),
+              ),
+            ].join(",")
+          : value,
+      )
     }
 
     // 两种认证头互斥；删除 SDK 遗留头，避免 Bearer 与 x-api-key 指向不同账号。

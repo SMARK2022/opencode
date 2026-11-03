@@ -94,7 +94,11 @@ export function scanFileTouchHistory(messages: MessageV2.WithParts[], filePath: 
         continue
       }
       if (part.tool === "edit" || part.tool === "write") {
-        if (typeof input?.filePath === "string" && resolveForCompare(input.filePath) === targetKey && end > history.lastWriteEnd) {
+        if (
+          typeof input?.filePath === "string" &&
+          resolveForCompare(input.filePath) === targetKey &&
+          end > history.lastWriteEnd
+        ) {
           history.lastWriteEnd = end
           history.lastWriteTool = part.tool
         }
@@ -291,101 +295,101 @@ export const EditTool = Tool.define(
             if (proposal.version.state === "absent") throw new Error(`File ${filePath} not found`)
             contentOld = source.text
 
-              // #514：匹配在 LF 工作区进行，写回时恢复文件级 CRLF/CR；避免把换行差异当成全文 diff。
-              const ending = detectLineEnding(contentOld)
-              // ending 只影响 proposal 的物理写回；下面的 editsLF 和 history sync 始终保持逻辑 LF。
-              const baseLF = normalizeLineEndings(contentOld)
-              const editsLF = edits.map((edit) => ({
-                oldString: normalizeLineEndings(edit.oldString),
-                newString: normalizeLineEndings(edit.newString),
-                replaceAll: edit.replaceAll,
-              }))
+            // #514：匹配在 LF 工作区进行，写回时恢复文件级 CRLF/CR；避免把换行差异当成全文 diff。
+            const ending = detectLineEnding(contentOld)
+            // ending 只影响 proposal 的物理写回；下面的 editsLF 和 history sync 始终保持逻辑 LF。
+            const baseLF = normalizeLineEndings(contentOld)
+            const editsLF = edits.map((edit) => ({
+              oldString: normalizeLineEndings(edit.oldString),
+              newString: normalizeLineEndings(edit.newString),
+              replaceAll: edit.replaceAll,
+            }))
 
-              let applied
-              try {
-                // #514：单/多 edit 同一 applyEdits；失败诊断的 closest 只解释，不参与成功替换。
-                applied = EditApply.applyEdits(baseLF, editsLF, filePath)
-              } catch (error) {
-                const message = error instanceof Error ? error.message : String(error)
-                if (message.includes("Could not find") || message.includes("Could not find oldString")) {
-                  // 失败索引来自共享替换owner，不能重新扫描成功条目猜测失败归属。
-                  if (!(error instanceof EditApply.EditApplyError)) throw error
-                  const probe = editsLF[error.editIndex]
-                  // 缺失内部索引时必须原样失败，不能用首条 edit 猜测。
-                  if (!probe) throw error
-                  // 只展示同一DP返回的actual，归一化成功的前项不应出现在本次诊断。
-                  const closest = closestMatch(contentOld, convertToLineEnding(probe.oldString, ending))
-                  throw new Error(
-                    message +
-                      (closest
-                        ? `\n\nClosest match at line ${closest.line}:\n${closest.excerpt}`
-                        : "\n\nNo reliable nearby candidate was found. Read the file and retry with exact text.") +
-                      mismatchHistoryNotes(ctx.messages, filePath),
-                  )
-                }
-                throw error
+            let applied
+            try {
+              // #514：单/多 edit 同一 applyEdits；失败诊断的 closest 只解释，不参与成功替换。
+              applied = EditApply.applyEdits(baseLF, editsLF, filePath)
+            } catch (error) {
+              const message = error instanceof Error ? error.message : String(error)
+              if (message.includes("Could not find") || message.includes("Could not find oldString")) {
+                // 失败索引来自共享替换owner，不能重新扫描成功条目猜测失败归属。
+                if (!(error instanceof EditApply.EditApplyError)) throw error
+                const probe = editsLF[error.editIndex]
+                // 缺失内部索引时必须原样失败，不能用首条 edit 猜测。
+                if (!probe) throw error
+                // 只展示同一DP返回的actual，归一化成功的前项不应出现在本次诊断。
+                const closest = closestMatch(contentOld, convertToLineEnding(probe.oldString, ending))
+                throw new Error(
+                  message +
+                    (closest
+                      ? `\n\nClosest match at line ${closest.line}:\n${closest.excerpt}`
+                      : "\n\nNo reliable nearby candidate was found. Read the file and retry with exact text.") +
+                    mismatchHistoryNotes(ctx.messages, filePath),
+                )
               }
-
-              contentNew = convertToLineEnding(applied.contentNew, ending)
-              // 该转换只服务磁盘写回；diff 与 history 随后再次归一化，避免物理 EOL 重复进入模型视图。
-              const desiredBom = source.bom || Bom.split(contentNew).bom
-              contentNew = Bom.split(contentNew).text
-
-              // 预计算 diff 供权限预览；有界 seam 保证审批 metadata 不携带无界产物。
-              diff = renderFileDiff(filePath, normalizeLineEndings(contentOld), normalizeLineEndings(contentNew)).patch
-
-              yield* ctx.ask({
-                permission: "edit",
-                patterns: [path.relative(instance.worktree, filePath)],
-                always: ["*"],
-                metadata: {
-                  filepath: filePath,
-                  diff,
-                },
-              })
-
-              // #518：applyEdits 已完成全部匹配与 overlap 校验，coordinator 只负责 stale proposal 防护。
-              // #518：匹配基于 proposal bytes；另一 mutation 先提交时这里整体失败，绝不重新匹配新内容。
-              yield* Mutation.commit({
-                fs: afs,
-                expected: [proposal],
-                execute: Effect.gen(function* () {
-                  // #518：写盘沿用既有顺序（内容→format→BOM 回写）；锁内完成才发布 change 事件。
-                  yield* afs.writeWithDirs(filePath, Bom.join(contentNew, desiredBom))
-                  if (yield* format.file(filePath)) {
-                    const formattedText = yield* Bom.syncFile(afs, filePath, desiredBom)
-                    // formatter 的文本变化有效，但 existing edit 的物理行尾仍由 proposal ending 约束。
-                    // 恢复和最终读取都留在 commit lock 内，保证 diff、事件与后续 mutation 只见最终文件。
-                    const restoredText = convertToLineEnding(normalizeLineEndings(formattedText), ending)
-                    if (restoredText !== formattedText) {
-                      yield* afs.writeWithDirs(filePath, Bom.join(restoredText, desiredBom))
-                    }
-                    contentNew = (yield* Bom.readFile(afs, filePath)).text
-                  }
-                }),
-              }).pipe(Effect.orDie)
-              // commit 成功后才发布 Edited/Updated，Permission reject 或 version conflict 不产生成功事件。
-              yield* events.publish(FileSystem.Event.Edited, { file: filePath })
-              yield* events.publish(Watcher.Event.Updated, {
-                file: filePath,
-                event: "change",
-              })
-              // 两代共享matcher给出的覆写索引及原LF输入指纹，不能用actual oldString替代提交证据。
-              provenanceRewrites.push(...EditApply.provenance(editsLF, applied.normalizedMismatchIndices))
-
-              // #514 INV-16：成功后始终发完整参数面 { filePath, edits }，
-              // processor 用其整表替换 state.input，清掉 stream 遗留的顶层 oldString。
-              // actualOld 已在 applyEdits.syncEdits 中，history 继续保留模型可回放的 LF logical form。
-              syncInput = {
-                filePath,
-                // normalize 已在 matcher 前完成，因此这里不再把物理 CRLF 写回 Message 参数。
-                edits: applied.syncEdits.map((edit) => ({
-                  oldString: edit.oldString,
-                  newString: edit.newString,
-                  ...(edit.replaceAll === true ? { replaceAll: true as const } : {}),
-                })),
-              }
+              throw error
             }
+
+            contentNew = convertToLineEnding(applied.contentNew, ending)
+            // 该转换只服务磁盘写回；diff 与 history 随后再次归一化，避免物理 EOL 重复进入模型视图。
+            const desiredBom = source.bom || Bom.split(contentNew).bom
+            contentNew = Bom.split(contentNew).text
+
+            // 预计算 diff 供权限预览；有界 seam 保证审批 metadata 不携带无界产物。
+            diff = renderFileDiff(filePath, normalizeLineEndings(contentOld), normalizeLineEndings(contentNew)).patch
+
+            yield* ctx.ask({
+              permission: "edit",
+              patterns: [path.relative(instance.worktree, filePath)],
+              always: ["*"],
+              metadata: {
+                filepath: filePath,
+                diff,
+              },
+            })
+
+            // #518：applyEdits 已完成全部匹配与 overlap 校验，coordinator 只负责 stale proposal 防护。
+            // #518：匹配基于 proposal bytes；另一 mutation 先提交时这里整体失败，绝不重新匹配新内容。
+            yield* Mutation.commit({
+              fs: afs,
+              expected: [proposal],
+              execute: Effect.gen(function* () {
+                // #518：写盘沿用既有顺序（内容→format→BOM 回写）；锁内完成才发布 change 事件。
+                yield* afs.writeWithDirs(filePath, Bom.join(contentNew, desiredBom))
+                if (yield* format.file(filePath)) {
+                  const formattedText = yield* Bom.syncFile(afs, filePath, desiredBom)
+                  // formatter 的文本变化有效，但 existing edit 的物理行尾仍由 proposal ending 约束。
+                  // 恢复和最终读取都留在 commit lock 内，保证 diff、事件与后续 mutation 只见最终文件。
+                  const restoredText = convertToLineEnding(normalizeLineEndings(formattedText), ending)
+                  if (restoredText !== formattedText) {
+                    yield* afs.writeWithDirs(filePath, Bom.join(restoredText, desiredBom))
+                  }
+                  contentNew = (yield* Bom.readFile(afs, filePath)).text
+                }
+              }),
+            }).pipe(Effect.orDie)
+            // commit 成功后才发布 Edited/Updated，Permission reject 或 version conflict 不产生成功事件。
+            yield* events.publish(FileSystem.Event.Edited, { file: filePath })
+            yield* events.publish(Watcher.Event.Updated, {
+              file: filePath,
+              event: "change",
+            })
+            // 两代共享matcher给出的覆写索引及原LF输入指纹，不能用actual oldString替代提交证据。
+            provenanceRewrites.push(...EditApply.provenance(editsLF, applied.normalizedMismatchIndices))
+
+            // #514 INV-16：成功后始终发完整参数面 { filePath, edits }，
+            // processor 用其整表替换 state.input，清掉 stream 遗留的顶层 oldString。
+            // actualOld 已在 applyEdits.syncEdits 中，history 继续保留模型可回放的 LF logical form。
+            syncInput = {
+              filePath,
+              // normalize 已在 matcher 前完成，因此这里不再把物理 CRLF 写回 Message 参数。
+              edits: applied.syncEdits.map((edit) => ({
+                oldString: edit.oldString,
+                newString: edit.newString,
+                ...(edit.replaceAll === true ? { replaceAll: true as const } : {}),
+              })),
+            }
+          }
 
           // 两分支都已同步 formatter 后的最终内容，回执与 metadata 因此共用同一 diff。
           // 权限请求仍使用各自 ask 前的预计算，不能拿成功后的真值替代审批预览。
@@ -450,7 +454,14 @@ export const EditTool = Tool.define(
           }
 
           // 两代复用完整行预算与精确省略数；仅展示预算内摘要，metadata仍保存全部原始取证。
-          const warningTail = EditApply.warningTail({ rewrites: provenanceRewrites, unchanged: unchangedEntries, total: edits.length, maxBytes: Math.min(reserveBytes, Math.max(0, limitBytes - consumedBytes)), maxLines: Math.min(reserveLines, Math.max(0, limitLines - consumedLines)), channel: "metadata" })
+          const warningTail = EditApply.warningTail({
+            rewrites: provenanceRewrites,
+            unchanged: unchangedEntries,
+            total: edits.length,
+            maxBytes: Math.min(reserveBytes, Math.max(0, limitBytes - consumedBytes)),
+            maxLines: Math.min(reserveLines, Math.max(0, limitLines - consumedLines)),
+            channel: "metadata",
+          })
           const warningBytes = Buffer.byteLength(warningTail, "utf-8")
           const warningLinesCount = warningTail ? warningTail.split("\n").length - 1 : 0
 
@@ -527,7 +538,6 @@ export const EditTool = Tool.define(
     }
   }),
 )
-
 
 export function trimDiff(diff: string): string {
   // 保留 diff 原始前导空白；公共缩进属于模型需要理解的文件语义，不是可丢弃的装饰。

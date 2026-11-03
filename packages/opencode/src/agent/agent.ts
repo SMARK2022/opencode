@@ -202,7 +202,7 @@ const layer = Layer.effect(
                 plan_enter: "allow",
                 bash: "auto",
                 edit: "auto",
-        // #230：edit 权限接入 auto admission——apply_patch/write/edit 实际执行前都请求 edit 权限
+                // #230：edit 权限接入 auto admission——apply_patch/write/edit 实际执行前都请求 edit 权限
                 // #203：external_directory:auto 让 shell 项目外路径门禁进入 auto 路由，
                 // #203：复用同一条命令的预审证据；白名单目录保持 allow 不被放宽
                 external_directory: {

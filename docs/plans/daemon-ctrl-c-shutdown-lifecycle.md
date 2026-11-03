@@ -68,53 +68,53 @@ before approval.
 
 ## 3. Repository Context
 
-| Source | Why it constrains this task |
-| --- | --- |
-| `CONTEXT.md:71-110,127-175` | Defines Project, InstanceState, AppRuntime, Server Lock, and the SMARK daemon ownership model. |
-| `packages/opencode/AGENTS.md:103-135` | Requires InstanceState-scoped cleanup, scoped fibers, Effect conventions, and no ambient context shims. |
-| `docs/adr/README.md:1-50` | Confirms ADR conventions; no daemon-specific accepted ADR exists. |
-| `docs/adr/0001-triage-labels-and-team-assignment-coexist.md` | Unrelated accepted ADR; read to confirm it does not constrain daemon lifecycle. |
+| Source                                                                     | Why it constrains this task                                                                                          |
+| -------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| `CONTEXT.md:71-110,127-175`                                                | Defines Project, InstanceState, AppRuntime, Server Lock, and the SMARK daemon ownership model.                       |
+| `packages/opencode/AGENTS.md:103-135`                                      | Requires InstanceState-scoped cleanup, scoped fibers, Effect conventions, and no ambient context shims.              |
+| `docs/adr/README.md:1-50`                                                  | Confirms ADR conventions; no daemon-specific accepted ADR exists.                                                    |
+| `docs/adr/0001-triage-labels-and-team-assignment-coexist.md`               | Unrelated accepted ADR; read to confirm it does not constrain daemon lifecycle.                                      |
 | `.opencode/policy/first-principles-engineering.md:218-231,253-322,476-546` | Requires first-divergence repair, one primary path, full traceability, and the 15% Chinese explanatory-comment gate. |
-| `.opencode/templates/canonical-plan.md` | Defines this plan structure and approval/implementation evidence fields. |
+| `.opencode/templates/canonical-plan.md`                                    | Defines this plan structure and approval/implementation evidence fields.                                             |
 
 ## 4. Files and Evidence Read
 
-| Evidence | Relevance | Evidence class |
-| --- | --- | --- |
-| `packages/opencode/src/cli/cmd/tui/thread.ts:84-161` | Shows launcher order, detached daemon acquisition, and that `ExitProvider` is not installed until `tui()` is entered. | reachable |
-| `packages/opencode/src/cli/cmd/tui/daemon.ts:23-25,244-369` | Shows owner fast path, alive-but-unresponsive reuse, detached spawn, and election behavior. | reachable |
-| `packages/opencode/src/cli/cmd/tui/worker.ts:92-117,247-303,330-413,454-560` | Shows server/lock startup, unbounded shutdown, signal handling, control status, idle shutdown, and late launcher watcher. | reachable |
-| `packages/opencode/src/cli/cmd/daemon.ts:6-10,29-97` | Shows graceful-only stop, 10-second wait, token-authenticated control request, and no escalation. | contracted/current behavior |
-| `packages/opencode/src/cli/cmd/tui/context/exit.tsx:38-75` | Shows signal listeners only after TUI context mounting and unbounded `onBeforeExit`. | reachable |
-| `packages/opencode/src/cli/cmd/tui/app.tsx:234-242,280-344,397-407` | Shows plugin cleanup before renderer/SSE teardown and asynchronous plugin initialization. | reachable |
-| `packages/opencode/src/cli/cmd/tui/plugin/runtime.ts:674-724,1000-1016,1040-1055,1111-1120` | Shows dependency wait, pending `loaded` promise, and plugin disposal ordering. | reachable |
-| `packages/opencode/src/cli/cmd/tui/context/sync.tsx:868-899,958-969` | Shows the five startup requests and fatal handling. | reachable |
-| `packages/opencode/src/cli/cmd/tui/context/aggregate-failures.ts:14-36` | Shows the exact generic network error aggregation. | reachable |
-| `packages/opencode/src/server/routes/instance/httpapi/middleware/instance-context.ts:23-34` | Shows instance API requests entering `InstanceStore.load()`. | reachable |
-| `packages/opencode/src/project/instance-store.ts:27-71,88-116,141-179` | Shows pending `Deferred`, bootstrap fiber, and `disposeAll()` waiting before disposers. | reachable |
-| `packages/opencode/src/project/bootstrap.ts:38-52` | Shows Project bootstrap dependency and service initialization chain. | reachable |
-| `packages/opencode/src/project/instance-runtime.ts:1-16` | Shows the Promise boundary used by worker shutdown. | reachable |
-| `packages/opencode/src/effect/instance-state.ts:27-53` | Shows ScopedCache per-Project lifecycle. | reachable |
-| `packages/opencode/src/effect/instance-registry.ts:1-12` | Shows all disposers are awaited but not bounded. | reachable |
-| `packages/opencode/src/session/run-state.ts:55-78` | Shows a real finalizer that waits for runner cancellation. | reachable |
-| `packages/opencode/src/file/watcher.ts:74-123` | Shows native watcher finalizer and timeout-limited acquisition but unbounded unsubscribe. | reachable |
-| `packages/opencode/src/lsp/client.ts:693-699` | Shows LSP shutdown waiting for process stop. | reachable |
-| `packages/opencode/src/mcp/index.ts:556-577` | Shows MCP close with no outer timeout. | reachable |
-| `packages/opencode/src/config/config.ts:601-638,771-793` | Shows detached dependency installation and later dependency joining. | reachable |
-| `packages/core/src/npm.ts:79-113` | Shows npm retry/timeout configuration and its boundary. | reachable |
-| `packages/opencode/test/project/instance.test.ts:86-118,198-243` | Existing concurrent-load and dispose tests; missing pending-dispose cancellation assertion. | reachable |
-| `packages/opencode/test/cli/tui/daemon.test.ts:1-120,611-681,729-888,1089-1130` | Existing real daemon, stop, startup-idle, launcher, and detached-signal tests. | reachable |
-| `packages/opencode/test/fixture/fixture.ts:48-87` | Test-only 5-second disposal timeout explicitly documents hanging finalizers. | observed |
-| `packages/opencode/test/cli/tui/plugin-lifecycle.test.ts:182-224` | Confirms plugin cleanup timeout coverage does not cover pending plugin load. | reachable |
-| `/Users/sunbenteng/.local/share/opencode/log/2026-07-21T213117.log:70-86` | Captured real daemon disconnect, idle shutdown, and incomplete teardown trace. | observed |
-| `/Users/sunbenteng/.local/share/opencode/log/2026-07-21T213124.log:4-12` | Captured exact startup network error and fatal TUI exit. | observed |
-| `/Users/sunbenteng/.local/share/opencode/log/2026-07-21T213126.log:4-12` | Confirms repeatability across another TUI launch. | observed |
-| `/Users/sunbenteng/.local/share/opencode/log/2026-07-21T213137.log:1` | Captures the `daemon stop` invocation. | observed |
-| `/Users/sunbenteng/.local/share/opencode/log/2026-07-21T213148.log:1-13` | Shows replacement daemon startup after the failed owner window. | observed |
-| `09c086ffa8d` | Records that production-like instance disposal can hang and required a test timeout. | observed/history |
-| `3282685c3a` | Records the lock-clear-after-disposal safety decision. | observed/history |
-| `60189bbe79` | Records the deliberate graceful-only `daemon stop` decision. | observed/history |
-| `b01eb22b2c` | Provides an upstream authenticated SIGTERM/SIGKILL lifecycle precedent. | observed/history |
+| Evidence                                                                                    | Relevance                                                                                                                 | Evidence class              |
+| ------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- | --------------------------- |
+| `packages/opencode/src/cli/cmd/tui/thread.ts:84-161`                                        | Shows launcher order, detached daemon acquisition, and that `ExitProvider` is not installed until `tui()` is entered.     | reachable                   |
+| `packages/opencode/src/cli/cmd/tui/daemon.ts:23-25,244-369`                                 | Shows owner fast path, alive-but-unresponsive reuse, detached spawn, and election behavior.                               | reachable                   |
+| `packages/opencode/src/cli/cmd/tui/worker.ts:92-117,247-303,330-413,454-560`                | Shows server/lock startup, unbounded shutdown, signal handling, control status, idle shutdown, and late launcher watcher. | reachable                   |
+| `packages/opencode/src/cli/cmd/daemon.ts:6-10,29-97`                                        | Shows graceful-only stop, 10-second wait, token-authenticated control request, and no escalation.                         | contracted/current behavior |
+| `packages/opencode/src/cli/cmd/tui/context/exit.tsx:38-75`                                  | Shows signal listeners only after TUI context mounting and unbounded `onBeforeExit`.                                      | reachable                   |
+| `packages/opencode/src/cli/cmd/tui/app.tsx:234-242,280-344,397-407`                         | Shows plugin cleanup before renderer/SSE teardown and asynchronous plugin initialization.                                 | reachable                   |
+| `packages/opencode/src/cli/cmd/tui/plugin/runtime.ts:674-724,1000-1016,1040-1055,1111-1120` | Shows dependency wait, pending `loaded` promise, and plugin disposal ordering.                                            | reachable                   |
+| `packages/opencode/src/cli/cmd/tui/context/sync.tsx:868-899,958-969`                        | Shows the five startup requests and fatal handling.                                                                       | reachable                   |
+| `packages/opencode/src/cli/cmd/tui/context/aggregate-failures.ts:14-36`                     | Shows the exact generic network error aggregation.                                                                        | reachable                   |
+| `packages/opencode/src/server/routes/instance/httpapi/middleware/instance-context.ts:23-34` | Shows instance API requests entering `InstanceStore.load()`.                                                              | reachable                   |
+| `packages/opencode/src/project/instance-store.ts:27-71,88-116,141-179`                      | Shows pending `Deferred`, bootstrap fiber, and `disposeAll()` waiting before disposers.                                   | reachable                   |
+| `packages/opencode/src/project/bootstrap.ts:38-52`                                          | Shows Project bootstrap dependency and service initialization chain.                                                      | reachable                   |
+| `packages/opencode/src/project/instance-runtime.ts:1-16`                                    | Shows the Promise boundary used by worker shutdown.                                                                       | reachable                   |
+| `packages/opencode/src/effect/instance-state.ts:27-53`                                      | Shows ScopedCache per-Project lifecycle.                                                                                  | reachable                   |
+| `packages/opencode/src/effect/instance-registry.ts:1-12`                                    | Shows all disposers are awaited but not bounded.                                                                          | reachable                   |
+| `packages/opencode/src/session/run-state.ts:55-78`                                          | Shows a real finalizer that waits for runner cancellation.                                                                | reachable                   |
+| `packages/opencode/src/file/watcher.ts:74-123`                                              | Shows native watcher finalizer and timeout-limited acquisition but unbounded unsubscribe.                                 | reachable                   |
+| `packages/opencode/src/lsp/client.ts:693-699`                                               | Shows LSP shutdown waiting for process stop.                                                                              | reachable                   |
+| `packages/opencode/src/mcp/index.ts:556-577`                                                | Shows MCP close with no outer timeout.                                                                                    | reachable                   |
+| `packages/opencode/src/config/config.ts:601-638,771-793`                                    | Shows detached dependency installation and later dependency joining.                                                      | reachable                   |
+| `packages/core/src/npm.ts:79-113`                                                           | Shows npm retry/timeout configuration and its boundary.                                                                   | reachable                   |
+| `packages/opencode/test/project/instance.test.ts:86-118,198-243`                            | Existing concurrent-load and dispose tests; missing pending-dispose cancellation assertion.                               | reachable                   |
+| `packages/opencode/test/cli/tui/daemon.test.ts:1-120,611-681,729-888,1089-1130`             | Existing real daemon, stop, startup-idle, launcher, and detached-signal tests.                                            | reachable                   |
+| `packages/opencode/test/fixture/fixture.ts:48-87`                                           | Test-only 5-second disposal timeout explicitly documents hanging finalizers.                                              | observed                    |
+| `packages/opencode/test/cli/tui/plugin-lifecycle.test.ts:182-224`                           | Confirms plugin cleanup timeout coverage does not cover pending plugin load.                                              | reachable                   |
+| `/Users/sunbenteng/.local/share/opencode/log/2026-07-21T213117.log:70-86`                   | Captured real daemon disconnect, idle shutdown, and incomplete teardown trace.                                            | observed                    |
+| `/Users/sunbenteng/.local/share/opencode/log/2026-07-21T213124.log:4-12`                    | Captured exact startup network error and fatal TUI exit.                                                                  | observed                    |
+| `/Users/sunbenteng/.local/share/opencode/log/2026-07-21T213126.log:4-12`                    | Confirms repeatability across another TUI launch.                                                                         | observed                    |
+| `/Users/sunbenteng/.local/share/opencode/log/2026-07-21T213137.log:1`                       | Captures the `daemon stop` invocation.                                                                                    | observed                    |
+| `/Users/sunbenteng/.local/share/opencode/log/2026-07-21T213148.log:1-13`                    | Shows replacement daemon startup after the failed owner window.                                                           | observed                    |
+| `09c086ffa8d`                                                                               | Records that production-like instance disposal can hang and required a test timeout.                                      | observed/history            |
+| `3282685c3a`                                                                                | Records the lock-clear-after-disposal safety decision.                                                                    | observed/history            |
+| `60189bbe79`                                                                                | Records the deliberate graceful-only `daemon stop` decision.                                                              | observed/history            |
+| `b01eb22b2c`                                                                                | Provides an upstream authenticated SIGTERM/SIGKILL lifecycle precedent.                                                   | observed/history            |
 
 ## 5. Current Behavior
 
@@ -148,16 +148,16 @@ long model call but also reuses an owner that is already stopping.
 
 ## 6. Supported Input Domain and Reachability
 
-| Input or condition | Producer | Upstream guarantees | Reachable path | Owner | Classification |
-| --- | --- | --- | --- | --- | --- |
-| Unix/macOS `Ctrl-C` before TUI app mount | Terminal signal to `thread.ts` launcher | Worker is detached from the foreground process group | `thread.ts` before `ExitProvider` registration | TUI launcher/worker lifecycle | observed/reachable |
-| TUI exit after SSE connection | OpenTUI keybinding or `ExitProvider` | `ExitProvider` serializes one exit task | `app.tsx` cleanup -> SSE disconnect -> idle timer | worker shutdown orchestration | observed/reachable |
-| Startup API request for a Project | `SyncProvider.bootstrap()` | Instance routes provide directory/workspace context | HTTP middleware -> `InstanceStore.load()` | `InstanceStore` | observed/reachable |
-| Pending Project bootstrap | `InstanceStore.load()` forks `completeLoad()` | Entry is cached and callers await its Deferred | `disposeAll()` sees entry before bootstrap completes | `InstanceStore` | reachable |
-| Hanging instance finalizer | `InstanceState`/registry services | Disposers are awaited with `allSettled`, not timeout | `InstanceRuntime.disposeAllInstances()` | worker shutdown orchestration | observed/reachable |
-| Daemon owner marked stopping | `gracefulShutdown()` sets shutdown guard | Control status is local and token protected | new `Daemon.ensure()` during teardown | daemon owner acquisition | reachable |
-| `daemon stop` timeout | CLI control request + PID polling | Lock token and control port authenticate owner | `cmd/daemon.ts` after 10 seconds | daemon CLI orchestration | reachable/contracted |
-| Existing ready owner temporarily unresponsive | long model call or event-loop delay | Single-owner SQLite invariant must remain | `ServerLock.alive()` true, health ping false | `Daemon.ensure()` | reachable, preserved |
+| Input or condition                            | Producer                                      | Upstream guarantees                                  | Reachable path                                       | Owner                         | Classification       |
+| --------------------------------------------- | --------------------------------------------- | ---------------------------------------------------- | ---------------------------------------------------- | ----------------------------- | -------------------- |
+| Unix/macOS `Ctrl-C` before TUI app mount      | Terminal signal to `thread.ts` launcher       | Worker is detached from the foreground process group | `thread.ts` before `ExitProvider` registration       | TUI launcher/worker lifecycle | observed/reachable   |
+| TUI exit after SSE connection                 | OpenTUI keybinding or `ExitProvider`          | `ExitProvider` serializes one exit task              | `app.tsx` cleanup -> SSE disconnect -> idle timer    | worker shutdown orchestration | observed/reachable   |
+| Startup API request for a Project             | `SyncProvider.bootstrap()`                    | Instance routes provide directory/workspace context  | HTTP middleware -> `InstanceStore.load()`            | `InstanceStore`               | observed/reachable   |
+| Pending Project bootstrap                     | `InstanceStore.load()` forks `completeLoad()` | Entry is cached and callers await its Deferred       | `disposeAll()` sees entry before bootstrap completes | `InstanceStore`               | reachable            |
+| Hanging instance finalizer                    | `InstanceState`/registry services             | Disposers are awaited with `allSettled`, not timeout | `InstanceRuntime.disposeAllInstances()`              | worker shutdown orchestration | observed/reachable   |
+| Daemon owner marked stopping                  | `gracefulShutdown()` sets shutdown guard      | Control status is local and token protected          | new `Daemon.ensure()` during teardown                | daemon owner acquisition      | reachable            |
+| `daemon stop` timeout                         | CLI control request + PID polling             | Lock token and control port authenticate owner       | `cmd/daemon.ts` after 10 seconds                     | daemon CLI orchestration      | reachable/contracted |
+| Existing ready owner temporarily unresponsive | long model call or event-loop delay           | Single-owner SQLite invariant must remain            | `ServerLock.alive()` true, health ping false         | `Daemon.ensure()`             | reachable, preserved |
 
 The plan does not add behavior for an unproven synchronous native event-loop
 freeze. The observed trace and source path establish asynchronous cleanup and
@@ -165,24 +165,24 @@ pending lifecycle waits as the supported repair domain.
 
 ## 7. Required Invariants
 
-| ID | Behavioral invariant | Evidence | Existing test |
-| --- | --- | --- | --- |
+| ID     | Behavioral invariant                                                                                                                                                             | Evidence                                                     | Existing test                             |
+| ------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------ | ----------------------------------------- |
 | INV-01 | Once daemon shutdown starts, it reaches either completed cleanup and owner release or a bounded process termination. It does not remain indefinitely live with a stopping owner. | User symptom, worker shutdown path, fixture timeout evidence | Planned real-worker hanging-disposer test |
-| INV-02 | A Project bootstrap that is still pending can be interrupted during disposal; disposal does not wait forever for the producer before it can cancel the producer. | `instance-store.ts:102-116,151-179` | Concurrent load only |
-| INV-03 | A TUI never reuses a daemon owner that has entered stopping state. | Captured error timing and `Daemon.ensure()` reuse path | No stopping-owner test |
-| INV-04 | `opencode daemon stop` terminates the same authenticated owner within a bounded command operation, including a stuck graceful teardown. | User symptom and `cmd/daemon.ts:54-70` | Healthy stop only |
-| INV-05 | A ready owner that is merely temporarily unresponsive remains the single reusable owner; no duplicate daemon is spawned. | `daemon.ts:287-304` and existing thread tests | Existing unresponsive-owner tests |
-| INV-06 | SQLite ownership is not transferred while the old daemon is still alive; forced termination is performed only after owner identity is revalidated. | `3282685c3a`, ServerLock token design | Existing lock-token tests |
-| INV-07 | A local owner teardown failure is not surfaced to TUI bootstrap as a generic external-network failure caused by stale URL reuse. | Captured startup error and aggregation path | Captured replay only |
+| INV-02 | A Project bootstrap that is still pending can be interrupted during disposal; disposal does not wait forever for the producer before it can cancel the producer.                 | `instance-store.ts:102-116,151-179`                          | Concurrent load only                      |
+| INV-03 | A TUI never reuses a daemon owner that has entered stopping state.                                                                                                               | Captured error timing and `Daemon.ensure()` reuse path       | No stopping-owner test                    |
+| INV-04 | `opencode daemon stop` terminates the same authenticated owner within a bounded command operation, including a stuck graceful teardown.                                          | User symptom and `cmd/daemon.ts:54-70`                       | Healthy stop only                         |
+| INV-05 | A ready owner that is merely temporarily unresponsive remains the single reusable owner; no duplicate daemon is spawned.                                                         | `daemon.ts:287-304` and existing thread tests                | Existing unresponsive-owner tests         |
+| INV-06 | SQLite ownership is not transferred while the old daemon is still alive; forced termination is performed only after owner identity is revalidated.                               | `3282685c3a`, ServerLock token design                        | Existing lock-token tests                 |
+| INV-07 | A local owner teardown failure is not surfaced to TUI bootstrap as a generic external-network failure caused by stale URL reuse.                                                 | Captured startup error and aggregation path                  | Captured replay only                      |
 
 ## 8. First Divergence and Root Cause
 
-| Invariant | First divergence | Owning module/interface | Proof |
-| --- | --- | --- | --- |
-| INV-02 | `disposeAllOnce()` awaits `Entry.deferred` before it can run `runDisposers()` and invalidate the pending instance scope. | `InstanceStore.disposeAll()` and `Entry` lifecycle | `instance-store.ts:102-116,151-179`; producer fiber is forked in the same store scope. |
-| INV-01 | `gracefulShutdown()` awaits all maintenance/instance/server cleanup without a hard deadline or final termination path. | `worker.ts:247-278` | Captured log stops after disposal begins; fixture documents disposal can never return. |
-| INV-03/INV-07 | `Daemon.ensure()` returns the URL for any live PID, including an owner already in shutdown. | `Daemon.existingOwnerUrl()` | `daemon.ts:244-289`; four local startup requests fail immediately after shutdown starts. |
-| INV-04 | Stop timeout only reports failure and deliberately does not escalate. | `DaemonStopCommand` | `cmd/daemon.ts:6-10,54-70`; commit `60189bbe79`. |
+| Invariant     | First divergence                                                                                                         | Owning module/interface                            | Proof                                                                                    |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| INV-02        | `disposeAllOnce()` awaits `Entry.deferred` before it can run `runDisposers()` and invalidate the pending instance scope. | `InstanceStore.disposeAll()` and `Entry` lifecycle | `instance-store.ts:102-116,151-179`; producer fiber is forked in the same store scope.   |
+| INV-01        | `gracefulShutdown()` awaits all maintenance/instance/server cleanup without a hard deadline or final termination path.   | `worker.ts:247-278`                                | Captured log stops after disposal begins; fixture documents disposal can never return.   |
+| INV-03/INV-07 | `Daemon.ensure()` returns the URL for any live PID, including an owner already in shutdown.                              | `Daemon.existingOwnerUrl()`                        | `daemon.ts:244-289`; four local startup requests fail immediately after shutdown starts. |
+| INV-04        | Stop timeout only reports failure and deliberately does not escalate.                                                    | `DaemonStopCommand`                                | `cmd/daemon.ts:6-10,54-70`; commit `60189bbe79`.                                         |
 
 ### Red-capable feedback loop
 
@@ -319,13 +319,13 @@ exit code: 0
 
 ## 9. Responsibility and Seam
 
-| Concern | Owner | Interface promise | Why it belongs here | Why another module does not own it |
-| --- | --- | --- | --- | --- |
-| Pending Project bootstrap cancellation | `InstanceStore` | `load`, `dispose`, and `disposeAll` own per-Project lifecycle | The pending `Entry` and producer scope are created here | TUI and worker do not own instance cache entries or their scopes |
-| Shutdown deadline and stopping visibility | `worker.ts` | Worker owns graceful shutdown and private control status | It is the first owner that knows shutdown has begun | CLI cannot observe internal cleanup phase before control request; TUI is only a consumer |
-| Stopping-owner acquisition behavior | `tui/daemon.ts` | `Daemon.ensure()` owns shared-owner selection | It decides whether an existing lock is reusable | `sync.tsx` should not infer process lifecycle from API errors |
-| Stop escalation | `cli/cmd/daemon.ts` | `daemon stop` owns user-visible stop policy | It already authenticates the owner and waits for termination | Worker cannot guarantee a CLI command returns when its own cleanup is stuck |
-| Generic startup error text | `aggregate-failures.ts`/`sync.tsx` | Existing startup aggregation reports request failures | No contract requires changing it if stale-owner reuse is repaired | Changing UI text would compensate downstream and not repair lifecycle ownership |
+| Concern                                   | Owner                              | Interface promise                                             | Why it belongs here                                               | Why another module does not own it                                                       |
+| ----------------------------------------- | ---------------------------------- | ------------------------------------------------------------- | ----------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| Pending Project bootstrap cancellation    | `InstanceStore`                    | `load`, `dispose`, and `disposeAll` own per-Project lifecycle | The pending `Entry` and producer scope are created here           | TUI and worker do not own instance cache entries or their scopes                         |
+| Shutdown deadline and stopping visibility | `worker.ts`                        | Worker owns graceful shutdown and private control status      | It is the first owner that knows shutdown has begun               | CLI cannot observe internal cleanup phase before control request; TUI is only a consumer |
+| Stopping-owner acquisition behavior       | `tui/daemon.ts`                    | `Daemon.ensure()` owns shared-owner selection                 | It decides whether an existing lock is reusable                   | `sync.tsx` should not infer process lifecycle from API errors                            |
+| Stop escalation                           | `cli/cmd/daemon.ts`                | `daemon stop` owns user-visible stop policy                   | It already authenticates the owner and waits for termination      | Worker cannot guarantee a CLI command returns when its own cleanup is stuck              |
+| Generic startup error text                | `aggregate-failures.ts`/`sync.tsx` | Existing startup aggregation reports request failures         | No contract requires changing it if stale-owner reuse is repaired | Changing UI text would compensate downstream and not repair lifecycle ownership          |
 
 ## 10. Single Approved Primary-Path Design
 
@@ -380,57 +380,57 @@ stop operation, not an alternate startup success algorithm.
 
 ## 11. Secondary and Replacement Path Inventory
 
-| Path | Current or proposed | Classification | Produces success? | Decision-surface share | Disposition |
-| --- | --- | --- | --- | --- | --- |
-| Reuse responsive ready owner | current | primary-contract branch | yes | existing | preserve |
-| Reuse alive but unresponsive ready owner | current | existing compatibility/single-owner branch | yes | existing | preserve |
-| Reuse owner marked stopping | current | forbidden lifecycle branch | yes | existing | remove by waiting/reclaiming |
-| Wait for stopping owner to exit, then existing election | proposed | primary-contract lifecycle branch | yes | primary | add |
-| Graceful-only stop replaced by verified force termination after timeout | proposed | explicit user-authorized replacement | yes | primary | add under the quoted authorization in Section 1 |
-| Catch local startup failure and synthesize a healthy TUI state | rejected | forbidden fallback | yes | 0 | reject |
-| Spawn a second daemon when ping fails without stopping state | rejected | forbidden fallback | yes | 0 | reject |
-| Change generic network error into success | rejected | forbidden fallback | yes | 0 | reject |
+| Path                                                                    | Current or proposed | Classification                             | Produces success? | Decision-surface share | Disposition                                     |
+| ----------------------------------------------------------------------- | ------------------- | ------------------------------------------ | ----------------- | ---------------------- | ----------------------------------------------- |
+| Reuse responsive ready owner                                            | current             | primary-contract branch                    | yes               | existing               | preserve                                        |
+| Reuse alive but unresponsive ready owner                                | current             | existing compatibility/single-owner branch | yes               | existing               | preserve                                        |
+| Reuse owner marked stopping                                             | current             | forbidden lifecycle branch                 | yes               | existing               | remove by waiting/reclaiming                    |
+| Wait for stopping owner to exit, then existing election                 | proposed            | primary-contract lifecycle branch          | yes               | primary                | add                                             |
+| Graceful-only stop replaced by verified force termination after timeout | proposed            | explicit user-authorized replacement       | yes               | primary                | add under the quoted authorization in Section 1 |
+| Catch local startup failure and synthesize a healthy TUI state          | rejected            | forbidden fallback                         | yes               | 0                      | reject                                          |
+| Spawn a second daemon when ping fails without stopping state            | rejected            | forbidden fallback                         | yes               | 0                      | reject                                          |
+| Change generic network error into success                               | rejected            | forbidden fallback                         | yes               | 0                      | reject                                          |
 
 ## 12. Workaround Deletion and Replacement
 
-| Existing workaround or duplicate | Why it existed | Why the approved route supersedes it | Delete or collapse location |
-| --- | --- | --- | --- |
-| Alive-but-unresponsive URL is always returned | Prevents duplicate daemons during long model calls | Stopping is now observable through the control plane; ready/unresponsive preservation remains explicit | Collapse `tui/daemon.ts` owner decision |
-| Graceful-only stop with timeout and no escalation | Avoided PID reuse and database takeover risk | Revalidation by token/PID preserves that safety while allowing the same owner to be terminated | Replace `cli/cmd/daemon.ts` timeout tail |
-| Test-only disposal timeout as the only bounded disposal evidence | Prevents test afterEach from hanging | Production owner now gets a lifecycle cancellation/deadline; the test timeout remains a test fixture safeguard, not a production workaround | Preserve test fixture; do not copy it blindly |
+| Existing workaround or duplicate                                 | Why it existed                                     | Why the approved route supersedes it                                                                                                        | Delete or collapse location                   |
+| ---------------------------------------------------------------- | -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------- |
+| Alive-but-unresponsive URL is always returned                    | Prevents duplicate daemons during long model calls | Stopping is now observable through the control plane; ready/unresponsive preservation remains explicit                                      | Collapse `tui/daemon.ts` owner decision       |
+| Graceful-only stop with timeout and no escalation                | Avoided PID reuse and database takeover risk       | Revalidation by token/PID preserves that safety while allowing the same owner to be terminated                                              | Replace `cli/cmd/daemon.ts` timeout tail      |
+| Test-only disposal timeout as the only bounded disposal evidence | Prevents test afterEach from hanging               | Production owner now gets a lifecycle cancellation/deadline; the test timeout remains a test fixture safeguard, not a production workaround | Preserve test fixture; do not copy it blindly |
 
 ## 13. Forward Traceability
 
-| Requirement or invariant | Production path | Planned file/change | Behavioral test |
-| --- | --- | --- | --- |
-| INV-01 | Worker shutdown completes or terminates by deadline | `worker.ts` stopping status and shutdown deadline | Real worker with a registered non-returning disposer in `daemon.test.ts` |
-| INV-02 | Pending entry is cancelled before disposal wait | `instance-store.ts` entry producer control | `instance.test.ts` pending bootstrap disposal |
-| INV-03 | Stopping owner is not reused | Control status read before owner reuse | `daemon.test.ts` stopping-owner acquisition |
-| INV-04 | Stop escalates safely after graceful timeout | Authenticated same-owner force termination | `daemon.test.ts` real CLI stop against a non-exiting authenticated owner |
-| INV-05 | Ready unresponsive owner remains single owner | Existing ready/unresponsive branch preserved | Existing `thread.test.ts` and daemon owner tests |
-| INV-06 | SQLite ownership is protected | Token/PID revalidation before escalation; lock clear remains last on normal path | Existing lock/stop tests plus force-owner identity test |
-| INV-07 | No stale local URL causes startup network error | New TUI waits/reclaims stopping owner | Real pre-first-SSE launcher test, pending-bootstrap test, and post-fix trace replay |
+| Requirement or invariant | Production path                                     | Planned file/change                                                              | Behavioral test                                                                     |
+| ------------------------ | --------------------------------------------------- | -------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------- |
+| INV-01                   | Worker shutdown completes or terminates by deadline | `worker.ts` stopping status and shutdown deadline                                | Real worker with a registered non-returning disposer in `daemon.test.ts`            |
+| INV-02                   | Pending entry is cancelled before disposal wait     | `instance-store.ts` entry producer control                                       | `instance.test.ts` pending bootstrap disposal                                       |
+| INV-03                   | Stopping owner is not reused                        | Control status read before owner reuse                                           | `daemon.test.ts` stopping-owner acquisition                                         |
+| INV-04                   | Stop escalates safely after graceful timeout        | Authenticated same-owner force termination                                       | `daemon.test.ts` real CLI stop against a non-exiting authenticated owner            |
+| INV-05                   | Ready unresponsive owner remains single owner       | Existing ready/unresponsive branch preserved                                     | Existing `thread.test.ts` and daemon owner tests                                    |
+| INV-06                   | SQLite ownership is protected                       | Token/PID revalidation before escalation; lock clear remains last on normal path | Existing lock/stop tests plus force-owner identity test                             |
+| INV-07                   | No stale local URL causes startup network error     | New TUI waits/reclaims stopping owner                                            | Real pre-first-SSE launcher test, pending-bootstrap test, and post-fix trace replay |
 
 ## 14. Reverse Traceability
 
-| Proposed production concept | Requirement ID | Evidence | Why existing logic cannot carry it |
-| --- | --- | --- | --- |
-| Pending bootstrap cancellation handle | INV-02 | `InstanceStore` currently waits its own Deferred before scope disposal | Existing `Deferred` alone cannot interrupt its producer |
-| Worker stopping status in existing control endpoint | INV-03 | Control endpoint already authenticates and returns lifecycle counters | Public health cannot distinguish ready/unresponsive from stopping |
-| Bounded worker shutdown deadline | INV-01 | Captured teardown stops before completion; test fixture records never-returning disposal | Existing graceful sequence has no deadline or final termination |
-| Same-owner force escalation in stop command | INV-04/INV-06 | User can only manually kill; upstream precedent uses identity + SIGTERM/SIGKILL | Existing command deliberately stops after timeout |
-| Stopping-owner wait/reclaim in `Daemon.ensure()` | INV-03/INV-05 | Existing fast path conflates stopping and long-call unresponsive owner | `sync.tsx` is downstream and cannot own daemon selection |
+| Proposed production concept                         | Requirement ID | Evidence                                                                                 | Why existing logic cannot carry it                                |
+| --------------------------------------------------- | -------------- | ---------------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
+| Pending bootstrap cancellation handle               | INV-02         | `InstanceStore` currently waits its own Deferred before scope disposal                   | Existing `Deferred` alone cannot interrupt its producer           |
+| Worker stopping status in existing control endpoint | INV-03         | Control endpoint already authenticates and returns lifecycle counters                    | Public health cannot distinguish ready/unresponsive from stopping |
+| Bounded worker shutdown deadline                    | INV-01         | Captured teardown stops before completion; test fixture records never-returning disposal | Existing graceful sequence has no deadline or final termination   |
+| Same-owner force escalation in stop command         | INV-04/INV-06  | User can only manually kill; upstream precedent uses identity + SIGTERM/SIGKILL          | Existing command deliberately stops after timeout                 |
+| Stopping-owner wait/reclaim in `Daemon.ensure()`    | INV-03/INV-05  | Existing fast path conflates stopping and long-call unresponsive owner                   | `sync.tsx` is downstream and cannot own daemon selection          |
 
 ## 15. File-Level Change Plan
 
-| File | Add / modify / delete | Exact responsibility of the change | Expected line delta |
-| --- | --- | --- | --- |
-| `packages/opencode/src/project/instance-store.ts` | modify | Track/cancel pending bootstrap producer before waiting in `disposeAll()`; preserve completed-entry disposal and failure removal. | +45 / -15 |
-| `packages/opencode/src/cli/cmd/tui/worker.ts` | modify | Expose `stopping` in existing control status and add bounded shutdown termination around the existing cleanup order. | +45 / -10 |
-| `packages/opencode/src/cli/cmd/tui/daemon.ts` | modify | Do not return a stopping owner URL; wait for owner exit and reuse the existing election/reclaim path. | +55 / -15 |
-| `packages/opencode/src/cli/cmd/daemon.ts` | modify | Add same-owner force escalation after graceful timeout and verify exit/owner identity. | +45 / -5 |
-| `packages/opencode/test/project/instance.test.ts` | modify | Add a public `InstanceStore.disposeAll()` pending-bootstrap regression slice. | +45 |
-| `packages/opencode/test/cli/tui/daemon.test.ts` | modify | Add pre-first-SSE launcher Ctrl-C, real worker hanging-disposer deadline, stopping-owner, and CLI force-stop cases using isolated helpers. | +150 |
+| File                                              | Add / modify / delete | Exact responsibility of the change                                                                                                         | Expected line delta |
+| ------------------------------------------------- | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ | ------------------- |
+| `packages/opencode/src/project/instance-store.ts` | modify                | Track/cancel pending bootstrap producer before waiting in `disposeAll()`; preserve completed-entry disposal and failure removal.           | +45 / -15           |
+| `packages/opencode/src/cli/cmd/tui/worker.ts`     | modify                | Expose `stopping` in existing control status and add bounded shutdown termination around the existing cleanup order.                       | +45 / -10           |
+| `packages/opencode/src/cli/cmd/tui/daemon.ts`     | modify                | Do not return a stopping owner URL; wait for owner exit and reuse the existing election/reclaim path.                                      | +55 / -15           |
+| `packages/opencode/src/cli/cmd/daemon.ts`         | modify                | Add same-owner force escalation after graceful timeout and verify exit/owner identity.                                                     | +45 / -5            |
+| `packages/opencode/test/project/instance.test.ts` | modify                | Add a public `InstanceStore.disposeAll()` pending-bootstrap regression slice.                                                              | +45                 |
+| `packages/opencode/test/cli/tui/daemon.test.ts`   | modify                | Add pre-first-SSE launcher Ctrl-C, real worker hanging-disposer deadline, stopping-owner, and CLI force-stop cases using isolated helpers. | +150                |
 
 Expected total: 6 modified files, approximately 300-400 effective changed
 lines, below the 800-line user limit. No files are added, deleted, generated,
@@ -438,15 +438,15 @@ or migrated.
 
 ## 16. TDD Behavior Slices
 
-| Order | Red behavior | Why current code fails | Minimal green behavior | Regression protected |
-| --- | --- | --- | --- | --- |
-| 1 | Spawn a real isolated launcher process that calls the public `Daemon.ensure()` path, wait for it to publish the worker lock before opening SSE, send `SIGINT` directly to the launcher PID, then assert launcher exit, bounded worker cleanup, lock release/dead-owner reclaim, and a subsequent owner acquisition that does not return the stale URL. The existing detached-child test separately verifies Unix process-group isolation. | The actual pre-first-SSE path has no Project bootstrap yet; current detached worker cleanup depends on startup idle/launcher watcher and can leave a live owner. | The launcher/worker lifecycle handles Ctrl-C before first SSE without leaving a live stale owner. | The real reachable pre-TUI/app lifecycle, without inventing Project bootstrap before app mount. |
-| 2 | Start `InstanceStore.load()` with a bootstrap blocked on a Deferred, call `store.disposeAll()`, and require completion within a bounded test window. | `disposeAll()` waits the pending Deferred before it can close the producer scope. | Dispose interrupts/removes the pending entry and returns without waiting for the blocked producer. | Pending Project bootstrap cancellation after the TUI app has reached its API path. |
-| 3 | Start the real worker in an isolated child wrapper, import the existing `registerDisposer`, register a non-returning disposer in that same worker process, load one Project through the real HTTP API, then send `SIGTERM` directly to the worker without invoking `daemon stop`. Require worker exit within the `5_000ms` worker deadline and PID death. | Current `InstanceRuntime.disposeAllInstances()` awaits the non-returning disposer and worker has no deadline; no CLI process can mask this direct signal path. | Worker logs bounded termination and exits by its own deadline; lock is then classified stale by the existing owner logic. | Direct red-green proof of the observed daemon hang and the worker-level deadline. |
-| 4 | Use an isolated worker/control status and require that shutdown status reports `stopping` before cleanup completes. | Current `/status` has no lifecycle state. | Existing private status response reports stopping from the worker's shutdown guard. | New TUI can distinguish stopping from a long-call unresponsive owner. |
-| 5 | Present a stopping owner to `Daemon.ensure()` and require it not to return the old URL; after owner exit it must use normal election/reclaim. | Current fast path returns any live PID URL. | Ensure waits boundedly and only returns a newly ready/reclaimed owner. | No repeated local startup network errors from a stopping owner. |
-| 6 | Run real `opencode daemon stop` against an authenticated isolated owner that accepts graceful stop but does not exit; require the existing `10_000ms` graceful wait to transition to same-token/PID force termination and verify the changed-owner rejection separately. This test does not claim to test the worker deadline. | Current command only reports timeout and leaves PID alive. | The same token/PID owner is force-terminated; changed owner is not killed. | User no longer needs manual kill. |
-| 7 | Run the existing healthy daemon startup/stop, unresponsive-ready-owner, launcher-exit, and detached-SIGINT cases. | Regression coverage protects the existing single-owner and platform behavior. | Existing behavior remains green with the new stopping branch. | No duplicate ready daemons or platform lifecycle regressions. |
+| Order | Red behavior                                                                                                                                                                                                                                                                                                                                                                                                                              | Why current code fails                                                                                                                                           | Minimal green behavior                                                                                                    | Regression protected                                                                            |
+| ----- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| 1     | Spawn a real isolated launcher process that calls the public `Daemon.ensure()` path, wait for it to publish the worker lock before opening SSE, send `SIGINT` directly to the launcher PID, then assert launcher exit, bounded worker cleanup, lock release/dead-owner reclaim, and a subsequent owner acquisition that does not return the stale URL. The existing detached-child test separately verifies Unix process-group isolation. | The actual pre-first-SSE path has no Project bootstrap yet; current detached worker cleanup depends on startup idle/launcher watcher and can leave a live owner. | The launcher/worker lifecycle handles Ctrl-C before first SSE without leaving a live stale owner.                         | The real reachable pre-TUI/app lifecycle, without inventing Project bootstrap before app mount. |
+| 2     | Start `InstanceStore.load()` with a bootstrap blocked on a Deferred, call `store.disposeAll()`, and require completion within a bounded test window.                                                                                                                                                                                                                                                                                      | `disposeAll()` waits the pending Deferred before it can close the producer scope.                                                                                | Dispose interrupts/removes the pending entry and returns without waiting for the blocked producer.                        | Pending Project bootstrap cancellation after the TUI app has reached its API path.              |
+| 3     | Start the real worker in an isolated child wrapper, import the existing `registerDisposer`, register a non-returning disposer in that same worker process, load one Project through the real HTTP API, then send `SIGTERM` directly to the worker without invoking `daemon stop`. Require worker exit within the `5_000ms` worker deadline and PID death.                                                                                 | Current `InstanceRuntime.disposeAllInstances()` awaits the non-returning disposer and worker has no deadline; no CLI process can mask this direct signal path.   | Worker logs bounded termination and exits by its own deadline; lock is then classified stale by the existing owner logic. | Direct red-green proof of the observed daemon hang and the worker-level deadline.               |
+| 4     | Use an isolated worker/control status and require that shutdown status reports `stopping` before cleanup completes.                                                                                                                                                                                                                                                                                                                       | Current `/status` has no lifecycle state.                                                                                                                        | Existing private status response reports stopping from the worker's shutdown guard.                                       | New TUI can distinguish stopping from a long-call unresponsive owner.                           |
+| 5     | Present a stopping owner to `Daemon.ensure()` and require it not to return the old URL; after owner exit it must use normal election/reclaim.                                                                                                                                                                                                                                                                                             | Current fast path returns any live PID URL.                                                                                                                      | Ensure waits boundedly and only returns a newly ready/reclaimed owner.                                                    | No repeated local startup network errors from a stopping owner.                                 |
+| 6     | Run real `opencode daemon stop` against an authenticated isolated owner that accepts graceful stop but does not exit; require the existing `10_000ms` graceful wait to transition to same-token/PID force termination and verify the changed-owner rejection separately. This test does not claim to test the worker deadline.                                                                                                            | Current command only reports timeout and leaves PID alive.                                                                                                       | The same token/PID owner is force-terminated; changed owner is not killed.                                                | User no longer needs manual kill.                                                               |
+| 7     | Run the existing healthy daemon startup/stop, unresponsive-ready-owner, launcher-exit, and detached-SIGINT cases.                                                                                                                                                                                                                                                                                                                         | Regression coverage protects the existing single-owner and platform behavior.                                                                                    | Existing behavior remains green with the new stopping branch.                                                             | No duplicate ready daemons or platform lifecycle regressions.                                   |
 
 The worker-deadline wrapper is an inline child process in
 `daemon.test.ts`, not a production test hook or a separate file. It imports the
@@ -463,10 +463,10 @@ counts.
 
 ## 17. Chinese Comment Budget
 
-| Metric | Estimate | Method |
-| --- | --- | --- |
-| Effective changed code lines `E` | 300-400 | Exclude imports, formatting, generated files, and pure moves. |
-| Required Chinese explanatory comments `C` | 45-60 | `ceil(E * 0.15)`, distributed near lifecycle, cancellation, owner identity, and test-safety decisions. |
+| Metric                                    | Estimate | Method                                                                                                 |
+| ----------------------------------------- | -------- | ------------------------------------------------------------------------------------------------------ |
+| Effective changed code lines `E`          | 300-400  | Exclude imports, formatting, generated files, and pure moves.                                          |
+| Required Chinese explanatory comments `C` | 45-60    | `ceil(E * 0.15)`, distributed near lifecycle, cancellation, owner identity, and test-safety decisions. |
 
 Qualifying comments must explain:
 
@@ -478,17 +478,17 @@ Qualifying comments must explain:
 
 ## 18. Verification
 
-| Command | Working directory | Evidence produced |
-| --- | --- | --- |
-| `bun test test/project/instance.test.ts` | `packages/opencode` | Pending-bootstrap disposal regression and existing InstanceStore behavior. |
-| `bun test test/cli/tui/daemon.test.ts -t "launcher Ctrl-C before first SSE releases startup owner"` | `packages/opencode` | Real `Daemon.ensure()` launcher/worker/SIGINT/lock/reclaim feedback loop before Project bootstrap begins. |
-| `bun test test/cli/tui/daemon.test.ts -t "worker deadline terminates a hanging instance disposer"` | `packages/opencode` | Direct worker `SIGTERM` path proves the worker's own 5-second deadline, without CLI force escalation. |
-| `bun test test/cli/tui/daemon.test.ts -t "force stops an authenticated non-exiting owner"` | `packages/opencode` | Real CLI graceful timeout, same-owner force termination, changed-owner rejection, and lock cleanup. |
-| `bun test test/cli/tui/daemon.test.ts` | `packages/opencode` | Real daemon startup, stopping-owner, authorized stop escalation, launcher, and platform lifecycle behavior. |
-| `bun typecheck` | `packages/opencode` | Type correctness for production changes. |
-| `bun test --timeout 10000 test/fixture/fixture.test.ts` | `packages/opencode` | Existing disposal-timeout contract remains intact; explicit timeout covers its intentional 5200ms wait. |
-| Post-fix feedback-loop trace command from section 8 | `packages/opencode` | Generates isolated post-fix daemon logs, verifies old-owner termination and lock release, reacquires a new owner, checks public health, and proves the network-failure plus incomplete-shutdown combination is absent. |
-| `git diff --check` | repository root | No whitespace errors in the final diff. |
+| Command                                                                                             | Working directory   | Evidence produced                                                                                                                                                                                                      |
+| --------------------------------------------------------------------------------------------------- | ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `bun test test/project/instance.test.ts`                                                            | `packages/opencode` | Pending-bootstrap disposal regression and existing InstanceStore behavior.                                                                                                                                             |
+| `bun test test/cli/tui/daemon.test.ts -t "launcher Ctrl-C before first SSE releases startup owner"` | `packages/opencode` | Real `Daemon.ensure()` launcher/worker/SIGINT/lock/reclaim feedback loop before Project bootstrap begins.                                                                                                              |
+| `bun test test/cli/tui/daemon.test.ts -t "worker deadline terminates a hanging instance disposer"`  | `packages/opencode` | Direct worker `SIGTERM` path proves the worker's own 5-second deadline, without CLI force escalation.                                                                                                                  |
+| `bun test test/cli/tui/daemon.test.ts -t "force stops an authenticated non-exiting owner"`          | `packages/opencode` | Real CLI graceful timeout, same-owner force termination, changed-owner rejection, and lock cleanup.                                                                                                                    |
+| `bun test test/cli/tui/daemon.test.ts`                                                              | `packages/opencode` | Real daemon startup, stopping-owner, authorized stop escalation, launcher, and platform lifecycle behavior.                                                                                                            |
+| `bun typecheck`                                                                                     | `packages/opencode` | Type correctness for production changes.                                                                                                                                                                               |
+| `bun test --timeout 10000 test/fixture/fixture.test.ts`                                             | `packages/opencode` | Existing disposal-timeout contract remains intact; explicit timeout covers its intentional 5200ms wait.                                                                                                                |
+| Post-fix feedback-loop trace command from section 8                                                 | `packages/opencode` | Generates isolated post-fix daemon logs, verifies old-owner termination and lock release, reacquires a new owner, checks public health, and proves the network-failure plus incomplete-shutdown combination is absent. |
+| `git diff --check`                                                                                  | repository root     | No whitespace errors in the final diff.                                                                                                                                                                                |
 
 The process-spawning tests and implementation evidence are retained as historical
 R5 evidence. R6 changes only the timeout argument for the independent fixture
@@ -496,14 +496,14 @@ verification command; it does not authorize any new implementation change.
 
 ## 19. Diff Budget
 
-| Metric | Estimate | Justification |
-| --- | --- | --- |
-| Files added | 0 | Reuse existing lifecycle and test files. |
-| Files modified | 6 | Four production owners and two existing behavioral test files. |
-| Files deleted | 0 | No superseded file requires deletion. |
-| Production lines | 150-220 | Cancellation, stopping state, bounded shutdown, and stop escalation only. |
-| Test lines | 140-180 | Two vertical behavior slices plus regression assertions. |
-| Generated lines | 0 | No generated surface is involved. |
+| Metric           | Estimate | Justification                                                             |
+| ---------------- | -------- | ------------------------------------------------------------------------- |
+| Files added      | 0        | Reuse existing lifecycle and test files.                                  |
+| Files modified   | 6        | Four production owners and two existing behavioral test files.            |
+| Files deleted    | 0        | No superseded file requires deletion.                                     |
+| Production lines | 150-220  | Cancellation, stopping state, bounded shutdown, and stop escalation only. |
+| Test lines       | 140-180  | Two vertical behavior slices plus regression assertions.                  |
+| Generated lines  | 0        | No generated surface is involved.                                         |
 
 The total effective implementation change must remain below 800 lines and the
 file count must remain at or below 6. A substantive scope increase requires a
@@ -561,15 +561,15 @@ The independent auditor must:
 
 ## 22. Plan Audit Record
 
-| Round | Audited revision | Full scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | R1 | yes | `B-01` Blocking: 未获用户明确授权的强制终止构成新增备用成功路径; `B-02` Blocking: 原始 Ctrl-C 用户反馈回路没有被行为级测试完整覆盖 | Canonical metadata audit mode; unspecified deadline value; old fixed replay paths | `BLOCK` | `ses_0793c3de1ffePLm6u42nU2RZCt` |
-| 2 | R2 | yes | `B-01` Blocking: TDD slice 1 构造了当前调用链中不存在的“app import 前 Project bootstrap”路径 | Section 18 still described process side effects as user-prohibited; deadline value and post-fix replay input were unspecified | `BLOCK` | `ses_0793c3de1ffePLm6u42nU2RZCt` |
-| 3 | R3 | yes | `B-01` Blocking: INV-01 的 worker 有界终止没有行为级 red 测试，无法证明原始 daemon 挂起根因已被修复 | R3 audit record was missing; worker deadline value and wrapper protocol were unspecified | `BLOCK` | `ses_0793c3de1ffePLm6u42nU2RZCt` |
-| 4 | R4 | yes | `B-01` Blocking: Worker shutdown deadline 的回归测试被 `daemon stop` 的强制终止路径遮蔽，无法证明 INV-01 的 worker-level 修复 | R4 audit record was missing; deadline value and wrapper protocol were unspecified | `BLOCK` | `ses_0793c3de1ffePLm6u42nU2RZCt` |
-| 5 | R5 | yes | none | Section 8 historical wording; R4 audit record before this row; post-fix trace input path; HTTP API route specificity | `No blocking findings. APPROVE` | `ses_0793c3de1ffePLm6u42nU2RZCt` |
-| 6 | R6 | yes | `B-01` Blocking: post-fix feedback-loop verification reused immutable pre-fix log paths and could not execute as specified. | Ctrl-C test wording differed from direct PID signal; historical implementation evidence remained adjacent to current metadata; historical and post-fix evidence roles were easy to conflate. | `BLOCK` | `ses_078f02f83ffewwnbgvvkr1ziN9` |
-| 7 | R7 | yes | none | Canonical document mixes current plan metadata with historical implementation evidence; post-fix trace records old/new URLs without directly asserting inequality; immutable pre-fix and executable post-fix evidence remain adjacent but distinguished. | `No blocking findings. APPROVE` | `ses_0782efb95ffeCIIRNi6nxK6L0w` |
+| Round | Audited revision | Full scope? | Blocking findings                                                                                                                  | Non-blocking findings                                                                                                                                                                                                                                    | Result                          | Invocation reference             |
+| ----- | ---------------- | ----------- | ---------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------- | -------------------------------- |
+| 1     | R1               | yes         | `B-01` Blocking: 未获用户明确授权的强制终止构成新增备用成功路径; `B-02` Blocking: 原始 Ctrl-C 用户反馈回路没有被行为级测试完整覆盖 | Canonical metadata audit mode; unspecified deadline value; old fixed replay paths                                                                                                                                                                        | `BLOCK`                         | `ses_0793c3de1ffePLm6u42nU2RZCt` |
+| 2     | R2               | yes         | `B-01` Blocking: TDD slice 1 构造了当前调用链中不存在的“app import 前 Project bootstrap”路径                                       | Section 18 still described process side effects as user-prohibited; deadline value and post-fix replay input were unspecified                                                                                                                            | `BLOCK`                         | `ses_0793c3de1ffePLm6u42nU2RZCt` |
+| 3     | R3               | yes         | `B-01` Blocking: INV-01 的 worker 有界终止没有行为级 red 测试，无法证明原始 daemon 挂起根因已被修复                                | R3 audit record was missing; worker deadline value and wrapper protocol were unspecified                                                                                                                                                                 | `BLOCK`                         | `ses_0793c3de1ffePLm6u42nU2RZCt` |
+| 4     | R4               | yes         | `B-01` Blocking: Worker shutdown deadline 的回归测试被 `daemon stop` 的强制终止路径遮蔽，无法证明 INV-01 的 worker-level 修复      | R4 audit record was missing; deadline value and wrapper protocol were unspecified                                                                                                                                                                        | `BLOCK`                         | `ses_0793c3de1ffePLm6u42nU2RZCt` |
+| 5     | R5               | yes         | none                                                                                                                               | Section 8 historical wording; R4 audit record before this row; post-fix trace input path; HTTP API route specificity                                                                                                                                     | `No blocking findings. APPROVE` | `ses_0793c3de1ffePLm6u42nU2RZCt` |
+| 6     | R6               | yes         | `B-01` Blocking: post-fix feedback-loop verification reused immutable pre-fix log paths and could not execute as specified.        | Ctrl-C test wording differed from direct PID signal; historical implementation evidence remained adjacent to current metadata; historical and post-fix evidence roles were easy to conflate.                                                             | `BLOCK`                         | `ses_078f02f83ffewwnbgvvkr1ziN9` |
+| 7     | R7               | yes         | none                                                                                                                               | Canonical document mixes current plan metadata with historical implementation evidence; post-fix trace records old/new URLs without directly asserting inequality; immutable pre-fix and executable post-fix evidence remain adjacent but distinguished. | `No blocking findings. APPROVE` | `ses_0782efb95ffeCIIRNi6nxK6L0w` |
 
 Any substantive revision invalidates earlier approval.
 
@@ -603,7 +603,7 @@ generic network-error suppression was added.
 ### Red-Green Test Evidence
 
 - Pending bootstrap slice red: `bun test test/project/instance.test.ts -t
-  "cancels pending bootstrap during disposeAll"` timed out after 5000ms on the
+"cancels pending bootstrap during disposeAll"` timed out after 5000ms on the
   pre-fix implementation.
 - Pending bootstrap slice green: same command passed with `1 pass` after the
   cancel-first implementation.
@@ -665,12 +665,12 @@ and successful public health. The original captured output was not rewritten.
 
 ### Chinese Comment Calculation
 
-| Metric | Actual | Exclusions and evidence |
-| --- | --- | --- |
-| Effective changed code lines `E` | 429 | Independent R5 implementation audit: exclude 27 blank, 69 comment, and 3 import-only lines; generated/pure moves 0. |
-| Qualifying Chinese comment lines `C` | 66 | Independent R5 implementation audit; nearby explanations only. |
-| Ratio `C / E` | 15.38% | `66 / 429`. |
-| Required minimum `C` | 65 | `ceil(429 * 0.15) = 65`. |
+| Metric                               | Actual | Exclusions and evidence                                                                                             |
+| ------------------------------------ | ------ | ------------------------------------------------------------------------------------------------------------------- |
+| Effective changed code lines `E`     | 429    | Independent R5 implementation audit: exclude 27 blank, 69 comment, and 3 import-only lines; generated/pure moves 0. |
+| Qualifying Chinese comment lines `C` | 66     | Independent R5 implementation audit; nearby explanations only.                                                      |
+| Ratio `C / E`                        | 15.38% | `66 / 429`.                                                                                                         |
+| Required minimum `C`                 | 65     | `ceil(429 * 0.15) = 65`.                                                                                            |
 
 ### Remaining Unverified Items
 
@@ -678,11 +678,11 @@ None.
 
 ## 24. Implementation Audit Record
 
-| Round | Plan revision | Full original scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | R5 | yes | `B-01` Blocking: original pre-first-SSE launcher Ctrl-C feedback loop was not behaviorally verified; `B-02` Blocking: changed-owner force-stop rejection was unverified. | Diff additions were undercounted by one; stale graceful-only CLI comment; plan status still read approved. | `BLOCK` | `ses_0790405caffeDqu45Fb8tTL2EJ` |
-| 2 | R5 | yes | `B-01` Blocking: required `bun test test/fixture/fixture.test.ts` reproducibly failed at the default 5-second Bun test timeout before its intentional 5200ms timer-cleanup assertion completed. | Stale verification-stage wording; historical evidence-table drift; implementation evidence comment calculation pending independent recomputation. | `BLOCK` | `ses_0790405caffeDqu45Fb8tTL2EJ` |
-| 3 | R7 | yes | none | Canonical metadata still said plan audit; `Implementation allowed: no` needed final-state clarification; post-fix trace did not directly assert URL inequality but the launcher regression asserted distinct owner PIDs; historical diagnosis remained in present tense. | `No blocking findings. RELEASE VERDICT: APPROVE` | `ses_0790405caffeDqu45Fb8tTL2EJ` |
+| Round | Plan revision | Full original scope? | Blocking findings                                                                                                                                                                               | Non-blocking findings                                                                                                                                                                                                                                                    | Result                                           | Invocation reference             |
+| ----- | ------------- | -------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------ | -------------------------------- |
+| 1     | R5            | yes                  | `B-01` Blocking: original pre-first-SSE launcher Ctrl-C feedback loop was not behaviorally verified; `B-02` Blocking: changed-owner force-stop rejection was unverified.                        | Diff additions were undercounted by one; stale graceful-only CLI comment; plan status still read approved.                                                                                                                                                               | `BLOCK`                                          | `ses_0790405caffeDqu45Fb8tTL2EJ` |
+| 2     | R5            | yes                  | `B-01` Blocking: required `bun test test/fixture/fixture.test.ts` reproducibly failed at the default 5-second Bun test timeout before its intentional 5200ms timer-cleanup assertion completed. | Stale verification-stage wording; historical evidence-table drift; implementation evidence comment calculation pending independent recomputation.                                                                                                                        | `BLOCK`                                          | `ses_0790405caffeDqu45Fb8tTL2EJ` |
+| 3     | R7            | yes                  | none                                                                                                                                                                                            | Canonical metadata still said plan audit; `Implementation allowed: no` needed final-state clarification; post-fix trace did not directly assert URL inequality but the launcher regression asserted distinct owner PIDs; historical diagnosis remained in present tense. | `No blocking findings. RELEASE VERDICT: APPROVE` | `ses_0790405caffeDqu45Fb8tTL2EJ` |
 
 The task may be marked `verified` only after an independent full-scope result of
 `No blocking findings` for the current implementation and approved plan

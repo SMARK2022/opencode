@@ -31,25 +31,25 @@
 
 ### 2.1 已阅读的文件、测试和文档
 
-| 文件 | 已确认内容 | 相关性 |
-| --- | --- | --- |
-| `docs/lsp-complete-enhancement-plan.md` | 旧文档记录了 VSCode Bridge、增量诊断、TUI `diagnosticSummary` 的历史方案；但旧文档中“无任何错误时 TUI 不显示”已不满足本次新需求。 | 确认旧方案边界与需要修正的缺口。 |
-| `packages/ui/src/components/message-part.tsx` | `Diagnostic` 接口、`getDiagnostics()`、`DiagnosticsDisplay()` 都在文件顶部；edit/write/apply_patch 都从 metadata 读取 `diagnostics` 与 `diagnosticSummary` 后传入 `DiagnosticsDisplay`。 | TUI 渲染的唯一入口。 |
-| `packages/ui/src/components/message-part.css` | `[data-component="diagnostics"]` 当前使用 critical 背景、顶部边框、flex column；单条 message 允许 3 行 clamp。 | 当前丑陋和高度不稳定的直接原因。 |
-| `packages/ui/src/components/basic-tool.tsx` / `basic-tool.css` | `BasicTool` 只处理工具 trigger、整体折叠 open/close 和可选动画；内容高度没有针对 diagnostics 的预算控制。 | 确认不应改全局工具容器。 |
-| `packages/ui/src/components/diff-changes.tsx` / `.css` | 工具 header 已有高信息密度的 `+N -N` 风格；可借鉴 compact 信息密度，但不复用组件。 | 统一视觉语言。 |
-| `packages/ui/src/components/tool-count-label.tsx` / `.css` | 当前组件用于计数动画，依赖 UI 文案差异；对 diagnostics 不是必要抽象。 | 确认不新增动画依赖。 |
-| `packages/ui/src/styles/theme.css` | 已有 success / critical / warning / weak / base 等 token。 | 诊断状态色应复用现有主题 token。 |
-| `packages/ui/src/components/apply-patch-file.test.ts`、`session-diff.test.ts` | UI 单测倾向测试纯函数/解析行为，而非 DOM 结构细节。 | 决定 UI TDD seam。 |
-| `packages/opencode/src/tool/write.ts` | 写入后已捕获 baseline、`touchFile(filepath, "document")`、再次 `diagnostics()`、计算 `reportDelta()` / `newErrors()` / `deltaSummary()`。 | 确认 output 与 metadata 修改点。 |
-| `packages/opencode/src/tool/edit.ts` | edit 与 write 相同，但在同文件 Semaphore 锁内执行。 | 确认并行 edit 下 delta 仍按串行文件锁计算。 |
-| `packages/opencode/src/tool/apply_patch.ts` | patch 应用后逐文件 strong touch，再聚合 totalNew/totalExisting。 | 确认多文件 clean 文案不能写成 “this file”。 |
-| `packages/opencode/src/tool/read.ts` | 普通文本 read 成功后调用 `warm(filepath)`，其内部 `lsp.touchFile(filepath).pipe(Effect.ignoreCause, Effect.forkIn(scope))`。 | read 打开 VSCode 文件的调用源。 |
-| `packages/opencode/src/lsp/lsp.ts` | `touchFile(input, diagnostics?)` 有 bridge 时无条件调用 `/lsp/touch`，不区分 read warm 与强诊断。 | read/touch 修复的最小切入点。 |
-| `sdks/vscode/src/lsp.ts` | `/lsp/touch` 使用 `openTextDocument` + `showTextDocument` + `awaitDiagnosticsRefresh`；hover/definition/symbol 使用 `ensureOpenLight`。 | 证明 read 打开文件的真实原因。 |
-| `packages/opencode/src/tool/lsp.ts` | 显式 lsp tool 在执行 hover/definition 等操作前调用 `touchFile(file, "document")`。 | 显式 LSP 操作仍应触发 strong touch。 |
-| `packages/opencode/test/lsp/index.test.ts`、`lifecycle.test.ts` | 现有 LSP 测试覆盖默认启用、touch/spawn、deltaSummary/reportDelta。 | LSP TDD seam。 |
-| `packages/opencode/test/ide/vscode-bridge.test.ts` | 可通过 registry fixture 与 HTTP test server 测 bridge discovery/call 行为。 | 如果需要验证 bridge 调用路径，可复用风格。 |
+| 文件                                                                          | 已确认内容                                                                                                                                                                               | 相关性                                      |
+| ----------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------- |
+| `docs/lsp-complete-enhancement-plan.md`                                       | 旧文档记录了 VSCode Bridge、增量诊断、TUI `diagnosticSummary` 的历史方案；但旧文档中“无任何错误时 TUI 不显示”已不满足本次新需求。                                                        | 确认旧方案边界与需要修正的缺口。            |
+| `packages/ui/src/components/message-part.tsx`                                 | `Diagnostic` 接口、`getDiagnostics()`、`DiagnosticsDisplay()` 都在文件顶部；edit/write/apply_patch 都从 metadata 读取 `diagnostics` 与 `diagnosticSummary` 后传入 `DiagnosticsDisplay`。 | TUI 渲染的唯一入口。                        |
+| `packages/ui/src/components/message-part.css`                                 | `[data-component="diagnostics"]` 当前使用 critical 背景、顶部边框、flex column；单条 message 允许 3 行 clamp。                                                                           | 当前丑陋和高度不稳定的直接原因。            |
+| `packages/ui/src/components/basic-tool.tsx` / `basic-tool.css`                | `BasicTool` 只处理工具 trigger、整体折叠 open/close 和可选动画；内容高度没有针对 diagnostics 的预算控制。                                                                                | 确认不应改全局工具容器。                    |
+| `packages/ui/src/components/diff-changes.tsx` / `.css`                        | 工具 header 已有高信息密度的 `+N -N` 风格；可借鉴 compact 信息密度，但不复用组件。                                                                                                       | 统一视觉语言。                              |
+| `packages/ui/src/components/tool-count-label.tsx` / `.css`                    | 当前组件用于计数动画，依赖 UI 文案差异；对 diagnostics 不是必要抽象。                                                                                                                    | 确认不新增动画依赖。                        |
+| `packages/ui/src/styles/theme.css`                                            | 已有 success / critical / warning / weak / base 等 token。                                                                                                                               | 诊断状态色应复用现有主题 token。            |
+| `packages/ui/src/components/apply-patch-file.test.ts`、`session-diff.test.ts` | UI 单测倾向测试纯函数/解析行为，而非 DOM 结构细节。                                                                                                                                      | 决定 UI TDD seam。                          |
+| `packages/opencode/src/tool/write.ts`                                         | 写入后已捕获 baseline、`touchFile(filepath, "document")`、再次 `diagnostics()`、计算 `reportDelta()` / `newErrors()` / `deltaSummary()`。                                                | 确认 output 与 metadata 修改点。            |
+| `packages/opencode/src/tool/edit.ts`                                          | edit 与 write 相同，但在同文件 Semaphore 锁内执行。                                                                                                                                      | 确认并行 edit 下 delta 仍按串行文件锁计算。 |
+| `packages/opencode/src/tool/apply_patch.ts`                                   | patch 应用后逐文件 strong touch，再聚合 totalNew/totalExisting。                                                                                                                         | 确认多文件 clean 文案不能写成 “this file”。 |
+| `packages/opencode/src/tool/read.ts`                                          | 普通文本 read 成功后调用 `warm(filepath)`，其内部 `lsp.touchFile(filepath).pipe(Effect.ignoreCause, Effect.forkIn(scope))`。                                                             | read 打开 VSCode 文件的调用源。             |
+| `packages/opencode/src/lsp/lsp.ts`                                            | `touchFile(input, diagnostics?)` 有 bridge 时无条件调用 `/lsp/touch`，不区分 read warm 与强诊断。                                                                                        | read/touch 修复的最小切入点。               |
+| `sdks/vscode/src/lsp.ts`                                                      | `/lsp/touch` 使用 `openTextDocument` + `showTextDocument` + `awaitDiagnosticsRefresh`；hover/definition/symbol 使用 `ensureOpenLight`。                                                  | 证明 read 打开文件的真实原因。              |
+| `packages/opencode/src/tool/lsp.ts`                                           | 显式 lsp tool 在执行 hover/definition 等操作前调用 `touchFile(file, "document")`。                                                                                                       | 显式 LSP 操作仍应触发 strong touch。        |
+| `packages/opencode/test/lsp/index.test.ts`、`lifecycle.test.ts`               | 现有 LSP 测试覆盖默认启用、touch/spawn、deltaSummary/reportDelta。                                                                                                                       | LSP TDD seam。                              |
+| `packages/opencode/test/ide/vscode-bridge.test.ts`                            | 可通过 registry fixture 与 HTTP test server 测 bridge discovery/call 行为。                                                                                                              | 如果需要验证 bridge 调用路径，可复用风格。  |
 
 ### 2.2 通过搜索确认的调用点和旧逻辑
 
@@ -69,15 +69,15 @@
 
 ### 2.3 当前不确定点和确认结果
 
-| 不确定点 | 确认方式 | 结论 |
-| --- | --- | --- |
-| 多行 LSP message 为什么撑高？ | 读取 `message-part.css` diagnostics 样式。 | message 当前允许 3 行 clamp，多个错误叠加会显著撑高。 |
-| 是否应改 `BasicTool` 高度？ | 读取 `basic-tool.tsx/css` 与工具内容结构。 | 不应改全局工具容器；应在 diagnostics 内部控制高度预算。 |
-| 无错误时是否有数据可判断？ | 读取 write/edit/apply_patch metadata 生成逻辑。 | `diagnosticSummary` 能证明 `newCount=0 && existingCount=0`，但只有 LSP 已运行时才可信。 |
-| read 打开 VSCode 是否真实由 touch 导致？ | 读取 `read.ts` warm、`lsp.ts` touch、`sdks/vscode/src/lsp.ts` ensureOpen。 | 是。read 无参 touch 在 bridge 下会走 `/lsp/touch`，然后 `showTextDocument`。 |
-| read 是否需要 VSCode 强诊断 touch？ | 对照 read 输出和编辑工具诊断链路。 | 不需要。read warm 的目的只是预热，不应显示/打开文件。 |
-| strong touch 是否仍需要 showTextDocument？ | 旧实验和当前 bridge 注释均说明 Pylance 诊断需要 show。 | edit/write/apply_patch/lsp tool 仍必须保留 strong touch。 |
-| apply_patch clean 文案是否能写 “this file”？ | 读取 apply_patch 多文件聚合逻辑。 | 不能。apply_patch 可能涉及多个 changed files。 |
+| 不确定点                                     | 确认方式                                                                   | 结论                                                                                    |
+| -------------------------------------------- | -------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
+| 多行 LSP message 为什么撑高？                | 读取 `message-part.css` diagnostics 样式。                                 | message 当前允许 3 行 clamp，多个错误叠加会显著撑高。                                   |
+| 是否应改 `BasicTool` 高度？                  | 读取 `basic-tool.tsx/css` 与工具内容结构。                                 | 不应改全局工具容器；应在 diagnostics 内部控制高度预算。                                 |
+| 无错误时是否有数据可判断？                   | 读取 write/edit/apply_patch metadata 生成逻辑。                            | `diagnosticSummary` 能证明 `newCount=0 && existingCount=0`，但只有 LSP 已运行时才可信。 |
+| read 打开 VSCode 是否真实由 touch 导致？     | 读取 `read.ts` warm、`lsp.ts` touch、`sdks/vscode/src/lsp.ts` ensureOpen。 | 是。read 无参 touch 在 bridge 下会走 `/lsp/touch`，然后 `showTextDocument`。            |
+| read 是否需要 VSCode 强诊断 touch？          | 对照 read 输出和编辑工具诊断链路。                                         | 不需要。read warm 的目的只是预热，不应显示/打开文件。                                   |
+| strong touch 是否仍需要 showTextDocument？   | 旧实验和当前 bridge 注释均说明 Pylance 诊断需要 show。                     | edit/write/apply_patch/lsp tool 仍必须保留 strong touch。                               |
+| apply_patch clean 文案是否能写 “this file”？ | 读取 apply_patch 多文件聚合逻辑。                                          | 不能。apply_patch 可能涉及多个 changed files。                                          |
 
 ---
 
@@ -187,7 +187,7 @@
 当前 read 调用：
 
 ```ts
-yield* lsp.touchFile(filepath).pipe(Effect.ignoreCause, Effect.forkIn(scope))
+yield * lsp.touchFile(filepath).pipe(Effect.ignoreCause, Effect.forkIn(scope))
 ```
 
 当前 bridge touch：
@@ -459,13 +459,13 @@ E 21:17  third error...
 
 在 `write.ts` / `edit.ts` / `apply_patch.ts` 的 delta 为空分支中补充短确认：
 
-| 场景 | output 建议 |
-| --- | --- |
-| LSP unavailable | 保持现有 `LSP diagnostics unavailable...` |
-| new errors > 0 | 保持现有 `<new-diagnostics>` + multi-step note |
-| new errors = 0，existing errors > 0 | `LSP checked: no new errors introduced; N existing errors remain.` |
-| new errors = 0，existing errors = 0，单文件 | `LSP checked: no errors in this file.` |
-| new errors = 0，existing errors = 0，apply_patch | `LSP checked: no errors in changed files.` |
+| 场景                                             | output 建议                                                        |
+| ------------------------------------------------ | ------------------------------------------------------------------ |
+| LSP unavailable                                  | 保持现有 `LSP diagnostics unavailable...`                          |
+| new errors > 0                                   | 保持现有 `<new-diagnostics>` + multi-step note                     |
+| new errors = 0，existing errors > 0              | `LSP checked: no new errors introduced; N existing errors remain.` |
+| new errors = 0，existing errors = 0，单文件      | `LSP checked: no errors in this file.`                             |
+| new errors = 0，existing errors = 0，apply_patch | `LSP checked: no errors in changed files.`                         |
 
 这样满足“没有任何错误时也应该适当进行一定的高效返回”，同时仍避免输出既有错误详情。
 
@@ -504,13 +504,13 @@ LSP 信息有两条输出链路，必须明确区分：
 
 #### 5.6.2 状态矩阵
 
-| 状态 | 触发条件 | 模型 output | TUI metadata | TUI 渲染 |
-| --- | --- | --- | --- | --- |
-| 新增错误 | `newErrors.length > 0` | `New LSP errors introduced by this edit:` + `<new-diagnostics>` + multi-step note | `diagnostics` 存新错误数组；`diagnosticSummary={newCount,existingCount}` | 红色 `LSP · N new errors · +M more`，最多 3 条一行错误 |
-| 没有新错误但有既有错误 | `newCount=0 && existingCount>0 && LSP 可用` | `LSP checked: no new errors introduced; N existing errors remain.` | `diagnostics` 为空数组；`diagnosticSummary={0,N}` | 中性/警告色 `LSP checked · 0 new · N existing` |
-| 完全无错误 | `newCount=0 && existingCount=0 && LSP 可用` | 单文件：`LSP checked: no errors in this file.`；patch：`LSP checked: no errors in changed files.` | `diagnostics` 为空数组；`diagnosticSummary={0,0}` | 绿色 `✓ LSP checked · no errors in this file/changed files` |
-| LSP 不可用 | `lsp.status()` 为空，或 bridge diagnostics 失败后无内置 client | `LSP diagnostics unavailable (no language server running). Run bun typecheck to verify type safety.` | `diagnostics` 仍可为空；**不传 `diagnosticSummary`** | 不显示 clean/existing 诊断块，避免误报成功 |
-| LSP 功能 disabled | 配置 `lsp:false`，或没有任何可用 server/client | 与 LSP 不可用相同，显示 unavailable 文案 | 不传 `diagnosticSummary` | 不显示绿色；如果工具 header 已有成功状态，只代表文件操作成功，不代表 LSP 成功 |
+| 状态                   | 触发条件                                                       | 模型 output                                                                                          | TUI metadata                                                             | TUI 渲染                                                                      |
+| ---------------------- | -------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ | ----------------------------------------------------------------------------- |
+| 新增错误               | `newErrors.length > 0`                                         | `New LSP errors introduced by this edit:` + `<new-diagnostics>` + multi-step note                    | `diagnostics` 存新错误数组；`diagnosticSummary={newCount,existingCount}` | 红色 `LSP · N new errors · +M more`，最多 3 条一行错误                        |
+| 没有新错误但有既有错误 | `newCount=0 && existingCount>0 && LSP 可用`                    | `LSP checked: no new errors introduced; N existing errors remain.`                                   | `diagnostics` 为空数组；`diagnosticSummary={0,N}`                        | 中性/警告色 `LSP checked · 0 new · N existing`                                |
+| 完全无错误             | `newCount=0 && existingCount=0 && LSP 可用`                    | 单文件：`LSP checked: no errors in this file.`；patch：`LSP checked: no errors in changed files.`    | `diagnostics` 为空数组；`diagnosticSummary={0,0}`                        | 绿色 `✓ LSP checked · no errors in this file/changed files`                   |
+| LSP 不可用             | `lsp.status()` 为空，或 bridge diagnostics 失败后无内置 client | `LSP diagnostics unavailable (no language server running). Run bun typecheck to verify type safety.` | `diagnostics` 仍可为空；**不传 `diagnosticSummary`**                     | 不显示 clean/existing 诊断块，避免误报成功                                    |
+| LSP 功能 disabled      | 配置 `lsp:false`，或没有任何可用 server/client                 | 与 LSP 不可用相同，显示 unavailable 文案                                                             | 不传 `diagnosticSummary`                                                 | 不显示绿色；如果工具 header 已有成功状态，只代表文件操作成功，不代表 LSP 成功 |
 
 #### 5.6.3 模型输出样例
 
@@ -584,10 +584,10 @@ LSP diagnostics unavailable (no language server running). Run bun typecheck to v
 推荐逻辑：
 
 ```ts
-const bridge = yield* resolveLspBridge(input)
+const bridge = yield * resolveLspBridge(input)
 if (bridge) {
   if (!diagnostics) return
-  const touched = yield* callLspBridge("/lsp/touch", { filePath: input }, input)
+  const touched = yield * callLspBridge("/lsp/touch", { filePath: input }, input)
   if (touched) return
 }
 ```
@@ -614,17 +614,17 @@ if (bridge) {
 
 ## 6. 预计文件改动
 
-| 文件 | 类型 | 具体改动 |
-| --- | --- | --- |
-| `packages/ui/src/components/diagnostics-display.ts` | 新增 | 纯 presenter/helper：归一化、截断、状态选择、行数/剩余计数。 |
-| `packages/ui/src/components/diagnostics-display.test.ts` | 新增 | 行为级单测覆盖多行归一化、截断、hidden/error/existing/clean 状态、`+N more`。 |
-| `packages/ui/src/components/message-part.tsx` | 修改 | `DiagnosticsDisplay` 改用 presenter；新增 `scope` 参数，edit/write 用 `file`，apply_patch 用 `changed-files`。 |
-| `packages/ui/src/components/message-part.css` | 修改 | 重写 diagnostics block 样式，增加 error/existing/clean 状态、单行 row、固定高度预算。 |
-| `packages/opencode/src/lsp/lsp.ts` | 修改 | bridge 分支按 `diagnostics` 参数区分 light warm 与 strong diagnostic touch。 |
-| `packages/opencode/src/tool/write.ts` | 修改 | delta 为空且 LSP 可用时输出 checked 短确认。 |
-| `packages/opencode/src/tool/edit.ts` | 修改 | 同 write。 |
-| `packages/opencode/src/tool/apply_patch.ts` | 修改 | 同 write，但文案使用 changed files。 |
-| `packages/opencode/test/lsp/index.test.ts` 或新测试文件 | 修改/新增 | bridge + no diagnostics 不调用 `/lsp/touch`；bridge + document diagnostics 仍调用。 |
+| 文件                                                     | 类型      | 具体改动                                                                                                       |
+| -------------------------------------------------------- | --------- | -------------------------------------------------------------------------------------------------------------- |
+| `packages/ui/src/components/diagnostics-display.ts`      | 新增      | 纯 presenter/helper：归一化、截断、状态选择、行数/剩余计数。                                                   |
+| `packages/ui/src/components/diagnostics-display.test.ts` | 新增      | 行为级单测覆盖多行归一化、截断、hidden/error/existing/clean 状态、`+N more`。                                  |
+| `packages/ui/src/components/message-part.tsx`            | 修改      | `DiagnosticsDisplay` 改用 presenter；新增 `scope` 参数，edit/write 用 `file`，apply_patch 用 `changed-files`。 |
+| `packages/ui/src/components/message-part.css`            | 修改      | 重写 diagnostics block 样式，增加 error/existing/clean 状态、单行 row、固定高度预算。                          |
+| `packages/opencode/src/lsp/lsp.ts`                       | 修改      | bridge 分支按 `diagnostics` 参数区分 light warm 与 strong diagnostic touch。                                   |
+| `packages/opencode/src/tool/write.ts`                    | 修改      | delta 为空且 LSP 可用时输出 checked 短确认。                                                                   |
+| `packages/opencode/src/tool/edit.ts`                     | 修改      | 同 write。                                                                                                     |
+| `packages/opencode/src/tool/apply_patch.ts`              | 修改      | 同 write，但文案使用 changed files。                                                                           |
+| `packages/opencode/test/lsp/index.test.ts` 或新测试文件  | 修改/新增 | bridge + no diagnostics 不调用 `/lsp/touch`；bridge + document diagnostics 仍调用。                            |
 
 预计净改动：
 
@@ -851,18 +851,19 @@ subagent 的非阻塞建议已经纳入本文档：
 ## 13. 修订方案：文件数收敛与 diff+LSP 联合行数预算
 
 > 本节是第一轮实现后的修订。第一轮实现暴露了两个问题：
+>
 > 1. 修改文件数达 16 个，远超“不该超过 10 个”的约束。
 > 2. LSP 诊断块在 diff 外面独立 `max-height: 112px`，没有和 diff/code 预览共享行数预算；当 diff 8 行 + LSP 8 行时，两者各自不收缩，整体高度仍会翻倍。
 
 ### 13.1 当前实现的问题诊断
 
-| 问题 | 根因 | 影响 |
-| --- | --- | --- |
-| 文件数过多（16 个） | 新增 `diagnostics-display.ts` + `diagnostics-display.test.ts`；`bridgeDiagnostics` 状态、`checkedMessage`、baseline 前移分散在 5 个生产文件 + 4 个测试文件 | git 净增量难以控制，review 负担大 |
-| LSP 不参与 diff collapse | `DiagnosticsDisplay` 渲染在 `ToolFileAccordion` **外面**，作为 `BasicTool` 的直接子节点；CSS 给它独立 `max-height: 112px` | diff 8 行 + LSP 8 行 = 16 行可见内容，工具块高度翻倍，没有联合收缩 |
-| presenter 外置成独立文件 | `diagnostics-display.ts` 只有 82 行，完全可以内联到 `message-part.tsx` | 多了一个文件和 import 链，违反“不新增不必要抽象” |
-| `bridgeDiagnostics` 状态字段 | 在 `State` interface 里加了 `bridgeDiagnostics?: "ok" \| "failed"`，`status()` 和 `diagnostics()` 都要读写 | 扩大了 LSP Service 的内部状态面，且只为了防止 clean 误报 |
-| baseline 前移改了 3 个 tool 文件 | write/edit/apply_patch 各改了 baseline 采集位置 | 3 个文件的结构性修改，增加回归风险 |
+| 问题                             | 根因                                                                                                                                                       | 影响                                                               |
+| -------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
+| 文件数过多（16 个）              | 新增 `diagnostics-display.ts` + `diagnostics-display.test.ts`；`bridgeDiagnostics` 状态、`checkedMessage`、baseline 前移分散在 5 个生产文件 + 4 个测试文件 | git 净增量难以控制，review 负担大                                  |
+| LSP 不参与 diff collapse         | `DiagnosticsDisplay` 渲染在 `ToolFileAccordion` **外面**，作为 `BasicTool` 的直接子节点；CSS 给它独立 `max-height: 112px`                                  | diff 8 行 + LSP 8 行 = 16 行可见内容，工具块高度翻倍，没有联合收缩 |
+| presenter 外置成独立文件         | `diagnostics-display.ts` 只有 82 行，完全可以内联到 `message-part.tsx`                                                                                     | 多了一个文件和 import 链，违反“不新增不必要抽象”                   |
+| `bridgeDiagnostics` 状态字段     | 在 `State` interface 里加了 `bridgeDiagnostics?: "ok" \| "failed"`，`status()` 和 `diagnostics()` 都要读写                                                 | 扩大了 LSP Service 的内部状态面，且只为了防止 clean 误报           |
+| baseline 前移改了 3 个 tool 文件 | write/edit/apply_patch 各改了 baseline 采集位置                                                                                                            | 3 个文件的结构性修改，增加回归风险                                 |
 
 ### 13.2 修订目标
 
@@ -881,6 +882,7 @@ subagent 的非阻塞建议已经纳入本文档：
 把 presenter 逻辑（`normalizeDiagnosticMessage`、`truncateDiagnosticMessage`、`prepareDiagnosticsDisplay`）作为模块内函数内联到 `message-part.tsx`。
 
 测试改为：
+
 - 如果 `message-part.tsx` 不便导出内部函数做单测，则把 `normalizeDiagnosticMessage` / `truncateDiagnosticMessage` / `prepareDiagnosticsDisplay` 保留为 `message-part.tsx` 内的纯函数，不做导出测试；行为验证改由 LSP lifecycle 测试 + 实际 TUI 观察覆盖。
 - 或者只导出一个 `prepareDiagnosticsDisplay` 到 `message-part.tsx` 的 `export`，测试文件仍可保留但不新增独立 .ts 文件。
 
@@ -986,20 +988,20 @@ apply_patch 多文件时，每个 `Accordion.Item` 的 `Accordion.Content` 内�
 
 ### 13.4 修订后预计文件改动
 
-| 文件 | 类型 | 具体改动 |
-| --- | --- | --- |
-| `packages/ui/src/components/message-part.tsx` | 修改 | 内联 presenter 函数；`DiagnosticsDisplay` 移到 `ToolFileAccordion` 内部；apply_patch 单文件同步移入 |
-| `packages/ui/src/components/message-part.css` | 修改 | 删除 diagnostics 独立 `max-height`；在 `edit-content`/`write-content` 上设联合 `max-height` + `overflow-y: auto` |
-| `packages/opencode/src/lsp/lsp.ts` | 修改 | bridge touchFile light/strong 分流（2 行）；`bridgeDiagnostics` 状态 + `status()`/`diagnostics()` 防误报（保留，补注释） |
-| `packages/opencode/src/lsp/diagnostic.ts` | 修改 | `checkedMessage()` 纯函数（保留） |
-| `packages/opencode/src/tool/write.ts` | 修改 | clean/existing output 短确认 + summary 条件传递（保留） |
-| `packages/opencode/src/tool/edit.ts` | 修改 | 同 write（保留）；回退 baseline 前移 |
-| `packages/opencode/src/tool/apply_patch.ts` | 修改 | 同 write（保留）；回退 baseline 前移 |
-| `packages/opencode/test/lsp/index.test.ts` | 修改 | bridge touch light/strong 测试 + bridge diagnostics 失败测试（保留） |
-| `packages/opencode/test/lsp/lifecycle.test.ts` | 修改 | `checkedMessage` 测试（保留） |
-| `packages/opencode/test/tool/edit.test.ts` | 修改 | unavailable 时不传 summary 断言（保留） |
-| `packages/opencode/test/tool/write.test.ts` | 修改 | unavailable 时不传 summary 断言（保留） |
-| `docs/lsp-diagnostics-ui-read-touch-implementation-plan.md` | 修改 | 本文档（保留） |
+| 文件                                                        | 类型 | 具体改动                                                                                                                 |
+| ----------------------------------------------------------- | ---- | ------------------------------------------------------------------------------------------------------------------------ |
+| `packages/ui/src/components/message-part.tsx`               | 修改 | 内联 presenter 函数；`DiagnosticsDisplay` 移到 `ToolFileAccordion` 内部；apply_patch 单文件同步移入                      |
+| `packages/ui/src/components/message-part.css`               | 修改 | 删除 diagnostics 独立 `max-height`；在 `edit-content`/`write-content` 上设联合 `max-height` + `overflow-y: auto`         |
+| `packages/opencode/src/lsp/lsp.ts`                          | 修改 | bridge touchFile light/strong 分流（2 行）；`bridgeDiagnostics` 状态 + `status()`/`diagnostics()` 防误报（保留，补注释） |
+| `packages/opencode/src/lsp/diagnostic.ts`                   | 修改 | `checkedMessage()` 纯函数（保留）                                                                                        |
+| `packages/opencode/src/tool/write.ts`                       | 修改 | clean/existing output 短确认 + summary 条件传递（保留）                                                                  |
+| `packages/opencode/src/tool/edit.ts`                        | 修改 | 同 write（保留）；回退 baseline 前移                                                                                     |
+| `packages/opencode/src/tool/apply_patch.ts`                 | 修改 | 同 write（保留）；回退 baseline 前移                                                                                     |
+| `packages/opencode/test/lsp/index.test.ts`                  | 修改 | bridge touch light/strong 测试 + bridge diagnostics 失败测试（保留）                                                     |
+| `packages/opencode/test/lsp/lifecycle.test.ts`              | 修改 | `checkedMessage` 测试（保留）                                                                                            |
+| `packages/opencode/test/tool/edit.test.ts`                  | 修改 | unavailable 时不传 summary 断言（保留）                                                                                  |
+| `packages/opencode/test/tool/write.test.ts`                 | 修改 | unavailable 时不传 summary 断言（保留）                                                                                  |
+| `docs/lsp-diagnostics-ui-read-touch-implementation-plan.md` | 修改 | 本文档（保留）                                                                                                           |
 
 删除的文件：
 
@@ -1025,7 +1027,9 @@ apply_patch 多文件时，每个 `Accordion.Item` 的 `Accordion.Content` 内�
   max-height: 320px;
   overflow-y: auto;
   scrollbar-width: none;
-  &::-webkit-scrollbar { display: none; }
+  &::-webkit-scrollbar {
+    display: none;
+  }
 }
 
 /* diagnostics 不再有独立 max-height */

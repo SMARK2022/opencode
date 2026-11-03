@@ -102,7 +102,9 @@ export const SummarizePayload = Schema.Struct({
   auto: Schema.optional(Schema.Boolean),
 })
 // 请求来源和根请求属于服务端来源标记，外部 payload 不能伪造它们。
-export const PromptPayload = Schema.Struct(Struct.omit(SessionPrompt.PromptInput.fields, ["sessionID", "source", "rootRequestID"]))
+export const PromptPayload = Schema.Struct(
+  Struct.omit(SessionPrompt.PromptInput.fields, ["sessionID", "source", "rootRequestID"]),
+)
 export const CommandPayload = Schema.Struct(Struct.omit(SessionPrompt.CommandInput.fields, ["sessionID"]))
 export const ShellPayload = Schema.Struct(Struct.omit(SessionPrompt.ShellInput.fields, ["sessionID"]))
 export const RevertPayload = Schema.Struct(Struct.omit(SessionRevert.RevertInput.fields, ["sessionID"]))
@@ -534,10 +536,18 @@ export const SessionApi = HttpApi.make("session")
         HttpApiEndpoint.get("requestUsageList", "/session/:sessionID/request_usage", {
           params: { sessionID: SessionID },
           // limit 使用安全整数绑定 SQLite，保留零及负数不限量；before 仍允许有限小数时间游标。
-          query: { ...WorkspaceRoutingQueryFields, limit: Schema.optional(Schema.NumberFromString.check(Schema.isInt())), before: Schema.optional(Schema.NumberFromString.check(Schema.isFinite())), rootRequestID: Schema.optional(MessageID), source: Schema.optional(SessionRequestUsage.SourceSchema) },
+          query: {
+            ...WorkspaceRoutingQueryFields,
+            limit: Schema.optional(Schema.NumberFromString.check(Schema.isInt())),
+            before: Schema.optional(Schema.NumberFromString.check(Schema.isFinite())),
+            rootRequestID: Schema.optional(MessageID),
+            source: Schema.optional(SessionRequestUsage.SourceSchema),
+          },
           success: Schema.Array(SessionRequestUsage.RequestUsageSchema),
           error: [HttpApiError.BadRequest, ApiNotFoundError],
-        }).annotateMerge(OpenApi.annotations({ identifier: "session.request_usage.list", summary: "List request usage" })),
+        }).annotateMerge(
+          OpenApi.annotations({ identifier: "session.request_usage.list", summary: "List request usage" }),
+        ),
       )
       .add(
         HttpApiEndpoint.get("requestUsageGet", "/session/:sessionID/request_usage/:requestID", {
@@ -545,7 +555,9 @@ export const SessionApi = HttpApi.make("session")
           query: WorkspaceRoutingQuery,
           success: SessionRequestUsage.RequestUsageSchema,
           error: [HttpApiError.BadRequest, ApiNotFoundError],
-        }).annotateMerge(OpenApi.annotations({ identifier: "session.request_usage.get", summary: "Get request usage" })),
+        }).annotateMerge(
+          OpenApi.annotations({ identifier: "session.request_usage.get", summary: "Get request usage" }),
+        ),
       )
       .add(
         HttpApiEndpoint.get("requestUsageAssistants", "/session/:sessionID/request_usage/:requestID/assistant", {
@@ -553,7 +565,9 @@ export const SessionApi = HttpApi.make("session")
           query: WorkspaceRoutingQuery,
           success: Schema.Array(SessionRequestUsage.AssistantUsageSchema),
           error: [HttpApiError.BadRequest, ApiNotFoundError],
-        }).annotateMerge(OpenApi.annotations({ identifier: "session.request_usage.assistants", summary: "List assistant usage" })),
+        }).annotateMerge(
+          OpenApi.annotations({ identifier: "session.request_usage.assistants", summary: "List assistant usage" }),
+        ),
       )
       .add(
         // #364：goal 端点：GET 读取当前 goal，POST 设置/更新，DELETE 清除
@@ -582,7 +596,8 @@ export const SessionApi = HttpApi.make("session")
           OpenApi.annotations({
             identifier: "session.goal.set",
             summary: "Set session goal",
-            description: "Create or update the persistent goal for a session. If objective is omitted, only status/budget are updated.",
+            description:
+              "Create or update the persistent goal for a session. If objective is omitted, only status/budget are updated.",
           }),
         ),
         // [local-smark] DELETE 幂等：goal 不存在时仍返回 cleared=false 而非 404
@@ -612,8 +627,7 @@ export const SessionApi = HttpApi.make("session")
           OpenApi.annotations({
             identifier: "session.preview",
             summary: "Batch session preview",
-            description:
-              "Retrieve the most recent user message text for multiple sessions in a single request.",
+            description: "Retrieve the most recent user message text for multiple sessions in a single request.",
           }),
         ),
         // #544：与 preview 同组——实例路由 + workspace middleware，body 带 search/cursor/batch

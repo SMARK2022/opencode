@@ -35,9 +35,7 @@ describe("disabledToolNotice", () => {
   test("returns notice when history contains a disabled tool", () => {
     const messages = [msgWithTool("apply_patch")]
     // 模拟 apply_patch 被 deny：edit 规则 deny 所有
-    const agentPermission: PermissionV1.Ruleset = [
-      { permission: "edit", pattern: "*", action: "deny" },
-    ]
+    const agentPermission: PermissionV1.Ruleset = [{ permission: "edit", pattern: "*", action: "deny" }]
     const result = disabledToolNotice(messages, agentPermission, [])
     expect(result).toContain("apply_patch is not available")
     // edit 和 write 也被 deny，所以不应建议它们
@@ -52,9 +50,7 @@ describe("disabledToolNotice", () => {
     // 所以要仅禁用 apply_patch 需要用 ToolSelection.enabled 而非 permission deny。
     // 这里测试 deny edit 但 NOT deny 的场景不存在——edit deny 会同时禁用三者。
     // 因此测试 deny edit 时 substitutes 被正确过滤。
-    const agentPermission: PermissionV1.Ruleset = [
-      { permission: "edit", pattern: "*", action: "deny" },
-    ]
+    const agentPermission: PermissionV1.Ruleset = [{ permission: "edit", pattern: "*", action: "deny" }]
     const result = disabledToolNotice(messages, agentPermission, [])
     // 所有 edit 类工具都被 deny，替代建议应回退到通用提示
     expect(result).toContain("Use an available tool instead")
@@ -73,4 +69,3 @@ describe("disabledToolNotice", () => {
     expect(result).toBeUndefined()
   })
 })
-

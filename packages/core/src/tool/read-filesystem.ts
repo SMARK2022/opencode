@@ -284,14 +284,15 @@ export const read = Effect.fn("ReadTool.read")(function* (
         },
       })
       // 只翻译实际解码错误，文件句柄和取消仍由原 Effect scope 管理。
-      const parse = <A>(run: () => A) => Effect.try({
-        try: run,
-        catch: (error) => {
-          if (error instanceof BinaryFileError) return error
-          if (error instanceof TypeError) return new MalformedUtf8Error({ resource })
-          throw error
-        },
-      })
+      const parse = <A>(run: () => A) =>
+        Effect.try({
+          try: run,
+          catch: (error) => {
+            if (error instanceof BinaryFileError) return error
+            if (error instanceof TypeError) return new MalformedUtf8Error({ resource })
+            throw error
+          },
+        })
       yield* parse(() => parser.push(first))
       while (!parser.done) {
         const chunk = yield* file.readAlloc(ReadLines.AUXILIARY_READ_AHEAD_BYTES)
@@ -305,7 +306,8 @@ export const read = Effect.fn("ReadTool.read")(function* (
         readOutlineCached(real, result.count, offset, Number(info.size), modified, result.totalExact, budget, signal),
       )
       const after = yield* file.stat
-      const stable = modified !== undefined && after.size === info.size && Option.getOrUndefined(after.mtime)?.getTime() === modified
+      const stable =
+        modified !== undefined && after.size === info.size && Option.getOrUndefined(after.mtime)?.getTime() === modified
       const metadata = {
         read: {
           path: real,
@@ -326,7 +328,14 @@ export const read = Effect.fn("ReadTool.read")(function* (
         ...(outline === undefined ? {} : { outline }),
       }
       // 完整短文件保留原 Content 字节/换行形态，显式分页仍返回 TextPage。
-      if (page.offset === undefined && page.limit === undefined && !result.more && Number(info.size) <= MAX_READ_BYTES && first.length === Number(info.size) && after.size === info.size) {
+      if (
+        page.offset === undefined &&
+        page.limit === undefined &&
+        !result.more &&
+        Number(info.size) <= MAX_READ_BYTES &&
+        first.length === Number(info.size) &&
+        after.size === info.size
+      ) {
         return {
           uri: pathToFileURL(real).href,
           name: path.basename(real),
@@ -377,7 +386,12 @@ export const list = Effect.fn("ReadTool.list")(function* (fs: FSUtil.Interface, 
     .sort((a, b) => (a.type === b.type ? a.path.localeCompare(b.path) : a.type === "directory" ? -1 : 1))
   const selected = visible.slice(offset - 1, offset - 1 + limit)
   const truncated = offset - 1 + selected.length < visible.length
-  return new ListPage({ entries: selected, total: visible.length, truncated, ...(truncated ? { next: offset + selected.length } : {}) })
+  return new ListPage({
+    entries: selected,
+    total: visible.length,
+    truncated,
+    ...(truncated ? { next: offset + selected.length } : {}),
+  })
 })
 
 const layer = Layer.effect(

@@ -14,10 +14,7 @@ import { SPINNER_FRAMES } from "../../../../src/component/spinner"
 // 因此本测试不用于复现编译期时序，而是作为 <spinner> intrinsic 注册链路的
 // 回归护栏：一旦注册被误删或导入链路被破坏，本测试会以确切错误信息失败。
 test("<spinner> intrinsic 经 Solid reconciler 注册并可渲染", async () => {
-  const app = await testRender(
-    () => <spinner frames={SPINNER_FRAMES} interval={80} />,
-    { width: 8, height: 3 },
-  )
+  const app = await testRender(() => <spinner frames={SPINNER_FRAMES} interval={80} />, { width: 8, height: 3 })
   try {
     await app.renderOnce()
     // 首帧至少渲染出一个 spinner 字形；注册缺失时上面 testRender/renderOnce

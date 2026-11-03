@@ -104,15 +104,27 @@ describe("plugin.trigger", () => {
         const events = yield* EventV2Bridge.Service
         const directory = (yield* TestInstance).directory
         const terminal: SessionV1.Assistant = {
-          id: MessageID.ascending(), parentID: MessageID.ascending(), sessionID: SessionID.make("ses_plugin_terminal"),
-          role: "assistant", agent: "build", mode: "build", path: { cwd: directory, root: directory },
-          modelID: ModelV2.ID.make("test"), providerID: ProviderV2.ID.make("test"),
-          cost: 0, tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
-          time: { created: 1, completed: 2 }, finish: "error",
+          id: MessageID.ascending(),
+          parentID: MessageID.ascending(),
+          sessionID: SessionID.make("ses_plugin_terminal"),
+          role: "assistant",
+          agent: "build",
+          mode: "build",
+          path: { cwd: directory, root: directory },
+          modelID: ModelV2.ID.make("test"),
+          providerID: ProviderV2.ID.make("test"),
+          cost: 0,
+          tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+          time: { created: 1, completed: 2 },
+          finish: "error",
           error: { name: "MessageAbortedError", data: { message: "Cancelled before provider" } },
         }
         // hook 返回永不完成的 Promise，Scope 退出仍须完成并保留同步交付顺序。
-        yield* Effect.addFinalizer(() => events.publish(MessageV2.Event.Updated, { sessionID: terminal.sessionID, info: terminal }, { finalizer: true }).pipe(Effect.asVoid)).pipe(Effect.scoped)
+        yield* Effect.addFinalizer(() =>
+          events
+            .publish(MessageV2.Event.Updated, { sessionID: terminal.sessionID, info: terminal }, { finalizer: true })
+            .pipe(Effect.asVoid),
+        ).pipe(Effect.scoped)
         expect(yield* triggerSystemTransform()).toEqual(["sync", "MessageAbortedError"])
       }),
     ),

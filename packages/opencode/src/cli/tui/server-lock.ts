@@ -31,10 +31,12 @@ export function identity() {
 }
 
 // HTTP listener 读取当前 env；显式传入相同值，避免 Flag 缓存与实际认证配置分叉。
-export function headers(credentials: ServerAuth.Credentials = {
-  password: process.env.OPENCODE_SERVER_PASSWORD ?? "",
-  username: process.env.OPENCODE_SERVER_USERNAME ?? "opencode",
-}) {
+export function headers(
+  credentials: ServerAuth.Credentials = {
+    password: process.env.OPENCODE_SERVER_PASSWORD ?? "",
+    username: process.env.OPENCODE_SERVER_USERNAME ?? "opencode",
+  },
+) {
   return ServerAuth.headers(credentials)
 }
 
@@ -128,21 +130,41 @@ export async function write(
 // 缺失或损坏记录不能提供可信 PID；权限错误另行抛出，不能伪装成不存在。
 export async function read(lockPath = getLockPath()): Promise<ServerLock | undefined> {
   // 只有不存在才视为无 owner；权限或 I/O 故障必须向上失败，不能启动备用 daemon。
-  const raw = await Bun.file(lockPath).text().catch((error: unknown) => {
-    if (typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT") return undefined
-    throw error
-  })
+  const raw = await Bun.file(lockPath)
+    .text()
+    .catch((error: unknown) => {
+      if (typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT") return undefined
+      throw error
+    })
   if (!raw) return
   try {
     const lock: unknown = JSON.parse(raw)
     // 锁是外部输入，字段错误不能成为 process.kill(0) 或任意端口探测的依据。
-    if (!lock || typeof lock !== "object" || !("pid" in lock) || !("port" in lock) ||
-      typeof lock.pid !== "number" || !Number.isSafeInteger(lock.pid) || lock.pid <= 0 ||
-      typeof lock.port !== "number" || !Number.isInteger(lock.port) || lock.port < 1 || lock.port > 65535 ||
-      !("token" in lock) || typeof lock.token !== "string" || !lock.token ||
-      !("dbPath" in lock) || typeof lock.dbPath !== "string" || !lock.dbPath ||
-      !("channel" in lock) || typeof lock.channel !== "string" || !lock.channel ||
-      !("startedAt" in lock) || typeof lock.startedAt !== "string") return
+    if (
+      !lock ||
+      typeof lock !== "object" ||
+      !("pid" in lock) ||
+      !("port" in lock) ||
+      typeof lock.pid !== "number" ||
+      !Number.isSafeInteger(lock.pid) ||
+      lock.pid <= 0 ||
+      typeof lock.port !== "number" ||
+      !Number.isInteger(lock.port) ||
+      lock.port < 1 ||
+      lock.port > 65535 ||
+      !("token" in lock) ||
+      typeof lock.token !== "string" ||
+      !lock.token ||
+      !("dbPath" in lock) ||
+      typeof lock.dbPath !== "string" ||
+      !lock.dbPath ||
+      !("channel" in lock) ||
+      typeof lock.channel !== "string" ||
+      !lock.channel ||
+      !("startedAt" in lock) ||
+      typeof lock.startedAt !== "string"
+    )
+      return
     return lock as ServerLock
   } catch {
     return undefined
@@ -307,12 +329,15 @@ export async function readMaintenanceTask(taskID: string, dbPath?: string) {
   const expectedPath = path.resolve(dbPath ?? Database.path())
   // task 文件先按当前 DB root 定位，再核对 record 内 dbPath；不能反过来信任文件内容选择要锁的数据库。
   // 规范化 path 消除 Windows 斜杠/相对路径差异，同时保留不同真实 DB 之间的硬隔离。
-  const raw = await Bun.file(taskPath(taskID, expectedPath)).text().catch(() => undefined)
+  const raw = await Bun.file(taskPath(taskID, expectedPath))
+    .text()
+    .catch(() => undefined)
   if (!raw) return undefined
   try {
     const task = parseMaintenanceTask(JSON.parse(raw))
     // record 所在 root 与内部 dbPath 必须一致，否则 resume 可能锁住一个 DB 却修改当前进程的另一个 DB。
-    if (path.resolve(task.dbPath) !== expectedPath) throw new MaintenanceLeaseError("Maintenance task database path mismatch")
+    if (path.resolve(task.dbPath) !== expectedPath)
+      throw new MaintenanceLeaseError("Maintenance task database path mismatch")
     return task
   } catch {
     throw new MaintenanceLeaseError(`Maintenance task record is corrupt: ${taskID}`)
@@ -370,9 +395,9 @@ export async function findNonterminalMaintenanceTask(dbPath = Database.path()) {
   const reconciled = await Promise.all(
     (await listMaintenanceTasks(dbPath)).map((task) => reconcileMaintenanceTask(task.taskID, dbPath)),
   )
-  const tasks = reconciled.filter((task): task is MaintenanceTask => task !== undefined).filter((task) =>
-    task.status === "queued" || task.status === "running" || task.status === "interrupted",
-  )
+  const tasks = reconciled
+    .filter((task): task is MaintenanceTask => task !== undefined)
+    .filter((task) => task.status === "queued" || task.status === "running" || task.status === "interrupted")
   if (tasks.length > 1) throw new MaintenanceBusyError("Multiple nonterminal maintenance tasks require manual repair")
   return tasks[0]
 }
@@ -469,7 +494,9 @@ export async function acquireMaintenanceLease(
     token,
     assertOwned,
     release: async () => {
-      const ownerRaw = await Bun.file(path.join(lockDir, "owner.json")).text().catch(() => undefined)
+      const ownerRaw = await Bun.file(path.join(lockDir, "owner.json"))
+        .text()
+        .catch(() => undefined)
       if (!ownerRaw) return
       if (maintenanceOwner(ownerRaw).token !== token) return
       await rm(lockDir, { recursive: true, force: true })
@@ -477,6 +504,5 @@ export async function acquireMaintenanceLease(
   }
   return lease
 }
-
 
 export * as ServerLock from "./server-lock"

@@ -1,7 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { parseApplyPatchFiles } from "../../../src/routes/session"
 
-
 // #248：本文件避开 CRLF 既有测试宿主，独立锁定 legacy delete 的解析放宽行为
 describe("apply patch files parsing", () => {
   test("keeps legacy delete entries without patch data", () => {
@@ -20,7 +19,14 @@ describe("apply patch files parsing", () => {
         { type: "add", relativePath: "new.ts", filePath: "src/new.ts", deletions: 0 },
       ]),
     ).toEqual([
-      { type: "delete", relativePath: "stale.ts", filePath: "src/stale.ts", patch: "", deletions: 5, movePath: undefined },
+      {
+        type: "delete",
+        relativePath: "stale.ts",
+        filePath: "src/stale.ts",
+        patch: "",
+        deletions: 5,
+        movePath: undefined,
+      },
       {
         type: "delete",
         relativePath: "gone.ts",

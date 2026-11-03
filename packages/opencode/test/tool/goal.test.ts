@@ -151,10 +151,9 @@ it.instance(
       yield* def.execute({ operate: "read" }, makeCtx(session.id, goalSvc, turn))
       yield* goalSvc.set(session.id, { objective: "revised" })
 
-      const result = yield* def.execute(
-        { operate: "complete", reason: "finished original" },
-        makeCtx(session.id, goalSvc, turn),
-      ).pipe(Effect.exit)
+      const result = yield* def
+        .execute({ operate: "complete", reason: "finished original" }, makeCtx(session.id, goalSvc, turn))
+        .pipe(Effect.exit)
       expect(Exit.isFailure(result)).toBe(true)
       if (Exit.isFailure(result)) {
         const error = Cause.squash(result.cause) as Error
@@ -175,10 +174,7 @@ it.instance(
       // Turn 1: read then blocked → pending
       const turn1: GoalTurnContext = { id: "t1", userInitiated: true }
       yield* def.execute({ operate: "read" }, makeCtx(session.id, goalSvc, turn1))
-      const r1 = yield* def.execute(
-        { operate: "blocked", reason: "stuck on X" },
-        makeCtx(session.id, goalSvc, turn1),
-      )
+      const r1 = yield* def.execute({ operate: "blocked", reason: "stuck on X" }, makeCtx(session.id, goalSvc, turn1))
       expect(r1.output).toContain("attempt 1")
       // #517：首轮必须明确保持 active、继续 BFS 探索和发现路径后继续，而不是只重复计数。
       expect(r1.output).toContain("The Goal stays active")
@@ -212,16 +208,15 @@ it.instance(
       expect(def.description).toContain("the same blocking condition must be verified again before marking `blocked`")
       // description 与 pending 输出分别供调用前后读取，两面都不能泄露分段指令。
       for (const text of [def.description, r1.output]) {
-        expect(text).not.toMatch(/this turn|each turn|next turn|across turns|eligible Goal turn|End-of-turn|The session loop will end/i)
+        expect(text).not.toMatch(
+          /this turn|each turn|next turn|across turns|eligible Goal turn|End-of-turn|The session loop will end/i,
+        )
       }
 
       // 新 turn 必须重新 read；复用 t1 snapshot 会掩盖 read-per-turn gate 是否真实生效。
       const turn2: GoalTurnContext = { id: "t2", previousID: "t1", userInitiated: true }
       yield* def.execute({ operate: "read" }, makeCtx(session.id, goalSvc, turn2))
-      const r2 = yield* def.execute(
-        { operate: "blocked", reason: "stuck on X" },
-        makeCtx(session.id, goalSvc, turn2),
-      )
+      const r2 = yield* def.execute({ operate: "blocked", reason: "stuck on X" }, makeCtx(session.id, goalSvc, turn2))
       expect(r2.output).toContain("blocked")
       expect(r2.output).toContain("stuck on X")
       // 成功结果只声明状态事实，不能把模型引向“结束本轮”的机制指令。
@@ -278,10 +273,7 @@ it.instance(
         expect(error.message).toContain("already active")
         expect(error.message).toContain("Continue working toward the current objective")
       }
-      yield* def.execute(
-        { operate: "complete", reason: "done" },
-        makeCtx(session.id, goalSvc, turn1),
-      ).pipe(
+      yield* def.execute({ operate: "complete", reason: "done" }, makeCtx(session.id, goalSvc, turn1)).pipe(
         Effect.tap((done) =>
           Effect.sync(() => {
             // 成功结果只声明状态事实，不能把模型引向“结束本轮”的机制指令。
@@ -294,7 +286,9 @@ it.instance(
       expect(schema).toContain("after the next goal-continuation message arrives")
       expect(schema).toContain("after the user sends a new message")
       for (const text of [schema]) {
-        expect(text).not.toMatch(/this turn|each turn|next turn|across turns|eligible Goal turn|End-of-turn|The session loop will end/i)
+        expect(text).not.toMatch(
+          /this turn|each turn|next turn|across turns|eligible Goal turn|End-of-turn|The session loop will end/i,
+        )
       }
       // Turn 2: active recovery
       const turn2: GoalTurnContext = { id: "t2", previousID: "t1", userInitiated: true }
@@ -319,9 +313,7 @@ it.instance(
       yield* def.execute({ operate: "complete", reason: "done" }, makeCtx(session.id, goalSvc, turn1))
 
       yield* def.execute({ operate: "read" }, makeCtx(session.id, goalSvc, turn1))
-      const result = yield* def
-        .execute({ operate: "active" }, makeCtx(session.id, goalSvc, turn1))
-        .pipe(Effect.exit)
+      const result = yield* def.execute({ operate: "active" }, makeCtx(session.id, goalSvc, turn1)).pipe(Effect.exit)
       expect(Exit.isFailure(result)).toBe(true)
       if (Exit.isFailure(result)) {
         const error = Cause.squash(result.cause) as Error
@@ -332,11 +324,15 @@ it.instance(
       // 新的合成续跑消息也不能恢复 terminal；必须与同消息重试的拒绝区分。
       const continuation: GoalTurnContext = { id: "t2", previousID: "t1", userInitiated: false }
       yield* def.execute({ operate: "read" }, makeCtx(session.id, goalSvc, continuation))
-      const resumed = yield* def.execute({ operate: "active" }, makeCtx(session.id, goalSvc, continuation)).pipe(Effect.exit)
+      const resumed = yield* def
+        .execute({ operate: "active" }, makeCtx(session.id, goalSvc, continuation))
+        .pipe(Effect.exit)
       expect(Exit.isFailure(resumed)).toBe(true)
       if (Exit.isFailure(resumed)) {
         const error = Cause.squash(resumed.cause) as Error
-        expect(error.message).toBe("You cannot resume a terminal goal while responding to a goal-continuation message. Resuming requires a new message from the user.")
+        expect(error.message).toBe(
+          "You cannot resume a terminal goal while responding to a goal-continuation message. Resuming requires a new message from the user.",
+        )
       }
     }),
   { git: true },
@@ -364,7 +360,9 @@ it.instance(
             expect(error.message).toContain("only valid for an active goal")
             expect(error.message).toContain("wait for the user to resume")
             // 终态重标的错误仍需先读再恢复，避免简化文本抹掉用户授权边界。
-            expect(error.message).toContain("use operate active only after the user sends a new message; read the goal again first")
+            expect(error.message).toContain(
+              "use operate active only after the user sends a new message; read the goal again first",
+            )
           }
 
           const persisted = yield* goalSvc.get(session.id)

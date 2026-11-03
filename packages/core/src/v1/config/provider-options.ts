@@ -23,7 +23,11 @@ export function get(packageName?: string): Lowerer {
       // 简写属于请求头，迁移时不能留在 API body/settings；显式任意大小写 UA 仍优先。
       const result = lowerer.provider(omit(options, ["header-ua"]))
       const userAgent = options["header-ua"]
-      if (typeof userAgent !== "string" || Object.keys(result.headers ?? {}).some((name) => name.toLowerCase() === "user-agent")) return result
+      if (
+        typeof userAgent !== "string" ||
+        Object.keys(result.headers ?? {}).some((name) => name.toLowerCase() === "user-agent")
+      )
+        return result
       return { ...result, headers: { ...result.headers, "User-Agent": userAgent } }
     },
   }

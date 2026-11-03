@@ -16,9 +16,7 @@ export function runWithAlias<T>(providerID: string, baseProviderID: string, fn: 
 }
 
 // #114：从 config.provider 构建 aliasID -> extends 基类映射
-export function buildBaseProviderMap(
-  configProviders: Record<string, { extends?: unknown }>,
-): Record<string, string> {
+export function buildBaseProviderMap(configProviders: Record<string, { extends?: unknown }>): Record<string, string> {
   const map: Record<string, string> = {}
   for (const [id, provider] of Object.entries(configProviders)) {
     if (provider?.extends && typeof provider.extends === "string") {
@@ -34,10 +32,7 @@ export function resolveBaseProvider(providerID: string, baseProviderMap: Record<
 }
 
 // #114：openai oauth 判定覆盖 extends: openai 的别名账号
-export function isOpenaiOauthProvider(
-  providerID: string,
-  baseProviderMap: Record<string, string>,
-): boolean {
+export function isOpenaiOauthProvider(providerID: string, baseProviderMap: Record<string, string>): boolean {
   return providerID === "openai" || baseProviderMap[providerID] === "openai"
 }
 

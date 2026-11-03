@@ -158,7 +158,10 @@ export async function run(cmd: string[], opts: RunOptions = {}): Promise<Result>
       }
     })
     // 保持原始错误/nothrow结果，仅把交付时间移动到全部资源结算之后。
-    .finally(async () => { await Promise.allSettled(pending); await closed })
+    .finally(async () => {
+      await Promise.allSettled(pending)
+      await closed
+    })
   if (out.code === 0 || opts.nothrow) return out
   throw new RunFailedError(cmd, out.code, out.stdout, out.stderr)
 }

@@ -3,7 +3,7 @@ name: Build OpenCode CLI
 # 显式设置 run-name 为 commit 消息；GitHub Actions 默认 display_title 不再自动回退到 commit 消息
 run-name: ${{ github.event.head_commit.message || github.workflow }}
 
-# #156：push dev-smark 与手动 workflow_dispatch
+# 1.x产品分支的push和手动触发共用完整构建及发布链。
 on:
   # #156：手动触发不依赖 push，可单独发布紧急修复版
   workflow_dispatch:
@@ -19,7 +19,7 @@ on:
         type: string
   push:
     branches:
-      - dev-smark
+      - dev1-smark
     paths:
       - ".github/workflows/build-opencode.yml"
       # #156：保留 tip setup-bun 路径触发，工具链变更必重建

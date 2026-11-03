@@ -11,14 +11,20 @@ describe("assistant visible parts (#185)", () => {
   test("completed tool hidden when details off", () => {
     // #185：tool_details 关闭时 completed 工具不可见
     expect(
-      isVisibleAssistantPart({ type: "tool", state: { status: "completed" } }, { showDetails: false, showThinking: true }),
+      isVisibleAssistantPart(
+        { type: "tool", state: { status: "completed" } },
+        { showDetails: false, showThinking: true },
+      ),
     ).toBe(false)
   })
 
   test("completed tool visible when details on", () => {
     // #185：详情开启时 completed 工具可见
     expect(
-      isVisibleAssistantPart({ type: "tool", state: { status: "completed" } }, { showDetails: true, showThinking: true }),
+      isVisibleAssistantPart(
+        { type: "tool", state: { status: "completed" } },
+        { showDetails: true, showThinking: true },
+      ),
     ).toBe(true)
   })
 
@@ -38,10 +44,12 @@ describe("assistant visible parts (#185)", () => {
       ),
     ).toBe(true)
     // 同形状但无 partial 标记：维持 #185 隐藏语义，豁免不扩大化
-    expect(isVisibleAssistantPart(
-      { type: "tool", tool: "glob", state: { status: "completed", structured: { files: [], partial: true } } },
-      { showDetails: false, showThinking: true },
-    )).toBe(true)
+    expect(
+      isVisibleAssistantPart(
+        { type: "tool", tool: "glob", state: { status: "completed", structured: { files: [], partial: true } } },
+        { showDetails: false, showThinking: true },
+      ),
+    ).toBe(true)
     expect(
       isVisibleAssistantPart(
         { type: "tool", tool: "glob", state: { status: "completed", metadata: {} } },

@@ -38,6 +38,7 @@
 本研究以源码为主，而不是 README 宣传文案。重点检查的文件包括但不限于：
 
 ### Claude Code Rebuilt
+
 - `src/query.ts`
 - `src/Tool.ts`
 - `src/tools.ts`
@@ -47,6 +48,7 @@
 - `src/constants/prompts.ts`
 
 ### OpenCode
+
 - `packages/opencode/src/agent/agent.ts`
 - `packages/opencode/src/session/prompt.ts`
 - `packages/opencode/src/session/system.ts`

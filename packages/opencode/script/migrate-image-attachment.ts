@@ -18,7 +18,17 @@ The default mode is a read-only preview. --apply updates the current database in
 
 // Native的type在独立SQL列，不在data里；两代始终保留完整旧JSON用于CAS。
 type ImageRow = { id: string; session_id: string; data: string; type?: string }
-type ImageAttachment = { location: string; index: number; value: Record<string, unknown>; mime: string; uri: string; field: "url" | "uri"; list: unknown[]; state?: Record<string, unknown>; toolIndex?: number }
+type ImageAttachment = {
+  location: string
+  index: number
+  value: Record<string, unknown>
+  mime: string
+  uri: string
+  field: "url" | "uri"
+  list: unknown[]
+  state?: Record<string, unknown>
+  toolIndex?: number
+}
 
 // 数据库路径使用唯一位置参数，避免重新引入part/source/hash等需要人工拼装的旧协议。
 // allowPositionals是全库扫描语义的入口：旧协议的散装参数不再存在。
@@ -52,13 +62,21 @@ try {
   // query_only在数据库层面挡写：比依赖应用层纪律更强，preview副作用无从发生。
 
   // 显式识别两代表，兼容只含其中一代的合法库存；SQL错误不转成空成功。
-  const tables = new Set(db.query<{ name: string }, []>("SELECT name FROM sqlite_schema WHERE type = 'table'").all().map(row => row.name))
+  const tables = new Set(
+    db
+      .query<{ name: string }, []>("SELECT name FROM sqlite_schema WHERE type = 'table'")
+      .all()
+      .map((row) => row.name),
+  )
   if (!tables.has("part") && !tables.has("session_message")) throw new Error("No supported message table was found")
-  const rows = (["part", "session_message"] as const).flatMap(table =>
+  const rows = (["part", "session_message"] as const).flatMap((table) =>
     tables.has(table)
-      ? db.query<ImageRow, []>(
-          `SELECT id, session_id, data${table === "session_message" ? ", type" : ""} FROM ${table} WHERE instr(data, 'image/') > 0 ORDER BY id`,
-        ).all().map(row => ({ ...row, table }))
+      ? db
+          .query<ImageRow, []>(
+            `SELECT id, session_id, data${table === "session_message" ? ", type" : ""} FROM ${table} WHERE instr(data, 'image/') > 0 ORDER BY id`,
+          )
+          .all()
+          .map((row) => ({ ...row, table }))
       : [],
   )
   // Effect.runPromise桥接CLI顶层；gen内的错误沿rejection进入catch统一回滚。
@@ -87,7 +105,13 @@ try {
         const next = structuredClone(part)
         const attachments: ImageAttachment[] = []
         // 槽位保留clone对象和原索引：多个坏图删除后也不会错写相邻图片。
-        const addAttachments = (list: unknown, field: "url" | "uri", location: string, state?: Record<string, unknown>, toolIndex?: number) => {
+        const addAttachments = (
+          list: unknown,
+          field: "url" | "uri",
+          location: string,
+          state?: Record<string, unknown>,
+          toolIndex?: number,
+        ) => {
           if (!Array.isArray(list)) return
           list.forEach((value: unknown, index) => {
             if (!isRecord(value)) return
@@ -105,7 +129,8 @@ try {
         if (row.table === "session_message" && row.type === "user") addAttachments(next.files, "uri", "user")
         if (row.table === "session_message" && row.type === "assistant" && Array.isArray(next.content))
           next.content.forEach((tool: unknown, toolIndex: number) => {
-            if (!isRecord(tool) || tool.type !== "tool" || !isRecord(tool.state) || tool.state.status !== "completed") return
+            if (!isRecord(tool) || tool.type !== "tool" || !isRecord(tool.state) || tool.state.status !== "completed")
+              return
             // Native模型实际消费content文件；展示attachments不是它的替代数据源。
             addAttachments(tool.state.attachments, "uri", "tool-attachment", tool.state, toolIndex)
             addAttachments(tool.state.content, "uri", "tool-content", tool.state, toolIndex)
@@ -126,9 +151,15 @@ try {
           // 坏图的旧载荷也计入总量，弃用后new bytes为零，报告才能体现真实释放空间。
           const oldBytes = dataUrlBytes(attachment.uri).length
           oldPayloadBytes += oldBytes
-          const detail = row.table === "part"
-            ? { part: row.id, location: attachment.location, index: attachment.index }
-            : { message: row.id, location: attachment.location, index: attachment.index, tool_index: attachment.toolIndex }
+          const detail =
+            row.table === "part"
+              ? { part: row.id, location: attachment.location, index: attachment.index }
+              : {
+                  message: row.id,
+                  location: attachment.location,
+                  index: attachment.index,
+                  tool_index: attachment.toolIndex,
+                }
           // 所有来源共用默认Image.Service，不传token budget，保证正常图片走metadata fast-path而不被二次压缩。
           const normalized = yield* image
             .normalize(attachment.uri, {
@@ -148,8 +179,7 @@ try {
           if (!normalized.ok) {
             // 非Tool位置或非DecodeError都向上传播：迁移工具绝不掩盖授权范围之外的失败。
             // 用户只授权弃用真实存在的completed Tool坏图；Sharp装载失败或顶层失败绝不能转成成功。
-            if (!attachment.state || !(normalized.error instanceof Image.DecodeError))
-              return yield* normalized.error
+            if (!attachment.state || !(normalized.error instanceof Image.DecodeError)) return yield* normalized.error
             // DecodeError说明数据库bytes自身不可恢复；移除附件并保留Tool文本比猜外部源更符合当前持久化链。
             attachment.list.splice(attachment.list.indexOf(attachment.value), 1)
             unavailable.add(attachment.state)
@@ -159,9 +189,11 @@ try {
             continue
           }
 
-          const url = normalized.value.mime === attachment.mime && normalized.value.content === attachment.uri.slice(attachment.uri.indexOf(";base64,") + ";base64,".length)
-            ? attachment.uri
-            : `data:${normalized.value.mime};base64,${normalized.value.content}`
+          const url =
+            normalized.value.mime === attachment.mime &&
+            normalized.value.content === attachment.uri.slice(attachment.uri.indexOf(";base64,") + ";base64,".length)
+              ? attachment.uri
+              : `data:${normalized.value.mime};base64,${normalized.value.content}`
           const newBytes = dataUrlBytes(url).length
           // 新载荷先计量再写回，saved_payload_bytes才能在报告里反映真实的存储收益。
           newPayloadBytes += newBytes
@@ -188,7 +220,15 @@ try {
           // Native保留必需content数组；每个Tool只追加一次说明，不改opaque result/structured。
           if (row.table === "session_message") {
             if (!Array.isArray(state.content)) throw new Error("Completed native tool is missing content")
-            if (!state.content.some((value: unknown) => isRecord(value) && value.type === "text" && typeof value.text === "string" && value.text.includes(unavailableNote)))
+            if (
+              !state.content.some(
+                (value: unknown) =>
+                  isRecord(value) &&
+                  value.type === "text" &&
+                  typeof value.text === "string" &&
+                  value.text.includes(unavailableNote),
+              )
+            )
               state.content.push({ type: "text", text: unavailableNote })
             continue
           }
@@ -213,8 +253,8 @@ try {
           unchanged,
           normalized: normalizedItems.length,
           unavailable: unavailableItems.length,
-          changed_parts: changes.filter(change => change.row.table === "part").length,
-          changed_messages: changes.filter(change => change.row.table === "session_message").length,
+          changed_parts: changes.filter((change) => change.row.table === "part").length,
+          changed_messages: changes.filter((change) => change.row.table === "session_message").length,
           old_payload_bytes: oldPayloadBytes,
           new_payload_bytes: newPayloadBytes,
           saved_payload_bytes: oldPayloadBytes - newPayloadBytes,
@@ -232,7 +272,9 @@ try {
       }
     }).pipe(
       // 空配置只选择Image.Service仓库默认值；迁移策略不再因历史来源或当前Project配置分叉。
-      Effect.provide(Image.layer.pipe(Layer.provide(Layer.mock(Config.Service, { entries: () => Effect.succeed([]) })))),
+      Effect.provide(
+        Image.layer.pipe(Layer.provide(Layer.mock(Config.Service, { entries: () => Effect.succeed([]) }))),
+      ),
     ),
   )
 

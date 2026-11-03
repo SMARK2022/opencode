@@ -1,4 +1,3 @@
-
 import { formatNumber } from "../format"
 import type { DailyUsage, StatsReport, UsageGroup, TokenTotals } from "./stats-data"
 
@@ -26,8 +25,14 @@ const BOLD = "\x1b[1m"
 // #174：COLORS 映射终端色。
 // R6 系列色使用终端 bright 槽位，正文使用默认前景，保留用户主题的对比度。
 const COLORS: Record<string, string> = {
-  red: "\x1b[91m", green: "\x1b[92m", blue: "\x1b[94m", yellow: "\x1b[93m",
-  magenta: "\x1b[95m", cyan: "\x1b[96m", white: "\x1b[39m", gray: "\x1b[90m",
+  red: "\x1b[91m",
+  green: "\x1b[92m",
+  blue: "\x1b[94m",
+  yellow: "\x1b[93m",
+  magenta: "\x1b[95m",
+  cyan: "\x1b[96m",
+  white: "\x1b[39m",
+  gray: "\x1b[90m",
 }
 // #174：DENSITY 供热力/矩阵相对强度
 // #174：密度字符只编码相对强度
@@ -158,7 +163,10 @@ export const sparkline = (values: number[], width: number) => {
 export const renderContext = (color?: string) => ({
   // R6 truthy NO_COLOR 契约：always 恒开；never 恒关；auto 在非 TTY 或非空
   // NO_COLOR 下禁用（空字符串按 truthiness 等同未设置，与源 0174 语义一致）。
-  color: color === "never" || (color !== "always" && (!process.stdout.isTTY || !!process.env.NO_COLOR)) ? "never" : color || "auto",
+  color:
+    color === "never" || (color !== "always" && (!process.stdout.isTTY || !!process.env.NO_COLOR))
+      ? "never"
+      : color || "auto",
   width: statsContentWidth(),
 })
 // #174：指标展示统一 formatNumber
@@ -192,7 +200,12 @@ const maxY = (pts: ChartPoint[]) => Math.max(1, ...pts.map((p) => p.y))
 // #174：line 按点列输出，非热力格
 // #174：折线用点列输出，与热力格不同
 // #174：renderRoundedLineChart 服务时间线折线，不承担 heatmap 命令
-export const renderRoundedLineChart = (input: { title?: string; series: ChartSeries[]; width?: number; height?: number }) => {
+export const renderRoundedLineChart = (input: {
+  title?: string
+  series: ChartSeries[]
+  width?: number
+  height?: number
+}) => {
   const w = input.width ?? Math.min(60, statsContentWidth())
   const series = input.series.filter((item) => item.points.length > 0)
   if (series.length === 0) return [input.title || "line", "(empty)"].filter(Boolean) as string[]
@@ -211,14 +224,21 @@ export const renderRoundedLineChart = (input: { title?: string; series: ChartSer
 
 // #174：stacked 按层输出分量文本
 // #174：堆叠按层输出分量，缺层不插值
-export const renderStackedAreaChart = (input: { title?: string; daily: DailyUsage[]; layers: ChartLayer[]; width?: number }) => {
+export const renderStackedAreaChart = (input: {
+  title?: string
+  daily: DailyUsage[]
+  layers: ChartLayer[]
+  width?: number
+}) => {
   const lines = input.title ? [input.title] : []
   const width = Math.max(1, input.width ?? Math.min(40, statsContentWidth() - 12))
   const max = Math.max(1, ...input.daily.map((day) => input.layers.reduce((sum, layer) => sum + layer.value(day), 0)))
   // 同一时间轴和总量刻度呈现组成，图例保留每个分量的名字。
   lines.push(input.layers.map((layer, index) => `${"█▓▒░"[index % 4]} ${layer.label}`).join("  "))
   for (const d of input.daily) {
-    const stack = input.layers.map((layer, index) => bar(layer.value(d) / max * width, width, "█▓▒░"[index % 4])).join("")
+    const stack = input.layers
+      .map((layer, index) => bar((layer.value(d) / max) * width, width, "█▓▒░"[index % 4]))
+      .join("")
     const parts = input.layers.map((layer) => `${layer.label}:${formatNumber(layer.value(d))}`)
     lines.push(`${fitVisible(d.label, 8)} ${stack} ${parts.join(" ")}`)
   }
@@ -247,7 +267,10 @@ export const renderHeatmap = (input: {
     const monday = new Date(point.day)
     monday.setDate(monday.getDate() - point.dow)
     monday.setHours(0, 0, 0, 0)
-    const week = weeks.get(monday.getTime()) ?? { label: `${String(monday.getMonth() + 1).padStart(2, "0")}-${String(monday.getDate()).padStart(2, "0")}`, values: new Map<number, number>() }
+    const week = weeks.get(monday.getTime()) ?? {
+      label: `${String(monday.getMonth() + 1).padStart(2, "0")}-${String(monday.getDate()).padStart(2, "0")}`,
+      values: new Map<number, number>(),
+    }
     week.values.set(point.dow, point.value)
     weeks.set(monday.getTime(), week)
   }
@@ -283,14 +306,15 @@ export const renderHistogram = (input: { title?: string; values: number[]; bins?
   }
   const m = Math.max(1, ...counts)
   counts.forEach((c, i) => {
-    lines.push(`${fitVisible(formatNumber(lo + i * width), 8)} ${bar(c / m * 20, 20)} ${c}`)
+    lines.push(`${fitVisible(formatNumber(lo + i * width), 8)} ${bar((c / m) * 20, 20)} ${c}`)
   })
   return lines
 }
 
 // #483：同时覆盖 7-bit ESC 与 8-bit C1 形式；未终止序列再由控制字节清理兑底，
 // 持久化实体标签（model/provider/session/tool）绝不把终端协议参数交给终端执行
-const TERMINAL_ESCAPE_RE = /(?:(?:\u001b\]|\u009d)[\s\S]*?(?:\u0007|\u001b\\|\u009c|$)|(?:\u001b\[|\u009b)[0-?]*[ -/]*(?:[@-~]|$)|\u001b[@-_])/g
+const TERMINAL_ESCAPE_RE =
+  /(?:(?:\u001b\]|\u009d)[\s\S]*?(?:\u0007|\u001b\\|\u009c|$)|(?:\u001b\[|\u009b)[0-?]*[ -/]*(?:[@-~]|$)|\u001b[@-_])/g
 const TERMINAL_CONTROL_RE = /[\u0000-\u001f\u007f-\u009f]/g
 export const terminalText = (value: string) =>
   // 控制序列整体移除后再折叠布局字符，标签保留可读正文而不泄漏终端协议参数
@@ -298,20 +322,35 @@ export const terminalText = (value: string) =>
 
 // #174：rank 条相对当前页最大值
 // #174：条长相对当前页最大值缩放
-export const renderRankBars = (input: { title?: string; series?: ChartSeries[]; rows?: { label: string; value: number }[]; width?: number; labelWidth?: number } | { label: string; value: number }[]) => {
+export const renderRankBars = (
+  input:
+    | {
+        title?: string
+        series?: ChartSeries[]
+        rows?: { label: string; value: number }[]
+        width?: number
+        labelWidth?: number
+      }
+    | { label: string; value: number }[],
+) => {
   // support both call shapes used by render pages
   const rows = Array.isArray(input)
     ? input
-    : input.rows || (input.series ? input.series.flatMap((s) => s.points.map((p) => ({ label: String(p.label ?? p.x), value: p.y }))) : [])
+    : input.rows ||
+      (input.series
+        ? input.series.flatMap((s) => s.points.map((p) => ({ label: String(p.label ?? p.x), value: p.y })))
+        : [])
   const title = Array.isArray(input) ? undefined : input.title
   const lines = title ? [title] : []
   // #483：label 宽度可由调用方扩展——真实实体名是 Breakdown 的显示契约，
   // 默认仍为 14 保持既有页面布局；宽度上限由调用方按终端预算控制
-  const labelWidth = Array.isArray(input) ? 14 : input.labelWidth ?? 14
+  const labelWidth = Array.isArray(input) ? 14 : (input.labelWidth ?? 14)
   const m = Math.max(1, ...rows.map((r) => r.value), 0)
   for (const r of rows.slice(0, 20)) {
     // #483：rank 行是持久化实体标签的直接出口，统一经 terminalText 清洗
-    lines.push(`${fitVisible(terminalText(r.label), labelWidth)} ${bar(r.value / m * 16, 16)} ${formatNumber(r.value)}`)
+    lines.push(
+      `${fitVisible(terminalText(r.label), labelWidth)} ${bar((r.value / m) * 16, 16)} ${formatNumber(r.value)}`,
+    )
   }
   return lines.length ? lines : ["(empty ranks)"]
 }
@@ -352,7 +391,10 @@ export const renderSmallMultiples = (input: { title?: string; series: ChartSerie
 // #174：donut 用条长近似占比，过小合并 other 语义由调用方处理
 export const renderCompositionDonut = (input: { title?: string; parts: { label: string; value: number }[] }) => {
   const lines = input.title ? [input.title] : []
-  const sum = Math.max(1, input.parts.reduce((a, p) => a + p.value, 0))
+  const sum = Math.max(
+    1,
+    input.parts.reduce((a, p) => a + p.value, 0),
+  )
   for (const p of input.parts) {
     const pct = (p.value / sum) * 100
     lines.push(`${fitVisible(p.label, 12)} ${bar(pct / 5, 20)} ${pct.toFixed(1)}%`)
@@ -408,29 +450,54 @@ export const renderSlopeChart = (input: { title?: string; series: ChartSeries })
   return [input.title || "slope", `${a.x}:${formatNumber(a.y)} → ${b.x}:${formatNumber(b.y)}`]
 }
 // #174：每列除以列和使总和 100%
-export const renderPercentStack = (input: { title?: string; color?: string; columns: { label: string; parts: { label: string; value: number }[] }[] }) => {
+export const renderPercentStack = (input: {
+  title?: string
+  color?: string
+  columns: { label: string; parts: { label: string; value: number }[] }[]
+}) => {
   const lines = input.title ? [input.title] : []
   const labelWidth = Math.max(1, ...input.columns.map((column) => visibleLength(terminalText(column.label))))
   const width = Math.max(8, Math.min(32, statsContentWidth() - labelWidth - 4))
-  const colors: Record<string, ChartColor> = { input: "blue", output: "green", reasoning: "magenta", cacheread: "yellow", cachewrite: "cyan" }
+  const colors: Record<string, ChartColor> = {
+    input: "blue",
+    output: "green",
+    reasoning: "magenta",
+    cacheread: "yellow",
+    cachewrite: "cyan",
+  }
   for (const col of input.columns) {
     const sum = col.parts.reduce((total, part) => total + part.value, 0)
     let consumed = 0
     let cells = 0
     // 按累计占比分配字符，不强制每个非零分量占格，防止极小reasoning扭曲组成。
-    const bar = col.parts.map((part) => {
-      consumed += part.value
-      const end = sum > 0 ? Math.round(consumed / sum * width) : 0
-      const chunk = paint("█".repeat(Math.max(0, end - cells)), colors[part.label.toLowerCase().replaceAll(" ", "")] ?? "white", renderContext(input.color))
-      cells = end
-      return chunk
-    }).join("")
-    lines.push(`${padEndVisible(terminalText(col.label), labelWidth)} [${bar}${" ".repeat(Math.max(0, width - cells))}]`, col.parts.map((part) => `${terminalText(part.label)} ${formatNumber(part.value)} ${(sum > 0 ? part.value / sum * 100 : 0).toFixed(1)}%`).join(" · "))
+    const bar = col.parts
+      .map((part) => {
+        consumed += part.value
+        const end = sum > 0 ? Math.round((consumed / sum) * width) : 0
+        const chunk = paint(
+          "█".repeat(Math.max(0, end - cells)),
+          colors[part.label.toLowerCase().replaceAll(" ", "")] ?? "white",
+          renderContext(input.color),
+        )
+        cells = end
+        return chunk
+      })
+      .join("")
+    lines.push(
+      `${padEndVisible(terminalText(col.label), labelWidth)} [${bar}${" ".repeat(Math.max(0, width - cells))}]`,
+      col.parts
+        .map(
+          (part) =>
+            `${terminalText(part.label)} ${formatNumber(part.value)} ${(sum > 0 ? (part.value / sum) * 100 : 0).toFixed(1)}%`,
+        )
+        .join(" · "),
+    )
   }
   return lines
 }
 // #174：日标签抽样显示，窄屏避免重叠
-export const renderDayLabels = (daily: DailyUsage[], step = 1) => daily.filter((_, i) => i % step === 0).map((d) => d.label)
+export const renderDayLabels = (daily: DailyUsage[], step = 1) =>
+  daily.filter((_, i) => i % step === 0).map((d) => d.label)
 // #174：callout 标题与正文靠样式分层而非第二数据源
 export const renderCallout = (title: string, body: string) => [`▸ ${title}`, `  ${body}`]
 // #174：列宽按可见字符最大值决定
@@ -439,7 +506,12 @@ export const renderComparisonTable = (rows: string[][]) => {
   const cells = rows.map((row) => row.map(terminalText))
   const widths = cells[0]?.map((_, index) => Math.max(...cells.map((row) => visibleLength(row[index] ?? "")))) ?? []
   const fits = widths.reduce((sum, width) => sum + width, 0) + Math.max(0, widths.length - 1) * 3 <= statsContentWidth()
-  return cells.flatMap((row) => wrapVisible(row.map((cell, index) => fits ? padEndVisible(cell, widths[index]) : cell).join(" │ "), statsContentWidth()))
+  return cells.flatMap((row) =>
+    wrapVisible(
+      row.map((cell, index) => (fits ? padEndVisible(cell, widths[index]) : cell)).join(" │ "),
+      statsContentWidth(),
+    ),
+  )
 }
 // #174：无数据输出 empty，保持管道可解析成功路径
 export const renderEmptyState = (msg = "no data") => [`(empty) ${msg}`]
@@ -468,10 +540,20 @@ export const wrapAnsiVisible = (text: string, width = statsContentWidth()) => {
   const lines = [""]
   let used = 0
   for (const token of text.match(/\x1b\[[0-?]*[ -/]*[@-~]|[\s\S]/gu) ?? []) {
-    if (token.startsWith("\x1b[")) { lines[lines.length - 1] += token; continue }
-    if (token === "\n") { lines.push(""); used = 0; continue }
+    if (token.startsWith("\x1b[")) {
+      lines[lines.length - 1] += token
+      continue
+    }
+    if (token === "\n") {
+      lines.push("")
+      used = 0
+      continue
+    }
     const columns = charWidth(token.codePointAt(0) ?? 0)
-    if (used > 0 && used + columns > width) { lines.push(""); used = 0 }
+    if (used > 0 && used + columns > width) {
+      lines.push("")
+      used = 0
+    }
     lines[lines.length - 1] += token
     used += columns
   }

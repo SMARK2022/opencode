@@ -244,7 +244,10 @@ function taskCursor(input: unknown, operation: MaintenanceTask["operation"]): Ma
   if (!isRecord(input)) throw new ValidationError({ message: "Maintenance task cursor is missing" })
   if ((operation === "compress" && input.stage !== "payload") || operation === "expand") {
     if (
-      (input.owner !== "message" && input.owner !== "part" && input.owner !== "session_message" && input.owner !== "session-summary") ||
+      (input.owner !== "message" &&
+        input.owner !== "part" &&
+        input.owner !== "session_message" &&
+        input.owner !== "session-summary") ||
       typeof input.lastID !== "string"
     ) {
       throw new ValidationError({ message: "Maintenance task owner cursor is invalid" })
@@ -494,19 +497,20 @@ export async function maintain(
 ): Promise<MaintenanceResult> {
   // daemon 与 offline CLI 共用此执行器，channel 差异只存在于外层锁和结果传输。
   const run = runtime.run ?? (async <A>(body: () => A) => body())
-  if (prepared.type === "immediate") return run(() => {
-    if (prepared.request.operation === "status") return { type: "status", report: status(db) }
-    if (prepared.request.operation === "verify") return { type: "verify", report: verify(db, prepared.request) }
-    if (prepared.request.operation === "cleanup") return { type: "cleanup", report: cleanup(db, prepared.request) }
-    if (prepared.request.operation !== "vacuum") {
-      throw new ValidationError({ message: "vacuum requires confirm=true" })
-    }
-    if (!prepared.request.confirm) throw new ValidationError({ message: "vacuum requires confirm=true" })
-    // vacuum 是唯一 immediate write，必须同时持有显式 confirm 与 maintenance lease。
-    if (!runtime.lease) throw new ValidationError({ message: "vacuum requires a maintenance lease" })
-    runtime.lease.assertOwned()
-    return { type: "vacuum", ...store.vacuum(db) }
-  })
+  if (prepared.type === "immediate")
+    return run(() => {
+      if (prepared.request.operation === "status") return { type: "status", report: status(db) }
+      if (prepared.request.operation === "verify") return { type: "verify", report: verify(db, prepared.request) }
+      if (prepared.request.operation === "cleanup") return { type: "cleanup", report: cleanup(db, prepared.request) }
+      if (prepared.request.operation !== "vacuum") {
+        throw new ValidationError({ message: "vacuum requires confirm=true" })
+      }
+      if (!prepared.request.confirm) throw new ValidationError({ message: "vacuum requires confirm=true" })
+      // vacuum 是唯一 immediate write，必须同时持有显式 confirm 与 maintenance lease。
+      if (!runtime.lease) throw new ValidationError({ message: "vacuum requires a maintenance lease" })
+      runtime.lease.assertOwned()
+      return { type: "vacuum", ...store.vacuum(db) }
+    })
 
   // 编码在线程中完成，SQLite事务和控制面通知留在任务线程。
   const preparedTask = taskRequest(prepared, runtime)
@@ -626,7 +630,8 @@ export async function maintain(
         const cold = request.operation === "expand"
         const cursor = task.cursor
         if (!cursor || !("owner" in cursor)) throw new ValidationError({ message: "Invalid owner maintenance cursor" })
-        const batch = request.operation === "compress" ? await run(() => store.prepareFreezeBatch(db, request, cursor)) : undefined
+        const batch =
+          request.operation === "compress" ? await run(() => store.prepareFreezeBatch(db, request, cursor)) : undefined
         // 存储快照与编码之间释放写锁；Promise.all 接管各 chunk 的失败，整批成功才进入提交。
         const packs = batch
           ? await Promise.all(
@@ -646,7 +651,9 @@ export async function maintain(
           return { type: "task", task }
         }
         // 编码已结束才重新预约写段；同一宿主连接的事务不能跨worker或checkpoint的await。
-        const outcome = await run(() => batch ? store.commitFreezeBatch(db, batch, packs) : store.expandOwnerBatch(db, request, cursor))
+        const outcome = await run(() =>
+          batch ? store.commitFreezeBatch(db, batch, packs) : store.expandOwnerBatch(db, request, cursor),
+        )
         if (outcome.empty) {
           // 只管理阶段推进；同一事务内的资格、恢复和引用修改由存储模块完成。
           if (cursor.owner === "message") task.cursor = { owner: "part", lastID: "" }

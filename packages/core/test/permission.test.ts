@@ -17,7 +17,18 @@ import { Config } from "@opencode-ai/core/config"
 import { ConfigAutoReview } from "@opencode-ai/core/config/auto-review"
 import { LayerNodePlatform } from "@opencode-ai/core/effect/app-node-platform"
 import { SessionRunnerModel } from "@opencode-ai/core/session/runner/model"
-import { HttpContext, HttpRequestDetails, HttpResponseDetails, InvalidRequestReason, LLMClient, LLMError, LLMEvent, LLMRequest, Model, ToolChoice } from "@opencode-ai/llm"
+import {
+  HttpContext,
+  HttpRequestDetails,
+  HttpResponseDetails,
+  InvalidRequestReason,
+  LLMClient,
+  LLMError,
+  LLMEvent,
+  LLMRequest,
+  Model,
+  ToolChoice,
+} from "@opencode-ai/llm"
 import { OpenAIChat } from "@opencode-ai/llm/protocols/openai-chat"
 import { OpenAIResponses } from "@opencode-ai/llm/protocols/openai-responses"
 import { Auth } from "@opencode-ai/llm/route"
@@ -40,7 +51,12 @@ import { location } from "./fixture/location"
 import { testEffect } from "./lib/effect"
 
 let reviewSettings = new Config.Info({})
-let assessment: typeof PermissionReviewerSchema.Assessment.Type = { outcome: "allow", rationale: "bounded requested change", risk_level: "low", user_authorization: "high" }
+let assessment: typeof PermissionReviewerSchema.Assessment.Type = {
+  outcome: "allow",
+  rationale: "bounded requested change",
+  risk_level: "low",
+  user_authorization: "high",
+}
 const reviewRequests: LLMRequest[] = []
 const reviewModels: unknown[] = []
 let reviewGate: Deferred.Deferred<void> | undefined
@@ -55,86 +71,141 @@ let reviewOpenTool = false
 const reviewBodies: unknown[] = []
 let reviewTerminalWriteFailures = 0
 const reviewTerminals: string[] = []
-const reviewClient = Layer.succeed(LLMClient.Service, LLMClient.Service.of({
-  prepare: () => Effect.die("unused"),
-  generate: () => Effect.die("reviewer must consume the actual provider stream"),
-  stream: (request, onPrepared) => Stream.unwrap(Effect.gen(function* () {
-    reviewRequests.push(request)
-    // 真实协议lowering但不执行运输，分类必须观察与生产相同的prepared正文。
-    const prepared = yield* LLMClient.prepare(request)
-    reviewBodies.push(prepared.body)
-    if (onPrepared) yield* onPrepared(prepared.body)
-    // 只在强制选择时产生typed400；真实lowering和publisher继续执行，不连接provider。
-    if (rejectedToolChoiceBody && request.toolChoice) return yield* new LLMError({
-      module: "permission-reviewer-test", method: "stream", reason: new InvalidRequestReason({ message: "parameter rejected", http: new HttpContext({
-        request: new HttpRequestDetails({ method: "POST", url: "https://review.test", headers: {} }),
-        response: new HttpResponseDetails({ status: 400, headers: {} }), body: rejectedToolChoiceBody,
-      }) }),
-    })
-    // 只脚本化模型运输边界，协议、落盘、隐藏和权限裁决均执行真实实现。
-    if (reviewScript) {
-      const next = reviewScript.shift()
-      if (!next) return yield* Effect.die("Unexpected reviewer retry")
-      return next
-    }
-    if (reviewBeforeStream) {
-      if (reviewArrivals && reviewRequests.length === 2) yield* Deferred.succeed(reviewArrivals, undefined)
-      yield* Deferred.await(reviewBeforeStream)
-    }
-    // 在决策gate之前交付真实事件，断言中途投影而不是伪造最终助手对象。
-    return Stream.make(
-      ...(reviewOpenTool ? [LLMEvent.toolInputStart({ id: "review-incomplete", name: "permission_review_decision" })] : []),
-      LLMEvent.reasoningStart({ id: "review-reason" }),
-      LLMEvent.reasoningDelta({ id: "review-reason", text: "Actual reviewer reasoning before decision." }),
-      LLMEvent.reasoningEnd({ id: "review-reason" }),
-      LLMEvent.textStart({ id: "review-text" }),
-      LLMEvent.textDelta({ id: "review-text", text: "Checking the requested change." }),
-      LLMEvent.textEnd({ id: "review-text" }),
-    ).pipe(Stream.concat(Stream.unwrap(Effect.gen(function* () {
-      if (reviewStarted) yield* Deferred.succeed(reviewStarted, undefined)
-      if (reviewGate) yield* Deferred.await(reviewGate)
-      return malformed ? Stream.empty : Stream.make(
-        LLMEvent.toolCall({ id: "review", name: "permission_review_decision", input: assessment }),
-        LLMEvent.stepFinish({ index: 0, reason: "tool-calls" }),
-        LLMEvent.finish({ reason: "tool-calls" }),
-      )
-    }))))
-  })),
-}))
-const reviewModel = makeLocationNode({ service: SessionRunnerModel.Service, deps: [Catalog.node], layer: Layer.effect(SessionRunnerModel.Service, Effect.gen(function* () {
-  const catalog = yield* Catalog.Service
-  return SessionRunnerModel.Service.of({ resolve: session => Effect.gen(function* () {
-    reviewModels.push(session.model)
-    // 原有失效模型、费用和OAuth断言继续经过同一真实reviewer链。
-    if (session.model?.id === "removed-model") return yield* new SessionRunnerModel.ModelUnavailableError({
-      providerID: session.model.providerID, modelID: session.model.id,
-    })
-    const model = session.model ? yield* catalog.model.get(session.model.providerID, session.model.id) : undefined
-    // 有广告时沿真实lowering观察wire默认值，未播种模型保持原fixture返回。
-    return { model: model && !reviewOAuth ? yield* SessionRunnerModel.resolve(session, model)
-      : Model.make({ id: "review", provider: session.model?.providerID ?? "test", route: reviewOAuth ? OpenAIResponses.route.with({ auth: Auth.none }) : OpenAIChat.route }),
-      pricing: model?.cost ?? [{ input: 1, output: 2, cache: { read: 0.5, write: 1 } }], openaiOAuth: reviewOAuth }
-  }) })
-})) })
-const reviewConfig = Layer.succeed(Config.Service, Config.Service.of({ entries: () => Effect.succeed([new Config.Document({ type: "document", info: reviewSettings })]) }))
+const reviewClient = Layer.succeed(
+  LLMClient.Service,
+  LLMClient.Service.of({
+    prepare: () => Effect.die("unused"),
+    generate: () => Effect.die("reviewer must consume the actual provider stream"),
+    stream: (request, onPrepared) =>
+      Stream.unwrap(
+        Effect.gen(function* () {
+          reviewRequests.push(request)
+          // 真实协议lowering但不执行运输，分类必须观察与生产相同的prepared正文。
+          const prepared = yield* LLMClient.prepare(request)
+          reviewBodies.push(prepared.body)
+          if (onPrepared) yield* onPrepared(prepared.body)
+          // 只在强制选择时产生typed400；真实lowering和publisher继续执行，不连接provider。
+          if (rejectedToolChoiceBody && request.toolChoice)
+            return yield* new LLMError({
+              module: "permission-reviewer-test",
+              method: "stream",
+              reason: new InvalidRequestReason({
+                message: "parameter rejected",
+                http: new HttpContext({
+                  request: new HttpRequestDetails({ method: "POST", url: "https://review.test", headers: {} }),
+                  response: new HttpResponseDetails({ status: 400, headers: {} }),
+                  body: rejectedToolChoiceBody,
+                }),
+              }),
+            })
+          // 只脚本化模型运输边界，协议、落盘、隐藏和权限裁决均执行真实实现。
+          if (reviewScript) {
+            const next = reviewScript.shift()
+            if (!next) return yield* Effect.die("Unexpected reviewer retry")
+            return next
+          }
+          if (reviewBeforeStream) {
+            if (reviewArrivals && reviewRequests.length === 2) yield* Deferred.succeed(reviewArrivals, undefined)
+            yield* Deferred.await(reviewBeforeStream)
+          }
+          // 在决策gate之前交付真实事件，断言中途投影而不是伪造最终助手对象。
+          return Stream.make(
+            ...(reviewOpenTool
+              ? [LLMEvent.toolInputStart({ id: "review-incomplete", name: "permission_review_decision" })]
+              : []),
+            LLMEvent.reasoningStart({ id: "review-reason" }),
+            LLMEvent.reasoningDelta({ id: "review-reason", text: "Actual reviewer reasoning before decision." }),
+            LLMEvent.reasoningEnd({ id: "review-reason" }),
+            LLMEvent.textStart({ id: "review-text" }),
+            LLMEvent.textDelta({ id: "review-text", text: "Checking the requested change." }),
+            LLMEvent.textEnd({ id: "review-text" }),
+          ).pipe(
+            Stream.concat(
+              Stream.unwrap(
+                Effect.gen(function* () {
+                  if (reviewStarted) yield* Deferred.succeed(reviewStarted, undefined)
+                  if (reviewGate) yield* Deferred.await(reviewGate)
+                  return malformed
+                    ? Stream.empty
+                    : Stream.make(
+                        LLMEvent.toolCall({ id: "review", name: "permission_review_decision", input: assessment }),
+                        LLMEvent.stepFinish({ index: 0, reason: "tool-calls" }),
+                        LLMEvent.finish({ reason: "tool-calls" }),
+                      )
+                }),
+              ),
+            ),
+          )
+        }),
+      ),
+  }),
+)
+const reviewModel = makeLocationNode({
+  service: SessionRunnerModel.Service,
+  deps: [Catalog.node],
+  layer: Layer.effect(
+    SessionRunnerModel.Service,
+    Effect.gen(function* () {
+      const catalog = yield* Catalog.Service
+      return SessionRunnerModel.Service.of({
+        resolve: (session) =>
+          Effect.gen(function* () {
+            reviewModels.push(session.model)
+            // 原有失效模型、费用和OAuth断言继续经过同一真实reviewer链。
+            if (session.model?.id === "removed-model")
+              return yield* new SessionRunnerModel.ModelUnavailableError({
+                providerID: session.model.providerID,
+                modelID: session.model.id,
+              })
+            const model = session.model
+              ? yield* catalog.model.get(session.model.providerID, session.model.id)
+              : undefined
+            // 有广告时沿真实lowering观察wire默认值，未播种模型保持原fixture返回。
+            return {
+              model:
+                model && !reviewOAuth
+                  ? yield* SessionRunnerModel.resolve(session, model)
+                  : Model.make({
+                      id: "review",
+                      provider: session.model?.providerID ?? "test",
+                      route: reviewOAuth ? OpenAIResponses.route.with({ auth: Auth.none }) : OpenAIChat.route,
+                    }),
+              pricing: model?.cost ?? [{ input: 1, output: 2, cache: { read: 0.5, write: 1 } }],
+              openaiOAuth: reviewOAuth,
+            }
+          }),
+      })
+    }),
+  ),
+})
+const reviewConfig = Layer.succeed(
+  Config.Service,
+  Config.Service.of({
+    entries: () => Effect.succeed([new Config.Document({ type: "document", info: reviewSettings })]),
+  }),
+)
 
 // 只在提交边界注入一次故障；所有成功发布仍经过同一真实DB和投影，顺序记录在提交之后。
-const reviewEvents = Layer.effect(EventV2.Service, Effect.gen(function* () {
-  const events = yield* EventV2.Service
-  return EventV2.Service.of({
-    ...events,
-    publish: (definition, data, options) => Effect.gen(function* () {
-      if (definition.type === SessionEvent.Tool.Failed.type && reviewTerminalWriteFailures > 0) {
-        reviewTerminalWriteFailures--
-        return yield* Effect.die("simulated terminal tool write failure")
-      }
-      const result = yield* events.publish(definition, data, options)
-      if (definition.type === SessionEvent.Tool.Failed.type) reviewTerminals.push("tool")
-      if (definition.type === SessionEvent.Step.Failed.type) reviewTerminals.push("assistant")
-      return result
-    }),
-  })
-})).pipe(Layer.provide(EventV2.layerWith()))
+const reviewEvents = Layer.effect(
+  EventV2.Service,
+  Effect.gen(function* () {
+    const events = yield* EventV2.Service
+    return EventV2.Service.of({
+      ...events,
+      publish: (definition, data, options) =>
+        Effect.gen(function* () {
+          if (definition.type === SessionEvent.Tool.Failed.type && reviewTerminalWriteFailures > 0) {
+            reviewTerminalWriteFailures--
+            return yield* Effect.die("simulated terminal tool write failure")
+          }
+          const result = yield* events.publish(definition, data, options)
+          if (definition.type === SessionEvent.Tool.Failed.type) reviewTerminals.push("tool")
+          if (definition.type === SessionEvent.Step.Failed.type) reviewTerminals.push("assistant")
+          return result
+        }),
+    })
+  }),
+).pipe(Layer.provide(EventV2.layerWith()))
 
 const current = Layer.succeed(
   Location.Service,
@@ -151,10 +222,13 @@ const it = testEffect(
       AgentV2.node,
       PermissionV2.node,
     ]),
-    [[Location.node, current], [Config.node, reviewConfig],
+    [
+      [Location.node, current],
+      [Config.node, reviewConfig],
       [EventV2.node, reviewEvents],
       // 只替换模型与运输边界；Permission、reviewer、Schema 和事件仍使用真实实现。
-      [SessionRunnerModel.node, reviewModel], [LayerNodePlatform.llmClient, reviewClient],
+      [SessionRunnerModel.node, reviewModel],
+      [LayerNodePlatform.llmClient, reviewClient],
     ],
   ),
 )
@@ -235,10 +309,21 @@ describe("PermissionV2", () => {
       expect(yield* service.ask(assertion())).toEqual({ id: PermissionV2.ID.create("per_test"), effect: "deny" })
       expect(yield* service.list()).toEqual([])
       // audit仅触发具体deny；不能获得allow，也不能把通配兜底deny变成新阻塞。
-      const adapted = assertion({ id: PermissionV2.ID.create("per_adapted"), action: "bash", resources: ["python-original"], metadata: { raw_patterns: ["python-adapted"] } })
-      yield* setRules([{ action: "bash", resource: "python-adapted", effect: "deny" }, { action: "bash", resource: "*", effect: "allow" }])
+      const adapted = assertion({
+        id: PermissionV2.ID.create("per_adapted"),
+        action: "bash",
+        resources: ["python-original"],
+        metadata: { raw_patterns: ["python-adapted"] },
+      })
+      yield* setRules([
+        { action: "bash", resource: "python-adapted", effect: "deny" },
+        { action: "bash", resource: "*", effect: "allow" },
+      ])
       expect(yield* service.ask(adapted)).toMatchObject({ effect: "deny" })
-      yield* setRules([{ action: "bash", resource: "*", effect: "deny" }, { action: "bash", resource: "python-original", effect: "allow" }])
+      yield* setRules([
+        { action: "bash", resource: "*", effect: "deny" },
+        { action: "bash", resource: "python-original", effect: "allow" },
+      ])
       expect(yield* service.ask(adapted)).toMatchObject({ effect: "allow" })
       yield* setRules([{ action: "bash", resource: "python-adapted", effect: "allow" }])
       expect(yield* service.ask(adapted)).toMatchObject({ effect: "ask" })
@@ -282,22 +367,41 @@ describe("PermissionV2", () => {
         { action: "external_directory", resource: "*", effect: "auto" },
         { action: "external_directory", resource: "/shared/*", effect: "allow" },
       ]
-      const overlay = SubagentPermissions.derive({ parentAgentPermission: parent, parentSessionPermission: [], subagentPermission: child })
+      const overlay = SubagentPermissions.derive({
+        parentAgentPermission: parent,
+        parentSessionPermission: [],
+        subagentPermission: child,
+      })
       expect(PermissionV2.evaluate("bash", "git status", child, overlay).effect).toBe("auto")
       expect(PermissionV2.evaluate("bash", "git push origin dev", child, overlay).effect).toBe("deny")
       expect(PermissionV2.evaluate("edit", "src/a.ts", child, overlay).effect).toBe("deny")
       expect(PermissionV2.evaluate("external_directory", "/shared/a", child, overlay).effect).toBe("allow")
       expect(PermissionV2.evaluate("external_directory", "/outside/a", child, overlay).effect).toBe("auto")
-      const nested = SubagentPermissions.derive({ parentAgentPermission: child, parentSessionPermission: overlay, subagentPermission: child })
+      const nested = SubagentPermissions.derive({
+        parentAgentPermission: child,
+        parentSessionPermission: overlay,
+        subagentPermission: child,
+      })
       expect(PermissionV2.evaluate("bash", "git status", child, nested).effect).toBe("auto")
       expect(PermissionV2.evaluate("bash", "git push origin dev", child, nested).effect).toBe("deny")
       // 通配关闭后的窄allow只被收紧；父会话grant不能反向放宽子ask。
-      const narrow: PermissionV2.Ruleset = [{ action: "*", resource: "*", effect: "deny" }, { action: "bash", resource: "git status", effect: "allow" }]
-      const narrowed = SubagentPermissions.derive({ parentAgentPermission: parent, parentSessionPermission: [], subagentPermission: narrow })
+      const narrow: PermissionV2.Ruleset = [
+        { action: "*", resource: "*", effect: "deny" },
+        { action: "bash", resource: "git status", effect: "allow" },
+      ]
+      const narrowed = SubagentPermissions.derive({
+        parentAgentPermission: parent,
+        parentSessionPermission: [],
+        subagentPermission: narrow,
+      })
       expect(PermissionV2.evaluate("bash", "git status", narrow, narrowed).effect).toBe("auto")
       expect(PermissionV2.evaluate("bash", "git push origin dev", narrow, narrowed).effect).toBe("deny")
       const manual: PermissionV2.Ruleset = [{ action: "read", resource: "*", effect: "ask" }]
-      const grants = SubagentPermissions.derive({ parentAgentPermission: [], parentSessionPermission: [{ action: "read", resource: "*", effect: "allow" }], subagentPermission: manual })
+      const grants = SubagentPermissions.derive({
+        parentAgentPermission: [],
+        parentSessionPermission: [{ action: "read", resource: "*", effect: "allow" }],
+        subagentPermission: manual,
+      })
       expect(PermissionV2.evaluate("read", "a", manual, grants).effect).toBe("ask")
       expect(PermissionV2.evaluate("task", "general", child, overlay).effect).toBe("deny")
     }),
@@ -411,21 +515,45 @@ describe("PermissionV2", () => {
       })
       // 旧raw审批仍可使用；canonical规则和原始凭证deny都保持实际裁决权。
       const command = "GITHUB_TOKEN=x git push --force"
-      const bash = assertion({ action: "bash", resources: [command], save: [command], metadata: {
-        command, canonical_patterns: ["git push --force"], raw_patterns: [command],
-      } })
+      const bash = assertion({
+        action: "bash",
+        resources: [command],
+        save: [command],
+        metadata: {
+          command,
+          canonical_patterns: ["git push --force"],
+          raw_patterns: [command],
+        },
+      })
       yield* saved.add({ projectID: Project.ID.global, action: "bash", resources: [command] })
       yield* setRules([])
       expect(yield* service.ask(bash)).toMatchObject({ effect: "allow" })
       for (const effect of ["allow", "auto", "ask"] as const) {
-        yield* setRules([{ action: "bash", resource: "GITHUB_TOKEN=*", effect: "deny" }, { action: "bash", resource: "*", effect }])
+        yield* setRules([
+          { action: "bash", resource: "GITHUB_TOKEN=*", effect: "deny" },
+          { action: "bash", resource: "*", effect },
+        ])
         expect(yield* service.ask(bash)).toMatchObject({ effect: "deny" })
       }
-      yield* setRules([{ action: "bash", resource: "*", effect: "allow" }, { action: "bash", resource: "git push --force*", effect: "deny" }])
+      yield* setRules([
+        { action: "bash", resource: "*", effect: "allow" },
+        { action: "bash", resource: "git push --force*", effect: "deny" },
+      ])
       expect(yield* service.ask(bash)).toMatchObject({ effect: "deny" })
       // 原始证据不参与普通allow/ask匹配；这些仍按canonical规则last-match-wins。
-      const fresh = { ...bash, resources: ["CI=true git push --force"], metadata: { command: "CI=true git push --force", canonical_patterns: ["git push --force"], raw_patterns: ["CI=true git push --force"] } }
-      yield* setRules([{ action: "bash", resource: "*", effect: "deny" }, { action: "bash", resource: "git push --force*", effect: "allow" }])
+      const fresh = {
+        ...bash,
+        resources: ["CI=true git push --force"],
+        metadata: {
+          command: "CI=true git push --force",
+          canonical_patterns: ["git push --force"],
+          raw_patterns: ["CI=true git push --force"],
+        },
+      }
+      yield* setRules([
+        { action: "bash", resource: "*", effect: "deny" },
+        { action: "bash", resource: "git push --force*", effect: "allow" },
+      ])
       expect(yield* service.ask(fresh)).toMatchObject({ effect: "allow" })
       yield* setRules([{ action: "bash", resource: "git push --force*", effect: "ask" }])
       expect(yield* service.ask(fresh)).toMatchObject({ effect: "ask" })
@@ -509,12 +637,30 @@ describe("PermissionV2", () => {
       const blocked = PermissionV2.ID.create("per_bash_blocked")
       const plain = PermissionV2.ID.create("per_bash_plain")
       yield* setRules([])
-      expect(yield* service.ask(assertion({ id: permit, action: "bash", resources: ["pwd"], save: ["*"] }))).toMatchObject({ effect: "ask" })
-      expect(yield* service.ask(assertion({ id: blocked, action: "bash", resources: [command], metadata: {
-        command, canonical_patterns: ["git push --force"], raw_patterns: [command],
-      } }))).toMatchObject({ effect: "ask" })
-      expect(yield* service.ask(assertion({ id: plain, action: "bash", resources: ["git status"] }))).toMatchObject({ effect: "ask" })
-      yield* setRules([{ action: "bash", resource: "GITHUB_TOKEN=*", effect: "deny" }, { action: "bash", resource: "*", effect: "allow" }])
+      expect(
+        yield* service.ask(assertion({ id: permit, action: "bash", resources: ["pwd"], save: ["*"] })),
+      ).toMatchObject({ effect: "ask" })
+      expect(
+        yield* service.ask(
+          assertion({
+            id: blocked,
+            action: "bash",
+            resources: [command],
+            metadata: {
+              command,
+              canonical_patterns: ["git push --force"],
+              raw_patterns: [command],
+            },
+          }),
+        ),
+      ).toMatchObject({ effect: "ask" })
+      expect(yield* service.ask(assertion({ id: plain, action: "bash", resources: ["git status"] }))).toMatchObject({
+        effect: "ask",
+      })
+      yield* setRules([
+        { action: "bash", resource: "GITHUB_TOKEN=*", effect: "deny" },
+        { action: "bash", resource: "*", effect: "allow" },
+      ])
       yield* service.reply({ requestID: permit, reply: "always" })
       expect((yield* service.list()).map((request) => request.id)).toEqual([blocked])
       expect(yield* service.get(plain)).toBeUndefined()
@@ -522,711 +668,1403 @@ describe("PermissionV2", () => {
       expect(yield* service.list()).toEqual([])
     }),
   )
-  it.effect("routes native auto permissions through the isolated reviewer", () => Effect.gen(function* () {
-    reviewSettings = new Config.Info({})
-    reviewRequests.length = 0
-    reviewModels.length = 0
-    malformed = false
-    reviewGate = undefined
-    reviewStarted = undefined
-    yield* setup([{ action: "*", resource: "*", effect: "auto" }])
-    const service = yield* PermissionV2.Service
-    const sessions = yield* SessionStore.Service
-    const progress: { type: string; reviewID: string }[] = []
-    const events = yield* EventV2.Service
-    const unsubscribe = yield* events.listen((event) => Effect.sync(() => {
-      if (Schema.is(PermissionV1.Event.ReviewStarted)(event) || Schema.is(PermissionV1.Event.ReviewCompleted)(event)) progress.push({ type: event.type, reviewID: event.data.reviewID })
-    }))
-    yield* Effect.addFinalizer(() => unsubscribe)
-    const evidence = yield* Database.Service
-    // 验证的是实际 reviewer 到 resolver 的输入，不能用固定返回模型掩盖来源漂移。
-    const catalog = yield* Catalog.Service
-    yield* catalog.transform(editor => editor.model.update(ProviderV2.ID.make("parent-provider"), ModelV2.ID.make("parent-model"), model => {
-      model.api = { type: "aisdk", id: ModelV2.ID.make("parent-model"), package: "@ai-sdk/openai", url: "https://review.test" }
-      model.variants = ["high", "low"].map(id => ({ id: ModelV2.VariantID.make(id), headers: {}, body: { reasoning_effort: id } }))
-    }))
-    yield* evidence.db.update(SessionTable).set({ model: {
-      id: ModelV2.ID.make("parent-model"), providerID: ProviderV2.ID.make("parent-provider"),
-    } }).where(eq(SessionTable.id, SessionV2.ID.make("ses_test"))).run().pipe(Effect.orDie)
-    const evidenceRows = [
-      ...Array.from({ length: 45 }, (_, index) => ({
-        id: SessionMessage.ID.make(`msg_evidence_${index}`), session_id: SessionV2.ID.make("ses_test"), type: "user" as const, seq: index + 1,
-        data: { time: { created: index + 1 }, text: index === 0 ? "FIRST_CONTEXT_" + "x".repeat(2500) + "FIRST AUTHORIZATION" : index === 44 ? "m".repeat(1500) + "Follow-up 44" : `Follow-up ${index}` },
-      })),
-      // 旧授权在compaction之前，原生快照仍须完整读取，窗口则遵循上游裁剪。
-      { id: SessionMessage.ID.make("msg_evidence_compaction"), session_id: SessionV2.ID.make("ses_test"), type: "compaction" as const, seq: 46,
-        data: { time: { created: 46 }, reason: "manual" as const, summary: "compacted context", recent: "recent context" } },
-      {
-        id: SessionMessage.ID.make("msg_evidence_assistant"), session_id: SessionV2.ID.make("ses_test"), type: "assistant" as const, seq: 47,
-        data: { time: { created: 47 }, agent: "test", model: { id: "review", providerID: "test" },
-          content: [{ type: "reasoning", id: "thought", text: "PRIVATE REASONING" }, { type: "text", id: "visible", text: "x".repeat(1100) + "ASSISTANT_TAIL" },
-            { type: "tool", id: "question", name: "question", time: { created: 47 }, state: { status: "completed", content: [],
-              input: { questions: [{ question: "q".repeat(500), header: "choice", options: [{ label: "yes", description: "authorize" }] }] },
-              structured: { answers: [["USER_ANSWER_FULL_" + "a".repeat(2500)]] } } },
-            { type: "tool", id: "early-denial", name: "bash", time: { created: 47 }, state: { status: "running", input: {}, content: [], structured: { autoReview: { status: "denied", result: { rationale: "prior bounded denial" } } } } },
-            { type: "tool", id: "cold-allow", name: "read", time: { created: 47 }, state: { status: "completed", input: {}, content: [], structured: { autoReview: { status: "allowed" } } } }] },
-      },
-      { id: SessionMessage.ID.make("msg_evidence_synthetic"), session_id: SessionV2.ID.make("ses_test"), type: "synthetic" as const, seq: 48, data: { sessionID: SessionV2.ID.make("ses_test"), time: { created: 48 }, text: "SYNTHETIC AUTHORIZATION" } },
-    ]
-    yield* evidence.db.insert(SessionMessageTable).values(evidenceRows).run().pipe(Effect.orDie)
-    // 真正冷藏完成QA和允许决定，running拒绝仍热；取证后两种事实都须进入同一快照。
-    const evidenceID = SessionMessage.ID.make("msg_evidence_assistant")
-    yield* Database.withSync(evidence, db => {
-      expect(ColdStorage.freezeOwner(db, { type: "session_message", id: evidenceID, olderThanMs: 0, now: Date.now() + 1 }).type).toBe("frozen")
-    })
-    const coldEvidence = yield* evidence.db.select().from(SessionMessageTable).where(eq(SessionMessageTable.id, evidenceID)).get().pipe(Effect.orDie)
-    const before = yield* sessions.context(SessionV2.ID.make("ses_test"))
-    // auto准入进入同一隔离审查，显式user与已知只读快速路径仍分别保留。
-    const agents = yield* AgentV2.Service
-    yield* agents.transform((draft) => draft.update(AgentV2.ID.make("auto"), (item) => { item.permissions = [{ action: "*", resource: "*", effect: "auto" }] }))
-    const automatic = assertion({ agent: AgentV2.ID.make("auto"), action: "bash", resources: ["git add ."], metadata: { command: "git add ." } })
-    expect(yield* service.ask(automatic)).toMatchObject({ effect: "allow" })
-    expect(reviewRequests).toHaveLength(1)
-    expect(reviewRequests[0]?.toolChoice).toEqual(ToolChoice.make("required"))
-    expect(JSON.stringify(reviewRequests[0]?.system)).toContain("You are the judge")
-    expect(JSON.stringify(reviewRequests[0]?.messages)).toContain("Decide efficiently now and submit exactly one permission_review_decision call.")
-    expect(reviewModels[0]).toMatchObject({ id: "parent-model", providerID: "parent-provider" })
-    expect(reviewRequests[0]?.http?.headers?.["session-id"]).toBeUndefined()
-    expect(progress.map((event) => event.type)).toEqual(["permission.review.started", "permission.review.completed"])
-    expect(progress[0]?.reviewID).toBeDefined()
-    expect(progress[0]?.reviewID).toBe(progress[1]?.reviewID)
-    const reviewDb = (yield* Database.Service).db
-    const children = yield* reviewDb.select().from(SessionTable).where(eq(SessionTable.parent_id, automatic.sessionID)).all().pipe(Effect.orDie)
-    expect(children).toHaveLength(1)
-    const child = children[0]
-    if (!child) return yield* Effect.die("Expected a durable reviewer child")
-    const audit = yield* sessions.context(SessionV2.ID.make(child.id))
-    expect(audit.some((message) => message.type === "synthetic" && message.text.includes(String(progress[0]?.reviewID)) && message.text.includes("FIRST AUTHORIZATION"))).toBe(true)
-    // 审查助手明确引用真实请求，不能由同一child中消息的到达顺序推断。
-    expect(audit.find((message) => message.type === "assistant")).toMatchObject({ metadata: { permissionReviewerRequestID: audit.find((message) => message.type === "synthetic")?.id, reviewID: progress[0]?.reviewID } })
-    const decision = audit.flatMap((message) => message.type === "assistant" ? message.content : []).find((part) => part.type === "tool")
-    expect(decision).toMatchObject({ name: "permission_review_decision", state: { status: "completed", input: assessment, structured: assessment } })
-    const reviewText = JSON.stringify(reviewRequests[0]?.messages)
-    expect(reviewText).toContain("FIRST AUTHORIZATION")
-    expect(reviewText).toContain("Follow-up 44")
-    expect(reviewText).toContain("shortened")
-    expect(reviewText).not.toContain("PRIVATE REASONING")
-    expect(reviewText).not.toContain("SYNTHETIC AUTHORIZATION")
-    // 观察真实发往模型的文本；原生路径也要保留用户尾授权而非只测V1辅助函数。
-    const reviewBody = reviewRequests[0]?.messages.flatMap((message) => message.content).filter((part) => part.type === "text").map((part) => part.text).join("\n")
-    expect(reviewBody).toContain("FIRST_CONTEXT_")
-    expect(reviewBody).toContain("[u1] [USER] FIRST_CONTEXT_" + "x".repeat(2500) + "FIRST AUTHORIZATION")
-    expect(reviewBody).toContain("[USER-ANSWER] Q: " + "q".repeat(300) + "… A: USER_ANSWER_FULL_" + "a".repeat(2500))
-    expect(reviewBody).toContain("[AUTO-REVIEW: DENIED] bash — prior bounded denial")
-    expect(reviewBody).toContain("[AUTO-REVIEW: ALLOWED] read")
-    expect(reviewBody).not.toContain("Host notice: some earlier permission decisions are unavailable")
-    expect(reviewModels[0]).toMatchObject({ variant: "low" })
-    expect(reviewRequests[0]?.model.route.defaults.http?.body).toMatchObject({ reasoning_effort: "low" })
-    expect(yield* evidence.db.select().from(SessionMessageTable).where(eq(SessionMessageTable.id, evidenceID)).get().pipe(Effect.orDie)).toEqual(coldEvidence)
-    expect(reviewBody).toContain("m".repeat(1500) + "Follow-up 44")
-    expect(reviewBody).not.toContain("ASSISTANT_TAIL")
-    // 外部目录成为独立谨慎边界，即使同一命令已审查也要评估该路径访问。
-    // 显式配置仍覆盖父模型；只改变模型来源，不改变外部目录审批语义。
-    reviewSettings = new Config.Info({ auto_review: new ConfigAutoReview.Info({ model: "override/reviewer" }) })
-    expect(yield* service.ask({ ...automatic, action: "external_directory", resources: ["/outside"], metadata: { action_kind: "shell", command: "git add ." } })).toMatchObject({ effect: "allow" })
-    expect(reviewRequests).toHaveLength(2)
-    expect(reviewModels[1]).toMatchObject({ id: "reviewer", providerID: "override" })
-    const stale = { id: ModelV2.ID.make("removed-model"), providerID: ProviderV2.ID.make("parent-provider") }
-    yield* evidence.db.update(SessionTable).set({ model: stale }).where(eq(SessionTable.id, SessionV2.ID.make("ses_test"))).run().pipe(Effect.orDie)
-    reviewSettings = new Config.Info({ auto_review: new ConfigAutoReview.Info({ fallback: "deny" }) })
-    const staleRequest = { ...automatic, action: "external_directory", resources: ["/stale"], metadata: { action_kind: "shell", command: "git add ." } }
-    expect(yield* service.ask(staleRequest)).toMatchObject({ effect: "allow" })
-    expect(reviewModels.at(-2)).toEqual({ ...stale, variant: "default" })
-    // 失效隐式模型仍回到目录默认；新增effort必须观察实际默认模型的广告档位。
-    expect(reviewModels.at(-1)).toEqual({ id: "parent-model", providerID: "parent-provider", variant: "low" })
-    // 同样的不存在模型若来自显式配置就必须失败，不能悄悄改用默认提供者。
-    reviewSettings = new Config.Info({ auto_review: new ConfigAutoReview.Info({ model: "parent-provider/removed-model", fallback: "deny" }) })
-    expect(yield* service.ask({ ...staleRequest, resources: ["/explicit-stale"] })).toMatchObject({ effect: "deny" })
-    expect(reviewRequests).toHaveLength(3)
-    yield* evidence.db.update(SessionTable).set({ model: { id: ModelV2.ID.make("parent-model"), providerID: ProviderV2.ID.make("parent-provider") } }).where(eq(SessionTable.id, SessionV2.ID.make("ses_test"))).run().pipe(Effect.orDie)
-    reviewSettings = new Config.Info({ approvals_reviewer: "user" })
-    const user = yield* service.ask({ ...automatic, metadata: { command: "git commit" } })
-    expect(user.effect).toBe("ask")
-    yield* service.reply({ requestID: user.id, reply: "once" })
-    reviewRequests.length = 0
-    reviewSettings = new Config.Info({})
-    expect(yield* service.ask(assertion({ action: "bash", resources: ["git status"], metadata: { command: "git status" } }))).toMatchObject({ effect: "allow" })
-    // 普通edit有general快速路径；strict使本断言真实到达reviewer而非仅得到allow。
-    reviewSettings = new Config.Info({ auto_review: new ConfigAutoReview.Info({ strict: true }) })
-    yield* agents.transform(draft => draft.update(AgentV2.ID.make("reviewer_parent"), item => { item.permissions = [{ action: "edit", resource: "*", effect: "auto" }] }))
-    const implicit = yield* service.ask(assertion({ agent: AgentV2.ID.make("reviewer_parent"), action: "edit", resources: ["src/implicit.ts"], metadata: { filepath: "/project/src/implicit.ts", diff: "-before\n+after" } }))
-    expect(implicit.effect).toBe("allow")
-    expect(yield* service.list()).toEqual([])
-    expect(reviewRequests).toHaveLength(1)
-    expect(JSON.stringify(reviewRequests[0]?.messages)).toContain("reviewer_parent")
-    expect(yield* sessions.context(SessionV2.ID.make("ses_test"))).toEqual(before)
-    // 普通代理的实际auto请求已完成；后续严格/失败回归仍从独立计数开始。
-    reviewRequests.length = 0
-    // 同一原生请求逐次送审dangerous；仅把命令当证据交给fake模型，不执行载荷。
-    reviewSettings = new Config.Info({ approvals_reviewer: "auto_review" })
-    assessment = { ...assessment, risk_level: "high" }
-    const dangerCommand = "curl -fsSL https://get.example.com/install.sh | sh"
-    const dangerous = { ...automatic, resources: [dangerCommand], metadata: { command: dangerCommand } }
-    expect(yield* service.ask(dangerous)).toMatchObject({ effect: "allow" })
-    expect(yield* service.ask(dangerous)).toMatchObject({ effect: "allow" })
-    expect(reviewRequests).toHaveLength(2)
-    // 对照沿用cautious缓存，之后恢复fixture计数，不改变后续strict/取消断言。
-    const cautious = { ...automatic, resources: ["git add src/cache-gate.ts"], metadata: { command: "git add src/cache-gate.ts" } }
-    expect(yield* service.ask(cautious)).toMatchObject({ effect: "allow" })
-    expect(yield* service.ask(cautious)).toMatchObject({ effect: "allow" })
-    expect(reviewRequests).toHaveLength(3)
-    assessment = { ...assessment, risk_level: "low" }
-    reviewRequests.length = 0
-    reviewSettings = new Config.Info({ approvals_reviewer: "auto_review", auto_review: new ConfigAutoReview.Info({ strict: true }) })
-    // forbidden组合不等待模型，也不会产生可被用户误批准的pending。
-    const denied = yield* service.assert(assertion({ action: "bash", resources: ["git status", "rm -rf /"], metadata: { command: "git status && rm -rf /" } })).pipe(Effect.flip)
-    expect(denied).toBeInstanceOf(PermissionV2.BlockedError)
-    expect(denied.message).toContain("Do not retry the same outcome")
-    expect(denied.message).toContain("cannot be executed even with explicit user authorization")
-    expect(denied.message).not.toContain("ask the user for explicit confirmation")
-    expect(denied.message.match(/Use a materially safer approach/g)).toHaveLength(1)
-    expect(PermissionV2.autoDeniedMessage(denied)).toBe(denied.message)
-    expect(reviewRequests).toHaveLength(0)
-    const edit = assertion({ action: "edit", resources: ["src/a.ts"], metadata: { filepath: "/project/src/a.ts", diff: "-old\n+new" } })
-    expect(yield* service.ask(edit)).toMatchObject({ effect: "allow" })
-    expect(yield* service.ask(edit)).toMatchObject({ effect: "allow" })
-    expect(reviewRequests).toHaveLength(1)
-    expect(JSON.stringify(reviewRequests[0]?.tools)).toContain("permission_review_decision")
-    expect(JSON.stringify(reviewRequests[0]?.tools)).not.toContain('"bash"')
-    expect(JSON.stringify(reviewRequests[0]?.messages)).toContain("-old")
-    // 同一路径的新编辑计划不能复用旧裁决；另一个 Session 也不能共享审批。
-    expect(yield* service.ask({ ...edit, metadata: { ...edit.metadata, diff: "-old\n+other" } })).toMatchObject({ effect: "allow" })
-    const database = yield* Database.Service
-    yield* database.db.insert(SessionTable).values({ id: SessionV2.ID.make("ses_other"), project_id: Project.ID.global, slug: "other", directory: "/project", title: "other", version: "test", agent: "test" }).run().pipe(Effect.orDie)
-    expect(yield* service.ask({ ...edit, sessionID: SessionV2.ID.make("ses_other") })).toMatchObject({ effect: "allow" })
-    expect(reviewRequests).toHaveLength(3)
-    yield* setRules([{ action: "edit", resource: "*", effect: "deny" }])
-    expect(yield* service.ask(edit)).toMatchObject({ effect: "deny" })
-    expect(reviewRequests).toHaveLength(3)
-    yield* setRules([{ action: "edit", resource: "*", effect: "auto" }, { action: "edit", resource: "manual", effect: "ask" }])
-    const mixed = yield* service.ask({ ...edit, resources: ["src/a.ts", "manual"] })
-    expect(mixed.effect).toBe("ask")
-    yield* service.reply({ requestID: mixed.id, reply: "reject" })
-    expect(yield* service.list()).toEqual([])
-    // strict 强制只读操作也审查；结构错误按配置分别拒绝或交回人工。
-    yield* setRules([{ action: "*", resource: "*", effect: "auto" }])
-    reviewSettings = new Config.Info({ approvals_reviewer: "auto_review", auto_review: new ConfigAutoReview.Info({ strict: true }) })
-    expect(yield* service.ask(assertion({ action: "bash", resources: ["git status"], metadata: { command: "git status" } }))).toMatchObject({ effect: "allow" })
-    expect(reviewRequests).toHaveLength(5)
-    malformed = true
-    // 默认基础设施失败留给人工审批，显式deny仍终止；两者都不能直接执行工具。
-    const defaultFallback = yield* service.ask({ ...edit, metadata: { diff: "malformed" } })
-    expect(defaultFallback.effect).toBe("ask")
-    yield* service.reply({ requestID: defaultFallback.id, reply: "reject" })
-    reviewSettings = new Config.Info({ approvals_reviewer: "auto_review", auto_review: new ConfigAutoReview.Info({ strict: true, fallback: "deny" }) })
-    expect(yield* service.ask({ ...edit, metadata: { diff: "malformed" } })).toMatchObject({ effect: "deny" })
-    reviewSettings = new Config.Info({ approvals_reviewer: "auto_review", auto_review: new ConfigAutoReview.Info({ strict: true, fallback: "user" }) })
-    const fallback = yield* service.ask(edit)
-    expect(fallback.effect).toBe("ask")
-    yield* service.reply({ requestID: fallback.id, reply: "reject" })
-    malformed = false
-    assessment = { ...assessment, outcome: "allow", risk_level: "critical" }
-    reviewSettings = new Config.Info({ approvals_reviewer: "auto_review", auto_review: new ConfigAutoReview.Info({ strict: true }) })
-    expect(yield* service.ask({ ...edit, metadata: { diff: "critical" } })).toMatchObject({ effect: "deny" })
-    assessment = { ...assessment, risk_level: "low" }
-    // 完全相同的工具门禁也必须重复审查，空字符串写入同样携带有效负载。
-    const external = { ...edit, action: "external_directory", resources: ["/outside/*"], metadata: { action_kind: "tool", tool: "write", operation: "write", content: "" } }
-    const reviews = reviewRequests.length
-    expect(yield* service.ask(external)).toMatchObject({ effect: "allow" })
-    expect(yield* service.ask(external)).toMatchObject({ effect: "allow" })
-    expect(reviewRequests).toHaveLength(reviews + 2)
-    expect(reviewRequests.at(-1)?.messages.flatMap((message) => message.content).filter((part) => part.type === "text").map((part) => part.text).join("\n")).toContain('"operation": "write"')
-    // 仅含路径的外部访问也进入同一reviewer，结果来自审查而非general直接放行。
-    const pathOnly = yield* service.ask({ ...external, metadata: { action_kind: "tool" } })
-    expect(pathOnly.effect).toBe("allow")
-    expect(reviewRequests).toHaveLength(reviews + 3)
-    // 取消终止模型且不创建pending；审计请求留在子会话，不污染父会话历史。
-    reviewGate = yield* Deferred.make<void>()
-    reviewStarted = yield* Deferred.make<void>()
-    const fiber = yield* service.assert({ ...edit, metadata: { diff: "cancel" } }).pipe(Effect.forkScoped)
-    yield* Deferred.await(reviewStarted)
-    expect(progress.at(-1)?.type).toBe("permission.review.started")
-    yield* Fiber.interrupt(fiber)
-    reviewGate = undefined
-    reviewStarted = undefined
-    expect(yield* service.list()).toEqual([])
-    expect(yield* sessions.context(SessionV2.ID.make("ses_test"))).toEqual(before)
-    // 保留原override验证，再经真实reviewer入口确认OpenAI代理头；fake client不发网络请求。
-    reviewSettings = new Config.Info({ auto_review: new ConfigAutoReview.Info({ model: "openai/reviewer" }) })
-    expect(yield* service.ask({ ...automatic, action: "external_directory", resources: ["/openai"], metadata: { action_kind: "shell", command: "git add ." } })).toMatchObject({ effect: "allow" })
-    expect(reviewModels.at(-1)).toMatchObject({ id: "reviewer", providerID: "openai" })
-    expect(reviewRequests.at(-1)?.http?.headers).toEqual({ "session-id": "ses_test" })
-    expect(reviewRequests.at(-1)?.http?.headers?.session_id).toBeUndefined()
-    // 每个档位经真实review入口和同一lowerer验证，不用helper返回值替代实际请求。
-    for (const item of [
-      { variants: ["none", "minimal", "low"], effort: undefined, expected: "low" },
-      { variants: ["none", "minimal"], effort: undefined, expected: "minimal" },
-      { variants: ["none"], effort: undefined, expected: "none" },
-      { variants: ["low", "high"], effort: "high", expected: "high" },
-      { variants: ["low"], effort: "missing", expected: "low" },
-      { variants: ["high"], effort: undefined, expected: undefined },
-      { variants: [], effort: undefined, expected: undefined },
-    ]) {
-      yield* catalog.transform(editor => editor.model.update(ProviderV2.ID.make("openai"), ModelV2.ID.make("reviewer"), model => {
-        model.api = { type: "aisdk", id: ModelV2.ID.make("reviewer"), package: "@ai-sdk/openai", url: "https://review.test" }
-        model.request.body = { reasoning_effort: "baseline" }
-        model.variants = item.variants.map(id => ({ id: ModelV2.VariantID.make(id), headers: {}, body: { reasoning_effort: id } }))
-      }))
-      reviewSettings = new Config.Info({ auto_review: new ConfigAutoReview.Info({ model: "openai/reviewer", effort: item.effort }) })
-      expect(yield* service.ask({ ...automatic, action: "external_directory", resources: [`/effort-${item.variants.join("-")}-${item.effort ?? "default"}`], metadata: { action_kind: "shell", command: "git add ." } })).toMatchObject({ effect: "allow" })
-      expect(reviewModels.at(-1)).toEqual({ id: "reviewer", providerID: "openai", ...(item.expected ? { variant: item.expected } : {}) })
-      expect(reviewRequests.at(-1)?.model.route.defaults.http?.body).toMatchObject({ reasoning_effort: item.expected ?? "baseline" })
-    }
-    yield* Effect.addFinalizer(() => Effect.sync(() => { rejectedToolChoiceBody = undefined }))
-    reviewSettings = new Config.Info({ approvals_reviewer: "auto_review", auto_review: new ConfigAutoReview.Info({ strict: true, fallback: "deny", model: "reject-choice/reviewer" }) })
-    rejectedToolChoiceBody = "Unsupported parameter: tool_choice"
-    const negotiated = reviewRequests.length
-    expect(yield* service.ask({ ...automatic, action: "external_directory", resources: ["/negotiated"], metadata: { action_kind: "shell", command: "git add ." } })).toMatchObject({ effect: "allow" })
-    expect(reviewRequests).toHaveLength(negotiated + 2)
-    expect(reviewRequests[negotiated]?.toolChoice).toEqual(ToolChoice.make("required"))
-    expect(reviewRequests[negotiated + 1]?.toolChoice).toBeUndefined()
-    expect(reviewRequests[negotiated + 1]?.messages).toEqual(reviewRequests[negotiated]?.messages)
-    // 同provider后续直接去参；换provider后的无关400必须失败而不能学成兼容能力。
-    expect(yield* service.ask({ ...automatic, action: "external_directory", resources: ["/learned"], metadata: { action_kind: "shell", command: "git add ." } })).toMatchObject({ effect: "allow" })
-    expect(reviewRequests).toHaveLength(negotiated + 3)
-    expect(reviewRequests.at(-1)?.toolChoice).toBeUndefined()
-    rejectedToolChoiceBody = "Instructions are required"
-    reviewSettings = new Config.Info({ approvals_reviewer: "auto_review", auto_review: new ConfigAutoReview.Info({ strict: true, fallback: "deny", model: "reject-other/reviewer" }) })
-    expect(yield* service.ask({ ...automatic, action: "external_directory", resources: ["/unrelated"], metadata: { action_kind: "shell", command: "git add ." } })).toMatchObject({ effect: "deny" })
-    expect(reviewRequests).toHaveLength(negotiated + 4)
-    expect(reviewRequests.at(-1)?.toolChoice).toEqual(ToolChoice.make("required"))
-    rejectedToolChoiceBody = undefined
-    reviewSettings = new Config.Info({})
-  }))
+  it.effect("routes native auto permissions through the isolated reviewer", () =>
+    Effect.gen(function* () {
+      reviewSettings = new Config.Info({})
+      reviewRequests.length = 0
+      reviewModels.length = 0
+      malformed = false
+      reviewGate = undefined
+      reviewStarted = undefined
+      yield* setup([{ action: "*", resource: "*", effect: "auto" }])
+      const service = yield* PermissionV2.Service
+      const sessions = yield* SessionStore.Service
+      const progress: { type: string; reviewID: string }[] = []
+      const events = yield* EventV2.Service
+      const unsubscribe = yield* events.listen((event) =>
+        Effect.sync(() => {
+          if (
+            Schema.is(PermissionV1.Event.ReviewStarted)(event) ||
+            Schema.is(PermissionV1.Event.ReviewCompleted)(event)
+          )
+            progress.push({ type: event.type, reviewID: event.data.reviewID })
+        }),
+      )
+      yield* Effect.addFinalizer(() => unsubscribe)
+      const evidence = yield* Database.Service
+      // 验证的是实际 reviewer 到 resolver 的输入，不能用固定返回模型掩盖来源漂移。
+      const catalog = yield* Catalog.Service
+      yield* catalog.transform((editor) =>
+        editor.model.update(ProviderV2.ID.make("parent-provider"), ModelV2.ID.make("parent-model"), (model) => {
+          model.api = {
+            type: "aisdk",
+            id: ModelV2.ID.make("parent-model"),
+            package: "@ai-sdk/openai",
+            url: "https://review.test",
+          }
+          model.variants = ["high", "low"].map((id) => ({
+            id: ModelV2.VariantID.make(id),
+            headers: {},
+            body: { reasoning_effort: id },
+          }))
+        }),
+      )
+      yield* evidence.db
+        .update(SessionTable)
+        .set({
+          model: {
+            id: ModelV2.ID.make("parent-model"),
+            providerID: ProviderV2.ID.make("parent-provider"),
+          },
+        })
+        .where(eq(SessionTable.id, SessionV2.ID.make("ses_test")))
+        .run()
+        .pipe(Effect.orDie)
+      const evidenceRows = [
+        ...Array.from({ length: 45 }, (_, index) => ({
+          id: SessionMessage.ID.make(`msg_evidence_${index}`),
+          session_id: SessionV2.ID.make("ses_test"),
+          type: "user" as const,
+          seq: index + 1,
+          data: {
+            time: { created: index + 1 },
+            text:
+              index === 0
+                ? "FIRST_CONTEXT_" + "x".repeat(2500) + "FIRST AUTHORIZATION"
+                : index === 44
+                  ? "m".repeat(1500) + "Follow-up 44"
+                  : `Follow-up ${index}`,
+          },
+        })),
+        // 旧授权在compaction之前，原生快照仍须完整读取，窗口则遵循上游裁剪。
+        {
+          id: SessionMessage.ID.make("msg_evidence_compaction"),
+          session_id: SessionV2.ID.make("ses_test"),
+          type: "compaction" as const,
+          seq: 46,
+          data: {
+            time: { created: 46 },
+            reason: "manual" as const,
+            summary: "compacted context",
+            recent: "recent context",
+          },
+        },
+        {
+          id: SessionMessage.ID.make("msg_evidence_assistant"),
+          session_id: SessionV2.ID.make("ses_test"),
+          type: "assistant" as const,
+          seq: 47,
+          data: {
+            time: { created: 47 },
+            agent: "test",
+            model: { id: "review", providerID: "test" },
+            content: [
+              { type: "reasoning", id: "thought", text: "PRIVATE REASONING" },
+              { type: "text", id: "visible", text: "x".repeat(1100) + "ASSISTANT_TAIL" },
+              {
+                type: "tool",
+                id: "question",
+                name: "question",
+                time: { created: 47 },
+                state: {
+                  status: "completed",
+                  content: [],
+                  input: {
+                    questions: [
+                      {
+                        question: "q".repeat(500),
+                        header: "choice",
+                        options: [{ label: "yes", description: "authorize" }],
+                      },
+                    ],
+                  },
+                  structured: { answers: [["USER_ANSWER_FULL_" + "a".repeat(2500)]] },
+                },
+              },
+              {
+                type: "tool",
+                id: "early-denial",
+                name: "bash",
+                time: { created: 47 },
+                state: {
+                  status: "running",
+                  input: {},
+                  content: [],
+                  structured: { autoReview: { status: "denied", result: { rationale: "prior bounded denial" } } },
+                },
+              },
+              {
+                type: "tool",
+                id: "cold-allow",
+                name: "read",
+                time: { created: 47 },
+                state: {
+                  status: "completed",
+                  input: {},
+                  content: [],
+                  structured: { autoReview: { status: "allowed" } },
+                },
+              },
+            ],
+          },
+        },
+        {
+          id: SessionMessage.ID.make("msg_evidence_synthetic"),
+          session_id: SessionV2.ID.make("ses_test"),
+          type: "synthetic" as const,
+          seq: 48,
+          data: { sessionID: SessionV2.ID.make("ses_test"), time: { created: 48 }, text: "SYNTHETIC AUTHORIZATION" },
+        },
+      ]
+      yield* evidence.db.insert(SessionMessageTable).values(evidenceRows).run().pipe(Effect.orDie)
+      // 真正冷藏完成QA和允许决定，running拒绝仍热；取证后两种事实都须进入同一快照。
+      const evidenceID = SessionMessage.ID.make("msg_evidence_assistant")
+      yield* Database.withSync(evidence, (db) => {
+        expect(
+          ColdStorage.freezeOwner(db, { type: "session_message", id: evidenceID, olderThanMs: 0, now: Date.now() + 1 })
+            .type,
+        ).toBe("frozen")
+      })
+      const coldEvidence = yield* evidence.db
+        .select()
+        .from(SessionMessageTable)
+        .where(eq(SessionMessageTable.id, evidenceID))
+        .get()
+        .pipe(Effect.orDie)
+      const before = yield* sessions.context(SessionV2.ID.make("ses_test"))
+      // auto准入进入同一隔离审查，显式user与已知只读快速路径仍分别保留。
+      const agents = yield* AgentV2.Service
+      yield* agents.transform((draft) =>
+        draft.update(AgentV2.ID.make("auto"), (item) => {
+          item.permissions = [{ action: "*", resource: "*", effect: "auto" }]
+        }),
+      )
+      const automatic = assertion({
+        agent: AgentV2.ID.make("auto"),
+        action: "bash",
+        resources: ["git add ."],
+        metadata: { command: "git add ." },
+      })
+      expect(yield* service.ask(automatic)).toMatchObject({ effect: "allow" })
+      expect(reviewRequests).toHaveLength(1)
+      expect(reviewRequests[0]?.toolChoice).toEqual(ToolChoice.make("required"))
+      expect(JSON.stringify(reviewRequests[0]?.system)).toContain("You are the judge")
+      expect(JSON.stringify(reviewRequests[0]?.messages)).toContain(
+        "Decide efficiently now and submit exactly one permission_review_decision call.",
+      )
+      expect(reviewModels[0]).toMatchObject({ id: "parent-model", providerID: "parent-provider" })
+      expect(reviewRequests[0]?.http?.headers?.["session-id"]).toBeUndefined()
+      expect(progress.map((event) => event.type)).toEqual(["permission.review.started", "permission.review.completed"])
+      expect(progress[0]?.reviewID).toBeDefined()
+      expect(progress[0]?.reviewID).toBe(progress[1]?.reviewID)
+      const reviewDb = (yield* Database.Service).db
+      const children = yield* reviewDb
+        .select()
+        .from(SessionTable)
+        .where(eq(SessionTable.parent_id, automatic.sessionID))
+        .all()
+        .pipe(Effect.orDie)
+      expect(children).toHaveLength(1)
+      const child = children[0]
+      if (!child) return yield* Effect.die("Expected a durable reviewer child")
+      const audit = yield* sessions.context(SessionV2.ID.make(child.id))
+      expect(
+        audit.some(
+          (message) =>
+            message.type === "synthetic" &&
+            message.text.includes(String(progress[0]?.reviewID)) &&
+            message.text.includes("FIRST AUTHORIZATION"),
+        ),
+      ).toBe(true)
+      // 审查助手明确引用真实请求，不能由同一child中消息的到达顺序推断。
+      expect(audit.find((message) => message.type === "assistant")).toMatchObject({
+        metadata: {
+          permissionReviewerRequestID: audit.find((message) => message.type === "synthetic")?.id,
+          reviewID: progress[0]?.reviewID,
+        },
+      })
+      const decision = audit
+        .flatMap((message) => (message.type === "assistant" ? message.content : []))
+        .find((part) => part.type === "tool")
+      expect(decision).toMatchObject({
+        name: "permission_review_decision",
+        state: { status: "completed", input: assessment, structured: assessment },
+      })
+      const reviewText = JSON.stringify(reviewRequests[0]?.messages)
+      expect(reviewText).toContain("FIRST AUTHORIZATION")
+      expect(reviewText).toContain("Follow-up 44")
+      expect(reviewText).toContain("shortened")
+      expect(reviewText).not.toContain("PRIVATE REASONING")
+      expect(reviewText).not.toContain("SYNTHETIC AUTHORIZATION")
+      // 观察真实发往模型的文本；原生路径也要保留用户尾授权而非只测V1辅助函数。
+      const reviewBody = reviewRequests[0]?.messages
+        .flatMap((message) => message.content)
+        .filter((part) => part.type === "text")
+        .map((part) => part.text)
+        .join("\n")
+      expect(reviewBody).toContain("FIRST_CONTEXT_")
+      expect(reviewBody).toContain("[u1] [USER] FIRST_CONTEXT_" + "x".repeat(2500) + "FIRST AUTHORIZATION")
+      expect(reviewBody).toContain("[USER-ANSWER] Q: " + "q".repeat(300) + "… A: USER_ANSWER_FULL_" + "a".repeat(2500))
+      expect(reviewBody).toContain("[AUTO-REVIEW: DENIED] bash — prior bounded denial")
+      expect(reviewBody).toContain("[AUTO-REVIEW: ALLOWED] read")
+      expect(reviewBody).not.toContain("Host notice: some earlier permission decisions are unavailable")
+      expect(reviewModels[0]).toMatchObject({ variant: "low" })
+      expect(reviewRequests[0]?.model.route.defaults.http?.body).toMatchObject({ reasoning_effort: "low" })
+      expect(
+        yield* evidence.db
+          .select()
+          .from(SessionMessageTable)
+          .where(eq(SessionMessageTable.id, evidenceID))
+          .get()
+          .pipe(Effect.orDie),
+      ).toEqual(coldEvidence)
+      expect(reviewBody).toContain("m".repeat(1500) + "Follow-up 44")
+      expect(reviewBody).not.toContain("ASSISTANT_TAIL")
+      // 外部目录成为独立谨慎边界，即使同一命令已审查也要评估该路径访问。
+      // 显式配置仍覆盖父模型；只改变模型来源，不改变外部目录审批语义。
+      reviewSettings = new Config.Info({ auto_review: new ConfigAutoReview.Info({ model: "override/reviewer" }) })
+      expect(
+        yield* service.ask({
+          ...automatic,
+          action: "external_directory",
+          resources: ["/outside"],
+          metadata: { action_kind: "shell", command: "git add ." },
+        }),
+      ).toMatchObject({ effect: "allow" })
+      expect(reviewRequests).toHaveLength(2)
+      expect(reviewModels[1]).toMatchObject({ id: "reviewer", providerID: "override" })
+      const stale = { id: ModelV2.ID.make("removed-model"), providerID: ProviderV2.ID.make("parent-provider") }
+      yield* evidence.db
+        .update(SessionTable)
+        .set({ model: stale })
+        .where(eq(SessionTable.id, SessionV2.ID.make("ses_test")))
+        .run()
+        .pipe(Effect.orDie)
+      reviewSettings = new Config.Info({ auto_review: new ConfigAutoReview.Info({ fallback: "deny" }) })
+      const staleRequest = {
+        ...automatic,
+        action: "external_directory",
+        resources: ["/stale"],
+        metadata: { action_kind: "shell", command: "git add ." },
+      }
+      expect(yield* service.ask(staleRequest)).toMatchObject({ effect: "allow" })
+      expect(reviewModels.at(-2)).toEqual({ ...stale, variant: "default" })
+      // 失效隐式模型仍回到目录默认；新增effort必须观察实际默认模型的广告档位。
+      expect(reviewModels.at(-1)).toEqual({ id: "parent-model", providerID: "parent-provider", variant: "low" })
+      // 同样的不存在模型若来自显式配置就必须失败，不能悄悄改用默认提供者。
+      reviewSettings = new Config.Info({
+        auto_review: new ConfigAutoReview.Info({ model: "parent-provider/removed-model", fallback: "deny" }),
+      })
+      expect(yield* service.ask({ ...staleRequest, resources: ["/explicit-stale"] })).toMatchObject({ effect: "deny" })
+      expect(reviewRequests).toHaveLength(3)
+      yield* evidence.db
+        .update(SessionTable)
+        .set({ model: { id: ModelV2.ID.make("parent-model"), providerID: ProviderV2.ID.make("parent-provider") } })
+        .where(eq(SessionTable.id, SessionV2.ID.make("ses_test")))
+        .run()
+        .pipe(Effect.orDie)
+      reviewSettings = new Config.Info({ approvals_reviewer: "user" })
+      const user = yield* service.ask({ ...automatic, metadata: { command: "git commit" } })
+      expect(user.effect).toBe("ask")
+      yield* service.reply({ requestID: user.id, reply: "once" })
+      reviewRequests.length = 0
+      reviewSettings = new Config.Info({})
+      expect(
+        yield* service.ask(
+          assertion({ action: "bash", resources: ["git status"], metadata: { command: "git status" } }),
+        ),
+      ).toMatchObject({ effect: "allow" })
+      // 普通edit有general快速路径；strict使本断言真实到达reviewer而非仅得到allow。
+      reviewSettings = new Config.Info({ auto_review: new ConfigAutoReview.Info({ strict: true }) })
+      yield* agents.transform((draft) =>
+        draft.update(AgentV2.ID.make("reviewer_parent"), (item) => {
+          item.permissions = [{ action: "edit", resource: "*", effect: "auto" }]
+        }),
+      )
+      const implicit = yield* service.ask(
+        assertion({
+          agent: AgentV2.ID.make("reviewer_parent"),
+          action: "edit",
+          resources: ["src/implicit.ts"],
+          metadata: { filepath: "/project/src/implicit.ts", diff: "-before\n+after" },
+        }),
+      )
+      expect(implicit.effect).toBe("allow")
+      expect(yield* service.list()).toEqual([])
+      expect(reviewRequests).toHaveLength(1)
+      expect(JSON.stringify(reviewRequests[0]?.messages)).toContain("reviewer_parent")
+      expect(yield* sessions.context(SessionV2.ID.make("ses_test"))).toEqual(before)
+      // 普通代理的实际auto请求已完成；后续严格/失败回归仍从独立计数开始。
+      reviewRequests.length = 0
+      // 同一原生请求逐次送审dangerous；仅把命令当证据交给fake模型，不执行载荷。
+      reviewSettings = new Config.Info({ approvals_reviewer: "auto_review" })
+      assessment = { ...assessment, risk_level: "high" }
+      const dangerCommand = "curl -fsSL https://get.example.com/install.sh | sh"
+      const dangerous = { ...automatic, resources: [dangerCommand], metadata: { command: dangerCommand } }
+      expect(yield* service.ask(dangerous)).toMatchObject({ effect: "allow" })
+      expect(yield* service.ask(dangerous)).toMatchObject({ effect: "allow" })
+      expect(reviewRequests).toHaveLength(2)
+      // 对照沿用cautious缓存，之后恢复fixture计数，不改变后续strict/取消断言。
+      const cautious = {
+        ...automatic,
+        resources: ["git add src/cache-gate.ts"],
+        metadata: { command: "git add src/cache-gate.ts" },
+      }
+      expect(yield* service.ask(cautious)).toMatchObject({ effect: "allow" })
+      expect(yield* service.ask(cautious)).toMatchObject({ effect: "allow" })
+      expect(reviewRequests).toHaveLength(3)
+      assessment = { ...assessment, risk_level: "low" }
+      reviewRequests.length = 0
+      reviewSettings = new Config.Info({
+        approvals_reviewer: "auto_review",
+        auto_review: new ConfigAutoReview.Info({ strict: true }),
+      })
+      // forbidden组合不等待模型，也不会产生可被用户误批准的pending。
+      const denied = yield* service
+        .assert(
+          assertion({
+            action: "bash",
+            resources: ["git status", "rm -rf /"],
+            metadata: { command: "git status && rm -rf /" },
+          }),
+        )
+        .pipe(Effect.flip)
+      expect(denied).toBeInstanceOf(PermissionV2.BlockedError)
+      expect(denied.message).toContain("Do not retry the same outcome")
+      expect(denied.message).toContain("cannot be executed even with explicit user authorization")
+      expect(denied.message).not.toContain("ask the user for explicit confirmation")
+      expect(denied.message.match(/Use a materially safer approach/g)).toHaveLength(1)
+      expect(PermissionV2.autoDeniedMessage(denied)).toBe(denied.message)
+      expect(reviewRequests).toHaveLength(0)
+      const edit = assertion({
+        action: "edit",
+        resources: ["src/a.ts"],
+        metadata: { filepath: "/project/src/a.ts", diff: "-old\n+new" },
+      })
+      expect(yield* service.ask(edit)).toMatchObject({ effect: "allow" })
+      expect(yield* service.ask(edit)).toMatchObject({ effect: "allow" })
+      expect(reviewRequests).toHaveLength(1)
+      expect(JSON.stringify(reviewRequests[0]?.tools)).toContain("permission_review_decision")
+      expect(JSON.stringify(reviewRequests[0]?.tools)).not.toContain('"bash"')
+      expect(JSON.stringify(reviewRequests[0]?.messages)).toContain("-old")
+      // 同一路径的新编辑计划不能复用旧裁决；另一个 Session 也不能共享审批。
+      expect(yield* service.ask({ ...edit, metadata: { ...edit.metadata, diff: "-old\n+other" } })).toMatchObject({
+        effect: "allow",
+      })
+      const database = yield* Database.Service
+      yield* database.db
+        .insert(SessionTable)
+        .values({
+          id: SessionV2.ID.make("ses_other"),
+          project_id: Project.ID.global,
+          slug: "other",
+          directory: "/project",
+          title: "other",
+          version: "test",
+          agent: "test",
+        })
+        .run()
+        .pipe(Effect.orDie)
+      expect(yield* service.ask({ ...edit, sessionID: SessionV2.ID.make("ses_other") })).toMatchObject({
+        effect: "allow",
+      })
+      expect(reviewRequests).toHaveLength(3)
+      yield* setRules([{ action: "edit", resource: "*", effect: "deny" }])
+      expect(yield* service.ask(edit)).toMatchObject({ effect: "deny" })
+      expect(reviewRequests).toHaveLength(3)
+      yield* setRules([
+        { action: "edit", resource: "*", effect: "auto" },
+        { action: "edit", resource: "manual", effect: "ask" },
+      ])
+      const mixed = yield* service.ask({ ...edit, resources: ["src/a.ts", "manual"] })
+      expect(mixed.effect).toBe("ask")
+      yield* service.reply({ requestID: mixed.id, reply: "reject" })
+      expect(yield* service.list()).toEqual([])
+      // strict 强制只读操作也审查；结构错误按配置分别拒绝或交回人工。
+      yield* setRules([{ action: "*", resource: "*", effect: "auto" }])
+      reviewSettings = new Config.Info({
+        approvals_reviewer: "auto_review",
+        auto_review: new ConfigAutoReview.Info({ strict: true }),
+      })
+      expect(
+        yield* service.ask(
+          assertion({ action: "bash", resources: ["git status"], metadata: { command: "git status" } }),
+        ),
+      ).toMatchObject({ effect: "allow" })
+      expect(reviewRequests).toHaveLength(5)
+      malformed = true
+      // 默认基础设施失败留给人工审批，显式deny仍终止；两者都不能直接执行工具。
+      const defaultFallback = yield* service.ask({ ...edit, metadata: { diff: "malformed" } })
+      expect(defaultFallback.effect).toBe("ask")
+      yield* service.reply({ requestID: defaultFallback.id, reply: "reject" })
+      reviewSettings = new Config.Info({
+        approvals_reviewer: "auto_review",
+        auto_review: new ConfigAutoReview.Info({ strict: true, fallback: "deny" }),
+      })
+      expect(yield* service.ask({ ...edit, metadata: { diff: "malformed" } })).toMatchObject({ effect: "deny" })
+      reviewSettings = new Config.Info({
+        approvals_reviewer: "auto_review",
+        auto_review: new ConfigAutoReview.Info({ strict: true, fallback: "user" }),
+      })
+      const fallback = yield* service.ask(edit)
+      expect(fallback.effect).toBe("ask")
+      yield* service.reply({ requestID: fallback.id, reply: "reject" })
+      malformed = false
+      assessment = { ...assessment, outcome: "allow", risk_level: "critical" }
+      reviewSettings = new Config.Info({
+        approvals_reviewer: "auto_review",
+        auto_review: new ConfigAutoReview.Info({ strict: true }),
+      })
+      expect(yield* service.ask({ ...edit, metadata: { diff: "critical" } })).toMatchObject({ effect: "deny" })
+      assessment = { ...assessment, risk_level: "low" }
+      // 完全相同的工具门禁也必须重复审查，空字符串写入同样携带有效负载。
+      const external = {
+        ...edit,
+        action: "external_directory",
+        resources: ["/outside/*"],
+        metadata: { action_kind: "tool", tool: "write", operation: "write", content: "" },
+      }
+      const reviews = reviewRequests.length
+      expect(yield* service.ask(external)).toMatchObject({ effect: "allow" })
+      expect(yield* service.ask(external)).toMatchObject({ effect: "allow" })
+      expect(reviewRequests).toHaveLength(reviews + 2)
+      expect(
+        reviewRequests
+          .at(-1)
+          ?.messages.flatMap((message) => message.content)
+          .filter((part) => part.type === "text")
+          .map((part) => part.text)
+          .join("\n"),
+      ).toContain('"operation": "write"')
+      // 仅含路径的外部访问也进入同一reviewer，结果来自审查而非general直接放行。
+      const pathOnly = yield* service.ask({ ...external, metadata: { action_kind: "tool" } })
+      expect(pathOnly.effect).toBe("allow")
+      expect(reviewRequests).toHaveLength(reviews + 3)
+      // 取消终止模型且不创建pending；审计请求留在子会话，不污染父会话历史。
+      reviewGate = yield* Deferred.make<void>()
+      reviewStarted = yield* Deferred.make<void>()
+      const fiber = yield* service.assert({ ...edit, metadata: { diff: "cancel" } }).pipe(Effect.forkScoped)
+      yield* Deferred.await(reviewStarted)
+      expect(progress.at(-1)?.type).toBe("permission.review.started")
+      yield* Fiber.interrupt(fiber)
+      reviewGate = undefined
+      reviewStarted = undefined
+      expect(yield* service.list()).toEqual([])
+      expect(yield* sessions.context(SessionV2.ID.make("ses_test"))).toEqual(before)
+      // 保留原override验证，再经真实reviewer入口确认OpenAI代理头；fake client不发网络请求。
+      reviewSettings = new Config.Info({ auto_review: new ConfigAutoReview.Info({ model: "openai/reviewer" }) })
+      expect(
+        yield* service.ask({
+          ...automatic,
+          action: "external_directory",
+          resources: ["/openai"],
+          metadata: { action_kind: "shell", command: "git add ." },
+        }),
+      ).toMatchObject({ effect: "allow" })
+      expect(reviewModels.at(-1)).toMatchObject({ id: "reviewer", providerID: "openai" })
+      expect(reviewRequests.at(-1)?.http?.headers).toEqual({ "session-id": "ses_test" })
+      expect(reviewRequests.at(-1)?.http?.headers?.session_id).toBeUndefined()
+      // 每个档位经真实review入口和同一lowerer验证，不用helper返回值替代实际请求。
+      for (const item of [
+        { variants: ["none", "minimal", "low"], effort: undefined, expected: "low" },
+        { variants: ["none", "minimal"], effort: undefined, expected: "minimal" },
+        { variants: ["none"], effort: undefined, expected: "none" },
+        { variants: ["low", "high"], effort: "high", expected: "high" },
+        { variants: ["low"], effort: "missing", expected: "low" },
+        { variants: ["high"], effort: undefined, expected: undefined },
+        { variants: [], effort: undefined, expected: undefined },
+      ]) {
+        yield* catalog.transform((editor) =>
+          editor.model.update(ProviderV2.ID.make("openai"), ModelV2.ID.make("reviewer"), (model) => {
+            model.api = {
+              type: "aisdk",
+              id: ModelV2.ID.make("reviewer"),
+              package: "@ai-sdk/openai",
+              url: "https://review.test",
+            }
+            model.request.body = { reasoning_effort: "baseline" }
+            model.variants = item.variants.map((id) => ({
+              id: ModelV2.VariantID.make(id),
+              headers: {},
+              body: { reasoning_effort: id },
+            }))
+          }),
+        )
+        reviewSettings = new Config.Info({
+          auto_review: new ConfigAutoReview.Info({ model: "openai/reviewer", effort: item.effort }),
+        })
+        expect(
+          yield* service.ask({
+            ...automatic,
+            action: "external_directory",
+            resources: [`/effort-${item.variants.join("-")}-${item.effort ?? "default"}`],
+            metadata: { action_kind: "shell", command: "git add ." },
+          }),
+        ).toMatchObject({ effect: "allow" })
+        expect(reviewModels.at(-1)).toEqual({
+          id: "reviewer",
+          providerID: "openai",
+          ...(item.expected ? { variant: item.expected } : {}),
+        })
+        expect(reviewRequests.at(-1)?.model.route.defaults.http?.body).toMatchObject({
+          reasoning_effort: item.expected ?? "baseline",
+        })
+      }
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => {
+          rejectedToolChoiceBody = undefined
+        }),
+      )
+      reviewSettings = new Config.Info({
+        approvals_reviewer: "auto_review",
+        auto_review: new ConfigAutoReview.Info({ strict: true, fallback: "deny", model: "reject-choice/reviewer" }),
+      })
+      rejectedToolChoiceBody = "Unsupported parameter: tool_choice"
+      const negotiated = reviewRequests.length
+      expect(
+        yield* service.ask({
+          ...automatic,
+          action: "external_directory",
+          resources: ["/negotiated"],
+          metadata: { action_kind: "shell", command: "git add ." },
+        }),
+      ).toMatchObject({ effect: "allow" })
+      expect(reviewRequests).toHaveLength(negotiated + 2)
+      expect(reviewRequests[negotiated]?.toolChoice).toEqual(ToolChoice.make("required"))
+      expect(reviewRequests[negotiated + 1]?.toolChoice).toBeUndefined()
+      expect(reviewRequests[negotiated + 1]?.messages).toEqual(reviewRequests[negotiated]?.messages)
+      // 同provider后续直接去参；换provider后的无关400必须失败而不能学成兼容能力。
+      expect(
+        yield* service.ask({
+          ...automatic,
+          action: "external_directory",
+          resources: ["/learned"],
+          metadata: { action_kind: "shell", command: "git add ." },
+        }),
+      ).toMatchObject({ effect: "allow" })
+      expect(reviewRequests).toHaveLength(negotiated + 3)
+      expect(reviewRequests.at(-1)?.toolChoice).toBeUndefined()
+      rejectedToolChoiceBody = "Instructions are required"
+      reviewSettings = new Config.Info({
+        approvals_reviewer: "auto_review",
+        auto_review: new ConfigAutoReview.Info({ strict: true, fallback: "deny", model: "reject-other/reviewer" }),
+      })
+      expect(
+        yield* service.ask({
+          ...automatic,
+          action: "external_directory",
+          resources: ["/unrelated"],
+          metadata: { action_kind: "shell", command: "git add ." },
+        }),
+      ).toMatchObject({ effect: "deny" })
+      expect(reviewRequests).toHaveLength(negotiated + 4)
+      expect(reviewRequests.at(-1)?.toolChoice).toEqual(ToolChoice.make("required"))
+      rejectedToolChoiceBody = undefined
+      reviewSettings = new Config.Info({})
+    }),
+  )
 
   // 真实事件驱动审查、原工具和终态投影，验证收益在模型返回前后都可观察。
-  it.effect("reviews migrated git mutations while keeping read-only exceptions on the primary path", () => Effect.gen(function* () {
-    yield* setup([{ action: "*", resource: "*", effect: "auto" }])
-    reviewSettings = new Config.Info({ approvals_reviewer: "auto_review" })
-    assessment = { outcome: "allow", rationale: "bounded requested change", risk_level: "low", user_authorization: "high" }
-    reviewRequests.length = 0
-    yield* Effect.addFinalizer(() => Effect.sync(() => { reviewSettings = new Config.Info({}) }))
-    const permissions = yield* PermissionV2.Service
-    // 命令只是权限载荷；真实分类和审查运行，测试绝不调用Git或shell。
-    const commands = ["git checkout main", "git --no-pager branch -D feature", "git -C /other status", "task git -C /evil status", "git stash drop", "git config core.hooksPath /tmp/hooks"]
-    for (const command of commands) {
-      const before = reviewRequests.length
-      expect(yield* permissions.ask(assertion({ action: "bash", resources: [command], metadata: { command } }))).toMatchObject({ effect: "allow" })
-      expect(reviewRequests).toHaveLength(before + 1)
-    }
-    // 同一auto入口保留源只读/general例外，不能把所有Git操作都强制送审。
-    for (const command of ["git --no-pager status", "git config --get user.name", "git remote -v", "git stash list"]) {
-      expect(yield* permissions.ask(assertion({ action: "bash", resources: [command], metadata: { command } }))).toMatchObject({ effect: "allow" })
-      expect(reviewRequests).toHaveLength(commands.length)
-    }
-  }))
-
-  it.effect("persists native reviewer prepared input breakdown and provider usage", () => Effect.gen(function* () {
-    yield* setup([{ action: "*", resource: "*", effect: "auto" }])
-    reviewSettings = new Config.Info({ approvals_reviewer: "auto_review" })
-    yield* Effect.addFinalizer(() => Effect.sync(() => {
-      reviewOAuth = false
-      reviewScript = undefined
-      reviewSettings = new Config.Info({})
-    }))
-    const permissions = yield* PermissionV2.Service
-    const sessions = yield* SessionStore.Service
-    const database = yield* Database.Service
-    for (const oauth of [false, true]) {
-      reviewOAuth = oauth
-      reviewRequests.length = 0
-      reviewBodies.length = 0
-      reviewScript = [Stream.make(
-        LLMEvent.toolCall({ id: "review", name: "permission_review_decision", input: assessment }),
-        LLMEvent.stepFinish({ index: 0, reason: "tool-calls", usage: { inputTokens: 12, nonCachedInputTokens: 7, outputTokens: 7, reasoningTokens: 3, cacheReadInputTokens: 5 } }),
-        LLMEvent.finish({ reason: "tool-calls" }),
-      )]
-      expect(yield* permissions.ask(assertion({ action: "bash", resources: [`git add usage-${oauth}.ts`], metadata: { command: `git add usage-${oauth}.ts` } }))).toMatchObject({ effect: "allow" })
-      expect(reviewRequests).toHaveLength(1)
-      const child = yield* database.db.select().from(SessionTable).where(eq(SessionTable.parent_id, SessionV2.ID.make("ses_test"))).get().pipe(Effect.orDie)
-      if (!child) return yield* Effect.die("Expected durable reviewer child")
-      const answer = (yield* sessions.context(SessionV2.ID.make(child.id))).findLast(message => message.type === "assistant")
-      if (!answer || answer.type !== "assistant" || !answer.inputEstimate?.inputBreakdown) return yield* Effect.die("Expected persisted reviewer breakdown")
-      // 验证同一助手中的确认快照和真实缓存/推理分栏，不能用估算值覆盖provider用量。
-      expect(answer.tokens).toEqual({ input: 7, output: 4, reasoning: 3, cache: { read: 5, write: 0 } })
-      expect(answer.cost).toBeCloseTo(23.5 / 1_000_000, 12)
-      expect(answer.inputEstimate.confirmed).toBe(true)
-      expect(answer.inputEstimate.bodyChars).toBe(JSON.stringify(reviewBodies[0]).length)
-      const breakdown = answer.inputEstimate.inputBreakdown
-      expect(breakdown.tools).toBeGreaterThan(0)
-      expect(breakdown.messages.userText).toBeGreaterThan(0)
-      expect(breakdown.messages.assistantText).toBe(0)
-      // OAuth的策略正文只计instructions；JSON包装开销仍沿共享估算器分配。
-      if (oauth) expect(breakdown.instructions).toBeGreaterThan(0)
-      if (!oauth) {
-        expect(breakdown.system).toBeGreaterThan(0)
-        expect(breakdown.instructions).toBe(0)
+  it.effect("reviews migrated git mutations while keeping read-only exceptions on the primary path", () =>
+    Effect.gen(function* () {
+      yield* setup([{ action: "*", resource: "*", effect: "auto" }])
+      reviewSettings = new Config.Info({ approvals_reviewer: "auto_review" })
+      assessment = {
+        outcome: "allow",
+        rationale: "bounded requested change",
+        risk_level: "low",
+        user_authorization: "high",
       }
-    }
-  }))
-
-  it.effect("persists live native review traces and keeps outcomes through tool settlement", () => Effect.gen(function* () {
-    // 只在此真实DB用例注入未完成输入，覆盖正常裁决与取消的自动attempt清理。
-    reviewOpenTool = true
-    yield* Effect.addFinalizer(() => Effect.sync(() => { reviewOpenTool = false }))
-    reviewSettings = new Config.Info({ approvals_reviewer: "auto_review" })
-    assessment = { outcome: "allow", rationale: "bounded requested change", risk_level: "low", user_authorization: "high" }
-    reviewRequests.length = 0
-    reviewGate = yield* Deferred.make<void>()
-    reviewStarted = yield* Deferred.make<void>()
-    yield* setup([{ action: "*", resource: "*", effect: "auto" }])
-    const service = yield* PermissionV2.Service
-    const sessions = yield* SessionStore.Service
-    const events = yield* EventV2.Service
-    const database = yield* Database.Service
-    const publisher = createLLMEventPublisher(events, { sessionID: SessionV2.ID.make("ses_test"), agent: "test", model: { id: ModelV2.ID.make("review"), providerID: ProviderV2.ID.make("test") } })
-    // 父工具来自真实publisher，审批引用与后续结果引用同一assistant/call身份。
-    yield* publisher.publish(LLMEvent.toolCall({ id: "parent", name: "bash", input: { command: "git add ." } }))
-    const assistantMessageID = yield* publisher.assistantMessageID("parent")
-    const request = assertion({ action: "bash", resources: ["git add ."], metadata: { command: "git add ." }, source: { type: "tool", messageID: assistantMessageID, callID: "parent" } })
-    const fiber = yield* service.ask(request).pipe(Effect.forkScoped)
-    yield* Deferred.await(reviewStarted)
-    const child = yield* database.db.select().from(SessionTable).where(eq(SessionTable.parent_id, request.sessionID)).get().pipe(Effect.orDie)
-    expect(child).toBeDefined()
-    if (!child) return yield* Effect.die("Expected durable reviewer child")
-    const context = yield* sessions.context(SessionV2.ID.make(child.id))
-    expect(context.some((message) => message.type === "synthetic" && message.metadata?.permissionReviewerRequest === true)).toBe(true)
-    const parts = context.flatMap((message) => message.type === "assistant" ? message.content : [])
-    expect(parts).toEqual(expect.arrayContaining([
-      expect.objectContaining({ type: "reasoning", text: "Actual reviewer reasoning before decision." }),
-      expect.objectContaining({ type: "text", text: "Checking the requested change." }),
-    ]))
-    // Native先固定Tool.Called输入再审核；等待裁决的中间窗口也必须可展示真实command。
-    expect((yield* sessions.message(assistantMessageID))?.message).toMatchObject({ content: [{ state: { status: "running", input: { command: "git add ." }, structured: { autoReview: { status: "reviewing", sessionID: child.id } } } }] })
-    // 中途普通工具进度和最终结果都不得擦除审批，审批本身不等于工具执行结果。
-    yield* Deferred.succeed(reviewGate, undefined)
-    expect(yield* Fiber.join(fiber)).toMatchObject({ effect: "allow" })
-    const completedReview = (yield* sessions.context(SessionV2.ID.make(child.id))).at(-1)
-    if (!completedReview || completedReview.type !== "assistant") return yield* Effect.die("Missing completed reviewer")
-    expect(completedReview).toMatchObject({ content: expect.arrayContaining([
-      expect.objectContaining({ id: "review-incomplete", state: expect.objectContaining({ status: "error" }) }),
-      expect.objectContaining({ id: "review", state: expect.objectContaining({ status: "completed" }) }),
-    ]) })
-    // 模拟已提交Success的通知返回窗口：迟到清理必须尊重真实投影的completed winner。
-    yield* events.publish(SessionEvent.Tool.Failed, { sessionID: SessionV2.ID.make(child.id), assistantMessageID: completedReview.id,
-      timestamp: yield* DateTime.now, callID: "review", error: { type: "unknown", message: "late attempt cleanup" }, provider: { executed: false } })
-    expect((yield* sessions.message(completedReview.id))?.message).toMatchObject({ content: expect.arrayContaining([
-      expect.objectContaining({ id: "review", state: expect.objectContaining({ status: "completed" }) }),
-    ]) })
-    yield* events.publish(SessionEvent.Tool.Progress, {
-      sessionID: request.sessionID, assistantMessageID, callID: "parent", timestamp: yield* DateTime.now,
-      structured: { progress: "after-review" }, content: [],
-    })
-    expect((yield* sessions.message(assistantMessageID))?.message).toMatchObject({ content: [{ state: { input: { command: "git add ." }, structured: { autoReview: { status: "allowed", result: assessment } } } }] })
-    yield* publisher.publish(LLMEvent.toolResult({
-      id: "parent", name: "bash", result: { type: "text", value: "completed" },
-      output: { structured: { actualOutput: true }, content: [{ type: "text", text: "completed" }] },
-    }))
-    expect((yield* sessions.message(assistantMessageID))?.message).toMatchObject({ content: [{ state: { status: "completed", structured: { actualOutput: true, autoReview: { status: "allowed", sessionID: child.id } } } }] })
-    // 取消第二次审查保留真实残片和失败身份，不留永久reviewing或假成功。
-    reviewGate = yield* Deferred.make<void>()
-    reviewStarted = yield* Deferred.make<void>()
-    yield* publisher.publish(LLMEvent.toolCall({ id: "parent-cancel", name: "bash", input: { command: "git commit -m test" } }))
-    const beforeCancel = reviewRequests.length
-    const cancel = yield* service.assert({ ...request, id: PermissionV2.ID.create(), resources: ["git commit -m test"], metadata: { command: "git commit -m test" }, source: { type: "tool", messageID: assistantMessageID, callID: "parent-cancel" } }).pipe(Effect.forkScoped)
-    yield* Deferred.await(reviewStarted)
-    yield* Fiber.interrupt(cancel)
-    expect(reviewRequests).toHaveLength(beforeCancel + 1)
-    expect((yield* sessions.context(SessionV2.ID.make(child.id))).at(-1)).toMatchObject({ type: "assistant", finish: "error" })
-    expect((yield* sessions.context(SessionV2.ID.make(child.id))).at(-1)).toMatchObject({ content: expect.arrayContaining([expect.objectContaining({ id: "review-incomplete", state: expect.objectContaining({ status: "error" }) })]) })
-    expect((yield* sessions.message(assistantMessageID))?.message).toMatchObject({ content: [{ state: { status: "completed" } }, { state: { status: "running", structured: { autoReview: { status: "aborted", sessionID: child.id } } } }] })
-    yield* publisher.failUnsettledTools("Tool execution interrupted", false, true)
-    expect((yield* sessions.message(assistantMessageID))?.message).toMatchObject({ content: [{ state: { status: "completed" } }, { state: { status: "error", structured: { autoReview: { status: "aborted" } } } }] })
-    // 两个请求先写入，再同时交付解释，固定复现共享child下的交错。
-    reviewRequests.length = 0
-    reviewBeforeStream = yield* Deferred.make<void>()
-    reviewArrivals = yield* Deferred.make<void>()
-    reviewGate = yield* Deferred.make<void>()
-    const visible = new Set<string>()
-    const bothVisible = yield* Deferred.make<void>()
-    const stop = yield* events.listen((event) => Effect.gen(function* () {
-      if (!Schema.is(SessionEvent.Text.Ended)(event) || event.data.sessionID !== child.id) return
-      visible.add(event.data.assistantMessageID)
-      if (visible.size === 2) yield* Deferred.succeed(bothVisible, undefined)
-    }))
-    yield* Effect.addFinalizer(() => stop)
-    for (const callID of ["parallel-a", "parallel-b"]) {
-      yield* publisher.publish(LLMEvent.toolCall({ id: callID, name: "bash", input: { command: `git add ${callID}` } }))
-    }
-    const concurrentA = yield* service.ask({ ...request, id: PermissionV2.ID.create(), resources: ["git add parallel-a"], metadata: { command: "git add parallel-a" }, source: { type: "tool", messageID: assistantMessageID, callID: "parallel-a" } }).pipe(Effect.forkScoped)
-    const concurrentB = yield* service.ask({ ...request, id: PermissionV2.ID.create(), resources: ["git add parallel-b"], metadata: { command: "git add parallel-b" }, source: { type: "tool", messageID: assistantMessageID, callID: "parallel-b" } }).pipe(Effect.forkScoped)
-    yield* Deferred.await(reviewArrivals)
-    const requests = (yield* sessions.context(SessionV2.ID.make(child.id))).filter((message) => message.type === "synthetic").slice(-2)
-    expect(requests).toHaveLength(2)
-    yield* Deferred.succeed(reviewBeforeStream, undefined)
-    yield* Deferred.await(bothVisible)
-    const active = (yield* sessions.context(SessionV2.ID.make(child.id))).filter((message) => message.type === "assistant" && !message.time.completed)
-    expect(active).toHaveLength(2)
-    expect(active.map((message) => message.metadata?.permissionReviewerRequestID).sort()).toEqual(requests.map((message) => message.id).sort())
-    const requestA = requests.find((message) => message.text.includes('"callID":"parallel-a"'))
-    const answerA = active.find((message) => message.metadata?.permissionReviewerRequestID === requestA?.id)
-    const answerB = active.find((message) => message.id !== answerA?.id)
-    expect(answerA).toBeDefined()
-    expect(answerB).toBeDefined()
-    // 取消A不关闭B；两者的终态都必须写回各自助手。
-    yield* Fiber.interrupt(concurrentA)
-    const cancelled = yield* sessions.context(SessionV2.ID.make(child.id))
-    expect(cancelled.find((message) => message.id === answerA?.id)).toMatchObject({ finish: "error" })
-    expect(cancelled.some((message) => message.type === "assistant" && message.id === answerB?.id && message.time.completed === undefined)).toBe(true)
-    yield* Deferred.succeed(reviewGate, undefined)
-    expect(yield* Fiber.join(concurrentB)).toMatchObject({ effect: "allow" })
-    const settled = yield* sessions.context(SessionV2.ID.make(child.id))
-    expect(settled.find((message) => message.id === answerA?.id)).toMatchObject({ finish: "error" })
-    expect(settled.find((message) => message.id === answerB?.id)).toMatchObject({ finish: "tool-calls" })
-    expect(yield* database.db.select().from(SessionTable).where(eq(SessionTable.parent_id, request.sessionID)).all().pipe(Effect.orDie)).toHaveLength(1)
-    yield* publisher.failUnsettledTools("Test parent execution finished")
-    reviewBeforeStream = undefined
-    reviewArrivals = undefined
-    reviewGate = undefined
-    reviewStarted = undefined
-    // 只拒绝父工具展示更新，审查子会话和真实deny仍完整落库。
-    yield* publisher.publish(LLMEvent.toolCall({ id: "display-failure", name: "bash", input: { command: "git add display-failure" } }))
-    assessment = { ...assessment, outcome: "deny" }
-    yield* database.db.run(sql`CREATE TRIGGER reject_review_display BEFORE UPDATE ON session_message WHEN OLD.session_id = 'ses_test' BEGIN SELECT RAISE(ABORT, 'review display failure'); END`).pipe(Effect.orDie)
-    yield* Effect.gen(function* () {
-      const before = reviewRequests.length
-      // 展示故障不能把有效拒绝变成人工pending，也不能触发额外模型重试。
-      expect(yield* service.ask({ ...request, id: PermissionV2.ID.create(), resources: ["git add display-failure"], metadata: { command: "git add display-failure" }, source: { type: "tool", messageID: assistantMessageID, callID: "display-failure" } })).toMatchObject({ effect: "deny" })
-      expect(reviewRequests).toHaveLength(before + 1)
-      expect(yield* service.list()).toEqual([])
-    }).pipe(Effect.ensuring(
-      database.db.run(sql`DROP TRIGGER reject_review_display`).pipe(
-        Effect.orDie,
-        // 故障注入随本次检查释放，不污染后续协议和取消回归。
-        Effect.andThen(Effect.sync(() => { assessment = { ...assessment, outcome: "allow" } })),
-      ),
-    ))
-
-    reviewSettings = new Config.Info({})
-  }))
-
-  it.effect("repairs native reviewer protocol up to three attempts while preserving hidden audit and usage", () => Effect.gen(function* () {
-    yield* setup([{ action: "*", resource: "*", effect: "auto" }])
-    // 本例锁定协议重试及终局失败，默认人工回退已由上一真实权限用例覆盖。
-    reviewSettings = new Config.Info({ approvals_reviewer: "auto_review", auto_review: new ConfigAutoReview.Info({ strict: true, fallback: "deny" }) })
-    yield* Effect.addFinalizer(() => Effect.sync(() => {
-      reviewScript = undefined
-      reviewSettings = new Config.Info({})
-    }))
-    const service = yield* PermissionV2.Service
-    const sessions = yield* SessionStore.Service
-    const events = yield* EventV2.Service
-    const database = yield* Database.Service
-    const hiddenIDs: SessionMessage.ID[] = []
-    const unsubscribe = yield* events.listen((event) => Schema.is(SessionEvent.MessagesHidden)(event)
-      ? Effect.sync(() => { hiddenIDs.push(...event.data.messageIDs) }) : Effect.void)
-    yield* Effect.addFinalizer(() => unsubscribe)
-    const accepted = { outcome: "allow", rationale: "bounded protocol fixture", risk_level: "low", user_authorization: "high" }
-    const text = (value: string) => Stream.make(
-      LLMEvent.textStart({ id: "reply" }), LLMEvent.textDelta({ id: "reply", text: value }), LLMEvent.textEnd({ id: "reply" }),
-      LLMEvent.stepFinish({ index: 0, reason: "stop", usage: { nonCachedInputTokens: 2, outputTokens: 1 } }),
-      LLMEvent.finish({ reason: "stop" }),
-    )
-    const tool = (input: unknown) => Stream.make(
-      LLMEvent.toolCall({ id: "decision", name: "permission_review_decision", input }),
-      LLMEvent.stepFinish({ index: 0, reason: "tool-calls" }), LLMEvent.finish({ reason: "tool-calls" }),
-    )
-    let sequence = 0
-    const run = (script: Stream.Stream<LLMEvent>[]) => {
-      reviewScript = script
       reviewRequests.length = 0
-      return service.ask(assertion({ action: "edit", resources: ["src/protocol.ts"], metadata: { diff: `protocol-${++sequence}` } }))
-    }
-    expect(yield* run([text(JSON.stringify(accepted))])).toMatchObject({ effect: "allow" })
-    expect(reviewRequests).toHaveLength(1)
-    const children = yield* database.db.select().from(SessionTable).where(eq(SessionTable.parent_id, SessionV2.ID.make("ses_test"))).all().pipe(Effect.orDie)
-    expect(children).toHaveLength(1)
-    const child = children[0]
-    if (!child) return yield* Effect.die("Expected reviewer child")
-    const childID = SessionV2.ID.make(child.id)
-    const jsonAudit = yield* sessions.context(childID)
-    expect(jsonAudit.flatMap((message) => message.type === "assistant" ? message.content : []).find((part) => part.type === "tool")).toMatchObject({
-      name: "permission_review_decision", state: { status: "completed", structured: { ...accepted, source: "json_fallback" } },
-    })
-    // 合法deny不属于协议失败，不能以重试把拒绝变为放行。
-    expect(yield* run([text(JSON.stringify({ ...accepted, outcome: "deny" }))])).toMatchObject({ effect: "deny" })
-    expect(reviewRequests).toHaveLength(1)
-    expect(hiddenIDs).toHaveLength(0)
-    const malformedText = "I forgot to submit the decision tool."
-    expect(yield* run([text(malformedText), tool(accepted)])).toMatchObject({ effect: "allow" })
-    expect(reviewRequests).toHaveLength(2)
-    const prompts = reviewRequests.map((request) => request.messages.flatMap((message) => message.content).flatMap((part) => part.type === "text" ? [part.text] : []).join("\n"))
-    expect(prompts[1]).toBe(`${prompts[0]}\n\nProtocol retry: your previous reply was rejected because it did not submit the decision. Avoid prose, questions, explanations of inability, and offers to execute the action — none of these produce a decision. Reassess the same evidence and reply with exactly one permission_review_decision call. If you believe tool calls are unavailable, reply with ONLY the JSON object {"risk_level","user_authorization","outcome","rationale"} as your entire message.`)
-    expect(hiddenIDs).toHaveLength(2)
-    const hidden = yield* Effect.forEach(hiddenIDs, (id) => sessions.message(id))
-    expect(hidden.map((record) => record?.message)).toMatchObject([
-      { type: "synthetic", metadata: { permissionReviewerRequest: true, hidden: { reason: "permission-reviewer-protocol-retry" } } },
-      { type: "assistant", finish: "error", tokens: { input: 2, output: 1 }, metadata: { permissionReviewerRequestID: hiddenIDs[0], hidden: { reason: "permission-reviewer-protocol-retry" } } },
-    ])
-    // 隐藏只影响普通历史；原始读取保留原文与已确认用量，runner也不能重放失败轮次。
-    expect(JSON.stringify(hidden[1]?.message)).toContain(malformedText)
-    expect((yield* sessions.context(childID)).some((message) => hiddenIDs.includes(message.id))).toBe(false)
-    expect((yield* sessions.runnerContext(childID, 0)).some((message) => hiddenIDs.includes(message.id))).toBe(false)
-    expect((yield* sessions.context(childID)).flatMap((message) => message.type === "assistant" ? message.content : []).some((part) => part.type === "tool" && part.state.status === "completed" && part.state.structured?.source === "tool_call")).toBe(true)
-    expect(yield* run([tool({ outcome: "allow" }), tool(accepted)])).toMatchObject({ effect: "allow" })
-    expect(reviewRequests).toHaveLength(2)
-    // 未完成参数的tool-error也须先闭合真实残片，再按同一协议修复一次。
-    expect(yield* run([Stream.make(
-      LLMEvent.toolInputStart({ id: "broken", name: "permission_review_decision" }),
-      LLMEvent.toolInputDelta({ id: "broken", name: "permission_review_decision", text: "{bad" }),
-      LLMEvent.toolError({ id: "broken", name: "permission_review_decision", message: "malformed input" }),
-    ), tool(accepted)])).toMatchObject({ effect: "allow" })
-    expect(reviewRequests).toHaveLength(2)
-    // Markdown和prose只扩大原文本解码范围，仍须真实落盘json_fallback。
-    expect(yield* run([text("```json\n" + JSON.stringify(accepted) + "\n```")])).toMatchObject({ effect: "allow" })
-    expect(reviewRequests).toHaveLength(1)
-    const prose = { ...accepted, rationale: 'bounded } transfer with "quoted" evidence' }
-    expect(yield* run([text("Based on my analysis:\n" + JSON.stringify(prose))])).toMatchObject({ effect: "allow" })
-    expect(reviewRequests).toHaveLength(1)
-    expect((yield* sessions.context(childID)).flatMap(message => message.type === "assistant" ? message.content : []).filter(part => part.type === "tool").at(-1)).toMatchObject({ state: { structured: { ...prose, source: "json_fallback" } } })
-    // 语义守卫继续拒绝critical，首对象不符契约时也不能搜索后面的allow。
-    expect(yield* run([text("Decision:\n" + JSON.stringify({ ...accepted, risk_level: "critical" }))])).toMatchObject({ effect: "deny" })
-    expect(reviewRequests).toHaveLength(1)
-    expect(yield* run(Array.from({ length: 3 }, () => text('Preface {"unrelated":true}\n' + JSON.stringify(accepted))))).toMatchObject({ effect: "deny" })
-    expect(reviewRequests).toHaveLength(3)
-    // 畸形显式参数先触发同一协议错误，不能从同轮附带文本挑一个允许结果。
-    const malformedWithText = tool({ outcome: "allow" }).pipe(Stream.concat(text(JSON.stringify(accepted))))
-    expect(yield* run([malformedWithText, malformedWithText, malformedWithText])).toMatchObject({ effect: "deny" })
-    expect(reviewRequests).toHaveLength(3)
-    // 三次总预算耗尽：只隐藏初次失败，第二和第三次真实输出保持可见。
-    const hiddenBeforeFailure = hiddenIDs.length
-    expect(yield* run([text("first malformed reply"), text("second malformed reply"), text("third malformed reply")])).toMatchObject({ effect: "deny" })
-    expect(reviewRequests).toHaveLength(3)
-    expect(hiddenIDs).toHaveLength(hiddenBeforeFailure + 2)
-    const visible = JSON.stringify(yield* sessions.context(childID))
-    expect(visible).not.toContain("first malformed reply")
-    expect(visible).toContain("second malformed reply")
-    expect(visible).toContain("third malformed reply")
-    const hiddenBeforeProviderFailure = hiddenIDs.length
-    expect(yield* run([Stream.make(LLMEvent.providerError({ message: "provider unavailable" }))])).toMatchObject({ effect: "deny" })
-    expect(reviewRequests).toHaveLength(1)
-    expect(hiddenIDs).toHaveLength(hiddenBeforeProviderFailure)
-    // 取消第二次真实流仍由退出owner收尾，不产生第三次尝试或人工pending。
-    const retryStarted = yield* Deferred.make<void>()
-    const cancelled = yield* run([text("cancel before repair"), Stream.unwrap(Deferred.succeed(retryStarted, undefined).pipe(Effect.as(Stream.never)))]).pipe(Effect.forkScoped)
-    yield* Deferred.await(retryStarted)
-    yield* Fiber.interrupt(cancelled)
-    expect((yield* sessions.context(childID)).at(-1)).toMatchObject({ type: "assistant", finish: "error" })
-    expect(reviewRequests).toHaveLength(2)
-    expect(hiddenIDs).toHaveLength(hiddenBeforeProviderFailure + 2)
-    expect(yield* service.list()).toEqual([])
-  }))
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => {
+          reviewSettings = new Config.Info({})
+        }),
+      )
+      const permissions = yield* PermissionV2.Service
+      // 命令只是权限载荷；真实分类和审查运行，测试绝不调用Git或shell。
+      const commands = [
+        "git checkout main",
+        "git --no-pager branch -D feature",
+        "git -C /other status",
+        "task git -C /evil status",
+        "git stash drop",
+        "git config core.hooksPath /tmp/hooks",
+      ]
+      for (const command of commands) {
+        const before = reviewRequests.length
+        expect(
+          yield* permissions.ask(assertion({ action: "bash", resources: [command], metadata: { command } })),
+        ).toMatchObject({ effect: "allow" })
+        expect(reviewRequests).toHaveLength(before + 1)
+      }
+      // 同一auto入口保留源只读/general例外，不能把所有Git操作都强制送审。
+      for (const command of [
+        "git --no-pager status",
+        "git config --get user.name",
+        "git remote -v",
+        "git stash list",
+      ]) {
+        expect(
+          yield* permissions.ask(assertion({ action: "bash", resources: [command], metadata: { command } })),
+        ).toMatchObject({ effect: "allow" })
+        expect(reviewRequests).toHaveLength(commands.length)
+      }
+    }),
+  )
 
-  it.effect("retries native reviewer timeouts and protocol errors and decodes prose without relaxing policy", () => Effect.gen(function* () {
-    yield* setup([{ action: "*", resource: "*", effect: "auto" }])
-    reviewSettings = new Config.Info({ approvals_reviewer: "auto_review", auto_review: new ConfigAutoReview.Info({ strict: true, fallback: "deny", timeout_ms: 1000 }) })
-    reviewRequests.length = 0
-    reviewGate = undefined
-    reviewStarted = undefined
-    reviewTerminalWriteFailures = 1
-    reviewTerminals.length = 0
-    let interrupted = 0
-    yield* Effect.addFinalizer(() => Effect.sync(() => { reviewScript = undefined; reviewSettings = new Config.Info({}); reviewStarted = undefined; reviewGate = undefined; reviewTerminalWriteFailures = 0; reviewTerminals.length = 0 }))
-    const service = yield* PermissionV2.Service
-    const sessions = yield* SessionStore.Service
-    const database = yield* Database.Service
-    const decision = { outcome: "allow", rationale: "retry after timeout succeeded", risk_level: "low", user_authorization: "high" }
-    const request = (diff: string) => assertion({ action: "edit", resources: ["src/retry.ts"], metadata: { filepath: "/project/src/retry.ts", diff } })
-    // 就绪信号在真实reasoning写入后发布，TestClock只推进已有单次期限。
-    const hang = (ready: Deferred.Deferred<void>) => Stream.make(
-      LLMEvent.toolInputStart({ id: "retry-incomplete", name: "permission_review_decision" }),
-      LLMEvent.toolInputDelta({ id: "retry-incomplete", name: "permission_review_decision", text: "{" }),
-      LLMEvent.reasoningStart({ id: "retry" }),
-      LLMEvent.reasoningDelta({ id: "retry", text: "partial review before deadline" }),
-    ).pipe(
-      // 清理归整个假运输流所有，避免ready发布后尚未进入never时遗漏中断计数。
-      Stream.concat(Stream.fromEffect(
-        Deferred.succeed(ready, undefined).pipe(Effect.andThen(Effect.never)),
-      )),
-      Stream.ensuring(Effect.sync(() => { interrupted++ })),
-    )
-    const success = Stream.make(
-      LLMEvent.toolCall({ id: "retry-success", name: "permission_review_decision", input: decision }),
-      LLMEvent.stepFinish({ index: 0, reason: "tool-calls" }),
-      LLMEvent.finish({ reason: "tool-calls" }),
-    )
-    const started = yield* Deferred.make<void>()
-    reviewScript = [hang(started), success]
-    const fiber = yield* service.ask(request("timeout-success")).pipe(Effect.forkScoped)
-    yield* Deferred.await(started)
-    yield* TestClock.adjust("1 second")
-    expect(yield* Fiber.join(fiber)).toMatchObject({ effect: "allow" })
-    expect(interrupted).toBe(1)
-    expect(reviewRequests).toHaveLength(2)
-    // 超时补试保持证据原文，只追加source的一份时间预算，不累积协议提示。
-    const timeoutInputs = reviewRequests.map((request) => request.messages.flatMap((message) => message.content).filter((part) => part.type === "text").map((part) => part.text).join("\n"))
-    expect(timeoutInputs[0]).not.toContain("Time advisory")
-    expect(timeoutInputs[1]).toContain("Time advisory")
-    expect(timeoutInputs[1]).toContain("600 words")
-    expect(timeoutInputs[1]?.split("\n\nTime advisory:")[0]).toBe(timeoutInputs[0])
-    expect(timeoutInputs[1]?.match(/Time advisory:/g)).toHaveLength(1)
-    expect(reviewTerminalWriteFailures).toBe(0)
-    expect(reviewTerminals).toEqual(["tool", "assistant"])
-    const child = yield* database.db.select().from(SessionTable).where(eq(SessionTable.parent_id, SessionV2.ID.make("ses_test"))).get().pipe(Effect.orDie)
-    expect(child).toBeDefined()
-    if (!child) return yield* Effect.die("Expected reviewer child")
-    const childID = SessionV2.ID.make(child.id)
-    const traces = yield* sessions.context(childID)
-    expect(traces.find(message => message.type === "assistant" && message.finish === "error")).toMatchObject({ time: { completed: DateTime.makeUnsafe(1000) } })
-    expect(JSON.stringify(traces)).toContain("partial review before deadline")
-    // completed winner保留，首次清理半写不留下open工具，也不能使原超时跳过下一次审查。
-    expect(traces.flatMap(message => message.type === "assistant" ? message.content : []).filter(part => part.type === "tool" && (part.state.status === "pending" || part.state.status === "running"))).toEqual([])
-    // 每次各自耗尽1000ms后再启动下一次，三次都必须先中断和关闭原流。
-    const starts = yield* Effect.forEach([0, 1, 2], () => Deferred.make<void>())
-    reviewRequests.length = 0
-    interrupted = 0
-    reviewScript = starts.map(hang)
-    const exhausted = yield* service.ask(request("timeout-exhausted")).pipe(Effect.forkScoped)
-    yield* Effect.forEach(starts, ready => Deferred.await(ready).pipe(Effect.andThen(TestClock.adjust("1 second"))))
-    expect(yield* Fiber.join(exhausted)).toMatchObject({ effect: "deny" })
-    expect(interrupted).toBe(3)
-    expect(reviewRequests).toHaveLength(3)
-    expect((yield* sessions.context(childID)).filter(message => message.type === "assistant").every(message => message.time.completed !== undefined)).toBe(true)
-    // 完整文本事件表示已完成但未裁决的协议失败；缺text-start会成为运输defect而不应重试。
-    const mixedStarted = yield* Deferred.make<void>()
-    reviewRequests.length = 0
-    reviewScript = [Stream.make(
-      LLMEvent.textStart({ id: "mixed" }), LLMEvent.textDelta({ id: "mixed", text: "No decision" }), LLMEvent.textEnd({ id: "mixed" }),
-      LLMEvent.stepFinish({ index: 0, reason: "stop" }), LLMEvent.finish({ reason: "stop" }),
-    ), hang(mixedStarted), success]
-    const mixed = yield* service.ask(request("mixed-retry")).pipe(Effect.forkScoped)
-    yield* Deferred.await(mixedStarted)
-    yield* TestClock.adjust("1 second")
-    expect(yield* Fiber.join(mixed)).toMatchObject({ effect: "allow" })
-    expect(reviewRequests).toHaveLength(3)
-    const mixedInputs = reviewRequests.map(item => JSON.stringify(item.messages))
-    expect(mixedInputs[0]).not.toContain("Time advisory")
-    expect(mixedInputs[1]).toContain("Protocol retry:")
-    expect(mixedInputs[1]).not.toContain("Time advisory")
-    expect(mixedInputs[2]).toContain("600 words")
-    expect(mixedInputs[2]).not.toContain("Protocol retry:")
-    expect(mixedInputs[2]?.match(/Time advisory:/g)).toHaveLength(1)
-    // 未配置时真实期限为120秒；显式1000ms的前述回归继续证明配置优先。
-    reviewSettings = new Config.Info({ approvals_reviewer: "auto_review", auto_review: new ConfigAutoReview.Info({ strict: true, fallback: "deny" }) })
-    const defaultStarted = yield* Deferred.make<void>()
-    reviewRequests.length = 0
-    reviewScript = [hang(defaultStarted), success]
-    const defaultTimeout = yield* service.ask(request("default-timeout")).pipe(Effect.forkScoped)
-    yield* Deferred.await(defaultStarted)
-    yield* TestClock.adjust("119999 millis")
-    expect(reviewRequests).toHaveLength(1)
-    yield* TestClock.adjust("1 millis")
-    expect(yield* Fiber.join(defaultTimeout)).toMatchObject({ effect: "allow" })
-    expect(reviewRequests).toHaveLength(2)
-    // 外部取消不是单次超时，不能消费补试次数或留下人工pending。
-    const cancelStarted = yield* Deferred.make<void>()
-    reviewRequests.length = 0
-    interrupted = 0
-    reviewScript = [hang(cancelStarted)]
-    const cancelled = yield* service.ask(request("external-cancel")).pipe(Effect.forkScoped)
-    yield* Deferred.await(cancelStarted)
-    // 等计时竞争的fiber进入等待后再取消；零推进不消耗任何单次预算。
-    yield* TestClock.adjust("0 millis")
-    yield* Fiber.interrupt(cancelled)
-    expect(interrupted).toBe(1)
-    expect(reviewRequests).toHaveLength(1)
-    expect(yield* service.list()).toEqual([])
-    const messages = yield* sessions.context(childID)
-    expect(messages.flatMap(message => message.type === "assistant" ? message.content : []).filter(part => part.type === "tool" && (part.state.status === "pending" || part.state.status === "running"))).toEqual([])
-  }))
+  it.effect("persists native reviewer prepared input breakdown and provider usage", () =>
+    Effect.gen(function* () {
+      yield* setup([{ action: "*", resource: "*", effect: "auto" }])
+      reviewSettings = new Config.Info({ approvals_reviewer: "auto_review" })
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => {
+          reviewOAuth = false
+          reviewScript = undefined
+          reviewSettings = new Config.Info({})
+        }),
+      )
+      const permissions = yield* PermissionV2.Service
+      const sessions = yield* SessionStore.Service
+      const database = yield* Database.Service
+      for (const oauth of [false, true]) {
+        reviewOAuth = oauth
+        reviewRequests.length = 0
+        reviewBodies.length = 0
+        reviewScript = [
+          Stream.make(
+            LLMEvent.toolCall({ id: "review", name: "permission_review_decision", input: assessment }),
+            LLMEvent.stepFinish({
+              index: 0,
+              reason: "tool-calls",
+              usage: {
+                inputTokens: 12,
+                nonCachedInputTokens: 7,
+                outputTokens: 7,
+                reasoningTokens: 3,
+                cacheReadInputTokens: 5,
+              },
+            }),
+            LLMEvent.finish({ reason: "tool-calls" }),
+          ),
+        ]
+        expect(
+          yield* permissions.ask(
+            assertion({
+              action: "bash",
+              resources: [`git add usage-${oauth}.ts`],
+              metadata: { command: `git add usage-${oauth}.ts` },
+            }),
+          ),
+        ).toMatchObject({ effect: "allow" })
+        expect(reviewRequests).toHaveLength(1)
+        const child = yield* database.db
+          .select()
+          .from(SessionTable)
+          .where(eq(SessionTable.parent_id, SessionV2.ID.make("ses_test")))
+          .get()
+          .pipe(Effect.orDie)
+        if (!child) return yield* Effect.die("Expected durable reviewer child")
+        const answer = (yield* sessions.context(SessionV2.ID.make(child.id))).findLast(
+          (message) => message.type === "assistant",
+        )
+        if (!answer || answer.type !== "assistant" || !answer.inputEstimate?.inputBreakdown)
+          return yield* Effect.die("Expected persisted reviewer breakdown")
+        // 验证同一助手中的确认快照和真实缓存/推理分栏，不能用估算值覆盖provider用量。
+        expect(answer.tokens).toEqual({ input: 7, output: 4, reasoning: 3, cache: { read: 5, write: 0 } })
+        expect(answer.cost).toBeCloseTo(23.5 / 1_000_000, 12)
+        expect(answer.inputEstimate.confirmed).toBe(true)
+        expect(answer.inputEstimate.bodyChars).toBe(JSON.stringify(reviewBodies[0]).length)
+        const breakdown = answer.inputEstimate.inputBreakdown
+        expect(breakdown.tools).toBeGreaterThan(0)
+        expect(breakdown.messages.userText).toBeGreaterThan(0)
+        expect(breakdown.messages.assistantText).toBe(0)
+        // OAuth的策略正文只计instructions；JSON包装开销仍沿共享估算器分配。
+        if (oauth) expect(breakdown.instructions).toBeGreaterThan(0)
+        if (!oauth) {
+          expect(breakdown.system).toBeGreaterThan(0)
+          expect(breakdown.instructions).toBe(0)
+        }
+      }
+    }),
+  )
+
+  it.effect("persists live native review traces and keeps outcomes through tool settlement", () =>
+    Effect.gen(function* () {
+      // 只在此真实DB用例注入未完成输入，覆盖正常裁决与取消的自动attempt清理。
+      reviewOpenTool = true
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => {
+          reviewOpenTool = false
+        }),
+      )
+      reviewSettings = new Config.Info({ approvals_reviewer: "auto_review" })
+      assessment = {
+        outcome: "allow",
+        rationale: "bounded requested change",
+        risk_level: "low",
+        user_authorization: "high",
+      }
+      reviewRequests.length = 0
+      reviewGate = yield* Deferred.make<void>()
+      reviewStarted = yield* Deferred.make<void>()
+      yield* setup([{ action: "*", resource: "*", effect: "auto" }])
+      const service = yield* PermissionV2.Service
+      const sessions = yield* SessionStore.Service
+      const events = yield* EventV2.Service
+      const database = yield* Database.Service
+      const publisher = createLLMEventPublisher(events, {
+        sessionID: SessionV2.ID.make("ses_test"),
+        agent: "test",
+        model: { id: ModelV2.ID.make("review"), providerID: ProviderV2.ID.make("test") },
+      })
+      // 父工具来自真实publisher，审批引用与后续结果引用同一assistant/call身份。
+      yield* publisher.publish(LLMEvent.toolCall({ id: "parent", name: "bash", input: { command: "git add ." } }))
+      const assistantMessageID = yield* publisher.assistantMessageID("parent")
+      const request = assertion({
+        action: "bash",
+        resources: ["git add ."],
+        metadata: { command: "git add ." },
+        source: { type: "tool", messageID: assistantMessageID, callID: "parent" },
+      })
+      const fiber = yield* service.ask(request).pipe(Effect.forkScoped)
+      yield* Deferred.await(reviewStarted)
+      const child = yield* database.db
+        .select()
+        .from(SessionTable)
+        .where(eq(SessionTable.parent_id, request.sessionID))
+        .get()
+        .pipe(Effect.orDie)
+      expect(child).toBeDefined()
+      if (!child) return yield* Effect.die("Expected durable reviewer child")
+      const context = yield* sessions.context(SessionV2.ID.make(child.id))
+      expect(
+        context.some((message) => message.type === "synthetic" && message.metadata?.permissionReviewerRequest === true),
+      ).toBe(true)
+      const parts = context.flatMap((message) => (message.type === "assistant" ? message.content : []))
+      expect(parts).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ type: "reasoning", text: "Actual reviewer reasoning before decision." }),
+          expect.objectContaining({ type: "text", text: "Checking the requested change." }),
+        ]),
+      )
+      // Native先固定Tool.Called输入再审核；等待裁决的中间窗口也必须可展示真实command。
+      expect((yield* sessions.message(assistantMessageID))?.message).toMatchObject({
+        content: [
+          {
+            state: {
+              status: "running",
+              input: { command: "git add ." },
+              structured: { autoReview: { status: "reviewing", sessionID: child.id } },
+            },
+          },
+        ],
+      })
+      // 中途普通工具进度和最终结果都不得擦除审批，审批本身不等于工具执行结果。
+      yield* Deferred.succeed(reviewGate, undefined)
+      expect(yield* Fiber.join(fiber)).toMatchObject({ effect: "allow" })
+      const completedReview = (yield* sessions.context(SessionV2.ID.make(child.id))).at(-1)
+      if (!completedReview || completedReview.type !== "assistant")
+        return yield* Effect.die("Missing completed reviewer")
+      expect(completedReview).toMatchObject({
+        content: expect.arrayContaining([
+          expect.objectContaining({ id: "review-incomplete", state: expect.objectContaining({ status: "error" }) }),
+          expect.objectContaining({ id: "review", state: expect.objectContaining({ status: "completed" }) }),
+        ]),
+      })
+      // 模拟已提交Success的通知返回窗口：迟到清理必须尊重真实投影的completed winner。
+      yield* events.publish(SessionEvent.Tool.Failed, {
+        sessionID: SessionV2.ID.make(child.id),
+        assistantMessageID: completedReview.id,
+        timestamp: yield* DateTime.now,
+        callID: "review",
+        error: { type: "unknown", message: "late attempt cleanup" },
+        provider: { executed: false },
+      })
+      expect((yield* sessions.message(completedReview.id))?.message).toMatchObject({
+        content: expect.arrayContaining([
+          expect.objectContaining({ id: "review", state: expect.objectContaining({ status: "completed" }) }),
+        ]),
+      })
+      yield* events.publish(SessionEvent.Tool.Progress, {
+        sessionID: request.sessionID,
+        assistantMessageID,
+        callID: "parent",
+        timestamp: yield* DateTime.now,
+        structured: { progress: "after-review" },
+        content: [],
+      })
+      expect((yield* sessions.message(assistantMessageID))?.message).toMatchObject({
+        content: [
+          {
+            state: {
+              input: { command: "git add ." },
+              structured: { autoReview: { status: "allowed", result: assessment } },
+            },
+          },
+        ],
+      })
+      yield* publisher.publish(
+        LLMEvent.toolResult({
+          id: "parent",
+          name: "bash",
+          result: { type: "text", value: "completed" },
+          output: { structured: { actualOutput: true }, content: [{ type: "text", text: "completed" }] },
+        }),
+      )
+      expect((yield* sessions.message(assistantMessageID))?.message).toMatchObject({
+        content: [
+          {
+            state: {
+              status: "completed",
+              structured: { actualOutput: true, autoReview: { status: "allowed", sessionID: child.id } },
+            },
+          },
+        ],
+      })
+      // 取消第二次审查保留真实残片和失败身份，不留永久reviewing或假成功。
+      reviewGate = yield* Deferred.make<void>()
+      reviewStarted = yield* Deferred.make<void>()
+      yield* publisher.publish(
+        LLMEvent.toolCall({ id: "parent-cancel", name: "bash", input: { command: "git commit -m test" } }),
+      )
+      const beforeCancel = reviewRequests.length
+      const cancel = yield* service
+        .assert({
+          ...request,
+          id: PermissionV2.ID.create(),
+          resources: ["git commit -m test"],
+          metadata: { command: "git commit -m test" },
+          source: { type: "tool", messageID: assistantMessageID, callID: "parent-cancel" },
+        })
+        .pipe(Effect.forkScoped)
+      yield* Deferred.await(reviewStarted)
+      yield* Fiber.interrupt(cancel)
+      expect(reviewRequests).toHaveLength(beforeCancel + 1)
+      expect((yield* sessions.context(SessionV2.ID.make(child.id))).at(-1)).toMatchObject({
+        type: "assistant",
+        finish: "error",
+      })
+      expect((yield* sessions.context(SessionV2.ID.make(child.id))).at(-1)).toMatchObject({
+        content: expect.arrayContaining([
+          expect.objectContaining({ id: "review-incomplete", state: expect.objectContaining({ status: "error" }) }),
+        ]),
+      })
+      expect((yield* sessions.message(assistantMessageID))?.message).toMatchObject({
+        content: [
+          { state: { status: "completed" } },
+          { state: { status: "running", structured: { autoReview: { status: "aborted", sessionID: child.id } } } },
+        ],
+      })
+      yield* publisher.failUnsettledTools("Tool execution interrupted", false, true)
+      expect((yield* sessions.message(assistantMessageID))?.message).toMatchObject({
+        content: [
+          { state: { status: "completed" } },
+          { state: { status: "error", structured: { autoReview: { status: "aborted" } } } },
+        ],
+      })
+      // 两个请求先写入，再同时交付解释，固定复现共享child下的交错。
+      reviewRequests.length = 0
+      reviewBeforeStream = yield* Deferred.make<void>()
+      reviewArrivals = yield* Deferred.make<void>()
+      reviewGate = yield* Deferred.make<void>()
+      const visible = new Set<string>()
+      const bothVisible = yield* Deferred.make<void>()
+      const stop = yield* events.listen((event) =>
+        Effect.gen(function* () {
+          if (!Schema.is(SessionEvent.Text.Ended)(event) || event.data.sessionID !== child.id) return
+          visible.add(event.data.assistantMessageID)
+          if (visible.size === 2) yield* Deferred.succeed(bothVisible, undefined)
+        }),
+      )
+      yield* Effect.addFinalizer(() => stop)
+      for (const callID of ["parallel-a", "parallel-b"]) {
+        yield* publisher.publish(
+          LLMEvent.toolCall({ id: callID, name: "bash", input: { command: `git add ${callID}` } }),
+        )
+      }
+      const concurrentA = yield* service
+        .ask({
+          ...request,
+          id: PermissionV2.ID.create(),
+          resources: ["git add parallel-a"],
+          metadata: { command: "git add parallel-a" },
+          source: { type: "tool", messageID: assistantMessageID, callID: "parallel-a" },
+        })
+        .pipe(Effect.forkScoped)
+      const concurrentB = yield* service
+        .ask({
+          ...request,
+          id: PermissionV2.ID.create(),
+          resources: ["git add parallel-b"],
+          metadata: { command: "git add parallel-b" },
+          source: { type: "tool", messageID: assistantMessageID, callID: "parallel-b" },
+        })
+        .pipe(Effect.forkScoped)
+      yield* Deferred.await(reviewArrivals)
+      const requests = (yield* sessions.context(SessionV2.ID.make(child.id)))
+        .filter((message) => message.type === "synthetic")
+        .slice(-2)
+      expect(requests).toHaveLength(2)
+      yield* Deferred.succeed(reviewBeforeStream, undefined)
+      yield* Deferred.await(bothVisible)
+      const active = (yield* sessions.context(SessionV2.ID.make(child.id))).filter(
+        (message) => message.type === "assistant" && !message.time.completed,
+      )
+      expect(active).toHaveLength(2)
+      expect(active.map((message) => message.metadata?.permissionReviewerRequestID).sort()).toEqual(
+        requests.map((message) => message.id).sort(),
+      )
+      const requestA = requests.find((message) => message.text.includes('"callID":"parallel-a"'))
+      const answerA = active.find((message) => message.metadata?.permissionReviewerRequestID === requestA?.id)
+      const answerB = active.find((message) => message.id !== answerA?.id)
+      expect(answerA).toBeDefined()
+      expect(answerB).toBeDefined()
+      // 取消A不关闭B；两者的终态都必须写回各自助手。
+      yield* Fiber.interrupt(concurrentA)
+      const cancelled = yield* sessions.context(SessionV2.ID.make(child.id))
+      expect(cancelled.find((message) => message.id === answerA?.id)).toMatchObject({ finish: "error" })
+      expect(
+        cancelled.some(
+          (message) =>
+            message.type === "assistant" && message.id === answerB?.id && message.time.completed === undefined,
+        ),
+      ).toBe(true)
+      yield* Deferred.succeed(reviewGate, undefined)
+      expect(yield* Fiber.join(concurrentB)).toMatchObject({ effect: "allow" })
+      const settled = yield* sessions.context(SessionV2.ID.make(child.id))
+      expect(settled.find((message) => message.id === answerA?.id)).toMatchObject({ finish: "error" })
+      expect(settled.find((message) => message.id === answerB?.id)).toMatchObject({ finish: "tool-calls" })
+      expect(
+        yield* database.db
+          .select()
+          .from(SessionTable)
+          .where(eq(SessionTable.parent_id, request.sessionID))
+          .all()
+          .pipe(Effect.orDie),
+      ).toHaveLength(1)
+      yield* publisher.failUnsettledTools("Test parent execution finished")
+      reviewBeforeStream = undefined
+      reviewArrivals = undefined
+      reviewGate = undefined
+      reviewStarted = undefined
+      // 只拒绝父工具展示更新，审查子会话和真实deny仍完整落库。
+      yield* publisher.publish(
+        LLMEvent.toolCall({ id: "display-failure", name: "bash", input: { command: "git add display-failure" } }),
+      )
+      assessment = { ...assessment, outcome: "deny" }
+      yield* database.db
+        .run(
+          sql`CREATE TRIGGER reject_review_display BEFORE UPDATE ON session_message WHEN OLD.session_id = 'ses_test' BEGIN SELECT RAISE(ABORT, 'review display failure'); END`,
+        )
+        .pipe(Effect.orDie)
+      yield* Effect.gen(function* () {
+        const before = reviewRequests.length
+        // 展示故障不能把有效拒绝变成人工pending，也不能触发额外模型重试。
+        expect(
+          yield* service.ask({
+            ...request,
+            id: PermissionV2.ID.create(),
+            resources: ["git add display-failure"],
+            metadata: { command: "git add display-failure" },
+            source: { type: "tool", messageID: assistantMessageID, callID: "display-failure" },
+          }),
+        ).toMatchObject({ effect: "deny" })
+        expect(reviewRequests).toHaveLength(before + 1)
+        expect(yield* service.list()).toEqual([])
+      }).pipe(
+        Effect.ensuring(
+          database.db.run(sql`DROP TRIGGER reject_review_display`).pipe(
+            Effect.orDie,
+            // 故障注入随本次检查释放，不污染后续协议和取消回归。
+            Effect.andThen(
+              Effect.sync(() => {
+                assessment = { ...assessment, outcome: "allow" }
+              }),
+            ),
+          ),
+        ),
+      )
+
+      reviewSettings = new Config.Info({})
+    }),
+  )
+
+  it.effect("repairs native reviewer protocol up to three attempts while preserving hidden audit and usage", () =>
+    Effect.gen(function* () {
+      yield* setup([{ action: "*", resource: "*", effect: "auto" }])
+      // 本例锁定协议重试及终局失败，默认人工回退已由上一真实权限用例覆盖。
+      reviewSettings = new Config.Info({
+        approvals_reviewer: "auto_review",
+        auto_review: new ConfigAutoReview.Info({ strict: true, fallback: "deny" }),
+      })
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => {
+          reviewScript = undefined
+          reviewSettings = new Config.Info({})
+        }),
+      )
+      const service = yield* PermissionV2.Service
+      const sessions = yield* SessionStore.Service
+      const events = yield* EventV2.Service
+      const database = yield* Database.Service
+      const hiddenIDs: SessionMessage.ID[] = []
+      const unsubscribe = yield* events.listen((event) =>
+        Schema.is(SessionEvent.MessagesHidden)(event)
+          ? Effect.sync(() => {
+              hiddenIDs.push(...event.data.messageIDs)
+            })
+          : Effect.void,
+      )
+      yield* Effect.addFinalizer(() => unsubscribe)
+      const accepted = {
+        outcome: "allow",
+        rationale: "bounded protocol fixture",
+        risk_level: "low",
+        user_authorization: "high",
+      }
+      const text = (value: string) =>
+        Stream.make(
+          LLMEvent.textStart({ id: "reply" }),
+          LLMEvent.textDelta({ id: "reply", text: value }),
+          LLMEvent.textEnd({ id: "reply" }),
+          LLMEvent.stepFinish({ index: 0, reason: "stop", usage: { nonCachedInputTokens: 2, outputTokens: 1 } }),
+          LLMEvent.finish({ reason: "stop" }),
+        )
+      const tool = (input: unknown) =>
+        Stream.make(
+          LLMEvent.toolCall({ id: "decision", name: "permission_review_decision", input }),
+          LLMEvent.stepFinish({ index: 0, reason: "tool-calls" }),
+          LLMEvent.finish({ reason: "tool-calls" }),
+        )
+      let sequence = 0
+      const run = (script: Stream.Stream<LLMEvent>[]) => {
+        reviewScript = script
+        reviewRequests.length = 0
+        return service.ask(
+          assertion({ action: "edit", resources: ["src/protocol.ts"], metadata: { diff: `protocol-${++sequence}` } }),
+        )
+      }
+      expect(yield* run([text(JSON.stringify(accepted))])).toMatchObject({ effect: "allow" })
+      expect(reviewRequests).toHaveLength(1)
+      const children = yield* database.db
+        .select()
+        .from(SessionTable)
+        .where(eq(SessionTable.parent_id, SessionV2.ID.make("ses_test")))
+        .all()
+        .pipe(Effect.orDie)
+      expect(children).toHaveLength(1)
+      const child = children[0]
+      if (!child) return yield* Effect.die("Expected reviewer child")
+      const childID = SessionV2.ID.make(child.id)
+      const jsonAudit = yield* sessions.context(childID)
+      expect(
+        jsonAudit
+          .flatMap((message) => (message.type === "assistant" ? message.content : []))
+          .find((part) => part.type === "tool"),
+      ).toMatchObject({
+        name: "permission_review_decision",
+        state: { status: "completed", structured: { ...accepted, source: "json_fallback" } },
+      })
+      // 合法deny不属于协议失败，不能以重试把拒绝变为放行。
+      expect(yield* run([text(JSON.stringify({ ...accepted, outcome: "deny" }))])).toMatchObject({ effect: "deny" })
+      expect(reviewRequests).toHaveLength(1)
+      expect(hiddenIDs).toHaveLength(0)
+      const malformedText = "I forgot to submit the decision tool."
+      expect(yield* run([text(malformedText), tool(accepted)])).toMatchObject({ effect: "allow" })
+      expect(reviewRequests).toHaveLength(2)
+      const prompts = reviewRequests.map((request) =>
+        request.messages
+          .flatMap((message) => message.content)
+          .flatMap((part) => (part.type === "text" ? [part.text] : []))
+          .join("\n"),
+      )
+      expect(prompts[1]).toBe(
+        `${prompts[0]}\n\nProtocol retry: your previous reply was rejected because it did not submit the decision. Avoid prose, questions, explanations of inability, and offers to execute the action — none of these produce a decision. Reassess the same evidence and reply with exactly one permission_review_decision call. If you believe tool calls are unavailable, reply with ONLY the JSON object {"risk_level","user_authorization","outcome","rationale"} as your entire message.`,
+      )
+      expect(hiddenIDs).toHaveLength(2)
+      const hidden = yield* Effect.forEach(hiddenIDs, (id) => sessions.message(id))
+      expect(hidden.map((record) => record?.message)).toMatchObject([
+        {
+          type: "synthetic",
+          metadata: { permissionReviewerRequest: true, hidden: { reason: "permission-reviewer-protocol-retry" } },
+        },
+        {
+          type: "assistant",
+          finish: "error",
+          tokens: { input: 2, output: 1 },
+          metadata: {
+            permissionReviewerRequestID: hiddenIDs[0],
+            hidden: { reason: "permission-reviewer-protocol-retry" },
+          },
+        },
+      ])
+      // 隐藏只影响普通历史；原始读取保留原文与已确认用量，runner也不能重放失败轮次。
+      expect(JSON.stringify(hidden[1]?.message)).toContain(malformedText)
+      expect((yield* sessions.context(childID)).some((message) => hiddenIDs.includes(message.id))).toBe(false)
+      expect((yield* sessions.runnerContext(childID, 0)).some((message) => hiddenIDs.includes(message.id))).toBe(false)
+      expect(
+        (yield* sessions.context(childID))
+          .flatMap((message) => (message.type === "assistant" ? message.content : []))
+          .some(
+            (part) =>
+              part.type === "tool" &&
+              part.state.status === "completed" &&
+              part.state.structured?.source === "tool_call",
+          ),
+      ).toBe(true)
+      expect(yield* run([tool({ outcome: "allow" }), tool(accepted)])).toMatchObject({ effect: "allow" })
+      expect(reviewRequests).toHaveLength(2)
+      // 未完成参数的tool-error也须先闭合真实残片，再按同一协议修复一次。
+      expect(
+        yield* run([
+          Stream.make(
+            LLMEvent.toolInputStart({ id: "broken", name: "permission_review_decision" }),
+            LLMEvent.toolInputDelta({ id: "broken", name: "permission_review_decision", text: "{bad" }),
+            LLMEvent.toolError({ id: "broken", name: "permission_review_decision", message: "malformed input" }),
+          ),
+          tool(accepted),
+        ]),
+      ).toMatchObject({ effect: "allow" })
+      expect(reviewRequests).toHaveLength(2)
+      // Markdown和prose只扩大原文本解码范围，仍须真实落盘json_fallback。
+      expect(yield* run([text("```json\n" + JSON.stringify(accepted) + "\n```")])).toMatchObject({ effect: "allow" })
+      expect(reviewRequests).toHaveLength(1)
+      const prose = { ...accepted, rationale: 'bounded } transfer with "quoted" evidence' }
+      expect(yield* run([text("Based on my analysis:\n" + JSON.stringify(prose))])).toMatchObject({ effect: "allow" })
+      expect(reviewRequests).toHaveLength(1)
+      expect(
+        (yield* sessions.context(childID))
+          .flatMap((message) => (message.type === "assistant" ? message.content : []))
+          .filter((part) => part.type === "tool")
+          .at(-1),
+      ).toMatchObject({ state: { structured: { ...prose, source: "json_fallback" } } })
+      // 语义守卫继续拒绝critical，首对象不符契约时也不能搜索后面的allow。
+      expect(yield* run([text("Decision:\n" + JSON.stringify({ ...accepted, risk_level: "critical" }))])).toMatchObject(
+        { effect: "deny" },
+      )
+      expect(reviewRequests).toHaveLength(1)
+      expect(
+        yield* run(Array.from({ length: 3 }, () => text('Preface {"unrelated":true}\n' + JSON.stringify(accepted)))),
+      ).toMatchObject({ effect: "deny" })
+      expect(reviewRequests).toHaveLength(3)
+      // 畸形显式参数先触发同一协议错误，不能从同轮附带文本挑一个允许结果。
+      const malformedWithText = tool({ outcome: "allow" }).pipe(Stream.concat(text(JSON.stringify(accepted))))
+      expect(yield* run([malformedWithText, malformedWithText, malformedWithText])).toMatchObject({ effect: "deny" })
+      expect(reviewRequests).toHaveLength(3)
+      // 三次总预算耗尽：只隐藏初次失败，第二和第三次真实输出保持可见。
+      const hiddenBeforeFailure = hiddenIDs.length
+      expect(
+        yield* run([text("first malformed reply"), text("second malformed reply"), text("third malformed reply")]),
+      ).toMatchObject({ effect: "deny" })
+      expect(reviewRequests).toHaveLength(3)
+      expect(hiddenIDs).toHaveLength(hiddenBeforeFailure + 2)
+      const visible = JSON.stringify(yield* sessions.context(childID))
+      expect(visible).not.toContain("first malformed reply")
+      expect(visible).toContain("second malformed reply")
+      expect(visible).toContain("third malformed reply")
+      const hiddenBeforeProviderFailure = hiddenIDs.length
+      expect(yield* run([Stream.make(LLMEvent.providerError({ message: "provider unavailable" }))])).toMatchObject({
+        effect: "deny",
+      })
+      expect(reviewRequests).toHaveLength(1)
+      expect(hiddenIDs).toHaveLength(hiddenBeforeProviderFailure)
+      // 取消第二次真实流仍由退出owner收尾，不产生第三次尝试或人工pending。
+      const retryStarted = yield* Deferred.make<void>()
+      const cancelled = yield* run([
+        text("cancel before repair"),
+        Stream.unwrap(Deferred.succeed(retryStarted, undefined).pipe(Effect.as(Stream.never))),
+      ]).pipe(Effect.forkScoped)
+      yield* Deferred.await(retryStarted)
+      yield* Fiber.interrupt(cancelled)
+      expect((yield* sessions.context(childID)).at(-1)).toMatchObject({ type: "assistant", finish: "error" })
+      expect(reviewRequests).toHaveLength(2)
+      expect(hiddenIDs).toHaveLength(hiddenBeforeProviderFailure + 2)
+      expect(yield* service.list()).toEqual([])
+    }),
+  )
+
+  it.effect("retries native reviewer timeouts and protocol errors and decodes prose without relaxing policy", () =>
+    Effect.gen(function* () {
+      yield* setup([{ action: "*", resource: "*", effect: "auto" }])
+      reviewSettings = new Config.Info({
+        approvals_reviewer: "auto_review",
+        auto_review: new ConfigAutoReview.Info({ strict: true, fallback: "deny", timeout_ms: 1000 }),
+      })
+      reviewRequests.length = 0
+      reviewGate = undefined
+      reviewStarted = undefined
+      reviewTerminalWriteFailures = 1
+      reviewTerminals.length = 0
+      let interrupted = 0
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => {
+          reviewScript = undefined
+          reviewSettings = new Config.Info({})
+          reviewStarted = undefined
+          reviewGate = undefined
+          reviewTerminalWriteFailures = 0
+          reviewTerminals.length = 0
+        }),
+      )
+      const service = yield* PermissionV2.Service
+      const sessions = yield* SessionStore.Service
+      const database = yield* Database.Service
+      const decision = {
+        outcome: "allow",
+        rationale: "retry after timeout succeeded",
+        risk_level: "low",
+        user_authorization: "high",
+      }
+      const request = (diff: string) =>
+        assertion({
+          action: "edit",
+          resources: ["src/retry.ts"],
+          metadata: { filepath: "/project/src/retry.ts", diff },
+        })
+      // 就绪信号在真实reasoning写入后发布，TestClock只推进已有单次期限。
+      const hang = (ready: Deferred.Deferred<void>) =>
+        Stream.make(
+          LLMEvent.toolInputStart({ id: "retry-incomplete", name: "permission_review_decision" }),
+          LLMEvent.toolInputDelta({ id: "retry-incomplete", name: "permission_review_decision", text: "{" }),
+          LLMEvent.reasoningStart({ id: "retry" }),
+          LLMEvent.reasoningDelta({ id: "retry", text: "partial review before deadline" }),
+        ).pipe(
+          // 清理归整个假运输流所有，避免ready发布后尚未进入never时遗漏中断计数。
+          Stream.concat(Stream.fromEffect(Deferred.succeed(ready, undefined).pipe(Effect.andThen(Effect.never)))),
+          Stream.ensuring(
+            Effect.sync(() => {
+              interrupted++
+            }),
+          ),
+        )
+      const success = Stream.make(
+        LLMEvent.toolCall({ id: "retry-success", name: "permission_review_decision", input: decision }),
+        LLMEvent.stepFinish({ index: 0, reason: "tool-calls" }),
+        LLMEvent.finish({ reason: "tool-calls" }),
+      )
+      const started = yield* Deferred.make<void>()
+      reviewScript = [hang(started), success]
+      const fiber = yield* service.ask(request("timeout-success")).pipe(Effect.forkScoped)
+      yield* Deferred.await(started)
+      yield* TestClock.adjust("1 second")
+      expect(yield* Fiber.join(fiber)).toMatchObject({ effect: "allow" })
+      expect(interrupted).toBe(1)
+      expect(reviewRequests).toHaveLength(2)
+      // 超时补试保持证据原文，只追加source的一份时间预算，不累积协议提示。
+      const timeoutInputs = reviewRequests.map((request) =>
+        request.messages
+          .flatMap((message) => message.content)
+          .filter((part) => part.type === "text")
+          .map((part) => part.text)
+          .join("\n"),
+      )
+      expect(timeoutInputs[0]).not.toContain("Time advisory")
+      expect(timeoutInputs[1]).toContain("Time advisory")
+      expect(timeoutInputs[1]).toContain("600 words")
+      expect(timeoutInputs[1]?.split("\n\nTime advisory:")[0]).toBe(timeoutInputs[0])
+      expect(timeoutInputs[1]?.match(/Time advisory:/g)).toHaveLength(1)
+      expect(reviewTerminalWriteFailures).toBe(0)
+      expect(reviewTerminals).toEqual(["tool", "assistant"])
+      const child = yield* database.db
+        .select()
+        .from(SessionTable)
+        .where(eq(SessionTable.parent_id, SessionV2.ID.make("ses_test")))
+        .get()
+        .pipe(Effect.orDie)
+      expect(child).toBeDefined()
+      if (!child) return yield* Effect.die("Expected reviewer child")
+      const childID = SessionV2.ID.make(child.id)
+      const traces = yield* sessions.context(childID)
+      expect(traces.find((message) => message.type === "assistant" && message.finish === "error")).toMatchObject({
+        time: { completed: DateTime.makeUnsafe(1000) },
+      })
+      expect(JSON.stringify(traces)).toContain("partial review before deadline")
+      // completed winner保留，首次清理半写不留下open工具，也不能使原超时跳过下一次审查。
+      expect(
+        traces
+          .flatMap((message) => (message.type === "assistant" ? message.content : []))
+          .filter(
+            (part) => part.type === "tool" && (part.state.status === "pending" || part.state.status === "running"),
+          ),
+      ).toEqual([])
+      // 每次各自耗尽1000ms后再启动下一次，三次都必须先中断和关闭原流。
+      const starts = yield* Effect.forEach([0, 1, 2], () => Deferred.make<void>())
+      reviewRequests.length = 0
+      interrupted = 0
+      reviewScript = starts.map(hang)
+      const exhausted = yield* service.ask(request("timeout-exhausted")).pipe(Effect.forkScoped)
+      yield* Effect.forEach(starts, (ready) => Deferred.await(ready).pipe(Effect.andThen(TestClock.adjust("1 second"))))
+      expect(yield* Fiber.join(exhausted)).toMatchObject({ effect: "deny" })
+      expect(interrupted).toBe(3)
+      expect(reviewRequests).toHaveLength(3)
+      expect(
+        (yield* sessions.context(childID))
+          .filter((message) => message.type === "assistant")
+          .every((message) => message.time.completed !== undefined),
+      ).toBe(true)
+      // 完整文本事件表示已完成但未裁决的协议失败；缺text-start会成为运输defect而不应重试。
+      const mixedStarted = yield* Deferred.make<void>()
+      reviewRequests.length = 0
+      reviewScript = [
+        Stream.make(
+          LLMEvent.textStart({ id: "mixed" }),
+          LLMEvent.textDelta({ id: "mixed", text: "No decision" }),
+          LLMEvent.textEnd({ id: "mixed" }),
+          LLMEvent.stepFinish({ index: 0, reason: "stop" }),
+          LLMEvent.finish({ reason: "stop" }),
+        ),
+        hang(mixedStarted),
+        success,
+      ]
+      const mixed = yield* service.ask(request("mixed-retry")).pipe(Effect.forkScoped)
+      yield* Deferred.await(mixedStarted)
+      yield* TestClock.adjust("1 second")
+      expect(yield* Fiber.join(mixed)).toMatchObject({ effect: "allow" })
+      expect(reviewRequests).toHaveLength(3)
+      const mixedInputs = reviewRequests.map((item) => JSON.stringify(item.messages))
+      expect(mixedInputs[0]).not.toContain("Time advisory")
+      expect(mixedInputs[1]).toContain("Protocol retry:")
+      expect(mixedInputs[1]).not.toContain("Time advisory")
+      expect(mixedInputs[2]).toContain("600 words")
+      expect(mixedInputs[2]).not.toContain("Protocol retry:")
+      expect(mixedInputs[2]?.match(/Time advisory:/g)).toHaveLength(1)
+      // 未配置时真实期限为120秒；显式1000ms的前述回归继续证明配置优先。
+      reviewSettings = new Config.Info({
+        approvals_reviewer: "auto_review",
+        auto_review: new ConfigAutoReview.Info({ strict: true, fallback: "deny" }),
+      })
+      const defaultStarted = yield* Deferred.make<void>()
+      reviewRequests.length = 0
+      reviewScript = [hang(defaultStarted), success]
+      const defaultTimeout = yield* service.ask(request("default-timeout")).pipe(Effect.forkScoped)
+      yield* Deferred.await(defaultStarted)
+      yield* TestClock.adjust("119999 millis")
+      expect(reviewRequests).toHaveLength(1)
+      yield* TestClock.adjust("1 millis")
+      expect(yield* Fiber.join(defaultTimeout)).toMatchObject({ effect: "allow" })
+      expect(reviewRequests).toHaveLength(2)
+      // 外部取消不是单次超时，不能消费补试次数或留下人工pending。
+      const cancelStarted = yield* Deferred.make<void>()
+      reviewRequests.length = 0
+      interrupted = 0
+      reviewScript = [hang(cancelStarted)]
+      const cancelled = yield* service.ask(request("external-cancel")).pipe(Effect.forkScoped)
+      yield* Deferred.await(cancelStarted)
+      // 等计时竞争的fiber进入等待后再取消；零推进不消耗任何单次预算。
+      yield* TestClock.adjust("0 millis")
+      yield* Fiber.interrupt(cancelled)
+      expect(interrupted).toBe(1)
+      expect(reviewRequests).toHaveLength(1)
+      expect(yield* service.list()).toEqual([])
+      const messages = yield* sessions.context(childID)
+      expect(
+        messages
+          .flatMap((message) => (message.type === "assistant" ? message.content : []))
+          .filter(
+            (part) => part.type === "tool" && (part.state.status === "pending" || part.state.status === "running"),
+          ),
+      ).toEqual([])
+    }),
+  )
 })

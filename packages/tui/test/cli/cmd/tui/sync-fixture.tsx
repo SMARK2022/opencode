@@ -24,7 +24,12 @@ export async function wait(fn: () => boolean, timeout = 2000) {
   }
 }
 
-type Ctx = { kv: ReturnType<typeof useKV>; project: ReturnType<typeof useProject>; sync: ReturnType<typeof useSync>; route: ReturnType<typeof useRoute> }
+type Ctx = {
+  kv: ReturnType<typeof useKV>
+  project: ReturnType<typeof useProject>
+  sync: ReturnType<typeof useSync>
+  route: ReturnType<typeof useRoute>
+}
 
 export async function mount(override?: FetchHandler, state?: string, initialRoute?: Route, render?: () => JSX.Element) {
   // 显式测试目录仍优先；批量隔离运行时不读写固定/tmp或用户全局KV。
@@ -54,27 +59,31 @@ export async function mount(override?: FetchHandler, state?: string, initialRout
 
   const app = await testRender(
     () => (
-    <TestTuiContexts paths={statePath ? { state: statePath } : undefined}>
-      <ArgsProvider>
-        <KVProvider>
-          <SDKProvider url="http://test" directory={directory} testTransport={{ fetch: calls.fetch, events: events.source }}>
-            {/* 活动Session资格由现有Route提供，fixture与生产同序，不添加可选context回退。 */}
-            <RouteProvider initialRoute={initialRoute}>
-              <PermissionProvider>
-                <ProjectProvider>
-                  <ExitProvider exit={() => {}}>
-                    <SyncProvider>
-                      <Probe />
-                    {render?.()}
-                    </SyncProvider>
-                  </ExitProvider>
-                </ProjectProvider>
-              </PermissionProvider>
-            </RouteProvider>
-          </SDKProvider>
-        </KVProvider>
-      </ArgsProvider>
-    </TestTuiContexts>
+      <TestTuiContexts paths={statePath ? { state: statePath } : undefined}>
+        <ArgsProvider>
+          <KVProvider>
+            <SDKProvider
+              url="http://test"
+              directory={directory}
+              testTransport={{ fetch: calls.fetch, events: events.source }}
+            >
+              {/* 活动Session资格由现有Route提供，fixture与生产同序，不添加可选context回退。 */}
+              <RouteProvider initialRoute={initialRoute}>
+                <PermissionProvider>
+                  <ProjectProvider>
+                    <ExitProvider exit={() => {}}>
+                      <SyncProvider>
+                        <Probe />
+                        {render?.()}
+                      </SyncProvider>
+                    </ExitProvider>
+                  </ProjectProvider>
+                </PermissionProvider>
+              </RouteProvider>
+            </SDKProvider>
+          </KVProvider>
+        </ArgsProvider>
+      </TestTuiContexts>
     ),
     {
       // core/testing 在 Linux 默认关闭 renderer 线程，但 Windows 默认开启。
@@ -100,4 +109,3 @@ export async function mount(override?: FetchHandler, state?: string, initialRout
   await wait(() => sync.status === "complete")
   return { app, emit: events.emit, kv, project, sync, route, session: calls.session }
 }
-

@@ -86,13 +86,13 @@ const it = testEffect(layer(false))
 const itWorkspaces = testEffect(layer(true))
 
 const withSession = (input?: Parameters<SessionNs.Interface["create"]>[0]) =>
-// #228：withSession 负责会话创建与清理——acquireRelease 保证测试隔离
+  // #228：withSession 负责会话创建与清理——acquireRelease 保证测试隔离
   Effect.acquireRelease(SessionNs.use.create(input), (created) =>
     SessionNs.Service.use((session) => session.remove(created.id).pipe(Effect.ignore)),
   )
 
 const initGitRepo = (directory: string) =>
-// #228：测试前置——临时 git repo 初始化，home 切换场景需要真实 git 项目
+  // #228：测试前置——临时 git repo 初始化，home 切换场景需要真实 git 项目
   Effect.gen(function* () {
     yield* Effect.promise(() => $`git init`.cwd(directory).quiet())
     yield* Effect.promise(() => $`git config core.fsmonitor false`.cwd(directory).quiet())
@@ -104,7 +104,7 @@ const initGitRepo = (directory: string) =>
 
 // #228：home-as-global 切换测试需要跨 project 可见性——这些临时 repo 在 active worktree 之外，realpath 匹配 InstanceStore 行为
 const tempGitRepo = () =>
-// #228：home-as-global 切换需要跨 project 可见性——repo 在 active worktree 之外
+  // #228：home-as-global 切换需要跨 project 可见性——repo 在 active worktree 之外
   Effect.acquireRelease(
     Effect.promise(() => mkdtemp(path.join(os.tmpdir(), "opencode-session-list-"))).pipe(
       Effect.flatMap((directory) => Effect.promise(() => realpath(directory))),
@@ -115,7 +115,7 @@ const tempGitRepo = () =>
 
 // #228：非 git 的 ~ 实例——realpath 保证 session 行存储的 resolved 目录与 OPENCODE_TEST_HOME 比较一致
 const tempDirectory = () =>
-// #228：非 git 的 ~ 实例——realpath 保证存储目录与 OPENCODE_TEST_HOME 比较一致
+  // #228：非 git 的 ~ 实例——realpath 保证存储目录与 OPENCODE_TEST_HOME 比较一致
   Effect.acquireRelease(
     Effect.promise(() => mkdtemp(path.join(os.tmpdir(), "opencode-session-list-"))).pipe(
       Effect.flatMap((directory) => Effect.promise(() => realpath(directory))),
@@ -125,7 +125,7 @@ const tempDirectory = () =>
 
 // #228：OPENCODE_TEST_HOME 控制 Global.Path.home——scoped override 避免 fake home 泄漏到后续测试
 const withTestHome = <A, E, R>(home: string, effect: Effect.Effect<A, E, R>) =>
-// #228：OPENCODE_TEST_HOME 控制 Global.Path.home——scoped override 不泄漏到后续测试
+  // #228：OPENCODE_TEST_HOME 控制 Global.Path.home——scoped override 不泄漏到后续测试
   Effect.acquireUseRelease(
     Effect.sync(() => {
       const previous = process.env.OPENCODE_TEST_HOME
@@ -142,7 +142,7 @@ const withTestHome = <A, E, R>(home: string, effect: Effect.Effect<A, E, R>) =>
 
 // #228：Windows 路径匹配是 query-time 兼容边界——临时进入 win32 分支测试反斜杠/大小写归一化
 const withPlatform = <A, E, R>(platform: typeof process.platform, effect: Effect.Effect<A, E, R>) =>
-// #228：临时进入 win32 分支测试反斜杠/大小写归一化——不触碰真实宿主 FS
+  // #228：临时进入 win32 分支测试反斜杠/大小写归一化——不触碰真实宿主 FS
   Effect.acquireUseRelease(
     Effect.sync(() => {
       const original = Object.getOwnPropertyDescriptor(process, "platform")
@@ -162,7 +162,7 @@ afterEach(async () => {
 
 describe("session.list", () => {
   it.instance(
-// #228：it.instance 提供 scoped 临时目录与实例上下文
+    // #228：it.instance 提供 scoped 临时目录与实例上下文
     "does not filter by directory when directory is omitted",
     () =>
       Effect.gen(function* () {
@@ -192,25 +192,25 @@ describe("session.list", () => {
 
   it.instance(
     "path-scoped session switching from home includes sessions from every project",
-// #228：核心场景——home 目录 list 必须包含每个 project 的会话，验证 global OR 臂
+    // #228：核心场景——home 目录 list 必须包含每个 project 的会话，验证 global OR 臂
     () =>
       Effect.gen(function* () {
         const test = yield* TestInstance
         const otherProject = yield* tempGitRepo()
-// #228：跨 project 会话用独立 git repo 构造——验证 global OR 真实命中
+        // #228：跨 project 会话用独立 git repo 构造——验证 global OR 真实命中
 
         yield* withTestHome(
-// #228：测试内切换 home——恢复由 acquireUseRelease 保证
+          // #228：测试内切换 home——恢复由 acquireUseRelease 保证
           test.directory,
           Effect.gen(function* () {
             const home = yield* withSession({ title: "home-switch-root" })
-// #228：home 目录内的会话与跨 project 会话都应被 home 视图列出
+            // #228：home 目录内的会话与跨 project 会话都应被 home 视图列出
             const other = yield* withSession({ title: "other-switch-root" }).pipe(provideInstance(otherProject))
 
             const ids = (yield* SessionNs.Service.use((session) =>
-// #228：list 断言使用真实 service 路径——不 mock 查询逻辑
+              // #228：list 断言使用真实 service 路径——不 mock 查询逻辑
               session.list({
-// #228：list 入参覆盖 directory/path/start——验证 home 展开与目录过滤组合
+                // #228：list 入参覆盖 directory/path/start——验证 home 展开与目录过滤组合
                 directory: test.directory,
                 path: SessionPath.relative(test.directory, test.directory),
                 start: Date.now() - 30 * 24 * 60 * 60 * 1000,
@@ -218,7 +218,7 @@ describe("session.list", () => {
             )).map((session) => session.id)
 
             expect(ids).toContain(home.id)
-// #228：home 视图必须包含 home 目录会话——缺省会话不丢失
+            // #228：home 视图必须包含 home 目录会话——缺省会话不丢失
             expect(ids).toContain(other.id)
           }),
         )
@@ -262,7 +262,7 @@ describe("session.list", () => {
       Effect.gen(function* () {
         const test = yield* TestInstance
         const homeDir = yield* tempDirectory()
-// #228：非 git home 目录——验证无 project 会话仍被列出
+        // #228：非 git home 目录——验证无 project 会话仍被列出
         const otherProject = yield* tempGitRepo()
 
         yield* withTestHome(
@@ -302,16 +302,16 @@ describe("session.list", () => {
             const current = yield* withSession({ title: "current-directory-only" })
             const home = yield* withSession({ title: "home-directory-only" }).pipe(provideInstance(homeDir))
 
-            const ids = (yield* SessionNs.Service.use((session) =>
-              session.list({ directory: test.directory }),
-            )).map((session) => session.id)
+            const ids = (yield* SessionNs.Service.use((session) => session.list({ directory: test.directory }))).map(
+              (session) => session.id,
+            )
 
             expect(ids).toContain(current.id)
             expect(ids).not.toContain(home.id)
 
-            const homeIDs = (yield* SessionNs.Service.use((session) =>
-              session.list({ directory: homeDir }),
-            ).pipe(provideInstance(homeDir))).map((session) => session.id)
+            const homeIDs = (yield* SessionNs.Service.use((session) => session.list({ directory: homeDir })).pipe(
+              provideInstance(homeDir),
+            )).map((session) => session.id)
 
             expect(homeIDs).toContain(home.id)
             expect(homeIDs).not.toContain(current.id)
@@ -322,10 +322,10 @@ describe("session.list", () => {
   )
 
   it.instance("path-scoped home matching treats Windows home spellings as equivalent", () =>
-// #228：Windows 拼写等价——反斜杠/大小写/尾部斜杠变体必须命中同一 home
+    // #228：Windows 拼写等价——反斜杠/大小写/尾部斜杠变体必须命中同一 home
     Effect.gen(function* () {
       const homeProjectID = Project.ID.make("proj_windows_home")
-// #228：直接插入 DB 行模拟历史 Windows 路径——绕过运行时创建避免路径解析干扰
+      // #228：直接插入 DB 行模拟历史 Windows 路径——绕过运行时创建避免路径解析干扰
       const otherProjectID = Project.ID.make("proj_windows_other")
       const home = yield* withSession({ title: "windows-home-switch" })
       const other = yield* withSession({ title: "windows-other-switch" })
@@ -341,8 +341,9 @@ describe("session.list", () => {
 
       yield* Database.Service.use(({ db }) =>
         Effect.gen(function* () {
-          yield* db.insert(ProjectTable)
-// #228：project 行固定 worktree——与 session 行的 directory/path 分离构造
+          yield* db
+            .insert(ProjectTable)
+            // #228：project 行固定 worktree——与 session 行的 directory/path 分离构造
             .values([
               {
                 id: homeProjectID,
@@ -362,12 +363,14 @@ describe("session.list", () => {
               },
             ])
             .run()
-          yield* db.update(SessionTable)
-// #228：把会话指向特定 project 并写入 Windows 拼写的 directory——构造历史数据
+          yield* db
+            .update(SessionTable)
+            // #228：把会话指向特定 project 并写入 Windows 拼写的 directory——构造历史数据
             .set({ project_id: homeProjectID, directory: "C:\\Users\\Alice", path: "" })
             .where(eq(SessionTable.id, home.id))
             .run()
-          yield* db.update(SessionTable)
+          yield* db
+            .update(SessionTable)
             .set({ project_id: otherProjectID, directory: "D:/Work/Repo", path: "" })
             .where(eq(SessionTable.id, other.id))
             .run()
@@ -375,7 +378,7 @@ describe("session.list", () => {
       )
 
       const ctx = {
-// #228：win32 实例上下文——directory 用小写+尾部斜杠验证归一化路径
+        // #228：win32 实例上下文——directory 用小写+尾部斜杠验证归一化路径
         directory: "c:/users/alice/",
         worktree: "C:/Users/Alice",
         project: {
@@ -387,7 +390,7 @@ describe("session.list", () => {
         },
       }
       const otherCtx = {
-// #228：另一 project 的上下文——验证 home 视图跨 project 可见
+        // #228：另一 project 的上下文——验证 home 视图跨 project 可见
         directory: "D:/Work/Repo",
         worktree: "D:/Work/Repo",
         project: {
@@ -400,7 +403,7 @@ describe("session.list", () => {
       }
 
       const ids = yield* withPlatform(
-// #228：win32 分支验证——生产代码按 process.platform 分支
+        // #228：win32 分支验证——生产代码按 process.platform 分支
         "win32",
         withTestHome(
           "C:/Users/Alice/",
@@ -433,13 +436,13 @@ describe("session.list", () => {
 
       expect(otherIDs).toContain(home.id)
       expect(otherIDs).toContain(other.id)
-// #228：跨 project 视图也保持双向可见——home 展开不隔离 project
+      // #228：跨 project 视图也保持双向可见——home 展开不隔离 project
     }),
   )
 
   it.instance(
     "filters by directory when directory is provided",
-// #228：显式 directory 过滤不受 home 展开影响——目录精确匹配优先
+    // #228：显式 directory 过滤不受 home 展开影响——目录精确匹配优先
     () =>
       Effect.gen(function* () {
         const test = yield* TestInstance
@@ -730,7 +733,7 @@ describe("session.list", () => {
         )
 
         const { db } = yield* Database.Service
-// #228：直接 DB 写历史行——运行时 API 无法构造的拼写变体
+        // #228：直接 DB 写历史行——运行时 API 无法构造的拼写变体
         yield* db
           .update(SessionTable)
           .set({ path: null })
@@ -862,7 +865,7 @@ describe("session.list", () => {
   // #143：git 子项目列表必须 OR 进 global 项目父会话
   it.instance(
     "includes global parent sessions from a git child project",
-// #228：git 子项目必须 OR 进 global 父会话——#143 回归覆盖
+    // #228：git 子项目必须 OR 进 global 父会话——#143 回归覆盖
     () =>
       Effect.gen(function* () {
         const test = yield* TestInstance
@@ -880,18 +883,16 @@ describe("session.list", () => {
         })
         // #143：无 git 的 outer 会话 project_id=global
         const parent = yield* withSession({ title: "global-parent" }).pipe(provideInstance(test.directory))
-// #228：无 git 的 outer 会话 project_id=global——子目录 list 必须能命中
+        // #228：无 git 的 outer 会话 project_id=global——子目录 list 必须能命中
         const current = yield* withSession({ title: "git-current" }).pipe(provideInstance(child))
         // #143：在 git 子目录上下文 list，才能触发 global OR 臂
-        const ids = (
-          yield* SessionNs.Service.use((session) =>
-            session.list({
-              directory: child,
-              path: SessionPath.relative(repo, child),
-              roots: true,
-            }),
-          ).pipe(provideInstance(child))
-        ).map((s) => s.id)
+        const ids = (yield* SessionNs.Service.use((session) =>
+          session.list({
+            directory: child,
+            path: SessionPath.relative(repo, child),
+            roots: true,
+          }),
+        ).pipe(provideInstance(child))).map((s) => s.id)
         expect(ids).toContain(parent.id)
         expect(ids).toContain(current.id)
       }),
@@ -959,9 +960,9 @@ describe("session.list", () => {
         )
 
         // title 模式经 list 公开入口：覆盖 ListInput.searchMode 到 searchCondition 的全链路。
-        const titleIDs = (
-          yield* SessionNs.Service.use((session) => session.list({ search: "cjk", searchMode: "title" }))
-        ).map((session) => session.id)
+        const titleIDs = (yield* SessionNs.Service.use((session) =>
+          session.list({ search: "cjk", searchMode: "title" }),
+        )).map((session) => session.id)
         expect(titleIDs).toContain(titled.id)
         expect(titleIDs).not.toContain(bodyOnly.id)
 
@@ -996,9 +997,9 @@ describe("session.list", () => {
         )
 
         // title AND 逐 token 命中标题——alpha/beta 分居两字段时必须整体漏掉。
-        const titleIDs = (
-          yield* SessionNs.Service.use((session) => session.list({ search: "alpha beta", searchMode: "title", roots: true }))
-        ).map((session) => session.id)
+        const titleIDs = (yield* SessionNs.Service.use((session) =>
+          session.list({ search: "alpha beta", searchMode: "title", roots: true }),
+        )).map((session) => session.id)
         expect(titleIDs).not.toContain(cross.id)
         expect(titleIDs).not.toContain(child.id)
 
@@ -1041,7 +1042,9 @@ describe("session.list", () => {
         const ids = new Set([...first.sessions, ...second.sessions].map((session) => session.id))
         expect(ids.size).toBe(first.sessions.length + second.sessions.length)
         // 满候选页即使命中为空也不能标记done，否则后续正文命中会被截断。
-        const empty = yield* SessionNs.Service.use((session) => session.searchScan({ search: "absent-token", batch: 2 }))
+        const empty = yield* SessionNs.Service.use((session) =>
+          session.searchScan({ search: "absent-token", batch: 2 }),
+        )
         expect([empty.sessions.length, empty.done, empty.nextCursor !== null]).toEqual([0, false, true])
       }),
     { git: true },
@@ -1202,7 +1205,11 @@ describe("session.list", () => {
           seq: 2,
           data: {
             agent: "build",
-            model: { id: ModelV2.ID.make("model"), providerID: ProviderV2.ID.make("provider"), variant: ModelV2.VariantID.make("default") },
+            model: {
+              id: ModelV2.ID.make("model"),
+              providerID: ProviderV2.ID.make("provider"),
+              variant: ModelV2.VariantID.make("default"),
+            },
             content: [
               { type: "text", text: "v2-assistant-visible-needle" },
               { type: "reasoning", id: "v2-reasoning", text: "v2-thinking-hidden-needle" },
@@ -1263,7 +1270,7 @@ describe("session.list", () => {
         for (const term of [
           "bash",
           "quoted v2 path",
-          '$TARGET',
+          "$TARGET",
           'grep "v2 safe phrase"',
           '> "v2 out file"',
           "$(pwd)",

@@ -38,7 +38,6 @@ type EventMetadata = {
   workspace: string | undefined
 }
 
-
 // #164：全局 directory 事件始终投递（重连/跨实例广播）
 // #164/#165：显式 project 字段必须匹配当前项目，防止共享 daemon SSE 跨项目泄漏
 // #570：活动 Session 是投递的第二权威 owner——project 不匹配但事件 sessionID 等于
@@ -77,15 +76,21 @@ export function useEvent() {
       // 重连通知始终投递，其余事件只在一次主分发前检查项目归属。
       const activeSessionID = route.data.type === "session" ? route.data.sessionID : undefined
       // 每次投递读取route与顶层Session ID，不缓存订阅时身份或猜测第二身份源。
-      const eventSessionID = "sessionID" in event.payload.properties
-        ? typeof event.payload.properties.sessionID === "string"
-          ? event.payload.properties.sessionID
+      const eventSessionID =
+        "sessionID" in event.payload.properties
+          ? typeof event.payload.properties.sessionID === "string"
+            ? event.payload.properties.sessionID
+            : undefined
           : undefined
-        : undefined
-      if (event.payload.type !== "server.connected" && !shouldDeliverScopedEvent(
-        { directory: event.directory, project: (event as { project?: string }).project, sessionID: eventSessionID },
-        project.project(), activeSessionID,
-      )) return
+      if (
+        event.payload.type !== "server.connected" &&
+        !shouldDeliverScopedEvent(
+          { directory: event.directory, project: (event as { project?: string }).project, sessionID: eventSessionID },
+          project.project(),
+          activeSessionID,
+        )
+      )
+        return
       handler(event.payload, { directory: event.directory, workspace: event.workspace })
     })
   }

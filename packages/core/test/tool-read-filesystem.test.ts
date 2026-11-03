@@ -40,30 +40,51 @@ describe("ReadToolFileSystem", () => {
       expect(parsed.physicalBytesRead).toBeLessThanOrEqual(256 * 1024 + 16 * 1024)
       expect(parsed.postWindowBytes).toBeLessThanOrEqual(256 * 1024 + 16 * 1024)
       expect(budget.remaining).toBe(0)
-      expect(yield* Effect.promise(() => readOutlineCached(file, parsed.count, 1, Buffer.byteLength(source), undefined, false, budget))).toBeUndefined()
+      expect(
+        yield* Effect.promise(() =>
+          readOutlineCached(file, parsed.count, 1, Buffer.byteLength(source), undefined, false, budget),
+        ),
+      ).toBeUndefined()
       const plain = path.join(data.directory, "boundaries.txt")
       yield* data.files.writeFileString(plain, "alpha\r\n\rbravo\ncharlie")
-      expect(yield* ReadToolFileSystem.read(data.fs, plain, "boundaries.txt", { limit: 20 }))
-        .toMatchObject({ content: "alpha\n\nbravo\ncharlie", truncated: false, read: { total: 4, totalExact: true } })
+      expect(yield* ReadToolFileSystem.read(data.fs, plain, "boundaries.txt", { limit: 20 })).toMatchObject({
+        content: "alpha\n\nbravo\ncharlie",
+        truncated: false,
+        read: { total: 4, totalExact: true },
+      })
       // 单行超过正文预算也必须有界停止；不能为了等换行组装整份文件。
       yield* data.files.writeFileString(plain, "x".repeat(1024 * 1024))
-      expect(yield* ReadToolFileSystem.read(data.fs, plain, "boundaries.txt"))
-        .toMatchObject({ content: "", truncated: true, read: { returned: 0, total: 1, totalExact: false, cut: true } })
+      expect(yield* ReadToolFileSystem.read(data.fs, plain, "boundaries.txt")).toMatchObject({
+        content: "",
+        truncated: true,
+        read: { returned: 0, total: 1, totalExact: false, cut: true },
+      })
       const firstLine = "a".repeat(16 * 1024 - 4) + "\u{1F600}"
       yield* data.files.writeFileString(plain, `\uFEFF${firstLine}\nbeta`)
-      const unicode = yield* Effect.promise(() => ReadLines.readTextPage(plain, { offset: 1, limit: 20, contentBytesLimit: Infinity }))
+      const unicode = yield* Effect.promise(() =>
+        ReadLines.readTextPage(plain, { offset: 1, limit: 20, contentBytesLimit: Infinity }),
+      )
       expect(unicode.raw).toEqual([`\uFEFF${firstLine}`, "beta"])
-      expect(yield* ReadToolFileSystem.read(data.fs, plain, "boundaries.txt", { limit: 20 }))
-        .toMatchObject({ content: firstLine, truncated: true, next: 2 })
+      expect(yield* ReadToolFileSystem.read(data.fs, plain, "boundaries.txt", { limit: 20 })).toMatchObject({
+        content: firstLine,
+        truncated: true,
+        next: 2,
+      })
       // LF 和孤立 CR 后的坏字节均在已完成单行页之外，不得使该页失败。
       for (const end of [10, 13]) {
         yield* data.files.writeFile(plain, Uint8Array.from([111, 110, 101, end, 0x80]))
-        expect(yield* ReadToolFileSystem.read(data.fs, plain, "boundaries.txt", { limit: 1 })).toMatchObject({ content: "one", truncated: true, next: 2 })
+        expect(yield* ReadToolFileSystem.read(data.fs, plain, "boundaries.txt", { limit: 1 })).toMatchObject({
+          content: "one",
+          truncated: true,
+          next: 2,
+        })
       }
       yield* Effect.promise(async () => {
         const controller = new AbortController()
         controller.abort()
-        await expect(ReadLines.readTextPage(plain, { offset: 1, limit: 1, signal: controller.signal })).rejects.toMatchObject({ name: "AbortError" })
+        await expect(
+          ReadLines.readTextPage(plain, { offset: 1, limit: 1, signal: controller.signal }),
+        ).rejects.toMatchObject({ name: "AbortError" })
       })
     }),
   )
@@ -78,7 +99,8 @@ describe("ReadToolFileSystem", () => {
       yield* Effect.promise(() => utimes(file, stamp, stamp))
       const first = yield* ReadToolFileSystem.read(data.fs, file, "fingerprint.txt", { limit: 1 })
       const next = yield* ReadToolFileSystem.read(data.fs, file, "fingerprint.txt", { offset: 2 })
-      if (!("read" in first) || !first.read || !("read" in next) || !next.read) throw new Error("Expected text Read metadata")
+      if (!("read" in first) || !first.read || !("read" in next) || !next.read)
+        throw new Error("Expected text Read metadata")
       expect(first.read.fp).toHaveLength(40)
       expect(next.read.fp).toBe(first.read.fp)
       const unchanged = yield* ReadToolFileSystem.read(data.fs, file, "fingerprint.txt", { limit: 1 })
@@ -114,15 +136,25 @@ describe("ReadToolFileSystem", () => {
       const first = yield* ReadToolFileSystem.read(fixtureData.fs, file, "lines.txt")
       expect(first).toMatchObject({ type: "text-page", truncated: true, next: 201 })
       expect(first.content.split("\n")).toHaveLength(200)
-      expect("read" in first ? first.read : undefined).toMatchObject({ start: 1, end: 200, returned: 200, total: 1601, totalExact: true, size: 3201, stub: false })
+      expect("read" in first ? first.read : undefined).toMatchObject({
+        start: 1,
+        end: 200,
+        returned: 200,
+        total: 1601,
+        totalExact: true,
+        size: 3201,
+        stub: false,
+      })
       expect("read" in first ? first.read?.modifiedMs : undefined).toBeNumber()
       // 默认和显式上限分别验证，不能用扩大后续请求来绕过新的 200 行分页。
       // 每个中间页都用默认值锁定连续 next，不能把末页改为显式大页绕过新默认。
-      yield* Effect.forEach([201, 401, 601, 801, 1001, 1201, 1401], (offset) => Effect.gen(function* () {
-        const page = yield* ReadToolFileSystem.read(fixtureData.fs, file, "lines.txt", { offset })
-        expect(page.content.split("\n")).toHaveLength(200)
-        expect(page).toMatchObject({ truncated: true, next: offset + 200 })
-      }))
+      yield* Effect.forEach([201, 401, 601, 801, 1001, 1201, 1401], (offset) =>
+        Effect.gen(function* () {
+          const page = yield* ReadToolFileSystem.read(fixtureData.fs, file, "lines.txt", { offset })
+          expect(page.content.split("\n")).toHaveLength(200)
+          expect(page).toMatchObject({ truncated: true, next: offset + 200 })
+        }),
+      )
       // next 是续页 offset，末页恰好返回余下正文且不制造另一页。
       const last = yield* ReadToolFileSystem.read(fixtureData.fs, file, "lines.txt", { offset: 1601 })
       expect(last.content.split("\n")).toHaveLength(1)
@@ -151,8 +183,11 @@ describe("ReadToolFileSystem", () => {
       const directory = path.join(fixtureData.directory, "entries")
       yield* fixtureData.files.makeDirectory(directory)
       // 使用真实 entries，过滤、排序和 next 都由实际 list 实现承担，不伪造 FS 返回值。
-      yield* Effect.forEach(Array.from({ length: 1501 }, (_, index) => String(index).padStart(4, "0")),
-        (name) => fixtureData.files.writeFileString(path.join(directory, name), ""), { concurrency: 16, discard: true })
+      yield* Effect.forEach(
+        Array.from({ length: 1501 }, (_, index) => String(index).padStart(4, "0")),
+        (name) => fixtureData.files.writeFileString(path.join(directory, name), ""),
+        { concurrency: 16, discard: true },
+      )
       const entries = yield* ReadToolFileSystem.list(fixtureData.fs, directory)
       expect(entries.entries).toHaveLength(200)
       expect(entries).toMatchObject({ total: 1501, truncated: true, next: 201 })
@@ -161,11 +196,13 @@ describe("ReadToolFileSystem", () => {
       expect(requested.entries).toHaveLength(1500)
       expect(requested).toMatchObject({ truncated: true, next: 1501 })
       // 过滤排序后的目录页也逐页推进，不能仅修改首页数量而漏掉中间 entries。
-      yield* Effect.forEach([201, 401, 601, 801, 1001, 1201], (offset) => Effect.gen(function* () {
-        const page = yield* ReadToolFileSystem.list(fixtureData.fs, directory, { offset })
-        expect(page.entries).toHaveLength(200)
-        expect(page).toMatchObject({ total: 1501, truncated: true, next: offset + 200 })
-      }))
+      yield* Effect.forEach([201, 401, 601, 801, 1001, 1201], (offset) =>
+        Effect.gen(function* () {
+          const page = yield* ReadToolFileSystem.list(fixtureData.fs, directory, { offset })
+          expect(page.entries).toHaveLength(200)
+          expect(page).toMatchObject({ total: 1501, truncated: true, next: offset + 200 })
+        }),
+      )
       const remaining = yield* ReadToolFileSystem.list(fixtureData.fs, directory, { offset: 1401 })
       expect(remaining.entries).toHaveLength(101)
       expect(remaining.truncated).toBe(false)

@@ -52,39 +52,39 @@ not implementation authority.
 
 ## 3. Repository Context
 
-| Source | Why it constrains this task |
-| --- | --- |
-| `CONTEXT.md` | Tool、Session、Message、Project 术语；Windows/PowerShell CRLF preservation 是 SMARK fork 的 load-bearing delta。 |
-| 根 `AGENTS.md` | 精准修改、避免 `any`、tests/typecheck 必须在 `packages/opencode` 运行。 |
-| `packages/opencode/AGENTS.md` | Effect 组合与模块边界；文件系统操作继续使用既有 Effect `AppFileSystem`。 |
-| `packages/opencode/test/AGENTS.md` | Tool 行为通过 `testEffect`/`TestInstance` seam 验证。 |
-| `.opencode/policy/first-principles-engineering.md` | 修 first divergence、单一 primary path、无 fallback、forward/reverse traceability、15% 中文注释门禁。 |
-| `docs/adr/` | 无 Tool 编辑/行尾相关 ADR；不新增 ADR，因为改动局限于现有 Tool 文件写盘合同。 |
-| Pi `packages/agent/src/harness/tools/{read,edit,write,edit-diff}.ts` | 对照：edit 在 LF 域匹配并恢复原行尾；read 保留 CR 字节，write 原样。Pi 的 read/write 信息合同与 opencode 不同，不能只照抄 write。 |
-| Codex `codex-rs/apply-patch/src/text_file.rs` | 对照：模型提交逻辑行；未触碰行保留原 ending，新增行使用 existing preferred ending。证明“行尾是已有文件属性”是一条 coherent primary contract。 |
+| Source                                                               | Why it constrains this task                                                                                                                   |
+| -------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CONTEXT.md`                                                         | Tool、Session、Message、Project 术语；Windows/PowerShell CRLF preservation 是 SMARK fork 的 load-bearing delta。                              |
+| 根 `AGENTS.md`                                                       | 精准修改、避免 `any`、tests/typecheck 必须在 `packages/opencode` 运行。                                                                       |
+| `packages/opencode/AGENTS.md`                                        | Effect 组合与模块边界；文件系统操作继续使用既有 Effect `AppFileSystem`。                                                                      |
+| `packages/opencode/test/AGENTS.md`                                   | Tool 行为通过 `testEffect`/`TestInstance` seam 验证。                                                                                         |
+| `.opencode/policy/first-principles-engineering.md`                   | 修 first divergence、单一 primary path、无 fallback、forward/reverse traceability、15% 中文注释门禁。                                         |
+| `docs/adr/`                                                          | 无 Tool 编辑/行尾相关 ADR；不新增 ADR，因为改动局限于现有 Tool 文件写盘合同。                                                                 |
+| Pi `packages/agent/src/harness/tools/{read,edit,write,edit-diff}.ts` | 对照：edit 在 LF 域匹配并恢复原行尾；read 保留 CR 字节，write 原样。Pi 的 read/write 信息合同与 opencode 不同，不能只照抄 write。             |
+| Codex `codex-rs/apply-patch/src/text_file.rs`                        | 对照：模型提交逻辑行；未触碰行保留原 ending，新增行使用 existing preferred ending。证明“行尾是已有文件属性”是一条 coherent primary contract。 |
 
 ## 4. Files and Evidence Read
 
-| Evidence | Relevance | Evidence class |
-| --- | --- | --- |
-| `packages/opencode/src/tool/edit.ts` | create/overwrite 原样写、non-create 行尾恢复、formatter 后重读、`_syncInput`、diff/output、`trimDiff` owner。 | observed |
-| `packages/opencode/src/tool/edit-apply.ts` | `syncEdits.actualOld` producer；异构 normalized replaceAll 在 representational fallback 前拥有唯一 mismatch 事实。 | observed |
-| `packages/opencode/src/tool/write.ts` | overwrite 原样写、formatter 后重读与 `_formattedContent` producer。 | observed |
-| `packages/opencode/src/tool/apply_patch.ts` | add 可覆写 existing file；update/move 从 existing source 派生；统一 formatter loop 只恢复 BOM。 | observed |
-| `packages/opencode/src/tool/tool.ts` | public Tool wrapper 将 output 与顶层 string metadata 的 CRLF 规范化为 LF；processor 消费的是逻辑行视图。 | observed / contracted compatibility |
-| `packages/opencode/src/session/processor.ts` | `_syncInput`/`_formattedContent` consumer；临时 truth metadata strip 与 completed Message 持久化 owner。 | observed |
-| `packages/opencode/src/session/message-v2.ts` | completed Tool metadata 是开放 Record，可持久化 provenance，无需 Tool Schema 变更；pending raw 不进入 completed state。 | observed |
-| `packages/opencode/src/util/line-ending.ts` | 双侧 LF normalization、first-seen file ending、write-back conversion 的既有 owner。 | observed |
-| `packages/opencode/src/util/bom.ts` | formatter 后 BOM 同步只处理 BOM，不恢复行尾。 | observed |
-| `packages/opencode/src/format/{index,formatter}.ts` | formatter 是正式可配置外部 writer；wrapper 不约束 formatter 行尾。 | observed / reachable |
-| `packages/opencode/src/tool/file-mutation-coordinator.ts` | proposal bytes/version 同源、formatter 位于 commit lock；修复必须继续在同一 critical section 内完成。 | observed |
-| `packages/opencode/test/tool/edit.test.ts` | EditTool execute seam、CRLF matrix、normalized `_syncInput`、create formatter、output budget fixtures。 | observed |
-| `packages/opencode/test/tool/write.test.ts` | WriteTool execute seam、CRLF-only diff、BOM、formatter `_formattedContent` fixtures。 | observed |
-| `packages/opencode/test/tool/apply_patch.test.ts` | existing CRLF update、add-overwrite、move 与真实 Tool execute seam。 | observed |
-| `docs/plans/edit-identical-noop-tolerance.md` | 已验证合同：output/metadata.diff 使用 post-formatter 真值、warning 尾部预算、`_syncInput` parameter-face replacement。 | contracted compatibility |
-| `D:\Temp\opencode\eol-tools-red.test.ts` | 临时 red-capable Tool execute harness；2026-08-18 实跑 5/5 fail。 | observed |
-| `D:\Temp\opencode\eol-tools-red.test.ts -t "apply_patch"` | R5 四条真实 Tool signal；add-overwrite、formatter update/add/move 实跑 0 pass / 4 fail。 | observed |
-| Session DB `ses_ff74d9063ffeOTYPsadCxfVXjn` | 184 edit、18 失败；真实拼接与 trimDiff 显示误报调查背景。 | observed |
+| Evidence                                                  | Relevance                                                                                                               | Evidence class                      |
+| --------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- | ----------------------------------- |
+| `packages/opencode/src/tool/edit.ts`                      | create/overwrite 原样写、non-create 行尾恢复、formatter 后重读、`_syncInput`、diff/output、`trimDiff` owner。           | observed                            |
+| `packages/opencode/src/tool/edit-apply.ts`                | `syncEdits.actualOld` producer；异构 normalized replaceAll 在 representational fallback 前拥有唯一 mismatch 事实。      | observed                            |
+| `packages/opencode/src/tool/write.ts`                     | overwrite 原样写、formatter 后重读与 `_formattedContent` producer。                                                     | observed                            |
+| `packages/opencode/src/tool/apply_patch.ts`               | add 可覆写 existing file；update/move 从 existing source 派生；统一 formatter loop 只恢复 BOM。                         | observed                            |
+| `packages/opencode/src/tool/tool.ts`                      | public Tool wrapper 将 output 与顶层 string metadata 的 CRLF 规范化为 LF；processor 消费的是逻辑行视图。                | observed / contracted compatibility |
+| `packages/opencode/src/session/processor.ts`              | `_syncInput`/`_formattedContent` consumer；临时 truth metadata strip 与 completed Message 持久化 owner。                | observed                            |
+| `packages/opencode/src/session/message-v2.ts`             | completed Tool metadata 是开放 Record，可持久化 provenance，无需 Tool Schema 变更；pending raw 不进入 completed state。 | observed                            |
+| `packages/opencode/src/util/line-ending.ts`               | 双侧 LF normalization、first-seen file ending、write-back conversion 的既有 owner。                                     | observed                            |
+| `packages/opencode/src/util/bom.ts`                       | formatter 后 BOM 同步只处理 BOM，不恢复行尾。                                                                           | observed                            |
+| `packages/opencode/src/format/{index,formatter}.ts`       | formatter 是正式可配置外部 writer；wrapper 不约束 formatter 行尾。                                                      | observed / reachable                |
+| `packages/opencode/src/tool/file-mutation-coordinator.ts` | proposal bytes/version 同源、formatter 位于 commit lock；修复必须继续在同一 critical section 内完成。                   | observed                            |
+| `packages/opencode/test/tool/edit.test.ts`                | EditTool execute seam、CRLF matrix、normalized `_syncInput`、create formatter、output budget fixtures。                 | observed                            |
+| `packages/opencode/test/tool/write.test.ts`               | WriteTool execute seam、CRLF-only diff、BOM、formatter `_formattedContent` fixtures。                                   | observed                            |
+| `packages/opencode/test/tool/apply_patch.test.ts`         | existing CRLF update、add-overwrite、move 与真实 Tool execute seam。                                                    | observed                            |
+| `docs/plans/edit-identical-noop-tolerance.md`             | 已验证合同：output/metadata.diff 使用 post-formatter 真值、warning 尾部预算、`_syncInput` parameter-face replacement。  | contracted compatibility            |
+| `D:\Temp\opencode\eol-tools-red.test.ts`                  | 临时 red-capable Tool execute harness；2026-08-18 实跑 5/5 fail。                                                       | observed                            |
+| `D:\Temp\opencode\eol-tools-red.test.ts -t "apply_patch"` | R5 四条真实 Tool signal；add-overwrite、formatter update/add/move 实跑 0 pass / 4 fail。                                | observed                            |
+| Session DB `ses_ff74d9063ffeOTYPsadCxfVXjn`               | 184 edit、18 失败；真实拼接与 trimDiff 显示误报调查背景。                                                               | observed                            |
 
 ## 5. Current Behavior
 
@@ -117,46 +117,46 @@ Tool wrapper:
 
 ## 6. Supported Input Domain and Reachability
 
-| Input or condition | Producer | Upstream guarantees | Reachable path | Owner | Classification |
-| --- | --- | --- | --- | --- | --- |
-| existing CRLF/CR file + LF `write.content` | read 对 CR/LF 透明；LLM 普遍提交 LF | Schema 只保证 string | WriteTool overwrite 原样写，整文件变 LF | WriteTool | observed by red harness / reachable in Session evidence |
-| existing CRLF/CR file + `edit` create/overwrite | Edit parameters | Schema 只保证 string | create branch 原样写，整文件变 LF | EditTool create branch | observed by red harness |
-| formatter 把 existing ending 改为另一 ending | Project formatter command | 只保证可执行，不保证行尾 | Tool write -> formatter -> syncFile(BOM only) | 调用 formatter 的 Tool commit section | reachable；临时 red harness 已观察 mixed separator |
-| apply_patch Add File 覆写 existing CRLF | Patch input + existing snapshot | Add File 允许 existing path | processHunkGroup(add) -> LF newContent -> commit write | ApplyPatchTool add owner | observed by R4 red harness |
-| apply_patch Update/Move existing + formatter | Patch input + formatter | Patch 初次写回保留 source ending；formatter 无 EOL 保证 | commit write -> format.file -> syncFile(BOM only) | ApplyPatchTool formatter loop | observed update by R4 red harness；move shares same loop |
-| exact edit input | LLM | oldString unique | `syncEdits.oldString === delivered LF oldString` | EditTool history truth | observed |
-| normalized edit input（智能引号等） | LLM | `normalizeForMatch` 可唯一定位 | `syncEdits.oldString !== delivered LF oldString`，当前静默覆盖 | EditTool + processor truth sync | observed by existing normalized test |
-| deeply indented hunk with no column-zero content line | edit/write/apply_patch diff | diff library preserves raw indentation | trimDiff removes hunk-wide minimum | `trimDiff` renderer | observed by red harness and Session transcript |
-| new file create/write | LLM | 无 existing ending | keep submitted ending; formatter result remains authoritative | Tool create path | contracted existing behavior |
-| public `_formattedContent` | WriteTool result + Tool wrapper | wrapper sanitizes top-level strings to LF | sanitizeResult -> processor truth consumer | Tool visible-text boundary | observed by targeted probe；existing compatibility |
+| Input or condition                                    | Producer                            | Upstream guarantees                                     | Reachable path                                                 | Owner                                 | Classification                                           |
+| ----------------------------------------------------- | ----------------------------------- | ------------------------------------------------------- | -------------------------------------------------------------- | ------------------------------------- | -------------------------------------------------------- |
+| existing CRLF/CR file + LF `write.content`            | read 对 CR/LF 透明；LLM 普遍提交 LF | Schema 只保证 string                                    | WriteTool overwrite 原样写，整文件变 LF                        | WriteTool                             | observed by red harness / reachable in Session evidence  |
+| existing CRLF/CR file + `edit` create/overwrite       | Edit parameters                     | Schema 只保证 string                                    | create branch 原样写，整文件变 LF                              | EditTool create branch                | observed by red harness                                  |
+| formatter 把 existing ending 改为另一 ending          | Project formatter command           | 只保证可执行，不保证行尾                                | Tool write -> formatter -> syncFile(BOM only)                  | 调用 formatter 的 Tool commit section | reachable；临时 red harness 已观察 mixed separator       |
+| apply_patch Add File 覆写 existing CRLF               | Patch input + existing snapshot     | Add File 允许 existing path                             | processHunkGroup(add) -> LF newContent -> commit write         | ApplyPatchTool add owner              | observed by R4 red harness                               |
+| apply_patch Update/Move existing + formatter          | Patch input + formatter             | Patch 初次写回保留 source ending；formatter 无 EOL 保证 | commit write -> format.file -> syncFile(BOM only)              | ApplyPatchTool formatter loop         | observed update by R4 red harness；move shares same loop |
+| exact edit input                                      | LLM                                 | oldString unique                                        | `syncEdits.oldString === delivered LF oldString`               | EditTool history truth                | observed                                                 |
+| normalized edit input（智能引号等）                   | LLM                                 | `normalizeForMatch` 可唯一定位                          | `syncEdits.oldString !== delivered LF oldString`，当前静默覆盖 | EditTool + processor truth sync       | observed by existing normalized test                     |
+| deeply indented hunk with no column-zero content line | edit/write/apply_patch diff         | diff library preserves raw indentation                  | trimDiff removes hunk-wide minimum                             | `trimDiff` renderer                   | observed by red harness and Session transcript           |
+| new file create/write                                 | LLM                                 | 无 existing ending                                      | keep submitted ending; formatter result remains authoritative  | Tool create path                      | contracted existing behavior                             |
+| public `_formattedContent`                            | WriteTool result + Tool wrapper     | wrapper sanitizes top-level strings to LF               | sanitizeResult -> processor truth consumer                     | Tool visible-text boundary            | observed by targeted probe；existing compatibility       |
 
 Speculative rows are intentionally absent.
 
 ## 7. Required Invariants
 
-| ID | Behavioral invariant | Evidence | Existing test |
-| --- | --- | --- | --- |
-| INV-01 | overwrite 已有文件时，模型/patch 提交的是逻辑行内容；write、edit-create 与 apply_patch add-overwrite 最终保持 proposal 的 file-level LF/CRLF/CR 风格。 | user Fix-A + apply_patch follow-up；Pi/Codex comparison；line-ending owner | Edit/apply_patch update matrix exists；overwrite paths missing |
-| INV-02 | new file 没有 existing ending，继续保留提交/formatter 产生的 ending。 | user non-invasive constraint；existing behavior | write new-file tests；edit create tests |
-| INV-03 | formatter 不得把 write/edit/apply_patch 对 existing file 的 ending 翻转；其内容格式化仍须保留，BOM 仍须恢复。 | user Fix-D + apply_patch follow-up；formatter is external writer | formatter tests exist but no ending assertion |
-| INV-04 | edit history 正常路径保持提交的 LF logical form；只有进入实际 replacement/write 的条目中，任一 normalized match slice 与 delivered LF oldString 不同时才算 truth rewrite。异构 `replaceAll` 必须记录；identical 跳写条目必须排除。 | user Fix-B；Pi history comparison；existing INV-16 | identical normalized skip + hybrid replaceAll tests |
-| INV-05 | truth rewrite 时持久化每条原提交 oldString 的 UTF-8 byte length 与完整 SHA-256；模型可见 output 在既有 limits 内展示尽可能多的完整 fingerprint 并明确省略数。正常路径不附加 provenance/warning。 | user “覆写才展示”；existing output-limit contract | missing |
-| INV-06 | diff 必须保留源文本前导缩进；不再为紧凑展示改写 diff 内容。 | user Fix-C；Session false-positive evidence | missing |
-| INV-07 | Tool 参数 Schema、Permission、Mutation atomicity、BOM、LSP、events、post-formatter diff single truth 均不变。 | user minimal-scope requirement + existing contracts | existing suites |
-| INV-08 | Tool wrapper 继续把模型/processor 可见的顶层 string metadata 规范化为 LF；物理 EOL 只由文件 owner 恢复，不穿透可见文本 sanitizer。 | existing Tool compatibility；user non-invasive logical-line model | sanitizer behavior + processor tests |
+| ID     | Behavioral invariant                                                                                                                                                                                                               | Evidence                                                                   | Existing test                                                  |
+| ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------- | -------------------------------------------------------------- |
+| INV-01 | overwrite 已有文件时，模型/patch 提交的是逻辑行内容；write、edit-create 与 apply_patch add-overwrite 最终保持 proposal 的 file-level LF/CRLF/CR 风格。                                                                             | user Fix-A + apply_patch follow-up；Pi/Codex comparison；line-ending owner | Edit/apply_patch update matrix exists；overwrite paths missing |
+| INV-02 | new file 没有 existing ending，继续保留提交/formatter 产生的 ending。                                                                                                                                                              | user non-invasive constraint；existing behavior                            | write new-file tests；edit create tests                        |
+| INV-03 | formatter 不得把 write/edit/apply_patch 对 existing file 的 ending 翻转；其内容格式化仍须保留，BOM 仍须恢复。                                                                                                                      | user Fix-D + apply_patch follow-up；formatter is external writer           | formatter tests exist but no ending assertion                  |
+| INV-04 | edit history 正常路径保持提交的 LF logical form；只有进入实际 replacement/write 的条目中，任一 normalized match slice 与 delivered LF oldString 不同时才算 truth rewrite。异构 `replaceAll` 必须记录；identical 跳写条目必须排除。 | user Fix-B；Pi history comparison；existing INV-16                         | identical normalized skip + hybrid replaceAll tests            |
+| INV-05 | truth rewrite 时持久化每条原提交 oldString 的 UTF-8 byte length 与完整 SHA-256；模型可见 output 在既有 limits 内展示尽可能多的完整 fingerprint 并明确省略数。正常路径不附加 provenance/warning。                                   | user “覆写才展示”；existing output-limit contract                          | missing                                                        |
+| INV-06 | diff 必须保留源文本前导缩进；不再为紧凑展示改写 diff 内容。                                                                                                                                                                        | user Fix-C；Session false-positive evidence                                | missing                                                        |
+| INV-07 | Tool 参数 Schema、Permission、Mutation atomicity、BOM、LSP、events、post-formatter diff single truth 均不变。                                                                                                                      | user minimal-scope requirement + existing contracts                        | existing suites                                                |
+| INV-08 | Tool wrapper 继续把模型/processor 可见的顶层 string metadata 规范化为 LF；物理 EOL 只由文件 owner 恢复，不穿透可见文本 sanitizer。                                                                                                 | existing Tool compatibility；user non-invasive logical-line model          | sanitizer behavior + processor tests                           |
 
 ## 8. First Divergence and Root Cause
 
-| Invariant | First divergence | Owning module/interface | Proof |
-| --- | --- | --- | --- |
-| INV-01 write | `write.ts` sets `contentNew = next.text` and writes it verbatim although proposal has an existing ending. | WriteTool overwrite | red harness `write overwrite preserves existing CRLF` fails |
-| INV-01 edit-create | `edit.ts` create branch sets `contentNew = next.text` for both missing and existing files. | EditTool create/overwrite | red harness `edit create-overwrite preserves existing CRLF` fails |
-| INV-03 | formatter runs after initial ending conversion; `Bom.syncFile` restores only BOM. | Tool commit formatter boundary | red harness formatter case fails |
-| INV-01 apply_patch add | `processHunkGroup(add)` 保留 snapshot version 却丢弃 existing text EOL，随后直接写 patch LF。 | ApplyPatchTool add proposal | R4 red harness add-overwrite fails |
-| INV-03 apply_patch | shared commit loop runs formatter and only `Bom.syncFile`; existing update/move ending is not restored. | ApplyPatchTool formatter boundary | R4 red harness update formatter fails |
-| INV-04/05 mismatch | `actualOldFromRanges` 在 normalized `replaceAll` 的实际切片异构时返回 `modelOld`；仅比较 `syncEdits.oldString` 会丢失 mismatch。反之，若对全部 located slice 标 mismatch，又会把 identical skip 误报为 rewrite。 | `edit-apply.ts` match truth producer + EditTool decision | current code 348-373、470-489；hybrid replaceAll + normalized identical tests；R1/R2 audit B-01 |
-| INV-05 output limit | edits[] 无数量上限；每条 mismatch 在既有预算完成后追加完整 SHA-256 warning 会突破 Tool limits。 | EditTool output assembler | current code 362-433；existing output-limit test；R2 audit B-02 |
-| INV-06 | `trimDiff` calculates minimum indentation across all content lines and removes it. | shared Tool diff renderer | `bun D:/Temp/opencode/eol-trim-red.ts` observed stripped output |
+| Invariant              | First divergence                                                                                                                                                                                                 | Owning module/interface                                  | Proof                                                                                           |
+| ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| INV-01 write           | `write.ts` sets `contentNew = next.text` and writes it verbatim although proposal has an existing ending.                                                                                                        | WriteTool overwrite                                      | red harness `write overwrite preserves existing CRLF` fails                                     |
+| INV-01 edit-create     | `edit.ts` create branch sets `contentNew = next.text` for both missing and existing files.                                                                                                                       | EditTool create/overwrite                                | red harness `edit create-overwrite preserves existing CRLF` fails                               |
+| INV-03                 | formatter runs after initial ending conversion; `Bom.syncFile` restores only BOM.                                                                                                                                | Tool commit formatter boundary                           | red harness formatter case fails                                                                |
+| INV-01 apply_patch add | `processHunkGroup(add)` 保留 snapshot version 却丢弃 existing text EOL，随后直接写 patch LF。                                                                                                                    | ApplyPatchTool add proposal                              | R4 red harness add-overwrite fails                                                              |
+| INV-03 apply_patch     | shared commit loop runs formatter and only `Bom.syncFile`; existing update/move ending is not restored.                                                                                                          | ApplyPatchTool formatter boundary                        | R4 red harness update formatter fails                                                           |
+| INV-04/05 mismatch     | `actualOldFromRanges` 在 normalized `replaceAll` 的实际切片异构时返回 `modelOld`；仅比较 `syncEdits.oldString` 会丢失 mismatch。反之，若对全部 located slice 标 mismatch，又会把 identical skip 误报为 rewrite。 | `edit-apply.ts` match truth producer + EditTool decision | current code 348-373、470-489；hybrid replaceAll + normalized identical tests；R1/R2 audit B-01 |
+| INV-05 output limit    | edits[] 无数量上限；每条 mismatch 在既有预算完成后追加完整 SHA-256 warning 会突破 Tool limits。                                                                                                                  | EditTool output assembler                                | current code 362-433；existing output-limit test；R2 audit B-02                                 |
+| INV-06                 | `trimDiff` calculates minimum indentation across all content lines and removes it.                                                                                                                               | shared Tool diff renderer                                | `bun D:/Temp/opencode/eol-trim-red.ts` observed stripped output                                 |
 
 Red-capable feedback loop already executed:
 
@@ -186,16 +186,16 @@ Observed: trimDiff("-    old/+    next") returns "-old/+next" and throws.
 
 ## 9. Responsibility and Seam
 
-| Concern | Owner | Interface promise | Why it belongs here | Why another module does not own it |
-| --- | --- | --- | --- | --- |
-| existing ending selection | `line-ending.ts` + proposal-owning Tool | edit/write promise to update a file | proposal contains raw text before permission; Tool knows create vs overwrite | Model/read must not implement host line-ending policy |
-| formatter ending restoration | calling Tool commit section | final disk preserves existing-file attributes | each Tool invokes formatter after its own proposal write | Format service must stay content-formatter agnostic；caller alone knows existing/new ownership |
-| apply_patch ending ownership | `apply_patch.ts` proposal + shared commit loop | add-overwrite/update/move existing files retain proposal/source ending | this Tool owns snapshot state and invokes formatter inside its own commit | Patch parser owns chunks, not physical file attributes；Format remains caller-agnostic |
-| normalized mismatch production | `applyEdits` | matcher owns actual normalized slices before representational fallback | only this seam can compare every actual slice with modelOld, including heterogeneous replaceAll | EditTool sees only collapsed `syncEdits.oldString` |
-| truth rewrite fingerprint | `EditTool.execute` | Edit owns delivered edits and consumes mismatch indices | only this seam has model-facing edit indexes, output and metadata | processor must not reconstruct edit semantics |
-| provenance persistence | existing processor `completeToolCall` pass-through | completed Tool metadata is durable audit record | `stripToolTruthMetadata` removes only underscore truth fields and already preserves public metadata | no processor production change is required |
-| visible metadata LF boundary | existing `Tool.wrap` sanitizer | top-level string metadata is safe logical text | processor already consumes this public Tool result | file writers must not bypass sanitizer to expose CR bytes |
-| diff fidelity | `trimDiff` | model-facing diff mirrors actual patch | shared function currently mutates indentation | TUI/Message must not reverse-engineer stripped whitespace |
+| Concern                        | Owner                                              | Interface promise                                                      | Why it belongs here                                                                                 | Why another module does not own it                                                             |
+| ------------------------------ | -------------------------------------------------- | ---------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| existing ending selection      | `line-ending.ts` + proposal-owning Tool            | edit/write promise to update a file                                    | proposal contains raw text before permission; Tool knows create vs overwrite                        | Model/read must not implement host line-ending policy                                          |
+| formatter ending restoration   | calling Tool commit section                        | final disk preserves existing-file attributes                          | each Tool invokes formatter after its own proposal write                                            | Format service must stay content-formatter agnostic；caller alone knows existing/new ownership |
+| apply_patch ending ownership   | `apply_patch.ts` proposal + shared commit loop     | add-overwrite/update/move existing files retain proposal/source ending | this Tool owns snapshot state and invokes formatter inside its own commit                           | Patch parser owns chunks, not physical file attributes；Format remains caller-agnostic         |
+| normalized mismatch production | `applyEdits`                                       | matcher owns actual normalized slices before representational fallback | only this seam can compare every actual slice with modelOld, including heterogeneous replaceAll     | EditTool sees only collapsed `syncEdits.oldString`                                             |
+| truth rewrite fingerprint      | `EditTool.execute`                                 | Edit owns delivered edits and consumes mismatch indices                | only this seam has model-facing edit indexes, output and metadata                                   | processor must not reconstruct edit semantics                                                  |
+| provenance persistence         | existing processor `completeToolCall` pass-through | completed Tool metadata is durable audit record                        | `stripToolTruthMetadata` removes only underscore truth fields and already preserves public metadata | no processor production change is required                                                     |
+| visible metadata LF boundary   | existing `Tool.wrap` sanitizer                     | top-level string metadata is safe logical text                         | processor already consumes this public Tool result                                                  | file writers must not bypass sanitizer to expose CR bytes                                      |
+| diff fidelity                  | `trimDiff`                                         | model-facing diff mirrors actual patch                                 | shared function currently mutates indentation                                                       | TUI/Message must not reverse-engineer stripped whitespace                                      |
 
 ## 10. Single Approved Primary-Path Design
 
@@ -253,63 +253,63 @@ Design details:
 
 ## 11. Secondary and Replacement Path Inventory
 
-| Path | Current or proposed | Classification | Produces success? | Decision-surface share | Disposition |
-| --- | --- | --- | --- | --- | --- |
-| existing-file LF/CRLF/CR conversion | proposed | supported-domain branch | yes | primary | add |
-| missing-file verbatim creation | current | supported-domain branch | yes | primary | preserve |
-| formatter content + ending restoration | proposed | supported-domain branch | yes | primary | add |
-| apply_patch add existing ending conversion | proposed | supported-domain branch | yes | primary | add |
-| apply_patch update/move formatter restoration | proposed | supported-domain branch | yes | primary | add in existing shared loop |
-| normalized actualOld truth rewrite（含 heterogeneous replaceAll，不含 identical skip） | current + diagnostic | supported-domain branch + diagnostic | yes | one mismatch branch | preserve + observe |
-| provenance/bounded warning on actual write mismatch | proposed | diagnostic | no independent success | one branch / no fallback | add |
-| Tool visible-text LF sanitization | current compatibility | contracted pass-through | yes | shared wrapper | preserve unchanged |
+| Path                                                                                   | Current or proposed   | Classification                       | Produces success?      | Decision-surface share   | Disposition                 |
+| -------------------------------------------------------------------------------------- | --------------------- | ------------------------------------ | ---------------------- | ------------------------ | --------------------------- |
+| existing-file LF/CRLF/CR conversion                                                    | proposed              | supported-domain branch              | yes                    | primary                  | add                         |
+| missing-file verbatim creation                                                         | current               | supported-domain branch              | yes                    | primary                  | preserve                    |
+| formatter content + ending restoration                                                 | proposed              | supported-domain branch              | yes                    | primary                  | add                         |
+| apply_patch add existing ending conversion                                             | proposed              | supported-domain branch              | yes                    | primary                  | add                         |
+| apply_patch update/move formatter restoration                                          | proposed              | supported-domain branch              | yes                    | primary                  | add in existing shared loop |
+| normalized actualOld truth rewrite（含 heterogeneous replaceAll，不含 identical skip） | current + diagnostic  | supported-domain branch + diagnostic | yes                    | one mismatch branch      | preserve + observe          |
+| provenance/bounded warning on actual write mismatch                                    | proposed              | diagnostic                           | no independent success | one branch / no fallback | add                         |
+| Tool visible-text LF sanitization                                                      | current compatibility | contracted pass-through              | yes                    | shared wrapper           | preserve unchanged          |
 
 No fallback or alternate success path is proposed.
 
 ## 12. Workaround Deletion and Replacement
 
-| Existing workaround or duplicate | Why it existed | Why the approved route supersedes it | Delete or collapse location |
-| --- | --- | --- | --- |
-| `trimDiff` common-indent rewrite | compact diff display | violates source-fidelity requirement and caused false fixes | collapse function to identity in `edit.ts` |
-| unconditional disk-ending conversion in `_syncInput` | replay convenience | mixes physical encoding into model logical history; new conditional provenance preserves exceptional rewrite evidence | replace map in `edit.ts` |
+| Existing workaround or duplicate                     | Why it existed       | Why the approved route supersedes it                                                                                  | Delete or collapse location                |
+| ---------------------------------------------------- | -------------------- | --------------------------------------------------------------------------------------------------------------------- | ------------------------------------------ |
+| `trimDiff` common-indent rewrite                     | compact diff display | violates source-fidelity requirement and caused false fixes                                                           | collapse function to identity in `edit.ts` |
+| unconditional disk-ending conversion in `_syncInput` | replay convenience   | mixes physical encoding into model logical history; new conditional provenance preserves exceptional rewrite evidence | replace map in `edit.ts`                   |
 
 ## 13. Forward Traceability
 
-| Requirement or invariant | Production path | Planned file/change | Behavioral test |
-| --- | --- | --- | --- |
-| Fix-A / INV-01 | WriteTool existing proposal -> converted write | `src/tool/write.ts` | write CRLF/CR overwrite with LF input preserves original ending |
-| Fix-A / INV-01/02 | EditTool create branch existing vs missing | `src/tool/edit.ts` | edit-create overwrite CRLF preserves; new-file LF remains LF |
-| Fix-D / INV-03 | edit/write formatter commit -> re-read -> ending restore | `edit.ts`, `write.ts` | deterministic formatter flips to LF, final existing file remains CRLF and formatted content persists |
-| apply_patch follow-up / INV-01/03 | add existing snapshot -> converted write；add/update/move shared formatter -> ending restore | `apply_patch.ts` | add-overwrite CRLF preserves；formatter-sensitive add/update/move each restore CRLF and keep formatted text；move source is deleted |
-| Fix-B / INV-04/05 | mismatch producer -> `_syncInput` + provenance -> completed metadata | `edit-apply.ts`, `edit.ts`；processor 既有 pass-through 零改动 | exact/identical path no provenance; smart-quote/hybrid replaceAll record length/hash; multi-rewrite output is bounded with omission count; processor behavior test locks persistence |
-| Fix-C / INV-06 | shared trimDiff | `edit.ts` | deeply-indented hunk output retains exact spaces; direct helper assertion |
-| INV-08 | internal final disk text -> existing Tool string sanitizer -> processor LF | no production change in `tool.ts` | write formatter test asserts CRLF disk and LF `_formattedContent` |
-| INV-07 | existing full Tool paths | no semantic expansion | existing edit/write/apply_patch regressions + typecheck |
+| Requirement or invariant          | Production path                                                                              | Planned file/change                                            | Behavioral test                                                                                                                                                                      |
+| --------------------------------- | -------------------------------------------------------------------------------------------- | -------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Fix-A / INV-01                    | WriteTool existing proposal -> converted write                                               | `src/tool/write.ts`                                            | write CRLF/CR overwrite with LF input preserves original ending                                                                                                                      |
+| Fix-A / INV-01/02                 | EditTool create branch existing vs missing                                                   | `src/tool/edit.ts`                                             | edit-create overwrite CRLF preserves; new-file LF remains LF                                                                                                                         |
+| Fix-D / INV-03                    | edit/write formatter commit -> re-read -> ending restore                                     | `edit.ts`, `write.ts`                                          | deterministic formatter flips to LF, final existing file remains CRLF and formatted content persists                                                                                 |
+| apply_patch follow-up / INV-01/03 | add existing snapshot -> converted write；add/update/move shared formatter -> ending restore | `apply_patch.ts`                                               | add-overwrite CRLF preserves；formatter-sensitive add/update/move each restore CRLF and keep formatted text；move source is deleted                                                  |
+| Fix-B / INV-04/05                 | mismatch producer -> `_syncInput` + provenance -> completed metadata                         | `edit-apply.ts`, `edit.ts`；processor 既有 pass-through 零改动 | exact/identical path no provenance; smart-quote/hybrid replaceAll record length/hash; multi-rewrite output is bounded with omission count; processor behavior test locks persistence |
+| Fix-C / INV-06                    | shared trimDiff                                                                              | `edit.ts`                                                      | deeply-indented hunk output retains exact spaces; direct helper assertion                                                                                                            |
+| INV-08                            | internal final disk text -> existing Tool string sanitizer -> processor LF                   | no production change in `tool.ts`                              | write formatter test asserts CRLF disk and LF `_formattedContent`                                                                                                                    |
+| INV-07                            | existing full Tool paths                                                                     | no semantic expansion                                          | existing edit/write/apply_patch regressions + typecheck                                                                                                                              |
 
 ## 14. Reverse Traceability
 
-| Proposed production concept | Requirement ID | Evidence | Why existing logic cannot carry it |
-| --- | --- | --- | --- |
-| existing overwrite ending conversion | INV-01 | red Tool harness; read hides physical ending | current write/create write `next.text` verbatim |
-| post-formatter ending restore | INV-03 | formatter is external writer; red formatter harness | Bom.syncFile only restores BOM |
-| apply_patch `FileChange.ending` | INV-01/03 | user follow-up + R5 0/4 red harness | add snapshot state is currently ignored for content EOL；shared formatter loop has no source ending fact |
-| normalized mismatch indices limited to real replacements | INV-04/05 | R1/R2 audit B-01 + reachable hybrid replaceAll/identical tests | collapsed `syncEdits.oldString` cannot represent heterogeneous actual slices，while located identical slices are not writes |
-| conditional rewrite provenance | INV-04/05 | user requirement; raw absent from completed state | `_syncInput` is stripped and no durable fingerprint exists |
-| bounded fingerprint warning section | INV-05/07 | R2 audit B-02 + unbounded edits Schema + existing limits test | per-rewrite append after budgeting can exceed output contract |
-| SHA-256 at Edit truth seam | INV-05 | user explicitly requires SHA-256/length | existing `Hash.fast` is SHA-1 and unsuitable; Node crypto SHA-256 is established in package |
-| identity trimDiff | INV-06 | user explicit requirement + false-positive trace | current helper mutates every consumer diff |
+| Proposed production concept                              | Requirement ID | Evidence                                                       | Why existing logic cannot carry it                                                                                          |
+| -------------------------------------------------------- | -------------- | -------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| existing overwrite ending conversion                     | INV-01         | red Tool harness; read hides physical ending                   | current write/create write `next.text` verbatim                                                                             |
+| post-formatter ending restore                            | INV-03         | formatter is external writer; red formatter harness            | Bom.syncFile only restores BOM                                                                                              |
+| apply_patch `FileChange.ending`                          | INV-01/03      | user follow-up + R5 0/4 red harness                            | add snapshot state is currently ignored for content EOL；shared formatter loop has no source ending fact                    |
+| normalized mismatch indices limited to real replacements | INV-04/05      | R1/R2 audit B-01 + reachable hybrid replaceAll/identical tests | collapsed `syncEdits.oldString` cannot represent heterogeneous actual slices，while located identical slices are not writes |
+| conditional rewrite provenance                           | INV-04/05      | user requirement; raw absent from completed state              | `_syncInput` is stripped and no durable fingerprint exists                                                                  |
+| bounded fingerprint warning section                      | INV-05/07      | R2 audit B-02 + unbounded edits Schema + existing limits test  | per-rewrite append after budgeting can exceed output contract                                                               |
+| SHA-256 at Edit truth seam                               | INV-05         | user explicitly requires SHA-256/length                        | existing `Hash.fast` is SHA-1 and unsuitable; Node crypto SHA-256 is established in package                                 |
+| identity trimDiff                                        | INV-06         | user explicit requirement + false-positive trace               | current helper mutates every consumer diff                                                                                  |
 
 ## 15. File-Level Change Plan
 
-| File | Add / modify / delete | Exact responsibility of the change | Expected line delta |
-| --- | --- | --- | --- |
-| `packages/opencode/src/tool/edit.ts` | modify | Fix-A create-overwrite, Fix-D formatter restoration, Fix-B LF sync/provenance/bounded warning, Fix-C identity trimDiff | +75 / -35 |
-| `packages/opencode/src/tool/edit-apply.ts` | modify | preserve normalized mismatch fact before heterogeneous replaceAll representational fallback | +16 / -8 |
-| `packages/opencode/src/tool/write.ts` | modify | Fix-A existing overwrite conversion, Fix-D formatter restoration/final truth | +30 / -8 |
-| `packages/opencode/src/tool/apply_patch.ts` | modify | capture existing add/update/move ending, convert add-overwrite, restore after formatter in shared commit | +30 / -8 |
-| `packages/opencode/test/tool/edit.test.ts` | modify | create/formatter/diff/provenance/processor behavior slices | +100 / -10 |
-| `packages/opencode/test/tool/write.test.ts` | modify | existing ending and formatter preservation slices | +75 / -15 |
-| `packages/opencode/test/tool/apply_patch.test.ts` | modify | add-overwrite plus formatter-sensitive add/update/move ending slices | +90 / -5 |
+| File                                              | Add / modify / delete | Exact responsibility of the change                                                                                     | Expected line delta |
+| ------------------------------------------------- | --------------------- | ---------------------------------------------------------------------------------------------------------------------- | ------------------- |
+| `packages/opencode/src/tool/edit.ts`              | modify                | Fix-A create-overwrite, Fix-D formatter restoration, Fix-B LF sync/provenance/bounded warning, Fix-C identity trimDiff | +75 / -35           |
+| `packages/opencode/src/tool/edit-apply.ts`        | modify                | preserve normalized mismatch fact before heterogeneous replaceAll representational fallback                            | +16 / -8            |
+| `packages/opencode/src/tool/write.ts`             | modify                | Fix-A existing overwrite conversion, Fix-D formatter restoration/final truth                                           | +30 / -8            |
+| `packages/opencode/src/tool/apply_patch.ts`       | modify                | capture existing add/update/move ending, convert add-overwrite, restore after formatter in shared commit               | +30 / -8            |
+| `packages/opencode/test/tool/edit.test.ts`        | modify                | create/formatter/diff/provenance/processor behavior slices                                                             | +100 / -10          |
+| `packages/opencode/test/tool/write.test.ts`       | modify                | existing ending and formatter preservation slices                                                                      | +75 / -15           |
+| `packages/opencode/test/tool/apply_patch.test.ts` | modify                | add-overwrite plus formatter-sensitive add/update/move ending slices                                                   | +90 / -5            |
 
 Production files: 4 ≤ 8. Estimated production changed lines: <260 ≤ 600.
 
@@ -317,30 +317,30 @@ Production files: 4 ≤ 8. Estimated production changed lines: <260 ≤ 600.
 
 Agreed seams are existing public Tool execute results plus the exported processor truth-consumer function already tested in `test/tool/edit.test.ts`.
 
-| Order | Red behavior | Why current code fails | Minimal green behavior | Regression protected |
-| --- | --- | --- | --- | --- |
-| 1 | Write overwrite CRLF file using LF content preserves CRLF | writes `next.text` verbatim | convert existing overwrite content to proposal ending | Fix-A write |
-| 2 | Edit create-overwrite preserves CRLF; new create unchanged | create branch ignores `existed` for ending | conditional conversion for existing only | Fix-A edit-create + INV-02 |
-| 3 | dedicated test formatter converts every CRLF/CR separator to LF, but cannot leave write/edit existing CRLF file as LF；public `_formattedContent` remains LF logical text | syncFile only handles BOM；Tool sanitizer intentionally normalizes top-level strings | restore proposal ending inside commit；preserve sanitizer | Fix-D + INV-08 |
-| 4 | apply_patch Add File overwrite preserves existing CRLF；new Add remains patch-authored LF | add snapshot EOL is discarded | optional FileChange ending converts only existing add | apply_patch follow-up + INV-02 |
-| 5 | existing CRLF apply_patch Add File overwrite经过 LF formatter 后仍为 CRLF并保留 formatter 文本 | add and shared formatter are distinct write boundaries | restore FileChange ending at the actual add target | R4 audit B-01 add branch |
-| 6 | apply_patch Update formatter cannot flip CRLF and still keeps formatter text | shared loop restores only BOM | restore FileChange ending after formatter | apply_patch follow-up + Fix-D |
-| 7 | CRLF source move 经 LF formatter 后 destination 保持 source CRLF、保留 formatter 文本且 source 删除 | move writes a different target path | restore the same source ending at `movePath` inside shared loop | R4 audit B-01 move branch |
-| 8 | normalized oldString rewrite yields stable provenance/warning; exact path does not | current sync is silent | producer returns mismatch index, hash only mismatch | Fix-B low-noise contract |
-| 9 | hybrid normalized `replaceAll` with one literal and one en-dash slice still reports rewrite | producer currently folds heterogeneous slices back to modelOld | retain mismatch fact before representational fallback | audit B-01 / Fix-B completeness |
-| 10 | normalized identical no-op remains submission-shaped and emits no provenance/warning | naive slice comparison misclassifies it | mismatch producer excludes entries skipped from replacement ranges | R2 audit B-01 |
-| 11 | many normalized rewrites persist all metadata, output complete fingerprints up to the tail budget, emit an omission marker, and remain within injected limits | unbounded per-item warning exceeds limits | bounded warning assembler reserves actual tail size | R2 audit B-02 |
-| 12 | processor persists public provenance and strips only temporary truth keys | current pass-through untested for this key | lock existing pass-through, no production change | Fix-B DB evidence |
-| 13 | deeply indented diff retains spaces | trimDiff removes min indent | identity return | Fix-C all diff consumers |
+| Order | Red behavior                                                                                                                                                              | Why current code fails                                                               | Minimal green behavior                                             | Regression protected            |
+| ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ | ------------------------------------------------------------------ | ------------------------------- |
+| 1     | Write overwrite CRLF file using LF content preserves CRLF                                                                                                                 | writes `next.text` verbatim                                                          | convert existing overwrite content to proposal ending              | Fix-A write                     |
+| 2     | Edit create-overwrite preserves CRLF; new create unchanged                                                                                                                | create branch ignores `existed` for ending                                           | conditional conversion for existing only                           | Fix-A edit-create + INV-02      |
+| 3     | dedicated test formatter converts every CRLF/CR separator to LF, but cannot leave write/edit existing CRLF file as LF；public `_formattedContent` remains LF logical text | syncFile only handles BOM；Tool sanitizer intentionally normalizes top-level strings | restore proposal ending inside commit；preserve sanitizer          | Fix-D + INV-08                  |
+| 4     | apply_patch Add File overwrite preserves existing CRLF；new Add remains patch-authored LF                                                                                 | add snapshot EOL is discarded                                                        | optional FileChange ending converts only existing add              | apply_patch follow-up + INV-02  |
+| 5     | existing CRLF apply_patch Add File overwrite经过 LF formatter 后仍为 CRLF并保留 formatter 文本                                                                            | add and shared formatter are distinct write boundaries                               | restore FileChange ending at the actual add target                 | R4 audit B-01 add branch        |
+| 6     | apply_patch Update formatter cannot flip CRLF and still keeps formatter text                                                                                              | shared loop restores only BOM                                                        | restore FileChange ending after formatter                          | apply_patch follow-up + Fix-D   |
+| 7     | CRLF source move 经 LF formatter 后 destination 保持 source CRLF、保留 formatter 文本且 source 删除                                                                       | move writes a different target path                                                  | restore the same source ending at `movePath` inside shared loop    | R4 audit B-01 move branch       |
+| 8     | normalized oldString rewrite yields stable provenance/warning; exact path does not                                                                                        | current sync is silent                                                               | producer returns mismatch index, hash only mismatch                | Fix-B low-noise contract        |
+| 9     | hybrid normalized `replaceAll` with one literal and one en-dash slice still reports rewrite                                                                               | producer currently folds heterogeneous slices back to modelOld                       | retain mismatch fact before representational fallback              | audit B-01 / Fix-B completeness |
+| 10    | normalized identical no-op remains submission-shaped and emits no provenance/warning                                                                                      | naive slice comparison misclassifies it                                              | mismatch producer excludes entries skipped from replacement ranges | R2 audit B-01                   |
+| 11    | many normalized rewrites persist all metadata, output complete fingerprints up to the tail budget, emit an omission marker, and remain within injected limits             | unbounded per-item warning exceeds limits                                            | bounded warning assembler reserves actual tail size                | R2 audit B-02                   |
+| 12    | processor persists public provenance and strips only temporary truth keys                                                                                                 | current pass-through untested for this key                                           | lock existing pass-through, no production change                   | Fix-B DB evidence               |
+| 13    | deeply indented diff retains spaces                                                                                                                                       | trimDiff removes min indent                                                          | identity return                                                    | Fix-C all diff consumers        |
 
 Each new behavior slice is red before implementation. The temporary harness demonstrated original slices 1-3, 8 and 13；R5's targeted command demonstrated slices 4-7 at 0/4. Slice 10 extends an existing identical-normalized regression with new absence assertions；slice 12 locks an existing pass-through contract and is green before production changes.
 
 ## 17. Chinese Comment Budget
 
-| Metric | Estimate | Method |
-| --- | --- | --- |
-| Effective changed code lines `E` | 220-310 | Include substantive production and test lines；exclude imports, blank lines, formatter-only churn and pure deletions |
-| Required Chinese explanatory comments `C` | 33-47 | `ceil(E * 0.15)`; target 40-52 qualifying lines |
+| Metric                                    | Estimate | Method                                                                                                               |
+| ----------------------------------------- | -------- | -------------------------------------------------------------------------------------------------------------------- |
+| Effective changed code lines `E`          | 220-310  | Include substantive production and test lines；exclude imports, blank lines, formatter-only churn and pure deletions |
+| Required Chinese explanatory comments `C` | 33-47    | `ceil(E * 0.15)`; target 40-52 qualifying lines                                                                      |
 
 Planned nearby comment subjects:
 
@@ -361,25 +361,25 @@ Comments that merely restate assignments, imports or control flow do not count.
 
 ## 18. Verification
 
-| Command | Working directory | Evidence produced |
-| --- | --- | --- |
-| `bun test test/tool/edit.test.ts` | `packages/opencode` | edit-create, formatter, sync/provenance, diff fidelity and existing edit contracts |
-| `bun test test/tool/write.test.ts` | `packages/opencode` | write overwrite/new/create, BOM, formatter and metadata truth contracts |
-| `bun test test/tool/apply_patch.test.ts` | `packages/opencode` | add-overwrite/update formatter EOL plus shared identity trimDiff and existing patch/move contracts |
+| Command                                           | Working directory   | Evidence produced                                                                                                     |
+| ------------------------------------------------- | ------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `bun test test/tool/edit.test.ts`                 | `packages/opencode` | edit-create, formatter, sync/provenance, diff fidelity and existing edit contracts                                    |
+| `bun test test/tool/write.test.ts`                | `packages/opencode` | write overwrite/new/create, BOM, formatter and metadata truth contracts                                               |
+| `bun test test/tool/apply_patch.test.ts`          | `packages/opencode` | add-overwrite/update formatter EOL plus shared identity trimDiff and existing patch/move contracts                    |
 | `bun test D:/Temp/opencode/eol-tools-red.test.ts` | `packages/opencode` | original five symptoms plus R5 apply_patch add-overwrite and formatter-sensitive add/update/move signals become green |
-| `bun typecheck` | `packages/opencode` | package type integrity |
-| `git diff --check -- <goal paths>` | repository root | whitespace defects absent; unrelated worktree excluded |
+| `bun typecheck`                                   | `packages/opencode` | package type integrity                                                                                                |
+| `git diff --check -- <goal paths>`                | repository root     | whitespace defects absent; unrelated worktree excluded                                                                |
 
 ## 19. Diff Budget
 
-| Metric | Estimate | Justification |
-| --- | --- | --- |
-| Files added | 1 plan | canonical artifact only |
-| Files modified | 7 | 4 production + 3 tests |
-| Files deleted | 0 | no fallback/workaround modules |
-| Production lines | <260 changed, hard cap 600 | localized edit-apply/edit/write/apply_patch seams |
-| Test lines | 220-320 | thirteen vertical behavior slices in existing files |
-| Generated lines | 0 | no schema generation |
+| Metric           | Estimate                   | Justification                                       |
+| ---------------- | -------------------------- | --------------------------------------------------- |
+| Files added      | 1 plan                     | canonical artifact only                             |
+| Files modified   | 7                          | 4 production + 3 tests                              |
+| Files deleted    | 0                          | no fallback/workaround modules                      |
+| Production lines | <260 changed, hard cap 600 | localized edit-apply/edit/write/apply_patch seams   |
+| Test lines       | 220-320                    | thirteen vertical behavior slices in existing files |
+| Generated lines  | 0                          | no schema generation                                |
 
 ## 20. Real Risks and Open Decisions
 
@@ -421,13 +421,13 @@ The independent auditor must:
 
 ## 22. Plan Audit Record
 
-| Round | Audited revision | Full scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | R1 | yes | B-01 `replaceAll` 归一化覆写会漏记 Fix-B provenance | formatter fixture 应真实翻转 separator；稳定字段级合同需补充 | BLOCK | `ses_fedefb4bfffeNrrJcHWzo0QS61` |
-| 2 | R2 | yes | B-01 normalized identical no-op 被误报；B-02 多 rewrite warning 可突破 output limits | R1 replaceAll 与 formatter fixture 已修正 | BLOCK | `ses_fedefb4bfffeNrrJcHWzo0QS61` |
-| 3 | R3 | yes | No blocking findings. | bounded warning 的 bytes/lines 合成与实际 E/C 须在实现审计复核 | APPROVE | `ses_fedefb4bfffeNrrJcHWzo0QS61` |
-| 4 | R4 | yes | B-01 apply_patch 的 add/move formatter 行尾合同缺少敏感测试 | FileChange.ending 主路径正确；move source ending owner 正确 | BLOCK | `ses_fedefb4bfffeNrrJcHWzo0QS61` |
-| 5 | R5 | yes | No blocking findings. | Verification 表中原始 feedback-loop 描述仍写“R4 apply_patch add/update signals”，而 R5 实际记录的是 add-overwrite 以及 formatter-sensitive add/update/move 共四条信号。命令覆盖完整，属于非阻塞记录文字滞后。<br>实现审计仍需核对 `FileChange.ending` 对 add、update、move 使用同一恢复逻辑，并确认恢复写盘继续位于 Mutation commit lock 内。<br>bounded provenance warning 与 15% 中文解释性注释要求必须按实际 diff 独立复算。 | APPROVE | `ses_fedefb4bfffeNrrJcHWzo0QS61` |
+| Round | Audited revision | Full scope? | Blocking findings                                                                    | Non-blocking findings                                                                                                                                                                                                                                                                                                                                                                                                           | Result  | Invocation reference             |
+| ----- | ---------------- | ----------- | ------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- | -------------------------------- |
+| 1     | R1               | yes         | B-01 `replaceAll` 归一化覆写会漏记 Fix-B provenance                                  | formatter fixture 应真实翻转 separator；稳定字段级合同需补充                                                                                                                                                                                                                                                                                                                                                                    | BLOCK   | `ses_fedefb4bfffeNrrJcHWzo0QS61` |
+| 2     | R2               | yes         | B-01 normalized identical no-op 被误报；B-02 多 rewrite warning 可突破 output limits | R1 replaceAll 与 formatter fixture 已修正                                                                                                                                                                                                                                                                                                                                                                                       | BLOCK   | `ses_fedefb4bfffeNrrJcHWzo0QS61` |
+| 3     | R3               | yes         | No blocking findings.                                                                | bounded warning 的 bytes/lines 合成与实际 E/C 须在实现审计复核                                                                                                                                                                                                                                                                                                                                                                  | APPROVE | `ses_fedefb4bfffeNrrJcHWzo0QS61` |
+| 4     | R4               | yes         | B-01 apply_patch 的 add/move formatter 行尾合同缺少敏感测试                          | FileChange.ending 主路径正确；move source ending owner 正确                                                                                                                                                                                                                                                                                                                                                                     | BLOCK   | `ses_fedefb4bfffeNrrJcHWzo0QS61` |
+| 5     | R5               | yes         | No blocking findings.                                                                | Verification 表中原始 feedback-loop 描述仍写“R4 apply_patch add/update signals”，而 R5 实际记录的是 add-overwrite 以及 formatter-sensitive add/update/move 共四条信号。命令覆盖完整，属于非阻塞记录文字滞后。<br>实现审计仍需核对 `FileChange.ending` 对 add、update、move 使用同一恢复逻辑，并确认恢复写盘继续位于 Mutation commit lock 内。<br>bounded provenance warning 与 15% 中文解释性注释要求必须按实际 diff 独立复算。 | APPROVE | `ses_fedefb4bfffeNrrJcHWzo0QS61` |
 
 Any substantive revision invalidates earlier approval.
 
@@ -468,15 +468,15 @@ expanded.
 
 ### Verification Commands and Results
 
-| Command | Working directory | Result |
-| --- | --- | --- |
-| `bun test --timeout 30000 test/tool/edit.test.ts` | `packages/opencode` | 83 pass, 0 fail, 4065 expect() |
-| `bun test --timeout 30000 test/tool/write.test.ts` | `packages/opencode` | 25 pass, 0 fail, 52 expect() |
-| `bun test --timeout 30000 test/tool/apply_patch.test.ts` | `packages/opencode` | 53 pass, 0 fail, 152 expect() |
-| `bun test --timeout 30000 D:/Temp/opencode/eol-tools-red.test.ts` | `packages/opencode` | 9 pass, 0 fail, 11 expect() |
-| `bun typecheck` | `packages/opencode` | pass |
-| `bunx prettier --check <7 goal TS files>` | repository root | not a release gate; independent audit found six target files have pre-existing untouched style differences, while the cleaned diff contains no unrelated formatter-only hunks |
-| `git diff --check -- <goal paths>` | repository root | pass |
+| Command                                                           | Working directory   | Result                                                                                                                                                                        |
+| ----------------------------------------------------------------- | ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `bun test --timeout 30000 test/tool/edit.test.ts`                 | `packages/opencode` | 83 pass, 0 fail, 4065 expect()                                                                                                                                                |
+| `bun test --timeout 30000 test/tool/write.test.ts`                | `packages/opencode` | 25 pass, 0 fail, 52 expect()                                                                                                                                                  |
+| `bun test --timeout 30000 test/tool/apply_patch.test.ts`          | `packages/opencode` | 53 pass, 0 fail, 152 expect()                                                                                                                                                 |
+| `bun test --timeout 30000 D:/Temp/opencode/eol-tools-red.test.ts` | `packages/opencode` | 9 pass, 0 fail, 11 expect()                                                                                                                                                   |
+| `bun typecheck`                                                   | `packages/opencode` | pass                                                                                                                                                                          |
+| `bunx prettier --check <7 goal TS files>`                         | repository root     | not a release gate; independent audit found six target files have pre-existing untouched style differences, while the cleaned diff contains no unrelated formatter-only hunks |
+| `git diff --check -- <goal paths>`                                | repository root     | pass                                                                                                                                                                          |
 
 The default 5-second Bun timeout caused two existing apply_patch integration
 tests to time out on this Windows/Effect environment. Both passed independently,
@@ -505,12 +505,12 @@ outside the repository and not part of the commit.
 
 ### Chinese Comment Calculation
 
-| Metric | Actual | Exclusions and evidence |
-| --- | --- | --- |
-| Effective changed code lines `E` | 404 | Added non-blank substantive production/test lines; imports, blank lines, formatter-only and pure deletions excluded |
-| Qualifying Chinese comment lines `C` | 74 | Independent audit count; adjacent rationale for EOL ownership, formatter boundary, normalized truth, output budget, move target, or test intent |
-| Ratio `C / E` | 18.32% | `74 / 404` |
-| Required minimum `C` | 61 | `ceil(404 * 0.15)` |
+| Metric                               | Actual | Exclusions and evidence                                                                                                                         |
+| ------------------------------------ | ------ | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| Effective changed code lines `E`     | 404    | Added non-blank substantive production/test lines; imports, blank lines, formatter-only and pure deletions excluded                             |
+| Qualifying Chinese comment lines `C` | 74     | Independent audit count; adjacent rationale for EOL ownership, formatter boundary, normalized truth, output budget, move target, or test intent |
+| Ratio `C / E`                        | 18.32% | `74 / 404`                                                                                                                                      |
+| Required minimum `C`                 | 61     | `ceil(404 * 0.15)`                                                                                                                              |
 
 ### Remaining Unverified Items
 
@@ -521,10 +521,10 @@ outside the repository and not part of the commit.
 
 ## 24. Implementation Audit Record
 
-| Round | Plan revision | Full original scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | R5 | yes | B-01 Unrelated formatting churn violates the approved precision scope and repository quality gate | Plan arithmetic is stale.<br>The implementation audit record is still empty.<br>Verification was not independently rerun in this audit. | BLOCK | `ses_fecb067f0ffeh4oBRvXkSSdF7l` |
-| 2 | R5 | yes | No blocking findings. | Implementation Evidence 中的 Prettier 记录不准确。<br>中文注释统计存在一行差异。 | APPROVE | `ses_fecb067f0ffeh4oBRvXkSSdF7l` |
+| Round | Plan revision | Full original scope? | Blocking findings                                                                                 | Non-blocking findings                                                                                                                   | Result  | Invocation reference             |
+| ----- | ------------- | -------------------- | ------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- | ------- | -------------------------------- |
+| 1     | R5            | yes                  | B-01 Unrelated formatting churn violates the approved precision scope and repository quality gate | Plan arithmetic is stale.<br>The implementation audit record is still empty.<br>Verification was not independently rerun in this audit. | BLOCK   | `ses_fecb067f0ffeh4oBRvXkSSdF7l` |
+| 2     | R5            | yes                  | No blocking findings.                                                                             | Implementation Evidence 中的 Prettier 记录不准确。<br>中文注释统计存在一行差异。                                                        | APPROVE | `ses_fecb067f0ffeh4oBRvXkSSdF7l` |
 
 The task may be marked `verified` only after an independent full-scope result of
 `No blocking findings` for the current implementation and approved plan

@@ -360,34 +360,34 @@ A descriptive index of current structure and each area's responsibility — **no
 
 ### Runtime module map (V1 entries relative to `packages/opencode/src/`)
 
-| Directory          | Role                                                  |
-| ------------------ | ----------------------------------------------------- |
-| `agent/`           | Agent definition, generation, subagent permissions    |
-| `session/`         | Session, Message (v2 + tool-call states), run loop, lifecycle, search, path |
-| `tool/`            | Tool definitions + registry (incl. `shell/`, `bash-compress.ts`) |
-| `provider/`        | LLM providers, alias, auth, transform, model status   |
-| `permission/`      | Permission rulesets + requests                        |
-| `server/`          | Headless HTTP API server (`opencode serve`, port 4096)|
-| `cli/`             | yargs CLI + `cmd/tui/` terminal UI + `cmd/daemon.ts`   |
-| `config/`          | Configuration system (self-export modules)            |
-| `storage/`         | SQLite/Drizzle persistence (`#db` import map)         |
-| `effect/`          | AppRuntime, makeRuntime, InstanceState, EffectBridge, runtime flags |
-| `project/`         | Project bootstrap + instance context                  |
-| `control-plane/`   | Workspaces (`wrk`-prefixed WorkspaceID)               |
-| `bus/`             | Event bus                                             |
-| `snapshot/`        | git-patch working-tree snapshots (`index.ts`)         |
-| `mcp/`             | Model Context Protocol                                |
-| `acp/`             | Agent Client Protocol                                 |
-| `lsp/`             | Language server protocol                              |
-| `pty/`             | Pseudo-terminal (`#pty` import map)                   |
-| `plugin/`          | External plugins (`--pure` disables)                  |
-| `skill/`           | Skill system                                          |
-| `token/`           | Token accounting + estimate                           |
-| `auth/`, `account/`| Authentication + identity                             |
-| `share/`, `sync/`  | Session sharing + synchronization                     |
-| `worktree/`, `git/`| Git worktree + git operations                         |
-| `image/`, `file/`  | Image processing + file handling                      |
-| `packages/core/src/session/` | Native V2 admission, execution and projection (see below) |
+| Directory                    | Role                                                                        |
+| ---------------------------- | --------------------------------------------------------------------------- |
+| `agent/`                     | Agent definition, generation, subagent permissions                          |
+| `session/`                   | Session, Message (v2 + tool-call states), run loop, lifecycle, search, path |
+| `tool/`                      | Tool definitions + registry (incl. `shell/`, `bash-compress.ts`)            |
+| `provider/`                  | LLM providers, alias, auth, transform, model status                         |
+| `permission/`                | Permission rulesets + requests                                              |
+| `server/`                    | Headless HTTP API server (`opencode serve`, port 4096)                      |
+| `cli/`                       | yargs CLI + `cmd/tui/` terminal UI + `cmd/daemon.ts`                        |
+| `config/`                    | Configuration system (self-export modules)                                  |
+| `storage/`                   | SQLite/Drizzle persistence (`#db` import map)                               |
+| `effect/`                    | AppRuntime, makeRuntime, InstanceState, EffectBridge, runtime flags         |
+| `project/`                   | Project bootstrap + instance context                                        |
+| `control-plane/`             | Workspaces (`wrk`-prefixed WorkspaceID)                                     |
+| `bus/`                       | Event bus                                                                   |
+| `snapshot/`                  | git-patch working-tree snapshots (`index.ts`)                               |
+| `mcp/`                       | Model Context Protocol                                                      |
+| `acp/`                       | Agent Client Protocol                                                       |
+| `lsp/`                       | Language server protocol                                                    |
+| `pty/`                       | Pseudo-terminal (`#pty` import map)                                         |
+| `plugin/`                    | External plugins (`--pure` disables)                                        |
+| `skill/`                     | Skill system                                                                |
+| `token/`                     | Token accounting + estimate                                                 |
+| `auth/`, `account/`          | Authentication + identity                                                   |
+| `share/`, `sync/`            | Session sharing + synchronization                                           |
+| `worktree/`, `git/`          | Git worktree + git operations                                               |
+| `image/`, `file/`            | Image processing + file handling                                            |
+| `packages/core/src/session/` | Native V2 admission, execution and projection (see below)                   |
 
 Canonical schemas live in `packages/schema`, runtime domains in `packages/core`, HTTP contracts in `packages/protocol`, and handlers in `packages/server`. Client runtime depends on Schema and Protocol, never Core or Server; `sdk-next` composes Client, Core and Server. `packages/opencode` retains V1 services and compatibility adapters, while `packages/tui` owns the terminal UI.
 

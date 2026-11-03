@@ -25,26 +25,28 @@ export const fileHandlers = HttpApiBuilder.group(InstanceHttpApi, "file", (handl
     })
 
     const findText = Effect.fn("FileHttpApi.findText")(function* (ctx: { query: { pattern: string } }) {
-      return (yield* ripgrep
-        .grep({ cwd: (yield* InstanceState.context).directory, pattern: ctx.query.pattern, limit: 10 })
-        // #138：SearchTooBroad→BadRequest；其它失败→InternalServerError（保留可区分通道）
-        .pipe(
-          Effect.mapError((err) =>
-            err instanceof Ripgrep.SearchTooBroadError
-              ? new HttpApiError.BadRequest({})
-              : new HttpApiError.InternalServerError({}),
-          ),
-        )).map((match) => ({
-        path: { text: match.entry.path },
-        lines: { text: match.text },
-        line_number: match.line,
-        absolute_offset: match.offset,
-        submatches: match.submatches.map((submatch) => ({
-          match: { text: submatch.text },
-          start: submatch.start,
-          end: submatch.end,
-        })),
-      }))
+      return (
+        (yield* ripgrep
+          .grep({ cwd: (yield* InstanceState.context).directory, pattern: ctx.query.pattern, limit: 10 })
+          // #138：SearchTooBroad→BadRequest；其它失败→InternalServerError（保留可区分通道）
+          .pipe(
+            Effect.mapError((err) =>
+              err instanceof Ripgrep.SearchTooBroadError
+                ? new HttpApiError.BadRequest({})
+                : new HttpApiError.InternalServerError({}),
+            ),
+          )).map((match) => ({
+          path: { text: match.entry.path },
+          lines: { text: match.text },
+          line_number: match.line,
+          absolute_offset: match.offset,
+          submatches: match.submatches.map((submatch) => ({
+            match: { text: submatch.text },
+            start: submatch.start,
+            end: submatch.end,
+          })),
+        }))
+      )
     })
 
     const findFile = Effect.fn("FileHttpApi.findFile")(function* (ctx: {

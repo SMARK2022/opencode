@@ -67,14 +67,19 @@ export function reviewerRequestID(message: SessionMessageInfo) {
 
 export function syntheticTurn(message: SessionMessageInfo) {
   if (message.type !== "synthetic" || sessionMessageHidden(message)) return
-  const reviewer = "metadata" in message && record(message.metadata) && message.metadata.permissionReviewerRequest === true
+  const reviewer =
+    "metadata" in message && record(message.metadata) && message.metadata.permissionReviewerRequest === true
   // 只提取真实Goal续跑包装；普通内部synthetic不能因含孤立objective而公开。
-  const objective = !reviewer && "text" in message && typeof message.text === "string"
-    ? message.text.match(/^<session-goal-continuation>[\s\S]*?<objective>([\s\S]*?)<\/objective>/)?.[1]
-    : undefined
-  const text = reviewer && "text" in message && typeof message.text === "string" ? message.text
-    : objective !== undefined ? objective.trim().replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">")
-    : message.description
+  const objective =
+    !reviewer && "text" in message && typeof message.text === "string"
+      ? message.text.match(/^<session-goal-continuation>[\s\S]*?<objective>([\s\S]*?)<\/objective>/)?.[1]
+      : undefined
+  const text =
+    reviewer && "text" in message && typeof message.text === "string"
+      ? message.text
+      : objective !== undefined
+        ? objective.trim().replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">")
+        : message.description
   if (!text?.trim()) return
   // 解码顺序沿用源TUI；仅改变展示投影，审查原文和canonical XML都不回写。
   return { text, reviewer, goal: objective !== undefined }
@@ -116,9 +121,12 @@ export function normalizeSessionMessages(sessionID: string, source: readonly Ses
         agent,
         model: { providerID: model.providerID, modelID: model.id, variant: model.variant },
       })
-      parts.set(message.id, [{
-        ...textPart(sessionID, message.id, 0, synthetic.text, !(synthetic.reviewer || synthetic.goal)), metadata: synthetic.reviewer ? { permissionReviewerRequest: true } : undefined,
-      }])
+      parts.set(message.id, [
+        {
+          ...textPart(sessionID, message.id, 0, synthetic.text, !(synthetic.reviewer || synthetic.goal)),
+          metadata: synthetic.reviewer ? { permissionReviewerRequest: true } : undefined,
+        },
+      ])
       return
     }
     if (message.type === "shell") {
@@ -241,7 +249,7 @@ function userMessage(
     role: "user",
     time: message.time,
     // vendor展示DTO尚无此字段；只读取canonical可选摘要，不重算或转述工具返回的patch。
-    ...(summary ? { summary: { diffs: summary.diffs.map(item => ({ ...item })) } } : {}),
+    ...(summary ? { summary: { diffs: summary.diffs.map((item) => ({ ...item })) } } : {}),
     agent,
     model: { providerID: model.providerID, modelID: model.id, variant: model.variant },
   }
@@ -334,7 +342,13 @@ function assistantParts(sessionID: string, message: SessionMessageAssistant): Pa
   })
 }
 
-function textPart(sessionID: string, messageID: string, ordinal: number, text: string, synthetic?: boolean): Extract<Part, { type: "text" }> {
+function textPart(
+  sessionID: string,
+  messageID: string,
+  ordinal: number,
+  text: string,
+  synthetic?: boolean,
+): Extract<Part, { type: "text" }> {
   return {
     id: sessionMessagePartID(messageID, "text", ordinal),
     sessionID,
@@ -348,7 +362,10 @@ function textPart(sessionID: string, messageID: string, ordinal: number, text: s
 export function toolMetadata(tool: SessionMessageAssistantTool) {
   // 当前原生wire使用structured，仍保留实际在用的vendor客户端metadata快照兼容。
   return "structured" in tool.state && record(tool.state.structured)
-    ? tool.state.structured : tool.state.status === "streaming" ? {} : tool.state.metadata ?? {}
+    ? tool.state.structured
+    : tool.state.status === "streaming"
+      ? {}
+      : (tool.state.metadata ?? {})
 }
 
 function toolPart(sessionID: string, messageID: string, tool: SessionMessageAssistantTool): ToolPart {

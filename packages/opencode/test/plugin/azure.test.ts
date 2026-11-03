@@ -163,7 +163,9 @@ describe("plugin.azure", () => {
 
     const runSpy = spyOn(Process, "run").mockResolvedValue({
       code: 0,
-      stdout: Buffer.from(JSON.stringify({ accessToken: "test-token", expires_on: Math.floor(Date.now() / 1000) + 3600 })),
+      stdout: Buffer.from(
+        JSON.stringify({ accessToken: "test-token", expires_on: Math.floor(Date.now() / 1000) + 3600 }),
+      ),
       stderr: Buffer.alloc(0),
     })
     const fetchSpy = spyOn(NetworkProxy, "fetch").mockResolvedValue(new Response(null, { status: 200 }))

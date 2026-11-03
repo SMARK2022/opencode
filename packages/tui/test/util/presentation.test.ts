@@ -7,12 +7,18 @@ test("formats session continuation summary", () => {
   expect(epilogue).toContain("A session")
   expect(epilogue).toContain("opencode -s ses_123")
   // 直接覆盖 stdout 最终消费的 epilogue 文本，不能只验证孤立 formatter。
-  const populated = sessionEpilogue({ title: "A session", sessionID: "ses_123", usage: { input: 12_300, output: 1_000, cost: 0.01 } })
+  const populated = sessionEpilogue({
+    title: "A session",
+    sessionID: "ses_123",
+    usage: { input: 12_300, output: 1_000, cost: 0.01 },
+  })
   expect(populated).toContain("↑ 12.3K ↓ 1.0K · $0.01")
   expect(populated).toContain("Stats")
   expect(populated.indexOf("Stats")).toBeGreaterThan(populated.indexOf("Session"))
   expect(populated.indexOf("Stats")).toBeLessThan(populated.indexOf("Continue"))
-  expect(sessionEpilogue({ title: "Empty", sessionID: "ses_zero", usage: { input: 0, output: 0, cost: 0 } })).not.toContain("Stats")
+  expect(
+    sessionEpilogue({ title: "Empty", sessionID: "ses_zero", usage: { input: 0, output: 0, cost: 0 } }),
+  ).not.toContain("Stats")
 })
 
 describe("formatUsageStats", () => {
@@ -37,8 +43,14 @@ describe("formatUsageStats", () => {
   // 目标等价承载；970 output + 30 reasoning 由调用方 projection 合并为 1.0K 后进入 formatter）。
   test("session epilogue renders compact spaced flow stats line", () => {
     const tokens = { input: 12_300, output: 970, reasoning: 30, cache: { read: 100, write: 50 } }
-    const usage = tokenAccounting([{ id: "a", role: "assistant", tokens, cost: 0.01, time: { completed: 1 } }], () => [{ type: "step-finish", tokens, cost: 0.01 }]).session
-    const epilogue = sessionEpilogue({ title: "Usage session", sessionID: "ses_u", usage: { input: usage.input, output: usage.output + usage.reasoning, cost: usage.cost } })
+    const usage = tokenAccounting([{ id: "a", role: "assistant", tokens, cost: 0.01, time: { completed: 1 } }], () => [
+      { type: "step-finish", tokens, cost: 0.01 },
+    ]).session
+    const epilogue = sessionEpilogue({
+      title: "Usage session",
+      sessionID: "ses_u",
+      usage: { input: usage.input, output: usage.output + usage.reasoning, cost: usage.cost },
+    })
     expect(epilogue).toContain("Stats")
     // 箭头后空格是用户可见 compact 形态，与 message footer 共用 formatUsageStats。
     expect(epilogue).toContain("↑ 12.3K ↓ 1.0K · $0.01")
@@ -51,15 +63,29 @@ describe("formatUsageStats", () => {
       { input: 6_000, output: 100, reasoning: 0, cache: { read: 100, write: 50 } },
       { input: 6_300, output: 900, reasoning: 100, cache: { read: 100, write: 50 } },
     ]
-    const messages = [{ id: "u", role: "user" }, ...tokens.map((tokens, index) => ({
-      id: `a${index}`, role: "assistant", parentID: "u", tokens, cost: 0.005, time: { completed: index + 1 },
-    }))]
+    const messages = [
+      { id: "u", role: "user" },
+      ...tokens.map((tokens, index) => ({
+        id: `a${index}`,
+        role: "assistant",
+        parentID: "u",
+        tokens,
+        cost: 0.005,
+        time: { completed: index + 1 },
+      })),
+    ]
     const parts = new Map(tokens.map((tokens, index) => [`a${index}`, [{ type: "step-finish", tokens, cost: 0.005 }]]))
     const usage = tokenAccounting(messages, (id) => parts.get(id) ?? [])
     // 当前 step 含缓存且只取最后一步；永久记录取 pure input 和含 reasoning 的请求累计。
     expect(usage.step).toEqual({ input: 6450, output: 1000, confirmed: true })
     expect(usage.request).toMatchObject({ totalInput: 12600, totalInputPure: 12300, totalOutput: 1100, cost: 0.01 })
-    expect(formatUsageStats({ input: usage.request.totalInputPure, output: usage.request.totalOutput, cost: usage.request.cost })).toBe("↑ 12.3K ↓ 1.1K · $0.01")
+    expect(
+      formatUsageStats({
+        input: usage.request.totalInputPure,
+        output: usage.request.totalOutput,
+        cost: usage.request.cost,
+      }),
+    ).toBe("↑ 12.3K ↓ 1.1K · $0.01")
     // 累计为零字段仍被独立门控，禁止空格箭头后的零值噪声。
     expect(formatUsageStats({ input: 0, output: 0, cost: 0 })).toBe("")
   })

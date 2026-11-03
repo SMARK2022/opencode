@@ -416,7 +416,12 @@ export interface Interface {
   readonly setWorkspace: (input: { sessionID: SessionID; workspaceID: Info["workspaceID"] }) => Effect.Effect<void>
   readonly diff: (sessionID: SessionID) => Effect.Effect<Snapshot.FileDiff[]>
   // fromMessageID：尾部裁剪读取（0393 revert messages 裁剪优化）
-  readonly messages: (input: { sessionID: SessionID; limit?: number; fromMessageID?: MessageID; includeHidden?: boolean }) => Effect.Effect<SessionV1.WithParts[], NotFound>
+  readonly messages: (input: {
+    sessionID: SessionID
+    limit?: number
+    fromMessageID?: MessageID
+    includeHidden?: boolean
+  }) => Effect.Effect<SessionV1.WithParts[], NotFound>
   readonly children: (parentID: SessionID) => Effect.Effect<Info[]>
   readonly remove: (sessionID: SessionID) => Effect.Effect<void, NotFound>
   readonly updateMessage: <T extends SessionV1.Info>(msg: T) => Effect.Effect<T>
@@ -515,7 +520,12 @@ const layer: Layer.Layer<
     })
 
     const get = Effect.fn("Session.get")(function* (id: SessionID) {
-      const row = yield* db.select(selection(id)).from(SessionTable).where(eq(SessionTable.id, id)).get().pipe(Effect.orDie)
+      const row = yield* db
+        .select(selection(id))
+        .from(SessionTable)
+        .where(eq(SessionTable.id, id))
+        .get()
+        .pipe(Effect.orDie)
       if (!row) return yield* Effect.fail(new NotFoundError({ message: `Session not found: ${id}` }))
       return fromRow(row)
     })
@@ -567,14 +577,17 @@ const layer: Layer.Layer<
               .select()
               .from(SessionTable)
               .where(and(...conditions))
-          // 先固定页面，再绑定每条身份读取完整请求，避免相关CTE反复展开。
-          : db.select().from(SessionTable)
-      const rows = yield* db.transaction(() => query
-        .orderBy(desc(SessionTable.time_updated), desc(SessionTable.id))
-        .limit(input?.limit ?? 100)
-        .all()
-        .pipe(Effect.flatMap((rows) => withRequests(db, rows))),
-      ).pipe(Effect.orDie)
+          : // 先固定页面，再绑定每条身份读取完整请求，避免相关CTE反复展开。
+            db.select().from(SessionTable)
+      const rows = yield* db
+        .transaction(() =>
+          query
+            .orderBy(desc(SessionTable.time_updated), desc(SessionTable.id))
+            .limit(input?.limit ?? 100)
+            .all()
+            .pipe(Effect.flatMap((rows) => withRequests(db, rows))),
+        )
+        .pipe(Effect.orDie)
       const ids = [...new Set(rows.map((row) => row.project_id))]
       const projects = new Map<string, ProjectInfo>()
       if (ids.length > 0) {
@@ -596,14 +609,17 @@ const layer: Layer.Layer<
     })
 
     const children = Effect.fn("Session.children")(function* (parentID: SessionID) {
-      const rows = yield* db.transaction(() => db
-        // 子代理独立 Session 使用自己的请求投影，不继承父请求费用。
-        .select()
-        .from(SessionTable)
-        .where(and(eq(SessionTable.parent_id, parentID)))
-        .all()
-        .pipe(Effect.flatMap((rows) => withRequests(db, rows))),
-      ).pipe(Effect.orDie)
+      const rows = yield* db
+        .transaction(() =>
+          db
+            // 子代理独立 Session 使用自己的请求投影，不继承父请求费用。
+            .select()
+            .from(SessionTable)
+            .where(and(eq(SessionTable.parent_id, parentID)))
+            .all()
+            .pipe(Effect.flatMap((rows) => withRequests(db, rows))),
+        )
+        .pipe(Effect.orDie)
       return rows.map(fromRow)
     })
 
@@ -671,7 +687,9 @@ const layer: Layer.Layer<
             eq(PartTable.id, input.partID),
             // 单Part读取先约束父子可见性；内部终态写者才能显式选择raw。
             input.includeHidden ? undefined : sql`json_type(${PartTable.data}, '$.hidden') is null`,
-            input.includeHidden ? undefined : sql`exists (
+            input.includeHidden
+              ? undefined
+              : sql`exists (
               select 1 from ${MessageTable} where ${MessageTable.id} = ${PartTable.message_id}
               and ${MessageTable.session_id} = ${PartTable.session_id}
               and json_type(${MessageTable.data}, '$.hidden') is null
@@ -716,8 +734,11 @@ const layer: Layer.Layer<
       // #493：复用 layer 内已解构的 database 服务——避免新增 Effect R 依赖泄漏到 Interface。
       const { sync } = database
       // 显式 fork 边界缺失须在创建子会话前失败，raw 读取仍占用同一预留连接。
-      const raw = yield* Database.withSync(database, () => MessageV2.rawForkRows(sync, { sessionID: input.sessionID, messageID: input.messageID }))
-      if (raw.missing) return yield* Effect.fail(new NotFoundError({ message: `Message not found: ${input.messageID}` }))
+      const raw = yield* Database.withSync(database, () =>
+        MessageV2.rawForkRows(sync, { sessionID: input.sessionID, messageID: input.messageID }),
+      )
+      if (raw.missing)
+        return yield* Effect.fail(new NotFoundError({ message: `Message not found: ${input.messageID}` }))
       const session = yield* createNext({
         directory: ctx.directory,
         path: sessionPath(ctx.worktree, ctx.directory),
@@ -835,7 +856,9 @@ const layer: Layer.Layer<
 
     const diff = Effect.fn("Session.diff")(function* (sessionID: SessionID) {
       // #0500：DB 权威聚合经 SummaryCache 读取；外部 session_diff 只作兼容镜像同步写出。
-      const result = SummaryCache.normalizeDiffPaths(yield* SummaryCache.load({ sessionID, storage }).pipe(Effect.provideService(Database.Service, database)))
+      const result = SummaryCache.normalizeDiffPaths(
+        yield* SummaryCache.load({ sessionID, storage }).pipe(Effect.provideService(Database.Service, database)),
+      )
       yield* storage.write(["session_diff", sessionID], result).pipe(Effect.ignore)
       return result
     })
@@ -844,17 +867,21 @@ const layer: Layer.Layer<
       // #493：0 是显式有界空范围而非“未提供”——退化为全量会在 cold session 上触发无意义持久预热。
       if (input.limit !== undefined) {
         // #106：过滤下沉到 MessageV2.page，避免 limit 路径双重 filter
-        return (yield* MessageV2.page({ sessionID: input.sessionID, limit: input.limit, fromMessageID: input.fromMessageID, includeHidden: input.includeHidden }).pipe(
-          Effect.provideService(Database.Service, database),
-        )).items
+        return (yield* MessageV2.page({
+          sessionID: input.sessionID,
+          limit: input.limit,
+          fromMessageID: input.fromMessageID,
+          includeHidden: input.includeHidden,
+        }).pipe(Effect.provideService(Database.Service, database))).items
       }
 
       // 无 limit 复用 stream 的隐藏过滤；先确认会话，保留公开列表的 NotFound 语义。
       yield* get(input.sessionID)
       // 把边界交给既有分页查询，不能全量hydrate后再作内存过滤。
-      const newestFirst = yield* MessageV2.stream(input.sessionID, { fromMessageID: input.fromMessageID, includeHidden: input.includeHidden }).pipe(
-        Effect.provideService(Database.Service, database),
-      )
+      const newestFirst = yield* MessageV2.stream(input.sessionID, {
+        fromMessageID: input.fromMessageID,
+        includeHidden: input.includeHidden,
+      }).pipe(Effect.provideService(Database.Service, database))
       // stream 为 newest-first；Session.messages 契约为 chronological oldest-first
       return newestFirst.slice().reverse()
     })
@@ -975,21 +1002,24 @@ function* listByProject(
   const limit = input.limit ?? 100
 
   // 页面与请求保持同一读快照，后台更新不能在两段读取间拼出混合版本。
-  return yield* database.db.transaction(() => database.db
-    // 继续使用前项的请求投影，搜索结果不能丢失已落盘的token与费用字段。
-    .select()
-    .from(SessionTable)
-    // #228：home 切换查询故意无 project/path 谓词——undefined 表示无 WHERE，只保留 start/search/roots 过滤
-    .where(conditions.length > 0 ? and(...conditions) : undefined)
-    // 与scan的keyset完全同序，同毫秒更新的top-400也保持一致。
-    .orderBy(desc(SessionTable.time_updated), desc(SessionTable.id))
-    .limit(limit)
-    .all()
-    .pipe(
-      Effect.flatMap((rows) => withRequests(database.db, rows)),
-      Effect.map((rows) => rows.map(fromRow)),
-    ),
-  ).pipe(Effect.orDie)
+  return yield* database.db
+    .transaction(() =>
+      database.db
+        // 继续使用前项的请求投影，搜索结果不能丢失已落盘的token与费用字段。
+        .select()
+        .from(SessionTable)
+        // #228：home 切换查询故意无 project/path 谓词——undefined 表示无 WHERE，只保留 start/search/roots 过滤
+        .where(conditions.length > 0 ? and(...conditions) : undefined)
+        // 与scan的keyset完全同序，同毫秒更新的top-400也保持一致。
+        .orderBy(desc(SessionTable.time_updated), desc(SessionTable.id))
+        .limit(limit)
+        .all()
+        .pipe(
+          Effect.flatMap((rows) => withRequests(database.db, rows)),
+          Effect.map((rows) => rows.map(fromRow)),
+        ),
+    )
+    .pipe(Effect.orDie)
 }
 
 /**
@@ -1029,10 +1059,7 @@ function* searchScanByProject(
     universe.push(
       or(
         lt(SessionTable.time_updated, input.cursor.time_updated),
-        and(
-          eq(SessionTable.time_updated, input.cursor.time_updated),
-          sql`${SessionTable.id} < ${input.cursor.id}`,
-        ),
+        and(eq(SessionTable.time_updated, input.cursor.time_updated), sql`${SessionTable.id} < ${input.cursor.id}`),
       )!,
     )
   }
@@ -1057,13 +1084,16 @@ function* searchScanByProject(
     searchCondition(sync, input.search, { mode: "all", roots: input.roots, scope: inArray(SessionTable.id, ids) }),
   )
   // 命中集合走第二段 SQL 而非在内存过滤——候选窗语义要求 SQL 只按 id 收窄。
-  const matched = yield* database.db.transaction(() => database.db
-    .select()
-    .from(SessionTable)
-    .where(and(inArray(SessionTable.id, ids), full))
-    .all()
-    .pipe(Effect.flatMap((rows) => withRequests(database.db, rows))),
-  ).pipe(Effect.orDie)
+  const matched = yield* database.db
+    .transaction(() =>
+      database.db
+        .select()
+        .from(SessionTable)
+        .where(and(inArray(SessionTable.id, ids), full))
+        .all()
+        .pipe(Effect.flatMap((rows) => withRequests(database.db, rows))),
+    )
+    .pipe(Effect.orDie)
   // 命中行保留同一请求投影，输出仍按候选页排序而非第二次SQL的返回顺序。
   const byID = new Map(matched.map((row) => [row.id, row]))
   const sessions = page.flatMap((row) => {
@@ -1096,7 +1126,13 @@ function listUniverseConditions(
   }
   if (input.path !== undefined) {
     // 已定义的空根也使用共享相关查询，不能被真值判断吞掉。
-    const condition = SessionListing.related({ projectID: input.projectID, worktree: input.worktree, path: input.path, directory: input.directory, home: input.scope !== "project" ? Global.Path.home : undefined })
+    const condition = SessionListing.related({
+      projectID: input.projectID,
+      worktree: input.worktree,
+      path: input.path,
+      directory: input.directory,
+      home: input.scope !== "project" ? Global.Path.home : undefined,
+    })
     if (condition) conditions.push(condition)
   } else {
     conditions.push(eq(SessionTable.project_id, input.projectID))

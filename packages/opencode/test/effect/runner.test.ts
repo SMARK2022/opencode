@@ -562,9 +562,7 @@ describe("Runner", () => {
         .pipe(Effect.forkChild)
       yield* Deferred.await(reserved)
 
-      const queued = yield* runner
-        .ensureRunning(Ref.set(ran, true).pipe(Effect.as("queued")))
-        .pipe(Effect.forkChild)
+      const queued = yield* runner.ensureRunning(Ref.set(ran, true).pipe(Effect.as("queued"))).pipe(Effect.forkChild)
       yield* Effect.yieldNow
       expect(yield* Ref.get(ran)).toBe(false)
       yield* Deferred.succeed(release, undefined)

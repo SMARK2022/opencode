@@ -7,32 +7,61 @@ import { createV2SessionReducer } from "../context/server-session-v2-reducer"
 
 describe("normalizeSessionMessages", () => {
   test("renders native goal objectives through the same snapshot and live turn projection", () => {
-    const text = "<session-goal-continuation>\n<objective>\n A &amp; B\n&lt;tag&gt; &amp;lt; \n</objective>\nprivate budget\n</session-goal-continuation>"
+    const text =
+      "<session-goal-continuation>\n<objective>\n A &amp; B\n&lt;tag&gt; &amp;lt; \n</objective>\nprivate budget\n</session-goal-continuation>"
     const goal = { id: "msg_goal", type: "synthetic" as const, time: { created: 1 }, ...{ sessionID: "ses_1", text } }
     const source = [
-      { id: "msg_internal", type: "synthetic", time: { created: 0 }, ...{ sessionID: "ses_1", text: "<objective>not a goal</objective>" } },
+      {
+        id: "msg_internal",
+        type: "synthetic",
+        time: { created: 0 },
+        ...{ sessionID: "ses_1", text: "<objective>not a goal</objective>" },
+      },
       goal,
-      { id: "msg_after_goal", type: "assistant", agent: "build", model: { id: "model", providerID: "test" }, content: [], time: { created: 2 } },
+      {
+        id: "msg_after_goal",
+        type: "assistant",
+        agent: "build",
+        model: { id: "model", providerID: "test" },
+        content: [],
+        time: { created: 2 },
+      },
     ] satisfies SessionMessageInfo[]
     const snapshot = normalizeSessionMessages("ses_1", source)
-    expect(snapshot.messages.map(message => message.id)).toEqual(["msg_goal", "msg_after_goal"])
+    expect(snapshot.messages.map((message) => message.id)).toEqual(["msg_goal", "msg_after_goal"])
     expect(snapshot.messages[1]).toMatchObject({ parentID: "msg_goal" })
     // 只把objective作为可见DTO；源XML与synthetic身份保持原样，字面实体沿用源解码顺序。
     expect(snapshot.parts.get("msg_goal")?.[0]).toMatchObject({ text: "A & B\n<tag> <", synthetic: false })
     expect(goal).toMatchObject({ type: "synthetic", text })
-    const event = Schema.decodeUnknownSync(Schema.toEncoded(SessionEvent.All))({ id: "evt_goal", type: "session.next.synthetic",
-      durable: { aggregateID: "ses_1", seq: 1, version: 1 }, data: { sessionID: "ses_1", messageID: "msg_goal", timestamp: 1, text } })
+    const event = Schema.decodeUnknownSync(Schema.toEncoded(SessionEvent.All))({
+      id: "evt_goal",
+      type: "session.next.synthetic",
+      durable: { aggregateID: "ses_1", seq: 1, version: 1 },
+      data: { sessionID: "ses_1", messageID: "msg_goal", timestamp: 1, text },
+    })
     const live = createV2SessionReducer().reduce([], event)
     expect(live?.missing).toBeUndefined()
-    expect(normalizeSessionMessages("ses_1", live?.messages ?? []).parts.get("msg_goal")).toEqual(snapshot.parts.get("msg_goal"))
+    expect(normalizeSessionMessages("ses_1", live?.messages ?? []).parts.get("msg_goal")).toEqual(
+      snapshot.parts.get("msg_goal"),
+    )
     expect(live?.messages[0]).toMatchObject({ type: "synthetic", text })
     // Reviewer优先于Goal识别；合法hidden仍隐藏，未标记内部消息仍不展示。
     const reviewer = { ...goal, metadata: { permissionReviewerRequest: true } }
-    expect(normalizeSessionMessages("ses_1", [reviewer]).parts.get("msg_goal")?.[0]).toMatchObject({ text, synthetic: false,
-      metadata: { permissionReviewerRequest: true } })
-    expect(normalizeSessionMessages("ses_1", [{ ...goal, metadata: { hidden: { time: 0, reason: "permission-reviewer-protocol-retry" } } }]).messages).toEqual([])
-    expect(normalizeSessionMessages("ses_1", [{ ...goal, ...{ text: "internal", description: "existing description" } }]).parts.get("msg_goal")?.[0])
-      .toMatchObject({ text: "existing description", synthetic: true })
+    expect(normalizeSessionMessages("ses_1", [reviewer]).parts.get("msg_goal")?.[0]).toMatchObject({
+      text,
+      synthetic: false,
+      metadata: { permissionReviewerRequest: true },
+    })
+    expect(
+      normalizeSessionMessages("ses_1", [
+        { ...goal, metadata: { hidden: { time: 0, reason: "permission-reviewer-protocol-retry" } } },
+      ]).messages,
+    ).toEqual([])
+    expect(
+      normalizeSessionMessages("ses_1", [
+        { ...goal, ...{ text: "internal", description: "existing description" } },
+      ]).parts.get("msg_goal")?.[0],
+    ).toMatchObject({ text: "existing description", synthetic: true })
   })
 
   test("projects current turns into stable legacy rendering records", () => {
@@ -100,22 +129,48 @@ describe("normalizeSessionMessages", () => {
         recent: "recent",
         time: { created: 8 },
       },
-      { id: "msg_internal", type: "synthetic", time: { created: 8 }, ...{ sessionID: "ses_1", text: "INTERNAL CONTEXT" } },
       {
-        id: "msg_review_request", type: "synthetic", time: { created: 9 },
-        ...{ sessionID: "ses_1", text: "system: exact policy\nuser: exact evidence", metadata: { permissionReviewerRequest: true, reviewID: "review_1" } },
+        id: "msg_internal",
+        type: "synthetic",
+        time: { created: 8 },
+        ...{ sessionID: "ses_1", text: "INTERNAL CONTEXT" },
       },
       {
-        id: "msg_review_answer", type: "assistant", agent: "permission-reviewer", model: { id: "review", providerID: "test" }, time: { created: 10, completed: 11 },
+        id: "msg_review_request",
+        type: "synthetic",
+        time: { created: 9 },
+        ...{
+          sessionID: "ses_1",
+          text: "system: exact policy\nuser: exact evidence",
+          metadata: { permissionReviewerRequest: true, reviewID: "review_1" },
+        },
+      },
+      {
+        id: "msg_review_answer",
+        type: "assistant",
+        agent: "permission-reviewer",
+        model: { id: "review", providerID: "test" },
+        time: { created: 10, completed: 11 },
         content: [
           { type: "reasoning", text: "Actual reviewer reasoning" },
           { type: "text", text: "Actual reviewer explanation" },
           {
-            type: "tool", id: "decision", name: "permission_review_decision",
+            type: "tool",
+            id: "decision",
+            name: "permission_review_decision",
             state: {
-              status: "completed", input: { outcome: "deny" },
+              status: "completed",
+              input: { outcome: "deny" },
               content: [{ type: "text", text: "Exact decision" }],
-              ...{ structured: { reviewID: "review_1", outcome: "deny", risk_level: "high", user_authorization: "unknown", rationale: "Exact rationale" } },
+              ...{
+                structured: {
+                  reviewID: "review_1",
+                  outcome: "deny",
+                  risk_level: "high",
+                  user_authorization: "unknown",
+                  rationale: "Exact rationale",
+                },
+              },
             },
             time: { created: 10, ran: 10, completed: 11 },
           },
@@ -154,11 +209,22 @@ describe("normalizeSessionMessages", () => {
       tool: "read",
       state: { status: "completed", output: "hello" },
     })
-    expect(result.messages.map((message) => message.id)).toEqual(["msg_3", "msg_4", "msg_review_request", "msg_review_answer"])
-    expect(result.parts.get("msg_review_request")?.[0]).toMatchObject({ text: "system: exact policy\nuser: exact evidence", synthetic: false, metadata: { permissionReviewerRequest: true } })
+    expect(result.messages.map((message) => message.id)).toEqual([
+      "msg_3",
+      "msg_4",
+      "msg_review_request",
+      "msg_review_answer",
+    ])
+    expect(result.parts.get("msg_review_request")?.[0]).toMatchObject({
+      text: "system: exact policy\nuser: exact evidence",
+      synthetic: false,
+      metadata: { permissionReviewerRequest: true },
+    })
     expect(result.messages[3]).toMatchObject({ role: "assistant", parentID: "msg_review_request" })
     expect(result.parts.get("msg_review_answer")?.map((part) => part.type)).toEqual(["reasoning", "text", "tool"])
-    expect(result.parts.get("msg_review_answer")?.[2]).toMatchObject({ state: { status: "completed", metadata: { reviewID: "review_1", outcome: "deny", rationale: "Exact rationale" } } })
+    expect(result.parts.get("msg_review_answer")?.[2]).toMatchObject({
+      state: { status: "completed", metadata: { reviewID: "review_1", outcome: "deny", rationale: "Exact rationale" } },
+    })
   })
 
   test("does not invent a parent for an assistant-only page", () => {
@@ -214,9 +280,25 @@ describe("normalizeSessionMessages", () => {
   test("adapts current edit fields for the legacy edit renderer", () => {
     const source = [
       // 已持久化摘要进入原有每prompt修改列表，不能只在单工具面板看见diff。
-      { id: "msg_user", type: "user", text: "edit it", time: { created: 1 }, ...{ summary: { diffs: [
-        { file: "README.md", patch: "@@ -1 +1 @@\n-old\n+new", additions: 1, deletions: 1, status: "modified" as const },
-      ] } } },
+      {
+        id: "msg_user",
+        type: "user",
+        text: "edit it",
+        time: { created: 1 },
+        ...{
+          summary: {
+            diffs: [
+              {
+                file: "README.md",
+                patch: "@@ -1 +1 @@\n-old\n+new",
+                additions: 1,
+                deletions: 1,
+                status: "modified" as const,
+              },
+            ],
+          },
+        },
+      },
       {
         id: "msg_assistant",
         type: "assistant",
@@ -252,7 +334,9 @@ describe("normalizeSessionMessages", () => {
     ] satisfies SessionMessageInfo[]
 
     const result = normalizeSessionMessages("ses_1", source)
-    expect(result.messages[0]).toMatchObject({ summary: { diffs: [{ file: "README.md", additions: 1, deletions: 1 }] } })
+    expect(result.messages[0]).toMatchObject({
+      summary: { diffs: [{ file: "README.md", additions: 1, deletions: 1 }] },
+    })
 
     expect(result.parts.get("msg_assistant")).toEqual([
       expect.objectContaining({

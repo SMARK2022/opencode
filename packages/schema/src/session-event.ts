@@ -101,16 +101,23 @@ export type PromptAdmitted = typeof PromptAdmitted.Type
 
 // 准备失败属于真实请求，不需要制造一条尚未执行的助手消息。
 export const PromptFailed = Event.define({
-  type: "session.next.prompt.failed", ...options,
+  type: "session.next.prompt.failed",
+  ...options,
   // 根和成员由执行边界冻结；公开事件和 replay 共用唯一 payload 契约。
-  schema: { ...Base, messageID: SessionMessage.ID, requestIDs: Schema.Array(SessionMessage.ID),
-    error: UnknownError, aborted: Schema.Boolean.pipe(optional) },
+  schema: {
+    ...Base,
+    messageID: SessionMessage.ID,
+    requestIDs: Schema.Array(SessionMessage.ID),
+    error: UnknownError,
+    aborted: Schema.Boolean.pipe(optional),
+  },
 })
 export type PromptFailed = typeof PromptFailed.Type
 
 // 零助手成功是请求终态，不伪造 provider Step 或改变已有失败 payload。
 export const PromptCompleted = Event.define({
-  type: "session.next.prompt.completed", ...options,
+  type: "session.next.prompt.completed",
+  ...options,
   schema: { ...Base, messageID: SessionMessage.ID, requestIDs: Schema.Array(SessionMessage.ID) },
 })
 export type PromptCompleted = typeof PromptCompleted.Type
@@ -470,7 +477,8 @@ export namespace Compaction {
 
   // 压缩使用独立 provider turn，但共享正常 step 的非重叠 token 分类契约。
   const Usage = Schema.Struct({
-    tokens: Step.Ended.data.fields.tokens, cost: Schema.Finite,
+    tokens: Step.Ended.data.fields.tokens,
+    cost: Schema.Finite,
     stepCount: NonNegativeInt,
   })
 
@@ -493,9 +501,15 @@ export namespace Compaction {
 
   // 失败只结算账本，不产生一条伪成功的摘要消息；沿用现有 durable event 基础设施。
   export const Failed = Event.define({
-    type: "session.next.compaction.failed", ...options,
-    schema: { ...Base, messageID: SessionMessage.ID, error: UnknownError,
-      aborted: Schema.Boolean.pipe(optional), usage: Usage.pipe(optional) },
+    type: "session.next.compaction.failed",
+    ...options,
+    schema: {
+      ...Base,
+      messageID: SessionMessage.ID,
+      error: UnknownError,
+      aborted: Schema.Boolean.pipe(optional),
+      usage: Usage.pipe(optional),
+    },
   })
   export type Failed = typeof Failed.Type
 }
@@ -519,7 +533,9 @@ export const MessagesHidden = Event.define({
   type: "session.next.messages.hidden",
   ...options,
   schema: {
-    ...Base, messageIDs: Schema.Array(SessionMessage.ID), hidden: SessionMessage.Hidden,
+    ...Base,
+    messageIDs: Schema.Array(SessionMessage.ID),
+    hidden: SessionMessage.Hidden,
   },
 })
 

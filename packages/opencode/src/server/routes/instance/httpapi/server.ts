@@ -287,28 +287,33 @@ const app = LayerNode.group([
 
 export function createSharedServices() {
   const legacyOwners = AppNodeBuilderV1.build(LayerNode.group([MCP.node, InstanceStore.node]))
-  const layer = Layer.unwrap(Effect.gen(function* () {
-    const mcp = yield* MCP.Service
-    const instances = yield* InstanceStore.Service
-    const locationServiceMapV2 = buildLocationServiceMap(ref => {
-      // 显式workspace有自己的Native owner；隐式本地位置取旧实例内的同一连接对象。
-      if (ref.workspaceID !== undefined) return []
-      return [[McpRuntime.node, Layer.effect(McpRuntime.Service,
-        instances.provide({ directory: ref.directory }, mcp.native()),
-      )]]
-    })
-    const replacements: LayerNode.Replacements = [
-      [LocationServiceMap.node, locationServiceMapV2],
-      [SessionExecution.node, SessionExecutionLocal.node],
-      [MCP.node, Layer.succeed(MCP.Service, mcp)],
-      [InstanceStore.node, Layer.succeed(InstanceStore.Service, instances)],
-    ]
-    return Layer.mergeAll(
-      AppNodeBuilderV1.build(app, replacements),
-      AppNodeBuilderV1.build(LayerNode.group([SessionV2.node, SessionExecution.node]), replacements),
-      AppNodeBuilderV1.build(MoveSession.node, replacements),
-    ).pipe(Layer.provideMerge(locationServiceMapV2))
-  })).pipe(Layer.provideMerge(legacyOwners))
+  const layer = Layer.unwrap(
+    Effect.gen(function* () {
+      const mcp = yield* MCP.Service
+      const instances = yield* InstanceStore.Service
+      const locationServiceMapV2 = buildLocationServiceMap((ref) => {
+        // 显式workspace有自己的Native owner；隐式本地位置取旧实例内的同一连接对象。
+        if (ref.workspaceID !== undefined) return []
+        return [
+          [
+            McpRuntime.node,
+            Layer.effect(McpRuntime.Service, instances.provide({ directory: ref.directory }, mcp.native())),
+          ],
+        ]
+      })
+      const replacements: LayerNode.Replacements = [
+        [LocationServiceMap.node, locationServiceMapV2],
+        [SessionExecution.node, SessionExecutionLocal.node],
+        [MCP.node, Layer.succeed(MCP.Service, mcp)],
+        [InstanceStore.node, Layer.succeed(InstanceStore.Service, instances)],
+      ]
+      return Layer.mergeAll(
+        AppNodeBuilderV1.build(app, replacements),
+        AppNodeBuilderV1.build(LayerNode.group([SessionV2.node, SessionExecution.node]), replacements),
+        AppNodeBuilderV1.build(MoveSession.node, replacements),
+      ).pipe(Layer.provideMerge(locationServiceMapV2))
+    }),
+  ).pipe(Layer.provideMerge(legacyOwners))
   return { layer, memoMap }
 }
 
@@ -328,23 +333,19 @@ export function createRoutes(
   ).pipe(
     // 在整个 legacy/native 合并树的装配边界提供同一服务，不在每个请求重建 Layer。
     Layer.provide(eventClients ? Layer.succeed(EventClients.Service)(eventClients) : EventClients.layer),
-    Layer.provide([
-      errorLayer,
-      compressionLayer,
-      corsVaryFix,
-      fenceLayer,
-      cors(corsOptions),
-      HttpServer.layerServices,
-    ]),
+    Layer.provide([errorLayer, compressionLayer, corsVaryFix, fenceLayer, cors(corsOptions), HttpServer.layerServices]),
     Layer.provide(Layer.succeed(CorsConfig)(corsOptions)),
     Layer.provide(sessionLocationLayer),
     Layer.provide(locationLayer),
     Layer.provide(PtyEnvironment.layer),
     // 只复用应用服务；路由注册、认证及 CORS 仍由各 listener 的 MemoMap 独立构建。
-    Layer.provide(shared
-      ? Layer.effectContext(Effect.flatMap(Effect.scope, (scope) =>
-          Layer.buildWithMemoMap(shared.layer, shared.memoMap, scope)))
-      : createSharedServices().layer),
+    Layer.provide(
+      shared
+        ? Layer.effectContext(
+            Effect.flatMap(Effect.scope, (scope) => Layer.buildWithMemoMap(shared.layer, shared.memoMap, scope)),
+          )
+        : createSharedServices().layer,
+    ),
     // Must stay last: layers provided later in this pipe build beneath earlier ones,
     // so Observability must come after every service graph. Otherwise eagerly forked
     // fibers (e.g. the ModelsDev background refresh) capture Effect's default stdout

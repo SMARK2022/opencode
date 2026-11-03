@@ -48,11 +48,11 @@
 
 调查脚本在只读 DB 上对 JSON 字段做了全量解析、SHA-256 内容去重和 gzip 实验。
 
-| 方案 | 候选范围 | 原始候选 | 占 DB | 去重+gzip | 理论节省 |
-| --- | --- | ---: | ---: | ---: | ---: |
+| 方案                          | 候选范围                                                  |  原始候选 |  占 DB | 去重+gzip |           理论节省 |
+| ----------------------------- | --------------------------------------------------------- | --------: | -----: | --------: | -----------------: |
 | A：冷字段白名单，compact 范围 | boundary 前的 tool output、附件、reasoning、summary.diffs | 373.98 MB | 17.85% | 144.78 MB | 229.19 MB / 10.94% |
-| B：compact 范围整行 | boundary 前全部 message/part JSON | 755.59 MB | 36.07% | 282.34 MB | 473.25 MB / 22.59% |
-| A：全库上界 | 全历史所有冷字段白名单 | 974.43 MB | 46.51% | 385.85 MB | 588.58 MB / 28.09% |
+| B：compact 范围整行           | boundary 前全部 message/part JSON                         | 755.59 MB | 36.07% | 282.34 MB | 473.25 MB / 22.59% |
+| A：全库上界                   | 全历史所有冷字段白名单                                    | 974.43 MB | 46.51% | 385.85 MB | 588.58 MB / 28.09% |
 
 方案 B 还需要约 53.60 MB 搜索投影，且会把低收益的普通字段引入冷/热投影同步问题。第一版采用方案 A：空间收益较大，仍保持搜索和普通读取的主表契约。
 
@@ -261,14 +261,14 @@ interface ColdStorage {
 
 前端 API 不增加 cold/hot 字段。后端根据调用路径选择 intent：
 
-| intent | 是否解冻 | 范围 |
-| --- | --- | --- |
-| `search` | 否 | 只查询主表热投影；绝不 join/读取 cold_storage |
-| `prompt` | 只解冻可见 tail | 不恢复 compact hidden head；只保证进入模型的 rows 完整 |
-| `display` | 是 | 按 TUI 请求的 message range 解冻 |
-| `export` | 是 | 解冻导出所需范围；全量导出显式承担 I/O |
-| `restore` | 是 | 解冻恢复操作实际需要的范围 |
-| `maintenance` | 由命令决定 | freeze/expand/verify 不走普通读取路径 |
+| intent        | 是否解冻        | 范围                                                   |
+| ------------- | --------------- | ------------------------------------------------------ |
+| `search`      | 否              | 只查询主表热投影；绝不 join/读取 cold_storage          |
+| `prompt`      | 只解冻可见 tail | 不恢复 compact hidden head；只保证进入模型的 rows 完整 |
+| `display`     | 是              | 按 TUI 请求的 message range 解冻                       |
+| `export`      | 是              | 解冻导出所需范围；全量导出显式承担 I/O                 |
+| `restore`     | 是              | 解冻恢复操作实际需要的范围                             |
+| `maintenance` | 由命令决定      | freeze/expand/verify 不走普通读取路径                  |
 
 ### 6.3 同步解冻与持久回填
 
@@ -482,25 +482,25 @@ opencode db migrate
 
 以下决策来自本次 grilling，对后续 canonical plan 具有约束力：
 
-| 决策 | 已确认内容 |
-| --- | --- |
-| 冷表拓扑 | 同一个 `opencode.db` 内只新增一张 `cold_storage` 表；不建立 hot 表，不使用独立 cold.db 或文件归档。 |
-| 主表引用 | `message`/`part` 增加 `cold_ref`；主表继续保存热投影。 |
-| Payload 粒度 | 同一个 message/part 的冷字段聚合成一个 payload；hash 不包含 owner ID。 |
-| Fork identity | message/part ID 保持独立；fork owner 可以共享同一 hash；各 owner 独立 thaw。 |
-| 引用计数 | freeze/thaw/fork/delete 在事务内维护 `ref_count`；verify 全量反算并报告或修复。 |
-| 冷字段 | `summary.diffs`、tool output、reasoning text、大型 data URI/base64；普通文本和搜索投影保持热。 |
-| Step 元数据 | 第一版保持 step-start/step-finish/patch 热态。 |
-| Compact 内容 | marker、summary assistant、tail 保持热；boundary 前冷字段按白名单冷冻；已 `state.time.compacted` 的 tool output 可冷冻。 |
-| Eligibility | `completed boundary OR time_updated >= 30 days old`；30 天规则冷冻整个 session 的冷字段白名单，不冷冻普通文本。 |
-| Thaw | TUI display 按请求范围同步 thaw，成功后持久回填主表；无 TTL、LRU 或自动再冷冻。 |
-| Search | session search 只查主表热投影，永不触发 cold_storage 解冻。 |
+| 决策              | 已确认内容                                                                                                                   |
+| ----------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| 冷表拓扑          | 同一个 `opencode.db` 内只新增一张 `cold_storage` 表；不建立 hot 表，不使用独立 cold.db 或文件归档。                          |
+| 主表引用          | `message`/`part` 增加 `cold_ref`；主表继续保存热投影。                                                                       |
+| Payload 粒度      | 同一个 message/part 的冷字段聚合成一个 payload；hash 不包含 owner ID。                                                       |
+| Fork identity     | message/part ID 保持独立；fork owner 可以共享同一 hash；各 owner 独立 thaw。                                                 |
+| 引用计数          | freeze/thaw/fork/delete 在事务内维护 `ref_count`；verify 全量反算并报告或修复。                                              |
+| 冷字段            | `summary.diffs`、tool output、reasoning text、大型 data URI/base64；普通文本和搜索投影保持热。                               |
+| Step 元数据       | 第一版保持 step-start/step-finish/patch 热态。                                                                               |
+| Compact 内容      | marker、summary assistant、tail 保持热；boundary 前冷字段按白名单冷冻；已 `state.time.compacted` 的 tool output 可冷冻。     |
+| Eligibility       | `completed boundary OR time_updated >= 30 days old`；30 天规则冷冻整个 session 的冷字段白名单，不冷冻普通文本。              |
+| Thaw              | TUI display 按请求范围同步 thaw，成功后持久回填主表；无 TTL、LRU 或自动再冷冻。                                              |
+| Search            | session search 只查主表热投影，永不触发 cold_storage 解冻。                                                                  |
 | Maintenance owner | daemon 是长期 DB 写入 owner；CLI `opencode db` 作为维护任务客户端；daemon 不可用时使用同一 implementation 的单进程锁定模式。 |
-| CLI | 使用现有 `opencode db` 命令组：compress、expand、status、verify、vacuum、path、migrate。 |
-| Compress | 无 session 时全库扫描 eligible session；后台小批量、可恢复；默认不与 compact 自动联动。 |
-| Expand | 指定 session 可直接执行；全量展开必须显式 `--all` 或确认。 |
-| API | 前端不接收 cold/hot 状态；普通 Session API 保持透明，维护状态只经 status/CLI。 |
-| Error | cold payload 缺失、hash 不匹配或解压失败时返回 typed error，保留引用和诊断证据，不静默降级成功。 |
+| CLI               | 使用现有 `opencode db` 命令组：compress、expand、status、verify、vacuum、path、migrate。                                     |
+| Compress          | 无 session 时全库扫描 eligible session；后台小批量、可恢复；默认不与 compact 自动联动。                                      |
+| Expand            | 指定 session 可直接执行；全量展开必须显式 `--all` 或确认。                                                                   |
+| API               | 前端不接收 cold/hot 状态；普通 Session API 保持透明，维护状态只经 status/CLI。                                               |
+| Error             | cold payload 缺失、hash 不匹配或解压失败时返回 typed error，保留引用和诊断证据，不静默降级成功。                             |
 
 ## 14. Cross-Platform Codec Decision
 

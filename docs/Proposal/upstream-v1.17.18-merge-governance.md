@@ -33,14 +33,14 @@ This is a controlled forward-port strategy rather than a tree-layering strategy:
 
 ### 2.1 Online release facts
 
-| Item | Value |
-| --- | --- |
-| Release | `v1.17.18` |
-| Release date | 2026-07-09 18:51:45 UTC |
-| Tag commit | `b1fc8113948b518835c2a39ece49553cffe9b30c` |
-| Release URL | <https://github.com/anomalyco/opencode/releases/tag/v1.17.18> |
-| Source tree | <https://github.com/anomalyco/opencode/tree/v1.17.18> |
-| Current upstream `dev` at research time | `34e58090595d44e3e7cc37498f16753a98627456` |
+| Item                                    | Value                                                         |
+| --------------------------------------- | ------------------------------------------------------------- |
+| Release                                 | `v1.17.18`                                                    |
+| Release date                            | 2026-07-09 18:51:45 UTC                                       |
+| Tag commit                              | `b1fc8113948b518835c2a39ece49553cffe9b30c`                    |
+| Release URL                             | <https://github.com/anomalyco/opencode/releases/tag/v1.17.18> |
+| Source tree                             | <https://github.com/anomalyco/opencode/tree/v1.17.18>         |
+| Current upstream `dev` at research time | `34e58090595d44e3e7cc37498f16753a98627456`                    |
 
 The current `dev` commit is deliberately excluded. A release migration must not silently include post-release development commits.
 
@@ -59,26 +59,26 @@ The common ancestor between the current local baseline and `v1.17.18` is:
 e4cc4e1682766853bccfb7acbd937a90728eeac2
 ```
 
-| Measure | Result |
-| --- | ---: |
-| Local-only commits after the common ancestor | 466 |
-| Upstream-only commits through `v1.17.18` | 1,856 |
-| Files touched by both sides | 215 |
-| Upstream-side changed files | 3,075 |
-| Upstream-side additions/deletions | +388,029 / -183,320 |
-| Local-side changed files | 648 |
-| Local-side additions/deletions | +138,862 / -82,746 |
+| Measure                                      |              Result |
+| -------------------------------------------- | ------------------: |
+| Local-only commits after the common ancestor |                 466 |
+| Upstream-only commits through `v1.17.18`     |               1,856 |
+| Files touched by both sides                  |                 215 |
+| Upstream-side changed files                  |               3,075 |
+| Upstream-side additions/deletions            | +388,029 / -183,320 |
+| Local-side changed files                     |                 648 |
+| Local-side additions/deletions               |  +138,862 / -82,746 |
 
 A direct virtual merge reports 206 conflicts:
 
-| Conflict class | Count |
-| --- | ---: |
-| Content | 141 |
-| Modify/delete | 43 |
-| File location | 19 |
-| Directory rename split | 1 |
-| Add/add | 1 |
-| Rename/delete | 1 |
+| Conflict class         | Count |
+| ---------------------- | ----: |
+| Content                |   141 |
+| Modify/delete          |    43 |
+| File location          |    19 |
+| Directory rename split |     1 |
+| Add/add                |     1 |
+| Rename/delete          |     1 |
 
 This is larger than the failed v1.17.7-era merge. Direct conflict resolution is therefore not an acceptable primary strategy.
 
@@ -86,25 +86,25 @@ This is larger than the failed v1.17.7-era merge. Direct conflict resolution is 
 
 The incremental range changes 1,769 files with +167,929 / -42,314 lines. The highest file counts are:
 
-| Area | Changed files |
-| --- | ---: |
-| `packages/app` | 343 |
-| `packages/core` | 340 |
-| `packages/opencode` | 278 |
-| `packages/session-ui` | 102 |
-| `packages/ui` | 94 |
-| `packages/schema` | 74 |
-| `packages/stats` | 55 |
-| `packages/console` | 55 |
-| `packages/web` | 48 |
-| `packages/tui` | 44 |
-| `packages/llm` | 40 |
-| `packages/codemode` | 40 |
-| `packages/plugin` | 33 |
-| `packages/server` | 31 |
-| `packages/protocol` | 26 |
-| `packages/desktop` | 21 |
-| `packages/client` | 21 |
+| Area                  | Changed files |
+| --------------------- | ------------: |
+| `packages/app`        |           343 |
+| `packages/core`       |           340 |
+| `packages/opencode`   |           278 |
+| `packages/session-ui` |           102 |
+| `packages/ui`         |            94 |
+| `packages/schema`     |            74 |
+| `packages/stats`      |            55 |
+| `packages/console`    |            55 |
+| `packages/web`        |            48 |
+| `packages/tui`        |            44 |
+| `packages/llm`        |            40 |
+| `packages/codemode`   |            40 |
+| `packages/plugin`     |            33 |
+| `packages/server`     |            31 |
+| `packages/protocol`   |            26 |
+| `packages/desktop`    |            21 |
+| `packages/client`     |            21 |
 
 The package counts show that the change is not centered on one CLI file. It changes public schemas, core domain ownership, protocol generation, session rendering, providers, TUI runtime, and desktop state management together.
 
@@ -122,19 +122,19 @@ This proposal uses the available `docs/merge-upstream-log.md`, current source, G
 
 ### 3.1 Release-level summary
 
-| Release | Material changes relevant to migration |
-| --- | --- |
-| `v1.17.8` | Faster Session timelines without flicker or scroll jumps; OpenAI-compatible MCP schema sanitation; Cloudflare API key propagation; MCP timeout refresh and OAuth/error fixes. |
-| `v1.17.9` | Agent step limits produce a final answer instead of failing; provider header and model detection fixes; GLM-5.2 high/max thinking; cache-preserving follow-up prompts. |
+| Release    | Material changes relevant to migration                                                                                                                                            |
+| ---------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `v1.17.8`  | Faster Session timelines without flicker or scroll jumps; OpenAI-compatible MCP schema sanitation; Cloudflare API key propagation; MCP timeout refresh and OAuth/error fixes.     |
+| `v1.17.9`  | Agent step limits produce a final answer instead of failing; provider header and model detection fixes; GLM-5.2 high/max thinking; cache-preserving follow-up prompts.            |
 | `v1.17.10` | MCP instructions/resources, managed Provider integrations, `--mini`, namespaced plugin hooks, V2 plugin API, Session snapshot/revert work, cross-platform ACP and Snapshot fixes. |
-| `v1.17.11` | Session snapshots and revert controls; significant tab, draft, Session navigation, Provider lifetime, and desktop-state corrections. |
-| `v1.17.12` | MCP OAuth/skill/provider fixes; TUI yolo mode; ServerAuth transport; live SDK events, active Sessions, durable history, runtime operations, and Permission request endpoints. |
-| `v1.17.13` | OpenAI-compatible reasoning enforcement; Copilot item-ID replay fix; V2 model picker and desktop Session isolation work. |
-| `v1.17.14` | Code mode MCP adapter; MCP metadata/output-schema fixes; Copilot endpoint routing; equivalent directory matching; TUI spinner registration fix; OpenTUI 0.4.3. |
-| `v1.17.15` | Unavailable Config directory handling; Z.ai context-overflow classification; home-relative Permission path handling. |
-| `v1.17.16` | Grok reasoning variants and xAI cache/PDF behavior; desktop file browser, review state, and route corrections. |
-| `v1.17.17` | Meta reasoning/request handling; V2 subagent/revert/free-model UI refinements. |
-| `v1.17.18` | Copilot zero billing-batch defense; Meta Muse Spark system prompt. |
+| `v1.17.11` | Session snapshots and revert controls; significant tab, draft, Session navigation, Provider lifetime, and desktop-state corrections.                                              |
+| `v1.17.12` | MCP OAuth/skill/provider fixes; TUI yolo mode; ServerAuth transport; live SDK events, active Sessions, durable history, runtime operations, and Permission request endpoints.     |
+| `v1.17.13` | OpenAI-compatible reasoning enforcement; Copilot item-ID replay fix; V2 model picker and desktop Session isolation work.                                                          |
+| `v1.17.14` | Code mode MCP adapter; MCP metadata/output-schema fixes; Copilot endpoint routing; equivalent directory matching; TUI spinner registration fix; OpenTUI 0.4.3.                    |
+| `v1.17.15` | Unavailable Config directory handling; Z.ai context-overflow classification; home-relative Permission path handling.                                                              |
+| `v1.17.16` | Grok reasoning variants and xAI cache/PDF behavior; desktop file browser, review state, and route corrections.                                                                    |
+| `v1.17.17` | Meta reasoning/request handling; V2 subagent/revert/free-model UI refinements.                                                                                                    |
+| `v1.17.18` | Copilot zero billing-batch defense; Meta Muse Spark system prompt.                                                                                                                |
 
 ### 3.2 Structural changes not captured by short release notes
 
@@ -190,33 +190,33 @@ Examples: local ProviderID/ModelID brands, the old Database singleton, legacy Sy
 
 ## 5. Canonical ownership matrix
 
-| Concern | Authoritative source after migration | Local disposition | Rule |
-| --- | --- | --- | --- |
-| Public IDs and wire contracts | `packages/schema/src/**` | R for duplicate brands | No local `ProviderID`, `ModelID`, `ProjectID`, Session/Permission wire clone. |
-| Config V1 operational surface | `packages/opencode/src/config/config.ts`, `packages/core/src/v1/config/**` | U/A/E at this upstream boundary | `v1.17.18` still uses `@opencode/Config` broadly and writes project `config.json`; do not pretend it has retired. |
-| Config V2 core surface | `packages/core/src/config.ts`, `packages/core/src/config/**` | U/A/E at this upstream boundary | Core consumers use `@opencode/v2/Config`; add no third SMARK schema or loader. |
-| Config V1-to-V2 migration | `packages/core/src/v1/config/migrate.ts` | A | Extend one-way migration for SMARK legacy keys only where a V2 consumer needs them. |
-| Config discovery and writes | The two upstream services and their documented precedence | U | Preserve current file discovery/writer behavior until a separately approved atomic Config convergence. |
-| Provider/Model runtime shape | `packages/schema/src/provider.ts`, `model.ts`; `packages/core/src/catalog.ts` | A/E | Alias and special protocols materialize canonical records. |
-| Database service | `packages/core/src/database/database.ts` | E for operational policy | Keep one `Database.Service`; no second singleton or transaction context. |
-| Base SQL tables | `packages/core/src/<domain>/sql.ts` | E via separate tables | Never copy Session/Project/Permission/Share tables into `packages/opencode`. |
-| Database migration engine | `packages/core/src/database/migration.ts` and ordered generated list | E via later migration | No parallel Drizzle folder runner in production. |
-| Storage paths | `packages/core/src/database/path.ts` | U | Preserve path normalization and branded absolute paths. |
-| Event model | `packages/core/src/event.ts`, `packages/schema/src/event.ts` | A then R for SyncEvent | New writes and projections use EventV2. |
-| Legacy transcript wire schema | `packages/core/src/v1/session.ts` / `packages/schema` Session V1 contracts | E only through approved fields/metadata | `message-v2.ts` may implement hydration, not redefine the union. |
-| New Session message/execution model | `packages/core/src/session/**` | E at service/projection seams | Preserve sequence, input, context epoch, replay, and projector invariants. |
-| HTTP contract | `packages/protocol/**` and upstream HttpApi group assembly | E | Local endpoints must be fully typed in the same contract graph. |
-| HTTP handlers | `packages/server/**` and canonical application handlers | E | Thin handlers; no `as any` registration or hand-written OpenAPI repair. |
-| OpenAPI and SDK | generated from canonical contracts | R for copied generated output | Regenerate after source stabilization. |
-| Permission schema | `packages/schema` / `packages/core` Permission modules | A/E | Auto-review is a policy service, not a second Ruleset. |
-| Tool parameter/result contracts | upstream Tool schema and registry interfaces | E | Preserve local execution behavior behind canonical Tool interfaces. |
-| LLM events/runtime | `packages/llm`, core/opencode LLM route adapters | A/E | Provider adapters emit canonical requests/events. |
-| TUI | `packages/tui` | E | Reimplement local UI behavior inside the upstream package. |
-| OpenTUI runtime | root catalog 0.4.3 and upstream lockfile closure | U | One version and one renderer/context graph. |
-| App/Desktop/Session UI | upstream `packages/app`, `desktop`, `session-ui`, `ui` | E only | Do not overwrite the new component/state architecture. |
-| CLI run/mini/attach | upstream CLI/runtime | E/A | Shared daemon, if retained, must be an explicit host adapter. |
-| Stats | SMARK local projection/CLI feature | E | Rebase reads onto canonical tables and token semantics; no base schema fork. |
-| Voice/Notebook/VS Code bridge | SMARK local product modules | E/A | Register through upstream Tool/TUI/plugin seams. |
+| Concern                             | Authoritative source after migration                                          | Local disposition                       | Rule                                                                                                              |
+| ----------------------------------- | ----------------------------------------------------------------------------- | --------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| Public IDs and wire contracts       | `packages/schema/src/**`                                                      | R for duplicate brands                  | No local `ProviderID`, `ModelID`, `ProjectID`, Session/Permission wire clone.                                     |
+| Config V1 operational surface       | `packages/opencode/src/config/config.ts`, `packages/core/src/v1/config/**`    | U/A/E at this upstream boundary         | `v1.17.18` still uses `@opencode/Config` broadly and writes project `config.json`; do not pretend it has retired. |
+| Config V2 core surface              | `packages/core/src/config.ts`, `packages/core/src/config/**`                  | U/A/E at this upstream boundary         | Core consumers use `@opencode/v2/Config`; add no third SMARK schema or loader.                                    |
+| Config V1-to-V2 migration           | `packages/core/src/v1/config/migrate.ts`                                      | A                                       | Extend one-way migration for SMARK legacy keys only where a V2 consumer needs them.                               |
+| Config discovery and writes         | The two upstream services and their documented precedence                     | U                                       | Preserve current file discovery/writer behavior until a separately approved atomic Config convergence.            |
+| Provider/Model runtime shape        | `packages/schema/src/provider.ts`, `model.ts`; `packages/core/src/catalog.ts` | A/E                                     | Alias and special protocols materialize canonical records.                                                        |
+| Database service                    | `packages/core/src/database/database.ts`                                      | E for operational policy                | Keep one `Database.Service`; no second singleton or transaction context.                                          |
+| Base SQL tables                     | `packages/core/src/<domain>/sql.ts`                                           | E via separate tables                   | Never copy Session/Project/Permission/Share tables into `packages/opencode`.                                      |
+| Database migration engine           | `packages/core/src/database/migration.ts` and ordered generated list          | E via later migration                   | No parallel Drizzle folder runner in production.                                                                  |
+| Storage paths                       | `packages/core/src/database/path.ts`                                          | U                                       | Preserve path normalization and branded absolute paths.                                                           |
+| Event model                         | `packages/core/src/event.ts`, `packages/schema/src/event.ts`                  | A then R for SyncEvent                  | New writes and projections use EventV2.                                                                           |
+| Legacy transcript wire schema       | `packages/core/src/v1/session.ts` / `packages/schema` Session V1 contracts    | E only through approved fields/metadata | `message-v2.ts` may implement hydration, not redefine the union.                                                  |
+| New Session message/execution model | `packages/core/src/session/**`                                                | E at service/projection seams           | Preserve sequence, input, context epoch, replay, and projector invariants.                                        |
+| HTTP contract                       | `packages/protocol/**` and upstream HttpApi group assembly                    | E                                       | Local endpoints must be fully typed in the same contract graph.                                                   |
+| HTTP handlers                       | `packages/server/**` and canonical application handlers                       | E                                       | Thin handlers; no `as any` registration or hand-written OpenAPI repair.                                           |
+| OpenAPI and SDK                     | generated from canonical contracts                                            | R for copied generated output           | Regenerate after source stabilization.                                                                            |
+| Permission schema                   | `packages/schema` / `packages/core` Permission modules                        | A/E                                     | Auto-review is a policy service, not a second Ruleset.                                                            |
+| Tool parameter/result contracts     | upstream Tool schema and registry interfaces                                  | E                                       | Preserve local execution behavior behind canonical Tool interfaces.                                               |
+| LLM events/runtime                  | `packages/llm`, core/opencode LLM route adapters                              | A/E                                     | Provider adapters emit canonical requests/events.                                                                 |
+| TUI                                 | `packages/tui`                                                                | E                                       | Reimplement local UI behavior inside the upstream package.                                                        |
+| OpenTUI runtime                     | root catalog 0.4.3 and upstream lockfile closure                              | U                                       | One version and one renderer/context graph.                                                                       |
+| App/Desktop/Session UI              | upstream `packages/app`, `desktop`, `session-ui`, `ui`                        | E only                                  | Do not overwrite the new component/state architecture.                                                            |
+| CLI run/mini/attach                 | upstream CLI/runtime                                                          | E/A                                     | Shared daemon, if retained, must be an explicit host adapter.                                                     |
+| Stats                               | SMARK local projection/CLI feature                                            | E                                       | Rebase reads onto canonical tables and token semantics; no base schema fork.                                      |
+| Voice/Notebook/VS Code bridge       | SMARK local product modules                                                   | E/A                                     | Register through upstream Tool/TUI/plugin seams.                                                                  |
 
 ## 6. Configuration migration policy
 
@@ -224,10 +224,10 @@ Examples: local ProviderID/ModelID brands, the old Database singleton, legacy Sy
 
 `v1.17.18` does **not** yet have one runtime Config service. It has two upstream-owned surfaces with different consumers and responsibilities:
 
-| Surface | Evidence in v1.17.18 | Current authority |
-| --- | --- | --- |
+| Surface                         | Evidence in v1.17.18                                                                                                                                                                                     | Current authority                                                                                                     |
+| ------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
 | opencode V1 operational service | `packages/opencode/src/config/config.ts` defines `@opencode/Config`, its `Info` extends `ConfigV1.Info`, and Provider, Session, Tool, MCP, CLI, server, Agent, plugin, and runtime code still import it. | Upstream authority for those existing consumers, global/project mutation, plugin origins, and compatibility behavior. |
-| core V2 service | `packages/core/src/config.ts` defines `@opencode/v2/Config` and ordered `Entry` documents/directories used by core services. | Upstream authority for V2 core consumers and V1-to-V2 decode at that boundary. |
+| core V2 service                 | `packages/core/src/config.ts` defines `@opencode/v2/Config` and ordered `Entry` documents/directories used by core services.                                                                             | Upstream authority for V2 core consumers and V1-to-V2 decode at that boundary.                                        |
 
 The V1 service discovers global files in `opencode.jsonc`, `opencode.json`, `config.json` order and `update()` writes project `config.json`. The V2 service reads `opencode.json` and `opencode.jsonc`, can decode/migrate V1 input, and is currently read-oriented rather than a replacement for all V1 mutation APIs. Calling `config.json` a read-only legacy input or claiming that V1 already has no runtime consumers would contradict the target tag.
 
@@ -243,20 +243,20 @@ The synchronization rule is therefore:
 
 Use upstream mappings rather than inventing another migration:
 
-| Legacy field | Canonical field |
-| --- | --- |
-| `permission` and `tools` | `permissions` ordered rules |
-| `agent` and `mode` | `agents` |
-| `snapshot` | `snapshots` |
-| `attachment` | `attachments` |
-| `command` | `commands` |
-| `reference` / `references` | `references` |
-| `plugin` | `plugins` |
-| `provider` | `providers` |
-| `autoshare` | `share` |
-| `compaction.preserve_recent_tokens` | `compaction.keep.tokens` |
-| `compaction.reserved` | `compaction.buffer` |
-| `experimental.mcp_timeout` | `mcp.timeout.request` |
+| Legacy field                        | Canonical field             |
+| ----------------------------------- | --------------------------- |
+| `permission` and `tools`            | `permissions` ordered rules |
+| `agent` and `mode`                  | `agents`                    |
+| `snapshot`                          | `snapshots`                 |
+| `attachment`                        | `attachments`               |
+| `command`                           | `commands`                  |
+| `reference` / `references`          | `references`                |
+| `plugin`                            | `plugins`                   |
+| `provider`                          | `providers`                 |
+| `autoshare`                         | `share`                     |
+| `compaction.preserve_recent_tokens` | `compaction.keep.tokens`    |
+| `compaction.reserved`               | `compaction.buffer`         |
+| `experimental.mcp_timeout`          | `mcp.timeout.request`       |
 
 The upstream migrator is `packages/core/src/v1/config/migrate.ts`. SMARK compatibility belongs there or in one dedicated, one-way SMARK migration adapter immediately after it. It must not fork `ConfigV1.Info`, `Config.Info`, or file discovery.
 
@@ -264,32 +264,32 @@ The upstream migrator is `packages/core/src/v1/config/migrate.ts`. SMARK compati
 
 The V2 locations below are long-term semantic homes, not evidence that every current V1 consumer can be switched during this synchronization. During the compatibility period, the same semantic field may need an upstream V1 schema entry plus a typed V1-to-V2 mapping, but it must have one definition of meaning, one precedence rule, and one test matrix.
 
-| Local field | Target | Decision |
-| --- | --- | --- |
-| `tool_output.bash_compression` | V1 Tool consumer bridge; V2 `ConfigToolOutput.Info` semantic home | E: additive optional field with one default and precedence rule. |
-| `tool_output.shell_encoding` | V1 Shell consumer bridge; V2 `ConfigToolOutput.Info` semantic home | E: additive optional field; preserve current enum and Windows behavior. |
-| `compaction.tail_turns` | Active upstream compaction owner; V2 `ConfigCompaction.Keep.turns` semantic home | E: do not create a parallel compaction Config object. |
-| `compaction.preserve_recent_tokens` | `compaction.keep.tokens` | A: upstream already defines this semantic location. |
-| `compaction.reserved` | `compaction.buffer` | A. |
-| `experimental.mcp_timeout` | `mcp.timeout.request` | A. |
-| Provider alias `extends` | Provider materialization adapter | A: not a Provider wire field. |
-| Provider client-version/header decoration | Provider request adapter | A. |
+| Local field                               | Target                                                                           | Decision                                                                |
+| ----------------------------------------- | -------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| `tool_output.bash_compression`            | V1 Tool consumer bridge; V2 `ConfigToolOutput.Info` semantic home                | E: additive optional field with one default and precedence rule.        |
+| `tool_output.shell_encoding`              | V1 Shell consumer bridge; V2 `ConfigToolOutput.Info` semantic home               | E: additive optional field; preserve current enum and Windows behavior. |
+| `compaction.tail_turns`                   | Active upstream compaction owner; V2 `ConfigCompaction.Keep.turns` semantic home | E: do not create a parallel compaction Config object.                   |
+| `compaction.preserve_recent_tokens`       | `compaction.keep.tokens`                                                         | A: upstream already defines this semantic location.                     |
+| `compaction.reserved`                     | `compaction.buffer`                                                              | A.                                                                      |
+| `experimental.mcp_timeout`                | `mcp.timeout.request`                                                            | A.                                                                      |
+| Provider alias `extends`                  | Provider materialization adapter                                                 | A: not a Provider wire field.                                           |
+| Provider client-version/header decoration | Provider request adapter                                                         | A.                                                                      |
 
 ### 6.4 SMARK fields requiring an explicit product decision
 
 The following must not be silently carried into the canonical schema:
 
-| Local field | Required decision |
-| --- | --- |
-| `logLevel` | Prefer CLI/environment/observability configuration. Add a canonical field only if runtime updates are a supported product behavior. |
-| `server` | Separate server launch configuration from portable project Config, or add a canonical server module with documented ownership. |
-| `disabled_providers` / `enabled_providers` | Migrate to canonical Provider enable/disable policy. Do not keep list policy and per-Provider state as competing truths. |
-| `small_model` | Reconcile with upstream small-model selection. Preserve only if an explicit user override is still required. |
-| `layout` | Retire unless an upstream UI consumer still supports the behavior. |
-| `goal_max_turns` | Move to a Goal extension module, preferably under a namespaced SMARK section or `goal.max_turns`. |
-| `experimental.primary_tools` | Move to Agent/Tool policy; do not make Tool availability depend on an unrelated Config fork. |
-| `experimental.continue_loop_on_deny` | Move to Permission/run-loop policy with a typed behavior test. |
-| `experimental.openTelemetry` | Reconcile with upstream observability configuration before adding anything. |
+| Local field                                | Required decision                                                                                                                   |
+| ------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------- |
+| `logLevel`                                 | Prefer CLI/environment/observability configuration. Add a canonical field only if runtime updates are a supported product behavior. |
+| `server`                                   | Separate server launch configuration from portable project Config, or add a canonical server module with documented ownership.      |
+| `disabled_providers` / `enabled_providers` | Migrate to canonical Provider enable/disable policy. Do not keep list policy and per-Provider state as competing truths.            |
+| `small_model`                              | Reconcile with upstream small-model selection. Preserve only if an explicit user override is still required.                        |
+| `layout`                                   | Retire unless an upstream UI consumer still supports the behavior.                                                                  |
+| `goal_max_turns`                           | Move to a Goal extension module, preferably under a namespaced SMARK section or `goal.max_turns`.                                   |
+| `experimental.primary_tools`               | Move to Agent/Tool policy; do not make Tool availability depend on an unrelated Config fork.                                        |
+| `experimental.continue_loop_on_deny`       | Move to Permission/run-loop policy with a typed behavior test.                                                                      |
+| `experimental.openTelemetry`               | Reconcile with upstream observability configuration before adding anything.                                                         |
 
 ### 6.5 Compatibility rules
 
@@ -412,12 +412,12 @@ These cannot be omitted to preserve the older local table definitions.
 
 These are valid additive candidates:
 
-| Table | Disposition |
-| --- | --- |
-| `request_usage` | Keep as an independent projection after rebasing FKs/types and event hooks. |
+| Table                     | Disposition                                                                                  |
+| ------------------------- | -------------------------------------------------------------------------------------------- |
+| `request_usage`           | Keep as an independent projection after rebasing FKs/types and event hooks.                  |
 | `request_usage_assistant` | Keep with the same constraints; verify every terminal assistant path writes/finalizes a row. |
-| `session_goal` | Keep as an independent Goal aggregate/projection; use canonical Session ID and EventV2. |
-| Other local tables | Keep only after proving they are not now owned upstream and documenting lifecycle/retention. |
+| `session_goal`            | Keep as an independent Goal aggregate/projection; use canonical Session ID and EventV2.      |
+| Other local tables        | Keep only after proving they are not now owned upstream and documenting lifecycle/retention. |
 
 Do not copy upstream-owned tables into `packages/opencode` merely to keep local imports stable.
 
@@ -455,11 +455,11 @@ An in-place path is allowed only for a database proven to be an exact upstream l
 
 The implementation must not collapse three different histories:
 
-| State | Meaning | Migration rule |
-| --- | --- | --- |
-| `migration` | Target TypeScript schema migration journal | In the sidecar, it reflects the target schema creation and reviewed post-head SMARK schema extensions only. |
-| `__drizzle_migrations` | Legacy Drizzle schema history | Read as evidence and reconcile by ID, hash, and postcondition; never copy or name-seed blindly into the target journal. |
-| `data_migration` | Completion state for idempotent/background data jobs | Reconcile each job by name, implementation hash, input assumptions, and verified postcondition; it is not a schema journal. |
+| State                  | Meaning                                              | Migration rule                                                                                                              |
+| ---------------------- | ---------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `migration`            | Target TypeScript schema migration journal           | In the sidecar, it reflects the target schema creation and reviewed post-head SMARK schema extensions only.                 |
+| `__drizzle_migrations` | Legacy Drizzle schema history                        | Read as evidence and reconcile by ID, hash, and postcondition; never copy or name-seed blindly into the target journal.     |
+| `data_migration`       | Completion state for idempotent/background data jobs | Reconcile each job by name, implementation hash, input assumptions, and verified postcondition; it is not a schema journal. |
 
 A journal row is an identity claim, not body-hash evidence. For each `__drizzle_migrations.name`, resolve the exact migration file from the frozen `dev-smark` commit, hash its raw bytes plus referenced snapshot, and run independent schema/data postcondition queries. For each target ID, hash the exact TypeScript migration module and its position in `migration.gen.ts`. `mapped-equivalent` requires an explicit source-hash/target-hash mapping, proved postconditions, and independent reviewer approval; a missing file, ambiguous name, or database-only hash is `unknown`, not equivalent.
 
@@ -495,12 +495,12 @@ No test may mutate the only copy of user data. A process crash, missing disk spa
 
 Cutover uses one atomic replacement of the canonical database path, never a two-rename swap:
 
-| State | Required durable state | Crash recovery |
-| --- | --- | --- |
-| `SOURCE_FROZEN` | Exclusive migration lock held; all application connections closed; checkpoint successful; active source valid; immutable rollback copy verified. | Continue using the old active source or restore the verified copy. |
-| `TARGET_READY` | Old active source still selected; target is in the same directory/filesystem, complete, integrity-checked, checkpointed/closed, `fsync`ed, and has no non-empty WAL/SHM; completion manifest binds source hash, target hash, schema hash, importer hash, and gate IDs. | Ignore/delete the unselected target and continue with old source. |
-| `TARGET_ACTIVE` | A single platform atomic-replace primitive has replaced the canonical active path with the closed target; immutable rollback copy remains separate. | Active path is entirely old or entirely target, never a filename mixture. Validate completion metadata before normal startup. |
-| `CUTOVER_VERIFIED` | Parent-directory durability completed, target opened and validated, mandatory post-open assertions passed, then migration lock released. | Use target; rollback means stop/close and atomically replace from the immutable copy under the same protocol. |
+| State              | Required durable state                                                                                                                                                                                                                                                 | Crash recovery                                                                                                                |
+| ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| `SOURCE_FROZEN`    | Exclusive migration lock held; all application connections closed; checkpoint successful; active source valid; immutable rollback copy verified.                                                                                                                       | Continue using the old active source or restore the verified copy.                                                            |
+| `TARGET_READY`     | Old active source still selected; target is in the same directory/filesystem, complete, integrity-checked, checkpointed/closed, `fsync`ed, and has no non-empty WAL/SHM; completion manifest binds source hash, target hash, schema hash, importer hash, and gate IDs. | Ignore/delete the unselected target and continue with old source.                                                             |
+| `TARGET_ACTIVE`    | A single platform atomic-replace primitive has replaced the canonical active path with the closed target; immutable rollback copy remains separate.                                                                                                                    | Active path is entirely old or entirely target, never a filename mixture. Validate completion metadata before normal startup. |
+| `CUTOVER_VERIFIED` | Parent-directory durability completed, target opened and validated, mandatory post-open assertions passed, then migration lock released.                                                                                                                               | Use target; rollback means stop/close and atomically replace from the immutable copy under the same protocol.                 |
 
 Before atomic replacement, both source and target connections are closed, stale active and target `-wal`/`-shm` files are absent after successful checkpoints, target/active/rollback paths are on the same filesystem, and target plus rollback files are durable. On POSIX, use one replacement `renameat`/equivalent followed by parent-directory `fsync`. On Windows, use a tested `ReplaceFileW` or `MoveFileExW(REPLACE_EXISTING | WRITE_THROUGH)` equivalent after proving no open handles. If the required primitive or durability guarantee is unavailable, cutover stops in `TARGET_READY` and the old source remains active.
 
@@ -531,15 +531,15 @@ The local SyncEvent implementation may temporarily decode old retained events or
 
 ### 9.3 Local Session features
 
-| Feature | Migration form |
-| --- | --- |
-| Session path and search | Query/projection extension over canonical Session tables and path types. |
-| Session list last-message preview | Typed batch projection endpoint plus `packages/tui` presentation; no N+1 fetch. |
-| RequestUsage | Independent tables/service fed by canonical run and terminal events. |
-| Goal continuation | Independent Goal service/table/Tool using canonical Session IDs and run coordination. |
-| Compaction tail/evidence behavior | Behavior extension inside upstream compaction seams; never a second compaction pipeline. |
-| Manual compaction queued-message continuation | Regression test at the canonical Session runner seam before porting the local fix. |
-| Hidden/repair metadata | Canonical schema extension or namespaced metadata with migration. |
+| Feature                                       | Migration form                                                                           |
+| --------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| Session path and search                       | Query/projection extension over canonical Session tables and path types.                 |
+| Session list last-message preview             | Typed batch projection endpoint plus `packages/tui` presentation; no N+1 fetch.          |
+| RequestUsage                                  | Independent tables/service fed by canonical run and terminal events.                     |
+| Goal continuation                             | Independent Goal service/table/Tool using canonical Session IDs and run coordination.    |
+| Compaction tail/evidence behavior             | Behavior extension inside upstream compaction seams; never a second compaction pipeline. |
+| Manual compaction queued-message continuation | Regression test at the canonical Session runner seam before porting the local fix.       |
+| Hidden/repair metadata                        | Canonical schema extension or namespaced metadata with migration.                        |
 
 ### 9.4 Protocol and handler rules
 
@@ -625,15 +625,15 @@ An unowned V1 generated tree may not silently absorb local endpoint changes. Fin
 
 Adopt upstream Provider/Model schemas and Catalog. Local Provider behavior must use adapters:
 
-| Local behavior | Correct seam |
-| --- | --- |
-| Multiple Provider instances / `extends` aliases | Materialize a canonical Provider record from a base definition before Catalog projection. |
-| DaXiao and other custom instances | Normal branded Provider IDs from user Config; not hard-coded enum branches. |
-| ClaudeCode protocol behavior | Request/fetch decorator around an Anthropic-compatible Provider. |
-| OpenAI OAuth aliases | Auth/integration adapter with explicit identity. |
-| Client version and custom headers | Provider request adapter. |
-| NetworkProxy | Shared transport adapter for AI SDK, native LLM, plugins, MCP, npm, and infrastructure HTTP. |
-| Additional timeout telemetry | Typed transport errors and tracing around canonical request routes. |
+| Local behavior                                  | Correct seam                                                                                 |
+| ----------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| Multiple Provider instances / `extends` aliases | Materialize a canonical Provider record from a base definition before Catalog projection.    |
+| DaXiao and other custom instances               | Normal branded Provider IDs from user Config; not hard-coded enum branches.                  |
+| ClaudeCode protocol behavior                    | Request/fetch decorator around an Anthropic-compatible Provider.                             |
+| OpenAI OAuth aliases                            | Auth/integration adapter with explicit identity.                                             |
+| Client version and custom headers               | Provider request adapter.                                                                    |
+| NetworkProxy                                    | Shared transport adapter for AI SDK, native LLM, plugins, MCP, npm, and infrastructure HTTP. |
+| Additional timeout telemetry                    | Typed transport errors and tracing around canonical request routes.                          |
 
 An alias ID, protocol family, auth integration, and runtime capability are distinct concepts. Do not overload `providerID` to mean all four.
 
@@ -702,16 +702,16 @@ Prohibited:
 
 ### 11.3 Local TUI behavior to re-port
 
-| Feature | Policy |
-| --- | --- |
-| Session preview | Add to upstream switcher without replacing root/search/pin/workspace behavior. |
-| Token accounting and `/context` | Recalculate against upstream token semantics; domain calculation outside TUI, presentation inside TUI. |
-| Reasoning visibility/collapse | Use upstream thinking model as baseline; port only demonstrated missing behavior. |
-| Voice input | Add through canonical prompt/controller seams; verify device lifecycle and cancellation. |
-| Notebook rendering/tools | Keep Tool domain outside TUI and add canonical renderers. |
+| Feature                             | Policy                                                                                                              |
+| ----------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| Session preview                     | Add to upstream switcher without replacing root/search/pin/workspace behavior.                                      |
+| Token accounting and `/context`     | Recalculate against upstream token semantics; domain calculation outside TUI, presentation inside TUI.              |
+| Reasoning visibility/collapse       | Use upstream thinking model as baseline; port only demonstrated missing behavior.                                   |
+| Voice input                         | Add through canonical prompt/controller seams; verify device lifecycle and cancellation.                            |
+| Notebook rendering/tools            | Keep Tool domain outside TUI and add canonical renderers.                                                           |
 | Smooth scrollbar/activity indicator | Preserve exact visual role; renderer-level tests must distinguish Session scrollbar from prompt activity indicator. |
-| Diff/LSP diagnostics | Extend upstream diff and Tool presentation, not the old route file. |
-| Plugin slots | Use upstream plugin runtime and exported slot interface. |
+| Diff/LSP diagnostics                | Extend upstream diff and Tool presentation, not the old route file.                                                 |
+| Plugin slots                        | Use upstream plugin runtime and exported slot interface.                                                            |
 
 ### 11.4 CLI run and daemon
 
@@ -747,32 +747,32 @@ The dependency-resolution report, native binary hash, installed binary hash, PTY
 
 The rows below are the known starting inventory, not the completeness boundary. The machine-readable ledger is complete only when every one of the 466 local-only commits maps to one or more feature rows or to an evidence-backed `no-product-impact` record, and the unmapped count is zero. Each feature row requires an owner, all source commits, target seam, Config/data impact, test, smoke evidence, and final status before release.
 
-| SMARK feature | Class | Target disposition |
-| --- | --- | --- |
-| Provider aliases/multi-instance | A | Canonical Provider materialization adapter. |
-| ClaudeCode request identity | A | Provider request/fetch adapter. |
-| NetworkProxy | A/E | Shared transport module used by all HTTP routes. |
-| Explicit primary Agent list | E | Canonical Agent selection policy. |
-| Session path/search | E | Canonical query projection. |
-| Session list preview | E | Typed protocol endpoint plus TUI presentation. |
-| RequestUsage and terminal stats | E | Independent projection tables/service and CLI reader. |
+| SMARK feature                                             | Class    | Target disposition                                                                                                                                             |
+| --------------------------------------------------------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Provider aliases/multi-instance                           | A        | Canonical Provider materialization adapter.                                                                                                                    |
+| ClaudeCode request identity                               | A        | Provider request/fetch adapter.                                                                                                                                |
+| NetworkProxy                                              | A/E      | Shared transport module used by all HTTP routes.                                                                                                               |
+| Explicit primary Agent list                               | E        | Canonical Agent selection policy.                                                                                                                              |
+| Session path/search                                       | E        | Canonical query projection.                                                                                                                                    |
+| Session list preview                                      | E        | Typed protocol endpoint plus TUI presentation.                                                                                                                 |
+| RequestUsage and terminal stats                           | E        | Independent projection tables/service and CLI reader.                                                                                                          |
 | `DataMigration.Service` and `session_usage_from_messages` | A then R | Replace with versioned offline `smark_session_usage_import_v1`; never copy the old completion row; retire the background service after verified target totals. |
-| Goal | E | Independent table/service/Tool and runner integration. |
-| Detailed token accounting | E | Core calculation module plus TUI/Stats adapters. |
-| Compaction tail/evidence/cancellation fixes | E | Upstream compaction/runner seams with regression tests. |
-| Read outline/stub/file evidence | E | Canonical Read Tool implementation. |
-| Shell compression/encoding | E | Canonical ToolOutput Config and Shell Tool. |
-| Windows/PowerShell normalization | E/A | Platform adapters and real process tests. |
-| VS Code bridge/Notebook | E/A | Canonical plugin/Tool/IDE seams. |
-| Voice recording/transcription | E | Canonical TUI prompt module and lifecycle tests. |
-| Permission auto-review/precheck | E | Policy service over upstream Permission contracts. |
-| Snapshot large-file/ignored-file behavior | E | Upstream Snapshot service extension. |
-| TUI reasoning and activity visuals | E | Behavior-level additions in `packages/tui`. |
-| Old Database singleton | R | Replace with core Database service. |
-| Legacy SyncEvent primary writes | A then R | Temporary decode bridge only. |
-| Local duplicate Provider/Model schemas | R | Canonical upstream brands. |
-| Old TUI path mirror | R | Direct imports from standalone package. |
-| Failed merge generated SDK/OpenAPI | R | Regenerate from final contracts. |
+| Goal                                                      | E        | Independent table/service/Tool and runner integration.                                                                                                         |
+| Detailed token accounting                                 | E        | Core calculation module plus TUI/Stats adapters.                                                                                                               |
+| Compaction tail/evidence/cancellation fixes               | E        | Upstream compaction/runner seams with regression tests.                                                                                                        |
+| Read outline/stub/file evidence                           | E        | Canonical Read Tool implementation.                                                                                                                            |
+| Shell compression/encoding                                | E        | Canonical ToolOutput Config and Shell Tool.                                                                                                                    |
+| Windows/PowerShell normalization                          | E/A      | Platform adapters and real process tests.                                                                                                                      |
+| VS Code bridge/Notebook                                   | E/A      | Canonical plugin/Tool/IDE seams.                                                                                                                               |
+| Voice recording/transcription                             | E        | Canonical TUI prompt module and lifecycle tests.                                                                                                               |
+| Permission auto-review/precheck                           | E        | Policy service over upstream Permission contracts.                                                                                                             |
+| Snapshot large-file/ignored-file behavior                 | E        | Upstream Snapshot service extension.                                                                                                                           |
+| TUI reasoning and activity visuals                        | E        | Behavior-level additions in `packages/tui`.                                                                                                                    |
+| Old Database singleton                                    | R        | Replace with core Database service.                                                                                                                            |
+| Legacy SyncEvent primary writes                           | A then R | Temporary decode bridge only.                                                                                                                                  |
+| Local duplicate Provider/Model schemas                    | R        | Canonical upstream brands.                                                                                                                                     |
+| Old TUI path mirror                                       | R        | Direct imports from standalone package.                                                                                                                        |
+| Failed merge generated SDK/OpenAPI                        | R        | Regenerate from final contracts.                                                                                                                               |
 
 ## 13. Required migration procedure
 
@@ -965,37 +965,37 @@ Only evidence produced by the same candidate commit and the exact package/binary
 
 Evidence invalidation is input-closure based:
 
-| Changed input | Minimum gates invalidated |
-| --- | --- |
-| Config schema/loader/writer/migrator or Config fixture | `G2-CONFIG` and all dependent real-user journeys |
-| SQL schema, migration, importer, projection, database path/PRAGMA | `G2-SCHEMA-PLAN`, `G3-DATA-MIGRATION`, Session/usage journeys, and cutover |
-| Public schema, protocol, route, handler, OpenAPI, generator | `G3-CONTRACT-PROVISIONAL`, `G6-GENERATION`, packed SDK, and all API consumers |
-| Provider, Catalog, LLM route, auth, proxy/network transport | `G4-PROVIDER-TOOLS` and `G7-PROVIDER-LIVE` |
-| TUI source, OpenTUI dependency, lockfile, build/package script | `G5-TUI-CLOSURE`, `G5-TUI-SOURCE`, `G6-TUI-BINARY-FINAL`, and `G6-PACKAGE` |
-| Any candidate commit or release artifact hash | all Phase 7 installed-binary, PTY/ConPTY, and live-Provider evidence |
+| Changed input                                                     | Minimum gates invalidated                                                     |
+| ----------------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| Config schema/loader/writer/migrator or Config fixture            | `G2-CONFIG` and all dependent real-user journeys                              |
+| SQL schema, migration, importer, projection, database path/PRAGMA | `G2-SCHEMA-PLAN`, `G3-DATA-MIGRATION`, Session/usage journeys, and cutover    |
+| Public schema, protocol, route, handler, OpenAPI, generator       | `G3-CONTRACT-PROVISIONAL`, `G6-GENERATION`, packed SDK, and all API consumers |
+| Provider, Catalog, LLM route, auth, proxy/network transport       | `G4-PROVIDER-TOOLS` and `G7-PROVIDER-LIVE`                                    |
+| TUI source, OpenTUI dependency, lockfile, build/package script    | `G5-TUI-CLOSURE`, `G5-TUI-SOURCE`, `G6-TUI-BINARY-FINAL`, and `G6-PACKAGE`    |
+| Any candidate commit or release artifact hash                     | all Phase 7 installed-binary, PTY/ConPTY, and live-Provider evidence          |
 
 ### 15.2 Verification domains
 
-| Area | Required verification |
-| --- | --- |
-| Config | Upstream V1 and V2 fixtures, real SMARK fixtures, raw-key consumption report, current writer targets, alias conflicts, precedence/policy order, and no third authority. |
-| IDs/schema | Decode/encode round trips, persisted row decode, wire errors, no duplicate brands/imports. |
-| Database | Fresh creation, old-upstream in-place migration, SMARK shadow migration, journal reconciliation, destructive-migration disposition, repeat/interrupted runs, logical digests, FK/index/schema parity, WAL/SHM and atomic cutover. |
-| EventV2 | Ordered sequence, idempotent replay, divergent replay rejection, projector atomicity, post-commit publication, reconnect. |
-| Session | Create/list/search/path/preview, input admission, queued prompt continuation, compaction, revert, fork, deletion, metadata. |
-| RequestUsage | Every success/error/abort/compaction/subagent path, no missing assistant row, totals match canonical usage. |
-| Goal | active/pause/complete/blocked, budget/turn limits, cancellation, error continuation, queued prompts. |
-| Protocol/API | Coverage/auth/effect exercise, malformed request, response encode failure, typed errors, generated-client call. |
-| SDK | Generation manifest, canonical OpenAPI hash, deterministic scripted post-processing, V1 disposition, clean double generation, external pack/install consumer, HTTP/error/SSE/cancel/iterator tests. |
-| Provider | Offline URL/headers/body/runtime, variants, OAuth/alias, proxy/no-proxy, timeout/cancellation/error decode, plus mandatory live streamed success for each release-critical pair. |
-| Tools | Real filesystem/process behavior, permissions, cancellation, metadata, output truncation/compression, Windows paths/encoding. |
-| TUI | Realpath/version closure from all workspace roots, spinner registration, real testRender tree, installed-binary PTY/ConPTY frames, resize/reconnect/stream/activity/scrollbar and process cleanup. |
-| CLI binary | Installed release package with isolated `OPENCODE_DB`, Config, home/data/cache/state; first run, new/old Session, run/continue/reuse, clean exit and process cleanup. |
-| Release package | Formal archive/package file list, checksums, permissions, platform selection, native/parser worker load, install wrapper, uninstall cleanup, and no workspace-source resolution. |
-| Daemon | Only if retained: multi-process owner election, stale lock, PID reuse, auth, database isolation, stop/status on Windows and Unix. |
-| Stats | Canonical token/cost projection, RequestUsage fallback, width/color, real isolated DB output. |
-| App/Desktop | Server/tab/Session scoping, drafts, provider lifetime, timeline stability, revert, terminal and review state. |
-| Performance | Session list/preview, timeline, message hydration, context panel, startup, large DB, large transcript, streaming repaint. |
+| Area            | Required verification                                                                                                                                                                                                             |
+| --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Config          | Upstream V1 and V2 fixtures, real SMARK fixtures, raw-key consumption report, current writer targets, alias conflicts, precedence/policy order, and no third authority.                                                           |
+| IDs/schema      | Decode/encode round trips, persisted row decode, wire errors, no duplicate brands/imports.                                                                                                                                        |
+| Database        | Fresh creation, old-upstream in-place migration, SMARK shadow migration, journal reconciliation, destructive-migration disposition, repeat/interrupted runs, logical digests, FK/index/schema parity, WAL/SHM and atomic cutover. |
+| EventV2         | Ordered sequence, idempotent replay, divergent replay rejection, projector atomicity, post-commit publication, reconnect.                                                                                                         |
+| Session         | Create/list/search/path/preview, input admission, queued prompt continuation, compaction, revert, fork, deletion, metadata.                                                                                                       |
+| RequestUsage    | Every success/error/abort/compaction/subagent path, no missing assistant row, totals match canonical usage.                                                                                                                       |
+| Goal            | active/pause/complete/blocked, budget/turn limits, cancellation, error continuation, queued prompts.                                                                                                                              |
+| Protocol/API    | Coverage/auth/effect exercise, malformed request, response encode failure, typed errors, generated-client call.                                                                                                                   |
+| SDK             | Generation manifest, canonical OpenAPI hash, deterministic scripted post-processing, V1 disposition, clean double generation, external pack/install consumer, HTTP/error/SSE/cancel/iterator tests.                               |
+| Provider        | Offline URL/headers/body/runtime, variants, OAuth/alias, proxy/no-proxy, timeout/cancellation/error decode, plus mandatory live streamed success for each release-critical pair.                                                  |
+| Tools           | Real filesystem/process behavior, permissions, cancellation, metadata, output truncation/compression, Windows paths/encoding.                                                                                                     |
+| TUI             | Realpath/version closure from all workspace roots, spinner registration, real testRender tree, installed-binary PTY/ConPTY frames, resize/reconnect/stream/activity/scrollbar and process cleanup.                                |
+| CLI binary      | Installed release package with isolated `OPENCODE_DB`, Config, home/data/cache/state; first run, new/old Session, run/continue/reuse, clean exit and process cleanup.                                                             |
+| Release package | Formal archive/package file list, checksums, permissions, platform selection, native/parser worker load, install wrapper, uninstall cleanup, and no workspace-source resolution.                                                  |
+| Daemon          | Only if retained: multi-process owner election, stale lock, PID reuse, auth, database isolation, stop/status on Windows and Unix.                                                                                                 |
+| Stats           | Canonical token/cost projection, RequestUsage fallback, width/color, real isolated DB output.                                                                                                                                     |
+| App/Desktop     | Server/tab/Session scoping, drafts, provider lifetime, timeline stability, revert, terminal and review state.                                                                                                                     |
+| Performance     | Session list/preview, timeline, message hydration, context panel, startup, large DB, large transcript, streaming repaint.                                                                                                         |
 
 ### 15.3 Mandatory real-user scenarios
 

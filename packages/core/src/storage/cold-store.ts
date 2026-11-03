@@ -2,7 +2,15 @@ import { and, desc, eq, gt, inArray, isNotNull, isNull, or, sql, type SQL } from
 import { Effect } from "effect"
 import { Database } from "../database/database"
 import type { Sqlite } from "../database/sqlite"
-import { ColdStorageTable, MessageTable, PartTable, SessionMessageTable, SessionTable, type PartColdStats, type SessionMessageColdStats } from "../session/sql"
+import {
+  ColdStorageTable,
+  MessageTable,
+  PartTable,
+  SessionMessageTable,
+  SessionTable,
+  type PartColdStats,
+  type SessionMessageColdStats,
+} from "../session/sql"
 import { SessionMessage } from "../session/message"
 import { MessageID, PartID } from "../v1/session"
 import { SessionSchema } from "../session/schema"
@@ -122,7 +130,8 @@ function extractPartV2(db: TxOrDb, data: (typeof PartTable.$inferSelect)["data"]
   // child 判定只在主线程查询一次，worker 重打包时以纯参数形式传入，保持 worker 零 DB 访问。
   const child =
     data.type === "text" && sessionID
-      ? !!db.select({ parent: SessionTable.parent_id }).from(SessionTable).where(eq(SessionTable.id, sessionID)).get()?.parent
+      ? !!db.select({ parent: SessionTable.parent_id }).from(SessionTable).where(eq(SessionTable.id, sessionID)).get()
+          ?.parent
       : undefined
   return extractPartCore(data, child)
 }
@@ -134,10 +143,23 @@ function extractPartV2(db: TxOrDb, data: (typeof PartTable.$inferSelect)["data"]
 function lastMessageCreated(db: TxOrDb, sessionID: SessionID) {
   // 空会话 max 为 null：无法证明 last-message idle，subagent age 分支必须为 false。
   // 两代消息聚合同一时钟，0不是空会话；不把Native消息漏出子任务闲置判断。
-  const times = db.select({ value: sql<number | null>`max(${MessageTable.time_created})`.as("value") })
-    .from(MessageTable).where(eq(MessageTable.session_id, sessionID))
-    .unionAll(db.select({ value: sql<number | null>`max(${SessionMessageTable.time_created})` }).from(SessionMessageTable).where(eq(SessionMessageTable.session_id, sessionID))).as("message_times")
-  return db.select({ value: sql<number | null>`max(${times.value})` }).from(times).get()?.value ?? null
+  const times = db
+    .select({ value: sql<number | null>`max(${MessageTable.time_created})`.as("value") })
+    .from(MessageTable)
+    .where(eq(MessageTable.session_id, sessionID))
+    .unionAll(
+      db
+        .select({ value: sql<number | null>`max(${SessionMessageTable.time_created})` })
+        .from(SessionMessageTable)
+        .where(eq(SessionMessageTable.session_id, sessionID)),
+    )
+    .as("message_times")
+  return (
+    db
+      .select({ value: sql<number | null>`max(${times.value})` })
+      .from(times)
+      .get()?.value ?? null
+  )
 }
 
 function completedReviewMessages(db: TxOrDb, sessionID: SessionID) {
@@ -202,7 +224,11 @@ function completedReviewMessages(db: TxOrDb, sessionID: SessionID) {
 
 function completedNativeReviewMessages(db: TxOrDb, sessionID: SessionID) {
   const rows = db.select().from(SessionMessageTable).where(eq(SessionMessageTable.session_id, sessionID)).all()
-  const requests = new Map<string, (typeof rows)[number]>(rows.flatMap(row => row.type === "synthetic" && row.data.metadata?.permissionReviewerRequest === true ? [[row.id, row]] : []))
+  const requests = new Map<string, (typeof rows)[number]>(
+    rows.flatMap((row) =>
+      row.type === "synthetic" && row.data.metadata?.permissionReviewerRequest === true ? [[row.id, row]] : [],
+    ),
+  )
   const groups = new Map<string, typeof rows>()
   for (const row of rows) {
     if (row.type !== "assistant" || typeof row.data.metadata?.permissionReviewerRequestID !== "string") continue
@@ -215,12 +241,26 @@ function completedNativeReviewMessages(db: TxOrDb, sessionID: SessionID) {
   const completed = new Set<number>()
   // 完成身份仍由真实Synthetic请求与助手metadata建立，open工具不能冒充已完成尝试。
   for (const [request, group] of groups) {
-    if (group.some(row => {
-      const data: unknown = row.data
-      return !isRecord(data) || data.agent !== "permission-reviewer" || !isRecord(data.time) || typeof data.time.completed !== "number" ||
-        !Array.isArray(data.content) || data.content.some(part => isRecord(part) && part.type === "tool" && isRecord(part.state) &&
-          (part.state.status === "pending" || part.state.status === "running"))
-    })) continue
+    if (
+      group.some((row) => {
+        const data: unknown = row.data
+        return (
+          !isRecord(data) ||
+          data.agent !== "permission-reviewer" ||
+          !isRecord(data.time) ||
+          typeof data.time.completed !== "number" ||
+          !Array.isArray(data.content) ||
+          data.content.some(
+            (part) =>
+              isRecord(part) &&
+              part.type === "tool" &&
+              isRecord(part.state) &&
+              (part.state.status === "pending" || part.state.status === "running"),
+          )
+        )
+      })
+    )
+      continue
     const input = requests.get(request)
     if (!input) continue
     completed.add(input.seq)
@@ -230,11 +270,19 @@ function completedNativeReviewMessages(db: TxOrDb, sessionID: SessionID) {
 }
 
 function eligibleSessionMessage(state: ReturnType<typeof eligibility>, seq: number) {
-  return state !== undefined && (state.aged || state.nativeCompleted.has(seq) || state.nativeBoundarySeq !== undefined && seq < state.nativeBoundarySeq)
+  return (
+    state !== undefined &&
+    (state.aged ||
+      state.nativeCompleted.has(seq) ||
+      (state.nativeBoundarySeq !== undefined && seq < state.nativeBoundarySeq))
+  )
 }
 
 function extractSessionMessage(db: TxOrDb, row: typeof SessionMessageTable.$inferSelect) {
-  const child = Boolean(db.select({ parent: SessionTable.parent_id }).from(SessionTable).where(eq(SessionTable.id, row.session_id)).get()?.parent)
+  const child = Boolean(
+    db.select({ parent: SessionTable.parent_id }).from(SessionTable).where(eq(SessionTable.id, row.session_id)).get()
+      ?.parent,
+  )
   return extractSessionMessageCore(row, child)
 }
 
@@ -245,9 +293,13 @@ function eligibility(db: TxOrDb, sessionID: SessionID, now: number, rootOlderTha
     .where(eq(SessionTable.id, sessionID))
     .get()
   if (!session) return
-  const nativeBoundarySeq = db.select({ seq: SessionMessageTable.seq }).from(SessionMessageTable)
+  const nativeBoundarySeq = db
+    .select({ seq: SessionMessageTable.seq })
+    .from(SessionMessageTable)
     .where(and(eq(SessionMessageTable.session_id, sessionID), eq(SessionMessageTable.type, "compaction")))
-    .orderBy(desc(SessionMessageTable.seq)).limit(1).get()?.seq
+    .orderBy(desc(SessionMessageTable.seq))
+    .limit(1)
+    .get()?.seq
   const boundary = CompactionBoundary.latest(db, sessionID)
   // marker fallback 仅在 tail 缺失时成立（shipped compatibility）；
   // tail 存在但行已删除时 boundary 不可解析，语义分支必须失效。
@@ -346,7 +398,12 @@ function ownerCount(db: TxOrDb, hash: string) {
       .from(SessionTable)
       .where(eq(SessionTable.summary_ref, hash))
       .get()?.value ?? 0
-  const native = db.select({ value: sql<number>`count(*)` }).from(SessionMessageTable).where(eq(SessionMessageTable.cold_ref, hash)).get()?.value ?? 0
+  const native =
+    db
+      .select({ value: sql<number>`count(*)` })
+      .from(SessionMessageTable)
+      .where(eq(SessionMessageTable.cold_ref, hash))
+      .get()?.value ?? 0
   return messages + parts + summaries + native
 }
 
@@ -382,8 +439,12 @@ export function ownerCounts(db: TxOrDb, hashes: string[]) {
       .all()) {
       if (row.hash) result.set(row.hash, (result.get(row.hash) ?? 0) + row.value)
     }
-    for (const row of db.select({ hash: SessionMessageTable.cold_ref, value: sql<number>`count(*)` }).from(SessionMessageTable)
-      .where(inArray(SessionMessageTable.cold_ref, batch)).groupBy(SessionMessageTable.cold_ref).all()) {
+    for (const row of db
+      .select({ hash: SessionMessageTable.cold_ref, value: sql<number>`count(*)` })
+      .from(SessionMessageTable)
+      .where(inArray(SessionMessageTable.cold_ref, batch))
+      .groupBy(SessionMessageTable.cold_ref)
+      .all()) {
       if (row.hash) result.set(row.hash, (result.get(row.hash) ?? 0) + row.value)
     }
   }
@@ -421,8 +482,15 @@ function packKeyStats(db: TxOrDb, hashes: string[]) {
       // 正常 kind 下同一 hash 只会出现在 message 或 part 一侧；相加仅防御异常双引用。
       if (row.hash) result.set(row.hash, (result.get(row.hash) ?? 0) + row.keys)
     }
-    for (const row of db.select({ hash: SessionMessageTable.cold_ref, keys: sql<number>`count(distinct ${SessionMessageTable.cold_key})` }).from(SessionMessageTable)
-      .where(inArray(SessionMessageTable.cold_ref, batch)).groupBy(SessionMessageTable.cold_ref).all()) {
+    for (const row of db
+      .select({
+        hash: SessionMessageTable.cold_ref,
+        keys: sql<number>`count(distinct ${SessionMessageTable.cold_key})`,
+      })
+      .from(SessionMessageTable)
+      .where(inArray(SessionMessageTable.cold_ref, batch))
+      .groupBy(SessionMessageTable.cold_ref)
+      .all()) {
       if (row.hash) result.set(row.hash, (result.get(row.hash) ?? 0) + row.keys)
     }
   }
@@ -873,49 +941,86 @@ function assignPartPack(db: TxOrDb, items: PartPackItem[], packed: ReturnType<ty
 }
 
 type NativePackItem = {
-  row: typeof SessionMessageTable.$inferSelect; projection: (typeof SessionMessageTable.$inferSelect)["data"]
-  entry: PackEntry; stats: SessionMessageColdStats | null; oldRef: string | null
+  row: typeof SessionMessageTable.$inferSelect
+  projection: (typeof SessionMessageTable.$inferSelect)["data"]
+  entry: PackEntry
+  stats: SessionMessageColdStats | null
+  oldRef: string | null
 }
 
 function assignSessionMessagePack(db: TxOrDb, items: NativePackItem[], packed: ReturnType<typeof retainPackPayload>) {
-  const updated = db.insert(SessionMessageTable).values(items.map(item => ({ ...item.row, data: item.projection,
-    cold_ref: packed.hash, cold_key: requiredPackKey(packed, item.entry.key), cold_stats: item.stats })))
-    .onConflictDoUpdate({ target: SessionMessageTable.id, set: { data: sql`excluded.data`, cold_ref: sql`excluded.cold_ref`,
-      cold_key: sql`excluded.cold_key`, cold_stats: sql`excluded.cold_stats`, time_updated: sql`excluded.time_updated` } })
-    .returning({ id: SessionMessageTable.id }).all()
-  if (updated.length !== items.length) throw new CorruptionError({ message: "Native pack assignment is incomplete", hash: packed.hash })
+  const updated = db
+    .insert(SessionMessageTable)
+    .values(
+      items.map((item) => ({
+        ...item.row,
+        data: item.projection,
+        cold_ref: packed.hash,
+        cold_key: requiredPackKey(packed, item.entry.key),
+        cold_stats: item.stats,
+      })),
+    )
+    .onConflictDoUpdate({
+      target: SessionMessageTable.id,
+      set: {
+        data: sql`excluded.data`,
+        cold_ref: sql`excluded.cold_ref`,
+        cold_key: sql`excluded.cold_key`,
+        cold_stats: sql`excluded.cold_stats`,
+        time_updated: sql`excluded.time_updated`,
+      },
+    })
+    .returning({ id: SessionMessageTable.id })
+    .all()
+  if (updated.length !== items.length)
+    throw new CorruptionError({ message: "Native pack assignment is incomplete", hash: packed.hash })
 }
 
 export function inspectSessionMessageRows(db: TxOrDb, rows: (typeof SessionMessageTable.$inferSelect)[]) {
-  const legacy = rows.flatMap(row => row.cold_ref && !row.cold_key ? [row.cold_ref] : [])
+  const legacy = rows.flatMap((row) => (row.cold_ref && !row.cold_key ? [row.cold_ref] : []))
   const values = decodedBatch(db, legacy, "session_message")
-  const hashes = [...new Set(rows.flatMap(row => row.cold_ref && row.cold_key ? [row.cold_ref] : []))]
+  const hashes = [...new Set(rows.flatMap((row) => (row.cold_ref && row.cold_key ? [row.cold_ref] : [])))]
   requireReferenceMetadata(db, hashes, "session-message-pack")
-  const packs = new Map(hashes.map(hash => [hash, decodePack(db, hash, "session_message")] as const))
-  return rows.map(row => {
+  const packs = new Map(hashes.map((hash) => [hash, decodePack(db, hash, "session_message")] as const))
+  return rows.map((row) => {
     if (!row.cold_ref) {
-      if (row.cold_key || row.cold_stats !== null) throw new CorruptionError({ message: "Hot Native message has cold pointers" })
+      if (row.cold_key || row.cold_stats !== null)
+        throw new CorruptionError({ message: "Hot Native message has cold pointers" })
       return row
     }
     if (!row.cold_key) {
-      if (row.cold_stats !== null) throw new CorruptionError({ message: "Legacy Native message has cold Stats", hash: row.cold_ref })
+      if (row.cold_stats !== null)
+        throw new CorruptionError({ message: "Legacy Native message has cold Stats", hash: row.cold_ref })
       return { ...row, data: restoreSessionMessage(row, requiredEnvelope(values, row.cold_ref)) }
     }
     const fields = packs.get(row.cold_ref)?.get(row.cold_key.toString("hex"))
     if (!fields) throw new CorruptionError({ message: "Native message key is missing from pack", hash: row.cold_ref })
     const data = restoreSessionMessage(row, { version: 1, owner: "session_message", fields })
-    if (canonical(parseSessionMessageStats(row.cold_stats, row.cold_ref)) !== canonical(projectSessionMessageStats({ ...row, data })))
+    if (
+      canonical(parseSessionMessageStats(row.cold_stats, row.cold_ref)) !==
+      canonical(projectSessionMessageStats({ ...row, data }))
+    )
       throw new CorruptionError({ message: "Native cold Stats do not match the payload", hash: row.cold_ref })
     return { ...row, data }
   })
 }
 
 export function inspectSessionMessageStats(db: TxOrDb, rows: (typeof SessionMessageTable.$inferSelect)[]) {
-  const legacy = new Map(inspectSessionMessageRows(db, rows.filter(row => row.cold_ref && !row.cold_key)).map(row => [row.id, row]))
-  requireReferenceMetadata(db, rows.flatMap(row => row.cold_ref && row.cold_key ? [row.cold_ref] : []), "session-message-pack")
-  return rows.map(row => {
+  const legacy = new Map(
+    inspectSessionMessageRows(
+      db,
+      rows.filter((row) => row.cold_ref && !row.cold_key),
+    ).map((row) => [row.id, row]),
+  )
+  requireReferenceMetadata(
+    db,
+    rows.flatMap((row) => (row.cold_ref && row.cold_key ? [row.cold_ref] : [])),
+    "session-message-pack",
+  )
+  return rows.map((row) => {
     if (!row.cold_ref) {
-      if (row.cold_key || row.cold_stats !== null) throw new CorruptionError({ message: "Hot Native Stats has cold pointers" })
+      if (row.cold_key || row.cold_stats !== null)
+        throw new CorruptionError({ message: "Hot Native Stats has cold pointers" })
       return projectSessionMessageStats(row)
     }
     if (row.cold_key) return parseSessionMessageStats(row.cold_stats, row.cold_ref)
@@ -927,21 +1032,44 @@ export function inspectSessionMessageStats(db: TxOrDb, rows: (typeof SessionMess
 
 function thawSessionMessageBatch(db: TxOrDb, rows: (typeof SessionMessageTable.$inferSelect)[], now: number) {
   const cold = rows.filter((row): row is typeof row & { cold_ref: string } => row.cold_ref !== null)
-  const restored = inspectSessionMessageRows(db, rows).map(row => ({ ...row, cold_ref: null, cold_key: null, cold_stats: null }))
+  const restored = inspectSessionMessageRows(db, rows).map((row) => ({
+    ...row,
+    cold_ref: null,
+    cold_key: null,
+    cold_stats: null,
+  }))
   if (cold.length > 0) {
-    db.insert(SessionMessageTable).values(restored.filter((_row, index) => Boolean(rows[index]?.cold_ref)))
-      .onConflictDoUpdate({ target: SessionMessageTable.id,
-        set: { data: sql`excluded.data`, cold_ref: null, cold_key: null, cold_stats: null, time_updated: sql`excluded.time_updated` } }).run()
-    decrementReferences(db, cold.map(row => row.cold_ref), now)
+    db.insert(SessionMessageTable)
+      .values(restored.filter((_row, index) => Boolean(rows[index]?.cold_ref)))
+      .onConflictDoUpdate({
+        target: SessionMessageTable.id,
+        set: {
+          data: sql`excluded.data`,
+          cold_ref: null,
+          cold_key: null,
+          cold_stats: null,
+          time_updated: sql`excluded.time_updated`,
+        },
+      })
+      .run()
+    decrementReferences(
+      db,
+      cold.map((row) => row.cold_ref),
+      now,
+    )
   }
   return restored
 }
 
 export function thawSessionMessageRowsInTransaction(db: TxOrDb, rows: (typeof SessionMessageTable.$inferSelect)[]) {
-  if (!rows.some(row => row.cold_ref)) return inspectSessionMessageRows(db, rows)
-  const current = rows.map(input => {
+  if (!rows.some((row) => row.cold_ref)) return inspectSessionMessageRows(db, rows)
+  const current = rows.map((input) => {
     if (!input.cold_ref) return input
-    const row = db.select().from(SessionMessageTable).where(and(eq(SessionMessageTable.id, input.id), eq(SessionMessageTable.session_id, input.session_id))).get()
+    const row = db
+      .select()
+      .from(SessionMessageTable)
+      .where(and(eq(SessionMessageTable.id, input.id), eq(SessionMessageTable.session_id, input.session_id)))
+      .get()
     if (!row) throw new CorruptionError({ message: `Native message disappeared during thaw: ${input.id}` })
     return row
   })
@@ -949,33 +1077,63 @@ export function thawSessionMessageRowsInTransaction(db: TxOrDb, rows: (typeof Se
 }
 
 // 普通读取仍同连接inspect；只有runner明确选中的execution窗口才持久预热。
-export function readSessionMessageRows(db: Database.Interface["db"], rows: (typeof SessionMessageTable.$inferSelect)[], messageProjection?: "viewer" | "execution") {
-  const selected = messageProjection === "viewer" ? rows.filter(row => {
-    const data: unknown = row.data
-    return row.type !== "user" || !row.cold_ref || !isRecord(data) || data.text === "" || Array.isArray(data.files) && data.files.some(file => isRecord(file) && file.uri === "")
-  }) : rows
-  const restored = messageProjection !== "execution" || !selected.some(row => row.cold_ref)
-    ? Database.withSync({ db, sync: db.sync }, sync => inspectSessionMessageRows(sync, selected))
-    : Database.withSync({ db, sync: db.sync }, sync => sync.transaction(tx => thawSessionMessageRowsInTransaction(tx, selected), { behavior: "immediate" }))
+export function readSessionMessageRows(
+  db: Database.Interface["db"],
+  rows: (typeof SessionMessageTable.$inferSelect)[],
+  messageProjection?: "viewer" | "execution",
+) {
+  const selected =
+    messageProjection === "viewer"
+      ? rows.filter((row) => {
+          const data: unknown = row.data
+          return (
+            row.type !== "user" ||
+            !row.cold_ref ||
+            !isRecord(data) ||
+            data.text === "" ||
+            (Array.isArray(data.files) && data.files.some((file) => isRecord(file) && file.uri === ""))
+          )
+        })
+      : rows
+  const restored =
+    messageProjection !== "execution" || !selected.some((row) => row.cold_ref)
+      ? Database.withSync({ db, sync: db.sync }, (sync) => inspectSessionMessageRows(sync, selected))
+      : Database.withSync({ db, sync: db.sync }, (sync) =>
+          sync.transaction((tx) => thawSessionMessageRowsInTransaction(tx, selected), { behavior: "immediate" }),
+        )
   if (messageProjection !== "viewer") return restored
-  return restored.pipe(Effect.map(items => {
-    const byID = new Map(rows.map(row => [row.id, row]))
-    for (const row of items) byID.set(row.id, row)
-    return [...byID.values()]
-  }))
+  return restored.pipe(
+    Effect.map((items) => {
+      const byID = new Map(rows.map((row) => [row.id, row]))
+      for (const row of items) byID.set(row.id, row)
+      return [...byID.values()]
+    }),
+  )
 }
 
 function nativeV2Value(db: TxOrDb, row: typeof SessionMessageTable.$inferSelect): NativePackItem | undefined {
   const full = inspectSessionMessageRows(db, [row])[0]
   const value = extractSessionMessage(db, full)
   if (!value) return
-  return { row, projection: value.projection, entry: { key: value.key, fields: value.fields }, stats: projectSessionMessageStats(full), oldRef: row.cold_ref }
+  return {
+    row,
+    projection: value.projection,
+    entry: { key: value.key, fields: value.fields },
+    stats: projectSessionMessageStats(full),
+    oldRef: row.cold_ref,
+  }
 }
 
-function freezeSessionMessageBatch(db: TxOrDb, rows: (typeof SessionMessageTable.$inferSelect)[], input: { now: number; eligibilityState(sessionID: SessionID): ReturnType<typeof eligibility> }) {
-  const prepared = rows.flatMap(row => {
+function freezeSessionMessageBatch(
+  db: TxOrDb,
+  rows: (typeof SessionMessageTable.$inferSelect)[],
+  input: { now: number; eligibilityState(sessionID: SessionID): ReturnType<typeof eligibility> },
+) {
+  const prepared = rows.flatMap((row) => {
     const value = nativeV2Value(db, row)
-    return value && (row.cold_key || eligibleSessionMessage(input.eligibilityState(row.session_id), row.seq)) ? [value] : []
+    return value && (row.cold_key || eligibleSessionMessage(input.eligibilityState(row.session_id), row.seq))
+      ? [value]
+      : []
   })
   const groups = new Map<SessionID, NativePackItem[]>()
   for (const item of prepared) {
@@ -983,13 +1141,23 @@ function freezeSessionMessageBatch(db: TxOrDb, rows: (typeof SessionMessageTable
     if (group) group.push(item)
     else groups.set(item.row.session_id, [item])
   }
-  for (const items of groups.values()) for (const chunk of splitPacks("session_message", items)) {
-    const packed = retainPackPayload(db, "session_message", chunk.map(item => item.entry), input.now)
-    const added = chunk.filter(item => item.oldRef !== packed.hash).length
-    if (added) retainPackedReference(db, packed.hash, "session_message", input.now, added)
-    assignSessionMessagePack(db, chunk, packed)
-    decrementReferences(db, chunk.flatMap(item => item.oldRef && item.oldRef !== packed.hash ? [item.oldRef] : []), input.now)
-  }
+  for (const items of groups.values())
+    for (const chunk of splitPacks("session_message", items)) {
+      const packed = retainPackPayload(
+        db,
+        "session_message",
+        chunk.map((item) => item.entry),
+        input.now,
+      )
+      const added = chunk.filter((item) => item.oldRef !== packed.hash).length
+      if (added) retainPackedReference(db, packed.hash, "session_message", input.now, added)
+      assignSessionMessagePack(db, chunk, packed)
+      decrementReferences(
+        db,
+        chunk.flatMap((item) => (item.oldRef && item.oldRef !== packed.hash ? [item.oldRef] : [])),
+        input.now,
+      )
+    }
 }
 
 function prepareFreezeBatch(
@@ -1015,9 +1183,14 @@ function prepareFreezeBatch(
           else groups.set(row.session_id, [value])
         }
         // 与两类旧owner相同：只读快照后释放预约，编码不能阻塞SQLite写入。
-        return { cursor: { owner: "session_message" as const, lastID: rows.at(-1)?.id ?? cursor.lastID },
-          processed: rows.length, olderThanMs: request.olderThanMs,
-          chunks: [...groups.values()].flatMap(items => splitPacks("session_message", items).map(items => ({ owner: "session_message" as const, items }))) }
+        return {
+          cursor: { owner: "session_message" as const, lastID: rows.at(-1)?.id ?? cursor.lastID },
+          processed: rows.length,
+          olderThanMs: request.olderThanMs,
+          chunks: [...groups.values()].flatMap((items) =>
+            splitPacks("session_message", items).map((items) => ({ owner: "session_message" as const, items })),
+          ),
+        }
       }
       if (cursor.owner === "message") {
         const rows = nextMessageRows(db, request, cursor.lastID, false, request.batchSize)
@@ -1077,28 +1250,38 @@ function commitFreezeBatch(db: TxOrDb, prepared: ReturnType<typeof prepareFreeze
       for (const [index, chunk] of prepared.chunks.entries()) {
         // 批量重读能发现删除；数量不一致会使整块失效，而不是重建已删除 owner。
         const current =
-          chunk.owner === "session_message" ? db.select().from(SessionMessageTable).where(inArray(SessionMessageTable.id, chunk.items.map(item => item.row.id))).all()
-          : chunk.owner === "message"
+          chunk.owner === "session_message"
             ? db
                 .select()
-                .from(MessageTable)
+                .from(SessionMessageTable)
                 .where(
                   inArray(
-                    MessageTable.id,
+                    SessionMessageTable.id,
                     chunk.items.map((item) => item.row.id),
                   ),
                 )
                 .all()
-            : db
-                .select()
-                .from(PartTable)
-                .where(
-                  inArray(
-                    PartTable.id,
-                    chunk.items.map((item) => item.row.id),
-                  ),
-                )
-                .all()
+            : chunk.owner === "message"
+              ? db
+                  .select()
+                  .from(MessageTable)
+                  .where(
+                    inArray(
+                      MessageTable.id,
+                      chunk.items.map((item) => item.row.id),
+                    ),
+                  )
+                  .all()
+              : db
+                  .select()
+                  .from(PartTable)
+                  .where(
+                    inArray(
+                      PartTable.id,
+                      chunk.items.map((item) => item.row.id),
+                    ),
+                  )
+                  .all()
         // 完整行快照覆盖同毫秒更新；资格在写事务中重算，以当前 Session 活跃度为准。
         const snapshots = new Map(chunk.items.map((item) => [String(item.row.id), JSON.stringify(item.row)]))
         // 按 ID 比较完整行，SQL 返回顺序与读取阶段无须相同。
@@ -1107,7 +1290,9 @@ function commitFreezeBatch(db: TxOrDb, prepared: ReturnType<typeof prepareFreeze
           current.every(
             (row) =>
               snapshots.get(row.id) === JSON.stringify(row) &&
-              ("seq" in row ? eligibleSessionMessage(admission(row.session_id), row.seq) : eligible(admission(row.session_id), "message_id" in row ? row.message_id : row.id)),
+              ("seq" in row
+                ? eligibleSessionMessage(admission(row.session_id), row.seq)
+                : eligible(admission(row.session_id), "message_id" in row ? row.message_id : row.id)),
           )
         if (!live) continue
         // 先确认整个 chunk，再落包和引用；被更新或删除的 owner 留待下一次显式维护。
@@ -1376,10 +1561,22 @@ function freeze(
     if (!row) return { type: "skipped", reason: "missing" }
     if (row.cold_key) return { type: "skipped", reason: "already-cold" }
     if (!nativeV2Value(db, row)) return { type: "skipped", reason: "no-fields" }
-    if (!eligibleSessionMessage(eligibility(db, row.session_id, input.now, input.olderThanMs), row.seq)) return { type: "skipped", reason: "ineligible" }
-    const existing = db.select().from(SessionMessageTable).where(and(eq(SessionMessageTable.session_id, row.session_id), isNotNull(SessionMessageTable.cold_key))).all()
-    freezeSessionMessageBatch(db, [...existing.filter(item => item.id !== row.id), row], { now: input.now, eligibilityState: sessionID => eligibility(db, sessionID, input.now, input.olderThanMs) })
-    const ref = db.select({ ref: SessionMessageTable.cold_ref }).from(SessionMessageTable).where(eq(SessionMessageTable.id, row.id)).get()?.ref
+    if (!eligibleSessionMessage(eligibility(db, row.session_id, input.now, input.olderThanMs), row.seq))
+      return { type: "skipped", reason: "ineligible" }
+    const existing = db
+      .select()
+      .from(SessionMessageTable)
+      .where(and(eq(SessionMessageTable.session_id, row.session_id), isNotNull(SessionMessageTable.cold_key)))
+      .all()
+    freezeSessionMessageBatch(db, [...existing.filter((item) => item.id !== row.id), row], {
+      now: input.now,
+      eligibilityState: (sessionID) => eligibility(db, sessionID, input.now, input.olderThanMs),
+    })
+    const ref = db
+      .select({ ref: SessionMessageTable.cold_ref })
+      .from(SessionMessageTable)
+      .where(eq(SessionMessageTable.id, row.id))
+      .get()?.ref
     if (!ref) throw new CorruptionError({ message: "Native pack target is missing" })
     const payload = db.select().from(ColdStorageTable).where(eq(ColdStorageTable.hash, ref)).get()
     if (!payload) throw new CorruptionError({ message: "Native pack disappeared after assignment", hash: ref })
@@ -1574,7 +1771,7 @@ export function thawOwner(db: TxOrDb, input: Owner) {
   if (input.type === "session_message") {
     const row = db.select().from(SessionMessageTable).where(eq(SessionMessageTable.id, input.id)).get()
     if (!row) return false
-    db.transaction(tx => thawSessionMessageRowsInTransaction(tx, [row]), { behavior: "immediate" })
+    db.transaction((tx) => thawSessionMessageRowsInTransaction(tx, [row]), { behavior: "immediate" })
     return row.cold_ref !== null
   }
   if (input.type === "message") {
@@ -1634,8 +1831,19 @@ function eligibleOwnerCount(db: TxOrDb, now: number, olderThanMs: number) {
       const value = partV2Value(db, row, legacyCache)
       if (!value) return false
       return eligible(state(row.session_id), row.message_id, row.data.type === "compaction")
-    }).length + db.select().from(SessionMessageTable).where(and(isNull(SessionMessageTable.cold_key), inArray(SessionMessageTable.type, ["user", "assistant", "synthetic"]))).all()
-      .filter(row => nativeV2Value(db, row) !== undefined && eligibleSessionMessage(state(row.session_id), row.seq)).length
+    }).length +
+    db
+      .select()
+      .from(SessionMessageTable)
+      .where(
+        and(
+          isNull(SessionMessageTable.cold_key),
+          inArray(SessionMessageTable.type, ["user", "assistant", "synthetic"]),
+        ),
+      )
+      .all()
+      .filter((row) => nativeV2Value(db, row) !== undefined && eligibleSessionMessage(state(row.session_id), row.seq))
+      .length
   )
 }
 
@@ -1695,24 +1903,29 @@ function partCandidate() {
 // 它先做 extraction 和 exact 门槛，再查询 session boundary，保持大多数非候选 row 的低成本。
 // 该函数只读且不压缩；true 仅表示此刻可冻，真正 freeze 会在 immediate transaction 内再次确认。
 export function isEligibleOwner(db: TxOrDb, input: Owner & { now?: number; olderThanMs?: number }) {
-    const now = input.now ?? Date.now()
-    const olderThanMs = input.olderThanMs ?? SEVEN_DAYS_MS
-    if (input.type === "session_message") {
-      const row = db.select().from(SessionMessageTable).where(eq(SessionMessageTable.id, input.id)).get()
-      return !!row && !row.cold_key && nativeV2Value(db, row) !== undefined && eligibleSessionMessage(eligibility(db, row.session_id, now, olderThanMs), row.seq)
-    }
-    if (input.type === "message") {
-      const row = db.select().from(MessageTable).where(eq(MessageTable.id, input.id)).get()
-      if (!row || row.cold_key) return false
-      const value = messageV2Value(db, row)
-      if (!value) return false
-      return eligible(eligibility(db, row.session_id, now, olderThanMs), row.id)
-    }
-    const row = db.select().from(PartTable).where(eq(PartTable.id, input.id)).get()
+  const now = input.now ?? Date.now()
+  const olderThanMs = input.olderThanMs ?? SEVEN_DAYS_MS
+  if (input.type === "session_message") {
+    const row = db.select().from(SessionMessageTable).where(eq(SessionMessageTable.id, input.id)).get()
+    return (
+      !!row &&
+      !row.cold_key &&
+      nativeV2Value(db, row) !== undefined &&
+      eligibleSessionMessage(eligibility(db, row.session_id, now, olderThanMs), row.seq)
+    )
+  }
+  if (input.type === "message") {
+    const row = db.select().from(MessageTable).where(eq(MessageTable.id, input.id)).get()
     if (!row || row.cold_key) return false
-    const value = partV2Value(db, row)
+    const value = messageV2Value(db, row)
     if (!value) return false
-    return eligible(eligibility(db, row.session_id, now, olderThanMs), row.message_id, row.data.type === "compaction")
+    return eligible(eligibility(db, row.session_id, now, olderThanMs), row.id)
+  }
+  const row = db.select().from(PartTable).where(eq(PartTable.id, input.id)).get()
+  if (!row || row.cold_key) return false
+  const value = partV2Value(db, row)
+  if (!value) return false
+  return eligible(eligibility(db, row.session_id, now, olderThanMs), row.message_id, row.data.type === "compaction")
 }
 
 // 工具 input 形状修复只针对热 Tool owner：v1/v2 冻结路径在写入前已验证 input，坏行只可能来自 hot row。
@@ -1780,8 +1993,17 @@ function verifyWith(db: TxOrDb, input: { repair: boolean; repairToolInput: boole
     .from(PartTable)
     .where(or(isNotNull(PartTable.cold_ref), isNotNull(PartTable.cold_key), isNotNull(PartTable.cold_stats)))
     .all()
-  const native = db.select().from(SessionMessageTable)
-    .where(or(isNotNull(SessionMessageTable.cold_ref), isNotNull(SessionMessageTable.cold_key), isNotNull(SessionMessageTable.cold_stats))).all()
+  const native = db
+    .select()
+    .from(SessionMessageTable)
+    .where(
+      or(
+        isNotNull(SessionMessageTable.cold_ref),
+        isNotNull(SessionMessageTable.cold_key),
+        isNotNull(SessionMessageTable.cold_stats),
+      ),
+    )
+    .all()
   const summaries = db
     .select({
       ref: SessionTable.summary_ref,
@@ -1802,7 +2024,7 @@ function verifyWith(db: TxOrDb, input: { repair: boolean; repairToolInput: boole
     ...messages.flatMap((row) => (row.ref ? [{ hash: row.ref }] : [])),
     ...parts.flatMap((row) => (row.ref ? [{ hash: row.ref }] : [])),
     ...summaries.flatMap((row) => (row.ref ? [{ hash: row.ref }] : [])),
-    ...native.flatMap(row => row.cold_ref ? [{ hash: row.cold_ref }] : []),
+    ...native.flatMap((row) => (row.cold_ref ? [{ hash: row.cold_ref }] : [])),
   ]
   const hashes = new Set(payloads.map((row) => row.hash))
   const byHash = new Map(payloads.map((row) => [row.hash, row]))
@@ -1832,7 +2054,8 @@ function verifyWith(db: TxOrDb, input: { repair: boolean; repairToolInput: boole
     try {
       // canonical、hash、size、codec 和 kind 共同构成 payload integrity，任一不符都算损坏。
       if (payload.kind === "session-summary") decodeSummary(db, payload.hash)
-      else if (payload.kind === "message" || payload.kind === "part" || payload.kind === "session_message") decode(db, payload.hash, payload.kind)
+      else if (payload.kind === "message" || payload.kind === "part" || payload.kind === "session_message")
+        decode(db, payload.hash, payload.kind)
       else if (payload.kind === "message-pack") {
         packEntries.set(payload.hash, decodePack(db, payload.hash, "message"))
       } else if (payload.kind === "part-pack") {
@@ -1902,14 +2125,26 @@ function verifyWith(db: TxOrDb, input: { repair: boolean; repairToolInput: boole
     validateOwner("session_message", owner.cold_ref, owner.cold_key)
     try {
       if (!owner.cold_ref || !owner.cold_key) {
-        if (owner.cold_stats !== null) throw new CorruptionError({ message: "Non-packed Native message has cold Stats" })
+        if (owner.cold_stats !== null)
+          throw new CorruptionError({ message: "Non-packed Native message has cold Stats" })
         continue
       }
       const fields = packEntries.get(owner.cold_ref)?.get(owner.cold_key.toString("hex"))
       const stored = parseSessionMessageStats(owner.cold_stats, owner.cold_ref)
-      if (fields && canonical(stored) !== canonical(projectSessionMessageStats({ ...owner, data: restoreSessionMessage(owner, { version: 1, owner: "session_message", fields }) })))
+      if (
+        fields &&
+        canonical(stored) !==
+          canonical(
+            projectSessionMessageStats({
+              ...owner,
+              data: restoreSessionMessage(owner, { version: 1, owner: "session_message", fields }),
+            }),
+          )
+      )
         throw new CorruptionError({ message: "Native cold Stats do not match the payload", hash: owner.cold_ref })
-    } catch { corruptOwners++ }
+    } catch {
+      corruptOwners++
+    }
   }
   // summary 的 ref/cursor 必须成对且指向 summary kind，repair 不猜测缺失的一半。
   for (const owner of summaries) {
@@ -1983,7 +2218,16 @@ export function expand(db: TxOrDb, input: { sessionID?: SessionID; all: boolean 
         .all()
       thawMessageRows(db, messages)
       thawPartRows(db, parts)
-      const native = db.select().from(SessionMessageTable).where(and(isNotNull(SessionMessageTable.cold_ref), input.sessionID ? eq(SessionMessageTable.session_id, input.sessionID) : undefined)).all()
+      const native = db
+        .select()
+        .from(SessionMessageTable)
+        .where(
+          and(
+            isNotNull(SessionMessageTable.cold_ref),
+            input.sessionID ? eq(SessionMessageTable.session_id, input.sessionID) : undefined,
+          ),
+        )
+        .all()
       thawSessionMessageRowsInTransaction(db, native)
       const summaries = db
         .select({ id: SessionTable.id, ref: SessionTable.summary_ref })
@@ -2085,29 +2329,29 @@ function repackCandidates(db: TxOrDb, request: { sessionID?: SessionID; recompre
     or(sql`length(${ColdStorageTable.hash}) = 64`, pending),
   )
   return db
-      .select({
-        hash: ColdStorageTable.hash,
-        bytes: ColdStorageTable.raw_bytes,
-        // 与 WHERE 共用字段谓词，选出源以后无需再次猜测本轮操作模式。
-        repack: sql<boolean>`${repack}`.mapWith(Boolean),
-      })
-      .from(ColdStorageTable)
-      .where(
-        and(
-          gt(ColdStorageTable.hash, lastHash),
-          request.recompress ? undefined : or(sql`length(${ColdStorageTable.hash}) = 64`, repack),
-          // scope 约束真实引用者，包的创建者不能代替共享 owner 的所属 Session。
-          request.sessionID
-            ? sql`(
+    .select({
+      hash: ColdStorageTable.hash,
+      bytes: ColdStorageTable.raw_bytes,
+      // 与 WHERE 共用字段谓词，选出源以后无需再次猜测本轮操作模式。
+      repack: sql<boolean>`${repack}`.mapWith(Boolean),
+    })
+    .from(ColdStorageTable)
+    .where(
+      and(
+        gt(ColdStorageTable.hash, lastHash),
+        request.recompress ? undefined : or(sql`length(${ColdStorageTable.hash}) = 64`, repack),
+        // scope 约束真实引用者，包的创建者不能代替共享 owner 的所属 Session。
+        request.sessionID
+          ? sql`(
       exists (select 1 from ${MessageTable} where ${MessageTable.cold_ref} = ${ColdStorageTable.hash} and ${MessageTable.session_id} = ${request.sessionID}) or
       exists (select 1 from ${PartTable} where ${PartTable.cold_ref} = ${ColdStorageTable.hash} and ${PartTable.session_id} = ${request.sessionID}) or
       exists (select 1 from ${SessionMessageTable} where ${SessionMessageTable.cold_ref} = ${ColdStorageTable.hash} and ${SessionMessageTable.session_id} = ${request.sessionID}) or
       exists (select 1 from ${SessionTable} where ${SessionTable.summary_ref} = ${ColdStorageTable.hash} and ${SessionTable.id} = ${request.sessionID}))`
-            : undefined,
-        ),
-      )
-      .orderBy(ColdStorageTable.hash)
-      .all()
+          : undefined,
+      ),
+    )
+    .orderBy(ColdStorageTable.hash)
+    .all()
 }
 
 function readRepackSources(
@@ -2154,8 +2398,10 @@ function readRepackSources(
           sources.push({ kind: "recode", hash, storageKind: payload.kind, references: payload.ref_count, pack })
           continue
         }
-        if (payload.kind !== "message-pack" && payload.kind !== "part-pack" && payload.kind !== "session-message-pack") continue
-        const owner: OwnerKind = payload.kind === "message-pack" ? "message" : payload.kind === "part-pack" ? "part" : "session_message"
+        if (payload.kind !== "message-pack" && payload.kind !== "part-pack" && payload.kind !== "session-message-pack")
+          continue
+        const owner: OwnerKind =
+          payload.kind === "message-pack" ? "message" : payload.kind === "part-pack" ? "part" : "session_message"
         // 读取期不一致按 corruption 抛错；并发窗口造成的不一致由提交复核按跳过处理。
         if (payload.ref_count !== (counts.get(hash) ?? 0))
           throw new CorruptionError({ message: "Repack reference count mismatch", hash })
@@ -2185,19 +2431,41 @@ function readRepackSources(
                 )
                 .all()
             : []
-        const native = owner === "session_message" ? db.select().from(SessionMessageTable).where(and(
-          eq(SessionMessageTable.cold_ref, hash), request.sessionID ? eq(SessionMessageTable.session_id, request.sessionID) : undefined,
-        )).all() : []
+        const native =
+          owner === "session_message"
+            ? db
+                .select()
+                .from(SessionMessageTable)
+                .where(
+                  and(
+                    eq(SessionMessageTable.cold_ref, hash),
+                    request.sessionID ? eq(SessionMessageTable.session_id, request.sessionID) : undefined,
+                  ),
+                )
+                .all()
+            : []
         const wire: PackWireRow[] = [
-          ...native.map((row): PackWireRow => ({ id: row.id, type: row.type, data: row.data,
-            coldKey: row.cold_key?.toString("hex") ?? null, nativeStats: row.cold_stats, child: childOf(row.session_id),
-            merge: eligibleSessionMessage(admission(row.session_id), row.seq) && extractSessionMessage(db, row) !== undefined })),
+          ...native.map(
+            (row): PackWireRow => ({
+              id: row.id,
+              type: row.type,
+              data: row.data,
+              coldKey: row.cold_key?.toString("hex") ?? null,
+              nativeStats: row.cold_stats,
+              child: childOf(row.session_id),
+              merge:
+                eligibleSessionMessage(admission(row.session_id), row.seq) &&
+                extractSessionMessage(db, row) !== undefined,
+            }),
+          ),
           ...messages.map((row): PackWireRow => {
             // 热行仍携带深层字段 ⟺ 包内 entry 未 merge（merge 时热行被替换为缩减投影）。
             const merge =
               row.data.role === "assistant" &&
-              Object.entries(row.data).some(([key, value]) =>
-                ["path", "inputChars", "inputTokens", "inputBreakdown"].includes(key) && value !== undefined) &&
+              Object.entries(row.data).some(
+                ([key, value]) =>
+                  ["path", "inputChars", "inputTokens", "inputBreakdown"].includes(key) && value !== undefined,
+              ) &&
               eligible(admission(row.session_id), row.id)
             // 只有 merge 行需要业务正文；进位行的投影原样保留在主线程，不占线传输。
             return {
@@ -2306,18 +2574,29 @@ type RepointRow = { id: string; key: Uint8Array; projection?: unknown }
 function repointPack(db: TxOrDb, owner: OwnerKind, rows: RepointRow[], hash: string) {
   // 同一事务复用carry/merge两条参数化语句，保留源优化且不穿透Effect宿主的原生连接边界。
   const table = owner === "message" ? MessageTable : owner === "part" ? PartTable : SessionMessageTable
-  const carry = db.update(table)
+  const carry = db
+    .update(table)
     .set({ cold_ref: sql.placeholder("hash"), cold_key: sql.placeholder("key"), time_updated: table.time_updated })
-    .where(eq(table.id, sql.placeholder("id"))).returning({ id: table.id }).prepare()
-  const merge = db.update(table)
-    .set({ cold_ref: sql.placeholder("hash"), cold_key: sql.placeholder("key"), data: sql.placeholder("data"), time_updated: table.time_updated })
-    .where(eq(table.id, sql.placeholder("id"))).returning({ id: table.id }).prepare()
+    .where(eq(table.id, sql.placeholder("id")))
+    .returning({ id: table.id })
+    .prepare()
+  const merge = db
+    .update(table)
+    .set({
+      cold_ref: sql.placeholder("hash"),
+      cold_key: sql.placeholder("key"),
+      data: sql.placeholder("data"),
+      time_updated: table.time_updated,
+    })
+    .where(eq(table.id, sql.placeholder("id")))
+    .returning({ id: table.id })
+    .prepare()
   for (const row of rows) {
     const updated =
       row.projection === undefined
         ? carry.get({ hash, key: Buffer.from(row.key), id: row.id })
-        // Drizzle的列encoder会序列化占位参数，只传原对象以免把投影二次JSON编码。
-        : merge.get({ hash, key: Buffer.from(row.key), data: row.projection, id: row.id })
+        : // Drizzle的列encoder会序列化占位参数，只传原对象以免把投影二次JSON编码。
+          merge.get({ hash, key: Buffer.from(row.key), data: row.projection, id: row.id })
     // 同一事务中的缺行是完整性错误，整批回滚而不是报告部分成功。
     if (!updated) throw new CorruptionError({ message: "Cold pack repoint is incomplete", hash })
   }
@@ -2406,36 +2685,56 @@ function commitRepackBatch(
     if (!payload || payload.ref_count !== (counts.get(source.hash) ?? 0)) continue
     if (source.kind === "pack") {
       const current =
-        source.owner === "session_message" ? db.select({ id: SessionMessageTable.id, cold_key: SessionMessageTable.cold_key, time_updated: SessionMessageTable.time_updated }).from(SessionMessageTable)
-          .where(and(eq(SessionMessageTable.cold_ref, source.hash), source.scope ? eq(SessionMessageTable.session_id, source.scope) : undefined)).all()
-        : source.owner === "message"
+        source.owner === "session_message"
           ? db
-              .select({ id: MessageTable.id, cold_key: MessageTable.cold_key, time_updated: MessageTable.time_updated })
-              .from(MessageTable)
+              .select({
+                id: SessionMessageTable.id,
+                cold_key: SessionMessageTable.cold_key,
+                time_updated: SessionMessageTable.time_updated,
+              })
+              .from(SessionMessageTable)
               .where(
                 and(
-                  eq(MessageTable.cold_ref, source.hash),
-                  source.scope ? eq(MessageTable.session_id, source.scope) : undefined,
+                  eq(SessionMessageTable.cold_ref, source.hash),
+                  source.scope ? eq(SessionMessageTable.session_id, source.scope) : undefined,
                 ),
               )
               .all()
-          : db
-              .select({ id: PartTable.id, cold_key: PartTable.cold_key, time_updated: PartTable.time_updated })
-              .from(PartTable)
-              .where(
-                and(
-                  eq(PartTable.cold_ref, source.hash),
-                  source.scope ? eq(PartTable.session_id, source.scope) : undefined,
-                ),
-              )
-              .all()
+          : source.owner === "message"
+            ? db
+                .select({
+                  id: MessageTable.id,
+                  cold_key: MessageTable.cold_key,
+                  time_updated: MessageTable.time_updated,
+                })
+                .from(MessageTable)
+                .where(
+                  and(
+                    eq(MessageTable.cold_ref, source.hash),
+                    source.scope ? eq(MessageTable.session_id, source.scope) : undefined,
+                  ),
+                )
+                .all()
+            : db
+                .select({ id: PartTable.id, cold_key: PartTable.cold_key, time_updated: PartTable.time_updated })
+                .from(PartTable)
+                .where(
+                  and(
+                    eq(PartTable.cold_ref, source.hash),
+                    source.scope ? eq(PartTable.session_id, source.scope) : undefined,
+                  ),
+                )
+                .all()
       const rows: ReadonlyArray<{ id: string; cold_key: Uint8Array | null; time_updated: number }> =
         source.owner === "message" ? source.messages : source.owner === "part" ? source.parts : source.native
       if (!sameRowStamp(current, rows)) continue
       if (source.owner === "session_message") {
         // 异步编码释放了原SQL快照；新增抽取须重验当前资格，carry不因此失去搬运能力。
-        const merges = new Set((scans[index] as PackScanResult).merges.map(item => item.id))
-        if (source.native.some(row => merges.has(row.id) && !eligibleSessionMessage(admission(row.session_id), row.seq))) continue
+        const merges = new Set((scans[index] as PackScanResult).merges.map((item) => item.id))
+        if (
+          source.native.some((row) => merges.has(row.id) && !eligibleSessionMessage(admission(row.session_id), row.seq))
+        )
+          continue
       }
     }
     // 原位重编码按当前引用数计量，读取窗口内新建的 fork 仍共享同一帧。
@@ -2472,7 +2771,13 @@ function commitRepackBatch(
   const inserted = new Map<string, { owner: OwnerKind; keys: Map<string, Buffer> }>()
   const fresh = new Set(freshPacks.map(({ pack }) => pack.hash))
   // 按解析后的目标位置分组；retain→assign→release 顺序与串行时代一致，引用环按计数结算。
-  type RepointGroup = { owner: OwnerKind; moved: number; messages: RepointRow[]; parts: RepointRow[]; native: RepointRow[] }
+  type RepointGroup = {
+    owner: OwnerKind
+    moved: number
+    messages: RepointRow[]
+    parts: RepointRow[]
+    native: RepointRow[]
+  }
   const groups = new Map<string, RepointGroup>()
   const released: string[] = []
   const verifiedTargets = new Set<string>()
@@ -2612,13 +2917,27 @@ function nextPartRows(
     .all()
 }
 
-function nextSessionMessageRows(db: TxOrDb, request: { sessionID?: SessionID }, lastID: string, cold: boolean, batchSize: number) {
-  return db.select().from(SessionMessageTable).where(and(
-    cold ? isNotNull(SessionMessageTable.cold_ref) : isNull(SessionMessageTable.cold_key),
-    cold ? undefined : inArray(SessionMessageTable.type, ["user", "assistant", "synthetic"]),
-    lastID ? gt(SessionMessageTable.id, SessionMessage.ID.make(lastID)) : undefined,
-    request.sessionID ? eq(SessionMessageTable.session_id, request.sessionID) : undefined,
-  )).orderBy(SessionMessageTable.id).limit(batchSize).all()
+function nextSessionMessageRows(
+  db: TxOrDb,
+  request: { sessionID?: SessionID },
+  lastID: string,
+  cold: boolean,
+  batchSize: number,
+) {
+  return db
+    .select()
+    .from(SessionMessageTable)
+    .where(
+      and(
+        cold ? isNotNull(SessionMessageTable.cold_ref) : isNull(SessionMessageTable.cold_key),
+        cold ? undefined : inArray(SessionMessageTable.type, ["user", "assistant", "synthetic"]),
+        lastID ? gt(SessionMessageTable.id, SessionMessage.ID.make(lastID)) : undefined,
+        request.sessionID ? eq(SessionMessageTable.session_id, request.sessionID) : undefined,
+      ),
+    )
+    .orderBy(SessionMessageTable.id)
+    .limit(batchSize)
+    .all()
 }
 
 function nextSummaryRows(db: TxOrDb, request: { sessionID?: SessionID }, lastID: string, batchSize: number) {
@@ -2684,8 +3003,14 @@ function expandOwnerBatch(
         const rows = nextSessionMessageRows(db, request, cursor.lastID, true, request.batchSize)
         if (!rows.length) return { empty: true as const }
         thawSessionMessageRowsInTransaction(db, rows)
-        return { empty: false as const, cursor: { owner: "session_message" as const, lastID: rows[rows.length - 1].id },
-          processed: rows.length, skipped: 0, rawBytes: 0, compressedBytes: 0 }
+        return {
+          empty: false as const,
+          cursor: { owner: "session_message" as const, lastID: rows[rows.length - 1].id },
+          processed: rows.length,
+          skipped: 0,
+          rawBytes: 0,
+          compressedBytes: 0,
+        }
       }
       const rows = nextSummaryRows(db, request, cursor.lastID, request.batchSize)
       if (!rows.length) return { empty: true as const }
@@ -2708,58 +3033,81 @@ function countOwnerCandidates(
   request: { operation: "compress" | "expand"; sessionID?: SessionID },
   cursor: { owner: OwnerKind | "session-summary"; lastID: string },
 ) {
-    const count = (table: typeof MessageTable | typeof PartTable) => {
-      // 恢复到Part或摘要阶段时，已完成的Message范围不再进入分母。
-      if (cursor.owner === "session-summary" || cursor.owner === "session_message" || (table === MessageTable && cursor.owner !== "message")) return 0
-      // 展开覆盖全部冷引用，沿用冻结白名单会漏掉已存在的历史表示。
-      const conditions =
-        request.operation === "expand"
-          ? [isNotNull(table.cold_ref)]
-          : [
-              isNull(table.cold_key),
-              or(table === MessageTable ? messageCandidate() : partCandidate(), isNotNull(table.cold_ref)),
-            ]
-      if (request.sessionID) conditions.push(eq(table.session_id, request.sessionID))
-      // 总量与剩余游标对齐，恢复任务沿用已提交边界。
-      if (cursor.lastID && cursor.owner === (table === MessageTable ? "message" : "part"))
-        conditions.push(sql`${table.id} > ${cursor.lastID}`)
-      return (
-        db
+  const count = (table: typeof MessageTable | typeof PartTable) => {
+    // 恢复到Part或摘要阶段时，已完成的Message范围不再进入分母。
+    if (
+      cursor.owner === "session-summary" ||
+      cursor.owner === "session_message" ||
+      (table === MessageTable && cursor.owner !== "message")
+    )
+      return 0
+    // 展开覆盖全部冷引用，沿用冻结白名单会漏掉已存在的历史表示。
+    const conditions =
+      request.operation === "expand"
+        ? [isNotNull(table.cold_ref)]
+        : [
+            isNull(table.cold_key),
+            or(table === MessageTable ? messageCandidate() : partCandidate(), isNotNull(table.cold_ref)),
+          ]
+    if (request.sessionID) conditions.push(eq(table.session_id, request.sessionID))
+    // 总量与剩余游标对齐，恢复任务沿用已提交边界。
+    if (cursor.lastID && cursor.owner === (table === MessageTable ? "message" : "part"))
+      conditions.push(sql`${table.id} > ${cursor.lastID}`)
+    return (
+      db
+        .select({ count: sql<number>`count(*)` })
+        .from(table)
+        .where(and(...conditions))
+        .get()?.count ?? 0
+    )
+  }
+  const native =
+    cursor.owner === "session-summary"
+      ? 0
+      : (db
           .select({ count: sql<number>`count(*)` })
-          .from(table)
-          .where(and(...conditions))
-          .get()?.count ?? 0
-      )
-    }
-    const native = cursor.owner === "session-summary" ? 0 : db.select({ count: sql<number>`count(*)` }).from(SessionMessageTable).where(and(
-      request.operation === "expand" ? isNotNull(SessionMessageTable.cold_ref) : isNull(SessionMessageTable.cold_key),
-      request.operation === "expand" ? undefined : inArray(SessionMessageTable.type, ["user", "assistant", "synthetic"]),
-      request.sessionID ? eq(SessionMessageTable.session_id, request.sessionID) : undefined,
-      cursor.owner === "session_message" && cursor.lastID ? gt(SessionMessageTable.id, SessionMessage.ID.make(cursor.lastID)) : undefined,
-    )).get()?.count ?? 0
-    return count(MessageTable) + count(PartTable) + native
+          .from(SessionMessageTable)
+          .where(
+            and(
+              request.operation === "expand"
+                ? isNotNull(SessionMessageTable.cold_ref)
+                : isNull(SessionMessageTable.cold_key),
+              request.operation === "expand"
+                ? undefined
+                : inArray(SessionMessageTable.type, ["user", "assistant", "synthetic"]),
+              request.sessionID ? eq(SessionMessageTable.session_id, request.sessionID) : undefined,
+              cursor.owner === "session_message" && cursor.lastID
+                ? gt(SessionMessageTable.id, SessionMessage.ID.make(cursor.lastID))
+                : undefined,
+            ),
+          )
+          .get()?.count ?? 0)
+  return count(MessageTable) + count(PartTable) + native
 }
 
 function restoreRepackIndex(db: TxOrDb, known: Map<string, EntryLocation>) {
-    // 目的包的hash排序与源游标无关，恢复时需扫描全部现有v3目标。
-    const rows = db
-      .select({ hash: ColdStorageTable.hash, kind: ColdStorageTable.kind })
-      .from(ColdStorageTable)
-      .where(
-        and(sql`length(${ColdStorageTable.hash}) = 43`, inArray(ColdStorageTable.kind, ["message-pack", "part-pack", "session-message-pack"])),
-      )
-      .all()
-    for (const row of rows) {
-      const owner = row.kind === "message-pack" ? "message" : row.kind === "part-pack" ? "part" : "session_message"
-      const entries = decodePack(db, row.hash, owner)
-      let index = 0
-      // decoder 已核验 entry 摘要，恢复派生索引时复用其身份计算。
-      for (const slot of entries.keys())
-        known.set(`${owner}:${entries.content[index++].key.toString("hex")}`, {
-          hash: row.hash,
-          key: Buffer.from(slot, "hex"),
-        })
-    }
+  // 目的包的hash排序与源游标无关，恢复时需扫描全部现有v3目标。
+  const rows = db
+    .select({ hash: ColdStorageTable.hash, kind: ColdStorageTable.kind })
+    .from(ColdStorageTable)
+    .where(
+      and(
+        sql`length(${ColdStorageTable.hash}) = 43`,
+        inArray(ColdStorageTable.kind, ["message-pack", "part-pack", "session-message-pack"]),
+      ),
+    )
+    .all()
+  for (const row of rows) {
+    const owner = row.kind === "message-pack" ? "message" : row.kind === "part-pack" ? "part" : "session_message"
+    const entries = decodePack(db, row.hash, owner)
+    let index = 0
+    // decoder 已核验 entry 摘要，恢复派生索引时复用其身份计算。
+    for (const slot of entries.keys())
+      known.set(`${owner}:${entries.content[index++].key.toString("hex")}`, {
+        hash: row.hash,
+        key: Buffer.from(slot, "hex"),
+      })
+  }
 }
 
 function cleanupBatch(db: TxOrDb, request: { delete: boolean; batchSize: number }, lastHash: string) {
@@ -2827,103 +3175,111 @@ export const maintenance = {
 }
 
 function pragmaNumber(db: TxOrDb, name: "page_size" | "page_count" | "freelist_count") {
-  const row: unknown = name === "page_size" ? db.get(sql`PRAGMA page_size`)
-    : name === "page_count" ? db.get(sql`PRAGMA page_count`) : db.get(sql`PRAGMA freelist_count`)
+  const row: unknown =
+    name === "page_size"
+      ? db.get(sql`PRAGMA page_size`)
+      : name === "page_count"
+        ? db.get(sql`PRAGMA page_count`)
+        : db.get(sql`PRAGMA freelist_count`)
   return isRecord(row) && typeof row[name] === "number" ? row[name] : 0
 }
 
 // 容量与共享量按元数据汇总，冻结资格复用存储规则。
 export function status(db: TxOrDb): StatusReport {
-    // activeBytes 与 file length 分开，freelist 页面只在显式 VACUUM 后物理消失。
-    const pageSize = pragmaNumber(db, "page_size")
-    const pages = pragmaNumber(db, "page_count")
-    const freelistPages = pragmaNumber(db, "freelist_count")
-    // 容量投影只持有每包的固定大小元数据，内存随包数增长。
-    const payloads = db
-      .select({
-        hash: ColdStorageTable.hash,
-        kind: ColdStorageTable.kind,
-        raw_bytes: ColdStorageTable.raw_bytes,
-        compressed_bytes: ColdStorageTable.compressed_bytes,
-        ref_count: ColdStorageTable.ref_count,
-      })
-      .from(ColdStorageTable)
-      .all()
-    // 真实 owner 索引提供共享量，也作为持久 ref_count 的独立核对来源。
-    const counts = ownerCounts(
-      db,
-      payloads.map((row) => row.hash),
-    )
-    const coldOwners =
-      (db
-        .select({ value: sql<number>`count(*)` })
-        .from(MessageTable)
-        .where(isNotNull(MessageTable.cold_ref))
-        .get()?.value ?? 0) +
-      (db
-        .select({ value: sql<number>`count(*)` })
-        .from(PartTable)
-        .where(isNotNull(PartTable.cold_ref))
-        .get()?.value ?? 0) +
-      (db.select({ value: sql<number>`count(*)` }).from(SessionMessageTable).where(isNotNull(SessionMessageTable.cold_ref)).get()?.value ?? 0)
-    const summaryOwners =
-      db
-        .select({ value: sql<number>`count(*)` })
-        .from(SessionTable)
-        .where(isNotNull(SessionTable.summary_ref))
-        .get()?.value ?? 0
-    const summaryPayloads = payloads.filter((row) => row.kind === "session-summary")
-    // distinct 定位键给出包内被引用的条目数，用于估算条目级共享倍率。
-    const keyCounts = packKeyStats(
-      db,
-      payloads.map((row) => row.hash),
-    )
-    const rawBytes = payloads.reduce((total, row) => {
-      const owners = counts.get(row.hash) ?? 0
-      // 逻辑展开量针对有 owner 的内容；孤立帧的在库占用另计。
-      if (owners === 0) return total
-      if (row.kind === "message-pack" || row.kind === "part-pack" || row.kind === "session-message-pack") {
-        const distinctKeys = keyCounts.get(row.hash) ?? 0
-        // 有效定位键集合为空时，该包的引用完整性由 verify 诊断。
-        if (distinctKeys <= 0) return total
-        // raw_bytes 是整包大小；按 owners/keys 等分估算，各条目的实际长度可不同。
-        // 保留浮点字节估计，展示层负责单位换算与舍入。
-        return total + (row.raw_bytes * owners) / distinctKeys
-      }
-      // 摘要与 v1 envelope 的每个引用都对应整份内容。
-      return total + row.raw_bytes * owners
-    }, 0)
-    // 帧字节总量包含待清理的孤立帧，SQLite 页开销通过 activeBytes 单列。
-    const compressedBytes = payloads.reduce((total, row) => total + row.compressed_bytes, 0)
-    const referencedRawBytes = payloads.reduce(
-      (total, row) => total + ((counts.get(row.hash) ?? 0) > 0 ? row.raw_bytes : 0),
-      0,
-    )
-    const refCountMismatches = payloads.filter((row) => row.ref_count !== (counts.get(row.hash) ?? 0)).length
-    // 孤立帧依据真实引用判定，保留持久计数漂移时的可回收空间信息。
-    const orphans = payloads.filter((row) => (counts.get(row.hash) ?? 0) === 0).length
-    return {
-      pageSize,
-      pageCount: pages,
-      freelistPages,
-      activeBytes: Math.max(0, pages - freelistPages) * pageSize,
-      // 报表容量参考值以十进制字节表示。
-      targetBytes: 1_500_000_000,
-      // 资格计数与默认维护共用 root 7d / subagent 24h 的时钟定义。
-      eligibleOwners: eligibleOwnerCount(db, Date.now(), SEVEN_DAYS_MS),
-      coldOwners,
-      summaryOwners,
-      summaryPayloads: summaryPayloads.length,
-      summaryRawBytes: summaryPayloads.reduce((total, row) => total + row.raw_bytes, 0),
-      summaryCompressedBytes: summaryPayloads.reduce((total, row) => total + row.compressed_bytes, 0),
-      payloads: payloads.length,
-      rawBytes,
-      compressedBytes,
-      // 共享收益是逻辑展开与唯一内容之差，物理回收另由 SQLite 页数报告。
-      sharedBytes: Math.max(0, rawBytes - referencedRawBytes),
-      refCountMismatches,
-      orphans,
+  // activeBytes 与 file length 分开，freelist 页面只在显式 VACUUM 后物理消失。
+  const pageSize = pragmaNumber(db, "page_size")
+  const pages = pragmaNumber(db, "page_count")
+  const freelistPages = pragmaNumber(db, "freelist_count")
+  // 容量投影只持有每包的固定大小元数据，内存随包数增长。
+  const payloads = db
+    .select({
+      hash: ColdStorageTable.hash,
+      kind: ColdStorageTable.kind,
+      raw_bytes: ColdStorageTable.raw_bytes,
+      compressed_bytes: ColdStorageTable.compressed_bytes,
+      ref_count: ColdStorageTable.ref_count,
+    })
+    .from(ColdStorageTable)
+    .all()
+  // 真实 owner 索引提供共享量，也作为持久 ref_count 的独立核对来源。
+  const counts = ownerCounts(
+    db,
+    payloads.map((row) => row.hash),
+  )
+  const coldOwners =
+    (db
+      .select({ value: sql<number>`count(*)` })
+      .from(MessageTable)
+      .where(isNotNull(MessageTable.cold_ref))
+      .get()?.value ?? 0) +
+    (db
+      .select({ value: sql<number>`count(*)` })
+      .from(PartTable)
+      .where(isNotNull(PartTable.cold_ref))
+      .get()?.value ?? 0) +
+    (db
+      .select({ value: sql<number>`count(*)` })
+      .from(SessionMessageTable)
+      .where(isNotNull(SessionMessageTable.cold_ref))
+      .get()?.value ?? 0)
+  const summaryOwners =
+    db
+      .select({ value: sql<number>`count(*)` })
+      .from(SessionTable)
+      .where(isNotNull(SessionTable.summary_ref))
+      .get()?.value ?? 0
+  const summaryPayloads = payloads.filter((row) => row.kind === "session-summary")
+  // distinct 定位键给出包内被引用的条目数，用于估算条目级共享倍率。
+  const keyCounts = packKeyStats(
+    db,
+    payloads.map((row) => row.hash),
+  )
+  const rawBytes = payloads.reduce((total, row) => {
+    const owners = counts.get(row.hash) ?? 0
+    // 逻辑展开量针对有 owner 的内容；孤立帧的在库占用另计。
+    if (owners === 0) return total
+    if (row.kind === "message-pack" || row.kind === "part-pack" || row.kind === "session-message-pack") {
+      const distinctKeys = keyCounts.get(row.hash) ?? 0
+      // 有效定位键集合为空时，该包的引用完整性由 verify 诊断。
+      if (distinctKeys <= 0) return total
+      // raw_bytes 是整包大小；按 owners/keys 等分估算，各条目的实际长度可不同。
+      // 保留浮点字节估计，展示层负责单位换算与舍入。
+      return total + (row.raw_bytes * owners) / distinctKeys
     }
+    // 摘要与 v1 envelope 的每个引用都对应整份内容。
+    return total + row.raw_bytes * owners
+  }, 0)
+  // 帧字节总量包含待清理的孤立帧，SQLite 页开销通过 activeBytes 单列。
+  const compressedBytes = payloads.reduce((total, row) => total + row.compressed_bytes, 0)
+  const referencedRawBytes = payloads.reduce(
+    (total, row) => total + ((counts.get(row.hash) ?? 0) > 0 ? row.raw_bytes : 0),
+    0,
+  )
+  const refCountMismatches = payloads.filter((row) => row.ref_count !== (counts.get(row.hash) ?? 0)).length
+  // 孤立帧依据真实引用判定，保留持久计数漂移时的可回收空间信息。
+  const orphans = payloads.filter((row) => (counts.get(row.hash) ?? 0) === 0).length
+  return {
+    pageSize,
+    pageCount: pages,
+    freelistPages,
+    activeBytes: Math.max(0, pages - freelistPages) * pageSize,
+    // 报表容量参考值以十进制字节表示。
+    targetBytes: 1_500_000_000,
+    // 资格计数与默认维护共用 root 7d / subagent 24h 的时钟定义。
+    eligibleOwners: eligibleOwnerCount(db, Date.now(), SEVEN_DAYS_MS),
+    coldOwners,
+    summaryOwners,
+    summaryPayloads: summaryPayloads.length,
+    summaryRawBytes: summaryPayloads.reduce((total, row) => total + row.raw_bytes, 0),
+    summaryCompressedBytes: summaryPayloads.reduce((total, row) => total + row.compressed_bytes, 0),
+    payloads: payloads.length,
+    rawBytes,
+    compressedBytes,
+    // 共享收益是逻辑展开与唯一内容之差，物理回收另由 SQLite 页数报告。
+    sharedBytes: Math.max(0, rawBytes - referencedRawBytes),
+    refCountMismatches,
+    orphans,
+  }
 }
 
 export * as ColdStore from "./cold-store"

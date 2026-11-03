@@ -247,11 +247,23 @@ describe("MessageV2.page", () => {
         yield* session.updateMessage({ ...hidden.info, hidden: { time: Date.now(), reason: "undo" } })
         const visible = yield* MessageV2.get({ sessionID, messageID: ids[2] })
         const part = Option.getOrThrow(Option.fromNullishOr(visible.parts.find((item) => item.type === "text")))
-        yield* session.updatePart({ ...part, type: "reasoning", text: "cold".repeat(512), time: { start: Date.now() }, hidden: { time: Date.now(), reason: "undo" } })
-        expect(ColdStorage.freezeOwner(sync, { type: "part", id: part.id, now: Date.now() + 1, olderThanMs: 0 }).type).toBe("frozen")
+        yield* session.updatePart({
+          ...part,
+          type: "reasoning",
+          text: "cold".repeat(512),
+          time: { start: Date.now() },
+          hidden: { time: Date.now(), reason: "undo" },
+        })
+        expect(
+          ColdStorage.freezeOwner(sync, { type: "part", id: part.id, now: Date.now() + 1, olderThanMs: 0 }).type,
+        ).toBe("frozen")
         const result = yield* MessageV2.page({ sessionID, limit: 1 })
         // #553：hidden Message 不消耗 limit；被隐藏 part 的冷 payload 不得因 page 读取被 thaw。
-        expect([result.items[0].info.id, result.items[0].parts, sessionColdOwners(sync, sessionID)]).toEqual([ids[2], [], 1])
+        expect([result.items[0].info.id, result.items[0].parts, sessionColdOwners(sync, sessionID)]).toEqual([
+          ids[2],
+          [],
+          1,
+        ])
         expect(result.more).toBe(true)
         // per-user 摘要同时要求目标可见、子消息可见，隐藏 child 不应混入仍可见的父轮次。
         const childID = yield* addAssistant(sessionID, ids[2])
@@ -264,14 +276,32 @@ describe("MessageV2.page", () => {
           childParts: (yield* MessageV2.get({ sessionID, messageID: ids[2] })).parts,
           part: yield* session.getPart({ sessionID, messageID: ids[2], partID: part.id }),
           stream: (yield* MessageV2.stream(sessionID)).map((message) => message.info.id),
-          target: yield* MessageV2.targetWithAssistantChildren({ sessionID, messageID: ids[3], throughMessageID: ids[3] }),
-          children: (yield* MessageV2.targetWithAssistantChildren({ sessionID, messageID: ids[2], throughMessageID: childID })).map((message) => message.info.id),
-        }).toEqual({ get: "Failure", parentParts: [], childParts: [], part: undefined, stream: ids.slice(0, 3).toReversed(), target: [], children: [ids[2]] })
+          target: yield* MessageV2.targetWithAssistantChildren({
+            sessionID,
+            messageID: ids[3],
+            throughMessageID: ids[3],
+          }),
+          children: (yield* MessageV2.targetWithAssistantChildren({
+            sessionID,
+            messageID: ids[2],
+            throughMessageID: childID,
+          })).map((message) => message.info.id),
+        }).toEqual({
+          get: "Failure",
+          parentParts: [],
+          childParts: [],
+          part: undefined,
+          stream: ids.slice(0, 3).toReversed(),
+          target: [],
+          children: [ids[2]],
+        })
         // hidden cold Part 必须仍在冷层；仅在明确审计读取时才允许 thaw。
         expect(sessionColdOwners(sync, sessionID)).toBe(1)
         const raw = yield* MessageV2.get({ sessionID, messageID: ids[3], includeHidden: true })
         expect(raw.parts.map((item) => item.id)).toEqual(hidden.parts.map((item) => item.id))
-        expect((yield* session.getPart({ sessionID, messageID: ids[2], partID: part.id, includeHidden: true }))?.id).toBe(part.id)
+        expect(
+          (yield* session.getPart({ sessionID, messageID: ids[2], partID: part.id, includeHidden: true }))?.id,
+        ).toBe(part.id)
       }),
     ),
   )
@@ -286,26 +316,47 @@ describe("MessageV2.page", () => {
         // 本基准只读Goal locator；两个cohort批量建数，不计逐条事件通知成本。
         const database = yield* Database.Service
         const fillCohort = (sessionID: SessionID, count: number) =>
-          Database.withSync(database, (sync) => sync.transaction((tx) => {
-            const now = Date.now()
-            const ids = Array.from({ length: count }, () => MessageID.ascending())
-            for (let offset = 0; offset < ids.length; offset += 250) {
-              const batch = ids.slice(offset, offset + 250)
-              tx.insert(MessageTable).values(batch.map((id, index) => ({
-                id, session_id: sessionID, time_created: now + offset + index,
-                data: { role: "user" as const, agent: "test", model: { providerID: ProviderV2.ID.make("test"), modelID: ModelV2.ID.make("test") },
-                  time: { created: now + offset + index } },
-              }))).run()
-              // 保留每条消息四个独立Part及原文本大小，不能用减少payload伪造有界查询收益。
-              tx.insert(PartTable).values(batch.flatMap((id, index) =>
-                Array.from({ length: 4 }, (_, part) => ({
-                  id: PartID.ascending(), message_id: id, session_id: sessionID,
-                  data: { type: "text" as const, text: part === 0 ? `m${offset + index}` : `m${offset + index}-${part}` },
-                })),
-              )).run()
-            }
-            return ids
-          }))
+          Database.withSync(database, (sync) =>
+            sync.transaction((tx) => {
+              const now = Date.now()
+              const ids = Array.from({ length: count }, () => MessageID.ascending())
+              for (let offset = 0; offset < ids.length; offset += 250) {
+                const batch = ids.slice(offset, offset + 250)
+                tx.insert(MessageTable)
+                  .values(
+                    batch.map((id, index) => ({
+                      id,
+                      session_id: sessionID,
+                      time_created: now + offset + index,
+                      data: {
+                        role: "user" as const,
+                        agent: "test",
+                        model: { providerID: ProviderV2.ID.make("test"), modelID: ModelV2.ID.make("test") },
+                        time: { created: now + offset + index },
+                      },
+                    })),
+                  )
+                  .run()
+                // 保留每条消息四个独立Part及原文本大小，不能用减少payload伪造有界查询收益。
+                tx.insert(PartTable)
+                  .values(
+                    batch.flatMap((id, index) =>
+                      Array.from({ length: 4 }, (_, part) => ({
+                        id: PartID.ascending(),
+                        message_id: id,
+                        session_id: sessionID,
+                        data: {
+                          type: "text" as const,
+                          text: part === 0 ? `m${offset + index}` : `m${offset + index}-${part}`,
+                        },
+                      })),
+                    ),
+                  )
+                  .run()
+              }
+              return ids
+            }),
+          )
         const smallIDs = yield* fillCohort(smallSession.id, 256)
         const largeIDs = yield* fillCohort(largeSession.id, 6326)
 
@@ -342,8 +393,12 @@ describe("MessageV2.page", () => {
         )
 
         // 等价断言：有界查询返回最后两条 user（跳过技术/hidden 行）。
-        expect(smallIDs.slice(-2)).toEqual((yield* MessageV2.goalChronology(smallSession.id)).map((message) => message.info.id))
-        expect(largeIDs.slice(-2)).toEqual((yield* MessageV2.goalChronology(largeSession.id)).map((message) => message.info.id))
+        expect(smallIDs.slice(-2)).toEqual(
+          (yield* MessageV2.goalChronology(smallSession.id)).map((message) => message.info.id),
+        )
+        expect(largeIDs.slice(-2)).toEqual(
+          (yield* MessageV2.goalChronology(largeSession.id)).map((message) => message.info.id),
+        )
         expect(large.p95 - small.p95).toBeLessThanOrEqual(45)
         expect(large.p95).toBeLessThanOrEqual(100)
       }),
@@ -370,7 +425,10 @@ describe("MessageV2.page", () => {
         yield* addCompactionPart(sessionID, technical)
         const current = yield* addUser(sessionID, "current")
 
-        expect((yield* MessageV2.goalChronology(sessionID)).map((message) => message.info.id)).toEqual([previous, current])
+        expect((yield* MessageV2.goalChronology(sessionID)).map((message) => message.info.id)).toEqual([
+          previous,
+          current,
+        ])
       }),
     ),
   )
@@ -801,7 +859,9 @@ describe("Session.findMessage", () => {
         expect(Option.isSome(match)).toBe(true)
         const matchedPart = Option.isSome(match) ? match.value.parts.find((part) => part.id === partID) : undefined
         expect(
-          matchedPart?.type === "tool" && matchedPart.state.status === "completed" ? matchedPart.state.output : undefined,
+          matchedPart?.type === "tool" && matchedPart.state.status === "completed"
+            ? matchedPart.state.output
+            : undefined,
         ).toBe(output)
         expect(Option.isSome(match) ? match.value.parts.some((part) => part.id === hiddenPartID) : true).toBe(false)
         // 命中返回完整值，持久冷态由显式展开或执行窗口预热改变。
@@ -1169,7 +1229,11 @@ describe("MessageV2.filterCompacted", () => {
         const next = yield* addUser(sessionID, "next request")
 
         // 普通 anchor 隐藏仍可定位 tail；撤销的是整次 Compaction 时才恢复旧历史。
-        expect((yield* MessageV2.filterCompactedEffect(sessionID)).map((item) => item.info.id)).toEqual([compact, summary, next])
+        expect((yield* MessageV2.filterCompactedEffect(sessionID)).map((item) => item.info.id)).toEqual([
+          compact,
+          summary,
+          next,
+        ])
         for (const id of [compact, summary]) {
           const message = yield* MessageV2.get({ sessionID, messageID: id })
           yield* session.updateMessage({ ...message.info, hidden: { time: Date.now(), reason: "undo" } })
@@ -1179,7 +1243,11 @@ describe("MessageV2.filterCompacted", () => {
 
         // DB 预裁剪与纯过滤必须一致，否则后续压缩仍可能沿用被撤销的边界。
         expect(result.map((item) => item.info.id)).toEqual([old, oldReply, next])
-        expect(MessageV2.filterCompacted(yield* MessageV2.stream(sessionID, { includeHidden: true })).map((item) => item.info.id)).toEqual([old, oldReply, next])
+        expect(
+          MessageV2.filterCompacted(yield* MessageV2.stream(sessionID, { includeHidden: true })).map(
+            (item) => item.info.id,
+          ),
+        ).toEqual([old, oldReply, next])
       }),
     ),
   )

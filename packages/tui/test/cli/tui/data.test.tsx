@@ -21,11 +21,16 @@ function InitializedDataProvider(props: ParentProps<{ initialRoute?: Route }>) {
   })
   // 在真实 provider 外等待初始化，不放宽 shouldDeliverScopedEvent 的隔离条件。
   // 与生产App顺序一致，Route在Data外层；测试不依赖可选context或生产fallback。
-  return <RouteProvider initialRoute={props.initialRoute}><Show when={ready()}><DataProvider>{props.children}</DataProvider></Show></RouteProvider>
+  return (
+    <RouteProvider initialRoute={props.initialRoute}>
+      <Show when={ready()}>
+        <DataProvider>{props.children}</DataProvider>
+      </Show>
+    </RouteProvider>
+  )
 }
 
 // 目录端点属于 project.sync 的真实依赖，fixture 不能遗漏后再绕过初始化。
-
 
 async function wait(fn: () => boolean, timeout = 2000) {
   // #296：单调时钟防墙钟跳变——同源 sdk.test.tsx 修复迁移到目标 helper owner
@@ -84,7 +89,11 @@ test("refreshes resources into reactive getters", async () => {
 
   const app = await testRender(() => (
     <TestTuiContexts>
-      <SDKProvider url="http://test" directory={directory} testTransport={{ events: events.source, fetch: calls.fetch }}>
+      <SDKProvider
+        url="http://test"
+        directory={directory}
+        testTransport={{ events: events.source, fetch: calls.fetch }}
+      >
         <ProjectProvider>
           <InitializedDataProvider>
             <Probe />
@@ -153,7 +162,11 @@ test("refreshes integrations after integration updates", async () => {
 
   const app = await testRender(() => (
     <TestTuiContexts>
-      <SDKProvider url="http://test" directory={directory} testTransport={{ events: events.source, fetch: calls.fetch }}>
+      <SDKProvider
+        url="http://test"
+        directory={directory}
+        testTransport={{ events: events.source, fetch: calls.fetch }}
+      >
         <ProjectProvider>
           <InitializedDataProvider>
             <Probe />
@@ -194,7 +207,11 @@ test("refreshes effective catalog data after catalog updates", async () => {
 
   const app = await testRender(() => (
     <TestTuiContexts>
-      <SDKProvider url="http://test" directory={directory} testTransport={{ events: events.source, fetch: calls.fetch }}>
+      <SDKProvider
+        url="http://test"
+        directory={directory}
+        testTransport={{ events: events.source, fetch: calls.fetch }}
+      >
         <ProjectProvider>
           <InitializedDataProvider>
             <box />
@@ -239,7 +256,11 @@ test("refreshes references after updates", async () => {
 
   const app = await testRender(() => (
     <TestTuiContexts>
-      <SDKProvider url="http://test" directory={directory} testTransport={{ events: events.source, fetch: calls.fetch }}>
+      <SDKProvider
+        url="http://test"
+        directory={directory}
+        testTransport={{ events: events.source, fetch: calls.fetch }}
+      >
         <ProjectProvider>
           <InitializedDataProvider>
             <Probe />
@@ -263,7 +284,7 @@ test("refreshes references after updates", async () => {
 test("settles pending tools when a live failure arrives", async () => {
   const events = createEventSource()
   const calls = createFetch(
-    (url) => url.pathname === "/api/session/session-1/message" ? json({ data: [], cursor: {} }) : undefined,
+    (url) => (url.pathname === "/api/session/session-1/message" ? json({ data: [], cursor: {} }) : undefined),
     events,
   )
   let sync!: ReturnType<typeof useData>
@@ -280,7 +301,11 @@ test("settles pending tools when a live failure arrives", async () => {
 
   const app = await testRender(() => (
     <TestTuiContexts>
-      <SDKProvider url="http://test" directory={directory} testTransport={{ events: events.source, fetch: calls.fetch }}>
+      <SDKProvider
+        url="http://test"
+        directory={directory}
+        testTransport={{ events: events.source, fetch: calls.fetch }}
+      >
         <ProjectProvider>
           <InitializedDataProvider>
             <Probe />
@@ -396,7 +421,7 @@ test("settles pending tools when a live failure arrives", async () => {
 test("renders admitted prompts only after they become model-visible", async () => {
   const events = createEventSource()
   const calls = createFetch(
-    (url) => url.pathname === "/api/session/session-1/message" ? json({ data: [], cursor: {} }) : undefined,
+    (url) => (url.pathname === "/api/session/session-1/message" ? json({ data: [], cursor: {} }) : undefined),
     events,
   )
   let sync!: ReturnType<typeof useData>
@@ -413,7 +438,11 @@ test("renders admitted prompts only after they become model-visible", async () =
 
   const app = await testRender(() => (
     <TestTuiContexts>
-      <SDKProvider url="http://test" directory={directory} testTransport={{ events: events.source, fetch: calls.fetch }}>
+      <SDKProvider
+        url="http://test"
+        directory={directory}
+        testTransport={{ events: events.source, fetch: calls.fetch }}
+      >
         <ProjectProvider>
           <InitializedDataProvider>
             <Probe />
@@ -464,7 +493,7 @@ test("renders admitted prompts only after they become model-visible", async () =
 test("projects live context updates with their message ID", async () => {
   const events = createEventSource()
   const calls = createFetch(
-    (url) => url.pathname === "/api/session/session-1/message" ? json({ data: [], cursor: {} }) : undefined,
+    (url) => (url.pathname === "/api/session/session-1/message" ? json({ data: [], cursor: {} }) : undefined),
     events,
   )
   let sync!: ReturnType<typeof useData>
@@ -481,7 +510,11 @@ test("projects live context updates with their message ID", async () => {
 
   const app = await testRender(() => (
     <TestTuiContexts>
-      <SDKProvider url="http://test" directory={directory} testTransport={{ events: events.source, fetch: calls.fetch }}>
+      <SDKProvider
+        url="http://test"
+        directory={directory}
+        testTransport={{ events: events.source, fetch: calls.fetch }}
+      >
         <ProjectProvider>
           <InitializedDataProvider initialRoute={{ type: "session", sessionID: "session-1" }}>
             <Probe />
@@ -495,26 +528,34 @@ test("projects live context updates with their message ID", async () => {
     await mounted
     await sync.session.message.refresh("session-1")
     // 同一事件流的已加载消息作屏障：不能因广播先到就为无人使用的Session创建正文桶。
-    emitEvent(events, {
-      id: "evt_context_unloaded",
-      type: "session.next.context.updated",
-      properties: {
-        sessionID: "session-unloaded",
-        messageID: "msg_context_unloaded",
-        timestamp: 1,
-        text: "unloaded context".repeat(65536),
+    emitEvent(
+      events,
+      {
+        id: "evt_context_unloaded",
+        type: "session.next.context.updated",
+        properties: {
+          sessionID: "session-unloaded",
+          messageID: "msg_context_unloaded",
+          timestamp: 1,
+          text: "unloaded context".repeat(65536),
+        },
       },
-    }, "proj_session_owner")
-    emitEvent(events, {
-      id: "evt_context_1",
-      type: "session.next.context.updated",
-      properties: {
-        sessionID: "session-1",
-        messageID: "msg_context_1",
-        timestamp: 1,
-        text: "Updated context",
+      "proj_session_owner",
+    )
+    emitEvent(
+      events,
+      {
+        id: "evt_context_1",
+        type: "session.next.context.updated",
+        properties: {
+          sessionID: "session-1",
+          messageID: "msg_context_1",
+          timestamp: 1,
+          text: "Updated context",
+        },
       },
-    }, "proj_session_owner")
+      "proj_session_owner",
+    )
 
     await wait(() => sync.session.message.list("session-1")?.length === 1)
     expect(sync.session.message.list("session-unloaded")).toBeUndefined()

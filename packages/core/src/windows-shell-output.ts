@@ -433,7 +433,8 @@ export function openRemote(command: StandardCommand, opts: { cwd?: string; env?:
   // 其它形态不在支持域内，显式报错而不是在跨进程边界静默改变语义。
   if (options.stdin !== undefined && options.stdin !== "ignore")
     throw new Error("marked shell commands require stdin to be ignored")
-  if (options.shell !== undefined && options.shell !== false) throw new Error("marked shell commands do not use a shell wrapper")
+  if (options.shell !== undefined && options.shell !== false)
+    throw new Error("marked shell commands do not use a shell wrapper")
   if (options.additionalFds !== undefined)
     throw new Error("marked shell commands do not carry additional file descriptors")
   const commandEnv = opts.env

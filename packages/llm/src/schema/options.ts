@@ -69,7 +69,7 @@ export const mergeHttpOptions = (...items: ReadonlyArray<HttpOptions | undefined
   const body = mergeJsonRecords(...items.map((item) => item?.body))
   const headers = mergeStringRecords(...items.map((item) => item?.headers))
   const query = mergeStringRecords(...items.map((item) => item?.query))
-  const chunkTimeout = items.findLast(item => item?.chunkTimeout !== undefined)?.chunkTimeout
+  const chunkTimeout = items.findLast((item) => item?.chunkTimeout !== undefined)?.chunkTimeout
   if (!body && !headers && !query && chunkTimeout === undefined) return undefined
   return new HttpOptions({ body, headers, query, chunkTimeout })
 }

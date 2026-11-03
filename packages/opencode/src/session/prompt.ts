@@ -111,7 +111,12 @@ function deriveGoalTurn(
     })
     // caller 可以自选 MessageID，因此 chronology 必须先看持久化时间；ID 只处理同毫秒 tie。
     // #0584：tie 复用 SQLite BINARY 的 UTF-8 字节序，不再用 JS locale 字典序。
-    .toSorted((a, b) => MessageV2.compareChronology({ id: a.id, time: { created: a.created } }, { id: b.id, time: { created: b.created } }))
+    .toSorted((a, b) =>
+      MessageV2.compareChronology(
+        { id: a.id, time: { created: a.created } },
+        { id: b.id, time: { created: b.created } },
+      ),
+    )
   const current = turns.at(-1)
   if (!current) return
   // turns 已经只含 canonical source，因此相邻两项就是 distinct eligible turns；
@@ -266,7 +271,6 @@ export function disabledToolNotice(
   return `<system-reminder>${notices.join("\n")}</system-reminder>`
 }
 
-
 export interface Interface {
   readonly cancel: (sessionID: SessionID) => Effect.Effect<void>
   readonly prompt: (input: PromptInput) => Effect.Effect<SessionV1.WithParts, Image.Error>
@@ -349,21 +353,31 @@ const layer = Layer.effect(
             // pending与queued孤儿身份从同次读取冻结，旧cancel不得重新扫描replacement请求。
             // 只读 hot 定位，已完成助手的冷 Tool 不因取消而持久预热；后续仍沿现有逐 ID 收尾 owner。
             // 隐藏只改变展示，不撤销旧消息上的执行权与计费责任。
-            const snapshot = yield* MessageV2.cancelSnapshot(sessionID, { includeHidden: true }).pipe(Effect.provideService(Database.Service, database))
+            const snapshot = yield* MessageV2.cancelSnapshot(sessionID, { includeHidden: true }).pipe(
+              Effect.provideService(Database.Service, database),
+            )
             const pending = snapshot.pendingAssistantIDs
             const orphanIDs = snapshot.orphanUserIDs
             yield* state.cancel(sessionID)
-            yield* Effect.forEach(pending, (messageID) => abortPendingAssistant(sessionID, messageID).pipe(Effect.ignore), {
-              discard: true,
-            })
+            yield* Effect.forEach(
+              pending,
+              (messageID) => abortPendingAssistant(sessionID, messageID).pipe(Effect.ignore),
+              {
+                discard: true,
+              },
+            )
             const usage = Option.getOrUndefined(yield* Effect.serviceOption(SessionRequestUsage.Service))
             if (usage) {
-              yield* Effect.forEach(orphanIDs, Effect.fnUntraced(function* (requestID) {
-                const request = yield* usage.get({ sessionID, requestID })
-                // noReply或已完成请求仍可能没有assistant，只有running项属于待取消队列。
-                if (request?.status !== "running") return
-                yield* usage.complete({ sessionID, requestID, status: "aborted", timeCompleted: Date.now() })
-              }), { discard: true })
+              yield* Effect.forEach(
+                orphanIDs,
+                Effect.fnUntraced(function* (requestID) {
+                  const request = yield* usage.get({ sessionID, requestID })
+                  // noReply或已完成请求仍可能没有assistant，只有running项属于待取消队列。
+                  if (request?.status !== "running") return
+                  yield* usage.complete({ sessionID, requestID, status: "aborted", timeCompleted: Date.now() })
+                }),
+                { discard: true },
+              )
             }
             yield* Effect.forEach(children, (child) => cancel(child.id), { discard: true })
           }),
@@ -379,7 +393,10 @@ const layer = Layer.effect(
       }),
     )
 
-    const abortPendingAssistant = Effect.fn("SessionPrompt.abortPendingAssistant")(function* (sessionID: SessionID, messageID: MessageID) {
+    const abortPendingAssistant = Effect.fn("SessionPrompt.abortPendingAssistant")(function* (
+      sessionID: SessionID,
+      messageID: MessageID,
+    ) {
       // 仅重读冻结 ID 的最新快照，processor/ownAssistant 的终态不得被取消前的旧对象覆盖。
       const match = yield* MessageV2.get({ sessionID, messageID, includeHidden: true }).pipe(
         Effect.provideService(Database.Service, database),
@@ -407,25 +424,34 @@ const layer = Layer.effect(
           const start = part.state.status === "running" ? part.state.time.start : now
           // 重读 parts 保留运行时已提交的 input 与 metadata，不使用取消前的工具快照。
           // 退出发布沿用同一 durable part 事件，跳过可能阻塞的普通 listener，实时流仍收到终态。
-          return events.publish(SessionV1.Event.PartUpdated, {
-            sessionID,
-            time: now,
-            part: structuredClone({
-              ...part,
-              state: {
-                status: "error",
-                input: part.state.input,
-                // #216：空闲修复与活动processor共用中止信封，reviewing必须变成aborted。
-                error: SessionProcessor.TOOL_ABORTED_ERROR,
-                metadata: SessionProcessor.interruptedToolMetadata(part.state.status === "running" ? part.state.metadata : undefined, now - start),
-                // pending 尚无真实 start，使用取消时刻；running 的计时起点保持不变。
-                time: {
-                  start,
-                  end: now,
-                },
+          return events
+            .publish(
+              SessionV1.Event.PartUpdated,
+              {
+                sessionID,
+                time: now,
+                part: structuredClone({
+                  ...part,
+                  state: {
+                    status: "error",
+                    input: part.state.input,
+                    // #216：空闲修复与活动processor共用中止信封，reviewing必须变成aborted。
+                    error: SessionProcessor.TOOL_ABORTED_ERROR,
+                    metadata: SessionProcessor.interruptedToolMetadata(
+                      part.state.status === "running" ? part.state.metadata : undefined,
+                      now - start,
+                    ),
+                    // pending 尚无真实 start，使用取消时刻；running 的计时起点保持不变。
+                    time: {
+                      start,
+                      end: now,
+                    },
+                  },
+                } satisfies SessionV1.ToolPart),
               },
-            } satisfies SessionV1.ToolPart),
-          }, { finalizer: true }).pipe(Effect.asVoid, Effect.uninterruptible)
+              { finalizer: true },
+            )
+            .pipe(Effect.asVoid, Effect.uninterruptible)
         },
         { discard: true },
       )
@@ -617,11 +643,7 @@ const layer = Layer.effect(
           callID: part.callID,
           extra: { bypassAgentCheck: true, promptOps },
           messages: msgs,
-          metadata: (val: {
-            title?: string
-            metadata?: Record<string, any>
-            delivery?: "durable" | "ephemeral"
-          }) =>
+          metadata: (val: { title?: string; metadata?: Record<string, any>; delivery?: "durable" | "ephemeral" }) =>
             Effect.gen(function* () {
               // delivery 是传输指令不是 ToolState 字段；混入会让进度快照污染持久化 metadata。
               const { delivery, ...rest } = val
@@ -644,45 +666,44 @@ const layer = Layer.effect(
                 // 审计元数据也必须用父 agent 名，与 Path A 的
                 // metadata.agent: input.agent.name 保持一致
                 metadata: { ...req.metadata, agent: lastUser.agent },
-        // #230：prompt 适配层统一写入 agent 标识——工具实现无需各自复制 ctx.agent
+                // #230：prompt 适配层统一写入 agent 标识——工具实现无需各自复制 ctx.agent
                 sessionID,
                 ruleset: Permission.merge(taskAgent.permission, session.permission ?? []),
               })
               .pipe(Effect.orDie),
         })
-      })
-        .pipe(
-          Effect.catchCause((cause) => {
-            const defect = Cause.squash(cause)
-            error = defect instanceof Error ? defect : new Error(String(defect))
-            // #139：setup/execute 失败路径写入 error，供后续 terminalize
-            return Effect.logError("subtask execution failed", {
-              error,
-              agent: task.agent,
-              description: task.description,
-            })
+      }).pipe(
+        Effect.catchCause((cause) => {
+          const defect = Cause.squash(cause)
+          error = defect instanceof Error ? defect : new Error(String(defect))
+          // #139：setup/execute 失败路径写入 error，供后续 terminalize
+          return Effect.logError("subtask execution failed", {
+            error,
+            agent: task.agent,
+            description: task.description,
+          })
+        }),
+        Effect.onInterrupt(() =>
+          Effect.gen(function* () {
+            taskAbort.abort()
+            assistantMessage.finish = "tool-calls"
+            assistantMessage.time.completed = Date.now()
+            yield* sessions.updateMessage(assistantMessage)
+            if (part.state.status === "running") {
+              yield* sessions.updatePart({
+                ...part,
+                state: {
+                  status: "error",
+                  error: "Cancelled",
+                  time: { start: part.state.time.start, end: Date.now() },
+                  metadata: part.state.metadata,
+                  input: part.state.input,
+                },
+              } satisfies SessionV1.ToolPart)
+            }
           }),
-          Effect.onInterrupt(() =>
-            Effect.gen(function* () {
-              taskAbort.abort()
-              assistantMessage.finish = "tool-calls"
-              assistantMessage.time.completed = Date.now()
-              yield* sessions.updateMessage(assistantMessage)
-              if (part.state.status === "running") {
-                yield* sessions.updatePart({
-                  ...part,
-                  state: {
-                    status: "error",
-                    error: "Cancelled",
-                    time: { start: part.state.time.start, end: Date.now() },
-                    metadata: part.state.metadata,
-                    input: part.state.input,
-                  },
-                } satisfies SessionV1.ToolPart)
-              }
-            }),
-          ),
-        )
+        ),
+      )
 
       const attachments = result?.attachments?.map((attachment) => ({
         ...attachment,
@@ -792,7 +813,16 @@ const layer = Layer.effect(
             // shell 用户消息已解析模型与 agent，不能再次用输入默认值覆盖实际保存的身份。
             const shellReqUsage = Option.getOrUndefined(yield* Effect.serviceOption(SessionRequestUsage.Service))
             if (shellReqUsage) {
-              yield* shellReqUsage.begin({ sessionID: input.sessionID, requestID: userMsg.id, rootRequestID: userMsg.id, source: "shell", agent: userMsg.agent, providerID: userMsg.model.providerID, modelID: userMsg.model.modelID, timeCreated: userMsg.time.created })
+              yield* shellReqUsage.begin({
+                sessionID: input.sessionID,
+                requestID: userMsg.id,
+                rootRequestID: userMsg.id,
+                source: "shell",
+                agent: userMsg.agent,
+                providerID: userMsg.model.providerID,
+                modelID: userMsg.model.modelID,
+                timeCreated: userMsg.time.created,
+              })
             }
             const userPart: SessionV1.Part = {
               type: "text",
@@ -856,7 +886,9 @@ const layer = Layer.effect(
               if (aborted) {
                 // #282：prompt.shell 不经过 ShellTool 的收尾格式化；这里必须直接写入
                 // 同一种 notice，保证取消路径不会重新引入旧的 <metadata> 包裹。
-                modelOutput += "\n\n" + formatExecutionNotice({ severity: "warning", reason: "user_abort", elapsed_ms: shellElapsedMs })
+                modelOutput +=
+                  "\n\n" +
+                  formatExecutionNotice({ severity: "warning", reason: "user_abort", elapsed_ms: shellElapsedMs })
               } else {
                 // [local-smark] direct shell 长成功：非 abort 且达到阈值时追加 completed Notice，
                 // 与 Bash 工具的 formatShellExecutionNotice 阈值/措辞保持一致
@@ -913,10 +945,12 @@ const layer = Layer.effect(
                 },
                 durable: (metadata) => {
                   if (part.state.status !== "running") return Effect.void
-                  return sessions.updatePart({
-                    ...part,
-                    state: { ...part.state, metadata },
-                  }).pipe(Effect.asVoid)
+                  return sessions
+                    .updatePart({
+                      ...part,
+                      state: { ...part.state, metadata },
+                    })
+                    .pipe(Effect.asVoid)
                 },
               })
               yield* Stream.runForEach(Stream.decodeText(handle.all), (chunk) =>
@@ -940,7 +974,12 @@ const layer = Layer.effect(
           // finish 已保存助手终态；shell 没有 step-finish，也必须区分中断、执行缺陷与成功。
           const shellCompleteUsage = Option.getOrUndefined(yield* Effect.serviceOption(SessionRequestUsage.Service))
           if (shellCompleteUsage) {
-            yield* shellCompleteUsage.complete({ sessionID: input.sessionID, requestID: msg.parentID, status: aborted ? "aborted" : Exit.isFailure(exit) ? "error" : "completed", timeCompleted: Date.now() })
+            yield* shellCompleteUsage.complete({
+              sessionID: input.sessionID,
+              requestID: msg.parentID,
+              status: aborted ? "aborted" : Exit.isFailure(exit) ? "error" : "completed",
+              timeCompleted: Date.now(),
+            })
           }
 
           if (Exit.isFailure(exit) && !aborted && !Cause.hasInterruptsOnly(exit.cause)) {
@@ -1432,10 +1471,18 @@ const layer = Layer.effect(
       // begin 位于用户消息保存之后，读取插件处理及默认模型解析后的真实消息描述。
       const reqUsage = Option.getOrUndefined(yield* Effect.serviceOption(SessionRequestUsage.Service))
       if (reqUsage) {
-        yield* reqUsage.begin({ sessionID: input.sessionID, requestID: message.info.id,
-        // 压缩调用传入原始请求根身份，其余请求以已保存用户消息为根，保留因果链。
-        rootRequestID: input.rootRequestID ?? message.info.id,
-        source: input.source ?? "prompt", agent: message.info.agent, providerID: message.info.model.providerID, modelID: message.info.model.modelID, variant: message.info.model.variant, timeCreated: message.info.time.created })
+        yield* reqUsage.begin({
+          sessionID: input.sessionID,
+          requestID: message.info.id,
+          // 压缩调用传入原始请求根身份，其余请求以已保存用户消息为根，保留因果链。
+          rootRequestID: input.rootRequestID ?? message.info.id,
+          source: input.source ?? "prompt",
+          agent: message.info.agent,
+          providerID: message.info.model.providerID,
+          modelID: message.info.model.modelID,
+          variant: message.info.model.variant,
+          timeCreated: message.info.time.created,
+        })
       }
       yield* sessions.touch(input.sessionID)
 
@@ -1475,8 +1522,13 @@ const layer = Layer.effect(
           if (MessageV2.compareChronology(message.info, parent.info) >= 0) return result
           // 不复制assistant账单；取消与provider失败分别保留aborted/error语义。
           yield* reqUsage.complete({
-            sessionID: input.sessionID, requestID: message.info.id,
-            status: SessionV1.AbortedError.isInstance(result.info.error) ? "aborted" : result.info.error ? "error" : "completed",
+            sessionID: input.sessionID,
+            requestID: message.info.id,
+            status: SessionV1.AbortedError.isInstance(result.info.error)
+              ? "aborted"
+              : result.info.error
+                ? "error"
+                : "completed",
             timeCompleted: result.info.time.completed,
           })
         }
@@ -1570,20 +1622,27 @@ const layer = Layer.effect(
         let requestID: MessageID | undefined
         let existingAssistantID: MessageID | undefined
         // 只在真实 work fiber 结算；加入同一 runner 的调用方取消不能替它关闭请求。
-        yield* Effect.addFinalizer((exit) => Effect.gen(function* () {
-          const id = requestID
-          if (Exit.isSuccess(exit) || id === undefined) return
-          const usage = Option.getOrUndefined(yield* Effect.serviceOption(SessionRequestUsage.Service))
-          if (!usage) return
-          const request = yield* usage.get({ sessionID, requestID: id })
-          if (!request || request.assistantCount !== 0 || request.status !== "running") return
-          // 旧助手身份在准备前冻结；新助手与账本同事务创建，无需退出时扫描历史。
-          if (existingAssistantID !== undefined) return
-          const failure = Cause.squash(exit.cause)
-          // complete 仅闭合冻结的请求；原 cause 继续退出，确认消费和根身份均不改。
-          yield* usage.complete({ sessionID, requestID: id, status: Cause.hasInterrupts(exit.cause) ? "aborted" : "error",
-            error: failure instanceof Error ? failure.message : String(failure), timeCompleted: Date.now() })
-        }))
+        yield* Effect.addFinalizer((exit) =>
+          Effect.gen(function* () {
+            const id = requestID
+            if (Exit.isSuccess(exit) || id === undefined) return
+            const usage = Option.getOrUndefined(yield* Effect.serviceOption(SessionRequestUsage.Service))
+            if (!usage) return
+            const request = yield* usage.get({ sessionID, requestID: id })
+            if (!request || request.assistantCount !== 0 || request.status !== "running") return
+            // 旧助手身份在准备前冻结；新助手与账本同事务创建，无需退出时扫描历史。
+            if (existingAssistantID !== undefined) return
+            const failure = Cause.squash(exit.cause)
+            // complete 仅闭合冻结的请求；原 cause 继续退出，确认消费和根身份均不改。
+            yield* usage.complete({
+              sessionID,
+              requestID: id,
+              status: Cause.hasInterrupts(exit.cause) ? "aborted" : "error",
+              error: failure instanceof Error ? failure.message : String(failure),
+              timeCompleted: Date.now(),
+            })
+          }),
+        )
         const ctx = yield* InstanceState.context
         let structured: unknown
         let step = 0
@@ -1626,10 +1685,7 @@ const layer = Layer.effect(
             Effect.provideService(Database.Service, database),
           )
           const slotEntry = PromptWindowCache.read(promptCache, sessionID)
-          const cached =
-            slotEntry?.proof.boundary === proof.boundary
-              ? slotEntry
-              : undefined
+          const cached = slotEntry?.proof.boundary === proof.boundary ? slotEntry : undefined
           // common prefix 覆盖 full hit、append、原地 mutation 与 A-G→A-E contraction；首个 key 不同即停。
           const common = cached
             ? proof.messages.findIndex((item, index) => item.key !== cached.proof.messages[index]?.key)
@@ -1648,13 +1704,10 @@ const layer = Layer.effect(
                     )
                   : []),
               ])
-            : yield* MessageV2.filterCompactedEffect(sessionID).pipe(
-                Effect.provideService(Database.Service, database),
-              )
+            : yield* MessageV2.filterCompactedEffect(sessionID).pipe(Effect.provideService(Database.Service, database))
           // 缓存suffix命中也经最终窗口owner，不只在全量cache miss时预热。
-          if (cached) yield* MessageV2.warmExecutionWindow(canonical).pipe(
-            Effect.provideService(Database.Service, database),
-          )
+          if (cached)
+            yield* MessageV2.warmExecutionWindow(canonical).pipe(Effect.provideService(Database.Service, database))
           let msgs = canonical
 
           const { user: lastUser, assistant: lastAssistant, finished: lastFinished, tasks } = MessageV2.latest(msgs)
@@ -1669,8 +1722,8 @@ const layer = Layer.effect(
             canonical,
             chunks:
               cached?.model === modelKey
-                // 只保留 exact matched IDs 的 chunks，mutation suffix 不得沿用旧转换。
-                ? new Map([...cached.chunks].filter(([id]) => matchedIDs.has(id)))
+                ? // 只保留 exact matched IDs 的 chunks，mutation suffix 不得沿用旧转换。
+                  new Map([...cached.chunks].filter(([id]) => matchedIDs.has(id)))
                 : new Map(),
             instance,
           }
@@ -1731,8 +1784,7 @@ const layer = Layer.effect(
             lastAssistant?.error !== undefined &&
             lastAssistant.id === terminalError.assistantID &&
             lastAssistant.parentID === lastUser.id &&
-            (SessionV1.APIError.isInstance(lastAssistant.error) ||
-              NamedError.Unknown.isInstance(lastAssistant.error))
+            (SessionV1.APIError.isInstance(lastAssistant.error) || NamedError.Unknown.isInstance(lastAssistant.error))
 
           if (normalCompletion || errorCompletion) {
             // 仅本轮获准错误跳过旧错误退出，不能把一般错误重新送入模型。
@@ -1762,11 +1814,7 @@ const layer = Layer.effect(
             // 长程督促与续跑上限在同一处定义：超过八次才附加提示，不改变 replan 判断。
             const GOAL_LONG_RUN_TURN_THRESHOLD = 8
             // [0386] 默认 32 轮：与 config schema description 同源；源提交本即 32
-            if (
-              maxGoalTurns > 0 &&
-              !session.parentID &&
-              goalTurns < maxGoalTurns
-            ) {
+            if (maxGoalTurns > 0 && !session.parentID && goalTurns < maxGoalTurns) {
               const goalOpt = yield* goalSvc.get(sessionID).pipe(Effect.orDie)
               if (goalOpt._tag === "Some") {
                 const goal = goalOpt.value
@@ -1787,9 +1835,13 @@ const layer = Layer.effect(
                   goalTurns++
                   // #517：先吸收本轮 structured tool/patch 证据，再决定 ordinary/replan 文案；
                   // 判断发生在 synthetic message 写入前，避免当前 continuation 反向污染自己。
-                  const signal = SessionGoalProgress.absorbGoalTurnEvidence(msgs
-                    .filter((message) => message.info.role === "assistant" && message.info.parentID === lastUser.id)
-                    .map((message) => message.parts.filter((part) => part.type === "tool" || part.type === "patch")), ctx.directory, goalProgressLedger)
+                  const signal = SessionGoalProgress.absorbGoalTurnEvidence(
+                    msgs
+                      .filter((message) => message.info.role === "assistant" && message.info.parentID === lastUser.id)
+                      .map((message) => message.parts.filter((part) => part.type === "tool" || part.type === "patch")),
+                    ctx.directory,
+                    goalProgressLedger,
+                  )
                   SessionGoalProgress.updateGoalProgressGate(goalProgressGate, signal)
                   // ctx.directory 与真实 search producer 共用 instance 根目录，保证 scope identity 一致。
                   const continuationMode: SessionGoal.ContinuationMode = goalProgressGate.replanRequired
@@ -1845,7 +1897,11 @@ const layer = Layer.effect(
                           // #520：max 来自本次 runLoop 已采用的配置，与 turn 共享同一 reset 边界。
                           goal_continuation_max_turns: maxGoalTurns,
                         },
-                        text: SessionGoal.continuationPrompt(goal, continuationMode, goalTurns > GOAL_LONG_RUN_TURN_THRESHOLD),
+                        text: SessionGoal.continuationPrompt(
+                          goal,
+                          continuationMode,
+                          goalTurns > GOAL_LONG_RUN_TURN_THRESHOLD,
+                        ),
                       },
                     ],
                   }).pipe(Effect.orDie)
@@ -1998,12 +2054,11 @@ const layer = Layer.effect(
           own(msg)
           // 首笔快照由真实prepared回调原子提交；更早的失败沿已有owner闭合账本，不制造零用量助手。
 
-          const handle = yield* processor
-            .create({
-              assistantMessage: msg,
-              sessionID,
-              model,
-            })
+          const handle = yield* processor.create({
+            assistantMessage: msg,
+            sessionID,
+            model,
+          })
 
           // [local-smark] outcome 增加 "terminal-error"：仅 eligible 错误返回此值
           const outcome: "break" | "continue" | "terminal-error" = yield* Effect.gen(function* () {
@@ -2079,7 +2134,7 @@ const layer = Layer.effect(
 
             // decide 跳过 skills/MCP 指令，只保留 env + instructions
             // canonical在插件改写前已捕获，epoch不把临时wire裁剪当作持久历史删除。
-            const epochHistory = { boundary: proof.boundary, messageIDs: canonical.map(message => message.info.id) }
+            const epochHistory = { boundary: proof.boundary, messageIDs: canonical.map((message) => message.info.id) }
             const [skills, env, instructions, mcpInstructions] = yield* Effect.all([
               decide ? Effect.succeed(undefined) : sys.skills(agent),
               sys.environment({ sessionID, model, history: epochHistory }).pipe(Effect.orDie),
@@ -2095,18 +2150,31 @@ const layer = Layer.effect(
             const format = lastUser.format ?? { type: "text" as const }
             if (format.type === "json_schema") system.push(STRUCTURED_OUTPUT_SYSTEM_PROMPT)
             // 只选择发送窗口，原始历史和 prepared 统计仍由各自 owner 管理。
-            const systemText = [(agent.prompt ? [agent.prompt] : SystemPrompt.provider(model)).join("\n"), ...system, lastUser.system ?? ""].join("\n")
+            const systemText = [
+              (agent.prompt ? [agent.prompt] : SystemPrompt.provider(model)).join("\n"),
+              ...system,
+              lastUser.system ?? "",
+            ].join("\n")
             // Anthropic不接纳历史中部system消息；只在wire投影为user reminder，不修改真实用户身份。
-            const reminderMessage = (text: string) => ({ role: "user", content: `<system-reminder>\n${text}\n</system-reminder>` } satisfies ModelMessage)
-            const contextReminders = env.updates.map(update => reminderMessage(update.message.text).content)
+            const reminderMessage = (text: string) =>
+              ({ role: "user", content: `<system-reminder>\n${text}\n</system-reminder>` }) satisfies ModelMessage
+            const contextReminders = env.updates.map((update) => reminderMessage(update.message.text).content)
             const requestMsgs = decide
-              ? yield* selectDecideMessages({ messages: msgs, model, systemText, contextReminders: contextReminders.join("\n") })
+              ? yield* selectDecideMessages({
+                  messages: msgs,
+                  model,
+                  systemText,
+                  contextReminders: contextReminders.join("\n"),
+                })
               : msgs
             const before = new Map<MessageID, ModelMessage[]>()
             const after = new Map<MessageID, ModelMessage[]>()
             const end: ModelMessage[] = []
-            for (const projected of SessionContextEpoch.projectUpdates({ updates: env.updates,
-              canonicalIDs: epochHistory.messageIDs, retainedIDs: new Set(requestMsgs.map(message => message.info.id)) })) {
+            for (const projected of SessionContextEpoch.projectUpdates({
+              updates: env.updates,
+              canonicalIDs: epochHistory.messageIDs,
+              retainedIDs: new Set(requestMsgs.map((message) => message.info.id)),
+            })) {
               const message = reminderMessage(projected.text)
               if (projected.placement.type === "before") {
                 before.set(projected.placement.id, [...(before.get(projected.placement.id) ?? []), message])
@@ -2140,19 +2208,27 @@ const layer = Layer.effect(
                 })
             // 按完整转换块插入，不能拆开tool-call/result；稳定块继续复用原缓存。
             const modelMsgs = requestMsgs.flatMap((message, index) => [
-              ...(before.get(message.info.id) ?? []), ...(blocks[index] ?? []), ...(after.get(message.info.id) ?? []),
+              ...(before.get(message.info.id) ?? []),
+              ...(blocks[index] ?? []),
+              ...(after.get(message.info.id) ?? []),
             ])
             modelMsgs.push(...end)
             // 复用上一轮真实 prepared 快照作轻量预警；本轮硬溢出仍由 processor 的唯一准备入口判断。
             if (!isLastStep) {
-              const prior = msgs.findLast(message => message.info.role === "assistant" && message.info.inputEstimate)?.info
-              const estimatedInput = prior?.role === "assistant" ? prior.inputEstimate?.input ?? 0 : 0
+              const prior = msgs.findLast(
+                (message) => message.info.role === "assistant" && message.info.inputEstimate,
+              )?.info
+              const estimatedInput = prior?.role === "assistant" ? (prior.inputEstimate?.input ?? 0) : 0
               const usableTokens = usable({ cfg: yield* config.get(), model })
               // 模型切换导致占比降低或无上限时复位，下次达到85%可重新提示。
               const threshold = usableTokens > 0 ? Math.floor(usableTokens * 0.85) : 0
               if (usableTokens > 0 && estimatedInput >= threshold) {
                 if (!nearOverflowNotified) {
-                  modelMsgs.push({ role: "user", content: "Context is approaching the model's limit. To avoid context compaction degrading task quality, prefer targeted reads (small offset/limit) over full-file reads, and narrow grep patterns over broad searches. Do not reduce response quality. If work is still in progress, ignore this and continue per user instructions." })
+                  modelMsgs.push({
+                    role: "user",
+                    content:
+                      "Context is approaching the model's limit. To avoid context compaction degrading task quality, prefer targeted reads (small offset/limit) over full-file reads, and narrow grep patterns over broad searches. Do not reduce response quality. If work is still in progress, ignore this and continue per user instructions.",
+                  })
                   nearOverflowNotified = true
                 }
               } else {
@@ -2174,8 +2250,8 @@ const layer = Layer.effect(
               // 只交付已有 source 的原文归属；字符与 token 仍在唯一 prepared 回调计算。
               inputSections: [
                 // 交付单条实际包装文本，由唯一prepared估算器从userText转入system，不另加字符总数。
-                ...contextReminders.map(text => ({ kind: "system" as const, text })),
-                ...instructions.map(text => ({ kind: "instructions" as const, text })),
+                ...contextReminders.map((text) => ({ kind: "system" as const, text })),
+                ...instructions.map((text) => ({ kind: "instructions" as const, text })),
                 ...(lastUser.system ? [{ kind: "instructions" as const, text: lastUser.system }] : []),
                 ...(skills ? [{ kind: "skills" as const, text: skills }] : []),
               ],
@@ -2192,14 +2268,19 @@ const layer = Layer.effect(
             // 在structured/stop/error/compact分支之前归账，保留已确认的最终消耗。
             if (expectedUsage && handle.message.tokens && handle.message.time.completed) {
               const tokenDelta =
-                handle.message.tokens.input +
-                handle.message.tokens.output +
-                handle.message.tokens.reasoning
-              const timeDelta = Math.max(0, Math.floor((handle.message.time.completed - handle.message.time.created) / 1000))
-              // 诊断数据库defect，不伪报计账成功，也不改写provider结果。
-              yield* goalSvc.accountUsage(sessionID, tokenDelta, timeDelta, expectedUsage).pipe(
-                Effect.catchDefect((defect) => Effect.logError("goal accountUsage defect", { defect: String(defect) })),
+                handle.message.tokens.input + handle.message.tokens.output + handle.message.tokens.reasoning
+              const timeDelta = Math.max(
+                0,
+                Math.floor((handle.message.time.completed - handle.message.time.created) / 1000),
               )
+              // 诊断数据库defect，不伪报计账成功，也不改写provider结果。
+              yield* goalSvc
+                .accountUsage(sessionID, tokenDelta, timeDelta, expectedUsage)
+                .pipe(
+                  Effect.catchDefect((defect) =>
+                    Effect.logError("goal accountUsage defect", { defect: String(defect) }),
+                  ),
+                )
             }
 
             if (structured !== undefined) {
@@ -2242,10 +2323,7 @@ const layer = Layer.effect(
               // APIError 覆盖 provider API 终止错误，UnknownError 覆盖
               // cyber_policy 等未分类错误
               const err = handle.message.error
-              if (
-                err &&
-                (SessionV1.APIError.isInstance(err) || NamedError.Unknown.isInstance(err))
-              ) {
+              if (err && (SessionV1.APIError.isInstance(err) || NamedError.Unknown.isInstance(err))) {
                 return "terminal-error" as const
               }
               return "break" as const
@@ -2264,9 +2342,7 @@ const layer = Layer.effect(
               if (compacted === "stop") return "break" as const
             }
             return "continue" as const
-          }).pipe(
-            Effect.ensuring(instruction.clear(handle.message.id)),
-          )
+          }).pipe(Effect.ensuring(instruction.clear(handle.message.id)))
           if (outcome === "break") break
           // 下一轮复用active/策略/agent/共享额度检查，不在错误分支重复调度。
           if (outcome === "terminal-error") {

@@ -1,10 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import {
-  convertToLineEnding,
-  detectLineEnding,
-  normalizeLineEndings,
-  splitLines,
-} from "../../src/util/line-ending"
+import { convertToLineEnding, detectLineEnding, normalizeLineEndings, splitLines } from "../../src/util/line-ending"
 
 // #131：行尾工具语义单测（CR/CRLF/LF）
 describe("line-ending", () => {

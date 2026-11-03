@@ -39,14 +39,25 @@ export const toolUsage = (ids: readonly string[]) => {
     ...(ids.includes("read") ? [" - To read files use the read tool instead of cat, head, tail, or sed"] : []),
     ...(ids.includes("edit") ? [" - To edit files use the edit tool instead of sed or awk"] : []),
     ...(ids.includes("write") ? [" - To create files use the write tool instead of echo redirection or heredoc"] : []),
-    ...(ids.includes("apply_patch") ? [" - To edit files use the apply_patch tool instead of shell text replacement"] : []),
+    ...(ids.includes("apply_patch")
+      ? [" - To edit files use the apply_patch tool instead of shell text replacement"]
+      : []),
     ...(ids.includes("grep") ? [" - To search file content use the grep tool instead of grep/rg"] : []),
     ...(ids.includes("glob") ? [" - To find files use the glob tool instead of find or ls"] : []),
     // Todo 工具也受当前 turn 权限约束，不能从静态提示推断其存在。
     // 状态规则归真实 todowrite 能力，不用不存在的 todo 别名触发。
-    ...(ids.includes("todowrite") ? ["# Task Management", "Use the todowrite tool for non-trivial multi-step work, explicit progress tracking, multiple requirements, and changed plans. Skip trivial or informational tasks. Keep items concrete and verifiable. Include required verification. Keep only one item in_progress; move it to in_progress before working, do not jump from pending to completed. Mark completed as soon as work and required verification finish; do not batch updates. Cancel irrelevant items and update the list when understanding changes before continuing implementation."] : []),
+    ...(ids.includes("todowrite")
+      ? [
+          "# Task Management",
+          "Use the todowrite tool for non-trivial multi-step work, explicit progress tracking, multiple requirements, and changed plans. Skip trivial or informational tasks. Keep items concrete and verifiable. Include required verification. Keep only one item in_progress; move it to in_progress before working, do not jump from pending to completed. Mark completed as soon as work and required verification finish; do not batch updates. Cancel irrelevant items and update the list when understanding changes before continuing implementation.",
+        ]
+      : []),
     // 通用 Windows 文件操作约束不猜测 shell，也不点名未广告的工具。
-    ...(process.platform === "win32" && ids.includes("bash") ? [" - On Windows, prefer available dedicated tools for file operations; use shell-native commands only when terminal execution is truly required."] : []),
+    ...(process.platform === "win32" && ids.includes("bash")
+      ? [
+          " - On Windows, prefer available dedicated tools for file operations; use shell-native commands only when terminal execution is truly required.",
+        ]
+      : []),
     // 终端操作结束后回到当前可用的专用工具，不因示例虚构被权限过滤的能力。
     " - Reserve bash for system commands and terminal operations requiring shell execution. After a bash operation (e.g. git, build), switch back to available dedicated tools for all subsequent file operations; do not chain grep, sed, cat, head, or tail inside bash when a dedicated tool can perform the same operation.",
     // 分段分隔是格式契约，避免指引紧贴前面的能力列表。
@@ -57,9 +68,13 @@ export const toolUsage = (ids: readonly string[]) => {
     ...(ids.includes("multi_tool_use.parallel") ? ["Use multi_tool_use.parallel for independent tool calls."] : []),
     "BATCH independent calls in the SAME response. Do not issue one discovery call at a time when several are already obvious.",
     // 示例必须受实际 glob 能力控制，不能让权限过滤后的请求虚构工具。
-    ...(ids.includes("glob") ? ['For directory surveys, use a wide first wave: glob("*"), glob("*/*"), glob("*/package.json"), glob("*/README*"), glob("*/src/*"), glob("*/packages/*"). BAD: one glob -> wait -> next glob. GOOD: one independent batch -> inspect results -> next independent batch.'] : []),
+    ...(ids.includes("glob")
+      ? [
+          'For directory surveys, use a wide first wave: glob("*"), glob("*/*"), glob("*/package.json"), glob("*/README*"), glob("*/src/*"), glob("*/packages/*"). BAD: one glob -> wait -> next glob. GOOD: one independent batch -> inspect results -> next independent batch.',
+        ]
+      : []),
     "After the first batch returns, identify newly relevant files and directories and issue the next independent batch together.",
-    "Never chain bash commands with separators like `echo \"====\";` to simulate grouped output, because it renders poorly for the user.",
+    'Never chain bash commands with separators like `echo "====";` to simulate grouped output, because it renders poorly for the user.',
     "Parallel writes are only appropriate when target files or edit ranges cannot conflict.",
     "For multiple changes in one file, prefer one edit/patch containing all non-overlapping changes.",
     "Sequential calls are ONLY for true dependencies, conflicts, or when the next target cannot be known without the previous result. Use bash only when dedicated tools are insufficient or real terminal execution is required.",
@@ -142,43 +157,66 @@ const builtIns = Layer.effectDiscard(
       return yield* Config.boolean("OPENCODE_DISABLE_GIT").pipe(Config.withDefault(false))
     }).pipe(Effect.orDie)
     // 所有命令固定在当前 Location；只读查询不应触发 Git 的可选索引写锁。
-    const run = (args: string[]) => proc.run(ChildProcess.make("git", ["--no-optional-locks", "-c", "core.quotepath=false", ...args], {
-      cwd: location.directory, extendEnv: true, stdin: "ignore",
-    })).pipe(
-      // 保留源补丁的字段级错误退化，同时忽略非零退出的错误输出。
-      Effect.map((result) => result.exitCode === 0 ? result.stdout.toString("utf8") : ""),
-      Effect.catch(() => Effect.succeed("")),
-    )
+    const run = (args: string[]) =>
+      proc
+        .run(
+          ChildProcess.make("git", ["--no-optional-locks", "-c", "core.quotepath=false", ...args], {
+            cwd: location.directory,
+            extendEnv: true,
+            stdin: "ignore",
+          }),
+        )
+        .pipe(
+          // 保留源补丁的字段级错误退化，同时忽略非零退出的错误输出。
+          Effect.map((result) => (result.exitCode === 0 ? result.stdout.toString("utf8") : "")),
+          Effect.catch(() => Effect.succeed("")),
+        )
     const gitContext = Effect.fn("SystemContextBuiltIns.git")(function* () {
       // 默认分支沿用源 Git 服务的本地判定顺序，不通过网络查询或改写 remote。
       const defaultBranch = Effect.gen(function* () {
         const remotes = (yield* run(["remote"])).trim().split(/\r?\n/).filter(Boolean)
         // 多 remote 时保留 origin / 单 remote / upstream / 首个 remote 的源优先级。
-        const remote = remotes.includes("origin") ? "origin" : remotes.length === 1 ? remotes[0] : remotes.includes("upstream") ? "upstream" : remotes[0]
+        const remote = remotes.includes("origin")
+          ? "origin"
+          : remotes.length === 1
+            ? remotes[0]
+            : remotes.includes("upstream")
+              ? "upstream"
+              : remotes[0]
         if (remote) {
           const head = (yield* run(["symbolic-ref", `refs/remotes/${remote}/HEAD`])).trim()
           if (head.startsWith(`refs/remotes/${remote}/`)) return head.slice(`refs/remotes/${remote}/`.length)
         }
         // 没有 remote HEAD 的本地仓库仍可能有明确默认分支，不能一律降为 unknown。
-        const branches = (yield* run(["for-each-ref", "--format=%(refname:short)", "refs/heads"])).trim().split(/\r?\n/).filter(Boolean)
+        const branches = (yield* run(["for-each-ref", "--format=%(refname:short)", "refs/heads"]))
+          .trim()
+          .split(/\r?\n/)
+          .filter(Boolean)
         const configured = (yield* run(["config", "init.defaultBranch"])).trim()
         if (configured && branches.includes(configured)) return configured
         return branches.includes("main") ? "main" : branches.includes("master") ? "master" : "unknown"
       })
       // 五个独立字段并行观察，使用同一 Location 的工作目录。
-      const [branch, main, user, status, log] = yield* Effect.all([
-        run(["symbolic-ref", "--quiet", "--short", "HEAD"]).pipe(Effect.map((text) => text.trim())),
-        defaultBranch,
-        run(["config", "user.name"]).pipe(Effect.map((text) => text.trim())),
-        // NUL 格式保留含空格文件名与双列状态；关闭 rename 保持源补丁 Item 语义。
-        run(["status", "--porcelain=v1", "--untracked-files=all", "--no-renames", "-z", "--", "."]).pipe(
-          Effect.map((text) => text.split("\0").filter(Boolean).join("\n")),
-        ),
-        // 限制日志条数而不是整块字符数，避免状态截断误伤最近提交。
-        run(["log", "--oneline", "-n", "5"]).pipe(Effect.map((text) => text.trim())),
-      ], { concurrency: 5 })
+      const [branch, main, user, status, log] = yield* Effect.all(
+        [
+          run(["symbolic-ref", "--quiet", "--short", "HEAD"]).pipe(Effect.map((text) => text.trim())),
+          defaultBranch,
+          run(["config", "user.name"]).pipe(Effect.map((text) => text.trim())),
+          // NUL 格式保留含空格文件名与双列状态；关闭 rename 保持源补丁 Item 语义。
+          run(["status", "--porcelain=v1", "--untracked-files=all", "--no-renames", "-z", "--", "."]).pipe(
+            Effect.map((text) => text.split("\0").filter(Boolean).join("\n")),
+          ),
+          // 限制日志条数而不是整块字符数，避免状态截断误伤最近提交。
+          run(["log", "--oneline", "-n", "5"]).pipe(Effect.map((text) => text.trim())),
+        ],
+        { concurrency: 5 },
+      )
       // 与 V1 相同的 2000 字符边界，截断提示指出后续读取的是实时状态。
-      const truncated = status.length > 2000 ? status.slice(0, 2000) + '\n... (truncated because it exceeds 2k characters. If you need more information, run "git status" using the bash tool)' : status
+      const truncated =
+        status.length > 2000
+          ? status.slice(0, 2000) +
+            '\n... (truncated because it exceeds 2k characters. If you need more information, run "git status" using the bash tool)'
+          : status
       return [
         "<git>",
         // Git 是首次 Context 观察的快照，不能宣称已经在 Session 创建时执行命令。
@@ -202,7 +240,9 @@ const builtIns = Layer.effectDiscard(
       // OS 属于稳定环境事实，Shell 由 BashTool 的独立 typed source 观察。
       `  OS Version: ${os.type()} ${os.release()}`,
       // 目录不同只产生位置约束，不额外探测或宣称它一定是 Git worktree。
-      ...(location.project.directory !== location.directory ? ["  Run ALL commands from the working directory; do NOT cd to the original repository root."] : []),
+      ...(location.project.directory !== location.directory
+        ? ["  Run ALL commands from the working directory; do NOT cd to the original repository root."]
+        : []),
       "</env>",
     ].join("\n")
     const context = SystemContext.combine([
@@ -225,15 +265,19 @@ const builtIns = Layer.effectDiscard(
       }),
       // 独立 key 让已有 core/environment 快照的 Session 也能接纳新增 Git source。
       // 禁用或非仓库时不注册详细 producer，environment 的 yes/no 仍完整保留。
-      ...(disableGit || location.vcs?.type !== "git" ? [] : [SystemContext.make({
-        key: SystemContext.Key.make("core/git"),
-        codec: Schema.toCodecJson(Schema.String),
-        // 冻结归Session已保存的snapshot，不让同Location的新Session继承旧采样。
-        lifetime: "session",
-        load: gitContext(),
-        baseline: (text) => text,
-        update: (_previous, text) => text,
-      })]),
+      ...(disableGit || location.vcs?.type !== "git"
+        ? []
+        : [
+            SystemContext.make({
+              key: SystemContext.Key.make("core/git"),
+              codec: Schema.toCodecJson(Schema.String),
+              // 冻结归Session已保存的snapshot，不让同Location的新Session继承旧采样。
+              lifetime: "session",
+              load: gitContext(),
+              baseline: (text) => text,
+              update: (_previous, text) => text,
+            }),
+          ]),
       SystemContext.make({
         key: SystemContext.Key.make("core/date"),
         codec: Schema.toCodecJson(Schema.String),

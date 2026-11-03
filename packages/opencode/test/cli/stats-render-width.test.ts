@@ -1,6 +1,26 @@
 import { describe, expect, test } from "bun:test"
-import { fitVisible, paint, renderContext, renderHeatmap, stripAnsi, truncateVisible, visibleLength } from "../../src/cli/cmd/stats-charts"
-import { renderBreakdown, renderCharts, renderCosts, renderDashboard, renderHeatmapPage, renderModels, renderOverview, renderProviders, renderSessions, renderTimeline, renderTokens } from "../../src/cli/cmd/stats-render"
+import {
+  fitVisible,
+  paint,
+  renderContext,
+  renderHeatmap,
+  stripAnsi,
+  truncateVisible,
+  visibleLength,
+} from "../../src/cli/cmd/stats-charts"
+import {
+  renderBreakdown,
+  renderCharts,
+  renderCosts,
+  renderDashboard,
+  renderHeatmapPage,
+  renderModels,
+  renderOverview,
+  renderProviders,
+  renderSessions,
+  renderTimeline,
+  renderTokens,
+} from "../../src/cli/cmd/stats-render"
 import { renderForecast, renderInsights } from "../../src/cli/cmd/stats-insights"
 import { buildForecast } from "../../src/cli/cmd/stats-insights"
 import type { StatsReport } from "../../src/cli/cmd/stats-data"
@@ -31,7 +51,11 @@ describe("stats render width (#176)", () => {
       models: [],
     }))
     const report = {
-      totalSessions: 1, sessionsWithUsage: 1, totalMessages: 2, totalTools: 0, days: 1,
+      totalSessions: 1,
+      sessionsWithUsage: 1,
+      totalMessages: 2,
+      totalTools: 0,
+      days: 1,
       dateRange: { earliest: 0, latest: 0 },
       total: {
         ...groups[0],
@@ -40,10 +64,27 @@ describe("stats render width (#176)", () => {
         requests: 2,
         assistantCalls: 2,
       },
-      models: groups, providers: groups, agents: groups, sources: groups, statuses: groups, projects: groups.map((group) => ({ ...group, path: "/project" })),
-      daily: [], modelSeries: [], providerSeries: [], agentSeries: [], sourceSeries: [], statusSeries: [], projectSeries: [],
-      tokenPartSeries: [], sessions: [], toolUsage: [], toolSeries: [], toolCalls: [], requestsByHour: [],
-      tokensPerSession: 110, medianTokensPerSession: 110,
+      models: groups,
+      providers: groups,
+      agents: groups,
+      sources: groups,
+      statuses: groups,
+      projects: groups.map((group) => ({ ...group, path: "/project" })),
+      daily: [],
+      modelSeries: [],
+      providerSeries: [],
+      agentSeries: [],
+      sourceSeries: [],
+      statusSeries: [],
+      projectSeries: [],
+      tokenPartSeries: [],
+      sessions: [],
+      toolUsage: [],
+      toolSeries: [],
+      toolCalls: [],
+      requestsByHour: [],
+      tokensPerSession: 110,
+      medianTokensPerSession: 110,
     } satisfies StatsReport
     for (const render of [renderModels, renderProviders, renderBreakdown, renderCosts]) {
       for (const metric of ["tokens", "cost"] as const) {
@@ -51,7 +92,9 @@ describe("stats render width (#176)", () => {
           const text = render(report, { sort, metric, limit: 1, color: "never" })
           expect(text).toContain(sort === "cost" || sort === "calls" ? "cost-heavy" : "token-heavy")
           // 排名限行只约束榜单；后续完整费用瀑布仍应展示其他供应商。
-          expect(text.split("\n").slice(0, 4).join("\n")).not.toContain(sort === "cost" || sort === "calls" ? "token-heavy" : "cost-heavy")
+          expect(text.split("\n").slice(0, 4).join("\n")).not.toContain(
+            sort === "cost" || sort === "calls" ? "token-heavy" : "cost-heavy",
+          )
         }
       }
     }
@@ -134,7 +177,16 @@ describe("stats render width (#176)", () => {
       sources: [],
       statuses: [],
       projects: [],
-      daily: [{ day: 0, label: "d0", tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 }, total: 0 }, cost: 0, requests: 0, assistantCalls: 0 }],
+      daily: [
+        {
+          day: 0,
+          label: "d0",
+          tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 }, total: 0 },
+          cost: 0,
+          requests: 0,
+          assistantCalls: 0,
+        },
+      ],
       modelSeries: [],
       providerSeries: [],
       agentSeries: [],
@@ -148,7 +200,16 @@ describe("stats render width (#176)", () => {
         {
           id: "bash",
           label: "bash",
-          points: [{ day: 0, label: "d0", tokens: { input: 3, output: 0, reasoning: 0, cache: { read: 0, write: 0 }, total: 3 }, cost: 0, requests: 1, assistantCalls: 0 }],
+          points: [
+            {
+              day: 0,
+              label: "d0",
+              tokens: { input: 3, output: 0, reasoning: 0, cache: { read: 0, write: 0 }, total: 3 },
+              cost: 0,
+              requests: 1,
+              assistantCalls: 0,
+            },
+          ],
           tokens: { input: 3, output: 0, reasoning: 0, cache: { read: 0, write: 0 }, total: 3 },
           cost: 0,
           requests: 1,
@@ -259,8 +320,34 @@ describe("stats render width (#176)", () => {
       sessions: [],
       toolUsage: [],
       toolCalls: [
-        { toolID: "bash", modelID: "m1", providerID: "p1", agent: "build", projectID: "proj", source: "prompt", status: "completed", calls: 5, inputChars: 0, outputChars: 0, errors: 0, durationMs: 0 },
-        { toolID: "read", modelID: "m2", providerID: "p2", agent: "build", projectID: "proj", source: "prompt", status: "completed", calls: 2, inputChars: 0, outputChars: 0, errors: 0, durationMs: 0 },
+        {
+          toolID: "bash",
+          modelID: "m1",
+          providerID: "p1",
+          agent: "build",
+          projectID: "proj",
+          source: "prompt",
+          status: "completed",
+          calls: 5,
+          inputChars: 0,
+          outputChars: 0,
+          errors: 0,
+          durationMs: 0,
+        },
+        {
+          toolID: "read",
+          modelID: "m2",
+          providerID: "p2",
+          agent: "build",
+          projectID: "proj",
+          source: "prompt",
+          status: "completed",
+          calls: 2,
+          inputChars: 0,
+          outputChars: 0,
+          errors: 0,
+          durationMs: 0,
+        },
       ],
       toolSeries: [],
       tokensPerSession: 0,
@@ -320,7 +407,14 @@ describe("stats render width (#176)", () => {
   test("#483 buildForecast weights run rates by observed active-day frequency", () => {
     // 4 天窗口，仅 1 天活跃（cost 40）：activityRate=0.25、active dailyAverage=40
     // → calendarDailyAverage=10，weeklyRunRate=70；σ 混入伯努利波动后 confidence<1
-    const active = { day: Date.now(), label: "d", cost: 40, tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 }, total: 0 }, requests: 1, assistantCalls: 1 }
+    const active = {
+      day: Date.now(),
+      label: "d",
+      cost: 40,
+      tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 }, total: 0 },
+      requests: 1,
+      assistantCalls: 1,
+    }
     const idle = { ...active, cost: 0, requests: 0, assistantCalls: 0 }
     // daily 顺序故意非单调：buildForecast 不得依赖数组顺序，只能按 day.day 过滤锚定月
     const forecast = buildForecast({
@@ -501,13 +595,28 @@ describe("stats render width (#176)", () => {
         cost: 1,
         requests: 1,
         assistantCalls: 1,
-        components: { system: 0, instructions: 0, skills: 0, toolSchemas: 0, userMessages: 0, assistantText: 0, reasoning: 0, toolCalls: 0, toolResults: 0, attachments: 0 },
+        components: {
+          system: 0,
+          instructions: 0,
+          skills: 0,
+          toolSchemas: 0,
+          userMessages: 0,
+          assistantText: 0,
+          reasoning: 0,
+          toolCalls: 0,
+          toolResults: 0,
+          attachments: 0,
+        },
         errors: 0,
         aborted: 0,
         durationMs: 0,
       },
     ]
-    const hostileReport = { ...report, total: { ...report.total, components: emptyComponents(), cost: 1, tokens: { ...report.total.tokens, total: 15 } }, sessions: hostileSessions } as unknown as StatsReport
+    const hostileReport = {
+      ...report,
+      total: { ...report.total, components: emptyComponents(), cost: 1, tokens: { ...report.total.tokens, total: 15 } },
+      sessions: hostileSessions,
+    } as unknown as StatsReport
     const insights = renderInsights(hostileReport, {})
     // insights 卡片 body 出口与表格出口共享同一清洗契约：session title 内插不泄漏协议序列
     expect(insights).not.toContain("]8;;")
@@ -518,7 +627,7 @@ describe("stats render width (#176)", () => {
 })
 
 describe("stats dashboard responsive top tables (#181)", () => {
-    // #181：临时改 stdout.columns 驱动响应式分支
+  // #181：临时改 stdout.columns 驱动响应式分支
   const withColumns = (cols: number, fn: () => void) => {
     const prev = process.stdout.columns
     Object.defineProperty(process.stdout, "columns", { configurable: true, value: cols })
@@ -584,18 +693,60 @@ describe("stats dashboard responsive top tables (#181)", () => {
     statuses: [],
     projects: [],
     daily: [
-      { day: 0, label: "d0", tokens: { input: 10, output: 3, reasoning: 0, cache: { read: 0, write: 0 }, total: 13 }, cost: 0.4, requests: 1, assistantCalls: 1 },
-      { day: 1, label: "d1", tokens: { input: 10, output: 3, reasoning: 0, cache: { read: 0, write: 0 }, total: 13 }, cost: 0.5, requests: 1, assistantCalls: 1 },
-      { day: 2, label: "d2", tokens: { input: 10, output: 4, reasoning: 0, cache: { read: 0, write: 0 }, total: 14 }, cost: 0.6, requests: 1, assistantCalls: 1 },
+      {
+        day: 0,
+        label: "d0",
+        tokens: { input: 10, output: 3, reasoning: 0, cache: { read: 0, write: 0 }, total: 13 },
+        cost: 0.4,
+        requests: 1,
+        assistantCalls: 1,
+      },
+      {
+        day: 1,
+        label: "d1",
+        tokens: { input: 10, output: 3, reasoning: 0, cache: { read: 0, write: 0 }, total: 13 },
+        cost: 0.5,
+        requests: 1,
+        assistantCalls: 1,
+      },
+      {
+        day: 2,
+        label: "d2",
+        tokens: { input: 10, output: 4, reasoning: 0, cache: { read: 0, write: 0 }, total: 14 },
+        cost: 0.6,
+        requests: 1,
+        assistantCalls: 1,
+      },
     ],
     modelSeries: [
       {
         id: "m1",
         label: "model-one",
         points: [
-          { day: 0, label: "d0", tokens: { input: 5, output: 1, reasoning: 0, cache: { read: 0, write: 0 }, total: 6 }, cost: 0.2, requests: 1, assistantCalls: 1 },
-          { day: 1, label: "d1", tokens: { input: 8, output: 2, reasoning: 0, cache: { read: 0, write: 0 }, total: 10 }, cost: 0.4, requests: 1, assistantCalls: 1 },
-          { day: 2, label: "d2", tokens: { input: 7, output: 2, reasoning: 0, cache: { read: 0, write: 0 }, total: 9 }, cost: 0.4, requests: 0, assistantCalls: 0 },
+          {
+            day: 0,
+            label: "d0",
+            tokens: { input: 5, output: 1, reasoning: 0, cache: { read: 0, write: 0 }, total: 6 },
+            cost: 0.2,
+            requests: 1,
+            assistantCalls: 1,
+          },
+          {
+            day: 1,
+            label: "d1",
+            tokens: { input: 8, output: 2, reasoning: 0, cache: { read: 0, write: 0 }, total: 10 },
+            cost: 0.4,
+            requests: 1,
+            assistantCalls: 1,
+          },
+          {
+            day: 2,
+            label: "d2",
+            tokens: { input: 7, output: 2, reasoning: 0, cache: { read: 0, write: 0 }, total: 9 },
+            cost: 0.4,
+            requests: 0,
+            assistantCalls: 0,
+          },
         ],
         tokens: { input: 20, output: 5, reasoning: 0, cache: { read: 0, write: 0 }, total: 25 },
         cost: 1,
@@ -608,9 +759,30 @@ describe("stats dashboard responsive top tables (#181)", () => {
         id: "p1",
         label: "provider-one",
         points: [
-          { day: 0, label: "d0", tokens: { input: 10, output: 3, reasoning: 0, cache: { read: 0, write: 0 }, total: 13 }, cost: 0.4, requests: 1, assistantCalls: 1 },
-          { day: 1, label: "d1", tokens: { input: 10, output: 3, reasoning: 0, cache: { read: 0, write: 0 }, total: 13 }, cost: 0.5, requests: 1, assistantCalls: 1 },
-          { day: 2, label: "d2", tokens: { input: 10, output: 4, reasoning: 0, cache: { read: 0, write: 0 }, total: 14 }, cost: 0.6, requests: 1, assistantCalls: 1 },
+          {
+            day: 0,
+            label: "d0",
+            tokens: { input: 10, output: 3, reasoning: 0, cache: { read: 0, write: 0 }, total: 13 },
+            cost: 0.4,
+            requests: 1,
+            assistantCalls: 1,
+          },
+          {
+            day: 1,
+            label: "d1",
+            tokens: { input: 10, output: 3, reasoning: 0, cache: { read: 0, write: 0 }, total: 13 },
+            cost: 0.5,
+            requests: 1,
+            assistantCalls: 1,
+          },
+          {
+            day: 2,
+            label: "d2",
+            tokens: { input: 10, output: 4, reasoning: 0, cache: { read: 0, write: 0 }, total: 14 },
+            cost: 0.6,
+            requests: 1,
+            assistantCalls: 1,
+          },
         ],
         tokens: { input: 30, output: 10, reasoning: 0, cache: { read: 0, write: 0 }, total: 40 },
         cost: 1.5,
@@ -631,15 +803,15 @@ describe("stats dashboard responsive top tables (#181)", () => {
     medianTokensPerSession: 20,
   } as unknown as StatsReport
 
-    // #181：宽屏必须出现 trend 且无独立 activity 区
+  // #181：宽屏必须出现 trend 且无独立 activity 区
   test("wide dashboard folds activity into top tables with trend", () => {
     withColumns(120, () => {
       const text = renderDashboard(report, { limit: 5, metric: "tokens" })
       expect(text).toContain("Top models")
       expect(text).toContain("Top providers")
-            // #181：宽屏契约：share 与 trend 同头
+      // #181：宽屏契约：share 与 trend 同头
       expect(text).toContain("share │ trend")
-            // #181：activity 已并入顶表
+      // #181：activity 已并入顶表
       expect(text).not.toContain("Model activity rows")
       expect(text).not.toContain("Provider trend rows")
       for (const line of text.split("\n")) {
@@ -649,12 +821,12 @@ describe("stats dashboard responsive top tables (#181)", () => {
     })
   })
 
-    // #181：窄屏折叠 trend，避免碎列
+  // #181：窄屏折叠 trend，避免碎列
   test("narrow dashboard drops trend column", () => {
     withColumns(58, () => {
       const text = renderDashboard(report, { limit: 5 })
       expect(text).toContain("Top models")
-            // #181：窄屏不得残留 trend 表头
+      // #181：窄屏不得残留 trend 表头
       expect(text).not.toContain("│ trend")
       expect(text).not.toContain("Model activity rows")
     })
@@ -665,17 +837,61 @@ describe("stats top table share (#181)", () => {
   test("share uses global total tokens not top-N sum", () => {
     // #181：两模型各 25/15，全局 total 200 → share 约 13%/8% 而非 62%/38%
     const report = {
-      totalSessions: 1, sessionsWithUsage: 1, totalMessages: 1, totalTools: 0, days: 1,
+      totalSessions: 1,
+      sessionsWithUsage: 1,
+      totalMessages: 1,
+      totalTools: 0,
+      days: 1,
       dateRange: { earliest: 0, latest: 1 },
-      total: { tokens: { input: 100, output: 50, reasoning: 0, cache: { read: 0, write: 0 }, total: 200 }, cost: 1, requests: 1, assistantCalls: 1 },
+      total: {
+        tokens: { input: 100, output: 50, reasoning: 0, cache: { read: 0, write: 0 }, total: 200 },
+        cost: 1,
+        requests: 1,
+        assistantCalls: 1,
+      },
       models: [
-        { id: "m1", label: "m1", tokens: { input: 20, output: 5, reasoning: 0, cache: { read: 0, write: 0 }, total: 25 }, cost: 0.5, requests: 1, assistantCalls: 1, sessions: 1, providers: [], models: [] },
-        { id: "m2", label: "m2", tokens: { input: 10, output: 5, reasoning: 0, cache: { read: 0, write: 0 }, total: 15 }, cost: 0.3, requests: 1, assistantCalls: 1, sessions: 1, providers: [], models: [] },
+        {
+          id: "m1",
+          label: "m1",
+          tokens: { input: 20, output: 5, reasoning: 0, cache: { read: 0, write: 0 }, total: 25 },
+          cost: 0.5,
+          requests: 1,
+          assistantCalls: 1,
+          sessions: 1,
+          providers: [],
+          models: [],
+        },
+        {
+          id: "m2",
+          label: "m2",
+          tokens: { input: 10, output: 5, reasoning: 0, cache: { read: 0, write: 0 }, total: 15 },
+          cost: 0.3,
+          requests: 1,
+          assistantCalls: 1,
+          sessions: 1,
+          providers: [],
+          models: [],
+        },
       ],
-      providers: [], agents: [], sources: [], statuses: [], projects: [],
-      daily: [], modelSeries: [], providerSeries: [], agentSeries: [], sourceSeries: [], statusSeries: [], projectSeries: [],
-      tokenPartSeries: [], sessions: [], toolUsage: [], toolSeries: [], modelProviderTokens: [],
-      tokensPerSession: 200, medianTokensPerSession: 200,
+      providers: [],
+      agents: [],
+      sources: [],
+      statuses: [],
+      projects: [],
+      daily: [],
+      modelSeries: [],
+      providerSeries: [],
+      agentSeries: [],
+      sourceSeries: [],
+      statusSeries: [],
+      projectSeries: [],
+      tokenPartSeries: [],
+      sessions: [],
+      toolUsage: [],
+      toolSeries: [],
+      modelProviderTokens: [],
+      tokensPerSession: 200,
+      medianTokensPerSession: 200,
     } as unknown as StatsReport
     const text = renderDashboard(report as any, { limit: 5 })
     expect(text).toContain("13%") // 25/200
@@ -703,28 +919,163 @@ describe("sparkline aggregation (#181)", () => {
 
 describe("stats dashboard sectioned overview (#182)", () => {
   const report = {
-    totalSessions: 2, sessionsWithUsage: 2, totalMessages: 2, totalTools: 0, days: 2,
+    totalSessions: 2,
+    sessionsWithUsage: 2,
+    totalMessages: 2,
+    totalTools: 0,
+    days: 2,
     dateRange: { earliest: 0, latest: 2 },
-    total: { tokens: { input: 100, output: 40, reasoning: 0, cache: { read: 50, write: 10 }, total: 200 }, cost: 2, requests: 10, assistantCalls: 10, errors: 2, aborted: 1 },
-    models: [{ id: "m1", label: "model-one", tokens: { input: 20, output: 5, reasoning: 0, cache: { read: 0, write: 0 }, total: 25 }, cost: 1, requests: 2, assistantCalls: 2, errors: 0, aborted: 0, sessions: 1, providers: [], models: [] }],
-    providers: [{ id: "p1", label: "provider-one", tokens: { input: 30, output: 10, reasoning: 0, cache: { read: 0, write: 0 }, total: 40 }, cost: 1.5, requests: 3, assistantCalls: 3, errors: 0, aborted: 0, sessions: 2, providers: [], models: [] }],
-    agents: [], sources: [], statuses: [], projects: [],
-    daily: [
-      { day: 1, label: "d1", tokens: { input: 50, output: 20, reasoning: 0, cache: { read: 25, write: 5 }, total: 100 }, cost: 1, requests: 5, assistantCalls: 5, errors: 1, aborted: 0 },
-      { day: 2, label: "d2", tokens: { input: 50, output: 20, reasoning: 0, cache: { read: 25, write: 5 }, total: 100 }, cost: 1, requests: 5, assistantCalls: 5, errors: 1, aborted: 1 },
+    total: {
+      tokens: { input: 100, output: 40, reasoning: 0, cache: { read: 50, write: 10 }, total: 200 },
+      cost: 2,
+      requests: 10,
+      assistantCalls: 10,
+      errors: 2,
+      aborted: 1,
+    },
+    models: [
+      {
+        id: "m1",
+        label: "model-one",
+        tokens: { input: 20, output: 5, reasoning: 0, cache: { read: 0, write: 0 }, total: 25 },
+        cost: 1,
+        requests: 2,
+        assistantCalls: 2,
+        errors: 0,
+        aborted: 0,
+        sessions: 1,
+        providers: [],
+        models: [],
+      },
     ],
-    modelSeries: [], providerSeries: [], agentSeries: [], sourceSeries: [], statusSeries: [], projectSeries: [],
+    providers: [
+      {
+        id: "p1",
+        label: "provider-one",
+        tokens: { input: 30, output: 10, reasoning: 0, cache: { read: 0, write: 0 }, total: 40 },
+        cost: 1.5,
+        requests: 3,
+        assistantCalls: 3,
+        errors: 0,
+        aborted: 0,
+        sessions: 2,
+        providers: [],
+        models: [],
+      },
+    ],
+    agents: [],
+    sources: [],
+    statuses: [],
+    projects: [],
+    daily: [
+      {
+        day: 1,
+        label: "d1",
+        tokens: { input: 50, output: 20, reasoning: 0, cache: { read: 25, write: 5 }, total: 100 },
+        cost: 1,
+        requests: 5,
+        assistantCalls: 5,
+        errors: 1,
+        aborted: 0,
+      },
+      {
+        day: 2,
+        label: "d2",
+        tokens: { input: 50, output: 20, reasoning: 0, cache: { read: 25, write: 5 }, total: 100 },
+        cost: 1,
+        requests: 5,
+        assistantCalls: 5,
+        errors: 1,
+        aborted: 1,
+      },
+    ],
+    modelSeries: [],
+    providerSeries: [],
+    agentSeries: [],
+    sourceSeries: [],
+    statusSeries: [],
+    projectSeries: [],
     tokenPartSeries: [
-      { id: "input", label: "Input", points: [{ day: 1, label: "a", value: 10 }, { day: 2, label: "b", value: 90 }], total: 100 },
-      { id: "output", label: "Output", points: [{ day: 1, label: "a", value: 5 }, { day: 2, label: "b", value: 35 }], total: 40 },
-      { id: "cacheRead", label: "Cache Read", points: [{ day: 1, label: "a", value: 20 }, { day: 2, label: "b", value: 30 }], total: 50 },
-      { id: "cacheWrite", label: "Cache Write", points: [{ day: 1, label: "a", value: 4 }, { day: 2, label: "b", value: 6 }], total: 10 },
+      {
+        id: "input",
+        label: "Input",
+        points: [
+          { day: 1, label: "a", value: 10 },
+          { day: 2, label: "b", value: 90 },
+        ],
+        total: 100,
+      },
+      {
+        id: "output",
+        label: "Output",
+        points: [
+          { day: 1, label: "a", value: 5 },
+          { day: 2, label: "b", value: 35 },
+        ],
+        total: 40,
+      },
+      {
+        id: "cacheRead",
+        label: "Cache Read",
+        points: [
+          { day: 1, label: "a", value: 20 },
+          { day: 2, label: "b", value: 30 },
+        ],
+        total: 50,
+      },
+      {
+        id: "cacheWrite",
+        label: "Cache Write",
+        points: [
+          { day: 1, label: "a", value: 4 },
+          { day: 2, label: "b", value: 6 },
+        ],
+        total: 10,
+      },
     ],
     sessions: [
-      { id: "s1" as any, title: "big", projectID: "p", directory: "/", created: 1, updated: Date.UTC(2026, 3, 27, 3), messages: 1, tools: 0, providers: [], models: [], tokens: { input: 80, output: 40, reasoning: 0, cache: { read: 0, write: 0 }, total: 120000 }, cost: 1, requests: 1, assistantCalls: 1, errors: 0, aborted: 0 },
-      { id: "s2" as any, title: "tiny", projectID: "p", directory: "/", created: 1, updated: Date.UTC(2026, 3, 28, 15), messages: 1, tools: 0, providers: [], models: [], tokens: { input: 5, output: 2, reasoning: 0, cache: { read: 0, write: 0 }, total: 7 }, cost: 0.1, requests: 1, assistantCalls: 1, errors: 0, aborted: 0 },
+      {
+        id: "s1" as any,
+        title: "big",
+        projectID: "p",
+        directory: "/",
+        created: 1,
+        updated: Date.UTC(2026, 3, 27, 3),
+        messages: 1,
+        tools: 0,
+        providers: [],
+        models: [],
+        tokens: { input: 80, output: 40, reasoning: 0, cache: { read: 0, write: 0 }, total: 120000 },
+        cost: 1,
+        requests: 1,
+        assistantCalls: 1,
+        errors: 0,
+        aborted: 0,
+      },
+      {
+        id: "s2" as any,
+        title: "tiny",
+        projectID: "p",
+        directory: "/",
+        created: 1,
+        updated: Date.UTC(2026, 3, 28, 15),
+        messages: 1,
+        tools: 0,
+        providers: [],
+        models: [],
+        tokens: { input: 5, output: 2, reasoning: 0, cache: { read: 0, write: 0 }, total: 7 },
+        cost: 0.1,
+        requests: 1,
+        assistantCalls: 1,
+        errors: 0,
+        aborted: 0,
+      },
     ],
-    toolUsage: [], toolSeries: [], modelProviderTokens: [], tokensPerSession: 15, medianTokensPerSession: 15,
+    toolUsage: [],
+    toolSeries: [],
+    modelProviderTokens: [],
+    tokensPerSession: 15,
+    medianTokensPerSession: 15,
   } as unknown as StatsReport
 
   test("renders sections, trends and session distribution", () => {
@@ -750,7 +1101,17 @@ describe("stats dashboard sectioned overview (#182)", () => {
       const previous = process.stdout.columns
       Object.defineProperty(process.stdout, "columns", { configurable: true, value: columns })
       try {
-        const lines = renderDashboard({ ...report, tokenPartSeries: [{ id: "output", label: "Output + Reasoning", total: 1_000_000, points: [{ day: 1, label: "d1", value: 1_000_000 }] }] }).split("\n")
+        const lines = renderDashboard({
+          ...report,
+          tokenPartSeries: [
+            {
+              id: "output",
+              label: "Output + Reasoning",
+              total: 1_000_000,
+              points: [{ day: 1, label: "d1", value: 1_000_000 }],
+            },
+          ],
+        }).split("\n")
         const index = lines.findIndex((line) => line.includes("Output + Reasoning"))
         expect(index).toBeGreaterThanOrEqual(0)
         expect(lines[index].length).toBeLessThanOrEqual(columns)
@@ -770,24 +1131,37 @@ describe("stats dashboard sectioned overview (#182)", () => {
     const text = (() => {
       const width = process.stdout.columns
       Object.defineProperty(process.stdout, "columns", { configurable: true, value: 58 })
-      try { return renderDashboard({
-      ...report,
-      totalSessions: 1,
-      sessionsWithUsage: 1,
-      dateRange: { earliest: monday, latest: tuesday },
-      daily: [
-        { ...report.daily[0], day: monday, label: "04-27" },
-        { ...report.daily[1], day: tuesday, label: "04-28" },
-      ],
-      sessions: [{ ...report.sessions[0], ...report.total, requests: 100, created: monday, updated: new Date(2026, 3, 28, 9).getTime() }, { ...report.sessions[1], requests: 1, updated: new Date(2026, 3, 28, 15).getTime() }],
-      }) } finally {
+      try {
+        return renderDashboard({
+          ...report,
+          totalSessions: 1,
+          sessionsWithUsage: 1,
+          dateRange: { earliest: monday, latest: tuesday },
+          daily: [
+            { ...report.daily[0], day: monday, label: "04-27" },
+            { ...report.daily[1], day: tuesday, label: "04-28" },
+          ],
+          sessions: [
+            {
+              ...report.sessions[0],
+              ...report.total,
+              requests: 100,
+              created: monday,
+              updated: new Date(2026, 3, 28, 9).getTime(),
+            },
+            { ...report.sessions[1], requests: 1, updated: new Date(2026, 3, 28, 15).getTime() },
+          ],
+        })
+      } finally {
         Object.defineProperty(process.stdout, "columns", { configurable: true, value: width })
       }
     })()
     const lines = text.split("\n")
     const start = lines.indexOf("Day of week share")
     expect(start).toBeGreaterThanOrEqual(0)
-    expect(lines.slice(start + 1, start + 8).map((line) => Number(line.split(" ").at(-1)))).toEqual([100, 100, 0, 0, 0, 0, 0])
+    expect(lines.slice(start + 1, start + 8).map((line) => Number(line.split(" ").at(-1)))).toEqual([
+      100, 100, 0, 0, 0, 0, 0,
+    ])
     // 日历必须能定位周起点，小时图必须按本地请求量而非会话数计权。
     const calendar = lines.indexOf("Calendar activity")
     expect(lines[calendar + 1]).toContain("M T W T F S S")
@@ -821,17 +1195,63 @@ describe("stats humanized labels (#183)", () => {
   test("top models table includes per-call column", () => {
     // #183：人性化顶表含 per-call
     const report = {
-      totalSessions: 1, sessionsWithUsage: 1, totalMessages: 1, totalTools: 0, days: 1,
+      totalSessions: 1,
+      sessionsWithUsage: 1,
+      totalMessages: 1,
+      totalTools: 0,
+      days: 1,
       dateRange: { earliest: 0, latest: 1 },
-      total: { tokens: { input: 20, output: 5, reasoning: 0, cache: { read: 0, write: 0 }, total: 25 }, cost: 1, requests: 1, assistantCalls: 5, errors: 0, aborted: 0 },
-      models: [{ id: "m1", label: "model-one", tokens: { input: 20, output: 5, reasoning: 0, cache: { read: 0, write: 0 }, total: 25 }, cost: 1, requests: 1, assistantCalls: 5, errors: 0, aborted: 0, sessions: 1, providers: [], models: [] }],
-      providers: [], agents: [], sources: [], statuses: [], projects: [],
-      daily: [], modelSeries: [], providerSeries: [], agentSeries: [], sourceSeries: [], statusSeries: [], projectSeries: [],
-      tokenPartSeries: [], sessions: [], toolUsage: [], toolSeries: [], modelProviderTokens: [],
-      tokensPerSession: 25, medianTokensPerSession: 25,
+      total: {
+        tokens: { input: 20, output: 5, reasoning: 0, cache: { read: 0, write: 0 }, total: 25 },
+        cost: 1,
+        requests: 1,
+        assistantCalls: 5,
+        errors: 0,
+        aborted: 0,
+      },
+      models: [
+        {
+          id: "m1",
+          label: "model-one",
+          tokens: { input: 20, output: 5, reasoning: 0, cache: { read: 0, write: 0 }, total: 25 },
+          cost: 1,
+          requests: 1,
+          assistantCalls: 5,
+          errors: 0,
+          aborted: 0,
+          sessions: 1,
+          providers: [],
+          models: [],
+        },
+      ],
+      providers: [],
+      agents: [],
+      sources: [],
+      statuses: [],
+      projects: [],
+      daily: [],
+      modelSeries: [],
+      providerSeries: [],
+      agentSeries: [],
+      sourceSeries: [],
+      statusSeries: [],
+      projectSeries: [],
+      tokenPartSeries: [],
+      sessions: [],
+      toolUsage: [],
+      toolSeries: [],
+      modelProviderTokens: [],
+      tokensPerSession: 25,
+      medianTokensPerSession: 25,
     } as unknown as StatsReport
     expect(renderDashboard(report as any, { limit: 5 })).toContain("per-call")
-    const large = renderDashboard({ ...report, models: report.models.map((model) => ({ ...model, tokens: { ...model.tokens, total: 1_000_000_000 } })) }, { limit: 5 })
+    const large = renderDashboard(
+      {
+        ...report,
+        models: report.models.map((model) => ({ ...model, tokens: { ...model.tokens, total: 1_000_000_000 } })),
+      },
+      { limit: 5 },
+    )
     expect(large).toContain("1.0B")
     expect(large).toContain("200.0M")
     // 在真实 58 列输入下检查表头和数据行，而不是只断言趋势列隐藏。
@@ -849,186 +1269,432 @@ describe("stats humanized labels (#183)", () => {
   })
 })
 
-  // 固定真实宽度owner，环境变量COLUMNS不会改变process.stdout.columns。
-  const withColumns = (cols: number, fn: () => void) => {
-    const prev = Object.getOwnPropertyDescriptor(process.stdout, "columns")
-    Object.defineProperty(process.stdout, "columns", { configurable: true, value: cols })
-    try {
-      fn()
-    } finally {
-      if (prev) Object.defineProperty(process.stdout, "columns", prev)
-      else Reflect.deleteProperty(process.stdout, "columns")
-    }
+// 固定真实宽度owner，环境变量COLUMNS不会改变process.stdout.columns。
+const withColumns = (cols: number, fn: () => void) => {
+  const prev = Object.getOwnPropertyDescriptor(process.stdout, "columns")
+  Object.defineProperty(process.stdout, "columns", { configurable: true, value: cols })
+  try {
+    fn()
+  } finally {
+    if (prev) Object.defineProperty(process.stdout, "columns", prev)
+    else Reflect.deleteProperty(process.stdout, "columns")
   }
-  // 空报告构造：全空集合 + 零总量，R6 空态前景/背景安全契约的输入。
-  const emptyReport = () => ({
-    totalSessions: 0, sessionsWithUsage: 0, totalMessages: 0, totalTools: 0, days: 0,
+}
+// 空报告构造：全空集合 + 零总量，R6 空态前景/背景安全契约的输入。
+const emptyReport = () =>
+  ({
+    totalSessions: 0,
+    sessionsWithUsage: 0,
+    totalMessages: 0,
+    totalTools: 0,
+    days: 0,
     dateRange: { earliest: 0, latest: 0 },
-    total: { tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 }, total: 0 }, cost: 0, requests: 0, assistantCalls: 0 },
-    models: [], providers: [], agents: [], sources: [], statuses: [], projects: [],
-    daily: [], modelSeries: [], providerSeries: [], agentSeries: [], sourceSeries: [],
-    statusSeries: [], projectSeries: [], tokenPartSeries: [], sessions: [], toolUsage: [],
-    modelProviderTokens: [], tokensPerSession: 0, medianTokensPerSession: 0,
-  } as unknown as StatsReport)
-  // 具体背景色扫描：40-47/100-107 与 24-bit/256 色背景均视为违规。
-  const concreteBackgroundAnsi = (s: string) => s.match(/\x1b\[(?:4[0-7]|10[0-7])m|\x1b\[48;(?:2|5)[^\x1b]*/g) ?? []
+    total: {
+      tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 }, total: 0 },
+      cost: 0,
+      requests: 0,
+      assistantCalls: 0,
+    },
+    models: [],
+    providers: [],
+    agents: [],
+    sources: [],
+    statuses: [],
+    projects: [],
+    daily: [],
+    modelSeries: [],
+    providerSeries: [],
+    agentSeries: [],
+    sourceSeries: [],
+    statusSeries: [],
+    projectSeries: [],
+    tokenPartSeries: [],
+    sessions: [],
+    toolUsage: [],
+    modelProviderTokens: [],
+    tokensPerSession: 0,
+    medianTokensPerSession: 0,
+  }) as unknown as StatsReport
+// 具体背景色扫描：40-47/100-107 与 24-bit/256 色背景均视为违规。
+const concreteBackgroundAnsi = (s: string) => s.match(/\x1b\[(?:4[0-7]|10[0-7])m|\x1b\[48;(?:2|5)[^\x1b]*/g) ?? []
 
-  test("emits the R6 bright ANSI palette contract", () => {
-    // 直接检查发射的槽位与强度复位；纯文本图元不恢复已不存在的Canvas状态机。
-    const desc = Object.getOwnPropertyDescriptor(process.stdout, "isTTY")
-    try {
-      Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true })
-      const ctx = renderContext("always")
-      expect(paint("x", "blue", ctx)).toContain("\x1b[94m")
-      expect(paint("x", "green", ctx)).toContain("\x1b[92m")
-      expect(paint("x", "yellow", ctx)).toContain("\x1b[93m")
-      expect(paint("x", "red", ctx)).toContain("\x1b[91m")
-      expect(paint("x", "magenta", ctx)).toContain("\x1b[95m")
-      expect(paint("x", "cyan", ctx)).toContain("\x1b[96m")
-      expect(paint("x", "white", ctx)).toBe("\x1b[22m\x1b[39m\x1b[39mx\x1b[0m")
-      // bright 前景不得携带 SGR dim（2）——dim 仅属于网格/低优先级结构。
-      for (const color of ["blue", "green", "yellow", "red", "magenta", "cyan"] as const) {
-        expect(paint("x", color, ctx)).toStartWith("\x1b[22m\x1b[39m")
-        expect(paint("x", color, ctx)).not.toMatch(/\x1b\[2(?:;|m)/)
-      }
-    } finally {
-      if (desc) Object.defineProperty(process.stdout, "isTTY", desc)
-      else Reflect.deleteProperty(process.stdout, "isTTY")
+test("emits the R6 bright ANSI palette contract", () => {
+  // 直接检查发射的槽位与强度复位；纯文本图元不恢复已不存在的Canvas状态机。
+  const desc = Object.getOwnPropertyDescriptor(process.stdout, "isTTY")
+  try {
+    Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true })
+    const ctx = renderContext("always")
+    expect(paint("x", "blue", ctx)).toContain("\x1b[94m")
+    expect(paint("x", "green", ctx)).toContain("\x1b[92m")
+    expect(paint("x", "yellow", ctx)).toContain("\x1b[93m")
+    expect(paint("x", "red", ctx)).toContain("\x1b[91m")
+    expect(paint("x", "magenta", ctx)).toContain("\x1b[95m")
+    expect(paint("x", "cyan", ctx)).toContain("\x1b[96m")
+    expect(paint("x", "white", ctx)).toBe("\x1b[22m\x1b[39m\x1b[39mx\x1b[0m")
+    // bright 前景不得携带 SGR dim（2）——dim 仅属于网格/低优先级结构。
+    for (const color of ["blue", "green", "yellow", "red", "magenta", "cyan"] as const) {
+      expect(paint("x", color, ctx)).toStartWith("\x1b[22m\x1b[39m")
+      expect(paint("x", color, ctx)).not.toMatch(/\x1b\[2(?:;|m)/)
+    }
+  } finally {
+    if (desc) Object.defineProperty(process.stdout, "isTTY", desc)
+    else Reflect.deleteProperty(process.stdout, "isTTY")
+  }
+})
+
+test("keeps colored empty reports safe under the R6 foreground and background contract", () => {
+  // 空报告彩色输出不得含 24-bit RGB 前景或具体背景色。
+  withColumns(120, () => {
+    const input = emptyReport()
+    const renders = [
+      renderDashboard,
+      renderOverview,
+      renderModels,
+      renderProviders,
+      renderTimeline,
+      renderSessions,
+      renderCharts,
+      renderHeatmapPage,
+      renderCosts,
+      renderTokens,
+      renderInsights,
+      renderForecast,
+    ]
+    const outputs = [
+      ...renders.map((render) => ({
+        colored: render(input, { color: "always" }),
+        plain: render(input, { color: "never" }),
+      })),
+      ...(["model", "provider", "agent", "source", "project", "tool", "status"] as const).map((by) => ({
+        colored: renderBreakdown(input, { color: "always", by }),
+        plain: renderBreakdown(input, { color: "never", by }),
+      })),
+    ]
+    for (const output of outputs) {
+      expect(output.colored).not.toContain("\x1b[38;2;")
+      expect(concreteBackgroundAnsi(output.colored)).toEqual([])
+      // 不能两侧都剥色，否则never泄漏会被等价断言掩盖。
+      expect(output.plain).not.toContain("\x1b[")
+      expect(stripAnsi(output.colored)).toBe(output.plain)
+      for (const line of output.colored.split("\n")) expect(visibleLength(line)).toBeLessThanOrEqual(120)
     }
   })
+})
 
-  test("keeps colored empty reports safe under the R6 foreground and background contract", () => {
-    // 空报告彩色输出不得含 24-bit RGB 前景或具体背景色。
-    withColumns(120, () => {
-      const input = emptyReport()
-      const renders = [renderDashboard, renderOverview, renderModels, renderProviders, renderTimeline, renderSessions, renderCharts, renderHeatmapPage, renderCosts, renderTokens, renderInsights, renderForecast]
-      const outputs = [
-        ...renders.map((render) => ({ colored: render(input, { color: "always" }), plain: render(input, { color: "never" }) })),
-        ...(["model", "provider", "agent", "source", "project", "tool", "status"] as const).map((by) => ({ colored: renderBreakdown(input, { color: "always", by }), plain: renderBreakdown(input, { color: "never", by }) })),
-      ]
-      for (const output of outputs) {
-        expect(output.colored).not.toContain("\x1b[38;2;")
-        expect(concreteBackgroundAnsi(output.colored)).toEqual([])
-        // 不能两侧都剥色，否则never泄漏会被等价断言掩盖。
-        expect(output.plain).not.toContain("\x1b[")
-        expect(stripAnsi(output.colored)).toBe(output.plain)
-        for (const line of output.colored.split("\n")) expect(visibleLength(line)).toBeLessThanOrEqual(120)
-      }
-    })
-  })
-
-  test("respects color mode precedence with NO_COLOR truthy contract", () => {
-    // R6 truthy NO_COLOR 语义由 renderContext 生产实现承载：always 恒开、never 恒关、
-    // auto 在非 TTY 或非空 NO_COLOR 下禁用；空字符串按 truthiness 等同未设置。
-    // isTTY 桩为 true，使 auto 分支对 NO_COLOR 回归可失败（而非恒 never 空转）。
-    const originalNoColor = process.env.NO_COLOR
-    const ttyDesc = Object.getOwnPropertyDescriptor(process.stdout, "isTTY")
-    try {
-      Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true })
-      // auto + TTY + NO_COLOR 未设置 → 彩色。
-      delete process.env.NO_COLOR
-      expect(renderContext("auto").color).toBe("auto")
-      // auto + TTY + NO_COLOR="" → 彩色（空串按 truthiness 等同未设置）。
-      process.env.NO_COLOR = ""
-      expect(renderContext("auto").color).toBe("auto")
-      // auto + TTY + NO_COLOR="1" → 纯文本（非空字符串禁用）。
-      process.env.NO_COLOR = "1"
-      expect(renderContext("auto").color).toBe("never")
-      // always 无视 NO_COLOR；never 恒关。
-      expect(renderContext("always").color).toBe("always")
-      expect(renderContext("never").color).toBe("never")
-      // auto + 非 TTY → 纯文本。
-      Object.defineProperty(process.stdout, "isTTY", { value: false, configurable: true })
-      delete process.env.NO_COLOR
-      expect(renderContext("auto").color).toBe("never")
-      expect(paint("x", "red", renderContext("always"))).toContain("\x1b[91m")
-      expect(paint("\x1b[31mx\x1b[0m", "red", renderContext("never"))).toBe("x")
-      // 端到端：paint 必须消费 renderContext 的裁决——NO_COLOR=1 + isTTY=true 时
-      // paint 输出不得携带 ANSI（对回归可失败的输出面断言，非仅模式字段）。
-      Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true })
-      process.env.NO_COLOR = "1"
-      expect(paint("x", "red", renderContext("auto"))).toBe("x")
-      expect(paint("x", "red", renderContext("always"))).toContain("\x1b[91m")
-      delete process.env.NO_COLOR
-      expect(paint("x", "red", renderContext("auto"))).toContain("\x1b[91m")
-      // 页面级端到端：dashboard/heatmap 标题发射点必须消费模式裁决。
-      const dashNever = renderDashboard(emptyReport(), { color: "never" })
-      expect(dashNever).not.toMatch(/\x1b\[/)
-      // auto + TTY + NO_COLOR="1" → 页面级纯文本（契约核心断言）。
-      process.env.NO_COLOR = "1"
-      const dashNoColor = renderDashboard(emptyReport(), { color: "auto" })
-      expect(dashNoColor).not.toMatch(/\x1b\[/)
-      const costsNever = renderCosts(emptyReport(), { color: "never" })
-      expect(costsNever).not.toMatch(/\x1b\[/)
-      const tokensNever = renderTokens(emptyReport(), { color: "never" })
-      expect(tokensNever).not.toMatch(/\x1b\[/)
-      const costsNoColor = renderCosts(emptyReport(), { color: "auto" })
-      expect(costsNoColor).not.toMatch(/\x1b\[/)
-      const tokensNoColor = renderTokens(emptyReport(), { color: "auto" })
-      expect(tokensNoColor).not.toMatch(/\x1b\[/)
-      delete process.env.NO_COLOR
-      const dashAlways = renderDashboard(emptyReport(), { color: "always" })
-      expect(dashAlways).toMatch(/\x1b\[95m/)
-      const heatNever = renderHeatmap({ title: "hm", points: [], color: "never" })
-      expect(heatNever.join("\n")).not.toMatch(/\x1b\[/)
-    } finally {
-      if (ttyDesc) Object.defineProperty(process.stdout, "isTTY", ttyDesc)
-      else Reflect.deleteProperty(process.stdout, "isTTY")
-      if (originalNoColor === undefined) delete process.env.NO_COLOR
-      else process.env.NO_COLOR = originalNoColor
-    }
-  })
+test("respects color mode precedence with NO_COLOR truthy contract", () => {
+  // R6 truthy NO_COLOR 语义由 renderContext 生产实现承载：always 恒开、never 恒关、
+  // auto 在非 TTY 或非空 NO_COLOR 下禁用；空字符串按 truthiness 等同未设置。
+  // isTTY 桩为 true，使 auto 分支对 NO_COLOR 回归可失败（而非恒 never 空转）。
+  const originalNoColor = process.env.NO_COLOR
+  const ttyDesc = Object.getOwnPropertyDescriptor(process.stdout, "isTTY")
+  try {
+    Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true })
+    // auto + TTY + NO_COLOR 未设置 → 彩色。
+    delete process.env.NO_COLOR
+    expect(renderContext("auto").color).toBe("auto")
+    // auto + TTY + NO_COLOR="" → 彩色（空串按 truthiness 等同未设置）。
+    process.env.NO_COLOR = ""
+    expect(renderContext("auto").color).toBe("auto")
+    // auto + TTY + NO_COLOR="1" → 纯文本（非空字符串禁用）。
+    process.env.NO_COLOR = "1"
+    expect(renderContext("auto").color).toBe("never")
+    // always 无视 NO_COLOR；never 恒关。
+    expect(renderContext("always").color).toBe("always")
+    expect(renderContext("never").color).toBe("never")
+    // auto + 非 TTY → 纯文本。
+    Object.defineProperty(process.stdout, "isTTY", { value: false, configurable: true })
+    delete process.env.NO_COLOR
+    expect(renderContext("auto").color).toBe("never")
+    expect(paint("x", "red", renderContext("always"))).toContain("\x1b[91m")
+    expect(paint("\x1b[31mx\x1b[0m", "red", renderContext("never"))).toBe("x")
+    // 端到端：paint 必须消费 renderContext 的裁决——NO_COLOR=1 + isTTY=true 时
+    // paint 输出不得携带 ANSI（对回归可失败的输出面断言，非仅模式字段）。
+    Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true })
+    process.env.NO_COLOR = "1"
+    expect(paint("x", "red", renderContext("auto"))).toBe("x")
+    expect(paint("x", "red", renderContext("always"))).toContain("\x1b[91m")
+    delete process.env.NO_COLOR
+    expect(paint("x", "red", renderContext("auto"))).toContain("\x1b[91m")
+    // 页面级端到端：dashboard/heatmap 标题发射点必须消费模式裁决。
+    const dashNever = renderDashboard(emptyReport(), { color: "never" })
+    expect(dashNever).not.toMatch(/\x1b\[/)
+    // auto + TTY + NO_COLOR="1" → 页面级纯文本（契约核心断言）。
+    process.env.NO_COLOR = "1"
+    const dashNoColor = renderDashboard(emptyReport(), { color: "auto" })
+    expect(dashNoColor).not.toMatch(/\x1b\[/)
+    const costsNever = renderCosts(emptyReport(), { color: "never" })
+    expect(costsNever).not.toMatch(/\x1b\[/)
+    const tokensNever = renderTokens(emptyReport(), { color: "never" })
+    expect(tokensNever).not.toMatch(/\x1b\[/)
+    const costsNoColor = renderCosts(emptyReport(), { color: "auto" })
+    expect(costsNoColor).not.toMatch(/\x1b\[/)
+    const tokensNoColor = renderTokens(emptyReport(), { color: "auto" })
+    expect(tokensNoColor).not.toMatch(/\x1b\[/)
+    delete process.env.NO_COLOR
+    const dashAlways = renderDashboard(emptyReport(), { color: "always" })
+    expect(dashAlways).toMatch(/\x1b\[95m/)
+    const heatNever = renderHeatmap({ title: "hm", points: [], color: "never" })
+    expect(heatNever.join("\n")).not.toMatch(/\x1b\[/)
+  } finally {
+    if (ttyDesc) Object.defineProperty(process.stdout, "isTTY", ttyDesc)
+    else Reflect.deleteProperty(process.stdout, "isTTY")
+    if (originalNoColor === undefined) delete process.env.NO_COLOR
+    else process.env.NO_COLOR = originalNoColor
+  }
+})
 
 test("#483 preserves quantitative sections, complete identities and independent denominators", async () => {
   const { emptyComponents } = await import("../../src/cli/cmd/stats-data")
-  const components = { system: 8, instructions: 5, skills: 4, toolSchemas: 12, userMessages: 24, assistantText: 10, reasoning: 4, toolCalls: 6, toolResults: 22, attachments: 5 }
-  const tokens = (value: number) => ({ input: value * 0.007, output: value * 0.002, reasoning: 0, cache: { read: value * 0.99, write: value * 0.001 }, total: value })
-  const usage = { tokens: tokens(130_000), components, cost: 30, requests: 100, assistantCalls: 200, errors: 12, aborted: 7, durationMs: 1000 }
-  const mix = [{ id: "first", tokens: 70 }, { id: "second", tokens: 10 }, { id: "third", tokens: 10 }, { id: "fourth", tokens: 10 }]
-  const group = (id: string) => ({ ...usage, id, label: id, sessions: 2, providers: mix, models: mix })
-  const daily = [1, 2, 1, 3, 2, 4].map((value, index) => ({ ...usage, day: new Date(2026, 3, index + 1).getTime(), label: `04-0${index + 1}`, tokens: tokens(value * 10_000), cost: index === 0 ? 30 : 0 }))
-  const report: StatsReport = {
-    totalSessions: 2, sessionsWithUsage: 2, totalMessages: 4, totalTools: 1, days: 6, dateRange: { earliest: daily[0].day, latest: daily.at(-1)!.day }, total: usage,
-    models: [group("claude-opus-complete-model-name")], providers: [group("production-complete-provider-name")], agents: [group("build")], sources: [group("prompt")], projects: [{ ...group("project"), path: "/projects/完整目录/name with spaces" }],
-    statuses: [{ ...group("completed"), requests: 80, tokens: tokens(1000) }, { ...group("error"), requests: 12, tokens: tokens(0) }, { ...group("aborted"), requests: 7, tokens: tokens(0) }, { ...group("running"), requests: 1, tokens: tokens(0) }, { ...group("unattributed"), requests: 0, tokens: tokens(129_000) }],
-    daily, modelSeries: [], providerSeries: [], agentSeries: [], sourceSeries: [], statusSeries: [], projectSeries: [], tokenPartSeries: [],
-    sessions: [{ ...usage, id: "ses_priced" as StatsReport["sessions"][number]["id"], title: "中文完整会话标题", projectID: "project", directory: "/project", created: daily[0].day, updated: daily[0].day, messages: 2, tools: 1, providers: ["provider"], models: ["model-one", "model-two", "complete-third-session-model"] }, { ...usage, tokens: tokens(0), cost: 0, id: "ses_unpriced" as StatsReport["sessions"][number]["id"], title: "unpriced", projectID: "project", directory: "/project", created: daily[0].day, updated: daily[0].day, messages: 2, tools: 0, providers: [], models: [] }],
-    toolUsage: [{ id: "read", count: 1, inputChars: 10, outputChars: 20, contextTokens: 0 }], toolSeries: [],
-    toolCalls: [{ toolID: "read", modelID: "claude-opus-complete-model-name", providerID: "production-complete-provider-name", agent: "build", projectID: "project", source: "prompt", status: "completed", calls: 1, inputChars: 10, outputChars: 20, errors: 0, durationMs: 10 }],
-    requestsByHour: Array.from({ length: 24 }, (_, hour) => hour === 4 ? 12 : hour === 6 ? 3 : 0), tokensPerSession: 65_000, medianTokensPerSession: 65_000,
+  const components = {
+    system: 8,
+    instructions: 5,
+    skills: 4,
+    toolSchemas: 12,
+    userMessages: 24,
+    assistantText: 10,
+    reasoning: 4,
+    toolCalls: 6,
+    toolResults: 22,
+    attachments: 5,
   }
-  const insights = stripAnsi(renderInsights(report, { color: "never" })).replace(/^│ ?/gm, "").replace(/\s+/g, " ")
-  for (const section of ["Usage shape", "Attribution", "Variability & outliers", "Actions"]) expect(insights).toContain(section)
-  for (const value of ["system 8.0%", "instructions 5.0%", "skills 4.0%", "schemas 12.0%", "user 24.0%", "assistant 10.0%", "reasoning 4.0%", "tool calls 6.0%", "tool results 22.0%", "attach 5.0%"]) expect(insights).toContain(value)
+  const tokens = (value: number) => ({
+    input: value * 0.007,
+    output: value * 0.002,
+    reasoning: 0,
+    cache: { read: value * 0.99, write: value * 0.001 },
+    total: value,
+  })
+  const usage = {
+    tokens: tokens(130_000),
+    components,
+    cost: 30,
+    requests: 100,
+    assistantCalls: 200,
+    errors: 12,
+    aborted: 7,
+    durationMs: 1000,
+  }
+  const mix = [
+    { id: "first", tokens: 70 },
+    { id: "second", tokens: 10 },
+    { id: "third", tokens: 10 },
+    { id: "fourth", tokens: 10 },
+  ]
+  const group = (id: string) => ({ ...usage, id, label: id, sessions: 2, providers: mix, models: mix })
+  const daily = [1, 2, 1, 3, 2, 4].map((value, index) => ({
+    ...usage,
+    day: new Date(2026, 3, index + 1).getTime(),
+    label: `04-0${index + 1}`,
+    tokens: tokens(value * 10_000),
+    cost: index === 0 ? 30 : 0,
+  }))
+  const report: StatsReport = {
+    totalSessions: 2,
+    sessionsWithUsage: 2,
+    totalMessages: 4,
+    totalTools: 1,
+    days: 6,
+    dateRange: { earliest: daily[0].day, latest: daily.at(-1)!.day },
+    total: usage,
+    models: [group("claude-opus-complete-model-name")],
+    providers: [group("production-complete-provider-name")],
+    agents: [group("build")],
+    sources: [group("prompt")],
+    projects: [{ ...group("project"), path: "/projects/完整目录/name with spaces" }],
+    statuses: [
+      { ...group("completed"), requests: 80, tokens: tokens(1000) },
+      { ...group("error"), requests: 12, tokens: tokens(0) },
+      { ...group("aborted"), requests: 7, tokens: tokens(0) },
+      { ...group("running"), requests: 1, tokens: tokens(0) },
+      { ...group("unattributed"), requests: 0, tokens: tokens(129_000) },
+    ],
+    daily,
+    modelSeries: [],
+    providerSeries: [],
+    agentSeries: [],
+    sourceSeries: [],
+    statusSeries: [],
+    projectSeries: [],
+    tokenPartSeries: [],
+    sessions: [
+      {
+        ...usage,
+        id: "ses_priced" as StatsReport["sessions"][number]["id"],
+        title: "中文完整会话标题",
+        projectID: "project",
+        directory: "/project",
+        created: daily[0].day,
+        updated: daily[0].day,
+        messages: 2,
+        tools: 1,
+        providers: ["provider"],
+        models: ["model-one", "model-two", "complete-third-session-model"],
+      },
+      {
+        ...usage,
+        tokens: tokens(0),
+        cost: 0,
+        id: "ses_unpriced" as StatsReport["sessions"][number]["id"],
+        title: "unpriced",
+        projectID: "project",
+        directory: "/project",
+        created: daily[0].day,
+        updated: daily[0].day,
+        messages: 2,
+        tools: 0,
+        providers: [],
+        models: [],
+      },
+    ],
+    toolUsage: [{ id: "read", count: 1, inputChars: 10, outputChars: 20, contextTokens: 0 }],
+    toolSeries: [],
+    toolCalls: [
+      {
+        toolID: "read",
+        modelID: "claude-opus-complete-model-name",
+        providerID: "production-complete-provider-name",
+        agent: "build",
+        projectID: "project",
+        source: "prompt",
+        status: "completed",
+        calls: 1,
+        inputChars: 10,
+        outputChars: 20,
+        errors: 0,
+        durationMs: 10,
+      },
+    ],
+    requestsByHour: Array.from({ length: 24 }, (_, hour) => (hour === 4 ? 12 : hour === 6 ? 3 : 0)),
+    tokensPerSession: 65_000,
+    medianTokensPerSession: 65_000,
+  }
+  const insights = stripAnsi(renderInsights(report, { color: "never" }))
+    .replace(/^│ ?/gm, "")
+    .replace(/\s+/g, " ")
+  for (const section of ["Usage shape", "Attribution", "Variability & outliers", "Actions"])
+    expect(insights).toContain(section)
+  for (const value of [
+    "system 8.0%",
+    "instructions 5.0%",
+    "skills 4.0%",
+    "schemas 12.0%",
+    "user 24.0%",
+    "assistant 10.0%",
+    "reasoning 4.0%",
+    "tool calls 6.0%",
+    "tool results 22.0%",
+    "attach 5.0%",
+  ])
+    expect(insights).toContain(value)
   expect(insights).toContain("status │ completed")
   expect(insights).toContain("Session cost p50 $30.0")
   expect(insights).not.toContain("Forecast")
   expect(insights).toContain("share 100.0% > 55%")
   const model = renderBreakdown(report, { color: "never", by: "model" })
-  for (const value of ["Model portfolio", "Token composition", "Routing & tools", "owned req", "tok/call", "other 10.0%", "claude-opus-complete-model-name"]) expect(model).toContain(value)
+  for (const value of [
+    "Model portfolio",
+    "Token composition",
+    "Routing & tools",
+    "owned req",
+    "tok/call",
+    "other 10.0%",
+    "claude-opus-complete-model-name",
+  ])
+    expect(model).toContain(value)
   const provider = renderBreakdown(report, { color: "never", by: "provider" })
-  for (const value of ["Provider economics", "Model portfolio by provider", "Capacity & reliability", "cost share", "tok/$"]) expect(provider).toContain(value)
-  for (const dimension of ["agent", "source", "project"] as const) expect(renderBreakdown(report, { by: dimension, color: "never" })).toContain("by tokens")
+  for (const value of [
+    "Provider economics",
+    "Model portfolio by provider",
+    "Capacity & reliability",
+    "cost share",
+    "tok/$",
+  ])
+    expect(provider).toContain(value)
+  for (const dimension of ["agent", "source", "project"] as const)
+    expect(renderBreakdown(report, { by: dimension, color: "never" })).toContain("by tokens")
   const project = renderBreakdown(report, { by: "project", color: "never" })
-  for (const value of ["Project portfolio", "/projects/完整目录/name with spaces", "Largest sessions", "中文完整会话标题"]) expect(project).toContain(value)
+  for (const value of [
+    "Project portfolio",
+    "/projects/完整目录/name with spaces",
+    "Largest sessions",
+    "中文完整会话标题",
+  ])
+    expect(project).toContain(value)
   const status = renderBreakdown(report, { by: "status", color: "never" }).replace(/\s+/g, " ")
   expect(status).toContain("100 total · 80 completed · 12 error · 7 aborted · 1 running")
   expect(status).toContain("Unattributed usage")
   expect(status).toContain("Failure leaders within each dimension")
   const timeline = renderTimeline(report, { color: "never" }).replace(/\s+/g, " ")
-  for (const value of ["Daily token volume", "total 130.0K · peak 40.0K/day · avg 21.7K/day", "each trend independently normalized", "Cache Read 128.7K 99.0% · peak 39.6K/day", "Input 910 0.7% · peak 280/day", "Cache Write 130 0.1% · peak 40/day", "Output + Reasoning 260 0.2% · peak 80/day"]) expect(timeline).toContain(value)
+  for (const value of [
+    "Daily token volume",
+    "total 130.0K · peak 40.0K/day · avg 21.7K/day",
+    "each trend independently normalized",
+    "Cache Read 128.7K 99.0% · peak 39.6K/day",
+    "Input 910 0.7% · peak 280/day",
+    "Cache Write 130 0.1% · peak 40/day",
+    "Output + Reasoning 260 0.2% · peak 80/day",
+  ])
+    expect(timeline).toContain(value)
   expect(renderTimeline(report, { color: "never", heatmap: true })).toContain("calendar view")
   expect(renderTimeline(report, { color: "never" })).not.toContain("calendar view")
   const sessions = renderSessions(report, { color: "never", limit: 1 }).replace(/\s+/g, " ")
-  for (const value of ["p90", "p99", "positive recorded cost (1 sessions)", "No positive recorded cost · 1 sessions", "token share", "中文完整会话标题", "complete-third-session-model", "Visible 1 of 2"]) expect(sessions).toContain(value)
+  for (const value of [
+    "p90",
+    "p99",
+    "positive recorded cost (1 sessions)",
+    "No positive recorded cost · 1 sessions",
+    "token share",
+    "中文完整会话标题",
+    "complete-third-session-model",
+    "Visible 1 of 2",
+  ])
+    expect(sessions).toContain(value)
   expect(sessions).not.toContain("Top tools")
-  report.providerSeries = [{ ...usage, id: "token-first", label: "token-first", cost: 1, points: daily.map((point) => ({ ...point, cost: 1 })) }, { ...usage, id: "cost-first", label: "cost-first", cost: 100, points: daily.map((point) => ({ ...point, cost: 10 })) }]
+  report.providerSeries = [
+    {
+      ...usage,
+      id: "token-first",
+      label: "token-first",
+      cost: 1,
+      points: daily.map((point) => ({ ...point, cost: 1 })),
+    },
+    {
+      ...usage,
+      id: "cost-first",
+      label: "cost-first",
+      cost: 100,
+      points: daily.map((point) => ({ ...point, cost: 10 })),
+    },
+  ]
   const forecast = renderInsights(report, { color: "never", forecast: true })
   const drivers = forecast.slice(forecast.indexOf("Forecast drivers"))
   expect(forecast).toContain("30-day run-rate")
   expect(forecast).toContain("endpoint confidence band")
   expect(drivers.indexOf("cost-first")).toBeLessThan(drivers.indexOf("token-first"))
-  const empty: StatsReport = { ...report, total: { ...usage, tokens: tokens(0), components: emptyComponents(), cost: 0, requests: 0, assistantCalls: 0, errors: 0, aborted: 0 }, models: [], providers: [], agents: [], sources: [], statuses: [], projects: [], sessions: [], daily: [], providerSeries: [], toolCalls: [], toolUsage: [] }
+  const empty: StatsReport = {
+    ...report,
+    total: {
+      ...usage,
+      tokens: tokens(0),
+      components: emptyComponents(),
+      cost: 0,
+      requests: 0,
+      assistantCalls: 0,
+      errors: 0,
+      aborted: 0,
+    },
+    models: [],
+    providers: [],
+    agents: [],
+    sources: [],
+    statuses: [],
+    projects: [],
+    sessions: [],
+    daily: [],
+    providerSeries: [],
+    toolCalls: [],
+    toolUsage: [],
+  }
   empty.toolUsage = [{ id: "read", count: 1, inputChars: 10, outputChars: 20, contextTokens: 0 }]
   const toolOnly = renderInsights(empty, { color: "never" })
   expect(toolOnly).toContain("Usage shape")

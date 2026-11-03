@@ -436,6 +436,7 @@ TUI 当前不是 React/Next，而是 `@opentui/solid` + Solid JSX。因此我把
 | 6 | 拆分 `Session`、`Prompt`、`Autocomplete` 大文件 | 降低后续改动复杂度，减少性能回归概率 |
 
 **优先建议**
+
 1. 先做共享 `useSessionUsage` 或 sync-level accounting cache。当前三处重复 `tokenAccounting` 是最值得优先处理的性能和代码量问题。
 2. 然后修 `ContextUsagePanel` 的 snapshot 节流位置。它是打开面板后的明确重计算热点。
 3. 再改 `DialogSelect` 的稳定 key 设计。这个改动能同时影响 command/session/model/tool/mcp 等多个弹窗。
@@ -451,13 +452,15 @@ TUI 当前不是 React/Next，而是 `@opentui/solid` + Solid JSX。因此我把
 
 请先不要实施代码修改。请基于当前仓库的已有设计思想、模块边界、代码风格和测试组织，为本次需求构建一份完整、可执行、克制的实现方案。
 要求：
+
 - 按照项目现有设计理念和分层方式解决问题。
 - 优先复用或微调已有逻辑；不要新增不必要抽象、状态机、配置项、公共 API 或大范围重构。
 - 不要过度假设不存在的问题；只处理本需求真实需要覆盖的正常路径、边界路径和错误路径。
 - 修改应是手术刀式的：切入点少、行为链路清晰、git 净增量和文件数可控。
 - 如果旧逻辑冗余、过期、重复或与新需求冲突，请说明应删除/替换/收敛，而不是叠加新逻辑。
 - 注释只解释非显然约束、安全边界、兼容性原因、常量含义和不变量；需要注释时使用清晰中文。
-请输出：
+  请输出：
+
 1. 需要阅读和确认的现有文件/测试/文档。
 2. 当前相关逻辑的职责边界和必须保持的既有行为。
 3. 推荐的最小实现方案，并说明为什么比其他方案更符合现有设计。
@@ -467,8 +470,8 @@ TUI 当前不是 React/Next，而是 `@opentui/solid` + Solid JSX。因此我把
 7. 建议运行的验证命令。
 8. 预估 git 文件数、增删行数和是否涉及生成文件/迁移/文档。
 9. 真实风险与开放问题；没有必须用户决策的问题就不要阻塞。
-只输出方案，不要改代码。
-最终请给出推荐方案摘要。 
+   只输出方案，不要改代码。
+   最终请给出推荐方案摘要。
 
 因此将完整实现方案写入F:\ML\PythonAIProject\Claude-Code\opencode\docs\draft的markdown中
 
@@ -537,9 +540,11 @@ TUI 当前不是 React/Next，而是 `@opentui/solid` + Solid JSX。因此我把
 ## Assistant (Compaction · GPT-5.5 · 81.4s)
 
 ## Goal
+
 - 为 Opencode TUI 低渲染开销/代码简洁性改进构建一份完整、可执行、克制的实现方案，并写入 `F:\ML\PythonAIProject\Claude-Code\opencode\docs\draft` 下的 Markdown，不实施代码修改。
 
 ## User Constraints & Preferences
+
 - 暂不实施功能代码修改。
 - 方案必须基于当前仓库已有设计思想、模块边界、代码风格和测试组织。
 - 优先复用或微调已有逻辑；不要新增不必要抽象、状态机、配置项、公共 API 或大范围重构。
@@ -561,7 +566,9 @@ TUI 当前不是 React/Next，而是 `@opentui/solid` + Solid JSX。因此我把
 - 方案需写入 `F:\ML\PythonAIProject\Claude-Code\opencode\docs\draft` 的 Markdown 文件。
 
 ## Progress
+
 ### Done
+
 - 已完成一次 TUI 静态审计报告，范围为 `packages/opencode/src/cli/cmd/tui` 及相关 `packages/opencode/src/token/accounting.ts`。
 - 确认 TUI 技术栈是 `@opentui/solid` + Solid JSX，不是 React DOM/Next；Vercel React 规则需等价映射为 Solid/OpenTUI 的订阅粒度、派生状态、列表渲染、事件批处理、热路径计算、定时器等。
 - 审计主要结论：
@@ -576,6 +583,7 @@ TUI 当前不是 React/Next，而是 `@opentui/solid` + Solid JSX。因此我把
   - 已发现 TUI 相关测试位于 `packages/opencode/test/cli/tui/**`，包括 `context-usage.test.ts`, `token-estimate.test.ts`, `prompt-submit-race.test.ts`, `plugin-lifecycle.test.ts` 等。
 
 ### In Progress
+
 - 正在产出实现方案 Markdown，尚未写入 `docs/draft`。
 - 方案应基于前次审计，优先覆盖最小、可测试、低风险的改动路线：
   1. 收敛/共享 token accounting 的重复 full scan，并把节流移动到昂贵计算之前。
@@ -585,9 +593,11 @@ TUI 当前不是 React/Next，而是 `@opentui/solid` + Solid JSX。因此我把
   5. 其余中低优先级仅列入后续建议，不在本轮手术刀式实现中强推。
 
 ### Blocked
+
 - `(none)`
 
 ## Files & Code
+
 - `F:\ML\PythonAIProject\Claude-Code\opencode\.opencode\skills\vercel-react-best-practices\SKILL.md`: 审计参考准则；需映射到 Solid/OpenTUI 语境。
 - `F:\ML\PythonAIProject\Claude-Code\opencode\docs\draft\`: 目标写入目录；当前 glob `docs/draft/**` 未找到文件，目录存在但为空。
 - `F:\ML\PythonAIProject\Claude-Code\opencode\packages\opencode\package.json`: 验证命令来源；`typecheck`, `test`, `test:ci`。
@@ -615,12 +625,14 @@ TUI 当前不是 React/Next，而是 `@opentui/solid` + Solid JSX。因此我把
 - `F:\ML\PythonAIProject\Claude-Code\opencode\packages\opencode\test\fixture\tui-plugin.ts`: 插件/TUI fixture 参考。
 
 ## Errors & Fixes
+
 - `docs/draft/**` glob 输出：`No files found`; 状态：`docs/` 目录读取确认存在 `draft/`，说明目标目录为空而非缺失。
 - `F:\ML\PythonAIProject\Claude-Code\opencode\packages\opencode\src\cli\cmd\tui\component\prompt\file.tsx` 读取失败：`File not found`; 状态：prompt 子目录无该文件，不要继续按该路径查找。
 - `F:\ML\PythonAIProject\Claude-Code\opencode\packages\opencode\src\cli\cmd\tui\component\prompt\command.tsx` 读取失败：`File not found`; 状态：prompt 子目录无该文件，不要继续按该路径查找。
 - `packages/opencode/src/**/*accounting*.test.*` glob 输出：`No files found`; 状态：未找到 accounting 专门测试，方案中可建议新增最小测试或复用现有 TUI 测试组织。
 
 ## Key Decisions
+
 - 将 Vercel React 规则等价应用到 Solid/OpenTUI，而不是按 React DOM/Next 逐条机械套用；原因是目标 TUI 实际使用 `@opentui/solid`。
 - 推荐方案应克制聚焦 P1/P2 中最小闭环，不做大范围拆文件或新公共 API；原因是用户明确要求手术刀式、净增量可控。
 - token accounting 优先收敛为共享派生/工具 hook 或局部可复用逻辑，而不是在各 UI 继续叠加 throttle；原因是当前三处重复 full scan 是真实性能和代码重复问题。
@@ -629,6 +641,7 @@ TUI 当前不是 React/Next，而是 `@opentui/solid` + Solid JSX。因此我把
 - Autocomplete 改动应优先加 debounce/stale guard，避免重构 sources/render；原因是用户要求少切入点、不要新增不必要抽象。
 
 ## Next Steps
+
 - 在 `docs/draft` 下创建一份方案 Markdown，建议文件名类似：
   - `tui-render-cost-implementation-plan.md`
   - 或 `tui-performance-simplification-plan.md`
@@ -646,6 +659,7 @@ TUI 当前不是 React/Next，而是 `@opentui/solid` + Solid JSX。因此我把
 - 写入文档后，最终回复应说明已写入的路径并给出推荐方案摘要；不要实施代码修改。
 
 ## Critical Context
+
 - 前次完整审计报告的总体评分：
   - 渲染架构：7/10
   - 流式事件处理：8/10
@@ -671,4 +685,3 @@ TUI 当前不是 React/Next，而是 `@opentui/solid` + Solid JSX。因此我把
 ## Assistant (Auto · GPT-5.5)
 
 ---
-

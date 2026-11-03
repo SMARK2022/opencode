@@ -126,9 +126,13 @@ function mergeFileDiff(target: DiffAccumulator, item: Snapshot.FileDiff) {
 // SummaryCache 与 SessionSummary 共用这一纯归并规则，避免缓存增量和显式 diff 各自定义文件状态。
 // 输入只保留 completed Tool metadata；可见 Text、Tool output 和其他 Part 不会因聚合被复制到缓存。
 export function collectToolDiffs(messages: readonly ToolDiffMessage[], worktree: string): Snapshot.FileDiff[] {
-  const records = messages.flatMap(message => message.info.hidden ? [] :
-    message.parts.flatMap(part => part.hidden ? [] : [part.state.metadata]),
-  ).filter((meta): meta is Record<string, unknown> => meta !== null && typeof meta === "object" && !Array.isArray(meta))
+  const records = messages
+    .flatMap((message) =>
+      message.info.hidden ? [] : message.parts.flatMap((part) => (part.hidden ? [] : [part.state.metadata])),
+    )
+    .filter(
+      (meta): meta is Record<string, unknown> => meta !== null && typeof meta === "object" && !Array.isArray(meta),
+    )
   return ToolDiffs.collect(records, worktree)
 }
 
@@ -186,13 +190,14 @@ function loadToolDiffMessages(db: TxOrDb, sessionID: SessionID, after?: string, 
     const condition = throughCursor(resolveMessageCursor(db, sessionID, through))
     if (condition) snapshotConditions.push(condition)
   }
-  const snapshotMaxID = db
-    .select({ id: MessageTable.id })
-    .from(MessageTable)
-    .where(and(...snapshotConditions))
-    .orderBy(desc(MessageTable.time_created), desc(MessageTable.id))
-    .limit(1)
-    .get()?.id ?? ""
+  const snapshotMaxID =
+    db
+      .select({ id: MessageTable.id })
+      .from(MessageTable)
+      .where(and(...snapshotConditions))
+      .orderBy(desc(MessageTable.time_created), desc(MessageTable.id))
+      .limit(1)
+      .get()?.id ?? ""
   const partConditions: SQL[] = [
     eq(PartTable.session_id, sessionID),
     sql`json_extract(${PartTable.data}, '$.type') = 'tool'`,
@@ -361,7 +366,10 @@ function greatestClosedMessageID(db: TxOrDb, sessionID: SessionID) {
     .where(eq(MessageTable.session_id, sessionID))
     .orderBy(desc(MessageTable.time_created), desc(MessageTable.id))
     .all()
-  return rows.find((row) => !row.data.hidden && (row.data.role === "user" || row.data.time.completed !== undefined))?.id ?? ""
+  return (
+    rows.find((row) => !row.data.hidden && (row.data.role === "user" || row.data.time.completed !== undefined))?.id ??
+    ""
+  )
 }
 
 function claimInitialization(db: TxOrDb, sessionID: SessionID) {
@@ -374,7 +382,13 @@ function claimInitialization(db: TxOrDb, sessionID: SessionID) {
   const updated = db
     .update(SessionTable)
     .set({ summary_cursor: cursor, summary_init_dirty: false, time_updated: SessionTable.time_updated })
-    .where(and(eq(SessionTable.id, sessionID), isNull(SessionTable.summary_cursor), eq(SessionTable.summary_initialized, false)))
+    .where(
+      and(
+        eq(SessionTable.id, sessionID),
+        isNull(SessionTable.summary_cursor),
+        eq(SessionTable.summary_initialized, false),
+      ),
+    )
     .returning({ id: SessionTable.id })
     .get()
   if (!updated) throw new Error(`Session summary initialization claim changed: ${sessionID}`)
@@ -443,7 +457,11 @@ function confirmMaterialized(db: TxOrDb, input: PreparedDelta & { type: "materia
   // summary-only per-user metadata 更新不触及 Tool history，因此合法情况下 ref/cursor 必须保持原值。
   // 零行代表并发历史变化，必须失败让下一轮重算，不能重复发布已经陈旧的 counters/Bus event。
   const state = selectSummaryState(db, input.sessionID)
-  if (!state.summaryInitialized || state.summaryRef !== input.previousRef || state.summaryCursor !== input.previousCursor) {
+  if (
+    !state.summaryInitialized ||
+    state.summaryRef !== input.previousRef ||
+    state.summaryCursor !== input.previousCursor
+  ) {
     throw new Error(`Session summary cache changed after materialization: ${input.sessionID}`)
   }
 }
@@ -462,9 +480,10 @@ const ensureInitialized = Effect.fn("SummaryCache.ensureInitialized")(function* 
   // dirty claim 已证明 mirror 早于覆盖历史，继续读取只会扩大竞态窗口且最终结果必须丢弃。
   const mirror = claim.dirty
     ? undefined
-    : yield* input.storage
-        .read<unknown>(["session_diff", input.sessionID])
-        .pipe(Effect.catchIf(NotFoundError.isInstance, () => Effect.succeed(undefined)), Effect.orDie)
+    : yield* input.storage.read<unknown>(["session_diff", input.sessionID]).pipe(
+        Effect.catchIf(NotFoundError.isInstance, () => Effect.succeed(undefined)),
+        Effect.orDie,
+      )
   const legacy = yield* Effect.sync(() => {
     if (mirror === undefined) return undefined
     if (!isDiffs(mirror)) throw new Error(`Session diff mirror is invalid: ${input.sessionID}`)
@@ -491,7 +510,7 @@ const ensureInitialized = Effect.fn("SummaryCache.ensureInitialized")(function* 
         if (!row) throw new Error(`Session not found: ${input.sessionID}`)
         // dirty 证明 legacy/row mirror 陈旧，本轮只能从当前可见 Tool rows 构建。
         // 文件 missing 才回退迁移 row；空数组是有效历史，不能与 missing 混淆。
-        const imported = state.summaryInitDirty ? undefined : legacy ?? row.diffs ?? undefined
+        const imported = state.summaryInitDirty ? undefined : (legacy ?? row.diffs ?? undefined)
         if (imported !== undefined && !isDiffs(imported)) {
           throw new Error(`Session diff compatibility value is invalid: ${input.sessionID}`)
         }
@@ -537,7 +556,10 @@ function prepareDeltaState(
     const collected = loadToolDiffMessages(db, input.sessionID, session.summaryCursor ?? undefined)
     // cursor 落后是正常增量，超前则证明历史被外部改写，必须 hard-fail。
     // #0584：超前判定同样按持久 (time, BINARY id) tuple，raw 字典序在回绕后会误报。
-    if (session.summaryCursor !== null && compareMessageCursors(db, input.sessionID, collected.cursor, session.summaryCursor) < 0) {
+    if (
+      session.summaryCursor !== null &&
+      compareMessageCursors(db, input.sessionID, collected.cursor, session.summaryCursor) < 0
+    ) {
       throw new Error(`Session summary cursor is ahead of message history: ${input.sessionID}`)
     }
     const delta = collectToolDiffs(collected.messages, base)

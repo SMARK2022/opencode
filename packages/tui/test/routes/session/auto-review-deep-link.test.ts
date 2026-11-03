@@ -14,12 +14,11 @@ describe("resolveReviewAnchorMessageID", () => {
 
   test("completed review anchors the reviewer assistant whose parentID is the request", () => {
     // 真实形状：R（request user，无 parentID）→ A（assistant 决策壳，parentID=R.id）。
-    const messages = [
-      msg("m_request", "user"),
-      msg("m_decision", "assistant", "m_request"),
-    ]
+    const messages = [msg("m_request", "user"), msg("m_decision", "assistant", "m_request")]
     const partsOf = (messageID: string) =>
-      messageID === "m_request" ? [{ type: "text", metadata: { permissionReviewerRequest: true, reviewID: "rev_1" } }] : []
+      messageID === "m_request"
+        ? [{ type: "text", metadata: { permissionReviewerRequest: true, reviewID: "rev_1" } }]
+        : []
     expect(resolveReviewAnchorMessageID(messages, partsOf, "rev_1")).toBe("m_decision")
   })
 
@@ -27,7 +26,9 @@ describe("resolveReviewAnchorMessageID", () => {
     // reviewing 期：决策 part 未落盘、无 assistant 壳——answer missing 语义是锚定 request，不是贴底。
     const messages = [msg("m_request", "user")]
     const partsOf = (messageID: string) =>
-      messageID === "m_request" ? [{ type: "text", metadata: { permissionReviewerRequest: true, reviewID: "rev_2" } }] : []
+      messageID === "m_request"
+        ? [{ type: "text", metadata: { permissionReviewerRequest: true, reviewID: "rev_2" } }]
+        : []
     expect(resolveReviewAnchorMessageID(messages, partsOf, "rev_2")).toBe("m_request")
   })
 
@@ -71,10 +72,7 @@ describe("auto review deep link wiring contract", () => {
     path.join(import.meta.dir, "..", "..", "..", "src", "routes", "session", "index.tsx"),
     "utf8",
   )
-  const routeSource = readFileSync(
-    path.join(import.meta.dir, "..", "..", "..", "src", "context", "route.tsx"),
-    "utf8",
-  )
+  const routeSource = readFileSync(path.join(import.meta.dir, "..", "..", "..", "src", "context", "route.tsx"), "utf8")
 
   test("SessionRoute carries an optional reviewID anchor", () => {
     expect(routeSource).toContain("reviewID?: string")
@@ -104,6 +102,6 @@ describe("auto review deep link wiring contract", () => {
 
   test("assistant messages expose a scroll-child id for anchor lookup", () => {
     // 复用前序消息布局的稳定id与layoutGroups，不额外套wrapper改变几何。
-    expect(source).toContain('<box id={props.message.id} flexShrink={0}')
+    expect(source).toContain("<box id={props.message.id} flexShrink={0}")
   })
 })

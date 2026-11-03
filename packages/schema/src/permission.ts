@@ -55,7 +55,9 @@ export const Effect = Schema.Literals(["allow", "deny", "ask"]).annotate({ ident
 export type Effect = typeof Effect.Type
 
 // 配置中的 auto 保留到 Permission owner；对外裁决 Effect 仍只有三种终态。
-export const RuleEffect = Schema.Literals(["allow", "deny", "ask", "auto"]).annotate({ identifier: "Permission.RuleEffect" })
+export const RuleEffect = Schema.Literals(["allow", "deny", "ask", "auto"]).annotate({
+  identifier: "Permission.RuleEffect",
+})
 
 export interface Rule extends Schema.Schema.Type<typeof Rule> {}
 export const Rule = Schema.Struct({

@@ -70,7 +70,14 @@ export const withDisposalTimeout = <T>(p: Promise<T>, label: string) => {
     }, DISPOSAL_TIMEOUT)
   })
   // 在 p 上注册 settle 回调清除定时器，但不改变 p 本身的 settle 行为
-  p.then(() => { if (timer) clearTimeout(timer) }, () => { if (timer) clearTimeout(timer) })
+  p.then(
+    () => {
+      if (timer) clearTimeout(timer)
+    },
+    () => {
+      if (timer) clearTimeout(timer)
+    },
+  )
   return Promise.race([p, timeout]) as Promise<T>
 }
 
@@ -81,9 +88,7 @@ export async function disposeAllInstances() {
   // 先前 allSettled 的 rejection 日志循环是永远不会触发的死代码。
   // 保持 Promise.all 与绿测基线（16bb317b8b）行为一致。
   // （目标仅有 InstanceRuntime 单 runtime，源 patch 的 InstanceStore 元素不存在。）
-  await Promise.all([
-    withDisposalTimeout(InstanceRuntime.disposeAllInstances(), "InstanceRuntime"),
-  ])
+  await Promise.all([withDisposalTimeout(InstanceRuntime.disposeAllInstances(), "InstanceRuntime")])
 }
 
 // Strip null bytes from paths (defensive fix for CI environment issues)

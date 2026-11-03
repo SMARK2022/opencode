@@ -178,7 +178,9 @@ export const makeSessionGroup = <I extends HttpApiMiddleware.AnyId, S>(sessionLo
         params: { sessionID: Session.ID },
         success: Schema.Struct({ goal: Schema.NullOr(SessionGoal.Goal) }),
         error: SessionNotFoundError,
-      }).middleware(sessionLocationMiddleware).annotateMerge(OpenApi.annotations({ identifier: "v2.session.goal", summary: "Get session goal" })),
+      })
+        .middleware(sessionLocationMiddleware)
+        .annotateMerge(OpenApi.annotations({ identifier: "v2.session.goal", summary: "Get session goal" })),
       HttpApiEndpoint.post("session.goal.set", "/api/session/:sessionID/goal", {
         params: { sessionID: Session.ID },
         payload: Schema.Struct({
@@ -193,12 +195,16 @@ export const makeSessionGroup = <I extends HttpApiMiddleware.AnyId, S>(sessionLo
         }),
         success: Schema.Struct({ goal: SessionGoal.Goal }),
         error: [InvalidRequestError, SessionNotFoundError],
-      }).middleware(sessionLocationMiddleware).annotateMerge(OpenApi.annotations({ identifier: "v2.session.goal.set", summary: "Set session goal" })),
+      })
+        .middleware(sessionLocationMiddleware)
+        .annotateMerge(OpenApi.annotations({ identifier: "v2.session.goal.set", summary: "Set session goal" })),
       HttpApiEndpoint.delete("session.goal.clear", "/api/session/:sessionID/goal", {
         params: { sessionID: Session.ID },
         success: Schema.Struct({ cleared: Schema.Boolean }),
         error: SessionNotFoundError,
-      }).middleware(sessionLocationMiddleware).annotateMerge(OpenApi.annotations({ identifier: "v2.session.goal.clear", summary: "Clear session goal" })),
+      })
+        .middleware(sessionLocationMiddleware)
+        .annotateMerge(OpenApi.annotations({ identifier: "v2.session.goal.clear", summary: "Clear session goal" })),
     )
     .add(
       HttpApiEndpoint.post("session.switchAgent", "/api/session/:sessionID/agent", {

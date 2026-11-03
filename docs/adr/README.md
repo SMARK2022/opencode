@@ -1,6 +1,6 @@
 # Architectural Decision Records
 
-ADRs record decisions that future architecture reviews should not re-litigate — load-bearing choices where the *why* matters and the reasoning is non-obvious. They are not a changelog and not a place for ephemeral "not worth it right now" notes.
+ADRs record decisions that future architecture reviews should not re-litigate — load-bearing choices where the _why_ matters and the reasoning is non-obvious. They are not a changelog and not a place for ephemeral "not worth it right now" notes.
 
 ## When to write an ADR
 
@@ -45,6 +45,6 @@ Skills (`improve-codebase-architecture`, `/grill-with-docs`) offer to create an 
 
 ## Index
 
-| ADR      | Title                                                         | Status   |
-| -------- | ------------------------------------------------------------- | -------- |
+| ADR                                                         | Title                                               | Status   |
+| ----------------------------------------------------------- | --------------------------------------------------- | -------- |
 | [0001](./0001-triage-labels-and-team-assignment-coexist.md) | Triage lifecycle labels and team-assignment coexist | accepted |

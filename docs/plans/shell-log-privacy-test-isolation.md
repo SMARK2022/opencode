@@ -54,13 +54,13 @@ R1实现审计：全新上下文`ses_ee9fa708effeQ9m6A1tC71KaCp`，Audit mode: i
 
 ## 5. TDD And Verification Results
 
-| 步骤 | 命令（packages/opencode） | 结果 |
-| --- | --- | --- |
-| red | `bun test test/lsp/client.test.ts test/tool/shell.test.ts --timeout 60000` | 修复前 234 pass / 1 fail，与 CI 同一条超时消息 |
-| green | 同一命令 | 235 pass / 0 fail，757 断言，280.49s |
-| 单文件回归 | `bun test test/tool/shell.test.ts --timeout 60000` | 223 pass / 735 断言，235.67s |
-| 另一劫持形态回归 | `bun test test/tool/shell.test.ts test/util/log.test.ts --timeout 60000` | 229 pass / 743 断言，276.51s（util/log.test.ts 含 Log.close 用例） |
-| 类型 | `bun typecheck`（packages/opencode） | 通过 |
+| 步骤             | 命令（packages/opencode）                                                  | 结果                                                               |
+| ---------------- | -------------------------------------------------------------------------- | ------------------------------------------------------------------ |
+| red              | `bun test test/lsp/client.test.ts test/tool/shell.test.ts --timeout 60000` | 修复前 234 pass / 1 fail，与 CI 同一条超时消息                     |
+| green            | 同一命令                                                                   | 235 pass / 0 fail，757 断言，280.49s                               |
+| 单文件回归       | `bun test test/tool/shell.test.ts --timeout 60000`                         | 223 pass / 735 断言，235.67s                                       |
+| 另一劫持形态回归 | `bun test test/tool/shell.test.ts test/util/log.test.ts --timeout 60000`   | 229 pass / 743 断言，276.51s（util/log.test.ts 含 Log.close 用例） |
+| 类型             | `bun typecheck`（packages/opencode）                                       | 通过                                                               |
 
 首次全量回归时遇到一次既有间歇：`preserves Select-Object -First suffix [powershell]` 报 python exit 255（PowerShell Select-Object 提前关管道的已知竞态，先前实现审计已记录为非本次引入）；重跑 223/223 通过，隐私用例在三次运行中全部通过。
 

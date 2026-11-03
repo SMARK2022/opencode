@@ -78,7 +78,11 @@ async function mountPrompt(input: {
             <KVProvider>
               <ThemeProvider mode="dark">
                 <ToastProvider>
-                  <SDKProvider url="http://test" directory={directory} testTransport={{ fetch: calls.fetch, events: events.source }}>
+                  <SDKProvider
+                    url="http://test"
+                    directory={directory}
+                    testTransport={{ fetch: calls.fetch, events: events.source }}
+                  >
                     <DialogProvider>
                       <DialogPrompt title="Rename Session" value="draft" onConfirm={input.onConfirm} />
                     </DialogProvider>
@@ -193,13 +197,11 @@ test("DialogPrompt renders the JSX returned by its description factory", async (
     import("../../../src/ui/dialog"),
   ])
 
-    // 独立 OpenPrompt 组件保证 dialog.replace 发生在 provider 树挂载完成后（onMount 时机）。
+  // 独立 OpenPrompt 组件保证 dialog.replace 发生在 provider 树挂载完成后（onMount 时机）。
   function OpenPrompt() {
     // factory 在 dialog replace 边界传入，测试不会直接求值 description 绕过组件 owner。
     const dialog = useDialog()
-    onMount(() =>
-      dialog.replace(<DialogPrompt title="Prompt" description={() => <text>Factory description</text>} />),
-    )
+    onMount(() => dialog.replace(<DialogPrompt title="Prompt" description={() => <text>Factory description</text>} />))
     return null
   }
 
@@ -228,7 +230,11 @@ test("DialogPrompt renders the JSX returned by its description factory", async (
             <KVProvider>
               <ThemeProvider mode="dark">
                 <ToastProvider>
-                  <SDKProvider url="http://test" directory={directory} testTransport={{ fetch: calls.fetch, events: events.source }}>
+                  <SDKProvider
+                    url="http://test"
+                    directory={directory}
+                    testTransport={{ fetch: calls.fetch, events: events.source }}
+                  >
                     <DialogProvider>
                       <OpenPrompt />
                     </DialogProvider>

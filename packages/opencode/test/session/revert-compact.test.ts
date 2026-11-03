@@ -25,7 +25,16 @@ import { ModelV2 } from "@opencode-ai/core/model"
 
 const it = testEffect(
   LayerNode.compile(
-    LayerNode.group([Session.node, SessionRevert.node, Snapshot.node, SessionProjector.node, CrossSpawnSpawner.node, MessageV2.node, SessionRequestUsage.node, SessionRunState.node]),
+    LayerNode.group([
+      Session.node,
+      SessionRevert.node,
+      Snapshot.node,
+      SessionProjector.node,
+      CrossSpawnSpawner.node,
+      MessageV2.node,
+      SessionRequestUsage.node,
+      SessionRunState.node,
+    ]),
   ),
 )
 
@@ -549,7 +558,6 @@ describe("revert + compact workflow", () => {
     ),
   )
 
-
   it.live(
     "cleanup resumes from a hidden boundary and preserves audit messages",
     provideTmpdirInstance(
@@ -685,7 +693,23 @@ describe("revert + compact workflow", () => {
           const info = yield* session.create({})
           const sid = info.id
 
-          const fakeResult = { info: { id: "", role: "assistant", parentID: "", path: {}, sessionID: sid, providerID: "", modelID: "", mode: "", agent: "", cost: 0, tokens: {}, time: { created: 0 } }, parts: [] } as never
+          const fakeResult = {
+            info: {
+              id: "",
+              role: "assistant",
+              parentID: "",
+              path: {},
+              sessionID: sid,
+              providerID: "",
+              modelID: "",
+              mode: "",
+              agent: "",
+              cost: 0,
+              tokens: {},
+              time: { created: 0 },
+            },
+            parts: [],
+          } as never
           const release = yield* Deferred.make<SessionV1.WithParts>()
           const owner = yield* runState
             .startExclusive(
@@ -707,18 +731,38 @@ describe("revert + compact workflow", () => {
           expect(leased).toBe(true)
 
           expect(Exit.isFailure(yield* runState.assertNotBusy(sid).pipe(Effect.exit))).toBe(true)
-          expect(Exit.isFailure(yield* runState.startExclusive(sid, Effect.succeed(fakeResult), Effect.succeed(fakeResult)).pipe(Effect.exit))).toBe(true)
+          expect(
+            Exit.isFailure(
+              yield* runState
+                .startExclusive(sid, Effect.succeed(fakeResult), Effect.succeed(fakeResult))
+                .pipe(Effect.exit),
+            ),
+          ).toBe(true)
           expect(Exit.isFailure(yield* runState.beginRevert(sid).pipe(Effect.exit))).toBe(true)
 
           // 其它目录同样受维护租约约束；销毁其空State不能取消原目录的owner。
-          expect(Exit.isFailure(yield* runState.assertNotBusy(sid).pipe(Effect.provideService(InstanceRef, target), Effect.exit))).toBe(true)
-          expect(Exit.isFailure(yield* runState.startExclusive(sid, Effect.succeed(fakeResult), Effect.succeed(fakeResult)).pipe(Effect.provideService(InstanceRef, target), Effect.exit))).toBe(true)
-          expect(Exit.isFailure(yield* runState.beginRevert(sid).pipe(Effect.provideService(InstanceRef, target), Effect.exit))).toBe(true)
+          expect(
+            Exit.isFailure(
+              yield* runState.assertNotBusy(sid).pipe(Effect.provideService(InstanceRef, target), Effect.exit),
+            ),
+          ).toBe(true)
+          expect(
+            Exit.isFailure(
+              yield* runState
+                .startExclusive(sid, Effect.succeed(fakeResult), Effect.succeed(fakeResult))
+                .pipe(Effect.provideService(InstanceRef, target), Effect.exit),
+            ),
+          ).toBe(true)
+          expect(
+            Exit.isFailure(
+              yield* runState.beginRevert(sid).pipe(Effect.provideService(InstanceRef, target), Effect.exit),
+            ),
+          ).toBe(true)
           yield* Effect.promise(() => disposeInstance(target.directory))
           expect(Exit.isFailure(yield* runState.assertNotBusy(sid).pipe(Effect.exit))).toBe(true)
 
           // 手动终结 deferred 以释放租约——fakeResult 经 never 泛化后可满足 WithParts 成功通道
-          yield* (Deferred.succeed(release, fakeResult as never) as Effect.Effect<boolean>)
+          yield* Deferred.succeed(release, fakeResult as never) as Effect.Effect<boolean>
           const exit = yield* Effect.exit(Fiber.join(owner))
           expect(Exit.isSuccess(exit)).toBe(true)
           // 释放后 Busy 检查恢复通过
@@ -727,17 +771,31 @@ describe("revert + compact workflow", () => {
           const shellEnd = yield* Deferred.make<SessionV1.WithParts>()
           const queuedStarted = yield* Deferred.make<void>()
           const queuedEnd = yield* Deferred.make<SessionV1.WithParts>()
-          const shell = yield* runState.startShell(sid, Effect.succeed(fakeResult),
-            Deferred.succeed(shellStarted, undefined).pipe(Effect.andThen(Deferred.await(shellEnd))),
-          ).pipe(Effect.provideService(WorkspaceRef, WorkspaceV2.ID.make("wrk_source")), Effect.forkChild)
+          const shell = yield* runState
+            .startShell(
+              sid,
+              Effect.succeed(fakeResult),
+              Deferred.succeed(shellStarted, undefined).pipe(Effect.andThen(Deferred.await(shellEnd))),
+            )
+            .pipe(Effect.provideService(WorkspaceRef, WorkspaceV2.ID.make("wrk_source")), Effect.forkChild)
           yield* awaitWithTimeout(Deferred.await(shellStarted), "logical shell did not start")
-          const queued = yield* runState.ensureRunning(sid, Effect.succeed(fakeResult), Effect.gen(function* () {
-            // D的shell fiber接续T的work时，Instance与显式空Workspace都必须来自T。
-            expect((yield* InstanceState.context).directory).toBe(target.directory)
-            expect(yield* WorkspaceRef).toBeUndefined()
-            yield* Deferred.succeed(queuedStarted, undefined)
-            return yield* Deferred.await(queuedEnd)
-          })).pipe(Effect.provideService(InstanceRef, target), Effect.provideService(WorkspaceRef, undefined), Effect.forkChild)
+          const queued = yield* runState
+            .ensureRunning(
+              sid,
+              Effect.succeed(fakeResult),
+              Effect.gen(function* () {
+                // D的shell fiber接续T的work时，Instance与显式空Workspace都必须来自T。
+                expect((yield* InstanceState.context).directory).toBe(target.directory)
+                expect(yield* WorkspaceRef).toBeUndefined()
+                yield* Deferred.succeed(queuedStarted, undefined)
+                return yield* Deferred.await(queuedEnd)
+              }),
+            )
+            .pipe(
+              Effect.provideService(InstanceRef, target),
+              Effect.provideService(WorkspaceRef, undefined),
+              Effect.forkChild,
+            )
           yield* Effect.yieldNow
           expect(yield* Deferred.isDone(queuedStarted)).toBe(false)
           yield* Deferred.succeed(shellEnd, fakeResult)
@@ -745,10 +803,16 @@ describe("revert + compact workflow", () => {
           yield* awaitWithTimeout(Deferred.await(queuedStarted), "queued caller context was not preserved")
           // 运行中跨目录join不能执行第二份work，目标目录取消后两个等待者均收到中断结果。
           let duplicate = false
-          const joined = yield* runState.ensureRunning(sid, Effect.succeed(fakeResult), Effect.sync(() => {
-            duplicate = true
-            return fakeResult
-          })).pipe(Effect.forkChild)
+          const joined = yield* runState
+            .ensureRunning(
+              sid,
+              Effect.succeed(fakeResult),
+              Effect.sync(() => {
+                duplicate = true
+                return fakeResult
+              }),
+            )
+            .pipe(Effect.forkChild)
           yield* Effect.yieldNow
           expect(duplicate).toBe(false)
           yield* runState.cancel(sid).pipe(Effect.provideService(InstanceRef, target))
@@ -757,8 +821,18 @@ describe("revert + compact workflow", () => {
           yield* runState.assertNotBusy(sid)
           // 撤回登记也跨目录共享，endRevert后同一Session才可再次进入维护。
           yield* runState.beginRevert(sid)
-          expect(Exit.isFailure(yield* runState.assertNotReverting(sid).pipe(Effect.provideService(InstanceRef, target), Effect.exit))).toBe(true)
-          expect(Exit.isFailure(yield* runState.startExclusive(sid, Effect.succeed(fakeResult), Effect.succeed(fakeResult)).pipe(Effect.provideService(InstanceRef, target), Effect.exit))).toBe(true)
+          expect(
+            Exit.isFailure(
+              yield* runState.assertNotReverting(sid).pipe(Effect.provideService(InstanceRef, target), Effect.exit),
+            ),
+          ).toBe(true)
+          expect(
+            Exit.isFailure(
+              yield* runState
+                .startExclusive(sid, Effect.succeed(fakeResult), Effect.succeed(fakeResult))
+                .pipe(Effect.provideService(InstanceRef, target), Effect.exit),
+            ),
+          ).toBe(true)
           yield* runState.endRevert(sid).pipe(Effect.provideService(InstanceRef, target))
           yield* runState.startExclusive(sid, Effect.succeed(fakeResult), Effect.succeed(fakeResult))
         }),
@@ -797,8 +871,12 @@ describe("revert + compact workflow", () => {
 
           // 非零 step usage 在隐藏后仍需由真实 accounting owner 汇总，不能只检查 aborted 状态。
           yield* session.updatePart({
-            id: PartID.ascending(), sessionID: sid, messageID: a1.id,
-            type: "step-finish", reason: "stop", cost: 0,
+            id: PartID.ascending(),
+            sessionID: sid,
+            messageID: a1.id,
+            type: "step-finish",
+            reason: "stop",
+            cost: 0,
             tokens: { ...tokens, input: 37, output: 5 },
           })
 
@@ -1047,128 +1125,127 @@ describe("revert + compact workflow", () => {
   )
 })
 
-  // ── B1: revert 状态守卫 ──────────────────────────────────────
-  // 验证 revert 进行中时，第二次 revert 被阻止（返回 BusyError），
-  // 以及 revert 失败后 reverting 标志被清除（后续操作不受阻）。
+// ── B1: revert 状态守卫 ──────────────────────────────────────
+// 验证 revert 进行中时，第二次 revert 被阻止（返回 BusyError），
+// 以及 revert 失败后 reverting 标志被清除（后续操作不受阻）。
 
-  it.live(
-    "concurrent revert is rejected with BusyError",
-    provideTmpdirInstance(
-      (dir) =>
-        Effect.gen(function* () {
-          const session = yield* Session.Service
-          const revert = yield* SessionRevert.Service
-          const snapshot = yield* Snapshot.Service
+it.live(
+  "concurrent revert is rejected with BusyError",
+  provideTmpdirInstance(
+    (dir) =>
+      Effect.gen(function* () {
+        const session = yield* Session.Service
+        const revert = yield* SessionRevert.Service
+        const snapshot = yield* Snapshot.Service
 
-          // 准备：两个 turn，各有 patch（同文件不同 hash）
-          yield* write(path.join(dir, "a.txt"), "a0")
-          const info = yield* session.create({})
-          const sid = info.id
+        // 准备：两个 turn，各有 patch（同文件不同 hash）
+        yield* write(path.join(dir, "a.txt"), "a0")
+        const info = yield* session.create({})
+        const sid = info.id
 
-          // #545：并发 revert 场景的 turn 同样声明 editTool，保持夹具语义一致。
-          // BusyError 语义与本 patch 无关——此测试只需在新夹具形状下保持可跑。
-          const turn = Effect.fn("test.concurrentTurn")(function* (prev: string, next: string) {
-            const u = yield* user(sid)
-            yield* text(sid, u.id, `a.txt:${next}`)
-            const a = yield* assistant(sid, u.id, dir)
-            const before = yield* snapshot.track()
-            if (!before) throw new Error("expected snapshot")
-            const abs = path.join(dir, "a.txt")
-            yield* write(abs, next)
-            yield* editTool(sid, a.id, abs, prev, next)
-            const after = yield* snapshot.track()
-            if (!after) throw new Error("expected snapshot")
-            const patch = yield* snapshot.patch(before)
-            yield* session.updatePart({
-              id: PartID.ascending(),
-              messageID: a.id,
-              sessionID: sid,
-              type: "step-start",
-              snapshot: before,
-            })
-            yield* session.updatePart({
-              id: PartID.ascending(),
-              messageID: a.id,
-              sessionID: sid,
-              type: "step-finish",
-              reason: "stop",
-              snapshot: after,
-              cost: 0,
-              tokens,
-            })
-            yield* session.updatePart({
-              id: PartID.ascending(),
-              messageID: a.id,
-              sessionID: sid,
-              type: "patch",
-              hash: patch.hash,
-              files: patch.files,
-            })
-            return u.id
+        // #545：并发 revert 场景的 turn 同样声明 editTool，保持夹具语义一致。
+        // BusyError 语义与本 patch 无关——此测试只需在新夹具形状下保持可跑。
+        const turn = Effect.fn("test.concurrentTurn")(function* (prev: string, next: string) {
+          const u = yield* user(sid)
+          yield* text(sid, u.id, `a.txt:${next}`)
+          const a = yield* assistant(sid, u.id, dir)
+          const before = yield* snapshot.track()
+          if (!before) throw new Error("expected snapshot")
+          const abs = path.join(dir, "a.txt")
+          yield* write(abs, next)
+          yield* editTool(sid, a.id, abs, prev, next)
+          const after = yield* snapshot.track()
+          if (!after) throw new Error("expected snapshot")
+          const patch = yield* snapshot.patch(before)
+          yield* session.updatePart({
+            id: PartID.ascending(),
+            messageID: a.id,
+            sessionID: sid,
+            type: "step-start",
+            snapshot: before,
           })
+          yield* session.updatePart({
+            id: PartID.ascending(),
+            messageID: a.id,
+            sessionID: sid,
+            type: "step-finish",
+            reason: "stop",
+            snapshot: after,
+            cost: 0,
+            tokens,
+          })
+          yield* session.updatePart({
+            id: PartID.ascending(),
+            messageID: a.id,
+            sessionID: sid,
+            type: "patch",
+            hash: patch.hash,
+            files: patch.files,
+          })
+          return u.id
+        })
 
-          yield* turn("a0", "a1")
-          yield* turn("a1", "a2")
+        yield* turn("a0", "a1")
+        yield* turn("a1", "a2")
 
-          // 获取两个 user messageID 作为 revert 目标
-          const msgs = yield* session.messages({ sessionID: sid })
-          const userMsgs = msgs.filter((m) => m.info.role === "user")
-          const first = userMsgs[0]!.info.id
-          const second = userMsgs[1]!.info.id
+        // 获取两个 user messageID 作为 revert 目标
+        const msgs = yield* session.messages({ sessionID: sid })
+        const userMsgs = msgs.filter((m) => m.info.role === "user")
+        const first = userMsgs[0]!.info.id
+        const second = userMsgs[1]!.info.id
 
-          // 真正并发：两个 revert 同时执行，beginRevert 原子 check-and-set
-          // 保证只有一个成功，另一个得 BusyError
-          const [exit1, exit2] = yield* Effect.all(
-            [
-              Effect.exit(revert.revert({ sessionID: sid, messageID: first })),
-              Effect.exit(revert.revert({ sessionID: sid, messageID: second })),
-            ],
-            { concurrency: 2 },
-          )
+        // 真正并发：两个 revert 同时执行，beginRevert 原子 check-and-set
+        // 保证只有一个成功，另一个得 BusyError
+        const [exit1, exit2] = yield* Effect.all(
+          [
+            Effect.exit(revert.revert({ sessionID: sid, messageID: first })),
+            Effect.exit(revert.revert({ sessionID: sid, messageID: second })),
+          ],
+          { concurrency: 2 },
+        )
 
-          // 一个成功一个失败（BusyError）——顺序不确定，但恰好一个 success
-          const successCount = [exit1, exit2].filter((e) => Exit.isSuccess(e)).length
-          expect(successCount).toBe(1)
-          const failure = [exit1, exit2].find(Exit.isFailure)
-          expect(failure).toBeDefined()
-          if (failure) expect(Cause.squash(failure.cause)).toBeInstanceOf(Session.BusyError)
+        // 一个成功一个失败（BusyError）——顺序不确定，但恰好一个 success
+        const successCount = [exit1, exit2].filter((e) => Exit.isSuccess(e)).length
+        expect(successCount).toBe(1)
+        const failure = [exit1, exit2].find(Exit.isFailure)
+        expect(failure).toBeDefined()
+        if (failure) expect(Cause.squash(failure.cause)).toBeInstanceOf(Session.BusyError)
 
-          yield* session.remove(sid)
-        }),
-      { git: true },
-    ),
-  )
+        yield* session.remove(sid)
+      }),
+    { git: true },
+  ),
+)
 
-  it.live(
-    "revert clears reverting flag on early return allowing subsequent operations",
-    provideTmpdirInstance(
-      (dir) =>
-        Effect.gen(function* () {
-          const session = yield* Session.Service
-          const revert = yield* SessionRevert.Service
+it.live(
+  "revert clears reverting flag on early return allowing subsequent operations",
+  provideTmpdirInstance(
+    (dir) =>
+      Effect.gen(function* () {
+        const session = yield* Session.Service
+        const revert = yield* SessionRevert.Service
 
-          const info = yield* session.create({})
-          const sid = info.id
-          const u1 = yield* user(sid)
-          yield* text(sid, u1.id, "hello")
+        const info = yield* session.create({})
+        const sid = info.id
+        const u1 = yield* user(sid)
+        yield* text(sid, u1.id, "hello")
 
-          // revert 一个不存在的 messageID——revert 内部遍历找不到 rev，
-          // 提前返回（不触发 git），但 beginRevert/endRevert 仍应正确配对
-          const fakeID = MessageID.ascending()
-          const exit = yield* Effect.exit(revert.revert({ sessionID: sid, messageID: fakeID }))
+        // revert 一个不存在的 messageID——revert 内部遍历找不到 rev，
+        // 提前返回（不触发 git），但 beginRevert/endRevert 仍应正确配对
+        const fakeID = MessageID.ascending()
+        const exit = yield* Effect.exit(revert.revert({ sessionID: sid, messageID: fakeID }))
 
-          // revert 对不存在的 messageID 返回 session（不报错），reverting 已清除
-          expect(Exit.isSuccess(exit)).toBe(true)
-          // 二次 revert 成功 = reverting 标志已被 endRevert 清除（若泄漏会 BusyError 失败）
-          const exit2 = yield* Effect.exit(revert.revert({ sessionID: sid, messageID: fakeID }))
-          expect(Exit.isSuccess(exit2)).toBe(true)
+        // revert 对不存在的 messageID 返回 session（不报错），reverting 已清除
+        expect(Exit.isSuccess(exit)).toBe(true)
+        // 二次 revert 成功 = reverting 标志已被 endRevert 清除（若泄漏会 BusyError 失败）
+        const exit2 = yield* Effect.exit(revert.revert({ sessionID: sid, messageID: fakeID }))
+        expect(Exit.isSuccess(exit2)).toBe(true)
 
-
-          yield* session.remove(sid)
-        }),
-      { git: true },
-    ),
-  )
+        yield* session.remove(sid)
+      }),
+    { git: true },
+  ),
+)
 
 // ── #545 工具流过滤：空 toolFiles 不撤磁盘；有声明时只撤交集 ──────────
 
@@ -1324,125 +1401,133 @@ it.live(
   ),
   30_000,
 )
-  // ── A1: 合并 git checkout ────────────────────────────────────
-  // 验证同一 hash 的多文件批量 revert 能正确恢复全部文件。
-  // 当前测试中每个 turn 只改一个文件且 hash 不同，走 single() 路径。
-  // 此测试构造同 hash 多文件场景，触发 A1 快速 checkout 路径。
+// ── A1: 合并 git checkout ────────────────────────────────────
+// 验证同一 hash 的多文件批量 revert 能正确恢复全部文件。
+// 当前测试中每个 turn 只改一个文件且 hash 不同，走 single() 路径。
+// 此测试构造同 hash 多文件场景，触发 A1 快速 checkout 路径。
 
-  it.live(
-    "revert restores multiple files with same snapshot hash in one batch",
-    provideTmpdirInstance(
-      (dir) =>
-        Effect.gen(function* () {
-          const session = yield* Session.Service
-          const revert = yield* SessionRevert.Service
-          const snapshot = yield* Snapshot.Service
+it.live(
+  "revert restores multiple files with same snapshot hash in one batch",
+  provideTmpdirInstance(
+    (dir) =>
+      Effect.gen(function* () {
+        const session = yield* Session.Service
+        const revert = yield* SessionRevert.Service
+        const snapshot = yield* Snapshot.Service
 
-          // 初始：两个文件
-          yield* write(path.join(dir, "x.txt"), "x0")
-          yield* write(path.join(dir, "y.txt"), "y0")
+        // 初始：两个文件
+        yield* write(path.join(dir, "x.txt"), "x0")
+        yield* write(path.join(dir, "y.txt"), "y0")
 
-          const info = yield* session.create({})
-          const sid = info.id
+        const info = yield* session.create({})
+        const sid = info.id
 
-          const u = yield* user(sid)
-          yield* text(sid, u.id, "change both files")
-          const a = yield* assistant(sid, u.id, dir)
+        const u = yield* user(sid)
+        yield* text(sid, u.id, "change both files")
+        const a = yield* assistant(sid, u.id, dir)
 
-          // 一次 track（before），然后同时修改两个文件，再一次 track（after）
-          // 这样两个文件的 patch 共享同一个 before hash → A1 批量路径
-          const before = yield* snapshot.track()
-          if (!before) throw new Error("expected before snapshot")
-          // A1 批量路径：两 patch 同 before hash 合并 checkout，交集后仍需两文件都恢复。
-          const xAbs = path.join(dir, "x.txt")
-          const yAbs = path.join(dir, "y.txt")
-          yield* write(xAbs, "x1")
-          yield* write(yAbs, "y1")
-          // #545：两个 edit 工具各自声明文件，toolFiles 才能与 patch.files 取交集。
-          // 若任一文件缺声明，无条件交集会把该文件从恢复面剔除、破坏既有断言。
-          yield* editTool(sid, a.id, xAbs, "x0", "x1")
-          yield* editTool(sid, a.id, yAbs, "y0", "y1")
-          const after = yield* snapshot.track()
-          if (!after) throw new Error("expected after snapshot")
-          const patch = yield* snapshot.patch(before)
+        // 一次 track（before），然后同时修改两个文件，再一次 track（after）
+        // 这样两个文件的 patch 共享同一个 before hash → A1 批量路径
+        const before = yield* snapshot.track()
+        if (!before) throw new Error("expected before snapshot")
+        // A1 批量路径：两 patch 同 before hash 合并 checkout，交集后仍需两文件都恢复。
+        const xAbs = path.join(dir, "x.txt")
+        const yAbs = path.join(dir, "y.txt")
+        yield* write(xAbs, "x1")
+        yield* write(yAbs, "y1")
+        // #545：两个 edit 工具各自声明文件，toolFiles 才能与 patch.files 取交集。
+        // 若任一文件缺声明，无条件交集会把该文件从恢复面剔除、破坏既有断言。
+        yield* editTool(sid, a.id, xAbs, "x0", "x1")
+        yield* editTool(sid, a.id, yAbs, "y0", "y1")
+        const after = yield* snapshot.track()
+        if (!after) throw new Error("expected after snapshot")
+        const patch = yield* snapshot.patch(before)
 
-          yield* session.updatePart({
-            id: PartID.ascending(),
-            messageID: a.id,
-            sessionID: sid,
-            type: "step-start",
-            snapshot: before,
-          })
-          yield* session.updatePart({
-            id: PartID.ascending(),
-            messageID: a.id,
-            sessionID: sid,
-            type: "step-finish",
-            reason: "stop",
-            snapshot: after,
-            cost: 0,
-            tokens,
-          })
-          // 两个 patch part 共享同一 hash——A1 会将它们合并为一次 checkout
-          yield* session.updatePart({
-            id: PartID.ascending(),
-            messageID: a.id,
-            sessionID: sid,
-            type: "patch",
-            hash: patch.hash,
-            files: patch.files,
-          })
+        yield* session.updatePart({
+          id: PartID.ascending(),
+          messageID: a.id,
+          sessionID: sid,
+          type: "step-start",
+          snapshot: before,
+        })
+        yield* session.updatePart({
+          id: PartID.ascending(),
+          messageID: a.id,
+          sessionID: sid,
+          type: "step-finish",
+          reason: "stop",
+          snapshot: after,
+          cost: 0,
+          tokens,
+        })
+        // 两个 patch part 共享同一 hash——A1 会将它们合并为一次 checkout
+        yield* session.updatePart({
+          id: PartID.ascending(),
+          messageID: a.id,
+          sessionID: sid,
+          type: "patch",
+          hash: patch.hash,
+          files: patch.files,
+        })
 
-          // revert 后两个文件都应恢复到初始内容
-          yield* revert.revert({ sessionID: sid, messageID: u.id })
-          expect(yield* read(path.join(dir, "x.txt"))).toBe("x0")
-          expect(yield* read(path.join(dir, "y.txt"))).toBe("y0")
+        // revert 后两个文件都应恢复到初始内容
+        yield* revert.revert({ sessionID: sid, messageID: u.id })
+        expect(yield* read(path.join(dir, "x.txt"))).toBe("x0")
+        expect(yield* read(path.join(dir, "y.txt"))).toBe("y0")
 
-          yield* session.remove(sid)
-        }),
-      { git: true },
-    ),
-  )
+        yield* session.remove(sid)
+      }),
+    { git: true },
+  ),
+)
 
-  // ── A2: messages 范围裁剪 ────────────────────────────────────
-  // 验证 messages(fromMessageID) 只返回该 ID 及之后的消息。
+// ── A2: messages 范围裁剪 ────────────────────────────────────
+// 验证 messages(fromMessageID) 只返回该 ID 及之后的消息。
 
-  it.live(
-    "messages with fromMessageID returns only tail messages",
-    provideTmpdirInstance(
-      () =>
-        Effect.gen(function* () {
-          const session = yield* Session.Service
+it.live(
+  "messages with fromMessageID returns only tail messages",
+  provideTmpdirInstance(
+    () =>
+      Effect.gen(function* () {
+        const session = yield* Session.Service
 
-          const info = yield* session.create({})
-          const sid = info.id
+        const info = yield* session.create({})
+        const sid = info.id
 
-          const u1 = yield* userAt(sid, "msg_z9-crop-before", 1)
-          yield* text(sid, u1.id, "first")
-          const u2 = yield* userAt(sid, "msg_z1-crop-target", 2)
-          yield* text(sid, u2.id, "second")
-          const u3 = yield* userAt(sid, "msg_a0-crop-after", 3)
-          yield* text(sid, u3.id, "third")
+        const u1 = yield* userAt(sid, "msg_z9-crop-before", 1)
+        yield* text(sid, u1.id, "first")
+        const u2 = yield* userAt(sid, "msg_z1-crop-target", 2)
+        yield* text(sid, u2.id, "second")
+        const u3 = yield* userAt(sid, "msg_a0-crop-after", 3)
+        yield* text(sid, u3.id, "third")
 
-          // 全量加载应返回 3 条
-          const all = yield* session.messages({ sessionID: sid })
-          expect(all.length).toBe(3)
+        // 全量加载应返回 3 条
+        const all = yield* session.messages({ sessionID: sid })
+        expect(all.length).toBe(3)
 
-          // 从 u2 开始裁剪——只返回 u2 和 u3
-          const tail = yield* session.messages({ sessionID: sid, fromMessageID: u2.id })
-          expect(tail.length).toBe(2)
-          const tailIds = tail.map((m) => m.info.id)
-          expect(tailIds).toContain(u2.id)
-          expect(tailIds).toContain(u3.id)
-          expect(tailIds).not.toContain(u1.id)
-          // 回绕ID仍沿时间后缀分页；不存在的锚点不能退回全量历史。
-          expect((yield* session.messages({ sessionID: sid, limit: 1, fromMessageID: u2.id })).map((m) => m.info.id)).toEqual([u3.id])
-          expect(yield* session.messages({ sessionID: sid, fromMessageID: MessageID.make("msg_missing-crop") })).toEqual([])
-          const page = yield* MessageV2.page({ sessionID: sid, limit: 1, fromMessageID: u2.id })
-          expect((yield* MessageV2.page({ sessionID: sid, limit: 1, before: page.cursor, fromMessageID: u2.id })).items.map((m) => m.info.id)).toEqual([u2.id])
+        // 从 u2 开始裁剪——只返回 u2 和 u3
+        const tail = yield* session.messages({ sessionID: sid, fromMessageID: u2.id })
+        expect(tail.length).toBe(2)
+        const tailIds = tail.map((m) => m.info.id)
+        expect(tailIds).toContain(u2.id)
+        expect(tailIds).toContain(u3.id)
+        expect(tailIds).not.toContain(u1.id)
+        // 回绕ID仍沿时间后缀分页；不存在的锚点不能退回全量历史。
+        expect(
+          (yield* session.messages({ sessionID: sid, limit: 1, fromMessageID: u2.id })).map((m) => m.info.id),
+        ).toEqual([u3.id])
+        expect(yield* session.messages({ sessionID: sid, fromMessageID: MessageID.make("msg_missing-crop") })).toEqual(
+          [],
+        )
+        const page = yield* MessageV2.page({ sessionID: sid, limit: 1, fromMessageID: u2.id })
+        expect(
+          (yield* MessageV2.page({ sessionID: sid, limit: 1, before: page.cursor, fromMessageID: u2.id })).items.map(
+            (m) => m.info.id,
+          ),
+        ).toEqual([u2.id])
 
-          yield* session.remove(sid)
-        }),
-      { git: true },
-    ),
-  )
+        yield* session.remove(sid)
+      }),
+    { git: true },
+  ),
+)

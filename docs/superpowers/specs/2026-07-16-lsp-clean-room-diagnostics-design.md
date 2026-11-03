@@ -76,14 +76,14 @@ The run is invalid unless all assertions pass:
 Each matrix cell starts with a fresh fixture or restarted provider state. A
 fixed control editor is active before the target request.
 
-| Stage | Trigger | Assertion |
-| --- | --- | --- |
-| A | `openTextDocument` only | Record document, diagnostics, active editor, and tab groups. |
-| B | `vscode.executeDocumentSymbolProvider` | Provider result cannot count as diagnostic readiness. |
-| C | hover and definition provider commands | Same zero-tab and exact-error assertions. |
-| D | code action, inlay hint, and completion provider commands | Same zero-tab and exact-error assertions. |
-| E | freshly built bridge diagnostic endpoint | Verify endpoint identity, typed result, and request-local events. |
-| F | external clean-to-error edit | Correlate document synchronization and later diagnostic waves without equating them. |
+| Stage | Trigger                                                   | Assertion                                                                            |
+| ----- | --------------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| A     | `openTextDocument` only                                   | Record document, diagnostics, active editor, and tab groups.                         |
+| B     | `vscode.executeDocumentSymbolProvider`                    | Provider result cannot count as diagnostic readiness.                                |
+| C     | hover and definition provider commands                    | Same zero-tab and exact-error assertions.                                            |
+| D     | code action, inlay hint, and completion provider commands | Same zero-tab and exact-error assertions.                                            |
+| E     | freshly built bridge diagnostic endpoint                  | Verify endpoint identity, typed result, and request-local events.                    |
+| F     | external clean-to-error edit                              | Correlate document synchronization and later diagnostic waves without equating them. |
 
 For every stage:
 
@@ -208,16 +208,16 @@ production edit path must not return `pending`, `observed-pending`, or an empty
 diagnostic array when the provider has not completed. The current file result is
 terminal only when the provider's own request or versioned publication proves it.
 
-| Provider | Completion signal | Fresh/warm evidence | Decision |
-| --- | --- | --- | --- |
-| Pyright 1.1.408 | `textDocument/diagnostic` full report, including explicit empty `items` | 20,001-file Project: initialization 1,088 ms, first report 665 ms, then 2-10 ms; 12/12 under 1 s | Direct pull is authoritative after readiness and current-document sync. |
-| Ruff 0.15.21 | `textDocument/diagnostic` full report | 20,001-file Project: initialization 6 ms, max 22 ms, 12/12 under 1 s | Add Ruff as a direct provider; empty full report is a real clean result. |
-| TypeScript 5.3.0 server | Three advertised `workspace/executeCommand` requests: `semanticDiagnosticsSync`, `syntacticDiagnosticsSync`, `suggestionDiagnosticsSync` | 20,002-file Project: readiness warm-up 3,862 ms; after warm-up max 84 ms, 12/12 exact | Historical benchmark only; R25/R28 forbid this provider-specific production branch. |
-| ESLint 3.0.24 server | `textDocument/diagnostic` full report | 20,001-file Project: max 216 ms, 12/12 exact | Direct pull is authoritative when ESLint is applicable and configured. |
-| clangd 17 | `textDocument/publishDiagnostics` full replacement with `version` equal to the sent `didChange` version | 12 alternating error/clean reports, max 64 ms, 12/12 same-version | Versioned push is authoritative for the request-local change. |
-| JDT LS 1.59 | `java.project.refreshDiagnostics` command plus request-local `publishDiagnostics` for the normalized target URI | 12 alternating error/clean reports, max 76 ms, 12/12 exact | Explicit refresh plus matching publication is authoritative; no fixed delay. |
-| rust-analyzer 0.3.2971 | `experimental/serverStatus` with `health: "ok", quiescent: true`, then `textDocument/diagnostic` full report | Readiness 4,706-10,934 ms; after readiness max 12 ms, 12/12 exact | Warm readiness outside the edit budget; early empty reports are not clean. |
-| Pylance/Ruff through VS Code aggregate API | URI-only aggregate event, no provider identity or all-provider completion | Zero-tab experiment produced separate waves but no stable completion hook | Keep as observed information only; never use it for strict clean/baseline. |
+| Provider                                   | Completion signal                                                                                                                        | Fresh/warm evidence                                                                              | Decision                                                                            |
+| ------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------- |
+| Pyright 1.1.408                            | `textDocument/diagnostic` full report, including explicit empty `items`                                                                  | 20,001-file Project: initialization 1,088 ms, first report 665 ms, then 2-10 ms; 12/12 under 1 s | Direct pull is authoritative after readiness and current-document sync.             |
+| Ruff 0.15.21                               | `textDocument/diagnostic` full report                                                                                                    | 20,001-file Project: initialization 6 ms, max 22 ms, 12/12 under 1 s                             | Add Ruff as a direct provider; empty full report is a real clean result.            |
+| TypeScript 5.3.0 server                    | Three advertised `workspace/executeCommand` requests: `semanticDiagnosticsSync`, `syntacticDiagnosticsSync`, `suggestionDiagnosticsSync` | 20,002-file Project: readiness warm-up 3,862 ms; after warm-up max 84 ms, 12/12 exact            | Historical benchmark only; R25/R28 forbid this provider-specific production branch. |
+| ESLint 3.0.24 server                       | `textDocument/diagnostic` full report                                                                                                    | 20,001-file Project: max 216 ms, 12/12 exact                                                     | Direct pull is authoritative when ESLint is applicable and configured.              |
+| clangd 17                                  | `textDocument/publishDiagnostics` full replacement with `version` equal to the sent `didChange` version                                  | 12 alternating error/clean reports, max 64 ms, 12/12 same-version                                | Versioned push is authoritative for the request-local change.                       |
+| JDT LS 1.59                                | `java.project.refreshDiagnostics` command plus request-local `publishDiagnostics` for the normalized target URI                          | 12 alternating error/clean reports, max 76 ms, 12/12 exact                                       | Explicit refresh plus matching publication is authoritative; no fixed delay.        |
+| rust-analyzer 0.3.2971                     | `experimental/serverStatus` with `health: "ok", quiescent: true`, then `textDocument/diagnostic` full report                             | Readiness 4,706-10,934 ms; after readiness max 12 ms, 12/12 exact                                | Warm readiness outside the edit budget; early empty reports are not clean.          |
+| Pylance/Ruff through VS Code aggregate API | URI-only aggregate event, no provider identity or all-provider completion                                                                | Zero-tab experiment produced separate waves but no stable completion hook                        | Keep as observed information only; never use it for strict clean/baseline.          |
 
 The large Project benchmarks deliberately included 20,000 files in the Project
 tree. The Python and TypeScript results show the required split: starting and

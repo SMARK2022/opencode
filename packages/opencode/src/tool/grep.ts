@@ -22,7 +22,6 @@ const MAX_TIMEOUT = 120_000
 // 避免两参数定义分叉后出现 include 支持数组而 exclude 不支持的回归
 const PatternList = Schema.Union([Schema.String, Schema.Array(Schema.String)])
 
-
 export const Parameters = Schema.Struct({
   pattern: Schema.String.annotate({ description: "The regex pattern to search for in file contents" }),
   path: Schema.optional(Schema.String).annotate({
@@ -207,7 +206,9 @@ export const GrepTool = Tool.define(
             output.push("")
             // #244：条数截断提示只在数量截断时出现，与超时提示分开措辞，
             // 模型可依据措辞差异选择「收窄 pattern」还是「加大 timeout」
-            output.push(`(Results truncated: showing first ${RESULT_LIMIT} matches. Consider using a more specific path or pattern.)`)
+            output.push(
+              `(Results truncated: showing first ${RESULT_LIMIT} matches. Consider using a more specific path or pattern.)`,
+            )
           }
 
           if (result.timedOut) {

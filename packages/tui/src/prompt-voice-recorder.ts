@@ -118,8 +118,11 @@ export async function startPromptVoiceRecorder(): Promise<VoiceRecorderHandle> {
     abort: async () => {
       // stop 可能仍在写 WAV，复用其完成点后再删除，避免取消后出现迟到文件。
       // stop 调用者已接收原始错误；abort 保持既有 best-effort 清理合同。
-      try { await close(false).catch(() => {}) }
-      finally { await fs.rm(file, { force: true }) }
+      try {
+        await close(false).catch(() => {})
+      } finally {
+        await fs.rm(file, { force: true })
+      }
     },
   }
 }
@@ -144,7 +147,8 @@ async function pvRecorderNativePath() {
 // #558：Worker 入口唯一——native/Worker 缺失一律直接失败，不保留第二套录音路径。
 export function voiceWorkerPath() {
   if (typeof OPENCODE_COMPILED !== "undefined" && OPENCODE_COMPILED) {
-    if (typeof OPENCODE_VOICE_WORKER_PATH === "undefined") throw new Error("Voice recorder Worker is missing from this installation")
+    if (typeof OPENCODE_VOICE_WORKER_PATH === "undefined")
+      throw new Error("Voice recorder Worker is missing from this installation")
     return OPENCODE_VOICE_WORKER_PATH
   }
   return new URL("./prompt-voice-recorder-worker.ts", import.meta.url).href
@@ -195,7 +199,9 @@ async function sameFileContent(source: string, target: string) {
 
 async function fileDigest(file: string) {
   // SHA-256 只用于校验本地 native cache 是否等于嵌入资源，不参与安全协议或外部输入解析。
-  return createHash("sha256").update(Buffer.from(await Bun.file(file).arrayBuffer())).digest("hex")
+  return createHash("sha256")
+    .update(Buffer.from(await Bun.file(file).arrayBuffer()))
+    .digest("hex")
 }
 
 async function cleanupExtractedPvRecorderCache(root: string, keepVersion: string) {

@@ -17,8 +17,12 @@ export function setPreLayoutSiblingMargin(el: BoxRenderable, margin: (previous?:
     const previous = cached?.frameID === el.ctx.frameId ? cached.previous : previousSiblings(parent, el.ctx.frameId)
     const sibling = previous.get(el)
     // 组内工具保持紧排，跨助手消息至少隔一行；空消息组不会制造额外间距。
-    const boundary = el.parent && sibling?.parent && el.parent !== sibling.parent
-      && layoutGroups.has(el.parent) && layoutGroups.has(sibling.parent)
+    const boundary =
+      el.parent &&
+      sibling?.parent &&
+      el.parent !== sibling.parent &&
+      layoutGroups.has(el.parent) &&
+      layoutGroups.has(sibling.parent)
     const value = Math.max(margin(sibling), boundary ? 1 : 0)
     if (el.marginTop !== value) el.marginTop = value
   }

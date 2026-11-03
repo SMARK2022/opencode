@@ -75,18 +75,29 @@ const prepareOnce = Effect.fnUntraced(function* (
   // 已持久化的旧裸 Snapshot 没有片段归属，仍解码原契约；缺少证明的文本保守留在 system。
   // 私有 wrapper 不改变 baseline_seq 或 source 的等价比较，现有 ContextEpoch admission 仍是唯一 owner。
   const decoded = Schema.decodeUnknownOption(State)(stored.snapshot)
-  const snapshot = Option.isSome(decoded) ? decoded.value : {
-    sources: yield* Schema.decodeUnknownEffect(SystemContext.Snapshot)(stored.snapshot).pipe(
-      Effect.mapError((error) => new ContextSnapshotDecodeError({ sessionID, details: String(error) })),
-    ), sections: [], anchor: undefined,
-  }
+  const snapshot = Option.isSome(decoded)
+    ? decoded.value
+    : {
+        sources: yield* Schema.decodeUnknownEffect(SystemContext.Snapshot)(stored.snapshot).pipe(
+          Effect.mapError((error) => new ContextSnapshotDecodeError({ sessionID, details: String(error) })),
+        ),
+        sections: [],
+        anchor: undefined,
+      }
   const replacementSeq = compaction !== undefined && compaction.seq > stored.baseline_seq ? compaction.seq : undefined
   // 查原始投影而非已裁剪的模型历史；正常compaction过滤不等于用户删除更新。
-  const missingAnchor = snapshot.anchor && !(yield* db.select({ id: SessionMessageTable.id })
-    .from(SessionMessageTable).where(eq(SessionMessageTable.id, snapshot.anchor)).get().pipe(Effect.orDie))
-  const result = replacementSeq !== undefined || missingAnchor
-    ? yield* SystemContext.replace(value, snapshot.sources, capture(sections))
-    : yield* SystemContext.reconcile(value, snapshot.sources, capture(sections))
+  const missingAnchor =
+    snapshot.anchor &&
+    !(yield* db
+      .select({ id: SessionMessageTable.id })
+      .from(SessionMessageTable)
+      .where(eq(SessionMessageTable.id, snapshot.anchor))
+      .get()
+      .pipe(Effect.orDie))
+  const result =
+    replacementSeq !== undefined || missingAnchor
+      ? yield* SystemContext.replace(value, snapshot.sources, capture(sections))
+      : yield* SystemContext.reconcile(value, snapshot.sources, capture(sections))
   // 不可用来源继续保守复用原 baseline/证明，估算不能偷读当前文件生成替代正文。
   if (result._tag === "Unchanged" || result._tag === "ReplacementBlocked") {
     return { baseline: stored.baseline, baselineSeq: stored.baseline_seq, sections: snapshot.sections }
@@ -116,7 +127,7 @@ const initializeOnce = Effect.fnUntraced(function* (
 ) {
   if (yield* exists(db, sessionID)) return
   const sections: Array<State["sections"][number]> = []
-  const generation = yield* context.pipe(Effect.flatMap(value => SystemContext.initialize(value, capture(sections))))
+  const generation = yield* context.pipe(Effect.flatMap((value) => SystemContext.initialize(value, capture(sections))))
   const baselineSeq = yield* insert(db, sessionID, generation, sections)
   return { baseline: generation.baseline, baselineSeq, sections }
 })
@@ -194,11 +205,7 @@ const replace = Effect.fnUntraced(function* (
   if (!updated) return yield* Effect.die("Context Epoch not found")
 })
 
-const advance = Effect.fnUntraced(function* (
-  db: DatabaseService,
-  sessionID: SessionSchema.ID,
-  snapshot: State,
-) {
+const advance = Effect.fnUntraced(function* (db: DatabaseService, sessionID: SessionSchema.ID, snapshot: State) {
   const updated = yield* db
     .update(SessionContextEpochTable)
     .set({ snapshot })

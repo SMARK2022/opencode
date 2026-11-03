@@ -33,9 +33,18 @@ export function isV1(input: unknown) {
   if (Object.keys(input).some((key) => keys.has(key))) return true
   const mcp = "mcp" in input ? input.mcp : undefined
   // 旧MCP可单独配置，不能因缺少其他旧键而被新schema当成空服务器集。
-  return typeof mcp === "object" && mcp !== null && !Array.isArray(mcp) &&
-    Object.values(mcp).some(server => typeof server === "object" && server !== null && (
-      ("type" in server && (server.type === "local" || server.type === "remote")) || ("enabled" in server && typeof server.enabled === "boolean")))
+  return (
+    typeof mcp === "object" &&
+    mcp !== null &&
+    !Array.isArray(mcp) &&
+    Object.values(mcp).some(
+      (server) =>
+        typeof server === "object" &&
+        server !== null &&
+        (("type" in server && (server.type === "local" || server.type === "remote")) ||
+          ("enabled" in server && typeof server.enabled === "boolean")),
+    )
+  )
 }
 
 export function migrate(info: typeof ConfigV1.Info.Type) {
@@ -77,7 +86,8 @@ export function migrate(info: typeof ConfigV1.Info.Type) {
     ),
     goal_max_turns: info.goal_max_turns,
     experimental: info.experimental && {
-      policies: info.experimental.policies, primary_tools: info.experimental.primary_tools?.map(normalizeAction),
+      policies: info.experimental.policies,
+      primary_tools: info.experimental.primary_tools?.map(normalizeAction),
     },
     providers: providers(info.provider),
   }
@@ -98,11 +108,18 @@ function permissions(info?: ConfigPermissionV1.Info, tools?: Readonly<Record<str
     if (!rule) continue
     if (typeof rule === "string") {
       // 保留四态原值及最后匹配顺序，控制字段已在上方排除。
-      if (rule === "allow" || rule === "deny" || rule === "ask" || rule === "auto") rules.push({ action, resource: "*", effect: rule })
+      if (rule === "allow" || rule === "deny" || rule === "ask" || rule === "auto")
+        rules.push({ action, resource: "*", effect: rule })
       continue
     }
     // #196：pattern 映射沿用同一 action 转换，agent 权限也经过该迁移入口。
-    rules.push(...Object.entries(rule).flatMap(([resource, effect]): typeof rules => effect === "allow" || effect === "deny" || effect === "ask" || effect === "auto" ? [{ action, resource, effect }] : []))
+    rules.push(
+      ...Object.entries(rule).flatMap(([resource, effect]): typeof rules =>
+        effect === "allow" || effect === "deny" || effect === "ask" || effect === "auto"
+          ? [{ action, resource, effect }]
+          : [],
+      ),
+    )
   }
   return rules.length ? rules : undefined
 }
@@ -144,9 +161,10 @@ export function migrateAgent(info: ConfigAgentV1.Info) {
 export function mcp(info: Pick<typeof ConfigV1.Info.Type, "mcp" | "experimental">): ConfigMCP.Info | undefined {
   const servers = Object.fromEntries(
     // enabled-only是公开的继承覆盖，不能在全局与项目配置合并前丢弃。
-    Object.entries(info.mcp ?? {}).map(([name, server]) =>
-      [name, "type" in server ? migrateMcp(server) : { disabled: !server.enabled }],
-    ),
+    Object.entries(info.mcp ?? {}).map(([name, server]) => [
+      name,
+      "type" in server ? migrateMcp(server) : { disabled: !server.enabled },
+    ]),
   )
   const timeout = info.experimental?.mcp_timeout
   if (!timeout && !Object.keys(servers).length) return undefined
@@ -205,15 +223,16 @@ function migrateProvider(info: ConfigProviderV1.Info) {
           ...(url === undefined ? {} : { url }),
           settings: options?.settings ?? {},
         }
-      // api/baseURL 与 SDK settings 可独立覆盖，基础协议在 catalog 中确定。
-      : info.extends || url !== undefined
+      : // api/baseURL 与 SDK settings 可独立覆盖，基础协议在 catalog 中确定。
+        info.extends || url !== undefined
         ? { ...(url === undefined ? {} : { url }), settings: options?.settings ?? {} }
         : undefined,
-    request: info.options && options && {
-      headers: options.headers,
-      // 显式 SDK 同样保留可用性信号；resolver 在编码 provider 请求前移除内部 apiKey。
-      body: typeof info.options.apiKey === "string" ? { apiKey: info.options.apiKey, ...options.body } : options.body,
-    },
+    request: info.options &&
+      options && {
+        headers: options.headers,
+        // 显式 SDK 同样保留可用性信号；resolver 在编码 provider 请求前移除内部 apiKey。
+        body: typeof info.options.apiKey === "string" ? { apiKey: info.options.apiKey, ...options.body } : options.body,
+      },
     models:
       info.models &&
       Object.fromEntries(Object.entries(info.models).map(([name, model]) => [name, migrateModel(model, info.npm)])),
@@ -249,9 +268,14 @@ function migrateModel(info: typeof ConfigProviderV1.Model.Type, packageName?: st
       : undefined
   return {
     // 能力开关随未决输入到配置 owner；显式 npm 的 options/variants 仍沿原路径转换。
-    v1: deferred || info.reasoning !== undefined
-      ? { options: deferred ? info.options : undefined, variants: deferred ? info.variants : undefined, reasoning: info.reasoning }
-      : undefined,
+    v1:
+      deferred || info.reasoning !== undefined
+        ? {
+            options: deferred ? info.options : undefined,
+            variants: deferred ? info.variants : undefined,
+            reasoning: info.reasoning,
+          }
+        : undefined,
     family: info.family,
     name: info.name,
     api: info.provider?.npm
@@ -262,8 +286,8 @@ function migrateModel(info: typeof ConfigProviderV1.Model.Type, packageName?: st
           ...(info.provider.api === undefined ? {} : { url: info.provider.api }),
           settings: {},
         }
-      // 原始 model.provider.api 独立于 npm；迁移不得吞掉仅 URL 的模型覆盖。
-      : info.id !== undefined || info.provider?.api !== undefined
+      : // 原始 model.provider.api 独立于 npm；迁移不得吞掉仅 URL 的模型覆盖。
+        info.id !== undefined || info.provider?.api !== undefined
         ? {
             ...(info.id === undefined ? {} : { id: info.id }),
             ...(info.provider?.api === undefined ? {} : { url: info.provider.api }),
@@ -274,12 +298,13 @@ function migrateModel(info: typeof ConfigProviderV1.Model.Type, packageName?: st
       headers: info.headers,
       body: request,
     },
-    variants:
-      deferred ? undefined : info.variants &&
-      Object.entries(info.variants).map(([id, options]) => ({
-        id,
-        body: lowerer.request(options),
-      })),
+    variants: deferred
+      ? undefined
+      : info.variants &&
+        Object.entries(info.variants).map(([id, options]) => ({
+          id,
+          body: lowerer.request(options),
+        })),
     cost: costs,
     disabled: info.status === "deprecated" ? true : undefined,
     limit: info.limit && {

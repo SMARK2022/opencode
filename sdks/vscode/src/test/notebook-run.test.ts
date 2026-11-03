@@ -10,17 +10,23 @@ test("rejects multiple cells before executing an explicit single-cell request", 
     serializeNotebook: () => new Uint8Array(),
   })
   try {
-    const notebook = await workspace.openNotebookDocument("opencode-run-test", new NotebookData([
-      new NotebookCellData(NotebookCellKind.Code, "first = 1", "python"),
-      new NotebookCellData(NotebookCellKind.Code, "second = 2", "python"),
-    ]))
+    const notebook = await workspace.openNotebookDocument(
+      "opencode-run-test",
+      new NotebookData([
+        new NotebookCellData(NotebookCellKind.Code, "first = 1", "python"),
+        new NotebookCellData(NotebookCellKind.Code, "second = 2", "python"),
+      ]),
+    )
     // 拒绝发生在界面与原生命令之前，不需要启动内核来证明执行范围边界。
-    await rejects(runNotebook({
-      filePath: notebook.uri.toString(),
-      type: "cell",
-      cellId: copilotLikeCellId(notebook.cellAt(0)),
-      endCellId: copilotLikeCellId(notebook.cellAt(1)),
-    }), /endCellId must not be set when type is cell/)
+    await rejects(
+      runNotebook({
+        filePath: notebook.uri.toString(),
+        type: "cell",
+        cellId: copilotLikeCellId(notebook.cellAt(0)),
+        endCellId: copilotLikeCellId(notebook.cellAt(1)),
+      }),
+      /endCellId must not be set when type is cell/,
+    )
   } finally {
     serializer.dispose()
   }

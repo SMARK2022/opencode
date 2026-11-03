@@ -43,7 +43,10 @@ it.instance("subagent inherits the executing parent agent's edit restriction", (
     const parentSessionPermission: PermissionV1.Ruleset = []
 
     // 传真实父权限，固定期望才会检查 Task 的继承分支而非空默认。
-    const subagentSessionPermission = deriveSubagentSessionPermission({ parentSessionPermission, subagent: generalAgent! }, planAgent!.permission)
+    const subagentSessionPermission = deriveSubagentSessionPermission(
+      { parentSessionPermission, subagent: generalAgent! },
+      planAgent!.permission,
+    )
 
     // Mirror the runtime evaluation in session/prompt.ts (~line 410, 639):
     //   ruleset: Permission.merge(agent.permission, session.permission ?? [])
@@ -83,13 +86,18 @@ it.instance(
 
       const parentSessionPermission: PermissionV1.Ruleset = []
       // 自定义子代理同样承接执行代理限制，不以子代理身份绕过 source 顺序。
-      const subagentSessionPermission = deriveSubagentSessionPermission({ parentSessionPermission, subagent: my! }, planAgent!.permission)
+      const subagentSessionPermission = deriveSubagentSessionPermission(
+        { parentSessionPermission, subagent: my! },
+        planAgent!.permission,
+      )
       const effective = Permission.merge(my!.permission, subagentSessionPermission)
 
       expect(Permission.evaluate("edit", "/some/file.ts", planAgent!.permission).action).toBe("deny")
       expect(Permission.evaluate("edit", "/some/file.ts", effective).action).toBe("deny")
       // 自定义子代理也只继承父子共享的计划文件例外，不放开普通文件。
-      expect(Permission.evaluate("edit", path.join(".opencode", "plans", "delegated.md"), effective).action).toBe("allow")
+      expect(Permission.evaluate("edit", path.join(".opencode", "plans", "delegated.md"), effective).action).toBe(
+        "allow",
+      )
       expect(Permission.disabled(["edit", "write", "apply_patch"], effective)).toEqual(new Set())
     }),
   {
@@ -441,8 +449,12 @@ it.effect("directory grants preserve child-shared session exceptions over parent
       [Permission.fromConfig({ external_directory: "allow" }), "allow"],
     ] as const) {
       const rules = deriveSubagentSessionPermission({ parentSessionPermission: grant, subagent: executor }, parent)
-      expect(Permission.evaluate("external_directory", "/tmp/allowed/file", executor.permission, rules).action).toBe("allow")
-      expect(Permission.evaluate("external_directory", "/tmp/outside/file", executor.permission, rules).action).toBe(outside)
+      expect(Permission.evaluate("external_directory", "/tmp/allowed/file", executor.permission, rules).action).toBe(
+        "allow",
+      )
+      expect(Permission.evaluate("external_directory", "/tmp/outside/file", executor.permission, rules).action).toBe(
+        outside,
+      )
     }
   }),
 )

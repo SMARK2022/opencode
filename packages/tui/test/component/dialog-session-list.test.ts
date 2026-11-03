@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test"
-import { createDialogSessionListQuery, loadDialogSessionList, matchesDialogSessionSearch, visibleSessions } from "../../src/component/dialog-session-list"
+import {
+  createDialogSessionListQuery,
+  loadDialogSessionList,
+  matchesDialogSessionSearch,
+  visibleSessions,
+} from "../../src/component/dialog-session-list"
 
 describe("dialog session list", () => {
   test("retains body matches without admitting unrelated pinned sessions", () => {

@@ -86,13 +86,16 @@ export class Info extends Schema.Class<Info>("ConfigV2.Provider")({
   name: Schema.String.pipe(Schema.optional),
   env: Schema.String.pipe(Schema.Array, Schema.optional),
   // 只有 URL/settings 的覆盖不能被误编码成 native，从而丢掉基础 SDK。
-  api: Schema.Union([ProviderV2.Api, Schema.Struct({
-    // 部分覆盖不得吞掉无效的显式 type/package，完整协议仍由原 union 校验。
-    type: Schema.Never.pipe(Schema.optional),
-    package: Schema.Never.pipe(Schema.optional),
-    url: Schema.String.pipe(Schema.optional),
-    settings: Schema.Record(Schema.String, Schema.Unknown).pipe(Schema.optional),
-  })]).pipe(Schema.optional),
+  api: Schema.Union([
+    ProviderV2.Api,
+    Schema.Struct({
+      // 部分覆盖不得吞掉无效的显式 type/package，完整协议仍由原 union 校验。
+      type: Schema.Never.pipe(Schema.optional),
+      package: Schema.Never.pipe(Schema.optional),
+      url: Schema.String.pipe(Schema.optional),
+      settings: Schema.Record(Schema.String, Schema.Unknown).pipe(Schema.optional),
+    }),
+  ]).pipe(Schema.optional),
   request: Request.pipe(Schema.optional),
   models: Schema.Record(Schema.String, Model).pipe(Schema.optional),
 }) {}

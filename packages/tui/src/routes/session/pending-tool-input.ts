@@ -50,7 +50,7 @@ export function createPendingToolInputParser(tool: string) {
   }
 }
 
-  // #224：notebook edit 的 pending 统计从流式参数提取 filePath/cellId/editType +
+// #224：notebook edit 的 pending 统计从流式参数提取 filePath/cellId/editType +
 // oldCode/newCode 行数。bridge 的 sourceProp 会用 "\n" 拼接 string[] 数组项，
 // streaming 统计也必须补上这个隐式换行，否则 pending 阶段的 +N/-N 会低估。
 // #224：与 createEditInputParser 不同——notebook edit 还需要 cellId 和 editType
@@ -60,13 +60,16 @@ function createNotebookEditInputParser() {
   let operation = ""
   const oldCode = createLineCounter()
   const newCode = createLineCounter()
-  const scanner = createJsonStringFieldScanner(["filePath", "cellId", "editType", "oldCode", "newCode"], (field, value) => {
-    if (field === "filePath") filePath += value
-    if (field === "cellId") cellId += value
-    if (field === "editType") operation += value
-    if (field === "oldCode") oldCode.push(value)
-    if (field === "newCode") newCode.push(value)
-  })
+  const scanner = createJsonStringFieldScanner(
+    ["filePath", "cellId", "editType", "oldCode", "newCode"],
+    (field, value) => {
+      if (field === "filePath") filePath += value
+      if (field === "cellId") cellId += value
+      if (field === "editType") operation += value
+      if (field === "oldCode") oldCode.push(value)
+      if (field === "newCode") newCode.push(value)
+    },
+  )
   return {
     push: scanner.push,
     stats: () => {
@@ -100,7 +103,8 @@ function createEditInputParser() {
   return {
     push: scanner.push,
     // 两代路径分别累积，兼有字段时保持 legacy filePath 优先而不拼接两个路径。
-    stats: () => pendingStats(filePath || nativePath, filePath || nativePath ? 1 : 0, newString.count(), oldString.count()),
+    stats: () =>
+      pendingStats(filePath || nativePath, filePath || nativePath ? 1 : 0, newString.count(), oldString.count()),
   }
 }
 
@@ -195,7 +199,7 @@ function createJsonStringFieldScanner(fields: readonly string[], onValue: (field
   }
 
   // #187：JSON 转义还原，\\uXXXX 走 unicode 缓冲
-function decodeEscaped(char: string) {
+  function decodeEscaped(char: string) {
     if (char === "n") return "\n"
     if (char === "r") return "\r"
     if (char === "t") return "\t"
@@ -209,7 +213,7 @@ function decodeEscaped(char: string) {
       for (const char of input) {
         if (inString) {
           // #187：收集 unicode 四位 hex
-        if (unicode !== undefined) {
+          if (unicode !== undefined) {
             unicode += char
             if (unicode.length === 4) {
               const code = Number.parseInt(unicode, 16)
@@ -220,7 +224,7 @@ function decodeEscaped(char: string) {
             continue
           }
           // #187：处理转义序列或进入 \\u
-        if (escaping) {
+          if (escaping) {
             if (char === "u") {
               unicode = ""
               continue
@@ -297,7 +301,7 @@ function createPatchStatsParser() {
   let current: { filePath: string; added: number; removed: number } | undefined
 
   // #187：登记一个 patch 文件路径并增加 fileCount
-function file(filePath: string) {
+  function file(filePath: string) {
     const hit = files.get(filePath)
     if (hit) return hit
     const next = { filePath, added: 0, removed: 0 }
@@ -306,35 +310,35 @@ function file(filePath: string) {
   }
 
   // #187：按行识别 *** Update/Add/Delete File 与 diff 行
-function processLine(input: string) {
+  function processLine(input: string) {
     const trimmed = input.trim()
     // #187：Begin/End 标记本身不计文件
     if (trimmed === "*** Begin Patch" || trimmed === "*** End Patch") return
     // #187：新增文件头
-      if (trimmed.startsWith("*** Add File: ")) {
+    if (trimmed.startsWith("*** Add File: ")) {
       current = file(trimmed.slice("*** Add File: ".length))
       mode = "add"
       return
     }
     // #187：删除文件头
-      if (trimmed.startsWith("*** Delete File: ")) {
+    if (trimmed.startsWith("*** Delete File: ")) {
       current = file(trimmed.slice("*** Delete File: ".length))
       mode = "delete"
       return
     }
     // #187：更新文件头
-      if (trimmed.startsWith("*** Update File: ")) {
+    if (trimmed.startsWith("*** Update File: ")) {
       current = file(trimmed.slice("*** Update File: ".length))
       mode = "update"
       return
     }
     if (!current) return
     // #187：add 模式仅 + 行计入 added
-      if (mode === "add" && input.startsWith("+")) current.added++
+    if (mode === "add" && input.startsWith("+")) current.added++
     // #187：update 的 + 行
-      if (mode === "update" && input.startsWith("+")) current.added++
+    if (mode === "update" && input.startsWith("+")) current.added++
     // #187：update 的 - 行
-      if (mode === "update" && input.startsWith("-")) current.removed++
+    if (mode === "update" && input.startsWith("-")) current.removed++
   }
 
   return {

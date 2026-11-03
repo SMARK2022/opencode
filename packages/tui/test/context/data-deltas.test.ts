@@ -38,15 +38,29 @@ test("flushes native deltas before the complete-value boundary", () => {
   const scope = createRoot((dispose) => ({ dispose, queue: createDataEventQueue((event) => received.push(event)) }))
   try {
     scope.queue.push(delta("fragment", "a"))
-    const end = { ...delta("end", ""), type: "session.next.text.ended" as const, data: { ...delta("end", "").data, text: "a" } }
+    const end = {
+      ...delta("end", ""),
+      type: "session.next.text.ended" as const,
+      data: { ...delta("end", "").data, text: "a" },
+    }
     scope.queue.push(end)
     // 完整正文替换在增量之后执行，不能再把已包含的 a 补写一次。
     expect(received).toMatchObject([{ id: "fragment" }, { id: "end", data: { text: "a" } }])
-    const hidden = { id: "hidden", type: "session.next.messages.hidden", location: { directory: "/test" }, data: { sessionID: "session", timestamp: 0, messageIDs: ["message"], hidden: { time: 0, reason: "permission-reviewer-protocol-retry" } } } satisfies V2Event
+    const hidden = {
+      id: "hidden",
+      type: "session.next.messages.hidden",
+      location: { directory: "/test" },
+      data: {
+        sessionID: "session",
+        timestamp: 0,
+        messageIDs: ["message"],
+        hidden: { time: 0, reason: "permission-reviewer-protocol-retry" },
+      },
+    } satisfies V2Event
     scope.queue.push(delta("before-hide", "b"))
     scope.queue.push(hidden)
     // tombstone也是顺序屏障，隐藏前的缓存片段不能拖到删除之后才提交。
-    expect(received.map(event => event.id)).toEqual(["fragment", "end", "before-hide", "hidden"])
+    expect(received.map((event) => event.id)).toEqual(["fragment", "end", "before-hide", "hidden"])
     scope.queue.flush()
     expect(received).toHaveLength(4)
   } finally {

@@ -180,114 +180,123 @@ const layer = Layer.effect(
       }
 
       // generation与objective必须在同一写锁内更新，否则并发编辑会复用代际并穿透读快照。
-      const result = yield* db.transaction((db) => Effect.gen(function* () {
-      // 时间戳在获锁后取值，避免等待提交的writer记录更早的更新时间。
-      const now = Date.now()
-      const existing = yield* db
-        .select()
-        .from(SessionGoalTable)
-        .where(eq(SessionGoalTable.session_id, sessionID))
-        .get()
-        .pipe(Effect.orDie)
+      const result = yield* db
+        .transaction(
+          (db) =>
+            Effect.gen(function* () {
+              // 时间戳在获锁后取值，避免等待提交的writer记录更早的更新时间。
+              const now = Date.now()
+              const existing = yield* db
+                .select()
+                .from(SessionGoalTable)
+                .where(eq(SessionGoalTable.session_id, sessionID))
+                .get()
+                .pipe(Effect.orDie)
 
-      if (existing) {
-        // 更新已有 goal：保留 tokens_used / time_used_seconds / id / created_at
-        const updates: Partial<typeof SessionGoalTable.$inferInsert> = {
-          time_updated: now,
-        }
-        if (input.objective !== undefined) {
-          const trimmedObjective = input.objective.trim()
-          // [local-smark] 仅当 trimmed objective 值真正改变时递增 generation 并重置 blocked 审计
-          if (trimmedObjective !== existing.objective) {
-            updates.objective = trimmedObjective
-            updates.generation = existing.generation + 1
-            updates.blocked_reason = null
-            updates.blocked_streak = 0
-            updates.blocked_last_turn_id = null
-            updates.terminal_turn_id = null
-            updates.reason = null
-            // [local-smark] terminal Goal 的 objective-only edit 自动回到 active；
-            // paused 保持 paused，active 保持 active
-            if (input.status === undefined && (existing.status === "complete" || existing.status === "blocked")) {
-              updates.status = "active"
-            }
-          }
-        }
-        if (input.status !== undefined) {
-          updates.status = input.status
-          // [local-smark] terminal 写入持久化 reason；active/paused 清除 reason 并重置
-          // blocked 审计，确保 resume 后 blocked streak 从零开始
-          if (input.status === "complete" || input.status === "blocked") {
-            updates.reason = input.reason!.trim()
-            updates.blocked_reason = null
-            updates.blocked_streak = 0
-            updates.blocked_last_turn_id = null
-            // 用户直接写入 terminal 不设置 terminal_turn_id（仅模型 transition 设置）
-            updates.terminal_turn_id = null
-          } else {
-            updates.reason = null
-            updates.blocked_reason = null
-            updates.blocked_streak = 0
-            updates.blocked_last_turn_id = null
-            updates.terminal_turn_id = null
-          }
-        }
-        if (input.tokenBudget !== undefined) updates.token_budget = input.tokenBudget
-        // [local-smark] 仅在显式传入时更新策略，省略时保留现有值
-        if (input.continueOnError !== undefined) updates.continue_on_error = input.continueOnError
-        yield* db
-          .update(SessionGoalTable)
-          .set(updates)
-          .where(eq(SessionGoalTable.session_id, sessionID))
-          .run()
-          .pipe(Effect.orDie)
-        const row = yield* db
-          .select()
-          .from(SessionGoalTable)
-          .where(eq(SessionGoalTable.session_id, sessionID))
-          .get()
-          .pipe(Effect.orDie)
-        const goal = fromRow(row!)
-        return { type: "updated" as const, goal }
-      }
+              if (existing) {
+                // 更新已有 goal：保留 tokens_used / time_used_seconds / id / created_at
+                const updates: Partial<typeof SessionGoalTable.$inferInsert> = {
+                  time_updated: now,
+                }
+                if (input.objective !== undefined) {
+                  const trimmedObjective = input.objective.trim()
+                  // [local-smark] 仅当 trimmed objective 值真正改变时递增 generation 并重置 blocked 审计
+                  if (trimmedObjective !== existing.objective) {
+                    updates.objective = trimmedObjective
+                    updates.generation = existing.generation + 1
+                    updates.blocked_reason = null
+                    updates.blocked_streak = 0
+                    updates.blocked_last_turn_id = null
+                    updates.terminal_turn_id = null
+                    updates.reason = null
+                    // [local-smark] terminal Goal 的 objective-only edit 自动回到 active；
+                    // paused 保持 paused，active 保持 active
+                    if (
+                      input.status === undefined &&
+                      (existing.status === "complete" || existing.status === "blocked")
+                    ) {
+                      updates.status = "active"
+                    }
+                  }
+                }
+                if (input.status !== undefined) {
+                  updates.status = input.status
+                  // [local-smark] terminal 写入持久化 reason；active/paused 清除 reason 并重置
+                  // blocked 审计，确保 resume 后 blocked streak 从零开始
+                  if (input.status === "complete" || input.status === "blocked") {
+                    updates.reason = input.reason!.trim()
+                    updates.blocked_reason = null
+                    updates.blocked_streak = 0
+                    updates.blocked_last_turn_id = null
+                    // 用户直接写入 terminal 不设置 terminal_turn_id（仅模型 transition 设置）
+                    updates.terminal_turn_id = null
+                  } else {
+                    updates.reason = null
+                    updates.blocked_reason = null
+                    updates.blocked_streak = 0
+                    updates.blocked_last_turn_id = null
+                    updates.terminal_turn_id = null
+                  }
+                }
+                if (input.tokenBudget !== undefined) updates.token_budget = input.tokenBudget
+                // [local-smark] 仅在显式传入时更新策略，省略时保留现有值
+                if (input.continueOnError !== undefined) updates.continue_on_error = input.continueOnError
+                yield* db
+                  .update(SessionGoalTable)
+                  .set(updates)
+                  .where(eq(SessionGoalTable.session_id, sessionID))
+                  .run()
+                  .pipe(Effect.orDie)
+                const row = yield* db
+                  .select()
+                  .from(SessionGoalTable)
+                  .where(eq(SessionGoalTable.session_id, sessionID))
+                  .get()
+                  .pipe(Effect.orDie)
+                const goal = fromRow(row!)
+                return { type: "updated" as const, goal }
+              }
 
-      // 新建 goal：objective 必须提供
-      const objective = input.objective
-      if (objective === undefined) {
-        return { type: "error" as const, message: "cannot update goal for session: no goal exists" }
-      }
+              // 新建 goal：objective 必须提供
+              const objective = input.objective
+              if (objective === undefined) {
+                return { type: "error" as const, message: "cannot update goal for session: no goal exists" }
+              }
 
-      const goalId = ulid()
-      yield* db
-        .insert(SessionGoalTable)
-        .values({
-          session_id: sessionID,
-          id: goalId,
-          objective: objective.trim(),
-          // 新建时 status 缺省为 active，立即进入续跑态
-          status: input.status ?? "active",
-          token_budget: input.tokenBudget ?? null,
-          tokens_used: 0,
-          time_used_seconds: 0,
-          // [local-smark] 错误后续跑策略默认关闭，保证升级兼容
-          continue_on_error: input.continueOnError ?? false,
-          // [local-smark] 新建 generation=1；terminal status 持久化 reason
-          generation: 1,
-          reason: input.status === "complete" || input.status === "blocked" ? input.reason!.trim() : null,
-          time_created: now,
-          time_updated: now,
-        })
-        .run()
+              const goalId = ulid()
+              yield* db
+                .insert(SessionGoalTable)
+                .values({
+                  session_id: sessionID,
+                  id: goalId,
+                  objective: objective.trim(),
+                  // 新建时 status 缺省为 active，立即进入续跑态
+                  status: input.status ?? "active",
+                  token_budget: input.tokenBudget ?? null,
+                  tokens_used: 0,
+                  time_used_seconds: 0,
+                  // [local-smark] 错误后续跑策略默认关闭，保证升级兼容
+                  continue_on_error: input.continueOnError ?? false,
+                  // [local-smark] 新建 generation=1；terminal status 持久化 reason
+                  generation: 1,
+                  reason: input.status === "complete" || input.status === "blocked" ? input.reason!.trim() : null,
+                  time_created: now,
+                  time_updated: now,
+                })
+                .run()
+                .pipe(Effect.orDie)
+              const row = yield* db
+                .select()
+                .from(SessionGoalTable)
+                .where(eq(SessionGoalTable.session_id, sessionID))
+                .get()
+                .pipe(Effect.orDie)
+              const goal = fromRow(row!)
+              return { type: "updated" as const, goal }
+            }),
+          { behavior: "immediate" },
+        )
         .pipe(Effect.orDie)
-      const row = yield* db
-        .select()
-        .from(SessionGoalTable)
-        .where(eq(SessionGoalTable.session_id, sessionID))
-        .get()
-        .pipe(Effect.orDie)
-      const goal = fromRow(row!)
-      return { type: "updated" as const, goal }
-      }), { behavior: "immediate" }).pipe(Effect.orDie)
       if (result.type === "error") return yield* new GoalError({ message: result.message })
       // 仅提交成功后发布，事件继续沿持久Session的位置归属。
       yield* publish(sessionID, result.goal)
@@ -304,11 +313,7 @@ const layer = Layer.effect(
         .get()
         .pipe(Effect.orDie)
       if (!existing) return false
-      yield* db
-        .delete(SessionGoalTable)
-        .where(eq(SessionGoalTable.session_id, sessionID))
-        .run()
-        .pipe(Effect.orDie)
+      yield* db.delete(SessionGoalTable).where(eq(SessionGoalTable.session_id, sessionID)).run().pipe(Effect.orDie)
       yield* publish(sessionID)
       return true
     })
@@ -321,190 +326,234 @@ const layer = Layer.effect(
       sessionID: SessionID,
       input: ModelTransitionInput,
     ) {
-    // [local-smark] modelTransition 的 read-validate-write 必须在单个事务内完成：
-    // 多 daemon 共库时裸 SELECT + UPDATE 构成 check-then-act 竞态，
-    // 两个 writer 可同时通过 snapshot 校验并互相覆盖 terminal/audit 字段。
-    const txResult = yield* db
-      .transaction((tx) =>
-        Effect.gen(function* () {
-          // 事务内 shadow 外层 db：读写走同一连接，保证校验到写入的原子可见性
-          const txdb = tx
-      const load = () =>
-        txdb.select().from(SessionGoalTable).where(eq(SessionGoalTable.session_id, sessionID)).get().pipe(Effect.orDie)
+      // [local-smark] modelTransition 的 read-validate-write 必须在单个事务内完成：
+      // 多 daemon 共库时裸 SELECT + UPDATE 构成 check-then-act 竞态，
+      // 两个 writer 可同时通过 snapshot 校验并互相覆盖 terminal/audit 字段。
+      const txResult = yield* db
+        .transaction(
+          (tx) =>
+            Effect.gen(function* () {
+              // 事务内 shadow 外层 db：读写走同一连接，保证校验到写入的原子可见性
+              const txdb = tx
+              const load = () =>
+                txdb
+                  .select()
+                  .from(SessionGoalTable)
+                  .where(eq(SessionGoalTable.session_id, sessionID))
+                  .get()
+                  .pipe(Effect.orDie)
 
-      const row = yield* load()
-      if (!row)
-        return { type: "error" as const, message:
-            "No goal exists for this session. Create a goal first before attempting to change its status.", }
+              const row = yield* load()
+              if (!row)
+                return {
+                  type: "error" as const,
+                  message:
+                    "No goal exists for this session. Create a goal first before attempting to change its status.",
+                }
 
-      // [local-smark] CAS 校验：snapshot 必须匹配当前 row，防止 stale write
-      if (row.id !== input.snapshot.goalID)
-        return { type: "error" as const, message:
-            "The goal ID in your read snapshot does not match the current goal. The goal may have been cleared and recreated since you last read it. Call operate read again to read the current goal.", }
-      if (row.generation !== input.snapshot.generation)
-        return { type: "error" as const, message:
-            "The objective has been edited since you last read the goal, so your read snapshot is stale. Call operate read again before changing the goal.", }
-      if (row.status !== input.snapshot.status)
-        return { type: "error" as const, message:
-            "The goal status has changed since you last read it. Call operate read again before changing the goal.", }
-      // 模型 terminal transition 只允许 active source；在 reason/audit 写入前拒绝 terminal re-mark，
-      // 防止 user-owned terminal 被改写 terminal_turn_id 后由模型自行恢复。
-      if ((input.status === "complete" || input.status === "blocked") && row.status !== "active") {
-        return {
-          type: "error" as const,
-          // 保留用户恢复与模型自有终态的区别，只把时序要求改成可见消息边界。
-          message: `Marking a goal as ${input.status} is only valid for an active goal, but this goal is currently ${row.status}. Do not mark a paused or terminal goal again; wait for the user to resume it, or if you previously ended it, use operate active only after the user sends a new message; read the goal again first.`,
-        }
-      }
+              // [local-smark] CAS 校验：snapshot 必须匹配当前 row，防止 stale write
+              if (row.id !== input.snapshot.goalID)
+                return {
+                  type: "error" as const,
+                  message:
+                    "The goal ID in your read snapshot does not match the current goal. The goal may have been cleared and recreated since you last read it. Call operate read again to read the current goal.",
+                }
+              if (row.generation !== input.snapshot.generation)
+                return {
+                  type: "error" as const,
+                  message:
+                    "The objective has been edited since you last read the goal, so your read snapshot is stale. Call operate read again before changing the goal.",
+                }
+              if (row.status !== input.snapshot.status)
+                return {
+                  type: "error" as const,
+                  message:
+                    "The goal status has changed since you last read it. Call operate read again before changing the goal.",
+                }
+              // 模型 terminal transition 只允许 active source；在 reason/audit 写入前拒绝 terminal re-mark，
+              // 防止 user-owned terminal 被改写 terminal_turn_id 后由模型自行恢复。
+              if ((input.status === "complete" || input.status === "blocked") && row.status !== "active") {
+                return {
+                  type: "error" as const,
+                  // 保留用户恢复与模型自有终态的区别，只把时序要求改成可见消息边界。
+                  message: `Marking a goal as ${input.status} is only valid for an active goal, but this goal is currently ${row.status}. Do not mark a paused or terminal goal again; wait for the user to resume it, or if you previously ended it, use operate active only after the user sends a new message; read the goal again first.`,
+                }
+              }
 
-      const now = Date.now()
+              const now = Date.now()
 
-      if (input.status === "complete") {
-        // complete 需要 reason
-        const trimmedReason = input.reason?.trim() ?? ""
-        if (trimmedReason === "")
-          return { type: "error" as const, message:
-            "Marking the goal as complete requires a non-empty reason explaining why the objective has been achieved. Provide that reason, then retry with operate complete.", }
-        if (trimmedReason.length > MAX_REASON_CHARS)
-          return { type: "error" as const, message:
-            `The reason must be at most ${MAX_REASON_CHARS} characters. Shorten it, then retry with operate complete.`, }
+              if (input.status === "complete") {
+                // complete 需要 reason
+                const trimmedReason = input.reason?.trim() ?? ""
+                if (trimmedReason === "")
+                  return {
+                    type: "error" as const,
+                    message:
+                      "Marking the goal as complete requires a non-empty reason explaining why the objective has been achieved. Provide that reason, then retry with operate complete.",
+                  }
+                if (trimmedReason.length > MAX_REASON_CHARS)
+                  return {
+                    type: "error" as const,
+                    message: `The reason must be at most ${MAX_REASON_CHARS} characters. Shorten it, then retry with operate complete.`,
+                  }
 
-        yield* txdb
-          .update(SessionGoalTable)
-          .set({
-            status: "complete",
-            reason: trimmedReason,
-            blocked_reason: null,
-            blocked_streak: 0,
-            blocked_last_turn_id: null,
-            // [local-smark] 记录产生 terminal 的 eligible turn ID，供 active recovery 校验
-            terminal_turn_id: input.turnID,
-            time_updated: now,
-          })
-          .where(eq(SessionGoalTable.session_id, sessionID))
-          .run()
-          .pipe(Effect.orDie)
-        const updated = yield* load()
-        const goal = fromRow(updated!)
-        return { type: "updated" as const, goal }
-      }
+                yield* txdb
+                  .update(SessionGoalTable)
+                  .set({
+                    status: "complete",
+                    reason: trimmedReason,
+                    blocked_reason: null,
+                    blocked_streak: 0,
+                    blocked_last_turn_id: null,
+                    // [local-smark] 记录产生 terminal 的 eligible turn ID，供 active recovery 校验
+                    terminal_turn_id: input.turnID,
+                    time_updated: now,
+                  })
+                  .where(eq(SessionGoalTable.session_id, sessionID))
+                  .run()
+                  .pipe(Effect.orDie)
+                const updated = yield* load()
+                const goal = fromRow(updated!)
+                return { type: "updated" as const, goal }
+              }
 
-      if (input.status === "blocked") {
-        const trimmedReason = input.reason?.trim() ?? ""
-        if (trimmedReason === "")
-          return { type: "error" as const, message:
-            "Marking the goal as blocked requires a non-empty reason explaining what is preventing progress. Provide that reason, then retry with operate blocked.", }
-        if (trimmedReason.length > MAX_REASON_CHARS)
-          return { type: "error" as const, message:
-            `The reason must be at most ${MAX_REASON_CHARS} characters. Shorten it, then retry with operate blocked.`, }
+              if (input.status === "blocked") {
+                const trimmedReason = input.reason?.trim() ?? ""
+                if (trimmedReason === "")
+                  return {
+                    type: "error" as const,
+                    message:
+                      "Marking the goal as blocked requires a non-empty reason explaining what is preventing progress. Provide that reason, then retry with operate blocked.",
+                  }
+                if (trimmedReason.length > MAX_REASON_CHARS)
+                  return {
+                    type: "error" as const,
+                    message: `The reason must be at most ${MAX_REASON_CHARS} characters. Shorten it, then retry with operate blocked.`,
+                  }
 
-        // [local-smark] 同一 turn 重复 blocked：幂等返回当前 pending，不增加 streak
-        if (row.blocked_last_turn_id === input.turnID && row.blocked_reason === trimmedReason) {
-          const goal = fromRow(row)
-          return { type: "blocked-pending" as const, goal, attempt: row.blocked_streak, required: 2 as const }
-        }
+                // [local-smark] 同一 turn 重复 blocked：幂等返回当前 pending，不增加 streak
+                if (row.blocked_last_turn_id === input.turnID && row.blocked_reason === trimmedReason) {
+                  const goal = fromRow(row)
+                  return { type: "blocked-pending" as const, goal, attempt: row.blocked_streak, required: 2 as const }
+                }
 
-        // [local-smark] 连续性校验：前一个 eligible turn 必须有相同 reason 的 attempt，
-        // 否则从 1 开始（reason 改变、turn 中断、objective 编辑都会触发重置）
-        const isConsecutive =
-          input.previousTurnID !== undefined &&
-          row.blocked_last_turn_id === input.previousTurnID &&
-          row.blocked_reason === trimmedReason
+                // [local-smark] 连续性校验：前一个 eligible turn 必须有相同 reason 的 attempt，
+                // 否则从 1 开始（reason 改变、turn 中断、objective 编辑都会触发重置）
+                const isConsecutive =
+                  input.previousTurnID !== undefined &&
+                  row.blocked_last_turn_id === input.previousTurnID &&
+                  row.blocked_reason === trimmedReason
 
-        const newStreak = isConsecutive ? row.blocked_streak + 1 : 1
+                const newStreak = isConsecutive ? row.blocked_streak + 1 : 1
 
-        // [local-smark] 两轮阈值要求两个不同 eligible turns 共同确认同一 blocker；
-        // 单个 turn 内的工具重试只能更新 pending，不能自证 terminal 状态。
-        if (newStreak < 2) {
-          // pending 必须保持 active 且 reason=null，避免首次自报 blocked 就结束 session loop。
-          yield* txdb
-            .update(SessionGoalTable)
-            .set({
-              blocked_reason: trimmedReason,
-              blocked_streak: newStreak,
-              blocked_last_turn_id: input.turnID,
-              time_updated: now,
-            })
-            .where(eq(SessionGoalTable.session_id, sessionID))
-            .run()
-            .pipe(Effect.orDie)
-          const pending = yield* load()
-          const goal = fromRow(pending!)
-          return { type: "blocked-pending" as const, goal, attempt: newStreak, required: 2 as const }
-        }
+                // [local-smark] 两轮阈值要求两个不同 eligible turns 共同确认同一 blocker；
+                // 单个 turn 内的工具重试只能更新 pending，不能自证 terminal 状态。
+                if (newStreak < 2) {
+                  // pending 必须保持 active 且 reason=null，避免首次自报 blocked 就结束 session loop。
+                  yield* txdb
+                    .update(SessionGoalTable)
+                    .set({
+                      blocked_reason: trimmedReason,
+                      blocked_streak: newStreak,
+                      blocked_last_turn_id: input.turnID,
+                      time_updated: now,
+                    })
+                    .where(eq(SessionGoalTable.session_id, sessionID))
+                    .run()
+                    .pipe(Effect.orDie)
+                  const pending = yield* load()
+                  const goal = fromRow(pending!)
+                  return { type: "blocked-pending" as const, goal, attempt: newStreak, required: 2 as const }
+                }
 
-        // 第二个连续 turn 才把 pending reason 提升为 terminal reason，并清空 audit 防止恢复后继承。
-        yield* txdb
-          .update(SessionGoalTable)
-          .set({
-            status: "blocked",
-            reason: trimmedReason,
-            blocked_reason: null,
-            blocked_streak: 0,
-            blocked_last_turn_id: null,
-            terminal_turn_id: input.turnID,
-            time_updated: now,
-          })
-          .where(eq(SessionGoalTable.session_id, sessionID))
-          .run()
-          .pipe(Effect.orDie)
-        const updated = yield* load()
-        const goal = fromRow(updated!)
-        return { type: "updated" as const, goal }
-      }
+                // 第二个连续 turn 才把 pending reason 提升为 terminal reason，并清空 audit 防止恢复后继承。
+                yield* txdb
+                  .update(SessionGoalTable)
+                  .set({
+                    status: "blocked",
+                    reason: trimmedReason,
+                    blocked_reason: null,
+                    blocked_streak: 0,
+                    blocked_last_turn_id: null,
+                    terminal_turn_id: input.turnID,
+                    time_updated: now,
+                  })
+                  .where(eq(SessionGoalTable.session_id, sessionID))
+                  .run()
+                  .pipe(Effect.orDie)
+                const updated = yield* load()
+                const goal = fromRow(updated!)
+                return { type: "updated" as const, goal }
+              }
 
-      // [local-smark] active recovery：仅恢复 model-produced terminal
-      if (input.status === "active") {
-        // paused 由用户控制，模型不能恢复
-        if (row.status === "paused")
-          return { type: "error" as const, message:
-            "This goal was paused by the user. Only the user can resume a paused goal — you cannot use the goal tool to unpause it.", }
-        // 非终态不需要恢复
-        if (row.status === "active")
-          return { type: "error" as const, message:
-            "This goal is already active, so there is no terminal state to recover from. Continue working toward the current objective instead of calling operate active again.", }
-        // 仅 model-produced terminal 可恢复（terminal_turn_id 非 null）
-        if (!row.terminal_turn_id)
-          return { type: "error" as const, message:
-            "This goal was marked as complete or blocked by the user, not by you. You can only resume goals that you yourself marked as complete or blocked. The user must resume this goal themselves.", }
-        // 拒绝同消息恢复仍按 terminal_turn_id 判定；文案只给出用户可触发的下一步。
-        if (row.terminal_turn_id === input.turnID)
-          return { type: "error" as const, message:
-            "You cannot resume a goal immediately after marking it complete or blocked. Wait for a new user message before attempting to resume.", }
-        // 合成续跑消息不代表用户重新授权，不能因移除 turn 措辞而放宽恢复权限。
-        if (!input.userInitiated)
-          return { type: "error" as const, message:
-            "You cannot resume a terminal goal while responding to a goal-continuation message. Resuming requires a new message from the user.", }
+              // [local-smark] active recovery：仅恢复 model-produced terminal
+              if (input.status === "active") {
+                // paused 由用户控制，模型不能恢复
+                if (row.status === "paused")
+                  return {
+                    type: "error" as const,
+                    message:
+                      "This goal was paused by the user. Only the user can resume a paused goal — you cannot use the goal tool to unpause it.",
+                  }
+                // 非终态不需要恢复
+                if (row.status === "active")
+                  return {
+                    type: "error" as const,
+                    message:
+                      "This goal is already active, so there is no terminal state to recover from. Continue working toward the current objective instead of calling operate active again.",
+                  }
+                // 仅 model-produced terminal 可恢复（terminal_turn_id 非 null）
+                if (!row.terminal_turn_id)
+                  return {
+                    type: "error" as const,
+                    message:
+                      "This goal was marked as complete or blocked by the user, not by you. You can only resume goals that you yourself marked as complete or blocked. The user must resume this goal themselves.",
+                  }
+                // 拒绝同消息恢复仍按 terminal_turn_id 判定；文案只给出用户可触发的下一步。
+                if (row.terminal_turn_id === input.turnID)
+                  return {
+                    type: "error" as const,
+                    message:
+                      "You cannot resume a goal immediately after marking it complete or blocked. Wait for a new user message before attempting to resume.",
+                  }
+                // 合成续跑消息不代表用户重新授权，不能因移除 turn 措辞而放宽恢复权限。
+                if (!input.userInitiated)
+                  return {
+                    type: "error" as const,
+                    message:
+                      "You cannot resume a terminal goal while responding to a goal-continuation message. Resuming requires a new message from the user.",
+                  }
 
-        yield* txdb
-          .update(SessionGoalTable)
-          .set({
-            status: "active",
-            reason: null,
-            blocked_reason: null,
-            blocked_streak: 0,
-            blocked_last_turn_id: null,
-            terminal_turn_id: null,
-            time_updated: now,
-          })
-          .where(eq(SessionGoalTable.session_id, sessionID))
-          .run()
-          .pipe(Effect.orDie)
-        const updated = yield* load()
-        const goal = fromRow(updated!)
-        return { type: "updated" as const, goal }
-      }
+                yield* txdb
+                  .update(SessionGoalTable)
+                  .set({
+                    status: "active",
+                    reason: null,
+                    blocked_reason: null,
+                    blocked_streak: 0,
+                    blocked_last_turn_id: null,
+                    terminal_turn_id: null,
+                    time_updated: now,
+                  })
+                  .where(eq(SessionGoalTable.session_id, sessionID))
+                  .run()
+                  .pipe(Effect.orDie)
+                const updated = yield* load()
+                const goal = fromRow(updated!)
+                return { type: "updated" as const, goal }
+              }
 
-      return { type: "error" as const, message: "invalid target status" }
-        }),
-        // [local-smark] immediate 写锁：read-validate-write 原子性依赖事务开始即取写锁，
-        // deferred 下并发 writer 会基于同一旧 row 通过校验并互相覆盖 terminal/audit 字段
-        { behavior: "immediate" },
-      ).pipe(Effect.orDie)
-    if (txResult.type === "error") return yield* new GoalError({ message: txResult.message })
-    // blocked-pending 也发布事件，使 TUI 可观察 attempt 进度
-    yield* publish(sessionID, txResult.goal)
-    return txResult
+              return { type: "error" as const, message: "invalid target status" }
+            }),
+          // [local-smark] immediate 写锁：read-validate-write 原子性依赖事务开始即取写锁，
+          // deferred 下并发 writer 会基于同一旧 row 通过校验并互相覆盖 terminal/audit 字段
+          { behavior: "immediate" },
+        )
+        .pipe(Effect.orDie)
+      if (txResult.type === "error") return yield* new GoalError({ message: txResult.message })
+      // blocked-pending 也发布事件，使 TUI 可观察 attempt 进度
+      yield* publish(sessionID, txResult.goal)
+      return txResult
     })
 
     // [local-smark] usage 归属：使用 expected {goalID, generation} 做 CAS 原子增量。
@@ -672,8 +721,8 @@ export function continuationPrompt(goal: Goal, mode: ContinuationMode = "ordinar
     // #364：受阻审计——同一阻塞条件连续三轮才允许标记 blocked
     "Blocked audit:",
     // #517：首轮 blocked 指引改为 BFS 复核；two-turn 阈值与 exact reason 契约不变。
-    '- The first blocked call starts the audit and keeps the Goal active; re-check the blocker breadth-first, inspect adjacent producers, consumers, tests, or configuration, and run a different focused check.',
-    '- If any explored branch yields a viable path, continue working and do not call blocked again.',
+    "- The first blocked call starts the audit and keeps the Goal active; re-check the blocker breadth-first, inspect adjacent producers, consumers, tests, or configuration, and run a different focused check.",
+    "- If any explored branch yields a viable path, continue working and do not call blocked again.",
     // runtime 按消息边界确认而非按调用次数；独立审查建议不新增状态机前置条件。
     '- If the same blocker still prevents meaningful progress after that exploration, call the goal tool with operate "blocked" again with the same trimmed reason after the next goal-continuation message arrives; a repeated call while answering the same message does not count as the second confirmation. For an independent judgment, delegate the blocker audit to a subagent with the task tool before confirming.',
     '- If the user resumes a goal that was previously marked "blocked", treat the resumed work as a fresh audit with the same exact-reason requirements.',

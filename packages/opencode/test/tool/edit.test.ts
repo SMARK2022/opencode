@@ -59,9 +59,10 @@ const mockFormatLayer = Layer.succeed(Format.Service, {
 
 // #514：Format.node 用 mock 覆盖——LayerNode.compile 的 override 槽位保留其余真实服务
 const itFormatted = testEffect(
-  LayerNode.compile(LayerNode.group([LSP.node, FSUtil.node, EventV2Bridge.node, Truncate.node, Agent.node, Format.node]), [
-    [Format.node, mockFormatLayer],
-  ]),
+  LayerNode.compile(
+    LayerNode.group([LSP.node, FSUtil.node, EventV2Bridge.node, Truncate.node, Agent.node, Format.node]),
+    [[Format.node, mockFormatLayer]],
+  ),
 )
 
 // 同时改文本并强制 LF，确保测试能区分 formatter authority 与 existing-file EOL authority。
@@ -78,9 +79,10 @@ const lineEndingFormatLayer = Layer.succeed(Format.Service, {
 })
 
 const itLineEndingFormatted = testEffect(
-  LayerNode.compile(LayerNode.group([LSP.node, FSUtil.node, EventV2Bridge.node, Truncate.node, Agent.node, Format.node]), [
-    [Format.node, lineEndingFormatLayer],
-  ]),
+  LayerNode.compile(
+    LayerNode.group([LSP.node, FSUtil.node, EventV2Bridge.node, Truncate.node, Agent.node, Format.node]),
+    [[Format.node, lineEndingFormatLayer]],
+  ),
 )
 
 // [local-smark] 小 limits + pass-through 截断：隔离 wrapper 截断，迫使 edit 组装段自身
@@ -88,7 +90,8 @@ const itLineEndingFormatted = testEffect(
 // output 放行不截断：隔离 wrapper 层后，预算违规只能来自 edit 组装段自身。
 const itTruncated = testEffect(
   LayerNode.compile(
-    LayerNode.group([LSP.node, FSUtil.node, EventV2Bridge.node, Format.node, Agent.node, Truncate.node]), [
+    LayerNode.group([LSP.node, FSUtil.node, EventV2Bridge.node, Format.node, Agent.node, Truncate.node]),
+    [
       [
         Truncate.node,
         Layer.mock(Truncate.Service, {
@@ -157,13 +160,19 @@ function ctxWithPriorRead(filePath: string): Tool.Context {
 
 // [local-smark] 中档预算层：diff 预算（limits−2048B/10行 保留额）落在「部分可显示」
 // 区间，C01 前缀测试才能区分连续前缀与跳行截断；itTruncated 的 1024B 会裁到 0 行。
-const itFeedback = testEffect(LayerNode.compile(
-  LayerNode.group([LSP.node, FSUtil.node, EventV2Bridge.node, Format.node, Agent.node, Truncate.node]),
-  [[LSP.node, feedbackLsp], [Format.node, feedbackFormat]],
-))
+const itFeedback = testEffect(
+  LayerNode.compile(
+    LayerNode.group([LSP.node, FSUtil.node, EventV2Bridge.node, Format.node, Agent.node, Truncate.node]),
+    [
+      [LSP.node, feedbackLsp],
+      [Format.node, feedbackFormat],
+    ],
+  ),
+)
 const itMidBudget = testEffect(
   LayerNode.compile(
-    LayerNode.group([LSP.node, FSUtil.node, EventV2Bridge.node, Format.node, Agent.node, Truncate.node]), [
+    LayerNode.group([LSP.node, FSUtil.node, EventV2Bridge.node, Format.node, Agent.node, Truncate.node]),
+    [
       [LSP.node, feedbackLsp],
       [Format.node, feedbackFormat],
       [
@@ -205,8 +214,7 @@ function ctxWithHistory(filePath: string, entries: HistoryEntry[]): Tool.Context
   const messageID = MessageID.make("msg_history")
   const parts = entries.map((entry, index) => {
     const file = entry.file ?? filePath
-    const input =
-      entry.tool === "apply_patch" ? { patchText: `*** Update File: ${file}` } : { filePath: file }
+    const input = entry.tool === "apply_patch" ? { patchText: `*** Update File: ${file}` } : { filePath: file }
     // 生产上每个 completed read 都携带 metadata.read；fixture 缺省补一个单行区间，
     // 只有携带 metadata 的 read 才能进入可见性协议（无 metadata 的历史形态不算可见读取）。
     const readRange = entry.readRange ?? { start: 1, end: 1 }
@@ -223,7 +231,8 @@ function ctxWithHistory(filePath: string, entries: HistoryEntry[]): Tool.Context
               fp: "fp",
               start: readRange.start,
               end: readRange.end,
-              total: readRange.end, totalExact: true,
+              total: readRange.end,
+              totalExact: true,
               returned: readRange.end - readRange.start + 1,
               stub: false,
             },
@@ -385,7 +394,9 @@ test("closestWindow agrees with an exhaustive scalar span oracle", () => {
   // 穷举总量 62*62≈3.8k 对；任何 bit-vector 边界（31/32 位）在此规模内已由逐点比较覆盖。
   for (let contentLength = 1; contentLength <= 5; contentLength++) {
     for (let contentBits = 0; contentBits < 2 ** contentLength; contentBits++) {
-      const content = Array.from({ length: contentLength }, (_, index) => ((contentBits >>> index) & 1 ? "a" : "b")).join("")
+      const content = Array.from({ length: contentLength }, (_, index) =>
+        (contentBits >>> index) & 1 ? "a" : "b",
+      ).join("")
       for (let expectedLength = 1; expectedLength <= 5; expectedLength++) {
         for (let expectedBits = 0; expectedBits < 2 ** expectedLength; expectedBits++) {
           const expected = Array.from({ length: expectedLength }, (_, index) =>
@@ -1104,7 +1115,10 @@ describe("tool.edit", () => {
       Effect.gen(function* () {
         const test = yield* TestInstance
         const filepath = path.join(test.directory, "mismatch.txt")
-        yield* put(filepath, "public class Foo {\n    private int x;\n    public void bar() {\n        x = 42;\n    }\n}")
+        yield* put(
+          filepath,
+          "public class Foo {\n    private int x;\n    public void bar() {\n        x = 42;\n    }\n}",
+        )
 
         const error = yield* fail({
           filePath: filepath,
@@ -1125,10 +1139,7 @@ describe("tool.edit", () => {
       Effect.gen(function* () {
         const test = yield* TestInstance
         const filepath = path.join(test.directory, "tied.txt")
-        yield* put(
-          filepath,
-          "target sequence alpha beta gammo\nfiller\ntarget sequence alpha beta gammi\n",
-        )
+        yield* put(filepath, "target sequence alpha beta gammo\nfiller\ntarget sequence alpha beta gammi\n")
 
         const error = yield* fail({
           filePath: filepath,
@@ -1211,7 +1222,19 @@ describe("tool.edit", () => {
           ...ctx,
           messages: [
             {
-              info: { id: "msg_prior", role: "assistant" as const, sessionID: ctx.sessionID, agent: "build", mode: "build", path: { cwd: test.directory, root: test.directory }, cost: 0, tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } }, modelID: "test", providerID: "test", time: { created: 0 } },
+              info: {
+                id: "msg_prior",
+                role: "assistant" as const,
+                sessionID: ctx.sessionID,
+                agent: "build",
+                mode: "build",
+                path: { cwd: test.directory, root: test.directory },
+                cost: 0,
+                tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+                modelID: "test",
+                providerID: "test",
+                time: { created: 0 },
+              },
               parts: [
                 {
                   id: "p_read",
@@ -1220,7 +1243,13 @@ describe("tool.edit", () => {
                   type: "tool" as const,
                   tool: "read",
                   callID: "call_read",
-                  state: { status: "completed" as const, input: { filePath: filepath }, output: "content", metadata: {}, time: { start: 0, end: 1 } },
+                  state: {
+                    status: "completed" as const,
+                    input: { filePath: filepath },
+                    output: "content",
+                    metadata: {},
+                    time: { start: 0, end: 1 },
+                  },
                 },
               ],
             },
@@ -1433,10 +1462,7 @@ describe("tool.edit", () => {
         yield* put(filepath, before)
 
         const context = ctxWithHistory(filepath, [{ tool: "read", end: 1 }])
-        const result = yield* run(
-          { filePath: filepath, edits: [{ oldString: before, newString: after }] },
-          context,
-        )
+        const result = yield* run({ filePath: filepath, edits: [{ oldString: before, newString: after }] }, context)
 
         const full = renderFileDiff(filepath, before, after).patch
         const shown = result.output.split("\n\nChanged:\n")[1]?.split("\n… (")[0] ?? ""
@@ -1819,7 +1845,6 @@ describe("tool.edit", () => {
     )
   })
 
-
   // [local-smark] 当 LSP 不可用时（无 language server 运行），edit 的 output
   // 应包含 "LSP diagnostics unavailable" 提示，避免模型误认为"无类型错误"。
   // 测试环境可能有 bridge registry 残留，需 mock status() 返回空才能可靠验证。
@@ -1903,9 +1928,7 @@ describe("tool.edit", () => {
             { oldString: "old", newString: "OLDISH", replaceAll: true },
           ],
         })
-        expect(yield* load(filepath)).toBe(
-          "OLDISH A\nline1\nMID REPLACED WITH LONGER TEXT\nline2\nOLDISH B\nend\n",
-        )
+        expect(yield* load(filepath)).toBe("OLDISH A\nline1\nMID REPLACED WITH LONGER TEXT\nline2\nOLDISH B\nend\n")
       }),
     )
 
@@ -2108,25 +2131,27 @@ describe("tool.edit", () => {
 
     // R9 slice 13：触碰行行尾空白 — preserve 落盘会 strip，continuous actualOld 替换不会；
     // 必须同时锁定磁盘字节与 _syncInput mid-line needle，防止把 continuous 当 apply oracle。
-    it.instance("normalized mid-line match: preserve disk drops touched trailing spaces; sync old is continuous needle", () =>
-      Effect.gen(function* () {
-        const test = yield* TestInstance
-        const filepath = path.join(test.directory, "joint-preserve.txt")
-        // 同一行：弯引号 needle + 行尾两空格
-        yield* put(filepath, "code(\u201Chello\u201D);  \n")
-        const result = yield* run({
-          filePath: filepath,
-          edits: [{ oldString: '"hello"', newString: '"hi"' }],
-        })
-        // preserve：触碰整行从归一化基重写 → 行尾空白消失
-        expect(yield* load(filepath)).toBe('code("hi");\n')
-        // 若误用 continuous replace(actualOld) 作 apply，会得到 'code("hi");  \n'（保留行尾空格）
-        expect(yield* load(filepath)).not.toBe('code("hi");  \n')
-        const sync = (result.metadata as { _syncInput?: { edits: Array<{ oldString: string }> } })._syncInput
-        // 历史 needle 仍是 mid-line 弯引号片段，不是整行
-        expect(sync?.edits[0]?.oldString).toBe("\u201Chello\u201D")
-        expect(sync?.edits[0]?.oldString).not.toContain("code(")
-      }),
+    it.instance(
+      "normalized mid-line match: preserve disk drops touched trailing spaces; sync old is continuous needle",
+      () =>
+        Effect.gen(function* () {
+          const test = yield* TestInstance
+          const filepath = path.join(test.directory, "joint-preserve.txt")
+          // 同一行：弯引号 needle + 行尾两空格
+          yield* put(filepath, "code(\u201Chello\u201D);  \n")
+          const result = yield* run({
+            filePath: filepath,
+            edits: [{ oldString: '"hello"', newString: '"hi"' }],
+          })
+          // preserve：触碰整行从归一化基重写 → 行尾空白消失
+          expect(yield* load(filepath)).toBe('code("hi");\n')
+          // 若误用 continuous replace(actualOld) 作 apply，会得到 'code("hi");  \n'（保留行尾空格）
+          expect(yield* load(filepath)).not.toBe('code("hi");  \n')
+          const sync = (result.metadata as { _syncInput?: { edits: Array<{ oldString: string }> } })._syncInput
+          // 历史 needle 仍是 mid-line 弯引号片段，不是整行
+          expect(sync?.edits[0]?.oldString).toBe("\u201Chello\u201D")
+          expect(sync?.edits[0]?.oldString).not.toContain("code(")
+        }),
     )
 
     // INV-07：hybrid 连字符在 replaceAll 下应两处都替换（elevation + sole domain 展开）

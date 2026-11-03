@@ -44,11 +44,7 @@ export function report(file: string, issues: LSPClient.Diagnostic[]) {
 
 // [local-smark] 增量诊断：只显示本次编辑新引入的错误（不在 baseline 中的），
 // 避免重复展示预存错误导致模型误判"编辑失败"（opencode issue #9102）
-export function reportDelta(
-  file: string,
-  current: LSPClient.Diagnostic[],
-  baseline: LSPClient.Diagnostic[] = [],
-) {
+export function reportDelta(file: string, current: LSPClient.Diagnostic[], baseline: LSPClient.Diagnostic[] = []) {
   const newErrs = newErrors(current, baseline)
   if (newErrs.length === 0) return ""
   const limited = newErrs.slice(0, MAX_PER_FILE)

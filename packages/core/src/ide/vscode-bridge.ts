@@ -101,7 +101,7 @@ let cachedRegistryBridge:
 
 // 注册目录：每个 VS Code 实例在此目录下写入一个 JSON 注册文件
 export function registryDir() {
-// 环境变量优先：允许测试和自定义安装指定注册目录路径
+  // 环境变量优先：允许测试和自定义安装指定注册目录路径
   return process.env.OPENCODE_IDE_REGISTRY_DIR ?? path.join(Global.Path.state, "ide")
 }
 
@@ -109,23 +109,23 @@ export function registryDir() {
 // 扫描本机 registry 目录，返回仍存活的 bridge 列表
 // CLI 桥接 API：discoverBridges — 发现/调用 VS Code notebook 能力
 export async function discoverBridges(input: ResolveInput): Promise<BridgeEntry[]> {
-// 注册目录路径：OPENCODE_IDE_REGISTRY_DIR 环境变量优先，默认为 state/ide
+  // 注册目录路径：OPENCODE_IDE_REGISTRY_DIR 环境变量优先，默认为 state/ide
   const dir = registryDir()
-// 当前时间戳：用于判断注册条目是否过期
+  // 当前时间戳：用于判断注册条目是否过期
   const now = Date.now()
-// 过期阈值：调用方可自定义，默认 60 秒
+  // 过期阈值：调用方可自定义，默认 60 秒
   const staleMs = input.staleMs ?? DEFAULT_STALE_MS
-// 读取注册目录：目录不存在时返回空数组，不抛出异常
+  // 读取注册目录：目录不存在时返回空数组，不抛出异常
   const files = await fs.readdir(dir).catch((error) => {
-  // 目录不存在时返回空数组：首次运行时注册目录可能尚未创建
+    // 目录不存在时返回空数组：首次运行时注册目录可能尚未创建
     if (isMissing(error)) return [] as string[]
-  // 其他 fs 错误向上抛出：权限不足等错误需要调用方处理
+    // 其他 fs 错误向上抛出：权限不足等错误需要调用方处理
     throw error
   })
 
-// 活跃桥接列表：只包含 PID 存活且健康检查通过的条目
+  // 活跃桥接列表：只包含 PID 存活且健康检查通过的条目
   const live: BridgeEntry[] = []
-// 并行检查所有注册文件：Promise.all 确保所有检查完成后才返回
+  // 并行检查所有注册文件：Promise.all 确保所有检查完成后才返回
   await Promise.all(
     files
       // #219：仅匹配 UUID 格式的注册清单——防止误删非 VS Code 扩展创建的 JSON 文件
@@ -142,11 +142,11 @@ export async function discoverBridges(input: ResolveInput): Promise<BridgeEntry[
           return
         }
         // 无效条目跳过：JSON 解析失败或 schema 不匹配时返回 null
-      // 无效条目：JSON 解析失败或 schema 版本不匹配时 readEntry 返回 null
+        // 无效条目：JSON 解析失败或 schema 版本不匹配时 readEntry 返回 null
         if (!entry) return
         // 先检查进程存活：进程已死则直接移除注册条目，无需进一步检查
         if (pidDead(entry.pid)) {
-// 移除过期注册文件：PID 已死的 VS Code 实例留下的残留文件
+          // 移除过期注册文件：PID 已死的 VS Code 实例留下的残留文件
           await removeRegistryFile(dir, file)
           return
         }
@@ -166,7 +166,7 @@ export async function discoverBridges(input: ResolveInput): Promise<BridgeEntry[
         if (age > staleMs) await removeRegistryFile(dir, file)
       }),
   )
-// 返回活跃桥接列表：已排除过期、PID 失效和健康检查失败的条目
+  // 返回活跃桥接列表：已排除过期、PID 失效和健康检查失败的条目
   return live
 }
 
@@ -191,33 +191,37 @@ export async function resolveBridge(input: ResolveInput): Promise<BridgeRef> {
     return cachedRegistryBridge.bridge
   }
 
-// 桥接发现：扫描注册目录获取所有活跃桥接
+  // 桥接发现：扫描注册目录获取所有活跃桥接
   const entries = await discoverBridges(input)
   const candidates = input.filePath ? entries.filter((entry) => bridgeMatchesFilePath(entry, input.filePath!)) : entries
-// 无匹配工作区：有可用桥接但没有匹配请求路径的工作区
+  // 无匹配工作区：有可用桥接但没有匹配请求路径的工作区
   if (entries.length > 0 && candidates.length === 0) {
-    throw new Error(`No live VS Code bridge workspace matches filePath: ${input.filePath}. Check the exact notebook path from vscode_notebook_summary.`)
+    throw new Error(
+      `No live VS Code bridge workspace matches filePath: ${input.filePath}. Check the exact notebook path from vscode_notebook_summary.`,
+    )
   }
 
-// 评分排序：按工作区路径匹配度和心跳新鲜度排序
+  // 评分排序：按工作区路径匹配度和心跳新鲜度排序
   const scored = candidates
     // 评分：健康>心跳新鲜>端口可达，决定 discover 排序
     .map((entry) => ({ entry, score: scoreBridge(entry, input.cwd, input.filePath) }))
     .sort((a, b) => b.score - a.score || b.entry.updatedAt - a.entry.updatedAt)
 
-// 最佳桥接：评分最高的候选
+  // 最佳桥接：评分最高的候选
   const best = scored[0]
   if (!best) {
-    throw new Error("No live VS Code bridge found. Open this workspace in VS Code or launch opencode from the VS Code extension.")
+    throw new Error(
+      "No live VS Code bridge found. Open this workspace in VS Code or launch opencode from the VS Code extension.",
+    )
   }
 
-// 次优桥接：用于检测评分并列的冲突
+  // 次优桥接：用于检测评分并列的冲突
   const second = scored[1]
   if (second && best.score === second.score && best.entry.updatedAt === second.entry.updatedAt) {
     throw new Error("Multiple matching VS Code bridges found. Specify filePath or focus the desired VS Code workspace.")
   }
 
-// 构建桥接引用：包含连接信息和缓存过期时间
+  // 构建桥接引用：包含连接信息和缓存过期时间
   const bridge = {
     id: best.entry.id,
     host: best.entry.host ?? "127.0.0.1",
@@ -228,7 +232,7 @@ export async function resolveBridge(input: ResolveInput): Promise<BridgeRef> {
     score: best.score,
     source: "registry",
   } satisfies BridgeRef
-// 更新缓存：设置过期时间为当前时间 + RESOLVE_CACHE_MS
+  // 更新缓存：设置过期时间为当前时间 + RESOLVE_CACHE_MS
   cachedRegistryBridge = {
     cwd: input.cwd,
     filePath: input.filePath,
@@ -236,7 +240,7 @@ export async function resolveBridge(input: ResolveInput): Promise<BridgeRef> {
     expiresAt: Date.now() + RESOLVE_CACHE_MS,
     bridge,
   }
-// 返回匹配桥接：工作区路径匹配度最高的桥接
+  // 返回匹配桥接：工作区路径匹配度最高的桥接
   return bridge
 }
 
@@ -257,9 +261,9 @@ async function callBridgeOnce(input: CallInput): Promise<unknown> {
   if (input.path !== "/notebook/env" || input.body.operation !== "create") {
     await assertExistingLocalFilePath(input.filePath)
   }
-// 解析桥接：通过工作区和文件路径匹配最佳桥接
+  // 解析桥接：通过工作区和文件路径匹配最佳桥接
   const bridge = await resolveBridge({ cwd: input.cwd, filePath: input.filePath })
-// HTTP 响应：fetchWithTimeout 支持 AbortController 中止
+  // HTTP 响应：fetchWithTimeout 支持 AbortController 中止
   let response: Response
   try {
     // 发送 HTTP POST：携带 Bearer token 认证，防止未授权调用
@@ -276,16 +280,16 @@ async function callBridgeOnce(input: CallInput): Promise<unknown> {
       input.timeoutMs,
       input.signal,
     )
-// 网络错误处理：清除缓存桥接，下次调用将重新发现
+    // 网络错误处理：清除缓存桥接，下次调用将重新发现
   } catch (error) {
-// 失效缓存：桥接可能已关闭或不可达，强制下次重新发现
+    // 失效缓存：桥接可能已关闭或不可达，强制下次重新发现
     invalidateCachedBridge(bridge)
     throw error
   }
 
-// 读取响应体：可能为空（204 No Content）
+  // 读取响应体：可能为空（204 No Content）
   const text = await response.text()
-// 解析响应体：优先 JSON，失败时保留原始文本
+  // 解析响应体：优先 JSON，失败时保留原始文本
   let value: unknown
   try {
     value = text ? JSON.parse(text) : {}
@@ -293,12 +297,12 @@ async function callBridgeOnce(input: CallInput): Promise<unknown> {
     value = text
   }
 
-// HTTP 错误：非 2xx 状态码视为失败
+  // HTTP 错误：非 2xx 状态码视为失败
   if (!response.ok) {
     const message = errorFromResponse(value) ?? `VS Code bridge request failed with HTTP ${response.status}`
     throw new Error(message)
   }
-// 业务错误：HTTP 200 但响应体包含 error 字段
+  // 业务错误：HTTP 200 但响应体包含 error 字段
   const error = errorFromResponse(value)
   if (error) throw new Error(error)
   return value
@@ -346,7 +350,6 @@ function bridgeMatchesFilePath(entry: BridgeEntry, filePath: string) {
     .map(normalizeInputPath)
     .some((active) => active !== undefined && samePath(active, target))
 }
-
 
 // 读取注册条目：解析 JSON，验证 schema 版本和必需字段
 async function readEntry(filepath: string) {
@@ -400,8 +403,8 @@ async function fetchWithTimeout(
   try {
     return await fetch(url, { ...init, signal: controller.signal })
   } finally {
-  // 清理定时器：请求完成后立即清除，防止内存泄漏
-// 清理定时器：请求完成后立即清除，防止内存泄漏和空回调
+    // 清理定时器：请求完成后立即清除，防止内存泄漏
+    // 清理定时器：请求完成后立即清除，防止内存泄漏和空回调
     clearTimeout(timer)
     signal?.removeEventListener("abort", abort)
   }
@@ -423,7 +426,7 @@ function pidDead(pid: number) {
 function normalizeInputPath(value?: string) {
   if (!value) return
   let result = value
-// file:// URI 转换：VS Code 使用 file:// URI，桥接需要文件系统路径
+  // file:// URI 转换：VS Code 使用 file:// URI，桥接需要文件系统路径
   if (result.startsWith("file://")) {
     try {
       result = fileURLToPath(result)
@@ -460,7 +463,9 @@ async function assertExistingLocalFilePath(filePath?: string) {
   if (!localPath) return
   const stat = await fs.stat(localPath).catch((error) => {
     if (isMissing(error)) {
-      throw new Error(`Notebook filePath does not exist exactly: ${filePath}. Reuse the exact path returned by vscode_notebook_summary.`)
+      throw new Error(
+        `Notebook filePath does not exist exactly: ${filePath}. Reuse the exact path returned by vscode_notebook_summary.`,
+      )
     }
     throw error
   })

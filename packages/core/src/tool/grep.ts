@@ -56,9 +56,17 @@ type ModelOutput = typeof Output.Encoded
 export const toModelOutput = (output: ModelOutput) => {
   // 截断来自真实 producer 状态，不能仅因条数恰好等于预算就猜测有更多结果。
   const timeout = output.timeout ?? DEFAULT_TIMEOUT
-  const lines = output.items.length === 0
-    ? output.timedOut ? [`Search timed out after ${timeout} ms before finding matches.`, "Results may be incomplete. Use a narrower path/include/exclude pattern or increase timeout."] : ["No files found"]
-    : [`Found ${output.items.length}${output.truncated ? "+" : ""} matches${output.truncated ? ` (showing first ${output.items.length})` : ""}${output.timedOut ? ` before timing out after ${timeout} ms` : ""}`]
+  const lines =
+    output.items.length === 0
+      ? output.timedOut
+        ? [
+            `Search timed out after ${timeout} ms before finding matches.`,
+            "Results may be incomplete. Use a narrower path/include/exclude pattern or increase timeout.",
+          ]
+        : ["No files found"]
+      : [
+          `Found ${output.items.length}${output.truncated ? "+" : ""} matches${output.truncated ? ` (showing first ${output.items.length})` : ""}${output.timedOut ? ` before timing out after ${timeout} ms` : ""}`,
+        ]
   let current = ""
   for (const match of output.items) {
     if (current !== match.entry.path) {
@@ -68,10 +76,16 @@ export const toModelOutput = (output: ModelOutput) => {
     }
     lines.push(`  Line ${match.line}: ${match.text}`)
   }
-  if (output.truncated) lines.push("", `(Results truncated: showing first ${output.items.length} matches. Consider using a more specific path or pattern.)`)
-  if (output.timedOut) lines.push("",
-    `(Search timed out after ${timeout} ms; results may be incomplete. Use a narrower path/include/exclude pattern or increase timeout.)`,
-  )
+  if (output.truncated)
+    lines.push(
+      "",
+      `(Results truncated: showing first ${output.items.length} matches. Consider using a more specific path or pattern.)`,
+    )
+  if (output.timedOut)
+    lines.push(
+      "",
+      `(Search timed out after ${timeout} ms; results may be incomplete. Use a narrower path/include/exclude pattern or increase timeout.)`,
+    )
   if (output.partial) lines.push("Some paths could not be accessed; results may be incomplete.")
   return lines.join("\n")
 }
@@ -89,18 +103,19 @@ const layer = Layer.effectDiscard(
       .register({
         [name]: Tool.make({
           description:
-            "Search file contents by regular expression within the active Location or an absolute managed tool-output file. Use limit to bound the match count. Returns concise file resources, line numbers, and bounded line previews.\n- Filter files by pattern with the include and exclude parameters (eg. include \"*.js\", exclude \"dist/**\")\n- For large workspaces, pass path, include, and exclude to narrow the candidate files before searching contents\n- Searches are time-bounded; if the timeout is reached, partial results may be returned instead of claiming there are no matches",
+            'Search file contents by regular expression within the active Location or an absolute managed tool-output file. Use limit to bound the match count. Returns concise file resources, line numbers, and bounded line previews.\n- Filter files by pattern with the include and exclude parameters (eg. include "*.js", exclude "dist/**")\n- For large workspaces, pass path, include, and exclude to narrow the candidate files before searching contents\n- Searches are time-bounded; if the timeout is reached, partial results may be returned instead of claiming there are no matches',
           input: Input,
           output: Output,
           toModelOutput: ({ output }) => [
             {
               type: "text",
-              text: toModelOutput(
-                { ...output, items: output.items.map((match) => ({
+              text: toModelOutput({
+                ...output,
+                items: output.items.map((match) => ({
                   ...match,
                   entry: { ...match.entry, path: path.resolve(location.directory, match.entry.path) },
-                })) },
-              ),
+                })),
+              }),
             },
           ],
           execute: (input, context) =>
@@ -160,13 +175,19 @@ const layer = Layer.effectDiscard(
                     ),
                   })),
                 )
-            }).pipe(Effect.mapError((cause) => new ToolFailure({
-              message: cause instanceof Ripgrep.SearchTooBroadError
-                ? `${cause.message}\nUse a narrower path or include pattern before searching file contents.`
-                : cause instanceof Ripgrep.InvalidPatternError || cause instanceof Ripgrep.Error
-                  ? cause.message
-                  : PermissionV2.autoDeniedMessage(cause) ?? `Unable to grep for ${input.pattern}`,
-            }))),
+            }).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new ToolFailure({
+                    message:
+                      cause instanceof Ripgrep.SearchTooBroadError
+                        ? `${cause.message}\nUse a narrower path or include pattern before searching file contents.`
+                        : cause instanceof Ripgrep.InvalidPatternError || cause instanceof Ripgrep.Error
+                          ? cause.message
+                          : (PermissionV2.autoDeniedMessage(cause) ?? `Unable to grep for ${input.pattern}`),
+                  }),
+              ),
+            ),
         }),
       })
       .pipe(Effect.orDie)

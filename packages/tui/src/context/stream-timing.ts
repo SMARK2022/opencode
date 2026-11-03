@@ -1,16 +1,11 @@
 // 每个 TUI 进程最多记住 512 个 message/part/field 诊断 key；超过后清空，
 // 防止长会话常驻内存增长。清空只会让后续首 delta 再打一行日志，不影响 UI。
-  // #237：512 上限防长流打爆诊断缓冲——超限整表清空而非拒绝写入，诊断永不阻塞流式主路径
+// #237：512 上限防长流打爆诊断缓冲——超限整表清空而非拒绝写入，诊断永不阻塞流式主路径
 export const PART_DELTA_TIMING_LIMIT = 512
 
 type AppLogClient = {
   app: {
-    log(input: {
-      service: string
-      level: "info"
-      message: string
-      extra: Record<string, unknown>
-    }): Promise<unknown>
+    log(input: { service: string; level: "info"; message: string; extra: Record<string, unknown> }): Promise<unknown>
   }
 }
 

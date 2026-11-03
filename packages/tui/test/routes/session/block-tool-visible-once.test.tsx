@@ -35,7 +35,8 @@ function ShellCard(props: { command: string; output: string; expanded?: boolean 
                   title="bash"
                   autoReview={false}
                   onClick={() => setExpanded((value) => !value)}
-                  preview={expanded() ? undefined : preview}>
+                  preview={expanded() ? undefined : preview}
+                >
                   <text>{`$ ${props.command}\n${props.output}`}</text>
                   <text>Click to collapse</text>
                 </BlockTool>
@@ -49,7 +50,11 @@ function ShellCard(props: { command: string; output: string; expanded?: boolean 
 }
 
 test("non-collapsed shell block shows command once", async () => {
-  const app = await testRender(() => <ShellCard command="echo hello" output={"hello\n"} expanded />, { width: 60, height: 40, useThread: false })
+  const app = await testRender(() => <ShellCard command="echo hello" output={"hello\n"} expanded />, {
+    width: 60,
+    height: 40,
+    useThread: false,
+  })
   try {
     await new Promise((resolve) => setTimeout(resolve, 100))
     await app.waitForFrame((frame) => frame.includes("$ echo hello"))
@@ -64,11 +69,21 @@ test("non-collapsed shell block shows command once", async () => {
 
 test("expanded shell block does not leak preview first row", async () => {
   const longOutput = Array.from({ length: 30 }, (_, index) => `line ${index}`).join("\n")
-  const app = await testRender(() => <ShellCard command="echo test" output={longOutput} />, { width: 60, height: 40, useThread: false })
+  const app = await testRender(() => <ShellCard command="echo test" output={longOutput} />, {
+    width: 60,
+    height: 40,
+    useThread: false,
+  })
   try {
     await new Promise((resolve) => setTimeout(resolve, 100))
     await app.waitForFrame((frame) => frame.includes("Click to expand"))
-    await app.mockMouse.click(10, app.captureCharFrame().split("\n").findIndex((line) => line.includes("Click to expand")))
+    await app.mockMouse.click(
+      10,
+      app
+        .captureCharFrame()
+        .split("\n")
+        .findIndex((line) => line.includes("Click to expand")),
+    )
     await app.waitForFrame((frame) => frame.includes("Click to collapse"))
     // 展开态：只有 body 可见；preview 首行泄漏会让 "$ echo test" 出现 2 次。
     const rows = app.captureCharFrame().split("\n")

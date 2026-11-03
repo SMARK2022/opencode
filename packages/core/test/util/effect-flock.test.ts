@@ -132,27 +132,47 @@ describe("util.effect-flock", () => {
 
       expect(yield* Effect.promise(() => exists(lockDir))).toBe(false)
       const released: string[] = []
-      const filesystem = Layer.effect(FSUtil.Service, Effect.gen(function* () {
-        const actual = yield* FSUtil.Service
-        return FSUtil.Service.of({ ...actual, rename: (from, to) => Effect.gen(function* () {
-          yield* actual.rename(from, to)
-          if (from !== lockDir) return
-          released.push(to)
-          // 在真实rename和旧目录清理之间重建活动锁，确定性模拟下一owner抢到同一路径。
-          yield* actual.makeDirectory(from)
-          yield* actual.writeFileString(path.join(from, "meta.json"), JSON.stringify({ token: "next-owner" }))
-        }) })
-      })).pipe(Layer.provide(LayerNode.compile(FSUtil.node)))
+      const filesystem = Layer.effect(
+        FSUtil.Service,
+        Effect.gen(function* () {
+          const actual = yield* FSUtil.Service
+          return FSUtil.Service.of({
+            ...actual,
+            rename: (from, to) =>
+              Effect.gen(function* () {
+                yield* actual.rename(from, to)
+                if (from !== lockDir) return
+                released.push(to)
+                // 在真实rename和旧目录清理之间重建活动锁，确定性模拟下一owner抢到同一路径。
+                yield* actual.makeDirectory(from)
+                yield* actual.writeFileString(path.join(from, "meta.json"), JSON.stringify({ token: "next-owner" }))
+              }),
+          })
+        }),
+      ).pipe(Layer.provide(LayerNode.compile(FSUtil.node)))
       yield* Effect.gen(function* () {
         // 默认服务已在本用例构建；fresh避免memo复用它而绕过真实文件交接夹具。
-        yield* Effect.scoped(Effect.gen(function* () {
-          const guarded = yield* EffectFlock.Service
-          yield* guarded.acquire("eflock:acquire", dir)
-        }).pipe(Effect.provide(Layer.fresh(AppNodeBuilder.build(EffectFlock.node, [[Global.node, testGlobal], [FSUtil.node, filesystem]])))))
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const guarded = yield* EffectFlock.Service
+            yield* guarded.acquire("eflock:acquire", dir)
+          }).pipe(
+            Effect.provide(
+              Layer.fresh(
+                AppNodeBuilder.build(EffectFlock.node, [
+                  [Global.node, testGlobal],
+                  [FSUtil.node, filesystem],
+                ]),
+              ),
+            ),
+          ),
+        )
         expect(released).toHaveLength(1)
         expect(released[0]).toStartWith(`${lockDir}.release-`)
         // scope释放只能清掉改名后的旧目录，下一owner的元数据和活动目录须完整保留。
-        expect((yield* Effect.promise(() => readJson<{ token: string }>(path.join(lockDir, "meta.json")))).token).toBe("next-owner")
+        expect((yield* Effect.promise(() => readJson<{ token: string }>(path.join(lockDir, "meta.json")))).token).toBe(
+          "next-owner",
+        )
         expect(yield* Effect.promise(() => fs.readdir(dir))).toEqual([path.basename(lockDir)])
       }).pipe(Effect.ensuring(Effect.promise(() => fs.rm(tmp, { recursive: true, force: true }))))
     }),

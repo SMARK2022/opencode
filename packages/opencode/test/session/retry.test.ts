@@ -294,7 +294,10 @@ describe("session.retry.retryable", () => {
     "retries Cloudflare HTML blocks for %s even when the SDK marks them non-retryable",
     (provider) => {
       // 保留source的outage页，并用无通用重试措辞的challenge锁定新增指纹路径。
-      for (const responseBody of [cloudflareBody, '<html><script>window._cf_chl_opt={};</script>/cdn-cgi/challenge-platform/</html>']) {
+      for (const responseBody of [
+        cloudflareBody,
+        "<html><script>window._cf_chl_opt={};</script>/cdn-cgi/challenge-platform/</html>",
+      ]) {
         const error = MessageV2.fromError(
           new APICallError({
             message: "Forbidden",
@@ -590,7 +593,9 @@ describe("session.message-v2.fromError", () => {
 
   // #191：SSE 超时转为可重试 APIError
   test("converts SSE read timeouts to retryable APIError", () => {
-    const result = MessageV2.fromError(Object.assign(new Error("SSE read timed out"), { code: "SSE_READ_TIMEOUT" }), { providerID })
+    const result = MessageV2.fromError(Object.assign(new Error("SSE read timed out"), { code: "SSE_READ_TIMEOUT" }), {
+      providerID,
+    })
     expect(SessionV1.APIError.isInstance(result)).toBe(true)
     if (!SessionV1.APIError.isInstance(result)) throw new Error("expected APIError")
     expect(result.data.isRetryable).toBe(true)
@@ -610,7 +615,12 @@ describe("session.message-v2.fromError", () => {
 
   // #191：嵌套 ECONNRESET 也应可重试
   test("converts wrapped connection resets to retryable APIError", () => {
-    const result = MessageV2.fromError(Object.assign(new TypeError("terminated"), { cause: Object.assign(new Error("socket closed"), { code: "ECONNRESET" }) }), { providerID })
+    const result = MessageV2.fromError(
+      Object.assign(new TypeError("terminated"), {
+        cause: Object.assign(new Error("socket closed"), { code: "ECONNRESET" }),
+      }),
+      { providerID },
+    )
     expect(SessionV1.APIError.isInstance(result)).toBe(true)
     if (!SessionV1.APIError.isInstance(result)) throw new Error("expected APIError")
     expect(result.data.isRetryable).toBe(true)
@@ -630,7 +640,9 @@ describe("session.message-v2.fromError", () => {
   test("converts TLS certificate failures to retryable APIError", () => {
     for (const error of [
       Object.assign(new Error("certificate has expired"), { code: "CERT_HAS_EXPIRED" }),
-      Object.assign(new TypeError("fetch failed"), { cause: Object.assign(new Error("self-signed certificate"), { code: "DEPTH_ZERO_SELF_SIGNED_CERT" }) }),
+      Object.assign(new TypeError("fetch failed"), {
+        cause: Object.assign(new Error("self-signed certificate"), { code: "DEPTH_ZERO_SELF_SIGNED_CERT" }),
+      }),
     ]) {
       const result = MessageV2.fromError(error, { providerID })
       expect(SessionV1.APIError.isInstance(result)).toBe(true)
@@ -657,7 +669,10 @@ describe("session.message-v2.fromError", () => {
   // #191：AI SDK RetryError 解包后取 lastError 判定
   test("unwraps AI SDK retry errors before deciding retryability", () => {
     const result = MessageV2.fromError(
-      Object.assign(new Error("Failed after retries"), { name: "AI_RetryError", lastError: Object.assign(new Error("fetch failed"), { code: "ETIMEDOUT" }) }),
+      Object.assign(new Error("Failed after retries"), {
+        name: "AI_RetryError",
+        lastError: Object.assign(new Error("fetch failed"), { code: "ETIMEDOUT" }),
+      }),
       { providerID },
     )
     expect(SessionV1.APIError.isInstance(result)).toBe(true)
@@ -665,8 +680,6 @@ describe("session.message-v2.fromError", () => {
     expect(result.data.isRetryable).toBe(true)
     expect(SessionRetry.retryable(result, retryProvider)).toEqual({ message: "fetch failed" })
   })
-
-
 
   // #192：无 statusCode 的 APICallError 无法自证重试性，需查 cause 决定重试
   // #192：有 statusCode 的 4xx 保持非重试，即使 cause 链中有 transport 故障
@@ -805,5 +818,4 @@ describe("session.message-v2.fromError", () => {
     expect(result.data.responseBody).toBeDefined()
     expect(SessionRetry.retryable(result, retryProvider)).toBeUndefined()
   })
-
 })

@@ -57,7 +57,15 @@ const noopBootstrapLayer = Layer.succeed(
 )
 const appLayer = AppNodeBuilder.build(
   // 种子写入与 HttpApi app 都依赖同一个全局 Database 节点，不另建请求级账本层。
-  LayerNode.group([InstanceStore.node, Project.node, Session.node, Workspace.node, Database.node, Ripgrep.node, SessionRequestUsage.node]),
+  LayerNode.group([
+    InstanceStore.node,
+    Project.node,
+    Session.node,
+    Workspace.node,
+    Database.node,
+    Ripgrep.node,
+    SessionRequestUsage.node,
+  ]),
   [[InstanceStore.bootstrapNode, noopBootstrapLayer]],
 )
 const servedRoutes: Layer.Layer<never, Config.ConfigError, HttpServer.HttpServer> = HttpRouter.serve(
@@ -249,87 +257,111 @@ afterEach(async () => {
 
 describe("session HttpApi", () => {
   // 原 it 会启动 HTTP 路由；此用例只构建生产服务，验证跨入口取消而不监听端口。
-  testEffect(appLayer).instance(
-    "shares session ownership and cancels V1 runs across service contexts",
-    () =>
-      Effect.gen(function* () {
-        const shared = HttpApiApp.createSharedServices()
-        const scope = yield* Scope.Scope
-        const firstScope = yield* Scope.fork(scope)
-        const secondScope = yield* Scope.fork(scope)
-        const runtimeScope = yield* Scope.fork(scope)
-        const first = yield* Layer.buildWithMemoMap(shared.layer, shared.memoMap, firstScope)
-        const second = yield* Layer.buildWithMemoMap(shared.layer, shared.memoMap, secondScope)
-        const runtime = yield* Layer.buildWithMemoMap(AppLayer, shared.memoMap, runtimeScope)
+  testEffect(appLayer).instance("shares session ownership and cancels V1 runs across service contexts", () =>
+    Effect.gen(function* () {
+      const shared = HttpApiApp.createSharedServices()
+      const scope = yield* Scope.Scope
+      const firstScope = yield* Scope.fork(scope)
+      const secondScope = yield* Scope.fork(scope)
+      const runtimeScope = yield* Scope.fork(scope)
+      const first = yield* Layer.buildWithMemoMap(shared.layer, shared.memoMap, firstScope)
+      const second = yield* Layer.buildWithMemoMap(shared.layer, shared.memoMap, secondScope)
+      const runtime = yield* Layer.buildWithMemoMap(AppLayer, shared.memoMap, runtimeScope)
 
-        const firstRunState = Context.get(first, SessionRunState.Service)
-        const secondRunState = Context.get(second, SessionRunState.Service)
-        expect(secondRunState).toBe(firstRunState)
-        expect(Context.get(second, SessionExecution.Service)).toBe(Context.get(first, SessionExecution.Service))
-        expect(Context.get(second, LocationServiceMap.Service)).toBe(Context.get(first, LocationServiceMap.Service))
-        expect(Context.get(second, Database.Service)).toBe(Context.get(first, Database.Service))
-        // 复用目标共享层，覆盖source要求的实际应用服务身份，不建立第二个共享helper。
-        expect(Context.get(second, SessionStatus.Service)).toBe(Context.get(first, SessionStatus.Service))
-        expect(Context.get(second, SessionPrompt.Service)).toBe(Context.get(first, SessionPrompt.Service))
-        expect(Context.get(second, Provider.Service)).toBe(Context.get(first, Provider.Service))
-        expect(Context.get(second, SessionV2.Service)).toBe(Context.get(first, SessionV2.Service))
-        expect(Context.get(second, EventV2Bridge.Service)).toBe(Context.get(first, EventV2Bridge.Service))
-        expect(Context.get(runtime, SessionRunState.Service)).toBe(firstRunState)
-        expect(Context.get(runtime, InstanceStore.Service)).toBe(Context.get(first, InstanceStore.Service))
-        const configuration = yield* Effect.promise(() => import("../../src/config/config"))
-        expect(Context.get(runtime, configuration.Config.Service)).toBe(Context.get(first, configuration.Config.Service))
+      const firstRunState = Context.get(first, SessionRunState.Service)
+      const secondRunState = Context.get(second, SessionRunState.Service)
+      expect(secondRunState).toBe(firstRunState)
+      expect(Context.get(second, SessionExecution.Service)).toBe(Context.get(first, SessionExecution.Service))
+      expect(Context.get(second, LocationServiceMap.Service)).toBe(Context.get(first, LocationServiceMap.Service))
+      expect(Context.get(second, Database.Service)).toBe(Context.get(first, Database.Service))
+      // 复用目标共享层，覆盖source要求的实际应用服务身份，不建立第二个共享helper。
+      expect(Context.get(second, SessionStatus.Service)).toBe(Context.get(first, SessionStatus.Service))
+      expect(Context.get(second, SessionPrompt.Service)).toBe(Context.get(first, SessionPrompt.Service))
+      expect(Context.get(second, Provider.Service)).toBe(Context.get(first, Provider.Service))
+      expect(Context.get(second, SessionV2.Service)).toBe(Context.get(first, SessionV2.Service))
+      expect(Context.get(second, EventV2Bridge.Service)).toBe(Context.get(first, EventV2Bridge.Service))
+      expect(Context.get(runtime, SessionRunState.Service)).toBe(firstRunState)
+      expect(Context.get(runtime, InstanceStore.Service)).toBe(Context.get(first, InstanceStore.Service))
+      const configuration = yield* Effect.promise(() => import("../../src/config/config"))
+      expect(Context.get(runtime, configuration.Config.Service)).toBe(Context.get(first, configuration.Config.Service))
 
-        // 直接调用无端口 handler，确认共享服务不会把第二棵路由或 CORS 缓存为第一棵。
-        const handlers = ["https://first.test", "https://second.test"].map(origin => ({
-          origin, web: HttpRouter.toWebHandler(HttpApiApp.createRoutes({ cors: [origin] }, undefined, shared), { disableLogger: true }),
-        }))
-        yield* Effect.addFinalizer(() => Effect.promise(() => Promise.all(handlers.map(entry => entry.web.dispose()))))
-        for (const entry of handlers) {
-          const response = yield* Effect.promise(() => entry.web.handler(new Request("http://localhost/global/health", { headers: { origin: entry.origin } }), HttpApiApp.context))
-          expect(response.status).toBe(200)
-          expect(response.headers.get("access-control-allow-origin")).toBe(entry.origin)
-        }
-        // 共享层使用独立内存库，项目也须由同一服务上下文登记后再创建会话。
-        const instance = yield* TestInstance
-        yield* Context.get(first, Project.Service).fromDirectory(instance.directory)
-        const session = yield* createSession().pipe(Effect.provide(first))
-        const message = yield* createTextMessage(session.id, "shared run").pipe(Effect.provide(first))
-        const other = yield* tmpdirScoped({ git: true }).pipe(Effect.provide(AppNodeBuilder.build(CrossSpawnSpawner.node)))
-        yield* Effect.acquireUseRelease(
-          firstRunState.beginRevert(session.id).pipe(Effect.provide(first)),
-          () => Effect.gen(function* () {
+      // 直接调用无端口 handler，确认共享服务不会把第二棵路由或 CORS 缓存为第一棵。
+      const handlers = ["https://first.test", "https://second.test"].map((origin) => ({
+        origin,
+        web: HttpRouter.toWebHandler(HttpApiApp.createRoutes({ cors: [origin] }, undefined, shared), {
+          disableLogger: true,
+        }),
+      }))
+      yield* Effect.addFinalizer(() => Effect.promise(() => Promise.all(handlers.map((entry) => entry.web.dispose()))))
+      for (const entry of handlers) {
+        const response = yield* Effect.promise(() =>
+          entry.web.handler(
+            new Request("http://localhost/global/health", { headers: { origin: entry.origin } }),
+            HttpApiApp.context,
+          ),
+        )
+        expect(response.status).toBe(200)
+        expect(response.headers.get("access-control-allow-origin")).toBe(entry.origin)
+      }
+      // 共享层使用独立内存库，项目也须由同一服务上下文登记后再创建会话。
+      const instance = yield* TestInstance
+      yield* Context.get(first, Project.Service).fromDirectory(instance.directory)
+      const session = yield* createSession().pipe(Effect.provide(first))
+      const message = yield* createTextMessage(session.id, "shared run").pipe(Effect.provide(first))
+      const other = yield* tmpdirScoped({ git: true }).pipe(
+        Effect.provide(AppNodeBuilder.build(CrossSpawnSpawner.node)),
+      )
+      yield* Effect.acquireUseRelease(
+        firstRunState.beginRevert(session.id).pipe(Effect.provide(first)),
+        () =>
+          Effect.gen(function* () {
             // 请求目录不同仍同步拒绝；若守卫放在fork内则会错误返回204。
-            const response = yield* Effect.promise(() => handlers[0]!.web.handler(new Request(
-              `http://localhost${pathFor(SessionPaths.promptAsync, { sessionID: session.id })}?directory=${encodeURIComponent(other)}`,
-              { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ noReply: true, parts: [{ type: "text", text: "must not be admitted" }] }) },
-            ), HttpApiApp.context))
+            const response = yield* Effect.promise(() =>
+              handlers[0]!.web.handler(
+                new Request(
+                  `http://localhost${pathFor(SessionPaths.promptAsync, { sessionID: session.id })}?directory=${encodeURIComponent(other)}`,
+                  {
+                    method: "POST",
+                    headers: { "content-type": "application/json" },
+                    body: JSON.stringify({ noReply: true, parts: [{ type: "text", text: "must not be admitted" }] }),
+                  },
+                ),
+                HttpApiApp.context,
+              ),
+            )
             expect(response.status).toBe(400)
-            expect(yield* Context.get(first, Session.Service).messages({ sessionID: session.id }).pipe(Effect.provide(first))).toHaveLength(1)
+            expect(
+              yield* Context.get(first, Session.Service)
+                .messages({ sessionID: session.id })
+                .pipe(Effect.provide(first)),
+            ).toHaveLength(1)
           }),
-          () => firstRunState.endRevert(session.id).pipe(Effect.provide(first)),
-        )
+        () => firstRunState.endRevert(session.id).pipe(Effect.provide(first)),
+      )
 
-        const interrupted = { info: message.info, parts: [message.part] }
-        const ready = yield* Deferred.make<void>()
-        const fiber = yield* firstRunState
-          .ensureRunning(
-            session.id,
-            Effect.succeed(interrupted),
-            Deferred.succeed(ready, undefined).pipe(Effect.andThen(Effect.never)),
-          )
-          .pipe(Effect.provide(first), Effect.forkScoped)
-
-        yield* awaitWithTimeout(Deferred.await(ready), "shared V1 run never became ready")
-        yield* awaitWithTimeout(
-          secondRunState.cancel(session.id).pipe(Effect.provide(second)),
-          "cross-context V1 cancellation did not finish",
+      const interrupted = { info: message.info, parts: [message.part] }
+      const ready = yield* Deferred.make<void>()
+      const fiber = yield* firstRunState
+        .ensureRunning(
+          session.id,
+          Effect.succeed(interrupted),
+          Deferred.succeed(ready, undefined).pipe(Effect.andThen(Effect.never)),
         )
-        const exit = yield* awaitWithTimeout(Fiber.await(fiber), "shared V1 run did not complete after cancellation")
-        expect(exit).toEqual(Exit.succeed(interrupted))
-        yield* Scope.close(firstScope, Exit.succeed(undefined))
-        // 第一scope退出不关闭第二scope仍持有的应用服务。
-        expect((yield* Context.get(second, Session.Service).get(session.id).pipe(Effect.provide(second))).id).toBe(session.id)
-      }),
+        .pipe(Effect.provide(first), Effect.forkScoped)
+
+      yield* awaitWithTimeout(Deferred.await(ready), "shared V1 run never became ready")
+      yield* awaitWithTimeout(
+        secondRunState.cancel(session.id).pipe(Effect.provide(second)),
+        "cross-context V1 cancellation did not finish",
+      )
+      const exit = yield* awaitWithTimeout(Fiber.await(fiber), "shared V1 run did not complete after cancellation")
+      expect(exit).toEqual(Exit.succeed(interrupted))
+      yield* Scope.close(firstScope, Exit.succeed(undefined))
+      // 第一scope退出不关闭第二scope仍持有的应用服务。
+      expect((yield* Context.get(second, Session.Service).get(session.id).pipe(Effect.provide(second))).id).toBe(
+        session.id,
+      )
+    }),
   )
 
   it.effect("maps busy sessions to public session busy errors", () =>
@@ -367,30 +399,53 @@ describe("session HttpApi", () => {
         // 同根不同来源、同来源不同根和较新输入分别隔离三个过滤条件的漏传。
         yield* usage.begin({ ...base, requestID: root.info.id, source: "prompt", timeCreated: 0 })
         yield* usage.begin({ ...base, requestID: shell.info.id, source: "shell", variant: undefined, timeCreated: 0 })
-        yield* usage.begin({ ...base, requestID: other.info.id, rootRequestID: other.info.id, source: "prompt", timeCreated: 0 })
+        yield* usage.begin({
+          ...base,
+          requestID: other.info.id,
+          rootRequestID: other.info.id,
+          source: "prompt",
+          timeCreated: 0,
+        })
         yield* usage.begin({ ...base, requestID: newer.info.id, source: "prompt", timeCreated: 2 })
 
         // V1 账本从持久化 step-finish 读取费用，只有助手 info.cost 不能替代这条结算。
         // 不传原生 usage 快照，确保 HTTP 测试确实经过现有 V1 parts 适配边界。
         const tokens = { input: 5, output: 3, reasoning: 2, cache: { read: 1, write: 0 }, total: 11 }
         const assistant = yield* session.updateMessage({
-          id: MessageID.ascending(), role: "assistant", sessionID: info.id,
-          parentID: root.info.id, mode: "build", agent: "build",
+          id: MessageID.ascending(),
+          role: "assistant",
+          sessionID: info.id,
+          parentID: root.info.id,
+          mode: "build",
+          agent: "build",
           path: { cwd: test.directory, root: test.directory },
-          ...model, cost: 1.25, tokens,
-          time: { created: 0, completed: 0 }, finish: "stop",
+          ...model,
+          cost: 1.25,
+          tokens,
+          time: { created: 0, completed: 0 },
+          finish: "stop",
         })
         // completed=0 必须编码为已完成；真实时钟仅影响 updated，不需要全局时钟替身。
         yield* session.updatePart({
-          id: PartID.ascending(), messageID: assistant.id, sessionID: info.id,
-          type: "step-finish", reason: "stop", cost: 1.25, tokens,
+          id: PartID.ascending(),
+          messageID: assistant.id,
+          sessionID: info.id,
+          type: "step-finish",
+          reason: "stop",
+          cost: 1.25,
+          tokens,
         })
         yield* usage.recordAssistant({ sessionID: info.id, requestID: root.info.id, assistant })
 
         // 独立美元常量是 oracle，不复写整数微美元换算或账本求和算法。
         const wire = {
-          sessionID: info.id, requestID: root.info.id, rootRequestID: root.info.id,
-          status: "completed", model, tokens, cost: 1.25,
+          sessionID: info.id,
+          requestID: root.info.id,
+          rootRequestID: root.info.id,
+          status: "completed",
+          model,
+          tokens,
+          cost: 1.25,
           time: { created: 0, updated: expect.any(Number), completed: 0 },
         }
         const url = `/session/${info.id}/request_usage`
@@ -404,17 +459,28 @@ describe("session HttpApi", () => {
         // 复用被 source 过滤排除的 shell 行，不新增请求改变既有分页和联合过滤 oracle。
         const zero = { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 }, total: 0 }
         const running = yield* session.updateMessage({
-          id: MessageID.ascending(), role: "assistant", sessionID: info.id,
-          parentID: shell.info.id, mode: "build", agent: "build",
+          id: MessageID.ascending(),
+          role: "assistant",
+          sessionID: info.id,
+          parentID: shell.info.id,
+          mode: "build",
+          agent: "build",
           path: { cwd: test.directory, root: test.directory },
-          providerID: model.providerID, modelID: model.modelID, cost: 0, tokens: zero,
+          providerID: model.providerID,
+          modelID: model.modelID,
+          cost: 0,
+          tokens: zero,
           time: { created: 0 },
         })
         yield* usage.recordAssistant({ sessionID: info.id, requestID: shell.info.id, assistant: running })
         // 精确 JSON 对象不列可选键，variant/completed/error 输出 null 也必须失败。
         const runningWire = {
-          ...wire, requestID: shell.info.id, status: "running",
-          model: { providerID: model.providerID, modelID: model.modelID }, tokens: zero, cost: 0,
+          ...wire,
+          requestID: shell.info.id,
+          status: "running",
+          model: { providerID: model.providerID, modelID: model.modelID },
+          tokens: zero,
+          cost: 0,
           time: { created: 0, updated: expect.any(Number) },
         }
         const runningRequest = { ...runningWire, source: "shell", agent: "build", assistantCount: 1, stepCount: 0 }
@@ -434,13 +500,29 @@ describe("session HttpApi", () => {
         expect(yield* requestJson<unknown[]>(`${url}?limit=0`, { headers })).toEqual([])
         // 负整数保留不限量语义：同根两条都应返回，不能钳制为一条或拒绝为负数。
         expect(
-          (yield* requestJson<Array<{ requestID: string }>>(`${url}?limit=-1&source=prompt&rootRequestID=${root.info.id}`, { headers })).map((row) => row.requestID),
+          (yield* requestJson<Array<{ requestID: string }>>(
+            `${url}?limit=-1&source=prompt&rootRequestID=${root.info.id}`,
+            { headers },
+          )).map((row) => row.requestID),
         ).toEqual([newer.info.id, root.info.id])
         // 每个排除行只违反一个条件，不能靠单一 source/root/before 条件碰巧通过。
-        expect(yield* requestJson<unknown[]>(`${url}?limit=2&before=1&source=prompt&rootRequestID=${root.info.id}`, { headers })).toEqual([expected])
+        expect(
+          yield* requestJson<unknown[]>(`${url}?limit=2&before=1&source=prompt&rootRequestID=${root.info.id}`, {
+            headers,
+          }),
+        ).toEqual([expected])
         // 整数限制仅属于 limit；before 的小数边界与安全整数上界仍须正常查询。
-        expect(yield* requestJson<unknown[]>(`${url}?limit=2&before=1.5&source=prompt&rootRequestID=${root.info.id}`, { headers })).toEqual([expected])
-        expect(yield* requestJson<unknown[]>(`${url}?limit=${Number.MAX_SAFE_INTEGER}&before=1.5&source=prompt&rootRequestID=${root.info.id}`, { headers })).toEqual([expected])
+        expect(
+          yield* requestJson<unknown[]>(`${url}?limit=2&before=1.5&source=prompt&rootRequestID=${root.info.id}`, {
+            headers,
+          }),
+        ).toEqual([expected])
+        expect(
+          yield* requestJson<unknown[]>(
+            `${url}?limit=${Number.MAX_SAFE_INTEGER}&before=1.5&source=prompt&rootRequestID=${root.info.id}`,
+            { headers },
+          ),
+        ).toEqual([expected])
 
         // 数字 codec 拒绝不可转换文本，避免只测试服务方法而遗漏 HttpApi query 解码。
         expect((yield* request(`${url}?limit=bad`, { headers })).status).toBe(400)
@@ -449,7 +531,8 @@ describe("session HttpApi", () => {
           const invalid = yield* request(`${url}?limit=${limit}`, { headers })
           expect(invalid.status).toBe(400)
           expect(yield* responseJson(invalid)).toMatchObject({
-            name: "BadRequest", data: { kind: "Query", message: expect.stringContaining("limit") },
+            name: "BadRequest",
+            data: { kind: "Query", message: expect.stringContaining("limit") },
           })
         }
         // Session 已存在且 message ID 合法，404 必须来自缺失账本资源而非路由或 ID 校验。
@@ -1143,7 +1226,8 @@ describe("session HttpApi", () => {
         // abort 到达真实子 fiber，而非只在另一个 InstanceState 中修补 SQLite 外观。
         expect(parentTask?.state.status).toBe("error")
         const childAssistants = (yield* MessageV2.filterCompactedEffect(childID)).filter(
-          (message): message is MessageV2.WithParts & { info: MessageV2.Assistant } => message.info.role === "assistant",
+          (message): message is MessageV2.WithParts & { info: MessageV2.Assistant } =>
+            message.info.role === "assistant",
         )
         expect(childAssistants.length).toBeGreaterThan(0)
         expect(childAssistants.every((message) => message.info.time.completed !== undefined)).toBe(true)
@@ -1453,9 +1537,7 @@ describe("session HttpApi", () => {
     Effect.gen(function* () {
       const llm = yield* TestLLMServer
       const directory = yield* tmpdirScoped({ git: true, config: testProviderConfig(llm.url) })
-      const session = yield* createSession({ title: "Request usage session" }).pipe(
-        provideInstanceEffect(directory),
-      )
+      const session = yield* createSession({ title: "Request usage session" }).pipe(provideInstanceEffect(directory))
       const headers = { "x-opencode-directory": directory }
       // #269：列表端点返回裸数组——成功契约是 [] 而非 { data: [] } 包装
       const body = yield* requestJson<unknown[]>(
@@ -1496,7 +1578,10 @@ describe("session HttpApi", () => {
       const headers = { "x-opencode-directory": directory }
       const missingID = "msg_httpapi_missing"
       const response = yield* request(
-        pathFor("/session/:sessionID/request_usage/:requestID/assistant", { sessionID: session.id, requestID: missingID }),
+        pathFor("/session/:sessionID/request_usage/:requestID/assistant", {
+          sessionID: session.id,
+          requestID: missingID,
+        }),
         { headers },
       )
       // #269：assistants 端点与 get 端点共享同一父请求前置——两处都需锁定

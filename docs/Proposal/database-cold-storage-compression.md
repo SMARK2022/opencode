@@ -53,50 +53,50 @@ Scope: `packages/opencode` 当前默认使用的 legacy `message` / `part` 持�
 
 ### 3.1 已阅读的源码
 
-| 文件 | 相关性和确认结果 |
-| --- | --- |
-| `packages/opencode/src/session/session.sql.ts` | `message.data`、`part.data`、`session_message.data` 都是 SQLite JSON text；Message 删除 cascade Part，Part 的 `session_id` 没有 FK |
-| `packages/opencode/src/session/message-v2.ts` | legacy Message/Part 全部 schema、row hydration、page/get/parts、provider conversion 和 compaction filtering 的权威实现 |
-| `packages/opencode/src/session/session.ts` | `Session.getPart()` 是独立 Part 读取 seam；`messages()`、`findMessage()`、`fork()` 的调用链 |
-| `packages/opencode/src/session/search.ts` | legacy 和 v2 Session list 的直接 SQL 搜索白名单；搜索不经过 Message hydration |
-| `packages/opencode/src/session/projectors.ts` | legacy Message/Part 正常 upsert/remove 的主要写入链；运行在 SyncEvent transaction 内 |
-| `packages/opencode/src/session/projectors-next.ts` | `session_message` 的实验性投影；确认它是另一套存储和读取链，不应在小补丁中半接入 |
-| `packages/opencode/src/session/prompt.ts` | 图片 normalize/save、legacy 历史读取、v2 dual-write 和 prompt compaction 调用顺序 |
-| `packages/opencode/src/session/summary.ts` | summary 会消费 Message diff、Tool metadata 和 hydrated Parts |
-| `packages/opencode/src/session/revert.ts` | revert 会读取 snapshot、patch 和 Tool metadata，必须看到完整 domain 值 |
-| `packages/opencode/src/session/compaction.ts` | compaction 消费 Reasoning、Tool evidence 和 metadata；不应直接看到 marker |
-| `packages/opencode/src/session/message-error.ts` | Assistant shared error 变体 |
-| `packages/core/src/util/error.ts` | `NamedError` 的持久化形状是 `{ name, data }`，所以精确路径是 `error.data.*` |
-| `packages/core/src/session-message.ts` | 实验性 v2 User/Shell/Assistant/Compaction schema 和搜索字段 |
-| `packages/opencode/src/image/image.ts` | 现有图片处理可能 resize/re-encode，只能用于上传规范化，不能用于可逆存储 codec |
-| `packages/opencode/src/config/attachment.ts` | 图片输入大小和 resize 配置；不应复用为数据库压缩配置 |
-| `packages/opencode/src/storage/db.ts` | WAL、30 秒 busy timeout、`BEGIN IMMEDIATE` 和 transaction 复用行为 |
-| `packages/opencode/src/sync/index.ts` | projector 和可选 EventTable 持久化位于同一 immediate transaction；event 持久化发生在 projector 之后 |
-| `packages/opencode/src/sync/event.sql.ts` | retained event schema 为 `aggregate_id`、`seq`、`type`、`data` |
-| `packages/opencode/src/event-v2-bridge.ts` | v2 event 通过 legacy SyncEvent bridge 投影；不应通过 EventTable 是否存在判断 Session 类型 |
-| `packages/opencode/src/cli/cmd/db.ts` | 已有 DB maintenance 命令 seam，适合增加 `db storage`，无需新增顶层命令或全局配置 |
-| `packages/opencode/src/cli/cmd/import.ts` | import 对 Message/Part 使用 `onConflictDoNothing()`；新行热写，冲突不会覆盖冷行 |
-| `packages/opencode/src/cli/cmd/export.ts` | export 应消费 hydrated domain 值，不能导出内部 marker |
-| `packages/opencode/src/share/share-next.ts` | share 订阅 domain event；representation-only 回热不应发布 Message/Part update |
-| `packages/opencode/src/data-migration.ts` | 直接用 `json_extract` 读取 Message usage；计费字段必须始终保持热态 |
-| `packages/opencode/src/data-migration.sql.ts` | 现有 data migration 表只记录任务状态，不适合承载 artifact |
-| `packages/opencode/drizzle.config.ts` | `src/**/*.sql.ts` 都会参与 migration 生成 |
+| 文件                                               | 相关性和确认结果                                                                                                                   |
+| -------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| `packages/opencode/src/session/session.sql.ts`     | `message.data`、`part.data`、`session_message.data` 都是 SQLite JSON text；Message 删除 cascade Part，Part 的 `session_id` 没有 FK |
+| `packages/opencode/src/session/message-v2.ts`      | legacy Message/Part 全部 schema、row hydration、page/get/parts、provider conversion 和 compaction filtering 的权威实现             |
+| `packages/opencode/src/session/session.ts`         | `Session.getPart()` 是独立 Part 读取 seam；`messages()`、`findMessage()`、`fork()` 的调用链                                        |
+| `packages/opencode/src/session/search.ts`          | legacy 和 v2 Session list 的直接 SQL 搜索白名单；搜索不经过 Message hydration                                                      |
+| `packages/opencode/src/session/projectors.ts`      | legacy Message/Part 正常 upsert/remove 的主要写入链；运行在 SyncEvent transaction 内                                               |
+| `packages/opencode/src/session/projectors-next.ts` | `session_message` 的实验性投影；确认它是另一套存储和读取链，不应在小补丁中半接入                                                   |
+| `packages/opencode/src/session/prompt.ts`          | 图片 normalize/save、legacy 历史读取、v2 dual-write 和 prompt compaction 调用顺序                                                  |
+| `packages/opencode/src/session/summary.ts`         | summary 会消费 Message diff、Tool metadata 和 hydrated Parts                                                                       |
+| `packages/opencode/src/session/revert.ts`          | revert 会读取 snapshot、patch 和 Tool metadata，必须看到完整 domain 值                                                             |
+| `packages/opencode/src/session/compaction.ts`      | compaction 消费 Reasoning、Tool evidence 和 metadata；不应直接看到 marker                                                          |
+| `packages/opencode/src/session/message-error.ts`   | Assistant shared error 变体                                                                                                        |
+| `packages/core/src/util/error.ts`                  | `NamedError` 的持久化形状是 `{ name, data }`，所以精确路径是 `error.data.*`                                                        |
+| `packages/core/src/session-message.ts`             | 实验性 v2 User/Shell/Assistant/Compaction schema 和搜索字段                                                                        |
+| `packages/opencode/src/image/image.ts`             | 现有图片处理可能 resize/re-encode，只能用于上传规范化，不能用于可逆存储 codec                                                      |
+| `packages/opencode/src/config/attachment.ts`       | 图片输入大小和 resize 配置；不应复用为数据库压缩配置                                                                               |
+| `packages/opencode/src/storage/db.ts`              | WAL、30 秒 busy timeout、`BEGIN IMMEDIATE` 和 transaction 复用行为                                                                 |
+| `packages/opencode/src/sync/index.ts`              | projector 和可选 EventTable 持久化位于同一 immediate transaction；event 持久化发生在 projector 之后                                |
+| `packages/opencode/src/sync/event.sql.ts`          | retained event schema 为 `aggregate_id`、`seq`、`type`、`data`                                                                     |
+| `packages/opencode/src/event-v2-bridge.ts`         | v2 event 通过 legacy SyncEvent bridge 投影；不应通过 EventTable 是否存在判断 Session 类型                                          |
+| `packages/opencode/src/cli/cmd/db.ts`              | 已有 DB maintenance 命令 seam，适合增加 `db storage`，无需新增顶层命令或全局配置                                                   |
+| `packages/opencode/src/cli/cmd/import.ts`          | import 对 Message/Part 使用 `onConflictDoNothing()`；新行热写，冲突不会覆盖冷行                                                    |
+| `packages/opencode/src/cli/cmd/export.ts`          | export 应消费 hydrated domain 值，不能导出内部 marker                                                                              |
+| `packages/opencode/src/share/share-next.ts`        | share 订阅 domain event；representation-only 回热不应发布 Message/Part update                                                      |
+| `packages/opencode/src/data-migration.ts`          | 直接用 `json_extract` 读取 Message usage；计费字段必须始终保持热态                                                                 |
+| `packages/opencode/src/data-migration.sql.ts`      | 现有 data migration 表只记录任务状态，不适合承载 artifact                                                                          |
+| `packages/opencode/drizzle.config.ts`              | `src/**/*.sql.ts` 都会参与 migration 生成                                                                                          |
 
 ### 3.2 已阅读的测试和文档
 
-| 文件 | 相关性和测试缺口 |
-| --- | --- |
-| `packages/opencode/test/server/session-list.test.ts` | 已有 legacy/v2 search 测试，但没有“completed compaction 旧历史冷冻后仍可检索”的回归 |
-| `packages/opencode/test/server/session-preview.test.ts` | preview 直接读取 visible text；需要验证不会触发回热 |
-| `packages/opencode/test/session/messages-pagination.test.ts` | 覆盖 page/get/parts 等 legacy 读取路径，适合增加 persistent warming 测试 |
-| `packages/opencode/test/session/message-v2.test.ts` | 覆盖 provider conversion 和 `filterCompacted`；适合验证 domain 层永远看不到 marker |
-| `packages/opencode/test/session/compaction.test.ts` | 适合验证冷 Tool/Reasoning 在 compaction 中仍完整 |
-| `packages/opencode/test/session/session.test.ts` | 适合验证 projector upsert 清 ref、回热不发 domain event |
-| `packages/opencode/test/storage/goal-migration.test.ts` | additive migration 测试组织范例 |
-| `packages/opencode/test/storage/db.test.ts` | 当前只覆盖 DB path/runtime flags，不覆盖 maintenance transaction |
-| `packages/opencode/test/image/image.test.ts` | 证明 normalize 语义；存储 codec 应单独测试，不能复用有损路径 |
-| `packages/opencode/test/acp/event-subscription.test.ts` | ACP 需要收到原始图片 data URL，要求 hydration 保持字节级结果 |
-| `AGENTS.md`、`packages/opencode/AGENTS.md` | migration、测试目录、Effect、模块形状和最小修改约束 |
+| 文件                                                         | 相关性和测试缺口                                                                    |
+| ------------------------------------------------------------ | ----------------------------------------------------------------------------------- |
+| `packages/opencode/test/server/session-list.test.ts`         | 已有 legacy/v2 search 测试，但没有“completed compaction 旧历史冷冻后仍可检索”的回归 |
+| `packages/opencode/test/server/session-preview.test.ts`      | preview 直接读取 visible text；需要验证不会触发回热                                 |
+| `packages/opencode/test/session/messages-pagination.test.ts` | 覆盖 page/get/parts 等 legacy 读取路径，适合增加 persistent warming 测试            |
+| `packages/opencode/test/session/message-v2.test.ts`          | 覆盖 provider conversion 和 `filterCompacted`；适合验证 domain 层永远看不到 marker  |
+| `packages/opencode/test/session/compaction.test.ts`          | 适合验证冷 Tool/Reasoning 在 compaction 中仍完整                                    |
+| `packages/opencode/test/session/session.test.ts`             | 适合验证 projector upsert 清 ref、回热不发 domain event                             |
+| `packages/opencode/test/storage/goal-migration.test.ts`      | additive migration 测试组织范例                                                     |
+| `packages/opencode/test/storage/db.test.ts`                  | 当前只覆盖 DB path/runtime flags，不覆盖 maintenance transaction                    |
+| `packages/opencode/test/image/image.test.ts`                 | 证明 normalize 语义；存储 codec 应单独测试，不能复用有损路径                        |
+| `packages/opencode/test/acp/event-subscription.test.ts`      | ACP 需要收到原始图片 data URL，要求 hydration 保持字节级结果                        |
+| `AGENTS.md`、`packages/opencode/AGENTS.md`                   | migration、测试目录、Effect、模块形状和最小修改约束                                 |
 
 ### 3.3 搜索确认的调用点和旧逻辑
 
@@ -117,46 +117,46 @@ Scope: `packages/opencode` 当前默认使用的 legacy `message` / `part` 持�
 
 以下统计均来自对 `$HOME/.local/share/opencode/opencode.db` 的只读 SQLite 查询：
 
-| 内容 | 逻辑字节 |
-| --- | ---: |
-| Tool `state.output` | 154,211,956 |
-| Message `summary.diffs` | 91,415,147 |
-| Reasoning text | 28,580,252 |
-| File data URL / URL | 24,328,690 |
-| Step start/finish 行合计 | 21,242,385 |
-| Tool searchable `state.input` | 18,684,865 |
-| Text metadata | 446,775 |
-| Tool `state.error` | 261,927 |
-| File source text | 360 |
+| 内容                          |    逻辑字节 |
+| ----------------------------- | ----------: |
+| Tool `state.output`           | 154,211,956 |
+| Message `summary.diffs`       |  91,415,147 |
+| Reasoning text                |  28,580,252 |
+| File data URL / URL           |  24,328,690 |
+| Step start/finish 行合计      |  21,242,385 |
+| Tool searchable `state.input` |  18,684,865 |
+| Text metadata                 |     446,775 |
+| Tool `state.error`            |     261,927 |
+| File source text              |         360 |
 
 按 Part 类型观察：
 
-| Part 类型 | JSON 总量 | 大于等于 4 KiB 的大行总量 |
-| --- | ---: | ---: |
-| tool | 268,900,836 | 214,393,784 |
-| reasoning | 63,638,288 | 40,648,405 |
-| text | 50,390,141 | 44,691,660 |
-| file | 24,335,180 | 主要是 data URL |
+| Part 类型 |   JSON 总量 | 大于等于 4 KiB 的大行总量 |
+| --------- | ----------: | ------------------------: |
+| tool      | 268,900,836 |               214,393,784 |
+| reasoning |  63,638,288 |                40,648,405 |
+| text      |  50,390,141 |                44,691,660 |
+| file      |  24,335,180 |           主要是 data URL |
 
 Text 需要进一步按检索语义拆分：
 
-| Text 类别 | 行数 | text 字节 |
-| --- | ---: | ---: |
-| visible、可检索 | 14,879 | 45,860,691 |
-| synthetic / ignored / hidden、不可检索 | 559 | 1,615,028 |
+| Text 类别                              |   行数 |  text 字节 |
+| -------------------------------------- | -----: | ---------: |
+| visible、可检索                        | 14,879 | 45,860,691 |
+| synthetic / ignored / hidden、不可检索 |    559 |  1,615,028 |
 
 其他精确字段测量：
 
-| 字段 | 行数 | 字节 |
-| --- | ---: | ---: |
-| user `system` | 0 | 0 |
-| user `tools` | 473 | 7,900 |
-| user `format.schema` | 0 | 0 |
-| user summary title/body | 2,421 | 0 |
-| assistant `structured` | 0 | 0 |
-| assistant error message | 497 | 7,417 |
-| assistant response body | 55 | 12,512 |
-| retry error payload | 0 | 0 |
+| 字段                    |  行数 |   字节 |
+| ----------------------- | ----: | -----: |
+| user `system`           |     0 |      0 |
+| user `tools`            |   473 |  7,900 |
+| user `format.schema`    |     0 |      0 |
+| user summary title/body | 2,421 |      0 |
+| assistant `structured`  |     0 |      0 |
+| assistant error message |   497 |  7,417 |
+| assistant response body |    55 | 12,512 |
+| retry error payload     |     0 |      0 |
 
 这些低占比字段仍可进入同一个字段矩阵，但 4 KiB 阈值会使当前绝大部分值继续 inline，不值得为它们增加专用 schema 或命令。
 
@@ -166,13 +166,13 @@ Text 需要进一步按检索语义拆分：
 
 当前 DB 有 40 个 top-level image FilePart：
 
-| 表示 | 字节 | 相对原始 inline URL |
-| --- | ---: | ---: |
-| 原始 data URL | 24,328,608 | 基准 |
-| base64 解码后二进制 | 18,245,765 | -25.0% |
-| 二进制 gzip level 1 BLOB | 16,302,230 | -33.0% |
-| gzip 后再 base64 放回 JSON | 21,737,436 | 仅 -10.6% |
-| gzip 整个 URL 后再 base64 | 28,582,508 | +17.5% |
+| 表示                       |       字节 | 相对原始 inline URL |
+| -------------------------- | ---------: | ------------------: |
+| 原始 data URL              | 24,328,608 |                基准 |
+| base64 解码后二进制        | 18,245,765 |              -25.0% |
+| 二进制 gzip level 1 BLOB   | 16,302,230 |              -33.0% |
+| gzip 后再 base64 放回 JSON | 21,737,436 |           仅 -10.6% |
+| gzip 整个 URL 后再 base64  | 28,582,508 |              +17.5% |
 
 结论是：把压缩 bytes 再 base64 放回 JSON 不能获得理想收益，有时反而膨胀。图片必须进入 SQLite BLOB，且保留原始 data URL prefix，才能同时去掉 base64 膨胀并做到字节级恢复。
 
@@ -332,19 +332,19 @@ generic ref 无法同时对 MessageTable 和 PartTable 声明一个传统 FK。�
 
 ### 7.1 Message 字段
 
-| owner | field ID | JSON 位置 | kind | 条件 |
-| --- | --- | --- | --- | --- |
-| user | `message.user.summary.title` | `summary.title` | utf8 | 值存在 |
-| user | `message.user.summary.body` | `summary.body` | utf8 | 值存在 |
-| user | `message.user.summary.diffs` | `summary.diffs` whole array | json | 值存在 |
-| user | `message.user.system` | `system` | utf8 | 值存在 |
-| user | `message.user.format.schema` | `format.schema` | json | `format.type === "json_schema"` |
-| user | `message.user.tools` | `tools` whole map | json | 值存在 |
-| assistant | `message.assistant.structured` | `structured` | json | 值存在 |
-| assistant | `message.assistant.error.message` | `error.data.message` | utf8 | error name 属于下述允许集合 |
-| assistant | `message.assistant.error.response_body` | `error.data.responseBody` | utf8 | APIError 或 ContextOverflowError |
-| assistant | `message.assistant.error.response_headers` | `error.data.responseHeaders` | json | APIError |
-| assistant | `message.assistant.error.metadata` | `error.data.metadata` | json | APIError |
+| owner     | field ID                                   | JSON 位置                    | kind | 条件                             |
+| --------- | ------------------------------------------ | ---------------------------- | ---- | -------------------------------- |
+| user      | `message.user.summary.title`               | `summary.title`              | utf8 | 值存在                           |
+| user      | `message.user.summary.body`                | `summary.body`               | utf8 | 值存在                           |
+| user      | `message.user.summary.diffs`               | `summary.diffs` whole array  | json | 值存在                           |
+| user      | `message.user.system`                      | `system`                     | utf8 | 值存在                           |
+| user      | `message.user.format.schema`               | `format.schema`              | json | `format.type === "json_schema"`  |
+| user      | `message.user.tools`                       | `tools` whole map            | json | 值存在                           |
+| assistant | `message.assistant.structured`             | `structured`                 | json | 值存在                           |
+| assistant | `message.assistant.error.message`          | `error.data.message`         | utf8 | error name 属于下述允许集合      |
+| assistant | `message.assistant.error.response_body`    | `error.data.responseBody`    | utf8 | APIError 或 ContextOverflowError |
+| assistant | `message.assistant.error.response_headers` | `error.data.responseHeaders` | json | APIError                         |
+| assistant | `message.assistant.error.metadata`         | `error.data.metadata`        | json | APIError                         |
 
 `message.assistant.error.message` 允许的 error name：
 
@@ -366,27 +366,27 @@ generic ref 无法同时对 MessageTable 和 PartTable 声明一个传统 FK。�
 
 ### 7.2 Part 字段
 
-| Part | field ID | JSON 位置 | kind | 条件 |
-| --- | --- | --- | --- | --- |
-| text | `part.text.nonsearch_text` | `text` | utf8 | `synthetic === true` 或 `ignored === true` 或 `hidden != null` |
-| text | `part.text.metadata` | `metadata` | json | 值存在 |
-| reasoning | `part.reasoning.text` | `text` | utf8 | 总是允许 |
-| reasoning | `part.reasoning.metadata` | `metadata` | json | 值存在 |
-| file | `part.file.url` | `url` | utf8/data-url | 总是允许 |
-| file | `part.file.source_text` | `source.text.value` | utf8 | source 存在 |
-| agent | `part.agent.source_value` | `source.value` | utf8 | source 存在 |
-| compaction | `part.compaction.recent_user_messages` | `recent_user_messages` whole array | json | 值存在 |
-| retry | `part.retry.error.message` | `error.data.message` | utf8 | APIError |
-| retry | `part.retry.error.response_body` | `error.data.responseBody` | utf8 | APIError |
-| retry | `part.retry.error.response_headers` | `error.data.responseHeaders` | json | APIError |
-| retry | `part.retry.error.metadata` | `error.data.metadata` | json | APIError |
-| tool any state | `part.tool.metadata` | top-level `metadata` | json | 值存在 |
-| tool running | `part.tool.running.metadata` | `state.metadata` | json | status=running |
-| tool completed | `part.tool.completed.output` | `state.output` | utf8 | status=completed |
-| tool completed | `part.tool.completed.metadata` | `state.metadata` | json | status=completed |
-| tool completed | `part.tool.completed.attachments` | `state.attachments` whole array | json | status=completed，值存在 |
-| tool error | `part.tool.error.error` | `state.error` | utf8 | status=error |
-| tool error | `part.tool.error.metadata` | `state.metadata` | json | status=error，值存在 |
+| Part           | field ID                               | JSON 位置                          | kind          | 条件                                                           |
+| -------------- | -------------------------------------- | ---------------------------------- | ------------- | -------------------------------------------------------------- |
+| text           | `part.text.nonsearch_text`             | `text`                             | utf8          | `synthetic === true` 或 `ignored === true` 或 `hidden != null` |
+| text           | `part.text.metadata`                   | `metadata`                         | json          | 值存在                                                         |
+| reasoning      | `part.reasoning.text`                  | `text`                             | utf8          | 总是允许                                                       |
+| reasoning      | `part.reasoning.metadata`              | `metadata`                         | json          | 值存在                                                         |
+| file           | `part.file.url`                        | `url`                              | utf8/data-url | 总是允许                                                       |
+| file           | `part.file.source_text`                | `source.text.value`                | utf8          | source 存在                                                    |
+| agent          | `part.agent.source_value`              | `source.value`                     | utf8          | source 存在                                                    |
+| compaction     | `part.compaction.recent_user_messages` | `recent_user_messages` whole array | json          | 值存在                                                         |
+| retry          | `part.retry.error.message`             | `error.data.message`               | utf8          | APIError                                                       |
+| retry          | `part.retry.error.response_body`       | `error.data.responseBody`          | utf8          | APIError                                                       |
+| retry          | `part.retry.error.response_headers`    | `error.data.responseHeaders`       | json          | APIError                                                       |
+| retry          | `part.retry.error.metadata`            | `error.data.metadata`              | json          | APIError                                                       |
+| tool any state | `part.tool.metadata`                   | top-level `metadata`               | json          | 值存在                                                         |
+| tool running   | `part.tool.running.metadata`           | `state.metadata`                   | json          | status=running                                                 |
+| tool completed | `part.tool.completed.output`           | `state.output`                     | utf8          | status=completed                                               |
+| tool completed | `part.tool.completed.metadata`         | `state.metadata`                   | json          | status=completed                                               |
+| tool completed | `part.tool.completed.attachments`      | `state.attachments` whole array    | json          | status=completed，值存在                                       |
+| tool error     | `part.tool.error.error`                | `state.error`                      | utf8          | status=error                                                   |
+| tool error     | `part.tool.error.metadata`             | `state.metadata`                   | json          | status=error，值存在                                           |
 
 以下 Part 保持完全 inline：
 
@@ -602,15 +602,15 @@ GC 必须比普通“无 ref 就删 blob”更保守：
 
 ### 10.3 CAS 收敛状态
 
-| 状态 | 行为 |
-| --- | --- |
-| 初始 owner 已热 | 返回当前热值，不写 DB |
-| 初始 owner 冷，CAS 成功 | 返回恢复值；owner update 和 ref delete 同事务提交 |
-| CAS 失败，重读为更新后的热行 | 返回更新者的热值，不返回旧 snapshot |
-| CAS 失败，重读为另一份冷行 | 重新读取新 refs/artifacts，再进行下一次有界尝试 |
-| owner 被删除 | 保持当前 get/page/parts 的 not-found/undefined 语义 |
-| 重复冲突超过预算 | 抛 typed storage contention error |
-| marker/ref/blob corruption | 抛 typed storage corruption error，DB 不变 |
+| 状态                         | 行为                                                |
+| ---------------------------- | --------------------------------------------------- |
+| 初始 owner 已热              | 返回当前热值，不写 DB                               |
+| 初始 owner 冷，CAS 成功      | 返回恢复值；owner update 和 ref delete 同事务提交   |
+| CAS 失败，重读为更新后的热行 | 返回更新者的热值，不返回旧 snapshot                 |
+| CAS 失败，重读为另一份冷行   | 重新读取新 refs/artifacts，再进行下一次有界尝试     |
+| owner 被删除                 | 保持当前 get/page/parts 的 not-found/undefined 语义 |
+| 重复冲突超过预算             | 抛 typed storage contention error                   |
+| marker/ref/blob corruption   | 抛 typed storage corruption error，DB 不变          |
 
 任何失败路径都不能返回含 marker 的 domain 对象，也不能在 CAS 失败后返回已经过时的解压 snapshot。
 
@@ -828,14 +828,14 @@ Message/Part/Session 删除可以暂时留下 generic refs。这不会造成 own
 
 ### 15.1 生产文件
 
-| 文件 | 具体改动 |
-| --- | --- |
-| `packages/opencode/src/session/session.sql.ts` | 新增两张 additive table 和 hash index |
-| `packages/opencode/src/session/cold-artifact.ts` | 新深模块：field matrix、codec、resolver、CAS、maintenance 和 typed errors |
-| `packages/opencode/src/session/message-v2.ts` | row query 携带 raw text，并在 page/get/parts 的 row-to-domain seam 调用 resolver |
-| `packages/opencode/src/session/session.ts` | `getPart()` 复用统一 Part resolver |
-| `packages/opencode/src/session/projectors.ts` | successful Message/Part upsert 后同事务清 owner refs |
-| `packages/opencode/src/cli/cmd/db.ts` | 增加 `db storage` 子命令，薄适配到 cold-artifact maintenance interface |
+| 文件                                             | 具体改动                                                                         |
+| ------------------------------------------------ | -------------------------------------------------------------------------------- |
+| `packages/opencode/src/session/session.sql.ts`   | 新增两张 additive table 和 hash index                                            |
+| `packages/opencode/src/session/cold-artifact.ts` | 新深模块：field matrix、codec、resolver、CAS、maintenance 和 typed errors        |
+| `packages/opencode/src/session/message-v2.ts`    | row query 携带 raw text，并在 page/get/parts 的 row-to-domain seam 调用 resolver |
+| `packages/opencode/src/session/session.ts`       | `getPart()` 复用统一 Part resolver                                               |
+| `packages/opencode/src/session/projectors.ts`    | successful Message/Part upsert 后同事务清 owner refs                             |
+| `packages/opencode/src/cli/cmd/db.ts`            | 增加 `db storage` 子命令，薄适配到 cold-artifact maintenance interface           |
 
 不修改：
 
@@ -905,12 +905,12 @@ PRAGMA foreign_key_check;
 
 不含本调研 proposal：
 
-| 类别 | 文件数 | 手写增删行预估 |
-| --- | ---: | ---: |
-| 生产代码 | 6 | 650-1,000 |
-| 测试 | 4-7 | 750-1,200 |
-| 生成 migration | 2 | 由 Drizzle 生成，snapshot 可能较大 |
-| 用户文档 | 0-2 | 0-120 |
+| 类别           | 文件数 |                     手写增删行预估 |
+| -------------- | -----: | ---------------------------------: |
+| 生产代码       |      6 |                          650-1,000 |
+| 测试           |    4-7 |                          750-1,200 |
+| 生成 migration |      2 | 由 Drizzle 生成，snapshot 可能较大 |
+| 用户文档       |    0-2 |                              0-120 |
 
 预计 Git 文件数为 12-17，主要新增量集中在一个深模块和行为测试；现有生产文件只做 seam 接入。若实现显著超过这个范围，应先重新审计，而不是继续增加 adapter、配置或状态机。
 

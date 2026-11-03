@@ -55,7 +55,9 @@ export const toModelOutput = (output: Output) =>
     // 批次最终 diff 与诊断状态独立，不用不可用提示替代真实改动。
     "\nLSP diagnostics unavailable (no language server running). Run bun typecheck to verify type safety.",
     ...(output.applied.some((item) => item.rewrite)
-      ? ["\nNote: a *** Delete File + *** Add File pair on the same path was applied as an in-place rewrite; the delete was redundant. Use *** Add File alone to rewrite a file."]
+      ? [
+          "\nNote: a *** Delete File + *** Add File pair on the same path was applied as an in-place rewrite; the delete was redundant. Use *** Add File alone to rewrite a file.",
+        ]
       : []),
     ...(output.errors?.length ? [`\nFailed to update ${output.errors.length} file(s):`, ...output.errors] : []),
   ].join("\n")
@@ -125,11 +127,18 @@ const layer = Layer.effectDiscard(
                 })
                 if (hunks.length === 0) return yield* new ToolFailure({ message: "patch rejected: empty patch" })
 
-                const targets: Array<{ readonly hunk: Patch.Hunk; readonly target: LocationMutation.Target; readonly destination?: LocationMutation.Target; readonly rewrite?: boolean }> = []
+                const targets: Array<{
+                  readonly hunk: Patch.Hunk
+                  readonly target: LocationMutation.Target
+                  readonly destination?: LocationMutation.Target
+                  readonly rewrite?: boolean
+                }> = []
                 for (const hunk of hunks) {
                   const target = yield* mutation.resolve({ path: hunk.path, kind: "file" })
-                  const destination = hunk.type === "update" && hunk.movePath
-                    ? yield* mutation.resolve({ path: hunk.movePath, kind: "file" }) : undefined
+                  const destination =
+                    hunk.type === "update" && hunk.movePath
+                      ? yield* mutation.resolve({ path: hunk.movePath, kind: "file" })
+                      : undefined
                   targets.push({ hunk, target, destination })
                 }
                 // 重复 update 可组合，Delete/Add 可重写；跨源 Move 争用不能靠提交顺序猜测。
@@ -142,8 +151,13 @@ const layer = Layer.effectDiscard(
                   const destination = item.destination
                   if (!destination || destination.canonical === item.target.canonical) continue
                   const owner = destinations.get(destination.canonical)
-                  if (owner && owner !== item.target.canonical || targets.some(other => other.target.canonical === destination.canonical)) return yield* fail(item.hunk.path)
-                  if (group.some(other => other.destination && other.destination.canonical !== destination.canonical)) return yield* fail(item.hunk.path)
+                  if (
+                    (owner && owner !== item.target.canonical) ||
+                    targets.some((other) => other.target.canonical === destination.canonical)
+                  )
+                    return yield* fail(item.hunk.path)
+                  if (group.some((other) => other.destination && other.destination.canonical !== destination.canonical))
+                    return yield* fail(item.hunk.path)
                   destinations.set(destination.canonical, item.target.canonical)
                 }
                 // 完整ownership检查后归一化canonical组；Move两端约束和批准前零正文读取保持。
@@ -154,25 +168,40 @@ const layer = Layer.effectDiscard(
                     normalized.push({ ...second, target: first.target, rewrite: true })
                     continue
                   }
-                  if (group.length > 1 && group.some(entry => entry.hunk.type !== "update")) {
+                  if (group.length > 1 && group.some((entry) => entry.hunk.type !== "update")) {
                     return yield* new ToolFailure({ message: `Conflicting operations for ${first.hunk.path}` })
                   }
                   normalized.push(...group)
                 }
 
                 // 相同目录和操作仍合并授权；不同操作保留各自语义并携带完整patch。
-                const externalDirectories = new Map<string, LocationMutation.ExternalDirectoryAuthorization & { operation: Patch.Hunk["type"] | "move" }>()
+                const externalDirectories = new Map<
+                  string,
+                  LocationMutation.ExternalDirectoryAuthorization & { operation: Patch.Hunk["type"] | "move" }
+                >()
                 for (const { hunk, target, destination } of normalized) {
                   // Move目的地有独立授权边界，不能用源路径审批代替。
-                  for (const entry of [{ target, operation: hunk.type }, ...(destination ? [{ target: destination, operation: "move" as const }] : [])]) {
+                  for (const entry of [
+                    { target, operation: hunk.type },
+                    ...(destination ? [{ target: destination, operation: "move" as const }] : []),
+                  ]) {
                     const external = entry.target.externalDirectory
-                    if (external) externalDirectories.set(`${external.resource}:${entry.operation}`, { ...external, operation: entry.operation })
+                    if (external)
+                      externalDirectories.set(`${external.resource}:${entry.operation}`, {
+                        ...external,
+                        operation: entry.operation,
+                      })
                   }
                 }
                 for (const external of externalDirectories.values()) {
                   yield* permission.assert({
                     ...LocationMutation.externalDirectoryPermission(external),
-                    metadata: { action_kind: "tool", tool: "apply_patch", operation: external.operation, patchText: input.patchText },
+                    metadata: {
+                      action_kind: "tool",
+                      tool: "apply_patch",
+                      operation: external.operation,
+                      patchText: input.patchText,
+                    },
                     sessionID: context.sessionID,
                     agent: context.agent,
                     source,
@@ -181,8 +210,21 @@ const layer = Layer.effectDiscard(
                 yield* permission.assert({
                   action: "edit",
                   // 审批前仅传解析计划；不读取目标来填充diff或伪造删除行数。
-                  metadata: { files: normalized.flatMap(item => [{ type: item.destination ? "move" : item.hunk.type, relativePath: item.target.resource }, ...(item.destination ? [{ type: "add", relativePath: item.destination.resource }] : [])]), patchText: input.patchText },
-                  resources: [...new Set(normalized.flatMap(({ target, destination }) => [target.resource, ...(destination ? [destination.resource] : [])]))],
+                  metadata: {
+                    files: normalized.flatMap((item) => [
+                      { type: item.destination ? "move" : item.hunk.type, relativePath: item.target.resource },
+                      ...(item.destination ? [{ type: "add", relativePath: item.destination.resource }] : []),
+                    ]),
+                    patchText: input.patchText,
+                  },
+                  resources: [
+                    ...new Set(
+                      normalized.flatMap(({ target, destination }) => [
+                        target.resource,
+                        ...(destination ? [destination.resource] : []),
+                      ]),
+                    ),
+                  ],
                   save: ["*"],
                   sessionID: context.sessionID,
                   agent: context.agent,
@@ -194,7 +236,10 @@ const layer = Layer.effectDiscard(
                 const grouped = normalized.flatMap((entry): typeof targets => {
                   if (entry.hunk.type !== "update") return [entry]
                   const chunks = updates.get(entry.target.canonical)
-                  if (chunks) { chunks.push(...entry.hunk.chunks); return [] }
+                  if (chunks) {
+                    chunks.push(...entry.hunk.chunks)
+                    return []
+                  }
                   const combined = [...entry.hunk.chunks]
                   updates.set(entry.target.canonical, combined)
                   return [{ ...entry, hunk: { ...entry.hunk, chunks: combined } }]
@@ -210,8 +255,13 @@ const layer = Layer.effectDiscard(
                   if (failed.has(target.canonical)) continue
                   yield* Effect.gen(function* () {
                     // Move可在后entry才声明，两端仍沿原始完整targets授权并从既有group取最终目的地。
-                    const destination = groups.get(target.canonical)?.findLast(item => item.destination)?.destination
-                    const snapshot = expected.get(target.canonical) ?? { target, content: yield* fs.readFile(target.canonical).pipe(Effect.catchReason("PlatformError", "NotFound", () => Effect.succeed(undefined))) }
+                    const destination = groups.get(target.canonical)?.findLast((item) => item.destination)?.destination
+                    const snapshot = expected.get(target.canonical) ?? {
+                      target,
+                      content: yield* fs
+                        .readFile(target.canonical)
+                        .pipe(Effect.catchReason("PlatformError", "NotFound", () => Effect.succeed(undefined))),
+                    }
                     expected.set(target.canonical, snapshot)
                     if (hunk.type === "add") {
                       prepared.push({
@@ -239,7 +289,12 @@ const layer = Layer.effectDiscard(
                       catch: (error) => new ToolFailure({ message: String(error) }),
                     })
                     if (destination && !expected.has(destination.canonical)) {
-                      expected.set(destination.canonical, { target: destination, content: yield* fs.readFile(destination.canonical).pipe(Effect.catchReason("PlatformError", "NotFound", () => Effect.succeed(undefined))) })
+                      expected.set(destination.canonical, {
+                        target: destination,
+                        content: yield* fs
+                          .readFile(destination.canonical)
+                          .pipe(Effect.catchReason("PlatformError", "NotFound", () => Effect.succeed(undefined))),
+                      })
                     }
                     // 同源全部chunks已对同一原文派生，最后只提交一次并保留真实Move目标。
                     const change = {
@@ -252,70 +307,136 @@ const layer = Layer.effectDiscard(
                       after: update.content,
                     }
                     prepared.push(change)
-                  }).pipe(Effect.catch(error => {
-                    failed.add(target.canonical)
-                    const index = prepared.findIndex(change => change.target.canonical === target.canonical)
-                    if (index !== -1) prepared.splice(index, 1)
-                    errors.push((error instanceof ToolFailure ? error.message : fail(hunk.path).message) + formatStalenessNote(scanFileTouchHistory(history, target.canonical, location.directory)))
-                    return Effect.void
-                  }))
+                  }).pipe(
+                    Effect.catch((error) => {
+                      failed.add(target.canonical)
+                      const index = prepared.findIndex((change) => change.target.canonical === target.canonical)
+                      if (index !== -1) prepared.splice(index, 1)
+                      errors.push(
+                        (error instanceof ToolFailure ? error.message : fail(hunk.path).message) +
+                          formatStalenessNote(scanFileTouchHistory(history, target.canonical, location.directory)),
+                      )
+                      return Effect.void
+                    }),
+                  )
                 }
 
                 if (prepared.length === 0) return yield* new ToolFailure({ message: errors.join("\n") })
                 const patchFiles: Array<typeof FileDiff.Info.Type> = []
                 yield* files.commit({
-                  expected: [...expected.values()].filter(item => prepared.some(change => change.target.canonical === item.target.canonical || change.type === "update" && change.destination?.canonical === item.target.canonical)),
-                  execute: files => Effect.forEach(
-                  prepared,
-                  (change) =>
-                    Effect.gen(function* () {
-                      if (change.type === "add") {
-                        const result = yield* files.writeTextPreservingBom({
-                          target: change.target,
-                          content:
-                            change.contents.endsWith("\n") || change.contents === ""
-                              ? change.contents
-                              : `${change.contents}\n`,
-                          format: format.file,
-                        })
-                        applied.push({ type: change.type, resource: result.resource, target: result.target, ...(change.rewrite ? { rewrite: true } : {}) })
-                        // Add覆盖也报告持锁前像，而不是将已有正文伪装成空文件。
-                        patchFiles.push({ ...patchFile({ ...change, before: result.previous ?? "", after: result.text ?? change.after.replace(/^\uFEFF+/, "") }, result.rendered), status: result.existed ? "modified" : "added" })
-                        return
-                      }
-                      if (change.type === "delete") {
-                        const result = yield* files.remove({ target: change.target })
-                        applied.push({ type: change.type, resource: result.resource, target: result.target })
-                        patchFiles.push(patchFile(change))
-                        return
-                      }
-                      const moving = change.destination && change.destination.canonical !== change.target.canonical ? change.destination : undefined
-                      const write = {
-                        target: change.target,
-                        expected: change.source,
-                        content: change.content,
-                        format: format.file,
-                      }
-                      const result = yield* (moving ? files.moveIfUnchanged({ ...write, destination: moving }) : files.writeIfUnchanged(write))
-                      if (moving) {
-                        // 用既有删除/创建合同呈现真实两端变化，不新增无人消费的move状态。
-                        applied.push({ type: "delete", resource: change.target.resource, target: change.target.canonical })
-                        applied.push({ type: result.existed ? "update" : "add", resource: result.resource, target: result.target })
-                        patchFiles.push(patchFile({ ...change, type: "delete", after: "" }))
-                        patchFiles.push({ ...patchFile({ ...change, target: moving, before: result.previous ?? "", after: result.text ?? change.after }, result.rendered), status: result.existed ? "modified" : "added" })
-                        return
-                      }
-                      applied.push({ type: change.type, resource: result.resource, target: result.target })
-                      patchFiles.push(patchFile({ ...change, after: result.text ?? change.after }, result.rendered))
-                    }).pipe(Effect.mapError(error => error instanceof FileMutation.MoveIncompleteError
-                      ? new ToolFailure({ message: `${fail(change.path).message}. Destination ${error.destination} was written, but source ${error.path} could not be removed: ${error.reason}` })
-                      : fail(change.path))),
-                  { discard: true },
-                ) })
+                  expected: [...expected.values()].filter((item) =>
+                    prepared.some(
+                      (change) =>
+                        change.target.canonical === item.target.canonical ||
+                        (change.type === "update" && change.destination?.canonical === item.target.canonical),
+                    ),
+                  ),
+                  execute: (files) =>
+                    Effect.forEach(
+                      prepared,
+                      (change) =>
+                        Effect.gen(function* () {
+                          if (change.type === "add") {
+                            const result = yield* files.writeTextPreservingBom({
+                              target: change.target,
+                              content:
+                                change.contents.endsWith("\n") || change.contents === ""
+                                  ? change.contents
+                                  : `${change.contents}\n`,
+                              format: format.file,
+                            })
+                            applied.push({
+                              type: change.type,
+                              resource: result.resource,
+                              target: result.target,
+                              ...(change.rewrite ? { rewrite: true } : {}),
+                            })
+                            // Add覆盖也报告持锁前像，而不是将已有正文伪装成空文件。
+                            patchFiles.push({
+                              ...patchFile(
+                                {
+                                  ...change,
+                                  before: result.previous ?? "",
+                                  after: result.text ?? change.after.replace(/^\uFEFF+/, ""),
+                                },
+                                result.rendered,
+                              ),
+                              status: result.existed ? "modified" : "added",
+                            })
+                            return
+                          }
+                          if (change.type === "delete") {
+                            const result = yield* files.remove({ target: change.target })
+                            applied.push({ type: change.type, resource: result.resource, target: result.target })
+                            patchFiles.push(patchFile(change))
+                            return
+                          }
+                          const moving =
+                            change.destination && change.destination.canonical !== change.target.canonical
+                              ? change.destination
+                              : undefined
+                          const write = {
+                            target: change.target,
+                            expected: change.source,
+                            content: change.content,
+                            format: format.file,
+                          }
+                          const result = yield* moving
+                            ? files.moveIfUnchanged({ ...write, destination: moving })
+                            : files.writeIfUnchanged(write)
+                          if (moving) {
+                            // 用既有删除/创建合同呈现真实两端变化，不新增无人消费的move状态。
+                            applied.push({
+                              type: "delete",
+                              resource: change.target.resource,
+                              target: change.target.canonical,
+                            })
+                            applied.push({
+                              type: result.existed ? "update" : "add",
+                              resource: result.resource,
+                              target: result.target,
+                            })
+                            patchFiles.push(patchFile({ ...change, type: "delete", after: "" }))
+                            patchFiles.push({
+                              ...patchFile(
+                                {
+                                  ...change,
+                                  target: moving,
+                                  before: result.previous ?? "",
+                                  after: result.text ?? change.after,
+                                },
+                                result.rendered,
+                              ),
+                              status: result.existed ? "modified" : "added",
+                            })
+                            return
+                          }
+                          applied.push({ type: change.type, resource: result.resource, target: result.target })
+                          patchFiles.push(patchFile({ ...change, after: result.text ?? change.after }, result.rendered))
+                        }).pipe(
+                          Effect.mapError((error) =>
+                            error instanceof FileMutation.MoveIncompleteError
+                              ? new ToolFailure({
+                                  message: `${fail(change.path).message}. Destination ${error.destination} was written, but source ${error.path} could not be removed: ${error.reason}`,
+                                })
+                              : fail(change.path),
+                          ),
+                        ),
+                      { discard: true },
+                    ),
+                })
                 return { applied, files: patchFiles, ...(errors.length ? { errors } : {}) }
-              }).pipe(Effect.mapError(error => error instanceof FileMutation.StaleContentError
-                ? new ToolFailure({ message: `File changed before commit: ${error.path}. Read the file again and retry.` })
-                : error instanceof ToolFailure ? error : fail("patch", error)))
+              }).pipe(
+                Effect.mapError((error) =>
+                  error instanceof FileMutation.StaleContentError
+                    ? new ToolFailure({
+                        message: `File changed before commit: ${error.path}. Read the file again and retry.`,
+                      })
+                    : error instanceof ToolFailure
+                      ? error
+                      : fail("patch", error),
+                ),
+              )
             },
           }),
           "edit",
@@ -328,7 +449,16 @@ const layer = Layer.effectDiscard(
 export const node = makeLocationNode({
   name: "tool/apply-patch",
   layer,
-  deps: [ToolRegistry.node, LocationMutation.node, FileMutation.node, FSUtil.node, PermissionV2.node, Format.node, Location.node, SessionStore.node],
+  deps: [
+    ToolRegistry.node,
+    LocationMutation.node,
+    FileMutation.node,
+    FSUtil.node,
+    PermissionV2.node,
+    Format.node,
+    Location.node,
+    SessionStore.node,
+  ],
 })
 
 function patchFile(change: Prepared, rendered?: RenderedFileDiff): typeof FileDiff.Info.Type {

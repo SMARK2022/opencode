@@ -482,17 +482,17 @@ TypeScript 层不要直接关心每个 Windows API 细节，只处理 readiness�
         "~/.netrc",
         "~/.git-credentials",
         "*.env",
-        "*.env.*"
-      ]
+        "*.env.*",
+      ],
     },
     "network": {
-      "mode": "inherit"
+      "mode": "inherit",
     },
     "windows": {
       "level": "elevated",
-      "setup": "auto"
-    }
-  }
+      "setup": "auto",
+    },
+  },
 }
 ```
 

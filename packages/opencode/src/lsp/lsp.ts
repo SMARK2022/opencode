@@ -362,12 +362,14 @@ const layer = Layer.effect(
 
     const implementation = Effect.fn("LSP.implementation")(function* (input: LocInput) {
       const results = yield* run(input.file, (client) =>
-        !client.supports("textDocument/implementation") ? Promise.resolve([]) : client.connection
-          .sendRequest("textDocument/implementation", {
-            textDocument: { uri: pathToFileURL(input.file).href },
-            position: { line: input.line, character: input.character },
-          })
-          .catch(() => null),
+        !client.supports("textDocument/implementation")
+          ? Promise.resolve([])
+          : client.connection
+              .sendRequest("textDocument/implementation", {
+                textDocument: { uri: pathToFileURL(input.file).href },
+                position: { line: input.line, character: input.character },
+              })
+              .catch(() => null),
       )
       return results.flat().filter(Boolean)
     })
@@ -392,12 +394,14 @@ const layer = Layer.effect(
 
     const prepareCallHierarchy = Effect.fn("LSP.prepareCallHierarchy")(function* (input: LocInput) {
       const results = yield* run(input.file, (client) =>
-        !client.supports("textDocument/prepareCallHierarchy") ? Promise.resolve([]) : client.connection
-          .sendRequest("textDocument/prepareCallHierarchy", {
-            textDocument: { uri: pathToFileURL(input.file).href },
-            position: { line: input.line, character: input.character },
-          })
-          .catch(() => []),
+        !client.supports("textDocument/prepareCallHierarchy")
+          ? Promise.resolve([])
+          : client.connection
+              .sendRequest("textDocument/prepareCallHierarchy", {
+                textDocument: { uri: pathToFileURL(input.file).href },
+                position: { line: input.line, character: input.character },
+              })
+              .catch(() => []),
       )
       return results.flat().filter(Boolean)
     })

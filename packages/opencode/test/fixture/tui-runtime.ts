@@ -61,7 +61,11 @@ export function mockTuiRuntime(dir: string, plugin: PluginSpec[], opts?: { plugi
 export async function waitForTuiPlugins() {
   const { TuiPluginRuntime } = await import("../../src/plugin/tui/runtime")
   // deadline 只检出任务卡住，不用固定 sleep 猜测 import/install/init 的耗时。
-  await Effect.runPromise(awaitWithTimeout(
-    Effect.promise(() => TuiPluginRuntime.ready()), "TUI plugins did not finish loading", "5 seconds",
-  ))
+  await Effect.runPromise(
+    awaitWithTimeout(
+      Effect.promise(() => TuiPluginRuntime.ready()),
+      "TUI plugins did not finish loading",
+      "5 seconds",
+    ),
+  )
 }

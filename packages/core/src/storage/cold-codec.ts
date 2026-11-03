@@ -7,7 +7,13 @@ import {
   zstdDecompressSync as nodeZstdDecompressSync,
 } from "node:zlib"
 import { Schema } from "effect"
-import type { MessageTable, PartTable, SessionMessageTable, PartColdStats, SessionMessageColdStats } from "../session/sql"
+import type {
+  MessageTable,
+  PartTable,
+  SessionMessageTable,
+  PartColdStats,
+  SessionMessageColdStats,
+} from "../session/sql"
 import { SessionMessage } from "../session/message"
 import { MessageID, PartID } from "../v1/session"
 import { FileDiff } from "@opencode-ai/schema/file-diff"
@@ -41,7 +47,10 @@ export function isSummarySeed(value: unknown): value is { cursor: string; diffs:
   return isRecord(value) && isSummaryCursor(value.cursor) && isDiffs(value.diffs)
 }
 
-export type Owner = { type: "message"; id: MessageID } | { type: "part"; id: PartID } | { type: "session_message"; id: SessionMessage.ID }
+export type Owner =
+  | { type: "message"; id: MessageID }
+  | { type: "part"; id: PartID }
+  | { type: "session_message"; id: SessionMessage.ID }
 
 // hot owner 没有引用；v1 只有 ref，v2 使用完整 key，v3 使用包内 slot。
 // 存量版本由持久 envelope 决定，不能因一次解码失败而改猜另一种版本。
@@ -960,14 +969,17 @@ function sessionMessageFields(
   if (includeText && (row.type === "user" || row.type === "synthetic")) use(data, "text", "text", "")
   if (row.type === "user") {
     if (isRecord(data.summary) && "diffs" in data.summary) use(data.summary, "diffs", "summary.diffs", [])
-    if (Array.isArray(data.files)) for (const [index, file] of data.files.entries()) {
-      if (isRecord(file) && typeof file.uri === "string" && (file.uri === "" || isInlineData(file.uri))) use(file, "uri", `files.${index}.uri`, "")
-    }
+    if (Array.isArray(data.files))
+      for (const [index, file] of data.files.entries()) {
+        if (isRecord(file) && typeof file.uri === "string" && (file.uri === "" || isInlineData(file.uri)))
+          use(file, "uri", `files.${index}.uri`, "")
+      }
   }
   if (row.type !== "assistant" || !Array.isArray(data.content)) return
   for (const [index, part] of data.content.entries()) {
     if (!isRecord(part)) continue
-    if (part.type === "reasoning" || includeText && part.type === "text") use(part, "text", `content.${index}.text`, "")
+    if (part.type === "reasoning" || (includeText && part.type === "text"))
+      use(part, "text", `content.${index}.text`, "")
     if (part.type !== "tool" || !isRecord(part.state) || part.state.status !== "completed") continue
     const state = part.state
     // Native消费content/structured/result，不套用V1 output字段或附件列表。
@@ -976,67 +988,118 @@ function sessionMessageFields(
     if ("result" in state) use(state, "result", `content.${index}.state.result`, null)
     if (!Array.isArray(state.attachments)) continue
     for (const [attachmentIndex, file] of state.attachments.entries()) {
-      if (isRecord(file) && typeof file.uri === "string" && (file.uri === "" || isInlineData(file.uri))) use(file, "uri", `content.${index}.state.attachments.${attachmentIndex}.uri`, "")
+      if (isRecord(file) && typeof file.uri === "string" && (file.uri === "" || isInlineData(file.uri)))
+        use(file, "uri", `content.${index}.state.attachments.${attachmentIndex}.uri`, "")
     }
   }
 }
 
-export function extractSessionMessageCore(row: Pick<typeof SessionMessageTable.$inferSelect, "type" | "data">, child: boolean) {
+export function extractSessionMessageCore(
+  row: Pick<typeof SessionMessageTable.$inferSelect, "type" | "data">,
+  child: boolean,
+) {
   const projection = structuredClone(row.data)
   const fields: Record<string, unknown> = {}
-  sessionMessageFields({ ...row, data: projection }, (target, key, path, empty) => {
-    const value = target[key]
-    if (value === undefined || value === null || value === "") return
-    if ((Array.isArray(value) && value.length === 0) || (isRecord(value) && Object.keys(value).length === 0)) return
-    if (path === "summary.diffs" && !isDiffs(value)) throw new CorruptionError({ message: "Native message diffs fail schema validation" })
-    fields[path] = value
-    target[key] = empty
-  }, child)
+  sessionMessageFields(
+    { ...row, data: projection },
+    (target, key, path, empty) => {
+      const value = target[key]
+      if (value === undefined || value === null || value === "") return
+      if ((Array.isArray(value) && value.length === 0) || (isRecord(value) && Object.keys(value).length === 0)) return
+      if (path === "summary.diffs" && !isDiffs(value))
+        throw new CorruptionError({ message: "Native message diffs fail schema validation" })
+      fields[path] = value
+      target[key] = empty
+    },
+    child,
+  )
   if (Object.keys(fields).length === 0) return
   const selected = jsonObject(fields)
   return { projection, fields: selected, key: entryKey("session_message", selected) }
 }
 
-export function restoreSessionMessage(row: Pick<typeof SessionMessageTable.$inferSelect, "type" | "data" | "cold_ref">, value: Envelope) {
+export function restoreSessionMessage(
+  row: Pick<typeof SessionMessageTable.$inferSelect, "type" | "data" | "cold_ref">,
+  value: Envelope,
+) {
   const data = structuredClone(row.data)
   const restored = new Set<string>()
   sessionMessageFields({ ...row, data }, (target, key, path, empty) => {
     if (!Object.hasOwn(value.fields, path)) return
     const field = value.fields[path]
-    if ((typeof empty === "string" && typeof field !== "string") || (Array.isArray(empty) && !Array.isArray(field)) ||
-      (isRecord(empty) && !isRecord(field)) || (path === "summary.diffs" && !isDiffs(field)))
+    if (
+      (typeof empty === "string" && typeof field !== "string") ||
+      (Array.isArray(empty) && !Array.isArray(field)) ||
+      (isRecord(empty) && !isRecord(field)) ||
+      (path === "summary.diffs" && !isDiffs(field))
+    )
       throw new CorruptionError({ message: `Native cold field is invalid: ${path}`, hash: row.cold_ref ?? undefined })
     target[key] = field
     restored.add(path)
   })
   // 路径必须对应原骨架，迁往worker不能静默丢弃未知字段或过期tool槽位。
-  if (restored.size !== Object.keys(value.fields).length) throw new CorruptionError({ message: "Native cold fields do not match their projection", hash: row.cold_ref ?? undefined })
+  if (restored.size !== Object.keys(value.fields).length)
+    throw new CorruptionError({
+      message: "Native cold fields do not match their projection",
+      hash: row.cold_ref ?? undefined,
+    })
   return data
 }
 
-export function projectSessionMessageStats(row: Pick<typeof SessionMessageTable.$inferSelect, "id" | "type" | "data">): SessionMessageColdStats | null {
+export function projectSessionMessageStats(
+  row: Pick<typeof SessionMessageTable.$inferSelect, "id" | "type" | "data">,
+): SessionMessageColdStats | null {
   const message = Schema.decodeUnknownSync(SessionMessage.Message)({ ...row.data, id: row.id, type: row.type })
   if (message.type !== "assistant") return null
   const tools = message.content.flatMap((part, index) => {
     if (part.type !== "tool") return []
     const state = part.state
-    return [[String(index), {
-      inputChars: state.status === "pending" ? (typeof state.input === "string" ? state.input.length : 0) : JSON.stringify(state.input ?? {}).length,
-      outputChars: state.status === "completed"
-        ? state.content.filter(item => item.type === "text").map(item => item.text).join("\n").length + state.content.reduce((sum, item) => sum + (item.type === "file" ? item.uri.length : 0), 0)
-        : state.status === "error" ? state.error.message.length : 0,
-    }] as const]
+    return [
+      [
+        String(index),
+        {
+          inputChars:
+            state.status === "pending"
+              ? typeof state.input === "string"
+                ? state.input.length
+                : 0
+              : JSON.stringify(state.input ?? {}).length,
+          outputChars:
+            state.status === "completed"
+              ? state.content
+                  .filter((item) => item.type === "text")
+                  .map((item) => item.text)
+                  .join("\n").length +
+                state.content.reduce((sum, item) => sum + (item.type === "file" ? item.uri.length : 0), 0)
+              : state.status === "error"
+                ? state.error.message.length
+                : 0,
+        },
+      ] as const,
+    ]
   })
   return tools.length ? { version: 1, tools: Object.fromEntries(tools) } : null
 }
 
 export function parseSessionMessageStats(value: unknown, hash?: string): SessionMessageColdStats | null {
   if (value === null) return null
-  if (!isRecord(value) || value.version !== 1 || !isRecord(value.tools)) throw new CorruptionError({ message: "Native cold Stats projection is invalid", hash })
-  return { version: 1, tools: Object.fromEntries(Object.entries(value.tools).map(([key, item]) => {
-    if (!isRecord(item)) throw new CorruptionError({ message: "Native Tool Stats projection is invalid", hash })
-    return [key, { inputChars: statInteger(item.inputChars, "Native Tool inputChars is invalid", hash), outputChars: statInteger(item.outputChars, "Native Tool outputChars is invalid", hash) }]
-  })) }
+  if (!isRecord(value) || value.version !== 1 || !isRecord(value.tools))
+    throw new CorruptionError({ message: "Native cold Stats projection is invalid", hash })
+  return {
+    version: 1,
+    tools: Object.fromEntries(
+      Object.entries(value.tools).map(([key, item]) => {
+        if (!isRecord(item)) throw new CorruptionError({ message: "Native Tool Stats projection is invalid", hash })
+        return [
+          key,
+          {
+            inputChars: statInteger(item.inputChars, "Native Tool inputChars is invalid", hash),
+            outputChars: statInteger(item.outputChars, "Native Tool outputChars is invalid", hash),
+          },
+        ]
+      }),
+    ),
+  }
 }
 
 // v2 entry fields 使用与 v1 envelope 相同的字段恢复协议；只替换 envelope version，避免复制另一套字段校验。
@@ -1141,7 +1204,11 @@ export type PackWireRow = {
   // 仅Text抽取需要父关系，其他类型不携带Session实体。
   child?: boolean
   // data只用于新增抽取和Tool/StepFinish统计核实，其余正文由冷包恢复。
-  data?: (typeof MessageTable.$inferSelect)["data"] | (typeof PartTable.$inferSelect)["data"] | (typeof SessionMessageTable.$inferSelect)["data"] | undefined
+  data?:
+    | (typeof MessageTable.$inferSelect)["data"]
+    | (typeof PartTable.$inferSelect)["data"]
+    | (typeof SessionMessageTable.$inferSelect)["data"]
+    | undefined
   type?: (typeof SessionMessageTable.$inferSelect)["type"]
   // part 行的持久统计投影（小字段），worker 就地与推导值比对；漂移即整批失败，不占主线程。
   coldStats?: (typeof PartTable.$inferSelect)["cold_stats"] | null
@@ -1195,25 +1262,39 @@ function scanPack(
     if (!fields) throw new CorruptionError({ message: "Repack owner entry is missing", hash: input.hash })
     const key = lookupToKey.get(row.coldKey ?? "") ?? ""
     // Native仅传真实消息类型和同行投影，仍经唯一字段恢复及统计校验边界。
-    const native = input.owner === "session_message" && row.data !== undefined && row.type
-      ? { id: SessionMessage.ID.make(row.id), type: row.type, data: row.data as (typeof SessionMessageTable.$inferSelect)["data"], cold_ref: input.hash } : undefined
-    const nativeData = native ? restoreSessionMessage(native, { version: 1, owner: "session_message", fields }) : undefined
+    const native =
+      input.owner === "session_message" && row.data !== undefined && row.type
+        ? {
+            id: SessionMessage.ID.make(row.id),
+            type: row.type,
+            data: row.data as (typeof SessionMessageTable.$inferSelect)["data"],
+            cold_ref: input.hash,
+          }
+        : undefined
+    const nativeData = native
+      ? restoreSessionMessage(native, { version: 1, owner: "session_message", fields })
+      : undefined
     if (input.owner === "session_message") {
-      if (!native || !nativeData) throw new CorruptionError({ message: "Native repack projection is missing", hash: input.hash })
-      if (canonical(parseSessionMessageStats(row.nativeStats ?? null, input.hash)) !== canonical(projectSessionMessageStats({ ...native, data: nativeData })))
+      if (!native || !nativeData)
+        throw new CorruptionError({ message: "Native repack projection is missing", hash: input.hash })
+      if (
+        canonical(parseSessionMessageStats(row.nativeStats ?? null, input.hash)) !==
+        canonical(projectSessionMessageStats({ ...native, data: nativeData }))
+      )
         throw new CorruptionError({ message: "Native cold Stats do not match the payload", hash: input.hash })
     }
     if (row.merge && row.data !== undefined) {
       const value =
-        native && nativeData ? extractSessionMessageCore({ ...native, data: nativeData }, row.child === true)
-        : input.owner === "message"
-          ? extractMessageV2(
-              restorePackedMessage(row.data as (typeof MessageTable.$inferSelect)["data"], fields, input.hash),
-            )
-          : extractPartCore(
-              restorePackedPart(row.data as (typeof PartTable.$inferSelect)["data"], fields, input.hash),
-              row.child,
-            )
+        native && nativeData
+          ? extractSessionMessageCore({ ...native, data: nativeData }, row.child === true)
+          : input.owner === "message"
+            ? extractMessageV2(
+                restorePackedMessage(row.data as (typeof MessageTable.$inferSelect)["data"], fields, input.hash),
+              )
+            : extractPartCore(
+                restorePackedPart(row.data as (typeof PartTable.$inferSelect)["data"], fields, input.hash),
+                row.child,
+              )
       if (value) {
         const mergedKey = value.key.toString("hex")
         // 新旧字段在该源的临时映射内并存，等全部 owner 处理后再决定旧键是否仍被需要。
@@ -1329,7 +1410,11 @@ function recodeFrame(
   // 重压缩保持原始 canonical 字节，各种已发布 envelope 使用各自的校验器。
   if (input.kind === "session-summary") parseSummaryEnvelope(raw, input.hash)
   else if (input.kind === "message-pack" || input.kind === "part-pack" || input.kind === "session-message-pack")
-    parsePackEnvelope(input.kind === "message-pack" ? "message" : input.kind === "part-pack" ? "part" : "session_message", raw, input.hash)
+    parsePackEnvelope(
+      input.kind === "message-pack" ? "message" : input.kind === "part-pack" ? "part" : "session_message",
+      raw,
+      input.hash,
+    )
   // 旧单owner格式使用原解析器，帧重编码不会顺带升级其包结构。
   else parseEnvelope(input.kind, raw, input.hash)
   // 重新编码原始字节，保留历史 envelope 版本和其中所有字段。

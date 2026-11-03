@@ -167,7 +167,10 @@ function decode(file: { directory: string; filepath: string; primary: boolean },
           decodeLegacyAgent({ name, ...markdown.data, prompt: body }, { errors: "all", propertyOrder: "original" }),
           ConfigMigrateV1.migrateAgent,
         )
-      : decodeAgent({ ...markdown.data, system: body }, { errors: "all", propertyOrder: "original" })) as Option.Option<ConfigAgentV1.Info>,
+      : decodeAgent(
+          { ...markdown.data, system: body },
+          { errors: "all", propertyOrder: "original" },
+        )) as Option.Option<ConfigAgentV1.Info>,
   )
   if (!agent) return
   const info = Option.getOrUndefined(

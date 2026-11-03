@@ -31,34 +31,34 @@ This file is the sole implementation specification for this task. Chat summaries
 
 ## 3. Repository Context
 
-| Source | Why it constrains this task |
-| --- | --- |
-| `AGENTS.md` | 最小内聚变更；测试及 typecheck 必须 package-local；不直接使用 tsc |
-| `packages/opencode/AGENTS.md` | 保留包内模块结构，不增加 namespace、公开 test-only API |
-| `packages/opencode/test/AGENTS.md` | 真实临时 fixture、公开行为 seam、以就绪信号同步而非固定 sleep |
-| `CONTEXT.md` | Provider/Instance/AppRuntime 语义；Instance 隔离不代表进程级 Log 隔离 |
-| `docs/adr/README.md` | 当前 ADR 索引仅列 triage ADR，无 SSE/logger 专用 ADR；本变更不新增架构决策 |
-| `.opencode/policy/first-principles-engineering.md` | primary-path、独立审计、traceability 和中文解释注释门禁 |
-| `.opencode/templates/canonical-plan.md` | 本文完整结构及审批记录 |
+| Source                                             | Why it constrains this task                                                |
+| -------------------------------------------------- | -------------------------------------------------------------------------- |
+| `AGENTS.md`                                        | 最小内聚变更；测试及 typecheck 必须 package-local；不直接使用 tsc          |
+| `packages/opencode/AGENTS.md`                      | 保留包内模块结构，不增加 namespace、公开 test-only API                     |
+| `packages/opencode/test/AGENTS.md`                 | 真实临时 fixture、公开行为 seam、以就绪信号同步而非固定 sleep              |
+| `CONTEXT.md`                                       | Provider/Instance/AppRuntime 语义；Instance 隔离不代表进程级 Log 隔离      |
+| `docs/adr/README.md`                               | 当前 ADR 索引仅列 triage ADR，无 SSE/logger 专用 ADR；本变更不新增架构决策 |
+| `.opencode/policy/first-principles-engineering.md` | primary-path、独立审计、traceability 和中文解释注释门禁                    |
+| `.opencode/templates/canonical-plan.md`            | 本文完整结构及审批记录                                                     |
 
 ## 4. Files and Evidence Read
 
-| Evidence | Relevance | Evidence class |
-| --- | --- | --- |
-| GitHub run `37151556509`, SHA `94e9a5f77fdcd4fcd8fcb8ae370ade0d6c0c943f` | 最新 test 仍失败；Linux 和 Windows runtime 唯一失败为 SSE 用例；macOS 通过 | observed |
-| Linux job `111286328441`、Windows job `111286328394` 日志 | `provider.test.ts:3106`, `expect(ended("race-b")).not.toEqual([])`，约 10 秒后失败 | observed |
-| GitHub run `36995871681` 及本轮 cold-v3 日志 | 上轮 cold-v3 三个失败在本轮全部通过；本轮不是这些冷存储断言失败 | observed |
-| `packages/opencode/test/provider/provider.test.ts:2982-3110` | plugin fetch -> production Provider -> SDK stream；固定 dev.log 的基线和 EOF 判别 | observed |
-| `packages/opencode/src/provider/provider.ts:97-285` | timing INFO、progressDeadline.wrap、released 守卫、cancelReader 和正常 EOF | observed |
-| `packages/core/src/util/log.ts` | 进程级 writer/level、init 就绪 Promise、dev/时间戳/stderr 输出、file() 和 close() | observed |
-| `packages/opencode/test/preload.ts`、`bunfig.toml` | 测试数据目录隔离；一次性异步配置 dev 日志，不保证后续全局日志状态 | observed |
-| `packages/opencode/test/project/project.test.ts:18`、`test/project/migrate-global.test.ts` | 模块加载调用 `Log.init({ print: false })`，使实际目标改为时间戳文件 | observed |
-| `packages/opencode/test/lsp/client.test.ts:19-22` | beforeEach 调用 print:true，是 stderr 状态的真实 producer | observed |
-| `packages/opencode/test/util/log.test.ts` | 临时改变日志目录和初始化，部分 finalizer 恢复 dev 日志；日志测试应与修复用例组合回归 | observed |
-| `packages/opencode/script/test-ci.ts`、`.github/workflows/test.yml` | 每个 Bun child 执行多文件，Windows runtime 包含 project/provider，Linux/macOS core 合并文件 | observed |
-| `packages/opencode/test/fixture/fixture.ts`、provider test afterEach | 保持现有实例处置及环境变量恢复，不引入第二套 runtime/fixture | observed |
-| 本轮执行的两条 bun test 命令（第 8 节） | 单独通过、共享 logger 失败，真实源码和真实磁盘路径，无修改测试文件 | observed |
-| 本轮 git status / diff / cached diff | provider 测试无任何既有修改；其他工作区/暂存修改不属于本任务 | observed |
+| Evidence                                                                                   | Relevance                                                                                   | Evidence class |
+| ------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------- | -------------- |
+| GitHub run `37151556509`, SHA `94e9a5f77fdcd4fcd8fcb8ae370ade0d6c0c943f`                   | 最新 test 仍失败；Linux 和 Windows runtime 唯一失败为 SSE 用例；macOS 通过                  | observed       |
+| Linux job `111286328441`、Windows job `111286328394` 日志                                  | `provider.test.ts:3106`, `expect(ended("race-b")).not.toEqual([])`，约 10 秒后失败          | observed       |
+| GitHub run `36995871681` 及本轮 cold-v3 日志                                               | 上轮 cold-v3 三个失败在本轮全部通过；本轮不是这些冷存储断言失败                             | observed       |
+| `packages/opencode/test/provider/provider.test.ts:2982-3110`                               | plugin fetch -> production Provider -> SDK stream；固定 dev.log 的基线和 EOF 判别           | observed       |
+| `packages/opencode/src/provider/provider.ts:97-285`                                        | timing INFO、progressDeadline.wrap、released 守卫、cancelReader 和正常 EOF                  | observed       |
+| `packages/core/src/util/log.ts`                                                            | 进程级 writer/level、init 就绪 Promise、dev/时间戳/stderr 输出、file() 和 close()           | observed       |
+| `packages/opencode/test/preload.ts`、`bunfig.toml`                                         | 测试数据目录隔离；一次性异步配置 dev 日志，不保证后续全局日志状态                           | observed       |
+| `packages/opencode/test/project/project.test.ts:18`、`test/project/migrate-global.test.ts` | 模块加载调用 `Log.init({ print: false })`，使实际目标改为时间戳文件                         | observed       |
+| `packages/opencode/test/lsp/client.test.ts:19-22`                                          | beforeEach 调用 print:true，是 stderr 状态的真实 producer                                   | observed       |
+| `packages/opencode/test/util/log.test.ts`                                                  | 临时改变日志目录和初始化，部分 finalizer 恢复 dev 日志；日志测试应与修复用例组合回归        | observed       |
+| `packages/opencode/script/test-ci.ts`、`.github/workflows/test.yml`                        | 每个 Bun child 执行多文件，Windows runtime 包含 project/provider，Linux/macOS core 合并文件 | observed       |
+| `packages/opencode/test/fixture/fixture.ts`、provider test afterEach                       | 保持现有实例处置及环境变量恢复，不引入第二套 runtime/fixture                                | observed       |
+| 本轮执行的两条 bun test 命令（第 8 节）                                                    | 单独通过、共享 logger 失败，真实源码和真实磁盘路径，无修改测试文件                          | observed       |
+| 本轮 git status / diff / cached diff                                                       | provider 测试无任何既有修改；其他工作区/暂存修改不属于本任务                                | observed       |
 
 ## 5. Current Behavior
 
@@ -75,33 +75,33 @@ test hard-coded dev.log -> no current race-b EOF -> ENOENT or 10s assertion fail
 
 ## 6. Supported Input Domain and Reachability
 
-| Input or condition | Producer | Upstream guarantees | Reachable path | Owner | Classification |
-| --- | --- | --- | --- | --- | --- |
-| dev.log writer | test/preload、log test finalizers | init 返回表示最新 writer 初始化结束 | 同进程 SSE 用例 | 测试观测 setup | observed |
-| timestamp writer | project/project.test.ts、migrate-global 等 | 未设置 dev 时选时间戳文件 | CI 分片加载多个文件 | 测试观测 setup | observed |
-| stderr writer | lsp/client.test.ts | print:true 不写文件，file() 可能仍保留旧路径 | Windows runtime 共享进程 | 测试观测 setup | reachable |
-| preload dev.log 尚未创建 | preload 的 void init 被后续 init supersede | 旧 init 允许失效；不保证旧文件存在 | 本轮两文件局部复现 | 测试观测 setup | observed |
-| SDK 正常关闭前排队事件 | AI SDK doStream TransformStream | 一次 read 不保证得到 done:true | 控制组 body.close 后读取 | 控制组 EOF 同步 | reachable |
-| race-a EOF 与 race-b 非 EOF 日志同批可见 | SSE released 缺失时的原始回归；不同请求 timing | 原有 guard 可被回归破坏；检测必须仍有区分力 | 文件尾读取含多行 | 测试日志就绪判别 | reachable |
+| Input or condition                       | Producer                                       | Upstream guarantees                          | Reachable path           | Owner            | Classification |
+| ---------------------------------------- | ---------------------------------------------- | -------------------------------------------- | ------------------------ | ---------------- | -------------- |
+| dev.log writer                           | test/preload、log test finalizers              | init 返回表示最新 writer 初始化结束          | 同进程 SSE 用例          | 测试观测 setup   | observed       |
+| timestamp writer                         | project/project.test.ts、migrate-global 等     | 未设置 dev 时选时间戳文件                    | CI 分片加载多个文件      | 测试观测 setup   | observed       |
+| stderr writer                            | lsp/client.test.ts                             | print:true 不写文件，file() 可能仍保留旧路径 | Windows runtime 共享进程 | 测试观测 setup   | reachable      |
+| preload dev.log 尚未创建                 | preload 的 void init 被后续 init supersede     | 旧 init 允许失效；不保证旧文件存在           | 本轮两文件局部复现       | 测试观测 setup   | observed       |
+| SDK 正常关闭前排队事件                   | AI SDK doStream TransformStream                | 一次 read 不保证得到 done:true               | 控制组 body.close 后读取 | 控制组 EOF 同步  | reachable      |
+| race-a EOF 与 race-b 非 EOF 日志同批可见 | SSE released 缺失时的原始回归；不同请求 timing | 原有 guard 可被回归破坏；检测必须仍有区分力  | 文件尾读取含多行         | 测试日志就绪判别 | reachable      |
 
 ## 7. Required Invariants
 
-| ID | Behavioral invariant | Evidence | Existing test |
-| --- | --- | --- | --- |
-| REQ-01 | 修复当前 SSE CI 红测，保持原回归检测能力 | 用户原文、run 37151556509 | SSE wrap 用例 |
-| INV-01 | 每次用例观测当前可写日志；前序文件选定的日志目标不得改变判定 | 第 8 节真实复现 | 原单用例缺少显式状态覆盖 |
-| INV-02 | 正常控制组完成 EOF 且同一条日志含 race-b 与 sse.end；取消组不得产出 EOF 日志 | provider.wrap、原控制组正/负断言 | 原用例 |
-| INV-03 | 观测 setup/read 或控制组 read 错误直接失败，不转换成空结果或成功 | policy error propagation；当前 ENOENT | 当前 catch 会延迟/混淆失败 |
-| REQ-02 | 只提交本任务完整路径，不改变其他 agent 的 hunk 或 index 内容 | 用户原文、dirty index | git 精确路径核对 |
-| REQ-03 | 独立批准、TDD、验证、独立实现审计、中文解释注释及提交 | Session GOAL | 本文记录 |
+| ID     | Behavioral invariant                                                         | Evidence                              | Existing test              |
+| ------ | ---------------------------------------------------------------------------- | ------------------------------------- | -------------------------- |
+| REQ-01 | 修复当前 SSE CI 红测，保持原回归检测能力                                     | 用户原文、run 37151556509             | SSE wrap 用例              |
+| INV-01 | 每次用例观测当前可写日志；前序文件选定的日志目标不得改变判定                 | 第 8 节真实复现                       | 原单用例缺少显式状态覆盖   |
+| INV-02 | 正常控制组完成 EOF 且同一条日志含 race-b 与 sse.end；取消组不得产出 EOF 日志 | provider.wrap、原控制组正/负断言      | 原用例                     |
+| INV-03 | 观测 setup/read 或控制组 read 错误直接失败，不转换成空结果或成功             | policy error propagation；当前 ENOENT | 当前 catch 会延迟/混淆失败 |
+| REQ-02 | 只提交本任务完整路径，不改变其他 agent 的 hunk 或 index 内容                 | 用户原文、dirty index                 | git 精确路径核对           |
+| REQ-03 | 独立批准、TDD、验证、独立实现审计、中文解释注释及提交                        | Session GOAL                          | 本文记录                   |
 
 ## 8. First Divergence and Root Cause
 
-| Invariant | First divergence | Owning module/interface | Proof |
-| --- | --- | --- | --- |
-| INV-01 | SSE setup 直接构造 dev.log，而未初始化观测目标 | `test/provider/provider.test.ts` | 同一用例独立绿、与 project 文件组合红；CI 正常 EOF 日志缺失 |
-| INV-02 | 正常组一次 read 不证明 EOF；while 的两个全文件 includes 不证明同一行 | 同一用例的 race helper 和日志循环 | SDK 可返回非终态事件；代码谓词可跨行组合 |
-| INV-03 | baseline/read 的 catch 将错误当作空基线或无事发生 | 同一测试 | logger 已初始化后应存在文件，read 错误不能成为观测成功 |
+| Invariant | First divergence                                                     | Owning module/interface           | Proof                                                       |
+| --------- | -------------------------------------------------------------------- | --------------------------------- | ----------------------------------------------------------- |
+| INV-01    | SSE setup 直接构造 dev.log，而未初始化观测目标                       | `test/provider/provider.test.ts`  | 同一用例独立绿、与 project 文件组合红；CI 正常 EOF 日志缺失 |
+| INV-02    | 正常组一次 read 不证明 EOF；while 的两个全文件 includes 不证明同一行 | 同一用例的 race helper 和日志循环 | SDK 可返回非终态事件；代码谓词可跨行组合                    |
+| INV-03    | baseline/read 的 catch 将错误当作空基线或无事发生                    | 同一测试                          | logger 已初始化后应存在文件，read 错误不能成为观测成功      |
 
 本阶段已运行（cwd 均为 `packages/opencode`，Bun 1.3.14）：
 
@@ -118,12 +118,12 @@ ENOENT at provider.test.ts:3099 reading .../log/dev.log.
 
 ## 9. Responsibility and Seam
 
-| Concern | Owner | Interface promise | Why it belongs here | Why another module does not own it |
-| --- | --- | --- | --- | --- |
-| 测试日志目标与初始化 | SSE test setup 使用现有 Log.init/file | 读取本用例真实 diagnostics | 只有消费者知道依赖文件日志 | production logger 已正确切换目标；不该禁止其他测试 init |
-| EOF 完成与记录归属 | 既有 race helper + ended predicate | 区分正常 EOF 与取消后错误 EOF | 属于既有测试判别契约 | 不修改 SDK 或增加 production test-only export |
-| 数据/实例隔离与清理 | 既有 tmpdir、withTestInstance、afterEach | 保持临时数据、环境和实例生命周期 | 复用现成 fixture | 不增加新全局 fixture 框架 |
-| commit ownership | Git 精确路径检查 | unrelated work 不进入 commit | 用户明确要求 | 不 reset/stash/改写他人 index |
+| Concern              | Owner                                    | Interface promise                | Why it belongs here        | Why another module does not own it                      |
+| -------------------- | ---------------------------------------- | -------------------------------- | -------------------------- | ------------------------------------------------------- |
+| 测试日志目标与初始化 | SSE test setup 使用现有 Log.init/file    | 读取本用例真实 diagnostics       | 只有消费者知道依赖文件日志 | production logger 已正确切换目标；不该禁止其他测试 init |
+| EOF 完成与记录归属   | 既有 race helper + ended predicate       | 区分正常 EOF 与取消后错误 EOF    | 属于既有测试判别契约       | 不修改 SDK 或增加 production test-only export           |
+| 数据/实例隔离与清理  | 既有 tmpdir、withTestInstance、afterEach | 保持临时数据、环境和实例生命周期 | 复用现成 fixture           | 不增加新全局 fixture 框架                               |
+| commit ownership     | Git 精确路径检查                         | unrelated work 不进入 commit     | 用户明确要求               | 不 reset/stash/改写他人 index                           |
 
 ## 10. Single Approved Primary-Path Design
 
@@ -147,95 +147,95 @@ parameterized existing SSE test: prior mode dev/timestamp/stderr
 
 ## 11. Secondary and Replacement Path Inventory
 
-| Path | Current or proposed | Classification | Produces success? | Decision-surface share | Disposition |
-| --- | --- | --- | --- | --- | --- |
-| dev/timestamp/stderr 参数 | proposed | primary-contract branch（测试初始状态） | 经同一断言 | production N/A | preserve |
-| 取消与正常 EOF 对照 | current | primary-contract branch | 共同证明契约 | production unchanged | preserve |
-| baseline catch -> empty string | current | forbidden fallback（测试观测失败被遮盖） | 可继续执行 | production N/A | remove |
-| control reader.catch -> undefined | current | forbidden fallback（控制组失败被遮盖） | 可继续执行 | production N/A | remove |
-| 10 秒 polling deadline | current | diagnostic（等待异步文件可见） | 仅同一 EOF 日志可成功 | production unchanged | preserve，修正就绪条件 |
+| Path                              | Current or proposed | Classification                           | Produces success?     | Decision-surface share | Disposition            |
+| --------------------------------- | ------------------- | ---------------------------------------- | --------------------- | ---------------------- | ---------------------- |
+| dev/timestamp/stderr 参数         | proposed            | primary-contract branch（测试初始状态）  | 经同一断言            | production N/A         | preserve               |
+| 取消与正常 EOF 对照               | current             | primary-contract branch                  | 共同证明契约          | production unchanged   | preserve               |
+| baseline catch -> empty string    | current             | forbidden fallback（测试观测失败被遮盖） | 可继续执行            | production N/A         | remove                 |
+| control reader.catch -> undefined | current             | forbidden fallback（控制组失败被遮盖）   | 可继续执行            | production N/A         | remove                 |
+| 10 秒 polling deadline            | current             | diagnostic（等待异步文件可见）           | 仅同一 EOF 日志可成功 | production unchanged   | preserve，修正就绪条件 |
 
 新 production alternate-success paths = 0；production decision surface 修改 = 0，诊断比例 N/A。未请求 rollback。
 
 ## 12. Workaround Deletion and Replacement
 
-| Existing workaround or duplicate | Why it existed | Why the approved route supersedes it | Delete or collapse location |
-| --- | --- | --- | --- |
-| 手动拼接 dev.log | 假定 preload 初始化永久有效 | owner 显式 init 后读取 Log.file() | SSE setup |
-| baseline 空串 catch | 容忍日志文件不存在 | 初始化成功后要求实际可读取 | 同上 |
-| 控制组一次 read + catch | 非终态事件或错误都可能被当作完成 | consume to EOF，错误直接冒泡 | race(false) |
-| 全文件双 includes | 粗略等待控制组可见 | 复用同一行 ended 过滤 | polling condition |
+| Existing workaround or duplicate | Why it existed                   | Why the approved route supersedes it | Delete or collapse location |
+| -------------------------------- | -------------------------------- | ------------------------------------ | --------------------------- |
+| 手动拼接 dev.log                 | 假定 preload 初始化永久有效      | owner 显式 init 后读取 Log.file()    | SSE setup                   |
+| baseline 空串 catch              | 容忍日志文件不存在               | 初始化成功后要求实际可读取           | 同上                        |
+| 控制组一次 read + catch          | 非终态事件或错误都可能被当作完成 | consume to EOF，错误直接冒泡         | race(false)                 |
+| 全文件双 includes                | 粗略等待控制组可见               | 复用同一行 ended 过滤                | polling condition           |
 
 ## 13. Forward Traceability
 
-| Requirement or invariant | Production path | Planned file/change | Behavioral test |
-| --- | --- | --- | --- |
-| REQ-01 / INV-01 | Provider fetch -> SDK -> logger | provider test setup + 三种模式 | 原两文件反馈环、三模式真实文件日志用例 |
-| INV-02 | cancel/normal EOF -> timing -> writer | drain + same-line condition，保留两个断言 | 三模式，完整 provider test；现有上轮内存守卫 mutation 仅辅助，非真实测试替代 |
-| INV-03 | Log init/file read；SDK read | 删除两处 catch | 真实磁盘/SDK 路径，任何异常导致测试失败 |
-| REQ-02 | 无 production 变化 | 仅本计划和 provider test | pre/post status、diff/cached diff、commit --only |
-| REQ-03 | 已有工程 workflow | 本计划审计/证据记录、邻近中文注释 | 独立两阶段 audit、package checks、commit hooks |
+| Requirement or invariant | Production path                       | Planned file/change                       | Behavioral test                                                              |
+| ------------------------ | ------------------------------------- | ----------------------------------------- | ---------------------------------------------------------------------------- |
+| REQ-01 / INV-01          | Provider fetch -> SDK -> logger       | provider test setup + 三种模式            | 原两文件反馈环、三模式真实文件日志用例                                       |
+| INV-02                   | cancel/normal EOF -> timing -> writer | drain + same-line condition，保留两个断言 | 三模式，完整 provider test；现有上轮内存守卫 mutation 仅辅助，非真实测试替代 |
+| INV-03                   | Log init/file read；SDK read          | 删除两处 catch                            | 真实磁盘/SDK 路径，任何异常导致测试失败                                      |
+| REQ-02                   | 无 production 变化                    | 仅本计划和 provider test                  | pre/post status、diff/cached diff、commit --only                             |
+| REQ-03                   | 已有工程 workflow                     | 本计划审计/证据记录、邻近中文注释         | 独立两阶段 audit、package checks、commit hooks                               |
 
 ## 14. Reverse Traceability
 
-| Proposed production concept | Requirement ID | Evidence | Why existing logic cannot carry it |
-| --- | --- | --- | --- |
-| 无新增 production concept | REQ-01/02 | 缺陷在测试观测 setup，Log/Provider 已有必要接口 | 直接复用 Log.init/file 与 SDK read/cancel |
-| 测试三模式初始状态 | INV-01 | preload/project/LSP 三种 producer | 单文件独立运行不会保留前序污染，需显式构造 |
-| awaited 初始化和实际文件路径 | INV-01/03 | 独立绿、组合红 | 硬编码路径不表示 active writer |
-| 正常组 EOF drain | INV-02/03 | SDK read 可返回中间事件 | 一次 read+catch 不证明完成 |
-| 同行 EOF 判别 | INV-02 | 原始 SSE 回归可能产生 race-a EOF | 跨行 includes 不证明 race-b EOF 已落盘 |
+| Proposed production concept  | Requirement ID | Evidence                                        | Why existing logic cannot carry it         |
+| ---------------------------- | -------------- | ----------------------------------------------- | ------------------------------------------ |
+| 无新增 production concept    | REQ-01/02      | 缺陷在测试观测 setup，Log/Provider 已有必要接口 | 直接复用 Log.init/file 与 SDK read/cancel  |
+| 测试三模式初始状态           | INV-01         | preload/project/LSP 三种 producer               | 单文件独立运行不会保留前序污染，需显式构造 |
+| awaited 初始化和实际文件路径 | INV-01/03      | 独立绿、组合红                                  | 硬编码路径不表示 active writer             |
+| 正常组 EOF drain             | INV-02/03      | SDK read 可返回中间事件                         | 一次 read+catch 不证明完成                 |
+| 同行 EOF 判别                | INV-02         | 原始 SSE 回归可能产生 race-a EOF                | 跨行 includes 不证明 race-b EOF 已落盘     |
 
 ## 15. File-Level Change Plan
 
-| File | Add / modify / delete | Exact responsibility of the change | Expected line delta |
-| --- | --- | --- | --- |
-| `docs/plans/ci-sse-regression-log-isolation.md` | add | 唯一 canonical plan、审计、执行及提交证据 | 约 320 行 |
-| `packages/opencode/test/provider/provider.test.ts` | modify | 现有 SSE 测试的 setup、状态矩阵、EOF 控制组及就绪条件 | 约 +20/-8，禁止格式化整个文件 |
+| File                                               | Add / modify / delete | Exact responsibility of the change                    | Expected line delta           |
+| -------------------------------------------------- | --------------------- | ----------------------------------------------------- | ----------------------------- |
+| `docs/plans/ci-sse-regression-log-isolation.md`    | add                   | 唯一 canonical plan、审计、执行及提交证据             | 约 320 行                     |
+| `packages/opencode/test/provider/provider.test.ts` | modify                | 现有 SSE 测试的 setup、状态矩阵、EOF 控制组及就绪条件 | 约 +20/-8，禁止格式化整个文件 |
 
 文件所有权：开始时 provider test 与 HEAD/index 均一致；本 plan 路径不存在。实施前及提交前重新确认；如同一路径出现他人修改则停止提交并报告，不混合 hunks。
 
 ## 16. TDD Behavior Slices
 
-| Order | Red behavior | Why current code fails | Minimal green behavior | Regression protected |
-| --- | --- | --- | --- | --- |
-| 1 | 三模式真实 SSE/文件日志，timestamp/stderr 的正常 EOF 不可见 | 依旧读旧 dev.log | await 初始化、实际路径和强制基线读取 | 本轮 CI 的控制组正断言失败 |
-| 2 | 保持正常 EOF 与取消后 EOF 区分；控制组完成信号真实可靠 | 既有一次 read/跨行匹配不保证同一 EOF | drain done + 复用 ended 判别 | 不牺牲 SSE cancellation 回归灵敏度 |
+| Order | Red behavior                                                | Why current code fails               | Minimal green behavior               | Regression protected               |
+| ----- | ----------------------------------------------------------- | ------------------------------------ | ------------------------------------ | ---------------------------------- |
+| 1     | 三模式真实 SSE/文件日志，timestamp/stderr 的正常 EOF 不可见 | 依旧读旧 dev.log                     | await 初始化、实际路径和强制基线读取 | 本轮 CI 的控制组正断言失败         |
+| 2     | 保持正常 EOF 与取消后 EOF 区分；控制组完成信号真实可靠      | 既有一次 read/跨行匹配不保证同一 EOF | drain done + 复用 ended 判别         | 不牺牲 SSE cancellation 回归灵敏度 |
 
 测试 seam 是对话已选定的真实 plugin custom Provider -> SDK `doStream` -> `read/cancel` -> production timing 文件。独立 expected 是 cancelled 组无 EOF、normal 组有 EOF；不比较私有调用次数，不 mock 内部 logger/Provider。
 
 ## 17. Chinese Comment Budget
 
-| Metric | Estimate | Method |
-| --- | --- | --- |
-| Effective changed code lines E | 约 12（最终按实际 diff 计算） | 不计 imports、空行、格式化和纯移动 ended |
-| Required Chinese explanatory comments C | 至少 2，预计 4 | C >= max(1, ceil(E * 0.15)) |
+| Metric                                  | Estimate                      | Method                                   |
+| --------------------------------------- | ----------------------------- | ---------------------------------------- |
+| Effective changed code lines E          | 约 12（最终按实际 diff 计算） | 不计 imports、空行、格式化和纯移动 ended |
+| Required Chinese explanatory comments C | 至少 2，预计 4                | C >= max(1, ceil(E \* 0.15))             |
 
 注释邻近解释：保留初始 dev 文件用于重现错目标；进程级 writer 必须重新就绪；正常组中间事件不代表 EOF；控制组 EOF 必须同行，避免不同请求日志拼接。
 
 ## 18. Verification
 
-| Command | Working directory | Evidence produced |
-| --- | --- | --- |
-| `bun test ./test/provider/provider.test.ts --test-name-pattern "SSE wrap:" --timeout 30000` | packages/opencode | TDD 三种初态 red/green，真实 plugin/SDK/disk |
-| `bun test ./test/project/project.test.ts ./test/provider/provider.test.ts --test-name-pattern "SSE wrap:" --timeout 30000` | packages/opencode | 原始最小反馈环修复，实际生产 logger 调用者参与 |
-| `bun test ./test/provider ./test/project ./test/util/log.test.ts --timeout 30000` | packages/opencode | 完整 provider、project、日志生命周期集成回归 |
-| `bun typecheck` | packages/opencode | 包级类型检查，不直接使用 tsc |
+| Command                                                                                                                                                           | Working directory | Evidence produced                                               |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------- | --------------------------------------------------------------- |
+| `bun test ./test/provider/provider.test.ts --test-name-pattern "SSE wrap:" --timeout 30000`                                                                       | packages/opencode | TDD 三种初态 red/green，真实 plugin/SDK/disk                    |
+| `bun test ./test/project/project.test.ts ./test/provider/provider.test.ts --test-name-pattern "SSE wrap:" --timeout 30000`                                        | packages/opencode | 原始最小反馈环修复，实际生产 logger 调用者参与                  |
+| `bun test ./test/provider ./test/project ./test/util/log.test.ts --timeout 30000`                                                                                 | packages/opencode | 完整 provider、project、日志生命周期集成回归                    |
+| `bun typecheck`                                                                                                                                                   | packages/opencode | 包级类型检查，不直接使用 tsc                                    |
 | `$env:OPENCODE_TEST_SHARD='runtime'; $env:OPENCODE_DISABLE_LSP_DOWNLOAD='true'; $env:OPENCODE_EXPERIMENTAL_DISABLE_FILEWATCHER='true'; bun run script/test-ci.ts` | packages/opencode | Windows CI runtime 分片；进程环境仅当前 shell，日志保留真实结果 |
-| `git diff --check`、限定路径 diff/cached diff/status | repo root | 空白检查及归属 |
+| `git diff --check`、限定路径 diff/cached diff/status                                                                                                              | repo root         | 空白检查及归属                                                  |
 
 先窄后宽。若 broad check 因现有未提交代码、机器环境或不相关测试失败，必须记录精确错误、建立与本次差异无关的证据，不擅自修改他人文件或把失败报告为通过；任何相关失败须修复并按需要重审。远端 Linux/macOS 无本地执行能力；禁止 push，最终明确远端新 CI 未运行。
 
 ## 19. Diff Budget
 
-| Metric | Estimate | Justification |
-| --- | --- | --- |
-| Files added | 1 | 用户要求 canonical plan |
-| Files modified | 1 | 责任 owner 是 SSE 测试 |
-| Files deleted | 0 | 无需删除文件 |
-| Production lines | 0 | 已有 Log/Provider 满足契约 |
-| Test lines | 约 28 行 diff | 三模式 + setup + 原判别修正 |
-| Generated lines | 0 | 不生成 SDK/migration |
+| Metric           | Estimate      | Justification               |
+| ---------------- | ------------- | --------------------------- |
+| Files added      | 1             | 用户要求 canonical plan     |
+| Files modified   | 1             | 责任 owner 是 SSE 测试      |
+| Files deleted    | 0             | 无需删除文件                |
+| Production lines | 0             | 已有 Log/Provider 满足契约  |
+| Test lines       | 约 28 行 diff | 三模式 + setup + 原判别修正 |
+| Generated lines  | 0             | 不生成 SDK/migration        |
 
 ## 20. Real Risks and Open Decisions
 
@@ -261,9 +261,9 @@ parameterized existing SSE test: prior mode dev/timestamp/stderr
 
 ## 22. Plan Audit Record
 
-| Round | Audited revision | Full scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | R1 | yes | No blocking findings | 见原文 | APPROVE | ses_efaa7a2e4ffei4ycn8Od1GWOj8 |
+| Round | Audited revision | Full scope? | Blocking findings    | Non-blocking findings | Result  | Invocation reference           |
+| ----- | ---------------- | ----------- | -------------------- | --------------------- | ------- | ------------------------------ |
+| 1     | R1               | yes         | No blocking findings | 见原文                | APPROVE | ses_efaa7a2e4ffei4ycn8Od1GWOj8 |
 
 以下为独立 auditor 返回的原文：
 
@@ -326,21 +326,21 @@ No blocking findings.
 
 所有 Bun 命令 cwd 均为 `packages/opencode`。未改变逐用例 30 秒预算；下述外层 timeout 是命令观察工具的终止上限。
 
-| Command/check | Result |
-| --- | --- |
-| `bun typecheck` | PASS，`tsgo --noEmit`，exit 0；完整 runtime 结束后再次执行仍 exit 0 |
-| `bun test ./test/provider/provider.test.ts --timeout 30000` | 92 pass / 0 fail / 228 expects |
-| `bun test ./test/provider --timeout 30000 --dots` | 353 pass / 0 fail / 681 expects，59.22s |
-| `bun test ./test/util/log.test.ts --timeout 30000` | 6 pass / 0 fail / 8 expects，5.03s |
-| `bun test ./test/provider ./test/util/log.test.ts --timeout 30000 --dots` | 359 pass / 0 fail / 689 expects，35.12s |
-| `bun test ./test/project ./test/util/log.test.ts ./test/provider --timeout 30000 --dots`（CI LSP/filewatcher flags） | 436 pass / 2 existing skips / 0 fail / 869 expects，15 files，588.54s；外层 900s 预算内正常退出 |
-| 早期 full related 命令外层 300s、project/log 外层 240s、project 三组拆分外层 180s | 被外层终止，不能计为通过；没有保留运行进程。后续完整 588.54s 运行取代这些不完整结论，未跳过用例或改变用例 timeout |
-| 独立排查 `project.test.ts -t "should throw error when project not found" --timeout 10000 --dots` | 1 pass，33 filtered，5.66s；该用例不是组合运行变慢的已证实根因 |
-| `git diff --check -- packages/opencode/test/provider/provider.test.ts` | PASS |
-| `bun x --no-install oxlint packages/opencode/test/provider/provider.test.ts`（repo root） | exit 0，0 errors / 5 warnings；警告对应未修改的既有泛型/类型断言代码，含原有 globalThis cast；未为清理警告扩大 diff |
-| 对 HEAD 内容尝试 `oxlint --stdin-filename` | 本地 oxlint 不支持该参数，命令失败；不作为 lint 证据。既有警告归属按实际 diff 中未改动的对应代码核对 |
-| 实际 runtime 分片，156 files，CI flags，外层 900s | 外层 timeout；无 test-shard-end/完整 JUnit，已捕获输出中无 `(fail)`，不可计为通过 |
-| 相同 runtime 分片不改变逐用例 timeout 的完整重跑 | PASS：2909 pass / 13 existing skips / 0 fail，2922 tests / 156 files，16 snapshots / 12993 expects；child PID 34824 正常退出，`test-shard-end.code=0`、elapsed=3922173ms；stdout/stderr 分别保留在 `D:/Temp/opencode/ci-sse-runtime-20261004.stdout.log` 和 `.stderr.log` |
+| Command/check                                                                                                        | Result                                                                                                                                                                                                                                                                    |
+| -------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `bun typecheck`                                                                                                      | PASS，`tsgo --noEmit`，exit 0；完整 runtime 结束后再次执行仍 exit 0                                                                                                                                                                                                       |
+| `bun test ./test/provider/provider.test.ts --timeout 30000`                                                          | 92 pass / 0 fail / 228 expects                                                                                                                                                                                                                                            |
+| `bun test ./test/provider --timeout 30000 --dots`                                                                    | 353 pass / 0 fail / 681 expects，59.22s                                                                                                                                                                                                                                   |
+| `bun test ./test/util/log.test.ts --timeout 30000`                                                                   | 6 pass / 0 fail / 8 expects，5.03s                                                                                                                                                                                                                                        |
+| `bun test ./test/provider ./test/util/log.test.ts --timeout 30000 --dots`                                            | 359 pass / 0 fail / 689 expects，35.12s                                                                                                                                                                                                                                   |
+| `bun test ./test/project ./test/util/log.test.ts ./test/provider --timeout 30000 --dots`（CI LSP/filewatcher flags） | 436 pass / 2 existing skips / 0 fail / 869 expects，15 files，588.54s；外层 900s 预算内正常退出                                                                                                                                                                           |
+| 早期 full related 命令外层 300s、project/log 外层 240s、project 三组拆分外层 180s                                    | 被外层终止，不能计为通过；没有保留运行进程。后续完整 588.54s 运行取代这些不完整结论，未跳过用例或改变用例 timeout                                                                                                                                                         |
+| 独立排查 `project.test.ts -t "should throw error when project not found" --timeout 10000 --dots`                     | 1 pass，33 filtered，5.66s；该用例不是组合运行变慢的已证实根因                                                                                                                                                                                                            |
+| `git diff --check -- packages/opencode/test/provider/provider.test.ts`                                               | PASS                                                                                                                                                                                                                                                                      |
+| `bun x --no-install oxlint packages/opencode/test/provider/provider.test.ts`（repo root）                            | exit 0，0 errors / 5 warnings；警告对应未修改的既有泛型/类型断言代码，含原有 globalThis cast；未为清理警告扩大 diff                                                                                                                                                       |
+| 对 HEAD 内容尝试 `oxlint --stdin-filename`                                                                           | 本地 oxlint 不支持该参数，命令失败；不作为 lint 证据。既有警告归属按实际 diff 中未改动的对应代码核对                                                                                                                                                                      |
+| 实际 runtime 分片，156 files，CI flags，外层 900s                                                                    | 外层 timeout；无 test-shard-end/完整 JUnit，已捕获输出中无 `(fail)`，不可计为通过                                                                                                                                                                                         |
+| 相同 runtime 分片不改变逐用例 timeout 的完整重跑                                                                     | PASS：2909 pass / 13 existing skips / 0 fail，2922 tests / 156 files，16 snapshots / 12993 expects；child PID 34824 正常退出，`test-shard-end.code=0`、elapsed=3922173ms；stdout/stderr 分别保留在 `D:/Temp/opencode/ci-sse-runtime-20261004.stdout.log` 和 `.stderr.log` |
 
 最终 JUnit：`packages/opencode/.artifacts/unit/junit-runtime.xml`，`tests=2922, failures=0, skipped=13`。三种 SSE testcase 均为 4 assertions、无 failure，耗时 dev=0.321880s、timestamp=0.419548s、stderr=0.373638s。完整运行使用当前共享工作区（包含其他 agent 的未提交冷存储测试），不能把相对远端 CI 的测试数增长全部归属于本修复。观察工具等待阶段最后一条 `Get-Process` 因 child 已退出返回非零，不代表测试失败；真实 exit 由 runner 的 `test-shard-end.code=0` 和 JUnit 共同证明。
 
@@ -348,13 +348,13 @@ No blocking findings.
 
 实现审计第 1 轮要求可直接读取的执行证据，已补充下列原始日志（未改批准设计）：
 
-| Evidence replay | Raw output | Result |
-| --- | --- | --- |
-| 最终两文件反馈环 | `D:/Temp/opencode/ci-sse-final-green.stdout.log`、`.stderr.log` | exit 0，3 pass / 0 fail / 12 expects，14.25s |
-| `bun typecheck` | `D:/Temp/opencode/ci-sse-typecheck.stdout.log`、`.stderr.log` | exit 0，tsgo --noEmit |
-| 单文件 oxlint | `D:/Temp/opencode/ci-sse-lint.stdout.log`、`.stderr.log` | exit 0，5 处既有 warnings / 0 errors |
-| 原因敏感性 red 重放 | `D:/Temp/opencode/ci-sse-red-replay.stdout.log`、`.stderr.log` | 仅临时移除本次 owner 初始化并恢复固定 dev.log；保留最终 EOF 判别。exit 1，dev pass，timestamp/stderr 均在正常组正断言失败，1 pass / 2 fail / 10 expects，26.39s |
-| 恢复后两文件 green | `D:/Temp/opencode/ci-sse-restored-green.stdout.log`、`.stderr.log` | exit 0，3 pass / 0 fail / 12 expects，7.03s |
+| Evidence replay     | Raw output                                                         | Result                                                                                                                                                          |
+| ------------------- | ------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 最终两文件反馈环    | `D:/Temp/opencode/ci-sse-final-green.stdout.log`、`.stderr.log`    | exit 0，3 pass / 0 fail / 12 expects，14.25s                                                                                                                    |
+| `bun typecheck`     | `D:/Temp/opencode/ci-sse-typecheck.stdout.log`、`.stderr.log`      | exit 0，tsgo --noEmit                                                                                                                                           |
+| 单文件 oxlint       | `D:/Temp/opencode/ci-sse-lint.stdout.log`、`.stderr.log`           | exit 0，5 处既有 warnings / 0 errors                                                                                                                            |
+| 原因敏感性 red 重放 | `D:/Temp/opencode/ci-sse-red-replay.stdout.log`、`.stderr.log`     | 仅临时移除本次 owner 初始化并恢复固定 dev.log；保留最终 EOF 判别。exit 1，dev pass，timestamp/stderr 均在正常组正断言失败，1 pass / 2 fail / 10 expects，26.39s |
+| 恢复后两文件 green  | `D:/Temp/opencode/ci-sse-restored-green.stdout.log`、`.stderr.log` | exit 0，3 pass / 0 fail / 12 expects，7.03s                                                                                                                     |
 
 red 重放只临时改变本 agent 的两行修复，随后精确恢复；前后 `git hash-object packages/opencode/test/provider/provider.test.ts` 均为 `5e74994e9dba6aee7d25d29c9e2b5146602bef1a`。未修改生产文件、其他 agent hunk 或 index。本项是已批准 TDD/验证的证据重放，不是方案行为变更；第 1 轮实现审计的代码 diff 仍完全相同。
 
@@ -368,12 +368,12 @@ red 重放只临时改变本 agent 的两行修复，随后精确恢复；前后
 
 ### Chinese Comment Calculation
 
-| Metric | Actual | Exclusions and evidence |
-| --- | --- | --- |
-| E | 10 | 17 added lines minus 1 import, 4 comments, 2 pure-move `ended` lines; remaining header 1 + init 3 + path/baseline 2 + EOF loop 3 + readiness 1 |
-| C | 4 | 旧 dev 文件的回归意图；进程级 writer 的观测边界；EOF drain 防中间事件/吞错；同行就绪防跨请求组合 |
-| C / E | 40% | 4 / 10 |
-| Required minimum C | 2 | ceil(10 * 0.15) |
+| Metric             | Actual | Exclusions and evidence                                                                                                                        |
+| ------------------ | ------ | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| E                  | 10     | 17 added lines minus 1 import, 4 comments, 2 pure-move `ended` lines; remaining header 1 + init 3 + path/baseline 2 + EOF loop 3 + readiness 1 |
+| C                  | 4      | 旧 dev 文件的回归意图；进程级 writer 的观测边界；EOF drain 防中间事件/吞错；同行就绪防跨请求组合                                               |
+| C / E              | 40%    | 4 / 10                                                                                                                                         |
+| Required minimum C | 2      | ceil(10 \* 0.15)                                                                                                                               |
 
 ### Remaining Unverified Items
 
@@ -381,10 +381,10 @@ Independent implementation audit approved R1 in round 2 (record below). No new r
 
 ## 24. Implementation Audit Record
 
-| Round | Plan revision | Full original scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | R1 | yes | No blocking findings（代码）；执行证据待闭合 | 见原文 | BLOCK | ses_efa3befd8ffeqavcJo6rjwEy85 |
-| 2 | R1 | yes | No blocking findings | 见原文；首次 TDD 输出留存、既有 lint warnings、远端 CI 未运行 | APPROVE | ses_efa3befd8ffeqavcJo6rjwEy85（复查） |
+| Round | Plan revision | Full original scope? | Blocking findings                            | Non-blocking findings                                         | Result  | Invocation reference                   |
+| ----- | ------------- | -------------------- | -------------------------------------------- | ------------------------------------------------------------- | ------- | -------------------------------------- |
+| 1     | R1            | yes                  | No blocking findings（代码）；执行证据待闭合 | 见原文                                                        | BLOCK   | ses_efa3befd8ffeqavcJo6rjwEy85         |
+| 2     | R1            | yes                  | No blocking findings                         | 见原文；首次 TDD 输出留存、既有 lint warnings、远端 CI 未运行 | APPROVE | ses_efa3befd8ffeqavcJo6rjwEy85（复查） |
 
 以下为独立 auditor 返回的原文：
 
@@ -434,6 +434,7 @@ No blocking findings.
 **BLOCK — 验证证据尚未闭合，当前没有已证实的代码阻断缺陷。**
 
 放行前需要：
+
 1. 授权在 `packages/opencode` 执行两文件 SSE 回归命令和 `bun typecheck`。
 2. 提供 R1 的 TDD red 与 lint 原始执行结果定位，供直接核验。
 
@@ -489,6 +490,7 @@ No blocking findings.
 **APPROVE — 全范围实现审计通过，仅适用于 canonical plan R1 与当前实际 diff。**
 
 精确审计对象：
+
 - `docs/plans/ci-sse-regression-log-isolation.md`：R1，包含当前补充证据及上一轮审计记录。
 - `packages/opencode/test/provider/provider.test.ts`：Git blob `5e74994e9dba6aee7d25d29c9e2b5146602bef1a`。
 

@@ -31,38 +31,43 @@ async function remainsRunningAfter(pid: number, timeout: number) {
 }
 
 describe("util.process", () => {
-  test.each([false, true])("settles the process after a pipe error with nothrow=%s", async (nothrow) => {
-    const abort = new AbortController()
-    const pid = Promise.withResolvers<number>()
-    // 故障来自父进程读取侧，需验证原错误交付，而非把它误当作子进程退出码。
-    const failure = new Error("fixture pipe failure")
-    const consume = consumers.buffer
-    // 注入真实 stdout 的读取错误；进程仍运行，用 OS 存活性验证完成合同。
-    const spy = spyOn(consumers, "buffer").mockImplementationOnce((stream) => {
-      if (!(stream instanceof Readable)) throw new Error("Expected a Node stdout pipe")
-      stream.once("data", (chunk) => {
-        pid.resolve(Number(chunk.toString().trim()))
-        stream.destroy(failure)
+  test.each([false, true])(
+    "settles the process after a pipe error with nothrow=%s",
+    async (nothrow) => {
+      const abort = new AbortController()
+      const pid = Promise.withResolvers<number>()
+      // 故障来自父进程读取侧，需验证原错误交付，而非把它误当作子进程退出码。
+      const failure = new Error("fixture pipe failure")
+      const consume = consumers.buffer
+      // 注入真实 stdout 的读取错误；进程仍运行，用 OS 存活性验证完成合同。
+      const spy = spyOn(consumers, "buffer").mockImplementationOnce((stream) => {
+        if (!(stream instanceof Readable)) throw new Error("Expected a Node stdout pipe")
+        stream.once("data", (chunk) => {
+          pid.resolve(Number(chunk.toString().trim()))
+          stream.destroy(failure)
+        })
+        return consume(stream)
       })
-      return consume(stream)
-    })
-    try {
-      // PID 发布即为就绪点，避免用固定延迟猜测子进程启动完成。
-      const running = Process.run(node("console.log(process.pid);setInterval(() => {}, 1000)"), {
-        abort: abort.signal, nothrow,
-      }).catch((error: unknown) => error)
-      const child = await pid.promise
-      const result = await running
-      // 两种错误交付形式均保留，区别只在清理先于结果交付。
-      if (nothrow) expect(result).toMatchObject({ code: 1, stderr: Buffer.from(failure.message) })
-      else expect(result).toBe(failure)
-      expect(await remainsRunningAfter(child, 1_000)).toBe(false)
-    } finally {
-      // RED 阶段也清理遗留子进程，避免复现本身污染后续用例。
-      abort.abort()
-      spy.mockRestore()
-    }
-  }, 15_000)
+      try {
+        // PID 发布即为就绪点，避免用固定延迟猜测子进程启动完成。
+        const running = Process.run(node("console.log(process.pid);setInterval(() => {}, 1000)"), {
+          abort: abort.signal,
+          nothrow,
+        }).catch((error: unknown) => error)
+        const child = await pid.promise
+        const result = await running
+        // 两种错误交付形式均保留，区别只在清理先于结果交付。
+        if (nothrow) expect(result).toMatchObject({ code: 1, stderr: Buffer.from(failure.message) })
+        else expect(result).toBe(failure)
+        expect(await remainsRunningAfter(child, 1_000)).toBe(false)
+      } finally {
+        // RED 阶段也清理遗留子进程，避免复现本身污染后续用例。
+        abort.abort()
+        spy.mockRestore()
+      }
+    },
+    15_000,
+  )
 
   test("captures stdout and stderr", async () => {
     const out = await Process.run(node('process.stdout.write("out");process.stderr.write("err")'))
@@ -165,8 +170,10 @@ describe("util.process", () => {
     } finally {
       abort.abort()
       // 失败路径也必须清理，避免测试自身制造本需求要消除的后台 node.exe 垃圾。
-      if (proc.pid && isProcessRunning(proc.pid)) await Process.run(["taskkill", "/pid", String(proc.pid), "/T", "/F"], { nothrow: true })
-      if (childPid && isProcessRunning(childPid)) await Process.run(["taskkill", "/pid", String(childPid), "/T", "/F"], { nothrow: true })
+      if (proc.pid && isProcessRunning(proc.pid))
+        await Process.run(["taskkill", "/pid", String(proc.pid), "/T", "/F"], { nothrow: true })
+      if (childPid && isProcessRunning(childPid))
+        await Process.run(["taskkill", "/pid", String(childPid), "/T", "/F"], { nothrow: true })
     }
   }, 5000)
 

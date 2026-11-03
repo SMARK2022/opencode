@@ -13,10 +13,11 @@ import { createMalformedSgrMouseGuard } from "../src/app"
 // 辅助：创建带 guard 的 testRender 并返回 textarea 引用
 async function setupTextareaWithGuard(width = 20, height = 3) {
   let textarea: any
-  const app = await testRender(
-    () => <textarea ref={(r: any) => (textarea = r)} width={width} height={1} />,
-    { width, height, prependInputHandlers: [createMalformedSgrMouseGuard()] },
-  )
+  const app = await testRender(() => <textarea ref={(r: any) => (textarea = r)} width={width} height={1} />, {
+    width,
+    height,
+    prependInputHandlers: [createMalformedSgrMouseGuard()],
+  })
   await app.renderOnce()
   textarea.focus()
   await app.renderOnce()

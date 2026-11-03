@@ -285,11 +285,8 @@ describe("Patch namespace", () => {
         ).content,
       ).toBe("ok\n")
       expect(
-        Patch.deriveNewContentsFromChunks(
-          "nfkc.txt",
-          [{ old_lines: ["Hello"], new_lines: ["ok"] }],
-          "Ｈｅｌｌｏ\n",
-        ).content,
+        Patch.deriveNewContentsFromChunks("nfkc.txt", [{ old_lines: ["Hello"], new_lines: ["ok"] }], "Ｈｅｌｌｏ\n")
+          .content,
       ).toBe("ok\n")
       expect(
         Patch.deriveNewContentsFromChunks(
@@ -338,11 +335,8 @@ describe("Patch namespace", () => {
         ).content,
       ).toBe("prefix X tail\n")
       expect(
-        Patch.deriveNewContentsFromChunks(
-          "ligature.txt",
-          [{ old_lines: ["ffi"], new_lines: ["X"] }],
-          "prefix ﬃ tail\n",
-        ).content,
+        Patch.deriveNewContentsFromChunks("ligature.txt", [{ old_lines: ["ffi"], new_lines: ["X"] }], "prefix ﬃ tail\n")
+          .content,
       ).toBe("prefix X tail\n")
       expect(() =>
         Patch.deriveNewContentsFromChunks(
@@ -357,11 +351,7 @@ describe("Patch namespace", () => {
     // 该候选虽不能写回，但仍证明模型 old block 在 normalized 域并不唯一。
     test("rejects a safe match when another normalized occurrence cuts a grapheme expansion", () => {
       expect(() =>
-        Patch.deriveNewContentsFromChunks(
-          "mixed-boundary.txt",
-          [{ old_lines: ["f"], new_lines: ["X"] }],
-          "f and ﬁ\n",
-        ),
+        Patch.deriveNewContentsFromChunks("mixed-boundary.txt", [{ old_lines: ["f"], new_lines: ["X"] }], "f and ﬁ\n"),
       ).toThrow("Found multiple matches")
     })
 
@@ -625,8 +615,7 @@ PATCH`
       Effect.gen(function* () {
         const filePath = path.join(tempDir, "verified-ambiguous.txt")
         yield* Effect.promise(() => fs.writeFile(filePath, "target one target\n"))
-        const patchText =
-          "*** Begin Patch\n*** Update File: verified-ambiguous.txt\n@@\n-target\n+fixed\n*** End Patch"
+        const patchText = "*** Begin Patch\n*** Update File: verified-ambiguous.txt\n@@\n-target\n+fixed\n*** End Patch"
 
         const result = yield* Patch.maybeParseApplyPatchVerified(["apply_patch", patchText], tempDir)
 
@@ -644,7 +633,8 @@ PATCH`
       Effect.gen(function* () {
         const filePath = path.join(tempDir, "verified-repeated.txt")
         yield* Effect.promise(() => fs.writeFile(filePath, "alpha\nmiddle\nomega\n"))
-        const patchText = "*** Begin Patch\n*** Update File: verified-repeated.txt\n@@\n-omega\n+OMEGA\n*** Update File: verified-repeated.txt\n@@\n-alpha\n+ALPHA\n*** End Patch"
+        const patchText =
+          "*** Begin Patch\n*** Update File: verified-repeated.txt\n@@\n-omega\n+OMEGA\n*** Update File: verified-repeated.txt\n@@\n-alpha\n+ALPHA\n*** End Patch"
 
         const result = yield* Patch.maybeParseApplyPatchVerified(["apply_patch", patchText], tempDir)
 
@@ -665,7 +655,8 @@ PATCH`
       Effect.gen(function* () {
         const filePath = path.join(tempDir, "verified-generated.txt")
         yield* Effect.promise(() => fs.writeFile(filePath, "alpha\nomega\n"))
-        const patchText = "*** Begin Patch\n*** Update File: verified-generated.txt\n@@\n-alpha\n+generated\n*** Update File: verified-generated.txt\n@@\n-generated\n+wrong\n*** End Patch"
+        const patchText =
+          "*** Begin Patch\n*** Update File: verified-generated.txt\n@@\n-alpha\n+generated\n*** Update File: verified-generated.txt\n@@\n-generated\n+wrong\n*** End Patch"
 
         const result = yield* Patch.maybeParseApplyPatchVerified(["apply_patch", patchText], tempDir)
 
@@ -687,7 +678,8 @@ PATCH`
         yield* Effect.promise(() => fs.symlink(realDir, aliasDir))
         const filePath = path.join(realDir, "source.txt")
         yield* Effect.promise(() => fs.writeFile(filePath, "alpha\nmiddle\nomega\n"))
-        const patchText = "*** Begin Patch\n*** Update File: verified-real/source.txt\n@@\n-omega\n+OMEGA\n*** Update File: verified-alias/source.txt\n@@\n-alpha\n+ALPHA\n*** End Patch"
+        const patchText =
+          "*** Begin Patch\n*** Update File: verified-real/source.txt\n@@\n-omega\n+OMEGA\n*** Update File: verified-alias/source.txt\n@@\n-alpha\n+ALPHA\n*** End Patch"
 
         const result = yield* Patch.maybeParseApplyPatchVerified(["apply_patch", patchText], tempDir)
 

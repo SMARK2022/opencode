@@ -51,26 +51,26 @@ Confirmed requirement IDs:
 
 ## 3. Repository Context
 
-| Source | Why it constrains this task |
-| --- | --- |
-| `CONTEXT.md` | Permission under `packages/opencode/src/permission/`. |
-| `AGENTS.md` / `packages/opencode/AGENTS.md` | Minimal helpers; package-local tests/typecheck. |
-| `.opencode/policy/first-principles-engineering.md` | Own first divergence; no fallback ladders. |
+| Source                                                | Why it constrains this task                            |
+| ----------------------------------------------------- | ------------------------------------------------------ |
+| `CONTEXT.md`                                          | Permission under `packages/opencode/src/permission/`.  |
+| `AGENTS.md` / `packages/opencode/AGENTS.md`           | Minimal helpers; package-local tests/typecheck.        |
+| `.opencode/policy/first-principles-engineering.md`    | Own first divergence; no fallback ladders.             |
 | `docs/plans/precheck-opaque-git-mutation-cautious.md` | Prior precheck style: extend classify/unwrap in place. |
-| `packages/opencode/src/permission/auto.ts` | `general` auto-allows; only `cautious` reviews. |
+| `packages/opencode/src/permission/auto.ts`            | `general` auto-allows; only `cautious` reviews.        |
 
 ## 4. Files and Evidence Read
 
-| Evidence | Relevance | Evidence class |
-| --- | --- | --- |
-| `precheck.ts` `FILE_DELETE_COMMANDS` ~72 | Has `remove-item`, missing `ri`. | observed |
-| `precheck.ts` `RAW_FILE_DELETE_PATTERN` ~122 | Has `Remove-Item`, missing `ri`. | observed |
-| `precheck.ts` `unwrap` POWERSHELL ~909–921 | Uses only `tokens[index+1]` for `-Command` (unlike cmd join-all). | observed |
-| `precheck.ts` `unwrap` env ~947 | Short-circuits to ask/general; no inner pierce. | observed |
-| `precheck.ts` `unwrap` sudo ~948–953 | Model for env pierce: `action: "script"`. | observed |
-| `precheck.ts` `classifyTokens` delete/move ~1069–1089 | Token owner for file mutations; no PS write cmdlets. | observed |
-| Red harness `precheck-red2.mjs` | All four REQ families currently `general`. | observed |
-| Existing `precheck.test.ts` | Regression surface; cmd join, Remove-Item, sudo rm green. | contracted |
+| Evidence                                              | Relevance                                                         | Evidence class |
+| ----------------------------------------------------- | ----------------------------------------------------------------- | -------------- |
+| `precheck.ts` `FILE_DELETE_COMMANDS` ~72              | Has `remove-item`, missing `ri`.                                  | observed       |
+| `precheck.ts` `RAW_FILE_DELETE_PATTERN` ~122          | Has `Remove-Item`, missing `ri`.                                  | observed       |
+| `precheck.ts` `unwrap` POWERSHELL ~909–921            | Uses only `tokens[index+1]` for `-Command` (unlike cmd join-all). | observed       |
+| `precheck.ts` `unwrap` env ~947                       | Short-circuits to ask/general; no inner pierce.                   | observed       |
+| `precheck.ts` `unwrap` sudo ~948–953                  | Model for env pierce: `action: "script"`.                         | observed       |
+| `precheck.ts` `classifyTokens` delete/move ~1069–1089 | Token owner for file mutations; no PS write cmdlets.              | observed       |
+| Red harness `precheck-red2.mjs`                       | All four REQ families currently `general`.                        | observed       |
+| Existing `precheck.test.ts`                           | Regression surface; cmd join, Remove-Item, sudo rm green.         | contracted     |
 
 ## 5. Current Behavior
 
@@ -90,40 +90,40 @@ bash command
 
 ## 6. Supported Input Domain and Reachability
 
-| Input | Producer | Reachable path | Classification |
-| --- | --- | --- | --- |
-| `Clear-Content f` / lower-case | agent bash | classifyTokens | observed red |
-| `Set-Content f x` / `Out-File f` | agent bash | classifyTokens | observed red |
-| `ri f` / `ri -Force f` | agent bash | classifyTokens / raw | observed red |
-| `ri -Recurse -Force dir` | agent bash | remove-item recursive branch needs `ri` | reachable |
-| `pwsh -Command Remove-Item f` | agent bash | unwrap PS | observed red |
-| `env rm f` / `env FOO=1 git reset --hard` | agent bash | unwrap env | observed red |
-| `env` alone | agent bash | stay general | contracted |
-| `cat .env` | already cautious | unchanged | observed |
-| edit `.env` path deny | ruleset | non-goal | contracted |
+| Input                                     | Producer         | Reachable path                          | Classification |
+| ----------------------------------------- | ---------------- | --------------------------------------- | -------------- |
+| `Clear-Content f` / lower-case            | agent bash       | classifyTokens                          | observed red   |
+| `Set-Content f x` / `Out-File f`          | agent bash       | classifyTokens                          | observed red   |
+| `ri f` / `ri -Force f`                    | agent bash       | classifyTokens / raw                    | observed red   |
+| `ri -Recurse -Force dir`                  | agent bash       | remove-item recursive branch needs `ri` | reachable      |
+| `pwsh -Command Remove-Item f`             | agent bash       | unwrap PS                               | observed red   |
+| `env rm f` / `env FOO=1 git reset --hard` | agent bash       | unwrap env                              | observed red   |
+| `env` alone                               | agent bash       | stay general                            | contracted     |
+| `cat .env`                                | already cautious | unchanged                               | observed       |
+| edit `.env` path deny                     | ruleset          | non-goal                                | contracted     |
 
 ## 7. Required Invariants
 
-| ID | Behavioral invariant | Existing test |
-| --- | --- | --- |
-| INV-01 | PS content overwrite cmdlets with target args → cautious | **red** |
-| INV-02 | `ri` (+ args) → same delete family as `remove-item` | **red** |
-| INV-03 | `ri -Recurse` + protected root → **dangerous** (parity with `Remove-Item -Recurse /`); non-protected recurse → cautious | **red (required)** |
-| INV-04 | `pwsh|powershell -Command` multi-token payload recursively classified | **red** |
-| INV-05 | `env [KEY=val…] cmd…` level ≥ bare `cmd…` for delete/move/git | **red** |
-| INV-06 | bare `env` / unknown env payload stays non-safe (general) | preserve |
-| INV-07 | Existing Remove-Item/rm/cmd/sudo/git/opaque suites stay green | precheck.test.ts |
-| INV-08 | No new `.env` hard-deny in precheck | non-goal |
+| ID     | Behavioral invariant                                                                                                    | Existing test                                                   |
+| ------ | ----------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------- | ------- |
+| INV-01 | PS content overwrite cmdlets with target args → cautious                                                                | **red**                                                         |
+| INV-02 | `ri` (+ args) → same delete family as `remove-item`                                                                     | **red**                                                         |
+| INV-03 | `ri -Recurse` + protected root → **dangerous** (parity with `Remove-Item -Recurse /`); non-protected recurse → cautious | **red (required)**                                              |
+| INV-04 | `pwsh                                                                                                                   | powershell -Command` multi-token payload recursively classified | **red** |
+| INV-05 | `env [KEY=val…] cmd…` level ≥ bare `cmd…` for delete/move/git                                                           | **red**                                                         |
+| INV-06 | bare `env` / unknown env payload stays non-safe (general)                                                               | preserve                                                        |
+| INV-07 | Existing Remove-Item/rm/cmd/sudo/git/opaque suites stay green                                                           | precheck.test.ts                                                |
+| INV-08 | No new `.env` hard-deny in precheck                                                                                     | non-goal                                                        |
 
 ## 8. First Divergence and Root Cause
 
-| Invariant | First divergence | Owner | Proof |
-| --- | --- | --- | --- |
-| INV-01 | classifyTokens has no write-cmdlet set | classifyTokens | Clear-Content → general |
-| INV-02 | FILE_DELETE / raw omit `ri` | FILE_DELETE_COMMANDS + RAW_FILE_DELETE | ri → general |
-| INV-03 | `RE_D_PS_RECURSIVE_DELETE_ROOT` and token recurse branch only match `Remove-Item` / `remove-item`, not `ri`; after adding `ri` only to generic delete, raw cautious would fire first and demote protected-root recurse | RE_D_PS_RECURSIVE_DELETE_ROOT + classifyTokens | `Remove-Item -Recurse /` dangerous; `ri -Recurse /` general today, would be wrong cautious if only FILE_DELETE extended |
-| INV-04 | PS `-Command` takes only next token | unwrap POWERSHELL | Remove-Item file dropped |
-| INV-05 | env hard-ask without script pierce | unwrap env | env rm → general |
+| Invariant | First divergence                                                                                                                                                                                                       | Owner                                          | Proof                                                                                                                   |
+| --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| INV-01    | classifyTokens has no write-cmdlet set                                                                                                                                                                                 | classifyTokens                                 | Clear-Content → general                                                                                                 |
+| INV-02    | FILE_DELETE / raw omit `ri`                                                                                                                                                                                            | FILE_DELETE_COMMANDS + RAW_FILE_DELETE         | ri → general                                                                                                            |
+| INV-03    | `RE_D_PS_RECURSIVE_DELETE_ROOT` and token recurse branch only match `Remove-Item` / `remove-item`, not `ri`; after adding `ri` only to generic delete, raw cautious would fire first and demote protected-root recurse | RE_D_PS_RECURSIVE_DELETE_ROOT + classifyTokens | `Remove-Item -Recurse /` dangerous; `ri -Recurse /` general today, would be wrong cautious if only FILE_DELETE extended |
+| INV-04    | PS `-Command` takes only next token                                                                                                                                                                                    | unwrap POWERSHELL                              | Remove-Item file dropped                                                                                                |
+| INV-05    | env hard-ask without script pierce                                                                                                                                                                                     | unwrap env                                     | env rm → general                                                                                                        |
 
 ### Red-capable feedback loop (executed)
 
@@ -136,13 +136,13 @@ Preserved greens: rm, Remove-Item, sudo rm, cmd del, git status, cat .env.
 
 ## 9. Responsibility and Seam
 
-| Concern | Owner | Why here |
-| --- | --- | --- |
-| PS overwrite / ri / delete sets | `classifyTokens` + FILE_* constants | token semantic owner |
-| raw opaque delete text | `RAW_FILE_DELETE_PATTERN` | mirror token set for opaque shells |
-| PS -Command join | `unwrap` PowerShell branch | same as cmd /c owner |
-| env pierce | `unwrap` env branch | same as sudo owner |
-| .env path deny | Permission ruleset | REQ-05 |
+| Concern                         | Owner                                 | Why here                           |
+| ------------------------------- | ------------------------------------- | ---------------------------------- |
+| PS overwrite / ri / delete sets | `classifyTokens` + FILE\_\* constants | token semantic owner               |
+| raw opaque delete text          | `RAW_FILE_DELETE_PATTERN`             | mirror token set for opaque shells |
+| PS -Command join                | `unwrap` PowerShell branch            | same as cmd /c owner               |
+| env pierce                      | `unwrap` env branch                   | same as sudo owner                 |
+| .env path deny                  | Permission ruleset                    | REQ-05                             |
 
 ## 10. Single Approved Primary-Path Design
 
@@ -175,93 +175,93 @@ No second classifier. No raw multi-line PS write regex. Token path primary; raw 
 
 ## 11. Secondary and Replacement Path Inventory
 
-| Path | Classification | Disposition |
-| --- | --- | --- |
-| classifyTokens / unwrap primary | primary | extend |
-| RAW_FILE_DELETE mirror for ri | primary-contract branch | extend |
-| New raw regex for Clear-Content | forbidden | reject |
-| .env in precheck | forbidden | reject |
+| Path                            | Classification          | Disposition |
+| ------------------------------- | ----------------------- | ----------- |
+| classifyTokens / unwrap primary | primary                 | extend      |
+| RAW_FILE_DELETE mirror for ri   | primary-contract branch | extend      |
+| New raw regex for Clear-Content | forbidden               | reject      |
+| .env in precheck                | forbidden               | reject      |
 
 ## 12. Workaround Deletion and Replacement
 
-| Item | Disposition |
-| --- | --- |
-| env always-ask without pierce | replace with sudo-like pierce |
-| PS -Command single-token script | replace with join-all |
+| Item                            | Disposition                   |
+| ------------------------------- | ----------------------------- |
+| env always-ask without pierce   | replace with sudo-like pierce |
+| PS -Command single-token script | replace with join-all         |
 
 ## 13. Forward Traceability
 
-| Req / INV | Path | File | Test |
-| --- | --- | --- | --- |
-| REQ-01 / INV-01 | classifyTokens write set | precheck.ts | Clear/Set/Out-File → cautious |
-| REQ-02 / INV-02–03 | FILE_DELETE + RAW delete + RE_D_PS_RECURSIVE_DELETE_ROOT + token ri recurse | precheck.ts | ri file cautious; ri -Recurse / dangerous; Remove-Item -Recurse / still dangerous |
-| REQ-03 / INV-04 | unwrap PS join | precheck.ts | pwsh -Command Remove-Item f |
-| REQ-04 / INV-05–06 | unwrap env pierce | precheck.ts | env rm; env FOO=1 git reset --hard; bare env general |
-| REQ-05 | none | — | no new .env precheck asserts |
-| REQ-06 | suite green | precheck.test.ts | full suite |
+| Req / INV          | Path                                                                        | File             | Test                                                                              |
+| ------------------ | --------------------------------------------------------------------------- | ---------------- | --------------------------------------------------------------------------------- |
+| REQ-01 / INV-01    | classifyTokens write set                                                    | precheck.ts      | Clear/Set/Out-File → cautious                                                     |
+| REQ-02 / INV-02–03 | FILE_DELETE + RAW delete + RE_D_PS_RECURSIVE_DELETE_ROOT + token ri recurse | precheck.ts      | ri file cautious; ri -Recurse / dangerous; Remove-Item -Recurse / still dangerous |
+| REQ-03 / INV-04    | unwrap PS join                                                              | precheck.ts      | pwsh -Command Remove-Item f                                                       |
+| REQ-04 / INV-05–06 | unwrap env pierce                                                           | precheck.ts      | env rm; env FOO=1 git reset --hard; bare env general                              |
+| REQ-05             | none                                                                        | —                | no new .env precheck asserts                                                      |
+| REQ-06             | suite green                                                                 | precheck.test.ts | full suite                                                                        |
 
 ## 14. Reverse Traceability
 
-| Concept | Req | Why existing insufficient |
-| --- | --- | --- |
-| FILE_WRITE_COMMANDS | REQ-01 | delete set does not cover truncate/overwrite |
+| Concept                                         | Req             | Why existing insufficient                                |
+| ----------------------------------------------- | --------------- | -------------------------------------------------------- |
+| FILE_WRITE_COMMANDS                             | REQ-01          | delete set does not cover truncate/overwrite             |
 | ri in delete + PS recursive dangerous raw/token | REQ-02 / INV-03 | alias missing; Remove-Item-only raw dangerous demotes ri |
-| PS join-all | REQ-03 | single token drops args |
-| env pierce | REQ-04 | short-circuit never sees rm/git |
+| PS join-all                                     | REQ-03          | single token drops args                                  |
+| env pierce                                      | REQ-04          | short-circuit never sees rm/git                          |
 
 ## 15. File-Level Change Plan
 
-| File | Change | Delta |
-| --- | --- | --- |
-| `packages/opencode/src/permission/precheck.ts` | write set, ri, PS join, env pierce, Chinese comments | +40–80 |
-| `packages/opencode/test/permission/precheck.test.ts` | red→green suites + regressions | +40–70 |
+| File                                                 | Change                                               | Delta  |
+| ---------------------------------------------------- | ---------------------------------------------------- | ------ |
+| `packages/opencode/src/permission/precheck.ts`       | write set, ri, PS join, env pierce, Chinese comments | +40–80 |
+| `packages/opencode/test/permission/precheck.test.ts` | red→green suites + regressions                       | +40–70 |
 
 ## 16. TDD Behavior Slices
 
 Seam: `PermissionPrecheck.evaluate` via existing `bash()` helper.
 
-| Order | Red | Green |
-| --- | --- | --- |
-| 1 | Clear-Content / Set-Content / Out-File → cautious | write set |
-| 2 | ri file → cautious; **ri -Recurse / → dangerous** (parity Remove-Item -Recurse /) | FILE_DELETE + RE_D + token ri recurse |
-| 3 | pwsh -Command Remove-Item file.txt → cautious | PS join |
-| 4 | env rm file.txt → cautious; env git reset --hard → cautious | env pierce |
-| 5 | bare env general; git status safe; rm still cautious; env git status still general | regression |
+| Order | Red                                                                                | Green                                 |
+| ----- | ---------------------------------------------------------------------------------- | ------------------------------------- |
+| 1     | Clear-Content / Set-Content / Out-File → cautious                                  | write set                             |
+| 2     | ri file → cautious; **ri -Recurse / → dangerous** (parity Remove-Item -Recurse /)  | FILE_DELETE + RE_D + token ri recurse |
+| 3     | pwsh -Command Remove-Item file.txt → cautious                                      | PS join                               |
+| 4     | env rm file.txt → cautious; env git reset --hard → cautious                        | env pierce                            |
+| 5     | bare env general; git status safe; rm still cautious; env git status still general | regression                            |
 
 ## 17. Chinese Comment Budget
 
-| Metric | Estimate |
-| --- | --- |
-| E | ~50–90 |
-| C | ≥ max(1, ceil(E×0.15)) ≈ 8–14 |
+| Metric | Estimate                      |
+| ------ | ----------------------------- |
+| E      | ~50–90                        |
+| C      | ≥ max(1, ceil(E×0.15)) ≈ 8–14 |
 
 Sites: PS write set purpose; ri alias; **ri in RE_D_PS_RECURSIVE_DELETE_ROOT before generic delete cautious**; PS join-all vs single token hole; env KEY=val/flag skip + pierce vs old ask.
 
 ## 18. Verification
 
-| Command | CWD |
-| --- | --- |
+| Command                                     | CWD               |
+| ------------------------------------------- | ----------------- |
 | `bun test test/permission/precheck.test.ts` | packages/opencode |
-| `bun test test/permission/auto.test.ts` | packages/opencode |
-| `bun typecheck` | packages/opencode |
-| re-run precheck-red2.mjs | temp |
+| `bun test test/permission/auto.test.ts`     | packages/opencode |
+| `bun typecheck`                             | packages/opencode |
+| re-run precheck-red2.mjs                    | temp              |
 
 ## 19. Diff Budget
 
-| Metric | Estimate |
-| --- | --- |
-| Files modified | 2 |
-| Production lines | ≤90 |
-| Test lines | ≤80 |
-| Total | ≪ 800 |
+| Metric           | Estimate |
+| ---------------- | -------- |
+| Files modified   | 2        |
+| Production lines | ≤90      |
+| Test lines       | ≤80      |
+| Total            | ≪ 800    |
 
 ## 20. Real Risks and Open Decisions
 
-| Risk | Mitigation |
-| --- | --- |
-| `ri` as substring false positive | word-boundary + normalizeCommandName as cmd only |
-| PS -Command with quoted multi-word already one token | join still correct; no double-join issue |
-| env -i / env -u flags | if first non-assignment is flag, remaining may still pierce poorly → keep general unless clear cmd; optional: skip known env flags `-i,-u,-0` lightly if observed |
+| Risk                                                 | Mitigation                                                                                                                                                        |
+| ---------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ri` as substring false positive                     | word-boundary + normalizeCommandName as cmd only                                                                                                                  |
+| PS -Command with quoted multi-word already one token | join still correct; no double-join issue                                                                                                                          |
+| env -i / env -u flags                                | if first non-assignment is flag, remaining may still pierce poorly → keep general unless clear cmd; optional: skip known env flags `-i,-u,-0` lightly if observed |
 
 ### Open Decisions
 
@@ -272,9 +272,9 @@ After `env`, skip tokens matching `^[A-Za-z_][A-Za-z0-9_]*=.*`. Then skip known 
 
 ### Rejected Speculation
 
-- All PS cmdlets cautious  
-- Raw regex for Set-Content in comments  
-- Moving .env deny into precheck  
+- All PS cmdlets cautious
+- Raw regex for Set-Content in comments
+- Moving .env deny into precheck
 
 ## 21. Audit Contract
 
@@ -282,10 +282,10 @@ Independent auditor: full original scope; evidence for blockers; under/over-desi
 
 ## 22. Plan Audit Record
 
-| Round | Audited revision | Full scope? | Blocking | Non-blocking | Result | Ref |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | R1 | yes | B-01: ri -Recurse protected root not same-level dangerous as Remove-Item (RE_D only Remove-Item; generic delete would demote) | N-01 weak INV-03 TDD; N-02 help dual wording; N-03 env flag residual vs refined | BLOCK | ses_065184aafffeHZlTLP4CqEE3X9 |
-| 2 | R2 | yes | No blocking findings. | N-01 env residual docs; N-02 help dual wording; N-03 full Remove-Item matrix not re-duplicated for ri | APPROVE | ses_0650e0976ffe2j3tVlh4AS7veC |
+| Round | Audited revision | Full scope? | Blocking                                                                                                                      | Non-blocking                                                                                          | Result  | Ref                            |
+| ----- | ---------------- | ----------- | ----------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- | ------- | ------------------------------ |
+| 1     | R1               | yes         | B-01: ri -Recurse protected root not same-level dangerous as Remove-Item (RE_D only Remove-Item; generic delete would demote) | N-01 weak INV-03 TDD; N-02 help dual wording; N-03 env flag residual vs refined                       | BLOCK   | ses_065184aafffeHZlTLP4CqEE3X9 |
+| 2     | R2               | yes         | No blocking findings.                                                                                                         | N-01 env residual docs; N-02 help dual wording; N-03 full Remove-Item matrix not re-duplicated for ri | APPROVE | ses_0650e0976ffe2j3tVlh4AS7veC |
 
 ### Plan audit R2 verdict (verbatim)
 
@@ -311,33 +311,33 @@ B-01 concrete production consequence: after FILE_DELETE-only `ri`, `ri -Recurse 
 
 ### Actual Files and Diff
 
-| File | Change |
-| --- | --- |
-| `packages/opencode/src/permission/precheck.ts` | FILE_WRITE_COMMANDS; ri in delete/raw/RE_D/token recurse; PS -Command join-all; env pierceEnvTokens; Chinese comments |
-| `packages/opencode/test/permission/precheck.test.ts` | four new behavioral suites |
+| File                                                 | Change                                                                                                                |
+| ---------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `packages/opencode/src/permission/precheck.ts`       | FILE_WRITE_COMMANDS; ri in delete/raw/RE_D/token recurse; PS -Command join-all; env pierceEnvTokens; Chinese comments |
+| `packages/opencode/test/permission/precheck.test.ts` | four new behavioral suites                                                                                            |
 
 `git diff --stat`: 2 files, +90 / −8.
 
 ### Red-Green Test Evidence
 
-| Slice | Before | After |
-| --- | --- | --- |
-| Clear/Set/Out-File | general | cautious |
-| ri file / ri -Recurse / | general | cautious / dangerous |
-| pwsh -Command Remove-Item f | general | cautious |
-| env rm / env git reset --hard | general | cautious |
-| bare env / env git status | general | general |
+| Slice                         | Before  | After                |
+| ----------------------------- | ------- | -------------------- |
+| Clear/Set/Out-File            | general | cautious             |
+| ri file / ri -Recurse /       | general | cautious / dangerous |
+| pwsh -Command Remove-Item f   | general | cautious             |
+| env rm / env git reset --hard | general | cautious             |
+| bare env / env git status     | general | general              |
 
 New tests failed first (4 fail), then full suite green.
 
 ### Verification Commands and Results
 
-| Command | CWD | Result |
-| --- | --- | --- |
-| `bun test test/permission/precheck.test.ts` | packages/opencode | 107 pass |
-| `bun test test/permission/auto.test.ts` | packages/opencode | 22 pass |
-| `bun typecheck` | packages/opencode | precheck clean; unrelated dirty `prompt.test.ts` errors pre-exist outside GOAL |
-| precheck-red2.mjs | temp | all planned reds green |
+| Command                                     | CWD               | Result                                                                         |
+| ------------------------------------------- | ----------------- | ------------------------------------------------------------------------------ |
+| `bun test test/permission/precheck.test.ts` | packages/opencode | 107 pass                                                                       |
+| `bun test test/permission/auto.test.ts`     | packages/opencode | 22 pass                                                                        |
+| `bun typecheck`                             | packages/opencode | precheck clean; unrelated dirty `prompt.test.ts` errors pre-exist outside GOAL |
+| precheck-red2.mjs                           | temp              | all planned reds green                                                         |
 
 ### Original Feedback-Loop Result
 
@@ -345,21 +345,21 @@ precheck-red2.mjs: Clear/Set/Out/ri/pwsh-Command/env rm|git → cautious; Remove
 
 ### Actual Secondary and Replacement Path Inventory
 
-| Path | Disposition |
-| --- | --- |
-| classifyTokens / unwrap / RE_D mirror | extended primary |
-| env always-ask | replaced by pierce |
-| PS single-token -Command | replaced by join-all |
-| .env precheck deny | not added |
+| Path                                  | Disposition          |
+| ------------------------------------- | -------------------- |
+| classifyTokens / unwrap / RE_D mirror | extended primary     |
+| env always-ask                        | replaced by pierce   |
+| PS single-token -Command              | replaced by join-all |
+| .env precheck deny                    | not added            |
 
 ### Chinese Comment Calculation
 
-| Metric | Actual | Exclusions and evidence |
-| --- | --- | --- |
-| Effective changed code lines `E` | 92 | non-blank +/- in precheck.ts + precheck.test.ts |
-| Qualifying Chinese comment lines `C` | 15 | write set, ri/RE_D, PS join, env pierce, test intent |
-| Ratio `C / E` | 0.163 |  |
-| Required minimum `C` | 14 | ceil(92*0.15) |
+| Metric                               | Actual | Exclusions and evidence                              |
+| ------------------------------------ | ------ | ---------------------------------------------------- |
+| Effective changed code lines `E`     | 92     | non-blank +/- in precheck.ts + precheck.test.ts      |
+| Qualifying Chinese comment lines `C` | 15     | write set, ri/RE_D, PS join, env pierce, test intent |
+| Ratio `C / E`                        | 0.163  |                                                      |
+| Required minimum `C`                 | 14     | ceil(92\*0.15)                                       |
 
 ### Remaining Unverified Items
 
@@ -368,9 +368,9 @@ precheck-red2.mjs: Clear/Set/Out/ri/pwsh-Command/env rm|git → cautious; Remove
 
 ## 24. Implementation Audit Record
 
-| Round | Plan revision | Full scope? | Blocking | Non-blocking | Result | Ref |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | R2 | yes | No blocking findings. | N-01 env mv not explicit; N-02 ri non-protected recurse not re-listed; N-03 complex env residual | APPROVE | ses_065008372ffe5TKzLdCRQ1oL0V |
+| Round | Plan revision | Full scope? | Blocking              | Non-blocking                                                                                     | Result  | Ref                            |
+| ----- | ------------- | ----------- | --------------------- | ------------------------------------------------------------------------------------------------ | ------- | ------------------------------ |
+| 1     | R2            | yes         | No blocking findings. | N-01 env mv not explicit; N-02 ri non-protected recurse not re-listed; N-03 complex env residual | APPROVE | ses_065008372ffe5TKzLdCRQ1oL0V |
 
 ### Implementation audit verdict (verbatim)
 

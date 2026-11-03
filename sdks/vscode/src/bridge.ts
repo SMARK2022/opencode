@@ -31,7 +31,15 @@ const BRIDGE_HOST = "127.0.0.1"
 // 桥接服务仅绑定本机回环地址，杜绝网络暴露
 
 // 路由集合先决定是否读取请求体，未知路径不能因无关 JSON 内容从 404 变成 500。
-const NOTEBOOK_ROUTES = new Set(["/notebook/summary", "/notebook/source", "/notebook/run", "/notebook/edit", "/notebook/output", "/notebook/cell-output", "/notebook/env"])
+const NOTEBOOK_ROUTES = new Set([
+  "/notebook/summary",
+  "/notebook/source",
+  "/notebook/run",
+  "/notebook/edit",
+  "/notebook/output",
+  "/notebook/cell-output",
+  "/notebook/env",
+])
 
 export type BridgeInfo = { port: number; token: string }
 // 导出的 BridgeInfo 必须同时携带端口与 token，终端模块不能把地址当成访问凭证。
@@ -47,7 +55,6 @@ const fileLocks = new Map<string, Promise<void>>()
 // 只读操作沿同一路由owner旁路，不占用长run持有的文档锁。
 const READONLY_ROUTES = new Set(["/notebook/summary", "/notebook/source", "/notebook/output", "/notebook/cell-output"])
 
-
 function withFileLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
   const prev = fileLocks.get(key) ?? Promise.resolve()
   let release!: () => void
@@ -62,7 +69,7 @@ function withFileLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
 }
 
 export async function closeBridge() {
-// bridge 模块持有唯一服务器句柄，外部只调用 closeBridge，不保存可独立关闭的副本。
+  // bridge 模块持有唯一服务器句柄，外部只调用 closeBridge，不保存可独立关闭的副本。
   // 重复卸载共享同一个关闭屏障，不能在第一个 close 回调前清空 owner 并重新激活。
   if (closing) return lifetime
   closing = true
@@ -76,7 +83,8 @@ export async function closeBridge() {
       await registry?.dispose()
       registry = undefined
       // Node 的关闭完成发生在回调；未监听的启动失败实例不需要调用 close 制造第二个错误。
-      if (current?.listening) await new Promise<void>((resolve, reject) => current.close((error) => error ? reject(error) : resolve()))
+      if (current?.listening)
+        await new Promise<void>((resolve, reject) => current.close((error) => (error ? reject(error) : resolve())))
     } finally {
       // 引用只在关闭结算后释放；标志保持关闭，直到下一次实际激活。
       server = undefined
@@ -92,10 +100,14 @@ export function activateBridge(output: { appendLine(value: string): void }) {
   closing = false
   const bridge = startBridge(output)
   // 资源屏障只等待启动结算；终端仍持有原 Promise，启动失败不会被转成成功凭证。
-  lifetime = bridge.then(() => undefined, () => undefined)
+  lifetime = bridge.then(
+    () => undefined,
+    () => undefined,
+  )
   void bridge.catch((error) => {
     // 卸载取消不向已经退出的日志上下文写入；正常启动失败仍保留原诊断。
-    if (!closing) output.appendLine(`[bridge] failed to start: ${error instanceof Error ? error.message : String(error)}`)
+    if (!closing)
+      output.appendLine(`[bridge] failed to start: ${error instanceof Error ? error.message : String(error)}`)
   })
   // 公共启动接口返回可拒绝的凭证 Promise，不能把只表示结算的 lifetime 暴露给终端并吞掉启动失败。
   return bridge
@@ -142,11 +154,16 @@ async function startBridge(output: { appendLine(value: string): void }): Promise
       if (request.method === "GET" && url.pathname === "/manifest") {
         const address = httpServer.address()
         const port = address && typeof address === "object" ? address.port : 0
-        return writeJson(response, 200, manifest({ id: vscode.env.sessionId || `vscode-${port}`, port, token: "<redacted>" }))
+        return writeJson(
+          response,
+          200,
+          manifest({ id: vscode.env.sessionId || `vscode-${port}`, port, token: "<redacted>" }),
+        )
       }
 
       // 保留源未知路由的 404；即使 body 是 null、数组或坏 JSON，也不启动解析器。
-      if (request.method !== "POST" || !NOTEBOOK_ROUTES.has(url.pathname)) return writeJson(response, 404, { ok: false, error: "Not found" })
+      if (request.method !== "POST" || !NOTEBOOK_ROUTES.has(url.pathname))
+        return writeJson(response, 404, { ok: false, error: "Not found" })
       // 只解析一次请求体；鉴权先完成，语法错误仍由原 500 边界处理。
       const body = await readJson(request)
       // env 也需要提交明确路径，非对象请求与其它 notebook 路由共用既有 400 边界。
@@ -200,7 +217,16 @@ async function startBridge(output: { appendLine(value: string): void }): Promise
           // 注册期间的卸载仍走原关闭屏障，不交付已经取消的凭证。
           if (closing) return reject(new Error("VS Code bridge startup cancelled"))
           output.appendLine(`[bridge] registry ${handle.id}`)
-          for (const ep of ["health", "notebook/summary", "notebook/source", "notebook/run", "notebook/edit", "notebook/output", "notebook/env", "manifest"]) {
+          for (const ep of [
+            "health",
+            "notebook/summary",
+            "notebook/source",
+            "notebook/run",
+            "notebook/edit",
+            "notebook/output",
+            "notebook/env",
+            "manifest",
+          ]) {
             output.appendLine(`[bridge] ${ep.padEnd(20)} ${base}/${ep}${ep === "health" ? "" : ``}`)
           }
           resolve({ port: address.port, token })
@@ -212,7 +238,7 @@ async function startBridge(output: { appendLine(value: string): void }): Promise
 }
 
 async function routeRequest(
-// 路由模块负责 HTTP 分发，notebook 模块只接收已解析对象，不持有请求流。
+  // 路由模块负责 HTTP 分发，notebook 模块只接收已解析对象，不持有请求流。
   method: string,
   pathname: string,
   body: unknown,
@@ -257,7 +283,6 @@ async function routeRequest(
         output.appendLine(`[bridge] reading raw notebook output ${filePath} cellId=${cellId ?? "<auto>"}`)
         return await readNotebookCellOutput(filePath, undefined, cellId)
       }
-
     }
 
     return undefined

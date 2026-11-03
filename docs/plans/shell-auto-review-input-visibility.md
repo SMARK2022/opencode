@@ -35,23 +35,23 @@ not implementation authority.
 
 ## 3. Repository Context
 
-| Source | Constraint |
-| --- | --- |
-| `CONTEXT.md` | Session/Message/Tool/Permission vocabulary. |
+| Source                                             | Constraint                                                                                                       |
+| -------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `CONTEXT.md`                                       | Session/Message/Tool/Permission vocabulary.                                                                      |
 | `.opencode/policy/first-principles-engineering.md` | First-divergence repair; regression tests must fail on the original defect; Chinese comment gate includes tests. |
-| Root + `packages/opencode` `AGENTS.md` | Package-local tests/typecheck. |
-| Audits R1–R5 | Durable race; equal-v0 live; durable red must hit pending→`{ raw }` owner path deterministically. |
+| Root + `packages/opencode` `AGENTS.md`             | Package-local tests/typecheck.                                                                                   |
+| Audits R1–R5                                       | Durable race; equal-v0 live; durable red must hit pending→`{ raw }` owner path deterministically.                |
 
 ## 4. Files and Evidence Read
 
-| Evidence | Relevance | Class |
-| --- | --- | --- |
-| `reviewer/service.ts:957-961` | Pending promote writes `input: { raw }`. | reachable |
-| `processor.ts:536-548` | Concurrent structured running full-replace. | reachable |
-| `prompt.ts` ask metadata | Bash ask carries `command` in permission metadata. | contracted |
-| `sync.tsx:340-353` | Equal-v0 keeps first bash running snapshot. | observed |
-| `session/index.tsx:2823-2825` | Missing `input.command` → `Writing command...`. | observed |
-| R5 audit B-01 | SessionPrompt “reviewing has command” often greens today because tool-call usually precedes review. | contracted |
+| Evidence                      | Relevance                                                                                           | Class      |
+| ----------------------------- | --------------------------------------------------------------------------------------------------- | ---------- |
+| `reviewer/service.ts:957-961` | Pending promote writes `input: { raw }`.                                                            | reachable  |
+| `processor.ts:536-548`        | Concurrent structured running full-replace.                                                         | reachable  |
+| `prompt.ts` ask metadata      | Bash ask carries `command` in permission metadata.                                                  | contracted |
+| `sync.tsx:340-353`            | Equal-v0 keeps first bash running snapshot.                                                         | observed   |
+| `session/index.tsx:2823-2825` | Missing `input.command` → `Writing command...`.                                                     | observed   |
+| R5 audit B-01                 | SessionPrompt “reviewing has command” often greens today because tool-call usually precedes review. | contracted |
 
 ## 5. Current Behavior
 
@@ -66,38 +66,38 @@ When tool-call already made structured running before review, current code keeps
 
 ## 6. Supported Input Domain and Reachability
 
-| Condition | Path | Class |
-| --- | --- | --- |
-| Parent ToolPart still `pending` at `updateToolAutoReview` | Stream lag / fixture / TOCTOU window | reachable |
-| Permission metadata includes string `command` | Shell ask | contracted |
-| Current running input already structured | tool-call first | reachable |
-| Two equal-v0 running TUI snapshots | Multiple PartUpdated | observed |
+| Condition                                                 | Path                                 | Class      |
+| --------------------------------------------------------- | ------------------------------------ | ---------- |
+| Parent ToolPart still `pending` at `updateToolAutoReview` | Stream lag / fixture / TOCTOU window | reachable  |
+| Permission metadata includes string `command`             | Shell ask                            | contracted |
+| Current running input already structured                  | tool-call first                      | reachable  |
+| Two equal-v0 running TUI snapshots                        | Multiple PartUpdated                 | observed   |
 
 ## 7. Required Invariants
 
-| ID | Invariant |
-| --- | --- |
+| ID     | Invariant                                                                                                                                                         |
+| ------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | INV-01 | If permission metadata includes `command` and reviewer marks the parent ToolPart reviewing, durable `state.input.command` must equal that command (not raw-only). |
-| INV-02 | Reviewer must not clobber an already-structured running input with `{ raw }`. |
-| INV-03 | Live TUI equal-v0 bash merge must field-enrich `input` / `autoReview` / `title` so reviewing visibility is not permanently dropped. |
-| INV-04 | Strictly-newer progress and terminal dominance unchanged. |
-| INV-05 | ≤4 files, ≤600 lines; no new state machine / fallback algorithm. |
+| INV-02 | Reviewer must not clobber an already-structured running input with `{ raw }`.                                                                                     |
+| INV-03 | Live TUI equal-v0 bash merge must field-enrich `input` / `autoReview` / `title` so reviewing visibility is not permanently dropped.                               |
+| INV-04 | Strictly-newer progress and terminal dominance unchanged.                                                                                                         |
+| INV-05 | ≤4 files, ≤600 lines; no new state machine / fallback algorithm.                                                                                                  |
 
 ## 8. First Divergence and Root Cause
 
-| INV | First divergence | Owner | Proof |
-| --- | --- | --- | --- |
+| INV            | First divergence                                                                                                                                         | Owner                                     | Proof                        |
+| -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------- | ---------------------------- |
 | INV-01, INV-02 | `updateToolAutoReview` pending branch full-replaces with `{ raw }`, ignoring permission metadata `command` and risking last-write over structured input. | `PermissionReviewer.updateToolAutoReview` | R2/R5; `service.ts:957-961`. |
-| INV-03 | TUI equal-v0 keeps first bash running snapshot. | TUI `mergeLivePart` | `sync.tsx`; R3. |
+| INV-03         | TUI equal-v0 keeps first bash running snapshot.                                                                                                          | TUI `mergeLivePart`                       | `sync.tsx`; R3.              |
 
 ## 9. Responsibility and Seam
 
-| Concern | Owner |
-| --- | --- |
-| Durable structured reviewing Part | `PermissionReviewer.updateToolAutoReview` |
-| Live equal-v0 field enrich | TUI `mergeLivePart` |
-| Deterministic durable red | `test/permission/reviewer-service.test.ts` with pending Part fixture |
-| Live red | `test/cli/cmd/tui/sync.test.tsx` |
+| Concern                           | Owner                                                                |
+| --------------------------------- | -------------------------------------------------------------------- |
+| Durable structured reviewing Part | `PermissionReviewer.updateToolAutoReview`                            |
+| Live equal-v0 field enrich        | TUI `mergeLivePart`                                                  |
+| Deterministic durable red         | `test/permission/reviewer-service.test.ts` with pending Part fixture |
+| Live red                          | `test/cli/cmd/tui/sync.test.tsx`                                     |
 
 ## 10. Single Approved Primary-Path Design
 
@@ -131,88 +131,88 @@ progressVersion strictly-newer path unchanged; terminal dominance unchanged
 
 ## 11. Secondary and Replacement Path Inventory
 
-| Path | Classification | Disposition |
-| --- | --- | --- |
-| Metadata/command-aware promote (single write) | primary | preserve |
-| Equal-v0 TUI field enrich | primary-contract branch | preserve |
-| Residual raw-only when no command metadata and no structured input | last-resort display | keep narrow |
-| R1–R3 rejected paths | forbidden | reject |
+| Path                                                               | Classification          | Disposition |
+| ------------------------------------------------------------------ | ----------------------- | ----------- |
+| Metadata/command-aware promote (single write)                      | primary                 | preserve    |
+| Equal-v0 TUI field enrich                                          | primary-contract branch | preserve    |
+| Residual raw-only when no command metadata and no structured input | last-resort display     | keep narrow |
+| R1–R3 rejected paths                                               | forbidden               | reject      |
 
 ## 12. Workaround Deletion
 
-| Item | Disposition |
-| --- | --- |
-| Always `{ raw }` on pending promote | Prefer structured current input or metadata.command |
-| SessionPrompt-only durable red (often green today) | Replace with pending-fixture owner red |
+| Item                                               | Disposition                                         |
+| -------------------------------------------------- | --------------------------------------------------- |
+| Always `{ raw }` on pending promote                | Prefer structured current input or metadata.command |
+| SessionPrompt-only durable red (often green today) | Replace with pending-fixture owner red              |
 
 ## 13. Forward Traceability
 
-| INV | Production | Files | Required red test (fails on current code) |
-| --- | --- | --- | --- |
+| INV    | Production                               | Files               | Required red test (fails on current code)                                                                                             |
+| ------ | ---------------------------------------- | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
 | INV-01 | command from metadata on pending promote | reviewer/service.ts | reviewer-service.test: seed pending ToolPart + review with metadata.command → durable input.command equals command (today: `{ raw }`) |
-| INV-02 | keep structured running input | reviewer/service.ts | reviewer-service.test: seed running structured input, then reviewing patch → command unchanged + autoReview set |
-| INV-03 | equal-v0 enrich | tui/sync.tsx | sync.test equal-v0 cases |
-| INV-04 | progress `>` | tui/sync.tsx | existing shell progress tests |
-| INV-05 | 4 files | §15 | git diff --stat |
+| INV-02 | keep structured running input            | reviewer/service.ts | reviewer-service.test: seed running structured input, then reviewing patch → command unchanged + autoReview set                       |
+| INV-03 | equal-v0 enrich                          | tui/sync.tsx        | sync.test equal-v0 cases                                                                                                              |
+| INV-04 | progress `>`                             | tui/sync.tsx        | existing shell progress tests                                                                                                         |
+| INV-05 | 4 files                                  | §15                 | git diff --stat                                                                                                                       |
 
 ## 14. Reverse Traceability
 
-| Concept | INV | Why needed |
-| --- | --- | --- |
-| metadata.command promote | INV-01 | Pending-at-review path ignores fixed bash command evidence today |
-| keep structured input | INV-02 | Full-replace can clobber tool-call structured input |
-| TUI equal-v0 field enrich | INV-03 | Live second snapshot drop |
-| pending-fixture durable test | INV-01 | SessionPrompt common path is often already structured at review |
+| Concept                      | INV    | Why needed                                                       |
+| ---------------------------- | ------ | ---------------------------------------------------------------- |
+| metadata.command promote     | INV-01 | Pending-at-review path ignores fixed bash command evidence today |
+| keep structured input        | INV-02 | Full-replace can clobber tool-call structured input              |
+| TUI equal-v0 field enrich    | INV-03 | Live second snapshot drop                                        |
+| pending-fixture durable test | INV-01 | SessionPrompt common path is often already structured at review  |
 
 ## 15. File-Level Change Plan
 
 Exactly four modified code files:
 
-| # | File | Responsibility | Expected Δ |
-| --- | --- | --- | --- |
-| 1 | `packages/opencode/src/permission/reviewer/service.ts` | Structured promote from latest Part / metadata.command in a single updatePart; no structured→raw clobber; no second repair write. | +25–45 |
-| 2 | `packages/opencode/src/cli/cmd/tui/context/sync.tsx` | Equal-v0 bash field enrich. | +20–35 |
-| 3 | `packages/opencode/test/permission/reviewer-service.test.ts` | **Required durable reds:** pending+command metadata → input.command; running structured then reviewing → keep command + autoReview. | +60–100 |
-| 4 | `packages/opencode/test/cli/cmd/tui/sync.test.tsx` | **Required live reds:** equal-v0 raw→command; equal-v0 command→autoReview; keep progress tests. | +40–70 |
+| #   | File                                                         | Responsibility                                                                                                                      | Expected Δ |
+| --- | ------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------- | ---------- |
+| 1   | `packages/opencode/src/permission/reviewer/service.ts`       | Structured promote from latest Part / metadata.command in a single updatePart; no structured→raw clobber; no second repair write.   | +25–45     |
+| 2   | `packages/opencode/src/cli/cmd/tui/context/sync.tsx`         | Equal-v0 bash field enrich.                                                                                                         | +20–35     |
+| 3   | `packages/opencode/test/permission/reviewer-service.test.ts` | **Required durable reds:** pending+command metadata → input.command; running structured then reviewing → keep command + autoReview. | +60–100    |
+| 4   | `packages/opencode/test/cli/cmd/tui/sync.test.tsx`           | **Required live reds:** equal-v0 raw→command; equal-v0 command→autoReview; keep progress tests.                                     | +40–70     |
 
 ## 16. TDD Behavior Slices
 
-| # | Red on current code | Green after fix |
-| --- | --- | --- |
-| 1 | Fixture: pending ToolPart + review with metadata.command → durable Part lacks input.command (raw-only today) | metadata-aware single promote |
-| 2 | Fixture: running structured command, then reviewing update → keep command + set autoReview (regression guard) | keep structured + merge envelope |
-| 3 | TUI equal-v0 raw+autoReview then structured → store has command + autoReview | field enrich |
-| 4 | TUI equal-v0 structured then autoReview → store has both | field enrich |
-| 5 | Existing shell progress monotonic tests green | no progress rule change |
+| #   | Red on current code                                                                                           | Green after fix                  |
+| --- | ------------------------------------------------------------------------------------------------------------- | -------------------------------- |
+| 1   | Fixture: pending ToolPart + review with metadata.command → durable Part lacks input.command (raw-only today)  | metadata-aware single promote    |
+| 2   | Fixture: running structured command, then reviewing update → keep command + set autoReview (regression guard) | keep structured + merge envelope |
+| 3   | TUI equal-v0 raw+autoReview then structured → store has command + autoReview                                  | field enrich                     |
+| 4   | TUI equal-v0 structured then autoReview → store has both                                                      | field enrich                     |
+| 5   | Existing shell progress monotonic tests green                                                                 | no progress rule change          |
 
 ## 17. Chinese Comment Budget
 
-| Metric | Estimate |
-| --- | --- |
-| E | 120–160 |
-| C | ≥ ceil(E × 0.15) ≈ 18–24 |
+| Metric | Estimate                 |
+| ------ | ------------------------ |
+| E      | 120–160                  |
+| C      | ≥ ceil(E × 0.15) ≈ 18–24 |
 
 Comments: pending promote must use fixed command evidence in one write; equal-v0 enrich is not progress `>=`; durable test forces pending-at-review owner path.
 
 ## 18. Verification
 
-| Command | Working directory |
-| --- | --- |
-| `bun test test/permission/reviewer-service.test.ts --test-name-pattern "pending|structured|command|reviewing|autoReview"` | `packages/opencode` |
-| `bun test test/cli/cmd/tui/sync.test.tsx --test-name-pattern "shell progress|auto review|enrich|equal|raw"` | `packages/opencode` |
-| `bun test test/session/prompt.test.ts --test-name-pattern "shell auto review|in-flight shell auto review"` | `packages/opencode` |
-| `bun test test/cli/cmd/tui/session-message-render.test.tsx --test-name-pattern "shell.*auto review"` | `packages/opencode` |
-| `bun typecheck` | `packages/opencode` |
-| `git diff --stat` | repository root |
+| Command                                                                                              | Working directory             |
+| ---------------------------------------------------------------------------------------------------- | ----------------------------- | ------------------- | --------- | ------------ | ------------------- |
+| `bun test test/permission/reviewer-service.test.ts --test-name-pattern "pending                      | structured                    | command             | reviewing | autoReview"` | `packages/opencode` |
+| `bun test test/cli/cmd/tui/sync.test.tsx --test-name-pattern "shell progress                         | auto review                   | enrich              | equal     | raw"`        | `packages/opencode` |
+| `bun test test/session/prompt.test.ts --test-name-pattern "shell auto review                         | in-flight shell auto review"` | `packages/opencode` |
+| `bun test test/cli/cmd/tui/session-message-render.test.tsx --test-name-pattern "shell.*auto review"` | `packages/opencode`           |
+| `bun typecheck`                                                                                      | `packages/opencode`           |
+| `git diff --stat`                                                                                    | repository root               |
 
 ## 19. Diff Budget
 
-| Metric | Estimate |
-| --- | --- |
-| Files modified | 4 |
-| Total lines | ≤250 (≪ 600) |
-| Production | 60–95 |
-| Test | 100–170 |
+| Metric         | Estimate     |
+| -------------- | ------------ |
+| Files modified | 4            |
+| Total lines    | ≤250 (≪ 600) |
+| Production     | 60–95        |
+| Test           | 100–170      |
 
 ## 20. Real Risks and Open Decisions
 
@@ -240,15 +240,15 @@ Independent full-scope audit of this exact revision against the original require
 
 ## 22. Plan Audit Record
 
-| Round | Rev | Full? | Blocking | Result | Ref |
-| --- | --- | --- | --- | --- | --- |
-| 1 | R1 | yes | 中文注释预算排除测试 | BLOCK | ses_0772572… |
-| 2 | R2 | yes | 客户端症状修复未覆盖 durable 整对象覆盖 | BLOCK | ses_07720d22… |
-| 3 | R3 | yes | Pre-ask running 破坏 equal-v0 下 autoReview | BLOCK | ses_07704132… |
-| 4 | R4 | yes | Durable INV 无 red-capable 行为测试 | BLOCK | ses_076f55f88… |
-| 5 | R5 | yes | Durable 红测在常见 tool-call-first 路径上不红 | BLOCK | ses_076e9ec98… |
-| 6 | R6 | yes | Post-write repair 是无独立 producer 条件的第二成功写 | BLOCK | ses_076e01479… |
-| 7 | R7 | yes | No blocking findings | APPROVE | ses_076d6b1b0ffeKNM8og0479bRek |
+| Round | Rev | Full? | Blocking                                             | Result  | Ref                            |
+| ----- | --- | ----- | ---------------------------------------------------- | ------- | ------------------------------ |
+| 1     | R1  | yes   | 中文注释预算排除测试                                 | BLOCK   | ses_0772572…                   |
+| 2     | R2  | yes   | 客户端症状修复未覆盖 durable 整对象覆盖              | BLOCK   | ses_07720d22…                  |
+| 3     | R3  | yes   | Pre-ask running 破坏 equal-v0 下 autoReview          | BLOCK   | ses_07704132…                  |
+| 4     | R4  | yes   | Durable INV 无 red-capable 行为测试                  | BLOCK   | ses_076f55f88…                 |
+| 5     | R5  | yes   | Durable 红测在常见 tool-call-first 路径上不红        | BLOCK   | ses_076e9ec98…                 |
+| 6     | R6  | yes   | Post-write repair 是无独立 producer 条件的第二成功写 | BLOCK   | ses_076e01479…                 |
+| 7     | R7  | yes   | No blocking findings                                 | APPROVE | ses_076d6b1b0ffeKNM8og0479bRek |
 
 ### Round 7 Auditor Verdict (Verbatim)
 
@@ -271,24 +271,24 @@ Audited artifact: `docs/plans/shell-auto-review-input-visibility.md` Revision **
 
 ### Actual Files and Diff
 
-| File | Role |
-| --- | --- |
-| `packages/opencode/src/permission/reviewer/service.ts` | Single-write structured promote from latest Part / metadata.command |
-| `packages/opencode/src/cli/cmd/tui/context/sync.tsx` | Equal-v0 bash field enrich for input/autoReview/title |
-| `packages/opencode/test/permission/reviewer-service.test.ts` | Pending-fixture durable reds + structured-keep regression |
-| `packages/opencode/test/cli/cmd/tui/sync.test.tsx` | Equal-v0 live enrich reds; shell progress still green |
+| File                                                         | Role                                                                |
+| ------------------------------------------------------------ | ------------------------------------------------------------------- |
+| `packages/opencode/src/permission/reviewer/service.ts`       | Single-write structured promote from latest Part / metadata.command |
+| `packages/opencode/src/cli/cmd/tui/context/sync.tsx`         | Equal-v0 bash field enrich for input/autoReview/title               |
+| `packages/opencode/test/permission/reviewer-service.test.ts` | Pending-fixture durable reds + structured-keep regression           |
+| `packages/opencode/test/cli/cmd/tui/sync.test.tsx`           | Equal-v0 live enrich reds; shell progress still green               |
 
 Diff (code only): 4 files, ~351 insertions / 4 deletions (≪ 600 lines).
 
 ### Red-Green Test Evidence
 
-| Test | Result |
-| --- | --- |
-| `promotes pending parent ToolPart using metadata.command as structured input` | green after fix |
-| `keeps structured running input when merging autoReview status` | green |
+| Test                                                                            | Result          |
+| ------------------------------------------------------------------------------- | --------------- |
+| `promotes pending parent ToolPart using metadata.command as structured input`   | green after fix |
+| `keeps structured running input when merging autoReview status`                 | green           |
 | `enriches equal-v0 bash running from raw-only autoReview to structured command` | green after fix |
 | `enriches equal-v0 bash running autoReview without dropping structured command` | green after fix |
-| existing shell progress / Shell auto-review prompt / render suites | green |
+| existing shell progress / Shell auto-review prompt / render suites              | green           |
 
 ### Verification Commands and Results
 
@@ -308,20 +308,20 @@ Pending-at-review durable path and equal-v0 live path both assert structured `co
 
 ### Actual Secondary and Replacement Path Inventory
 
-| Path | Classification |
-| --- | --- |
-| metadata.command single promote | primary |
-| equal-v0 field enrich | primary-contract branch |
-| residual raw-only when no command metadata | last-resort display |
+| Path                                       | Classification          |
+| ------------------------------------------ | ----------------------- |
+| metadata.command single promote            | primary                 |
+| equal-v0 field enrich                      | primary-contract branch |
+| residual raw-only when no command metadata | last-resort display     |
 
 ### Chinese Comment Calculation
 
-| Metric | Actual | Notes |
-| --- | --- | --- |
-| E | 311 | Independent auditor recount of substantive non-blank prod+test lines |
-| C | 50 | Qualifying adjacent Chinese explanations |
-| Ratio | 0.161 | ≥ 0.15 |
-| Required min C | 47 | ceil(311×0.15) |
+| Metric         | Actual | Notes                                                                |
+| -------------- | ------ | -------------------------------------------------------------------- |
+| E              | 311    | Independent auditor recount of substantive non-blank prod+test lines |
+| C              | 50     | Qualifying adjacent Chinese explanations                             |
+| Ratio          | 0.161  | ≥ 0.15                                                               |
+| Required min C | 47     | ceil(311×0.15)                                                       |
 
 ### Remaining Unverified Items
 
@@ -329,11 +329,11 @@ Pending-at-review durable path and equal-v0 live path both assert structured `co
 
 ## 24. Implementation Audit Record
 
-| Round | Plan revision | Full original scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | R7 | yes | B-01 Chinese comment gate E=311 C=23 need≥47 | INV-02 red weak; §23 metrics wrong | BLOCK | ses_076c4105effe… |
-| 2 | R7 | yes | B-01 C_qualifying=45 need≥47 | INV-02 weak; sleep(30); app residual | BLOCK | ses_076bd9e08ffe… |
-| 3 | R7 | yes | No blocking findings | INV-02 weak red; sleep(30); app residual; auditor did not re-exec bun | APPROVE | ses_076b76426ffeca7dZBw1U32deq |
+| Round | Plan revision | Full original scope? | Blocking findings                            | Non-blocking findings                                                 | Result  | Invocation reference           |
+| ----- | ------------- | -------------------- | -------------------------------------------- | --------------------------------------------------------------------- | ------- | ------------------------------ |
+| 1     | R7            | yes                  | B-01 Chinese comment gate E=311 C=23 need≥47 | INV-02 red weak; §23 metrics wrong                                    | BLOCK   | ses_076c4105effe…              |
+| 2     | R7            | yes                  | B-01 C_qualifying=45 need≥47                 | INV-02 weak; sleep(30); app residual                                  | BLOCK   | ses_076bd9e08ffe…              |
+| 3     | R7            | yes                  | No blocking findings                         | INV-02 weak red; sleep(30); app residual; auditor did not re-exec bun | APPROVE | ses_076b76426ffeca7dZBw1U32deq |
 
 ### Implementation Audit Round 3 Verdict (Verbatim)
 

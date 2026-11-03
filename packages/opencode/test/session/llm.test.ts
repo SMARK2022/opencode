@@ -769,7 +769,7 @@ function createEventResponse(chunks: unknown[], includeDone = false) {
   })
 }
 
-  // #240：心跳注释块是合法 SSE 帧但非模型输出——首块计数为 1 后永久停滞
+// #240：心跳注释块是合法 SSE 帧但非模型输出——首块计数为 1 后永久停滞
 function createStalledEventResponse() {
   const encoder = new TextEncoder()
   return new Response(
@@ -785,7 +785,7 @@ function createStalledEventResponse() {
   )
 }
 
-  // #240：真实 Logger 捕获而非 console 替换——bridge fork 的日志继承测试环境
+// #240：真实 Logger 捕获而非 console 替换——bridge fork 的日志继承测试环境
 function withProviderLogs<A, E, R>(fn: (logs: Record<string, unknown>[]) => Effect.Effect<A, E, R>) {
   return Effect.suspend(() => {
     // 每次执行独立收集，不替换全局 console，也不依赖文件 logger 的批量刷盘时序。
@@ -801,9 +801,11 @@ function withProviderLogs<A, E, R>(fn: (logs: Record<string, unknown>[]) => Effe
   })
 }
 
-  // #240：phase+requestID 双键过滤——只保留 fetch/SSE 里程碑，排除其他日志噪音
+// #240：phase+requestID 双键过滤——只保留 fetch/SSE 里程碑，排除其他日志噪音
 function providerFetchEvents(lines: Record<string, unknown>[]) {
-  return lines.filter((line) => "phase" in line && "requestID" in line).map((line) => Object.fromEntries(Object.entries(line).map(([key, value]) => [key, String(value)])))
+  return lines
+    .filter((line) => "phase" in line && "requestID" in line)
+    .map((line) => Object.fromEntries(Object.entries(line).map(([key, value]) => [key, String(value)])))
 }
 
 describe("session.llm.stream", () => {
@@ -813,7 +815,11 @@ describe("session.llm.stream", () => {
   // #168：线上抓取 User-Agent，锁定 headers 与 header-ua 两条配置路径
   // #168：集成测覆盖 openai-compatible 线上头，防止只测纯函数
   for (const item of [
-    { name: "options.headers.User-Agent", options: { headers: { "User-Agent": "codex_cli_rs/0.2333" } }, id: "daxiao-codex-headers" },
+    {
+      name: "options.headers.User-Agent",
+      options: { headers: { "User-Agent": "codex_cli_rs/0.2333" } },
+      id: "daxiao-codex-headers",
+    },
     { name: "options.header-ua", options: { "header-ua": "codex_cli_rs/0.2333" }, id: "daxiao-codex-shortcut" },
   ] as const) {
     it.instance(
@@ -886,66 +892,67 @@ describe("session.llm.stream", () => {
     )
   }
 
-
   // [local-smark] 默认超时回退验证：未配置 timeout/chunkTimeout 时回退 600000/180000。
   // 快路径流式毫秒级完成不会真正触发死线，通过 fetch.start 日志字段断言默认值；
   // 同时断言 sse.end 出现，证明默认 chunk 超时已启用 wrapSSE（此前未配置时不启用）。
   it.instance(
     "times out before delayed provider headers at the configured chunk boundary",
     () =>
-      withProviderLogs((logs) => Effect.gen(function* () {
-        const providerID = "delayed-header-openai-compatible"
-        const responseReady = deferred<void>()
-        const requestAborted = deferred<void>()
-        let events: ReturnType<typeof providerFetchEvents> = []
-        const request = waitRequest("/chat/completions", async (req) => {
-          // 请求已到达但 headers 延迟 100ms；这与"工具完成后首个 chunk 长时间静默"的边界一致。
-          // abort listener 必须挂在同一个 Request.signal 上，才能证明 Provider deadline 到达了真实 transport。
-          req.signal.addEventListener("abort", () => requestAborted.resolve(), { once: true })
-          await new Promise((resolve) => setTimeout(resolve, 100))
-          responseReady.resolve()
-          return new Response(createChatStream("late"), {
-            status: 200,
-            headers: { "Content-Type": "text/event-stream" },
+      withProviderLogs((logs) =>
+        Effect.gen(function* () {
+          const providerID = "delayed-header-openai-compatible"
+          const responseReady = deferred<void>()
+          const requestAborted = deferred<void>()
+          let events: ReturnType<typeof providerFetchEvents> = []
+          const request = waitRequest("/chat/completions", async (req) => {
+            // 请求已到达但 headers 延迟 100ms；这与"工具完成后首个 chunk 长时间静默"的边界一致。
+            // abort listener 必须挂在同一个 Request.signal 上，才能证明 Provider deadline 到达了真实 transport。
+            req.signal.addEventListener("abort", () => requestAborted.resolve(), { once: true })
+            await new Promise((resolve) => setTimeout(resolve, 100))
+            responseReady.resolve()
+            return new Response(createChatStream("late"), {
+              status: 200,
+              headers: { "Content-Type": "text/event-stream" },
+            })
           })
-        })
-        const resolved = yield* Provider.use.getModel(ProviderV2.ID.make(providerID), ModelV2.ID.make("gpt-test"))
-        const sessionID = SessionID.make("session-provider-delayed-header")
-        const agent = {
-          name: "test",
-          mode: "primary",
-          options: {},
-          permission: [{ permission: "*", pattern: "*", action: "allow" }],
-        } satisfies Agent.Info
-        const user = {
-          id: MessageID.make("msg_user-provider-delayed-header"),
-          sessionID,
-          role: "user",
-          time: { created: Date.now() },
-          agent: agent.name,
-          model: { providerID: ProviderV2.ID.make(providerID), modelID: resolved.id },
-        } satisfies SessionV1.User
-        // deadline 在 header 等待期到达时 drain 以 SSE_READ_TIMEOUT 失败——用 Exit 承接，不污染测试错误通道。
-        const exit = yield* drain({
-          user,
-          sessionID,
-          model: resolved,
-          agent,
-          system: ["You are a helpful assistant."],
-          messages: [{ role: "user", content: "Hello" }],
-          tools: {},
-        }).pipe(Effect.exit)
-        expect(Exit.isFailure(exit)).toBe(true)
-        yield* Effect.promise(() => Promise.allSettled([request, responseReady.promise, requestAborted.promise]))
-        events = providerFetchEvents(logs)
-        // 首个 raw chunk 尚未到达时也必须记录同一个 no-progress 失败，不能退回 Bun 的五分钟 idle timeout。
-        expect(events.map((event) => event.phase)).toContain("sse.timeout")
-        // chunkCount=0 区分 headers 前超时与首 chunk 后 stall；chunkTimeoutMs 断言配置 provenance。
-        expect(events.find((event) => event.phase === "sse.timeout")?.chunkCount).toBe("0")
-        expect(events.find((event) => event.phase === "sse.timeout")?.chunkTimeoutMs).toBe("25")
-        // abort 必须传播到真实 transport（server handler 的 abort listener 已被触发）。
-        expect(requestAborted).toBeDefined()
-      })),
+          const resolved = yield* Provider.use.getModel(ProviderV2.ID.make(providerID), ModelV2.ID.make("gpt-test"))
+          const sessionID = SessionID.make("session-provider-delayed-header")
+          const agent = {
+            name: "test",
+            mode: "primary",
+            options: {},
+            permission: [{ permission: "*", pattern: "*", action: "allow" }],
+          } satisfies Agent.Info
+          const user = {
+            id: MessageID.make("msg_user-provider-delayed-header"),
+            sessionID,
+            role: "user",
+            time: { created: Date.now() },
+            agent: agent.name,
+            model: { providerID: ProviderV2.ID.make(providerID), modelID: resolved.id },
+          } satisfies SessionV1.User
+          // deadline 在 header 等待期到达时 drain 以 SSE_READ_TIMEOUT 失败——用 Exit 承接，不污染测试错误通道。
+          const exit = yield* drain({
+            user,
+            sessionID,
+            model: resolved,
+            agent,
+            system: ["You are a helpful assistant."],
+            messages: [{ role: "user", content: "Hello" }],
+            tools: {},
+          }).pipe(Effect.exit)
+          expect(Exit.isFailure(exit)).toBe(true)
+          yield* Effect.promise(() => Promise.allSettled([request, responseReady.promise, requestAborted.promise]))
+          events = providerFetchEvents(logs)
+          // 首个 raw chunk 尚未到达时也必须记录同一个 no-progress 失败，不能退回 Bun 的五分钟 idle timeout。
+          expect(events.map((event) => event.phase)).toContain("sse.timeout")
+          // chunkCount=0 区分 headers 前超时与首 chunk 后 stall；chunkTimeoutMs 断言配置 provenance。
+          expect(events.find((event) => event.phase === "sse.timeout")?.chunkCount).toBe("0")
+          expect(events.find((event) => event.phase === "sse.timeout")?.chunkTimeoutMs).toBe("25")
+          // abort 必须传播到真实 transport（server handler 的 abort listener 已被触发）。
+          expect(requestAborted).toBeDefined()
+        }),
+      ),
     {
       config: () => ({
         enabled_providers: ["delayed-header-openai-compatible"],
@@ -964,97 +971,102 @@ describe("session.llm.stream", () => {
   it.instance(
     "bounds stream error logs without changing the failure cause",
     () =>
-      withProviderLogs((logs) => Effect.gen(function* () {
-        const requestMarker = "REQUEST_BODY_SECRET_MARKER_7f5c"
-        const request = waitRequest(
-          "/chat/completions",
-          new Response(JSON.stringify({ error: { message: requestMarker + "R".repeat(12_000) } }), {
-            status: 500,
-            headers: { "Content-Type": "application/json" },
-          }),
-        )
+      withProviderLogs((logs) =>
+        Effect.gen(function* () {
+          const requestMarker = "REQUEST_BODY_SECRET_MARKER_7f5c"
+          const request = waitRequest(
+            "/chat/completions",
+            new Response(JSON.stringify({ error: { message: requestMarker + "R".repeat(12_000) } }), {
+              status: 500,
+              headers: { "Content-Type": "application/json" },
+            }),
+          )
 
-        const resolved = yield* Provider.use.getModel(
-          ProviderV2.ID.make("bounded-error-compatible"),
-          ModelV2.ID.make("gpt-test"),
-        )
-        // 超长合法标识走截断路径：agent/sessionID 无 schema 上限，provider/model 由注册表绑定只能短值。
-        const sessionID = SessionID.make("ses" + "s".repeat(3_000))
-        const agent = {
-          name: "a".repeat(3_000),
-          mode: "primary",
-          options: {},
-          permission: [{ permission: "*", pattern: "*", action: "allow" }],
-        } satisfies Agent.Info
+          const resolved = yield* Provider.use.getModel(
+            ProviderV2.ID.make("bounded-error-compatible"),
+            ModelV2.ID.make("gpt-test"),
+          )
+          // 超长合法标识走截断路径：agent/sessionID 无 schema 上限，provider/model 由注册表绑定只能短值。
+          const sessionID = SessionID.make("ses" + "s".repeat(3_000))
+          const agent = {
+            name: "a".repeat(3_000),
+            mode: "primary",
+            options: {},
+            permission: [{ permission: "*", pattern: "*", action: "allow" }],
+          } satisfies Agent.Info
 
-        // 目标 HTTP 500 从 Effect failure 通道返回，不能为匹配旧事件断言改写生产语义。
-        // 诊断仅脱敏日志；交给 processor 的原始错误必须保持请求与响应信息。
-        const exit = yield* LLM.Service.use((svc) =>
-          svc
-            .stream({
-              user: {
-                id: MessageID.make("msg-bounded-stream-error"),
-                sessionID,
-                role: "user",
-                time: { created: Date.now() },
-                agent: agent.name,
-                model: {
-                  providerID: ProviderV2.ID.make("bounded-error-compatible"),
-                  modelID: resolved.id,
+          // 目标 HTTP 500 从 Effect failure 通道返回，不能为匹配旧事件断言改写生产语义。
+          // 诊断仅脱敏日志；交给 processor 的原始错误必须保持请求与响应信息。
+          const exit = yield* LLM.Service.use((svc) =>
+            svc
+              .stream({
+                user: {
+                  id: MessageID.make("msg-bounded-stream-error"),
+                  sessionID,
+                  role: "user",
+                  time: { created: Date.now() },
+                  agent: agent.name,
+                  model: {
+                    providerID: ProviderV2.ID.make("bounded-error-compatible"),
+                    modelID: resolved.id,
+                  },
                 },
-              },
-              sessionID,
-              model: resolved,
-              agent,
-              system: ["You are a helpful assistant."],
-              messages: [{ role: "user", content: requestMarker + "X".repeat(64_000) }],
-              tools: {},
-            })
-            .pipe(Stream.runCollect, Effect.map((chunk) => [...chunk])),
-        ).pipe(Effect.exit)
-        expect(Exit.isFailure(exit)).toBe(true)
-        if (Exit.isSuccess(exit)) throw new Error("Provider failure was not preserved")
-        const failure = Cause.squash(exit.cause)
-        expect(APICallError.isInstance(failure)).toBe(true)
-        expect(JSON.stringify(failure)).toContain("requestBodyValues")
-        expect(JSON.stringify(failure)).toContain(requestMarker)
+                sessionID,
+                model: resolved,
+                agent,
+                system: ["You are a helpful assistant."],
+                messages: [{ role: "user", content: requestMarker + "X".repeat(64_000) }],
+                tools: {},
+              })
+              .pipe(
+                Stream.runCollect,
+                Effect.map((chunk) => [...chunk]),
+              ),
+          ).pipe(Effect.exit)
+          expect(Exit.isFailure(exit)).toBe(true)
+          if (Exit.isSuccess(exit)) throw new Error("Provider failure was not preserved")
+          const failure = Cause.squash(exit.cause)
+          expect(APICallError.isInstance(failure)).toBe(true)
+          expect(JSON.stringify(failure)).toContain("requestBodyValues")
+          expect(JSON.stringify(failure)).toContain(requestMarker)
 
-        yield* Effect.promise(() => request)
-        // 检查实际 onError 日志，而不只测试独立 summary 函数。
-        const logged = logs.find((entry) => "error" in entry)
-        expect(logged?.error).toEqual(expect.objectContaining({ name: "APICallError", statusCode: 500 }))
-        expect(JSON.stringify(logged)).not.toContain(requestMarker)
-        expect(JSON.stringify(logged)).not.toContain("requestBodyValues")
+          yield* Effect.promise(() => request)
+          // 检查实际 onError 日志，而不只测试独立 summary 函数。
+          const logged = logs.find((entry) => "error" in entry)
+          expect(logged?.error).toEqual(expect.objectContaining({ name: "APICallError", statusCode: 500 }))
+          expect(JSON.stringify(logged)).not.toContain(requestMarker)
+          expect(JSON.stringify(logged)).not.toContain("requestBodyValues")
 
-        // 超长标识必须被 utf8Prefix 截断：任何日志条目内不允许出现 129+ 连续同字符 run，
-        // 移除 stream/onError 站点预算会让原始 3000 字符标识原样落盘而失败。
-        const streamEntry = logs.find((entry) => !("error" in entry))
-        expect(JSON.stringify(streamEntry)).not.toContain("a".repeat(129))
-        expect(JSON.stringify(streamEntry)).not.toContain("s".repeat(129))
-        expect(JSON.stringify(logged)).not.toContain("a".repeat(129))
-        expect(JSON.stringify(logged)).not.toContain("s".repeat(129))
+          // 超长标识必须被 utf8Prefix 截断：任何日志条目内不允许出现 129+ 连续同字符 run，
+          // 移除 stream/onError 站点预算会让原始 3000 字符标识原样落盘而失败。
+          const streamEntry = logs.find((entry) => !("error" in entry))
+          expect(JSON.stringify(streamEntry)).not.toContain("a".repeat(129))
+          expect(JSON.stringify(streamEntry)).not.toContain("s".repeat(129))
+          expect(JSON.stringify(logged)).not.toContain("a".repeat(129))
+          expect(JSON.stringify(logged)).not.toContain("s".repeat(129))
 
-        // 日志侧净化合同：进入 Effect.logError 的唯一 error 形态是 streamErrorSummary；
-        // provider-controlled message/URL/body 都不得出现在返回结构里，
-        // responseBytes 只暴露长度不暴露内容。
-        const raw = new APICallError({
-          message: requestMarker,
-          url: "http://bounded.test/v1/chat",
-          requestBodyValues: { body: requestMarker },
-          responseBody: requestMarker + "R".repeat(12_000),
-          statusCode: 500,
-          isRetryable: false,
-          // 当前 ai 包版本的 APICallError 构造不含 isRetryableByUsageLimit，省略。
-        })
-        const summary = streamErrorSummary(raw)
-        expect(summary.name).toBe("APICallError")
-        expect(JSON.stringify(summary)).not.toContain(requestMarker)
-        expect(JSON.stringify(summary)).not.toContain("http://bounded.test")
-        expect(summary.statusCode).toBe(500)
-        expect(summary.isRetryable).toBe(false)
-        expect(summary.responseBytes).toBeGreaterThan(12_000)
-        expect(streamErrorSummary(new Error("plain")).name).toBe("UnknownError")
-      })),
+          // 日志侧净化合同：进入 Effect.logError 的唯一 error 形态是 streamErrorSummary；
+          // provider-controlled message/URL/body 都不得出现在返回结构里，
+          // responseBytes 只暴露长度不暴露内容。
+          const raw = new APICallError({
+            message: requestMarker,
+            url: "http://bounded.test/v1/chat",
+            requestBodyValues: { body: requestMarker },
+            responseBody: requestMarker + "R".repeat(12_000),
+            statusCode: 500,
+            isRetryable: false,
+            // 当前 ai 包版本的 APICallError 构造不含 isRetryableByUsageLimit，省略。
+          })
+          const summary = streamErrorSummary(raw)
+          expect(summary.name).toBe("APICallError")
+          expect(JSON.stringify(summary)).not.toContain(requestMarker)
+          expect(JSON.stringify(summary)).not.toContain("http://bounded.test")
+          expect(summary.statusCode).toBe(500)
+          expect(summary.isRetryable).toBe(false)
+          expect(summary.responseBytes).toBeGreaterThan(12_000)
+          expect(streamErrorSummary(new Error("plain")).name).toBe("UnknownError")
+        }),
+      ),
     {
       config: () => ({
         enabled_providers: ["bounded-error-compatible"],
@@ -1082,49 +1094,59 @@ describe("session.llm.stream", () => {
   it.instance(
     "applies default overall and chunk timeouts when neither is configured",
     () =>
-      withProviderLogs((logs) => Effect.gen(function* () {
-        const request = waitRequest(
-          "/chat/completions",
-          new Response(createChatStream("Hello"), {
-            status: 200,
-            headers: { "Content-Type": "text/event-stream" },
-          }),
-        )
-        const resolved = yield* Provider.use.getModel(ProviderV2.ID.make("default-timeout-openai-compatible"), ModelV2.ID.make("gpt-test"))
-        const sessionID = SessionID.make("session-provider-default-timeout")
-        const agent = {
-          name: "test",
-          mode: "primary",
-          options: {},
-          permission: [{ permission: "*", pattern: "*", action: "allow" }],
-        } satisfies Agent.Info
-        const user = {
-          id: MessageID.make("msg_user-provider-default-timeout"),
-          sessionID,
-          role: "user",
-          time: { created: Date.now() },
-          agent: agent.name,
-          model: { providerID: ProviderV2.ID.make("default-timeout-openai-compatible"), modelID: resolved.id },
-        } satisfies SessionV1.User
-        // drain 走真实 provider→custom fetch→wrapSSE 链路（非 mock），SSE 里程碑能反映默认配置是否生效
-        yield* drain({
-          user,
-          sessionID,
-          model: resolved,
-          agent,
-          system: ["You are a helpful assistant."],
-          messages: [{ role: "user", content: "Hello" }],
-          tools: {},
-        })
-        yield* Effect.promise(() => request)
-        const events = providerFetchEvents(logs)
-        // 默认 chunk 超时启用 wrapSSE，完整 SSE 里程碑都会出现
-        expect(events.map((event) => event.phase)).toEqual(["fetch.start", "fetch.response", "sse.first_chunk", "sse.end"])
-        // 默认整请求绝对超时 10 分钟（从请求发起计时的硬死线）
-        expect(events.find((event) => event.phase === "fetch.start")?.timeoutMs).toBe("600000")
-        // 默认 chunk 空闲超时 3 分钟（两个 SSE 字节之间无数据才触发）
-        expect(events.find((event) => event.phase === "fetch.start")?.chunkTimeoutMs).toBe("180000")
-      })),
+      withProviderLogs((logs) =>
+        Effect.gen(function* () {
+          const request = waitRequest(
+            "/chat/completions",
+            new Response(createChatStream("Hello"), {
+              status: 200,
+              headers: { "Content-Type": "text/event-stream" },
+            }),
+          )
+          const resolved = yield* Provider.use.getModel(
+            ProviderV2.ID.make("default-timeout-openai-compatible"),
+            ModelV2.ID.make("gpt-test"),
+          )
+          const sessionID = SessionID.make("session-provider-default-timeout")
+          const agent = {
+            name: "test",
+            mode: "primary",
+            options: {},
+            permission: [{ permission: "*", pattern: "*", action: "allow" }],
+          } satisfies Agent.Info
+          const user = {
+            id: MessageID.make("msg_user-provider-default-timeout"),
+            sessionID,
+            role: "user",
+            time: { created: Date.now() },
+            agent: agent.name,
+            model: { providerID: ProviderV2.ID.make("default-timeout-openai-compatible"), modelID: resolved.id },
+          } satisfies SessionV1.User
+          // drain 走真实 provider→custom fetch→wrapSSE 链路（非 mock），SSE 里程碑能反映默认配置是否生效
+          yield* drain({
+            user,
+            sessionID,
+            model: resolved,
+            agent,
+            system: ["You are a helpful assistant."],
+            messages: [{ role: "user", content: "Hello" }],
+            tools: {},
+          })
+          yield* Effect.promise(() => request)
+          const events = providerFetchEvents(logs)
+          // 默认 chunk 超时启用 wrapSSE，完整 SSE 里程碑都会出现
+          expect(events.map((event) => event.phase)).toEqual([
+            "fetch.start",
+            "fetch.response",
+            "sse.first_chunk",
+            "sse.end",
+          ])
+          // 默认整请求绝对超时 10 分钟（从请求发起计时的硬死线）
+          expect(events.find((event) => event.phase === "fetch.start")?.timeoutMs).toBe("600000")
+          // 默认 chunk 空闲超时 3 分钟（两个 SSE 字节之间无数据才触发）
+          expect(events.find((event) => event.phase === "fetch.start")?.chunkTimeoutMs).toBe("180000")
+        }),
+      ),
     {
       config: () => ({
         enabled_providers: ["default-timeout-openai-compatible"],
@@ -1150,52 +1172,62 @@ describe("session.llm.stream", () => {
   it.instance(
     "logs provider response and first raw SSE chunk when chunk timeout is enabled",
     () =>
-      withProviderLogs((logs) => Effect.gen(function* () {
-        const request = waitRequest(
-          "/chat/completions",
-          // 总流时长(20 块×20ms)超过 50ms 窗口而每块间隙小于窗口——锁定「不累计、每块重置」
-          new Response(createChatStream("Hello", 20), {
-            status: 200,
-            headers: { "Content-Type": "text/event-stream" },
-          }),
-        )
+      withProviderLogs((logs) =>
+        Effect.gen(function* () {
+          const request = waitRequest(
+            "/chat/completions",
+            // 总流时长(20 块×20ms)超过 50ms 窗口而每块间隙小于窗口——锁定「不累计、每块重置」
+            new Response(createChatStream("Hello", 20), {
+              status: 200,
+              headers: { "Content-Type": "text/event-stream" },
+            }),
+          )
 
-        const resolved = yield* Provider.use.getModel(ProviderV2.ID.make("timed-openai-compatible"), ModelV2.ID.make("gpt-test"))
-        const sessionID = SessionID.make("session-provider-fetch-timing")
-        const agent = {
-          name: "test",
-          mode: "primary",
-          options: {},
-          permission: [{ permission: "*", pattern: "*", action: "allow" }],
-        } satisfies Agent.Info
-        const user = {
-          id: MessageID.make("msg_user-provider-fetch-timing"),
-          sessionID,
-          role: "user",
-          time: { created: Date.now() },
-          agent: agent.name,
-          model: { providerID: ProviderV2.ID.make("timed-openai-compatible"), modelID: resolved.id },
-        } satisfies SessionV1.User
+          const resolved = yield* Provider.use.getModel(
+            ProviderV2.ID.make("timed-openai-compatible"),
+            ModelV2.ID.make("gpt-test"),
+          )
+          const sessionID = SessionID.make("session-provider-fetch-timing")
+          const agent = {
+            name: "test",
+            mode: "primary",
+            options: {},
+            permission: [{ permission: "*", pattern: "*", action: "allow" }],
+          } satisfies Agent.Info
+          const user = {
+            id: MessageID.make("msg_user-provider-fetch-timing"),
+            sessionID,
+            role: "user",
+            time: { created: Date.now() },
+            agent: agent.name,
+            model: { providerID: ProviderV2.ID.make("timed-openai-compatible"), modelID: resolved.id },
+          } satisfies SessionV1.User
 
-        // #240：drain 走完整 LLM Service 流——诊断断言覆盖真实消费链路而非纯函数调用
-        yield* drain({
-          user,
-          sessionID,
-          model: resolved,
-          agent,
-          system: ["You are a helpful assistant."],
-          messages: [{ role: "user", content: "Hello" }],
-          tools: {},
-        })
-        yield* Effect.promise(() => request)
+          // #240：drain 走完整 LLM Service 流——诊断断言覆盖真实消费链路而非纯函数调用
+          yield* drain({
+            user,
+            sessionID,
+            model: resolved,
+            agent,
+            system: ["You are a helpful assistant."],
+            messages: [{ role: "user", content: "Hello" }],
+            tools: {},
+          })
+          yield* Effect.promise(() => request)
 
-        const events = providerFetchEvents(logs)
-        expect(events.map((event) => event.phase)).toEqual(["fetch.start", "fetch.response", "sse.first_chunk", "sse.end"])
-        expect(events.find((event) => event.phase === "fetch.response")?.status).toBe("200")
-        expect(events.find((event) => event.phase === "fetch.response")?.isSSE).toBe("true")
-        expect(Number(events.find((event) => event.phase === "sse.first_chunk")?.bytes)).toBeGreaterThan(0)
-        expect(Number(events.find((event) => event.phase === "sse.end")?.chunkCount)).toBeGreaterThan(0)
-      })),
+          const events = providerFetchEvents(logs)
+          expect(events.map((event) => event.phase)).toEqual([
+            "fetch.start",
+            "fetch.response",
+            "sse.first_chunk",
+            "sse.end",
+          ])
+          expect(events.find((event) => event.phase === "fetch.response")?.status).toBe("200")
+          expect(events.find((event) => event.phase === "fetch.response")?.isSSE).toBe("true")
+          expect(Number(events.find((event) => event.phase === "sse.first_chunk")?.bytes)).toBeGreaterThan(0)
+          expect(Number(events.find((event) => event.phase === "sse.end")?.chunkCount)).toBeGreaterThan(0)
+        }),
+      ),
     {
       config: () => ({
         enabled_providers: ["timed-openai-compatible"],
@@ -1217,56 +1249,60 @@ describe("session.llm.stream", () => {
     },
   )
 
-
   // #240：SSE 首块后停滞必须触发 sse.timeout 诊断——wrapSSE 超时分支的唯一回归覆盖。
   // #240：createStalledEventResponse 只发一个心跳注释块后不再 enqueue，模拟真实停滞流。
   it.instance(
     "logs SSE timeout when a streaming response stalls after the first raw chunk",
     () =>
-      withProviderLogs((logs) => Effect.gen(function* () {
-        // #240：waitRequest 锁定 HTTP 服务端响应——断言与请求落点同源
-        const request = waitRequest("/chat/completions", createStalledEventResponse())
+      withProviderLogs((logs) =>
+        Effect.gen(function* () {
+          // #240：waitRequest 锁定 HTTP 服务端响应——断言与请求落点同源
+          const request = waitRequest("/chat/completions", createStalledEventResponse())
 
-        // #240：模型经真实 Provider 解析——诊断链随真实 getModel 路径走，不做 model stub
-        const resolved = yield* Provider.use.getModel(ProviderV2.ID.make("stalled-openai-compatible"), ModelV2.ID.make("gpt-test"))
-        const sessionID = SessionID.make("session-provider-fetch-timeout")
-        const agent = {
-          name: "test",
-          mode: "primary",
-          options: {},
-          permission: [{ permission: "*", pattern: "*", action: "allow" }],
-        } satisfies Agent.Info
-        const user = {
-          id: MessageID.make("msg_user-provider-fetch-timeout"),
-          sessionID,
-          role: "user",
-          time: { created: Date.now() },
-          agent: agent.name,
-          model: { providerID: ProviderV2.ID.make("stalled-openai-compatible"), modelID: resolved.id },
-        } satisfies SessionV1.User
+          // #240：模型经真实 Provider 解析——诊断链随真实 getModel 路径走，不做 model stub
+          const resolved = yield* Provider.use.getModel(
+            ProviderV2.ID.make("stalled-openai-compatible"),
+            ModelV2.ID.make("gpt-test"),
+          )
+          const sessionID = SessionID.make("session-provider-fetch-timeout")
+          const agent = {
+            name: "test",
+            mode: "primary",
+            options: {},
+            permission: [{ permission: "*", pattern: "*", action: "allow" }],
+          } satisfies Agent.Info
+          const user = {
+            id: MessageID.make("msg_user-provider-fetch-timeout"),
+            sessionID,
+            role: "user",
+            time: { created: Date.now() },
+            agent: agent.name,
+            model: { providerID: ProviderV2.ID.make("stalled-openai-compatible"), modelID: resolved.id },
+          } satisfies SessionV1.User
 
-        // 停滞流在 chunkTimeout 后以 SSE_READ_TIMEOUT 失败/死亡——exit 统一捕获两种失败形态
-        yield* drain({
-          user,
-          sessionID,
-          model: resolved,
-          agent,
-          system: ["You are a helpful assistant."],
-          messages: [{ role: "user", content: "Hello" }],
-          tools: {},
-        }).pipe(Effect.exit)
-        yield* Effect.promise(() => request)
+          // 停滞流在 chunkTimeout 后以 SSE_READ_TIMEOUT 失败/死亡——exit 统一捕获两种失败形态
+          yield* drain({
+            user,
+            sessionID,
+            model: resolved,
+            agent,
+            system: ["You are a helpful assistant."],
+            messages: [{ role: "user", content: "Hello" }],
+            tools: {},
+          }).pipe(Effect.exit)
+          yield* Effect.promise(() => request)
 
-        const events = providerFetchEvents(logs)
-        expect(events.map((event) => event.phase)).toContain("fetch.response")
-        // #240：sse.timeout 存在性是本测试的判别核心——wrapSSE 超时分支唯一触发路径
-        expect(events.map((event) => event.phase)).toContain("sse.timeout")
-        // 断言字符串值：结构化日志字段统一为字符串序列化形态
-        expect(events.find((event) => event.phase === "sse.timeout")?.chunkCount).toBe("1")
-        // #240：chunkTimeoutMs 回显配置值 25——证明超时来自该 provider 的配置而非默认
-        expect(events.find((event) => event.phase === "sse.timeout")?.chunkTimeoutMs).toBe("1000")
-        expect(Number(events.find((event) => event.phase === "sse.timeout")?.idleMs)).toBeGreaterThanOrEqual(1000)
-      })),
+          const events = providerFetchEvents(logs)
+          expect(events.map((event) => event.phase)).toContain("fetch.response")
+          // #240：sse.timeout 存在性是本测试的判别核心——wrapSSE 超时分支唯一触发路径
+          expect(events.map((event) => event.phase)).toContain("sse.timeout")
+          // 断言字符串值：结构化日志字段统一为字符串序列化形态
+          expect(events.find((event) => event.phase === "sse.timeout")?.chunkCount).toBe("1")
+          // #240：chunkTimeoutMs 回显配置值 25——证明超时来自该 provider 的配置而非默认
+          expect(events.find((event) => event.phase === "sse.timeout")?.chunkTimeoutMs).toBe("1000")
+          expect(Number(events.find((event) => event.phase === "sse.timeout")?.idleMs)).toBeGreaterThanOrEqual(1000)
+        }),
+      ),
     {
       config: () => ({
         enabled_providers: ["stalled-openai-compatible"],
@@ -1299,10 +1335,7 @@ describe("session.llm.stream", () => {
           createEventResponse([{ type: "response.completed" }], true),
         )
 
-        const resolved = yield* Provider.use.getModel(
-          ProviderV2.ID.make("openai-alias-ua"),
-          ModelV2.ID.make("gpt-5.4"),
-        )
+        const resolved = yield* Provider.use.getModel(ProviderV2.ID.make("openai-alias-ua"), ModelV2.ID.make("gpt-5.4"))
         const sessionID = SessionID.make("session-test-openai-alias-ua")
         const agent = {
           name: "test",
@@ -1773,65 +1806,67 @@ describe("session.llm.stream", () => {
   it.instance(
     "service stream cancellation before first progress cancels the deadline promptly",
     () =>
-      withProviderLogs((logs) => Effect.gen(function* () {
-        const fixture = loadFixture(alibabaQwenFixture.providerID, alibabaQwenFixture.modelID)
-        // 延迟首个 raw chunk，确保 user abort 发生在 headers/first-progress deadline 仍在等待时。
-        const pending = waitStreamingRequest("/chat/completions", 100)
+      withProviderLogs((logs) =>
+        Effect.gen(function* () {
+          const fixture = loadFixture(alibabaQwenFixture.providerID, alibabaQwenFixture.modelID)
+          // 延迟首个 raw chunk，确保 user abort 发生在 headers/first-progress deadline 仍在等待时。
+          const pending = waitStreamingRequest("/chat/completions", 100)
 
-        const resolved = yield* Provider.use.getModel(
-          ProviderV2.ID.make(alibabaQwenFixture.providerID),
-          ModelV2.ID.make(fixture.model.id),
-        )
-        const sessionID = SessionID.make("session-test-service-abort")
-        const agent = {
-          name: "test",
-          mode: "primary",
-          options: {},
-          permission: [{ permission: "*", pattern: "*", action: "allow" }],
-        } satisfies Agent.Info
-        const user = {
-          id: MessageID.make("msg_user-service-abort"),
-          sessionID,
-          role: "user",
-          time: { created: Date.now() },
-          agent: agent.name,
-          model: { providerID: ProviderV2.ID.make(alibabaQwenFixture.providerID), modelID: resolved.id },
-        } satisfies SessionV1.User
+          const resolved = yield* Provider.use.getModel(
+            ProviderV2.ID.make(alibabaQwenFixture.providerID),
+            ModelV2.ID.make(fixture.model.id),
+          )
+          const sessionID = SessionID.make("session-test-service-abort")
+          const agent = {
+            name: "test",
+            mode: "primary",
+            options: {},
+            permission: [{ permission: "*", pattern: "*", action: "allow" }],
+          } satisfies Agent.Info
+          const user = {
+            id: MessageID.make("msg_user-service-abort"),
+            sessionID,
+            role: "user",
+            time: { created: Date.now() },
+            agent: agent.name,
+            model: { providerID: ProviderV2.ID.make(alibabaQwenFixture.providerID), modelID: resolved.id },
+          } satisfies SessionV1.User
 
-        const fiber = yield* drain({
-          user,
-          sessionID,
-          model: resolved,
-          agent,
-          system: ["You are a helpful assistant."],
-          messages: [{ role: "user", content: "Hello" }],
-          tools: {},
-        }).pipe(Effect.exit, Effect.forkScoped)
+          const fiber = yield* drain({
+            user,
+            sessionID,
+            model: resolved,
+            agent,
+            system: ["You are a helpful assistant."],
+            messages: [{ role: "user", content: "Hello" }],
+            tools: {},
+          }).pipe(Effect.exit, Effect.forkScoped)
 
-        yield* Effect.promise(() => pending.request)
-        yield* Fiber.interrupt(fiber)
+          yield* Effect.promise(() => pending.request)
+          yield* Fiber.interrupt(fiber)
 
-        yield* Effect.promise(() => Promise.race([pending.responseCanceled, timeout(500)]))
-        const exit = yield* Fiber.await(fiber)
-        // Fiber.await returns an Exit<Exit<...>>. Unwrap once.
-        const inner = Exit.isSuccess(exit) ? exit.value : exit
-        expect(Exit.isFailure(inner)).toBe(true)
-        if (Exit.isFailure(inner)) {
-          expect(Cause.hasInterrupts(inner.cause)).toBe(true)
-        }
-        yield* Effect.promise(() => Promise.race([pending.requestAborted, timeout(500)]).catch(() => undefined))
-        // 等待一个完整 chunkTimeout 周期：若 cancel 未停止 deadline，25ms 定时器此刻必已触发，负断言才有区分力
-        yield* Effect.sleep(100)
-        const events = providerFetchEvents(logs)
-        // 取消先于 chunkTimeout(25ms) 到达：deadline 不得发出 sse.timeout（否则取消不够 prompt）。
-        expect(events.map((event) => event.phase)).not.toContain("sse.timeout")
-      })),
+          yield* Effect.promise(() => Promise.race([pending.responseCanceled, timeout(500)]))
+          const exit = yield* Fiber.await(fiber)
+          // Fiber.await returns an Exit<Exit<...>>. Unwrap once.
+          const inner = Exit.isSuccess(exit) ? exit.value : exit
+          expect(Exit.isFailure(inner)).toBe(true)
+          if (Exit.isFailure(inner)) {
+            expect(Cause.hasInterrupts(inner.cause)).toBe(true)
+          }
+          yield* Effect.promise(() => Promise.race([pending.requestAborted, timeout(500)]).catch(() => undefined))
+          // 等待一个完整 chunkTimeout 周期：若 cancel 未停止 deadline，25ms 定时器此刻必已触发，负断言才有区分力
+          yield* Effect.sleep(100)
+          const events = providerFetchEvents(logs)
+          // 取消先于 chunkTimeout(25ms) 到达：deadline 不得发出 sse.timeout（否则取消不够 prompt）。
+          expect(events.map((event) => event.phase)).not.toContain("sse.timeout")
+        }),
+      ),
     {
       config: () => ({
         enabled_providers: [alibabaQwenFixture.providerID],
         provider: {
           [alibabaQwenFixture.providerID]: {
-            options: { apiKey: "test-key", baseURL: `${state.server!.url.origin}/v1` , chunkTimeout: 25 },
+            options: { apiKey: "test-key", baseURL: `${state.server!.url.origin}/v1`, chunkTimeout: 25 },
           },
         },
       }),
@@ -1910,7 +1945,10 @@ describe("session.llm.stream", () => {
         expect(tools?.some((item) => item.function?.name === "write")).toBe(false)
         // 真实 HTTP 捕获验证最终 system，而非单独调用 toolUsage 复制生产逻辑。
         const messages = capture.body.messages as Array<{ role: string; content: string }>
-        const system = messages.filter((message) => message.role === "system").map((message) => message.content).join("\n")
+        const system = messages
+          .filter((message) => message.role === "system")
+          .map((message) => message.content)
+          .join("\n")
         expect(system.indexOf("# Using your tools")).toBeGreaterThanOrEqual(0)
         expect(system.indexOf("You are a helpful assistant.")).toBeGreaterThan(system.indexOf("# Using your tools"))
         expect(system.indexOf("<env>")).toBeGreaterThan(system.indexOf("You are a helpful assistant."))
@@ -1923,7 +1961,7 @@ describe("session.llm.stream", () => {
         enabled_providers: [alibabaQwenFixture.providerID],
         provider: {
           [alibabaQwenFixture.providerID]: {
-            options: { apiKey: "test-key", baseURL: `${state.server!.url.origin}/v1`  },
+            options: { apiKey: "test-key", baseURL: `${state.server!.url.origin}/v1` },
           },
         },
       }),
@@ -1932,116 +1970,126 @@ describe("session.llm.stream", () => {
 
   // 保留旧模型对照，Astra经真实配置、选定Variant和LLM.stream到HTTP边界。
   for (const modelID of ["gpt-5.2", "gpt-6-astra"]) {
-  it.instance(
-    `sends responses API payload for OpenAI model ${modelID}`,
-    () =>
-      Effect.gen(function* () {
-        const model = { ...loadFixture("openai", "gpt-5.2").model, id: modelID }
+    it.instance(
+      `sends responses API payload for OpenAI model ${modelID}`,
+      () =>
+        Effect.gen(function* () {
+          const model = { ...loadFixture("openai", "gpt-5.2").model, id: modelID }
 
-        const responseChunks = [
-          {
-            type: "response.created",
-            response: {
-              id: "resp-1",
-              created_at: Math.floor(Date.now() / 1000),
-              model: model.id,
-              service_tier: null,
-            },
-          },
-          {
-            type: "response.output_item.added",
-            output_index: 0,
-            item: { type: "message", id: "item-1", status: "in_progress", role: "assistant", content: [] },
-          },
-          {
-            type: "response.content_part.added",
-            item_id: "item-1",
-            output_index: 0,
-            content_index: 0,
-            part: { type: "output_text", text: "", annotations: [] },
-          },
-          {
-            type: "response.output_text.delta",
-            item_id: "item-1",
-            delta: "Hello",
-            logprobs: null,
-          },
-          {
-            type: "response.completed",
-            response: {
-              incomplete_details: null,
-              usage: {
-                input_tokens: 1,
-                input_tokens_details: null,
-                output_tokens: 1,
-                output_tokens_details: null,
+          const responseChunks = [
+            {
+              type: "response.created",
+              response: {
+                id: "resp-1",
+                created_at: Math.floor(Date.now() / 1000),
+                model: model.id,
+                service_tier: null,
               },
-              service_tier: null,
             },
-          },
-        ]
-        const request = waitRequest("/responses", createEventResponse(responseChunks, true))
+            {
+              type: "response.output_item.added",
+              output_index: 0,
+              item: { type: "message", id: "item-1", status: "in_progress", role: "assistant", content: [] },
+            },
+            {
+              type: "response.content_part.added",
+              item_id: "item-1",
+              output_index: 0,
+              content_index: 0,
+              part: { type: "output_text", text: "", annotations: [] },
+            },
+            {
+              type: "response.output_text.delta",
+              item_id: "item-1",
+              delta: "Hello",
+              logprobs: null,
+            },
+            {
+              type: "response.completed",
+              response: {
+                incomplete_details: null,
+                usage: {
+                  input_tokens: 1,
+                  input_tokens_details: null,
+                  output_tokens: 1,
+                  output_tokens_details: null,
+                },
+                service_tier: null,
+              },
+            },
+          ]
+          const request = waitRequest("/responses", createEventResponse(responseChunks, true))
 
-        const resolved = yield* Provider.use.getModel(ProviderV2.ID.openai, ModelV2.ID.make(model.id))
-        const sessionID = SessionID.make("session-test-2")
-        const agent = {
-          name: "test",
-          mode: "primary",
-          options: { reasoningMode: "pro" },
-          permission: [{ permission: "*", pattern: "*", action: "allow" }],
-          temperature: 0.2,
-        } satisfies Agent.Info
+          const resolved = yield* Provider.use.getModel(ProviderV2.ID.openai, ModelV2.ID.make(model.id))
+          const sessionID = SessionID.make("session-test-2")
+          const agent = {
+            name: "test",
+            mode: "primary",
+            options: { reasoningMode: "pro" },
+            permission: [{ permission: "*", pattern: "*", action: "allow" }],
+            temperature: 0.2,
+          } satisfies Agent.Info
 
-        const user = {
-          id: MessageID.make("msg_user-2"),
-          sessionID,
-          role: "user",
-          time: { created: Date.now() },
-          agent: agent.name,
-          model: {
-            providerID: ProviderV2.ID.make("openai"),
-            modelID: resolved.id,
-            variant: modelID === "gpt-6-astra" ? "ultrafast" : "high",
-          },
-        } satisfies SessionV1.User
+          const user = {
+            id: MessageID.make("msg_user-2"),
+            sessionID,
+            role: "user",
+            time: { created: Date.now() },
+            agent: agent.name,
+            model: {
+              providerID: ProviderV2.ID.make("openai"),
+              modelID: resolved.id,
+              variant: modelID === "gpt-6-astra" ? "ultrafast" : "high",
+            },
+          } satisfies SessionV1.User
 
-        yield* drain({
-          user,
-          sessionID,
-          model: resolved,
-          agent,
-          system: ["You are a helpful assistant."],
-          messages: [{ role: "user", content: "Hello" }],
-          tools: {},
-        })
+          yield* drain({
+            user,
+            sessionID,
+            model: resolved,
+            agent,
+            system: ["You are a helpful assistant."],
+            messages: [{ role: "user", content: "Hello" }],
+            tools: {},
+          })
 
-        const capture = yield* Effect.promise(() => request)
-        const body = capture.body
+          const capture = yield* Effect.promise(() => request)
+          const body = capture.body
 
-        expect(capture.url.pathname.endsWith("/responses")).toBe(true)
-        expect(body.model).toBe(resolved.api.id)
-        expect(body.stream).toBe(true)
-        expect((body.reasoning as { effort?: string } | undefined)?.effort).toBe("high")
-        expect((body.reasoning as { mode?: string } | undefined)?.mode).toBe("pro")
-        // 核对实际编码字段；旧模型对照不能被配置定义本身强行加速。
-        expect(body.service_tier).toBe(modelID === "gpt-6-astra" ? "ultrafast" : undefined)
+          expect(capture.url.pathname.endsWith("/responses")).toBe(true)
+          expect(body.model).toBe(resolved.api.id)
+          expect(body.stream).toBe(true)
+          expect((body.reasoning as { effort?: string } | undefined)?.effort).toBe("high")
+          expect((body.reasoning as { mode?: string } | undefined)?.mode).toBe("pro")
+          // 核对实际编码字段；旧模型对照不能被配置定义本身强行加速。
+          expect(body.service_tier).toBe(modelID === "gpt-6-astra" ? "ultrafast" : undefined)
 
-        const maxTokens = body.max_output_tokens as number | undefined
-        expect(maxTokens).toBe(undefined) // match codex cli behavior
-      }),
-    { config: () => {
-      const model = { ...loadFixture("openai", "gpt-5.2").model, id: modelID }
-      const config = openAIConfig(model, `${state.server!.url.origin}/v1`)
-      return { ...config, provider: { ...config.provider, openai: {
-        ...config.provider?.openai,
-        models: { [modelID]: {
-          ...config.provider?.openai?.models?.[modelID],
-          // 定义不等于启用，上面的user.model.variant才选择此配置。
-          variants: { ultrafast: { serviceTier: "ultrafast", reasoningEffort: "high" } },
-        } },
-      } } }
-    } },
-  )
+          const maxTokens = body.max_output_tokens as number | undefined
+          expect(maxTokens).toBe(undefined) // match codex cli behavior
+        }),
+      {
+        config: () => {
+          const model = { ...loadFixture("openai", "gpt-5.2").model, id: modelID }
+          const config = openAIConfig(model, `${state.server!.url.origin}/v1`)
+          return {
+            ...config,
+            provider: {
+              ...config.provider,
+              openai: {
+                ...config.provider?.openai,
+                models: {
+                  [modelID]: {
+                    ...config.provider?.openai?.models?.[modelID],
+                    // 定义不等于启用，上面的user.model.variant才选择此配置。
+                    variants: { ultrafast: { serviceTier: "ultrafast", reasoningEffort: "high" } },
+                  },
+                },
+              },
+            },
+          }
+        },
+      },
+    )
   }
 
   it.instance(
@@ -2198,7 +2246,10 @@ describe("session.llm.stream", () => {
           system: ["You are a helpful assistant."],
           messages: [{ role: "user", content: "Hello" }],
           tools: {},
-          onRequestPrepared: body => Effect.sync(() => { prepared.push(body) }),
+          onRequestPrepared: (body) =>
+            Effect.sync(() => {
+              prepared.push(body)
+            }),
         })
 
         const capture = yield* Effect.promise(() => request)
@@ -2416,7 +2467,7 @@ describe("session.llm.stream", () => {
               npm: "@ai-sdk/openai",
               api: "https://api.openai.com/v1",
               models: { [model.id]: JSON.parse(JSON.stringify(model)) as ConfigModel },
-              options: { apiKey: "test-openai-key", baseURL: `${state.server!.url.origin}/v1`  },
+              options: { apiKey: "test-openai-key", baseURL: `${state.server!.url.origin}/v1` },
             },
           },
         }
@@ -2612,7 +2663,7 @@ describe("session.llm.stream", () => {
         enabled_providers: [minimaxFixture.providerID],
         provider: {
           [minimaxFixture.providerID]: {
-            options: { apiKey: "test-anthropic-key", baseURL: `${state.server!.url.origin}/v1`  },
+            options: { apiKey: "test-anthropic-key", baseURL: `${state.server!.url.origin}/v1` },
           },
         },
       }),
@@ -2770,7 +2821,11 @@ describe("session.llm.stream", () => {
         const modelMessages = yield* Effect.promise(() => MessageV2.toModelMessages(input as any, resolved))
         // 原tool配对断言不变；追加历史assistant后接user reminder，验证Anthropic真实wire适配。
         const reminder = "<system-reminder>\nToday's date is now: Sat Sep 12 2026\n</system-reminder>"
-        modelMessages.push({ role: "assistant", content: "prior answer" }, { role: "user", content: reminder }, { role: "user", content: "current turn" })
+        modelMessages.push(
+          { role: "assistant", content: "prior answer" },
+          { role: "user", content: reminder },
+          { role: "user", content: "current turn" },
+        )
         yield* drain({
           user,
           sessionID,
@@ -2798,7 +2853,12 @@ describe("session.llm.stream", () => {
         expect(capture.url.pathname.endsWith("/messages")).toBe(true)
         const messages = body.messages as Array<{ role: string; content: Array<Record<string, unknown>> }>
         expect(JSON.stringify(body.system)).toContain("baseline prefix")
-        expect(messages.some(message => message.role === "user" && message.content.some(part => part.type === "text" && part.text === reminder))).toBe(true)
+        expect(
+          messages.some(
+            (message) =>
+              message.role === "user" && message.content.some((part) => part.type === "text" && part.text === reminder),
+          ),
+        ).toBe(true)
         expect(messages[0]?.role).toBe("user")
         expect(messages[0]?.content[0]).toMatchObject({
           type: "text",
@@ -2842,7 +2902,7 @@ describe("session.llm.stream", () => {
               npm: "@ai-sdk/anthropic",
               api: "https://api.anthropic.com/v1",
               models: { [model.id]: configModel(model) as ConfigModel },
-              options: { apiKey: "test-anthropic-key", baseURL: `${state.server!.url.origin}/v1`  },
+              options: { apiKey: "test-anthropic-key", baseURL: `${state.server!.url.origin}/v1` },
             },
           },
         }
@@ -2919,7 +2979,7 @@ describe("session.llm.stream", () => {
         enabled_providers: [geminiFixture.providerID],
         provider: {
           [geminiFixture.providerID]: {
-            options: { apiKey: "test-google-key", baseURL: `${state.server!.url.origin}/v1beta`  },
+            options: { apiKey: "test-google-key", baseURL: `${state.server!.url.origin}/v1beta` },
           },
         },
       }),

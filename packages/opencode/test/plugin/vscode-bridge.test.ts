@@ -17,7 +17,12 @@ if (!tools) throw new Error("plugin did not register tools")
 
 describe("vscode bridge plugin", () => {
   test("checks notebook mutation permissions before calling the VS Code bridge", async () => {
-    const calls: Array<{ permission: string; patterns: string[]; always: string[]; metadata: Record<string, unknown> }> = []
+    const calls: Array<{
+      permission: string
+      patterns: string[]
+      always: string[]
+      metadata: Record<string, unknown>
+    }> = []
     const stop = "stopped after permission check"
     const filePath = "F:\\project with spaces\\demo.ipynb"
 
@@ -94,7 +99,7 @@ describe("vscode bridge plugin", () => {
     const calls: string[] = []
 
     await expect(
-     tools.vscode_notebook_edit.execute(
+      tools.vscode_notebook_edit.execute(
         {
           filePath,
           cellId: "#VSC-12345678",
@@ -110,7 +115,12 @@ describe("vscode bridge plugin", () => {
           worktree: "F:\\project with spaces",
           abort: new AbortController().signal,
           metadata: () => undefined,
-          async ask(input: { permission: string; patterns: string[]; always: string[]; metadata: Record<string, unknown> }) {
+          async ask(input: {
+            permission: string
+            patterns: string[]
+            always: string[]
+            metadata: Record<string, unknown>
+          }) {
             calls.push(input.permission)
             // #223：vscode_notebook_edit 通过后才在 edit 门禁拒绝，验证双层权限顺序
             if (input.permission === "edit") throw new Error(stop)
@@ -122,51 +132,59 @@ describe("vscode bridge plugin", () => {
     expect(calls).toEqual(["vscode_notebook_edit", "edit"])
   })
 
-  test.each(["save", "create"] as const)("keeps notebook %s covered by the generic edit permission gate", async (operation) => {
-    // #252：save 是 env 的持久化分支——必须被通用 edit 门禁覆盖，防止绕过文件写入边界
-    // Use shell-looking characters as literal path data. Permission matching must
-    // receive the exact notebook path string and must not normalize, split, or
-    // interpret quotes, environment-variable text, pipes, redirection, or
-    // subcommand-looking fragments before the approval/deny boundary runs.
-    const filePath = String.raw`F:\project with spaces\$(noop) '$HOME' | redirect > demo.ipynb`
-    const stop = `generic edit denied for notebook ${operation}`
-    const calls: string[] = []
-    const bridge = spyOn(VscodeBridge, "callBridge").mockResolvedValue({
-      ran: true,
-      summary: "save should not be reached when generic edit is denied",
-      data: { path: filePath, operation, saved: true },
-    })
+  test.each(["save", "create"] as const)(
+    "keeps notebook %s covered by the generic edit permission gate",
+    async (operation) => {
+      // #252：save 是 env 的持久化分支——必须被通用 edit 门禁覆盖，防止绕过文件写入边界
+      // Use shell-looking characters as literal path data. Permission matching must
+      // receive the exact notebook path string and must not normalize, split, or
+      // interpret quotes, environment-variable text, pipes, redirection, or
+      // subcommand-looking fragments before the approval/deny boundary runs.
+      const filePath = String.raw`F:\project with spaces\$(noop) '$HOME' | redirect > demo.ipynb`
+      const stop = `generic edit denied for notebook ${operation}`
+      const calls: string[] = []
+      const bridge = spyOn(VscodeBridge, "callBridge").mockResolvedValue({
+        ran: true,
+        summary: "save should not be reached when generic edit is denied",
+        data: { path: filePath, operation, saved: true },
+      })
 
-    await expect(
-      plugin.tool!.vscode_notebook_env.execute(
-        {
-          filePath,
-          operation,
-          reason: "permission boundary regression test",
-        },
-        {
-          sessionID: "ses_test",
-          messageID: "msg_test",
-          agent: "build",
-          directory: "F:\\project with spaces",
-          worktree: "F:\\project with spaces",
-          abort: new AbortController().signal,
-          metadata: () => undefined,
-          async ask(input: { permission: string; patterns: string[]; always: string[]; metadata: Record<string, unknown> }) {
-            calls.push(input.permission)
-            expect(input.patterns).toEqual([filePath])
-            expect(input.always).toEqual([filePath])
-            expect(input.metadata.args).toMatchObject({ filePath, operation })
-            if (input.permission === "edit") throw new Error(stop)
+      await expect(
+        plugin.tool!.vscode_notebook_env.execute(
+          {
+            filePath,
+            operation,
+            reason: "permission boundary regression test",
           },
-        },
-      ),
-    ).rejects.toThrow(stop)
+          {
+            sessionID: "ses_test",
+            messageID: "msg_test",
+            agent: "build",
+            directory: "F:\\project with spaces",
+            worktree: "F:\\project with spaces",
+            abort: new AbortController().signal,
+            metadata: () => undefined,
+            async ask(input: {
+              permission: string
+              patterns: string[]
+              always: string[]
+              metadata: Record<string, unknown>
+            }) {
+              calls.push(input.permission)
+              expect(input.patterns).toEqual([filePath])
+              expect(input.always).toEqual([filePath])
+              expect(input.metadata.args).toMatchObject({ filePath, operation })
+              if (input.permission === "edit") throw new Error(stop)
+            },
+          },
+        ),
+      ).rejects.toThrow(stop)
 
-    expect(calls).toEqual(["vscode_notebook_env", "edit"])
-    expect(bridge).not.toHaveBeenCalled()
-    // #252：edit 拒绝时 bridge 零调用——门禁在 IO 之前，拒绝路径无副作用
-  })
+      expect(calls).toEqual(["vscode_notebook_env", "edit"])
+      expect(bridge).not.toHaveBeenCalled()
+      // #252：edit 拒绝时 bridge 零调用——门禁在 IO 之前，拒绝路径无副作用
+    },
+  )
 
   test("returns the next usable cell ID after notebook insert and type-change edits", async () => {
     // #252：句柄失效场景——metadata 必须同时给出新 cellId 与原 requestedCellId
@@ -206,7 +224,7 @@ describe("vscode bridge plugin", () => {
           cellId: updatedCellId,
           requestedCellId,
           // #252：双句柄并存是渲染器兼容的关键——只发新句柄会让审计锚丢失
-    // #252：mock 形态取自真实 type-change 响应——字段缺一会静默退化成旧句柄
+          // #252：mock 形态取自真实 type-change 响应——字段缺一会静默退化成旧句柄
         },
       },
     })
@@ -288,7 +306,16 @@ describe("vscode bridge plugin", () => {
         path: filePath,
         dirty: false,
         runtime: "Python 3.11",
-        cell: { i: 3, id: "#VSC-12345678", kind: "code", lang: "python", lines: 7, exec: "succeeded", existing_outs: ["text"], first: "df.head()" },
+        cell: {
+          i: 3,
+          id: "#VSC-12345678",
+          kind: "code",
+          lang: "python",
+          lines: 7,
+          exec: "succeeded",
+          existing_outs: ["text"],
+          first: "df.head()",
+        },
         artifacts: [
           {
             mime: "text/plain",
@@ -328,7 +355,9 @@ describe("vscode bridge plugin", () => {
     // #224：序列化后的 metadata 不能包含完整 artifact text
     // #224：这验证 compactArtifacts 确实排除了 text，不只是 toMatchObject 不检查它
     // #224：JSON.stringify 会序列化整个 metadata，如果 text 泄漏会在这里被发现
-    expect(JSON.stringify(typeof result === "object" && result ? result.metadata : result)).not.toContain("full text should not be persisted")
+    expect(JSON.stringify(typeof result === "object" && result ? result.metadata : result)).not.toContain(
+      "full text should not be persisted",
+    )
   })
 
   // #224：验证 notebook insert 的 diff 标签使用插入位置的 cell index
@@ -431,7 +460,12 @@ describe("vscode bridge plugin", () => {
   test("keeps oversized notebook insert previews visible without persisting the full cell source", async () => {
     const plugin = await VscodeBridgePlugin({} as unknown as PluginInput)
     const filePath = "F:\\project with spaces\\large notebook.ipynb"
-    const inserted = ["import pandas as pd", "df = pd.read_csv('large file.csv')", "df.head()", ...Array.from({ length: 3000 }, (_, i) => `row_${i}`)].join("\n")
+    const inserted = [
+      "import pandas as pd",
+      "df = pd.read_csv('large file.csv')",
+      "df.head()",
+      ...Array.from({ length: 3000 }, (_, i) => `row_${i}`),
+    ].join("\n")
     spyOn(VscodeBridge, "callBridge").mockResolvedValue({
       ran: false,
       summary: "Notebook edit: applied=true op=insert at=4 num_cells=3->4 dirty=true.",

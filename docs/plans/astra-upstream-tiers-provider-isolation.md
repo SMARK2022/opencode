@@ -31,45 +31,45 @@ This file is the sole implementation specification for this task. Chat summaries
 
 ## 3. Repository Context
 
-| Source | Why it constrains this task |
-| --- | --- |
-| AGENTS.md | 最小修改、不新增 any、包目录运行测试与 bun typecheck |
-| packages/opencode/AGENTS.md | 平铺模块、Effect 服务边界、不得在根目录运行测试 |
-| packages/opencode/test/AGENTS.md | 复用 fixture、真实公共 seam、等待 readiness 而非 sleep |
-| CONTEXT.md | V1 session 是生产路径；Provider alias 是 fork 已有语义；Message 包含 Parts |
-| docs/adr/README.md | ADR 目录仅有 triage 决策，无本功能额外约束 |
-| .opencode/policy/first-principles-engineering.md | first divergence、独立审计、无 fallback、双向映射及 E/C |
+| Source                                           | Why it constrains this task                                                |
+| ------------------------------------------------ | -------------------------------------------------------------------------- |
+| AGENTS.md                                        | 最小修改、不新增 any、包目录运行测试与 bun typecheck                       |
+| packages/opencode/AGENTS.md                      | 平铺模块、Effect 服务边界、不得在根目录运行测试                            |
+| packages/opencode/test/AGENTS.md                 | 复用 fixture、真实公共 seam、等待 readiness 而非 sleep                     |
+| CONTEXT.md                                       | V1 session 是生产路径；Provider alias 是 fork 已有语义；Message 包含 Parts |
+| docs/adr/README.md                               | ADR 目录仅有 triage 决策，无本功能额外约束                                 |
+| .opencode/policy/first-principles-engineering.md | first divergence、独立审计、无 fallback、双向映射及 E/C                    |
 
 ## 4. Files and Evidence Read
 
-| Evidence | Relevance | Evidence class |
-| --- | --- | --- |
-| packages/opencode/src/plugin/codex.ts:27-34,379-505 | OAuth model hook、版本过滤、请求体透传 | observed |
-| packages/opencode/src/config/provider.ts:56-68；config.ts:213 | 对象式 options/variants；不需要新配置 | contracted |
-| packages/opencode/src/provider/provider.ts:1475-1658,1933-2005 | model hook/config/alias 顺序，SDK fetch 包装与 id 剥离 | reachable |
-| packages/opencode/src/session/llm.ts:132-179,384 | variant 合并和 providerOptions 传递 | reachable |
-| packages/opencode/src/provider/transform.ts:215-237,854-865,1165-1167,1281-1328 | stateless reasoning 过滤、SDK namespace、cache key | reachable |
-| packages/opencode/src/session/processor.ts:497-554 | SDK metadata 原样落 reasoning Part | reachable |
-| packages/opencode/src/session/message-v2.ts:1414-1424,1576-1601,1643-1663 | GPT-family exception 绕过 differentModel，跨 Provider 回放 | observed |
-| packages/opencode/src/session/prompt.ts:2644-2662,3094-3115 | chunks key 已包括 providerID，所有转换调用归于 MessageV2 | reachable |
-| packages/opencode/src/session/system.ts:34-43 | 使用 API ID 路由；gpt-6 匹配过宽 | observed |
-| packages/opencode/test/session/message-v2.test.ts:61-108,761-849 | 现有测试要求跨 Provider GPT 加密回放，需按新合同改正 | observed |
-| packages/opencode/test/session/system.test.ts:349-383 | API ID 别名 fixture 和路由表 | observed |
-| packages/opencode/test/plugin/codex.test.ts | 已有插件公共 hook 测试 | observed |
-| packages/opencode/test/session/llm.test.ts:1279-1394 | 已有真实 LLM.stream 到本地 HTTP 请求捕获 seam | observed |
-| packages/core/src/plugin/provider/openai.ts；test/plugin/provider-openai.test.ts | core 同时消费同版 SDK，需验证 | reachable |
-| package.json:147-154；packages/{core,opencode}/package.json；bun.lock | 两处 3.0.53，无 OpenAI patch | observed |
-| node_modules/@ai-sdk/openai/src/{responses,chat} 与模型能力判断 | ultrafast 不在 enum；GPT-6 不在 tier/reasoning 识别 | observed |
-| 上游 gh pr diff/view #47385,#47659,#47671,#53875,#50989 | 精确迁移来源，合并 hash 下表固定 | observed |
-| 下文实际执行的 bun -e 和现有 bun test | 不写测试文件的规划阶段反馈 | observed |
+| Evidence                                                                         | Relevance                                                  | Evidence class |
+| -------------------------------------------------------------------------------- | ---------------------------------------------------------- | -------------- |
+| packages/opencode/src/plugin/codex.ts:27-34,379-505                              | OAuth model hook、版本过滤、请求体透传                     | observed       |
+| packages/opencode/src/config/provider.ts:56-68；config.ts:213                    | 对象式 options/variants；不需要新配置                      | contracted     |
+| packages/opencode/src/provider/provider.ts:1475-1658,1933-2005                   | model hook/config/alias 顺序，SDK fetch 包装与 id 剥离     | reachable      |
+| packages/opencode/src/session/llm.ts:132-179,384                                 | variant 合并和 providerOptions 传递                        | reachable      |
+| packages/opencode/src/provider/transform.ts:215-237,854-865,1165-1167,1281-1328  | stateless reasoning 过滤、SDK namespace、cache key         | reachable      |
+| packages/opencode/src/session/processor.ts:497-554                               | SDK metadata 原样落 reasoning Part                         | reachable      |
+| packages/opencode/src/session/message-v2.ts:1414-1424,1576-1601,1643-1663        | GPT-family exception 绕过 differentModel，跨 Provider 回放 | observed       |
+| packages/opencode/src/session/prompt.ts:2644-2662,3094-3115                      | chunks key 已包括 providerID，所有转换调用归于 MessageV2   | reachable      |
+| packages/opencode/src/session/system.ts:34-43                                    | 使用 API ID 路由；gpt-6 匹配过宽                           | observed       |
+| packages/opencode/test/session/message-v2.test.ts:61-108,761-849                 | 现有测试要求跨 Provider GPT 加密回放，需按新合同改正       | observed       |
+| packages/opencode/test/session/system.test.ts:349-383                            | API ID 别名 fixture 和路由表                               | observed       |
+| packages/opencode/test/plugin/codex.test.ts                                      | 已有插件公共 hook 测试                                     | observed       |
+| packages/opencode/test/session/llm.test.ts:1279-1394                             | 已有真实 LLM.stream 到本地 HTTP 请求捕获 seam              | observed       |
+| packages/core/src/plugin/provider/openai.ts；test/plugin/provider-openai.test.ts | core 同时消费同版 SDK，需验证                              | reachable      |
+| package.json:147-154；packages/{core,opencode}/package.json；bun.lock            | 两处 3.0.53，无 OpenAI patch                               | observed       |
+| node_modules/@ai-sdk/openai/src/{responses,chat} 与模型能力判断                  | ultrafast 不在 enum；GPT-6 不在 tier/reasoning 识别        | observed       |
+| 上游 gh pr diff/view #47385,#47659,#47671,#53875,#50989                          | 精确迁移来源，合并 hash 下表固定                           | observed       |
+| 下文实际执行的 bun -e 和现有 bun test                                            | 不写测试文件的规划阶段反馈                                 | observed       |
 
-| PR | Merge commit | Scope |
-| --- | --- | --- |
+| PR     | Merge commit                             | Scope                                      |
+| ------ | ---------------------------------------- | ------------------------------------------ |
 | #47385 | 02a167e048d3bd7299225068d79e4fce5c830d67 | major/minor 最终比较，包含 #47384 整数支持 |
-| #47659 | 23ec4f55c8bf4009068c44635a448d602914f1f7 | 两处 SDK 升级到 3.0.88 |
-| #47671 | ea2d59d7ca8028951a16d4ebc558104258440bf9 | 注册 SDK 显式 tier 补丁 |
-| #53875 | 5e2df97a8945faa59064682c1160aadaee1b8ded | 最终累计 SDK patch，ultrafast 类型和校验 |
-| #50989 | 6e0857cc0e2e (PR 固定 diff) | Astra 提示词只匹配 astra |
+| #47659 | 23ec4f55c8bf4009068c44635a448d602914f1f7 | 两处 SDK 升级到 3.0.88                     |
+| #47671 | ea2d59d7ca8028951a16d4ebc558104258440bf9 | 注册 SDK 显式 tier 补丁                    |
+| #53875 | 5e2df97a8945faa59064682c1160aadaee1b8ded | 最终累计 SDK patch，ultrafast 类型和校验   |
+| #50989 | 6e0857cc0e2e (PR 固定 diff)              | Astra 提示词只匹配 astra                   |
 
 ## 5. Current Behavior
 
@@ -85,35 +85,35 @@ Codex 仅匹配带小数版本。SDK 3.0.53 丢 priority、拒 ultrafast。Messa
 
 ## 6. Supported Input Domain and Reachability
 
-| Input or condition | Producer | Upstream guarantees | Reachable path | Owner | Classification |
-| --- | --- | --- | --- | --- | --- |
-| GPT 整数/多位 minor API ID | 模型目录/config | 字符串 model.api.id | Codex OAuth models hook | codex.ts | observed |
-| priority/flex/ultrafast | model options、已选 variant | options record；SDK 自有 enum | LLM -> SDK | OpenAI SDK patch | observed |
-| 同 Provider GPT 模型切换 | session user model 选择 | assistant 持久化 providerID/modelID | projection -> adapter | MessageV2 | contracted |
-| 不同 Provider，相同或不同 GPT 模型 | Provider alias/模型选择 | providerID 明确；不保证账号相同 | 同上 | MessageV2 | observed |
-| 空/非空 reasoning summary | SDK streaming Parts | text 字符串，metadata 可选 | 同上 | MessageV2 | reachable |
-| OpenAI-compatible reasoning_content | 模型 capabilities.interleaved | 声明明文协议 | 同上 | 既有 projection/transform | contracted |
-| API id 是 Astra/GPT-6 Sol/Luna/Codex | 模型目录/config alias | id 与 display name 分开 | SystemPrompt.provider | system.ts | observed |
+| Input or condition                   | Producer                      | Upstream guarantees                 | Reachable path          | Owner                     | Classification |
+| ------------------------------------ | ----------------------------- | ----------------------------------- | ----------------------- | ------------------------- | -------------- |
+| GPT 整数/多位 minor API ID           | 模型目录/config               | 字符串 model.api.id                 | Codex OAuth models hook | codex.ts                  | observed       |
+| priority/flex/ultrafast              | model options、已选 variant   | options record；SDK 自有 enum       | LLM -> SDK              | OpenAI SDK patch          | observed       |
+| 同 Provider GPT 模型切换             | session user model 选择       | assistant 持久化 providerID/modelID | projection -> adapter   | MessageV2                 | contracted     |
+| 不同 Provider，相同或不同 GPT 模型   | Provider alias/模型选择       | providerID 明确；不保证账号相同     | 同上                    | MessageV2                 | observed       |
+| 空/非空 reasoning summary            | SDK streaming Parts           | text 字符串，metadata 可选          | 同上                    | MessageV2                 | reachable      |
+| OpenAI-compatible reasoning_content  | 模型 capabilities.interleaved | 声明明文协议                        | 同上                    | 既有 projection/transform | contracted     |
+| API id 是 Astra/GPT-6 Sol/Luna/Codex | 模型目录/config alias         | id 与 display name 分开             | SystemPrompt.provider   | system.ts                 | observed       |
 
 ## 7. Required Invariants
 
-| ID | Behavioral invariant | Evidence | Existing test |
-| --- | --- | --- | --- |
-| INV-01 | OAuth 保留 newer GPT 整数与多位 minor；已有 allowlist 保持 | #47385 | codex.test.ts 待加 |
-| INV-02 | 两个包使用 3.0.88；显式 tier 在 Chat/Responses 请求中保留，ultrafast 被接受 | 三个 SDK PR | openai.test.ts 待加；core provider suite |
-| INV-03 | Astra prompt 只对 GPT 路由内含 astra 的 API id 生效；其他 GPT/Codex 原路由保持 | 用户 + #50989 | system.test.ts 路由表 |
-| INV-04 | 跨 Provider 不回放不透明 OpenAI reasoning metadata；保留可见文本与答案、工具历史 | 用户 | message-v2.test.ts 更新 |
-| INV-05 | 同 Provider GPT 跨模型回放保持；同模型元数据行为和兼容明文 reasoning 保持 | 缩小用户要求的边界，保留现有合法路径 | message-v2.test.ts 与 transform.test.ts |
-| INV-06 | 持久化历史不变、无恢复重试或新配置、有限修改 | 用户与 policy | 非变异断言、diff 检查 |
+| ID     | Behavioral invariant                                                             | Evidence                             | Existing test                            |
+| ------ | -------------------------------------------------------------------------------- | ------------------------------------ | ---------------------------------------- |
+| INV-01 | OAuth 保留 newer GPT 整数与多位 minor；已有 allowlist 保持                       | #47385                               | codex.test.ts 待加                       |
+| INV-02 | 两个包使用 3.0.88；显式 tier 在 Chat/Responses 请求中保留，ultrafast 被接受      | 三个 SDK PR                          | openai.test.ts 待加；core provider suite |
+| INV-03 | Astra prompt 只对 GPT 路由内含 astra 的 API id 生效；其他 GPT/Codex 原路由保持   | 用户 + #50989                        | system.test.ts 路由表                    |
+| INV-04 | 跨 Provider 不回放不透明 OpenAI reasoning metadata；保留可见文本与答案、工具历史 | 用户                                 | message-v2.test.ts 更新                  |
+| INV-05 | 同 Provider GPT 跨模型回放保持；同模型元数据行为和兼容明文 reasoning 保持        | 缩小用户要求的边界，保留现有合法路径 | message-v2.test.ts 与 transform.test.ts  |
+| INV-06 | 持久化历史不变、无恢复重试或新配置、有限修改                                     | 用户与 policy                        | 非变异断言、diff 检查                    |
 
 ## 8. First Divergence and Root Cause
 
-| Invariant | First divergence | Owning module/interface | Proof |
-| --- | --- | --- | --- |
-| INV-01 | model hook 正则要求小数且 parseFloat 错比 5.10 | CodexAuthPlugin.provider.models | 实跑 catalog [] |
-| INV-02 | SDK enum 拒绝 ultrafast；capability gate 删除 tier | SDK options/schema 与 language-model | 实跑 wireTier undefined；invalid openai provider options |
-| INV-03 | system.ts includes(gpt-6) | SystemPrompt.provider | 实跑 Astra/Sol/Luna 均 true |
-| INV-04/05 | GPT exception 只检查两端 GPT 名称 | MessageV2.toModelMessagesEffect | 输出 encrypted-source 到 target Provider |
+| Invariant | First divergence                                   | Owning module/interface              | Proof                                                    |
+| --------- | -------------------------------------------------- | ------------------------------------ | -------------------------------------------------------- |
+| INV-01    | model hook 正则要求小数且 parseFloat 错比 5.10     | CodexAuthPlugin.provider.models      | 实跑 catalog []                                          |
+| INV-02    | SDK enum 拒绝 ultrafast；capability gate 删除 tier | SDK options/schema 与 language-model | 实跑 wireTier undefined；invalid openai provider options |
+| INV-03    | system.ts includes(gpt-6)                          | SystemPrompt.provider                | 实跑 Astra/Sol/Luna 均 true                              |
+| INV-04/05 | GPT exception 只检查两端 GPT 名称                  | MessageV2.toModelMessagesEffect      | 输出 encrypted-source 到 target Provider                 |
 
 ### Executed Feedback Loops
 
@@ -129,12 +129,12 @@ Prompt 最初直接 import system 出现既有 Ruleset 循环初始化异常；�
 
 ## 9. Responsibility and Seam
 
-| Concern | Owner | Interface promise | Why it belongs here | Why another module does not own it |
-| --- | --- | --- | --- | --- |
-| 目录筛选 | Codex model hook | 按 OAuth 合同选择模型 | 版本首次被拒绝的位置 | 不改用户 config 补偿 |
-| tier 编码与校验 | SDK patch | SDK providerOptions -> wire | enum/delete 正在该包 | 不在 fetch 注入 body 绕过 SDK |
-| 历史隔离 | MessageV2 projection | 有 source providerID 和 target Provider | 唯一拥有两端 provenance 的转换入口 | transform/wire 已无源 Provider，不加下游重复过滤 |
-| prompt 选择 | SystemPrompt.provider | API ID -> 模板 | 本地唯一生产路由 | 不改模板正文和 UI |
+| Concern         | Owner                 | Interface promise                       | Why it belongs here                | Why another module does not own it               |
+| --------------- | --------------------- | --------------------------------------- | ---------------------------------- | ------------------------------------------------ |
+| 目录筛选        | Codex model hook      | 按 OAuth 合同选择模型                   | 版本首次被拒绝的位置               | 不改用户 config 补偿                             |
+| tier 编码与校验 | SDK patch             | SDK providerOptions -> wire             | enum/delete 正在该包               | 不在 fetch 注入 body 绕过 SDK                    |
+| 历史隔离        | MessageV2 projection  | 有 source providerID 和 target Provider | 唯一拥有两端 provenance 的转换入口 | transform/wire 已无源 Provider，不加下游重复过滤 |
+| prompt 选择     | SystemPrompt.provider | API ID -> 模板                          | 本地唯一生产路由                   | 不改模板正文和 UI                                |
 
 ## 10. Single Approved Primary-Path Design
 
@@ -148,116 +148,116 @@ Prompt 最初直接 import system 出现既有 Ruleset 循环初始化异常；�
 
 ## 11. Secondary and Replacement Path Inventory
 
-| Path | Current or proposed | Classification | Produces success? | Decision-surface share | Disposition |
-| --- | --- | --- | --- | --- | --- |
-| 相同 Provider GPT 跨模型加密回放 | current narrowed | primary-contract branch | yes | 主路径 | preserve |
-| 跨 Provider 可见 reasoning 文本 | existing | primary-contract branch | yes | 主路径 | preserve |
-| reasoning_content 明文协议 | existing | existing compatibility | yes | 主路径 | preserve |
-| SDK 显式 tier 请求 | proposed upstream | contracted pass-through | yes | 主路径 | preserve |
-| config 手动模型与 alias hook | existing | existing compatibility | yes | 未修改 | preserve |
-| fetch 失败后注入 tier/尝试他账号/删除密文重试 | absent | forbidden fallback | yes | 0 | reject |
+| Path                                          | Current or proposed | Classification          | Produces success? | Decision-surface share | Disposition |
+| --------------------------------------------- | ------------------- | ----------------------- | ----------------- | ---------------------- | ----------- |
+| 相同 Provider GPT 跨模型加密回放              | current narrowed    | primary-contract branch | yes               | 主路径                 | preserve    |
+| 跨 Provider 可见 reasoning 文本               | existing            | primary-contract branch | yes               | 主路径                 | preserve    |
+| reasoning_content 明文协议                    | existing            | existing compatibility  | yes               | 主路径                 | preserve    |
+| SDK 显式 tier 请求                            | proposed upstream   | contracted pass-through | yes               | 主路径                 | preserve    |
+| config 手动模型与 alias hook                  | existing            | existing compatibility  | yes               | 未修改                 | preserve    |
+| fetch 失败后注入 tier/尝试他账号/删除密文重试 | absent              | forbidden fallback      | yes               | 0                      | reject      |
 
 新增备用成功路径 0；新增 diagnostic surface 0%，无 retry、日志、配置开关或备用 parser。
 
 ## 12. Workaround Deletion and Replacement
 
-| Existing workaround or duplicate | Why it existed | Why the approved route supersedes it | Delete or collapse location |
-| --- | --- | --- | --- |
-| GPT-only 无 Provider 限制的加密回放例外 | 先前追求所有 GPT 互通 | Provider 是当前可用 provenance 边界 | 原判定加 Provider 限制，旧注释与跨 Provider 正向测试同步替换 |
-| SDK tier 静态能力删除 | 旧模型能力猜测 | 上游显式 tier 合同 | 累计 SDK patch 删除 Chat/Responses gates |
-| 泛 GPT-6 Astra 路由 | Astra 初期 GPT-6 唯一模板 | Sol/Luna 不能因 major 版本继承 Astra | 替换一个路由条件 |
+| Existing workaround or duplicate        | Why it existed            | Why the approved route supersedes it | Delete or collapse location                                  |
+| --------------------------------------- | ------------------------- | ------------------------------------ | ------------------------------------------------------------ |
+| GPT-only 无 Provider 限制的加密回放例外 | 先前追求所有 GPT 互通     | Provider 是当前可用 provenance 边界  | 原判定加 Provider 限制，旧注释与跨 Provider 正向测试同步替换 |
+| SDK tier 静态能力删除                   | 旧模型能力猜测            | 上游显式 tier 合同                   | 累计 SDK patch 删除 Chat/Responses gates                     |
+| 泛 GPT-6 Astra 路由                     | Astra 初期 GPT-6 唯一模板 | Sol/Luna 不能因 major 版本继承 Astra | 替换一个路由条件                                             |
 
 ## 13. Forward Traceability
 
-| Requirement or invariant | Production path | Planned file/change | Behavioral test |
-| --- | --- | --- | --- |
-| INV-01 / #47385 | catalog -> OAuth hook | plugin/codex.ts | public models hook 整数、多位 minor、旧模型、API key passthrough |
-| INV-02 / #47659 | 两包 import SDK | 两 manifest + lock | 两包 typecheck/core suite；SDK reasoning/tier 请求 |
-| INV-02 / #47671+#53875 | SDK -> HTTP | root package.json + upstream patch | Chat/Responses doStream 捕获 tier；LLM.stream 选中 variant 的 HTTP body |
-| INV-03 / #50989 | API ID -> prompt | session/system.ts | Astra、GPT-6、Sol/Luna、Codex、旧 GPT 路由表 |
-| INV-04 | persisted history -> projection -> SDK | session/message-v2.ts | 不同 Provider 相同/不同 GPT model、空/非空 summary、wire 无 encrypted_content、输入不变 |
-| INV-05 | same Provider projection | 同上 | 同 Provider 同/不同 GPT model 保留密文，非 GPT/兼容明文既有测试 |
-| INV-06 | 全部路径 | 有限文件与已有 seam | git diff --check/范围检查，无持久化修改 |
+| Requirement or invariant | Production path                        | Planned file/change                | Behavioral test                                                                         |
+| ------------------------ | -------------------------------------- | ---------------------------------- | --------------------------------------------------------------------------------------- |
+| INV-01 / #47385          | catalog -> OAuth hook                  | plugin/codex.ts                    | public models hook 整数、多位 minor、旧模型、API key passthrough                        |
+| INV-02 / #47659          | 两包 import SDK                        | 两 manifest + lock                 | 两包 typecheck/core suite；SDK reasoning/tier 请求                                      |
+| INV-02 / #47671+#53875   | SDK -> HTTP                            | root package.json + upstream patch | Chat/Responses doStream 捕获 tier；LLM.stream 选中 variant 的 HTTP body                 |
+| INV-03 / #50989          | API ID -> prompt                       | session/system.ts                  | Astra、GPT-6、Sol/Luna、Codex、旧 GPT 路由表                                            |
+| INV-04                   | persisted history -> projection -> SDK | session/message-v2.ts              | 不同 Provider 相同/不同 GPT model、空/非空 summary、wire 无 encrypted_content、输入不变 |
+| INV-05                   | same Provider projection               | 同上                               | 同 Provider 同/不同 GPT model 保留密文，非 GPT/兼容明文既有测试                         |
+| INV-06                   | 全部路径                               | 有限文件与已有 seam                | git diff --check/范围检查，无持久化修改                                                 |
 
 ## 14. Reverse Traceability
 
-| Proposed production concept | Requirement ID | Evidence | Why existing logic cannot carry it |
-| --- | --- | --- | --- |
-| major/minor 数值比较 | INV-01 | upstream #47385 与 loop | parseFloat 折叠 minor，强制小数漏整数 |
-| SDK 3.0.88 + 累计补丁 | INV-02 | 三个上游 PR | 本地 enum、capabilities 不识别目标行为 |
-| ProviderID 同一性限制 | INV-04/05 | 用户 + 密文 loop | GPT 名字不证明账号/Provider 域相同 |
-| Astra API ID 匹配 | INV-03 | 用户 + #50989 | major 版本不能表达模型家族 |
+| Proposed production concept | Requirement ID | Evidence                | Why existing logic cannot carry it     |
+| --------------------------- | -------------- | ----------------------- | -------------------------------------- |
+| major/minor 数值比较        | INV-01         | upstream #47385 与 loop | parseFloat 折叠 minor，强制小数漏整数  |
+| SDK 3.0.88 + 累计补丁       | INV-02         | 三个上游 PR             | 本地 enum、capabilities 不识别目标行为 |
+| ProviderID 同一性限制       | INV-04/05      | 用户 + 密文 loop        | GPT 名字不证明账号/Provider 域相同     |
+| Astra API ID 匹配           | INV-03         | 用户 + #50989           | major 版本不能表达模型家族             |
 
 无新生产 helper、状态、public API、配置字段或抽象。
 
 ## 15. File-Level Change Plan
 
-| File | Add / modify / delete | Exact responsibility of the change | Expected line delta |
-| --- | --- | --- | --- |
-| packages/opencode/src/plugin/codex.ts | modify | major/minor 过滤 | 10 |
-| packages/opencode/src/session/system.ts | modify | prompt family 匹配 | 4 |
-| packages/opencode/src/session/message-v2.ts | modify | Provider 加密回放边界 | 8 |
-| packages/opencode/package.json | modify | SDK pin | 2 |
-| packages/core/package.json | modify | SDK pin | 2 |
-| package.json | modify | Bun patchedDependencies | 1 |
-| patches/@ai-sdk%2Fopenai@3.0.88.patch | add | 精确上游累计补丁，可在修改源码 hunk 附中文解释且保持相同运行语义 | ~448 |
-| bun.lock | modify generated | dependency/patch resolution，仅必要关联变更 | <150 |
-| packages/opencode/test/plugin/codex.test.ts | modify | 目录边界表 | ~45 |
-| packages/opencode/test/session/system.test.ts | modify | 更新独立路由预期 | ~12 |
-| packages/opencode/test/session/message-v2.test.ts | modify | 更新 GPT 回放矩阵，wire 隔离及不变性 | ~90 |
-| packages/opencode/test/provider/openai.test.ts | add | 上游 SDK test 与 tier/协议矩阵 | ~65 |
-| packages/opencode/test/session/llm.test.ts | modify | 复用 Responses test 增加 Astra ultrafast variant/真实请求验证，保留原 GPT-5 case | ~20 |
-| docs/plans/astra-upstream-tiers-provider-isolation.md | add/update | canonical evidence/audit | 文档 |
+| File                                                  | Add / modify / delete | Exact responsibility of the change                                               | Expected line delta |
+| ----------------------------------------------------- | --------------------- | -------------------------------------------------------------------------------- | ------------------- |
+| packages/opencode/src/plugin/codex.ts                 | modify                | major/minor 过滤                                                                 | 10                  |
+| packages/opencode/src/session/system.ts               | modify                | prompt family 匹配                                                               | 4                   |
+| packages/opencode/src/session/message-v2.ts           | modify                | Provider 加密回放边界                                                            | 8                   |
+| packages/opencode/package.json                        | modify                | SDK pin                                                                          | 2                   |
+| packages/core/package.json                            | modify                | SDK pin                                                                          | 2                   |
+| package.json                                          | modify                | Bun patchedDependencies                                                          | 1                   |
+| patches/@ai-sdk%2Fopenai@3.0.88.patch                 | add                   | 精确上游累计补丁，可在修改源码 hunk 附中文解释且保持相同运行语义                 | ~448                |
+| bun.lock                                              | modify generated      | dependency/patch resolution，仅必要关联变更                                      | <150                |
+| packages/opencode/test/plugin/codex.test.ts           | modify                | 目录边界表                                                                       | ~45                 |
+| packages/opencode/test/session/system.test.ts         | modify                | 更新独立路由预期                                                                 | ~12                 |
+| packages/opencode/test/session/message-v2.test.ts     | modify                | 更新 GPT 回放矩阵，wire 隔离及不变性                                             | ~90                 |
+| packages/opencode/test/provider/openai.test.ts        | add                   | 上游 SDK test 与 tier/协议矩阵                                                   | ~65                 |
+| packages/opencode/test/session/llm.test.ts            | modify                | 复用 Responses test 增加 Astra ultrafast variant/真实请求验证，保留原 GPT-5 case | ~20                 |
+| docs/plans/astra-upstream-tiers-provider-isolation.md | add/update            | canonical evidence/audit                                                         | 文档                |
 
 ## 16. TDD Behavior Slices
 
 审计批准即确认下列公共 seams；按 GOAL 自动推进，不另设审批。每片先 red，再唯一所属修复，最后 regression。
 
-| Order | Red behavior | Why current code fails | Minimal green behavior | Regression protected |
-| --- | --- | --- | --- | --- |
-| 1 | 跨 Provider GPT 不能带密文；同 Provider 可带 | 旧 GPT exception 无 Provider 判断 | 增加 ProviderID 条件 | 明文兼容、same model、可见 text、不修改历史；通过 SDK 捕获 wire |
-| 2 | GPT-6 Sol/Luna 用通用 prompt、Astra 用 Astra | gpt-6 broad match | astra match | Codex 与旧 GPT 路由 |
-| 3 | OAuth Astra、5.10 可见 | 正则与 parseFloat | 上游最终 major/minor 比较 | whitelist、旧 GPT 排除、非 OAuth passthrough |
-| 4 | SDK Chat/Responses 支持 ultrafast/priority/flex/default，Astra reasoning 不被丢 | 旧 SDK enum/capability | 3.0.88 + upstream cumulative patch | 两协议显式 tier、错误仍抛；core 使用同版 |
-| 5 | 配置 selected ultrafast variant 经 LLM.stream 到本地 HTTP | 旧 SDK 无此能力 | 已批准 SDK 修复 | 既有 GPT-5 Responses、tool/transport 回归 |
+| Order | Red behavior                                                                    | Why current code fails            | Minimal green behavior             | Regression protected                                            |
+| ----- | ------------------------------------------------------------------------------- | --------------------------------- | ---------------------------------- | --------------------------------------------------------------- |
+| 1     | 跨 Provider GPT 不能带密文；同 Provider 可带                                    | 旧 GPT exception 无 Provider 判断 | 增加 ProviderID 条件               | 明文兼容、same model、可见 text、不修改历史；通过 SDK 捕获 wire |
+| 2     | GPT-6 Sol/Luna 用通用 prompt、Astra 用 Astra                                    | gpt-6 broad match                 | astra match                        | Codex 与旧 GPT 路由                                             |
+| 3     | OAuth Astra、5.10 可见                                                          | 正则与 parseFloat                 | 上游最终 major/minor 比较          | whitelist、旧 GPT 排除、非 OAuth passthrough                    |
+| 4     | SDK Chat/Responses 支持 ultrafast/priority/flex/default，Astra reasoning 不被丢 | 旧 SDK enum/capability            | 3.0.88 + upstream cumulative patch | 两协议显式 tier、错误仍抛；core 使用同版                        |
+| 5     | 配置 selected ultrafast variant 经 LLM.stream 到本地 HTTP                       | 旧 SDK 无此能力                   | 已批准 SDK 修复                    | 既有 GPT-5 Responses、tool/transport 回归                       |
 
 不得测试 source text 或 helper 调用计数。HTTP 捕获是外部边界；终止异常使用固定 sentinel，断言真实 body，不请求在线模型。
 
 ## 17. Chinese Comment Budget
 
-| Metric | Estimate | Method |
-| --- | --- | --- |
-| Effective changed code lines E | 150-230 | 新增/实质修改 production/test/config；排除 imports、空行、纯格式、generated lock/dist/type declarations、patch context 与删除行 |
-| Required Chinese explanatory comments C | 23-35，最终按实际公式 | E=0 则 C=0，否则 C>=max(1,ceil(E*0.15)) |
+| Metric                                  | Estimate              | Method                                                                                                                          |
+| --------------------------------------- | --------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| Effective changed code lines E          | 150-230               | 新增/实质修改 production/test/config；排除 imports、空行、纯格式、generated lock/dist/type declarations、patch context 与删除行 |
+| Required Chinese explanatory comments C | 23-35，最终按实际公式 | E=0 则 C=0，否则 C>=max(1,ceil(E\*0.15))                                                                                        |
 
 注释邻近解释：Provider 是可用历史 provenance；same Provider 切换 GPT 保留；空 summary 无需造占位；reasoning_content 是明文；持久化不可变；API ID 不等于显示别名；多位 minor 非小数；旧 allowlist 合同；SDK 源码与发布入口同时补丁；公开 tier 指令由服务端判定；离线 sentinel/请求 body 的独立行为预期；variant 必须选中。上游 patch 的生成入口不增加无意义注释；有效 SDK 源码补丁纳入 E。不得集中堆放、逐行复述或通过拆行凑数。
 
 ## 18. Verification
 
-| Command | Working directory | Evidence produced |
-| --- | --- | --- |
-| 第 8 节三条 bun -e | packages/opencode | 原始症状消失，目录另由明确测试断言 |
-| bun test test/session/message-v2.test.ts test/provider/transform.test.ts --timeout 30000 | packages/opencode | 投影隔离与协议兼容 |
-| bun test test/session/system.test.ts test/plugin/codex.test.ts --timeout 30000 | packages/opencode | 提示词、目录及认证既有行为 |
-| bun test test/provider/openai.test.ts --timeout 30000 | packages/opencode | patched SDK 请求体 |
-| bun test test/session/llm.test.ts test/provider/provider.test.ts --timeout 30000 | packages/opencode | variant 到 wire、Provider resolution/alias、transport |
-| bun test test/plugin/provider-openai.test.ts --timeout 30000 | packages/core | 第二 SDK consumer |
-| bun typecheck | packages/opencode 与 packages/core 分别 | 类型与升级兼容 |
-| bun install --ignore-scripts；bun install --frozen-lockfile --ignore-scripts | repository root | 依赖安装和 patch 可重现；仅依赖操作，非跳过测试/提交 hook |
-| git diff --check；git diff --stat | repository root | 范围、空白、生产预算 |
+| Command                                                                                  | Working directory                       | Evidence produced                                         |
+| ---------------------------------------------------------------------------------------- | --------------------------------------- | --------------------------------------------------------- |
+| 第 8 节三条 bun -e                                                                       | packages/opencode                       | 原始症状消失，目录另由明确测试断言                        |
+| bun test test/session/message-v2.test.ts test/provider/transform.test.ts --timeout 30000 | packages/opencode                       | 投影隔离与协议兼容                                        |
+| bun test test/session/system.test.ts test/plugin/codex.test.ts --timeout 30000           | packages/opencode                       | 提示词、目录及认证既有行为                                |
+| bun test test/provider/openai.test.ts --timeout 30000                                    | packages/opencode                       | patched SDK 请求体                                        |
+| bun test test/session/llm.test.ts test/provider/provider.test.ts --timeout 30000         | packages/opencode                       | variant 到 wire、Provider resolution/alias、transport     |
+| bun test test/plugin/provider-openai.test.ts --timeout 30000                             | packages/core                           | 第二 SDK consumer                                         |
+| bun typecheck                                                                            | packages/opencode 与 packages/core 分别 | 类型与升级兼容                                            |
+| bun install --ignore-scripts；bun install --frozen-lockfile --ignore-scripts             | repository root                         | 依赖安装和 patch 可重现；仅依赖操作，非跳过测试/提交 hook |
+| git diff --check；git diff --stat                                                        | repository root                         | 范围、空白、生产预算                                      |
 
 若环境/既有测试失败，记录独立证据并定位，不降低断言、不改无关实现；真实 blocker 按 GOAL 处理。线上 entitlement/实际计费 tier 不验证，不使用用户凭据。
 
 ## 19. Diff Budget
 
-| Metric | Estimate | Justification |
-| --- | --- | --- |
-| Files added | 3 | SDK patch、SDK test、canonical plan |
-| Files modified | 11 | 3 production source、3 manifests、lock、4 tests |
-| Files deleted | 0 | 无 |
-| Production lines | <600（含完整 patch 文本） | 7 个 production/config/patch 文件，保守含 lock 为 8，低于 16；低于 2500 行 |
-| Test lines | <300 | 复用 fixture 与既有路由/Responses case |
-| Generated lines | <150 lock；patch 中生成内容约 350 | 必需 SDK 发布入口，不编辑模型快照 |
+| Metric           | Estimate                          | Justification                                                              |
+| ---------------- | --------------------------------- | -------------------------------------------------------------------------- |
+| Files added      | 3                                 | SDK patch、SDK test、canonical plan                                        |
+| Files modified   | 11                                | 3 production source、3 manifests、lock、4 tests                            |
+| Files deleted    | 0                                 | 无                                                                         |
+| Production lines | <600（含完整 patch 文本）         | 7 个 production/config/patch 文件，保守含 lock 为 8，低于 16；低于 2500 行 |
+| Test lines       | <300                              | 复用 fixture 与既有路由/Responses case                                     |
+| Generated lines  | <150 lock；patch 中生成内容约 350 | 必需 SDK 发布入口，不编辑模型快照                                          |
 
 ## 20. Real Risks and Open Decisions
 
@@ -280,9 +280,9 @@ Prompt 最初直接 import system 出现既有 Ruleset 循环初始化异常；�
 
 ## 22. Plan Audit Record
 
-| Round | Audited revision | Full scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | R1 | yes | No blocking findings | N-01 | APPROVE | ses_ed6a472f6ffekIYIy6vVZT9cCr |
+| Round | Audited revision | Full scope? | Blocking findings    | Non-blocking findings | Result  | Invocation reference           |
+| ----- | ---------------- | ----------- | -------------------- | --------------------- | ------- | ------------------------------ |
+| 1     | R1               | yes         | No blocking findings | N-01                  | APPROVE | ses_ed6a472f6ffekIYIy6vVZT9cCr |
 
 ### Independent Verdict (Verbatim)
 
@@ -305,14 +305,14 @@ No blocking findings.
 
 本轮覆盖 R1 的完整原始需求及所有计划变更区域。
 
-| 需求 | 独立核查结果 |
-|---|---|
-| #47385 模型版本比较 | `codex.ts:383-408` 确认现有小数正则与 `parseFloat` 的缺陷；上游提交确认采用 major/minor 比较。计划保留本地 allowlist、成本和 limit 行为。 |
-| #47659 SDK 升级 | 上游提交确认 core、opencode 两处升级到 `3.0.88`；本地两处仍为 `3.0.53`。两包检查与依赖安装验证已映射。 |
-| #47671、#53875 tier 修正 | 已读取固定提交中的累计补丁，覆盖 Chat/Responses 的 tier 校验、能力过滤及发布入口。配置 → variant → `LLM.stream` → SDK 的路径成立。 |
-| Astra 提示词收窄 | `system.ts:34-43` 确认本地尚未收窄；计划在现有 API ID 路由处修复，并更新独立模板预期。 |
+| 需求                     | 独立核查结果                                                                                                                                |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| #47385 模型版本比较      | `codex.ts:383-408` 确认现有小数正则与 `parseFloat` 的缺陷；上游提交确认采用 major/minor 比较。计划保留本地 allowlist、成本和 limit 行为。   |
+| #47659 SDK 升级          | 上游提交确认 core、opencode 两处升级到 `3.0.88`；本地两处仍为 `3.0.53`。两包检查与依赖安装验证已映射。                                      |
+| #47671、#53875 tier 修正 | 已读取固定提交中的累计补丁，覆盖 Chat/Responses 的 tier 校验、能力过滤及发布入口。配置 → variant → `LLM.stream` → SDK 的路径成立。          |
+| Astra 提示词收窄         | `system.ts:34-43` 确认本地尚未收窄；计划在现有 API ID 路由处修复，并更新独立模板预期。                                                      |
 | 跨 Provider 加密状态隔离 | `processor.ts:497-554` 生产 metadata；`message-v2.ts:1420-1422` 的 GPT 例外首次绕过 Provider 边界；计划在该责任点增加 Provider 同一性条件。 |
-| 保留合法历史与控制范围 | 同 Provider 回放、可见文本、兼容明文 reasoning、工具历史和输入不变性均有测试映射；未增加迁移、配置或账号状态。 |
+| 保留合法历史与控制范围   | 同 Provider 回放、可见文本、兼容明文 reasoning、工具历史和输入不变性均有测试映射；未增加迁移、配置或账号状态。                              |
 
 计划的回归测试能够对当前缺陷产生敏感结果：跨 Provider 密文断言、GPT-6 非 Astra 模板断言、整数及多位 minor 目录断言、tier 请求体断言均可区分修复前后行为。
 
@@ -377,16 +377,16 @@ Initial typecheck found missing Bun fetch.preconnect and assistant/user content 
 
 All commands completed on 2026-10-11, Bun 1.3.14.
 
-| Working directory | Command | Result |
-| --- | --- | --- |
-| repository root | `bun install --ignore-scripts` | success, generated lockfile |
-| repository root | `bun install --frozen-lockfile --ignore-scripts` | success, reproducible frozen resolution |
-| packages/opencode | `bun test test/session/message-v2.test.ts test/provider/transform.test.ts test/session/system.test.ts test/plugin/codex.test.ts test/provider/openai.test.ts test/session/llm.test.ts test/provider/provider.test.ts --timeout 30000` | 460 pass, 0 fail, 983 expectations |
-| packages/opencode | `bun typecheck` | exit 0 |
-| packages/core | `bun typecheck` | exit 0 |
-| packages/core | `bun test test/plugin/provider-openai.test.ts --timeout 30000` | 6 pass, 0 fail, 9 expectations |
-| packages/core | offline SDK request probe | core SDK ultrafast wire verified |
-| repository root | `git diff --check` | exit 0 |
+| Working directory | Command                                                                                                                                                                                                                               | Result                                  |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------- |
+| repository root   | `bun install --ignore-scripts`                                                                                                                                                                                                        | success, generated lockfile             |
+| repository root   | `bun install --frozen-lockfile --ignore-scripts`                                                                                                                                                                                      | success, reproducible frozen resolution |
+| packages/opencode | `bun test test/session/message-v2.test.ts test/provider/transform.test.ts test/session/system.test.ts test/plugin/codex.test.ts test/provider/openai.test.ts test/session/llm.test.ts test/provider/provider.test.ts --timeout 30000` | 460 pass, 0 fail, 983 expectations      |
+| packages/opencode | `bun typecheck`                                                                                                                                                                                                                       | exit 0                                  |
+| packages/core     | `bun typecheck`                                                                                                                                                                                                                       | exit 0                                  |
+| packages/core     | `bun test test/plugin/provider-openai.test.ts --timeout 30000`                                                                                                                                                                        | 6 pass, 0 fail, 9 expectations          |
+| packages/core     | offline SDK request probe                                                                                                                                                                                                             | core SDK ultrafast wire verified        |
+| repository root   | `git diff --check`                                                                                                                                                                                                                    | exit 0                                  |
 
 Package-local narrow checks preceded the combined run. No tests ran from repository root. No live credentials or network inference were used.
 
@@ -404,12 +404,12 @@ Only approved primary paths changed. The old blanket GPT cross-Provider exceptio
 
 ### Chinese Comment Calculation
 
-| Metric | Actual | Exclusions and evidence |
-| --- | --- | --- |
-| Effective changed code lines E | 188 | changed nonblank, non-import code additions, including two SDK source enum additions |
-| Qualifying Chinese comment lines C | 32 | adjacent boundary, compatibility and test-intent explanations |
-| Ratio C/E | 17.02% | 32 / 188 |
-| Required minimum C | 29 | ceil(188 * 0.15) |
+| Metric                             | Actual | Exclusions and evidence                                                              |
+| ---------------------------------- | ------ | ------------------------------------------------------------------------------------ |
+| Effective changed code lines E     | 188    | changed nonblank, non-import code additions, including two SDK source enum additions |
+| Qualifying Chinese comment lines C | 32     | adjacent boundary, compatibility and test-intent explanations                        |
+| Ratio C/E                          | 17.02% | 32 / 188                                                                             |
+| Required minimum C                 | 29     | ceil(188 \* 0.15)                                                                    |
 
 Per-file E/C: root manifest 1/0; core manifest 1/0; opencode manifest 1/0; codex source 5/1; message source 1/2; system source 1/1; codex test 57/7; message test 46/8; system test 6/2; llm test 12/3; new openai test 55/8; SDK patch source enum additions 2/0. Excluded imports, blank lines, generated lockfile and generated SDK dist/declarations, patch context and deletions; no pure moves. Representative comments explain ProviderID as available account-domain provenance, why same-Provider GPT reuse remains, why store:false is necessary for encrypted wire assertions, and why minor versions cannot be decimal numbers.
 
@@ -419,9 +419,9 @@ Live OAuth account entitlement and actual server tier remain unverified; no prod
 
 ## 24. Implementation Audit Record
 
-| Round | Plan revision | Full original scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | R1 | yes | none | none | APPROVE | ses_ed6392cfeffeJ8sCGtGhwsOUDK |
+| Round | Plan revision | Full original scope? | Blocking findings | Non-blocking findings | Result  | Invocation reference           |
+| ----- | ------------- | -------------------- | ----------------- | --------------------- | ------- | ------------------------------ |
+| 1     | R1            | yes                  | none              | none                  | APPROVE | ses_ed6392cfeffeJ8sCGtGhwsOUDK |
 
 本轮第一次返回静态无阻塞，但因尚未独立执行验证而暂缓放行；复用同一 task_id 明确既有执行授权后，审计员独立重跑并给出以下最终 verdict。没有实现返工或范围变更。
 
@@ -448,31 +448,31 @@ No blocking findings.
 
 本轮覆盖 R1 原始完整需求、全部指定 diff hunks、两个新增实现文件，以及决定其行为的生产者和消费者。当前 revision 与 approved revision 均为 R1。
 
-| 需求 | 独立核查结果 |
-|---|---|
-| #47385 模型版本比较 | `codex.ts:383-415` 在原 models hook 修复整数版本和多位 minor 比较；保留原 allowlist、OAuth 零计费及 5.5 limit。测试覆盖允许、拒绝和 API-key 透传行为。 |
-| #47659 SDK 升级 | core、opencode 的 manifest、lockfile 和实际安装包均为 `3.0.88`；两个消费者的测试及类型检查通过。 |
-| #47671、#53875 tier 修正 | 补丁覆盖 Chat/Responses 源码、CJS/ESM、internal 和声明入口。当前补丁与固定上游提交的 blob 哈希一致：`cf467ee4f4c401132cc3e94edc29c78cd3fe87e0`。 |
-| 显式 tier 到请求体 | `llm.ts:132-143,384` 将选中 variant 合并并交给 SDK。SDK 测试检查真实序列化字段；未知模型用例独立验证静态能力过滤已移除；LLM 测试覆盖配置到 HTTP 请求。 |
-| Astra 提示词收窄 | `system.ts:34-43` 在既有 API ID 路由内改为匹配 `astra`，保留旧 GPT 和 Codex 优先级。独立复现确认 Astra 命中专用模板，Sol/Luna 不命中。 |
+| 需求                       | 独立核查结果                                                                                                                                                                                  |
+| -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| #47385 模型版本比较        | `codex.ts:383-415` 在原 models hook 修复整数版本和多位 minor 比较；保留原 allowlist、OAuth 零计费及 5.5 limit。测试覆盖允许、拒绝和 API-key 透传行为。                                        |
+| #47659 SDK 升级            | core、opencode 的 manifest、lockfile 和实际安装包均为 `3.0.88`；两个消费者的测试及类型检查通过。                                                                                              |
+| #47671、#53875 tier 修正   | 补丁覆盖 Chat/Responses 源码、CJS/ESM、internal 和声明入口。当前补丁与固定上游提交的 blob 哈希一致：`cf467ee4f4c401132cc3e94edc29c78cd3fe87e0`。                                              |
+| 显式 tier 到请求体         | `llm.ts:132-143,384` 将选中 variant 合并并交给 SDK。SDK 测试检查真实序列化字段；未知模型用例独立验证静态能力过滤已移除；LLM 测试覆盖配置到 HTTP 请求。                                        |
+| Astra 提示词收窄           | `system.ts:34-43` 在既有 API ID 路由内改为匹配 `astra`，保留旧 GPT 和 Codex 优先级。独立复现确认 Astra 命中专用模板，Sol/Luna 不命中。                                                        |
 | 跨 Provider 不透明状态隔离 | `processor.ts:497-554` 保存 reasoning metadata；`message-v2.ts:1415-1424` 在原 GPT 回放例外处加入 Provider 同一性条件。跨 Provider 进入 `1578-1603` 的已有文本投影路径，不携带密文 metadata。 |
-| 保留合法历史 | 同 Provider 同模型、跨 GPT 模型、空/非空摘要均有矩阵覆盖；测试检查输入不变及真实 SDK 的 `encrypted_content`。既有工具历史和明文 `reasoning_content` 测试保留并通过。 |
-| 克制修改 | 生产、依赖及补丁共 8 个路径，其中生产 TypeScript 为 3 个；低于用户提出的文件数和行数预算。未增加账号状态、迁移或配置接口。 |
+| 保留合法历史               | 同 Provider 同模型、跨 GPT 模型、空/非空摘要均有矩阵覆盖；测试检查输入不变及真实 SDK 的 `encrypted_content`。既有工具历史和明文 `reasoning_content` 测试保留并通过。                          |
+| 克制修改                   | 生产、依赖及补丁共 8 个路径，其中生产 TypeScript 为 3 个；低于用户提出的文件数和行数预算。未增加账号状态、迁移或配置接口。                                                                    |
 
 新增测试能够区分原始缺陷与修复结果。原跨 Provider 密文回放预期按新需求替换为隔离断言；GPT-5.2 请求测试继续作为对照。已直接读取 SDK ultrafast 校验失败及提示词路由失败的原始红测输出，并独立完成最终绿测和原始反馈循环。
 
 **本轮独立执行结果：**
 
-| 工作目录 | 验证 | 结果 |
-|---|---|---|
-| `packages/opencode` | R1 §18 七文件组合测试 | **460 pass、0 fail、983 expectations** |
-| `packages/core` | `test/plugin/provider-openai.test.ts` | **6 pass、0 fail、9 expectations** |
-| `packages/opencode` | `bun typecheck` | **exit 0** |
-| `packages/core` | `bun typecheck` | **exit 0** |
-| 仓库根目录 | `bun install --frozen-lockfile --ignore-scripts` | **exit 0** |
-| `packages/opencode` | frozen install 后重跑 SDK 与 MessageV2 测试 | **67 pass、0 fail、176 expectations** |
-| `packages/opencode` | R1 §8 三条原始反馈命令 | **全部 exit 0** |
-| 仓库根目录 | `git diff --check` | **通过** |
+| 工作目录            | 验证                                             | 结果                                   |
+| ------------------- | ------------------------------------------------ | -------------------------------------- |
+| `packages/opencode` | R1 §18 七文件组合测试                            | **460 pass、0 fail、983 expectations** |
+| `packages/core`     | `test/plugin/provider-openai.test.ts`            | **6 pass、0 fail、9 expectations**     |
+| `packages/opencode` | `bun typecheck`                                  | **exit 0**                             |
+| `packages/core`     | `bun typecheck`                                  | **exit 0**                             |
+| 仓库根目录          | `bun install --frozen-lockfile --ignore-scripts` | **exit 0**                             |
+| `packages/opencode` | frozen install 后重跑 SDK 与 MessageV2 测试      | **67 pass、0 fail、176 expectations**  |
+| `packages/opencode` | R1 §8 三条原始反馈命令                           | **全部 exit 0**                        |
+| 仓库根目录          | `git diff --check`                               | **通过**                               |
 
 原始反馈实际输出确认：
 
@@ -506,17 +506,17 @@ No blocking findings.
 
 按实际 diff 独立计数：
 
-| 范围 | E | C |
-|---|---:|---:|
-| 三处 manifest | 3 | 0 |
-| 三处生产 TypeScript 修改 | 7 | 4 |
-| Codex 测试 | 57 | 7 |
-| MessageV2 测试 | 46 | 8 |
-| SystemPrompt 测试 | 6 | 2 |
-| LLM 测试 | 12 | 3 |
-| 新增 OpenAI SDK 测试 | 55 | 8 |
-| SDK 补丁源码新增枚举行 | 2 | 0 |
-| **合计** | **188** | **32** |
+| 范围                     |       E |      C |
+| ------------------------ | ------: | -----: |
+| 三处 manifest            |       3 |      0 |
+| 三处生产 TypeScript 修改 |       7 |      4 |
+| Codex 测试               |      57 |      7 |
+| MessageV2 测试           |      46 |      8 |
+| SystemPrompt 测试        |       6 |      2 |
+| LLM 测试                 |      12 |      3 |
+| 新增 OpenAI SDK 测试     |      55 |      8 |
+| SDK 补丁源码新增枚举行   |       2 |      0 |
+| **合计**                 | **188** | **32** |
 
 **C/E = 17.02%**，达到 policy 的 15% 要求，最低需 29 行。
 
@@ -536,14 +536,14 @@ No blocking findings.
 
 2026-10-11 本地 Windows、Bun 1.3.14 扩大验证：
 
-| Scope | Command / environment | Result |
-| --- | --- | --- |
-| 根目录正常安装 | `bun install --frozen-lockfile`，包含 fix-node-pty 和 husky hooks | exit 0 |
-| packages/core 全套 | `bun run test:ci` | 378 pass, 1 skip, 0 fail; 51 files; 77.82s |
-| packages/opencode integration | `OPENCODE_TEST_SHARD=integration`，`bun run script/test-ci.ts` | 1009 pass, 34 skip, 0 fail; 80 files; 2086.16s |
-| packages/opencode runtime | `OPENCODE_TEST_SHARD=runtime`，同上 | 2917 pass, 13 skip, 0 fail; 157 files; 1994.02s |
-| packages/opencode tui | `OPENCODE_TEST_SHARD=tui`，同上 | 801 pass, 14 skip, 0 fail; 80 files; 737.34s |
-| 两包类型检查 | 分别在 packages/core、packages/opencode 执行 `bun typecheck` | 均 exit 0 |
+| Scope                         | Command / environment                                             | Result                                          |
+| ----------------------------- | ----------------------------------------------------------------- | ----------------------------------------------- |
+| 根目录正常安装                | `bun install --frozen-lockfile`，包含 fix-node-pty 和 husky hooks | exit 0                                          |
+| packages/core 全套            | `bun run test:ci`                                                 | 378 pass, 1 skip, 0 fail; 51 files; 77.82s      |
+| packages/opencode integration | `OPENCODE_TEST_SHARD=integration`，`bun run script/test-ci.ts`    | 1009 pass, 34 skip, 0 fail; 80 files; 2086.16s  |
+| packages/opencode runtime     | `OPENCODE_TEST_SHARD=runtime`，同上                               | 2917 pass, 13 skip, 0 fail; 157 files; 1994.02s |
+| packages/opencode tui         | `OPENCODE_TEST_SHARD=tui`，同上                                   | 801 pass, 14 skip, 0 fail; 80 files; 737.34s    |
+| 两包类型检查                  | 分别在 packages/core、packages/opencode 执行 `bun typecheck`      | 均 exit 0                                       |
 
 OpenCode 三个分片共 4727 pass / 61 skip / 0 fail，使用与 Windows CI 相同的 `OPENCODE_DISABLE_LSP_DOWNLOAD=true` 和 `OPENCODE_EXPERIMENTAL_DISABLE_FILEWATCHER=true`。最初未分片的本地调用在工具的 30 分钟上限内未完成，未获得完整报告；改用 CI 的三个独立分片后全部正常退出。最后可见的 httpapi-sdk.test.ts 另行单跑为 16 pass / 0 fail。超时那次不计为成功，也没有据此修改测试或生产代码。
 

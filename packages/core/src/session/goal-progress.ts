@@ -282,16 +282,21 @@ export function nativeEvidence(messages: readonly SessionMessage.Message[]): Evi
     const parts: Evidence[] = []
     if (message.snapshot?.files?.length) {
       // Step owner 的快照证明实际变化，成功 write 本身不等同于有效 diff。
-      parts.push({ type: "patch", files: message.snapshot.files, hash: `${message.snapshot.start ?? ""}:${message.snapshot.end ?? ""}` })
+      parts.push({
+        type: "patch",
+        files: message.snapshot.files,
+        hash: `${message.snapshot.start ?? ""}:${message.snapshot.end ?? ""}`,
+      })
     }
     for (const part of message.content) {
       if (part.type !== "tool" || part.state.status !== "completed") continue
       // Native后台通知也是已结算ToolPart；只有实际任务完成才提供共享探索身份。
-      const metadata = part.name === "task" && part.state.structured.state === "completed"
-        ? { ...part.state.structured, sessionId: part.state.structured.task_id }
-        : part.state.structured
+      const metadata =
+        part.name === "task" && part.state.structured.state === "completed"
+          ? { ...part.state.structured, sessionId: part.state.structured.task_id }
+          : part.state.structured
       // Bash 首段是稳定输出，后附耗时说明不能制造验证结果变化。
-      const output = part.state.content.flatMap((content) => content.type === "text" ? [content.text] : [])[0] ?? ""
+      const output = part.state.content.flatMap((content) => (content.type === "text" ? [content.text] : []))[0] ?? ""
       parts.push({
         type: "tool",
         tool: part.name,

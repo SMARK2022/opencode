@@ -82,12 +82,16 @@ export function tokenAccounting(
   messages: ReadonlyArray<Msg>,
   getParts: (id: string) => ReadonlyArray<Pt>,
   contextLimit?: number,
-  projection?: { session: Pick<Session, "tokens" | "cost" | "request"> | undefined; last: AssistantMessage | undefined; parts: ReadonlyArray<Part> },
+  projection?: {
+    session: Pick<Session, "tokens" | "cost" | "request"> | undefined
+    last: AssistantMessage | undefined
+    parts: ReadonlyArray<Part>
+  },
   // #490：显式历史 request 选择器——只改变 request projection 的 parent，不改变 session 全量遍历
   requestUserID?: string,
 ): TokenAccounting {
   // #122：会话累计与当前 request 边界（按 user 消息切分）
-// ── 1. lastUser / requestAssistantIDs ──
+  // ── 1. lastUser / requestAssistantIDs ──
   // 以最新 assistant 的 parentID 锁定当前活跃 user，跳过尚未派生 assistant 的 queued user
   // （例如 TaskTool 后台注入 noReply prompt 在父会话 busy 期间落库的 orphan）。
   // 无 assistant（首次 prompt 空窗）时仍取最新 user，保留原 fail-closed 语义。
@@ -134,7 +138,7 @@ export function tokenAccounting(
     const parts = getParts(msg.id)
     const isRequest = requestAssistantIDs.has(msg.id)
     // #122：本 assistant 是否已出现 step-finish
-  let msgHasFinish = false
+    let msgHasFinish = false
 
     for (let i = 0; i < parts.length; i++) {
       const p = parts[i]
@@ -163,7 +167,9 @@ export function tokenAccounting(
       if (chars && chars >= 100) {
         const tok = p.tokens.input + p.tokens.cache.read + p.tokens.cache.write
         if (tok > 0) {
-          const bd = p.inputBreakdown as { messages?: { attachments?: number }; media?: { rawChars: number; textChars: number; tokens: number } } | undefined
+          const bd = p.inputBreakdown as
+            | { messages?: { attachments?: number }; media?: { rawChars: number; textChars: number; tokens: number } }
+            | undefined
           // #175：校准剔除 media.raw，加回 text 占位
           // #194：旧附件样本排除，已知媒体量从确认分母扣除，不能稀释文本密度。
           if (bd?.media || !bd?.messages?.attachments) {
@@ -178,17 +184,21 @@ export function tokenAccounting(
       if (confirmedOut > 0) {
         let stepChars = 0
         const startIdx = parts.slice(0, i).findLastIndex((x) => x.type === "step-start")
-        for (let j = (startIdx >= 0 ? startIdx + 1 : 0); j < i; j++) {
+        for (let j = startIdx >= 0 ? startIdx + 1 : 0; j < i; j++) {
           const sp = parts[j]
-          if (sp.type === "text" && !sp.ignored) stepChars += (sp.text?.length ?? 0)
-          if (sp.type === "reasoning") stepChars += (sp.text?.length ?? 0)
+          if (sp.type === "text" && !sp.ignored) stepChars += sp.text?.length ?? 0
+          if (sp.type === "reasoning") stepChars += sp.text?.length ?? 0
           if (sp.type === "tool") {
-            stepChars += sp.state?.status === "pending"
-              ? (sp.state.raw?.length ?? 0)
-              : JSON.stringify(sp.state?.input ?? {}).length
+            stepChars +=
+              sp.state?.status === "pending"
+                ? (sp.state.raw?.length ?? 0)
+                : JSON.stringify(sp.state?.input ?? {}).length
           }
         }
-        if (stepChars > 0) { outputCharsTotal += stepChars; outputTokensTotal += confirmedOut }
+        if (stepChars > 0) {
+          outputCharsTotal += stepChars
+          outputTokensTotal += confirmedOut
+        }
       }
     }
 
@@ -219,12 +229,17 @@ export function tokenAccounting(
       if (msg.time?.completed !== undefined && confirmedOut > 0) {
         const stepChars = parts.reduce((sum, p) => {
           if ((p.type === "text" && !p.ignored) || p.type === "reasoning") return sum + (p.text?.length ?? 0)
-          if (p.type === "tool") return sum + (p.state?.status === "pending"
-            ? (p.state.raw?.length ?? 0)
-            : JSON.stringify(p.state?.input ?? {}).length)
+          if (p.type === "tool")
+            return (
+              sum +
+              (p.state?.status === "pending" ? (p.state.raw?.length ?? 0) : JSON.stringify(p.state?.input ?? {}).length)
+            )
           return sum
         }, 0)
-        if (stepChars > 0) { outputCharsTotal += stepChars; outputTokensTotal += confirmedOut }
+        if (stepChars > 0) {
+          outputCharsTotal += stepChars
+          outputTokensTotal += confirmedOut
+        }
       }
     }
   }
@@ -233,18 +248,33 @@ export function tokenAccounting(
   // #194：clamp 2..8——与 TokenEstimate.learnInputCharsPerToken 同口径，防极端样本失真
   // #194：TUI 不能直接 import TokenEstimate（包边界），但 ratio 逻辑与 daemon 对齐
   const density = requestProjection?.session?.request?.inputEstimate?.charsPerToken
-  const inputRatio = density !== undefined && Number.isFinite(density) && density > 0 ? density : ratioTokens > 0 && ratioChars > 500 ? Math.min(8, Math.max(2, ratioChars / ratioTokens)) : DEFAULT_RATIO
+  const inputRatio =
+    density !== undefined && Number.isFinite(density) && density > 0
+      ? density
+      : ratioTokens > 0 && ratioChars > 500
+        ? Math.min(8, Math.max(2, ratioChars / ratioTokens))
+        : DEFAULT_RATIO
   // #122：输出字符/token 比；样本不足回落 DEFAULT_RATIO
-  const outputRatio = outputTokensTotal > 0 && outputCharsTotal > 100 ? outputCharsTotal / outputTokensTotal : DEFAULT_RATIO
+  const outputRatio =
+    outputTokensTotal > 0 && outputCharsTotal > 100 ? outputCharsTotal / outputTokensTotal : DEFAULT_RATIO
   // 持久投影拥有完整请求确认值；输入密度与输出校准分别进入既有尾部 helper。
   const projected = requestProjection?.session?.request
-    ? computeFinalTokens(requestProjection.last, requestProjection.parts, requestProjection.session.request, outputRatio)
+    ? computeFinalTokens(
+        requestProjection.last,
+        requestProjection.parts,
+        requestProjection.session.request,
+        outputRatio,
+      )
     : undefined
 
   // ── 4. step（基于 latest assistant）───────────────────────────────
   // 当前投影或显式历史 parent 唯一决定尾部，保留上游分页选择与零确认语义。
   const latestAssistant = requestProjection ? requestProjection.last : latestAssistantForRequest
-  const lastParts: ReadonlyArray<Pt> = requestProjection ? requestProjection.parts : latestAssistant ? getParts(latestAssistant.id) : []
+  const lastParts: ReadonlyArray<Pt> = requestProjection
+    ? requestProjection.parts
+    : latestAssistant
+      ? getParts(latestAssistant.id)
+      : []
   // #122：最后一个 step-finish 划分已确认区与流式追加区
   const sfIdx = lastParts.findLastIndex((p) => p.type === "step-finish")
   const stepSF = sfIdx >= 0 ? lastParts[sfIdx] : undefined
@@ -257,7 +287,7 @@ export function tokenAccounting(
   if (stepSF && msgCompleted) {
     stepInput = stepSF.tokens.input + stepSF.tokens.cache.read + stepSF.tokens.cache.write
     stepConfirmed = true
-  // #122：流式中 step-finish 可能存在但仍需叠加未确认输出
+    // #122：流式中 step-finish 可能存在但仍需叠加未确认输出
   } else if (stepSF && !msgCompleted) {
     // #122：流式进行中：step-finish 存在但消息未 completed
     stepInput = latestAssistant?.tokens
@@ -278,12 +308,11 @@ export function tokenAccounting(
     let outChars = 0
     for (let i = sfIdx + 1; i < lastParts.length; i++) {
       const p = lastParts[i]
-      if (p.type === "text" && !p.ignored) outChars += (p.text?.length ?? 0)
-      if (p.type === "reasoning") outChars += (p.text?.length ?? 0)
+      if (p.type === "text" && !p.ignored) outChars += p.text?.length ?? 0
+      if (p.type === "reasoning") outChars += p.text?.length ?? 0
       if (p.type === "tool") {
-        outChars += p.state?.status === "pending"
-          ? (p.state.raw?.length ?? 0)
-          : JSON.stringify(p.state?.input ?? {}).length
+        outChars +=
+          p.state?.status === "pending" ? (p.state.raw?.length ?? 0) : JSON.stringify(p.state?.input ?? {}).length
       }
     }
     stepOutput = Math.round(outChars / outputRatio)
@@ -298,9 +327,13 @@ export function tokenAccounting(
     const p = lastParts[i]
     if (p.type !== "tool") continue
     // prepared 游标已覆盖的结果和附件属于输入快照，不能再追加为 pending。
-    if (requestProjection?.session?.request?.estimatedInput !== undefined && (p.id ?? "") <= (requestProjection.last?.inputEstimate?.afterPartID ?? "")) continue
+    if (
+      requestProjection?.session?.request?.estimatedInput !== undefined &&
+      (p.id ?? "") <= (requestProjection.last?.inputEstimate?.afterPartID ?? "")
+    )
+      continue
     if (p.state?.status === "completed") {
-      pendingToolResultChars += (p.state.output?.length ?? 0)
+      pendingToolResultChars += p.state.output?.length ?? 0
       for (const att of (p.state.attachments ?? []) as Array<{ url: string; mime: string }>) {
         // #122：附件 data URL 估算并入待计入 input
         // #175：pending 附件与 daemon 同口径
@@ -308,7 +341,7 @@ export function tokenAccounting(
       }
     }
     if (p.state?.status === "error") {
-      pendingToolResultChars += (p.state.error?.length ?? 0)
+      pendingToolResultChars += p.state.error?.length ?? 0
     }
   }
   const pendingToolResultTokens = Math.round(pendingToolResultChars / inputRatio)
@@ -322,8 +355,8 @@ export function tokenAccounting(
   // 写入的工具结果才是已知的未来 input。
   const inFlightInput = stepConfirmed
     ? 0
-    // #490：selected historical parent 不是 global latest 时，不能把当前 parent 的 pending input 借给它。
-    : stepSF && latestAssistant?.id === (requestUserID ? latestAssistantForUser?.id : latestRequestAssistant?.id)
+    : // #490：selected historical parent 不是 global latest 时，不能把当前 parent 的 pending input 借给它。
+      stepSF && latestAssistant?.id === (requestUserID ? latestAssistantForUser?.id : latestRequestAssistant?.id)
       ? pendingToolResultTokens + pendingAttachTokens
       : stepInput
   const totalInput = confirmedRequest.input + inFlightInput
@@ -337,38 +370,66 @@ export function tokenAccounting(
   // #124：无 step-start 时 breakdown 仅能等 step-finish 或 pending
   const stepSS = ssIdx >= 0 ? lastParts[ssIdx] : undefined
   // 当前请求没有快照时不能借旧助手；显式零字符、零估算也是有效快照。
-  const estimate = requestProjection?.session?.request ? requestProjection.session.request.inputEstimate : latestAssistant?.inputEstimate
-  const pendingMsg =
-    estimate?.inputBreakdown
-      ? {
-          type: "pending" as const,
-          inputBreakdown: estimate.inputBreakdown,
-          inputChars: estimate.bodyChars,
-          inputTokens: estimate.input,
-        }
-      : undefined
+  const estimate = requestProjection?.session?.request
+    ? requestProjection.session.request.inputEstimate
+    : latestAssistant?.inputEstimate
+  const pendingMsg = estimate?.inputBreakdown
+    ? {
+        type: "pending" as const,
+        inputBreakdown: estimate.inputBreakdown,
+        inputChars: estimate.bodyChars,
+        inputTokens: estimate.input,
+      }
+    : undefined
   // 下一轮 prepared 游标越过旧 finish/start 时，旧确认不能接管新请求体。
-  const breakdownSrc = pendingMsg && estimate?.confirmed === false &&
-    (estimate.afterPartID ?? "") >= (stepSF?.id ?? "") && (estimate.afterPartID ?? "") >= (stepSS?.id ?? "")
-    ? pendingMsg
-    : stepSF?.inputBreakdown && sfIdx > ssIdx
-    ? stepSF
-    : stepSS?.inputBreakdown
-      ? stepSS
-      : pendingMsg
+  const breakdownSrc =
+    pendingMsg &&
+    estimate?.confirmed === false &&
+    (estimate.afterPartID ?? "") >= (stepSF?.id ?? "") &&
+    (estimate.afterPartID ?? "") >= (stepSS?.id ?? "")
+      ? pendingMsg
+      : stepSF?.inputBreakdown && sfIdx > ssIdx
+        ? stepSF
+        : stepSS?.inputBreakdown
+          ? stepSS
+          : pendingMsg
   if (breakdownSrc?.inputBreakdown && breakdownSrc.inputChars !== undefined) {
     const bd = breakdownSrc.inputBreakdown as {
-      system: number; instructions: number; skills: number; tools: number
-      messages: { userText: number; assistantText: number; reasoning: number; toolInput: number; toolOutput: number; attachments: number; total: number }
-      media?: { rawChars: number; textChars: number; tokens: number; count: number; imageTokens: number; pdfTokens: number; otherTokens: number }
+      system: number
+      instructions: number
+      skills: number
+      tools: number
+      messages: {
+        userText: number
+        assistantText: number
+        reasoning: number
+        toolInput: number
+        toolOutput: number
+        attachments: number
+        total: number
+      }
+      media?: {
+        rawChars: number
+        textChars: number
+        tokens: number
+        count: number
+        imageTokens: number
+        pdfTokens: number
+        otherTokens: number
+      }
     }
     // provider 确认优先于旧 prepared 密度，不必等整条消息 completed。
-    const isConfirmed = breakdownSrc.type === "step-finish" || (breakdownSrc === pendingMsg && estimate?.confirmed === true)
-    const confirmedInput = breakdownSrc.type === "step-finish" && stepSF?.tokens
-      ? stepSF.tokens.input + stepSF.tokens.cache.read + stepSF.tokens.cache.write
-      : isConfirmed ? requestProjection?.session?.request?.stepInput ?? (latestAssistant?.tokens
-        ? latestAssistant.tokens.input + latestAssistant.tokens.cache.read + latestAssistant.tokens.cache.write : 0)
-      : breakdownSrc.inputTokens ?? Math.round(breakdownSrc.inputChars / inputRatio)
+    const isConfirmed =
+      breakdownSrc.type === "step-finish" || (breakdownSrc === pendingMsg && estimate?.confirmed === true)
+    const confirmedInput =
+      breakdownSrc.type === "step-finish" && stepSF?.tokens
+        ? stepSF.tokens.input + stepSF.tokens.cache.read + stepSF.tokens.cache.write
+        : isConfirmed
+          ? (requestProjection?.session?.request?.stepInput ??
+            (latestAssistant?.tokens
+              ? latestAssistant.tokens.input + latestAssistant.tokens.cache.read + latestAssistant.tokens.cache.write
+              : 0))
+          : (breakdownSrc.inputTokens ?? Math.round(breakdownSrc.inputChars / inputRatio))
     const denom = breakdownSrc.inputChars
     // #175：先固定切走 media.tokens
     const media = (bd as any).media as { rawChars: number; textChars: number; tokens: number } | undefined
@@ -379,7 +440,7 @@ export function tokenAccounting(
     // #175：textDenom = denom - raw + text，至少为 1
     // #175：全媒体请求 textDenom 保底 1
     const textDenom = media ? Math.max(1, denom - media.rawChars + media.textChars) : denom
-    const alloc = (chars: number) => textDenom > 0 ? Math.round((chars / textDenom) * textAllocInput) : 0
+    const alloc = (chars: number) => (textDenom > 0 ? Math.round((chars / textDenom) * textAllocInput) : 0)
     const system = alloc(bd.system)
     const instructions = alloc(bd.instructions)
     const skills = alloc(bd.skills)
@@ -395,22 +456,30 @@ export function tokenAccounting(
     const inputToolCalls = alloc(bd.messages.toolInput)
 
     // #127：当前 step live output：只统计本 step 新生成的 text/reasoning/tool
-    let liveAssistantText = 0, liveReasoning = 0, liveToolCalls = 0
+    let liveAssistantText = 0,
+      liveReasoning = 0,
+      liveToolCalls = 0
     // finish 只扫描它之前的本 step；prepared 游标隔开已上传历史与新输出。
-    const outputStartIdx = breakdownSrc.type === "step-finish"
-      ? lastParts.slice(0, sfIdx).findLastIndex((p) => p.type === "step-start")
-      : Math.max(ssIdx, sfIdx, estimate?.afterPartID ? lastParts.findLastIndex((p) => (p.id ?? "") <= estimate.afterPartID!) : -1)
+    const outputStartIdx =
+      breakdownSrc.type === "step-finish"
+        ? lastParts.slice(0, sfIdx).findLastIndex((p) => p.type === "step-start")
+        : Math.max(
+            ssIdx,
+            sfIdx,
+            estimate?.afterPartID ? lastParts.findLastIndex((p) => (p.id ?? "") <= estimate.afterPartID!) : -1,
+          )
     const outputEndIdx = breakdownSrc.type === "step-finish" ? sfIdx : lastParts.length
-    let textC = 0, reasonC = 0, toolC = 0
+    let textC = 0,
+      reasonC = 0,
+      toolC = 0
     // #127：扫描当前 step 的 live text/reasoning/tool 字符
     for (let i = outputStartIdx + 1; i < outputEndIdx; i++) {
       const p = lastParts[i]
-      if (p.type === "text" && !p.ignored) textC += (p.text?.length ?? 0)
-      if (p.type === "reasoning") reasonC += (p.text?.length ?? 0)
+      if (p.type === "text" && !p.ignored) textC += p.text?.length ?? 0
+      if (p.type === "reasoning") reasonC += p.text?.length ?? 0
       if (p.type === "tool") {
-        toolC += p.state?.status === "pending"
-          ? (p.state.raw?.length ?? 0)
-          : JSON.stringify(p.state?.input ?? {}).length
+        toolC +=
+          p.state?.status === "pending" ? (p.state.raw?.length ?? 0) : JSON.stringify(p.state?.input ?? {}).length
       }
     }
     const outputTokens = breakdownSrc.type === "step-finish" ? stepSF?.tokens : latestAssistant?.tokens
@@ -420,7 +489,8 @@ export function tokenAccounting(
       const visibleOutput = outputTokens.output
       // #127：visible output 在 live text/tool 字符间分配
       const totalVisibleChars = textC + toolC
-      liveAssistantText = totalVisibleChars > 0 ? Math.round((visibleOutput * textC) / totalVisibleChars) : visibleOutput
+      liveAssistantText =
+        totalVisibleChars > 0 ? Math.round((visibleOutput * textC) / totalVisibleChars) : visibleOutput
       // #127：toolCalls 吃掉 visible 余量，避免双重计数
       liveToolCalls = Math.max(0, visibleOutput - liveAssistantText)
     } else {
@@ -431,7 +501,13 @@ export function tokenAccounting(
     }
 
     breakdown = {
-      system, instructions, skills, tools, userMessages, toolResults, attachments,
+      system,
+      instructions,
+      skills,
+      tools,
+      userMessages,
+      toolResults,
+      attachments,
       // #127：UI 展示 = 上传上下文份额 + 本 step 新输出
       assistantText: inputAssistantText + liveAssistantText,
       reasoning: inputReasoning + liveReasoning,
@@ -463,8 +539,14 @@ export function tokenAccounting(
     },
     // 会话账本独立于前端分页，旧 transcript-only 调用仍保留原始统计语义。
     session: projection?.session?.tokens
-      ? { input: projection.session.tokens.input, output: projection.session.tokens.output, reasoning: projection.session.tokens.reasoning,
-          cacheRead: projection.session.tokens.cache.read, cacheWrite: projection.session.tokens.cache.write, cost: projection.session.cost ?? 0 }
+      ? {
+          input: projection.session.tokens.input,
+          output: projection.session.tokens.output,
+          reasoning: projection.session.tokens.reasoning,
+          cacheRead: projection.session.tokens.cache.read,
+          cacheWrite: projection.session.tokens.cache.write,
+          cost: projection.session.cost ?? 0,
+        }
       : session,
     contextLimit: limit,
     contextPercent,

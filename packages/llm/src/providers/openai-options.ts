@@ -72,7 +72,10 @@ export const openAIDefaultOptions = (
   options: { readonly textVerbosity?: boolean } = {},
 ): ProviderOptions | undefined =>
   // OpenAI、Azure、Copilot facade 共享源默认；外部显式选项仍在 withOpenAIOptions 最后合并。
-  mergeProviderOptions(openAIProviderOptions({ store: false, parallelToolCalls: true }), gpt5DefaultOptions(modelID, options))
+  mergeProviderOptions(
+    openAIProviderOptions({ store: false, parallelToolCalls: true }),
+    gpt5DefaultOptions(modelID, options),
+  )
 
 export const withOpenAIOptions = <Options extends { readonly providerOptions?: OpenAIProviderOptionsInput }>(
   modelID: string,

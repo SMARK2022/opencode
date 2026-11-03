@@ -97,7 +97,12 @@ async function mountHarness(input: {
   function Harness() {
     const [currentKey, setCurrentKey] = createSignal<string | undefined>(input.currentKey)
     const [options, setOptions] = createSignal(input.options)
-    onMount(() => input.deferredKey?.((key) => setCurrentKey(key), (next) => setOptions(next)))
+    onMount(() =>
+      input.deferredKey?.(
+        (key) => setCurrentKey(key),
+        (next) => setOptions(next),
+      ),
+    )
 
     return (
       <DialogSelectHarness
@@ -144,7 +149,9 @@ test("dialog select can mark the current object by stable key", async () => {
     const other = frame.find((line) => line.includes("Model One")) ?? ""
     // header位于标题和选项之间，不能吞掉原有identity高亮或进入业务选项集合。
     expect(frame.findIndex((line) => line.includes("Goal summary"))).toBeGreaterThanOrEqual(0)
-    expect(frame.findIndex((line) => line.includes("Goal summary"))).toBeLessThan(frame.findIndex((line) => line.includes("Model One")))
+    expect(frame.findIndex((line) => line.includes("Goal summary"))).toBeLessThan(
+      frame.findIndex((line) => line.includes("Model One")),
+    )
 
     // value 多出的 metadata 使对象不相等，高亮必须来自稳定 key。
     expect(current).toContain("●")
@@ -219,11 +226,7 @@ test("goal menu mounts large without a search filter", async () => {
   expect(mount).toBeDefined()
   const sizes: string[] = []
   // 执行真实挂载语句，不在测试中重写 setSize 决策，也不导入 App/SDK 初始化链。
-  new Function(
-    "onMount",
-    "dialog",
-    mount!,
-  )((run: () => void) => run(), { setSize: (size: string) => sizes.push(size) })
+  new Function("onMount", "dialog", mount!)((run: () => void) => run(), { setSize: (size: string) => sizes.push(size) })
   expect(sizes).toEqual(["large"])
   // 菜单自身关闭 filter 才能省行，其他 DialogSelect 用例继续验证真实列表布局。
   expect(menu).toMatch(/<DialogSelect\s[\s\S]*?renderFilter=\{false\}/)

@@ -94,29 +94,36 @@ export function buildLocationServiceMap(
     LocationServiceMap.Service,
     Effect.gen(function* () {
       const locations: LayerMap.LayerMap<Location.Ref, LocationServices, LocationError> = yield* LayerMap.make(
-      (ref: Location.Ref) => {
-        const defaults: LayerNode.Replacements = [[SessionExecution.node, SessionExecutionLocal.node]]
-        // 放在hoist之前，替换owner的真实依赖才能参加原图分层。
-        const allReplacements = defaults.concat(typeof replacements === "function" ? replacements(ref) : replacements, [[Location.node, Location.boundNode(ref)]])
-        // Apply replacements during hoist, not afterward: replacements can
-        // introduce new tagged dependencies (Location.boundNode depends on
-        // Project), and the hoist walk is the only pass that can still slice
-        // those back out.
-        const location = LayerNode.hoist(locationServices, Node.tags.values.global, allReplacements)
+        (ref: Location.Ref) => {
+          const defaults: LayerNode.Replacements = [[SessionExecution.node, SessionExecutionLocal.node]]
+          // 放在hoist之前，替换owner的真实依赖才能参加原图分层。
+          const allReplacements = defaults.concat(
+            typeof replacements === "function" ? replacements(ref) : replacements,
+            [[Location.node, Location.boundNode(ref)]],
+          )
+          // Apply replacements during hoist, not afterward: replacements can
+          // introduce new tagged dependencies (Location.boundNode depends on
+          // Project), and the hoist walk is the only pass that can still slice
+          // those back out.
+          const location = LayerNode.hoist(locationServices, Node.tags.values.global, allReplacements)
 
-        return LayerNode.compile(location.node).pipe(
-          Layer.fresh,
-          Layer.tap(() =>
-            Effect.logInfo("booting location services", {
-              directory: ref.directory,
-              workspaceID: ref.workspaceID,
-            }),
-          ),
-          // lookup晚于map构造；绑定同一实例并保留共享memo，避免另建Session/Execution全局所有者。
-          Layer.provide(LayerNode.compile(location.hoisted, [[LocationServiceMap.node, Layer.succeed(LocationServiceMap.Service, locations)]])),
-        )
-      },
-      { idleTimeToLive: "60 minutes" },
+          return LayerNode.compile(location.node).pipe(
+            Layer.fresh,
+            Layer.tap(() =>
+              Effect.logInfo("booting location services", {
+                directory: ref.directory,
+                workspaceID: ref.workspaceID,
+              }),
+            ),
+            // lookup晚于map构造；绑定同一实例并保留共享memo，避免另建Session/Execution全局所有者。
+            Layer.provide(
+              LayerNode.compile(location.hoisted, [
+                [LocationServiceMap.node, Layer.succeed(LocationServiceMap.Service, locations)],
+              ]),
+            ),
+          )
+        },
+        { idleTimeToLive: "60 minutes" },
       )
       return locations
     }),

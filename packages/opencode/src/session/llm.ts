@@ -143,13 +143,15 @@ const live: Layer.Layer<
           // metadata，避免 workflow 参数或输出进入日志。
           await bridge.promise(Effect.logInfo("tool timing", { phase: "tool.start", ...timing }))
           if (!t || !t.execute) {
-            await bridge.promise(Effect.logInfo("tool timing", {
-              phase: "tool.end",
-              ...timing,
-              status: "error",
-            // #237：durationMs 只度量本轮工具执行墙钟——不含排队与权限等待，保证 timing 口径一致
-              durationMs: Date.now() - startedAt,
-            }))
+            await bridge.promise(
+              Effect.logInfo("tool timing", {
+                phase: "tool.end",
+                ...timing,
+                status: "error",
+                // #237：durationMs 只度量本轮工具执行墙钟——不含排队与权限等待，保证 timing 口径一致
+                durationMs: Date.now() - startedAt,
+              }),
+            )
             return { result: "", error: `Unknown tool: ${toolName}` }
           }
           try {
@@ -159,24 +161,28 @@ const live: Layer.Layer<
               abortSignal: input.abort,
             })
             const output = typeof result === "string" ? result : (result?.output ?? JSON.stringify(result))
-            await bridge.promise(Effect.logInfo("tool timing", {
-              phase: "tool.end",
-              ...timing,
-              status: "completed",
-              durationMs: Date.now() - startedAt,
-            }))
+            await bridge.promise(
+              Effect.logInfo("tool timing", {
+                phase: "tool.end",
+                ...timing,
+                status: "completed",
+                durationMs: Date.now() - startedAt,
+              }),
+            )
             return {
               result: output,
               metadata: typeof result === "object" ? result?.metadata : undefined,
               title: typeof result === "object" ? result?.title : undefined,
             }
           } catch (e: any) {
-            await bridge.promise(Effect.logInfo("tool timing", {
-              phase: "tool.end",
-              ...timing,
-              status: "error",
-              durationMs: Date.now() - startedAt,
-            }))
+            await bridge.promise(
+              Effect.logInfo("tool timing", {
+                phase: "tool.end",
+                ...timing,
+                status: "error",
+                durationMs: Date.now() - startedAt,
+              }),
+            )
             return { result: "", error: e.message ?? String(e) }
           }
         }
@@ -379,10 +385,14 @@ const live: Layer.Layer<
                   if (args.type === "stream" && input.onRequestPrepared) {
                     // middleware 此处已得到 SDK 的 JSON Schema 工具与变换后消息。
                     // OAuth/workflow 的 system 没有重复进入普通 messages。
-                    await bridge.promise(input.onRequestPrepared({
-                      system: isWorkflow ? prepared.system : [],
-                      messages: args.params.prompt, tools: args.params.tools, providerOptions: args.params.providerOptions,
-                    }))
+                    await bridge.promise(
+                      input.onRequestPrepared({
+                        system: isWorkflow ? prepared.system : [],
+                        messages: args.params.prompt,
+                        tools: args.params.tools,
+                        providerOptions: args.params.providerOptions,
+                      }),
+                    )
                   }
                   return args.params
                 },
@@ -422,7 +432,7 @@ const live: Layer.Layer<
             return Stream.fromReadableStream({
               evaluate: () => result.result.fullStream,
               // #192：保留结构化错误 cause；reader 的既有释放责任不随错误转换迁移。
-              onError: (e) => e instanceof Error ? e : new Error(String(e), { cause: e }),
+              onError: (e) => (e instanceof Error ? e : new Error(String(e), { cause: e })),
               releaseLockOnEnd: true,
             }).pipe(
               Stream.mapEffect((event) => LLMAISDK.toLLMEvents(state, event)),

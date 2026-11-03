@@ -45,8 +45,8 @@ export class AutoDeniedError extends Schema.TaggedErrorClass<AutoDeniedError>()(
     // 虚假逃生口，会诱发换形态重试循环）；默认文案保留可授权重试路径
     const tail = this.terminal
       ? " Use a materially safer approach. This operation is terminally forbidden: it cannot be executed even with explicit user authorization."
-      // 非终局拒绝给出安全替代、改变事实的取证和继续其他工作，原终局门禁保持不变。
-      : " You may: switch to a materially safer approach; gather read-only evidence that changes this assessment and retry; or complete unaffected work without asking for confirmation. If the task stays blocked, report in one short paragraph what was rejected and why, and ask the user for approval once."
+      : // 非终局拒绝给出安全替代、改变事实的取证和继续其他工作，原终局门禁保持不变。
+        " You may: switch to a materially safer approach; gather read-only evidence that changes this assessment and retry; or complete unaffected work without asking for confirmation. If the task stays blocked, report in one short paragraph what was rejected and why, and ask the user for approval once."
     return `Auto permission preflight rejected this tool call: ${this.reason}. Do not retry the same outcome through shell indirection, generated scripts, alternative tools, MCP tools, or other policy workarounds.${tail}`
   }
 }

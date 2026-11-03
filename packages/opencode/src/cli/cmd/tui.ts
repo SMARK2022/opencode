@@ -46,7 +46,10 @@ async function spawnDaemon(cmd: string[], opts: Parameters<typeof Bun.spawn>[1])
   const pidFile = path.join(baseDir, `daemon-pid-${nonce}.txt`)
   // WMI不继承wrapper环境，分代路径必须在一次性env序列化前写入；run关联不充当launch身份。
   envRecord.OPENCODE_RUN_ID ??= runID
-  envRecord.OPENCODE_DAEMON_DIAG_DIR = path.join(envRecord.OPENCODE_DAEMON_DIAG_DIR ?? path.join(Global.Path.log, "daemon-native"), nonce)
+  envRecord.OPENCODE_DAEMON_DIAG_DIR = path.join(
+    envRecord.OPENCODE_DAEMON_DIAG_DIR ?? path.join(Global.Path.log, "daemon-native"),
+    nonce,
+  )
   const forensics = String.raw`
 $diag = $env:OPENCODE_DAEMON_DIAG_DIR
 # 父端强制提供每次launch的独占路径；目录不可建即退出，不留半初始化取证态。
@@ -160,7 +163,7 @@ public sealed class TailFile : FileStream {
     "  $stdout = [IO.Stream]::Null; $stderr = [IO.Stream]::Null",
     "  if ($env:OPENCODE_PRINT_LOGS -eq '1') {",
     // 显式关联 caller console；WMI parent 是服务进程，ATTACH_PARENT_PROCESS 会关联错误的 owner。
-    "    Add-Type 'using System; using System.Runtime.InteropServices; public static class DaemonConsole { [DllImport(\"kernel32.dll\")] public static extern bool FreeConsole(); [DllImport(\"kernel32.dll\")] public static extern bool AttachConsole(uint pid); }'",
+    '    Add-Type \'using System; using System.Runtime.InteropServices; public static class DaemonConsole { [DllImport("kernel32.dll")] public static extern bool FreeConsole(); [DllImport("kernel32.dll")] public static extern bool AttachConsole(uint pid); }\'',
     "    [void][DaemonConsole]::FreeConsole()",
     "    if (-not [DaemonConsole]::AttachConsole(__OPENCODE_CONSOLE_PID__)) { throw 'Cannot attach print-log console' }",
     `    $stdout = [IO.Pipes.NamedPipeClientStream]::new('.', 'opencode-daemon-${nonce}-stdout', [IO.Pipes.PipeDirection]::Out)`,
@@ -220,9 +223,11 @@ public sealed class TailFile : FileStream {
   await Bun.write(
     envFile,
     // 首行无 tab，只是受控脚本数据；既有 env 恢复循环跳过它，不把代码注入 worker 环境。
-    [b64u(relayScript), ...Object.entries(envRecord)
-      .filter(([, v]) => v !== undefined)
-      .map(([k, v]) => `${k}\t${b64u(v as string)}`)
+    [
+      b64u(relayScript),
+      ...Object.entries(envRecord)
+        .filter(([, v]) => v !== undefined)
+        .map(([k, v]) => `${k}\t${b64u(v as string)}`),
     ].join("\n"),
   )
   const script = `
@@ -473,7 +478,9 @@ export type DiscoverDaemonDeps = {
   resolveDaemonFile: () => Promise<string>
   identity: typeof ServerLock.identity
   placement: typeof ServerLock.placement
-  resolveNetwork: (args: Parameters<typeof resolveNetworkOptionsNoConfig>[0]) => Promise<ReturnType<typeof resolveNetworkOptionsNoConfig>>
+  resolveNetwork: (
+    args: Parameters<typeof resolveNetworkOptionsNoConfig>[0],
+  ) => Promise<ReturnType<typeof resolveNetworkOptionsNoConfig>>
   electionTimeoutMs: number
   electionStaleMs: number
   pollMs: number
@@ -489,10 +496,14 @@ export const SERVER_POLL_INTERVAL_MS = 200
 // #259：daemon status 返回的类型——tuiClients 和 sessionActivity 用于退出提示
 export type Status = { tuiClients: number; sessionActivity: number }
 
-
 // 子进程快照只在唯一 spawn 前归一，父进程的 HTTP/HTTPS/ALL 代理与 CA 配置保持原值。
 function applyProxyEnv(env: Record<string, string>) {
-  const noProxy = [env.NO_PROXY, env.no_proxy].flatMap((value) => (value ?? "").split(",").map((s) => s.trim()).filter(Boolean))
+  const noProxy = [env.NO_PROXY, env.no_proxy].flatMap((value) =>
+    (value ?? "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean),
+  )
   const merged = NetworkProxy.noProxyString(noProxy)
   env.NO_PROXY = merged
   env.no_proxy = merged
@@ -585,7 +596,12 @@ async function waitForOwnerExit(lock: ServerLock.ServerLock, deps: DiscoverDaemo
 
 function bypassLoopbackProxy() {
   const noProxy = NetworkProxy.noProxyString(
-    [process.env.NO_PROXY, process.env.no_proxy].flatMap((value) => (value ?? "").split(",").map((s) => s.trim()).filter(Boolean)),
+    [process.env.NO_PROXY, process.env.no_proxy].flatMap((value) =>
+      (value ?? "")
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean),
+    ),
   )
   process.env.NO_PROXY = noProxy
   process.env.no_proxy = noProxy
@@ -602,15 +618,21 @@ async function inspectDaemonOwner(
   if (!lock || !deps.alive(lock.pid)) return
   const dbPath = path.normalize(lock.dbPath)
   const expectedPath = path.normalize(identity.dbPath)
-  if ((process.platform === "win32" ? dbPath.toLowerCase() !== expectedPath.toLowerCase() : dbPath !== expectedPath) || lock.channel !== identity.channel)
+  if (
+    (process.platform === "win32" ? dbPath.toLowerCase() !== expectedPath.toLowerCase() : dbPath !== expectedPath) ||
+    lock.channel !== identity.channel
+  )
     throw new Error("Existing opencode daemon has a different database or channel; stop it explicitly before switching")
   if (network && (!lock.externalUrl || JSON.stringify(lock.network) !== JSON.stringify(network)))
-    throw new Error("Existing opencode daemon has incompatible network options; stop it explicitly before changing listeners")
+    throw new Error(
+      "Existing opencode daemon has incompatible network options; stop it explicitly before changing listeners",
+    )
   const stopping = await ownerIsStopping(lock)
-  const responsive = !stopping && await deps.ping(lock.port)
+  const responsive = !stopping && (await deps.ping(lock.port))
   // 探测完成后仍复读同一placement，不能把换代前的PID/端口交给调用方。
   const current = await deps.read(lockPath)
-  if (current?.token !== lock.token || current.pid !== lock.pid) throw new Error("Opencode daemon ownership changed during discovery")
+  if (current?.token !== lock.token || current.pid !== lock.pid)
+    throw new Error("Opencode daemon ownership changed during discovery")
   return { lock, stopping, responsive }
 }
 
@@ -623,7 +645,12 @@ export async function connectionInfo(deps: DiscoverDaemonDeps = defaultDiscoverD
   const lockPath = deps.placement()
   const owner = await inspectDaemonOwner(await deps.read(lockPath), deps, lockPath, deps.identity())
   if (!owner) return { running: false }
-  return { running: true, pid: owner.lock.pid, url: `http://127.0.0.1:${owner.lock.port}`, responsive: owner.responsive }
+  return {
+    running: true,
+    pid: owner.lock.pid,
+    url: `http://127.0.0.1:${owner.lock.port}`,
+    responsive: owner.responsive,
+  }
 }
 
 // #165：共享 daemon 选举/复用；禁止重引入 per-TUI Worker+Rpc.client
@@ -639,8 +666,12 @@ export async function discoverOrSpawnDaemon(
   // 身份与网络请求先于快速路径解析，禁止复用另一数据库或忽略显式外部端口。
   const identity = deps.identity()
   const network = await deps.resolveNetwork(networkArgs)
-  const external = ["--port", "--hostname", "--mdns", "--mdns-domain", "--cors"].some(hasArg) ||
-    network.mdns || network.port !== 0 || network.hostname !== "127.0.0.1" || network.cors.length > 0
+  const external =
+    ["--port", "--hostname", "--mdns", "--mdns-domain", "--cors"].some(hasArg) ||
+    network.mdns ||
+    network.port !== 0 ||
+    network.hostname !== "127.0.0.1" ||
+    network.cors.length > 0
   // 同一 DB/channel 共用发现路径；显式网络请求只在复用检查中判断兼容性。
   const lockPath = deps.placement()
   async function reuse(lock: ServerLock.ServerLock | undefined) {
@@ -658,7 +689,7 @@ export async function discoverOrSpawnDaemon(
   let fwdPid: number | undefined
 
   // URL 为空只能进入选举或失败出口，不能返回一个猜测的旧端口作为成功。
-      
+
   if (!existingUrl) {
     // Flock key 与发现路径绑定，四个并发 TUI 对同一身份只能产生一个 winner。
     // 租约由此作用域获取并 finally 释放，调用方不能传入已持有的 lease。
@@ -700,13 +731,13 @@ export async function discoverOrSpawnDaemon(
         // 快照已补齐代理键后再调整，桌面 shell 的旧代理不能冻结 daemon 的系统路由。
         applyProxyEnv(env)
         // 编译二进制必须凭 worker 环境角色旁路 yargs，不能把模块路径当成用户 project。
-      const proc = await deps.spawn([process.execPath, daemonFile], {
-        // #139：Unix 下 detached，避免 TUI 进程组 SIGINT 带走共享 daemon。
-        // Windows 不能用 detached:true（Bun #31603：子进程被 job object 绑定，
-        // parent 退出即杀）。Windows 的 daemon Ctrl+C 免疫改由 worker 进程内
-        // 调用 FreeConsole 实现（见 worker.ts win32DetachConsole）：worker 脱离
-        // 共享 console 后，CTRL_C_EVENT 不再送达，等价 Unix detached 进程组。
-        detached: process.platform !== "win32",
+        const proc = await deps.spawn([process.execPath, daemonFile], {
+          // #139：Unix 下 detached，避免 TUI 进程组 SIGINT 带走共享 daemon。
+          // Windows 不能用 detached:true（Bun #31603：子进程被 job object 绑定，
+          // parent 退出即杀）。Windows 的 daemon Ctrl+C 免疫改由 worker 进程内
+          // 调用 FreeConsole 实现（见 worker.ts win32DetachConsole）：worker 脱离
+          // 共享 console 后，CTRL_C_EVENT 不再送达，等价 Unix detached 进程组。
+          detached: process.platform !== "win32",
           env: {
             ...env,
             OPENCODE_PROCESS_ROLE: "worker",
@@ -740,12 +771,16 @@ export async function discoverOrSpawnDaemon(
             if (result.kind === "code" && result.code === 0) {
               const lock = await deps.read(lockPath)
               if (lock && deps.alive(lock.pid)) existingUrl = await reuse(lock)
-              if (existingUrl) { fwdPid = lock!.pid; return }
+              if (existingUrl) {
+                fwdPid = lock!.pid
+                return
+              }
             }
             exitedBeforeReady = true
-            const msg = result.kind === "code"
-              ? `opencode daemon exited before startup with exit code ${result.code}. Re-run with --print-logs to show daemon startup logs.`
-              : "opencode daemon exited before startup. Re-run with --print-logs to show daemon startup logs."
+            const msg =
+              result.kind === "code"
+                ? `opencode daemon exited before startup with exit code ${result.code}. Re-run with --print-logs to show daemon startup logs.`
+                : "opencode daemon exited before startup. Re-run with --print-logs to show daemon startup logs."
             UI.error(msg)
             throw new Error(msg)
           }
@@ -756,7 +791,7 @@ export async function discoverOrSpawnDaemon(
           // 启动器 PID 可不同；健康锁仍必须通过 reuse 的身份与稳定 owner 校验。
           while (!existingUrl && Date.now() < deadline) {
             const daemonLock = await deps.read(lockPath)
-            if (daemonLock && deps.alive(daemonLock.pid) && await deps.ping(daemonLock.port)) {
+            if (daemonLock && deps.alive(daemonLock.pid) && (await deps.ping(daemonLock.port))) {
               // 交付身份、认证与 token 复读均通过的 daemon owner，启动器 PID 不代替锁身份。
               existingUrl = await reuse(daemonLock)
               // 重载信号的目标是已验证 daemon，而不是可能已经退出的启动器。
@@ -773,8 +808,12 @@ export async function discoverOrSpawnDaemon(
             // deadline 只结束此次交付尝试，清理随后只作用于尚未交付的 proc handle。
             // 超时仍向上失败；杀本次 proc 与释放 lease 继续由原有两层 finally 执行。
             // 超时诊断与提前退出共享日志指引，资源仍由原 finally 清理。
-            UI.error(`opencode daemon failed to start within ${DAEMON_START_TIMEOUT_MS / 1000} seconds. Re-run with --print-logs to show daemon startup logs.`)
-            throw new Error(`opencode daemon failed to start within ${DAEMON_START_TIMEOUT_MS / 1000} seconds. Re-run with --print-logs to show daemon startup logs.`)
+            UI.error(
+              `opencode daemon failed to start within ${DAEMON_START_TIMEOUT_MS / 1000} seconds. Re-run with --print-logs to show daemon startup logs.`,
+            )
+            throw new Error(
+              `opencode daemon failed to start within ${DAEMON_START_TIMEOUT_MS / 1000} seconds. Re-run with --print-logs to show daemon startup logs.`,
+            )
           }
         } finally {
           // 只终止本次启动且尚未交付的子进程；read/sleep/ping 异常也会进入此处。
@@ -810,7 +849,12 @@ export function resolveThreadDirectory(project?: string, envPWD = process.env.PW
 export async function status(lockPath = ServerLock.placement()): Promise<Status | undefined> {
   // 独立 status 调用也可能跳过发现，回环绕过不能只依赖 TUI 启动时设置。
   const noProxy = NetworkProxy.noProxyString(
-    [process.env.NO_PROXY, process.env.no_proxy].flatMap((value) => (value ?? "").split(",").map((s) => s.trim()).filter(Boolean)),
+    [process.env.NO_PROXY, process.env.no_proxy].flatMap((value) =>
+      (value ?? "")
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean),
+    ),
   )
   process.env.NO_PROXY = noProxy
   process.env.no_proxy = noProxy

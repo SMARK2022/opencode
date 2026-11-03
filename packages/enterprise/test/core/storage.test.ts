@@ -36,9 +36,12 @@ function useTestStorage() {
     const request = new Request(input, init)
     const url = new URL(request.url)
     const bucketPath = `/${state.bucket}`
-    if (url.host !== `s3.${state.region}.amazonaws.com` || (url.pathname !== bucketPath && !url.pathname.startsWith(`${bucketPath}/`))) {
+    if (
+      url.host !== `s3.${state.region}.amazonaws.com` ||
+      (url.pathname !== bucketPath && !url.pathname.startsWith(`${bucketPath}/`))
+    ) {
       return state.originalFetch(input, init)
-    // 仅拦截测试 bucket 前缀；其余 S3/外部流量原样透传，保证测试边界不外溢。
+      // 仅拦截测试 bucket 前缀；其余 S3/外部流量原样透传，保证测试边界不外溢。
     }
 
     const key = decodeURIComponent(url.pathname.slice(bucketPath.length).replace(/^\//, ""))
@@ -52,9 +55,12 @@ function useTestStorage() {
       const limited = url.searchParams.has("max-keys") ? keys.slice(0, Number(url.searchParams.get("max-keys"))) : keys
       // ListObjectsV2 三游标（prefix/start-after/max-keys）按 S3 真实分页语义模拟。
       // Storage.createAdapter 只解析 <Key> 节点；测试 key 全部由 Storage.resolve 生成，保持简单 XML 足够覆盖 S3 list 行为。
-      return new Response(`<ListBucketResult>${limited.map((item) => `<Contents><Key>${item}</Key></Contents>`).join("")}</ListBucketResult>`, {
-        headers: { "Content-Type": "application/xml" },
-      })
+      return new Response(
+        `<ListBucketResult>${limited.map((item) => `<Contents><Key>${item}</Key></Contents>`).join("")}</ListBucketResult>`,
+        {
+          headers: { "Content-Type": "application/xml" },
+        },
+      )
     }
 
     if (request.method === "PUT") {

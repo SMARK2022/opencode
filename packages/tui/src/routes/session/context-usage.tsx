@@ -31,7 +31,7 @@ import {
 } from "../../util/context-usage"
 
 // 完整快照保留全部 wire 字段；resource 仅在节流后深拷贝，避免订阅绕过节流。
-export function contextUsageSnapshot<T,>(value: T): T {
+export function contextUsageSnapshot<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T
 }
 
@@ -64,7 +64,10 @@ export function contextUsageRefreshKey(input: {
     input.vcs ? refreshJson(input.vcs) : "",
     input.providers.map(providerRefreshKey).join("|"),
     (input.agents ?? [])
-      .map((agent) => `${agent.name}:${agent.mode}:${agent.hidden ? 1 : 0}:${agent.description ?? ""}:${agent.prompt?.length ?? 0}:${refreshJson(agent.permission)}`)
+      .map(
+        (agent) =>
+          `${agent.name}:${agent.mode}:${agent.hidden ? 1 : 0}:${agent.description ?? ""}:${agent.prompt?.length ?? 0}:${refreshJson(agent.permission)}`,
+      )
       .join("|"),
     input.session?.id ?? "",
     refreshJson(input.session?.permission),
@@ -89,11 +92,15 @@ export function contextUsageRefreshKey(input: {
         ].join("/")
       : "",
     // 显式空列表覆盖扫描或目录默认，和未提供列表不同。
-    input.instructionFiles ? input.instructionFiles.map((item) => `${item.path}:${item.content.length}`).join("|") : "-",
+    input.instructionFiles
+      ? input.instructionFiles.map((item) => `${item.path}:${item.content.length}`).join("|")
+      : "-",
     input.skills ? input.skills.map((item) => `${item.name}:${item.description}:${item.path}`).join("|") : "-",
     input.toolDefinitions ? input.toolDefinitions.map((item) => `${item.name}:${item.text.length}`).join("|") : "-",
     input.messages
-      .map((message) => [messageRefreshKey(message), input.getParts(message.id).map(partRefreshKey).join(",")].join("="))
+      .map((message) =>
+        [messageRefreshKey(message), input.getParts(message.id).map(partRefreshKey).join(",")].join("="),
+      )
       .join("\n"),
   ].join("\n")
 }
@@ -118,7 +125,10 @@ function providerRefreshKey(provider: Provider) {
   return [
     provider.id,
     Object.entries(provider.models)
-      .map(([id, model]) => `${id}:${model.id}:${model.providerID}:${model.api.id}:${model.status}:${model.limit.context}:${model.limit.input}:${model.limit.output}`)
+      .map(
+        ([id, model]) =>
+          `${id}:${model.id}:${model.providerID}:${model.api.id}:${model.status}:${model.limit.context}:${model.limit.input}:${model.limit.output}`,
+      )
       .join(","),
   ].join(":")
 }
@@ -145,7 +155,7 @@ function messageRefreshKey(message: Message) {
     "tokens" in message && message.tokens ? tokenRefreshKey(message.tokens) : "",
     message.agent,
     message.role === "user" ? `${message.model.providerID}/${message.model.modelID}` : "",
-    message.role === "user" ? message.system?.length ?? 0 : "",
+    message.role === "user" ? (message.system?.length ?? 0) : "",
     message.role === "user" ? refreshJson(message.tools) : "",
     message.role === "assistant" ? `${message.summary ? 1 : 0}:${message.finish ?? ""}:${message.error ? 1 : 0}` : "",
     message.role === "assistant" ? message.cost : "",
@@ -159,7 +169,8 @@ function partRefreshKey(part: Part): string {
   if (part.type === "reasoning") return `${base}:${part.text?.length ?? 0}`
   if (part.type === "tool") {
     const state = part.state
-    if (state.status === "pending") return `${base}:${part.tool}:${state.status}:${refreshJsonLength(state.input)}:${state.raw?.length ?? 0}`
+    if (state.status === "pending")
+      return `${base}:${part.tool}:${state.status}:${refreshJsonLength(state.input)}:${state.raw?.length ?? 0}`
     // 压缩标记、read 规则路径和附件各自改变分类，不能只观察工具输出长度。
     if (state.status === "completed")
       return [
@@ -169,7 +180,9 @@ function partRefreshKey(part: Part): string {
         refreshJsonLength(state.input),
         state.output?.length ?? 0,
         state.time.compacted ?? "",
-        Array.isArray(state.metadata.loaded) ? state.metadata.loaded.filter((item) => typeof item === "string").join("\0") : "",
+        Array.isArray(state.metadata.loaded)
+          ? state.metadata.loaded.filter((item) => typeof item === "string").join("\0")
+          : "",
         state.attachments?.map(partRefreshKey).join(",") ?? "",
       ].join(":")
     if (state.status === "error")
@@ -185,7 +198,12 @@ function partRefreshKey(part: Part): string {
   return base
 }
 
-function tokenRefreshKey(tokens: { input: number; output: number; reasoning: number; cache: { read: number; write: number } }) {
+function tokenRefreshKey(tokens: {
+  input: number
+  output: number
+  reasoning: number
+  cache: { read: number; write: number }
+}) {
   return `${tokens.input}/${tokens.output}/${tokens.reasoning}/${tokens.cache.read}/${tokens.cache.write}`
 }
 
@@ -219,7 +237,6 @@ function inputBreakdownRefreshKey(input: InputBreakdown) {
     input.media ? `${input.media.rawChars}/${input.media.textChars}/${input.media.tokens}/${input.media.count}` : "",
   ].join("/")
 }
-
 
 // 显示缩写不改变底层 token，明细相加仍使用原始整数，不能把四舍五入结果当账本。
 function formatTokens(tokens: number) {
@@ -285,7 +302,9 @@ export function contextUsageFooter(data: ContextUsageData, columns: number) {
           usage.reasoning > 0 ? `Reason ${formatTokens(usage.reasoning)}` : undefined,
           `Cache W/R ${formatTokens(usage.cacheWrite)}/${formatTokens(usage.cacheRead)}`,
           usage.cost > 0 ? `Cost $${usage.cost.toFixed(4)}` : undefined,
-        ].filter(Boolean).join("  ")
+        ]
+          .filter(Boolean)
+          .join("  ")
       : [
           `Current Window`,
           `Used ${formatTokens(data.totalTokens)}`,
@@ -329,37 +348,44 @@ function CategoryList(props: { data: ContextUsageData }) {
   const valueWidth = 14
   // 无 provider reserve 时整项不存在，按分类过滤而非补一个看似有测量依据的零值。
   // tokens===0 不进列表，避免 Attachments 等零值噪音；网格 weights 仍可含零（waterline 为 no-op）。
-  const groups = createMemo(() => [
-    {
-      title: "Prompt",
-      categories: props.data.categories.filter(
-        (item) =>
-          item.tokens > 0 && ["System prompt", "Instructions", "Skills", "Tool definitions"].includes(item.name),
-      ),
-    },
-    {
-      title: "Conversation",
-      // 附件与待上传结果等额拆桶，列表与网格使用同一组类别。
-      categories: props.data.categories.filter(
-        (item) =>
-          item.tokens > 0 &&
-          ["User Messages", "Tool Results", "Attachments", "Assistant Messages", "Tool Calls", "Pending"].includes(item.name),
-      ),
-    },
-    {
-      title: "Window",
-      categories: props.data.categories.filter(
-        (item) => item.tokens > 0 && ["Unaccounted", "Free space", "Model reserve", "Autocompact buffer"].includes(item.name),
-      ),
-    },
-  ].filter((group) => group.categories.length > 0))
+  const groups = createMemo(() =>
+    [
+      {
+        title: "Prompt",
+        categories: props.data.categories.filter(
+          (item) =>
+            item.tokens > 0 && ["System prompt", "Instructions", "Skills", "Tool definitions"].includes(item.name),
+        ),
+      },
+      {
+        title: "Conversation",
+        // 附件与待上传结果等额拆桶，列表与网格使用同一组类别。
+        categories: props.data.categories.filter(
+          (item) =>
+            item.tokens > 0 &&
+            ["User Messages", "Tool Results", "Attachments", "Assistant Messages", "Tool Calls", "Pending"].includes(
+              item.name,
+            ),
+        ),
+      },
+      {
+        title: "Window",
+        categories: props.data.categories.filter(
+          (item) =>
+            item.tokens > 0 && ["Unaccounted", "Free space", "Model reserve", "Autocompact buffer"].includes(item.name),
+        ),
+      },
+    ].filter((group) => group.categories.length > 0),
+  )
 
   return (
     <box flexDirection="column" gap={1} flexGrow={1} paddingLeft={2}>
       <For each={groups()}>
         {(group) => (
           <box flexDirection="column" gap={0}>
-            <box height={1}><text fg={theme.textMuted}>{group.title}</text></box>
+            <box height={1}>
+              <text fg={theme.textMuted}>{group.title}</text>
+            </box>
             <For each={group.categories}>
               {(category) => (
                 <box flexDirection="row" justifyContent="space-between" height={1}>
@@ -370,7 +396,12 @@ function CategoryList(props: { data: ContextUsageData }) {
                     <text fg={theme.text}>{fixed(category.name, labelWidth)}</text>
                   </box>
                   <text fg={theme.textMuted} flexShrink={0}>
-                    {fixed(`${formatTokens(category.tokens)} ${percent(category.tokens, props.data.maxTokens)}`.padStart(valueWidth), valueWidth)}
+                    {fixed(
+                      `${formatTokens(category.tokens)} ${percent(category.tokens, props.data.maxTokens)}`.padStart(
+                        valueWidth,
+                      ),
+                      valueWidth,
+                    )}
                   </text>
                 </box>
               )}
@@ -413,21 +444,28 @@ export function contextUsageDetailLines(data: ContextUsageData, columns: number)
     .join("  ")
   // 只取首个路径限制展示宽度；工具/技能数量仍来自完整列表，不能随明细截断减少能力数。
   const prompt = [
-    ...files.slice(0, 1).map((item) => `Instruction ${formatTokens(item.tokens)} ${Locale.truncateMiddle(displayPath(item.label), detailWidth)}`),
+    ...files
+      .slice(0, 1)
+      .map(
+        (item) =>
+          `Instruction ${formatTokens(item.tokens)} ${Locale.truncateMiddle(displayPath(item.label), detailWidth)}`,
+      ),
     data.details.toolDefs.length > 0 ? `Tools ${data.details.toolDefs.length}` : undefined,
     data.details.skills.length > 0 ? `Skills ${data.details.skills.length}` : undefined,
   ]
     .filter(Boolean)
     .join("  ")
 
-  return [
-    input ? `Input   ${input}` : undefined,
-    output ? `Output  ${output}` : undefined,
-    prompt ? `Prompt  ${prompt}` : undefined,
-  ]
-    // 可选项全部为空时省略整行，避免空 Prompt 明细占用有限高度并挤掉真实输入输出。
-    .filter((line): line is string => !!line && line.trim().length > 0)
-    .map((line) => fixed(Locale.truncateMiddle(line, lineWidth), lineWidth))
+  return (
+    [
+      input ? `Input   ${input}` : undefined,
+      output ? `Output  ${output}` : undefined,
+      prompt ? `Prompt  ${prompt}` : undefined,
+    ]
+      // 可选项全部为空时省略整行，避免空 Prompt 明细占用有限高度并挤掉真实输入输出。
+      .filter((line): line is string => !!line && line.trim().length > 0)
+      .map((line) => fixed(Locale.truncateMiddle(line, lineWidth), lineWidth))
+  )
 }
 
 // 明细行长度由同一 formatter 限制，组件不能拼回被截断的路径再使网格溢出。
@@ -474,17 +512,19 @@ export function registerContextUsageKeys<TTarget extends object, TEvent extends 
     // 弹层打开即撤掉面板 layer，其 modal/escape 处理继续拥有优先权，不能先关面板再冒泡。
     if (!input.enabled()) return
     // 配置更新会重新注册；Solid 在重跑及卸载前清理旧 layer，不能留下关闭旧面板的回调。
-    onCleanup(keymap.registerLayer({
-      priority: 1,
-      bindings: [{ key: "escape" }, { key: "ctrl+c" }, ...input.bindings()].map((binding) => ({
-        ...binding,
-        // 配置里的 app.exit 仅提供按键/序列；当前面板把动作替换为 onClose，不调用应用退出。
-        cmd: input.onClose,
-        // 两个开关分别阻止宿主传播和 keymap 内继续匹配，用户配置的 fallthrough 不能放行全局退出。
-        preventDefault: true,
-        fallthrough: false,
-      })),
-    }))
+    onCleanup(
+      keymap.registerLayer({
+        priority: 1,
+        bindings: [{ key: "escape" }, { key: "ctrl+c" }, ...input.bindings()].map((binding) => ({
+          ...binding,
+          // 配置里的 app.exit 仅提供按键/序列；当前面板把动作替换为 onClose，不调用应用退出。
+          cmd: input.onClose,
+          // 两个开关分别阻止宿主传播和 keymap 内继续匹配，用户配置的 fallthrough 不能放行全局退出。
+          preventDefault: true,
+          fallthrough: false,
+        })),
+      }),
+    )
   })
 }
 
@@ -528,7 +568,10 @@ export function ContextUsagePanel(props: { sessionID: string; onClose: () => voi
   registerContextUsageKeys(keymap, {
     // gather 保留默认 Ctrl+D、leader 序列与用户覆盖；不能把 app_exit 缩成固定的 Ctrl+C。
     // 新关闭命令仍由既有 layer 消费，保留应用退出键在面板内仅关闭的语义。
-    bindings: () => [...tuiConfig.keybinds.gather("app_exit", ["app.exit"]), ...tuiConfig.keybinds.get("session.context.close")],
+    bindings: () => [
+      ...tuiConfig.keybinds.gather("app_exit", ["app.exit"]),
+      ...tuiConfig.keybinds.get("session.context.close"),
+    ],
     enabled: () => dialog.stack.length === 0,
     onClose: props.onClose,
   })

@@ -227,44 +227,47 @@ test.skipIf(process.platform === "win32")("kv plugin_enabled overrides tui confi
   }
 })
 
-test.skipIf(process.platform === "win32")("loads disabled-by-default internal plugin inactive and activates on demand", async () => {
-  await using tmp = await tmpdir()
-  const config = createTuiResolvedConfig()
-  const wait = spyOn(TuiConfig, "waitForDependencies").mockResolvedValue()
-  const cwd = spyOn(process, "cwd").mockImplementation(() => tmp.path)
-  const api = createTuiPluginApi()
+test.skipIf(process.platform === "win32")(
+  "loads disabled-by-default internal plugin inactive and activates on demand",
+  async () => {
+    await using tmp = await tmpdir()
+    const config = createTuiResolvedConfig()
+    const wait = spyOn(TuiConfig, "waitForDependencies").mockResolvedValue()
+    const cwd = spyOn(process, "cwd").mockImplementation(() => tmp.path)
+    const api = createTuiPluginApi()
 
-  try {
-    await TuiPluginRuntime.init({ api, config })
+    try {
+      await TuiPluginRuntime.init({ api, config })
 
-    expect(TuiPluginRuntime.list().find((item) => item.id === "internal:plugin-manager")).toMatchObject({
-      enabled: true,
-      active: true,
-    })
-    expect(TuiPluginRuntime.list().find((item) => item.id === "which-key")).toEqual({
-      id: "which-key",
-      source: "internal",
-      spec: "which-key",
-      target: "which-key",
-      enabled: false,
-      active: false,
-    })
+      expect(TuiPluginRuntime.list().find((item) => item.id === "internal:plugin-manager")).toMatchObject({
+        enabled: true,
+        active: true,
+      })
+      expect(TuiPluginRuntime.list().find((item) => item.id === "which-key")).toEqual({
+        id: "which-key",
+        source: "internal",
+        spec: "which-key",
+        target: "which-key",
+        enabled: false,
+        active: false,
+      })
 
-    await expect(TuiPluginRuntime.activatePlugin("which-key")).resolves.toBe(true)
-    expect(TuiPluginRuntime.list().find((item) => item.id === "which-key")).toEqual({
-      id: "which-key",
-      source: "internal",
-      spec: "which-key",
-      target: "which-key",
-      enabled: true,
-      active: true,
-    })
-    expect(api.kv.get("plugin_enabled", {})).toEqual({
-      "which-key": true,
-    })
-  } finally {
-    await TuiPluginRuntime.dispose()
-    cwd.mockRestore()
-    wait.mockRestore()
-  }
-})
+      await expect(TuiPluginRuntime.activatePlugin("which-key")).resolves.toBe(true)
+      expect(TuiPluginRuntime.list().find((item) => item.id === "which-key")).toEqual({
+        id: "which-key",
+        source: "internal",
+        spec: "which-key",
+        target: "which-key",
+        enabled: true,
+        active: true,
+      })
+      expect(api.kv.get("plugin_enabled", {})).toEqual({
+        "which-key": true,
+      })
+    } finally {
+      await TuiPluginRuntime.dispose()
+      cwd.mockRestore()
+      wait.mockRestore()
+    }
+  },
+)

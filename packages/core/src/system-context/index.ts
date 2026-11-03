@@ -141,37 +141,39 @@ export function make<A>(source: Source<A>): SystemContext {
   return context([
     {
       key: source.key,
-      load: (previous) => (source.lifetime === "session" && previous
-        ? Schema.decodeUnknownEffect(source.codec)(previous.value).pipe(Effect.orDie)
-        : source.load).pipe(
-        Effect.map((value) => {
-          if (isUnavailable(value)) return value
-          const snapshot = (): SourceSnapshot => ({
-            value: encode(value),
-            ...(source.removed ? { removed: requireText(source.key, "removal", source.removed(value)) } : {}),
-          })
-          return {
-            baseline: (): Rendered => ({
-              text: requireText(source.key, "baseline", source.baseline(value)),
-              snapshot: snapshot(),
-            }),
-            compare: (previous): Compared =>
-              Option.match(decode(previous), {
-                onNone: (): Compared => ({ _tag: "Incompatible" }),
-                onSome: (decoded): Compared =>
-                  equivalent(decoded, value)
-                    ? { _tag: "Unchanged" }
-                    : {
-                        _tag: "Updated",
-                        render: () => ({
-                          text: requireText(source.key, "update", source.update(decoded, value)),
-                          snapshot: snapshot(),
-                        }),
-                      },
+      load: (previous) =>
+        (source.lifetime === "session" && previous
+          ? Schema.decodeUnknownEffect(source.codec)(previous.value).pipe(Effect.orDie)
+          : source.load
+        ).pipe(
+          Effect.map((value) => {
+            if (isUnavailable(value)) return value
+            const snapshot = (): SourceSnapshot => ({
+              value: encode(value),
+              ...(source.removed ? { removed: requireText(source.key, "removal", source.removed(value)) } : {}),
+            })
+            return {
+              baseline: (): Rendered => ({
+                text: requireText(source.key, "baseline", source.baseline(value)),
+                snapshot: snapshot(),
               }),
-          }
-        }),
-      ),
+              compare: (previous): Compared =>
+                Option.match(decode(previous), {
+                  onNone: (): Compared => ({ _tag: "Incompatible" }),
+                  onSome: (decoded): Compared =>
+                    equivalent(decoded, value)
+                      ? { _tag: "Unchanged" }
+                      : {
+                          _tag: "Updated",
+                          render: () => ({
+                            text: requireText(source.key, "update", source.update(decoded, value)),
+                            snapshot: snapshot(),
+                          }),
+                        },
+                }),
+            }
+          }),
+        ),
     },
   ])
 }
@@ -187,19 +189,24 @@ const observe = (value: SystemContext, previous?: Snapshot) =>
   Effect.forEach(
     value[ContextTypeId],
     (source) =>
-      source.load(previous && getSnapshot(previous, source.key)).pipe(
-        Effect.map(
-          (result): Entry =>
-            result === unavailable
-              ? { _tag: "Unavailable", key: source.key }
-              : { _tag: "Available", key: source.key, ...result },
+      source
+        .load(previous && getSnapshot(previous, source.key))
+        .pipe(
+          Effect.map(
+            (result): Entry =>
+              result === unavailable
+                ? { _tag: "Unavailable", key: source.key }
+                : { _tag: "Available", key: source.key, ...result },
+          ),
         ),
-      ),
     { concurrency: "unbounded" },
   )
 
 /** Creates the immutable baseline and durable snapshot for a new generation. */
-export function initialize(value: SystemContext, rendered?: (key: Key, text: string) => void): Effect.Effect<Generation, InitializationBlocked> {
+export function initialize(
+  value: SystemContext,
+  rendered?: (key: Key, text: string) => void,
+): Effect.Effect<Generation, InitializationBlocked> {
   return observe(value).pipe(
     Effect.flatMap((entries) => {
       const unavailable = entries.flatMap((entry) => (entry._tag === "Unavailable" ? [entry.key] : []))
@@ -221,7 +228,11 @@ function initializeObservation(entries: ReadonlyArray<Entry>, emitted?: (key: Ke
 }
 
 /** Reconciles current source values with one active generation. */
-export function reconcile(value: SystemContext, previous: Snapshot, rendered?: (key: Key, text: string) => void): Effect.Effect<ReconcileResult> {
+export function reconcile(
+  value: SystemContext,
+  previous: Snapshot,
+  rendered?: (key: Key, text: string) => void,
+): Effect.Effect<ReconcileResult> {
   return observe(value, previous).pipe(
     Effect.map((entries): ReconcileResult => {
       const result = reconcileObservation(entries, previous, rendered)
@@ -290,11 +301,19 @@ function reconcileObservation(
 }
 
 /** Creates a complete replacement generation or blocks while admitted context is unavailable. */
-export function replace(value: SystemContext, previous: Snapshot, rendered?: (key: Key, text: string) => void): Effect.Effect<ReplacementResult> {
+export function replace(
+  value: SystemContext,
+  previous: Snapshot,
+  rendered?: (key: Key, text: string) => void,
+): Effect.Effect<ReplacementResult> {
   return observe(value, previous).pipe(Effect.map((entries) => replaceObservation(entries, previous, rendered)))
 }
 
-function replaceObservation(entries: ReadonlyArray<Entry>, previous: Snapshot, rendered?: (key: Key, text: string) => void): ReplacementResult {
+function replaceObservation(
+  entries: ReadonlyArray<Entry>,
+  previous: Snapshot,
+  rendered?: (key: Key, text: string) => void,
+): ReplacementResult {
   if (entries.some((entry) => entry._tag === "Unavailable" && getSnapshot(previous, entry.key) !== undefined))
     return { _tag: "ReplacementBlocked" }
   return { _tag: "ReplacementReady", generation: initializeObservation(entries, rendered) }

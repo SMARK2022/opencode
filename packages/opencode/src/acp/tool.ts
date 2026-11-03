@@ -328,14 +328,11 @@ function diffContent(input: ToolInput): ToolCallContent[] {
   // 完整 multi-edit 统一 diff 非本任务目标，空 multi 体可接受（与源 hunk 同一裁定）。
   const edits = Array.isArray(input.edits) ? input.edits : []
   const first = edits[0] && typeof edits[0] === "object" ? (edits[0] as Record<string, unknown>) : undefined
-  const oldText =
-    typeof first?.["oldString"] === "string"
-      ? first["oldString"]
-      : stringValue(input.oldString)
+  const oldText = typeof first?.["oldString"] === "string" ? first["oldString"] : stringValue(input.oldString)
   const newText =
     typeof first?.["newString"] === "string"
       ? first["newString"]
-      : stringValue(input.newString) ?? stringValue(input.content)
+      : (stringValue(input.newString) ?? stringValue(input.content))
   if (oldText === undefined || newText === undefined) return []
 
   return [

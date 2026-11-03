@@ -58,28 +58,28 @@
 
 ## 3. Repository Context
 
-| Source | Constraint |
-| --- | --- |
-| `CONTEXT.md` | Session由Message和Part组成；Tool输出及附件存入completed ToolPart |
-| `AGENTS.md` | 最小修改、不得新增单次helper、测试/typecheck从package运行 |
-| `packages/opencode/test/AGENTS.md` | 测试真实CLI行为和临时SQLite，不复制算法 |
-| `.opencode/policy/first-principles-engineering.md` | 单一Sharp主路径；用户明确授权的坏图弃用必须精确定义 |
+| Source                                             | Constraint                                                       |
+| -------------------------------------------------- | ---------------------------------------------------------------- |
+| `CONTEXT.md`                                       | Session由Message和Part组成；Tool输出及附件存入completed ToolPart |
+| `AGENTS.md`                                        | 最小修改、不得新增单次helper、测试/typecheck从package运行        |
+| `packages/opencode/test/AGENTS.md`                 | 测试真实CLI行为和临时SQLite，不复制算法                          |
+| `.opencode/policy/first-principles-engineering.md` | 单一Sharp主路径；用户明确授权的坏图弃用必须精确定义              |
 
 当前任务基线是用户完成既有Sharp修复commit后的HEAD `d75c026a5a68`。R7只修改现有文档、迁移脚本和`read.test.ts`。
 
 ## 4. Files and Evidence Read
 
-| Evidence | Relevance | Class |
-| --- | --- | --- |
-| `src/image/image.ts` | 默认统一边界：2000x2000、5MB base64；正常图片metadata fast-path原样返回 | contracted |
-| `src/session/processor.ts:561-585` | 当前链路允许失败Tool图片省略并在output追加说明 | contracted |
-| `src/session/message-v2.ts` | completed ToolPart的`output`和`attachments`持久化形态 | contracted |
-| `src/session/session.sql.ts` | `part.data`是唯一更新字段 | contracted |
-| `script/migrate-image-attachment.ts` HEAD | 旧工具要求single source/hash/backup，不能自动全库处理 | observed |
-| `test/tool/read.test.ts` | 现有CLI子进程和临时SQLite测试缝 | reachable |
-| 真实DB只读扫描 | 441张均为规范`image/png|jpeg` base64 data URL；119顶层、322 completed Read Tool | observed |
-| 真实DB Sharp默认扫描 | 48张需规范化、392张不变、1张Tool PNG DecodeError | observed |
-| 坏Part | `prt_f5af04c69001KEtWbmwrZrOjt3`，7,340,032 bytes，completed Read Tool attachment[0] | observed |
+| Evidence                                  | Relevance                                                                            | Class                                                   |
+| ----------------------------------------- | ------------------------------------------------------------------------------------ | ------------------------------------------------------- | -------- |
+| `src/image/image.ts`                      | 默认统一边界：2000x2000、5MB base64；正常图片metadata fast-path原样返回              | contracted                                              |
+| `src/session/processor.ts:561-585`        | 当前链路允许失败Tool图片省略并在output追加说明                                       | contracted                                              |
+| `src/session/message-v2.ts`               | completed ToolPart的`output`和`attachments`持久化形态                                | contracted                                              |
+| `src/session/session.sql.ts`              | `part.data`是唯一更新字段                                                            | contracted                                              |
+| `script/migrate-image-attachment.ts` HEAD | 旧工具要求single source/hash/backup，不能自动全库处理                                | observed                                                |
+| `test/tool/read.test.ts`                  | 现有CLI子进程和临时SQLite测试缝                                                      | reachable                                               |
+| 真实DB只读扫描                            | 441张均为规范`image/png                                                              | jpeg` base64 data URL；119顶层、322 completed Read Tool | observed |
+| 真实DB Sharp默认扫描                      | 48张需规范化、392张不变、1张Tool PNG DecodeError                                     | observed                                                |
+| 坏Part                                    | `prt_f5af04c69001KEtWbmwrZrOjt3`，7,340,032 bytes，completed Read Tool attachment[0] | observed                                                |
 
 ## 5. Current Behavior
 
@@ -93,40 +93,40 @@
 
 ## 6. Supported Input Domain and Reachability
 
-| Input | Producer/evidence | R7 outcome |
-| --- | --- | --- |
-| 顶层`image/*` FilePart，合法base64 data URL | 真实DB 119张 | 默认Image.Service；不变或规范化；失败则整批回滚 |
-| completed ToolPart中的`image/*` attachment，合法base64 data URL | 真实DB 322张 | 默认Image.Service；不变或规范化 |
-| completed Tool图片返回`ImageDecodeError` | 真实DB唯一坏Part | 删除该attachment，并在原Tool output追加图片不可用说明 |
-| `ImageResizerUnavailableError` | workspace Sharp装载失败 | 整批失败并回滚，绝不弃用全部图片 |
-| 非图片附件、非completed Tool状态 | schema与真实DB | 原样忽略 |
+| Input                                                           | Producer/evidence       | R7 outcome                                            |
+| --------------------------------------------------------------- | ----------------------- | ----------------------------------------------------- |
+| 顶层`image/*` FilePart，合法base64 data URL                     | 真实DB 119张            | 默认Image.Service；不变或规范化；失败则整批回滚       |
+| completed ToolPart中的`image/*` attachment，合法base64 data URL | 真实DB 322张            | 默认Image.Service；不变或规范化                       |
+| completed Tool图片返回`ImageDecodeError`                        | 真实DB唯一坏Part        | 删除该attachment，并在原Tool output追加图片不可用说明 |
+| `ImageResizerUnavailableError`                                  | workspace Sharp装载失败 | 整批失败并回滚，绝不弃用全部图片                      |
+| 非图片附件、非completed Tool状态                                | schema与真实DB          | 原样忽略                                              |
 
 只有以上观察或现有契约证明的输入进入实现。顶层坏图、MIME错配、目录替代源、去重和历史Project配置均不得新增分支。
 
 ## 7. Required Invariants
 
-| ID | Invariant | Evidence | Test |
-| --- | --- | --- | --- |
-| INV-01 | CLI只需位置参数DB；默认preview，`--apply`写入 | 用户选择 | CLI参数测试 |
-| INV-02 | 所有图片统一调用workspace Image.Service默认策略，不传token budget | 用户统一化要求 | 同一fixture跨两种存储位置输出一致 |
-| INV-03 | metadata fast-path返回同一MIME/URL时不写库 | 用户“正常大小不二次处理” | 小图不变 |
-| INV-04 | 超过默认尺寸/5MB边界的可解码图由Sharp规范化 | 用户要求过大图片处理 | large fixture变小且可decode |
-| INV-05 | observed completed Tool DecodeError删除坏附件并只追加一次“图片不可用”说明 | 用户明确授权 | 坏Tool图preview/apply/幂等 |
-| INV-06 | Sharp不可用或顶层图片失败不得转成成功，整批rollback | 单一主链安全边界 | 代码审计；无生产test hook |
-| INV-07 | preview使用readonly+query_only且零写入 | 用户选择 | 完整行前后相等 |
-| INV-08 | apply在首条查询前`BEGIN IMMEDIATE`，所有更新同一事务，错误rollback | SQLite并发 | 后行trigger回滚前行 |
-| INV-09 | 只改mime/url、Tool attachments/output，其他未知字段不变 | Part持久化契约 | 深比较 |
-| INV-10 | 报告不变/规范化/弃用数量及payload/Part JSON逻辑空间差值，并说明无VACUUM物理文件不缩小 | 用户空间要求 | 独立已知值 |
-| INV-11 | 第二次preview显示0个待修改，且不可用说明不重复 | 幂等 | apply后重跑 |
+| ID     | Invariant                                                                             | Evidence                 | Test                              |
+| ------ | ------------------------------------------------------------------------------------- | ------------------------ | --------------------------------- |
+| INV-01 | CLI只需位置参数DB；默认preview，`--apply`写入                                         | 用户选择                 | CLI参数测试                       |
+| INV-02 | 所有图片统一调用workspace Image.Service默认策略，不传token budget                     | 用户统一化要求           | 同一fixture跨两种存储位置输出一致 |
+| INV-03 | metadata fast-path返回同一MIME/URL时不写库                                            | 用户“正常大小不二次处理” | 小图不变                          |
+| INV-04 | 超过默认尺寸/5MB边界的可解码图由Sharp规范化                                           | 用户要求过大图片处理     | large fixture变小且可decode       |
+| INV-05 | observed completed Tool DecodeError删除坏附件并只追加一次“图片不可用”说明             | 用户明确授权             | 坏Tool图preview/apply/幂等        |
+| INV-06 | Sharp不可用或顶层图片失败不得转成成功，整批rollback                                   | 单一主链安全边界         | 代码审计；无生产test hook         |
+| INV-07 | preview使用readonly+query_only且零写入                                                | 用户选择                 | 完整行前后相等                    |
+| INV-08 | apply在首条查询前`BEGIN IMMEDIATE`，所有更新同一事务，错误rollback                    | SQLite并发               | 后行trigger回滚前行               |
+| INV-09 | 只改mime/url、Tool attachments/output，其他未知字段不变                               | Part持久化契约           | 深比较                            |
+| INV-10 | 报告不变/规范化/弃用数量及payload/Part JSON逻辑空间差值，并说明无VACUUM物理文件不缩小 | 用户空间要求             | 独立已知值                        |
+| INV-11 | 第二次preview显示0个待修改，且不可用说明不重复                                        | 幂等                     | apply后重跑                       |
 
 ## 8. First Divergence and Root Cause
 
-| Invariant | First divergence | Owner | Proof |
-| --- | --- | --- | --- |
-| INV-01 | 参数解析把part/source/hash设为必填 | migration CLI | 路径-only命令exit 1 |
-| INV-02-04 | 旧CLI只处理外部source，未扫描数据库现有图片 | migration CLI | HEAD源码 |
-| INV-05 | 旧CLI遇到数据库坏bytes只能要求外部source | migration CLI | 已知坏PNG不可完整decode |
-| INV-10 | 旧CLI只报告单张new bytes | migration CLI | HEAD report |
+| Invariant | First divergence                            | Owner         | Proof                   |
+| --------- | ------------------------------------------- | ------------- | ----------------------- |
+| INV-01    | 参数解析把part/source/hash设为必填          | migration CLI | 路径-only命令exit 1     |
+| INV-02-04 | 旧CLI只处理外部source，未扫描数据库现有图片 | migration CLI | HEAD源码                |
+| INV-05    | 旧CLI遇到数据库坏bytes只能要求外部source    | migration CLI | 已知坏PNG不可完整decode |
+| INV-10    | 旧CLI只报告单张new bytes                    | migration CLI | HEAD report             |
 
 Red命令：
 
@@ -139,12 +139,12 @@ bun test test/tool/read.test.ts --test-name-pattern "image attachment migration"
 
 ## 9. Responsibility and Seam
 
-| Concern | Owner | Reason |
-| --- | --- | --- |
-| 默认图片规范化 | Image.Service/Sharp | 唯一现有算法，不复制resize逻辑 |
-| 全库扫描、preview和事务更新 | 离线migration CLI | 用户直接执行的持久化维护边界 |
-| 已丢失Tool图片的语义降级 | migration CLI按用户显式rollback授权 | 数据库无法恢复bytes；completed Tool output允许文本说明 |
-| Provider消费 | 现有MessageV2 | 更新后自然读取正确附件/不可用文本，不加B端repair |
+| Concern                     | Owner                               | Reason                                                 |
+| --------------------------- | ----------------------------------- | ------------------------------------------------------ |
+| 默认图片规范化              | Image.Service/Sharp                 | 唯一现有算法，不复制resize逻辑                         |
+| 全库扫描、preview和事务更新 | 离线migration CLI                   | 用户直接执行的持久化维护边界                           |
+| 已丢失Tool图片的语义降级    | migration CLI按用户显式rollback授权 | 数据库无法恢复bytes；completed Tool output允许文本说明 |
+| Provider消费                | 现有MessageV2                       | 更新后自然读取正确附件/不可用文本，不加B端repair       |
 
 ## 10. Single Approved Primary-Path Design
 
@@ -180,99 +180,99 @@ db path [+ --apply]
 
 ## 11. Secondary and Replacement Path Inventory
 
-| Path | Classification | Success | Disposition |
-| --- | --- | --- | --- |
-| 默认Image.Service unchanged/normalized | primary-contract branches | yes | preserve |
-| completed Tool DecodeError弃用 | explicit user-requested rollback | yes | implement exactly |
-| ResizerUnavailable/顶层失败 | error path | no | rollback |
-| 外部source、第二后端、目录猜测、原图fallback | forbidden fallback | yes | delete/reject |
+| Path                                         | Classification                   | Success | Disposition       |
+| -------------------------------------------- | -------------------------------- | ------- | ----------------- |
+| 默认Image.Service unchanged/normalized       | primary-contract branches        | yes     | preserve          |
+| completed Tool DecodeError弃用               | explicit user-requested rollback | yes     | implement exactly |
+| ResizerUnavailable/顶层失败                  | error path                       | no      | rollback          |
+| 外部source、第二后端、目录猜测、原图fallback | forbidden fallback               | yes     | delete/reject     |
 
 新alternate success path只有用户逐字授权的Tool坏图弃用。`unchanged/normalized`报告和preview/apply汇总属于主契约可观察性，坏图Part/index属于rollback必需可观察性，均不属于诊断路径。唯一真正诊断分支是“非授权Image错误导致非成功退出”，按新增约12个可执行决策计为`1/12 = 8.3%`，低于10%；不为比例新增任何分支。
 
 ## 12. Workaround Deletion and Replacement
 
-| Existing logic | Disposition |
-| --- | --- |
-| single Options和part/source/SHA参数 | 删除，替换为位置DB + `--apply` |
+| Existing logic                               | Disposition                                |
+| -------------------------------------------- | ------------------------------------------ |
+| single Options和part/source/SHA参数          | 删除，替换为位置DB + `--apply`             |
 | backup/VACUUM INTO/manifest/validation clone | 删除；用户不要保留旧值，bulk事务负责原子性 |
-| expected plan/new hash双运行协议 | 删除；preview与apply都从当前DB自动计算 |
-| 按来源token budget和Project Config方案 | 删除；采用统一默认Image.Service |
+| expected plan/new hash双运行协议             | 删除；preview与apply都从当前DB自动计算     |
+| 按来源token budget和Project Config方案       | 删除；采用统一默认Image.Service            |
 
 ## 13. Forward Traceability
 
-| Invariant | Script change | Test |
-| --- | --- | --- |
-| INV-01/07 | positional db + optional apply；readonly preview | preview零写入 |
-| INV-02-04 | 全部来源调用默认Image.Service | 小图不变、大图两位置统一输出 |
-| INV-05/06 | 仅Tool DecodeError rollback；其他错误失败 | 坏Tool图弃用；代码审计Sharp unavailable |
-| INV-08/09 | BEGIN IMMEDIATE + full JSON CAS | second-row trigger全回滚；字段保留 |
-| INV-10 | 聚合bytes/JSON差值 | fixture独立literal |
-| INV-11 | 只在无固定说明时追加 | 二次preview 0 changes |
+| Invariant | Script change                                    | Test                                    |
+| --------- | ------------------------------------------------ | --------------------------------------- |
+| INV-01/07 | positional db + optional apply；readonly preview | preview零写入                           |
+| INV-02-04 | 全部来源调用默认Image.Service                    | 小图不变、大图两位置统一输出            |
+| INV-05/06 | 仅Tool DecodeError rollback；其他错误失败        | 坏Tool图弃用；代码审计Sharp unavailable |
+| INV-08/09 | BEGIN IMMEDIATE + full JSON CAS                  | second-row trigger全回滚；字段保留      |
+| INV-10    | 聚合bytes/JSON差值                               | fixture独立literal                      |
+| INV-11    | 只在无固定说明时追加                             | 二次preview 0 changes                   |
 
 ## 14. Reverse Traceability
 
-| Concept | Requirement | Why existing code insufficient |
-| --- | --- | --- |
-| positional DB/preview/apply | INV-01 | 旧CLI需要7类外部信息 |
-| 全库图片遍历 | INV-02-04 | 旧CLI只查一个Part |
-| Tool DecodeError弃用 | INV-05 | 缺失bytes无法由Sharp或DB恢复 |
-| BEGIN IMMEDIATE + CAS | INV-08/09 | 多行写入必须原子且不覆盖并发值 |
-| 空间聚合 | INV-10 | 单张new bytes不能回答全库收益 |
+| Concept                     | Requirement | Why existing code insufficient |
+| --------------------------- | ----------- | ------------------------------ |
+| positional DB/preview/apply | INV-01      | 旧CLI需要7类外部信息           |
+| 全库图片遍历                | INV-02-04   | 旧CLI只查一个Part              |
+| Tool DecodeError弃用        | INV-05      | 缺失bytes无法由Sharp或DB恢复   |
+| BEGIN IMMEDIATE + CAS       | INV-08/09   | 多行写入必须原子且不覆盖并发值 |
+| 空间聚合                    | INV-10      | 单张new bytes不能回答全库收益  |
 
 ## 15. File-Level Change Plan
 
-| File | Change | Budget |
-| --- | --- | ---: |
-| `docs/Proposal/tui-image-validation-and-history-repair.md` | R7规范和审计记录 | docs |
-| `packages/opencode/script/migrate-image-attachment.ts` | 删除single复杂协议，改为精简preview/apply全库处理 | 约220-300行最终文件 |
-| `packages/opencode/test/tool/read.test.ts` | 替换旧single测试为两个bulk CLI行为测试 | +100至160 |
+| File                                                       | Change                                            |              Budget |
+| ---------------------------------------------------------- | ------------------------------------------------- | ------------------: |
+| `docs/Proposal/tui-image-validation-and-history-repair.md` | R7规范和审计记录                                  |                docs |
+| `packages/opencode/script/migrate-image-attachment.ts`     | 删除single复杂协议，改为精简preview/apply全库处理 | 约220-300行最终文件 |
+| `packages/opencode/test/tool/read.test.ts`                 | 替换旧single测试为两个bulk CLI行为测试            |           +100至160 |
 
 3文件、预计有效代码低于450行，低于8文件/800行限制。无生成文件、schema或依赖变化。
 
 ## 16. TDD Behavior Slices
 
-| Order | Red | Green |
-| ---: | --- | --- |
-| 1 | 路径-only当前报缺`--db/part/source` | preview扫描临时DB且零写入 |
-| 2 | 小图和大图无法全库分类 | 小图unchanged，大图normalized，两种存储位置使用同一输出 |
-| 3 | 截断Tool图只能外部source修复 | preview标记unavailable；apply删除附件并追加说明 |
-| 4 | 多行apply无全库原子测试 | second-row trigger使所有行rollback |
-| 5 | apply后可能重复说明/编码 | 二次preview changed=0、unavailable=0 |
-| 6 | 空间报告无独立口径 | 断言已知payload/JSON前后差值 |
+| Order | Red                                 | Green                                                   |
+| ----: | ----------------------------------- | ------------------------------------------------------- |
+|     1 | 路径-only当前报缺`--db/part/source` | preview扫描临时DB且零写入                               |
+|     2 | 小图和大图无法全库分类              | 小图unchanged，大图normalized，两种存储位置使用同一输出 |
+|     3 | 截断Tool图只能外部source修复        | preview标记unavailable；apply删除附件并追加说明         |
+|     4 | 多行apply无全库原子测试             | second-row trigger使所有行rollback                      |
+|     5 | apply后可能重复说明/编码            | 二次preview changed=0、unavailable=0                    |
+|     6 | 空间报告无独立口径                  | 断言已知payload/JSON前后差值                            |
 
 测试缝是用户实际CLI子进程和临时SQLite。不得检查private helper或源码字符串。
 
 ## 17. Chinese Comment Budget
 
-| Metric | Estimate |
-| --- | ---: |
-| Effective code `E` | 250-400 |
-| Required Chinese comments `C` | 38-60 |
+| Metric                        | Estimate |
+| ----------------------------- | -------: |
+| Effective code `E`            |  250-400 |
+| Required Chinese comments `C` |    38-60 |
 
 注释仅解释统一默认策略、DecodeError rollback授权、Sharp unavailable全回滚、readonly/apply事务边界、完整JSON CAS、逻辑空间口径和测试行为意图。
 
 ## 18. Verification
 
-| Command | CWD | Proof |
-| --- | --- | --- |
-| `bun test test/tool/read.test.ts --test-name-pattern "image attachment migration" --timeout 120000` | `packages/opencode` | 新CLI全部行为 |
-| `bun test test/tool/read.test.ts --timeout 30000` | `packages/opencode` | 完整Read回归 |
-| `bun test test/image/image.test.ts --timeout 30000` | `packages/opencode` | 默认Image.Service边界 |
-| `bun typecheck` | `packages/opencode` | 类型检查 |
-| `bun script/migrate-image-attachment.ts "C:\Users\Lenovo\.local\share\opencode\opencode.db"` | `packages/opencode` | 真实DB只读preview；本会话唯一允许的真实DB命令 |
-| `git diff --check` | repo root | diff检查 |
+| Command                                                                                             | CWD                 | Proof                                         |
+| --------------------------------------------------------------------------------------------------- | ------------------- | --------------------------------------------- |
+| `bun test test/tool/read.test.ts --test-name-pattern "image attachment migration" --timeout 120000` | `packages/opencode` | 新CLI全部行为                                 |
+| `bun test test/tool/read.test.ts --timeout 30000`                                                   | `packages/opencode` | 完整Read回归                                  |
+| `bun test test/image/image.test.ts --timeout 30000`                                                 | `packages/opencode` | 默认Image.Service边界                         |
+| `bun typecheck`                                                                                     | `packages/opencode` | 类型检查                                      |
+| `bun script/migrate-image-attachment.ts "C:\Users\Lenovo\.local\share\opencode\opencode.db"`        | `packages/opencode` | 真实DB只读preview；本会话唯一允许的真实DB命令 |
+| `git diff --check`                                                                                  | repo root           | diff检查                                      |
 
 真实`--apply`只由用户在review结果后执行。
 
 ## 19. Diff Budget
 
-| Metric | Estimate |
-| --- | ---: |
-| Modified files | 3 |
-| Added/deleted files | 0 |
+| Metric                 |      Estimate |
+| ---------------------- | ------------: |
+| Modified files         |             3 |
+| Added/deleted files    |             0 |
 | Final migration script | 220-300 lines |
-| Net test change | +100至160 |
-| Effective code | <450 |
+| Net test change        |     +100至160 |
+| Effective code         |          <450 |
 
 ## 20. Real Risks and Open Decisions
 
@@ -299,24 +299,24 @@ db path [+ --apply]
 
 ## 22. Plan Audit Record
 
-| Round | Revision | Scope | Findings | Result | Reference |
-| --- | --- | --- | --- | --- | --- |
-| 1 | R2 | full | 4 blocking | BLOCK | `ses_09f6e2b0affeWvgSLYD4Yy0GIt` |
-| 2 | R3 | full | 3 blocking | BLOCK | `ses_09f28334affeMaj37F62quZ2Ew` |
-| 3 | R4 | full | 3 blocking；用户否定纯文本比例阻塞并重新定义坏图处理 | superseded by user requirement | `ses_09f17ef82ffeY9CvJn1yCl73TV` |
-| 4 | R5 | full | B-01 rollback缺少重新评估条件；B-02审计输入漏掉既有空间要求 | BLOCK | `ses_09e52eb71ffejvPpuTIDlX93je` |
-| 5 | R6 | full | B-01诊断决策面缺少数值；用户已明确该纯文本比例不应阻塞 | BLOCK，按用户指示仅补分类文本 | `ses_09e4ed3fdffeN0xMFYwLYOrBK4` |
-| 6 | R7 | full | `No blocking findings.` | APPROVE — canonical plan revision R7 only. | `ses_09e4b1cc1ffeUV8WQi7fQjzZRA` |
+| Round | Revision | Scope | Findings                                                    | Result                                     | Reference                        |
+| ----- | -------- | ----- | ----------------------------------------------------------- | ------------------------------------------ | -------------------------------- |
+| 1     | R2       | full  | 4 blocking                                                  | BLOCK                                      | `ses_09f6e2b0affeWvgSLYD4Yy0GIt` |
+| 2     | R3       | full  | 3 blocking                                                  | BLOCK                                      | `ses_09f28334affeMaj37F62quZ2Ew` |
+| 3     | R4       | full  | 3 blocking；用户否定纯文本比例阻塞并重新定义坏图处理        | superseded by user requirement             | `ses_09f17ef82ffeY9CvJn1yCl73TV` |
+| 4     | R5       | full  | B-01 rollback缺少重新评估条件；B-02审计输入漏掉既有空间要求 | BLOCK                                      | `ses_09e52eb71ffejvPpuTIDlX93je` |
+| 5     | R6       | full  | B-01诊断决策面缺少数值；用户已明确该纯文本比例不应阻塞      | BLOCK，按用户指示仅补分类文本              | `ses_09e4ed3fdffeN0xMFYwLYOrBK4` |
+| 6     | R7       | full  | `No blocking findings.`                                     | APPROVE — canonical plan revision R7 only. | `ses_09e4b1cc1ffeUV8WQi7fQjzZRA` |
 
 ## 23. Implementation Evidence
 
 ### 23.1 Actual Change Surface
 
-| File | Actual change | Necessity |
-| --- | --- | --- |
-| `docs/Proposal/tui-image-validation-and-history-repair.md` | R7唯一规范、验证证据和审计记录 | 为批准实施和独立放行提供可审计事实 |
-| `packages/opencode/script/migrate-image-attachment.ts` | 删除single/source/hash/backup/plan协议，收敛为229行preview/apply全库CLI | 唯一生产修改，直接修复无法自动处理全库和截断Tool图片的问题 |
-| `packages/opencode/test/tool/read.test.ts` | 用两个真实CLI+临时SQLite行为测试替换旧single协议测试 | 覆盖统一Sharp、只读、apply、弃用、空间、幂等和事务回滚 |
+| File                                                       | Actual change                                                           | Necessity                                                  |
+| ---------------------------------------------------------- | ----------------------------------------------------------------------- | ---------------------------------------------------------- |
+| `docs/Proposal/tui-image-validation-and-history-repair.md` | R7唯一规范、验证证据和审计记录                                          | 为批准实施和独立放行提供可审计事实                         |
+| `packages/opencode/script/migrate-image-attachment.ts`     | 删除single/source/hash/backup/plan协议，收敛为229行preview/apply全库CLI | 唯一生产修改，直接修复无法自动处理全库和截断Tool图片的问题 |
+| `packages/opencode/test/tool/read.test.ts`                 | 用两个真实CLI+临时SQLite行为测试替换旧single协议测试                    | 覆盖统一Sharp、只读、apply、弃用、空间、幂等和事务回滚     |
 
 没有新增文件、依赖、schema、migration、生成文件、配置项或公共API。无关`thirdparty/chatgpt-browser-agent`修改未触碰。
 
@@ -339,20 +339,20 @@ bun script/migrate-image-attachment.ts "C:\Users\Lenovo\.local\share\opencode\op
 
 结果：
 
-| Metric | Value |
-| --- | ---: |
-| status | preview |
-| image attachments | 441 |
-| unchanged | 392 |
-| normalized | 48 |
-| unavailable | 1 |
-| changed parts | 49 |
-| old payload bytes | 256,706,749 |
-| new payload bytes | 195,263,239 |
-| saved payload bytes | 61,443,510 |
-| old Part JSON bytes | 342,576,969 |
-| new Part JSON bytes | 260,652,145 |
-| logical Part JSON bytes saved | 81,924,824 |
+| Metric                        |       Value |
+| ----------------------------- | ----------: |
+| status                        |     preview |
+| image attachments             |         441 |
+| unchanged                     |         392 |
+| normalized                    |          48 |
+| unavailable                   |           1 |
+| changed parts                 |          49 |
+| old payload bytes             | 256,706,749 |
+| new payload bytes             | 195,263,239 |
+| saved payload bytes           |  61,443,510 |
+| old Part JSON bytes           | 342,576,969 |
+| new Part JSON bytes           | 260,652,145 |
+| logical Part JSON bytes saved |  81,924,824 |
 
 唯一unavailable仍是`prt_f5af04c69001KEtWbmwrZrOjt3`的Tool attachment index 0。命令前后数据库主文件长度和`LastWriteTimeUtc`均相等，确认preview未写库。本会话未运行真实`--apply`。
 
@@ -375,12 +375,12 @@ Alternate-success path为0。没有Bun.Image、第二decoder/resizer、来源预
 
 按`git diff HEAD`对生产和测试新增行使用审计者的保守口径：
 
-| Metric | Value |
-| --- | ---: |
-| Effective code `E` | 253 |
-| Qualifying Chinese explanatory comments `C` | 38 |
-| Required `ceil(E * 0.15)` | 38 |
-| Ratio | 15.02% |
+| Metric                                      |  Value |
+| ------------------------------------------- | -----: |
+| Effective code `E`                          |    253 |
+| Qualifying Chinese explanatory comments `C` |     38 |
+| Required `ceil(E * 0.15)`                   |     38 |
+| Ratio                                       | 15.02% |
 
 注释分布在位置参数契约、preview/apply事务边界、统一Sharp策略、typed DecodeError授权、附件索引稳定、未知字段保留、完整JSON CAS、空间统计和对应行为断言附近；没有集中注释或表面复述。
 
@@ -391,10 +391,10 @@ Alternate-success path为0。没有Bun.Image、第二decoder/resizer、来源预
 
 ## 24. Implementation Audit Record
 
-| Round | Revision | Full scope | Finding classification | Release verdict | Reference |
-| --- | --- | --- | --- | --- | --- |
-| 1 | pre-R2 | yes | blocking | BLOCK | `ses_09fddb7fcffen8zj58b5BQbEL5` |
-| 2 | R7 | yes | `No blocking findings.`；`Non-blocking findings: 无。未发现需要发布前整改的纯风格、冗余抽象或兼容性问题。` | `APPROVE — 仅适用于当前 R7 canonical plan 与本次实际实现 diff。` | `ses_09e3b9935ffery6EmVZ4cm5DL0` |
+| Round | Revision | Full scope | Finding classification                                                                                     | Release verdict                                                  | Reference                        |
+| ----- | -------- | ---------- | ---------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------- | -------------------------------- |
+| 1     | pre-R2   | yes        | blocking                                                                                                   | BLOCK                                                            | `ses_09fddb7fcffen8zj58b5BQbEL5` |
+| 2     | R7       | yes        | `No blocking findings.`；`Non-blocking findings: 无。未发现需要发布前整改的纯风格、冗余抽象或兼容性问题。` | `APPROVE — 仅适用于当前 R7 canonical plan 与本次实际实现 diff。` | `ses_09e3b9935ffery6EmVZ4cm5DL0` |
 
 审计确认：primary-path通过；alternate-success budget为0；唯一非主语义是用户逐字授权的completed Tool typed `ImageDecodeError` rollback，不属于未授权fallback。
 

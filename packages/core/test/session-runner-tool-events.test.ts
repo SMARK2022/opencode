@@ -73,7 +73,12 @@ const result = LLMEvent.toolResult({
 test("local tool success serializes media base64 once and reconstructs from structured content", async () => {
   const { published, publisher } = capture()
   await Effect.runPromise(publisher.publish(call))
-  expect(await Effect.runPromise(publisher.publish(result))).toMatchObject({ failed: false, name: "read", input: call.input, callID: call.id })
+  expect(await Effect.runPromise(publisher.publish(result))).toMatchObject({
+    failed: false,
+    name: "read",
+    input: call.input,
+    callID: call.id,
+  })
 
   const success = published.find((event) => event.type === "session.next.tool.success.1")
   expect(success).toBeDefined()
@@ -89,7 +94,7 @@ test("local tool success serializes media base64 once and reconstructs from stru
   })
   // 正常结果已提交后，attempt清理不能另发失败终态。
   await Effect.runPromise(publisher.failUnsettledTools("stream ended", false, true))
-  expect(published.filter(event => event.type === "session.next.tool.failed.1")).toHaveLength(0)
+  expect(published.filter((event) => event.type === "session.next.tool.failed.1")).toHaveLength(0)
 })
 
 test("provider-executed success retains its compatibility result", async () => {
@@ -113,33 +118,44 @@ test("binary failure emits no success event", async () => {
     ),
   )
   expect(accepted).toMatchObject({ failed: true, name: "read", input: call.input, callID: call.id })
-  const repeated = await Effect.runPromise(publisher.publish(LLMEvent.toolResult({ id: call.id, name: call.name, result: { type: "error", value: "duplicate" } })))
+  const repeated = await Effect.runPromise(
+    publisher.publish(
+      LLMEvent.toolResult({ id: call.id, name: call.name, result: { type: "error", value: "duplicate" } }),
+    ),
+  )
   expect(repeated).toBeUndefined()
   expect(published.some((event) => event.type === "session.next.tool.success.1")).toBe(false)
   expect(published.some((event) => event.type === "session.next.tool.failed.1")).toBe(true)
   let rejected = false
-  const retryable = capture(type => {
+  const retryable = capture((type) => {
     if (type !== SessionEvent.Tool.Failed.type || rejected) return
     rejected = true
     throw new Error("terminal commit failed")
   })
   await Effect.runPromise(retryable.publisher.publish(call))
   // 终态写入失败不能先把内存标记为settled，否则退出清理会漏掉持久running。
-  const failed = await Effect.runPromise(retryable.publisher.publish(LLMEvent.toolResult({ id: call.id, name: call.name,
-    result: { type: "error", value: "failed" } })).pipe(Effect.exit))
+  const failed = await Effect.runPromise(
+    retryable.publisher
+      .publish(LLMEvent.toolResult({ id: call.id, name: call.name, result: { type: "error", value: "failed" } }))
+      .pipe(Effect.exit),
+  )
   expect(failed._tag).toBe("Failure")
   await Effect.runPromise(retryable.publisher.failUnsettledTools("stream ended", false, true))
-  expect(retryable.published.filter(event => event.type === "session.next.tool.failed.1")).toHaveLength(1)
+  expect(retryable.published.filter((event) => event.type === "session.next.tool.failed.1")).toHaveLength(1)
   await Effect.runPromise(retryable.publisher.failUnsettledTools("repeated cleanup", false, true))
-  expect(retryable.published.filter(event => event.type === "session.next.tool.failed.1")).toHaveLength(1)
+  expect(retryable.published.filter((event) => event.type === "session.next.tool.failed.1")).toHaveLength(1)
   // 真正Native publisher保留坏参数原值，但持久Called事件的input必须仍为对象。
   for (const input of ["{bad json", []]) {
     const malformed = capture()
     await Effect.runPromise(malformed.publisher.publish(LLMEvent.toolCall({ ...call, id: "malformed", input })))
-    await Effect.runPromise(malformed.publisher.publish(LLMEvent.toolResult({ id: "malformed", name: call.name, result: { type: "error", value: "Invalid input" } })))
-    const called = malformed.published.find(event => event.type === "session.next.tool.called.1")
+    await Effect.runPromise(
+      malformed.publisher.publish(
+        LLMEvent.toolResult({ id: "malformed", name: call.name, result: { type: "error", value: "Invalid input" } }),
+      ),
+    )
+    const called = malformed.published.find((event) => event.type === "session.next.tool.called.1")
     expect(called?.data).toMatchObject({ input: { value: input } })
-    expect(malformed.published.some(event => event.type === "session.next.tool.failed.1")).toBe(true)
+    expect(malformed.published.some((event) => event.type === "session.next.tool.failed.1")).toBe(true)
   }
 })
 

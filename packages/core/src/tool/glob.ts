@@ -60,9 +60,10 @@ const layer = Layer.effectDiscard(
           toModelOutput: ({ output }) => [
             {
               type: "text",
-              text: toModelOutput(
-                { ...output, files: output.files.map((entry) => ({ ...entry, path: path.resolve(location.directory, entry.path) })) },
-              ),
+              text: toModelOutput({
+                ...output,
+                files: output.files.map((entry) => ({ ...entry, path: path.resolve(location.directory, entry.path) })),
+              }),
             },
           ],
           execute: (input, context) =>
@@ -101,7 +102,12 @@ const layer = Layer.effectDiscard(
                   })),
                 )
             }).pipe(
-              Effect.mapError((error) => new ToolFailure({ message: PermissionV2.autoDeniedMessage(error) ?? `Unable to find files matching ${input.pattern}` })),
+              Effect.mapError(
+                (error) =>
+                  new ToolFailure({
+                    message: PermissionV2.autoDeniedMessage(error) ?? `Unable to find files matching ${input.pattern}`,
+                  }),
+              ),
             ),
         }),
       })

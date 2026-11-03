@@ -175,7 +175,8 @@ function DiagnosticsDisplay(props: {
           <div data-slot="diagnostic-summary">
             <span data-slot="diagnostic-summary-clean">✓</span>
             <span data-slot="diagnostic-summary-text">
-              {" "}{i18n.t("ui.messagePart.diagnostic.summary", { count: props.summary!.existingCount })}
+              {" "}
+              {i18n.t("ui.messagePart.diagnostic.summary", { count: props.summary!.existingCount })}
             </span>
           </div>
         </Show>
@@ -899,7 +900,7 @@ function contextToolTrigger(part: ToolPart, i18n: ReturnType<typeof useI18n>) {
       return {
         title: i18n.t("ui.tool.grep"),
         subtitle: getDirectory(path),
-        args: grepSummary(input, "metadata" in part.state ? part.state.metadata ?? {} : {}, i18n),
+        args: grepSummary(input, "metadata" in part.state ? (part.state.metadata ?? {}) : {}, i18n),
       }
     }
     default: {
@@ -1645,9 +1646,7 @@ PART_MAPPING["tool"] = function ToolPartDisplay(props) {
             />
           </Match>
         </Switch>
-        <Show when={review()}>
-          {(value) => <AutoReviewLine review={value()} />}
-        </Show>
+        <Show when={review()}>{(value) => <AutoReviewLine review={value()} />}</Show>
       </div>
     </Show>
   )
@@ -1670,7 +1669,15 @@ export function MessageDivider(props: { label: string }) {
 PART_MAPPING["compaction"] = function CompactionPartDisplay(props) {
   const i18n = useI18n()
   // 通用part入口与Native时间线读取同一持久标记和共享词典。
-  return <MessageDivider label={i18n.t(props.part.type === "compaction" && props.part.auto ? "ui.messagePart.compaction.auto" : "ui.messagePart.compaction")} />
+  return (
+    <MessageDivider
+      label={i18n.t(
+        props.part.type === "compaction" && props.part.auto
+          ? "ui.messagePart.compaction.auto"
+          : "ui.messagePart.compaction",
+      )}
+    />
+  )
 }
 
 PART_MAPPING["text"] = function TextPartDisplay(props) {
@@ -2116,7 +2123,16 @@ function AutoReviewLine(props: { review: NonNullable<ReturnType<typeof autoRevie
       class="text-12-regular text-text-weak"
       onClick={(event) => {
         const id = props.review.sessionID
-        if (!id || !data.navigateToSession || event.button !== 0 || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return
+        if (
+          !id ||
+          !data.navigateToSession ||
+          event.button !== 0 ||
+          event.altKey ||
+          event.ctrlKey ||
+          event.metaKey ||
+          event.shiftKey
+        )
+          return
         event.preventDefault()
         data.navigateToSession(id)
       }}
@@ -2133,10 +2149,12 @@ function AutoReviewLine(props: { review: NonNullable<ReturnType<typeof autoRevie
 }
 
 // 六工具进入实际共享展示入口，不再落入仅预览调用参数的GenericTool。
-Object.entries(notebookTools).forEach(([name, title]) => ToolRegistry.register({
-  name,
-  render: (props) => <NotebookTool {...props} title={title} />,
-}))
+Object.entries(notebookTools).forEach(([name, title]) =>
+  ToolRegistry.register({
+    name,
+    render: (props) => <NotebookTool {...props} title={title} />,
+  }),
+)
 ToolRegistry.register({
   name: "permission_review_decision",
   render(props) {
@@ -2152,10 +2170,16 @@ ToolRegistry.register({
     return (
       <BasicTool {...props} icon="task" defaultOpen trigger={{ title: i18n.t("ui.permission.review.title") }}>
         <dl data-component="permission-review-decision" class="text-13-regular">
-          <For each={fields}>{([field, label]) => <>
-            <dt>{i18n.t(label)}</dt>
-            <dd style={{ "white-space": "pre-wrap" }}>{String(decision()[field] ?? i18n.t("ui.permission.review.unknown"))}</dd>
-          </>}</For>
+          <For each={fields}>
+            {([field, label]) => (
+              <>
+                <dt>{i18n.t(label)}</dt>
+                <dd style={{ "white-space": "pre-wrap" }}>
+                  {String(decision()[field] ?? i18n.t("ui.permission.review.unknown"))}
+                </dd>
+              </>
+            )}
+          </For>
         </dl>
       </BasicTool>
     )

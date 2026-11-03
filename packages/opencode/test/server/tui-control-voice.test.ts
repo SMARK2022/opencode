@@ -33,12 +33,16 @@ async function browserFixture(directory: string, source: string): Promise<VoiceT
 }
 
 const voiceE2E = process.env.CHATGPT_VOICE_E2E === "1" ? test : test.skip
-const defaultProfileE2E = process.env.CHATGPT_VOICE_E2E === "1" && process.env.CHATGPT_VOICE_DEFAULT_PROFILE_E2E === "1" ? test : test.skip
+const defaultProfileE2E =
+  process.env.CHATGPT_VOICE_E2E === "1" && process.env.CHATGPT_VOICE_DEFAULT_PROFILE_E2E === "1" ? test : test.skip
 
 // 旧TUI argv回归迁到共享后端，Windows解释器shim仍必须原样接收带元字符的文件参数。
 test.skipIf(process.platform !== "win32")("backend transcriber accepts a Windows command shim", async () => {
   await using tmp = await tmpdir()
-  const target = await browserFixture(tmp.path, `console.log(JSON.stringify({text:process.argv[4],auth:{cookies:[],fetchedAt:'fixture'}}))`)
+  const target = await browserFixture(
+    tmp.path,
+    `console.log(JSON.stringify({text:process.argv[4],auth:{cookies:[],fetchedAt:'fixture'}}))`,
+  )
   const command = path.join(tmp.path, "voice transcriber.cmd")
   const file = path.join(tmp.path, "voice & literal.wav")
   await Bun.write(file, "RIFF....WAVE")
@@ -47,35 +51,54 @@ test.skipIf(process.platform !== "win32")("backend transcriber accepts a Windows
 })
 
 // cmd入口同样不能连带终止独立后代；有界CLI自退保证夹具不制造遗留父进程。
-test.skipIf(process.platform !== "win32" || !Bun.which("node"))("cancels a Windows transcriber without killing its lifecycle child", async () => {
-  await using tmp = await tmpdir()
-  const node = Bun.which("node")
-  if (!node) throw new Error("Node is required for the Windows fixture")
-  const pidFile = path.join(tmp.path, "child.pid")
-  const command = path.join(tmp.path, "transcriber.cmd")
-  const abort = new AbortController()
-  let pid = 0
-  const target = await browserFixture(tmp.path, `const {spawn}=require("child_process"); const fs=require("fs"); const child=spawn(process.execPath,["-e","setInterval(()=>{},1000)"],{detached:true,stdio:"ignore"}); child.unref(); fs.writeFileSync(${JSON.stringify(pidFile)},String(child.pid)); setTimeout(()=>{},500)`)
-  await Bun.write(command, `@echo off\r\n"${node}" %*\r\n`)
-  const pending = transcribeVoiceFile("voice.wav", { ...target, interpreter: command }, abort.signal).catch((error: unknown) => error)
-  try {
-    const ready = Date.now() + 5_000
-    while (!(await Bun.file(pidFile).exists()) && Date.now() < ready) await Bun.sleep(20)
-    pid = Number(await Bun.file(pidFile).text())
-    expect(pid).toBeGreaterThan(0)
-    abort.abort()
-    expect(await pending).toBeInstanceOf(Error)
-    const running = () => {
-      try { process.kill(pid, 0); return true } catch { return false }
+test.skipIf(process.platform !== "win32" || !Bun.which("node"))(
+  "cancels a Windows transcriber without killing its lifecycle child",
+  async () => {
+    await using tmp = await tmpdir()
+    const node = Bun.which("node")
+    if (!node) throw new Error("Node is required for the Windows fixture")
+    const pidFile = path.join(tmp.path, "child.pid")
+    const command = path.join(tmp.path, "transcriber.cmd")
+    const abort = new AbortController()
+    let pid = 0
+    const target = await browserFixture(
+      tmp.path,
+      `const {spawn}=require("child_process"); const fs=require("fs"); const child=spawn(process.execPath,["-e","setInterval(()=>{},1000)"],{detached:true,stdio:"ignore"}); child.unref(); fs.writeFileSync(${JSON.stringify(pidFile)},String(child.pid)); setTimeout(()=>{},500)`,
+    )
+    await Bun.write(command, `@echo off\r\n"${node}" %*\r\n`)
+    const pending = transcribeVoiceFile("voice.wav", { ...target, interpreter: command }, abort.signal).catch(
+      (error: unknown) => error,
+    )
+    try {
+      const ready = Date.now() + 5_000
+      while (!(await Bun.file(pidFile).exists()) && Date.now() < ready) await Bun.sleep(20)
+      pid = Number(await Bun.file(pidFile).text())
+      expect(pid).toBeGreaterThan(0)
+      abort.abort()
+      expect(await pending).toBeInstanceOf(Error)
+      const running = () => {
+        try {
+          process.kill(pid, 0)
+          return true
+        } catch {
+          return false
+        }
+      }
+      expect(running()).toBe(true)
+    } finally {
+      abort.abort()
+      await pending
+      // 只清理本用例创建并记录的PID，失败也不能留下无限计时的子进程。
+      if (pid > 0)
+        await Bun.spawn(["taskkill", "/pid", String(pid), "/T", "/F"], {
+          windowsHide: true,
+          stdout: "ignore",
+          stderr: "ignore",
+        }).exited
     }
-    expect(running()).toBe(true)
-  } finally {
-    abort.abort()
-    await pending
-    // 只清理本用例创建并记录的PID，失败也不能留下无限计时的子进程。
-    if (pid > 0) await Bun.spawn(["taskkill", "/pid", String(pid), "/T", "/F"], { windowsHide: true, stdout: "ignore", stderr: "ignore" }).exited
-  }
-}, 15_000)
+  },
+  15_000,
+)
 
 async function writeLateMarkerWav(source: string, target: string, seconds: number) {
   const input = Buffer.from(await Bun.file(source).arrayBuffer())
@@ -87,7 +110,11 @@ async function writeLateMarkerWav(source: string, target: string, seconds: numbe
     const size = input.readUInt32LE(chunk + 4)
     chunk += 8 + size + (size % 2)
   }
-  if (input.toString("ascii", 0, 4) !== "RIFF" || input.toString("ascii", 8, 12) !== "WAVE" || chunk + 8 > input.length) {
+  if (
+    input.toString("ascii", 0, 4) !== "RIFF" ||
+    input.toString("ascii", 8, 12) !== "WAVE" ||
+    chunk + 8 > input.length
+  ) {
     throw new Error("voice E2E source is not a supported RIFF/WAVE file")
   }
   const blockAlign = input.readUInt16LE(32)
@@ -95,7 +122,8 @@ async function writeLateMarkerWav(source: string, target: string, seconds: numbe
   // 使用header byteRate保持源采样格式，按blockAlign取整保证最后一个sample frame完整。
   const dataBytes = Math.floor((seconds * input.readUInt32LE(28)) / blockAlign) * blockAlign
   const dataStart = chunk + 8
-  const sourceBytes = Math.floor(Math.min(input.readUInt32LE(chunk + 4), input.length - dataStart) / blockAlign) * blockAlign
+  const sourceBytes =
+    Math.floor(Math.min(input.readUInt32LE(chunk + 4), input.length - dataStart) / blockAlign) * blockAlign
   if (sourceBytes === 0 || sourceBytes > dataBytes) throw new Error("voice E2E marker has no usable PCM frames")
   const output = Buffer.alloc(dataStart + dataBytes)
   input.copy(output, 0, 0, dataStart)
@@ -126,56 +154,83 @@ const handwritten = `{
 `
 
 // 两代共用真实锁、Cookie决策和写回，只替换网络/CLI边界，不启动HTTP或浏览器。
-test.each(["cache", "profile", "browser", "cancel"] as const)("shared voice transaction without external processes: %s", async (stage) => {
-  await using tmp = await tmpdir()
-  const config = path.join(tmp.path, "opencode.json")
-  const file = path.join(tmp.path, "voice.wav")
-  await Bun.write(config, JSON.stringify({ mcp: { chatgpt: { auth: { ...auth, access_token: "cached-token" } } } }))
-  await Bun.write(file, new Uint8Array([1, 2, 3, 4]))
-  const initial = await Bun.file(config).text()
-  const controller = new AbortController()
-  const reason = new Error("cancel shared voice operation")
-  const commands: string[] = []
-  const exported = { cookies: [{ name: "oai-did", value: stage, expires: -1 }], fetchedAt: "2026-09-18T00:00:00Z", accessToken: "new-token" }
-  const command = spyOn(Process, "run").mockImplementation(async (args, options) => {
-    commands.push(args[2]!)
-    // profile允许清进程树，浏览器CLI必须保留独立daemon的生命周期。
-    expect(options?.killTree).toBe(args[2] === "auth-export")
-    expect(options?.timeout).toBe(1_000)
-    expect(options?.env).toEqual({ FIXTURE_VOICE: "shared" })
-    expect(options?.abort).toBeInstanceOf(AbortSignal)
-    return { code: 0, stdout: Buffer.from(JSON.stringify(args[2] === "auth-export" ? exported : { text: "browser transcript", auth: exported })), stderr: Buffer.alloc(0) }
-  })
-  const transport = spyOn(NetworkProxy, "fetch").mockImplementation(async (url, init) => {
-    expect(String(url)).toBe(VOICE_TRANSCRIBE_URL)
-    expect(init?.method).toBe("POST")
-    if (!(init?.body instanceof FormData)) throw new Error("Expected real multipart voice body")
-    const uploaded = init.body.get("file")
-    if (!(uploaded instanceof File)) throw new Error("Expected uploaded WAV")
-    expect(new Uint8Array(await uploaded.arrayBuffer())).toEqual(new Uint8Array([1, 2, 3, 4]))
-    const headers = new Headers(init.headers)
-    if (stage === "cancel") { controller.abort(reason); throw reason }
-    // 只有401/403进入profile；429直接进入source约定的浏览器阶段。
-    if (stage === "browser") return Response.json({}, { status: 429 })
-    if (stage === "profile" && headers.get("cookie") === "oai-did=did-1") return Response.json({}, { status: 401 })
-    expect(headers.get("authorization")).toBe(stage === "cache" ? "Bearer cached-token" : "Bearer new-token")
-    expect(headers.get("cookie")).toBe(`oai-did=${stage === "cache" ? "did-1" : stage}`)
-    return Response.json({ text: `${stage} transcript` })
-  })
-  try {
-    const operation = transcribeVoiceFile(file, { config, key: "chatgpt", interpreter: "fixture", script: "fixture.js", environment: { FIXTURE_VOICE: "shared" } }, controller.signal)
-    if (stage === "cancel") await expect(operation).rejects.toBe(reason)
-    if (stage !== "cancel") expect(await operation).toBe(`${stage} transcript`)
-    expect(commands).toEqual(stage === "profile" ? ["auth-export"] : stage === "browser" ? ["transcribe-file"] : [])
-    expect(transport).toHaveBeenCalledTimes(stage === "profile" ? 2 : 1)
-    // 命中缓存不刷新文件，取消不提交；恢复成功则一次写回完整的新账户快照。
-    if (stage === "cache" || stage === "cancel") expect(await Bun.file(config).text()).toBe(initial)
-    if (stage === "profile" || stage === "browser") expect(await readVoiceAuth(config, "chatgpt")).toEqual(authFromHarvest(exported))
-  } finally {
-    transport.mockRestore()
-    command.mockRestore()
-  }
-})
+test.each(["cache", "profile", "browser", "cancel"] as const)(
+  "shared voice transaction without external processes: %s",
+  async (stage) => {
+    await using tmp = await tmpdir()
+    const config = path.join(tmp.path, "opencode.json")
+    const file = path.join(tmp.path, "voice.wav")
+    await Bun.write(config, JSON.stringify({ mcp: { chatgpt: { auth: { ...auth, access_token: "cached-token" } } } }))
+    await Bun.write(file, new Uint8Array([1, 2, 3, 4]))
+    const initial = await Bun.file(config).text()
+    const controller = new AbortController()
+    const reason = new Error("cancel shared voice operation")
+    const commands: string[] = []
+    const exported = {
+      cookies: [{ name: "oai-did", value: stage, expires: -1 }],
+      fetchedAt: "2026-09-18T00:00:00Z",
+      accessToken: "new-token",
+    }
+    const command = spyOn(Process, "run").mockImplementation(async (args, options) => {
+      commands.push(args[2]!)
+      // profile允许清进程树，浏览器CLI必须保留独立daemon的生命周期。
+      expect(options?.killTree).toBe(args[2] === "auth-export")
+      expect(options?.timeout).toBe(1_000)
+      expect(options?.env).toEqual({ FIXTURE_VOICE: "shared" })
+      expect(options?.abort).toBeInstanceOf(AbortSignal)
+      return {
+        code: 0,
+        stdout: Buffer.from(
+          JSON.stringify(args[2] === "auth-export" ? exported : { text: "browser transcript", auth: exported }),
+        ),
+        stderr: Buffer.alloc(0),
+      }
+    })
+    const transport = spyOn(NetworkProxy, "fetch").mockImplementation(async (url, init) => {
+      expect(String(url)).toBe(VOICE_TRANSCRIBE_URL)
+      expect(init?.method).toBe("POST")
+      if (!(init?.body instanceof FormData)) throw new Error("Expected real multipart voice body")
+      const uploaded = init.body.get("file")
+      if (!(uploaded instanceof File)) throw new Error("Expected uploaded WAV")
+      expect(new Uint8Array(await uploaded.arrayBuffer())).toEqual(new Uint8Array([1, 2, 3, 4]))
+      const headers = new Headers(init.headers)
+      if (stage === "cancel") {
+        controller.abort(reason)
+        throw reason
+      }
+      // 只有401/403进入profile；429直接进入source约定的浏览器阶段。
+      if (stage === "browser") return Response.json({}, { status: 429 })
+      if (stage === "profile" && headers.get("cookie") === "oai-did=did-1") return Response.json({}, { status: 401 })
+      expect(headers.get("authorization")).toBe(stage === "cache" ? "Bearer cached-token" : "Bearer new-token")
+      expect(headers.get("cookie")).toBe(`oai-did=${stage === "cache" ? "did-1" : stage}`)
+      return Response.json({ text: `${stage} transcript` })
+    })
+    try {
+      const operation = transcribeVoiceFile(
+        file,
+        {
+          config,
+          key: "chatgpt",
+          interpreter: "fixture",
+          script: "fixture.js",
+          environment: { FIXTURE_VOICE: "shared" },
+        },
+        controller.signal,
+      )
+      if (stage === "cancel") await expect(operation).rejects.toBe(reason)
+      if (stage !== "cancel") expect(await operation).toBe(`${stage} transcript`)
+      expect(commands).toEqual(stage === "profile" ? ["auth-export"] : stage === "browser" ? ["transcribe-file"] : [])
+      expect(transport).toHaveBeenCalledTimes(stage === "profile" ? 2 : 1)
+      // 命中缓存不刷新文件，取消不提交；恢复成功则一次写回完整的新账户快照。
+      if (stage === "cache" || stage === "cancel") expect(await Bun.file(config).text()).toBe(initial)
+      if (stage === "profile" || stage === "browser")
+        expect(await readVoiceAuth(config, "chatgpt")).toEqual(authFromHarvest(exported))
+    } finally {
+      transport.mockRestore()
+      command.mockRestore()
+    }
+  },
+)
 
 describe("voice auth node", () => {
   // 写入方唯一合同：只替换 mcp.<key>.auth 节点，注释、缩进与兄弟字段逐字保留。
@@ -201,7 +256,10 @@ describe("voice auth node", () => {
     const config = path.join(tmp.path, "opencode.jsonc")
     await Bun.write(config, handwritten)
 
-    await Bun.write(config, JSON.stringify({ mcp: { chatgpt: { auth: { ...auth, access_token: "retired-token", token_expires_at: 1 } } } }))
+    await Bun.write(
+      config,
+      JSON.stringify({ mcp: { chatgpt: { auth: { ...auth, access_token: "retired-token", token_expires_at: 1 } } } }),
+    )
     expect(await readVoiceAuth(config, "chatgpt")).toEqual({ ...auth, access_token: "retired-token" })
     const refreshed: VoiceAuth = { ...auth, cookies: { fresh: { value: "cookie-2", expires: 0 } } }
     await writeVoiceAuth(config, "chatgpt", refreshed, new AbortController().signal)
@@ -229,10 +287,18 @@ describe("voice auth node", () => {
   })
 
   // 磁盘输入没有 TypeScript 保护；一个坏 Cookie 也不能留下部分可用的快照。
-  test.each([{ access_token: 42 }, { cookies: {} }, { ...auth, cookies: { broken: { value: 42, expires: 0 } } }, { ...auth, cookies: { broken: { value: "x", expires: "0" } } }])("rejects malformed auth nodes %j", async (invalid) => {
+  test.each([
+    { access_token: 42 },
+    { cookies: {} },
+    { ...auth, cookies: { broken: { value: 42, expires: 0 } } },
+    { ...auth, cookies: { broken: { value: "x", expires: "0" } } },
+  ])("rejects malformed auth nodes %j", async (invalid) => {
     await using tmp = await tmpdir()
     const config = path.join(tmp.path, "opencode.json")
-    await Bun.write(config, JSON.stringify({ mcp: { chatgpt: { type: "local", command: ["node", "x"], auth: invalid } } }))
+    await Bun.write(
+      config,
+      JSON.stringify({ mcp: { chatgpt: { type: "local", command: ["node", "x"], auth: invalid } } }),
+    )
     expect(await readVoiceAuth(config, "chatgpt")).toBeUndefined()
   })
 })
@@ -269,13 +335,22 @@ describe("voice auth helpers", () => {
   })
 
   // 私有 CLI 输出仍是不可信协议输入；缺时间或坏条目不能产生可写回快照。
-  test.each([null, { cookies: [] }, { fetchedAt: "now", cookies: [null] }, { fetchedAt: "now", cookies: [{ name: "a", value: 1, expires: 0 }] }])("rejects invalid Cookie exports %j", (payload) => {
+  test.each([
+    null,
+    { cookies: [] },
+    { fetchedAt: "now", cookies: [null] },
+    { fetchedAt: "now", cookies: [{ name: "a", value: 1, expires: 0 }] },
+  ])("rejects invalid Cookie exports %j", (payload) => {
     expect(() => authFromHarvest(payload)).toThrow(/Invalid voice Cookie/)
   })
 })
 
 // 只替换网络目的地址；正文解析、请求取消和 CLI 生命周期全部由生产入口负责。
-async function backendFixture(dir: string, handler: (request: Request) => Response | Promise<Response>, command = "console.log(JSON.stringify(stage === 'auth-export' ? exported : {text:'browser transcript',auth:exported}))") {
+async function backendFixture(
+  dir: string,
+  handler: (request: Request) => Response | Promise<Response>,
+  command = "console.log(JSON.stringify(stage === 'auth-export' ? exported : {text:'browser transcript',auth:exported}))",
+) {
   const config = path.join(dir, "opencode.json")
   const file = path.join(dir, "voice.wav")
   const script = path.join(dir, "agent.cjs")
@@ -284,9 +359,12 @@ async function backendFixture(dir: string, handler: (request: Request) => Respon
   await Bun.write(file, new Uint8Array([1, 2, 3, 4]))
   await Bun.write(log, "")
   // 子进程自己写调用日志，区别真正执行过的命令与仅被构造的 argv。
-  await Bun.write(script, `const stage = process.argv[2]; require('fs').appendFileSync(${JSON.stringify(log)}, stage+'\\n');
+  await Bun.write(
+    script,
+    `const stage = process.argv[2]; require('fs').appendFileSync(${JSON.stringify(log)}, stage+'\\n');
 const exported = {cookies:[{name:'oai-did',value:stage === 'auth-export' ? 'profile' : 'browser',expires:-1}],fetchedAt:'2026-09-18T00:00:00Z'};
-(async () => { ${command} })().catch(error => { console.error(error.message); process.exitCode = 1 });`)
+(async () => { ${command} })().catch(error => { console.error(error.message); process.exitCode = 1 });`,
+  )
   // 原生 Request 的 signal 只在请求正文完成后仍能观察响应读取取消，避免把 body EOF 误当成连接结束。
   // fixture 统一先消费上传字节，再把响应生命周期交给标准 fetch；handler 不再接触 Node 专属事件。
   const server = Bun.serve({
@@ -311,7 +389,11 @@ const exported = {cookies:[{name:'oai-did',value:stage === 'auth-export' ? 'prof
   })
   const target = { config, key: "chatgpt", interpreter: process.execPath, script, environment: { FIXTURE_URL: url } }
   return {
-    config, file, target, requests, headers: headers.promise,
+    config,
+    file,
+    target,
+    requests,
+    headers: headers.promise,
     run: (signal = new AbortController().signal) => TuiControl.transcribeVoiceFile(file, target, signal),
     commands: () => Bun.file(log).text(),
     async [Symbol.asyncDispose]() {
@@ -329,20 +411,28 @@ describe("backend Cookie attempts", () => {
   test.each([429, 401, 403])("reuses the browser account snapshot after HTTP %i recovery", async (status) => {
     await using tmp = await tmpdir()
     const seen: (string | undefined)[] = []
-    await using fixture = await backendFixture(tmp.path, async (request) => {
-      const authorization = request.headers.get("authorization") ?? undefined
-      const cookie = request.headers.get("cookie")
-      seen.push(authorization)
-      // 只认独立已知的账户值，避免Cookie单独成功掩盖授权字段在持久化中丢失。
-      // 标准 Headers 读取保持与线上请求相同的大小写无关语义。
-      const account = authorization === "Bearer browser-token" && cookie === "oai-did=browser"
-      return new Response(JSON.stringify({ text: "authenticated transcript" }), { status: account ? 200 : cookie === "oai-did=profile" ? 429 : status })
-    }, "console.log(JSON.stringify(stage === 'auth-export' ? exported : {text:'browser transcript',auth:{...exported,accessToken:'browser-token'}}))")
+    await using fixture = await backendFixture(
+      tmp.path,
+      async (request) => {
+        const authorization = request.headers.get("authorization") ?? undefined
+        const cookie = request.headers.get("cookie")
+        seen.push(authorization)
+        // 只认独立已知的账户值，避免Cookie单独成功掩盖授权字段在持久化中丢失。
+        // 标准 Headers 读取保持与线上请求相同的大小写无关语义。
+        const account = authorization === "Bearer browser-token" && cookie === "oai-did=browser"
+        return new Response(JSON.stringify({ text: "authenticated transcript" }), {
+          status: account ? 200 : cookie === "oai-did=profile" ? 429 : status,
+        })
+      },
+      "console.log(JSON.stringify(stage === 'auth-export' ? exported : {text:'browser transcript',auth:{...exported,accessToken:'browser-token'}}))",
+    )
     expect(await fixture.run()).toBe("browser transcript")
     // 第二轮从文件读取，经真实HTTP发送；仅检查转换helper不足以覆盖完整消费链。
     expect(await fixture.run()).toBe("authenticated transcript")
     // 两种入口都只在恢复轮执行CLI；下一轮从磁盘取得Bearer后必须直接得到HTTP文字。
-    expect(seen).toEqual(status === 429 ? [undefined, "Bearer browser-token"] : [undefined, undefined, "Bearer browser-token"])
+    expect(seen).toEqual(
+      status === 429 ? [undefined, "Bearer browser-token"] : [undefined, undefined, "Bearer browser-token"],
+    )
     expect(await fixture.commands()).toBe(status === 429 ? "transcribe-file\n" : "auth-export\ntranscribe-file\n")
     expect(await readVoiceAuth(fixture.config, "chatgpt")).toMatchObject({ access_token: "browser-token" })
   })
@@ -351,19 +441,28 @@ describe("backend Cookie attempts", () => {
   test.each([401, 403, 400, 429, 500])("routes HTTP %i to the contracted next step", async (status) => {
     await using tmp = await tmpdir()
     await using fixture = await backendFixture(tmp.path, async (request) => {
-      return new Response(JSON.stringify({ text: "profile transcript" }), { status: request.headers.get("cookie") === "oai-did=profile" ? 200 : status })
+      return new Response(JSON.stringify({ text: "profile transcript" }), {
+        status: request.headers.get("cookie") === "oai-did=profile" ? 200 : status,
+      })
     })
     expect(await fixture.run()).toBe(status === 401 || status === 403 ? "profile transcript" : "browser transcript")
     expect(await fixture.commands()).toBe(status === 401 || status === 403 ? "auth-export\n" : "transcribe-file\n")
     // 每次请求都必须是转录 POST；没有 session 刷新，也没有同凭据隐藏重试。
-    expect(fixture.requests.map((entry) => entry.url)).toEqual(Array(status === 401 || status === 403 ? 2 : 1).fill(VOICE_TRANSCRIBE_URL))
-    expect(fixture.requests.map((entry) => entry.cookie)).toEqual(status === 401 || status === 403 ? ["oai-did=did-1", "oai-did=profile"] : ["oai-did=did-1"])
+    expect(fixture.requests.map((entry) => entry.url)).toEqual(
+      Array(status === 401 || status === 403 ? 2 : 1).fill(VOICE_TRANSCRIBE_URL),
+    )
+    expect(fixture.requests.map((entry) => entry.cookie)).toEqual(
+      status === 401 || status === 403 ? ["oai-did=did-1", "oai-did=profile"] : ["oai-did=did-1"],
+    )
   })
 
   // 未写入快照和格式错误的旧节点都不可用于直连，不能先发一个空凭据请求。
   test.each([undefined, { access_token: "old" }])("reads profile when cache is unavailable: %j", async (cached) => {
     await using tmp = await tmpdir()
-    await using fixture = await backendFixture(tmp.path, async () => new Response(JSON.stringify({ text: "profile transcript" })))
+    await using fixture = await backendFixture(
+      tmp.path,
+      async () => new Response(JSON.stringify({ text: "profile transcript" })),
+    )
     await Bun.write(fixture.config, JSON.stringify({ mcp: { chatgpt: { auth: cached } } }))
     expect(await fixture.run()).toBe("profile transcript")
     expect(await fixture.commands()).toBe("auth-export\n")
@@ -374,17 +473,23 @@ describe("backend Cookie attempts", () => {
   // profile 的读取错误、协议错误和 POST 错误都进入末级；不允许重复离线读取。
   test.each(["exit", "json", "shape", "post"])("advances after profile %s failure", async (failure) => {
     await using tmp = await tmpdir()
-    await using fixture = await backendFixture(tmp.path, async () => {
-      return new Response("{}", { status: 403 })
-    }, `if (stage === 'auth-export') { if (${JSON.stringify(failure)} === 'exit') process.exit(3); console.log(${JSON.stringify(failure)} === 'json' ? 'invalid JSON' : JSON.stringify(${JSON.stringify(failure)} === 'shape' ? {} : exported)); return; } console.log(JSON.stringify({text:'browser transcript',auth:exported}));`)
+    await using fixture = await backendFixture(
+      tmp.path,
+      async () => {
+        return new Response("{}", { status: 403 })
+      },
+      `if (stage === 'auth-export') { if (${JSON.stringify(failure)} === 'exit') process.exit(3); console.log(${JSON.stringify(failure)} === 'json' ? 'invalid JSON' : JSON.stringify(${JSON.stringify(failure)} === 'shape' ? {} : exported)); return; } console.log(JSON.stringify({text:'browser transcript',auth:exported}));`,
+    )
     expect(await fixture.run()).toBe("browser transcript")
     expect(await fixture.commands()).toBe("auth-export\ntranscribe-file\n")
     // 只有拿到完整导出才允许 profile POST，失败导出不产生半可用凭据。
-    expect(fixture.requests.map((entry) => entry.cookie)).toEqual(failure === "post" ? ["oai-did=did-1", "oai-did=profile"] : ["oai-did=did-1"])
+    expect(fixture.requests.map((entry) => entry.cookie)).toEqual(
+      failure === "post" ? ["oai-did=did-1", "oai-did=profile"] : ["oai-did=did-1"],
+    )
   })
 
   // 静音的空串是成功；缺 text、类型错误和无效 JSON 是可观察的协议失败。
-  test.each(['{"text":""}', '{}', 'null', '{"text":7}', 'not JSON'])("consumes direct response %s", async (body) => {
+  test.each(['{"text":""}', "{}", "null", '{"text":7}', "not JSON"])("consumes direct response %s", async (body) => {
     await using tmp = await tmpdir()
     await using fixture = await backendFixture(tmp.path, async () => new Response(body))
     expect(await fixture.run()).toBe(body === '{"text":""}' ? "" : "browser transcript")
@@ -426,56 +531,87 @@ describe("backend Cookie attempts", () => {
 
 describe("backend cancellation and deadlines", () => {
   // 请求级取消高于恢复策略；无论当前处于哪个外部边界，都不能再推进下一步。
-  test.each(["before", "cache", "profile", "profile-post", "browser"])("never advances after cancellation during %s", async (stage) => {
-    await using tmp = await tmpdir()
-    const ready = Promise.withResolvers<void>()
-    const closed = Promise.withResolvers<void>()
-    const controller = new AbortController()
-    const reason = new Error("cancel voice transaction")
-    await using fixture = await backendFixture(tmp.path, (request) => {
-      const pathname = new URL(request.url).pathname
-      // CLI 用就绪握手证明已经启动；不靠固定 sleep 猜测进程是否到达取消点。
-      if (pathname === "/ready" || stage === "cache" || stage === "profile-post") {
-        // 握手与转录响应都只发布响应头；正文故意不关闭以观察原生 signal 的断连事实。
-        // 取消回调只关闭测试流并发布完成点，不能替代生产请求的取消传播。
-        const body = new ReadableStream<Uint8Array>({
-          start(controller) {
-            request.signal.addEventListener("abort", () => {
-              closed.resolve()
-              controller.close()
-            }, { once: true })
-            if (pathname !== "/ready") controller.enqueue(new TextEncoder().encode('{"text":"'))
-            ready.resolve()
-          },
-        })
-        return new Response(body, { headers: { "content-type": "application/json" } })
+  test.each(["before", "cache", "profile", "profile-post", "browser"])(
+    "never advances after cancellation during %s",
+    async (stage) => {
+      await using tmp = await tmpdir()
+      const ready = Promise.withResolvers<void>()
+      const closed = Promise.withResolvers<void>()
+      const controller = new AbortController()
+      const reason = new Error("cancel voice transaction")
+      await using fixture = await backendFixture(
+        tmp.path,
+        (request) => {
+          const pathname = new URL(request.url).pathname
+          // CLI 用就绪握手证明已经启动；不靠固定 sleep 猜测进程是否到达取消点。
+          if (pathname === "/ready" || stage === "cache" || stage === "profile-post") {
+            // 握手与转录响应都只发布响应头；正文故意不关闭以观察原生 signal 的断连事实。
+            // 取消回调只关闭测试流并发布完成点，不能替代生产请求的取消传播。
+            const body = new ReadableStream<Uint8Array>({
+              start(controller) {
+                request.signal.addEventListener(
+                  "abort",
+                  () => {
+                    closed.resolve()
+                    controller.close()
+                  },
+                  { once: true },
+                )
+                if (pathname !== "/ready") controller.enqueue(new TextEncoder().encode('{"text":"'))
+                ready.resolve()
+              },
+            })
+            return new Response(body, { headers: { "content-type": "application/json" } })
+          }
+          return new Response("{}", { status: stage === "profile" ? 401 : 500 })
+        },
+        stage === "profile-post"
+          ? "console.log(JSON.stringify(exported))"
+          : "await fetch(process.env.FIXTURE_URL+'/ready'); console.log(JSON.stringify({text:'late',auth:exported}));",
+      )
+      // 无缓存使 profile POST 成为第一条直连，避免把缓存的响应头误作正文就绪。
+      if (stage === "profile-post") await Bun.write(fixture.config, handwritten)
+      const before = await Bun.file(fixture.config).text()
+      if (stage === "before") controller.abort(reason)
+      const pending = fixture.run(controller.signal)
+      // 先附拒绝处理再触发取消，避免异步失败在就绪握手期间成为未处理异常。
+      const outcome = pending.then(
+        (value) => ({ value }),
+        (error: unknown) => ({ error }),
+      )
+      try {
+        if (stage !== "before") {
+          await withTimeout(ready.promise, 30_000, `voice cancellation ${stage} readiness timed out`)
+          controller.abort(reason)
+        }
+        expect(await outcome).toEqual({ error: reason })
+        // 服务端观察响应读取请求被中断，避免只丢弃 Promise 的假取消。
+        // 阶段标签让30秒总期限内的失败能区分握手缺失与服务端未收取消。
+        if (stage !== "before")
+          await withTimeout(closed.promise, 30_000, `voice cancellation ${stage} server abort timed out`)
+        expect(await fixture.commands()).toBe(
+          stage === "profile" || stage === "profile-post"
+            ? "auth-export\n"
+            : stage === "browser"
+              ? "transcribe-file\n"
+              : "",
+        )
+        expect(fixture.requests).toHaveLength(stage === "before" ? 0 : 1)
+        expect(await Bun.file(fixture.config).text()).toBe(before)
+      } finally {
+        controller.abort(reason)
+        await pending.catch(() => {})
       }
-      return new Response("{}", { status: stage === "profile" ? 401 : 500 })
-    }, stage === "profile-post" ? "console.log(JSON.stringify(exported))" : "await fetch(process.env.FIXTURE_URL+'/ready'); console.log(JSON.stringify({text:'late',auth:exported}));")
-    // 无缓存使 profile POST 成为第一条直连，避免把缓存的响应头误作正文就绪。
-    if (stage === "profile-post") await Bun.write(fixture.config, handwritten)
-    const before = await Bun.file(fixture.config).text()
-    if (stage === "before") controller.abort(reason)
-    const pending = fixture.run(controller.signal)
-    // 先附拒绝处理再触发取消，避免异步失败在就绪握手期间成为未处理异常。
-    const outcome = pending.then((value) => ({ value }), (error: unknown) => ({ error }))
-    try {
-      if (stage !== "before") { await withTimeout(ready.promise, 30_000, `voice cancellation ${stage} readiness timed out`); controller.abort(reason) }
-      expect(await outcome).toEqual({ error: reason })
-      // 服务端观察响应读取请求被中断，避免只丢弃 Promise 的假取消。
-      // 阶段标签让30秒总期限内的失败能区分握手缺失与服务端未收取消。
-      if (stage !== "before") await withTimeout(closed.promise, 30_000, `voice cancellation ${stage} server abort timed out`)
-      expect(await fixture.commands()).toBe(stage === "profile" || stage === "profile-post" ? "auth-export\n" : stage === "browser" ? "transcribe-file\n" : "")
-      expect(fixture.requests).toHaveLength(stage === "before" ? 0 : 1)
-      expect(await Bun.file(fixture.config).text()).toBe(before)
-    } finally { controller.abort(reason); await pending.catch(() => {}) }
-  })
+    },
+  )
 
   // rename 是提交点：之前取消不得改配置，之后取消保留快照但绝不交付本轮文字。
   test.each(["before", "after"])("cancels %s atomic rename without delivering text", async (when) => {
     await using tmp = await tmpdir()
     await using fixture = await backendFixture(tmp.path, (request) => {
-      return new Response(JSON.stringify({ text: "must not deliver" }), { status: request.headers.get("cookie") === "oai-did=profile" ? 200 : 401 })
+      return new Response(JSON.stringify({ text: "must not deliver" }), {
+        status: request.headers.get("cookie") === "oai-did=profile" ? 200 : 401,
+      })
     })
     const controller = new AbortController()
     const reason = new Error(`cancel ${when} rename`)
@@ -485,7 +621,8 @@ describe("backend cancellation and deadlines", () => {
     const commits: string[] = []
     // 包装真实文件系统操作只安排取消时刻，不伪造写入、移动或内部 helper 的结果。
     const writing = spyOn(Bun, "write").mockImplementation(async (destination, data, options) => {
-      if (typeof destination !== "string" || typeof data !== "string") throw new Error("Fixture expects JSONC filesystem writes")
+      if (typeof destination !== "string" || typeof data !== "string")
+        throw new Error("Fixture expects JSONC filesystem writes")
       // 先落地临时 JSONC 再取消，确保 finally 确实有文件要清理，而非只测预取消入口。
       const result = await write(destination, data, options)
       if (destination.startsWith(`${fixture.config}.tmp-`) && when === "before") controller.abort(reason)
@@ -502,12 +639,19 @@ describe("backend cancellation and deadlines", () => {
       await expect(fixture.run(controller.signal)).rejects.toBe(reason)
       // 字节级比较保护提交前的注释与格式；提交后则通过公开读接口确认新快照。
       if (when === "before") expect(await Bun.file(fixture.config).text()).toBe(before)
-      if (when === "after") expect(await readVoiceAuth(fixture.config, "chatgpt")).toEqual({ fetched_at: "2026-09-18T00:00:00Z", cookies: { "oai-did": { value: "profile", expires: 0 } } })
+      if (when === "after")
+        expect(await readVoiceAuth(fixture.config, "chatgpt")).toEqual({
+          fetched_at: "2026-09-18T00:00:00Z",
+          cookies: { "oai-did": { value: "profile", expires: 0 } },
+        })
       expect(commits).toHaveLength(when === "before" ? 0 : 1)
       // 成功提交和中止提交都必须清理临时文件；取消不能被当作浏览器恢复理由。
       expect((await fs.readdir(tmp.path)).filter((name) => name.includes(".tmp-"))).toEqual([])
       expect(await fixture.commands()).toBe("auth-export\n")
-    } finally { writing.mockRestore(); renaming.mockRestore() }
+    } finally {
+      writing.mockRestore()
+      renaming.mockRestore()
+    }
   })
 
   // 受控时钟仅替换 timeout 信号，真实 fetch 收到响应头后仍须等待并取消真实正文。
@@ -525,35 +669,50 @@ describe("backend cancellation and deadlines", () => {
       controllers.push(controller)
       return controller.signal
     })
-    await using fixture = await backendFixture(tmp.path, (request) => {
-      if (new URL(request.url).pathname === "/ready") {
-        // CLI 只需要响应头继续启动；控制器由测试在既有计时点显式结束正文。
-        const response = new Response(new ReadableStream<Uint8Array>({
+    await using fixture = await backendFixture(
+      tmp.path,
+      (request) => {
+        if (new URL(request.url).pathname === "/ready") {
+          // CLI 只需要响应头继续启动；控制器由测试在既有计时点显式结束正文。
+          const response = new Response(
+            new ReadableStream<Uint8Array>({
+              start(controller) {
+                readingProfile.resolve(controller)
+              },
+            }),
+            { headers: { "content-type": "text/plain" } },
+          )
+          return response
+        }
+        // 不发送结束花括号，确保返回响应头并不等于完成转录正文解析。
+        const body = new ReadableStream<Uint8Array>({
           start(controller) {
-            readingProfile.resolve(controller)
+            request.signal.addEventListener(
+              "abort",
+              () => {
+                closed.resolve()
+                controller.close()
+              },
+              { once: true },
+            )
+            controller.enqueue(new TextEncoder().encode('{"text":"unfinished'))
           },
-        }), { headers: { "content-type": "text/plain" } })
-        return response
-      }
-      // 不发送结束花括号，确保返回响应头并不等于完成转录正文解析。
-      const body = new ReadableStream<Uint8Array>({
-        start(controller) {
-          request.signal.addEventListener("abort", () => {
-            closed.resolve()
-            controller.close()
-          }, { once: true })
-          controller.enqueue(new TextEncoder().encode('{"text":"unfinished'))
-        },
-      })
-      return new Response(body, { status: 200, headers: { "content-type": "application/json" } })
-    }, "if (stage === 'auth-export') await fetch(process.env.FIXTURE_URL+'/ready'); console.log(JSON.stringify(stage === 'auth-export' ? exported : {text:'browser transcript',auth:exported}));")
+        })
+        return new Response(body, { status: 200, headers: { "content-type": "application/json" } })
+      },
+      "if (stage === 'auth-export') await fetch(process.env.FIXTURE_URL+'/ready'); console.log(JSON.stringify(stage === 'auth-export' ? exported : {text:'browser transcript',auth:exported}));",
+    )
     if (stage === "profile") await Bun.write(fixture.config, handwritten)
     const request = new AbortController()
     const pending = fixture.run(request.signal)
     try {
       // profile CLI 尚未结束时计时器就已存在，POST 不能另开一个新的 40 秒窗口。
       // 这里只释放握手正文，不缩短真实转录请求的固定尝试期限。
-      if (stage === "profile") { const response = await withTimeout(readingProfile.promise, 30_000, "profile CLI readiness timed out"); expect(durations).toEqual([40_000]); response.close() }
+      if (stage === "profile") {
+        const response = await withTimeout(readingProfile.promise, 30_000, "profile CLI readiness timed out")
+        expect(durations).toEqual([40_000])
+        response.close()
+      }
       // 响应头、正文取消和下一步推进分别有独立阶段信号，避免单一超时掩盖顺序错误。
       await withTimeout(fixture.headers, 30_000, `${stage} response headers timed out`)
       expect(durations).toEqual([40_000])
@@ -568,8 +727,14 @@ describe("backend cancellation and deadlines", () => {
       expect(request.signal.aborted).toBe(false)
       expect(fixture.requests[0]?.signal?.aborted).toBe(true)
       expect(durations).toEqual([40_000, 40_000])
-      expect(await fixture.commands()).toBe(stage === "profile" ? "auth-export\ntranscribe-file\n" : "transcribe-file\n")
-    } finally { request.abort(); await pending.catch(() => {}); clock.mockRestore() }
+      expect(await fixture.commands()).toBe(
+        stage === "profile" ? "auth-export\ntranscribe-file\n" : "transcribe-file\n",
+      )
+    } finally {
+      request.abort()
+      await pending.catch(() => {})
+      clock.mockRestore()
+    }
   })
 
   // CLI 读取与浏览器执行都受各自尝试信号约束；只有末级超时终止整轮。
@@ -586,14 +751,24 @@ describe("backend cancellation and deadlines", () => {
       controllers.push(controller)
       return controller.signal
     })
-    await using fixture = await backendFixture(tmp.path, (request) => {
-      if (new URL(request.url).pathname === "/ready") { ready.resolve(); return new Response("ready") }
-      return new Response("{}", { status: 401 })
-    }, `if (stage === ${JSON.stringify(stage === "profile" ? "auth-export" : "transcribe-file")}) await fetch(process.env.FIXTURE_URL+'/ready'); console.log(JSON.stringify(stage === 'auth-export' ? exported : {text:'browser transcript',auth:exported}));`)
+    await using fixture = await backendFixture(
+      tmp.path,
+      (request) => {
+        if (new URL(request.url).pathname === "/ready") {
+          ready.resolve()
+          return new Response("ready")
+        }
+        return new Response("{}", { status: 401 })
+      },
+      `if (stage === ${JSON.stringify(stage === "profile" ? "auth-export" : "transcribe-file")}) await fetch(process.env.FIXTURE_URL+'/ready'); console.log(JSON.stringify(stage === 'auth-export' ? exported : {text:'browser transcript',auth:exported}));`,
+    )
     const request = new AbortController()
     const reason = new DOMException("CLI deadline", "TimeoutError")
     const pending = fixture.run(request.signal)
-    const outcome = pending.then((value) => ({ value }), (error: unknown) => ({ error }))
+    const outcome = pending.then(
+      (value) => ({ value }),
+      (error: unknown) => ({ error }),
+    )
     try {
       await withTimeout(ready.promise, 30_000, `${stage} CLI readiness timed out`)
       // 快速 401 必须立即推进，既不等满 40 秒，也不从末级扣除之前的耗时。
@@ -606,8 +781,16 @@ describe("backend cancellation and deadlines", () => {
       // 超时的 profile 绝不能再 POST；浏览器成功写回，末级失败则保持旧快照。
       expect(fixture.requests).toHaveLength(stage === "profile" ? 1 : 2)
       expect(durations).toEqual([40_000, 40_000, 40_000])
-      expect(await readVoiceAuth(fixture.config, "chatgpt")).toEqual(stage === "profile" ? { fetched_at: "2026-09-18T00:00:00Z", cookies: { "oai-did": { value: "browser", expires: 0 } } } : auth)
-    } finally { request.abort(); await pending.catch(() => {}); clock.mockRestore() }
+      expect(await readVoiceAuth(fixture.config, "chatgpt")).toEqual(
+        stage === "profile"
+          ? { fetched_at: "2026-09-18T00:00:00Z", cookies: { "oai-did": { value: "browser", expires: 0 } } }
+          : auth,
+      )
+    } finally {
+      request.abort()
+      await pending.catch(() => {})
+      clock.mockRestore()
+    }
   })
 })
 
@@ -618,63 +801,128 @@ describe("direct transcribe", () => {
     const config = path.join(tmp.path, "opencode.json")
     const override = path.join(tmp.path, "override.json")
     await Bun.write(path.join(tmp.path, "chatgpt.js"), "")
-    await Bun.write(config, JSON.stringify({ mcp: { chatgpt: { type: "local", command: [process.execPath, "./mcp-server.js"], environment: { CHATGPT_STATE_DIR: tmp.path } } } }))
-    expect(await TuiControl.resolveVoiceTarget([config])).toEqual({ config, key: "chatgpt", interpreter: process.execPath, script: path.join(tmp.path, "chatgpt.js"), environment: { CHATGPT_STATE_DIR: tmp.path } })
+    await Bun.write(
+      config,
+      JSON.stringify({
+        mcp: {
+          chatgpt: {
+            type: "local",
+            command: [process.execPath, "./mcp-server.js"],
+            environment: { CHATGPT_STATE_DIR: tmp.path },
+          },
+        },
+      }),
+    )
+    expect(await TuiControl.resolveVoiceTarget([config])).toEqual({
+      config,
+      key: "chatgpt",
+      interpreter: process.execPath,
+      script: path.join(tmp.path, "chatgpt.js"),
+      environment: { CHATGPT_STATE_DIR: tmp.path },
+    })
     await Bun.write(override, JSON.stringify({ mcp: { chatgpt: { enabled: false } } }))
-    await expect(TuiControl.resolveVoiceTarget([config, override])).rejects.toThrow("Voice input requires a user-configured ChatGPT MCP")
+    await expect(TuiControl.resolveVoiceTarget([config, override])).rejects.toThrow(
+      "Voice input requires a user-configured ChatGPT MCP",
+    )
   })
 
   // 从后端入口穿过真实HTTP；缓存携带已有Bearer，profile导出保持Cookie-only。
-  test.each(["cache", "profile", "browser"])("daemon transcribes through %s and persists its cookies", async (source) => {
-    await using tmp = await tmpdir()
-    const config = path.join(tmp.path, "opencode.json")
-    const file = path.join(tmp.path, "voice.wav")
-    const script = path.join(tmp.path, "chatgpt.cjs")
-    const commands = path.join(tmp.path, "commands")
-    const exported = { cookies: [{ name: "oai-did", value: source, expires: 0, domain: "chatgpt.com", path: "/" }], fetchedAt: "2026-09-18T00:00:00Z" }
-    // 旧期限字段退出决策，缓存是否有效由真实服务端响应决定。
-    await Bun.write(config, JSON.stringify({ mcp: { chatgpt: { auth: { ...auth, access_token: "cached-token", token_expires_at: 1 } } } }))
-    const initial = await Bun.file(config).text()
-    await Bun.write(file, new Uint8Array([1, 2, 3, 4]))
-    await Bun.write(commands, "")
-    // 假 CLI 只模拟私有命令的外部协议；后端仍真实 spawn、消费 stdout 并写回 JSONC。
-    await Bun.write(script, `require('fs').appendFileSync(${JSON.stringify(commands)}, process.argv[2]+'\\n'); if(process.argv.includes('auth-export') && ${JSON.stringify(source)} === 'browser') process.exit(1); console.log(JSON.stringify(process.argv.includes('auth-export') ? ${JSON.stringify(exported)} : {text:'browser transcript',auth:${JSON.stringify(exported)}}));`)
-    const cookies: string[] = []
-    const server = Http.createServer((request, response) => {
-      request.resume()
-      request.on("end", () => {
-        cookies.push(request.headers.cookie ?? "")
-        const accepted = request.headers.cookie === `oai-did=${source === "cache" ? "did-1" : source}` && request.headers.authorization === (source === "cache" ? "Bearer cached-token" : undefined)
-        response.writeHead(accepted ? 200 : 401, { "content-type": "application/json" })
-        response.end(JSON.stringify(accepted ? { text: "cookie transcript" } : { error: "credentials" }))
-      })
-    })
-    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve))
-    const address = server.address()
-    if (!address || typeof address === "string") throw new Error("Fixture listener missing")
-    const fetch = spyOn(NetworkProxy, "fetch").mockImplementation((_url, init) => globalThis.fetch(`http://127.0.0.1:${address.port}`, init))
-    try {
-      expect(await TuiControl.transcribeVoiceFile(file, { config, key: "chatgpt", interpreter: process.execPath, script, environment: {} }, new AbortController().signal)).toBe(source === "browser" ? "browser transcript" : "cookie transcript")
-      if (source !== "cache") {
-        expect((await Bun.file(config).json()).mcp.chatgpt.auth).toEqual({ cookies: { "oai-did": { value: source, expires: 0 } }, fetched_at: exported.fetchedAt })
+  test.each(["cache", "profile", "browser"])(
+    "daemon transcribes through %s and persists its cookies",
+    async (source) => {
+      await using tmp = await tmpdir()
+      const config = path.join(tmp.path, "opencode.json")
+      const file = path.join(tmp.path, "voice.wav")
+      const script = path.join(tmp.path, "chatgpt.cjs")
+      const commands = path.join(tmp.path, "commands")
+      const exported = {
+        cookies: [{ name: "oai-did", value: source, expires: 0, domain: "chatgpt.com", path: "/" }],
+        fetchedAt: "2026-09-18T00:00:00Z",
       }
-      // 缓存命中不是新快照，不能为了更新时间戳而改写用户配置。
-      if (source === "cache") expect(await Bun.file(config).text()).toBe(initial)
-      // 第二次仍从公共后端入口读取文件；真实 CLI 日志不变才证明没有重新收割。
-      const before = await Bun.file(commands).text()
-      expect(before).toBe(source === "cache" ? "" : source === "profile" ? "auth-export\n" : "auth-export\ntranscribe-file\n")
-      expect(await TuiControl.transcribeVoiceFile(file, { config, key: "chatgpt", interpreter: process.execPath, script, environment: {} }, new AbortController().signal)).toBe("cookie transcript")
-      expect(await Bun.file(commands).text()).toBe(before)
-      expect(cookies).toEqual(source === "cache" ? ["oai-did=did-1", "oai-did=did-1"] : source === "profile" ? ["oai-did=did-1", "oai-did=profile", "oai-did=profile"] : ["oai-did=did-1", "oai-did=browser"])
-    } finally {
-      fetch.mockRestore()
-      await new Promise<void>((resolve) => server.close(() => resolve()))
-    }
-  })
+      // 旧期限字段退出决策，缓存是否有效由真实服务端响应决定。
+      await Bun.write(
+        config,
+        JSON.stringify({ mcp: { chatgpt: { auth: { ...auth, access_token: "cached-token", token_expires_at: 1 } } } }),
+      )
+      const initial = await Bun.file(config).text()
+      await Bun.write(file, new Uint8Array([1, 2, 3, 4]))
+      await Bun.write(commands, "")
+      // 假 CLI 只模拟私有命令的外部协议；后端仍真实 spawn、消费 stdout 并写回 JSONC。
+      await Bun.write(
+        script,
+        `require('fs').appendFileSync(${JSON.stringify(commands)}, process.argv[2]+'\\n'); if(process.argv.includes('auth-export') && ${JSON.stringify(source)} === 'browser') process.exit(1); console.log(JSON.stringify(process.argv.includes('auth-export') ? ${JSON.stringify(exported)} : {text:'browser transcript',auth:${JSON.stringify(exported)}}));`,
+      )
+      const cookies: string[] = []
+      const server = Http.createServer((request, response) => {
+        request.resume()
+        request.on("end", () => {
+          cookies.push(request.headers.cookie ?? "")
+          const accepted =
+            request.headers.cookie === `oai-did=${source === "cache" ? "did-1" : source}` &&
+            request.headers.authorization === (source === "cache" ? "Bearer cached-token" : undefined)
+          response.writeHead(accepted ? 200 : 401, { "content-type": "application/json" })
+          response.end(JSON.stringify(accepted ? { text: "cookie transcript" } : { error: "credentials" }))
+        })
+      })
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve))
+      const address = server.address()
+      if (!address || typeof address === "string") throw new Error("Fixture listener missing")
+      const fetch = spyOn(NetworkProxy, "fetch").mockImplementation((_url, init) =>
+        globalThis.fetch(`http://127.0.0.1:${address.port}`, init),
+      )
+      try {
+        expect(
+          await TuiControl.transcribeVoiceFile(
+            file,
+            { config, key: "chatgpt", interpreter: process.execPath, script, environment: {} },
+            new AbortController().signal,
+          ),
+        ).toBe(source === "browser" ? "browser transcript" : "cookie transcript")
+        if (source !== "cache") {
+          expect((await Bun.file(config).json()).mcp.chatgpt.auth).toEqual({
+            cookies: { "oai-did": { value: source, expires: 0 } },
+            fetched_at: exported.fetchedAt,
+          })
+        }
+        // 缓存命中不是新快照，不能为了更新时间戳而改写用户配置。
+        if (source === "cache") expect(await Bun.file(config).text()).toBe(initial)
+        // 第二次仍从公共后端入口读取文件；真实 CLI 日志不变才证明没有重新收割。
+        const before = await Bun.file(commands).text()
+        expect(before).toBe(
+          source === "cache" ? "" : source === "profile" ? "auth-export\n" : "auth-export\ntranscribe-file\n",
+        )
+        expect(
+          await TuiControl.transcribeVoiceFile(
+            file,
+            { config, key: "chatgpt", interpreter: process.execPath, script, environment: {} },
+            new AbortController().signal,
+          ),
+        ).toBe("cookie transcript")
+        expect(await Bun.file(commands).text()).toBe(before)
+        expect(cookies).toEqual(
+          source === "cache"
+            ? ["oai-did=did-1", "oai-did=did-1"]
+            : source === "profile"
+              ? ["oai-did=did-1", "oai-did=profile", "oai-did=profile"]
+              : ["oai-did=did-1", "oai-did=browser"],
+        )
+      } finally {
+        fetch.mockRestore()
+        await new Promise<void>((resolve) => server.close(() => resolve()))
+      }
+    },
+  )
 
   // 此快照来自仅含Cookie的profile导出；SendIfAvailable在该输入域省略Authorization。
   test("builds the documented direct transcribe request shape", async () => {
-    const snapshot = { ...auth, cookies: { "oai-did": { value: "did-7", expires: 0 }, expired: { value: "omit", expires: 1 }, live: { value: "keep", expires: Date.now() / 1000 + 86_400 } } }
+    const snapshot = {
+      ...auth,
+      cookies: {
+        "oai-did": { value: "did-7", expires: 0 },
+        expired: { value: "omit", expires: 1 },
+        live: { value: "keep", expires: Date.now() / 1000 + 86_400 },
+      },
+    }
     const bytes = new Uint8Array([1, 2, 3, 4])
     const request = buildDirectTranscribeRequest({ file: "C:/tmp/voice .wav", bytes, auth: snapshot })
     expect(request.input).toBe(VOICE_TRANSCRIBE_URL)
@@ -700,7 +948,12 @@ describe("direct transcribe", () => {
   test("rejects a backend target whose agent script is missing", async () => {
     await using tmp = await tmpdir()
     const config = path.join(tmp.path, "opencode.json")
-    await Bun.write(config, JSON.stringify({ mcp: { chatgpt: { type: "local", command: [process.execPath, path.join(tmp.path, "mcp-server.js")] } } }))
+    await Bun.write(
+      config,
+      JSON.stringify({
+        mcp: { chatgpt: { type: "local", command: [process.execPath, path.join(tmp.path, "mcp-server.js")] } },
+      }),
+    )
     await expect(resolveVoiceTarget([config])).rejects.toThrow("Voice MCP executable is unavailable")
   })
 })
@@ -714,12 +967,21 @@ describe("backend browser protocol", () => {
     const grandchild = path.join(tmp.path, "grandchild.cjs")
     const file = path.join(tmp.path, "voice.wav")
     await Bun.write(file, "RIFF....WAVE")
-    await Bun.write(grandchild, "require('fs').writeFileSync(process.argv[3], 'ready'); setTimeout(() => require('fs').writeFileSync(process.argv[2], 'alive'), 500)")
+    await Bun.write(
+      grandchild,
+      "require('fs').writeFileSync(process.argv[3], 'ready'); setTimeout(() => require('fs').writeFileSync(process.argv[2], 'alive'), 500)",
+    )
     // 取消应由后端持有的 CLI 接收；浏览器后代仍按原 ownership 自行存活。
-    const target = await browserFixture(tmp.path, `require('child_process').spawn(process.execPath, [${JSON.stringify(grandchild)}, ${JSON.stringify(marker)}, ${JSON.stringify(ready)}], { detached: true, stdio: 'ignore' }).unref(); setInterval(() => {}, 1000)`)
+    const target = await browserFixture(
+      tmp.path,
+      `require('child_process').spawn(process.execPath, [${JSON.stringify(grandchild)}, ${JSON.stringify(marker)}, ${JSON.stringify(ready)}], { detached: true, stdio: 'ignore' }).unref(); setInterval(() => {}, 1000)`,
+    )
     const abort = new AbortController()
     const transcription = transcribeVoiceFile(file, target, abort.signal)
-    const cancelled = transcription.then((text) => ({ text }), (error: unknown) => ({ error }))
+    const cancelled = transcription.then(
+      (text) => ({ text }),
+      (error: unknown) => ({ error }),
+    )
     for (let attempts = 0; attempts < 100 && !(await Bun.file(ready).exists()); attempts++) await Bun.sleep(25)
     expect(await Bun.file(ready).text()).toBe("ready")
     abort.abort()
@@ -734,7 +996,10 @@ describe("backend browser protocol", () => {
     const file = path.join(tmp.path, "voice $HOME ; echo nope.wav")
     await Bun.write(file, "RIFF....WAVE")
 
-    const target = await browserFixture(tmp.path, "process.stdout.write(JSON.stringify({ text: process.argv[4], auth: { cookies: [], fetchedAt: '2026-09-18T00:00:00Z' } }))")
+    const target = await browserFixture(
+      tmp.path,
+      "process.stdout.write(JSON.stringify({ text: process.argv[4], auth: { cookies: [], fetchedAt: '2026-09-18T00:00:00Z' } }))",
+    )
     const text = await transcribeVoiceFile(file, target, new AbortController().signal)
 
     expect(text).toBe(file)
@@ -759,14 +1024,22 @@ describe("backend browser protocol", () => {
     await using tmp = await tmpdir()
     const file = path.join(tmp.path, "voice.wav")
     await Bun.write(file, "RIFF....WAVE")
-    const target = await browserFixture(tmp.path, "process.stdout.write(JSON.stringify({ text: 'fallback browser text', auth: { cookies: [], fetchedAt: '2026-09-18T00:00:00Z' } }))")
-    await Bun.write(target.config, JSON.stringify({ mcp: { chatgpt: { auth: { cookies: {}, fetched_at: "2026-09-18T00:00:00Z" } } } }))
+    const target = await browserFixture(
+      tmp.path,
+      "process.stdout.write(JSON.stringify({ text: 'fallback browser text', auth: { cookies: [], fetchedAt: '2026-09-18T00:00:00Z' } }))",
+    )
+    await Bun.write(
+      target.config,
+      JSON.stringify({ mcp: { chatgpt: { auth: { cookies: {}, fetched_at: "2026-09-18T00:00:00Z" } } } }),
+    )
     // 直连 403 与收割不可用同时注入：两级失败都压到同一回退口，覆盖最坏链路。
     // 只隔离真实远端网络，profile 失败与浏览器协议解析仍执行实际子进程。
     const transport = spyOn(NetworkProxy, "fetch").mockResolvedValue(new Response("{}", { status: 403 }))
     try {
       expect(await transcribeVoiceFile(file, target, new AbortController().signal)).toBe("fallback browser text")
-    } finally { transport.mockRestore() }
+    } finally {
+      transport.mockRestore()
+    }
   })
 
   // 直连成功时浏览器 argv 不得被调用（marker 文件是 argv 被调用的磁盘证据）。
@@ -778,7 +1051,16 @@ describe("backend browser protocol", () => {
     const marker = path.join(tmp.path, "argv-invoked")
     const target = await browserFixture(tmp.path, `require('fs').writeFileSync(${JSON.stringify(marker)}, '1')`)
     // R12仍支持没有Bearer的Cookie快照；此fixture验证匿名成功时不启动浏览器。
-    await Bun.write(target.config, JSON.stringify({ mcp: { chatgpt: { auth: { cookies: { session: { value: "fixture", expires: 0 } }, fetched_at: "2026-09-18T00:00:00Z" } } } }))
+    await Bun.write(
+      target.config,
+      JSON.stringify({
+        mcp: {
+          chatgpt: {
+            auth: { cookies: { session: { value: "fixture", expires: 0 } }, fetched_at: "2026-09-18T00:00:00Z" },
+          },
+        },
+      }),
+    )
     const transport = spyOn(NetworkProxy, "fetch").mockImplementation(async (_url, init) => {
       expect(new Headers(init?.headers).get("cookie")).toBe("session=fixture")
       expect(new Headers(init?.headers).has("authorization")).toBe(false)
@@ -787,7 +1069,9 @@ describe("backend browser protocol", () => {
     try {
       expect(await transcribeVoiceFile(file, target, new AbortController().signal)).toBe("direct text")
       expect(await Bun.file(marker).exists()).toBe(false)
-    } finally { transport.mockRestore() }
+    } finally {
+      transport.mockRestore()
+    }
   })
 })
 
@@ -820,13 +1104,17 @@ voiceE2E(
       key: "chatgpt",
       interpreter: "node",
       script,
-      environment: { CHATGPT_STATE_DIR: state, CHATGPT_BROWSER_USER_DATA_DIR: process.env.CHATGPT_BROWSER_USER_DATA_DIR },
+      environment: {
+        CHATGPT_STATE_DIR: state,
+        CHATGPT_BROWSER_USER_DATA_DIR: process.env.CHATGPT_BROWSER_USER_DATA_DIR,
+      },
     }
     try {
       const text = await transcribeVoiceFile(wav, direct, AbortSignal.timeout(120_000))
       const lowered = text.toLowerCase()
       // markers 与 darwin 五分钟 E2E 独立：hello/world 只能来自真实直连响应体。
-      if (!lowered.includes("hello") || !lowered.includes("world")) throw new Error(`direct E2E markers missing: ${text.slice(0, 120)}`)
+      if (!lowered.includes("hello") || !lowered.includes("world"))
+        throw new Error(`direct E2E markers missing: ${text.slice(0, 120)}`)
       // 本用例限定profile匿名直连成功，落盘仍只有Cookie；浏览器成功快照在R12另附Bearer。
       const authNode = await readVoiceAuth(config, "chatgpt")
       if (!authNode) throw new Error("direct E2E did not persist the harvested auth node")
@@ -837,7 +1125,13 @@ voiceE2E(
       expect(lowered).toContain("world")
     } finally {
       // 隔离 daemon 用真实 CLI ownership 收敛；先停进程再删 state。
-      const stop = Bun.spawn(["node", script, "--stop"], { cwd: agent, env: process.env, stdout: "ignore", stderr: "ignore", windowsHide: true })
+      const stop = Bun.spawn(["node", script, "--stop"], {
+        cwd: agent,
+        env: process.env,
+        stdout: "ignore",
+        stderr: "ignore",
+        windowsHide: true,
+      })
       await stop.exited
       await fs.rm(state, { recursive: true, force: true })
       await fs.rm(wav, { force: true })
@@ -857,7 +1151,8 @@ voiceE2E(
     if (!process.env.CHATGPT_BROWSER_USER_DATA_DIR) {
       throw new Error("voice E2E requires CHATGPT_BROWSER_USER_DATA_DIR for a logged-in agent profile")
     }
-    if (process.platform !== "darwin") throw new Error("voice E2E late-marker fixture requires Darwin system audio tools")
+    if (process.platform !== "darwin")
+      throw new Error("voice E2E late-marker fixture requires Darwin system audio tools")
     const { createVoiceInputController } = await import("@opencode-ai/tui/prompt-voice-input")
     const agent = path.resolve(import.meta.dir, "../../../../thirdparty/chatgpt-browser-agent")
     const script = path.join(agent, "chatgpt.js")
@@ -875,10 +1170,16 @@ voiceE2E(
     const marker = path.join(root, `tui-marker-${process.pid}.wav`)
     await fs.mkdir(root, { recursive: true })
     // 系统TTS只生成本地测试输入；argv调用避免shell解释，普通CI因voiceE2E门禁不会进入该分支。
-    const say = Bun.spawn(["/usr/bin/say", "-v", "Samantha", "-o", markerAiff, "purple checkpoint orange"], { stdout: "ignore", stderr: "ignore" })
-    if (await say.exited !== 0) throw new Error("voice E2E could not synthesize its late marker")
-    const convert = Bun.spawn(["/usr/bin/afconvert", markerAiff, "-o", marker, "-f", "WAVE", "-d", "LEI16@48000", "-c", "1"], { stdout: "ignore", stderr: "ignore" })
-    if (await convert.exited !== 0) throw new Error("voice E2E could not convert its late marker to PCM WAV")
+    const say = Bun.spawn(["/usr/bin/say", "-v", "Samantha", "-o", markerAiff, "purple checkpoint orange"], {
+      stdout: "ignore",
+      stderr: "ignore",
+    })
+    if ((await say.exited) !== 0) throw new Error("voice E2E could not synthesize its late marker")
+    const convert = Bun.spawn(
+      ["/usr/bin/afconvert", markerAiff, "-o", marker, "-f", "WAVE", "-d", "LEI16@48000", "-c", "1"],
+      { stdout: "ignore", stderr: "ignore" },
+    )
+    if ((await convert.exited) !== 0) throw new Error("voice E2E could not convert its late marker to PCM WAV")
     await writeLateMarkerWav(marker, long, 300)
     await fs.copyFile(source, short)
     // long必须先于short消费；交换顺序会让独立expected失去检测迟到回放的能力。
@@ -899,9 +1200,16 @@ voiceE2E(
     const config = path.join(root, `e2e-config-${process.pid}.json`)
     await Bun.write(config, JSON.stringify({ mcp: { chatgpt: { type: "local", command: ["node", script] } } }))
     // 复用后端公开事务入口，保留长音频末端 marker 与下一次录音隔离的真实验证。
-    const target: VoiceTarget = { config, key: "chatgpt", interpreter: "node", script, environment: {
-      CHATGPT_STATE_DIR: state, CHATGPT_BROWSER_USER_DATA_DIR: process.env.CHATGPT_BROWSER_USER_DATA_DIR,
-    } }
+    const target: VoiceTarget = {
+      config,
+      key: "chatgpt",
+      interpreter: "node",
+      script,
+      environment: {
+        CHATGPT_STATE_DIR: state,
+        CHATGPT_BROWSER_USER_DATA_DIR: process.env.CHATGPT_BROWSER_USER_DATA_DIR,
+      },
+    }
     const controller = createVoiceInputController({
       transcribe: (file, signal) => transcribeVoiceFile(file, target, signal),
       startRecorder: async () => {
@@ -936,7 +1244,8 @@ voiceE2E(
       expect(controller.status()).toEqual({ type: "idle" })
       shortRemoved = !(await Bun.file(short).exists())
       expect(shortRemoved).toBe(true)
-      if (errors.length !== errorsBeforeShort) throw new Error(`subsequent short voice failed: ${errors.slice(errorsBeforeShort).join(" | ")}`)
+      if (errors.length !== errorsBeforeShort)
+        throw new Error(`subsequent short voice failed: ${errors.slice(errorsBeforeShort).join(" | ")}`)
       // short使用另一组独立expected，确保第二次结果不是long marker的迟到回放。
       const shortText = inserted.at(-1)?.toLowerCase() ?? ""
       shortMarkersMatched = shortText.includes("hello") && shortText.includes("world")
@@ -951,16 +1260,27 @@ voiceE2E(
       await fs.rm(marker, { force: true })
       await fs.rm(config, { force: true })
       try {
-        const daemon = await Bun.file(path.join(state, "daemon.json")).json().catch(() => null) as { pid?: number } | null
+        const daemon = (await Bun.file(path.join(state, "daemon.json"))
+          .json()
+          .catch(() => null)) as { pid?: number } | null
         // stop走真实CLI ownership：shared CDP只disconnect，owned browser才关闭自身窗口。
-        const stop = Bun.spawn(["node", script, "--stop"], { cwd: agent, env: process.env, stdout: "ignore", stderr: "ignore" })
+        const stop = Bun.spawn(["node", script, "--stop"], {
+          cwd: agent,
+          env: process.env,
+          stdout: "ignore",
+          stderr: "ignore",
+        })
         stopExitCode = await stop.exited
         if (stopExitCode !== 0) throw new Error("voice E2E could not stop its isolated daemon")
         // 不能只相信stop退出码；精确旧PID仍存活时profile锁尚未安全释放。
         const daemonAlive = () => {
           if (!daemon?.pid) return false
-          try { process.kill(daemon.pid, 0); return true }
-          catch { return false }
+          try {
+            process.kill(daemon.pid, 0)
+            return true
+          } catch {
+            return false
+          }
         }
         const deadline = Date.now() + 10_000
         while (daemonAlive() && Date.now() < deadline) {
@@ -974,21 +1294,41 @@ voiceE2E(
         if (previousState === undefined) delete process.env.CHATGPT_STATE_DIR
         else process.env.CHATGPT_STATE_DIR = previousState
         // state删除是证据合同的一部分，防止本地bearer索引或测试PID残留在临时目录。
-        stateRemoved = await fs.stat(state).then(() => false, () => true)
+        stateRemoved = await fs.stat(state).then(
+          () => false,
+          () => true,
+        )
         if (evidence) {
           await fs.mkdir(path.dirname(evidence), { recursive: true })
           // 可选本地证据只保留布尔结果和长度；普通CI不登录，也不依赖任何被忽略目录。
-          await Bun.write(evidence, JSON.stringify({
-            schemaVersion: 1,
-            generatedAt: new Date().toISOString(),
-            command: 'CHATGPT_VOICE_E2E=1 CHATGPT_BROWSER_USER_DATA_DIR=<agent-profile> bun test tui-control-voice.test.ts --test-name-pattern "five-minute WAV"',
-            // Cookie 直连成功不必启动 browser daemon；若曾启动，仍必须证明精确 PID 已退出。
-            status: completed && stopExitCode === 0 && daemonExited && stateRemoved ? "passed" : "failed",
-            elapsedMs: Date.now() - startedAt,
-            long: { durationSeconds: 300, markersMatched: longMarkersMatched, chars: inserted[0]?.trim().length ?? 0, wavRemoved: longRemoved },
-            short: { markersMatched: shortMarkersMatched, chars: inserted.at(-1)?.trim().length ?? 0, wavRemoved: shortRemoved },
-            cleanup: { stopExitCode, daemonExited, stateRemoved },
-          }, null, 2) + "\n")
+          await Bun.write(
+            evidence,
+            JSON.stringify(
+              {
+                schemaVersion: 1,
+                generatedAt: new Date().toISOString(),
+                command:
+                  'CHATGPT_VOICE_E2E=1 CHATGPT_BROWSER_USER_DATA_DIR=<agent-profile> bun test tui-control-voice.test.ts --test-name-pattern "five-minute WAV"',
+                // Cookie 直连成功不必启动 browser daemon；若曾启动，仍必须证明精确 PID 已退出。
+                status: completed && stopExitCode === 0 && daemonExited && stateRemoved ? "passed" : "failed",
+                elapsedMs: Date.now() - startedAt,
+                long: {
+                  durationSeconds: 300,
+                  markersMatched: longMarkersMatched,
+                  chars: inserted[0]?.trim().length ?? 0,
+                  wavRemoved: longRemoved,
+                },
+                short: {
+                  markersMatched: shortMarkersMatched,
+                  chars: inserted.at(-1)?.trim().length ?? 0,
+                  wavRemoved: shortRemoved,
+                },
+                cleanup: { stopExitCode, daemonExited, stateRemoved },
+              },
+              null,
+              2,
+            ) + "\n",
+          )
         }
       }
     }
@@ -1001,25 +1341,39 @@ defaultProfileE2E(
   "accepts the actual default MCP profile and browser snapshots across subsequent requests",
   async () => {
     const userConfig = process.env.CHATGPT_VOICE_USER_CONFIG
-    if (process.platform !== "win32" || !userConfig || !process.env.LOCALAPPDATA) throw new Error("Default profile acceptance requires explicit Windows user config")
+    if (process.platform !== "win32" || !userConfig || !process.env.LOCALAPPDATA)
+      throw new Error("Default profile acceptance requires explicit Windows user config")
     const configured = await resolveVoiceTarget([userConfig])
     const environment = { ...process.env, ...configured.environment }
     // 非默认 profile/CDP 不能借本测试获得关闭授权；配置读取只用于绑定真实 Node 和 CLI。
-    for (const key of ["CHATGPT_STATE_DIR", "CHATGPT_BROWSER_USER_DATA_DIR", "CHATGPT_BROWSER_PROFILE_DIRECTORY", "CHATGPT_BROWSER_CDP_URL", "CHATGPT_BROWSER_WS_ENDPOINT", "CHATGPT_BROWSER_DEBUG_PORT", "OPENCODE_DATA_DIR"]) {
+    for (const key of [
+      "CHATGPT_STATE_DIR",
+      "CHATGPT_BROWSER_USER_DATA_DIR",
+      "CHATGPT_BROWSER_PROFILE_DIRECTORY",
+      "CHATGPT_BROWSER_CDP_URL",
+      "CHATGPT_BROWSER_WS_ENDPOINT",
+      "CHATGPT_BROWSER_DEBUG_PORT",
+      "OPENCODE_DATA_DIR",
+    ]) {
       if (environment[key]) throw new Error("Default profile acceptance refuses overridden browser ownership")
     }
     const state = path.join(process.env.LOCALAPPDATA, "opencode", "chatgpt-browser-agent", "state")
     // 保留原字节用于最终比较，证明 fixture 写回没有误伤用户配置中的旧认证或其他设置。
     const originalConfig = Buffer.from(await Bun.file(userConfig).arrayBuffer())
     // 凭据只经过内存管道；CLI 的完整 stdout/stderr 不进入测试断言或错误报告。
-    const cli = (args: string[]) => Process.run([configured.interpreter, configured.script, ...args], {
-      env: configured.environment, nothrow: true, killTree: false, abort: AbortSignal.timeout(120_000),
-    })
+    const cli = (args: string[]) =>
+      Process.run([configured.interpreter, configured.script, ...args], {
+        env: configured.environment,
+        nothrow: true,
+        killTree: false,
+        abort: AbortSignal.timeout(120_000),
+      })
     const status = async () => {
       const daemon = await Bun.file(path.join(state, "daemon.json")).json()
       // 本地管理Bearer只发到回环地址；外部Bearer必须来自本次浏览器成功快照，不能混用。
       const response = await fetch(`http://127.0.0.1:${daemon.port}/status`, {
-        headers: { authorization: `Bearer ${daemon.token}` }, signal: AbortSignal.timeout(5_000),
+        headers: { authorization: `Bearer ${daemon.token}` },
+        signal: AbortSignal.timeout(5_000),
       })
       const body = await response.json()
       // 重读状态文件并校验 daemonID，避免旧端口被复用后对错误进程执行生命周期操作。
@@ -1028,10 +1382,23 @@ defaultProfileE2E(
     }
     const before = await status()
     // ask 锁、pending 和 voice 队列都必须为空；仅 CLI 摘要的 Active locks 不足以证明可停。
-    expect(before.browserConnected === true && before.activeLocks === 0 && before.pendingPageCount === 0 && before.voiceActive === 0 && before.voiceQueued === 0).toBe(true)
+    expect(
+      before.browserConnected === true &&
+        before.activeLocks === 0 &&
+        before.pendingPageCount === 0 &&
+        before.voiceActive === 0 &&
+        before.voiceQueued === 0,
+    ).toBe(true)
     const browser = await Bun.file(path.join(state, "browser-pid.json")).json()
     expect(Number.isInteger(browser.pid) && Number.isInteger(before.pid)).toBe(true)
-    const alive = (pid: number) => { try { process.kill(pid, 0); return true } catch { return false } }
+    const alive = (pid: number) => {
+      try {
+        process.kill(pid, 0)
+        return true
+      } catch {
+        return false
+      }
+    }
     const root = path.join(os.tmpdir(), "opencode", "voice")
     await fs.mkdir(root, { recursive: true })
     const directory = await fs.mkdtemp(path.join(root, "default-profile-acceptance-"))
@@ -1044,7 +1411,10 @@ defaultProfileE2E(
     let restored = before.browserConnected === true
     try {
       // Windows 不执行 POSIX mode；取消继承并仅授权当前账户，保证临时 auth 配置是私有文件。
-      const acl = await Process.run(["icacls", directory, "/inheritance:r", "/grant:r", `${os.userInfo().username}:(OI)(CI)F`], { nothrow: true })
+      const acl = await Process.run(
+        ["icacls", directory, "/inheritance:r", "/grant:r", `${os.userInfo().username}:(OI)(CI)F`],
+        { nothrow: true },
+      )
       expect(acl.code).toBe(0)
       await fs.copyFile(path.join(path.dirname(configured.script), "test-voice-hello.wav"), wav)
       expect((await cli(["--stop"])).code).toBe(0)
@@ -1056,9 +1426,31 @@ defaultProfileE2E(
       expect(alive(before.pid) || alive(browser.pid)).toBe(false)
       console.log(JSON.stringify({ profileClosed: true }))
       for (const scenario of ["profile", "browser"] as const) {
-        const evidence = { scenario, exportCode: -1, exportedCookies: 0, profileCookieOnly: false, directStatuses: [] as number[], bearerSent: [] as boolean[], snapshotReused: true, helloWorld: [] as boolean[], persistedCookies: 0, persistedBearer: false, browserSubmitted: 0, daemonVersion: 0, challenge: false, retryAfterSeconds: 0, proxyRouted: false, errorJson: false, rateLimited: false, authRejected: false }
+        const evidence = {
+          scenario,
+          exportCode: -1,
+          exportedCookies: 0,
+          profileCookieOnly: false,
+          directStatuses: [] as number[],
+          bearerSent: [] as boolean[],
+          snapshotReused: true,
+          helloWorld: [] as boolean[],
+          persistedCookies: 0,
+          persistedBearer: false,
+          browserSubmitted: 0,
+          daemonVersion: 0,
+          challenge: false,
+          retryAfterSeconds: 0,
+          proxyRouted: false,
+          errorJson: false,
+          rateLimited: false,
+          authRejected: false,
+        }
         // 前一个真实场景可能触发浏览器回退；只比较本场景增量，不把累计提交误判为重复发送。
-        const initialSubmitted = await status().then((value) => value.voiceSubmitted, () => 0)
+        const initialSubmitted = await status().then(
+          (value) => value.voiceSubmitted,
+          () => 0,
+        )
         // 原网络实现始终留存；仅 browser 场景首个外部请求注入 503，不伪造成功正文。
         const originalFetch = NetworkProxy.fetch
         let requests = 0
@@ -1068,8 +1460,18 @@ defaultProfileE2E(
           const headers = new Headers(init?.headers)
           evidence.bearerSent.push(headers.has("authorization"))
           // R12同时比对Cookie和实际落盘Bearer；只断言布尔值，失败也不能打印认证头。
-          if (saved) evidence.snapshotReused &&= headers.get("cookie") === Object.entries(saved.cookies).filter(([, c]) => c.expires <= 0 || c.expires > Date.now() / 1000).map(([name, c]) => `${name}=${c.value}`).join("; ") && headers.get("authorization") === (saved.access_token ? `Bearer ${saved.access_token}` : null)
-          if (scenario === "browser" && requests === 1) { evidence.directStatuses.push(503); return new Response(null, { status: 503 }) }
+          if (saved)
+            evidence.snapshotReused &&=
+              headers.get("cookie") ===
+                Object.entries(saved.cookies)
+                  .filter(([, c]) => c.expires <= 0 || c.expires > Date.now() / 1000)
+                  .map(([name, c]) => `${name}=${c.value}`)
+                  .join("; ") &&
+              headers.get("authorization") === (saved.access_token ? `Bearer ${saved.access_token}` : null)
+          if (scenario === "browser" && requests === 1) {
+            evidence.directStatuses.push(503)
+            return new Response(null, { status: 503 })
+          }
           const response = await originalFetch(url, init)
           evidence.directStatuses.push(response.status)
           evidence.challenge ||= response.headers.get("cf-mitigated") === "challenge"
@@ -1079,20 +1481,32 @@ defaultProfileE2E(
             const body = await response.clone().text()
             evidence.proxyRouted = (await NetworkProxy.resolveProxyRoute(String(url), "provider")).type === "proxy"
             evidence.errorJson ||= (response.headers.get("content-type") ?? "").includes("application/json")
-            evidence.rateLimited ||= /rate.limit|too many requests|quota|limit for dictation without an account/i.test(body)
+            evidence.rateLimited ||= /rate.limit|too many requests|quota|limit for dictation without an account/i.test(
+              body,
+            )
             evidence.authRejected ||= /unauthorized|invalid.token|expired.token|authentication.required/i.test(body)
           }
           return response
         })
         try {
           // 绝不复制用户旧 auth：profile 从缺席开始，browser 从空节点进入受控 503。
-          await Bun.write(config, JSON.stringify({ mcp: { [target.key]: scenario === "profile" ? {} : { auth: { cookies: {}, fetched_at: new Date().toISOString() } } } }))
+          await Bun.write(
+            config,
+            JSON.stringify({
+              mcp: {
+                [target.key]:
+                  scenario === "profile" ? {} : { auth: { cookies: {}, fetched_at: new Date().toISOString() } },
+              },
+            }),
+          )
           if (scenario === "profile") {
             const exported = await cli(["auth-export", "--json"])
             evidence.exportCode = exported.code
             if (exported.code !== 0) {
               // 只分类已知环境错误，避免 Node 或远端错误意外携带凭据正文。
-              failures.push(exported.stderr.includes("unable to open database") ? "profile:sqlite-open" : "profile:export-failed")
+              failures.push(
+                exported.stderr.includes("unable to open database") ? "profile:sqlite-open" : "profile:export-failed",
+              )
               continue
             }
             // 独立导出只证明关闭后的 reader 可用；后端必须自行再次收割，测试不向它注入导出结果。
@@ -1144,17 +1558,24 @@ defaultProfileE2E(
         if (stopped && !restored) {
           const result = await cli(["transcribe-file", "--file", wav, "--json"])
           console.log(JSON.stringify({ restoreVoiceExitCode: result.code }))
-          restored = await status().then((value) => value.browserConnected === true, () => false)
+          restored = await status().then(
+            (value) => value.browserConnected === true,
+            () => false,
+          )
         }
       } finally {
         // 即使恢复命令超时也必须清除私有配置；真实 profile 和正常 daemon 始终保留。
         await fs.rm(directory, { recursive: true, force: true })
       }
       const configUnchanged = originalConfig.equals(Buffer.from(await Bun.file(userConfig).arrayBuffer()))
-      const temporaryRemoved = !await Bun.file(config).exists() && !await Bun.file(wav).exists()
+      const temporaryRemoved = !(await Bun.file(config).exists()) && !(await Bun.file(wav).exists())
       // 连接可用还不足以证明清理完成；voice队列和ask锁都归零才交还正常MCP。
       const finalStatus = await status()
-      const idle = finalStatus.activeLocks === 0 && finalStatus.pendingPageCount === 0 && finalStatus.voiceActive === 0 && finalStatus.voiceQueued === 0
+      const idle =
+        finalStatus.activeLocks === 0 &&
+        finalStatus.pendingPageCount === 0 &&
+        finalStatus.voiceActive === 0 &&
+        finalStatus.voiceQueued === 0
       console.log(JSON.stringify({ restored, idle, configUnchanged, temporaryRemoved }))
       expect(restored && idle && configUnchanged && temporaryRemoved).toBe(true)
     }

@@ -21,7 +21,12 @@ function textPart(text: string, options?: { synthetic?: boolean; metadata?: Reco
 }
 
 function envelope(objective: string, extra: string[] = []) {
-  return ["<session-goal-continuation>", `<objective>${objective}</objective>`, ...extra, "</session-goal-continuation>"].join("\n")
+  return [
+    "<session-goal-continuation>",
+    `<objective>${objective}</objective>`,
+    ...extra,
+    "</session-goal-continuation>",
+  ].join("\n")
 }
 
 describe("goalContinuation view model", () => {
@@ -54,9 +59,13 @@ describe("goalContinuation view model", () => {
   test("omits counts when turn or max is missing or invalid", () => {
     const base = { goal_continuation: true, goal_continuation_mode: "continue" as const }
     // 历史 Message 缺少任一计数字段时不得显示半套数字；非正整数同样视为缺失。
-    expect(goalContinuation([textPart(envelope("No count"), { synthetic: true, metadata: base })])?.count).toBeUndefined()
     expect(
-      goalContinuation([textPart(envelope("Half count"), { synthetic: true, metadata: { ...base, goal_continuation_turn: 2 } })])?.count,
+      goalContinuation([textPart(envelope("No count"), { synthetic: true, metadata: base })])?.count,
+    ).toBeUndefined()
+    expect(
+      goalContinuation([
+        textPart(envelope("Half count"), { synthetic: true, metadata: { ...base, goal_continuation_turn: 2 } }),
+      ])?.count,
     ).toBeUndefined()
     expect(
       goalContinuation([
@@ -84,7 +93,9 @@ describe("goalContinuation view model", () => {
     expect(view?.label).toBe("CONTINUE")
     expect(view?.count).toBeUndefined()
     // 正文片段不是完整 envelope，不得命中（防止普通 synthetic XML 偶然进入 Revert-only 卡片）。
-    expect(goalContinuation([textPart("<session-goal-continuation>\npartial only", { synthetic: true })])).toBeUndefined()
+    expect(
+      goalContinuation([textPart("<session-goal-continuation>\npartial only", { synthetic: true })]),
+    ).toBeUndefined()
     // 非 synthetic 的同形 XML 是真实用户输入，绝不降级成 Goal 卡片。
     expect(goalContinuation([textPart(envelope("Real user XML"))])).toBeUndefined()
   })
@@ -100,7 +111,10 @@ describe("goalContinuation view model", () => {
     expect(marker?.label).toBe("REPLAN")
     expect(marker?.count).toBeUndefined()
     // 无 strategy-switch 的 marker-only 历史按 CONTINUE 展示。
-    expect(goalContinuation([textPart(envelope("Plain marker"), { synthetic: true, metadata: { goal_continuation: true } })])?.label).toBe("CONTINUE")
+    expect(
+      goalContinuation([textPart(envelope("Plain marker"), { synthetic: true, metadata: { goal_continuation: true } })])
+        ?.label,
+    ).toBe("CONTINUE")
   })
 
   test("rejects unknown stored mode instead of falling back to CONTINUE", () => {
@@ -141,9 +155,7 @@ describe("goal continuation card template contracts", () => {
       expect(dialogSource).toContain(`value: "${action}"`)
     }
     // 过滤谓词锁定：continuation 只保留 Revert；普通消息（goalContinuation falsy）全集保留。
-    expect(dialogSource).toContain(
-      "].filter((option) => !props.goalContinuation || option.value === \"session.revert\")",
-    )
+    expect(dialogSource).toContain('].filter((option) => !props.goalContinuation || option.value === "session.revert")')
   })
 
   test("session route passes subtype and renders the integrated badge row", () => {
@@ -155,10 +167,8 @@ describe("goal continuation card template contracts", () => {
     // 徽章行合同：两个 badge 以 gap={1} 分列；GOAL 用 Agent 身份色（color()/queuedFg()），
     // mode badge 用中性 backgroundElement——不得伪造第二个 Agent 角色（源用 captureSpans 断言同一合同）。
     expect(sessionSource).toContain('<box flexDirection="row" paddingTop={1} gap={1}>')
-    expect(sessionSource).toContain('<span style={{ bg: color(), fg: queuedFg(), bold: true }}> GOAL </span>')
-    expect(sessionSource).toContain(
-      '<span style={{ bg: theme.backgroundElement, fg: theme.textMuted }}>',
-    )
+    expect(sessionSource).toContain("<span style={{ bg: color(), fg: queuedFg(), bold: true }}> GOAL </span>")
+    expect(sessionSource).toContain("<span style={{ bg: theme.backgroundElement, fg: theme.textMuted }}>")
     // label 与配对计数以 ` · ` 连接；count 缺失时省略整个后缀（与 view model 合同一致）。
     // 断言用单引号串原样锁定模板字面量（源仓同款运行时语义，目标为未转义形态）。
     expect(sessionSource).toContain('item().count ? ` · ${item().count}` : ""}')

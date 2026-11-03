@@ -19,7 +19,8 @@ export const DaemonCommand = cmd({
   // #259：这里只注册本机 TUI 共享 daemon 的管理入口；不复用 serve，避免把 headless server 生命周期混入
   command: "daemon",
   describe: "manage the shared opencode daemon",
-  builder: (yargs) => yargs.command(DaemonStatusCommand).command(DaemonStartCommand).command(DaemonStopCommand).demandCommand(),
+  builder: (yargs) =>
+    yargs.command(DaemonStatusCommand).command(DaemonStartCommand).command(DaemonStopCommand).demandCommand(),
   async handler() {},
 })
 
@@ -62,7 +63,8 @@ const DaemonStartCommand = cmd({
       }),
   async handler(args) {
     // 正整数门禁属于 CLI trust seam；无效 PID 不能进入 worker 环境并改变 startup idle 语义
-    if (!Number.isSafeInteger(args.launcherPid) || args.launcherPid <= 0) throw new Error("launcher-pid must be a positive integer")
+    if (!Number.isSafeInteger(args.launcherPid) || args.launcherPid <= 0)
+      throw new Error("launcher-pid must be a positive integer")
     await discoverOrSpawnDaemon(
       { port: 0, hostname: "127.0.0.1", mdns: false, "mdns-domain": "opencode.local", cors: [] },
       undefined,
@@ -86,7 +88,8 @@ const DaemonStopCommand = cmd({
       const result = await stopDaemon({ progress: (message) => UI.println(message) })
       if (result.type === "absent") UI.println("No opencode daemon is running.")
       if (result.type === "stale") UI.println("Removed stale opencode daemon lock.")
-      if (result.type === "stopped") UI.println(result.forced ? "Force-stopped opencode daemon." : "Stopped opencode daemon.")
+      if (result.type === "stopped")
+        UI.println(result.forced ? "Force-stopped opencode daemon." : "Stopped opencode daemon.")
     } catch (error) {
       UI.error(errorMessage(error))
       process.exitCode = 1
@@ -96,12 +99,19 @@ const DaemonStopCommand = cmd({
 
 // #535：stopDaemon 导出为 db 维护域的唯一安全停机 owner：expected 绑定 prompt 时用户看到的 PID/token，
 // maintenanceIdle 请求 conditional shutdown，progress 承接人类进度；typed result 让调用方获得 offline 授权。
-export async function stopDaemon(input: { expected?: ServerLock.ServerLock; maintenanceIdle?: boolean; progress?: (message: string) => void } = {}) {
+export async function stopDaemon(
+  input: { expected?: ServerLock.ServerLock; maintenanceIdle?: boolean; progress?: (message: string) => void } = {},
+) {
   // 与发现共用DB/channel定位；网络参数不另建同库owner，也无需启动runtime读取配置。
   const lockPath = ServerLock.placement()
   // CLI 没有经过发现入口；私有 token 请求仍须绕过父进程继承的代理。
   const noProxy = NetworkProxy.noProxyString(
-    [process.env.NO_PROXY, process.env.no_proxy].flatMap((value) => (value ?? "").split(",").map((s) => s.trim()).filter(Boolean)),
+    [process.env.NO_PROXY, process.env.no_proxy].flatMap((value) =>
+      (value ?? "")
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean),
+    ),
   )
   process.env.NO_PROXY = noProxy
   process.env.no_proxy = noProxy
@@ -133,7 +143,9 @@ export async function stopDaemon(input: { expected?: ServerLock.ServerLock; main
   if (!controlPort) {
     // #259：旧 lock 没有私有 control port 时无法证明 pid 与 HTTP daemon 的所有权关系；
     // 为了避免退化成误杀风险，这里拒绝 fallback 到 process.kill。
-    throw new Error(`opencode daemon pid=${lock.pid} does not support safe stop; restart the TUI or wait for idle shutdown.`)
+    throw new Error(
+      `opencode daemon pid=${lock.pid} does not support safe stop; restart the TUI or wait for idle shutdown.`,
+    )
   }
 
   // 已接受的graceful超时或显式stop未获应答，均须先复核同一owner才可进入原force分支。
@@ -218,7 +230,10 @@ async function waitForStop(lock: ServerLock.ServerLock, timeoutMs = STOP_TIMEOUT
   return false
 }
 
-function sameOwner(current: ServerLock.ServerLock | undefined, expected: ServerLock.ServerLock): current is ServerLock.ServerLock {
+function sameOwner(
+  current: ServerLock.ServerLock | undefined,
+  expected: ServerLock.ServerLock,
+): current is ServerLock.ServerLock {
   // PID、token 和私有端口三者均来自重新读取的 owner，不能凭旧 PID 授权强停。
   // #535：dbPath 参与 identity，防止共享 lock 位置异常时把另一数据库的 daemon 当成原 owner。
   return (

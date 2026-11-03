@@ -28,7 +28,18 @@ import path from "path"
 // #524：metadata 投影子进程脚本需要 fileURL 对齐目标 core 模块路径。
 import { fileURLToPath } from "url"
 
-const coldLayer = LayerNode.compile(LayerNode.group([SessionNs.node, MessageV2.node, SessionProjector.node, SessionSummary.node, Database.node, EventV2Bridge.node, Storage.node, CrossSpawnSpawner.node]))
+const coldLayer = LayerNode.compile(
+  LayerNode.group([
+    SessionNs.node,
+    MessageV2.node,
+    SessionProjector.node,
+    SessionSummary.node,
+    Database.node,
+    EventV2Bridge.node,
+    Storage.node,
+    CrossSpawnSpawner.node,
+  ]),
+)
 const it = testEffect(coldLayer)
 // #0500：HTTP seam 用例与 Server.Default 共享 memoMap 实例——pub/sub 与 handler 必须同源。
 const sharedIt = testEffectShared(Layer.mergeAll(coldLayer, httpApiLayer))
@@ -617,9 +628,9 @@ describe.serial("ColdStorage", () => {
           .run(),
       )
       expect(ColdStorage.freezeOwner(sync, { type: "part", id: partID }).type).toBe("frozen")
-      const hash = useDb(sync, 
-        (db) =>
-          db.select({ hash: PartTable.cold_ref }).from(PartTable).where(eq(PartTable.id, partID)).get()?.hash,
+      const hash = useDb(
+        sync,
+        (db) => db.select({ hash: PartTable.cold_ref }).from(PartTable).where(eq(PartTable.id, partID)).get()?.hash,
       )
       if (!hash) throw new Error("Expected a cold hash")
       const original = useDb(sync, (db) =>
@@ -705,16 +716,24 @@ describe.serial("ColdStorage", () => {
       expect(() => ColdMaintain.status(sync)).not.toThrow()
       // 同一坏行经真实task-backed入口再修复，锁定参数持久化与显式写授权。
       const repairPartID = yield* seedMalformedToolPart(sessions, session, "{another bad json")
-      const prepared = ColdMaintain.prepareMaintenance(ColdMaintain.parseMaintenanceRequest({ operation: "verify", repairToolInput: true, batchSize: 50 }))
+      const prepared = ColdMaintain.prepareMaintenance(
+        ColdMaintain.parseMaintenanceRequest({ operation: "verify", repairToolInput: true, batchSize: 50 }),
+      )
       if (prepared.type !== "task") throw new Error("Expected tool input repair task")
-      expect(ColdMaintain.parseMaintenanceTask(prepared.task).args).toMatchObject({ operation: "verify", repair: false, repairToolInput: true })
+      expect(ColdMaintain.parseMaintenanceTask(prepared.task).args).toMatchObject({
+        operation: "verify",
+        repair: false,
+        repairToolInput: true,
+      })
       const database = yield* Database.Service
-      const result = yield* Effect.promise(() => ColdMaintain.maintain(sync, prepared, {
-        lease: { assertOwned() {} },
-        checkpoint: async () => {},
-        // 使用现有同连接预约，避免同步测试client掩盖维护事务的实际执行边界。
-        run: <A>(body: () => A) => Effect.runPromise(Database.withSync(database, body)),
-      }))
+      const result = yield* Effect.promise(() =>
+        ColdMaintain.maintain(sync, prepared, {
+          lease: { assertOwned() {} },
+          checkpoint: async () => {},
+          // 使用现有同连接预约，避免同步测试client掩盖维护事务的实际执行边界。
+          run: <A>(body: () => A) => Effect.runPromise(Database.withSync(database, body)),
+        }),
+      )
       expect(result.type === "task" ? result.task.status : undefined).toBe("completed")
       const repaired = sync.select().from(PartTable).where(eq(PartTable.id, repairPartID)).get()
       expect(repaired?.data.type === "tool" ? repaired.data.state.input : undefined).toEqual({})
@@ -941,14 +960,19 @@ describe.serial("ColdStorage", () => {
         tools: {},
       })
       yield* sessions.updatePart({
-        id: PartID.ascending(), sessionID: source.id, messageID: boundaryID,
-        type: "text", text: "excluded boundary content",
+        id: PartID.ascending(),
+        sessionID: source.id,
+        messageID: boundaryID,
+        type: "text",
+        text: "excluded boundary content",
       })
       const child = yield* sessions.fork({ sessionID: source.id, messageID: boundaryID })
       // 公开读取必须恰好保留旧轮及其 Part，不复制边界正文或源身份。
       const messages = yield* sessions.messages({ sessionID: child.id })
       expect(messages.map((message) => message.info.time.created)).toEqual([1_000])
-      expect(messages.flatMap((message) => message.parts.flatMap((part) => part.type === "text" ? [part.text] : []))).toEqual(["chronologically old"])
+      expect(
+        messages.flatMap((message) => message.parts.flatMap((part) => (part.type === "text" ? [part.text] : []))),
+      ).toEqual(["chronologically old"])
       expect(messages.every((message) => message.info.id !== oldID && message.info.id !== boundaryID)).toBe(true)
       yield* sessions.remove(child.id)
       yield* sessions.remove(source.id)
@@ -962,7 +986,9 @@ describe.serial("ColdStorage", () => {
       const sessions = yield* SessionNs.Service
       const source = yield* sessions.create({ title: "fork missing boundary" })
       const before = (yield* sessions.list()).length
-      const result = yield* Effect.exit(sessions.fork({ sessionID: source.id, messageID: MessageID.make("msg_missing_boundary") }))
+      const result = yield* Effect.exit(
+        sessions.fork({ sessionID: source.id, messageID: MessageID.make("msg_missing_boundary") }),
+      )
       expect(Exit.isFailure(result)).toBe(true)
       expect((yield* sessions.list()).length).toBe(before)
       yield* sessions.remove(source.id)
@@ -1248,23 +1274,42 @@ describe.serial("ColdStorage", () => {
       expect(ColdStorage.freezeOwner(sync, { type: "part", id: partID, now: Date.now() }).type).toBe("frozen")
 
       // ID与时间反序及同时间tie必须选择同一Message/Part前缀，且fork不能先预热source。
-      for (const [id, time] of [["msg_10_future", 40], ["msg_30_before", 30], ["msg_40_anchor", 30], ["msg_50_after", 30]] as const) {
-        yield* sessions.updateMessage({ id: MessageID.make(id), sessionID: source.id, role: "user", time: { created: time },
-          agent: "build", model: { providerID: ProviderV2.ID.make("test-provider"), modelID: ModelV2.ID.make("test-model") } })
+      for (const [id, time] of [
+        ["msg_10_future", 40],
+        ["msg_30_before", 30],
+        ["msg_40_anchor", 30],
+        ["msg_50_after", 30],
+      ] as const) {
+        yield* sessions.updateMessage({
+          id: MessageID.make(id),
+          sessionID: source.id,
+          role: "user",
+          time: { created: time },
+          agent: "build",
+          model: { providerID: ProviderV2.ID.make("test-provider"), modelID: ModelV2.ID.make("test-model") },
+        })
       }
       const prefix = MessageV2.rawForkRows(sync, { sessionID: source.id, messageID: MessageID.make("msg_40_anchor") })
-      expect(prefix.messages.map(row => row.id)).toEqual([parentID, messageID, MessageID.make("msg_30_before")])
-      expect(prefix.parts.map(row => row.id).sort()).toEqual([partID, finishID].sort())
+      expect(prefix.messages.map((row) => row.id)).toEqual([parentID, messageID, MessageID.make("msg_30_before")])
+      expect(prefix.parts.map((row) => row.id).sort()).toEqual([partID, finishID].sort())
       const bounded = yield* sessions.fork({ sessionID: source.id, messageID: MessageID.make("msg_40_anchor") })
       expect(coldOwnerCount(sync, [source.id, bounded.id])).toBe(2)
       expect(MessageV2.rawForkRows(sync, { sessionID: bounded.id }).messages).toHaveLength(3)
       yield* sessions.remove(bounded.id)
       expect(coldOwnerCount(sync, [source.id])).toBe(1)
-      expect(MessageV2.rawForkRows(sync, { sessionID: source.id, messageID: MessageID.make("msg_missing") }).messages).toHaveLength(6)
+      expect(
+        MessageV2.rawForkRows(sync, { sessionID: source.id, messageID: MessageID.make("msg_missing") }).messages,
+      ).toHaveLength(6)
       const external = yield* sessions.create({ title: "external fork anchor" })
       const externalID = MessageID.make("msg_40_external")
-      yield* sessions.updateMessage({ id: externalID, sessionID: external.id, role: "user", time: { created: 15 },
-        agent: "build", model: { providerID: ProviderV2.ID.make("test-provider"), modelID: ModelV2.ID.make("test-model") } })
+      yield* sessions.updateMessage({
+        id: externalID,
+        sessionID: external.id,
+        role: "user",
+        time: { created: 15 },
+        agent: "build",
+        model: { providerID: ProviderV2.ID.make("test-provider"), modelID: ModelV2.ID.make("test-model") },
+      })
       expect(MessageV2.rawForkRows(sync, { sessionID: source.id, messageID: externalID }).messages).toHaveLength(6)
       yield* sessions.remove(external.id)
 
@@ -1552,13 +1597,12 @@ describe.serial("ColdStorage", () => {
       )
       expect(ColdStorage.freezeOwner(sync, { type: "part", id: partID, now: Date.now() }).type).toBe("frozen")
       const beforeVerify = ColdStorage.verify(sync, { repair: false }).refCountMismatches
-      const owner = useDb(sync,
-        (db) =>
-          db
-            .select({ hash: PartTable.cold_ref, key: PartTable.cold_key })
-            .from(PartTable)
-            .where(eq(PartTable.id, partID))
-            .get(),
+      const owner = useDb(sync, (db) =>
+        db
+          .select({ hash: PartTable.cold_ref, key: PartTable.cold_key })
+          .from(PartTable)
+          .where(eq(PartTable.id, partID))
+          .get(),
       )
       if (!owner?.hash || !owner.key) throw new Error("Expected a packed cold owner for verify test")
       const hash = owner.hash
@@ -1570,55 +1614,51 @@ describe.serial("ColdStorage", () => {
       expect(ColdStorage.verify(sync, { repair: false }).refCountMismatches).toBe(beforeVerify)
 
       const database = yield* Database.Service
-      const runtime = { lease: { assertOwned() {} }, checkpoint: async () => {}, run: <A>(body: () => A) => Effect.runPromise(Database.withSync(database, body)) }
+      const runtime = {
+        lease: { assertOwned() {} },
+        checkpoint: async () => {},
+        run: <A>(body: () => A) => Effect.runPromise(Database.withSync(database, body)),
+      }
       // 合法 frame 搭配不存在的随机 entry key，区分完整 owner verify 与旧 payload-only task。
       useDb(sync, (db) =>
-        db.update(PartTable).set({ cold_key: Buffer.alloc(32, 0xa5) }).where(eq(PartTable.id, partID)).run(),
+        db
+          .update(PartTable)
+          .set({ cold_key: Buffer.alloc(32, 0xa5) })
+          .where(eq(PartTable.id, partID))
+          .run(),
       )
       const verifyTask = ColdMaintain.prepareMaintenance({ operation: "verify", repair: true, batchSize: 50 })
       if (verifyTask.type !== "task") throw new Error("Expected task-backed repair")
-      const verified = yield* Effect.promise(() =>
-        ColdMaintain.maintain(sync, verifyTask, runtime),
-      )
+      const verified = yield* Effect.promise(() => ColdMaintain.maintain(sync, verifyTask, runtime))
       if (verified.type !== "task") throw new Error("Expected task result for repair")
       // repair 不可修 key；task 必须报告 corruption，不能因 payload hash 正常而 completed/failed=0。
       expect(verified.task.failed).toBeGreaterThan(0)
-      useDb(sync, (db) =>
-        db.update(PartTable).set({ cold_key: owner.key }).where(eq(PartTable.id, partID)).run(),
-      )
+      useDb(sync, (db) => db.update(PartTable).set({ cold_key: owner.key }).where(eq(PartTable.id, partID)).run())
 
       const baselineOwners = ColdStorage.verify(sync, { repair: false }).corruptOwners
       // dirty 没有 claimed cursor 是非法状态；repair 只能报告，不能猜测清 bit 或制造 cursor。
       useDb(sync, (db) =>
-        db
-          .update(SessionTable)
-          .set({ summary_init_dirty: true })
-          .where(eq(SessionTable.id, session.id))
-          .run(),
+        db.update(SessionTable).set({ summary_init_dirty: true }).where(eq(SessionTable.id, session.id)).run(),
       )
       const summaryTask = ColdMaintain.prepareMaintenance({ operation: "verify", repair: true, batchSize: 50 })
       if (summaryTask.type !== "task") throw new Error("Expected task-backed summary repair")
-      const summaryVerified = yield* Effect.promise(() =>
-        ColdMaintain.maintain(sync, summaryTask, runtime),
-      )
+      const summaryVerified = yield* Effect.promise(() => ColdMaintain.maintain(sync, summaryTask, runtime))
       if (summaryVerified.type !== "task") throw new Error("Expected task result for summary repair")
       expect(summaryVerified.task.failed).toBeGreaterThan(0)
       expect(ColdStorage.verify(sync, { repair: false }).corruptOwners).toBe(baselineOwners + 1)
       expect(
-        useDb(sync, (db) =>
-          db
-            .select({ dirty: SessionTable.summary_init_dirty })
-            .from(SessionTable)
-            .where(eq(SessionTable.id, session.id))
-            .get()?.dirty,
+        useDb(
+          sync,
+          (db) =>
+            db
+              .select({ dirty: SessionTable.summary_init_dirty })
+              .from(SessionTable)
+              .where(eq(SessionTable.id, session.id))
+              .get()?.dirty,
         ),
       ).toBe(true)
       useDb(sync, (db) =>
-        db
-          .update(SessionTable)
-          .set({ summary_init_dirty: false })
-          .where(eq(SessionTable.id, session.id))
-          .run(),
+        db.update(SessionTable).set({ summary_init_dirty: false }).where(eq(SessionTable.id, session.id)).run(),
       )
 
       const expanded = ColdStorage.expand(sync, { sessionID: session.id, all: false })
@@ -1660,7 +1700,9 @@ describe.serial("ColdStorage", () => {
       expect(() =>
         ColdMaintain.parseMaintenanceTask({ ...prepared.task, progress: { stage: "owner", done: "1", total: 10 } }),
       ).toThrow()
-      expect(() => ColdMaintain.prepareMaintenance({ operation: "compress", olderThanMs: 0, batchSize: 5001 })).toThrow()
+      expect(() =>
+        ColdMaintain.prepareMaintenance({ operation: "compress", olderThanMs: 0, batchSize: 5001 }),
+      ).toThrow()
       yield* sessions.remove(session.id)
     }),
   )
@@ -1713,13 +1755,19 @@ describe.serial("ColdStorage", () => {
           .run(),
       )
       expect(ColdStorage.freezeOwner(sync, { type: "part", id: partID }).type).toBe("frozen")
-      const hash = useDb(sync, 
-        (db) =>
-          db.select({ hash: PartTable.cold_ref }).from(PartTable).where(eq(PartTable.id, partID)).get()?.hash,
+      const hash = useDb(
+        sync,
+        (db) => db.select({ hash: PartTable.cold_ref }).from(PartTable).where(eq(PartTable.id, partID)).get()?.hash,
       )
       if (!hash) throw new Error("Expected a cleanup hash")
       // 手工清除 owner 模拟外部 SQL/crash 遗留的 orphan；正常删除路径不会制造此状态。
-      useDb(sync, (db) => db.update(PartTable).set({ cold_ref: null, cold_key: null, cold_stats: null }).where(eq(PartTable.id, partID)).run())
+      useDb(sync, (db) =>
+        db
+          .update(PartTable)
+          .set({ cold_ref: null, cold_key: null, cold_stats: null })
+          .where(eq(PartTable.id, partID))
+          .run(),
+      )
 
       const preview = ColdStorage.cleanup(sync, { delete: false })
       expect(preview.candidates).toBeGreaterThanOrEqual(1)
@@ -1800,7 +1848,8 @@ describe.serial("ColdStorage", () => {
         },
       }
       const compressed = yield* Effect.promise(() =>
-        ColdMaintain.maintain(sync,
+        ColdMaintain.maintain(
+          sync,
           ColdMaintain.prepareMaintenance({
             operation: "compress",
             sessionID: session.id,
@@ -1817,7 +1866,8 @@ describe.serial("ColdStorage", () => {
       expect(checkpoints.some((task) => task.status === "running")).toBe(true)
 
       const expanded = yield* Effect.promise(() =>
-        ColdMaintain.maintain(sync,
+        ColdMaintain.maintain(
+          sync,
           ColdMaintain.prepareMaintenance({ operation: "expand", sessionID: session.id, all: false, batchSize: 1 }),
           runtime,
         ),
@@ -1868,7 +1918,8 @@ describe.serial("ColdStorage", () => {
           .run(),
       )
       const result = yield* Effect.promise(() =>
-        ColdMaintain.maintain(sync,
+        ColdMaintain.maintain(
+          sync,
           ColdMaintain.prepareMaintenance({
             operation: "compress",
             sessionID: session.id,
@@ -1955,7 +2006,8 @@ describe.serial("ColdStorage", () => {
         },
       }
       const interrupted = yield* Effect.promise(() =>
-        ColdMaintain.maintain(sync,
+        ColdMaintain.maintain(
+          sync,
           ColdMaintain.prepareMaintenance({
             operation: "compress",
             sessionID: session.id,
@@ -1968,7 +2020,8 @@ describe.serial("ColdStorage", () => {
       expect(interrupted.type === "task" ? interrupted.task.status : undefined).toBe("interrupted")
 
       const resumed = yield* Effect.promise(() =>
-        ColdMaintain.maintain(sync,
+        ColdMaintain.maintain(
+          sync,
           ColdMaintain.prepareMaintenance({
             operation: "compress",
             sessionID: session.id,
@@ -1992,10 +2045,13 @@ describe.serial("ColdStorage", () => {
 // #0500：race 用例的 mirror read 闸门——只在 session_diff 键上生效，其余 Storage
 // 操作原样透传；ready 在 read 进入后发布，release 控制真实竞态窗口。
 // #0500：目标 Effect 形态下自定义 tag 用 Context.Service 定义（与生产 Storage.Service 同模式）。
-class MirrorReadGateService extends Context.Service<MirrorReadGateService, {
-  ready: Deferred.Deferred<void>
-  release: Deferred.Deferred<void>
-}>()("MirrorReadGate") {}
+class MirrorReadGateService extends Context.Service<
+  MirrorReadGateService,
+  {
+    ready: Deferred.Deferred<void>
+    release: Deferred.Deferred<void>
+  }
+>()("MirrorReadGate") {}
 const MirrorReadGate = MirrorReadGateService
 
 const mirrorGateLayer = Layer.effect(
@@ -2033,7 +2089,15 @@ const mirrorGatedStorage = Layer.provide(
 const raceIt = testEffect(
   Layer.merge(
     AppNodeBuilder.build(
-      LayerNode.group([SessionNs.node, MessageV2.node, SessionProjector.node, SessionSummary.node, Database.node, EventV2Bridge.node, Storage.node]),
+      LayerNode.group([
+        SessionNs.node,
+        MessageV2.node,
+        SessionProjector.node,
+        SessionSummary.node,
+        Database.node,
+        EventV2Bridge.node,
+        Storage.node,
+      ]),
       [[Storage.node, mirrorGatedStorage]],
     ),
     // gate 层单独 merge——body 直接 yield MirrorReadGate 获取同一 Deferred 实例。
@@ -2076,7 +2140,7 @@ describe.serial("Packed ColdStorage V2", () => {
       // maintenance 走公开 dispatcher 与真实 lease contract，不能用 direct freeze 掩盖 batch packing 差异。
       const result = yield* Effect.promise(() =>
         ColdMaintain.maintain(
-        sync,
+          sync,
           ColdMaintain.prepareMaintenance({
             operation: "compress",
             sessionID: session.id,
@@ -2529,9 +2593,10 @@ describe.serial("Packed ColdStorage V2", () => {
         patch: "+claim-old\n",
       })
       // stale mirror 使用不同文件和大计数，若被采用会产生一眼可见的错误结果。
-      yield* storage.write(["session_diff", session.id], [
-        { file: "src/stale.ts", patch: "+stale\n", additions: 20, deletions: 10, status: "modified" },
-      ])
+      yield* storage.write(
+        ["session_diff", session.id],
+        [{ file: "src/stale.ts", patch: "+stale\n", additions: 20, deletions: 10, status: "modified" }],
+      )
       // 测试直接构造 crash-resume 可见的 persisted claim，而不是依赖不可控 wall-clock race。
       useDb(sync, (db) =>
         db
@@ -2878,12 +2943,10 @@ describe.serial("Packed ColdStorage V2", () => {
         ColdStorage.freezeOwner(sync, { type: "part", id: edit.partID, now: Date.now() + 1_000, olderThanMs: 0 }).type,
       ).toBe("frozen")
       // Part ref 从真实 owner 行读取，测试不复制 content hash 或 pack identity 算法。
-      const partRef = useDb(sync, (db) =>
-        db
-          .select({ hash: PartTable.cold_ref })
-          .from(PartTable)
-          .where(eq(PartTable.id, edit.partID))
-          .get()?.hash,
+      const partRef = useDb(
+        sync,
+        (db) =>
+          db.select({ hash: PartTable.cold_ref }).from(PartTable).where(eq(PartTable.id, edit.partID)).get()?.hash,
       )
       if (!partRef) throw new Error("Integrity fixture did not create a cold Part owner")
 
@@ -2920,15 +2983,14 @@ describe.serial("Packed ColdStorage V2", () => {
 
       // 恢复 Part 后先建立合法 summary，再单独破坏 Session ref 以隔离第二个 gate。
       useDb(sync, (db) =>
-        db.update(ColdStorageTable).set({ ref_count: 1 }).where(eq(ColdStorageTable.hash, partRef)).run()
+        db.update(ColdStorageTable).set({ ref_count: 1 }).where(eq(ColdStorageTable.hash, partRef)).run(),
       )
       expect(yield* sessions.diff(session.id)).toHaveLength(1)
-      const summaryRef = useDb(sync, (db) =>
-        db
-          .select({ hash: SessionTable.summary_ref })
-          .from(SessionTable)
-          .where(eq(SessionTable.id, session.id))
-          .get()?.hash,
+      const summaryRef = useDb(
+        sync,
+        (db) =>
+          db.select({ hash: SessionTable.summary_ref }).from(SessionTable).where(eq(SessionTable.id, session.id)).get()
+            ?.hash,
       )
       if (!summaryRef) throw new Error("Integrity fixture did not create a summary owner")
       useDb(sync, (db) =>
@@ -2960,9 +3022,10 @@ describe.serial("Packed ColdStorage V2", () => {
         patch: "+race-old\n",
       })
       // stale 文件在 release 时仍存在，成功不能归因于 NotFound compatibility branch。
-      yield* storage.write(["session_diff", session.id], [
-        { file: "src/stale-race.ts", patch: "+stale\n", additions: 30, deletions: 12, status: "modified" },
-      ])
+      yield* storage.write(
+        ["session_diff", session.id],
+        [{ file: "src/stale-race.ts", patch: "+stale\n", additions: 30, deletions: 12, status: "modified" }],
+      )
 
       // Storage wrapper 最终委托真实 filesystem read，Deferred 只控制顺序而不伪造 mirror 类型或内容。
       const first = yield* sessions.diff(session.id).pipe(Effect.forkChild)
@@ -3028,10 +3091,13 @@ describe.serial("Packed ColdStorage V2", () => {
         patch: "+removed\n",
       })
       // mirror 包含即将删除的文件，若 initializer 信任 pre-I/O ceiling 会把 removed.ts 永久保存。
-      yield* storage.write(["session_diff", session.id], [
-        { file: "src/remains.ts", patch: "+remains\n", additions: 1, deletions: 0, status: "added" },
-        { file: "src/removed.ts", patch: "+removed\n", additions: 1, deletions: 0, status: "added" },
-      ])
+      yield* storage.write(
+        ["session_diff", session.id],
+        [
+          { file: "src/remains.ts", patch: "+remains\n", additions: 1, deletions: 0, status: "added" },
+          { file: "src/removed.ts", patch: "+removed\n", additions: 1, deletions: 0, status: "added" },
+        ],
+      )
 
       const pending = yield* sessions.diff(session.id).pipe(Effect.forkChild)
       yield* Deferred.await(gate.ready).pipe(Effect.timeout("5 seconds"))
@@ -3067,29 +3133,29 @@ describe.serial("Packed ColdStorage V2", () => {
     Effect.gen(function* () {
       const directory = yield* tmpdirScoped()
       return yield* Effect.gen(function* () {
-      const database = yield* Database.Service
-      const { sync } = database
-      sync.run(sql`CREATE TABLE vacuum_fixture(value blob)`)
-      sync.run(sql`INSERT INTO vacuum_fixture VALUES(zeroblob(65536))`)
-      const filename = sync.get<{ file: string }>(sql`PRAGMA database_list`).file
-      expect(filename).toBe(path.join(directory, "wal.sqlite"))
-      expect(Bun.file(`${filename}-wal`).size).toBeGreaterThan(0)
-      // confirm=true 与 lease 同时提供，覆盖 production 对破坏性物理操作的双重授权门禁。
-      // 本测试不执行自动 vacuum，只有显式 operation 才拥有 checkpoint/truncate 副作用。
-      const result = yield* Effect.promise(() =>
-        ColdMaintain.maintain(sync, ColdMaintain.prepareMaintenance({ operation: "vacuum", confirm: true }), {
-          lease: { assertOwned() {} },
-          checkpoint: async () => {},
-          run: <A>(body: () => A) => Effect.runPromise(Database.withSync(database, body)),
-        }),
-      )
-      // maintenance dispatcher 仍返回原有 vacuum report，前端/CLI contract 没有新增字段。
-      expect(result.type).toBe("vacuum")
-      // 文件大小在 command 返回后读取，确保断言观察的是 terminal 状态而非并发 checkpoint 中间态。
-      // 只验证当前独立 fixture 文件，不将 source 历史大库体积作为本轮结果。
-      const wal = Bun.file(`${filename}-wal`)
-      // 已证明同一文件在命令前存在非空 WAL，返回后必须清零，不能误查 preload 的 :memory: 路径。
-      expect(yield* Effect.promise(async () => ((await wal.exists()) ? wal.size : 0))).toBe(0)
+        const database = yield* Database.Service
+        const { sync } = database
+        sync.run(sql`CREATE TABLE vacuum_fixture(value blob)`)
+        sync.run(sql`INSERT INTO vacuum_fixture VALUES(zeroblob(65536))`)
+        const filename = sync.get<{ file: string }>(sql`PRAGMA database_list`).file
+        expect(filename).toBe(path.join(directory, "wal.sqlite"))
+        expect(Bun.file(`${filename}-wal`).size).toBeGreaterThan(0)
+        // confirm=true 与 lease 同时提供，覆盖 production 对破坏性物理操作的双重授权门禁。
+        // 本测试不执行自动 vacuum，只有显式 operation 才拥有 checkpoint/truncate 副作用。
+        const result = yield* Effect.promise(() =>
+          ColdMaintain.maintain(sync, ColdMaintain.prepareMaintenance({ operation: "vacuum", confirm: true }), {
+            lease: { assertOwned() {} },
+            checkpoint: async () => {},
+            run: <A>(body: () => A) => Effect.runPromise(Database.withSync(database, body)),
+          }),
+        )
+        // maintenance dispatcher 仍返回原有 vacuum report，前端/CLI contract 没有新增字段。
+        expect(result.type).toBe("vacuum")
+        // 文件大小在 command 返回后读取，确保断言观察的是 terminal 状态而非并发 checkpoint 中间态。
+        // 只验证当前独立 fixture 文件，不将 source 历史大库体积作为本轮结果。
+        const wal = Bun.file(`${filename}-wal`)
+        // 已证明同一文件在命令前存在非空 WAL，返回后必须清零，不能误查 preload 的 :memory: 路径。
+        expect(yield* Effect.promise(async () => ((await wal.exists()) ? wal.size : 0))).toBe(0)
       }).pipe(Effect.provide(Layer.fresh(Database.layerFromPath(path.join(directory, "wal.sqlite")))))
     }),
   )

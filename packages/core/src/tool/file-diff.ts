@@ -85,7 +85,13 @@ function binaryMarker(filePath: string, oldText: string, newText: string): Rende
   }
 }
 
-function rewriteMarker(filePath: string, oldMid: string[], newMid: string[], oldText: string, newText: string): RenderedFileDiff {
+function rewriteMarker(
+  filePath: string,
+  oldMid: string[],
+  newMid: string[],
+  oldText: string,
+  newText: string,
+): RenderedFileDiff {
   // 预算耗尽或产物超界只降级展示，显式中段计数及完整内容身份继续保留。
   // 正文使用context前缀和合法range，普通解析器无需特判，重扫0/0不覆盖显式计数。
   return {

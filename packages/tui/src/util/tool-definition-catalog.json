@@ -1,68 +1,339 @@
 {
   "invalid": {
     "description": "Do not use",
-    "parameters": {"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"tool":{"type":"string"},"error":{"type":"string"}},"required":["tool","error"]}
+    "parameters": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": { "tool": { "type": "string" }, "error": { "type": "string" } },
+      "required": ["tool", "error"]
+    }
   },
   "question": {
     "description": "Use this tool when you need to ask the user questions during execution. This allows you to:\n1. Gather user preferences or requirements\n2. Clarify ambiguous instructions\n3. Get decisions on implementation choices as you work\n4. Offer choices to the user about what direction to take.\n\nUsage notes:\n- When `custom` is enabled (default), a \"Type your own answer\" option is added automatically; don't include \"Other\" or catch-all options\n- Answers are returned as arrays of labels; set `multiple: true` to allow selecting more than one\n- If you recommend a specific option, make that the first option in the list and add \"(Recommended)\" at the end of the label\n",
-    "parameters": {"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"questions":{"type":"array","items":{"type":"object","properties":{"question":{"type":"string","description":"Complete question"},"header":{"type":"string","description":"Very short label (max 30 chars)"},"options":{"type":"array","items":{"type":"object","properties":{"label":{"type":"string","description":"Display text (1-5 words, concise)"},"description":{"type":"string","description":"Explanation of choice"}},"required":["label","description"]},"description":"Available choices"},"multiple":{"type":"boolean","description":"Allow selecting multiple choices"}},"required":["question","header","options"]},"description":"Questions to ask"}},"required":["questions"]}
+    "parameters": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "questions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "question": { "type": "string", "description": "Complete question" },
+              "header": { "type": "string", "description": "Very short label (max 30 chars)" },
+              "options": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "label": { "type": "string", "description": "Display text (1-5 words, concise)" },
+                    "description": { "type": "string", "description": "Explanation of choice" }
+                  },
+                  "required": ["label", "description"]
+                },
+                "description": "Available choices"
+              },
+              "multiple": { "type": "boolean", "description": "Allow selecting multiple choices" }
+            },
+            "required": ["question", "header", "options"]
+          },
+          "description": "Questions to ask"
+        }
+      },
+      "required": ["questions"]
+    }
   },
   "bash": {
     "description": "Executes a given bash command in a persistent shell session with optional timeout, ensuring proper handling and security measures.\n\nBe aware: OS: ${os}, Shell: ${shell}\n\nAll commands run in the current working directory by default. Use the `workdir` parameter if you need to run a command in a different directory.\n\nUse `/tmp` for temporary work outside the workspace. This directory has already been created, already exists, and is pre-approved for external directory access.\n\nIMPORTANT: This tool is for terminal operations like git, npm, docker, etc. DO NOT use it for file operations (reading, writing, editing, searching, finding files) - use the specialized tools for this instead.\n\nBefore executing the command, please follow directory verification and quoting rules for paths with spaces.\n\n# Git repository state changes\n\n# 只读检查允许列表（含 rev-parse / remote -v）\nRead-only git inspection commands are allowed when needed, such as `git status`, `git diff`, `git log`, `git show`, `git branch --show-current`, `git rev-parse`, and `git remote -v`.\n\n# 写操作必须由最新用户消息明确要求该操作类型\nDo not run git commands that modify refs, history, the index, the working tree, stashes, or remotes\nunless the latest user message explicitly requests that exact kind of operation.\nThis includes `git add`, `git commit`, `git merge`, `git rebase`, `git cherry-pick`, `git revert`,\n`git pull`, `git push`, `git checkout`, `git switch`, `git restore`, `git reset`, `git clean`,\nand `git stash push/pop/apply/drop/clear`.\nDebugging, fixing tests, syncing a branch, resolving a blocker, or make-it-work is not authorization for these commands.\nIf such an operation seems necessary, explain why and ask first.\n\n# Git Safety Protocol\n- NEVER update the git config\n- NEVER run destructive/irreversible git commands (force push, hard reset, etc) unless the user explicitly requests them\n- NEVER skip hooks (--no-verify, --no-gpg-sign, etc) unless the user explicitly requests it\n- NEVER run force push to main/master; warn the user if they request it\n- Avoid git commit --amend. ONLY use --amend when ALL conditions are met:\n  (1) User explicitly requested amend, OR the commit succeeded and pre-commit hooks auto-modified files that need including\n  (2) HEAD commit was created by you in this conversation (verify: git log -1 --format='%an %ae')\n  (3) Commit has NOT been pushed to remote (verify: git status shows \"Your branch is ahead\")\n- CRITICAL: If commit FAILED or was REJECTED by hook, NEVER amend - fix the issue and create a NEW commit\n- CRITICAL: If you already pushed to remote, NEVER amend unless user explicitly requests it (requires force push)\n- NEVER commit changes unless the latest user message explicitly asks you to.\n  Prior approval to make code changes, debug, test, or inspect git status is not approval to commit.\n\n# Committing changes with git\nOnly create commits when the latest user message explicitly asks you to create a commit. If unclear, ask first.\n- Before committing, inspect `git status`, `git diff`, and `git log --oneline -10`; stage only intended files and never commit secrets.\n- Write a concise commit message that matches the repo style.\n- If a commit fails or hooks reject it, fix the issue and create a new commit; do not amend the failed commit.\n\n# GitHub\n- Before creating a PR, inspect status, diff, remote tracking, recent commits, and the diff from the base branch.\n- Review all commits included in the PR, not just the latest commit.\n- Use `gh` for GitHub tasks, including PRs, issues, checks, and releases; return the PR URL when done.\n",
-    "parameters": {"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"command":{"type":"string","description":"The command to execute"},"description":{"type":"string","description":"Clear, concise description of what this command does in 5-10 words. Example: git status -> Shows working tree status."},"timeout":{"minimum":-9007199254740991,"type":"integer","exclusiveMinimum":0,"maximum":9007199254740991,"description":"Optional timeout in milliseconds"},"workdir":{"type":"string","description":"The working directory to run the command in. Defaults to the current directory. Use this instead of 'cd' commands."},"compress_output":{"type":"boolean","description":"Whether this Bash call may compress repetitive output before returning it. Defaults to the user's Bash output compression setting. Set false when exact raw formatting is important."}},"required":["command"]}
+    "parameters": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "command": { "type": "string", "description": "The command to execute" },
+        "description": {
+          "type": "string",
+          "description": "Clear, concise description of what this command does in 5-10 words. Example: git status -> Shows working tree status."
+        },
+        "timeout": {
+          "minimum": -9007199254740991,
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991,
+          "description": "Optional timeout in milliseconds"
+        },
+        "workdir": {
+          "type": "string",
+          "description": "The working directory to run the command in. Defaults to the current directory. Use this instead of 'cd' commands."
+        },
+        "compress_output": {
+          "type": "boolean",
+          "description": "Whether this Bash call may compress repetitive output before returning it. Defaults to the user's Bash output compression setting. Set false when exact raw formatting is important."
+        }
+      },
+      "required": ["command"]
+    }
   },
   "read": {
     "description": "Read a file or directory from the local filesystem. If the path does not exist, an error is returned.\n\nUsage:\n- The filePath parameter should be an absolute path.\n- By default, this tool returns up to 400 lines from the start of the file.\n- The offset parameter is the line number to start from (1-indexed).\n- To read later sections, call this tool again with a larger offset.\n- Use the grep tool to find specific content in large files or files with long lines.\n- If you are unsure of the correct file path, use the glob tool to look up filenames by glob pattern.\n- Contents are returned with each line prefixed by its line number as `<line>: <content>`. For example, if a file has contents \"foo\\n\", you will receive \"1: foo\\n\". For directories, entries are returned one per line (without line numbers) with a trailing `/` for subdirectories.\n- Any line longer than 2000 characters is truncated.\n- Call this tool in parallel when you know there are multiple files you want to read.\n- Avoid tiny repeated slices (30 line chunks). If you need more context, read a larger window.\n- This tool can read image files and PDFs and return them as file attachments.\n",
-    "parameters": {"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"filePath":{"type":"string","description":"The absolute path to the file or directory to read"},"offset":{"type":"integer","minimum":0,"maximum":9007199254740991,"description":"The line number to start reading from (1-indexed)"},"limit":{"type":"integer","minimum":0,"maximum":9007199254740991,"description":"The maximum number of lines to read (defaults to 400)"}},"required":["filePath"]}
+    "parameters": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "filePath": { "type": "string", "description": "The absolute path to the file or directory to read" },
+        "offset": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991,
+          "description": "The line number to start reading from (1-indexed)"
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991,
+          "description": "The maximum number of lines to read (defaults to 400)"
+        }
+      },
+      "required": ["filePath"]
+    }
   },
   "glob": {
     "description": "# glob 工具：优先专用搜索，避免 shell find 绕过忽略规则\n- Fast file pattern matching tool that works with any codebase size\n- Supports glob patterns like \"**/*.js\" or \"src/**/*.ts\"\n- Returns matching file paths\n- Use this tool when you need to find files by name patterns\n- For open-ended search, use glob/grep/read directly first. Consider Task only when exploration splits into 2+ independent branches and does not block your next local step.\n- You have the capability to call multiple tools in a single response. It is always better to speculatively perform multiple searches as a batch that are potentially useful.\n",
-    "parameters": {"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"pattern":{"type":"string","description":"The glob pattern to match files against"},"path":{"type":"string","description":"The directory to search in. If not specified, the current working directory will be used. IMPORTANT: Omit this field to use the default directory. DO NOT enter \"undefined\" or \"null\" - simply omit it for the default behavior. Must be a valid directory path if provided."}},"required":["pattern"]}
+    "parameters": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "pattern": { "type": "string", "description": "The glob pattern to match files against" },
+        "path": {
+          "type": "string",
+          "description": "The directory to search in. If not specified, the current working directory will be used. IMPORTANT: Omit this field to use the default directory. DO NOT enter \"undefined\" or \"null\" - simply omit it for the default behavior. Must be a valid directory path if provided."
+        }
+      },
+      "required": ["pattern"]
+    }
   },
   "grep": {
     "description": "# grep 工具：优先专用内容搜索，避免 shell grep 丢上下文\n- Fast content search tool that works with any codebase size\n- Searches file contents using regular expressions\n- Supports full regex syntax (eg. \"log.*Error\", \"function\\s+\\w+\", etc.)\n- Filter files by pattern with the include parameter (eg. \"*.js\", \"*.{ts,tsx}\")\n- Returns file paths and line numbers with matching lines\n- Use this tool when you need to find files containing specific patterns\n- If you need to identify/count the number of matches within files, use the Bash tool with `rg` (ripgrep) directly. Do NOT use `grep`.\n- For open-ended search, use glob/grep/read directly first. Consider Task only when exploration splits into 3+ independent branches and does not block your next local step.\n",
-    "parameters": {"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"pattern":{"type":"string","description":"The regex pattern to search for in file contents"},"path":{"type":"string","description":"The directory to search in. Defaults to the current working directory."},"include":{"type":"string","description":"File pattern to include in the search (e.g. \"*.js\", \"*.{ts,tsx}\")"}},"required":["pattern"]}
+    "parameters": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "pattern": { "type": "string", "description": "The regex pattern to search for in file contents" },
+        "path": {
+          "type": "string",
+          "description": "The directory to search in. Defaults to the current working directory."
+        },
+        "include": {
+          "type": "string",
+          "description": "File pattern to include in the search (e.g. \"*.js\", \"*.{ts,tsx}\")"
+        }
+      },
+      "required": ["pattern"]
+    }
   },
   "edit": {
     "description": "Performs exact string replacements in files. \n\nUsage:\n- You must use your `Read` tool at least once in the conversation before editing. This tool will error if you attempt an edit without reading the file. \n- When editing text from Read tool output, ensure you preserve the exact indentation (tabs/spaces) as it appears AFTER the line number prefix. The line number prefix format is: line number + colon + space (e.g., `1: `). Everything after that space is the actual file content to match. Never include any part of the line number prefix in the oldString or newString.\n- ALWAYS prefer editing existing files in the codebase. NEVER write new files unless explicitly required.\n- Only use emojis if the user explicitly requests it. Avoid adding emojis to files unless asked.\n- The edit will FAIL if `oldString` is not found in the file with an error \"oldString not found in content\".\n- The edit will FAIL if `oldString` is found multiple times in the file with an error \"Found multiple matches for oldString. Provide more surrounding lines in oldString to identify the correct match.\" Either provide a larger string with more surrounding context to make it unique or use `replaceAll` to change every instance of `oldString`.\n- Use `replaceAll` for replacing and renaming strings across the file. This parameter is useful if you want to rename a variable for instance.\n",
-    "parameters": {"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"filePath":{"type":"string","description":"The absolute path to the file to modify"},"oldString":{"type":"string","description":"The text to replace"},"newString":{"type":"string","description":"The text to replace it with (must be different from oldString)"},"replaceAll":{"type":"boolean","description":"Replace all occurrences of oldString (default false)"}},"required":["filePath","oldString","newString"]}
+    "parameters": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "filePath": { "type": "string", "description": "The absolute path to the file to modify" },
+        "oldString": { "type": "string", "description": "The text to replace" },
+        "newString": {
+          "type": "string",
+          "description": "The text to replace it with (must be different from oldString)"
+        },
+        "replaceAll": { "type": "boolean", "description": "Replace all occurrences of oldString (default false)" }
+      },
+      "required": ["filePath", "oldString", "newString"]
+    }
   },
   "write": {
     "description": "Writes a file to the local filesystem.\n\nUsage:\n- This tool will overwrite the existing file if there is one at the provided path.\n- If this is an existing file, you MUST use the Read tool first to read the file's contents. This tool will fail if you did not read the file first.\n- ALWAYS prefer editing existing files in the codebase. NEVER write new files unless explicitly required.\n- NEVER proactively create documentation files (*.md) or README files. Only create documentation files if explicitly requested by the User.\n- Only use emojis if the user explicitly requests it. Avoid writing emojis to files unless asked.\n",
-    "parameters": {"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"content":{"type":"string","description":"The content to write to the file"},"filePath":{"type":"string","description":"The absolute path to the file to write (must be absolute, not relative)"}},"required":["content","filePath"]}
+    "parameters": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "content": { "type": "string", "description": "The content to write to the file" },
+        "filePath": {
+          "type": "string",
+          "description": "The absolute path to the file to write (must be absolute, not relative)"
+        }
+      },
+      "required": ["content", "filePath"]
+    }
   },
   "task": {
     "description": "# task 工具：禁止跨会话复用非法 task_id，须显式新建\nLaunch a new agent to handle complex, multistep tasks autonomously.\n\nWhen using the Task tool, you must specify a subagent_type parameter to select which agent type to use.\n\nUse task when:\n- The user invokes a custom slash command; pass the slash command invocation as the full prompt.\n- A broad codebase question splits into 2+ independent search/read branches.\n- A non-blocking subtask can run in parallel while you continue useful local work.\n- A specialized agent clearly matches the task and can materially advance the request.\n- You need an isolated review/research pass and the user requested or accepted that workflow.\n\nDo NOT use task when:\n- You need to read a known file path; use read.\n- You need to find files by name; use glob.\n- You need to search known keywords, symbols, error text, or a small set of files; use grep/read.\n- The next local step is blocked on the result and you can search or read it yourself.\n- The task is trivial, would duplicate work you are already doing, or would only save context.\n- The task is normal debugging, implementation, or verification work in the current thread.\n\nPrompting rules:\n- Make the prompt self-contained unless resuming with task_id.\n- State whether the agent should research only or edit files.\n- For code-editing subtasks, specify the owned files/modules and avoid overlapping write scopes with other agents.\n- Include relevant paths, constraints, and expected final output.\n- Ask for concise findings when you only need a summary.\n- Tell the agent how to verify its work when verification is possible.\n\n\nUsage notes:\n- Launch independent agents in parallel in one response when their scopes do not overlap.\n- Trust completed agent results by default, but inspect changed files before integrating or reporting final success.\n- Reuse task_id only when continuing the same subagent context is useful.\n- The agent result is returned to you, not directly to the user; summarize relevant results yourself.\n\nExample usage (NOTE: The agents below are fictional examples for illustration only - use the actual agents listed above):\n\n<example_agent_descriptions>\n\"explorer\": use this agent for broad, independent codebase exploration across multiple unrelated areas\n\"reviewer\": use this agent for an isolated review pass after the user requested or accepted review\n</example_agent_description>\n\n<example>\nuser: \"Where is the database lock error thrown?\"\n<commentary>\nThe target is a known error string, so use grep/read directly instead of Task.\n</commentary>\nassistant: Uses grep for \"database is locked\", then reads the matching files.\n</example>\n\n<example>\nuser: \"Compare the server lifecycle, permission model, and streaming event flow.\"\n<commentary>\nThis has 3 independent research branches and can run in parallel, so Task may be useful.\n</commentary>\nassistant: Uses Task to launch independent exploration for each non-overlapping branch.\n</example>\n",
     "backgroundDescription": "Background mode: background=true launches the subagent asynchronously and returns immediately. Foreground is the default; use it when you need the result before continuing. Use background only for independent work that can run while you continue elsewhere. You will be notified automatically when it finishes.",
-    "baseParameters": {"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"description":{"type":"string","description":"A short (3-5 words) description of the task"},"prompt":{"type":"string","description":"The task for the agent to perform"},"subagent_type":{"type":"string","description":"The type of specialized agent to use for this task"},"task_id":{"type":"string","description":"This should only be set if you mean to resume a previous task (you can pass a prior task_id and the task will continue the same subagent session as before instead of creating a fresh one)"},"command":{"type":"string","description":"The command that triggered this task"}},"required":["description","prompt","subagent_type"]},
-    "parameters": {"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"description":{"type":"string","description":"A short (3-5 words) description of the task"},"prompt":{"type":"string","description":"The task for the agent to perform"},"subagent_type":{"type":"string","description":"The type of specialized agent to use for this task"},"task_id":{"type":"string","description":"This should only be set if you mean to resume a previous task (you can pass a prior task_id and the task will continue the same subagent session as before instead of creating a fresh one)"},"command":{"type":"string","description":"The command that triggered this task"},"background":{"type":"boolean","description":"Run the agent in the background. You will be notified when it completes. DO NOT sleep, poll, or proactively check on its progress"}},"required":["description","prompt","subagent_type"]}
+    "baseParameters": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "description": { "type": "string", "description": "A short (3-5 words) description of the task" },
+        "prompt": { "type": "string", "description": "The task for the agent to perform" },
+        "subagent_type": { "type": "string", "description": "The type of specialized agent to use for this task" },
+        "task_id": {
+          "type": "string",
+          "description": "This should only be set if you mean to resume a previous task (you can pass a prior task_id and the task will continue the same subagent session as before instead of creating a fresh one)"
+        },
+        "command": { "type": "string", "description": "The command that triggered this task" }
+      },
+      "required": ["description", "prompt", "subagent_type"]
+    },
+    "parameters": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "description": { "type": "string", "description": "A short (3-5 words) description of the task" },
+        "prompt": { "type": "string", "description": "The task for the agent to perform" },
+        "subagent_type": { "type": "string", "description": "The type of specialized agent to use for this task" },
+        "task_id": {
+          "type": "string",
+          "description": "This should only be set if you mean to resume a previous task (you can pass a prior task_id and the task will continue the same subagent session as before instead of creating a fresh one)"
+        },
+        "command": { "type": "string", "description": "The command that triggered this task" },
+        "background": {
+          "type": "boolean",
+          "description": "Run the agent in the background. You will be notified when it completes. DO NOT sleep, poll, or proactively check on its progress"
+        }
+      },
+      "required": ["description", "prompt", "subagent_type"]
+    }
   },
   "webfetch": {
     "description": "- Fetches content from a specified URL\n- Takes a URL and optional format as input\n- Fetches the URL content, converts to requested format (markdown by default)\n- Returns the content in the specified format\n- Use this tool when you need to retrieve and analyze web content\n\nUsage notes:\n  - IMPORTANT: if another tool is present that offers better web fetching capabilities, is more targeted to the task, or has fewer restrictions, prefer using that tool instead of this one.\n  - The URL must be a fully-formed valid URL\n  - HTTP URLs will be automatically upgraded to HTTPS\n  - Format options: \"markdown\" (default), \"text\", or \"html\"\n  - This tool is read-only and does not modify any files\n  - Results may be summarized if the content is very large\n",
-    "parameters": {"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"url":{"type":"string","description":"The URL to fetch content from"},"format":{"type":"string","enum":["text","markdown","html"],"description":"The format to return the content in (text, markdown, or html). Defaults to markdown.","default":"markdown"},"timeout":{"type":"number","description":"Optional timeout in seconds (max 120)"}},"required":["url"]}
+    "parameters": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "url": { "type": "string", "description": "The URL to fetch content from" },
+        "format": {
+          "type": "string",
+          "enum": ["text", "markdown", "html"],
+          "description": "The format to return the content in (text, markdown, or html). Defaults to markdown.",
+          "default": "markdown"
+        },
+        "timeout": { "type": "number", "description": "Optional timeout in seconds (max 120)" }
+      },
+      "required": ["url"]
+    }
   },
   "todowrite": {
     "description": "Create and maintain a structured task list for the current coding session. Tracks progress, organizes multi-step work, and surfaces status to the user.\n\nUse todowrite when:\n- The task has 3 or more meaningful steps.\n- The user explicitly asks for a todo list or progress tracking.\n- The user provides multiple tasks or requirements.\n- The work needs planning, implementation, and verification phases.\n- New instructions change the plan and the task list should be updated.\n\nDo not use todowrite when:\n- The task is a single straightforward action.\n- The task is trivial or purely informational.\n- Tracking would add noise without improving execution.\n\n## States\n- `pending` - not started\n- `in_progress` - actively working (exactly ONE at a time)\n- `completed` - finished successfully\n- `cancelled` - no longer needed\n\n## Rules\n- Update status in real time; don't batch completions\n- Mark `completed` only after the required work is actually done, including any required verification. Never based on intent.\n- Keep exactly one `in_progress` while work remains\n- If blocked or partial, keep it `in_progress` and add a follow-up todo describing the blocker\n- Preserve user-provided commands verbatim (flags, args, order)\n- Items should be specific and actionable; break large work into smaller steps\n\n## Examples\n\nUse it:\n- \"Add a dark mode toggle and run the tests\" -> multi-step feature + explicit verification\n- \"Rename getCwd -> getCurrentWorkingDirectory across the repo\" -> grep reveals 15 occurrences in 8 files\n- \"Implement registration, catalog, cart, checkout\" -> multiple complex features\n\nSkip it:\n- \"How do I print Hello World in Python?\" -> informational\n- \"Add a comment to calculateTotal\" -> single edit\n- \"Run npm install and tell me what happened\" -> one command\n\nWhen in doubt, use it.\n",
-    "parameters": {"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"todos":{"type":"array","items":{"type":"object","properties":{"content":{"type":"string","description":"Brief description of the task"},"status":{"type":"string","description":"Current status of the task: pending, in_progress, completed, cancelled"},"priority":{"type":"string","description":"Priority level of the task: high, medium, low"}},"required":["content","status","priority"]},"description":"The updated todo list"}},"required":["todos"]}
+    "parameters": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "todos": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "content": { "type": "string", "description": "Brief description of the task" },
+              "status": {
+                "type": "string",
+                "description": "Current status of the task: pending, in_progress, completed, cancelled"
+              },
+              "priority": { "type": "string", "description": "Priority level of the task: high, medium, low" }
+            },
+            "required": ["content", "status", "priority"]
+          },
+          "description": "The updated todo list"
+        }
+      },
+      "required": ["todos"]
+    }
   },
   "websearch": {
     "description": "- Search the web using the session's web search provider - performs real-time web searches and can scrape content from specific URLs\n- Provides up-to-date information for current events and recent data\n- Supports configurable result counts and returns the content from the most relevant websites\n- Use this tool for accessing information beyond knowledge cutoff\n- Searches are performed automatically within a single API call\n\nUsage notes:\n  - Supports live crawling modes when available: 'fallback' (backup if cached unavailable) or 'preferred' (prioritize live crawling)\n  - Search types when available: 'auto' (balanced), 'fast' (quick results), 'deep' (comprehensive search)\n  - Configurable context length for optimal LLM integration\n  - Domain filtering and advanced search options available\n\nThe current year is {{year}}. You MUST use this year when searching for recent information or current events\n- Example: If the current year is 2026 and the user asks for \"latest AI news\", search for \"AI news 2026\", NOT \"AI news 2025\"\n",
-    "parameters": {"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"query":{"type":"string","description":"Websearch query"},"numResults":{"type":"number","description":"Number of search results to return (default: 8)"},"livecrawl":{"type":"string","enum":["fallback","preferred"],"description":"Live crawl mode - 'fallback': use live crawling as backup if cached content unavailable, 'preferred': prioritize live crawling (default: 'fallback')"},"type":{"type":"string","enum":["auto","fast","deep"],"description":"Search type - 'auto': balanced search (default), 'fast': quick results, 'deep': comprehensive search"},"contextMaxCharacters":{"type":"number","description":"Maximum characters for context string optimized for LLMs (default: 10000)"}},"required":["query"]}
+    "parameters": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "query": { "type": "string", "description": "Websearch query" },
+        "numResults": { "type": "number", "description": "Number of search results to return (default: 8)" },
+        "livecrawl": {
+          "type": "string",
+          "enum": ["fallback", "preferred"],
+          "description": "Live crawl mode - 'fallback': use live crawling as backup if cached content unavailable, 'preferred': prioritize live crawling (default: 'fallback')"
+        },
+        "type": {
+          "type": "string",
+          "enum": ["auto", "fast", "deep"],
+          "description": "Search type - 'auto': balanced search (default), 'fast': quick results, 'deep': comprehensive search"
+        },
+        "contextMaxCharacters": {
+          "type": "number",
+          "description": "Maximum characters for context string optimized for LLMs (default: 10000)"
+        }
+      },
+      "required": ["query"]
+    }
   },
   "skill": {
     "description": "Load a specialized skill when the task at hand matches one of the skills listed in the system prompt.\n\nUse this tool to inject the skill's instructions and resources into current conversation. The output may contain detailed workflow guidance as well as references to scripts, files, etc in the same directory as the skill.\n\nThe skill name must match one of the skills listed in your system prompt.\n",
-    "parameters": {"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"name":{"type":"string","description":"The name of the skill from available_skills"}},"required":["name"]}
+    "parameters": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": { "name": { "type": "string", "description": "The name of the skill from available_skills" } },
+      "required": ["name"]
+    }
   },
   "apply_patch": {
     "description": "Use the `apply_patch` tool to edit files. Your patch language is a stripped‑down, file‑oriented diff format designed to be easy to parse and safe to apply. You can think of it as a high‑level envelope:\n\n*** Begin Patch\n[ one or more file sections ]\n*** End Patch\n\nWithin that envelope, you get a sequence of file operations.\nYou MUST include a header to specify the action you are taking.\nEach operation starts with one of three headers:\n\n*** Add File: <path> - create a new file. Every following line is a + line (the initial contents).\n*** Delete File: <path> - remove an existing file. Nothing follows.\n*** Update File: <path> - patch an existing file in place (optionally with a rename).\n\nExample patch:\n\n```\n*** Begin Patch\n*** Add File: hello.txt\n+Hello world\n*** Update File: src/app.py\n*** Move to: src/main.py\n@@ def greet():\n-print(\"Hi\")\n+print(\"Hello, world!\")\n*** Delete File: obsolete.txt\n*** End Patch\n```\n\nIt is important to remember:\n\n- You must include a header with your intended action (Add/Delete/Update)\n- You must prefix new lines with `+` even when creating a new file\n",
-    "parameters": {"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"patchText":{"type":"string","description":"The full patch text that describes all changes to be made"}},"required":["patchText"]}
+    "parameters": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "patchText": { "type": "string", "description": "The full patch text that describes all changes to be made" }
+      },
+      "required": ["patchText"]
+    }
   },
   "lsp": {
     "description": "Interact with Language Server Protocol (LSP) servers to get code intelligence features.\n\nSupported operations:\n- goToDefinition: Find where a symbol is defined\n- findReferences: Find all references to a symbol\n- hover: Get hover information (documentation, type info) for a symbol\n- documentSymbol: Get all symbols (functions, classes, variables) in a document\n- workspaceSymbol: List project-wide symbols matching a query string\n- goToImplementation: Find implementations of an interface or abstract method\n- prepareCallHierarchy: Get call hierarchy item at a position (functions/methods)\n- incomingCalls: Find all functions/methods that call the function at a position\n- outgoingCalls: Find all functions/methods called by the function at a position\n\nAll operations require:\n- filePath: The file to operate on\n- line: The line number (1-based, as shown in editors)\n- character: The character offset (1-based, as shown in editors)\n\nworkspaceSymbol also accepts:\n- query: A query string to filter symbols by. Empty string requests all symbols.\n\nFor workspaceSymbol, filePath is not sent in the LSP workspace/symbol request. It is used by opencode to select and start the matching LSP server.\n\nNote: LSP servers must be configured for the file type. If no server is available, an error will be returned.\n",
-    "parameters": {"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"operation":{"type":"string","enum":["goToDefinition","findReferences","hover","documentSymbol","workspaceSymbol","goToImplementation","prepareCallHierarchy","incomingCalls","outgoingCalls"],"description":"The LSP operation to perform"},"filePath":{"type":"string","description":"The absolute or relative path to the file"},"line":{"type":"integer","minimum":1,"maximum":9007199254740991,"description":"The line number (1-based, as shown in editors)"},"character":{"type":"integer","minimum":1,"maximum":9007199254740991,"description":"The character offset (1-based, as shown in editors)"},"query":{"type":"string","description":"Search query for workspaceSymbol. Empty string requests all symbols."}},"required":["operation","filePath","line","character"]}
+    "parameters": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "operation": {
+          "type": "string",
+          "enum": [
+            "goToDefinition",
+            "findReferences",
+            "hover",
+            "documentSymbol",
+            "workspaceSymbol",
+            "goToImplementation",
+            "prepareCallHierarchy",
+            "incomingCalls",
+            "outgoingCalls"
+          ],
+          "description": "The LSP operation to perform"
+        },
+        "filePath": { "type": "string", "description": "The absolute or relative path to the file" },
+        "line": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991,
+          "description": "The line number (1-based, as shown in editors)"
+        },
+        "character": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991,
+          "description": "The character offset (1-based, as shown in editors)"
+        },
+        "query": {
+          "type": "string",
+          "description": "Search query for workspaceSymbol. Empty string requests all symbols."
+        }
+      },
+      "required": ["operation", "filePath", "line", "character"]
+    }
   },
   "plan_exit": {
     "description": "Use this tool when you have completed the planning phase and are ready to exit plan agent.\n\nThis tool will ask the user if they want to switch to build agent to start implementing the plan.\n\nCall this tool:\n- After you have written a complete plan to the plan file\n- After you have clarified any questions with the user\n- When you are confident the plan is ready for implementation\n\nDo NOT call this tool:\n- Before you have created or finalized the plan\n- If you still have unanswered questions about the implementation\n- If the user has indicated they want to continue planning\n",
-    "parameters": {"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{}}
+    "parameters": { "$schema": "https://json-schema.org/draft/2020-12/schema", "type": "object", "properties": {} }
   }
 }

@@ -32,18 +32,21 @@ describe("SessionRunCoordinator", () => {
         const compactRelease = yield* Deferred.make<void>()
         const woken = yield* Deferred.make<void>()
         const modes: ("compact" | undefined)[] = []
-        const serial = yield* SessionRunCoordinator.make<string, never>({ drain: (_key, _force, maintenance) => Effect.gen(function* () {
-          modes.push(maintenance)
-          if (modes.length === 1) {
-            yield* Deferred.succeed(started, undefined)
-            return yield* Deferred.await(release)
-          }
-          if (maintenance === "compact") {
-            yield* Deferred.succeed(compactStarted, undefined)
-            return yield* Deferred.await(compactRelease)
-          }
-          yield* Deferred.succeed(woken, undefined)
-        }) })
+        const serial = yield* SessionRunCoordinator.make<string, never>({
+          drain: (_key, _force, maintenance) =>
+            Effect.gen(function* () {
+              modes.push(maintenance)
+              if (modes.length === 1) {
+                yield* Deferred.succeed(started, undefined)
+                return yield* Deferred.await(release)
+              }
+              if (maintenance === "compact") {
+                yield* Deferred.succeed(compactStarted, undefined)
+                return yield* Deferred.await(compactRelease)
+              }
+              yield* Deferred.succeed(woken, undefined)
+            }),
+        })
         const draining = yield* serial.run("session").pipe(Effect.forkChild)
         yield* Deferred.await(started)
         const compacting = yield* serial.run("session", "compact").pipe(Effect.forkChild)
@@ -114,9 +117,12 @@ describe("SessionRunCoordinator", () => {
         const coordinator = yield* SessionRunCoordinator.make({
           drain: (key: string) =>
             // 使用生产execution相同的资源边界，不用手写计数替身模拟其释放。
-            SessionActivity.track(`native:${key}`, Deferred.succeed(key === "first" ? firstStarted : secondStarted, undefined).pipe(
-              Effect.andThen(Deferred.await(key === "first" ? firstGate : secondGate)),
-            )),
+            SessionActivity.track(
+              `native:${key}`,
+              Deferred.succeed(key === "first" ? firstStarted : secondStarted, undefined).pipe(
+                Effect.andThen(Deferred.await(key === "first" ? firstGate : secondGate)),
+              ),
+            ),
         })
 
         expect(Array.from(yield* coordinator.active)).toEqual([])
@@ -157,7 +163,8 @@ describe("SessionRunCoordinator", () => {
         const baseline = SessionActivity.count()
         const defect = new Error("defect")
         const coordinator = yield* SessionRunCoordinator.make({
-          drain: (key: string) => SessionActivity.track(`native:${key}`, key === "failure" ? Effect.fail(failure) : Effect.die(defect)),
+          drain: (key: string) =>
+            SessionActivity.track(`native:${key}`, key === "failure" ? Effect.fail(failure) : Effect.die(defect)),
         })
 
         const failed = yield* coordinator.run("failure").pipe(Effect.exit)
@@ -179,7 +186,11 @@ describe("SessionRunCoordinator", () => {
       const coordinator = yield* Effect.scoped(
         Effect.gen(function* () {
           const coordinator = yield* SessionRunCoordinator.make({
-            drain: () => SessionActivity.track("native:scope", Deferred.succeed(started, undefined).pipe(Effect.andThen(Effect.never))),
+            drain: () =>
+              SessionActivity.track(
+                "native:scope",
+                Deferred.succeed(started, undefined).pipe(Effect.andThen(Effect.never)),
+              ),
           })
           yield* coordinator.wake("session")
           yield* Deferred.await(started)

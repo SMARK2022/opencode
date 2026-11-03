@@ -24,11 +24,10 @@ export type SearchPhase = "awaiting_first" | "partial" | "complete"
  * - 非空 query：只消费 search 源；loading 时 undefined 视为 []，不得 ?? 回 browse
  *   （否则无命中/加载中会短暂展示「其他会话」，违反搜索空结果语义）
  */
-export function resolveSessionListSource<T>(input: {
-  query: string
-  searchResults: T[] | undefined
-  browse: T[]
-}): { source: "browse" | "search"; sessions: T[] } {
+export function resolveSessionListSource<T>(input: { query: string; searchResults: T[] | undefined; browse: T[] }): {
+  source: "browse" | "search"
+  sessions: T[]
+} {
   // 空 query 是唯一合法回 browse 的路径：progressive 各阶段都禁止静默回退。
   if (!input.query) return { source: "browse", sessions: input.browse }
   return { source: "search", sessions: input.searchResults ?? [] }

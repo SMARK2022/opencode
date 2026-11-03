@@ -5,16 +5,18 @@ import type { ServerProtocol } from "./server-protocol"
 import { sessionMessageHidden } from "./session-message"
 
 // V1沿用CLI导出结构；Native保留原生字段，避免显示投影丢失压缩正文与工具信息。
-export type SessionExportData = {
-  info: Session
-  messages: {
-    info: Message
-    parts: Part[]
-  }[]
-} | {
-  info: SessionInfo
-  messages: SessionMessageInfo[]
-}
+export type SessionExportData =
+  | {
+      info: Session
+      messages: {
+        info: Message
+        parts: Part[]
+      }[]
+    }
+  | {
+      info: SessionInfo
+      messages: SessionMessageInfo[]
+    }
 
 export type SessionExportClient = {
   session: {
@@ -29,7 +31,7 @@ export async function fetchSessionExport(input: {
   protocol: Promise<ServerProtocol>
   api: { session: Pick<ServerApi["session"], "get">; message: Pick<ServerApi["message"], "list"> }
 }): Promise<SessionExportData> {
-  if (await input.protocol !== "v1") {
+  if ((await input.protocol) !== "v1") {
     const info = await input.api.session.get({ sessionID: input.sessionID })
     let page = await input.api.message.list({ sessionID: input.sessionID, limit: 200, order: "asc" })
     const messages = page.data.filter((message) => !sessionMessageHidden(message))

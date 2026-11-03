@@ -350,15 +350,30 @@ describe("tool.read truncation", () => {
         const input = { filePath: target, offset: 1, limit: 1 }
         const decoded = Schema.decodeUnknownSync(SessionV1.WithParts)({
           info: {
-            id: "msg_prior", sessionID, role: "assistant", parentID: "msg_parent",
-            time: { created: 1 }, modelID: "test", providerID: "test", mode: "build", agent: "build",
-            path: { cwd: dir, root: dir }, cost: 0,
+            id: "msg_prior",
+            sessionID,
+            role: "assistant",
+            parentID: "msg_parent",
+            time: { created: 1 },
+            modelID: "test",
+            providerID: "test",
+            mode: "build",
+            agent: "build",
+            path: { cwd: dir, root: dir },
+            cost: 0,
             tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
           },
-          parts: [{
-            id: "prt_prior", sessionID, messageID: "msg_prior", type: "tool", tool: "read", callID: "prior",
-            state: { status: "completed", input, ...result, time: { start: 1, end: 2 } },
-          }],
+          parts: [
+            {
+              id: "prt_prior",
+              sessionID,
+              messageID: "msg_prior",
+              type: "tool",
+              tool: "read",
+              callID: "prior",
+              state: { status: "completed", input, ...result, time: { start: 1, end: 2 } },
+            },
+          ],
         })
         return [decoded as SessionV1.WithParts]
       }
@@ -368,7 +383,9 @@ describe("tool.read truncation", () => {
       const first = yield* exec(dir, request)
       const visible = history(first)
       // 同会话已有完整页面可预热命中，第一次历史调用也无需进程级初始化。
-      expect((yield* exec(dir, request, { ...ctx, messages: visible })).output).toContain('status="stub_same_range_visible"')
+      expect((yield* exec(dir, request, { ...ctx, messages: visible })).output).toContain(
+        'status="stub_same_range_visible"',
+      )
       // B 读 v2 后，A 的 v1 历史仍不能证明 v2；此序列捕获原全局缓存缺陷。
       yield* put(target, "v2\ntail")
       const b = { ...ctx, sessionID: SessionID.make("ses_b") }
@@ -381,7 +398,9 @@ describe("tool.read truncation", () => {
       expect(reread.output).toContain("1: v2")
       expect(reread.output).not.toContain("1: v1")
       // B 的本会话可见页面证明当前版本；A 的旧页面不能借用这个证明。
-      expect((yield* exec(dir, request, { ...b, messages: history(second, b.sessionID) })).output).toContain('status="stub_same_range_visible"')
+      expect((yield* exec(dir, request, { ...b, messages: history(second, b.sessionID) })).output).toContain(
+        'status="stub_same_range_visible"',
+      )
       // 外会话即使包含当前版本，也不构成本会话的可见证明。
       expect((yield* exec(dir, request, { ...ctx, messages: history(second, b.sessionID) })).output).toContain("v2")
       const current = history(second)
@@ -406,27 +425,34 @@ describe("tool.read truncation", () => {
       read.start = 1
       read.end = 1
       // 恢复范围确实命中，避免拒绝断言仅因测试历史失配而偶然成立。
-      expect((yield* exec(dir, request, { ...ctx, messages: current })).output).toContain('status="stub_same_range_visible"')
+      expect((yield* exec(dir, request, { ...ctx, messages: current })).output).toContain(
+        'status="stub_same_range_visible"',
+      )
       const denied = yield* fail(dir, request, {
-        ...ctx, messages: current, ask: () => Effect.die(new Error("read denied")),
+        ...ctx,
+        messages: current,
+        ask: () => Effect.die(new Error("read denied")),
       })
       expect(denied.message).toBe("read denied")
       // 完整长行可证明同版本，2000 字符之后的变化也必须返回新正文。
       yield* put(target, "x".repeat(3000))
       const whole = yield* exec(dir, request)
-      expect((yield* exec(dir, request, { ...ctx, messages: history(whole) })).output).toContain('status="stub_same_range_visible"')
+      expect((yield* exec(dir, request, { ...ctx, messages: history(whole) })).output).toContain(
+        'status="stub_same_range_visible"',
+      )
       yield* put(target, "x".repeat(3000) + "changed")
       const changed = yield* exec(dir, request, { ...ctx, messages: history(whole) })
       expect(changed.metadata.read).toMatchObject({ size: 3007, returned: 1, stub: false })
       expect(changed.output).toContain("<content>")
       expect(changed.output).not.toContain("<stub")
       expect(changed.output).toContain("line truncated to 2000 chars")
-      expect((yield* exec(dir, request, { ...ctx, messages: history(changed) })).output).toContain('status="stub_same_range_visible"')
+      expect((yield* exec(dir, request, { ...ctx, messages: history(changed) })).output).toContain(
+        'status="stub_same_range_visible"',
+      )
       // 字节预算省略的正文仍不构成完整版本证明。
       yield* put(target, "x".repeat(24 * 1024 + 1))
       const partial = yield* exec(dir, request)
-      expect((yield* exec(dir, request, { ...ctx, messages: history(partial) })).output)
-        .not.toContain('<stub status=')
+      expect((yield* exec(dir, request, { ...ctx, messages: history(partial) })).output).not.toContain("<stub status=")
     }),
   )
 
@@ -796,8 +822,8 @@ describe("tool.read truncation", () => {
         expect(attachment).not.toHaveProperty("id")
         expect(attachment).not.toHaveProperty("sessionID")
         expect(attachment).not.toHaveProperty("messageID")
-      // 原PNG保持逐字bytes；BMP/TIFF/AVIF继续遵守目标转码合同。
-      if (name === "image.png") expect(attachment.url).toBe(`data:image/png;base64,${png.toString("base64")}`)
+        // 原PNG保持逐字bytes；BMP/TIFF/AVIF继续遵守目标转码合同。
+        if (name === "image.png") expect(attachment.url).toBe(`data:image/png;base64,${png.toString("base64")}`)
         const normalized = yield* provideInstance(dir)(
           image.normalize(
             { ...attachment, id: PartID.ascending(), sessionID: ctx.sessionID, messageID: ctx.messageID },
@@ -807,10 +833,11 @@ describe("tool.read truncation", () => {
         expect(["image/jpeg", "image/png", "image/gif", "image/webp"]).toContain(normalized.mime)
         expect(normalized.mime).toBe("image/png")
         expect(normalized.url.startsWith(`data:${normalized.mime};base64,`)).toBe(true)
-        expect(Buffer.byteLength(normalized.url.slice(normalized.url.indexOf(";base64,") + 8), "utf-8")).toBeLessThanOrEqual(1600 * 750)
+        expect(
+          Buffer.byteLength(normalized.url.slice(normalized.url.indexOf(";base64,") + 8), "utf-8"),
+        ).toBeLessThanOrEqual(1600 * 750)
         const bytes = Buffer.from(normalized.url.slice(normalized.url.indexOf(";base64,") + 8), "base64")
-        expect(Array.from(bytes.subarray(0, 8)))
-          .toEqual([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+        expect(Array.from(bytes.subarray(0, 8))).toEqual([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
         const decoded = photon.PhotonImage.new_from_byteslice(bytes)
         expect(decoded.get_width()).toBe(1)
         expect(decoded.get_height()).toBe(1)
@@ -826,9 +853,8 @@ describe("tool.read truncation", () => {
       const photon = yield* Effect.promise(() => import("@silvia-odwyer/photon-node"))
       const source = new photon.PhotonImage(
         new Uint8Array(
-          Array.from(
-            { length: 8 * 8 * 4 },
-            (_, index) => (index % 4 === 3 ? 255 : ((index >> 2) * (index % 4 === 0 ? 1 : index % 4 === 1 ? 7 : 13)) % 251),
+          Array.from({ length: 8 * 8 * 4 }, (_, index) =>
+            index % 4 === 3 ? 255 : ((index >> 2) * (index % 4 === 0 ? 1 : index % 4 === 1 ? 7 : 13)) % 251,
           ),
         ),
         8,
@@ -989,7 +1015,8 @@ describe("tool.read truncation", () => {
   it.live("reads SVG image media as text instead of decoding it", () =>
     Effect.gen(function* () {
       const dir = yield* tmpdirScoped()
-      const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="2" height="2"><rect width="2" height="2" fill="red"/></svg>'
+      const svg =
+        '<svg xmlns="http://www.w3.org/2000/svg" width="2" height="2"><rect width="2" height="2" fill="red"/></svg>'
       // SVG 无二进制 magic；sniff 回退到扩展名 MIME 后由谓词排除，不进 decoder。
       yield* put(path.join(dir, "vector.svg"), svg)
 
@@ -997,7 +1024,7 @@ describe("tool.read truncation", () => {
       // 域外格式不走 omission——文本内容完整回显，不进 Image.Service 也不伪造解码失败。
       expect(result.attachments).toBeUndefined()
       expect(result.output).toContain("<svg")
-      expect(result.output).toContain("fill=\"red\"")
+      expect(result.output).toContain('fill="red"')
     }),
   )
 
@@ -1131,7 +1158,7 @@ describe("tool.read XML preserve channels", () => {
     }),
   )
 
-    // #145：outline 使用含 <> 的 impl 标签，硬断言未转义
+  // #145：outline 使用含 <> 的 impl 标签，硬断言未转义
   it.instance("preserves XML-sensitive outline labels", () =>
     Effect.gen(function* () {
       const test = yield* TestInstance
@@ -1165,7 +1192,6 @@ describe("tool.read XML preserve channels", () => {
     }),
   )
 })
-
 
 describe("tool.read structured output", () => {
   // #142：正常读取输出 file/range 结构
@@ -1250,7 +1276,10 @@ describe("tool.read outline", () => {
 
       // 预算内的长泛型返回类型仍须生成声明提示，不能恢复固定短前缀限制。
       const declarationPath = path.join(test.directory, "long-declaration.java")
-      yield* put(declarationPath, `public Map<${"SomeType,".repeat(700)}LastType> declared() {}\n${"// filler\n".repeat(700)}`)
+      yield* put(
+        declarationPath,
+        `public Map<${"SomeType,".repeat(700)}LastType> declared() {}\n${"// filler\n".repeat(700)}`,
+      )
       const declaration = yield* Effect.promise(() =>
         readOutline(declarationPath, 701, 1, true, createAuxiliaryBudget()),
       )
@@ -1401,7 +1430,9 @@ describe("tool.read visible context stubs", () => {
 
       const second = yield* exec(dir, secondInput, { ...ctx, messages: [readMessage(firstInput, first)] })
 
-      expect(second.output).toContain(`<range start="10000" end="10019" total="${coveringTotal}" total_exact="false" returned="0" />`)
+      expect(second.output).toContain(
+        `<range start="10000" end="10019" total="${coveringTotal}" total_exact="false" returned="0" />`,
+      )
       expect(second.output).toContain('covered_by="10000-10079"')
       expect(second.output).toContain("offset=10080 for unread lines")
       // stub 的 total 和导航必须由 covering read 拥有，不能被 nested read 覆盖。
@@ -1732,7 +1763,7 @@ describe("tool.read visible context stubs", () => {
                     status: "completed",
                     time: { start: 1, end: Date.now() + 1000 },
                     input: { filePath: file, offset: 1, limit: 3 },
-                    output: 'FILE_UNCHANGED_STUB',
+                    output: "FILE_UNCHANGED_STUB",
                     title: "t",
                     metadata: stubMeta,
                   },
@@ -1753,7 +1784,19 @@ describe("tool.read visible context stubs", () => {
     input: { filePath: string; offset?: number; limit?: number },
     result: { output: string; metadata: Record<string, unknown> },
   ): any => ({
-    info: { id: "msg_rm", role: "assistant" as const, sessionID: ctx.sessionID, agent: "build", mode: "build", path: { cwd: ".", root: "." }, cost: 0, tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } }, modelID: "test", providerID: "test", time: { created: 0 } },
+    info: {
+      id: "msg_rm",
+      role: "assistant" as const,
+      sessionID: ctx.sessionID,
+      agent: "build",
+      mode: "build",
+      path: { cwd: ".", root: "." },
+      cost: 0,
+      tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+      modelID: "test",
+      providerID: "test",
+      time: { created: 0 },
+    },
     parts: [
       {
         id: "p_read",
@@ -1892,8 +1935,7 @@ describe("tool.read visible context stubs", () => {
     }),
   )
 
-
-    // #142：多语言声明应抽出至少一条 outline label
+  // #142：多语言声明应抽出至少一条 outline label
   it.instance("extracts conservative labels for common language declarations", () =>
     Effect.gen(function* () {
       const test = yield* TestInstance
@@ -1927,7 +1969,10 @@ describe("tool.read visible context stubs", () => {
       const filePath = path.join(test.directory, "long-outline.rs")
       const source = [
         "impl VeryLongGenericTypeNameWithManySegmentsAndTraitsAndBoundsThatShouldBeTrimmed where T: Clone {",
-        ...Array.from({ length: 650 }, (_, i) => `pub fn function_${i}_with_a_very_long_suffix_that_should_not_bloat_the_outline() {}`),
+        ...Array.from(
+          { length: 650 },
+          (_, i) => `pub fn function_${i}_with_a_very_long_suffix_that_should_not_bloat_the_outline() {}`,
+        ),
       ].join("\n")
       yield* put(filePath, source)
       const outline = yield* Effect.promise(() => readOutline(filePath, 651, 1))
@@ -1943,7 +1988,7 @@ describe("tool.read visible context stubs", () => {
     }),
   )
 
-// #142：outline 预算上限（硬断言必须出现 outline）
+  // #142：outline 预算上限（硬断言必须出现 outline）
   it.instance("outline size stays within budget", () =>
     Effect.gen(function* () {
       const test = yield* TestInstance
@@ -1977,4 +2022,3 @@ describe("tool.read visible context stubs", () => {
     }),
   )
 })
-

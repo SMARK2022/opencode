@@ -142,9 +142,7 @@ describe("buildParentInspectedFilesSummary", () => {
 
   test("limits to 8 ranges per file with overflow indicator", () => {
     // 构造 12 个不相邻 range，超过 8 个上限
-    const parts = Array.from({ length: 12 }, (_, i) =>
-      makeReadPart(`${WORKTREE}/src/f.ts`, i * 100 + 1, i * 100 + 50),
-    )
+    const parts = Array.from({ length: 12 }, (_, i) => makeReadPart(`${WORKTREE}/src/f.ts`, i * 100 + 1, i * 100 + 50))
     const messages = makeMessages(parts)
     const result = buildParentInspectedFilesSummary(messages, WORKTREE)
     // 截断 8 个，剩余 4 个用 ...(+4) 标记
@@ -153,9 +151,7 @@ describe("buildParentInspectedFilesSummary", () => {
 
   test("limits to 20 files with omission notice", () => {
     // 构造 25 个不同文件，超过 20 个上限
-    const parts = Array.from({ length: 25 }, (_, i) =>
-      makeReadPart(`${WORKTREE}/src/file-${i}.ts`, 1, 10),
-    )
+    const parts = Array.from({ length: 25 }, (_, i) => makeReadPart(`${WORKTREE}/src/file-${i}.ts`, 1, 10))
     const messages = makeMessages(parts)
     const result = buildParentInspectedFilesSummary(messages, WORKTREE)
     expect(result!).toContain("Omitted: 5 files")
@@ -228,9 +224,7 @@ describe("buildParentInspectedFilesSummary", () => {
   })
 
   test("returns undefined when no completed read parts exist", () => {
-    const messages = makeMessages([
-      makeReadPart(`${WORKTREE}/src/l.ts`, 1, 10, { status: "running" }),
-    ])
+    const messages = makeMessages([makeReadPart(`${WORKTREE}/src/l.ts`, 1, 10, { status: "running" })])
     const result = buildParentInspectedFilesSummary(messages, WORKTREE)
     expect(result).toBeUndefined()
   })

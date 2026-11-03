@@ -10,7 +10,7 @@ type NativePvRecorder = {
   delete(handle: bigint): void
 }
 
-  // #558：start 命令携带 native 路径与共享原子位——资源所有权在 postMessage 时移交。
+// #558：start 命令携带 native 路径与共享原子位——资源所有权在 postMessage 时移交。
 type StartCommand = {
   type: "start"
   native: string
@@ -58,7 +58,7 @@ function record(command: StartCommand) {
       if (Atomics.load(control, 0) !== 0) break
       self.postMessage({ type: "frame", frame }, [frame.buffer]) // 转移 backing store 后不再复用该帧。
     }
-  // #558：read 错误保留为 primary failure——后续 cleanup 不得覆盖。
+    // #558：read 错误保留为 primary failure——后续 cleanup 不得覆盖。
   } catch (error) {
     failure = error
   }
@@ -69,7 +69,8 @@ function record(command: StartCommand) {
   try {
     if (native && handle !== undefined) native.delete(handle) // delete failure 不覆盖 earlier failure。
   } catch {}
-  if (failure) self.postMessage({ type: "error", message: failure instanceof Error ? failure.message : String(failure) })
+  if (failure)
+    self.postMessage({ type: "error", message: failure instanceof Error ? failure.message : String(failure) })
   // terminal 排在 cleanup 与全部 accepted frame 之后。
   else self.postMessage({ type: "stopped" })
   self.close()

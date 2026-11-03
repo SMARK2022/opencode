@@ -25,7 +25,9 @@ export const ReadRangeMeta = Schema.Struct({
   totalExact: Schema.Boolean,
   returned: Schema.Number,
   stub: Schema.Boolean,
-  stubStatus: Schema.optional(Schema.Literals(["stub_same_range_visible", "stub_covered_range_visible", "stub_high_overlap_visible"])),
+  stubStatus: Schema.optional(
+    Schema.Literals(["stub_same_range_visible", "stub_covered_range_visible", "stub_high_overlap_visible"]),
+  ),
   coveredBy: Schema.optional(Schema.String),
   cut: Schema.optional(Schema.Boolean),
 })
@@ -59,12 +61,15 @@ function isSameFileVersion(a: ReadRangeMeta, b: ReadRangeMeta) {
 }
 
 export function findReadStub(visibleReads: readonly ReadRangeMeta[], current: ReadRangeMeta, contentLength: number) {
-  const sameVersion = visibleReads.filter((item) => item.canonicalPath === current.canonicalPath && !item.stub && isSameFileVersion(item, current))
+  const sameVersion = visibleReads.filter(
+    (item) => item.canonicalPath === current.canonicalPath && !item.stub && isSameFileVersion(item, current),
+  )
   const sameRange = sameVersion.find((item) => item.start === current.start && item.end === current.end)
   if (sameRange) return { status: "stub_same_range_visible" as const }
   const covering = sameVersion.find((item) => item.start <= current.start && item.end >= current.end)
   // 覆盖源同时拥有 total 和精确性，子页不能以较弱下界改写导航事实。
-  if (covering) return { status: "stub_covered_range_visible" as const, coveredBy: `${covering.start}-${covering.end}`, covering }
+  if (covering)
+    return { status: "stub_covered_range_visible" as const, coveredBy: `${covering.start}-${covering.end}`, covering }
   // 只有高重叠分支比较正文字符数；完全相同或被覆盖的读取保持原stub语义。
   if (contentLength < 300) return undefined
   // 只使用同版本最佳单交集；多个重复页不能叠加出虚假的80%覆盖。
@@ -81,18 +86,22 @@ export function findOverlapNote(visibleReads: readonly ReadRangeMeta[], current:
     .filter((item) => item.canonicalPath === current.canonicalPath && !item.stub && isSameFileVersion(item, current))
     .map((item) => ({ start: Math.max(item.start, current.start), end: Math.min(item.end, current.end) }))
     .filter((item) => item.end >= item.start)
-    .sort((a, b) => (b.end - b.start) - (a.end - a.start))[0]
+    .sort((a, b) => b.end - b.start - (a.end - a.start))[0]
   if (!best) return undefined
   const lines = best.end - best.start + 1
   // 源策略要求最佳单个交集同时达到两项门限，重复历史不能叠加成虚假的重叠。
-  if (lines < OVERLAP_MIN_LINES || lines / Math.max(1, current.end - current.start + 1) < OVERLAP_MIN_RATIO) return undefined
+  if (lines < OVERLAP_MIN_LINES || lines / Math.max(1, current.end - current.start + 1) < OVERLAP_MIN_RATIO)
+    return undefined
   return `${best.start}-${best.end}`
 }
 
 export function computeUnreadRanges(visibleReads: readonly ReadRangeMeta[], current: ReadRangeMeta) {
   // 联合范围仅计算指引；路径、版本与实际交付正文仍先过滤，不能改变80%触发口径。
-  const covered = mergeRanges(visibleReads.filter(read => read.canonicalPath === current.canonicalPath && !read.stub && isSameFileVersion(read, current))
-    .map(read => ({ start: read.start, end: read.end })))
+  const covered = mergeRanges(
+    visibleReads
+      .filter((read) => read.canonicalPath === current.canonicalPath && !read.stub && isSameFileVersion(read, current))
+      .map((read) => ({ start: read.start, end: read.end })),
+  )
   const unread: { start: number; end: number }[] = []
   let pos = current.start
   for (const range of covered) {
@@ -143,14 +152,20 @@ export function renderReadOutput(input: {
     output.push("</outline>")
   }
   // 短正文仍原样交付，仅附既有范围与避免重复读取的原话。
-  if (input.overlap) output.push(`<note type="overlap" ranges="${escapeXmlAttr(input.overlap)}">Lines ${input.overlap} already in context (latest version, file unchanged); avoid re-reading this range unnecessarily.</note>`)
+  if (input.overlap)
+    output.push(
+      `<note type="overlap" ranges="${escapeXmlAttr(input.overlap)}">Lines ${input.overlap} already in context (latest version, file unchanged); avoid re-reading this range unnecessarily.</note>`,
+    )
   output.push("<content>", renderContentLines(input.raw, input.start), "</content>")
   if (input.cut) output.push(`<more offset="${input.end + 1}" reason="byte_limit" />`)
   else if (input.more) output.push(`<more offset="${input.end + 1}" reason="line_limit" />`)
   return output.join("\n")
 }
 
-export function renderNativeRead(output: { content: string; read: ReadRangeMeta; truncated?: unknown; outline?: unknown }, overlap?: string) {
+export function renderNativeRead(
+  output: { content: string; read: ReadRangeMeta; truncated?: unknown; outline?: unknown },
+  overlap?: string,
+) {
   return renderReadOutput({
     ...output.read,
     raw: output.read.returned === 0 ? [] : output.content.split("\n"),
@@ -194,7 +209,7 @@ export function renderReadStub(input: {
             `Use the content from your previous read.`
           : `Lines ${coverage} already in context (latest version, file unchanged). ` +
             `Avoid re-reading this range unnecessarily — use the content from your previous read. ` +
-            `New unread lines: ${unread.map(range => `${range.start}-${range.end}`).join(", ")}. ` +
+            `New unread lines: ${unread.map((range) => `${range.start}-${range.end}`).join(", ")}. ` +
             `Read offset=${unread[0]!.start} limit=${unread[0]!.end - unread[0]!.start + 1} for just the new content.`
         : `Lines ${input.start}-${input.end} covered by visible read ${coverage} (latest version, file unchanged); do NOT re-read.\n${offsetExit}`
   return [

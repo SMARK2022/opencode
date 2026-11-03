@@ -4,7 +4,12 @@ export function previewDiff(input: string, maxLines: number) {
   const src = input.split("\n")
   const out: string[] = []
   const body: string[] = []
-  let oldStart = "", newStart = "", suffix = "", left = 0, right = 0, cut = false
+  let oldStart = "",
+    newStart = "",
+    suffix = "",
+    left = 0,
+    right = 0,
+    cut = false
   // left/right 是分栏行预算：split 视图两侧独立计数，任一侧触顶即截断
   let expectedOld = 0,
     expectedNew = 0,
@@ -25,10 +30,7 @@ export function previewDiff(input: string, maxLines: number) {
     // #564：截断预览不注入 ` …` sentinel 行：hunk header 已按 oldVisible()/newVisible()
     // 重算为实际保留行数，parsePatch 依此即可解析；“还有更多”由 BlockTool footer 承载。
     changed ||= cut || countMismatch
-    out.push(
-      `@@ -${oldStart},${oldVisible()} +${newStart},${newVisible()} @@${suffix}`,
-      ...body,
-    )
+    out.push(`@@ -${oldStart},${oldVisible()} +${newStart},${newVisible()} @@${suffix}`, ...body)
     oldStart = newStart = suffix = ""
     expectedOld = expectedNew = left = right = 0
     body.length = 0

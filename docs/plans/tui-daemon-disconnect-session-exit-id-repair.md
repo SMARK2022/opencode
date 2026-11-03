@@ -74,33 +74,33 @@ bootstrap no longer deletes it from the TUI projection.
 
 ### Required Invariants and Traceability
 
-| ID | Invariant | Owner | Behavioral evidence |
-| --- | --- | --- | --- |
-| INV-R10-01 | Path compatibility uses the current request Instance worktree, not one persisted worktree selected by shared Project ID. | Session service | Shared-ID A/B fixture fails with `[]` under the old lookup and passes under current context. |
-| INV-R10-02 | `list` and progressive `searchScan` use the same current-worktree universe. | `listUniverseConditions` | The same fixture asserts target visibility through both public service methods; `searchScan` has its own observed red. |
-| INV-R10-03 | Correct list output keeps the unchanged ordinary/Provider full bootstrap from deleting the active related Session. | Session producer feeding existing SyncProvider | Compiled A/B clone scenario executes real auth/global event/full bootstrap and remains rendered. |
-| INV-R10-04 | Sibling scope, Project identity, historical rows, schema, and no-migration behavior remain unchanged. | Existing list predicates and persisted contracts | Complete 23-test Session-list matrix and legacy fixture remain green. |
+| ID         | Invariant                                                                                                                | Owner                                            | Behavioral evidence                                                                                                    |
+| ---------- | ------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------- |
+| INV-R10-01 | Path compatibility uses the current request Instance worktree, not one persisted worktree selected by shared Project ID. | Session service                                  | Shared-ID A/B fixture fails with `[]` under the old lookup and passes under current context.                           |
+| INV-R10-02 | `list` and progressive `searchScan` use the same current-worktree universe.                                              | `listUniverseConditions`                         | The same fixture asserts target visibility through both public service methods; `searchScan` has its own observed red. |
+| INV-R10-03 | Correct list output keeps the unchanged ordinary/Provider full bootstrap from deleting the active related Session.       | Session producer feeding existing SyncProvider   | Compiled A/B clone scenario executes real auth/global event/full bootstrap and remains rendered.                       |
+| INV-R10-04 | Sibling scope, Project identity, historical rows, schema, and no-migration behavior remain unchanged.                    | Existing list predicates and persisted contracts | Complete 23-test Session-list matrix and legacy fixture remain green.                                                  |
 
 Forward traceability:
 
-| User-visible requirement | First owner/path | File | Test or runtime proof |
-| --- | --- | --- | --- |
-| Historical/related Sessions appear in Switch Session | `Session.list -> listUniverseConditions -> directoryMatchesPath` | `session.ts` | Public `list` assertion in shared-ID fixture. |
-| Search input finds the same Session | `Session.searchScan -> listUniverseConditions -> directoryMatchesPath` | `session.ts` | Public `searchScan` assertion in the same fixture. |
-| Provider refresh no longer blanks the TUI or loses exit identity | Correct producer list enters unchanged full bootstrap | No TUI production change | Compiled cross-clone/auth/full-bootstrap scenario. |
+| User-visible requirement                                         | First owner/path                                                       | File                     | Test or runtime proof                              |
+| ---------------------------------------------------------------- | ---------------------------------------------------------------------- | ------------------------ | -------------------------------------------------- |
+| Historical/related Sessions appear in Switch Session             | `Session.list -> listUniverseConditions -> directoryMatchesPath`       | `session.ts`             | Public `list` assertion in shared-ID fixture.      |
+| Search input finds the same Session                              | `Session.searchScan -> listUniverseConditions -> directoryMatchesPath` | `session.ts`             | Public `searchScan` assertion in the same fixture. |
+| Provider refresh no longer blanks the TUI or loses exit identity | Correct producer list enters unchanged full bootstrap                  | No TUI production change | Compiled cross-clone/auth/full-bootstrap scenario. |
 
 Reverse traceability:
 
-| Production concept | Required by | Why existing value cannot be reused |
-| --- | --- | --- |
+| Production concept                                                        | Required by                             | Why existing value cannot be reused                                                                               |
+| ------------------------------------------------------------------------- | --------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
 | Carry `InstanceState.context.worktree` through private list/search inputs | INV-R10-01/02 and same-ID live evidence | `ProjectTable.worktree` stores one row and cannot identify which active request Instance produced directory/path. |
-| Remove ProjectTable lookup from `directoryMatchesPath` | Same first divergence | Keeping it would discard the exact request context before comparison and reproduce both red assertions. |
+| Remove ProjectTable lookup from `directoryMatchesPath`                    | Same first divergence                   | Keeping it would discard the exact request context before comparison and reproduce both red assertions.           |
 
 ### Candidate Diff and TDD
 
-| File | Change |
-| --- | --- |
-| `packages/opencode/src/session/session.ts` | One production file, raw +16/-8; remove the persisted Project lookup and carry current `worktree` through existing private list/search inputs. |
+| File                                                 | Change                                                                                                                                                                                                                  |
+| ---------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `packages/opencode/src/session/session.ts`           | One production file, raw +16/-8; remove the persisted Project lookup and carry current `worktree` through existing private list/search inputs.                                                                          |
 | `packages/opencode/test/server/session-list.test.ts` | One test file, final raw +103; create A/B request worktrees sharing one Project ID while ProjectTable retains A, then require both B's public `list` and `searchScan` seams to include the ancestor historical Session. |
 
 The new service test was observed red before the production change:
@@ -152,7 +152,15 @@ An isolated compiled scenario used the unchanged production TUI refresh flow:
 Observed success:
 
 ```json
-{"crossPath":true,"sessionProject":"...\\project-clone","sessionID":"ses_00e813167ffetHkPaMF50yi3e9","sourceCount":2,"renderedCount":2,"modelRequests":2,"targetEventCount":14}
+{
+  "crossPath": true,
+  "sessionProject": "...\\project-clone",
+  "sessionID": "ses_00e813167ffetHkPaMF50yi3e9",
+  "sourceCount": 2,
+  "renderedCount": 2,
+  "modelRequests": 2,
+  "targetEventCount": 14
+}
 ```
 
 The temporary smoke-harness extension was fully reverted. `git diff --exit-code`
@@ -195,9 +203,9 @@ approved in additional round 2 by independent full-scope audit
 
 #### Actual Diff
 
-| File | Raw diff | Necessity |
-| --- | --- | --- |
-| `packages/opencode/src/session/session.ts` | +16 / -8 | Removes the first divergent persisted-worktree reconstruction and carries current request worktree through the already-shared list/search universe. |
+| File                                                 | Raw diff  | Necessity                                                                                                                                                                                                   |
+| ---------------------------------------------------- | --------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `packages/opencode/src/session/session.ts`           | +16 / -8  | Removes the first divergent persisted-worktree reconstruction and carries current request worktree through the already-shared list/search universe.                                                         |
 | `packages/opencode/test/server/session-list.test.ts` | +103 / -0 | Locks both public `list` and progressive `searchScan` seams under the exact shared-ID/different-worktree condition; persisted/runtime mismatch setup and cleanup live in one narrowly named fixture helper. |
 
 No other production, test, smoke, Provider, SyncProvider, route, daemon, SDK,
@@ -207,9 +215,9 @@ files match HEAD.
 
 #### Red-Green Results
 
-| Slice | Red | Green |
-| --- | --- | --- |
-| Public `Session.list` | Temporarily restoring `ProjectTable.worktree` lookup produced `Expected to contain: ses_...; Received: []`. | Restoring current request worktree made the identical test pass. |
+| Slice                       | Red                                                                                                                                    | Green                                                                                                     |
+| --------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| Public `Session.list`       | Temporarily restoring `ProjectTable.worktree` lookup produced `Expected to contain: ses_...; Received: []`.                            | Restoring current request worktree made the identical test pass.                                          |
 | Public `Session.searchScan` | With the old lookup restored and `scanIDs` asserted first, the test failed in 2.97s with `Expected to contain: ses_...; Received: []`. | Restoring the same two production lines made `list` and `searchScan` pass together: 1 test, 3 assertions. |
 
 Both red runs altered only the first divergence and were immediately restored;
@@ -217,15 +225,15 @@ the final diff contains only the approved green implementation.
 
 #### Final Verification
 
-| Command or scenario | Result |
-| --- | --- |
-| `bun test test/server/session-list.test.ts --test-name-pattern "uses the current Instance worktree"` | 1 pass, 0 fail, 3 assertions. |
-| `bun test --timeout 30000 test/server/session-list.test.ts` | 23 pass, 0 fail, 121 assertions. The command-level timeout only gives existing Windows InstanceStore cleanup headroom. |
-| `bun typecheck` from `packages/opencode` | Exit 0. |
-| `git diff --check` for R10 files and Plan | Exit 0. |
-| Minimal Windows artifact build | `0.0.0-dev-smark-202608111539`, executable SHA-256 `c1cedd4985bfb128444d2d4be3e6e302448bc60c007731985e1659b908e55436`; version, voice Worker, and OpenTUI DLL smokes passed. |
-| Final unchanged `target-liveness` artifact smoke | Passed with `sessionID=ses_00e679a41ffe15QEEYXvNjBT7A`, 2 model requests, 14 target events, and matching source/rendered glyph counts. |
-| Isolated compiled A/B clone plus real auth/global event/full bootstrap | Passed with the unchanged TUI consumer path, 2 model requests, 14 target events, continuing rendering, and normal Ctrl+C. Temporary smoke extension was reverted. |
+| Command or scenario                                                                                  | Result                                                                                                                                                                       |
+| ---------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `bun test test/server/session-list.test.ts --test-name-pattern "uses the current Instance worktree"` | 1 pass, 0 fail, 3 assertions.                                                                                                                                                |
+| `bun test --timeout 30000 test/server/session-list.test.ts`                                          | 23 pass, 0 fail, 121 assertions. The command-level timeout only gives existing Windows InstanceStore cleanup headroom.                                                       |
+| `bun typecheck` from `packages/opencode`                                                             | Exit 0.                                                                                                                                                                      |
+| `git diff --check` for R10 files and Plan                                                            | Exit 0.                                                                                                                                                                      |
+| Minimal Windows artifact build                                                                       | `0.0.0-dev-smark-202608111539`, executable SHA-256 `c1cedd4985bfb128444d2d4be3e6e302448bc60c007731985e1659b908e55436`; version, voice Worker, and OpenTUI DLL smokes passed. |
+| Final unchanged `target-liveness` artifact smoke                                                     | Passed with `sessionID=ses_00e679a41ffe15QEEYXvNjBT7A`, 2 model requests, 14 target events, and matching source/rendered glyph counts.                                       |
+| Isolated compiled A/B clone plus real auth/global event/full bootstrap                               | Passed with the unchanged TUI consumer path, 2 model requests, 14 target events, continuing rendering, and normal Ctrl+C. Temporary smoke extension was reverted.            |
 
 The user's running daemon was deliberately not stopped and still contains the
 old loaded binary; it cannot be current-code evidence. The isolated rebuilt
@@ -234,7 +242,7 @@ daemon/TUI scenario exercises the same cross-clone and Provider-triggered path.
 #### Path and Fallback Inventory
 
 - Primary path only: `InstanceState.context.worktree -> list/search private
-  input -> listUniverseConditions -> directoryMatchesPath`.
+input -> listUniverseConditions -> directoryMatchesPath`.
 - Existing ancestor/descendant, historical null-path, home, sibling, Project ID,
   and full-bootstrap behavior remains unchanged.
 - No alternate query, second data source, retry, state machine, event reason,
@@ -258,10 +266,10 @@ cause.
 
 ### R10 Implementation Audit Record
 
-| Round | Full scope | Blocking findings | Non-blocking findings | Verdict | Reference |
-| --- | --- | --- | --- | --- | --- |
-| 1 | yes | B-01 inline persisted/runtime mismatch bypassed required fixture helper | NB-01 audit-mode metadata | BLOCK | `ses_00e66470cffejfsNpV30mFHKj3` |
-| 2 | yes | None | NB-01 stale early evidence counts | APPROVE — exact R10 implementation diff | `ses_00e66470cffejfsNpV30mFHKj3` |
+| Round | Full scope | Blocking findings                                                       | Non-blocking findings             | Verdict                                 | Reference                        |
+| ----- | ---------- | ----------------------------------------------------------------------- | --------------------------------- | --------------------------------------- | -------------------------------- |
+| 1     | yes        | B-01 inline persisted/runtime mismatch bypassed required fixture helper | NB-01 audit-mode metadata         | BLOCK                                   | `ses_00e66470cffejfsNpV30mFHKj3` |
+| 2     | yes        | None                                                                    | NB-01 stale early evidence counts | APPROVE — exact R10 implementation diff | `ses_00e66470cffejfsNpV30mFHKj3` |
 
 Round 1 B-01 resolution: direct Project/Session database setup and reverse
 cleanup moved into the narrowly named
@@ -345,36 +353,36 @@ Session projection and the real Session route through `ExitProvider` stdout.
 
 ## 3. Repository Context
 
-| Source | Why it constrains this task |
-| --- | --- |
-| `CONTEXT.md:9-23,63-83,101-110,127-181` | Defines Session, Provider, Project, Session path, InstanceState, and the v1 production boundary. |
-| `AGENTS.md:21-141` | Requires minimal changes, package-local tests/typecheck, and no speculative abstraction. |
-| `packages/opencode/AGENTS.md:19-135` | Constrains module shape and InstanceState ownership; no new service is required. |
-| `packages/opencode/test/AGENTS.md:161-204` | Concurrent tests must use published readiness rather than fixed sleeps. |
-| `packages/opencode/src/server/routes/instance/httpapi/AGENTS.md` | Session list/get handlers remain at their existing HttpApi boundary. |
-| `packages/opencode/test/server/AGENTS.md` | Existing Session list behavior is verified at the Effect/HTTP owner; no server test change is planned. |
-| `docs/adr/README.md` and ADR-0001 | No accepted ADR governs TUI Session projection; this local repair does not warrant a new ADR. |
-| `.opencode/policy/first-principles-engineering.md` | Requires repair at the first divergence, no fallback, full traceability, and the Chinese-comment gate. |
+| Source                                                           | Why it constrains this task                                                                            |
+| ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| `CONTEXT.md:9-23,63-83,101-110,127-181`                          | Defines Session, Provider, Project, Session path, InstanceState, and the v1 production boundary.       |
+| `AGENTS.md:21-141`                                               | Requires minimal changes, package-local tests/typecheck, and no speculative abstraction.               |
+| `packages/opencode/AGENTS.md:19-135`                             | Constrains module shape and InstanceState ownership; no new service is required.                       |
+| `packages/opencode/test/AGENTS.md:161-204`                       | Concurrent tests must use published readiness rather than fixed sleeps.                                |
+| `packages/opencode/src/server/routes/instance/httpapi/AGENTS.md` | Session list/get handlers remain at their existing HttpApi boundary.                                   |
+| `packages/opencode/test/server/AGENTS.md`                        | Existing Session list behavior is verified at the Effect/HTTP owner; no server test change is planned. |
+| `docs/adr/README.md` and ADR-0001                                | No accepted ADR governs TUI Session projection; this local repair does not warrant a new ADR.          |
+| `.opencode/policy/first-principles-engineering.md`               | Requires repair at the first divergence, no fallback, full traceability, and the Chinese-comment gate. |
 
 ## 4. Files and Evidence Read
 
-| Evidence | Relevance | Evidence class |
-| --- | --- | --- |
-| `packages/opencode/src/cli/cmd/tui/context/sync.tsx:62-180,447-464,609-637,932-1136` | One store currently carries browse and route-owned Session metadata; three list paths replace it wholesale; Provider and reconnect events call bootstrap. | observed/reachable |
-| `packages/opencode/src/cli/cmd/tui/routes/session/index.tsx:212-245,338-401,479-494` | Explicit route fetches by ID, applies non-connection failure navigation on initial load, force-syncs on reconnect without the same handler, renders through `sync.session.get`, and derives exit identity from that metadata. | observed/reachable |
-| `packages/opencode/src/cli/cmd/tui/app.tsx:280-344,438-535,1089-1096` | `-s` navigates to a Session route while bootstrap runs; missing route metadata changes title/render consumers. | reachable |
-| `packages/opencode/src/session/session.ts:56-139,152-215,630-693,997-1177` | `session.get` is ID-global; path-scoped list/search share `directoryMatchesPath`, which currently re-reads one persisted Project worktree instead of using the request Instance worktree. | observed/contracted |
-| `packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts:56-116` | Public list and get endpoints intentionally have different selection contracts. | contracted |
-| `packages/opencode/src/cli/cmd/tui/component/dialog-provider.tsx:235-405` | API, code, and auto auth success all call full `sync.bootstrap()` before opening models. | observed/reachable |
-| `packages/opencode/src/server/global-lifecycle.ts:38-50` and control/provider handlers | Auth changes invalidate Provider caches and broadcast non-stop `global.disposed` without disposing Sessions. | observed/reachable |
-| `packages/opencode/test/cli/cmd/tui/sync-fixture.tsx` and `sync.test.tsx` | Real `SyncProvider` with public route, SDK transport, and event seam supports a deterministic regression. | observed |
-| `packages/opencode/test/cli/cmd/tui/session-exit.test.tsx` | Real Session route and ExitProvider stdout seam already exists. | observed |
-| `packages/opencode/test/server/session-list.test.ts:546-641` | Historical Project ID plus matching directory is already visible without migration. | observed |
-| Live daemon `127.0.0.1:4096` query for `ses_01be48e73ffeQJJlE10m5u4q6J` | Direct get returned 200; Session directory was the repository root and therefore an ancestor of the thirdparty launch path; thirdparty browse list incorrectly omitted it while root browse list contained it. | observed |
-| Live `/project/current`, `/path`, and `/project` comparison for root and thirdparty | Both Instances resolve Project ID `4b0...` but expose distinct request worktrees; the single stored Project row exposes only the root worktree. | observed |
-| `Get-NetTCPConnection -OwningProcess 26356` | Affected `-s` TUI retained multiple Established connections to daemon port 4096. | observed |
-| `2026-08-11T120834.log` and `2026-08-11T120505.log` | Exact `-s` launches show no bootstrap, renderer, panic, or connection failure; duplicate test-plugin ID is adjacent but not causal. | observed |
-| `git blame` and `git show` for `9209c04370`, `ddc5e00c60`, `1c4298bfc6` | Path filtering exposed the latent projection conflict; Provider refresh made it deterministic; the latest repair did not change list replacement. | observed |
+| Evidence                                                                               | Relevance                                                                                                                                                                                                                     | Evidence class      |
+| -------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------- |
+| `packages/opencode/src/cli/cmd/tui/context/sync.tsx:62-180,447-464,609-637,932-1136`   | One store currently carries browse and route-owned Session metadata; three list paths replace it wholesale; Provider and reconnect events call bootstrap.                                                                     | observed/reachable  |
+| `packages/opencode/src/cli/cmd/tui/routes/session/index.tsx:212-245,338-401,479-494`   | Explicit route fetches by ID, applies non-connection failure navigation on initial load, force-syncs on reconnect without the same handler, renders through `sync.session.get`, and derives exit identity from that metadata. | observed/reachable  |
+| `packages/opencode/src/cli/cmd/tui/app.tsx:280-344,438-535,1089-1096`                  | `-s` navigates to a Session route while bootstrap runs; missing route metadata changes title/render consumers.                                                                                                                | reachable           |
+| `packages/opencode/src/session/session.ts:56-139,152-215,630-693,997-1177`             | `session.get` is ID-global; path-scoped list/search share `directoryMatchesPath`, which currently re-reads one persisted Project worktree instead of using the request Instance worktree.                                     | observed/contracted |
+| `packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts:56-116`      | Public list and get endpoints intentionally have different selection contracts.                                                                                                                                               | contracted          |
+| `packages/opencode/src/cli/cmd/tui/component/dialog-provider.tsx:235-405`              | API, code, and auto auth success all call full `sync.bootstrap()` before opening models.                                                                                                                                      | observed/reachable  |
+| `packages/opencode/src/server/global-lifecycle.ts:38-50` and control/provider handlers | Auth changes invalidate Provider caches and broadcast non-stop `global.disposed` without disposing Sessions.                                                                                                                  | observed/reachable  |
+| `packages/opencode/test/cli/cmd/tui/sync-fixture.tsx` and `sync.test.tsx`              | Real `SyncProvider` with public route, SDK transport, and event seam supports a deterministic regression.                                                                                                                     | observed            |
+| `packages/opencode/test/cli/cmd/tui/session-exit.test.tsx`                             | Real Session route and ExitProvider stdout seam already exists.                                                                                                                                                               | observed            |
+| `packages/opencode/test/server/session-list.test.ts:546-641`                           | Historical Project ID plus matching directory is already visible without migration.                                                                                                                                           | observed            |
+| Live daemon `127.0.0.1:4096` query for `ses_01be48e73ffeQJJlE10m5u4q6J`                | Direct get returned 200; Session directory was the repository root and therefore an ancestor of the thirdparty launch path; thirdparty browse list incorrectly omitted it while root browse list contained it.                | observed            |
+| Live `/project/current`, `/path`, and `/project` comparison for root and thirdparty    | Both Instances resolve Project ID `4b0...` but expose distinct request worktrees; the single stored Project row exposes only the root worktree.                                                                               | observed            |
+| `Get-NetTCPConnection -OwningProcess 26356`                                            | Affected `-s` TUI retained multiple Established connections to daemon port 4096.                                                                                                                                              | observed            |
+| `2026-08-11T120834.log` and `2026-08-11T120505.log`                                    | Exact `-s` launches show no bootstrap, renderer, panic, or connection failure; duplicate test-plugin ID is adjacent but not causal.                                                                                           | observed            |
+| `git blame` and `git show` for `9209c04370`, `ddc5e00c60`, `1c4298bfc6`                | Path filtering exposed the latent projection conflict; Provider refresh made it deterministic; the latest repair did not change list replacement.                                                                             | observed            |
 
 ## 5. Current Behavior
 
@@ -424,35 +432,35 @@ worktree. No migration or Project identity change is required.
 
 ## 6. Supported Input Domain and Reachability
 
-| Input or condition | Producer | Upstream guarantees | Reachable path | Owner | Classification |
-| --- | --- | --- | --- | --- | --- |
-| Two clone/worktree Instances with the same root-commit Project ID but different worktrees | Current Project identity contract and InstanceStore | Each request has its own resolved `InstanceState.context.worktree`; one Project row cannot represent both simultaneously | Session list/search path compatibility | Session service | observed |
-| Explicit valid `-s <SessionID>` whose Session directory is outside the launch-directory browse domain | CLI args and RouteProvider | ID passes the Session schema; public get returns the persisted Session | app navigation -> Session route -> direct sync -> list refresh | SyncProvider active projection | observed |
-| Same-directory or related-path active Session | Main TUI or related launch path | Browse list includes target | list replacement contains active ID | Existing list contract | observed |
-| Successful API/code/auto Provider auth | Provider dialog and server handlers | Provider cache is invalidated before notification | global.disposed plus direct dialog refresh | SyncProvider Provider projection | observed/reachable |
-| Historical Session with old Project ID and matching directory/path | Existing SQLite rows | Current Session list compatibility finds it without migration | Session.list directory/path predicates | Session service | observed |
-| Reconnect or explicit Session-list refresh while a cross-path route is active | SSE reconnect, switch dialog, tool/dialog workflows | Browse snapshot is authoritative only for its query domain | bootstrap/session.refresh -> store replacement | SyncProvider | reachable |
-| Session deletion or failed direct get | Server Session lifecycle | Deleted/not-found Session is not valid active metadata | delete event/direct sync failure -> route handling | Existing Session route/event paths | reachable |
+| Input or condition                                                                                    | Producer                                            | Upstream guarantees                                                                                                      | Reachable path                                                 | Owner                              | Classification     |
+| ----------------------------------------------------------------------------------------------------- | --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------- | ---------------------------------- | ------------------ |
+| Two clone/worktree Instances with the same root-commit Project ID but different worktrees             | Current Project identity contract and InstanceStore | Each request has its own resolved `InstanceState.context.worktree`; one Project row cannot represent both simultaneously | Session list/search path compatibility                         | Session service                    | observed           |
+| Explicit valid `-s <SessionID>` whose Session directory is outside the launch-directory browse domain | CLI args and RouteProvider                          | ID passes the Session schema; public get returns the persisted Session                                                   | app navigation -> Session route -> direct sync -> list refresh | SyncProvider active projection     | observed           |
+| Same-directory or related-path active Session                                                         | Main TUI or related launch path                     | Browse list includes target                                                                                              | list replacement contains active ID                            | Existing list contract             | observed           |
+| Successful API/code/auto Provider auth                                                                | Provider dialog and server handlers                 | Provider cache is invalidated before notification                                                                        | global.disposed plus direct dialog refresh                     | SyncProvider Provider projection   | observed/reachable |
+| Historical Session with old Project ID and matching directory/path                                    | Existing SQLite rows                                | Current Session list compatibility finds it without migration                                                            | Session.list directory/path predicates                         | Session service                    | observed           |
+| Reconnect or explicit Session-list refresh while a cross-path route is active                         | SSE reconnect, switch dialog, tool/dialog workflows | Browse snapshot is authoritative only for its query domain                                                               | bootstrap/session.refresh -> store replacement                 | SyncProvider                       | reachable          |
+| Session deletion or failed direct get                                                                 | Server Session lifecycle                            | Deleted/not-found Session is not valid active metadata                                                                   | delete event/direct sync failure -> route handling             | Existing Session route/event paths | reachable          |
 
 ## 7. Required Invariants
 
-| ID | Behavioral invariant | Evidence | Existing test |
-| --- | --- | --- | --- |
-| INV-01 | Session path compatibility is evaluated against the current request Instance worktree, including when another worktree shares the same Project ID. | Live Project/path split and ancestor-list red command. | None; existing legacy test uses one worktree. |
-| INV-02 | A valid Session selected by the current route remains available to TUI consumers after any browse snapshot that legitimately omits it, including while reconnect validation is pending or has a confirmed ConnectionError. | Live direct-get/list split, independent list/direct requests, and deterministic SyncProvider red loop. | None. |
-| INV-03 | Browse snapshots remain authoritative for non-active entries: omitted stale Sessions are removed, and unrelated non-active sibling Sessions do not become browse matches. | Existing path-filter contract and dialog list behavior. | Session list tests cover server scope, not active TUI composition. |
-| INV-04 | Provider credential changes refresh Provider/model/auth/console projections only; they do not refresh Session, Config, Agent, Message, Part, Project, or route state. | User-selected contract and `ddc5e00c60` regression. | None. |
-| INV-05 | A valid cross-path Session route exits with its concrete original Session ID after startup, list refresh, reconnect, or Provider refresh. | User output and real ExitProvider seam. | Existing exit tests never omit the active Session from list. |
-| INV-06 | Same-path list behavior, daemon/SSE lifecycle, Project identity, and historical no-migration visibility remain unchanged; NotFound revokes a deleted Session even after route navigation, ConnectionError retains it, and every other latest direct-sync failure keeps the existing error/toast/home contract. | SSE no-replay path, SDK 404 cause, ConnectionError classifier, and initial route error boundary. | Existing tests cover delivered delete events and initial errors, not missed deletion plus reconnect or a late browse after route navigation. |
+| ID     | Behavioral invariant                                                                                                                                                                                                                                                                                           | Evidence                                                                                               | Existing test                                                                                                                                |
+| ------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| INV-01 | Session path compatibility is evaluated against the current request Instance worktree, including when another worktree shares the same Project ID.                                                                                                                                                             | Live Project/path split and ancestor-list red command.                                                 | None; existing legacy test uses one worktree.                                                                                                |
+| INV-02 | A valid Session selected by the current route remains available to TUI consumers after any browse snapshot that legitimately omits it, including while reconnect validation is pending or has a confirmed ConnectionError.                                                                                     | Live direct-get/list split, independent list/direct requests, and deterministic SyncProvider red loop. | None.                                                                                                                                        |
+| INV-03 | Browse snapshots remain authoritative for non-active entries: omitted stale Sessions are removed, and unrelated non-active sibling Sessions do not become browse matches.                                                                                                                                      | Existing path-filter contract and dialog list behavior.                                                | Session list tests cover server scope, not active TUI composition.                                                                           |
+| INV-04 | Provider credential changes refresh Provider/model/auth/console projections only; they do not refresh Session, Config, Agent, Message, Part, Project, or route state.                                                                                                                                          | User-selected contract and `ddc5e00c60` regression.                                                    | None.                                                                                                                                        |
+| INV-05 | A valid cross-path Session route exits with its concrete original Session ID after startup, list refresh, reconnect, or Provider refresh.                                                                                                                                                                      | User output and real ExitProvider seam.                                                                | Existing exit tests never omit the active Session from list.                                                                                 |
+| INV-06 | Same-path list behavior, daemon/SSE lifecycle, Project identity, and historical no-migration visibility remain unchanged; NotFound revokes a deleted Session even after route navigation, ConnectionError retains it, and every other latest direct-sync failure keeps the existing error/toast/home contract. | SSE no-replay path, SDK 404 cause, ConnectionError classifier, and initial route error boundary.       | Existing tests cover delivered delete events and initial errors, not missed deletion plus reconnect or a late browse after route navigation. |
 
 ## 8. First Divergence and Root Cause
 
-| Invariant | First divergence | Owning module/interface | Proof |
-| --- | --- | --- | --- |
-| INV-01 | `directoryMatchesPath` resolves `ProjectTable.worktree` by shared Project ID and compares that unrelated persisted worktree to the current request's directory/path, disabling the existing directory fallback for the second Instance. | Session service list/search universe predicate | Public APIs show same Project ID, request worktrees A/B, one stored worktree A, and an omitted ancestor Session from B. |
-| INV-02, INV-03 | Each list completion calls `setStore("session", reconcile(snapshot))`, treating a path-scoped browse snapshot as the complete shared Session projection and deleting the route-owned direct Session. | `SyncProvider` Session projection replacement | Production lines 994, 1002, 1064; the red harness leaves the route unchanged while both ordinary and Provider refresh remove the Session. |
-| INV-04 | `ddc5e00c60` maps Provider-only `global.disposed` and all three Provider dialogs to full `bootstrap()`. | `SyncProvider` refresh interface and Provider dialog caller | Commit diff and current lines 612-621 / 270 / 321 / 394. |
-| INV-05 | Session route reads the already-corrupted projection for title and exit ID. | Downstream Session route consumer | `session()?.id` becomes undefined only after the owning projection removed the row; changing the formatter would not restore rendering. |
+| Invariant      | First divergence                                                                                                                                                                                                                        | Owning module/interface                                     | Proof                                                                                                                                     |
+| -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| INV-01         | `directoryMatchesPath` resolves `ProjectTable.worktree` by shared Project ID and compares that unrelated persisted worktree to the current request's directory/path, disabling the existing directory fallback for the second Instance. | Session service list/search universe predicate              | Public APIs show same Project ID, request worktrees A/B, one stored worktree A, and an omitted ancestor Session from B.                   |
+| INV-02, INV-03 | Each list completion calls `setStore("session", reconcile(snapshot))`, treating a path-scoped browse snapshot as the complete shared Session projection and deleting the route-owned direct Session.                                    | `SyncProvider` Session projection replacement               | Production lines 994, 1002, 1064; the red harness leaves the route unchanged while both ordinary and Provider refresh remove the Session. |
+| INV-04         | `ddc5e00c60` maps Provider-only `global.disposed` and all three Provider dialogs to full `bootstrap()`.                                                                                                                                 | `SyncProvider` refresh interface and Provider dialog caller | Commit diff and current lines 612-621 / 270 / 321 / 394.                                                                                  |
+| INV-05         | Session route reads the already-corrupted projection for title and exit ID.                                                                                                                                                             | Downstream Session route consumer                           | `session()?.id` becomes undefined only after the owning projection removed the row; changing the formatter would not restore rendering.   |
 
 ### Red-Capable Feedback Loop
 
@@ -475,7 +483,7 @@ bun -e 'import { Global } from "@opencode-ai/core/global"; import { tmpdir } fro
 It was run twice after minimization. Both runs exited 1 with:
 
 ```json
-{"first":true,"second":true}
+{ "first": true, "second": true }
 ```
 
 `first` is ordinary path-scoped list erasure; `second` is the recent Provider
@@ -513,13 +521,13 @@ Observed post-repair output: `{"first":false,"second":false}` with exit 0.
 
 ## 9. Responsibility and Seam
 
-| Concern | Owner | Interface promise | Why it belongs here | Why another module does not own it |
-| --- | --- | --- | --- | --- |
-| Evaluate Session path compatibility for the current request Instance | Session service | List/search use the caller's resolved directory/path universe | The service already receives InstanceState context and owns the shared predicate | ProjectTable is persisted Project metadata and cannot identify one of multiple active worktrees. |
-| Compose a browse snapshot with the current route-owned Session | SyncProvider | Supplies the TUI's Session projection to all route and dialog consumers | It owns both direct Session insertion and list replacement and already has RouteProvider access | Session.list correctly owns only browse selection; the Session route must not compensate after deletion. |
-| Refresh Provider-derived TUI state after credentials change | SyncProvider | Supplies Provider/model/auth/console projections | It already fetches and stores every Provider field | Server owns cache invalidation, not each TUI's local projection; Dialog should not know endpoint composition. |
-| Initiate auth and wait for Provider projection readiness | Provider dialog | Opens Model selection only after successful credential refresh | It owns API/code/auto interaction completion | Session and daemon lifecycle do not own dialog sequencing. |
-| Stable Continue output and invalid-route navigation | Session route/ExitProvider | Reflects a valid Session and returns home only after authoritative NotFound | Reconnect reads SyncProvider's direct-sync validation result; formatter remains unchanged | SyncProvider cannot own route navigation, and transport/unrelated failures must not revoke a valid route. |
+| Concern                                                              | Owner                      | Interface promise                                                           | Why it belongs here                                                                             | Why another module does not own it                                                                            |
+| -------------------------------------------------------------------- | -------------------------- | --------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| Evaluate Session path compatibility for the current request Instance | Session service            | List/search use the caller's resolved directory/path universe               | The service already receives InstanceState context and owns the shared predicate                | ProjectTable is persisted Project metadata and cannot identify one of multiple active worktrees.              |
+| Compose a browse snapshot with the current route-owned Session       | SyncProvider               | Supplies the TUI's Session projection to all route and dialog consumers     | It owns both direct Session insertion and list replacement and already has RouteProvider access | Session.list correctly owns only browse selection; the Session route must not compensate after deletion.      |
+| Refresh Provider-derived TUI state after credentials change          | SyncProvider               | Supplies Provider/model/auth/console projections                            | It already fetches and stores every Provider field                                              | Server owns cache invalidation, not each TUI's local projection; Dialog should not know endpoint composition. |
+| Initiate auth and wait for Provider projection readiness             | Provider dialog            | Opens Model selection only after successful credential refresh              | It owns API/code/auto interaction completion                                                    | Session and daemon lifecycle do not own dialog sequencing.                                                    |
+| Stable Continue output and invalid-route navigation                  | Session route/ExitProvider | Reflects a valid Session and returns home only after authoritative NotFound | Reconnect reads SyncProvider's direct-sync validation result; formatter remains unchanged       | SyncProvider cannot own route navigation, and transport/unrelated failures must not revoke a valid route.     |
 
 ## 10. Single Approved Primary-Path Design
 
@@ -600,66 +608,66 @@ added.
 
 ## 11. Secondary and Replacement Path Inventory
 
-| Path | Current or proposed | Classification | Produces success? | Decision-surface share | Disposition |
-| --- | --- | --- | --- | --- | --- |
-| Current Instance worktree path comparison | proposed | primary-contract path | yes | about 25% | replace persisted-worktree lookup |
-| Exact browse replacement with no loaded active route Session | current, centralized | supported-domain branch | yes | about 25% | preserve |
-| Sorted browse replacement plus active Session in pending/valid/connection-error state | proposed | supported-domain branch of the same projection contract | yes | about 30% | add |
-| Provider-derived fields-only refresh | proposed | primary-contract branch | yes | about 20% | replace full bootstrap for Provider auth |
-| Provider refresh failure logging/toast without Model transition | proposed | diagnostic failure path | no | below 10% of changed decision surface | add |
-| Reconnect direct-sync NotFound -> existing home navigation | proposed reuse | diagnostic failure path | no | below 10% of changed decision surface | add |
-| Reconnect latest non-connection/non-404 failure -> existing toast/home | proposed reuse | diagnostic failure path | no | below 10% of changed decision surface | add |
-| Alternate Session get/list query | not proposed | forbidden fallback | yes | 0% | reject |
-| Preserve every omitted Session | not proposed | forbidden stale compatibility path | yes | 0% | reject |
-| Schema migration or Project ID rollback | not proposed | unrelated replacement path | yes | 0% | reject |
-| Exit formatter route-ID fallback | R1 proposal, superseded | downstream workaround for R8 scope | yes | 0% | reject |
+| Path                                                                                  | Current or proposed     | Classification                                          | Produces success? | Decision-surface share                | Disposition                              |
+| ------------------------------------------------------------------------------------- | ----------------------- | ------------------------------------------------------- | ----------------- | ------------------------------------- | ---------------------------------------- |
+| Current Instance worktree path comparison                                             | proposed                | primary-contract path                                   | yes               | about 25%                             | replace persisted-worktree lookup        |
+| Exact browse replacement with no loaded active route Session                          | current, centralized    | supported-domain branch                                 | yes               | about 25%                             | preserve                                 |
+| Sorted browse replacement plus active Session in pending/valid/connection-error state | proposed                | supported-domain branch of the same projection contract | yes               | about 30%                             | add                                      |
+| Provider-derived fields-only refresh                                                  | proposed                | primary-contract branch                                 | yes               | about 20%                             | replace full bootstrap for Provider auth |
+| Provider refresh failure logging/toast without Model transition                       | proposed                | diagnostic failure path                                 | no                | below 10% of changed decision surface | add                                      |
+| Reconnect direct-sync NotFound -> existing home navigation                            | proposed reuse          | diagnostic failure path                                 | no                | below 10% of changed decision surface | add                                      |
+| Reconnect latest non-connection/non-404 failure -> existing toast/home                | proposed reuse          | diagnostic failure path                                 | no                | below 10% of changed decision surface | add                                      |
+| Alternate Session get/list query                                                      | not proposed            | forbidden fallback                                      | yes               | 0%                                    | reject                                   |
+| Preserve every omitted Session                                                        | not proposed            | forbidden stale compatibility path                      | yes               | 0%                                    | reject                                   |
+| Schema migration or Project ID rollback                                               | not proposed            | unrelated replacement path                              | yes               | 0%                                    | reject                                   |
+| Exit formatter route-ID fallback                                                      | R1 proposal, superseded | downstream workaround for R8 scope                      | yes               | 0%                                    | reject                                   |
 
 ## 12. Workaround Deletion and Replacement
 
-| Existing workaround or duplicate | Why it existed | Why R8 supersedes it | Delete or collapse location |
-| --- | --- | --- | --- |
-| `directoryMatchesPath` ProjectTable lookup | Attempted to reconstruct the worktree from Project ID | Same-history worktrees prove Project ID does not select the current request Instance; context already owns the exact worktree | `session/session.ts`. |
-| Three direct `setStore("session", reconcile(...))` list replacements | Each caller independently treated list as total state | One owner must compose browse and active route semantics identically | Collapse in `context/sync.tsx`. |
-| Non-stop `global.disposed -> bootstrap()` | `ddc5e00c60` needed Provider UI refresh without disposing Session runners | Full bootstrap crosses unrelated projection ownership | Replace with Provider-only refresh in `context/sync.tsx`. |
-| Three Provider dialog `sync.bootstrap()` calls | Sender wanted fresh models immediately | They duplicate the broadcast consumer and refresh unrelated state | Replace with the same SyncProvider Provider refresh method. |
-| Boolean `fullSyncedSessions` as retention authority | It only deduplicates complete snapshots | Absence conflates pending, ConnectionError, NotFound, and other failure; the validation map owns retention while the Set keeps deduplication only | `context/sync.tsx`. |
-| Reconnect fire-and-forget `session.sync` without NotFound handling | Reconnect recovery assumed the Session still existed | SSE has no replay, so direct sync 404 is the deletion authority after a missed event | Add one route-local catch in `routes/session/index.tsx`. |
-| R1 formatter/route-ID repair proposal | R1 saw only the downstream `undefined` output | R8 reproduces the earlier Session projection deletion | Do not implement; retain existing formatter. |
+| Existing workaround or duplicate                                     | Why it existed                                                            | Why R8 supersedes it                                                                                                                              | Delete or collapse location                                 |
+| -------------------------------------------------------------------- | ------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
+| `directoryMatchesPath` ProjectTable lookup                           | Attempted to reconstruct the worktree from Project ID                     | Same-history worktrees prove Project ID does not select the current request Instance; context already owns the exact worktree                     | `session/session.ts`.                                       |
+| Three direct `setStore("session", reconcile(...))` list replacements | Each caller independently treated list as total state                     | One owner must compose browse and active route semantics identically                                                                              | Collapse in `context/sync.tsx`.                             |
+| Non-stop `global.disposed -> bootstrap()`                            | `ddc5e00c60` needed Provider UI refresh without disposing Session runners | Full bootstrap crosses unrelated projection ownership                                                                                             | Replace with Provider-only refresh in `context/sync.tsx`.   |
+| Three Provider dialog `sync.bootstrap()` calls                       | Sender wanted fresh models immediately                                    | They duplicate the broadcast consumer and refresh unrelated state                                                                                 | Replace with the same SyncProvider Provider refresh method. |
+| Boolean `fullSyncedSessions` as retention authority                  | It only deduplicates complete snapshots                                   | Absence conflates pending, ConnectionError, NotFound, and other failure; the validation map owns retention while the Set keeps deduplication only | `context/sync.tsx`.                                         |
+| Reconnect fire-and-forget `session.sync` without NotFound handling   | Reconnect recovery assumed the Session still existed                      | SSE has no replay, so direct sync 404 is the deletion authority after a missed event                                                              | Add one route-local catch in `routes/session/index.tsx`.    |
+| R1 formatter/route-ID repair proposal                                | R1 saw only the downstream `undefined` output                             | R8 reproduces the earlier Session projection deletion                                                                                             | Do not implement; retain existing formatter.                |
 
 ## 13. Forward Traceability
 
-| Requirement or invariant | Production path | Planned file/change | Behavioral test |
-| --- | --- | --- | --- |
-| INV-01, ancestor/descendant list works for shared-ID worktrees | Instance context -> shared list/search universe | `session/session.ts` | Real Session service fixture with two worktrees/one Project ID includes the ancestor legacy Session. |
-| INV-02, cross-path `-s` must not gray | Session list completion -> validation-aware active replacement | `context/sync.tsx` | Real Session route remains renderable when list wins before delayed direct success and when direct sync has a ConnectionError. |
-| INV-03, browse scope remains exact for non-active Sessions | Same replacement drops omitted non-active entries | `context/sync.tsx` | SyncProvider test keeps active target while removing an omitted non-active fixture. |
-| INV-04, Provider refresh touches Provider state only | global event/direct dialog -> Provider refresh | `context/sync.tsx`, `component/dialog-provider.tsx` | SyncProvider event test changes Provider state while Config/Agent/Session remain unchanged; Dialog integration reaches fresh Model selection. |
-| INV-05, no valid route exits as undefined | Preserved active Session -> existing Session exit producer | No exit production change | Real Session route/ExitProvider stdout contains the concrete ID after browse omission. |
-| INV-06, deletion/error and no schema/migration/lifecycle change | Reconnect marks pending -> result classifies ConnectionError, 404, or failed -> route applies existing branch | `context/sync.tsx`, `routes/session/index.tsx`; no Project, SDK, schema, migration, or renderer files | ConnectionError retains; NotFound removes/home; generic latest failure shows error/home; stale failures no-op. |
+| Requirement or invariant                                        | Production path                                                                                               | Planned file/change                                                                                   | Behavioral test                                                                                                                               |
+| --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| INV-01, ancestor/descendant list works for shared-ID worktrees  | Instance context -> shared list/search universe                                                               | `session/session.ts`                                                                                  | Real Session service fixture with two worktrees/one Project ID includes the ancestor legacy Session.                                          |
+| INV-02, cross-path `-s` must not gray                           | Session list completion -> validation-aware active replacement                                                | `context/sync.tsx`                                                                                    | Real Session route remains renderable when list wins before delayed direct success and when direct sync has a ConnectionError.                |
+| INV-03, browse scope remains exact for non-active Sessions      | Same replacement drops omitted non-active entries                                                             | `context/sync.tsx`                                                                                    | SyncProvider test keeps active target while removing an omitted non-active fixture.                                                           |
+| INV-04, Provider refresh touches Provider state only            | global event/direct dialog -> Provider refresh                                                                | `context/sync.tsx`, `component/dialog-provider.tsx`                                                   | SyncProvider event test changes Provider state while Config/Agent/Session remain unchanged; Dialog integration reaches fresh Model selection. |
+| INV-05, no valid route exits as undefined                       | Preserved active Session -> existing Session exit producer                                                    | No exit production change                                                                             | Real Session route/ExitProvider stdout contains the concrete ID after browse omission.                                                        |
+| INV-06, deletion/error and no schema/migration/lifecycle change | Reconnect marks pending -> result classifies ConnectionError, 404, or failed -> route applies existing branch | `context/sync.tsx`, `routes/session/index.tsx`; no Project, SDK, schema, migration, or renderer files | ConnectionError retains; NotFound removes/home; generic latest failure shows error/home; stale failures no-op.                                |
 
 ## 14. Reverse Traceability
 
-| Proposed production concept | Requirement ID | Evidence | Why existing logic cannot carry it |
-| --- | --- | --- | --- |
-| Current Instance worktree propagation inside Session list/search | INV-01 | Public same-ID/different-worktree evidence | ProjectTable exposes only one row per ID and cannot recover the current request context. |
+| Proposed production concept                                        | Requirement ID                 | Evidence                                                                                                          | Why existing logic cannot carry it                                                                                                                                                           |
+| ------------------------------------------------------------------ | ------------------------------ | ----------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Current Instance worktree propagation inside Session list/search   | INV-01                         | Public same-ID/different-worktree evidence                                                                        | ProjectTable exposes only one row per ID and cannot recover the current request context.                                                                                                     |
 | Versioned five-state direct-sync validation and active replacement | INV-02, INV-03, INV-05, INV-06 | Deterministic red, concurrent callers, SDK error cause, existing ConnectionError classifier, and raw replacements | Boolean membership cannot distinguish pending/ConnectionError from NotFound/failed or reject stale completion; the existing result and request order supply the state without another query. |
-| Provider-only projection refresh | INV-04 | Explicit user choice and `ddc5e00c60` diff | Full bootstrap updates unrelated projections and re-enters the defect. |
-| Provider dialog use of the shared refresh | INV-04 | Three current auth success call sites | Leaving sender bootstrap would violate the same Provider-only contract even if broadcast consumers are fixed. |
-| Provider refresh failure diagnostic | INV-04 | Provider HTTP requests are reachable and dialogs must not advance on failure | Fire-and-forget rejection or catch-and-success would either leak failure or open stale Model selection. |
-| Reconnect error route handler | INV-06 | Initial load retains only ConnectionError and navigates home for other current errors | SyncProvider cannot navigate; route must preserve that existing distinction while reading latest validation state. |
+| Provider-only projection refresh                                   | INV-04                         | Explicit user choice and `ddc5e00c60` diff                                                                        | Full bootstrap updates unrelated projections and re-enters the defect.                                                                                                                       |
+| Provider dialog use of the shared refresh                          | INV-04                         | Three current auth success call sites                                                                             | Leaving sender bootstrap would violate the same Provider-only contract even if broadcast consumers are fixed.                                                                                |
+| Provider refresh failure diagnostic                                | INV-04                         | Provider HTTP requests are reachable and dialogs must not advance on failure                                      | Fire-and-forget rejection or catch-and-success would either leak failure or open stale Model selection.                                                                                      |
+| Reconnect error route handler                                      | INV-06                         | Initial load retains only ConnectionError and navigates home for other current errors                             | SyncProvider cannot navigate; route must preserve that existing distinction while reading latest validation state.                                                                           |
 
 ## 15. File-Level Change Plan
 
-| File | Add / modify / delete | Exact responsibility of the change | Expected line delta |
-| --- | --- | --- | --- |
-| `packages/opencode/src/session/session.ts` | modify | Carry the current Instance worktree into list/search shared universe evaluation and remove the ProjectTable lookup from `directoryMatchesPath`. | raw +16 / -8 |
-| `packages/opencode/src/cli/cmd/tui/context/sync.tsx` | modify | Track versioned five-state direct-sync validation, centralize validation-aware list replacement, add Provider-only atomic refresh, route Provider event through it, and expose validation/refresh through the existing Sync context. | raw +156 / -47 |
-| `packages/opencode/src/cli/cmd/tui/component/dialog-provider.tsx` | modify | Replace API/code/auto full bootstrap with the shared Provider refresh and stop Model transition on refresh failure. | raw +19 / -7 |
-| `packages/opencode/src/cli/cmd/tui/routes/session/index.tsx` | modify | Catch reconnect force-sync; retain only ConnectionError, and reuse existing toast/home behavior for latest NotFound or failed validation. | raw +16 / -11 |
-| `packages/opencode/test/cli/cmd/tui/sync.test.tsx` | modify | Add public SyncProvider behavior for active/browse composition and Provider-only event refresh. | actual diff recorded in Section 23 |
-| `packages/opencode/test/cli/cmd/tui/session-exit.test.tsx` | modify | Cover list-first delayed success, ConnectionError continuity, reconnect NotFound, and generic 500 toast/home behavior through the real route. | actual diff recorded in Section 23 |
-| `packages/opencode/test/cli/cmd/tui/dialog-provider.test.tsx` | add | Drive public API/code/auto auth success and Provider-refresh failure paths; assert fresh Model selection only after success, active Session retention, and toast/no-transition on failure. | actual diff recorded in Section 23 |
-| `packages/opencode/test/server/session-list.test.ts` | modify | Reproduce one Project ID with two request worktrees and an ancestor historical Session through the real Session service. | actual diff recorded in Section 23 |
+| File                                                              | Add / modify / delete | Exact responsibility of the change                                                                                                                                                                                                   | Expected line delta                |
+| ----------------------------------------------------------------- | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------- |
+| `packages/opencode/src/session/session.ts`                        | modify                | Carry the current Instance worktree into list/search shared universe evaluation and remove the ProjectTable lookup from `directoryMatchesPath`.                                                                                      | raw +16 / -8                       |
+| `packages/opencode/src/cli/cmd/tui/context/sync.tsx`              | modify                | Track versioned five-state direct-sync validation, centralize validation-aware list replacement, add Provider-only atomic refresh, route Provider event through it, and expose validation/refresh through the existing Sync context. | raw +156 / -47                     |
+| `packages/opencode/src/cli/cmd/tui/component/dialog-provider.tsx` | modify                | Replace API/code/auto full bootstrap with the shared Provider refresh and stop Model transition on refresh failure.                                                                                                                  | raw +19 / -7                       |
+| `packages/opencode/src/cli/cmd/tui/routes/session/index.tsx`      | modify                | Catch reconnect force-sync; retain only ConnectionError, and reuse existing toast/home behavior for latest NotFound or failed validation.                                                                                            | raw +16 / -11                      |
+| `packages/opencode/test/cli/cmd/tui/sync.test.tsx`                | modify                | Add public SyncProvider behavior for active/browse composition and Provider-only event refresh.                                                                                                                                      | actual diff recorded in Section 23 |
+| `packages/opencode/test/cli/cmd/tui/session-exit.test.tsx`        | modify                | Cover list-first delayed success, ConnectionError continuity, reconnect NotFound, and generic 500 toast/home behavior through the real route.                                                                                        | actual diff recorded in Section 23 |
+| `packages/opencode/test/cli/cmd/tui/dialog-provider.test.tsx`     | add                   | Drive public API/code/auto auth success and Provider-refresh failure paths; assert fresh Model selection only after success, active Session retention, and toast/no-transition on failure.                                           | actual diff recorded in Section 23 |
+| `packages/opencode/test/server/session-list.test.ts`              | modify                | Reproduce one Project ID with two request worktrees and an ancestor historical Session through the real Session service.                                                                                                             | actual diff recorded in Section 23 |
 
 No production file is added. Four production files and 140 effective production
 code lines remain below the user's four-file/200-code-line limits; the 207 raw
@@ -667,18 +675,18 @@ added lines include 34 Chinese explanatory comments and structural formatting.
 
 ## 16. TDD Behavior Slices
 
-| Order | Red behavior | Why current code fails | Minimal green behavior | Regression protected |
-| --- | --- | --- | --- | --- |
-| 1 | Session list from worktree B must include an ancestor historical Session while Project row worktree remains A and A/B share one Project ID. | `directoryMatchesPath` compares B against persisted A and disables directory fallback. | Shared list/search universe receives and uses the current Instance worktree B. | Current root/thirdparty Session list omission without migration. |
-| 2 | Real Session route starts reconnect with direct sync delayed; let an empty list land first, then complete direct sync. Metadata/route must remain continuously present and exit must print `opencode -s ses_exit`. | Raw list reconcile creates an observable blank interval before direct sync reinserts. | Pending validation preserves the exact old active object; success changes state to valid and updates it. | List-first reconnect cannot flicker gray or lose exit ID. |
-| 3 | Real Session route reconnects while direct get throws a ConnectionError and list omits it; metadata, route, and exit ID must remain continuously present. | Boolean sync-membership absence deletes metadata while route intentionally remains. | Unavailable validation preserves the old active object and route. | Daemon transport interruption cannot recreate the reported gray screen. |
-| 4 | After a valid active Session is loaded, omit its delete event, switch direct get to a 404 NotFound, and emit reconnect; stale metadata must disappear and the real route must return home. | A retention rule based only on old store presence revives the Session; reconnect sync currently drops its rejection. | NotFound validation removes/excludes the active ID and the route applies home navigation. | Session deleted while disconnected cannot remain a stale route. |
-| 5 | Make the latest reconnect direct sync return a non-404, non-ConnectionError server failure; the route must show the error and return home instead of treating stale metadata as success. | Collapsing every non-404 into transport-unavailable hides existing failures. | `failed` validation follows the current generic error branch; only ConnectionError retains. | No catch-and-stale-success error expansion. |
-| 6 | Start two direct force-syncs for one Session; let the newer request reach NotFound, then release the older successful snapshot. Metadata must stay absent and validation must stay not-found. | Unversioned async completion can restore a deleted Session after newer authority. | Per-Session request version ignores every stale completion before store/validation mutation and does not reject to the route. | Initial connection and repeated reconnect concurrency cannot reverse authority. |
-| 7 | SyncProvider receives Provider `global.disposed`; Provider list changes, while active Session, Config, and Agent values remain unchanged. | Current handler runs full bootstrap, replacing all fields and removing the cross-path Session. | Atomic Provider-only refresh updates only Provider-derived fields. | Other TUI Provider update trigger. |
-| 8 | Parameterized public Provider dialog tests complete API-key, OAuth code, and OAuth auto auth; each must reach Model selection with refreshed Provider data while the active Session remains present. | Each sender path independently calls full bootstrap; testing only API allows code/auto to retain the defect. | Each auth success path awaits the same Provider refresh before Model selection. | Initiating/main and secondary TUI direct Provider paths for all shipped auth methods. |
-| 9 | For API-key, OAuth code, and OAuth auto, make the post-auth Provider refresh reject; each dialog must show an error and must not enter Model selection or remove the active Session. | The three async callers have separate completion code; an omitted rejection branch can advance stale UI or leak an unhandled rejection. | Each caller maps refresh rejection to its existing toast/dialog boundary and returns without a success transition. | Provider refresh failure is diagnostic failure, never stale success, for every reachable caller. |
-| 10 | Deliver `session.deleted`, navigate the route home, then apply an older browse snapshot containing that ID; metadata must remain absent. | Filtering revoked IDs only while they are the active route lets route navigation turn a known terminal row back into an ordinary browse entry. | Every replacement filters IDs whose latest validation is `not-found`, independent of the current route. | A delivered delete remains authoritative over HTTP ordering and route lifecycle. |
+| Order | Red behavior                                                                                                                                                                                                       | Why current code fails                                                                                                                         | Minimal green behavior                                                                                                        | Regression protected                                                                             |
+| ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| 1     | Session list from worktree B must include an ancestor historical Session while Project row worktree remains A and A/B share one Project ID.                                                                        | `directoryMatchesPath` compares B against persisted A and disables directory fallback.                                                         | Shared list/search universe receives and uses the current Instance worktree B.                                                | Current root/thirdparty Session list omission without migration.                                 |
+| 2     | Real Session route starts reconnect with direct sync delayed; let an empty list land first, then complete direct sync. Metadata/route must remain continuously present and exit must print `opencode -s ses_exit`. | Raw list reconcile creates an observable blank interval before direct sync reinserts.                                                          | Pending validation preserves the exact old active object; success changes state to valid and updates it.                      | List-first reconnect cannot flicker gray or lose exit ID.                                        |
+| 3     | Real Session route reconnects while direct get throws a ConnectionError and list omits it; metadata, route, and exit ID must remain continuously present.                                                          | Boolean sync-membership absence deletes metadata while route intentionally remains.                                                            | Unavailable validation preserves the old active object and route.                                                             | Daemon transport interruption cannot recreate the reported gray screen.                          |
+| 4     | After a valid active Session is loaded, omit its delete event, switch direct get to a 404 NotFound, and emit reconnect; stale metadata must disappear and the real route must return home.                         | A retention rule based only on old store presence revives the Session; reconnect sync currently drops its rejection.                           | NotFound validation removes/excludes the active ID and the route applies home navigation.                                     | Session deleted while disconnected cannot remain a stale route.                                  |
+| 5     | Make the latest reconnect direct sync return a non-404, non-ConnectionError server failure; the route must show the error and return home instead of treating stale metadata as success.                           | Collapsing every non-404 into transport-unavailable hides existing failures.                                                                   | `failed` validation follows the current generic error branch; only ConnectionError retains.                                   | No catch-and-stale-success error expansion.                                                      |
+| 6     | Start two direct force-syncs for one Session; let the newer request reach NotFound, then release the older successful snapshot. Metadata must stay absent and validation must stay not-found.                      | Unversioned async completion can restore a deleted Session after newer authority.                                                              | Per-Session request version ignores every stale completion before store/validation mutation and does not reject to the route. | Initial connection and repeated reconnect concurrency cannot reverse authority.                  |
+| 7     | SyncProvider receives Provider `global.disposed`; Provider list changes, while active Session, Config, and Agent values remain unchanged.                                                                          | Current handler runs full bootstrap, replacing all fields and removing the cross-path Session.                                                 | Atomic Provider-only refresh updates only Provider-derived fields.                                                            | Other TUI Provider update trigger.                                                               |
+| 8     | Parameterized public Provider dialog tests complete API-key, OAuth code, and OAuth auto auth; each must reach Model selection with refreshed Provider data while the active Session remains present.               | Each sender path independently calls full bootstrap; testing only API allows code/auto to retain the defect.                                   | Each auth success path awaits the same Provider refresh before Model selection.                                               | Initiating/main and secondary TUI direct Provider paths for all shipped auth methods.            |
+| 9     | For API-key, OAuth code, and OAuth auto, make the post-auth Provider refresh reject; each dialog must show an error and must not enter Model selection or remove the active Session.                               | The three async callers have separate completion code; an omitted rejection branch can advance stale UI or leak an unhandled rejection.        | Each caller maps refresh rejection to its existing toast/dialog boundary and returns without a success transition.            | Provider refresh failure is diagnostic failure, never stale success, for every reachable caller. |
+| 10    | Deliver `session.deleted`, navigate the route home, then apply an older browse snapshot containing that ID; metadata must remain absent.                                                                           | Filtering revoked IDs only while they are the active route lets route navigation turn a known terminal row back into an ordinary browse entry. | Every replacement filters IDs whose latest validation is `not-found`, independent of the current route.                       | A delivered delete remains authoritative over HTTP ordering and route lifecycle.                 |
 
 Each slice is written and observed red before its minimal production change.
 Tests use the real providers/components and replace only the external HTTP/SSE
@@ -687,10 +695,10 @@ asserts private helper names, source text, or request counts.
 
 ## 17. Chinese Comment Budget
 
-| Metric | Estimate | Method |
-| --- | --- | --- |
-| Effective changed code lines `E` | 700 actual | Production and test executable lines; excludes imports, blank/comment-only lines, pure delimiter-only formatting, generated files, and pure moves. |
-| Required Chinese explanatory comments `C` | 105 required; 112 actual | `C >= max(1, ceil(E * 0.15))`; actual ratio is 16.00%. |
+| Metric                                    | Estimate                 | Method                                                                                                                                             |
+| ----------------------------------------- | ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Effective changed code lines `E`          | 700 actual               | Production and test executable lines; excludes imports, blank/comment-only lines, pure delimiter-only formatting, generated files, and pure moves. |
+| Required Chinese explanatory comments `C` | 105 required; 112 actual | `C >= max(1, ceil(E * 0.15))`; actual ratio is 16.00%.                                                                                             |
 
 Qualifying comments will explain: request Instance worktree versus persisted
 Project metadata; shared list/search universe ownership; browse snapshot versus active route ownership;
@@ -703,19 +711,19 @@ must be adjacent to those decisions and may not restate calls or assertions.
 
 ## 18. Verification
 
-| Command | Working directory | Evidence produced |
-| --- | --- | --- |
-| `bun test test/cli/cmd/tui/session-exit.test.tsx` | `packages/opencode` | Real route-to-stdout cross-path Session identity. |
-| `bun test test/cli/cmd/tui/sync.test.tsx` | `packages/opencode` | Active/browse composition, Provider-only refresh, reconnect regressions. |
-| `bun test test/cli/cmd/tui/dialog-provider.test.tsx` | `packages/opencode` | API/code/auto initiating dialogs use refreshed models; refresh rejection shows toast and blocks Model transition without Session loss. |
-| `bun test test/server/session-list.test.ts --test-name-pattern "shared Project ID|legacy Session|directory|path"` | `packages/opencode` | Current Instance worktree, no-migration, and path browse producer behavior. |
-| `bun test test/cli/tui/use-event.test.tsx test/cli/cmd/tui/sdk.test.tsx` | `packages/opencode` | Existing active Session event admission and SSE reconnect remain green. |
-| `bun typecheck` | `packages/opencode` | Sync context and dialog contracts are type-safe. |
-| Live ancestor red loop plus the corrected R8 source loop from section 8 | `packages/opencode` | The old running daemon remains a read-only red control; current source returns `first=false, second=false`, and the compiled isolated cross-clone scenario verifies the producer and TUI together. |
-| `bun run build --single --skip-install --skip-embed-web-ui` | `packages/opencode` | Current Windows artifact compiles from the repaired source. |
-| `bun run script/smoke-opentui-artifact.ts --binary F:\ML\PythonAIProject\Claude-Code\opencode\packages\opencode\dist\opencode-windows-x64\bin\opencode.exe --scenario target-liveness` | `packages/opencode` | Existing compiled renderer/event/exit lifecycle remains green. |
-| Isolated compiled shared-daemon scenario: launch daemon in A, launch `-s` for A Session from sibling B, connect a fake Provider, then Ctrl+C | `packages/opencode` | No gray frame; Provider/model data updates; prompt remains live; Continue uses concrete Session ID. |
-| `git diff --check` | repository root | No whitespace errors. |
+| Command                                                                                                                                                                                | Working directory   | Evidence produced                                                                                                                                                                                  |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ | ------------------- | --------------------------------------------------------------------------- |
+| `bun test test/cli/cmd/tui/session-exit.test.tsx`                                                                                                                                      | `packages/opencode` | Real route-to-stdout cross-path Session identity.                                                                                                                                                  |
+| `bun test test/cli/cmd/tui/sync.test.tsx`                                                                                                                                              | `packages/opencode` | Active/browse composition, Provider-only refresh, reconnect regressions.                                                                                                                           |
+| `bun test test/cli/cmd/tui/dialog-provider.test.tsx`                                                                                                                                   | `packages/opencode` | API/code/auto initiating dialogs use refreshed models; refresh rejection shows toast and blocks Model transition without Session loss.                                                             |
+| `bun test test/server/session-list.test.ts --test-name-pattern "shared Project ID                                                                                                      | legacy Session      | directory                                                                                                                                                                                          | path"` | `packages/opencode` | Current Instance worktree, no-migration, and path browse producer behavior. |
+| `bun test test/cli/tui/use-event.test.tsx test/cli/cmd/tui/sdk.test.tsx`                                                                                                               | `packages/opencode` | Existing active Session event admission and SSE reconnect remain green.                                                                                                                            |
+| `bun typecheck`                                                                                                                                                                        | `packages/opencode` | Sync context and dialog contracts are type-safe.                                                                                                                                                   |
+| Live ancestor red loop plus the corrected R8 source loop from section 8                                                                                                                | `packages/opencode` | The old running daemon remains a read-only red control; current source returns `first=false, second=false`, and the compiled isolated cross-clone scenario verifies the producer and TUI together. |
+| `bun run build --single --skip-install --skip-embed-web-ui`                                                                                                                            | `packages/opencode` | Current Windows artifact compiles from the repaired source.                                                                                                                                        |
+| `bun run script/smoke-opentui-artifact.ts --binary F:\ML\PythonAIProject\Claude-Code\opencode\packages\opencode\dist\opencode-windows-x64\bin\opencode.exe --scenario target-liveness` | `packages/opencode` | Existing compiled renderer/event/exit lifecycle remains green.                                                                                                                                     |
+| Isolated compiled shared-daemon scenario: launch daemon in A, launch `-s` for A Session from sibling B, connect a fake Provider, then Ctrl+C                                           | `packages/opencode` | No gray frame; Provider/model data updates; prompt remains live; Continue uses concrete Session ID.                                                                                                |
+| `git diff --check`                                                                                                                                                                     | repository root     | No whitespace errors.                                                                                                                                                                              |
 
 The live host daemon and current TUI processes remain read-only evidence and
 must not be stopped. Compiled verification uses an isolated temporary daemon,
@@ -723,15 +731,15 @@ database/config root, and fake Provider transport.
 
 ## 19. Diff Budget
 
-| Metric | Estimate | Justification |
-| --- | --- | --- |
-| Production files modified | 4 | Session list producer, TUI projection owner, Provider auth caller, and existing Session route failure owner. |
-| Production files added/deleted | 0 | No new module or replacement path. |
-| Production changed lines | 120-150 | Instance-worktree predicate, versioned five-state active replacement, Provider refresh/callers, and existing route error handling. |
-| Test files modified | 3 | Session list, SyncProvider, and Session/Exit seams. |
-| Test files added | 1 | Focused public Provider dialog seam. |
-| Test changed lines | 375-425 | Nine vertical observed behaviors, with auth paths table-driven inside the dialog seam. |
-| Schema/migration/generated lines | 0 | Explicitly prohibited and unnecessary. |
+| Metric                           | Estimate | Justification                                                                                                                      |
+| -------------------------------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| Production files modified        | 4        | Session list producer, TUI projection owner, Provider auth caller, and existing Session route failure owner.                       |
+| Production files added/deleted   | 0        | No new module or replacement path.                                                                                                 |
+| Production changed lines         | 120-150  | Instance-worktree predicate, versioned five-state active replacement, Provider refresh/callers, and existing route error handling. |
+| Test files modified              | 3        | Session list, SyncProvider, and Session/Exit seams.                                                                                |
+| Test files added                 | 1        | Focused public Provider dialog seam.                                                                                               |
+| Test changed lines               | 375-425  | Nine vertical observed behaviors, with auth paths table-driven inside the dialog seam.                                             |
+| Schema/migration/generated lines | 0        | Explicitly prohibited and unnecessary.                                                                                             |
 
 ## 20. Real Risks and Open Decisions
 
@@ -801,16 +809,16 @@ evidence, and audit the complete original scope on every round. It must check:
 
 ## 22. Plan Audit Record
 
-| Round | Audited revision | Full scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
-| --- | --- | --- | --- | --- | --- | --- |
-| Historical | R1 | yes | None | NB-01, NB-02, NB-03 | APPROVE, superseded by newly observed gray-screen scope | `ses_022f7d2aaffee7yATIY9DPvHBM` |
-| Draft | R2 | no | Not audited; superseded after public worktree evidence | None | superseded | local planning |
-| 1 | R3 | yes | B-01 | None | BLOCK | `ses_00f280be3ffeYRBC5QGvKvt2To` |
-| 2 | R4 | yes | B-01 | None | BLOCK | `ses_00f280be3ffeYRBC5QGvKvt2To` |
-| 3 | R5 | yes | B-01 | None | BLOCK | `ses_00f280be3ffeYRBC5QGvKvt2To` |
-| 4 | R6 | yes | B-01 | None | BLOCK | `ses_00f280be3ffeYRBC5QGvKvt2To` |
-| 5 | R7 | yes | None | None | APPROVE — exact plan revision R7 | `ses_00f280be3ffeYRBC5QGvKvt2To` |
-| 6 | R8 | pending | pending | pending | pending | pending |
+| Round      | Audited revision | Full scope? | Blocking findings                                      | Non-blocking findings | Result                                                  | Invocation reference             |
+| ---------- | ---------------- | ----------- | ------------------------------------------------------ | --------------------- | ------------------------------------------------------- | -------------------------------- |
+| Historical | R1               | yes         | None                                                   | NB-01, NB-02, NB-03   | APPROVE, superseded by newly observed gray-screen scope | `ses_022f7d2aaffee7yATIY9DPvHBM` |
+| Draft      | R2               | no          | Not audited; superseded after public worktree evidence | None                  | superseded                                              | local planning                   |
+| 1          | R3               | yes         | B-01                                                   | None                  | BLOCK                                                   | `ses_00f280be3ffeYRBC5QGvKvt2To` |
+| 2          | R4               | yes         | B-01                                                   | None                  | BLOCK                                                   | `ses_00f280be3ffeYRBC5QGvKvt2To` |
+| 3          | R5               | yes         | B-01                                                   | None                  | BLOCK                                                   | `ses_00f280be3ffeYRBC5QGvKvt2To` |
+| 4          | R6               | yes         | B-01                                                   | None                  | BLOCK                                                   | `ses_00f280be3ffeYRBC5QGvKvt2To` |
+| 5          | R7               | yes         | None                                                   | None                  | APPROVE — exact plan revision R7                        | `ses_00f280be3ffeYRBC5QGvKvt2To` |
+| 6          | R8               | pending     | pending                                                | pending               | pending                                                 | pending                          |
 
 R1 and R7 approvals are invalid for R8 and grant no implementation permission.
 R2 was never audited; R3, R4, R5, and R6 were blocked.
@@ -972,16 +980,16 @@ None.
 
 ### Actual Changed-File Inventory
 
-| File | Raw diff | Actual responsibility |
-| --- | --- | --- |
-| `packages/opencode/src/session/session.ts` | +16 / -8 | Current Instance worktree reaches the shared list/search compatibility predicate. |
-| `packages/opencode/src/cli/cmd/tui/context/sync.tsx` | +156 / -47 | Central Session replacement, versioned five-state validation, route-independent not-found filtering, and atomic Provider-only refresh. |
-| `packages/opencode/src/cli/cmd/tui/routes/session/index.tsx` | +16 / -11 | Initial/reconnect sync share ConnectionError versus error/toast/home handling. |
-| `packages/opencode/src/cli/cmd/tui/component/dialog-provider.tsx` | +19 / -7 | API/code/auto use the shared refresh and stop on toast-visible failure. |
-| `packages/opencode/test/server/session-list.test.ts` | +65 / -0 | Shared Project ID with two request worktrees and historical ancestor Session. |
-| `packages/opencode/test/cli/cmd/tui/session-exit.test.tsx` | +308 / -23 | Real Session route/ExitProvider list ordering and reconnect result classes. |
-| `packages/opencode/test/cli/cmd/tui/sync.test.tsx` | +179 / -0 | Provider ownership, deletion/list ordering, and direct-sync request versions. |
-| `packages/opencode/test/cli/cmd/tui/dialog-provider.test.tsx` | +239 / -0 | Public API/code/auto success and refresh-rejection Dialog behavior. |
+| File                                                              | Raw diff   | Actual responsibility                                                                                                                  |
+| ----------------------------------------------------------------- | ---------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `packages/opencode/src/session/session.ts`                        | +16 / -8   | Current Instance worktree reaches the shared list/search compatibility predicate.                                                      |
+| `packages/opencode/src/cli/cmd/tui/context/sync.tsx`              | +156 / -47 | Central Session replacement, versioned five-state validation, route-independent not-found filtering, and atomic Provider-only refresh. |
+| `packages/opencode/src/cli/cmd/tui/routes/session/index.tsx`      | +16 / -11  | Initial/reconnect sync share ConnectionError versus error/toast/home handling.                                                         |
+| `packages/opencode/src/cli/cmd/tui/component/dialog-provider.tsx` | +19 / -7   | API/code/auto use the shared refresh and stop on toast-visible failure.                                                                |
+| `packages/opencode/test/server/session-list.test.ts`              | +65 / -0   | Shared Project ID with two request worktrees and historical ancestor Session.                                                          |
+| `packages/opencode/test/cli/cmd/tui/session-exit.test.tsx`        | +308 / -23 | Real Session route/ExitProvider list ordering and reconnect result classes.                                                            |
+| `packages/opencode/test/cli/cmd/tui/sync.test.tsx`                | +179 / -0  | Provider ownership, deletion/list ordering, and direct-sync request versions.                                                          |
+| `packages/opencode/test/cli/cmd/tui/dialog-provider.test.tsx`     | +239 / -0  | Public API/code/auto success and refresh-rejection Dialog behavior.                                                                    |
 
 No production module, schema, migration, generated SDK, dependency, setting,
 feature flag, or event schema was added. The final repair touches exactly four
@@ -992,18 +1000,18 @@ SSE, renderer, Project identity, and database ownership remain unchanged.
 
 ### Red-Green Evidence
 
-| Behavior | Red evidence | Green evidence |
-| --- | --- | --- |
-| Current worktree path compatibility | New service test received `[]` instead of the ancestor Session. | Focused worktree/legacy command: 2 pass. |
-| Direct Session versus late browse | Real route expected `ses_exit`, received `undefined`. | `session-exit.test.tsx`: 8 pass. |
-| List-first reconnect | Removing pending retention made `First connected` become `undefined`. | Pending case remains continuously renderable. |
-| ConnectionError | Reconnect rejected with `Unable to connect to reconnect fixture`. | Route/metadata/concrete exit ID remain present. |
-| NotFound | Mutating 404 classification to 410 timed out before `not-found`. | 404 removes metadata and navigates home. |
-| Generic failure | Reconnect rejection escaped the route error owner. | 500 error is toast-visible and route becomes home. |
-| Direct-sync version race | Removing both version guards produced `valid` after newer `not-found`. | Older success cannot restore metadata. |
-| Delivered delete versus late browse | Initial implementation remained `valid`; strengthened route-home test reinserted the deleted object. | Event records `not-found`; late browse stays filtered after home navigation. |
-| Provider broadcast ownership | Expected old Config, received `new-config` after `global.disposed`. | Provider becomes new while Config/Agent/Session remain old. |
-| Provider initiating Dialog | API success reached fresh Model but active Session became `undefined`; refresh failure leaked an unhandled rejection. | API/code/auto success and failure matrix: 6 pass, 15 assertions. |
+| Behavior                            | Red evidence                                                                                                          | Green evidence                                                               |
+| ----------------------------------- | --------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| Current worktree path compatibility | New service test received `[]` instead of the ancestor Session.                                                       | Focused worktree/legacy command: 2 pass.                                     |
+| Direct Session versus late browse   | Real route expected `ses_exit`, received `undefined`.                                                                 | `session-exit.test.tsx`: 8 pass.                                             |
+| List-first reconnect                | Removing pending retention made `First connected` become `undefined`.                                                 | Pending case remains continuously renderable.                                |
+| ConnectionError                     | Reconnect rejected with `Unable to connect to reconnect fixture`.                                                     | Route/metadata/concrete exit ID remain present.                              |
+| NotFound                            | Mutating 404 classification to 410 timed out before `not-found`.                                                      | 404 removes metadata and navigates home.                                     |
+| Generic failure                     | Reconnect rejection escaped the route error owner.                                                                    | 500 error is toast-visible and route becomes home.                           |
+| Direct-sync version race            | Removing both version guards produced `valid` after newer `not-found`.                                                | Older success cannot restore metadata.                                       |
+| Delivered delete versus late browse | Initial implementation remained `valid`; strengthened route-home test reinserted the deleted object.                  | Event records `not-found`; late browse stays filtered after home navigation. |
+| Provider broadcast ownership        | Expected old Config, received `new-config` after `global.disposed`.                                                   | Provider becomes new while Config/Agent/Session remain old.                  |
+| Provider initiating Dialog          | API success reached fresh Model but active Session became `undefined`; refresh failure leaked an unhandled rejection. | API/code/auto success and failure matrix: 6 pass, 15 assertions.             |
 
 Every production branch above has a behavior-sensitive test through a public
 service, route/context, SDK transport, rendered Dialog, or ExitProvider seam.
@@ -1011,16 +1019,16 @@ Mutation checks were restored immediately after proving test sensitivity.
 
 ### Verification Results
 
-| Command or scenario | Result |
-| --- | --- |
-| `bun test test/cli/cmd/tui/session-exit.test.tsx test/cli/cmd/tui/sync.test.tsx test/cli/cmd/tui/dialog-provider.test.tsx test/cli/tui/use-event.test.tsx test/cli/cmd/tui/sdk.test.tsx` | 44 pass, 0 fail, 116 assertions. A non-fatal existing KV first-read ENOENT diagnostic was logged. |
-| `bun test --timeout 30000 test/server/session-list.test.ts` | 23 pass, 0 fail, 120 assertions. The default five-second Windows fixture disposal limit timed out under load; the command-only 30-second limit changed no test or product behavior. |
-| `bun typecheck` | Exit 0. |
-| Corrected R8 source feedback loop from Section 8 | Exit 0 with `{"first":false,"second":false}`. |
-| `bun run build --single --skip-install --skip-embed-web-ui` with Windows system proxy `127.0.0.1:7897` | Built `0.0.0-dev-smark-202608111438`; version, voice Worker, and OpenTUI DLL smokes passed; executable SHA-256 `777ec6f83e1c4331c8a7aebb3791de2de89e03c8421503bcc5f5dfc9f01b1b03`. |
-| Compiled `target-liveness` artifact smoke | Passed with 2 source/rendered target glyphs, 2 model requests, and 14 target events. |
-| Temporary isolated compiled cross-clone run using the existing smoke harness | Passed: daemon/TUI A, same-root-commit clone B, explicit A Session from B, real `auth.set/global.disposed`, 2 model requests, 14 target events, concrete `sessionID=ses_00eb4ef6bffeJUGVM9lZuWOkGJ`, and normal Ctrl+C. The temporary harness extension was fully reverted; `git diff --exit-code -- packages/opencode/script/smoke-opentui-artifact.ts` passed. |
-| `git diff --check` | Exit 0; only line-ending warnings from unrelated dirty files. |
+| Command or scenario                                                                                                                                                                      | Result                                                                                                                                                                                                                                                                                                                                                           |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `bun test test/cli/cmd/tui/session-exit.test.tsx test/cli/cmd/tui/sync.test.tsx test/cli/cmd/tui/dialog-provider.test.tsx test/cli/tui/use-event.test.tsx test/cli/cmd/tui/sdk.test.tsx` | 44 pass, 0 fail, 116 assertions. A non-fatal existing KV first-read ENOENT diagnostic was logged.                                                                                                                                                                                                                                                                |
+| `bun test --timeout 30000 test/server/session-list.test.ts`                                                                                                                              | 23 pass, 0 fail, 120 assertions. The default five-second Windows fixture disposal limit timed out under load; the command-only 30-second limit changed no test or product behavior.                                                                                                                                                                              |
+| `bun typecheck`                                                                                                                                                                          | Exit 0.                                                                                                                                                                                                                                                                                                                                                          |
+| Corrected R8 source feedback loop from Section 8                                                                                                                                         | Exit 0 with `{"first":false,"second":false}`.                                                                                                                                                                                                                                                                                                                    |
+| `bun run build --single --skip-install --skip-embed-web-ui` with Windows system proxy `127.0.0.1:7897`                                                                                   | Built `0.0.0-dev-smark-202608111438`; version, voice Worker, and OpenTUI DLL smokes passed; executable SHA-256 `777ec6f83e1c4331c8a7aebb3791de2de89e03c8421503bcc5f5dfc9f01b1b03`.                                                                                                                                                                               |
+| Compiled `target-liveness` artifact smoke                                                                                                                                                | Passed with 2 source/rendered target glyphs, 2 model requests, and 14 target events.                                                                                                                                                                                                                                                                             |
+| Temporary isolated compiled cross-clone run using the existing smoke harness                                                                                                             | Passed: daemon/TUI A, same-root-commit clone B, explicit A Session from B, real `auth.set/global.disposed`, 2 model requests, 14 target events, concrete `sessionID=ses_00eb4ef6bffeJUGVM9lZuWOkGJ`, and normal Ctrl+C. The temporary harness extension was fully reverted; `git diff --exit-code -- packages/opencode/script/smoke-opentui-artifact.ts` passed. |
+| `git diff --check`                                                                                                                                                                       | Exit 0; only line-ending warnings from unrelated dirty files.                                                                                                                                                                                                                                                                                                    |
 
 The first build attempt failed only because direct access to
 `https://models.dev/api.json` was refused; using the already-enabled Windows

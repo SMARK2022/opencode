@@ -32,7 +32,6 @@ const SAMPLE_BYTES = 4096
 
 const MAX_CONTENT_TOKENS = 16000
 
-
 // 设备文件保护 - 阻止会导致进程挂起或无限输出的设备文件
 const BLOCKED_DEVICE_PATHS = new Set([
   "/dev/zero",
@@ -138,7 +137,19 @@ function findUnexpandedFileInContext(
 // Schema output is identical (`type: "number"`), so the LLM view is
 // unchanged; purely CLI-facing uses must now send numbers rather than strings.
 
-import { type ReadRangeMeta, canonicalReadPath, escapeXmlText, escapeXmlAttr, formatModified, isReadRangeMeta, findReadStub, findOverlapNote, renderReadOutput, renderReadStub, computeUnreadRanges } from "@opencode-ai/core/tool/read-presentation"
+import {
+  type ReadRangeMeta,
+  canonicalReadPath,
+  escapeXmlText,
+  escapeXmlAttr,
+  formatModified,
+  isReadRangeMeta,
+  findReadStub,
+  findOverlapNote,
+  renderReadOutput,
+  renderReadStub,
+  computeUnreadRanges,
+} from "@opencode-ai/core/tool/read-presentation"
 // 导出既有共享身份规则，失败反馈不能重新定义Windows路径规范化。
 export { canonicalReadPath } from "@opencode-ai/core/tool/read-presentation"
 
@@ -162,7 +173,11 @@ function modifiedMsOf(stat: { mtime: Option.Option<Date> }) {
 export function visibleReadMeta(part: {
   type?: string
   tool?: string
-  state?: { status?: string; time?: { start?: number; end?: number; compacted?: number }; metadata?: { read?: unknown } }
+  state?: {
+    status?: string
+    time?: { start?: number; end?: number; compacted?: number }
+    metadata?: { read?: unknown }
+  }
 }): ReadRangeMeta | undefined {
   if (part.type !== "tool" || part.tool !== "read") return undefined
   if (part.state?.status !== "completed" || part.state?.time?.compacted !== undefined) return undefined
@@ -189,7 +204,6 @@ function collectVisibleReads(messages: Array<{ info: { role: string }; parts: an
   }
   return reads
 }
-
 
 export const Parameters = Schema.Struct({
   filePath: Schema.String.annotate({ description: "The absolute path to the file or directory to read" }),
@@ -497,7 +511,8 @@ export const ReadTool = Tool.define<
                   sessionID: ctx.sessionID,
                 },
                 { tokenBudget: 1600 },
-              ).pipe(Effect.option)
+              )
+              .pipe(Effect.option)
           : Option.some(input)
         // 图片typed失败仅省略该payload；loaded仍记录真实读盘动作，PDF不经过decoder。
         if (Option.isNone(attachment)) {
@@ -528,10 +543,9 @@ export const ReadTool = Tool.define<
         // 帮助模型知道用什么工具读取而非盲目重试。
         const ext = path.extname(filepath).toLowerCase()
         const suggestion = getBinaryFileSuggestion(ext)
-        return yield* Effect.fail(new Error(
-          `Cannot read binary file: ${filepath}` +
-          (suggestion ? `\n${suggestion}` : ""),
-        ))
+        return yield* Effect.fail(
+          new Error(`Cannot read binary file: ${filepath}` + (suggestion ? `\n${suggestion}` : "")),
+        )
       }
 
       // 每次 execute 仅创建一个预算；Effect 中断同时关闭底层 Node 流。
@@ -568,21 +582,21 @@ export const ReadTool = Tool.define<
 
       // #142：构造当前读区间元数据供 stub/overlap
       // #142：当前文件 size
-const size = fileSizeOf(stat)
+      const size = fileSizeOf(stat)
       // #142：当前 mtime
-const mtimeMs = modifiedMsOf(stat)
+      const mtimeMs = modifiedMsOf(stat)
       // #142：展示用 modified
-const modified = formatModified(mtimeMs)
+      const modified = formatModified(mtimeMs)
       // #142：区间起点
-const start = file.offset
+      const start = file.offset
       // #142：空区间 end 规则
-const end = file.raw.length === 0 ? Math.max(0, file.offset - 1) : file.offset + file.raw.length - 1
+      const end = file.raw.length === 0 ? Math.max(0, file.offset - 1) : file.offset + file.raw.length - 1
       // #142：实际返回行数
-const returned = file.raw.length
+      const returned = file.raw.length
       // #142：truncated 元数据
-const truncated = file.more || file.cut
+      const truncated = file.more || file.cut
       // #142：构造当前 read 元数据
-const current: ReadRangeMeta = {
+      const current: ReadRangeMeta = {
         path: filepath,
         canonicalPath: canonicalReadPath(filepath),
         type: "file",
@@ -600,9 +614,12 @@ const current: ReadRangeMeta = {
       }
       // #142：可见上下文驱动 stub，优先于 mtime 缓存
       // #142：加载可见 reads
-const visibleReads = collectVisibleReads(ctx.messages.filter(message => message.info.sessionID === ctx.sessionID), current.canonicalPath)
+      const visibleReads = collectVisibleReads(
+        ctx.messages.filter((message) => message.info.sessionID === ctx.sessionID),
+        current.canonicalPath,
+      )
       // #142：stub 判定
-const stub = findReadStub(visibleReads, current, file.raw.join("\n").length)
+      const stub = findReadStub(visibleReads, current, file.raw.join("\n").length)
       if (stub) {
         // #142：可见范围 stub，避免重复灌入相同内容
         // covering 的总行数与 EOF 证明必须一起发布，沿用目标已有 totalExact。
@@ -646,16 +663,16 @@ const stub = findReadStub(visibleReads, current, file.raw.join("\n").length)
 
       // #142：异步大纲，失败不应阻断主读取（promise 内自处理）
       // #142：异步 outline
-// [local-smark] 使用 readOutlineCached 替代 readOutline，
-// 按 canonicalPath+size+modifiedMs 缓存 outline，避免每次 read 重新扫描文件
-const outline = yield* Effect.promise((signal) =>
+      // [local-smark] 使用 readOutlineCached 替代 readOutline，
+      // 按 canonicalPath+size+modifiedMs 缓存 outline，避免每次 read 重新扫描文件
+      const outline = yield* Effect.promise((signal) =>
         readOutlineCached(filepath, file.count, file.offset, size, mtimeMs, file.totalExact, auxiliaryBudget, signal),
       )
       // #142：部分重叠仍返回内容，但附 note
       // #142：overlap 判定
-const overlap = findOverlapNote(visibleReads, current)
+      const overlap = findOverlapNote(visibleReads, current)
       // #142：渲染主输出
-let output = renderReadOutput({
+      let output = renderReadOutput({
         path: filepath,
         size,
         modified,
@@ -681,7 +698,6 @@ let output = renderReadOutput({
       // if (shouldInjectCyberReminder(ext)) {
       //   output += CYBER_REMINDER
       // }
-
 
       return {
         title,

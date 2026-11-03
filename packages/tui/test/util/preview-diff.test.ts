@@ -53,8 +53,8 @@ describe("previewDiff", () => {
 
     // #564：截断预览只保留真实正文行；折叠语义由 BlockTool footer 承载，预览不再注入 ` …` sentinel 行。
     expect(hunk?.lines).toEqual([
-      " describe(\"ModelsDev Service\", () => {",
-      "   it.live(\"get() returns providers from disk when cache file exists\", () =>",
+      ' describe("ModelsDev Service", () => {',
+      '   it.live("get() returns providers from disk when cache file exists", () =>',
       "     Effect.gen(function* () {",
       "       yield* writeCache(fixture)",
       "-      const state = yield* Ref.make(initialState)",

@@ -132,7 +132,11 @@ const unavailableImage = Layer.succeed(
   Image.Service,
   Image.Service.of({ normalize: () => Effect.fail(new Image.ResizerUnavailableError()) }),
 )
-const readLayer = (imageLayer: Layer.Layer<Image.Service>, readerLayer: Layer.Layer<ReadToolFileSystem.Service> = reader, replacements: LayerNode.Replacements = []) =>
+const readLayer = (
+  imageLayer: Layer.Layer<Image.Service>,
+  readerLayer: Layer.Layer<ReadToolFileSystem.Service> = reader,
+  replacements: LayerNode.Replacements = [],
+) =>
   AppNodeBuilder.build(LayerNode.group([ToolRegistry.node, ToolRegistry.toolsNode, ReadTool.node]), [
     [ReadToolFileSystem.node, readerLayer],
     [PermissionV2.node, permission],
@@ -175,7 +179,14 @@ describe("ReadTool", () => {
     Effect.gen(function* () {
       const registry = yield* ToolRegistry.Service
 
-      expect(yield* toolDefinitions(registry)).toMatchObject([{ name: "read", description: expect.stringContaining("After a successful edit, write, or apply_patch, skip re-reading the file to confirm—the tool errors if it didn't work.") }])
+      expect(yield* toolDefinitions(registry)).toMatchObject([
+        {
+          name: "read",
+          description: expect.stringContaining(
+            "After a successful edit, write, or apply_patch, skip re-reading the file to confirm—the tool errors if it didn't work.",
+          ),
+        },
+      ])
       expect(yield* toolDefinitions(registry, [{ action: "read", resource: "*", effect: "deny" }])).toEqual([])
       expect(
         yield* executeTool(registry, {
@@ -203,112 +214,196 @@ describe("ReadTool", () => {
     }),
   )
 
-  itFiles.live("attaches nearby rules using actual visible results without hiding file contents", () => Effect.gen(function* () {
-    const fs = yield* FSUtil.Service
-    const directory = yield* fs.makeTempDirectoryScoped()
-    const nested = path.join(directory, "nested")
-    const target = path.join(nested, "notes.txt")
-    const rules = path.join(nested, "AGENTS.md")
-    yield* fs.makeDirectory(nested, { recursive: true })
-    yield* fs.writeFileString(path.join(directory, "AGENTS.md"), "Ambient root rule")
-    yield* fs.writeFileString(rules, "Nearby rule body")
-    yield* fs.writeFileString(path.join(nested, "CLAUDE.md"), "Shadowed rule")
-    yield* fs.writeFileString(target, "Actual file body")
-    let visible: SessionMessage.Message[] = []
-    let lookups = 0
-    yield* Effect.gen(function* () {
-      const registry = yield* ToolRegistry.Service
-      const read = (id = sessionID) => settleTool(registry, {
-        sessionID: id, ...toolIdentity,
-        call: { type: "tool-call", id: "nearby-read", name: "read", input: { path: target } },
-      })
-      const first = yield* read()
-      if (!first.output) throw new Error("expected actual read output")
-      expect(first.output.structured).toMatchObject({ content: "Actual file body", instructions: [{ path: rules, content: "Nearby rule body" }] })
-      const text = first.output.content.flatMap(part => part.type === "text" ? [part.text] : []).join("\n")
-      expect(text).toContain("Actual file body")
-      expect(text).toContain(`Instructions from: ${rules}\nNearby rule body`)
-      expect(text).not.toContain("Ambient root rule")
-      expect(text).not.toContain("Shadowed rule")
-      // 使用真实settlement构造持久结果；路径列表本身不能证明正文已经进入模型上下文。
-      const history = (pruned?: number, bounded = false) => Schema.decodeUnknownSync(SessionMessage.Message)({
-        id: "msg_nearby", type: "assistant", agent: "build", model: { id: "test", providerID: "test" }, time: { created: 0 },
-        content: [{ type: "tool", id: "nearby-read", name: "read", time: { created: 0, ...(pruned === undefined ? {} : { pruned }) },
-          state: { status: "completed", input: { path: target }, structured: first.output?.structured,
-            content: bounded ? [{ type: "text", text: "[truncated]" }] : first.output?.content } }],
-      })
-      visible = [history()]
-      expect((yield* read()).output?.structured).not.toHaveProperty("instructions")
-      // 时间为零仍表示pruned；已截断正文、压缩后历史和另一Session均须重新发送规则。
-      visible = [history(0)]
-      expect((yield* read()).output?.structured).toHaveProperty("instructions")
-      visible = [history(undefined, true)]
-      expect((yield* read()).output?.structured).toHaveProperty("instructions")
-      visible = []
-      expect((yield* read()).output?.structured).toHaveProperty("instructions")
-      visible = [history()]
-      expect((yield* read(SessionV2.ID.make("ses_nearby_other"))).output?.structured).toHaveProperty("instructions")
-      const source = path.join(nested, "large.ts")
-      yield* fs.writeFileString(source, Array.from({ length: 700 }, (_, index) => index === 9 ? "export function alpha() {}" : index === 119 ? "export class Beta {}" : `// line ${index + 1} ${"x".repeat(48)}`).join("\n"))
-      const sourceRead = (offset: number) => settleTool(registry, { sessionID, ...toolIdentity,
-        call: { type: "tool-call", id: "outline-read", name: "read", input: { path: source, offset, limit: 20 } } })
-      const head = yield* sourceRead(1)
-      expect(head.output?.structured).toMatchObject({ read: { start: 1, totalExact: true, stub: false, cut: false } })
-      const metadata = Schema.decodeUnknownSync(Schema.Struct({ read: ReadPresentation.ReadRangeMeta }))(head.output?.structured).read
-      expect(metadata.total).toBe(700)
-      const body = head.output?.content.flatMap(part => part.type === "text" ? [part.text] : []).join("\n") ?? ""
-      expect(body).toContain("<outline")
-      expect(body).toContain("10 function alpha")
-      expect(body).toContain("120 class Beta")
-      expect(body).toContain('<range start="1" end="20" total="700" returned="20" />')
-      expect(body).toContain('reason="line_limit"')
-      expect((yield* sourceRead(50)).output?.structured).not.toHaveProperty("outline")
-      // 原生 schema 和 registry 后的真实结果必须保留证据，不能只测试纯 helper。
-      const rawRead = (file: string) => settleTool(registry, { sessionID, ...toolIdentity,
-        call: { type: "tool-call", id: "raw-channel", name: "read", input: { path: file } } })
-      const xmlFile = path.join(nested, "raw.txt")
-      yield* fs.writeFileString(xmlFile, '<tag attr="x">&</tag>\n')
-      const rawFile = yield* rawRead(xmlFile)
-      const fileText = rawFile.result.type === "text" ? rawFile.result.value : ""
-      expect(fileText).toContain('1: <tag attr="x">&</tag>')
-      expect(fileText).not.toContain("&lt;tag")
-      const rawDirectory = path.join(nested, "raw-directory")
-      yield* fs.makeDirectory(rawDirectory)
-      yield* fs.writeFileString(path.join(rawDirectory, "a&b.txt"), "content")
-      const directoryResult = yield* rawRead(rawDirectory)
-      expect(directoryResult.result).toMatchObject({ type: "json", value: { entries: [{ path: "a&b.txt" }], total: 1, truncated: false } })
-      const rustFile = path.join(nested, "generic.rs")
-      yield* fs.writeFileString(rustFile, ["impl<T> Parser<T> where T: Clone {", ...Array.from({ length: 650 }, () => "// filler")].join("\n"))
-      const rustResult = yield* rawRead(rustFile)
-      const rustText = rustResult.result.type === "text" ? rustResult.result.value : ""
-      expect(rustText).toContain("1 impl Parser<T>")
-      expect(rustText).not.toContain("Parser&lt;T&gt;")
-      // 三通道经过实际 reader、schema 和统一结算，不能只用纯渲染器自证原文。
-      const before = lookups
-      allow = false
-      expect((yield* read()).result.type).toBe("error")
-      expect(lookups).toBe(before)
-    }).pipe(Effect.provide(readLayer(imageLayer, LayerNode.compile(ReadToolFileSystem.node), [
-      [Location.node, Layer.succeed(Location.Service, location({ directory: AbsolutePath.make(directory) }))],
-      [SessionStore.node, Layer.mock(SessionStore.Service, { context: id => Effect.sync(() => { lookups++; return id === sessionID ? visible : [] }) })],
-      // 与生产Location构建一致隔离layer memo，不能复用外层fixture已捕获的cwd工具实例。
-    ]).pipe(Layer.fresh)))
-  }))
+  itFiles.live("attaches nearby rules using actual visible results without hiding file contents", () =>
+    Effect.gen(function* () {
+      const fs = yield* FSUtil.Service
+      const directory = yield* fs.makeTempDirectoryScoped()
+      const nested = path.join(directory, "nested")
+      const target = path.join(nested, "notes.txt")
+      const rules = path.join(nested, "AGENTS.md")
+      yield* fs.makeDirectory(nested, { recursive: true })
+      yield* fs.writeFileString(path.join(directory, "AGENTS.md"), "Ambient root rule")
+      yield* fs.writeFileString(rules, "Nearby rule body")
+      yield* fs.writeFileString(path.join(nested, "CLAUDE.md"), "Shadowed rule")
+      yield* fs.writeFileString(target, "Actual file body")
+      let visible: SessionMessage.Message[] = []
+      let lookups = 0
+      yield* Effect.gen(function* () {
+        const registry = yield* ToolRegistry.Service
+        const read = (id = sessionID) =>
+          settleTool(registry, {
+            sessionID: id,
+            ...toolIdentity,
+            call: { type: "tool-call", id: "nearby-read", name: "read", input: { path: target } },
+          })
+        const first = yield* read()
+        if (!first.output) throw new Error("expected actual read output")
+        expect(first.output.structured).toMatchObject({
+          content: "Actual file body",
+          instructions: [{ path: rules, content: "Nearby rule body" }],
+        })
+        const text = first.output.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("\n")
+        expect(text).toContain("Actual file body")
+        expect(text).toContain(`Instructions from: ${rules}\nNearby rule body`)
+        expect(text).not.toContain("Ambient root rule")
+        expect(text).not.toContain("Shadowed rule")
+        // 使用真实settlement构造持久结果；路径列表本身不能证明正文已经进入模型上下文。
+        const history = (pruned?: number, bounded = false) =>
+          Schema.decodeUnknownSync(SessionMessage.Message)({
+            id: "msg_nearby",
+            type: "assistant",
+            agent: "build",
+            model: { id: "test", providerID: "test" },
+            time: { created: 0 },
+            content: [
+              {
+                type: "tool",
+                id: "nearby-read",
+                name: "read",
+                time: { created: 0, ...(pruned === undefined ? {} : { pruned }) },
+                state: {
+                  status: "completed",
+                  input: { path: target },
+                  structured: first.output?.structured,
+                  content: bounded ? [{ type: "text", text: "[truncated]" }] : first.output?.content,
+                },
+              },
+            ],
+          })
+        visible = [history()]
+        expect((yield* read()).output?.structured).not.toHaveProperty("instructions")
+        // 时间为零仍表示pruned；已截断正文、压缩后历史和另一Session均须重新发送规则。
+        visible = [history(0)]
+        expect((yield* read()).output?.structured).toHaveProperty("instructions")
+        visible = [history(undefined, true)]
+        expect((yield* read()).output?.structured).toHaveProperty("instructions")
+        visible = []
+        expect((yield* read()).output?.structured).toHaveProperty("instructions")
+        visible = [history()]
+        expect((yield* read(SessionV2.ID.make("ses_nearby_other"))).output?.structured).toHaveProperty("instructions")
+        const source = path.join(nested, "large.ts")
+        yield* fs.writeFileString(
+          source,
+          Array.from({ length: 700 }, (_, index) =>
+            index === 9
+              ? "export function alpha() {}"
+              : index === 119
+                ? "export class Beta {}"
+                : `// line ${index + 1} ${"x".repeat(48)}`,
+          ).join("\n"),
+        )
+        const sourceRead = (offset: number) =>
+          settleTool(registry, {
+            sessionID,
+            ...toolIdentity,
+            call: { type: "tool-call", id: "outline-read", name: "read", input: { path: source, offset, limit: 20 } },
+          })
+        const head = yield* sourceRead(1)
+        expect(head.output?.structured).toMatchObject({ read: { start: 1, totalExact: true, stub: false, cut: false } })
+        const metadata = Schema.decodeUnknownSync(Schema.Struct({ read: ReadPresentation.ReadRangeMeta }))(
+          head.output?.structured,
+        ).read
+        expect(metadata.total).toBe(700)
+        const body = head.output?.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("\n") ?? ""
+        expect(body).toContain("<outline")
+        expect(body).toContain("10 function alpha")
+        expect(body).toContain("120 class Beta")
+        expect(body).toContain('<range start="1" end="20" total="700" returned="20" />')
+        expect(body).toContain('reason="line_limit"')
+        expect((yield* sourceRead(50)).output?.structured).not.toHaveProperty("outline")
+        // 原生 schema 和 registry 后的真实结果必须保留证据，不能只测试纯 helper。
+        const rawRead = (file: string) =>
+          settleTool(registry, {
+            sessionID,
+            ...toolIdentity,
+            call: { type: "tool-call", id: "raw-channel", name: "read", input: { path: file } },
+          })
+        const xmlFile = path.join(nested, "raw.txt")
+        yield* fs.writeFileString(xmlFile, '<tag attr="x">&</tag>\n')
+        const rawFile = yield* rawRead(xmlFile)
+        const fileText = rawFile.result.type === "text" ? rawFile.result.value : ""
+        expect(fileText).toContain('1: <tag attr="x">&</tag>')
+        expect(fileText).not.toContain("&lt;tag")
+        const rawDirectory = path.join(nested, "raw-directory")
+        yield* fs.makeDirectory(rawDirectory)
+        yield* fs.writeFileString(path.join(rawDirectory, "a&b.txt"), "content")
+        const directoryResult = yield* rawRead(rawDirectory)
+        expect(directoryResult.result).toMatchObject({
+          type: "json",
+          value: { entries: [{ path: "a&b.txt" }], total: 1, truncated: false },
+        })
+        const rustFile = path.join(nested, "generic.rs")
+        yield* fs.writeFileString(
+          rustFile,
+          ["impl<T> Parser<T> where T: Clone {", ...Array.from({ length: 650 }, () => "// filler")].join("\n"),
+        )
+        const rustResult = yield* rawRead(rustFile)
+        const rustText = rustResult.result.type === "text" ? rustResult.result.value : ""
+        expect(rustText).toContain("1 impl Parser<T>")
+        expect(rustText).not.toContain("Parser&lt;T&gt;")
+        // 三通道经过实际 reader、schema 和统一结算，不能只用纯渲染器自证原文。
+        const before = lookups
+        allow = false
+        expect((yield* read()).result.type).toBe("error")
+        expect(lookups).toBe(before)
+      }).pipe(
+        Effect.provide(
+          readLayer(imageLayer, LayerNode.compile(ReadToolFileSystem.node), [
+            [Location.node, Layer.succeed(Location.Service, location({ directory: AbsolutePath.make(directory) }))],
+            [
+              SessionStore.node,
+              Layer.mock(SessionStore.Service, {
+                context: (id) =>
+                  Effect.sync(() => {
+                    lookups++
+                    return id === sessionID ? visible : []
+                  }),
+              }),
+            ],
+            // 与生产Location构建一致隔离layer memo，不能复用外层fixture已捕获的cwd工具实例。
+          ]).pipe(Layer.fresh),
+        ),
+      )
+    }),
+  )
 
   it.effect("omits malware reminders without changing typed text or permission ordering", () =>
     Effect.gen(function* () {
       const registry = yield* ToolRegistry.Service
       // 完整文件、无凭证旧结果和真实分页凭证都停用额外提醒，正文及next仍完整。
-      for (const output of [readResult, new ReadToolFileSystem.TextPage({
-        type: "text-page", content: "hello", mime: "text/plain", offset: 2, truncated: true, next: 3,
-      }), new ReadToolFileSystem.TextPage({
-        type: "text-page", content: "hello", mime: "text/plain", offset: 2, truncated: true, next: 3,
-        read: {
-          path: "sample.TS", canonicalPath: path.resolve("sample.TS"),
-          type: "file", size: 12, modified: "2026-10-25 00:00:00", modifiedMs: 0,
-          start: 2, end: 2, total: 3, totalExact: true, returned: 1, stub: false,
-        },
-      })]) {
+      for (const output of [
+        readResult,
+        new ReadToolFileSystem.TextPage({
+          type: "text-page",
+          content: "hello",
+          mime: "text/plain",
+          offset: 2,
+          truncated: true,
+          next: 3,
+        }),
+        new ReadToolFileSystem.TextPage({
+          type: "text-page",
+          content: "hello",
+          mime: "text/plain",
+          offset: 2,
+          truncated: true,
+          next: 3,
+          read: {
+            path: "sample.TS",
+            canonicalPath: path.resolve("sample.TS"),
+            type: "file",
+            size: 12,
+            modified: "2026-10-25 00:00:00",
+            modifiedMs: 0,
+            start: 2,
+            end: 2,
+            total: 3,
+            totalExact: true,
+            returned: 1,
+            stub: false,
+          },
+        }),
+      ]) {
         readResult = output
         const settled = yield* settleTool(registry, {
           sessionID,
@@ -318,7 +413,9 @@ describe("ReadTool", () => {
         expect(settled.output?.structured).toEqual(output)
         expect(JSON.stringify(settled.output)).not.toContain("MUST refuse to improve")
         if ("read" in output && ReadPresentation.isReadRangeMeta(output.read)) {
-          expect(settled.output?.content).toEqual([{ type: "text", text: ReadPresentation.renderNativeRead({ ...output, read: output.read }) }])
+          expect(settled.output?.content).toEqual([
+            { type: "text", text: ReadPresentation.renderNativeRead({ ...output, read: output.read }) },
+          ])
         } else {
           // 旧结果继续走真实structured→JSON结算，不用空提醒替代正文与分页字段。
           expect(settled.output?.content).toEqual([])
@@ -328,11 +425,13 @@ describe("ReadTool", () => {
       // 停用模型提醒不改变权限门禁：拒绝时仍不执行读取。
       allow = false
       readCalls.length = 0
-      expect(yield* executeTool(registry, {
-        sessionID,
-        ...toolIdentity,
-        call: { type: "tool-call", id: "call-cyber-denied", name: "read", input: { path: "sample.ts" } },
-      })).toEqual({ type: "error", value: "Unable to read sample.ts" })
+      expect(
+        yield* executeTool(registry, {
+          sessionID,
+          ...toolIdentity,
+          call: { type: "tool-call", id: "call-cyber-denied", name: "read", input: { path: "sample.ts" } },
+        }),
+      ).toEqual({ type: "error", value: "Unable to read sample.ts" })
       expect(readCalls).toEqual([])
     }),
   )
@@ -407,10 +506,11 @@ describe("ReadTool", () => {
         expect(["image/jpeg", "image/png", "image/gif", "image/webp"]).toContain(attachment.mime)
         expect(attachment.mime).toBe("image/png")
         expect(attachment.uri.startsWith(`data:${attachment.mime};base64,`)).toBe(true)
-        expect(Buffer.byteLength(attachment.uri.slice(attachment.uri.indexOf(";base64,") + 8), "utf-8")).toBeLessThanOrEqual(1600 * 750)
+        expect(
+          Buffer.byteLength(attachment.uri.slice(attachment.uri.indexOf(";base64,") + 8), "utf-8"),
+        ).toBeLessThanOrEqual(1600 * 750)
         const bytes = Buffer.from(attachment.uri.slice(attachment.uri.indexOf(";base64,") + 8), "base64")
-        expect(Array.from(bytes.subarray(0, 8)))
-          .toEqual([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+        expect(Array.from(bytes.subarray(0, 8))).toEqual([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
         const decoded = photon.PhotonImage.new_from_byteslice(bytes)
         expect(decoded.get_width()).toBe(1)
         expect(decoded.get_height()).toBe(1)
@@ -471,9 +571,13 @@ describe("ReadTool", () => {
         ],
       })
 
-      const oversized = Buffer.from(yield* Effect.promise(() =>
-        Bun.file(path.join(import.meta.dir, "../../opencode/test/image/fixtures/picture-5mb-base64.png")).arrayBuffer(),
-      )).toString("base64")
+      const oversized = Buffer.from(
+        yield* Effect.promise(() =>
+          Bun.file(
+            path.join(import.meta.dir, "../../opencode/test/image/fixtures/picture-5mb-base64.png"),
+          ).arrayBuffer(),
+        ),
+      ).toString("base64")
       expect(oversized.length).toBe(5 * 1024 * 1024)
       readResult = { ...readResult, uri: "file:///budget.png", name: "budget.png", content: oversized }
       const bounded = yield* settleTool(registry, {
@@ -518,7 +622,14 @@ describe("ReadTool", () => {
           ...toolIdentity,
           call: { type: "tool-call", id: "call-image-fallback", name: "read", input: { path: "pixel.png" } },
         }),
-      ).toMatchObject({ type: "json", value: { encoding: "utf8", mime: "text/plain", content: "Image omitted: could not be decoded or resized within the image size limit." } })
+      ).toMatchObject({
+        type: "json",
+        value: {
+          encoding: "utf8",
+          mime: "text/plain",
+          content: "Image omitted: could not be decoded or resized within the image size limit.",
+        },
+      })
     }),
   )
 
@@ -539,7 +650,14 @@ describe("ReadTool", () => {
           ...toolIdentity,
           call: { type: "tool-call", id: "call-truncated-image", name: "read", input: { path: "truncated.png" } },
         }),
-      ).toMatchObject({ type: "json", value: { encoding: "utf8", mime: "text/plain", content: "Image omitted: could not be decoded or resized within the image size limit." } })
+      ).toMatchObject({
+        type: "json",
+        value: {
+          encoding: "utf8",
+          mime: "text/plain",
+          content: "Image omitted: could not be decoded or resized within the image size limit.",
+        },
+      })
     }),
   )
 
@@ -574,7 +692,12 @@ describe("ReadTool", () => {
       })
 
       expect(result.type).toBe("json")
-      if (result.type === "json") expect(result.value).toMatchObject({ encoding: "utf8", mime: "text/plain", content: "Image omitted: could not be decoded or resized within the image size limit." })
+      if (result.type === "json")
+        expect(result.value).toMatchObject({
+          encoding: "utf8",
+          mime: "text/plain",
+          content: "Image omitted: could not be decoded or resized within the image size limit.",
+        })
     }),
   )
 
@@ -646,7 +769,12 @@ describe("ReadTool", () => {
       })
 
       expect(result.type).toBe("json")
-      if (result.type === "json") expect(result.value).toMatchObject({ encoding: "utf8", mime: "text/plain", content: "Image omitted: could not be decoded or resized within the image size limit." })
+      if (result.type === "json")
+        expect(result.value).toMatchObject({
+          encoding: "utf8",
+          mime: "text/plain",
+          content: "Image omitted: could not be decoded or resized within the image size limit.",
+        })
     }),
   )
 

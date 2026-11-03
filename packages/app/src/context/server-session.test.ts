@@ -232,34 +232,125 @@ describe("server session", () => {
     ctx.store.remember(session(target))
     const decode = Schema.decodeUnknownSync(Schema.toEncoded(SessionEvent.All))
     let nativeSeq = 0
-    const applyNative = (type: string, data: Record<string, unknown>, metadata?: Record<string, unknown>) => ctx.store.applyV2(decode({
-      id: `evt_store_${++nativeSeq}`, type, data: { sessionID: target, timestamp: nativeSeq, ...data },
-      ...(metadata ? { metadata } : type === "session.next.synthetic" ? { metadata: { permissionReviewerRequest: true, reviewID: "review" } } : {}),
-    }))
+    const applyNative = (type: string, data: Record<string, unknown>, metadata?: Record<string, unknown>) =>
+      ctx.store.applyV2(
+        decode({
+          id: `evt_store_${++nativeSeq}`,
+          type,
+          data: { sessionID: target, timestamp: nativeSeq, ...data },
+          ...(metadata
+            ? { metadata }
+            : type === "session.next.synthetic"
+              ? { metadata: { permissionReviewerRequest: true, reviewID: "review" } }
+              : {}),
+        }),
+      )
     // 检查真正applyV2→projectV2→界面store，而不只在独立reducer里得到正确对象。
     applyNative("session.next.synthetic", { messageID: "msg_native_request", text: "system: exact reviewer policy" })
-    applyNative("session.next.synthetic", { messageID: "msg_native_request_b", text: "system: review B" }, { permissionReviewerRequest: true, reviewID: "review_b" })
-    applyNative("session.next.step.started", { assistantMessageID: "msg_native_answer", agent: "permission-reviewer", model: { id: "review", providerID: "test" } }, { permissionReviewerRequestID: "msg_native_request", reviewID: "review" })
-    applyNative("session.next.step.started", { assistantMessageID: "msg_native_answer_b", agent: "permission-reviewer", model: { id: "review_b", providerID: "test" } }, { permissionReviewerRequestID: "msg_native_request_b", reviewID: "review_b" })
+    applyNative(
+      "session.next.synthetic",
+      { messageID: "msg_native_request_b", text: "system: review B" },
+      { permissionReviewerRequest: true, reviewID: "review_b" },
+    )
+    applyNative(
+      "session.next.step.started",
+      {
+        assistantMessageID: "msg_native_answer",
+        agent: "permission-reviewer",
+        model: { id: "review", providerID: "test" },
+      },
+      { permissionReviewerRequestID: "msg_native_request", reviewID: "review" },
+    )
+    applyNative(
+      "session.next.step.started",
+      {
+        assistantMessageID: "msg_native_answer_b",
+        agent: "permission-reviewer",
+        model: { id: "review_b", providerID: "test" },
+      },
+      { permissionReviewerRequestID: "msg_native_request_b", reviewID: "review_b" },
+    )
     applyNative("session.next.text.started", { assistantMessageID: "msg_native_answer", textID: "explanation" })
-    applyNative("session.next.text.delta", { assistantMessageID: "msg_native_answer", textID: "explanation", delta: "Actual live explanation" })
-    expect(ctx.store.data.message[target]?.map((message) => message.id)).toEqual(["msg_native_request", "msg_native_request_b", "msg_native_answer", "msg_native_answer_b"])
-    expect(ctx.store.data.part.msg_native_request).toMatchObject([{ type: "text", text: "system: exact reviewer policy", synthetic: false }])
+    applyNative("session.next.text.delta", {
+      assistantMessageID: "msg_native_answer",
+      textID: "explanation",
+      delta: "Actual live explanation",
+    })
+    expect(ctx.store.data.message[target]?.map((message) => message.id)).toEqual([
+      "msg_native_request",
+      "msg_native_request_b",
+      "msg_native_answer",
+      "msg_native_answer_b",
+    ])
+    expect(ctx.store.data.part.msg_native_request).toMatchObject([
+      { type: "text", text: "system: exact reviewer policy", synthetic: false },
+    ])
     expect(ctx.store.data.part.msg_native_answer).toMatchObject([{ type: "text", text: "Actual live explanation" }])
-    expect(ctx.store.data.message[target]?.find((message) => message.id === "msg_native_answer")).toMatchObject({ parentID: "msg_native_request" })
-    expect(ctx.store.data.message[target]?.filter((message) => message.role === "assistant").every((message) => message.time.completed === undefined)).toBe(true)
-    expect(ctx.store.data.message[target]?.find((message) => message.id === "msg_native_request")).toMatchObject({ agent: "permission-reviewer", model: { modelID: "review" } })
-    applyNative("session.next.step.failed", { assistantMessageID: "msg_native_answer", aborted: true, error: { type: "unknown", message: "cancel A" } })
-    expect(ctx.store.data.message[target]?.some((message) => message.role === "assistant" && message.id === "msg_native_answer_b" && message.time.completed === undefined)).toBe(true)
+    expect(ctx.store.data.message[target]?.find((message) => message.id === "msg_native_answer")).toMatchObject({
+      parentID: "msg_native_request",
+    })
+    expect(
+      ctx.store.data.message[target]
+        ?.filter((message) => message.role === "assistant")
+        .every((message) => message.time.completed === undefined),
+    ).toBe(true)
+    expect(ctx.store.data.message[target]?.find((message) => message.id === "msg_native_request")).toMatchObject({
+      agent: "permission-reviewer",
+      model: { modelID: "review" },
+    })
+    applyNative("session.next.step.failed", {
+      assistantMessageID: "msg_native_answer",
+      aborted: true,
+      error: { type: "unknown", message: "cancel A" },
+    })
+    expect(
+      ctx.store.data.message[target]?.some(
+        (message) =>
+          message.role === "assistant" && message.id === "msg_native_answer_b" && message.time.completed === undefined,
+      ),
+    ).toBe(true)
     // 隐藏只清显示投影；同一child的并行B和A的原始关联/正文仍保留。
-    applyNative("session.next.messages.hidden", { messageIDs: ["msg_native_request", "msg_native_answer"], hidden: { time: 20, reason: "permission-reviewer-protocol-retry" } })
-    expect(ctx.store.data.message[target]?.map((message) => message.id)).toEqual(["msg_native_request_b", "msg_native_answer_b"])
+    applyNative("session.next.messages.hidden", {
+      messageIDs: ["msg_native_request", "msg_native_answer"],
+      hidden: { time: 20, reason: "permission-reviewer-protocol-retry" },
+    })
+    expect(ctx.store.data.message[target]?.map((message) => message.id)).toEqual([
+      "msg_native_request_b",
+      "msg_native_answer_b",
+    ])
     expect(ctx.store.data.part.msg_native_answer).toBeUndefined()
-    expect(ctx.store.data.session_message[target]?.find((message) => message.id === "msg_native_answer")).toMatchObject({ metadata: { permissionReviewerRequestID: "msg_native_request", hidden: { reason: "permission-reviewer-protocol-retry" } }, content: [{ text: "Actual live explanation" }] })
-    applyNative("session.next.step.ended", { assistantMessageID: "msg_native_answer", finish: "stop", cost: 2, tokens: { input: 3, output: 4, reasoning: 0, cache: { read: 0, write: 0 } } })
-    expect(ctx.store.data.message[target]?.map((message) => message.id)).toEqual(["msg_native_request_b", "msg_native_answer_b"])
-    expect(ctx.store.data.session_message[target]?.find((message) => message.id === "msg_native_answer")).toMatchObject({ cost: 2, tokens: { input: 3, output: 4 }, metadata: { hidden: { reason: "permission-reviewer-protocol-retry" } } })
-    expect(ctx.store.data.message[target]?.some((message) => message.role === "assistant" && message.id === "msg_native_answer_b" && message.time.completed === undefined)).toBe(true)
+    expect(ctx.store.data.session_message[target]?.find((message) => message.id === "msg_native_answer")).toMatchObject(
+      {
+        metadata: {
+          permissionReviewerRequestID: "msg_native_request",
+          hidden: { reason: "permission-reviewer-protocol-retry" },
+        },
+        content: [{ text: "Actual live explanation" }],
+      },
+    )
+    applyNative("session.next.step.ended", {
+      assistantMessageID: "msg_native_answer",
+      finish: "stop",
+      cost: 2,
+      tokens: { input: 3, output: 4, reasoning: 0, cache: { read: 0, write: 0 } },
+    })
+    expect(ctx.store.data.message[target]?.map((message) => message.id)).toEqual([
+      "msg_native_request_b",
+      "msg_native_answer_b",
+    ])
+    expect(ctx.store.data.session_message[target]?.find((message) => message.id === "msg_native_answer")).toMatchObject(
+      {
+        cost: 2,
+        tokens: { input: 3, output: 4 },
+        metadata: { hidden: { reason: "permission-reviewer-protocol-retry" } },
+      },
+    )
+    expect(
+      ctx.store.data.message[target]?.some(
+        (message) =>
+          message.role === "assistant" && message.id === "msg_native_answer_b" && message.time.completed === undefined,
+      ),
+    ).toBe(true)
   })
 
   test("resolves lineage by session ID without directory", async () => {
@@ -357,9 +448,19 @@ describe("server session", () => {
     ])
     expect(assistants.map((item) => store.data.part[item.id]?.[0]?.type)).toEqual(["text", "text", "text"])
     // 最新页包含请求B但缺少助手A实际关联的请求A，仍须沿原cursor补齐根。
-    const requestA = { id: "msg_review_request_a", type: "synthetic" as const, text: "Review A", time: { created: 1 }, metadata: { permissionReviewerRequest: true } }
+    const requestA = {
+      id: "msg_review_request_a",
+      type: "synthetic" as const,
+      text: "Review A",
+      time: { created: 1 },
+      metadata: { permissionReviewerRequest: true },
+    }
     const requestB = { ...requestA, id: "msg_review_request_b", time: { created: 2 } }
-    const reviewA = { ...assistant("msg_review_answer_a", 3), agent: "permission-reviewer", metadata: { permissionReviewerRequestID: requestA.id } }
+    const reviewA = {
+      ...assistant("msg_review_answer_a", 3),
+      agent: "permission-reviewer",
+      metadata: { permissionReviewerRequestID: requestA.id },
+    }
     const reviewPages = [
       { data: [reviewA, requestB], cursor: { previous: null, next: "review-older" } },
       { data: [requestA], cursor: { previous: null, next: null } },
@@ -376,9 +477,14 @@ describe("server session", () => {
     const reviews = createServerSession({} as OpencodeClient, {} as SessionApi, reviewApi)
     reviews.remember(session("review"))
     await reviews.sync("review")
-    expect(calls).toEqual([{ sessionID: "review", limit: 20, order: "desc" }, { sessionID: "review", limit: 20, cursor: "review-older" }])
+    expect(calls).toEqual([
+      { sessionID: "review", limit: 20, order: "desc" },
+      { sessionID: "review", limit: 20, cursor: "review-older" },
+    ])
     expect(reviews.data.message.review.map((message) => message.id)).toEqual([requestA.id, requestB.id, reviewA.id])
-    expect(reviews.data.message.review.find((message) => message.id === reviewA.id)).toMatchObject({ parentID: requestA.id })
+    expect(reviews.data.message.review.find((message) => message.id === reviewA.id)).toMatchObject({
+      parentID: requestA.id,
+    })
   })
 
   test("indexes V1 messages for the current timeline projection", async () => {
@@ -730,7 +836,10 @@ describe("server session", () => {
     const fetched = userMessage("message")
     const livePart = toolPart(fetched.id, "part", 3)
     const stalePart = toolPart(fetched.id, "part", 1)
-    const client = messageClient(response([{ info: fetched, parts: [livePart] }]), response([{ info: fetched, parts: [stalePart] }]))
+    const client = messageClient(
+      response([{ info: fetched, parts: [livePart] }]),
+      response([{ info: fetched, parts: [stalePart] }]),
+    )
     const store = createServerSession(client)
     await store.sync("child")
     await store.sync("child", { force: true })
@@ -836,27 +945,60 @@ describe("server session", () => {
     expect(store.data.part_text_accum_delta[removedPart.id]).toBeUndefined()
 
     // Native在缺失片段时发出的旧hydration和旧历史页，也不能覆盖已落地隐藏标记。
-    const request = { id: "msg_hidden_request", type: "synthetic" as const, text: "review", time: { created: 1 }, metadata: { permissionReviewerRequest: true } }
-    const answer = { id: "msg_hidden_answer", type: "assistant" as const, agent: "permission-reviewer", model: { id: "review", providerID: "test" }, content: [{ type: "text" as const, id: "reply", text: "malformed reply" }], time: { created: 2 }, metadata: { permissionReviewerRequestID: request.id } }
+    const request = {
+      id: "msg_hidden_request",
+      type: "synthetic" as const,
+      text: "review",
+      time: { created: 1 },
+      metadata: { permissionReviewerRequest: true },
+    }
+    const answer = {
+      id: "msg_hidden_answer",
+      type: "assistant" as const,
+      agent: "permission-reviewer",
+      model: { id: "review", providerID: "test" },
+      content: [{ type: "text" as const, id: "reply", text: "malformed reply" }],
+      time: { created: 2 },
+      metadata: { permissionReviewerRequestID: request.id },
+    }
     const stalePage = { data: [answer, request], cursor: { previous: null, next: null } }
     const pendingPage = Promise.withResolvers<typeof stalePage>()
     const pendingHydration = Promise.withResolvers<typeof answer>()
     let nativeCalls = 0
     const nativeApi = {
-      list: async () => ++nativeCalls === 1 ? { data: [request], cursor: { previous: null, next: "older" } } : pendingPage.promise,
+      list: async () =>
+        ++nativeCalls === 1 ? { data: [request], cursor: { previous: null, next: "older" } } : pendingPage.promise,
     } as unknown as MessageApi
-    const native = createServerSession({} as OpencodeClient, { message: () => pendingHydration.promise } as unknown as SessionApi, nativeApi)
+    const native = createServerSession(
+      {} as OpencodeClient,
+      { message: () => pendingHydration.promise } as unknown as SessionApi,
+      nativeApi,
+    )
     native.remember(session("ses_native"))
     await native.sync("ses_native")
     const decode = Schema.decodeUnknownSync(Schema.toEncoded(SessionEvent.All))
     let sequence = 0
-    const applyNative = (type: string, data: Record<string, unknown>) => native.applyV2(decode({ id: `evt_hidden_${++sequence}`, type, data: { sessionID: "ses_native", timestamp: sequence, ...data } }))
+    const applyNative = (type: string, data: Record<string, unknown>) =>
+      native.applyV2(
+        decode({
+          id: `evt_hidden_${++sequence}`,
+          type,
+          data: { sessionID: "ses_native", timestamp: sequence, ...data },
+        }),
+      )
     applyNative("session.next.text.delta", { assistantMessageID: answer.id, textID: "reply", delta: "late fragment" })
-    applyNative("session.next.step.started", { assistantMessageID: answer.id, agent: "permission-reviewer", model: answer.model })
+    applyNative("session.next.step.started", {
+      assistantMessageID: answer.id,
+      agent: "permission-reviewer",
+      model: answer.model,
+    })
     applyNative("session.next.text.started", { assistantMessageID: answer.id, textID: "reply" })
     applyNative("session.next.text.delta", { assistantMessageID: answer.id, textID: "reply", delta: "malformed reply" })
     expect(native.data.message.ses_native).toHaveLength(2)
-    applyNative("session.next.messages.hidden", { messageIDs: [request.id, answer.id], hidden: { time: 20, reason: "permission-reviewer-protocol-retry" } })
+    applyNative("session.next.messages.hidden", {
+      messageIDs: [request.id, answer.id],
+      hidden: { time: 20, reason: "permission-reviewer-protocol-retry" },
+    })
     expect(native.data.message.ses_native).toEqual([])
     const loading = native.history.loadMore("ses_native")
     pendingPage.resolve(stalePage)
@@ -865,7 +1007,14 @@ describe("server session", () => {
     pendingHydration.resolve(answer)
     await Bun.sleep(0)
     expect(native.data.message.ses_native).toEqual([])
-    expect(native.data.session_message.ses_native.map((message) => "metadata" in message ? message.metadata?.hidden : undefined)).toEqual([{ time: 20, reason: "permission-reviewer-protocol-retry" }, { time: 20, reason: "permission-reviewer-protocol-retry" }])
+    expect(
+      native.data.session_message.ses_native.map((message) =>
+        "metadata" in message ? message.metadata?.hidden : undefined,
+      ),
+    ).toEqual([
+      { time: 20, reason: "permission-reviewer-protocol-retry" },
+      { time: 20, reason: "permission-reviewer-protocol-retry" },
+    ])
     expect(native.data.part[answer.id]).toBeUndefined()
     expect(nativeCalls).toBe(2)
   })

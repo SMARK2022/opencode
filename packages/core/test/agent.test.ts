@@ -146,14 +146,20 @@ describe("AgentV2", () => {
         expect(item).toMatchObject({ id, mode: "primary", hidden: false })
         expect(item.system).toBe((yield* agent.resolve("build"))?.system)
         expect(item.system).toBeUndefined()
-        expect(PermissionV2.evaluate("bash", "git status", item.permissions).effect).toBe(id === "auto" ? "auto" : "ask")
+        expect(PermissionV2.evaluate("bash", "git status", item.permissions).effect).toBe(
+          id === "auto" ? "auto" : "ask",
+        )
         // 只有auto接入写入审查；interactive继续保留普通编辑权限。
-        expect(PermissionV2.evaluate("edit", "src/index.ts", item.permissions).effect).toBe(id === "auto" ? "auto" : "allow")
+        expect(PermissionV2.evaluate("edit", "src/index.ts", item.permissions).effect).toBe(
+          id === "auto" ? "auto" : "allow",
+        )
         expect(PermissionV2.evaluate("question", "*", item.permissions).effect).toBe("allow")
         expect(PermissionV2.evaluate("plan_enter", "*", item.permissions).effect).toBe("allow")
         // 默认敏感文件和外部目录规则必须随两个新代理一起继承。
         expect(PermissionV2.evaluate("read", ".env", item.permissions).effect).toBe("ask")
-        expect(PermissionV2.evaluate("external_directory", "/outside/*", item.permissions).effect).toBe(id === "auto" ? "auto" : "ask")
+        expect(PermissionV2.evaluate("external_directory", "/outside/*", item.permissions).effect).toBe(
+          id === "auto" ? "auto" : "ask",
+        )
       }
       // 显式默认可以选择auto；仅剩auto时仍不能成为隐式fallback。
       const explicit = yield* agent.transform((draft) => draft.default(AgentV2.ID.make("auto")))
@@ -168,7 +174,12 @@ describe("AgentV2", () => {
       yield* only.dispose
       expect((yield* agent.default())?.id).toBe(AgentV2.ID.make("build"))
       const listed = yield* agent.all()
-      expect(listed.slice(1).map((item) => item.id)).toEqual(listed.slice(1).map((item) => item.id).toSorted((a, b) => a.localeCompare(b)))
+      expect(listed.slice(1).map((item) => item.id)).toEqual(
+        listed
+          .slice(1)
+          .map((item) => item.id)
+          .toSorted((a, b) => a.localeCompare(b)),
+      )
       // 后注册规则覆盖内置 ask，验证配置插件依赖的最后匹配契约。
       const override = yield* agent.transform((draft) =>
         draft.update(AgentV2.ID.make("interactive"), (item) => {

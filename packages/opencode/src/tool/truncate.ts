@@ -126,10 +126,7 @@ const layer = Layer.effect(
       })
 
       return {
-        content:
-          direction === "head"
-            ? `${preview}\n\n${notice}`
-            : `${notice}\n\n${preview}`,
+        content: direction === "head" ? `${preview}\n\n${notice}` : `${notice}\n\n${preview}`,
         truncated: true,
         outputPath: file,
       } as const

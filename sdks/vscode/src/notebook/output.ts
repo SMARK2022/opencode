@@ -4,14 +4,7 @@ import path from "node:path"
 import { randomUUID } from "node:crypto"
 import { toPosixPath, quoteForSummary } from "../util"
 /** 输出主定位参数为 Copilot 风格的 cellId；原始字节保留在 notebook-outputs 导出文件中。 */
-import {
-  compactCell,
-  runtimeLabel,
-  isTextLikeMime,
-  extensionForMime,
-  formatArtifactSummary,
-  cellRef,
-} from "./format"
+import { compactCell, runtimeLabel, isTextLikeMime, extensionForMime, formatArtifactSummary, cellRef } from "./format"
 import { resolveNotebook, resolveNotebookCell } from "./resolve"
 
 export async function readNotebookCellOutput(filePath: string, cellIndex?: number, cellId?: string) {
@@ -26,7 +19,9 @@ export async function readNotebookCellOutput(filePath: string, cellIndex?: numbe
 export function captureNotebookCellOutput(notebook: vscode.NotebookDocument, cell: vscode.NotebookCell) {
   // outputs 是原模型的可变列表，先复制层级，后续输出替换不能改变请求的 item 集合。
   // item.data 还可能原地改写，复制 Uint8Array 才能同时固定预览字节和 artifact 字节。
-  const outputs = cell.outputs.map((output) => ({ items: output.items.map((item) => ({ mime: item.mime, data: Uint8Array.from(item.data) })) }))
+  const outputs = cell.outputs.map((output) => ({
+    items: output.items.map((item) => ({ mime: item.mime, data: Uint8Array.from(item.data) })),
+  }))
   // 捕获函数没有 I/O；run 可以先完成全部目标的投影，再启动任一格的文件写入。
   return {
     // output 导出的快照只包含请求私有数据，跨模块消费者不能借它修改或重新定位 notebook。
@@ -47,18 +42,18 @@ async function serializeNotebookCellOutput(notebook: vscode.NotebookDocument, ce
   const snapshot = captureNotebookCellOutput(notebook, cell)
   // 目标引用与输出同在I/O前固定，不能在导出后重读可变格。
   const target = cellRef(cell)
-  const artifacts = (
-    // 任一 item 写入失败都会拒绝整体导出，不能把缺失 artifact 隐藏在成功列表中。
-    await Promise.all(
-      // 每个 output 可含多个 MIME item，导出必须保留所有替代表示而非只取第一项。
-      snapshot.outputs.flatMap((cellOutput, outputIndex) =>
-        // 输出序号只定位快照；统一 serializer 以每次导出的 UUID 避免覆盖旧文件。
-        cellOutput.items.map((item, itemIndex) =>
-          serializeNotebookOutputItem(notebook, cell, item, outputIndex, itemIndex),
+  const artifacts = // 任一 item 写入失败都会拒绝整体导出，不能把缺失 artifact 隐藏在成功列表中。
+    (
+      await Promise.all(
+        // 每个 output 可含多个 MIME item，导出必须保留所有替代表示而非只取第一项。
+        snapshot.outputs.flatMap((cellOutput, outputIndex) =>
+          // 输出序号只定位快照；统一 serializer 以每次导出的 UUID 避免覆盖旧文件。
+          cellOutput.items.map((item, itemIndex) =>
+            serializeNotebookOutputItem(notebook, cell, item, outputIndex, itemIndex),
+          ),
         ),
-      ),
-    )
-  ).flat()
+      )
+    ).flat()
 
   // ID 与标题同取 I/O 前快照，导出期间插格或第二次运行不能改变本次输出身份。
   const summaryLines = [
@@ -138,7 +133,10 @@ export async function writeArtifact(
   const filename =
     [
       // basename 经 ASCII 化并限长，非 ASCII 文件名不会撑过文件系统预算。
-      path.basename(notebook.uri.fsPath || "untitled", path.extname(notebook.uri.fsPath || "untitled")).replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 48),
+      path
+        .basename(notebook.uri.fsPath || "untitled", path.extname(notebook.uri.fsPath || "untitled"))
+        .replace(/[^a-zA-Z0-9._-]/g, "_")
+        .slice(0, 48),
       // 每个导出项已有独立 UUID，同名文档和重跑无需再叠加 URI 哈希来区分。
       randomUUID(),
       `cell-${cell.index}`,

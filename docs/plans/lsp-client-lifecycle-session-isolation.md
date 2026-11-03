@@ -63,35 +63,35 @@ independence, scope, verification and implementation-audit gates remain intact.
 
 ## 3. Repository Context
 
-| Source | Constraint |
-| --- | --- |
-| `CONTEXT.md` | Session has identity; InstanceState is directory-scoped, not Session-scoped. |
-| root and package `AGENTS.md` | Minimal edits, package-local tests/typecheck, Effect/InstanceState rules, no fixed-sleep concurrency tests. |
-| `.opencode/policy/first-principles-engineering.md` | First-divergence repair, no fallback, full mappings, independent audit, 15% Chinese comments. |
-| `.opencode/templates/canonical-plan.md` | Required evidence, TDD, budgets, audit and implementation records. |
-| `docs/plans/lsp-diagnostics-reliability.md` | Diagnostics are separate history and remain out of scope. |
+| Source                                             | Constraint                                                                                                  |
+| -------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `CONTEXT.md`                                       | Session has identity; InstanceState is directory-scoped, not Session-scoped.                                |
+| root and package `AGENTS.md`                       | Minimal edits, package-local tests/typecheck, Effect/InstanceState rules, no fixed-sleep concurrency tests. |
+| `.opencode/policy/first-principles-engineering.md` | First-divergence repair, no fallback, full mappings, independent audit, 15% Chinese comments.               |
+| `.opencode/templates/canonical-plan.md`            | Required evidence, TDD, budgets, audit and implementation records.                                          |
+| `docs/plans/lsp-diagnostics-reliability.md`        | Diagnostics are separate history and remain out of scope.                                                   |
 
 ## 4. Files and Evidence Read
 
-| Evidence | Relevance | Class |
-| --- | --- | --- |
-| `src/lsp/lsp.ts` | Directory State stores bare clients; no Session ownership or normal removal. | observed |
-| `src/lsp/client.ts` | One client owns connection/diagnostics and idempotent shutdown. | observed |
-| `src/lsp/server.ts`, `src/lsp/launch.ts` | Handle exposes typed child `exit`; no server file change is needed. | observed |
-| `src/tool/read.ts` | Read forks LSP warmup into a long-lived Scope after successful reads. | observed |
-| `src/session/prompt.ts`, `run-state.ts`, `effect/runner.ts` | Runner index is directory-scoped today; only globally admitted Idle work distinguishes a new run from a cross-State Running join. | observed |
-| `src/session/session.ts` | Deletion emits existing typed event; Session stores directory/workspace. | observed |
-| `src/control-plane/workspace.ts` | Warp can preserve persisted directory D while assigning Workspace W. | observed |
-| Workspace routing middleware | Workspace target T overrides raw directory for Session Tool execution. | observed |
-| `src/bus/index.ts`, `bus/global.ts`, `sync/index.ts` | Typed events reach module-local GlobalBus across daemon directory states. | observed |
-| `src/effect/instance-state.ts` | Client state remains cache-isolated by directory and has scoped finalizers. | contracted |
-| `src/cli/cmd/tui/context/event.ts` | Project filtering currently drops cross-Project LSP invalidation before SyncProvider. | observed |
-| `src/cli/cmd/tui/context/sync.tsx` | One Project-level `lsp[]`; bootstrap and event each write unfiltered status. | observed |
-| TUI sidebar/footer/status | All consume the same `sync.data.lsp`. | observed |
-| TUI route/SDK/project contexts | Session Info has route ID, directory and workspace; SDK defaults to launch directory. | observed |
-| existing LSP/prompt/sync/Workspace tests | Public seams and deterministic Deferred/process/transport fixtures exist. | observed |
-| live `/lsp` A/B comparison | Different Session IDs receive the same directory-global row. | observed |
-| fake-server stale-root harness | Deleted task A remains and accumulates with task B. | observed |
+| Evidence                                                    | Relevance                                                                                                                         | Class      |
+| ----------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- | ---------- |
+| `src/lsp/lsp.ts`                                            | Directory State stores bare clients; no Session ownership or normal removal.                                                      | observed   |
+| `src/lsp/client.ts`                                         | One client owns connection/diagnostics and idempotent shutdown.                                                                   | observed   |
+| `src/lsp/server.ts`, `src/lsp/launch.ts`                    | Handle exposes typed child `exit`; no server file change is needed.                                                               | observed   |
+| `src/tool/read.ts`                                          | Read forks LSP warmup into a long-lived Scope after successful reads.                                                             | observed   |
+| `src/session/prompt.ts`, `run-state.ts`, `effect/runner.ts` | Runner index is directory-scoped today; only globally admitted Idle work distinguishes a new run from a cross-State Running join. | observed   |
+| `src/session/session.ts`                                    | Deletion emits existing typed event; Session stores directory/workspace.                                                          | observed   |
+| `src/control-plane/workspace.ts`                            | Warp can preserve persisted directory D while assigning Workspace W.                                                              | observed   |
+| Workspace routing middleware                                | Workspace target T overrides raw directory for Session Tool execution.                                                            | observed   |
+| `src/bus/index.ts`, `bus/global.ts`, `sync/index.ts`        | Typed events reach module-local GlobalBus across daemon directory states.                                                         | observed   |
+| `src/effect/instance-state.ts`                              | Client state remains cache-isolated by directory and has scoped finalizers.                                                       | contracted |
+| `src/cli/cmd/tui/context/event.ts`                          | Project filtering currently drops cross-Project LSP invalidation before SyncProvider.                                             | observed   |
+| `src/cli/cmd/tui/context/sync.tsx`                          | One Project-level `lsp[]`; bootstrap and event each write unfiltered status.                                                      | observed   |
+| TUI sidebar/footer/status                                   | All consume the same `sync.data.lsp`.                                                                                             | observed   |
+| TUI route/SDK/project contexts                              | Session Info has route ID, directory and workspace; SDK defaults to launch directory.                                             | observed   |
+| existing LSP/prompt/sync/Workspace tests                    | Public seams and deterministic Deferred/process/transport fixtures exist.                                                         | observed   |
+| live `/lsp` A/B comparison                                  | Different Session IDs receive the same directory-global row.                                                                      | observed   |
+| fake-server stale-root harness                              | Deleted task A remains and accumulates with task B.                                                                               | observed   |
 
 ## 5. Current Behavior
 
@@ -118,55 +118,55 @@ diff is still measured against `HEAD` and must be at most 600 lines.
 
 ## 6. Supported Domain and Reachability
 
-| Condition | Reachable producer | Owner / disposition |
-| --- | --- | --- |
-| Two Sessions use same/different roots in one or different materialized states | concurrent/sequential daemon runs | LSP registry claims |
-| New prompt from Idle; prompt while Running | SessionPrompt/Runner | new token / join pass-through |
-| Read warmup outlives its run | detached Tool fiber | immutable run-token validation |
-| Root disappears, child exits, or State disposes during init | filesystem/process/cache | registry cleanup and closed-State validation |
-| Same-process HTTP/Workspace/recursive deletion | Session deletion event | materialized-state claim retirement |
-| deletion races a run admission | DB removal + GlobalBus while Runner work starts | one lifecycle transition semaphore |
-| Workspace routes persisted D to target T | sessionWarp + middleware | actual materialized owner state |
-| D is Running when first warp routes another prompt to T | directory-local Runner maps | daemon-wide Runner identity with State-owned lifetime |
-| D shell queues a Prompt submitted in T | Runner starts stored bare Effect from D shell fiber | bind queued work to caller's InstanceRef/WorkspaceRef |
-| TUI route changes or owner changes while route stays active/cross-Project | route and routed `lsp.updated` invalidation | EventProvider + SyncProvider projection |
-| VS Code Bridge selected | bridge touch/status | lightweight Session claim; no shutdown |
-| Unscoped debug caller | no Session context | preserved aggregate branch |
-| Standalone CLI deletes into another daemon | separate process | explicitly excluded |
+| Condition                                                                     | Reachable producer                                  | Owner / disposition                                   |
+| ----------------------------------------------------------------------------- | --------------------------------------------------- | ----------------------------------------------------- |
+| Two Sessions use same/different roots in one or different materialized states | concurrent/sequential daemon runs                   | LSP registry claims                                   |
+| New prompt from Idle; prompt while Running                                    | SessionPrompt/Runner                                | new token / join pass-through                         |
+| Read warmup outlives its run                                                  | detached Tool fiber                                 | immutable run-token validation                        |
+| Root disappears, child exits, or State disposes during init                   | filesystem/process/cache                            | registry cleanup and closed-State validation          |
+| Same-process HTTP/Workspace/recursive deletion                                | Session deletion event                              | materialized-state claim retirement                   |
+| deletion races a run admission                                                | DB removal + GlobalBus while Runner work starts     | one lifecycle transition semaphore                    |
+| Workspace routes persisted D to target T                                      | sessionWarp + middleware                            | actual materialized owner state                       |
+| D is Running when first warp routes another prompt to T                       | directory-local Runner maps                         | daemon-wide Runner identity with State-owned lifetime |
+| D shell queues a Prompt submitted in T                                        | Runner starts stored bare Effect from D shell fiber | bind queued work to caller's InstanceRef/WorkspaceRef |
+| TUI route changes or owner changes while route stays active/cross-Project     | route and routed `lsp.updated` invalidation         | EventProvider + SyncProvider projection               |
+| VS Code Bridge selected                                                       | bridge touch/status                                 | lightweight Session claim; no shutdown                |
+| Unscoped debug caller                                                         | no Session context                                  | preserved aggregate branch                            |
+| Standalone CLI deletes into another daemon                                    | separate process                                    | explicitly excluded                                   |
 
 ## 7. Required Invariants
 
-| ID | Invariant |
-| --- | --- |
-| INV-01 | TUI Session view contains only rows owned by that Session and requested through its directory/workspace. |
-| INV-02 | One `(server, root)` client may be shared, with independent Session claims. |
+| ID     | Invariant                                                                                                                                                                                                                                                                                                                                |
+| ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| INV-01 | TUI Session view contains only rows owned by that Session and requested through its directory/workspace.                                                                                                                                                                                                                                 |
+| INV-02 | One `(server, root)` client may be shared, with independent Session claims.                                                                                                                                                                                                                                                              |
 | INV-03 | Daemon-wide Runner identity is authoritative for admission, join, ShellThenRun, busy checks and cancellation. Running joins do not reset LSP; queued or Idle work executes in its submitting Instance/Workspace, and genuine new work retires that Session across all materialized LSP states before installing one current-state token. |
-| INV-04 | Final owner release shuts down; one owner cannot kill another's client. |
-| INV-05 | Missing root, child exit, covered Session deletion, or state disposal removes impossible resources; disposed State cannot accept a late entry. |
-| INV-06 | Detached/initializing old work cannot claim a newer generation, including after the Session moves from state D to T. |
-| INV-07 | Client lookup/status remains directory InstanceState-isolated. |
-| INV-08 | Read activation and server/root selection remain unchanged. |
-| INV-09 | Sidebar/footer/status consume one route-owned snapshot: route identity change clears it synchronously, stale responses cannot overwrite it, and cross-Project LSP invalidation reaches the same refresh path. |
-| INV-10 | Bridge visibility is Session-scoped without owning the external process. |
-| INV-11 | Diagnostics behavior is unchanged. |
-| INV-12 | Covered deletion retires the Session in every materialized state that actually holds a claim, including Workspace target T. |
-| INV-13 | Public status emits at most one row per underlying client, with deduplicated owner IDs. |
-| INV-14 | New-run admission and covered deletion are linearized: deletion before admission prevents install; deletion after admission retires the installed token. Slow shutdown is outside the transition lock. |
+| INV-04 | Final owner release shuts down; one owner cannot kill another's client.                                                                                                                                                                                                                                                                  |
+| INV-05 | Missing root, child exit, covered Session deletion, or state disposal removes impossible resources; disposed State cannot accept a late entry.                                                                                                                                                                                           |
+| INV-06 | Detached/initializing old work cannot claim a newer generation, including after the Session moves from state D to T.                                                                                                                                                                                                                     |
+| INV-07 | Client lookup/status remains directory InstanceState-isolated.                                                                                                                                                                                                                                                                           |
+| INV-08 | Read activation and server/root selection remain unchanged.                                                                                                                                                                                                                                                                              |
+| INV-09 | Sidebar/footer/status consume one route-owned snapshot: route identity change clears it synchronously, stale responses cannot overwrite it, and cross-Project LSP invalidation reaches the same refresh path.                                                                                                                            |
+| INV-10 | Bridge visibility is Session-scoped without owning the external process.                                                                                                                                                                                                                                                                 |
+| INV-11 | Diagnostics behavior is unchanged.                                                                                                                                                                                                                                                                                                       |
+| INV-12 | Covered deletion retires the Session in every materialized state that actually holds a claim, including Workspace target T.                                                                                                                                                                                                              |
+| INV-13 | Public status emits at most one row per underlying client, with deduplicated owner IDs.                                                                                                                                                                                                                                                  |
+| INV-14 | New-run admission and covered deletion are linearized: deletion before admission prevents install; deletion after admission retires the installed token. Slow shutdown is outside the transition lock.                                                                                                                                   |
 
 ## 8. First Divergence and Feedback Signals
 
-| Invariant | First divergence | Owner | Proof |
-| --- | --- | --- | --- |
-| 01/02/04/13 | Bare `State.clients` has no owner identity. | LSP registry | no Session field or release transition |
-| 03/06 | Session run provenance is absent; old warmup can observe later state. | LSP context + Prompt work boundary | detached Read + async bridge/spawn |
-| 05 | Root/exit/deletion do not detach entries; disposal does not close a State before in-flight init resumes. | LSP lifecycle | stale-root and paused-init disposal reproductions |
-| 09 | SyncProvider stores rows without route identity; Project-filtered events can drop cross-Project LSP invalidation. | LSP invalidation + TUI SyncProvider | A snapshot during blocked B request; B event behind old Project filter |
-| 10 | Synthetic bridge row bypasses ownership. | LSP bridge projection | current status branch |
-| 12 | Persisted D and Workspace target T can diverge; selecting one address misses claims. | LSP deletion handoff | warp + routing evidence |
-| 14 | Retirement and later token install are separated by async shutdown, so deletion can miss the future token. | LSP lifecycle transition | controlled shutdown + concurrent deletion |
-| 03/04 | Runner map is directory-local, so T can treat D-Running as Idle and retire an active D claim. | SessionRunState admission | first warp D Running -> prompt in T |
-| 03 | Cross-State join without global cancel/busy lookup leaves control operations reading a second local identity. | SessionRunState control | D Running -> T cancel/assertNotBusy |
-| 03/06 | Runner stores a bare T work Effect, then D shell fiber starts it with D context. | SessionRunState ShellThenRun handoff | D shell -> warp T -> queued Prompt executes in T |
+| Invariant   | First divergence                                                                                                  | Owner                                | Proof                                                                  |
+| ----------- | ----------------------------------------------------------------------------------------------------------------- | ------------------------------------ | ---------------------------------------------------------------------- |
+| 01/02/04/13 | Bare `State.clients` has no owner identity.                                                                       | LSP registry                         | no Session field or release transition                                 |
+| 03/06       | Session run provenance is absent; old warmup can observe later state.                                             | LSP context + Prompt work boundary   | detached Read + async bridge/spawn                                     |
+| 05          | Root/exit/deletion do not detach entries; disposal does not close a State before in-flight init resumes.          | LSP lifecycle                        | stale-root and paused-init disposal reproductions                      |
+| 09          | SyncProvider stores rows without route identity; Project-filtered events can drop cross-Project LSP invalidation. | LSP invalidation + TUI SyncProvider  | A snapshot during blocked B request; B event behind old Project filter |
+| 10          | Synthetic bridge row bypasses ownership.                                                                          | LSP bridge projection                | current status branch                                                  |
+| 12          | Persisted D and Workspace target T can diverge; selecting one address misses claims.                              | LSP deletion handoff                 | warp + routing evidence                                                |
+| 14          | Retirement and later token install are separated by async shutdown, so deletion can miss the future token.        | LSP lifecycle transition             | controlled shutdown + concurrent deletion                              |
+| 03/04       | Runner map is directory-local, so T can treat D-Running as Idle and retire an active D claim.                     | SessionRunState admission            | first warp D Running -> prompt in T                                    |
+| 03          | Cross-State join without global cancel/busy lookup leaves control operations reading a second local identity.     | SessionRunState control              | D Running -> T cancel/assertNotBusy                                    |
+| 03/06       | Runner stores a bare T work Effect, then D shell fiber starts it with D context.                                  | SessionRunState ShellThenRun handoff | D shell -> warp T -> queued Prompt executes in T                       |
 
 Executed baseline red signals before the partial R4 implementation:
 
@@ -182,15 +182,15 @@ FAIL: stale task-a client remained
 
 ## 9. Responsibility and Seams
 
-| Concern | Owner | Promise |
-| --- | --- | --- |
-| client identity/claims/shutdown | LSP registry | shared process, exact owner set, final-owner cleanup |
-| run admission + new-run token | daemon-wide index in SessionRunState | cross-State join; only newly executed work performs LSP admission and inherits token |
-| covered deletion | singleton LSP layer + daemon GlobalBus | retire Session in existing materialized states only |
-| admission/deletion order | singleton lifecycle semaphore | DB existence check plus atomic in-memory transition; shutdown outside lock |
-| LSP invalidation | existing LSP Bus publication -> TUI EventProvider | preserve typed/directory event and route this invalidation before Project filtering |
-| active view | TUI SyncProvider | synchronous route invalidation plus request/filter/token for all renderers |
-| public metadata | Status schema/generated type | one row with optional `sessionIDs` |
+| Concern                         | Owner                                             | Promise                                                                              |
+| ------------------------------- | ------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| client identity/claims/shutdown | LSP registry                                      | shared process, exact owner set, final-owner cleanup                                 |
+| run admission + new-run token   | daemon-wide index in SessionRunState              | cross-State join; only newly executed work performs LSP admission and inherits token |
+| covered deletion                | singleton LSP layer + daemon GlobalBus            | retire Session in existing materialized states only                                  |
+| admission/deletion order        | singleton lifecycle semaphore                     | DB existence check plus atomic in-memory transition; shutdown outside lock           |
+| LSP invalidation                | existing LSP Bus publication -> TUI EventProvider | preserve typed/directory event and route this invalidation before Project filtering  |
+| active view                     | TUI SyncProvider                                  | synchronous route invalidation plus request/filter/token for all renderers           |
+| public metadata                 | Status schema/generated type                      | one row with optional `sessionIDs`                                                   |
 
 ## 10. Single Primary-Path Design
 
@@ -280,84 +280,84 @@ snapshot while refreshing. Bootstrap, route reactivity and the globally routed
 
 ## 11. Secondary and Replacement Paths
 
-| Path | Class | Disposition |
-| --- | --- | --- |
-| direct shared client | primary | implement |
-| Bridge claim | supported branch | implement same token/notification semantics |
-| unscoped debug | shipped compatibility | preserve; omitted from Session view |
-| different InstanceStates | pass-through | preserve client isolation |
-| same-process deletion fan-out | lifecycle branch | exact Session retirement only |
-| standalone CLI cross-process delete | explicit non-goal | exclude |
-| TTL, Project clear, per-Session process, second endpoint/registry | forbidden fallback | reject |
+| Path                                                              | Class                 | Disposition                                 |
+| ----------------------------------------------------------------- | --------------------- | ------------------------------------------- |
+| direct shared client                                              | primary               | implement                                   |
+| Bridge claim                                                      | supported branch      | implement same token/notification semantics |
+| unscoped debug                                                    | shipped compatibility | preserve; omitted from Session view         |
+| different InstanceStates                                          | pass-through          | preserve client isolation                   |
+| same-process deletion fan-out                                     | lifecycle branch      | exact Session retirement only               |
+| standalone CLI cross-process delete                               | explicit non-goal     | exclude                                     |
+| TTL, Project clear, per-Session process, second endpoint/registry | forbidden fallback    | reject                                      |
 
 Alternate-success-path ratio: `0%`. Diagnostic decision change: `0%`.
 
 ## 12. Workaround Deletion
 
-| Existing duplicate | Replacement |
-| --- | --- |
-| bootstrap direct `/lsp` writer | one `refreshLsp` |
-| `lsp.updated` direct `/lsp` writer | same `refreshLsp` |
+| Existing duplicate                      | Replacement                         |
+| --------------------------------------- | ----------------------------------- |
+| bootstrap direct `/lsp` writer          | one `refreshLsp`                    |
+| `lsp.updated` direct `/lsp` writer      | same `refreshLsp`                   |
 | renderer interpretation of global array | SyncProvider guarantees active view |
 
 ## 13. Forward Traceability
 
-| Requirement | Production path | File | Test |
-| --- | --- | --- | --- |
-| Session isolation/dedup | token claims -> one status row | `lsp.ts`, generated type | shared A/B row |
-| prompt refresh/join | globally admitted work -> all-state retire -> current-state token | `run-state.ts`, `lsp.ts` | D old claim/warmup -> T next run; concurrent join retains T |
-| cross-State Runner control/context | daemon index + bound Instance/Workspace -> join/queue/cancel/busy | `run-state.ts` | D Running and D-shell/T-queued Prompt preserve one Runner and execute new work in T |
-| stale warmup/init | inherited token -> all-state invalidation -> post-async validation | `lsp.ts` | old D warmup resumes after T token and cannot claim |
-| final-owner cleanup | retire -> detach -> shutdown | `lsp.ts` | A release preserves B; B release removes |
-| root/exit/disposal | prune/typed Node exit/closed State -> detach | `lsp.ts` | root delete, pre/post-listener exit, paused init disposal |
-| Workspace D/T deletion | materialized states -> matching Session retire | `lsp.ts` | claim in T, persisted D event, T cleaned |
-| deletion/admission race | shared transition semaphore -> existence/retire/install | `lsp.ts` | deletion before/after admission leaves no claim |
-| owner change refresh | claim -> `lsp.updated` | `lsp.ts`, `sync.tsx` | current route empty then event refresh |
-| cross-Project refresh | existing event -> LSP invalidation exception -> one refresh | `event.ts`, `sync.tsx` | B event carries another project but refreshes active B; non-LSP remains filtered |
-| TUI route/race | route identity invalidation -> request/filter/token | `sync.tsx`, generated type | committed A clears while B blocked; late A rejection |
-| Bridge | token claim/update, no process stop | `lsp.ts` | shared bridge row and reset |
-| diagnostics/Read | unchanged | no behavioral edit | existing regressions |
+| Requirement                        | Production path                                                    | File                       | Test                                                                                |
+| ---------------------------------- | ------------------------------------------------------------------ | -------------------------- | ----------------------------------------------------------------------------------- |
+| Session isolation/dedup            | token claims -> one status row                                     | `lsp.ts`, generated type   | shared A/B row                                                                      |
+| prompt refresh/join                | globally admitted work -> all-state retire -> current-state token  | `run-state.ts`, `lsp.ts`   | D old claim/warmup -> T next run; concurrent join retains T                         |
+| cross-State Runner control/context | daemon index + bound Instance/Workspace -> join/queue/cancel/busy  | `run-state.ts`             | D Running and D-shell/T-queued Prompt preserve one Runner and execute new work in T |
+| stale warmup/init                  | inherited token -> all-state invalidation -> post-async validation | `lsp.ts`                   | old D warmup resumes after T token and cannot claim                                 |
+| final-owner cleanup                | retire -> detach -> shutdown                                       | `lsp.ts`                   | A release preserves B; B release removes                                            |
+| root/exit/disposal                 | prune/typed Node exit/closed State -> detach                       | `lsp.ts`                   | root delete, pre/post-listener exit, paused init disposal                           |
+| Workspace D/T deletion             | materialized states -> matching Session retire                     | `lsp.ts`                   | claim in T, persisted D event, T cleaned                                            |
+| deletion/admission race            | shared transition semaphore -> existence/retire/install            | `lsp.ts`                   | deletion before/after admission leaves no claim                                     |
+| owner change refresh               | claim -> `lsp.updated`                                             | `lsp.ts`, `sync.tsx`       | current route empty then event refresh                                              |
+| cross-Project refresh              | existing event -> LSP invalidation exception -> one refresh        | `event.ts`, `sync.tsx`     | B event carries another project but refreshes active B; non-LSP remains filtered    |
+| TUI route/race                     | route identity invalidation -> request/filter/token                | `sync.tsx`, generated type | committed A clears while B blocked; late A rejection                                |
+| Bridge                             | token claim/update, no process stop                                | `lsp.ts`                   | shared bridge row and reset                                                         |
+| diagnostics/Read                   | unchanged                                                          | no behavioral edit         | existing regressions                                                                |
 
 ## 14. Reverse Traceability
 
-| Concept | Invariants | Why existing logic is insufficient |
-| --- | --- | --- |
-| owner map | 01/02/04/13 | bare clients cannot isolate or identify final owner |
-| opaque run token/context | 03/06/08 | Session ID alone lets old work impersonate new run |
-| daemon Runner index + State ownership | 03/04/05 | directory-local lookup admits/misses D/T work; process-global lifetime would break State disposal |
-| bound queued-work context | 03/06/07 | a bare Effect stored by Runner inherits the later D shell fiber rather than submitting T |
-| unified detach | 04/05 | ad hoc shutdown races replacement/other owners |
-| closed State + post-async validation | 05/06 | cache disposal otherwise permits late orphan reattachment |
+| Concept                                   | Invariants     | Why existing logic is insufficient                                                                     |
+| ----------------------------------------- | -------------- | ------------------------------------------------------------------------------------------------------ |
+| owner map                                 | 01/02/04/13    | bare clients cannot isolate or identify final owner                                                    |
+| opaque run token/context                  | 03/06/08       | Session ID alone lets old work impersonate new run                                                     |
+| daemon Runner index + State ownership     | 03/04/05       | directory-local lookup admits/misses D/T work; process-global lifetime would break State disposal      |
+| bound queued-work context                 | 03/06/07       | a bare Effect stored by Runner inherits the later D shell fiber rather than submitting T               |
+| unified detach                            | 04/05          | ad hoc shutdown races replacement/other owners                                                         |
+| closed State + post-async validation      | 05/06          | cache disposal otherwise permits late orphan reattachment                                              |
 | materialized-state lifecycle address book | 03/05/06/07/12 | New run and deletion must invalidate prior claims across D/T; unmaterialized state cannot own a client |
-| lifecycle transition semaphore | 05/06/12/14 | async shutdown otherwise leaves a deletion gap before token installation |
-| owner-change publication | 01/09/10 | reuse/Bridge changes metadata without new process |
-| `sessionIDs` metadata | 01/10/13 | TUI cannot infer owner from root/directory |
-| LSP event routing exception | 01/09 | generic Project filtering drops active-route invalidation before SyncProvider |
-| route snapshot owner/token | 01/09 | launch directory, committed old rows and async response order are insufficient |
+| lifecycle transition semaphore            | 05/06/12/14    | async shutdown otherwise leaves a deletion gap before token installation                               |
+| owner-change publication                  | 01/09/10       | reuse/Bridge changes metadata without new process                                                      |
+| `sessionIDs` metadata                     | 01/10/13       | TUI cannot infer owner from root/directory                                                             |
+| LSP event routing exception               | 01/09          | generic Project filtering drops active-route invalidation before SyncProvider                          |
+| route snapshot owner/token                | 01/09          | launch directory, committed old rows and async response order are insufficient                         |
 
 ## 15. File-Level Plan
 
 ### Production / Generated: authorized maximum 5
 
-| File | Change | Estimate |
-| --- | --- | ---: |
-| `packages/opencode/src/lsp/lsp.ts` | claims, tokens, materialized-state deletion, cleanup, bridge/status/update | +155/-25 |
-| `packages/opencode/src/session/run-state.ts` | daemon Runner index with State ownership; wrap only admitted work in LSP token | +30/-10 |
-| `packages/opencode/src/cli/cmd/tui/context/event.ts` | route existing LSP invalidation before generic Project filter | +5/-1 |
-| `packages/opencode/src/cli/cmd/tui/context/sync.tsx` | one active-route refresh/filter/token | +35/-8 |
-| `packages/sdk/js/src/v2/gen/types.gen.ts` | generator-owned optional `sessionIDs` | +1/-0 |
+| File                                                 | Change                                                                         | Estimate |
+| ---------------------------------------------------- | ------------------------------------------------------------------------------ | -------: |
+| `packages/opencode/src/lsp/lsp.ts`                   | claims, tokens, materialized-state deletion, cleanup, bridge/status/update     | +155/-25 |
+| `packages/opencode/src/session/run-state.ts`         | daemon Runner index with State ownership; wrap only admitted work in LSP token |  +30/-10 |
+| `packages/opencode/src/cli/cmd/tui/context/event.ts` | route existing LSP invalidation before generic Project filter                  |    +5/-1 |
+| `packages/opencode/src/cli/cmd/tui/context/sync.tsx` | one active-route refresh/filter/token                                          |   +35/-8 |
+| `packages/sdk/js/src/v2/gen/types.gen.ts`            | generator-owned optional `sessionIDs`                                          |    +1/-0 |
 
 The fifth path is permitted only because it is the generated SDK type. If SDK
 generation changes another generated file, stop; do not hand-trim output.
 
 ### Tests: hard maximum 4
 
-| File | Change | Estimate |
-| --- | --- | ---: |
-| `packages/opencode/test/lsp/index.test.ts` | consolidated claims, notifications, D/T/deletion/disposal/root/exit/Bridge | +195/-5 |
-| `packages/opencode/test/session/prompt.test.ts` | completed refresh and cross-State Running join | +32/-3 |
-| `packages/opencode/test/cli/cmd/tui/sync-fixture.tsx` | real RouteProvider/navigation | +12/-2 |
-| `packages/opencode/test/cli/cmd/tui/sync.test.tsx` | routing/filter/event/late response | +55/-2 |
+| File                                                  | Change                                                                     | Estimate |
+| ----------------------------------------------------- | -------------------------------------------------------------------------- | -------: |
+| `packages/opencode/test/lsp/index.test.ts`            | consolidated claims, notifications, D/T/deletion/disposal/root/exit/Bridge |  +195/-5 |
+| `packages/opencode/test/session/prompt.test.ts`       | completed refresh and cross-State Running join                             |   +32/-3 |
+| `packages/opencode/test/cli/cmd/tui/sync-fixture.tsx` | real RouteProvider/navigation                                              |   +12/-2 |
+| `packages/opencode/test/cli/cmd/tui/sync.test.tsx`    | routing/filter/event/late response                                         |   +55/-2 |
 
 No file is added. `prompt.ts`, `server.ts`, Workspace tests, App, and unrelated
 complete LSP mocks must have zero final diff.
@@ -383,8 +383,8 @@ complete LSP mocks must have zero final diff.
 9. A first commits rows; switching to B clears A synchronously while B response
    is blocked, then B uses its directory/workspace and late A loses.
 10. Cross-Project B starts empty and refreshes when B's Project-tagged underlying
-   owner change reaches the existing LSP routing exception; no navigation or
-   second subscription is used.
+    owner change reaches the existing LSP routing exception; no navigation or
+    second subscription is used.
 
 Tests observe public status, process lifetime, prompt results and `sync.data.lsp`.
 They use Deferred/process/event/HTTP signals, not private maps, source text, or
@@ -392,10 +392,10 @@ fixed sleeps.
 
 ## 17. Chinese Comment Budget
 
-| Metric | Estimate |
-| --- | ---: |
-| Effective changed lines `E` | 400 |
-| Minimum qualifying Chinese comments `C` | 60 |
+| Metric                                  | Estimate |
+| --------------------------------------- | -------: |
+| Effective changed lines `E`             |      400 |
+| Minimum qualifying Chinese comments `C` |       60 |
 
 Comments must explain immutable run provenance, shared owner/process identity,
 claim-change notification, detach-before-shutdown, materialized-state address
@@ -406,31 +406,31 @@ and TUI response token. Narrative comments do not count. Recalculate actual E/C.
 
 All commands run from the named package directory.
 
-| Command | CWD | Evidence |
-| --- | --- | --- |
-| `bun test --timeout 30000 test/lsp/index.test.ts` | `packages/opencode` | registry/lifecycle/token/deletion/Bridge |
-| `bun test --timeout 30000 test/session/prompt.test.ts --test-name-pattern 'LSP ownership|concurrent loop callers'` | `packages/opencode` | Idle refresh and Running join |
-| `bun test --timeout 30000 test/server/httpapi-session.test.ts --test-name-pattern 'abort|busy'` | `packages/opencode` | existing HTTP Runner control regression |
-| `bun test --timeout 30000 test/cli/cmd/tui/sync.test.tsx --test-name-pattern 'LSP status'` | `packages/opencode` | active route/event/race |
-| `bun test --timeout 30000 test/lsp/index.test.ts test/lsp/lifecycle.test.ts test/lsp/client.test.ts` | `packages/opencode` | related LSP regression |
-| `bun test --timeout 30000 test/session/prompt.test.ts test/session/snapshot-tool-race.test.ts test/tool/lsp.test.ts` | `packages/opencode` | prompt and unchanged fixture compatibility |
-| `bun test --timeout 30000 test/cli/cmd/tui/sync.test.tsx test/cli/tui/use-event.test.tsx` | `packages/opencode` | TUI regression |
-| `bun typecheck` | `packages/opencode` | package type safety |
-| `./script/build.ts` | `packages/sdk/js` | generated SDK |
-| `bun typecheck` | `packages/sdk/js` | generated type safety |
-| rerun stale-root harness | `packages/opencode` | original accumulation fixed |
+| Command                                                                                                              | CWD                       | Evidence                                   |
+| -------------------------------------------------------------------------------------------------------------------- | ------------------------- | ------------------------------------------ | --------------------------------------- |
+| `bun test --timeout 30000 test/lsp/index.test.ts`                                                                    | `packages/opencode`       | registry/lifecycle/token/deletion/Bridge   |
+| `bun test --timeout 30000 test/session/prompt.test.ts --test-name-pattern 'LSP ownership                             | concurrent loop callers'` | `packages/opencode`                        | Idle refresh and Running join           |
+| `bun test --timeout 30000 test/server/httpapi-session.test.ts --test-name-pattern 'abort                             | busy'`                    | `packages/opencode`                        | existing HTTP Runner control regression |
+| `bun test --timeout 30000 test/cli/cmd/tui/sync.test.tsx --test-name-pattern 'LSP status'`                           | `packages/opencode`       | active route/event/race                    |
+| `bun test --timeout 30000 test/lsp/index.test.ts test/lsp/lifecycle.test.ts test/lsp/client.test.ts`                 | `packages/opencode`       | related LSP regression                     |
+| `bun test --timeout 30000 test/session/prompt.test.ts test/session/snapshot-tool-race.test.ts test/tool/lsp.test.ts` | `packages/opencode`       | prompt and unchanged fixture compatibility |
+| `bun test --timeout 30000 test/cli/cmd/tui/sync.test.tsx test/cli/tui/use-event.test.tsx`                            | `packages/opencode`       | TUI regression                             |
+| `bun typecheck`                                                                                                      | `packages/opencode`       | package type safety                        |
+| `./script/build.ts`                                                                                                  | `packages/sdk/js`         | generated SDK                              |
+| `bun typecheck`                                                                                                      | `packages/sdk/js`         | generated type safety                      |
+| rerun stale-root harness                                                                                             | `packages/opencode`       | original accumulation fixed                |
 
 ## 19. Diff Budget
 
-| Metric | Limit / estimate |
-| --- | --- |
-| handwritten production files | 4 / exactly 4 |
-| generated files | 1 / exactly 1 |
-| test files | 4 / exactly 4 |
-| files added | 0 |
-| production/generated lines | about 270 |
-| test lines | about 304 |
-| generated lines | about 1 |
+| Metric                                | Limit / estimate             |
+| ------------------------------------- | ---------------------------- |
+| handwritten production files          | 4 / exactly 4                |
+| generated files                       | 1 / exactly 1                |
+| test files                            | 4 / exactly 4                |
+| files added                           | 0                            |
+| production/generated lines            | about 270                    |
+| test lines                            | about 304                    |
+| generated lines                       | about 1                      |
 | total changed lines excluding reports | about 574 / hard maximum 600 |
 
 Any sixth production/generated file, fifth test file, generator spread, or >600
@@ -478,34 +478,34 @@ blocker for this task; auditors must not relax any substantive finding.
 
 Superseded full text is in the non-authoritative audit-history report.
 
-| Round | Revision | Result | Primary finding | Reference |
-| ---: | --- | --- | --- | --- |
-| 1 | R1 | BLOCK | Session deletion and then-current App scope missing | `ses_0860246afffeCxdKCdxZd34ct0` |
-| 2 | R2 | BLOCK | duplicate deletion event; insensitive App test | `ses_085f2673dffe0Gwun19xx2MFNc` |
-| 3 | R3 | BLOCK | Workspace deletion wrong InstanceState | `ses_085e54f26ffeHD6kLXdQMC4OeZ` |
-| 4 | R4 | APPROVE | old App-inclusive soft-cap scope | `ses_085d38e6cffehSr05oadm19e0b` |
-| 5 | R5 | BLOCK | owner attachment did not refresh TUI | `ses_0858fccf4ffeKTmxu9qSPi9on1` |
-| 6 | R6 | BLOCK | detached warmup provenance; commit handoff omission | `ses_08587fe34ffeSX5CKl7TysRsUV` |
-| 7 | R7 | BLOCK | standalone CLI cross-process delete; later excluded | `ses_08545a82bffeGbcuJpRFLgO2ud` |
-| 8 | R8 | BLOCK | persisted D differs from Workspace target T | `ses_08525dd0effetbZ802Jr4P1TKM` |
-| 9A | R9 | APPROVE | no blockers; noted final diff must be under 600 | `ses_0850a0ae9ffeCgj757ojXj6TIf` |
-| 9B | R9 | BLOCK | next run in T did not retire old D claims/warmup | `ses_0850a0a77ffeal9U4sKGjdaJv6` |
-| 10A | R10 | APPROVE | no blocker; recorded estimate arithmetic correction | `ses_085008ce6ffeOmxNIHnqFiSDlF` |
-| 10B | R10 | BLOCK | cross-Project event filtered; old A visible while B request waits | `ses_085008c2bffeXgdekmXDivagYr` |
-| 11A | R11 | BLOCK | global event breaks typed Bus and excluded App refresh | `ses_084f6a434ffeQuqJQhK9fzvnzV` |
-| 11B | R11 | BLOCK | erased exit promise; disposal allows late reattachment | `ses_084f6a3e0ffeP6pSrnkWMdgXtK` |
-| 12A | R12 | BLOCK | partial superseded implementation omitted from audit baseline | `ses_084e9f921ffehsrS4TvYuuthqp` |
-| 12B | R12 | BLOCK | deletion can land between retirement and token install | `ses_084e9f8ebffeoiHwDFcXpxqTD7` |
-| 13A | R13 | BLOCK | directory-local Runner admits D-Running/T duplicate work | `ses_084df5ddeffe2L2tCpJOk5VeYT` |
-| 13B | R13 | APPROVE | no blocking findings | `ses_084df5dbdffeGX7NOD9IFarb8b` |
-| 14A | R14 | BLOCK | daemon Runner admission omitted cancel/busy consumers | `ses_084d56977ffeQRRniQ6StOPHU0` |
-| 14B | R14 | APPROVE | no blocking findings | `ses_084d568d2ffeHWOxigNzUtTKls` |
-| 15A | R15 | BLOCK | ShellThenRun starts T work in D shell fiber context | `ses_084cd9c85ffetT9IGW0vgDK9MD` |
-| 15B | R15 | BLOCK | ShellThenRun loses submitting Instance/Workspace | `ses_084cd9c42ffeAzuSm9lQWRfWwI` |
-| 16A | R16 | BLOCK | no technical blocker; six-round limit lacked user exception | `ses_084c73cd0ffedg0COaZ5hTSIR9` |
-| 16B | R16 | BLOCK | no technical blocker; six-round limit lacked user exception | `ses_084c73c90ffetUrlYWJjhAGgto` |
-| 16C | R16 | APPROVE | no blocking findings; exact full-scope R16 | `ses_084bb9cb1ffey0SWRV71TJFkEX` |
-| 16D | R16 | stopped | user stopped further plan audit and accepted approval | `ses_084bb9c71ffeWlIVkgKJ3JOqTH` |
+| Round | Revision | Result  | Primary finding                                                   | Reference                        |
+| ----: | -------- | ------- | ----------------------------------------------------------------- | -------------------------------- |
+|     1 | R1       | BLOCK   | Session deletion and then-current App scope missing               | `ses_0860246afffeCxdKCdxZd34ct0` |
+|     2 | R2       | BLOCK   | duplicate deletion event; insensitive App test                    | `ses_085f2673dffe0Gwun19xx2MFNc` |
+|     3 | R3       | BLOCK   | Workspace deletion wrong InstanceState                            | `ses_085e54f26ffeHD6kLXdQMC4OeZ` |
+|     4 | R4       | APPROVE | old App-inclusive soft-cap scope                                  | `ses_085d38e6cffehSr05oadm19e0b` |
+|     5 | R5       | BLOCK   | owner attachment did not refresh TUI                              | `ses_0858fccf4ffeKTmxu9qSPi9on1` |
+|     6 | R6       | BLOCK   | detached warmup provenance; commit handoff omission               | `ses_08587fe34ffeSX5CKl7TysRsUV` |
+|     7 | R7       | BLOCK   | standalone CLI cross-process delete; later excluded               | `ses_08545a82bffeGbcuJpRFLgO2ud` |
+|     8 | R8       | BLOCK   | persisted D differs from Workspace target T                       | `ses_08525dd0effetbZ802Jr4P1TKM` |
+|    9A | R9       | APPROVE | no blockers; noted final diff must be under 600                   | `ses_0850a0ae9ffeCgj757ojXj6TIf` |
+|    9B | R9       | BLOCK   | next run in T did not retire old D claims/warmup                  | `ses_0850a0a77ffeal9U4sKGjdaJv6` |
+|   10A | R10      | APPROVE | no blocker; recorded estimate arithmetic correction               | `ses_085008ce6ffeOmxNIHnqFiSDlF` |
+|   10B | R10      | BLOCK   | cross-Project event filtered; old A visible while B request waits | `ses_085008c2bffeXgdekmXDivagYr` |
+|   11A | R11      | BLOCK   | global event breaks typed Bus and excluded App refresh            | `ses_084f6a434ffeQuqJQhK9fzvnzV` |
+|   11B | R11      | BLOCK   | erased exit promise; disposal allows late reattachment            | `ses_084f6a3e0ffeP6pSrnkWMdgXtK` |
+|   12A | R12      | BLOCK   | partial superseded implementation omitted from audit baseline     | `ses_084e9f921ffehsrS4TvYuuthqp` |
+|   12B | R12      | BLOCK   | deletion can land between retirement and token install            | `ses_084e9f8ebffeoiHwDFcXpxqTD7` |
+|   13A | R13      | BLOCK   | directory-local Runner admits D-Running/T duplicate work          | `ses_084df5ddeffe2L2tCpJOk5VeYT` |
+|   13B | R13      | APPROVE | no blocking findings                                              | `ses_084df5dbdffeGX7NOD9IFarb8b` |
+|   14A | R14      | BLOCK   | daemon Runner admission omitted cancel/busy consumers             | `ses_084d56977ffeQRRniQ6StOPHU0` |
+|   14B | R14      | APPROVE | no blocking findings                                              | `ses_084d568d2ffeHWOxigNzUtTKls` |
+|   15A | R15      | BLOCK   | ShellThenRun starts T work in D shell fiber context               | `ses_084cd9c85ffetT9IGW0vgDK9MD` |
+|   15B | R15      | BLOCK   | ShellThenRun loses submitting Instance/Workspace                  | `ses_084cd9c42ffeAzuSm9lQWRfWwI` |
+|   16A | R16      | BLOCK   | no technical blocker; six-round limit lacked user exception       | `ses_084c73cd0ffedg0COaZ5hTSIR9` |
+|   16B | R16      | BLOCK   | no technical blocker; six-round limit lacked user exception       | `ses_084c73c90ffetUrlYWJjhAGgto` |
+|   16C | R16      | APPROVE | no blocking findings; exact full-scope R16                        | `ses_084bb9cb1ffey0SWRV71TJFkEX` |
+|   16D | R16      | stopped | user stopped further plan audit and accepted approval             | `ses_084bb9c71ffeWlIVkgKJ3JOqTH` |
 
 ## 23. Implementation Evidence
 
@@ -578,13 +578,13 @@ without dropping or silently including another task's work.
 
 ## 24. Implementation Audit Record
 
-| Round | Revision | Result | Primary finding | Reference |
-| ---: | --- | --- | --- | --- |
-| 1 | R16 implementation | BLOCK | B-01 stale claimant shut down a current waiter sharing one in-flight client | `ses_0845e50d0ffe58e3Ug2y7EcJvY` |
-| 2 | R16 implementation | BLOCK | B-02 root vanished during startup but client was still registered and consumed | `ses_0845e50d0ffe58e3Ug2y7EcJvY` |
-| 3 | R16 implementation | BLOCK | B-03 child exit detached the entry without client shutdown | `ses_0845e50d0ffe58e3Ug2y7EcJvY` |
-| 4 | R16 implementation | BLOCK | B-04 child-exit test could not detect missing client shutdown | `ses_0845e50d0ffe58e3Ug2y7EcJvY` |
-| 5 | R16 implementation | APPROVE | No blocking findings; full-scope R16 implementation verified | `ses_0845e50d0ffe58e3Ug2y7EcJvY` |
+| Round | Revision           | Result  | Primary finding                                                                | Reference                        |
+| ----: | ------------------ | ------- | ------------------------------------------------------------------------------ | -------------------------------- |
+|     1 | R16 implementation | BLOCK   | B-01 stale claimant shut down a current waiter sharing one in-flight client    | `ses_0845e50d0ffe58e3Ug2y7EcJvY` |
+|     2 | R16 implementation | BLOCK   | B-02 root vanished during startup but client was still registered and consumed | `ses_0845e50d0ffe58e3Ug2y7EcJvY` |
+|     3 | R16 implementation | BLOCK   | B-03 child exit detached the entry without client shutdown                     | `ses_0845e50d0ffe58e3Ug2y7EcJvY` |
+|     4 | R16 implementation | BLOCK   | B-04 child-exit test could not detect missing client shutdown                  | `ses_0845e50d0ffe58e3Ug2y7EcJvY` |
+|     5 | R16 implementation | APPROVE | No blocking findings; full-scope R16 implementation verified                   | `ses_0845e50d0ffe58e3Ug2y7EcJvY` |
 
 B-01 was repaired in the existing `State.spawning` owner path by retaining the
 tokens waiting on each shared Promise and allowing orphan detach only when no

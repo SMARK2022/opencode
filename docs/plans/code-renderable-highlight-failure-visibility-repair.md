@@ -36,45 +36,45 @@
 
 ## 3. Repository Context
 
-| Source | Why it constrains this task |
-| --- | --- |
-| `CONTEXT.md` | OpenTUI core 是 `thirdparty/opentui/packages/core`；`packages/opencode` 是 Session/Message/Part 的生产调用方。 |
-| `.opencode/policy/first-principles-engineering.md` | 要求修复 first divergence、一个 authoritative primary path、禁止无证据 fallback，并要求完整 traceability。 |
-| `.opencode/templates/canonical-plan.md` | 规定本计划的证据、TDD、验证、审计、E/C 和实现记录结构。 |
-| `AGENTS.md` | 要求优先使用 Bun；测试从 package 目录运行；根仓库不能直接运行测试。 |
-| `thirdparty/opentui/AGENTS.md` | OpenTUI 使用 `bun test`；仅 TypeScript 改动不需要 native build；避免静默错误。 |
-| `packages/opencode/AGENTS.md` | OpenCode 的包级验证从 `packages/opencode` 运行，并使用现有 Session/TUI 测试习惯。 |
-| `docs/plans/opentui-streaming-markdown-performance-repair.md` R62 | 已有合同要求 managed rejection 提交失败快照的当前 plain text，清除 conceal mapping，完成可见状态并请求重绘。 |
-| `docs/plans/opentui-tree-sitter-request-lifecycle-repair.md` R81 | 已有 Tree-sitter owner/lifecycle 修复边界；本任务不能把 producer 生命周期再次扩成新的工作流。 |
+| Source                                                            | Why it constrains this task                                                                                    |
+| ----------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| `CONTEXT.md`                                                      | OpenTUI core 是 `thirdparty/opentui/packages/core`；`packages/opencode` 是 Session/Message/Part 的生产调用方。 |
+| `.opencode/policy/first-principles-engineering.md`                | 要求修复 first divergence、一个 authoritative primary path、禁止无证据 fallback，并要求完整 traceability。     |
+| `.opencode/templates/canonical-plan.md`                           | 规定本计划的证据、TDD、验证、审计、E/C 和实现记录结构。                                                        |
+| `AGENTS.md`                                                       | 要求优先使用 Bun；测试从 package 目录运行；根仓库不能直接运行测试。                                            |
+| `thirdparty/opentui/AGENTS.md`                                    | OpenTUI 使用 `bun test`；仅 TypeScript 改动不需要 native build；避免静默错误。                                 |
+| `packages/opencode/AGENTS.md`                                     | OpenCode 的包级验证从 `packages/opencode` 运行，并使用现有 Session/TUI 测试习惯。                              |
+| `docs/plans/opentui-streaming-markdown-performance-repair.md` R62 | 已有合同要求 managed rejection 提交失败快照的当前 plain text，清除 conceal mapping，完成可见状态并请求重绘。   |
+| `docs/plans/opentui-tree-sitter-request-lifecycle-repair.md` R81  | 已有 Tree-sitter owner/lifecycle 修复边界；本任务不能把 producer 生命周期再次扩成新的工作流。                  |
 
 ## 4. Files and Evidence Read
 
-| Evidence | Relevance | Evidence class |
-| --- | --- | --- |
-| `thirdparty/opentui/packages/core/src/renderables/Code.ts:121-141` | seedless `content` 更新在 `streaming && filetype && !drawUnstyledText` 路径仍保持既有 pending 语义；R2 未改变此路径。 | observed |
-| `thirdparty/opentui/packages/core/src/renderables/Code.ts:183-300` | public rendering setters set `_highlightsDirty=true`; cache-affecting setters advance `_cacheGeneration`, while `drawUnstyledText` and `onChunks` currently do not. `initialStyledText` is a pending-only seed and currently also sets the primary dirty flag. | observed |
-| `thirdparty/opentui/packages/core/src/renderables/Code.ts:68,235-239,381-475,599-703,818-832` | `_streamingActive` is the existing request-lifecycle owner. R8 used only a configuration tuple, so a settled streaming instance could still consume a new seed without scheduling authoritative highlight. | observed |
-| `thirdparty/opentui/packages/core/src/renderables/Code.ts:591-597` | `commitStreamingVisible()` 是 styled-success finalization helper，且无条件执行 `_highlightsDirty=false`；R7 仍只保留它在成功路径。 | observed |
-| `thirdparty/opentui/packages/core/src/renderables/Code.ts:675-695` | R2 one-shot rejection catch 已恢复可见的 request-local plain representation；R7 不改变这个既有 one-shot settlement。 | observed |
-| `thirdparty/opentui/packages/core/src/renderables/Code.ts:811-825` | `_highlightsDirty` 是 render-time 唯一会重新调度 primary highlight request 的 gate。 | observed |
-| `thirdparty/opentui/packages/core/src/renderables/Code.test.ts:269-303,904-938,2363-2400,2714-2795` | R2 tests 已断言 rejection plain-text/frame visibility、current snapshot correctness 和零 success callbacks；R7 将它们作为 preserved baseline。 | observed |
-| `thirdparty/opentui/packages/core/src/renderables/Code.test.ts:2651-2712,2825-2856` | 已有 `syntaxStyle` setter in-flight seam 证明 shared dirty gate 可调度替代请求；seeded rejection test 证明 request-local source，但 R7 增加 setter 后普通 render 的 queueing 时序。 | observed |
-| `thirdparty/opentui/packages/core/src/testing/mock-tree-sitter-client.ts:132-183` | 提供可控 streaming resolve/reject seam，可稳定触发真实 CodeRenderable 失败路径。 | observed |
-| `thirdparty/opentui/packages/core/src/testing/test-renderer.ts:198-231` | 提供真实 render loop 和 char frame capture，可验证用户看到的 frame，而不是只看内存状态。 | observed |
-| `thirdparty/opentui/packages/core/src/renderables/Markdown.ts:464-493,642-668,977-995,998-1068` | Markdown pending seed 可以 conceal/transform 原文；它是等待期表示，不等同于 rejection 后要求的 current-source plain text。真实 producer 先更新 seed，再更新 content；R7 保留这条顺序。 | observed |
-| `thirdparty/opentui/packages/core/src/renderables/Diff.ts:715-733` | conceal + wrap 时会把 `drawUnstyledText` 设为 `false`，其内部 CodeRenderable 也依赖共享 failure owner。 | reachable |
-| `packages/opencode/src/cli/cmd/tui/routes/session/index.tsx:2078-2094` | `ReasoningBody` 直接使用 `drawUnstyledText={false}`，未传 `initialStyledText`。 | observed |
-| `packages/opencode/src/cli/cmd/tui/routes/session/index.tsx:2133-2158` | 普通完成态和流式 TextPart 直接使用 seedless CodeRenderable。 | observed |
-| `packages/opencode/src/cli/cmd/tui/routes/session/index.tsx:3061-3079` | Write 内容预览和正文使用 CodeRenderable；共享同一 owner。 | reachable |
-| `packages/opencode/src/cli/cmd/tui/feature-plugins/system/session-v2.tsx` | v2 debug/feature 路径也有 `drawUnstyledText={false}` Code 调用。 | reachable |
-| `packages/opencode/src/cli/cmd/tui/routes/session/notebook-tool.tsx:269` | Notebook 工具代码显示使用同一 CodeRenderable。 | reachable |
-| `git show a8fe63ce2 -- packages/core/src/renderables/Code.ts` | 上游原始 Code 高亮失败后调用 `fallback(content)`，保持内容可见。 | observed |
-| `git show 61023ba5e -- packages/core/src/renderables/Code.ts` | R62 版本在 streaming/one-shot failure 中提交 plain text 并请求重绘。 | observed |
-| `git show 1b9a20a08 -- packages/core/src/renderables/Code.ts` | 当前 fork 在 parser lifecycle repair 时移除了两处失败表示提交，形成回归。 | observed |
-| 安装的 `node_modules/@opentui/core/index-mh9nh736.js` | 当前 `0.4.3-smark.7` tarball 保留 `Code streaming highlight failed` 路径且不包含旧 plain-text 提交。 | observed |
-| 已运行的单实例 Bun repro | `plainText` 有内容、height 有值、frame 为空、`_shouldRenderTextBuffer=false`。 | observed |
-| 已运行的 8 实例 Bun repro | 8 个共享 client 的 CodeRenderable 全部保留高度但 `visibleTextCount=0`，frame 为空。 | observed |
-| 已运行的 seed control repro | 同样 rejection 下传入 `initialStyledText` 后 pending frame 能显示 seed；这只证明等待期表示，不证明 rejection 终态可以继续使用 seed。 | observed |
+| Evidence                                                                                            | Relevance                                                                                                                                                                                                                                                      | Evidence class |
+| --------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------- |
+| `thirdparty/opentui/packages/core/src/renderables/Code.ts:121-141`                                  | seedless `content` 更新在 `streaming && filetype && !drawUnstyledText` 路径仍保持既有 pending 语义；R2 未改变此路径。                                                                                                                                          | observed       |
+| `thirdparty/opentui/packages/core/src/renderables/Code.ts:183-300`                                  | public rendering setters set `_highlightsDirty=true`; cache-affecting setters advance `_cacheGeneration`, while `drawUnstyledText` and `onChunks` currently do not. `initialStyledText` is a pending-only seed and currently also sets the primary dirty flag. | observed       |
+| `thirdparty/opentui/packages/core/src/renderables/Code.ts:68,235-239,381-475,599-703,818-832`       | `_streamingActive` is the existing request-lifecycle owner. R8 used only a configuration tuple, so a settled streaming instance could still consume a new seed without scheduling authoritative highlight.                                                     | observed       |
+| `thirdparty/opentui/packages/core/src/renderables/Code.ts:591-597`                                  | `commitStreamingVisible()` 是 styled-success finalization helper，且无条件执行 `_highlightsDirty=false`；R7 仍只保留它在成功路径。                                                                                                                             | observed       |
+| `thirdparty/opentui/packages/core/src/renderables/Code.ts:675-695`                                  | R2 one-shot rejection catch 已恢复可见的 request-local plain representation；R7 不改变这个既有 one-shot settlement。                                                                                                                                           | observed       |
+| `thirdparty/opentui/packages/core/src/renderables/Code.ts:811-825`                                  | `_highlightsDirty` 是 render-time 唯一会重新调度 primary highlight request 的 gate。                                                                                                                                                                           | observed       |
+| `thirdparty/opentui/packages/core/src/renderables/Code.test.ts:269-303,904-938,2363-2400,2714-2795` | R2 tests 已断言 rejection plain-text/frame visibility、current snapshot correctness 和零 success callbacks；R7 将它们作为 preserved baseline。                                                                                                                 | observed       |
+| `thirdparty/opentui/packages/core/src/renderables/Code.test.ts:2651-2712,2825-2856`                 | 已有 `syntaxStyle` setter in-flight seam 证明 shared dirty gate 可调度替代请求；seeded rejection test 证明 request-local source，但 R7 增加 setter 后普通 render 的 queueing 时序。                                                                            | observed       |
+| `thirdparty/opentui/packages/core/src/testing/mock-tree-sitter-client.ts:132-183`                   | 提供可控 streaming resolve/reject seam，可稳定触发真实 CodeRenderable 失败路径。                                                                                                                                                                               | observed       |
+| `thirdparty/opentui/packages/core/src/testing/test-renderer.ts:198-231`                             | 提供真实 render loop 和 char frame capture，可验证用户看到的 frame，而不是只看内存状态。                                                                                                                                                                       | observed       |
+| `thirdparty/opentui/packages/core/src/renderables/Markdown.ts:464-493,642-668,977-995,998-1068`     | Markdown pending seed 可以 conceal/transform 原文；它是等待期表示，不等同于 rejection 后要求的 current-source plain text。真实 producer 先更新 seed，再更新 content；R7 保留这条顺序。                                                                         | observed       |
+| `thirdparty/opentui/packages/core/src/renderables/Diff.ts:715-733`                                  | conceal + wrap 时会把 `drawUnstyledText` 设为 `false`，其内部 CodeRenderable 也依赖共享 failure owner。                                                                                                                                                        | reachable      |
+| `packages/opencode/src/cli/cmd/tui/routes/session/index.tsx:2078-2094`                              | `ReasoningBody` 直接使用 `drawUnstyledText={false}`，未传 `initialStyledText`。                                                                                                                                                                                | observed       |
+| `packages/opencode/src/cli/cmd/tui/routes/session/index.tsx:2133-2158`                              | 普通完成态和流式 TextPart 直接使用 seedless CodeRenderable。                                                                                                                                                                                                   | observed       |
+| `packages/opencode/src/cli/cmd/tui/routes/session/index.tsx:3061-3079`                              | Write 内容预览和正文使用 CodeRenderable；共享同一 owner。                                                                                                                                                                                                      | reachable      |
+| `packages/opencode/src/cli/cmd/tui/feature-plugins/system/session-v2.tsx`                           | v2 debug/feature 路径也有 `drawUnstyledText={false}` Code 调用。                                                                                                                                                                                               | reachable      |
+| `packages/opencode/src/cli/cmd/tui/routes/session/notebook-tool.tsx:269`                            | Notebook 工具代码显示使用同一 CodeRenderable。                                                                                                                                                                                                                 | reachable      |
+| `git show a8fe63ce2 -- packages/core/src/renderables/Code.ts`                                       | 上游原始 Code 高亮失败后调用 `fallback(content)`，保持内容可见。                                                                                                                                                                                               | observed       |
+| `git show 61023ba5e -- packages/core/src/renderables/Code.ts`                                       | R62 版本在 streaming/one-shot failure 中提交 plain text 并请求重绘。                                                                                                                                                                                           | observed       |
+| `git show 1b9a20a08 -- packages/core/src/renderables/Code.ts`                                       | 当前 fork 在 parser lifecycle repair 时移除了两处失败表示提交，形成回归。                                                                                                                                                                                      | observed       |
+| 安装的 `node_modules/@opentui/core/index-mh9nh736.js`                                               | 当前 `0.4.3-smark.7` tarball 保留 `Code streaming highlight failed` 路径且不包含旧 plain-text 提交。                                                                                                                                                           | observed       |
+| 已运行的单实例 Bun repro                                                                            | `plainText` 有内容、height 有值、frame 为空、`_shouldRenderTextBuffer=false`。                                                                                                                                                                                 | observed       |
+| 已运行的 8 实例 Bun repro                                                                           | 8 个共享 client 的 CodeRenderable 全部保留高度但 `visibleTextCount=0`，frame 为空。                                                                                                                                                                            | observed       |
+| 已运行的 seed control repro                                                                         | 同样 rejection 下传入 `initialStyledText` 后 pending frame 能显示 seed；这只证明等待期表示，不证明 rejection 终态可以继续使用 seed。                                                                                                                           | observed       |
 
 ## 5. Current Behavior
 
@@ -99,35 +99,35 @@ seed-only setter during in-flight streaming request
 
 ## 6. Supported Input Domain and Reachability
 
-| Input or condition | Producer | Upstream guarantees | Reachable path | Owner | Classification |
-| --- | --- | --- | --- | --- | --- |
-| 流式 Markdown 首次高亮 rejection，且 caller 没有 seed | `ReasoningBody`、流式 `TextPart` | content 已是字符串，CodeRenderable 接受该组合 | `renderSelf -> startStreamingHighlight -> runStreamingLoop -> catch` | `CodeRenderable` | observed |
-| 非 streaming 或非 Markdown 的 one-shot highlight rejection | completed TextPart、Diff 内部 Code、Write/Notebook Code | filetype 和 content 已由调用方传入 | `renderSelf -> startOneShotHighlight -> catch` | `CodeRenderable` | reachable |
-| streaming 非 Markdown 内容更新失败 | fenced code 或其他 streaming Code caller | 当前 snapshot 仍由 CodeRenderable 管理 | `content setter -> startOneShotHighlight -> catch` | `CodeRenderable` | observed |
-| 已有 `initialStyledText` 的 Markdown block rejection | `MarkdownRenderable` | seed 用于 pending，可 conceal/transform；request 已捕获 current source | Code failure catch 必须使用 request-local `content` | `CodeRenderable` | reachable |
-| Tree-sitter client 在请求期间被销毁 | renderer destroy / lifecycle owner | client rejection 会抵达 Code request | client Promise -> Code catch | `CodeRenderable` 表示 owner；client 仍拥有生命周期 | observed / reachable |
-| 后续新 delta 在旧请求完成前到达 | Session event stream | Code 用 snapshot id 丢弃旧响应 | old catch sees stale snapshot and continues to latest pending content | `CodeRenderable` | observed |
-| streaming request 在途时 `drawUnstyledText` 或 `onChunks` setter 变化 | Solid reconciler / public CodeRenderable props | setter 当前会置 `_highlightsDirty=true`；R5 失败结算只比较 `_cacheGeneration`，因此这两类变更可被清除 | public setter -> streaming rejection catch -> next render | `CodeRenderable` | observed / reachable |
+| Input or condition                                                    | Producer                                                | Upstream guarantees                                                                                   | Reachable path                                                        | Owner                                              | Classification       |
+| --------------------------------------------------------------------- | ------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------- | -------------------------------------------------- | -------------------- |
+| 流式 Markdown 首次高亮 rejection，且 caller 没有 seed                 | `ReasoningBody`、流式 `TextPart`                        | content 已是字符串，CodeRenderable 接受该组合                                                         | `renderSelf -> startStreamingHighlight -> runStreamingLoop -> catch`  | `CodeRenderable`                                   | observed             |
+| 非 streaming 或非 Markdown 的 one-shot highlight rejection            | completed TextPart、Diff 内部 Code、Write/Notebook Code | filetype 和 content 已由调用方传入                                                                    | `renderSelf -> startOneShotHighlight -> catch`                        | `CodeRenderable`                                   | reachable            |
+| streaming 非 Markdown 内容更新失败                                    | fenced code 或其他 streaming Code caller                | 当前 snapshot 仍由 CodeRenderable 管理                                                                | `content setter -> startOneShotHighlight -> catch`                    | `CodeRenderable`                                   | observed             |
+| 已有 `initialStyledText` 的 Markdown block rejection                  | `MarkdownRenderable`                                    | seed 用于 pending，可 conceal/transform；request 已捕获 current source                                | Code failure catch 必须使用 request-local `content`                   | `CodeRenderable`                                   | reachable            |
+| Tree-sitter client 在请求期间被销毁                                   | renderer destroy / lifecycle owner                      | client rejection 会抵达 Code request                                                                  | client Promise -> Code catch                                          | `CodeRenderable` 表示 owner；client 仍拥有生命周期 | observed / reachable |
+| 后续新 delta 在旧请求完成前到达                                       | Session event stream                                    | Code 用 snapshot id 丢弃旧响应                                                                        | old catch sees stale snapshot and continues to latest pending content | `CodeRenderable`                                   | observed             |
+| streaming request 在途时 `drawUnstyledText` 或 `onChunks` setter 变化 | Solid reconciler / public CodeRenderable props          | setter 当前会置 `_highlightsDirty=true`；R5 失败结算只比较 `_cacheGeneration`，因此这两类变更可被清除 | public setter -> streaming rejection catch -> next render             | `CodeRenderable`                                   | observed / reachable |
 
 未将 native allocator OOM、terminal writer failure、任意 malformed input 或未证明的外部 caller 作为本次 production 设计输入；它们没有必要的 first divergence 证据。
 
 ## 7. Required Invariants
 
-| ID | Behavioral invariant | Evidence | Existing test |
-| --- | --- | --- | --- |
-| INV-01 | CodeRenderable 的 highlight 请求进入终态 failure 后，必须显示该 request 已捕获的 current source plain text；不能使用 independently mutable seed，也不能留下有高度的空白或旧表示。 | 用户需求、上游 `a8fe63ce2`、R62 rejection contract、R2 frame repro | R2 `Code.test.ts:2714-2759` 已有 managed rejection frame assertion |
-| INV-02 | managed parser/request rejection 不得伪装成成功高亮：rejection 发生在 success callbacks 前时，不调用 `onHighlight`/`onChunks`，不提交 styled highlight 或 conceal mapping。 | R62/R81 managed rejection contract；`runStreamingLoop` request rejection 先于 success conversion | `Code.test.ts:2707` 已断言两个 callback 次数为 0 |
-| INV-03 | `drawUnstyledText=false` 的在途等待语义不变；pending 阶段仍使用既有 seed 机制，不能把未完成高亮改成全局常开。 | R74-INV-04、Markdown seed implementation | Markdown pending tests、Code pending tests |
+| ID     | Behavioral invariant                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          | Evidence                                                                                                                                                    | Existing test                                                                                                                                                      |
+| ------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| INV-01 | CodeRenderable 的 highlight 请求进入终态 failure 后，必须显示该 request 已捕获的 current source plain text；不能使用 independently mutable seed，也不能留下有高度的空白或旧表示。                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             | 用户需求、上游 `a8fe63ce2`、R62 rejection contract、R2 frame repro                                                                                          | R2 `Code.test.ts:2714-2759` 已有 managed rejection frame assertion                                                                                                 |
+| INV-02 | managed parser/request rejection 不得伪装成成功高亮：rejection 发生在 success callbacks 前时，不调用 `onHighlight`/`onChunks`，不提交 styled highlight 或 conceal mapping。                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   | R62/R81 managed rejection contract；`runStreamingLoop` request rejection 先于 success conversion                                                            | `Code.test.ts:2707` 已断言两个 callback 次数为 0                                                                                                                   |
+| INV-03 | `drawUnstyledText=false` 的在途等待语义不变；pending 阶段仍使用既有 seed 机制，不能把未完成高亮改成全局常开。                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 | R74-INV-04、Markdown seed implementation                                                                                                                    | Markdown pending tests、Code pending tests                                                                                                                         |
 | INV-04 | **streaming rejection 路径中**，failure 表示提交完成后，后续新 content 和请求期间发生的 rendering-semantic setter invalidation 都能继续进入一次 primary highlight；普通 rejection 在后续普通 render 中不得产生请求；每个 in-scope setter invalidation 只允许恰好一次既有 primary rehighlight。scope 包含 `filetype`、`syntaxStyle`、`conceal`、`drawUnstyledText`、`streaming`、`treeSitterClient`、`baseHighlight`、`onHighlight`、`onChunks`；`content` 由 snapshot gate 管理。`initialStyledText` 只有在 `_streamingActive=true` 时是 pending-only：非空 seed 可刷新当前等待期表示，清空 seed保留当前 buffer/visibility；`_streamingActive=false` 时保留既有 primary dirty 行为；one-shot rejection 的既有 dirty settlement 不在 R9 扩展。 | 当前 snapshot/cache generation 检查、streaming failure finalization、`_streamingActive` lifecycle、pending representation 与 `_highlightsDirty` render gate | R9 ordinary rejection、active non-empty seed、active empty seed、settled streaming seed、non-streaming seed、`syntaxStyle`、`drawUnstyledText` 与 `onChunks` tests |
 
 ## 8. First Divergence and Root Cause
 
-| Invariant | First divergence | Owning module/interface | Proof |
-| --- | --- | --- | --- |
-| INV-01 | R2 已恢复 `runStreamingLoop()` 和 `startOneShotHighlight()` 的 request-local `content` plain-text commit；R5 不再修改该已验证 divergence。 | `CodeRenderable`，它拥有 request snapshot、TextBuffer 和 `_shouldRenderTextBuffer` | R2 source diff、Code tests、单实例及 8 实例 frame repro |
-| INV-02 | managed parser/request rejection 本身无需修改 settlement；表示修复必须继续位于 callback conversion 之前的 catch。 | `CodeRenderable` | `Code.test.ts:2707` callback counters 为 0 |
-| INV-03 | 无需修复；Markdown seed 和 `ensureVisibleTextBeforeHighlight()` 已存在。 | `MarkdownRenderable`/`CodeRenderable` | Markdown source 与 pending tests |
-| INV-04 | R2 failure catch 复用了无条件清 dirty 的 success helper，吞掉请求期间 rendering semantic setter 留下的 `_highlightsDirty`；R7 同时修正 seed-only setter 误进入 streaming queue 的调度分叉，并保留 R6 的统一 generation marker，不改变请求队列或 one-shot settlement。 | `CodeRenderable` | R5 implementation audit B-01、R6 plan audit B-01；public `initialStyledText` interleaving 与 `onChunks`/`drawUnstyledText` setter paths |
+| Invariant | First divergence                                                                                                                                                                                                                                                      | Owning module/interface                                                            | Proof                                                                                                                                   |
+| --------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| INV-01    | R2 已恢复 `runStreamingLoop()` 和 `startOneShotHighlight()` 的 request-local `content` plain-text commit；R5 不再修改该已验证 divergence。                                                                                                                            | `CodeRenderable`，它拥有 request snapshot、TextBuffer 和 `_shouldRenderTextBuffer` | R2 source diff、Code tests、单实例及 8 实例 frame repro                                                                                 |
+| INV-02    | managed parser/request rejection 本身无需修改 settlement；表示修复必须继续位于 callback conversion 之前的 catch。                                                                                                                                                     | `CodeRenderable`                                                                   | `Code.test.ts:2707` callback counters 为 0                                                                                              |
+| INV-03    | 无需修复；Markdown seed 和 `ensureVisibleTextBeforeHighlight()` 已存在。                                                                                                                                                                                              | `MarkdownRenderable`/`CodeRenderable`                                              | Markdown source 与 pending tests                                                                                                        |
+| INV-04    | R2 failure catch 复用了无条件清 dirty 的 success helper，吞掉请求期间 rendering semantic setter 留下的 `_highlightsDirty`；R7 同时修正 seed-only setter 误进入 streaming queue 的调度分叉，并保留 R6 的统一 generation marker，不改变请求队列或 one-shot settlement。 | `CodeRenderable`                                                                   | R5 implementation audit B-01、R6 plan audit B-01；public `initialStyledText` interleaving 与 `onChunks`/`drawUnstyledText` setter paths |
 
 ### Historical R2 feedback loop
 
@@ -179,12 +179,12 @@ R9 必须使用八个独立的 public render seams：
 
 ## 9. Responsibility and Seam
 
-| Concern | Owner | Interface promise | Why it belongs here | Why another module does not own it |
-| --- | --- | --- | --- | --- |
-| highlight failure 后的当前文本表示 | `CodeRenderable` | CodeRenderable 必须拥有可绘制的当前 TextBuffer 表示，并公开 `plainText`/layout/render 行为 | failure catch 与 `_shouldRenderTextBuffer`、TextBuffer 提交在同一 owner | Session caller 只提供 content/options；Tree-sitter 只提供 highlight request/result，不拥有 terminal representation |
-| pending seed 的保留与调度 | `CodeRenderable` + `MarkdownRenderable` | 只有真实 `_streamingActive` 的 pending 状态把 seed 当等待期表示；非空 seed 可刷新等待期 buffer，空 seed 不打开 unstyled visibility；inactive 状态保留既有 primary invalidation | seed 可以 conceal/transform，不能承担 rejection 的 current-source plain contract；状态边界属于 Code owner | 每个 Tool 重复生成 seed 会复制责任并漏掉 Diff/其他 Code caller |
-| Tree-sitter 错误终态 | `TreeSitterClient`/worker | request rejection 传回原调用方，不伪装成功 | 当前 client/worker 已拥有 request settlement | Code 不应吞掉错误或重试 parser；本计划只消费已到达的 failure |
-| 失败诊断日志 | 现有 Code warning 路径 | 保留现有 warning，不增加生产 telemetry | 本任务只恢复表示，不扩大诊断面 | renderer、Session 和 worker 不拥有 Code 表示决策 |
+| Concern                            | Owner                                   | Interface promise                                                                                                                                                              | Why it belongs here                                                                                       | Why another module does not own it                                                                                 |
+| ---------------------------------- | --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| highlight failure 后的当前文本表示 | `CodeRenderable`                        | CodeRenderable 必须拥有可绘制的当前 TextBuffer 表示，并公开 `plainText`/layout/render 行为                                                                                     | failure catch 与 `_shouldRenderTextBuffer`、TextBuffer 提交在同一 owner                                   | Session caller 只提供 content/options；Tree-sitter 只提供 highlight request/result，不拥有 terminal representation |
+| pending seed 的保留与调度          | `CodeRenderable` + `MarkdownRenderable` | 只有真实 `_streamingActive` 的 pending 状态把 seed 当等待期表示；非空 seed 可刷新等待期 buffer，空 seed 不打开 unstyled visibility；inactive 状态保留既有 primary invalidation | seed 可以 conceal/transform，不能承担 rejection 的 current-source plain contract；状态边界属于 Code owner | 每个 Tool 重复生成 seed 会复制责任并漏掉 Diff/其他 Code caller                                                     |
+| Tree-sitter 错误终态               | `TreeSitterClient`/worker               | request rejection 传回原调用方，不伪装成功                                                                                                                                     | 当前 client/worker 已拥有 request settlement                                                              | Code 不应吞掉错误或重试 parser；本计划只消费已到达的 failure                                                       |
+| 失败诊断日志                       | 现有 Code warning 路径                  | 保留现有 warning，不增加生产 telemetry                                                                                                                                         | 本任务只恢复表示，不扩大诊断面                                                                            | renderer、Session 和 worker 不拥有 Code 表示决策                                                                   |
 
 ## 10. Single Approved Primary-Path Design
 
@@ -207,78 +207,78 @@ highlight request
 
 ## 11. Secondary and Replacement Path Inventory
 
-| Path | Current or proposed | Classification | Produces success? | Decision-surface share | Disposition |
-| --- | --- | --- | --- | --- | --- |
-| existing styled highlight success | current | primary-contract branch | yes | existing | preserve |
-| pending `_initialStyledText` commit | current | primary-contract branch | no independent success; current pending representation | existing | preserve only before terminal rejection |
-| failure 后提交 request-local current source plain text | proposed restoration | existing shipped compatibility / explicit user-requested repair direction | no; it is terminal visible representation and does not invoke success callbacks | all new production decision surface | restore |
-| no-filetype plain rendering | current | contracted pass-through | yes as existing non-highlight path | existing | preserve |
-| Tree-sitter rejection | current | diagnostic/error path | no | existing | preserve |
-| retry parser / alternate parser / caller-local fallback | not present in approved route | forbidden fallback | would produce alternate success | 0 allowed | reject |
+| Path                                                    | Current or proposed           | Classification                                                            | Produces success?                                                               | Decision-surface share              | Disposition                             |
+| ------------------------------------------------------- | ----------------------------- | ------------------------------------------------------------------------- | ------------------------------------------------------------------------------- | ----------------------------------- | --------------------------------------- |
+| existing styled highlight success                       | current                       | primary-contract branch                                                   | yes                                                                             | existing                            | preserve                                |
+| pending `_initialStyledText` commit                     | current                       | primary-contract branch                                                   | no independent success; current pending representation                          | existing                            | preserve only before terminal rejection |
+| failure 后提交 request-local current source plain text  | proposed restoration          | existing shipped compatibility / explicit user-requested repair direction | no; it is terminal visible representation and does not invoke success callbacks | all new production decision surface | restore                                 |
+| no-filetype plain rendering                             | current                       | contracted pass-through                                                   | yes as existing non-highlight path                                              | existing                            | preserve                                |
+| Tree-sitter rejection                                   | current                       | diagnostic/error path                                                     | no                                                                              | existing                            | preserve                                |
+| retry parser / alternate parser / caller-local fallback | not present in approved route | forbidden fallback                                                        | would produce alternate success                                                 | 0 allowed                           | reject                                  |
 
 失败后的 request-local plain text 不是“失败后再尝试成功”的 alternate success path。它是 CodeRenderable 唯一的 rejection display contract，且与上游 `fallback(content)`、R62 rejection contract 和用户要求一致；失败的高亮回调和 styled success 仍不会发生。
 
 ## 12. Workaround Deletion and Replacement
 
-| Existing workaround or duplicate | Why it existed | Why the approved route supersedes it | Delete or collapse location |
-| --- | --- | --- | --- |
-| `1b9a20a08` 后 failure catch 仅清 `_prefixCache`/`_cachedHighlights`，依赖 caller seed 留住可见内容 | R74 实现假设所有重要 Markdown caller 都有 seed | R2 已将共同 owner 恢复为 request-local plain representation；R5 不删除该修复 | Keep the R2 `Code.ts` failure representation commit |
-| 各 caller 逐个新增 seed | 未批准；会将共同表示责任复制到多个 UI consumer | CodeRenderable 已拥有同一 failure seam，调用方改动会扩大兼容面且仍可能漏掉 Diff/插件路径 | Do not add |
+| Existing workaround or duplicate                                                                    | Why it existed                                 | Why the approved route supersedes it                                                     | Delete or collapse location                         |
+| --------------------------------------------------------------------------------------------------- | ---------------------------------------------- | ---------------------------------------------------------------------------------------- | --------------------------------------------------- |
+| `1b9a20a08` 后 failure catch 仅清 `_prefixCache`/`_cachedHighlights`，依赖 caller seed 留住可见内容 | R74 实现假设所有重要 Markdown caller 都有 seed | R2 已将共同 owner 恢复为 request-local plain representation；R5 不删除该修复             | Keep the R2 `Code.ts` failure representation commit |
+| 各 caller 逐个新增 seed                                                                             | 未批准；会将共同表示责任复制到多个 UI consumer | CodeRenderable 已拥有同一 failure seam，调用方改动会扩大兼容面且仍可能漏掉 Diff/插件路径 | Do not add                                          |
 
 ## 13. Forward Traceability
 
-| Requirement or invariant | Production path | Planned file/change | Behavioral test |
-| --- | --- | --- | --- |
-| 用户要求：highlight failure 后不得继续禁止 TextBuffer 绘制 | R2 `Code.ts` one-shot/streaming failure catches | R2 已提交 catch 捕获的 `content` plain text 并恢复 visibility；R5 仅保持该历史修复 | R2 `Code.test.ts` frame assertions；历史批量 red loop |
-| INV-01：失败后当前正文可见、无高度空白 | R2 streaming failure catch | R2 已完成 `setText(content)` + clear line source + visible flag/text info/render request；R5 保持 | R2 `Code.test.ts` frame assertions；历史批量 red loop |
-| INV-01：最新失败 snapshot 不停在旧文本或 mutable seed | R2 streaming/one-shot catches | R2 只消费 request-local `content`；R5 不改该 contract | R2 `Code.test.ts:2358` + seeded in-flight mutation test |
-| INV-02：managed rejection 不进入成功回调 | existing failure catch | R5 不改变 callback settlement；只修 streaming dirty finalization | `Code.test.ts:2714` 保留 `onHighlightCalls=0`、`onChunksCalls=0` |
-| INV-03：pending 语义不变 | `ensureVisibleTextBeforeHighlight` and Markdown seeds | 不修改 pending path、Markdown.ts 或 callers | existing Code/Markdown pending tests |
+| Requirement or invariant                                                                            | Production path                                                                                                                   | Planned file/change                                                                                                                                                                                                   | Behavioral test                                                                                                                                                                                             |
+| --------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 用户要求：highlight failure 后不得继续禁止 TextBuffer 绘制                                          | R2 `Code.ts` one-shot/streaming failure catches                                                                                   | R2 已提交 catch 捕获的 `content` plain text 并恢复 visibility；R5 仅保持该历史修复                                                                                                                                    | R2 `Code.test.ts` frame assertions；历史批量 red loop                                                                                                                                                       |
+| INV-01：失败后当前正文可见、无高度空白                                                              | R2 streaming failure catch                                                                                                        | R2 已完成 `setText(content)` + clear line source + visible flag/text info/render request；R5 保持                                                                                                                     | R2 `Code.test.ts` frame assertions；历史批量 red loop                                                                                                                                                       |
+| INV-01：最新失败 snapshot 不停在旧文本或 mutable seed                                               | R2 streaming/one-shot catches                                                                                                     | R2 只消费 request-local `content`；R5 不改该 contract                                                                                                                                                                 | R2 `Code.test.ts:2358` + seeded in-flight mutation test                                                                                                                                                     |
+| INV-02：managed rejection 不进入成功回调                                                            | existing failure catch                                                                                                            | R5 不改变 callback settlement；只修 streaming dirty finalization                                                                                                                                                      | `Code.test.ts:2714` 保留 `onHighlightCalls=0`、`onChunksCalls=0`                                                                                                                                            |
+| INV-03：pending 语义不变                                                                            | `ensureVisibleTextBeforeHighlight` and Markdown seeds                                                                             | 不修改 pending path、Markdown.ts 或 callers                                                                                                                                                                           | existing Code/Markdown pending tests                                                                                                                                                                        |
 | INV-04：streaming rejection 保留 R10 scope 内 newer rendering invalidation，且 failure 不形成 retry | streaming failure catch -> existing `_highlightsDirty` render gate；`_streamingActive` seed setter -> pending representation path | 不调用 success helper；无 setter 时保持 dirty=false，有 R10 scope setter 时保留 dirty=true，下一帧仅由既有 dirty gate 调度一次 primary request；仅 active seed 分支不进入该 gate，inactive seed 保留既有 primary path | ordinary rejection + active non-empty/empty seed with reject/no-replacement + settled streaming seed + non-streaming seed + `syntaxStyle`/`drawUnstyledText`/`onChunks` focused tests + full `Code.test.ts` |
 
 ## 14. Reverse Traceability
 
-| Proposed production concept | Requirement ID | Evidence | Why existing logic cannot carry it |
-| --- | --- | --- | --- |
-| failure catch 提交 request-local `content` plain text | INV-01 | R2 red repro、上游 `fallback(content)`、R62 rejection contract | R2 已修复当前 catch；R5 必须保留该 request-local failure contract，不能回退到 mutable seed |
+| Proposed production concept                             | Requirement ID                  | Evidence                                                                                                  | Why existing logic cannot carry it                                                                                                             |
+| ------------------------------------------------------- | ------------------------------- | --------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| failure catch 提交 request-local `content` plain text   | INV-01                          | R2 red repro、上游 `fallback(content)`、R62 rejection contract                                            | R2 已修复当前 catch；R5 必须保留该 request-local failure contract，不能回退到 mutable seed                                                     |
 | streaming failure visibility 与 dirty finalization 分离 | INV-01, INV-04 (streaming only) | R2 implementation audit 的 observed B-01 证明 `commitStreamingVisible()` 会吞掉 newer setter invalidation | 失败可见性需要保留，但 failure path 不能复用无条件清 dirty 的 success helper；普通 rejection 必须无 pending，setter rejection 恰好一次 pending |
-| 失败测试改为 frame-level assertion | INV-01 | 现有 plainText 测试会在用户仍看不到内容时通过 | 用户症状发生在 terminal frame，不发生在 plainText getter |
-| 失败快照测试改为 current content assertion | INV-01 | 2358 当前只证明旧内容未被替换，无法满足“当前内容可见” | failure catch 需要使用当前 snapshot 表示，旧 buffer 内容不能作为正确终态 |
-| 保留 callback count assertions | INV-02 | R62/R81 明确禁止 failure 伪装成功 | 只检查 frame 会允许错误地调用 success callback；已有 seam 可直接保护该合同 |
+| 失败测试改为 frame-level assertion                      | INV-01                          | 现有 plainText 测试会在用户仍看不到内容时通过                                                             | 用户症状发生在 terminal frame，不发生在 plainText getter                                                                                       |
+| 失败快照测试改为 current content assertion              | INV-01                          | 2358 当前只证明旧内容未被替换，无法满足“当前内容可见”                                                     | failure catch 需要使用当前 snapshot 表示，旧 buffer 内容不能作为正确终态                                                                       |
+| 保留 callback count assertions                          | INV-02                          | R62/R81 明确禁止 failure 伪装成功                                                                         | 只检查 frame 会允许错误地调用 success callback；已有 seam 可直接保护该合同                                                                     |
 
 ## 15. File-Level Change Plan
 
-| File | Add / modify / delete | Exact responsibility of the change | Expected line delta |
-| --- | --- | --- | --- |
-| `thirdparty/opentui/packages/core/src/renderables/Code.ts` | modify | 保留 R2 两处 request-local plain failure commit；统一让 R10 scope 内 rendering semantic setter 推进 `_cacheGeneration`；仅在真实 `_streamingActive` 时按 seed 是否为空分流 pending representation 与既有 visibility/dirty 语义，inactive 状态保留 primary path。 | 约 +12 至 +28 行总 R2/R10 production diff；不新增 public API/helper |
-| `thirdparty/opentui/packages/core/src/renderables/Code.test.ts` | modify | 保留 R2 visibility/current-source/seed regressions；新增 ordinary no-retry、active non-empty/empty seed with rejection settlement, settled streaming seed、non-streaming seed、`syntaxStyle`、`drawUnstyledText` 与 `onChunks` focused regressions。 | 约 +125 至 +195 行总 R2/R10 test diff |
+| File                                                            | Add / modify / delete | Exact responsibility of the change                                                                                                                                                                                                                               | Expected line delta                                                 |
+| --------------------------------------------------------------- | --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------- |
+| `thirdparty/opentui/packages/core/src/renderables/Code.ts`      | modify                | 保留 R2 两处 request-local plain failure commit；统一让 R10 scope 内 rendering semantic setter 推进 `_cacheGeneration`；仅在真实 `_streamingActive` 时按 seed 是否为空分流 pending representation 与既有 visibility/dirty 语义，inactive 状态保留 primary path。 | 约 +12 至 +28 行总 R2/R10 production diff；不新增 public API/helper |
+| `thirdparty/opentui/packages/core/src/renderables/Code.test.ts` | modify                | 保留 R2 visibility/current-source/seed regressions；新增 ordinary no-retry、active non-empty/empty seed with rejection settlement, settled streaming seed、non-streaming seed、`syntaxStyle`、`drawUnstyledText` 与 `onChunks` focused regressions。             | 约 +125 至 +195 行总 R2/R10 test diff                               |
 
 不修改 `Markdown.ts`、`Diff.ts`、OpenCode Session route、`session-v2.tsx`、release manifest、lockfile、native Zig 或 generated output。
 
 ## 16. TDD Behavior Slices
 
-| Order | Red behavior | Why current code fails | Minimal green behavior | Regression protected |
-| --- | --- | --- | --- | --- |
-| 1 | 保留 R2 managed streaming rejection 的 frame assertion，证明当前 plain text 仍可见。 | R2 已修复原始 blank-frame divergence。 | 不重复改动该路径，只作为 R10 preserved regression baseline。 | 防止 dirty-state 修复回退可见性。 |
-| 2 | 保留 R2 one-shot failure frame/current-content assertions。 | R2 已完成 one-shot visibility contract。 | 不扩大 one-shot dirty semantics。 | 防止 streaming-only rework 改坏共享 failure representation。 |
-| 3 | 新增 active seed-only interleaving：`_streamingActive` 期间 `initialStyledText` mutation 后先普通 render 再 rejection，failure settlement 后 pending streaming update 必须保持 `0`，终态仍显示 request source。 | 当前 R9 只规定真实 active marker，必须验证 replacement queue 未被 seed-only render 注入。 | 仅在 `_streamingActive` 且 seed 非空时提交 pending representation，不设置 primary dirty；其他状态保留既有 dirty。 | 防止 pending seed 变化隐性变成 rejection retry 或抑制 one-shot。 |
-| 4 | 新增普通 managed rejection regression：reject 后执行至少一次普通 render，pending streaming update 必须保持 `0`。 | 如果 failure path 无条件保留 dirty，下一次 render 会错误地产生 retry。 | 无 setter 时 failure visibility finalization 保持 dirty=false；普通 render 不发起新 request。 | 防止把 failure 可见性修复成自动 retry。 |
-| 5 | 新增 `syntaxStyle` setter 在 streaming rejection 期间发生的 regression：reject 后 render 必须重新发起恰好一个 pending update，并最终以新 style 完成成功提交。 | R2 的 `commitStreamingVisible()` 无条件清 dirty，当前实现会让 pending count 保持 0。 | failure visibility 直接提交，不调用 success helper；保留 newer dirty，下一帧走既有 primary path 一次。 | 防止修复空白时吞掉 semantic invalidation。 |
-| 6 | 新增 `drawUnstyledText` setter rejection regression：reject 后必须有恰好一个 replacement，并保持既有 pending visibility contract。 | setter 设置 dirty 但未推进 generation 时，R5 failure catch 会错误清 dirty。 | 与其他 rendering semantic setter 共享 `_cacheGeneration` marker，不新增 recovery path。 | 防止可见性模式切换在失败结算中丢失。 |
-| 7 | 新增 `onChunks` setter rejection regression：replacement 必须执行新 callback 的可见文本变换，且不发生第二次请求。 | setter 设置 dirty 但未推进 generation 时，R5 failure catch 会错误清 dirty。 | 与其他 rendering semantic setter 共享 marker，由既有 dirty gate 重新高亮。 | 防止 callback 语义更新静默丢失。 |
-| 8 | 新增 empty-seed rejection regression：active streaming 且 `drawUnstyledText=false` 时清空 seed，普通 render 后 reject 原请求，等待结算并再次 render；不得显示 unstyled source，且 `pendingStreamingUpdates() === 0`。 | 错误实现即使保持 frame 隐藏，也可能把 seed-only 变化写入 `_streamingPending`，在 rejection 后隐式发起 replacement。 | 清空 seed 时只保留既有 visibility/dirty 状态，不提交 unstyled source，也不启动 replacement。 | 同时锁定等待期 visibility 和 seed-only no-retry。 |
-| 9 | 新增 non-streaming seed invalidation regression：非 streaming Code 的 seed mutation 仍触发 one-shot primary path。 | 无条件 pending-only setter 会吞掉既有 `_highlightsDirty`。 | 仅 active streaming 状态特殊处理，其他状态维持原 setter dirty。 | 防止兼容性 one-shot 路径被抑制。 |
-| 10 | 新增 settled-streaming seed invalidation regression：完成初次 streaming highlight 后再改变 seed，仍必须由 primary path消费并恢复 authoritative content。 | R8 配置组合判断会把 settled instance 错当 pending state，seed 可以永久覆盖成功表示。 | 只使用 `_streamingActive` 判断 pending-only 分支；inactive seed 保留 dirty。 | 防止已结算内容被 pending seed 永久遮蔽。 |
-| 11 | 运行完整 `Code.test.ts`、Markdown tests 和 R2 原始 frame repro。 | 需要证明 R2 visibility contract、pending seed、success conversion、cleanup、ordinary no-retry、active/inactive seed semantics、四个 setter exactly-once settlement 同时稳定。 | 所有现有与新增行为测试通过，原始 repro 保持可见。 | 防止只修状态标志而回退用户症状修复。 |
+| Order | Red behavior                                                                                                                                                                                                          | Why current code fails                                                                                                                                                        | Minimal green behavior                                                                                            | Regression protected                                             |
+| ----- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------- |
+| 1     | 保留 R2 managed streaming rejection 的 frame assertion，证明当前 plain text 仍可见。                                                                                                                                  | R2 已修复原始 blank-frame divergence。                                                                                                                                        | 不重复改动该路径，只作为 R10 preserved regression baseline。                                                      | 防止 dirty-state 修复回退可见性。                                |
+| 2     | 保留 R2 one-shot failure frame/current-content assertions。                                                                                                                                                           | R2 已完成 one-shot visibility contract。                                                                                                                                      | 不扩大 one-shot dirty semantics。                                                                                 | 防止 streaming-only rework 改坏共享 failure representation。     |
+| 3     | 新增 active seed-only interleaving：`_streamingActive` 期间 `initialStyledText` mutation 后先普通 render 再 rejection，failure settlement 后 pending streaming update 必须保持 `0`，终态仍显示 request source。       | 当前 R9 只规定真实 active marker，必须验证 replacement queue 未被 seed-only render 注入。                                                                                     | 仅在 `_streamingActive` 且 seed 非空时提交 pending representation，不设置 primary dirty；其他状态保留既有 dirty。 | 防止 pending seed 变化隐性变成 rejection retry 或抑制 one-shot。 |
+| 4     | 新增普通 managed rejection regression：reject 后执行至少一次普通 render，pending streaming update 必须保持 `0`。                                                                                                      | 如果 failure path 无条件保留 dirty，下一次 render 会错误地产生 retry。                                                                                                        | 无 setter 时 failure visibility finalization 保持 dirty=false；普通 render 不发起新 request。                     | 防止把 failure 可见性修复成自动 retry。                          |
+| 5     | 新增 `syntaxStyle` setter 在 streaming rejection 期间发生的 regression：reject 后 render 必须重新发起恰好一个 pending update，并最终以新 style 完成成功提交。                                                         | R2 的 `commitStreamingVisible()` 无条件清 dirty，当前实现会让 pending count 保持 0。                                                                                          | failure visibility 直接提交，不调用 success helper；保留 newer dirty，下一帧走既有 primary path 一次。            | 防止修复空白时吞掉 semantic invalidation。                       |
+| 6     | 新增 `drawUnstyledText` setter rejection regression：reject 后必须有恰好一个 replacement，并保持既有 pending visibility contract。                                                                                    | setter 设置 dirty 但未推进 generation 时，R5 failure catch 会错误清 dirty。                                                                                                   | 与其他 rendering semantic setter 共享 `_cacheGeneration` marker，不新增 recovery path。                           | 防止可见性模式切换在失败结算中丢失。                             |
+| 7     | 新增 `onChunks` setter rejection regression：replacement 必须执行新 callback 的可见文本变换，且不发生第二次请求。                                                                                                     | setter 设置 dirty 但未推进 generation 时，R5 failure catch 会错误清 dirty。                                                                                                   | 与其他 rendering semantic setter 共享 marker，由既有 dirty gate 重新高亮。                                        | 防止 callback 语义更新静默丢失。                                 |
+| 8     | 新增 empty-seed rejection regression：active streaming 且 `drawUnstyledText=false` 时清空 seed，普通 render 后 reject 原请求，等待结算并再次 render；不得显示 unstyled source，且 `pendingStreamingUpdates() === 0`。 | 错误实现即使保持 frame 隐藏，也可能把 seed-only 变化写入 `_streamingPending`，在 rejection 后隐式发起 replacement。                                                           | 清空 seed 时只保留既有 visibility/dirty 状态，不提交 unstyled source，也不启动 replacement。                      | 同时锁定等待期 visibility 和 seed-only no-retry。                |
+| 9     | 新增 non-streaming seed invalidation regression：非 streaming Code 的 seed mutation 仍触发 one-shot primary path。                                                                                                    | 无条件 pending-only setter 会吞掉既有 `_highlightsDirty`。                                                                                                                    | 仅 active streaming 状态特殊处理，其他状态维持原 setter dirty。                                                   | 防止兼容性 one-shot 路径被抑制。                                 |
+| 10    | 新增 settled-streaming seed invalidation regression：完成初次 streaming highlight 后再改变 seed，仍必须由 primary path消费并恢复 authoritative content。                                                              | R8 配置组合判断会把 settled instance 错当 pending state，seed 可以永久覆盖成功表示。                                                                                          | 只使用 `_streamingActive` 判断 pending-only 分支；inactive seed 保留 dirty。                                      | 防止已结算内容被 pending seed 永久遮蔽。                         |
+| 11    | 运行完整 `Code.test.ts`、Markdown tests 和 R2 原始 frame repro。                                                                                                                                                      | 需要证明 R2 visibility contract、pending seed、success conversion、cleanup、ordinary no-retry、active/inactive seed semantics、四个 setter exactly-once settlement 同时稳定。 | 所有现有与新增行为测试通过，原始 repro 保持可见。                                                                 | 防止只修状态标志而回退用户症状修复。                             |
 
 测试只观察公开可见行为、`plainText`、frame 和已有 callback contract；不通过私有 helper 调用次数证明实现正确。
 
 ## 17. Chinese Comment Budget
 
-| Metric | Estimate | Method |
-| --- | --- | --- |
-| Effective changed code lines `E` | 约 60-80 总 diff | R2 implementation diff plus R5 streaming finalization rework and ordinary/setter rejection regressions；排除 imports、空行、formatter-only、generated 和纯移动。 |
-| Required Chinese explanatory comments `C` | 至少 12 | 按上界 `ceil(80 * 0.15)=12` 规划；实际 implementation 必须按真实 E 重算且不得低于 15%。 |
+| Metric                                    | Estimate         | Method                                                                                                                                                           |
+| ----------------------------------------- | ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Effective changed code lines `E`          | 约 60-80 总 diff | R2 implementation diff plus R5 streaming finalization rework and ordinary/setter rejection regressions；排除 imports、空行、formatter-only、generated 和纯移动。 |
+| Required Chinese explanatory comments `C` | 至少 12          | 按上界 `ceil(80 * 0.15)=12` 规划；实际 implementation 必须按真实 E 重算且不得低于 15%。                                                                          |
 
 需要保留或新增的 qualifying comments：
 
@@ -294,25 +294,25 @@ highlight request
 
 ## 18. Verification
 
-| Command | Working directory | Evidence produced |
-| --- | --- | --- |
-| `bun test ./src/renderables/Code.test.ts` | `thirdparty/opentui/packages/core` | 完整 CodeRenderable success、pending、failure、streaming、cleanup 和 R9 active/inactive seed/setter regression。 |
-| `bun test ./src/renderables/__tests__/Markdown.test.ts` | `thirdparty/opentui/packages/core` | Markdown seed、结构化 block 和 pending visibility 不被 failure repair 改坏。 |
-| `bun run build:lib` | `thirdparty/opentui/packages/core` | TypeScript library build 仍可完成；本任务不运行 native build。 |
-| 原始 `bun -e` red loop（同第 8 节） | `thirdparty/opentui/packages/core` | 单实例 after frame 含正文；8 实例 visibleTextCount 从 0 变为 8；重绘后不再为空。 |
+| Command                                                 | Working directory                  | Evidence produced                                                                                                |
+| ------------------------------------------------------- | ---------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `bun test ./src/renderables/Code.test.ts`               | `thirdparty/opentui/packages/core` | 完整 CodeRenderable success、pending、failure、streaming、cleanup 和 R9 active/inactive seed/setter regression。 |
+| `bun test ./src/renderables/__tests__/Markdown.test.ts` | `thirdparty/opentui/packages/core` | Markdown seed、结构化 block 和 pending visibility 不被 failure repair 改坏。                                     |
+| `bun run build:lib`                                     | `thirdparty/opentui/packages/core` | TypeScript library build 仍可完成；本任务不运行 native build。                                                   |
+| 原始 `bun -e` red loop（同第 8 节）                     | `thirdparty/opentui/packages/core` | 单实例 after frame 含正文；8 实例 visibleTextCount 从 0 变为 8；重绘后不再为空。                                 |
 
 `bun run test:native` 不属于本任务验证：本次只修改 TypeScript，且当前环境没有 `zig`；不以跳过 native test 代替 TypeScript behavior evidence。
 
 ## 19. Diff Budget
 
-| Metric | Estimate | Justification |
-| --- | --- | --- |
-| Files added | 0 | 只修改已有 Code owner 与已有行为测试。 |
-| Files modified | 2 | `Code.ts` 和 `Code.test.ts`。 |
-| Files deleted | 0 | 不删除现有公共路径。 |
-| Production lines | 约 6-12 effective lines | 保留 R2 plain failure commit，并分离 streaming visibility 与 dirty finalization；不新增 public API、helper、状态机或 parser。 |
-| Test lines | 约 45-60 effective lines | 保留 R2 visibility/seed regressions，并新增一个 setter/rejection regression；不再重复修改已完成的 R2 red slices。 |
-| Generated lines | 0 | 不提交 build output、release tarball 或 native artifact。 |
+| Metric           | Estimate                 | Justification                                                                                                                 |
+| ---------------- | ------------------------ | ----------------------------------------------------------------------------------------------------------------------------- |
+| Files added      | 0                        | 只修改已有 Code owner 与已有行为测试。                                                                                        |
+| Files modified   | 2                        | `Code.ts` 和 `Code.test.ts`。                                                                                                 |
+| Files deleted    | 0                        | 不删除现有公共路径。                                                                                                          |
+| Production lines | 约 6-12 effective lines  | 保留 R2 plain failure commit，并分离 streaming visibility 与 dirty finalization；不新增 public API、helper、状态机或 parser。 |
+| Test lines       | 约 45-60 effective lines | 保留 R2 visibility/seed regressions，并新增一个 setter/rejection regression；不再重复修改已完成的 R2 red slices。             |
+| Generated lines  | 0                        | 不提交 build output、release tarball 或 native artifact。                                                                     |
 
 用户硬上限为生产文件不超过 8 个、代码修改不超过 1200 行；R6 仍为 1 个生产文件、2 个总文件，新增修改远低于上限。
 
@@ -352,18 +352,18 @@ None. 用户已经明确要求修复 CodeRenderable failure visibility、参考�
 
 ## 22. Plan Audit Record
 
-| Round | Audited revision | Full scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | R1 | yes | B-01 `Seed failure representation contradicts the existing rejection contract`; B-02 `The proposed seed commit is not bound to the failed snapshot`; B-03 `The new seeded failure branch has no behaviorally sensitive regression test` | N-01 `INV-02 is broader than the actual callback contract`; N-02 `The red feedback loop is described procedurally but no exact bun -e command is recorded`; N-03 `The plan's own maximum diff budget ... requires 7 qualifying Chinese comment lines ... while §17 estimates only 5-6` | BLOCK | `ses_fddfc8436ffeSFJ3Nj6Zm3zm7J` |
-| 2 | R2 | yes | No blocking findings. | N-01 `initialStyledText mutation test is broader than the actual Markdown producer sequence.`; N-02 `The plan’s comment estimate is feasible but implementation audit must recompute it.` | APPROVE — plan revision R2. | `ses_fddfc8436ffeSFJ3Nj6Zm3zm7J` |
-| 3 | R3 | yes | B-01 current plan baseline still described already-fixed R2 visibility work as pending; B-02 primary path still referenced `commitStreamingVisible()` while requiring dirty preservation; B-03 unconstrained INV-04 covered one-shot route without production/test mapping. | N-01 diff-budget upper bounds were internally inconsistent. | BLOCK — R3. | `ses_fddfc8436ffeSFJ3Nj6Zm3zm7J` |
-| 4 | R4 | yes | B-01 R4 did not separately prove ordinary rejection no-retry and setter rejection exactly-once rehighlight. | N-01 historical R2 red loop was not labeled separately; N-02 stale INV-01 evidence wording; N-03 setter scope wording; N-04 forward traceability mixed R2 and R4; N-05 E/C range ambiguity; N-06 callback-thrown wording broader than managed rejection. | BLOCK — R4. | `ses_fddfc8436ffeSFJ3Nj6Zm3zm7J` |
-| 5 | R5 | yes | No blocking findings. | N-01 rendering semantic setter scope should be explicitly bounded; N-02 focused R5 loop lacks separate exact command/output; N-03 historical line references drift; N-04 E/C estimate range slightly exceeds §19 split upper bound; N-05 resolution mapping recorded after verdict. | APPROVE — plan revision R5. | `ses_fddfc8436ffeSFJ3Nj6Zm3zm7J` |
-| 6 | R6 | yes | B-01 `Seed-only initialStyledText mutation can still enqueue a post-rejection streaming update`. | N-01 setter scope broader than explicit rejection slices; N-02 cumulative diff/E-C estimate imprecise; N-03 current-behavior wording drift. | BLOCK — plan revision R6. | `ses_fddfc8436ffeSFJ3Nj6Zm3zm7J` |
-| 7 | R7 | yes | B-01 `initialStyledText` clearing can expose unstyled source while `drawUnstyledText=false`; B-02 unconditional seed scheduling isolation can suppress the non-streaming one-shot primary path. | Focused command names and representative setter coverage remain implementation-evidence notes. | BLOCK — plan revision R7 is not approved. | `ses_fddfc8436ffeSFJ3Nj6Zm3zm7J` |
-| 8 | R8 | yes | B-01 configuration tuple was not actual pending state; B-02 missing settled-streaming test mapping. | R8 command block and historical wording drift. | BLOCK — R8. | `ses_fddfc8436ffeSFJ3Nj6Zm3zm7J` |
-| 9 | R9 | yes | B-01 inactive seed dirty instructions conflicted; B-02 active empty-seed test did not detect replacement queueing. | Scope/line-budget estimate drift; `_streamingActive` reverse mapping could be more explicit. | BLOCK — R9. | `ses_fddfc8436ffeSFJ3Nj6Zm3zm7J` |
-| 10 | R10 | yes | No blocking findings. | §10 wording remains historically broad; §8 title and §18 verification label drift; diff estimates differ across historical/current sections; R8 row was previously pending and is now recorded above. | APPROVE — plan revision R10 | `ses_fddfc8436ffeSFJ3Nj6Zm3zm7J` |
+| Round | Audited revision | Full scope? | Blocking findings                                                                                                                                                                                                                                                           | Non-blocking findings                                                                                                                                                                                                                                                                  | Result                                    | Invocation reference             |
+| ----- | ---------------- | ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------- | -------------------------------- |
+| 1     | R1               | yes         | B-01 `Seed failure representation contradicts the existing rejection contract`; B-02 `The proposed seed commit is not bound to the failed snapshot`; B-03 `The new seeded failure branch has no behaviorally sensitive regression test`                                     | N-01 `INV-02 is broader than the actual callback contract`; N-02 `The red feedback loop is described procedurally but no exact bun -e command is recorded`; N-03 `The plan's own maximum diff budget ... requires 7 qualifying Chinese comment lines ... while §17 estimates only 5-6` | BLOCK                                     | `ses_fddfc8436ffeSFJ3Nj6Zm3zm7J` |
+| 2     | R2               | yes         | No blocking findings.                                                                                                                                                                                                                                                       | N-01 `initialStyledText mutation test is broader than the actual Markdown producer sequence.`; N-02 `The plan’s comment estimate is feasible but implementation audit must recompute it.`                                                                                              | APPROVE — plan revision R2.               | `ses_fddfc8436ffeSFJ3Nj6Zm3zm7J` |
+| 3     | R3               | yes         | B-01 current plan baseline still described already-fixed R2 visibility work as pending; B-02 primary path still referenced `commitStreamingVisible()` while requiring dirty preservation; B-03 unconstrained INV-04 covered one-shot route without production/test mapping. | N-01 diff-budget upper bounds were internally inconsistent.                                                                                                                                                                                                                            | BLOCK — R3.                               | `ses_fddfc8436ffeSFJ3Nj6Zm3zm7J` |
+| 4     | R4               | yes         | B-01 R4 did not separately prove ordinary rejection no-retry and setter rejection exactly-once rehighlight.                                                                                                                                                                 | N-01 historical R2 red loop was not labeled separately; N-02 stale INV-01 evidence wording; N-03 setter scope wording; N-04 forward traceability mixed R2 and R4; N-05 E/C range ambiguity; N-06 callback-thrown wording broader than managed rejection.                               | BLOCK — R4.                               | `ses_fddfc8436ffeSFJ3Nj6Zm3zm7J` |
+| 5     | R5               | yes         | No blocking findings.                                                                                                                                                                                                                                                       | N-01 rendering semantic setter scope should be explicitly bounded; N-02 focused R5 loop lacks separate exact command/output; N-03 historical line references drift; N-04 E/C estimate range slightly exceeds §19 split upper bound; N-05 resolution mapping recorded after verdict.    | APPROVE — plan revision R5.               | `ses_fddfc8436ffeSFJ3Nj6Zm3zm7J` |
+| 6     | R6               | yes         | B-01 `Seed-only initialStyledText mutation can still enqueue a post-rejection streaming update`.                                                                                                                                                                            | N-01 setter scope broader than explicit rejection slices; N-02 cumulative diff/E-C estimate imprecise; N-03 current-behavior wording drift.                                                                                                                                            | BLOCK — plan revision R6.                 | `ses_fddfc8436ffeSFJ3Nj6Zm3zm7J` |
+| 7     | R7               | yes         | B-01 `initialStyledText` clearing can expose unstyled source while `drawUnstyledText=false`; B-02 unconditional seed scheduling isolation can suppress the non-streaming one-shot primary path.                                                                             | Focused command names and representative setter coverage remain implementation-evidence notes.                                                                                                                                                                                         | BLOCK — plan revision R7 is not approved. | `ses_fddfc8436ffeSFJ3Nj6Zm3zm7J` |
+| 8     | R8               | yes         | B-01 configuration tuple was not actual pending state; B-02 missing settled-streaming test mapping.                                                                                                                                                                         | R8 command block and historical wording drift.                                                                                                                                                                                                                                         | BLOCK — R8.                               | `ses_fddfc8436ffeSFJ3Nj6Zm3zm7J` |
+| 9     | R9               | yes         | B-01 inactive seed dirty instructions conflicted; B-02 active empty-seed test did not detect replacement queueing.                                                                                                                                                          | Scope/line-budget estimate drift; `_streamingActive` reverse mapping could be more explicit.                                                                                                                                                                                           | BLOCK — R9.                               | `ses_fddfc8436ffeSFJ3Nj6Zm3zm7J` |
+| 10    | R10              | yes         | No blocking findings.                                                                                                                                                                                                                                                       | §10 wording remains historically broad; §8 title and §18 verification label drift; diff estimates differ across historical/current sections; R8 row was previously pending and is now recorded above.                                                                                  | APPROVE — plan revision R10               | `ses_fddfc8436ffeSFJ3Nj6Zm3zm7J` |
 
 ### R1 Verbatim Independent Verdict
 
@@ -443,28 +443,28 @@ Plan mode has no implementation diff, so actual code-quality and `E/C` approval 
 
 ### R2 Resolution Mapping
 
-| R1 finding | R2 resolution |
-| --- | --- |
-| B-01 | failure contract 收敛为上游/R62 的 request-local current source plain text；seed 只属于 pending。 |
-| B-02 | 两个 catch 直接消费各自已捕获并经 snapshot check 验证的局部 `content`，不读取 mutable `_initialStyledText`/`_content`。 |
-| B-03 | 新增 seeded in-flight mutation + managed rejection 行为测试，断言终态是 request source plain text 而不是新 seed。 |
-| N-01 | INV-02 收窄为 managed parser/request rejection，明确 callback 自身抛错不属于该断言。 |
-| N-02 | 第 8 节记录已实际运行的 exact `bun -e` command；安装 tarball 测试不再作为 source change 证明。 |
-| N-03 | E 上界调整为 60，计划 C 最少 9；implementation 仍按实际 E 重算。 |
+| R1 finding | R2 resolution                                                                                                           |
+| ---------- | ----------------------------------------------------------------------------------------------------------------------- |
+| B-01       | failure contract 收敛为上游/R62 的 request-local current source plain text；seed 只属于 pending。                       |
+| B-02       | 两个 catch 直接消费各自已捕获并经 snapshot check 验证的局部 `content`，不读取 mutable `_initialStyledText`/`_content`。 |
+| B-03       | 新增 seeded in-flight mutation + managed rejection 行为测试，断言终态是 request source plain text 而不是新 seed。       |
+| N-01       | INV-02 收窄为 managed parser/request rejection，明确 callback 自身抛错不属于该断言。                                    |
+| N-02       | 第 8 节记录已实际运行的 exact `bun -e` command；安装 tarball 测试不再作为 source change 证明。                          |
+| N-03       | E 上界调整为 60，计划 C 最少 9；implementation 仍按实际 E 重算。                                                        |
 
 ### R2 Verbatim Independent Verdict
 
-```text
+````text
 ## Blocking findings
 
 No blocking findings.
 
 ## Non-blocking findings
 
-- **N-01 — `initialStyledText` mutation test is broader than the actual Markdown producer sequence.**  
+- **N-01 — `initialStyledText` mutation test is broader than the actual Markdown producer sequence.**
   R2 appropriately proves that `CodeRenderable.initialStyledText` is independently mutable through its public setter. The test should state it is a `CodeRenderable` interface-boundary regression, rather than implying ordinary `MarkdownRenderable` updates normally mutate only the seed without updating content. This does not weaken the test or block the plan.
 
-- **N-02 — The plan’s comment estimate is feasible but implementation audit must recompute it.**  
+- **N-02 — The plan’s comment estimate is feasible but implementation audit must recompute it.**
   Section 17 correctly budgets `C >= 9` against the `E = 60` upper bound. Actual effective modified lines, qualifying Chinese comments, exclusions, and ratio remain implementation-audit work.
 
 ## Rejected speculation
@@ -497,7 +497,7 @@ request rejection
   -> TextBuffer plain-text commit
   -> clear rendered-line mapping
   -> existing visibility/render finalization
-```
+````
 
 This is an existing compatibility/display contract, not an alternate highlight success path: it performs no retry, alternate parser selection, callback conversion, styled-result construction, or caller-local fallback. The successful syntax-highlighting path remains unchanged.
 
@@ -506,7 +506,8 @@ This is an existing compatibility/display contract, not an alternate highlight s
 **APPROVE — plan revision R2.**
 
 The approval applies only to `docs/plans/code-renderable-highlight-failure-visibility-repair.md` at R2. Implementation remains disallowed until the orchestrating agent records this full-scope verdict administratively, sets `Status: approved`, `Approved revision: R2`, and `Implementation allowed: yes`; any substantive edit requires a new revision and full audit.
-```
+
+````
 
 任何 substantive plan revision 都必须递增 revision、清空 approval 并重新进行完整范围审计。
 
@@ -528,7 +529,7 @@ Actual code diff from `thirdparty/opentui`:
 58 insertions(+), 9 deletions(-)
 1 production file changed
 0 release/native/generated files changed
-```
+````
 
 ### Red-Green Test Evidence
 
@@ -541,16 +542,16 @@ The production repair was deliberately implemented after the first red slice and
 
 ### Verification Commands and Results
 
-| Command | Working directory | Result |
-| --- | --- | --- |
-| `bun test ./src/renderables/Code.test.ts -t "managed rejection commits current plain text without success callbacks"` | `thirdparty/opentui/packages/core` | Red before fix; green after fix, 1 pass, 0 fail. |
-| `bun test ./src/renderables/Code.test.ts -t "commits unstyled plain text when highlighting throws"` | `thirdparty/opentui/packages/core` | Red before one-shot fix; green after fix, 1 pass, 0 fail. |
-| `bun test ./src/renderables/Code.test.ts -t "keeps failed drawUnstyledText=false output visible and unstyled"` | `thirdparty/opentui/packages/core` | Green, 1 pass, 0 fail. |
-| `bun test ./src/renderables/Code.test.ts -t "streaming with drawUnstyledText=false commits the failed snapshot as plain text"` | `thirdparty/opentui/packages/core` | Green, 1 pass, 0 fail. |
-| `bun test ./src/renderables/Code.test.ts -t "streaming rejection uses request source after initialStyledText changes"` | `thirdparty/opentui/packages/core` | Green, 1 pass, 0 fail. |
-| `bun test ./src/renderables/Code.test.ts` | `thirdparty/opentui/packages/core` | 73 pass, 1 skip, 0 fail, 2 snapshots, 251 expect calls. |
-| `bun test ./src/renderables/__tests__/Markdown.test.ts` | `thirdparty/opentui/packages/core` | 156 pass, 0 fail, 91 snapshots, 391 expect calls. |
-| `bun run build:lib` | `thirdparty/opentui/packages/core` | Library bundle and declarations generated successfully. |
+| Command                                                                                                                        | Working directory                  | Result                                                    |
+| ------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------- | --------------------------------------------------------- |
+| `bun test ./src/renderables/Code.test.ts -t "managed rejection commits current plain text without success callbacks"`          | `thirdparty/opentui/packages/core` | Red before fix; green after fix, 1 pass, 0 fail.          |
+| `bun test ./src/renderables/Code.test.ts -t "commits unstyled plain text when highlighting throws"`                            | `thirdparty/opentui/packages/core` | Red before one-shot fix; green after fix, 1 pass, 0 fail. |
+| `bun test ./src/renderables/Code.test.ts -t "keeps failed drawUnstyledText=false output visible and unstyled"`                 | `thirdparty/opentui/packages/core` | Green, 1 pass, 0 fail.                                    |
+| `bun test ./src/renderables/Code.test.ts -t "streaming with drawUnstyledText=false commits the failed snapshot as plain text"` | `thirdparty/opentui/packages/core` | Green, 1 pass, 0 fail.                                    |
+| `bun test ./src/renderables/Code.test.ts -t "streaming rejection uses request source after initialStyledText changes"`         | `thirdparty/opentui/packages/core` | Green, 1 pass, 0 fail.                                    |
+| `bun test ./src/renderables/Code.test.ts`                                                                                      | `thirdparty/opentui/packages/core` | 73 pass, 1 skip, 0 fail, 2 snapshots, 251 expect calls.   |
+| `bun test ./src/renderables/__tests__/Markdown.test.ts`                                                                        | `thirdparty/opentui/packages/core` | 156 pass, 0 fail, 91 snapshots, 391 expect calls.         |
+| `bun run build:lib`                                                                                                            | `thirdparty/opentui/packages/core` | Library bundle and declarations generated successfully.   |
 
 ### Original Feedback-Loop Result
 
@@ -585,22 +586,22 @@ The earlier batch check with height 24 reported only 6 visible markers because t
 
 ### Actual Secondary and Replacement Path Inventory
 
-| Path | Actual disposition |
-| --- | --- |
-| Successful syntax-highlighting path | Unchanged and remains the only styled-success path. |
-| Pending `initialStyledText` | Unchanged; remains a pending-only representation. |
-| Request rejection | Restored existing upstream/R62 plain-text terminal representation; no retry, alternate parser, callback conversion, or success-shaped result. |
-| Caller-local seed/fallback | Not added. |
-| Native/release/tarball path | Not changed. |
+| Path                                | Actual disposition                                                                                                                            |
+| ----------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| Successful syntax-highlighting path | Unchanged and remains the only styled-success path.                                                                                           |
+| Pending `initialStyledText`         | Unchanged; remains a pending-only representation.                                                                                             |
+| Request rejection                   | Restored existing upstream/R62 plain-text terminal representation; no retry, alternate parser, callback conversion, or success-shaped result. |
+| Caller-local seed/fallback          | Not added.                                                                                                                                    |
+| Native/release/tarball path         | Not changed.                                                                                                                                  |
 
 ### Chinese Comment Calculation
 
-| Metric | Actual | Exclusions and evidence |
-| --- | --- | --- |
-| Effective changed code lines `E` | 52 | 53 added nonblank lines minus 1 import-only line; excludes blank, formatter-only, generated and pure-move lines. |
-| Qualifying Chinese comment lines `C` | 8 | 2 production failure-contract comments and 6 adjacent behavior-test intent comments. |
-| Ratio `C / E` | 15.38% | `8 / 52`. |
-| Required minimum `C` | 8 | `ceil(52 * 0.15) = 8`. |
+| Metric                               | Actual | Exclusions and evidence                                                                                          |
+| ------------------------------------ | ------ | ---------------------------------------------------------------------------------------------------------------- |
+| Effective changed code lines `E`     | 52     | 53 added nonblank lines minus 1 import-only line; excludes blank, formatter-only, generated and pure-move lines. |
+| Qualifying Chinese comment lines `C` | 8      | 2 production failure-contract comments and 6 adjacent behavior-test intent comments.                             |
+| Ratio `C / E`                        | 15.38% | `8 / 52`.                                                                                                        |
+| Required minimum `C`                 | 8      | `ceil(52 * 0.15) = 8`.                                                                                           |
 
 Representative qualifying comments explain: request-local rejection source versus mutable pending seed; frame-level assertion versus plainText-only false confidence; unstyled output versus successful highlight; and the public setter boundary regression.
 
@@ -612,18 +613,18 @@ Representative qualifying comments explain: request-local rejection source versu
 
 ## 24. Implementation Audit Record
 
-| Round | Plan revision | Full original scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | R2 implementation | yes | B-01 `Streaming rejection clears a newer semantic invalidation` | E/C counting used two compatible scopes; native Zig unavailable because `zig` is not installed. | BLOCK — implementation rework required. | `ses_fddfc8436ffeSFJ3Nj6Zm3zm7J` |
+| Round | Plan revision     | Full original scope? | Blocking findings                                               | Non-blocking findings                                                                           | Result                                  | Invocation reference             |
+| ----- | ----------------- | -------------------- | --------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- | --------------------------------------- | -------------------------------- |
+| 1     | R2 implementation | yes                  | B-01 `Streaming rejection clears a newer semantic invalidation` | E/C counting used two compatible scopes; native Zig unavailable because `zig` is not installed. | BLOCK — implementation rework required. | `ses_fddfc8436ffeSFJ3Nj6Zm3zm7J` |
 
 ## 25. R5 Implementation Evidence
 
 ### Actual Files and Diff
 
-| File | Actual change | Why necessary |
-| --- | --- | --- |
-| `thirdparty/opentui/packages/core/src/renderables/Code.ts` | R2 request-local plain failure representation remains. R5 captures each streaming request's cache generation and makes the rejection finalization restore visibility while retaining dirty only when an in-flight rendering-semantic setter changed that generation. | `CodeRenderable` owns the request snapshot, TextBuffer visibility and shared render-time dirty gate; this prevents the success helper from dropping a newer style/conceal/base-highlight/onHighlight invalidation. |
-| `thirdparty/opentui/packages/core/src/renderables/Code.test.ts` | Adds the two R5 public rendering seams: ordinary rejection has no pending retry after another render; in-flight `syntaxStyle` invalidation produces exactly one replacement update, applies the new style, then produces no extra update. R2 visible-frame/current-source/seed regressions remain. | Separately locks both sides of INV-04 without observing private implementation state or adding a test-only interface. |
+| File                                                            | Actual change                                                                                                                                                                                                                                                                                      | Why necessary                                                                                                                                                                                                      |
+| --------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `thirdparty/opentui/packages/core/src/renderables/Code.ts`      | R2 request-local plain failure representation remains. R5 captures each streaming request's cache generation and makes the rejection finalization restore visibility while retaining dirty only when an in-flight rendering-semantic setter changed that generation.                               | `CodeRenderable` owns the request snapshot, TextBuffer visibility and shared render-time dirty gate; this prevents the success helper from dropping a newer style/conceal/base-highlight/onHighlight invalidation. |
+| `thirdparty/opentui/packages/core/src/renderables/Code.test.ts` | Adds the two R5 public rendering seams: ordinary rejection has no pending retry after another render; in-flight `syntaxStyle` invalidation produces exactly one replacement update, applies the new style, then produces no extra update. R2 visible-frame/current-source/seed regressions remain. | Separately locks both sides of INV-04 without observing private implementation state or adding a test-only interface.                                                                                              |
 
 Actual nested OpenTUI diff:
 
@@ -645,18 +646,18 @@ The user hard limit remains satisfied: one production file is below eight and 13
 
 ### Verification Commands and Results
 
-| Command | Working directory | Result |
-| --- | --- | --- |
-| `bun test ./src/renderables/Code.test.ts -t "streaming rejection preserves a style invalidation for one replacement update"` | `thirdparty/opentui/packages/core` | Red before R5 repair (`Expected: 1`, `Received: 0`); green after, 1 pass, 0 fail. |
-| `bun test ./src/renderables/Code.test.ts -t "managed rejection commits current plain text without success callbacks"` | `thirdparty/opentui/packages/core` | Green, 1 pass, 0 fail; checks two no-pending points around an ordinary render. |
-| `bun test ./src/renderables/Code.test.ts -t "streaming rejection uses request source after initialStyledText changes"` | `thirdparty/opentui/packages/core` | Green, 1 pass, 0 fail; verifies pending seed mutation does not create a replacement request or replace request-local source. |
-| `bun test ./src/renderables/Code.test.ts` | `thirdparty/opentui/packages/core` | 74 pass, 1 skip, 0 fail, 2 snapshots, 258 expect calls. |
-| `bun test ./src/renderables/__tests__/Markdown.test.ts` | `thirdparty/opentui/packages/core` | 156 pass, 0 fail, 91 snapshots, 391 expect calls. |
-| `bun run build:lib` | `thirdparty/opentui/packages/core` | Passed; library bundle, declarations and tree-sitter assets generated. |
-| `git diff --check` | `thirdparty/opentui` | Passed. |
-| Original single-instance `bun -e` frame loop | `thirdparty/opentui/packages/core` | `afterHasText: true`, `plainText: "# broken\\n"`, `height: 2`, `pending: 0`. |
-| Original eight-instance `bun -e` frame loop | `thirdparty/opentui/packages/core` | `pending: 0`, `plainTextCount: 8`, `visibleTextCount: 8`, all eight markers true. |
-| `bun typecheck` | `thirdparty/opentui/packages/core` | Not green due to existing package-wide dev/generated Yoga test configuration errors (`expect`/`test` globals, `.ts` import extension, missing JSON module resolution) plus unrelated dev files. No diagnostic named `Code.ts` or `Code.test.ts`. |
+| Command                                                                                                                      | Working directory                  | Result                                                                                                                                                                                                                                           |
+| ---------------------------------------------------------------------------------------------------------------------------- | ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `bun test ./src/renderables/Code.test.ts -t "streaming rejection preserves a style invalidation for one replacement update"` | `thirdparty/opentui/packages/core` | Red before R5 repair (`Expected: 1`, `Received: 0`); green after, 1 pass, 0 fail.                                                                                                                                                                |
+| `bun test ./src/renderables/Code.test.ts -t "managed rejection commits current plain text without success callbacks"`        | `thirdparty/opentui/packages/core` | Green, 1 pass, 0 fail; checks two no-pending points around an ordinary render.                                                                                                                                                                   |
+| `bun test ./src/renderables/Code.test.ts -t "streaming rejection uses request source after initialStyledText changes"`       | `thirdparty/opentui/packages/core` | Green, 1 pass, 0 fail; verifies pending seed mutation does not create a replacement request or replace request-local source.                                                                                                                     |
+| `bun test ./src/renderables/Code.test.ts`                                                                                    | `thirdparty/opentui/packages/core` | 74 pass, 1 skip, 0 fail, 2 snapshots, 258 expect calls.                                                                                                                                                                                          |
+| `bun test ./src/renderables/__tests__/Markdown.test.ts`                                                                      | `thirdparty/opentui/packages/core` | 156 pass, 0 fail, 91 snapshots, 391 expect calls.                                                                                                                                                                                                |
+| `bun run build:lib`                                                                                                          | `thirdparty/opentui/packages/core` | Passed; library bundle, declarations and tree-sitter assets generated.                                                                                                                                                                           |
+| `git diff --check`                                                                                                           | `thirdparty/opentui`               | Passed.                                                                                                                                                                                                                                          |
+| Original single-instance `bun -e` frame loop                                                                                 | `thirdparty/opentui/packages/core` | `afterHasText: true`, `plainText: "# broken\\n"`, `height: 2`, `pending: 0`.                                                                                                                                                                     |
+| Original eight-instance `bun -e` frame loop                                                                                  | `thirdparty/opentui/packages/core` | `pending: 0`, `plainTextCount: 8`, `visibleTextCount: 8`, all eight markers true.                                                                                                                                                                |
+| `bun typecheck`                                                                                                              | `thirdparty/opentui/packages/core` | Not green due to existing package-wide dev/generated Yoga test configuration errors (`expect`/`test` globals, `.ts` import extension, missing JSON module resolution) plus unrelated dev files. No diagnostic named `Code.ts` or `Code.test.ts`. |
 
 ### Actual Primary-Path and Workaround Record
 
@@ -673,12 +674,12 @@ The R5 rejection display is still one terminal failure representation, not a sec
 
 ### Chinese Comment Calculation
 
-| Metric | Actual | Exclusions and evidence |
-| --- | --- | --- |
-| Effective changed code lines `E` | 117 | 130 added lines minus 1 import-only line and 12 blank lines; excludes generated, formatter-only and pure-move lines. |
-| Qualifying Chinese comment lines `C` | 18 | Adjacent production and behavior-test comments explain request-local source, pending-seed exclusion, cache-generation invalidation, terminal-frame visibility, no-retry and exactly-once replacement invariants. |
-| Ratio `C / E` | 15.38% | `18 / 117`. |
-| Required minimum `C` | 18 | `ceil(117 * 0.15) = 18`. |
+| Metric                               | Actual | Exclusions and evidence                                                                                                                                                                                          |
+| ------------------------------------ | ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Effective changed code lines `E`     | 117    | 130 added lines minus 1 import-only line and 12 blank lines; excludes generated, formatter-only and pure-move lines.                                                                                             |
+| Qualifying Chinese comment lines `C` | 18     | Adjacent production and behavior-test comments explain request-local source, pending-seed exclusion, cache-generation invalidation, terminal-frame visibility, no-retry and exactly-once replacement invariants. |
+| Ratio `C / E`                        | 15.38% | `18 / 117`.                                                                                                                                                                                                      |
+| Required minimum `C`                 | 18     | `ceil(117 * 0.15) = 18`.                                                                                                                                                                                         |
 
 ### Remaining Unverified Items
 
@@ -733,20 +734,20 @@ The minimal production change is to make `drawUnstyledText` and `onChunks` advan
 
 ### R6 TDD Slices
 
-| Order | Red behavior | Why current R5 code fails | Minimal green behavior |
-| --- | --- | --- | --- |
-| 1 | While a streaming update is pending, change `drawUnstyledText`, reject the request, render once, and observe exactly one replacement request; resolve it and verify no second pending request. | The setter sets dirty but does not advance `_cacheGeneration`; R5 catch clears dirty. | Advance the existing marker in the setter; reuse the current failure finalization and dirty gate. |
-| 2 | While a streaming update is pending, change `onChunks` to a callback that transforms the full visible text, reject the request, and verify one replacement applies the new transformation with no second request. | The setter sets dirty but does not advance `_cacheGeneration`; R5 catch clears dirty and the new callback is never reprocessed. | Advance the existing marker in the setter; the existing primary replacement runs and uses the public callback. |
-| 3 | Re-run ordinary rejection, `syntaxStyle` replacement, seeded source, complete Code/Markdown suites and original frame repro. | The marker change must not turn ordinary rejection into retry or pending seed mutation into replacement. | Existing R5/R2 contracts remain green. |
+| Order | Red behavior                                                                                                                                                                                                      | Why current R5 code fails                                                                                                       | Minimal green behavior                                                                                         |
+| ----- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| 1     | While a streaming update is pending, change `drawUnstyledText`, reject the request, render once, and observe exactly one replacement request; resolve it and verify no second pending request.                    | The setter sets dirty but does not advance `_cacheGeneration`; R5 catch clears dirty.                                           | Advance the existing marker in the setter; reuse the current failure finalization and dirty gate.              |
+| 2     | While a streaming update is pending, change `onChunks` to a callback that transforms the full visible text, reject the request, and verify one replacement applies the new transformation with no second request. | The setter sets dirty but does not advance `_cacheGeneration`; R5 catch clears dirty and the new callback is never reprocessed. | Advance the existing marker in the setter; the existing primary replacement runs and uses the public callback. |
+| 3     | Re-run ordinary rejection, `syntaxStyle` replacement, seeded source, complete Code/Markdown suites and original frame repro.                                                                                      | The marker change must not turn ordinary rejection into retry or pending seed mutation into replacement.                        | Existing R5/R2 contracts remain green.                                                                         |
 
 ### R6 Traceability and Budget
 
-| Requirement | Owner/path | File/test evidence |
-| --- | --- | --- |
-| INV-04 preserves every declared rendering-semantic setter | `CodeRenderable` setter invalidation + streaming rejection catch | `Code.ts`; new `drawUnstyledText` and `onChunks` rejection slices |
-| `initialStyledText` remains pending-only | `CodeRenderable.initialStyledText` setter and request-local failure catch | existing seeded rejection test |
-| Ordinary rejection does not retry | streaming failure finalization + existing dirty gate | existing managed rejection no-pending test |
-| Original blank frame remains repaired | streaming/one-shot failure visibility commits | existing frame-level tests and single/eight-instance repros |
+| Requirement                                               | Owner/path                                                                | File/test evidence                                                |
+| --------------------------------------------------------- | ------------------------------------------------------------------------- | ----------------------------------------------------------------- |
+| INV-04 preserves every declared rendering-semantic setter | `CodeRenderable` setter invalidation + streaming rejection catch          | `Code.ts`; new `drawUnstyledText` and `onChunks` rejection slices |
+| `initialStyledText` remains pending-only                  | `CodeRenderable.initialStyledText` setter and request-local failure catch | existing seeded rejection test                                    |
+| Ordinary rejection does not retry                         | streaming failure finalization + existing dirty gate                      | existing managed rejection no-pending test                        |
+| Original blank frame remains repaired                     | streaming/one-shot failure visibility commits                             | existing frame-level tests and single/eight-instance repros       |
 
 Expected R6 diff remains within user limits: one production file, one behavior-test file, no generated/native/release files, approximately 2 production added lines plus two focused tests and their qualifying comments, and well below 1200 total code lines.
 
@@ -807,20 +808,20 @@ R7 rendering-semantic setter
   -> existing renderSelf() schedules exactly one primary replacement
 ```
 
-| Order | Red behavior | Why current R6 path fails | Minimal green behavior |
-| --- | --- | --- | --- |
-| 1 | Change only `initialStyledText`, execute a normal `renderOnce()`, reject the original streaming request, then assert `pendingStreamingUpdates() === 0` and request-local plain text is visible. | The setter sets `_highlightsDirty`; the normal render starts a streaming update even though content did not change, and rejection then drains it. | Remove only the setter’s primary dirty assignment; commit the pending seed and request a render through the existing pending path. |
-| 2 | Re-run the four R6 slices: ordinary rejection, `syntaxStyle`, `drawUnstyledText`, and `onChunks`, including exactly-once replacement and no second pending request. | The scheduling split must not remove legitimate primary invalidation. | Keep R6 generation-marker behavior unchanged for rendering-semantic setters. |
-| 3 | Re-run seeded current-source, complete Code/Markdown suites and original single/eight-instance frame loops. | Seed must remain visible while pending but must not become terminal failure source or retry. | Existing R2/R5 behavior remains green. |
+| Order | Red behavior                                                                                                                                                                                    | Why current R6 path fails                                                                                                                         | Minimal green behavior                                                                                                             |
+| ----- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| 1     | Change only `initialStyledText`, execute a normal `renderOnce()`, reject the original streaming request, then assert `pendingStreamingUpdates() === 0` and request-local plain text is visible. | The setter sets `_highlightsDirty`; the normal render starts a streaming update even though content did not change, and rejection then drains it. | Remove only the setter’s primary dirty assignment; commit the pending seed and request a render through the existing pending path. |
+| 2     | Re-run the four R6 slices: ordinary rejection, `syntaxStyle`, `drawUnstyledText`, and `onChunks`, including exactly-once replacement and no second pending request.                             | The scheduling split must not remove legitimate primary invalidation.                                                                             | Keep R6 generation-marker behavior unchanged for rendering-semantic setters.                                                       |
+| 3     | Re-run seeded current-source, complete Code/Markdown suites and original single/eight-instance frame loops.                                                                                     | Seed must remain visible while pending but must not become terminal failure source or retry.                                                      | Existing R2/R5 behavior remains green.                                                                                             |
 
 ### R7 Traceability and Budget
 
-| Requirement | Owner/path | File/test evidence |
-| --- | --- | --- |
-| Seed-only changes remain pending-only | `CodeRenderable.initialStyledText` setter -> `commitPendingRepresentation` | new seed interleaving regression |
-| Rendering semantic invalidations survive rejection | existing setter generation markers -> streaming failure finalization | R6 `drawUnstyledText`/`onChunks`/`syntaxStyle` regressions |
-| Ordinary rejection does not retry | streaming failure finalization and existing dirty gate | existing no-pending regression plus seed interleaving |
-| Original blank frame remains visible | request-local failure catches | existing frame-level tests and original repros |
+| Requirement                                        | Owner/path                                                                 | File/test evidence                                         |
+| -------------------------------------------------- | -------------------------------------------------------------------------- | ---------------------------------------------------------- |
+| Seed-only changes remain pending-only              | `CodeRenderable.initialStyledText` setter -> `commitPendingRepresentation` | new seed interleaving regression                           |
+| Rendering semantic invalidations survive rejection | existing setter generation markers -> streaming failure finalization       | R6 `drawUnstyledText`/`onChunks`/`syntaxStyle` regressions |
+| Ordinary rejection does not retry                  | streaming failure finalization and existing dirty gate                     | existing no-pending regression plus seed interleaving      |
+| Original blank frame remains visible               | request-local failure catches                                              | existing frame-level tests and original repros             |
 
 Expected R7 change remains one production file and one test file, no callers/Markdown/native/release files, below eight production files and 1200 total code lines. The production delta is one removed dirty assignment plus pending representation/render calls; actual E/C must be recomputed after implementation.
 
@@ -953,7 +954,7 @@ R10 is approved for implementation under the exact contract recorded above. Any 
 
 ## 32. R10 Verbatim Independent Plan Verdict
 
-```text
+````text
 ## Blocking findings
 
 No blocking findings.
@@ -995,7 +996,7 @@ render-time dirty gate
   -> existing streaming or one-shot highlight
   -> success: existing styled commit
   -> managed rejection: request-local plain terminal representation
-```
+````
 
 `initialStyledText`只是active request期间的pending representation。inactive mutation仍回到同一primary highlight path。Failure plain representation属于`CodeRenderable`的terminal display contract，不是第二次解析或成功替代路径。
 
@@ -1021,10 +1022,10 @@ C >= ceil(E * 0.15)
 
 Only the approved OpenTUI owner and its behavior tests changed:
 
-| File | Actual responsibility | Necessity |
-| --- | --- | --- |
-| `thirdparty/opentui/packages/core/src/renderables/Code.ts` | Preserves the existing request-local plain failure settlement; advances `_cacheGeneration` for `drawUnstyledText` and `onChunks`; makes `initialStyledText` state-aware: while `_streamingActive`, non-empty seed refreshes pending representation and empty seed preserves the current waiting visibility; while inactive, the existing `_highlightsDirty` primary scheduling remains unchanged. | `CodeRenderable` owns the request lifecycle, pending representation, dirty gate and TextBuffer visibility. This is the first divergence owner identified by R10. |
-| `thirdparty/opentui/packages/core/src/renderables/Code.test.ts` | Adds public-seam regressions for active non-empty/empty seed interleavings, settled streaming seed, non-streaming seed, `drawUnstyledText` invalidation and `onChunks` invalidation. Existing ordinary rejection, style replacement, frame, source and callback tests remain. | These tests distinguish pending-only representation from primary scheduling and prove no retry or exactly-once replacement through `MockTreeSitterClient` and the real test renderer. |
+| File                                                            | Actual responsibility                                                                                                                                                                                                                                                                                                                                                                             | Necessity                                                                                                                                                                             |
+| --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `thirdparty/opentui/packages/core/src/renderables/Code.ts`      | Preserves the existing request-local plain failure settlement; advances `_cacheGeneration` for `drawUnstyledText` and `onChunks`; makes `initialStyledText` state-aware: while `_streamingActive`, non-empty seed refreshes pending representation and empty seed preserves the current waiting visibility; while inactive, the existing `_highlightsDirty` primary scheduling remains unchanged. | `CodeRenderable` owns the request lifecycle, pending representation, dirty gate and TextBuffer visibility. This is the first divergence owner identified by R10.                      |
+| `thirdparty/opentui/packages/core/src/renderables/Code.test.ts` | Adds public-seam regressions for active non-empty/empty seed interleavings, settled streaming seed, non-streaming seed, `drawUnstyledText` invalidation and `onChunks` invalidation. Existing ordinary rejection, style replacement, frame, source and callback tests remain.                                                                                                                     | These tests distinguish pending-only representation from primary scheduling and prove no retry or exactly-once replacement through `MockTreeSitterClient` and the real test renderer. |
 
 Nested OpenTUI diff summary:
 
@@ -1049,17 +1050,17 @@ The production-file hard limit is `1 <= 8`; the total code diff is far below `12
 
 All Bun commands below ran from `thirdparty/opentui/packages/core`:
 
-| Command | Result |
-| --- | --- |
-| `bun test ./src/renderables/Code.test.ts -t "active seed mutation does not enqueue a replacement after rejection"` | 1 pass, 0 fail. |
-| `bun test ./src/renderables/Code.test.ts -t "active empty seed preserves waiting visibility and does not retry after rejection"` | 1 pass, 0 fail. |
-| `bun test ./src/renderables/Code.test.ts -t "settled streaming seed mutation re-highlights authoritative content"` | 1 pass, 0 fail. |
-| `bun test ./src/renderables/Code.test.ts -t "non-streaming seed mutation keeps the one-shot primary path"` | 1 pass, 0 fail. |
-| `bun test ./src/renderables/Code.test.ts -t "streaming rejection preserves a drawUnstyledText invalidation for one replacement update"` | 1 pass, 0 fail. |
-| `bun test ./src/renderables/Code.test.ts -t "streaming rejection preserves an onChunks invalidation for one replacement update"` | 1 pass, 0 fail. |
-| `bun test ./src/renderables/Code.test.ts` | 80 pass, 1 skip, 0 fail, 2 snapshots, 282 expect calls. |
-| `bun test ./src/renderables/__tests__/Markdown.test.ts` | 156 pass, 0 fail, 91 snapshots, 391 expect calls. |
-| `bun run build:lib` | Passed; library bundle, declarations and tree-sitter assets generated. |
+| Command                                                                                                                                 | Result                                                                 |
+| --------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| `bun test ./src/renderables/Code.test.ts -t "active seed mutation does not enqueue a replacement after rejection"`                      | 1 pass, 0 fail.                                                        |
+| `bun test ./src/renderables/Code.test.ts -t "active empty seed preserves waiting visibility and does not retry after rejection"`        | 1 pass, 0 fail.                                                        |
+| `bun test ./src/renderables/Code.test.ts -t "settled streaming seed mutation re-highlights authoritative content"`                      | 1 pass, 0 fail.                                                        |
+| `bun test ./src/renderables/Code.test.ts -t "non-streaming seed mutation keeps the one-shot primary path"`                              | 1 pass, 0 fail.                                                        |
+| `bun test ./src/renderables/Code.test.ts -t "streaming rejection preserves a drawUnstyledText invalidation for one replacement update"` | 1 pass, 0 fail.                                                        |
+| `bun test ./src/renderables/Code.test.ts -t "streaming rejection preserves an onChunks invalidation for one replacement update"`        | 1 pass, 0 fail.                                                        |
+| `bun test ./src/renderables/Code.test.ts`                                                                                               | 80 pass, 1 skip, 0 fail, 2 snapshots, 282 expect calls.                |
+| `bun test ./src/renderables/__tests__/Markdown.test.ts`                                                                                 | 156 pass, 0 fail, 91 snapshots, 391 expect calls.                      |
+| `bun run build:lib`                                                                                                                     | Passed; library bundle, declarations and tree-sitter assets generated. |
 
 `bun typecheck` was also run from the package directory. It remains non-zero because of existing `dev/`, generated Yoga test globals/imports, missing `src/lib/fonts/*.json` module resolution, and unrelated pointer/configuration diagnostics. No reported diagnostic names `Code.ts` or `Code.test.ts`; behavior suites and library build are green.
 
@@ -1091,24 +1092,24 @@ markers: [true,true,true,true,true,true,true,true]
 
 ### Actual Secondary and Replacement Path Inventory
 
-| Path | Actual verdict |
-| --- | --- |
-| Existing styled success path | Preserved; `commitStreamingVisible()` remains success-only. |
-| Active non-empty `initialStyledText` | Existing pending representation path; no primary dirty or replacement request. |
-| Active empty `initialStyledText` | Existing waiting visibility is preserved; no unstyled source commit and no replacement request. |
-| Inactive `initialStyledText` | Existing primary dirty path; settled streaming and one-shot instances rehighlight authoritative content. |
-| Streaming rejection | Request-local plain terminal representation; no parser retry, callback success conversion or alternate success path. |
-| R10 semantic setters | Existing primary dirty gate with `_cacheGeneration` marker preservation; exactly one replacement in focused tests. |
-| Caller-local fallback/parser/native/release path | Not added. |
+| Path                                             | Actual verdict                                                                                                       |
+| ------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------- |
+| Existing styled success path                     | Preserved; `commitStreamingVisible()` remains success-only.                                                          |
+| Active non-empty `initialStyledText`             | Existing pending representation path; no primary dirty or replacement request.                                       |
+| Active empty `initialStyledText`                 | Existing waiting visibility is preserved; no unstyled source commit and no replacement request.                      |
+| Inactive `initialStyledText`                     | Existing primary dirty path; settled streaming and one-shot instances rehighlight authoritative content.             |
+| Streaming rejection                              | Request-local plain terminal representation; no parser retry, callback success conversion or alternate success path. |
+| R10 semantic setters                             | Existing primary dirty gate with `_cacheGeneration` marker preservation; exactly one replacement in focused tests.   |
+| Caller-local fallback/parser/native/release path | Not added.                                                                                                           |
 
 ### Chinese Comment Calculation
 
-| Metric | Actual | Exclusions and evidence |
-| --- | --- | --- |
-| Effective changed code lines `E` | 334 | Independent final audit calculation: nested unified diff added lines `378`, minus `1` import-only line and `43` blank lines; excludes formatter-only, generated and pure-move lines. |
-| Qualifying Chinese explanatory comment lines `C` | 51 | 51 adjacent Chinese comments explain request-local failure source, pending seed boundary, `_cacheGeneration` semantics, active/inactive lifecycle, frame-vs-plainText evidence, no-retry and exactly-once replacement intent. The stale active-dirty comment was corrected and is not counted as a duplicate. |
-| Ratio `C / E` | 15.27% | `51 / 334`. |
-| Required minimum `C` | 51 | `ceil(334 * 0.15) = 51`. |
+| Metric                                           | Actual | Exclusions and evidence                                                                                                                                                                                                                                                                                       |
+| ------------------------------------------------ | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Effective changed code lines `E`                 | 334    | Independent final audit calculation: nested unified diff added lines `378`, minus `1` import-only line and `43` blank lines; excludes formatter-only, generated and pure-move lines.                                                                                                                          |
+| Qualifying Chinese explanatory comment lines `C` | 51     | 51 adjacent Chinese comments explain request-local failure source, pending seed boundary, `_cacheGeneration` semantics, active/inactive lifecycle, frame-vs-plainText evidence, no-retry and exactly-once replacement intent. The stale active-dirty comment was corrected and is not counted as a duplicate. |
+| Ratio `C / E`                                    | 15.27% | `51 / 334`.                                                                                                                                                                                                                                                                                                   |
+| Required minimum `C`                             | 51     | `ceil(334 * 0.15) = 51`.                                                                                                                                                                                                                                                                                      |
 
 ### Remaining Unverified Items
 
@@ -1118,7 +1119,7 @@ markers: [true,true,true,true,true,true,true,true]
 
 ## 34. R10 Implementation Audit Record
 
-| Round | Plan revision | Full original scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | R10 implementation | yes | B-01 actual Chinese explanatory comments were below the 15% hard gate; one stale active-dirty comment was inaccurate. | Diff/E/C evidence initially drifted from actual nested diff; package-wide typecheck remains blocked by existing unrelated diagnostics; native Zig tests unavailable; installed tarball unchanged by approved release boundary. | BLOCK — implementation rework required. | `ses_fddfc8436ffeSFJ3Nj6Zm3zm7J` |
-| 2 | R10 implementation | yes | No blocking findings. | Current nested diff is `378 additions, 9 deletions`; `bun typecheck` remains blocked by unrelated existing diagnostics; native Zig unavailable; installed tarball unchanged by approved release boundary. | APPROVE — R10 implementation | `ses_fddfc8436ffeSFJ3Nj6Zm3zm7J` |
+| Round | Plan revision      | Full original scope? | Blocking findings                                                                                                     | Non-blocking findings                                                                                                                                                                                                          | Result                                  | Invocation reference             |
+| ----- | ------------------ | -------------------- | --------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------- | -------------------------------- |
+| 1     | R10 implementation | yes                  | B-01 actual Chinese explanatory comments were below the 15% hard gate; one stale active-dirty comment was inaccurate. | Diff/E/C evidence initially drifted from actual nested diff; package-wide typecheck remains blocked by existing unrelated diagnostics; native Zig tests unavailable; installed tarball unchanged by approved release boundary. | BLOCK — implementation rework required. | `ses_fddfc8436ffeSFJ3Nj6Zm3zm7J` |
+| 2     | R10 implementation | yes                  | No blocking findings.                                                                                                 | Current nested diff is `378 additions, 9 deletions`; `bun typecheck` remains blocked by unrelated existing diagnostics; native Zig unavailable; installed tarball unchanged by approved release boundary.                      | APPROVE — R10 implementation            | `ses_fddfc8436ffeSFJ3Nj6Zm3zm7J` |

@@ -32,9 +32,9 @@ export const disposeAllInstancesAndEmitGlobalDisposed = Effect.fn("Server.dispos
 // 失败仅告警不阻断——auth 已写入文件，下次访问会惰性重建。
 export const refreshProviderCaches = Effect.fn("Server.refreshProviderCaches")(function* () {
   const provider = yield* Provider.Service
-  yield* provider.invalidateAll().pipe(
-    Effect.catchCause((cause) => Effect.logWarning("provider cache refresh failed", { cause })),
-  )
+  yield* provider
+    .invalidateAll()
+    .pipe(Effect.catchCause((cause) => Effect.logWarning("provider cache refresh failed", { cause })))
   yield* emitGlobalDisposed
 })
 

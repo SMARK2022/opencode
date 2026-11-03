@@ -36,38 +36,38 @@ not implementation authority.
 
 ## 3. Repository Context
 
-| Source | Why it constrains this task |
-| --- | --- |
-| `CONTEXT.md` | `provider/` 是 Provider adapter 与 transform owner；Message 是持久化 Part 集合，Provider wire 兼容属于 adapter 责任。 |
-| `AGENTS.md` | 要求最小内聚修改、避免单次 helper、避免 `any`、package-local test/typecheck。 |
-| `packages/opencode/AGENTS.md` | 本任务不需要 database/migration；生产代码保持当前 module shape。 |
-| `.opencode/policy/first-principles-engineering.md` | 要求修复 first divergence、禁止 fallback、完整映射、独立审计和 15% 中文解释性注释。 |
-| `docs/adr/README.md` | 单文件 Provider 兼容分支不是 load-bearing architecture decision，不创建 ADR。 |
-| `docs/adr/0001-triage-labels-and-team-assignment-coexist.md` | 只约束 issue triage，与 Provider Message normalization 无关。 |
-| 上游 PR `anomalyco/opencode#27914` | 精确覆盖 `[step-start, reasoning("")]` 产生的 OpenAI-compatible 空 assistant；因自动 stale cleanup 关闭，未被技术否决。 |
-| 上游 PR `anomalyco/opencode#33899` | 只为 Tool-call-only assistant 补单空格；本分支已采用该兼容行为，必须保留。 |
-| AI SDK Issue `vercel/ai#15248` | 确认 `convertToModelMessages` 会在 `step-start` 边界生成独立空 assistant block。 |
+| Source                                                       | Why it constrains this task                                                                                             |
+| ------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------- |
+| `CONTEXT.md`                                                 | `provider/` 是 Provider adapter 与 transform owner；Message 是持久化 Part 集合，Provider wire 兼容属于 adapter 责任。   |
+| `AGENTS.md`                                                  | 要求最小内聚修改、避免单次 helper、避免 `any`、package-local test/typecheck。                                           |
+| `packages/opencode/AGENTS.md`                                | 本任务不需要 database/migration；生产代码保持当前 module shape。                                                        |
+| `.opencode/policy/first-principles-engineering.md`           | 要求修复 first divergence、禁止 fallback、完整映射、独立审计和 15% 中文解释性注释。                                     |
+| `docs/adr/README.md`                                         | 单文件 Provider 兼容分支不是 load-bearing architecture decision，不创建 ADR。                                           |
+| `docs/adr/0001-triage-labels-and-team-assignment-coexist.md` | 只约束 issue triage，与 Provider Message normalization 无关。                                                           |
+| 上游 PR `anomalyco/opencode#27914`                           | 精确覆盖 `[step-start, reasoning("")]` 产生的 OpenAI-compatible 空 assistant；因自动 stale cleanup 关闭，未被技术否决。 |
+| 上游 PR `anomalyco/opencode#33899`                           | 只为 Tool-call-only assistant 补单空格；本分支已采用该兼容行为，必须保留。                                              |
+| AI SDK Issue `vercel/ai#15248`                               | 确认 `convertToModelMessages` 会在 `step-start` 边界生成独立空 assistant block。                                        |
 
 ## 4. Files and Evidence Read
 
-| Evidence | Relevance | Evidence class |
-| --- | --- | --- |
-| `packages/opencode/src/provider/transform.ts:58-391` | `normalizeMessages()`、OpenAI-compatible empty filter、Tool-call space guard 和 interleaved lowering 的真实顺序。 | observed |
-| `packages/opencode/src/provider/transform.ts:342-391` | DeepSeek 在 OpenAI-compatible filter 之后重新补 required empty reasoning，再由 interleaved lowering 形成 `reasoning_content:""`。 | observed |
-| `packages/opencode/test/provider/transform.test.ts:1447-1514` | Anthropic 已有 empty reasoning/whole-message 测试模式。 | observed |
-| `packages/opencode/test/provider/transform.test.ts:1725-1821` | 当前 OpenAI-compatible 测试仅覆盖空 text/Tool call；fixture 使用 `reasoning:false`、`interleaved:false`。 | observed |
-| `packages/opencode/src/session/processor.ts:353-408,690-777,1020-1097` | retry attempt 会先持久化空 reasoning Part；delta 仅进入 bus；retry 重置 map。 | observed |
-| `packages/opencode/src/session/session.ts:900-908` | `updatePartDelta()` 不持久化 delta，解释中断 Part 为何保持 `text:""`。 | observed |
-| `packages/opencode/src/session/message-v2.ts:969-1274` | 同模型 reasoning 被转换为 UI reasoning；`step-start` 保留给 AI SDK 分块。 | observed |
-| `node_modules/ai/src/ui/convert-to-model-messages.ts:132-249,346-360` | `step-start` flush block；只含 `reasoning("")` 的 block 仍生成 assistant ModelMessage。 | observed |
-| `node_modules/@ai-sdk/openai-compatible/src/chat/convert-to-openai-compatible-chat-messages.ts:150-209` | 空 reasoning assistant 最终序列化为 `content:""`。 | observed |
-| `packages/core/src/models-snapshot.js` Kimi K3 record | Kimi K3 使用 `@ai-sdk/openai-compatible` 和 `interleaved.field="reasoning_content"`。 | observed |
-| `C:/Users/Lenovo/.local/share/opencode/opencode.db`，只读 `PRAGMA query_only=ON` | 错误 Message、source Message、Part 顺序和发生时可见性。 | observed |
-| `C:/Users/Lenovo/.local/share/opencode/log/2026-07-18T195525.log:113031-113122` | Request `1381` 在 reasoning delta 后 `ECONNRESET`，`1382` 成功，`1383` 返回 position 842。 | observed |
-| 历史 wire replay | 433 Message -> 792 ModelMessage -> 793 含 system -> 845 wire Message；索引 842 精确为空。 | observed |
-| Session 风险扫描 | 4,839 assistant Message 中检测到 13 个 retry-created empty block；Kimi 包含旧 2 个空 text 和新 1 个空 reasoning。 | observed |
-| 当前 worktree / target diff | `transform.ts`、`transform.test.ts`、`processor.ts`、`llm.ts` 当前无未提交改动。 | observed |
-| upstream `dev` SHA `5a5117b36c1277a20a0afbd483bb861a90cbacd9` | 当前 upstream 1.18.3 仍只对 Anthropic/Bedrock 过滤空 reasoning；OpenAI-compatible 2.0.41 未修复。 | observed |
+| Evidence                                                                                                | Relevance                                                                                                                         | Evidence class |
+| ------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- | -------------- |
+| `packages/opencode/src/provider/transform.ts:58-391`                                                    | `normalizeMessages()`、OpenAI-compatible empty filter、Tool-call space guard 和 interleaved lowering 的真实顺序。                 | observed       |
+| `packages/opencode/src/provider/transform.ts:342-391`                                                   | DeepSeek 在 OpenAI-compatible filter 之后重新补 required empty reasoning，再由 interleaved lowering 形成 `reasoning_content:""`。 | observed       |
+| `packages/opencode/test/provider/transform.test.ts:1447-1514`                                           | Anthropic 已有 empty reasoning/whole-message 测试模式。                                                                           | observed       |
+| `packages/opencode/test/provider/transform.test.ts:1725-1821`                                           | 当前 OpenAI-compatible 测试仅覆盖空 text/Tool call；fixture 使用 `reasoning:false`、`interleaved:false`。                         | observed       |
+| `packages/opencode/src/session/processor.ts:353-408,690-777,1020-1097`                                  | retry attempt 会先持久化空 reasoning Part；delta 仅进入 bus；retry 重置 map。                                                     | observed       |
+| `packages/opencode/src/session/session.ts:900-908`                                                      | `updatePartDelta()` 不持久化 delta，解释中断 Part 为何保持 `text:""`。                                                            | observed       |
+| `packages/opencode/src/session/message-v2.ts:969-1274`                                                  | 同模型 reasoning 被转换为 UI reasoning；`step-start` 保留给 AI SDK 分块。                                                         | observed       |
+| `node_modules/ai/src/ui/convert-to-model-messages.ts:132-249,346-360`                                   | `step-start` flush block；只含 `reasoning("")` 的 block 仍生成 assistant ModelMessage。                                           | observed       |
+| `node_modules/@ai-sdk/openai-compatible/src/chat/convert-to-openai-compatible-chat-messages.ts:150-209` | 空 reasoning assistant 最终序列化为 `content:""`。                                                                                | observed       |
+| `packages/core/src/models-snapshot.js` Kimi K3 record                                                   | Kimi K3 使用 `@ai-sdk/openai-compatible` 和 `interleaved.field="reasoning_content"`。                                             | observed       |
+| `C:/Users/Lenovo/.local/share/opencode/opencode.db`，只读 `PRAGMA query_only=ON`                        | 错误 Message、source Message、Part 顺序和发生时可见性。                                                                           | observed       |
+| `C:/Users/Lenovo/.local/share/opencode/log/2026-07-18T195525.log:113031-113122`                         | Request `1381` 在 reasoning delta 后 `ECONNRESET`，`1382` 成功，`1383` 返回 position 842。                                        | observed       |
+| 历史 wire replay                                                                                        | 433 Message -> 792 ModelMessage -> 793 含 system -> 845 wire Message；索引 842 精确为空。                                         | observed       |
+| Session 风险扫描                                                                                        | 4,839 assistant Message 中检测到 13 个 retry-created empty block；Kimi 包含旧 2 个空 text 和新 1 个空 reasoning。                 | observed       |
+| 当前 worktree / target diff                                                                             | `transform.ts`、`transform.test.ts`、`processor.ts`、`llm.ts` 当前无未提交改动。                                                  | observed       |
+| upstream `dev` SHA `5a5117b36c1277a20a0afbd483bb861a90cbacd9`                                           | 当前 upstream 1.18.3 仍只对 Anthropic/Bedrock 过滤空 reasoning；OpenAI-compatible 2.0.41 未修复。                                 | observed       |
 
 ## 5. Current Behavior
 
@@ -95,35 +95,35 @@ because it records the rejected request. The offending history producer is
 
 ## 6. Supported Input Domain and Reachability
 
-| Input or condition | Producer | Upstream guarantees | Reachable path | Owner | Classification |
-| --- | --- | --- | --- | --- | --- |
-| OpenAI-compatible assistant with `reasoning("")` and no semantic sibling Part | Interrupted/retried reasoning stream; persisted source Message proves it | AI SDK permits the Part and emits an assistant block | MessageV2 -> AI SDK step split -> `ProviderTransform.message()` | Provider transform adapter | observed |
-| Empty reasoning plus Tool call | Reasoning model can start reasoning and then emit Tool call | Tool call must retain matching Tool result lineage | Same normalization branch then existing Tool-call space guard | Provider transform adapter | reachable |
-| Non-empty reasoning | Normal Kimi reasoning output | Must replay through model-specific `reasoning_content` | Same normalization branch then interleaved lowering | Provider transform adapter | observed |
-| Empty text plus Tool call | Existing GLM/Kimi Tool-only output | Existing commit `11f7de2a4d` promises non-empty wire content without deleting Tool call | Existing OpenAI-compatible filter and space guard | Provider transform adapter | contracted |
-| Anthropic/Bedrock empty signed reasoning | Provider opaque signature/redacted data replay | Empty visible text may still carry required opaque token | Separate existing Anthropic/Bedrock branches | Their existing adapter branches | contracted |
-| Retry-attempt Part cleanup | SessionRetry orchestration | No safe deletion contract established for partial output or executed Tools | `processor.ts` retry lifecycle | Session orchestration | observed but out of scope |
+| Input or condition                                                            | Producer                                                                 | Upstream guarantees                                                                     | Reachable path                                                  | Owner                           | Classification            |
+| ----------------------------------------------------------------------------- | ------------------------------------------------------------------------ | --------------------------------------------------------------------------------------- | --------------------------------------------------------------- | ------------------------------- | ------------------------- |
+| OpenAI-compatible assistant with `reasoning("")` and no semantic sibling Part | Interrupted/retried reasoning stream; persisted source Message proves it | AI SDK permits the Part and emits an assistant block                                    | MessageV2 -> AI SDK step split -> `ProviderTransform.message()` | Provider transform adapter      | observed                  |
+| Empty reasoning plus Tool call                                                | Reasoning model can start reasoning and then emit Tool call              | Tool call must retain matching Tool result lineage                                      | Same normalization branch then existing Tool-call space guard   | Provider transform adapter      | reachable                 |
+| Non-empty reasoning                                                           | Normal Kimi reasoning output                                             | Must replay through model-specific `reasoning_content`                                  | Same normalization branch then interleaved lowering             | Provider transform adapter      | observed                  |
+| Empty text plus Tool call                                                     | Existing GLM/Kimi Tool-only output                                       | Existing commit `11f7de2a4d` promises non-empty wire content without deleting Tool call | Existing OpenAI-compatible filter and space guard               | Provider transform adapter      | contracted                |
+| Anthropic/Bedrock empty signed reasoning                                      | Provider opaque signature/redacted data replay                           | Empty visible text may still carry required opaque token                                | Separate existing Anthropic/Bedrock branches                    | Their existing adapter branches | contracted                |
+| Retry-attempt Part cleanup                                                    | SessionRetry orchestration                                               | No safe deletion contract established for partial output or executed Tools              | `processor.ts` retry lifecycle                                  | Session orchestration           | observed but out of scope |
 
 ## 7. Required Invariants
 
-| ID | Behavioral invariant | Evidence | Existing test |
-| --- | --- | --- | --- |
-| INV-01 | OpenAI-compatible normalization must not emit an assistant whose visible content, reasoning content, and Tool calls are all empty. | Exact Moonshot 400 and wire replay at index 842. | Missing for empty reasoning. |
-| INV-02 | Empty reasoning-only assistant blocks carry no replayable semantic content and must be removed before interleaved lowering. | Persisted retry artifact plus upstream PR #27914. | Missing. |
-| INV-03 | Removing empty reasoning must preserve Tool-call-only assistant linkage and the existing single-space wire compatibility. | Existing commit/tests and Tool result protocol. | Existing Tool-only tests; add interaction coverage. |
-| INV-04 | Non-empty reasoning must continue to lower to `providerOptions.openaiCompatible.reasoning_content`. | Kimi catalog and successful wire history. | No OpenAI-compatible non-empty reasoning regression test. |
-| INV-05 | Anthropic, Bedrock, OpenAI Responses and non-OpenAI-compatible Provider behavior must remain unchanged. | Existing separate branches and verified Error 2 fix. | Existing suite. |
-| INV-06 | Implementation stays within 4 production files, 4 test files and 600 changed code lines excluding report. | Explicit user requirement. | Diff verification. |
-| INV-07 | DeepSeek assistant 即使没有显式 reasoning，也必须保留既有 `reasoning_content:""` 兼容输出。 | Existing DeepSeek branch and interleaved compatibility comment. | Existing explicit-reasoning test does not cover synthesized empty reasoning. |
+| ID     | Behavioral invariant                                                                                                               | Evidence                                                        | Existing test                                                                |
+| ------ | ---------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| INV-01 | OpenAI-compatible normalization must not emit an assistant whose visible content, reasoning content, and Tool calls are all empty. | Exact Moonshot 400 and wire replay at index 842.                | Missing for empty reasoning.                                                 |
+| INV-02 | Empty reasoning-only assistant blocks carry no replayable semantic content and must be removed before interleaved lowering.        | Persisted retry artifact plus upstream PR #27914.               | Missing.                                                                     |
+| INV-03 | Removing empty reasoning must preserve Tool-call-only assistant linkage and the existing single-space wire compatibility.          | Existing commit/tests and Tool result protocol.                 | Existing Tool-only tests; add interaction coverage.                          |
+| INV-04 | Non-empty reasoning must continue to lower to `providerOptions.openaiCompatible.reasoning_content`.                                | Kimi catalog and successful wire history.                       | No OpenAI-compatible non-empty reasoning regression test.                    |
+| INV-05 | Anthropic, Bedrock, OpenAI Responses and non-OpenAI-compatible Provider behavior must remain unchanged.                            | Existing separate branches and verified Error 2 fix.            | Existing suite.                                                              |
+| INV-06 | Implementation stays within 4 production files, 4 test files and 600 changed code lines excluding report.                          | Explicit user requirement.                                      | Diff verification.                                                           |
+| INV-07 | DeepSeek assistant 即使没有显式 reasoning，也必须保留既有 `reasoning_content:""` 兼容输出。                                        | Existing DeepSeek branch and interleaved compatibility comment. | Existing explicit-reasoning test does not cover synthesized empty reasoning. |
 
 ## 8. First Divergence and Root Cause
 
-| Invariant | First divergence | Owning module/interface | Proof |
-| --- | --- | --- | --- |
-| INV-01, INV-02 | `normalizeMessages()` OpenAI-compatible filter removes only empty `text` Parts and treats `reasoning("")` as substantive, so an otherwise empty assistant survives. | `ProviderTransform.message()` / `normalizeMessages()` external wire-format compatibility seam | Minimal red loop emits `{role:"assistant",content:"",reasoning_content:""}`; exact historical loop reproduces position 842. |
-| INV-03 | No current divergence for Tool-call-only input; the risk is regression if the new reasoning filter removes the whole Message instead of only the empty Part. | Same seam and existing space guard | Current Tool-only tests and in-memory interaction matrix. |
-| INV-04 | No current divergence for non-empty reasoning; it requires regression protection because the new branch distinguishes empty from non-empty reasoning. | Same seam, followed by interleaved lowering | Successful current wire output with non-empty `reasoning_content`. |
-| INV-07 | No current production divergence: the common empty filter runs first, then the later DeepSeek-specific branch re-adds required empty reasoning before interleaved lowering. The missing evidence is a behavioral regression test for that ordering. | Same `normalizeMessages()` primary path, DeepSeek branch at lines 342-358 | Current source order; implementation audit B-01 identified the untested compatibility contract. |
+| Invariant      | First divergence                                                                                                                                                                                                                                    | Owning module/interface                                                                       | Proof                                                                                                                       |
+| -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| INV-01, INV-02 | `normalizeMessages()` OpenAI-compatible filter removes only empty `text` Parts and treats `reasoning("")` as substantive, so an otherwise empty assistant survives.                                                                                 | `ProviderTransform.message()` / `normalizeMessages()` external wire-format compatibility seam | Minimal red loop emits `{role:"assistant",content:"",reasoning_content:""}`; exact historical loop reproduces position 842. |
+| INV-03         | No current divergence for Tool-call-only input; the risk is regression if the new reasoning filter removes the whole Message instead of only the empty Part.                                                                                        | Same seam and existing space guard                                                            | Current Tool-only tests and in-memory interaction matrix.                                                                   |
+| INV-04         | No current divergence for non-empty reasoning; it requires regression protection because the new branch distinguishes empty from non-empty reasoning.                                                                                               | Same seam, followed by interleaved lowering                                                   | Successful current wire output with non-empty `reasoning_content`.                                                          |
+| INV-07         | No current production divergence: the common empty filter runs first, then the later DeepSeek-specific branch re-adds required empty reasoning before interleaved lowering. The missing evidence is a behavioral regression test for that ordering. | Same `normalizeMessages()` primary path, DeepSeek branch at lines 342-358                     | Current source order; implementation audit B-01 identified the untested compatibility contract.                             |
 
 The retry lifecycle explains how the invalid input is produced, but it is not
 the first divergence of the Provider wire invariant. Provider normalization is
@@ -143,13 +143,18 @@ bun -e 'import * as T from "./packages/opencode/src/provider/transform.ts"; impo
 Observed result on 2026-07-20:
 
 ```json
-{"verdict":"RED","wire":[{"role":"assistant","content":"","reasoning_content":""}]}
+{ "verdict": "RED", "wire": [{ "role": "assistant", "content": "", "reasoning_content": "" }] }
 ```
 
 The historical read-only replay independently produced:
 
 ```json
-{"verdict":"RED","position":842,"message":{"role":"assistant","content":"","reasoning_content":""},"total":845}
+{
+  "verdict": "RED",
+  "position": 842,
+  "message": { "role": "assistant", "content": "", "reasoning_content": "" },
+  "total": 845
+}
 ```
 
 Minimized reproduction: one assistant ModelMessage containing exactly one
@@ -158,11 +163,11 @@ the real Provider transform, and the real OpenAI-compatible wire converter.
 
 ## 9. Responsibility and Seam
 
-| Concern | Owner | Interface promise | Why it belongs here | Why another module does not own it |
-| --- | --- | --- | --- | --- |
+| Concern                                         | Owner                                                 | Interface promise                                                    | Why it belongs here                                                                                      | Why another module does not own it                                                                                      |
+| ----------------------------------------------- | ----------------------------------------------------- | -------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
 | OpenAI-compatible empty assistant compatibility | `ProviderTransform.message()` / `normalizeMessages()` | Convert accepted model history into Provider-valid wire prompt input | Existing branches already filter empty content and supply Tool-only text for this exact Provider package | MessageV2 owns model-neutral replay; SessionRetry owns retries; transport sees wire too late to preserve Tool semantics |
-| Empty-vs-non-empty reasoning distinction | Existing OpenAI-compatible filter predicate | Keep semantic Parts and discard Provider-empty Parts before lowering | The predicate already distinguishes empty text at the same seam | A new helper or config would duplicate a one-branch rule |
-| Retry artifact lifecycle | `SessionProcessor` / `SessionRetry` | Orchestrate attempts and partial Part lifetime | It owns retry state, but full cleanup semantics require a separate requirement and wider tests | It cannot normalize stored history or third-party/plugin producers |
+| Empty-vs-non-empty reasoning distinction        | Existing OpenAI-compatible filter predicate           | Keep semantic Parts and discard Provider-empty Parts before lowering | The predicate already distinguishes empty text at the same seam                                          | A new helper or config would duplicate a one-branch rule                                                                |
+| Retry artifact lifecycle                        | `SessionProcessor` / `SessionRetry`                   | Orchestrate attempts and partial Part lifetime                       | It owns retry state, but full cleanup semantics require a separate requirement and wider tests           | It cannot normalize stored history or third-party/plugin producers                                                      |
 
 The agreed public test seam is `ProviderTransform.message()`. The original
 feedback loop extends that seam through the real OpenAI-compatible serializer.
@@ -199,43 +204,43 @@ for this already-existing ordering; it does not add another production branch.
 
 ## 11. Secondary and Replacement Path Inventory
 
-| Path | Current or proposed | Classification | Produces success? | Decision-surface share | Disposition |
-| --- | --- | --- | --- | --- | --- |
-| OpenAI-compatible empty text/reasoning filtering | Current + one proposed branch | primary-contract branch | yes | 100% of new decision surface | extend in place |
-| Tool-call-only single-space insertion | Current | existing compatibility | yes | 0% new | preserve and regression-test interaction |
-| Interleaved `reasoning_content` lowering | Current | primary-contract branch | yes | 0% new | preserve |
-| DeepSeek required empty reasoning re-add after common filtering | Current | existing compatibility within primary contract | yes | 0% new | preserve and add regression test |
-| Retry Part cleanup | Rejected for this revision | separate orchestration concern | no path added | 0% | do not implement |
-| HTTP/fetch payload filtering | Rejected | forbidden downstream workaround | would synthesize success after invalid lowering | 0% | reject |
-| Config/feature flag | Rejected | forbidden alternate path | yes | 0% | reject |
+| Path                                                            | Current or proposed           | Classification                                 | Produces success?                               | Decision-surface share       | Disposition                              |
+| --------------------------------------------------------------- | ----------------------------- | ---------------------------------------------- | ----------------------------------------------- | ---------------------------- | ---------------------------------------- |
+| OpenAI-compatible empty text/reasoning filtering                | Current + one proposed branch | primary-contract branch                        | yes                                             | 100% of new decision surface | extend in place                          |
+| Tool-call-only single-space insertion                           | Current                       | existing compatibility                         | yes                                             | 0% new                       | preserve and regression-test interaction |
+| Interleaved `reasoning_content` lowering                        | Current                       | primary-contract branch                        | yes                                             | 0% new                       | preserve                                 |
+| DeepSeek required empty reasoning re-add after common filtering | Current                       | existing compatibility within primary contract | yes                                             | 0% new                       | preserve and add regression test         |
+| Retry Part cleanup                                              | Rejected for this revision    | separate orchestration concern                 | no path added                                   | 0%                           | do not implement                         |
+| HTTP/fetch payload filtering                                    | Rejected                      | forbidden downstream workaround                | would synthesize success after invalid lowering | 0%                           | reject                                   |
+| Config/feature flag                                             | Rejected                      | forbidden alternate path                       | yes                                             | 0%                           | reject                                   |
 
 New alternate success paths: zero. Diagnostic decision surface: zero. No
 fallback or rollback is introduced.
 
 ## 12. Workaround Deletion and Replacement
 
-| Existing workaround or duplicate | Why it existed | Why the approved route supersedes it | Delete or collapse location |
-| --- | --- | --- | --- |
-| None for empty reasoning-only OpenAI-compatible Message | Current code has no matching branch | Not applicable | Not applicable |
+| Existing workaround or duplicate                        | Why it existed                      | Why the approved route supersedes it | Delete or collapse location |
+| ------------------------------------------------------- | ----------------------------------- | ------------------------------------ | --------------------------- |
+| None for empty reasoning-only OpenAI-compatible Message | Current code has no matching branch | Not applicable                       | Not applicable              |
 
 The Tool-call single-space insertion is not superseded: Tool calls carry
 semantic linkage and cannot be dropped. The new branch composes with it.
 
 ## 13. Forward Traceability
 
-| Requirement or invariant | Production path | Planned file/change | Behavioral test |
-| --- | --- | --- | --- |
-| INV-01, INV-02 | OpenAI-compatible filter -> whole-Message removal | `packages/opencode/src/provider/transform.ts`: reject trimmed-empty reasoning Part in existing predicate | New red test: empty reasoning-only assistant returns no normalized Message |
-| INV-03 | Reasoning filter -> existing Tool-call space guard | No additional production concept | Extend existing empty-content/Tool test input with empty reasoning and keep expected space + Tool call |
-| INV-04 | Non-empty reasoning -> existing interleaved lowering | No additional production concept | New regression: non-empty reasoning survives as `reasoning_content` |
-| INV-05 | Existing Provider branches | No changes outside exact OpenAI-compatible predicate | Full `transform.test.ts` and package typecheck |
-| INV-06 | Planned 1 production + 1 test file and bounded diff | Diff audit | `git diff --stat`, changed-line and file classification |
-| INV-07 | Common filter -> existing DeepSeek re-add -> interleaved lowering | No additional production change; preserve current ordering | Extend existing DeepSeek behavior coverage with assistant text lacking explicit reasoning -> `reasoning_content:""` |
+| Requirement or invariant | Production path                                                   | Planned file/change                                                                                      | Behavioral test                                                                                                     |
+| ------------------------ | ----------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| INV-01, INV-02           | OpenAI-compatible filter -> whole-Message removal                 | `packages/opencode/src/provider/transform.ts`: reject trimmed-empty reasoning Part in existing predicate | New red test: empty reasoning-only assistant returns no normalized Message                                          |
+| INV-03                   | Reasoning filter -> existing Tool-call space guard                | No additional production concept                                                                         | Extend existing empty-content/Tool test input with empty reasoning and keep expected space + Tool call              |
+| INV-04                   | Non-empty reasoning -> existing interleaved lowering              | No additional production concept                                                                         | New regression: non-empty reasoning survives as `reasoning_content`                                                 |
+| INV-05                   | Existing Provider branches                                        | No changes outside exact OpenAI-compatible predicate                                                     | Full `transform.test.ts` and package typecheck                                                                      |
+| INV-06                   | Planned 1 production + 1 test file and bounded diff               | Diff audit                                                                                               | `git diff --stat`, changed-line and file classification                                                             |
+| INV-07                   | Common filter -> existing DeepSeek re-add -> interleaved lowering | No additional production change; preserve current ordering                                               | Extend existing DeepSeek behavior coverage with assistant text lacking explicit reasoning -> `reasoning_content:""` |
 
 ## 14. Reverse Traceability
 
-| Proposed production concept | Requirement ID | Evidence | Why existing logic cannot carry it |
-| --- | --- | --- | --- |
+| Proposed production concept                                               | Requirement ID | Evidence                                                      | Why existing logic cannot carry it                                                   |
+| ------------------------------------------------------------------------- | -------------- | ------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
 | One empty-reasoning predicate branch in existing OpenAI-compatible filter | INV-01, INV-02 | Exact position 842 replay, persisted Part, upstream PR #27914 | Existing predicate handles only `text`; `reasoning("")` survives until wire lowering |
 
 No helper, state, setting, cache, retry, adapter, dependency or public interface
@@ -243,23 +248,23 @@ is added.
 
 ## 15. File-Level Change Plan
 
-| File | Add / modify / delete | Exact responsibility of the change | Expected line delta |
-| --- | --- | --- | --- |
-| `packages/opencode/src/provider/transform.ts` | modify | Add empty reasoning classification to the existing OpenAI-compatible content predicate and nearby rationale comment | 3-5 lines |
-| `packages/opencode/test/provider/transform.test.ts` | modify | Use real Kimi reasoning/interleaved capability; add empty reasoning red test and non-empty reasoning compatibility regression; compose empty reasoning with existing Tool test; reuse the existing DeepSeek fixture to lock synthesized empty `reasoning_content` | 35-55 lines |
-| `docs/plans/kimi-empty-reasoning-part-replay-fix.md` | add/report | Canonical plan, audit and implementation evidence | report-only; excluded from user's code limit |
+| File                                                 | Add / modify / delete | Exact responsibility of the change                                                                                                                                                                                                                                | Expected line delta                          |
+| ---------------------------------------------------- | --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------- |
+| `packages/opencode/src/provider/transform.ts`        | modify                | Add empty reasoning classification to the existing OpenAI-compatible content predicate and nearby rationale comment                                                                                                                                               | 3-5 lines                                    |
+| `packages/opencode/test/provider/transform.test.ts`  | modify                | Use real Kimi reasoning/interleaved capability; add empty reasoning red test and non-empty reasoning compatibility regression; compose empty reasoning with existing Tool test; reuse the existing DeepSeek fixture to lock synthesized empty `reasoning_content` | 35-55 lines                                  |
+| `docs/plans/kimi-empty-reasoning-part-replay-fix.md` | add/report            | Canonical plan, audit and implementation evidence                                                                                                                                                                                                                 | report-only; excluded from user's code limit |
 
 Production files: 1 of maximum 4. Test files: 1 of maximum 4. No generated
 files, migration, configuration or dependency changes.
 
 ## 16. TDD Behavior Slices
 
-| Order | Red behavior | Why current code fails | Minimal green behavior | Regression protected |
-| --- | --- | --- | --- | --- |
-| 1 | `ProviderTransform.message()` receives Kimi empty reasoning-only assistant and should return no Message | Current OpenAI-compatible predicate preserves reasoning; interleaved lowering returns `content:[]` | Add the one reasoning predicate branch | Exact orphan assistant that becomes wire position 842 |
-| 2 | Existing Tool-call test includes an empty reasoning sibling and must still return one-space text + Tool call | Interaction is reachable; current and intended behavior should remain green | No new production behavior beyond Slice 1 | Tool call/result lineage and #33899 compatibility |
-| 3 | Non-empty Kimi reasoning must appear in `providerOptions.openaiCompatible.reasoning_content` | New empty/non-empty distinction could regress if broadened | No new production behavior beyond Slice 1 | Kimi reasoning replay compatibility |
-| 4 | DeepSeek assistant text without explicit reasoning must still produce `reasoning_content:""` | Existing test covers only explicit non-empty reasoning; implementation audit requires evidence for the later DeepSeek re-add ordering | Reuse the existing DeepSeek test fixture; no production change | Existing DeepSeek-required reasoning compatibility |
+| Order | Red behavior                                                                                                 | Why current code fails                                                                                                                | Minimal green behavior                                         | Regression protected                                  |
+| ----- | ------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------- | ----------------------------------------------------- |
+| 1     | `ProviderTransform.message()` receives Kimi empty reasoning-only assistant and should return no Message      | Current OpenAI-compatible predicate preserves reasoning; interleaved lowering returns `content:[]`                                    | Add the one reasoning predicate branch                         | Exact orphan assistant that becomes wire position 842 |
+| 2     | Existing Tool-call test includes an empty reasoning sibling and must still return one-space text + Tool call | Interaction is reachable; current and intended behavior should remain green                                                           | No new production behavior beyond Slice 1                      | Tool call/result lineage and #33899 compatibility     |
+| 3     | Non-empty Kimi reasoning must appear in `providerOptions.openaiCompatible.reasoning_content`                 | New empty/non-empty distinction could regress if broadened                                                                            | No new production behavior beyond Slice 1                      | Kimi reasoning replay compatibility                   |
+| 4     | DeepSeek assistant text without explicit reasoning must still produce `reasoning_content:""`                 | Existing test covers only explicit non-empty reasoning; implementation audit requires evidence for the later DeepSeek re-add ordering | Reuse the existing DeepSeek test fixture; no production change | Existing DeepSeek-required reasoning compatibility    |
 
 Slice 1 executes red -> minimal green. Slices 2 and 3 are focused regression
 checks at the same public seam after the semantic branch exists; they do not
@@ -271,10 +276,10 @@ source text, or assert call counts.
 
 ## 17. Chinese Comment Budget
 
-| Metric | Estimate | Method |
-| --- | --- | --- |
-| Effective changed code lines `E` | 32-45 | One production condition plus focused Kimi and DeepSeek test setup/assertions; excludes imports, formatting and report |
-| Required Chinese explanatory comments `C` | 5-7 minimum | `ceil(E * 0.15)` at the upper estimate is 7 |
+| Metric                                    | Estimate    | Method                                                                                                                 |
+| ----------------------------------------- | ----------- | ---------------------------------------------------------------------------------------------------------------------- |
+| Effective changed code lines `E`          | 32-45       | One production condition plus focused Kimi and DeepSeek test setup/assertions; excludes imports, formatting and report |
+| Required Chinese explanatory comments `C` | 5-7 minimum | `ceil(E * 0.15)` at the upper estimate is 7                                                                            |
 
 Planned qualifying Chinese explanations:
 
@@ -294,29 +299,29 @@ required minimum. Comment text that merely restates code will not count.
 
 ## 18. Verification
 
-| Command | Working directory | Evidence produced |
-| --- | --- | --- |
-| `bun test test/provider/transform.test.ts -t "openai-compatible non-empty assistant content"` | `packages/opencode` | Narrow red/green and compatibility regression at the agreed seam |
-| `bun test test/provider/transform.test.ts -t "DeepSeek reasoning content"` | `packages/opencode` | Existing DeepSeek branch still emits required empty `reasoning_content` when explicit reasoning is absent |
-| `bun test test/provider/transform.test.ts` | `packages/opencode` | Full Provider transform regression suite |
-| `bun typecheck` | `packages/opencode` | Package type safety and model fixture validity |
-| Minimal `bun -e` feedback command from Section 8 | repository root | Real transform + OpenAI-compatible serializer no longer emits empty assistant |
-| Historical read-only position-842 replay with `PRAGMA query_only=ON` | repository root | Original 845-message production payload no longer contains an invalid empty assistant; position 842 becomes valid Tool-call assistant |
-| `git diff --check` | repository root | Whitespace integrity |
-| `git diff --stat -- <goal paths>` and `git diff --numstat -- <goal paths>` | repository root | File and line budgets |
+| Command                                                                                       | Working directory   | Evidence produced                                                                                                                     |
+| --------------------------------------------------------------------------------------------- | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `bun test test/provider/transform.test.ts -t "openai-compatible non-empty assistant content"` | `packages/opencode` | Narrow red/green and compatibility regression at the agreed seam                                                                      |
+| `bun test test/provider/transform.test.ts -t "DeepSeek reasoning content"`                    | `packages/opencode` | Existing DeepSeek branch still emits required empty `reasoning_content` when explicit reasoning is absent                             |
+| `bun test test/provider/transform.test.ts`                                                    | `packages/opencode` | Full Provider transform regression suite                                                                                              |
+| `bun typecheck`                                                                               | `packages/opencode` | Package type safety and model fixture validity                                                                                        |
+| Minimal `bun -e` feedback command from Section 8                                              | repository root     | Real transform + OpenAI-compatible serializer no longer emits empty assistant                                                         |
+| Historical read-only position-842 replay with `PRAGMA query_only=ON`                          | repository root     | Original 845-message production payload no longer contains an invalid empty assistant; position 842 becomes valid Tool-call assistant |
+| `git diff --check`                                                                            | repository root     | Whitespace integrity                                                                                                                  |
+| `git diff --stat -- <goal paths>` and `git diff --numstat -- <goal paths>`                    | repository root     | File and line budgets                                                                                                                 |
 
 Tests and typecheck are never run from repository root.
 
 ## 19. Diff Budget
 
-| Metric | Estimate | Justification |
-| --- | --- | --- |
-| Files added | 1 report | This canonical plan only |
-| Files modified | 2 | One production file and one test file |
-| Files deleted | 0 | No obsolete file |
-| Production lines | 3-5 | One predicate condition plus necessary nearby rationale |
-| Test lines | 35-55 | One red test, Kimi compatibility checks, one DeepSeek ordering regression and qualifying comments |
-| Generated lines | 0 | No generation needed |
+| Metric           | Estimate | Justification                                                                                     |
+| ---------------- | -------- | ------------------------------------------------------------------------------------------------- |
+| Files added      | 1 report | This canonical plan only                                                                          |
+| Files modified   | 2        | One production file and one test file                                                             |
+| Files deleted    | 0        | No obsolete file                                                                                  |
+| Production lines | 3-5      | One predicate condition plus necessary nearby rationale                                           |
+| Test lines       | 35-55    | One red test, Kimi compatibility checks, one DeepSeek ordering regression and qualifying comments |
+| Generated lines  | 0        | No generation needed                                                                              |
 
 Estimated code change excluding report: under 45 lines, below the 600-line
 contract. Production file count 1/4 and test file count 1/4.
@@ -373,11 +378,11 @@ The independent auditor must:
 
 ## 22. Plan Audit Record
 
-| Round | Audited revision | Full scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | R1 | yes | No blocking findings. | Historical replay command not concretely persisted; verify `trim()` preserves semantic reasoning. | APPROVE | `ses_0812321a0ffelFZslKZQZaeNIl` |
-| 2 | R2 | yes | B-01: canonical plan and current target implementation state had drifted. | Historical replay command is not persisted; whitespace-only reasoning needs implementation evidence. | BLOCK | `ses_0810ed269ffeHzvTxlHViXMuhG` |
-| 3 | R3 | yes | No blocking findings. | Historical replay command not persisted; audit-mode wording and old embedded estimate are administrative only. | APPROVE | `ses_0810306e4ffex63keDujOL3BhT` |
+| Round | Audited revision | Full scope? | Blocking findings                                                         | Non-blocking findings                                                                                          | Result  | Invocation reference             |
+| ----- | ---------------- | ----------- | ------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- | ------- | -------------------------------- |
+| 1     | R1               | yes         | No blocking findings.                                                     | Historical replay command not concretely persisted; verify `trim()` preserves semantic reasoning.              | APPROVE | `ses_0812321a0ffelFZslKZQZaeNIl` |
+| 2     | R2               | yes         | B-01: canonical plan and current target implementation state had drifted. | Historical replay command is not persisted; whitespace-only reasoning needs implementation evidence.           | BLOCK   | `ses_0810ed269ffeHzvTxlHViXMuhG` |
+| 3     | R3               | yes         | No blocking findings.                                                     | Historical replay command not persisted; audit-mode wording and old embedded estimate are administrative only. | APPROVE | `ses_0810306e4ffex63keDujOL3BhT` |
 
 ### Round 1 Verbatim Verdict
 
@@ -650,11 +655,11 @@ pending independent full-scope implementation audit.
 
 ### Actual Files and Diff
 
-| Path | Classification | Actual diff | Necessity |
-| --- | --- | --- | --- |
-| `packages/opencode/src/provider/transform.ts` | production | 3 additions, 0 deletions | Add the single approved empty-reasoning predicate at the first-divergence owner. |
-| `packages/opencode/test/provider/transform.test.ts` | test | 54 additions, 5 deletions | Cover Kimi empty/non-empty reasoning, Tool interaction, real Kimi capability and DeepSeek required-empty compatibility. |
-| `docs/plans/kimi-empty-reasoning-part-replay-fix.md` | report | canonical plan and audit evidence; excluded from code limit | Sole plan, audit and implementation record. |
+| Path                                                 | Classification | Actual diff                                                 | Necessity                                                                                                               |
+| ---------------------------------------------------- | -------------- | ----------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| `packages/opencode/src/provider/transform.ts`        | production     | 3 additions, 0 deletions                                    | Add the single approved empty-reasoning predicate at the first-divergence owner.                                        |
+| `packages/opencode/test/provider/transform.test.ts`  | test           | 54 additions, 5 deletions                                   | Cover Kimi empty/non-empty reasoning, Tool interaction, real Kimi capability and DeepSeek required-empty compatibility. |
+| `docs/plans/kimi-empty-reasoning-part-replay-fix.md` | report         | canonical plan and audit evidence; excluded from code limit | Sole plan, audit and implementation record.                                                                             |
 
 Production files: 1/4. Test files: 1/4. Raw code churn: 62 lines,
 well below 600. No generated, configuration, migration, dependency or public
@@ -662,27 +667,27 @@ interface files changed.
 
 ### Red-Green Test Evidence
 
-| Phase | Command and working directory | Result |
-| --- | --- | --- |
-| RED | `bun test test/provider/transform.test.ts -t "drops assistant messages whose only part is empty reasoning"` from `packages/opencode` | `0 pass, 1 fail`; expected `[]`, received one assistant with `content:[]` and `reasoning_content:""`. The failure matched the missing behavior. |
-| GREEN | Same command after the approved predicate change | `1 pass, 0 fail, 1 expect()` |
-| Tool regression | `bun test test/provider/transform.test.ts -t "filters empty text parts and prepends space to tool-call-only assistant"` | `1 pass, 0 fail, 4 expect()` |
-| Non-empty reasoning regression | `bun test test/provider/transform.test.ts -t "preserves whitespace-surrounded non-empty reasoning"` | `1 pass, 0 fail, 1 expect()` |
-| DeepSeek regression | `bun test test/provider/transform.test.ts -t "DeepSeek preserves explicit and required empty reasoning_content"` | `1 pass, 0 fail, 5 expect()`; text-only assistant retained `reasoning_content:""`. |
+| Phase                          | Command and working directory                                                                                                        | Result                                                                                                                                          |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| RED                            | `bun test test/provider/transform.test.ts -t "drops assistant messages whose only part is empty reasoning"` from `packages/opencode` | `0 pass, 1 fail`; expected `[]`, received one assistant with `content:[]` and `reasoning_content:""`. The failure matched the missing behavior. |
+| GREEN                          | Same command after the approved predicate change                                                                                     | `1 pass, 0 fail, 1 expect()`                                                                                                                    |
+| Tool regression                | `bun test test/provider/transform.test.ts -t "filters empty text parts and prepends space to tool-call-only assistant"`              | `1 pass, 0 fail, 4 expect()`                                                                                                                    |
+| Non-empty reasoning regression | `bun test test/provider/transform.test.ts -t "preserves whitespace-surrounded non-empty reasoning"`                                  | `1 pass, 0 fail, 1 expect()`                                                                                                                    |
+| DeepSeek regression            | `bun test test/provider/transform.test.ts -t "DeepSeek preserves explicit and required empty reasoning_content"`                     | `1 pass, 0 fail, 5 expect()`; text-only assistant retained `reasoning_content:""`.                                                              |
 
 ### Verification Commands and Results
 
-| Command | Working directory | Result |
-| --- | --- | --- |
-| `bun test test/provider/transform.test.ts -t "openai-compatible non-empty assistant content"` | `packages/opencode` | `6 pass, 0 fail, 15 expect()` |
-| `bun test test/provider/transform.test.ts -t "DeepSeek reasoning content"` | `packages/opencode` | `2 pass, 0 fail, 7 expect()` |
-| `bun test test/provider/transform.test.ts` | `packages/opencode` | `233 pass, 0 fail, 400 expect()` |
-| `bun typecheck` | `packages/opencode` | Final retry passed: `tsgo --noEmit`, exit 0. An earlier run was transiently blocked by unrelated concurrent `prompt/index.tsx:1388` work; no goal file was changed to make it pass. |
-| Minimal Section 8 `bun -e` transform + real serializer loop | repository root | `{"verdict":"GREEN","wire":[]}`, exit 0 |
-| Historical read-only database replay using `bun:sqlite`, `{readonly:true}`, `PRAGMA query_only=ON`, `filterCompacted`, real `toModelMessages`, transform and serializer | repository root | `history:433`, `modelMessages:792`, `totalWithSystem:793`, `wireTotal:844`, `invalidEmpty:[]`; position 842 is assistant with `contentLength:1`, one Tool call and `reasoningLength:772`. |
-| `git diff --check -- <goal paths>` | repository root | exit 0 |
-| `git diff --exit-code -- packages/opencode/src/session/processor.ts packages/opencode/src/session/message-v2.ts packages/opencode/src/session/llm.ts` | repository root | exit 0; rejected retry/session paths remain unchanged. |
-| PowerShell classification over `git diff --unified=0 -- <two code paths>` | repository root | `RawChanged:62`, `Nonblank:56`, `ImportOnly:1`, `Effective:55`, `AddedComments:9`. |
+| Command                                                                                                                                                                 | Working directory   | Result                                                                                                                                                                                    |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `bun test test/provider/transform.test.ts -t "openai-compatible non-empty assistant content"`                                                                           | `packages/opencode` | `6 pass, 0 fail, 15 expect()`                                                                                                                                                             |
+| `bun test test/provider/transform.test.ts -t "DeepSeek reasoning content"`                                                                                              | `packages/opencode` | `2 pass, 0 fail, 7 expect()`                                                                                                                                                              |
+| `bun test test/provider/transform.test.ts`                                                                                                                              | `packages/opencode` | `233 pass, 0 fail, 400 expect()`                                                                                                                                                          |
+| `bun typecheck`                                                                                                                                                         | `packages/opencode` | Final retry passed: `tsgo --noEmit`, exit 0. An earlier run was transiently blocked by unrelated concurrent `prompt/index.tsx:1388` work; no goal file was changed to make it pass.       |
+| Minimal Section 8 `bun -e` transform + real serializer loop                                                                                                             | repository root     | `{"verdict":"GREEN","wire":[]}`, exit 0                                                                                                                                                   |
+| Historical read-only database replay using `bun:sqlite`, `{readonly:true}`, `PRAGMA query_only=ON`, `filterCompacted`, real `toModelMessages`, transform and serializer | repository root     | `history:433`, `modelMessages:792`, `totalWithSystem:793`, `wireTotal:844`, `invalidEmpty:[]`; position 842 is assistant with `contentLength:1`, one Tool call and `reasoningLength:772`. |
+| `git diff --check -- <goal paths>`                                                                                                                                      | repository root     | exit 0                                                                                                                                                                                    |
+| `git diff --exit-code -- packages/opencode/src/session/processor.ts packages/opencode/src/session/message-v2.ts packages/opencode/src/session/llm.ts`                   | repository root     | exit 0; rejected retry/session paths remain unchanged.                                                                                                                                    |
+| PowerShell classification over `git diff --unified=0 -- <two code paths>`                                                                                               | repository root     | `RawChanged:62`, `Nonblank:56`, `ImportOnly:1`, `Effective:55`, `AddedComments:9`.                                                                                                        |
 
 ### Original Feedback-Loop Result
 
@@ -696,26 +701,26 @@ assistant rather than the orphan empty-reasoning assistant.
 
 ### Actual Secondary and Replacement Path Inventory
 
-| Path | Actual disposition | Verdict |
-| --- | --- | --- |
-| OpenAI-compatible empty Part normalization | One approved predicate added in place | Authoritative primary path |
-| Whole-Message removal | Existing branch reused unchanged | Supported primary-contract behavior |
-| Tool-call single-space insertion | Existing behavior unchanged and interaction-tested | Existing shipped compatibility |
-| DeepSeek required empty reasoning | Existing later re-add unchanged and regression-tested | Existing provider compatibility within primary path |
-| Interleaved lowering and real serializer | Existing path unchanged and exercised | Supported primary-contract behavior |
-| Retry cleanup, HTTP filtering, feature flag, alternate serializer | Not added | No fallback or replacement path |
+| Path                                                              | Actual disposition                                    | Verdict                                             |
+| ----------------------------------------------------------------- | ----------------------------------------------------- | --------------------------------------------------- |
+| OpenAI-compatible empty Part normalization                        | One approved predicate added in place                 | Authoritative primary path                          |
+| Whole-Message removal                                             | Existing branch reused unchanged                      | Supported primary-contract behavior                 |
+| Tool-call single-space insertion                                  | Existing behavior unchanged and interaction-tested    | Existing shipped compatibility                      |
+| DeepSeek required empty reasoning                                 | Existing later re-add unchanged and regression-tested | Existing provider compatibility within primary path |
+| Interleaved lowering and real serializer                          | Existing path unchanged and exercised                 | Supported primary-contract behavior                 |
+| Retry cleanup, HTTP filtering, feature flag, alternate serializer | Not added                                             | No fallback or replacement path                     |
 
 New alternate success paths: zero. Diagnostic decision surface: zero. No
 workaround became obsolete, so none was deleted.
 
 ### Chinese Comment Calculation
 
-| Metric | Actual | Exclusions and evidence |
-| --- | --- | --- |
-| Effective changed code lines `E` | 41 | Independent audit count: each substantive added or modified code line once; excludes import-only, blanks, pure comments and replacement deletion sides. No formatter-only, generated or pure-move lines. The conservative churn count remains 55 and also passes. |
-| Qualifying Chinese comment lines `C` | 9 | 2 production rationale; 1 Kimi capability rationale; 1 Tool-lineage interaction; 2 original-failure test intent; 2 non-empty reasoning intent; 1 DeepSeek ordering contract. |
-| Ratio `C / E` | 21.95% | `9 / 41` |
-| Required minimum `C` | 7 | `max(1, ceil(41 * 0.15)) = 7`; actual 9 passes. |
+| Metric                               | Actual | Exclusions and evidence                                                                                                                                                                                                                                           |
+| ------------------------------------ | ------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Effective changed code lines `E`     | 41     | Independent audit count: each substantive added or modified code line once; excludes import-only, blanks, pure comments and replacement deletion sides. No formatter-only, generated or pure-move lines. The conservative churn count remains 55 and also passes. |
+| Qualifying Chinese comment lines `C` | 9      | 2 production rationale; 1 Kimi capability rationale; 1 Tool-lineage interaction; 2 original-failure test intent; 2 non-empty reasoning intent; 1 DeepSeek ordering contract.                                                                                      |
+| Ratio `C / E`                        | 21.95% | `9 / 41`                                                                                                                                                                                                                                                          |
+| Required minimum `C`                 | 7      | `max(1, ceil(41 * 0.15)) = 7`; actual 9 passes.                                                                                                                                                                                                                   |
 
 Representative comments explain why filtering must precede interleaved
 lowering, why Tool calls remain semantic, why semantic reasoning retains its
@@ -732,10 +737,10 @@ this plan and commit path.
 
 ## 24. Implementation Audit Record
 
-| Round | Plan revision | Full original scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | R1 | yes | B-01: broad OpenAI-compatible empty-reasoning predicate was not reconciled with the existing DeepSeek-required empty reasoning contract. | Implementation evidence remained pending; broad whitespace handling and serializer-level coverage needed verification. | BLOCK | `ses_0811797caffeFfTKppNME2ghT1` |
-| 2 | R3 | yes | No blocking findings. | Historical replay command is not fixed; independent E count is 41; AI SDK issue scope is narrower than local Kimi evidence. | APPROVE | `ses_080f3c9d1ffet2prNp6NccsWqH` |
+| Round | Plan revision | Full original scope? | Blocking findings                                                                                                                        | Non-blocking findings                                                                                                       | Result  | Invocation reference             |
+| ----- | ------------- | -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- | ------- | -------------------------------- |
+| 1     | R1            | yes                  | B-01: broad OpenAI-compatible empty-reasoning predicate was not reconciled with the existing DeepSeek-required empty reasoning contract. | Implementation evidence remained pending; broad whitespace handling and serializer-level coverage needed verification.      | BLOCK   | `ses_0811797caffeFfTKppNME2ghT1` |
+| 2     | R3            | yes                  | No blocking findings.                                                                                                                    | Historical replay command is not fixed; independent E count is 41; AI SDK issue scope is narrower than local Kimi evidence. | APPROVE | `ses_080f3c9d1ffet2prNp6NccsWqH` |
 
 ### Round 1 Verbatim Verdict
 

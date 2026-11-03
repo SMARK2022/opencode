@@ -63,22 +63,41 @@ test("compaction describes tool media without embedding base64", () => {
   const text = "x".repeat(4_006) + "RECOVERY_TAIL"
   const created = DateTime.makeUnsafe(0)
   const shell = SessionMessage.Shell.make({
-    id: SessionMessage.ID.make("msg_notice_shell"), type: "shell", callID: "shell-notice",
-    command: "pwd", output: text, time: { created, completed: created },
+    id: SessionMessage.ID.make("msg_notice_shell"),
+    type: "shell",
+    callID: "shell-notice",
+    command: "pwd",
+    output: text,
+    time: { created, completed: created },
   })
   const assistant = SessionMessage.Assistant.make({
-    id: SessionMessage.ID.make("msg_notice_assistant"), type: "assistant", agent: "build",
+    id: SessionMessage.ID.make("msg_notice_assistant"),
+    type: "assistant",
+    agent: "build",
     model: { id: ModelV2.ID.make("model"), providerID: ProviderV2.ID.make("provider") },
-    content: [SessionMessage.AssistantTool.make({
-      type: "tool", id: "notice-tool", name: "read", time: { created, completed: created },
-      state: SessionMessage.ToolStateCompleted.make({ status: "completed", input: {}, structured: {}, content: [{ type: "text", text }], outputPaths: ["/cache/middle-output"] }),
-    })],
+    content: [
+      SessionMessage.AssistantTool.make({
+        type: "tool",
+        id: "notice-tool",
+        name: "read",
+        time: { created, completed: created },
+        state: SessionMessage.ToolStateCompleted.make({
+          status: "completed",
+          input: {},
+          structured: {},
+          content: [{ type: "text", text }],
+          outputPaths: ["/cache/middle-output"],
+        }),
+      }),
+    ],
     time: { created, completed: created },
   })
   for (const message of [shell, assistant]) {
     const result = SessionCompaction.serialize(message)
     // 实际serializer保留两端和精确省略数，不能用短于预算的输出充当截断回归。
-    expect(result).toContain(`${"x".repeat(2_000)}\n[... compaction truncated 19 chars ...]\n${"x".repeat(1_987)}RECOVERY_TAIL`)
+    expect(result).toContain(
+      `${"x".repeat(2_000)}\n[... compaction truncated 19 chars ...]\n${"x".repeat(1_987)}RECOVERY_TAIL`,
+    )
     if (message.type === "assistant") expect(result).toContain("[Full tool output]: /cache/middle-output")
     expect(result).not.toContain("[truncated]")
     expect(result).not.toContain("compaction_cleared")
@@ -89,66 +108,99 @@ test("compaction describes tool media without embedding base64", () => {
 
 test("file handoff compares real disk versions before applying its bounded evidence budget", async () => {
   await using tmp = await tmpdir()
-  await Effect.runPromise(Effect.gen(function* () {
-    const fs = yield* FSUtil.Service
-    const receipts: { path: string; canonicalPath: string; start: number; end: number; total: number; modified: string; size: number; modifiedMs?: number }[] = []
-    for (const [index, name] of ["unchanged file.ts", "changed.ts", "deleted.ts", "missing-metadata.ts"].entries()) {
-      const file = path.join(tmp.path, name)
-      const time = new Date(2026, 4, 18, index + 1)
-      yield* fs.writeFileString(file, "x".repeat(20))
-      yield* fs.utimes(file, time, time)
-      receipts.push({ path: file, canonicalPath: file, start: 1, end: 10, total: 20, modified: "previous read", size: 20,
-        ...(index === 3 ? {} : { modifiedMs: time.getTime() }) })
-    }
-    // 同一路径两次读取合并范围；纯写事件从来不是文件失效的事实来源。
-    receipts.push({ ...receipts[0], start: 11, end: 20 })
-    const changed = new Date(2026, 4, 18, 5)
-    yield* fs.writeFileString(receipts[1].path, "changed on disk")
-    yield* fs.utimes(receipts[1].path, changed, changed)
-    yield* fs.remove(receipts[2].path)
-    const text = yield* FileEvidence.render(receipts, fs, tmp.path)
-    expect(text).toContain("| unchanged file.ts | 1-20 | 20 | 2026-05-18 01:00:00 | current |")
-    expect(text).toContain("| changed.ts | 1-10 | 20 | 2026-05-18 05:00:00 | stale |")
-    expect(text).toContain("| deleted.ts | 1-10 | 20 | - | deleted |")
-    expect(text).toContain("| missing-metadata.ts | 1-10 | 20 | 2026-05-18 04:00:00 | stale |")
-    expect(text).toContain("Treat stale evidence as advisory only.")
-    const inspected: string[] = []
-    const observed = { ...fs, stat: (file: string) => Effect.sync(() => inspected.push(file)).pipe(Effect.andThen(fs.stat(file))) }
-    // 裁剪发生在stat前，未展示的第二十一条记录不访问磁盘。
-    const many = Array.from({ length: 21 }, (_, index) => ({ ...receipts[0], path: path.join(tmp.path, `file-${index}.ts`), canonicalPath: path.join(tmp.path, `file-${index}.ts`) }))
-    const bounded = yield* FileEvidence.render(many, observed, tmp.path)
-    expect(inspected).toHaveLength(20)
-    expect(inspected).not.toContain(many[0].canonicalPath)
-    expect(bounded).toContain("Omitted: 1 inspected files due to evidence budget.")
-    expect(bounded).not.toContain("| file-0.ts |")
-    const untouched = inspected.length
-    expect(yield* FileEvidence.render([{ ...receipts[0], stub: true }, { malformed: true }], observed, tmp.path)).toBeUndefined()
-    expect(inspected).toHaveLength(untouched)
-    // 命令只作为已完成凭证进入共享渲染器，不能执行其管道或环境赋值。
-    const commands = Array.from({ length: 12 }, (_, index) => ({ command: `node --check file-${index}.js`, exit: 0 }))
-    const commandHandoff = yield* FileEvidence.render([], observed, tmp.path, {
-      commands: [...commands,
-        { command: "ENV=changed node --check file-4.js", exit: 1 },
-        { command: "TOKEN=sk-secret node --check piped.js | tee output.txt" },
-      ], directory: path.join(tmp.path, "src"), compactionCount: 2,
-    })
-    expect(commandHandoff).toContain("### Executed Commands")
-    expect(commandHandoff).toContain("| ENV=changed node --check file-4.js | src | 1 |")
-    expect(commandHandoff).toContain("| TOKEN=[redacted] node --check piped.js \\| tee output.txt | src | unknown |")
-    expect(commandHandoff).not.toContain("sk-secret")
-    expect(commandHandoff).not.toContain("| node --check file-0.js |")
-    expect(commandHandoff).toContain("Omitted: 3 executed commands due to evidence budget.")
-    expect(commandHandoff).toContain("This is compaction #2.")
-    expect(inspected).toHaveLength(untouched)
-    // 同一共享交接器保留partial空结果；完整空结果仍是确定性零匹配且不读盘。
-    const searchHandoff = yield* FileEvidence.render([], observed, tmp.path, { searches: [
-      { tool: "grep", pattern: "needle", path: ".", matches: 0, partial: true },
-      { tool: "glob", pattern: "*.missing", path: ".", matches: 0 },
-    ] })
-    expect(searchHandoff).toContain("| grep | needle | . | 0 (incomplete) |")
-    expect(searchHandoff).toContain("| glob | *.missing | . | 0 |")
-    expect(inspected).toHaveLength(untouched)
-  }).pipe(Effect.provide(LayerNode.compile(FSUtil.node))))
+  await Effect.runPromise(
+    Effect.gen(function* () {
+      const fs = yield* FSUtil.Service
+      const receipts: {
+        path: string
+        canonicalPath: string
+        start: number
+        end: number
+        total: number
+        modified: string
+        size: number
+        modifiedMs?: number
+      }[] = []
+      for (const [index, name] of ["unchanged file.ts", "changed.ts", "deleted.ts", "missing-metadata.ts"].entries()) {
+        const file = path.join(tmp.path, name)
+        const time = new Date(2026, 4, 18, index + 1)
+        yield* fs.writeFileString(file, "x".repeat(20))
+        yield* fs.utimes(file, time, time)
+        receipts.push({
+          path: file,
+          canonicalPath: file,
+          start: 1,
+          end: 10,
+          total: 20,
+          modified: "previous read",
+          size: 20,
+          ...(index === 3 ? {} : { modifiedMs: time.getTime() }),
+        })
+      }
+      // 同一路径两次读取合并范围；纯写事件从来不是文件失效的事实来源。
+      receipts.push({ ...receipts[0], start: 11, end: 20 })
+      const changed = new Date(2026, 4, 18, 5)
+      yield* fs.writeFileString(receipts[1].path, "changed on disk")
+      yield* fs.utimes(receipts[1].path, changed, changed)
+      yield* fs.remove(receipts[2].path)
+      const text = yield* FileEvidence.render(receipts, fs, tmp.path)
+      expect(text).toContain("| unchanged file.ts | 1-20 | 20 | 2026-05-18 01:00:00 | current |")
+      expect(text).toContain("| changed.ts | 1-10 | 20 | 2026-05-18 05:00:00 | stale |")
+      expect(text).toContain("| deleted.ts | 1-10 | 20 | - | deleted |")
+      expect(text).toContain("| missing-metadata.ts | 1-10 | 20 | 2026-05-18 04:00:00 | stale |")
+      expect(text).toContain("Treat stale evidence as advisory only.")
+      const inspected: string[] = []
+      const observed = {
+        ...fs,
+        stat: (file: string) => Effect.sync(() => inspected.push(file)).pipe(Effect.andThen(fs.stat(file))),
+      }
+      // 裁剪发生在stat前，未展示的第二十一条记录不访问磁盘。
+      const many = Array.from({ length: 21 }, (_, index) => ({
+        ...receipts[0],
+        path: path.join(tmp.path, `file-${index}.ts`),
+        canonicalPath: path.join(tmp.path, `file-${index}.ts`),
+      }))
+      const bounded = yield* FileEvidence.render(many, observed, tmp.path)
+      expect(inspected).toHaveLength(20)
+      expect(inspected).not.toContain(many[0].canonicalPath)
+      expect(bounded).toContain("Omitted: 1 inspected files due to evidence budget.")
+      expect(bounded).not.toContain("| file-0.ts |")
+      const untouched = inspected.length
+      expect(
+        yield* FileEvidence.render([{ ...receipts[0], stub: true }, { malformed: true }], observed, tmp.path),
+      ).toBeUndefined()
+      expect(inspected).toHaveLength(untouched)
+      // 命令只作为已完成凭证进入共享渲染器，不能执行其管道或环境赋值。
+      const commands = Array.from({ length: 12 }, (_, index) => ({ command: `node --check file-${index}.js`, exit: 0 }))
+      const commandHandoff = yield* FileEvidence.render([], observed, tmp.path, {
+        commands: [
+          ...commands,
+          { command: "ENV=changed node --check file-4.js", exit: 1 },
+          { command: "TOKEN=sk-secret node --check piped.js | tee output.txt" },
+        ],
+        directory: path.join(tmp.path, "src"),
+        compactionCount: 2,
+      })
+      expect(commandHandoff).toContain("### Executed Commands")
+      expect(commandHandoff).toContain("| ENV=changed node --check file-4.js | src | 1 |")
+      expect(commandHandoff).toContain("| TOKEN=[redacted] node --check piped.js \\| tee output.txt | src | unknown |")
+      expect(commandHandoff).not.toContain("sk-secret")
+      expect(commandHandoff).not.toContain("| node --check file-0.js |")
+      expect(commandHandoff).toContain("Omitted: 3 executed commands due to evidence budget.")
+      expect(commandHandoff).toContain("This is compaction #2.")
+      expect(inspected).toHaveLength(untouched)
+      // 同一共享交接器保留partial空结果；完整空结果仍是确定性零匹配且不读盘。
+      const searchHandoff = yield* FileEvidence.render([], observed, tmp.path, {
+        searches: [
+          { tool: "grep", pattern: "needle", path: ".", matches: 0, partial: true },
+          { tool: "glob", pattern: "*.missing", path: ".", matches: 0 },
+        ],
+      })
+      expect(searchHandoff).toContain("| grep | needle | . | 0 (incomplete) |")
+      expect(searchHandoff).toContain("| glob | *.missing | . | 0 |")
+      expect(inspected).toHaveLength(untouched)
+    }).pipe(Effect.provide(LayerNode.compile(FSUtil.node))),
+  )
 })
 
 test("recent user memento budgets the full envelope and preserves newest literal instructions", () => {
@@ -159,8 +211,10 @@ test("recent user memento budgets the full envelope and preserves newest literal
   const selected = SessionMemento.collect(messages, 400)
   const replay = SessionMemento.format(selected)
   // 最新优先采集、最终原序；超长的较早指令只保留前缀并明确标记预算截断。
-  expect(selected.map(message => message.id)).toEqual(["msg_old", "msg_latest"])
-  expect(replay).toStartWith("<recent-user-messages>\nRecent user instructions preserved verbatim for continuity. They may overlap with the retained transcript tail.")
+  expect(selected.map((message) => message.id)).toEqual(["msg_old", "msg_latest"])
+  expect(replay).toStartWith(
+    "<recent-user-messages>\nRecent user instructions preserved verbatim for continuity. They may overlap with the retained transcript tail.",
+  )
   expect(replay).toContain('最新原话\n"exact"')
   expect(replay).toContain('id="msg_old" truncated="true"')
   expect(replay).toContain("old prefix")

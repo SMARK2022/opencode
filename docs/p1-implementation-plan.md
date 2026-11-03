@@ -1,7 +1,7 @@
 # P1 改造方案详细设计（只调研不改代码）
 
 > 基于穷尽式源码调研（subagent 完成全部 10 项的调用链/边界/兼容确认）
-> 
+>
 > 生成时间：2026-06-29 | 基准分支：dev-smark | 前置：P0 已完成并提交
 
 ---
@@ -10,22 +10,22 @@
 
 ### 已阅读的文件
 
-| 文件 | 调研范围 | 关键发现 |
-|---|---|---|
-| `tool/read.ts` | L197-250（dedup）、L728（outline 调用） | stub 仅精确/覆盖 range；overlap 仅 note 不 suppress；outline 每次 read 都重新扫描 |
-| `tool/read-outline.ts` | L5-9（常量）、L227-262（readOutline） | 仅 offset<=1 && total>=600 && 源码扩展名时生成；MAX_SCAN_LINES=3000 |
+| 文件                    | 调研范围                                                                                                                       | 关键发现                                                                                                                      |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------- |
+| `tool/read.ts`          | L197-250（dedup）、L728（outline 调用）                                                                                        | stub 仅精确/覆盖 range；overlap 仅 note 不 suppress；outline 每次 read 都重新扫描                                             |
+| `tool/read-outline.ts`  | L5-9（常量）、L227-262（readOutline）                                                                                          | 仅 offset<=1 && total>=600 && 源码扩展名时生成；MAX_SCAN_LINES=3000                                                           |
 | `session/compaction.ts` | L44-76（常量）、L293-305（events）、L398-586（evidence）、L606-636（splitTurn）、L763-810（prune）、L193-198（memento budget） | PRUNE_PROTECTED 仅 skill；splitTurn 跳 error turns；memento 无 floor；evidence 无 search history；EVIDENCE_FILE_LIMIT 固定 20 |
-| `session/message-v2.ts` | L398-406（truncateToolOutput）、L963-969（compacted 处理） | head/tail 固定 400/2000；compacted 直接清空；正常路径不截断 |
-| `tool/task.ts` | L48-60（Parameters）、L116-366（run）、L62-70（output） | background 需 experimental flag；output 无截断；不传递 inspected files |
-| `session/processor.ts` | L33（DOOM_LOOP_THRESHOLD）、L427-489（doom loop 检测） | 仅同消息内检测；JSON.stringify 严格相等；无跨消息/语义/typecheck cache |
-| `session/prompt.ts` | L2148-2149（maxSteps）、L2254（MAX_STEPS 注入） | agent.steps ?? Infinity；无默认 ceiling；无 80% 收敛提示 |
-| `agent/agent.ts` | L51（steps 字段）、L139+（各 agent 定义） | 所有内置 agent 均未设 steps |
-| `tool/grep.ts` | L14（RESULT_LIMIT）、L113-124（搜索）、L207-213（metadata） | 多取 1 条判断 truncated；metadata.matches 是截断后长度；不返回总数 |
-| `tool/glob.ts` | L54（limit=100）、L69-77（截断）、L95（metadata） | 同 grep 模式；metadata.count 是截断后长度 |
-| `tool/shell.ts` | L322-358（tail 函数）、L1007（tail 调用）、L1066-1084（metadata） | 固定 tail 方向；metadata 有 exit 码但无 hasErrors flag |
-| `tool/truncate.ts` | L26（direction 参数）、L81-130（output 函数） | 已支持 head/tail direction，shell.ts 没用它 |
-| `tool/skill.ts` | L23-72（execute） | 无 load 历史；每次重新扫描文件 + 输出完整 content |
-| `util/output-notice.ts` | L13-20（ExecutionNotice）、L53-55（formatExecutionNotice） | notice 含 exit_code 但无 typecheck_error flag |
+| `session/message-v2.ts` | L398-406（truncateToolOutput）、L963-969（compacted 处理）                                                                     | head/tail 固定 400/2000；compacted 直接清空；正常路径不截断                                                                   |
+| `tool/task.ts`          | L48-60（Parameters）、L116-366（run）、L62-70（output）                                                                        | background 需 experimental flag；output 无截断；不传递 inspected files                                                        |
+| `session/processor.ts`  | L33（DOOM_LOOP_THRESHOLD）、L427-489（doom loop 检测）                                                                         | 仅同消息内检测；JSON.stringify 严格相等；无跨消息/语义/typecheck cache                                                        |
+| `session/prompt.ts`     | L2148-2149（maxSteps）、L2254（MAX_STEPS 注入）                                                                                | agent.steps ?? Infinity；无默认 ceiling；无 80% 收敛提示                                                                      |
+| `agent/agent.ts`        | L51（steps 字段）、L139+（各 agent 定义）                                                                                      | 所有内置 agent 均未设 steps                                                                                                   |
+| `tool/grep.ts`          | L14（RESULT_LIMIT）、L113-124（搜索）、L207-213（metadata）                                                                    | 多取 1 条判断 truncated；metadata.matches 是截断后长度；不返回总数                                                            |
+| `tool/glob.ts`          | L54（limit=100）、L69-77（截断）、L95（metadata）                                                                              | 同 grep 模式；metadata.count 是截断后长度                                                                                     |
+| `tool/shell.ts`         | L322-358（tail 函数）、L1007（tail 调用）、L1066-1084（metadata）                                                              | 固定 tail 方向；metadata 有 exit 码但无 hasErrors flag                                                                        |
+| `tool/truncate.ts`      | L26（direction 参数）、L81-130（output 函数）                                                                                  | 已支持 head/tail direction，shell.ts 没用它                                                                                   |
+| `tool/skill.ts`         | L23-72（execute）                                                                                                              | 无 load 历史；每次重新扫描文件 + 输出完整 content                                                                             |
+| `util/output-notice.ts` | L13-20（ExecutionNotice）、L53-55（formatExecutionNotice）                                                                     | notice 含 exit_code 但无 typecheck_error flag                                                                                 |
 
 ### 确认的既有行为必须保持
 
@@ -97,8 +97,15 @@ if (overlapNote) {
 const outlineCache = new Map<string, { outline: Outline; size: number; modifiedMs: number }>()
 const OUTLINE_CACHE_LIMIT = 50
 
-export async function readOutlineCached(filepath: string, total: number, offset: number, size: number, modifiedMs: number): Promise<Outline | undefined> {
-  const canonical = process.platform === "win32" ? filepath.replaceAll("\\", "/").toLowerCase() : filepath.replaceAll("\\", "/")
+export async function readOutlineCached(
+  filepath: string,
+  total: number,
+  offset: number,
+  size: number,
+  modifiedMs: number,
+): Promise<Outline | undefined> {
+  const canonical =
+    process.platform === "win32" ? filepath.replaceAll("\\", "/").toLowerCase() : filepath.replaceAll("\\", "/")
   const key = canonical
   const cached = outlineCache.get(key)
   if (cached && cached.size === size && cached.modifiedMs === modifiedMs) {
@@ -143,6 +150,7 @@ function renderSearchHistory(input: { events: ToolEvent[] }): string {
 ```
 
 在 `renderEvidenceHandoff` 中插入：
+
 ```typescript
 return [
   "## Evidence Handoff", "",
@@ -211,7 +219,7 @@ const compactionCount = completedCompactions(input.messages).length
 // bash 输出保持 tail-heavy（保 error/结果在末尾）。
 function toolOutputTruncationFor(tool: string): { head: number; tail: number } {
   if (tool === "read") return { head: 1000, tail: 2000 }
-  return { head: 400, tail: 2000 }  // 默认（bash 等）
+  return { head: 400, tail: 2000 } // 默认（bash 等）
 }
 ```
 
@@ -230,7 +238,10 @@ function toolOutputTruncationFor(tool: string): { head: number; tail: number } {
 // 小模型（8K context）的 20% 仅 1.6K，4K floor 会吃掉 2/3 预算加剧溢出。
 // 大模型 4K floor 确保关键 user intent 不被截断。
 const mementoFloor = usable(input) >= 20_000 ? 4_000 : 0
-return Math.min(DEFAULT_PRESERVE_RECENT_USER_TOKENS, Math.max(mementoFloor, Math.floor(usable(input) * PRESERVE_RECENT_USER_RATIO)))
+return Math.min(
+  DEFAULT_PRESERVE_RECENT_USER_TOKENS,
+  Math.max(mementoFloor, Math.floor(usable(input) * PRESERVE_RECENT_USER_RATIO)),
+)
 ```
 
 ---
@@ -247,14 +258,16 @@ return Math.min(DEFAULT_PRESERVE_RECENT_USER_TOKENS, Math.max(mementoFloor, Math
 // task.ts Parameters 新增
 inspected_files: Schema.optional(
   Schema.Literal("none", "summary").annotate({
-    description: "Controls whether to pass parent session's inspected file list to the subagent. " +
+    description:
+      "Controls whether to pass parent session's inspected file list to the subagent. " +
       "'none': no file list (default for resume). " +
       "'summary': compact file path + range table (default for new subagents).",
-  })
+  }),
 )
 ```
 
 默认行为：
+
 - **新 subagent（无 task_id）**：默认 `"summary"`——传递父 session 的 inspected files 摘要
 - **resume（有 task_id）**：默认 `"none"`——子 session 已有自己的 read 历史，不重复传递
 
@@ -270,10 +283,7 @@ export { completedToolEvents }
 // 双源合并：从 ctx.messages 的 read tool parts 提取（精确，但仅 retained tail 范围）
 // + 从 Evidence Handoff text part 中解析 ### Inspected Files 表格（覆盖 compaction 前的 reads）。
 // worktree 用于 displayPath 相对路径显示。
-export function renderInspectedFilesSummary(
-  messages: MessageV2.WithParts[],
-  worktree: string,
-): string {
+export function renderInspectedFilesSummary(messages: MessageV2.WithParts[], worktree: string): string {
   // 源 1：从 messages 中的 read tool parts 提取（仅 retained tail 范围内的）
   const events = completedToolEvents(messages)
   // ... 复用 renderInspectedFiles 的提取逻辑，跳过 fs.stat，跳过 stub
@@ -285,6 +295,7 @@ export function renderInspectedFilesSummary(
 ```
 
 **关键边界（subagent 复核修正）**：
+
 - **full compaction 后 ctx.messages 只含 retained tail（最近 4 turns）**：full compaction 的 `filterCompacted` 完全移除 retained tail 之外的旧消息。`ctx.messages` 中只有最近 4 turns 的 read parts。补充数据源：Evidence Handoff text part（在 compaction 时已生成完整 inspected files 列表）。
 - **prune 后 metadata.read 完整保留**：prune 只设 `time.compacted`，不清空 output/metadata。但 `completedToolEvents` 不跳过 compacted parts——这是有意选择（父 session 确实读过这些文件）。
 - **Path B（handleSubtask）无法传 inspected_files 参数**：prompt.ts 构造 taskArgs 时只有 prompt/description/subagent_type/command。Path B 走默认值（无 task_id → "summary"）。
@@ -294,13 +305,13 @@ export function renderInspectedFilesSummary(
 
 ```typescript
 // task.ts runTask 函数内（L226 之后）
-const parts = yield* ops.resolvePromptParts(params.prompt)
+const parts = yield * ops.resolvePromptParts(params.prompt)
 
 // [local-smark] 根据 inspected_files 参数传递父 session 的已读文件列表。
 // 新 subagent 默认 "summary"，resume 默认 "none"（子 session 已有自己的 read 历史）。
 const inspectedFilesMode = params.inspected_files ?? (params.task_id ? "none" : "summary")
 if (inspectedFilesMode !== "none" && ctx.messages.length > 0) {
-  const ctx2 = yield* InstanceState.context
+  const ctx2 = yield * InstanceState.context
   const summary = renderInspectedFilesSummary(ctx.messages, ctx2.worktree)
   if (summary) {
     parts.push({ type: "text", text: `<parent_context>\n${summary}\n</parent_context>` })
@@ -372,7 +383,8 @@ function truncateTaskResult(text: string): string {
 // 不改 pipe 架构（pty 改造是 P2），仅改善模型决策质量。
 // 注意 output 顺序：(no output) + 增强提示 + diagnosticAppendix
 if (emptyOutput && expired) {
-  output += "\n\nThe process produced no output before timeout. This may indicate:" +
+  output +=
+    "\n\nThe process produced no output before timeout. This may indicate:" +
     "\n- The command is block-buffering output (common for build tools like bun install, bundle install);" +
     " consider adding --verbose or running with a larger timeout." +
     "\n- The process is waiting for interactive input; provide input or use a non-interactive flag." +
@@ -381,6 +393,7 @@ if (emptyOutput && expired) {
 ```
 
 **边界**：
+
 - timeout + 有 output → 不触发增强提示（有 output 说明不是 block-buffering）
 - abort + 无 output → 不触发增强提示（abort 是用户主动操作）
 - 正常完成 → 不受影响
@@ -388,6 +401,7 @@ if (emptyOutput && expired) {
 ### P2 可选：pty 模式（设计概要，不在 P1 实施）
 
 已有 pty 基础设施（`src/pty/`），可渐进引入：
+
 1. Parameters 新增 `interactive?: boolean`（默认 false）
 2. `interactive === true` 时用 `src/pty` 的 `Proc` 替代 `ChildProcessSpawner`
 3. `Proc.onData` → `Queue` → `Stream.fromQueue` → `onChunk`（用 EffectBridge 桥接）
@@ -485,11 +499,11 @@ if (nearCeiling && !isLastStep) {
 // L113-124 附近：ripgrep 搜索后，若 truncated，额外跑 rg --count 获取总数
 if (resultLimitTruncated) {
   // [local-smark] 截断时获取真实总数，帮助模型评估搜索密度
-  const total = yield* rg.count(pattern, { cwd: search, include, signal: ctx.abort })
+  const total = yield * rg.count(pattern, { cwd: search, include, signal: ctx.abort })
   metadata.totalMatches = total
 }
 // L171 输出文案改为：
-`Found ${total ?? final.length} matches${resultLimitTruncated ? ` (showing first ${RESULT_LIMIT})` : ""}`
+;`Found ${total ?? final.length} matches${resultLimitTruncated ? ` (showing first ${RESULT_LIMIT})` : ""}`
 ```
 
 需在 ripgrep.ts 新增 `count` 方法（用 `rg --count-matches` 或流式计数，设上限如 10000 避免大仓库扫描过久）。
@@ -516,9 +530,10 @@ function shouldUseHead(command: string): boolean {
 }
 
 const direction = shouldUseHead(input.command) ? "head" : "tail"
-const end = direction === "head"
-  ? head(normalized, limits.maxLines, limits.maxBytes)
-  : tail(normalized, limits.maxLines, limits.maxBytes)
+const end =
+  direction === "head"
+    ? head(normalized, limits.maxLines, limits.maxBytes)
+    : tail(normalized, limits.maxLines, limits.maxBytes)
 ```
 
 需新增 `head` 函数（对称于 `tail`），或复用 `Truncate.output` 的 head 分支。但 `tail` 返回 `{text, cut, hidden}` 供诊断，`head` 需对称返回。
@@ -538,18 +553,21 @@ const end = direction === "head"
 // 返回 stub 而非重新输出完整 content（~7KB）。
 // 通过扫描 ctx.messages 中已完成的 skill tool part 实现，
 // 不需要 InstanceState 或额外状态——与 read.ts collectVisibleReads 同一模式。
-const alreadyLoaded = ctx.messages.some(msg =>
-  msg.info.role === "assistant" &&
-  msg.parts.some(part =>
-    part.type === "tool" && part.tool === "skill" &&
-    part.state.status === "completed" &&
-    // [local-smark] 补 compacted 守卫对齐 collectVisibleReads（read.ts L205）：
-    // compacted 的 skill part 内容已被 prune 清空，不应视为"已加载"。
-    // 当前 skill 在 PRUNE_PROTECTED_TOOLS 中受保护不会被 prune，
-    // 但 full compaction 会移除旧消息——此时 alreadyLoaded=false 正确触发重载。
-    !part.state.time.compacted &&
-    (part.state.input as Record<string, unknown>)?.name === params.name
-  )
+const alreadyLoaded = ctx.messages.some(
+  (msg) =>
+    msg.info.role === "assistant" &&
+    msg.parts.some(
+      (part) =>
+        part.type === "tool" &&
+        part.tool === "skill" &&
+        part.state.status === "completed" &&
+        // [local-smark] 补 compacted 守卫对齐 collectVisibleReads（read.ts L205）：
+        // compacted 的 skill part 内容已被 prune 清空，不应视为"已加载"。
+        // 当前 skill 在 PRUNE_PROTECTED_TOOLS 中受保护不会被 prune，
+        // 但 full compaction 会移除旧消息——此时 alreadyLoaded=false 正确触发重载。
+        !part.state.time.compacted &&
+        (part.state.input as Record<string, unknown>)?.name === params.name,
+    ),
 )
 if (alreadyLoaded) {
   return {
@@ -586,6 +604,7 @@ metadata: {
 ```
 
 在 output 中追加提示：
+
 ```typescript
 if (hasErrors) {
   output = `Verification found errors. Address them before reporting complete.\n` + output
@@ -598,16 +617,17 @@ if (hasErrors) {
 
 ## 十二、实施路线图
 
-| Phase | P1 项 | 预计工期 | 依赖 |
-|---|---|---|---|
-| Phase 1 | P1-3（pruning 保护 read + memento 条件化 floor + compaction 计数）+ Bash timeout 提示 | 3 天 | 无 |
-| Phase 2 | P1-6（step ceiling）+ P1-9（skill dedup）+ P1-10（typecheck flag）| 3 天 | 无 |
-| Phase 3 | P1-1（read dedup + outline cache）| 4 天 | 无 |
-| Phase 4 | P1-2（Evidence Handoff search history）+ P1-7（grep/glob count）| 4 天 | 无 |
-| Phase 5 | P1-8（bash truncation 方向）+ P1-5（跨消息 doom loop + consecutive-error breaker）| 5 天 | P1-1 |
-| Phase 6 | P1-4（subagent inspected files + 空结果 + result 截断）| 4 天 | P1-2 |
+| Phase   | P1 项                                                                                 | 预计工期 | 依赖 |
+| ------- | ------------------------------------------------------------------------------------- | -------- | ---- |
+| Phase 1 | P1-3（pruning 保护 read + memento 条件化 floor + compaction 计数）+ Bash timeout 提示 | 3 天     | 无   |
+| Phase 2 | P1-6（step ceiling）+ P1-9（skill dedup）+ P1-10（typecheck flag）                    | 3 天     | 无   |
+| Phase 3 | P1-1（read dedup + outline cache）                                                    | 4 天     | 无   |
+| Phase 4 | P1-2（Evidence Handoff search history）+ P1-7（grep/glob count）                      | 4 天     | 无   |
+| Phase 5 | P1-8（bash truncation 方向）+ P1-5（跨消息 doom loop + consecutive-error breaker）    | 5 天     | P1-1 |
+| Phase 6 | P1-4（subagent inspected files + 空结果 + result 截断）                               | 4 天     | P1-2 |
 
 **降级到 P2 的项**：
+
 - P1-3 splitTurn 放宽 error（需先验证 undo/repair 防御）
 - P1-4 background 默认 true（需 flag 处理 + 轮询稳定性验证）
 - P1-5 typecheck cache（需先实现 edit/write 失效 hook）
@@ -618,20 +638,20 @@ if (hasErrors) {
 
 ## 十三、预估 Git 影响
 
-| P1 项 | 修改文件 | 新增文件 | 预计净增行 | 删除行 |
-|---|---|---|---|---|
-| P1-1 | read.ts, read-outline.ts | 0 | ~80 | ~5 |
-| P1-2 | compaction.ts | 0 | ~50 | 0 |
-| P1-3 | compaction.ts, message-v2.ts | 0 | ~15 | ~3 |
-| P1-4 | task.ts, compaction.ts | 0 | ~60 | ~3 |
-| P1-5 | processor.ts | 0 | ~25 | ~3 |
-| P1-6 | prompt.ts | 0 | ~10 | ~1 |
-| P1-7 | grep.ts, glob.ts | 0 | ~40 | ~5 |
-| P1-8 | shell.ts | 0 | ~25 | ~3 |
-| P1-9 | skill.ts | 0 | ~18 | 0 |
-| P1-10 | shell.ts, output-notice.ts | 0 | ~20 | ~2 |
-| Bash timeout | shell.ts | 0 | ~12 | 0 |
-| **合计** | **~12 文件** | **0** | **~345** | **~24** |
+| P1 项        | 修改文件                     | 新增文件 | 预计净增行 | 删除行  |
+| ------------ | ---------------------------- | -------- | ---------- | ------- |
+| P1-1         | read.ts, read-outline.ts     | 0        | ~80        | ~5      |
+| P1-2         | compaction.ts                | 0        | ~50        | 0       |
+| P1-3         | compaction.ts, message-v2.ts | 0        | ~15        | ~3      |
+| P1-4         | task.ts, compaction.ts       | 0        | ~60        | ~3      |
+| P1-5         | processor.ts                 | 0        | ~25        | ~3      |
+| P1-6         | prompt.ts                    | 0        | ~10        | ~1      |
+| P1-7         | grep.ts, glob.ts             | 0        | ~40        | ~5      |
+| P1-8         | shell.ts                     | 0        | ~25        | ~3      |
+| P1-9         | skill.ts                     | 0        | ~18        | 0       |
+| P1-10        | shell.ts, output-notice.ts   | 0        | ~20        | ~2      |
+| Bash timeout | shell.ts                     | 0        | ~12        | 0       |
+| **合计**     | **~12 文件**                 | **0**    | **~345**   | **~24** |
 
 - 不涉及生成文件/迁移/文档
 - 不涉及新配置项（step ceiling 200 是默认值，可被 config 覆盖）
@@ -669,6 +689,7 @@ if (hasErrors) {
 P1 改造共 10 项（4 项暂缓 P2）+ Bash timeout 增强，涉及 ~12 个源文件，预计净增 ~345 行、删除 ~24 行，不新增文件/配置/API。
 
 核心改动按影响排序：
+
 1. **P1-1**（read dedup + outline cache）→ 减少 1248 hot pairs 中 >50% 的重复读取
 2. **P1-3**（pruning 保护 read + memento + compaction 计数）→ 减少 post-compaction 信息丢失
 3. **P1-5**（跨消息 doom loop + consecutive-error breaker）→ 循环检测覆盖率 5%→40%

@@ -45,7 +45,9 @@ export function notebookMetadata(value: unknown) {
 }
 
 export function notebookValue(value: unknown) {
-  return typeof value === "string" || typeof value === "number" || typeof value === "boolean" ? String(value) : undefined
+  return typeof value === "string" || typeof value === "number" || typeof value === "boolean"
+    ? String(value)
+    : undefined
 }
 
 export function notebookRows(value: unknown) {
@@ -54,8 +56,12 @@ export function notebookRows(value: unknown) {
 
 export function notebookLine(value: Record<string, unknown>) {
   const id = typeof value.i === "number" ? `c${value.i}` : undefined
-  const values = ["id", "kind", "lang", "lines", "exec", "first", "mime", "bytes", "artifactPath", "preview"].map((key) => notebookValue(value[key]))
-  const outputs = Array.isArray(value.existing_outs) ? value.existing_outs.filter((item): item is string => typeof item === "string") : []
+  const values = ["id", "kind", "lang", "lines", "exec", "first", "mime", "bytes", "artifactPath", "preview"].map(
+    (key) => notebookValue(value[key]),
+  )
+  const outputs = Array.isArray(value.existing_outs)
+    ? value.existing_outs.filter((item): item is string => typeof item === "string")
+    : []
   return [id, ...values, ...outputs].filter((item): item is string => item !== undefined).join("  ")
 }
 
@@ -73,7 +79,8 @@ export function notebookInsertSource(view: Record<string, unknown> | undefined) 
   }
   if (source.length) return { text: source.join("\n"), truncated: false }
   return typeof view.insertedSourcePreview === "string"
-    ? { text: view.insertedSourcePreview, truncated: view.insertedSourcePreviewTruncated === true } : undefined
+    ? { text: view.insertedSourcePreview, truncated: view.insertedSourcePreviewTruncated === true }
+    : undefined
 }
 
 export function notebookPreviewCells(cells: Record<string, unknown>[]) {

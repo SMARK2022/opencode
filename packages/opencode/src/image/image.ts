@@ -134,7 +134,12 @@ export const layer = Layer.effect(
       const bytes = Buffer.byteLength(base64, "utf8")
       const buffer = Buffer.from(base64, "base64")
       // 结构门禁不替代像素解码；按真实bytes预选BMP，禁止失败后换backend。
-      if (buffer.length === 0 || (isPng(buffer) && !hasPngHeader(buffer)) || (isBmp(buffer) && !hasValidBmpHeader(buffer))) return yield* new DecodeError()
+      if (
+        buffer.length === 0 ||
+        (isPng(buffer) && !hasPngHeader(buffer)) ||
+        (isBmp(buffer) && !hasValidBmpHeader(buffer))
+      )
+        return yield* new DecodeError()
 
       if (!isBmp(buffer)) {
         const content = yield* loadSharp.pipe(
@@ -192,7 +197,9 @@ export const layer = Layer.effect(
           })
 
         const scale = Math.min(1, info.maxWidth / originalWidth, info.maxHeight / originalHeight)
-        for (const size of Array.from({ length: info.autoResize ? 32 : 1 }).reduce<Array<{ width: number; height: number }>>((acc) => {
+        for (const size of Array.from({ length: info.autoResize ? 32 : 1 }).reduce<
+          Array<{ width: number; height: number }>
+        >((acc) => {
           const previous = acc.at(-1) ?? {
             width: Math.max(1, Math.round(originalWidth * scale)),
             height: Math.max(1, Math.round(originalHeight * scale)),

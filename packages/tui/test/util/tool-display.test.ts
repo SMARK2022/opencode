@@ -26,7 +26,11 @@ describe("collapseToolOutput previews", () => {
     const preview = collapseToolOutput(output, 10, 200)
     expect(Array.from(preview.output).length).toBe(200)
     expect(preview.output.endsWith("…")).toBe(true)
-    expect(Array.from(preview.output).slice(0, -1).every((item) => item === String.fromCodePoint(0x1f600))).toBe(true)
+    expect(
+      Array.from(preview.output)
+        .slice(0, -1)
+        .every((item) => item === String.fromCodePoint(0x1f600)),
+    ).toBe(true)
   })
 
   test("disclosure previews keep real rows and Unicode character budgets", () => {

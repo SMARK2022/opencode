@@ -598,7 +598,10 @@ describe("acp event routing", () => {
     // #553：hidden Tool 只传播 tombstone，ACP 不得创建 pending/running lifecycle 帧。
     await harness.subscription.handle(
       // SDK wire 类型未声明 hidden——运行时携带，此处展开注入并以 ToolPart 视图收窄。
-      toolUpdated({ ...runningTool("ses_hidden", "call_hidden", "hello"), hidden: { time: Date.now(), reason: "undo" } } as ToolPart),
+      toolUpdated({
+        ...runningTool("ses_hidden", "call_hidden", "hello"),
+        hidden: { time: Date.now(), reason: "undo" },
+      } as ToolPart),
     )
 
     expect(toolUpdates(harness.updates)).toEqual([])
@@ -679,7 +682,9 @@ describe("acp event routing", () => {
       ["a", 2],
       ["marker-7d1a", 3],
     ] as const) {
-      await harness.subscription.handle(progressEvent(versionedRunning("ses_progress", "call_progress", output, version)))
+      await harness.subscription.handle(
+        progressEvent(versionedRunning("ses_progress", "call_progress", output, version)),
+      )
     }
     // durable PartUpdated 在较新 live 后到达：stale version 即使 output 不同也不能让 ACP 展示回退。
     await harness.subscription.handle(toolUpdated(versionedRunning("ses_progress", "call_progress", "stale", 2)))
@@ -692,25 +697,35 @@ describe("acp event routing", () => {
       const part = completedTool("ses_progress", callID)
       await (source === "live"
         ? harness.subscription.handle(toolUpdated(part))
-        : harness.subscription.replayMessage(assistantToolMessage({
-            ...part,
-            state: { status: "error", input: part.state.input, error: "failed", time: part.state.time },
-          })))
+        : harness.subscription.replayMessage(
+            assistantToolMessage({
+              ...part,
+              state: { status: "error", input: part.state.input, error: "failed", time: part.state.time },
+            }),
+          ))
       // 先回放 pending，再送更高版本 running，分别验证两处终态守卫不能被绕过。
-      await harness.subscription.replayMessage(assistantToolMessage({
-        ...part,
-        state: { status: "pending", input: part.state.input, raw: JSON.stringify(part.state.input) },
-      }))
+      await harness.subscription.replayMessage(
+        assistantToolMessage({
+          ...part,
+          state: { status: "pending", input: part.state.input, raw: JSON.stringify(part.state.input) },
+        }),
+      )
       await harness.subscription.handle(progressEvent(versionedRunning("ses_progress", callID, `late-${callID}`, 99)))
       const updates = toolUpdates(harness.updates).filter((item) => item.update.toolCallId === callID)
-      const terminalIndex = updates.findIndex((item) => item.update.status === "completed" || item.update.status === "failed")
+      const terminalIndex = updates.findIndex(
+        (item) => item.update.status === "completed" || item.update.status === "failed",
+      )
       expect(terminalIndex).toBeGreaterThanOrEqual(0)
       expect(updates.slice(terminalIndex + 1)).toHaveLength(0)
     }
-    expect(toolUpdates(harness.updates)
-      .filter((item) => item.update.status === "completed" || item.update.status === "failed")
-      .map((item) => [item.update.toolCallId, item.update.status]))
-      .toEqual([["call_progress", "completed"], ["call_replay_error", "failed"]])
+    expect(
+      toolUpdates(harness.updates)
+        .filter((item) => item.update.status === "completed" || item.update.status === "failed")
+        .map((item) => [item.update.toolCallId, item.update.status]),
+    ).toEqual([
+      ["call_progress", "completed"],
+      ["call_replay_error", "failed"],
+    ])
 
     // v1 内容一次；v2 同 hash 只发 status-only 帧（无 content）；v3 新内容；stale v2 整体拒绝。
     const contents = toolUpdates(harness.updates)

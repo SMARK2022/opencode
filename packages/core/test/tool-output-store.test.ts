@@ -76,7 +76,9 @@ describe("ToolOutputStore", () => {
         expect(visible).toContain('type="output_truncated" source="tool"')
         expect(visible).toContain(`path="${result.outputPaths[0]}" guidance="`)
         // 真实Native结算正文必须带完整原话，新增指导仍占用既有notice预算而不是吞掉原文恢复入口。
-        expect(visible).toContain('guidance="Before making decisions that depend on omitted output, use grep on path first, then read relevant ranges with read offset/limit. Avoid reading the full file unless necessary."')
+        expect(visible).toContain(
+          'guidance="Before making decisions that depend on omitted output, use grep on path first, then read relevant ranges with read offset/limit. Avoid reading the full file unless necessary."',
+        )
         expect(visible).toMatch(/total="2L\/59KB"/)
         const excerpt = visible.replace(/\n\n<opencode_notice[^>]+ \/>\n\n/, "\n")
         expect(visible).toContain(`shown="head+tail ${excerpt.split("\n").length}L/`)
@@ -135,7 +137,10 @@ describe("ToolOutputStore", () => {
         const result = yield* store.bound({
           sessionID,
           toolCallID: "call-text-and-media",
-          output: { structured: { caption: "pixel", formattedContent: "code\u0007\r\n" }, content: [{ type: "text", text }, media] },
+          output: {
+            structured: { caption: "pixel", formattedContent: "code\u0007\r\n" },
+            content: [{ type: "text", text }, media],
+          },
         })
 
         // structured承载后续历史回写真值，不能随正文一起改写真实代码。
@@ -165,7 +170,9 @@ describe("ToolOutputStore", () => {
         })
         // 小输出只存在有界内存中，bound/discard 均不能为它创建目录。
         const input = { sessionID, toolCallID: "call-captured", output }
-        yield* store.capture(input, (write) => write(Buffer.from(text)).pipe(Effect.as({ value: output, retain: false })))
+        yield* store.capture(input, (write) =>
+          write(Buffer.from(text)).pipe(Effect.as({ value: output, retain: false })),
+        )
         expect(yield* fs.exists(directory)).toBe(false)
         expect(yield* store.bound(input)).toEqual({ output, outputPaths: [] })
         yield* store.discard(input)
@@ -173,7 +180,9 @@ describe("ToolOutputStore", () => {
         yield* store.discard(input)
         expect(yield* fs.exists(directory)).toBe(false)
         // bound 已发布的原文脱离暂存表，最终清理不能删除模型仍需要恢复的内容。
-        yield* store.capture(input, (write) => write(Buffer.from(text)).pipe(Effect.as({ value: output, retain: true })))
+        yield* store.capture(input, (write) =>
+          write(Buffer.from(text)).pipe(Effect.as({ value: output, retain: true })),
+        )
         const published = yield* store.bound(input)
         expect(published.outputPaths).toHaveLength(1)
         yield* store.discard(input)
@@ -183,14 +192,19 @@ describe("ToolOutputStore", () => {
         expect(yield* fs.readDirectory(directory)).toHaveLength(1)
         // 两次写入跨越flush；UTF-16原字节不能由UTF-8模型窗口反推。
         const bytes = Buffer.from("AB".repeat(20_000), "utf16le")
-        yield* store.capture(input, (write) => Effect.gen(function* () {
-          yield* write(bytes.subarray(0, 20_000))
-          yield* write(bytes.subarray(20_000))
-          return { value: undefined, retain: true }
-        }))
-        const captured = yield* store.bound({ ...input, output: { structured: {}, content: [{ type: "text", text: "x".repeat(20_000) }] } })
+        yield* store.capture(input, (write) =>
+          Effect.gen(function* () {
+            yield* write(bytes.subarray(0, 20_000))
+            yield* write(bytes.subarray(20_000))
+            return { value: undefined, retain: true }
+          }),
+        )
+        const captured = yield* store.bound({
+          ...input,
+          output: { structured: {}, content: [{ type: "text", text: "x".repeat(20_000) }] },
+        })
         expect(Buffer.from(yield* fs.readFile(captured.outputPaths[0]))).toEqual(bytes)
-        const notice = captured.output.content.flatMap((part) => part.type === "text" ? [part.text] : []).join("")
+        const notice = captured.output.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("")
         expect(notice).toContain('total="78KB"')
         expect(notice).not.toContain('total="1L/')
         expect(notice).toContain(`path="${captured.outputPaths[0]}" guidance="`)
@@ -201,11 +215,19 @@ describe("ToolOutputStore", () => {
 
   it.live("fails oversized settlement when complete retention cannot be written", () => {
     // 故障只注入 append 的字节写入，初始文件创建与清理继续使用真实文件系统。
-    const failure = PlatformError.systemError({ _tag: "Unknown", module: "FileSystem", method: "writeFile", description: "ENOSPC: quota exhausted" })
-    const filesystem = Layer.effect(FSUtil.Service, Effect.gen(function* () {
-      const fs = yield* FSUtil.Service
-      return FSUtil.Service.of({ ...fs, writeFile: () => Effect.fail(failure) })
-    })).pipe(Layer.provide(LayerNode.compile(FSUtil.node)))
+    const failure = PlatformError.systemError({
+      _tag: "Unknown",
+      module: "FileSystem",
+      method: "writeFile",
+      description: "ENOSPC: quota exhausted",
+    })
+    const filesystem = Layer.effect(
+      FSUtil.Service,
+      Effect.gen(function* () {
+        const fs = yield* FSUtil.Service
+        return FSUtil.Service.of({ ...fs, writeFile: () => Effect.fail(failure) })
+      }),
+    ).pipe(Layer.provide(LayerNode.compile(FSUtil.node)))
     return withStore(({ root, store, fs }) =>
       Effect.gen(function* () {
         yield* fs.writeFileString(path.join(root, "tool-output"), "not a directory")
@@ -220,85 +242,148 @@ describe("ToolOutputStore", () => {
         if (Exit.isFailure(exit))
           expect(Option.getOrUndefined(Cause.findErrorOption(exit.cause))?._tag).toBe("ToolOutputStore.StorageError")
       }),
-    ).pipe(Effect.andThen(withStore(({ root, store, fs }) => Effect.gen(function* () {
-      const input = { sessionID, toolCallID: "call-append-failure" }
-      const directory = path.join(root, ToolOutputStore.MANAGED_DIRECTORY)
-      const exit = yield* store.capture(input, (write) => Effect.gen(function* () {
-        // 跨阈值触发真实创建后 append 失败，不能以初始 write 失败替代回归。
-        expect(yield* fs.exists(directory)).toBe(false)
-        yield* write(Buffer.alloc(ToolOutputStore.MAX_BYTES + 1))
-        return { value: undefined, retain: true }
-      })).pipe(Effect.exit)
-      expect(Exit.isFailure(exit)).toBe(true)
-      if (Exit.isFailure(exit)) {
-        const error = Option.getOrUndefined(Cause.findErrorOption(exit.cause))
-        // 错误保持原始 cause 身份，不能通过包装成 defect 或丢失配额原因来通过断言。
-        if (!(error instanceof ToolOutputStore.StorageError)) throw new Error("expected typed append failure")
-        expect(error.operation).toBe("write")
-        expect(error.cause).toBe(failure)
-      }
-      yield* store.discard(input)
-      expect(yield* fs.readDirectory(directory)).toEqual([])
-    }), undefined, filesystem)), Effect.andThen(Effect.gen(function* () {
-      const created = yield* Deferred.make<void>()
-      const release = yield* Deferred.make<void>()
-      let bodies = 0
-      let writes = 0
-      // 初始 wx 已创建文件但尚未返回，取消请求必须在挂接清理后才被交付。
-      const delayed = Layer.effect(FSUtil.Service, Effect.gen(function* () {
-        const native = yield* FSUtil.Service
-        return FSUtil.Service.of({ ...native, writeFileString: (file, text, options) => native.writeFileString(file, text, options).pipe(
-          Effect.andThen(Effect.sync(() => writes++)),
-          Effect.andThen(Deferred.succeed(created, undefined)),
-          Effect.andThen(Deferred.await(release)),
-        ) })
-      })).pipe(Layer.provide(LayerNode.compile(FSUtil.node)))
-      yield* withStore(({ root, store, fs }) => Effect.gen(function* () {
-        const directory = path.join(root, ToolOutputStore.MANAGED_DIRECTORY)
-        const foreign = path.join(directory, "foreign-output")
-        yield* fs.ensureDir(directory)
-        yield* fs.writeFile(foreign, Buffer.from("owned by another call"))
-        const input = { sessionID, toolCallID: "call-initial-cancel" }
-        // 正文必须保持可中断，挂起的创建阶段结束后不能执行用户副作用。
-        const fiber = yield* store.capture(input, (write) => write(Buffer.alloc(ToolOutputStore.MAX_BYTES + 1)).pipe(Effect.andThen(Effect.sync(() => { bodies++; return { value: undefined, retain: true } })))).pipe(Effect.forkChild)
-        yield* Deferred.await(created)
-        expect(yield* fs.readDirectory(directory)).toHaveLength(2)
-        // 中断等待者另起 fiber，主测试仍能释放被保护的短 acquisition。
-        const interrupting = yield* Fiber.interrupt(fiber).pipe(Effect.forkChild)
-        yield* Effect.yieldNow
-        yield* Deferred.succeed(release, undefined)
-        yield* Fiber.join(interrupting)
-        yield* store.discard(input)
-        expect(bodies).toBe(0)
-        expect(writes).toBe(1)
-        // 清理只删除本次取得的路径，不以清空目录替代所有权判断。
-        expect(yield* fs.readDirectory(directory)).toEqual(["foreign-output"])
-        expect(yield* fs.readFileString(foreign)).toBe("owned by another call")
-      }), undefined, delayed)
-      // 真实 wx 碰撞不授予所有权，失败 cause 必须保留且既有文件不能被删除。
-      let collision: FSUtil.Error | undefined
-      const colliding = Layer.effect(FSUtil.Service, Effect.gen(function* () {
-        const native = yield* FSUtil.Service
-        return FSUtil.Service.of({ ...native, writeFileString: (file, text, options) => native.writeFileString(file, "collision owner").pipe(
-          Effect.andThen(native.writeFileString(file, text, options)),
-          Effect.tapError((cause) => Effect.sync(() => { collision = cause })),
-        ) })
-      })).pipe(Layer.provide(LayerNode.compile(FSUtil.node)))
-      yield* withStore(({ root, store, fs }) => Effect.gen(function* () {
-        const exit = yield* store.capture({ sessionID, toolCallID: "call-collision" }, (write) => write(Buffer.alloc(ToolOutputStore.MAX_BYTES + 1)).pipe(Effect.andThen(Effect.die("collision must not continue body")))).pipe(Effect.exit)
-        if (!Exit.isFailure(exit)) throw new Error("expected exclusive creation failure")
-        const error = Option.getOrUndefined(Cause.findErrorOption(exit.cause))
-        if (!(error instanceof ToolOutputStore.StorageError)) throw new Error("expected typed collision failure")
-        expect(error.cause).toBe(collision)
-        const directory = path.join(root, ToolOutputStore.MANAGED_DIRECTORY)
-        const files = yield* fs.readDirectory(directory)
-        expect(files).toHaveLength(1)
-        // 文件内容和原始失败身份共同证明 wx 没有覆盖或删除别人的输出。
-        expect(yield* fs.readFileString(path.join(directory, files[0]))).toBe("collision owner")
-      }), undefined, colliding)
-    })))
-  },
-  )
+    ).pipe(
+      Effect.andThen(
+        withStore(
+          ({ root, store, fs }) =>
+            Effect.gen(function* () {
+              const input = { sessionID, toolCallID: "call-append-failure" }
+              const directory = path.join(root, ToolOutputStore.MANAGED_DIRECTORY)
+              const exit = yield* store
+                .capture(input, (write) =>
+                  Effect.gen(function* () {
+                    // 跨阈值触发真实创建后 append 失败，不能以初始 write 失败替代回归。
+                    expect(yield* fs.exists(directory)).toBe(false)
+                    yield* write(Buffer.alloc(ToolOutputStore.MAX_BYTES + 1))
+                    return { value: undefined, retain: true }
+                  }),
+                )
+                .pipe(Effect.exit)
+              expect(Exit.isFailure(exit)).toBe(true)
+              if (Exit.isFailure(exit)) {
+                const error = Option.getOrUndefined(Cause.findErrorOption(exit.cause))
+                // 错误保持原始 cause 身份，不能通过包装成 defect 或丢失配额原因来通过断言。
+                if (!(error instanceof ToolOutputStore.StorageError)) throw new Error("expected typed append failure")
+                expect(error.operation).toBe("write")
+                expect(error.cause).toBe(failure)
+              }
+              yield* store.discard(input)
+              expect(yield* fs.readDirectory(directory)).toEqual([])
+            }),
+          undefined,
+          filesystem,
+        ),
+      ),
+      Effect.andThen(
+        Effect.gen(function* () {
+          const created = yield* Deferred.make<void>()
+          const release = yield* Deferred.make<void>()
+          let bodies = 0
+          let writes = 0
+          // 初始 wx 已创建文件但尚未返回，取消请求必须在挂接清理后才被交付。
+          const delayed = Layer.effect(
+            FSUtil.Service,
+            Effect.gen(function* () {
+              const native = yield* FSUtil.Service
+              return FSUtil.Service.of({
+                ...native,
+                writeFileString: (file, text, options) =>
+                  native
+                    .writeFileString(file, text, options)
+                    .pipe(
+                      Effect.andThen(Effect.sync(() => writes++)),
+                      Effect.andThen(Deferred.succeed(created, undefined)),
+                      Effect.andThen(Deferred.await(release)),
+                    ),
+              })
+            }),
+          ).pipe(Layer.provide(LayerNode.compile(FSUtil.node)))
+          yield* withStore(
+            ({ root, store, fs }) =>
+              Effect.gen(function* () {
+                const directory = path.join(root, ToolOutputStore.MANAGED_DIRECTORY)
+                const foreign = path.join(directory, "foreign-output")
+                yield* fs.ensureDir(directory)
+                yield* fs.writeFile(foreign, Buffer.from("owned by another call"))
+                const input = { sessionID, toolCallID: "call-initial-cancel" }
+                // 正文必须保持可中断，挂起的创建阶段结束后不能执行用户副作用。
+                const fiber = yield* store
+                  .capture(input, (write) =>
+                    write(Buffer.alloc(ToolOutputStore.MAX_BYTES + 1)).pipe(
+                      Effect.andThen(
+                        Effect.sync(() => {
+                          bodies++
+                          return { value: undefined, retain: true }
+                        }),
+                      ),
+                    ),
+                  )
+                  .pipe(Effect.forkChild)
+                yield* Deferred.await(created)
+                expect(yield* fs.readDirectory(directory)).toHaveLength(2)
+                // 中断等待者另起 fiber，主测试仍能释放被保护的短 acquisition。
+                const interrupting = yield* Fiber.interrupt(fiber).pipe(Effect.forkChild)
+                yield* Effect.yieldNow
+                yield* Deferred.succeed(release, undefined)
+                yield* Fiber.join(interrupting)
+                yield* store.discard(input)
+                expect(bodies).toBe(0)
+                expect(writes).toBe(1)
+                // 清理只删除本次取得的路径，不以清空目录替代所有权判断。
+                expect(yield* fs.readDirectory(directory)).toEqual(["foreign-output"])
+                expect(yield* fs.readFileString(foreign)).toBe("owned by another call")
+              }),
+            undefined,
+            delayed,
+          )
+          // 真实 wx 碰撞不授予所有权，失败 cause 必须保留且既有文件不能被删除。
+          let collision: FSUtil.Error | undefined
+          const colliding = Layer.effect(
+            FSUtil.Service,
+            Effect.gen(function* () {
+              const native = yield* FSUtil.Service
+              return FSUtil.Service.of({
+                ...native,
+                writeFileString: (file, text, options) =>
+                  native.writeFileString(file, "collision owner").pipe(
+                    Effect.andThen(native.writeFileString(file, text, options)),
+                    Effect.tapError((cause) =>
+                      Effect.sync(() => {
+                        collision = cause
+                      }),
+                    ),
+                  ),
+              })
+            }),
+          ).pipe(Layer.provide(LayerNode.compile(FSUtil.node)))
+          yield* withStore(
+            ({ root, store, fs }) =>
+              Effect.gen(function* () {
+                const exit = yield* store
+                  .capture({ sessionID, toolCallID: "call-collision" }, (write) =>
+                    write(Buffer.alloc(ToolOutputStore.MAX_BYTES + 1)).pipe(
+                      Effect.andThen(Effect.die("collision must not continue body")),
+                    ),
+                  )
+                  .pipe(Effect.exit)
+                if (!Exit.isFailure(exit)) throw new Error("expected exclusive creation failure")
+                const error = Option.getOrUndefined(Cause.findErrorOption(exit.cause))
+                if (!(error instanceof ToolOutputStore.StorageError))
+                  throw new Error("expected typed collision failure")
+                expect(error.cause).toBe(collision)
+                const directory = path.join(root, ToolOutputStore.MANAGED_DIRECTORY)
+                const files = yield* fs.readDirectory(directory)
+                expect(files).toHaveLength(1)
+                // 文件内容和原始失败身份共同证明 wx 没有覆盖或删除别人的输出。
+                expect(yield* fs.readFileString(path.join(directory, files[0]))).toBe("collision owner")
+              }),
+            undefined,
+            colliding,
+          )
+        }),
+      ),
+    )
+  })
 
   it.live("does not encode ignored structured metadata when projected content exists", () =>
     withStore(({ store }) =>
@@ -359,7 +444,7 @@ describe("ToolOutputStore", () => {
           })
           expect(result.outputPaths).toHaveLength(1)
           // 恢复地址即使超过极小预算也必须完整；空预览不能报成原文丢失。
-          const text = result.output.content.flatMap((part) => part.type === "text" ? [part.text] : []).join("")
+          const text = result.output.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("")
           expect(text).toContain('total="3L/13B" shown="head 0L/0B"')
           expect(text).toContain(`path="${result.outputPaths[0]}" guidance="`)
           expect(text).toStartWith("<opencode_notice ")
@@ -371,37 +456,47 @@ describe("ToolOutputStore", () => {
 
   it.live("cleans expired managed files and preserves unrelated files", () => {
     // 真实临时FS只在两个指定entry替换stat结果，不污染全局或绕过实际cleanup。
-    const filesystem = Layer.effect(FSUtil.Service, Effect.gen(function* () {
-      const fs = yield* FSUtil.Service
-      return FSUtil.Service.of({ ...fs, stat: file => {
-        if (file.endsWith("tool_unreadable")) return fs.stat(path.join(file, "missing"))
-        return fs.stat(file).pipe(Effect.map(info => file.endsWith("tool_unknown") ? { ...info, mtime: Option.none() } : info))
-      } })
-    })).pipe(Layer.provide(LayerNode.compile(FSUtil.node)))
-    return withStore(({ root, store, fs }) =>
+    const filesystem = Layer.effect(
+      FSUtil.Service,
       Effect.gen(function* () {
-        const old = path.join(root, "tool-output", "tool_old")
-        const recent = path.join(root, "tool-output", "tool_recent")
-        const unrelated = path.join(root, "tool-output", "keep.txt")
-        const unknown = path.join(root, "tool-output", "tool_unknown")
-        const unreadable = path.join(root, "tool-output", "tool_unreadable")
-        yield* fs.ensureDir(path.join(root, "tool-output"))
-        yield* fs.writeFileString(old, "old")
-        yield* fs.writeFileString(recent, "recent")
-        yield* fs.writeFileString(unrelated, "keep")
-        yield* fs.writeFileString(unknown, "unknown")
-        yield* fs.writeFileString(unreadable, "unreadable")
-        const expired = new Date(Date.now() - 8 * 24 * 60 * 60 * 1_000)
-        yield* fs.utimes(old, expired, expired)
-        yield* store.cleanup()
-        expect(yield* fs.exists(old)).toBe(false)
-        expect(yield* fs.exists(recent)).toBe(true)
-        expect(yield* fs.exists(unrelated)).toBe(true)
-        // mtime缺失与stat失败都不能删，已知过期项仍按原断言删除。
-        expect(yield* fs.exists(unknown)).toBe(true)
-        expect(yield* fs.exists(unreadable)).toBe(true)
+        const fs = yield* FSUtil.Service
+        return FSUtil.Service.of({
+          ...fs,
+          stat: (file) => {
+            if (file.endsWith("tool_unreadable")) return fs.stat(path.join(file, "missing"))
+            return fs
+              .stat(file)
+              .pipe(Effect.map((info) => (file.endsWith("tool_unknown") ? { ...info, mtime: Option.none() } : info)))
+          },
+        })
       }),
-      undefined, filesystem,
+    ).pipe(Layer.provide(LayerNode.compile(FSUtil.node)))
+    return withStore(
+      ({ root, store, fs }) =>
+        Effect.gen(function* () {
+          const old = path.join(root, "tool-output", "tool_old")
+          const recent = path.join(root, "tool-output", "tool_recent")
+          const unrelated = path.join(root, "tool-output", "keep.txt")
+          const unknown = path.join(root, "tool-output", "tool_unknown")
+          const unreadable = path.join(root, "tool-output", "tool_unreadable")
+          yield* fs.ensureDir(path.join(root, "tool-output"))
+          yield* fs.writeFileString(old, "old")
+          yield* fs.writeFileString(recent, "recent")
+          yield* fs.writeFileString(unrelated, "keep")
+          yield* fs.writeFileString(unknown, "unknown")
+          yield* fs.writeFileString(unreadable, "unreadable")
+          const expired = new Date(Date.now() - 8 * 24 * 60 * 60 * 1_000)
+          yield* fs.utimes(old, expired, expired)
+          yield* store.cleanup()
+          expect(yield* fs.exists(old)).toBe(false)
+          expect(yield* fs.exists(recent)).toBe(true)
+          expect(yield* fs.exists(unrelated)).toBe(true)
+          // mtime缺失与stat失败都不能删，已知过期项仍按原断言删除。
+          expect(yield* fs.exists(unknown)).toBe(true)
+          expect(yield* fs.exists(unreadable)).toBe(true)
+        }),
+      undefined,
+      filesystem,
     )
   })
 })

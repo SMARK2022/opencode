@@ -8,7 +8,13 @@ import { aggregateStats } from "@/cli/cmd/stats-data"
 // #236：renderBreakdown 渲染统计报告——验证 Tool context tokens 文案
 import { renderBreakdown } from "@/cli/cmd/stats-render"
 // #483：CLI 契约测试需要公开命令对象
-import { StatsBreakdownCommand, StatsCommand, StatsInsightsCommand, StatsSessionsCommand, StatsTimelineCommand } from "@/cli/cmd/stats"
+import {
+  StatsBreakdownCommand,
+  StatsCommand,
+  StatsInsightsCommand,
+  StatsSessionsCommand,
+  StatsTimelineCommand,
+} from "@/cli/cmd/stats"
 // #236：Session.Service 提供 create/updateMessage/updatePart 接口
 import { Session } from "@/session/session"
 import { MessageID, PartID } from "@/session/schema"
@@ -36,7 +42,9 @@ afterEach(async () => {
   await resetDatabase()
 })
 
-const seedToolBreakdownReport = (input: { legacyEmptyMessages?: boolean; errorCall?: boolean; filter?: Parameters<typeof aggregateStats>[0] } = {}) =>
+const seedToolBreakdownReport = (
+  input: { legacyEmptyMessages?: boolean; errorCall?: boolean; filter?: Parameters<typeof aggregateStats>[0] } = {},
+) =>
   // #483：通过真实 Session 服务写入数据，避免测试复制 aggregateStats 的归因算法
   Effect.gen(function* () {
     const session = yield* Session.Service
@@ -277,7 +285,10 @@ const seedNamedProject = () =>
     yield* db
       .update(ProjectTable)
       // #483：worktree 列带 AbsolutePath brand——测试用裸字符串 as never 直写存储边界
-      .set({ name: "Stats\nProject\u001bX | $HOME > report", worktree: "/tmp/project with space/$(noop)|source" as never })
+      .set({
+        name: "Stats\nProject\u001bX | $HOME > report",
+        worktree: "/tmp/project with space/$(noop)|source" as never,
+      })
       .where(eq(ProjectTable.id, info.projectID))
       .run()
     return { report: yield* aggregateStats(), projectID: info.projectID }
@@ -305,7 +316,8 @@ describe("stats data", () => {
   test("accepts root breakdown shortcuts with optional limits", async () => {
     const builder = StatsCommand.builder
     if (typeof builder !== "function") throw new Error("stats command builder is unavailable")
-    const parse = async (args: string[]) => (await builder(yargs(args).exitProcess(false).showHelpOnFail(false))).parse()
+    const parse = async (args: string[]) =>
+      (await builder(yargs(args).exitProcess(false).showHelpOnFail(false))).parse()
     const tools = await parse(["--tools"])
     const topTools = await parse(["--tools", "4"])
     const models = await parse(["--models"])
@@ -322,9 +334,23 @@ describe("stats data", () => {
   })
 
   test("rejects options that a stats endpoint does not consume", async () => {
-    if (typeof StatsCommand.builder !== "function" || typeof StatsBreakdownCommand.builder !== "function" || typeof StatsTimelineCommand.builder !== "function" || typeof StatsSessionsCommand.builder !== "function" || typeof StatsInsightsCommand.builder !== "function") throw new Error("stats detail command builders are unavailable")
+    if (
+      typeof StatsCommand.builder !== "function" ||
+      typeof StatsBreakdownCommand.builder !== "function" ||
+      typeof StatsTimelineCommand.builder !== "function" ||
+      typeof StatsSessionsCommand.builder !== "function" ||
+      typeof StatsInsightsCommand.builder !== "function"
+    )
+      throw new Error("stats detail command builders are unavailable")
     const rootBuilder = StatsCommand.builder
-    const parser = (args: string[]) => yargs(args).exitProcess(false).showHelpOnFail(false).strictOptions().fail((message, error) => { throw error ?? new Error(message) })
+    const parser = (args: string[]) =>
+      yargs(args)
+        .exitProcess(false)
+        .showHelpOnFail(false)
+        .strictOptions()
+        .fail((message, error) => {
+          throw error ?? new Error(message)
+        })
     const timeline = await StatsTimelineCommand.builder(parser(["--sort", "cost"]))
     const sessions = await StatsSessionsCommand.builder(parser(["--metric", "cost"]))
     const insights = await StatsInsightsCommand.builder(parser(["--limit", "5"]))
@@ -338,12 +364,30 @@ describe("stats data", () => {
     let called = false
     let failure: unknown
     // 保留真实builder，只替换执行入口；错误参数被放行时也不会触发AppRuntime。
-    const publicParser = yargs(["stats", "--limit", "5", "insights"]).exitProcess(false).showHelpOnFail(false).fail((message, error) => { throw error ?? new Error(message) }).command({
-      ...StatsCommand,
-      builder: async (root) => (await rootBuilder(root)).command({ ...StatsInsightsCommand, handler: () => { called = true } }),
-      handler: () => {},
-    }).demandCommand().strict()
-    try { await publicParser.parse() } catch (error) { failure = error }
+    const publicParser = yargs(["stats", "--limit", "5", "insights"])
+      .exitProcess(false)
+      .showHelpOnFail(false)
+      .fail((message, error) => {
+        throw error ?? new Error(message)
+      })
+      .command({
+        ...StatsCommand,
+        builder: async (root) =>
+          (await rootBuilder(root)).command({
+            ...StatsInsightsCommand,
+            handler: () => {
+              called = true
+            },
+          }),
+        handler: () => {},
+      })
+      .demandCommand()
+      .strict()
+    try {
+      await publicParser.parse()
+    } catch (error) {
+      failure = error
+    }
     expect(String(failure)).toContain("limit")
     expect(called).toBe(false)
   })

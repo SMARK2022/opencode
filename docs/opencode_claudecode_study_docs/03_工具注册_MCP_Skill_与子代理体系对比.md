@@ -115,6 +115,7 @@ OpenCode 的 MCP 则更多体现在：
 ## 3.5 两者在工具与代理体系上的真正差异
 
 ### Claude Code Rebuilt 的强项
+
 - 工具生态更全面；
 - 技能生命周期更完整；
 - 子代理与系统主循环结合得更深；
@@ -122,6 +123,7 @@ OpenCode 的 MCP 则更多体现在：
 - 并发与只读工具调度更成熟。
 
 ### OpenCode 的强项
+
 - registry 设计更干净；
 - agent、tool、plugin、provider 的边界更明晰；
 - task 作为工具的设计更利于持续扩展；
@@ -131,6 +133,7 @@ OpenCode 的 MCP 则更多体现在：
 ## 3.6 OpenCode 的建议改造方向
 
 ### 第一项：给 Tool.Def 增加更多元数据
+
 建议在 registry 层为工具补充元数据，例如：
 
 - `readonly`
@@ -141,6 +144,7 @@ OpenCode 的 MCP 则更多体现在：
 - `compactPriority`
 
 ### 第二项：把 Skill 做成跨 compact 的弱持久资源
+
 可以做轻量版：
 
 - 记录本 session 已调用 skills；
@@ -148,6 +152,7 @@ OpenCode 的 MCP 则更多体现在：
 - 必要时允许在 compact 后自动重提示已调用 skills。
 
 ### 第三项：为 TaskTool 建立子代理结果标准化协议
+
 建议所有子代理结果统一输出：
 
 - `summary`
@@ -158,6 +163,7 @@ OpenCode 的 MCP 则更多体现在：
 - `cost`
 
 ### 第四项：在 MCP 层增加统一输出瘦身器
+
 高噪声 MCP 工具非常容易把上下文炸掉。建议对 MCP tool output 加统一的：
 
 - preview
@@ -172,10 +178,8 @@ OpenCode 的工程秩序更好，更适合你继续做体系化增强。
 
 如果你后续只做两件事，我建议优先做：
 
-1. **TaskTool 结果标准化 + 角色化模型路由**  
+1. **TaskTool 结果标准化 + 角色化模型路由**
 2. **Skill 与 MCP 输出的跨 compact 轻持久化**
-
-
 
 ## 3.8 从“工程整洁度”再看一遍：为什么 OpenCode 的 registry 值得你珍惜
 
@@ -184,6 +188,7 @@ OpenCode 的工程秩序更好，更适合你继续做体系化增强。
 这两个概念看似接近，实际上天差地别。
 
 一个项目可以在内部安装二十种工具，但当前回合不一定都该暴露给模型。比如：
+
 - plan agent 不应该看到 edit/write 这类执行工具；
 - compaction agent 根本不应该看到 bash；
 - 某个 provider 或某类模型不适合暴露 patch 类工具；
@@ -214,7 +219,9 @@ OpenCode 今天的 TaskTool 已经能把子代理跑起来，但真正要把多 
 所谓“可运营”，至少包括以下几件事：
 
 ### 一，能度量
+
 每个子代理要知道：
+
 - 自己用了多少 token；
 - 读了多少文件；
 - 调了多少工具；
@@ -222,12 +229,15 @@ OpenCode 今天的 TaskTool 已经能把子代理跑起来，但真正要把多 
 - 是否真的减少了主线程负担。
 
 ### 二，能压缩
+
 Explore 类子代理的输出特别容易变成长段观察日志。必须要求它们以结构化 envelope 返回，否则越多子代理，主上下文越快膨胀。
 
 ### 三，能恢复
+
 如果用户下一轮继续同一问题，或者任务被 compact 过一次，系统应该尽量恢复已有 task session，而不是再新开一个“几乎重复”的子任务。
 
 ### 四，能分档
+
 并不是所有子代理都值得上强模型。  
 Explore 可能更适合便宜模型；  
 Plan 可能需要更强模型；  
@@ -250,6 +260,7 @@ Summary/Compaction 则应该极便宜。
 工具、MCP、Skill、子代理这块，Claude Code Rebuilt 给你的是一个“高完成度样板”；OpenCode 给你的是一个“高可塑性平台”。
 
 如果你的目标是继续建设自己的体系，那么工具系统的核心不是“赶紧变多”，而是：
+
 - 让 registry 成为真正的能力总线；
 - 让 Skill 保持轻而可进化；
 - 让 Task 成为多 agent 的运营中心；

@@ -59,16 +59,16 @@ type SessionRunSettled = {
 
 默认声音策略应是：
 
-| 条件 | 默认行为 |
-| --- | --- |
-| root Session、`kind=agent`、`outcome=completed` | 播放一次柔和完成声 |
-| child/subagent Session 完成 | 默认不播放最终完成声 |
-| `failed` | 不播放成功声；错误提示保持独立策略 |
-| `aborted` | 默认静音，避免把用户取消误报为任务完成 |
-| `paused` / `blocked` | 不播放成功声；可由独立 attention 策略提示 |
-| direct shell / manual Compaction | 默认不播放 Agent 完成声 |
-| 仍有关联 BackgroundJob、result injection 或 Goal continuation | 尚未 settled，不播放 |
-| 同一 generation 的重复传输 | 按 `generationID` 去重，只尝试播放一次 |
+| 条件                                                          | 默认行为                                  |
+| ------------------------------------------------------------- | ----------------------------------------- |
+| root Session、`kind=agent`、`outcome=completed`               | 播放一次柔和完成声                        |
+| child/subagent Session 完成                                   | 默认不播放最终完成声                      |
+| `failed`                                                      | 不播放成功声；错误提示保持独立策略        |
+| `aborted`                                                     | 默认静音，避免把用户取消误报为任务完成    |
+| `paused` / `blocked`                                          | 不播放成功声；可由独立 attention 策略提示 |
+| direct shell / manual Compaction                              | 默认不播放 Agent 完成声                   |
+| 仍有关联 BackgroundJob、result injection 或 Goal continuation | 尚未 settled，不播放                      |
+| 同一 generation 的重复传输                                    | 按 `generationID` 去重，只尝试播放一次    |
 
 播放侧继续使用现有 native OpenTUI Audio。不要把声音放进 `SessionProcessor`、`SessionStatus.set()`、HTTP handler 或 Server daemon。
 
@@ -103,16 +103,16 @@ type SessionRunSettled = {
 
 本文沿用 `CONTEXT.md` 的领域语言。
 
-| 术语 | 本文定义 |
-| --- | --- |
-| Session | Project 内由 Agent 驱动、持久化 Message 的执行容器 |
-| Status | `idle`、`retry`、`busy` 的总线标签；只表达高层忙闲，不表达任务成功 |
-| Run state | `cancel`、`ensureRunning`、`startShell` 等 in-flight Runner 控制面 |
-| Runner generation | 从一个 Session 的 Run state 接受一批关联工作，到这批工作不可再自动产生下一轮 loop 为止的唯一执行代次 |
-| Settlement | generation 已不可再产生关联的 Agent loop、Goal continuation、前台 child、BackgroundJob result injection 或取消清理 |
-| Root request | 打开 generation 的真实外部用户 Message；不包括 Goal、Compaction 或 background result 生成的 synthetic Message |
-| Owned work | 能继续或重启同一 generation 的工作，例如 Goal continuation、foreground child、BackgroundJob、result injection |
-| Local adapter | TUI、浏览器或 Electron 中把 settlement 映射为声音、OS notification、badge 或静音的实现 |
+| 术语              | 本文定义                                                                                                           |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------ |
+| Session           | Project 内由 Agent 驱动、持久化 Message 的执行容器                                                                 |
+| Status            | `idle`、`retry`、`busy` 的总线标签；只表达高层忙闲，不表达任务成功                                                 |
+| Run state         | `cancel`、`ensureRunning`、`startShell` 等 in-flight Runner 控制面                                                 |
+| Runner generation | 从一个 Session 的 Run state 接受一批关联工作，到这批工作不可再自动产生下一轮 loop 为止的唯一执行代次               |
+| Settlement        | generation 已不可再产生关联的 Agent loop、Goal continuation、前台 child、BackgroundJob result injection 或取消清理 |
+| Root request      | 打开 generation 的真实外部用户 Message；不包括 Goal、Compaction 或 background result 生成的 synthetic Message      |
+| Owned work        | 能继续或重启同一 generation 的工作，例如 Goal continuation、foreground child、BackgroundJob、result injection      |
+| Local adapter     | TUI、浏览器或 Electron 中把 settlement 映射为声音、OS notification、badge 或静音的实现                             |
 
 Status 和 Run state 已经在仓库领域模型中被明确区分。Settlement 是第三个概念，不能继续复用 `idle` 的名字或语义。
 
@@ -120,38 +120,38 @@ Status 和 Run state 已经在仓库领域模型中被明确区分。Settlement 
 
 ### 4.1 生产代码
 
-| 区域 | 关键文件 | 调研目的 |
-| --- | --- | --- |
-| Runner | `packages/opencode/src/effect/runner.ts` | Idle/Running/Shell/ShellThenRun、handoff、cancel 与 onIdle 顺序 |
-| Run state | `packages/opencode/src/session/run-state.ts` | per-Session Runner、Status 写入、BackgroundJob cancel |
-| Agent loop | `packages/opencode/src/session/prompt.ts` | Message admission、Goal、Compaction、Tool、shell、loop exit |
-| Processor | `packages/opencode/src/session/processor.ts` | retry、error、abort、cleanup 和提前 idle |
-| Status | `packages/opencode/src/session/status.ts` | `session.status` 与 deprecated `session.idle` 发布顺序 |
-| Background | `packages/opencode/src/background/job.ts` | BackgroundJob 状态、fiber 与 cancel |
-| Task Tool | `packages/opencode/src/tool/task.ts` | foreground/background subagent、result injection、parent resume |
-| Request usage | `packages/opencode/src/session/request-usage.ts` | `requestID`、`rootRequestID` 与持久化结果 |
-| EventV2 | `packages/core/src/event.ts`、`session-event.ts` | 当前 versioned event interface 与缺失的 run settlement |
-| Event bridge | `packages/opencode/src/event-v2-bridge.ts`、`sync/index.ts` | EventV2 到现有 Bus/SDK 的迁移 seam |
-| TUI notifications | `packages/opencode/src/cli/cmd/tui/feature-plugins/system/notifications.ts` | 当前 busy-to-idle 推断、error suppression、subagent 策略 |
-| TUI attention | `packages/opencode/src/cli/cmd/tui/attention.ts` | focus、sound pack、volume、fallback 和配置总开关 |
-| TUI audio | `packages/opencode/src/cli/cmd/tui/util/audio.ts` | native Audio 创建、加载、播放、缓存与销毁 |
-| App notifications | `packages/app/src/context/notification.tsx` | Web/Desktop idle、error、parent filtering 和持久通知 |
-| Browser audio | `packages/app/src/utils/sound.ts` | AAC lazy import、`Audio.play()` 和失败降级 |
-| Desktop | `packages/desktop/src/renderer/index.tsx`、`main/ipc.ts` | renderer audio 与 OS notification 所有权 |
-| Run/ACP | `packages/opencode/src/cli/cmd/run.ts`、`src/acp/agent.ts` | 非 TUI surface 是否应发声 |
-| Build | `packages/opencode/script/build.ts` | OpenTUI native package 与静态 asset 打包 |
+| 区域              | 关键文件                                                                    | 调研目的                                                        |
+| ----------------- | --------------------------------------------------------------------------- | --------------------------------------------------------------- |
+| Runner            | `packages/opencode/src/effect/runner.ts`                                    | Idle/Running/Shell/ShellThenRun、handoff、cancel 与 onIdle 顺序 |
+| Run state         | `packages/opencode/src/session/run-state.ts`                                | per-Session Runner、Status 写入、BackgroundJob cancel           |
+| Agent loop        | `packages/opencode/src/session/prompt.ts`                                   | Message admission、Goal、Compaction、Tool、shell、loop exit     |
+| Processor         | `packages/opencode/src/session/processor.ts`                                | retry、error、abort、cleanup 和提前 idle                        |
+| Status            | `packages/opencode/src/session/status.ts`                                   | `session.status` 与 deprecated `session.idle` 发布顺序          |
+| Background        | `packages/opencode/src/background/job.ts`                                   | BackgroundJob 状态、fiber 与 cancel                             |
+| Task Tool         | `packages/opencode/src/tool/task.ts`                                        | foreground/background subagent、result injection、parent resume |
+| Request usage     | `packages/opencode/src/session/request-usage.ts`                            | `requestID`、`rootRequestID` 与持久化结果                       |
+| EventV2           | `packages/core/src/event.ts`、`session-event.ts`                            | 当前 versioned event interface 与缺失的 run settlement          |
+| Event bridge      | `packages/opencode/src/event-v2-bridge.ts`、`sync/index.ts`                 | EventV2 到现有 Bus/SDK 的迁移 seam                              |
+| TUI notifications | `packages/opencode/src/cli/cmd/tui/feature-plugins/system/notifications.ts` | 当前 busy-to-idle 推断、error suppression、subagent 策略        |
+| TUI attention     | `packages/opencode/src/cli/cmd/tui/attention.ts`                            | focus、sound pack、volume、fallback 和配置总开关                |
+| TUI audio         | `packages/opencode/src/cli/cmd/tui/util/audio.ts`                           | native Audio 创建、加载、播放、缓存与销毁                       |
+| App notifications | `packages/app/src/context/notification.tsx`                                 | Web/Desktop idle、error、parent filtering 和持久通知            |
+| Browser audio     | `packages/app/src/utils/sound.ts`                                           | AAC lazy import、`Audio.play()` 和失败降级                      |
+| Desktop           | `packages/desktop/src/renderer/index.tsx`、`main/ipc.ts`                    | renderer audio 与 OS notification 所有权                        |
+| Run/ACP           | `packages/opencode/src/cli/cmd/run.ts`、`src/acp/agent.ts`                  | 非 TUI surface 是否应发声                                       |
+| Build             | `packages/opencode/script/build.ts`                                         | OpenTUI native package 与静态 asset 打包                        |
 
 ### 4.2 测试与规格
 
-| 文件 | 已覆盖内容 |
-| --- | --- |
-| `packages/opencode/test/effect/runner.test.ts` | Runner handoff、cancel、idle/finalizer 顺序 |
-| `packages/opencode/test/session/prompt.test.ts` | Agent loop、Compaction handoff、subagent cancel |
-| `packages/opencode/test/cli/cmd/tui/attention.test.ts` | focus、音量、sound pack、fallback、dispose |
+| 文件                                                       | 已覆盖内容                                              |
+| ---------------------------------------------------------- | ------------------------------------------------------- |
+| `packages/opencode/test/effect/runner.test.ts`             | Runner handoff、cancel、idle/finalizer 顺序             |
+| `packages/opencode/test/session/prompt.test.ts`            | Agent loop、Compaction handoff、subagent cancel         |
+| `packages/opencode/test/cli/cmd/tui/attention.test.ts`     | focus、音量、sound pack、fallback、dispose              |
 | `packages/opencode/test/cli/cmd/tui/notifications.test.ts` | question、Permission、busy/idle、error、subagent sounds |
-| `packages/opencode/test/config/tui.test.ts` | attention 默认值和路径解析 |
-| `packages/opencode/specs/tui-plugins.md` | attention plugin interface 与当前默认关闭事实 |
-| `packages/opencode/specs/v2/notifications.md` | v2 计划把 `attention.enabled` 默认改为 true |
+| `packages/opencode/test/config/tui.test.ts`                | attention 默认值和路径解析                              |
+| `packages/opencode/specs/tui-plugins.md`                   | attention plugin interface 与当前默认关闭事实           |
+| `packages/opencode/specs/v2/notifications.md`              | v2 计划把 `attention.enabled` 默认改为 true             |
 
 ### 4.3 无声运行时探针
 
@@ -240,15 +240,15 @@ ShellThenRun
 
 ### 6.2 Status 的全部写入源
 
-| Status | 写入位置 | 语义 |
-| --- | --- | --- |
-| `busy` | `session/prompt.ts:2228-2230` | 每个 runLoop iteration 开始 |
-| `busy` | `session/processor.ts:340-344` | Provider stream start |
-| `busy` | `session/run-state.ts:83` | shell/maintenance Runner 进入 busy |
-| `retry` | `session/processor.ts:1066-1094` | retry schedule 等待下一次请求 |
-| `idle` | `session/run-state.ts:78-82` | Runner onIdle |
-| `idle` | `session/run-state.ts:121-130` | cancel 时没有 busy Runner 也强制 idle |
-| `idle` | `session/processor.ts:991-1018` | 非 overflow terminal processor error/abort |
+| Status  | 写入位置                         | 语义                                       |
+| ------- | -------------------------------- | ------------------------------------------ |
+| `busy`  | `session/prompt.ts:2228-2230`    | 每个 runLoop iteration 开始                |
+| `busy`  | `session/processor.ts:340-344`   | Provider stream start                      |
+| `busy`  | `session/run-state.ts:83`        | shell/maintenance Runner 进入 busy         |
+| `retry` | `session/processor.ts:1066-1094` | retry schedule 等待下一次请求              |
+| `idle`  | `session/run-state.ts:78-82`     | Runner onIdle                              |
+| `idle`  | `session/run-state.ts:121-130`   | cancel 时没有 busy Runner 也强制 idle      |
+| `idle`  | `session/processor.ts:991-1018`  | 非 overflow terminal processor error/abort |
 
 Status 写入没有去重。一次普通请求可以发布多次 `busy`；一次取消可以由 Runner 和 Processor 发布多次 `idle`。
 
@@ -328,14 +328,14 @@ retry 只表示 Provider 请求将在之后重试，不是失败或完成。TUI 
 
 `session.error` 也不是 terminal settlement：
 
-| Error 来源 | 是否一定 terminal |
-| --- | --- |
-| context overflow | 否，通常进入 Compaction |
-| 文件/目录读取失败并转成 synthetic context | 否，Agent 继续 |
-| Provider terminal error | 可能被 Goal `continueOnError` 继续 |
-| async route 包装后的 generic error | 可能与更具体 error 重复 |
-| user abort | 是终止意图，但 idle 可能早于 cleanup |
-| Agent/model 配置错误 | 通常 terminal，但可能在 Runner busy 之前发生 |
+| Error 来源                                | 是否一定 terminal                            |
+| ----------------------------------------- | -------------------------------------------- |
+| context overflow                          | 否，通常进入 Compaction                      |
+| 文件/目录读取失败并转成 synthetic context | 否，Agent 继续                               |
+| Provider terminal error                   | 可能被 Goal `continueOnError` 继续           |
+| async route 包装后的 generic error        | 可能与更具体 error 重复                      |
+| user abort                                | 是终止意图，但 idle 可能早于 cleanup         |
+| Agent/model 配置错误                      | 通常 terminal，但可能在 Runner busy 之前发生 |
 
 Runner cancel 会先切 Idle、执行 idle callback，再 interrupt worker；测试明确覆盖 idle 可能早于 interrupted-run finalizer。`SessionPrompt.cancel()` 随后才 terminalize Assistant、Tool Part、RequestUsage 和 dangling child Assistant，见 `prompt.ts:400-511`。
 
@@ -398,19 +398,19 @@ title generation、Session summary/diff 和 Compaction prune 会 detached fork�
 
 ## 7. 为什么当前 idle 不是可靠完成事件
 
-| 场景 | 当前可见事件 | 直接用 idle 的结果 |
-| --- | --- | --- |
-| 普通多 step Agent | 多次 busy，最后 idle | 通常正确，但缺少 generation ID |
-| retry 后成功 | busy -> retry -> busy -> idle | 通常正确 |
-| terminal error + Goal continuation | error -> idle -> busy -> idle | 第一个 idle 误报 |
-| automatic Compaction | busy/error/compaction/busy/idle | 中间信号可能误报 |
-| manual Compaction，无 prompt | busy -> idle | 把 maintenance 误报为 Agent 完成 |
-| direct shell，无 Agent | busy -> idle | 把 shell 误报为 Agent 完成 |
-| late queued Message | busy -> idle，但 Message 未消费 | 提前完成 |
-| foreground child | child idle，parent 仍 busy | child sound 误导 |
-| background child | parent idle，稍后 parent 再 busy | 多次“完成” |
-| user abort | error/idle/idle，cleanup 尚在进行 | 提前或重复 |
-| reconnect/late attach | 可能只看到 idle snapshot | 无法知道是否刚完成 |
+| 场景                               | 当前可见事件                      | 直接用 idle 的结果               |
+| ---------------------------------- | --------------------------------- | -------------------------------- |
+| 普通多 step Agent                  | 多次 busy，最后 idle              | 通常正确，但缺少 generation ID   |
+| retry 后成功                       | busy -> retry -> busy -> idle     | 通常正确                         |
+| terminal error + Goal continuation | error -> idle -> busy -> idle     | 第一个 idle 误报                 |
+| automatic Compaction               | busy/error/compaction/busy/idle   | 中间信号可能误报                 |
+| manual Compaction，无 prompt       | busy -> idle                      | 把 maintenance 误报为 Agent 完成 |
+| direct shell，无 Agent             | busy -> idle                      | 把 shell 误报为 Agent 完成       |
+| late queued Message                | busy -> idle，但 Message 未消费   | 提前完成                         |
+| foreground child                   | child idle，parent 仍 busy        | child sound 误导                 |
+| background child                   | parent idle，稍后 parent 再 busy  | 多次“完成”                       |
+| user abort                         | error/idle/idle，cleanup 尚在进行 | 提前或重复                       |
+| reconnect/late attach              | 可能只看到 idle snapshot          | 无法知道是否刚完成               |
 
 结论：
 
@@ -501,14 +501,14 @@ ACP relay Message、Tool 和 Permission 等协议事件，不处理 completion s
 
 ### 8.7 行为对比
 
-| Surface | 当前完成信号 | 默认声音 | child Session | error 后 done | 设备所有者 |
-| --- | --- | ---: | --- | --- | --- |
-| TUI | observed busy/retry -> idle | 否，attention 总开关 false | 播 `subagent_done` | suppression | TUI 本机进程 |
-| Web | deprecated `session.idle` | 是 | 完全忽略 | 可能播放 | 浏览器 tab |
-| Desktop | deprecated `session.idle` | 是 | 完全忽略 | 可能播放 | Electron renderer |
-| `run` | `session.status(idle)` | 否 | 不适用 | 退出逻辑受影响 | 无 |
-| ACP | 无 completion presentation | 否 | 协议 relay | 不适用 | ACP client 决定 |
-| Server | 无 | 否 | 不适用 | 不适用 | 不应拥有设备 |
+| Surface | 当前完成信号                |                   默认声音 | child Session      | error 后 done  | 设备所有者        |
+| ------- | --------------------------- | -------------------------: | ------------------ | -------------- | ----------------- |
+| TUI     | observed busy/retry -> idle | 否，attention 总开关 false | 播 `subagent_done` | suppression    | TUI 本机进程      |
+| Web     | deprecated `session.idle`   |                         是 | 完全忽略           | 可能播放       | 浏览器 tab        |
+| Desktop | deprecated `session.idle`   |                         是 | 完全忽略           | 可能播放       | Electron renderer |
+| `run`   | `session.status(idle)`      |                         否 | 不适用             | 退出逻辑受影响 | 无                |
+| ACP     | 无 completion presentation  |                         否 | 协议 relay         | 不适用         | ACP client 决定   |
+| Server  | 无                          |                         否 | 不适用             | 不适用         | 不应拥有设备      |
 
 ## 9. TUI 音频链路审计
 
@@ -528,14 +528,14 @@ attention.notify({ sound: { name: "done" } })
 
 `packages/opencode/src/cli/cmd/tui/attention.ts:16-21` 当前映射：
 
-| 语义 | MP3 |
-| --- | --- |
-| `default` | `bip-bop-01.mp3` |
-| `question` | `bip-bop-03.mp3` |
-| `permission` | `staplebops-06.mp3` |
-| `error` | `nope-03.mp3` |
-| `done` | `bip-bop-01.mp3` |
-| `subagent_done` | `yup-01.mp3` |
+| 语义            | MP3                 |
+| --------------- | ------------------- |
+| `default`       | `bip-bop-01.mp3`    |
+| `question`      | `bip-bop-03.mp3`    |
+| `permission`    | `staplebops-06.mp3` |
+| `error`         | `nope-03.mp3`       |
+| `done`          | `bip-bop-01.mp3`    |
+| `subagent_done` | `yup-01.mp3`        |
 
 候选顺序为：
 
@@ -574,10 +574,10 @@ OpenTUI 0.3.4 相关源码：
 
 当前 lockfile 固定 `@opentui/core@0.3.4`，包含 8 个 platform packages。native miniaudio backend 覆盖：
 
-| 平台 | backend |
-| --- | --- |
-| macOS | CoreAudio |
-| Linux | ALSA、PulseAudio |
+| 平台    | backend                    |
+| ------- | -------------------------- |
+| macOS   | CoreAudio                  |
+| Linux   | ALSA、PulseAudio           |
 | Windows | WASAPI、DirectSound、WinMM |
 
 OpenCode build matrix覆盖 macOS/Linux/Windows、arm64/x64，以及 Linux glibc/musl。音频没有扩展主 TUI 之外的新平台要求，因为 OpenTUI renderer 本身已经依赖相同 native package。
@@ -612,11 +612,11 @@ OpenCode build matrix覆盖 macOS/Linux/Windows、arm64/x64，以及 Linux glibc
 
 使用 OpenTUI headless mixer 对候选 clip 做了无声测量：
 
-| 文件 | `afinfo` 时长 | native peak | active RMS | 当前用途 |
-| --- | ---: | ---: | ---: | --- |
-| `bip-bop-01.mp3` | 0.679s | 0.3142 | 0.1138 | TUI default/done |
-| `staplebops-01.mp3` | 0.418s | 0.2042 | 0.0194 | App completion default |
-| `yup-01.mp3` | 0.653s | 0.2554 | 0.0339 | TUI subagent done |
+| 文件                | `afinfo` 时长 | native peak | active RMS | 当前用途               |
+| ------------------- | ------------: | ----------: | ---------: | ---------------------- |
+| `bip-bop-01.mp3`    |        0.679s |      0.3142 |     0.1138 | TUI default/done       |
+| `staplebops-01.mp3` |        0.418s |      0.2042 |     0.0194 | App completion default |
+| `yup-01.mp3`        |        0.653s |      0.2554 |     0.0339 | TUI subagent done      |
 
 测量方法使用 48kHz、双声道、2 秒 buffer，active RMS 只统计绝对值大于 `1e-5` 的 sample。它能比较技术电平，不能判断音色是否“耐听”。
 
@@ -647,26 +647,26 @@ OpenCode build matrix覆盖 macOS/Linux/Windows、arm64/x64，以及 Linux glibc
 
 ### 9.8 remote、SSH 与 headless
 
-| 运行方式 | 声音发生位置 |
-| --- | --- |
-| 本地 TUI + 本地 Server | 本机默认输出设备 |
-| 本地 `attach` + 远程 Server | attach TUI 所在本机 |
-| 通过 SSH 在远端启动 TUI | 远端机器的默认设备；通常无设备并静默失败 |
-| container/headless TUI | start 失败，sound=false，其他通知仍可工作 |
-| server-only | 不创建 audio engine |
+| 运行方式                    | 声音发生位置                              |
+| --------------------------- | ----------------------------------------- |
+| 本地 TUI + 本地 Server      | 本机默认输出设备                          |
+| 本地 `attach` + 远程 Server | attach TUI 所在本机                       |
+| 通过 SSH 在远端启动 TUI     | 远端机器的默认设备；通常无设备并静默失败  |
+| container/headless TUI      | start 失败，sound=false，其他通知仍可工作 |
+| server-only                 | 不创建 audio engine                       |
 
 BEL 与 native Audio 的差异是：BEL 通过 terminal stream 到达 terminal emulator，可能在 SSH 本地提示；native Audio 属于运行进程所在 OS。若未来需要 SSH-friendly 模式，应提供显式 `bell` adapter，而不是 native 失败后自动 fallback。自动 fallback 可能造成重复提示，并受 terminal bell 设置影响。
 
 ## 10. 备选播放方案
 
-| 方案 | 跨平台 | 默认设备 | 音量 | 外部依赖 | SSH 本地 | 推荐 |
-| --- | ---: | ---: | ---: | ---: | ---: | --- |
-| OpenTUI native Audio | 是，覆盖现有 release matrix | 是 | 是 | 无新增 | 否 | 默认方案 |
-| macOS `afplay` | 仅 macOS | 是 | 是 | 外部进程 | 否 | 拒绝默认使用 |
-| Linux `paplay`/`aplay` | 分发行依赖 | 通常 | 不一致 | 常缺失 | 否 | 拒绝默认使用 |
-| PowerShell/Media.SoundPlayer | Windows 限制多 | 不稳定 | 不一致 | 子进程/runtime | 否 | 拒绝默认使用 |
-| terminal BEL | terminal-dependent | 不适用 | 不可控 | 无 | 是 | 仅未来显式 adapter |
-| Server 播放 | 错误主机 | Server 默认设备 | 可控但无意义 | 无 | 否 | 明确拒绝 |
+| 方案                         |                      跨平台 |        默认设备 |         音量 |       外部依赖 | SSH 本地 | 推荐               |
+| ---------------------------- | --------------------------: | --------------: | -----------: | -------------: | -------: | ------------------ |
+| OpenTUI native Audio         | 是，覆盖现有 release matrix |              是 |           是 |         无新增 |       否 | 默认方案           |
+| macOS `afplay`               |                    仅 macOS |              是 |           是 |       外部进程 |       否 | 拒绝默认使用       |
+| Linux `paplay`/`aplay`       |                  分发行依赖 |            通常 |       不一致 |         常缺失 |       否 | 拒绝默认使用       |
+| PowerShell/Media.SoundPlayer |              Windows 限制多 |          不稳定 |       不一致 | 子进程/runtime |       否 | 拒绝默认使用       |
+| terminal BEL                 |          terminal-dependent |          不适用 |       不可控 |             无 |       是 | 仅未来显式 adapter |
+| Server 播放                  |                    错误主机 | Server 默认设备 | 可控但无意义 |             无 |       否 | 明确拒绝           |
 
 OpenTUI native Audio 的 interface 已经存在、已有两个以上平台 adapter、打包路径也已建立。继续使用它比建立一组 shell command adapter 更深、更安全、更有 locality。
 
@@ -700,33 +700,33 @@ OpenTUI native Audio 的 interface 已经存在、已有两个以上平台 adapt
 
 ### 12.1 Settlement 不变量
 
-| 编号 | 不变量 |
-| --- | --- |
-| S1 | 一个 Session 同时最多有一个 open Agent generation |
-| S2 | generation 从 open 到 settled 只能转换一次，settled 后不能 reopen |
-| S3 | 后续外部输入在 closure 之后创建新 generation |
-| S4 | 每个 accepted root/queued Message 必须在 settlement 前被 answered、coalesced、aborted 或标为 noReply |
-| S5 | Goal continuation、自动 Compaction、foreground child 和关联 BackgroundJob handoff 都属于当前 generation |
-| S6 | manual Compaction/direct shell 必须有 `kind`，不能伪装成 Agent completion |
-| S7 | cancellation 只有在 terminal writes 和 owned cleanup 完成后才能 settled |
-| S8 | Status 不参与 settlement interface；重复 busy/idle 不改变 generation identity |
-| S9 | `session.error` 是诊断事实，不直接决定 failed settlement |
-| S10 | generation settlement 必须有稳定 ID，供 at-least-once transport 去重 |
-| S11 | settlement event 必须在最终 Message/RequestUsage terminal state 持久化之后发布 |
-| S12 | title、summary、prune 等不会再启动 Agent loop 的 detached work 不阻止 settlement |
+| 编号 | 不变量                                                                                                  |
+| ---- | ------------------------------------------------------------------------------------------------------- |
+| S1   | 一个 Session 同时最多有一个 open Agent generation                                                       |
+| S2   | generation 从 open 到 settled 只能转换一次，settled 后不能 reopen                                       |
+| S3   | 后续外部输入在 closure 之后创建新 generation                                                            |
+| S4   | 每个 accepted root/queued Message 必须在 settlement 前被 answered、coalesced、aborted 或标为 noReply    |
+| S5   | Goal continuation、自动 Compaction、foreground child 和关联 BackgroundJob handoff 都属于当前 generation |
+| S6   | manual Compaction/direct shell 必须有 `kind`，不能伪装成 Agent completion                               |
+| S7   | cancellation 只有在 terminal writes 和 owned cleanup 完成后才能 settled                                 |
+| S8   | Status 不参与 settlement interface；重复 busy/idle 不改变 generation identity                           |
+| S9   | `session.error` 是诊断事实，不直接决定 failed settlement                                                |
+| S10  | generation settlement 必须有稳定 ID，供 at-least-once transport 去重                                    |
+| S11  | settlement event 必须在最终 Message/RequestUsage terminal state 持久化之后发布                          |
+| S12  | title、summary、prune 等不会再启动 Agent loop 的 detached work 不阻止 settlement                        |
 
 ### 12.2 Presentation 不变量
 
-| 编号 | 不变量 |
-| --- | --- |
-| P1 | Core/Server event 不包含 sound name、volume、focus、OS notification 文案 |
-| P2 | root Agent completed generation 最多尝试播放一次 |
-| P3 | transport 重复不能重复播放；按 `(sessionID, generationID)` 去重 |
-| P4 | failed/aborted/paused/blocked 不播放成功声 |
-| P5 | child Session 默认不播放 root 完成声 |
-| P6 | 音频失败只影响 presentation result，不影响 settlement |
-| P7 | 非交互 surface 没有 audio adapter 就保持静音，不需要伪造 no-op module |
-| P8 | reconnect snapshot 默认只 seed 去重，不追溯播放历史完成声 |
+| 编号 | 不变量                                                                   |
+| ---- | ------------------------------------------------------------------------ |
+| P1   | Core/Server event 不包含 sound name、volume、focus、OS notification 文案 |
+| P2   | root Agent completed generation 最多尝试播放一次                         |
+| P3   | transport 重复不能重复播放；按 `(sessionID, generationID)` 去重          |
+| P4   | failed/aborted/paused/blocked 不播放成功声                               |
+| P5   | child Session 默认不播放 root 完成声                                     |
+| P6   | 音频失败只影响 presentation result，不影响 settlement                    |
+| P7   | 非交互 surface 没有 audio adapter 就保持静音，不需要伪造 no-op module    |
+| P8   | reconnect snapshot 默认只 seed 去重，不追溯播放历史完成声                |
 
 ## 13. 方案比较
 
@@ -830,9 +830,7 @@ export interface Interface {
     work: Effect.Effect<A, E, R>,
   ) => Effect.Effect<A, E, R>
 
-  readonly get: (
-    sessionID: SessionID,
-  ) => Effect.Effect<Snapshot | undefined>
+  readonly get: (sessionID: SessionID) => Effect.Effect<Snapshot | undefined>
 }
 ```
 
@@ -905,12 +903,12 @@ type Generation = {
 closure 条件：
 
 ```ts
-generation.runnerDone === true
-&& generation.owned.size === 0
-&& noAcceptedMessageAfter(generation.messageWatermark)
-&& noEligibleGoalContinuation()
-&& cancellationIsCompleteIfRequested()
-&& terminalMessageStateIsPersisted()
+generation.runnerDone === true &&
+  generation.owned.size === 0 &&
+  noAcceptedMessageAfter(generation.messageWatermark) &&
+  noEligibleGoalContinuation() &&
+  cancellationIsCompleteIfRequested() &&
+  terminalMessageStateIsPersisted()
 ```
 
 admission 与 closure 必须使用同一 per-Session synchronized transition。不能依赖 sleep/debounce 来猜“已经安静足够久”。
@@ -1265,23 +1263,23 @@ ACP 可以 relay settlement 给 editor/client；是否发声由 editor 决定。
 
 ## 21. 预计文件影响
 
-| 文件/区域 | 预计变化 |
-| --- | --- |
-| `packages/core/src/session-event.ts` | 增加 `Run.Settled` schema |
-| `packages/opencode/src/session/settlement.ts` | 新增深 module，拥有 generation/ownership/closure |
-| `packages/opencode/src/effect/runner.ts` | generation-aware finish/idle |
-| `packages/opencode/src/session/run-state.ts` | 接入 settlement，收敛 Status ownership |
-| `packages/opencode/src/session/prompt.ts` | root admission、Goal/Compaction ownership、message watermark |
-| `packages/opencode/src/session/processor.ts` | 返回结构化 outcome，移除 Session-wide idle |
-| `packages/opencode/src/tool/task.ts` | foreground/background ownership 与 handoff |
-| `packages/opencode/src/background/job.ts` | fork 前 ownership adapter 或 metadata propagation |
-| `packages/opencode/src/session/projectors-next.ts` | settlement projector/no-op registration |
-| `packages/opencode/src/cli/cmd/tui/feature-plugins/system/notifications.ts` | 从 Status 推断迁到 settlement event |
-| `packages/opencode/src/cli/cmd/tui/config/tui.ts` | 最后阶段翻转默认值 |
-| `packages/app/src/context/notification.tsx` | completion 从 idle 迁到 settlement |
-| `packages/app/src/utils/sound.ts` | 可选 volume 支持与 overlap policy |
-| `packages/sdk/js/**` | 重新生成事件类型 |
-| 对应 tests/specs | 生命周期、adapter、配置、SDK 与文档更新 |
+| 文件/区域                                                                   | 预计变化                                                     |
+| --------------------------------------------------------------------------- | ------------------------------------------------------------ |
+| `packages/core/src/session-event.ts`                                        | 增加 `Run.Settled` schema                                    |
+| `packages/opencode/src/session/settlement.ts`                               | 新增深 module，拥有 generation/ownership/closure             |
+| `packages/opencode/src/effect/runner.ts`                                    | generation-aware finish/idle                                 |
+| `packages/opencode/src/session/run-state.ts`                                | 接入 settlement，收敛 Status ownership                       |
+| `packages/opencode/src/session/prompt.ts`                                   | root admission、Goal/Compaction ownership、message watermark |
+| `packages/opencode/src/session/processor.ts`                                | 返回结构化 outcome，移除 Session-wide idle                   |
+| `packages/opencode/src/tool/task.ts`                                        | foreground/background ownership 与 handoff                   |
+| `packages/opencode/src/background/job.ts`                                   | fork 前 ownership adapter 或 metadata propagation            |
+| `packages/opencode/src/session/projectors-next.ts`                          | settlement projector/no-op registration                      |
+| `packages/opencode/src/cli/cmd/tui/feature-plugins/system/notifications.ts` | 从 Status 推断迁到 settlement event                          |
+| `packages/opencode/src/cli/cmd/tui/config/tui.ts`                           | 最后阶段翻转默认值                                           |
+| `packages/app/src/context/notification.tsx`                                 | completion 从 idle 迁到 settlement                           |
+| `packages/app/src/utils/sound.ts`                                           | 可选 volume 支持与 overlap policy                            |
+| `packages/sdk/js/**`                                                        | 重新生成事件类型                                             |
+| 对应 tests/specs                                                            | 生命周期、adapter、配置、SDK 与文档更新                      |
 
 具体实现时应优先替换旧推断，不要在其旁边叠加第二条 done listener，否则一个 generation 会同时由 idle 和 settlement 播放两次。
 
@@ -1289,55 +1287,55 @@ ACP 可以 relay settlement 给 editor/client；是否发声由 editor 决定。
 
 ### 22.1 Settlement module
 
-| Case | 期望 |
-| --- | --- |
-| 单步文本完成 | 1 个 completed settled |
-| 多 step + 多 Tool | 全部完成后 1 个 settled |
-| Provider retry 后成功 | retry 不 settled，最终 1 个 completed |
-| automatic Compaction 后成功 | Compaction 中不 settled |
-| Goal 连续 N 轮后 complete | 最终 1 个 completed |
-| Goal 达 max turns 后 pause | 1 个 paused，不播 success |
-| terminal error + continueOnError | 中间 error/idle 不 settled |
-| terminal error 无 continuation | 1 个 failed |
-| context overflow recover | 最终 completed，不是 failed |
-| queued Message 被同一 loop 消费 | 同 generation 1 个 settled，requestIDs 完整 |
-| closure 同时到达新 Message | 线性化为当前或下一 generation，不丢 Message |
-| manual Compaction alone | maintenance settled 或无 Agent settled |
-| direct shell alone | shell kind，不触发 Agent completion |
-| shell -> queued Agent handoff | 一个 Agent generation，无中间 settled |
-| foreground child | child 可 settled，parent 最终才 root settled |
-| background child | parent 初次 idle 不 settled，inject/resume 后才 settled |
-| user abort | cleanup 后 1 个 aborted |
-| duplicate cancel | 仍只有 1 个 aborted |
-| replacement run during old finish | 旧 callback 不删除/settle新 generation |
+| Case                              | 期望                                                    |
+| --------------------------------- | ------------------------------------------------------- |
+| 单步文本完成                      | 1 个 completed settled                                  |
+| 多 step + 多 Tool                 | 全部完成后 1 个 settled                                 |
+| Provider retry 后成功             | retry 不 settled，最终 1 个 completed                   |
+| automatic Compaction 后成功       | Compaction 中不 settled                                 |
+| Goal 连续 N 轮后 complete         | 最终 1 个 completed                                     |
+| Goal 达 max turns 后 pause        | 1 个 paused，不播 success                               |
+| terminal error + continueOnError  | 中间 error/idle 不 settled                              |
+| terminal error 无 continuation    | 1 个 failed                                             |
+| context overflow recover          | 最终 completed，不是 failed                             |
+| queued Message 被同一 loop 消费   | 同 generation 1 个 settled，requestIDs 完整             |
+| closure 同时到达新 Message        | 线性化为当前或下一 generation，不丢 Message             |
+| manual Compaction alone           | maintenance settled 或无 Agent settled                  |
+| direct shell alone                | shell kind，不触发 Agent completion                     |
+| shell -> queued Agent handoff     | 一个 Agent generation，无中间 settled                   |
+| foreground child                  | child 可 settled，parent 最终才 root settled            |
+| background child                  | parent 初次 idle 不 settled，inject/resume 后才 settled |
+| user abort                        | cleanup 后 1 个 aborted                                 |
+| duplicate cancel                  | 仍只有 1 个 aborted                                     |
+| replacement run during old finish | 旧 callback 不删除/settle新 generation                  |
 
 ### 22.2 TUI adapter
 
-| Case | 期望 |
-| --- | --- |
-| root Agent completed | done sound 1 次 |
-| duplicate event ID/generation | 仍为 1 次 |
-| child completed | 默认 0 次 |
-| failed | success sound 0 次 |
-| aborted | success/error 新行为均为 0，除非 error policy另定 |
-| shell/maintenance | Agent done 0 次 |
-| attention disabled | 0 次 |
-| sound disabled、notification enabled | sound 0，notification 可成功 |
-| focus focused | 依当前 always policy播放，OS notification不发 |
-| focus blurred | sound + OS notification |
-| decode/device failure | 返回 sound=false，不抛出 |
-| 多 Session 500ms 内完成 | 按 coalescing policy 只响一次 |
+| Case                                 | 期望                                              |
+| ------------------------------------ | ------------------------------------------------- |
+| root Agent completed                 | done sound 1 次                                   |
+| duplicate event ID/generation        | 仍为 1 次                                         |
+| child completed                      | 默认 0 次                                         |
+| failed                               | success sound 0 次                                |
+| aborted                              | success/error 新行为均为 0，除非 error policy另定 |
+| shell/maintenance                    | Agent done 0 次                                   |
+| attention disabled                   | 0 次                                              |
+| sound disabled、notification enabled | sound 0，notification 可成功                      |
+| focus focused                        | 依当前 always policy播放，OS notification不发     |
+| focus blurred                        | sound + OS notification                           |
+| decode/device failure                | 返回 sound=false，不抛出                          |
+| 多 Session 500ms 内完成              | 按 coalescing policy 只响一次                     |
 
 ### 22.3 App/Desktop adapter
 
-| Case | 期望 |
-| --- | --- |
-| completed settlement | 一次 completion sound/record |
-| error followed by legacy idle | 不再播 completion |
-| child event | 默认忽略 completion sound |
-| browser autoplay reject | 无 unhandled rejection、无 retry surprise |
-| persisted settings 未 ready | 不越过明确 user opt-out |
-| duplicate transport | generation 去重 |
+| Case                          | 期望                                      |
+| ----------------------------- | ----------------------------------------- |
+| completed settlement          | 一次 completion sound/record              |
+| error followed by legacy idle | 不再播 completion                         |
+| child event                   | 默认忽略 completion sound                 |
+| browser autoplay reject       | 无 unhandled rejection、无 retry surprise |
+| persisted settings 未 ready   | 不越过明确 user opt-out                   |
+| duplicate transport           | generation 去重                           |
 
 ### 22.4 Audio wrapper
 
@@ -1354,27 +1352,27 @@ CI 不应播放实际声音。真实设备输出属于人工 QA。
 
 ### 22.5 跨平台人工 QA
 
-| 平台 | 检查 |
-| --- | --- |
-| macOS arm64/x64 | CoreAudio 默认输出、耳机切换、静音、退出释放 |
-| Linux PulseAudio/PipeWire | default sink、无 daemon、container 降级 |
-| Linux ALSA-only | default PCM 与无设备降级 |
-| Windows x64/arm64 | WASAPI default、设备切换、Terminal/PowerShell 启动 |
-| local attach remote Server | 声音只在 local client |
-| SSH remote TUI | 不误称本地发声，失败静默 |
+| 平台                       | 检查                                               |
+| -------------------------- | -------------------------------------------------- |
+| macOS arm64/x64            | CoreAudio 默认输出、耳机切换、静音、退出释放       |
+| Linux PulseAudio/PipeWire  | default sink、无 daemon、container 降级            |
+| Linux ALSA-only            | default PCM 与无设备降级                           |
+| Windows x64/arm64          | WASAPI default、设备切换、Terminal/PowerShell 启动 |
+| local attach remote Server | 声音只在 local client                              |
+| SSH remote TUI             | 不误称本地发声，失败静默                           |
 
 ## 23. 观测与诊断
 
 不要收集设备名称或音频内容 telemetry。建议只使用本地 debug log 和匿名计数：
 
-| 指标/日志 | 用途 |
-| --- | --- |
-| settlement generation opened/settled | 检查重复或永不结束 |
-| settlement outcome/kind | 验证策略覆盖 |
-| completion adapter handled/skipped | 解释为何没响 |
+| 指标/日志                                     | 用途                                 |
+| --------------------------------------------- | ------------------------------------ |
+| settlement generation opened/settled          | 检查重复或永不结束                   |
+| settlement outcome/kind                       | 验证策略覆盖                         |
+| completion adapter handled/skipped            | 解释为何没响                         |
 | audio create/load/start/play failure category | 区分 ABI、decode、device、voice pool |
-| duplicate generation dropped | 检查 transport at-least-once |
-| coalesced completion count | 评估多 Session burst |
+| duplicate generation dropped                  | 检查 transport at-least-once         |
+| coalesced completion count                    | 评估多 Session burst                 |
 
 音频错误当前都被压成 boolean。hardening 时可以在内部使用 typed failure，但 public plugin result 仍可保持稳定的 `{ ok, notification, sound, skipped? }`。
 
@@ -1403,19 +1401,19 @@ external TUI plugin 仍可调用 `api.attention.notify()`。新 settlement event
 
 ## 25. 风险与缓解
 
-| 风险 | 影响 | 缓解 |
-| --- | --- | --- |
-| Settlement module 变成另一套 Run state | 生命周期重复 | 只拥有语义 closure，不复制 Runner 执行控制 |
-| ownership lease 漏释放 | generation 永不 settled | scoped acquire/release、fork 前登记、泄漏诊断 |
-| ownership 提前释放 | 提前声音 | BackgroundJob lease 覆盖 inject + resumed loop |
-| EventV2/legacy 双写重复 | 两次声音 | schema 单一、event generation 去重、替换旧 listener |
-| late Message 仍有竞态 | 漏回答/提前声 | admission 与 closure 同一 synchronized seam |
-| 默认启用引发用户反感 | 体验回归 | 先修语义、短声、root-only、explicit opt-out、release note |
-| 多 Session 同时完成 | 声音重叠 | 500-750ms completion coalescer |
-| 音频设备变更 | 后续无声 | bounded restart，不持久化 index |
-| 浏览器 autoplay | Web 无声 | one attempt、设置/UI说明，不晚到重播 |
-| SSH 用户无本地声 | 需求未覆盖 | 文档说明；未来显式 BEL adapter |
-| native ABI mismatch | engine 创建失败 | target artifact decode/symbol smoke test |
+| 风险                                   | 影响                    | 缓解                                                      |
+| -------------------------------------- | ----------------------- | --------------------------------------------------------- |
+| Settlement module 变成另一套 Run state | 生命周期重复            | 只拥有语义 closure，不复制 Runner 执行控制                |
+| ownership lease 漏释放                 | generation 永不 settled | scoped acquire/release、fork 前登记、泄漏诊断             |
+| ownership 提前释放                     | 提前声音                | BackgroundJob lease 覆盖 inject + resumed loop            |
+| EventV2/legacy 双写重复                | 两次声音                | schema 单一、event generation 去重、替换旧 listener       |
+| late Message 仍有竞态                  | 漏回答/提前声           | admission 与 closure 同一 synchronized seam               |
+| 默认启用引发用户反感                   | 体验回归                | 先修语义、短声、root-only、explicit opt-out、release note |
+| 多 Session 同时完成                    | 声音重叠                | 500-750ms completion coalescer                            |
+| 音频设备变更                           | 后续无声                | bounded restart，不持久化 index                           |
+| 浏览器 autoplay                        | Web 无声                | one attempt、设置/UI说明，不晚到重播                      |
+| SSH 用户无本地声                       | 需求未覆盖              | 文档说明；未来显式 BEL adapter                            |
+| native ABI mismatch                    | engine 创建失败         | target artifact decode/symbol smoke test                  |
 
 ## 26. 明确拒绝的实现
 
@@ -1461,15 +1459,15 @@ external TUI plugin 仍可调用 `api.attention.notify()`。新 settlement event
 
 推荐默认答案：
 
-| 决策 | 推荐 |
-| --- | --- |
-| generation ID | 独立 `run_` ID，Message IDs 保留在 `requestIDs` |
-| Goal max turns | `paused`，不播放 success |
-| BackgroundJob | 只有关联且会 inject/resume 的 job 阻止 settlement |
-| coalescing | 750ms，presentation-only |
-| sound | 先保留现有 `bip-bop-01@0.4`，人工 A/B 后再改 |
-| durability | 首版 live + bounded client dedupe；snapshot 后续 |
-| `run` migration | settlement 稳定后同一 release 迁移，但仍默认静音 |
+| 决策            | 推荐                                              |
+| --------------- | ------------------------------------------------- |
+| generation ID   | 独立 `run_` ID，Message IDs 保留在 `requestIDs`   |
+| Goal max turns  | `paused`，不播放 success                          |
+| BackgroundJob   | 只有关联且会 inject/resume 的 job 阻止 settlement |
+| coalescing      | 750ms，presentation-only                          |
+| sound           | 先保留现有 `bip-bop-01@0.4`，人工 A/B 后再改      |
+| durability      | 首版 live + bounded client dedupe；snapshot 后续  |
+| `run` migration | settlement 稳定后同一 release 迁移，但仍默认静音  |
 
 ## 29. 最终判断
 

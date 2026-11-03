@@ -8,64 +8,91 @@ import type { Transport, TransportPrepareInput } from "./index"
 import * as ProviderShared from "../../protocols/shared"
 import { LLMError, TransportReason, mergeJsonRecords, type LLMRequest } from "../../schema"
 
-const progressTimeout = () => new LLMError({
-  module: "HttpTransport",
-  method: "frames",
-  reason: new TransportReason({ message: "SSE read timed out", kind: "timeout" }),
-})
+const progressTimeout = () =>
+  new LLMError({
+    module: "HttpTransport",
+    method: "frames",
+    reason: new TransportReason({ message: "SSE read timed out", kind: "timeout" }),
+  })
 
 function observeSSE(response: HttpClientResponse.HttpClientResponse, request: LLMRequest, startedAt: number) {
   const timing = FetchTiming.responses.get(response)
   if (!response.headers["content-type"]?.includes("text/event-stream")) return response.stream
   const chunkTimeout = request.http?.chunkTimeout ?? 180_000
   // 必须在framing前按原始字节计时，心跳/注释也续期，且不依赖是否采集timing。
-  const stream = chunkTimeout === false ? response.stream : Stream.transformPull(response.stream, (pull) => Effect.sync(() => {
-    let progressedAt = startedAt
-    // headers与首块共享dispatch起点；之后每个raw pull成功才续期，不按semantic frame续期。
-    return Effect.gen(function* () {
-      const remaining = chunkTimeout - ((yield* Clock.currentTimeMillis) - progressedAt)
-      const chunk = yield* pull.pipe(Effect.timeoutOrElse({
-        duration: Math.max(0, remaining), orElse: () => Effect.fail(progressTimeout()),
-      }))
-      progressedAt = yield* Clock.currentTimeMillis
-      return chunk
-    })
-  }))
+  const stream =
+    chunkTimeout === false
+      ? response.stream
+      : Stream.transformPull(response.stream, (pull) =>
+          Effect.sync(() => {
+            let progressedAt = startedAt
+            // headers与首块共享dispatch起点；之后每个raw pull成功才续期，不按semantic frame续期。
+            return Effect.gen(function* () {
+              const remaining = chunkTimeout - ((yield* Clock.currentTimeMillis) - progressedAt)
+              const chunk = yield* pull.pipe(
+                Effect.timeoutOrElse({
+                  duration: Math.max(0, remaining),
+                  orElse: () => Effect.fail(progressTimeout()),
+                }),
+              )
+              progressedAt = yield* Clock.currentTimeMillis
+              return chunk
+            })
+          }),
+        )
   if (!timing) return stream
-  return Stream.unwrap(Effect.gen(function* () {
-    let lastChunkAt = yield* Clock.currentTimeMillis
-    let chunkCount = 0
-    let bytes = 0
-    let maxGapMs = 0
-    const log = (phase: string, extra: Record<string, unknown> = {}) => Clock.currentTimeMillis.pipe(
-      Effect.flatMap((now) => Effect.logInfo("timing", {
-        phase, requestID: timing.requestID, elapsedMs: now - timing.startedAt,
-        providerID: request.model.provider, modelID: request.model.id,
-        sessionID: response.request.headers["x-session-affinity"] ?? response.request.headers["x-opencode-session"],
-        chunkCount, bytes, maxGapMs, idleMs: now - lastChunkAt, ...extra,
-      })),
-      Effect.annotateLogs({ service: "provider.fetch" }),
-    )
-    return stream.pipe(
-      Stream.tap((chunk) => Effect.gen(function* () {
-        const now = yield* Clock.currentTimeMillis
-        const gapMs = now - lastChunkAt
-        lastChunkAt = now
-        chunkCount++
-        bytes += chunk.byteLength
-        maxGapMs = Math.max(maxGapMs, gapMs)
-        // 心跳先计原始首块，191的started仍只在交付协议frame时改变。
-        if (chunkCount === 1) yield* log("sse.first_chunk", { gapMs, bytes: chunk.byteLength })
-      })),
-      Stream.tapError((error) => {
-        const cause = "cause" in error.reason ? error.reason.cause : undefined
-        const timeout = Cause.isTimeoutError(cause) || (typeof cause === "object" && cause !== null && "code" in cause && cause.code === "SSE_READ_TIMEOUT") || (error instanceof LLMError && error.reason._tag === "Transport" && error.reason.kind === "timeout")
-        return log(timeout ? "sse.timeout" : "sse.error", { errorName: error.name, errorKind: error.reason._tag })
-      }),
-      // 只在原始EOF记end；语义提前结束或取消不额外drain，也不伪报完成。
-      Stream.onEnd(log("sse.end")),
-    )
-  }))
+  return Stream.unwrap(
+    Effect.gen(function* () {
+      let lastChunkAt = yield* Clock.currentTimeMillis
+      let chunkCount = 0
+      let bytes = 0
+      let maxGapMs = 0
+      const log = (phase: string, extra: Record<string, unknown> = {}) =>
+        Clock.currentTimeMillis.pipe(
+          Effect.flatMap((now) =>
+            Effect.logInfo("timing", {
+              phase,
+              requestID: timing.requestID,
+              elapsedMs: now - timing.startedAt,
+              providerID: request.model.provider,
+              modelID: request.model.id,
+              sessionID:
+                response.request.headers["x-session-affinity"] ?? response.request.headers["x-opencode-session"],
+              chunkCount,
+              bytes,
+              maxGapMs,
+              idleMs: now - lastChunkAt,
+              ...extra,
+            }),
+          ),
+          Effect.annotateLogs({ service: "provider.fetch" }),
+        )
+      return stream.pipe(
+        Stream.tap((chunk) =>
+          Effect.gen(function* () {
+            const now = yield* Clock.currentTimeMillis
+            const gapMs = now - lastChunkAt
+            lastChunkAt = now
+            chunkCount++
+            bytes += chunk.byteLength
+            maxGapMs = Math.max(maxGapMs, gapMs)
+            // 心跳先计原始首块，191的started仍只在交付协议frame时改变。
+            if (chunkCount === 1) yield* log("sse.first_chunk", { gapMs, bytes: chunk.byteLength })
+          }),
+        ),
+        Stream.tapError((error) => {
+          const cause = "cause" in error.reason ? error.reason.cause : undefined
+          const timeout =
+            Cause.isTimeoutError(cause) ||
+            (typeof cause === "object" && cause !== null && "code" in cause && cause.code === "SSE_READ_TIMEOUT") ||
+            (error instanceof LLMError && error.reason._tag === "Transport" && error.reason.kind === "timeout")
+          return log(timeout ? "sse.timeout" : "sse.error", { errorName: error.name, errorKind: error.reason._tag })
+        }),
+        // 只在原始EOF记end；语义提前结束或取消不额外drain，也不伪报完成。
+        Stream.onEnd(log("sse.end")),
+      )
+    }),
+  )
 }
 
 export type JsonRequestInput<Body> = TransportPrepareInput<Body>
@@ -199,34 +226,51 @@ export const httpJson = <Body, Frame>(input: HttpJsonInput<Body, Frame>): HttpJs
           // 只覆盖本次运输的Bun idle选项；原fetch配置、取消和有限重试仍归现有owner。
           const transport = { ...Option.getOrElse(init, () => ({})), timeout: false }
           const execute = runtime.http.execute(prepared.request).pipe(
-            Effect.annotateLogs({ providerID: request.model.provider, modelID: request.model.id, sessionID: prepared.request.headers["x-session-affinity"] ?? prepared.request.headers["x-opencode-session"] }),
+            Effect.annotateLogs({
+              providerID: request.model.provider,
+              modelID: request.model.id,
+              sessionID:
+                prepared.request.headers["x-session-affinity"] ?? prepared.request.headers["x-opencode-session"],
+            }),
             Effect.provideService(FetchHttpClient.RequestInit, transport),
           )
-          const response = yield* (timeout === false ? execute : execute.pipe(
-            Effect.timeoutOrElse({ duration: timeout, orElse: () => Effect.fail(progressTimeout()) }),
-          ))
+          const response = yield* timeout === false
+            ? execute
+            : execute.pipe(Effect.timeoutOrElse({ duration: timeout, orElse: () => Effect.fail(progressTimeout()) }))
           return prepared.framing.frame(
             observeSSE(response, request, startedAt).pipe(
               // 字节读取失败是运输故障；协议/JSON解码仍在原有不可重试分支。
-              Stream.mapError((error) => error instanceof LLMError ? error : new LLMError({
-                module: "HttpTransport",
-                method: "frames",
-                reason: new TransportReason({
-                  message: `Failed to read ${request.model.provider}/${request.model.route.id} stream: ${ProviderShared.errorText(error)}`,
-                  kind: error.reason._tag,
-                }),
-              })),
+              Stream.mapError((error) =>
+                error instanceof LLMError
+                  ? error
+                  : new LLMError({
+                      module: "HttpTransport",
+                      method: "frames",
+                      reason: new TransportReason({
+                        message: `Failed to read ${request.model.provider}/${request.model.route.id} stream: ${ProviderShared.errorText(error)}`,
+                        kind: error.reason._tag,
+                      }),
+                    }),
+              ),
             ),
           )
         }),
       )
       return frames.pipe(
         // 已交付的frame可能包含工具副作用，之后绝不自动重放本provider turn。
-        Stream.tap(() => Effect.sync(() => { started = true })),
-        Stream.retry(($) => $(Schedule.exponential(500).pipe(Schedule.take(2))).pipe(
-          // 仅重取此处的body故障，不重复包裹executor已耗尽的建连/status重试。
-          Schedule.while(({ input }) => !started && input.module === "HttpTransport" && input.reason._tag === "Transport"),
-        )),
+        Stream.tap(() =>
+          Effect.sync(() => {
+            started = true
+          }),
+        ),
+        Stream.retry(($) =>
+          $(Schedule.exponential(500).pipe(Schedule.take(2))).pipe(
+            // 仅重取此处的body故障，不重复包裹executor已耗尽的建连/status重试。
+            Schedule.while(
+              ({ input }) => !started && input.module === "HttpTransport" && input.reason._tag === "Transport",
+            ),
+          ),
+        ),
       )
     }),
 })

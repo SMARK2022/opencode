@@ -22,7 +22,11 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
   return (
     <Show when={(summary()?.files ?? list().length) > 0}>
       <box>
-        <box flexDirection="row" justifyContent="space-between" onMouseDown={() => list().length > 2 && setOpen((x) => !x)}>
+        <box
+          flexDirection="row"
+          justifyContent="space-between"
+          onMouseDown={() => list().length > 2 && setOpen((x) => !x)}
+        >
           {/* 标题只承载高信息量 totals；不能加入 showing-first 等固定解释文案。 */}
           <box flexDirection="row" gap={1}>
             <Show when={list().length > 2}>

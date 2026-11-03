@@ -162,7 +162,6 @@ function addStepFinish(sessionID: SessionID, messageID: MessageID, inputChars: n
   )
 }
 
-
 function createSummaryAssistantMessage(sessionID: SessionID, parentID: MessageID, root: string, text: string) {
   return SessionNs.Service.use((ssn) =>
     Effect.gen(function* () {
@@ -270,7 +269,14 @@ const env = AppNodeBuilder.build(compactionTestNode, [
 const it = testEffect(env)
 
 const compactionEnv = AppNodeBuilder.build(
-  LayerNode.group([SessionNs.node, SessionProjector.node, Database.node, SessionRequestUsage.node, EventV2Bridge.node, CrossSpawnSpawner.node]),
+  LayerNode.group([
+    SessionNs.node,
+    SessionProjector.node,
+    Database.node,
+    SessionRequestUsage.node,
+    EventV2Bridge.node,
+    CrossSpawnSpawner.node,
+  ]),
 )
 const itCompaction = testEffect(compactionEnv)
 
@@ -303,7 +309,10 @@ function compactionProcessLayer(options?: CompactionProcessOptions) {
   if (!options?.llm) {
     return AppNodeBuilder.build(compactionTestNode, [
       ...replacements,
-      [SessionProcessorModule.SessionProcessor.node, options?.processor ?? processorLayer(options?.result ?? "continue")],
+      [
+        SessionProcessorModule.SessionProcessor.node,
+        options?.processor ?? processorLayer(options?.result ?? "continue"),
+      ],
       ...(options?.plugin ? ([[Plugin.node, options.plugin]] as const) : []),
       ...(options?.config ? ([[Config.node, options.config]] as const) : []),
       ...(options?.session ? ([[SessionNs.node, options.session]] as const) : ([] as const)),
@@ -400,7 +409,9 @@ function autocontinue(enabled: boolean, hideHistory = false) {
         const messages = Reflect.get(output, "messages")
         if (Array.isArray(messages)) {
           const target = messages.find((message) =>
-            message.parts.some((part: MessageV2.Part) => part.type === "text" && part.text.includes("plugin-hidden-compaction-history")),
+            message.parts.some(
+              (part: MessageV2.Part) => part.type === "text" && part.text.includes("plugin-hidden-compaction-history"),
+            ),
           )
           if (target) Reflect.set(target.info, "hidden", { time: Date.now(), reason: "plugin" })
         }
@@ -430,89 +441,147 @@ function compactionContext(context: string) {
   })
 }
 
-itCompaction.instance("uses current disk state for inspected file freshness", () => {
-  const stub = llm()
-  stub.push(reply("summary"))
-  return Effect.gen(function* () {
-    const test = yield* TestInstance
-    const ssn = yield* SessionNs.Service
-    const session = yield* ssn.create({})
-    // 真实 Todo 表快照与摘要同一次执行读取，不用伪造 todowrite 输出替代持久 owner。
-    const todo = yield* Todo.Service
-    yield* todo.update({ sessionID: session.id, todos: [
-      { content: "Read forensic report", status: "completed", priority: "high" },
-      { content: "Design P0 evidence handoff", status: "in_progress", priority: "high" },
-      { content: "Add compaction tests", status: "pending", priority: "medium" },
-      { content: "Discard obsolete sketch", status: "cancelled", priority: "low" },
-    ] })
-    const user = yield* createUserMessage(session.id, "check inspected freshness")
-    const assistant = yield* createAssistantMessage(session.id, user.id, test.directory)
-    const names = ["unchanged file", "changed", "deleted", "missing-metadata"] as const
-    for (const [index, name] of names.entries()) {
-      const file = path.join(test.directory, `${name}.ts`)
-      const modifiedMs = new Date(2026, 4, 18, index + 1).getTime()
-      // 真实落盘和mtime固定后再记录读取凭证，覆盖带外变更而非伪造工具事件。
-      yield* Effect.promise(async () => {
-        await fs.writeFile(file, "x".repeat(20))
-        await fs.utimes(file, new Date(modifiedMs), new Date(modifiedMs))
+itCompaction.instance(
+  "uses current disk state for inspected file freshness",
+  () => {
+    const stub = llm()
+    stub.push(reply("summary"))
+    return Effect.gen(function* () {
+      const test = yield* TestInstance
+      const ssn = yield* SessionNs.Service
+      const session = yield* ssn.create({})
+      // 真实 Todo 表快照与摘要同一次执行读取，不用伪造 todowrite 输出替代持久 owner。
+      const todo = yield* Todo.Service
+      yield* todo.update({
+        sessionID: session.id,
+        todos: [
+          { content: "Read forensic report", status: "completed", priority: "high" },
+          { content: "Design P0 evidence handoff", status: "in_progress", priority: "high" },
+          { content: "Add compaction tests", status: "pending", priority: "medium" },
+          { content: "Discard obsolete sketch", status: "cancelled", priority: "low" },
+        ],
       })
+      const user = yield* createUserMessage(session.id, "check inspected freshness")
+      const assistant = yield* createAssistantMessage(session.id, user.id, test.directory)
+      const names = ["unchanged file", "changed", "deleted", "missing-metadata"] as const
+      for (const [index, name] of names.entries()) {
+        const file = path.join(test.directory, `${name}.ts`)
+        const modifiedMs = new Date(2026, 4, 18, index + 1).getTime()
+        // 真实落盘和mtime固定后再记录读取凭证，覆盖带外变更而非伪造工具事件。
+        yield* Effect.promise(async () => {
+          await fs.writeFile(file, "x".repeat(20))
+          await fs.utimes(file, new Date(modifiedMs), new Date(modifiedMs))
+        })
+        yield* ssn.updatePart({
+          id: PartID.ascending(),
+          sessionID: session.id,
+          messageID: assistant.id,
+          type: "tool",
+          tool: "read",
+          callID: `read_${index}`,
+          state: {
+            status: "completed",
+            input: { filePath: file },
+            output: "file",
+            title: "read",
+            time: { start: 1, end: 2 },
+            metadata: {
+              read: {
+                path: file,
+                canonicalPath: file,
+                start: 1,
+                end: 20,
+                total: 20,
+                modified: "previous read",
+                ...(index === 3 ? {} : { size: 20, modifiedMs }),
+              },
+            },
+          },
+        })
+        // 同一路径的重叠读取必须合并，版本判断仍由真实磁盘负责。
+        if (index === 0)
+          yield* ssn.updatePart({
+            id: PartID.ascending(),
+            sessionID: session.id,
+            messageID: assistant.id,
+            type: "tool",
+            tool: "read",
+            callID: "read_overlap",
+            state: {
+              status: "completed",
+              input: { filePath: file },
+              output: "file",
+              title: "read",
+              time: { start: 1, end: 2 },
+              metadata: {
+                read: {
+                  path: file,
+                  canonicalPath: file,
+                  start: 19,
+                  end: 20,
+                  total: 20,
+                  modified: "previous read",
+                  size: 20,
+                  modifiedMs,
+                },
+              },
+            },
+          })
+      }
+      // 只有磁盘变化使凭证过期：write元数据本身不会让未变的文件失效。
       yield* ssn.updatePart({
-        id: PartID.ascending(), sessionID: session.id, messageID: assistant.id,
-        type: "tool", tool: "read", callID: `read_${index}`,
-        state: { status: "completed", input: { filePath: file }, output: "file", title: "read",
-          time: { start: 1, end: 2 }, metadata: { read: {
-            path: file, canonicalPath: file, start: 1, end: 20, total: 20,
-            modified: "previous read", ...(index === 3 ? {} : { size: 20, modifiedMs }),
-          } } },
+        id: PartID.ascending(),
+        sessionID: session.id,
+        messageID: assistant.id,
+        type: "tool",
+        tool: "write",
+        callID: "metadata_only",
+        state: {
+          status: "completed",
+          input: {},
+          output: "",
+          title: "write",
+          time: { start: 2, end: 3 },
+          metadata: { filepath: path.join(test.directory, "unchanged file.ts") },
+        },
       })
-      // 同一路径的重叠读取必须合并，版本判断仍由真实磁盘负责。
-      if (index === 0) yield* ssn.updatePart({
-        id: PartID.ascending(), sessionID: session.id, messageID: assistant.id,
-        type: "tool", tool: "read", callID: "read_overlap",
-        state: { status: "completed", input: { filePath: file }, output: "file", title: "read",
-          time: { start: 1, end: 2 }, metadata: { read: {
-            path: file, canonicalPath: file, start: 19, end: 20, total: 20,
-            modified: "previous read", size: 20, modifiedMs,
-          } } },
+      yield* Effect.promise(async () => {
+        const changed = path.join(test.directory, "changed.ts")
+        await fs.writeFile(changed, "changed on disk")
+        const time = new Date(2026, 4, 18, 5)
+        await fs.utimes(changed, time, time)
+        // 移动后的旧路径也必须标 deleted，不能只依赖工具 mutation 元数据。
+        await fs.rename(path.join(test.directory, "deleted.ts"), path.join(test.directory, "moved.ts"))
       })
-    }
-    // 只有磁盘变化使凭证过期：write元数据本身不会让未变的文件失效。
-    yield* ssn.updatePart({
-      id: PartID.ascending(), sessionID: session.id, messageID: assistant.id,
-      type: "tool", tool: "write", callID: "metadata_only",
-      state: { status: "completed", input: {}, output: "", title: "write",
-        time: { start: 2, end: 3 }, metadata: { filepath: path.join(test.directory, "unchanged file.ts") } },
-    })
-    yield* Effect.promise(async () => {
-      const changed = path.join(test.directory, "changed.ts")
-      await fs.writeFile(changed, "changed on disk")
-      const time = new Date(2026, 4, 18, 5)
-      await fs.utimes(changed, time, time)
-      // 移动后的旧路径也必须标 deleted，不能只依赖工具 mutation 元数据。
-      await fs.rename(path.join(test.directory, "deleted.ts"), path.join(test.directory, "moved.ts"))
-    })
-    yield* createSummaryCompaction(session.id)
-    const messages = yield* ssn.messages({ sessionID: session.id })
-    yield* SessionCompaction.use.process({
-      parentID: messages.at(-1)!.info.id, messages, sessionID: session.id, auto: false,
-    })
-    const compacted = (yield* ssn.messages({ sessionID: session.id }))
-      .findLast((message) => message.info.role === "assistant" && message.info.summary)
-    const text = compacted?.parts.flatMap((part) => part.type === "text" ? [part.text] : []).join("\n")
-    expect(text).toContain("summary")
-    expect(text).toContain("## Evidence Handoff")
-    expect(text?.match(/## Evidence Handoff/g)).toHaveLength(1)
-    expect(text).toContain("| completed | high | Read forensic report |")
-    expect(text).toContain("| in_progress | high | Design P0 evidence handoff |")
-    expect(text).toContain("| pending | medium | Add compaction tests |")
-    expect(text).toContain("| cancelled | low | Discard obsolete sketch |")
-    expect(text).toContain("- Older raw tool outputs were compacted.")
-    expect(text).toContain("| unchanged file.ts | 1-20 | 20 | 2026-05-18 01:00:00 | current |")
-    expect(text).toContain("| changed.ts | 1-20 | 20 | 2026-05-18 05:00:00 | stale |")
-    expect(text).toContain("| deleted.ts | 1-20 | 20 | - | deleted |")
-    expect(text).toContain("| missing-metadata.ts | 1-20 | 20 | 2026-05-18 04:00:00 | stale |")
-  }).pipe(withCompaction({ llm: stub.llmLayer }))
-}, { git: true }, 20_000)
+      yield* createSummaryCompaction(session.id)
+      const messages = yield* ssn.messages({ sessionID: session.id })
+      yield* SessionCompaction.use.process({
+        parentID: messages.at(-1)!.info.id,
+        messages,
+        sessionID: session.id,
+        auto: false,
+      })
+      const compacted = (yield* ssn.messages({ sessionID: session.id })).findLast(
+        (message) => message.info.role === "assistant" && message.info.summary,
+      )
+      const text = compacted?.parts.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("\n")
+      expect(text).toContain("summary")
+      expect(text).toContain("## Evidence Handoff")
+      expect(text?.match(/## Evidence Handoff/g)).toHaveLength(1)
+      expect(text).toContain("| completed | high | Read forensic report |")
+      expect(text).toContain("| in_progress | high | Design P0 evidence handoff |")
+      expect(text).toContain("| pending | medium | Add compaction tests |")
+      expect(text).toContain("| cancelled | low | Discard obsolete sketch |")
+      expect(text).toContain("- Older raw tool outputs were compacted.")
+      expect(text).toContain("| unchanged file.ts | 1-20 | 20 | 2026-05-18 01:00:00 | current |")
+      expect(text).toContain("| changed.ts | 1-20 | 20 | 2026-05-18 05:00:00 | stale |")
+      expect(text).toContain("| deleted.ts | 1-20 | 20 | - | deleted |")
+      expect(text).toContain("| missing-metadata.ts | 1-20 | 20 | 2026-05-18 04:00:00 | stale |")
+    }).pipe(withCompaction({ llm: stub.llmLayer }))
+  },
+  { git: true },
+  20_000,
+)
 
 describe("session.compaction.isOverflow", () => {
   test("preserves conditional V1 usable budgets and explicit reserves", () => {
@@ -1015,14 +1084,20 @@ describe("session.compaction.process", () => {
     () => {
       const stub = llm()
       // 穿过真实Processor.halt，错误持久化与失败隐藏必须在同一链路发生。
-      const failure = () => Stream.concat(
-        Stream.make(LLMEvent.stepStart({ index: 0 })),
-        Stream.fail(new APICallError({
-          message: "Bad Request: Invalid request content: A tool_choice was set on the request but no tools were specified.",
-          url: "https://example.com/v1/chat/completions",
-          requestBodyValues: {}, statusCode: 400, isRetryable: false,
-        })),
-      )
+      const failure = () =>
+        Stream.concat(
+          Stream.make(LLMEvent.stepStart({ index: 0 })),
+          Stream.fail(
+            new APICallError({
+              message:
+                "Bad Request: Invalid request content: A tool_choice was set on the request but no tools were specified.",
+              url: "https://example.com/v1/chat/completions",
+              requestBodyValues: {},
+              statusCode: 400,
+              isRetryable: false,
+            }),
+          ),
+        )
       stub.push(failure())
       stub.push(failure())
 
@@ -1099,22 +1174,25 @@ describe("session.compaction.process", () => {
         // 冻结 Session 层：真实 Session 从 ambient（外层 compactionEnv）解析——Session 是
         // SessionCompaction 的直接依赖，替换按 processor 同机制可靠生效；Layer 替换不携带 deps，
         // 其 R 由测试环境既有真实图满足，无自替换环。
-        const frozenSession = Layer.effect(SessionNs.Service, Effect.gen(function* () {
-          const real = yield* SessionNs.Service
-          return SessionNs.Service.of({
-            ...real,
-            updatePart: ((part: SessionV1.Part) =>
-              Effect.gen(function* () {
-                // 冻结谓词：compaction part 的持久化发布点——marker message 已 durable、
-                // createMarker 尚未返回的精确中断窗口（H4 预分配 ID 的红绿证据）。
-                if (part.type === "compaction") {
-                  Deferred.doneUnsafe(ready, Effect.void)
-                  return yield* Effect.never
-                }
-                return yield* real.updatePart(part)
-              })) as typeof real.updatePart,
-          })
-        }))
+        const frozenSession = Layer.effect(
+          SessionNs.Service,
+          Effect.gen(function* () {
+            const real = yield* SessionNs.Service
+            return SessionNs.Service.of({
+              ...real,
+              updatePart: ((part: SessionV1.Part) =>
+                Effect.gen(function* () {
+                  // 冻结谓词：compaction part 的持久化发布点——marker message 已 durable、
+                  // createMarker 尚未返回的精确中断窗口（H4 预分配 ID 的红绿证据）。
+                  if (part.type === "compaction") {
+                    Deferred.doneUnsafe(ready, Effect.void)
+                    return yield* Effect.never
+                  }
+                  return yield* real.updatePart(part)
+                })) as typeof real.updatePart,
+            })
+          }),
+        )
         return yield* Effect.gen(function* () {
           const ssn = yield* SessionNs.Service
           const session = yield* ssn.create({})
@@ -1147,10 +1225,7 @@ describe("session.compaction.process", () => {
     () => {
       const ready = Deferred.makeUnsafe<void>()
       const processor = Layer.mock(SessionProcessorModule.SessionProcessor.Service)({
-        create: () =>
-          Effect.sync(() => Deferred.doneUnsafe(ready, Effect.void)).pipe(
-            Effect.andThen(Effect.never),
-          ),
+        create: () => Effect.sync(() => Deferred.doneUnsafe(ready, Effect.void)).pipe(Effect.andThen(Effect.never)),
       })
 
       return Effect.gen(function* () {
@@ -1212,8 +1287,15 @@ describe("session.compaction.process", () => {
                     msg.cost = expectedCost
                     msg.time.completed = Date.now()
                     // V1账本从真实step-finish归约；只改Message字段会产生伪零用量样本。
-                    yield* ssn.updatePart({ id: PartID.ascending(), sessionID: msg.sessionID, messageID: msg.id,
-                      type: "step-finish", reason: "stop", tokens: expectedTokens, cost: expectedCost })
+                    yield* ssn.updatePart({
+                      id: PartID.ascending(),
+                      sessionID: msg.sessionID,
+                      messageID: msg.id,
+                      type: "step-finish",
+                      reason: "stop",
+                      tokens: expectedTokens,
+                      cost: expectedCost,
+                    })
                     yield* usage.recordAssistant({ sessionID: msg.sessionID, requestID: msg.parentID, assistant: msg })
                     before = yield* usage.get({ sessionID: msg.sessionID, requestID: msg.parentID })
                     return "compact" as const
@@ -1365,17 +1447,25 @@ describe("session.compaction.process", () => {
       expect(summary?.info.role).toBe("assistant")
       if (summary?.info.role !== "assistant") return
       expect(summary.info.inputEstimate?.bodyChars).toBeGreaterThan(0)
-      expect(summary.info.inputEstimate?.input).toBeLessThan(Math.round((summary.info.inputEstimate?.bodyChars ?? 0) / 6))
-    }).pipe(withCompaction({
-      // 仅替换 LLM 边界，执行真实 processor 与准备回调；整体 processor 替身不会产生估算。
-      llm: Layer.succeed(LLM.Service, LLM.Service.of({
-        stream: (input) => Stream.unwrap(
-          (input.onRequestPrepared?.({ messages: input.messages }) ?? Effect.void).pipe(
-            Effect.as(reply("summary")(input)),
-          ),
+      expect(summary.info.inputEstimate?.input).toBeLessThan(
+        Math.round((summary.info.inputEstimate?.bodyChars ?? 0) / 6),
+      )
+    }).pipe(
+      withCompaction({
+        // 仅替换 LLM 边界，执行真实 processor 与准备回调；整体 processor 替身不会产生估算。
+        llm: Layer.succeed(
+          LLM.Service,
+          LLM.Service.of({
+            stream: (input) =>
+              Stream.unwrap(
+                (input.onRequestPrepared?.({ messages: input.messages }) ?? Effect.void).pipe(
+                  Effect.as(reply("summary")(input)),
+                ),
+              ),
+          }),
         ),
-      })),
-    })),
+      }),
+    ),
   )
 
   itCompaction.instance(
@@ -1389,31 +1479,40 @@ describe("session.compaction.process", () => {
       const msgs = yield* ssn.messages({ sessionID: session.id })
       const prepared = yield* Deferred.make<void>()
       const release = yield* Deferred.make<void>()
-      const fiber = yield* SessionCompaction.use.process({ parentID: msg.id, messages: msgs, sessionID: session.id, auto: false })
+      const fiber = yield* SessionCompaction.use
+        .process({ parentID: msg.id, messages: msgs, sessionID: session.id, auto: false })
         .pipe(
           withCompaction({
             plugin: autocontinue(true, true),
-            llm: Layer.succeed(LLM.Service, LLM.Service.of({
-              stream: (input) => Stream.unwrap(
-                (input.onRequestPrepared?.({ messages: input.messages }) ?? Effect.void).pipe(
-                  Effect.tap(() => Effect.sync(() => expect(JSON.stringify(input.messages)).not.toContain("plugin-hidden-compaction-history"))),
-                  Effect.andThen(Deferred.succeed(prepared, undefined)),
-                  Effect.andThen(Deferred.await(release)),
-                  Effect.as(Stream.concat(
-                    Stream.make(LLMEvent.stepStart({ index: 0 })),
-                    reply("summary")(input),
-                  )),
-                ),
-              ),
-            })),
+            llm: Layer.succeed(
+              LLM.Service,
+              LLM.Service.of({
+                stream: (input) =>
+                  Stream.unwrap(
+                    (input.onRequestPrepared?.({ messages: input.messages }) ?? Effect.void).pipe(
+                      Effect.tap(() =>
+                        Effect.sync(() =>
+                          expect(JSON.stringify(input.messages)).not.toContain("plugin-hidden-compaction-history"),
+                        ),
+                      ),
+                      Effect.andThen(Deferred.succeed(prepared, undefined)),
+                      Effect.andThen(Deferred.await(release)),
+                      Effect.as(Stream.concat(Stream.make(LLMEvent.stepStart({ index: 0 })), reply("summary")(input))),
+                    ),
+                  ),
+              }),
+            ),
           }),
           Effect.forkChild,
         )
       // 准备回调提交后仍阻塞首个流事件，数据库快照必须已包含摘要请求的估算。
       yield* Deferred.await(prepared).pipe(Effect.timeout("5 seconds"))
       const snapshot = yield* Effect.gen(function* () {
-        const pending = (yield* ssn.messages({ sessionID: session.id })).find((item) => item.info.role === "assistant" && item.info.summary)
-        if (!pending || pending.info.role !== "assistant" || !pending.info.inputEstimate) return yield* Effect.die("Missing pending summary estimate")
+        const pending = (yield* ssn.messages({ sessionID: session.id })).find(
+          (item) => item.info.role === "assistant" && item.info.summary,
+        )
+        if (!pending || pending.info.role !== "assistant" || !pending.info.inputEstimate)
+          return yield* Effect.die("Missing pending summary estimate")
         const estimate = pending.info.inputEstimate
         expect(estimate.input).toBeGreaterThan(0)
         expect(estimate.bodyChars).toBeGreaterThan(0)
@@ -1426,7 +1525,9 @@ describe("session.compaction.process", () => {
         return estimate
       }).pipe(Effect.ensuring(Deferred.succeed(release, undefined)))
       yield* Fiber.join(fiber)
-      const summary = (yield* ssn.messages({ sessionID: session.id })).find((item) => item.info.role === "assistant" && item.info.summary)
+      const summary = (yield* ssn.messages({ sessionID: session.id })).find(
+        (item) => item.info.role === "assistant" && item.info.summary,
+      )
       if (!summary || summary.info.role !== "assistant") return yield* Effect.die("Missing completed summary")
       // 流式部件沿同一准备快照交接，不能恢复旧inputChars/inputBreakdown可变旁路。
       expect(summary.parts.find((part) => part.type === "step-start")).toMatchObject({
@@ -1434,13 +1535,19 @@ describe("session.compaction.process", () => {
         inputTokens: snapshot.input,
         inputBreakdown: snapshot.inputBreakdown,
       })
-      expect(summary.parts.find((part) => part.type === "step-finish")).toMatchObject({ inputChars: snapshot.bodyChars, inputBreakdown: snapshot.inputBreakdown })
+      expect(summary.parts.find((part) => part.type === "step-finish")).toMatchObject({
+        inputChars: snapshot.bodyChars,
+        inputBreakdown: snapshot.inputBreakdown,
+      })
       expect(summary.info.inputEstimate).toMatchObject({ ...snapshot, confirmed: true })
       expect(summary.info.tokens.input).toBe(1)
       // 同一次provider确认只结算一次，pending展示不得增加摘要账单。
       const ledger = yield* SessionRequestUsage.Service
       expect(yield* ledger.get({ sessionID: session.id, requestID: msg.id })).toMatchObject({
-        source: "system_compaction", assistantCount: 1, stepCount: 1, tokens: { input: 1, output: 1, total: 2 },
+        source: "system_compaction",
+        assistantCount: 1,
+        stepCount: 1,
+        tokens: { input: 1, output: 1, total: 2 },
       })
     }),
   )
@@ -1471,31 +1578,94 @@ describe("session.compaction.process", () => {
         expect(JSON.stringify(summary.info.error)).toContain("Session too large to compact")
       }
       const ledger = yield* SessionRequestUsage.Service
-      expect(yield* ledger.get({ sessionID: session.id, requestID: msg.id })).toMatchObject({ source: "system_compaction", rootRequestID: msg.id, status: "error", assistantCount: 1, stepCount: 0, cost: 0, tokens: { total: 0 } })
+      expect(yield* ledger.get({ sessionID: session.id, requestID: msg.id })).toMatchObject({
+        source: "system_compaction",
+        rootRequestID: msg.id,
+        status: "error",
+        assistantCount: 1,
+        stepCount: 0,
+        cost: 0,
+        tokens: { total: 0 },
+      })
       // fresh 避开 fake processor/provider，但沿用 Project 所在的真实数据库确认用量和 overflow。
       const database = yield* Database.Service
       const stub = llm()
-      stub.push(Stream.concat(
-        Stream.make(LLMEvent.stepStart({ index: 0 }), LLMEvent.stepFinish({ index: 0, reason: "stop", usage: usage({ inputTokens: 8, outputTokens: 3, totalTokens: 11 }) })),
-        Stream.fail(new APICallError({ message: "request entity too large", url: "https://example.com/v1/chat/completions", requestBodyValues: {}, statusCode: 413, responseBody: '{"error":"request entity too large"}', isRetryable: false })),
-      ))
+      stub.push(
+        Stream.concat(
+          Stream.make(
+            LLMEvent.stepStart({ index: 0 }),
+            LLMEvent.stepFinish({
+              index: 0,
+              reason: "stop",
+              usage: usage({ inputTokens: 8, outputTokens: 3, totalTokens: 11 }),
+            }),
+          ),
+          Stream.fail(
+            new APICallError({
+              message: "request entity too large",
+              url: "https://example.com/v1/chat/completions",
+              requestBodyValues: {},
+              statusCode: 413,
+              responseBody: '{"error":"request entity too large"}',
+              isRetryable: false,
+            }),
+          ),
+        ),
+      )
       yield* Effect.gen(function* () {
         const ssn = yield* SessionNs.Service
         const ledger = yield* SessionRequestUsage.Service
         const chat = yield* ssn.create({ title: "Confirmed usage before summary overflow" })
         const parent = yield* createUserMessage(chat.id, "Overflow after a confirmed step")
-        const result = yield* SessionCompaction.use.process({ parentID: parent.id, messages: yield* ssn.messages({ sessionID: chat.id }), sessionID: chat.id, auto: false })
+        const result = yield* SessionCompaction.use.process({
+          parentID: parent.id,
+          messages: yield* ssn.messages({ sessionID: chat.id }),
+          sessionID: chat.id,
+          auto: false,
+        })
         expect(result).toBe("stop")
-        const summary = (yield* ssn.messages({ sessionID: chat.id })).find(message => message.info.role === "assistant" && message.info.summary)
+        const summary = (yield* ssn.messages({ sessionID: chat.id })).find(
+          (message) => message.info.role === "assistant" && message.info.summary,
+        )
         if (!summary || summary.info.role !== "assistant") return yield* Effect.die("Missing overflow summary")
         expect(summary.info.error?.name).toBe("ContextOverflowError")
-        if (!SessionV1.ContextOverflowError.isInstance(summary.info.error)) return yield* Effect.die("Expected original overflow error")
+        if (!SessionV1.ContextOverflowError.isInstance(summary.info.error))
+          return yield* Effect.die("Expected original overflow error")
         expect(summary.info.cost).toBeGreaterThan(0)
         expect(summary.info.tokens).toMatchObject({ input: 8, output: 3 })
-        const settled = { status: "error", stepCount: 1, cost: summary.info.cost, tokens: { input: 8, output: 3, total: 11 }, error: summary.info.error.data.message }
-        expect(yield* ledger.get({ sessionID: chat.id, requestID: parent.id })).toMatchObject({ ...settled, rootRequestID: parent.id, source: "system_compaction", assistantCount: 1 })
-        expect(yield* ledger.assistants({ sessionID: chat.id, requestID: parent.id })).toMatchObject([{ ...settled, assistantMessageID: summary.info.id }])
-      }).pipe(Effect.provide(Layer.fresh(compactionProcessLayer({ database: Layer.succeed(Database.Service, database), llm: stub.llmLayer, provider: ProviderTest.fake({ model: createModel({ context: 100_000, output: 32_000, cost: { input: 2, output: 4, cache: { read: 0, write: 0 } } }) }) }))))
+        const settled = {
+          status: "error",
+          stepCount: 1,
+          cost: summary.info.cost,
+          tokens: { input: 8, output: 3, total: 11 },
+          error: summary.info.error.data.message,
+        }
+        expect(yield* ledger.get({ sessionID: chat.id, requestID: parent.id })).toMatchObject({
+          ...settled,
+          rootRequestID: parent.id,
+          source: "system_compaction",
+          assistantCount: 1,
+        })
+        expect(yield* ledger.assistants({ sessionID: chat.id, requestID: parent.id })).toMatchObject([
+          { ...settled, assistantMessageID: summary.info.id },
+        ])
+      }).pipe(
+        Effect.provide(
+          Layer.fresh(
+            compactionProcessLayer({
+              database: Layer.succeed(Database.Service, database),
+              llm: stub.llmLayer,
+              provider: ProviderTest.fake({
+                model: createModel({
+                  context: 100_000,
+                  output: 32_000,
+                  cost: { input: 2, output: 4, cache: { read: 0, write: 0 } },
+                }),
+              }),
+            }),
+          ),
+        ),
+      )
     }).pipe(withCompaction({ result: "compact" })),
   )
 
@@ -1663,7 +1833,10 @@ describe("session.compaction.process", () => {
         // #256：auto:false 手动驱动 process——memento 在 select 之后写入 part
 
         const filtered = MessageV2.filterCompacted(yield* MessageV2.stream(session.id))
-        const modelMessages = yield* MessageV2.toModelMessagesEffect(filtered, createModel({ context: 100_000, output: 32_000 }))
+        const modelMessages = yield* MessageV2.toModelMessagesEffect(
+          filtered,
+          createModel({ context: 100_000, output: 32_000 }),
+        )
         const compactedContext = JSON.stringify(modelMessages)
 
         expect(compactedContext).toContain("<recent-user-messages>")
@@ -1674,7 +1847,7 @@ describe("session.compaction.process", () => {
           compactedContext.indexOf("What did we do so far?"),
         )
       }).pipe(withCompaction({ llm: stub.llmLayer, config: cfg({ tail_turns: 1, preserve_recent_tokens: 20 }) }))
-        // #256：tail_turns:1 + 20 token 预算使整轮尾部无法保留——强制 memento 成为唯一交接通道
+      // #256：tail_turns:1 + 20 token 预算使整轮尾部无法保留——强制 memento 成为唯一交接通道
     },
     { git: true },
   )
@@ -1685,7 +1858,7 @@ describe("session.compaction.process", () => {
     () => {
       const stub = llm()
       const mementoModel = createModel({ context: 10_000, output: 8_000 })
-        // #256：10K 小窗口——memento 预算按 usable 的 20% 收缩，远低于 20K 绝对上限
+      // #256：10K 小窗口——memento 预算按 usable 的 20% 收缩，远低于 20K 绝对上限
       stub.push(reply("summary"))
       return Effect.gen(function* () {
         const test = yield* TestInstance
@@ -1694,7 +1867,7 @@ describe("session.compaction.process", () => {
         const latest = yield* createUserMessage(
           session.id,
           `start of oversized instruction ${"x".repeat(100_000)} end of oversized instruction`,
-        // #256：100K 字符远超任何预算——强制走到 truncateRecentUserMessage 二分路径
+          // #256：100K 字符远超任何预算——强制走到 truncateRecentUserMessage 二分路径
         )
         yield* ssn.updateMessage({
           id: MessageID.ascending(),
@@ -1832,12 +2005,12 @@ describe("session.compaction.process", () => {
           type: "text",
           text: "hidden text part should not be preserved",
           hidden: { time: Date.now(), reason: "undo" },
-        // #257：hidden 结构为 {time, reason}——撤销标记必须同时排除 part 与整条消息
+          // #257：hidden 结构为 {time, reason}——撤销标记必须同时排除 part 与整条消息
         })
         const hiddenMsg = yield* createUserMessage(session.id, "hidden message should not be preserved")
         yield* ssn.updateMessage({
           ...hiddenMsg,
-        // #257：对已创建消息二次更新打 hidden 标记——比创建时传参更接近真实撤销路径
+          // #257：对已创建消息二次更新打 hidden 标记——比创建时传参更接近真实撤销路径
           hidden: { time: Date.now(), reason: "undo" },
         })
         yield* ssn.updateMessage({
@@ -2122,11 +2295,13 @@ describe("session.compaction.process", () => {
           expect(Cause.hasInterrupts(exit.cause)).toBe(true)
           expect(Date.now() - start).toBeLessThan(250)
         }
-      }).pipe(withCompaction({
-        llm: stub.llmLayer,
-        // 此例计量重试取消，不将 Git 快照子进程收尾混入 250ms 预算。
-        config: Layer.succeed(Config.Service, TestConfig.make({ get: () => Effect.succeed({ snapshot: false }) })),
-      }))
+      }).pipe(
+        withCompaction({
+          llm: stub.llmLayer,
+          // 此例计量重试取消，不将 Git 快照子进程收尾混入 250ms 预算。
+          config: Layer.succeed(Config.Service, TestConfig.make({ get: () => Effect.succeed({ snapshot: false }) })),
+        }),
+      )
     },
     { git: true },
     { timeout: 10_000 },
@@ -2160,7 +2335,13 @@ describe("session.compaction.process", () => {
           if (Exit.isFailure(exit)) expect(Cause.hasInterrupts(exit.cause)).toBe(true)
           expect(all.some((msg) => msg.info.role === "assistant" && msg.info.summary)).toBe(false)
           const ledger = yield* SessionRequestUsage.Service
-          expect(yield* ledger.get({ sessionID: session.id, requestID: msg.id })).toMatchObject({ rootRequestID: msg.id, status: "aborted", assistantCount: 0, stepCount: 0, tokens: { total: 0 } })
+          expect(yield* ledger.get({ sessionID: session.id, requestID: msg.id })).toMatchObject({
+            rootRequestID: msg.id,
+            status: "aborted",
+            assistantCount: 0,
+            stepCount: 0,
+            tokens: { total: 0 },
+          })
         }).pipe(withCompaction({ plugin: plugin(ready) }))
         // 快照已延后到副作用工具；仍在通知与真实processor初始化边界分别验证取消责任。
         for (const phase of ["publish", "processor"] as const) {
@@ -2168,7 +2349,10 @@ describe("session.compaction.process", () => {
           const release = yield* Deferred.make<void>()
           const stub = llm()
           let calls = 0
-          stub.push(input => { calls++; return reply("unused")(input) })
+          stub.push((input) => {
+            calls++
+            return reply("unused")(input)
+          })
           yield* Effect.gen(function* () {
             const ssn = yield* SessionNs.Service
             const events = yield* EventV2Bridge.Service
@@ -2176,33 +2360,69 @@ describe("session.compaction.process", () => {
             const chat = yield* ssn.create({ title: `Cancel summary ${phase}` })
             const parent = yield* createUserMessage(chat.id, "Cancel summary initialization")
             yield* Effect.addFinalizer(() => Deferred.succeed(release, void 0).pipe(Effect.asVoid))
-            const off = yield* events.listen(event => Effect.gen(function* () {
-              if (phase !== "publish" || event.type !== MessageV2.Event.Updated.type) return
-              const data = Schema.decodeUnknownSync(MessageV2.Event.Updated.data)(event.data)
-              if (data.sessionID !== chat.id || data.info.role !== "assistant") return
-              yield* Deferred.succeed(gate, void 0)
-              yield* Deferred.await(release)
-            }))
+            const off = yield* events.listen((event) =>
+              Effect.gen(function* () {
+                if (phase !== "publish" || event.type !== MessageV2.Event.Updated.type) return
+                const data = Schema.decodeUnknownSync(MessageV2.Event.Updated.data)(event.data)
+                if (data.sessionID !== chat.id || data.info.role !== "assistant") return
+                yield* Deferred.succeed(gate, void 0)
+                yield* Deferred.await(release)
+              }),
+            )
             yield* Effect.addFinalizer(() => off)
-            const fiber = yield* SessionCompaction.use.process({ parentID: parent.id, messages: yield* ssn.messages({ sessionID: chat.id }), sessionID: chat.id, auto: false }).pipe(Effect.forkChild)
+            const fiber = yield* SessionCompaction.use
+              .process({
+                parentID: parent.id,
+                messages: yield* ssn.messages({ sessionID: chat.id }),
+                sessionID: chat.id,
+                auto: false,
+              })
+              .pipe(Effect.forkChild)
             yield* Deferred.await(gate).pipe(Effect.timeout("1 second"))
-            const rescue = yield* Effect.sleep("2 seconds").pipe(Effect.andThen(Deferred.succeed(release, void 0)), Effect.forkChild)
+            const rescue = yield* Effect.sleep("2 seconds").pipe(
+              Effect.andThen(Deferred.succeed(release, void 0)),
+              Effect.forkChild,
+            )
             yield* Fiber.interrupt(fiber)
             expect(yield* Deferred.isDone(release)).toBe(false)
             yield* Fiber.interrupt(rescue)
             const exit = yield* Fiber.await(fiber)
             expect(Exit.isFailure(exit)).toBe(true)
             if (Exit.isFailure(exit)) expect(Cause.hasInterrupts(exit.cause)).toBe(true)
-            const summary = (yield* ssn.messages({ sessionID: chat.id })).find(message => message.info.role === "assistant" && message.info.summary)
-            expect(summary?.info).toMatchObject({ parentID: parent.id, error: { name: "MessageAbortedError" }, time: { completed: expect.any(Number) } })
-            expect(yield* ledger.get({ sessionID: chat.id, requestID: parent.id })).toMatchObject({ rootRequestID: parent.id, source: "system_compaction", status: "aborted", assistantCount: 1, stepCount: 0, cost: 0, tokens: { total: 0 } })
+            const summary = (yield* ssn.messages({ sessionID: chat.id })).find(
+              (message) => message.info.role === "assistant" && message.info.summary,
+            )
+            expect(summary?.info).toMatchObject({
+              parentID: parent.id,
+              error: { name: "MessageAbortedError" },
+              time: { completed: expect.any(Number) },
+            })
+            expect(yield* ledger.get({ sessionID: chat.id, requestID: parent.id })).toMatchObject({
+              rootRequestID: parent.id,
+              source: "system_compaction",
+              status: "aborted",
+              assistantCount: 1,
+              stepCount: 0,
+              cost: 0,
+              tokens: { total: 0 },
+            })
             expect(calls).toBe(0)
-          }).pipe(withCompaction({ llm: stub.llmLayer, ...(phase === "processor" ? { processor: Layer.mock(SessionProcessorModule.SessionProcessor.Service)({ create: () => Deferred.succeed(gate, void 0).pipe(Effect.andThen(Effect.never)) }) } : {}) }))
+          }).pipe(
+            withCompaction({
+              llm: stub.llmLayer,
+              ...(phase === "processor"
+                ? {
+                    processor: Layer.mock(SessionProcessorModule.SessionProcessor.Service)({
+                      create: () => Deferred.succeed(gate, void 0).pipe(Effect.andThen(Effect.never)),
+                    }),
+                  }
+                : {}),
+            }),
+          )
         }
       }),
     { git: true },
   )
-
 
   // #242：run 直接把 compaction 执行为已完成边界——create 落 marker、process 收 continue
   // #242：latest.tasks 不再包含可重放 compact 任务（生产者直执，消费端只留边界）
@@ -2237,7 +2457,8 @@ describe("session.compaction.process", () => {
         expect(latest.tasks).toEqual([])
       }).pipe(withCompaction())
     },
-    { git: true }, 15_000,
+    { git: true },
+    15_000,
   )
 
   // #242：中断发生在 scratch 标记可见后、摘要请求开始前——hideIncomplete 只隐藏
@@ -3062,15 +3283,28 @@ describe("ColdStorage compact eligibility", () => {
     Effect.gen(function* () {
       const ssn = yield* SessionNs.Service
       // 与现有 eligibility 用例构造相同的已结算 Tool，不在 fixture 中模拟冻结资格。
-      const addCompletedToolPart = (input: { sessionID: SessionID; messageID: MessageID; tool: string; output: string }) => ssn.updatePart({
-        id: PartID.ascending(), type: "tool",
-        sessionID: input.sessionID, messageID: input.messageID,
-        tool: input.tool, callID: crypto.randomUUID(),
-        state: {
-          status: "completed", input: {}, output: input.output,
-          title: input.tool, metadata: {}, time: { start: 1, end: 2 },
-        },
-      })
+      const addCompletedToolPart = (input: {
+        sessionID: SessionID
+        messageID: MessageID
+        tool: string
+        output: string
+      }) =>
+        ssn.updatePart({
+          id: PartID.ascending(),
+          type: "tool",
+          sessionID: input.sessionID,
+          messageID: input.messageID,
+          tool: input.tool,
+          callID: crypto.randomUUID(),
+          state: {
+            status: "completed",
+            input: {},
+            output: input.output,
+            title: input.tool,
+            metadata: {},
+            time: { start: 1, end: 2 },
+          },
+        })
       // #493：eligibility 走同步 drizzle client，与运行时同连接。
       const { sync } = yield* Database.Service
       const session = yield* ssn.create({ title: "compact chronology rollover" })
@@ -3123,15 +3357,28 @@ describe("ColdStorage compact eligibility", () => {
       // marker/summary 由现有 compaction helper 生成，测试不复制 production completed-boundary SQL。
       const ssn = yield* SessionNs.Service
       // 沿用真实 projector 写入完整 tool 终态；四组样本只改变输出及所属 session。
-      const addCompletedToolPart = (input: { sessionID: SessionID; messageID: MessageID; tool: string; output: string }) => ssn.updatePart({
-        id: PartID.ascending(), type: "tool",
-        sessionID: input.sessionID, messageID: input.messageID,
-        tool: input.tool, callID: crypto.randomUUID(),
-        state: {
-          status: "completed", input: {}, output: input.output,
-          title: input.tool, metadata: {}, time: { start: 1, end: 2 },
-        },
-      })
+      const addCompletedToolPart = (input: {
+        sessionID: SessionID
+        messageID: MessageID
+        tool: string
+        output: string
+      }) =>
+        ssn.updatePart({
+          id: PartID.ascending(),
+          type: "tool",
+          sessionID: input.sessionID,
+          messageID: input.messageID,
+          tool: input.tool,
+          callID: crypto.randomUUID(),
+          state: {
+            status: "completed",
+            input: {},
+            output: input.output,
+            title: input.tool,
+            metadata: {},
+            time: { start: 1, end: 2 },
+          },
+        })
       const test = yield* TestInstance
       // #493：eligibility/freeze 走同一同步 drizzle client（Database.Service.sync），与运行时同连接。
       const { sync } = yield* Database.Service
@@ -3167,11 +3414,7 @@ describe("ColdStorage compact eligibility", () => {
       )
       const summaryParts = yield* MessageV2.parts(summary.id)
       const summaryText = summaryParts[0]
-      sync
-        .update(SessionTable)
-        .set({ time_updated: Date.now() })
-        .where(eq(SessionTable.id, session.id))
-        .run()
+      sync.update(SessionTable).set({ time_updated: Date.now() }).where(eq(SessionTable.id, session.id)).run()
       expect(ColdStorage.isEligibleOwner(sync, { type: "part", id: headPart.id })).toBe(true)
       expect(ColdStorage.isEligibleOwner(sync, { type: "part", id: tailPart.id })).toBe(false)
       // marker/memento 与普通 summary text 即使超过门槛也不是冷字段；boundary 只能授权白名单，不扩展类型集合。
@@ -3179,7 +3422,9 @@ describe("ColdStorage compact eligibility", () => {
       // 三项 false 与 head tool true 联合锁定“compact 决定 eligibility、extraction 决定字段”的双门禁。
       expect(ColdStorage.isEligibleOwner(sync, { type: "part", id: marker.id })).toBe(false)
       expect(ColdStorage.isEligibleOwner(sync, { type: "message", id: summary.id })).toBe(false)
-      expect(summaryText ? ColdStorage.isEligibleOwner(sync, { type: "part", id: summaryText.id }) : undefined).toBe(false)
+      expect(summaryText ? ColdStorage.isEligibleOwner(sync, { type: "part", id: summaryText.id }) : undefined).toBe(
+        false,
+      )
       expect(ColdStorage.freezeOwner(sync, { type: "part", id: headPart.id }).type).toBe("frozen")
       expect(ColdStorage.freezeOwner(sync, { type: "part", id: tailPart.id }).type).toBe("skipped")
       // 把同 session 变老证明 age 规则覆盖 tail：31 天前的 session 使 tail tool part 也可冻结。
@@ -3239,11 +3484,7 @@ describe("ColdStorage compact eligibility", () => {
         .run()
       expect(ColdStorage.isEligibleOwner(sync, { type: "part", id: rootPart.id })).toBe(false)
       // root 不得因 last message 变老而走 subagent 时钟：消息 25h 前但 session 仍热时必须 ineligible。
-      sync
-        .update(SessionTable)
-        .set({ time_updated: Date.now() })
-        .where(eq(SessionTable.id, rootAge.id))
-        .run()
+      sync.update(SessionTable).set({ time_updated: Date.now() }).where(eq(SessionTable.id, rootAge.id)).run()
       sync
         .update(MessageTable)
         .set({ time_created: Date.now() - 25 * 60 * 60 * 1000 })
@@ -3262,11 +3503,7 @@ describe("ColdStorage compact eligibility", () => {
         tool: "read",
         output: "child-idle-output-".repeat(512),
       })
-      sync
-        .update(SessionTable)
-        .set({ time_updated: Date.now() })
-        .where(eq(SessionTable.id, child.id))
-        .run()
+      sync.update(SessionTable).set({ time_updated: Date.now() }).where(eq(SessionTable.id, child.id)).run()
       sync
         .update(MessageTable)
         .set({ time_created: Date.now() - 25 * 60 * 60 * 1000 })

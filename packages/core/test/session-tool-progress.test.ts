@@ -145,13 +145,21 @@ describe("Tool.Progress", () => {
       // 从真实 durable success 投影到数据库，下一轮工具调用记忆必须采用 formatter 的落盘真值。
       yield* start("call-formatted", "write", { path: "x.ts", content: "const n=2" })
       yield* service.publish(SessionEvent.Tool.Success, {
-        sessionID, timestamp, assistantMessageID, callID: "call-formatted",
+        sessionID,
+        timestamp,
+        assistantMessageID,
+        callID: "call-formatted",
         structured: { formattedContent: "const n = 2;\n", formattedDiff: "-const n=2\n+const n = 2;\n" },
-        content: content("Wrote file successfully.\nFormatted changes"), provider: { executed: false },
+        content: content("Wrote file successfully.\nFormatted changes"),
+        provider: { executed: false },
       })
       expect((yield* readAssistant).content[2]).toMatchObject({
         name: "write",
-        state: { status: "completed", input: { path: "x.ts", content: "const n = 2;\n" }, structured: { formattedDiff: "-const n=2\n+const n = 2;\n" } },
+        state: {
+          status: "completed",
+          input: { path: "x.ts", content: "const n = 2;\n" },
+          structured: { formattedDiff: "-const n=2\n+const n = 2;\n" },
+        },
       })
       const formattedTool = (yield* readAssistant).content[2]
       expect(formattedTool?.type).toBe("tool")

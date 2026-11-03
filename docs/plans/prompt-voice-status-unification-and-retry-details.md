@@ -42,32 +42,32 @@ it does not authorize production or test implementation.
 
 ## 3. Repository Context
 
-| Source | Why it constrains this task |
-| --- | --- |
-| `CONTEXT.md` | Defines Prompt, Session, Status, Run state, and Goal vocabulary used by this plan. |
+| Source                                             | Why it constrains this task                                                                                               |
+| -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| `CONTEXT.md`                                       | Defines Prompt, Session, Status, Run state, and Goal vocabulary used by this plan.                                        |
 | `.opencode/policy/first-principles-engineering.md` | Requires first-divergence ownership, one primary path, behavior-sensitive tests, and the 15 percent Chinese comment gate. |
-| `.opencode/templates/canonical-plan.md` | Defines this plan's required sections and audit transitions. |
-| `packages/opencode/AGENTS.md` | Preserves package module shape and repository test/typecheck conventions. |
-| `packages/opencode/test/AGENTS.md` | Requires fixture cleanup and real lifecycle synchronization in tests. |
-| `docs/adr/README.md` | No new ADR is justified: this is a scoped presentation change, not a load-bearing architectural decision. |
-| `docs/plans/prompt-extension-bar-single-line.md` | Existing verified R5 baseline for the one-row Prompt footer and main-Prompt compact profile. |
+| `.opencode/templates/canonical-plan.md`            | Defines this plan's required sections and audit transitions.                                                              |
+| `packages/opencode/AGENTS.md`                      | Preserves package module shape and repository test/typecheck conventions.                                                 |
+| `packages/opencode/test/AGENTS.md`                 | Requires fixture cleanup and real lifecycle synchronization in tests.                                                     |
+| `docs/adr/README.md`                               | No new ADR is justified: this is a scoped presentation change, not a load-bearing architectural decision.                 |
+| `docs/plans/prompt-extension-bar-single-line.md`   | Existing verified R5 baseline for the one-row Prompt footer and main-Prompt compact profile.                              |
 
 ## 4. Files and Evidence Read
 
-| Evidence | Relevance | Evidence class |
-| --- | --- | --- |
-| `packages/opencode/src/cli/cmd/tui/prompt-voice-input.ts:217-231` | Shared formatter has default long text and an existing `compact` option. | observed |
-| `packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx:445-452` | Main Prompt explicitly opts into compact voice text. | observed |
-| `packages/opencode/src/cli/cmd/tui/ui/dialog-prompt.tsx:33-44,153-179` | DialogPrompt owns the same controller/clock but calls the formatter without compact mode. | observed |
-| `packages/opencode/src/cli/cmd/tui/routes/session/question.tsx:39-50,575-590` | QuestionPrompt owns the same controller/clock but calls the formatter without compact mode. | observed |
-| `packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx:1959-2008` | Retry summary, details token, flex growth, color, and mouse ownership. | observed |
-| `packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx:2073` | Existing shrink-only text pattern: `minWidth={0} flexShrink={1}` without `flexBasis={0}`. | observed |
-| `packages/opencode/test/cli/tui/prompt-voice-input.test.ts:111-140` | Existing default and main-Prompt compact formatter contracts; comment still says compact is main-Prompt only. | observed |
-| `packages/opencode/test/cli/cmd/tui/dialog-prompt.test.tsx` | Existing real DialogPrompt provider/test seam; currently no voice assertion. | observed |
-| `packages/opencode/test/cli/cmd/tui/prompt-submit-transport.test.tsx` | Existing real Prompt renderer, SDK status, final-frame, and mouse-dialog seam. | observed |
-| `packages/opencode/test/cli/cmd/tui/session-integration.test.ts` | Session integration smoke only; does not cover QuestionPrompt voice wording. | observed |
-| Temporary real Prompt repro, deleted after run | User-visible red signal for short retry alignment. | observed |
-| `git` baseline commit `c50779e07a` | Confirms the prior R5 implementation is committed and is not this plan's implementation authorization. | observed |
+| Evidence                                                                      | Relevance                                                                                                     | Evidence class |
+| ----------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- | -------------- |
+| `packages/opencode/src/cli/cmd/tui/prompt-voice-input.ts:217-231`             | Shared formatter has default long text and an existing `compact` option.                                      | observed       |
+| `packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx:445-452`        | Main Prompt explicitly opts into compact voice text.                                                          | observed       |
+| `packages/opencode/src/cli/cmd/tui/ui/dialog-prompt.tsx:33-44,153-179`        | DialogPrompt owns the same controller/clock but calls the formatter without compact mode.                     | observed       |
+| `packages/opencode/src/cli/cmd/tui/routes/session/question.tsx:39-50,575-590` | QuestionPrompt owns the same controller/clock but calls the formatter without compact mode.                   | observed       |
+| `packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx:1959-2008`      | Retry summary, details token, flex growth, color, and mouse ownership.                                        | observed       |
+| `packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx:2073`           | Existing shrink-only text pattern: `minWidth={0} flexShrink={1}` without `flexBasis={0}`.                     | observed       |
+| `packages/opencode/test/cli/tui/prompt-voice-input.test.ts:111-140`           | Existing default and main-Prompt compact formatter contracts; comment still says compact is main-Prompt only. | observed       |
+| `packages/opencode/test/cli/cmd/tui/dialog-prompt.test.tsx`                   | Existing real DialogPrompt provider/test seam; currently no voice assertion.                                  | observed       |
+| `packages/opencode/test/cli/cmd/tui/prompt-submit-transport.test.tsx`         | Existing real Prompt renderer, SDK status, final-frame, and mouse-dialog seam.                                | observed       |
+| `packages/opencode/test/cli/cmd/tui/session-integration.test.ts`              | Session integration smoke only; does not cover QuestionPrompt voice wording.                                  | observed       |
+| Temporary real Prompt repro, deleted after run                                | User-visible red signal for short retry alignment.                                                            | observed       |
+| `git` baseline commit `c50779e07a`                                            | Confirms the prior R5 implementation is committed and is not this plan's implementation authorization.        | observed       |
 
 ## 5. Current Behavior
 
@@ -114,34 +114,34 @@ token toward the far edge of the available row.
 
 ## 6. Supported Input Domain and Reachability
 
-| Input or condition | Producer | Upstream guarantees | Reachable path | Owner | Classification |
-| --- | --- | --- | --- | --- | --- |
-| `starting`, `recording`, `stopping`, `transcribing` | Existing voice controller status callbacks | Status is a finite `VoiceInputStatus` union. | Controller → each consumer signal → shared formatter. | `PromptVoiceInput` formatter for wording; each consumer for opt-in profile. | observed / contracted |
-| Recording elapsed time | Existing consumer `createRefreshClock` | Consumer clock refreshes while recording. | Voice status → `now()` → formatter. | Existing consumer lifecycle. | observed |
-| Short retry message | Session status producer | Retry status carries a message string. | Session status → Prompt retry branch → footer. | Prompt extension-bar layout. | observed / reachable |
-| Long retry message | Provider/session transport | Message remains available for detail dialog. | Same retry branch; summary can shrink. | Prompt display owner; DialogAlert remains detail owner. | observed / reachable |
-| Mouse click on summary/details | OpenTUI rendered text | Visible text receives mouse event in current seam. | Footer text → existing `handleMessageClick` → DialogAlert. | Prompt retry branch. | observed |
+| Input or condition                                  | Producer                                   | Upstream guarantees                                | Reachable path                                             | Owner                                                                       | Classification        |
+| --------------------------------------------------- | ------------------------------------------ | -------------------------------------------------- | ---------------------------------------------------------- | --------------------------------------------------------------------------- | --------------------- |
+| `starting`, `recording`, `stopping`, `transcribing` | Existing voice controller status callbacks | Status is a finite `VoiceInputStatus` union.       | Controller → each consumer signal → shared formatter.      | `PromptVoiceInput` formatter for wording; each consumer for opt-in profile. | observed / contracted |
+| Recording elapsed time                              | Existing consumer `createRefreshClock`     | Consumer clock refreshes while recording.          | Voice status → `now()` → formatter.                        | Existing consumer lifecycle.                                                | observed              |
+| Short retry message                                 | Session status producer                    | Retry status carries a message string.             | Session status → Prompt retry branch → footer.             | Prompt extension-bar layout.                                                | observed / reachable  |
+| Long retry message                                  | Provider/session transport                 | Message remains available for detail dialog.       | Same retry branch; summary can shrink.                     | Prompt display owner; DialogAlert remains detail owner.                     | observed / reachable  |
+| Mouse click on summary/details                      | OpenTUI rendered text                      | Visible text receives mouse event in current seam. | Footer text → existing `handleMessageClick` → DialogAlert. | Prompt retry branch.                                                        | observed              |
 
 No speculative producer or hidden panel is included.
 
 ## 7. Required Invariants
 
-| ID | Behavioral invariant | Evidence | Existing test |
-| --- | --- | --- | --- |
-| INV-01 | Main Prompt, DialogPrompt, and QuestionPrompt use the same compact voice labels for every non-idle voice status. | User follow-up plus shared formatter/call-site evidence. | Formatter compact assertions exist; **hard consumer call-site regressions required** for DialogPrompt and QuestionPrompt (see §16/§18). |
-| INV-02 | Default formatter wording remains available and unchanged for compatibility. | Existing default formatter assertions and non-goal. | `prompt-voice-input.test.ts`. |
-| INV-03 | Retry details display as red `(details)` and remain in the same left-starting group as a short error. | User symptom and temporary real-frame red signal. | New real Prompt final-frame assertion. |
-| INV-04 | Long retry summaries may shrink/truncate, but `(details)`, retry metadata, interrupt, and active duration remain observable in one row. | Existing R5 layout invariant and user requirement. | Existing long retry frame plus new short-layout assertion. |
-| INV-05 | Clicking summary or `(details)` opens the existing dialog with the exact raw retry message. | Existing R5 interaction path. | Existing real mouse/DialogAlert test. |
-| INV-06 | Voice controller, timer, abort, shortcut, and text insertion behavior remain unchanged. | Existing controller lifecycle tests and non-goals. | Existing voice lifecycle suites. |
+| ID     | Behavioral invariant                                                                                                                    | Evidence                                                 | Existing test                                                                                                                           |
+| ------ | --------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| INV-01 | Main Prompt, DialogPrompt, and QuestionPrompt use the same compact voice labels for every non-idle voice status.                        | User follow-up plus shared formatter/call-site evidence. | Formatter compact assertions exist; **hard consumer call-site regressions required** for DialogPrompt and QuestionPrompt (see §16/§18). |
+| INV-02 | Default formatter wording remains available and unchanged for compatibility.                                                            | Existing default formatter assertions and non-goal.      | `prompt-voice-input.test.ts`.                                                                                                           |
+| INV-03 | Retry details display as red `(details)` and remain in the same left-starting group as a short error.                                   | User symptom and temporary real-frame red signal.        | New real Prompt final-frame assertion.                                                                                                  |
+| INV-04 | Long retry summaries may shrink/truncate, but `(details)`, retry metadata, interrupt, and active duration remain observable in one row. | Existing R5 layout invariant and user requirement.       | Existing long retry frame plus new short-layout assertion.                                                                              |
+| INV-05 | Clicking summary or `(details)` opens the existing dialog with the exact raw retry message.                                             | Existing R5 interaction path.                            | Existing real mouse/DialogAlert test.                                                                                                   |
+| INV-06 | Voice controller, timer, abort, shortcut, and text insertion behavior remain unchanged.                                                 | Existing controller lifecycle tests and non-goals.       | Existing voice lifecycle suites.                                                                                                        |
 
 ## 8. First Divergence and Root Cause
 
-| Invariant | First divergence | Owning module/interface | Proof |
-| --- | --- | --- | --- |
-| INV-01 | DialogPrompt and QuestionPrompt omit the already-supported compact presentation option. | Three consumer call sites plus shared formatter interface. | Source calls at `dialog-prompt.tsx:166` and `question.tsx:582` versus main Prompt compact call. |
-| INV-03 | Prompt retry branch assigns muted, unparenthesized text to the details affordance and allows the summary text to grow. | Existing Prompt retry layout. | Source at `prompt/index.tsx:1996-2003`; temporary frame shows separated short error/details. |
-| INV-04 | Short/long summary behavior is represented by the same growable text child rather than a left-starting content-based shrinkable summary next to a fixed details token. | Existing Prompt flex children. | `flexGrow={1}` / `flexBasis={0}` on the error text and red repro frame. |
+| Invariant | First divergence                                                                                                                                                       | Owning module/interface                                    | Proof                                                                                           |
+| --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| INV-01    | DialogPrompt and QuestionPrompt omit the already-supported compact presentation option.                                                                                | Three consumer call sites plus shared formatter interface. | Source calls at `dialog-prompt.tsx:166` and `question.tsx:582` versus main Prompt compact call. |
+| INV-03    | Prompt retry branch assigns muted, unparenthesized text to the details affordance and allows the summary text to grow.                                                 | Existing Prompt retry layout.                              | Source at `prompt/index.tsx:1996-2003`; temporary frame shows separated short error/details.    |
+| INV-04    | Short/long summary behavior is represented by the same growable text child rather than a left-starting content-based shrinkable summary next to a fixed details token. | Existing Prompt flex children.                             | `flexGrow={1}` / `flexBasis={0}` on the error text and red repro frame.                         |
 
 Red-capable feedback loop already run:
 
@@ -155,12 +155,12 @@ test was removed after the run and is not implementation authorization.
 
 ## 9. Responsibility and Seam
 
-| Concern | Owner | Interface promise | Why it belongs here | Why another module does not own it |
-| --- | --- | --- | --- | --- |
-| Compact voice wording | `PromptVoiceInput.voiceInputStatusText` | One formatter can expose default and compact presentation profiles. | All three consumers already call this formatter. | Controllers produce lifecycle state, not user-facing wording. |
-| Compact profile selection | Prompt/DialogPrompt/QuestionPrompt call sites | Each consumer explicitly chooses the same compact profile. | The user requested all three panel presentations; consumer owns display context. | Global default would silently alter future consumers. |
-| Retry details label/color/alignment | Prompt retry footer | Footer owns visual grouping and existing click handler. | It owns the first divergence and fixed-token priority. | DialogAlert owns detail content, not footer display geometry. |
-| Raw retry detail | Existing `DialogAlert.show` call | Receives the original message unchanged. | Existing contract already satisfies raw-detail preservation. | No DialogAlert change is justified. |
+| Concern                             | Owner                                         | Interface promise                                                   | Why it belongs here                                                              | Why another module does not own it                            |
+| ----------------------------------- | --------------------------------------------- | ------------------------------------------------------------------- | -------------------------------------------------------------------------------- | ------------------------------------------------------------- |
+| Compact voice wording               | `PromptVoiceInput.voiceInputStatusText`       | One formatter can expose default and compact presentation profiles. | All three consumers already call this formatter.                                 | Controllers produce lifecycle state, not user-facing wording. |
+| Compact profile selection           | Prompt/DialogPrompt/QuestionPrompt call sites | Each consumer explicitly chooses the same compact profile.          | The user requested all three panel presentations; consumer owns display context. | Global default would silently alter future consumers.         |
+| Retry details label/color/alignment | Prompt retry footer                           | Footer owns visual grouping and existing click handler.             | It owns the first divergence and fixed-token priority.                           | DialogAlert owns detail content, not footer display geometry. |
+| Raw retry detail                    | Existing `DialogAlert.show` call              | Receives the original message unchanged.                            | Existing contract already satisfies raw-detail preservation.                     | No DialogAlert change is justified.                           |
 
 ## 10. Single Approved Primary-Path Design
 
@@ -196,56 +196,56 @@ shrinkable, matching the existing file-label pattern at
 
 ## 11. Secondary and Replacement Path Inventory
 
-| Path | Current or proposed | Classification | Produces success? | Decision-surface share | Disposition |
-| --- | --- | --- | --- | --- | --- |
-| Shared formatter default profile | Current compatibility presentation. | existing compatibility | yes | none for the three target consumers | preserve |
-| Shared compact formatter profile | Current main Prompt path, proposed for all three consumers. | primary-contract branch | yes | all voice wording | preserve and unify |
-| Existing DialogAlert raw detail | Current detail surface. | pass-through | yes | detail content only | preserve |
-| Width-specific alternate footer | Not proposed. | forbidden fallback | no | none | reject |
-| New voice status component/lifecycle | Not proposed. | forbidden duplicate abstraction | no | none | reject |
+| Path                                 | Current or proposed                                         | Classification                  | Produces success? | Decision-surface share              | Disposition        |
+| ------------------------------------ | ----------------------------------------------------------- | ------------------------------- | ----------------- | ----------------------------------- | ------------------ |
+| Shared formatter default profile     | Current compatibility presentation.                         | existing compatibility          | yes               | none for the three target consumers | preserve           |
+| Shared compact formatter profile     | Current main Prompt path, proposed for all three consumers. | primary-contract branch         | yes               | all voice wording                   | preserve and unify |
+| Existing DialogAlert raw detail      | Current detail surface.                                     | pass-through                    | yes               | detail content only                 | preserve           |
+| Width-specific alternate footer      | Not proposed.                                               | forbidden fallback              | no                | none                                | reject             |
+| New voice status component/lifecycle | Not proposed.                                               | forbidden duplicate abstraction | no                | none                                | reject             |
 
 ## 12. Workaround Deletion and Replacement
 
-| Existing workaround or duplicate | Why it existed | Why the approved route supersedes it | Delete or collapse location |
-| --- | --- | --- | --- |
-| Per-consumer default/compact wording split | Main Prompt width pressure was handled, Dialog/Question panels were left on long wording. | All three consumers have the explicitly requested uniform compact profile. | Collapse call-site divergence by adding compact option to DialogPrompt and QuestionPrompt. |
-| Growable short error summary | It protected long-message width but created a large blank gap for short messages. | Summary is content-based shrinkable without growth; fixed details remains adjacent. | Prompt retry inner text flex configuration. |
-| Muted unparenthesized `details` label | Existing label was a low-emphasis affordance. | User explicitly requests a red, parenthesized error affordance. | Prompt retry details text. |
-| Stale comments/tests claiming compact is main-Prompt only | R5 scoped compact to main Prompt. | User now requires three-panel compact; comments/tests must match. | `prompt-voice-input.ts` and `prompt-voice-input.test.ts` narrative comments. |
+| Existing workaround or duplicate                          | Why it existed                                                                            | Why the approved route supersedes it                                                | Delete or collapse location                                                                |
+| --------------------------------------------------------- | ----------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| Per-consumer default/compact wording split                | Main Prompt width pressure was handled, Dialog/Question panels were left on long wording. | All three consumers have the explicitly requested uniform compact profile.          | Collapse call-site divergence by adding compact option to DialogPrompt and QuestionPrompt. |
+| Growable short error summary                              | It protected long-message width but created a large blank gap for short messages.         | Summary is content-based shrinkable without growth; fixed details remains adjacent. | Prompt retry inner text flex configuration.                                                |
+| Muted unparenthesized `details` label                     | Existing label was a low-emphasis affordance.                                             | User explicitly requests a red, parenthesized error affordance.                     | Prompt retry details text.                                                                 |
+| Stale comments/tests claiming compact is main-Prompt only | R5 scoped compact to main Prompt.                                                         | User now requires three-panel compact; comments/tests must match.                   | `prompt-voice-input.ts` and `prompt-voice-input.test.ts` narrative comments.               |
 
 ## 13. Forward Traceability
 
-| Requirement or invariant | Production path | Planned file/change | Behavioral test |
-| --- | --- | --- | --- |
-| INV-01 unified compact voice labels | Shared formatter call sites | `dialog-prompt.tsx`, `question.tsx`, retain main Prompt compact call | **Hard fail-capable consumer contract tests** for DialogPrompt and QuestionPrompt plus existing formatter compact assertions. |
-| INV-02 default wording compatibility | Shared formatter default branch | No default string change | Existing `prompt-voice-input.test.ts` default assertions. |
-| INV-03 red `(details)` and short left alignment | Prompt retry footer | `component/prompt/index.tsx` details token and content-based shrinkable summary | Real Prompt short retry frame and span color assertion. |
-| INV-04 long retry one-row priority | Existing Prompt retry flex row | Same Prompt owner, no new branch | Existing long retry frame and five-state loop. |
-| INV-05 raw detail click | Existing handler/DialogAlert | No DialogAlert change | Existing real mouse/dialog test. |
-| INV-06 lifecycle preservation | Existing controller/clock consumers | No lifecycle code changes | Existing voice lifecycle and controller suites. |
+| Requirement or invariant                        | Production path                     | Planned file/change                                                             | Behavioral test                                                                                                               |
+| ----------------------------------------------- | ----------------------------------- | ------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| INV-01 unified compact voice labels             | Shared formatter call sites         | `dialog-prompt.tsx`, `question.tsx`, retain main Prompt compact call            | **Hard fail-capable consumer contract tests** for DialogPrompt and QuestionPrompt plus existing formatter compact assertions. |
+| INV-02 default wording compatibility            | Shared formatter default branch     | No default string change                                                        | Existing `prompt-voice-input.test.ts` default assertions.                                                                     |
+| INV-03 red `(details)` and short left alignment | Prompt retry footer                 | `component/prompt/index.tsx` details token and content-based shrinkable summary | Real Prompt short retry frame and span color assertion.                                                                       |
+| INV-04 long retry one-row priority              | Existing Prompt retry flex row      | Same Prompt owner, no new branch                                                | Existing long retry frame and five-state loop.                                                                                |
+| INV-05 raw detail click                         | Existing handler/DialogAlert        | No DialogAlert change                                                           | Existing real mouse/dialog test.                                                                                              |
+| INV-06 lifecycle preservation                   | Existing controller/clock consumers | No lifecycle code changes                                                       | Existing voice lifecycle and controller suites.                                                                               |
 
 ## 14. Reverse Traceability
 
-| Proposed production concept | Requirement ID | Evidence | Why existing logic cannot carry it |
-| --- | --- | --- | --- |
-| Explicit compact option at DialogPrompt/QuestionPrompt | INV-01 | User explicitly requests all panels match Prompt; current call sites omit option. | Existing call sites currently select the long profile. |
-| Hard DialogPrompt consumer compact assertion | INV-01 | Formatter-only tests cannot prove consumer selection; Dialog currently has no voice assertion. | Without it, Dialog omission remains green. |
-| Hard QuestionPrompt consumer compact assertion | INV-01 | Question is a third distinct call site; session-integration does not cover it. | Without it, Question omission remains green. |
-| Parenthesized red details token | INV-03 | User-visible red/parentheses requirement and current muted plain token. | Existing token is visibly muted and lacks grouping semantics. |
-| Content-based shrinkable summary text | INV-03/04 | Temporary real frame shows short-error blank gap; long-error one-row invariant remains. | Current `flexGrow={1}` / `flexBasis={0}` makes short content expand or risk collapse if only grow is removed. |
-| Durable real-frame assertions for retry | INV-03/04 | Existing OpenTUI Prompt seam is the only behavior-sensitive geometry/color seam. | Formatter-only tests cannot prove flex placement or color. |
+| Proposed production concept                            | Requirement ID | Evidence                                                                                       | Why existing logic cannot carry it                                                                            |
+| ------------------------------------------------------ | -------------- | ---------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| Explicit compact option at DialogPrompt/QuestionPrompt | INV-01         | User explicitly requests all panels match Prompt; current call sites omit option.              | Existing call sites currently select the long profile.                                                        |
+| Hard DialogPrompt consumer compact assertion           | INV-01         | Formatter-only tests cannot prove consumer selection; Dialog currently has no voice assertion. | Without it, Dialog omission remains green.                                                                    |
+| Hard QuestionPrompt consumer compact assertion         | INV-01         | Question is a third distinct call site; session-integration does not cover it.                 | Without it, Question omission remains green.                                                                  |
+| Parenthesized red details token                        | INV-03         | User-visible red/parentheses requirement and current muted plain token.                        | Existing token is visibly muted and lacks grouping semantics.                                                 |
+| Content-based shrinkable summary text                  | INV-03/04      | Temporary real frame shows short-error blank gap; long-error one-row invariant remains.        | Current `flexGrow={1}` / `flexBasis={0}` makes short content expand or risk collapse if only grow is removed. |
+| Durable real-frame assertions for retry                | INV-03/04      | Existing OpenTUI Prompt seam is the only behavior-sensitive geometry/color seam.               | Formatter-only tests cannot prove flex placement or color.                                                    |
 
 ## 15. File-Level Change Plan
 
-| File | Add / modify / delete | Exact responsibility of the change | Expected line delta |
-| --- | --- | --- | --- |
-| `packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx` | modify | Red `(details)` token; content-based shrinkable summary (`minWidth={0} flexShrink={1}`, no grow, no basis-0); preserve long-error shrink/click. | approximately +4 / -4 production lines |
-| `packages/opencode/src/cli/cmd/tui/prompt-voice-input.ts` | modify | Update comments so compact is the three-consumer presentation profile; no default-string change. | approximately +2 / -2 |
-| `packages/opencode/src/cli/cmd/tui/ui/dialog-prompt.tsx` | modify | Pass `{ compact: true }` to shared formatter only. | approximately +1 / -1 |
-| `packages/opencode/src/cli/cmd/tui/routes/session/question.tsx` | modify | Pass `{ compact: true }` to shared formatter only. | approximately +1 / -1 |
-| `packages/opencode/test/cli/tui/prompt-voice-input.test.ts` | modify | Keep default assertions; rewrite compact comments to three-consumer contract; add fail-capable assertions that both DialogPrompt and QuestionPrompt call sites pass `{ compact: true }` (source-contract seam if full mount is not required). | approximately +40 / -4 |
-| `packages/opencode/test/cli/cmd/tui/prompt-submit-transport.test.tsx` | modify additive hunk only | Add short retry final-frame/color assertion without overwriting existing dirty user tests. | approximately +35 / -0 |
-| `packages/opencode/test/cli/cmd/tui/dialog-prompt.test.tsx` | modify | **Required:** fail-capable compact consumer verification for DialogPrompt (real frame preferred; call-site contract minimum). | approximately +25 / -0 |
+| File                                                                  | Add / modify / delete     | Exact responsibility of the change                                                                                                                                                                                                            | Expected line delta                    |
+| --------------------------------------------------------------------- | ------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------- |
+| `packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx`        | modify                    | Red `(details)` token; content-based shrinkable summary (`minWidth={0} flexShrink={1}`, no grow, no basis-0); preserve long-error shrink/click.                                                                                               | approximately +4 / -4 production lines |
+| `packages/opencode/src/cli/cmd/tui/prompt-voice-input.ts`             | modify                    | Update comments so compact is the three-consumer presentation profile; no default-string change.                                                                                                                                              | approximately +2 / -2                  |
+| `packages/opencode/src/cli/cmd/tui/ui/dialog-prompt.tsx`              | modify                    | Pass `{ compact: true }` to shared formatter only.                                                                                                                                                                                            | approximately +1 / -1                  |
+| `packages/opencode/src/cli/cmd/tui/routes/session/question.tsx`       | modify                    | Pass `{ compact: true }` to shared formatter only.                                                                                                                                                                                            | approximately +1 / -1                  |
+| `packages/opencode/test/cli/tui/prompt-voice-input.test.ts`           | modify                    | Keep default assertions; rewrite compact comments to three-consumer contract; add fail-capable assertions that both DialogPrompt and QuestionPrompt call sites pass `{ compact: true }` (source-contract seam if full mount is not required). | approximately +40 / -4                 |
+| `packages/opencode/test/cli/cmd/tui/prompt-submit-transport.test.tsx` | modify additive hunk only | Add short retry final-frame/color assertion without overwriting existing dirty user tests.                                                                                                                                                    | approximately +35 / -0                 |
+| `packages/opencode/test/cli/cmd/tui/dialog-prompt.test.tsx`           | modify                    | **Required:** fail-capable compact consumer verification for DialogPrompt (real frame preferred; call-site contract minimum).                                                                                                                 | approximately +25 / -0                 |
 
 No file addition, deletion, generated artifact, migration, dependency, or
 configuration change is planned.
@@ -268,12 +268,12 @@ configuration change is planned.
 
 ## 16. TDD Behavior Slices
 
-| Order | Red behavior | Why current code fails | Minimal green behavior | Regression protected |
-| --- | --- | --- | --- | --- |
-| 1 | Real Prompt short retry frame expects `Short error (details)` as one left-starting group with matching error foreground. | Current output separates `Short error` and `details`, uses no parentheses, and details is muted. | Change details text/color and make summary content-based shrinkable (no grow, no basis-0 collapse). | User-reported retry affordance appearance. |
-| 2 | Fail-capable consumer contract: DialogPrompt and QuestionPrompt each select compact; omitting either fails. Default formatter assertions remain unchanged. | DialogPrompt and QuestionPrompt omit compact; no suite fails on that omission today. | Pass `{ compact: true }` at both call sites and lock both with hard tests. | All three panel voice status wording. |
-| 3 | Long retry message remains one row and details remains clickable after short-group alignment change. | An incorrect flex change could restore wrapping, displace fixed tokens, or collapse summary. | Keep parent shrink/fixed-token structure; use content-based shrinkable summary only. | Existing R5 long-error and dialog interaction coverage. |
-| 4 | Voice lifecycle regression remains green across recording/transcribing/cancellation and stale textarea paths. | Broad consumer changes can accidentally alter lifecycle ownership. | No controller/clock/abort changes; existing suites remain green. | Existing shared voice lifecycle behavior. |
+| Order | Red behavior                                                                                                                                               | Why current code fails                                                                           | Minimal green behavior                                                                              | Regression protected                                    |
+| ----- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------- | ------------------------------------------------------- |
+| 1     | Real Prompt short retry frame expects `Short error (details)` as one left-starting group with matching error foreground.                                   | Current output separates `Short error` and `details`, uses no parentheses, and details is muted. | Change details text/color and make summary content-based shrinkable (no grow, no basis-0 collapse). | User-reported retry affordance appearance.              |
+| 2     | Fail-capable consumer contract: DialogPrompt and QuestionPrompt each select compact; omitting either fails. Default formatter assertions remain unchanged. | DialogPrompt and QuestionPrompt omit compact; no suite fails on that omission today.             | Pass `{ compact: true }` at both call sites and lock both with hard tests.                          | All three panel voice status wording.                   |
+| 3     | Long retry message remains one row and details remains clickable after short-group alignment change.                                                       | An incorrect flex change could restore wrapping, displace fixed tokens, or collapse summary.     | Keep parent shrink/fixed-token structure; use content-based shrinkable summary only.                | Existing R5 long-error and dialog interaction coverage. |
+| 4     | Voice lifecycle regression remains green across recording/transcribing/cancellation and stale textarea paths.                                              | Broad consumer changes can accidentally alter lifecycle ownership.                               | No controller/clock/abort changes; existing suites remain green.                                    | Existing shared voice lifecycle behavior.               |
 
 Tests must assert rendered text/color/row behavior, consumer compact selection,
 and existing dialog output — not private helpers, JSX structure, or event call
@@ -282,10 +282,10 @@ satisfy INV-01 alone.
 
 ## 17. Chinese Comment Budget
 
-| Metric | Estimate | Method |
-| --- | --- | --- |
-| Effective changed code lines `E` | 110 | Estimate: approximately 15 production/call-site lines plus 95 behavior-test lines (including hard Dialog/Question consumer contracts); excludes imports, formatting, generated files, and pure movement. |
-| Required Chinese explanatory comments `C` | at least 17 | `ceil(110 × 0.15) = 17`; implementation must recalculate actual `E` and raise `C` if needed. |
+| Metric                                    | Estimate    | Method                                                                                                                                                                                                   |
+| ----------------------------------------- | ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Effective changed code lines `E`          | 110         | Estimate: approximately 15 production/call-site lines plus 95 behavior-test lines (including hard Dialog/Question consumer contracts); excludes imports, formatting, generated files, and pure movement. |
+| Required Chinese explanatory comments `C` | at least 17 | `ceil(110 × 0.15) = 17`; implementation must recalculate actual `E` and raise `C` if needed.                                                                                                             |
 
 Qualifying comments should explain why the shared compact profile remains
 explicit at every consumer, why default wording is preserved, why short
@@ -296,13 +296,13 @@ placement.
 
 ## 18. Verification
 
-| Command | Working directory | Evidence produced |
-| --- | --- | --- |
-| `bun test test/cli/cmd/tui/prompt-submit-transport.test.tsx --timeout 30000` | `packages/opencode` | Real Prompt retry short/long frame, details color, left grouping, click/dialog behavior, and existing dirty-test preservation. |
-| `bun test test/cli/tui/prompt-voice-input.test.ts --timeout 30000` | `packages/opencode` | Default/compact formatter wording, timer/controller lifecycle, and **hard DialogPrompt + QuestionPrompt compact call-site contracts**. |
-| `bun test test/cli/cmd/tui/dialog-prompt.test.tsx --timeout 30000` | `packages/opencode` | DialogPrompt provider/render seam and **required** compact consumer verification. |
-| `bun typecheck` | `packages/opencode` | Shared formatter options and three consumer call sites typecheck. |
-| Temporary red loop before implementation | `packages/opencode` | Current defect reproduced; temporary test must be removed before plan-only completion. |
+| Command                                                                      | Working directory   | Evidence produced                                                                                                                      |
+| ---------------------------------------------------------------------------- | ------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `bun test test/cli/cmd/tui/prompt-submit-transport.test.tsx --timeout 30000` | `packages/opencode` | Real Prompt retry short/long frame, details color, left grouping, click/dialog behavior, and existing dirty-test preservation.         |
+| `bun test test/cli/tui/prompt-voice-input.test.ts --timeout 30000`           | `packages/opencode` | Default/compact formatter wording, timer/controller lifecycle, and **hard DialogPrompt + QuestionPrompt compact call-site contracts**. |
+| `bun test test/cli/cmd/tui/dialog-prompt.test.tsx --timeout 30000`           | `packages/opencode` | DialogPrompt provider/render seam and **required** compact consumer verification.                                                      |
+| `bun typecheck`                                                              | `packages/opencode` | Shared formatter options and three consumer call sites typecheck.                                                                      |
+| Temporary red loop before implementation                                     | `packages/opencode` | Current defect reproduced; temporary test must be removed before plan-only completion.                                                 |
 
 `session-integration.test.ts` is intentionally **not** listed as INV-01
 Question coverage. It may still be run as unrelated smoke during a later
@@ -313,14 +313,14 @@ plan-only phase. Those commands belong to a later approved implementation phase.
 
 ## 19. Diff Budget
 
-| Metric | Estimate | Justification |
-| --- | --- | --- |
-| Files added | 0 | Existing formatter, consumers, and test seams are sufficient. |
-| Files modified | 7 | One Prompt owner, shared formatter/call sites, and hard consumer/test seams. |
-| Files deleted | 0 | No obsolete module exists. |
-| Production lines | approximately 12 touched | Two call-site flags plus retry token/layout correction and comment updates. |
-| Test lines | approximately 100 touched | Compact consumer hard contracts and real-frame behavior coverage. |
-| Generated lines | 0 | No generated or schema change. |
+| Metric           | Estimate                  | Justification                                                                |
+| ---------------- | ------------------------- | ---------------------------------------------------------------------------- |
+| Files added      | 0                         | Existing formatter, consumers, and test seams are sufficient.                |
+| Files modified   | 7                         | One Prompt owner, shared formatter/call sites, and hard consumer/test seams. |
+| Files deleted    | 0                         | No obsolete module exists.                                                   |
+| Production lines | approximately 12 touched  | Two call-site flags plus retry token/layout correction and comment updates.  |
+| Test lines       | approximately 100 touched | Compact consumer hard contracts and real-frame behavior coverage.            |
+| Generated lines  | 0                         | No generated or schema change.                                               |
 
 The budget is an audit signal, not permission to omit any confirmed consumer or
 behavioral state.
@@ -362,10 +362,10 @@ The independent auditor must:
 
 ## 22. Plan Audit Record
 
-| Round | Audited revision | Full scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | R1 | yes | B-01 | 4 | BLOCK | `ses_0801fe213ffeFAweBloEHk1G7N` |
-| 2 | R2 | yes | No blocking findings. | 4 | APPROVE | `ses_08015d47cffe8fh18WcY00VNfC` |
+| Round | Audited revision | Full scope? | Blocking findings     | Non-blocking findings | Result  | Invocation reference             |
+| ----- | ---------------- | ----------- | --------------------- | --------------------- | ------- | -------------------------------- |
+| 1     | R1               | yes         | B-01                  | 4                     | BLOCK   | `ses_0801fe213ffeFAweBloEHk1G7N` |
+| 2     | R2               | yes         | No blocking findings. | 4                     | APPROVE | `ses_08015d47cffe8fh18WcY00VNfC` |
 
 ### Round 1 Independent Plan Verdict (Verbatim)
 
@@ -463,17 +463,17 @@ No blocking findings.
 
 ## Requirement and traceability coverage
 
-| 用户确认点 | 不变式 | 生产路径 | 计划变更 | 行为敏感验证 |
-| --- | --- | --- | --- | --- |
-| details 加括号 | INV-03 | Prompt retry footer token | `prompt/index.tsx` → `(details)` | 真实 short retry 帧 |
-| details 与错误同红 | INV-03 | 同 token `theme.error` | 同上 | `captureSpans` 前景色与 summary 对齐 |
-| 短错误左对齐、非两端拉开 | INV-03/04 | summary content-based shrinkable | 同上 | short 帧中 `Short error (details)` 左起成组 |
-| 长错误仍一行、固定 token 可见 | INV-04 | 既有 outer shrink + fixed details/retry/interrupt | 不新增分支 | 既有五态一行帧 + long/click 覆盖 |
-| 点击打开原文 | INV-05 | 既有 `handleMessageClick` → `DialogAlert` | 不改 DialogAlert | 既有 mouse/dialog 测试 |
-| 主 Prompt / Dialog / Question 统一 compact 文案 | INV-01 | 三 call site 均 compact | `dialog-prompt.tsx`、`question.tsx`，保留主 Prompt | formatter 双 profile + 硬 Dialog/Question consumer 契约 |
-| 周围 submit/select/escape 控件保留 | 用户 scope / non-goal | 各 panel-local footer | 只改 voice status 展示 profile | 生命周期与现有 controls 非目标保持 |
-| 默认 formatter 兼容 | INV-02 | default 分支不变 | 不改默认字符串 | 既有 default 断言 |
-| 录音/转写生命周期不变 | INV-06 | controller/clock/abort 不动 | non-goal | 既有 voice lifecycle suites |
+| 用户确认点                                      | 不变式                | 生产路径                                          | 计划变更                                           | 行为敏感验证                                            |
+| ----------------------------------------------- | --------------------- | ------------------------------------------------- | -------------------------------------------------- | ------------------------------------------------------- |
+| details 加括号                                  | INV-03                | Prompt retry footer token                         | `prompt/index.tsx` → `(details)`                   | 真实 short retry 帧                                     |
+| details 与错误同红                              | INV-03                | 同 token `theme.error`                            | 同上                                               | `captureSpans` 前景色与 summary 对齐                    |
+| 短错误左对齐、非两端拉开                        | INV-03/04             | summary content-based shrinkable                  | 同上                                               | short 帧中 `Short error (details)` 左起成组             |
+| 长错误仍一行、固定 token 可见                   | INV-04                | 既有 outer shrink + fixed details/retry/interrupt | 不新增分支                                         | 既有五态一行帧 + long/click 覆盖                        |
+| 点击打开原文                                    | INV-05                | 既有 `handleMessageClick` → `DialogAlert`         | 不改 DialogAlert                                   | 既有 mouse/dialog 测试                                  |
+| 主 Prompt / Dialog / Question 统一 compact 文案 | INV-01                | 三 call site 均 compact                           | `dialog-prompt.tsx`、`question.tsx`，保留主 Prompt | formatter 双 profile + 硬 Dialog/Question consumer 契约 |
+| 周围 submit/select/escape 控件保留              | 用户 scope / non-goal | 各 panel-local footer                             | 只改 voice status 展示 profile                     | 生命周期与现有 controls 非目标保持                      |
+| 默认 formatter 兼容                             | INV-02                | default 分支不变                                  | 不改默认字符串                                     | 既有 default 断言                                       |
+| 录音/转写生命周期不变                           | INV-06                | controller/clock/abort 不动                       | non-goal                                           | 既有 voice lifecycle suites                             |
 
 ## Primary-path and fallback verdict
 
@@ -521,35 +521,35 @@ implementation audit.
 
 ### Actual Files and Diff
 
-| File | Change |
-| --- | --- |
-| `packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx` | Red `(details)`; content-based shrinkable summary |
-| `packages/opencode/src/cli/cmd/tui/prompt-voice-input.ts` | Compact comment documents three-consumer profile |
-| `packages/opencode/src/cli/cmd/tui/ui/dialog-prompt.tsx` | `{ compact: true }` |
-| `packages/opencode/src/cli/cmd/tui/routes/session/question.tsx` | `{ compact: true }` |
-| `packages/opencode/test/cli/cmd/tui/prompt-submit-transport.test.tsx` | Short retry left-group + color; long retry token |
-| `packages/opencode/test/cli/tui/prompt-voice-input.test.ts` | Dialog/Question compact call-site contracts |
-| `packages/opencode/test/cli/cmd/tui/dialog-prompt.test.tsx` | Dialog compact call-site contract |
-| Diff summary | 7 files, +84 / -15 |
+| File                                                                  | Change                                            |
+| --------------------------------------------------------------------- | ------------------------------------------------- |
+| `packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx`        | Red `(details)`; content-based shrinkable summary |
+| `packages/opencode/src/cli/cmd/tui/prompt-voice-input.ts`             | Compact comment documents three-consumer profile  |
+| `packages/opencode/src/cli/cmd/tui/ui/dialog-prompt.tsx`              | `{ compact: true }`                               |
+| `packages/opencode/src/cli/cmd/tui/routes/session/question.tsx`       | `{ compact: true }`                               |
+| `packages/opencode/test/cli/cmd/tui/prompt-submit-transport.test.tsx` | Short retry left-group + color; long retry token  |
+| `packages/opencode/test/cli/tui/prompt-voice-input.test.ts`           | Dialog/Question compact call-site contracts       |
+| `packages/opencode/test/cli/cmd/tui/dialog-prompt.test.tsx`           | Dialog compact call-site contract                 |
+| Diff summary                                                          | 7 files, +84 / -15                                |
 
 ### Red-Green Test Evidence
 
-| Slice | Red | Green |
-| --- | --- | --- |
-| Short retry left-group + color | Expected `Short error (details)`, received empty/`details` separation | Pass after flex/token fix |
-| Dialog/Question compact selection | Dialog source lacked `compact: true` | Pass after both call sites updated |
-| Long retry + click | One assertion adjusted for middle truncation; click path green | Pass |
+| Slice                             | Red                                                                   | Green                              |
+| --------------------------------- | --------------------------------------------------------------------- | ---------------------------------- |
+| Short retry left-group + color    | Expected `Short error (details)`, received empty/`details` separation | Pass after flex/token fix          |
+| Dialog/Question compact selection | Dialog source lacked `compact: true`                                  | Pass after both call sites updated |
+| Long retry + click                | One assertion adjusted for middle truncation; click path green        | Pass                               |
 
 ### Verification Commands and Results
 
 All from `packages/opencode`:
 
-| Command | Result |
-| --- | --- |
-| `bun test test/cli/cmd/tui/prompt-submit-transport.test.tsx --timeout 30000` | 14 pass, 0 fail |
-| `bun test test/cli/tui/prompt-voice-input.test.ts --timeout 30000` | 23 pass, 1 skip, 0 fail |
-| `bun test test/cli/cmd/tui/dialog-prompt.test.tsx --timeout 30000` | 2 pass, 0 fail |
-| `bun typecheck` | pass (`tsgo --noEmit`) |
+| Command                                                                      | Result                  |
+| ---------------------------------------------------------------------------- | ----------------------- |
+| `bun test test/cli/cmd/tui/prompt-submit-transport.test.tsx --timeout 30000` | 14 pass, 0 fail         |
+| `bun test test/cli/tui/prompt-voice-input.test.ts --timeout 30000`           | 23 pass, 1 skip, 0 fail |
+| `bun test test/cli/cmd/tui/dialog-prompt.test.tsx --timeout 30000`           | 2 pass, 0 fail          |
+| `bun typecheck`                                                              | pass (`tsgo --noEmit`)  |
 
 ### Original Feedback-Loop Result
 
@@ -559,21 +559,21 @@ foreground, one-row long retry and click still green.
 
 ### Actual Secondary and Replacement Path Inventory
 
-| Path | Verdict |
-| --- | --- |
+| Path                                            | Verdict     |
+| ----------------------------------------------- | ----------- |
 | Primary compact presentation at three consumers | Implemented |
-| Default formatter compatibility profile | Preserved |
-| DialogAlert raw message | Unchanged |
-| Fallback/alternate footer | None |
+| Default formatter compatibility profile         | Preserved   |
+| DialogAlert raw message                         | Unchanged   |
+| Fallback/alternate footer                       | None        |
 
 ### Chinese Comment Calculation
 
-| Metric | Actual | Exclusions and evidence |
-| --- | --- | --- |
-| Effective changed code lines `E` | 61 | `git diff -w --unified=0` new-side non-blank non-import non-comment code |
-| Qualifying Chinese comment lines `C` | 16 | Adjacent rationale for shrinkable flex, red details, compact three-consumer contracts |
-| Ratio `C / E` | 26.2% | `16 / 61` |
-| Required minimum `C` | 10 | `ceil(61 × 0.15) = 10` |
+| Metric                               | Actual | Exclusions and evidence                                                               |
+| ------------------------------------ | ------ | ------------------------------------------------------------------------------------- |
+| Effective changed code lines `E`     | 61     | `git diff -w --unified=0` new-side non-blank non-import non-comment code              |
+| Qualifying Chinese comment lines `C` | 16     | Adjacent rationale for shrinkable flex, red details, compact three-consumer contracts |
+| Ratio `C / E`                        | 26.2%  | `16 / 61`                                                                             |
+| Required minimum `C`                 | 10     | `ceil(61 × 0.15) = 10`                                                                |
 
 Excluded: plan document, blank lines, import-only lines, pure formatting.
 
@@ -584,9 +584,9 @@ Excluded: plan document, blank lines, import-only lines, pure formatting.
 
 ## 24. Implementation Audit Record
 
-| Round | Plan revision | Full original scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | R2 | yes | No blocking findings. | 4 | APPROVE | `ses_07fecd41fffeHrcORBenGycTyP` |
+| Round | Plan revision | Full original scope? | Blocking findings     | Non-blocking findings | Result  | Invocation reference             |
+| ----- | ------------- | -------------------- | --------------------- | --------------------- | ------- | -------------------------------- |
+| 1     | R2            | yes                  | No blocking findings. | 4                     | APPROVE | `ses_07fecd41fffeHrcORBenGycTyP` |
 
 ### Round 1 Independent Implementation Verdict (Verbatim)
 

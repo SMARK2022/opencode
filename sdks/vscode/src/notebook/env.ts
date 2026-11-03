@@ -58,7 +58,8 @@ export async function notebookEnv(input: Record<string, unknown>) {
   const filePath = stringProp(input, "filePath")
   if (!filePath) throw new Error("filePath is required")
   const operation = stringProp(input, "operation") ?? "info"
-  if (!["info", "configure", "restart", "save", "stop", "create"].includes(operation)) throw new Error(`Invalid operation "${operation}". Must be one of: info, configure, restart, save, stop, create.`)
+  if (!["info", "configure", "restart", "save", "stop", "create"].includes(operation))
+    throw new Error(`Invalid operation "${operation}". Must be one of: info, configure, restart, save, stop, create.`)
   const reason = stringProp(input, "reason")
   // 创建不存在的文档必须先分流，不能走现有文档解析器。
   if (operation === "create") return await createNotebook(filePath, reason)
@@ -79,7 +80,13 @@ export async function notebookEnv(input: Record<string, unknown>) {
 }
 
 // 未探测运行时的操作只标unknown，文档元数据不替代活动内核证据。
-function envSummaryHeader(notebook: vscode.NotebookDocument, operation: "info" | "configure" | "restart" | "save" | "stop" | "create", status?: string, dirty = String(notebook.isDirty), runtime = "unknown") {
+function envSummaryHeader(
+  notebook: vscode.NotebookDocument,
+  operation: "info" | "configure" | "restart" | "save" | "stop" | "create",
+  status?: string,
+  dirty = String(notebook.isDirty),
+  runtime = "unknown",
+) {
   return notebookHeader(notebook, "Env", [
     `operation=${operation}`,
     "target=notebook",
@@ -97,14 +104,22 @@ async function infoNotebook(notebook: vscode.NotebookDocument, reason?: string) 
     ran: false,
     summary: [
       // 头部复用本次活动内核探测结果，无内核时不回退到kernelspec。
-      ...envSummaryHeader(notebook, "info", undefined, String(notebook.isDirty), activeRuntime ? formatActiveRuntime(activeRuntime) : "no-active-kernel"),
-      `Notebook runtime: ${activeRuntime ? formatActiveRuntime(activeRuntime) : "no-active-kernel"}; Python/Jupyter extensions: ${extensionState("ms-python.python")}/${extensionState("ms-toolsai.jupyter" )}.`,
+      ...envSummaryHeader(
+        notebook,
+        "info",
+        undefined,
+        String(notebook.isDirty),
+        activeRuntime ? formatActiveRuntime(activeRuntime) : "no-active-kernel",
+      ),
+      `Notebook runtime: ${activeRuntime ? formatActiveRuntime(activeRuntime) : "no-active-kernel"}; Python/Jupyter extensions: ${extensionState("ms-python.python")}/${extensionState("ms-toolsai.jupyter")}.`,
       `Notebook saved metadata: ${formatSavedMetadata(savedMetadata)}.`,
       activeRuntime
         ? "运行时来源：公开API可见的活动内核状态。"
         : "运行时来源：无；Jupyter 稳定 API 仅暴露至少执行过一个代码格后启动的内核。",
       reason ? `Reason: ${reason}` : undefined,
-    ].filter(Boolean).join("\n"),
+    ]
+      .filter(Boolean)
+      .join("\n"),
     data: {
       path: notebook.uri.fsPath || notebook.uri.toString(),
       operation: "info",
@@ -149,9 +164,13 @@ async function configureNotebook(notebook: vscode.NotebookDocument, reason?: str
   const pythonHeuristic = isPythonNotebookLike(notebook)
   const python = vscode.extensions.getExtension("ms-python.python")
   const pyActivateStart = Date.now()
-  const pythonActivationError = pythonHeuristic.result && python && !python.isActive
-    ? await Promise.resolve(python.activate()).then(() => undefined, (error: unknown) => error instanceof Error ? error.message : String(error))
-    : undefined
+  const pythonActivationError =
+    pythonHeuristic.result && python && !python.isActive
+      ? await Promise.resolve(python.activate()).then(
+          () => undefined,
+          (error: unknown) => (error instanceof Error ? error.message : String(error)),
+        )
+      : undefined
   const pythonInfo = {
     ...extensionInfo("ms-python.python"),
     isPythonLike: pythonHeuristic.result,
@@ -182,7 +201,14 @@ async function configureNotebook(notebook: vscode.NotebookDocument, reason?: str
       reason,
       status: "configured",
       summary: "Notebook already has an active kernel.",
-      data: { notebook: notebookMeta, jupyter: jupyterInfo, python: pythonInfo, visibility, preCheck, durationMs: Date.now() - startedAt },
+      data: {
+        notebook: notebookMeta,
+        jupyter: jupyterInfo,
+        python: pythonInfo,
+        visibility,
+        preCheck,
+        durationMs: Date.now() - startedAt,
+      },
     })
   }
   const cmdStart = Date.now()
@@ -199,10 +225,12 @@ async function configureNotebook(notebook: vscode.NotebookDocument, reason?: str
   // 命令列表只作诊断，是否接受或取消以实际调用结果为准。
   let timeoutHandle: ReturnType<typeof setTimeout> | undefined
   const selection = await Promise.race([
-    Promise.resolve(vscode.commands.executeCommand(SELECT_KERNEL_CMD, {
-      notebookUri: notebook.uri,
-      skipIfAlreadySelected: true,
-    })).then(
+    Promise.resolve(
+      vscode.commands.executeCommand(SELECT_KERNEL_CMD, {
+        notebookUri: notebook.uri,
+        skipIfAlreadySelected: true,
+      }),
+    ).then(
       (result) => ({ result, error: undefined }),
       (error: unknown) => ({ result: undefined, error: error instanceof Error ? error.message : String(error) }),
     ),
@@ -236,7 +264,12 @@ async function configureNotebook(notebook: vscode.NotebookDocument, reason?: str
     path: primaryPath,
     reason,
     status,
-    summary: selection.error !== undefined ? `Kernel selection command failed: ${selection.error}.` : selection.result === undefined ? "Kernel selection was invoked without a confirmed command result." : "Kernel selection command completed.",
+    summary:
+      selection.error !== undefined
+        ? `Kernel selection command failed: ${selection.error}.`
+        : selection.result === undefined
+          ? "Kernel selection was invoked without a confirmed command result."
+          : "Kernel selection command completed.",
     data: {
       notebook: notebookMeta,
       jupyter: jupyterInfo,
@@ -261,13 +294,22 @@ function configureResult(input: {
   const guidance = {
     configured: "Notebook is ready for cell execution.",
     selected: "Kernel selection was accepted. Proceed to run cells; the kernel will start on first execution.",
-    "needs-selection": "No kernel was selected or accepted. Select a kernel manually from the notebook toolbar, then call configure to verify.",
-    "selection-requested": "The kernel picker may still be open or the command returned no explicit result. Select a kernel manually from the notebook toolbar, then call configure to verify.",
+    "needs-selection":
+      "No kernel was selected or accepted. Select a kernel manually from the notebook toolbar, then call configure to verify.",
+    "selection-requested":
+      "The kernel picker may still be open or the command returned no explicit result. Select a kernel manually from the notebook toolbar, then call configure to verify.",
     failed: "Check Jupyter/Python extensions and workspace trust.",
   }[input.status]
   return {
     ran: true,
-    summary: [...envSummaryHeader(input.notebook, "configure", input.status), input.summary, guidance, input.reason ? `Reason: ${input.reason}` : undefined].filter(Boolean).join("\n"),
+    summary: [
+      ...envSummaryHeader(input.notebook, "configure", input.status),
+      input.summary,
+      guidance,
+      input.reason ? `Reason: ${input.reason}` : undefined,
+    ]
+      .filter(Boolean)
+      .join("\n"),
     data: { path: input.path, operation: "configure", reason: input.reason, status: input.status, ...input.data },
   }
 }
@@ -287,7 +329,11 @@ async function probeConfigureRuntime(uri: vscode.Uri) {
 }
 
 function isPythonNotebookLike(notebook: vscode.NotebookDocument) {
-  if (notebook.getCells().some((cell) => cell.kind === vscode.NotebookCellKind.Code && cell.document.languageId === "python")) {
+  if (
+    notebook
+      .getCells()
+      .some((cell) => cell.kind === vscode.NotebookCellKind.Code && cell.document.languageId === "python")
+  ) {
     return { result: true, heuristic: "cells" } as const
   }
   const meta = notebook.metadata as {
@@ -296,8 +342,8 @@ function isPythonNotebookLike(notebook: vscode.NotebookDocument) {
   }
   const language = meta.language_info?.name ?? meta.kernelspec?.language ?? meta.kernelspec?.name
   return typeof language === "string" && language.toLowerCase().includes("python")
-    ? { result: true, heuristic: "metadata" } as const
-    : { result: false, heuristic: "none" } as const
+    ? ({ result: true, heuristic: "metadata" } as const)
+    : ({ result: false, heuristic: "none" } as const)
 }
 
 async function restartNotebookKernel(notebook: vscode.NotebookDocument, reason?: string) {
@@ -305,13 +351,41 @@ async function restartNotebookKernel(notebook: vscode.NotebookDocument, reason?:
   const startedAt = Date.now()
   const jupyter = vscode.extensions.getExtension("ms-toolsai.jupyter")
   if (!jupyter) {
-    return { ran: true, summary: [...envSummaryHeader(notebook, "restart", "failed"), "Jupyter extension is not installed. Install ms-toolsai.jupyter and select a kernel first."].join("\n"), data: { path: primaryPath, operation: "restart", reason, jupyterFound: false, durationMs: Date.now() - startedAt } }
+    return {
+      ran: true,
+      summary: [
+        ...envSummaryHeader(notebook, "restart", "failed"),
+        "Jupyter extension is not installed. Install ms-toolsai.jupyter and select a kernel first.",
+      ].join("\n"),
+      data: {
+        path: primaryPath,
+        operation: "restart",
+        reason,
+        jupyterFound: false,
+        durationMs: Date.now() - startedAt,
+      },
+    }
   }
   if (!jupyter.isActive) await jupyter.activate()
   // Jupyter 可注册隐藏命令，查询面必须包含 executeCommand 能调用的完整列表。
   const allCommands = await vscode.commands.getCommands(false)
   if (!allCommands.includes(RESTART_CMD)) {
-    return { ran: true, summary: [...envSummaryHeader(notebook, "restart", "failed"), "jupyter.restartkernel command is not registered."].join("\n"), data: { path: primaryPath, operation: "restart", reason, jupyterFound: true, jupyterActive: jupyter.isActive, restartCommandFound: false, durationMs: Date.now() - startedAt } }
+    return {
+      ran: true,
+      summary: [
+        ...envSummaryHeader(notebook, "restart", "failed"),
+        "jupyter.restartkernel command is not registered.",
+      ].join("\n"),
+      data: {
+        path: primaryPath,
+        operation: "restart",
+        reason,
+        jupyterFound: true,
+        jupyterActive: jupyter.isActive,
+        restartCommandFound: false,
+        durationMs: Date.now() - startedAt,
+      },
+    }
   }
   // effective值可能来自文档作用域，写回Global既不能恢复原作用域，也会覆盖并发修改。
   const config = vscode.workspace.getConfiguration(CONFIG_SECTION, notebook.uri)
@@ -320,7 +394,10 @@ async function restartNotebookKernel(notebook: vscode.NotebookDocument, reason?:
   if (original === true) {
     return {
       ran: false,
-      summary: [...envSummaryHeader(notebook, "restart", "confirmation-required"), "Jupyter requires restart confirmation; no restart was requested and no settings were changed."].join("\n"),
+      summary: [
+        ...envSummaryHeader(notebook, "restart", "confirmation-required"),
+        "Jupyter requires restart confirmation; no restart was requested and no settings were changed.",
+      ].join("\n"),
       data: { path: primaryPath, operation: "restart", requested: false, verified: false, reason },
     }
   }
@@ -329,9 +406,19 @@ async function restartNotebookKernel(notebook: vscode.NotebookDocument, reason?:
     await vscode.commands.executeCommand(RESTART_CMD, { notebookEditor: { notebookUri: notebook.uri } })
     return {
       ran: true,
-      summary: [...envSummaryHeader(notebook, "restart", "requested"), "Kernel restart requested; completion and state clearing have not been verified.", "Rerun setup or import cells before running dependent cells.", reason ? `Reason: ${reason}` : undefined].filter(Boolean).join("\n"),
+      summary: [
+        ...envSummaryHeader(notebook, "restart", "requested"),
+        "Kernel restart requested; completion and state clearing have not been verified.",
+        "Rerun setup or import cells before running dependent cells.",
+        reason ? `Reason: ${reason}` : undefined,
+      ]
+        .filter(Boolean)
+        .join("\n"),
       data: {
-        path: primaryPath, operation: "restart", reason, requested: true,
+        path: primaryPath,
+        operation: "restart",
+        reason,
+        requested: true,
         askForKernelRestartOriginal: original,
         // 可访问的旧内核不能证明已完成重启，保留requested而不虚报verified。
         verified: false,
@@ -340,7 +427,14 @@ async function restartNotebookKernel(notebook: vscode.NotebookDocument, reason?:
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
-    return { ran: true, summary: [...envSummaryHeader(notebook, "restart", "failed"), `Kernel restart invocation failed: ${message}.`].join("\n"), data: { path: primaryPath, operation: "restart", reason, error: message, durationMs: Date.now() - startedAt } }
+    return {
+      ran: true,
+      summary: [
+        ...envSummaryHeader(notebook, "restart", "failed"),
+        `Kernel restart invocation failed: ${message}.`,
+      ].join("\n"),
+      data: { path: primaryPath, operation: "restart", reason, error: message, durationMs: Date.now() - startedAt },
+    }
   }
 }
 
@@ -376,8 +470,11 @@ async function stopNotebookKernel(notebook: vscode.NotebookDocument, reason?: st
         `${INTERRUPT_CMD} command is not registered. Check that the Jupyter extension is correctly installed.`,
       ].join("\n"),
       data: {
-        path: primaryPath, operation: "stop", reason,
-        jupyterFound: true, jupyterActive: jupyter.isActive,
+        path: primaryPath,
+        operation: "stop",
+        reason,
+        jupyterFound: true,
+        jupyterActive: jupyter.isActive,
         interruptCommandFound: false,
         requested: false,
         durationMs: Date.now() - startedAt,
@@ -400,9 +497,13 @@ async function stopNotebookKernel(notebook: vscode.NotebookDocument, reason?: st
         "If no cell was running, this operation is harmless.",
         "Use vscode_notebook_env operation=info to verify kernel status.",
         reason ? `Reason: ${reason}` : "",
-      ].filter(Boolean).join("\n"),
+      ]
+        .filter(Boolean)
+        .join("\n"),
       data: {
-        path: primaryPath, operation: "stop", reason,
+        path: primaryPath,
+        operation: "stop",
+        reason,
         requested: true,
         durationMs: Date.now() - startedAt,
       },
@@ -411,10 +512,7 @@ async function stopNotebookKernel(notebook: vscode.NotebookDocument, reason?: st
     const message = error instanceof Error ? error.message : String(error)
     return {
       ran: true,
-      summary: [
-        ...envSummaryHeader(notebook, "stop", "failed"),
-        `Kernel interrupt failed: ${message}.`,
-      ].join("\n"),
+      summary: [...envSummaryHeader(notebook, "stop", "failed"), `Kernel interrupt failed: ${message}.`].join("\n"),
       data: { path: primaryPath, operation: "stop", reason, error: message, durationMs: Date.now() - startedAt },
     }
   }
@@ -436,11 +534,24 @@ async function createNotebook(filePath: string, reason?: string) {
     return {
       ran: true,
       summary: [
-        ...notebookHeader(existing, "Env", [`operation=create`, `status=already-exists`, `cells=${existing.cellCount}`]),
+        ...notebookHeader(existing, "Env", [
+          `operation=create`,
+          `status=already-exists`,
+          `cells=${existing.cellCount}`,
+        ]),
         `Notebook already exists and is open in VS Code. Use vscode_notebook_summary to inspect it.`,
         reason ? `Reason: ${reason}` : "",
-      ].filter(Boolean).join("\n"),
-      data: { path: filePath, operation: "create", created: false, alreadyExists: true, cellCount: existing.cellCount, durationMs: Date.now() - startedAt },
+      ]
+        .filter(Boolean)
+        .join("\n"),
+      data: {
+        path: filePath,
+        operation: "create",
+        created: false,
+        alreadyExists: true,
+        cellCount: existing.cellCount,
+        durationMs: Date.now() - startedAt,
+      },
     }
   }
 
@@ -454,20 +565,32 @@ async function createNotebook(filePath: string, reason?: string) {
         `Env: operation=create status=already-exists`,
         `Notebook file already exists on disk. Use vscode_notebook_summary to inspect it.`,
         reason ? `Reason: ${reason}` : "",
-      ].filter(Boolean).join("\n"),
-      data: { path: filePath, operation: "create", created: false, alreadyExists: true, durationMs: Date.now() - startedAt },
+      ]
+        .filter(Boolean)
+        .join("\n"),
+      data: {
+        path: filePath,
+        operation: "create",
+        created: false,
+        alreadyExists: true,
+        durationMs: Date.now() - startedAt,
+      },
     }
   } catch {
     // stat 抛 ENOENT 是预期行为——文件不存在，继续创建
   }
 
   // 创建最小 .ipynb JSON（nbformat 4.5 标准）
-  const minimalNotebook = JSON.stringify({
-    cells: [],
-    metadata: {},
-    nbformat: 4,
-    nbformat_minor: 5,
-  }, null, 2)
+  const minimalNotebook = JSON.stringify(
+    {
+      cells: [],
+      metadata: {},
+      nbformat: 4,
+      nbformat_minor: 5,
+    },
+    null,
+    2,
+  )
 
   try {
     await vscode.workspace.fs.writeFile(uri, new TextEncoder().encode(minimalNotebook))
@@ -479,10 +602,15 @@ async function createNotebook(filePath: string, reason?: string) {
         `Notebook created successfully with empty cell list.`,
         `Use vscode_notebook_edit with editType=insert to add cells, or vscode_notebook_env with operation=configure to select a kernel.`,
         reason ? `Reason: ${reason}` : "",
-      ].filter(Boolean).join("\n"),
+      ]
+        .filter(Boolean)
+        .join("\n"),
       data: {
-        path: filePath, operation: "create", reason,
-        created: true, cellCount: 0,
+        path: filePath,
+        operation: "create",
+        reason,
+        created: true,
+        cellCount: 0,
         durationMs: Date.now() - startedAt,
       },
     }
@@ -497,12 +625,20 @@ async function createNotebook(filePath: string, reason?: string) {
         `Notebook creation failed: ${message}.`,
         `Check that the parent directory exists and is writable.`,
         reason ? `Reason: ${reason}` : "",
-      ].filter(Boolean).join("\n"),
-      data: { path: filePath, operation: "create", reason, created: false, error: message, durationMs: Date.now() - startedAt },
+      ]
+        .filter(Boolean)
+        .join("\n"),
+      data: {
+        path: filePath,
+        operation: "create",
+        reason,
+        created: false,
+        error: message,
+        durationMs: Date.now() - startedAt,
+      },
     }
   }
 }
-
 
 async function saveNotebook(notebook: vscode.NotebookDocument, reason?: string) {
   const primaryPath = notebook.uri.fsPath || notebook.uri.toString()
@@ -559,7 +695,12 @@ async function saveNotebook(notebook: vscode.NotebookDocument, reason?: string) 
     ran: true,
     summary: [
       // 头部复用最终dirty判定及保存前后状态，不改写保存结果。
-      ...envSummaryHeader(notebook, "save", saved ? "saved" : saveError ? "error" : "not-confirmed", `${beforeDirty}->${afterDirty}`),
+      ...envSummaryHeader(
+        notebook,
+        "save",
+        saved ? "saved" : saveError ? "error" : "not-confirmed",
+        `${beforeDirty}->${afterDirty}`,
+      ),
       `Saved: ${saved ? "yes" : saveError ? "error" : "not confirmed"}`,
       `Dirty: ${beforeDirty} -> ${afterDirty}  Version: ${beforeVersion} -> ${afterVersion}`,
       saveError ? `Save error: ${saveError}` : undefined,
@@ -652,6 +793,6 @@ function formatSavedMetadata(meta: SavedMetadata | null) {
   const kernel = meta.kernelDisplayName ?? meta.kernelName ?? "unknown"
   const language = meta.languageVersion
     ? `${meta.language ?? "unknown"} ${meta.languageVersion}`
-    : meta.language ?? "unknown"
+    : (meta.language ?? "unknown")
   return `${kernel} (${language}), kernelspec.name=${meta.kernelName ?? "unknown"}`
 }

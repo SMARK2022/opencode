@@ -73,7 +73,8 @@ const processHunkGroup = Effect.fn("ApplyPatchTool.processHunkGroup")(function* 
       const oldContent =
         group.rewrite && snapshot.version.state === "file" ? Bom.split(Mutation.decode(snapshot)).text : ""
       // 尾部换行补齐沿用既有 Add File 语义；proposal 不修正用户文本，只保证落盘可 diff。
-      const newContent = first.contents.length === 0 || first.contents.endsWith("\n") ? first.contents : `${first.contents}\n`
+      const newContent =
+        first.contents.length === 0 || first.contents.endsWith("\n") ? first.contents : `${first.contents}\n`
       const next = Bom.split(newContent)
       // 元数据 diff 走唯一有界 seam（二进制/超限中段改标记表示，计数随产物单遍推导）。
       const rendered = renderFileDiff(displayPath, normalizeLineEndings(oldContent), normalizeLineEndings(next.text))
@@ -96,7 +97,8 @@ const processHunkGroup = Effect.fn("ApplyPatchTool.processHunkGroup")(function* 
       // #533：canonical source 只读取一个 snapshot，定位与最终 Mutation expected 因而观察同一版本。
       const snapshot = yield* Mutation.read(afs, group.filePath)
       // #518：proposal 阶段就拒绝 missing/目录；不能等 commit recheck 才报错，否则错误会混入 Permission 后失败路径。
-      if (snapshot.version.state !== "file") return yield* Effect.fail(new Error(`Failed to read file to update: ${group.filePath}`))
+      if (snapshot.version.state !== "file")
+        return yield* Effect.fail(new Error(`Failed to read file to update: ${group.filePath}`))
       // #518：update 只接受 proposal read 观察到的 file state，目录和 missing 不进入 matcher 成功域。
       const source = Bom.split(Mutation.decode(snapshot))
       const oldContent = source.text
@@ -125,7 +127,11 @@ const processHunkGroup = Effect.fn("ApplyPatchTool.processHunkGroup")(function* 
         return yield* Effect.fail(error instanceof Error ? error : new Error(String(error)))
       }
       // 元数据 diff 走唯一有界 seam；正常路径产物与旧实现逐字节一致（INV-02）。
-      const rendered = renderFileDiff(displayPath, normalizeLineEndings(oldContent), normalizeLineEndings(fileUpdate.content))
+      const rendered = renderFileDiff(
+        displayPath,
+        normalizeLineEndings(oldContent),
+        normalizeLineEndings(fileUpdate.content),
+      )
       // #518：expected 只包含 source；update 未声明 move 时不锁任何 destination 路径。
       const expected = [snapshot]
       if (movePath) {
@@ -155,12 +161,23 @@ const processHunkGroup = Effect.fn("ApplyPatchTool.processHunkGroup")(function* 
       // #518：delete 与 add 同理不聚合；重复 Delete entry 无法像 update 那样链式消费。
       if (group.hunks.length !== 1) throw new Error(`Conflicting operations for ${group.filePath}`)
       const snapshot = yield* Mutation.read(afs, group.filePath)
-      if (snapshot.version.state !== "file") return yield* Effect.fail(new Error(`Failed to read file to delete: ${group.filePath}`))
+      if (snapshot.version.state !== "file")
+        return yield* Effect.fail(new Error(`Failed to read file to delete: ${group.filePath}`))
       const source = Bom.split(Mutation.decode(snapshot))
       // delete 的全量语义保留：中小文件仍记录全文行 diff；只有二进制/超限中段换标记表示。
       const rendered = renderFileDiff(displayPath, normalizeLineEndings(source.text), "")
       // #518：delete 的 proposal 只记录 source state；commit 仍在所有 patch target 校验后才执行。
-      return { filePath: group.filePath, oldContent: source.text, newContent: "", type: "delete" as const, diff: rendered.patch, additions: rendered.additions, deletions: rendered.deletions, bom: source.bom, expected: [snapshot] }
+      return {
+        filePath: group.filePath,
+        oldContent: source.text,
+        newContent: "",
+        type: "delete" as const,
+        diff: rendered.patch,
+        additions: rendered.additions,
+        deletions: rendered.deletions,
+        bom: source.bom,
+        expected: [snapshot],
+      }
     }
     default:
       // 未知 hunk 类型来自 parser 版本差异；拒绝而不是跳过，避免静默丢 hunk。
@@ -193,7 +210,9 @@ function validateOwnership(groups: HunkGroup[], instance: InstanceContext) {
   for (const group of groups) {
     const first = group.hunks[0]
     const rewrite = group.hunks.length === 2 && first.type === "delete" && group.hunks[1].type === "add"
-    const compatible = rewrite || group.hunks.every((hunk) => hunk.type === first.type) && (first.type === "update" || group.hunks.length === 1)
+    const compatible =
+      rewrite ||
+      (group.hunks.every((hunk) => hunk.type === first.type) && (first.type === "update" || group.hunks.length === 1))
     // #518：ownership conflict 在 Permission 前拒绝；锁排序只能避免死锁，不能选择语义。
     // 同 source 的 update entry 是唯一允许聚合的组合；add/delete 不凭猜测重建新语义。
     if (!compatible) throw new Error(`Conflicting operations for ${group.filePath}`)
@@ -318,9 +337,9 @@ export const ApplyPatchTool = Tool.define(
 
       // 全部 hunk 都失败时返回 error
       if (fileChanges.length === 0) {
-        return yield* Effect.fail(new Error(
-          `apply_patch verification failed: all hunks failed.\n${hunkErrors.join("\n")}`,
-        ))
+        return yield* Effect.fail(
+          new Error(`apply_patch verification failed: all hunks failed.\n${hunkErrors.join("\n")}`),
+        )
       }
 
       // Build per-file metadata for UI rendering (used for both permission and result)
@@ -519,7 +538,8 @@ export const ApplyPatchTool = Tool.define(
       const resultFiles = fileChanges.map((change) => {
         const edited = change.type === "delete" ? undefined : (change.movePath ?? change.filePath)
         const finalText = edited ? finalContents.get(edited) : undefined
-        const unchanged = finalText === undefined || normalizeLineEndings(finalText) === normalizeLineEndings(change.newContent)
+        const unchanged =
+          finalText === undefined || normalizeLineEndings(finalText) === normalizeLineEndings(change.newContent)
         // proposal diff 已在 processHunkGroup 用相对路径渲染；未变化的文件直接复用，
         // formatter 改写过的文件以同一相对路径重算（post-formatter 真值）。
         const relativePath = path.relative(instance.worktree, change.movePath ?? change.filePath).replaceAll("\\", "/")

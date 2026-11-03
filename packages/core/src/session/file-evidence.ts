@@ -37,8 +37,16 @@ export interface CommandReceipt {
 export const kind = "compaction_evidence_handoff"
 
 export const render = Effect.fn("FileEvidence.render")(function* (
-  receipts: readonly unknown[], fs: FSUtil.Interface, worktree: string,
-  context: { readonly searches?: readonly SearchReceipt[]; readonly commands?: readonly CommandReceipt[]; readonly todos?: readonly SessionTodo.Info[]; readonly directory?: string; readonly compactionCount?: number } = {},
+  receipts: readonly unknown[],
+  fs: FSUtil.Interface,
+  worktree: string,
+  context: {
+    readonly searches?: readonly SearchReceipt[]
+    readonly commands?: readonly CommandReceipt[]
+    readonly todos?: readonly SessionTodo.Info[]
+    readonly directory?: string
+    readonly compactionCount?: number
+  } = {},
 ) {
   const files = new Map<string, typeof Receipt.Type & { ranges: { start: number; end: number }[] }>()
   // 两代只转换真实已完成Read凭证，合并/预算/stat仍只有一个owner。
@@ -75,7 +83,11 @@ export const render = Effect.fn("FileEvidence.render")(function* (
     }
     const key = `${process.platform === "win32" ? cwd.toLowerCase() : cwd}\0${normalized}`
     commands.delete(key)
-    commands.set(key, { command: receipt.command, cwd, exit: receipt.exit === undefined ? "unknown" : String(receipt.exit) })
+    commands.set(key, {
+      command: receipt.command,
+      cwd,
+      exit: receipt.exit === undefined ? "unknown" : String(receipt.exit),
+    })
   }
   const todos = context.todos ?? []
   if (files.size === 0 && searches.size === 0 && commands.size === 0 && todos.length === 0) return undefined
@@ -88,16 +100,28 @@ export const render = Effect.fn("FileEvidence.render")(function* (
         const modifiedMs = Option.getOrUndefined(Option.map(stat.mtime, (time) => Math.floor(time.getTime())))
         if (modifiedMs === undefined) return { modified: "-", status: "stale" }
         // 旧会话缺少版本字段时只能标stale，工具写事件也不能代替当前磁盘事实。
-        return { modified: formatModified(modifiedMs), status:
-          file.size !== undefined && file.modifiedMs !== undefined &&
-          Number(stat.size) === file.size && modifiedMs === file.modifiedMs ? "current" : "stale" }
+        return {
+          modified: formatModified(modifiedMs),
+          status:
+            file.size !== undefined &&
+            file.modifiedMs !== undefined &&
+            Number(stat.size) === file.size &&
+            modifiedMs === file.modifiedMs
+              ? "current"
+              : "stale",
+        }
       }),
       // NotFound才是删除；权限等预期stat错误不阻止摘要完成，也不伪装成current。
-      Effect.catch((error) => Effect.succeed({ modified: "-", status: error.reason._tag === "NotFound" ? "deleted" : "stale" })),
+      Effect.catch((error) =>
+        Effect.succeed({ modified: "-", status: error.reason._tag === "NotFound" ? "deleted" : "stale" }),
+      ),
       Effect.map((state) => {
         const relative = path.relative(worktree, path.resolve(worktree, file.path))
         const name = relative && !relative.startsWith("..") && !path.isAbsolute(relative) ? relative : file.path
-        const ranges = file.ranges.slice(0, 8).map((range) => `${range.start}-${range.end}`).join(", ")
+        const ranges = file.ranges
+          .slice(0, 8)
+          .map((range) => `${range.start}-${range.end}`)
+          .join(", ")
         const omitted = file.ranges.length - Math.min(file.ranges.length, 8)
         return `| ${cell(name.replaceAll("\\", "/"))} | ${ranges}${omitted ? `, ...(+${omitted})` : ""} | ${file.total} | ${state.modified} | ${state.status} |`
       }),
@@ -105,30 +129,69 @@ export const render = Effect.fn("FileEvidence.render")(function* (
   )
   return [
     "## Evidence Handoff",
-    ...(rows.length ? ["", "### Inspected Files", "| path | ranges | total | modified | status |", "|---|---:|---:|---|---|", ...rows] : []),
-    ...(files.size > visible.length ? [`Omitted: ${files.size - visible.length} inspected files due to evidence budget.`] : []),
-    ...(commands.size ? ["", "### Executed Commands", "| command | cwd | exit |", "|---|---|---:|", ...[...commands.values()].toReversed().slice(0, 10).map(item => {
-      const relative = path.relative(worktree, item.cwd)
-      const cwd = !relative.startsWith("..") && !path.isAbsolute(relative) ? relative || "." : item.cwd
-      return `| ${commandDisplay(item.command)} | ${cell(cwd.replaceAll("\\", "/"))} | ${item.exit} |`
-    })] : []),
+    ...(rows.length
+      ? ["", "### Inspected Files", "| path | ranges | total | modified | status |", "|---|---:|---:|---|---|", ...rows]
+      : []),
+    ...(files.size > visible.length
+      ? [`Omitted: ${files.size - visible.length} inspected files due to evidence budget.`]
+      : []),
+    ...(commands.size
+      ? [
+          "",
+          "### Executed Commands",
+          "| command | cwd | exit |",
+          "|---|---|---:|",
+          ...[...commands.values()]
+            .toReversed()
+            .slice(0, 10)
+            .map((item) => {
+              const relative = path.relative(worktree, item.cwd)
+              const cwd = !relative.startsWith("..") && !path.isAbsolute(relative) ? relative || "." : item.cwd
+              return `| ${commandDisplay(item.command)} | ${cell(cwd.replaceAll("\\", "/"))} | ${item.exit} |`
+            }),
+        ]
+      : []),
     ...(commands.size > 10 ? [`Omitted: ${commands.size - 10} executed commands due to evidence budget.`] : []),
     // 数量与完整性是独立事实，保留source原话而非把权限遗漏伪装成更多匹配。
-    ...(searches.size ? ["", "### Search History", "| tool | pattern | path | matches |", "|---|---|---|---:|", ...[...searches.values()].toReversed().slice(0, 10).map(search => `| ${search.tool} | ${cell(search.pattern.slice(0, 60))} | ${cell(search.path)} | ${search.matches}${search.partial ? " (incomplete)" : ""} |`)] : []),
+    ...(searches.size
+      ? [
+          "",
+          "### Search History",
+          "| tool | pattern | path | matches |",
+          "|---|---|---|---:|",
+          ...[...searches.values()]
+            .toReversed()
+            .slice(0, 10)
+            .map(
+              (search) =>
+                `| ${search.tool} | ${cell(search.pattern.slice(0, 60))} | ${cell(search.path)} | ${search.matches}${search.partial ? " (incomplete)" : ""} |`,
+            ),
+        ]
+      : []),
     ...(searches.size > 10 ? [`Omitted: ${searches.size - 10} searches due to evidence budget.`] : []),
     // Todo 使用持久化原序及四种状态，不能从工具调用历史重建另一份任务表。
-    ...(todos.length ? [
-      "", "### Outstanding Todos",
-      "| status | priority | content |", "|---|---|---|",
-      ...todos.slice(0, 100).map((todo) => {
-        const content = cell(todo.content).trim()
-        // 源字符预算只裁展示，省略指纹和数量保持公开，实际任务内容不变。
-        const preview = content.length <= 160 ? content : `${content.slice(0, 142).trimEnd()}... [todo:${createHash("sha256").update(content).digest("hex").slice(0, 8)}]`
-        return `| ${cell(todo.status)} | ${cell(todo.priority)} | ${preview} |`
-      }),
-    ] : []),
+    ...(todos.length
+      ? [
+          "",
+          "### Outstanding Todos",
+          "| status | priority | content |",
+          "|---|---|---|",
+          ...todos.slice(0, 100).map((todo) => {
+            const content = cell(todo.content).trim()
+            // 源字符预算只裁展示，省略指纹和数量保持公开，实际任务内容不变。
+            const preview =
+              content.length <= 160
+                ? content
+                : `${content.slice(0, 142).trimEnd()}... [todo:${createHash("sha256").update(content).digest("hex").slice(0, 8)}]`
+            return `| ${cell(todo.status)} | ${cell(todo.priority)} | ${preview} |`
+          }),
+        ]
+      : []),
     ...(todos.length > 100 ? [`Omitted: ${todos.length - 100} todos due to evidence budget.`] : []),
-    "", "### Lost Context Notice", "- Older raw tool outputs were compacted.", "- Use current evidence before repeating reads or commands.",
+    "",
+    "### Lost Context Notice",
+    "- Older raw tool outputs were compacted.",
+    "- Use current evidence before repeating reads or commands.",
     "- Treat stale evidence as advisory only.",
     `- This is compaction #${context.compactionCount ?? 1}. Summary fidelity may be degraded; verify critical facts by re-reading.`,
   ].join("\n")
@@ -146,7 +209,8 @@ function commandDisplay(input: string) {
     .replace(/((?:api[_-]?key|token|password|secret)=)("[^"]*"|'[^']*'|\S+)/gi, "$1[redacted]")
     .replace(/(--(?:api[_-]?key|token|password|secret)=)("[^"]*"|'[^']*'|\S+)/gi, "$1[redacted]")
     .replace(/(--(?:api[_-]?key|token|password|secret)\s+)("[^"]*"|'[^']*'|\S+)/gi, "$1[redacted]")
-    .replace(/\s+/g, " ").trim()
+    .replace(/\s+/g, " ")
+    .trim()
   const clean = cell(redacted)
   if (clean.length <= 120) return clean
   return `${clean.slice(0, 102).trimEnd()}... [cmd:${createHash("sha256").update(clean).digest("hex").slice(0, 8)}]`
@@ -160,7 +224,15 @@ function formatModified(ms: number) {
 }
 
 export function parentSummary(receipts: readonly unknown[], worktree: string) {
-  const parse = Schema.decodeUnknownOption(Schema.Struct({ path: Schema.String, canonicalPath: Schema.optional(Schema.String), start: Schema.Number, end: Schema.Number, stub: Schema.optional(Schema.Unknown) }))
+  const parse = Schema.decodeUnknownOption(
+    Schema.Struct({
+      path: Schema.String,
+      canonicalPath: Schema.optional(Schema.String),
+      start: Schema.Number,
+      end: Schema.Number,
+      stub: Schema.optional(Schema.Unknown),
+    }),
+  )
   const files = new Map<string, { path: string; ranges: { start: number; end: number }[] }>()
   for (const value of receipts) {
     const parsed = parse(value)
@@ -176,16 +248,24 @@ export function parentSummary(receipts: readonly unknown[], worktree: string) {
   }
   if (!files.size) return undefined
   return [
-    "### Parent Session Inspected Files", "| path | ranges |", "|---|---|",
-    ...[...files.values()].toReversed().slice(0, 20).map(file => {
-      // 以真实工作树计算路径，不截尾三段；外部或跨盘路径仍完整保留。
-      const absolute = path.resolve(worktree, file.path)
-      const relative = path.relative(worktree, absolute)
-      const name = !relative.startsWith("..") && !path.isAbsolute(relative) ? relative || "." : absolute
-      const shown = file.ranges.slice(0, 8).map(range => `${range.start}-${range.end}`).join(", ")
-      const omitted = Math.max(0, file.ranges.length - 8)
-      return `| ${cell(name.replaceAll("\\", "/"))} | ${shown}${omitted ? `, ...(+${omitted})` : ""} |`
-    }),
+    "### Parent Session Inspected Files",
+    "| path | ranges |",
+    "|---|---|",
+    ...[...files.values()]
+      .toReversed()
+      .slice(0, 20)
+      .map((file) => {
+        // 以真实工作树计算路径，不截尾三段；外部或跨盘路径仍完整保留。
+        const absolute = path.resolve(worktree, file.path)
+        const relative = path.relative(worktree, absolute)
+        const name = !relative.startsWith("..") && !path.isAbsolute(relative) ? relative || "." : absolute
+        const shown = file.ranges
+          .slice(0, 8)
+          .map((range) => `${range.start}-${range.end}`)
+          .join(", ")
+        const omitted = Math.max(0, file.ranges.length - 8)
+        return `| ${cell(name.replaceAll("\\", "/"))} | ${shown}${omitted ? `, ...(+${omitted})` : ""} |`
+      }),
     ...(files.size > 20 ? [`Omitted: ${files.size - 20} files due to budget.`] : []),
   ].join("\n")
 }

@@ -19,7 +19,8 @@ function installChildEnv(extra: Record<string, string | undefined> = {}) {
   // 安装子进程保留代理、CA、PATH 与 VERSION；仅剥离 daemon 身份和 Electron 执行角色。
   return Object.fromEntries(
     Object.entries({ ...process.env, ...extra }).filter(
-      (entry): entry is [string, string] => entry[1] !== undefined &&
+      (entry): entry is [string, string] =>
+        entry[1] !== undefined &&
         !["OPENCODE_PROCESS_ROLE", "OPENCODE_RUN_ID", "ELECTRON_RUN_AS_NODE"].includes(entry[0]),
     ),
   )

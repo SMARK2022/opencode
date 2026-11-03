@@ -130,10 +130,13 @@ export async function create(input: {
   const instance = input.instance
 
   // 外部连接复用同一协议客户端，不伪造子进程或复制诊断缓存。
-  const connection = "connection" in input.server ? input.server.connection : createMessageConnection(
-    new StreamMessageReader(input.server.process.stdout as any),
-    new StreamMessageWriter(input.server.process.stdin as any),
-  )
+  const connection =
+    "connection" in input.server
+      ? input.server.connection
+      : createMessageConnection(
+          new StreamMessageReader(input.server.process.stdout as any),
+          new StreamMessageWriter(input.server.process.stdin as any),
+        )
   // stderr 只存在于进程句柄；外部连接没有可订阅的宿主错误流，静默跳过。
   if ("process" in input.server) input.server.process.stderr?.resume()
   // --- Connection state ---
@@ -554,7 +557,8 @@ export async function create(input: {
     supports(method: string) {
       if ("process" in input.server) return true
       if (method === "textDocument/implementation") return Boolean(initialized.capabilities?.implementationProvider)
-      if (method === "textDocument/prepareCallHierarchy") return Boolean(initialized.capabilities?.callHierarchyProvider)
+      if (method === "textDocument/prepareCallHierarchy")
+        return Boolean(initialized.capabilities?.callHierarchyProvider)
       return true
     },
     get serverID() {

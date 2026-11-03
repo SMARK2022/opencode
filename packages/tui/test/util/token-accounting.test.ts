@@ -39,7 +39,10 @@ function stepFinish(
 describe("tokenAccounting", () => {
   // #122：完成消息 + step-finish → step.input 用确认值（含 cache）
   test("step.input uses confirmed tokens when last step-finish exists and message completed", () => {
-    const msgs = [userMsg("u1"), assistantMsg("a1", "u1", { input: 10, output: 20, reasoning: 0, cache: { read: 0, write: 0 } }, 100)]
+    const msgs = [
+      userMsg("u1"),
+      assistantMsg("a1", "u1", { input: 10, output: 20, reasoning: 0, cache: { read: 0, write: 0 } }, 100),
+    ]
     const parts: Record<string, any[]> = {
       a1: [stepFinish("sf1", { input: 100, output: 50, reasoning: 0, cache: { read: 5, write: 5 } }, 1000)],
     }
@@ -119,20 +122,20 @@ describe("tokenAccounting", () => {
           input: 400,
           confirmed: false,
           inputBreakdown: {
-          system: 200,
-          instructions: 100,
-          skills: 50,
-          tools: 50,
-          messages: {
-            userText: 100,
-            assistantText: 80,
-            reasoning: 0,
-            toolInput: 40,
-            toolOutput: 80,
-            attachments: 100,
-            total: 400,
+            system: 200,
+            instructions: 100,
+            skills: 50,
+            tools: 50,
+            messages: {
+              userText: 100,
+              assistantText: 80,
+              reasoning: 0,
+              toolInput: 40,
+              toolOutput: 80,
+              attachments: 100,
+              total: 400,
+            },
           },
-        },
         },
       },
     ]
@@ -211,8 +214,10 @@ describe("tokenAccounting", () => {
     // #127：15 + 200 = 215；toolCalls 仅 input 份额 10
     expect(acc.breakdown!.assistantText).toBe(215)
     expect(acc.breakdown!.toolCalls).toBe(10)
-    const unfinished = tokenAccounting(msgs.map((msg) => msg.role === "assistant" ? { ...msg, time: { created: 1 } } : msg),
-      (id) => parts[id] ?? [])
+    const unfinished = tokenAccounting(
+      msgs.map((msg) => (msg.role === "assistant" ? { ...msg, time: { created: 1 } } : msg)),
+      (id) => parts[id] ?? [],
+    )
     expect(unfinished.breakdown!.assistantText).toBe(215)
   })
 
@@ -259,24 +264,54 @@ describe("tokenAccounting", () => {
     // #127：input 32 + live 3 = 35；toolCalls input 16
     expect(acc.breakdown!.assistantText).toBe(35)
     expect(acc.breakdown!.toolCalls).toBe(16)
-    const next = tokenAccounting(msgs, (id) => id === "a1" ? [
-      { ...parts.a1[0], id: "00-finish", type: "step-finish",
-        tokens: { input: 500, output: 200, reasoning: 0, cache: { read: 0, write: 0 } } }, ...parts.a1,
-    ] : [])
+    const next = tokenAccounting(msgs, (id) =>
+      id === "a1"
+        ? [
+            {
+              ...parts.a1[0],
+              id: "00-finish",
+              type: "step-finish",
+              tokens: { input: 500, output: 200, reasoning: 0, cache: { read: 0, write: 0 } },
+            },
+            ...parts.a1,
+          ]
+        : [],
+    )
     expect(next.breakdown!.system).toBe(80)
     expect(next.breakdown!.assistantText).toBe(35)
   })
   // #175：media.tokens=10 固定；system/user 经 textDenom 为 242
   test("breakdown allocates media tokens outside text character ratio", () => {
     const msgs = [userMsg("1"), assistantMsg("2", "1", undefined, 10)]
-    const getParts = (_id: string) => [{
-      ...stepFinish("sf", { input: 500, output: 200, reasoning: 0, cache: { read: 0, write: 0 } }, 9_500),
-      inputBreakdown: {
-        system: 1_000, instructions: 0, skills: 0, tools: 0,
-        messages: { userText: 1_000, assistantText: 0, reasoning: 0, toolInput: 0, toolOutput: 0, attachments: 7_500, total: 8_500 },
-        media: { rawChars: 7_500, textChars: 25, tokens: 10, count: 1, imageTokens: 10, pdfTokens: 0, otherTokens: 0 },
+    const getParts = (_id: string) => [
+      {
+        ...stepFinish("sf", { input: 500, output: 200, reasoning: 0, cache: { read: 0, write: 0 } }, 9_500),
+        inputBreakdown: {
+          system: 1_000,
+          instructions: 0,
+          skills: 0,
+          tools: 0,
+          messages: {
+            userText: 1_000,
+            assistantText: 0,
+            reasoning: 0,
+            toolInput: 0,
+            toolOutput: 0,
+            attachments: 7_500,
+            total: 8_500,
+          },
+          media: {
+            rawChars: 7_500,
+            textChars: 25,
+            tokens: 10,
+            count: 1,
+            imageTokens: 10,
+            pdfTokens: 0,
+            otherTokens: 0,
+          },
+        },
       },
-    }]
+    ]
     const acc = tokenAccounting(msgs as any, getParts)
     // #175：固定侧 10，不按 7500 字符分配
     expect(acc.breakdown?.attachments).toBe(10)
@@ -285,21 +320,49 @@ describe("tokenAccounting", () => {
     expect(acc.breakdown?.userMessages).toBe(242)
   })
 
-
   test("durable projection survives an empty visible history and preserves prepared input", () => {
     const tokens = { input: 9000, output: 700, reasoning: 30, cache: { read: 100, write: 20 } }
-    const snapshot = (request: SessionRequestUsage) => tokenAccounting([], () => [], undefined, {
-      session: { tokens, request }, last: undefined, parts: [],
-    })
+    const snapshot = (request: SessionRequestUsage) =>
+      tokenAccounting([], () => [], undefined, {
+        session: { tokens, request },
+        last: undefined,
+        parts: [],
+      })
     const request = { messageID: "u", input: 4000, output: 30, stepInput: 1000, stepOutput: 10, cost: 2 }
     // 窗口没有旧消息也不能截断持久累计，未记录会话费用时沿用零值。
     const confirmed = snapshot(request)
-    expect(confirmed.request).toEqual({ input: 1000, output: 10, totalInput: 4000, totalInputPure: 0, totalOutput: 30, cost: 2 })
-    expect(confirmed.session).toEqual({ input: 9000, output: 700, reasoning: 30, cacheRead: 100, cacheWrite: 20, cost: 0 })
+    expect(confirmed.request).toEqual({
+      input: 1000,
+      output: 10,
+      totalInput: 4000,
+      totalInputPure: 0,
+      totalOutput: 30,
+      cost: 2,
+    })
+    expect(confirmed.session).toEqual({
+      input: 9000,
+      output: 700,
+      reasoning: 30,
+      cacheRead: 100,
+      cacheWrite: 20,
+      cost: 0,
+    })
     // 首包前由服务端发布估算；零估算同样权威，不能借上一个请求的窗口补值。
-    const prepared = { ...request, stepInput: 0, stepOutput: 0, estimatedInput: 777,
-      model: { providerID: "p", modelID: "m", contextLimit: 2000 } }
-    expect(snapshot(prepared).request).toEqual({ input: 777, output: 0, totalInput: 4777, totalInputPure: 0, totalOutput: 30, cost: 2 })
+    const prepared = {
+      ...request,
+      stepInput: 0,
+      stepOutput: 0,
+      estimatedInput: 777,
+      model: { providerID: "p", modelID: "m", contextLimit: 2000 },
+    }
+    expect(snapshot(prepared).request).toEqual({
+      input: 777,
+      output: 0,
+      totalInput: 4777,
+      totalInputPure: 0,
+      totalOutput: 30,
+      cost: 2,
+    })
     expect(snapshot(prepared).contextPercent).toBe(39)
     expect(snapshot({ ...prepared, estimatedInput: 0 }).request.totalInput).toBe(4000)
     expect(snapshot(prepared).breakdown).toBeNull()
@@ -308,42 +371,100 @@ describe("tokenAccounting", () => {
   test("projection calibrates live output independently and preserves durable totals", () => {
     const history = assistantMsg("old", "u", undefined, 1)
     const last: AssistantMessage = {
-      ...assistantMsg("a", "u"), sessionID: "s", agent: "build", mode: "build",
-      providerID: "p", modelID: "m", path: { cwd: "/", root: "/" },
+      ...assistantMsg("a", "u"),
+      sessionID: "s",
+      agent: "build",
+      mode: "build",
+      providerID: "p",
+      modelID: "m",
+      path: { cwd: "/", root: "/" },
       inputEstimate: { input: 777, bodyChars: 1554, confirmed: false, charsPerToken: 2, afterPartID: "02-tool" },
     }
     const parts: Record<string, Part[]> = {
       old: [
         { id: "01-text", sessionID: "s", messageID: "old", type: "text", text: "x".repeat(800) },
-        { ...stepFinish("01-finish", { input: 400, output: 80, reasoning: 20, cache: { read: 0, write: 0 } }, 800),
-          sessionID: "s", messageID: "old", reason: "stop", cost: 0 },
+        {
+          ...stepFinish("01-finish", { input: 400, output: 80, reasoning: 20, cache: { read: 0, write: 0 } }, 800),
+          sessionID: "s",
+          messageID: "old",
+          reason: "stop",
+          cost: 0,
+        },
       ],
       a: [
-        { id: "02-tool", sessionID: "s", messageID: "a", type: "tool", callID: "covered", tool: "read",
-          state: { status: "completed", input: {}, output: "x".repeat(80), title: "read", metadata: {}, time: { start: 1, end: 2 } } },
+        {
+          id: "02-tool",
+          sessionID: "s",
+          messageID: "a",
+          type: "tool",
+          callID: "covered",
+          tool: "read",
+          state: {
+            status: "completed",
+            input: {},
+            output: "x".repeat(80),
+            title: "read",
+            metadata: {},
+            time: { start: 1, end: 2 },
+          },
+        },
         { id: "03-text", sessionID: "s", messageID: "a", type: "text", text: "x".repeat(80) },
-        { id: "04-reason", sessionID: "s", messageID: "a", type: "reasoning", text: "x".repeat(40), time: { start: 0, end: 1 } },
-        { id: "05-tool", sessionID: "s", messageID: "a", type: "tool", callID: "live", tool: "read",
-          state: { status: "pending", input: {}, raw: "x".repeat(40) } },
+        {
+          id: "04-reason",
+          sessionID: "s",
+          messageID: "a",
+          type: "reasoning",
+          text: "x".repeat(40),
+          time: { start: 0, end: 1 },
+        },
+        {
+          id: "05-tool",
+          sessionID: "s",
+          messageID: "a",
+          type: "tool",
+          callID: "live",
+          tool: "read",
+          state: { status: "pending", input: {}, raw: "x".repeat(40) },
+        },
       ],
     }
     const request: SessionRequestUsage = {
-      messageID: "u", assistantID: "a", input: 4000, output: 300, cost: 2, stepInput: 0, stepOutput: 0,
-      estimatedInput: 777, inputEstimate: last.inputEstimate,
+      messageID: "u",
+      assistantID: "a",
+      input: 4000,
+      output: 300,
+      cost: 2,
+      stepInput: 0,
+      stepOutput: 0,
+      estimatedInput: 777,
+      inputEstimate: last.inputEstimate,
       model: { providerID: "p", modelID: "m", contextLimit: 2000 },
     }
     const tokens = { input: 9000, output: 700, reasoning: 30, cache: { read: 100, write: 20 } }
     const acc = tokenAccounting([history, last], (id) => parts[id] ?? [], undefined, {
-      session: { tokens, cost: 3, request }, last, parts: parts.a,
+      session: { tokens, cost: 3, request },
+      last,
+      parts: parts.a,
     })
     // 密度仍分别为 8/2，游标覆盖结果不重复计入；窗口缺少 parent user 时，不从含 cache 的投影反推 pure input。
     expect(acc.ratio.output).toBe(8)
     expect(acc.step).toMatchObject({ input: 777, output: 20 })
-    expect(acc.request).toEqual({ input: 777, output: 20, totalInput: 4777, totalInputPure: 0, totalOutput: 320, cost: 2 })
+    expect(acc.request).toEqual({
+      input: 777,
+      output: 20,
+      totalInput: 4777,
+      totalInputPure: 0,
+      totalOutput: 320,
+      cost: 2,
+    })
     expect(acc.session).toEqual({ input: 9000, output: 700, reasoning: 30, cacheRead: 100, cacheWrite: 20, cost: 3 })
     const native = { ...history, tokens: { input: 400, output: 80, reasoning: 20, cache: { read: 0, write: 0 } } }
-    const calibrated = tokenAccounting([native, last], (id) => id === "old" ? parts.old.slice(0, 1) : parts.a,
-      undefined, { session: { tokens, request }, last, parts: parts.a })
+    const calibrated = tokenAccounting(
+      [native, last],
+      (id) => (id === "old" ? parts.old.slice(0, 1) : parts.a),
+      undefined,
+      { session: { tokens, request }, last, parts: parts.a },
+    )
     expect(calibrated.ratio.output).toBe(8)
     expect(calibrated.request.totalOutput).toBe(320)
   })
@@ -452,5 +573,4 @@ describe("tokenAccounting", () => {
   function sf2(input: number, output = 0, reasoning = 0, cacheRead = 0, cacheWrite = 0, inputChars?: number) {
     return stepFinish("sf", { input, output, reasoning, cache: { read: cacheRead, write: cacheWrite } }, inputChars)
   }
-
 })

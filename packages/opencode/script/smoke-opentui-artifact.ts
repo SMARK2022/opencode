@@ -114,9 +114,11 @@ if (process.platform === "win32" && !rootReport) {
   let error: unknown
   if (childRoot) {
     // child只上报本次mkdtemp绝对路径，outer不扫描宿主temp或根据进程名猜测清理目标。
-    await fs.rm(childRoot.trim(), { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }).catch((cause: unknown) => {
-      error = cause
-    })
+    await fs
+      .rm(childRoot.trim(), { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
+      .catch((cause: unknown) => {
+        error = cause
+      })
   } else if (code === 0) {
     error = new Error("Windows artifact smoke child did not publish its cleanup root")
   }
@@ -171,11 +173,12 @@ const fixture = Bun.serve({
       new ReadableStream({
         async start(controller) {
           const encoder = new TextEncoder()
-          const firstDelta = targetLiveness && requestNumber > 1
-            ? { content: "```ts\n// CANCEL-HIGHLIGHT-SENTINEL\n```" }
-            : targetLiveness
-              ? { reasoning_content: thinkingMarker }
-              : { content: bodyMarker }
+          const firstDelta =
+            targetLiveness && requestNumber > 1
+              ? { content: "```ts\n// CANCEL-HIGHLIGHT-SENTINEL\n```" }
+              : targetLiveness
+                ? { reasoning_content: thinkingMarker }
+                : { content: bodyMarker }
           const secondDelta = targetLiveness && requestNumber === 1 ? { content: bodyMarker } : {}
           // 首 delta 已足以驱动 Thinking cell；body 等待窗口后再发，保证两哨兵可分帧断言。
           // 先发一个真实part delta，再等待abort，才能让Code进入高亮在途窗口。
@@ -376,10 +379,13 @@ try {
   sessionID = session.id
   if (targetLiveness) {
     // Project identity与Session identity分开读取，证明事件过滤没有只靠Session字符串碰巧命中。
-    const projectResponse = await fetch(`http://127.0.0.1:${lock.port}/project/current?directory=${encodeURIComponent(project)}`, {
-      headers,
-      signal: AbortSignal.timeout(10_000),
-    })
+    const projectResponse = await fetch(
+      `http://127.0.0.1:${lock.port}/project/current?directory=${encodeURIComponent(project)}`,
+      {
+        headers,
+        signal: AbortSignal.timeout(10_000),
+      },
+    )
     const currentProject = await projectResponse.json()
     if (typeof currentProject?.id !== "string") throw new Error("Target Project response did not contain an id")
     targetProjectID = currentProject.id
@@ -663,7 +669,7 @@ try {
     )
     // waitFor仅以undefined表示未就绪；文件缺席的false必须转换，避免伪造在途高亮证据。
     await waitFor(
-      async () => (await Bun.file(highlightReadyPath).exists()) ? true : undefined,
+      async () => ((await Bun.file(highlightReadyPath).exists()) ? true : undefined),
       "target cancellation highlight worker did not publish pending readiness",
       10_000,
     )
@@ -686,7 +692,8 @@ try {
     ]
     const warningCount = shutdownPatterns.reduce((total, pattern) => total + count(shutdownLog, pattern), 0)
     // zero是in-flight cancellation的绝对门槛，不能用“少于某个数量”替代。
-    if (warningCount !== 0) throw new Error(`Target TUI shutdown emitted ${warningCount} expected-cancellation warnings`)
+    if (warningCount !== 0)
+      throw new Error(`Target TUI shutdown emitted ${warningCount} expected-cancellation warnings`)
   }
 
   stage = "stop daemon"
@@ -750,22 +757,30 @@ try {
           // 这些探针都有短timeout，诊断自身不能让CI在原始故障后永久挂起。
           health: await fetch(`http://127.0.0.1:${lockInfo.port}/global/health`, {
             signal: AbortSignal.timeout(2_000),
-          }).then((response) => response.status).catch((error) => String(error)),
+          })
+            .then((response) => response.status)
+            .catch((error) => String(error)),
           status: await fetch(`http://127.0.0.1:${lockInfo.controlPort}/status`, {
             headers: { "x-opencode-daemon-token": lockInfo.token },
             signal: AbortSignal.timeout(2_000),
-          }).then((response) => response.text()).catch((error) => String(error)),
+          })
+            .then((response) => response.text())
+            .catch((error) => String(error)),
           session: sessionID
             ? await fetch(`http://127.0.0.1:${lockInfo.port}/session/${sessionID}`, {
                 headers: { "x-opencode-directory": project },
                 signal: AbortSignal.timeout(2_000),
-              }).then((response) => response.status).catch((error) => String(error))
+              })
+                .then((response) => response.status)
+                .catch((error) => String(error))
             : undefined,
           goal: sessionID
             ? await fetch(`http://127.0.0.1:${lockInfo.port}/session/${sessionID}/goal`, {
                 headers: { "x-opencode-directory": project },
                 signal: AbortSignal.timeout(2_000),
-              }).then(async (response) => ({ status: response.status, body: await response.text() })).catch((error) => String(error))
+              })
+                .then(async (response) => ({ status: response.status, body: await response.text() }))
+                .catch((error) => String(error))
             : undefined,
         }
       : undefined,
@@ -917,7 +932,15 @@ globalThis.onmessage = async (event) => {
 async function readIsolatedLogs(root: string) {
   // 只扫隔离 root 内的日志文件；宿主全局日志不进入 shutdown 断言语料。
   const files = await Array.fromAsync(new Bun.Glob("**/*.log").scan({ cwd: root, onlyFiles: true }))
-  return (await Promise.all(files.map((file) => Bun.file(path.join(root, file)).text().catch(() => "")))).join("\n")
+  return (
+    await Promise.all(
+      files.map((file) =>
+        Bun.file(path.join(root, file))
+          .text()
+          .catch(() => ""),
+      ),
+    )
+  ).join("\n")
 }
 
 function isPartTimingEvent(event: TargetEvent) {

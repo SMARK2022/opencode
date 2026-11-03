@@ -32,8 +32,14 @@ const LocationInput = Schema.Struct({
 })
 const Input = LocationInput
 const Output = Schema.Union([
-  Schema.Struct({ ...ReadToolFileSystem.Content.fields, instructions: SessionReadInstructions.Files.pipe(Schema.optional) }),
-  Schema.Struct({ ...ReadToolFileSystem.TextPage.fields, instructions: SessionReadInstructions.Files.pipe(Schema.optional) }),
+  Schema.Struct({
+    ...ReadToolFileSystem.Content.fields,
+    instructions: SessionReadInstructions.Files.pipe(Schema.optional),
+  }),
+  Schema.Struct({
+    ...ReadToolFileSystem.TextPage.fields,
+    instructions: SessionReadInstructions.Files.pipe(Schema.optional),
+  }),
   ReadToolFileSystem.ListPage,
 ])
 
@@ -51,28 +57,32 @@ const layer = Layer.effectDiscard(
         [name]: Tool.make({
           description:
             // 保留精心打磨的成功后提示原话；这不是工具执行层的读取禁令。
-            "Read a text file or supported image, page through a large UTF-8 text file by line offset, or list a directory page. Relative paths resolve from the current location; absolute paths inside it are accepted, while external absolute paths require external_directory approval.\n\nBy default, this tool returns up to 200 lines from the start of the file.\nText content is capped at 16 KiB per read; displayed lines are limited to 2000 characters.\nThe tool may inspect up to 256 KB of additional text plus one 16 KB read-ahead chunk to estimate line totals on a large remainder; this input is not returned as content.\nThe `total` attribute is exact when line accounting reaches EOF; `total_exact=\"false\"` marks a bounded-scan lower bound, always at least one line beyond the returned range.\nThe `<more>` element means unread file content remains. It can be present even when `total` is exact.\nIf a result returns `<stub status=\"...\">`, the requested lines overlap >=80% with a previous read that is still in your context at the latest version (file unchanged). The stub tells you which range (covered_by) is already visible. Do not use bash/shell commands to re-read the same range — use the content from your previous read in context, or read a different offset/limit for the new unread lines indicated in the stub message. For short reads, the full content is returned with an overlap `<note>` instead of a stub.\nFor source files, use `<range>`, `<more>`, and optional `<outline>` to choose targeted ranges. Do not page sequentially unless full-file comprehension is needed." +
+            'Read a text file or supported image, page through a large UTF-8 text file by line offset, or list a directory page. Relative paths resolve from the current location; absolute paths inside it are accepted, while external absolute paths require external_directory approval.\n\nBy default, this tool returns up to 200 lines from the start of the file.\nText content is capped at 16 KiB per read; displayed lines are limited to 2000 characters.\nThe tool may inspect up to 256 KB of additional text plus one 16 KB read-ahead chunk to estimate line totals on a large remainder; this input is not returned as content.\nThe `total` attribute is exact when line accounting reaches EOF; `total_exact="false"` marks a bounded-scan lower bound, always at least one line beyond the returned range.\nThe `<more>` element means unread file content remains. It can be present even when `total` is exact.\nIf a result returns `<stub status="...">`, the requested lines overlap >=80% with a previous read that is still in your context at the latest version (file unchanged). The stub tells you which range (covered_by) is already visible. Do not use bash/shell commands to re-read the same range — use the content from your previous read in context, or read a different offset/limit for the new unread lines indicated in the stub message. For short reads, the full content is returned with an overlap `<note>` instead of a stub.\nFor source files, use `<range>`, `<more>`, and optional `<outline>` to choose targeted ranges. Do not page sequentially unless full-file comprehension is needed.' +
             "\nAfter a successful edit, write, or apply_patch, skip re-reading the file to confirm—the tool errors if it didn't work.",
           input: Input,
           output: Output,
           toModelOutput: ({ input, output }) => {
-            const instructions = "instructions" in output ? output.instructions ?? [] : []
-            const reminders = instructions.length ? [{ type: "text" as const, text: `<system-reminder>\n${instructions.map(file => `Instructions from: ${file.path}\n${file.content}`).join("\n\n")}\n</system-reminder>` }] : []
+            const instructions = "instructions" in output ? (output.instructions ?? []) : []
+            const reminders = instructions.length
+              ? [
+                  {
+                    type: "text" as const,
+                    text: `<system-reminder>\n${instructions.map((file) => `Instructions from: ${file.path}\n${file.content}`).join("\n\n")}\n</system-reminder>`,
+                  },
+                ]
+              : []
             // 两代同步关闭额外源码提醒；逐文件规则、分页凭证和原生图片保持原投影。
             if (!("encoding" in output) || output.encoding !== "base64" || !SUPPORTED_IMAGE_MIMES.has(output.mime)) {
               if (!("content" in output)) return []
-              if (ReadPresentation.isReadRangeMeta(output.read)) return [
-                { type: "text", text: ReadPresentation.renderNativeRead({ ...output, read: output.read }) },
-                ...reminders,
-              ]
-              if (reminders.length === 0)
-                return []
+              if (ReadPresentation.isReadRangeMeta(output.read))
+                return [
+                  { type: "text", text: ReadPresentation.renderNativeRead({ ...output, read: output.read }) },
+                  ...reminders,
+                ]
+              if (reminders.length === 0) return []
               // 保留完整结构化结果的模型表示，不能只返回提醒而隐藏正文与 next。
               // Schema 已完成编码，此处不增加解析器或改变 utf8/TextPage 的输出契约。
-              return [
-                { type: "text", text: JSON.stringify({ ...output, instructions: undefined }) },
-                ...reminders,
-              ]
+              return [{ type: "text", text: JSON.stringify({ ...output, instructions: undefined }) }, ...reminders]
             }
             // 原生媒体继续绕过文本化 base64；所有文本仍由 registry 统一限幅。
             return [
@@ -117,23 +127,25 @@ const layer = Layer.effectDiscard(
                 limit: input.limit,
               })
               const instructions = yield* nearby(absolute, context.sessionID)
-              const attach = (value: ReadToolFileSystem.Content | ReadToolFileSystem.TextPage) => instructions.length ? { ...value, instructions } : value
+              const attach = (value: ReadToolFileSystem.Content | ReadToolFileSystem.TextPage) =>
+                instructions.length ? { ...value, instructions } : value
               // 附加规则只在成功读取后产生；原生图片与分页仍走原有结果类型及统一限幅。
-              if (
-                "encoding" in content &&
-                content.encoding === "base64" &&
-                content.mime.startsWith("image/")
-              ) {
+              if ("encoding" in content && content.encoding === "base64" && content.mime.startsWith("image/")) {
                 return yield* image
                   // 1,600 的源估算只约束 Read 图片，不能扩散到用户上传。
                   .normalize(resource, { ...content, encoding: "base64" }, 1600 * 750)
                   // 只适配Image的typed内容错误；读盘/权限错误与interrupt仍沿原失败通道。
-                  .pipe(Effect.catch(() => Effect.succeed({
-                    ...content,
-                    encoding: "utf8" as const,
-                    mime: "text/plain",
-                    content: "Image omitted: could not be decoded or resized within the image size limit.",
-                  })), Effect.map(attach))
+                  .pipe(
+                    Effect.catch(() =>
+                      Effect.succeed({
+                        ...content,
+                        encoding: "utf8" as const,
+                        mime: "text/plain",
+                        content: "Image omitted: could not be decoded or resized within the image size limit.",
+                      }),
+                    ),
+                    Effect.map(attach),
+                  )
               }
               if ("encoding" in content && content.encoding === "base64")
                 return yield* Effect.fail(new ReadToolFileSystem.BinaryFileError({ resource }))
@@ -144,11 +156,11 @@ const layer = Layer.effectDiscard(
                   error instanceof Image.ResizerUnavailableError
                     ? "Image resizer is unavailable"
                     : error instanceof ReadToolFileSystem.BinaryFileError ||
-                  error instanceof ReadToolFileSystem.MediaIngestLimitError ||
-                  error instanceof Image.DecodeError ||
-                  error instanceof Image.SizeError
-                    ? error.message
-                    : PermissionV2.autoDeniedMessage(error) ?? `Unable to read ${input.path}`
+                        error instanceof ReadToolFileSystem.MediaIngestLimitError ||
+                        error instanceof Image.DecodeError ||
+                        error instanceof Image.SizeError
+                      ? error.message
+                      : (PermissionV2.autoDeniedMessage(error) ?? `Unable to read ${input.path}`)
                 return new ToolFailure({ message })
               }),
             )
@@ -162,5 +174,14 @@ const layer = Layer.effectDiscard(
 export const node = makeLocationNode({
   name: "tool/read",
   layer,
-  deps: [ToolRegistry.node, ReadToolFileSystem.node, LocationMutation.node, Image.node, PermissionV2.node, FSUtil.node, Location.node, SessionStore.node],
+  deps: [
+    ToolRegistry.node,
+    ReadToolFileSystem.node,
+    LocationMutation.node,
+    Image.node,
+    PermissionV2.node,
+    FSUtil.node,
+    Location.node,
+    SessionStore.node,
+  ],
 })

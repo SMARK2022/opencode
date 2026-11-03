@@ -13,7 +13,13 @@ export function build(endpoint: string, args: Record<string, unknown>, value: un
   const path = stringValue(data.path) ?? stringValue(args.filePath)
   // #224：summary view——cells 列表 + dirty/runtime 状态
   if (endpoint === "/notebook/summary") {
-    return { view: "summary", path, dirty: booleanValue(data.dirty), runtime: stringValue(data.runtime), cells: compactCells(data.cells) }
+    return {
+      view: "summary",
+      path,
+      dirty: booleanValue(data.dirty),
+      runtime: stringValue(data.runtime),
+      cells: compactCells(data.cells),
+    }
   }
   // #224：source view——返回的行数/截断信息，不含源码文本
   if (endpoint === "/notebook/source") {
@@ -67,21 +73,22 @@ function notebookEditView(path: string | undefined, args: Record<string, unknown
   const before = stringValue(data.beforeSource)
   const after = stringValue(data.afterSource)
   // #224：createTwoFilesPatch 生成 unified diff——两路径用 cell index + language 标记
-  const fullDiff = before !== undefined && after !== undefined && before !== after
-    ? createTwoFilesPatch(notebookDiffPath(path, data, "old"), notebookDiffPath(path, data, "new"), before, after)
-    : undefined
+  const fullDiff =
+    before !== undefined && after !== undefined && before !== after
+      ? createTwoFilesPatch(notebookDiffPath(path, data, "old"), notebookDiffPath(path, data, "new"), before, after)
+      : undefined
   const stats = diffStats(fullDiff ?? "")
   // #224：diff 超过 16KB 只保留统计，diff 设为 undefined，diffOmitted 标记 "too-large"
   const diff = fullDiff && fullDiff.length <= NOTEBOOK_DIFF_METADATA_MAX_CHARS ? fullDiff : undefined
-  const cellIndex = numberValue(data.affectedCellIndex) ?? numberValue(data.anchorCellIndex) ?? numberValue(data.deletedCellIndex)
+  const cellIndex =
+    numberValue(data.affectedCellIndex) ?? numberValue(data.anchorCellIndex) ?? numberValue(data.deletedCellIndex)
   const editType = stringValue(data.editType) ?? stringValue(args.editType)
   const requestedCellId = stringValue(args.cellId)
   // 插入与类型替换会分配新句柄；续用结果身份，同时保留不同的请求锚点。
   const cellId = stringValue(data.insertedCellId) ?? stringValue(data.updatedCellId) ?? requestedCellId
   // #233：insert 有 afterSource 时生成有界预览——TUI 用代码渲染器展示插入内容
-  const insertedSourcePreview = editType === "insert" && after !== undefined
-    ? previewNotebookInsertSource(after)
-    : undefined
+  const insertedSourcePreview =
+    editType === "insert" && after !== undefined ? previewNotebookInsertSource(after) : undefined
   return {
     view: "edit",
     path,
@@ -112,9 +119,10 @@ function previewNotebookInsertSource(source: string) {
   const rawLines = source.split(/\r?\n/)
   const lines = rawLines.at(-1) === "" ? rawLines.slice(0, -1) : rawLines
   const linePreview = lines.slice(0, NOTEBOOK_INSERT_PREVIEW_LINES).join("\n")
-  const text = linePreview.length > NOTEBOOK_INSERT_PREVIEW_MAX_CHARS
-    ? linePreview.slice(0, NOTEBOOK_INSERT_PREVIEW_MAX_CHARS)
-    : linePreview
+  const text =
+    linePreview.length > NOTEBOOK_INSERT_PREVIEW_MAX_CHARS
+      ? linePreview.slice(0, NOTEBOOK_INSERT_PREVIEW_MAX_CHARS)
+      : linePreview
   return {
     text,
     // #233：截断判定——行数超 10 或字符被 4KB 上限裁剪，二者任一即为 truncated
@@ -127,17 +135,18 @@ function notebookEnvView(path: string | undefined, data: Record<string, unknown>
   const operation = stringValue(data.operation)
   const status = stringValue(data.status)
   // #224：guidance 从 status 派生——让 agent 知道下一步操作
-  const guidance = status === "configured"
-    ? "Notebook is ready for cell execution."
-    : status === "selected"
-      ? "Proceed to run cells — the kernel will start on first execution."
-      : status === "needs-selection"
-        ? "Select a kernel manually from the notebook toolbar, then call configure to verify."
-        : status === "selection-requested"
-          ? "Retry configure or select a kernel manually."
-          : status === "failed"
-            ? "Check Jupyter/Python extensions and workspace trust."
-            : undefined
+  const guidance =
+    status === "configured"
+      ? "Notebook is ready for cell execution."
+      : status === "selected"
+        ? "Proceed to run cells — the kernel will start on first execution."
+        : status === "needs-selection"
+          ? "Select a kernel manually from the notebook toolbar, then call configure to verify."
+          : status === "selection-requested"
+            ? "Retry configure or select a kernel manually."
+            : status === "failed"
+              ? "Check Jupyter/Python extensions and workspace trust."
+              : undefined
   return {
     view: "env",
     path,
@@ -159,16 +168,26 @@ function notebookEnvView(path: string | undefined, data: Record<string, unknown>
 // #224：diff 路径标签——用 path + cell index + language 组成虚拟文件名，
 // 让 diff component 能选对语法高亮
 function notebookDiffPath(path: string | undefined, data: Record<string, unknown>, fallback: string) {
-  const cellIndex = numberValue(data.affectedCellIndex) ?? numberValue(data.anchorCellIndex) ?? numberValue(data.deletedCellIndex)
+  const cellIndex =
+    numberValue(data.affectedCellIndex) ?? numberValue(data.anchorCellIndex) ?? numberValue(data.deletedCellIndex)
   const language = stringValue(data.language)
-  return [path ?? "notebook", cellIndex === undefined ? undefined : `#c${cellIndex + 1}`, language ? `.${language}` : undefined]
-    .filter((item): item is string => Boolean(item))
-    .join("") || fallback
+  return (
+    [
+      path ?? "notebook",
+      cellIndex === undefined ? undefined : `#c${cellIndex + 1}`,
+      language ? `.${language}` : undefined,
+    ]
+      .filter((item): item is string => Boolean(item))
+      .join("") || fallback
+  )
 }
 
 // #224：run cells 压缩——每个 cell 追加 artifacts 列表
 function compactRunCells(value: unknown) {
-  return arrayValue(value).map((item) => ({ ...compactCell(item), artifacts: compactArtifacts(recordValue(item).artifacts) }))
+  return arrayValue(value).map((item) => ({
+    ...compactCell(item),
+    artifacts: compactArtifacts(recordValue(item).artifacts),
+  }))
 }
 
 // #224：summary cells 压缩——只保留 TUI 需要的字段

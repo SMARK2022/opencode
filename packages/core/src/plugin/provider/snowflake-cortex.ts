@@ -19,9 +19,7 @@ export function cortexFetch(upstream?: FetchLike) {
       } catch {}
     }
 
-    const response = await (upstream
-      ? upstream(url, init)
-      : NetworkProxy.fetch(url, { ...init, purpose: "provider" }))
+    const response = await (upstream ? upstream(url, init) : NetworkProxy.fetch(url, { ...init, purpose: "provider" }))
 
     // Cortex returns 400 "conversation complete" as a normal stop condition
     if (!response.ok && response.status === 400) {

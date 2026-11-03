@@ -44,26 +44,26 @@
 
 ## 3. Repository Context
 
-| Source | Constraint |
-| --- | --- |
-| `CONTEXT.md` | OpenTUI core 是 `packages/core`；本任务关注 CodeRenderable、TreeSitterClient 和 parser worker。 |
+| Source                                             | Constraint                                                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| `CONTEXT.md`                                       | OpenTUI core 是 `packages/core`；本任务关注 CodeRenderable、TreeSitterClient 和 parser worker。   |
 | `.opencode/policy/first-principles-engineering.md` | 修复 first divergence；一个 authoritative primary path；无批准不得实施；必须有双向 traceability。 |
-| `.opencode/templates/canonical-plan.md` | 必须包含证据、责任、TDD、验证、diff、audit 和 implementation evidence。 |
-| `thirdparty/opentui/AGENTS.md` | 使用 Bun；测试从 package 目录运行；TypeScript 修改无需 native build。 |
-| `docs/adr/README.md` | 本任务是单模块实现，不新增 ADR。 |
+| `.opencode/templates/canonical-plan.md`            | 必须包含证据、责任、TDD、验证、diff、audit 和 implementation evidence。                           |
+| `thirdparty/opentui/AGENTS.md`                     | 使用 Bun；测试从 package 目录运行；TypeScript 修改无需 native build。                             |
+| `docs/adr/README.md`                               | 本任务是单模块实现，不新增 ADR。                                                                  |
 
 ## 4. Files and Evidence Read
 
-| Evidence | Relevance | Class |
-| --- | --- | --- |
-| rollback baseline `packages/core/src/renderables/Code.ts` | 每次 dirty render 都可触发 `highlightOnce(fullContent)`；`drawUnstyledText=false` 会隐藏未完成内容。 | observed |
-| `packages/core/src/renderables/Code.test.ts` | 已有 stale snapshot、streaming、lineInfo 和 conceal 行为 seam。 | observed |
-| `packages/core/src/lib/tree-sitter/client.ts` | 已有 `createBuffer/updateBuffer/removeBuffer`、edit queue 和 version，但没有可等待 update result。 | observed |
-| `packages/core/src/lib/tree-sitter/parser.worker.ts` | 已有持久 parser tree、`tree.edit`、incremental parse 和 `changedRanges`。 | observed |
-| `packages/core/src/lib/tree-sitter/types.ts` | 现有 worker protocol 没有 buffer update completion payload。 | observed |
-| `packages/core/src/lib/styled-text.ts` | `StyledText.chunks` 可作为 Code 内部稳定前缀渲染缓存。 | observed |
-| `packages/core/src/lib/tree-sitter/client.test.ts` | 已有 buffer create/update 协议测试 seam。 | observed |
-| `packages/core/src/testing/mock-tree-sitter-client.ts` | Code 测试 client seam，需要跟随新增公共 buffer seam扩展。 | observed |
+| Evidence                                                              | Relevance                                                                                                                                                                                                                                                                                                                | Class    |
+| --------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------- |
+| rollback baseline `packages/core/src/renderables/Code.ts`             | 每次 dirty render 都可触发 `highlightOnce(fullContent)`；`drawUnstyledText=false` 会隐藏未完成内容。                                                                                                                                                                                                                     | observed |
+| `packages/core/src/renderables/Code.test.ts`                          | 已有 stale snapshot、streaming、lineInfo 和 conceal 行为 seam。                                                                                                                                                                                                                                                          | observed |
+| `packages/core/src/lib/tree-sitter/client.ts`                         | 已有 `createBuffer/updateBuffer/removeBuffer`、edit queue 和 version，但没有可等待 update result。                                                                                                                                                                                                                       | observed |
+| `packages/core/src/lib/tree-sitter/parser.worker.ts`                  | 已有持久 parser tree、`tree.edit`、incremental parse 和 `changedRanges`。                                                                                                                                                                                                                                                | observed |
+| `packages/core/src/lib/tree-sitter/types.ts`                          | 现有 worker protocol 没有 buffer update completion payload。                                                                                                                                                                                                                                                             | observed |
+| `packages/core/src/lib/styled-text.ts`                                | `StyledText.chunks` 可作为 Code 内部稳定前缀渲染缓存。                                                                                                                                                                                                                                                                   | observed |
+| `packages/core/src/lib/tree-sitter/client.test.ts`                    | 已有 buffer create/update 协议测试 seam。                                                                                                                                                                                                                                                                                | observed |
+| `packages/core/src/testing/mock-tree-sitter-client.ts`                | Code 测试 client seam，需要跟随新增公共 buffer seam扩展。                                                                                                                                                                                                                                                                | observed |
 | `.temp/testing/streaming-markdown-buffer-benchmark.ts` full benchmark | 240 snapshots；R62 验收实测：sequential candidate 15.91ms average/34.10ms p95 vs baseline 28.28/62.05（total -44%、p95 -45%、1.78x）、text/style 0 mismatch；scaling candidate1000 507ms vs baseline1000 703ms（1.39x）；cadence candidate catch-up 28.65ms vs baseline 193.63ms、stream 1.06x、converged、normal exit。 | observed |
 
 ## 5. Current Behavior
@@ -81,39 +81,39 @@ provider delta -> CodeRenderable.content -> dirty -> renderSelf
 
 ## 6. Supported Input Domain and Reachability
 
-| Input | Producer/path | Owner | Class |
-| --- | --- | --- | --- |
-| streaming Markdown append | provider delta -> OpenCode TextPart -> CodeRenderable.content | Code + TreeSitter client | observed/reachable |
-| table/list/blockquote/reference/setext/emphasis across deltas | same TextPart -> Markdown tree | persistent parser owner | observed/reachable |
-| open/closed backtick or tilde fence | same TextPart | persistent parser owner | observed/reachable |
-| CJK/emoji append | TextPart -> web-tree-sitter string edit | parser/client code-unit seam | observed/reachable |
-| content rewrite and style/conceal/callback setters | Code public setters | Code snapshot/cache owner | reachable |
-| filetype or TreeSitterClient replacement | Code public setters | Code managed-buffer ownership | reachable |
-| non-streaming/non-Markdown Code | existing full route | CodeRenderable | reachable |
-| Reasoning identity `onChunks` and generic callbacks | actual/public Code callbacks | CodeRenderable | observed/reachable |
+| Input                                                         | Producer/path                                                 | Owner                         | Class              |
+| ------------------------------------------------------------- | ------------------------------------------------------------- | ----------------------------- | ------------------ |
+| streaming Markdown append                                     | provider delta -> OpenCode TextPart -> CodeRenderable.content | Code + TreeSitter client      | observed/reachable |
+| table/list/blockquote/reference/setext/emphasis across deltas | same TextPart -> Markdown tree                                | persistent parser owner       | observed/reachable |
+| open/closed backtick or tilde fence                           | same TextPart                                                 | persistent parser owner       | observed/reachable |
+| CJK/emoji append                                              | TextPart -> web-tree-sitter string edit                       | parser/client code-unit seam  | observed/reachable |
+| content rewrite and style/conceal/callback setters            | Code public setters                                           | Code snapshot/cache owner     | reachable          |
+| filetype or TreeSitterClient replacement                      | Code public setters                                           | Code managed-buffer ownership | reachable          |
+| non-streaming/non-Markdown Code                               | existing full route                                           | CodeRenderable                | reachable          |
+| Reasoning identity `onChunks` and generic callbacks           | actual/public Code callbacks                                  | CodeRenderable                | observed/reachable |
 
 ## 7. Required Invariants
 
-| ID | Behavioral invariant | Evidence | Test |
-| --- | --- | --- | --- |
-| INV-01 | 最新 streaming Markdown 最终可见，且等于同内容独立 full parse。 | user requirement + current path | Code differential |
-| INV-02 | append-only 使用一个 persistent parser tree 和一个 active update，不形成 detached one-shot backlog。 | Opus benchmark + client buffer API | client protocol + benchmark |
+| ID     | Behavioral invariant                                                                                                                                                                      | Evidence                                                                                    | Test                                                    |
+| ------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- | ------------------------------------------------------- |
+| INV-01 | 最新 streaming Markdown 最终可见，且等于同内容独立 full parse。                                                                                                                           | user requirement + current path                                                             | Code differential                                       |
+| INV-02 | append-only 使用一个 persistent parser tree 和一个 active update，不形成 detached one-shot backlog。                                                                                      | Opus benchmark + client buffer API                                                          | client protocol + benchmark                             |
 | INV-03 | shipped grammar 的 `document`/`section` 是透明容器；stable boundary 选择最后一个 section 内的最后一个 render block，它及其后内容始终属于 tail；只有它之前的 closed render blocks 可缓存。 | user requirement + actual grammar probe (`document -> section -> paragraph/pipe_table/...`) | section 起点 vs 内部 table/list/fence 起点 differential |
-| INV-04 | 旧 version 不能提交 StyledText、callback 或 line mapping；rewrite 重置同 owner；filetype/client 转移必须释放旧 buffer 并由当前 owner 重建。 | snapshot/version + public setter contract | delayed ownership test |
-| INV-05 | non-Markdown、non-streaming、`onHighlight`、`onChunks` 和 parser error 后显示当前 plain text 的兼容行为不改变。 | current public options/error test | Code/callback/managed-error regression |
-| INV-06 | destroy 释放 buffer，不改变已有 shared worker lifecycle。 | existing destroy/removeBuffer | cleanup test |
-| INV-07 | 所有 edit/range/cut 使用已观察的 JavaScript UTF-16 code-unit 域；closing-fence normalization、Unicode、lineInfo 和 conceal 最终正确。 | installed parser probe + existing one-shot normalization | fence/Unicode/conceal regression |
-| INV-08 | renderer benchmark 证明逐帧文本与样式等价、稳定前缀 work scaling、独立 16ms producer 下的 producer/frame/visible-update gaps、missed cadence、catch-up 和显著提速。 | explicit user requirement | style-sensitive sequential/scaling/cadence harness |
+| INV-04 | 旧 version 不能提交 StyledText、callback 或 line mapping；rewrite 重置同 owner；filetype/client 转移必须释放旧 buffer 并由当前 owner 重建。                                               | snapshot/version + public setter contract                                                   | delayed ownership test                                  |
+| INV-05 | non-Markdown、non-streaming、`onHighlight`、`onChunks` 和 parser error 后显示当前 plain text 的兼容行为不改变。                                                                           | current public options/error test                                                           | Code/callback/managed-error regression                  |
+| INV-06 | destroy 释放 buffer，不改变已有 shared worker lifecycle。                                                                                                                                 | existing destroy/removeBuffer                                                               | cleanup test                                            |
+| INV-07 | 所有 edit/range/cut 使用已观察的 JavaScript UTF-16 code-unit 域；closing-fence normalization、Unicode、lineInfo 和 conceal 最终正确。                                                     | installed parser probe + existing one-shot normalization                                    | fence/Unicode/conceal regression                        |
+| INV-08 | renderer benchmark 证明逐帧文本与样式等价、稳定前缀 work scaling、独立 16ms producer 下的 producer/frame/visible-update gaps、missed cadence、catch-up 和显著提速。                       | explicit user requirement                                                                   | style-sensitive sequential/scaling/cadence harness      |
 
 ## 8. First Divergence and Root Cause
 
-| Invariant | First divergence | Owner | Proof |
-| --- | --- | --- | --- |
+| Invariant | First divergence                                                                                                                                                | Owner                          | Proof                                                |
+| --------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------ | ---------------------------------------------------- |
 | INV-02/03 | `CodeRenderable.renderSelf` 把 append dirty 直接映射为 full `highlightOnce`，且现有 buffer path 只提供 changed ranges、没有 parser-owned stable tail boundary。 | Code -> TreeSitter buffer seam | baseline source + grammar probe + renderer benchmark |
-| INV-01/04 | 旧结果只在 one-shot 完成后检查 snapshot，没有版本化 persistent update completion。 | client/worker response seam | current callback protocol |
-| INV-07 | persistent create/update/reset 没有复用 one-shot closing-fence normalization，计划前版本错误假定 UTF-8 byte offsets。 | parser worker/client seam | installed parser probe + current worker paths |
-| INV-04 | generic reset 不能改变 grammar 或 TreeSitterClient owner。 | Code managed-buffer lifecycle | current setter/reset source |
-| INV-03/08 | 仅结果等价不能证明 tail-only conversion，顺序等待不能证明 16ms producer 收敛。 | benchmark seam | R56 auditor + current harness |
+| INV-01/04 | 旧结果只在 one-shot 完成后检查 snapshot，没有版本化 persistent update completion。                                                                              | client/worker response seam    | current callback protocol                            |
+| INV-07    | persistent create/update/reset 没有复用 one-shot closing-fence normalization，计划前版本错误假定 UTF-8 byte offsets。                                           | parser worker/client seam      | installed parser probe + current worker paths        |
+| INV-04    | generic reset 不能改变 grammar 或 TreeSitterClient owner。                                                                                                      | Code managed-buffer lifecycle  | current setter/reset source                          |
+| INV-03/08 | 仅结果等价不能证明 tail-only conversion，顺序等待不能证明 16ms producer 收敛。                                                                                  | benchmark seam                 | R56 auditor + current harness                        |
 
 Measured performance feedback loop:
 
@@ -128,13 +128,13 @@ The harness has three public-path phases: sequential per-snapshot full/streaming
 
 ## 9. Responsibility and Seam
 
-| Concern | Owner | Reason |
-| --- | --- | --- |
-| parser tree, normalization and stable tail boundary | parser worker | owns Parser, Tree, edit, parse, query, injections and code-unit source/parse offsets |
-| versioned response delivery | TreeSitterClient | already owns worker messages, buffer map, edit queue and dispatch |
-| stable prefix StyledText cache | CodeRenderable | owns visible text, style, conceal and public snapshots |
-| benchmark measurement | `.temp/testing` harness | diagnostic only; not production semantics |
-| buffer cleanup | CodeRenderable + existing `removeBuffer` | Code owns ID; client owns worker protocol |
+| Concern                                             | Owner                                    | Reason                                                                               |
+| --------------------------------------------------- | ---------------------------------------- | ------------------------------------------------------------------------------------ |
+| parser tree, normalization and stable tail boundary | parser worker                            | owns Parser, Tree, edit, parse, query, injections and code-unit source/parse offsets |
+| versioned response delivery                         | TreeSitterClient                         | already owns worker messages, buffer map, edit queue and dispatch                    |
+| stable prefix StyledText cache                      | CodeRenderable                           | owns visible text, style, conceal and public snapshots                               |
+| benchmark measurement                               | `.temp/testing` harness                  | diagnostic only; not production semantics                                            |
+| buffer cleanup                                      | CodeRenderable + existing `removeBuffer` | Code owns ID; client owns worker protocol                                            |
 
 ## 10. Single Approved Primary-Path Design
 
@@ -148,7 +148,7 @@ append -> versioned source update
 ```
 
 - `TreeSitterClient` exposes a managed buffer ID and an awaitable update result; existing `createBuffer/updateBuffer` behavior remains compatible.
-- Worker stores source content separately from normalized parse content. The same closing-````` synthetic newline rule applies to create, append, rewrite and reset; edits, points, `changedStart`, `tailStart`, highlights and clipping all use the installed parser's observed JavaScript UTF-16 code-unit domain.
+- Worker stores source content separately from normalized parse content. The same closing-`````synthetic newline rule applies to create, append, rewrite and reset; edits, points,`changedStart`, `tailStart`, highlights and clipping all use the installed parser's observed JavaScript UTF-16 code-unit domain.
 - Stable-boundary resolution uses one parser rule, not syntax-specific states: skip transparent `document`/`section` wrappers, take the last render block (child of the innermost last section) as tail start; it stays tail until a later sibling proves it closed. Existing Markdown-inline injection nodes move `tailStart` back to the earliest unresolved `full_reference_link`, `collapsed_reference_link` or `shortcut_link` block. Any other current last block (table/list/blockquote/fence/indented code/paragraph) is handled by the same sibling rule. Tests must distinguish a section's start from the start of the `pipe_table`/`list`/`fence` inside it.
 - `changedStart` is invalidation evidence, not cache eligibility. If it precedes cached chunks, Code regenerates the affected prefix from current highlights; `tailStart` alone defines the current closed-prefix boundary.
 - Code keeps one active update and one latest pending content. Pending append replaces older pending content; after completion one edit is computed from the last submitted content.
@@ -161,111 +161,111 @@ append -> versioned source update
 
 ## 11. Secondary and Replacement Path Inventory
 
-| Path | Classification | Decision |
-| --- | --- | --- |
-| persistent normalized buffer update | primary streaming Markdown branch | implement |
-| existing full one-shot route | existing non-streaming/non-Markdown/reset branch | preserve |
-| parser-error plain-text behavior | managed rejection -> existing Code failure commit | current source visible, callbacks untouched, `highlightingDone` resolves; no alternate parse |
-| Markdown fragment/fallback parser | forbidden alternate success path | reject |
-| `.3/.4` worker termination/replay | out of scope lifecycle path | reject |
+| Path                                | Classification                                    | Decision                                                                                     |
+| ----------------------------------- | ------------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| persistent normalized buffer update | primary streaming Markdown branch                 | implement                                                                                    |
+| existing full one-shot route        | existing non-streaming/non-Markdown/reset branch  | preserve                                                                                     |
+| parser-error plain-text behavior    | managed rejection -> existing Code failure commit | current source visible, callbacks untouched, `highlightingDone` resolves; no alternate parse |
+| Markdown fragment/fallback parser   | forbidden alternate success path                  | reject                                                                                       |
+| `.3/.4` worker termination/replay   | out of scope lifecycle path                       | reject                                                                                       |
 
 New alternate success-path budget: zero.
 
 ## 12. Workaround Deletion and Replacement
 
-| Existing workaround | Approved replacement |
-| --- | --- |
-| full one-shot per dirty render | one persistent update plus latest pending content |
-| snapshot only discards old completed results | client version gate before Code commit |
+| Existing workaround                          | Approved replacement                                         |
+| -------------------------------------------- | ------------------------------------------------------------ |
+| full one-shot per dirty render               | one persistent update plus latest pending content            |
+| snapshot only discards old completed results | client version gate before Code commit                       |
 | full main-thread chunk conversion each frame | parser-qualified prefix chunks plus complete tail conversion |
 
 ## 13. Forward Traceability
 
-| Requirement | Production path | Planned file/change | Behavioral test |
-| --- | --- | --- | --- |
-| INV-01/03 | parser tailStart + prefix/tail render | `Code.ts`, `parser.worker.ts` | boundary + table/list/fence/reference differential |
-| INV-02/04 | versioned response + active/latest gate | `client.ts`, `types.ts`, `Code.ts` | delayed version test |
-| INV-04/05 | callback-safe chunks + explicit owner/grammar/error transitions | `Code.ts` | Reasoning/onHighlight/onChunks + filetype/client + managed rejection tests |
-| INV-06/07 | cleanup + normalized code-unit edit/source clipping | `Code.ts`, `client.ts`, `parser.worker.ts` | closing fence/cleanup/Unicode/conceal |
-| INV-08 | sequential/scaling/cadence renderer harness | `.temp/testing/streaming-markdown-buffer-benchmark.ts` | output/speed/work scaling/catch-up |
+| Requirement | Production path                                                 | Planned file/change                                    | Behavioral test                                                            |
+| ----------- | --------------------------------------------------------------- | ------------------------------------------------------ | -------------------------------------------------------------------------- |
+| INV-01/03   | parser tailStart + prefix/tail render                           | `Code.ts`, `parser.worker.ts`                          | boundary + table/list/fence/reference differential                         |
+| INV-02/04   | versioned response + active/latest gate                         | `client.ts`, `types.ts`, `Code.ts`                     | delayed version test                                                       |
+| INV-04/05   | callback-safe chunks + explicit owner/grammar/error transitions | `Code.ts`                                              | Reasoning/onHighlight/onChunks + filetype/client + managed rejection tests |
+| INV-06/07   | cleanup + normalized code-unit edit/source clipping             | `Code.ts`, `client.ts`, `parser.worker.ts`             | closing fence/cleanup/Unicode/conceal                                      |
+| INV-08      | sequential/scaling/cadence renderer harness                     | `.temp/testing/streaming-markdown-buffer-benchmark.ts` | output/speed/work scaling/catch-up                                         |
 
 ## 14. Reverse Traceability
 
-| Concept | Requirement | Why existing logic is insufficient |
-| --- | --- | --- |
-| managed buffer handle | INV-02/03 | baseline has only stateless full one-shot |
-| versioned update response | INV-04 | existing buffer API is event-only |
-| parser-owned tailStart | INV-03 | changed ranges do not classify the current last block as stable/unstable |
-| code-unit source/parse normalization map | INV-01/07 | persistent path otherwise differs from installed parser/full parse |
-| prefix chunk cache | INV-01/03 | current Code converts and commits the whole document |
-| active/latest gate | INV-02 | current client accepts every one-shot request |
-| callback-safe cache composition | INV-03/05 | actual Reasoning onChunks must keep prefix conversion reuse and full callback input |
-| explicit buffer ownership transfer | INV-04/06 | reset cannot change grammar/client and old owner must release resources |
+| Concept                                  | Requirement | Why existing logic is insufficient                                                  |
+| ---------------------------------------- | ----------- | ----------------------------------------------------------------------------------- |
+| managed buffer handle                    | INV-02/03   | baseline has only stateless full one-shot                                           |
+| versioned update response                | INV-04      | existing buffer API is event-only                                                   |
+| parser-owned tailStart                   | INV-03      | changed ranges do not classify the current last block as stable/unstable            |
+| code-unit source/parse normalization map | INV-01/07   | persistent path otherwise differs from installed parser/full parse                  |
+| prefix chunk cache                       | INV-01/03   | current Code converts and commits the whole document                                |
+| active/latest gate                       | INV-02      | current client accepts every one-shot request                                       |
+| callback-safe cache composition          | INV-03/05   | actual Reasoning onChunks must keep prefix conversion reuse and full callback input |
+| explicit buffer ownership transfer       | INV-04/06   | reset cannot change grammar/client and old owner must release resources             |
 
 ## 15. File-Level Change Plan
 
-| File | Responsibility | Estimate |
-| --- | --- | ---: |
-| `packages/core/src/lib/tree-sitter/types.ts` | update request/response types | 35 |
-| `packages/core/src/lib/tree-sitter/client.ts` | managed ID, awaitable update, stale response gate | 130 |
-| `packages/core/src/lib/tree-sitter/parser.worker.ts` | normalized tree update, tailStart, source clipping | 160 |
-| `packages/core/src/renderables/Code.ts` | ownership lifecycle, scheduling, callback-safe prefix/tail chunks | 350 |
-| `packages/core/src/lib/tree-sitter/client.test.ts` | protocol/normalization behavior | 110 |
-| `packages/core/src/renderables/Code.test.ts` | visible/style/boundary/callback/ownership/error behavior | 270 |
-| `packages/core/src/testing/mock-tree-sitter-client.ts` | public managed-buffer test seam if required | 60 |
-| `packages/core/package.json` | add exact script `"typecheck": "tsc --noEmit -p tsconfig.json"`; invoked only as package-local `bun typecheck` | 1 |
-| `.temp/testing/streaming-markdown-buffer-benchmark.ts` | style-sensitive sequential/scaling/independent-cadence benchmark | 245 |
+| File                                                   | Responsibility                                                                                                 | Estimate |
+| ------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------- | -------: |
+| `packages/core/src/lib/tree-sitter/types.ts`           | update request/response types                                                                                  |       35 |
+| `packages/core/src/lib/tree-sitter/client.ts`          | managed ID, awaitable update, stale response gate                                                              |      130 |
+| `packages/core/src/lib/tree-sitter/parser.worker.ts`   | normalized tree update, tailStart, source clipping                                                             |      160 |
+| `packages/core/src/renderables/Code.ts`                | ownership lifecycle, scheduling, callback-safe prefix/tail chunks                                              |      350 |
+| `packages/core/src/lib/tree-sitter/client.test.ts`     | protocol/normalization behavior                                                                                |      110 |
+| `packages/core/src/renderables/Code.test.ts`           | visible/style/boundary/callback/ownership/error behavior                                                       |      270 |
+| `packages/core/src/testing/mock-tree-sitter-client.ts` | public managed-buffer test seam if required                                                                    |       60 |
+| `packages/core/package.json`                           | add exact script `"typecheck": "tsc --noEmit -p tsconfig.json"`; invoked only as package-local `bun typecheck` |        1 |
+| `.temp/testing/streaming-markdown-buffer-benchmark.ts` | style-sensitive sequential/scaling/independent-cadence benchmark                                               |      245 |
 
 Maximum planned files: 9; estimates total 1361 lines; hard user ceilings are 12 files and 1600 lines.
 
 ## 16. TDD Behavior Slices
 
-| Order | Red behavior | Minimal green behavior |
-| ---: | --- | --- |
-| 1 | buffer append has no awaitable current-version result | add one versioned response through existing tree |
-| 2 | stale response or filetype/client transfer can use old semantics/owner | version gate plus dispose/recreate ownership transition |
-| 3 | append starts repeated full one-shots | one buffer, one active update, one latest pending content |
-| 4 | active table/list/fence/reference enters prefix or differs from full render | parser tailStart and complete current-tail render |
-| 5 | closing fence or Unicode append breaks positions/lineInfo | normalized parse text and one code-unit range domain |
-| 6 | destroy leaves managed parser buffer | existing removeBuffer cleanup |
-| 7 | arbitrary `onHighlight` range crosses the cut or cached prefix goes stale | `onHighlight` presence forces single full composition; style-sensitive full differential |
-| 8 | prefix conversion still scales with stable prefix size | public small/large stable-prefix append benchmark |
-| 9 | managed update rejection leaves old delta or calls success callback | reject-to-current-plain-text test including callback counts and highlightingDone |
-| 10 | 16ms producer creates backlog、frame/update gaps or fails to converge | independent producer/render clocks, wall-time gaps, final equality and catch-up |
+| Order | Red behavior                                                                | Minimal green behavior                                                                   |
+| ----: | --------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+|     1 | buffer append has no awaitable current-version result                       | add one versioned response through existing tree                                         |
+|     2 | stale response or filetype/client transfer can use old semantics/owner      | version gate plus dispose/recreate ownership transition                                  |
+|     3 | append starts repeated full one-shots                                       | one buffer, one active update, one latest pending content                                |
+|     4 | active table/list/fence/reference enters prefix or differs from full render | parser tailStart and complete current-tail render                                        |
+|     5 | closing fence or Unicode append breaks positions/lineInfo                   | normalized parse text and one code-unit range domain                                     |
+|     6 | destroy leaves managed parser buffer                                        | existing removeBuffer cleanup                                                            |
+|     7 | arbitrary `onHighlight` range crosses the cut or cached prefix goes stale   | `onHighlight` presence forces single full composition; style-sensitive full differential |
+|     8 | prefix conversion still scales with stable prefix size                      | public small/large stable-prefix append benchmark                                        |
+|     9 | managed update rejection leaves old delta or calls success callback         | reject-to-current-plain-text test including callback counts and highlightingDone         |
+|    10 | 16ms producer creates backlog、frame/update gaps or fails to converge       | independent producer/render clocks, wall-time gaps, final equality and catch-up          |
 
 Expected values are independent full-render `plainText`, public identity-`onChunks` style snapshots, `lineInfo`, callback inputs and benchmark timing/convergence. Style snapshots include chunk text, fg/bg, attributes, links and conceal output. Work reduction is proven by public scaling, not private fields, production telemetry or parser call-count assertions; callback counts only define failed-snapshot compatibility.
 
 ## 17. Chinese Comment Budget
 
-| Metric | Estimate | Method |
-| --- | ---: | --- |
-| Effective changed lines `E` | 950 | excludes imports, formatting and benchmark-only output |
-| Required qualifying Chinese comments `C` | 143 | `ceil(950 * 0.15)` |
+| Metric                                   | Estimate | Method                                                 |
+| ---------------------------------------- | -------: | ------------------------------------------------------ |
+| Effective changed lines `E`              |      950 | excludes imports, formatting and benchmark-only output |
+| Required qualifying Chinese comments `C` |      143 | `ceil(950 * 0.15)`                                     |
 
 Distribute rationale comments near code-unit offsets, parser tail boundary, callback composition, version/ownership transfer, cleanup and test intent. Comments must explain why, not restate flow.
 
 ## 18. Verification
 
-| Command | Directory | Evidence |
-| --- | --- | --- |
-| `bun test ./src/lib/tree-sitter/client.test.ts` | `thirdparty/opentui/packages/core` | buffer protocol |
-| `bun test ./src/renderables/Code.test.ts` | same | Code behavior |
-| `bun test` | same | package regression |
-| `bun typecheck` | same | executes planned `tsc --noEmit -p tsconfig.json` package script against `packages/core/tsconfig.json` |
-| `bun ../../.temp/testing/streaming-markdown-buffer-benchmark.ts --flushes=240` | same | R62 实测：candidate 15.91ms average / 34.10ms p95 vs reference 28.28/62.05（total -44%、p95 -45%、1.78x）；scaling candidate1000 507ms vs baseline1000 703ms（1.39x）；cadence catch-up 28.65ms vs baseline 193.63ms、stream 1.06x、converged、text/style 0 mismatch、normal exit。审计独立复现：11.31ms average、1.78x、1.42x scaling、catch-up 26.2ms vs 73.8ms，全部验收通过 |
-| `bun run build` when required | `thirdparty/opentui` | package closure |
+| Command                                                                        | Directory                          | Evidence                                                                                                                                                                                                                                                                                                                                                                        |
+| ------------------------------------------------------------------------------ | ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `bun test ./src/lib/tree-sitter/client.test.ts`                                | `thirdparty/opentui/packages/core` | buffer protocol                                                                                                                                                                                                                                                                                                                                                                 |
+| `bun test ./src/renderables/Code.test.ts`                                      | same                               | Code behavior                                                                                                                                                                                                                                                                                                                                                                   |
+| `bun test`                                                                     | same                               | package regression                                                                                                                                                                                                                                                                                                                                                              |
+| `bun typecheck`                                                                | same                               | executes planned `tsc --noEmit -p tsconfig.json` package script against `packages/core/tsconfig.json`                                                                                                                                                                                                                                                                           |
+| `bun ../../.temp/testing/streaming-markdown-buffer-benchmark.ts --flushes=240` | same                               | R62 实测：candidate 15.91ms average / 34.10ms p95 vs reference 28.28/62.05（total -44%、p95 -45%、1.78x）；scaling candidate1000 507ms vs baseline1000 703ms（1.39x）；cadence catch-up 28.65ms vs baseline 193.63ms、stream 1.06x、converged、text/style 0 mismatch、normal exit。审计独立复现：11.31ms average、1.78x、1.42x scaling、catch-up 26.2ms vs 73.8ms，全部验收通过 |
+| `bun run build` when required                                                  | `thirdparty/opentui`               | package closure                                                                                                                                                                                                                                                                                                                                                                 |
 
 Acceptance requires all 240 sequential frames to match full-render plain text and serialized public chunks, then exit normally. Persistent mode must reduce sequential total by >=30%, p95 by >=20% and keep average <=16.7ms. Stable-prefix scaling is judged like-for-like in the same run: at 1000 paragraphs the candidate append median must be at least 1.25x faster than the baseline append median, and both growth slopes (200->1000) are reported; the native full-commit floor makes a small/large absolute ratio meaningless. Cadence is judged against the co-run baseline algorithm rather than machine-dependent absolutes: the candidate must converge to full-render output, stream wall time must be <=1.1x baseline, catch-up must be <=100ms and <=0.5x baseline catch-up, and producer/frame/visible-update gaps are reported for both.
 
 ## 19. Diff Budget
 
-| Metric | Hard budget |
-| --- | ---: |
-| files modified/added | <= 12 |
-| production/test code | <= 1600 lines |
-| plan document | <= 600 lines |
-| new alternate success paths | 0 |
-| native/Zig files | 0 |
+| Metric                      |   Hard budget |
+| --------------------------- | ------------: |
+| files modified/added        |         <= 12 |
+| production/test code        | <= 1600 lines |
+| plan document               |  <= 600 lines |
+| new alternate success paths |             0 |
+| native/Zig files            |             0 |
 
 ## 20. Real Risks and Open Decisions
 
@@ -291,16 +291,16 @@ The independent auditor must read this exact R62 file, the original requirement,
 
 ## 22. Plan Audit Record
 
-| Round | Revision | Full scope | Blocking findings | Non-blocking findings | Result | Invocation |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | R55 | yes | B-01..B-05 | N-01..N-03 | BLOCK | `ses_046d62478ffeqWFpEgn2ZEB0l7` |
-| 2 | R56 | yes | B-01..B-05 | N-01..N-02 | BLOCK | `ses_046c7df60ffeyY85xixbaggmjn` |
-| 3 | R57 | yes | B-01 | N-01 | BLOCK | `ses_046bac6bfffe5K9ckaxgvJKE6L` |
-| 4 | R58 | yes | B-01..B-02 | none | BLOCK | `ses_046b11a3cffeH1H2OFaEJUgcJy` |
-| 5 | R59 | yes | B-01 | N-01..N-03 | BLOCK | `ses_046a95fd0ffea0dK6p1huj80Hy` |
-| 6 | R60 | yes | B-01..B-02 | N-01..N-02 | BLOCK | `ses_046a60a98ffeiWUcZF1nP9si0n` |
-| 7 | R61 | yes | none（No blocking findings） | N-01..N-06 | APPROVE | `ses_04540b755ffep1S52rotfQM0x2` |
-| 8 | R62 | yes | none（No blocking findings） | N-01..N-04 | APPROVE | `ses_044eb9523ffe4uJc46e4jNsftl` |
+| Round | Revision | Full scope | Blocking findings            | Non-blocking findings | Result  | Invocation                       |
+| ----- | -------- | ---------- | ---------------------------- | --------------------- | ------- | -------------------------------- |
+| 1     | R55      | yes        | B-01..B-05                   | N-01..N-03            | BLOCK   | `ses_046d62478ffeqWFpEgn2ZEB0l7` |
+| 2     | R56      | yes        | B-01..B-05                   | N-01..N-02            | BLOCK   | `ses_046c7df60ffeyY85xixbaggmjn` |
+| 3     | R57      | yes        | B-01                         | N-01                  | BLOCK   | `ses_046bac6bfffe5K9ckaxgvJKE6L` |
+| 4     | R58      | yes        | B-01..B-02                   | none                  | BLOCK   | `ses_046b11a3cffeH1H2OFaEJUgcJy` |
+| 5     | R59      | yes        | B-01                         | N-01..N-03            | BLOCK   | `ses_046a95fd0ffea0dK6p1huj80Hy` |
+| 6     | R60      | yes        | B-01..B-02                   | N-01..N-02            | BLOCK   | `ses_046a60a98ffeiWUcZF1nP9si0n` |
+| 7     | R61      | yes        | none（No blocking findings） | N-01..N-06            | APPROVE | `ses_04540b755ffep1S52rotfQM0x2` |
+| 8     | R62      | yes        | none（No blocking findings） | N-01..N-04            | APPROVE | `ses_044eb9523ffe4uJc46e4jNsftl` |
 
 ## 23. Open Decisions Resolution
 
@@ -313,17 +313,17 @@ The independent auditor must read this exact R62 file, the original requirement,
 
 ### Changed files（vs rollback baseline `93098b518`，11 files，0 Zig/native）
 
-| File | +/- lines | Content |
-| --- | ---: | --- |
-| `packages/core/src/lib/tree-sitter/types.ts` | +29 | `StreamingUpdateResult`、`STREAMING_UPDATE/_RESPONSE` 协议 |
-| `packages/core/src/lib/tree-sitter/client.ts` | +74 | 负数 ID 段 `createStreamingBuffer`（空初始化）、awaitable `updateStreamingBuffer`（client 自增 version + stale 标记）、`removeStreamingBuffer` 复用 `removeBuffer` |
-| `packages/core/src/lib/tree-sitter/parser.worker.ts` | +255 | `handleStreamingUpdate`（closing-fence normalize、code-unit diff、增量 parse、`lastRenderBlockStart` 透明 section 边界、引用状态增量维护、`capturesFrom` 逐 block 查询、injection 范围裁剪、one-shot 逐位一致 highlights） |
-| `packages/core/src/renderables/Code.ts` | +208 | dispatcher（streaming+markdown → persistent）、buffer 生命周期（filetype/client/streaming/destroy 释放）、active/latest 合并 loop、prefix chunk cache + 完整 tail 转换、onHighlight 全量 composition、onChunks 全量输入、managed rejection → plain text 兼容 |
-| `packages/core/src/lib/tree-sitter/client.test.ts` | +38 | 2 个协议测试（版本化结果+tail 边界、closing-fence one-shot 逐位一致） |
-| `packages/core/src/renderables/Code.test.ts` | +436 | 10 个行为测试（buffer 复用/rewrite、filetype/client 转移、destroy 释放、stale 不提交、rejection 合同、onChunks 全量、文本+样式差分、onHighlight 全量输入、迟到引用定义差分） |
-| `packages/core/src/testing/mock-tree-sitter-client.ts` | +67 | streaming buffer seam（创建/释放记录、可控挂起、stale 复现、autoResolve） |
-| `packages/core/package.json` | +1（本次） | `"typecheck": "tsc --noEmit -p tsconfig.json"`（版本号行为 .4 既有元数据，非本次修改） |
-| `.temp/testing/streaming-markdown-buffer-benchmark.ts` | 诊断工具，不计入 E | sequential 等价/scaling/cadence 三阶段 harness |
+| File                                                   |          +/- lines | Content                                                                                                                                                                                                                                                      |
+| ------------------------------------------------------ | -----------------: | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `packages/core/src/lib/tree-sitter/types.ts`           |                +29 | `StreamingUpdateResult`、`STREAMING_UPDATE/_RESPONSE` 协议                                                                                                                                                                                                   |
+| `packages/core/src/lib/tree-sitter/client.ts`          |                +74 | 负数 ID 段 `createStreamingBuffer`（空初始化）、awaitable `updateStreamingBuffer`（client 自增 version + stale 标记）、`removeStreamingBuffer` 复用 `removeBuffer`                                                                                           |
+| `packages/core/src/lib/tree-sitter/parser.worker.ts`   |               +255 | `handleStreamingUpdate`（closing-fence normalize、code-unit diff、增量 parse、`lastRenderBlockStart` 透明 section 边界、引用状态增量维护、`capturesFrom` 逐 block 查询、injection 范围裁剪、one-shot 逐位一致 highlights）                                   |
+| `packages/core/src/renderables/Code.ts`                |               +208 | dispatcher（streaming+markdown → persistent）、buffer 生命周期（filetype/client/streaming/destroy 释放）、active/latest 合并 loop、prefix chunk cache + 完整 tail 转换、onHighlight 全量 composition、onChunks 全量输入、managed rejection → plain text 兼容 |
+| `packages/core/src/lib/tree-sitter/client.test.ts`     |                +38 | 2 个协议测试（版本化结果+tail 边界、closing-fence one-shot 逐位一致）                                                                                                                                                                                        |
+| `packages/core/src/renderables/Code.test.ts`           |               +436 | 10 个行为测试（buffer 复用/rewrite、filetype/client 转移、destroy 释放、stale 不提交、rejection 合同、onChunks 全量、文本+样式差分、onHighlight 全量输入、迟到引用定义差分）                                                                                 |
+| `packages/core/src/testing/mock-tree-sitter-client.ts` |                +67 | streaming buffer seam（创建/释放记录、可控挂起、stale 复现、autoResolve）                                                                                                                                                                                    |
+| `packages/core/package.json`                           |         +1（本次） | `"typecheck": "tsc --noEmit -p tsconfig.json"`（版本号行为 .4 既有元数据，非本次修改）                                                                                                                                                                       |
+| `.temp/testing/streaming-markdown-buffer-benchmark.ts` | 诊断工具，不计入 E | sequential 等价/scaling/cadence 三阶段 harness                                                                                                                                                                                                               |
 
 ### Red-green evidence
 
@@ -334,11 +334,11 @@ The independent auditor must read this exact R62 file, the original requirement,
 
 ### Verification（目录均为 `thirdparty/opentui/packages/core`）
 
-| Command | Result |
-| --- | --- |
-| `bun test ./src/renderables/Code.test.ts` | 70 pass / 1 skip / 0 fail（baseline 60+1，新增 10） |
-| `bun test ./src/lib/tree-sitter/client.test.ts` | 50 pass / 0 fail（baseline 47+1 flaky timeout，现全绿） |
-| `bun typecheck` | 变更文件 0 错误；全量 17114 错误均为 baseline 既有（yoga-upstream/dev/native Pointer），不属于本任务范围 |
+| Command                                                                        | Result                                                                                                                                                                                                                                                       |
+| ------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `bun test ./src/renderables/Code.test.ts`                                      | 70 pass / 1 skip / 0 fail（baseline 60+1，新增 10）                                                                                                                                                                                                          |
+| `bun test ./src/lib/tree-sitter/client.test.ts`                                | 50 pass / 0 fail（baseline 47+1 flaky timeout，现全绿）                                                                                                                                                                                                      |
+| `bun typecheck`                                                                | 变更文件 0 错误；全量 17114 错误均为 baseline 既有（yoga-upstream/dev/native Pointer），不属于本任务范围                                                                                                                                                     |
 | `bun ../../.temp/testing/streaming-markdown-buffer-benchmark.ts --flushes=240` | 三轮：avg 8.67-15.91ms（≤16.7 ✓）；total -36%~-57%（≥30% ✓）；p95 -39%~-52%（≥20% ✓）；text/style 0 mismatch ✓；scaling large 1.09-1.42x（审计复现 1.42x ✓）；cadence converged、catch-up 25.6-34ms（≤100ms ✓）、stream 0.98-1.06x（≤1.1x ✓）、normal exit ✓ |
 
 ### Path inventory（与批准一致）
@@ -370,6 +370,7 @@ The independent auditor must read this exact R62 file, the original requirement,
 - B-01（BLOCK，INV-05）：新 dispatcher 使 Markdown 段落块走 persistent seam，4 个既有测试仍用 one-shot mock seam（`isHighlighting()`/`resolveAllHighlightOnce()`/`highlightOnce` override）导致 package 回归 4 fail。修复：迁移这 4 个测试的 fixture 到 persistent seam（`streamingAutoResolve=false` + `pendingStreamingUpdates()` + `resolveAllStreamingUpdates()`；错误注入点从 `highlightOnce` 换成 `updateStreamingBuffer`），行为断言逐字保留；非 markdown fence 块继续用 one-shot seam，双 seam 并行放行。
 - 迁移过程发现 mock 缺省 `tailStart: content.length` 违反“最后一个 render block 始终属于 tail”不变量（会把陈旧文本认证进前缀缓存），修正为 `tailStart: 0` 并同步两个 handler；生产 worker 本就不违反该不变量。
 - rework 后验证：`bun test` 全量 4992 pass / 23 skip / 0 fail（5015 tests, 167 files）；benchmark avg 9.33ms / 2.16x / p95 -39% / largeImprovement 1.44x / catch-up 23.0ms vs 65.6ms（0.35x）/ stream 0.995x / 0 mismatch / converged；`E=1228`、`C=189`、`required=185`、`C/E=15.4%`。
+
 ### Implementation audit round 3 rework（`ses_0443e8441ffeUSCk8MFxk8dDhO`）
 
 - B-01（BLOCK，INV-01/05）：在途裁剪响应遇上样式/回调 setter 失效窗口时，提交侧会用残缺 highlights 重建前缀缓存，前缀高亮在流的剩余生命周期内永久丢失。修复：`_cacheGeneration` 失效代数——syntaxStyle/conceal/baseHighlight/onHighlight setter 与 release 路径递增；请求时捕获，update 返回后与 commit 内每个 await 点后校验，不匹配按 stale 丢弃，由 dirty 标志驱动 cacheEnd=0 全量重取。新增 red 行为测试（样式切换落在在途窗口 → 前缀最终以新样式着色）。。
@@ -382,9 +383,9 @@ The independent auditor must read this exact R62 file, the original requirement,
 
 ## 25. Implementation Audit Record
 
-| Round | Plan revision | Full original scope | Blocking findings | Non-blocking findings | Result | Invocation |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | R62 | yes | B-01 | N-01..N-04 | BLOCK | `ses_044adb25dffedCy4s8YTD9XHaZ` |
-| 2 | R62 | yes | B-01 | N-01..N-02 | BLOCK | `ses_044707f21ffeeIZNS7l20l8rNC` |
-| 3 | R62 | yes | B-01 | N-01..N-03 | BLOCK | `ses_0443e8441ffeUSCk8MFxk8dDhO` |
-| 4 | R62 | yes | none（No blocking findings） | N-01..N-04 | APPROVE | `ses_044159240ffegcYUocJVjaQwG8` |
+| Round | Plan revision | Full original scope | Blocking findings            | Non-blocking findings | Result  | Invocation                       |
+| ----- | ------------- | ------------------- | ---------------------------- | --------------------- | ------- | -------------------------------- |
+| 1     | R62           | yes                 | B-01                         | N-01..N-04            | BLOCK   | `ses_044adb25dffedCy4s8YTD9XHaZ` |
+| 2     | R62           | yes                 | B-01                         | N-01..N-02            | BLOCK   | `ses_044707f21ffeeIZNS7l20l8rNC` |
+| 3     | R62           | yes                 | B-01                         | N-01..N-03            | BLOCK   | `ses_0443e8441ffeUSCk8MFxk8dDhO` |
+| 4     | R62           | yes                 | none（No blocking findings） | N-01..N-04            | APPROVE | `ses_044159240ffegcYUocJVjaQwG8` |

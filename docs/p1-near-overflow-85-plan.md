@@ -2,14 +2,14 @@
 
 ## 1. 已阅读的文件
 
-| 文件 | 行范围 | 为什么相关 |
-|---|---|---|
-| `src/session/prompt.ts` L2091-2095 | `nearOverflowNotified` 声明 + 注释 | 标志生命周期 |
-| `src/session/prompt.ts` L2137 | `const model = yield* getModel(...)` | model 每步重新获取——模型切换在同一 loop 内发生 |
-| `src/session/prompt.ts` L2342-2347 | `estimatedInput` 计算 | 使用当前 model 估算 |
-| `src/session/prompt.ts` L2367-2371 | compaction 后重置 `nearOverflowNotified = false` | 当前唯一的重置路径 |
-| `src/session/prompt.ts` L2373-2389 | near-overflow 检查 + 注入 | 80% 阈值 + `nearOverflowNotified` 防重复 |
-| `src/session/overflow.ts` L9-20 | `usable()` 函数 | 基于当前 model 的 context limit 计算 usable tokens |
+| 文件                               | 行范围                                           | 为什么相关                                         |
+| ---------------------------------- | ------------------------------------------------ | -------------------------------------------------- |
+| `src/session/prompt.ts` L2091-2095 | `nearOverflowNotified` 声明 + 注释               | 标志生命周期                                       |
+| `src/session/prompt.ts` L2137      | `const model = yield* getModel(...)`             | model 每步重新获取——模型切换在同一 loop 内发生     |
+| `src/session/prompt.ts` L2342-2347 | `estimatedInput` 计算                            | 使用当前 model 估算                                |
+| `src/session/prompt.ts` L2367-2371 | compaction 后重置 `nearOverflowNotified = false` | 当前唯一的重置路径                                 |
+| `src/session/prompt.ts` L2373-2389 | near-overflow 检查 + 注入                        | 80% 阈值 + `nearOverflowNotified` 防重复           |
+| `src/session/overflow.ts` L9-20    | `usable()` 函数                                  | 基于当前 model 的 context limit 计算 usable tokens |
 
 ## 2. 当前问题
 
@@ -35,14 +35,15 @@
 // 提示是 ephemeral 的（仅存在于 messages 数组，不持久化到 DB），
 // 不会泄漏给 compaction 模型。不限制工具使用、不退化回复质量。
 if (!isLastStep) {
-  const usableTokens = usable({ cfg: yield* config.get(), model })
+  const usableTokens = usable({ cfg: yield * config.get(), model })
   // threshold=0 时（无上下文上限模型）永远不触发注入，但 else 重置仍生效
   const threshold = usableTokens > 0 ? Math.floor(usableTokens * 0.85) : 0
   if (usableTokens > 0 && estimatedInput >= threshold) {
     if (!nearOverflowNotified) {
       messages.push({
         role: "user" as const,
-        content: "Context is approaching the model's limit. To avoid context compaction degrading task quality, prefer targeted reads (small offset/limit) over full-file reads, and narrow grep patterns over broad searches. Do not reduce response quality. If work is still in progress, ignore this and continue per user instructions.",
+        content:
+          "Context is approaching the model's limit. To avoid context compaction degrading task quality, prefer targeted reads (small offset/limit) over full-file reads, and narrow grep patterns over broad searches. Do not reduce response quality. If work is still in progress, ignore this and continue per user instructions.",
       })
       nearOverflowNotified = true
     }
@@ -59,13 +60,13 @@ if (!isLastStep) {
 
 ## 4. 行为分析
 
-| 场景 | 当前行为 | 修改后行为 |
-|---|---|---|
-| 同模型，上下文增长到 80%+ | 提示注入，标志 true | 提示注入（85%），标志 true |
-| 同模型，上下文持续 80%+ | 不重复注入（标志 true） | 不重复注入（标志 true） |
-| 同模型，compaction 后 | 标志重置 false | 标志重置 false（compaction + 新逻辑双重保障） |
-| 小模型 80%+ → 切大模型 | 标志仍 true，后续不再提示 | 标志重置 false（10% < 85%），后续大模型 85% 时重新提示 |
-| 大模型 80%+ → 切小模型 | 标志仍 true，小模型不提示 | 若上下文 > 小模型 100% → compaction 先触发（L2353），不到达 near-overflow 块；若 85%-100% → 标志仍 true，不重复注入（正确，提示已给过） |
+| 场景                      | 当前行为                  | 修改后行为                                                                                                                              |
+| ------------------------- | ------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| 同模型，上下文增长到 80%+ | 提示注入，标志 true       | 提示注入（85%），标志 true                                                                                                              |
+| 同模型，上下文持续 80%+   | 不重复注入（标志 true）   | 不重复注入（标志 true）                                                                                                                 |
+| 同模型，compaction 后     | 标志重置 false            | 标志重置 false（compaction + 新逻辑双重保障）                                                                                           |
+| 小模型 80%+ → 切大模型    | 标志仍 true，后续不再提示 | 标志重置 false（10% < 85%），后续大模型 85% 时重新提示                                                                                  |
+| 大模型 80%+ → 切小模型    | 标志仍 true，小模型不提示 | 若上下文 > 小模型 100% → compaction 先触发（L2353），不到达 near-overflow 块；若 85%-100% → 标志仍 true，不重复注入（正确，提示已给过） |
 
 ## 5. 不修改的部分
 
@@ -76,8 +77,8 @@ if (!isLastStep) {
 
 ## 6. 预估改动
 
-| 文件 | 增/删 |
-|---|---|
+| 文件                    | 增/删    |
+| ----------------------- | -------- |
 | `src/session/prompt.ts` | +10 / -6 |
 
 无新增文件、无新增依赖、无测试变更（feature 无现有测试）。

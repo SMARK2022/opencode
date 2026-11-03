@@ -159,8 +159,20 @@ describe("tool.registry", () => {
       const ids = yield* registry.ids()
 
       expect(ids).not.toContain("permission_review_decision")
-      expect((yield* registry.tools({ providerID: ProviderV2.ID.opencode, modelID: ModelV2.ID.make("test"), agent: build })).map((tool) => tool.id)).not.toContain("permission_review_decision")
-      expect((yield* registry.tools({ providerID: ProviderV2.ID.opencode, modelID: ModelV2.ID.make("test"), agent: reviewer })).map((tool) => tool.id)).toContain("permission_review_decision")
+      expect(
+        (yield* registry.tools({
+          providerID: ProviderV2.ID.opencode,
+          modelID: ModelV2.ID.make("test"),
+          agent: build,
+        })).map((tool) => tool.id),
+      ).not.toContain("permission_review_decision")
+      expect(
+        (yield* registry.tools({
+          providerID: ProviderV2.ID.opencode,
+          modelID: ModelV2.ID.make("test"),
+          agent: reviewer,
+        })).map((tool) => tool.id),
+      ).toContain("permission_review_decision")
     }),
   )
 

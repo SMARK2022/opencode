@@ -92,7 +92,7 @@ const JSON_FALLBACK_SOURCE = "json_fallback"
 // that produced neither a decision tool call nor valid JSON fallback is hidden
 // and retried with a protocol nudge.
 const REVIEWER_DECISION_PROTOCOL_ERROR = "reviewer did not call permission_review_decision"
-  // #227：协议错误哨兵——JSON 回退失败与工具缺失共用同一错误码触发重试
+// #227：协议错误哨兵——JSON 回退失败与工具缺失共用同一错误码触发重试
 // Keep this string aligned with MessageV2.Hidden. It names the audit workflow
 // that owns these hidden child-session turns and prevents future hidden-message
 // consumers from confusing protocol retry cleanup with undo or session repair.
@@ -103,7 +103,7 @@ const TIME_BUDGET_RETRY_USER_ITEM = PermissionReviewerPrompt.TIME_BUDGET_RETRY_U
 // reviewer 总尝试次数：1 初始 + 2 重试。协议错误与超时共用该预算。
 const MAX_REVIEWER_ATTEMPTS = 3
 const PROTOCOL_RETRY_USER_ITEM = {
-// #227：协议 nudge 仅追加到 user items——重试时保持证据与请求上下文不变，只修复提交格式
+  // #227：协议 nudge 仅追加到 user items——重试时保持证据与请求上下文不变，只修复提交格式
   type: "text" as const,
   // 重试仍重建同一证据，nudge明确排除反问/执行承诺，保留source允许的严格JSON兼容入口。
   text: PermissionReviewerPrompt.PROTOCOL_RETRY_TEXT,
@@ -166,10 +166,12 @@ export const layer = Layer.effect(
             ? yield* provider.getModel(
                 Provider.parseModel(autoReview.model).providerID,
                 Provider.parseModel(autoReview.model).modelID,
-                )
+              )
             : yield* resolveImplicitReviewerModel(input.sessionID ? SessionID.make(input.sessionID) : undefined)
           // #208：获取或创建 reviewer 子会话——复用同一 transcript 追加请求/决策轮次
-          const reviewerSession = input.sessionID ? yield* getReviewerSession(SessionID.make(input.sessionID), model) : undefined
+          const reviewerSession = input.sessionID
+            ? yield* getReviewerSession(SessionID.make(input.sessionID), model)
+            : undefined
           // 请求options与持久化审计名称使用同一次档位选择。
           const effortVariant = resolveReviewerVariant(model, autoReview?.effort)
           // #209：标记工具状态为 reviewing 并附带 reviewer 子会话 ID——UI 可导航到 reviewer 子会话查看完整推理
@@ -185,25 +187,33 @@ export const layer = Layer.effect(
                 Effect.provideService(Database.Service, database),
                 Effect.map(([snapshot, page]) => {
                   const transcript = PermissionReviewerTranscript.fromEvidence({ snapshot, window: page.items })
-                  return { ...transcript, window: { ...transcript.window, truncated: transcript.window.truncated || page.more } }
+                  return {
+                    ...transcript,
+                    window: { ...transcript.window, truncated: transcript.window.truncated || page.more },
+                  }
                 }),
-                Effect.catch(() => Effect.succeed({
-                  snapshot: { entries: [], userOmitted: false, decisionsOmitted: false, emptyUserEvidence: true },
-                  window: { entries: [], truncated: false, entryTruncated: false },
-                } satisfies PermissionReviewerPrompt.ReviewerTranscript)),
+                Effect.catch(() =>
+                  Effect.succeed({
+                    snapshot: { entries: [], userOmitted: false, decisionsOmitted: false, emptyUserEvidence: true },
+                    window: { entries: [], truncated: false, entryTruncated: false },
+                  } satisfies PermissionReviewerPrompt.ReviewerTranscript),
+                ),
               )
-            : { snapshot: { entries: [], userOmitted: false, decisionsOmitted: false, emptyUserEvidence: true }, window: { entries: [], truncated: false, entryTruncated: false } }
+            : {
+                snapshot: { entries: [], userOmitted: false, decisionsOmitted: false, emptyUserEvidence: true },
+                window: { entries: [], truncated: false, entryTruncated: false },
+              }
           // #209：在子会话中记录 reviewer 请求——metadata 标记防止被误认为人类授权，但保留可检查性
           const system = PermissionReviewerPrompt.buildSystemPrompt(tenantPolicy, "tool")
           const userItems = PermissionReviewerPrompt.buildUserPromptItems(transcript, request, input.precheck.reason)
-    // #227：buildMessages 统一拼装 system+userItems——重试时仅追加协议 nudge 其余不变
+          // #227：buildMessages 统一拼装 system+userItems——重试时仅追加协议 nudge 其余不变
           const messages = buildMessages({ system, userItems })
           function runReviewerAttempt(messages: readonly ModelMessage[], hideProtocolFailure: boolean) {
-// #227：hideProtocolFailure=true 时协议错误触发隐藏+重试；第二次尝试传 false 不再隐藏
+            // #227：hideProtocolFailure=true 时协议错误触发隐藏+重试；第二次尝试传 false 不再隐藏
             return Effect.gen(function* () {
               const reviewerUser = reviewerSession
-// #227：先落盘 synthetic reviewer 请求，重试时才能按 requestID 隐藏首次失败尝试
-                ? yield* recordReviewerRequest({
+                ? // #227：先落盘 synthetic reviewer 请求，重试时才能按 requestID 隐藏首次失败尝试
+                  yield* recordReviewerRequest({
                     session: reviewerSession,
                     model,
                     reviewID: input.reviewID,
@@ -216,21 +226,26 @@ export const layer = Layer.effect(
                 model,
                 // #214：reviewID 从父工具 autoReview metadata 传入——稳定 join key
                 reviewID: input.reviewID,
-          // #209：streamText + permission_review_decision tool——流式持久化 reasoning/text/tool part，替代一次性 generateObject 黑盒
-// #227：reviewer 用流式事件持久化 part——推理/文本/工具分片随 stream 实时落盘，替代一次性拼接
-            // #214：reviewID 透传到 reviewer agent——最终决策 part 需 mirror 此 ID
+                // #209：streamText + permission_review_decision tool——流式持久化 reasoning/text/tool part，替代一次性 generateObject 黑盒
+                // #227：reviewer 用流式事件持久化 part——推理/文本/工具分片随 stream 实时落盘，替代一次性拼接
+                // #214：reviewID 透传到 reviewer agent——最终决策 part 需 mirror 此 ID
                 parentID: reviewerUser?.id,
                 messages,
                 effortVariant,
               }).pipe(
                 Effect.tapError((error) => {
-// #227：协议失败才隐藏——provider/schema 等其他错误保持可见，避免掩盖真实失败
-    // #227：隐藏前置条件齐全才隐藏——缺 reviewer 会话或非协议错误时静默跳过
-                  if (!hideProtocolFailure || !reviewerSession || !reviewerUser || !isReviewerDecisionProtocolError(error)) {
+                  // #227：协议失败才隐藏——provider/schema 等其他错误保持可见，避免掩盖真实失败
+                  // #227：隐藏前置条件齐全才隐藏——缺 reviewer 会话或非协议错误时静默跳过
+                  if (
+                    !hideProtocolFailure ||
+                    !reviewerSession ||
+                    !reviewerUser ||
+                    !isReviewerDecisionProtocolError(error)
+                  ) {
                     return Effect.void
                   }
                   return hideReviewerProtocolAttempt(session, reviewerSession.id, reviewerUser.id)
-// #227：隐藏失败尝试后重试；隐藏本身失败不阻断流程（Effect.ignore）
+                  // #227：隐藏失败尝试后重试；隐藏本身失败不阻断流程（Effect.ignore）
                 }),
               )
             }) as Effect.Effect<Schema.Schema.Type<typeof Assessment>, Error, never>
@@ -239,7 +254,11 @@ export const layer = Layer.effect(
           // 默认120秒覆盖source观测长尾；显式配置与三次尝试总数不变。
           const perAttemptTimeout = autoReview?.timeout_ms ?? 120_000
           // 显式返回注解：递归函数的返回类型无法推断（TS7023/7024）
-          const reviewerRetry = (attemptNum: number, currentMessages: readonly ModelMessage[], hideProtocolFailure: boolean): Effect.Effect<Schema.Schema.Type<typeof Assessment>, Error> =>
+          const reviewerRetry = (
+            attemptNum: number,
+            currentMessages: readonly ModelMessage[],
+            hideProtocolFailure: boolean,
+          ): Effect.Effect<Schema.Schema.Type<typeof Assessment>, Error> =>
             runReviewerAttempt(currentMessages, hideProtocolFailure).pipe(
               Effect.timeoutOrElse({
                 duration: `${perAttemptTimeout} millis`,
@@ -261,13 +280,13 @@ export const layer = Layer.effect(
           const assessment = yield* reviewerRetry(0, messages, true).pipe(
             // #198：mapError 将非 reviewer 错误包装为 RunError——provider/schema 错误统一为可处理的 fail-closed 信号
             Effect.mapError((error) =>
-// #227：非 reviewer 错误统一包装为 RunError——fail-closed 信号可被上层捕获
-    // #227：isReviewerError 保持原始错误类型——只有未知错误才包装为 RunError
+              // #227：非 reviewer 错误统一包装为 RunError——fail-closed 信号可被上层捕获
+              // #227：isReviewerError 保持原始错误类型——只有未知错误才包装为 RunError
               isReviewerError(error) ? error : new ReviewerRunError({ reason: errorMessage(error) }),
             ),
           )
           // #209：标记工具审查结果——allowed/denied 状态和 reviewer 评估详情写入工具 metadata 供 UI 渲染
-// #227：markToolReviewed 把 outcome 写回工具 metadata——UI 无需重查 reviewer 子会话
+          // #227：markToolReviewed 把 outcome 写回工具 metadata——UI 无需重查 reviewer 子会话
           yield* markToolReviewed(input, assessment)
 
           return {
@@ -304,7 +323,9 @@ export const layer = Layer.effect(
                 return yield* new ReviewerFallbackToUser({ reason: errorMessage(error) })
               }
               // #264：非 ReviewerError 的未知错误包成 ReviewerRunError——类型化错误契约不因 fallback 改造而破裂
-              return yield* Effect.fail(isReviewerError(error) ? error : new ReviewerRunError({ reason: errorMessage(error) }))
+              return yield* Effect.fail(
+                isReviewerError(error) ? error : new ReviewerRunError({ reason: errorMessage(error) }),
+              )
             }),
           ),
           // 外部取消（session cancel/compaction）不触发 handleReviewerFailure（中断
@@ -374,9 +395,9 @@ export const layer = Layer.effect(
     // 只在此处回退一次到 defaultModel，避免 stale session model 让 reviewer 永久不可用。
     function resolveModelWithFallback(candidate: { providerID: ProviderV2.ID; modelID: ModelV2.ID }) {
       return Effect.gen(function* () {
-        const small = yield* provider.getSmallModel(candidate.providerID).pipe(
-          Effect.catch(() => Effect.succeed(undefined)),
-        )
+        const small = yield* provider
+          .getSmallModel(candidate.providerID)
+          .pipe(Effect.catch(() => Effect.succeed(undefined)))
         if (small) return small
         return yield* provider.getModel(candidate.providerID, candidate.modelID).pipe(
           // 仅隐式候选的 exact model 缺失才回退；显式 auto_review.model 不经过此路径
@@ -391,21 +412,22 @@ export const layer = Layer.effect(
     }
     // [local-smark] 隐式 reviewer 模型解析结束
 
-
     // #208：获取或创建 reviewer 子会话——每父会话一个可复用的 permission-reviewer 子会话
     function getReviewerSession(parentID: SessionID, model: Provider.Model) {
-      return reviewerSessionLock(parentID).withPermits(1)(Effect.gen(function* () {
-        // #208：优先复用已有 permission-reviewer 子会话——每次审查创建新 transcript 会丢失前序请求/决策上下文
-        const existing = (yield* session.children(parentID)).find((item) => item.agent === "permission-reviewer")
-        if (existing) return existing
-        // #208：单个子会话镜像 Codex guardian trunk——后续审查追加新请求/决策轮次
-        return yield* session.create({
-          parentID,
-          title: "Auto permission review (@permission-reviewer subagent)",
-          agent: "permission-reviewer",
-          model: { providerID: model.providerID, id: model.id },
-        })
-      }))
+      return reviewerSessionLock(parentID).withPermits(1)(
+        Effect.gen(function* () {
+          // #208：优先复用已有 permission-reviewer 子会话——每次审查创建新 transcript 会丢失前序请求/决策上下文
+          const existing = (yield* session.children(parentID)).find((item) => item.agent === "permission-reviewer")
+          if (existing) return existing
+          // #208：单个子会话镜像 Codex guardian trunk——后续审查追加新请求/决策轮次
+          return yield* session.create({
+            parentID,
+            title: "Auto permission review (@permission-reviewer subagent)",
+            agent: "permission-reviewer",
+            model: { providerID: model.providerID, id: model.id },
+          })
+        }),
+      )
     }
 
     function reviewerSessionLock(parentID: SessionID) {
@@ -467,7 +489,8 @@ export const layer = Layer.effect(
       const sessionInfo = input.session
       const parentID = input.parentID
       // #209：无子会话或无 parentID 时走纯流式提取——不持久化中间 part，仅从 tool-call 事件取出 assessment
-      if (!sessionInfo || !parentID) return runReviewerStreamWithToolChoice(input.messages, input.model, undefined, input.effortVariant)
+      if (!sessionInfo || !parentID)
+        return runReviewerStreamWithToolChoice(input.messages, input.model, undefined, input.effortVariant)
       return Effect.gen(function* () {
         // #209：先创建 assistant 消息壳——流式 part 挂载到该消息，错误时也能回填 error 字段
         const message: Assistant = {
@@ -496,17 +519,34 @@ export const layer = Layer.effect(
             interrupted,
           }).pipe(
             Effect.provideService(Database.Service, database),
-            Effect.catch((cause) => Effect.logWarning("reviewer closeMessageTools failed", { cause, sessionID: sessionInfo.id, messageID: message.id })),
-            Effect.catchDefect((cause) => Effect.logWarning("reviewer closeMessageTools defect", { cause, sessionID: sessionInfo.id, messageID: message.id })),
+            Effect.catch((cause) =>
+              Effect.logWarning("reviewer closeMessageTools failed", {
+                cause,
+                sessionID: sessionInfo.id,
+                messageID: message.id,
+              }),
+            ),
+            Effect.catchDefect((cause) =>
+              Effect.logWarning("reviewer closeMessageTools defect", {
+                cause,
+                sessionID: sessionInfo.id,
+                messageID: message.id,
+              }),
+            ),
           )
-        const assessment = yield* runReviewerStreamWithToolChoice(input.messages, input.model, {
-          sessionID: sessionInfo.id,
-          messageID: message.id,
-          // #214：reviewID 透传到 stream——决策 part metadata 需 mirror 此 ID
-          reviewID: input.reviewID,
-          // [local-smark] 传入可变 message 引用，使 finish-step handler 能就地更新 tokens/cost
-          message,
-        }, input.effortVariant).pipe(
+        const assessment = yield* runReviewerStreamWithToolChoice(
+          input.messages,
+          input.model,
+          {
+            sessionID: sessionInfo.id,
+            messageID: message.id,
+            // #214：reviewID 透传到 stream——决策 part metadata 需 mirror 此 ID
+            reviewID: input.reviewID,
+            // [local-smark] 传入可变 message 引用，使 finish-step handler 能就地更新 tokens/cost
+            message,
+          },
+          input.effortVariant,
+        ).pipe(
           // #209：流式错误时仍持久化 assistant 消息的 error 字段——审计可见失败原因，而非丢失在内存中
           // #546：先闭 tool 再写 message——顺序颠倒会重现「error message + pending tool」僵尸（INV-02）。
           Effect.tapError((error) =>
@@ -523,13 +563,16 @@ export const layer = Layer.effect(
             Effect.gen(function* () {
               yield* closeMessageTools(TOOL_ABORTED_ERROR, true)
               if (message.time.completed) return
-              message.error ??= MessageV2.fromError(
-                new DOMException("Aborted", "AbortError"),
-                { providerID: input.model.providerID, aborted: true },
-              )
+              message.error ??= MessageV2.fromError(new DOMException("Aborted", "AbortError"), {
+                providerID: input.model.providerID,
+                aborted: true,
+              })
               message.time.completed = Date.now()
               yield* session.updateMessage(message)
-            }).pipe(Effect.catch(() => Effect.void), Effect.catchDefect(() => Effect.void)),
+            }).pipe(
+              Effect.catch(() => Effect.void),
+              Effect.catchDefect(() => Effect.void),
+            ),
           ),
         )
         // #209：流结束后补全 finish 与 completed——tool-calls 标记决策工具已被调用
@@ -578,7 +621,8 @@ export const layer = Layer.effect(
               effortVariant?.options,
             )
             const isOpenaiOauth =
-              isOpenaiOauthProvider(providerInfo.id, buildBaseProviderMap(cfg.provider ?? {})) && authInfo?.type === "oauth"
+              isOpenaiOauthProvider(providerInfo.id, buildBaseProviderMap(cfg.provider ?? {})) &&
+              authInfo?.type === "oauth"
             // OpenAI OAuth/Codex 后端要求顶层 instructions；普通 Responses 会把
             // system message 降成 input item，但 Codex 路径会因此 400。这里只移动
             // 可信 reviewer 指令，transcript、precheck reason 和 planned action 仍留在
@@ -696,11 +740,11 @@ export const layer = Layer.effect(
             })
             // #209：assessment 可变——由 tool-call 事件设置，流结束时检查是否为空决定 fail-closed
             let assessment: Schema.Schema.Type<typeof Assessment> | undefined
-// #227：assessment 由 tool-call 事件或文本回退填充——流结束时为空即 fail-closed
+            // #227：assessment 由 tool-call 事件或文本回退填充——流结束时为空即 fail-closed
             // #209：textPart/reasoningPart 可变——跨 start/delta/end 事件保持引用以增量更新同一 part
             let textPart: TextPart | undefined
             let textOutput = ""
-// #227：textOutput 累积所有 text-delta——JSON 回退解析需要完整文本而非首个分片
+            // #227：textOutput 累积所有 text-delta——JSON 回退解析需要完整文本而非首个分片
             let reasoningPart: ReasoningPart | undefined
             // #209：toolParts/toolInput 按 callID 索引——一个 tool-call 的 input-start/delta/end/call 共享同一 callID
             // #497：Map 只表达 attempt 对 Part identity 的 ownership，不缓存可变 state；
@@ -713,8 +757,20 @@ export const layer = Layer.effect(
             // provider 原始错误或伪装 reviewer 成功（INV-04）。
             const safeFinalize = (error: string, interrupted: boolean) =>
               finalizeOpenToolParts(error, interrupted).pipe(
-                Effect.catch((cause) => Effect.logWarning("reviewer finalizeOpenToolParts failed", { cause, sessionID: persist?.sessionID, messageID: persist?.messageID })),
-                Effect.catchDefect((cause) => Effect.logWarning("reviewer finalizeOpenToolParts defect", { cause, sessionID: persist?.sessionID, messageID: persist?.messageID })),
+                Effect.catch((cause) =>
+                  Effect.logWarning("reviewer finalizeOpenToolParts failed", {
+                    cause,
+                    sessionID: persist?.sessionID,
+                    messageID: persist?.messageID,
+                  }),
+                ),
+                Effect.catchDefect((cause) =>
+                  Effect.logWarning("reviewer finalizeOpenToolParts defect", {
+                    cause,
+                    sessionID: persist?.sessionID,
+                    messageID: persist?.messageID,
+                  }),
+                ),
               )
             const finalizeOpenToolParts = Effect.fnUntraced(function* (error: string, interrupted: boolean) {
               if (!persist) return
@@ -731,11 +787,12 @@ export const layer = Layer.effect(
 
             const iterator = result.fullStream[Symbol.asyncIterator]()
             const close = iterator.return
-            if (close) iterator.return = (value) => {
-              // SDK的tee分支关闭要等待底层流结束，必须先中止请求再等待迭代器释放。
-              abort.abort()
-              return close.call(iterator, value)
-            }
+            if (close)
+              iterator.return = (value) => {
+                // SDK的tee分支关闭要等待底层流结束，必须先中止请求再等待迭代器释放。
+                abort.abort()
+                return close.call(iterator, value)
+              }
 
             yield* Stream.runForEach(
               // #209：fullStream 聚合 reasoning/text/tool 全部事件——逐事件持久化使子会话 transcript 实时可审计
@@ -746,10 +803,10 @@ export const layer = Layer.effect(
                 if (!persist) {
                   if (event.type === "text-delta") {
                     textOutput += event.text
-// #227：text-delta 增量累积，textPart 同时持久化——两者各自独立完成
+                    // #227：text-delta 增量累积，textPart 同时持久化——两者各自独立完成
                   }
                   if (event.type === "tool-call" && event.toolName === "permission_review_decision") {
-// #227：tool-call 事件携带最终 input——此处提取 assessment 为唯一权威来源
+                    // #227：tool-call 事件携带最终 input——此处提取 assessment 为唯一权威来源
                     assessment = assessmentFromUnknown(event.input)
                   }
                   // 纯流式分支也传播原始provider错误，不能吞成协议失败使窄400协商失去依据。
@@ -757,7 +814,7 @@ export const layer = Layer.effect(
                   return
                 }
                 if (event.type === "reasoning-start") {
-// #227：reasoning 空壳先建后增量更新——UI 能实时显示推理进度
+                  // #227：reasoning 空壳先建后增量更新——UI 能实时显示推理进度
                   // #209：reasoning part 先建空壳——delta 事件增量更新 text，end 事件收尾时间
                   reasoningPart = yield* session.updatePart({
                     id: PartID.ascending(),
@@ -833,7 +890,7 @@ export const layer = Layer.effect(
                   return
                 }
                 if (event.type === "tool-input-end") {
-// #227：input 聚合完成时回填 state.input——running 状态先持久化保证 UI 及时
+                  // #227：input 聚合完成时回填 state.input——running 状态先持久化保证 UI 及时
                   const partID = toolParts.get(event.id)
                   if (!partID) return
                   // #497：raw 参数更新也必须从 durable Part 起步；创建写入可能已经 commit，
@@ -903,7 +960,7 @@ export const layer = Layer.effect(
                   // through the same hidden retry as missing or malformed input
                   // instead of treating it as an unrelated provider failure.
                   return yield* new ReviewerRunError({ reason: REVIEWER_DECISION_PROTOCOL_ERROR })
-// #227：文本回退也失败时抛协议错误——触发外层 catchIf 的第二次尝试
+                  // #227：文本回退也失败时抛协议错误——触发外层 catchIf 的第二次尝试
                 }
                 // [local-smark] 镜像 processor.ts finish-step：持久化 provider 真实 usage 和 input breakdown。
                 // reviewer 不走 SessionProcessor 管道（安全边界：不暴露 prompt 给 chat plugin），
@@ -989,7 +1046,7 @@ export const layer = Layer.effect(
             // #209：模型未调用 permission_review_decision——fail closed，未给出明确 allow 即拒绝
             if (!assessment) {
               const fallback = assessmentFromJsonText(textOutput)
-// #227：纯文本回退只在无工具调用时启用——解析失败仍 fail-closed 而非静默放行
+              // #227：纯文本回退只在无工具调用时启用——解析失败仍 fail-closed 而非静默放行
               if (fallback) {
                 // The text part remains as provider output, while this synthetic
                 // no-side-effect tool part preserves the same audit shape as the
@@ -1003,7 +1060,7 @@ export const layer = Layer.effect(
             return assessment
           }),
         (abort) => Effect.sync(() => abort.abort()),
-// #227：release 中止 AbortController——Effect 取消/超时立即停止 streamText 不再消耗配额
+        // #227：release 中止 AbortController——Effect 取消/超时立即停止 streamText 不再消耗配额
         // #209：release 时中止 AbortController——确保 Effect 取消时 streamText 立即停止，不再消耗 provider 配额
       ).pipe(
         // #214：SessionRetry.retry 封装——hidden reviewer 子代理流复用同一 provider 安全重试策略
@@ -1029,16 +1086,19 @@ export const layer = Layer.effect(
     ) {
       const forced = !toolChoiceRejectedProviders.has(model.providerID)
       return runReviewerStream(messages, model, persist, forced, effortVariant).pipe(
-        Effect.catchIf((error) => forced && isToolChoiceRejection(error), () => {
-          toolChoiceRejectedProviders.add(model.providerID)
-          return runReviewerStream(messages, model, persist, false, effortVariant)
-        }),
+        Effect.catchIf(
+          (error) => forced && isToolChoiceRejection(error),
+          () => {
+            toolChoiceRejectedProviders.add(model.providerID)
+            return runReviewerStream(messages, model, persist, false, effortVariant)
+          },
+        ),
       )
     }
 
     // #209：标记工具状态为 reviewing——附带 reviewer 子会话 ID 供 UI 导航
     function markToolReviewing(input: PermissionAuto.ReviewInput, reviewerSessionID: SessionID | undefined) {
-// #227：reviewing 状态附带 reviewer 子会话 ID——UI 可跳转查看审查过程
+      // #227：reviewing 状态附带 reviewer 子会话 ID——UI 可跳转查看审查过程
       return updateToolAutoReview(input, {
         status: "reviewing",
         ...(reviewerSessionID ? { sessionID: reviewerSessionID } : {}),
@@ -1047,7 +1107,7 @@ export const layer = Layer.effect(
 
     // #209：标记工具审查完成——allowed/denied 状态和 reviewer 评估详情
     function markToolReviewed(input: PermissionAuto.ReviewInput, assessment: Schema.Schema.Type<typeof Assessment>) {
-// #227：allowed/denied 终结状态——result 附带完整评估供审计与 UI 展示
+      // #227：allowed/denied 终结状态——result 附带完整评估供审计与 UI 展示
       return updateToolAutoReview(input, {
         status: assessment.outcome === "allow" ? "allowed" : "denied",
         result: {
@@ -1089,9 +1149,7 @@ export const layer = Layer.effect(
         const messages = yield* session.messages({ sessionID: SessionID.make(sessionID), limit: 50 })
         const message = messages.find((m) => m.info.id === tool.messageID)
         if (!message) return
-        const part = message.parts.find(
-          (item): item is ToolPart => item.type === "tool" && item.callID === tool.callID,
-        )
+        const part = message.parts.find((item): item is ToolPart => item.type === "tool" && item.callID === tool.callID)
         if (!part || (part.state.status !== "pending" && part.state.status !== "running")) return
         // #209：保留现有 autoReview metadata——reviewing → allowed/denied 渐进更新不覆盖已写入的 reviewID/precheck
         const metadata = part.state.status === "running" ? (part.state.metadata ?? {}) : {}
@@ -1186,7 +1244,10 @@ function isToolChoiceRejection(error: unknown): boolean {
 // #203：reviewer 启用判定——显式 user 配置优先保留人工审批
 // #280：reviewer 只会在 Permission.ask 已经命中 auto action 后被调用；是否进入
 // auto review 由权限计算决定，而不是由 agent 名称或工具 metadata 决定。
-function reviewerEnabled(permission: ConfigPermissionV1.Info | undefined, _metadata: Readonly<Record<string, unknown>>) {
+function reviewerEnabled(
+  permission: ConfigPermissionV1.Info | undefined,
+  _metadata: Readonly<Record<string, unknown>>,
+) {
   if (permission?.approvals_reviewer === "user") return false
   return true
 }
@@ -1225,8 +1286,8 @@ function loadTenantPolicy(autoReview: { policy?: string; policy_path?: string } 
     // #198：policy_path 文件读取失败转为 RunError——策略加载失败不应静默回退到默认策略
     const pathPolicy = autoReview?.policy_path
       ? yield* Effect.promise(() => Bun.file(autoReview.policy_path!).text()).pipe(
-          Effect.mapError((error) =>
-            new ReviewerRunError({ reason: `failed to load auto_review.policy_path: ${String(error)}` }),
+          Effect.mapError(
+            (error) => new ReviewerRunError({ reason: `failed to load auto_review.policy_path: ${String(error)}` }),
           ),
         )
       : ""
@@ -1251,7 +1312,9 @@ export const defaultLayer = Layer.suspend(() =>
 // #203：Permission.defaultLayer 消费此 bundled reviewer 层来构建 Permission.Service。
 // #203：Layer.suspend 保留历史循环边界：Session 导入 Permission 类型，故 Session.defaultLayer
 // #203：不能在本模块初始化期间被解引用
-export const defaultLayerWithSession = Layer.suspend(() => defaultLayer.pipe(Layer.provide(LayerNode.compile(Session.node))))
+export const defaultLayerWithSession = Layer.suspend(() =>
+  defaultLayer.pipe(Layer.provide(LayerNode.compile(Session.node))),
+)
 
 function assessmentFromJsonText(text: string) {
   const trimmed = text.trim()
@@ -1299,7 +1362,7 @@ function extractFirstJsonObject(text: string): string | undefined {
 }
 
 function assessmentFromUnknown(input: unknown) {
-// #227：畸形工具参数与缺失协议输出同等待遇——不绕过修复格式的第二次尝试
+  // #227：畸形工具参数与缺失协议输出同等待遇——不绕过修复格式的第二次尝试
   try {
     // Treat malformed tool/function arguments the same as missing protocol
     // output: they are not a valid permission decision, but they also should not
@@ -1327,7 +1390,13 @@ function closeOpenReviewerTools(
     const known = new Set(input.knownPartIDs ?? [])
     // 隐藏只影响展示；attempt-owned的物理open工具仍须结清。
     const durable = yield* MessageV2.parts(input.messageID, { includeHidden: true }).pipe(
-      Effect.catchDefect((cause) => Effect.logWarning("reviewer durable tool scan failed", { cause, sessionID: input.sessionID, messageID: input.messageID }).pipe(Effect.as([]))),
+      Effect.catchDefect((cause) =>
+        Effect.logWarning("reviewer durable tool scan failed", {
+          cause,
+          sessionID: input.sessionID,
+          messageID: input.messageID,
+        }).pipe(Effect.as([])),
+      ),
     )
     // durable 只补 tool 类型——text/reasoning 的收尾走既有 drain 路径，不在闭合范围
     for (const part of durable) {
@@ -1363,15 +1432,19 @@ function closeOpenReviewerTools(
   })
 }
 
-function hideReviewerProtocolAttempt(sessions: Session.Interface, sessionID: SessionID, requestID: MessageID): Effect.Effect<void, ReviewerRunError, never> {
-// #227：隐藏请求与畸形 assistant 回复——重试后只保留最终可见尝试
+function hideReviewerProtocolAttempt(
+  sessions: Session.Interface,
+  sessionID: SessionID,
+  requestID: MessageID,
+): Effect.Effect<void, ReviewerRunError, never> {
+  // #227：隐藏请求与畸形 assistant 回复——重试后只保留最终可见尝试
   return Effect.gen(function* () {
     const hidden = { time: Date.now(), reason: PROTOCOL_RETRY_HIDDEN_REASON as typeof PROTOCOL_RETRY_HIDDEN_REASON }
-// #227：hidden 元数据独立于消息内容——重试后消息仍可作结构压缩锚点
+    // #227：hidden 元数据独立于消息内容——重试后消息仍可作结构压缩锚点
     // #208: use sessions.messages instead of MessageV2.get to avoid Database.Service leak
     const messages = yield* sessions.messages({ sessionID, limit: 100 })
     const request = messages.find((m) => m.info.id === requestID)
-// #227：按 requestID 定位 synthetic 请求——消息缓存行可能因分页错位
+    // #227：按 requestID 定位 synthetic 请求——消息缓存行可能因分页错位
     // Hide the synthetic reviewer request together with its malformed assistant
     // reply. The prompt is regenerated for the retry, and keeping only the final
     // visible attempt prevents users from reading a malformed JSON/prose answer
@@ -1387,7 +1460,7 @@ function hideReviewerProtocolAttempt(sessions: Session.Interface, sessionID: Ses
 }
 
 function recordJsonFallbackDecision(
-// #227：合成 tool part 模拟函数调用路径的审计形状——source 字段标识回退来源
+  // #227：合成 tool part 模拟函数调用路径的审计形状——source 字段标识回退来源
   sessions: Session.Interface,
   persist: { sessionID: SessionID; messageID: MessageID; reviewID: string },
   assessment: Schema.Schema.Type<typeof Assessment>,
@@ -1402,7 +1475,7 @@ function recordJsonFallbackDecision(
       // it is namespaced by the stable review id and is only created after the
       // stream ended without any `permission_review_decision` function call.
       callID: `json_fallback_${persist.reviewID}`,
-// #227：callID 用 reviewID 命名空间——不可能与 provider 真实 tool-call id 冲突
+      // #227：callID 用 reviewID 命名空间——不可能与 provider 真实 tool-call id 冲突
       tool: "permission_review_decision",
       state: {
         status: "completed",
@@ -1454,6 +1527,10 @@ function reviewDisplayToolInput(part: ToolPart, askMetadata: Readonly<Record<str
 // #250：reviewer layer 现在 yield Auth.Service 判定 OpenAI OAuth/Codex instructions 路径——
 // node deps 显式加入 Auth.node，LayerNode 依赖图在编译期保持完整
 // #261：Plugin.Service 加入 layer 依赖——node deps 同步加 Plugin.node，保持 LayerNode 编译期依赖图完整
-export const node = LayerNode.make({ service: Service, layer: layer, deps: [Config.node, Auth.node, Provider.node, Session.node, Database.node, Plugin.node] })
+export const node = LayerNode.make({
+  service: Service,
+  layer: layer,
+  deps: [Config.node, Auth.node, Provider.node, Session.node, Database.node, Plugin.node],
+})
 
 export * as PermissionReviewer from "./service"

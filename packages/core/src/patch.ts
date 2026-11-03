@@ -1,7 +1,16 @@
 export * as Patch from "./patch"
 
 import { convertToLineEnding, detectLineEnding, splitLines } from "./util/line-ending"
-import { closestWindow, formatAmbiguityHint, lineOffset, locateContext, locateExact, nextLineOffset, uniqueExtensionHint, type AmbiguityCandidates } from "./patch-match"
+import {
+  closestWindow,
+  formatAmbiguityHint,
+  lineOffset,
+  locateContext,
+  locateExact,
+  nextLineOffset,
+  uniqueExtensionHint,
+  type AmbiguityCandidates,
+} from "./patch-match"
 
 export type Hunk =
   | { readonly type: "add"; readonly path: string; readonly contents: string }
@@ -132,7 +141,12 @@ function parseUpdate(lines: ReadonlyArray<string>, start: number) {
   return { chunks, next: index }
 }
 
-function applyChunks(originalLines: string[], path: string, chunks: ReadonlyArray<UpdateFileChunk>, persistedText: string) {
+function applyChunks(
+  originalLines: string[],
+  path: string,
+  chunks: ReadonlyArray<UpdateFileChunk>,
+  persistedText: string,
+) {
   // 两代调用方共用immutable original；定位结束前不产生可被后续chunk消费的文本。
   const terminated = persistedText.endsWith("\n")
   const originalText = workingText(originalLines, terminated)
@@ -142,8 +156,12 @@ function applyChunks(originalLines: string[], path: string, chunks: ReadonlyArra
     let searchFrom = 0
     if (chunk.changeContext) {
       const context = locateContext(originalLines, [chunk.changeContext], 0, terminated)
-      if (context.type !== "found") throw new Error(withCandidate(`Failed to find context in ${path}.`, persistedText, chunk.changeContext))
-      const offset = context.location.kind === "line" ? lineOffset(originalLines, context.location.startLine) : context.location.startOffset
+      if (context.type !== "found")
+        throw new Error(withCandidate(`Failed to find context in ${path}.`, persistedText, chunk.changeContext))
+      const offset =
+        context.location.kind === "line"
+          ? lineOffset(originalLines, context.location.startLine)
+          : context.location.startOffset
       searchFrom = nextLineOffset(originalText, offset)
     }
     if (chunk.oldLines.length === 0) {
@@ -152,15 +170,29 @@ function applyChunks(originalLines: string[], path: string, chunks: ReadonlyArra
     }
     const result = locateExact(originalLines, chunk.oldLines, searchFrom, chunk.endOfFile, terminated)
     if (result.type === "ambiguous")
-      throw new Error(withAmbiguityAdvice(
-        `Found multiple matches for expected lines in ${path}. Provide more context to make the match unique.`,
-        originalLines, chunk.oldLines, result.candidates, searchFrom, terminated,
-      ))
+      throw new Error(
+        withAmbiguityAdvice(
+          `Found multiple matches for expected lines in ${path}. Provide more context to make the match unique.`,
+          originalLines,
+          chunk.oldLines,
+          result.candidates,
+          searchFrom,
+          terminated,
+        ),
+      )
     if (result.type === "not-found")
-      throw new Error(withCandidate(`Failed to find expected lines in ${path}.`, persistedText, chunk.oldLines.join("\n")))
+      throw new Error(
+        withCandidate(`Failed to find expected lines in ${path}.`, persistedText, chunk.oldLines.join("\n")),
+      )
     const span =
       result.location.kind === "line"
-        ? { start: lineOffset(originalLines, result.location.startLine), end: result.location.endLine < originalLines.length ? lineOffset(originalLines, result.location.endLine) : originalText.length }
+        ? {
+            start: lineOffset(originalLines, result.location.startLine),
+            end:
+              result.location.endLine < originalLines.length
+                ? lineOffset(originalLines, result.location.endLine)
+                : originalText.length,
+          }
         : { start: result.location.startOffset, end: result.location.endOffset }
     // 整行span包含其行尾；substring仅拥有匹配字符，不能吞掉原始前后缀。
     const text =
@@ -209,8 +241,12 @@ function withAmbiguityAdvice(
   return message + formatAmbiguityHint(hint && { ...hint, total: candidates.total })
 }
 
-
-function formatLineReplacement(newLines: ReadonlyArray<string>, span: { start: number; end: number }, originalText: string, terminated: boolean) {
+function formatLineReplacement(
+  newLines: ReadonlyArray<string>,
+  span: { start: number; end: number },
+  originalText: string,
+  terminated: boolean,
+) {
   if (newLines.length === 0) return ""
   const body = newLines.join("\n")
   if (span.end < originalText.length) return `${body}\n`
@@ -225,7 +261,9 @@ function workingText(lines: string[], terminated: boolean) {
 function withCandidate(message: string, content: string, expected: string) {
   // 用失败chunk和未提交的磁盘原文诊断，不混入其他chunk或working copy。
   const closest = closestWindow(content, expected)
-  return closest ? `${message}\n\nClosest match at line ${closest.line}:\n${closest.excerpt}` : `${message}\n\nNo reliable nearby candidate was found. Read the file and retry with exact text.`
+  return closest
+    ? `${message}\n\nClosest match at line ${closest.line}:\n${closest.excerpt}`
+    : `${message}\n\nNo reliable nearby candidate was found. Read the file and retry with exact text.`
 }
 const splitBom = (text: string) =>
   text.startsWith("\uFEFF") ? { bom: true, text: text.slice(1) } : { bom: false, text }

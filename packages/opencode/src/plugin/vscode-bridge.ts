@@ -13,14 +13,18 @@ const NOTEBOOK_METADATA_KEY = "vscodeNotebook"
 const requiredFilePath = {
   filePath: z
     .string()
-    .describe("Absolute notebook path or file URI. Required; the bridge never infers a notebook from VS Code focus or open documents."),
+    .describe(
+      "Absolute notebook path or file URI. Required; the bridge never infers a notebook from VS Code focus or open documents.",
+    ),
 }
 
 const optionalCellId = {
   cellId: z
     .string()
     .optional()
-    .describe("Stable notebook cell ID from vscode_notebook_summary, formatted like #VSC-xxxxxxxx. Prefer this over display indexes."),
+    .describe(
+      "Stable notebook cell ID from vscode_notebook_summary, formatted like #VSC-xxxxxxxx. Prefer this over display indexes.",
+    ),
 }
 
 const requiredEditCellId = {
@@ -39,7 +43,9 @@ const sourceArgs = {
     .int()
     .positive()
     .optional()
-    .describe("1-based global virtual source line offset. With cellId, omit this to start at that cell's first global line."),
+    .describe(
+      "1-based global virtual source line offset. With cellId, omit this to start at that cell's first global line.",
+    ),
   limit: z
     .number()
     .int()
@@ -54,13 +60,21 @@ const runArgs = {
   type: z
     .enum(["cell", "range"])
     .optional()
-    .describe("Optional run kind. endCellId selects a range when type is omitted or range; explicit cell requires both endpoints to resolve to the same cell."),
+    .describe(
+      "Optional run kind. endCellId selects a range when type is omitted or range; explicit cell requires both endpoints to resolve to the same cell.",
+    ),
   // #101：cellId 支持 TOP/BOTTOM 快捷定位首末 cell
-  cellId: z.string().describe("Stable start cell ID from vscode_notebook_summary, formatted like #VSC-xxxxxxxx. Also supports TOP and BOTTOM for the first/last cell."),
+  cellId: z
+    .string()
+    .describe(
+      "Stable start cell ID from vscode_notebook_summary, formatted like #VSC-xxxxxxxx. Also supports TOP and BOTTOM for the first/last cell.",
+    ),
   endCellId: z
     .string()
     .optional()
-    .describe("Stable ending cell ID, formatted like #VSC-xxxxxxxx. When provided, the bridge runs from cellId through this cell, inclusive."),
+    .describe(
+      "Stable ending cell ID, formatted like #VSC-xxxxxxxx. When provided, the bridge runs from cellId through this cell, inclusive.",
+    ),
   timeoutMs: z
     .number()
     .int()
@@ -84,16 +98,22 @@ const editArgs = {
   oldCode: z
     .union([z.string(), z.array(z.string())])
     .optional()
-    .describe("Existing source fragment to replace inside the target cell. It must identify one unique match; include enough surrounding lines from vscode_notebook_source."),
+    .describe(
+      "Existing source fragment to replace inside the target cell. It must identify one unique match; include enough surrounding lines from vscode_notebook_source.",
+    ),
   newCode: z
     .union([z.string(), z.array(z.string())])
     .optional()
-    .describe("New source for insert or edit. Required for insert, full-cell replacement, and oldCode replacement. Do not wrap in Markdown fences unless the fences are literal content."),
+    .describe(
+      "New source for insert or edit. Required for insert, full-cell replacement, and oldCode replacement. Do not wrap in Markdown fences unless the fences are literal content.",
+    ),
   // 仅语言编辑必须真正省略源码，空字符串和空数组不能冒充缺省字段。
   language: z
     .string()
     .optional()
-    .describe("Cell language. Use 'markdown' for Markdown cells; use 'python' or another language for code cells. On edit, language alone changes cell kind/language while preserving source; omit oldCode and newCode entirely for this mode."),
+    .describe(
+      "Cell language. Use 'markdown' for Markdown cells; use 'python' or another language for code cells. On edit, language alone changes cell kind/language while preserving source; omit oldCode and newCode entirely for this mode.",
+    ),
 }
 
 async function callRaw(
@@ -143,63 +163,71 @@ async function ask(context: ToolContext, permission: string, args: Record<string
 export async function VscodeBridgePlugin(input: PluginInput): Promise<Hooks> {
   // 返回 Hooks：init 初始化插件，tool 返回工具列表
   return {
-  tool: {
-    vscode_notebook_summary: tool({
-      description: VscodeNotebookDescriptions.summary,
-      args: requiredFilePath,
-      execute: async (args, context) => notebookResult("/notebook/summary", args, await callRaw("/notebook/summary", args, context, 10_000)),
-    }),
-    vscode_notebook_source: tool({
-      description: VscodeNotebookDescriptions.source,
-      args: sourceArgs,
-      execute: async (args, context) => notebookResult("/notebook/source", args, await callRaw("/notebook/source", args, context, 10_000)),
-    }),
-    vscode_notebook_run: tool({
-      description: VscodeNotebookDescriptions.run,
-      args: runArgs,
-      execute: async (args, context) => {
-        await ask(context, "vscode_notebook_run", args)
-        const timeoutMs = args.timeoutMs ?? 300_000
-        const body = { ...args, timeoutMs }
-        return notebookResult("/notebook/run", body, await callRaw("/notebook/run", body, context, timeoutMs + 5_000))
-      },
-    }),
-    vscode_notebook_output: tool({
-      description: VscodeNotebookDescriptions.output,
-      args: outputArgs,
-      execute: async (args, context) => notebookResult("/notebook/output", args, await callRaw("/notebook/output", args, context, 30_000)),
-    }),
-    vscode_notebook_edit: tool({
-      description: VscodeNotebookDescriptions.edit,
-      args: editArgs,
-      execute: async (args, context) => {
-        // #223：notebook 编辑是独立工具能力，必须使用自己的权限 key；否则 plan
-        // mode 对 vscode_notebook_edit 的 deny 不会覆盖到这里，只会落到通用
-        // edit 规则，导致 notebook 写入权限和普通文件编辑权限混在一起。
-        await ask(context, "vscode_notebook_edit", args)
-        // #223：继续保留通用 edit 门禁：既有配置若用 permission.edit 禁止写入，
-        // notebook cell 修改也不能绕过。顺序先专属后通用，确保更精确的
-        // vscode_notebook_edit deny/ask 先表达，再由 edit 维持历史兼容边界。
-        await ask(context, "edit", args)
-        return notebookResult("/notebook/edit", args, await callRaw("/notebook/edit", args, context, 30_000))
-      },
-    }),
-    vscode_notebook_env: tool({
-      description: VscodeNotebookDescriptions.env,
-      args: {
-        ...requiredFilePath,
-        // 操作仍为显式枚举，新增中断与创建不改变其它环境操作的权限入口。
-        operation: z.enum(["info", "configure", "restart", "save", "stop", "create"]).describe("Which notebook environment operation to perform."),
-        reason: z.string().optional().describe("Brief description of why this operation is being performed, shown to the user."),
-      },
-      execute: async (args, context) => {
-        // 环境操作沿用工具级权限，审批拒绝时不进入桥接调用；保留操作元数据与选核超时。
-        await ask(context, "vscode_notebook_env", args)
-        // save 和 create 都会写磁盘文件，必须服从通用 edit 门禁
-        if (args.operation === "save" || args.operation === "create") await ask(context, "edit", args)
-        return notebookResult("/notebook/env", args, await callRaw("/notebook/env", args, context, 120_000))
-      },
-    }),
-  },
-}
+    tool: {
+      vscode_notebook_summary: tool({
+        description: VscodeNotebookDescriptions.summary,
+        args: requiredFilePath,
+        execute: async (args, context) =>
+          notebookResult("/notebook/summary", args, await callRaw("/notebook/summary", args, context, 10_000)),
+      }),
+      vscode_notebook_source: tool({
+        description: VscodeNotebookDescriptions.source,
+        args: sourceArgs,
+        execute: async (args, context) =>
+          notebookResult("/notebook/source", args, await callRaw("/notebook/source", args, context, 10_000)),
+      }),
+      vscode_notebook_run: tool({
+        description: VscodeNotebookDescriptions.run,
+        args: runArgs,
+        execute: async (args, context) => {
+          await ask(context, "vscode_notebook_run", args)
+          const timeoutMs = args.timeoutMs ?? 300_000
+          const body = { ...args, timeoutMs }
+          return notebookResult("/notebook/run", body, await callRaw("/notebook/run", body, context, timeoutMs + 5_000))
+        },
+      }),
+      vscode_notebook_output: tool({
+        description: VscodeNotebookDescriptions.output,
+        args: outputArgs,
+        execute: async (args, context) =>
+          notebookResult("/notebook/output", args, await callRaw("/notebook/output", args, context, 30_000)),
+      }),
+      vscode_notebook_edit: tool({
+        description: VscodeNotebookDescriptions.edit,
+        args: editArgs,
+        execute: async (args, context) => {
+          // #223：notebook 编辑是独立工具能力，必须使用自己的权限 key；否则 plan
+          // mode 对 vscode_notebook_edit 的 deny 不会覆盖到这里，只会落到通用
+          // edit 规则，导致 notebook 写入权限和普通文件编辑权限混在一起。
+          await ask(context, "vscode_notebook_edit", args)
+          // #223：继续保留通用 edit 门禁：既有配置若用 permission.edit 禁止写入，
+          // notebook cell 修改也不能绕过。顺序先专属后通用，确保更精确的
+          // vscode_notebook_edit deny/ask 先表达，再由 edit 维持历史兼容边界。
+          await ask(context, "edit", args)
+          return notebookResult("/notebook/edit", args, await callRaw("/notebook/edit", args, context, 30_000))
+        },
+      }),
+      vscode_notebook_env: tool({
+        description: VscodeNotebookDescriptions.env,
+        args: {
+          ...requiredFilePath,
+          // 操作仍为显式枚举，新增中断与创建不改变其它环境操作的权限入口。
+          operation: z
+            .enum(["info", "configure", "restart", "save", "stop", "create"])
+            .describe("Which notebook environment operation to perform."),
+          reason: z
+            .string()
+            .optional()
+            .describe("Brief description of why this operation is being performed, shown to the user."),
+        },
+        execute: async (args, context) => {
+          // 环境操作沿用工具级权限，审批拒绝时不进入桥接调用；保留操作元数据与选核超时。
+          await ask(context, "vscode_notebook_env", args)
+          // save 和 create 都会写磁盘文件，必须服从通用 edit 门禁
+          if (args.operation === "save" || args.operation === "create") await ask(context, "edit", args)
+          return notebookResult("/notebook/env", args, await callRaw("/notebook/env", args, context, 120_000))
+        },
+      }),
+    },
+  }
 }

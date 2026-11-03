@@ -32,12 +32,16 @@ let restoreGate: Deferred.Deferred<void> | undefined
 const restoreFailure = new Error("fixture restore failed")
 const locations = Layer.effect(
   LocationServiceMap.Service,
-  LayerMap.make((_ref: Location.Ref) => Layer.unwrap<LocationServices, never, never, never, never>(Effect.gen(function* () {
-    // 仅阻塞和失败Location构建，不加载生产Provider/MCP/文件恢复服务。
-    if (restoreStarted) yield* Deferred.succeed(restoreStarted, undefined)
-    if (restoreGate) yield* Deferred.await(restoreGate)
-    return yield* Effect.die(restoreFailure)
-  }))),
+  LayerMap.make((_ref: Location.Ref) =>
+    Layer.unwrap<LocationServices, never, never, never, never>(
+      Effect.gen(function* () {
+        // 仅阻塞和失败Location构建，不加载生产Provider/MCP/文件恢复服务。
+        if (restoreStarted) yield* Deferred.succeed(restoreStarted, undefined)
+        if (restoreGate) yield* Deferred.await(restoreGate)
+        return yield* Effect.die(restoreFailure)
+      }),
+    ),
+  ),
 )
 const execution = Layer.succeed(
   SessionExecution.Service,
@@ -60,7 +64,10 @@ const execution = Layer.succeed(
 const it = testEffect(
   AppNodeBuilder.build(
     LayerNode.group([Database.node, EventV2.node, SessionProjector.node, SessionStore.node, SessionV2.node]),
-    [[SessionExecution.node, execution], [LocationServiceMap.node, locations]],
+    [
+      [SessionExecution.node, execution],
+      [LocationServiceMap.node, locations],
+    ],
   ),
 )
 const sessionID = SessionV2.ID.make("ses_prompt_test")
@@ -114,40 +121,63 @@ const eventCount = (type: string) =>
   )
 
 describe("SessionV2.prompt", () => {
-  it.effect("guards native revert and releases admission after failure", () => Effect.gen(function* () {
-    yield* setup
-    const session = yield* SessionV2.Service
-    yield* Effect.addFinalizer(() => Effect.sync(() => { activeSessions.clear(); restoreStarted = undefined; restoreGate = undefined }))
-    activeSessions.add(sessionID)
-    expect(yield* session.revert.stage({ sessionID, messageID }).pipe(Effect.flip)).toBeInstanceOf(SessionV2.BusyError)
-    expect(yield* session.revert.clear(sessionID).pipe(Effect.flip)).toBeInstanceOf(SessionV2.BusyError)
-    // 正常执行期间仍允许durable steer/queue，不把busy误当成reverting。
-    yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "steer while running" }), resume: false })
-    yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "queue while running" }), delivery: "queue", resume: false })
-    activeSessions.clear()
-    restoreStarted = yield* Deferred.make<void>()
-    restoreGate = yield* Deferred.make<void>()
-    const reverting = yield* session.revert.stage({ sessionID, messageID }).pipe(Effect.exit, Effect.forkScoped)
-    yield* Deferred.await(restoreStarted)
-    const before = yield* admittedCount
-    // 占用存在时拒绝提交和第二次撤回；失败获取不能清除第一个操作的占用。
-    expect(yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "blocked" }), resume: false }).pipe(Effect.flip)).toBeInstanceOf(SessionV2.BusyError)
-    expect(yield* admittedCount).toBe(before)
-    expect(yield* session.revert.stage({ sessionID, messageID }).pipe(Effect.flip)).toBeInstanceOf(SessionV2.BusyError)
-    expect(yield* session.revert.clear(sessionID).pipe(Effect.flip)).toBeInstanceOf(SessionV2.BusyError)
-    expect(yield* session.revert.commit(sessionID).pipe(Effect.flip)).toBeInstanceOf(SessionV2.BusyError)
-    expect(yield* session.resume(sessionID).pipe(Effect.flip)).toBeInstanceOf(SessionV2.BusyError)
-    expect(yield* session.compact({ sessionID }).pipe(Effect.flip)).toBeInstanceOf(SessionV2.BusyError)
-    expect(yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "still blocked" }), resume: false }).pipe(Effect.flip)).toBeInstanceOf(SessionV2.BusyError)
-    yield* Deferred.succeed(restoreGate, undefined)
-    const failure = yield* Fiber.join(reverting)
-    expect(Exit.isFailure(failure)).toBe(true)
-    if (Exit.isFailure(failure)) expect(Cause.squash(failure.cause)).toBe(restoreFailure)
-    // 真失败之后原Cause不变且占用已释放；无撤回状态的commit早退同样释放。
-    yield* session.revert.commit(sessionID)
-    yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "after failure" }), resume: false })
-    expect(yield* admittedCount).toBe(before + 1)
-  }))
+  it.effect("guards native revert and releases admission after failure", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const session = yield* SessionV2.Service
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => {
+          activeSessions.clear()
+          restoreStarted = undefined
+          restoreGate = undefined
+        }),
+      )
+      activeSessions.add(sessionID)
+      expect(yield* session.revert.stage({ sessionID, messageID }).pipe(Effect.flip)).toBeInstanceOf(
+        SessionV2.BusyError,
+      )
+      expect(yield* session.revert.clear(sessionID).pipe(Effect.flip)).toBeInstanceOf(SessionV2.BusyError)
+      // 正常执行期间仍允许durable steer/queue，不把busy误当成reverting。
+      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "steer while running" }), resume: false })
+      yield* session.prompt({
+        sessionID,
+        prompt: Prompt.make({ text: "queue while running" }),
+        delivery: "queue",
+        resume: false,
+      })
+      activeSessions.clear()
+      restoreStarted = yield* Deferred.make<void>()
+      restoreGate = yield* Deferred.make<void>()
+      const reverting = yield* session.revert.stage({ sessionID, messageID }).pipe(Effect.exit, Effect.forkScoped)
+      yield* Deferred.await(restoreStarted)
+      const before = yield* admittedCount
+      // 占用存在时拒绝提交和第二次撤回；失败获取不能清除第一个操作的占用。
+      expect(
+        yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "blocked" }), resume: false }).pipe(Effect.flip),
+      ).toBeInstanceOf(SessionV2.BusyError)
+      expect(yield* admittedCount).toBe(before)
+      expect(yield* session.revert.stage({ sessionID, messageID }).pipe(Effect.flip)).toBeInstanceOf(
+        SessionV2.BusyError,
+      )
+      expect(yield* session.revert.clear(sessionID).pipe(Effect.flip)).toBeInstanceOf(SessionV2.BusyError)
+      expect(yield* session.revert.commit(sessionID).pipe(Effect.flip)).toBeInstanceOf(SessionV2.BusyError)
+      expect(yield* session.resume(sessionID).pipe(Effect.flip)).toBeInstanceOf(SessionV2.BusyError)
+      expect(yield* session.compact({ sessionID }).pipe(Effect.flip)).toBeInstanceOf(SessionV2.BusyError)
+      expect(
+        yield* session
+          .prompt({ sessionID, prompt: Prompt.make({ text: "still blocked" }), resume: false })
+          .pipe(Effect.flip),
+      ).toBeInstanceOf(SessionV2.BusyError)
+      yield* Deferred.succeed(restoreGate, undefined)
+      const failure = yield* Fiber.join(reverting)
+      expect(Exit.isFailure(failure)).toBe(true)
+      if (Exit.isFailure(failure)) expect(Cause.squash(failure.cause)).toBe(restoreFailure)
+      // 真失败之后原Cause不变且占用已释放；无撤回状态的commit早退同样释放。
+      yield* session.revert.commit(sessionID)
+      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "after failure" }), resume: false })
+      expect(yield* admittedCount).toBe(before + 1)
+    }),
+  )
 
   it.effect("exposes the execution registry", () =>
     Effect.gen(function* () {

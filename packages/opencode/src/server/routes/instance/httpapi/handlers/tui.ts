@@ -137,10 +137,16 @@ export const tuiHandlers = HttpApiBuilder.group(InstanceHttpApi, "tui", (handler
         // Promise 结果只交付一次；取消 finalizer 继续等待这份 operation，而非另起任务。
         void operation.then(
           (value) => resume(Effect.succeed(value)),
-          (error) => resume(Effect.fail(new VoiceError({ message: error instanceof Error ? error.message : String(error) }))),
+          (error) =>
+            resume(Effect.fail(new VoiceError({ message: error instanceof Error ? error.message : String(error) }))),
         )
         // 客户端 close 先 abort signal；finalizer 等待原操作收尾，文件和 activity 与工作同寿命。
-        return Effect.promise(() => operation.then(() => undefined, () => undefined))
+        return Effect.promise(() =>
+          operation.then(
+            () => undefined,
+            () => undefined,
+          ),
+        )
       })
 
     return handlers

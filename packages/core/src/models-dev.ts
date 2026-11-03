@@ -188,7 +188,8 @@ const layer = Layer.effect(
         Effect.provideService(
           FetchHttpClient.Fetch,
           Object.assign(
-            (input: Parameters<typeof fetch>[0], init?: RequestInit) => NetworkProxy.routedFetch(input, { ...init, purpose: "infrastructure" }),
+            (input: Parameters<typeof fetch>[0], init?: RequestInit) =>
+              NetworkProxy.routedFetch(input, { ...init, purpose: "infrastructure" }),
             // Bun 的 fetch 类型包含 preconnect，局部适配不能丢掉该成员或伪造第二套实现。
             { preconnect: fetch.preconnect },
           ),

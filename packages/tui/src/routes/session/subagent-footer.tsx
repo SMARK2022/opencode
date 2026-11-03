@@ -92,7 +92,16 @@ export function SubagentFooter() {
     // 保留 step/request 区别；累计仍参与可见性判断，但不再追加到箭头后。
     // 子会话的 prepared 密度只随它自己的请求读取，父会话与旧模型确认样本不参与。
     // 子代理传自己的完整投影，沿既有节流与费用范围展示统计。
-    const { input: currentInput, output: currentOutput, totalInput, totalOutput } = tokenAccounting(msg, (id) => sync.data.part[id] ?? [], undefined, { session: session(), last, parts: lastParts }).request
+    const {
+      input: currentInput,
+      output: currentOutput,
+      totalInput,
+      totalOutput,
+    } = tokenAccounting(msg, (id) => sync.data.part[id] ?? [], undefined, {
+      session: session(),
+      last,
+      parts: lastParts,
+    }).request
     const requestTokens = currentInput + currentOutput
     const totalTokens = totalInput + totalOutput
 
@@ -103,8 +112,15 @@ export function SubagentFooter() {
 
     // 原生模型信息也从当前请求投影读取，不要求先有 V1 助手消息。
     // 用户模型仅用于首次等待；确认模型仍由子代理请求投影提供。
-    const modelRef = request.model ?? msg.find((item): item is UserMessage => item.role === "user" && item.id === request.messageID)?.model
-    const contextLimit = getContextLimit(sync.data.provider, modelRef?.providerID, modelRef?.modelID, request.model?.contextLimit)
+    const modelRef =
+      request.model ??
+      msg.find((item): item is UserMessage => item.role === "user" && item.id === request.messageID)?.model
+    const contextLimit = getContextLimit(
+      sync.data.provider,
+      modelRef?.providerID,
+      modelRef?.modelID,
+      request.model?.contextLimit,
+    )
     const pct = requestTokens > 0 && contextLimit ? `${Math.round((requestTokens / contextLimit) * 100)}%` : undefined
     // 恢复 footer 的请求费用 hunk，不把子代理 Session.cost 当作请求费用。
     // 仍使用共享费用生产策略和现有 money 格式化，费用不参与箭头增长判断。
@@ -112,7 +128,12 @@ export function SubagentFooter() {
     return {
       input: currentInput,
       output: currentOutput,
-      context: requestTokens > 0 ? (pct ? `${Locale.number(requestTokens)} (${pct})` : Locale.number(requestTokens)) : undefined,
+      context:
+        requestTokens > 0
+          ? pct
+            ? `${Locale.number(requestTokens)} (${pct})`
+            : Locale.number(requestTokens)
+          : undefined,
       cost: cost > 0 ? money.format(cost) : undefined,
     }
   })
@@ -182,8 +203,22 @@ export function SubagentFooter() {
             </Show>
             {/* #550：retry 红字簇优先于 usage——宽度不足先挤 usage 不挤诊断。 */}
             <Show when={retry()}>
-              <box minWidth={0} flexShrink={1} flexDirection="row" gap={1} overflow="hidden" onMouseUp={openRetryDetails}>
-                <text minWidth={0} flexShrink={1} fg={theme.error} wrapMode="none" truncate onMouseUp={openRetryDetails}>
+              <box
+                minWidth={0}
+                flexShrink={1}
+                flexDirection="row"
+                gap={1}
+                overflow="hidden"
+                onMouseUp={openRetryDetails}
+              >
+                <text
+                  minWidth={0}
+                  flexShrink={1}
+                  fg={theme.error}
+                  wrapMode="none"
+                  truncate
+                  onMouseUp={openRetryDetails}
+                >
                   {retrySummary()}
                 </text>
                 <text flexShrink={0} fg={theme.error} wrapMode="none" onMouseUp={openRetryDetails}>
@@ -199,8 +234,10 @@ export function SubagentFooter() {
                 <text fg={theme.textMuted} wrapMode="none" flexShrink={1} minWidth={0} truncate>
                   {/* Show 提供有效 item 后才格式化计数，undefined 的清空快照不进入这段文本。 */}
                   {/* 两方向用空格内聚并保留独立脉冲；context/cost 仍以中点分组。 */}
-                  <span style={{ fg: usageFlow().input ? theme.text : theme.textMuted }}>↑</span> {Locale.number(item().input)}{" "}
-                  <span style={{ fg: usageFlow().output ? theme.text : theme.textMuted }}>↓</span> {Locale.number(item().output)}
+                  <span style={{ fg: usageFlow().input ? theme.text : theme.textMuted }}>↑</span>{" "}
+                  {Locale.number(item().input)}{" "}
+                  <span style={{ fg: usageFlow().output ? theme.text : theme.textMuted }}>↓</span>{" "}
+                  {Locale.number(item().output)}
                   {item().context ? ` · ${item().context}` : ""}
                   {item().cost ? ` · ${item().cost}` : ""}
                 </text>

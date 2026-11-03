@@ -1093,7 +1093,11 @@ export function variants(model: Provider.Model): Record<string, Record<string, a
     // https://v5.ai-sdk.dev/providers/ai-sdk-providers/anthropic
     case "@ai-sdk/google-vertex/anthropic":
       // https://v5.ai-sdk.dev/providers/ai-sdk-providers/google-vertex#anthropic-provider
-      return ProviderV2.anthropicThinkingVariants({ apiID: model.api.id, providerID: model.providerID, output: model.limit.output })
+      return ProviderV2.anthropicThinkingVariants({
+        apiID: model.api.id,
+        providerID: model.providerID,
+        output: model.limit.output,
+      })
 
     case "@ai-sdk/amazon-bedrock":
       // https://v5.ai-sdk.dev/providers/ai-sdk-providers/amazon-bedrock

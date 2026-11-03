@@ -121,9 +121,11 @@ describe("cross-spawn spawner", () => {
         // 现存exe交给OS启动后失败；避开cross-spawn对找不到命令时启动cmd的既有行为。
         // 管道已取得，创建失败仍须沿原错误链返回并释放本次资源。
         const result = yield* Effect.exit(
-          Effect.scoped(Effect.gen(function* () {
-            return yield* WindowsShellOutput.mark(ChildProcess.make(executable, [], { stdin: "ignore" }))
-          })),
+          Effect.scoped(
+            Effect.gen(function* () {
+              return yield* WindowsShellOutput.mark(ChildProcess.make(executable, [], { stdin: "ignore" }))
+            }),
+          ),
         )
         expect(Exit.isFailure(result)).toBe(true)
       }),
@@ -326,7 +328,8 @@ describe("cross-spawn spawner", () => {
         for (let attempt = 0; attempt < 10; attempt++) {
           const stdout = ` \r\ninstant-${attempt} 中\t\nend \r`
           const stderr = `\t err-${attempt}\r\n `
-          const handle = yield* ChildProcess.make(process.execPath, ["-e",
+          const handle = yield* ChildProcess.make(process.execPath, [
+            "-e",
             `process.stdout.write(${JSON.stringify(stdout)}); process.stderr.write(${JSON.stringify(stderr)})`,
           ])
           expect(yield* handle.exitCode).toBe(ChildProcessSpawner.ExitCode(0))
@@ -591,10 +594,14 @@ describe("cross-spawn spawner", () => {
           // 后代安装 TERM trap 后发布 readiness；同一用例覆盖显式 kill 与 scope 清理。
           const handle = yield* Effect.scoped(
             Effect.gen(function* () {
-              const handle = yield* ChildProcess.make("sh", ["-c", 'sh -c \'trap "" TERM; echo ready; sleep 30\' & wait'], {
-                detached: true,
-                forceKillAfter: 100,
-              })
+              const handle = yield* ChildProcess.make(
+                "sh",
+                ["-c", "sh -c 'trap \"\" TERM; echo ready; sleep 30' & wait"],
+                {
+                  detached: true,
+                  forceKillAfter: 100,
+                },
+              )
               yield* Stream.runCollect(handle.stdout.pipe(Stream.decodeText, Stream.splitLines, Stream.take(1))).pipe(
                 Effect.tap((lines) => Effect.sync(() => expect(Array.from(lines)).toEqual(["ready"]))),
                 Effect.timeoutOrElse({

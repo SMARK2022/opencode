@@ -87,9 +87,14 @@ describe("OpenAI Chat route", () => {
               { type: "reasoning", text: "  thinking  " },
               { type: "text", text: "Hello" },
             ]),
-            Message.assistant([{ type: "reasoning", text: "" }, { type: "text", text: "Answer" }]),
-            Message.assistant([{ type: "reasoning", text: "" },
-              ToolCallPart.make({ id: "call_502", name: "read", input: { filePath: "a.ts" } })]),
+            Message.assistant([
+              { type: "reasoning", text: "" },
+              { type: "text", text: "Answer" },
+            ]),
+            Message.assistant([
+              { type: "reasoning", text: "" },
+              ToolCallPart.make({ id: "call_502", name: "read", input: { filePath: "a.ts" } }),
+            ]),
           ],
         }),
       )
@@ -97,23 +102,36 @@ describe("OpenAI Chat route", () => {
       expect(prepared.body.messages).toEqual([
         { role: "assistant", content: "Hello", reasoning_content: "  thinking  " },
         { role: "assistant", content: "Answer" },
-        { role: "assistant", content: null, tool_calls: [{ id: "call_502", type: "function",
-          function: { name: "read", arguments: '{"filePath":"a.ts"}' } }] },
+        {
+          role: "assistant",
+          content: null,
+          tool_calls: [
+            { id: "call_502", type: "function", function: { name: "read", arguments: '{"filePath":"a.ts"}' } },
+          ],
+        },
       ])
       // 复用真实 prepare 校验 DeepSeek：先删除空消息，再为有内容的助手补必填字段。
-      const deepseek = yield* LLMClient.prepare<OpenAIChat.OpenAIChatBody>(LLM.request({
-        model: model.route.model({ id: "deepseek-reasoner" }),
-        messages: [
-          Message.assistant([{ type: "reasoning", text: "" }]),
-          Message.assistant("Answer"),
-          Message.assistant([{ type: "reasoning", text: "  thinking  " },
-            ToolCallPart.make({ id: "call_503", name: "read", input: {} })]),
-        ],
-      }))
+      const deepseek = yield* LLMClient.prepare<OpenAIChat.OpenAIChatBody>(
+        LLM.request({
+          model: model.route.model({ id: "deepseek-reasoner" }),
+          messages: [
+            Message.assistant([{ type: "reasoning", text: "" }]),
+            Message.assistant("Answer"),
+            Message.assistant([
+              { type: "reasoning", text: "  thinking  " },
+              ToolCallPart.make({ id: "call_503", name: "read", input: {} }),
+            ]),
+          ],
+        }),
+      )
       expect(deepseek.body.messages).toEqual([
         { role: "assistant", content: "Answer", reasoning_content: "" },
-        { role: "assistant", content: null, reasoning_content: "  thinking  ",
-          tool_calls: [{ id: "call_503", type: "function", function: { name: "read", arguments: "{}" } }] },
+        {
+          role: "assistant",
+          content: null,
+          reasoning_content: "  thinking  ",
+          tool_calls: [{ id: "call_503", type: "function", function: { name: "read", arguments: "{}" } }],
+        },
       ])
     }),
   )
@@ -132,11 +150,16 @@ describe("OpenAI Chat route", () => {
       expect(prepared.body.reasoning_effort).toBe("low")
       // 沿用真实 Chat prepare，普通 raw route 的既有精确 body 期望继续要求无默认字段。
       expect(prepared.body.parallel_tool_calls).toBe(true)
-      const serial = yield* LLMClient.prepare<OpenAIChat.OpenAIChatBody>(LLM.request({
-        model: OpenAI.configure({ baseURL: "https://api.openai.test/v1/", apiKey: "test",
-          providerOptions: { openai: { parallelToolCalls: false } },
-        }).chat("gpt-4o-mini"), prompt: "think",
-      }))
+      const serial = yield* LLMClient.prepare<OpenAIChat.OpenAIChatBody>(
+        LLM.request({
+          model: OpenAI.configure({
+            baseURL: "https://api.openai.test/v1/",
+            apiKey: "test",
+            providerOptions: { openai: { parallelToolCalls: false } },
+          }).chat("gpt-4o-mini"),
+          prompt: "think",
+        }),
+      )
       // facade 上的 false 与 request 上的 false 都必须穿过合并及 Schema 校验。
       expect(serial.body.parallel_tool_calls).toBe(false)
     }),

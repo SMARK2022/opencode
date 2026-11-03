@@ -9,14 +9,14 @@
 > Audit mode: full-scope
 >
 > Requirement source: |
->   详细完整检查全面的内容，按照如上我们要求的逻辑进行相应修改，本侧实现集中在
->   permission/reviewer/service.ts 的收口,保持整体逻辑理顺、服从整体项目的开发和
->   实现风格，移除或者替换旧的逻辑。我希望整体的修改保持甜点级别,也就是不要修改
->   过于冗余。整体修改文件数量控制在4个代码文件以内，同时代码修改不超过800行。
+> 详细完整检查全面的内容，按照如上我们要求的逻辑进行相应修改，本侧实现集中在
+> permission/reviewer/service.ts 的收口,保持整体逻辑理顺、服从整体项目的开发和
+> 实现风格，移除或者替换旧的逻辑。我希望整体的修改保持甜点级别,也就是不要修改
+> 过于冗余。整体修改文件数量控制在4个代码文件以内，同时代码修改不超过800行。
 >
->   （对话上下文确认的行为目标：对齐 SessionProcessor 的 tool 终态收口保证——
->   ensuring 必跑、message 与 tool 同收、优先 durable 扫描、finalize 失败不可完全
->   无痕迹；不把 reviewer 整段并入 SessionProcessor；不负责 daemon 启动扫历史。）
+> （对话上下文确认的行为目标：对齐 SessionProcessor 的 tool 终态收口保证——
+> ensuring 必跑、message 与 tool 同收、优先 durable 扫描、finalize 失败不可完全
+> 无痕迹；不把 reviewer 整段并入 SessionProcessor；不负责 daemon 启动扫历史。）
 >
 > Implementation allowed: no further material changes without revision or rework
 >
@@ -53,26 +53,26 @@ permission/reviewer/service.ts 的收口,保持整体逻辑理顺、服从整体
 
 ## 3. Repository Context
 
-| Source | Why it constrains this task |
-| --- | --- |
-| `CONTEXT.md` | Session / Message / Tool / Permission 词汇；reviewer 写的是 Message Part 与 Tool state |
-| `packages/opencode/AGENTS.md` | Effect 模块形态、测试在 package 目录运行、typecheck 用 `bun typecheck` |
-| 根 `AGENTS.md` | 默认分支 `dev`、测试勿从 repo root 跑 |
-| `.opencode/policy/first-principles-engineering.md` | 修 first divergence、禁止 fallback 堆叠、一责任一主路径 |
-| SessionProcessor 既有设计 | `Effect.ensuring(cleanup())` 是主会话 tool 终态权威模式 |
+| Source                                             | Why it constrains this task                                                            |
+| -------------------------------------------------- | -------------------------------------------------------------------------------------- |
+| `CONTEXT.md`                                       | Session / Message / Tool / Permission 词汇；reviewer 写的是 Message Part 与 Tool state |
+| `packages/opencode/AGENTS.md`                      | Effect 模块形态、测试在 package 目录运行、typecheck 用 `bun typecheck`                 |
+| 根 `AGENTS.md`                                     | 默认分支 `dev`、测试勿从 repo root 跑                                                  |
+| `.opencode/policy/first-principles-engineering.md` | 修 first divergence、禁止 fallback 堆叠、一责任一主路径                                |
+| SessionProcessor 既有设计                          | `Effect.ensuring(cleanup())` 是主会话 tool 终态权威模式                                |
 
 ## 4. Files and Evidence Read
 
-| Evidence | Relevance | Evidence class |
-| --- | --- | --- |
-| `packages/opencode/src/permission/reviewer/service.ts` | attempt timeout、stream finalize、message onInterrupt 双 handler | observed |
-| `packages/opencode/src/session/processor.ts` | `TOOL_ABORTED_ERROR`、`ensuring(cleanup)`、open tool→error | observed / contracted |
-| `packages/opencode/src/session/prompt.ts` | cancel → `abortPendingToolParts`（仅 incomplete assistant） | observed |
-| `packages/opencode/src/session/message-v2.ts` | `MessageV2.get` / `parts(messageID)` durable hydrate | observed |
-| `packages/opencode/src/tool/permission_review_decision.ts` | 协议 tool 无副作用 | contracted |
-| `packages/opencode/test/permission/reviewer-service.test.ts` | 已有 interrupt/drain/completed-winner closure 测 | observed |
-| `~/.local/share/opencode/opencode.db` | 3 条 orphan：msg Aborted + tool pending；lag≈90005–90008ms | observed |
-| 既有 closure 测试运行结果 | 3 pass（Fiber.interrupt 路径绿） | observed |
+| Evidence                                                     | Relevance                                                        | Evidence class        |
+| ------------------------------------------------------------ | ---------------------------------------------------------------- | --------------------- |
+| `packages/opencode/src/permission/reviewer/service.ts`       | attempt timeout、stream finalize、message onInterrupt 双 handler | observed              |
+| `packages/opencode/src/session/processor.ts`                 | `TOOL_ABORTED_ERROR`、`ensuring(cleanup)`、open tool→error       | observed / contracted |
+| `packages/opencode/src/session/prompt.ts`                    | cancel → `abortPendingToolParts`（仅 incomplete assistant）      | observed              |
+| `packages/opencode/src/session/message-v2.ts`                | `MessageV2.get` / `parts(messageID)` durable hydrate             | observed              |
+| `packages/opencode/src/tool/permission_review_decision.ts`   | 协议 tool 无副作用                                               | contracted            |
+| `packages/opencode/test/permission/reviewer-service.test.ts` | 已有 interrupt/drain/completed-winner closure 测                 | observed              |
+| `~/.local/share/opencode/opencode.db`                        | 3 条 orphan：msg Aborted + tool pending；lag≈90005–90008ms       | observed              |
+| 既有 closure 测试运行结果                                    | 3 pass（Fiber.interrupt 路径绿）                                 | observed              |
 
 ## 5. Current Behavior
 
@@ -111,28 +111,28 @@ SessionProcessor.process
 
 ## 6. Supported Input Domain and Reachability
 
-| Input or condition | Producer | Upstream guarantees | Reachable path | Owner | Classification |
-| --- | --- | --- | --- | --- | --- |
-| per-attempt timeout | `Effect.timeoutOrElse` + `timeout_ms` | 中断 attempt fiber | `reviewerRetry` → interrupt stream + message handlers | PermissionReviewer | observed / contracted |
-| Fiber / session cancel interrupt | cancel / outer interrupt | 中断不是 failure | stream + message onInterrupt | PermissionReviewer | observed |
-| Stream incomplete after tool-input-start | provider SSE 无合法 tool-call | drain 后协议错误 | finalize + protocol retry | PermissionReviewer | observed / tested |
-| Completed decision before interrupt | tool-call 已 durable completed | completed 是 winner | finalize must skip | PermissionReviewer | observed / tested |
-| Crash before any handler | process kill | 无 in-process handler | **out of scope**（daemon 扫描） | daemon reconcile | observed |
+| Input or condition                       | Producer                              | Upstream guarantees   | Reachable path                                        | Owner              | Classification        |
+| ---------------------------------------- | ------------------------------------- | --------------------- | ----------------------------------------------------- | ------------------ | --------------------- |
+| per-attempt timeout                      | `Effect.timeoutOrElse` + `timeout_ms` | 中断 attempt fiber    | `reviewerRetry` → interrupt stream + message handlers | PermissionReviewer | observed / contracted |
+| Fiber / session cancel interrupt         | cancel / outer interrupt              | 中断不是 failure      | stream + message onInterrupt                          | PermissionReviewer | observed              |
+| Stream incomplete after tool-input-start | provider SSE 无合法 tool-call         | drain 后协议错误      | finalize + protocol retry                             | PermissionReviewer | observed / tested     |
+| Completed decision before interrupt      | tool-call 已 durable completed        | completed 是 winner   | finalize must skip                                    | PermissionReviewer | observed / tested     |
+| Crash before any handler                 | process kill                          | 无 in-process handler | **out of scope**（daemon 扫描）                       | daemon reconcile   | observed              |
 
 ## 7. Required Invariants
 
-| ID | Behavioral invariant | Evidence | Existing test |
-| --- | --- | --- | --- |
+| ID     | Behavioral invariant                                                                                                                                         | Evidence                              | Existing test                                       |
+| ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------- | --------------------------------------------------- |
 | INV-01 | 任一 attempt 在 interrupt/timeout/stream-failure/drain-incomplete 退出后，该 attempt 所写的 `permission_review_decision` Part 不得停留在 `pending`/`running` | DB 3 zombies 违反；processor 对等保证 | partial: interrupt pending→error；缺 timeout 共终态 |
-| INV-02 | message 写入 `time.completed`（含 Aborted）时，同 message 下 open tool 必须已是终态（completed/error） | DB: msg completed + tool pending | **missing** |
-| INV-03 | 已 `completed` 的 decision tool 不得被 abort cleanup 覆盖为 error | completed-winner 注释与测试 | `preserves a completed decision Tool…` |
-| INV-04 | 收口失败不得把 reviewer 失败伪装成 allow/deny 成功 | fail-closed 注释 | 既有 failure/fallback 测 |
-| INV-05 | 修改保持甜点：≤4 代码文件、≤800 行；不并入 SessionProcessor | 用户约束 | N/A |
+| INV-02 | message 写入 `time.completed`（含 Aborted）时，同 message 下 open tool 必须已是终态（completed/error）                                                       | DB: msg completed + tool pending      | **missing**                                         |
+| INV-03 | 已 `completed` 的 decision tool 不得被 abort cleanup 覆盖为 error                                                                                            | completed-winner 注释与测试           | `preserves a completed decision Tool…`              |
+| INV-04 | 收口失败不得把 reviewer 失败伪装成 allow/deny 成功                                                                                                           | fail-closed 注释                      | 既有 failure/fallback 测                            |
+| INV-05 | 修改保持甜点：≤4 代码文件、≤800 行；不并入 SessionProcessor                                                                                                  | 用户约束                              | N/A                                                 |
 
 ## 8. First Divergence and Root Cause
 
-| Invariant | First divergence | Owning module/interface | Proof |
-| --- | --- | --- | --- |
+| Invariant       | First divergence                                                                                                                                                                                                                                                             | Owning module/interface                                              | Proof                                                                                                                                     |
+| --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
 | INV-01 / INV-02 | `tool-input-start` 已 durable 写 pending 后，attempt 退出时 **tool 终态不保证执行**：仅 stream 的 `onInterrupt`/`tapError`/drain 后调用 `finalizeOpenToolParts`；**无 `ensuring`**；**只扫内存 `toolParts`**；失败 **catch void**；**外层 message 终态 handler 不闭合 tool** | `PermissionReviewer` / `runReviewerStream` + `runReviewerAgent` 收口 | 代码结构；DB lag≈90s + Aborted message + empty pending tool；既有 Fiber.interrupt 测绿说明旁路有时可用，但与 timeout/半写组合无共终态保证 |
 
 根因（first divergence）：
@@ -188,12 +188,12 @@ Observed: **3 pass**。证明 Fiber.interrupt + barrier 路径当前可绿；**�
 
 ## 9. Responsibility and Seam
 
-| Concern | Owner | Interface promise | Why it belongs here | Why another module does not own it |
-| --- | --- | --- | --- | --- |
-| Reviewer attempt stream tool lifecycle | `PermissionReviewer` | hidden audit transcript 上协议 tool 的 pending→terminal | 它创建 part 并拥有 stream | SessionProcessor 被安全边界排除 |
-| Reviewer assistant message terminal | `PermissionReviewer.runReviewerAgent` | message 必有 completed 或 error | 它创建 message | cancel 只处理 incomplete + 不扫已 completed orphan |
-| Parent autoReview display | `updateToolAutoReview` | reviewing→timed_out/aborted/… | 父会话 tool metadata | 不写子会话协议 tool part |
-| Crash orphan 全库修复 | daemon reconcile（out of scope） | 无 runner 时 interrupt 收口 | 进程边界 | reviewer 无启动 hook |
+| Concern                                | Owner                                 | Interface promise                                       | Why it belongs here       | Why another module does not own it                 |
+| -------------------------------------- | ------------------------------------- | ------------------------------------------------------- | ------------------------- | -------------------------------------------------- |
+| Reviewer attempt stream tool lifecycle | `PermissionReviewer`                  | hidden audit transcript 上协议 tool 的 pending→terminal | 它创建 part 并拥有 stream | SessionProcessor 被安全边界排除                    |
+| Reviewer assistant message terminal    | `PermissionReviewer.runReviewerAgent` | message 必有 completed 或 error                         | 它创建 message            | cancel 只处理 incomplete + 不扫已 completed orphan |
+| Parent autoReview display              | `updateToolAutoReview`                | reviewing→timed_out/aborted/…                           | 父会话 tool metadata      | 不写子会话协议 tool part                           |
+| Crash orphan 全库修复                  | daemon reconcile（out of scope）      | 无 runner 时 interrupt 收口                             | 进程边界                  | reviewer 无启动 hook                               |
 
 ## 10. Single Approved Primary-Path Design
 
@@ -224,57 +224,57 @@ attempt exit (timeout | interrupt | stream error | drain incomplete)
 
 ## 11. Secondary and Replacement Path Inventory
 
-| Path | Current or proposed | Classification | Produces success? | Decision-surface share | Disposition |
-| --- | --- | --- | --- | --- | --- |
-| ensuring + durable finalize on attempt exit | proposed primary | primary | no (cleanup only) | main | **add as primary terminal** |
-| stream onInterrupt/tapError finalize | current | primary-contract branch（早收口） | no | secondary early | **preserve if idempotent** under ensuring |
-| outer message-only onInterrupt | current | **forbidden incomplete terminal** | no | bug | **replace** with finalize-then-message |
-| map-only finalize | current | incomplete primary | no | bug | **expand** to map ∪ durable |
-| catch void on finalize | current | diagnostic-ish but silent | no | hides failure | **replace** with log + still no success invent |
-| Merge into SessionProcessor | rejected | forbidden alternate architecture | n/a | n/a | **reject** |
-| Daemon boot scan | other task | existing/planned elsewhere | n/a | n/a | **out of scope** |
-| JSON fallback assessment | current | primary-contract domain branch | yes (valid assessment) | protocol | **preserve**（不改） |
-| Protocol retry hide | current | primary-contract | no | protocol | **preserve** |
+| Path                                        | Current or proposed | Classification                    | Produces success?      | Decision-surface share | Disposition                                    |
+| ------------------------------------------- | ------------------- | --------------------------------- | ---------------------- | ---------------------- | ---------------------------------------------- |
+| ensuring + durable finalize on attempt exit | proposed primary    | primary                           | no (cleanup only)      | main                   | **add as primary terminal**                    |
+| stream onInterrupt/tapError finalize        | current             | primary-contract branch（早收口） | no                     | secondary early        | **preserve if idempotent** under ensuring      |
+| outer message-only onInterrupt              | current             | **forbidden incomplete terminal** | no                     | bug                    | **replace** with finalize-then-message         |
+| map-only finalize                           | current             | incomplete primary                | no                     | bug                    | **expand** to map ∪ durable                    |
+| catch void on finalize                      | current             | diagnostic-ish but silent         | no                     | hides failure          | **replace** with log + still no success invent |
+| Merge into SessionProcessor                 | rejected            | forbidden alternate architecture  | n/a                    | n/a                    | **reject**                                     |
+| Daemon boot scan                            | other task          | existing/planned elsewhere        | n/a                    | n/a                    | **out of scope**                               |
+| JSON fallback assessment                    | current             | primary-contract domain branch    | yes (valid assessment) | protocol               | **preserve**（不改）                           |
+| Protocol retry hide                         | current             | primary-contract                  | no                     | protocol               | **preserve**                                   |
 
 New alternate success paths: **0**.
 
 ## 12. Workaround Deletion and Replacement
 
-| Existing workaround or duplicate | Why it existed | Why the approved route supersedes it | Delete or collapse location |
-| --- | --- | --- | --- |
-| 外层 message onInterrupt 假定内层必关 tool | 注释依赖 stream finalize | 外层直接 finalize 后写 message | `runReviewerAgent` onInterrupt/tapError |
-| 仅内存 `toolParts` 扫描 | 快路径 ownership | durable 是 SQLite 真相；map 作加速 | `finalizeOpenToolParts` |
-| finalize `catch void` 无痕迹 | 避免 cleanup 污染 provider error shape | 可继续不 fail 业务，但必须 log | finalize helpers |
-| drain 后再 finalize 作为唯一“正常”闭合 | 防 retry 累积 pending | ensuring 覆盖更多退出；drain 次保留幂等 | stream use 段 |
+| Existing workaround or duplicate           | Why it existed                         | Why the approved route supersedes it    | Delete or collapse location             |
+| ------------------------------------------ | -------------------------------------- | --------------------------------------- | --------------------------------------- |
+| 外层 message onInterrupt 假定内层必关 tool | 注释依赖 stream finalize               | 外层直接 finalize 后写 message          | `runReviewerAgent` onInterrupt/tapError |
+| 仅内存 `toolParts` 扫描                    | 快路径 ownership                       | durable 是 SQLite 真相；map 作加速      | `finalizeOpenToolParts`                 |
+| finalize `catch void` 无痕迹               | 避免 cleanup 污染 provider error shape | 可继续不 fail 业务，但必须 log          | finalize helpers                        |
+| drain 后再 finalize 作为唯一“正常”闭合     | 防 retry 累积 pending                  | ensuring 覆盖更多退出；drain 次保留幂等 | stream use 段                           |
 
 ## 13. Forward Traceability
 
-| Requirement or invariant | Production path | Planned file/change | Behavioral test |
-| --- | --- | --- | --- |
-| INV-01 tool 不留 pending | ensuring finalize + durable scan | `service.ts` finalize + ensuring | 新：timeout/pending stream 后无 open tool；旧：interrupt pending→error |
-| INV-02 message completed ⇒ tools terminal | finalize before updateMessage | `service.ts` outer handlers | 新：assert message.completed **and** tool error |
-| INV-03 completed winner | skip non-open in finalize | 保留 finalize status guard | 既有 completed-winner 测 |
-| INV-04 fail-closed | finalize 不 return assessment | 无成功合成 | 既有 failure 路径；finalize 失败不 mark allow |
-| INV-05 甜点范围 | ≤2–3 files, ≪800 lines | service + test（可选 import 常量） | review diff 规模 |
-| 用户：集中 service 收口 | 只改 reviewer terminal | 不改 auto/processor 主循环 | 文件清单 |
+| Requirement or invariant                  | Production path                  | Planned file/change                | Behavioral test                                                        |
+| ----------------------------------------- | -------------------------------- | ---------------------------------- | ---------------------------------------------------------------------- |
+| INV-01 tool 不留 pending                  | ensuring finalize + durable scan | `service.ts` finalize + ensuring   | 新：timeout/pending stream 后无 open tool；旧：interrupt pending→error |
+| INV-02 message completed ⇒ tools terminal | finalize before updateMessage    | `service.ts` outer handlers        | 新：assert message.completed **and** tool error                        |
+| INV-03 completed winner                   | skip non-open in finalize        | 保留 finalize status guard         | 既有 completed-winner 测                                               |
+| INV-04 fail-closed                        | finalize 不 return assessment    | 无成功合成                         | 既有 failure 路径；finalize 失败不 mark allow                          |
+| INV-05 甜点范围                           | ≤2–3 files, ≪800 lines           | service + test（可选 import 常量） | review diff 规模                                                       |
+| 用户：集中 service 收口                   | 只改 reviewer terminal           | 不改 auto/processor 主循环         | 文件清单                                                               |
 
 ## 14. Reverse Traceability
 
-| Proposed production concept | Requirement ID | Evidence | Why existing logic cannot carry it |
-| --- | --- | --- | --- |
-| `finalizeAttemptTools` (map ∪ durable) | INV-01, INV-02 | DB orphan；map-only 可漏 | 现 finalize 不扫 message parts |
-| `Effect.ensuring(finalize)` on stream | INV-01 | processor 对等；现无 ensuring | onInterrupt 可被中断/吞掉 |
-| finalize-before-message on outer handlers | INV-02 | msg Aborted + tool pending | 外层只写 message |
-| log on finalize failure | INV-01 observability | catch void 无痕迹 | 现完全静默 |
-| import `TOOL_ABORTED_ERROR` | INV-01 文案一致 | processor 常量 | 可选；字面量对齐亦可 |
+| Proposed production concept               | Requirement ID       | Evidence                      | Why existing logic cannot carry it |
+| ----------------------------------------- | -------------------- | ----------------------------- | ---------------------------------- |
+| `finalizeAttemptTools` (map ∪ durable)    | INV-01, INV-02       | DB orphan；map-only 可漏      | 现 finalize 不扫 message parts     |
+| `Effect.ensuring(finalize)` on stream     | INV-01               | processor 对等；现无 ensuring | onInterrupt 可被中断/吞掉          |
+| finalize-before-message on outer handlers | INV-02               | msg Aborted + tool pending    | 外层只写 message                   |
+| log on finalize failure                   | INV-01 observability | catch void 无痕迹             | 现完全静默                         |
+| import `TOOL_ABORTED_ERROR`               | INV-01 文案一致      | processor 常量                | 可选；字面量对齐亦可               |
 
 ## 15. File-Level Change Plan
 
-| File | Add / modify / delete | Exact responsibility of the change | Expected line delta |
-| --- | --- | --- | --- |
-| `packages/opencode/src/permission/reviewer/service.ts` | modify | ensuring finalize；durable 扫描；外层先 tool 后 message；log；替换弱收口 | +40～90 / ~20 替换 |
-| `packages/opencode/test/permission/reviewer-service.test.ts` | modify | 新 timeout/共终态 red-green；保留既有 closure 测 | +80～150 |
-| `packages/opencode/src/session/processor.ts` | modify（可选，≤5 行） | 仅若 export 复用 `TOOL_ABORTED_ERROR`；**不改 cleanup 逻辑** | 0～5 |
+| File                                                         | Add / modify / delete | Exact responsibility of the change                                       | Expected line delta |
+| ------------------------------------------------------------ | --------------------- | ------------------------------------------------------------------------ | ------------------- |
+| `packages/opencode/src/permission/reviewer/service.ts`       | modify                | ensuring finalize；durable 扫描；外层先 tool 后 message；log；替换弱收口 | +40～90 / ~20 替换  |
+| `packages/opencode/test/permission/reviewer-service.test.ts` | modify                | 新 timeout/共终态 red-green；保留既有 closure 测                         | +80～150            |
+| `packages/opencode/src/session/processor.ts`                 | modify（可选，≤5 行） | 仅若 export 复用 `TOOL_ABORTED_ERROR`；**不改 cleanup 逻辑**             | 0～5                |
 
 **上限：≤3 代码文件，≪800 行。禁止第 4 个生产模块。**
 
@@ -282,20 +282,20 @@ New alternate success paths: **0**.
 
 Public seam: `PermissionReviewer.Service.review` + 持久化后的 child-session tool/message 状态。
 
-| Order | Red behavior | Why current code fails | Minimal green behavior | Regression protected |
-| --- | --- | --- | --- | --- |
-| 1 | timeout/interrupt 后：`permission_review_decision` 不得 pending；message 已 completed | 无 ensuring / 外层不关 tool / 可能仅 map | ensuring + finalize-before-message + durable | 用户僵尸形态 |
-| 2 | 已 completed decision 不被 cleanup 改成 error | 若误扫覆盖 | skip non-open | completed-winner |
-| 3 | drain incomplete 仍无 open tool | 已有测 | 保持 finalize 幂等 | drain closure |
+| Order | Red behavior                                                                          | Why current code fails                   | Minimal green behavior                       | Regression protected |
+| ----- | ------------------------------------------------------------------------------------- | ---------------------------------------- | -------------------------------------------- | -------------------- |
+| 1     | timeout/interrupt 后：`permission_review_decision` 不得 pending；message 已 completed | 无 ensuring / 外层不关 tool / 可能仅 map | ensuring + finalize-before-message + durable | 用户僵尸形态         |
+| 2     | 已 completed decision 不被 cleanup 改成 error                                         | 若误扫覆盖                               | skip non-open                                | completed-winner     |
+| 3     | drain incomplete 仍无 open tool                                                       | 已有测                                   | 保持 finalize 幂等                           | drain closure        |
 
 测试规则：独立期望字面量（`"Tool execution aborted"`、`status: "error"`）；不断言私有 map 内容；不复制 finalize 算法。
 
 ## 17. Chinese Comment Budget
 
-| Metric | Estimate | Method |
-| --- | --- | --- |
-| Effective changed code lines `E` | 50–80 | 排除 import-only/纯格式 |
-| Required Chinese explanatory comments `C` | ≥ `max(1, ceil(E*0.15))` ≈ 8–12 | 邻近修改点 |
+| Metric                                    | Estimate                        | Method                  |
+| ----------------------------------------- | ------------------------------- | ----------------------- |
+| Effective changed code lines `E`          | 50–80                           | 排除 import-only/纯格式 |
+| Required Chinese explanatory comments `C` | ≥ `max(1, ceil(E*0.15))` ≈ 8–12 | 邻近修改点              |
 
 需中文说明的点：
 
@@ -307,33 +307,33 @@ Public seam: `PermissionReviewer.Service.review` + 持久化后的 child-session
 
 ## 18. Verification
 
-| Command | Working directory | Evidence produced |
-| --- | --- | --- |
-| `bun test test/permission/reviewer-service.test.ts -t "closes a pending\|closes open\|preserves a completed\|timeout\|共终态\|terminal"`（最终以实际 test 名为准） | `packages/opencode` | 新+旧 closure 行为 |
-| `bun test test/permission/reviewer-service.test.ts` | `packages/opencode` | reviewer 全文件回归 |
-| `bun typecheck` | `packages/opencode` | 类型 |
-| （可选）Loop A sqlite count | host | 历史僵尸仍可能=3；记录 non-goal |
+| Command                                                                                                                                                            | Working directory   | Evidence produced               |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------- | ------------------------------- |
+| `bun test test/permission/reviewer-service.test.ts -t "closes a pending\|closes open\|preserves a completed\|timeout\|共终态\|terminal"`（最终以实际 test 名为准） | `packages/opencode` | 新+旧 closure 行为              |
+| `bun test test/permission/reviewer-service.test.ts`                                                                                                                | `packages/opencode` | reviewer 全文件回归             |
+| `bun typecheck`                                                                                                                                                    | `packages/opencode` | 类型                            |
+| （可选）Loop A sqlite count                                                                                                                                        | host                | 历史僵尸仍可能=3；记录 non-goal |
 
 ## 19. Diff Budget
 
-| Metric | Estimate | Justification |
-| --- | --- | --- |
-| Files added | 0 | 不新开模块 |
-| Files modified | 2（最多 3） | service + test（+可选 processor 常量） |
-| Files deleted | 0 | |
-| Production lines | 40–100 | 甜点收口 |
-| Test lines | 80–150 | timeout 共终态 |
-| Generated lines | 0 | |
-| **Total** | **≪800** | 用户硬上限 |
+| Metric           | Estimate    | Justification                          |
+| ---------------- | ----------- | -------------------------------------- |
+| Files added      | 0           | 不新开模块                             |
+| Files modified   | 2（最多 3） | service + test（+可选 processor 常量） |
+| Files deleted    | 0           |                                        |
+| Production lines | 40–100      | 甜点收口                               |
+| Test lines       | 80–150      | timeout 共终态                         |
+| Generated lines  | 0           |                                        |
+| **Total**        | **≪800**    | 用户硬上限                             |
 
 ## 20. Real Risks and Open Decisions
 
-| Risk | Mitigation |
-| --- | --- |
-| ensuring 与 onInterrupt 双跑 | finalize 幂等（非 open 则 skip） |
+| Risk                                   | Mitigation                                                                             |
+| -------------------------------------- | -------------------------------------------------------------------------------------- |
+| ensuring 与 onInterrupt 双跑           | finalize 幂等（非 open 则 skip）                                                       |
 | MessageV2.get 在 mock Session 层不可用 | 测试用真实 Session 或 mock getPart + 列出 parts 的等价路径；生产用 MessageV2.get/parts |
-| finalize log 噪声 | 仅 warn；不改变 fail-closed |
-| 历史 3 行仍在 | non-goal；daemon 扫描 |
+| finalize log 噪声                      | 仅 warn；不改变 fail-closed                                                            |
+| 历史 3 行仍在                          | non-goal；daemon 扫描                                                                  |
 
 ### Open Decisions Requiring the User
 
@@ -360,9 +360,9 @@ The independent auditor must:
 
 ## 22. Plan Audit Record
 
-| Round | Audited revision | Full scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | R1 | yes | none | N-01 Loop C 实施期须真跑红；N-02 durable 失败降级 map；N-03 不必改 processor.ts | APPROVE | adversarial-auditor ses_06a28afd2ffefjUE84jv4ESlIp |
+| Round | Audited revision | Full scope? | Blocking findings | Non-blocking findings                                                           | Result  | Invocation reference                               |
+| ----- | ---------------- | ----------- | ----------------- | ------------------------------------------------------------------------------- | ------- | -------------------------------------------------- |
+| 1     | R1               | yes         | none              | N-01 Loop C 实施期须真跑红；N-02 durable 失败降级 map；N-03 不必改 processor.ts | APPROVE | adversarial-auditor ses_06a28afd2ffefjUE84jv4ESlIp |
 
 Independent auditor release verdict (verbatim summary fields):
 
@@ -378,11 +378,11 @@ Implementation allowed after recorder transition: only for exact R1
 
 ### Actual Files and Diff
 
-| File | Change |
-| --- | --- |
-| `packages/opencode/src/permission/reviewer/service.ts` | ensuring finalize；`closeOpenReviewerTools` map∪durable；外层 finalize-before-message；log |
-| `packages/opencode/test/permission/reviewer-service.test.ts` | timeout 共终态测；首次 error 写失败后仍闭合测 |
-| `docs/plans/permission-reviewer-tool-terminal-closure.md` | plan + evidence（非生产代码） |
+| File                                                         | Change                                                                                     |
+| ------------------------------------------------------------ | ------------------------------------------------------------------------------------------ |
+| `packages/opencode/src/permission/reviewer/service.ts`       | ensuring finalize；`closeOpenReviewerTools` map∪durable；外层 finalize-before-message；log |
+| `packages/opencode/test/permission/reviewer-service.test.ts` | timeout 共终态测；首次 error 写失败后仍闭合测                                              |
+| `docs/plans/permission-reviewer-tool-terminal-closure.md`    | plan + evidence（非生产代码）                                                              |
 
 `git diff --stat`（代码）：`service.ts` +198/-约44 净改；`reviewer-service.test.ts` +170；合计 ≪800 行、2 代码文件。
 
@@ -397,10 +397,10 @@ Implementation allowed after recorder transition: only for exact R1
 
 ### Verification Commands and Results
 
-| Command | Working directory | Result |
-| --- | --- | --- |
+| Command                                             | Working directory   | Result          |
+| --------------------------------------------------- | ------------------- | --------------- |
 | `bun test test/permission/reviewer-service.test.ts` | `packages/opencode` | 18 pass, 0 fail |
-| `bun typecheck` | `packages/opencode` | pass |
+| `bun typecheck`                                     | `packages/opencode` | pass            |
 
 ### Original Feedback-Loop Result
 
@@ -410,23 +410,23 @@ Implementation allowed after recorder transition: only for exact R1
 
 ### Actual Secondary and Replacement Path Inventory
 
-| Path | Classification | Disposition |
-| --- | --- | --- |
-| ensuring + map∪durable finalize | primary terminal | implemented |
+| Path                                       | Classification         | Disposition           |
+| ------------------------------------------ | ---------------------- | --------------------- |
+| ensuring + map∪durable finalize            | primary terminal       | implemented           |
 | stream onInterrupt/tapError early finalize | primary-contract early | preserved, idempotent |
-| outer finalize-before-message | primary terminal | implemented |
-| silent catch void | forbidden incomplete | replaced with log |
-| SessionProcessor merge | rejected | not done |
-| Daemon history scan | out of scope | not done |
+| outer finalize-before-message              | primary terminal       | implemented           |
+| silent catch void                          | forbidden incomplete   | replaced with log     |
+| SessionProcessor merge                     | rejected               | not done              |
+| Daemon history scan                        | out of scope           | not done              |
 
 ### Chinese Comment Calculation
 
-| Metric | Actual | Exclusions and evidence |
-| --- | --- | --- |
-| Effective changed code lines `E` | 266 | 独立审计：非空实质代码行，排除 import-only/空行/纯注释行 |
-| Qualifying Chinese comment lines `C` | 46 | 独立审计：INV/ensuring/durable/timeout 意图；排除 1 条复述过滤注释 |
-| Ratio `C / E` | ≈0.17 | |
-| Required minimum `C` | 40 | `ceil(266 * 0.15) = 40` |
+| Metric                               | Actual | Exclusions and evidence                                            |
+| ------------------------------------ | ------ | ------------------------------------------------------------------ |
+| Effective changed code lines `E`     | 266    | 独立审计：非空实质代码行，排除 import-only/空行/纯注释行           |
+| Qualifying Chinese comment lines `C` | 46     | 独立审计：INV/ensuring/durable/timeout 意图；排除 1 条复述过滤注释 |
+| Ratio `C / E`                        | ≈0.17  |                                                                    |
+| Required minimum `C`                 | 40     | `ceil(266 * 0.15) = 40`                                            |
 
 ### Remaining Unverified Items
 
@@ -435,9 +435,9 @@ Implementation allowed after recorder transition: only for exact R1
 
 ## 24. Implementation Audit Record
 
-| Round | Plan revision | Full original scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | R1 | yes | none | N-01 outer durable-only 测覆盖不足；N-02 builder E 曾把注释计入；N-03 审计 shell 未复跑命令 | APPROVE | adversarial-auditor ses_06a17a2c1ffetJx8rdK7BPyV0M |
+| Round | Plan revision | Full original scope? | Blocking findings | Non-blocking findings                                                                       | Result  | Invocation reference                               |
+| ----- | ------------- | -------------------- | ----------------- | ------------------------------------------------------------------------------------------- | ------- | -------------------------------------------------- |
+| 1     | R1            | yes                  | none              | N-01 outer durable-only 测覆盖不足；N-02 builder E 曾把注释计入；N-03 审计 shell 未复跑命令 | APPROVE | adversarial-auditor ses_06a17a2c1ffetJx8rdK7BPyV0M |
 
 Independent auditor release verdict (verbatim summary fields):
 

@@ -68,7 +68,11 @@ export async function notebookBridgeTools(output: vscode.OutputChannel) {
             ignoreFocusOut: true,
           })
           if (reason === undefined) return undefined
-          return notebookEnv({ filePath: notebook.uri.toString(), operation: operation.label, reason: reason || undefined })
+          return notebookEnv({
+            filePath: notebook.uri.toString(),
+            operation: operation.label,
+            reason: reason || undefined,
+          })
         },
       },
     ],
@@ -90,9 +94,7 @@ export async function notebookBridgeTools(output: vscode.OutputChannel) {
 
 async function selectNotebook() {
   // 已打开文档按完整 URI 去重，同名文件不合并成同一个候选项。
-  const notebooks = [
-    ...new Map(vscode.workspace.notebookDocuments.map((nb) => [nb.uri.toString(), nb])).values(),
-  ]
+  const notebooks = [...new Map(vscode.workspace.notebookDocuments.map((nb) => [nb.uri.toString(), nb])).values()]
   if (notebooks.length === 0) {
     // 所有入口都要求明确文档，无候选时提示并退出，不借用缺省运行时。
     void vscode.window.showWarningMessage("No open notebook documents found.")
@@ -206,7 +208,8 @@ async function editNotebookCommand() {
 
   // 面板提交与 HTTP 相同的三元契约，不能继续生成已移除的 operation 名称。
   const editType = await vscode.window.showQuickPick(["insert", "edit", "delete"], {
-    title: "vscode_notebook_edit", placeHolder: "选择编辑类型",
+    title: "vscode_notebook_edit",
+    placeHolder: "选择编辑类型",
   })
   if (!editType) return undefined
 
@@ -217,7 +220,8 @@ async function editNotebookCommand() {
   if (editType === "insert") {
     // 位置哨兵只属于 insert，编辑与删除仍必须经过真实格选择。
     const pos = await vscode.window.showQuickPick(["TOP", "BOTTOM", "所选格之后"], {
-      title: "插入位置", placeHolder: "选择插入位置",
+      title: "插入位置",
+      placeHolder: "选择插入位置",
     })
     if (!pos) return undefined
     if (pos === "TOP") {
@@ -237,15 +241,17 @@ async function editNotebookCommand() {
   }
 
   // 编辑框预填实时格源码；空字符串是显式清空，不能伪装成仅修改类型。
-  const newCode = editType === "delete"
-    ? undefined
-    : await vscode.window.showInputBox({
-        title: "vscode_notebook_edit newCode",
-        // 输入框的空串仍是显式清空；仅修改语言需要桥接 API 真正省略源码字段。
-        prompt: "newCode 可用 \\n 表示换行；空文本清空内容，取消退出。仅修改语言请通过桥接 API 省略 oldCode/newCode。",
-        value: editType === "edit" && cell ? cell.cell.document.getText().replace(/\n/g, "\\n") : "",
-        ignoreFocusOut: true,
-      })
+  const newCode =
+    editType === "delete"
+      ? undefined
+      : await vscode.window.showInputBox({
+          title: "vscode_notebook_edit newCode",
+          // 输入框的空串仍是显式清空；仅修改语言需要桥接 API 真正省略源码字段。
+          prompt:
+            "newCode 可用 \\n 表示换行；空文本清空内容，取消退出。仅修改语言请通过桥接 API 省略 oldCode/newCode。",
+          value: editType === "edit" && cell ? cell.cell.document.getText().replace(/\n/g, "\\n") : "",
+          ignoreFocusOut: true,
+        })
   // 取消输入不进入编辑 owner，避免 undefined 意外触发纯类型变更路径。
   if (editType !== "delete" && newCode === undefined) return undefined
 

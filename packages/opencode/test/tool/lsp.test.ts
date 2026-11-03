@@ -99,9 +99,11 @@ describe("tool.lsp", () => {
     Effect.gen(function* () {
       const service = yield* LSP.Service
       const { items, next } = asks()
-      const result = yield* Effect.exit(run({ operation: "hover", filePath: "not-read.ts", line: 1, character: 1 }, next).pipe(
-        Effect.provideService(LSP.Service, { ...service, hasClients: () => Effect.succeed(false) }),
-      ))
+      const result = yield* Effect.exit(
+        run({ operation: "hover", filePath: "not-read.ts", line: 1, character: 1 }, next).pipe(
+          Effect.provideService(LSP.Service, { ...service, hasClients: () => Effect.succeed(false) }),
+        ),
+      )
       expect(result._tag).toBe("Failure")
       if (result._tag !== "Failure") throw new Error("expected unavailable LSP")
       // 只注入不可用的假Service，不启动LSP；错误必须先于不存在文件和审批。

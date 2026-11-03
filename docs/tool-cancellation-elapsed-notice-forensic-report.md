@@ -30,24 +30,24 @@
 
 ### 1.1 核心源码
 
-| 文件 | 已确认职责 |
-| --- | --- |
-| `src/util/output-notice.ts` | `ExecutionNotice` 和 XML-like formatter；当前 source 硬编码 shell，reason 为 timeout/user_abort/exit |
-| `src/tool/shell.ts` | Bash 自己判定 abort、timeout、exit；output drain 后组装 Notice；已有 `started` 与 `metadata.durationMs` |
-| `src/session/prompt.ts` | `resolveTools()` 统一包装 local/MCP；已有 `timedToolExecution()`；另有 Task 和 direct shell 路径；progress metadata 当前会重置 start |
-| `src/session/processor.ts` | `failToolCall()`、abort settle、leftover cleanup 和 `interruptedToolMetadata()`；generic cancel 在此终态化 |
-| `src/session/message-v2.ts` | completed 直接回放；interrupted error 有 partial output 时按 output-available 回放并隐藏 abort error |
+| 文件                        | 已确认职责                                                                                                                           |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `src/util/output-notice.ts` | `ExecutionNotice` 和 XML-like formatter；当前 source 硬编码 shell，reason 为 timeout/user_abort/exit                                 |
+| `src/tool/shell.ts`         | Bash 自己判定 abort、timeout、exit；output drain 后组装 Notice；已有 `started` 与 `metadata.durationMs`                              |
+| `src/session/prompt.ts`     | `resolveTools()` 统一包装 local/MCP；已有 `timedToolExecution()`；另有 Task 和 direct shell 路径；progress metadata 当前会重置 start |
+| `src/session/processor.ts`  | `failToolCall()`、abort settle、leftover cleanup 和 `interruptedToolMetadata()`；generic cancel 在此终态化                           |
+| `src/session/message-v2.ts` | completed 直接回放；interrupted error 有 partial output 时按 output-available 回放并隐藏 abort error                                 |
 
 ### 1.2 测试和文档
 
-| 文件 | 已确认覆盖 |
-| --- | --- |
-| `test/tool/shell.test.ts` | Bash abort、timeout、exit、partial output、truncation |
-| `test/session/prompt.test.ts` | direct shell cancel、TERM-resistant shell、Bash cancel truncation、真实 SessionPrompt/Adapter |
-| `test/session/processor-effect.test.ts` | Processor interrupted metadata、cleanup、experimental event |
-| `test/session/message-v2.test.ts` | aborted partial output、error-text、provider message shape |
-| `docs/tool-output-notice-format-design.md` | Notice 应短、稳定、只陈述模型可用事实 |
-| `docs/abort-latency-fix-plan.md` | AI Bash 500ms escalation 与 direct shell 3 秒 policy 不同 |
+| 文件                                       | 已确认覆盖                                                                                    |
+| ------------------------------------------ | --------------------------------------------------------------------------------------------- |
+| `test/tool/shell.test.ts`                  | Bash abort、timeout、exit、partial output、truncation                                         |
+| `test/session/prompt.test.ts`              | direct shell cancel、TERM-resistant shell、Bash cancel truncation、真实 SessionPrompt/Adapter |
+| `test/session/processor-effect.test.ts`    | Processor interrupted metadata、cleanup、experimental event                                   |
+| `test/session/message-v2.test.ts`          | aborted partial output、error-text、provider message shape                                    |
+| `docs/tool-output-notice-format-design.md` | Notice 应短、稳定、只陈述模型可用事实                                                         |
+| `docs/abort-latency-fix-plan.md`           | AI Bash 500ms escalation 与 direct shell 3 秒 policy 不同                                     |
 
 ### 1.3 当前精确行为和数据库证据
 
@@ -178,14 +178,14 @@ interrupted=true + 有效 executionElapsedMs：
 
 ## 5. 边界、并发、兼容和安全
 
-| 场景 | 结果 |
-| --- | --- |
-| shell/local/MCP/Task 119999ms 成功 | output 原样 |
-| shell/local/MCP/Task 120000ms 成功 | completed + elapsed |
-| abort/timeout/non-zero 任意耗时 | 对应唯一 outcome + elapsed |
-| old interrupted 无 marker | 原样，不追溯 elapsed |
-| provider-executed | 无 elapsed |
-| direct shell 长 non-zero | 保持 completed 语义 |
+| 场景                               | 结果                       |
+| ---------------------------------- | -------------------------- |
+| shell/local/MCP/Task 119999ms 成功 | output 原样                |
+| shell/local/MCP/Task 120000ms 成功 | completed + elapsed        |
+| abort/timeout/non-zero 任意耗时    | 对应唯一 outcome + elapsed |
+| old interrupted 无 marker          | 原样，不追溯 elapsed       |
+| provider-executed                  | 无 elapsed                 |
+| direct shell 长 non-zero           | 保持 completed 语义        |
 
 不新增 Map、generation token 或 terminalizer；继续依赖 Processor 的 `readToolCall()`、terminal guard 和 Deferred settle。Bash completed 与 generic interrupted error 互斥，local Adapter 对 Bash skip，abort 优先于 long completed，因此不重复系统 Notice。不解析工具正文中的仿冒 XML。
 
@@ -199,7 +199,7 @@ experimental event 兼容边界：local/MCP long success 和 cooperative abort �
 
 1. abort/timeout/non-zero 保留现有行为并包含正整数 elapsed。
 2. 直接测试生产 `formatShellExecutionNotice()`：119999 无 completed，120000 有 completed。
-3. >=120秒 abort 只有 user_abort；timeout 只有 timeout；non-zero 只有 exit；空输出 exit 0 保留 exit。
+3. > =120秒 abort 只有 user_abort；timeout 只有 timeout；non-zero 只有 exit；空输出 exit 0 保留 exit。
 4. truncation 后 execution Notice 在尾部且仅一条。
 
 ShellTool 没有 clock seam，不真实等待 120 秒、不全局 mock `Date.now()`。ShellTool 直接调用上述受测 pure policy，真实进程测试负责验证正 elapsed 和输出顺序。
@@ -253,11 +253,11 @@ git diff --stat
 
 ## 8. Git 改动估算
 
-| 类别 | 文件数 | 预计改动 |
-| --- | ---: | ---: |
-| 源码 | 5 | 约 100-200 行 |
-| 测试 | 4 | 约 140-260 行 |
-| 合计 | 9 | 约 240-460 行 |
+| 类别 | 文件数 |      预计改动 |
+| ---- | -----: | ------------: |
+| 源码 |      5 | 约 100-200 行 |
+| 测试 |      4 | 约 140-260 行 |
+| 合计 |      9 | 约 240-460 行 |
 
 ```text
 新增/删除源码文件：0
@@ -291,12 +291,12 @@ SDK 生成：0
 
 当前 120 秒最小方案必须经过 subagent 同范围完整审计。审计发现阻塞项时先修订本文，再重新完整审计，最多 6 轮；只有出现一次无阻塞结论才能放行。
 
-| 轮次 | 结果 |
-| --- | --- |
-| 1 | 阻塞：experimental event 边界未定义；错误声称存在 Bash clock seam |
-| 2 | 阻塞：event parity 测试放错层；formatter test 未证明 Shell outcome wiring |
-| 3 | 阻塞：SessionPrompt 长成功端到端测试无确定性 clock seam |
-| 4 | 无阻塞意见，放行 |
+| 轮次 | 结果                                                                      |
+| ---- | ------------------------------------------------------------------------- |
+| 1    | 阻塞：experimental event 边界未定义；错误声称存在 Bash clock seam         |
+| 2    | 阻塞：event parity 测试放错层；formatter test 未证明 Shell outcome wiring |
+| 3    | 阻塞：SessionPrompt 长成功端到端测试无确定性 clock seam                   |
+| 4    | 无阻塞意见，放行                                                          |
 
 ## 12. 最终推荐
 

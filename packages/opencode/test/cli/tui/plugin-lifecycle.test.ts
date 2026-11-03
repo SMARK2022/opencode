@@ -322,13 +322,17 @@ test(
   },
   { timeout: 15000 },
 )
-test("disposes pending external init and resources registered after abort", async () => {
-  await using tmp = await tmpdir({
-    init: async (dir) => {
-      const file = path.join(dir, "pending-plugin.ts")
-      const started = path.join(dir, "started.txt")
-      const marker = path.join(dir, "cleaned.txt")
-      await Bun.write(file, `export default {
+test(
+  "disposes pending external init and resources registered after abort",
+  async () => {
+    await using tmp = await tmpdir({
+      init: async (dir) => {
+        const file = path.join(dir, "pending-plugin.ts")
+        const started = path.join(dir, "started.txt")
+        const marker = path.join(dir, "cleaned.txt")
+        await Bun.write(
+          file,
+          `export default {
   id: "demo.pending.exit",
   tui: async (api, options) => {
     await Bun.write(options.started, "started")
@@ -344,34 +348,51 @@ test("disposes pending external init and resources registered after abort", asyn
     api.lifecycle.onDispose(async () => { await Bun.write(options.marker, "cleaned") })
   },
 }
-`)
-      return { spec: pathToFileURL(file).href, started, marker }
-    },
-  })
-  const { config, restore } = mockTuiRuntime(tmp.path, [[tmp.extra.spec, { started: tmp.extra.started, marker: tmp.extra.marker }]])
-  const count = { event_add: 0, event_drop: 0, route_add: 0, route_drop: 0, command_add: 0, command_drop: 0 }
-  try {
-    await TuiPluginRuntime.init({ api: createTuiPluginApi({ count }), config })
-    // marker 确认真实 init 已进入等待，不用 sleep 或尚未激活的空状态作为退出证据。
-    await Effect.runPromise(pollWithTimeout(
-      Effect.promise(() => Bun.file(tmp.extra.started).exists().then((exists) => exists ? true : undefined)),
-      "external plugin init did not start",
-    ))
-    const before = { ...count }
-    // dispose 必须主动 abort 才能解开 init；完成后再验证 abort 后登记的资源也被回收。
-    await Effect.runPromise(awaitWithTimeout(
-      Effect.promise(() => TuiPluginRuntime.dispose()), "pending external plugin init did not exit",
-    ))
-    expect(count.event_add).toBe(before.event_add + 1)
-    expect(count.route_add).toBe(before.route_add + 1)
-    expect(count.event_drop).toBe(count.event_add)
-    expect(count.route_drop).toBe(count.route_add)
-    await expect(fs.readFile(tmp.extra.marker, "utf8")).resolves.toBe("cleaned")
-  } finally {
-    // 失败路径仍有界清理 fixture，原测试错误保持，不能再用无界 dispose 把失败挂住。
-    await Effect.runPromise(awaitWithTimeout(
-      Effect.promise(() => TuiPluginRuntime.dispose()), "pending plugin fixture cleanup did not exit",
-    )).catch(() => {})
-    restore()
-  }
-}, { timeout: 15000 })
+`,
+        )
+        return { spec: pathToFileURL(file).href, started, marker }
+      },
+    })
+    const { config, restore } = mockTuiRuntime(tmp.path, [
+      [tmp.extra.spec, { started: tmp.extra.started, marker: tmp.extra.marker }],
+    ])
+    const count = { event_add: 0, event_drop: 0, route_add: 0, route_drop: 0, command_add: 0, command_drop: 0 }
+    try {
+      await TuiPluginRuntime.init({ api: createTuiPluginApi({ count }), config })
+      // marker 确认真实 init 已进入等待，不用 sleep 或尚未激活的空状态作为退出证据。
+      await Effect.runPromise(
+        pollWithTimeout(
+          Effect.promise(() =>
+            Bun.file(tmp.extra.started)
+              .exists()
+              .then((exists) => (exists ? true : undefined)),
+          ),
+          "external plugin init did not start",
+        ),
+      )
+      const before = { ...count }
+      // dispose 必须主动 abort 才能解开 init；完成后再验证 abort 后登记的资源也被回收。
+      await Effect.runPromise(
+        awaitWithTimeout(
+          Effect.promise(() => TuiPluginRuntime.dispose()),
+          "pending external plugin init did not exit",
+        ),
+      )
+      expect(count.event_add).toBe(before.event_add + 1)
+      expect(count.route_add).toBe(before.route_add + 1)
+      expect(count.event_drop).toBe(count.event_add)
+      expect(count.route_drop).toBe(count.route_add)
+      await expect(fs.readFile(tmp.extra.marker, "utf8")).resolves.toBe("cleaned")
+    } finally {
+      // 失败路径仍有界清理 fixture，原测试错误保持，不能再用无界 dispose 把失败挂住。
+      await Effect.runPromise(
+        awaitWithTimeout(
+          Effect.promise(() => TuiPluginRuntime.dispose()),
+          "pending plugin fixture cleanup did not exit",
+        ),
+      ).catch(() => {})
+      restore()
+    }
+  },
+  { timeout: 15000 },
+)

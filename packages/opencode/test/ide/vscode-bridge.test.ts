@@ -23,7 +23,9 @@ describe("vscode bridge discovery", () => {
     const dir = await tempRegistry()
     // SDK实际运行在Node；Bun的http兼容层不派发断开的response.close，不能替代此边界。
     const entry = path.join(dir, "worker.ts")
-    await fs.writeFile(entry, `
+    await fs.writeFile(
+      entry,
+      `
       import assert from "node:assert/strict";
       import { subscribe } from "node:diagnostics_channel";
       import { activateBridge, closeBridge } from ${JSON.stringify(path.resolve(import.meta.dir, "../../../../sdks/vscode/src/bridge.ts"))};
@@ -55,11 +57,21 @@ describe("vscode bridge discovery", () => {
         assert.deepEqual(workspace.notebookDocuments[0].getCells().map(c=>c.document.getText()),['first','second','barrier']);
         assert.equal(executions,1);
       } finally { abortRun.abort(); abortEdit.abort(); release.resolve(); await closeBridge(); }
-    `)
+    `,
+    )
     // 只替代VS Code文档API；服务器、HTTP连接、队列与handler均为实际实现。
-    const build = await Bun.build({ entrypoints: [entry], target: "node", outdir: dir, plugins: [{ name: "vscode-fixture", setup(build) {
-      build.onResolve({ filter: /^vscode$/ }, () => ({ path: "vscode", namespace: "fixture" }))
-      build.onLoad({ filter: /.*/, namespace: "fixture" }, () => ({ loader: "js", contents: `
+    const build = await Bun.build({
+      entrypoints: [entry],
+      target: "node",
+      outdir: dir,
+      plugins: [
+        {
+          name: "vscode-fixture",
+          setup(build) {
+            build.onResolve({ filter: /^vscode$/ }, () => ({ path: "vscode", namespace: "fixture" }))
+            build.onLoad({ filter: /.*/, namespace: "fixture" }, () => ({
+              loader: "js",
+              contents: `
         const uri = value => ({ fsPath:value, scheme:'file',fragment:value.split('#')[1]||'',toString(){return value} });
         export const env={appName:'test'}, extensions={getExtension(){}};
         export const NotebookCellKind={Code:2,Markup:1}, EndOfLine={LF:1,CRLF:2};
@@ -86,10 +98,17 @@ describe("vscode bridge discovery", () => {
           for(const fn of listeners)fn({notebook,cellChanges:[{cell,executionSummary:cell.executionSummary}]});
         }};
         export default {env,extensions,NotebookCellKind,EndOfLine,Uri,NotebookRange,NotebookCellData,WorkspaceEdit,NotebookEdit,workspace,window,commands};
-      ` }))
-    } }] })
+      `,
+            }))
+          },
+        },
+      ],
+    })
     expect(build.success).toBe(true)
-    const child = Bun.spawnSync(["node", path.join(dir, "worker.js")], { env: { ...process.env, OPENCODE_IDE_REGISTRY_DIR: dir }, timeout: 10_000 })
+    const child = Bun.spawnSync(["node", path.join(dir, "worker.js")], {
+      env: { ...process.env, OPENCODE_IDE_REGISTRY_DIR: dir },
+      timeout: 10_000,
+    })
     // 子进程断言失败或超时必须使CI变红，不能吞掉stderr里的实际缺陷。
     expect({ exit: child.exitCode, error: child.stderr.toString() }).toEqual({ exit: 0, error: "" })
   })
@@ -100,16 +119,20 @@ describe("vscode bridge discovery", () => {
     const filePath = path.join(dir, "new.ipynb")
     await writeEntry(dir, "11111111-1111-1111-1111-111111111111", server.port, dir)
     // 同一不存在的路径，create与读取的契约不同；不能放松全部路由。
-    await expect(VscodeBridge.callBridge({ cwd: dir, filePath, path: "/notebook/env", body: { filePath, operation: "create" } })).resolves.toMatchObject({ summary: "ok" })
-    await expect(VscodeBridge.callBridge({ cwd: dir, filePath, path: "/notebook/summary", body: { filePath } })).rejects.toThrow("does not exist")
+    await expect(
+      VscodeBridge.callBridge({ cwd: dir, filePath, path: "/notebook/env", body: { filePath, operation: "create" } }),
+    ).resolves.toMatchObject({ summary: "ok" })
+    await expect(
+      VscodeBridge.callBridge({ cwd: dir, filePath, path: "/notebook/summary", body: { filePath } }),
+    ).rejects.toThrow("does not exist")
   })
 
   // 测试用例：验证桥接发现和路径匹配逻辑
-// 边界条件：空目录时应返回空数组，不抛出异常
-// 测试意图：验证 stale 条目（超过 staleMs）被正确移除
-// 测试意图：验证 PID 失效的条目被移除，即使未超过 staleMs
+  // 边界条件：空目录时应返回空数组，不抛出异常
+  // 测试意图：验证 stale 条目（超过 staleMs）被正确移除
+  // 测试意图：验证 PID 失效的条目被移除，即使未超过 staleMs
 
-test("selects registry bridge matching the requested file path", async () => {
+  test("selects registry bridge matching the requested file path", async () => {
     using first = await bridgeServer()
     using second = await bridgeServer()
     const dir = await tempRegistry()
@@ -154,7 +177,15 @@ test("selects registry bridge matching the requested file path", async () => {
     const abort = new AbortController()
     abort.abort(new Error("cancelled before request"))
     // 已发生的abort不会再次派发事件，入口必须消费signal当前状态。
-    await expect(VscodeBridge.callBridge({ cwd: dir, filePath: path.join(dir, "new.ipynb"), path: "/notebook/env", body: { operation: "create" }, signal: abort.signal })).rejects.toThrow("cancelled before request")
+    await expect(
+      VscodeBridge.callBridge({
+        cwd: dir,
+        filePath: path.join(dir, "new.ipynb"),
+        path: "/notebook/env",
+        body: { operation: "create" },
+        signal: abort.signal,
+      }),
+    ).rejects.toThrow("cancelled before request")
   })
 
   // #219：损坏条目跳过且经宽限后清理——发现仍选择活桥
@@ -224,7 +255,7 @@ test("selects registry bridge matching the requested file path", async () => {
     expect((await fs.stat(foreignJson)).isFile()).toBe(true)
   })
 
-test("rejects file paths that do not match any live VS Code workspace", async () => {
+  test("rejects file paths that do not match any live VS Code workspace", async () => {
     using server = await bridgeServer()
     const dir = await tempRegistry()
     // #219：fixture ID 改为 UUID 格式——匹配生产发现过滤
@@ -238,7 +269,7 @@ test("rejects file paths that do not match any live VS Code workspace", async ()
     ).rejects.toThrow("No live VS Code bridge workspace matches filePath")
   })
 
-test("ignores and removes stale registry entries", async () => {
+  test("ignores and removes stale registry entries", async () => {
     const dir = await tempRegistry()
     // #219：fixture ID 改为 UUID 格式——过期文件名也须匹配 UUID 清单
     const staleId = "11111111-1111-1111-1111-111111111111"
@@ -265,7 +296,9 @@ test("ignores and removes stale registry entries", async () => {
     using serverA = await postBridgeServer()
     using serverB = await postBridgeServer()
     await writeEntry(dir, "11111111-1111-1111-1111-111111111111", serverA.port, cwd, Date.now(), { notebook: fileA })
-    await writeEntry(dir, "22222222-2222-2222-2222-222222222222", serverB.port, cwd, Date.now() + 1, { notebook: fileB })
+    await writeEntry(dir, "22222222-2222-2222-2222-222222222222", serverB.port, cwd, Date.now() + 1, {
+      notebook: fileB,
+    })
 
     // 创建磁盘文件以满足 assertExistingLocalFilePath
     await fs.mkdir(cwd, { recursive: true })
@@ -274,12 +307,24 @@ test("ignores and removes stale registry entries", async () => {
 
     // serverA 的 POST 处理被阻塞直到 releaseA 被调用；
     // 如果全局队列仍在，serverB 的请求会被 serverA 阻塞，promise 会超时
-    const callA = VscodeBridge.callBridge({ cwd, path: "/notebook/summary", body: { filePath: fileA }, filePath: fileA, timeoutMs: 5_000 })
+    const callA = VscodeBridge.callBridge({
+      cwd,
+      path: "/notebook/summary",
+      body: { filePath: fileA },
+      filePath: fileA,
+      timeoutMs: 5_000,
+    })
     // 等首个POST真正到达，再证明另一文档没有被它阻塞。
     await serverA.started
     // callB 应该能立即完成，不被 callA 阻塞
     try {
-      const resultB = await VscodeBridge.callBridge({ cwd, path: "/notebook/summary", body: { filePath: fileB }, filePath: fileB, timeoutMs: 5_000 })
+      const resultB = await VscodeBridge.callBridge({
+        cwd,
+        path: "/notebook/summary",
+        body: { filePath: fileB },
+        filePath: fileB,
+        timeoutMs: 5_000,
+      })
       expect(resultB).toBeDefined()
     } finally {
       serverA.release()
@@ -295,7 +340,14 @@ async function tempRegistry() {
   return dir
 }
 
-async function writeEntry(dir: string, id: string, port: number, workspace: string, updatedAt = Date.now(), active?: { notebook?: string }) {
+async function writeEntry(
+  dir: string,
+  id: string,
+  port: number,
+  workspace: string,
+  updatedAt = Date.now(),
+  active?: { notebook?: string },
+) {
   await fs.writeFile(
     path.join(dir, `${id}.json`),
     JSON.stringify({
@@ -343,9 +395,13 @@ async function bridgeServer() {
 // 用于验证客户端移除全局队列后不同文件的请求能真正并发。
 async function postBridgeServer() {
   let release!: () => void
-  const blocked = new Promise<void>((resolve) => { release = resolve })
+  const blocked = new Promise<void>((resolve) => {
+    release = resolve
+  })
   let ready!: () => void
-  const started = new Promise<void>((resolve) => { ready = resolve })
+  const started = new Promise<void>((resolve) => {
+    ready = resolve
+  })
   const server = http.createServer((request, response) => {
     if (request.url === "/health") {
       response.writeHead(200, { "Content-Type": "application/json" })
@@ -355,7 +411,9 @@ async function postBridgeServer() {
     if (request.method === "POST") {
       let body = ""
       request.setEncoding("utf8")
-      request.on("data", (chunk: string) => { body += chunk })
+      request.on("data", (chunk: string) => {
+        body += chunk
+      })
       request.on("end", async () => {
         // 第一个请求阻塞直到 release；通过 body 中 filePath 区分
         const parsed = JSON.parse(body || "{}")

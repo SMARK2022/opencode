@@ -32,20 +32,20 @@
 
 ## 3. 必须保持的既有行为（测试锁定）
 
-| 输入 | 期望 | 依据 |
-|---|---|---|
-| `echo $HOME` | general | :205（`$` 动态展开）|
-| `ls *.ts` | general | :209（glob）|
-| `echo hello > out.txt` | general | :227（文件重定向改 FS）|
-| `git status & rg TODO src` | general | :69（单 `&`）|
-| `git status\nrg TODO src` | general | :70（换行；若 split 会变 safe，破坏）|
-| `chmod\n-u+s ...` / `cat\n.env` / `iptables\n-F` / `kill -9\n-1` | general | :746-752（换行分隔使命令与 flag 解耦）|
-| `git status '` / `git status &&` / `| git status` / `git status |` / `   ` | general | :231-235（畸形）|
-| `rm -rf /tmp/.web_api_cache\n/Users/...` | cautious | :744（raw 层捕 rm）|
-| `Remove-Item ... > deleted.log` | cautious | :85（raw 层捕删除）|
-| `cmd /c "del ..." 2>&1` / `pwsh -Command "Remove-Item..." 2>&1` | cautious/dangerous | :126-130,:147（raw 层；`2>&1` 未锁 general）|
-| `git status && rg TODO src; pwd` | safe | :34（正常 split）|
-| `scp ...`（无特殊字符）| cautious | classifyTokens :1136 |
+| 输入                                                             | 期望                    | 依据                                         |
+| ---------------------------------------------------------------- | ----------------------- | -------------------------------------------- | ------- | ---------------- |
+| `echo $HOME`                                                     | general                 | :205（`$` 动态展开）                         |
+| `ls *.ts`                                                        | general                 | :209（glob）                                 |
+| `echo hello > out.txt`                                           | general                 | :227（文件重定向改 FS）                      |
+| `git status & rg TODO src`                                       | general                 | :69（单 `&`）                                |
+| `git status\nrg TODO src`                                        | general                 | :70（换行；若 split 会变 safe，破坏）        |
+| `chmod\n-u+s ...` / `cat\n.env` / `iptables\n-F` / `kill -9\n-1` | general                 | :746-752（换行分隔使命令与 flag 解耦）       |
+| `git status '` / `git status &&` / `                             | git status`/`git status | `/` `                                        | general | :231-235（畸形） |
+| `rm -rf /tmp/.web_api_cache\n/Users/...`                         | cautious                | :744（raw 层捕 rm）                          |
+| `Remove-Item ... > deleted.log`                                  | cautious                | :85（raw 层捕删除）                          |
+| `cmd /c "del ..." 2>&1` / `pwsh -Command "Remove-Item..." 2>&1`  | cautious/dangerous      | :126-130,:147（raw 层；`2>&1` 未锁 general） |
+| `git status && rg TODO src; pwd`                                 | safe                    | :34（正常 split）                            |
+| `scp ...`（无特殊字符）                                          | cautious                | classifyTokens :1136                         |
 
 **核心约束**：`$`/glob/文件重定向/单`&`/换行 → general 是**测试锁定且语义合理**（动态/写文件/解耦），
 **不能改**。换行**必须 bail 不能 split**（否则 `git status\nrg`→safe 破坏 :70）。
@@ -70,6 +70,7 @@
 取 max。segments 为空且 opaque → general（等价旧行为）。
 
 **效果**（bail 段不入 segments，余文至下一分隔符为新干净段；post-bail 片段若无可识别命令则归类 general）：
+
 - `scp; echo $HOME` → bail 段="echo "(到`$`止)；干净段=["scp"](cautious) + ["HOME"](general) → max(cautious,general,general)=**cautious**（修）。
 - `git status & rg TODO src` → bail 段="git status"(单`&`)；干净段=["rg TODO src"](safe) → max(safe,general)=general ✓。
 - `git status\nrg TODO src` → bail 段="git status"(换行)；干净段=["rg TODO src"](safe) → general ✓。
@@ -78,6 +79,7 @@
 ### 改动 B：fd-merge 重定向跳过（不 bail）
 
 在 splitCommands 扫描到 `>` 或 `<` 时，先看是否 fd-merge（`>&\d` / `>&-` / `<&\d` / `<&-`，即 `2>&1`/`1>&2`/`>&2`/`2>&-`）：
+
 - 是 → **原子消费**该 fd-merge token（连同 `&` 与 fd 数字一起跳过并前进索引），**继续当前段**（不 bail）。
 - 否（`>file`/`>>file`/`<file`/`2>file`/`2>/dev/null` 等文件重定向）→ 当前段 opaque（保 :227）。
 
@@ -86,6 +88,7 @@
 并跳过 `&1`，否则 `scp 2>&1` 会因 `&` bail 变 opaque→general，改动 B 失效。
 
 **边界**：
+
 - `>&2`（无前导数字）→ `>&\d` 匹配 → 跳过 → 段干净（fd-merge 语义）。
 - `>& /dev/tcp`（`>&` 后非数字/`-`）→ 不匹配 fd-merge → opaque（reverse-shell 由 raw 层 RE_D_REVERSE_SHELL 捕获，双保险）。
 - `2>/dev/null` 形如 `2>file` → opaque → general（不做 `/dev/null` 特例，避免过度假设）。
@@ -119,6 +122,7 @@
 先写测试（当前实现下暴露缺口），再实现：
 
 新增 test("marks scp cautious through fd-merge redirect"):
+
 - `scp host:a b 2>&1` → cautious（当前 general，暴露缺口）
 - `scp host:a b 1>&2` → cautious
 - `scp host:a b 2>&1; echo done` → cautious
@@ -127,6 +131,7 @@
 - `echo hello >> out.txt` → general（回归守卫）
 
 新增 test("does not let opaque segment poison cautious sibling"):
+
 - `scp host:a b; echo $HOME` → cautious（当前 general，暴露缺口）
 - `scp host:a b; ls *.ts` → cautious
 - `git status; scp host:a b` → cautious

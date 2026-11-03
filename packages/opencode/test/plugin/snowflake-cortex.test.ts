@@ -165,7 +165,8 @@ describe("plugin.snowflake-cortex", () => {
       seenAuth.push(new Headers(init?.headers).get("authorization") || "")
       if (apiCalls === 1) return new Response("unauthorized", { status: 401 })
       return new Response('data: {"choices":[{"delta":{"role":"","content":"hello"}}]}\n\n', {
-        status: 200, headers: { "content-type": "text/event-stream" },
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
       })
     })
 

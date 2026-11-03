@@ -48,42 +48,42 @@ the main worktree unless the user later replaces that instruction.
 
 ## 3. Repository Context
 
-| Source | Why it constrains this task |
-| --- | --- |
-| `AGENTS.md` | Tests and typechecks run from package directories; use Bun APIs where practical; keep changes minimal. |
-| `packages/opencode/AGENTS.md` | Defines package module style and the ownership of process-wide and per-Project runtime resources. |
-| `packages/opencode/test/AGENTS.md` | Requires behavioral tests, scoped cleanup, and published synchronization rather than timing guesses. |
-| `CONTEXT.md` | Establishes `packages/opencode` as the core package and distinguishes process-wide AppRuntime/native boundaries from per-Project state. |
-| `docs/adr/README.md` | No accepted ADR governs unit-test process sharding; this bounded orchestration change does not create an ADR. |
-| `.opencode/policy/first-principles-engineering.md` | Requires first-divergence repair, no fallback, full traceability, TDD, independent audits, and the Chinese-comment gate. |
-| `.opencode/templates/canonical-plan.md` | Defines this plan's required structure and approval metadata. |
+| Source                                             | Why it constrains this task                                                                                                             |
+| -------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `AGENTS.md`                                        | Tests and typechecks run from package directories; use Bun APIs where practical; keep changes minimal.                                  |
+| `packages/opencode/AGENTS.md`                      | Defines package module style and the ownership of process-wide and per-Project runtime resources.                                       |
+| `packages/opencode/test/AGENTS.md`                 | Requires behavioral tests, scoped cleanup, and published synchronization rather than timing guesses.                                    |
+| `CONTEXT.md`                                       | Establishes `packages/opencode` as the core package and distinguishes process-wide AppRuntime/native boundaries from per-Project state. |
+| `docs/adr/README.md`                               | No accepted ADR governs unit-test process sharding; this bounded orchestration change does not create an ADR.                           |
+| `.opencode/policy/first-principles-engineering.md` | Requires first-divergence repair, no fallback, full traceability, TDD, independent audits, and the Chinese-comment gate.                |
+| `.opencode/templates/canonical-plan.md`            | Defines this plan's required structure and approval metadata.                                                                           |
 
 ## 4. Files and Evidence Read
 
-| Evidence | Relevance | Evidence class |
-| --- | --- | --- |
-| `packages/opencode/package.json:8-17` | `test:ci` currently launches all package tests in one Bun process and writes one JUnit file. | observed |
-| `turbo.json:16-23` | Turbo currently caches only `.artifacts/unit/junit.xml` for `opencode#test:ci`. | observed |
-| `.github/workflows/test.yml:30-164` | Required jobs invoke `test:ci`, check one report path, publish it, and preserve the command's failure. | observed |
-| `.github/workflows/test.yml:330-395` | Upstream-warning jobs also consume the package JUnit output. | observed |
-| `packages/opencode/test/cli/tui/daemon.test.ts` | The full-suite crash occurs after this group on failing jobs; it does not import an OpenTUI renderer directly. | observed |
-| `packages/opencode/test/cli/cmd/tui/dialog-prompt.test.tsx` | Exercises a real OpenTUI renderer and was the last visible test group in the original user log. | observed |
-| `packages/opencode/test/cli/tui/slot-replace.test.tsx` | One real renderer cleanup defect was found, but repairing it did not remove the native crash. | observed |
-| `packages/opencode/test/cli/tui/use-event.test.tsx` | Explicit engine detach did not remove the native crash. | observed |
-| `node_modules/@opentui/solid/index.js` | `testRender` creates and mounts a native-backed renderer and attaches the process-global timeline engine. | observed |
-| `node_modules/@opentui/core/index.js` and bundled implementation | Renderer destruction crosses into `opentui.dll`; the timeline engine and TreeSitter client have process-lifetime state. | observed |
-| GitHub run `30131430684` | Unmodified full suite reproduced the same native crash in 2 of 3 Windows jobs. | observed |
-| GitHub runs `30133291043`, `30134941727`, `30136588180`, `30137948676` | Unthreaded render, slot cleanup, engine detach, and pre-created KV state did not eliminate the crash. | observed |
-| GitHub run `30146552374` | OpenTUI `smark.1` still crashed in 2 of 3 jobs, rejecting `smark.2` as a sufficient cause. | observed |
-| GitHub run `30149299984` | Bun `--max-concurrency=1` still crashed in 2 of 3 jobs, rejecting test concurrency as a sufficient cause. | observed |
-| GitHub run `30166717141` | Removing only file-mutation tests still produced the same native crash; that file is not necessary for failure. | observed |
-| GitHub run `30168396381` | The 70 CLI/TUI files ran in one dedicated process three times: each had 606 pass, 0 fail, 618 tests, and no native crash. | observed |
-| GitHub run `30168972664` | All 297 files were partitioned exactly once into 227 core and 70 CLI/TUI files; 0 of 3 jobs had a native crash, every TUI shard passed, two jobs fully passed, and one core shard had one unrelated DB assertion failure. | observed |
-| Local `Bun.Glob` probe | Current main worktree finds 298 test files; Windows returns `test\\...` paths, so path normalization is required before cross-platform classification. | observed |
-| Main `dev-smark` commit `0581314208` and current `db-maintenance.test.ts:177-207` | The old diagnostic branch's DB assertion used `Promise.race`; current main waits for CLI exit, checks terminal ownership, then awaits contender acquisition. | observed |
-| Main package run `bun test test/cli/db-maintenance.test.ts -t "holds the daemon election while initially offline compression runs" --rerun-each 20` | Current main passed `20 pass`, `0 fail`; the diagnostic DB failure is not present at the implementation base. | observed |
-| Main package run `bun test test/cli/tui/daemon.test.ts -t "daemon startup resumes an interrupted maintenance task from its persisted record" --rerun-each 10` | Current main passed `10 pass`, `0 fail`; the daemon timeout is covered as regression verification, not an unresolved excluded error. | observed |
-| `packages/opencode/test/script/install-target.test.ts` | Establishes the existing seam for importing and testing package scripts through exported pure functions. | observed |
+| Evidence                                                                                                                                                      | Relevance                                                                                                                                                                                                                 | Evidence class |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------- |
+| `packages/opencode/package.json:8-17`                                                                                                                         | `test:ci` currently launches all package tests in one Bun process and writes one JUnit file.                                                                                                                              | observed       |
+| `turbo.json:16-23`                                                                                                                                            | Turbo currently caches only `.artifacts/unit/junit.xml` for `opencode#test:ci`.                                                                                                                                           | observed       |
+| `.github/workflows/test.yml:30-164`                                                                                                                           | Required jobs invoke `test:ci`, check one report path, publish it, and preserve the command's failure.                                                                                                                    | observed       |
+| `.github/workflows/test.yml:330-395`                                                                                                                          | Upstream-warning jobs also consume the package JUnit output.                                                                                                                                                              | observed       |
+| `packages/opencode/test/cli/tui/daemon.test.ts`                                                                                                               | The full-suite crash occurs after this group on failing jobs; it does not import an OpenTUI renderer directly.                                                                                                            | observed       |
+| `packages/opencode/test/cli/cmd/tui/dialog-prompt.test.tsx`                                                                                                   | Exercises a real OpenTUI renderer and was the last visible test group in the original user log.                                                                                                                           | observed       |
+| `packages/opencode/test/cli/tui/slot-replace.test.tsx`                                                                                                        | One real renderer cleanup defect was found, but repairing it did not remove the native crash.                                                                                                                             | observed       |
+| `packages/opencode/test/cli/tui/use-event.test.tsx`                                                                                                           | Explicit engine detach did not remove the native crash.                                                                                                                                                                   | observed       |
+| `node_modules/@opentui/solid/index.js`                                                                                                                        | `testRender` creates and mounts a native-backed renderer and attaches the process-global timeline engine.                                                                                                                 | observed       |
+| `node_modules/@opentui/core/index.js` and bundled implementation                                                                                              | Renderer destruction crosses into `opentui.dll`; the timeline engine and TreeSitter client have process-lifetime state.                                                                                                   | observed       |
+| GitHub run `30131430684`                                                                                                                                      | Unmodified full suite reproduced the same native crash in 2 of 3 Windows jobs.                                                                                                                                            | observed       |
+| GitHub runs `30133291043`, `30134941727`, `30136588180`, `30137948676`                                                                                        | Unthreaded render, slot cleanup, engine detach, and pre-created KV state did not eliminate the crash.                                                                                                                     | observed       |
+| GitHub run `30146552374`                                                                                                                                      | OpenTUI `smark.1` still crashed in 2 of 3 jobs, rejecting `smark.2` as a sufficient cause.                                                                                                                                | observed       |
+| GitHub run `30149299984`                                                                                                                                      | Bun `--max-concurrency=1` still crashed in 2 of 3 jobs, rejecting test concurrency as a sufficient cause.                                                                                                                 | observed       |
+| GitHub run `30166717141`                                                                                                                                      | Removing only file-mutation tests still produced the same native crash; that file is not necessary for failure.                                                                                                           | observed       |
+| GitHub run `30168396381`                                                                                                                                      | The 70 CLI/TUI files ran in one dedicated process three times: each had 606 pass, 0 fail, 618 tests, and no native crash.                                                                                                 | observed       |
+| GitHub run `30168972664`                                                                                                                                      | All 297 files were partitioned exactly once into 227 core and 70 CLI/TUI files; 0 of 3 jobs had a native crash, every TUI shard passed, two jobs fully passed, and one core shard had one unrelated DB assertion failure. | observed       |
+| Local `Bun.Glob` probe                                                                                                                                        | Current main worktree finds 298 test files; Windows returns `test\\...` paths, so path normalization is required before cross-platform classification.                                                                    | observed       |
+| Main `dev-smark` commit `0581314208` and current `db-maintenance.test.ts:177-207`                                                                             | The old diagnostic branch's DB assertion used `Promise.race`; current main waits for CLI exit, checks terminal ownership, then awaits contender acquisition.                                                              | observed       |
+| Main package run `bun test test/cli/db-maintenance.test.ts -t "holds the daemon election while initially offline compression runs" --rerun-each 20`           | Current main passed `20 pass`, `0 fail`; the diagnostic DB failure is not present at the implementation base.                                                                                                             | observed       |
+| Main package run `bun test test/cli/tui/daemon.test.ts -t "daemon startup resumes an interrupted maintenance task from its persisted record" --rerun-each 10` | Current main passed `10 pass`, `0 fail`; the daemon timeout is covered as regression verification, not an unresolved excluded error.                                                                                      | observed       |
+| `packages/opencode/test/script/install-target.test.ts`                                                                                                        | Establishes the existing seam for importing and testing package scripts through exported pure functions.                                                                                                                  | observed       |
 
 ## 5. Current Behavior
 
@@ -105,36 +105,36 @@ main's targeted stress run is green.
 
 ## 6. Supported Input Domain and Reachability
 
-| Input or condition | Producer | Upstream guarantees | Reachable path | Owner | Classification |
-| --- | --- | --- | --- | --- | --- |
-| `test/**/*.test.ts` and `test/**/*.test.tsx` paths | Package test tree through `Bun.Glob` | Files are tracked package test modules; path separators vary by OS. | `test:ci` -> test-file discovery -> shard classification | Package test orchestrator | observed |
-| `test/cli/run/**`, `test/cli/tui/**`, `test/cli/cmd/tui/**` | Existing CLI/TUI test layout | These are the exact 70-file slice proven stable in a fresh process. | discovered path -> normalized path -> TUI shard | Package test orchestrator | observed |
-| Every other discovered test file | Existing package test layout | Every non-TUI file must remain covered exactly once. | discovered path -> core shard | Package test orchestrator | observed |
-| A shard exits non-zero | Bun child test process | Bun exposes the child exit code and writes any available shard JUnit. | child exit -> aggregate command exit | Package test orchestrator | contracted |
-| Multiple JUnit files | Two mandatory shard processes | CI report and Turbo cache consumers currently expect one path. | shard output -> workflow publication/cache | CI adapter and Turbo task config | reachable |
-| DB election or daemon recovery regression | Existing current-main tests and their real PTY/lock producers | Current main already owns the DB ordering repair and daemon reconciliation repair. | targeted package tests -> required full-suite verification | DB/daemon owners; no new change in this plan | observed |
+| Input or condition                                          | Producer                                                      | Upstream guarantees                                                                | Reachable path                                             | Owner                                        | Classification |
+| ----------------------------------------------------------- | ------------------------------------------------------------- | ---------------------------------------------------------------------------------- | ---------------------------------------------------------- | -------------------------------------------- | -------------- |
+| `test/**/*.test.ts` and `test/**/*.test.tsx` paths          | Package test tree through `Bun.Glob`                          | Files are tracked package test modules; path separators vary by OS.                | `test:ci` -> test-file discovery -> shard classification   | Package test orchestrator                    | observed       |
+| `test/cli/run/**`, `test/cli/tui/**`, `test/cli/cmd/tui/**` | Existing CLI/TUI test layout                                  | These are the exact 70-file slice proven stable in a fresh process.                | discovered path -> normalized path -> TUI shard            | Package test orchestrator                    | observed       |
+| Every other discovered test file                            | Existing package test layout                                  | Every non-TUI file must remain covered exactly once.                               | discovered path -> core shard                              | Package test orchestrator                    | observed       |
+| A shard exits non-zero                                      | Bun child test process                                        | Bun exposes the child exit code and writes any available shard JUnit.              | child exit -> aggregate command exit                       | Package test orchestrator                    | contracted     |
+| Multiple JUnit files                                        | Two mandatory shard processes                                 | CI report and Turbo cache consumers currently expect one path.                     | shard output -> workflow publication/cache                 | CI adapter and Turbo task config             | reachable      |
+| DB election or daemon recovery regression                   | Existing current-main tests and their real PTY/lock producers | Current main already owns the DB ordering repair and daemon reconciliation repair. | targeted package tests -> required full-suite verification | DB/daemon owners; no new change in this plan | observed       |
 
 Speculative rows are omitted; no unsupported input or compatibility behavior is
 planned.
 
 ## 7. Required Invariants
 
-| ID | Behavioral invariant | Evidence | Existing test |
-| --- | --- | --- | --- |
-| INV-01 | Required CI runs every discovered opencode test file exactly once; process isolation may not reduce coverage. | User requirement; diagnostic coverage `297 = 227 + 70`, all unique. | No current partition-contract test. |
-| INV-02 | Native-backed CLI/TUI tests execute in a fresh Bun process that does not inherit the core shard's process-lifetime state. | Runs `30168396381` and `30168972664`. | GitHub diagnostic feedback loop only. |
-| INV-03 | Both shards run even if one reports a test failure, and any non-zero shard makes `test:ci` non-zero. | Existing Bun full-suite behavior continues after assertion failures; user requires no hidden errors. | No current orchestrator test. |
-| INV-04 | Every shard emits a separately publishable JUnit report, and CI/Turbo retain all reports. | Existing report publication/cache contract. | Existing workflow behavior only supports one report. |
-| INV-05 | User-facing application behavior and dependency versions remain unchanged. | Explicit user requirement. | Existing application suite and zero production-file diff. |
-| INV-06 | Current-main DB election and daemon recovery behaviors remain green; stale diagnostic-branch assertions are not reported as unresolved main errors. | Commit `0581314208`; current-main 20x DB and 10x daemon runs. | Existing targeted tests. |
+| ID     | Behavioral invariant                                                                                                                                | Evidence                                                                                             | Existing test                                             |
+| ------ | --------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- | --------------------------------------------------------- |
+| INV-01 | Required CI runs every discovered opencode test file exactly once; process isolation may not reduce coverage.                                       | User requirement; diagnostic coverage `297 = 227 + 70`, all unique.                                  | No current partition-contract test.                       |
+| INV-02 | Native-backed CLI/TUI tests execute in a fresh Bun process that does not inherit the core shard's process-lifetime state.                           | Runs `30168396381` and `30168972664`.                                                                | GitHub diagnostic feedback loop only.                     |
+| INV-03 | Both shards run even if one reports a test failure, and any non-zero shard makes `test:ci` non-zero.                                                | Existing Bun full-suite behavior continues after assertion failures; user requires no hidden errors. | No current orchestrator test.                             |
+| INV-04 | Every shard emits a separately publishable JUnit report, and CI/Turbo retain all reports.                                                           | Existing report publication/cache contract.                                                          | Existing workflow behavior only supports one report.      |
+| INV-05 | User-facing application behavior and dependency versions remain unchanged.                                                                          | Explicit user requirement.                                                                           | Existing application suite and zero production-file diff. |
+| INV-06 | Current-main DB election and daemon recovery behaviors remain green; stale diagnostic-branch assertions are not reported as unresolved main errors. | Commit `0581314208`; current-main 20x DB and 10x daemon runs.                                        | Existing targeted tests.                                  |
 
 ## 8. First Divergence and Root Cause
 
-| Invariant | First divergence | Owning module/interface | Proof |
-| --- | --- | --- | --- |
-| INV-02 | `packages/opencode`'s `test:ci` command chooses one Bun process for heterogeneous core tests and native-backed CLI/TUI tests, so the TUI phase does not begin with a fresh process lifetime. | Package test orchestration in `packages/opencode/package.json` and the planned `script/test-ci.ts`. | Full suite repeatedly crashes; focused TUI is 3/3 clean; exact full coverage in two processes is 0/3 native crashes. |
-| INV-04 | The package and its CI/cache consumers encode one fixed `junit.xml` output. | Package script, `.github/workflows/test.yml`, `turbo.json`. | Two mandatory processes necessarily produce independent reports; diagnostic run successfully uploaded both. |
-| INV-06 | The diagnostic run's DB failure is not a current-main first divergence: the branch predates `0581314208`, whose test contract is green on current main. | DB test owner and commit history. | Current main stress run: `20 pass, 0 fail`; no DB production/test edit is planned. |
+| Invariant | First divergence                                                                                                                                                                             | Owning module/interface                                                                             | Proof                                                                                                                |
+| --------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| INV-02    | `packages/opencode`'s `test:ci` command chooses one Bun process for heterogeneous core tests and native-backed CLI/TUI tests, so the TUI phase does not begin with a fresh process lifetime. | Package test orchestration in `packages/opencode/package.json` and the planned `script/test-ci.ts`. | Full suite repeatedly crashes; focused TUI is 3/3 clean; exact full coverage in two processes is 0/3 native crashes. |
+| INV-04    | The package and its CI/cache consumers encode one fixed `junit.xml` output.                                                                                                                  | Package script, `.github/workflows/test.yml`, `turbo.json`.                                         | Two mandatory processes necessarily produce independent reports; diagnostic run successfully uploaded both.          |
+| INV-06    | The diagnostic run's DB failure is not a current-main first divergence: the branch predates `0581314208`, whose test contract is green on current main.                                      | DB test owner and commit history.                                                                   | Current main stress run: `20 pass, 0 fail`; no DB production/test edit is planned.                                   |
 
 The downstream `opentui.dll` segmentation fault is not treated as an application
 logic defect. Repository evidence does not identify a safe source-level repair
@@ -172,12 +172,12 @@ are not substitutes for the original signal.
 
 ## 9. Responsibility and Seam
 
-| Concern | Owner | Interface promise | Why it belongs here | Why another module does not own it |
-| --- | --- | --- | --- | --- |
-| Discover and partition package tests | `packages/opencode/script/test-ci.ts` | `test:ci` covers every package test exactly once. | This is orchestration policy, not application behavior. | Individual tests must not know or compensate for global suite topology. |
-| Normalize test path representation | Same script | Classification is OS-independent. | `Bun.Glob` is the first seam that exposes OS-specific separators. | CI YAML should not duplicate package test taxonomy. |
-| Execute both mandatory shards and aggregate failure | Same script | Both domains run; any failure remains failure. | Retry/ordering/failure policy belongs to orchestration. | Turbo and GitHub should invoke one package contract, not reimplement it. |
-| Publish/cache multiple reports | `.github/workflows/test.yml`, `turbo.json` | All JUnit outputs remain available to existing consumers. | These files own report consumption and cache declarations. | The test runner must not merge or falsify independent test results. |
+| Concern                                             | Owner                                      | Interface promise                                         | Why it belongs here                                               | Why another module does not own it                                       |
+| --------------------------------------------------- | ------------------------------------------ | --------------------------------------------------------- | ----------------------------------------------------------------- | ------------------------------------------------------------------------ |
+| Discover and partition package tests                | `packages/opencode/script/test-ci.ts`      | `test:ci` covers every package test exactly once.         | This is orchestration policy, not application behavior.           | Individual tests must not know or compensate for global suite topology.  |
+| Normalize test path representation                  | Same script                                | Classification is OS-independent.                         | `Bun.Glob` is the first seam that exposes OS-specific separators. | CI YAML should not duplicate package test taxonomy.                      |
+| Execute both mandatory shards and aggregate failure | Same script                                | Both domains run; any failure remains failure.            | Retry/ordering/failure policy belongs to orchestration.           | Turbo and GitHub should invoke one package contract, not reimplement it. |
+| Publish/cache multiple reports                      | `.github/workflows/test.yml`, `turbo.json` | All JUnit outputs remain available to existing consumers. | These files own report consumption and cache declarations.        | The test runner must not merge or falsify independent test results.      |
 
 Confirmed TDD seams:
 
@@ -220,74 +220,74 @@ success route.
 
 ## 11. Secondary and Replacement Path Inventory
 
-| Path | Current or proposed | Classification | Produces success? | Decision-surface share | Disposition |
-| --- | --- | --- | --- | --- | --- |
-| Core test shard | proposed | primary-contract branch | Only when its tests pass | 50% of two mandatory executions | add |
-| CLI/TUI test shard | proposed | primary-contract branch | Only when its tests pass | 50% of two mandatory executions | add |
-| Continue to TUI after core failure | proposed | primary-contract branch | No; aggregate remains non-zero | 0% alternate-success surface | add |
-| Retry or skip after native failure | neither | forbidden fallback | Would attempt success | 0% | reject |
-| Platform-specific one-process route | neither | forbidden duplicate | Could compete with primary route | 0% | reject |
+| Path                                | Current or proposed | Classification          | Produces success?                | Decision-surface share          | Disposition |
+| ----------------------------------- | ------------------- | ----------------------- | -------------------------------- | ------------------------------- | ----------- |
+| Core test shard                     | proposed            | primary-contract branch | Only when its tests pass         | 50% of two mandatory executions | add         |
+| CLI/TUI test shard                  | proposed            | primary-contract branch | Only when its tests pass         | 50% of two mandatory executions | add         |
+| Continue to TUI after core failure  | proposed            | primary-contract branch | No; aggregate remains non-zero   | 0% alternate-success surface    | add         |
+| Retry or skip after native failure  | neither             | forbidden fallback      | Would attempt success            | 0%                              | reject      |
+| Platform-specific one-process route | neither             | forbidden duplicate     | Could compete with primary route | 0%                              | reject      |
 
 New alternate success paths: zero. Diagnostic decision surface: zero in the
 final implementation.
 
 ## 12. Workaround Deletion and Replacement
 
-| Existing workaround or duplicate | Why it existed | Why the approved route supersedes it | Delete or collapse location |
-| --- | --- | --- | --- |
-| Temporary `.github/workflows/opentui-windows-diagnostic.yml` on `diag/opentui-windows-crash` | Reproduces and tests one variable at a time on GitHub-hosted Windows. | It is not part of the main branch and is not a production fallback. | Do not merge it; remote deletion requires separate authorization. |
-| Temporary OpenTUI `smark.1`, test removal, unthreaded render, cleanup, and serial-run commits | Falsified individual hypotheses. | All were rejected as insufficient and are absent from the main worktree. | No main-branch deletion required. |
+| Existing workaround or duplicate                                                              | Why it existed                                                        | Why the approved route supersedes it                                     | Delete or collapse location                                       |
+| --------------------------------------------------------------------------------------------- | --------------------------------------------------------------------- | ------------------------------------------------------------------------ | ----------------------------------------------------------------- |
+| Temporary `.github/workflows/opentui-windows-diagnostic.yml` on `diag/opentui-windows-crash`  | Reproduces and tests one variable at a time on GitHub-hosted Windows. | It is not part of the main branch and is not a production fallback.      | Do not merge it; remote deletion requires separate authorization. |
+| Temporary OpenTUI `smark.1`, test removal, unthreaded render, cleanup, and serial-run commits | Falsified individual hypotheses.                                      | All were rejected as insufficient and are absent from the main worktree. | No main-branch deletion required.                                 |
 
 ## 13. Forward Traceability
 
-| Requirement or invariant | Production path | Planned file/change | Behavioral test |
-| --- | --- | --- | --- |
-| INV-01 exact-once coverage | Test discovery and partition | `script/test-ci.ts`; `test/script/test-ci.test.ts` | Pure mixed-path partition test plus shard count in real `test:ci` output. |
-| INV-02 fresh TUI process | Sequential child-process orchestration | `script/test-ci.ts`; `package.json` | GitHub Windows full-coverage loop, three jobs. |
-| INV-03 preserve failure | Run both and aggregate non-zero exits | `script/test-ci.ts` | End-to-end `test:ci`; existing ordinary DB failure remained non-zero while TUI still ran in run `30168972664`. |
-| INV-04 retain reports | Two report names consumed as a glob | `script/test-ci.ts`; `.github/workflows/test.yml`; `turbo.json` | Verify two XML files and published reports/artifacts. |
-| INV-05 no user behavior change | No application source path | No production files | Package suite, typecheck, and zero production diff. |
-| INV-06 current-main DB/daemon correctness | Existing DB and daemon owners | No new source change; targeted verification only | 20x DB election and 10x daemon recovery tests on current main, then full package loop. |
-| <=6 files, <=800 lines | Bounded implementation | Five implementation files plus this plan | Diff/stat inspection. |
+| Requirement or invariant                  | Production path                        | Planned file/change                                             | Behavioral test                                                                                                |
+| ----------------------------------------- | -------------------------------------- | --------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| INV-01 exact-once coverage                | Test discovery and partition           | `script/test-ci.ts`; `test/script/test-ci.test.ts`              | Pure mixed-path partition test plus shard count in real `test:ci` output.                                      |
+| INV-02 fresh TUI process                  | Sequential child-process orchestration | `script/test-ci.ts`; `package.json`                             | GitHub Windows full-coverage loop, three jobs.                                                                 |
+| INV-03 preserve failure                   | Run both and aggregate non-zero exits  | `script/test-ci.ts`                                             | End-to-end `test:ci`; existing ordinary DB failure remained non-zero while TUI still ran in run `30168972664`. |
+| INV-04 retain reports                     | Two report names consumed as a glob    | `script/test-ci.ts`; `.github/workflows/test.yml`; `turbo.json` | Verify two XML files and published reports/artifacts.                                                          |
+| INV-05 no user behavior change            | No application source path             | No production files                                             | Package suite, typecheck, and zero production diff.                                                            |
+| INV-06 current-main DB/daemon correctness | Existing DB and daemon owners          | No new source change; targeted verification only                | 20x DB election and 10x daemon recovery tests on current main, then full package loop.                         |
+| <=6 files, <=800 lines                    | Bounded implementation                 | Five implementation files plus this plan                        | Diff/stat inspection.                                                                                          |
 
 No confirmed requirement remains unmapped.
 
 ## 14. Reverse Traceability
 
-| Proposed production concept | Requirement ID | Evidence | Why existing logic cannot carry it |
-| --- | --- | --- | --- |
-| OS-neutral path normalization | INV-01, INV-02 | Windows `Bun.Glob` returns backslashes; Unix returns slashes. | Current inline command has no partition or normalization seam. |
-| Two mandatory sequential child processes | INV-02, INV-03 | Runs `30168396381` and `30168972664`. | One Bun invocation cannot provide a fresh process lifetime between domains. |
-| Separate core/TUI JUnit files | INV-04 | Each Bun process owns one reporter output. | Reusing one path would overwrite one shard's evidence. |
-| Workflow glob consumption | INV-04 | Current checks/publish/upload use one literal path. | Existing literal cannot consume both reports. |
-| Turbo output glob | INV-04 | Current cache declares one literal output. | Existing declaration would omit one report from cache artifacts. |
+| Proposed production concept              | Requirement ID | Evidence                                                      | Why existing logic cannot carry it                                          |
+| ---------------------------------------- | -------------- | ------------------------------------------------------------- | --------------------------------------------------------------------------- |
+| OS-neutral path normalization            | INV-01, INV-02 | Windows `Bun.Glob` returns backslashes; Unix returns slashes. | Current inline command has no partition or normalization seam.              |
+| Two mandatory sequential child processes | INV-02, INV-03 | Runs `30168396381` and `30168972664`.                         | One Bun invocation cannot provide a fresh process lifetime between domains. |
+| Separate core/TUI JUnit files            | INV-04         | Each Bun process owns one reporter output.                    | Reusing one path would overwrite one shard's evidence.                      |
+| Workflow glob consumption                | INV-04         | Current checks/publish/upload use one literal path.           | Existing literal cannot consume both reports.                               |
+| Turbo output glob                        | INV-04         | Current cache declares one literal output.                    | Existing declaration would omit one report from cache artifacts.            |
 
 No dependency, setting, retry, compatibility path, or user-facing interface is
 added.
 
 ## 15. File-Level Change Plan
 
-| File | Add / modify / delete | Exact responsibility of the change | Expected line delta |
-| --- | --- | --- | --- |
-| `docs/plans/windows-opentui-test-process-isolation.md` | add | Canonical evidence, design, verification, and audit record. | documentation only |
-| `packages/opencode/test/script/test-ci.test.ts` | add | TDD contract for Windows/Unix path normalization and exact-once core/TUI partition. | +20 to +30 |
-| `packages/opencode/script/test-ci.ts` | add | Discover, normalize, partition, execute both shards, emit two reports, and aggregate exits. | +45 to +60 |
-| `packages/opencode/package.json` | modify | Route `test:ci` through the package orchestration script. | 1 modified line |
-| `.github/workflows/test.yml` | modify | Consume both opencode JUnit files in required and upstream-report paths. | 6 to 10 modified lines |
-| `turbo.json` | modify | Cache every opencode unit XML report. | 1 modified line |
+| File                                                   | Add / modify / delete | Exact responsibility of the change                                                          | Expected line delta    |
+| ------------------------------------------------------ | --------------------- | ------------------------------------------------------------------------------------------- | ---------------------- |
+| `docs/plans/windows-opentui-test-process-isolation.md` | add                   | Canonical evidence, design, verification, and audit record.                                 | documentation only     |
+| `packages/opencode/test/script/test-ci.test.ts`        | add                   | TDD contract for Windows/Unix path normalization and exact-once core/TUI partition.         | +20 to +30             |
+| `packages/opencode/script/test-ci.ts`                  | add                   | Discover, normalize, partition, execute both shards, emit two reports, and aggregate exits. | +45 to +60             |
+| `packages/opencode/package.json`                       | modify                | Route `test:ci` through the package orchestration script.                                   | 1 modified line        |
+| `.github/workflows/test.yml`                           | modify                | Consume both opencode JUnit files in required and upstream-report paths.                    | 6 to 10 modified lines |
+| `turbo.json`                                           | modify                | Cache every opencode unit XML report.                                                       | 1 modified line        |
 
 Total files including this plan: six. Planned executable/config/test delta is
 well below 800 lines.
 
 ## 16. TDD Behavior Slices
 
-| Order | Red behavior | Why current code fails | Minimal green behavior | Regression protected |
-| --- | --- | --- | --- | --- |
-| 1 | Mixed Windows (`\\`) and Unix (`/`) test paths do not produce the independently specified `{ core, tui }` partition. | `script/test-ci.ts` and `partitionTestFiles` do not exist. | Add normalization and one exact classification function. | Windows cannot silently place native-backed tests in core; no input is dropped or duplicated. |
-| 2 | `bun run test:ci` cannot emit two complete reports while running both mandatory domains. | Current package command launches one Bun process and one report. | Add sequential child orchestration and two report names; retain non-zero aggregate exit. | Full coverage and failure visibility survive process isolation. |
-| 3 | CI/cache consumers cannot find both report files. | Existing workflow and Turbo declarations name only `junit.xml`. | Change only the opencode report contract to `*.xml` and make report existence checks glob-aware. | Both shard results are published and cached on every OS. |
-| 4 | Current-main DB election and daemon recovery regression checks must stay green while the test orchestrator changes. | These are confirmed behaviors and current-main tests already provide the seam. | Run the targeted 20x DB and 10x daemon checks before and after orchestration changes. | Prevents stale diagnostic-branch failures from being mistaken for an OpenTUI fix. |
-| 5 | Original Windows loop can still reach the same native crash under the current one-process command. | Current process-lifetime boundary is the observed first divergence. | Run the exact two-process implementation in three GitHub-hosted Windows jobs. | Original `opentui.dll` exit-3 symptom remains the release gate. |
+| Order | Red behavior                                                                                                         | Why current code fails                                                         | Minimal green behavior                                                                           | Regression protected                                                                          |
+| ----- | -------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------- |
+| 1     | Mixed Windows (`\\`) and Unix (`/`) test paths do not produce the independently specified `{ core, tui }` partition. | `script/test-ci.ts` and `partitionTestFiles` do not exist.                     | Add normalization and one exact classification function.                                         | Windows cannot silently place native-backed tests in core; no input is dropped or duplicated. |
+| 2     | `bun run test:ci` cannot emit two complete reports while running both mandatory domains.                             | Current package command launches one Bun process and one report.               | Add sequential child orchestration and two report names; retain non-zero aggregate exit.         | Full coverage and failure visibility survive process isolation.                               |
+| 3     | CI/cache consumers cannot find both report files.                                                                    | Existing workflow and Turbo declarations name only `junit.xml`.                | Change only the opencode report contract to `*.xml` and make report existence checks glob-aware. | Both shard results are published and cached on every OS.                                      |
+| 4     | Current-main DB election and daemon recovery regression checks must stay green while the test orchestrator changes.  | These are confirmed behaviors and current-main tests already provide the seam. | Run the targeted 20x DB and 10x daemon checks before and after orchestration changes.            | Prevents stale diagnostic-branch failures from being mistaken for an OpenTUI fix.             |
+| 5     | Original Windows loop can still reach the same native crash under the current one-process command.                   | Current process-lifetime boundary is the observed first divergence.            | Run the exact two-process implementation in three GitHub-hosted Windows jobs.                    | Original `opentui.dll` exit-3 symptom remains the release gate.                               |
 
 Expected values in slice 1 are literal path groups written independently of the
 partition algorithm. No test asserts source text, helper calls, or internal
@@ -295,10 +295,10 @@ spawn counts.
 
 ## 17. Chinese Comment Budget
 
-| Metric | Estimate | Method |
-| --- | --- | --- |
-| Effective changed code lines `E` | 70-100 | New executable/test lines plus substantive JSON/YAML lines; excludes imports, blanks, this plan, and formatting. |
-| Required Chinese explanatory comments `C` | 11-15 minimum | Apply `ceil(E * 0.15)` to the actual implementation; use the upper bound until actual `E` is counted. |
+| Metric                                    | Estimate      | Method                                                                                                           |
+| ----------------------------------------- | ------------- | ---------------------------------------------------------------------------------------------------------------- |
+| Effective changed code lines `E`          | 70-100        | New executable/test lines plus substantive JSON/YAML lines; excludes imports, blanks, this plan, and formatting. |
+| Required Chinese explanatory comments `C` | 11-15 minimum | Apply `ceil(E * 0.15)` to the actual implementation; use the upper bound until actual `E` is counted.            |
 
 Qualifying comments will be distributed next to:
 
@@ -318,31 +318,31 @@ comments will not be counted.
 
 ## 18. Verification
 
-| Command | Working directory | Evidence produced |
-| --- | --- | --- |
-| `bun test test/script/test-ci.test.ts` | `packages/opencode` | Red then green partition contract. |
-| `bun test test/cli/db-maintenance.test.ts -t "holds the daemon election while initially offline compression runs" --rerun-each 20` | `packages/opencode` | Current-main DB election remains green. |
-| `bun test test/cli/tui/daemon.test.ts -t "daemon startup resumes an interrupted maintenance task from its persisted record" --rerun-each 10` | `packages/opencode` | Current-main daemon recovery remains green. |
-| `bun typecheck` | `packages/opencode` | Script and test type safety. |
-| `bun run test:ci` | `packages/opencode` | Both real shards execute, all package tests remain covered, two JUnit files exist, and aggregate exit is correct. |
-| `git diff --check` | repository root | Patch formatting. |
-| `git diff --stat` and changed-path inspection | repository root | Six-file and 800-line budgets; no production source or lockfile changes. |
-| Three-job `opentui-windows-diagnostic.yml` run rebased on current `dev-smark` with the exact implementation copied to `diag/opentui-windows-crash` | GitHub-hosted Windows | All three full-coverage jobs must succeed; native, DB, daemon, and any other non-zero failure blocks completion. |
-| Required `packages/opencode` Linux/macOS jobs or equivalent package-local runs | GitHub-hosted runners | Cross-platform path normalization and report contract. |
+| Command                                                                                                                                            | Working directory     | Evidence produced                                                                                                 |
+| -------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `bun test test/script/test-ci.test.ts`                                                                                                             | `packages/opencode`   | Red then green partition contract.                                                                                |
+| `bun test test/cli/db-maintenance.test.ts -t "holds the daemon election while initially offline compression runs" --rerun-each 20`                 | `packages/opencode`   | Current-main DB election remains green.                                                                           |
+| `bun test test/cli/tui/daemon.test.ts -t "daemon startup resumes an interrupted maintenance task from its persisted record" --rerun-each 10`       | `packages/opencode`   | Current-main daemon recovery remains green.                                                                       |
+| `bun typecheck`                                                                                                                                    | `packages/opencode`   | Script and test type safety.                                                                                      |
+| `bun run test:ci`                                                                                                                                  | `packages/opencode`   | Both real shards execute, all package tests remain covered, two JUnit files exist, and aggregate exit is correct. |
+| `git diff --check`                                                                                                                                 | repository root       | Patch formatting.                                                                                                 |
+| `git diff --stat` and changed-path inspection                                                                                                      | repository root       | Six-file and 800-line budgets; no production source or lockfile changes.                                          |
+| Three-job `opentui-windows-diagnostic.yml` run rebased on current `dev-smark` with the exact implementation copied to `diag/opentui-windows-crash` | GitHub-hosted Windows | All three full-coverage jobs must succeed; native, DB, daemon, and any other non-zero failure blocks completion.  |
+| Required `packages/opencode` Linux/macOS jobs or equivalent package-local runs                                                                     | GitHub-hosted runners | Cross-platform path normalization and report contract.                                                            |
 
 No test command will be run from the repository root locally. The root-level
 Turbo command remains a CI entrypoint only, matching repository instructions.
 
 ## 19. Diff Budget
 
-| Metric | Estimate | Justification |
-| --- | --- | --- |
-| Files added | 3 | Canonical plan, orchestrator, partition test. |
-| Files modified | 3 | Package command, CI report consumer, Turbo output declaration. |
-| Files deleted | 0 | No main-branch workaround exists. |
-| Production lines | 0 | No application source or user-facing behavior changes. |
+| Metric                          | Estimate                        | Justification                                                             |
+| ------------------------------- | ------------------------------- | ------------------------------------------------------------------------- |
+| Files added                     | 3                               | Canonical plan, orchestrator, partition test.                             |
+| Files modified                  | 3                               | Package command, CI report consumer, Turbo output declaration.            |
+| Files deleted                   | 0                               | No main-branch workaround exists.                                         |
+| Production lines                | 0                               | No application source or user-facing behavior changes.                    |
 | Test/orchestration/config lines | 70-100 effective; under 140 raw | One bounded package runner, one focused test, and small contract updates. |
-| Generated lines | 0 | JUnit files are runtime artifacts and not committed. |
+| Generated lines                 | 0                               | JUnit files are runtime artifacts and not committed.                      |
 
 ## 20. Real Risks and Open Decisions
 
@@ -400,10 +400,10 @@ The independent auditor must:
 
 ## 22. Plan Audit Record
 
-| Round | Audited revision | Full scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | R1 | yes | B-01 | 3 findings recorded below | BLOCK | `ses_065626d1effe19pq2C5R5kQark` |
-| 2 | R2 | yes | none | 2 findings recorded below | APPROVE | `ses_06552ab38ffeHoQ1ZQbEQtN71O` |
+| Round | Audited revision | Full scope? | Blocking findings | Non-blocking findings     | Result  | Invocation reference             |
+| ----- | ---------------- | ----------- | ----------------- | ------------------------- | ------- | -------------------------------- |
+| 1     | R1               | yes         | B-01              | 3 findings recorded below | BLOCK   | `ses_065626d1effe19pq2C5R5kQark` |
+| 2     | R2               | yes         | none              | 2 findings recorded below | APPROVE | `ses_06552ab38ffeHoQ1ZQbEQtN71O` |
 
 Any substantive revision invalidates earlier approval.
 
@@ -486,10 +486,9 @@ Any substantive revision invalidates earlier approval.
 > ## Non-blocking findings
 >
 > 1. **缺少针对失败聚合语义的自动化故障注入测试。**  
-> `INV-03` 要求 core shard 失败后仍运行 TUI shard，并最终返回非零状态。计划通过诊断运行 `30168972664` 和最终实现源码审查覆盖该语义，但 `packages/opencode/test/script/test-ci.test.ts` 只明确测试路径规范化和精确分区。建议实现审计时重点核实该执行路径；现有诊断 workflow 已观察到 core 失败后 TUI 继续执行，因此当前不构成阻断。
->
+>    `INV-03` 要求 core shard 失败后仍运行 TUI shard，并最终返回非零状态。计划通过诊断运行 `30168972664` 和最终实现源码审查覆盖该语义，但 `packages/opencode/test/script/test-ci.test.ts` 只明确测试路径规范化和精确分区。建议实现审计时重点核实该执行路径；现有诊断 workflow 已观察到 core 失败后 TUI 继续执行，因此当前不构成阻断。
 > 2. **`Audit mode` 元数据可以更精确。**  
-> 计划第 9 行填写 `full-scope`，本次输入模式为 `plan`。完整审计范围已经在计划和审计记录中明确，该差异不影响设计执行性或修复行为。
+>    计划第 9 行填写 `full-scope`，本次输入模式为 `plan`。完整审计范围已经在计划和审计记录中明确，该差异不影响设计执行性或修复行为。
 >
 > ## Rejected speculation
 >
@@ -501,7 +500,7 @@ Any substantive revision invalidates earlier approval.
 >   - `30131430684` 的单进程基线为 2/3 失败；
 >   - `30168396381` 的三个 focused TUI job 全部成功；
 >   - `30168972664` 的两进程完整测试为两个成功、一个保留普通测试失败。  
-> 因而不能把原生崩溃归因于普通 Bun 测试并发，也不能把普通断言失败转换成成功。
+>     因而不能把原生崩溃归因于普通 Bun 测试并发，也不能把普通断言失败转换成成功。
 >
 > ## Requirement and traceability coverage
 >
@@ -635,24 +634,24 @@ crashes, zero test failures, and zero timeouts. Every run covered 229 core plus
 
 ### Actual Secondary and Replacement Path Inventory
 
-| Path | Actual classification | Success behavior | Verdict |
-| --- | --- | --- | --- |
-| Core child process | Mandatory primary-contract branch | Must exit zero | approved |
-| Fresh CLI/TUI child process | Mandatory primary-contract branch | Must exit zero | approved |
-| Continue to TUI after core non-zero | Primary-contract failure-preservation branch | Aggregate remains non-zero | approved; observed in `30168972664` |
-| Retry, skip, quarantine, platform switch, alternate runner | Absent | None | no fallback |
+| Path                                                       | Actual classification                        | Success behavior           | Verdict                             |
+| ---------------------------------------------------------- | -------------------------------------------- | -------------------------- | ----------------------------------- |
+| Core child process                                         | Mandatory primary-contract branch            | Must exit zero             | approved                            |
+| Fresh CLI/TUI child process                                | Mandatory primary-contract branch            | Must exit zero             | approved                            |
+| Continue to TUI after core non-zero                        | Primary-contract failure-preservation branch | Aggregate remains non-zero | approved; observed in `30168972664` |
+| Retry, skip, quarantine, platform switch, alternate runner | Absent                                       | None                       | no fallback                         |
 
 Actual alternate success paths: zero. Actual diagnostic decision surface in the
 main implementation: zero.
 
 ### Chinese Comment Calculation
 
-| Metric | Actual | Exclusions and evidence |
-| --- | --- | --- |
-| Effective changed code lines `E` | 78 | Runner 49 + test 20 + workflow 7 + package 1 + Turbo 1. Excludes 4 import-only lines, blank lines, 13 comments, plan text, and unrelated worktree changes. |
-| Qualifying Chinese comment lines `C` | 13 | Runner 10 + test 2 + workflow 1, adjacent to process, path, report, fail-closed, expected-value, and glob boundaries. |
-| Ratio `C / E` | 16.67% | `13 / 78` |
-| Required minimum `C` | 12 | `ceil(78 * 0.15) = 12` |
+| Metric                               | Actual | Exclusions and evidence                                                                                                                                    |
+| ------------------------------------ | ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Effective changed code lines `E`     | 78     | Runner 49 + test 20 + workflow 7 + package 1 + Turbo 1. Excludes 4 import-only lines, blank lines, 13 comments, plan text, and unrelated worktree changes. |
+| Qualifying Chinese comment lines `C` | 13     | Runner 10 + test 2 + workflow 1, adjacent to process, path, report, fail-closed, expected-value, and glob boundaries.                                      |
+| Ratio `C / E`                        | 16.67% | `13 / 78`                                                                                                                                                  |
+| Required minimum `C`                 | 12     | `ceil(78 * 0.15) = 12`                                                                                                                                     |
 
 ### Remaining Unverified Items
 
@@ -667,9 +666,9 @@ main implementation: zero.
 
 ## 24. Implementation Audit Record
 
-| Round | Plan revision | Full original scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | R2 | yes | none | 2 findings recorded below | APPROVE | `ses_064b5a219ffe1LFKBZd2jYVotM` |
+| Round | Plan revision | Full original scope? | Blocking findings | Non-blocking findings     | Result  | Invocation reference             |
+| ----- | ------------- | -------------------- | ----------------- | ------------------------- | ------- | -------------------------------- |
+| 1     | R2            | yes                  | none              | 2 findings recorded below | APPROVE | `ses_064b5a219ffe1LFKBZd2jYVotM` |
 
 ### Round 1 Independent Verdict (verbatim)
 
@@ -685,7 +684,7 @@ main implementation: zero.
 >   - run `30175387710` 的 Linux、macOS 和三个 Windows package suite 均成功；
 >   - Linux、macOS 的 `Typecheck opencode package` 均成功；
 >   - 五个平台产物均已生成。  
->   现有远程证据足以满足发布门槛。
+>     现有远程证据足以满足发布门槛。
 >
 > ## Rejected speculation
 >
@@ -733,17 +732,17 @@ main implementation: zero.
 >
 > 实际中文解释性注释计算：
 >
-> | 项目 | 实际值 |
-> |---|---:|
-> | Runner 有效代码 | 49 |
-> | Test 有效代码 | 20 |
-> | Workflow 有效代码 | 7 |
-> | Package script | 1 |
-> | Turbo config | 1 |
-> | `E` | **78** |
-> | 要求的 `C` | `ceil(78 × 0.15) = 12` |
-> | 实际合格 `C` | **13** |
-> | 比率 | **16.67%** |
+> | 项目              |                 实际值 |
+> | ----------------- | ---------------------: |
+> | Runner 有效代码   |                     49 |
+> | Test 有效代码     |                     20 |
+> | Workflow 有效代码 |                      7 |
+> | Package script    |                      1 |
+> | Turbo config      |                      1 |
+> | `E`               |                 **78** |
+> | 要求的 `C`        | `ceil(78 × 0.15) = 12` |
+> | 实际合格 `C`      |                 **13** |
+> | 比率              |             **16.67%** |
 >
 > 排除了 4 行 import-only、空行、plan 文本、未修改上下文、纯删除的旧值和无关 worktree 变化。13 行注释分别解释路径表示、native process boundary、exact-once 默认路由、JUnit 覆盖风险、空 shard fail-closed、陈旧报告清理、失败传播、测试 expected 独立性及 workflow glob 合同，均与相关决策相邻。
 >

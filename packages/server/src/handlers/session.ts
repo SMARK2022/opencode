@@ -124,16 +124,19 @@ export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handl
         "session.goal.set",
         Effect.fn(function* (ctx) {
           // 仅领域校验映射400；数据库defect及取消保持原有错误语义。
-          const goal = yield* goals.set(ctx.params.sessionID, ctx.payload).pipe(
-            Effect.mapError(error => new InvalidRequestError({ message: error.message })),
-          )
+          const goal = yield* goals
+            .set(ctx.params.sessionID, ctx.payload)
+            .pipe(Effect.mapError((error) => new InvalidRequestError({ message: error.message })))
           // 空Session只保存active Goal；已有user历史才沿原全局所有权恢复，不以技术提醒代替用户。
           if (goal.status === "active") {
             const messages = yield* session.messages({ sessionID: ctx.params.sessionID }).pipe(Effect.orDie)
-            if (messages.some(message => message.type === "user")) yield* session.resume(ctx.params.sessionID).pipe(
-              Effect.catchCause(cause => Effect.logError("goal resume failed", { sessionID: ctx.params.sessionID, cause })),
-              Effect.forkIn(scope, { startImmediately: true }),
-            )
+            if (messages.some((message) => message.type === "user"))
+              yield* session.resume(ctx.params.sessionID).pipe(
+                Effect.catchCause((cause) =>
+                  Effect.logError("goal resume failed", { sessionID: ctx.params.sessionID, cause }),
+                ),
+                Effect.forkIn(scope, { startImmediately: true }),
+              )
           }
           return { goal }
         }),
@@ -207,8 +210,11 @@ export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handl
                   ),
                 ),
                 // 撤回冲突与已有durable ID冲突共用公开409合同，不变成隐藏成功。
-                Effect.catchTag("Session.BusyError", (error) =>
-                  new ConflictError({ message: `Session is busy: ${error.sessionID}`, resource: error.sessionID })),
+                Effect.catchTag(
+                  "Session.BusyError",
+                  (error) =>
+                    new ConflictError({ message: `Session is busy: ${error.sessionID}`, resource: error.sessionID }),
+                ),
               ),
           }
         }),
@@ -218,13 +224,18 @@ export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handl
         Effect.fn(function* (ctx) {
           yield* session.compact({ sessionID: ctx.params.sessionID }).pipe(
             // 已接通的维护失败返回真实诊断，不能仍报告“尚未实现”。
-            Effect.catch((error) => Effect.fail(
-              error instanceof SessionV2.BusyError
-                ? new ConflictError({ message: `Session is busy: ${error.sessionID}`, resource: error.sessionID })
-                : error instanceof SessionV2.NotFoundError
-                ? new SessionNotFoundError({ sessionID: error.sessionID, message: `Session not found: ${error.sessionID}` })
-                : new ServiceUnavailableError({ message: error.message, service: "session.compact" }),
-            )),
+            Effect.catch((error) =>
+              Effect.fail(
+                error instanceof SessionV2.BusyError
+                  ? new ConflictError({ message: `Session is busy: ${error.sessionID}`, resource: error.sessionID })
+                  : error instanceof SessionV2.NotFoundError
+                    ? new SessionNotFoundError({
+                        sessionID: error.sessionID,
+                        message: `Session not found: ${error.sessionID}`,
+                      })
+                    : new ServiceUnavailableError({ message: error.message, service: "session.compact" }),
+              ),
+            ),
           )
           return HttpApiSchema.NoContent.make()
         }),
@@ -259,7 +270,10 @@ export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handl
           return {
             data: yield* session.revert.stage({ ...ctx.params, ...ctx.payload }).pipe(
               Effect.catchTag(
-                "Session.BusyError", (error) => new ConflictError({ message: `Session is busy: ${error.sessionID}`, resource: error.sessionID })),
+                "Session.BusyError",
+                (error) =>
+                  new ConflictError({ message: `Session is busy: ${error.sessionID}`, resource: error.sessionID }),
+              ),
               Effect.catchTag(
                 "Session.NotFoundError",
                 (error) =>
@@ -299,7 +313,10 @@ export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handl
         Effect.fn(function* (ctx) {
           yield* session.revert.clear(ctx.params.sessionID).pipe(
             Effect.catchTag(
-              "Session.BusyError", (error) => new ConflictError({ message: `Session is busy: ${error.sessionID}`, resource: error.sessionID })),
+              "Session.BusyError",
+              (error) =>
+                new ConflictError({ message: `Session is busy: ${error.sessionID}`, resource: error.sessionID }),
+            ),
             Effect.catchTag(
               "Session.NotFoundError",
               (error) =>
@@ -330,7 +347,10 @@ export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handl
         Effect.fn(function* (ctx) {
           yield* session.revert.commit(ctx.params.sessionID).pipe(
             Effect.catchTag(
-              "Session.BusyError", (error) => new ConflictError({ message: `Session is busy: ${error.sessionID}`, resource: error.sessionID })),
+              "Session.BusyError",
+              (error) =>
+                new ConflictError({ message: `Session is busy: ${error.sessionID}`, resource: error.sessionID }),
+            ),
             Effect.catchTag(
               "Session.NotFoundError",
               (error) =>
@@ -401,7 +421,12 @@ export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handl
         Effect.fn((ctx) =>
           Effect.succeed(
             // 按会话订阅 durable events 的客户端也持有租约，历史页终止时正常释放。
-            Stream.unwrap(Effect.as(clients.acquire, session.events({ sessionID: ctx.params.sessionID, after: ctx.query.after }).pipe(Stream.orDie))),
+            Stream.unwrap(
+              Effect.as(
+                clients.acquire,
+                session.events({ sessionID: ctx.params.sessionID, after: ctx.query.after }).pipe(Stream.orDie),
+              ),
+            ),
           ),
         ),
       )
@@ -424,6 +449,6 @@ export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handl
           })
         }),
       )
-      .handle("session.preview", ctx => SessionPreview.load(database.db, ctx.payload))
+      .handle("session.preview", (ctx) => SessionPreview.load(database.db, ctx.payload))
   }),
 )

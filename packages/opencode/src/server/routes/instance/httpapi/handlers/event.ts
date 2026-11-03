@@ -31,7 +31,9 @@ function eventResponse(events: EventV2.Interface, clients: EventClients.Interfac
     // be lost while the HTTP body fiber is starting or emitting server.connected.
     const queue = yield* Queue.unbounded<EventV2.Payload>()
     // 此处只同步入队；SSE 编码和网络写入仍在 response stream 中执行。
-    const unsubscribe = yield* events.listen((event) => Effect.sync(() => Queue.offerUnsafe(queue, event)), { finalizerSafe: true })
+    const unsubscribe = yield* events.listen((event) => Effect.sync(() => Queue.offerUnsafe(queue, event)), {
+      finalizerSafe: true,
+    })
     yield* Effect.addFinalizer(() => unsubscribe)
     const stream = Stream.fromQueue(queue).pipe(
       Stream.filter(
@@ -75,13 +77,18 @@ function eventResponse(events: EventV2.Interface, clients: EventClients.Interfac
     yield* Effect.logInfo("event connected")
     return HttpServerResponse.stream(
       // /event 使用相同 body-scope 租约，不能因为未订阅 /global/event 被误判为空闲。
-      Stream.unwrap(Effect.as(clients.acquire, Stream.make({ id: eventID(), type: "server.connected", properties: {} }).pipe(
-        Stream.concat(output.pipe(Stream.merge(heartbeat, { haltStrategy: "left" }))),
-        Stream.map(eventData),
-        Stream.pipeThroughChannel(Sse.encode()),
-        Stream.encodeText,
-        Stream.ensuring(Effect.logInfo("event disconnected")),
-      ))),
+      Stream.unwrap(
+        Effect.as(
+          clients.acquire,
+          Stream.make({ id: eventID(), type: "server.connected", properties: {} }).pipe(
+            Stream.concat(output.pipe(Stream.merge(heartbeat, { haltStrategy: "left" }))),
+            Stream.map(eventData),
+            Stream.pipeThroughChannel(Sse.encode()),
+            Stream.encodeText,
+            Stream.ensuring(Effect.logInfo("event disconnected")),
+          ),
+        ),
+      ),
       {
         contentType: "text/event-stream",
         headers: {

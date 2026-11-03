@@ -17,7 +17,9 @@ describe("AttachmentToken", () => {
     ])
 
     expect(estimate.attachments.tokens).toBe(17)
-    expect(estimate.attachments.rawChars).toBe(`data:image/png;base64,${payload}`.length + `data:application/pdf;base64,${payload}`.length)
+    expect(estimate.attachments.rawChars).toBe(
+      `data:image/png;base64,${payload}`.length + `data:application/pdf;base64,${payload}`.length,
+    )
     expect(estimate.text).not.toContain(payload)
     expect(estimate.text).toContain("[Attached image/png: chart.png]")
     expect(estimate.text).toContain("[Attached application/pdf: file]")

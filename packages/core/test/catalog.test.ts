@@ -218,11 +218,20 @@ describe("CatalogV2", () => {
         ["@ai-sdk/openai", "https://api.openai.com/v1"],
       ]) {
         yield* catalog.transform((catalog) => {
-          catalog.provider.update(providerID, (provider) => { provider.api = { type: "aisdk", package: npm } })
+          catalog.provider.update(providerID, (provider) => {
+            provider.api = { type: "aisdk", package: npm }
+          })
           // 两个别名共享 wire ID，固定这个冲突才能发现用 API ID 反查 Catalog 键的错误。
-          catalog.model.update(providerID, modelID, (model) => { model.api.id = ModelV2.ID.make("wire-model") })
+          catalog.model.update(providerID, modelID, (model) => {
+            model.api.id = ModelV2.ID.make("wire-model")
+          })
           catalog.model.update(providerID, ModelV2.ID.make("alias"), (model) => {
-            model.api = { id: ModelV2.ID.make("wire-model"), type: "aisdk", package: npm, settings: { baseURL: "https://alias.example.com/v1" } }
+            model.api = {
+              id: ModelV2.ID.make("wire-model"),
+              type: "aisdk",
+              package: npm,
+              settings: { baseURL: "https://alias.example.com/v1" },
+            }
           })
         })
         // 公共投影应直接提供端点，读取展示元数据无需建立运输或解析凭证。

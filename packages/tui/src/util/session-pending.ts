@@ -74,7 +74,9 @@ export function activeTurnPair(messages: readonly Message[]): ActiveTurnPair | u
     ? // 有 assistant：以最新 assistant 的 parentID 锁定活跃 user，跳过其后未派生 assistant
       // 的 orphan user。不变量：成对场景下 latestAssistant.parentID === latestUser.id，
       // 因此与旧 findLast(role==="user") 完全等价，不改变任何既有行为。
-      messages.findLast((message): message is UserMessage => message.role === "user" && message.id === latestAssistant.parentID)
+      messages.findLast(
+        (message): message is UserMessage => message.role === "user" && message.id === latestAssistant.parentID,
+      )
     : // 无 assistant（首次 prompt 落库但 assistant 尚未创建的空窗期）：fallback 到最新 user，
       // 返回 assistant: undefined 让调用点维持既有的 fail-closed 显示语义。
       messages.findLast((message): message is UserMessage => message.role === "user")

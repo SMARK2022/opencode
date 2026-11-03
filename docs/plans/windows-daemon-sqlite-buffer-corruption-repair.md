@@ -31,17 +31,17 @@ further material change is allowed without approved rework or a new revision.
 ## 1. Verbatim Requirement
 
 > 准确完整识别当前daemon的SQLiteError: database disk image is malformed
->     at values (unknown)
->     at all
->     at run
->     at MQ0
->     at Gq
->     at <anonymous>
->     at MessageV2.page
->     at Session.messages
->     at SessionRevert.cleanupCurrent
->     at SessionRevert.cleanup
->     at SessionPrompt.prompt以及数据库被缓冲区写坏的问题；同时如果审计员给你了blocker，请你首先分析是否是用户原始要求范围内的bug，如果与现在问题大概无关，请进行rebuttal，禁止直接进行对blocker的方案修改；
+> at values (unknown)
+> at all
+> at run
+> at MQ0
+> at Gq
+> at <anonymous>
+> at MessageV2.page
+> at Session.messages
+> at SessionRevert.cleanupCurrent
+> at SessionRevert.cleanup
+> at SessionPrompt.prompt以及数据库被缓冲区写坏的问题；同时如果审计员给你了blocker，请你首先分析是否是用户原始要求范围内的bug，如果与现在问题大概无关，请进行rebuttal，禁止直接进行对blocker的方案修改；
 > 从根源上问题，避免进行额外的数据库schema添加以及迁移，禁止以“遇到问题报错”为解决目标，解决方式应该是解决实质性错误的生产路径，而非修改错误的消费路径，即后续不再会产生该种错误，且整体修改保持克制，即仅精准修改现有的会产生该种错误schema的代码路径，同时在不破坏现有功能和性能的前提下，修复该问题。整体修改文件数不超过四个生产文件，不超过400行代码
 >
 > 目标终态：verified-implementation
@@ -78,46 +78,46 @@ of any blocker whose reachability or scope is uncertain.
 
 ## 3. Repository Context
 
-| Source | Why it constrains this task |
-| --- | --- |
-| `CONTEXT.md:9-31,71-110,127-175` | A Session and its Messages are persisted in SQLite; the daemon is the shared runtime owner; use the canonical Session/Message/Provider/Permission vocabulary. |
-| `AGENTS.md:21-141` | Requires minimal owner-local changes, rare meaningful comments, package-local tests, and `bun typecheck` instead of direct `tsc`. |
-| `packages/opencode/AGENTS.md:1-10,76-135` | Defines SQLite ownership conventions and Effect/module rules; no schema or migration is needed for this transport defect. |
-| `packages/opencode/test/AGENTS.md:1-17,83-177` | OS-process tests use live behavior, isolated `tmpdir`, automatic cleanup, and published readiness rather than fixed sleeps. |
-| `docs/adr/README.md:1-50` | No accepted daemon/SQLite ADR exists; ADR 0001 concerns triage and is unrelated. This owner-local transport correction does not require a new ADR. |
-| `.opencode/policy/first-principles-engineering.md` | Requires first-divergence repair, one primary path, no fallback, forward/reverse traceability, behavior-sensitive tests, and the 15% Chinese explanatory-comment gate. |
-| `.opencode/templates/canonical-plan.md` | Defines this artifact, audit transitions, implementation evidence, and verification sections. |
+| Source                                                       | Why it constrains this task                                                                                                                                                |
+| ------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CONTEXT.md:9-31,71-110,127-175`                             | A Session and its Messages are persisted in SQLite; the daemon is the shared runtime owner; use the canonical Session/Message/Provider/Permission vocabulary.              |
+| `AGENTS.md:21-141`                                           | Requires minimal owner-local changes, rare meaningful comments, package-local tests, and `bun typecheck` instead of direct `tsc`.                                          |
+| `packages/opencode/AGENTS.md:1-10,76-135`                    | Defines SQLite ownership conventions and Effect/module rules; no schema or migration is needed for this transport defect.                                                  |
+| `packages/opencode/test/AGENTS.md:1-17,83-177`               | OS-process tests use live behavior, isolated `tmpdir`, automatic cleanup, and published readiness rather than fixed sleeps.                                                |
+| `docs/adr/README.md:1-50`                                    | No accepted daemon/SQLite ADR exists; ADR 0001 concerns triage and is unrelated. This owner-local transport correction does not require a new ADR.                         |
+| `.opencode/policy/first-principles-engineering.md`           | Requires first-divergence repair, one primary path, no fallback, forward/reverse traceability, behavior-sensitive tests, and the 15% Chinese explanatory-comment gate.     |
+| `.opencode/templates/canonical-plan.md`                      | Defines this artifact, audit transitions, implementation evidence, and verification sections.                                                                              |
 | `docs/plans/windows-hidden-spawn-test-and-daemon-wrapper.md` | Preserves the existing absolute SystemRoot PowerShell wrapper, hidden-window behavior, PID handshake, target paths with spaces, and launcher-independent worker lifecycle. |
-| `docs/plans/daemon-ctrl-c-shutdown-lifecycle.md` | Preserves the intentional Windows `FreeConsole` Ctrl-C isolation and the single-daemon SQLite-owner invariant. |
+| `docs/plans/daemon-ctrl-c-shutdown-lifecycle.md`             | Preserves the intentional Windows `FreeConsole` Ctrl-C isolation and the single-daemon SQLite-owner invariant.                                                             |
 
 ## 4. Files and Evidence Read
 
-| Evidence | Relevance | Evidence class |
-| --- | --- | --- |
-| `packages/opencode/src/cli/cmd/tui/daemon.ts:69-186,330-383` | Windows wrapper uses `Start-Process`; only the wrapper has a Bun stdout pipe. The worker inherits console standard handles, while default caller stdio is ignore and `--print-logs` is inherit. | observed |
-| `packages/opencode/src/cli/cmd/tui/worker.ts:1-64,93-108,269-321` | Calls `win32DetachConsole()` before serving Projects and before lazy database use; preserves Ctrl-C isolation and closes the database during shutdown. | observed |
-| `packages/opencode/src/cli/cmd/tui/win32.ts:70-93` | Documents and executes `FreeConsole`; current contract already states console stdio handles become invalid. | observed |
-| `packages/opencode/src/storage/db.ts:92-169,179-189` | Lazily opens one Bun/SQLite client on first `Database.use`; WAL/checkpoint/migrations are downstream and are not the owner of standard handles. | observed |
-| `packages/opencode/src/permission/reviewer/service.ts:609-648,698-706,878-884` | The hidden permission reviewer uses `streamText` without overriding `onError`, making AI SDK default console output reachable for Provider stream errors. | reachable |
-| `packages/opencode/src/session/llm.ts:353-424` | The only other production `streamText` call explicitly logs `onError`; the repository has exactly two call sites. | observed |
-| `node_modules/ai/src/generate-text/stream-text.ts:317-319,857-881` | AI SDK's default `onError` is `console.error(error)` and is invoked for a stream `error` part. | contracted dependency behavior |
-| `packages/core/src/util/log.ts:61-69,71-162,187-236` | Default daemon application logs are file-backed, but dependency-owned `console.error` bypasses that logger and writes to process stderr. | reachable |
-| `packages/opencode/src/session/message-v2.ts:1398-1493` | `MessageV2.page` performs the SQLite read that surfaced malformed pages; it is a consumer, not the producer. | observed |
-| `packages/opencode/src/session/session.ts:878-901` | `Session.messages` delegates to `MessageV2.page`, matching the user stack. | observed |
-| `packages/opencode/src/session/revert.ts:171-253` | `cleanupCurrent` reads the complete Session history through `Session.messages`, matching the user stack. | observed |
-| `packages/opencode/src/session/prompt.ts:2429-2435` | `SessionPrompt.prompt` invokes Revert cleanup before creating a new Message, matching the final stack frame. | observed |
-| `packages/opencode/test/cli/tui/daemon.test.ts:1-65,2063-2262` | Existing live Windows tests cover wrapper hide, path quoting, 1 MB output drain, launcher exit, full daemon HTTP/SSE/control operation, and Ctrl-C detachment; no test checks standard-handle validity after `FreeConsole`. | observed |
-| Current print-log characterization command | Real `_spawn` with `OPENCODE_PRINT_LOGS=1` reports `consoleCP=65001`, four attached console processes, and stdout/stderr `FILE_TYPE_PIPE=3`; this is the pre-change compatibility baseline. | observed |
-| Current default pre-detach characterization command | Real `_spawn` before worker detach reports `consoleCP=65001`, one attached console process, and stdout/stderr `FILE_TYPE_CHAR=2`; this proves default mode currently starts attached and relies on `FreeConsole`. | observed |
-| `packages/opencode/test/permission/reviewer-service.test.ts:23-55,782-847,1322-1355` | Real OpenAI Responses SSE fixture proves the reviewer-to-AI-SDK seam; no production change is planned here. | observed |
-| `package.json:7` | Runtime is pinned to Bun 1.3.14. | contracted |
-| Bun 1.3.14 `src/sys/fd.zig:81-92,148-166,679-682` | Windows stdout/stderr return cached handles; source explicitly says they are snapshotted at startup and may differ after console changes. | contracted runtime behavior |
-| Microsoft `FreeConsole`, `GetStdHandle`, `WriteFile`, and kernel-object documentation | `FreeConsole` detaches the process; standard-handle table values are not validated until I/O; `WriteFile` targets the object named by the HANDLE and updates synchronous file position. | contracted platform behavior |
-| SQLite `howtocorrupt.html` and SQLite 3.53 `src/os_win.c` `winWrite` | SQLite documents stale output descriptors overwriting database files; Windows VFS writes full pages through a native file HANDLE at explicit page offsets. | contracted storage behavior |
-| `D:/Temp/opencode/db-recovery-20260809-213324/source-latest/opencode.db` | Immutable incident source still raises `database disk image is malformed`. Pages 460825, 461447, and 464158 share one exact 525-byte foreign prefix. | observed |
-| `D:/Temp/opencode/db-recovery-20260809-213324/opencode-recovered-latest.manifest.json` | Recovery evidence identifies 12 affected Part rows; all 20 table hashes match, recovered integrity is `ok`, and foreign-key check is empty. It is incident evidence, not a production repair path. | observed |
-| Inline incident feedback command recorded in section 8 | Actual `_spawn` + `FreeConsole` yields stdout/stderr type 0; actual AI SDK error output is byte-identical to the three damaged page prefixes. | observed |
-| `git blame` / history: `d7bc8462e4f`, `43f17817d5b`, `12663b5e09f`, `6d90ba6c7af` | `FreeConsole` was introduced after reviewer streaming; later PowerShell wrapper retained inherited worker stdio. Normal Session logging already has an explicit `onError`, while reviewer output remains a reachable trigger. | observed history |
+| Evidence                                                                               | Relevance                                                                                                                                                                                                                     | Evidence class                 |
+| -------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------ |
+| `packages/opencode/src/cli/cmd/tui/daemon.ts:69-186,330-383`                           | Windows wrapper uses `Start-Process`; only the wrapper has a Bun stdout pipe. The worker inherits console standard handles, while default caller stdio is ignore and `--print-logs` is inherit.                               | observed                       |
+| `packages/opencode/src/cli/cmd/tui/worker.ts:1-64,93-108,269-321`                      | Calls `win32DetachConsole()` before serving Projects and before lazy database use; preserves Ctrl-C isolation and closes the database during shutdown.                                                                        | observed                       |
+| `packages/opencode/src/cli/cmd/tui/win32.ts:70-93`                                     | Documents and executes `FreeConsole`; current contract already states console stdio handles become invalid.                                                                                                                   | observed                       |
+| `packages/opencode/src/storage/db.ts:92-169,179-189`                                   | Lazily opens one Bun/SQLite client on first `Database.use`; WAL/checkpoint/migrations are downstream and are not the owner of standard handles.                                                                               | observed                       |
+| `packages/opencode/src/permission/reviewer/service.ts:609-648,698-706,878-884`         | The hidden permission reviewer uses `streamText` without overriding `onError`, making AI SDK default console output reachable for Provider stream errors.                                                                     | reachable                      |
+| `packages/opencode/src/session/llm.ts:353-424`                                         | The only other production `streamText` call explicitly logs `onError`; the repository has exactly two call sites.                                                                                                             | observed                       |
+| `node_modules/ai/src/generate-text/stream-text.ts:317-319,857-881`                     | AI SDK's default `onError` is `console.error(error)` and is invoked for a stream `error` part.                                                                                                                                | contracted dependency behavior |
+| `packages/core/src/util/log.ts:61-69,71-162,187-236`                                   | Default daemon application logs are file-backed, but dependency-owned `console.error` bypasses that logger and writes to process stderr.                                                                                      | reachable                      |
+| `packages/opencode/src/session/message-v2.ts:1398-1493`                                | `MessageV2.page` performs the SQLite read that surfaced malformed pages; it is a consumer, not the producer.                                                                                                                  | observed                       |
+| `packages/opencode/src/session/session.ts:878-901`                                     | `Session.messages` delegates to `MessageV2.page`, matching the user stack.                                                                                                                                                    | observed                       |
+| `packages/opencode/src/session/revert.ts:171-253`                                      | `cleanupCurrent` reads the complete Session history through `Session.messages`, matching the user stack.                                                                                                                      | observed                       |
+| `packages/opencode/src/session/prompt.ts:2429-2435`                                    | `SessionPrompt.prompt` invokes Revert cleanup before creating a new Message, matching the final stack frame.                                                                                                                  | observed                       |
+| `packages/opencode/test/cli/tui/daemon.test.ts:1-65,2063-2262`                         | Existing live Windows tests cover wrapper hide, path quoting, 1 MB output drain, launcher exit, full daemon HTTP/SSE/control operation, and Ctrl-C detachment; no test checks standard-handle validity after `FreeConsole`.   | observed                       |
+| Current print-log characterization command                                             | Real `_spawn` with `OPENCODE_PRINT_LOGS=1` reports `consoleCP=65001`, four attached console processes, and stdout/stderr `FILE_TYPE_PIPE=3`; this is the pre-change compatibility baseline.                                   | observed                       |
+| Current default pre-detach characterization command                                    | Real `_spawn` before worker detach reports `consoleCP=65001`, one attached console process, and stdout/stderr `FILE_TYPE_CHAR=2`; this proves default mode currently starts attached and relies on `FreeConsole`.             | observed                       |
+| `packages/opencode/test/permission/reviewer-service.test.ts:23-55,782-847,1322-1355`   | Real OpenAI Responses SSE fixture proves the reviewer-to-AI-SDK seam; no production change is planned here.                                                                                                                   | observed                       |
+| `package.json:7`                                                                       | Runtime is pinned to Bun 1.3.14.                                                                                                                                                                                              | contracted                     |
+| Bun 1.3.14 `src/sys/fd.zig:81-92,148-166,679-682`                                      | Windows stdout/stderr return cached handles; source explicitly says they are snapshotted at startup and may differ after console changes.                                                                                     | contracted runtime behavior    |
+| Microsoft `FreeConsole`, `GetStdHandle`, `WriteFile`, and kernel-object documentation  | `FreeConsole` detaches the process; standard-handle table values are not validated until I/O; `WriteFile` targets the object named by the HANDLE and updates synchronous file position.                                       | contracted platform behavior   |
+| SQLite `howtocorrupt.html` and SQLite 3.53 `src/os_win.c` `winWrite`                   | SQLite documents stale output descriptors overwriting database files; Windows VFS writes full pages through a native file HANDLE at explicit page offsets.                                                                    | contracted storage behavior    |
+| `D:/Temp/opencode/db-recovery-20260809-213324/source-latest/opencode.db`               | Immutable incident source still raises `database disk image is malformed`. Pages 460825, 461447, and 464158 share one exact 525-byte foreign prefix.                                                                          | observed                       |
+| `D:/Temp/opencode/db-recovery-20260809-213324/opencode-recovered-latest.manifest.json` | Recovery evidence identifies 12 affected Part rows; all 20 table hashes match, recovered integrity is `ok`, and foreign-key check is empty. It is incident evidence, not a production repair path.                            | observed                       |
+| Inline incident feedback command recorded in section 8                                 | Actual `_spawn` + `FreeConsole` yields stdout/stderr type 0; actual AI SDK error output is byte-identical to the three damaged page prefixes.                                                                                 | observed                       |
+| `git blame` / history: `d7bc8462e4f`, `43f17817d5b`, `12663b5e09f`, `6d90ba6c7af`      | `FreeConsole` was introduced after reviewer streaming; later PowerShell wrapper retained inherited worker stdio. Normal Session logging already has an explicit `onError`, while reviewer output remains a reachable trigger. | observed history               |
 
 External references:
 
@@ -174,18 +174,18 @@ page-relative offset.
 
 ## 6. Supported Input Domain and Reachability
 
-| Input or condition | Producer | Upstream guarantees | Reachable path | Owner | Classification |
-| --- | --- | --- | --- | --- | --- |
-| Default Windows daemon launch | TUI/CLI `Daemon.ensure` | Absolute SystemRoot PowerShell; hidden wrapper; one worker | `spawnDaemon` -> `Start-Process` -> worker | Windows daemon spawn adapter | observed |
-| Worker `FreeConsole` | `worker.ts` when `printLogs=false` | Intentionally detaches Ctrl-C delivery | worker startup before Server/SQLite activity | Windows worker transport contract | observed |
-| Provider stream error object | OpenAI Responses SSE / AI SDK | Valid structured stream error; default `onError` may print it | permission reviewer `streamText` -> `console.error` | AI SDK producer; daemon owns its output transport | observed |
-| Any other dependency/runtime stdout or stderr write | Reachable loaded dependencies and runtime | May legitimately use standard streams without OpenCode logger | worker process stdio | daemon spawn adapter | reachable |
-| SQLite HANDLE allocation after detach | First `Database.use` in daemon | One client, WAL, mmap disabled in incident runtime | Project/Session request after worker startup | SQLite VFS allocates file; daemon must not alias it with stdio | observed incident class |
-| `--print-logs` Windows daemon | CLI argument / env | Worker keeps console attachment today and logs remain visible | same wrapper with inherited output | daemon spawn adapter | contracted |
-| High-volume worker stdout | Existing path-with-spaces test writes 1 MB | Worker must not block before readiness | wrapper output drain | daemon spawn adapter | observed |
-| Wrapper/launcher exits before worker | TUI launcher lifecycle | Worker remains owner; adapter exposes worker PID | existing wrapper lifecycle | daemon spawn adapter | contracted/observed |
-| Unix/macOS daemon | `Daemon.ensure` | detached process group, no `FreeConsole` | direct `Bun.spawn` | existing Unix branch | contracted, preserved |
-| Malformed database reads | Existing physically damaged database | SQLite reports corruption | Message/Revert/Prompt stack | storage consumer | observed, not a repair owner |
+| Input or condition                                  | Producer                                   | Upstream guarantees                                           | Reachable path                                      | Owner                                                          | Classification               |
+| --------------------------------------------------- | ------------------------------------------ | ------------------------------------------------------------- | --------------------------------------------------- | -------------------------------------------------------------- | ---------------------------- |
+| Default Windows daemon launch                       | TUI/CLI `Daemon.ensure`                    | Absolute SystemRoot PowerShell; hidden wrapper; one worker    | `spawnDaemon` -> `Start-Process` -> worker          | Windows daemon spawn adapter                                   | observed                     |
+| Worker `FreeConsole`                                | `worker.ts` when `printLogs=false`         | Intentionally detaches Ctrl-C delivery                        | worker startup before Server/SQLite activity        | Windows worker transport contract                              | observed                     |
+| Provider stream error object                        | OpenAI Responses SSE / AI SDK              | Valid structured stream error; default `onError` may print it | permission reviewer `streamText` -> `console.error` | AI SDK producer; daemon owns its output transport              | observed                     |
+| Any other dependency/runtime stdout or stderr write | Reachable loaded dependencies and runtime  | May legitimately use standard streams without OpenCode logger | worker process stdio                                | daemon spawn adapter                                           | reachable                    |
+| SQLite HANDLE allocation after detach               | First `Database.use` in daemon             | One client, WAL, mmap disabled in incident runtime            | Project/Session request after worker startup        | SQLite VFS allocates file; daemon must not alias it with stdio | observed incident class      |
+| `--print-logs` Windows daemon                       | CLI argument / env                         | Worker keeps console attachment today and logs remain visible | same wrapper with inherited output                  | daemon spawn adapter                                           | contracted                   |
+| High-volume worker stdout                           | Existing path-with-spaces test writes 1 MB | Worker must not block before readiness                        | wrapper output drain                                | daemon spawn adapter                                           | observed                     |
+| Wrapper/launcher exits before worker                | TUI launcher lifecycle                     | Worker remains owner; adapter exposes worker PID              | existing wrapper lifecycle                          | daemon spawn adapter                                           | contracted/observed          |
+| Unix/macOS daemon                                   | `Daemon.ensure`                            | detached process group, no `FreeConsole`                      | direct `Bun.spawn`                                  | existing Unix branch                                           | contracted, preserved        |
+| Malformed database reads                            | Existing physically damaged database       | SQLite reports corruption                                     | Message/Revert/Prompt stack                         | storage consumer                                               | observed, not a repair owner |
 
 Speculative inputs do not drive this plan. In particular, no hidden second
 daemon, WAL reset race, mmap write, disk bit-flip, or malicious input is needed
@@ -193,25 +193,25 @@ or supported by the incident evidence.
 
 ## 7. Required Invariants
 
-| ID | Behavioral invariant | Evidence | Existing test |
-| --- | --- | --- | --- |
-| REQ-01 | The implementation repairs the producer-side path that allowed a runtime buffer to overwrite SQLite; it does not make downstream reads tolerate or merely report corruption. | Verbatim requirement | None |
-| REQ-02 | No schema, migration, database format, setting, public API, dependency, or fallback is added. | Verbatim requirement | Schema/migration diff audit |
-| REQ-03 | At most four production files and fewer than 400 changed lines; unrelated behavior and performance remain intact. | Verbatim requirement | Diff audit + regressions |
-| INV-01 | A default Windows daemon worker retains valid stdout and stderr handles after `FreeConsole`; both are non-console pipes for its lifetime. | Platform contract + red feedback loop | Missing; planned live `_spawn` test |
-| INV-02 | A worker's standard-stream write can reach only its configured pipe, never an unrelated file HANDLE opened later by SQLite or another subsystem. | Incident bytes + Bun cached stdio + Windows HANDLE semantics | Planned OS handle-type test |
-| INV-03 | PID handshake, worker PID identity, absolute wrapper path, target paths with spaces, hidden launch, launcher independence, and worker exit propagation remain unchanged. | Existing wrapper contract/tests | Existing daemon tests |
-| INV-04 | Default output is continuously drained without becoming user-visible; `--print-logs` output is continuously forwarded; neither mode can deadlock on pipe backpressure or lose tail bytes at exit. | Existing options and 1 MB test; print-logs contract | Default drain existing; print-logs planned characterization |
-| INV-05 | `FreeConsole` continues to isolate the default Windows worker from shared-console Ctrl-C while HTTP, SSE, control port, idle, stop, and SQLite single-owner behavior remain intact. | Existing lifecycle plans/tests | Existing full worker tests |
-| INV-06 | Unix/macOS continues using direct detached `Bun.spawn` with unchanged stdio semantics. | Existing code contract | Existing Unix tests |
+| ID     | Behavioral invariant                                                                                                                                                                              | Evidence                                                     | Existing test                                               |
+| ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------ | ----------------------------------------------------------- |
+| REQ-01 | The implementation repairs the producer-side path that allowed a runtime buffer to overwrite SQLite; it does not make downstream reads tolerate or merely report corruption.                      | Verbatim requirement                                         | None                                                        |
+| REQ-02 | No schema, migration, database format, setting, public API, dependency, or fallback is added.                                                                                                     | Verbatim requirement                                         | Schema/migration diff audit                                 |
+| REQ-03 | At most four production files and fewer than 400 changed lines; unrelated behavior and performance remain intact.                                                                                 | Verbatim requirement                                         | Diff audit + regressions                                    |
+| INV-01 | A default Windows daemon worker retains valid stdout and stderr handles after `FreeConsole`; both are non-console pipes for its lifetime.                                                         | Platform contract + red feedback loop                        | Missing; planned live `_spawn` test                         |
+| INV-02 | A worker's standard-stream write can reach only its configured pipe, never an unrelated file HANDLE opened later by SQLite or another subsystem.                                                  | Incident bytes + Bun cached stdio + Windows HANDLE semantics | Planned OS handle-type test                                 |
+| INV-03 | PID handshake, worker PID identity, absolute wrapper path, target paths with spaces, hidden launch, launcher independence, and worker exit propagation remain unchanged.                          | Existing wrapper contract/tests                              | Existing daemon tests                                       |
+| INV-04 | Default output is continuously drained without becoming user-visible; `--print-logs` output is continuously forwarded; neither mode can deadlock on pipe backpressure or lose tail bytes at exit. | Existing options and 1 MB test; print-logs contract          | Default drain existing; print-logs planned characterization |
+| INV-05 | `FreeConsole` continues to isolate the default Windows worker from shared-console Ctrl-C while HTTP, SSE, control port, idle, stop, and SQLite single-owner behavior remain intact.               | Existing lifecycle plans/tests                               | Existing full worker tests                                  |
+| INV-06 | Unix/macOS continues using direct detached `Bun.spawn` with unchanged stdio semantics.                                                                                                            | Existing code contract                                       | Existing Unix tests                                         |
 
 ## 8. First Divergence and Root Cause
 
-| Invariant | First divergence | Owning module/interface | Proof |
-| --- | --- | --- | --- |
-| INV-01/INV-02 | The Windows wrapper creates the Bun worker with inherited console stdout/stderr via `Start-Process`; no non-console worker stdio is bound before Bun snapshots its handles. `FreeConsole` then invalidates those inherited handles. | `daemon.ts` `spawnDaemon` Windows process/stdio adapter | Actual `_spawn` harness reports `{ detached: 1, stdout: 0, stderr: 0 }`; `win32.ts` already documents invalidation; Bun source documents cached startup handles. |
-| REQ-01 | After the first divergence, a reachable AI SDK `console.error` emits the exact incident bytes. Suppressing this one producer would leave INV-02 false for all other writes. | Not owned by reviewer/Message/SQLite; transport owner remains `spawnDaemon` | Real AI SDK replay emits 525 bytes exactly equal to each damaged prefix. |
-| Stack symptom | `MessageV2.page` reads an already malformed page and SQLite rejects it. | Storage consumer, deliberately unchanged | Immutable source reproduces the user stack's `database disk image is malformed`. |
+| Invariant     | First divergence                                                                                                                                                                                                                    | Owning module/interface                                                     | Proof                                                                                                                                                            |
+| ------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| INV-01/INV-02 | The Windows wrapper creates the Bun worker with inherited console stdout/stderr via `Start-Process`; no non-console worker stdio is bound before Bun snapshots its handles. `FreeConsole` then invalidates those inherited handles. | `daemon.ts` `spawnDaemon` Windows process/stdio adapter                     | Actual `_spawn` harness reports `{ detached: 1, stdout: 0, stderr: 0 }`; `win32.ts` already documents invalidation; Bun source documents cached startup handles. |
+| REQ-01        | After the first divergence, a reachable AI SDK `console.error` emits the exact incident bytes. Suppressing this one producer would leave INV-02 false for all other writes.                                                         | Not owned by reviewer/Message/SQLite; transport owner remains `spawnDaemon` | Real AI SDK replay emits 525 bytes exactly equal to each damaged prefix.                                                                                         |
+| Stack symptom | `MessageV2.page` reads an already malformed page and SQLite rejects it.                                                                                                                                                             | Storage consumer, deliberately unchanged                                    | Immutable source reproduces the user stack's `database disk image is malformed`.                                                                                 |
 
 ### Red-capable feedback loop
 
@@ -347,23 +347,23 @@ repair must make it `3/3`.
 
 ### Ranked hypotheses and outcomes
 
-| Rank | Hypothesis and falsifiable prediction | Result |
-| --- | --- | --- |
-| 1 | Inherited console stdio becomes stale after `FreeConsole`; if true, actual `_spawn` reports invalid handles and real AI SDK output equals the foreign bytes. | Confirmed: `0/0`, 525 bytes, exact hash/equality. |
-| 2 | SQLite WAL-reset concurrency corrupted pages; if true, damage should be SQLite page content and require concurrent connections/checkpoint/reset. | Rejected: incident used SQLite 3.53, one daemon owner, and pages contain ANSI Bun object output. |
-| 3 | SQLite mmap/page-cache memory corruption wrote the buffer; if true, incident runtime needs a nonzero `mmap_size` or matching WAL page image. | Rejected for planned behavior: incident `mmap_size=0`; retained WAL is zero bytes; direct standard-stream producer and invalid handle are observed. |
-| 4 | Random disk/media damage; if true, damage should not repeat one exact high-level object serialization at three page starts. | Rejected: three identical 525-byte prefixes and exact `console.error` reproduction. |
-| 5 | A second daemon or TUI wrote the database concurrently; if true, a second SQLite owner must be present and still cannot explain foreign ANSI output. | Rejected: process topology had one worker; TUI clients do not own SQLite; concurrency cannot synthesize the observed bytes. |
+| Rank | Hypothesis and falsifiable prediction                                                                                                                        | Result                                                                                                                                              |
+| ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1    | Inherited console stdio becomes stale after `FreeConsole`; if true, actual `_spawn` reports invalid handles and real AI SDK output equals the foreign bytes. | Confirmed: `0/0`, 525 bytes, exact hash/equality.                                                                                                   |
+| 2    | SQLite WAL-reset concurrency corrupted pages; if true, damage should be SQLite page content and require concurrent connections/checkpoint/reset.             | Rejected: incident used SQLite 3.53, one daemon owner, and pages contain ANSI Bun object output.                                                    |
+| 3    | SQLite mmap/page-cache memory corruption wrote the buffer; if true, incident runtime needs a nonzero `mmap_size` or matching WAL page image.                 | Rejected for planned behavior: incident `mmap_size=0`; retained WAL is zero bytes; direct standard-stream producer and invalid handle are observed. |
+| 4    | Random disk/media damage; if true, damage should not repeat one exact high-level object serialization at three page starts.                                  | Rejected: three identical 525-byte prefixes and exact `console.error` reproduction.                                                                 |
+| 5    | A second daemon or TUI wrote the database concurrently; if true, a second SQLite owner must be present and still cannot explain foreign ANSI output.         | Rejected: process topology had one worker; TUI clients do not own SQLite; concurrency cannot synthesize the observed bytes.                         |
 
 ## 9. Responsibility and Seam
 
-| Concern | Owner | Interface promise | Why it belongs here | Why another module does not own it |
-| --- | --- | --- | --- | --- |
-| Windows worker stdio before `FreeConsole` | `daemon.ts` `spawnDaemon` | Create and supervise the worker with caller-requested output semantics | It is the only process-creation seam and can bind HANDLEs before Bun starts | Worker code cannot retroactively change Bun/CRT startup snapshots safely; DB and reviewer do not own process handles |
-| Ctrl-C detachment precondition | `win32.ts` contract + worker call site | Detach only while non-console stdio remains valid | These comments document the caller invariant at the native boundary | No new native behavior is needed; process creation enforces it |
-| Provider error output | AI SDK / permission reviewer | A stream error may invoke configured/default error observation | It is a legitimate producer that exposes the transport defect | Suppressing it is a one-producer workaround and would not protect other runtime output |
-| SQLite file integrity | Existing SQLite client and single daemon | Ordinary SQLite I/O must not receive unrelated writes | Preserved once HANDLE aliasing is removed at process creation | Schema, migrations, checks, and Message reads act after the first divergence |
-| Behavioral verification | Existing public test seam `DaemonModule._spawn` | Launch the real Windows adapter and return real worker PID/lifecycle | It observes the actual OS handle type after the worker operation | Source-text checks or `_setSpawn` bypass the adapter and cannot prove HANDLE behavior |
+| Concern                                   | Owner                                           | Interface promise                                                      | Why it belongs here                                                         | Why another module does not own it                                                                                   |
+| ----------------------------------------- | ----------------------------------------------- | ---------------------------------------------------------------------- | --------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| Windows worker stdio before `FreeConsole` | `daemon.ts` `spawnDaemon`                       | Create and supervise the worker with caller-requested output semantics | It is the only process-creation seam and can bind HANDLEs before Bun starts | Worker code cannot retroactively change Bun/CRT startup snapshots safely; DB and reviewer do not own process handles |
+| Ctrl-C detachment precondition            | `win32.ts` contract + worker call site          | Detach only while non-console stdio remains valid                      | These comments document the caller invariant at the native boundary         | No new native behavior is needed; process creation enforces it                                                       |
+| Provider error output                     | AI SDK / permission reviewer                    | A stream error may invoke configured/default error observation         | It is a legitimate producer that exposes the transport defect               | Suppressing it is a one-producer workaround and would not protect other runtime output                               |
+| SQLite file integrity                     | Existing SQLite client and single daemon        | Ordinary SQLite I/O must not receive unrelated writes                  | Preserved once HANDLE aliasing is removed at process creation               | Schema, migrations, checks, and Message reads act after the first divergence                                         |
+| Behavioral verification                   | Existing public test seam `DaemonModule._spawn` | Launch the real Windows adapter and return real worker PID/lifecycle   | It observes the actual OS handle type after the worker operation            | Source-text checks or `_setSpawn` bypass the adapter and cannot prove HANDLE behavior                                |
 
 ## 10. Single Approved Primary-Path Design
 
@@ -413,65 +413,65 @@ must be enumerated or suppressed.
 
 ## 11. Secondary and Replacement Path Inventory
 
-| Path | Current or proposed | Classification | Produces success? | Decision-surface share | Disposition |
-| --- | --- | --- | --- | --- | --- |
-| Windows ProcessStartInfo worker with pipe stdio | proposed | primary-contract branch | yes | primary | replace current Start-Process path |
-| Default worker output -> `Stream.Null` | proposed destination within primary transport | primary-contract branch | yes | ~20% of changed destination branch | preserve caller's ignore semantics |
-| `--print-logs` worker output -> wrapper streams | proposed destination within primary transport | primary-contract branch | yes | ~20% of changed destination branch | preserve visible diagnostic semantics |
-| Unix direct detached worker | current | primary-contract platform branch | yes | unchanged | preserve |
-| AI SDK default `console.error` | current reachable producer | contracted pass-through to stdio | no alternate application success | unchanged | preserve; transport is repaired |
-| Add reviewer-only `onError` | rejected | forbidden workaround if used as repair | no | n/a | reject |
-| Add DB integrity gate/tolerant read/recovery | rejected | downstream diagnostic/fallback outside request | no/alternate | n/a | reject |
-| Retry with old Start-Process if ProcessStartInfo fails | rejected | forbidden fallback | yes | n/a | reject |
+| Path                                                   | Current or proposed                           | Classification                                 | Produces success?                | Decision-surface share             | Disposition                           |
+| ------------------------------------------------------ | --------------------------------------------- | ---------------------------------------------- | -------------------------------- | ---------------------------------- | ------------------------------------- |
+| Windows ProcessStartInfo worker with pipe stdio        | proposed                                      | primary-contract branch                        | yes                              | primary                            | replace current Start-Process path    |
+| Default worker output -> `Stream.Null`                 | proposed destination within primary transport | primary-contract branch                        | yes                              | ~20% of changed destination branch | preserve caller's ignore semantics    |
+| `--print-logs` worker output -> wrapper streams        | proposed destination within primary transport | primary-contract branch                        | yes                              | ~20% of changed destination branch | preserve visible diagnostic semantics |
+| Unix direct detached worker                            | current                                       | primary-contract platform branch               | yes                              | unchanged                          | preserve                              |
+| AI SDK default `console.error`                         | current reachable producer                    | contracted pass-through to stdio               | no alternate application success | unchanged                          | preserve; transport is repaired       |
+| Add reviewer-only `onError`                            | rejected                                      | forbidden workaround if used as repair         | no                               | n/a                                | reject                                |
+| Add DB integrity gate/tolerant read/recovery           | rejected                                      | downstream diagnostic/fallback outside request | no/alternate                     | n/a                                | reject                                |
+| Retry with old Start-Process if ProcessStartInfo fails | rejected                                      | forbidden fallback                             | yes                              | n/a                                | reject                                |
 
 New alternate success paths: 0. Diagnostic decision surface added in production:
 0%. The existing print-logs destination is preserved, not expanded.
 
 ## 12. Workaround Deletion and Replacement
 
-| Existing workaround or duplicate | Why it existed | Why the approved route supersedes it | Delete or collapse location |
-| --- | --- | --- | --- |
-| PowerShell `Start-Process` worker creation with inherited stdio | Supplied hidden/no-new-window worker launch and PID ownership | It cannot bind independently drainable pipe HANDLEs before Bun startup | Replace the `Start-Process` block in `daemon.ts`; do not retain as fallback |
-| Comment assumption that file-backed OpenCode logs make invalid stdio harmless | OpenCode logger normally writes a file | Dependency/runtime `console.error` is observed and bypasses the logger | Correct comments in `worker.ts` and `win32.ts` to state the pipe precondition |
-| Incident recovery scripts/database copy | Restored already damaged user data | Recovery does not prevent recurrence and is not a production path | Remain outside repository implementation; never call from production |
+| Existing workaround or duplicate                                              | Why it existed                                                | Why the approved route supersedes it                                   | Delete or collapse location                                                   |
+| ----------------------------------------------------------------------------- | ------------------------------------------------------------- | ---------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| PowerShell `Start-Process` worker creation with inherited stdio               | Supplied hidden/no-new-window worker launch and PID ownership | It cannot bind independently drainable pipe HANDLEs before Bun startup | Replace the `Start-Process` block in `daemon.ts`; do not retain as fallback   |
+| Comment assumption that file-backed OpenCode logs make invalid stdio harmless | OpenCode logger normally writes a file                        | Dependency/runtime `console.error` is observed and bypasses the logger | Correct comments in `worker.ts` and `win32.ts` to state the pipe precondition |
+| Incident recovery scripts/database copy                                       | Restored already damaged user data                            | Recovery does not prevent recurrence and is not a production path      | Remain outside repository implementation; never call from production          |
 
 ## 13. Forward Traceability
 
-| Requirement or invariant | Production path | Planned file/change | Behavioral test |
-| --- | --- | --- | --- |
-| REQ-01, INV-01, INV-02 | Windows worker process creation before Bun startup | `daemon.ts`: one ProcessStartInfo pipe-backed path | New live `_spawn` + `FreeConsole` test expects `3/3`; original incident loop turns green |
-| REQ-02 | No storage or public surface change | No DB/schema/migration/config/dependency files | Changed-file/diff inventory; package typecheck |
-| REQ-03 | Owner-local implementation | Three production files, one test file, <400 lines | Diff line/file count and implementation audit |
-| INV-03 | Existing wrapper/PID/lifecycle | `daemon.ts`: preserve protocol and adapter return shape | Existing hide, spaces, PID, launcher-exit tests |
-| INV-04 | Concurrent worker stdout/stderr drains | `daemon.ts`: two CopyToAsync tasks; Null/forward destinations | Existing 1 MB output-before-marker test; planned print-logs stdout/stderr forwarding test |
-| INV-05 | Existing `FreeConsole` after valid pipes | `worker.ts`/`win32.ts`: contract comments only | Existing real daemon HTTP/SSE/control test; new OS handle test |
-| INV-06 | Non-Windows early return | No Unix code change | Existing non-Windows no-op and detached SIGINT tests |
-| Full user stack identification | Consumer chain remains unchanged | No consumer change | Immutable source stack/quick-check forensic evidence; targeted Session regressions need not change |
+| Requirement or invariant       | Production path                                    | Planned file/change                                           | Behavioral test                                                                                    |
+| ------------------------------ | -------------------------------------------------- | ------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| REQ-01, INV-01, INV-02         | Windows worker process creation before Bun startup | `daemon.ts`: one ProcessStartInfo pipe-backed path            | New live `_spawn` + `FreeConsole` test expects `3/3`; original incident loop turns green           |
+| REQ-02                         | No storage or public surface change                | No DB/schema/migration/config/dependency files                | Changed-file/diff inventory; package typecheck                                                     |
+| REQ-03                         | Owner-local implementation                         | Three production files, one test file, <400 lines             | Diff line/file count and implementation audit                                                      |
+| INV-03                         | Existing wrapper/PID/lifecycle                     | `daemon.ts`: preserve protocol and adapter return shape       | Existing hide, spaces, PID, launcher-exit tests                                                    |
+| INV-04                         | Concurrent worker stdout/stderr drains             | `daemon.ts`: two CopyToAsync tasks; Null/forward destinations | Existing 1 MB output-before-marker test; planned print-logs stdout/stderr forwarding test          |
+| INV-05                         | Existing `FreeConsole` after valid pipes           | `worker.ts`/`win32.ts`: contract comments only                | Existing real daemon HTTP/SSE/control test; new OS handle test                                     |
+| INV-06                         | Non-Windows early return                           | No Unix code change                                           | Existing non-Windows no-op and detached SIGINT tests                                               |
+| Full user stack identification | Consumer chain remains unchanged                   | No consumer change                                            | Immutable source stack/quick-check forensic evidence; targeted Session regressions need not change |
 
 No confirmed requirement is unmapped.
 
 ## 14. Reverse Traceability
 
-| Proposed production concept | Requirement ID | Evidence | Why existing logic cannot carry it |
-| --- | --- | --- | --- |
-| ProcessStartInfo with `UseShellExecute=false` and dual redirects | REQ-01, INV-01, INV-02 | Actual `Start-Process` worker reports invalid stdio after detach | Existing inherited console HANDLEs are precisely the violated invariant |
-| Explicit `CreateNoWindow=false` on the single ProcessStartInfo path | INV-03, INV-05 | Current default and print-log workers both start console-attached; print-log intentionally skips `FreeConsole` | Redirected stdio must not silently remove the shared-console/Ctrl-C contract; existing wrapper `windowsHide=true` preserves invisibility |
-| Concurrent CopyToAsync drains | INV-04 | Existing worker can write 1 MB before readiness; bounded pipes can block | `WaitForExit` alone deadlocks if either redirected pipe fills |
-| Null vs forwarded destination | INV-04 | Existing default ignore and print-logs inherit options | Redirected pipes need one owner that preserves both existing destinations |
-| Await drain completion after worker exit | INV-04 | Existing adapter waits for wrapper output EOF | Process exit does not itself prove all redirected tail bytes reached the wrapper destination |
-| Native-boundary comment corrections | INV-01, INV-05 | Current comments incorrectly claim file logger makes invalid stdio harmless | Reachable AI SDK output disproves the assumption; future changes need the process-creation precondition |
+| Proposed production concept                                         | Requirement ID         | Evidence                                                                                                       | Why existing logic cannot carry it                                                                                                       |
+| ------------------------------------------------------------------- | ---------------------- | -------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| ProcessStartInfo with `UseShellExecute=false` and dual redirects    | REQ-01, INV-01, INV-02 | Actual `Start-Process` worker reports invalid stdio after detach                                               | Existing inherited console HANDLEs are precisely the violated invariant                                                                  |
+| Explicit `CreateNoWindow=false` on the single ProcessStartInfo path | INV-03, INV-05         | Current default and print-log workers both start console-attached; print-log intentionally skips `FreeConsole` | Redirected stdio must not silently remove the shared-console/Ctrl-C contract; existing wrapper `windowsHide=true` preserves invisibility |
+| Concurrent CopyToAsync drains                                       | INV-04                 | Existing worker can write 1 MB before readiness; bounded pipes can block                                       | `WaitForExit` alone deadlocks if either redirected pipe fills                                                                            |
+| Null vs forwarded destination                                       | INV-04                 | Existing default ignore and print-logs inherit options                                                         | Redirected pipes need one owner that preserves both existing destinations                                                                |
+| Await drain completion after worker exit                            | INV-04                 | Existing adapter waits for wrapper output EOF                                                                  | Process exit does not itself prove all redirected tail bytes reached the wrapper destination                                             |
+| Native-boundary comment corrections                                 | INV-01, INV-05         | Current comments incorrectly claim file logger makes invalid stdio harmless                                    | Reachable AI SDK output disproves the assumption; future changes need the process-creation precondition                                  |
 
 No new module, API, setting, state, retry, guard, schema, migration, dependency,
 or fallback is proposed.
 
 ## 15. File-Level Change Plan
 
-| File | Add / modify / delete | Exact responsibility of the change | Expected line delta |
-| --- | --- | --- | --- |
-| `packages/opencode/src/cli/cmd/tui/daemon.ts` | modify | Replace the single Windows `Start-Process` worker block with ProcessStartInfo dual pipes, destination selection, concurrent drain, and exit/tail completion while preserving PID protocol | +25 to +40 / -4 to -8 |
-| `packages/opencode/src/cli/cmd/tui/worker.ts` | modify comments only | Replace the stale “file logger makes invalid stdio harmless” assumption with the launcher-established pipe invariant; no executable behavior change | 4 to 8 comment lines |
-| `packages/opencode/src/cli/cmd/tui/win32.ts` | modify comments only | State that `FreeConsole` invalidates console handles but preserves launcher-provided non-console pipes; no executable behavior change | 4 to 8 comment lines |
-| `packages/opencode/test/cli/tui/daemon.test.ts` | modify | Add live post-FreeConsole handle test and print-logs forwarding characterization; reuse `tmpdir`, `_spawn`, and real child processes | +65 to +100 |
+| File                                            | Add / modify / delete | Exact responsibility of the change                                                                                                                                                        | Expected line delta   |
+| ----------------------------------------------- | --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------- |
+| `packages/opencode/src/cli/cmd/tui/daemon.ts`   | modify                | Replace the single Windows `Start-Process` worker block with ProcessStartInfo dual pipes, destination selection, concurrent drain, and exit/tail completion while preserving PID protocol | +25 to +40 / -4 to -8 |
+| `packages/opencode/src/cli/cmd/tui/worker.ts`   | modify comments only  | Replace the stale “file logger makes invalid stdio harmless” assumption with the launcher-established pipe invariant; no executable behavior change                                       | 4 to 8 comment lines  |
+| `packages/opencode/src/cli/cmd/tui/win32.ts`    | modify comments only  | State that `FreeConsole` invalidates console handles but preserves launcher-provided non-console pipes; no executable behavior change                                                     | 4 to 8 comment lines  |
+| `packages/opencode/test/cli/tui/daemon.test.ts` | modify                | Add live post-FreeConsole handle test and print-logs forwarding characterization; reuse `tmpdir`, `_spawn`, and real child processes                                                      | +65 to +100           |
 
 Production files modified: 3 (limit 4). No files added/deleted by the
 implementation, no storage file, and no generated artifact.
@@ -482,13 +482,13 @@ Agreed public seam: existing test export `DaemonModule._spawn`, observed through
 the real Windows PowerShell adapter and OS `GetFileType` values. This is the
 same seam used by existing wrapper tests and does not add production test APIs.
 
-| Order | Red behavior | Why current code fails | Minimal green behavior | Regression protected |
-| --- | --- | --- | --- | --- |
-| 1 | Windows worker launched by `_spawn` calls `FreeConsole`; marker must report `{ detached: 1, stdout: 3, stderr: 3 }` | Start-Process inherits console handles; actual current result is `0/0` | Replace worker creation with pre-start redirected stdout/stderr pipes and continuously drain both | Exact first divergence behind SQLite overwrite |
-| 2 | Existing path-with-spaces worker writes 1 MB stdout before marker and still publishes readiness/PID | New redirection would deadlock if either pipe is not drained before WaitForExit | Start both CopyToAsync operations immediately after PID publication, before waiting | Default output backpressure and target quoting |
-| 3 | Print-log launcher reports nonzero console attachment, `FILE_TYPE_PIPE=3` for both streams, captures distinct stdout/stderr markers, and exits with worker code | New implementation could remove the shared console, drain both streams to Null, or mix output into PID handshake | Keep `CreateNoWindow=false`; route each pipe to its corresponding wrapper stream when `OPENCODE_PRINT_LOGS=1` | Existing visible debug mode and intentional Ctrl-C propagation |
-| 4 | Existing hidden-window, launcher-exit, real HTTP/SSE/control, stop/idle, and Unix SIGINT tests remain green | Process ownership or lifecycle drift would break them | No additional behavior; preserve current wrapper protocol | INV-03/05/06 |
-| 5 | Original incident loop reports pipe handles `3/3` while the same 525-byte Provider buffer remains reproducible as ordinary output | Current loop fails on invalid handles | Rerun unchanged after green | Original production trigger can no longer reach a stale handle |
+| Order | Red behavior                                                                                                                                                    | Why current code fails                                                                                           | Minimal green behavior                                                                                        | Regression protected                                           |
+| ----- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------- |
+| 1     | Windows worker launched by `_spawn` calls `FreeConsole`; marker must report `{ detached: 1, stdout: 3, stderr: 3 }`                                             | Start-Process inherits console handles; actual current result is `0/0`                                           | Replace worker creation with pre-start redirected stdout/stderr pipes and continuously drain both             | Exact first divergence behind SQLite overwrite                 |
+| 2     | Existing path-with-spaces worker writes 1 MB stdout before marker and still publishes readiness/PID                                                             | New redirection would deadlock if either pipe is not drained before WaitForExit                                  | Start both CopyToAsync operations immediately after PID publication, before waiting                           | Default output backpressure and target quoting                 |
+| 3     | Print-log launcher reports nonzero console attachment, `FILE_TYPE_PIPE=3` for both streams, captures distinct stdout/stderr markers, and exits with worker code | New implementation could remove the shared console, drain both streams to Null, or mix output into PID handshake | Keep `CreateNoWindow=false`; route each pipe to its corresponding wrapper stream when `OPENCODE_PRINT_LOGS=1` | Existing visible debug mode and intentional Ctrl-C propagation |
+| 4     | Existing hidden-window, launcher-exit, real HTTP/SSE/control, stop/idle, and Unix SIGINT tests remain green                                                     | Process ownership or lifecycle drift would break them                                                            | No additional behavior; preserve current wrapper protocol                                                     | INV-03/05/06                                                   |
+| 5     | Original incident loop reports pipe handles `3/3` while the same 525-byte Provider buffer remains reproducible as ordinary output                               | Current loop fails on invalid handles                                                                            | Rerun unchanged after green                                                                                   | Original production trigger can no longer reach a stale handle |
 
 Test expectations are independent platform constants and visible child output,
 not source text, private helper calls, or implementation call counts. The
@@ -497,11 +497,11 @@ committed regression test.
 
 ## 17. Chinese Comment Budget
 
-| Metric | Estimate | Method |
-| --- | --- | --- |
-| Effective changed code lines `E` | 110-135 | Count substantively added/modified production and test lines; exclude imports, formatting-only, generated, and pure moves |
-| Required Chinese explanatory comments `C` | 17-21 | `ceil(E * 0.15)`; implementation must recompute actual values and meet the higher actual threshold |
-| Planned qualifying Chinese comments | at least 22 | Distributed beside production transport decisions and behavioral test boundaries |
+| Metric                                    | Estimate    | Method                                                                                                                    |
+| ----------------------------------------- | ----------- | ------------------------------------------------------------------------------------------------------------------------- |
+| Effective changed code lines `E`          | 110-135     | Count substantively added/modified production and test lines; exclude imports, formatting-only, generated, and pure moves |
+| Required Chinese explanatory comments `C` | 17-21       | `ceil(E * 0.15)`; implementation must recompute actual values and meet the higher actual threshold                        |
+| Planned qualifying Chinese comments       | at least 22 | Distributed beside production transport decisions and behavioral test boundaries                                          |
 
 Qualifying nearby explanations will cover:
 
@@ -532,20 +532,20 @@ lines, ratio, and representative comments.
 
 ## 18. Verification
 
-| Command | Working directory | Evidence produced |
-| --- | --- | --- |
-| `bun test test/cli/tui/daemon.test.ts --test-name-pattern "Windows daemon keeps stdout and stderr as pipes after FreeConsole"` | `packages/opencode` | Red before implementation (`0/0`), green after (`3/3`) through real `_spawn` |
-| `bun test test/cli/tui/daemon.test.ts --test-name-pattern "Windows daemon preserves shared console and forwards pipes in print-log mode"` | `packages/opencode` | Preserves console attachment/Ctrl-C membership, visible per-stream routing, and exit |
-| `bun test test/cli/tui/daemon.test.ts --test-name-pattern "Windows daemon PowerShell wrapper hides its console window"` | `packages/opencode` | Hidden wrapper behavior preserved |
-| `bun test test/cli/tui/daemon.test.ts --test-name-pattern "Windows daemon wrapper preserves a worker target path containing spaces"` | `packages/opencode` | Quoting, PID identity, and 1 MB drain remain correct |
-| `bun test test/cli/tui/daemon.test.ts --test-name-pattern "Windows daemon remains healthy after its launcher exits"` | `packages/opencode` | Wrapper/worker ownership survives launcher exit |
-| `bun test test/cli/tui/daemon.test.ts --test-name-pattern "Windows daemon detaches from the shared console yet keeps serving HTTP, SSE and control port"` | `packages/opencode` | Real worker still detaches and serves all channels |
-| `bun test test/cli/tui/daemon.test.ts` | `packages/opencode` | Full daemon lifecycle, stop, maintenance, wrapper, and Unix regressions |
-| `bun test test/permission/reviewer-service.test.ts` | `packages/opencode` | Reachable Provider error/permission path semantics remain unchanged |
-| `bun typecheck` | `packages/opencode` | Package TypeScript correctness |
-| `bun run build` | `packages/opencode` | Bundled/compiled worker and embedded PowerShell source build successfully |
-| Re-run section 8 inline incident feedback command | `packages/opencode` | Same 525-byte Provider output remains ordinary output, while handles change from `0/0` to `3/3`; command exits 0 |
-| `git diff --check` and scoped `git diff --stat` / `git diff --numstat` | repository root | No whitespace errors; file/line budgets and unrelated-diff exclusion are auditable |
+| Command                                                                                                                                                   | Working directory   | Evidence produced                                                                                                |
+| --------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `bun test test/cli/tui/daemon.test.ts --test-name-pattern "Windows daemon keeps stdout and stderr as pipes after FreeConsole"`                            | `packages/opencode` | Red before implementation (`0/0`), green after (`3/3`) through real `_spawn`                                     |
+| `bun test test/cli/tui/daemon.test.ts --test-name-pattern "Windows daemon preserves shared console and forwards pipes in print-log mode"`                 | `packages/opencode` | Preserves console attachment/Ctrl-C membership, visible per-stream routing, and exit                             |
+| `bun test test/cli/tui/daemon.test.ts --test-name-pattern "Windows daemon PowerShell wrapper hides its console window"`                                   | `packages/opencode` | Hidden wrapper behavior preserved                                                                                |
+| `bun test test/cli/tui/daemon.test.ts --test-name-pattern "Windows daemon wrapper preserves a worker target path containing spaces"`                      | `packages/opencode` | Quoting, PID identity, and 1 MB drain remain correct                                                             |
+| `bun test test/cli/tui/daemon.test.ts --test-name-pattern "Windows daemon remains healthy after its launcher exits"`                                      | `packages/opencode` | Wrapper/worker ownership survives launcher exit                                                                  |
+| `bun test test/cli/tui/daemon.test.ts --test-name-pattern "Windows daemon detaches from the shared console yet keeps serving HTTP, SSE and control port"` | `packages/opencode` | Real worker still detaches and serves all channels                                                               |
+| `bun test test/cli/tui/daemon.test.ts`                                                                                                                    | `packages/opencode` | Full daemon lifecycle, stop, maintenance, wrapper, and Unix regressions                                          |
+| `bun test test/permission/reviewer-service.test.ts`                                                                                                       | `packages/opencode` | Reachable Provider error/permission path semantics remain unchanged                                              |
+| `bun typecheck`                                                                                                                                           | `packages/opencode` | Package TypeScript correctness                                                                                   |
+| `bun run build`                                                                                                                                           | `packages/opencode` | Bundled/compiled worker and embedded PowerShell source build successfully                                        |
+| Re-run section 8 inline incident feedback command                                                                                                         | `packages/opencode` | Same 525-byte Provider output remains ordinary output, while handles change from `0/0` to `3/3`; command exits 0 |
+| `git diff --check` and scoped `git diff --stat` / `git diff --numstat`                                                                                    | repository root     | No whitespace errors; file/line budgets and unrelated-diff exclusion are auditable                               |
 
 Tests must not run from repository root. No test may be skipped, timeout
 weakened, or changed to accept invalid handles. If a full-file test exposes a
@@ -555,16 +555,16 @@ unapproved production change.
 
 ## 19. Diff Budget
 
-| Metric | Estimate | Justification |
-| --- | --- | --- |
-| Files added | 0 implementation files | Canonical plan already exists before implementation |
-| Files modified | 4 total; 3 production + 1 test | One owner, two contract-comment sites, one existing live test suite |
-| Files deleted | 0 | No alternate implementation is introduced |
-| Production lines | 35-55 changed | Embedded PowerShell worker transport plus accurate boundary comments |
-| Test lines | 65-100 changed | One red OS-handle test plus one print-logs characterization |
-| Total changed code lines | 100-155, hard cap <400 | Leaves margin without authorizing additional concepts |
-| Generated lines | 0 | No SDK/schema generation |
-| Schema/migration/config lines | 0 | Explicitly prohibited and unnecessary |
+| Metric                        | Estimate                       | Justification                                                        |
+| ----------------------------- | ------------------------------ | -------------------------------------------------------------------- |
+| Files added                   | 0 implementation files         | Canonical plan already exists before implementation                  |
+| Files modified                | 4 total; 3 production + 1 test | One owner, two contract-comment sites, one existing live test suite  |
+| Files deleted                 | 0                              | No alternate implementation is introduced                            |
+| Production lines              | 35-55 changed                  | Embedded PowerShell worker transport plus accurate boundary comments |
+| Test lines                    | 65-100 changed                 | One red OS-handle test plus one print-logs characterization          |
+| Total changed code lines      | 100-155, hard cap <400         | Leaves margin without authorizing additional concepts                |
+| Generated lines               | 0                              | No SDK/schema generation                                             |
+| Schema/migration/config lines | 0                              | Explicitly prohibited and unnecessary                                |
 
 The budget cannot be used to omit a confirmed invariant. Any need for a fourth
 production file or a materially different path requires an R2 revision and a
@@ -575,14 +575,14 @@ forbidden by the user requirement.
 
 ### Real risks
 
-| Risk | Evidence | Planned control |
-| --- | --- | --- |
-| Redirected stdout or stderr fills and deadlocks worker exit | Existing worker test writes 1 MB before readiness | Start both CopyToAsync drains before WaitForExit; retain high-volume test |
-| Worker output races PID handshake | Wrapper stdout is both PID protocol and optional forwarded worker output | Publish and flush PID before starting forwarding; test real worker PID/markers |
-| Print-log output is silently discarded or merged | Existing default/print-logs destinations differ | Explicit per-stream destination and child-launcher capture test |
-| Fast worker exit drops tail bytes or wrapper exit code | Redirected stream tasks may complete after process exit | Wait for worker exit, await both drains, propagate the saved worker exit code |
-| ProcessStartInfo changes hidden, shared-console, or launcher-independent behavior | Replaces Start-Process behavior | Explicit `CreateNoWindow=false`; print-log console characterization; existing hide/launcher/HTTP/SSE/control tests |
-| Test failure leaks worker/wrapper processes | Live OS tests create real children | `try/finally`, worker-first `proc.kill()`, await `proc.exited`, tmpdir disposal |
+| Risk                                                                              | Evidence                                                                 | Planned control                                                                                                    |
+| --------------------------------------------------------------------------------- | ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------ |
+| Redirected stdout or stderr fills and deadlocks worker exit                       | Existing worker test writes 1 MB before readiness                        | Start both CopyToAsync drains before WaitForExit; retain high-volume test                                          |
+| Worker output races PID handshake                                                 | Wrapper stdout is both PID protocol and optional forwarded worker output | Publish and flush PID before starting forwarding; test real worker PID/markers                                     |
+| Print-log output is silently discarded or merged                                  | Existing default/print-logs destinations differ                          | Explicit per-stream destination and child-launcher capture test                                                    |
+| Fast worker exit drops tail bytes or wrapper exit code                            | Redirected stream tasks may complete after process exit                  | Wait for worker exit, await both drains, propagate the saved worker exit code                                      |
+| ProcessStartInfo changes hidden, shared-console, or launcher-independent behavior | Replaces Start-Process behavior                                          | Explicit `CreateNoWindow=false`; print-log console characterization; existing hide/launcher/HTTP/SSE/control tests |
+| Test failure leaks worker/wrapper processes                                       | Live OS tests create real children                                       | `try/finally`, worker-first `proc.kill()`, await `proc.exited`, tmpdir disposal                                    |
 
 ### Open Decisions Requiring the User
 
@@ -648,10 +648,10 @@ Primary-agent blocker handling is constrained by the user requirement:
 
 ## 22. Plan Audit Record
 
-| Round | Audited revision | Full scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | R1 | yes | `B-01 CreateNoWindow=true 改变 --print-logs 的既有控制台与 Ctrl-C 语义` | 无 | `BLOCK — canonical plan revision R1。` | `ses_0186edf7effeYukhGJet2pVFfn` |
-| 2 | R2 | yes | `No blocking findings.` | `无。` | `APPROVE — 仅适用于 canonical plan revision R2。` | `ses_0186edf7effeYukhGJet2pVFfn` |
+| Round | Audited revision | Full scope? | Blocking findings                                                       | Non-blocking findings | Result                                            | Invocation reference             |
+| ----- | ---------------- | ----------- | ----------------------------------------------------------------------- | --------------------- | ------------------------------------------------- | -------------------------------- |
+| 1     | R1               | yes         | `B-01 CreateNoWindow=true 改变 --print-logs 的既有控制台与 Ctrl-C 语义` | 无                    | `BLOCK — canonical plan revision R1。`            | `ses_0186edf7effeYukhGJet2pVFfn` |
+| 2     | R2               | yes         | `No blocking findings.`                                                 | `无。`                | `APPROVE — 仅适用于 canonical plan revision R2。` | `ses_0186edf7effeYukhGJet2pVFfn` |
 
 ### Round 2 Verbatim Verdict
 
@@ -742,18 +742,18 @@ database setting, public API, provider retry, or consumer-path change exists.
 
 All commands ran from `packages/opencode` unless stated otherwise.
 
-| Command | Result |
-| --- | --- |
-| `bun test test/cli/tui/daemon.test.ts --test-name-pattern "Windows daemon keeps stdout and stderr as pipes after FreeConsole"` | Red before implementation (`0/0`), green after implementation (`3/3`) |
-| `bun test test/cli/tui/daemon.test.ts --test-name-pattern "Windows daemon preserves shared console and forwards pipes in print-log mode"` | Pass; console retained, streams separated, exit `23` propagated |
-| The four section 15 targeted wrapper/service regression commands | Pass |
-| `bun test test/cli/tui/daemon.test.ts` | Initial package-default 5-second run timed out in 4 pre-existing CLI startup cases; no assertion was weakened |
-| `bun test --timeout 30000 test/cli/tui/daemon.test.ts` | `45 pass`, `0 fail`, `174 expect()` |
-| `bun test --timeout 30000 test/permission/reviewer-service.test.ts` | `18 pass`, `0 fail`, `102 expect()` |
-| `bun typecheck` | Pass (`tsgo --noEmit`) |
-| `bun run build` | First attempt stopped before compilation because `https://models.dev/api.json` was unreachable |
-| `MODELS_DEV_API_JSON=<authorized byte-identical temporary input> bun run build --single --skip-embed-web-ui --skip-install` | Pass; version smoke and compiled voice-worker smoke pass; `opencode-windows-x64/bin/opencode.exe` is 152296448 bytes, SHA-256 `3f0477ab1253f25aed2103f97e35815909447e51c11a644b0be90c4a46624165` |
-| `git diff --check -- <goal files>` from repository root | Pass |
+| Command                                                                                                                                   | Result                                                                                                                                                                                           |
+| ----------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `bun test test/cli/tui/daemon.test.ts --test-name-pattern "Windows daemon keeps stdout and stderr as pipes after FreeConsole"`            | Red before implementation (`0/0`), green after implementation (`3/3`)                                                                                                                            |
+| `bun test test/cli/tui/daemon.test.ts --test-name-pattern "Windows daemon preserves shared console and forwards pipes in print-log mode"` | Pass; console retained, streams separated, exit `23` propagated                                                                                                                                  |
+| The four section 15 targeted wrapper/service regression commands                                                                          | Pass                                                                                                                                                                                             |
+| `bun test test/cli/tui/daemon.test.ts`                                                                                                    | Initial package-default 5-second run timed out in 4 pre-existing CLI startup cases; no assertion was weakened                                                                                    |
+| `bun test --timeout 30000 test/cli/tui/daemon.test.ts`                                                                                    | `45 pass`, `0 fail`, `174 expect()`                                                                                                                                                              |
+| `bun test --timeout 30000 test/permission/reviewer-service.test.ts`                                                                       | `18 pass`, `0 fail`, `102 expect()`                                                                                                                                                              |
+| `bun typecheck`                                                                                                                           | Pass (`tsgo --noEmit`)                                                                                                                                                                           |
+| `bun run build`                                                                                                                           | First attempt stopped before compilation because `https://models.dev/api.json` was unreachable                                                                                                   |
+| `MODELS_DEV_API_JSON=<authorized byte-identical temporary input> bun run build --single --skip-embed-web-ui --skip-install`               | Pass; version smoke and compiled voice-worker smoke pass; `opencode-windows-x64/bin/opencode.exe` is 152296448 bytes, SHA-256 `3f0477ab1253f25aed2103f97e35815909447e51c11a644b0be90c4a46624165` |
+| `git diff --check -- <goal files>` from repository root                                                                                   | Pass                                                                                                                                                                                             |
 
 The authorized temporary model input was deleted. The user's pre-existing
 `packages/core/src/models-snapshot.js` remains byte-identical with SHA-256
@@ -764,7 +764,12 @@ The authorized temporary model input was deleted. The user's pre-existing
 The unchanged section 8 incident command exits `0` after the repair:
 
 ```json
-{"handles":{"detached":1,"stdout":3,"stderr":3},"providerBytes":525,"byteEqual":true,"sha256":"673f54d8381df44762653631d3d24570a15a0583bd0bfd0fe8815afb9d115be8"}
+{
+  "handles": { "detached": 1, "stdout": 3, "stderr": 3 },
+  "providerBytes": 525,
+  "byteEqual": true,
+  "sha256": "673f54d8381df44762653631d3d24570a15a0583bd0bfd0fe8815afb9d115be8"
+}
 ```
 
 The actual AI SDK Provider error buffer remains exactly reproducible and
@@ -791,12 +796,12 @@ route rather than suppressing the producer or tolerating malformed SQLite.
 
 ### Chinese Comment Calculation
 
-| Metric | Actual | Exclusions and evidence |
-| --- | --- | --- |
-| Effective changed code lines `E` | `170` | 177 added lines minus 7 blank lines; no import-only, formatter-only, generated, or pure-move lines counted |
-| Qualifying Chinese comment lines `C` | `27` | Each is adjacent to its modified boundary/test and explains an invariant, compatibility requirement, failure oracle, or cleanup safety condition |
-| Ratio `C / E` | `15.88%` | `27 / 170` |
-| Required minimum `C` | `26` | `ceil(170 * 0.15)`; gate passes |
+| Metric                               | Actual   | Exclusions and evidence                                                                                                                          |
+| ------------------------------------ | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Effective changed code lines `E`     | `170`    | 177 added lines minus 7 blank lines; no import-only, formatter-only, generated, or pure-move lines counted                                       |
+| Qualifying Chinese comment lines `C` | `27`     | Each is adjacent to its modified boundary/test and explains an invariant, compatibility requirement, failure oracle, or cleanup safety condition |
+| Ratio `C / E`                        | `15.88%` | `27 / 170`                                                                                                                                       |
+| Required minimum `C`                 | `26`     | `ceil(170 * 0.15)`; gate passes                                                                                                                  |
 
 Representative qualifying comments explain why pipes must exist before Bun
 starts, why both streams must drain concurrently, why `CreateNoWindow=false`
@@ -815,9 +820,9 @@ the runtime protection.
 
 ## 24. Implementation Audit Record
 
-| Round | Plan revision | Full original scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | R2 | yes | None | None | `No blocking findings`; `APPROVE` | `ses_0181cd672ffe1H0PW5GGzeUyk7` |
+| Round | Plan revision | Full original scope? | Blocking findings | Non-blocking findings | Result                            | Invocation reference             |
+| ----- | ------------- | -------------------- | ----------------- | --------------------- | --------------------------------- | -------------------------------- |
+| 1     | R2            | yes                  | None              | None                  | `No blocking findings`; `APPROVE` | `ses_0181cd672ffe1H0PW5GGzeUyk7` |
 
 ### Round 1 Independent Verdict (verbatim)
 

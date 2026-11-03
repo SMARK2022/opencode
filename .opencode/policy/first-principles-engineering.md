@@ -276,18 +276,18 @@ demonstrated over-budget diagnostic surface.
 
 Use these default owners unless repository evidence establishes another seam.
 
-| Concern | Default owner |
-| --- | --- |
-| Raw input validation | First trust seam |
-| Domain invariants | Domain module |
-| External wire-format compatibility | Adapter |
-| Retry and timeout policy | Orchestration module |
-| Temporary files and transport buffering | Transport or storage implementation |
-| Fallback product policy | Explicit product orchestration, only when requested |
-| Logging, metrics, and alerts | Observability seam |
-| Persisted schema migration | Persistence owner |
-| Output compatibility | Public interface or adapter that promises it |
-| Permission and approval | Permission/workflow module |
+| Concern                                 | Default owner                                       |
+| --------------------------------------- | --------------------------------------------------- |
+| Raw input validation                    | First trust seam                                    |
+| Domain invariants                       | Domain module                                       |
+| External wire-format compatibility      | Adapter                                             |
+| Retry and timeout policy                | Orchestration module                                |
+| Temporary files and transport buffering | Transport or storage implementation                 |
+| Fallback product policy                 | Explicit product orchestration, only when requested |
+| Logging, metrics, and alerts            | Observability seam                                  |
+| Persisted schema migration              | Persistence owner                                   |
+| Output compatibility                    | Public interface or adapter that promises it        |
+| Permission and approval                 | Permission/workflow module                          |
 
 For every added behavior, answer:
 
@@ -306,7 +306,7 @@ If the interface does not own the behavior, move it to the owner or remove it.
 Prevent under-design with forward traceability:
 
 | Confirmed requirement or invariant | Production path | Change location | Behavioral test |
-| --- | --- | --- | --- |
+| ---------------------------------- | --------------- | --------------- | --------------- |
 
 Every observed, contracted, or reachable requirement in scope must map to an
 implementation path and a behavioral test or an explicit reason why automated
@@ -315,7 +315,7 @@ verification is impossible.
 Prevent over-design with reverse traceability:
 
 | Proposed production concept | Requirement ID | Evidence | Why existing logic cannot carry it |
-| --- | --- | --- | --- |
+| --------------------------- | -------------- | -------- | ---------------------------------- |
 
 Every new module, interface method, adapter, helper, branch, state, setting,
 cache, retry, guard, compatibility rule, migration, or dependency must map back

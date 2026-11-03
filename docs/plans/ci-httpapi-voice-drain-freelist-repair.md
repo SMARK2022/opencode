@@ -59,41 +59,41 @@ Non-goals:
 
 ## 3. Repository Context
 
-| Source | Constraint |
-| --- | --- |
-| `CONTEXT.md` | Preserve Session, Project, daemon, and test vocabulary. |
-| `packages/opencode/test/AGENTS.md` | Test observable behavior; avoid scheduler sleeps as readiness. |
+| Source                                                               | Constraint                                                                                   |
+| -------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| `CONTEXT.md`                                                         | Preserve Session, Project, daemon, and test vocabulary.                                      |
+| `packages/opencode/test/AGENTS.md`                                   | Test observable behavior; avoid scheduler sleeps as readiness.                               |
 | `packages/opencode/AGENTS.md` and `packages/opencode/test/AGENTS.md` | Keep tests at public seams; process cleanup and output synchronization must remain explicit. |
-| `packages/opencode/src/server/routes/instance/httpapi/AGENTS.md` | Keep HTTP ownership at route/middleware seams. |
-| `packages/opencode/package.json` | `test:httpapi` runs coverage/auth/effect with missing/skip gates. |
-| User budget | At most 8 code files and 800 changed code lines. |
+| `packages/opencode/src/server/routes/instance/httpapi/AGENTS.md`     | Keep HTTP ownership at route/middleware seams.                                               |
+| `packages/opencode/package.json`                                     | `test:httpapi` runs coverage/auth/effect with missing/skip gates.                            |
+| User budget                                                          | At most 8 code files and 800 changed code lines.                                             |
 
 ## 4. Evidence Read
 
-| Evidence | Relevance | Class |
-| --- | --- | --- |
-| Original Linux/macOS CI logs | Voice recovery failed `Expected: 121 / Received: 49` | observed |
-| Original HttpApi gate logs | `POST /session/search/scan` was the only missing scenario | observed |
-| `groups/session.ts` and `handlers/session.ts` | Search route and handler already exist | observed |
-| `workspace-routing.ts` | Search static path was previously mistaken for SessionID | observed |
-| `prompt-voice-recorder.ts` and its dual-slow test | Main-thread native reads and elapsed-time drain classification are the current voice path | observed |
-| Current-HEAD candidate with root-only dependency link | Invalid isolation: resolved top-level `@ai-sdk/anthropic@3.0.64`, producing a false MiniMax `top_p` failure | observed |
-| Focused DB command | `bun test test/cli/db-maintenance.test.ts -t "does not classify..."` times out at 30s because it waits for the downstream Agent run | observed |
-| Incremental stderr harness for `opencode run db status` | Marker observed in 2.137s while the focused test still times out at 30s waiting for exit | observed |
-| `src/index.ts:68-77,138-175` | Root-command classification writes the migration prompt before dispatching `run`; this is the behavior under test | reachable |
-| Direct package-local MiniMax command | `packages/opencode` resolves `@ai-sdk/anthropic@3.0.71`; focused wire test passes with `top_p=0.9` | observed |
-| Isolated candidate after package-local node_modules link | Same MiniMax focused test passes; dependency resolution, not code, was the first divergence | observed |
-| Full LSP test with real local bridge | False red: status selects `vscode`, not `typescript` | observed |
-| Full LSP test with empty `OPENCODE_IDE_REGISTRY_DIR` | `17 pass / 0 fail`; no LSP implementation repair is required | observed |
-| PvRecorder `pv_recorder.c` at `a33ec985...` | `stop()` resets the circular buffer before device stop; `read()` blocks until a full frame and exposes no occupancy/EOF | contracted |
-| PvRecorder Node wrapper and public header | Public surface has start/stop/read/isRecording only; no non-blocking queue query exists | contracted |
-| R6 independent implementation audit | Three slow reads only move the scheduler-sensitive failure threshold and leave the first divergence | observed |
-| User's latest budget decision | Up to eight code files are authorized so the recorder read owner can move to one dedicated Worker | contracted |
-| Existing voice read-failure tests | `stop()` rejects and writes no partial WAV; `abort()` remains best-effort and releases once | observed |
-| R7 plan audit | Worker error terminal and compiled Worker startup lacked behavior-sensitive mappings | observed |
-| R8 plan audit | JavaScript fake addon conflicts with the compiled `.node` resource loader | observed |
-| R9 plan audit | Native init/start and Worker-entry startup failures lacked behavior-sensitive tests | observed |
-| R10 plan audit | Native stop/release failure outcomes were not classified | observed |
+| Evidence                                                 | Relevance                                                                                                                           | Class      |
+| -------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- | ---------- |
+| Original Linux/macOS CI logs                             | Voice recovery failed `Expected: 121 / Received: 49`                                                                                | observed   |
+| Original HttpApi gate logs                               | `POST /session/search/scan` was the only missing scenario                                                                           | observed   |
+| `groups/session.ts` and `handlers/session.ts`            | Search route and handler already exist                                                                                              | observed   |
+| `workspace-routing.ts`                                   | Search static path was previously mistaken for SessionID                                                                            | observed   |
+| `prompt-voice-recorder.ts` and its dual-slow test        | Main-thread native reads and elapsed-time drain classification are the current voice path                                           | observed   |
+| Current-HEAD candidate with root-only dependency link    | Invalid isolation: resolved top-level `@ai-sdk/anthropic@3.0.64`, producing a false MiniMax `top_p` failure                         | observed   |
+| Focused DB command                                       | `bun test test/cli/db-maintenance.test.ts -t "does not classify..."` times out at 30s because it waits for the downstream Agent run | observed   |
+| Incremental stderr harness for `opencode run db status`  | Marker observed in 2.137s while the focused test still times out at 30s waiting for exit                                            | observed   |
+| `src/index.ts:68-77,138-175`                             | Root-command classification writes the migration prompt before dispatching `run`; this is the behavior under test                   | reachable  |
+| Direct package-local MiniMax command                     | `packages/opencode` resolves `@ai-sdk/anthropic@3.0.71`; focused wire test passes with `top_p=0.9`                                  | observed   |
+| Isolated candidate after package-local node_modules link | Same MiniMax focused test passes; dependency resolution, not code, was the first divergence                                         | observed   |
+| Full LSP test with real local bridge                     | False red: status selects `vscode`, not `typescript`                                                                                | observed   |
+| Full LSP test with empty `OPENCODE_IDE_REGISTRY_DIR`     | `17 pass / 0 fail`; no LSP implementation repair is required                                                                        | observed   |
+| PvRecorder `pv_recorder.c` at `a33ec985...`              | `stop()` resets the circular buffer before device stop; `read()` blocks until a full frame and exposes no occupancy/EOF             | contracted |
+| PvRecorder Node wrapper and public header                | Public surface has start/stop/read/isRecording only; no non-blocking queue query exists                                             | contracted |
+| R6 independent implementation audit                      | Three slow reads only move the scheduler-sensitive failure threshold and leave the first divergence                                 | observed   |
+| User's latest budget decision                            | Up to eight code files are authorized so the recorder read owner can move to one dedicated Worker                                   | contracted |
+| Existing voice read-failure tests                        | `stop()` rejects and writes no partial WAV; `abort()` remains best-effort and releases once                                         | observed   |
+| R7 plan audit                                            | Worker error terminal and compiled Worker startup lacked behavior-sensitive mappings                                                | observed   |
+| R8 plan audit                                            | JavaScript fake addon conflicts with the compiled `.node` resource loader                                                           | observed   |
+| R9 plan audit                                            | Native init/start and Worker-entry startup failures lacked behavior-sensitive tests                                                 | observed   |
+| R10 plan audit                                           | Native stop/release failure outcomes were not classified                                                                            | observed   |
 
 ## 5. Current Behavior and Reachability
 
@@ -124,38 +124,38 @@ output is already observable.
 
 ### Supported Domain and Reachability
 
-| Input or condition | Producer | Upstream guarantee | Reachable path | Owner | Class |
-| --- | --- | --- | --- | --- | --- |
-| `POST /session/search/scan` | Generated/public HttpApi route | Path is a collection operation, not a branded SessionID | middleware -> handler | workspace routing + route exercise | observed |
-| TUI event-loop stall while audio capture continues | TUI render/input work | recorder reads must not share the stalled event loop | Worker read -> ordered frame message -> WAV | voice recorder + voice Worker | observed |
-| stop requested while a Worker read is in flight | user voice toggle | frames completed after the atomic boundary are not part of the recording | atomic flag -> Worker discard -> native stop/release -> ack | voice Worker | reachable |
-| non-TTY argv `run db status` on first migration | public CLI caller | root command is `run`; later tokens are message data | root middleware -> stderr -> run | CLI test seam | observed |
-| live VS Code bridge during built-in LSP lifecycle test | developer environment | bridge discovery intentionally selects external LSP | registry -> LSP status | test environment isolation | observed, rejected as code scope |
+| Input or condition                                     | Producer                       | Upstream guarantee                                                       | Reachable path                                              | Owner                              | Class                            |
+| ------------------------------------------------------ | ------------------------------ | ------------------------------------------------------------------------ | ----------------------------------------------------------- | ---------------------------------- | -------------------------------- |
+| `POST /session/search/scan`                            | Generated/public HttpApi route | Path is a collection operation, not a branded SessionID                  | middleware -> handler                                       | workspace routing + route exercise | observed                         |
+| TUI event-loop stall while audio capture continues     | TUI render/input work          | recorder reads must not share the stalled event loop                     | Worker read -> ordered frame message -> WAV                 | voice recorder + voice Worker      | observed                         |
+| stop requested while a Worker read is in flight        | user voice toggle              | frames completed after the atomic boundary are not part of the recording | atomic flag -> Worker discard -> native stop/release -> ack | voice Worker                       | reachable                        |
+| non-TTY argv `run db status` on first migration        | public CLI caller              | root command is `run`; later tokens are message data                     | root middleware -> stderr -> run                            | CLI test seam                      | observed                         |
+| live VS Code bridge during built-in LSP lifecycle test | developer environment          | bridge discovery intentionally selects external LSP                      | registry -> LSP status                                      | test environment isolation         | observed, rejected as code scope |
 
 ## 6. Required Invariants
 
-| ID | Invariant | Evidence / test |
-| --- | --- | --- |
-| INV-A1 | Every OpenAPI route has a matching exercise scenario and missing=0. | HttpApi gate |
-| INV-A2 | Search scan reaches its handler through workspace routing and returns its declared 200 shape. | Effect scenario |
-| INV-B1 | Blocking the TUI event loop does not stop the recorder owner from draining native frames into the application queue. | Real Worker + fake native addon test |
-| INV-B2 | A native read that completes after the atomic stop request is discarded and never enters the WAV. | In-flight read stop test |
-| INV-B3 | `stopped` is emitted only after native stop/release; sender ordering guarantees all accepted frame messages precede the final acknowledgement. | Worker protocol test + recorder stop test |
-| INV-B4 | Native init/start/read failure emits an error terminal only after its owned cleanup; `stop()` rejects without writing a partial WAV, while `abort()` remains best-effort and idempotent. | Init/start/read failure matrix at the Worker protocol seam |
-| INV-B4a | Worker module/startup failure before `started` makes `startPromptVoiceRecorder()` reject, terminate the Worker, and leave no WAV. | Main recorder startup-failure test |
-| INV-B4b | Native stop/delete cleanup failure is best-effort: normal stop still emits `stopped` and writes accepted frames; after init/start/read failure it never replaces the primary error. | Stop/delete failure protocol tests |
-| INV-D1 | The non-DB root command `run db status` emits the normal one-time migration presentation. | Public CLI stderr |
-| INV-D2 | Classification tests stop after observing their owned output and do not wait for unrelated Provider completion. | Focused DB CLI test |
-| INV-B5 | A host-executable compiled artifact resolves and starts the same embedded Worker entrypoint, exchanges a probe message, and observes a clean Worker close. | Compiled voice Worker probe |
-| INV-BUDGET | Replacement work remains within eight code files and 800 code lines. | Diffstat |
+| ID         | Invariant                                                                                                                                                                                | Evidence / test                                            |
+| ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------- |
+| INV-A1     | Every OpenAPI route has a matching exercise scenario and missing=0.                                                                                                                      | HttpApi gate                                               |
+| INV-A2     | Search scan reaches its handler through workspace routing and returns its declared 200 shape.                                                                                            | Effect scenario                                            |
+| INV-B1     | Blocking the TUI event loop does not stop the recorder owner from draining native frames into the application queue.                                                                     | Real Worker + fake native addon test                       |
+| INV-B2     | A native read that completes after the atomic stop request is discarded and never enters the WAV.                                                                                        | In-flight read stop test                                   |
+| INV-B3     | `stopped` is emitted only after native stop/release; sender ordering guarantees all accepted frame messages precede the final acknowledgement.                                           | Worker protocol test + recorder stop test                  |
+| INV-B4     | Native init/start/read failure emits an error terminal only after its owned cleanup; `stop()` rejects without writing a partial WAV, while `abort()` remains best-effort and idempotent. | Init/start/read failure matrix at the Worker protocol seam |
+| INV-B4a    | Worker module/startup failure before `started` makes `startPromptVoiceRecorder()` reject, terminate the Worker, and leave no WAV.                                                        | Main recorder startup-failure test                         |
+| INV-B4b    | Native stop/delete cleanup failure is best-effort: normal stop still emits `stopped` and writes accepted frames; after init/start/read failure it never replaces the primary error.      | Stop/delete failure protocol tests                         |
+| INV-D1     | The non-DB root command `run db status` emits the normal one-time migration presentation.                                                                                                | Public CLI stderr                                          |
+| INV-D2     | Classification tests stop after observing their owned output and do not wait for unrelated Provider completion.                                                                          | Focused DB CLI test                                        |
+| INV-B5     | A host-executable compiled artifact resolves and starts the same embedded Worker entrypoint, exchanges a probe message, and observes a clean Worker close.                               | Compiled voice Worker probe                                |
+| INV-BUDGET | Replacement work remains within eight code files and 800 code lines.                                                                                                                     | Diffstat                                                   |
 
 ## 7. First Divergence and Root Cause
 
-| Cluster | First divergence | Owner | Proof |
-| --- | --- | --- | --- |
-| A | Missing scenario, then workspace middleware calls `SessionID.make("search")` for a collection route. | Exercise scenario + workspace routing | Prior effect 500: `Expected a string starting with "ses", got "search"`. |
-| B | Synchronous native reads run on the TUI event loop; after a stall, stop attempts to reconstruct queue state from elapsed read time, which PvRecorder does not contract. | Voice recorder lifecycle | Prior CI `Expected 121 Received 49`; upstream exposes neither occupancy nor EOF; R6 audit proves every finite slow-count threshold retains the same failure. |
-| D | Test observes migration only after `runCli` awaits process exit, so the downstream Agent run controls the verdict. | DB CLI test harness | Focused command reaches Bun's 30s timeout; incremental stderr observes the required marker in 2.137s before killing the child. |
+| Cluster | First divergence                                                                                                                                                        | Owner                                 | Proof                                                                                                                                                        |
+| ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| A       | Missing scenario, then workspace middleware calls `SessionID.make("search")` for a collection route.                                                                    | Exercise scenario + workspace routing | Prior effect 500: `Expected a string starting with "ses", got "search"`.                                                                                     |
+| B       | Synchronous native reads run on the TUI event loop; after a stall, stop attempts to reconstruct queue state from elapsed read time, which PvRecorder does not contract. | Voice recorder lifecycle              | Prior CI `Expected 121 Received 49`; upstream exposes neither occupancy nor EOF; R6 audit proves every finite slow-count threshold retains the same failure. |
+| D       | Test observes migration only after `runCli` awaits process exit, so the downstream Agent run controls the verdict.                                                      | DB CLI test harness                   | Focused command reaches Bun's 30s timeout; incremental stderr observes the required marker in 2.137s before killing the child.                               |
 
 D is an output-observation boundary error in the test harness and does not
 justify production behavior. R11 repairs that owner and does not add retry,
@@ -164,11 +164,11 @@ branch is rejected evidence: actual package resolution makes it green.
 
 ### Responsibility and Seam
 
-| Concern | Owner | Interface promise | Why this owner | Why not elsewhere |
-| --- | --- | --- | --- | --- |
-| collection route classification | workspace routing | static route segments never become SessionID | it parses the shared HTTP path before handlers | handler already receives a valid collection request |
+| Concern                                    | Owner                          | Interface promise                                                                                             | Why this owner                                        | Why not elsewhere                                                           |
+| ------------------------------------------ | ------------------------------ | ------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------- | --------------------------------------------------------------------------- |
+| collection route classification            | workspace routing              | static route segments never become SessionID                                                                  | it parses the shared HTTP path before handlers        | handler already receives a valid collection request                         |
 | continuous voice capture and stop boundary | voice recorder Worker protocol | read independently of TUI scheduling; accept frames only before atomic stop; acknowledge after native release | recorder lifecycle owns native reads and WAV ordering | tests cannot repair dropped frames and native API cannot expose queue state |
-| migration presentation verdict | DB CLI test | observe public stderr for non-DB root command | the test chose an over-wide completion boundary | run/Provider behavior is unrelated and unchanged |
+| migration presentation verdict             | DB CLI test                    | observe public stderr for non-DB root command                                                                 | the test chose an over-wide completion boundary       | run/Provider behavior is unrelated and unchanged                            |
 
 ## 8. Proposed Primary Path Design
 
@@ -248,15 +248,15 @@ success path and does not hide an error as success.
 
 ## 9. Secondary Path Inventory
 
-| Path | Classification | Decision |
-| --- | --- | --- |
-| Main-thread record loop + elapsed-time drain | Superseded workaround | Delete completely |
-| Dedicated Worker + atomic stop protocol | Primary production path | Add as the only native-read owner |
-| Compiled Worker probe | Diagnostic path | One top-level `probe` message branch; cannot load native or produce a recording; keep diagnostic decisions at or below 10% of the final protocol decision surface |
-| Full Agent run completion in DB classification test | Superseded test overreach | Remove |
-| Migration-marker observation | Primary test seam | Add |
-| Windows freelist timeout and daemon marker edits | Outside explicit R11 scope | Remove from replacement diff |
-| MiniMax `top_p` test change | Invalid dependency-isolation workaround | Reject; preserve existing green test |
+| Path                                                | Classification                          | Decision                                                                                                                                                          |
+| --------------------------------------------------- | --------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Main-thread record loop + elapsed-time drain        | Superseded workaround                   | Delete completely                                                                                                                                                 |
+| Dedicated Worker + atomic stop protocol             | Primary production path                 | Add as the only native-read owner                                                                                                                                 |
+| Compiled Worker probe                               | Diagnostic path                         | One top-level `probe` message branch; cannot load native or produce a recording; keep diagnostic decisions at or below 10% of the final protocol decision surface |
+| Full Agent run completion in DB classification test | Superseded test overreach               | Remove                                                                                                                                                            |
+| Migration-marker observation                        | Primary test seam                       | Add                                                                                                                                                               |
+| Windows freelist timeout and daemon marker edits    | Outside explicit R11 scope              | Remove from replacement diff                                                                                                                                      |
+| MiniMax `top_p` test change                         | Invalid dependency-isolation workaround | Reject; preserve existing green test                                                                                                                              |
 
 ## 10. File Budget and Ownership
 
@@ -279,43 +279,43 @@ is the compiled smoke process-role dispatch. No new dependency is planned.
 
 ### Forward Traceability
 
-| Requirement or invariant | Production path | Planned file/change | Behavioral test |
-| --- | --- | --- | --- |
-| INV-A1 | HttpApi route inventory | add `session.search.scan` scenario in `httpapi-exercise/index.ts` | coverage/auth/effect missing=0 |
-| INV-A2 | workspace route parser -> search handler | exempt `/session/search/*` in `workspace-routing.ts` | real effect scenario returns 200 |
-| INV-B1 / INV-B2 / INV-B3 | Worker native read -> ordered frame messages -> atomic stop -> release ack -> WAV | replace inline reader/drain in recorder; add Worker entrypoint and compile path | real Worker protocol with fake native addon plus recorder public-handle tests |
-| INV-B4 | native init/start/read failure -> owner-specific cleanup -> error terminal -> no WAV | Worker cleanup and recorder terminal handling | real Worker fake-native failure matrix plus migrated read-failure/abort behavior |
-| INV-B4a | Worker module/startup error -> main terminate/remove/reject | recorder startup boundary | protocol fake Worker startup-failure test |
-| INV-B4b | normal stop or primary failure -> one best-effort stop/delete attempt -> preserve stopped/primary error terminal | Worker cleanup owner | fake-native stop/delete failure tests through recorder handle |
-| INV-B5 | compiled executable -> embedded Worker entrypoint -> probe ack/close | build smoke process role in `src/index.ts` plus `script/build.ts` | host-target compiled voice probe |
-| INV-D1 / INV-D2 | root migration middleware -> stderr | replace full-process wait with incremental stderr observation in `db-maintenance.test.ts` | focused run-message test |
-| INV-BUDGET | replacement diff | exactly eight listed code files, below 800 lines | diffstat and path audit |
+| Requirement or invariant | Production path                                                                                                  | Planned file/change                                                                       | Behavioral test                                                                  |
+| ------------------------ | ---------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
+| INV-A1                   | HttpApi route inventory                                                                                          | add `session.search.scan` scenario in `httpapi-exercise/index.ts`                         | coverage/auth/effect missing=0                                                   |
+| INV-A2                   | workspace route parser -> search handler                                                                         | exempt `/session/search/*` in `workspace-routing.ts`                                      | real effect scenario returns 200                                                 |
+| INV-B1 / INV-B2 / INV-B3 | Worker native read -> ordered frame messages -> atomic stop -> release ack -> WAV                                | replace inline reader/drain in recorder; add Worker entrypoint and compile path           | real Worker protocol with fake native addon plus recorder public-handle tests    |
+| INV-B4                   | native init/start/read failure -> owner-specific cleanup -> error terminal -> no WAV                             | Worker cleanup and recorder terminal handling                                             | real Worker fake-native failure matrix plus migrated read-failure/abort behavior |
+| INV-B4a                  | Worker module/startup error -> main terminate/remove/reject                                                      | recorder startup boundary                                                                 | protocol fake Worker startup-failure test                                        |
+| INV-B4b                  | normal stop or primary failure -> one best-effort stop/delete attempt -> preserve stopped/primary error terminal | Worker cleanup owner                                                                      | fake-native stop/delete failure tests through recorder handle                    |
+| INV-B5                   | compiled executable -> embedded Worker entrypoint -> probe ack/close                                             | build smoke process role in `src/index.ts` plus `script/build.ts`                         | host-target compiled voice probe                                                 |
+| INV-D1 / INV-D2          | root migration middleware -> stderr                                                                              | replace full-process wait with incremental stderr observation in `db-maintenance.test.ts` | focused run-message test                                                         |
+| INV-BUDGET               | replacement diff                                                                                                 | exactly eight listed code files, below 800 lines                                          | diffstat and path audit                                                          |
 
 ### Reverse Traceability
 
-| Proposed production concept | Requirement | Evidence | Why existing logic is insufficient |
-| --- | --- | --- | --- |
-| search collection-route exemption | INV-A2 | effect route previously branded `search` as SessionID and returned 500 | existing preview-only exemption does not cover the reachable search collection path |
-| dedicated native-read Worker | INV-B1 / INV-B2 / INV-B3 / INV-B4 / INV-B4a / INV-B4b | TUI stalls block the current reader; PvRecorder has no queue-state API; existing failure and cleanup semantics belong to the replaced lifecycle | elapsed-time drain cannot classify queue state and must be deleted rather than extended |
-| compiled voice probe role | INV-B5 | compiled Worker path is a supported production domain and `--version` never starts it | source-only tests and build success cannot detect a broken bunfs Worker entrypoint; hardware startup is separately unverifiable |
+| Proposed production concept       | Requirement                                           | Evidence                                                                                                                                        | Why existing logic is insufficient                                                                                              |
+| --------------------------------- | ----------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| search collection-route exemption | INV-A2                                                | effect route previously branded `search` as SessionID and returned 500                                                                          | existing preview-only exemption does not cover the reachable search collection path                                             |
+| dedicated native-read Worker      | INV-B1 / INV-B2 / INV-B3 / INV-B4 / INV-B4a / INV-B4b | TUI stalls block the current reader; PvRecorder has no queue-state API; existing failure and cleanup semantics belong to the replaced lifecycle | elapsed-time drain cannot classify queue state and must be deleted rather than extended                                         |
+| compiled voice probe role         | INV-B5                                                | compiled Worker path is a supported production domain and `--version` never starts it                                                           | source-only tests and build success cannot detect a broken bunfs Worker entrypoint; hardware startup is separately unverifiable |
 
 D adds no production concept. Its change stays in the test because the current
 production owner already satisfies the confirmed contract.
 
 ## 11. TDD Slices
 
-| Order | Red behavior | Green behavior |
-| --- | --- | --- |
-| 1 | A real Worker fake-native harness continues producing frames while the test/TUI thread is synchronously stalled; the current inline implementation cannot. | Worker queues pre-stop frames independently of TUI scheduling. |
-| 2 | Stop is requested during a delayed native read; the current elapsed-time drain may commit or classify by duration. | Atomic flag discards the in-flight post-stop completion and terminal ack follows stop/release. |
-| 3 | Fake native init returns nonzero before a handle is owned. | Worker emits `error`, performs no stop/delete, closes, and main startup rejects without a WAV. |
-| 4 | Fake native start returns nonzero after init succeeds. | Worker deletes the handle exactly once, emits `error`, closes, and main startup rejects without a WAV. |
-| 5 | Fake native read returns nonzero after startup. | Worker stops/deletes exactly once, sends `error`; public `stop()` rejects and writes no WAV; `abort()` resolves and removes the file. |
-| 6 | Worker module/startup fails before `started`. | Main recorder terminates the Worker, rejects startup, and leaves no WAV or inline fallback. |
-| 7 | Native stop or delete fails during normal close, or cleanup fails after a primary native error. | Normal close still writes accepted frames; a primary init/start/read error remains the sole rejection; each cleanup operation is attempted once. |
-| 8 | A compiled artifact with a missing/broken Worker entrypoint still passes `--version`. | Host-target build launches the real compiled Worker path and requires probe acknowledgement plus clean close. |
-| 9 | Effect search scan returns 500 or route is missing. | Static route exemption plus scenario returns 200. |
-| 10 | Focused run-message test reaches Bun's 30s timeout after the migration marker. | Marker observation settles the assertion; the child is killed and awaited. |
+| Order | Red behavior                                                                                                                                               | Green behavior                                                                                                                                   |
+| ----- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 1     | A real Worker fake-native harness continues producing frames while the test/TUI thread is synchronously stalled; the current inline implementation cannot. | Worker queues pre-stop frames independently of TUI scheduling.                                                                                   |
+| 2     | Stop is requested during a delayed native read; the current elapsed-time drain may commit or classify by duration.                                         | Atomic flag discards the in-flight post-stop completion and terminal ack follows stop/release.                                                   |
+| 3     | Fake native init returns nonzero before a handle is owned.                                                                                                 | Worker emits `error`, performs no stop/delete, closes, and main startup rejects without a WAV.                                                   |
+| 4     | Fake native start returns nonzero after init succeeds.                                                                                                     | Worker deletes the handle exactly once, emits `error`, closes, and main startup rejects without a WAV.                                           |
+| 5     | Fake native read returns nonzero after startup.                                                                                                            | Worker stops/deletes exactly once, sends `error`; public `stop()` rejects and writes no WAV; `abort()` resolves and removes the file.            |
+| 6     | Worker module/startup fails before `started`.                                                                                                              | Main recorder terminates the Worker, rejects startup, and leaves no WAV or inline fallback.                                                      |
+| 7     | Native stop or delete fails during normal close, or cleanup fails after a primary native error.                                                            | Normal close still writes accepted frames; a primary init/start/read error remains the sole rejection; each cleanup operation is attempted once. |
+| 8     | A compiled artifact with a missing/broken Worker entrypoint still passes `--version`.                                                                      | Host-target build launches the real compiled Worker path and requires probe acknowledgement plus clean close.                                    |
+| 9     | Effect search scan returns 500 or route is missing.                                                                                                        | Static route exemption plus scenario returns 200.                                                                                                |
+| 10    | Focused run-message test reaches Bun's 30s timeout after the migration marker.                                                                             | Marker observation settles the assertion; the child is killed and awaited.                                                                       |
 
 For D, the expected value is literal public stderr. The test does not assert a
 private helper or reproduce production logic.
@@ -359,18 +359,18 @@ Chinese explanatory comments are required, covering:
 - why search is a collection route;
 - why the DB test stops at the migration output boundary rather than Agent completion;
 
-| Metric | Estimate | Method |
-| --- | --- | --- |
-| Effective changed code lines `E` | 300-430 | exclude imports, formatting, generated files, and reverted R4 Windows edits |
-| Required Chinese explanatory comments `C` | 45-65 minimum | `ceil(E * 0.15)` using actual E after implementation |
+| Metric                                    | Estimate      | Method                                                                      |
+| ----------------------------------------- | ------------- | --------------------------------------------------------------------------- |
+| Effective changed code lines `E`          | 300-430       | exclude imports, formatting, generated files, and reverted R4 Windows edits |
+| Required Chinese explanatory comments `C` | 45-65 minimum | `ceil(E * 0.15)` using actual E after implementation                        |
 
-| Diff metric | Budget |
-| --- | --- |
-| Code files modified | exactly 8, maximum 8 |
+| Diff metric                   | Budget                                                 |
+| ----------------------------- | ------------------------------------------------------ |
+| Code files modified           | exactly 8, maximum 8                                   |
 | Files added/deleted/generated | one Worker source added; no generated output committed |
-| Production/build lines | below 260 |
-| Test lines | below 220 |
-| Total changed code lines | below 800 |
+| Production/build lines        | below 260                                              |
+| Test lines                    | below 220                                              |
+| Total changed code lines      | below 800                                              |
 
 Expected code files: **8 maximum**. Expected code delta: **well below 800**.
 
@@ -447,25 +447,25 @@ full-scope approval.
 
 ## 16. Audit and Implementation Records
 
-| Phase | Revision | Result | Reference |
-| --- | --- | --- | --- |
-| Prior implementation | R2 | WITHDRAWN by user request; branch moved back without retaining add/revert history | `84bea8bc40` and `793bbf1d34` removed from branch |
-| Plan audit | R3 | BLOCK: C2 first divergence and commit sequence incomplete | adversarial audit |
-| Plan audit | R4 | No blocking findings | adversarial-auditor `ses_066758e63ffeyRkjyqppyVeyM6` |
-| Implementation audit | R4 | BLOCK: full package CI red and Windows C2 evidence unavailable | adversarial-auditor `ses_0664b44feffejMO3JdXzv5ugdg` |
-| Plan audit | R5 | BLOCK: MiniMax contract misclassified and full-suite registry command incomplete | adversarial-auditor `ses_065a73f8dffe3Gpr7A7NIz3iUk` |
-| Plan audit | R6 | BLOCK: fixed slow-read count remains scheduler-sensitive | adversarial-auditor `ses_065963981ffeUuXhbcukAkaOqj` |
-| Exploratory implementation audit | R6 | BLOCK: no approved baseline, voice heuristic, HttpApi `any`, incomplete full suite | adversarial-auditor `ses_0655dc50effe5tZirqvCEhBf55` |
-| Plan audit | R7 | BLOCK: failure terminal and compiled Worker startup were unmapped | adversarial-auditor `ses_0654b17dbffeFJa1p5HjDvP115` |
-| Plan audit | R8 | BLOCK: JavaScript fake addon cannot enter compiled `.node` loader | adversarial-auditor `ses_065419e6fffe5C47SEYNUaRh3Z` |
-| Plan audit | R9 | BLOCK: init/start and Worker-entry failure tests missing | adversarial-auditor `ses_0653c4f42ffe8O23Gk9uDqGjX1` |
-| Plan audit | R10 | BLOCK: native stop/release failure outcome missing | adversarial-auditor `ses_06532a616ffeloJ8LwIbmIacSc` |
-| Plan audit | R11 | No blocking findings; APPROVE | adversarial-auditor `ses_06528cb65ffeEO4QpHYg3nggCT` |
-| Implementation audit | R11 | BLOCK: package gate red, physical-line compression | adversarial-auditor `ses_064ee7abdffeI9JMEEPMZ2lkdT` |
-| Implementation re-audit | R11 | BLOCK: package gate red, physical-line compression | adversarial-auditor `ses_064ee7abdffeI9JMEEPMZ2lkdT` |
-| Implementation audit round 3 | R11 | 3 consecutive invocation failures | `ses_0621a5647ffeoAMqaavLjPeDwf` (invalid one-word response), `ses_06214d297ffeQ4qEcHtQQXZe9O` (no output), `ses_061e4c9e0ffeaNq8RMcv6GI88c` (no output) |
-| Implementation audit round 4 | R11 | APPROVE. Recomputed `E = 280`, `C = 46`, required `>= 42`, gate met. Three non-blocking dead-code items raised. | `ses_061dec123ffeX4t05sWS07WsDD` |
-| Implementation audit round 5 | R11 | APPROVE for the cleanup of all three non-blocking items; single throwing resolution path retained, WAV assertions unweakened, `afterEach` now symmetric | `ses_061dec123ffeX4t05sWS07WsDD` |
+| Phase                            | Revision | Result                                                                                                                                                  | Reference                                                                                                                                                |
+| -------------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Prior implementation             | R2       | WITHDRAWN by user request; branch moved back without retaining add/revert history                                                                       | `84bea8bc40` and `793bbf1d34` removed from branch                                                                                                        |
+| Plan audit                       | R3       | BLOCK: C2 first divergence and commit sequence incomplete                                                                                               | adversarial audit                                                                                                                                        |
+| Plan audit                       | R4       | No blocking findings                                                                                                                                    | adversarial-auditor `ses_066758e63ffeyRkjyqppyVeyM6`                                                                                                     |
+| Implementation audit             | R4       | BLOCK: full package CI red and Windows C2 evidence unavailable                                                                                          | adversarial-auditor `ses_0664b44feffejMO3JdXzv5ugdg`                                                                                                     |
+| Plan audit                       | R5       | BLOCK: MiniMax contract misclassified and full-suite registry command incomplete                                                                        | adversarial-auditor `ses_065a73f8dffe3Gpr7A7NIz3iUk`                                                                                                     |
+| Plan audit                       | R6       | BLOCK: fixed slow-read count remains scheduler-sensitive                                                                                                | adversarial-auditor `ses_065963981ffeUuXhbcukAkaOqj`                                                                                                     |
+| Exploratory implementation audit | R6       | BLOCK: no approved baseline, voice heuristic, HttpApi `any`, incomplete full suite                                                                      | adversarial-auditor `ses_0655dc50effe5tZirqvCEhBf55`                                                                                                     |
+| Plan audit                       | R7       | BLOCK: failure terminal and compiled Worker startup were unmapped                                                                                       | adversarial-auditor `ses_0654b17dbffeFJa1p5HjDvP115`                                                                                                     |
+| Plan audit                       | R8       | BLOCK: JavaScript fake addon cannot enter compiled `.node` loader                                                                                       | adversarial-auditor `ses_065419e6fffe5C47SEYNUaRh3Z`                                                                                                     |
+| Plan audit                       | R9       | BLOCK: init/start and Worker-entry failure tests missing                                                                                                | adversarial-auditor `ses_0653c4f42ffe8O23Gk9uDqGjX1`                                                                                                     |
+| Plan audit                       | R10      | BLOCK: native stop/release failure outcome missing                                                                                                      | adversarial-auditor `ses_06532a616ffeloJ8LwIbmIacSc`                                                                                                     |
+| Plan audit                       | R11      | No blocking findings; APPROVE                                                                                                                           | adversarial-auditor `ses_06528cb65ffeEO4QpHYg3nggCT`                                                                                                     |
+| Implementation audit             | R11      | BLOCK: package gate red, physical-line compression                                                                                                      | adversarial-auditor `ses_064ee7abdffeI9JMEEPMZ2lkdT`                                                                                                     |
+| Implementation re-audit          | R11      | BLOCK: package gate red, physical-line compression                                                                                                      | adversarial-auditor `ses_064ee7abdffeI9JMEEPMZ2lkdT`                                                                                                     |
+| Implementation audit round 3     | R11      | 3 consecutive invocation failures                                                                                                                       | `ses_0621a5647ffeoAMqaavLjPeDwf` (invalid one-word response), `ses_06214d297ffeQ4qEcHtQQXZe9O` (no output), `ses_061e4c9e0ffeaNq8RMcv6GI88c` (no output) |
+| Implementation audit round 4     | R11      | APPROVE. Recomputed `E = 280`, `C = 46`, required `>= 42`, gate met. Three non-blocking dead-code items raised.                                         | `ses_061dec123ffeX4t05sWS07WsDD`                                                                                                                         |
+| Implementation audit round 5     | R11      | APPROVE for the cleanup of all three non-blocking items; single throwing resolution path retained, WAV assertions unweakened, `afterEach` now symmetric | `ses_061dec123ffeX4t05sWS07WsDD`                                                                                                                         |
 
 Both blocking findings from the earlier round were addressed: the physical-line
 compression was reverted to normal repository TypeScript structure, and the
@@ -476,11 +476,11 @@ gate as `E = 280`, `C = 46`, required `>= 42`.
 
 Final dead-code cleanup applied after round 4 and re-approved in round 5:
 
-| Item | Location | Disposition |
-| --- | --- | --- |
-| Dead ternary `libraryPath ? ... : undefined` | `prompt-voice-recorder.ts:123` | Removed; the `:122` guard already narrows the type, so no cast was needed |
-| Dead `OPENCODE_NODE_PATH` scaffolding | `prompt-voice-recorder.test.ts` WAV test | Removed; guarded an implementation that no longer exists. Repo-wide match count is now `0` |
-| `OPENCODE_VOICE_WORKER_PATH` leaked past `afterEach` | `prompt-voice-recorder.test.ts:54-59` | `afterEach` now symmetrically clears both compile defines |
+| Item                                                 | Location                                 | Disposition                                                                                |
+| ---------------------------------------------------- | ---------------------------------------- | ------------------------------------------------------------------------------------------ |
+| Dead ternary `libraryPath ? ... : undefined`         | `prompt-voice-recorder.ts:123`           | Removed; the `:122` guard already narrows the type, so no cast was needed                  |
+| Dead `OPENCODE_NODE_PATH` scaffolding                | `prompt-voice-recorder.test.ts` WAV test | Removed; guarded an implementation that no longer exists. Repo-wide match count is now `0` |
+| `OPENCODE_VOICE_WORKER_PATH` leaked past `afterEach` | `prompt-voice-recorder.test.ts:54-59`    | `afterEach` now symmetrically clears both compile defines                                  |
 
 Post-cleanup verification: voice `10 pass / 0 fail / 35 expect()`, DB
 `14 pass / 0 fail`, LSP `17 pass / 0 fail`, HttpApi all three modes
@@ -514,12 +514,12 @@ R4 commit sequence evidence:
 
 R4 comment gate estimate:
 
-| Metric | Actual |
-| --- | --- |
-| Effective changed lines `E` | approximately 70 |
-| Qualifying Chinese explanatory lines `C` | approximately 13 |
-| Required minimum | `ceil(70 * 0.15) = 11` |
-| Ratio | approximately 0.19; passes |
+| Metric                                   | Actual                     |
+| ---------------------------------------- | -------------------------- |
+| Effective changed lines `E`              | approximately 70           |
+| Qualifying Chinese explanatory lines `C` | approximately 13           |
+| Required minimum                         | `ceil(70 * 0.15) = 11`     |
+| Ratio                                    | approximately 0.19; passes |
 
 ### R11 Pre-Implementation Red Evidence
 
@@ -586,14 +586,14 @@ and remaining verification items must be filled after implementation.
   plus the eight target code files.
 - The exact package `test:ci` command in the shared worktree was terminated by
   SIGTERM after 20 minutes while repeated unrelated `InstanceRuntime disposal
-  timed out after 5000ms` and `GlobalBusEmitter` listener warnings accumulated.
+timed out after 5000ms` and `GlobalBusEmitter` listener warnings accumulated.
   It produced no final count. An isolated HEAD plus target diff using both the
   repository-root and package-local dependency trees completed `4090` tests in
   `880.45s`: `4071 pass / 17 skip / 2 fail`. The remaining failures are the
   unrelated `test/session/prompt.test.ts` cases `legacy compaction marker without
-  lineage does not create a Goal turn` (`blocked` expected, `active` received)
+lineage does not create a Goal turn` (`blocked` expected, `active` received)
   and `goal error continuation enabled — terminal APIError triggers one
-  system_continue` (30-second timeout). No target A/B/D test failed. This is not
+system_continue` (30-second timeout). No target A/B/D test failed. This is not
   a full package-green result and therefore blocks verification and commit.
 - Both remaining prompt cases pass when selected alone in the isolated baseline
   and shared worktree (`2 pass / 0 fail`), and `--rerun-each=50` on the same two
@@ -605,7 +605,7 @@ and remaining verification items must be filled after implementation.
   pre-existing. The same cleaned HEAD-plus-target-diff copy was then run three
   times under the identical command and produced `2 fail`, then `1 fail`
   (`file/index Filesystem patterns > InstanceState isolation > disposal gives
-  fresh state on next access`, which passes when selected alone), then
+fresh state on next access`, which passes when selected alone), then
   `0 fail`. Three runs of one unchanged tree yielding three different failure
   sets across unrelated modules establishes package-level teardown/resource
   nondeterminism, not a defect introduced by the eight target files.

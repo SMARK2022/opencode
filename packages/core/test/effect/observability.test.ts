@@ -131,10 +131,16 @@ test("file logger recreates a missing log directory", async () => {
 
 test("file logger scope close flushes pending fatal evidence", async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-log-close-"))
-  await using cleanup = { async [Symbol.asyncDispose]() { await fs.rm(dir, { recursive: true, force: true }) } }
+  await using cleanup = {
+    async [Symbol.asyncDispose]() {
+      await fs.rm(dir, { recursive: true, force: true })
+    },
+  }
   const file = path.join(dir, "opencode.log")
   await Effect.logError("close durability sentinel", { service: "daemon", reason: "uncaughtException" }).pipe(
-    Effect.provide(Logger.layer([fileLogger(file, "fatal-scope")]).pipe(Layer.provide(NodeFileSystem.layer), Layer.orDie)),
+    Effect.provide(
+      Logger.layer([fileLogger(file, "fatal-scope")]).pipe(Layer.provide(NodeFileSystem.layer), Layer.orDie),
+    ),
     Effect.scoped,
     Effect.runPromise,
   )
@@ -146,14 +152,23 @@ test("file logger scope close flushes pending fatal evidence", async () => {
 
 test("file logger initialization preserves recent evidence beyond old keep limits", async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-log-retain-"))
-  await using cleanup = { async [Symbol.asyncDispose]() { await fs.rm(dir, { recursive: true, force: true }) } }
+  await using cleanup = {
+    async [Symbol.asyncDispose]() {
+      await fs.rm(dir, { recursive: true, force: true })
+    },
+  }
   const files = Array.from({ length: 12 }, (_, index) => `2000-01-${String(index + 1).padStart(2, "0")}T000000.log`)
-  await Promise.all(files.map(file => fs.writeFile(path.join(dir, file), file)))
+  await Promise.all(files.map((file) => fs.writeFile(path.join(dir, file), file)))
   const stale = new Date(Date.now() - 48 * 60 * 60 * 1000)
   await fs.utimes(path.join(dir, files[1]), stale, stale)
   // 上游追加logger没有计数清理器；新鲜和旧日志都保留，不能复活更弱的keep=10删除路径。
   await Effect.logInfo("retention sentinel").pipe(
-    Effect.provide(Logger.layer([fileLogger(path.join(dir, "opencode.log"), "retain-scope")]).pipe(Layer.provide(NodeFileSystem.layer), Layer.orDie)),
+    Effect.provide(
+      Logger.layer([fileLogger(path.join(dir, "opencode.log"), "retain-scope")]).pipe(
+        Layer.provide(NodeFileSystem.layer),
+        Layer.orDie,
+      ),
+    ),
     Effect.scoped,
     Effect.runPromise,
   )

@@ -38,15 +38,16 @@ export const SkillTool = Tool.define(
           // 补 compacted 守卫对齐 collectVisibleReads：
           // compacted 的 skill part 内容已被 prune 清空，不应视为"已加载"。
           // full compaction 会移除旧消息——此时 alreadyLoaded=false 正确触发重载。
-          const alreadyLoaded = ctx.messages.some((msg) =>
-            msg.info.role === "assistant" &&
-            msg.parts.some((part) => {
-              if (part.type !== "tool" || part.tool !== "skill") return false
-              if (part.state.status !== "completed") return false
-              if (part.state.time.compacted) return false
-              const input = part.state.input as Record<string, unknown> | undefined
-              return input?.name === params.name
-            }),
+          const alreadyLoaded = ctx.messages.some(
+            (msg) =>
+              msg.info.role === "assistant" &&
+              msg.parts.some((part) => {
+                if (part.type !== "tool" || part.tool !== "skill") return false
+                if (part.state.status !== "completed") return false
+                if (part.state.time.compacted) return false
+                const input = part.state.input as Record<string, unknown> | undefined
+                return input?.name === params.name
+              }),
           )
           if (alreadyLoaded) {
             return {

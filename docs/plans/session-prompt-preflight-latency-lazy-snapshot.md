@@ -17,6 +17,7 @@
 This file is the sole implementation specification for this task. Chat summaries,
 superseded revisions, `stash@{0}`, and builder rationale outside this file are
 not implementation authority.
+
 > **R40 active-revision boundary:** Sections 1-24 below record the superseded
 > R34 Session Prompt implementation history and its audit evidence. They remain
 > historical evidence only. The active design, scope, budget, and release route
@@ -28,8 +29,9 @@ not implementation authority.
 > 详细完整检查全面的内容，检查当前行为设计，先写 tokens=0
 > snapshot.track() 在 create 时同步 应该改成首个副作用工具调用之前进行相应的snapshot构建（同时每个工具可以添加一个相应的metadata，尽量保持整体风格一致，同时metadata中，edit/write/apply_patch/bash这几个增加相应的副作用参数;）
 > 第二笔 updateMessage(估算);MessageV2.chronology 在工具goal启动才进行扫描、同时只扫描最近两个lastturn部分（避免因为最近的compaction导致识别错误）
+>
 > 1. Messages 历史（user / assistant / 已发生的 tool 调用与结果） 已完成前缀基本稳 要优化（filter 窗口 + toModelMessages 前缀缓存 + 后缀增量）。
-> 然后针对完整问题进行完整的修改，请确保修改后的内容不会出现红测问题，保持整体逻辑理顺、服从整体项目的开发和实现风格，移除或者替换旧的逻辑。我希望整体的修改保持甜点级别,也就是不要修改过于冗余。整体修改文件数量控制在12个代码文件以内，同时代码修改不超过1200行。
+>    然后针对完整问题进行完整的修改，请确保修改后的内容不会出现红测问题，保持整体逻辑理顺、服从整体项目的开发和实现风格，移除或者替换旧的逻辑。我希望整体的修改保持甜点级别,也就是不要修改过于冗余。整体修改文件数量控制在12个代码文件以内，同时代码修改不超过1200行。
 >
 > 默认 "none"：不把 ambient worktree 变化算作本工具副作用。仅影响 snapshot/revert 归因，不进 LLM schema。
 >
@@ -102,35 +104,35 @@ and one commit containing only this GOAL.
 
 ## 3. Repository Context
 
-| Source | Constraint |
-| --- | --- |
-| `AGENTS.md` | Small natural changes, package-local verification, no unrelated edits. |
-| `packages/opencode/AGENTS.md` | Effect service/module and database ownership conventions. |
-| `CONTEXT.md` | Canonical Session, Message, Tool, Snapshot, Revert, Project and InstanceState language. |
-| `docs/adr/README.md` | No ADR is needed for this bounded repair. |
-| `docs/adr/0001-...` | Unrelated to Session preflight. |
+| Source                                             | Constraint                                                                               |
+| -------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| `AGENTS.md`                                        | Small natural changes, package-local verification, no unrelated edits.                   |
+| `packages/opencode/AGENTS.md`                      | Effect service/module and database ownership conventions.                                |
+| `CONTEXT.md`                                       | Canonical Session, Message, Tool, Snapshot, Revert, Project and InstanceState language.  |
+| `docs/adr/README.md`                               | No ADR is needed for this bounded repair.                                                |
+| `docs/adr/0001-...`                                | Unrelated to Session preflight.                                                          |
 | `.opencode/policy/first-principles-engineering.md` | First-divergence repair, one path, no fallback, full traceability and independent audit. |
-| `.opencode/templates/canonical-plan.md` | Required artifact fields and audit transitions. |
+| `.opencode/templates/canonical-plan.md`            | Required artifact fields and audit transitions.                                          |
 
 ## 4. Files and Evidence Read
 
-| Evidence | Relevance | Class |
-| --- | --- | --- |
-| `session/prompt.ts:1142-1388,2546-3044` | Tool/MCP adapters, repeated history assembly, loop-head Goal scan, zero and estimate writes, Plugin transform, dispatch | observed |
-| `session/processor.ts:105-212,490-819,917-1127` | eager Snapshot, Tool event ordering, Patch and cleanup | observed |
-| `session/message-v2.ts:818-959,989-1394,1508-1756` | hydration, conversion, pagination, Compaction filter, chronology and latest | observed |
-| `session/compaction-boundary.ts:1-74` | completed boundary currently ordered by ID | observed |
-| `session/revert.ts:46-136,157-209` | lexical tail/range/cleanup and declared intersection | observed |
-| `session/session.sql.ts:164-217`, `storage/schema.sql.ts:3-10` | persisted Message/Part row identity and timestamps | contracted |
-| `session/session.ts:726-759,878-925` | authoritative writes, paging and removals | observed |
-| `tool/tool.ts:45-93`, `tool/registry.ts:365-391` | Tool metadata owner and internal projection | observed |
-| `tool/edit.ts`, `write.ts`, `apply_patch.ts`, `shell.ts` | declared and ambient Tool owners | observed |
-| `tool/goal.ts:1-166` | trusted GoalTurnContext consumer | contracted |
-| `server/.../handlers/session.ts:399-430` | reachable public Message/Part mutations; no new guard is planned because admission is exact | reachable |
-| `test/session/prompt.test.ts` | public SessionPrompt/TestLLM, Goal, Compaction, queued and Revert fixtures | observed |
-| `test/session/snapshot-tool-race.test.ts` | existing execute-before-event Snapshot race | observed |
-| real opencode DB and Snapshot benchmark | 5405-Message chronology and git contributor timings | observed |
-| `stash@{0}` | superseded implementation archive, diagnostic history only | observed |
+| Evidence                                                       | Relevance                                                                                                               | Class      |
+| -------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- | ---------- |
+| `session/prompt.ts:1142-1388,2546-3044`                        | Tool/MCP adapters, repeated history assembly, loop-head Goal scan, zero and estimate writes, Plugin transform, dispatch | observed   |
+| `session/processor.ts:105-212,490-819,917-1127`                | eager Snapshot, Tool event ordering, Patch and cleanup                                                                  | observed   |
+| `session/message-v2.ts:818-959,989-1394,1508-1756`             | hydration, conversion, pagination, Compaction filter, chronology and latest                                             | observed   |
+| `session/compaction-boundary.ts:1-74`                          | completed boundary currently ordered by ID                                                                              | observed   |
+| `session/revert.ts:46-136,157-209`                             | lexical tail/range/cleanup and declared intersection                                                                    | observed   |
+| `session/session.sql.ts:164-217`, `storage/schema.sql.ts:3-10` | persisted Message/Part row identity and timestamps                                                                      | contracted |
+| `session/session.ts:726-759,878-925`                           | authoritative writes, paging and removals                                                                               | observed   |
+| `tool/tool.ts:45-93`, `tool/registry.ts:365-391`               | Tool metadata owner and internal projection                                                                             | observed   |
+| `tool/edit.ts`, `write.ts`, `apply_patch.ts`, `shell.ts`       | declared and ambient Tool owners                                                                                        | observed   |
+| `tool/goal.ts:1-166`                                           | trusted GoalTurnContext consumer                                                                                        | contracted |
+| `server/.../handlers/session.ts:399-430`                       | reachable public Message/Part mutations; no new guard is planned because admission is exact                             | reachable  |
+| `test/session/prompt.test.ts`                                  | public SessionPrompt/TestLLM, Goal, Compaction, queued and Revert fixtures                                              | observed   |
+| `test/session/snapshot-tool-race.test.ts`                      | existing execute-before-event Snapshot race                                                                             | observed   |
+| real opencode DB and Snapshot benchmark                        | 5405-Message chronology and git contributor timings                                                                     | observed   |
+| `stash@{0}`                                                    | superseded implementation archive, diagnostic history only                                                              | observed   |
 
 ## 5. Current Behavior
 
@@ -163,52 +165,52 @@ identifiers rather than chronology.
 
 ## 6. Supported Input Domain and Reachability
 
-| Input or condition | Producer | Upstream guarantees | Reachable path | Owner | Classification |
-| --- | --- | --- | --- | --- | --- |
-| text/read-only step | Agent + local Tool | no worktree ownership | Prompt -> Processor -> Provider | Prompt/Processor | observed |
-| edit/write/apply_patch | builtin Tool | declared files are reported in Tool metadata | local execute adapter | Tool/Processor/Revert | observed |
-| bash/shell | builtin Tool | arbitrary worktree mutation is possible | local execute adapter | Tool/Processor/Revert | observed |
-| connected MCP Tool | MCP client | side effects are opaque | MCP execute adapter | Prompt/Processor | reachable |
-| Provider-executed Tool | Provider stream | local execute adapter is not called | Processor event | Processor | observed |
-| Tool set changes | permission/control panel/MCP/plugin | current step owns availability | resolveTools | Prompt | observed |
-| queued user Message | public prompt while busy | append is persisted | next iteration | Prompt/MessageV2 | observed |
-| Revert A-G to A-E | SessionRevert | selected suffix becomes hidden | later run | Revert/MessageV2 | observed |
-| successful Compaction | SessionCompaction | window reorders while old rows may remain | same/later run | CompactionBoundary/MessageV2 | observed |
-| caller-selected low ID | public Message input | ID need not reflect creation time | latest/Revert/Compaction | MessageV2 | observed |
-| Plugin Message transform | plugin hook | may mutate any historical working Message | pre-dispatch hook | Prompt | reachable |
-| different Session/model | another request | conversion is not transferable | later Prompt run | Prompt | reachable |
+| Input or condition       | Producer                            | Upstream guarantees                          | Reachable path                  | Owner                        | Classification |
+| ------------------------ | ----------------------------------- | -------------------------------------------- | ------------------------------- | ---------------------------- | -------------- |
+| text/read-only step      | Agent + local Tool                  | no worktree ownership                        | Prompt -> Processor -> Provider | Prompt/Processor             | observed       |
+| edit/write/apply_patch   | builtin Tool                        | declared files are reported in Tool metadata | local execute adapter           | Tool/Processor/Revert        | observed       |
+| bash/shell               | builtin Tool                        | arbitrary worktree mutation is possible      | local execute adapter           | Tool/Processor/Revert        | observed       |
+| connected MCP Tool       | MCP client                          | side effects are opaque                      | MCP execute adapter             | Prompt/Processor             | reachable      |
+| Provider-executed Tool   | Provider stream                     | local execute adapter is not called          | Processor event                 | Processor                    | observed       |
+| Tool set changes         | permission/control panel/MCP/plugin | current step owns availability               | resolveTools                    | Prompt                       | observed       |
+| queued user Message      | public prompt while busy            | append is persisted                          | next iteration                  | Prompt/MessageV2             | observed       |
+| Revert A-G to A-E        | SessionRevert                       | selected suffix becomes hidden               | later run                       | Revert/MessageV2             | observed       |
+| successful Compaction    | SessionCompaction                   | window reorders while old rows may remain    | same/later run                  | CompactionBoundary/MessageV2 | observed       |
+| caller-selected low ID   | public Message input                | ID need not reflect creation time            | latest/Revert/Compaction        | MessageV2                    | observed       |
+| Plugin Message transform | plugin hook                         | may mutate any historical working Message    | pre-dispatch hook               | Prompt                       | reachable      |
+| different Session/model  | another request                     | conversion is not transferable               | later Prompt run                | Prompt                       | reachable      |
 
 Speculative malformed rows, downstream normalization and serialization recovery
 cannot justify production branches.
 
 ## 7. Required Invariants
 
-| ID | Behavioral invariant | Evidence | Existing test |
-| --- | --- | --- | --- |
-| INV-01 | A normal Provider attempt has no durable zero Assistant; its first durable Assistant contains estimate/breakdown before dispatch. | explicit clarification; current two writes | partial token/Prompt coverage |
-| INV-02 | Pre-dispatch failure/interruption remains one durable completed typed-error Assistant; preflight Compaction leaves no dangling attempt. | current early publication supplies visibility | partial interruption coverage |
-| INV-03 | A step with no local non-`none` Tool performs no Snapshot git operation. | explicit requirement; eager create | absent focused matrix |
-| INV-04 | The first local declared/ambient Tool awaits one shared pre-Tool Snapshot before plugin, Permission, MCP client or mutation. | explicit requirement; observed event race | race coverage partial |
-| INV-05 | Provider-executed Tools never trigger local Snapshot. | ownership boundary | no sensitive Prompt test |
+| ID     | Behavioral invariant                                                                                                                                                                                                            | Evidence                                        | Existing test                     |
+| ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------- | --------------------------------- |
+| INV-01 | A normal Provider attempt has no durable zero Assistant; its first durable Assistant contains estimate/breakdown before dispatch.                                                                                               | explicit clarification; current two writes      | partial token/Prompt coverage     |
+| INV-02 | Pre-dispatch failure/interruption remains one durable completed typed-error Assistant; preflight Compaction leaves no dangling attempt.                                                                                         | current early publication supplies visibility   | partial interruption coverage     |
+| INV-03 | A step with no local non-`none` Tool performs no Snapshot git operation.                                                                                                                                                        | explicit requirement; eager create              | absent focused matrix             |
+| INV-04 | The first local declared/ambient Tool awaits one shared pre-Tool Snapshot before plugin, Permission, MCP client or mutation.                                                                                                    | explicit requirement; observed event race       | race coverage partial             |
+| INV-05 | Provider-executed Tools never trigger local Snapshot.                                                                                                                                                                           | ownership boundary                              | no sensitive Prompt test          |
 | INV-06 | worktree defaults none, stays outside Provider schema, persists only at the existing `ToolPart.metadata.worktree` primitive key through every lifecycle transition, and drives declared exact or ambient same-Assistant Revert. | explicit policy; reachable metadata replacement | ambient/lifecycle coverage absent |
-| INV-07 | One replaceable cache supports full hit, common-prefix hit including A-G -> A-E, or full rebuild; miss is not an error fallback. | explicit cache contract | absent |
-| INV-08 | Admission proves the raw Compaction window before hydration; every reminder, queued wrapper, decide rewrite or Plugin transform invalidates/reconverts its affected working suffix without mutating cached canonical data. | timing red; reachable working transforms | absent |
-| INV-09 | Tool/MCP/Permission/control-panel/schema resolution remains fresh each step. | explicit clarification | partial dynamic tests |
-| INV-10 | Prompt, Compaction, latest/tasks, cache and Revert use persisted `(time_created,id)` chronology. | low-ID producer; R22 B-01 | Goal low-ID only |
-| INV-11 | Ordinary steps do no Goal chronology query; actual Goal Tool start reads at most two canonical eligible turns. | explicit requirement | latency seam absent |
-| INV-12 | Estimate/breakdown still describe the final Provider request and are replaced by confirmed usage only after response. | accounting contract | token tests exist |
+| INV-07 | One replaceable cache supports full hit, common-prefix hit including A-G -> A-E, or full rebuild; miss is not an error fallback.                                                                                                | explicit cache contract                         | absent                            |
+| INV-08 | Admission proves the raw Compaction window before hydration; every reminder, queued wrapper, decide rewrite or Plugin transform invalidates/reconverts its affected working suffix without mutating cached canonical data.      | timing red; reachable working transforms        | absent                            |
+| INV-09 | Tool/MCP/Permission/control-panel/schema resolution remains fresh each step.                                                                                                                                                    | explicit clarification                          | partial dynamic tests             |
+| INV-10 | Prompt, Compaction, latest/tasks, cache and Revert use persisted `(time_created,id)` chronology.                                                                                                                                | low-ID producer; R22 B-01                       | Goal low-ID only                  |
+| INV-11 | Ordinary steps do no Goal chronology query; actual Goal Tool start reads at most two canonical eligible turns.                                                                                                                  | explicit requirement                            | latency seam absent               |
+| INV-12 | Estimate/breakdown still describe the final Provider request and are replaced by confirmed usage only after response.                                                                                                           | accounting contract                             | token tests exist                 |
 
 ## 8. First Divergence and Root Cause
 
-| Invariant | First divergence | Owning module/interface | Proof |
-| --- | --- | --- | --- |
-| INV-01/02 | `runLoop` durably writes a new all-zero Assistant before assembly has produced an estimate or error. | SessionPrompt Assistant lifecycle | `prompt.ts:2788-2803,3034-3044` |
-| INV-03/04/05 | `SessionProcessor.create` captures before a Tool exists; event-side rescue is not the local execute barrier. | SessionProcessor + Prompt Tool adapter | `processor.ts:189-202,712-749`; race output below |
-| INV-07/08 | each loop fully filters/hydrates before any prefix admission and converts the complete window. | MessageV2 window + SessionPrompt cache owner | `prompt.ts:2581,2892`; timing red below |
-| INV-09 | moving dynamic definitions into the cache would cross `resolveTools` ownership. | SessionPrompt.resolveTools | `prompt.ts:1206-1385` |
-| INV-10 | consumers compare caller-controlled IDs after storage defines persisted order. | MessageV2/CompactionBoundary/Revert | current ranges and R22 B-01 |
-| INV-11 | `deriveGoalTurn(MessageV2.chronology(sessionID))` executes at each loop head. | SessionPrompt + MessageV2 | `prompt.ts:2587-2591` |
-| INV-12 | no divergence; final-body estimate scanning is required and retained. | TokenEstimate/Prompt | `prompt.ts:2897-2981` |
+| Invariant    | First divergence                                                                                             | Owning module/interface                      | Proof                                             |
+| ------------ | ------------------------------------------------------------------------------------------------------------ | -------------------------------------------- | ------------------------------------------------- |
+| INV-01/02    | `runLoop` durably writes a new all-zero Assistant before assembly has produced an estimate or error.         | SessionPrompt Assistant lifecycle            | `prompt.ts:2788-2803,3034-3044`                   |
+| INV-03/04/05 | `SessionProcessor.create` captures before a Tool exists; event-side rescue is not the local execute barrier. | SessionProcessor + Prompt Tool adapter       | `processor.ts:189-202,712-749`; race output below |
+| INV-07/08    | each loop fully filters/hydrates before any prefix admission and converts the complete window.               | MessageV2 window + SessionPrompt cache owner | `prompt.ts:2581,2892`; timing red below           |
+| INV-09       | moving dynamic definitions into the cache would cross `resolveTools` ownership.                              | SessionPrompt.resolveTools                   | `prompt.ts:1206-1385`                             |
+| INV-10       | consumers compare caller-controlled IDs after storage defines persisted order.                               | MessageV2/CompactionBoundary/Revert          | current ranges and R22 B-01                       |
+| INV-11       | `deriveGoalTurn(MessageV2.chronology(sessionID))` executes at each loop head.                                | SessionPrompt + MessageV2                    | `prompt.ts:2587-2591`                             |
+| INV-12       | no divergence; final-body estimate scanning is required and retained.                                        | TokenEstimate/Prompt                         | `prompt.ts:2897-2981`                             |
 
 ### Red-capable feedback loop
 
@@ -322,17 +324,17 @@ implementation.
 
 ## 9. Responsibility and Seam
 
-| Concern | Owner | Interface promise | Why it belongs here | Why another module does not own it |
-| --- | --- | --- | --- | --- |
-| Assistant pre-dispatch lifecycle | SessionPrompt.runLoop | first normal durable state is estimated; failures remain durable | Prompt owns assembly/dispatch | TUI cannot repair database timing |
-| Tool worktree policy | Tool.Def + `ToolPart.metadata.worktree` | definition semantics and one durable server-owned key in the existing metadata record | definition knows semantics; Processor owns preservation | Snapshot/Revert cannot infer names or use state metadata |
-| shared lazy Snapshot | SessionProcessor Handle called by Prompt adapters | first non-none local execute awaits one baseline | Processor owns one request | individual Tools cannot coordinate |
-| fresh Tool availability | SessionPrompt.resolveTools/MCP | build current callable set every step | existing availability owner | Message cache contains history only |
-| fresh control-panel state | SessionPrompt.runLoop | re-read current persisted Session at each while step before Tool/Permission resolution | queued prompt can update permission while busy | loop-entry Session snapshot becomes stale |
-| proof/hydration/conversion | MessageV2 | one Compaction-aware row-to-model seam | owns rows, cold hydration and conversion | Prompt must not duplicate storage/filter logic |
-| retained entry | SessionPrompt service closure | full/prefix/miss replacement | owns request lifetime | no global or per-Session authority |
-| Goal turn tail | MessageV2 query lazily called by Prompt | latest two canonical turns | storage owns bounded SQL | Goal Tool should not scan persistence |
-| Revert range/files | SessionRevert | persisted chronology and declared/ambient attribution | owns hide/restore scope | cache cannot compensate downstream |
+| Concern                          | Owner                                             | Interface promise                                                                      | Why it belongs here                                     | Why another module does not own it                       |
+| -------------------------------- | ------------------------------------------------- | -------------------------------------------------------------------------------------- | ------------------------------------------------------- | -------------------------------------------------------- |
+| Assistant pre-dispatch lifecycle | SessionPrompt.runLoop                             | first normal durable state is estimated; failures remain durable                       | Prompt owns assembly/dispatch                           | TUI cannot repair database timing                        |
+| Tool worktree policy             | Tool.Def + `ToolPart.metadata.worktree`           | definition semantics and one durable server-owned key in the existing metadata record  | definition knows semantics; Processor owns preservation | Snapshot/Revert cannot infer names or use state metadata |
+| shared lazy Snapshot             | SessionProcessor Handle called by Prompt adapters | first non-none local execute awaits one baseline                                       | Processor owns one request                              | individual Tools cannot coordinate                       |
+| fresh Tool availability          | SessionPrompt.resolveTools/MCP                    | build current callable set every step                                                  | existing availability owner                             | Message cache contains history only                      |
+| fresh control-panel state        | SessionPrompt.runLoop                             | re-read current persisted Session at each while step before Tool/Permission resolution | queued prompt can update permission while busy          | loop-entry Session snapshot becomes stale                |
+| proof/hydration/conversion       | MessageV2                                         | one Compaction-aware row-to-model seam                                                 | owns rows, cold hydration and conversion                | Prompt must not duplicate storage/filter logic           |
+| retained entry                   | SessionPrompt service closure                     | full/prefix/miss replacement                                                           | owns request lifetime                                   | no global or per-Session authority                       |
+| Goal turn tail                   | MessageV2 query lazily called by Prompt           | latest two canonical turns                                                             | storage owns bounded SQL                                | Goal Tool should not scan persistence                    |
+| Revert range/files               | SessionRevert                                     | persisted chronology and declared/ambient attribution                                  | owns hide/restore scope                                 | cache cannot compensate downstream                       |
 
 ## 10. Single Approved Primary-Path Design
 
@@ -367,13 +369,13 @@ worktree?: "none" | "declared" | "ambient"
 
 Policy assignments:
 
-| Tool source | Policy |
-| --- | --- |
-| edit, write, apply_patch | `declared` |
-| bash/shell | `ambient` |
-| task | no assignment; child-Session ownership remains deferred |
-| connected unknown MCP Tools | `ambient` for the current step |
-| all unannotated Tools | `none` |
+| Tool source                 | Policy                                                  |
+| --------------------------- | ------------------------------------------------------- |
+| edit, write, apply_patch    | `declared`                                              |
+| bash/shell                  | `ambient`                                               |
+| task                        | no assignment; child-Session ownership remains deferred |
+| connected unknown MCP Tools | `ambient` for the current step                          |
+| all unannotated Tools       | `none`                                                  |
 
 Registry forwards this field only to internal Prompt resolution; it is absent
 from Provider descriptions and schemas. Persistence uses the existing open
@@ -489,76 +491,76 @@ serializer or fallback request is attempted.
 
 ## 11. Secondary and Replacement Path Inventory
 
-| Path | Current or proposed | Classification | Produces success? | Decision-surface share | Disposition |
-| --- | --- | --- | --- | --- | --- |
-| exact full cache hit | proposed | primary-contract branch | yes | proof comparison | add |
-| exact common-prefix hit | proposed | primary-contract branch | yes | suffix hydrate/convert | add |
-| authoritative miss/rebuild | proposed | primary-contract branch | yes | one full window | add as deterministic admission |
-| mutable Plugin Message transform | current | existing compatibility | yes | full working conversion | preserve |
-| fresh Tool/MCP resolution | current | contracted pass-through | yes | every Provider step | preserve outside cache |
-| Provider-executed Tool | current | contracted pass-through | yes | no local execute | preserve without Snapshot |
-| declared/ambient Revert | current/proposed | primary-contract branches | yes | deterministic policy | preserve/extend |
-| alternate serializer/catch-and-success | rejected | forbidden fallback | n/a | 0 | reject |
+| Path                                   | Current or proposed | Classification            | Produces success? | Decision-surface share  | Disposition                    |
+| -------------------------------------- | ------------------- | ------------------------- | ----------------- | ----------------------- | ------------------------------ |
+| exact full cache hit                   | proposed            | primary-contract branch   | yes               | proof comparison        | add                            |
+| exact common-prefix hit                | proposed            | primary-contract branch   | yes               | suffix hydrate/convert  | add                            |
+| authoritative miss/rebuild             | proposed            | primary-contract branch   | yes               | one full window         | add as deterministic admission |
+| mutable Plugin Message transform       | current             | existing compatibility    | yes               | full working conversion | preserve                       |
+| fresh Tool/MCP resolution              | current             | contracted pass-through   | yes               | every Provider step     | preserve outside cache         |
+| Provider-executed Tool                 | current             | contracted pass-through   | yes               | no local execute        | preserve without Snapshot      |
+| declared/ambient Revert                | current/proposed    | primary-contract branches | yes               | deterministic policy    | preserve/extend                |
+| alternate serializer/catch-and-success | rejected            | forbidden fallback        | n/a               | 0                       | reject                         |
 
 Alternate-success-path ratio: `0%`. Diagnostic decision surface: `0%`.
 
 ## 12. Workaround Deletion and Replacement
 
-| Existing workaround or duplicate | Why it existed | Why the approved route supersedes it | Delete or collapse location |
-| --- | --- | --- | --- |
-| zero Assistant then estimate write | early pending visibility | estimated publication plus typed failure finalization | `session/prompt.ts` |
-| eager create Snapshot and start-step rescue | attempted event-race protection | awaited local execute barrier | `session/processor.ts`, `session/prompt.ts` |
-| loop-head full Goal chronology | easy shared context construction | lazy two-turn Tool-start loader | `session/prompt.ts`, `message-v2.ts` |
-| full hydrate/convert before admission | no prefix proof seam | raw proof then suffix hydration/conversion | `session/message-v2.ts`, `session/prompt.ts` |
-| lexical ID chronology | generated IDs assumed monotonic | persisted time + ID tie | MessageV2/Compaction/Revert |
+| Existing workaround or duplicate            | Why it existed                   | Why the approved route supersedes it                  | Delete or collapse location                  |
+| ------------------------------------------- | -------------------------------- | ----------------------------------------------------- | -------------------------------------------- |
+| zero Assistant then estimate write          | early pending visibility         | estimated publication plus typed failure finalization | `session/prompt.ts`                          |
+| eager create Snapshot and start-step rescue | attempted event-race protection  | awaited local execute barrier                         | `session/processor.ts`, `session/prompt.ts`  |
+| loop-head full Goal chronology              | easy shared context construction | lazy two-turn Tool-start loader                       | `session/prompt.ts`, `message-v2.ts`         |
+| full hydrate/convert before admission       | no prefix proof seam             | raw proof then suffix hydration/conversion            | `session/message-v2.ts`, `session/prompt.ts` |
+| lexical ID chronology                       | generated IDs assumed monotonic  | persisted time + ID tie                               | MessageV2/Compaction/Revert                  |
 
 ## 13. Forward Traceability
 
-| Requirement or invariant | Production path | Planned file/change | Behavioral test |
-| --- | --- | --- | --- |
-| INV-01/02 | Assistant assembly -> dispatch/error | Prompt single publication/finalizer | first state estimated; failure durable; overflow no dangling Assistant |
-| INV-03/04/05 | local Tool adapter -> Processor gate | lazy shared Snapshot and provider exclusion | text/read zero; declared/ambient ordering; concurrent one; provider zero |
-| INV-06 | Tool.Def -> registry -> pre-execute -> `part.metadata.worktree` -> Revert | policy assignment, permit-preserved lifecycle and file admission | Provider excludes primitive key; builtin/MCP pending-running-progress-terminal matrix; declared/ambient/none Revert |
-| INV-07/08 | proof -> admission -> canonical chunks -> working dirty suffix | exact one-entry cache and one final converter | full/prefix/miss, A-G -> A-E, reminder, queued wrapper, decide, Plugin and literal body |
-| INV-09 | resolveTools per step | keep dynamic surfaces outside cache | Tool/MCP change between equal-history steps |
-| INV-10 | storage order -> all consumers | comparator and inclusive cursor | low-ID queued Message, Compaction, Revert diff/cleanup |
-| INV-11 | Goal Tool execute -> bounded query | lazy latest-two context | ordinary no penalty; current/previous across Compaction |
-| INV-12 | final body -> estimate | retain estimator/breakdown | token suites and first Assistant assertions |
+| Requirement or invariant | Production path                                                           | Planned file/change                                              | Behavioral test                                                                                                     |
+| ------------------------ | ------------------------------------------------------------------------- | ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| INV-01/02                | Assistant assembly -> dispatch/error                                      | Prompt single publication/finalizer                              | first state estimated; failure durable; overflow no dangling Assistant                                              |
+| INV-03/04/05             | local Tool adapter -> Processor gate                                      | lazy shared Snapshot and provider exclusion                      | text/read zero; declared/ambient ordering; concurrent one; provider zero                                            |
+| INV-06                   | Tool.Def -> registry -> pre-execute -> `part.metadata.worktree` -> Revert | policy assignment, permit-preserved lifecycle and file admission | Provider excludes primitive key; builtin/MCP pending-running-progress-terminal matrix; declared/ambient/none Revert |
+| INV-07/08                | proof -> admission -> canonical chunks -> working dirty suffix            | exact one-entry cache and one final converter                    | full/prefix/miss, A-G -> A-E, reminder, queued wrapper, decide, Plugin and literal body                             |
+| INV-09                   | resolveTools per step                                                     | keep dynamic surfaces outside cache                              | Tool/MCP change between equal-history steps                                                                         |
+| INV-10                   | storage order -> all consumers                                            | comparator and inclusive cursor                                  | low-ID queued Message, Compaction, Revert diff/cleanup                                                              |
+| INV-11                   | Goal Tool execute -> bounded query                                        | lazy latest-two context                                          | ordinary no penalty; current/previous across Compaction                                                             |
+| INV-12                   | final body -> estimate                                                    | retain estimator/breakdown                                       | token suites and first Assistant assertions                                                                         |
 
 ## 14. Reverse Traceability
 
-| Proposed production concept | Requirement ID | Evidence | Why existing logic cannot carry it |
-| --- | --- | --- | --- |
-| Tool.Def worktree policy | INV-03/06 | explicit user table | names/arguments cannot express custom semantics |
-| server-owned `part.metadata.worktree` key | INV-06 | top-level Provider metadata is replaced by reachable lifecycle transitions, while the existing record is already persisted and SDK-typed as open metadata | permit-serialized central preservation gives Revert one authority without changing public Schema or reading state metadata |
-| Processor pre-execute gate | INV-04/05 | observed event race | create/start are too early or not an await barrier |
-| exact raw window proof | INV-07/08 | 236ms red; R18 timestamp finding | hydration defeats admission; IDs/timestamps/events are not exact |
-| per-Message conversion chunks | INV-07 | A-G -> A-E and suffix reuse | one flat output cannot be sliced safely |
-| one Prompt retained entry | INV-07 | explicit cardinality | per-Session Map and run-only cache violate contract |
-| earliest dirty working index | INV-08 | reminder, queued wrapper, decide and Plugin rewrites are reachable before Provider conversion | canonical proof cannot represent request-only mutation; one boundary preserves the same converter without invalidating untouched prefix |
-| shared chronology comparator | INV-10 | low IDs and R22 B-01 | local lexical fixes leave consumers inconsistent |
-| bounded Goal query | INV-11 | full scan benchmark/latest-two requirement | current chronology scans every Message/Part locator |
-| ambient Patch admission | INV-06 | opaque bash/MCP side effects | declared metadata cannot name ambient files |
+| Proposed production concept               | Requirement ID | Evidence                                                                                                                                                  | Why existing logic cannot carry it                                                                                                      |
+| ----------------------------------------- | -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| Tool.Def worktree policy                  | INV-03/06      | explicit user table                                                                                                                                       | names/arguments cannot express custom semantics                                                                                         |
+| server-owned `part.metadata.worktree` key | INV-06         | top-level Provider metadata is replaced by reachable lifecycle transitions, while the existing record is already persisted and SDK-typed as open metadata | permit-serialized central preservation gives Revert one authority without changing public Schema or reading state metadata              |
+| Processor pre-execute gate                | INV-04/05      | observed event race                                                                                                                                       | create/start are too early or not an await barrier                                                                                      |
+| exact raw window proof                    | INV-07/08      | 236ms red; R18 timestamp finding                                                                                                                          | hydration defeats admission; IDs/timestamps/events are not exact                                                                        |
+| per-Message conversion chunks             | INV-07         | A-G -> A-E and suffix reuse                                                                                                                               | one flat output cannot be sliced safely                                                                                                 |
+| one Prompt retained entry                 | INV-07         | explicit cardinality                                                                                                                                      | per-Session Map and run-only cache violate contract                                                                                     |
+| earliest dirty working index              | INV-08         | reminder, queued wrapper, decide and Plugin rewrites are reachable before Provider conversion                                                             | canonical proof cannot represent request-only mutation; one boundary preserves the same converter without invalidating untouched prefix |
+| shared chronology comparator              | INV-10         | low IDs and R22 B-01                                                                                                                                      | local lexical fixes leave consumers inconsistent                                                                                        |
+| bounded Goal query                        | INV-11         | full scan benchmark/latest-two requirement                                                                                                                | current chronology scans every Message/Part locator                                                                                     |
+| ambient Patch admission                   | INV-06         | opaque bash/MCP side effects                                                                                                                              | declared metadata cannot name ambient files                                                                                             |
 
 No production concept remains unmapped.
 
 ## 15. File-Level Change Plan
 
-| File | Add / modify / delete | Exact responsibility of the change | Expected line delta |
-| --- | --- | --- | --- |
-| `packages/opencode/src/session/prompt.ts` | modify | single publication, one entry, working dirty boundary, fresh Tools, lazy Goal loader, pre-execute calls | 105-160 |
-| `packages/opencode/src/session/processor.ts` | modify | remove eager capture; shared lazy Snapshot; permit-serialized Tool Part lifecycle; conditional Patch | 55-90 |
-| `packages/opencode/src/session/message-v2.ts` | modify | proof, suffix hydration/chunks, comparator, persisted tail, bounded Goal query | 120-190 |
-| `packages/opencode/src/session/compaction-boundary.ts` | modify | persisted latest-boundary order | 2-8 |
-| `packages/opencode/src/session/revert.ts` | modify | persisted range/cleanup and ambient admission | 25-50 |
-| `packages/opencode/src/tool/tool.ts` | modify | optional worktree field | 3-8 |
-| `packages/opencode/src/tool/registry.ts` | modify | internal policy projection | 2-6 |
-| `packages/opencode/src/tool/edit.ts` | modify | declared assignment | 1-3 |
-| `packages/opencode/src/tool/write.ts` | modify | declared assignment | 1-3 |
-| `packages/opencode/src/tool/apply_patch.ts` | modify | declared assignment | 1-3 |
-| `packages/opencode/src/tool/shell.ts` | modify | ambient assignment | 1-3 |
-| `packages/opencode/test/session/prompt.test.ts` | modify | all public behavior/performance slices; first consolidate repeated turn/input fixture code before adding R33 signals | final file diff at most 590 changed lines |
-| `packages/opencode/test/session/revert-compact.test.ts` | modify | existing legacy fixtures explicitly persist declared/ambient authority so missing remains none | 2-6 |
+| File                                                    | Add / modify / delete | Exact responsibility of the change                                                                                   | Expected line delta                       |
+| ------------------------------------------------------- | --------------------- | -------------------------------------------------------------------------------------------------------------------- | ----------------------------------------- |
+| `packages/opencode/src/session/prompt.ts`               | modify                | single publication, one entry, working dirty boundary, fresh Tools, lazy Goal loader, pre-execute calls              | 105-160                                   |
+| `packages/opencode/src/session/processor.ts`            | modify                | remove eager capture; shared lazy Snapshot; permit-serialized Tool Part lifecycle; conditional Patch                 | 55-90                                     |
+| `packages/opencode/src/session/message-v2.ts`           | modify                | proof, suffix hydration/chunks, comparator, persisted tail, bounded Goal query                                       | 120-190                                   |
+| `packages/opencode/src/session/compaction-boundary.ts`  | modify                | persisted latest-boundary order                                                                                      | 2-8                                       |
+| `packages/opencode/src/session/revert.ts`               | modify                | persisted range/cleanup and ambient admission                                                                        | 25-50                                     |
+| `packages/opencode/src/tool/tool.ts`                    | modify                | optional worktree field                                                                                              | 3-8                                       |
+| `packages/opencode/src/tool/registry.ts`                | modify                | internal policy projection                                                                                           | 2-6                                       |
+| `packages/opencode/src/tool/edit.ts`                    | modify                | declared assignment                                                                                                  | 1-3                                       |
+| `packages/opencode/src/tool/write.ts`                   | modify                | declared assignment                                                                                                  | 1-3                                       |
+| `packages/opencode/src/tool/apply_patch.ts`             | modify                | declared assignment                                                                                                  | 1-3                                       |
+| `packages/opencode/src/tool/shell.ts`                   | modify                | ambient assignment                                                                                                   | 1-3                                       |
+| `packages/opencode/test/session/prompt.test.ts`         | modify                | all public behavior/performance slices; first consolidate repeated turn/input fixture code before adding R33 signals | final file diff at most 590 changed lines |
+| `packages/opencode/test/session/revert-compact.test.ts` | modify                | existing legacy fixtures explicitly persist declared/ambient authority so missing remains none                       | 2-6                                       |
 
 Exactly 13 code/test files, below the user-authorized ceiling of 16; no
 added/deleted code file, migration or generated artifact. The thirteenth path
@@ -608,18 +610,18 @@ Agreed seams are public `SessionPrompt.prompt/runLoop` through TestLLM,
 Messages through Session APIs. Tests do not call private cache helpers, inspect
 source text, assert internal calls, or reproduce conversion logic.
 
-| Order | Red behavior | Why current code fails | Minimal green behavior | Regression protected |
-| --- | --- | --- | --- | --- |
-| 1 | first Assistant state is estimated; assembly failure durable; Compaction no zero attempt | zero write first | move publication and add one finalizer | TUI flash/dangling attempt |
-| 2 | text/read request records no Snapshot | create tracks eagerly | remove eager/event capture | pre-dispatch git latency |
-| 3 | first declared/ambient builtin and MCP Tool snapshots before plugin/Permission/execute; concurrent calls share; policy survives real pending/running/progress/terminal metadata updates | no execute barrier and replaceable metadata | permit-serialized preservation of one existing-record server key plus cached Processor gate | mutation-before-baseline and lost ownership marker |
-| 4 | provider-executed ambient-named Tool records no local Snapshot | event path owns capture | local adapter sole trigger | provider/local confusion |
-| 5 | Provider excludes worktree; after real builtin/MCP metadata updates Revert restores declared/ambient but not none-only files | no durable policy/ambient admission | dedicated Part authority and one Revert branch | schema leak/lost marker/wrong restore |
-| 6 | proof full/prefix/miss, A-G -> A-E and warm public Revert+cleanup produce expected bodies; unchanged 2048-turn Session is timed as exact full hit, then another Session replaces the sole entry and the unchanged original is timed as rebuild | full window hydrates first, equality can rebuild, and deletion alone cannot prove hidden invalidation | one entry + suffix seam; real Revert hidden mutation; public full-hit versus eviction timing | stale/multi-generation/reverted history and fake full hit |
-| 7 | in one queued Tool continuation, step1 waits while public prompt changes bash deny→allow, local `tool.definition` v1→v2 and MCP enabled→disabled; step2 Provider body must use v2/no MCP and successfully execute bash; reminder, decide and historical Message Plugin transforms retain their signals | resolving dynamic surfaces once per runLoop or using loop-entry Session remains stale | every while step re-admits Session and calls current ToolRegistry/Plugin/MCP; dirty suffix and decide/Plugin conversion remain separate | stale Permission/Tool schema/MCP, missing reminder and unsafe decide history |
-| 8 | later low-ID Message wins; Compaction/Revert hide and diff persisted suffix | lexical ID | shared comparator | reverted history replay |
-| 9 | ordinary Goal step avoids chronology; Goal Tool gets two eligible turns | loop-head full scan | Tool-start bounded query | repeated latency/wrong lineage |
-| 10 | 2048-turn later dispatch beats paired rebuild while literal body remains equal | admission after hydration | proof-before-hydrate | performance regression |
+| Order | Red behavior                                                                                                                                                                                                                                                                                           | Why current code fails                                                                                | Minimal green behavior                                                                                                                  | Regression protected                                                         |
+| ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| 1     | first Assistant state is estimated; assembly failure durable; Compaction no zero attempt                                                                                                                                                                                                               | zero write first                                                                                      | move publication and add one finalizer                                                                                                  | TUI flash/dangling attempt                                                   |
+| 2     | text/read request records no Snapshot                                                                                                                                                                                                                                                                  | create tracks eagerly                                                                                 | remove eager/event capture                                                                                                              | pre-dispatch git latency                                                     |
+| 3     | first declared/ambient builtin and MCP Tool snapshots before plugin/Permission/execute; concurrent calls share; policy survives real pending/running/progress/terminal metadata updates                                                                                                                | no execute barrier and replaceable metadata                                                           | permit-serialized preservation of one existing-record server key plus cached Processor gate                                             | mutation-before-baseline and lost ownership marker                           |
+| 4     | provider-executed ambient-named Tool records no local Snapshot                                                                                                                                                                                                                                         | event path owns capture                                                                               | local adapter sole trigger                                                                                                              | provider/local confusion                                                     |
+| 5     | Provider excludes worktree; after real builtin/MCP metadata updates Revert restores declared/ambient but not none-only files                                                                                                                                                                           | no durable policy/ambient admission                                                                   | dedicated Part authority and one Revert branch                                                                                          | schema leak/lost marker/wrong restore                                        |
+| 6     | proof full/prefix/miss, A-G -> A-E and warm public Revert+cleanup produce expected bodies; unchanged 2048-turn Session is timed as exact full hit, then another Session replaces the sole entry and the unchanged original is timed as rebuild                                                         | full window hydrates first, equality can rebuild, and deletion alone cannot prove hidden invalidation | one entry + suffix seam; real Revert hidden mutation; public full-hit versus eviction timing                                            | stale/multi-generation/reverted history and fake full hit                    |
+| 7     | in one queued Tool continuation, step1 waits while public prompt changes bash deny→allow, local `tool.definition` v1→v2 and MCP enabled→disabled; step2 Provider body must use v2/no MCP and successfully execute bash; reminder, decide and historical Message Plugin transforms retain their signals | resolving dynamic surfaces once per runLoop or using loop-entry Session remains stale                 | every while step re-admits Session and calls current ToolRegistry/Plugin/MCP; dirty suffix and decide/Plugin conversion remain separate | stale Permission/Tool schema/MCP, missing reminder and unsafe decide history |
+| 8     | later low-ID Message wins; Compaction/Revert hide and diff persisted suffix                                                                                                                                                                                                                            | lexical ID                                                                                            | shared comparator                                                                                                                       | reverted history replay                                                      |
+| 9     | ordinary Goal step avoids chronology; Goal Tool gets two eligible turns                                                                                                                                                                                                                                | loop-head full scan                                                                                   | Tool-start bounded query                                                                                                                | repeated latency/wrong lineage                                               |
+| 10    | 2048-turn later dispatch beats paired rebuild while literal body remains equal                                                                                                                                                                                                                         | admission after hydration                                                                             | proof-before-hydrate                                                                                                                    | performance regression                                                       |
 
 Each slice runs red -> minimal approved green -> focused regression. Timing uses
 five paired samples and `cached <= 0.65 * full median + 40ms`; literal Provider
@@ -627,10 +629,10 @@ body equality is the primary correctness oracle.
 
 ## 17. Chinese Comment Budget
 
-| Metric | Estimate | Method |
-| --- | --- | --- |
-| Effective changed code lines `E` | 600-900 | excludes import-only, formatting, generated and pure moves |
-| Required Chinese explanatory comments `C` | 90-135 | actual gate is `ceil(E * 0.15)` |
+| Metric                                    | Estimate | Method                                                     |
+| ----------------------------------------- | -------- | ---------------------------------------------------------- |
+| Effective changed code lines `E`          | 600-900  | excludes import-only, formatting, generated and pure moves |
+| Required Chinese explanatory comments `C` | 90-135   | actual gate is `ceil(E * 0.15)`                            |
 
 Qualifying comments will be adjacent to:
 
@@ -651,32 +653,32 @@ padding are forbidden; any concentrated pile fails regardless of the ratio.
 
 ## 18. Verification
 
-| Command | Working directory | Evidence produced |
-| --- | --- | --- |
-| `bun test --timeout 60000 test/session/prompt.test.ts --test-name-pattern 'estimated Assistant|assembly failure|preflight Compaction|Snapshot|worktree|retained Message prefix|A-G to A-E|low MessageID|Goal chronology'` | `packages/opencode` | new vertical slices |
-| `bun test --timeout 60000 test/session/prompt.test.ts` | `packages/opencode` | complete directly modified suite |
-| `bun test test/session/snapshot-tool-race.test.ts test/session/message-v2.test.ts test/session/messages-pagination.test.ts` | `packages/opencode` | Tool race, conversion, pagination and Compaction |
-| `bun test test/session/compaction.test.ts test/session/revert-compact.test.ts test/session/summary-tool-diff.test.ts` | `packages/opencode` | Compaction/Revert/declared ownership |
-| `bun test test/session/processor-effect.test.ts test/token/accounting.test.ts test/token/estimate.test.ts` | `packages/opencode` | Processor cleanup and token accounting |
-| `bun typecheck` | `packages/opencode` | Package type correctness |
-| rerun 2048-turn public timing slice five times | `packages/opencode` | cache feedback turns green with literal body equality |
-| rerun real DB/Snapshot contributor harness | repository root | contributor baseline plus focused call-path removal |
-| `git diff --check -- <all GOAL paths>` | repository root | whitespace integrity |
+| Command                                                                                                                     | Working directory   | Evidence produced                                     |
+| --------------------------------------------------------------------------------------------------------------------------- | ------------------- | ----------------------------------------------------- | -------- | -------- | ----------------------- | ---------- | ------------- | ----------------- | ------------------- | ------------------- |
+| `bun test --timeout 60000 test/session/prompt.test.ts --test-name-pattern 'estimated Assistant                              | assembly failure    | preflight Compaction                                  | Snapshot | worktree | retained Message prefix | A-G to A-E | low MessageID | Goal chronology'` | `packages/opencode` | new vertical slices |
+| `bun test --timeout 60000 test/session/prompt.test.ts`                                                                      | `packages/opencode` | complete directly modified suite                      |
+| `bun test test/session/snapshot-tool-race.test.ts test/session/message-v2.test.ts test/session/messages-pagination.test.ts` | `packages/opencode` | Tool race, conversion, pagination and Compaction      |
+| `bun test test/session/compaction.test.ts test/session/revert-compact.test.ts test/session/summary-tool-diff.test.ts`       | `packages/opencode` | Compaction/Revert/declared ownership                  |
+| `bun test test/session/processor-effect.test.ts test/token/accounting.test.ts test/token/estimate.test.ts`                  | `packages/opencode` | Processor cleanup and token accounting                |
+| `bun typecheck`                                                                                                             | `packages/opencode` | Package type correctness                              |
+| rerun 2048-turn public timing slice five times                                                                              | `packages/opencode` | cache feedback turns green with literal body equality |
+| rerun real DB/Snapshot contributor harness                                                                                  | repository root     | contributor baseline plus focused call-path removal   |
+| `git diff --check -- <all GOAL paths>`                                                                                      | repository root     | whitespace integrity                                  |
 
 No generated output, migration, SDK build, or root-level test command is
 required because this plan changes no public generated schema or database.
 
 ## 19. Diff Budget
 
-| Metric | Estimate | Justification |
-| --- | --- | --- |
-| Files added | 0 code/test | reuse current modules |
-| Files modified | 13 code/test | below explicit 16-file ceiling |
-| Files deleted | 0 | no replacement module |
-| Production lines | 300-490 | below approximately 600-line expectation |
-| Test lines | 280-430 | consolidated in one existing suite |
-| Total changed code/test lines | 580-920 | reserve below 1200 |
-| Generated lines | 0 | no generated contract change |
+| Metric                        | Estimate     | Justification                            |
+| ----------------------------- | ------------ | ---------------------------------------- |
+| Files added                   | 0 code/test  | reuse current modules                    |
+| Files modified                | 13 code/test | below explicit 16-file ceiling           |
+| Files deleted                 | 0            | no replacement module                    |
+| Production lines              | 300-490      | below approximately 600-line expectation |
+| Test lines                    | 280-430      | consolidated in one existing suite       |
+| Total changed code/test lines | 580-920      | reserve below 1200                       |
+| Generated lines               | 0            | no generated contract change             |
 
 Hard implementation budget: at most 16 code/test files and fewer than 1200
 changed code lines. R29 plans exactly 13. The plan document is not counted as
@@ -743,37 +745,37 @@ verdict may permit implementation.
 
 ## 22. Plan Audit Record
 
-| Round | Audited revision | Full scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
-| --- | --- | --- | --- | --- | --- | --- |
-| R1 | R1 | yes | B-01 将 Task 标记为 `ambient` 超出原始需求授权；B-02 Message 前缀缓存未覆盖现有可变的 Plugin Message Transform seam | §10.2 default normalization seam and §18 benchmark path need explicit implementation evidence | BLOCK | `ses_06751a49cffedigXU5AkDV1MMT` |
-| R2 | R2 | yes | B-01 Cache boundary can promote in-place prompt decorations (`insertReminders` / queued-user wrappers) into replayed canonical history; B-02 removing the initial write leaves reachable non-interruption pre-dispatch failures without a durable Assistant boundary | §8 benchmark body should be reproducible; §10.2 normalization seam should be named | BLOCK | `ses_06749b6eeffeWzmepbqOQk6YwC` |
-| R3 | R3 | yes | B-01 run-local Message cache does not invalidate after successful automatic Compaction; B-02 connected MCP Tools have no behaviorally sensitive worktree-policy test | §8 benchmark exit semantics were inverted and standalone operations cannot alone prove call-path removal | BLOCK | `ses_0669d31c7ffebK868eOQPkd223` |
-| R4 | R4 | yes | No blocking findings. | Registration operation/persisted worktree metadata location should be explicit in implementation evidence; standalone benchmark is contributor evidence while SessionPrompt tests remain authoritative; MCP wrapper/Tool.Def distinction must be preserved; final approval remains tied only to R4. | APPROVE | `ses_06693a720ffe3TMgltXNw157Db` |
-| R5 | R5 | yes | B-01 Canonical plan baseline drifted from current repository: create/start-step eager capture was already removed in the current worktree, so required red slices no longer targeted the audited source behavior | concurrent capture synchronization and concrete focused command need explicit implementation evidence | BLOCK | `ses_06672de0affePJM5BMDhWcpn00` |
-| R6 | R6 | yes | No blocking findings. | N-01 partial worktree changes require actual-diff implementation audit; N-02 slice 1 is characterization rather than red-green; N-03 standalone benchmark is contributor evidence only and focused path tests are authoritative. | APPROVE | `ses_0666b29fbffeS51g1QLvcO8E84` |
-| R7 | R7 | yes | B-01 Goal chronology is still scanned on every active-Goal provider step instead of at the `goal` Tool-start boundary; B-02 non-`none` Tools do not unconditionally trigger the first Snapshot because MCP permission/plugin work runs before `ensureToolSnapshot` | Benchmark approximation and comment-budget estimate remain non-blocking | BLOCK | `ses_06623e73cffeQN5DfIkITIkYg1` |
-| R8 | R8 | yes | B-01 Canonical plan baseline is contradicted by the current repository: the current source already has no durable zero Assistant update and substantial planned implementation, so stale red slices cannot fail | E/C remains implementation evidence; standalone benchmark remains contributor-only evidence | BLOCK | `ses_06619f200ffewGvzsBz1xYINN7` |
-| R9 | R9 | yes | No blocking findings. | N-01 verification command must explicitly execute all mapped behavior slices; N-02 implementation must inject the lazy Goal result into the same trusted `GoalTurnContext` consumed by Goal read/transition. | APPROVE | `ses_0660a85f3ffe4q2YF2EXnHyZUl` |
-| R9 implementation | R9 | yes | B-01 SessionPrompt regression suite remains red; B-02 superseded unbounded `MessageV2.chronology()` remains exported; B-03 Message-prefix optimization lacks behaviorally sensitive verification | independent E/C calculation passes; exact failure count was 111/2 in the audit run | BLOCK | `ses_065f087b2ffe4qXhghx3OEcWve` |
-| R10 | R10 | yes | B-01 plan baseline still described already-completed Goal/Snapshot fixes as pending; B-02 ordinary active Goal no-scan path lacked sensitive verification; B-03 verification omitted the complete red Prompt file | fixed benchmark parameters remained non-blocking; stale R9 labels reduced readability | BLOCK | `ses_065df4640ffeXvS03UQ0yGQk4M` |
-| R11 | R11 | yes | B-01 remaining work had no executable path below 1200 changed lines; B-02 `worktree` schema exclusion lacked a sensitive Provider-boundary test | Timing mutation sensitivity remained an implementation-audit concern | BLOCK | `ses_06589a974ffe4NwQdeZ3vNDPHK` |
-| R12 | R12 | yes | No blocking findings. | N-01 审计模式元数据用词不一致；N-02 Provider-executed Tool 的测试落点应在实施证据中明确核对 | **APPROVE — exact canonical revision R12 only.** | `ses_0657a4bb7ffe0PbNPDCA0gMccy` |
-| R13 | R13 | yes | B-01 Provider-executed Tool 的 Snapshot 排除路径缺少行为敏感验证 | N-01 diff 预算把删除 chronology 错算成增加 changed lines | **BLOCK — exact canonical revision R13.** | `ses_065615370ffeg8DDW8XzzeL6hf` |
-| R14 | R14 | yes | B-01 Message 增量窗口错误地假设调用方提供的 MessageID 单调递增 | R14 的部分旧 revision 文案；注释墙仍需在实施审计中清零 | **BLOCK — exact canonical revision R14.** | `ses_0655a7530ffeJXrDt17Lq69J44` |
-| R15 | R15 | yes | B-01 计划删除用户明确要求的首笔 `tokens=0` 持久化；B-02 未分离公共 `fromMessageID` 与内部 persisted-order cursor 合同 | 当前 revision 文案与实施 evidence 仍需清理 | **BLOCK — exact canonical revision R15.** | `ses_0654e65dbffecL6SNhX2SLWSkz` |
-| R16 | R16 | yes | B-01 Message mutation revision 依赖 experimental Workspaces 的 EventSequence/EventTable，默认运行路径不可用；B-02 所有 MCP Tool 被无条件标记为 `ambient`，独立审计认为缺少受信副作用归属 | N-01 §23 保留 superseded implementation evidence；当前不改变 release verdict | **BLOCK — exact canonical revision R16.** | `ses_0653b1fd3ffeBVWFx6yNnq5r70` |
-| R17 | R17 | yes | B-01 active Run 公开旧 Part 修改无法使 cache miss；B-02 `MessageV2.latest` 仍按 ID；B-03 Compaction 首次读取仍按 ID cutoff；B-04 auditor 未收到较早的 audit-cap 授权 | N-01 zero-write current-state wording；N-02 diff estimates；N-03 stale §23 evidence | **BLOCK — exact canonical revision R17.** | `ses_0652764fdffeX9QfMtTYCilXtt` |
-| R18 | R18 | yes | B-01 plan retained contradictory run-local versus cross-run cache lifetime; B-02 millisecond `time_updated` could collide | N-01 stale §23 evidence | **BLOCK — exact canonical revision R18.** | `ses_06512fd22ffeh6FjULE2Se3guR` |
-| R19 | R19 | yes | B-01 Cache lifetime contract remained contradictory between run-local and cross-run ownership; B-02 typed Bus invalidation had no admission-before-subscriber ordering guarantee | none recorded | **BLOCK — exact canonical revision R19.** | `ses_06507d712ffeHNdJJonfHNmtcA` |
-| R20 | R20 | yes | B-01 Audit handoff omitted the later user quote removing the first durable `tokens=0` write and therefore treated the superseded two-write description as contracted; B-02 a per-Session entry Map violated the user's one retained cache cardinality | none | **BLOCK — exact canonical revision R20.** | `ses_064f073b0ffeFWgQkCJziVSlnV` |
-| R21 | R21 | yes | No blocking findings. | §23 superseded evidence should be replaced after implementation; timing thresholds remain supplemental to literal request-body equivalence | **APPROVE — exact canonical plan revision R21 only.** | `ses_064e752cbffetbpSgyXKckegu3` |
-| R22 | R22 | yes | B-01 Revert tail selection, diff range and cleanup retained lexical MessageID order, so a later low-ID Message could remain visible and be replayed by the otherwise correct cache | E/C remains implementation-stage evidence; §23 is superseded history; 12-file count depends on removing the standalone Tool.define test diff | **BLOCK — exact canonical plan revision R22.** | `ses_064d5e535ffekBO2u2gRF5HcTa` |
-| R23 | R23 | no | audit was not invoked; revision superseded after the worktree reset | none | NOT AUDITED | n/a |
-| R24 | R24 | yes | B-01 已超过计划审计六轮硬上限；B-02 缓存转换块没有覆盖工作历史的非 Plugin 改写 | Audit mode 元数据用词；E/C 与预算实施时复核 | **BLOCK — exact canonical plan revision R24.** | `ses_064a8954fffeoD381UdncWoZZe` |
-| R25 | R25 | no | B-02 corrected; B-01 awaits explicit user authorization for a fresh six-round cycle | none | BLOCKED BEFORE AUDIT | pending user decision |
-| new cycle 1/6 | R26 | yes | B-01 Tool worktree policy lacks a durable, race-safe ownership path | Budget/comment/benchmark findings are implementation-stage checks | **BLOCK — exact canonical plan revision R26, new audit cycle round 1/6.** | `ses_06490986cffeYL9DMmMExTi0q0` |
-| new cycle 2/6 | R27 | yes | B-01 新增 `ToolPart.worktree` 会改变公开 SDK 合同，但计划明确排除了 SDK 生成 | Budget/comment/benchmark findings remain implementation-stage checks | **BLOCK — exact canonical plan revision R27, new audit cycle round 2/6.** | `ses_06489a881ffevD5G1HLJsE80lD` |
-| new cycle 3/6 | R28 | yes | No blocking findings. | 无。 | **APPROVE — exact canonical plan revision R28 only.** | `ses_0647a79b5ffeiCIs88oqfCp38L` |
+| Round             | Audited revision | Full scope? | Blocking findings                                                                                                                                                                                                                                                    | Non-blocking findings                                                                                                                                                                                                                                                                               | Result                                                                    | Invocation reference             |
+| ----------------- | ---------------- | ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------- | -------------------------------- |
+| R1                | R1               | yes         | B-01 将 Task 标记为 `ambient` 超出原始需求授权；B-02 Message 前缀缓存未覆盖现有可变的 Plugin Message Transform seam                                                                                                                                                  | §10.2 default normalization seam and §18 benchmark path need explicit implementation evidence                                                                                                                                                                                                       | BLOCK                                                                     | `ses_06751a49cffedigXU5AkDV1MMT` |
+| R2                | R2               | yes         | B-01 Cache boundary can promote in-place prompt decorations (`insertReminders` / queued-user wrappers) into replayed canonical history; B-02 removing the initial write leaves reachable non-interruption pre-dispatch failures without a durable Assistant boundary | §8 benchmark body should be reproducible; §10.2 normalization seam should be named                                                                                                                                                                                                                  | BLOCK                                                                     | `ses_06749b6eeffeWzmepbqOQk6YwC` |
+| R3                | R3               | yes         | B-01 run-local Message cache does not invalidate after successful automatic Compaction; B-02 connected MCP Tools have no behaviorally sensitive worktree-policy test                                                                                                 | §8 benchmark exit semantics were inverted and standalone operations cannot alone prove call-path removal                                                                                                                                                                                            | BLOCK                                                                     | `ses_0669d31c7ffebK868eOQPkd223` |
+| R4                | R4               | yes         | No blocking findings.                                                                                                                                                                                                                                                | Registration operation/persisted worktree metadata location should be explicit in implementation evidence; standalone benchmark is contributor evidence while SessionPrompt tests remain authoritative; MCP wrapper/Tool.Def distinction must be preserved; final approval remains tied only to R4. | APPROVE                                                                   | `ses_06693a720ffe3TMgltXNw157Db` |
+| R5                | R5               | yes         | B-01 Canonical plan baseline drifted from current repository: create/start-step eager capture was already removed in the current worktree, so required red slices no longer targeted the audited source behavior                                                     | concurrent capture synchronization and concrete focused command need explicit implementation evidence                                                                                                                                                                                               | BLOCK                                                                     | `ses_06672de0affePJM5BMDhWcpn00` |
+| R6                | R6               | yes         | No blocking findings.                                                                                                                                                                                                                                                | N-01 partial worktree changes require actual-diff implementation audit; N-02 slice 1 is characterization rather than red-green; N-03 standalone benchmark is contributor evidence only and focused path tests are authoritative.                                                                    | APPROVE                                                                   | `ses_0666b29fbffeS51g1QLvcO8E84` |
+| R7                | R7               | yes         | B-01 Goal chronology is still scanned on every active-Goal provider step instead of at the `goal` Tool-start boundary; B-02 non-`none` Tools do not unconditionally trigger the first Snapshot because MCP permission/plugin work runs before `ensureToolSnapshot`   | Benchmark approximation and comment-budget estimate remain non-blocking                                                                                                                                                                                                                             | BLOCK                                                                     | `ses_06623e73cffeQN5DfIkITIkYg1` |
+| R8                | R8               | yes         | B-01 Canonical plan baseline is contradicted by the current repository: the current source already has no durable zero Assistant update and substantial planned implementation, so stale red slices cannot fail                                                      | E/C remains implementation evidence; standalone benchmark remains contributor-only evidence                                                                                                                                                                                                         | BLOCK                                                                     | `ses_06619f200ffewGvzsBz1xYINN7` |
+| R9                | R9               | yes         | No blocking findings.                                                                                                                                                                                                                                                | N-01 verification command must explicitly execute all mapped behavior slices; N-02 implementation must inject the lazy Goal result into the same trusted `GoalTurnContext` consumed by Goal read/transition.                                                                                        | APPROVE                                                                   | `ses_0660a85f3ffe4q2YF2EXnHyZUl` |
+| R9 implementation | R9               | yes         | B-01 SessionPrompt regression suite remains red; B-02 superseded unbounded `MessageV2.chronology()` remains exported; B-03 Message-prefix optimization lacks behaviorally sensitive verification                                                                     | independent E/C calculation passes; exact failure count was 111/2 in the audit run                                                                                                                                                                                                                  | BLOCK                                                                     | `ses_065f087b2ffe4qXhghx3OEcWve` |
+| R10               | R10              | yes         | B-01 plan baseline still described already-completed Goal/Snapshot fixes as pending; B-02 ordinary active Goal no-scan path lacked sensitive verification; B-03 verification omitted the complete red Prompt file                                                    | fixed benchmark parameters remained non-blocking; stale R9 labels reduced readability                                                                                                                                                                                                               | BLOCK                                                                     | `ses_065df4640ffeXvS03UQ0yGQk4M` |
+| R11               | R11              | yes         | B-01 remaining work had no executable path below 1200 changed lines; B-02 `worktree` schema exclusion lacked a sensitive Provider-boundary test                                                                                                                      | Timing mutation sensitivity remained an implementation-audit concern                                                                                                                                                                                                                                | BLOCK                                                                     | `ses_06589a974ffe4NwQdeZ3vNDPHK` |
+| R12               | R12              | yes         | No blocking findings.                                                                                                                                                                                                                                                | N-01 审计模式元数据用词不一致；N-02 Provider-executed Tool 的测试落点应在实施证据中明确核对                                                                                                                                                                                                         | **APPROVE — exact canonical revision R12 only.**                          | `ses_0657a4bb7ffe0PbNPDCA0gMccy` |
+| R13               | R13              | yes         | B-01 Provider-executed Tool 的 Snapshot 排除路径缺少行为敏感验证                                                                                                                                                                                                     | N-01 diff 预算把删除 chronology 错算成增加 changed lines                                                                                                                                                                                                                                            | **BLOCK — exact canonical revision R13.**                                 | `ses_065615370ffeg8DDW8XzzeL6hf` |
+| R14               | R14              | yes         | B-01 Message 增量窗口错误地假设调用方提供的 MessageID 单调递增                                                                                                                                                                                                       | R14 的部分旧 revision 文案；注释墙仍需在实施审计中清零                                                                                                                                                                                                                                              | **BLOCK — exact canonical revision R14.**                                 | `ses_0655a7530ffeJXrDt17Lq69J44` |
+| R15               | R15              | yes         | B-01 计划删除用户明确要求的首笔 `tokens=0` 持久化；B-02 未分离公共 `fromMessageID` 与内部 persisted-order cursor 合同                                                                                                                                                | 当前 revision 文案与实施 evidence 仍需清理                                                                                                                                                                                                                                                          | **BLOCK — exact canonical revision R15.**                                 | `ses_0654e65dbffecL6SNhX2SLWSkz` |
+| R16               | R16              | yes         | B-01 Message mutation revision 依赖 experimental Workspaces 的 EventSequence/EventTable，默认运行路径不可用；B-02 所有 MCP Tool 被无条件标记为 `ambient`，独立审计认为缺少受信副作用归属                                                                             | N-01 §23 保留 superseded implementation evidence；当前不改变 release verdict                                                                                                                                                                                                                        | **BLOCK — exact canonical revision R16.**                                 | `ses_0653b1fd3ffeBVWFx6yNnq5r70` |
+| R17               | R17              | yes         | B-01 active Run 公开旧 Part 修改无法使 cache miss；B-02 `MessageV2.latest` 仍按 ID；B-03 Compaction 首次读取仍按 ID cutoff；B-04 auditor 未收到较早的 audit-cap 授权                                                                                                 | N-01 zero-write current-state wording；N-02 diff estimates；N-03 stale §23 evidence                                                                                                                                                                                                                 | **BLOCK — exact canonical revision R17.**                                 | `ses_0652764fdffeX9QfMtTYCilXtt` |
+| R18               | R18              | yes         | B-01 plan retained contradictory run-local versus cross-run cache lifetime; B-02 millisecond `time_updated` could collide                                                                                                                                            | N-01 stale §23 evidence                                                                                                                                                                                                                                                                             | **BLOCK — exact canonical revision R18.**                                 | `ses_06512fd22ffeh6FjULE2Se3guR` |
+| R19               | R19              | yes         | B-01 Cache lifetime contract remained contradictory between run-local and cross-run ownership; B-02 typed Bus invalidation had no admission-before-subscriber ordering guarantee                                                                                     | none recorded                                                                                                                                                                                                                                                                                       | **BLOCK — exact canonical revision R19.**                                 | `ses_06507d712ffeHNdJJonfHNmtcA` |
+| R20               | R20              | yes         | B-01 Audit handoff omitted the later user quote removing the first durable `tokens=0` write and therefore treated the superseded two-write description as contracted; B-02 a per-Session entry Map violated the user's one retained cache cardinality                | none                                                                                                                                                                                                                                                                                                | **BLOCK — exact canonical revision R20.**                                 | `ses_064f073b0ffeFWgQkCJziVSlnV` |
+| R21               | R21              | yes         | No blocking findings.                                                                                                                                                                                                                                                | §23 superseded evidence should be replaced after implementation; timing thresholds remain supplemental to literal request-body equivalence                                                                                                                                                          | **APPROVE — exact canonical plan revision R21 only.**                     | `ses_064e752cbffetbpSgyXKckegu3` |
+| R22               | R22              | yes         | B-01 Revert tail selection, diff range and cleanup retained lexical MessageID order, so a later low-ID Message could remain visible and be replayed by the otherwise correct cache                                                                                   | E/C remains implementation-stage evidence; §23 is superseded history; 12-file count depends on removing the standalone Tool.define test diff                                                                                                                                                        | **BLOCK — exact canonical plan revision R22.**                            | `ses_064d5e535ffekBO2u2gRF5HcTa` |
+| R23               | R23              | no          | audit was not invoked; revision superseded after the worktree reset                                                                                                                                                                                                  | none                                                                                                                                                                                                                                                                                                | NOT AUDITED                                                               | n/a                              |
+| R24               | R24              | yes         | B-01 已超过计划审计六轮硬上限；B-02 缓存转换块没有覆盖工作历史的非 Plugin 改写                                                                                                                                                                                       | Audit mode 元数据用词；E/C 与预算实施时复核                                                                                                                                                                                                                                                         | **BLOCK — exact canonical plan revision R24.**                            | `ses_064a8954fffeoD381UdncWoZZe` |
+| R25               | R25              | no          | B-02 corrected; B-01 awaits explicit user authorization for a fresh six-round cycle                                                                                                                                                                                  | none                                                                                                                                                                                                                                                                                                | BLOCKED BEFORE AUDIT                                                      | pending user decision            |
+| new cycle 1/6     | R26              | yes         | B-01 Tool worktree policy lacks a durable, race-safe ownership path                                                                                                                                                                                                  | Budget/comment/benchmark findings are implementation-stage checks                                                                                                                                                                                                                                   | **BLOCK — exact canonical plan revision R26, new audit cycle round 1/6.** | `ses_06490986cffeYL9DMmMExTi0q0` |
+| new cycle 2/6     | R27              | yes         | B-01 新增 `ToolPart.worktree` 会改变公开 SDK 合同，但计划明确排除了 SDK 生成                                                                                                                                                                                         | Budget/comment/benchmark findings remain implementation-stage checks                                                                                                                                                                                                                                | **BLOCK — exact canonical plan revision R27, new audit cycle round 2/6.** | `ses_06489a881ffevD5G1HLJsE80lD` |
+| new cycle 3/6     | R28              | yes         | No blocking findings.                                                                                                                                                                                                                                                | 无。                                                                                                                                                                                                                                                                                                | **APPROVE — exact canonical plan revision R28 only.**                     | `ses_0647a79b5ffeiCIs88oqfCp38L` |
 
 Any substantive revision invalidates earlier approval.
 
@@ -1017,11 +1019,11 @@ implementation audit only.
 
 ## 24. Implementation Audit Record
 
-| Round | Plan revision | Full original scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | R28 | yes | B-01 none Tool metadata admitted by Revert; B-02 Snapshot policy matrix missing; B-03 cache invalidation matrix missing | none | BLOCK | `ses_064478ad8ffedh0FK7Xp1QexRF` |
-| 2 | R34 | yes | B-01 ambient authority crossed Assistant boundaries; B-02 chunk equivalence lacked Tool error/output, media and Compaction shapes | none | BLOCK | `ses_062d1dfd2ffexZCjNos6qxstxQ` |
-| 3 | R34 | yes | none | N-01 pre-existing Goal test flakiness under full-suite load; N-02 single-sample timing assertions; N-03 commit must exclude unrelated worktree paths | APPROVE | `ses_0627920f5ffeXWYts4oAAQzYQw` |
+| Round | Plan revision | Full original scope? | Blocking findings                                                                                                                 | Non-blocking findings                                                                                                                                | Result  | Invocation reference             |
+| ----- | ------------- | -------------------- | --------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- | ------- | -------------------------------- |
+| 1     | R28           | yes                  | B-01 none Tool metadata admitted by Revert; B-02 Snapshot policy matrix missing; B-03 cache invalidation matrix missing           | none                                                                                                                                                 | BLOCK   | `ses_064478ad8ffedh0FK7Xp1QexRF` |
+| 2     | R34           | yes                  | B-01 ambient authority crossed Assistant boundaries; B-02 chunk equivalence lacked Tool error/output, media and Compaction shapes | none                                                                                                                                                 | BLOCK   | `ses_062d1dfd2ffexZCjNos6qxstxQ` |
+| 3     | R34           | yes                  | none                                                                                                                              | N-01 pre-existing Goal test flakiness under full-suite load; N-02 single-sample timing assertions; N-03 commit must exclude unrelated worktree paths | APPROVE | `ses_0627920f5ffeXWYts4oAAQzYQw` |
 
 Round-3 verdict recorded verbatim: **APPROVE — exact R34 implementation diff
 against approved canonical plan revision R34 only.** The auditor independently
@@ -1105,24 +1107,24 @@ code/test lines; the plan document and pre-existing commits are not counted.
 
 ## R35.3 Repository Context and Evidence Read
 
-| Evidence | Relevance | Evidence class |
-|---|---|---|
-| `CONTEXT.md` | MessageV2 is the persisted part-based Session record; raw event and accounting vocabulary are distinct from visible transcript reads. | contracted |
-| `AGENTS.md`, `packages/opencode/AGENTS.md`, `packages/opencode/test/AGENTS.md` | Package-local verification, Effect/module shape, public behavior seams, no test-from-root rule. | contracted |
-| `.opencode/policy/first-principles-engineering.md` and canonical template | First divergence, one authoritative path, no fallback, full traceability, audit and comment gates. | contracted |
-| `docs/plans/session-prompt-preflight-latency-lazy-snapshot.md` R34 §10.4, §12, §22-24 | The approved R34 design removes the loop-head full chronology call and unbounded export; R9 implementation audit made the remaining export blocking. | contracted |
-| `docs/plans/hidden-message-production-isolation.md` R6 §10, §22-23 | Upstream hidden commit assumes a full `chronology` owner; this is the conflicting history that must be adapted, not silently retained. | observed/contracted |
-| `packages/opencode/src/session/message-v2.ts:745-760, 1340-1526, 1640-1870` | Existing `visible`, page, stream, Provider conversion and Compaction owners. | observed |
-| `packages/opencode/src/session/message-v2.ts` stage 2/3 during rebase | Stage 2 reintroduces `chronology`; stage 3 contains bounded `goalChronology`; this is the exact conflict. | observed |
-| `packages/opencode/src/session/prompt.ts:2588-2665, 2870-3018` | R34 lazy Goal loader/cache and the plugin projection conflict. | observed |
-| `packages/opencode/src/session/session.ts:878-901` | `Session.messages` delegates ordinary reads to `MessageV2.page`. | observed |
-| `packages/opencode/src/session/sync/index.ts:148-189, 361-389` | Sync events persist/project/publish raw lifecycle data; this is not a visible transcript reader. | observed |
-| `packages/opencode/src/session/projectors.ts:155-257` | Hidden updates still preserve raw accounting/projector semantics. | observed |
-| `packages/opencode/test/session/messages-pagination.test.ts:232-281, 800-840` | Existing visible-page and bounded Tool-tail behavior; the chronology benchmark is the stale test seam to replace. | observed |
-| `packages/opencode/test/session/prompt.test.ts:4923-5033` | Real Prompt/Goal public behavior covers persisted chronology, hidden canonical turns, wrappers and compaction markers. | observed |
-| `packages/opencode/test/session/message-v2.test.ts:158-163` | Existing direct Provider conversion test proves hidden Message/Part projection at the central converter. | observed |
-| `git diff --check -- packages/opencode/src/session/message-v2.ts packages/opencode/src/session/prompt.ts` | Current rebase is red with leftover conflict markers, so no implementation continuation is authorized yet. | observed |
-| R35 chronology contract harness | Upstream object reports `upstreamFullChronology=true`; R34 object reports `localBoundedGoalChronology=true`, and exits 1. | observed |
+| Evidence                                                                                                  | Relevance                                                                                                                                            | Evidence class      |
+| --------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------- |
+| `CONTEXT.md`                                                                                              | MessageV2 is the persisted part-based Session record; raw event and accounting vocabulary are distinct from visible transcript reads.                | contracted          |
+| `AGENTS.md`, `packages/opencode/AGENTS.md`, `packages/opencode/test/AGENTS.md`                            | Package-local verification, Effect/module shape, public behavior seams, no test-from-root rule.                                                      | contracted          |
+| `.opencode/policy/first-principles-engineering.md` and canonical template                                 | First divergence, one authoritative path, no fallback, full traceability, audit and comment gates.                                                   | contracted          |
+| `docs/plans/session-prompt-preflight-latency-lazy-snapshot.md` R34 §10.4, §12, §22-24                     | The approved R34 design removes the loop-head full chronology call and unbounded export; R9 implementation audit made the remaining export blocking. | contracted          |
+| `docs/plans/hidden-message-production-isolation.md` R6 §10, §22-23                                        | Upstream hidden commit assumes a full `chronology` owner; this is the conflicting history that must be adapted, not silently retained.               | observed/contracted |
+| `packages/opencode/src/session/message-v2.ts:745-760, 1340-1526, 1640-1870`                               | Existing `visible`, page, stream, Provider conversion and Compaction owners.                                                                         | observed            |
+| `packages/opencode/src/session/message-v2.ts` stage 2/3 during rebase                                     | Stage 2 reintroduces `chronology`; stage 3 contains bounded `goalChronology`; this is the exact conflict.                                            | observed            |
+| `packages/opencode/src/session/prompt.ts:2588-2665, 2870-3018`                                            | R34 lazy Goal loader/cache and the plugin projection conflict.                                                                                       | observed            |
+| `packages/opencode/src/session/session.ts:878-901`                                                        | `Session.messages` delegates ordinary reads to `MessageV2.page`.                                                                                     | observed            |
+| `packages/opencode/src/session/sync/index.ts:148-189, 361-389`                                            | Sync events persist/project/publish raw lifecycle data; this is not a visible transcript reader.                                                     | observed            |
+| `packages/opencode/src/session/projectors.ts:155-257`                                                     | Hidden updates still preserve raw accounting/projector semantics.                                                                                    | observed            |
+| `packages/opencode/test/session/messages-pagination.test.ts:232-281, 800-840`                             | Existing visible-page and bounded Tool-tail behavior; the chronology benchmark is the stale test seam to replace.                                    | observed            |
+| `packages/opencode/test/session/prompt.test.ts:4923-5033`                                                 | Real Prompt/Goal public behavior covers persisted chronology, hidden canonical turns, wrappers and compaction markers.                               | observed            |
+| `packages/opencode/test/session/message-v2.test.ts:158-163`                                               | Existing direct Provider conversion test proves hidden Message/Part projection at the central converter.                                             | observed            |
+| `git diff --check -- packages/opencode/src/session/message-v2.ts packages/opencode/src/session/prompt.ts` | Current rebase is red with leftover conflict markers, so no implementation continuation is authorized yet.                                           | observed            |
+| R35 chronology contract harness                                                                           | Upstream object reports `upstreamFullChronology=true`; R34 object reports `localBoundedGoalChronology=true`, and exits 1.                            | observed            |
 
 ## R35.4 Current Behavior and First Divergence
 
@@ -1164,37 +1166,37 @@ raw event contract rather than adding scattered downstream filters.
 
 ## R35.5 Supported Domain and Reachability
 
-| Input/condition | Producer | Reachable path | Owner | Classification |
-|---|---|---|---|---|
-| Visible `Session.messages` read | Session service/API/TUI | `Session.messages -> MessageV2.page` | MessageV2 page/visible projection | observed |
-| Provider history | Prompt/Compaction | `filterCompacted -> visible -> toModelMessagesEffect` | MessageV2 plus Prompt post-plugin seam | observed |
-| Goal current/previous | Goal Tool execution | `Prompt goal adapter -> loadGoalTurn -> MessageV2.goalChronology` | MessageV2 bounded query | reachable/contracted |
-| Hidden Message/Part in persisted history | Revert, failed lifecycle, plugin transform | normal visible readers and Provider conversion | MessageV2 visibility owner | observed |
-| Hidden raw event/tombstone | Session update producer | Sync projector/event bus | SyncEvent raw contract | contracted |
-| Raw structural Compaction/reviewer/fork read | explicit `includeHidden: true` or raw owner | structural consumer | caller-owned raw path | contracted |
+| Input/condition                              | Producer                                    | Reachable path                                                    | Owner                                  | Classification       |
+| -------------------------------------------- | ------------------------------------------- | ----------------------------------------------------------------- | -------------------------------------- | -------------------- |
+| Visible `Session.messages` read              | Session service/API/TUI                     | `Session.messages -> MessageV2.page`                              | MessageV2 page/visible projection      | observed             |
+| Provider history                             | Prompt/Compaction                           | `filterCompacted -> visible -> toModelMessagesEffect`             | MessageV2 plus Prompt post-plugin seam | observed             |
+| Goal current/previous                        | Goal Tool execution                         | `Prompt goal adapter -> loadGoalTurn -> MessageV2.goalChronology` | MessageV2 bounded query                | reachable/contracted |
+| Hidden Message/Part in persisted history     | Revert, failed lifecycle, plugin transform  | normal visible readers and Provider conversion                    | MessageV2 visibility owner             | observed             |
+| Hidden raw event/tombstone                   | Session update producer                     | Sync projector/event bus                                          | SyncEvent raw contract                 | contracted           |
+| Raw structural Compaction/reviewer/fork read | explicit `includeHidden: true` or raw owner | structural consumer                                               | caller-owned raw path                  | contracted           |
 
 Speculative malformed payloads and hypothetical external consumers do not drive
 R35 production logic.
 
 ## R35.6 Required Invariants
 
-| ID | Behavioral invariant | Evidence | Behavior test/evidence |
-|---|---|---|---|
-| R35-INV-01 | No final production code exports or calls the unbounded `MessageV2.chronology`; ordinary steps perform no Goal chronology query. | R34 §10.4 and R9 B-02 | structural `git grep` plus Prompt behavior suite |
-| R35-INV-02 | The only Goal query is bounded, returns at most two visible canonical eligible turns, and excludes hidden Message/Part and technical/compaction-only rows before classification. | user clarification; current R34 classifier; hidden-row producer | `goalChronology` public fixture and real Goal Prompt test |
-| R35-INV-03 | `MessageV2.visible` remains the one normal persisted/Provider projection; hidden Message and hidden Part cannot enter ordinary page, Compaction replay, or direct Provider conversion. | existing upstream implementation and tests | page, Compaction, direct conversion suites |
-| R35-INV-04 | Plugin-hidden working history is projected once before Provider/estimate/overflow consumers, and arbitrary Plugin mutation invalidates retained conversion chunks. | hidden post-plugin producer; R34 cache contract | existing plugin hidden/request-body test and Prompt cache suite |
-| R35-INV-05 | Raw Sync events and accounting retain hidden facts as tombstones; R35 does not duplicate visibility policy in each raw consumer. | Sync/projector contract | existing Sync/projector and hidden adapter regression suites |
-| R35-INV-06 | Persisted `(time_created,id)` ordering remains the only chronology comparator for bounded Goal selection and existing R34 consumers. | low-ID producer and R34 comparator | low-ID Goal/Revert/Compaction tests |
+| ID         | Behavioral invariant                                                                                                                                                                   | Evidence                                                        | Behavior test/evidence                                          |
+| ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------- | --------------------------------------------------------------- |
+| R35-INV-01 | No final production code exports or calls the unbounded `MessageV2.chronology`; ordinary steps perform no Goal chronology query.                                                       | R34 §10.4 and R9 B-02                                           | structural `git grep` plus Prompt behavior suite                |
+| R35-INV-02 | The only Goal query is bounded, returns at most two visible canonical eligible turns, and excludes hidden Message/Part and technical/compaction-only rows before classification.       | user clarification; current R34 classifier; hidden-row producer | `goalChronology` public fixture and real Goal Prompt test       |
+| R35-INV-03 | `MessageV2.visible` remains the one normal persisted/Provider projection; hidden Message and hidden Part cannot enter ordinary page, Compaction replay, or direct Provider conversion. | existing upstream implementation and tests                      | page, Compaction, direct conversion suites                      |
+| R35-INV-04 | Plugin-hidden working history is projected once before Provider/estimate/overflow consumers, and arbitrary Plugin mutation invalidates retained conversion chunks.                     | hidden post-plugin producer; R34 cache contract                 | existing plugin hidden/request-body test and Prompt cache suite |
+| R35-INV-05 | Raw Sync events and accounting retain hidden facts as tombstones; R35 does not duplicate visibility policy in each raw consumer.                                                       | Sync/projector contract                                         | existing Sync/projector and hidden adapter regression suites    |
+| R35-INV-06 | Persisted `(time_created,id)` ordering remains the only chronology comparator for bounded Goal selection and existing R34 consumers.                                                   | low-ID producer and R34 comparator                              | low-ID Goal/Revert/Compaction tests                             |
 
 ## R35.7 Responsibility and Single Primary Path
 
-| Concern | Owner | Primary responsibility | Why not downstream |
-|---|---|---|---|
-| Normal hidden visibility | `MessageV2.visible` + visible page/conversion seams | one atomic Message/Part projection | downstream readers receive already-visible `WithParts` |
-| Goal hidden visibility and boundedness | `MessageV2.goalChronology` | SQL locator selection and latest-two classification input | Goal service must not scan or filter raw persistence itself |
-| Post-plugin visibility | `SessionPrompt` immediately after transform | one working projection before request consumers split | converter alone is too late for estimate/overflow |
-| Raw tombstone transport | `SyncEvent`/existing event consumers | preserve raw update and event deletion semantics | a visible reader cannot retract an emitted event |
+| Concern                                | Owner                                               | Primary responsibility                                    | Why not downstream                                          |
+| -------------------------------------- | --------------------------------------------------- | --------------------------------------------------------- | ----------------------------------------------------------- |
+| Normal hidden visibility               | `MessageV2.visible` + visible page/conversion seams | one atomic Message/Part projection                        | downstream readers receive already-visible `WithParts`      |
+| Goal hidden visibility and boundedness | `MessageV2.goalChronology`                          | SQL locator selection and latest-two classification input | Goal service must not scan or filter raw persistence itself |
+| Post-plugin visibility                 | `SessionPrompt` immediately after transform         | one working projection before request consumers split     | converter alone is too late for estimate/overflow           |
+| Raw tombstone transport                | `SyncEvent`/existing event consumers                | preserve raw update and event deletion semantics          | a visible reader cannot retract an emitted event            |
 
 Primary path:
 
@@ -1234,55 +1236,55 @@ failed path and introduces no fallback.
 
 ## R35.9 Secondary Path Inventory
 
-| Path | Classification | Disposition |
-|---|---|---|
-| `MessageV2.visible` normal projection | primary-contract branch | preserve and reuse |
-| bounded `goalChronology` | primary-contract branch | preserve and make hidden-aware |
-| explicit raw structural `includeHidden: true` | contracted pass-through | preserve only at existing raw callers |
-| raw Sync hidden event | contracted tombstone pass-through | preserve; no new downstream branch |
-| full `MessageV2.chronology` | superseded workaround | delete; no alias |
-| per-consumer hidden filters | duplicate responsibility | do not add; existing upstream history is not expanded |
-| alternate serializer/catch-and-success | forbidden fallback | reject |
+| Path                                          | Classification                    | Disposition                                           |
+| --------------------------------------------- | --------------------------------- | ----------------------------------------------------- |
+| `MessageV2.visible` normal projection         | primary-contract branch           | preserve and reuse                                    |
+| bounded `goalChronology`                      | primary-contract branch           | preserve and make hidden-aware                        |
+| explicit raw structural `includeHidden: true` | contracted pass-through           | preserve only at existing raw callers                 |
+| raw Sync hidden event                         | contracted tombstone pass-through | preserve; no new downstream branch                    |
+| full `MessageV2.chronology`                   | superseded workaround             | delete; no alias                                      |
+| per-consumer hidden filters                   | duplicate responsibility          | do not add; existing upstream history is not expanded |
+| alternate serializer/catch-and-success        | forbidden fallback                | reject                                                |
 
 Alternate success-path ratio: `0%`.
 
 ## R35.10 Workaround Deletion
 
-| Superseded logic | Reason | R35 replacement |
-|---|---|---|
-| Loop-head full `MessageV2.chronology` | pays full history cost on ordinary steps and contradicts latest-two Goal contract | lazy bounded `goalChronology` at Goal Tool start |
-| Full chronology export kept for upstream compatibility | leaves the removed path reachable and failed R9 audit B-02 | no export; update the bounded test seam |
-| Hidden predicates repeated in downstream consumers | responsibility leak and six-file/300-line violation | MessageV2 visible projection and bounded locator query |
+| Superseded logic                                       | Reason                                                                            | R35 replacement                                        |
+| ------------------------------------------------------ | --------------------------------------------------------------------------------- | ------------------------------------------------------ |
+| Loop-head full `MessageV2.chronology`                  | pays full history cost on ordinary steps and contradicts latest-two Goal contract | lazy bounded `goalChronology` at Goal Tool start       |
+| Full chronology export kept for upstream compatibility | leaves the removed path reachable and failed R9 audit B-02                        | no export; update the bounded test seam                |
+| Hidden predicates repeated in downstream consumers     | responsibility leak and six-file/300-line violation                               | MessageV2 visible projection and bounded locator query |
 
 ## R35.11 Forward Traceability
 
-| Requirement/invariant | Production path | File delta | Behavior evidence |
-|---|---|---|---|
-| R35-INV-01 | no loop-head/full chronology path | `message-v2.ts`, `prompt.ts` | current loader boundary plus no-call structural proof; Prompt Goal suite remains green |
-| R35-INV-02 | Goal Tool -> lazy loader -> bounded visible query | `message-v2.ts`, `prompt.ts` | bounded fixture and real Goal hidden-turn test |
-| R35-INV-03 | visible page/filter/converter owner | existing `message-v2.ts` seam | pagination, Compaction, direct conversion tests |
-| R35-INV-04 | post-plugin projection + dirty cache boundary | existing `prompt.ts` seam | plugin-hidden request-body and cache tests |
-| R35-INV-05 | raw Sync/projector unchanged | no R35 production change | existing raw/tombstone/accounting tests |
-| R35-INV-06 | persisted comparator in bounded query | existing `message-v2.ts` comparator | low-ID Goal/Revert/Compaction tests |
+| Requirement/invariant | Production path                                   | File delta                          | Behavior evidence                                                                      |
+| --------------------- | ------------------------------------------------- | ----------------------------------- | -------------------------------------------------------------------------------------- |
+| R35-INV-01            | no loop-head/full chronology path                 | `message-v2.ts`, `prompt.ts`        | current loader boundary plus no-call structural proof; Prompt Goal suite remains green |
+| R35-INV-02            | Goal Tool -> lazy loader -> bounded visible query | `message-v2.ts`, `prompt.ts`        | bounded fixture and real Goal hidden-turn test                                         |
+| R35-INV-03            | visible page/filter/converter owner               | existing `message-v2.ts` seam       | pagination, Compaction, direct conversion tests                                        |
+| R35-INV-04            | post-plugin projection + dirty cache boundary     | existing `prompt.ts` seam           | plugin-hidden request-body and cache tests                                             |
+| R35-INV-05            | raw Sync/projector unchanged                      | no R35 production change            | existing raw/tombstone/accounting tests                                                |
+| R35-INV-06            | persisted comparator in bounded query             | existing `message-v2.ts` comparator | low-ID Goal/Revert/Compaction tests                                                    |
 
 ## R35.12 Reverse Traceability
 
-| Proposed concept | Requirement | Evidence | Why reuse is insufficient |
-|---|---|---|---|
-| hidden-aware bounded SQL locator | R35-INV-02 | current bounded query omits hidden Part state; hidden producer is reachable | `deriveGoalTurn` sees only its input and cannot recover omitted Part visibility |
-| removal of full chronology export | R35-INV-01 | R34 §10.4 and blocking R9 audit | keeping the symbol leaves the superseded path reachable |
-| composed Prompt `dirty=0` plus `visible` | R35-INV-03/04 | Plugin mutates working history before estimate/conversion | converter-only filtering is too late; dirty-only filtering is incomplete |
+| Proposed concept                         | Requirement   | Evidence                                                                    | Why reuse is insufficient                                                       |
+| ---------------------------------------- | ------------- | --------------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
+| hidden-aware bounded SQL locator         | R35-INV-02    | current bounded query omits hidden Part state; hidden producer is reachable | `deriveGoalTurn` sees only its input and cannot recover omitted Part visibility |
+| removal of full chronology export        | R35-INV-01    | R34 §10.4 and blocking R9 audit                                             | keeping the symbol leaves the superseded path reachable                         |
+| composed Prompt `dirty=0` plus `visible` | R35-INV-03/04 | Plugin mutates working history before estimate/conversion                   | converter-only filtering is too late; dirty-only filtering is incomplete        |
 
 No other production concept is authorized by R35.
 
 ## R35.13 File-Level Change Plan
 
-| File | Change | Exact responsibility | Expected delta |
-|---|---|---|---:|
-| `packages/opencode/src/session/message-v2.ts` | modify | remove full chronology conflict; make bounded Goal locator hidden-aware; retain central visible/page/converter owner | 35-85 |
-| `packages/opencode/src/session/prompt.ts` | modify | compose Plugin dirty invalidation with the central visible projection | 3-12 |
-| `packages/opencode/test/session/messages-pagination.test.ts` | modify | replace stale full-chronology benchmark with bounded Goal/page fixture and hidden Part qualification case | 25-70 |
-| `packages/opencode/test/session/prompt.test.ts` | modify | extend the existing 2048-turn/TestLLM seam with active-Goal ordinary-step paired timing and actual Goal Tool control; retain existing Goal/plugin assertions | 30-55 |
+| File                                                         | Change | Exact responsibility                                                                                                                                         | Expected delta |
+| ------------------------------------------------------------ | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------: |
+| `packages/opencode/src/session/message-v2.ts`                | modify | remove full chronology conflict; make bounded Goal locator hidden-aware; retain central visible/page/converter owner                                         |          35-85 |
+| `packages/opencode/src/session/prompt.ts`                    | modify | compose Plugin dirty invalidation with the central visible projection                                                                                        |           3-12 |
+| `packages/opencode/test/session/messages-pagination.test.ts` | modify | replace stale full-chronology benchmark with bounded Goal/page fixture and hidden Part qualification case                                                    |          25-70 |
+| `packages/opencode/test/session/prompt.test.ts`              | modify | extend the existing 2048-turn/TestLLM seam with active-Goal ordinary-step paired timing and actual Goal Tool control; retain existing Goal/plugin assertions |          30-55 |
 
 Exactly four code/test files are planned. No production adapter, sync schema,
 migration, generated file, or new module is authorized. The R35 correction
@@ -1291,13 +1293,13 @@ implemented within this list, stop and revise the plan before editing.
 
 ## R35.14 TDD Behavior Slices
 
-| Order | Red behavior | Why current path fails | Minimal green behavior | Regression |
-|---|---|---|---|---|
-| 1 | The upstream integration contract reports a full chronology export while R34 requires none. | rebase stage 2 restores the removed export | resolve to the bounded sole owner and remove the stale test seam | no full scan/export regression |
-| 2 | A hidden canonical user or hidden qualifying Part is returned/counts as a Goal turn by the bounded query. | current bounded locator omits hidden Part state | filter hidden Message/Part at the MessageV2 locator owner | Goal current/previous and blocked continuity |
-| 3 | The actual Goal Tool startup performs a full-history locator scan, or the bounded query cost grows with old history. Ordinary Provider steps must retain the existing no-query loader boundary. | the rebase conflict retains the full locator branch in `goalChronology`; the existing Prompt loader boundary already keeps ordinary steps lazy | small/large production-query scaling through the exported Goal seam, real Goal Tool behavior, and structural call-path proof | bounded I/O and lazy Tool-start ownership |
-| 4 | Plugin-hidden history can diverge between Provider wire and request estimate/cache admission. | Plugin runs before multiple request consumers | one Prompt visible projection plus `conversionDirty=0` | Provider body, estimate, overflow and cache |
-| 5 | Visible page and direct Provider conversion remain unchanged for visible data and exclude hidden data. | regression risk while merging upstream projection | reuse existing MessageV2 projection without downstream branches | pagination, conversion, Compaction |
+| Order | Red behavior                                                                                                                                                                                    | Why current path fails                                                                                                                         | Minimal green behavior                                                                                                       | Regression                                   |
+| ----- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------- |
+| 1     | The upstream integration contract reports a full chronology export while R34 requires none.                                                                                                     | rebase stage 2 restores the removed export                                                                                                     | resolve to the bounded sole owner and remove the stale test seam                                                             | no full scan/export regression               |
+| 2     | A hidden canonical user or hidden qualifying Part is returned/counts as a Goal turn by the bounded query.                                                                                       | current bounded locator omits hidden Part state                                                                                                | filter hidden Message/Part at the MessageV2 locator owner                                                                    | Goal current/previous and blocked continuity |
+| 3     | The actual Goal Tool startup performs a full-history locator scan, or the bounded query cost grows with old history. Ordinary Provider steps must retain the existing no-query loader boundary. | the rebase conflict retains the full locator branch in `goalChronology`; the existing Prompt loader boundary already keeps ordinary steps lazy | small/large production-query scaling through the exported Goal seam, real Goal Tool behavior, and structural call-path proof | bounded I/O and lazy Tool-start ownership    |
+| 4     | Plugin-hidden history can diverge between Provider wire and request estimate/cache admission.                                                                                                   | Plugin runs before multiple request consumers                                                                                                  | one Prompt visible projection plus `conversionDirty=0`                                                                       | Provider body, estimate, overflow and cache  |
+| 5     | Visible page and direct Provider conversion remain unchanged for visible data and exclude hidden data.                                                                                          | regression risk while merging upstream projection                                                                                              | reuse existing MessageV2 projection without downstream branches                                                              | pagination, conversion, Compaction           |
 
 The agreed seams are public `MessageV2.page`, bounded Goal query through the
 real `SessionPrompt`/Goal Tool path, and direct `MessageV2.toModelMessages`.
@@ -1306,10 +1308,10 @@ call counts, or copied production algorithms.
 
 ## R35.15 Chinese Comment Budget
 
-| Metric | Estimate | Method |
-|---|---:|---|
-| Effective changed code lines `E` | 180-260 | exclude imports, blank/comment-only, formatter-only and pure conflict moves |
-| Qualifying Chinese comments `C` | 40-52 | `ceil(E * 0.15)` requires at most 39; comments are distributed at the bounded hidden locator, projection boundary, and test intent |
+| Metric                           | Estimate | Method                                                                                                                             |
+| -------------------------------- | -------: | ---------------------------------------------------------------------------------------------------------------------------------- |
+| Effective changed code lines `E` |  180-260 | exclude imports, blank/comment-only, formatter-only and pure conflict moves                                                        |
+| Qualifying Chinese comments `C`  |    40-52 | `ceil(E * 0.15)` requires at most 39; comments are distributed at the bounded hidden locator, projection boundary, and test intent |
 
 Only non-obvious comments are authorized: why hidden Part locator state is
 needed before Goal classification, why raw Sync remains unfiltered, why the
@@ -1322,17 +1324,17 @@ are forbidden.
 All commands run after the rebase conflict is resolved, from the listed working
 directory:
 
-| Command | Working directory | Evidence |
-|---|---|---|
-| `bun test --timeout 60000 test/session/messages-pagination.test.ts --test-name-pattern "visible|Goal|bounded"` | `packages/opencode` | visible page and bounded hidden Goal seam |
-| `bun test --timeout 120000 test/session/prompt.test.ts --test-name-pattern "2048-turn|late technical|legacy compaction|plugin-hidden|Goal"` | `packages/opencode` | existing lazy Goal loader boundary, actual Goal Tool control, real classification and post-plugin behavior |
-| `bun test --timeout 60000 test/session/message-v2.test.ts` | `packages/opencode` | direct Provider visibility projection |
-| `bun test --timeout 60000 test/session/prompt.test.ts` | `packages/opencode` | directly affected Prompt regression suite |
-| `bun typecheck` | `packages/opencode` | package type correctness and no stale chronology caller |
-| `git grep -n "MessageV2\.chronology\|export function chronology" -- packages/opencode/src packages/opencode/test` | repository root | structural proof that the removed full path is absent; this is not a behavioral substitute |
-| `bun test --timeout 60000 test/session/compaction.test.ts` | `packages/opencode` | hidden/failed/partial Compaction replay and structural boundary regression |
-| `git diff --check -- <R35 four changed code/test paths>` | repository root | conflict/whitespace integrity |
-| `git diff --stat -- <R35 four changed code/test paths>` | repository root | six-file/300-line budget |
+| Command                                                                                                           | Working directory   | Evidence                                                                                   |
+| ----------------------------------------------------------------------------------------------------------------- | ------------------- | ------------------------------------------------------------------------------------------ | ------------------- | ----------------------------------------- | ------------------- | ---------------------------------------------------------------------------------------------------------- |
+| `bun test --timeout 60000 test/session/messages-pagination.test.ts --test-name-pattern "visible                   | Goal                | bounded"`                                                                                  | `packages/opencode` | visible page and bounded hidden Goal seam |
+| `bun test --timeout 120000 test/session/prompt.test.ts --test-name-pattern "2048-turn                             | late technical      | legacy compaction                                                                          | plugin-hidden       | Goal"`                                    | `packages/opencode` | existing lazy Goal loader boundary, actual Goal Tool control, real classification and post-plugin behavior |
+| `bun test --timeout 60000 test/session/message-v2.test.ts`                                                        | `packages/opencode` | direct Provider visibility projection                                                      |
+| `bun test --timeout 60000 test/session/prompt.test.ts`                                                            | `packages/opencode` | directly affected Prompt regression suite                                                  |
+| `bun typecheck`                                                                                                   | `packages/opencode` | package type correctness and no stale chronology caller                                    |
+| `git grep -n "MessageV2\.chronology\|export function chronology" -- packages/opencode/src packages/opencode/test` | repository root     | structural proof that the removed full path is absent; this is not a behavioral substitute |
+| `bun test --timeout 60000 test/session/compaction.test.ts`                                                        | `packages/opencode` | hidden/failed/partial Compaction replay and structural boundary regression                 |
+| `git diff --check -- <R35 four changed code/test paths>`                                                          | repository root     | conflict/whitespace integrity                                                              |
+| `git diff --stat -- <R35 four changed code/test paths>`                                                           | repository root     | six-file/300-line budget                                                                   |
 
 The existing R34 cache/Snapshot/token verification remains baseline evidence;
 R35 must not weaken or reimplement it. The pre-implementation red signals are
@@ -1342,13 +1344,13 @@ R40 Goal-query scaling mutation described below.
 
 ## R35.17 Diff Budget
 
-| Metric | Hard limit | Plan estimate |
-|---|---:|---:|
-| Code/test files | 6 | 4 |
-| Changed code/test lines | <300 | 180-260 |
-| Production changed lines | not separately expanded beyond the total | 40-100 |
-| Generated/migration/schema files | 0 | 0 |
-| New fallback/alternate success path | 0 | 0 |
+| Metric                              |                               Hard limit | Plan estimate |
+| ----------------------------------- | ---------------------------------------: | ------------: |
+| Code/test files                     |                                        6 |             4 |
+| Changed code/test lines             |                                     <300 |       180-260 |
+| Production changed lines            | not separately expanded beyond the total |        40-100 |
+| Generated/migration/schema files    |                                        0 |             0 |
+| New fallback/alternate success path |                                        0 |             0 |
 
 The budget applies to the R35 integration correction delta. Existing R34 and
 already-landed upstream commits remain immutable history and are not silently
@@ -1416,9 +1418,9 @@ plan re-audit. Only an exact clean plan verdict permits implementation.
 
 ## R35.20 Plan Audit Record
 
-| Round | Revision | Full scope | Blocking findings | Result | Reference |
-|---|---|---|---|---|---|
-| 1 | R35 | yes | B-01 R35 excludes the retained R34 13-file/1189-line implementation from the user’s literal 6-file/300-line final-delivery budget | BLOCK | `ses_05ff42370ffeEFgu6MWsZu8F76` |
+| Round | Revision | Full scope | Blocking findings                                                                                                                 | Result | Reference                        |
+| ----- | -------- | ---------- | --------------------------------------------------------------------------------------------------------------------------------- | ------ | -------------------------------- |
+| 1     | R35      | yes        | B-01 R35 excludes the retained R34 13-file/1189-line implementation from the user’s literal 6-file/300-line final-delivery budget | BLOCK  | `ses_05ff42370ffeEFgu6MWsZu8F76` |
 
 R34's clean implementation audit remains historical evidence for the baseline;
 it is not an approval of the R36 integration delta. R36 remains
@@ -1442,14 +1444,14 @@ requires another revision and audit.
 
 ## R36.2 Plan Audit Record
 
-| Round | Revision | Full scope | Blocking findings | Result | Reference |
-|---|---|---|---|---|---|
-| 1 | R35 | yes | B-01 budget scope lacked explicit authorization | BLOCK | `ses_05ff42370ffeEFgu6MWsZu8F76` |
-| 2 | R36 | yes | B-01 R35 omitted the affected Compaction consumer from executable verification | BLOCK | `ses_05feb5696ffeciSEBsyPODqVmT` |
-| 3 | R37 | yes | B-01 canonical metadata declared `Audit mode: implementation` while the exact handoff and active contract required plan audit | BLOCK | `ses_05fe707faffenO93Ak4jRNi3Bm` |
-| 4 | R38 | yes | B-01 Goal Tool-start laziness and bounded scan cost lacked behavior-sensitive verification | BLOCK | `ses_05fe31f03ffefg6Rj2EPg5dQvt` |
-| 5 | R39 | yes | B-01 Goal laziness and bounded-scan verification left jitter, absolute, relative, and mutation thresholds to be established after the plan | BLOCK | `ses_05fdb718cffewitLSkjgL9DfIo` |
-| 6 | R40 | yes | none | APPROVE | `ses_05fcae166ffeAiLJLvLmJ1Ugbz` |
+| Round | Revision | Full scope | Blocking findings                                                                                                                          | Result  | Reference                        |
+| ----- | -------- | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------ | ------- | -------------------------------- |
+| 1     | R35      | yes        | B-01 budget scope lacked explicit authorization                                                                                            | BLOCK   | `ses_05ff42370ffeEFgu6MWsZu8F76` |
+| 2     | R36      | yes        | B-01 R35 omitted the affected Compaction consumer from executable verification                                                             | BLOCK   | `ses_05feb5696ffeciSEBsyPODqVmT` |
+| 3     | R37      | yes        | B-01 canonical metadata declared `Audit mode: implementation` while the exact handoff and active contract required plan audit              | BLOCK   | `ses_05fe707faffenO93Ak4jRNi3Bm` |
+| 4     | R38      | yes        | B-01 Goal Tool-start laziness and bounded scan cost lacked behavior-sensitive verification                                                 | BLOCK   | `ses_05fe31f03ffefg6Rj2EPg5dQvt` |
+| 5     | R39      | yes        | B-01 Goal laziness and bounded-scan verification left jitter, absolute, relative, and mutation thresholds to be established after the plan | BLOCK   | `ses_05fdb718cffewitLSkjgL9DfIo` |
+| 6     | R40      | yes        | none                                                                                                                                       | APPROVE | `ses_05fcae166ffeAiLJLvLmJ1Ugbz` |
 
 ## R37.1 Compaction Verification Correction
 

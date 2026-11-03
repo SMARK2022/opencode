@@ -43,48 +43,48 @@ ESC[38;2;238;238;238m ESC[48;2;30;30;30m aN;NaNMaN;NaNMaN;NaNm ESC[0m
 
 ### 源码
 
-| 文件 | 为什么相关 |
-|------|-----------|
-| `packages/opencode/src/cli/cmd/tui/app.tsx:122-143` | `rendererConfig()` 是 OpenCode 配置 OpenTUI renderer 的唯一入口，`prependInputHandlers` 在此注入 |
-| `packages/opencode/src/cli/cmd/tui/app.tsx:215-292` | `createCliRenderer()` 调用和 renderer 生命周期 |
-| `packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx:1766-1834` | Textarea props 和 `onContentChange` |
-| `packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx:110-112` | `fadeColor()` 颜色辅助函数 |
-| `packages/opencode/src/cli/cmd/tui/util/signal.ts:38-69` | `createFadeIn()` 动画 |
-| `packages/opencode/src/cli/cmd/tui/ui/spinner.ts:199-244` | spinner 颜色派生 |
-| `packages/opencode/src/cli/cmd/tui/context/theme.tsx:198-301` | 主题颜色解析 |
-| `packages/opencode/src/cli/cmd/tui/context/local.tsx:46-103` | Agent 颜色解析 |
-| `packages/opencode/src/cli/cmd/tui/keymap.tsx:123-152` | keymap 注册 |
-| `packages/opencode/src/util/color.ts` | raw ANSI 颜色构造（有 hex 校验） |
-| `packages/opencode/src/token/accounting.ts` | token 统计（无 NaN 进入 ANSI 路径） |
+| 文件                                                                     | 为什么相关                                                                                       |
+| ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------ |
+| `packages/opencode/src/cli/cmd/tui/app.tsx:122-143`                      | `rendererConfig()` 是 OpenCode 配置 OpenTUI renderer 的唯一入口，`prependInputHandlers` 在此注入 |
+| `packages/opencode/src/cli/cmd/tui/app.tsx:215-292`                      | `createCliRenderer()` 调用和 renderer 生命周期                                                   |
+| `packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx:1766-1834` | Textarea props 和 `onContentChange`                                                              |
+| `packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx:110-112`   | `fadeColor()` 颜色辅助函数                                                                       |
+| `packages/opencode/src/cli/cmd/tui/util/signal.ts:38-69`                 | `createFadeIn()` 动画                                                                            |
+| `packages/opencode/src/cli/cmd/tui/ui/spinner.ts:199-244`                | spinner 颜色派生                                                                                 |
+| `packages/opencode/src/cli/cmd/tui/context/theme.tsx:198-301`            | 主题颜色解析                                                                                     |
+| `packages/opencode/src/cli/cmd/tui/context/local.tsx:46-103`             | Agent 颜色解析                                                                                   |
+| `packages/opencode/src/cli/cmd/tui/keymap.tsx:123-152`                   | keymap 注册                                                                                      |
+| `packages/opencode/src/util/color.ts`                                    | raw ANSI 颜色构造（有 hex 校验）                                                                 |
+| `packages/opencode/src/token/accounting.ts`                              | token 统计（无 NaN 进入 ANSI 路径）                                                              |
 
 ### OpenTUI 0.3.4 实现
 
-| 文件 | 为什么相关 |
-|------|-----------|
-| `node_modules/@opentui/core/index-54s7pk0d.js:7698-7842` | `csi_sgr_mouse` 状态机——bug 所在 |
-| `node_modules/@opentui/core/index-54s7pk0d.js:24260-24310` | `dispatchSequenceHandlers` 和 `handleStdinEvent`——handler 注入点 |
-| `node_modules/@opentui/core/index-54s7pk0d.js:24324-24348` | `setupInput()`——`prependedInputHandlers` 注册顺序 |
-| `node_modules/@opentui/core/index-0nvgrgam.js:5437-5465` | `TextareaRenderable.handleKeyPress()`——`insertText(key.sequence)` |
-| `node_modules/@opentui/core/renderer.d.ts:45` | `prependInputHandlers?: ((sequence: string) => boolean)[]` 类型声明 |
-| `node_modules/@opentui/core/lib/stdin-parser.d.ts` | `StdinParser` 公共接口 |
-| `node_modules/@opentui/core/testing.d.ts` | `testRender` 测试接口 |
+| 文件                                                       | 为什么相关                                                          |
+| ---------------------------------------------------------- | ------------------------------------------------------------------- |
+| `node_modules/@opentui/core/index-54s7pk0d.js:7698-7842`   | `csi_sgr_mouse` 状态机——bug 所在                                    |
+| `node_modules/@opentui/core/index-54s7pk0d.js:24260-24310` | `dispatchSequenceHandlers` 和 `handleStdinEvent`——handler 注入点    |
+| `node_modules/@opentui/core/index-54s7pk0d.js:24324-24348` | `setupInput()`——`prependedInputHandlers` 注册顺序                   |
+| `node_modules/@opentui/core/index-0nvgrgam.js:5437-5465`   | `TextareaRenderable.handleKeyPress()`——`insertText(key.sequence)`   |
+| `node_modules/@opentui/core/renderer.d.ts:45`              | `prependInputHandlers?: ((sequence: string) => boolean)[]` 类型声明 |
+| `node_modules/@opentui/core/lib/stdin-parser.d.ts`         | `StdinParser` 公共接口                                              |
+| `node_modules/@opentui/core/testing.d.ts`                  | `testRender` 测试接口                                               |
 
 ### 测试
 
-| 文件 | 为什么相关 |
-|------|-----------|
-| `packages/opencode/test/cli/cmd/tui/spinner.test.tsx` | 现有 `testRender` + intrinsic 注册测试模式 |
-| `packages/opencode/test/cli/cmd/tui/prompt-submit-transport.test.tsx` | 现有 Prompt + provider 测试模式 |
-| `packages/opencode/test/cli/cmd/tui/prompt-interrupt.test.ts` | Prompt 行为测试模式 |
-| `packages/opencode/test/fixture/tui-runtime.ts` | TUI 测试 fixture |
+| 文件                                                                  | 为什么相关                                 |
+| --------------------------------------------------------------------- | ------------------------------------------ |
+| `packages/opencode/test/cli/cmd/tui/spinner.test.tsx`                 | 现有 `testRender` + intrinsic 注册测试模式 |
+| `packages/opencode/test/cli/cmd/tui/prompt-submit-transport.test.tsx` | 现有 Prompt + provider 测试模式            |
+| `packages/opencode/test/cli/cmd/tui/prompt-interrupt.test.ts`         | Prompt 行为测试模式                        |
+| `packages/opencode/test/fixture/tui-runtime.ts`                       | TUI 测试 fixture                           |
 
 ### 配置
 
-| 文件 | 为什么相关 |
-|------|-----------|
-| `packages/opencode/src/cli/cmd/tui/config/tui-schema.ts:89` | `mouse` 配置字段 |
-| `packages/opencode/src/cli/cmd/tui/app.tsx:123` | `OPENCODE_DISABLE_MOUSE` flag |
-| `.opencode/tui.json` | 项目 TUI 配置（smoke plugin disabled） |
+| 文件                                                        | 为什么相关                             |
+| ----------------------------------------------------------- | -------------------------------------- |
+| `packages/opencode/src/cli/cmd/tui/config/tui-schema.ts:89` | `mouse` 配置字段                       |
+| `packages/opencode/src/cli/cmd/tui/app.tsx:123`             | `OPENCODE_DISABLE_MOUSE` flag          |
+| `.opencode/tui.json`                                        | 项目 TUI 配置（smoke plugin disabled） |
 
 ## 已确认的调用链
 
@@ -175,14 +175,14 @@ recovery → 遇到非法字符 → idle (放行当前字符)
 
 ### 为什么比其他方案更符合现有设计
 
-| 方案 | 文件数 | 问题 |
-|------|--------|------|
-| **prependInputHandlers（推荐）** | 2 | 复用现有接口，最小修改面 |
-| patch node_modules | 3+ | 引入 patch 文件和 lockfile 变更 |
-| 包装 process.stdin | 2 | blast radius 过大，影响所有输入 |
-| 升级 OpenTUI | 2+ | 0.4.3 未修复此问题 |
-| Prompt 文本过滤 | 2 | 误删合法输入，且太晚 |
-| 关闭 mouse | 1 | 破坏现有交互 |
+| 方案                             | 文件数 | 问题                            |
+| -------------------------------- | ------ | ------------------------------- |
+| **prependInputHandlers（推荐）** | 2      | 复用现有接口，最小修改面        |
+| patch node_modules               | 3+     | 引入 patch 文件和 lockfile 变更 |
+| 包装 process.stdin               | 2      | blast radius 过大，影响所有输入 |
+| 升级 OpenTUI                     | 2+     | 0.4.3 未修复此问题              |
+| Prompt 文本过滤                  | 2      | 误删合法输入，且太晚            |
+| 关闭 mouse                       | 1      | 破坏现有交互                    |
 
 ## 预计修改
 

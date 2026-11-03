@@ -102,7 +102,6 @@ export function normalizeCellId(cellId: string) {
   return v
 }
 
-
 /** LLM 可见的 cN 显示编号为一基，内部 VS Code 索引仍为零基。 */
 export const c1 = (cell: vscode.NotebookCell) => cell.index + 1
 
@@ -201,10 +200,7 @@ export function notebookPath(notebook: vscode.NotebookDocument) {
 
 // 所有工具共用Notebook与工具名两行头部，可选字段不占空位。
 export function notebookHeader(notebook: vscode.NotebookDocument, label: string, fields: Array<string | undefined>) {
-  return [
-    `Notebook: ${notebookPath(notebook)}`,
-    `${label}: ${fields.filter(Boolean).join(" ")}`,
-  ]
+  return [`Notebook: ${notebookPath(notebook)}`, `${label}: ${fields.filter(Boolean).join(" ")}`]
 }
 
 // cN只作显示，稳定ID和类型/语言由既有格身份规则生成。
@@ -254,7 +250,12 @@ export function compactCell(cell: vscode.NotebookCell) {
 export function executionState(cell: vscode.NotebookCell) {
   return {
     // 状态只取原生 success 布尔值，输出存在或 MIME 名称都不能补成成功/失败证据。
-    status: cell.executionSummary?.success === false ? "failed" : cell.executionSummary?.success === true ? "succeeded" : "unknown",
+    status:
+      cell.executionSummary?.success === false
+        ? "failed"
+        : cell.executionSummary?.success === true
+          ? "succeeded"
+          : "unknown",
     // 摘要与 timing 可从磁盘恢复，缺少请求身份时来源仍为 unknown；无摘要的历史输出仅标 saved。
     provenance: cell.executionSummary ? "unknown" : cell.outputs.length > 0 ? "saved" : "unknown",
   }

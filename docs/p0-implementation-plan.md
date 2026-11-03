@@ -1,7 +1,7 @@
 # P0 改造方案详细设计（只调研不改代码）
 
 > 本文档是完整实现方案，不是顶层规划。每个改动点都已追溯到具体源码行、调用链和测试覆盖。
-> 
+>
 > 生成时间：2026-06-28 | 基准分支：dev-smark
 
 ---
@@ -10,39 +10,39 @@
 
 ### 源文件（全部通读相关段落）
 
-| 文件 | 阅读范围 | 为什么相关 |
-|---|---|---|
-| `tool/bash-compress.ts` | 655-684 | P0-1: quotePattern 函数在 669 行 `.replaceAll` 不检查 undefined |
-| `tool/read.ts` | 21-28, 197-250, 345-356, 427-620, 696-715 | P0-1: offset schema (348-356 用 NonNegativeInt 允许 0)；P0-2: binary file error (617-618)；P0-4: read 的 offset 实际在 519/622 行做 `\|\| 1` 兜底但 schema 层面不拦截 0；P0-6: collectVisibleReads (197-217) |
-| `session/retry.ts` | 24-65 | P0-1: RETRY_MAX_DELAY=2^31-1 (28行)，delay 函数 (34-65) |
-| `tool/invalid.ts` | 全文(21行) | P0-3: invalid tool 的 execute 只拼 params.error 到 output (14-18行) |
-| `tool/edit.ts` | 37-214, 677-714 | P0-2: replace() 函数 (677-714) 的 9 个 fuzzy replacer 和 generic error (709-711)；P0-4: LSP diagnostics 调用 (196-200)；P0-7: format.file 调用 (109, 153) |
-| `tool/write.ts` | 全文(125行) | P0-4: LSP diagnostics 调用 (94-110)；P0-7: format.file (72-73), metadataDiff (76-86), finalSource (78) |
-| `tool/apply_patch.ts` | 1-90, 95-330 | P0-2: update case error (137)；P0-4: LSP (282-310)；P0-5: hunk loop (73-208), apply phase (234-280) |
-| `tool/tool.ts` | 全文(201行) | 理解 Tool.Context (46-56), ExecuteResult (58-63), wrap() (109-167) 中 metadata 处理 |
-| `tool/registry.ts` | 110-190 | P0-3: InvalidTool 注册 (121), 工具注册流程 |
-| `tool/selection.ts` | 全文(20行) | P0-3: enabled() 函数 (10-18) 基于 permission ruleset 判断工具是否可用 |
-| `session/message-v2.ts` | 792-1097 | P0-7/P0-8: toModelMessages (960-997) 中 `input: part.state.input` 是 tool input 的注入点；truncateToolOutput (398-406)；differentModel (914) |
-| `session/processor.ts` | 215-252, 420-540 | P0-7: completeToolCall (215-252) 中 `input: match.part.state.input` (237行) 是 input 持久化点；tool-call 事件处理 (420-481)；tool-result 事件处理 (484-540) |
-| `session/prompt.ts` | 581-730, 2080-2235 | P0-3: insertReminders (581-730) 是注入 synthetic text 的位置；disabledTools 计算 (2196)；tools 过滤 (2198-2203) |
-| `session/system.ts` | 49-102, 126-155 | toolUsageSection (49-102) 是 system prompt 中工具使用指导；verificationSection (126-129) |
-| `permission/index.ts` | 530-543 | P0-3: disabled() 函数 (534-543) 和 EDIT_TOOLS (532) |
-| `lsp/lsp.ts` | 60-62, 315-384, 488-496 | P0-4: diagnostics() (373-384) 返回空对象当无 client；status() (320-333) 返回空数组当无 client；hasClients() (335-344) |
-| `format/index.ts` | 全文(209行) | P0-7: format.file() (194-197) 返回 boolean，true=有 formatter 运行（不代表内容变了） |
-| `format/formatter.ts` | 1-80 | 理解 prettier/gofmt/mix formatter 注册 |
-| `plugin/vscode-bridge.ts` | 400-437 | P0-2: notebook_edit 是 plugin tool，cellId error 来自 VS Code 扩展侧 |
-| `util/output-notice.ts` | 全文(87行) | 理解 formatCompactionClearedNotice, formatOutputTruncatedNotice |
+| 文件                      | 阅读范围                                  | 为什么相关                                                                                                                                                                                                   |
+| ------------------------- | ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `tool/bash-compress.ts`   | 655-684                                   | P0-1: quotePattern 函数在 669 行 `.replaceAll` 不检查 undefined                                                                                                                                              |
+| `tool/read.ts`            | 21-28, 197-250, 345-356, 427-620, 696-715 | P0-1: offset schema (348-356 用 NonNegativeInt 允许 0)；P0-2: binary file error (617-618)；P0-4: read 的 offset 实际在 519/622 行做 `\|\| 1` 兜底但 schema 层面不拦截 0；P0-6: collectVisibleReads (197-217) |
+| `session/retry.ts`        | 24-65                                     | P0-1: RETRY_MAX_DELAY=2^31-1 (28行)，delay 函数 (34-65)                                                                                                                                                      |
+| `tool/invalid.ts`         | 全文(21行)                                | P0-3: invalid tool 的 execute 只拼 params.error 到 output (14-18行)                                                                                                                                          |
+| `tool/edit.ts`            | 37-214, 677-714                           | P0-2: replace() 函数 (677-714) 的 9 个 fuzzy replacer 和 generic error (709-711)；P0-4: LSP diagnostics 调用 (196-200)；P0-7: format.file 调用 (109, 153)                                                    |
+| `tool/write.ts`           | 全文(125行)                               | P0-4: LSP diagnostics 调用 (94-110)；P0-7: format.file (72-73), metadataDiff (76-86), finalSource (78)                                                                                                       |
+| `tool/apply_patch.ts`     | 1-90, 95-330                              | P0-2: update case error (137)；P0-4: LSP (282-310)；P0-5: hunk loop (73-208), apply phase (234-280)                                                                                                          |
+| `tool/tool.ts`            | 全文(201行)                               | 理解 Tool.Context (46-56), ExecuteResult (58-63), wrap() (109-167) 中 metadata 处理                                                                                                                          |
+| `tool/registry.ts`        | 110-190                                   | P0-3: InvalidTool 注册 (121), 工具注册流程                                                                                                                                                                   |
+| `tool/selection.ts`       | 全文(20行)                                | P0-3: enabled() 函数 (10-18) 基于 permission ruleset 判断工具是否可用                                                                                                                                        |
+| `session/message-v2.ts`   | 792-1097                                  | P0-7/P0-8: toModelMessages (960-997) 中 `input: part.state.input` 是 tool input 的注入点；truncateToolOutput (398-406)；differentModel (914)                                                                 |
+| `session/processor.ts`    | 215-252, 420-540                          | P0-7: completeToolCall (215-252) 中 `input: match.part.state.input` (237行) 是 input 持久化点；tool-call 事件处理 (420-481)；tool-result 事件处理 (484-540)                                                  |
+| `session/prompt.ts`       | 581-730, 2080-2235                        | P0-3: insertReminders (581-730) 是注入 synthetic text 的位置；disabledTools 计算 (2196)；tools 过滤 (2198-2203)                                                                                              |
+| `session/system.ts`       | 49-102, 126-155                           | toolUsageSection (49-102) 是 system prompt 中工具使用指导；verificationSection (126-129)                                                                                                                     |
+| `permission/index.ts`     | 530-543                                   | P0-3: disabled() 函数 (534-543) 和 EDIT_TOOLS (532)                                                                                                                                                          |
+| `lsp/lsp.ts`              | 60-62, 315-384, 488-496                   | P0-4: diagnostics() (373-384) 返回空对象当无 client；status() (320-333) 返回空数组当无 client；hasClients() (335-344)                                                                                        |
+| `format/index.ts`         | 全文(209行)                               | P0-7: format.file() (194-197) 返回 boolean，true=有 formatter 运行（不代表内容变了）                                                                                                                         |
+| `format/formatter.ts`     | 1-80                                      | 理解 prettier/gofmt/mix formatter 注册                                                                                                                                                                       |
+| `plugin/vscode-bridge.ts` | 400-437                                   | P0-2: notebook_edit 是 plugin tool，cellId error 来自 VS Code 扩展侧                                                                                                                                         |
+| `util/output-notice.ts`   | 全文(87行)                                | 理解 formatCompactionClearedNotice, formatOutputTruncatedNotice                                                                                                                                              |
 
 ### 测试文件
 
-| 文件 | 阅读范围 | 为什么相关 |
-|---|---|---|
-| `test/tool/edit.test.ts` | 1-60 | 测试模式：testEffect(layer), ctx 构造, fail() helper, LSP/Format/Bus layer 提供 |
-| `test/tool/write.test.ts` | 1-40 | 同上，write 测试模式 |
-| `test/tool/apply_patch.test.ts` | 存在确认 | apply_patch 测试存在 |
-| `test/tool/read.test.ts` | 存在确认 | read 测试存在 |
-| `test/tool/shell.test.ts` | 存在确认 | shell 测试存在 |
-| `test/AGENTS.md` | 全文 | 测试规范：tmpdir fixture, testEffect, it.instance, 避免 mock, 避免 sleep |
+| 文件                            | 阅读范围 | 为什么相关                                                                      |
+| ------------------------------- | -------- | ------------------------------------------------------------------------------- |
+| `test/tool/edit.test.ts`        | 1-60     | 测试模式：testEffect(layer), ctx 构造, fail() helper, LSP/Format/Bus layer 提供 |
+| `test/tool/write.test.ts`       | 1-40     | 同上，write 测试模式                                                            |
+| `test/tool/apply_patch.test.ts` | 存在确认 | apply_patch 测试存在                                                            |
+| `test/tool/read.test.ts`        | 存在确认 | read 测试存在                                                                   |
+| `test/tool/shell.test.ts`       | 存在确认 | shell 测试存在                                                                  |
+| `test/AGENTS.md`                | 全文     | 测试规范：tmpdir fixture, testEffect, it.instance, 避免 mock, 避免 sleep        |
 
 ### 通过搜索确认的调用点
 
@@ -87,6 +87,7 @@
 **根因**：TypeScript 类型标注 `pattern: string` 不在运行时强制。调用方可能传入 undefined。
 
 **改动**：
+
 ```typescript
 // bash-compress.ts:667
 function quotePattern(pattern: string, maxChars = 40) {
@@ -111,11 +112,13 @@ function quotePattern(pattern: string, maxChars = 40) {
 **搜索确认**：grep "offset must be greater" → 需要在 read.ts 和 lines() 函数中搜索。
 
 **改动方案**：
+
 - 方案 A（schema 层）：将 `NonNegativeInt` 改为 `PositiveInt`（最小值 1），在 schema 层拦截 0。但需确认 `PositiveInt` 是否已存在于 `@opencode-ai/core/schema`。
 - 方案 B（auto-correct 层）：在 Parameters 定义后、execute 入口处加 `const offset = params.offset && params.offset > 0 ? params.offset : undefined`，让 falsy 兜底处理。
 - **推荐方案 B**：不改 schema（避免破坏 API 兼容），在 execute 入口做显式修正。
 
 **改动**：
+
 ```typescript
 // read.ts execute 入口（475 行附近），在 resolveReadPath 之前
 // [local-smark] offset 是 1-indexed，0 和负值视为未指定（走默认值 1）
@@ -132,6 +135,7 @@ const offset = params.offset && params.offset > 0 ? params.offset : undefined
 **问题**：`RETRY_MAX_DELAY = 2_147_483_647`（~24.8 天），provider `retry-after` header 可导致超长等待。
 
 **改动**：
+
 ```typescript
 // retry.ts:28
 // [local-smark] 将 retry 上限从 32 位整数极值改为 5 分钟。
@@ -159,7 +163,7 @@ if (notFound) {
   const closest = findClosestMatch(content, oldString)
   throw new Error(
     `Could not find oldString in the file. It must match exactly, including whitespace, indentation, and line endings.` +
-    (closest ? `\n\nClosest match found at line ${closest.line}:\n${closest.excerpt}` : ""),
+      (closest ? `\n\nClosest match found at line ${closest.line}:\n${closest.excerpt}` : ""),
   )
 }
 ```
@@ -167,6 +171,7 @@ if (notFound) {
 **新增辅助函数** `findClosestMatch`：在 edit.ts 中新增，用滑动窗口找到与 oldString 最相似的 content 区域（按行数匹配，返回行号 + 内容摘录）。限制摘录长度避免上下文膨胀。
 
 **边界处理**：
+
 - oldString < 3 行：跳过 closest match（太短没有意义）
 - content > 500 行：限制扫描范围（从 oldString 首行的近似位置开始扫描）
 - 摘录限制 5 行 / 500 字符
@@ -196,16 +201,14 @@ if (notFound) {
 **问题**：`"Cannot read binary file: ${filepath}"` 不提供替代方案。
 
 **改动**：
+
 ```typescript
 // read.ts:617-618 修改
 if (isBinaryFile(filepath, sample)) {
   // [local-smark] 根据文件扩展名提供 type-specific 替代建议
   const ext = path.extname(filepath).toLowerCase()
   const suggestion = getBinaryFileSuggestion(ext)
-  return yield* Effect.fail(new Error(
-    `Cannot read binary file: ${filepath}` +
-    (suggestion ? `\n${suggestion}` : ""),
-  ))
+  return yield * Effect.fail(new Error(`Cannot read binary file: ${filepath}` + (suggestion ? `\n${suggestion}` : "")))
 }
 ```
 
@@ -243,6 +246,7 @@ if (isBinaryFile(filepath, sample)) {
 **推荐位置**：`insertReminders` (prompt.ts:581-729)。
 
 理由：
+
 1. insertReminders 已有 synthetic text 注入先例（plan mode DECIDE_PROMPT, BUILD_SWITCH）
 2. 它在 `msgs = yield* insertReminders({ messages: msgs, agent, session })` (2086行) 被调用，在 toModelMessages 之前
 3. 它有 `agent` 参数，可以计算 disabledTools
@@ -255,20 +259,18 @@ if (isBinaryFile(filepath, sample)) {
 // [local-smark] 当历史记录中使用了当前不可用的工具时，事前提醒模型使用替代工具
 const disabledTools = Permission.disabled(
   // 从 messages 中提取所有出现过的工具名
-  [...new Set(input.messages.flatMap(m => m.parts.filter(p => p.type === "tool").map(p => p.tool)))],
+  [...new Set(input.messages.flatMap((m) => m.parts.filter((p) => p.type === "tool").map((p) => p.tool)))],
   Permission.merge(input.agent.permission, input.session.permission ?? []),
 )
 if (disabledTools.size > 0) {
   // 检查历史中是否实际使用了被 disabled 的工具
-  const usedDisabled = input.messages.some(m =>
-    m.parts.some(p => p.type === "tool" && disabledTools.has(p.tool))
-  )
+  const usedDisabled = input.messages.some((m) => m.parts.some((p) => p.type === "tool" && disabledTools.has(p.tool)))
   if (usedDisabled) {
     const substituteMap: Record<string, string> = {
       apply_patch: "Use edit (for targeted replacements) or write (for full file writes)",
     }
-    const notices = [...disabledTools].map(tool =>
-      `${tool} is not available in this session. ${substituteMap[tool] ?? "Use an available tool instead."}`
+    const notices = [...disabledTools].map(
+      (tool) => `${tool} is not available in this session. ${substituteMap[tool] ?? "Use an available tool instead."}`,
     )
     userMessage.parts.push({
       id: PartID.ascending(),
@@ -312,15 +314,15 @@ edit.ts:196-200, write.ts:94-110, apply_patch.ts:282-310 调用 `lsp.diagnostics
 ```typescript
 // edit.ts:196-200 修改
 let output = "Edit applied successfully."
-yield* lsp.touchFile(filePath, "document")
-const diagnostics = yield* lsp.diagnostics()
+yield * lsp.touchFile(filePath, "document")
+const diagnostics = yield * lsp.diagnostics()
 const normalizedFilePath = AppFileSystem.normalizePath(filePath)
 const block = LSP.Diagnostic.report(filePath, diagnostics[normalizedFilePath] ?? [])
 if (block) {
   output += `\n\nLSP errors detected in this file, please fix:\n${block}`
 } else {
   // [local-smark] 当 diagnostics 为空时，区分 "no errors" 和 "LSP not running"
-  const clients = yield* lsp.status()
+  const clients = yield * lsp.status()
   if (clients.length === 0) {
     output += `\n\nLSP diagnostics unavailable (no language server running). Run bun typecheck to verify type safety.`
   }
@@ -328,6 +330,7 @@ if (block) {
 ```
 
 **同样改动应用到**：
+
 - write.ts:94-110（在 diagnostics 循环后加 else 分支）
 - apply_patch.ts:302-310（在 diagnostics 循环后加 else 分支）
 
@@ -371,9 +374,7 @@ for (const hunk of hunks) {
 
 if (fileChanges.length === 0) {
   // 所有 hunk 都失败了
-  return yield* Effect.fail(new Error(
-    `apply_patch verification failed: all hunks failed.\n${errors.join("\n")}`,
-  ))
+  return yield * Effect.fail(new Error(`apply_patch verification failed: all hunks failed.\n${errors.join("\n")}`))
 }
 
 // 有部分成功的 hunk，继续 permission check 和 apply（保持不变）
@@ -414,19 +415,26 @@ if (errors.length > 0) {
 // [local-smark] blind edit 检查：如果文件在当前 session 中未被 read 或 write，
 // 提示模型先 read，避免 oldString 基于过期/假设内容导致匹配失败。
 if (params.oldString !== "") {
-  const hasTouched = ctx.messages.some(msg =>
-    msg.info.role === "assistant" &&
-    msg.parts.some(part =>
-      part.type === "tool" &&
-      part.state.status === "completed" &&
-      (part.tool === "read" || part.tool === "write" || part.tool === "edit" || part.tool === "apply_patch") &&
-      (part.state.input as any)?.filePath === filePath
-    )
+  const hasTouched = ctx.messages.some(
+    (msg) =>
+      msg.info.role === "assistant" &&
+      msg.parts.some(
+        (part) =>
+          part.type === "tool" &&
+          part.state.status === "completed" &&
+          (part.tool === "read" || part.tool === "write" || part.tool === "edit" || part.tool === "apply_patch") &&
+          (part.state.input as any)?.filePath === filePath,
+      ),
   )
   if (!hasTouched) {
-    return yield* Effect.fail(new Error(
-      `File has not been read in this session: ${filePath}. Read it first to verify current content, then retry the edit.`,
-    ))
+    return (
+      yield *
+      Effect.fail(
+        new Error(
+          `File has not been read in this session: ${filePath}. Read it first to verify current content, then retry the edit.`,
+        ),
+      )
+    )
   }
 }
 ```
@@ -458,11 +466,13 @@ collectVisibleReads (read.ts:197-217) 是 read.ts 的私有函数，检查 canon
 在 processor.ts completeToolCall (215-252) 中，当 tool 的 output.metadata 包含 `_inputOverride` 时，用其更新持久化的 input。
 
 优点：
+
 - 持久化数据直接正确（DB 中 input = 格式化后内容）
 - toModelMessages 不需要改动
 - 模型在后续上下文中看到的 input 就是格式化后内容
 
 缺点：
+
 - 修改了持久化数据（原始 input 丢失）
 - 需要 processor 和 tool 双方配合
 
@@ -471,10 +481,12 @@ collectVisibleReads (read.ts:197-217) 是 read.ts 的私有函数，检查 canon
 在 message-v2.ts:993 中，当 metadata 包含 formattedContent 时，替换 input。
 
 优点：
+
 - 不修改持久化数据
 - 只影响 provider message
 
 缺点：
+
 - metadata 中存储完整格式化内容（双倍存储）
 - toModelMessages 需要工具特定逻辑
 
@@ -491,7 +503,7 @@ collectVisibleReads (read.ts:197-217) 是 read.ts 的私有函数，检查 canon
 let metadataDiff: string | undefined
 let inputOverride: Record<string, unknown> | undefined
 if (exists) {
-  const finalSource = yield* Bom.readFile(fs, filepath)
+  const finalSource = yield * Bom.readFile(fs, filepath)
   metadataDiff = trimDiff(
     createTwoFilesPatch(filepath, filepath, normalizeLineEndings(contentOld), normalizeLineEndings(finalSource.text)),
   )
@@ -504,6 +516,7 @@ if (exists) {
 ```
 
 在 return 中加入 inputOverride：
+
 ```typescript
 return {
   title: path.relative(instance.worktree, filepath),
@@ -528,30 +541,32 @@ edit.ts 的 format 调用在 109 和 153 行。在 153 行 format 后，`content
 
 ```typescript
 // processor.ts:233-250 修改
-yield* session.updatePart({
-  ...match.part,
-  state: {
-    status: "completed",
-    // [local-smark] 当工具返回 _inputOverride 时，用其更新持久化 input，
-    // 使后续上下文中模型看到的 input 与磁盘实际内容一致（auto-format 场景）。
-    input: output.metadata?._inputOverride
-      ? { ...match.part.state.input, ...output.metadata._inputOverride }
-      : match.part.state.input,
-    output: output.output,
-    metadata: (() => {
-      const { _inputOverride, ...rest } = output.metadata ?? {}
-      return match.part.state.metadata?.autoReview
-        ? { ...rest, autoReview: match.part.state.metadata.autoReview }
-        : rest
-    })(),
-    title: output.title,
-    time: { start: match.part.state.time.start, end: Date.now() },
-    attachments: output.attachments,
-  },
-})
+yield *
+  session.updatePart({
+    ...match.part,
+    state: {
+      status: "completed",
+      // [local-smark] 当工具返回 _inputOverride 时，用其更新持久化 input，
+      // 使后续上下文中模型看到的 input 与磁盘实际内容一致（auto-format 场景）。
+      input: output.metadata?._inputOverride
+        ? { ...match.part.state.input, ...output.metadata._inputOverride }
+        : match.part.state.input,
+      output: output.output,
+      metadata: (() => {
+        const { _inputOverride, ...rest } = output.metadata ?? {}
+        return match.part.state.metadata?.autoReview
+          ? { ...rest, autoReview: match.part.state.metadata.autoReview }
+          : rest
+      })(),
+      title: output.title,
+      time: { start: match.part.state.time.start, end: Date.now() },
+      attachments: output.attachments,
+    },
+  })
 ```
 
 关键点：
+
 - `input` 行：如果 `_inputOverride` 存在，merge 到 input
 - `metadata` 行：从 metadata 中 strip `_inputOverride`（不持久化到 DB）
 
@@ -566,7 +581,7 @@ apply_patch 的 format 调用在 270-271 行。与 edit 类似，apply_patch 的
 - **format 未改变内容**：`finalSource.text === contentNew` → 不设 `_inputOverride` → 行为不变
 - **新文件（exists=false）**：不进入 metadataDiff 分支 → 不设 `_inputOverride` → 行为不变
 - **无 formatter**：`format.file()` 返回 false → 不进入 sync 分支 → `finalSource` 未读取 → 不设 `_inputOverride`
-- **_inputOverride 不持久化**：在 completeToolCall 中 strip，DB 中不存储
+- **\_inputOverride 不持久化**：在 completeToolCall 中 strip，DB 中不存储
 - **snapshot/revert 不受影响**：snapshot 用 git 跟踪磁盘文件，不读 tool input
 - **session replay 正确**：toModelMessages 读 `state.input`，已被更新为格式化后内容
 
@@ -597,62 +612,62 @@ P0-7 已经解决了核心问题（format 后内容不一致）。P0-8 的收益
 
 ### 10.1 P0-1 测试
 
-| 测试 | 验证点 | 文件 |
-|---|---|---|
-| quotePattern(undefined) 返回 "" | guard 生效 | test/tool/bash-compress.test.ts（如不存在则新增） |
-| quotePattern("normal") 行为不变 | 正常路径不破坏 | 同上 |
-| retry delay cap 为 300000 | 常量值正确 | test/session/retry.test.ts（如不存在则新增） |
-| offset=0 被修正为 1 | auto-correct 生效 | test/tool/read.test.ts |
+| 测试                            | 验证点            | 文件                                              |
+| ------------------------------- | ----------------- | ------------------------------------------------- |
+| quotePattern(undefined) 返回 "" | guard 生效        | test/tool/bash-compress.test.ts（如不存在则新增） |
+| quotePattern("normal") 行为不变 | 正常路径不破坏    | 同上                                              |
+| retry delay cap 为 300000       | 常量值正确        | test/session/retry.test.ts（如不存在则新增）      |
+| offset=0 被修正为 1             | auto-correct 生效 | test/tool/read.test.ts                            |
 
 ### 10.2 P0-2 测试
 
-| 测试 | 验证点 | 文件 |
-|---|---|---|
-| edit oldString 不匹配时 error 包含 closest match | 诊断增强 | test/tool/edit.test.ts |
+| 测试                                                   | 验证点   | 文件                          |
+| ------------------------------------------------------ | -------- | ----------------------------- |
+| edit oldString 不匹配时 error 包含 closest match       | 诊断增强 | test/tool/edit.test.ts        |
 | apply_patch context 不匹配时 error 包含 actual content | 诊断增强 | test/tool/apply_patch.test.ts |
-| read binary file error 包含 type-specific suggestion | 诊断增强 | test/tool/read.test.ts |
+| read binary file error 包含 type-specific suggestion   | 诊断增强 | test/tool/read.test.ts        |
 
 ### 10.3 P0-3 测试
 
-| 测试 | 验证点 | 文件 |
-|---|---|---|
+| 测试                                         | 验证点   | 文件                                          |
+| -------------------------------------------- | -------- | --------------------------------------------- |
 | 历史含 apply_patch 且 disabled 时注入 notice | 事前提醒 | test/session/prompt.test.ts（如不存在则新增） |
-| 历史不含 apply_patch 时不注入 | 不误触发 | 同上 |
-| apply_patch 未 disabled 时不注入 | 不误触发 | 同上 |
+| 历史不含 apply_patch 时不注入                | 不误触发 | 同上                                          |
+| apply_patch 未 disabled 时不注入             | 不误触发 | 同上                                          |
 
 ### 10.4 P0-4 测试
 
-| 测试 | 验证点 | 文件 |
-|---|---|---|
+| 测试                                            | 验证点   | 文件                   |
+| ----------------------------------------------- | -------- | ---------------------- |
 | LSP 无 client 时 edit output 包含 "unavailable" | LSP 提示 | test/tool/edit.test.ts |
-| LSP 有 client 且无 error 时不包含 "unavailable" | 不误触发 | 同上 |
-| LSP 有 client 且有 error 时正常显示 error | 正常路径 | 同上 |
+| LSP 有 client 且无 error 时不包含 "unavailable" | 不误触发 | 同上                   |
+| LSP 有 client 且有 error 时正常显示 error       | 正常路径 | 同上                   |
 
 ### 10.5 P0-5 测试
 
-| 测试 | 验证点 | 文件 |
-|---|---|---|
+| 测试                              | 验证点             | 文件                          |
+| --------------------------------- | ------------------ | ----------------------------- |
 | 2 文件 patch，1 个失败 → 1 个成功 | per-file atomicity | test/tool/apply_patch.test.ts |
-| 全部失败 → 返回 error | 不静默成功 | 同上 |
-| 全部成功 → output 不含 failed | 正常路径 | 同上 |
+| 全部失败 → 返回 error             | 不静默成功         | 同上                          |
+| 全部成功 → output 不含 failed     | 正常路径           | 同上                          |
 
 ### 10.6 P0-6 测试
 
-| 测试 | 验证点 | 文件 |
-|---|---|---|
+| 测试                                       | 验证点          | 文件                   |
+| ------------------------------------------ | --------------- | ---------------------- |
 | 未读文件 edit → 返回 "not been read" error | blind edit 拦截 | test/tool/edit.test.ts |
-| 已读文件 edit → 正常执行 | 不误拦截 | 同上 |
-| write 创建后 edit → 正常执行 | write 也算接触 | 同上 |
-| oldString="" 创建文件 → 不拦截 | 创建模式豁免 | 同上 |
+| 已读文件 edit → 正常执行                   | 不误拦截        | 同上                   |
+| write 创建后 edit → 正常执行               | write 也算接触  | 同上                   |
+| oldString="" 创建文件 → 不拦截             | 创建模式豁免    | 同上                   |
 
 ### 10.7 P0-7 测试
 
-| 测试 | 验证点 | 文件 |
-|---|---|---|
-| write + format 改变内容 → input 被替换 | format 透明化 | test/tool/write.test.ts |
-| write + format 未改变内容 → input 不变 | 不误触发 | 同上 |
-| write 新文件 → 无 _inputOverride | 新文件豁免 | 同上 |
-| completeToolCall strip _inputOverride | metadata 不持久化 | test/session/processor.test.ts（如不存在则新增） |
+| 测试                                   | 验证点            | 文件                                             |
+| -------------------------------------- | ----------------- | ------------------------------------------------ |
+| write + format 改变内容 → input 被替换 | format 透明化     | test/tool/write.test.ts                          |
+| write + format 未改变内容 → input 不变 | 不误触发          | 同上                                             |
+| write 新文件 → 无 \_inputOverride      | 新文件豁免        | 同上                                             |
+| completeToolCall strip \_inputOverride | metadata 不持久化 | test/session/processor.test.ts（如不存在则新增） |
 
 ---
 
@@ -681,17 +696,17 @@ bun test --timeout 30000 test/session/retry.test.ts
 
 ## 十二、Git 影响预估
 
-| 改动项 | 修改文件 | 新增文件 | 预计净增行 | 删除行 |
-|---|---|---|---|---|
-| P0-1 | bash-compress.ts, read.ts, retry.ts | 0 | ~10 | ~2 |
-| P0-2 | edit.ts, apply_patch.ts, read.ts | 0 | ~60 | ~6 |
-| P0-3 | prompt.ts | 0 | ~30 | 0 |
-| P0-4 | edit.ts, write.ts, apply_patch.ts | 0 | ~20 | ~6 |
-| P0-5 | apply_patch.ts | 0 | ~25 | ~5 |
-| P0-6 | edit.ts | 0 | ~15 | 0 |
-| P0-7 | write.ts, processor.ts | 0 | ~15 | ~3 |
-| P0-8 | 暂缓 | 0 | 0 | 0 |
-| **合计** | **8 文件** | **0** | **~175** | **~22** |
+| 改动项   | 修改文件                            | 新增文件 | 预计净增行 | 删除行  |
+| -------- | ----------------------------------- | -------- | ---------- | ------- |
+| P0-1     | bash-compress.ts, read.ts, retry.ts | 0        | ~10        | ~2      |
+| P0-2     | edit.ts, apply_patch.ts, read.ts    | 0        | ~60        | ~6      |
+| P0-3     | prompt.ts                           | 0        | ~30        | 0       |
+| P0-4     | edit.ts, write.ts, apply_patch.ts   | 0        | ~20        | ~6      |
+| P0-5     | apply_patch.ts                      | 0        | ~25        | ~5      |
+| P0-6     | edit.ts                             | 0        | ~15        | 0       |
+| P0-7     | write.ts, processor.ts              | 0        | ~15        | ~3      |
+| P0-8     | 暂缓                                | 0        | 0          | 0       |
+| **合计** | **8 文件**                          | **0**    | **~175**   | **~22** |
 
 - 不涉及生成文件、迁移、文档
 - 不涉及新配置项
@@ -714,12 +729,12 @@ bun test --timeout 30000 test/session/retry.test.ts
 
 1. **P0-2 edit closest match 性能**：对大文件的滑动窗口扫描可能慢。**缓解**：限制扫描范围和返回长度。
 2. **P0-5 语义变更**：从 patch-level atomic 到 file-level atomic。**缓解**：release notes 说明；保留 "全部失败仍返回 error" 的行为。
-3. **P0-7 DB mutation**：修改持久化 input。**缓解**：已确认 snapshot/revert 不依赖 tool input；_inputOverride 不持久化到 metadata。
+3. **P0-7 DB mutation**：修改持久化 input。**缓解**：已确认 snapshot/revert 不依赖 tool input；\_inputOverride 不持久化到 metadata。
 
 ### 待确认项（不阻塞但需实施时验证）
 
 1. **offset=0 error 来源**：read.ts 内部已有 `|| 1` 兜底，需确认 error 是否来自 `lines()` 函数。如果来自 lines()，则 P0-1 的 auto-correct 方案需要调整。
-2. **write.ts contentNew vs finalSource.text 比较**：需确认是否需要 normalize line endings 后比较（避免 CRLF 差异导致 false positive _inputOverride）。
+2. **write.ts contentNew vs finalSource.text 比较**：需确认是否需要 normalize line endings 后比较（避免 CRLF 差异导致 false positive \_inputOverride）。
 3. **notebook_edit cellId error**：需阅读 vscode-bridge.ts 的 notebookResult/callRaw 完整实现，确认能否在 error 后自动获取 cellId 列表。
 4. **apply_patch getActualContentAtLocation**：需确认 Patch.deriveNewContentsFromChunks 的 error 是否包含行号信息，以便定位 actual content。
 
@@ -730,12 +745,13 @@ bun test --timeout 30000 test/session/retry.test.ts
 P0 改造共 7 项（P0-8 暂缓为 P1），涉及 8 个源文件，预计净增 ~175 行、删除 ~22 行，不新增文件/配置/API。
 
 核心改动：
+
 1. **P0-1**（3 文件）：quotePattern guard + offset 修正 + retry cap → 消除 3 个 bug
 2. **P0-2**（3 文件）：edit/apply_patch/read-binary error 增加 actual content → 提升恢复率
 3. **P0-3**（1 文件）：insertReminders 中注入 disabled tool 事前提醒 → 预防 apply_patch 误用
 4. **P0-4**（3 文件）：LSP diagnostics 为空时检查 hasClients → 区分 "no errors" vs "LSP not running"
 5. **P0-5**（1 文件）：apply_patch hunk loop 改为 per-file atomicity → 保留部分成功
 6. **P0-6**（1 文件）：edit 前检查文件是否被 read/write 过 → 阻止 blind edit
-7. **P0-7**（2 文件）：write + format 后通过 _inputOverride 替换持久化 input → 模型看到格式化后内容
+7. **P0-7**（2 文件）：write + format 后通过 \_inputOverride 替换持久化 input → 模型看到格式化后内容
 
 所有改动遵循 Effect-first 架构、[local-smark] 标记、向后兼容、手术刀式修改。

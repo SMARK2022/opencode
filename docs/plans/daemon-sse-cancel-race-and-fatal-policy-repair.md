@@ -56,7 +56,7 @@ R3 范围变更（verified 后用户两条新原话，逐字）：
 - 不新增 daemon 卡死自动检测/自动强杀机制——对 unresponsive owner 的自动终止会把"长模型调用"误判成卡死，构成新的误杀（与用户"不要过度激进"的要求直接冲突）。卡死的既有机制是显式 `opencode daemon stop`（graceful → 超时 → owner 复核后 SIGKILL）。
 - 不修复 Bun 运行时本身（listen socket 句柄被 Bun.spawn 子进程继承是 Bun 的 Windows 行为，见 §20 D3 决策）。
 - 不引入 FFI 句柄遍历（NtQuerySystemInformation）来标记 socket 不可继承——结构体布局版本敏感、失败即 daemon 启动崩溃，与一个"恢复检测延迟 ~90s"的纯延迟性问题不成比例（探针实证见 §8）。
-- 不为 TUI 增加 SSE  stall watchdog（心跳是否到达 SDK 消费层受生成代码约束，属另行立项）。
+- 不为 TUI 增加 SSE stall watchdog（心跳是否到达 SDK 消费层受生成代码约束，属另行立项）。
 - 不改动 AI SDK（node_modules）内部管道；只修我们自己拥有 controller 的流源。
 - 不扩大 Log 关闭接口到 TUI 进程退出路径（TUI 日志丢失无受害证据；daemon 是唯一实证的受害者）。
 - 不改变 cancel 语义本身（abort、reader cancel、deadline 清理路径全部保持原样）。
@@ -64,34 +64,34 @@ R3 范围变更（verified 后用户两条新原话，逐字）：
 
 ## 3. Repository Context
 
-| Source | Why it constrains this task |
-| --- | --- |
-| `CONTEXT.md` | Daemon = `cli/cmd/tui/worker.ts`（共享 daemon 进程，ServerLock 单 owner 模型，见文件末尾 `[local-devsmark][deprecated-rpc-thread]` 注释）；Provider 经 `@ai-sdk` 统一 |
-| 根 `AGENTS.md` | 测试不得从仓库根目录运行；typecheck 用 `bun typecheck` 从 package 目录运行 |
-| `packages/opencode/AGENTS.md` | 模块形状：flat exports + 文件底部 self-reexport；Effect 规则；测试 fixture 惯例 |
-| `packages/opencode/test/AGENTS.md` | 测试 fixture（tmpdir/testEffect）、禁止用 sleep 猜并发就绪（本计划的竞态测试不依赖就绪猜测，依赖同步确定性排序） |
-| `docs/plans/cross-host-daemon-lock-and-db-single-writer.md`（R4 approved） | unresponsive daemon 不得被顶替/强杀（单写者保护）；本计划的 WS3 只能在此约束内做"验证与记录"，不能引入自动终止 |
-| `docs/plans/daemon-ctrl-c-shutdown-lifecycle.md`（R7 verified） | `daemon stop` 的 graceful→force 策略边界：force 只允许在同一 lock owner 复核后发生，不得从无关失败路径触发 |
-| `packages/opencode/src/cli/cmd/tui/daemon.ts` `existingOwnerUrl` 注释 | "unresponsive" = owner 活着但控制面暂时阻塞（如长模型调用），**禁止**此时 spawn 第二个 daemon |
+| Source                                                                     | Why it constrains this task                                                                                                                                           |
+| -------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CONTEXT.md`                                                               | Daemon = `cli/cmd/tui/worker.ts`（共享 daemon 进程，ServerLock 单 owner 模型，见文件末尾 `[local-devsmark][deprecated-rpc-thread]` 注释）；Provider 经 `@ai-sdk` 统一 |
+| 根 `AGENTS.md`                                                             | 测试不得从仓库根目录运行；typecheck 用 `bun typecheck` 从 package 目录运行                                                                                            |
+| `packages/opencode/AGENTS.md`                                              | 模块形状：flat exports + 文件底部 self-reexport；Effect 规则；测试 fixture 惯例                                                                                       |
+| `packages/opencode/test/AGENTS.md`                                         | 测试 fixture（tmpdir/testEffect）、禁止用 sleep 猜并发就绪（本计划的竞态测试不依赖就绪猜测，依赖同步确定性排序）                                                      |
+| `docs/plans/cross-host-daemon-lock-and-db-single-writer.md`（R4 approved） | unresponsive daemon 不得被顶替/强杀（单写者保护）；本计划的 WS3 只能在此约束内做"验证与记录"，不能引入自动终止                                                        |
+| `docs/plans/daemon-ctrl-c-shutdown-lifecycle.md`（R7 verified）            | `daemon stop` 的 graceful→force 策略边界：force 只允许在同一 lock owner 复核后发生，不得从无关失败路径触发                                                            |
+| `packages/opencode/src/cli/cmd/tui/daemon.ts` `existingOwnerUrl` 注释      | "unresponsive" = owner 活着但控制面暂时阻塞（如长模型调用），**禁止**此时 spawn 第二个 daemon                                                                         |
 
 ## 4. Files and Evidence Read
 
-| Evidence | Relevance | Evidence class |
-| --- | --- | --- |
-| `~/.local/share/opencode/log/2026-10-02T045932.log` 行 20206-20207 | daemon 41064 死亡实证：`ERROR service=default e=Invalid state: Controller is already closed rejection` 紧跟 `INFO service=daemon reason=unhandledRejection hadClient=true sseClients=5 sessionActivity=9 daemon shutting down` | observed |
-| 同日志 05:23:53-54 段 | 触发序列：ses_f8b378e68 cancel → provider fetch AbortError（设计内路径）→ 两个 bash tool.end → rejection（竞态路径）→ 自杀 | observed |
-| `~/.local/share/opencode/log/2026-10-01T203822.log`（已被 cleanup 删除，删除前已取证） | daemon 36428 于 12:57:59 死亡时日志戛止于正常流式输出；无 shutdown 记录——与 `gracefulShutdown` 末尾 `process.exit(0)` 丢弃未 flush 缓冲一致（同类死亡，尾部证据丢失） | observed |
-| 探针 `D:\Temp\opencode\probe-stream-race2.ts` | 默认 hwm + 多 read 预取：cancel 时在途 pull 恢复 done → `ctrl.close()` 抛出与生产完全一致的 `TypeError [ERR_INVALID_STATE]: Invalid state: Controller is already closed` | observed |
-| 探针 `D:\Temp\opencode\probe-stream-race4.ts` | 默认水位 + `pipeThrough` 消费（AI SDK 管道拓扑）：cancel 时源端 pull #2 在飞，恢复后 close 抛同款 TypeError。两探针同时证明：Bun 在简单拓扑下会吞掉该 rejection（不触发 unhandledRejection），生产逃逸依赖更复杂的管道拓扑——因此**源端不抛错是唯一可靠的根治点** | observed |
-| Red 运行记录（2026-10-02 06:07 UTC，packages/opencode） | `bun test test/provider/provider.test.ts -t "cancel during in-flight pull"`：未修复代码下 cancel 组合成 `phase=sse.end requestID=42424201`（断言失败输出已捕获），控制组正常 EOF 产生 sse.end——证明测试可判别 | observed |
-| `packages/opencode/src/provider/provider.ts` `progressDeadline().wrap()`（218-273 行） | 竞态现场：async `pull(ctrl)` 在 `await read()` 后无守卫地 `ctrl.enqueue`/`ctrl.close`；`cancel()` 不同步阻断在途 pull | observed |
-| `packages/core/src/aisdk.ts` `wrapSSE()`（11-57 行） | 同构隐患：chunkTimeout 配置的 aisdk 端点走这条包裹路径，同样的 cancel-during-pull 窗口 | reachable |
-| `packages/opencode/src/cli/cmd/tui/worker.ts` 51-61、266-348 行 | 自杀开关现场：`process.prependListener("unhandledRejection", () => void gracefulShutdown(...))`；`gracefulShutdown` 全量拆解（取消全部 session、dispose 实例、关闭 server、关闭 DB、清 lock、exit） | observed |
-| `packages/opencode/src/cli/cmd/tui/daemon.ts`（ensure/existingOwnerUrl/选举/stopDaemon）、`server-lock.ts` | 生命周期现状：死亡→flock 选举→单 owner 重建（本次事故中 41064→14840→45632 均单 owner，无并发双写）；unresponsive→复用不顶替；stop→控制面 graceful→owner 复核→SIGKILL | observed |
-| `packages/opencode/test/cli/tui/daemon.test.ts`（2400+ 行） | 既有生命周期测试覆盖：选举、锁、隔离 env；无 unhandledRejection 策略覆盖 | observed |
-| `packages/opencode/src/server/event.ts` 45-77 行 | 全局 SSE 端点的 controller 写入已全部 try/catch 守卫——排除为 rejection 来源 | observed |
-| `packages/opencode/src/util/queue.ts` | AsyncQueue 纯数组实现，push 不抛——排除 | observed |
-| Windows 事件日志 / CrashDumps / SecurityCenter2 | 两次死亡均无 WER/崩溃转储/AV 记录——排除原生崩溃与外部查杀 | observed |
+| Evidence                                                                                                   | Relevance                                                                                                                                                                                                                                                        | Evidence class |
+| ---------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------- |
+| `~/.local/share/opencode/log/2026-10-02T045932.log` 行 20206-20207                                         | daemon 41064 死亡实证：`ERROR service=default e=Invalid state: Controller is already closed rejection` 紧跟 `INFO service=daemon reason=unhandledRejection hadClient=true sseClients=5 sessionActivity=9 daemon shutting down`                                   | observed       |
+| 同日志 05:23:53-54 段                                                                                      | 触发序列：ses_f8b378e68 cancel → provider fetch AbortError（设计内路径）→ 两个 bash tool.end → rejection（竞态路径）→ 自杀                                                                                                                                       | observed       |
+| `~/.local/share/opencode/log/2026-10-01T203822.log`（已被 cleanup 删除，删除前已取证）                     | daemon 36428 于 12:57:59 死亡时日志戛止于正常流式输出；无 shutdown 记录——与 `gracefulShutdown` 末尾 `process.exit(0)` 丢弃未 flush 缓冲一致（同类死亡，尾部证据丢失）                                                                                            | observed       |
+| 探针 `D:\Temp\opencode\probe-stream-race2.ts`                                                              | 默认 hwm + 多 read 预取：cancel 时在途 pull 恢复 done → `ctrl.close()` 抛出与生产完全一致的 `TypeError [ERR_INVALID_STATE]: Invalid state: Controller is already closed`                                                                                         | observed       |
+| 探针 `D:\Temp\opencode\probe-stream-race4.ts`                                                              | 默认水位 + `pipeThrough` 消费（AI SDK 管道拓扑）：cancel 时源端 pull #2 在飞，恢复后 close 抛同款 TypeError。两探针同时证明：Bun 在简单拓扑下会吞掉该 rejection（不触发 unhandledRejection），生产逃逸依赖更复杂的管道拓扑——因此**源端不抛错是唯一可靠的根治点** | observed       |
+| Red 运行记录（2026-10-02 06:07 UTC，packages/opencode）                                                    | `bun test test/provider/provider.test.ts -t "cancel during in-flight pull"`：未修复代码下 cancel 组合成 `phase=sse.end requestID=42424201`（断言失败输出已捕获），控制组正常 EOF 产生 sse.end——证明测试可判别                                                    | observed       |
+| `packages/opencode/src/provider/provider.ts` `progressDeadline().wrap()`（218-273 行）                     | 竞态现场：async `pull(ctrl)` 在 `await read()` 后无守卫地 `ctrl.enqueue`/`ctrl.close`；`cancel()` 不同步阻断在途 pull                                                                                                                                            | observed       |
+| `packages/core/src/aisdk.ts` `wrapSSE()`（11-57 行）                                                       | 同构隐患：chunkTimeout 配置的 aisdk 端点走这条包裹路径，同样的 cancel-during-pull 窗口                                                                                                                                                                           | reachable      |
+| `packages/opencode/src/cli/cmd/tui/worker.ts` 51-61、266-348 行                                            | 自杀开关现场：`process.prependListener("unhandledRejection", () => void gracefulShutdown(...))`；`gracefulShutdown` 全量拆解（取消全部 session、dispose 实例、关闭 server、关闭 DB、清 lock、exit）                                                              | observed       |
+| `packages/opencode/src/cli/cmd/tui/daemon.ts`（ensure/existingOwnerUrl/选举/stopDaemon）、`server-lock.ts` | 生命周期现状：死亡→flock 选举→单 owner 重建（本次事故中 41064→14840→45632 均单 owner，无并发双写）；unresponsive→复用不顶替；stop→控制面 graceful→owner 复核→SIGKILL                                                                                             | observed       |
+| `packages/opencode/test/cli/tui/daemon.test.ts`（2400+ 行）                                                | 既有生命周期测试覆盖：选举、锁、隔离 env；无 unhandledRejection 策略覆盖                                                                                                                                                                                         | observed       |
+| `packages/opencode/src/server/event.ts` 45-77 行                                                           | 全局 SSE 端点的 controller 写入已全部 try/catch 守卫——排除为 rejection 来源                                                                                                                                                                                      | observed       |
+| `packages/opencode/src/util/queue.ts`                                                                      | AsyncQueue 纯数组实现，push 不抛——排除                                                                                                                                                                                                                           | observed       |
+| Windows 事件日志 / CrashDumps / SecurityCenter2                                                            | 两次死亡均无 WER/崩溃转储/AV 记录——排除原生崩溃与外部查杀                                                                                                                                                                                                        | observed       |
 
 ## 5. Current Behavior
 
@@ -124,39 +124,39 @@ daemon 退出路径 -> 控制面 /shutdown（token 校验）/ idle 定时器（4
 
 ## 6. Supported Input Domain and Reachability
 
-| Input or condition | Producer | Upstream guarantees | Reachable path | Owner | Classification |
-| --- | --- | --- | --- | --- | --- |
-| consumer 在 pull 在途时 cancel SSE body | AI SDK 管道 abort（session cancel / 超时 / abort 风暴） | 无（流协议允许任意时刻 cancel） | `wrap()` pull/cancel 竞态 | provider.ts | observed（两次生产死亡） |
-| 同上，aisdk chunkTimeout 包裹路径 | 模型 config 设置 chunkTimeout 的 aisdk 端点 | 无 | `wrapSSE()` 同构竞态 | core/aisdk.ts | reachable |
-| 任意 unhandledRejection | 任何产生孤儿 promise 的代码路径 | 无 | worker.ts:347 自杀 | worker.ts | observed（本次直接死因） |
-| uncaughtException | 同步代码逃逸 | 无 | worker.ts:348 自杀 | worker.ts | reachable（保留，见第 10 节论证） |
-| daemon 卡死（unresponsive） | 长模型调用 / 真卡死 | 单 owner 不变量 | ensure 复用；显式 `daemon stop` 恢复 | daemon.ts | contracted（不改变） |
+| Input or condition                      | Producer                                                | Upstream guarantees             | Reachable path                       | Owner         | Classification                    |
+| --------------------------------------- | ------------------------------------------------------- | ------------------------------- | ------------------------------------ | ------------- | --------------------------------- |
+| consumer 在 pull 在途时 cancel SSE body | AI SDK 管道 abort（session cancel / 超时 / abort 风暴） | 无（流协议允许任意时刻 cancel） | `wrap()` pull/cancel 竞态            | provider.ts   | observed（两次生产死亡）          |
+| 同上，aisdk chunkTimeout 包裹路径       | 模型 config 设置 chunkTimeout 的 aisdk 端点             | 无                              | `wrapSSE()` 同构竞态                 | core/aisdk.ts | reachable                         |
+| 任意 unhandledRejection                 | 任何产生孤儿 promise 的代码路径                         | 无                              | worker.ts:347 自杀                   | worker.ts     | observed（本次直接死因）          |
+| uncaughtException                       | 同步代码逃逸                                            | 无                              | worker.ts:348 自杀                   | worker.ts     | reachable（保留，见第 10 节论证） |
+| daemon 卡死（unresponsive）             | 长模型调用 / 真卡死                                     | 单 owner 不变量                 | ensure 复用；显式 `daemon stop` 恢复 | daemon.ts     | contracted（不改变）              |
 
 ## 7. Required Invariants
 
-| ID | Behavioral invariant | Evidence | Existing test |
-| --- | --- | --- | --- |
-| INV-01 | SSE 包裹流在 consumer cancel 后，迟到的 chunk/EOF 不得再触碰 controller（不 enqueue、不 close、不合成 EOF 遥测） | 生产 rejection + 探针复现 | 无（本计划新增） |
-| INV-02 | cancel 语义不变：abort 传播、reader cancel、deadline 清理、错误分类（AbortError 走既有 error mapping）全部保持 | 生产日志中 AbortError 走设计内路径 | `test/session/retry.test.ts:622-630`（abort 非重试分类） |
-| INV-03 | unhandledRejection 只记录日志，不得终止 daemon 进程 | 本次事故直接死因 | R5 新增：隔离子进程 import 真实 worker，stdin 触发 Promise.reject，观测仍服务（沿 spawnHangingDisposerDaemon 先例） |
-| INV-04 | uncaughtException 仍触发 gracefulShutdown（同步逃逸后在飞状态不可信，需清 lock 释放 SQLite） | worker.ts:345-346 注释的设计意图 | R5 新增：同设施触发 uncaughtException，观测有界退出 + lock 清理 |
-| INV-10 | 显式 `daemon stop` 在控制面无响应（超时/连接失败）时，必须能到达 owner 复核后的 force 路径；控制面应答但拒绝（如 maintenance-idle 409）不得升级为强杀；R6 补充：maintenanceIdle 条件式停机在未获得 worker 接受时（含无应答）一律不得升级强杀——无应答不等于空闲，中断授权只能来自 worker 的明确接受 | 双审计 B-01（R5 轮）+ 二轮双审计共性 B-01：WS8 汇焦把条件式调用一并带入 force（db.ts:487/604 为真实消费者） | R5 hung 控制面测试（显式 stop 方向）+ R6 新增条件式 hung 控制面不得强杀测试 |
-| INV-05 | daemon 单 owner 与选举行为不变；unresponsive owner 不被顶替；无自动卡死强杀 | cross-host R4 + daemon-ctrl-c R7 | test/cli/tui/daemon.test.ts 既有套件 |
-| INV-06 | 热路径无性能回退：每 pull 仅增加 O(1) 布尔检查；无新增定时器/轮询/IO | 设计静态分析 | typecheck + 套件通过即可 |
-| INV-07 | gracefulShutdown 正常路径退出前，日志流缓冲必须完整落盘（死亡尾部证据不丢失）；deadline 硬截止路径保持原有不同步等待语义 | 36428 日志在 12:57:59 后零记录 vs 41064 同类关闭有记录（缓冲丢失实证） | 无（本计划新增） |
-| INV-08 | 日志 cleanup 不得删除近期仍在/刚被写入的证据日志：超出 keep 数量且 mtime 超过保留窗才可删除 | 36428 的 17MB 日志（名旧、mtime 新）在 TUI 暴发重启时被 count-only 规则删除 | 无（本计划新增） |
-| INV-09 | ~~ACP stdin 流 cancel 后摘除监听~~ R5 撤回：经直接读取实际消费者（@agentclientprotocol/sdk stream.js:17-60、acp.js close 路径）证实没有任何 consumer 调用该流的 cancel()——危害不可达，WS7 代码为无生产者的死分支，按证据门禁回退 acp.ts 至 HEAD | 审计者亲读 SDK 消费者源码（observed） | 无需测试（无变更） |
+| ID     | Behavioral invariant                                                                                                                                                                                                                                                                               | Evidence                                                                                                    | Existing test                                                                                                       |
+| ------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| INV-01 | SSE 包裹流在 consumer cancel 后，迟到的 chunk/EOF 不得再触碰 controller（不 enqueue、不 close、不合成 EOF 遥测）                                                                                                                                                                                   | 生产 rejection + 探针复现                                                                                   | 无（本计划新增）                                                                                                    |
+| INV-02 | cancel 语义不变：abort 传播、reader cancel、deadline 清理、错误分类（AbortError 走既有 error mapping）全部保持                                                                                                                                                                                     | 生产日志中 AbortError 走设计内路径                                                                          | `test/session/retry.test.ts:622-630`（abort 非重试分类）                                                            |
+| INV-03 | unhandledRejection 只记录日志，不得终止 daemon 进程                                                                                                                                                                                                                                                | 本次事故直接死因                                                                                            | R5 新增：隔离子进程 import 真实 worker，stdin 触发 Promise.reject，观测仍服务（沿 spawnHangingDisposerDaemon 先例） |
+| INV-04 | uncaughtException 仍触发 gracefulShutdown（同步逃逸后在飞状态不可信，需清 lock 释放 SQLite）                                                                                                                                                                                                       | worker.ts:345-346 注释的设计意图                                                                            | R5 新增：同设施触发 uncaughtException，观测有界退出 + lock 清理                                                     |
+| INV-10 | 显式 `daemon stop` 在控制面无响应（超时/连接失败）时，必须能到达 owner 复核后的 force 路径；控制面应答但拒绝（如 maintenance-idle 409）不得升级为强杀；R6 补充：maintenanceIdle 条件式停机在未获得 worker 接受时（含无应答）一律不得升级强杀——无应答不等于空闲，中断授权只能来自 worker 的明确接受 | 双审计 B-01（R5 轮）+ 二轮双审计共性 B-01：WS8 汇焦把条件式调用一并带入 force（db.ts:487/604 为真实消费者） | R5 hung 控制面测试（显式 stop 方向）+ R6 新增条件式 hung 控制面不得强杀测试                                         |
+| INV-05 | daemon 单 owner 与选举行为不变；unresponsive owner 不被顶替；无自动卡死强杀                                                                                                                                                                                                                        | cross-host R4 + daemon-ctrl-c R7                                                                            | test/cli/tui/daemon.test.ts 既有套件                                                                                |
+| INV-06 | 热路径无性能回退：每 pull 仅增加 O(1) 布尔检查；无新增定时器/轮询/IO                                                                                                                                                                                                                               | 设计静态分析                                                                                                | typecheck + 套件通过即可                                                                                            |
+| INV-07 | gracefulShutdown 正常路径退出前，日志流缓冲必须完整落盘（死亡尾部证据不丢失）；deadline 硬截止路径保持原有不同步等待语义                                                                                                                                                                           | 36428 日志在 12:57:59 后零记录 vs 41064 同类关闭有记录（缓冲丢失实证）                                      | 无（本计划新增）                                                                                                    |
+| INV-08 | 日志 cleanup 不得删除近期仍在/刚被写入的证据日志：超出 keep 数量且 mtime 超过保留窗才可删除                                                                                                                                                                                                        | 36428 的 17MB 日志（名旧、mtime 新）在 TUI 暴发重启时被 count-only 规则删除                                 | 无（本计划新增）                                                                                                    |
+| INV-09 | ~~ACP stdin 流 cancel 后摘除监听~~ R5 撤回：经直接读取实际消费者（@agentclientprotocol/sdk stream.js:17-60、acp.js close 路径）证实没有任何 consumer 调用该流的 cancel()——危害不可达，WS7 代码为无生产者的死分支，按证据门禁回退 acp.ts 至 HEAD                                                    | 审计者亲读 SDK 消费者源码（observed）                                                                       | 无需测试（无变更）                                                                                                  |
 
 ## 8. First Divergence and Root Cause
 
-| Invariant | First divergence | Owning module/interface | Proof |
-| --- | --- | --- | --- |
-| INV-01 | `wrap()` 的 `pull()` 在 `await read()` 恢复后未检查 cancel 是否已发生，直接写 controller | provider.ts `progressDeadline().wrap()`；core/aisdk.ts `wrapSSE()` | 探针 2/4 复现同款 TypeError；red 测试输出 |
-| INV-03 | worker.ts:347 把"孤儿 promise 结果"（进程状态完好）与"崩溃"混为一谈，升级为整机 shutdown | worker.ts 致命错误策略 | 045932.log 20206-20207 行 |
-| INV-07 | `gracefulShutdown` 在 `process.exit(0)` 前未等待日志流（`createWriteStream` 缓冲）落盘 | `core/util/log.ts`（无 flush/close 接口）+ worker.ts 退出点 | 36428 尾部日志缺失 vs 41064 部分保存的对比实证 |
-| INV-08 | `cleanup()` 仅按文件名排序保留 top-10，把"名字旧但仍在写"的长跑 daemon 日志误判为尸体 | `core/util/log.ts` `cleanup()` | 203822.log 在 13:24:38 暴发重启后被删（删除前已完成取证） |
-| INV-09 | R5 修正：原判"可达"有误——唯一消费者 ndJsonStream/AgentSideConnection 从不 cancel 输入流（stream.js:17-60 仅 getReader/read/releaseLock），write-after-close 前提（cancel 发生）在该链上不成立 | 无生产变更（回退 WS7） | 审计者亲读 node_modules 实际消费者 |
-| INV-10 | `stopDaemon` 把 requestStop 的任何失败（含 1s 超时/连接拒绝）直接 throw，owner 复核 + force 仅在"请求成功但未退出"后可达 | `cli/cmd/daemon.ts` stopDaemon/requestStop | 双审计 B-01 + 亲读 daemon.ts:130-156 证实分支结构 |
+| Invariant | First divergence                                                                                                                                                                              | Owning module/interface                                            | Proof                                                     |
+| --------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ | --------------------------------------------------------- |
+| INV-01    | `wrap()` 的 `pull()` 在 `await read()` 恢复后未检查 cancel 是否已发生，直接写 controller                                                                                                      | provider.ts `progressDeadline().wrap()`；core/aisdk.ts `wrapSSE()` | 探针 2/4 复现同款 TypeError；red 测试输出                 |
+| INV-03    | worker.ts:347 把"孤儿 promise 结果"（进程状态完好）与"崩溃"混为一谈，升级为整机 shutdown                                                                                                      | worker.ts 致命错误策略                                             | 045932.log 20206-20207 行                                 |
+| INV-07    | `gracefulShutdown` 在 `process.exit(0)` 前未等待日志流（`createWriteStream` 缓冲）落盘                                                                                                        | `core/util/log.ts`（无 flush/close 接口）+ worker.ts 退出点        | 36428 尾部日志缺失 vs 41064 部分保存的对比实证            |
+| INV-08    | `cleanup()` 仅按文件名排序保留 top-10，把"名字旧但仍在写"的长跑 daemon 日志误判为尸体                                                                                                         | `core/util/log.ts` `cleanup()`                                     | 203822.log 在 13:24:38 暴发重启后被删（删除前已完成取证） |
+| INV-09    | R5 修正：原判"可达"有误——唯一消费者 ndJsonStream/AgentSideConnection 从不 cancel 输入流（stream.js:17-60 仅 getReader/read/releaseLock），write-after-close 前提（cancel 发生）在该链上不成立 | 无生产变更（回退 WS7）                                             | 审计者亲读 node_modules 实际消费者                        |
+| INV-10    | `stopDaemon` 把 requestStop 的任何失败（含 1s 超时/连接拒绝）直接 throw，owner 复核 + force 仅在"请求成功但未退出"后可达                                                                      | `cli/cmd/daemon.ts` stopDaemon/requestStop                         | 双审计 B-01 + 亲读 daemon.ts:130-156 证实分支结构         |
 
 D3（listen socket 继承）探针实证：`probe-socket-inherit.ts`——父进程 Bun.serve 监听后 spawn 子进程（stdio 全 ignore），父 `server.stop(true)` 后子仍存活时同端口重绑失败（REBIND_FAILED），证明 Windows 上 Bun.spawn 子进程继承 listen socket；`probe-server-fd.ts` 证明 Bun Server 对象不暴露 fd/handle（keys/proto 枚举无 fd/handle/listener）。结论：运行时层无法触及句柄，属 Bun 行为；本计划不修 Bun（见 §2/§20）。
 
@@ -173,12 +173,12 @@ Red-capable feedback loop（已建立并实际运行）：
 
 ## 9. Responsibility and Seam
 
-| Concern | Owner | Interface promise | Why it belongs here | Why another module does not own it |
-| --- | --- | --- | --- | --- |
-| 流源 controller 的写入时机 | 各 ReadableStream 源（wrap / wrapSSE） | 源独占其 controller 生命周期；cancel 后不得再写 | cancel 时序只有源自己可见（closure 内 released 标志） | 下游 consumer/pipe 无法知道源的 pull 是否在飞 |
-| daemon 致命错误分类（rejection vs exception） | `cli/cmd/tui/worker.ts` 内联（R3 按用户内联指令自 fatal-policy.ts 撤回） | 对"何种进程级错误需要自杀"的唯一裁决 | worker.ts 是进程入口，唯一消费者；用户明确否决单消费者模块抽取 | 各业务模块只见局部错误，无法裁决进程级生死 |
-| daemon 选举/锁/单 owner | 既有 `daemon.ts`/`server-lock.ts` | 不变 | — | — |
-| cancel 语义与错误分类 | 既有 provider 错误 mapping | 不变（INV-02） | — | — |
+| Concern                                       | Owner                                                                    | Interface promise                               | Why it belongs here                                            | Why another module does not own it            |
+| --------------------------------------------- | ------------------------------------------------------------------------ | ----------------------------------------------- | -------------------------------------------------------------- | --------------------------------------------- |
+| 流源 controller 的写入时机                    | 各 ReadableStream 源（wrap / wrapSSE）                                   | 源独占其 controller 生命周期；cancel 后不得再写 | cancel 时序只有源自己可见（closure 内 released 标志）          | 下游 consumer/pipe 无法知道源的 pull 是否在飞 |
+| daemon 致命错误分类（rejection vs exception） | `cli/cmd/tui/worker.ts` 内联（R3 按用户内联指令自 fatal-policy.ts 撤回） | 对"何种进程级错误需要自杀"的唯一裁决            | worker.ts 是进程入口，唯一消费者；用户明确否决单消费者模块抽取 | 各业务模块只见局部错误，无法裁决进程级生死    |
+| daemon 选举/锁/单 owner                       | 既有 `daemon.ts`/`server-lock.ts`                                        | 不变                                            | —                                                              | —                                             |
+| cancel 语义与错误分类                         | 既有 provider 错误 mapping                                               | 不变（INV-02）                                  | —                                                              | —                                             |
 
 ## 10. Single Approved Primary-Path Design
 
@@ -254,6 +254,7 @@ R6 权限边界（二轮双审计共性 blocker）：unreachable 汇焦只对**�
 删除 `_progressDeadline` test-only 导出（policy:485 禁止仅为测试新增生产代码；`_spawn` 先例不构成新增例外的授权）。回归测试改沿 provider.test.ts:1893 的既有生产 seam：本地 plugin 定义 custom provider（loader 注入 fetch），`Provider.getLanguage` → `doStream` 走真实 provider fetch 包装——测试 fetch 返回 `content-type: text/event-stream` 的可控 `Response`，body 经真实 `deadline.wrap` 包裹。
 
 同步纪律（替换两处固定 sleep）：
+
 - 就绪信号：可控 inner 流的 `pull()` 回调计数，第 2 次 pull 即 refill 在飞（latch），此时 abort。
 - 完成信号：先跑 cancelled 组（abort 传播触发在途 pull 恢复——buggy 代码会在此刻合成 sse.end），再跑正常 EOF 控制组；轮询 dev.log 直到控制组的 sse.end（以唯一 providerID/modelID 区分两组）落盘——日志流 FIFO 保证 buggy 写入若存在必先于控制组落盘，负断言窗口确定关闭。
 
@@ -276,91 +277,92 @@ WS3: 既有路径 -> 代码+测试核实 -> 记录结论
 
 ## 11. Secondary and Replacement Path Inventory
 
-| Path | Current or proposed | Classification | Produces success? | Decision-surface share | Disposition |
-| --- | --- | --- | --- | --- | --- |
-| AbortError 走 error mapping / retry 分类 | current | primary-contract branch | yes（错误语义即合同） | 既有 | preserve |
-| `daemon stop` force SIGKILL（owner 复核后） | current | existing compatibility（R7 授权路径） | yes | 既有 | preserve |
-| unresponsive owner 复用 | current | primary-contract branch | yes | 既有 | preserve |
-| 按错误类型过滤后选择性自杀 | rejected | forbidden fallback（分类不可靠，误杀即整机事故） | — | — | reject |
-| 新增 daemon 卡死自动检测/强杀 | rejected | 与 cross-host R4 单写者约束冲突；长调用误判=新误杀 | — | — | reject |
-| FFI 句柄遍历（NtQuerySystemInformation）标记 listen socket 不可继承 | rejected | 结构体布局版本敏感、解析错误即 daemon 启动崩溃；与"恢复检测延迟 ~90s"的纯延迟性危害不成比例 | — | — | reject |
-| 工具子进程改经包装器 spawn 以隔断句柄继承 | rejected | 改动最热的工具 spawn 路径换取罕见死亡场景的恢复延迟，风险不成比例 | — | — | reject |
-| TUI 侧 SSE stall watchdog | deferred | R5 记录修正：`cli/cmd/tui/context/sdk.tsx:134-141` 已有心跳看门狗（15s 无事件即 abort 重建）；事故中 ~90s 延迟在该机制存在下仍发生，原因未定位，属另行立项 | — | — | 另行立项 |
-| `Log.close()` 退出落盘 + cleanup mtime 保留窗 | current-defect repair | yes（修复已实证的独立缺陷） | 本计划 WS4/WS5 | primary-contract repair |
-| acp stdin cancel 摘除（R4 WS7） | rejected（R5） | 无生产者：实际消费者从不 cancel 输入流（stream.js:17-60），属不可达死分支 | — | — | reject（回退 acp.ts） |
-| `_progressDeadline` test-only 导出（R2） | rejected（R5） | policy:485 禁止仅为测试新增生产代码；`_spawn` 先例不授权新例外 | — | — | reject（删除导出，测试改走生产 seam，WS10） |
-| 固定 sleep 充当并发就绪/完成信号（R2 竞态测试） | rejected（R5） | test/AGENTS.md 明确要求可观测信号；负断言窗口无确定性关闭保证 | — | — | reject（WS10 以 pull latch + 日志轮询替换） |
+| Path                                                                | Current or proposed   | Classification                                                                                                                                             | Produces success?     | Decision-surface share  | Disposition                                 |
+| ------------------------------------------------------------------- | --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------- | ----------------------- | ------------------------------------------- |
+| AbortError 走 error mapping / retry 分类                            | current               | primary-contract branch                                                                                                                                    | yes（错误语义即合同） | 既有                    | preserve                                    |
+| `daemon stop` force SIGKILL（owner 复核后）                         | current               | existing compatibility（R7 授权路径）                                                                                                                      | yes                   | 既有                    | preserve                                    |
+| unresponsive owner 复用                                             | current               | primary-contract branch                                                                                                                                    | yes                   | 既有                    | preserve                                    |
+| 按错误类型过滤后选择性自杀                                          | rejected              | forbidden fallback（分类不可靠，误杀即整机事故）                                                                                                           | —                     | —                       | reject                                      |
+| 新增 daemon 卡死自动检测/强杀                                       | rejected              | 与 cross-host R4 单写者约束冲突；长调用误判=新误杀                                                                                                         | —                     | —                       | reject                                      |
+| FFI 句柄遍历（NtQuerySystemInformation）标记 listen socket 不可继承 | rejected              | 结构体布局版本敏感、解析错误即 daemon 启动崩溃；与"恢复检测延迟 ~90s"的纯延迟性危害不成比例                                                                | —                     | —                       | reject                                      |
+| 工具子进程改经包装器 spawn 以隔断句柄继承                           | rejected              | 改动最热的工具 spawn 路径换取罕见死亡场景的恢复延迟，风险不成比例                                                                                          | —                     | —                       | reject                                      |
+| TUI 侧 SSE stall watchdog                                           | deferred              | R5 记录修正：`cli/cmd/tui/context/sdk.tsx:134-141` 已有心跳看门狗（15s 无事件即 abort 重建）；事故中 ~90s 延迟在该机制存在下仍发生，原因未定位，属另行立项 | —                     | —                       | 另行立项                                    |
+| `Log.close()` 退出落盘 + cleanup mtime 保留窗                       | current-defect repair | yes（修复已实证的独立缺陷）                                                                                                                                | 本计划 WS4/WS5        | primary-contract repair |
+| acp stdin cancel 摘除（R4 WS7）                                     | rejected（R5）        | 无生产者：实际消费者从不 cancel 输入流（stream.js:17-60），属不可达死分支                                                                                  | —                     | —                       | reject（回退 acp.ts）                       |
+| `_progressDeadline` test-only 导出（R2）                            | rejected（R5）        | policy:485 禁止仅为测试新增生产代码；`_spawn` 先例不授权新例外                                                                                             | —                     | —                       | reject（删除导出，测试改走生产 seam，WS10） |
+| 固定 sleep 充当并发就绪/完成信号（R2 竞态测试）                     | rejected（R5）        | test/AGENTS.md 明确要求可观测信号；负断言窗口无确定性关闭保证                                                                                              | —                     | —                       | reject（WS10 以 pull latch + 日志轮询替换） |
 
 ## 12. Workaround Deletion and Replacement
 
-| Existing workaround or duplicate | Why it existed | Why the approved route supersedes it | Delete or collapse location |
-| --- | --- | --- | --- |
-| worker.ts:347 unhandledRejection→shutdown | 注释称"确保 daemon 崩溃时 lock 被清理" | rejection 不退出进程，无需 lock 清理；真崩溃由 stale-owner 选举 reconciliation 兜底（worker.ts:274-276 注释既有合同） | worker.ts prependListener 注册（R3：并入内联处理器） |
-| `fatal-policy.ts` 策略模块 + 其测试（R2 引入，未提交） | R2 为可测试性抽取的单消费者模块 | 用户明确要求：单用途 helper 应当内联，不增加扁平化小模块（第 1 节 R3 原话） | 删除两文件，策略内联回 worker.ts 原注册点（R4 已完成；R5 由 WS9 补隔离子进程行为测试） |
-| `_progressDeadline` test-only 导出（R2 引入） | 为竞态复现直接驱动私有 wrap | policy:485 硬门禁；生产 seam（plugin custom provider fetch）可达同一 wrap（WS10） | provider.ts 导出删除，provider.test.ts 重写 |
-| acp.ts cancel 摘除分支（R4 WS7） | 假设 consumer 会 cancel | 实际消费者从不 cancel（stream.js:17-60 亲读实证），不可达死分支 | acp.ts 回退至 HEAD |
+| Existing workaround or duplicate                       | Why it existed                         | Why the approved route supersedes it                                                                                  | Delete or collapse location                                                            |
+| ------------------------------------------------------ | -------------------------------------- | --------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------- |
+| worker.ts:347 unhandledRejection→shutdown              | 注释称"确保 daemon 崩溃时 lock 被清理" | rejection 不退出进程，无需 lock 清理；真崩溃由 stale-owner 选举 reconciliation 兜底（worker.ts:274-276 注释既有合同） | worker.ts prependListener 注册（R3：并入内联处理器）                                   |
+| `fatal-policy.ts` 策略模块 + 其测试（R2 引入，未提交） | R2 为可测试性抽取的单消费者模块        | 用户明确要求：单用途 helper 应当内联，不增加扁平化小模块（第 1 节 R3 原话）                                           | 删除两文件，策略内联回 worker.ts 原注册点（R4 已完成；R5 由 WS9 补隔离子进程行为测试） |
+| `_progressDeadline` test-only 导出（R2 引入）          | 为竞态复现直接驱动私有 wrap            | policy:485 硬门禁；生产 seam（plugin custom provider fetch）可达同一 wrap（WS10）                                     | provider.ts 导出删除，provider.test.ts 重写                                            |
+| acp.ts cancel 摘除分支（R4 WS7）                       | 假设 consumer 会 cancel                | 实际消费者从不 cancel（stream.js:17-60 亲读实证），不可达死分支                                                       | acp.ts 回退至 HEAD                                                                     |
 
 ## 13. Forward Traceability
 
-| Requirement or invariant | Production path | Planned file/change | Behavioral test |
-| --- | --- | --- | --- |
-| INV-01（provider 路径） | provider.ts wrap() released 守卫 | provider.ts 修改（R5 删除 `_progressDeadline` 导出，WS10） | test/provider/provider.test.ts 竞态回归重写为生产 seam（WS10：plugin custom provider + pull latch + 日志轮询） |
-| INV-01（aisdk 路径） | aisdk.ts wrapSSE() released 守卫 | aisdk.ts 修改 | 无可判别 seam，见第 16 节 unverifiable 说明；由 typecheck + 既有套件 + 同构模式证明 |
-| INV-02 | 不改动 | 不改动 | 既有 provider 套件（351 通过） |
-| INV-03 / INV-04 | worker.ts 内联进程级错误处理器 | worker.ts（R4 内联，R5 仅注释口径修正 WS11） | daemon.test.ts 新增隔离子进程行为测试 ×2（WS9：rejection 存活 / exception 有界退出） |
-| INV-07 | `Log.close()` + gracefulShutdown 退出前 await | core/util/log.ts 修改 + worker.ts 修改 | test/util/log.test.ts 新增 close 落盘测试 |
-| INV-08 | cleanup() mtime 保留窗 | core/util/log.ts 修改 | test/util/log.test.ts：新增保留窗测试 + 改写既有 count 规则测试（utimes 回拨预期被删 fixture，R4 B-01 登记） |
-| INV-09 | R5 撤回：危害不可达，无生产变更 | acp.ts 回退至 HEAD | 无（无变更） |
-| INV-10 | requestStop 判别 rejected/unreachable + 汇焦既有 force 分支；R6：unreachable+maintenanceIdle 维持抛错 | cli/cmd/daemon.ts 修改（WS8） | daemon.test.ts：hung 控制面 force 测试（显式 stop 方向）+ R6 新增条件式 hung 控制面不得强杀测试（直接调 stopDaemon 导出函数 + `_setLockPath` 隔离） |
-| INV-05 | 不改动 | 不改动 | 既有 daemon.test.ts 套件（WS3 核实引用） |
-| INV-06 | 静态论证 + 全套件通过 | — | 全套件无新增超时/性能断言失败 |
+| Requirement or invariant | Production path                                                                                       | Planned file/change                                        | Behavioral test                                                                                                                                     |
+| ------------------------ | ----------------------------------------------------------------------------------------------------- | ---------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| INV-01（provider 路径）  | provider.ts wrap() released 守卫                                                                      | provider.ts 修改（R5 删除 `_progressDeadline` 导出，WS10） | test/provider/provider.test.ts 竞态回归重写为生产 seam（WS10：plugin custom provider + pull latch + 日志轮询）                                      |
+| INV-01（aisdk 路径）     | aisdk.ts wrapSSE() released 守卫                                                                      | aisdk.ts 修改                                              | 无可判别 seam，见第 16 节 unverifiable 说明；由 typecheck + 既有套件 + 同构模式证明                                                                 |
+| INV-02                   | 不改动                                                                                                | 不改动                                                     | 既有 provider 套件（351 通过）                                                                                                                      |
+| INV-03 / INV-04          | worker.ts 内联进程级错误处理器                                                                        | worker.ts（R4 内联，R5 仅注释口径修正 WS11）               | daemon.test.ts 新增隔离子进程行为测试 ×2（WS9：rejection 存活 / exception 有界退出）                                                                |
+| INV-07                   | `Log.close()` + gracefulShutdown 退出前 await                                                         | core/util/log.ts 修改 + worker.ts 修改                     | test/util/log.test.ts 新增 close 落盘测试                                                                                                           |
+| INV-08                   | cleanup() mtime 保留窗                                                                                | core/util/log.ts 修改                                      | test/util/log.test.ts：新增保留窗测试 + 改写既有 count 规则测试（utimes 回拨预期被删 fixture，R4 B-01 登记）                                        |
+| INV-09                   | R5 撤回：危害不可达，无生产变更                                                                       | acp.ts 回退至 HEAD                                         | 无（无变更）                                                                                                                                        |
+| INV-10                   | requestStop 判别 rejected/unreachable + 汇焦既有 force 分支；R6：unreachable+maintenanceIdle 维持抛错 | cli/cmd/daemon.ts 修改（WS8）                              | daemon.test.ts：hung 控制面 force 测试（显式 stop 方向）+ R6 新增条件式 hung 控制面不得强杀测试（直接调 stopDaemon 导出函数 + `_setLockPath` 隔离） |
+| INV-05                   | 不改动                                                                                                | 不改动                                                     | 既有 daemon.test.ts 套件（WS3 核实引用）                                                                                                            |
+| INV-06                   | 静态论证 + 全套件通过                                                                                 | —                                                          | 全套件无新增超时/性能断言失败                                                                                                                       |
 
 ## 14. Reverse Traceability
 
-| Proposed production concept | Requirement ID | Evidence | Why existing logic cannot carry it |
-| --- | --- | --- | --- |
-| `released` 守卫（×2 处） | INV-01 | 生产 rejection + 探针 + red 测试 | cancel 与 pull 分属不同微任务，现代码无共享时序状态 |
-| ~~`_progressDeadline` test-only 导出~~ R5 删除 | INV-01 测试可达性 | policy:485 硬门禁（双审计 B-03） | 生产 seam 可达同一 wrap：plugin custom provider 注入 fetch → deadline.wrap（provider.ts:2024） |
-| worker.ts 内联策略处理器（R3） | INV-03/INV-04 + 用户内联指令 | 本次事故死因 + 第 1 节 R3 原话 | worker.ts import 即启动服务器，策略无法进测试；用户明确否决抽取模块 |
-| 既有 cleanup 测试的 utimes 改写（R4） | INV-08 合同变更 | R4 B-01：fixture mtime=now 在新合同下全保留，原删除断言必红 | 原测试钉住的是 count-only 旧语义，新合同下必须显式回拨才能继续真实走删除路径 |
-| `Log.close()` | INV-07 | 36428 尾部日志丢失实证 | 现有 Log 无任何 flush/close 接口，`write` 为 fire-and-forget |
-| cleanup mtime 保留窗 | INV-08 | 203822.log（17MB）被暴发删除实证 | 现有规则只认文件名序，不知道"名字旧但仍在写" |
-| requestStop 判别结果类型 | INV-10 | 双审计 B-01 + 用户"卡死要有好流程"原话 | 现有字符串返回无法区分"应答拒绝"与"无应答"，而两者的升级权限不同（409 不可强杀、无响应必须可强杀） |
-| unreachable 对 maintenanceIdle 的排除分支（R6） | INV-10 权限边界 | 二轮双审计共性 blocker + worker.ts:472-484 条件门 + daemon.test.ts:1763 既有合同 | 条件式停机的中断授权只能由 worker 接受产生；WS8 的汇焦点不知道该授权是否存在，必须在决策点区分 |
-| aisdk.ts 无专用行为测试 | — | Bun 在当前运行时会吞掉该路径的 pull rejection，任何 black-box 断言都无法判别（探针 2/3/4 实证） | 明确 unverifiable reason；模式与 provider 修复同构 |
+| Proposed production concept                     | Requirement ID               | Evidence                                                                                        | Why existing logic cannot carry it                                                                 |
+| ----------------------------------------------- | ---------------------------- | ----------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| `released` 守卫（×2 处）                        | INV-01                       | 生产 rejection + 探针 + red 测试                                                                | cancel 与 pull 分属不同微任务，现代码无共享时序状态                                                |
+| ~~`_progressDeadline` test-only 导出~~ R5 删除  | INV-01 测试可达性            | policy:485 硬门禁（双审计 B-03）                                                                | 生产 seam 可达同一 wrap：plugin custom provider 注入 fetch → deadline.wrap（provider.ts:2024）     |
+| worker.ts 内联策略处理器（R3）                  | INV-03/INV-04 + 用户内联指令 | 本次事故死因 + 第 1 节 R3 原话                                                                  | worker.ts import 即启动服务器，策略无法进测试；用户明确否决抽取模块                                |
+| 既有 cleanup 测试的 utimes 改写（R4）           | INV-08 合同变更              | R4 B-01：fixture mtime=now 在新合同下全保留，原删除断言必红                                     | 原测试钉住的是 count-only 旧语义，新合同下必须显式回拨才能继续真实走删除路径                       |
+| `Log.close()`                                   | INV-07                       | 36428 尾部日志丢失实证                                                                          | 现有 Log 无任何 flush/close 接口，`write` 为 fire-and-forget                                       |
+| cleanup mtime 保留窗                            | INV-08                       | 203822.log（17MB）被暴发删除实证                                                                | 现有规则只认文件名序，不知道"名字旧但仍在写"                                                       |
+| requestStop 判别结果类型                        | INV-10                       | 双审计 B-01 + 用户"卡死要有好流程"原话                                                          | 现有字符串返回无法区分"应答拒绝"与"无应答"，而两者的升级权限不同（409 不可强杀、无响应必须可强杀） |
+| unreachable 对 maintenanceIdle 的排除分支（R6） | INV-10 权限边界              | 二轮双审计共性 blocker + worker.ts:472-484 条件门 + daemon.test.ts:1763 既有合同                | 条件式停机的中断授权只能由 worker 接受产生；WS8 的汇焦点不知道该授权是否存在，必须在决策点区分     |
+| aisdk.ts 无专用行为测试                         | —                            | Bun 在当前运行时会吞掉该路径的 pull rejection，任何 black-box 断言都无法判别（探针 2/3/4 实证） | 明确 unverifiable reason；模式与 provider 修复同构                                                 |
 
 ## 15. File-Level Change Plan
 
 | File | Add / modify / delete | Exact responsibility of the change | Expected line delta |
-| --- | --- | --- | --- |
+| ---- | --------------------- | ---------------------------------- | ------------------- |
+
 生产文件 5 个（用户上限 6），生产改动行数远低于 1200 行上限：
 
-| File | Add / modify / delete | Exact responsibility of the change | Expected line delta |
-| --- | --- | --- | --- |
-| `packages/opencode/src/provider/provider.ts` | modify | wrap() released 守卫（R2 保留）；R5 删除 `_progressDeadline` 导出 | +11 / -2 |
-| `packages/core/src/aisdk.ts` | modify | wrapSSE() released 守卫（R2 保留，不动） | +8 / -0 |
-| `packages/opencode/src/cli/cmd/tui/worker.ts` | modify | R4 内联策略 + `await Log.close()`（保留）；R5 仅 WS11 注释口径修正 | +14 / -16（注释行变动） |
-| `packages/core/src/util/log.ts` | modify | close() + cleanup 保留窗（R4 保留，不动） | +28 / -2 |
-| `packages/opencode/src/cli/cmd/daemon.ts` | modify | WS8：requestStop 判别 rejected/unreachable；unreachable 汇焦既有 force 分支；R6：unreachable+maintenanceIdle 排除分支 + :98 过期注释修正 | +24 / -6 |
-| `packages/opencode/src/cli/cmd/acp.ts` | revert | R5 回退 WS7 至 HEAD（不可达死分支） | 0（净） |
-| `packages/opencode/src/cli/cmd/tui/fatal-policy.ts` | delete（工作区，R4 已完成） | — | 0（净 vs HEAD） |
-| `packages/opencode/test/cli/tui/fatal-policy.test.ts` | delete（工作区，R4 已完成） | — | 0（净 vs HEAD） |
-| `packages/opencode/test/provider/provider.test.ts` | modify | R5 重写竞态回归为生产 seam（WS10），替换 R2 的 _progressDeadline 直驱版 | +75 / -63 |
-| `packages/opencode/test/cli/tui/daemon.test.ts` | modify | WS9 隔离子进程策略测试 ×2 + WS8 hung 控制面 force 测试 + R6 条件式 hung 不得强杀测试 | +170 |
-| `packages/opencode/test/util/log.test.ts` | modify | R4 内容保留不动 | +65 / -0（已在树） |
+| File                                                  | Add / modify / delete       | Exact responsibility of the change                                                                                                       | Expected line delta     |
+| ----------------------------------------------------- | --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- | ----------------------- |
+| `packages/opencode/src/provider/provider.ts`          | modify                      | wrap() released 守卫（R2 保留）；R5 删除 `_progressDeadline` 导出                                                                        | +11 / -2                |
+| `packages/core/src/aisdk.ts`                          | modify                      | wrapSSE() released 守卫（R2 保留，不动）                                                                                                 | +8 / -0                 |
+| `packages/opencode/src/cli/cmd/tui/worker.ts`         | modify                      | R4 内联策略 + `await Log.close()`（保留）；R5 仅 WS11 注释口径修正                                                                       | +14 / -16（注释行变动） |
+| `packages/core/src/util/log.ts`                       | modify                      | close() + cleanup 保留窗（R4 保留，不动）                                                                                                | +28 / -2                |
+| `packages/opencode/src/cli/cmd/daemon.ts`             | modify                      | WS8：requestStop 判别 rejected/unreachable；unreachable 汇焦既有 force 分支；R6：unreachable+maintenanceIdle 排除分支 + :98 过期注释修正 | +24 / -6                |
+| `packages/opencode/src/cli/cmd/acp.ts`                | revert                      | R5 回退 WS7 至 HEAD（不可达死分支）                                                                                                      | 0（净）                 |
+| `packages/opencode/src/cli/cmd/tui/fatal-policy.ts`   | delete（工作区，R4 已完成） | —                                                                                                                                        | 0（净 vs HEAD）         |
+| `packages/opencode/test/cli/tui/fatal-policy.test.ts` | delete（工作区，R4 已完成） | —                                                                                                                                        | 0（净 vs HEAD）         |
+| `packages/opencode/test/provider/provider.test.ts`    | modify                      | R5 重写竞态回归为生产 seam（WS10），替换 R2 的 \_progressDeadline 直驱版                                                                 | +75 / -63               |
+| `packages/opencode/test/cli/tui/daemon.test.ts`       | modify                      | WS9 隔离子进程策略测试 ×2 + WS8 hung 控制面 force 测试 + R6 条件式 hung 不得强杀测试                                                     | +170                    |
+| `packages/opencode/test/util/log.test.ts`             | modify                      | R4 内容保留不动                                                                                                                          | +65 / -0（已在树）      |
 
 ## 16. TDD Behavior Slices
 
-| Order | Red behavior | Why current code fails | Minimal green behavior | Regression protected |
-| --- | --- | --- | --- | --- |
-| 1 | cancel 打在在途 pull 上时不得合成 sse.end（write-after-close 的可观测前哨），正常 EOF 必须合成 | wrap() 无 released 守卫 | released 守卫 | 同一 cancel 竞态不再产生 rejection；生产症状不再现 |
-| 2 | `await Log.close()` 后 sentinel 日志行必须已落盘 dev.log | 现无 close() 接口（缺失 API 红） | close() end 流并等待 finish/error | INV-07：退出前证据不丢失 |
-| 3 | cleanup 对超出 keep 但 mtime 新鲜的文件保留、对 mtime 过期的删除 | count-only 规则 | mtime 保留窗 | INV-08：暴发不再误删证据 |
-| 4（R5） | 竞态回归生产 seam 版：abort 打在在途 pull 上时 cancelled 组无 sse.end，正常 EOF 组有 | R2 测试依赖 test-only 导出与固定 sleep | WS10 重写（red 证明：临时移除守卫时 cancelled 组 sse.end 出现） | INV-01 回归保护移至合法 seam |
-| 5（R5） | 隔离 worker 子进程触发 unhandledRejection 后 ping 仍成功 | R4 前该策略无行为测试 | WS9 测试 1 | INV-03 被行为钉住 |
-| 6（R5） | 隔离 worker 子进程触发 uncaughtException 后有界退出且 lock 清理 | 同上 | WS9 测试 2 | INV-04 被行为钉住 |
-| 7（R5） | 控制面永不应答的 owner，`daemon stop` 仍完成 owner 复核后强杀并清 lock | requestStop 失败即抛错 | WS8 判别 + 汇焦 force 分支 | INV-10：卡死恢复链闭合 |
-| 8（R6） | 同一 hung owner 上，`stopDaemon({maintenanceIdle: true})` 必须抛错且进程存活、lock 不动 | WS8 汇焦无条件带入 force | unreachable+maintenanceIdle 维持抛错 | INV-10 权限边界：条件式停机不继承显式 stop 的中断权 |
+| Order   | Red behavior                                                                                   | Why current code fails                 | Minimal green behavior                                          | Regression protected                                |
+| ------- | ---------------------------------------------------------------------------------------------- | -------------------------------------- | --------------------------------------------------------------- | --------------------------------------------------- |
+| 1       | cancel 打在在途 pull 上时不得合成 sse.end（write-after-close 的可观测前哨），正常 EOF 必须合成 | wrap() 无 released 守卫                | released 守卫                                                   | 同一 cancel 竞态不再产生 rejection；生产症状不再现  |
+| 2       | `await Log.close()` 后 sentinel 日志行必须已落盘 dev.log                                       | 现无 close() 接口（缺失 API 红）       | close() end 流并等待 finish/error                               | INV-07：退出前证据不丢失                            |
+| 3       | cleanup 对超出 keep 但 mtime 新鲜的文件保留、对 mtime 过期的删除                               | count-only 规则                        | mtime 保留窗                                                    | INV-08：暴发不再误删证据                            |
+| 4（R5） | 竞态回归生产 seam 版：abort 打在在途 pull 上时 cancelled 组无 sse.end，正常 EOF 组有           | R2 测试依赖 test-only 导出与固定 sleep | WS10 重写（red 证明：临时移除守卫时 cancelled 组 sse.end 出现） | INV-01 回归保护移至合法 seam                        |
+| 5（R5） | 隔离 worker 子进程触发 unhandledRejection 后 ping 仍成功                                       | R4 前该策略无行为测试                  | WS9 测试 1                                                      | INV-03 被行为钉住                                   |
+| 6（R5） | 隔离 worker 子进程触发 uncaughtException 后有界退出且 lock 清理                                | 同上                                   | WS9 测试 2                                                      | INV-04 被行为钉住                                   |
+| 7（R5） | 控制面永不应答的 owner，`daemon stop` 仍完成 owner 复核后强杀并清 lock                         | requestStop 失败即抛错                 | WS8 判别 + 汇焦 force 分支                                      | INV-10：卡死恢复链闭合                              |
+| 8（R6） | 同一 hung owner 上，`stopDaemon({maintenanceIdle: true})` 必须抛错且进程存活、lock 不动        | WS8 汇焦无条件带入 force               | unreachable+maintenanceIdle 维持抛错                            | INV-10 权限边界：条件式停机不继承显式 stop 的中断权 |
 
 Slice 2/3 说明：两测试均加入既有 test/util/log.test.ts，复用其 `Global.Path.log` 覆盖 + finalizer 恢复模式。Slice 2 在 tmpdir 上 init(dev:true) → 写 sentinel → close() → 同步读 dev.log 断言（close 返回即落盘，不需轮询）；finalizer 恢复 Global.Path.log 并 re-init（既有先例）。Slice 3 黑盒经 `Log.init` 触发 cleanup（沿本文件既有 cleanup 测试先例）：造 12 个旧名文件，`fs.utimes` 将其中 2 个 backdate 到 48h 前、1 个保持新鲜 mtime；init 后断言新鲜者存活、backdated 者被删。
 
@@ -376,10 +378,10 @@ aisdk.ts unverifiable 说明：Bun 在当前版本会把该 seam 的 write-after
 
 ## 17. Chinese Comment Budget
 
-| Metric | Estimate | Method |
-| --- | --- | --- |
-| Effective changed code lines `E` | ≈405（production ≈75：provider 4 + aisdk 4 + worker 20 + log 20 + daemon 27；acp 0 已回退；测试 ≈330：provider.test ≈109 + log.test 42 + daemon.test ≈179） | 按政策口径含 production **与 tests**；exclude formatting/generated/pure moves；fatal-policy 与 acp 净零不计；实现审计以实际 diff 复算为准 |
-| Required Chinese explanatory comments `C` | ≥ max(1, ceil(405×0.15)) = 61；计划 ≈72 | 见下 |
+| Metric                                    | Estimate                                                                                                                                                    | Method                                                                                                                                    |
+| ----------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| Effective changed code lines `E`          | ≈405（production ≈75：provider 4 + aisdk 4 + worker 20 + log 20 + daemon 27；acp 0 已回退；测试 ≈330：provider.test ≈109 + log.test 42 + daemon.test ≈179） | 按政策口径含 production **与 tests**；exclude formatting/generated/pure moves；fatal-policy 与 acp 净零不计；实现审计以实际 diff 复算为准 |
+| Required Chinese explanatory comments `C` | ≥ max(1, ceil(405×0.15)) = 61；计划 ≈72                                                                                                                     | 见下                                                                                                                                      |
 
 计划注释位置（均为非显然约束，实施时逐条落位）：
 
@@ -410,27 +412,27 @@ aisdk.ts unverifiable 说明：Bun 在当前版本会把该 seam 的 write-after
 
 ## 18. Verification
 
-| Command | Working directory | Evidence produced |
-| --- | --- | --- |
-| `bun test test/provider/provider.test.ts -t "cancel during in-flight pull" --timeout 30000` | `packages/opencode` | slice 1 red（实施前）→ green（实施后） |
-| `bun test test/util/log.test.ts --timeout 30000` | `packages/opencode` | slice 2/3 green + 既有 log 测试回归 |
-| `bun test test/provider/provider.test.ts -t "SSE wrap" --timeout 30000` | `packages/opencode` | slice 4 生产 seam 版 green（red 由临时去守卫证明） |
-| `bun test test/cli/tui/daemon.test.ts --timeout 120000` | `packages/opencode` | slice 5/6/7/8 green + 生命周期既有套件回归（INV-05；该套件实测 ≈320-400s，需足宽超时） |
-| `bun test test/provider/ --timeout 60000` | `packages/opencode` | provider 全套件回归（基线 351 pass） |
-| `bun typecheck` | `packages/opencode` | 类型干净 |
-| `bun typecheck` | `packages/core` | aisdk.ts 修改类型干净 |
-| `bun test`（core 套件，允许只跑到既有基线） | `packages/core` | aisdk 修改无回归 |
+| Command                                                                                     | Working directory   | Evidence produced                                                                      |
+| ------------------------------------------------------------------------------------------- | ------------------- | -------------------------------------------------------------------------------------- |
+| `bun test test/provider/provider.test.ts -t "cancel during in-flight pull" --timeout 30000` | `packages/opencode` | slice 1 red（实施前）→ green（实施后）                                                 |
+| `bun test test/util/log.test.ts --timeout 30000`                                            | `packages/opencode` | slice 2/3 green + 既有 log 测试回归                                                    |
+| `bun test test/provider/provider.test.ts -t "SSE wrap" --timeout 30000`                     | `packages/opencode` | slice 4 生产 seam 版 green（red 由临时去守卫证明）                                     |
+| `bun test test/cli/tui/daemon.test.ts --timeout 120000`                                     | `packages/opencode` | slice 5/6/7/8 green + 生命周期既有套件回归（INV-05；该套件实测 ≈320-400s，需足宽超时） |
+| `bun test test/provider/ --timeout 60000`                                                   | `packages/opencode` | provider 全套件回归（基线 351 pass）                                                   |
+| `bun typecheck`                                                                             | `packages/opencode` | 类型干净                                                                               |
+| `bun typecheck`                                                                             | `packages/core`     | aisdk.ts 修改类型干净                                                                  |
+| `bun test`（core 套件，允许只跑到既有基线）                                                 | `packages/core`     | aisdk 修改无回归                                                                       |
 
 ## 19. Diff Budget
 
-| Metric | Estimate | Justification |
-| --- | --- | --- |
-| Files added | 0（净） | fatal-policy 两文件未提交即删除；acp.ts 回退净零 |
-| Files modified | 5 production + 3 test | production：provider.ts / aisdk.ts / worker.ts / log.ts / daemon.ts（用户上限 6）；test：provider.test.ts / daemon.test.ts / log.test.ts |
-| Files deleted | 0（相对 HEAD） | — |
-| Production lines | ≈ +85 / -26 | 远低于用户 1200 行上限 |
-| Test lines | ≈ +315 / -65 | 竞态重写 + daemon 四测试 + log 两测试 |
-| Generated lines | 0 | — |
+| Metric           | Estimate              | Justification                                                                                                                            |
+| ---------------- | --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| Files added      | 0（净）               | fatal-policy 两文件未提交即删除；acp.ts 回退净零                                                                                         |
+| Files modified   | 5 production + 3 test | production：provider.ts / aisdk.ts / worker.ts / log.ts / daemon.ts（用户上限 6）；test：provider.test.ts / daemon.test.ts / log.test.ts |
+| Files deleted    | 0（相对 HEAD）        | —                                                                                                                                        |
+| Production lines | ≈ +85 / -26           | 远低于用户 1200 行上限                                                                                                                   |
+| Test lines       | ≈ +315 / -65          | 竞态重写 + daemon 四测试 + log 两测试                                                                                                    |
+| Generated lines  | 0                     | —                                                                                                                                        |
 
 ## 20. Real Risks and Open Decisions
 
@@ -465,11 +467,11 @@ The independent auditor must:
 
 ## 22. Plan Audit Record
 
-| Round | Audited revision | Full scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | R1 | yes | B-01（§17 的 E 口径未含测试代码行，C 承诺低于政策硬下限） | NB-01..NB-05 | BLOCK | task ses_f046febc5ffe3XBzQfozzct9mi |
-| 2 | R2 | yes | No blocking findings | NB-02（保留）、NB-04（保留）、NB-05（保留） | APPROVE | task ses_f046febc5ffe3XBzQfozzct9mi |
-| 3 | R3 | yes | B-01（WS5 mtime 保留窗使既有 cleanup 测试 `init cleanup keeps the newest timestamped logs` 必然转红：fixture 由 writeFile 构造 mtime=now，新合同下超额文件全保留，`not.toContain(list[0])` 必失败；计划未登记该既有测试的处置） | NB-01（§10 残留的 `_cleanup` 导出句与黑盒口径矛盾，需删）、NB-02（`await Log.close()` 应位于 clearTimeout(shutdownDeadlineTimer) 之前）、NB-03（内联后 INV-03/04 失去行为级测试，unverifiable 理由成立，实现审计逐字比对 §10 片段）、NB-04（沿留）、NB-05（worker.ts 行差估计漂移，实现审计以实际 diff 复算为准） | BLOCK | task ses_f046febc5ffe3XBzQfozzct9mi |
+| Round | Audited revision | Full scope? | Blocking findings                                                                                                                                                                                                               | Non-blocking findings                                                                                                                                                                                                                                                                                             | Result  | Invocation reference                |
+| ----- | ---------------- | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- | ----------------------------------- |
+| 1     | R1               | yes         | B-01（§17 的 E 口径未含测试代码行，C 承诺低于政策硬下限）                                                                                                                                                                       | NB-01..NB-05                                                                                                                                                                                                                                                                                                      | BLOCK   | task ses_f046febc5ffe3XBzQfozzct9mi |
+| 2     | R2               | yes         | No blocking findings                                                                                                                                                                                                            | NB-02（保留）、NB-04（保留）、NB-05（保留）                                                                                                                                                                                                                                                                       | APPROVE | task ses_f046febc5ffe3XBzQfozzct9mi |
+| 3     | R3               | yes         | B-01（WS5 mtime 保留窗使既有 cleanup 测试 `init cleanup keeps the newest timestamped logs` 必然转红：fixture 由 writeFile 构造 mtime=now，新合同下超额文件全保留，`not.toContain(list[0])` 必失败；计划未登记该既有测试的处置） | NB-01（§10 残留的 `_cleanup` 导出句与黑盒口径矛盾，需删）、NB-02（`await Log.close()` 应位于 clearTimeout(shutdownDeadlineTimer) 之前）、NB-03（内联后 INV-03/04 失去行为级测试，unverifiable 理由成立，实现审计逐字比对 §10 片段）、NB-04（沿留）、NB-05（worker.ts 行差估计漂移，实现审计以实际 diff 复算为准） | BLOCK   | task ses_f046febc5ffe3XBzQfozzct9mi |
 
 第 3 轮原话记录："**BLOCK**（plan audit，第 3 轮，audited revision: R3，full-scope）。B-01 须修订：在 §13/§15/§16 登记既有 `init cleanup keeps the newest timestamped logs` 测试随 WS5 新合同的改写（utimes 回拨制造判别窗口），revision 升至 R4 后请求新一轮全量审计。修订前 `Implementation allowed` 必须保持 `no`。"R4 修订处置：B-01 已在 §10/§13/§14/§15/§16 登记（既有测试改写 + 双向钉住说明）；NB-01 已删 §10 残句；NB-02 已在 §10/§15 明确 `await Log.close()` 位于 clearTimeout 之前；NB-05 已修正行差估计为 -15；NB-03 为实现审计指令，无需计划改动。
 
@@ -491,7 +493,7 @@ R6 触发记录：R5 verified 后用户再次要求双独立审计（第 1 节 R
 
 第 5 轮原话记录："**APPROVE**（plan audit，第 5 轮，audited revision: R5，full-scope：原始 7 条用户需求 + 全部保留/新增/撤回的工作流）。仅允许对 R5 做行政审批状态迁移：`Status: approved`、`Approved revision: R5`、`Implementation allowed: yes`，不得与设计改动合并提交。实施边界：acp.ts 回退至 HEAD（净零）、fatal-policy 两文件维持删除、提交只许包含 §15 所列文件（provider.ts、aisdk.ts、worker.ts、log.ts、daemon.ts + 三个测试文件），不得卷入 cold-maintenance 线程的工作区产物。任何实质性修改使本批准失效并触发新一轮全量审计。"
 
-R5 触发记录：R4 verified 后用户要求双独立审计（第 1 节 R5 原话）。两名全新审计者（task ses_effd250cdffezM0Z2CBmc6XcFj / ses_effd92885ffegwHUskPdT8xSmi，互不通信）均返回 BLOCK。primary 按 blocker 复议规则逐项亲读源码核实：B-01（控制面无响应时 force 不可达）读 daemon.ts:100-213 确认分支结构属实，属需求原话 1"卡死要有好流程"覆盖范围且 WS3 的覆盖结论有误——采信；B-02（unverifiable 被 spawnHangingDisposerDaemon 反证）读 daemon.test.ts:224-263 确认属实，INV-03/04 验证缺口系本次删除测试造成——采信；B-03（_progressDeadline 属 policy:485 禁止项）读 policy 原文确认措辞无例外——采信；B-04（固定 sleep 违反 test/AGENTS.md）读测试现码确认两处 sleep 猜测——采信；B-05（acp cancel 不可达）亲读 node_modules stream.js 全文确认消费者从不 cancel——采信，WS7 撤回。无一项提出复议（均属实且属范围/本次引入）。按政策 R4 批准失效，修订 R5 重新全量审计。
+R5 触发记录：R4 verified 后用户要求双独立审计（第 1 节 R5 原话）。两名全新审计者（task ses_effd250cdffezM0Z2CBmc6XcFj / ses_effd92885ffegwHUskPdT8xSmi，互不通信）均返回 BLOCK。primary 按 blocker 复议规则逐项亲读源码核实：B-01（控制面无响应时 force 不可达）读 daemon.ts:100-213 确认分支结构属实，属需求原话 1"卡死要有好流程"覆盖范围且 WS3 的覆盖结论有误——采信；B-02（unverifiable 被 spawnHangingDisposerDaemon 反证）读 daemon.test.ts:224-263 确认属实，INV-03/04 验证缺口系本次删除测试造成——采信；B-03（\_progressDeadline 属 policy:485 禁止项）读 policy 原文确认措辞无例外——采信；B-04（固定 sleep 违反 test/AGENTS.md）读测试现码确认两处 sleep 猜测——采信；B-05（acp cancel 不可达）亲读 node_modules stream.js 全文确认消费者从不 cancel——采信，WS7 撤回。无一项提出复议（均属实且属范围/本次引入）。按政策 R4 批准失效，修订 R5 重新全量审计。
 
 ## 23. Implementation Evidence（R6）
 
@@ -499,9 +501,9 @@ R5 触发记录：R4 verified 后用户要求双独立审计（第 1 节 R5 原�
 
 ### R6 Delta Evidence
 
-| File | Change | Lines (numstat vs HEAD，R6 完成后全量口径) |
-| --- | --- | --- |
-| `packages/opencode/src/cli/cmd/daemon.ts` | modify | +22 / -10（WS8 判别 + R6 排除分支 6 行（含 3 行注释）+ :98 注释改写 1 行） |
+| File                                            | Change | Lines (numstat vs HEAD，R6 完成后全量口径)                                             |
+| ----------------------------------------------- | ------ | -------------------------------------------------------------------------------------- |
+| `packages/opencode/src/cli/cmd/daemon.ts`       | modify | +22 / -10（WS8 判别 + R6 排除分支 6 行（含 3 行注释）+ :98 注释改写 1 行）             |
 | `packages/opencode/test/cli/tui/daemon.test.ts` | modify | +216 / -0（R5 的 +155 + slice 8 的 +61：hung 条件式夹具、`_setLockPath` 隔离、三断言） |
 
 - Slice 8 red（2026-10-03，`packages/opencode`，`-t "conditional maintenance stop"`）：1 fail——`rejects.toThrow("Failed to request opencode daemon shutdown")` 失败，当前 R5 代码对 hung owner 的条件式 stop 进入 force 分支杀进程（未抛错）。
@@ -519,17 +521,17 @@ R6 E/C delta（实现审计复算口径）：E +62（daemon 排除分支 3 代�
 
 `git diff --numstat HEAD`（2026-10-03，R5 实施完成后，工作区口径）：
 
-| File | Change | Lines (numstat) |
-| --- | --- | --- |
-| `packages/opencode/src/provider/provider.ts` | modify | +9 / -0（released 守卫保留；`_progressDeadline` 导出已删除，相对 HEAD 无足迹） |
-| `packages/core/src/aisdk.ts` | modify | +7 / -0（R2 保留，不动） |
-| `packages/opencode/src/cli/cmd/tui/worker.ts` | modify | +14 / -16（内联策略 + `await Log.close()` 保留；WS11 注释口径修正为策略边界表述） |
-| `packages/core/src/util/log.ts` | modify | +27 / -1（R4 保留，不动） |
-| `packages/opencode/src/cli/cmd/daemon.ts` | modify | +17 / -10（WS8：requestStop 判别 rejected/unreachable；unreachable 汇焦既有 force 分支） |
-| `packages/opencode/src/cli/cmd/acp.ts` | 净零 | `git diff HEAD` 为空（WS7 已按 R5 回退） |
+| File                                               | Change | Lines (numstat)                                                                                                                      |
+| -------------------------------------------------- | ------ | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `packages/opencode/src/provider/provider.ts`       | modify | +9 / -0（released 守卫保留；`_progressDeadline` 导出已删除，相对 HEAD 无足迹）                                                       |
+| `packages/core/src/aisdk.ts`                       | modify | +7 / -0（R2 保留，不动）                                                                                                             |
+| `packages/opencode/src/cli/cmd/tui/worker.ts`      | modify | +14 / -16（内联策略 + `await Log.close()` 保留；WS11 注释口径修正为策略边界表述）                                                    |
+| `packages/core/src/util/log.ts`                    | modify | +27 / -1（R4 保留，不动）                                                                                                            |
+| `packages/opencode/src/cli/cmd/daemon.ts`          | modify | +17 / -10（WS8：requestStop 判别 rejected/unreachable；unreachable 汇焦既有 force 分支）                                             |
+| `packages/opencode/src/cli/cmd/acp.ts`             | 净零   | `git diff HEAD` 为空（WS7 已按 R5 回退）                                                                                             |
 | `packages/opencode/test/provider/provider.test.ts` | modify | 竞态回归重写为生产 seam（plugin custom provider ×2 + globalThis controller 注册 + text-delta 就绪 + cancel 完成闩 + 控制组日志轮询） |
-| `packages/opencode/test/cli/tui/daemon.test.ts` | modify | +155 / -0（spawnProbeDaemon + pollFileContains 辅助；WS9 两策略测试；WS8 hung 控制面 force 测试） |
-| `packages/opencode/test/util/log.test.ts` | modify | +65 / -0（R4 内容保留） |
+| `packages/opencode/test/cli/tui/daemon.test.ts`    | modify | +155 / -0（spawnProbeDaemon + pollFileContains 辅助；WS9 两策略测试；WS8 hung 控制面 force 测试）                                    |
+| `packages/opencode/test/util/log.test.ts`          | modify | +65 / -0（R4 内容保留）                                                                                                              |
 
 生产文件 5 个（provider/aisdk/worker/log/daemon，用户上限 6）；生产行数 ≈+74/-27（用户上限 1200）。与 §15 一致，无计划外文件。
 
@@ -543,15 +545,15 @@ R6 E/C delta（实现审计复算口径）：E +62（daemon 排除分支 3 代�
 
 ### Verification Commands and Results
 
-| Command | Working directory | Result |
-| --- | --- | --- |
-| `bun test test/provider/provider.test.ts -t "cancel during in-flight pull" --timeout 60000` | `packages/opencode` | 1 pass（生产 seam 版） |
-| `bun test test/util/log.test.ts --timeout 30000` | `packages/opencode` | 6 pass / 0 fail |
-| `bun test test/provider/ --timeout 60000` | `packages/opencode` | 351 pass / 0 fail |
-| `bun test test/cli/tui/daemon.test.ts --timeout 120000` | `packages/opencode` | 48 pass / 0 fail（314s；含 WS8/WS9 三新测试） |
-| `bun typecheck` | `packages/opencode` | 干净 |
-| `bun typecheck` | `packages/core` | 干净 |
-| `bun test --timeout 60000` | `packages/core` | 368 pass / 0 fail |
+| Command                                                                                     | Working directory   | Result                                        |
+| ------------------------------------------------------------------------------------------- | ------------------- | --------------------------------------------- |
+| `bun test test/provider/provider.test.ts -t "cancel during in-flight pull" --timeout 60000` | `packages/opencode` | 1 pass（生产 seam 版）                        |
+| `bun test test/util/log.test.ts --timeout 30000`                                            | `packages/opencode` | 6 pass / 0 fail                               |
+| `bun test test/provider/ --timeout 60000`                                                   | `packages/opencode` | 351 pass / 0 fail                             |
+| `bun test test/cli/tui/daemon.test.ts --timeout 120000`                                     | `packages/opencode` | 48 pass / 0 fail（314s；含 WS8/WS9 三新测试） |
+| `bun typecheck`                                                                             | `packages/opencode` | 干净                                          |
+| `bun typecheck`                                                                             | `packages/core`     | 干净                                          |
+| `bun test --timeout 60000`                                                                  | `packages/core`     | 368 pass / 0 fail                             |
 
 ### Original Feedback-Loop Result
 
@@ -563,12 +565,12 @@ R6 E/C delta（实现审计复算口径）：E +62（daemon 排除分支 3 代�
 
 ### Chinese Comment Calculation
 
-| Metric | Actual | Exclusions and evidence |
-| --- | --- | --- |
-| Effective changed code lines `E` | ≈366 | production ≈71（provider 4 + aisdk 4 + worker 20 + log 20 + daemon 23）；tests ≈295（provider.test 109 + daemon.test 144 + log.test 42）；excluded：import-only、空行、纯注释行；acp 净零不计（实现审计第 3 轮独立复算口径，按政策以审计者复算为准） |
-| Qualifying Chinese comment lines `C` | ≈66 | 实现审计第 3 轮独立复算口径 |
-| Ratio `C / E` | ≈18.0% | — |
-| Required minimum `C` | max(1, ceil(366×0.15)) = 55 | 达标 |
+| Metric                               | Actual                      | Exclusions and evidence                                                                                                                                                                                                                              |
+| ------------------------------------ | --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Effective changed code lines `E`     | ≈366                        | production ≈71（provider 4 + aisdk 4 + worker 20 + log 20 + daemon 23）；tests ≈295（provider.test 109 + daemon.test 144 + log.test 42）；excluded：import-only、空行、纯注释行；acp 净零不计（实现审计第 3 轮独立复算口径，按政策以审计者复算为准） |
+| Qualifying Chinese comment lines `C` | ≈66                         | 实现审计第 3 轮独立复算口径                                                                                                                                                                                                                          |
+| Ratio `C / E`                        | ≈18.0%                      | —                                                                                                                                                                                                                                                    |
+| Required minimum `C`                 | max(1, ceil(366×0.15)) = 55 | 达标                                                                                                                                                                                                                                                 |
 
 代表性注释：worker.ts「进程级错误裁决（策略边界，非运行时保证）……」（WS11 修正后口径）；daemon.ts「rejected 是控制面应答后的业务拒绝……unreachable 是请求根本未获应答……显式 stop 不能被挡在恢复路径之外」；provider.test.ts「SDK 实例按 provider 共享……providerID 随 SDK 实例区分，两组判别必须用 providerID（实测踩坑后定型）」「cancel() 的返回值是结构性完成闩…… buggy 遥测写入若存在必已在日志 FIFO 中排队」；daemon.test.ts「/shutdown 永不答复，模拟控制面卡死……否则卡死 daemon 没有任何可执行的恢复流程」。
 
@@ -580,17 +582,17 @@ R6 E/C delta（实现审计复算口径）：E +62（daemon 排除分支 3 代�
 
 ## 24. Implementation Audit Record
 
-| Round | Plan revision | Full original scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | R2 | yes | No blocking findings | NB-01（已解决：注册点注释改写为真实约束）、NB-02（已解决：§23 按 auditor 复算修正）、NB-03（记录级：并发 cold-maintenance 线程导致 typecheck 暂时性错误，与本 diff 无关） | APPROVE | task ses_f0443de28ffeKo6UnFDFDpkBGy |
-| 2 | R4 | yes | No blocking findings | NB-01（记录级，已解决：§16 acp 说明删除“既有 CLI 套件”表述）、NB-02（记录级，已解决：§23 E/C 按 auditor 复算修正为 E≈154/C=46）、NB-03（沿留：提交边界警告） | APPROVE | task ses_f0443de28ffeKo6UnFDFDpkBGy |
-| 3 | R5 | yes | No blocking findings | NB-01（环境级：effect-flock 压力测试在审计并行负载下抖动一次，隔离复跑全绿，与本 diff 无因果）、NB-02（外观级：unreachable 入口下 force 分支进度文案仍写 Graceful stop timed out，纯文案精度）、NB-03（记录级，已解决：§23 E/C 按 auditor 复算修正为 E≈366/C≈66）、NB-04（沿留：提交边界——index 含外来中间态，提交须按 §15 显式列路径、以工作区为准） | APPROVE | task ses_f0443de28ffeKo6UnFDFDpkBGy |
-| 4 | R6 | yes | No blocking findings | NB-01（外来线程工作区破坏：cold.ts 重构中间态致整包 typecheck 红，错误 100% 为 cold 成员查找，被审 8 文件零错误；提交边界升级——cold 线程完成调用方迁移前不得同批提交）、NB-02（记录级，已解决：slice 8 注释方向词“上面”改“下方”）、NB-03（记录级，已解决：E/C 按 auditor 复算修正为 E≈428/C≈72） | APPROVE | task ses_f0443de28ffeKo6UnFDFDpkBGy |
+| Round | Plan revision | Full original scope? | Blocking findings    | Non-blocking findings                                                                                                                                                                                                                                                                                                                                 | Result  | Invocation reference                |
+| ----- | ------------- | -------------------- | -------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- | ----------------------------------- |
+| 1     | R2            | yes                  | No blocking findings | NB-01（已解决：注册点注释改写为真实约束）、NB-02（已解决：§23 按 auditor 复算修正）、NB-03（记录级：并发 cold-maintenance 线程导致 typecheck 暂时性错误，与本 diff 无关）                                                                                                                                                                             | APPROVE | task ses_f0443de28ffeKo6UnFDFDpkBGy |
+| 2     | R4            | yes                  | No blocking findings | NB-01（记录级，已解决：§16 acp 说明删除“既有 CLI 套件”表述）、NB-02（记录级，已解决：§23 E/C 按 auditor 复算修正为 E≈154/C=46）、NB-03（沿留：提交边界警告）                                                                                                                                                                                          | APPROVE | task ses_f0443de28ffeKo6UnFDFDpkBGy |
+| 3     | R5            | yes                  | No blocking findings | NB-01（环境级：effect-flock 压力测试在审计并行负载下抖动一次，隔离复跑全绿，与本 diff 无因果）、NB-02（外观级：unreachable 入口下 force 分支进度文案仍写 Graceful stop timed out，纯文案精度）、NB-03（记录级，已解决：§23 E/C 按 auditor 复算修正为 E≈366/C≈66）、NB-04（沿留：提交边界——index 含外来中间态，提交须按 §15 显式列路径、以工作区为准） | APPROVE | task ses_f0443de28ffeKo6UnFDFDpkBGy |
+| 4     | R6            | yes                  | No blocking findings | NB-01（外来线程工作区破坏：cold.ts 重构中间态致整包 typecheck 红，错误 100% 为 cold 成员查找，被审 8 文件零错误；提交边界升级——cold 线程完成调用方迁移前不得同批提交）、NB-02（记录级，已解决：slice 8 注释方向词“上面”改“下方”）、NB-03（记录级，已解决：E/C 按 auditor 复算修正为 E≈428/C≈72）                                                      | APPROVE | task ses_f0443de28ffeKo6UnFDFDpkBGy |
 
 第 4 轮原话记录："**APPROVE**（implementation audit，R6 第 1 轮，full-scope：全部 7 条用户原话 + R6 批准计划 + 8 个实际变更文件 + fatal-policy 删除 + acp 回退及其生产-消费链）。裁决仅覆盖：计划 R6（approved revision: R6）+ 工作区 diff（provider.ts、aisdk.ts、worker.ts、log.ts、daemon.ts、provider.test.ts、daemon.test.ts、log.test.ts；acp.ts 净零回退）。沿留事项（均不阻塞，已入册）：(a) D3 socket 继承 Open Decision 留给用户；(b) aisdk wrapSSE 无专用行为测试（批准的 unverifiable 理由）；(c) 提交边界警告（NB-01 升级版）：index 含外来中间态且 cold.ts 当前类型破损——提交只许含 §15 的 8 个文件、以工作区内容为准（`git commit --only -- <paths>`），不得提交 index 中间态或卷入 cold-maintenance 线程产物；外来线程完成 cold.ts 调用方迁移前，整包 typecheck 不会转绿，这不构成本 diff 的阻塞，但构成本 diff 与外来改动同批提交的阻塞。"验证命令独立复现：daemon 全套件 49/49（568s，含 slice 8）；slice 8 与 WS8 隔离复跑各 1 pass；竞态回归 1 pass；log.test 6 pass；provider 全套件 351/351；opencode typecheck 红外来归因（被审 diff 零错误）；core 未触及（R6 无 core 变更，R5 轮 368/368 + typecheck 干净对同内容有效，numstat 已核）。
 
 第 3 轮原话记录："**APPROVE**（implementation audit，第 3 轮即末轮，full-scope：全部 7 条用户原话 + R5 批准计划 + 8 个实际变更文件 + fatal-policy 删除 + acp 回退及其生产-消费链）。裁决仅覆盖：计划 R5（approved revision: R5）+ 工作区 diff（provider.ts、aisdk.ts、worker.ts、log.ts、daemon.ts、provider.test.ts、daemon.test.ts、log.test.ts；acp.ts 净零回退）。沿留事项（均不阻塞，已入册）：(a) D3 socket 继承为 Bun 运行时行为，残余 ~90s 检测延迟，§20 R5 已修正记录（TUI 心跳看门狗存在于 sdk.tsx:134-141，未触发原因定位属另行立项），Open Decision 留给用户；(b) aisdk.ts wrapSSE 无专用行为测试（批准的 unverifiable 理由）；(c) 提交边界警告 NB-04——index 含外来中间态，提交须按 §15 显式列路径、以工作区为准。"验证命令独立复现：生产 seam 竞态回归 1 pass；log.test 6 pass；provider 全套件 351/351；daemon 套件 48/48（322s，含 WS8/WS9 三新测试）；packages/opencode typecheck 干净；packages/core typecheck 干净 + 套件 368/368（隔离复跑）。
 
-第 1 轮原话记录："**APPROVE**（implementation audit，第 1 轮，full-scope：原始需求 + R2 批准计划 + 全部 6 个实际变更文件及其生产-消费链）。裁决仅覆盖：计划 R2（approved revision: R2）+ 被审 diff（provider.ts、aisdk.ts、worker.ts、provider.test.ts 四个修改文件及 fatal-policy.ts、fatal-policy.test.ts 两个新增文件，含 NB-01 的注释文本修正）。提交边界警告：工作区现存另一线程的未完成 cold-maintenance 编辑（test/storage/cold*.test.ts，typecheck 红），任何提交必须只包含上述 6 个文件，不得卷入外来中间态。"验证命令独立复现：race 回归 1 pass；fatal-policy 2 pass；provider 全套件 351 pass；daemon 生命周期 45 pass；core 套件 368 pass；packages/core typecheck 干净；被审 diff 类型干净。
+第 1 轮原话记录："**APPROVE**（implementation audit，第 1 轮，full-scope：原始需求 + R2 批准计划 + 全部 6 个实际变更文件及其生产-消费链）。裁决仅覆盖：计划 R2（approved revision: R2）+ 被审 diff（provider.ts、aisdk.ts、worker.ts、provider.test.ts 四个修改文件及 fatal-policy.ts、fatal-policy.test.ts 两个新增文件，含 NB-01 的注释文本修正）。提交边界警告：工作区现存另一线程的未完成 cold-maintenance 编辑（test/storage/cold\*.test.ts，typecheck 红），任何提交必须只包含上述 6 个文件，不得卷入外来中间态。"验证命令独立复现：race 回归 1 pass；fatal-policy 2 pass；provider 全套件 351 pass；daemon 生命周期 45 pass；core 套件 368 pass；packages/core typecheck 干净；被审 diff 类型干净。
 
 第 2 轮原话记录："**APPROVE**（implementation audit，第 2 轮，full-scope：全部 5 条用户原话 + R4 批准计划 + 7 个实际变更文件及其生产-消费链）。裁决仅覆盖：计划 R4（approved revision: R4）+ 被审 diff（provider.ts、aisdk.ts、worker.ts、core/util/log.ts、cli/cmd/acp.ts、provider.test.ts、test/util/log.test.ts）以及 fatal-policy 两文件的工作区删除动作。两个沿留事项（均不阻塞，已在计划 §20/§23 入册）：(a) WS6/D3 listen socket 继承为 Bun 运行时行为（探针实证无自有修复 seam），残余仅 ~90s 检测延迟、无正确性危害，作为 Open Decision 留给用户；(b) 提交边界警告——任何提交只许包含上述 7 个文件，不得卷入 cold-maintenance 线程的工作区产物。"验证命令独立复现：race 回归 1 pass；log.test 6 pass；provider 全套件 351/351；daemon 生命周期 45/45（319s）；packages/core typecheck 干净 + 368/368；packages/opencode typecheck 全绿（cold 线程中间态已完成，第 1 轮 NB-03 记录项随之关闭）。

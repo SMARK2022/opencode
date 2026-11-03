@@ -95,7 +95,6 @@ describe("pending tool input parser (#187)", () => {
   })
 })
 
-
 test("progress interval is 50ms after #189", async () => {
   // #189：跟手刷新间隔
   const { PENDING_TOOL_INPUT_PROGRESS_INTERVAL } = await import("../../../src/routes/session/pending-tool-input")

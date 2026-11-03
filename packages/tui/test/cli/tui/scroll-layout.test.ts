@@ -7,14 +7,20 @@ async function fixture(preserveVisibleContent = true, wrapped = false) {
   const app = await createTestRenderer({ width: 60, height: 15, useThread: false, footerHeight: 0 })
   // 与 Session 同款开关组合：关闭 preserveVisibleContent 的对照由最后一个用例单独覆盖。
   const scroll = new ScrollBoxRenderable(app.renderer, {
-    width: 60, height: 15, preserveVisibleContent,
-    stickyScroll: true, stickyStart: "bottom", stickyScrollTolerance: 1,
+    width: 60,
+    height: 15,
+    preserveVisibleContent,
+    stickyScroll: true,
+    stickyStart: "bottom",
+    stickyScrollTolerance: 1,
   })
   app.renderer.root.add(scroll)
   // 三百个根覆盖实际 Session 窗口量级；宽度用例让文本真正换行，不能手工估算高度。
   const rows = Array.from({ length: 300 }, (_, i) => {
     const row = new BoxRenderable(app.renderer, { height: wrapped ? "auto" : 3, flexShrink: 0 })
-    row.add(new TextRenderable(app.renderer, { content: `MESSAGE ${i}` + (wrapped ? " wrapped content".repeat(12) : "") }))
+    row.add(
+      new TextRenderable(app.renderer, { content: `MESSAGE ${i}` + (wrapped ? " wrapped content".repeat(12) : "") }),
+    )
     scroll.add(row)
     return row
   })
@@ -60,45 +66,48 @@ test("scroll layout preserves the visible message on every growth and shrink fra
   }
 })
 
-test.each(["wheel", "line", "resize", "redistribute", "padding"])("scroll layout preserves input during %s", async (kind) => {
-  const { app, scroll, rows } = await fixture(true, kind === "resize")
-  try {
-    if (kind === "padding") {
-      // 内容内边距和消息外边距都参与 Yoga 坐标，不能按零边距的特例通过。
-      scroll.content.paddingTop = 2
-      rows[20].marginTop = 3
-      await app.renderOnce()
+test.each(["wheel", "line", "resize", "redistribute", "padding"])(
+  "scroll layout preserves input during %s",
+  async (kind) => {
+    const { app, scroll, rows } = await fixture(true, kind === "resize")
+    try {
+      if (kind === "padding") {
+        // 内容内边距和消息外边距都参与 Yoga 坐标，不能按零边距的特例通过。
+        scroll.content.paddingTop = 2
+        rows[20].marginTop = 3
+        await app.renderOnce()
+      }
+      const original = rows[150].y - scroll.viewport.y
+      // 累加已经接受的输入位移，避免用新布局后的绝对位置倒推期望而自证正确。
+      // resize 用例的宽度交替（60↔40）同时覆盖换行扩张与收缩两个方向。
+      let movement = 0
+      // 输入量来自公开滚动接口的实际接受值；断言只排除布局额外引入的位移。
+      for (let i = 0; i < 8; i++) {
+        const before = scroll.scrollTop
+        if (kind === "wheel") await app.mockMouse.scroll(10, 5, "down")
+        if (kind === "line") scroll.scrollBy(1)
+        movement += scroll.scrollTop - before
+        // 反复恢复原宽度同时验证收缩路径，只有变窄时正确不足以保证连续调整窗口。
+        if (kind === "resize") scroll.width = i % 2 ? 60 : 40
+        else rows[i].height = i % 2 ? 1 : 5
+        // 上下各改相反的两行，总高不变也必须保持中间正在阅读的消息。
+        if (kind === "redistribute") rows[280 + i].height = i % 2 ? 5 : 1
+        await app.renderOnce()
+        expect(rows[150].y - scroll.viewport.y).toBe(original - movement)
+      }
+      // 若鼠标事件未到达容器，零漂移也会假通过，因此必须证明输入确实生效。
+      if (kind === "wheel" || kind === "line") expect(movement).toBeGreaterThan(0)
+      // 停止输入后再观察，拒绝把补偿延迟到后续空闲帧的实现。
+      // 这是旧事后锚点恢复的失败模式：中间帧偏移、帧外恢复仍能骗过终态断言。
+      for (let i = 0; i < 4; i++) {
+        await app.renderOnce()
+        expect(rows[150].y - scroll.viewport.y).toBe(original - movement)
+      }
+    } finally {
+      app.renderer.destroy()
     }
-    const original = rows[150].y - scroll.viewport.y
-    // 累加已经接受的输入位移，避免用新布局后的绝对位置倒推期望而自证正确。
-    // resize 用例的宽度交替（60↔40）同时覆盖换行扩张与收缩两个方向。
-    let movement = 0
-    // 输入量来自公开滚动接口的实际接受值；断言只排除布局额外引入的位移。
-    for (let i = 0; i < 8; i++) {
-      const before = scroll.scrollTop
-      if (kind === "wheel") await app.mockMouse.scroll(10, 5, "down")
-      if (kind === "line") scroll.scrollBy(1)
-      movement += scroll.scrollTop - before
-      // 反复恢复原宽度同时验证收缩路径，只有变窄时正确不足以保证连续调整窗口。
-      if (kind === "resize") scroll.width = i % 2 ? 60 : 40
-      else rows[i].height = i % 2 ? 1 : 5
-      // 上下各改相反的两行，总高不变也必须保持中间正在阅读的消息。
-      if (kind === "redistribute") rows[280 + i].height = i % 2 ? 5 : 1
-      await app.renderOnce()
-      expect(rows[150].y - scroll.viewport.y).toBe(original - movement)
-    }
-    // 若鼠标事件未到达容器，零漂移也会假通过，因此必须证明输入确实生效。
-    if (kind === "wheel" || kind === "line") expect(movement).toBeGreaterThan(0)
-    // 停止输入后再观察，拒绝把补偿延迟到后续空闲帧的实现。
-    // 这是旧事后锚点恢复的失败模式：中间帧偏移、帧外恢复仍能骗过终态断言。
-    for (let i = 0; i < 4; i++) {
-      await app.renderOnce()
-      expect(rows[150].y - scroll.viewport.y).toBe(original - movement)
-    }
-  } finally {
-    app.renderer.destroy()
-  }
-})
+  },
+)
 
 test("scroll layout keeps bottom tolerance and explicit navigation semantics", async () => {
   const { app, scroll, rows } = await fixture()
@@ -157,7 +166,11 @@ test("scroll layout settles its real scheduler after geometry changes", async ()
     await app.renderer.idle()
     // 坐标不变仍可能持续空转；公开调度状态必须证明没有等待绘制的任务。
     // updateLayout 覆写只读几何不预约渲染——空转即说明补偿路径引入了额外调度。
-    expect(app.renderer.getSchedulerState()).toEqual({ isRunning: false, isRendering: false, hasScheduledRender: false })
+    expect(app.renderer.getSchedulerState()).toEqual({
+      isRunning: false,
+      isRendering: false,
+      hasScheduledRender: false,
+    })
   } finally {
     app.renderer.destroy()
   }

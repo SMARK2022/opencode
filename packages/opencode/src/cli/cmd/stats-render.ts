@@ -1,6 +1,11 @@
-
 import { renderTwoColumn, renderThreeColumn } from "./stats-charts"
-import { renderCompositionDonut, renderPercentStack, renderStreamStackChart, renderWaterfall, renderHistogram } from "./stats-charts"
+import {
+  renderCompositionDonut,
+  renderPercentStack,
+  renderStreamStackChart,
+  renderWaterfall,
+  renderHistogram,
+} from "./stats-charts"
 import type { StatsReport } from "./stats-data"
 import { emptyComponents } from "./stats-data"
 // #174：render 再导出 formatNumber 方便调用
@@ -54,7 +59,7 @@ export const useColor = (mode?: ColorMode) => renderContext(mode).color !== "nev
 // #174：limit 只 slice
 // #174：limit 只 slice 展示行，不改 totals
 // #174：limit 只切片列表，totals 不动
-export const limitRows = <T,>(rows: T[], limit?: number) => {
+export const limitRows = <T>(rows: T[], limit?: number) => {
   if (limit === undefined || !Number.isFinite(limit)) return rows
   return rows.slice(0, Math.max(0, limit))
 }
@@ -64,7 +69,11 @@ const header = (report: StatsReport, title: string, color?: ColorMode) => [
   // R6标题采用magenta，辅助标题保留cyan；同一模式决定每个页面的ANSI输出。
   paint(title, "magenta", renderContext(color), true),
   `sessions=${report.totalSessions} cost=${formatNumber(report.total.cost)} tokens=${formatNumber(report.total.tokens.total)} days=${report.days}`,
-  report.requestedDays === undefined ? "All time" : report.requestedDays === 0 ? "Today" : `Last ${report.requestedDays} days`,
+  report.requestedDays === undefined
+    ? "All time"
+    : report.requestedDays === 0
+      ? "Today"
+      : `Last ${report.requestedDays} days`,
   "-".repeat(Math.min(60, statsContentWidth())),
 ]
 
@@ -73,19 +82,26 @@ const renderUsageSeries = (series: StatsReport["modelSeries"], options: StatsRen
   renderRoundedLineChart({
     title,
     series: limitRows(series, options.limit).map((item) => ({
-      id: item.id, label: item.label || item.id,
-      points: item.points.map((point) => ({ x: point.label, y: options.metric === "cost" ? point.cost : point.tokens.total })),
+      id: item.id,
+      label: item.label || item.id,
+      points: item.points.map((point) => ({
+        x: point.label,
+        y: options.metric === "cost" ? point.cost : point.tokens.total,
+      })),
     })),
   })
 
 // 排名和明细先按同一指标排序再限行，不能从默认费用榜截出 token/calls 的 Top N。
 const topGroups = (groups: StatsReport["models"], options: StatsRenderOptions) =>
-  limitRows(groups.toSorted((a, b) => {
-    // 默认 token 与显式 cost/calls 共用选择器，所有榜单和台账在限行前取得同一排序。
-    if (options.sort === "cost") return b.cost - a.cost || b.tokens.total - a.tokens.total
-    if (options.sort === "calls") return b.assistantCalls - a.assistantCalls || b.tokens.total - a.tokens.total
-    return b.tokens.total - a.tokens.total || b.cost - a.cost
-  }), options.limit)
+  limitRows(
+    groups.toSorted((a, b) => {
+      // 默认 token 与显式 cost/calls 共用选择器，所有榜单和台账在限行前取得同一排序。
+      if (options.sort === "cost") return b.cost - a.cost || b.tokens.total - a.tokens.total
+      if (options.sort === "calls") return b.assistantCalls - a.assistantCalls || b.tokens.total - a.tokens.total
+      return b.tokens.total - a.tokens.total || b.cost - a.cost
+    }),
+    options.limit,
+  )
 
 // 分组台账补足排名图省略的计量，模型、供应商和扩展维度复用同一口径。
 const renderGroupDetails = (groups: StatsReport["models"], options: StatsRenderOptions) =>
@@ -106,18 +122,24 @@ export const renderBreakdown = (report: StatsReport, options: StatsRenderOptions
     by === "provider"
       ? report.providers
       : by === "agent"
-        ? report.agents ?? []
+        ? (report.agents ?? [])
         : by === "source"
-          ? report.sources ?? []
+          ? (report.sources ?? [])
           : by === "project"
-            ? report.projects ?? []
+            ? (report.projects ?? [])
             : by === "status"
-              ? report.statuses ?? []
+              ? (report.statuses ?? [])
               : by === "tool"
                 ? (report.toolUsage ?? []).map((tool) => ({
                     id: tool.id,
                     label: tool.id,
-                    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 }, total: tool.contextTokens },
+                    tokens: {
+                      input: 0,
+                      output: 0,
+                      reasoning: 0,
+                      cache: { read: 0, write: 0 },
+                      total: tool.contextTokens,
+                    },
                     cost: 0,
                     requests: tool.count,
                     assistantCalls: 0,
@@ -136,16 +158,21 @@ export const renderBreakdown = (report: StatsReport, options: StatsRenderOptions
   // #483：占比分母用完整分组集合而非可见行——limit 只裁剪展示，不改变份额语义
   const grandTotal = groups.reduce((sum, g) => sum + (metric === "cost" ? g.cost : g.tokens.total), 0)
   // 保留目标统一排序器；provider仅在未指定指标/排序时用费用，tool调用数不冒充assistant次数。
-  const rows = (by === "tool"
-    ? limitRows(options.sort === "calls" ? groups.toSorted((a, b) => b.requests - a.requests) : groups, options.limit)
-    : topGroups(groups, { ...options, sort: options.sort ?? (by === "provider" && options.metric === undefined ? "cost" : undefined) })
+  const rows = (
+    by === "tool"
+      ? limitRows(options.sort === "calls" ? groups.toSorted((a, b) => b.requests - a.requests) : groups, options.limit)
+      : topGroups(groups, {
+          ...options,
+          sort: options.sort ?? (by === "provider" && options.metric === undefined ? "cost" : undefined),
+        })
   ).map((group) => {
     const value = metric === "cost" ? group.cost : group.tokens.total
     // share 紧跟绝对值：空数据集合不输出 0%，避免与真实零用量混淆
     const share = grandTotal > 0 ? ` ${Math.round((value / grandTotal) * 100)}%` : ""
     // #483：project 行同时展示名称与 worktree 路径——两者都是用户可识别身份；缺失元数据时 path 为空；
     // replace 只清理空 path 时残留的分隔符，不触碰用户数据中的任何字符
-    const path = by === "project" && "path" in group ? ` · ${(group as { path?: string }).path || ""}`.replace(/ ·$/, "") : ""
+    const path =
+      by === "project" && "path" in group ? ` · ${(group as { path?: string }).path || ""}`.replace(/ ·$/, "") : ""
     return { label: `${group.label || group.id}${path}${share}`, value }
   })
   const lines = [
@@ -158,7 +185,7 @@ export const renderBreakdown = (report: StatsReport, options: StatsRenderOptions
       labelWidth: Math.max(24, ...rows.map((row) => visibleLength(row.label))),
     }),
   ]
-    // #176：tool 维附加 context/count/IO 明细
+  // #176：tool 维附加 context/count/IO 明细
   if (by === "tool") {
     // #177：tool breakdown 主路径展示 context 时间序列
     if ((report.toolSeries?.length ?? 0) > 0) {
@@ -182,7 +209,9 @@ export const renderBreakdown = (report: StatsReport, options: StatsRenderOptions
       lines.push("Context estimate unavailable for these records; call share remains separate.")
     }
     lines.push("Tool footprint")
-    lines.push("Calls, IO characters, errors and duration come from ToolPart; estimated context is not tool cost or billed tokens.")
+    lines.push(
+      "Calls, IO characters, errors and duration come from ToolPart; estimated context is not tool cost or billed tokens.",
+    )
     // #483：errors/duration 来自过滤后的 toolCalls，分母始终是同一行的真实调用数
     const callStats = new Map<string, { errors: number; durationMs: number }>()
     let totalCalls = 0
@@ -193,7 +222,10 @@ export const renderBreakdown = (report: StatsReport, options: StatsRenderOptions
       callStats.set(call.toolID, item)
       totalCalls += call.calls
     }
-    for (const tool of limitRows(options.sort === "calls" ? report.toolUsage.toSorted((a, b) => b.count - a.count) : report.toolUsage, options.limit)) {
+    for (const tool of limitRows(
+      options.sort === "calls" ? report.toolUsage.toSorted((a, b) => b.count - a.count) : report.toolUsage,
+      options.limit,
+    )) {
       const calls = callStats.get(tool.id) ?? { errors: 0, durationMs: 0 }
       // 分母始终是同一行的真实调用数：per-call 列回答“单次调用多大/多慢”，
       // 总量列回答“累计多少”；call share 分母同样来自过滤后 tuple 总和
@@ -201,7 +233,12 @@ export const renderBreakdown = (report: StatsReport, options: StatsRenderOptions
       const avgMs = tool.count > 0 ? Math.round(calls.durationMs / tool.count) : 0
       const inPerCall = Math.round(tool.inputChars / Math.max(1, tool.count))
       const outPerCall = Math.round(tool.outputChars / Math.max(1, tool.count))
-      const ctx = hasContextTokens ? ` ctx=${tool.contextTokens} context share=${percentage(tool.contextTokens, report.toolUsage.reduce((sum, item) => sum + item.contextTokens, 0))}` : ""
+      const ctx = hasContextTokens
+        ? ` ctx=${tool.contextTokens} context share=${percentage(
+            tool.contextTokens,
+            report.toolUsage.reduce((sum, item) => sum + item.contextTokens, 0),
+          )}`
+        : ""
       // #483：tool 名同样经终端协议清洗——内部受限词表不是省略清洗的理由
       lines.push(
         `  ${terminalText(tool.id).padEnd(24)} calls=${tool.count}${share} in=${tool.inputChars}chars out=${tool.outputChars}chars in/c=${inPerCall} out/c=${outPerCall} errors=${calls.errors} avg/call=${avgMs}ms${ctx}`,
@@ -217,7 +254,9 @@ export const renderBreakdown = (report: StatsReport, options: StatsRenderOptions
     if (mix.size > 0) {
       lines.push("")
       lines.push("Issuing runtime mix (calls by owning assistant)")
-      for (const [key, calls] of Array.from(mix.entries()).sort((a, b) => b[1] - a[1]).slice(0, options.limit ?? 8)) {
+      for (const [key, calls] of Array.from(mix.entries())
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, options.limit ?? 8)) {
         // #483：mix 行是 provider/model/agent/project 拼接的持久化实体标签，输出前清洗
         lines.push(`  ${terminalText(key)} calls=${calls}`)
       }
@@ -225,22 +264,59 @@ export const renderBreakdown = (report: StatsReport, options: StatsRenderOptions
   }
   if (by !== "tool") {
     // 数据层的各维度序列与输入组件必须有实际输出入口，不能只保留在报告对象中。
-    const series = { model: report.modelSeries, provider: report.providerSeries, agent: report.agentSeries, source: report.sourceSeries, project: report.projectSeries, status: report.statusSeries }[by]
+    const series = {
+      model: report.modelSeries,
+      provider: report.providerSeries,
+      agent: report.agentSeries,
+      source: report.sourceSeries,
+      project: report.projectSeries,
+      status: report.statusSeries,
+    }[by]
     // Outcome趋势按每日请求分母计算，未归因Assistant token不进入结果比率。
-    lines.push("", ...(by === "status" ? renderRoundedLineChart({ title: "Request outcome trend", series: report.statusSeries.filter((group) => group.id !== "unattributed").map((group) => ({ id: group.id, label: terminalText(group.label), style: { color: group.id === "completed" ? "green" as const : group.id === "error" ? "red" as const : group.id === "aborted" ? "yellow" as const : "cyan" as const }, points: group.points.map((point) => ({ x: point.label, y: ratio(point.requests, report.daily.find((day) => day.day === point.day)?.requests ?? 0) * 100 })) })) }) : renderUsageSeries(series, options, `${by} usage over time`)))
+    lines.push(
+      "",
+      ...(by === "status"
+        ? renderRoundedLineChart({
+            title: "Request outcome trend",
+            series: report.statusSeries
+              .filter((group) => group.id !== "unattributed")
+              .map((group) => ({
+                id: group.id,
+                label: terminalText(group.label),
+                style: {
+                  color:
+                    group.id === "completed"
+                      ? ("green" as const)
+                      : group.id === "error"
+                        ? ("red" as const)
+                        : group.id === "aborted"
+                          ? ("yellow" as const)
+                          : ("cyan" as const),
+                },
+                points: group.points.map((point) => ({
+                  x: point.label,
+                  y: ratio(point.requests, report.daily.find((day) => day.day === point.day)?.requests ?? 0) * 100,
+                })),
+              })),
+          })
+        : renderUsageSeries(series, options, `${by} usage over time`)),
+    )
     lines.push(...renderGroupDetails(groups, options))
     if (by === "source") {
       lines.push("Input components by source")
       for (const group of topGroups(groups, options)) {
-        lines.push(`  ${group.label || group.id} ${Object.entries(group.components).map(([key, value]) => `${key}=${formatNumber(value)}`).join(" ")}`)
+        lines.push(
+          `  ${group.label || group.id} ${Object.entries(group.components)
+            .map(([key, value]) => `${key}=${formatNumber(value)}`)
+            .join(" ")}`,
+        )
       }
     }
   }
   if (by !== "tool") lines.push(...renderDimensionAnalysis(report, groups, by, options))
-    // #181：只返回本表行，由 dashboard 负责段间距
+  // #181：只返回本表行，由 dashboard 负责段间距
   return lines.join("\n")
 }
-
 
 // #181：金额短格式
 // #181：仪表盘顶表金额短显示
@@ -275,31 +351,34 @@ const dashboardTopTable = (
   // #181：share 分母用全局 total.tokens.total，禁止 top-N 重归一化
   globalTokenTotal: number,
 ) => {
-    // #181：内容宽取自 tip charts 统一口径
+  // #181：内容宽取自 tip charts 统一口径
   const content = statsContentWidth()
-    // #181：空表仍保留标题，避免布局塌陷误判
+  // #181：空表仍保留标题，避免布局塌陷误判
   const rows = dashboardTopRows(groups, options.limit ?? 5)
   if (rows.length === 0) return [`▸ ${title}`, "  (empty)"]
-    // #181：share 分母至少为 1，避免 NaN%
+  // #181：share 分母至少为 1，避免 NaN%
   const totalTokens = Math.max(1, globalTokenTotal)
-    // #181：model 标签地板更宽，provider 稍窄
+  // #181：model 标签地板更宽，provider 稍窄
   const labelFloor = kind === "model" ? 18 : 16
-    // #181：标签上限防止挤掉指标列
+  // #181：标签上限防止挤掉指标列
   const labelCap = kind === "model" ? 28 : 26
   // metrics 形如 " $12  1.2M  3  40% " 约 28 列预算
   // #181：右侧指标列预算，剩余给 label/trend
   // #183：含 per-call 时指标槽更宽
   const metricsBudget = kind === "model" ? 36 : 28
-    // #181：先扣指标与 gutter 再谈 trend
+  // #181：先扣指标与 gutter 再谈 trend
   const trendRoom = content - metricsBudget - 15 - labelFloor
   // #181：小于 6 列不画 trend，避免碎裂
-    // #181：trend 要么够 6 列要么为 0
+  // #181：trend 要么够 6 列要么为 0
   const trendWidth = trendRoom < 6 ? 0 : Math.min(24, trendRoom)
   // #181：label 在 floor/cap 间吃掉剩余宽度
   // 指标槽宽含空格与缩进；窄屏优先缩标签，保留 per-call 和数量级。
-  const labelWidth = Math.max(1, Math.min(labelCap, content - (kind === "model" ? 41 : 32) - (trendWidth > 0 ? trendWidth + 3 : 0)))
+  const labelWidth = Math.max(
+    1,
+    Math.min(labelCap, content - (kind === "model" ? 41 : 32) - (trendWidth > 0 ? trendWidth + 3 : 0)),
+  )
   const lines = [`▸ ${title}`]
-    // #181：宽屏表头带 share│trend，窄屏去掉 trend
+  // #181：宽屏表头带 share│trend，窄屏去掉 trend
   // #183：model 顶表增加 per-call 列（tokens/calls）
   const headCols = [
     fitVisible("name", labelWidth),
@@ -339,7 +418,6 @@ const dashboardTopTable = (
   return lines
 }
 
-
 // #182：节标题分隔，便于扫读
 const renderSectionDivider = (title: string, subtitle?: string) => {
   const line = `── ${title} ${"─".repeat(Math.max(2, 24 - title.length))}`
@@ -371,8 +449,17 @@ const renderHourOfDayStrip = (report: StatsReport) => {
   if (fromReport && fromReport.length === 24 && fromReport.some((h) => h > 0)) {
     const max = Math.max(1, ...fromReport)
     const glyphs = fromReport.map((h) => "·░▒▓█"[Math.min(4, Math.round((h / max) * 4))]).join("")
-    const active = fromReport.map((value, hour) => ({ value, hour })).filter((item) => item.value > 0).toSorted((a, b) => a.value - b.value)
-    return ["Hour of day (requests)", `  ${glyphs}`, "  00  04  08  12  16  20", `peak ${String(active.at(-1)!.hour).padStart(2, "0")}:00 / ${active.at(-1)!.value} req`, `low ${String(active[0].hour).padStart(2, "0")}:00 / ${active[0].value} req`]
+    const active = fromReport
+      .map((value, hour) => ({ value, hour }))
+      .filter((item) => item.value > 0)
+      .toSorted((a, b) => a.value - b.value)
+    return [
+      "Hour of day (requests)",
+      `  ${glyphs}`,
+      "  00  04  08  12  16  20",
+      `peak ${String(active.at(-1)!.hour).padStart(2, "0")}:00 / ${active.at(-1)!.value} req`,
+      `low ${String(active[0].hour).padStart(2, "0")}:00 / ${active[0].value} req`,
+    ]
   }
   // #182：24 小时活跃（无 request 数据时的 legacy 回退，仍基于会话活跃）
   const hours = Array.from({ length: 24 }, () => 0)
@@ -397,7 +484,10 @@ const renderCalendarActivity = (report: StatsReport) => {
       rows.push(`  ${label} ${week.join(" ")}`)
       week = []
     }
-    if (!week.length) { label = day.label; week = Array(weekday).fill(" ") }
+    if (!week.length) {
+      label = day.label
+      week = Array(weekday).fill(" ")
+    }
     week.push("·░▒▓█"[Math.min(4, Math.round((day.tokens.total / max) * 4))])
   }
   if (week.length) rows.push(`  ${label} ${week.join(" ")}`)
@@ -484,7 +574,9 @@ const renderInsightsCallout = (report: StatsReport) => {
     failure.failed > 0
       ? `Failed/aborted requests: ${failure.failed} (${failure.rate}%). Inspect stats timeline for bursts.`
       : "No failed/aborted requests in window.",
-    share > 0 ? `Top-2 sessions hold ~${share}% of tokens; use stats sessions for outliers.` : "Session concentration unavailable.",
+    share > 0
+      ? `Top-2 sessions hold ~${share}% of tokens; use stats sessions for outliers.`
+      : "Session concentration unavailable.",
     `Cache hit ~${cacheHitRate(report)}%. Review provider mix if cost spikes.`,
   ]
   return ["Insights", ...body.map((l) => `  ${l}`)]
@@ -496,7 +588,13 @@ export const renderDashboard = (report: StatsReport, options: StatsRenderOptions
   lines.push(...renderSectionDivider("Daily activity"))
   // 宽屏复用现有多列布局；窄屏保留完整内容，避免固定分栏裁掉日期。
   const activity = [renderCalendarActivity(report), renderHourOfDayStrip(report), renderDayOfWeekShare(report)]
-  lines.push(...(statsContentWidth() >= 90 ? renderThreeColumn(activity[0], activity[1], activity[2]) : statsContentWidth() >= 64 ? renderTwoColumn(activity[0], [...activity[1], ...activity[2]]) : activity.flat()))
+  lines.push(
+    ...(statsContentWidth() >= 90
+      ? renderThreeColumn(activity[0], activity[1], activity[2])
+      : statsContentWidth() >= 64
+        ? renderTwoColumn(activity[0], [...activity[1], ...activity[2]])
+        : activity.flat()),
+  )
   lines.push("")
   lines.push(...renderSectionDivider("Token components", "auto-normalized small multiples"))
   // #182：组件小多图区
@@ -507,10 +605,21 @@ export const renderDashboard = (report: StatsReport, options: StatsRenderOptions
   lines.push(...renderCostHealthSection(report))
   lines.push("")
   lines.push(...renderSectionDivider("Top models"))
-  lines.push(...dashboardTopTable("Top models", report.models, report.modelSeries, options, "model", report.total.tokens.total))
+  lines.push(
+    ...dashboardTopTable("Top models", report.models, report.modelSeries, options, "model", report.total.tokens.total),
+  )
   lines.push("")
   lines.push(...renderSectionDivider("Top providers"))
-  lines.push(...dashboardTopTable("Top providers", report.providers, report.providerSeries, options, "provider", report.total.tokens.total))
+  lines.push(
+    ...dashboardTopTable(
+      "Top providers",
+      report.providers,
+      report.providerSeries,
+      options,
+      "provider",
+      report.total.tokens.total,
+    ),
+  )
   lines.push("")
   lines.push(...renderSectionDivider("Sessions"))
   lines.push(`  sessions with usage: ${report.sessionsWithUsage}`)
@@ -524,7 +633,9 @@ export const renderDashboard = (report: StatsReport, options: StatsRenderOptions
       { label: "1M-10M", lo: 1_000_000, hi: 10_000_000 },
       { label: ">10M", lo: 10_000_000, hi: Number.POSITIVE_INFINITY },
     ]
-    const counts = buckets.map((b) => report.sessions.filter((s) => s.tokens.total >= b.lo && s.tokens.total < b.hi).length)
+    const counts = buckets.map(
+      (b) => report.sessions.filter((s) => s.tokens.total >= b.lo && s.tokens.total < b.hi).length,
+    )
     lines.push("  Session size distribution")
     for (let i = 0; i < buckets.length; i++) {
       const bar = "█".repeat(Math.min(20, counts[i]))
@@ -533,14 +644,23 @@ export const renderDashboard = (report: StatsReport, options: StatsRenderOptions
     const sorted = [...report.sessions].sort((a, b) => b.tokens.total - a.tokens.total).slice(0, options.limit ?? 5)
     // 分位数使用完整会话样本，榜单 limit 不能改变长尾统计。
     const volumes = report.sessions.map((session) => session.tokens.total).sort((a, b) => a - b)
-    const quantile = (q: number) => formatNumber(volumes[Math.min(volumes.length - 1, Math.floor(volumes.length * q))] ?? 0)
-    const share = (count: number) => (100 * volumes.slice(-count).reduce((sum, value) => sum + value, 0) / Math.max(1, report.total.tokens.total)).toFixed(1)
+    const quantile = (q: number) =>
+      formatNumber(volumes[Math.min(volumes.length - 1, Math.floor(volumes.length * q))] ?? 0)
+    const share = (count: number) =>
+      (
+        (100 * volumes.slice(-count).reduce((sum, value) => sum + value, 0)) /
+        Math.max(1, report.total.tokens.total)
+      ).toFixed(1)
     lines.push(`  p50=${formatNumber(report.medianTokensPerSession)} p90=${quantile(0.9)} p99=${quantile(0.99)}`)
     lines.push(`  Heavy-tail top-2=${share(2)}% top-10=${share(10)}%`)
     lines.push("  Top sessions by tokens")
     for (const s of sorted) {
       lines.push(...wrapAnsiVisible(`  ${terminalText(s.title || s.id)} ${s.tokens.total}`))
-      lines.push(...wrapAnsiVisible(`  models ${s.models.map(terminalText).join(", ")} · providers ${s.providers.map(terminalText).join(", ")}`))
+      lines.push(
+        ...wrapAnsiVisible(
+          `  models ${s.models.map(terminalText).join(", ")} · providers ${s.providers.map(terminalText).join(", ")}`,
+        ),
+      )
     }
   }
   lines.push("")
@@ -550,7 +670,6 @@ export const renderDashboard = (report: StatsReport, options: StatsRenderOptions
   // #182：分区完成后一次性输出
   return lines.join("\n")
 }
-
 
 export const renderOverview = (report: StatsReport, options: StatsRenderOptions = {}) =>
   [
@@ -566,7 +685,9 @@ export const renderModels = (report: StatsReport, options: StatsRenderOptions = 
 
 // #174：providers 页数据源独立
 export const renderProviders = (report: StatsReport, options: StatsRenderOptions = {}) =>
-  [...header(report, "stats providers", options.color), renderBreakdown(report, { ...options, by: "provider" })].join("\n")
+  [...header(report, "stats providers", options.color), renderBreakdown(report, { ...options, by: "provider" })].join(
+    "\n",
+  )
 
 // #174：折线加堆叠非热力命令：只读报告生成终端行，不写库
 // #174：timeline 只用折线与堆叠，不承担 heatmap 命令
@@ -574,7 +695,7 @@ export const renderProviders = (report: StatsReport, options: StatsRenderOptions
 // #174：renderTimeline 服务时间线折线，不承担 heatmap 命令
 export const renderTimeline = (report: StatsReport, options: StatsRenderOptions = {}) => {
   const metric = options.metric ?? "tokens"
-  const values = report.daily.map((day) => metric === "cost" ? day.cost : day.tokens.total)
+  const values = report.daily.map((day) => (metric === "cost" ? day.cost : day.tokens.total))
   const peak = Math.max(0, ...values)
   const peakDay = report.daily[values.indexOf(peak)]
   const total = metric === "cost" ? report.total.cost : report.total.tokens.total
@@ -582,8 +703,20 @@ export const renderTimeline = (report: StatsReport, options: StatsRenderOptions 
   const lines = [...header(report, "stats timeline", options.color)]
   if (metric === "cost" && report.total.cost <= 0) lines.push("No positive cost recorded in this range.")
   else {
-    lines.push(`━━━ ${metric === "cost" ? "Daily cost" : "Daily token volume"}`, "", ...renderRoundedLineChart({ series: [dailySeries(report.daily, (day) => metric === "cost" ? day.cost : day.tokens.total)], width: Math.max(12, statsContentWidth() - 8), height: 8 }))
-    lines.push(metric === "cost" ? `total ${format(total)} · avg ${format(ratio(total, report.days))}/day · peak ${format(peak)}${peakDay ? ` on ${new Date(peakDay.day).toLocaleDateString()}` : ""} · ${values.filter((value) => value > 0).length}/${report.days} active days` : `total ${format(total)} · peak ${format(peak)}/day · avg ${format(ratio(total, report.days))}/day`)
+    lines.push(
+      `━━━ ${metric === "cost" ? "Daily cost" : "Daily token volume"}`,
+      "",
+      ...renderRoundedLineChart({
+        series: [dailySeries(report.daily, (day) => (metric === "cost" ? day.cost : day.tokens.total))],
+        width: Math.max(12, statsContentWidth() - 8),
+        height: 8,
+      }),
+    )
+    lines.push(
+      metric === "cost"
+        ? `total ${format(total)} · avg ${format(ratio(total, report.days))}/day · peak ${format(peak)}${peakDay ? ` on ${new Date(peakDay.day).toLocaleDateString()}` : ""} · ${values.filter((value) => value > 0).length}/${report.days} active days`
+        : `total ${format(total)} · peak ${format(peak)}/day · avg ${format(ratio(total, report.days))}/day`,
+    )
   }
   if (metric === "tokens") {
     // 各组件独立归一化只表示形状，旁边的绝对量、占比和峰值承担量级比较。
@@ -591,48 +724,152 @@ export const renderTimeline = (report: StatsReport, options: StatsRenderOptions 
     for (const layer of layersFromTokenParts()) {
       const points = report.daily.map(layer.value)
       const amount = layer.value({ ...report.total, day: report.dateRange.latest, label: "total" })
-      lines.push(`${layer.label === "Output" ? "Output + Reasoning" : layer.label} ${formatNumber(amount)} ${percentage(amount, report.total.tokens.total)} · peak ${formatNumber(Math.max(0, ...points))}/day`, sparkline(points, Math.max(8, Math.min(32, statsContentWidth() - 2))))
+      lines.push(
+        `${layer.label === "Output" ? "Output + Reasoning" : layer.label} ${formatNumber(amount)} ${percentage(amount, report.total.tokens.total)} · peak ${formatNumber(Math.max(0, ...points))}/day`,
+        sparkline(points, Math.max(8, Math.min(32, statsContentWidth() - 2))),
+      )
     }
   }
-  lines.push("━━━ Health and efficiency", ...renderCostHealthSection(report), ...report.daily.map((day) => `${day.label} completed=${Math.max(0, day.requests - day.errors - day.aborted)} error=${day.errors} aborted=${day.aborted} avg=${Math.round(ratio(day.durationMs, day.requests))}ms`))
-  lines.push(metric === "cost" ? "Top cost days" : "Top active days", ...renderComparisonTable([["date", metric, "requests", "failed"], ...report.daily.filter((day) => (metric === "cost" ? day.cost : day.tokens.total) > 0).toSorted((a, b) => metric === "cost" ? b.cost - a.cost : b.tokens.total - a.tokens.total).slice(0, 5).map((day) => [day.label, format(metric === "cost" ? day.cost : day.tokens.total), String(day.requests), percentage(day.errors + day.aborted, day.requests)])]))
+  lines.push(
+    "━━━ Health and efficiency",
+    ...renderCostHealthSection(report),
+    ...report.daily.map(
+      (day) =>
+        `${day.label} completed=${Math.max(0, day.requests - day.errors - day.aborted)} error=${day.errors} aborted=${day.aborted} avg=${Math.round(ratio(day.durationMs, day.requests))}ms`,
+    ),
+  )
+  lines.push(
+    metric === "cost" ? "Top cost days" : "Top active days",
+    ...renderComparisonTable([
+      ["date", metric, "requests", "failed"],
+      ...report.daily
+        .filter((day) => (metric === "cost" ? day.cost : day.tokens.total) > 0)
+        .toSorted((a, b) => (metric === "cost" ? b.cost - a.cost : b.tokens.total - a.tokens.total))
+        .slice(0, 5)
+        .map((day) => [
+          day.label,
+          format(metric === "cost" ? day.cost : day.tokens.total),
+          String(day.requests),
+          percentage(day.errors + day.aborted, day.requests),
+        ]),
+    ]),
+  )
   lines.push(metric === "cost" ? "Cost drivers" : "Entity trends")
-  for (const [title, series] of [["Models", report.modelSeries], ["Providers", report.providerSeries]] as const) {
-    lines.push(title, ...series.toSorted((a, b) => metric === "cost" ? b.cost - a.cost : b.tokens.total - a.tokens.total).slice(0, 3).map((item) => `${terminalText(item.label)} ${sparkline(item.points.map((point) => metric === "cost" ? point.cost : point.tokens.total), 14)} ${format(metric === "cost" ? item.cost : item.tokens.total)}`))
+  for (const [title, series] of [
+    ["Models", report.modelSeries],
+    ["Providers", report.providerSeries],
+  ] as const) {
+    lines.push(
+      title,
+      ...series
+        .toSorted((a, b) => (metric === "cost" ? b.cost - a.cost : b.tokens.total - a.tokens.total))
+        .slice(0, 3)
+        .map(
+          (item) =>
+            `${terminalText(item.label)} ${sparkline(
+              item.points.map((point) => (metric === "cost" ? point.cost : point.tokens.total)),
+              14,
+            )} ${format(metric === "cost" ? item.cost : item.tokens.total)}`,
+        ),
+    )
   }
-  if (options.heatmap) lines.push(...renderHeatmap({ title: metric === "cost" ? "Cost heatmap · calendar view" : "Token heatmap · calendar view", points: metric === "cost" ? dailyCostPoints(report) : dailyTokenPoints(report), color: options.color }))
-  return lines.flatMap((line) => line.includes("\x1b[") ? wrapAnsiVisible(line) : wrapVisible(line)).join("\n")
+  if (options.heatmap)
+    lines.push(
+      ...renderHeatmap({
+        title: metric === "cost" ? "Cost heatmap · calendar view" : "Token heatmap · calendar view",
+        points: metric === "cost" ? dailyCostPoints(report) : dailyTokenPoints(report),
+        color: options.color,
+      }),
+    )
+  return lines.flatMap((line) => (line.includes("\x1b[") ? wrapAnsiVisible(line) : wrapVisible(line))).join("\n")
 }
 
 // #174：sessions 按 sort 键排序再切片
 // #177：sessions 默认 tokens 排序
 export const renderSessions = (report: StatsReport, options: StatsRenderOptions = {}) => {
   const sort = options.sort ?? "tokens"
-  const rows = report.sessions.toSorted((a, b) => sort === "tokens" ? b.tokens.total - a.tokens.total : sort === "calls" ? b.assistantCalls - a.assistantCalls : sort === "updated" ? b.updated - a.updated : b.cost - a.cost)
-  const percentile = (values: number[], q: number) => values.toSorted((a, b) => a - b)[Math.floor(Math.max(0, values.length - 1) * q)] ?? 0
+  const rows = report.sessions.toSorted((a, b) =>
+    sort === "tokens"
+      ? b.tokens.total - a.tokens.total
+      : sort === "calls"
+        ? b.assistantCalls - a.assistantCalls
+        : sort === "updated"
+          ? b.updated - a.updated
+          : b.cost - a.cost,
+  )
+  const percentile = (values: number[], q: number) =>
+    values.toSorted((a, b) => a - b)[Math.floor(Math.max(0, values.length - 1) * q)] ?? 0
   const positive = report.sessions.filter((session) => session.cost > 0)
   const lines = [...header(report, "stats sessions", options.color), "━━━ Session population", ""]
   // 总体分位数和分布使用全部样本，limit仅约束下面的明细。
-  for (const q of [0.5, 0.9, 0.95, 0.99]) lines.push(`p${Math.round(q * 100)} ${formatNumber(percentile(report.sessions.map((session) => session.tokens.total), q))} tokens · ${priced(percentile(positive.map((session) => session.cost), q))}`)
+  for (const q of [0.5, 0.9, 0.95, 0.99])
+    lines.push(
+      `p${Math.round(q * 100)} ${formatNumber(
+        percentile(
+          report.sessions.map((session) => session.tokens.total),
+          q,
+        ),
+      )} tokens · ${priced(
+        percentile(
+          positive.map((session) => session.cost),
+          q,
+        ),
+      )}`,
+    )
   const bands = (title: string, values: number[], limits: number[], labels: string[]) => {
-    const counts = labels.map((_, index) => values.filter((value) => value >= limits[index] && value < (limits[index + 1] ?? Infinity)).length)
+    const counts = labels.map(
+      (_, index) => values.filter((value) => value >= limits[index] && value < (limits[index + 1] ?? Infinity)).length,
+    )
     const max = Math.max(1, ...counts)
     const width = Math.max(8, statsContentWidth() - 24)
-    return [title, ...counts.map((count, index) => `${labels[index]} ${"█".repeat(Math.round(count / max * width))}${"░".repeat(width - Math.round(count / max * width))} ${count} ${percentage(count, values.length)}`)]
+    return [
+      title,
+      ...counts.map(
+        (count, index) =>
+          `${labels[index]} ${"█".repeat(Math.round((count / max) * width))}${"░".repeat(width - Math.round((count / max) * width))} ${count} ${percentage(count, values.length)}`,
+      ),
+    ]
   }
-  lines.push(...bands("Session size distribution · tokens", report.sessions.map((session) => session.tokens.total), [0, 100_000, 1_000_000, 5_000_000, 50_000_000], ["<100K", "100K-1M", "1M-5M", "5M-50M", ">50M"]))
+  lines.push(
+    ...bands(
+      "Session size distribution · tokens",
+      report.sessions.map((session) => session.tokens.total),
+      [0, 100_000, 1_000_000, 5_000_000, 50_000_000],
+      ["<100K", "100K-1M", "1M-5M", "5M-50M", ">50M"],
+    ),
+  )
   // 零费用既可能是免费也可能是未定价，不能冒充正费用分布的低值样本。
-  lines.push(...(positive.length ? bands(`Session cost distribution · positive recorded cost (${positive.length} sessions)`, positive.map((session) => session.cost), [0, 0.1, 1, 5, 10], ["<$0.10", "$0.10-$1", "$1-$5", "$5-$10", ">$10"]) : ["Cost distribution unavailable: no positive cost recorded in this range."]))
-  if (positive.length < report.sessions.length) lines.push(`No positive recorded cost · ${report.sessions.length - positive.length} sessions`)
+  lines.push(
+    ...(positive.length
+      ? bands(
+          `Session cost distribution · positive recorded cost (${positive.length} sessions)`,
+          positive.map((session) => session.cost),
+          [0, 0.1, 1, 5, 10],
+          ["<$0.10", "$0.10-$1", "$1-$5", "$5-$10", ">$10"],
+        )
+      : ["Cost distribution unavailable: no positive cost recorded in this range."]),
+  )
+  if (positive.length < report.sessions.length)
+    lines.push(`No positive recorded cost · ${report.sessions.length - positive.length} sessions`)
   lines.push(`Session leaderboard · sorted by ${sort} · bar = token share`)
   const selected = limitRows(rows, options.limit ?? (statsContentWidth() < 60 ? 3 : 5))
   for (const session of selected) {
     const share = ratio(session.tokens.total, report.total.tokens.total)
     const width = Math.max(8, statsContentWidth() - 40)
-    lines.push(terminalText(session.title || session.id), `token share ${"█".repeat(Math.round(share * width))}${"░".repeat(Math.max(0, width - Math.round(share * width)))} ${percentage(session.tokens.total, report.total.tokens.total)} ${formatNumber(session.tokens.total)}`)
-    lines.push(`project ${terminalText(report.projects.find((project) => project.id === session.projectID)?.label ?? session.projectID)} · ${priced(session.cost)} · ${session.requests} req / ${session.assistantCalls} calls · ${session.messages} msg / ${session.tools} tools`)
-    lines.push(`cache ${percentage(session.tokens.cache.read, session.tokens.total)} · fail ${session.errors + session.aborted} · ${Math.round(ratio(session.durationMs, session.requests))}ms avg/request`)
-    lines.push(`models ${session.models.map(terminalText).join(", ") || "unknown"} · providers ${session.providers.map(terminalText).join(", ") || "unknown"}`, "")
+    lines.push(
+      terminalText(session.title || session.id),
+      `token share ${"█".repeat(Math.round(share * width))}${"░".repeat(Math.max(0, width - Math.round(share * width)))} ${percentage(session.tokens.total, report.total.tokens.total)} ${formatNumber(session.tokens.total)}`,
+    )
+    lines.push(
+      `project ${terminalText(report.projects.find((project) => project.id === session.projectID)?.label ?? session.projectID)} · ${priced(session.cost)} · ${session.requests} req / ${session.assistantCalls} calls · ${session.messages} msg / ${session.tools} tools`,
+    )
+    lines.push(
+      `cache ${percentage(session.tokens.cache.read, session.tokens.total)} · fail ${session.errors + session.aborted} · ${Math.round(ratio(session.durationMs, session.requests))}ms avg/request`,
+    )
+    lines.push(
+      `models ${session.models.map(terminalText).join(", ") || "unknown"} · providers ${session.providers.map(terminalText).join(", ") || "unknown"}`,
+      "",
+    )
   }
   lines.push(`Visible ${selected.length} of ${rows.length} usage sessions · use -n to change rows`)
   return lines.flatMap((line) => wrapVisible(line)).join("\n")
@@ -655,12 +892,29 @@ export const renderCharts = (report: StatsReport, options: StatsRenderOptions = 
           })),
         })
       : []),
-    ...renderRankBars({ rows: limitRows(report.models, options.limit ?? 8).map((m) => ({ label: m.label || m.id, value: m.tokens.total })) }),
+    ...renderRankBars({
+      rows: limitRows(report.models, options.limit ?? 8).map((m) => ({
+        label: m.label || m.id,
+        value: m.tokens.total,
+      })),
+    }),
     ...renderRoundedLineChart({ series: [dailySeries(report.daily, (d) => d.cost)] }),
     ...renderUsageSeries(report.modelSeries, options, "Model usage over time"),
     ...renderUsageSeries(report.providerSeries, options, "Provider usage over time"),
     ...renderStackedAreaChart({ title: "Token components", daily: report.daily, layers: layersFromTokenParts() }),
-    ...renderStreamStackChart({ title: "Model mix over time", daily: report.daily, layers: limitRows(report.modelSeries, options.limit).map((series) => ({ id: series.id, label: series.label || series.id, color: "cyan", value: (day) => { const point = series.points.find((point) => point.day === day.day); return options.metric === "cost" ? point?.cost ?? 0 : point?.tokens.total ?? 0 } })) }),
+    ...renderStreamStackChart({
+      title: "Model mix over time",
+      daily: report.daily,
+      layers: limitRows(report.modelSeries, options.limit).map((series) => ({
+        id: series.id,
+        label: series.label || series.id,
+        color: "cyan",
+        value: (day) => {
+          const point = series.points.find((point) => point.day === day.day)
+          return options.metric === "cost" ? (point?.cost ?? 0) : (point?.tokens.total ?? 0)
+        },
+      })),
+    }),
   ].join("\n")
 
 // #174：双热力加矩阵禁止 timeline 别名
@@ -669,21 +923,30 @@ export const renderCharts = (report: StatsReport, options: StatsRenderOptions = 
 // #174：renderHeatmapPage 输出密度格/矩阵语义，供 heatmap 命令使用
 export const renderHeatmapPage = (report: StatsReport, options: StatsRenderOptions = {}) => {
   // token portfolio与工具发起方独立计量，不可用工具次数取代没有工具的token用量。
-  const portfolio = report.providers.flatMap((provider) => provider.models.map((model) => [`${provider.label || provider.id}/${model.id}`, formatNumber(model.tokens)]))
+  const portfolio = report.providers.flatMap((provider) =>
+    provider.models.map((model) => [`${provider.label || provider.id}/${model.id}`, formatNumber(model.tokens)]),
+  )
   const mix = new Map<string, number>()
   for (const call of report.toolCalls ?? []) {
     const key = `${call.providerID}/${call.modelID}`
     mix.set(key, (mix.get(key) ?? 0) + call.calls)
   }
-  const topMix = Array.from(mix.entries()).sort((a, b) => b[1] - a[1]).slice(0, options.limit ?? 8)
+  const topMix = Array.from(mix.entries())
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, options.limit ?? 8)
   return [
     ...header(report, "stats heatmap", options.color),
     ...renderHeatmap({ title: "Daily tokens", points: dailyTokenPoints(report), color: options.color }),
     ...renderHeatmap({ title: "Daily cost", points: dailyCostPoints(report), color: options.color }),
     ...(topMix.length > 0
-      ? renderRankBars({ title: "provider/model by tool calls", rows: topMix.map(([label, calls]) => ({ label, value: calls })) })
+      ? renderRankBars({
+          title: "provider/model by tool calls",
+          rows: topMix.map(([label, calls]) => ({ label, value: calls })),
+        })
       : []),
-    ...(portfolio.length ? ["Model portfolio by provider (tokens)", ...renderComparisonTable([["provider/model", "tokens"], ...portfolio])] : []),
+    ...(portfolio.length
+      ? ["Model portfolio by provider (tokens)", ...renderComparisonTable([["provider/model", "tokens"], ...portfolio])]
+      : []),
   ].join("\n")
 }
 
@@ -694,12 +957,19 @@ export const renderCosts = (report: StatsReport, options: StatsRenderOptions = {
     ...renderRankBars({
       // #177：显式 cost 先排序再限行，默认沿用 tokens 榜
       rows: limitRows(
-        options.sort === "cost" ? [...report.models].sort((a, b) => b.cost - a.cost || b.tokens.total - a.tokens.total) : options.sort === "calls" ? [...report.models].sort((a, b) => b.assistantCalls - a.assistantCalls) : report.models,
+        options.sort === "cost"
+          ? [...report.models].sort((a, b) => b.cost - a.cost || b.tokens.total - a.tokens.total)
+          : options.sort === "calls"
+            ? [...report.models].sort((a, b) => b.assistantCalls - a.assistantCalls)
+            : report.models,
         options.limit,
       ).map((m) => ({ label: m.label || m.id, value: m.cost })),
     }),
     ...renderRoundedLineChart({ series: [dailySeries(report.daily, (d) => d.cost)] }),
-    ...renderWaterfall({ title: "Provider cost waterfall", steps: report.providers.map((provider) => ({ label: provider.label || provider.id, delta: provider.cost })) }),
+    ...renderWaterfall({
+      title: "Provider cost waterfall",
+      steps: report.providers.map((provider) => ({ label: provider.label || provider.id, delta: provider.cost })),
+    }),
     ...renderHistogram({ title: "Session cost distribution", values: report.sessions.map((session) => session.cost) }),
   ].join("\n")
 
@@ -709,14 +979,31 @@ export const renderTokens = (report: StatsReport, options: StatsRenderOptions = 
   [
     ...header(report, "stats tokens", options.color),
     `input=${formatNumber(report.total.tokens.input)} output=${formatNumber(report.total.tokens.output + report.total.tokens.reasoning)} cacheRead=${formatNumber(report.total.tokens.cache.read)} cacheWrite=${formatNumber(report.total.tokens.cache.write)}`,
-    ...renderRankBars({ rows: limitRows(report.models, options.limit).map((m) => ({ label: m.label || m.id, value: m.tokens.total })) }),
-    ...renderStackedAreaChart({ title: "Input / output / cache over time", daily: report.daily, layers: layersFromTokenParts() }),
-    ...renderPercentStack({ title: "Token share", columns: report.daily.map((day) => ({ label: day.label, parts: layersFromTokenParts().map((layer) => ({ label: layer.label, value: layer.value(day) })) })) }),
-    ...renderCompositionDonut({ title: "Top model token share", parts: limitRows(report.models, options.limit).map((model) => ({ label: model.label || model.id, value: model.tokens.total })) }),
+    ...renderRankBars({
+      rows: limitRows(report.models, options.limit).map((m) => ({ label: m.label || m.id, value: m.tokens.total })),
+    }),
+    ...renderStackedAreaChart({
+      title: "Input / output / cache over time",
+      daily: report.daily,
+      layers: layersFromTokenParts(),
+    }),
+    ...renderPercentStack({
+      title: "Token share",
+      columns: report.daily.map((day) => ({
+        label: day.label,
+        parts: layersFromTokenParts().map((layer) => ({ label: layer.label, value: layer.value(day) })),
+      })),
+    }),
+    ...renderCompositionDonut({
+      title: "Top model token share",
+      parts: limitRows(report.models, options.limit).map((model) => ({
+        label: model.label || model.id,
+        value: model.tokens.total,
+      })),
+    }),
   ].join("\n")
 
 export { formatNumber }
-
 
 // #177：独立导出工具上下文时间序列块，供 charts/dashboard 组合
 export const renderToolSeries = (report: StatsReport, options: StatsRenderOptions = {}) => {
@@ -731,77 +1018,407 @@ export const renderToolSeries = (report: StatsReport, options: StatsRenderOption
   }).join("\n")
 }
 
-const ratio = (value: number, total: number) => total > 0 ? value / total : 0
+const ratio = (value: number, total: number) => (total > 0 ? value / total : 0)
 const percentage = (value: number, total: number) => `${(ratio(value, total) * 100).toFixed(1)}%`
-const priced = (value: number) => value > 0 ? money(value) : "—"
+const priced = (value: number) => (value > 0 ? money(value) : "—")
 const mixText = (items: { id: string; value: number }[], limit = 3) => {
   // 长尾明确归入other；分母先取完整集合，不随可见项数变化。
   const sorted = items.filter((item) => item.value > 0).toSorted((a, b) => b.value - a.value)
   const total = sorted.reduce((sum, item) => sum + item.value, 0)
   const other = sorted.slice(limit).reduce((sum, item) => sum + item.value, 0)
-  return total > 0 ? [...sorted.slice(0, limit), ...(other > 0 ? [{ id: "other", value: other }] : [])].map((item) => `${terminalText(item.id)} ${percentage(item.value, total)}`).join(" · ") : "—"
+  return total > 0
+    ? [...sorted.slice(0, limit), ...(other > 0 ? [{ id: "other", value: other }] : [])]
+        .map((item) => `${terminalText(item.id)} ${percentage(item.value, total)}`)
+        .join(" · ")
+    : "—"
 }
 const highOutlier = (value: number, population: number[], format: (value: number) => string) => {
   // 异常基线取完整过滤后总体，不能因limit缩小而改变同一个Provider的标记。
   const mean = population.reduce((sum, item) => sum + item, 0) / Math.max(1, population.length)
-  const sigma = Math.sqrt(population.reduce((sum, item) => sum + (item - mean) ** 2, 0) / Math.max(1, population.length))
+  const sigma = Math.sqrt(
+    population.reduce((sum, item) => sum + (item - mean) ** 2, 0) / Math.max(1, population.length),
+  )
   const z = sigma > 0 && population.length >= 3 ? (value - mean) / sigma : 0
   return `${format(value)}${z >= 3 ? "!" : z >= 2 ? "^" : ""}`
 }
 
-const renderDimensionAnalysis = (report: StatsReport, all: StatsReport["models"], by: Exclude<BreakdownDimension, "tool">, options: StatsRenderOptions) => {
-  const groups = limitRows(all.toSorted((a, b) => (options.sort ?? (by === "provider" && options.metric === undefined ? "cost" : "tokens")) === "cost" ? b.cost - a.cost : options.sort === "calls" ? b.assistantCalls - a.assistantCalls : b.tokens.total - a.tokens.total), options.limit ?? (statsContentWidth() < 100 ? 3 : 5))
-  const table = (title: string, columns: string[], rows: string[][]) => ["", `━━━ ${title}`, "", ...renderComparisonTable([columns, ...rows])]
-  const tokenMix = (items: { id: string; tokens: number }[]) => mixText(items.map((item) => ({ id: item.id, value: item.tokens })))
-  const series = { model: report.modelSeries, provider: report.providerSeries, agent: report.agentSeries, source: report.sourceSeries, project: report.projectSeries, status: report.statusSeries }[by]
-  const key = { model: "modelID", provider: "providerID", agent: "agent", source: "source", project: "projectID", status: "status" }[by] as "modelID" | "providerID" | "agent" | "source" | "projectID" | "status"
+const renderDimensionAnalysis = (
+  report: StatsReport,
+  all: StatsReport["models"],
+  by: Exclude<BreakdownDimension, "tool">,
+  options: StatsRenderOptions,
+) => {
+  const groups = limitRows(
+    all.toSorted((a, b) =>
+      (options.sort ?? (by === "provider" && options.metric === undefined ? "cost" : "tokens")) === "cost"
+        ? b.cost - a.cost
+        : options.sort === "calls"
+          ? b.assistantCalls - a.assistantCalls
+          : b.tokens.total - a.tokens.total,
+    ),
+    options.limit ?? (statsContentWidth() < 100 ? 3 : 5),
+  )
+  const table = (title: string, columns: string[], rows: string[][]) => [
+    "",
+    `━━━ ${title}`,
+    "",
+    ...renderComparisonTable([columns, ...rows]),
+  ]
+  const tokenMix = (items: { id: string; tokens: number }[]) =>
+    mixText(items.map((item) => ({ id: item.id, value: item.tokens })))
+  const series = {
+    model: report.modelSeries,
+    provider: report.providerSeries,
+    agent: report.agentSeries,
+    source: report.sourceSeries,
+    project: report.projectSeries,
+    status: report.statusSeries,
+  }[by]
+  const key = {
+    model: "modelID",
+    provider: "providerID",
+    agent: "agent",
+    source: "source",
+    project: "projectID",
+    status: "status",
+  }[by] as "modelID" | "providerID" | "agent" | "source" | "projectID" | "status"
   const callMix = (id: string) => {
     const totals = new Map<string, number>()
-    for (const call of report.toolCalls.filter((call) => call[key] === id)) totals.set(call.toolID, (totals.get(call.toolID) ?? 0) + call.calls)
+    for (const call of report.toolCalls.filter((call) => call[key] === id))
+      totals.set(call.toolID, (totals.get(call.toolID) ?? 0) + call.calls)
     return mixText(Array.from(totals, ([id, value]) => ({ id, value })))
   }
   // RequestUsage只拥有请求健康，Assistant行拥有token/cost；secondary usage的零请求不是缺失数据。
-  const health = (group: StatsReport["models"][number]) => [group.requests > 0 ? percentage(group.errors + group.aborted, group.requests) : "—", group.requests > 0 ? `${Math.round(group.durationMs / group.requests)}ms` : "—"]
-  const components = (group: StatsReport["models"][number]) => Object.entries({ system: group.components.system, instructions: group.components.instructions, skills: group.components.skills, schemas: group.components.toolSchemas, user: group.components.userMessages, assistant: group.components.assistantText, reasoning: group.components.reasoning, "tool calls": group.components.toolCalls, "tool results": group.components.toolResults, attach: group.components.attachments })
+  const health = (group: StatsReport["models"][number]) => [
+    group.requests > 0 ? percentage(group.errors + group.aborted, group.requests) : "—",
+    group.requests > 0 ? `${Math.round(group.durationMs / group.requests)}ms` : "—",
+  ]
+  const components = (group: StatsReport["models"][number]) =>
+    Object.entries({
+      system: group.components.system,
+      instructions: group.components.instructions,
+      skills: group.components.skills,
+      schemas: group.components.toolSchemas,
+      user: group.components.userMessages,
+      assistant: group.components.assistantText,
+      reasoning: group.components.reasoning,
+      "tool calls": group.components.toolCalls,
+      "tool results": group.components.toolResults,
+      attach: group.components.attachments,
+    })
   const lines: string[] = []
   if (by === "model") {
-    lines.push(...table("Model portfolio", ["model", "tokens", "share", "cost", "owned req", "calls", "tok/call", "sessions", "owner fail", "owner avg"], groups.map((group) => [group.label, formatNumber(group.tokens.total), percentage(group.tokens.total, report.total.tokens.total), priced(group.cost), String(group.requests), String(group.assistantCalls), formatNumber(ratio(group.tokens.total, group.assistantCalls)), String(group.sessions), ...health(group)])))
-    lines.push("owned req / owner fail / owner avg follow RequestUsage owner; tokens, cost and calls follow Assistant usage.")
-    lines.push("━━━ Token composition", ...renderPercentStack({ columns: groups.map((group) => ({ label: terminalText(group.label), parts: [{ label: "input", value: group.tokens.input }, { label: "output", value: group.tokens.output }, { label: "reasoning", value: group.tokens.reasoning }, { label: "cache read", value: group.tokens.cache.read }, { label: "cache write", value: group.tokens.cache.write }] })) }))
-    lines.push(...table("Routing & tools", ["model", "provider mix by tokens", "issued tool calls"], groups.map((group) => [group.label, tokenMix(group.providers), callMix(group.id)])))
+    lines.push(
+      ...table(
+        "Model portfolio",
+        ["model", "tokens", "share", "cost", "owned req", "calls", "tok/call", "sessions", "owner fail", "owner avg"],
+        groups.map((group) => [
+          group.label,
+          formatNumber(group.tokens.total),
+          percentage(group.tokens.total, report.total.tokens.total),
+          priced(group.cost),
+          String(group.requests),
+          String(group.assistantCalls),
+          formatNumber(ratio(group.tokens.total, group.assistantCalls)),
+          String(group.sessions),
+          ...health(group),
+        ]),
+      ),
+    )
+    lines.push(
+      "owned req / owner fail / owner avg follow RequestUsage owner; tokens, cost and calls follow Assistant usage.",
+    )
+    lines.push(
+      "━━━ Token composition",
+      ...renderPercentStack({
+        columns: groups.map((group) => ({
+          label: terminalText(group.label),
+          parts: [
+            { label: "input", value: group.tokens.input },
+            { label: "output", value: group.tokens.output },
+            { label: "reasoning", value: group.tokens.reasoning },
+            { label: "cache read", value: group.tokens.cache.read },
+            { label: "cache write", value: group.tokens.cache.write },
+          ],
+        })),
+      }),
+    )
+    lines.push(
+      ...table(
+        "Routing & tools",
+        ["model", "provider mix by tokens", "issued tool calls"],
+        groups.map((group) => [group.label, tokenMix(group.providers), callMix(group.id)]),
+      ),
+    )
   }
   if (by === "provider") {
-    const perCall = report.providers.filter((group) => group.cost > 0 && group.assistantCalls > 0).map((group) => group.cost / group.assistantCalls)
-    const failures = report.providers.filter((group) => group.requests > 0).map((group) => (group.errors + group.aborted) / group.requests)
-    const durations = report.providers.filter((group) => group.requests > 0).map((group) => group.durationMs / group.requests)
-    lines.push(...table("Provider economics", ["provider", "tokens", "share", "cost", "cost share", "owned req", "calls", "$/call", "cache", "owner fail", "owner avg"], groups.map((group) => [group.label, formatNumber(group.tokens.total), percentage(group.tokens.total, report.total.tokens.total), priced(group.cost), group.cost > 0 ? percentage(group.cost, report.total.cost) : "—", String(group.requests), String(group.assistantCalls), group.cost > 0 && group.assistantCalls > 0 ? highOutlier(group.cost / group.assistantCalls, perCall, money) : "—", percentage(group.tokens.cache.read + group.tokens.cache.write, group.tokens.total), group.requests > 0 ? highOutlier((group.errors + group.aborted) / group.requests, failures, (value) => percentage(value, 1)) : "—", group.requests > 0 ? highOutlier(group.durationMs / group.requests, durations, (value) => `${Math.round(value)}ms`) : "—"])))
-    lines.push("Risk marks compare the full provider population: ! >=3σ, ^ >=2σ. Cache >=95% is highlighted as healthy.")
-    lines.push(...table("Model portfolio by provider", ["provider", "models by tokens"], groups.map((group) => [group.label, tokenMix(group.models)])))
-    lines.push(...table("Capacity & reliability", ["provider", "tok/$", "tok/call", "output", "errors", "aborted", "completed", "recent cost/day"], groups.map((group) => [group.label, group.cost > 0 ? formatNumber(group.tokens.total / group.cost) : "—", formatNumber(ratio(group.tokens.total, group.assistantCalls)), percentage(group.tokens.output + group.tokens.reasoning, group.tokens.total), highOutlier(group.errors, report.providers.map((item) => item.errors), formatNumber), highOutlier(group.aborted, report.providers.map((item) => item.aborted), formatNumber), String(Math.max(0, group.requests - group.errors - group.aborted)), sparkline(series.find((item) => item.id === group.id)?.points.map((point) => point.cost) ?? [], 12)])))
+    const perCall = report.providers
+      .filter((group) => group.cost > 0 && group.assistantCalls > 0)
+      .map((group) => group.cost / group.assistantCalls)
+    const failures = report.providers
+      .filter((group) => group.requests > 0)
+      .map((group) => (group.errors + group.aborted) / group.requests)
+    const durations = report.providers
+      .filter((group) => group.requests > 0)
+      .map((group) => group.durationMs / group.requests)
+    lines.push(
+      ...table(
+        "Provider economics",
+        [
+          "provider",
+          "tokens",
+          "share",
+          "cost",
+          "cost share",
+          "owned req",
+          "calls",
+          "$/call",
+          "cache",
+          "owner fail",
+          "owner avg",
+        ],
+        groups.map((group) => [
+          group.label,
+          formatNumber(group.tokens.total),
+          percentage(group.tokens.total, report.total.tokens.total),
+          priced(group.cost),
+          group.cost > 0 ? percentage(group.cost, report.total.cost) : "—",
+          String(group.requests),
+          String(group.assistantCalls),
+          group.cost > 0 && group.assistantCalls > 0
+            ? highOutlier(group.cost / group.assistantCalls, perCall, money)
+            : "—",
+          percentage(group.tokens.cache.read + group.tokens.cache.write, group.tokens.total),
+          group.requests > 0
+            ? highOutlier((group.errors + group.aborted) / group.requests, failures, (value) => percentage(value, 1))
+            : "—",
+          group.requests > 0
+            ? highOutlier(group.durationMs / group.requests, durations, (value) => `${Math.round(value)}ms`)
+            : "—",
+        ]),
+      ),
+    )
+    lines.push(
+      "Risk marks compare the full provider population: ! >=3σ, ^ >=2σ. Cache >=95% is highlighted as healthy.",
+    )
+    lines.push(
+      ...table(
+        "Model portfolio by provider",
+        ["provider", "models by tokens"],
+        groups.map((group) => [group.label, tokenMix(group.models)]),
+      ),
+    )
+    lines.push(
+      ...table(
+        "Capacity & reliability",
+        ["provider", "tok/$", "tok/call", "output", "errors", "aborted", "completed", "recent cost/day"],
+        groups.map((group) => [
+          group.label,
+          group.cost > 0 ? formatNumber(group.tokens.total / group.cost) : "—",
+          formatNumber(ratio(group.tokens.total, group.assistantCalls)),
+          percentage(group.tokens.output + group.tokens.reasoning, group.tokens.total),
+          highOutlier(
+            group.errors,
+            report.providers.map((item) => item.errors),
+            formatNumber,
+          ),
+          highOutlier(
+            group.aborted,
+            report.providers.map((item) => item.aborted),
+            formatNumber,
+          ),
+          String(Math.max(0, group.requests - group.errors - group.aborted)),
+          sparkline(series.find((item) => item.id === group.id)?.points.map((point) => point.cost) ?? [], 12),
+        ]),
+      ),
+    )
   }
   if (by === "agent" || by === "source") {
-    lines.push(...table(by === "agent" ? "Agent workload" : "Source workload", [by, "tokens", "sessions", "cost", "owned req", "calls", "calls/req", "tok/session", "tok/req*", "cost/req*", "cache", "owner fail", "owner avg"], groups.map((group) => [group.label, formatNumber(group.tokens.total), String(group.sessions), priced(group.cost), String(group.requests), String(group.assistantCalls), group.requests > 0 ? ratio(group.assistantCalls, group.requests).toFixed(1) : "—", formatNumber(ratio(group.tokens.total, group.sessions)), group.requests > 0 ? formatNumber(group.tokens.total / group.requests) : "—", group.requests > 0 ? priced(group.cost / group.requests) : "—", percentage(group.tokens.cache.read + group.tokens.cache.write, group.tokens.total), ...health(group)])))
+    lines.push(
+      ...table(
+        by === "agent" ? "Agent workload" : "Source workload",
+        [
+          by,
+          "tokens",
+          "sessions",
+          "cost",
+          "owned req",
+          "calls",
+          "calls/req",
+          "tok/session",
+          "tok/req*",
+          "cost/req*",
+          "cache",
+          "owner fail",
+          "owner avg",
+        ],
+        groups.map((group) => [
+          group.label,
+          formatNumber(group.tokens.total),
+          String(group.sessions),
+          priced(group.cost),
+          String(group.requests),
+          String(group.assistantCalls),
+          group.requests > 0 ? ratio(group.assistantCalls, group.requests).toFixed(1) : "—",
+          formatNumber(ratio(group.tokens.total, group.sessions)),
+          group.requests > 0 ? formatNumber(group.tokens.total / group.requests) : "—",
+          group.requests > 0 ? priced(group.cost / group.requests) : "—",
+          percentage(group.tokens.cache.read + group.tokens.cache.write, group.tokens.total),
+          ...health(group),
+        ]),
+      ),
+    )
     // Source缺旧组件归因时明确不可用；Agent仍逐一展示十类，共用行内完整分母。
-    lines.push(...table("Input context composition", [by, "input components"], groups.map((group) => { const parts = components(group); const total = parts.reduce((sum, [, value]) => sum + value, 0); return [group.label, total > 0 ? by === "source" ? mixText(parts.map(([id, value]) => ({ id, value })), 5) : parts.map(([label, value]) => `${label} ${percentage(value, total)}`).join(" · ") : "component attribution unavailable for these records"] })))
+    lines.push(
+      ...table(
+        "Input context composition",
+        [by, "input components"],
+        groups.map((group) => {
+          const parts = components(group)
+          const total = parts.reduce((sum, [, value]) => sum + value, 0)
+          return [
+            group.label,
+            total > 0
+              ? by === "source"
+                ? mixText(
+                    parts.map(([id, value]) => ({ id, value })),
+                    5,
+                  )
+                : parts.map(([label, value]) => `${label} ${percentage(value, total)}`).join(" · ")
+              : "component attribution unavailable for these records",
+          ]
+        }),
+      ),
+    )
     lines.push("* request-owner denominator and health; legacy Assistant usage has no owned request.")
   }
   if (by === "project") {
-    lines.push(...table("Project portfolio", ["project", "path", "tokens", "share", "cost", "sessions", "requests", "calls", "active days", "owner fail", "owner avg"], groups.map((group) => [group.label, report.projects.find((item) => item.id === group.id)?.path || "Path unavailable", formatNumber(group.tokens.total), percentage(group.tokens.total, report.total.tokens.total), priced(group.cost), String(group.sessions), String(group.requests), String(group.assistantCalls), String(series.find((item) => item.id === group.id)?.points.filter((point) => point.tokens.total > 0 || point.cost > 0 || point.requests > 0).length ?? 0), ...health(group)])))
+    lines.push(
+      ...table(
+        "Project portfolio",
+        [
+          "project",
+          "path",
+          "tokens",
+          "share",
+          "cost",
+          "sessions",
+          "requests",
+          "calls",
+          "active days",
+          "owner fail",
+          "owner avg",
+        ],
+        groups.map((group) => [
+          group.label,
+          report.projects.find((item) => item.id === group.id)?.path || "Path unavailable",
+          formatNumber(group.tokens.total),
+          percentage(group.tokens.total, report.total.tokens.total),
+          priced(group.cost),
+          String(group.sessions),
+          String(group.requests),
+          String(group.assistantCalls),
+          String(
+            series
+              .find((item) => item.id === group.id)
+              ?.points.filter((point) => point.tokens.total > 0 || point.cost > 0 || point.requests > 0).length ?? 0,
+          ),
+          ...health(group),
+        ]),
+      ),
+    )
     // 使用稳定project ID找会话，同名目录或Project标签不能混合归属。
-    lines.push(...table("Largest sessions inside each project", ["project", "session", "tokens", "cost", "requests"], groups.map((group) => { const session = report.sessions.filter((item) => item.projectID === group.id).toSorted((a, b) => b.tokens.total - a.tokens.total)[0]; return [group.label, session?.title ?? "—", formatNumber(session?.tokens.total ?? 0), priced(session?.cost ?? 0), String(session?.requests ?? 0)] })))
+    lines.push(
+      ...table(
+        "Largest sessions inside each project",
+        ["project", "session", "tokens", "cost", "requests"],
+        groups.map((group) => {
+          const session = report.sessions
+            .filter((item) => item.projectID === group.id)
+            .toSorted((a, b) => b.tokens.total - a.tokens.total)[0]
+          return [
+            group.label,
+            session?.title ?? "—",
+            formatNumber(session?.tokens.total ?? 0),
+            priced(session?.cost ?? 0),
+            String(session?.requests ?? 0),
+          ]
+        }),
+      ),
+    )
   }
-  if (by !== "status") lines.push(...table(by === "model" ? "Runtime mix" : "Routing mix", [by, "models by tokens", "providers by tokens", "tools by calls"], groups.map((group) => [group.label, tokenMix(group.models), tokenMix(group.providers), callMix(group.id)])))
+  if (by !== "status")
+    lines.push(
+      ...table(
+        by === "model" ? "Runtime mix" : "Routing mix",
+        [by, "models by tokens", "providers by tokens", "tools by calls"],
+        groups.map((group) => [group.label, tokenMix(group.models), tokenMix(group.providers), callMix(group.id)]),
+      ),
+    )
   if (by === "status") {
     const outcomes = all.filter((group) => group.id !== "unattributed")
     const total = outcomes.reduce((sum, group) => sum + group.requests, 0)
     const count = (id: string) => outcomes.find((group) => group.id === id)?.requests ?? 0
-    lines.push(`Request outcomes · ${total} total · ${count("completed")} completed · ${count("error")} error · ${count("aborted")} aborted · ${count("running")} running`)
-    lines.push(...table("Outcome distribution", ["status", "requests", "req share", "tokens", "cost"], outcomes.map((group) => [group.label, String(group.requests), percentage(group.requests, total), formatNumber(group.tokens.total), priced(group.cost)])))
-    lines.push(...table("Status efficiency", ["status", "tokens/req", "cost/req", "calls/req", "cache", "output", "sessions"], outcomes.map((group) => [group.label, group.requests > 0 ? formatNumber(group.tokens.total / group.requests) : "—", group.requests > 0 ? priced(group.cost / group.requests) : "—", group.requests > 0 ? (group.assistantCalls / group.requests).toFixed(1) : "—", percentage(group.tokens.cache.read + group.tokens.cache.write, group.tokens.total), percentage(group.tokens.output + group.tokens.reasoning, group.tokens.total), String(group.sessions)])))
+    lines.push(
+      `Request outcomes · ${total} total · ${count("completed")} completed · ${count("error")} error · ${count("aborted")} aborted · ${count("running")} running`,
+    )
+    lines.push(
+      ...table(
+        "Outcome distribution",
+        ["status", "requests", "req share", "tokens", "cost"],
+        outcomes.map((group) => [
+          group.label,
+          String(group.requests),
+          percentage(group.requests, total),
+          formatNumber(group.tokens.total),
+          priced(group.cost),
+        ]),
+      ),
+    )
+    lines.push(
+      ...table(
+        "Status efficiency",
+        ["status", "tokens/req", "cost/req", "calls/req", "cache", "output", "sessions"],
+        outcomes.map((group) => [
+          group.label,
+          group.requests > 0 ? formatNumber(group.tokens.total / group.requests) : "—",
+          group.requests > 0 ? priced(group.cost / group.requests) : "—",
+          group.requests > 0 ? (group.assistantCalls / group.requests).toFixed(1) : "—",
+          percentage(group.tokens.cache.read + group.tokens.cache.write, group.tokens.total),
+          percentage(group.tokens.output + group.tokens.reasoning, group.tokens.total),
+          String(group.sessions),
+        ]),
+      ),
+    )
     const unattributed = all.find((group) => group.id === "unattributed")
-    if (unattributed) lines.push(`Unattributed usage · ${formatNumber(unattributed.tokens.total)} tokens · ${priced(unattributed.cost)} · no owning request outcome`)
+    if (unattributed)
+      lines.push(
+        `Unattributed usage · ${formatNumber(unattributed.tokens.total)} tokens · ${priced(unattributed.cost)} · no owning request outcome`,
+      )
     const failures = report.total.errors + report.total.aborted
-    lines.push(...table("Failure leaders within each dimension", ["dimension", "leader", "failed req", "rate in leader", "share of all failures"], [{ label: "model", groups: report.models }, { label: "provider", groups: report.providers }, { label: "source", groups: report.sources }, { label: "agent", groups: report.agents }, { label: "project", groups: report.projects }].map((dimension) => { const leader = dimension.groups.toSorted((a, b) => b.errors + b.aborted - a.errors - a.aborted)[0]; const failed = (leader?.errors ?? 0) + (leader?.aborted ?? 0); return [dimension.label, leader?.label ?? "—", String(failed), percentage(failed, leader?.requests ?? 0), percentage(failed, failures)] })))
+    lines.push(
+      ...table(
+        "Failure leaders within each dimension",
+        ["dimension", "leader", "failed req", "rate in leader", "share of all failures"],
+        [
+          { label: "model", groups: report.models },
+          { label: "provider", groups: report.providers },
+          { label: "source", groups: report.sources },
+          { label: "agent", groups: report.agents },
+          { label: "project", groups: report.projects },
+        ].map((dimension) => {
+          const leader = dimension.groups.toSorted((a, b) => b.errors + b.aborted - a.errors - a.aborted)[0]
+          const failed = (leader?.errors ?? 0) + (leader?.aborted ?? 0)
+          return [
+            dimension.label,
+            leader?.label ?? "—",
+            String(failed),
+            percentage(failed, leader?.requests ?? 0),
+            percentage(failed, failures),
+          ]
+        }),
+      ),
+    )
     lines.push("Outcome ratios exclude unattributed usage. Each leader row is an independent query, not a partition.")
   }
   return lines.flatMap((line) => wrapVisible(line))

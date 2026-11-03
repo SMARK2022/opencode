@@ -22,8 +22,8 @@ export async function resolveNotebook(filePath: string) {
   } catch (error) {
     throw new Error(
       `Unable to open notebook: ${filePath}. ${error instanceof Error ? error.message : String(error)}. ` +
-      `If this is a new notebook, use vscode_notebook_env with operation=create to create it. ` +
-      `Otherwise, check the exact path from vscode_notebook_summary.`,
+        `If this is a new notebook, use vscode_notebook_env with operation=create to create it. ` +
+        `Otherwise, check the exact path from vscode_notebook_summary.`,
       { cause: error },
     )
   }
@@ -35,7 +35,9 @@ export function resolveNotebookCell(notebook: vscode.NotebookDocument, cellIndex
     // 先接受模型返回的 ID 别名，再沿既有多格歧义检查匹配。
     const normalized = normalizeCellId(cellId)
     // 仅在给定文档内以 summary 同款 canonical ID 匹配，不比较截短显示片段。
-    const cells = notebook.getCells().filter((candidate) => cellIdentifiers(candidate).some((id) => shortId(id) === shortId(normalized)))
+    const cells = notebook
+      .getCells()
+      .filter((candidate) => cellIdentifiers(candidate).some((id) => shortId(id) === shortId(normalized)))
     // 多个别名命中同一格不算歧义，多个不同格命中必须拒绝。
     if (cells.length > 1) throw new Error(`Ambiguous notebook cell ID: ${cellId}`)
     if (cells.length === 1) return cells[0]
@@ -43,7 +45,9 @@ export function resolveNotebookCell(notebook: vscode.NotebookDocument, cellIndex
     // cell ID 在 type-change（replaceCells）后失效，因为新 cell 获得新的 URI。
     // 此错误被 edit/run/source/output 共用，消息不能只提 "edit response"。
     // 建议调用 summary 获取当前 cell map，这是所有工具通用的恢复路径。
-    throw new Error(`Notebook cell not found: ${cellId}. Cell IDs change after type-change edits — call vscode_notebook_summary to get the current cell map.`)
+    throw new Error(
+      `Notebook cell not found: ${cellId}. Cell IDs change after type-change edits — call vscode_notebook_summary to get the current cell map.`,
+    )
   }
 
   // 显式 ID 的不命中或歧义先拒绝，不能被同时传入的数字位置掩盖。
@@ -59,4 +63,3 @@ export function resolveNotebookCell(notebook: vscode.NotebookDocument, cellIndex
 
   return notebook.cellAt(0)
 }
-

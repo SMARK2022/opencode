@@ -4,7 +4,13 @@ import { Database } from "@opencode-ai/core/database/database"
 import type { ColdStorage } from "@opencode-ai/core/storage/cold-storage"
 import type { Sqlite } from "@opencode-ai/core/database/sqlite"
 import { EventV2Bridge } from "@/event-v2-bridge"
-import { MessageTable, PartTable, SessionTable, SessionInputTable, SessionMessageTable } from "@opencode-ai/core/session/sql"
+import {
+  MessageTable,
+  PartTable,
+  SessionTable,
+  SessionInputTable,
+  SessionMessageTable,
+} from "@opencode-ai/core/session/sql"
 import { SessionEvent } from "@opencode-ai/core/session/event"
 import { SessionExecution } from "@opencode-ai/core/session/execution"
 import { SessionMessage } from "@opencode-ai/core/session/message"
@@ -17,7 +23,8 @@ import type { MessageID, SessionID } from "./schema"
 // #547：worker 进程级结构化日志——与 worker.ts #235 的 daemon log 同构（目标无 core Log 模块）。
 const log = {
   info: (message: string, fields: Record<string, unknown> = {}) => console.log(`[stale-turn] ${message}`, fields),
-  error: (message: string, fields: Record<string, unknown> = {}) => console.log(`[stale-turn] [ERROR] ${message}`, fields),
+  error: (message: string, fields: Record<string, unknown> = {}) =>
+    console.log(`[stale-turn] [ERROR] ${message}`, fields),
 }
 
 // L1 产品范围：最近 16 个活跃 session。
@@ -154,7 +161,12 @@ function abortUsageRunning(db: ColdStorage.TxOrDb, sessionIDs?: SessionID[]) {
       time_updated: now,
     })
     // 未提升native inbox的running行仍代表待接纳工作，不能按旧V1全表规则终结。
-    .where(and(where, sql`not exists (select 1 from session_input i where i.session_id = ${RequestUsageTable.session_id} and i.id = ${RequestUsageTable.request_id})`))
+    .where(
+      and(
+        where,
+        sql`not exists (select 1 from session_input i where i.session_id = ${RequestUsageTable.session_id} and i.id = ${RequestUsageTable.request_id})`,
+      ),
+    )
     .run()
 }
 
@@ -181,11 +193,15 @@ function* writeTerminal(input: {
             ...part,
             state: interruptedToolState(part.state, input.now),
           }
-          yield* events.publish(MessageV2.Event.PartUpdated, {
-            sessionID: input.sessionID,
-            part: structuredClone(next),
-            time: input.now,
-          }, { finalizer: true })
+          yield* events.publish(
+            MessageV2.Event.PartUpdated,
+            {
+              sessionID: input.sessionID,
+              part: structuredClone(next),
+              time: input.now,
+            },
+            { finalizer: true },
+          )
         }
         // 浅拷贝后写终态——不改动 incompleteAssistants 读到的快照引用。
         const assistant = { ...input.assistant }
@@ -228,10 +244,10 @@ function* terminalizeOrphanTools(database: Database.Interface, run: RunEvents, d
   const execution = yield* SessionExecution.Service
   const active = yield* execution.active
   const found = yield* Database.withSync(database, (db) => {
-  const result: Array<{ id: string; message_id: string; native: number }> = []
-  // $client 仅存在于基础 Db（cold-storage 同款 cast）；事务句柄不参与孤儿扫描路径。
-  // 两代孤儿共用这一条有界扫描；Native只定位热工具状态，不扫描或恢复冷正文。
-  const stmt = (db as Sqlite.DrizzleClient).$client.prepare(`
+    const result: Array<{ id: string; message_id: string; native: number }> = []
+    // $client 仅存在于基础 Db（cold-storage 同款 cast）；事务句柄不参与孤儿扫描路径。
+    // 两代孤儿共用这一条有界扫描；Native只定位热工具状态，不扫描或恢复冷正文。
+    const stmt = (db as Sqlite.DrizzleClient).$client.prepare(`
     SELECT part.id AS id, part.message_id AS message_id, 0 AS native
     FROM part
     INNER JOIN message ON message.id = part.message_id
@@ -246,14 +262,14 @@ function* terminalizeOrphanTools(database: Database.Interface, run: RunEvents, d
       AND json_extract(content.value, '$.type') = 'tool'
       AND json_extract(content.value, '$.state.status') IN ('pending', 'running')
   `)
-  for (const row of stmt.iterate() as Iterable<{ id: string; message_id: string; native: number }>) {
-    if (Date.now() >= deadlineMs) {
-      log.info("orphan tool scan budget exhausted during scan", { collected: result.length })
-      break
+    for (const row of stmt.iterate() as Iterable<{ id: string; message_id: string; native: number }>) {
+      if (Date.now() >= deadlineMs) {
+        log.info("orphan tool scan budget exhausted during scan", { collected: result.length })
+        break
+      }
+      result.push(row)
     }
-    result.push(row)
-  }
-  return result
+    return result
   })
 
   // 写阶段时钟单独取样：scan 与 write 之间的耗时不计入 tool 的 executionElapsedMs。
@@ -265,28 +281,56 @@ function* terminalizeOrphanTools(database: Database.Interface, run: RunEvents, d
       return
     }
     if (row.native) {
-      const stored = yield* database.db.select().from(SessionMessageTable).where(eq(SessionMessageTable.id, SessionMessage.ID.make(row.message_id))).get().pipe(Effect.orDie)
+      const stored = yield* database.db
+        .select()
+        .from(SessionMessageTable)
+        .where(eq(SessionMessageTable.id, SessionMessage.ID.make(row.message_id)))
+        .get()
+        .pipe(Effect.orDie)
       if (!stored || active.has(stored.session_id)) continue
-      const message = yield* Schema.decodeUnknownEffect(SessionMessage.Message)({ ...stored.data, id: stored.id, type: stored.type }).pipe(Effect.orDie)
+      const message = yield* Schema.decodeUnknownEffect(SessionMessage.Message)({
+        ...stored.data,
+        id: stored.id,
+        type: stored.type,
+      }).pipe(Effect.orDie)
       if (message.type !== "assistant" || message.time.completed === undefined) continue
-      const part = message.content.find(part => part.type === "tool" && part.id === row.id)
-      if (!part || part.type !== "tool" || (part.state.status !== "pending" && part.state.status !== "running")) continue
+      const part = message.content.find((part) => part.type === "tool" && part.id === row.id)
+      if (!part || part.type !== "tool" || (part.state.status !== "pending" && part.state.status !== "running"))
+        continue
       // completed助手只收工具终态，不发Step/Prompt失败，不改已确认消费或completed winner。
-      yield* run(EventV2Bridge.Service.use(events => events.publish(SessionEvent.Tool.Failed, {
-        sessionID: stored.session_id, assistantMessageID: message.id, callID: part.id, timestamp: DateTime.makeUnsafe(now),
-        error: { type: "unknown", message: SessionProcessor.TOOL_ABORTED_ERROR }, provider: part.provider ?? { executed: false },
-      }, { finalizer: true })))
+      yield* run(
+        EventV2Bridge.Service.use((events) =>
+          events.publish(
+            SessionEvent.Tool.Failed,
+            {
+              sessionID: stored.session_id,
+              assistantMessageID: message.id,
+              callID: part.id,
+              timestamp: DateTime.makeUnsafe(now),
+              error: { type: "unknown", message: SessionProcessor.TOOL_ABORTED_ERROR },
+              provider: part.provider ?? { executed: false },
+            },
+            { finalizer: true },
+          ),
+        ),
+      )
       continue
     }
-    const part = yield* Database.withSync(database, (db) => hotParts(db, row.message_id as MessageID).find((item) => item.id === row.id))
+    const part = yield* Database.withSync(database, (db) =>
+      hotParts(db, row.message_id as MessageID).find((item) => item.id === row.id),
+    )
     if (!part || !isOpenToolPart(part)) continue
     yield* run(
       EventV2Bridge.Service.use((events) =>
-        events.publish(MessageV2.Event.PartUpdated, {
-          sessionID: part.sessionID,
-          part: structuredClone({ ...part, state: interruptedToolState(part.state, now) }),
-          time: now,
-        }, { finalizer: true }),
+        events.publish(
+          MessageV2.Event.PartUpdated,
+          {
+            sessionID: part.sessionID,
+            part: structuredClone({ ...part, state: interruptedToolState(part.state, now) }),
+            time: now,
+          },
+          { finalizer: true },
+        ),
       ),
     )
   }
@@ -299,28 +343,82 @@ function* terminalizeNative(database: Database.Interface, run: RunEvents, sessio
   const timestamp = yield* DateTime.now
   const error = { type: "unknown" as const, message: SessionProcessor.TOOL_ABORTED_ERROR }
   // 先冻结已提升的running请求；Step.Failed可能先将根账本终结，但Prompt终态仍需闭合同批估算。
-  const requests = yield* database.db.select({ sessionID: RequestUsageTable.session_id, id: SessionInputTable.id, root: RequestUsageTable.root_request_id })
-    .from(RequestUsageTable).innerJoin(SessionInputTable, and(eq(SessionInputTable.session_id, RequestUsageTable.session_id), eq(SessionInputTable.id, RequestUsageTable.request_id)))
-    .where(and(eq(RequestUsageTable.status, "running"), sql`${SessionInputTable.promoted_seq} is not null`, sessionIDs ? inArray(RequestUsageTable.session_id, sessionIDs) : undefined))
-    .all().pipe(Effect.orDie)
-  const rows = yield* database.db.select().from(SessionMessageTable)
-    .where(and(eq(SessionMessageTable.type, "assistant"), sql`json_extract(${SessionMessageTable.data}, '$.time.completed') is null`, sessionIDs ? inArray(SessionMessageTable.session_id, sessionIDs) : undefined))
-    .all().pipe(Effect.orDie)
+  const requests = yield* database.db
+    .select({
+      sessionID: RequestUsageTable.session_id,
+      id: SessionInputTable.id,
+      root: RequestUsageTable.root_request_id,
+    })
+    .from(RequestUsageTable)
+    .innerJoin(
+      SessionInputTable,
+      and(
+        eq(SessionInputTable.session_id, RequestUsageTable.session_id),
+        eq(SessionInputTable.id, RequestUsageTable.request_id),
+      ),
+    )
+    .where(
+      and(
+        eq(RequestUsageTable.status, "running"),
+        sql`${SessionInputTable.promoted_seq} is not null`,
+        sessionIDs ? inArray(RequestUsageTable.session_id, sessionIDs) : undefined,
+      ),
+    )
+    .all()
+    .pipe(Effect.orDie)
+  const rows = yield* database.db
+    .select()
+    .from(SessionMessageTable)
+    .where(
+      and(
+        eq(SessionMessageTable.type, "assistant"),
+        sql`json_extract(${SessionMessageTable.data}, '$.time.completed') is null`,
+        sessionIDs ? inArray(SessionMessageTable.session_id, sessionIDs) : undefined,
+      ),
+    )
+    .all()
+    .pipe(Effect.orDie)
   for (const row of rows) {
     if (active.has(row.session_id)) continue
-    const message = yield* Schema.decodeUnknownEffect(SessionMessage.Message)({ ...row.data, id: row.id, type: row.type }).pipe(Effect.orDie)
+    const message = yield* Schema.decodeUnknownEffect(SessionMessage.Message)({
+      ...row.data,
+      id: row.id,
+      type: row.type,
+    }).pipe(Effect.orDie)
     if (message.type !== "assistant" || message.time.completed !== undefined) continue
-    yield* run(EventV2Bridge.Service.use((events) => Effect.gen(function* () {
-      for (const part of message.content) {
-        if (part.type !== "tool" || (part.state.status !== "pending" && part.state.status !== "running")) continue
-        yield* events.publish(SessionEvent.Tool.Failed, {
-          sessionID: row.session_id, assistantMessageID: message.id, callID: part.id, timestamp, error,
-          provider: part.provider ?? { executed: false },
-        }, { finalizer: true })
-      }
-      // 原生projector保留已确认成本并更新助手明细，不伪造V1消息或直接覆写累计。
-      yield* events.publish(SessionEvent.Step.Failed, { sessionID: row.session_id, assistantMessageID: message.id, timestamp, error: message.error ?? error, aborted: true }, { finalizer: true })
-    })))
+    yield* run(
+      EventV2Bridge.Service.use((events) =>
+        Effect.gen(function* () {
+          for (const part of message.content) {
+            if (part.type !== "tool" || (part.state.status !== "pending" && part.state.status !== "running")) continue
+            yield* events.publish(
+              SessionEvent.Tool.Failed,
+              {
+                sessionID: row.session_id,
+                assistantMessageID: message.id,
+                callID: part.id,
+                timestamp,
+                error,
+                provider: part.provider ?? { executed: false },
+              },
+              { finalizer: true },
+            )
+          }
+          // 原生projector保留已确认成本并更新助手明细，不伪造V1消息或直接覆写累计。
+          yield* events.publish(
+            SessionEvent.Step.Failed,
+            {
+              sessionID: row.session_id,
+              assistantMessageID: message.id,
+              timestamp,
+              error: message.error ?? error,
+              aborted: true,
+            },
+            { finalizer: true },
+          )
+        }),
+      ),
+    )
   }
   const batches = new Map<string, { sessionID: SessionID; root: string; ids: SessionMessage.ID[] }>()
   for (const request of requests) {
@@ -330,9 +428,23 @@ function* terminalizeNative(database: Database.Interface, run: RunEvents, sessio
     if (batch) batch.ids.push(request.id)
     else batches.set(key, { sessionID: request.sessionID, root: request.root, ids: [request.id] })
   }
-  for (const batch of batches.values()) yield* run(EventV2Bridge.Service.use((events) => events.publish(SessionEvent.PromptFailed, {
-    sessionID: batch.sessionID, messageID: SessionMessage.ID.make(batch.root), requestIDs: batch.ids, timestamp, error, aborted: true,
-  }, { finalizer: true })))
+  for (const batch of batches.values())
+    yield* run(
+      EventV2Bridge.Service.use((events) =>
+        events.publish(
+          SessionEvent.PromptFailed,
+          {
+            sessionID: batch.sessionID,
+            messageID: SessionMessage.ID.make(batch.root),
+            requestIDs: batch.ids,
+            timestamp,
+            error,
+            aborted: true,
+          },
+          { finalizer: true },
+        ),
+      ),
+    )
 }
 
 /**

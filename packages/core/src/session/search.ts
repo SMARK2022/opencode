@@ -32,7 +32,8 @@ export function searchCondition(
   // #529：单 token 与历史语义逐字一致；多 token 逐个 AND，等价于「先 A 再 B 再 C」
   // #529：每个 token 的三路 union 自带括号，AND 拼接不会漏进 union 内部的 or 链
   // 根搜索保持纯 SQL；子正文匹配由存储层按当前候选范围一次恢复。
-  const cold = mode === "title" || options?.roots ? tokens.map(() => []) : ColdStorage.matchColdText(db, tokens, options?.scope)
+  const cold =
+    mode === "title" || options?.roots ? tokens.map(() => []) : ColdStorage.matchColdText(db, tokens, options?.scope)
   const parts = tokens.map((needle, index) =>
     mode === "title" ? titleTokenCondition(needle) : tokenCondition(needle, cold[index]),
   )

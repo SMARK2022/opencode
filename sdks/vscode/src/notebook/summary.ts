@@ -13,7 +13,11 @@ export async function notebookSummary(filePath: string) {
 }
 
 /** 返回笔记本快照的 summary/data 双层响应。 */
-export function compactNotebookResult(notebook: vscode.NotebookDocument, ran: boolean, extra?: Record<string, unknown>) {
+export function compactNotebookResult(
+  notebook: vscode.NotebookDocument,
+  ran: boolean,
+  extra?: Record<string, unknown>,
+) {
   const cells = notebook.getCells().map(compactCell)
   return {
     ran,
@@ -39,10 +43,10 @@ function notebookSummaryText(notebook: vscode.NotebookDocument, cells: ReturnTyp
   const failed = code.filter((cell) => cell.execution.status === "failed")
   // status 读取结构化 success 派生值，不依赖 exec 文案的前缀或词序。
   const status = failed.length
-    // 先报告失败数，防止所有格都有输出时把失败格归入全成功分支。
-    ? `${failed.length} failed`
-    // 没有代码格时保留零比零统计，不能用空数组 every 的真值宣称全部执行成功。
-    : executed.length === code.length && code.length > 0
+    ? // 先报告失败数，防止所有格都有输出时把失败格归入全成功分支。
+      `${failed.length} failed`
+    : // 没有代码格时保留零比零统计，不能用空数组 every 的真值宣称全部执行成功。
+      executed.length === code.length && code.length > 0
       ? "All code cells report successful execution state (may be from a previous session)."
       : `${executed.length}/${code.length} code cells executed`
 

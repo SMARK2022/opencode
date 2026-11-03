@@ -34,10 +34,12 @@ export const parse = Effect.fn("TuiConfigHost.parse")(function* (text: string, f
     ...parsed,
     attention: {
       ...parsed.attention,
-      sounds: Object.fromEntries(Object.entries(parsed.attention.sounds).flatMap(([name, file]) => {
-        if (!file) return []
-        return [[name, file.startsWith("file://") ? fileURLToPath(file) : path.resolve(path.dirname(filepath), file)]]
-      })),
+      sounds: Object.fromEntries(
+        Object.entries(parsed.attention.sounds).flatMap(([name, file]) => {
+          if (!file) return []
+          return [[name, file.startsWith("file://") ? fileURLToPath(file) : path.resolve(path.dirname(filepath), file)]]
+        }),
+      ),
     },
   }
 })
@@ -59,9 +61,14 @@ export const load = Effect.fn("TuiConfigHost.load")(function* (directory: string
     const data = yield* Effect.gen(function* () {
       const text = yield* fs.readFileStringSafe(filepath)
       return text ? yield* parse(text, filepath) : {}
-    }).pipe(Effect.catchCause((cause) => Effect.logWarning("skipping invalid tui config", {
-      path: filepath, reason: Cause.squash(cause),
-    }).pipe(Effect.as({}))))
+    }).pipe(
+      Effect.catchCause((cause) =>
+        Effect.logWarning("skipping invalid tui config", {
+          path: filepath,
+          reason: Cause.squash(cause),
+        }).pipe(Effect.as({})),
+      ),
+    )
     result = mergeDeep(result, data)
   }
   // 两代host仅解析界面设置，用户MCP和凭据选择由同一后端事务承担。

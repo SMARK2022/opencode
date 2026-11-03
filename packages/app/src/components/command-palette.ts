@@ -220,7 +220,10 @@ export function createServerSessionEntries(props: {
   server: ServerConnection.Key
   opened: () => LocalProject[]
   stored: () => Project[]
-  load: (query: { parentID: null; search: string; limit: number; start: number }, signal: AbortSignal) => Promise<{ data: SessionInfo[] }>
+  load: (
+    query: { parentID: null; search: string; limit: number; start: number },
+    signal: AbortSignal,
+  ) => Promise<{ data: SessionInfo[] }>
   untitled: () => string
   category: () => string
 }) {
@@ -253,30 +256,32 @@ export function createServerSessionEntries(props: {
     const openedByID = new Map(opened.flatMap((project) => (project.id ? [[project.id, project] as const] : [])))
     const stored = props.stored().map((project) => ({ ...project, expanded: false }))
     const storedByID = new Map(stored.map((project) => [project.id, project] as const))
-    return props
-      // 两个Native入口共用实际查询预算，窗口进入服务端SQL而不是本地截掉一页。
-      .load({ parentID: null, search, limit: 100, start: Date.now() - 90 * 24 * 60 * 60 * 1000 }, current.signal)
-      .then((result) =>
-        result.data
-          .map(normalizeSessionInfo)
-          .filter((session) => !session.time.archived)
-          .map((session) => {
-            const project =
-              projectForSession(session, opened, openedByID) ?? projectForSession(session, stored, storedByID)
-            return {
-              id: `session:${props.server}:${session.id}`,
-              type: "session" as const,
-              title: session.title || props.untitled(),
-              description: project ? displayName(project) : getFilename(session.directory),
-              category: props.category(),
-              directory: session.directory,
-              sessionID: session.id,
-              server: props.server,
-              project,
-              updated: session.time.updated,
-            }
-          }),
-      )
-      .catch(() => [] as CommandPaletteEntry[])
+    return (
+      props
+        // 两个Native入口共用实际查询预算，窗口进入服务端SQL而不是本地截掉一页。
+        .load({ parentID: null, search, limit: 100, start: Date.now() - 90 * 24 * 60 * 60 * 1000 }, current.signal)
+        .then((result) =>
+          result.data
+            .map(normalizeSessionInfo)
+            .filter((session) => !session.time.archived)
+            .map((session) => {
+              const project =
+                projectForSession(session, opened, openedByID) ?? projectForSession(session, stored, storedByID)
+              return {
+                id: `session:${props.server}:${session.id}`,
+                type: "session" as const,
+                title: session.title || props.untitled(),
+                description: project ? displayName(project) : getFilename(session.directory),
+                category: props.category(),
+                directory: session.directory,
+                sessionID: session.id,
+                server: props.server,
+                project,
+                updated: session.time.updated,
+              }
+            }),
+        )
+        .catch(() => [] as CommandPaletteEntry[])
+    )
   }
 }

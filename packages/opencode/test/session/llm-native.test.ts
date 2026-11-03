@@ -584,7 +584,10 @@ describe("session.llm-native.request", () => {
       } as LLMClientShape
       const native = LLMNativeRuntime.stream({
         model: baseModel,
-        provider: { ...providerInfo, options: { ...providerInfo.options, headers: { "User-Agent": "configured-agent" } } },
+        provider: {
+          ...providerInfo,
+          options: { ...providerInfo.options, headers: { "User-Agent": "configured-agent" } },
+        },
         auth: undefined,
         llmClient,
         messages: [],
@@ -629,13 +632,20 @@ describe("session.llm-native.request", () => {
             },
             generate: () => Effect.die("unused"),
           },
-          messages: [], tools: {}, headers: {}, abort: new AbortController().signal,
+          messages: [],
+          tools: {},
+          headers: {},
+          abort: new AbortController().signal,
         })
         if (native.type === "unsupported") throw new Error(native.reason)
         const running = yield* native.stream.pipe(
           Stream.runDrain,
           Effect.exit,
-          Effect.onExit(() => Effect.sync(() => { state.ended = true })),
+          Effect.onExit(() =>
+            Effect.sync(() => {
+              state.ended = true
+            }),
+          ),
           Effect.forkChild,
         )
         yield* Deferred.await(started)
@@ -651,9 +661,10 @@ describe("session.llm-native.request", () => {
         yield* TestClock.adjust((timeout ?? 600_000) - before)
         const exit = yield* Fiber.join(running)
         expect(Exit.isFailure(exit)).toBe(true)
-        if (Exit.isFailure(exit)) expect(Cause.squash(exit.cause)).toMatchObject({
-          reason: { message: "Provider request timed out", kind: "timeout" },
-        })
+        if (Exit.isFailure(exit))
+          expect(Cause.squash(exit.cause)).toMatchObject({
+            reason: { message: "Provider request timed out", kind: "timeout" },
+          })
       }
     }),
   )
@@ -709,21 +720,37 @@ describe("session.llm-native.request", () => {
         api: { ...baseModel.api, id: "kimi-k2", npm: "@ai-sdk/openai-compatible" },
         capabilities: { ...baseModel.capabilities, interleaved: { field: "reasoning_content" } },
       }
-      const history: ModelMessage[] = [{ role: "assistant", content: [
-        { type: "reasoning", text: "thinking" }, { type: "text", text: "answer" },
-      ] }]
+      const history: ModelMessage[] = [
+        {
+          role: "assistant",
+          content: [
+            { type: "reasoning", text: "thinking" },
+            { type: "text", text: "answer" },
+          ],
+        },
+      ]
       // 必须经过生产transform再适配，直接喂reasoning part会绕开消息级字段丢失。
       const prepared = yield* prepareNativeRequest({
-        model: compatible, apiKey: "test-key",
+        model: compatible,
+        apiKey: "test-key",
         messages: ProviderTransform.message(history, compatible, {}),
       })
       expect(prepared.body).toMatchObject({
         messages: [{ role: "assistant", content: "answer", reasoning_content: "thinking" }],
       })
       for (const store of [false, true]) {
-        const encrypted: ModelMessage[] = [{ role: "assistant", content: [{
-          type: "reasoning", text: "", providerOptions: { openai: { reasoningEncryptedContent: "encrypted-state" } },
-        }] }]
+        const encrypted: ModelMessage[] = [
+          {
+            role: "assistant",
+            content: [
+              {
+                type: "reasoning",
+                text: "",
+                providerOptions: { openai: { reasoningEncryptedContent: "encrypted-state" } },
+              },
+            ],
+          },
+        ]
         // 没有可见摘要也须穿过同一transform/adapter，凭据不能被降级为空文本。
         yield* expectOpenAIResponsesRequest({
           history: ProviderTransform.message(encrypted, baseModel, { store }),

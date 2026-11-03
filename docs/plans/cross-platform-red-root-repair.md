@@ -49,34 +49,34 @@ catch-all 同法回填处置。
 
 ## 3. Repository Context
 
-| Source | Why it constrains this task |
-| --- | --- |
-| 根 `AGENTS.md` | 测试从包目录运行；`bun typecheck`；风格规则 |
-| `packages/core` 与 `packages/opencode` 的 `AGENTS.md` | core 是共享 spawner owner；opencode 是 shell 工具与测试宿主；Effect/测试 fixture 约定 |
-| `packages/opencode/test/AGENTS.md` | `testEffect`/`it.instance` 约定；禁止 fixed-sleep 反模式；同步用发布信号 |
-| `CONTEXT.md` | `[local-smark]` 注释约定；tool/ 模块职责 |
-| `.opencode/policy/first-principles-engineering.md` | 单一路径、owner 修复、workaround 删除、E/C 门禁 |
-| `packages/core/src/cross-spawn-spawner.ts` 自身 | 文件内 extra-fd 输出路径（200-206 行）已存在急切 `pipe(PassThrough)` 模式——主 stdout/stderr 路径的修复模板 |
-| `packages/opencode/src/tool/shell.ts:649-655` 注释 | 该 macOS 竞态的两轮历史斗争记录（shell 选项 bug → 显式 -c；detached 保留决策） |
+| Source                                                | Why it constrains this task                                                                                |
+| ----------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| 根 `AGENTS.md`                                        | 测试从包目录运行；`bun typecheck`；风格规则                                                                |
+| `packages/core` 与 `packages/opencode` 的 `AGENTS.md` | core 是共享 spawner owner；opencode 是 shell 工具与测试宿主；Effect/测试 fixture 约定                      |
+| `packages/opencode/test/AGENTS.md`                    | `testEffect`/`it.instance` 约定；禁止 fixed-sleep 反模式；同步用发布信号                                   |
+| `CONTEXT.md`                                          | `[local-smark]` 注释约定；tool/ 模块职责                                                                   |
+| `.opencode/policy/first-principles-engineering.md`    | 单一路径、owner 修复、workaround 删除、E/C 门禁                                                            |
+| `packages/core/src/cross-spawn-spawner.ts` 自身       | 文件内 extra-fd 输出路径（200-206 行）已存在急切 `pipe(PassThrough)` 模式——主 stdout/stderr 路径的修复模板 |
+| `packages/opencode/src/tool/shell.ts:649-655` 注释    | 该 macOS 竞态的两轮历史斗争记录（shell 选项 bug → 显式 -c；detached 保留决策）                             |
 
 ## 4. Files and Evidence Read
 
-| Evidence | Relevance | Evidence class |
-| --- | --- | --- |
-| `packages/core/src/cross-spawn-spawner.ts`（全文） | `setupOutput`（240-263 行）主输出用惰性 `NodeStream.fromReadable(() => proc.stdout)`——订阅才读；`setupFds` extra 输出（197-211 行）用立即 `node.pipe(tap)` 急切缓冲 | observed |
-| `packages/opencode/src/tool/shell.ts` 600-690、925-999、1140-1214 行 | `cmd()` 的 detached 决策与两轮竞态注释；1165-1171 行 spawn→`Effect.forkScoped(Stream.runForEach(handle.all))` 的订阅时序间隙 | observed |
-| `packages/opencode/test/tool/shell.test.ts` 100-235、326-353 行 | 两个同款 workaround（`echo test; sleep 0.01` 与 `... \| tr ...; sleep 0.01`）及其 216-218、341-342 行机制注释；`timeoutMs` 平台放大先例（140 行） | observed |
-| `packages/opencode/test/lib/effect.ts`（全文） | `make()` 的 live/instance 注册把 `testOptions` 透传给 `test()`；缺省为 undefined → 落回 bun 默认 5000ms | observed |
-| `packages/opencode/test/session/prompt.test.ts` 1100-1169 行 | Windows 红测 R2：1130 行 `printf allowed > ${JSON.stringify(bashFile)}` POSIX 命令经 bash 工具在 pwsh 下失败；106-110 行 `shortShellDelayCommand` 的 `bun -e` 跨平台先例 | observed |
-| `packages/core/test/effect/cross-spawn-spawner.test.ts` 1-80 行 + `packages/core/test/lib/effect.ts` | R1 回归 seam：`fx` 注册器（`fx.effect` 走 TestClock 冻结层，定时 sleep 会永久挂死——审计 B-01 实证；**必须用 `fx.live`**）+ `js()` helper + `decodeByteStream` | observed |
-| **R1 红色回路**（本机 Windows，bun -e 直驱 spawner）：快退子进程（写后即退）+ 150ms 延迟订阅 → capture `""` **LOST**；慢退子进程（写后存活 400ms）+ 同延迟 → **RETAINED** | 第一分歧点的直接观察：无读者时子进程退出导致管道数据丢弃；进程存活则保留 | observed |
-| **R2 红色回路**：`bun test --timeout 30000 test/session/prompt.test.ts -t "refreshes queued Permission, Tool definition and MCP in one continuation"` → 1 fail（1167 行 bashFile 不存在） | Windows 真实红测（canonical 预算下） | observed |
-| **R3 红色回路**：裸 `bun test ... -t "publishes the estimated Assistant as the first durable attempt state"` → 1 fail（bun 默认 5000ms 超时） | 裸调用落回 5s 默认的伪红类（canonical `--timeout 30000` 下同测试通过，已验证 95 pass/1 fail） | observed |
-| 用户提供的 macOS CI 输出（3524 tests：1 fail = `tool.shell > basic [bash]` 910ms） | macOS 侧症状原始证据 | observed |
-| **既有 Windows 确定性红测（Round 2 审计发现并三次重现）**：`bun test test/effect/cross-spawn-spawner.test.ts`（裸调用）→ 23 pass / 1 fail——:197-204 "captures stdout via .all when no stderr" 用 `ChildProcess.make("echo", [...])`，Windows 无 echo.exe，cross-spawn 回退 cmd 包装并对参数加引号 → 输出含字面引号 → `toBe` 失败（823ms 断言非超时）；同 describe 的 stderr 用例（:209）已用 `js()` 写手且绿——文件自身既有约定即修复模板 | 变更集内文件的平台敏感既有红；用户需求原文直接覆盖 | observed |
-| **R2 slice-1 公式实测（Round 2 审计）**：fx.live + exit 后订阅 + 循环 10 → 修复前 **10/10 确定性丢失**（node 子 2452ms / bun 子 1684ms）；急切 tap 机理对照 → **10/10 保留**；R1 的 1/5–2/6 数字来自已废弃的定时延迟变体，不再引用 | slice 1 红绿强度的权威数字 | observed |
-| shell.test.ts `sleep 0.01` 补丁全量清点（Round 2 审计）：**:219、:344、:369、:1979、:2129 共 5 处**，各自带同款机制注释 | workaround 处置必须覆盖全量 | observed |
-| `packages/opencode/package.json` `"test": "bun test --timeout 30000"`、`script/test-ci.ts:6` | canonical 超时契约现状：只活在 CLI flag | contracted |
+| Evidence                                                                                                                                                                                                                                                                                                                                                                                                                                 | Relevance                                                                                                                                                                | Evidence class |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------- |
+| `packages/core/src/cross-spawn-spawner.ts`（全文）                                                                                                                                                                                                                                                                                                                                                                                       | `setupOutput`（240-263 行）主输出用惰性 `NodeStream.fromReadable(() => proc.stdout)`——订阅才读；`setupFds` extra 输出（197-211 行）用立即 `node.pipe(tap)` 急切缓冲      | observed       |
+| `packages/opencode/src/tool/shell.ts` 600-690、925-999、1140-1214 行                                                                                                                                                                                                                                                                                                                                                                     | `cmd()` 的 detached 决策与两轮竞态注释；1165-1171 行 spawn→`Effect.forkScoped(Stream.runForEach(handle.all))` 的订阅时序间隙                                             | observed       |
+| `packages/opencode/test/tool/shell.test.ts` 100-235、326-353 行                                                                                                                                                                                                                                                                                                                                                                          | 两个同款 workaround（`echo test; sleep 0.01` 与 `... \| tr ...; sleep 0.01`）及其 216-218、341-342 行机制注释；`timeoutMs` 平台放大先例（140 行）                        | observed       |
+| `packages/opencode/test/lib/effect.ts`（全文）                                                                                                                                                                                                                                                                                                                                                                                           | `make()` 的 live/instance 注册把 `testOptions` 透传给 `test()`；缺省为 undefined → 落回 bun 默认 5000ms                                                                  | observed       |
+| `packages/opencode/test/session/prompt.test.ts` 1100-1169 行                                                                                                                                                                                                                                                                                                                                                                             | Windows 红测 R2：1130 行 `printf allowed > ${JSON.stringify(bashFile)}` POSIX 命令经 bash 工具在 pwsh 下失败；106-110 行 `shortShellDelayCommand` 的 `bun -e` 跨平台先例 | observed       |
+| `packages/core/test/effect/cross-spawn-spawner.test.ts` 1-80 行 + `packages/core/test/lib/effect.ts`                                                                                                                                                                                                                                                                                                                                     | R1 回归 seam：`fx` 注册器（`fx.effect` 走 TestClock 冻结层，定时 sleep 会永久挂死——审计 B-01 实证；**必须用 `fx.live`**）+ `js()` helper + `decodeByteStream`            | observed       |
+| **R1 红色回路**（本机 Windows，bun -e 直驱 spawner）：快退子进程（写后即退）+ 150ms 延迟订阅 → capture `""` **LOST**；慢退子进程（写后存活 400ms）+ 同延迟 → **RETAINED**                                                                                                                                                                                                                                                                | 第一分歧点的直接观察：无读者时子进程退出导致管道数据丢弃；进程存活则保留                                                                                                 | observed       |
+| **R2 红色回路**：`bun test --timeout 30000 test/session/prompt.test.ts -t "refreshes queued Permission, Tool definition and MCP in one continuation"` → 1 fail（1167 行 bashFile 不存在）                                                                                                                                                                                                                                                | Windows 真实红测（canonical 预算下）                                                                                                                                     | observed       |
+| **R3 红色回路**：裸 `bun test ... -t "publishes the estimated Assistant as the first durable attempt state"` → 1 fail（bun 默认 5000ms 超时）                                                                                                                                                                                                                                                                                            | 裸调用落回 5s 默认的伪红类（canonical `--timeout 30000` 下同测试通过，已验证 95 pass/1 fail）                                                                            | observed       |
+| 用户提供的 macOS CI 输出（3524 tests：1 fail = `tool.shell > basic [bash]` 910ms）                                                                                                                                                                                                                                                                                                                                                       | macOS 侧症状原始证据                                                                                                                                                     | observed       |
+| **既有 Windows 确定性红测（Round 2 审计发现并三次重现）**：`bun test test/effect/cross-spawn-spawner.test.ts`（裸调用）→ 23 pass / 1 fail——:197-204 "captures stdout via .all when no stderr" 用 `ChildProcess.make("echo", [...])`，Windows 无 echo.exe，cross-spawn 回退 cmd 包装并对参数加引号 → 输出含字面引号 → `toBe` 失败（823ms 断言非超时）；同 describe 的 stderr 用例（:209）已用 `js()` 写手且绿——文件自身既有约定即修复模板 | 变更集内文件的平台敏感既有红；用户需求原文直接覆盖                                                                                                                       | observed       |
+| **R2 slice-1 公式实测（Round 2 审计）**：fx.live + exit 后订阅 + 循环 10 → 修复前 **10/10 确定性丢失**（node 子 2452ms / bun 子 1684ms）；急切 tap 机理对照 → **10/10 保留**；R1 的 1/5–2/6 数字来自已废弃的定时延迟变体，不再引用                                                                                                                                                                                                       | slice 1 红绿强度的权威数字                                                                                                                                               | observed       |
+| shell.test.ts `sleep 0.01` 补丁全量清点（Round 2 审计）：**:219、:344、:369、:1979、:2129 共 5 处**，各自带同款机制注释                                                                                                                                                                                                                                                                                                                  | workaround 处置必须覆盖全量                                                                                                                                              | observed       |
+| `packages/opencode/package.json` `"test": "bun test --timeout 30000"`、`script/test-ci.ts:6`                                                                                                                                                                                                                                                                                                                                             | canonical 超时契约现状：只活在 CLI flag                                                                                                                                  | contracted     |
 
 ## 5. Current Behavior
 
@@ -102,31 +102,31 @@ prompt.test.ts:1130 mock 驱动 bash 工具执行 `printf allowed > "<win path>"
 
 ## 6. Supported Input Domain and Reachability
 
-| Input or condition | Producer | Upstream guarantees | Reachable path | Owner | Classification |
-| --- | --- | --- | --- | --- | --- |
-| 快退命令输出（echo/console.log 后即退）+ 订阅调度间隙 | 任意 ShellTool/bash 工具调用（模型侧高频）；spawner 其他消费者（`.lines`） | 无——惰性订阅无保真保证 | 生产负载下 forkScoped 调度延迟即触发；本机 150ms 探针稳定复现 | packages/core cross-spawn-spawner `setupOutput` | observed（本机 + macOS CI + 双处注释） |
-| Windows pwsh 下的 bash 工具调用 | prompt.test.ts mock 的 `printf >` 命令 | bash 工具按平台选择 shell（win=pwsh） | 该测试在 Windows 每次必红 | 测试命令（prompt.test.ts） | observed |
-| Windows 无 echo.exe 时 cross-spawn 回退 cmd 包装加引号 | core spawner 测试 :197-204 直接 spawn `echo` | 无（平台差异未归一） | 裸调用 packages/core 套件确定性 1 fail | 测试命令（cross-spawn-spawner.test.ts，同文件 stderr 用例已用 js() 写手） | observed |
-| 裸 bun test 调用（IDE/手动，无 canonical flag） | 开发者/IDE | 无——超时契约在 CLI flag 里 | 任何非 canonical 入口 | 测试设施（test/lib/effect.ts seam） | observed（19 项伪红；其中 18 项为超时类、1 项为 R2 平台红，在 canonical 预算下隔离） |
+| Input or condition                                     | Producer                                                                   | Upstream guarantees                   | Reachable path                                                | Owner                                                                     | Classification                                                                       |
+| ------------------------------------------------------ | -------------------------------------------------------------------------- | ------------------------------------- | ------------------------------------------------------------- | ------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| 快退命令输出（echo/console.log 后即退）+ 订阅调度间隙  | 任意 ShellTool/bash 工具调用（模型侧高频）；spawner 其他消费者（`.lines`） | 无——惰性订阅无保真保证                | 生产负载下 forkScoped 调度延迟即触发；本机 150ms 探针稳定复现 | packages/core cross-spawn-spawner `setupOutput`                           | observed（本机 + macOS CI + 双处注释）                                               |
+| Windows pwsh 下的 bash 工具调用                        | prompt.test.ts mock 的 `printf >` 命令                                     | bash 工具按平台选择 shell（win=pwsh） | 该测试在 Windows 每次必红                                     | 测试命令（prompt.test.ts）                                                | observed                                                                             |
+| Windows 无 echo.exe 时 cross-spawn 回退 cmd 包装加引号 | core spawner 测试 :197-204 直接 spawn `echo`                               | 无（平台差异未归一）                  | 裸调用 packages/core 套件确定性 1 fail                        | 测试命令（cross-spawn-spawner.test.ts，同文件 stderr 用例已用 js() 写手） | observed                                                                             |
+| 裸 bun test 调用（IDE/手动，无 canonical flag）        | 开发者/IDE                                                                 | 无——超时契约在 CLI flag 里            | 任何非 canonical 入口                                         | 测试设施（test/lib/effect.ts seam）                                       | observed（19 项伪红；其中 18 项为超时类、1 项为 R2 平台红，在 canonical 预算下隔离） |
 
 ## 7. Required Invariants
 
-| ID | Behavioral invariant | Evidence | Existing test |
-| --- | --- | --- | --- |
-| INV-01 | spawner 输出保真：子进程写入 stdout/stderr 后无论何时退出、消费者无论何时订阅，已写入字节必须完整可读（写入与订阅时序解耦） | observed（快退 LOST/慢退 RETAINED 对照 + macOS CI 1 fail + in-repo 双注释） | 无（本次建立） |
-| INV-02 | shell 工具端到端输出保真：`basic`/`quotes` 测试不得依赖 sleep 类时序补丁即稳定（workaround 删除后仍绿） | contracted（workaround 删除门禁）+ observed | 现有 basic/quotes 测试（带 sleep） |
-| INV-03 | 平台无关的测试命令：驱动 bash 工具/spawner 的脚本化命令在 win32(pwsh/无 echo.exe)/POSIX 下语义一致 | contracted（用户需求"解决两平台红测"）+ observed（R2 红 + core echo 红） | 无（本次修正两处：prompt.test.ts:1130、cross-spawn-spawner.test.ts:197-204） |
-| INV-04 | 测试预算与 canonical 契约一致：任何调用入口（裸 bun test/IDE/CI）下集成测试预算均为 30s，显式传入者不受影响 | contracted（package.json `"test": bun test --timeout 30000` 既有契约的内化） | 无（本次建立；R3 回路为红样本） |
-| INV-05 | 负载余量预算：负载敏感集成用例的显式预算按平台放大（仓内先例：shortSessionTimeout、shell.test.ts timeoutMs），且只放宽"等待多久"不改变任何并发/行为断言（prompt.test.ts:4106 既有注释原文背书"放宽预算不改变并发语义断言"） | contracted（用户 R4 需求"全仓零红测"）+ observed（对照树实验：4 测试同机同负载在预修复代码同样失败；审计实测通过类测试比基线慢 30-55%；fsmonitor 后台进程占用 1299s CPU） | 无（R4 建立；当前 4 红为样本） |
-| INV-05a | 预算连贯性：同一用例的内层 wait 预算必须严格小于其外层注册硬顶（两平台均成立） | contracted（Round 4 B-01：reviewPollBudget 20s > :2391 显式 15s 硬顶不连贯） | 无（R5 建立） |
+| ID      | Behavioral invariant                                                                                                                                                                                                        | Evidence                                                                                                                                                                  | Existing test                                                                |
+| ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| INV-01  | spawner 输出保真：子进程写入 stdout/stderr 后无论何时退出、消费者无论何时订阅，已写入字节必须完整可读（写入与订阅时序解耦）                                                                                                 | observed（快退 LOST/慢退 RETAINED 对照 + macOS CI 1 fail + in-repo 双注释）                                                                                               | 无（本次建立）                                                               |
+| INV-02  | shell 工具端到端输出保真：`basic`/`quotes` 测试不得依赖 sleep 类时序补丁即稳定（workaround 删除后仍绿）                                                                                                                     | contracted（workaround 删除门禁）+ observed                                                                                                                               | 现有 basic/quotes 测试（带 sleep）                                           |
+| INV-03  | 平台无关的测试命令：驱动 bash 工具/spawner 的脚本化命令在 win32(pwsh/无 echo.exe)/POSIX 下语义一致                                                                                                                          | contracted（用户需求"解决两平台红测"）+ observed（R2 红 + core echo 红）                                                                                                  | 无（本次修正两处：prompt.test.ts:1130、cross-spawn-spawner.test.ts:197-204） |
+| INV-04  | 测试预算与 canonical 契约一致：任何调用入口（裸 bun test/IDE/CI）下集成测试预算均为 30s，显式传入者不受影响                                                                                                                 | contracted（package.json `"test": bun test --timeout 30000` 既有契约的内化）                                                                                              | 无（本次建立；R3 回路为红样本）                                              |
+| INV-05  | 负载余量预算：负载敏感集成用例的显式预算按平台放大（仓内先例：shortSessionTimeout、shell.test.ts timeoutMs），且只放宽"等待多久"不改变任何并发/行为断言（prompt.test.ts:4106 既有注释原文背书"放宽预算不改变并发语义断言"） | contracted（用户 R4 需求"全仓零红测"）+ observed（对照树实验：4 测试同机同负载在预修复代码同样失败；审计实测通过类测试比基线慢 30-55%；fsmonitor 后台进程占用 1299s CPU） | 无（R4 建立；当前 4 红为样本）                                               |
+| INV-05a | 预算连贯性：同一用例的内层 wait 预算必须严格小于其外层注册硬顶（两平台均成立）                                                                                                                                              | contracted（Round 4 B-01：reviewPollBudget 20s > :2391 显式 15s 硬顶不连贯）                                                                                              | 无（R5 建立）                                                                |
 
 ## 8. First Divergence and Root Cause
 
-| Invariant | First divergence | Owning module/interface | Proof |
-| --- | --- | --- | --- |
+| Invariant     | First divergence                                                                                                                                                                                                                                                                            | Owning module/interface                                                           | Proof                                                                                                                          |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
 | INV-01/INV-02 | `setupOutput`（cross-spawn-spawner.ts:240-263）将主 stdout/stderr 包装为惰性 `NodeStream.fromReadable(() => proc.stdout)`——读取在 Effect Stream 订阅时才开始；子进程在订阅前退出时其管道数据被丢弃。同文件 `setupFds` 的 extra 输出（197-211 行）已是急切 `pipe(PassThrough)`，主路径未对齐 | `packages/core/src/cross-spawn-spawner.ts` `setupOutput`（进程/流接线唯一 owner） | 本机红回路：快退+150ms 延迟订阅 → `""` LOST；慢退 → RETAINED。测试侧 `sleep 0.01`（shell.test.ts:219/344）是对该分歧的下游补偿 |
-| INV-03 | prompt.test.ts:1130 的 `printf allowed > <path>` 假定 POSIX shell；Windows 默认 pwsh 无 printf | 测试自身（跨平台命令缺失） | R2 红回路 1 fail |
-| INV-04 | `test/lib/effect.ts` `make()` 对 live/instance 注册透传 `testOptions`（缺省 undefined）→ bun 默认 5000ms；canonical 30s 契约只活在 CLI flag | 测试设施 seam（test/lib/effect.ts） | R3 红回路：裸调用 1 fail vs canonical 通过 |
+| INV-03        | prompt.test.ts:1130 的 `printf allowed > <path>` 假定 POSIX shell；Windows 默认 pwsh 无 printf                                                                                                                                                                                              | 测试自身（跨平台命令缺失）                                                        | R2 红回路 1 fail                                                                                                               |
+| INV-04        | `test/lib/effect.ts` `make()` 对 live/instance 注册透传 `testOptions`（缺省 undefined）→ bun 默认 5000ms；canonical 30s 契约只活在 CLI flag                                                                                                                                                 | 测试设施 seam（test/lib/effect.ts）                                               | R3 红回路：裸调用 1 fail vs canonical 通过                                                                                     |
 
 红色回路命令与输出（三组，均已实跑）：
 
@@ -143,11 +143,11 @@ prompt.test.ts:1130 mock 驱动 bash 工具执行 `printf allowed > "<win path>"
 
 ## 9. Responsibility and Seam
 
-| Concern | Owner | Interface promise | Why it belongs here | Why another module does not own it |
-| --- | --- | --- | --- | --- |
-| 子进程输出在"写入↔订阅"窗口的保真 | `cross-spawn-spawner.ts` `setupOutput` | handle.stdout/stderr/all 是可延迟订阅且完整的流 | 它是进程创建与流接线的唯一 owner；写入-订阅解耦只有它能保证 | shell.ts 无法在不放弃 detached 进程组的前提下修复（其 653-655 行已论证）；测试侧 sleep 是下游补偿非 owner |
-| 集成测试 bun 预算与 canonical 一致 | `test/lib/effect.ts` `make()`（live/instance 注册 seam） | 注册入口自带默认 30s，显式参数优先 | 所有 opencode Effect 测试的注册汇聚点；canonical 契约内化的唯一自然位置 | 各测试文件散落 timeout 是重复；bunfig 无法承载（oven-sh/bun#7789） |
-| 测试命令跨平台性 | 各测试文件（prompt.test.ts） | 驱动 bash 工具的命令在 pwsh/POSIX 语义一致 | 命令文本属于测试自身 | 生产 shell 选择逻辑无缺陷 |
+| Concern                            | Owner                                                    | Interface promise                               | Why it belongs here                                                     | Why another module does not own it                                                                        |
+| ---------------------------------- | -------------------------------------------------------- | ----------------------------------------------- | ----------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| 子进程输出在"写入↔订阅"窗口的保真 | `cross-spawn-spawner.ts` `setupOutput`                   | handle.stdout/stderr/all 是可延迟订阅且完整的流 | 它是进程创建与流接线的唯一 owner；写入-订阅解耦只有它能保证             | shell.ts 无法在不放弃 detached 进程组的前提下修复（其 653-655 行已论证）；测试侧 sleep 是下游补偿非 owner |
+| 集成测试 bun 预算与 canonical 一致 | `test/lib/effect.ts` `make()`（live/instance 注册 seam） | 注册入口自带默认 30s，显式参数优先              | 所有 opencode Effect 测试的注册汇聚点；canonical 契约内化的唯一自然位置 | 各测试文件散落 timeout 是重复；bunfig 无法承载（oven-sh/bun#7789）                                        |
+| 测试命令跨平台性                   | 各测试文件（prompt.test.ts）                             | 驱动 bash 工具的命令在 pwsh/POSIX 语义一致      | 命令文本属于测试自身                                                    | 生产 shell 选择逻辑无缺陷                                                                                 |
 
 ## 10. Single Approved Primary-Path Design
 
@@ -186,52 +186,52 @@ bun 默认。数值与 package.json canonical flag 一字不差——是契约�
 
 ## 11. Secondary and Replacement Path Inventory
 
-| Path | Current or proposed | Classification | Produces success? | Decision-surface share | Disposition |
-| --- | --- | --- | --- | --- | --- |
-| extra-fd 急切 PassThrough（setupFds 197-211） | 现有 | primary-contract branch（同契约既有分支） | yes | 已在 | preserve（修复对齐它） |
-| 主 stdout/stderr 惰性 fromReadable | 现有 | 待修复的 primary 路径 | yes | 主路径 | 就地修复 |
-| 测试侧 sleep 补丁 ×5（:219/:344/:369/:1979/:2129） | 现有 | 被取代的 workaround | yes | 5 处 | delete |
-| detached 移除 / shell 选项回退 | 已被历史论证否决 | forbidden（破坏进程组隔离/已知 bug） | — | 0 | reject |
-| spawner 内 retry/重读 | 不存在 | forbidden fallback | — | 0 | reject |
-| CI retry-once 掩盖 | 不存在 | forbidden（掩盖竞态类） | — | 0 | reject |
+| Path                                               | Current or proposed | Classification                            | Produces success? | Decision-surface share | Disposition            |
+| -------------------------------------------------- | ------------------- | ----------------------------------------- | ----------------- | ---------------------- | ---------------------- |
+| extra-fd 急切 PassThrough（setupFds 197-211）      | 现有                | primary-contract branch（同契约既有分支） | yes               | 已在                   | preserve（修复对齐它） |
+| 主 stdout/stderr 惰性 fromReadable                 | 现有                | 待修复的 primary 路径                     | yes               | 主路径                 | 就地修复               |
+| 测试侧 sleep 补丁 ×5（:219/:344/:369/:1979/:2129） | 现有                | 被取代的 workaround                       | yes               | 5 处                   | delete                 |
+| detached 移除 / shell 选项回退                     | 已被历史论证否决    | forbidden（破坏进程组隔离/已知 bug）      | —                 | 0                      | reject                 |
+| spawner 内 retry/重读                              | 不存在              | forbidden fallback                        | —                 | 0                      | reject                 |
+| CI retry-once 掩盖                                 | 不存在              | forbidden（掩盖竞态类）                   | —                 | 0                      | reject                 |
 
 ## 12. Workaround Deletion and Replacement
 
-| Existing workaround or duplicate | Why it existed | Why the approved route supersedes it | Delete or collapse location |
-| --- | --- | --- | --- |
+| Existing workaround or duplicate                                   | Why it existed       | Why the approved route supersedes it                      | Delete or collapse location             |
+| ------------------------------------------------------------------ | -------------------- | --------------------------------------------------------- | --------------------------------------- |
 | shell.test.ts:219/:344/:369/:1979/:2129 `sleep 0.01` ×5 + 同款注释 | 补偿订阅前快退丢数据 | spawner 急切缓冲后写入-订阅解耦，保真不再依赖进程存活时长 | delete（5 处 sleep），注释改指向 INV-01 |
-| cross-spawn-spawner.test.ts:197-204 `echo` 写手 | 假定 POSIX echo 语义 | 同文件 :209 既有 js() 写手即平台无关模板 | 就地替换为 js() 写手 |
-| prompt.test.ts:1130 `printf >` | 假定 POSIX | `bun -e Bun.write` 跨平台等价 | 就地替换 |
+| cross-spawn-spawner.test.ts:197-204 `echo` 写手                    | 假定 POSIX echo 语义 | 同文件 :209 既有 js() 写手即平台无关模板                  | 就地替换为 js() 写手                    |
+| prompt.test.ts:1130 `printf >`                                     | 假定 POSIX           | `bun -e Bun.write` 跨平台等价                             | 就地替换                                |
 
 ## 13. Forward Traceability
 
-| Requirement or invariant | Production path | Planned file/change | Behavioral test |
-| --- | --- | --- | --- |
-| INV-01 spawner 输出保真 | setupOutput 急切 PassThrough | cross-spawn-spawner.ts | core spawner 新测试（fx.live，exit-后订阅 ×10 → 完整捕获） |
-| INV-02 端到端无时序补丁 | R1 修复 | shell.test.ts 删 5 处 sleep | 既有 basic/quotes 测试（删 workaround 后全平台跑；macOS CI 为真门） |
-| INV-03 平台无关命令 | —（测试侧） | prompt.test.ts:1130 命令替换 | 既有 1167 行断言（Windows 由红转绿；macOS 保持绿） |
-| INV-05/INV-05a 负载余量与预算连贯 | —（测试侧：用例自身的注册/内部 wait 预算，owner 即该测试文件） | prompt.test.ts 三常量 + 四用例接入（含 :2391 注册硬顶） | slices 5/6/7 红转绿；全文件复跑清零 |
-| INV-04 预算契约内化 | —（测试设施） | test/lib/effect.ts 默认 30s | R3 回路：裸 `bun test -t "publishes the estimated..."` 由红转绿；显式 timeout 用例（shell basic 60_000）不受影响 |
-| 用户上限（≤6 文件、≤800 行） | 第 19 节预算 | 5 代码文件 + 本 plan | 预算表审计 |
+| Requirement or invariant          | Production path                                                | Planned file/change                                     | Behavioral test                                                                                                  |
+| --------------------------------- | -------------------------------------------------------------- | ------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| INV-01 spawner 输出保真           | setupOutput 急切 PassThrough                                   | cross-spawn-spawner.ts                                  | core spawner 新测试（fx.live，exit-后订阅 ×10 → 完整捕获）                                                       |
+| INV-02 端到端无时序补丁           | R1 修复                                                        | shell.test.ts 删 5 处 sleep                             | 既有 basic/quotes 测试（删 workaround 后全平台跑；macOS CI 为真门）                                              |
+| INV-03 平台无关命令               | —（测试侧）                                                    | prompt.test.ts:1130 命令替换                            | 既有 1167 行断言（Windows 由红转绿；macOS 保持绿）                                                               |
+| INV-05/INV-05a 负载余量与预算连贯 | —（测试侧：用例自身的注册/内部 wait 预算，owner 即该测试文件） | prompt.test.ts 三常量 + 四用例接入（含 :2391 注册硬顶） | slices 5/6/7 红转绿；全文件复跑清零                                                                              |
+| INV-04 预算契约内化               | —（测试设施）                                                  | test/lib/effect.ts 默认 30s                             | R3 回路：裸 `bun test -t "publishes the estimated..."` 由红转绿；显式 timeout 用例（shell basic 60_000）不受影响 |
+| 用户上限（≤6 文件、≤800 行）      | 第 19 节预算                                                   | 5 代码文件 + 本 plan                                    | 预算表审计                                                                                                       |
 
 ## 14. Reverse Traceability
 
-| Proposed production concept | Requirement ID | Evidence | Why existing logic cannot carry it |
-| --- | --- | --- | --- |
-| setupOutput 急切 PassThrough（主输出） | INV-01/02 | 本机红回路 + macOS CI + in-repo 双注释 + setupFds 既有同款 | 惰性 fromReadable 无保真保证；shell.ts 层修复会牺牲 detached 进程组 |
-| live/instance 默认 30s testOptions | INV-04 | canonical flag 契约 + R3 红回路 | bunfig 不可用（#7789）；散落 per-test timeout 是重复责任 |
-| prompt.test.ts `bun -e Bun.write` 命令 | INV-03 | R2 红回路 + 106-110 行先例 | printf 仅 POSIX |
+| Proposed production concept                                  | Requirement ID | Evidence                                                         | Why existing logic cannot carry it                                  |
+| ------------------------------------------------------------ | -------------- | ---------------------------------------------------------------- | ------------------------------------------------------------------- |
+| setupOutput 急切 PassThrough（主输出）                       | INV-01/02      | 本机红回路 + macOS CI + in-repo 双注释 + setupFds 既有同款       | 惰性 fromReadable 无保真保证；shell.ts 层修复会牺牲 detached 进程组 |
+| live/instance 默认 30s testOptions                           | INV-04         | canonical flag 契约 + R3 红回路                                  | bunfig 不可用（#7789）；散落 per-test timeout 是重复责任            |
+| prompt.test.ts `bun -e Bun.write` 命令                       | INV-03         | R2 红回路 + 106-110 行先例                                       | printf 仅 POSIX                                                     |
 | heavyLoopBudget/reviewPollBudget/snapshotMatrixBudget 三常量 | INV-05/INV-05a | 4 红实测 + 对照树实验 + 双先例（shortSessionTimeout、timeoutMs） | 四用例的固定预算无负载余量，且 :2391 外层硬顶与体内 poll 无连贯约束 |
 
 ## 15. File-Level Change Plan
 
-| File | Add / modify / delete | Exact responsibility of the change | Expected line delta |
-| --- | --- | --- | --- |
-| `packages/core/src/cross-spawn-spawner.ts` | modify | setupOutput 主 stdout/stderr 急切 pipe(PassThrough) + error 透传 + 中文不变量注释 | 约 +14/−4 |
-| `packages/core/test/effect/cross-spawn-spawner.test.ts` | modify | 新增 INV-01 回归测试（fx.live，显式 timeout 30_000，循环 10 次 exit-后订阅）；既有 :197-204 echo 写手归一为 js() 写手（slice 1b） | 约 +25/−2 |
-| `packages/opencode/test/tool/shell.test.ts` | modify | 删除 **5 处** sleep workaround（:219/:344/:369/:1979/:2129），注释改指向 INV-01 | 约 +8/−12 |
-| `packages/opencode/test/session/prompt.test.ts` | modify | 1130 命令跨平台化 + 中文意图注释；**R5：顶部新增平台化预算常量（heavyLoopBudget：win32 30_000/其余 12_000；reviewPollBudget：win32 "12 seconds"/其余 "5 seconds"；snapshotMatrixBudget：win32 90_000/其余 40_000）。四用例接入：:4067/:4107/:2391 显式注册 → heavyLoopBudget（:2391 原 15_000 一并纳入，保 INV-05a 内层<外层）；auto-review 五处 pollWithTimeout + :2345 awaitWithTimeout 传 reviewPollBudget；snapshot matrix 注册显式 snapshotMatrixBudget；:4066 旧 "10s" 理由注释同步改写** | 约 +28/−10（R3-R5 合计） |
-| `packages/opencode/test/lib/effect.ts` | modify | live/instance 注册默认 `{ timeout: 30_000 }`（显式优先）+ 契约注释 | 约 +12/−2 |
+| File                                                    | Add / modify / delete | Exact responsibility of the change                                                                                                                                                                                                                                                                                                                                                                                                                                                              | Expected line delta      |
+| ------------------------------------------------------- | --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------ |
+| `packages/core/src/cross-spawn-spawner.ts`              | modify                | setupOutput 主 stdout/stderr 急切 pipe(PassThrough) + error 透传 + 中文不变量注释                                                                                                                                                                                                                                                                                                                                                                                                               | 约 +14/−4                |
+| `packages/core/test/effect/cross-spawn-spawner.test.ts` | modify                | 新增 INV-01 回归测试（fx.live，显式 timeout 30_000，循环 10 次 exit-后订阅）；既有 :197-204 echo 写手归一为 js() 写手（slice 1b）                                                                                                                                                                                                                                                                                                                                                               | 约 +25/−2                |
+| `packages/opencode/test/tool/shell.test.ts`             | modify                | 删除 **5 处** sleep workaround（:219/:344/:369/:1979/:2129），注释改指向 INV-01                                                                                                                                                                                                                                                                                                                                                                                                                 | 约 +8/−12                |
+| `packages/opencode/test/session/prompt.test.ts`         | modify                | 1130 命令跨平台化 + 中文意图注释；**R5：顶部新增平台化预算常量（heavyLoopBudget：win32 30_000/其余 12_000；reviewPollBudget：win32 "12 seconds"/其余 "5 seconds"；snapshotMatrixBudget：win32 90_000/其余 40_000）。四用例接入：:4067/:4107/:2391 显式注册 → heavyLoopBudget（:2391 原 15_000 一并纳入，保 INV-05a 内层<外层）；auto-review 五处 pollWithTimeout + :2345 awaitWithTimeout 传 reviewPollBudget；snapshot matrix 注册显式 snapshotMatrixBudget；:4066 旧 "10s" 理由注释同步改写** | 约 +28/−10（R3-R5 合计） |
+| `packages/opencode/test/lib/effect.ts`                  | modify                | live/instance 注册默认 `{ timeout: 30_000 }`（显式优先）+ 契约注释                                                                                                                                                                                                                                                                                                                                                                                                                              | 约 +12/−2                |
 
 注：bunfig 无法承载 timeout 的 oven-sh/bun#7789 引用未经本仓独立验证（审计
 备注），seam 选择的独立依据是「单一注册汇聚点 + 显式选项优先」，该引用仅为
@@ -240,26 +240,26 @@ bun 默认。数值与 package.json canonical flag 一字不差——是契约�
 
 ## 16. TDD Behavior Slices
 
-| Order | Red behavior | Why current code fails | Minimal green behavior | Regression protected |
-| --- | --- | --- | --- | --- |
-| 1 | core spawner（**fx.live，实时钟，显式 timeout 30_000**——packages/core 裸跑无 canonical flag，循环实测 ~2.5s 仅 2 倍余量）：循环 10 次「spawn 快退写手 → `await handle.exitCode` 后才订阅收集」，逐次断言捕获含全文 | 惰性订阅下快退数据丢弃（**确定性红**：Round 2 实测 10/10 丢失；R1 的 1/5–2/6 来自已废弃的定时变体） | setupOutput 急切 PassThrough（机理对照 10/10 保留，绿为确定性） | INV-01 全平台；exit-后订阅是写入-订阅窗口的最对抗性排序，macOS CI 原竞态的确定性替代门 |
-| 1b | core spawner 套件既有 "captures stdout via .all when no stderr"（Windows 确定性红） | `echo` 写手在无 echo.exe 的 Windows 经 cross-spawn cmd 回退加引号 | 换用同文件 :209 既有的 js() 写手 → 绿（macOS 保持绿：POSIX echo 原本也绿，归一后不依赖 echo） | INV-03；§18 基线归真 |
-| 2 | shell.test.ts basic/quotes 删 sleep 后全平台运行 | （依赖 slice 1 修复） | 两测试在无 workaround 下绿 | INV-02：端到端不再依赖时序补丁 |
-| 3 | prompt.test.ts queued-permission（canonical 预算） | Windows pwsh 无 printf → 1167 红（已红） | `bun -e Bun.write` 跨平台命令 → 绿 | INV-03 |
-| 4 | prompt.test.ts `publishes the estimated...` 裸调用（无 flag） | bun 默认 5s 超时（已红） | seam 默认 30s → 绿；显式 60_000 用例不受影响 | INV-04 |
-| 5 | prompt.test.ts `loop waits while shell runs...` 与 `shell completion resumes...`（显式 10_000，负载下 10.5s 超限红） | 平台化 heavyLoopBudget（win32 30s / 其他 12s）→ 绿；断言不变；:4066 旧 "10s" 理由注释同步改写 | INV-05；仓内 :4106 注释已背书放宽不改语义 |
-| 6 | prompt.test.ts `cancel aborts an in-flight shell auto review`（**双层预算**：注册显式 15s 硬顶 + 体内 5 处 pollWithTimeout 默认 5s，负载下链路 >5s 红） | 注册 15_000 → heavyLoopBudget（win32 30s）；五处 poll + :2345 await 传 reviewPollBudget（win32 12s / 其他 5s）→ 绿；内层严格小于外层硬顶（INV-05a：12<30、5<12） | INV-05/INV-05a |
-| 7 | prompt.test.ts `enforces Snapshot and Revert worktree authority matrix`（无显式预算，负载下 30s 顶格红） | 注册显式 snapshotMatrixBudget（win32 90s / 其他 40s）→ 绿 | INV-05；该用例含 3 个会话多轮 loop + git snapshot/revert，是最重用例 |
+| Order | Red behavior                                                                                                                                                                                                       | Why current code fails                                                                                                                                           | Minimal green behavior                                                                        | Regression protected                                                                   |
+| ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------- |
+| 1     | core spawner（**fx.live，实时钟，显式 timeout 30_000**——packages/core 裸跑无 canonical flag，循环实测 ~2.5s 仅 2 倍余量）：循环 10 次「spawn 快退写手 → `await handle.exitCode` 后才订阅收集」，逐次断言捕获含全文 | 惰性订阅下快退数据丢弃（**确定性红**：Round 2 实测 10/10 丢失；R1 的 1/5–2/6 来自已废弃的定时变体）                                                              | setupOutput 急切 PassThrough（机理对照 10/10 保留，绿为确定性）                               | INV-01 全平台；exit-后订阅是写入-订阅窗口的最对抗性排序，macOS CI 原竞态的确定性替代门 |
+| 1b    | core spawner 套件既有 "captures stdout via .all when no stderr"（Windows 确定性红）                                                                                                                                | `echo` 写手在无 echo.exe 的 Windows 经 cross-spawn cmd 回退加引号                                                                                                | 换用同文件 :209 既有的 js() 写手 → 绿（macOS 保持绿：POSIX echo 原本也绿，归一后不依赖 echo） | INV-03；§18 基线归真                                                                   |
+| 2     | shell.test.ts basic/quotes 删 sleep 后全平台运行                                                                                                                                                                   | （依赖 slice 1 修复）                                                                                                                                            | 两测试在无 workaround 下绿                                                                    | INV-02：端到端不再依赖时序补丁                                                         |
+| 3     | prompt.test.ts queued-permission（canonical 预算）                                                                                                                                                                 | Windows pwsh 无 printf → 1167 红（已红）                                                                                                                         | `bun -e Bun.write` 跨平台命令 → 绿                                                            | INV-03                                                                                 |
+| 4     | prompt.test.ts `publishes the estimated...` 裸调用（无 flag）                                                                                                                                                      | bun 默认 5s 超时（已红）                                                                                                                                         | seam 默认 30s → 绿；显式 60_000 用例不受影响                                                  | INV-04                                                                                 |
+| 5     | prompt.test.ts `loop waits while shell runs...` 与 `shell completion resumes...`（显式 10_000，负载下 10.5s 超限红）                                                                                               | 平台化 heavyLoopBudget（win32 30s / 其他 12s）→ 绿；断言不变；:4066 旧 "10s" 理由注释同步改写                                                                    | INV-05；仓内 :4106 注释已背书放宽不改语义                                                     |
+| 6     | prompt.test.ts `cancel aborts an in-flight shell auto review`（**双层预算**：注册显式 15s 硬顶 + 体内 5 处 pollWithTimeout 默认 5s，负载下链路 >5s 红）                                                            | 注册 15_000 → heavyLoopBudget（win32 30s）；五处 poll + :2345 await 传 reviewPollBudget（win32 12s / 其他 5s）→ 绿；内层严格小于外层硬顶（INV-05a：12<30、5<12） | INV-05/INV-05a                                                                                |
+| 7     | prompt.test.ts `enforces Snapshot and Revert worktree authority matrix`（无显式预算，负载下 30s 顶格红）                                                                                                           | 注册显式 snapshotMatrixBudget（win32 90s / 其他 40s）→ 绿                                                                                                        | INV-05；该用例含 3 个会话多轮 loop + git snapshot/revert，是最重用例                          |
 
 Slice 1/3/4 实施前红已用同构回路证实；slice 2 是 workaround 删除后的恒绿
 锁定（其红能力来自 slice 1 的前置红）。
 
 ## 17. Chinese Comment Budget
 
-| Metric | Estimate | Method |
-| --- | --- | --- |
-| Effective changed code lines `E` | R3 实测 41（审计重算）+ R4 增量约 14（三个常量 + 七处预算替换，排除注释） | 见 15 节行数扣除注释；§23 有 R3 实际口径 |
-| Required Chinese explanatory comments `C` | R3 实测 20 + R4 增量约 5（常量处负载机理注释） | R4 合计需 ≥ ceil(55×0.15)=9，存量已远超 |
+| Metric                                    | Estimate                                                                  | Method                                   |
+| ----------------------------------------- | ------------------------------------------------------------------------- | ---------------------------------------- |
+| Effective changed code lines `E`          | R3 实测 41（审计重算）+ R4 增量约 14（三个常量 + 七处预算替换，排除注释） | 见 15 节行数扣除注释；§23 有 R3 实际口径 |
+| Required Chinese explanatory comments `C` | R3 实测 20 + R4 增量约 5（常量处负载机理注释）                            | R4 合计需 ≥ ceil(55×0.15)=9，存量已远超  |
 
 注释点：①setupOutput 保真不变量（写入-订阅解耦、快退丢弃机理、与 setupFds
 同款）；②core 新测试意图（快退+延迟订阅即竞态形态）；③shell.test 两处注释
@@ -269,29 +269,29 @@ flag 一字不差、显式优先）。
 
 ## 18. Verification
 
-| Command | Working directory | Evidence produced |
-| --- | --- | --- |
-| `bun test test/effect/cross-spawn-spawner.test.ts` | packages/core | 真实基线（Windows 裸跑）= 23 pass / 1 fail（:197-204 echo 平台红）；slice 1b 归一后既有全绿；slice 1（fx.live）确定性红转绿 |
-| `bun test test/tool/shell.test.ts` | packages/opencode | basic/quotes 删 workaround 后绿（slice 2） |
-| `bun test --timeout 30000 test/session/prompt.test.ts -t "refreshes queued Permission, Tool definition and MCP in one continuation"` | packages/opencode | slice 3 红转绿 |
-| `bun test test/session/prompt.test.ts -t "publishes the estimated Assistant as the first durable attempt state"`（**无 flag**） | packages/opencode | slice 4 红转绿 |
-| `bun test --timeout 30000 test/session/prompt.test.ts`（全文件） | packages/opencode | 全套通过（R2/R3 修复后 0 fail） |
-| `bun test test/tool/shell.test.ts test/tool/edit.test.ts test/patch/patch.test.ts test/tool/apply_patch.test.ts` | packages/opencode | 邻接回归 |
-| `bun typecheck` | packages/core 与 packages/opencode | 两包类型安全 |
-| macOS 侧 | 用户 CI 复跑 | `tool.shell > basic [bash]` 转绿（本机无法执行 macOS；slice 1/2 为其确定性替代门） |
-| `bun test --timeout 30000 test/session/prompt.test.ts -t "loop waits while shell runs..."` 等 4 个负载敏感用例 | packages/opencode | slice 5/6/7 红转绿（当前机器负载态下） |
-| `bun test --timeout 30000 test/session/prompt.test.ts`（全文件，R4 后复跑） | packages/opencode | 已知红测清零（若机器负载出现新暴露的其余紧预算用例，按 INV-05 同法处置并回填本表） |
+| Command                                                                                                                              | Working directory                  | Evidence produced                                                                                                           |
+| ------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `bun test test/effect/cross-spawn-spawner.test.ts`                                                                                   | packages/core                      | 真实基线（Windows 裸跑）= 23 pass / 1 fail（:197-204 echo 平台红）；slice 1b 归一后既有全绿；slice 1（fx.live）确定性红转绿 |
+| `bun test test/tool/shell.test.ts`                                                                                                   | packages/opencode                  | basic/quotes 删 workaround 后绿（slice 2）                                                                                  |
+| `bun test --timeout 30000 test/session/prompt.test.ts -t "refreshes queued Permission, Tool definition and MCP in one continuation"` | packages/opencode                  | slice 3 红转绿                                                                                                              |
+| `bun test test/session/prompt.test.ts -t "publishes the estimated Assistant as the first durable attempt state"`（**无 flag**）      | packages/opencode                  | slice 4 红转绿                                                                                                              |
+| `bun test --timeout 30000 test/session/prompt.test.ts`（全文件）                                                                     | packages/opencode                  | 全套通过（R2/R3 修复后 0 fail）                                                                                             |
+| `bun test test/tool/shell.test.ts test/tool/edit.test.ts test/patch/patch.test.ts test/tool/apply_patch.test.ts`                     | packages/opencode                  | 邻接回归                                                                                                                    |
+| `bun typecheck`                                                                                                                      | packages/core 与 packages/opencode | 两包类型安全                                                                                                                |
+| macOS 侧                                                                                                                             | 用户 CI 复跑                       | `tool.shell > basic [bash]` 转绿（本机无法执行 macOS；slice 1/2 为其确定性替代门）                                          |
+| `bun test --timeout 30000 test/session/prompt.test.ts -t "loop waits while shell runs..."` 等 4 个负载敏感用例                       | packages/opencode                  | slice 5/6/7 红转绿（当前机器负载态下）                                                                                      |
+| `bun test --timeout 30000 test/session/prompt.test.ts`（全文件，R4 后复跑）                                                          | packages/opencode                  | 已知红测清零（若机器负载出现新暴露的其余紧预算用例，按 INV-05 同法处置并回填本表）                                          |
 
 ## 19. Diff Budget
 
-| Metric | Estimate | Justification |
-| --- | --- | --- |
-| Files added | 0 | — |
-| Files modified（含测试） | 5 + 本 plan = 6 | 用户上限 6 |
-| Files deleted | 0 | — |
-| Production lines | 约 18（含注释） | 单点 owner 修复 |
-| Test lines | 约 45（R3）+ 约 20（R4 预算常量与替换） | 1 新测试 + 3 处小改 + seam 默认 + R4 预算加固 |
-| Generated lines | 0 | 无 |
+| Metric                   | Estimate                                | Justification                                 |
+| ------------------------ | --------------------------------------- | --------------------------------------------- |
+| Files added              | 0                                       | —                                             |
+| Files modified（含测试） | 5 + 本 plan = 6                         | 用户上限 6                                    |
+| Files deleted            | 0                                       | —                                             |
+| Production lines         | 约 18（含注释）                         | 单点 owner 修复                               |
+| Test lines               | 约 45（R3）+ 约 20（R4 预算常量与替换） | 1 新测试 + 3 处小改 + seam 默认 + R4 预算加固 |
+| Generated lines          | 0                                       | 无                                            |
 
 总量约 110 行 ≤ 800（R3 实测 86 + R4 预估 ~25）。文件数不变：6 ≤ 6。
 
@@ -340,9 +340,9 @@ The independent auditor must:
 
 ## 22. Plan Audit Record
 
-| Round | Audited revision | Full scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | R1 | yes | 1（B-01：slice 1 指定 `fx.effect`（TestClock 冻结层）+ 定时 150ms 延迟订阅会永久挂死，测试永远无法转绿，破坏 INV-01 验证路径；最小修正方向 = fx.live 或时钟无关排序） | 4（slice 1 修复前红为概率性 1/5–2/6，应循环化；bun#7789 引用未独立验证；§15 行数算术口径漂移；损失机制在父端 Bun 运行时，子进程运行时无关） | BLOCKING — 修订至 R2 重事全量审计 | ses_fb14b20a1ffeWSJyZpby5oEOsR |
+| Round | Audited revision | Full scope? | Blocking findings                                                                                                                                                     | Non-blocking findings                                                                                                                       | Result                            | Invocation reference           |
+| ----- | ---------------- | ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------- | ------------------------------ |
+| 1     | R1               | yes         | 1（B-01：slice 1 指定 `fx.effect`（TestClock 冻结层）+ 定时 150ms 延迟订阅会永久挂死，测试永远无法转绿，破坏 INV-01 验证路径；最小修正方向 = fx.live 或时钟无关排序） | 4（slice 1 修复前红为概率性 1/5–2/6，应循环化；bun#7789 引用未独立验证；§15 行数算术口径漂移；损失机制在父端 Bun 运行时，子进程运行时无关） | BLOCKING — 修订至 R2 重事全量审计 | ses_fb14b20a1ffeWSJyZpby5oEOsR |
 
 <details><summary>Verbatim independent audit verdict (Round 1, revision R1) — blocking</summary>
 
@@ -412,6 +412,7 @@ The independent auditor must:
 **计划：** `docs/plans/cross-platform-red-root-repair.md` — Revision R2, Status audit-required, Approved revision: none, Implementation allowed: no
 
 **通过直接重现验证的证据（本机 Windows = 实施与验证宿主）：**
+
 1. `bun test test/effect/cross-spawn-spawner.test.ts`（packages/core，裸调用）→ **23 pass / 1 fail**：`combined output (all) > captures stdout via .all when no stderr`（test:197-206，期望 `"hello from stdout"` 实得 `"\"hello from stdout\""`，823ms 断言失败，非超时）。复跑单测 2/2 同样失败。
 2. 直驱 cross-spawn 探针：`launch('echo', ['hello from stdout'])` → 输出 `"\"hello from stdout\"\r\n"`（带引号）；`where.exe echo` 无结果 — Windows 上无 echo.exe，cross-spawn 回退 cmd 包装并对参数加引号。机制定位，确定性。
 3. R2 slice-1 公式（`fx.live` + `await handle.exitCode` 后订阅 + 循环 10 次）经真实 spawner seam 直跑：修复前 **10/10 全部丢失**（node 子进程 2452ms、bun 子进程 1684ms）——比计划声称的 1/5–2/6 更红（确定性）。
@@ -469,7 +470,7 @@ The independent auditor must:
 
 **阻塞（BLOCK）** —— B-01（既有 Windows 确定性红测未处置 + §18 主验证门基线声明为假）。R2 对 Round 1 B-01 的修复（slice 1 公式）已独立验证为正确且充分；根因、ownership、机理、预算、二次路径、R2/R3 设计均维持成立。按最小修正方向修订至 R3（记录 + 处置该红测 + 更正 §18 基线声明，不触 R1 生产设计），随后请求新的全量审计。计划审计第 2 轮，共 6 轮。
 
-*审计探针产物：`D:\\Temp\\opencode\\audit-probe-slice1.ts`（预批准临时目录内，未运行成功的历史残留，未触碰仓库任何文件）。*
+_审计探针产物：`D:\\Temp\\opencode\\audit-probe-slice1.ts`（预批准临时目录内，未运行成功的历史残留，未触碰仓库任何文件）。_
 
 </details>
 
@@ -603,6 +604,7 @@ R4 注释承诺存在且位于决策处：常量定义处的负载机理注释�
 **计划：** `docs/plans/cross-platform-red-root-repair.md` — Revision R3, Status audit-required, Approved revision: none, Implementation allowed: no
 
 **通过直接重现验证的证据（本机 Windows = 实施与验证宿主）：**
+
 1. `bun test test/effect/cross-spawn-spawner.test.ts`（packages/core，裸调用）→ **23 pass / 1 fail**：`combined output (all) > captures stdout via .all when no stderr`（:197-204），期望 `"hello from stdout"` 实得 `"\"hello from stdout\""`，974ms 断言失败（非超时）——与 §4/§18 记录的既有 Windows 红测逐字一致。
 2. `bun test --timeout 30000 test/session/prompt.test.ts -t "refreshes queued Permission, Tool definition and MCP in one continuation"` → **1 fail**（:1167 `Bun.file(bashFile).exists()` 期望 true 实得 false，14237ms）——R2 红逐字复现。
 3. `bun test test/session/prompt.test.ts -t "publishes the estimated Assistant as the first durable attempt state"`（裸调用）→ **1 fail**（"this test timed out after 5000ms"）——R3/slice 4 红逐字复现。
@@ -662,13 +664,13 @@ Complete only after implementation.
 
 ### Actual Files and Diff
 
-| File | Diff | 内容 |
-| --- | --- | --- |
-| `packages/core/src/cross-spawn-spawner.ts` | +18/−4 | setupOutput 急切 pipe(PassThrough)（tapOutput helper + 双流接入 + error 透传）+ 中文不变量注释 |
+| File                                                    | Diff   | 内容                                                                                                 |
+| ------------------------------------------------------- | ------ | ---------------------------------------------------------------------------------------------------- |
+| `packages/core/src/cross-spawn-spawner.ts`              | +18/−4 | setupOutput 急切 pipe(PassThrough)（tapOutput helper + 双流接入 + error 透传）+ 中文不变量注释       |
 | `packages/core/test/effect/cross-spawn-spawner.test.ts` | +22/−1 | 新增 INV-01 回归（fx.live，显式 30_000，循环 10 次 exit-后订阅）；:197-204 echo 写手归一为 js() 写手 |
-| `packages/opencode/test/tool/shell.test.ts` | +6/−13 | 删陙 5 处 sleep 补丁（:219/:344/:369/:1979/:2129）及同款机制注释，首处改指 INV-01 |
-| `packages/opencode/test/session/prompt.test.ts` | +7/−1 | :1130 命令跨平台化（bun -e Bun.write + 正斜杠）+ 中文意图注释 |
-| `packages/opencode/test/lib/effect.ts` | +10/−4 | live/instance（含 .only）注册默认 `{ timeout: 30_000 }`（显式优先）+ 契约注释 |
+| `packages/opencode/test/tool/shell.test.ts`             | +6/−13 | 删陙 5 处 sleep 补丁（:219/:344/:369/:1979/:2129）及同款机制注释，首处改指 INV-01                    |
+| `packages/opencode/test/session/prompt.test.ts`         | +7/−1  | :1130 命令跨平台化（bun -e Bun.write + 正斜杠）+ 中文意图注释                                        |
+| `packages/opencode/test/lib/effect.ts`                  | +10/−4 | live/instance（含 .only）注册默认 `{ timeout: 30_000 }`（显式优先）+ 契约注释                        |
 
 合计 +63/−23，5 代码文件 + 本 plan = 6 ≤ 6；约 86 行 ≤ 800。
 
@@ -682,14 +684,14 @@ Complete only after implementation.
 
 ### Verification Commands and Results
 
-| Command | Working directory | Result |
-| --- | --- | --- |
-| `bun test test/effect/cross-spawn-spawner.test.ts` | packages/core | 25 pass / 0 fail / 35 expect（真实基线曾是 23 pass / 1 fail） |
-| `bun test --timeout 30000 test/tool/shell.test.ts` | packages/opencode | 186 pass / 0 fail / 678 expect |
-| `bun test --timeout 30000 ... -t "refreshes queued Permission..."` | packages/opencode | 1 pass / 0 fail（红转绿） |
-| `bun test ... -t "publishes the estimated..."`（无 flag） | packages/opencode | 1 pass / 0 fail（裸调用红转绿） |
-| `bun test --timeout 30000 test/tool/edit.test.ts test/patch/patch.test.ts test/tool/apply_patch.test.ts test/tool/file-mutation-concurrency.test.ts` | packages/opencode | 207 pass / 0 fail / 4366 expect |
-| `bun typecheck` | packages/core、packages/opencode | 双包 exit 0 |
+| Command                                                                                                                                              | Working directory                | Result                                                        |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------- | ------------------------------------------------------------- |
+| `bun test test/effect/cross-spawn-spawner.test.ts`                                                                                                   | packages/core                    | 25 pass / 0 fail / 35 expect（真实基线曾是 23 pass / 1 fail） |
+| `bun test --timeout 30000 test/tool/shell.test.ts`                                                                                                   | packages/opencode                | 186 pass / 0 fail / 678 expect                                |
+| `bun test --timeout 30000 ... -t "refreshes queued Permission..."`                                                                                   | packages/opencode                | 1 pass / 0 fail（红转绿）                                     |
+| `bun test ... -t "publishes the estimated..."`（无 flag）                                                                                            | packages/opencode                | 1 pass / 0 fail（裸调用红转绿）                               |
+| `bun test --timeout 30000 test/tool/edit.test.ts test/patch/patch.test.ts test/tool/apply_patch.test.ts test/tool/file-mutation-concurrency.test.ts` | packages/opencode                | 207 pass / 0 fail / 4366 expect                               |
+| `bun typecheck`                                                                                                                                      | packages/core、packages/opencode | 双包 exit 0                                                   |
 
 ### Original Feedback-Loop Result
 
@@ -706,12 +708,12 @@ Complete only after implementation.
 
 ### Chinese Comment Calculation
 
-| Metric | Actual | Exclusions and evidence |
-| --- | --- | --- |
-| Effective changed code lines `E` | 44 | 生产 ~12 + core 测试 ~17 + effect ~6 + prompt ~4 + shell ~5；排除注释/空行/纯删除 |
-| Qualifying Chinese comment lines `C` | 18 | 生产 5（tap 不变量）+ core 5（新测试意图 4 + echo 归一 2）+ effect 4 + prompt 3 + shell 1 |
-| Ratio `C / E` | 0.41 | ≥ 0.15 |
-| Required minimum `C` | 7 | `max(1, ceil(44 × 0.15))` |
+| Metric                               | Actual | Exclusions and evidence                                                                   |
+| ------------------------------------ | ------ | ----------------------------------------------------------------------------------------- |
+| Effective changed code lines `E`     | 44     | 生产 ~12 + core 测试 ~17 + effect ~6 + prompt ~4 + shell ~5；排除注释/空行/纯删除         |
+| Qualifying Chinese comment lines `C` | 18     | 生产 5（tap 不变量）+ core 5（新测试意图 4 + echo 归一 2）+ effect 4 + prompt 3 + shell 1 |
+| Ratio `C / E`                        | 0.41   | ≥ 0.15                                                                                    |
+| Required minimum `C`                 | 7      | `max(1, ceil(44 × 0.15))`                                                                 |
 
 ### Remaining Unverified Items
 
@@ -735,28 +737,28 @@ Complete only after implementation.
 
 ### Red-Green Test Evidence（slice 5/6/7，当前机器负载态）
 
-| 用例 | 实施前（在案实测） | 实施后 |
-| --- | --- | --- |
-| loop waits while shell runs... | 10576ms 顶格红（10s） | **1 pass**（12.65s 文件时长，含 ~3s 启动） |
-| shell completion resumes... | 10007ms 顶格红（10s） | **1 pass**（9.22s） |
-| cancel aborts auto review | 12124ms poll 红 | **1 pass**（33.61s 文件时长，含 ~5s 启动，测试体 < 30s 硬顶） |
-| enforces Snapshot matrix | 30002ms 顶格红（30s） | **1 pass**（22.15s，90s 预算余量充足） |
+| 用例                           | 实施前（在案实测）    | 实施后                                                        |
+| ------------------------------ | --------------------- | ------------------------------------------------------------- |
+| loop waits while shell runs... | 10576ms 顶格红（10s） | **1 pass**（12.65s 文件时长，含 ~3s 启动）                    |
+| shell completion resumes...    | 10007ms 顶格红（10s） | **1 pass**（9.22s）                                           |
+| cancel aborts auto review      | 12124ms poll 红       | **1 pass**（33.61s 文件时长，含 ~5s 启动，测试体 < 30s 硬顶） |
+| enforces Snapshot matrix       | 30002ms 顶格红（30s） | **1 pass**（22.15s，90s 预算余量充足）                        |
 
 ### Verification Commands and Results
 
-| Command | Working directory | Result |
-| --- | --- | --- |
-| 四用例 `-t` 定向（canonical 预算） | packages/opencode | 4 × 1 pass / 0 fail（上表） |
+| Command                                                          | Working directory | Result                                                                                         |
+| ---------------------------------------------------------------- | ----------------- | ---------------------------------------------------------------------------------------------- |
+| 四用例 `-t` 定向（canonical 预算）                               | packages/opencode | 4 × 1 pass / 0 fail（上表）                                                                    |
 | `bun test --timeout 30000 test/session/prompt.test.ts`（全文件） | packages/opencode | **96 pass / 14 skip / 0 fail**（457.67s；机器回落态）——已知红测清零，§18 R4 后全文件复跑行兑现 |
-| `bun typecheck` | packages/opencode | exit 0 |
+| `bun typecheck`                                                  | packages/opencode | exit 0                                                                                         |
 
 ### E/C（R3+R5 合并口径）
 
-| Metric | Actual | 说明 |
-| --- | --- | --- |
-| E | ≈ 54 | R3 审计重算 41 + R5 增量 ≈ 13（3 常量 + 4 注册替换 + 7 内层预算插入；排除注释） |
-| C | ≈ 29 | R3 审计重算 20 + R5 增量 ≈ 9（常量机理 4 + 三处接入点注释 5） |
-| C/E | ≈ 0.54 | ≥ 0.15 |
+| Metric | Actual | 说明                                                                            |
+| ------ | ------ | ------------------------------------------------------------------------------- |
+| E      | ≈ 54   | R3 审计重算 41 + R5 增量 ≈ 13（3 常量 + 4 注册替换 + 7 内层预算插入；排除注释） |
+| C      | ≈ 29   | R3 审计重算 20 + R5 增量 ≈ 9（常量机理 4 + 三处接入点注释 5）                   |
+| C/E    | ≈ 0.54 | ≥ 0.15                                                                          |
 
 ### Remaining Unverified Items（R5 后）
 
@@ -765,10 +767,10 @@ Complete only after implementation.
 
 ## 24. Implementation Audit Record
 
-| Round | Plan revision | Full original scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | R3 | yes | 0 | 4（全文件 0-fail 在当前机器状态不可复现且为环境性，加固留待 R4；seam 默认使 CLI --timeout 对无显式 opts 的注册不再生效属批准取舍；macOS 终验待用户 CI；E/C 重算 41/20 同向漂移） | No blocking findings — APPROVE | ses_fb0fc7443ffe1aO66nJm8HvAc7 |
-| 2 | R5 | yes（R5 增量 + 全量终态） | 0 | 4（工作树存在五文件外无关未提交改动，提交时须范围隔离；§23-R5 行号轻微漂移（实际 :4083/:4123/:2404、:2355）；沿袭 Round 5 非阻塞（§8/§9 行缺失、非 win32 12s rationale）；macOS 终验待用户 CI） | No blocking findings — APPROVE | ses_fb0c44314ffewV10BHV5P7ac7p |
+| Round | Plan revision | Full original scope?      | Blocking findings | Non-blocking findings                                                                                                                                                                           | Result                         | Invocation reference           |
+| ----- | ------------- | ------------------------- | ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------ | ------------------------------ |
+| 1     | R3            | yes                       | 0                 | 4（全文件 0-fail 在当前机器状态不可复现且为环境性，加固留待 R4；seam 默认使 CLI --timeout 对无显式 opts 的注册不再生效属批准取舍；macOS 终验待用户 CI；E/C 重算 41/20 同向漂移）                | No blocking findings — APPROVE | ses_fb0fc7443ffe1aO66nJm8HvAc7 |
+| 2     | R5            | yes（R5 增量 + 全量终态） | 0                 | 4（工作树存在五文件外无关未提交改动，提交时须范围隔离；§23-R5 行号轻微漂移（实际 :4083/:4123/:2404、:2355）；沿袭 Round 5 非阻塞（§8/§9 行缺失、非 win32 12s rationale）；macOS 终验待用户 CI） | No blocking findings — APPROVE | ses_fb0c44314ffewV10BHV5P7ac7p |
 
 <details><summary>Verbatim independent implementation audit verdict (Round 1, plan revision R3) — approved</summary>
 
@@ -779,13 +781,13 @@ Complete only after implementation.
 
 **审计者独立重现证据（本机 Windows，全部实跑）：**
 
-| 验证命令（计划 §18） | 结果 |
-| --- | --- |
-| `bun test test/effect/cross-spawn-spawner.test.ts`（packages/core，裸跑） | **25 pass / 0 fail**（含新 INV-01 测试与 echo→js 归一；修复前基线 23 pass/1 fail 为 Round 2/3 审计实录） |
-| `bun test --timeout 30000 test/session/prompt.test.ts -t "refreshes queued Permission..."` | **1 pass**（R2 红转绿；我在预修复对照树中同日重现该红：:1167 `exists()` false，15.09s） |
-| `bun test test/session/prompt.test.ts -t "publishes the estimated Assistant..."`（**无 flag**） | **1 pass**（19.93s，seam 默认 30s 生效，R3 红转绿） |
-| `bun test --timeout 30000 test/tool/shell.test.ts`（全量） | **186 pass / 0 fail**（165.62s；5 处 sleep 补丁全删后 INV-02 成立，含 bash/pwsh/cmd 矩阵；grep 确认 `sleep 0.01` 零残留） |
-| `bun typecheck`（core 与 opencode） | **双包 exit 0** |
+| 验证命令（计划 §18）                                                                            | 结果                                                                                                                      |
+| ----------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| `bun test test/effect/cross-spawn-spawner.test.ts`（packages/core，裸跑）                       | **25 pass / 0 fail**（含新 INV-01 测试与 echo→js 归一；修复前基线 23 pass/1 fail 为 Round 2/3 审计实录）                  |
+| `bun test --timeout 30000 test/session/prompt.test.ts -t "refreshes queued Permission..."`      | **1 pass**（R2 红转绿；我在预修复对照树中同日重现该红：:1167 `exists()` false，15.09s）                                   |
+| `bun test test/session/prompt.test.ts -t "publishes the estimated Assistant..."`（**无 flag**） | **1 pass**（19.93s，seam 默认 30s 生效，R3 红转绿）                                                                       |
+| `bun test --timeout 30000 test/tool/shell.test.ts`（全量）                                      | **186 pass / 0 fail**（165.62s；5 处 sleep 补丁全删后 INV-02 成立，含 bash/pwsh/cmd 矩阵；grep 确认 `sleep 0.01` 零残留） |
+| `bun typecheck`（core 与 opencode）                                                             | **双包 exit 0**                                                                                                           |
 
 **关键独立实验（对照树）**：用只读 `git archive HEAD` 在预批准临时目录构建预修复对照（已验证其 spawner 为旧惰性实现、且同日重现 R2 红）。四个全文件 canonical 失败（`loop waits...`、`shell completion resumes...`、`cancel aborts...`、`enforces Snapshot...`）在**对照树上同样全部失败**（10335/10012/13903/30045ms，与带 diff 的 10003/10134/15004/30007ms 同类同预算）——失败由环境负载（当前 CPU 89%、8 月 25 日起的 `git fsmonitor--daemon` 占用 1299s CPU）× 紧预算所致，**非本 diff 引入**。构建者 §23 的归因被直接实验证实。
 
@@ -831,7 +833,7 @@ No blocking findings.
 
 **APPROVE** — 无阻塞性发现。唯一生产改动（INV-01）经 owner 层确定性回归门验证；三类红测红→绿全部独立复现；被质疑的全文件失败经预修复对照树实验证明为环境负载所致、非 diff 引入；预算与治理约束全部满足。本判定仅适用于 R3 计划修订版与当前五文件实施 diff；macOS 终验仍按计划以用户 CI 复跑收口（§23 已如实挂起）。任务可在该复跑后标记 `verified`。
 
-*审计产物：`D:\\Temp\\opencode\\old-control\\`（预修复对照树，含 HEAD 版 spawner）与 `D:\\Temp\\opencode\\old-head.tar`——均在预批准临时目录，未触碰仓库任何文件。*
+_审计产物：`D:\\Temp\\opencode\\old-control\\`（预修复对照树，含 HEAD 版 spawner）与 `D:\\Temp\\opencode\\old-head.tar`——均在预批准临时目录，未触碰仓库任何文件。_
 
 </details>
 

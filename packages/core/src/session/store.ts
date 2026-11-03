@@ -37,14 +37,26 @@ const layer = Layer.effect(
 
     return Service.of({
       permissions: Effect.fn("SessionStore.permissions")(function* (sessionID) {
-        const row = yield* db.select({ rules: SessionTable.permission }).from(SessionTable).where(eq(SessionTable.id, sessionID)).get().pipe(Effect.orDie)
+        const row = yield* db
+          .select({ rules: SessionTable.permission })
+          .from(SessionTable)
+          .where(eq(SessionTable.id, sessionID))
+          .get()
+          .pipe(Effect.orDie)
         // 旧wire只在存储边界转换，权限执行与广告复用同一持久子会话范围。
-        return row?.rules?.map(rule => ({ action: rule.permission, resource: rule.pattern, effect: rule.action })) ?? []
+        return (
+          row?.rules?.map((rule) => ({ action: rule.permission, resource: rule.pattern, effect: rule.action })) ?? []
+        )
       }),
       get: Effect.fn("SessionStore.get")(function* (sessionID) {
         // 与会话行同一次读取，首次挂载不能由 TUI 的有限消息页重建请求用量。
         // SessionStore 仍按 Session ID 读取，没有新建请求执行服务或生命周期。
-        const row = yield* db.select(selection(sessionID)).from(SessionTable).where(eq(SessionTable.id, sessionID)).get().pipe(Effect.orDie)
+        const row = yield* db
+          .select(selection(sessionID))
+          .from(SessionTable)
+          .where(eq(SessionTable.id, sessionID))
+          .get()
+          .pipe(Effect.orDie)
         return row ? fromRow(row) : undefined
       }),
       context: Effect.fn("SessionStore.context")(function* (sessionID) {
@@ -57,14 +69,21 @@ const layer = Layer.effect(
         const row = yield* db
           .select()
           .from(SessionMessageTable)
-          .where(and(eq(SessionMessageTable.id, messageID), sessionID ? eq(SessionMessageTable.session_id, sessionID) : undefined))
+          .where(
+            and(
+              eq(SessionMessageTable.id, messageID),
+              sessionID ? eq(SessionMessageTable.session_id, sessionID) : undefined,
+            ),
+          )
           .get()
           .pipe(Effect.orDie)
         const restored = row ? (yield* ColdStorage.readSessionMessageRows(db, [row]))[0] : undefined
         return restored
           ? {
               sessionID: SessionSchema.ID.make(restored.session_id),
-              message: yield* decodeMessage({ ...restored.data, id: restored.id, type: restored.type }).pipe(Effect.orDie),
+              message: yield* decodeMessage({ ...restored.data, id: restored.id, type: restored.type }).pipe(
+                Effect.orDie,
+              ),
             }
           : undefined
       }),

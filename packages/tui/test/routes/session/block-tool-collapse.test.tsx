@@ -46,7 +46,8 @@ test("block tool keeps content after collapse and re-expand", async () => {
                     title="source · cell 3"
                     autoReview={false}
                     onClick={() => setExpanded((value) => !value)}
-                    preview={expanded() ? undefined : preview}>
+                    preview={expanded() ? undefined : preview}
+                  >
                     <Body />
                     <text>Click to collapse</text>
                   </BlockTool>
@@ -61,7 +62,10 @@ test("block tool keeps content after collapse and re-expand", async () => {
 
   const app = await testRender(() => <Harness />, { width: 60, height: 40, useThread: false })
   const click = async (label: string) => {
-    const row = app.captureCharFrame().split("\n").findIndex((line) => line.includes(label))
+    const row = app
+      .captureCharFrame()
+      .split("\n")
+      .findIndex((line) => line.includes(label))
     expect(row).toBeGreaterThanOrEqual(0)
     await app.mockMouse.click(10, row)
   }

@@ -1,3 +1,30 @@
 // 兼容既有 V1 发现入口，内置规则由 Core 唯一维护。
 export type { Context, Info } from "@opencode-ai/core/format/catalog"
-export { gofmt, mix, prettier, oxfmt, biome, zig, clang, ktlint, ruff, rlang, uvformat, rubocop, standardrb, htmlbeautifier, dart, ocamlformat, terraform, latexindent, gleam, shfmt, nixfmt, rustfmt, pint, ormolu, cljfmt, dfmt } from "@opencode-ai/core/format/catalog"
+export {
+  gofmt,
+  mix,
+  prettier,
+  oxfmt,
+  biome,
+  zig,
+  clang,
+  ktlint,
+  ruff,
+  rlang,
+  uvformat,
+  rubocop,
+  standardrb,
+  htmlbeautifier,
+  dart,
+  ocamlformat,
+  terraform,
+  latexindent,
+  gleam,
+  shfmt,
+  nixfmt,
+  rustfmt,
+  pint,
+  ormolu,
+  cljfmt,
+  dfmt,
+} from "@opencode-ai/core/format/catalog"

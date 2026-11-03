@@ -32,13 +32,17 @@ const categoryPrompts: Record<ShellIntentCategory, string> = {
   "literal-dollar": "Print a literal $HOME token; it must not be expanded by the current shell or a child shell.",
   quotes: "Pass a value containing both quote types through the shell without changing its characters.",
   slashes: "Pass Windows-style backslashes and a regular-expression backslash through the shell unchanged.",
-  "json-newline": "Create one JSON value containing a newline escape, decode it once, and print the decoded two-line value.",
+  "json-newline":
+    "Create one JSON value containing a newline escape, decode it once, and print the decoded two-line value.",
   "python-multiline": "Run a multiline Python program through its native stdin or -c interface and print its value.",
   "node-template": "Run a Node.js program using a template literal and print its interpolated value.",
-  "stdin-data": "Send data through stdin to a program without putting the data in the program source, then print its parsed value.",
+  "stdin-data":
+    "Send data through stdin to a program without putting the data in the program source, then print its parsed value.",
   "cross-interpreter": "Use the shell to invoke Python with an explicitly quoted argument and print the result.",
-  "exit-zero-value-wrong": "The command must exit zero while printing the expected value, not merely exit successfully.",
-  "literal-block": "Use a literal multiline block or heredoc/here-string so the payload reaches the program byte-for-byte.",
+  "exit-zero-value-wrong":
+    "The command must exit zero while printing the expected value, not merely exit successfully.",
+  "literal-block":
+    "Use a literal multiline block or heredoc/here-string so the payload reaches the program byte-for-byte.",
 }
 
 const expectedValues: Record<ShellIntentCategory, string> = {

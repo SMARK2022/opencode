@@ -30,19 +30,19 @@
 
 ## 4. 代码证据
 
-| 文件 | 已核对内容 |
-|---|---|
-| `packages/opencode/src/config/config.ts:230` | 省略或false关闭，true/对象启用；Config.get按Instance返回合并配置 |
-| `packages/opencode/src/config/lsp.ts` | 既有布尔/服务器配置结构；disabled条目与自定义进程配置 |
-| `packages/opencode/src/lsp/server.ts:27` | Handle必须包含ChildProcess；Info声明id、extensions、root、spawn |
-| `packages/opencode/src/lsp/client.ts:586` | 原生client暴露connection、文档同步、诊断等待与缓存；shutdown结束所属进程 |
-| `packages/opencode/src/lsp/lsp.ts` | 开关只作用于内置servers；bridge有独立发现、调用、状态、claim和诊断快照路径 |
-| `packages/opencode/src/effect/instance-state.ts` | 按目录缓存、随Instance释放失效 |
-| `packages/opencode/src/ide/vscode-bridge.ts:186` | 公共HTTP传输、工作区匹配及发现缓存，Notebook也使用该模块 |
-| `sdks/vscode/src/lsp.ts` | touch隐藏打开文档；800ms观察；hover/definition等现有能力 |
-| `packages/opencode/src/tool/{edit,write,apply_patch,lsp}.ts` | 调用LSP.Service；编辑工具用diagnostics与status生成输出 |
-| `packages/opencode/test/lsp/{index,lifecycle,client}.test.ts` | 内置禁用、bridge调用、诊断失败、共享client生命周期等既有行为测试 |
-| `.temp/testing/lsp-registration/` | 三个模块的实验副本、原始客户端回归副本、真实宿主及差异统计；原生产文件未修改 |
+| 文件                                                          | 已核对内容                                                                   |
+| ------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| `packages/opencode/src/config/config.ts:230`                  | 省略或false关闭，true/对象启用；Config.get按Instance返回合并配置             |
+| `packages/opencode/src/config/lsp.ts`                         | 既有布尔/服务器配置结构；disabled条目与自定义进程配置                        |
+| `packages/opencode/src/lsp/server.ts:27`                      | Handle必须包含ChildProcess；Info声明id、extensions、root、spawn              |
+| `packages/opencode/src/lsp/client.ts:586`                     | 原生client暴露connection、文档同步、诊断等待与缓存；shutdown结束所属进程     |
+| `packages/opencode/src/lsp/lsp.ts`                            | 开关只作用于内置servers；bridge有独立发现、调用、状态、claim和诊断快照路径   |
+| `packages/opencode/src/effect/instance-state.ts`              | 按目录缓存、随Instance释放失效                                               |
+| `packages/opencode/src/ide/vscode-bridge.ts:186`              | 公共HTTP传输、工作区匹配及发现缓存，Notebook也使用该模块                     |
+| `sdks/vscode/src/lsp.ts`                                      | touch隐藏打开文档；800ms观察；hover/definition等现有能力                     |
+| `packages/opencode/src/tool/{edit,write,apply_patch,lsp}.ts`  | 调用LSP.Service；编辑工具用diagnostics与status生成输出                       |
+| `packages/opencode/test/lsp/{index,lifecycle,client}.test.ts` | 内置禁用、bridge调用、诊断失败、共享client生命周期等既有行为测试             |
+| `.temp/testing/lsp-registration/`                             | 三个模块的实验副本、原始客户端回归副本、真实宿主及差异统计；原生产文件未修改 |
 
 ## 5. 当前路径
 
@@ -60,14 +60,14 @@
 
 ## 7. 不变量
 
-| ID | 行为 |
-|---|---|
-| L1 | false/省略时，LSP调用不会发现或请求bridge、启动语言服务器或打开文档 |
-| L2 | VS Code与内置服务器从同一配置筛选后的注册集合取得，方法本体不再独立选择bridge |
-| L3 | 开启时保留现有语言能力；操作执行前选择支持该能力的连接 |
-| L4 | status、hasClients、touch和diagnostics使用同一组注册及连接事实，关闭时不报告连接或检查成功 |
-| L5 | Session共享和Instance释放复用现有管理；释放外部连接只释放本地引用，不关闭VS Code |
-| L6 | 诊断失败保持不可用，不能返回检查成功或执行失败后切换另一后端 |
+| ID  | 行为                                                                                       |
+| --- | ------------------------------------------------------------------------------------------ |
+| L1  | false/省略时，LSP调用不会发现或请求bridge、启动语言服务器或打开文档                        |
+| L2  | VS Code与内置服务器从同一配置筛选后的注册集合取得，方法本体不再独立选择bridge              |
+| L3  | 开启时保留现有语言能力；操作执行前选择支持该能力的连接                                     |
+| L4  | status、hasClients、touch和diagnostics使用同一组注册及连接事实，关闭时不报告连接或检查成功 |
+| L5  | Session共享和Instance释放复用现有管理；释放外部连接只释放本地引用，不关闭VS Code           |
+| L6  | 诊断失败保持不可用，不能返回检查成功或执行失败后切换另一后端                               |
 
 ## 8. 首次分歧与实测
 
@@ -89,13 +89,13 @@ VS Code 1.138.0隔离宿主结果见host-results.json：false和省略配置均o
 
 ## 9. 职责
 
-| 内容 | Owner |
-|---|---|
-| 读取启用配置、筛选服务器、选取连接、Session使用关系 | LSP模块的Instance级注册管理 |
-| stdio启动、初始化、文档协议和进程退出 | 现有server/client实现 |
-| bridge发现、既有LSP请求与HTTP操作转换 | server.ts中的VS Code注册项及私有接入函数 |
-| 通用bridge传输与工作区匹配 | 既有ide/vscode-bridge模块，继续服务Notebook等调用者 |
-| 打开VS Code文档及调用语言扩展 | 既有SDK端lsp.ts |
+| 内容                                                | Owner                                               |
+| --------------------------------------------------- | --------------------------------------------------- |
+| 读取启用配置、筛选服务器、选取连接、Session使用关系 | LSP模块的Instance级注册管理                         |
+| stdio启动、初始化、文档协议和进程退出               | 现有server/client实现                               |
+| bridge发现、既有LSP请求与HTTP操作转换               | server.ts中的VS Code注册项及私有接入函数            |
+| 通用bridge传输与工作区匹配                          | 既有ide/vscode-bridge模块，继续服务Notebook等调用者 |
+| 打开VS Code文档及调用语言扩展                       | 既有SDK端lsp.ts                                     |
 
 ## 10. 主路径调整
 
@@ -121,13 +121,13 @@ Config.get（原配置schema）
 
 ## 11. 路径分类
 
-| 路径 | 分类 | 处理 |
-|---|---|---|
-| stdio与已注册VS Code接入 | 原注册集合中的两种句柄来源 | 复用原客户端及多服务器遍历 |
-| bridge light warm | 既有公开行为 | 只建立本地使用关系，不打开文档 |
-| bridge失败后再查内置 | 当前部分查询中的备用成功路径 | 删除；不增加重试 |
-| false/省略 | 配置域中的关闭状态 | 空集合，不激活任何连接 |
-| 诊断不可用 | 现有诊断结果 | 保留事实，不生成成功快照 |
+| 路径                     | 分类                         | 处理                           |
+| ------------------------ | ---------------------------- | ------------------------------ |
+| stdio与已注册VS Code接入 | 原注册集合中的两种句柄来源   | 复用原客户端及多服务器遍历     |
+| bridge light warm        | 既有公开行为                 | 只建立本地使用关系，不打开文档 |
+| bridge失败后再查内置     | 当前部分查询中的备用成功路径 | 删除；不增加重试               |
+| false/省略               | 配置域中的关闭状态           | 空集合，不激活任何连接         |
+| 诊断不可用               | 现有诊断结果                 | 保留事实，不生成成功快照       |
 
 不增加额外诊断决策分支，新增备用成功路径为零。
 
@@ -137,31 +137,31 @@ Config.get（原配置schema）
 
 ## 13. 正向映射
 
-| 不变量 | 修改 | 验证 |
-|---|---|---|
-| L1/L2 | state注册集合、统一获取连接 | false与省略；逐项公开操作均无bridge/进程副作用 |
-| L3 | 已注册接入句柄及原客户端 | bridge已支持操作、原生客户端原有回归、没有bridge时已启用的原生诊断 |
-| L4/L6 | 原等待结果及通用诊断失败事实 | 禁用不报告connected；成功空快照有效；混合连接中安静stdio不能掩盖bridge失败 |
-| L5 | ClientEntry及释放接口 | 两Session共享、最后使用者释放、Instance释放；VS Code进程保持运行 |
+| 不变量 | 修改                         | 验证                                                                       |
+| ------ | ---------------------------- | -------------------------------------------------------------------------- |
+| L1/L2  | state注册集合、统一获取连接  | false与省略；逐项公开操作均无bridge/进程副作用                             |
+| L3     | 已注册接入句柄及原客户端     | bridge已支持操作、原生客户端原有回归、没有bridge时已启用的原生诊断         |
+| L4/L6  | 原等待结果及通用诊断失败事实 | 禁用不报告connected；成功空快照有效；混合连接中安静stdio不能掩盖bridge失败 |
+| L5     | ClientEntry及释放接口        | 两Session共享、最后使用者释放、Instance释放；VS Code进程保持运行           |
 
 ## 14. 反向映射
 
-| 概念 | 必要性 |
-|---|---|
-| Handle的MessageConnection分支 | L2/L5：已实测现有客户端可直接复用协议连接；只改变句柄来源 |
-| 统一注册集合 | L1/L2：旧servers集合未包含VS Code，开关筛选不完整 |
-| 原有多服务器请求机制 | L3：继续允许原生服务器提供HTTP接口未实现的能力，不扩展HTTP协议 |
-| 外部连接的本地释放 | L5：OpenCode不拥有VS Code进程，不能沿用Process.stop |
+| 概念                          | 必要性                                                         |
+| ----------------------------- | -------------------------------------------------------------- |
+| Handle的MessageConnection分支 | L2/L5：已实测现有客户端可直接复用协议连接；只改变句柄来源      |
+| 统一注册集合                  | L1/L2：旧servers集合未包含VS Code，开关筛选不完整              |
+| 原有多服务器请求机制          | L3：继续允许原生服务器提供HTTP接口未实现的能力，不扩展HTTP协议 |
+| 外部连接的本地释放            | L5：OpenCode不拥有VS Code进程，不能沿用Process.stop            |
 
 ## 15. 文件计划
 
-| 文件 | 操作 | 内容 |
-|---|---|---|
-| `packages/opencode/src/lsp/server.ts` | modify | vscode注册项及私有协议接入，Handle增加现成连接分支 |
-| `packages/opencode/src/lsp/lsp.ts` | modify | 删除bridge旁路和重复状态；复用退出清理与客户端诊断缓存 |
-| `packages/opencode/src/lsp/client.ts` | modify | 连接来源和释放四处小调整，原型新增5行/删除4行 |
-| `packages/opencode/test/lsp/index.test.ts` | modify | 禁用与注册/能力选择行为；旧bridge用例显式启用LSP |
-| `packages/opencode/test/lsp/lifecycle.test.ts` | modify | 共同连接释放；保持Session和外部进程所有权 |
+| 文件                                           | 操作   | 内容                                                   |
+| ---------------------------------------------- | ------ | ------------------------------------------------------ |
+| `packages/opencode/src/lsp/server.ts`          | modify | vscode注册项及私有协议接入，Handle增加现成连接分支     |
+| `packages/opencode/src/lsp/lsp.ts`             | modify | 删除bridge旁路和重复状态；复用退出清理与客户端诊断缓存 |
+| `packages/opencode/src/lsp/client.ts`          | modify | 连接来源和释放四处小调整，原型新增5行/删除4行          |
+| `packages/opencode/test/lsp/index.test.ts`     | modify | 禁用与注册/能力选择行为；旧bridge用例显式启用LSP       |
+| `packages/opencode/test/lsp/lifecycle.test.ts` | modify | 共同连接释放；保持Session和外部进程所有权              |
 
 实验确认3个现有生产文件足以承载原型，新增生产文件为0；正式测试预计修改2个现有测试文件，另维护本方案文档。实验adapter.ts仅为原型组织，统计候选已将其合入server.ts并通过类型检查和回归。配置schema、编辑工具、SDK插件、通用HTTP传输和Notebook未改变。
 
@@ -171,7 +171,7 @@ Config.get（原配置schema）
 
 ## 17. 注释预算
 
-有效代码和中文解释注释按正式diff复算，C满足ceil(E*0.15)。解释限于现有注册启停、真实进程所有权和协议接入。实验代码尚未按生产注释要求补齐；新增注释及正式回归纳入最终统计。
+有效代码和中文解释注释按正式diff复算，C满足ceil(E\*0.15)。解释限于现有注册启停、真实进程所有权和协议接入。实验代码尚未按生产注释要求补齐；新增注释及正式回归纳入最终统计。
 
 ## 18. 验证
 
@@ -187,12 +187,12 @@ Config.get（原配置schema）
 
 生产实质新增/修改上限400行，移动和删除单列，不将400误作普通diff总行数。当前候选按正常格式统计：
 
-| 文件 | 新增 | 删除 |
-|---|---:|---:|
-| client.ts | 15 | 13 |
-| server.ts | 126 | 4 |
-| lsp.ts | 29 | 185 |
-| 合计 | 170 | 202 |
+| 文件      | 新增 | 删除 |
+| --------- | ---: | ---: |
+| client.ts |   15 |   13 |
+| server.ts |  126 |    4 |
+| lsp.ts    |   29 |  185 |
+| 合计      |  170 |  202 |
 
 所有新增均保守计入实质新增上界，不扣除搬迁，生产候选170行新增、202行删除。正式测试与配置也单列实质修改，完整实施有效新增/修改目标控制在400行内；不能通过转移到测试规避预算。数值仅对应实验候选，正式注释和验证代码仍需统计。
 
@@ -228,16 +228,16 @@ Non-blocking：正式实现须验证操作前能力选择，原型不能替代�
 
 正式实施修改3个生产文件（lsp.ts/client.ts/server.ts）、2个测试文件（index.test.ts/lifecycle.test.ts），无新增生产文件、schema变更或依赖。此前Testing候选仅为原型证据，最终验证使用实际生产模块。
 
-| 验证 | 命令及结果 |
-|---|---|
-| 原始red | false/省略配置均观察到错误bridge调用，2 fail；原型补充3项审计问题均先失败再通过 |
-| LSP回归 | `bun test test/lsp/index.test.ts test/lsp/client.test.ts test/lsp/lifecycle.test.ts`：65 pass、0 fail、138 assertions，39.54秒 |
+| 验证             | 命令及结果                                                                                                                                                               |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 原始red          | false/省略配置均观察到错误bridge调用，2 fail；原型补充3项审计问题均先失败再通过                                                                                          |
+| LSP回归          | `bun test test/lsp/index.test.ts test/lsp/client.test.ts test/lsp/lifecycle.test.ts`：65 pass、0 fail、138 assertions，39.54秒                                           |
 | 编辑工具诊断回归 | `bun test test/tool/write.test.ts test/tool/edit.test.ts test/tool/apply_patch.test.ts -t "diagnostic\|LSP\|lsp"`：4 pass、0 fail、8 assertions；192个无关用例被名称过滤 |
-| 类型 | cwd packages/opencode，`bun typecheck`通过 |
-| 实际扩展宿主 | VS Code1.138.0，production-profile：false/unset均无HTTP且不开文档；warm建立本地连接但不开文档；strong仅1次/lsp/touch并打开文档取得诊断；4子进程测试均通过 |
-| 生命周期 | 正式lifecycle测试使用真实HTTP监听和registry，两Session共享一个client，最后claim释放后HTTP健康请求仍成功 |
-| 能力选择 | 正式index测试取得真实MessageConnection，implementation和call hierarchy在请求前跳过未声明能力，公开sendRequest无调用；原生client原回归保留 |
-| 日志 | 宿主启动mutex提示、内置git/TS配置作用域警告、copilotcli关闭警告及DEP0169来自VS Code/内置扩展；控制实验4场景通过 |
+| 类型             | cwd packages/opencode，`bun typecheck`通过                                                                                                                               |
+| 实际扩展宿主     | VS Code1.138.0，production-profile：false/unset均无HTTP且不开文档；warm建立本地连接但不开文档；strong仅1次/lsp/touch并打开文档取得诊断；4子进程测试均通过                |
+| 生命周期         | 正式lifecycle测试使用真实HTTP监听和registry，两Session共享一个client，最后claim释放后HTTP健康请求仍成功                                                                  |
+| 能力选择         | 正式index测试取得真实MessageConnection，implementation和call hierarchy在请求前跳过未声明能力，公开sendRequest无调用；原生client原回归保留                                |
+| 日志             | 宿主启动mutex提示、内置git/TS配置作用域警告、copilotcli关闭警告及DEP0169来自VS Code/内置扩展；控制实验4场景通过                                                          |
 
 主路径：原Config schema筛选server.ts导出项→原getClients→原LSPClient→私有HTTP协议接入。删除方法级bridge分支、bridgeOwners及独立快照；未新增备用成功路径，失败诊断状态由原等待结果汇总。SDK和Notebook未修改。
 

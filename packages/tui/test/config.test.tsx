@@ -70,12 +70,18 @@ test("resolves host-neutral defaults", () => {
     for (const platform of ["darwin", "linux", "win32"]) {
       Object.defineProperty(process, "platform", { value: platform })
       // 测真实最终lookup，平台默认必须同时覆盖两host，且不能修改输入或复活用户禁用的绑定。
-      expect(resolve({}, { terminalSuspend: true }).keybinds.get("prompt.voice.toggle")?.[0]?.key).toBe(platform === "darwin" ? "f8" : "alt+v")
+      expect(resolve({}, { terminalSuspend: true }).keybinds.get("prompt.voice.toggle")?.[0]?.key).toBe(
+        platform === "darwin" ? "f8" : "alt+v",
+      )
       const explicit = { keybinds: { prompt_voice_toggle: "alt+x" } }
       expect(resolve(explicit, { terminalSuspend: true }).keybinds.get("prompt.voice.toggle")?.[0]?.key).toBe("alt+x")
       expect(explicit.keybinds).toEqual({ prompt_voice_toggle: "alt+x" })
       for (const binding of ["none", false, []] as const) {
-        expect(resolve({ keybinds: { prompt_voice_toggle: binding } }, { terminalSuspend: true }).keybinds.has("prompt.voice.toggle")).toBe(false)
+        expect(
+          resolve({ keybinds: { prompt_voice_toggle: binding } }, { terminalSuspend: true }).keybinds.has(
+            "prompt.voice.toggle",
+          ),
+        ).toBe(false)
       }
     }
   } finally {

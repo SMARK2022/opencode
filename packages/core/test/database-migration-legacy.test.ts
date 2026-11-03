@@ -15,7 +15,9 @@ test("resumes renamed migrations from named, timestamp-only and partially import
         yield* db.run(sql`CREATE TABLE session (id text PRIMARY KEY)`)
         yield* db.transaction(requestMigration.up)
         yield* db.run(sql`INSERT INTO session (id) VALUES ('session')`)
-        yield* db.run(sql`INSERT INTO request_usage (session_id, request_id, root_request_id, source, status, agent, provider_id, model_id, tokens_total, cost_micros, time_created, time_updated) VALUES ('session', 'request', 'request', 'prompt', 'completed', 'build', 'provider', 'model', 1234, 5678, 1, 2)`)
+        yield* db.run(
+          sql`INSERT INTO request_usage (session_id, request_id, root_request_id, source, status, agent, provider_id, model_id, tokens_total, cost_micros, time_created, time_updated) VALUES ('session', 'request', 'request', 'prompt', 'completed', 'build', 'provider', 'model', 1234, 5678, 1, 2)`,
+        )
         const before = yield* db.all(sql`SELECT * FROM request_usage`)
         if (mode === "unnamed") {
           // 旧Drizzle版本仅有时间戳，仍须找到同一条迁移的历史身份。
@@ -29,21 +31,22 @@ test("resumes renamed migrations from named, timestamp-only and partially import
         if (mode === "partial") {
           // 失败启动已导入旧身份并完成部分新迁移，非空账本同样需要接续。
           yield* db.run(sql`CREATE TABLE migration (id text PRIMARY KEY, time_completed integer NOT NULL)`)
-          yield* db.run(sql`INSERT INTO migration VALUES ('20260422130633_request_usage_tracking', 1), ('unrelated', 1)`)
+          yield* db.run(
+            sql`INSERT INTO migration VALUES ('20260422130633_request_usage_tracking', 1), ('unrelated', 1)`,
+          )
         }
         yield* DatabaseMigration.applyOnly(db, [requestMigration])
         expect(yield* db.all(sql`SELECT * FROM request_usage`)).toEqual(before)
-        expect(yield* db.all(sql`SELECT id FROM migration WHERE id = ${requestMigration.id}`)).toEqual([{ id: requestMigration.id }])
+        expect(yield* db.all(sql`SELECT id FROM migration WHERE id = ${requestMigration.id}`)).toEqual([
+          { id: requestMigration.id },
+        ])
         const completed = yield* db.all(sql`SELECT * FROM migration ORDER BY id`)
         // 第二次启动既不重跑DDL，也不重写完成时间和原账本。
         yield* DatabaseMigration.applyOnly(db, [requestMigration])
         expect(yield* db.all(sql`SELECT * FROM migration ORDER BY id`)).toEqual(completed)
         expect(yield* db.all(sql`SELECT * FROM request_usage`)).toEqual(before)
         expect(yield* db.get(sql`SELECT count(*) AS count FROM __drizzle_migrations`)).toEqual({ count: 1 })
-      }).pipe(
-        Effect.provide(SqliteClient.layer({ filename: ":memory:", disableWAL: true })),
-        Effect.scoped,
-      ),
+      }).pipe(Effect.provide(SqliteClient.layer({ filename: ":memory:", disableWAL: true })), Effect.scoped),
     )
   }
 })

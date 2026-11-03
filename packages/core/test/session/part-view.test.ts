@@ -24,7 +24,11 @@ function editPart(metadata: Record<string, unknown>) {
 
 describe("PartView.project", () => {
   test("drops filediff.patch only when it is identical to metadata.diff", () => {
-    const part = editPart({ diff: patch, filediff: { file: "a.ts", patch, additions: 1, deletions: 0 }, diagnostics: {} })
+    const part = editPart({
+      diff: patch,
+      filediff: { file: "a.ts", patch, additions: 1, deletions: 0 },
+      diagnostics: {},
+    })
     const projected = PartView.project(part)
     // 与 diff 逐字相同的 patch 是重复驻留；file/additions/deletions 属于轻量元数据必须保留。
     expect(projected.state.metadata.filediff).toEqual({ file: "a.ts", additions: 1, deletions: 0 })
@@ -52,7 +56,11 @@ describe("PartView.project", () => {
       tool: "third_party_custom",
     } as const
     expect(PartView.project(custom)).toBe(custom)
-    const native = { type: "tool", name: "third_party_custom", state: { status: "completed", structured: custom.state.metadata } }
+    const native = {
+      type: "tool",
+      name: "third_party_custom",
+      state: { status: "completed", structured: custom.state.metadata },
+    }
     expect(PartView.project(native)).toBe(native)
     const unnamed = { type: "tool", state: native.state }
     expect(PartView.project(unnamed)).toBe(unnamed)

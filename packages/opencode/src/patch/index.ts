@@ -485,9 +485,8 @@ export const maybeParseApplyPatchVerified = Effect.fn("Patch.maybeParseApplyPatc
       const effectiveCwd = args.workdir ? path.resolve(cwd, args.workdir) : cwd
       const changes = new Map<string, ApplyPatchFileChange>()
       // #533：direct apply 与 verified preview 共用此 grouping 契约，避免相同 patch 在 consumer 间分叉。
-      const groupedHunks = groupUpdateHunks(
-        args.hunks,
-        (filePath) => FSUtil.resolve(path.resolve(effectiveCwd, filePath)),
+      const groupedHunks = groupUpdateHunks(args.hunks, (filePath) =>
+        FSUtil.resolve(path.resolve(effectiveCwd, filePath)),
       )
 
       for (const hunk of groupedHunks) {

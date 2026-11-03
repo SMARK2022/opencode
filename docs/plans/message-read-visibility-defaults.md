@@ -47,39 +47,39 @@ Follow the user's Session GOAL workflow and `docs/workflow.md`: independently ap
 
 ## 3. Repository Context
 
-| Source | Constraint |
-| --- | --- |
-| Root and packages/opencode AGENTS.md | Minimal functions, Effect style, package-local tests/typecheck |
-| packages/opencode/test/AGENTS.md | Existing Effect fixtures and observable behavior |
-| src/server/routes/instance/httpapi/AGENTS.md | Domain NotFound mapped at HTTP adapter |
-| CONTEXT.md | Message has multiple Parts; v1 is current production; Snapshot is file-state, Compaction is context |
-| docs/adr/README.md | Only triage ADR present; no hidden-read exception ADR |
-| first-principles-engineering policy and canonical template | One owning primary path, no fallback, exact-revision audit, E/C gate |
-| docs/workflow.md | Verified implementation terminal state; audit evidence and scope review |
+| Source                                                     | Constraint                                                                                          |
+| ---------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| Root and packages/opencode AGENTS.md                       | Minimal functions, Effect style, package-local tests/typecheck                                      |
+| packages/opencode/test/AGENTS.md                           | Existing Effect fixtures and observable behavior                                                    |
+| src/server/routes/instance/httpapi/AGENTS.md               | Domain NotFound mapped at HTTP adapter                                                              |
+| CONTEXT.md                                                 | Message has multiple Parts; v1 is current production; Snapshot is file-state, Compaction is context |
+| docs/adr/README.md                                         | Only triage ADR present; no hidden-read exception ADR                                               |
+| first-principles-engineering policy and canonical template | One owning primary path, no fallback, exact-revision audit, E/C gate                                |
+| docs/workflow.md                                           | Verified implementation terminal state; audit evidence and scope review                             |
 
 ## 4. Files and Evidence Read
 
 All short paths below are relative to packages/opencode.
 
-| Evidence | Why | Class |
-| --- | --- | --- |
-| src/session/message-v2.ts:883-1067,1446-2010 | Current raw/visible entrypoints, hydration, proof and structural consumers | observed |
-| src/session/session.ts:575-600,765-780,885-946 | messages/find wrappers; direct getPart bypass | observed |
-| src/session/prompt.ts:730-835,2474,2634-2640,3393-3408 | Cancel ownership and all-undone recovery return | reachable |
-| src/session/processor.ts:285-298,752-754,1074-1104 | getPart tool-state owner and doom-loop visible consumer | reachable |
-| src/session/stale-turn.ts:88-118,145-245 | Hidden incomplete/orphan tool recovery | reachable |
-| src/permission/reviewer/service.ts:157,819-846,1046,1280-1352 | Transcript vs owned tool terminalization vs protocol retry | reachable |
-| src/session/request-usage.ts:280-310 | Actual incurred step usage must include hidden rows | contracted |
-| src/session/revert.ts:46-91,152-226 | Pending revert vs persisted hidden; partial cleanup retry | reachable |
-| src/session/summary.ts:38-59 | Ordinary target/children read, not audit |
-| src/server/routes/instance/httpapi/handlers/session.ts:214-223,459-477 | Read first, reject/filter later wrappers | observed |
-| src/session/search.ts; summary-cache.ts:150-154,225-295 | Already visible SQL/independent array guard |
-| src/storage/cold.ts; projectors.ts | Raw ownership and accounting require physical rows |
-| test/session/messages-pagination.test.ts:236-249,694-767,1071-1118 | Existing visibility/cold/anchor fixtures |
-| test/session/revert-compact.test.ts:468-511,543-570,765-804 | Existing cleanup and raw audit assertions |
-| test/session/stale-turn.test.ts; test/permission/reviewer-service.test.ts | Existing recovery/reviewer regression seams |
-| Commit 3b2925b777 | Historical implementation fixed output consumers but left raw defaults | observed |
-| D:/Temp/opencode/hidden-read-defaults-repro.ts | Actual in-memory DB and actual reader calls | observed |
+| Evidence                                                                  | Why                                                                        | Class      |
+| ------------------------------------------------------------------------- | -------------------------------------------------------------------------- | ---------- |
+| src/session/message-v2.ts:883-1067,1446-2010                              | Current raw/visible entrypoints, hydration, proof and structural consumers | observed   |
+| src/session/session.ts:575-600,765-780,885-946                            | messages/find wrappers; direct getPart bypass                              | observed   |
+| src/session/prompt.ts:730-835,2474,2634-2640,3393-3408                    | Cancel ownership and all-undone recovery return                            | reachable  |
+| src/session/processor.ts:285-298,752-754,1074-1104                        | getPart tool-state owner and doom-loop visible consumer                    | reachable  |
+| src/session/stale-turn.ts:88-118,145-245                                  | Hidden incomplete/orphan tool recovery                                     | reachable  |
+| src/permission/reviewer/service.ts:157,819-846,1046,1280-1352             | Transcript vs owned tool terminalization vs protocol retry                 | reachable  |
+| src/session/request-usage.ts:280-310                                      | Actual incurred step usage must include hidden rows                        | contracted |
+| src/session/revert.ts:46-91,152-226                                       | Pending revert vs persisted hidden; partial cleanup retry                  | reachable  |
+| src/session/summary.ts:38-59                                              | Ordinary target/children read, not audit                                   |
+| src/server/routes/instance/httpapi/handlers/session.ts:214-223,459-477    | Read first, reject/filter later wrappers                                   | observed   |
+| src/session/search.ts; summary-cache.ts:150-154,225-295                   | Already visible SQL/independent array guard                                |
+| src/storage/cold.ts; projectors.ts                                        | Raw ownership and accounting require physical rows                         |
+| test/session/messages-pagination.test.ts:236-249,694-767,1071-1118        | Existing visibility/cold/anchor fixtures                                   |
+| test/session/revert-compact.test.ts:468-511,543-570,765-804               | Existing cleanup and raw audit assertions                                  |
+| test/session/stale-turn.test.ts; test/permission/reviewer-service.test.ts | Existing recovery/reviewer regression seams                                |
+| Commit 3b2925b777                                                         | Historical implementation fixed output consumers but left raw defaults     | observed   |
+| D:/Temp/opencode/hidden-read-defaults-repro.ts                            | Actual in-memory DB and actual reader calls                                | observed   |
 
 Re-read unchanged files through Read; same-version stubs confirm the already-visible source. Current git status identifies the four-file previous goal baseline; no unrelated modifications are authorized.
 
@@ -97,29 +97,29 @@ Session.messages -> page is already visible by default; Session.findMessage -> f
 
 ## 6. Supported Input Domain and Reachability
 
-| Condition | Producer/path | Owner | Class |
-| --- | --- | --- | --- |
-| Hidden Message with still-visible Parts | Undo cleanup, compaction cancellation, stale/reviewer repair | MessageV2 admission | observed |
-| Visible Message with hidden Part | Public partial revert/Part update | MessageV2 admission | reachable |
-| Hidden cold owner | Existing freeze/maintenance | Visibility before thaw | reachable |
-| Hidden unfinished Tool | Partial hide or interrupted cleanup while state still open | Cancel/processor/reviewer/stale state writers | reachable |
-| Hidden completed step usage | Historical undo | RequestUsage accounting | contracted |
-| Hidden ordinary retained tail anchor | Existing supported historical repair fixture | Internal compaction structural scan | observed |
-| Interrupted revert cleanup | Per-message writes followed by clearRevert | Revert cleanup | reachable |
-| Missing parent/part | Existing NotFound / empty / undefined contracts | Existing readers | contracted |
+| Condition                               | Producer/path                                                | Owner                                         | Class      |
+| --------------------------------------- | ------------------------------------------------------------ | --------------------------------------------- | ---------- |
+| Hidden Message with still-visible Parts | Undo cleanup, compaction cancellation, stale/reviewer repair | MessageV2 admission                           | observed   |
+| Visible Message with hidden Part        | Public partial revert/Part update                            | MessageV2 admission                           | reachable  |
+| Hidden cold owner                       | Existing freeze/maintenance                                  | Visibility before thaw                        | reachable  |
+| Hidden unfinished Tool                  | Partial hide or interrupted cleanup while state still open   | Cancel/processor/reviewer/stale state writers | reachable  |
+| Hidden completed step usage             | Historical undo                                              | RequestUsage accounting                       | contracted |
+| Hidden ordinary retained tail anchor    | Existing supported historical repair fixture                 | Internal compaction structural scan           | observed   |
+| Interrupted revert cleanup              | Per-message writes followed by clearRevert                   | Revert cleanup                                | reachable  |
+| Missing parent/part                     | Existing NotFound / empty / undefined contracts              | Existing readers                              | contracted |
 
 ## 7. Required Invariants
 
-| ID | Invariant | Verification |
-| --- | --- | --- |
-| V1 | Ordinary read defaults exclude hidden parents and children before thaw/child content hydration | Original repro; extend existing visibility fixture |
-| V2 | Explicit includeHidden:true preserves full physical data for actual recovery/usage owners | Same fixture raw opt-in; existing recovery/usage tests |
-| V3 | Public Session.getPart obeys the same default and parent precedence | Same fixture exact-part read |
-| V4 | Callers with unbypassable visible input remove redundant checks; independent raw/array/event inputs retain theirs | Diff + HTTP/doom-loop regressions |
-| V5 | Lifecycle cleanup and actual usage remain complete even for hidden rows | Existing cancel/stale/reviewer/revert/usage tests |
-| V6 | Revert cleanup retry handles already-hidden boundary without rewriting old tombstones | Extend existing cleanup-preserves-history case |
-| V7 | Previous hidden Compaction invalidation, tail anchoring, cache proof and cold references remain intact | Existing focused Compaction tests |
-| V8 | <=2 new test cases, small diff, distributed explanatory comments, no full suite | Actual diff and commands |
+| ID  | Invariant                                                                                                         | Verification                                           |
+| --- | ----------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------ |
+| V1  | Ordinary read defaults exclude hidden parents and children before thaw/child content hydration                    | Original repro; extend existing visibility fixture     |
+| V2  | Explicit includeHidden:true preserves full physical data for actual recovery/usage owners                         | Same fixture raw opt-in; existing recovery/usage tests |
+| V3  | Public Session.getPart obeys the same default and parent precedence                                               | Same fixture exact-part read                           |
+| V4  | Callers with unbypassable visible input remove redundant checks; independent raw/array/event inputs retain theirs | Diff + HTTP/doom-loop regressions                      |
+| V5  | Lifecycle cleanup and actual usage remain complete even for hidden rows                                           | Existing cancel/stale/reviewer/revert/usage tests      |
+| V6  | Revert cleanup retry handles already-hidden boundary without rewriting old tombstones                             | Extend existing cleanup-preserves-history case         |
+| V7  | Previous hidden Compaction invalidation, tail anchoring, cache proof and cold references remain intact            | Existing focused Compaction tests                      |
+| V8  | <=2 new test cases, small diff, distributed explanatory comments, no full suite                                   | Actual diff and commands                               |
 
 ## 8. First Divergence and Root Cause
 
@@ -134,20 +134,33 @@ bun D:\Temp\opencode\hidden-read-defaults-repro.ts
 Actual imports are current MessageV2 and storage/db. OPENCODE_DB=:memory: and isolated XDG paths are set before dynamic imports. Two user rows: visible/hidden; visible parent has one visible and one hidden Part; hidden parent has an unmarked Part. No user DB is opened. Exit 1 in 1.7 seconds:
 
 ```json
-{"actual":{"getHidden":"Success","visibleParts":["prt_hidden","prt_visible"],"hiddenParentParts":["prt_child"],"stream":["msg_visible","msg_hidden"]},"expected":{"getHidden":"Failure","visibleParts":["prt_visible"],"hiddenParentParts":[],"stream":["msg_visible"]}}
+{
+  "actual": {
+    "getHidden": "Success",
+    "visibleParts": ["prt_hidden", "prt_visible"],
+    "hiddenParentParts": ["prt_child"],
+    "stream": ["msg_visible", "msg_hidden"]
+  },
+  "expected": {
+    "getHidden": "Failure",
+    "visibleParts": ["prt_visible"],
+    "hiddenParentParts": [],
+    "stream": ["msg_visible"]
+  }
+}
 ```
 
 This is the deterministic red feedback loop, not a mock of the filter. Upstream missing defaults predicts these results; UI-only filtering or cached rendering cannot cause them because the reproduction uses neither.
 
 ## 9. Responsibility and Seam
 
-| Concern | Owner | Why |
-| --- | --- | --- |
-| Visible Message/Part admission | MessageV2 get/parts/page/hydrate | Last shared read seam before content restore |
-| Exact Part admission | Session.getPart | Existing direct query must honor the same contract before decoder |
-| Raw opt-in | Lifecycle/accounting callsite | Only owner knows why physical hidden data is needed |
-| Pending undo recovery | SessionRevert.cleanupCurrent | Owns boundary, per-row hiding, usage reconciliation and clear |
-| HTTP error mapping | Existing HTTP wrapper | Domain NotFound already mapped, no new error shape |
+| Concern                        | Owner                            | Why                                                               |
+| ------------------------------ | -------------------------------- | ----------------------------------------------------------------- |
+| Visible Message/Part admission | MessageV2 get/parts/page/hydrate | Last shared read seam before content restore                      |
+| Exact Part admission           | Session.getPart                  | Existing direct query must honor the same contract before decoder |
+| Raw opt-in                     | Lifecycle/accounting callsite    | Only owner knows why physical hidden data is needed               |
+| Pending undo recovery          | SessionRevert.cleanupCurrent     | Owns boundary, per-row hiding, usage reconciliation and clear     |
+| HTTP error mapping             | Existing HTTP wrapper            | Domain NotFound already mapped, no new error shape                |
 
 ## 10. Single Approved Primary-Path Design
 
@@ -164,31 +177,31 @@ This is the deterministic red feedback loop, not a mock of the filter. Upstream 
 
 Explicit raw call inventory:
 
-| File/function | Change |
-| --- | --- |
-| prompt.cancel + abortPendingAssistants | Both cancelSnapshot calls true; get pending assistant true |
-| prompt.loop all-undone recovery return | Existing page(true) retained; not Provider input |
-| stale-turn.incompleteAssistants / terminalizeOrphanTools | parts(...,{includeHidden:true}) |
-| processor.readToolCall | getPart includeHidden:true for owned durable Tool lifecycle |
-| reviewer tool-input-end / tool-call | getPart true preserves raw identity/hidden during state replacement |
-| reviewer.closeOpenReviewerTools | Both parts and getPart true |
-| reviewer.hideReviewerProtocolAttempt | Remove needless stream(true); current request/assistant are visible before this helper hides them. get stays default |
-| reviewer.updateToolAutoReview / evidence transcript | Default visible: display and authorization do not need old hidden rows |
-| request-usage.recordAssistant | stepFinishParts(...,{includeHidden:true}) |
-| revert.cleanupCurrent | Bounded Session.messages(true) for restartable write lifecycle |
+| File/function                                            | Change                                                                                                               |
+| -------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| prompt.cancel + abortPendingAssistants                   | Both cancelSnapshot calls true; get pending assistant true                                                           |
+| prompt.loop all-undone recovery return                   | Existing page(true) retained; not Provider input                                                                     |
+| stale-turn.incompleteAssistants / terminalizeOrphanTools | parts(...,{includeHidden:true})                                                                                      |
+| processor.readToolCall                                   | getPart includeHidden:true for owned durable Tool lifecycle                                                          |
+| reviewer tool-input-end / tool-call                      | getPart true preserves raw identity/hidden during state replacement                                                  |
+| reviewer.closeOpenReviewerTools                          | Both parts and getPart true                                                                                          |
+| reviewer.hideReviewerProtocolAttempt                     | Remove needless stream(true); current request/assistant are visible before this helper hides them. get stays default |
+| reviewer.updateToolAutoReview / evidence transcript      | Default visible: display and authorization do not need old hidden rows                                               |
+| request-usage.recordAssistant                            | stepFinishParts(...,{includeHidden:true})                                                                            |
+| revert.cleanupCurrent                                    | Bounded Session.messages(true) for restartable write lifecycle                                                       |
 
 Do not add false at every ordinary callsite. Task/read/skill/model selection, export/share snapshot, search and normal Revert retain their existing calls and inherit the owning default.
 
 ## 11. Secondary and Replacement Path Inventory
 
-| Path | Classification | Disposition |
-| --- | --- | --- |
-| Default visible reads | Primary contract | Repair |
-| Explicit raw recovery/usage/structural reads | Supported-domain branch with named owners above | Preserve explicitly |
-| Parent hidden -> not-found/[]/undefined | Existing return-contract branch | Preserve |
-| Raw physical fork/cold/projector/Stats | Contracted pass-through | Preserve, no global SQL filter |
-| Downstream compensating filters after guaranteed visible read | Superseded workaround | Remove specified checks |
-| Array converters, plugin projections, event tombstones | Independent trust seams | Preserve |
+| Path                                                          | Classification                                  | Disposition                    |
+| ------------------------------------------------------------- | ----------------------------------------------- | ------------------------------ |
+| Default visible reads                                         | Primary contract                                | Repair                         |
+| Explicit raw recovery/usage/structural reads                  | Supported-domain branch with named owners above | Preserve explicitly            |
+| Parent hidden -> not-found/[]/undefined                       | Existing return-contract branch                 | Preserve                       |
+| Raw physical fork/cold/projector/Stats                        | Contracted pass-through                         | Preserve, no global SQL filter |
+| Downstream compensating filters after guaranteed visible read | Superseded workaround                           | Remove specified checks        |
+| Array converters, plugin projections, event tombstones        | Independent trust seams                         | Preserve                       |
 
 New alternate success paths zero; new diagnostic decision surface zero percent. No retry/catch-and-success additions.
 
@@ -202,39 +215,39 @@ New alternate success paths zero; new diagnostic decision surface zero percent. 
 
 ## 13. Forward Traceability
 
-| Invariant | Production path/change | Behavior seam |
-| --- | --- | --- |
-| V1/V3 | MessageV2 + Session.getPart admission | Existing pagination visibility fixture extended across default and explicit raw reads |
-| V2/V5 | Named raw options at cancel/processor/reviewer/stale/usage | Existing targeted suites and raw audit assertions |
-| V4 | HTTP get/updatePart; page/findHot; doom-loop current parts | Existing SDK hidden and processor hidden tests |
-| V6 | Bounded raw cleanup + unchanged hidden metadata + replay usage | Existing cleanup-preserves-history test extended with pre-hidden boundary and repeat cleanup |
-| V7 | Explicit internal structural raw reads | Existing compaction/hidden-anchor cases and prior goal Provider test |
-| V8 | Test reuse / comment gates | Diff count, focused test list, E/C |
+| Invariant | Production path/change                                         | Behavior seam                                                                                |
+| --------- | -------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| V1/V3     | MessageV2 + Session.getPart admission                          | Existing pagination visibility fixture extended across default and explicit raw reads        |
+| V2/V5     | Named raw options at cancel/processor/reviewer/stale/usage     | Existing targeted suites and raw audit assertions                                            |
+| V4        | HTTP get/updatePart; page/findHot; doom-loop current parts     | Existing SDK hidden and processor hidden tests                                               |
+| V6        | Bounded raw cleanup + unchanged hidden metadata + replay usage | Existing cleanup-preserves-history test extended with pre-hidden boundary and repeat cleanup |
+| V7        | Explicit internal structural raw reads                         | Existing compaction/hidden-anchor cases and prior goal Provider test                         |
+| V8        | Test reuse / comment gates                                     | Diff count, focused test list, E/C                                                           |
 
 ## 14. Reverse Traceability
 
-| Concept | Requirement | Existing insufficiency |
-| --- | --- | --- |
-| includeHidden default false | V1/V2/V3 | get/parts/stream/hydrate lack consistent default |
-| Parent admission before child restore | V1 | Filtering child alone bypasses parent via known ID |
-| Explicit lifecycle/usage opt-in | V2/V5 | Default flip otherwise skips unfinished hidden tools/actual charges |
-| Session.messages flag forwarding | V6 | Recovery range must include already-hidden boundary; visible-only wrapper cannot express it |
-| Idempotent cleanup row handling | V6 | Raw recovery must not rewrite unrelated old tombstone times or skip interrupted accounting |
+| Concept                               | Requirement | Existing insufficiency                                                                      |
+| ------------------------------------- | ----------- | ------------------------------------------------------------------------------------------- |
+| includeHidden default false           | V1/V2/V3    | get/parts/stream/hydrate lack consistent default                                            |
+| Parent admission before child restore | V1          | Filtering child alone bypasses parent via known ID                                          |
+| Explicit lifecycle/usage opt-in       | V2/V5       | Default flip otherwise skips unfinished hidden tools/actual charges                         |
+| Session.messages flag forwarding      | V6          | Recovery range must include already-hidden boundary; visible-only wrapper cannot express it |
+| Idempotent cleanup row handling       | V6          | Raw recovery must not rewrite unrelated old tombstone times or skip interrupted accounting  |
 
 ## 15. File-Level Change Plan
 
-| File | Responsibility | Expected changed lines |
-| --- | --- | --- |
-| src/session/message-v2.ts | Default admission and deletion of duplicate filters | 65-100 |
-| src/session/session.ts | getPart admission, messages option forwarding | 15-30 |
-| src/session/prompt.ts | Cancellation opt-ins | 5-12 |
-| src/session/stale-turn.ts | Repair opt-ins | 4-8 |
-| src/session/processor.ts | Owned read opt-in; duplicate filter removal | 3-8 |
-| src/permission/reviewer/service.ts | Lifecycle opt-ins; narrow protocol search | 8-16 |
-| src/session/request-usage.ts | Explicit raw accounting | 2-5 |
-| src/session/revert.ts | Bounded raw cleanup and idempotent replay | 15-30 |
-| src/server/routes/instance/httpapi/handlers/session.ts | Remove old get-result filters/comments | -8 to -4 |
-| Existing tests affected by raw get/stream assumptions | Add true where the assertion intentionally inspects audit/repair state | one argument per affected call |
+| File                                                   | Responsibility                                                         | Expected changed lines         |
+| ------------------------------------------------------ | ---------------------------------------------------------------------- | ------------------------------ |
+| src/session/message-v2.ts                              | Default admission and deletion of duplicate filters                    | 65-100                         |
+| src/session/session.ts                                 | getPart admission, messages option forwarding                          | 15-30                          |
+| src/session/prompt.ts                                  | Cancellation opt-ins                                                   | 5-12                           |
+| src/session/stale-turn.ts                              | Repair opt-ins                                                         | 4-8                            |
+| src/session/processor.ts                               | Owned read opt-in; duplicate filter removal                            | 3-8                            |
+| src/permission/reviewer/service.ts                     | Lifecycle opt-ins; narrow protocol search                              | 8-16                           |
+| src/session/request-usage.ts                           | Explicit raw accounting                                                | 2-5                            |
+| src/session/revert.ts                                  | Bounded raw cleanup and idempotent replay                              | 15-30                          |
+| src/server/routes/instance/httpapi/handlers/session.ts | Remove old get-result filters/comments                                 | -8 to -4                       |
+| Existing tests affected by raw get/stream assumptions  | Add true where the assertion intentionally inspects audit/repair state | one argument per affected call |
 
 No new production/test files. Existing previously modified files are preserved, and this goal's diff is measured against its starting worktree.
 
@@ -249,26 +262,26 @@ At most two new cases are authorized, but planned new case count is zero. Focus 
 
 ## 17. Chinese Comment Budget
 
-Estimate E=130-220 (production plus changed tests; excluding imports, formatting, docs and pure moves). Require C>=max(1,ceil(E*0.15)), estimated 20-33 qualifying lines. Explain parent dominance before cold thaw, raw tool terminalization, accounting preservation, structural anchor exception, partial-cleanup restart boundary and cold fixture observation. Distribute comments at those decisions, not a header block. Actual diff count governs; no padding.
+Estimate E=130-220 (production plus changed tests; excluding imports, formatting, docs and pure moves). Require C>=max(1,ceil(E\*0.15)), estimated 20-33 qualifying lines. Explain parent dominance before cold thaw, raw tool terminalization, accounting preservation, structural anchor exception, partial-cleanup restart boundary and cold fixture observation. Distribute comments at those decisions, not a header block. Actual diff count governs; no padding.
 
 ## 18. Verification
 
 Run in packages/opencode unless noted. Only focused cases/small relevant files; never full repository suite or full prompt suite.
 
-| Command | Purpose |
-| --- | --- |
-| `bun D:\Temp\opencode\hidden-read-defaults-repro.ts` (D:/Temp/opencode) | Original actual-interface failure becomes green |
+| Command                                                                                                                                                       | Purpose                                               |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------- |
+| `bun D:\Temp\opencode\hidden-read-defaults-repro.ts` (D:/Temp/opencode)                                                                                       | Original actual-interface failure becomes green       |
 | `bun test test/session/messages-pagination.test.ts -t 'visible limit\|hidden\|findMessage\|MessageV2.get\|MessageV2.parts\|MessageV2.stream' --timeout 30000` | Direct visible/raw/cold contracts and related anchors |
-| `bun test test/session/revert-compact.test.ts --timeout 30000` | Small existing undo suite; recovery/files |
-| `bun test test/session/stale-turn.test.ts --timeout 30000` | Existing state recovery |
-| `bun test test/session/revert-compact.test.ts -t 'terminalizes unfinished assistant' --timeout 30000` | Nonzero actual accounting after hidden mutation |
-| `bun test test/session/compaction.test.ts -t 'hidden\|failed\|cancel\|memento' --timeout 30000` | Existing scratch/anchor/history regressions |
-| `bun test test/session/prompt.test.ts -t 'cancel\|cleanup\|rebuilds a retained window after Compaction' --timeout 30000` | Raw cancel opt-ins and previous repair |
-| `bun test test/permission/reviewer-service.test.ts -t 'protocol\|cancel\|interrupt\|terminal\|cleanup' --timeout 30000` | Owned reviewer raw state |
-| `bun test test/server/httpapi-sdk.test.ts -t 'hidden' --timeout 30000` | SDK visible interface |
-| `bun test test/session/processor-effect.test.ts -t 'hidden\|cleanup\|terminal' --timeout 30000` | Tool lifecycle vs visible history |
-| `bun typecheck` | Package type contract |
-| `git diff --check` (root) | Hygiene |
+| `bun test test/session/revert-compact.test.ts --timeout 30000`                                                                                                | Small existing undo suite; recovery/files             |
+| `bun test test/session/stale-turn.test.ts --timeout 30000`                                                                                                    | Existing state recovery                               |
+| `bun test test/session/revert-compact.test.ts -t 'terminalizes unfinished assistant' --timeout 30000`                                                         | Nonzero actual accounting after hidden mutation       |
+| `bun test test/session/compaction.test.ts -t 'hidden\|failed\|cancel\|memento' --timeout 30000`                                                               | Existing scratch/anchor/history regressions           |
+| `bun test test/session/prompt.test.ts -t 'cancel\|cleanup\|rebuilds a retained window after Compaction' --timeout 30000`                                      | Raw cancel opt-ins and previous repair                |
+| `bun test test/permission/reviewer-service.test.ts -t 'protocol\|cancel\|interrupt\|terminal\|cleanup' --timeout 30000`                                       | Owned reviewer raw state                              |
+| `bun test test/server/httpapi-sdk.test.ts -t 'hidden' --timeout 30000`                                                                                        | SDK visible interface                                 |
+| `bun test test/session/processor-effect.test.ts -t 'hidden\|cleanup\|terminal' --timeout 30000`                                                               | Tool lifecycle vs visible history                     |
+| `bun typecheck`                                                                                                                                               | Package type contract                                 |
+| `git diff --check` (root)                                                                                                                                     | Hygiene                                               |
 
 Adjust name filters to exact existing test titles if needed; do not widen to full slow suite or report zero selected tests as verification. Capture raw results under D:/Temp/opencode for independent audit. No dependency changes are planned; if environment fails report prerequisite rather than hide failure.
 
@@ -301,10 +314,10 @@ Auditor alone loads adversarial audit materials. Handoff contains only verbatim 
 
 ## 22. Plan Audit Record
 
-| Round | Revision | Full scope | Result | Invocation |
-| --- | --- | --- | --- | --- |
-| 1 | R1 | yes | BLOCK, B-01 | ses_f2c82bd38ffexHNGWiQgXifntp |
-| 2 | R2 | yes | No blocking findings. APPROVE | ses_f2c82bd38ffexHNGWiQgXifntp |
+| Round | Revision | Full scope | Result                        | Invocation                     |
+| ----- | -------- | ---------- | ----------------------------- | ------------------------------ |
+| 1     | R1       | yes        | BLOCK, B-01                   | ses_f2c82bd38ffexHNGWiQgXifntp |
+| 2     | R2       | yes        | No blocking findings. APPROVE | ses_f2c82bd38ffexHNGWiQgXifntp |
 
 R2 independent verdict (verbatim):
 
@@ -363,16 +376,16 @@ Observed red then green:
 
 All commands ran from packages/opencode except the original diagnostic and git commands. JUnit artifacts are generated directly by Bun under D:/Temp/opencode:
 
-| Command/filter | Result | Raw artifact |
-| --- | --- | --- |
-| messages-pagination: `visible limit\|hidden\|findMessage\|MessageV2.get\|MessageV2.parts\|MessageV2.stream` | 25 pass, 0 fail | hidden-read-direct.xml |
-| revert-compact small suite | 16 pass, 0 fail | hidden-read-revert.xml |
-| stale-turn small suite | 7 pass, 0 fail | hidden-read-stale.xml |
-| prompt: `cancel finalizes\|rebuilds a retained window after Compaction\|goal resume.*revert\|auto permission reviewer.*protocol` | 7 pass, 1 existing skip, 0 fail | hidden-read-prompt.xml |
-| reviewer-service: `closes\|protocol\|interrupt\|terminal\|cleanup` | 4 pass, 0 fail | hidden-read-reviewer.xml |
-| compaction: `hidden\|failed\|cancel\|memento` | 4 pass, 0 fail | hidden-read-compaction.xml |
-| processor-effect: `hidden\|cleanup\|terminal` | 2 pass, 0 fail | hidden-read-processor.xml |
-| httpapi-sdk: `matches generated SDK session message and part routes` | 1 pass, 0 fail | hidden-read-sdk.xml |
+| Command/filter                                                                                                                   | Result                          | Raw artifact               |
+| -------------------------------------------------------------------------------------------------------------------------------- | ------------------------------- | -------------------------- |
+| messages-pagination: `visible limit\|hidden\|findMessage\|MessageV2.get\|MessageV2.parts\|MessageV2.stream`                      | 25 pass, 0 fail                 | hidden-read-direct.xml     |
+| revert-compact small suite                                                                                                       | 16 pass, 0 fail                 | hidden-read-revert.xml     |
+| stale-turn small suite                                                                                                           | 7 pass, 0 fail                  | hidden-read-stale.xml      |
+| prompt: `cancel finalizes\|rebuilds a retained window after Compaction\|goal resume.*revert\|auto permission reviewer.*protocol` | 7 pass, 1 existing skip, 0 fail | hidden-read-prompt.xml     |
+| reviewer-service: `closes\|protocol\|interrupt\|terminal\|cleanup`                                                               | 4 pass, 0 fail                  | hidden-read-reviewer.xml   |
+| compaction: `hidden\|failed\|cancel\|memento`                                                                                    | 4 pass, 0 fail                  | hidden-read-compaction.xml |
+| processor-effect: `hidden\|cleanup\|terminal`                                                                                    | 2 pass, 0 fail                  | hidden-read-processor.xml  |
+| httpapi-sdk: `matches generated SDK session message and part routes`                                                             | 1 pass, 0 fail                  | hidden-read-sdk.xml        |
 
 All test commands use `--timeout 30000`; reporter runs additionally use `--reporter=junit --reporter-outfile=D:\Temp\opencode\<artifact>`. Total 66 passed and 1 pre-existing skipped case, no full repository/prompt suite run. Filters were matched against actual existing test titles (the SDK title does not contain the word hidden).
 
@@ -383,7 +396,20 @@ All test commands use `--timeout 30000`; reporter runs additionally use `--repor
 Original actual-interface diagnostic now exits 0. Raw native transcript: `D:\Temp\opencode\hidden-read-original-repro.log`.
 
 ```json
-{"actual":{"getHidden":"Failure","visibleParts":["prt_visible"],"hiddenParentParts":[],"stream":["msg_visible"]},"expected":{"getHidden":"Failure","visibleParts":["prt_visible"],"hiddenParentParts":[],"stream":["msg_visible"]}}
+{
+  "actual": {
+    "getHidden": "Failure",
+    "visibleParts": ["prt_visible"],
+    "hiddenParentParts": [],
+    "stream": ["msg_visible"]
+  },
+  "expected": {
+    "getHidden": "Failure",
+    "visibleParts": ["prt_visible"],
+    "hiddenParentParts": [],
+    "stream": ["msg_visible"]
+  }
+}
 ```
 
 ### Actual Secondary and Replacement Path Inventory
@@ -392,7 +418,7 @@ Visible/default and explicit raw remain two supported modes of the same primary 
 
 ### Chinese Comment Calculation
 
-Current combined code diff: E=133, C=40. Previous goal baseline E=28, C=12 is unchanged. This goal E=105, C=28, C/E=26.67%; required minimum ceil(105*0.15)=16. Count added or substantively replaced nonblank code, exclude comments themselves/import-only changes/docs and unchanged context; no generated/format-only/pure-move changes. Comments explain parent admission before cold restoration, explicit raw lifecycle/usage, structural anchor exception, hidden cleanup resume, and positive fixture expectations. They are distributed adjacent to each owning decision.
+Current combined code diff: E=133, C=40. Previous goal baseline E=28, C=12 is unchanged. This goal E=105, C=28, C/E=26.67%; required minimum ceil(105\*0.15)=16. Count added or substantively replaced nonblank code, exclude comments themselves/import-only changes/docs and unchanged context; no generated/format-only/pure-move changes. Comments explain parent admission before cold restoration, explicit raw lifecycle/usage, structural anchor exception, hidden cleanup resume, and positive fixture expectations. They are distributed adjacent to each owning decision.
 
 ### Remaining Unverified Items
 
@@ -400,9 +426,9 @@ Focused verification, package typecheck and independent full-scope implementatio
 
 ## 24. Implementation Audit Record
 
-| Round | Approved revision | Full scope | Blocking findings | Result | Invocation |
-| --- | --- | --- | --- | --- | --- |
-| 1 | R2 | yes | No blocking findings. | APPROVE | ses_f2c6688deffeJAzf3Ca02XEw5t |
+| Round | Approved revision | Full scope | Blocking findings     | Result  | Invocation                     |
+| ----- | ----------------- | ---------- | --------------------- | ------- | ------------------------------ |
+| 1     | R2                | yes        | No blocking findings. | APPROVE | ses_f2c6688deffeJAzf3Ca02XEw5t |
 
 Independent findings and release verdict (verbatim):
 

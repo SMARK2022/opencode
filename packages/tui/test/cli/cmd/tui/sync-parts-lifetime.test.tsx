@@ -9,7 +9,14 @@ const other = "ses_lifetime_other"
 let sequence = 0
 
 function message(id: string, sessionID = active, created = 1): UserMessage {
-  return { id, sessionID, role: "user", time: { created }, agent: "build", model: { providerID: "test", modelID: "test" } }
+  return {
+    id,
+    sessionID,
+    role: "user",
+    time: { created },
+    agent: "build",
+    model: { providerID: "test", modelID: "test" },
+  }
 }
 
 function session(id: string) {
@@ -24,12 +31,23 @@ function tool(messageID: string, sessionID: string, output: string, created = 1)
     type: "tool",
     callID: messageID,
     tool: "bash",
-    state: { status: "completed", input: { command: "echo fixture" }, output, title: "fixture", metadata: {}, time: { start: 1, end: 2 } },
+    state: {
+      status: "completed",
+      input: { command: "echo fixture" },
+      output,
+      title: "fixture",
+      metadata: {},
+      time: { start: 1, end: 2 },
+    },
   }
 }
 
 function emit(h: Harness, type: string, properties: object) {
-  h.emit({ directory, project: "proj_test", payload: { id: `evt_lifetime_${++sequence}`, type, properties } } as GlobalEvent)
+  h.emit({
+    directory,
+    project: "proj_test",
+    payload: { id: `evt_lifetime_${++sequence}`, type, properties },
+  } as GlobalEvent)
 }
 
 async function barrier(h: Harness) {
@@ -41,7 +59,12 @@ async function barrier(h: Harness) {
 function bytes(h: Harness, sessionID: string) {
   return Object.values(h.sync.data.part)
     .flat()
-    .reduce((n, p) => n + (p.sessionID === sessionID && p.type === "tool" && p.state.status === "completed" ? p.state.output.length : 0), 0)
+    .reduce(
+      (n, p) =>
+        n +
+        (p.sessionID === sessionID && p.type === "tool" && p.state.status === "completed" ? p.state.output.length : 0),
+      0,
+    )
 }
 
 function put(h: Harness, id: string, sessionID: string, output: string, created = 1) {
@@ -51,7 +74,8 @@ function put(h: Harness, id: string, sessionID: string, output: string, created 
 
 function transport(rows: { info: UserMessage; parts: Part[] }[]) {
   return (url: URL) => {
-    if (url.pathname === `/session/${active}` || url.pathname === `/session/${other}`) return json(session(url.pathname.split("/")[2]))
+    if (url.pathname === `/session/${active}` || url.pathname === `/session/${other}`)
+      return json(session(url.pathname.split("/")[2]))
     if (url.pathname.endsWith("/message")) return json(rows)
     if (url.pathname.endsWith("/goal")) return json({ goal: null })
     if (url.pathname.endsWith("/todo") || url.pathname.endsWith("/diff")) return json([])
@@ -135,14 +159,18 @@ test("route handoff preserves acquired bodies across the release microtask", asy
 test("acquireParts rolls back the consumer count when sync rejects", async () => {
   // [0624] sync 失败（Session 删除竞态/守护进程重启）必须回滚计数：否则该 Session 的
   // 正文使用权永久泄漏，后台完成事件会持续补入。
-  const h = await mount((url) => {
-    if (url.pathname === `/session/${other}`) return new Response("boom", { status: 500 })
-    if (url.pathname === `/session/${active}`) return json(session(active))
-    if (url.pathname.endsWith("/message")) return json([])
-    if (url.pathname.endsWith("/goal")) return json({ goal: null })
-    if (url.pathname.endsWith("/todo") || url.pathname.endsWith("/diff")) return json([])
-    return undefined
-  }, undefined, { type: "session", sessionID: active })
+  const h = await mount(
+    (url) => {
+      if (url.pathname === `/session/${other}`) return new Response("boom", { status: 500 })
+      if (url.pathname === `/session/${active}`) return json(session(active))
+      if (url.pathname.endsWith("/message")) return json([])
+      if (url.pathname.endsWith("/goal")) return json({ goal: null })
+      if (url.pathname.endsWith("/todo") || url.pathname.endsWith("/diff")) return json([])
+      return undefined
+    },
+    undefined,
+    { type: "session", sessionID: active },
+  )
   try {
     await expect(h.sync.session.acquireParts(other)).rejects.toBeDefined()
     // 回滚的证据： acquire 失败后该 Session 没有消费者，迟到的终态正文仍被拒绝。
@@ -213,7 +241,14 @@ test("terminal tool update removes the previously admitted running body", async 
       sessionID: other,
       part: {
         ...running,
-        state: { status: "completed", input: { command: "echo" }, output: "FINAL", title: "done", metadata: {}, time: { start: 1, end: 2 } },
+        state: {
+          status: "completed",
+          input: { command: "echo" },
+          output: "FINAL",
+          title: "done",
+          metadata: {},
+          time: { start: 1, end: 2 },
+        },
       },
     })
     await barrier(h)
@@ -298,11 +333,20 @@ test("concurrent acquisitions both resolve only after bodies are loaded", async 
 })
 test("switching into a streaming session retains bus-only delta before HTTP parent arrives", async () => {
   const rows = [
-    { info: message("msg_stream", other), parts: [{ id: "prt_stream", messageID: "msg_stream", sessionID: other, type: "text", text: "" } as Part] },
+    {
+      info: message("msg_stream", other),
+      parts: [{ id: "prt_stream", messageID: "msg_stream", sessionID: other, type: "text", text: "" } as Part],
+    },
   ]
   const h = await mount(transport(rows), undefined, { type: "session", sessionID: active })
   try {
-    emit(h, "message.part.delta", { sessionID: other, messageID: "msg_stream", partID: "prt_stream", field: "text", delta: "BUS_ONLY" })
+    emit(h, "message.part.delta", {
+      sessionID: other,
+      messageID: "msg_stream",
+      partID: "prt_stream",
+      field: "text",
+      delta: "BUS_ONLY",
+    })
     await barrier(h)
     h.route.navigate({ type: "session", sessionID: other })
     await h.sync.session.sync(other)

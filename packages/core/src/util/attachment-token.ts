@@ -110,23 +110,23 @@ export function estimateAttachment(input: AttachmentInput): AttachmentTokenEstim
   // #175：mime 优先显式字段，其次 payload 解析
   const mime = input.mime ?? input.mediaType ?? payload.mime ?? "application/octet-stream"
   const text = placeholder({ mime, filename: input.filename })
-// #175：image 除数 750，结果夹紧到 1..1600
+  // #175：image 除数 750，结果夹紧到 1..1600
   const tokens = mime.startsWith("image/")
     ? Math.max(1, Math.min(1600, Math.round(payload.payload.length / 750)))
-// #175：pdf 除数 1100
-    : mime === "application/pdf"
+    : // #175：pdf 除数 1100
+      mime === "application/pdf"
       ? Math.max(1, Math.round(payload.payload.length / 1100))
-// #175：其它 MIME 回退 Token.estimate
-      : Math.max(1, Token.estimate(payload.payload))
+      : // #175：其它 MIME 回退 Token.estimate
+        Math.max(1, Token.estimate(payload.payload))
 
   return {
     tokens,
     rawChars: payload.rawChars,
     textChars: text.length,
     count: 1,
-// #175：image 除数 750，结果夹紧到 1..1600
+    // #175：image 除数 750，结果夹紧到 1..1600
     imageTokens: mime.startsWith("image/") ? tokens : 0,
-// #175：pdf 除数 1100
+    // #175：pdf 除数 1100
     pdfTokens: mime === "application/pdf" ? tokens : 0,
     otherTokens: !mime.startsWith("image/") && mime !== "application/pdf" ? tokens : 0,
   }
@@ -174,7 +174,12 @@ function attachmentFromRecord(value: Record<string, unknown>): AttachmentInput |
       mime: typeof value.mime === "string" ? value.mime : undefined,
       mediaType: typeof value.mediaType === "string" ? value.mediaType : undefined,
       url: typeof value.url === "string" ? value.url : undefined,
-      data: typeof value.data === "string" ? value.data : value.data instanceof Uint8Array ? Buffer.from(value.data).toString("base64") : undefined,
+      data:
+        typeof value.data === "string"
+          ? value.data
+          : value.data instanceof Uint8Array
+            ? Buffer.from(value.data).toString("base64")
+            : undefined,
       filename: typeof value.filename === "string" ? value.filename : undefined,
     }
   }
@@ -189,9 +194,14 @@ function attachmentFromRecord(value: Record<string, unknown>): AttachmentInput |
   }
   // SDK 图片可为二进制；转换只供估算，不改实际 provider 请求。
   if (value.type === "image" && value.image instanceof Uint8Array) {
-    return { type: "media", data: Buffer.from(value.image).toString("base64"), mediaType: typeof value.mediaType === "string" ? value.mediaType : "image/png" }
+    return {
+      type: "media",
+      data: Buffer.from(value.image).toString("base64"),
+      mediaType: typeof value.mediaType === "string" ? value.mediaType : "image/png",
+    }
   }
-  if (value.type === "image" && typeof value.image === "string") return { type: "image", url: value.image, mime: parseDataUrl(value.image)?.mime }
+  if (value.type === "image" && typeof value.image === "string")
+    return { type: "image", url: value.image, mime: parseDataUrl(value.image)?.mime }
   // native Responses 的字段不同，仍消费同一 prepared 载荷。
   if (value.type === "input_image" && typeof value.image_url === "string")
     return { type: "image", url: value.image_url, mime: parseDataUrl(value.image_url)?.mime }
@@ -223,11 +233,10 @@ export function sanitizeModelMessagesForTokenEstimate(messages: unknown): Saniti
     value: result.value,
     text,
     textChars: text.length,
-// #175：rawChars 用未消毒 JSON 对齐 wire
+    // #175：rawChars 用未消毒 JSON 对齐 wire
     rawChars,
     // 二进制与 data URL 的 JSON 长度不同，raw→text 的差额必须对齐真实准备体。
-    attachments: { ...result.attachments,
-      rawChars: rawChars - text.length + result.attachments.textChars },
+    attachments: { ...result.attachments, rawChars: rawChars - text.length + result.attachments.textChars },
   }
 }
 

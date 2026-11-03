@@ -84,10 +84,14 @@ const layer = Layer.effect(
       // #285：raw_patterns 是 shell 解析的原始拒绝证据，绕过 canonical pattern 评估
       for (const pattern of rawDenyPatterns(request.metadata)) {
         const denied = rawDenyRule(request.permission, pattern, ruleset)
-        yield* Effect.logInfo("evaluated raw deny evidence", { permission: request.permission, pattern, denied: Boolean(denied) })
+        yield* Effect.logInfo("evaluated raw deny evidence", {
+          permission: request.permission,
+          pattern,
+          denied: Boolean(denied),
+        })
         if (denied) {
-        // #285：命中 deny 立即 fail-closed，不给后续 ask 规则截获的机会；
-        // ruleset 过滤只保留本 permission 相关规则，错误对象不含无关规则
+          // #285：命中 deny 立即 fail-closed，不给后续 ask 规则截获的机会；
+          // ruleset 过滤只保留本 permission 相关规则，错误对象不含无关规则
           return yield* new PermissionV1.DeniedError({
             ruleset: ruleset.filter((rule) => Wildcard.match(request.permission, rule.permission)),
           })
@@ -164,7 +168,11 @@ const layer = Layer.effect(
                 precheck: review.precheck,
               }),
           )
-          yield* Effect.logInfo("auto evaluated", { permission: request.permission, action: decision.action, reason: decision.reason })
+          yield* Effect.logInfo("auto evaluated", {
+            permission: request.permission,
+            action: decision.action,
+            reason: decision.reason,
+          })
           if (decision.action === "allow") {
             if (circuit) yield* circuit.recordNonDenial(request.sessionID)
             // #199：只有 reviewer allow 才缓存和发布事件——precheck fast-path allow 是
@@ -222,7 +230,10 @@ const layer = Layer.effect(
             // #199：agent 通过用户审批旁路 precheck/reviewer 已拒绝的危险操作。
             // [local-smark] #627：终局性由 decision.source 唯一承载（auto.ts forbidden
             // 是唯一的 precheck deny 路径；reviewer 拒绝保留"用户确认后重试"路径）
-            return yield* new PermissionV1.AutoDeniedError({ reason: decision.reason, terminal: decision.source === "precheck" })
+            return yield* new PermissionV1.AutoDeniedError({
+              reason: decision.reason,
+              terminal: decision.source === "precheck",
+            })
           }
           // #199：reviewer 不可用或返回 ask 时回退到用户审批，保持 fail-open 语义
           // #199：而非 fail-closed——未配置 reviewer 不应阻断正常工作流。
@@ -379,8 +390,8 @@ function rawDenyRule(permission: string, pattern: string, ruleset: PermissionV1.
       rule.pattern !== "*" &&
       Wildcard.match(permission, rule.permission) &&
       Wildcard.match(pattern, rule.pattern),
-      // #285：rule.pattern !== "*" 防止通配兜底规则吞掉原始证据检查；
-      // 只有显式命名 pattern 的 deny 才能命中 raw_patterns
+    // #285：rule.pattern !== "*" 防止通配兜底规则吞掉原始证据检查；
+    // 只有显式命名 pattern 的 deny 才能命中 raw_patterns
   )
 }
 
@@ -422,6 +433,10 @@ export function visibleTools<T>(tools: Record<string, T>, ruleset: PermissionV1.
 // #199：Permission.node 声明对 session cache 和 circuit breaker 的依赖，使
 // #199：builder 在构建 Permission 层时自动提供这些服务。reviewer 不在此声明——
 // #199：它是可选协作者，通过 serviceOption 访问，缺失时退回 ask 路径。
-export const node = LayerNode.make({ service: Service, layer: layer, deps: [EventV2Bridge.node, PermissionSessionCache.node, PermissionCircuitBreaker.node] })
+export const node = LayerNode.make({
+  service: Service,
+  layer: layer,
+  deps: [EventV2Bridge.node, PermissionSessionCache.node, PermissionCircuitBreaker.node],
+})
 
 export * as Permission from "."

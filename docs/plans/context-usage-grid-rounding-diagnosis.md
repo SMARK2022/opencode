@@ -5,6 +5,7 @@
 > Scope: TUI `/context` 面板 `gridRows` / token icon 分配
 >
 > Primary code:
+>
 > - `packages/opencode/src/cli/cmd/tui/util/context-usage.ts` → `contextGrid`, `computeContextData`
 > - `packages/opencode/src/cli/cmd/tui/routes/session/context-usage.tsx` → 渲染
 > - `packages/opencode/src/token/accounting.ts` → category token 来源
@@ -48,13 +49,13 @@ let count = Math.round(exact)
 
 `computeContextData` 组装 categories：
 
-| 类别 | 来源 |
-|------|------|
-| System / Instructions / Skills / Tool definitions | `acc.breakdown.*` |
-| Input Messages / Tool results / Output / Tool calls | `msgDetails.*` |
-| Free space | `usableInput - used`（`used = step.input + step.output`） |
-| Model reserve | `context - inputLimit` |
-| Autocompact buffer | `inputLimit - usableInput` |
+| 类别                                                | 来源                                                      |
+| --------------------------------------------------- | --------------------------------------------------------- |
+| System / Instructions / Skills / Tool definitions   | `acc.breakdown.*`                                         |
+| Input Messages / Tool results / Output / Tool calls | `msgDetails.*`                                            |
+| Free space                                          | `usableInput - used`（`used = step.input + step.output`） |
+| Model reserve                                       | `context - inputLimit`                                    |
+| Autocompact buffer                                  | `inputLimit - usableInput`                                |
 
 **未进入网格类别的 breakdown 字段：**
 
@@ -73,12 +74,12 @@ let count = Math.round(exact)
 
 典型失败模式：
 
-| 模式 | 机制 | 视觉效果 |
-|------|------|----------|
-| 亚半格消失 | 多个类别 `exact ∈ (0, 0.5)` → 各自 round 到 0 | “好几块不满一格”整体归零 |
-| 净向下取整 | 多个 used 类 fractional part < 0.5 | used 格数 < 理论格数 |
-| 余数归 Free | `remaining` 只加给 Free | Free/空白系统膨胀 |
-| 顺序饿死 | 前面 round 向上过多 → 后面 `min(count, remaining)` 变 0 | 后部类别被吃掉 |
+| 模式        | 机制                                                    | 视觉效果                 |
+| ----------- | ------------------------------------------------------- | ------------------------ |
+| 亚半格消失  | 多个类别 `exact ∈ (0, 0.5)` → 各自 round 到 0           | “好几块不满一格”整体归零 |
+| 净向下取整  | 多个 used 类 fractional part < 0.5                      | used 格数 < 理论格数     |
+| 余数归 Free | `remaining` 只加给 Free                                 | Free/空白系统膨胀        |
+| 顺序饿死    | 前面 round 向上过多 → 后面 `min(count, remaining)` 变 0 | 后部类别被吃掉           |
 
 复现（纯函数，total=100, context=200_000）：
 
@@ -129,10 +130,10 @@ remaining 再喂给 Free
 
 修复后应满足：
 
-1. **闭包**：`Σ count_i === total`（`total = gridW * gridH`）恒成立。  
-2. **比例**：对任意类别集合 S，`|Σ_{i∈S} count_i - round_or_floor_exact(Σ tokens_S)| ≤ 类别数` 量级误差，且**不允许**系统性地把误差全部倒给 Free。  
+1. **闭包**：`Σ count_i === total`（`total = gridW * gridH`）恒成立。
+2. **比例**：对任意类别集合 S，`|Σ_{i∈S} count_i - round_or_floor_exact(Σ tokens_S)| ≤ 类别数` 量级误差，且**不允许**系统性地把误差全部倒给 Free。
 3. **质量守恒**：painted categories 的 token 之和必须等于（或主动补齐到）contextLimit 分母所代表的 mass：  
-   `used_painted + free + reserve + buffer === contextLimit`（允许 1 token 舍入差）。  
+   `used_painted + free + reserve + buffer === contextLimit`（允许 1 token 舍入差）。
 4. **亚半格可合并**：多个 `exact < 1` 的 used 类，合计 exact ≥ 1 时，应至少分到合计 floor/LRM 对应的格数，而不是全灭。
 
 ## 5. 完整解决方案
@@ -141,7 +142,7 @@ remaining 再喂给 Free
 
 在 `computeContextData` 构图前：
 
-1. 增加 `Attachments`（及必要时 `Pending`）类别，token 来自 `bd.attachments` / `bd.pending`；**或**把 attachments 并入 `Input Messages` / `Tool results` 的已有桶，并在详情里拆开。  
+1. 增加 `Attachments`（及必要时 `Pending`）类别，token 来自 `bd.attachments` / `bd.pending`；**或**把 attachments 并入 `Input Messages` / `Tool results` 的已有桶，并在详情里拆开。
 2. 计算：
 
 ```ts
@@ -150,7 +151,7 @@ const windowParts = free + providerReserve + compactionBuffer
 const gap = maxTokens - (painted + windowParts)
 ```
 
-3. 若 `gap > 0`：挂到显式 `Unaccounted` 类别，或临时并入最接近语义的桶（优先 Attachments/Pending，禁止默认吞进 Free 而不标注）。  
+3. 若 `gap > 0`：挂到显式 `Unaccounted` 类别，或临时并入最接近语义的桶（优先 Attachments/Pending，禁止默认吞进 Free 而不标注）。
 4. 若 `gap < 0`：按比例或从最大 used 桶扣减，保证 `Σ tokens === maxTokens`（或 === 用于网格的 denom）。
 
 目标：进入 `contextGrid` 的 weights 之和 == `contextLimit`。
@@ -172,9 +173,7 @@ function apportion(weights: number[], seats: number): number[] {
   const exact = weights.map((w) => (w / sum) * seats)
   const floors = exact.map((e) => Math.floor(e))
   let remain = seats - floors.reduce((a, b) => a + b, 0)
-  const order = exact
-    .map((e, i) => ({ i, frac: e - floors[i] }))
-    .sort((a, b) => b.frac - a.frac || a.i - b.i)
+  const order = exact.map((e, i) => ({ i, frac: e - floors[i] })).sort((a, b) => b.frac - a.frac || a.i - b.i)
   const out = floors.slice()
   for (let k = 0; k < remain; k++) out[order[k % order.length].i]++
   return out
@@ -183,69 +182,69 @@ function apportion(weights: number[], seats: number): number[] {
 
 流程：
 
-1. `total = gridW * gridH`。  
-2. 对**全部** categories（含 Autocompact / Free / Reserve）一次 `apportion(tokens[], total)`。  
-3. 若仍需 Autocompact 固定贴在网格尾部：  
-   - 先 `apportion` 得各类 count；  
-   - **渲染顺序**把 Autocompact 的 count 个格子 append 到尾部，body 保持原类别顺序；  
-   - 不要先 round tail 再在 body 里二次 round。  
-4. 删除“remaining → Free only”分支。  
-5. `fullness` 仍可用 `exact - localIndex`，但 `exact` 建议改为 `count` 的连续解释：  
-   - 前 `floor(exact)` 格 fullness=1；  
+1. `total = gridW * gridH`。
+2. 对**全部** categories（含 Autocompact / Free / Reserve）一次 `apportion(tokens[], total)`。
+3. 若仍需 Autocompact 固定贴在网格尾部：
+   - 先 `apportion` 得各类 count；
+   - **渲染顺序**把 Autocompact 的 count 个格子 append 到尾部，body 保持原类别顺序；
+   - 不要先 round tail 再在 body 里二次 round。
+4. 删除“remaining → Free only”分支。
+5. `fullness` 仍可用 `exact - localIndex`，但 `exact` 建议改为 `count` 的连续解释：
+   - 前 `floor(exact)` 格 fullness=1；
    - 若 LRM 多给 1 格，最后一格 fullness = fractional part 或 1（二选一，测试锁死）。
 
 ### 5.3 可选增强：最小可见性策略（产品选择）
 
 若希望“任何 tokens>0 的 used 类至少 1 格”：
 
-1. 先给 `tokens>0 && !isDeferred` 的类各 1 席（总数不超过 total）。  
-2. 剩余 seats 再对 `weights' = max(0, tokens - tokenPerSeat)` 做 LRM。  
+1. 先给 `tokens>0 && !isDeferred` 的类各 1 席（总数不超过 total）。
+2. 剩余 seats 再对 `weights' = max(0, tokens - tokenPerSeat)` 做 LRM。
 
 注意：这会轻微牺牲严格比例，应用在“小类别可读性”优先时。  
 默认推荐：**纯 LRM**，不强制 min-1，避免小窗下 Free 被挤没。
 
 ### 5.4 文案 / 分母对齐
 
-1. 顶栏百分比继续用 `used / maxTokens`，与网格同一 `maxTokens`。  
-2. 若产品希望“相对 usable”：  
-   - 要么网格分母改 usable（reserve/buffer 另条显示）；  
-   - 要么百分比旁标注 `of context` / `of usable`。  
+1. 顶栏百分比继续用 `used / maxTokens`，与网格同一 `maxTokens`。
+2. 若产品希望“相对 usable”：
+   - 要么网格分母改 usable（reserve/buffer 另条显示）；
+   - 要么百分比旁标注 `of context` / `of usable`。
 3. 列表里的 `percent(tokens, maxTokens)` 保持与格子同一套 denom。
 
 ### 5.5 测试（应新增，回归锁死）
 
 放在 `packages/opencode/test/cli/tui/context-usage.test.ts`：
 
-1. **闭包**：任意 categories + total，`flat(grid).length === total` 且 `Σ count_by_name === total`。  
-2. **亚半格合并**：10×`exact=0.4` used + free → used 合计 count === 4（或 3/4/5 内 LRM 合法范围，且 **≠0**）。  
-3. **比例**：单类 100K / 300K，total=120 → 该类 count === 40。  
-4. **attachments 不丢**：breakdown.attachments>0 时，used 色格合计与 `(used/context)*total` 误差 ≤1（在 mass 补齐后）。  
-5. **Autocompact 仍在尾部**：最后 N 格 categoryName === Autocompact buffer，且 N === LRM 结果。  
+1. **闭包**：任意 categories + total，`flat(grid).length === total` 且 `Σ count_by_name === total`。
+2. **亚半格合并**：10×`exact=0.4` used + free → used 合计 count === 4（或 3/4/5 内 LRM 合法范围，且 **≠0**）。
+3. **比例**：单类 100K / 300K，total=120 → 该类 count === 40。
+4. **attachments 不丢**：breakdown.attachments>0 时，used 色格合计与 `(used/context)*total` 误差 ≤1（在 mass 补齐后）。
+5. **Autocompact 仍在尾部**：最后 N 格 categoryName === Autocompact buffer，且 N === LRM 结果。
 6. **不把系统误差只塞 Free**：构造 used 全为 `*.4` 的向量，assert Free 的 count ≤ ceil(exact_free)+1，而 used 合计 ≥ floor(exact_used)。
 
 ### 5.6 建议实现切分
 
-| Step | 改动 | 风险 |
-|------|------|------|
-| 1 | 抽出纯函数 `apportion(weights, seats)` + 单测 | 无 UI |
-| 2 | `contextGrid` 改 LRM，去掉 Free remainder hack | 网格外观变化 |
-| 3 | categories 纳入 attachments/pending 或 gap 桶 | 列表多一行 |
-| 4 | 对齐 fullness / 符号阈值（可选） | 纯视觉 |
-| 5 | 百分比文案分母说明（可选） | 文案 |
+| Step | 改动                                           | 风险         |
+| ---- | ---------------------------------------------- | ------------ |
+| 1    | 抽出纯函数 `apportion(weights, seats)` + 单测  | 无 UI        |
+| 2    | `contextGrid` 改 LRM，去掉 Free remainder hack | 网格外观变化 |
+| 3    | categories 纳入 attachments/pending 或 gap 桶  | 列表多一行   |
+| 4    | 对齐 fullness / 符号阈值（可选）               | 纯视觉       |
+| 5    | 百分比文案分母说明（可选）                     | 文案         |
 
 ## 6. 非方案（避免）
 
-1. **只把 Math.round 改成 Math.ceil/floor**：仍各自独立，总和仍漂。  
-2. **只提高 grid 分辨率**：能减小误差，治不好亚半格全灭与空洞。  
-3. **继续 “remaining → Free”**：这是系统偏置的来源。  
+1. **只把 Math.round 改成 Math.ceil/floor**：仍各自独立，总和仍漂。
+2. **只提高 grid 分辨率**：能减小误差，治不好亚半格全灭与空洞。
+3. **继续 “remaining → Free”**：这是系统偏置的来源。
 4. **在渲染层用 CSS/字符串重复补丁**：根在 `contextGrid` 的整数分配。
 
 ## 7. 结论
 
 根因不是“百分比字符串 toFixed”，而是：
 
-1. **`contextGrid` 对每类独立 `Math.round`，余数只补给 Free** → used 图标系统偏少，小碎片可集体归零；  
-2. **`attachments`/`pending` 等 mass 进了 used 却未进网格类别** → 无主 token 再被 Free 吃掉；  
+1. **`contextGrid` 对每类独立 `Math.round`，余数只补给 Free** → used 图标系统偏少，小碎片可集体归零；
+2. **`attachments`/`pending` 等 mass 进了 used 却未进网格类别** → 无主 token 再被 Free 吃掉；
 3. **全窗分母（含 reserve/buffer）** 会让“相对 usable 的 1/2”在全窗上只占更小一截（语义问题，需产品确认）。
 
 正确修法：  

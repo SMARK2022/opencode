@@ -131,21 +131,21 @@ authoritative.
 The live database was inspected with `bun:sqlite` using `readonly: true`; no
 database or source file was modified.
 
-| Measurement | Result |
-|---|---:|
-| `cold_storage` rows | 7,717 |
-| `cold_storage` read including payload | 74.6-84.8 ms |
-| `cold_storage` metadata-only read | 51.7-58.7 ms |
-| owner-count grouped queries | 6.8-7.7 ms |
-| message candidate rows | 2,276 |
-| exact Part eligibility candidate rows | 405,626 |
-| exact Part query with required data | 5,323-5,425 ms |
-| exact Part query without data column | 3,962-4,028 ms |
-| sessions | 1,339 |
-| sessions older than 30 days | 726 |
-| candidate Part sessions | 1,310 |
-| database main file | 2,380,378,112 bytes |
-| database WAL | 4,770,992 bytes |
+| Measurement                           |              Result |
+| ------------------------------------- | ------------------: |
+| `cold_storage` rows                   |               7,717 |
+| `cold_storage` read including payload |        74.6-84.8 ms |
+| `cold_storage` metadata-only read     |        51.7-58.7 ms |
+| owner-count grouped queries           |          6.8-7.7 ms |
+| message candidate rows                |               2,276 |
+| exact Part eligibility candidate rows |             405,626 |
+| exact Part query with required data   |      5,323-5,425 ms |
+| exact Part query without data column  |      3,962-4,028 ms |
+| sessions                              |               1,339 |
+| sessions older than 30 days           |                 726 |
+| candidate Part sessions               |               1,310 |
+| database main file                    | 2,380,378,112 bytes |
+| database WAL                          |     4,770,992 bytes |
 
 The evidence distinguishes two symptoms:
 
@@ -236,22 +236,22 @@ persisted result record and its scan duration grows with the database.
 
 ## 8. Forward Traceability
 
-| Requirement/invariant | Production path | Planned location | Behavioral verification |
-|---|---|---|---|
-| Complete status output | `ColdStorage.status()` | `cold.ts` | exact report equality on fixture |
-| No unnecessary payload materialization | metadata query, with required legacy v1 decode exception | `cold.ts` | exact output, unchanged refs, and hard-heap BLOB regression |
-| Exact eligibility | `eligibleOwnerCount()` | `cold.ts` | old/new count equality across aged, recent, compacted, hot and cold owners |
-| Live daemon authority | `liveDaemon()`/`daemonRequest()` | `db.ts` | timeout/error never triggers offline execution |
-| Task acknowledgment | unchanged worker maintenance route | no production change | real daemon `202` and terminal polling test |
-| Original timeout repair | CLI `db status` without artificial deadline | `db.ts` | original command loop no timeout |
+| Requirement/invariant                  | Production path                                          | Planned location     | Behavioral verification                                                    |
+| -------------------------------------- | -------------------------------------------------------- | -------------------- | -------------------------------------------------------------------------- |
+| Complete status output                 | `ColdStorage.status()`                                   | `cold.ts`            | exact report equality on fixture                                           |
+| No unnecessary payload materialization | metadata query, with required legacy v1 decode exception | `cold.ts`            | exact output, unchanged refs, and hard-heap BLOB regression                |
+| Exact eligibility                      | `eligibleOwnerCount()`                                   | `cold.ts`            | old/new count equality across aged, recent, compacted, hot and cold owners |
+| Live daemon authority                  | `liveDaemon()`/`daemonRequest()`                         | `db.ts`              | timeout/error never triggers offline execution                             |
+| Task acknowledgment                    | unchanged worker maintenance route                       | no production change | real daemon `202` and terminal polling test                                |
+| Original timeout repair                | CLI `db status` without artificial deadline              | `db.ts`              | original command loop no timeout                                           |
 
 ## 9. Reverse Traceability and Complexity Budget
 
-| Proposed concept | Requirement | Evidence | Why existing logic cannot carry it |
-|---|---|---|---|
-| Metadata-only cold projection | no unnecessary thaw/read | `status()` selects `*`; payload is unused | current query transfers BLOBs unnecessarily |
-| Narrow candidate projection | status latency | 405,626 exact Part candidates and 5.3s query | current `.select()` loads every column |
-| Status deadline removal | usable exact report for unbounded database growth | fixed 2s timeout, 5.3s scan, and 2.0s user failure | current orchestration assumes all immediate operations are short |
+| Proposed concept              | Requirement                                       | Evidence                                           | Why existing logic cannot carry it                               |
+| ----------------------------- | ------------------------------------------------- | -------------------------------------------------- | ---------------------------------------------------------------- |
+| Metadata-only cold projection | no unnecessary thaw/read                          | `status()` selects `*`; payload is unused          | current query transfers BLOBs unnecessarily                      |
+| Narrow candidate projection   | status latency                                    | 405,626 exact Part candidates and 5.3s query       | current `.select()` loads every column                           |
+| Status deadline removal       | usable exact report for unbounded database growth | fixed 2s timeout, 5.3s scan, and 2.0s user failure | current orchestration assumes all immediate operations are short |
 
 No other production concept is authorized. In particular, no retry loop,
 offline fallback, schema migration, status cache, background scheduler, or
@@ -310,12 +310,12 @@ below the policy's 10 percent secondary-path budget.
 
 ## 12. Risks and Explicit Non-Goals
 
-| Risk | Mitigation |
-|---|---|
-| Narrow projection omits a field needed by extraction | compile/typecheck plus exact status tests; retain full row only where the consumer requires it |
-| Eligibility count changes subtly | equality tests for each age/compaction quadrant and mixed v1/v2 owners |
+| Risk                                                  | Mitigation                                                                                                                         |
+| ----------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| Narrow projection omits a field needed by extraction  | compile/typecheck plus exact status tests; retain full row only where the consumer requires it                                     |
+| Eligibility count changes subtly                      | equality tests for each age/compaction quadrant and mixed v1/v2 owners                                                             |
 | No status deadline leaves a stuck daemon request open | `liveDaemon()` proves the local owner before the request; HTTP/process errors still reject, and no alternate success path is added |
-| Large fixture makes tests slow or flaky | use published readiness and deterministic fixture data; do not use arbitrary sleeps |
+| Large fixture makes tests slow or flaky               | use published readiness and deterministic fixture data; do not use arbitrary sleeps                                                |
 
 Non-goals are compression algorithm changes, vacuum scheduling, backup, Stats
 redesign, payload thaw policy, external archive cleanup, and user-facing webapp
@@ -471,6 +471,7 @@ APPROVE — implementation diff against approved plan revision R3 only.
 ```
 
 Non-blocking notes retained:
+
 - status completeness assertions only cover a subset of StatusReport fields
 - no dedicated no-mutation status fixture was added beyond read-only path review
 - commit must exclude unrelated `bun.lock` noise

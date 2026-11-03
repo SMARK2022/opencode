@@ -274,17 +274,14 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
 
   // #279：仅 current/currentKey 变化时同步选择；options 更新继续由 preserveSelection 保持锚点。
   createEffect(
-    on(
-      [() => props.current, () => props.currentKey],
-      () => {
-        const index = currentIndex()
-        if (index >= 0) {
-          setStore("selected", index)
-          selection = flat()[index]
-        }
-        // #279：index<0（current 不在列表中）时不动 selected，避免高亮抖动
-      },
-    ),
+    on([() => props.current, () => props.currentKey], () => {
+      const index = currentIndex()
+      if (index >= 0) {
+        setStore("selected", index)
+        selection = flat()[index]
+      }
+      // #279：index<0（current 不在列表中）时不动 selected，避免高亮抖动
+    }),
   )
 
   createEffect(

@@ -46,5 +46,10 @@ export function mergePartSnapshot(existing: Part | undefined, incoming: Part): P
 export function mergePartSnapshots(existing: readonly Part[] | undefined, incoming: readonly Part[]): Part[] {
   if (!existing) return incoming.slice()
   // HTTP page 保持 server 顺序，只按 ID 查找本地候选并复用单 Part 合同。
-  return incoming.map((part) => mergePartSnapshot(existing.find((item) => item.id === part.id), part))
+  return incoming.map((part) =>
+    mergePartSnapshot(
+      existing.find((item) => item.id === part.id),
+      part,
+    ),
+  )
 }

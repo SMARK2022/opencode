@@ -378,7 +378,9 @@ export async function CodexAuthPlugin(input: PluginInput, options: CodexAuthPlug
 
             const currentAuth = await getAuth()
             if (currentAuth.type !== "oauth")
-              return websocketFetch ? websocketFetch(requestInput, init) : NetworkProxy.fetch(requestInput, { ...init, purpose: "provider" })
+              return websocketFetch
+                ? websocketFetch(requestInput, init)
+                : NetworkProxy.fetch(requestInput, { ...init, purpose: "provider" })
 
             const authWithAccount = currentAuth as typeof currentAuth & { accountId?: string }
 
@@ -453,7 +455,10 @@ export async function CodexAuthPlugin(input: PluginInput, options: CodexAuthPlug
               headers,
             }
             if (websocketFetch && parsed.pathname.endsWith("/responses")) return websocketFetch(url, requestInit)
-            return NetworkProxy.fetch(url, { ...OpenAIWebSocketPool.withoutInternalHeaders(requestInit), purpose: "provider" })
+            return NetworkProxy.fetch(url, {
+              ...OpenAIWebSocketPool.withoutInternalHeaders(requestInit),
+              purpose: "provider",
+            })
           },
         }
       },

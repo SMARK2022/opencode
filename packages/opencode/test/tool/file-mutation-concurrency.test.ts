@@ -157,9 +157,18 @@ describe("built-in file mutation coordination", () => {
         "*** End Patch",
       ].join("\n")
 
-      yield* executePatch({ patchText }, context(() => Effect.void))
+      yield* executePatch(
+        { patchText },
+        context(() => Effect.void),
+      )
       expect(yield* fs.readFileString(filePath)).toBe("first\nline2\nline3\nlast\n")
-      yield* executePatch({ patchText: "*** Begin Patch\n*** Delete File: repeated-entry.txt\n*** Add File: repeated-entry.txt\n+rewrite\n*** End Patch" }, context(() => Effect.void))
+      yield* executePatch(
+        {
+          patchText:
+            "*** Begin Patch\n*** Delete File: repeated-entry.txt\n*** Add File: repeated-entry.txt\n+rewrite\n*** End Patch",
+        },
+        context(() => Effect.void),
+      )
       expect(yield* fs.readFileString(filePath)).toBe("rewrite\n")
     }),
   )
@@ -194,7 +203,10 @@ describe("built-in file mutation coordination", () => {
         "*** End Patch",
       ].join("\n")
 
-      const exit = yield* executePatch({ patchText }, context(() => Effect.void)).pipe(Effect.exit)
+      const exit = yield* executePatch(
+        { patchText },
+        context(() => Effect.void),
+      ).pipe(Effect.exit)
       expect(Exit.isFailure(exit)).toBe(true)
       expect(yield* fs.readFileString(first)).toBe("first\n")
       expect(yield* fs.readFileString(second)).toBe("second\n")
@@ -223,7 +235,10 @@ describe("built-in file mutation coordination", () => {
         }),
       )
 
-      const fiber = yield* executeWrite({ content: "proposal\n", filePath }, writeCtx).pipe(Effect.exit, Effect.forkScoped)
+      const fiber = yield* executeWrite({ content: "proposal\n", filePath }, writeCtx).pipe(
+        Effect.exit,
+        Effect.forkScoped,
+      )
       yield* Deferred.await(asked)
       yield* fs.writeWithDirs(filePath, "")
       // 外部创建发生在 Permission 之后，故只有 commit recheck 能区分它与原始 missing proposal。
@@ -284,7 +299,10 @@ describe("built-in file mutation coordination", () => {
       yield* Deferred.succeed(releaseSecond, undefined)
       expect(Exit.isFailure(yield* Fiber.join(second))).toBe(true)
       expect(yield* fs.readFileString(filePath)).toBe("A\nb\n")
-      yield* executeWrite({ content: "fresh\n", filePath }, context(() => Effect.void))
+      yield* executeWrite(
+        { content: "fresh\n", filePath },
+        context(() => Effect.void),
+      )
       expect(yield* fs.readFileString(filePath)).toBe("fresh\n")
     }),
   )
@@ -342,7 +360,11 @@ describe("built-in file mutation coordination", () => {
         yield* Deferred.await(firstAsked)
         yield* Deferred.await(secondAsked)
         yield* Deferred.succeed(releasePermission, undefined)
-        yield* awaitWithTimeout(Effect.all(formatReady.map(Deferred.await)), "different-file commits did not overlap", "5 seconds")
+        yield* awaitWithTimeout(
+          Effect.all(formatReady.map(Deferred.await)),
+          "different-file commits did not overlap",
+          "5 seconds",
+        )
         yield* Deferred.succeed(formatRelease, undefined)
         expect(Exit.isSuccess(yield* Fiber.join(first))).toBe(true)
         expect(Exit.isSuccess(yield* Fiber.join(second))).toBe(true)
@@ -380,7 +402,10 @@ describe("built-in file mutation coordination", () => {
         const test = yield* TestInstance
         const fs = yield* FSUtil.Service
         const filePath = path.join(test.directory, "formatter-lock.txt")
-        const first = yield* executeWrite({ content: "A\n", filePath }, context(() => Effect.void)).pipe(Effect.exit, Effect.forkScoped)
+        const first = yield* executeWrite(
+          { content: "A\n", filePath },
+          context(() => Effect.void),
+        ).pipe(Effect.exit, Effect.forkScoped)
         yield* Deferred.await(formatterStarted)
         // formatterStarted 发生在首个 write 后，第二个 proposal 可见已写内容但不能越过 formatter。
 
@@ -433,7 +458,10 @@ describe("built-in file mutation coordination", () => {
         const test = yield* TestInstance
         const fs = yield* FSUtil.Service
         const filePath = path.join(test.directory, "cancelled-waiter.txt")
-        const first = yield* executeWrite({ content: "A\n", filePath }, context(() => Effect.void)).pipe(Effect.exit, Effect.forkScoped)
+        const first = yield* executeWrite(
+          { content: "A\n", filePath },
+          context(() => Effect.void),
+        ).pipe(Effect.exit, Effect.forkScoped)
         yield* Deferred.await(formatterStarted)
         const second = yield* executeWrite(
           { content: "B\n", filePath },
@@ -450,7 +478,10 @@ describe("built-in file mutation coordination", () => {
         yield* Deferred.succeed(formatterRelease, undefined)
         expect(Exit.isSuccess(yield* Fiber.join(first))).toBe(true)
 
-        yield* executeWrite({ content: "C\n", filePath }, context(() => Effect.void))
+        yield* executeWrite(
+          { content: "C\n", filePath },
+          context(() => Effect.void),
+        )
         expect(yield* fs.readFileString(filePath)).toBe("C\n")
       })
 
@@ -570,7 +601,10 @@ describe("built-in file mutation coordination", () => {
         priorRead(filePath),
       )
 
-      const writeFiber = yield* executeWrite({ content: "write\n", filePath }, writeCtx).pipe(Effect.exit, Effect.forkScoped)
+      const writeFiber = yield* executeWrite({ content: "write\n", filePath }, writeCtx).pipe(
+        Effect.exit,
+        Effect.forkScoped,
+      )
       yield* Deferred.await(writeAsked)
 
       const editFiber = yield* executeEdit(

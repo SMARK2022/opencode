@@ -31,8 +31,14 @@ describe("shell", () => {
       await using home = await tmpdir()
       await using cwd = await tmpdir()
       // 独立 HOME 避免用户 rc 干扰；login 和手动 rc 各自提供可观察标记。
-      await Bun.write(path.join(home.path, name === "bash" ? ".bash_profile" : ".zprofile"), "export LOGIN_MARK=login\n")
-      await Bun.write(path.join(home.path, `.${name}rc`), "export VALUE=outer\nalias fidelity_alias='printf alias'\ncd /\n")
+      await Bun.write(
+        path.join(home.path, name === "bash" ? ".bash_profile" : ".zprofile"),
+        "export LOGIN_MARK=login\n",
+      )
+      await Bun.write(
+        path.join(home.path, `.${name}rc`),
+        "export VALUE=outer\nalias fidelity_alias='printf alias'\ncd /\n",
+      )
       // Zsh 的 env 与 rc 查找语义不同于 Bash，不能合并初始化脚本。
       await Bun.write(path.join(home.path, ".zshenv"), "export ENV_MARK=zshenv\n")
       await Bun.write(path.join(cwd.path, "cwd-marker"), "")
@@ -51,13 +57,20 @@ true`
       const proc = Bun.spawn([file, ...Shell.args(file, command, cwd.path)], {
         cwd: home.path,
         env: { ...process.env, HOME: home.path, ZDOTDIR: home.path, ENV_MARK: "" },
-        stdout: "pipe", stderr: "pipe",
+        stdout: "pipe",
+        stderr: "pipe",
       })
-      const [output, error, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited])
+      const [output, error, code] = await Promise.all([
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+        proc.exited,
+      ])
       expect(error).toBe("")
       expect(code).toBe(0)
       // 预期值由语言合同独立给出：赋值后才展开，单引号中的字符原样输出。
-      expect(output).toBe("inner\n$VALUE\nC:\\Temp\\x\ncontinued\nlogin\nopencode\nalias:cwd" + (name === "zsh" ? ":zshenv" : ""))
+      expect(output).toBe(
+        "inner\n$VALUE\nC:\\Temp\\x\ncontinued\nlogin\nopencode\nalias:cwd" + (name === "zsh" ? ":zshenv" : ""),
+      )
     })
   }
 
@@ -66,12 +79,12 @@ true`
     for (const [command, expected] of [
       ['git commit -m "x" -- a.ts', 'git commit -m "x" "--" a.ts'],
       ['git commit --only -m "a" -m "b" -- p1.txt p2.txt', 'git commit --only -m "a" -m "b" "--" p1.txt p2.txt'],
-      ['git log --oneline -2 -- path', 'git log --oneline -2 "--" path'],
-      ['git checkout --;git reset --hard', 'git checkout "--";git reset --hard'],
+      ["git log --oneline -2 -- path", 'git log --oneline -2 "--" path'],
+      ["git checkout --;git reset --hard", 'git checkout "--";git reset --hard'],
       ['git commit -m "unclosed', 'git commit -m "unclosed'],
       ['echo "a -- b"', 'echo "a -- b"'],
-      ['git push --% --force', 'git push --% --force'],
-      ['git log --oneline', 'git log --oneline'],
+      ["git push --% --force", "git push --% --force"],
+      ["git log --oneline", "git log --oneline"],
     ] as const) {
       const tree = await Shell.parse(command, true)
       try {
@@ -79,24 +92,36 @@ true`
         if (!expected.includes('"--"')) continue
         expect(tree.rootNode.hasError).toBe(false)
         expect(tree.rootNode.descendantsOfType("command").length).toBe(command.includes(";") ? 2 : 1)
-      } finally { tree.delete() }
+      } finally {
+        tree.delete()
+      }
     }
     // Bash无需改写；同一共享入口不能扩大归一化范围。
     const bash = await Shell.parse("git log -- path", false)
-    try { expect(bash.rootNode.text).toBe("git log -- path") } finally { bash.delete() }
+    try {
+      expect(bash.rootNode.text).toBe("git log -- path")
+    } finally {
+      bash.delete()
+    }
   })
 
   test("keeps guest payload ranges separate from following host commands", () => {
     // 边界识别不执行命令，两个shell族在任何测试平台都可验证。
     for (const [shell, command, guest] of [
       ["pwsh", "wsl -d Ubuntu -- cat /mnt/file", "cat /mnt/file"],
-      ["pwsh", "wsl --cd /tmp -u root --exec sh -lc 'cat /mnt/file | grep data' | Get-Content local", "sh -lc 'cat /mnt/file | grep data'"],
-      ["cmd", 'WSL.EXE --exec cat /mnt/file & TYPE local', "cat /mnt/file"],
+      [
+        "pwsh",
+        "wsl --cd /tmp -u root --exec sh -lc 'cat /mnt/file | grep data' | Get-Content local",
+        "sh -lc 'cat /mnt/file | grep data'",
+      ],
+      ["cmd", "WSL.EXE --exec cat /mnt/file & TYPE local", "cat /mnt/file"],
       ["pwsh", "ssh -p 22 host 'cat /etc/os-release | grep NAME' | grep local", "'cat /etc/os-release | grep NAME'"],
       ["cmd", "ssh -i key host cat /etc/os-release & TYPE local", "cat /etc/os-release"],
       ["cmd", "wsl --exec cat /mnt/file ^| data", "cat /mnt/file ^| data"],
     ] as const) {
-      expect(ShellRemote.ranges(command, shell).map((range) => command.slice(range.start, range.end).trim())).toEqual([guest])
+      expect(ShellRemote.ranges(command, shell).map((range) => command.slice(range.start, range.end).trim())).toEqual([
+        guest,
+      ])
     }
     expect(ShellRemote.ranges("ssh -p 22 host", "pwsh")).toEqual([])
   })
@@ -107,12 +132,16 @@ true`
     expect(Shell.utf8Environment("linux")).toEqual({})
     expect(Shell.utf8Environment("darwin")).toEqual({})
     expect(Shell.utf8Environment("win32")).toEqual({
-      PYTHONIOENCODING: "utf-8", PYTHONUTF8: "1",
+      PYTHONIOENCODING: "utf-8",
+      PYTHONUTF8: "1",
     })
     // 只覆盖 Python；用户显式 Java/Ruby 原值在环境合并中保留，不能重建旧 oracle。
     expect({ ...env, ...Shell.utf8Environment("win32") }).toEqual({
-      PYTHONIOENCODING: "utf-8", PYTHONUTF8: "1",
-      PATH: "configured-path", JAVA_TOOL_OPTIONS: "-Xmx1g", RUBYOPT: "-w",
+      PYTHONIOENCODING: "utf-8",
+      PYTHONUTF8: "1",
+      PATH: "configured-path",
+      JAVA_TOOL_OPTIONS: "-Xmx1g",
+      RUBYOPT: "-w",
     })
     expect(env).toEqual({ PATH: "configured-path", JAVA_TOOL_OPTIONS: "-Xmx1g", RUBYOPT: "-w", PYTHONUTF8: "0" })
   })
@@ -121,12 +150,25 @@ true`
     // 旧改写的正反输入都保留为原生脚本，传输不得插入Legacy绑定或吞掉反斜杠。
     for (const command of [
       String.raw`python -c "print('{\"key\":1}')"`,
-      ...["python3.12 -B -Wdefault -Xutf8", "py -3.12 -B", '& "C:\\Python312\\python3.12.exe"', "conda run --name=agent --live-stream python"].map((prefix) => `${prefix} -c "print(1)"`),
-      'python -i -c "print(1)"', 'python -c "print(1)" extra', 'python -c "print(1)"; Write-Output done',
-      'python -c "print(1)" > output.txt', 'conda run --name=$env:ENV python -c "print(1)"',
+      ...[
+        "python3.12 -B -Wdefault -Xutf8",
+        "py -3.12 -B",
+        '& "C:\\Python312\\python3.12.exe"',
+        "conda run --name=agent --live-stream python",
+      ].map((prefix) => `${prefix} -c "print(1)"`),
+      'python -i -c "print(1)"',
+      'python -c "print(1)" extra',
+      'python -c "print(1)"; Write-Output done',
+      'python -c "print(1)" > output.txt',
+      'conda run --name=$env:ENV python -c "print(1)"',
       `python -c "${"x".repeat(20_000)}"`,
     ]) {
-      for (const [shell, platform] of [["pwsh", "win32"], ["cmd.exe", "win32"], ["/bin/sh", "linux"], ["/bin/sh", "darwin"]]) {
+      for (const [shell, platform] of [
+        ["pwsh", "win32"],
+        ["cmd.exe", "win32"],
+        ["/bin/sh", "linux"],
+        ["/bin/sh", "darwin"],
+      ]) {
         const invocation = Shell.cmd(shell, command, platform)
         const body = invocation.args.at(-1)
         if (!body) throw new Error("expected native command transport")
@@ -173,10 +215,17 @@ true`
 
   test("builds command args per shell family", () => {
     // 显式启动shell；Windows名称去扩展名依赖真实宿主，只在Windows验证cmd路径。
-    expect(Shell.cmd("/bin/sh", "echo hi", "linux")).toEqual({ command: "/bin/sh", args: ["-c", "echo hi"], shell: false })
-    if (process.platform === "win32") expect(Shell.cmd("cmd.exe", "echo hi", "win32")).toEqual({
-      command: "cmd.exe", args: ["/d", "/s", "/c", '"echo hi"'], shell: false,
+    expect(Shell.cmd("/bin/sh", "echo hi", "linux")).toEqual({
+      command: "/bin/sh",
+      args: ["-c", "echo hi"],
+      shell: false,
     })
+    if (process.platform === "win32")
+      expect(Shell.cmd("cmd.exe", "echo hi", "win32")).toEqual({
+        command: "cmd.exe",
+        args: ["/d", "/s", "/c", '"echo hi"'],
+        shell: false,
+      })
     expect(Shell.args("/bin/sh", "echo hi", "/tmp")).toEqual(["-c", "echo hi"])
     expect(Shell.args("/usr/bin/fish", "echo hi", "/tmp")).toEqual(["-c", "echo hi"])
     const zsh = Shell.args("/bin/zsh", "echo hi", "/tmp")
@@ -204,7 +253,9 @@ true`
       await withShell(shell, async () => {
         expect(Shell.preferred()).toBe(FSUtil.windowsPath(shell))
         // 保留临时夹具的真实解析，同时独立核对source固定路径，不依赖主机Git安装。
-        expect(FSUtil.windowsPath("/cygdrive/c/Program Files/Git/bin/bash.exe")).toBe("C:/Program Files/Git/bin/bash.exe")
+        expect(FSUtil.windowsPath("/cygdrive/c/Program Files/Git/bin/bash.exe")).toBe(
+          "C:/Program Files/Git/bin/bash.exe",
+        )
       })
     })
 

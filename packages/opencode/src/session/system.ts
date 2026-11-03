@@ -78,32 +78,35 @@ const layer = Layer.effect(
       }
 
       // 五个字段互相独立，保留源补丁并行采集以避免串行进程启动延迟。
-      const [branch, defaultBranch, userName, status, log] = yield* Effect.all([
-        git.branch(cwd),
-        git.defaultBranch(cwd),
-        // 用户配置可能不存在；沿用源补丁的空字段退化，不阻断模型执行。
-        git.run(["config", "user.name"], { cwd }).pipe(
-          Effect.map((r) => r.text().trim()),
-          Effect.orElseSucceed(() => ""),
-        ),
-        git.status(cwd).pipe(
-          // 保留 Git 服务的双列状态码，不能 trim 掉暂存区与工作树的区别。
-          Effect.map((items) => items.map((item) => `${item.code} ${item.file}`).join("\n")),
-          Effect.orElseSucceed(() => ""),
-        ),
-        git.run(["log", "--oneline", "-n", "5"], { cwd }).pipe(
-          // 无提交的仓库仍是仓库；日志为空不应改变 repository yes/no。
-          Effect.map((r) => r.text().trim()),
-          Effect.orElseSucceed(() => ""),
-        ),
-      ], { concurrency: 5 })
+      const [branch, defaultBranch, userName, status, log] = yield* Effect.all(
+        [
+          git.branch(cwd),
+          git.defaultBranch(cwd),
+          // 用户配置可能不存在；沿用源补丁的空字段退化，不阻断模型执行。
+          git.run(["config", "user.name"], { cwd }).pipe(
+            Effect.map((r) => r.text().trim()),
+            Effect.orElseSucceed(() => ""),
+          ),
+          git.status(cwd).pipe(
+            // 保留 Git 服务的双列状态码，不能 trim 掉暂存区与工作树的区别。
+            Effect.map((items) => items.map((item) => `${item.code} ${item.file}`).join("\n")),
+            Effect.orElseSucceed(() => ""),
+          ),
+          git.run(["log", "--oneline", "-n", "5"], { cwd }).pipe(
+            // 无提交的仓库仍是仓库；日志为空不应改变 repository yes/no。
+            Effect.map((r) => r.text().trim()),
+            Effect.orElseSucceed(() => ""),
+          ),
+        ],
+        { concurrency: 5 },
+      )
 
       // 截断发生在格式化后，提示模型按需读取完整状态而非假装状态完整。
       const truncatedStatus =
         status.length > MAX_STATUS_CHARS
           ? status.substring(0, MAX_STATUS_CHARS) +
             // 截断提示中工具名统一小写，与提示词文件保持一致
-            "\n... (truncated because it exceeds 2k characters. If you need more information, run \"git status\" using the bash tool)"
+            '\n... (truncated because it exceeds 2k characters. If you need more information, run "git status" using the bash tool)'
           : status
 
       const lines = [
@@ -125,8 +128,10 @@ const layer = Layer.effect(
         const ctx = yield* InstanceState.context
         const model = input.model
         const epoch = yield* SessionContextEpoch.prepare({
-          sessionID: input.sessionID, history: input.history,
-          now: yield* DateTime.nowAsDate, captureGit: getGitContext(),
+          sessionID: input.sessionID,
+          history: input.history,
+          now: yield* DateTime.nowAsDate,
+          captureGit: getGitContext(),
         }).pipe(Effect.provideService(Database.Service, database))
         // 与 ShellTool 使用同一个实际选择器，Windows 的 pwsh/cmd 不能被 SHELL 猜测替代。
         const shell = Shell.acceptable((yield* config.get()).shell)
@@ -136,48 +141,55 @@ const layer = Layer.effect(
         }).pipe(Effect.provide(locations.get(Location.Ref.make({ directory: AbsolutePath.make(ctx.directory) }))))
         // 环境整体放到稳定指引之后，不改写 Session 起始 Git 快照或 shell 来源。
         const environment = [
-            `You are powered by the model named ${model.api.id}. The exact model ID is ${model.providerID}/${model.api.id}`,
-            `Here is some useful information about the environment you are running in:`,
-            `<env>`,
-            `  Working directory: ${ctx.directory}`,
-            `  Workspace root folder: ${ctx.worktree}`,
-            // 状态和日志可能多行，统一缩进保证它们仍属于同一个环境块。
-            ...epoch.snapshot["smark/git"].value.split("\n").map((line) => `  ${line}`),
-            `  Platform: ${process.platform}`,
-            // 语法信息来自执行 shell；完整 PS/cmd 安全和 quoting 指引仍归工具 description。
-            // 沿用上方 cfg.shell 的真实选择，共用说明不能重新猜测环境变量。
-            ...Shell.guidance(shell, process.platform).split("\n").map((line) => `  ${line}`),
-            `  OS Version: ${os.type()} ${os.release()}`,
-            ...(cutoff ? [`  Knowledge cutoff: ${cutoff}`] : []),
-            // baseline保留初始日期；比较snapshot推进到今天也不能改写旧前缀。
-            `  ${epoch.baseline.slice(epoch.snapshot["smark/git"].value.length + 1)}`,
-            // 保留打开目录作为执行位置，不能因为 workspace root 不同就让模型切回原仓库。
-            ...(ctx.worktree !== ctx.directory ? ["  Run ALL commands from the working directory; do NOT cd to the original repository root."] : []),
-            `</env>`,
-          ].join("\n")
-        return { system: [
-          references.length === 0
-            ? undefined
-            : [
-                "Project references provide additional directories that can be accessed when relevant.",
-                "<available_references>",
-                ...references
-                  .toSorted((a, b) => a.name.localeCompare(b.name))
-                  .flatMap((reference) => [
-                    "  <reference>",
-                    `    <name>${reference.name}</name>`,
-                    `    <path>${reference.path}</path>`,
-                    ...(reference.description === undefined
-                      ? []
-                      : [`    <description>${reference.description}</description>`]),
-                    "  </reference>",
-                  ]),
-                "</available_references>",
-              ].join("\n"),
-          SystemContextBuiltIns.ACTION_GUIDANCE,
-          SystemContextBuiltIns.OUTPUT_GUIDANCE,
-          environment,
-        ].filter((part): part is string => part !== undefined), updates: epoch.updates }
+          `You are powered by the model named ${model.api.id}. The exact model ID is ${model.providerID}/${model.api.id}`,
+          `Here is some useful information about the environment you are running in:`,
+          `<env>`,
+          `  Working directory: ${ctx.directory}`,
+          `  Workspace root folder: ${ctx.worktree}`,
+          // 状态和日志可能多行，统一缩进保证它们仍属于同一个环境块。
+          ...epoch.snapshot["smark/git"].value.split("\n").map((line) => `  ${line}`),
+          `  Platform: ${process.platform}`,
+          // 语法信息来自执行 shell；完整 PS/cmd 安全和 quoting 指引仍归工具 description。
+          // 沿用上方 cfg.shell 的真实选择，共用说明不能重新猜测环境变量。
+          ...Shell.guidance(shell, process.platform)
+            .split("\n")
+            .map((line) => `  ${line}`),
+          `  OS Version: ${os.type()} ${os.release()}`,
+          ...(cutoff ? [`  Knowledge cutoff: ${cutoff}`] : []),
+          // baseline保留初始日期；比较snapshot推进到今天也不能改写旧前缀。
+          `  ${epoch.baseline.slice(epoch.snapshot["smark/git"].value.length + 1)}`,
+          // 保留打开目录作为执行位置，不能因为 workspace root 不同就让模型切回原仓库。
+          ...(ctx.worktree !== ctx.directory
+            ? ["  Run ALL commands from the working directory; do NOT cd to the original repository root."]
+            : []),
+          `</env>`,
+        ].join("\n")
+        return {
+          system: [
+            references.length === 0
+              ? undefined
+              : [
+                  "Project references provide additional directories that can be accessed when relevant.",
+                  "<available_references>",
+                  ...references
+                    .toSorted((a, b) => a.name.localeCompare(b.name))
+                    .flatMap((reference) => [
+                      "  <reference>",
+                      `    <name>${reference.name}</name>`,
+                      `    <path>${reference.path}</path>`,
+                      ...(reference.description === undefined
+                        ? []
+                        : [`    <description>${reference.description}</description>`]),
+                      "  </reference>",
+                    ]),
+                  "</available_references>",
+                ].join("\n"),
+            SystemContextBuiltIns.ACTION_GUIDANCE,
+            SystemContextBuiltIns.OUTPUT_GUIDANCE,
+            environment,
+          ].filter((part): part is string => part !== undefined),
+          updates: epoch.updates,
+        }
       }),
 
       skills: Effect.fn("SystemPrompt.skills")(function* (agent: Agent.Info) {

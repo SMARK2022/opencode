@@ -33,4 +33,3 @@ export function hasValidBmpHeader(buffer: Buffer) {
         : undefined
   return fields !== undefined && fields.planes === 1 && [1, 4, 8, 16, 24, 32].includes(fields.bpp)
 }
-

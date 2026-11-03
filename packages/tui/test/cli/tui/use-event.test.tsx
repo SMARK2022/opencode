@@ -64,7 +64,11 @@ async function mount(initialRoute?: Route) {
 
   const app = await testRender(() => (
     <TestTuiContexts>
-      <SDKProvider url="http://test" directory={directory} testTransport={{ events: events.source, fetch: calls.fetch }}>
+      <SDKProvider
+        url="http://test"
+        directory={directory}
+        testTransport={{ events: events.source, fetch: calls.fetch }}
+      >
         {/* #570：RouteProvider 供 useEvent 读取活动 Session；包裹位置与 sync-fixture 同型。 */}
         <RouteProvider initialRoute={initialRoute}>
           <ProjectProvider>
@@ -171,7 +175,16 @@ describe("useEvent", () => {
       )
 
       await wait(() => seen.length === 1)
-      emit(event({ id: "evt_other_session", type: "session.status", properties: { sessionID: "ses_other", status: { type: "idle" } } }, { directory: "/tmp/other", project: "proj_other" }))
+      emit(
+        event(
+          {
+            id: "evt_other_session",
+            type: "session.status",
+            properties: { sessionID: "ses_other", status: { type: "idle" } },
+          },
+          { directory: "/tmp/other", project: "proj_other" },
+        ),
+      )
 
       // 无 sessionID 的跨 Project 事件仍被 admission 拒绝（seen 不再增长）。
       emit(event(vcs("foreign"), { directory: "/tmp/other", project: "proj_other" }))

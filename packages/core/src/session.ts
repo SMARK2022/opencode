@@ -128,7 +128,10 @@ export interface Interface {
   readonly list: (input?: ListInput) => Effect.Effect<SessionSchema.Info[]>
   readonly create: (input: CreateInput) => Effect.Effect<SessionSchema.Info>
   readonly get: (sessionID: SessionSchema.ID) => Effect.Effect<SessionSchema.Info, NotFoundError>
-  readonly setPermissions: (input: { sessionID: SessionSchema.ID; permissions: PermissionV2.Ruleset }) => Effect.Effect<void, NotFoundError>
+  readonly setPermissions: (input: {
+    sessionID: SessionSchema.ID
+    permissions: PermissionV2.Ruleset
+  }) => Effect.Effect<void, NotFoundError>
   readonly messages: (input: {
     sessionID: SessionSchema.ID
     limit?: number
@@ -183,7 +186,9 @@ export interface Interface {
   readonly compact: (input: CompactInput) => Effect.Effect<void, NotFoundError | SessionRunner.RunError | BusyError>
   readonly wait: (id: SessionSchema.ID) => Effect.Effect<void, NotFoundError | OperationUnavailableError>
   readonly active: Effect.Effect<ReadonlySet<SessionSchema.ID>>
-  readonly resume: (sessionID: SessionSchema.ID) => Effect.Effect<void, NotFoundError | SessionRunner.RunError | BusyError>
+  readonly resume: (
+    sessionID: SessionSchema.ID,
+  ) => Effect.Effect<void, NotFoundError | SessionRunner.RunError | BusyError>
   readonly interrupt: (sessionID: SessionSchema.ID) => Effect.Effect<void>
   readonly revert: {
     readonly stage: (input: {
@@ -229,9 +234,8 @@ const layer = Layer.effect(
 
     // 占用与Session服务同为进程级；普通运行中的steer/queue仍可入箱。
     const reverting = new Set<SessionSchema.ID>()
-    const assertNotReverting = (sessionID: SessionSchema.ID) => Effect.suspend(() =>
-      reverting.has(sessionID) ? new BusyError({ sessionID }) : Effect.void,
-    )
+    const assertNotReverting = (sessionID: SessionSchema.ID) =>
+      Effect.suspend(() => (reverting.has(sessionID) ? new BusyError({ sessionID }) : Effect.void))
     // 获取失败不释放别人的占用，文件恢复、失败和取消共用同一释放边界。
     const withRevert = <A, E, R>(sessionID: SessionSchema.ID, use: Effect.Effect<A, E, R>) =>
       Effect.acquireUseRelease(
@@ -241,7 +245,10 @@ const layer = Layer.effect(
           reverting.add(sessionID)
         }),
         () => use,
-        () => Effect.sync(() => { reverting.delete(sessionID) }),
+        () =>
+          Effect.sync(() => {
+            reverting.delete(sessionID)
+          }),
       )
 
     const result = Service.of({
@@ -268,7 +275,11 @@ const layer = Layer.effect(
           parentID: input.parentID,
           title: input.title ?? `New session - ${new Date(now).toISOString()}`,
           // 复用既有持久permission列的wire形状，Core消费者仍使用当前Rule。
-          permission: input.permissions?.map(rule => ({ permission: rule.action, pattern: rule.resource, action: rule.effect })),
+          permission: input.permissions?.map((rule) => ({
+            permission: rule.action,
+            pattern: rule.resource,
+            action: rule.effect,
+          })),
           agent: input.agent,
           model: input.model
             ? {
@@ -309,14 +320,24 @@ const layer = Layer.effect(
         return session
       }),
       setPermissions: Effect.fn("V2Session.setPermissions")(function* (input) {
-        const row = yield* db.select().from(SessionTable).where(eq(SessionTable.id, input.sessionID)).get().pipe(Effect.orDie)
+        const row = yield* db
+          .select()
+          .from(SessionTable)
+          .where(eq(SessionTable.id, input.sessionID))
+          .get()
+          .pipe(Effect.orDie)
         if (!row) return yield* new NotFoundError({ sessionID: input.sessionID })
         const info = SessionV1.fromRow(row)
         // 复用完整旧事件及存储wire；只改权限/更新时间，不能擦掉模型、用量或扩展元数据。
         yield* events.publish(SessionV1.Event.Updated, {
           sessionID: input.sessionID,
           info: SessionV1.SessionInfo.make({
-            ...info, permission: input.permissions.map(rule => ({ permission: rule.action, pattern: rule.resource, action: rule.effect })),
+            ...info,
+            permission: input.permissions.map((rule) => ({
+              permission: rule.action,
+              pattern: rule.resource,
+              action: rule.effect,
+            })),
             time: { ...info.time, updated: Date.now() },
           }),
         })
@@ -334,11 +355,21 @@ const layer = Layer.effect(
         if ("project" in input) {
           if (input.subpath === undefined) conditions.push(eq(SessionTable.project_id, input.project))
           if (input.subpath !== undefined) {
-            const project = yield* db.select({ worktree: ProjectTable.worktree }).from(ProjectTable)
-              .where(eq(ProjectTable.id, input.project)).get().pipe(Effect.orDie)
+            const project = yield* db
+              .select({ worktree: ProjectTable.worktree })
+              .from(ProjectTable)
+              .where(eq(ProjectTable.id, input.project))
+              .get()
+              .pipe(Effect.orDie)
             if (!project) return []
             // 已公开的 subpath 进入真实查询；空根与普通 project 仍是不同的筛选意图。
-            const condition = SessionListing.related({ projectID: input.project, worktree: project.worktree, path: input.subpath, directory: path.resolve(project.worktree, input.subpath), home: Global.Path.home })
+            const condition = SessionListing.related({
+              projectID: input.project,
+              worktree: project.worktree,
+              path: input.subpath,
+              directory: path.resolve(project.worktree, input.subpath),
+              home: Global.Path.home,
+            })
             if (condition) conditions.push(condition)
           }
         }
@@ -373,9 +404,13 @@ const layer = Layer.effect(
             order === "asc" ? asc(sortColumn) : desc(sortColumn),
             order === "asc" ? asc(SessionTable.id) : desc(SessionTable.id),
           )
-        const rows = yield* db.transaction(() =>
-          (input.limit === undefined ? query.all() : query.limit(input.limit).all()).pipe(Effect.flatMap((rows) => withRequests(db, rows))),
-        ).pipe(Effect.orDie)
+        const rows = yield* db
+          .transaction(() =>
+            (input.limit === undefined ? query.all() : query.limit(input.limit).all()).pipe(
+              Effect.flatMap((rows) => withRequests(db, rows)),
+            ),
+          )
+          .pipe(Effect.orDie)
         return (direction === "previous" ? rows.toReversed() : rows).map((row) => fromRow(row))
       }),
       messages: Effect.fn("V2Session.messages")(function* (input) {
@@ -412,15 +447,30 @@ const layer = Layer.effect(
         // 只恢复实际返回页，cursor探针与范围外消息仍保持冷态。
         const restored = yield* ColdStorage.readSessionMessageRows(db, rows, input.messageProjection)
         // 先完整恢复必需正文再正式decode；仅省略合法optional summary，不改写持久行或默认完整API。
-        return yield* Effect.forEach(direction === "previous" ? restored.toReversed() : restored, row => decode(row).pipe(Effect.map(message => {
-          if (input.messageProjection !== "viewer" || message.type !== "user") return message
-          const { summary: _, ...info } = message
-          return info
-        })))
+        return yield* Effect.forEach(direction === "previous" ? restored.toReversed() : restored, (row) =>
+          decode(row).pipe(
+            Effect.map((message) => {
+              if (input.messageProjection !== "viewer" || message.type !== "user") return message
+              const { summary: _, ...info } = message
+              return info
+            }),
+          ),
+        )
       }),
       message: Effect.fn("V2Session.message")(function* (input) {
         // 定点公开读取沿原undefined/not-found合同；不能先调用raw Store把隐藏cold消息解包。
-        const row = yield* db.select().from(SessionMessageTable).where(and(eq(SessionMessageTable.session_id, input.sessionID), eq(SessionMessageTable.id, input.messageID), visibleMessage)).get().pipe(Effect.orDie)
+        const row = yield* db
+          .select()
+          .from(SessionMessageTable)
+          .where(
+            and(
+              eq(SessionMessageTable.session_id, input.sessionID),
+              eq(SessionMessageTable.id, input.messageID),
+              visibleMessage,
+            ),
+          )
+          .get()
+          .pipe(Effect.orDie)
         if (!row) return undefined
         const restored = (yield* ColdStorage.readSessionMessageRows(db, [row]))[0]!
         return yield* decode(restored).pipe(Effect.orDie)
@@ -523,29 +573,38 @@ const layer = Layer.effect(
       ),
       revert: {
         stage: Effect.fn("V2Session.revert.stage")((input) =>
-          withRevert(input.sessionID, Effect.gen(function* () {
-            const session = yield* result.get(input.sessionID)
-            return yield* SessionRevert.stage({ session, messageID: input.messageID, files: input.files }).pipe(
-              Effect.provideService(Database.Service, database),
-              Effect.provideService(EventV2.Service, events),
-              Effect.provide(locations.get(session.location)),
-            )
-          })),
+          withRevert(
+            input.sessionID,
+            Effect.gen(function* () {
+              const session = yield* result.get(input.sessionID)
+              return yield* SessionRevert.stage({ session, messageID: input.messageID, files: input.files }).pipe(
+                Effect.provideService(Database.Service, database),
+                Effect.provideService(EventV2.Service, events),
+                Effect.provide(locations.get(session.location)),
+              )
+            }),
+          ),
         ),
         clear: Effect.fn("V2Session.revert.clear")((sessionID) =>
-          withRevert(sessionID, Effect.gen(function* () {
-            const session = yield* result.get(sessionID)
-            yield* SessionRevert.clear(session).pipe(
-              Effect.provideService(EventV2.Service, events),
-              Effect.provide(locations.get(session.location)),
-            )
-          })),
+          withRevert(
+            sessionID,
+            Effect.gen(function* () {
+              const session = yield* result.get(sessionID)
+              yield* SessionRevert.clear(session).pipe(
+                Effect.provideService(EventV2.Service, events),
+                Effect.provide(locations.get(session.location)),
+              )
+            }),
+          ),
         ),
         commit: Effect.fn("V2Session.revert.commit")((sessionID) =>
-          withRevert(sessionID, Effect.gen(function* () {
-            const session = yield* result.get(sessionID)
-            yield* SessionRevert.commit(session).pipe(Effect.provideService(EventV2.Service, events))
-          })),
+          withRevert(
+            sessionID,
+            Effect.gen(function* () {
+              const session = yield* result.get(sessionID)
+              yield* SessionRevert.commit(session).pipe(Effect.provideService(EventV2.Service, events))
+            }),
+          ),
         ),
       },
     })

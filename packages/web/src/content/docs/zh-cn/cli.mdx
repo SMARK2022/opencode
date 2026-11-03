@@ -447,14 +447,14 @@ Sessions 展示总体分位数、全宽 Token/正费用分布横条，并为每�
 
 #### 标志
 
-| 标志                                    | 描述                                                   |
-| --------------------------------------- | ------------------------------------------------------ |
-| <nobr><code>{"--days"}</code></nobr>    | 显示最近 N 个自然日（默认 60 天；0 表示今天）          |
-| <nobr><code>{"--all-time"}</code></nobr> | 包含全部历史记录，替代默认的 60 天窗口                |
-| <nobr><code>{"--interactive"}</code></nobr> | 以交互方式浏览视图与时间范围                        |
-| <nobr><code>{"--tools"}</code></nobr>   | 快捷进入工具 Breakdown；传入数字可显示前 N 个          |
-| <nobr><code>{"--models"}</code></nobr>  | 显示模型用量明细（默认隐藏）。传入数字可显示前 N 个    |
-| <nobr><code>{"--project"}</code></nobr> | 按项目筛选（默认为所有项目，传入空字符串表示当前项目） |
+| 标志                                        | 描述                                                   |
+| ------------------------------------------- | ------------------------------------------------------ |
+| <nobr><code>{"--days"}</code></nobr>        | 显示最近 N 个自然日（默认 60 天；0 表示今天）          |
+| <nobr><code>{"--all-time"}</code></nobr>    | 包含全部历史记录，替代默认的 60 天窗口                 |
+| <nobr><code>{"--interactive"}</code></nobr> | 以交互方式浏览视图与时间范围                           |
+| <nobr><code>{"--tools"}</code></nobr>       | 快捷进入工具 Breakdown；传入数字可显示前 N 个          |
+| <nobr><code>{"--models"}</code></nobr>      | 显示模型用量明细（默认隐藏）。传入数字可显示前 N 个    |
+| <nobr><code>{"--project"}</code></nobr>     | 按项目筛选（默认为所有项目，传入空字符串表示当前项目） |
 
 `--interactive`、`--tools` 与 `--models` 是根 Dashboard 快捷方式。Breakdown 与
 Sessions 自带 `-n` / `--limit`；其余细分视图会拒绝该标志，而不是静默忽略。

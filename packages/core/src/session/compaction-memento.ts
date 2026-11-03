@@ -16,7 +16,10 @@ export function format(messages: readonly Entry[]) {
   ].join("\n")
 }
 
-export function collect<Id extends string>(messages: readonly { readonly id: Id; readonly text: string }[], maxTokens: number) {
+export function collect<Id extends string>(
+  messages: readonly { readonly id: Id; readonly text: string }[],
+  maxTokens: number,
+) {
   const result: { id: Id; text: string; truncated?: boolean }[] = []
   // 独立增量通道允许归零，不能为信封最小长度反过来扩张预算。
   if (maxTokens <= 0) return result
@@ -34,7 +37,9 @@ export function collect<Id extends string>(messages: readonly { readonly id: Id;
     // 对实际重放的完整信封二分，截断标记本身也占用预算。
     while (low <= high) {
       const mid = Math.floor((low + high) / 2)
-      const fragment = [text.slice(0, mid).trimEnd(), "...[truncated for compaction memento]"].filter(Boolean).join("\n")
+      const fragment = [text.slice(0, mid).trimEnd(), "...[truncated for compaction memento]"]
+        .filter(Boolean)
+        .join("\n")
       const candidate = [{ id: message.id, text: fragment, truncated: true }, ...result]
       if (Token.estimate(format(candidate)) <= maxTokens) {
         best = fragment

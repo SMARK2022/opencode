@@ -25,7 +25,7 @@
 
 > 你这个文案 asks the user for explicit confirmation，这个东西不行啊。……你应该表达，这种情况即使用户授权都无法执行。而且你那个 choose a materially safer approach，这个东西不是已经，后面不是已经有那个提示了吗？
 
-> 按照之前 Plan 的格式，请你将上述全部完整内容修订……写入一个新的 Plan 中。生产文件代码修改数不超过六个文件，生产代码修改行数不超过800行。……你判定这几个规则如果过宽的话，请你适当进行相应的优化，就譬如说，/usr/** C:\User\*\*等等
+> 按照之前 Plan 的格式，请你将上述全部完整内容修订……写入一个新的 Plan 中。生产文件代码修改数不超过六个文件，生产代码修改行数不超过800行。……你判定这几个规则如果过宽的话，请你适当进行相应的优化，就譬如说，/usr/\*\* C:\User\*\*等等
 
 ## 2. Explicit Non-Goals
 
@@ -37,25 +37,25 @@
 
 ## 3. Repository Context
 
-| Source | Why it constrains this task |
-| --- | --- |
-| 根 AGENTS.md | 默认分支 dev；并行 agent 常驻（提交用 --only） |
-| packages/opencode/AGENTS.md、test/AGENTS.md | Effect 与测试规范 |
-| 提交 ea7c4f30e5（五级拆分） | forbidden=不可逆灾难终审 / dangerous=可授权高风险 语义基准 |
-| 提交 4e3b65ce02（git -C reason 聚合） | precheck.ts 当前结构；tokenizeRich 剥损标记既有 |
+| Source                                      | Why it constrains this task                                |
+| ------------------------------------------- | ---------------------------------------------------------- |
+| 根 AGENTS.md                                | 默认分支 dev；并行 agent 常驻（提交用 --only）             |
+| packages/opencode/AGENTS.md、test/AGENTS.md | Effect 与测试规范                                          |
+| 提交 ea7c4f30e5（五级拆分）                 | forbidden=不可逆灾难终审 / dangerous=可授权高风险 语义基准 |
+| 提交 4e3b65ce02（git -C reason 聚合）       | precheck.ts 当前结构；tokenizeRich 剥损标记既有            |
 
 ## 4. Files and Evidence Read
 
-| Evidence | Relevance | Evidence class |
-| --- | --- | --- |
-| precheck.ts :150-214（RE_D_RM_RF_ROOT、解释器族、PS/Windows raw 模式）、:588-625（forbiddenRaw）、:1205-1245（rm token 分支、DISK_FORMAT 分支）、:1735-1813（Windows 谓词 + protectedDeleteTarget）、:262-272（RE_C_PYTHON_FILE_REMOVE_CALL）、:1057-1061（解释器 unwrap 返回 ask）、:962-994（tokenizeRich 剥反斜杠）、:599-602（forbiddenRaw 折叠归一化） | 全部触发点与粒度现状 | observed |
-| **解释器族真实宽度**（审计 B-01 实证）：:195-202 的 `(?:\/|~|\$HOME|\/etc(?:\/|["']))` 首个裸 `\/` 分支匹配**任意绝对路径**——`os.remove("/tmp/x")`、`shutil.rmtree("/opt/mytool")`、`fs.rmSync("/var/lib/x")` 今天全部 forbidden | 比 /usr 子树更严重的过宽实例（用户要求全面排查的直接证据） | observed（正则语义确定性） |
-| Windows cmd 族检测唯一路径（审计 B-02 实证）：`C:\Users\u\AppData` 未加引号时被 tokenizeRich 剥成 `C:UsersuAppData`，token 层 :1811 永不命中；raw 层 windowsCmdTokens（:1756 保留反斜杠）是唯一检测路径，且 forbiddenRaw 只能产 forbidden | Windows 二级 dangerous 必须走 raw 层出口 | observed |
-| auto.ts :62-69（forbidden 是唯一 source==="precheck" 的 deny） | 终局性判定无需新字段（N-03） | observed |
-| index.ts :137-147（AutoDeniedError）、:353（唯一构造点） | 文案分叉改造点 | observed |
-| 探针 D:\Temp\opencode\rm_rf_forbidden_probe.ts（2026-09-07 运行） | 用户案例全 forbidden；`/home/user/Downloads/foo` cautious；`/opt/mytool`、`/var/lib/myapp/data` forbidden；`/tmp` cautious | observed |
-| precheck.test.ts forbidden 断言 65+ 处逐条清点 | 唯 :426（/usr/local/bin 二级）需改级；**:147-162 与 :180-188 逐字断言 `reason: "Windows protected directory delete"`（N-01）**——该串在替换范围内，这些断言同步更新；其余全 level-only | observed |
-| auto.test.ts / next.test.ts / shell.test.ts / prompt.test.ts | AutoDeniedError 断言全 `toBeInstanceOf`；next.test.ts:831 断言文案 `toContain("Do not retry the same outcome through shell indirection")`——新终审文案保留该子串，零红测 | observed |
+| Evidence                                                                                                                                                                                                                                                                                                                                                    | Relevance                                                                                                                                                                             | Evidence class |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------- | ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------- | -------------------------- |
+| precheck.ts :150-214（RE_D_RM_RF_ROOT、解释器族、PS/Windows raw 模式）、:588-625（forbiddenRaw）、:1205-1245（rm token 分支、DISK_FORMAT 分支）、:1735-1813（Windows 谓词 + protectedDeleteTarget）、:262-272（RE_C_PYTHON_FILE_REMOVE_CALL）、:1057-1061（解释器 unwrap 返回 ask）、:962-994（tokenizeRich 剥反斜杠）、:599-602（forbiddenRaw 折叠归一化） | 全部触发点与粒度现状                                                                                                                                                                  | observed       |
+| **解释器族真实宽度**（审计 B-01 实证）：:195-202 的 `(?:\/                                                                                                                                                                                                                                                                                                  | ~                                                                                                                                                                                     | \$HOME         | \/etc(?:\/ | ["']))`首个裸`\/` 分支匹配**任意绝对路径**——`os.remove("/tmp/x")`、`shutil.rmtree("/opt/mytool")`、`fs.rmSync("/var/lib/x")` 今天全部 forbidden | 比 /usr 子树更严重的过宽实例（用户要求全面排查的直接证据） | observed（正则语义确定性） |
+| Windows cmd 族检测唯一路径（审计 B-02 实证）：`C:\Users\u\AppData` 未加引号时被 tokenizeRich 剥成 `C:UsersuAppData`，token 层 :1811 永不命中；raw 层 windowsCmdTokens（:1756 保留反斜杠）是唯一检测路径，且 forbiddenRaw 只能产 forbidden                                                                                                                   | Windows 二级 dangerous 必须走 raw 层出口                                                                                                                                              | observed       |
+| auto.ts :62-69（forbidden 是唯一 source==="precheck" 的 deny）                                                                                                                                                                                                                                                                                              | 终局性判定无需新字段（N-03）                                                                                                                                                          | observed       |
+| index.ts :137-147（AutoDeniedError）、:353（唯一构造点）                                                                                                                                                                                                                                                                                                    | 文案分叉改造点                                                                                                                                                                        | observed       |
+| 探针 D:\Temp\opencode\rm_rf_forbidden_probe.ts（2026-09-07 运行）                                                                                                                                                                                                                                                                                           | 用户案例全 forbidden；`/home/user/Downloads/foo` cautious；`/opt/mytool`、`/var/lib/myapp/data` forbidden；`/tmp` cautious                                                            | observed       |
+| precheck.test.ts forbidden 断言 65+ 处逐条清点                                                                                                                                                                                                                                                                                                              | 唯 :426（/usr/local/bin 二级）需改级；**:147-162 与 :180-188 逐字断言 `reason: "Windows protected directory delete"`（N-01）**——该串在替换范围内，这些断言同步更新；其余全 level-only | observed       |
+| auto.test.ts / next.test.ts / shell.test.ts / prompt.test.ts                                                                                                                                                                                                                                                                                                | AutoDeniedError 断言全 `toBeInstanceOf`；next.test.ts:831 断言文案 `toContain("Do not retry the same outcome through shell indirection")`——新终审文案保留该子串，零红测               | observed       |
 
 ## 5. Current Behavior
 
@@ -77,42 +77,42 @@ rm -rf <path> / Remove-Item -Recurse / del|rd /s / 解释器删除调用
 
 ## 6. Supported Input Domain and Reachability
 
-| Input or condition | Producer | Upstream guarantees | Reachable path | Owner | Classification |
-| --- | --- | --- | --- | --- | --- |
-| rm -rf/r/-R/--recursive + 系统根任意深度 | bash 文本（含 WSL/ssh/包装器内层） | 路径 token/文本 | RE_D_RM_RF_ROOT + rm token 分支 | precheck | observed |
-| del/rd/rmdir /s 或 Remove-Item/ri -Recurse + Windows 路径（未加引号反斜杠为主形态） | 同上 | windowsCmdTokens 保留反斜杠 | raw 层 windowsProtectedDeleteInCommand | precheck | observed |
-| 解释器删除调用（os.remove/unlink/rmdir、shutil.rmtree、fs.rmSync/rmdirSync/unlinkSync、subprocess rm -rf）+ 任意路径 | 同上 | 引号字面量 | 解释器族 RE | precheck | observed |
-| fdisk -l / parted -l / wipefs 无 -a | 同上 | 参数 token | DISK_FORMAT 分支 :1244 | precheck | reachable |
-| forbidden 终审 AutoDeniedError 文案 | index.ts:145 | decision.source==="precheck" | auto.ts:69 → index.ts:353 | auto/index | observed |
-| 穿越折叠（/home/../etc）与多斜杠 | 同上 | 折叠归一化必须 raw 双出口共享（N-02） | forbiddenRaw+dangerousRaw | precheck | observed（:412-418 断言） |
+| Input or condition                                                                                                   | Producer                           | Upstream guarantees                   | Reachable path                         | Owner      | Classification            |
+| -------------------------------------------------------------------------------------------------------------------- | ---------------------------------- | ------------------------------------- | -------------------------------------- | ---------- | ------------------------- |
+| rm -rf/r/-R/--recursive + 系统根任意深度                                                                             | bash 文本（含 WSL/ssh/包装器内层） | 路径 token/文本                       | RE_D_RM_RF_ROOT + rm token 分支        | precheck   | observed                  |
+| del/rd/rmdir /s 或 Remove-Item/ri -Recurse + Windows 路径（未加引号反斜杠为主形态）                                  | 同上                               | windowsCmdTokens 保留反斜杠           | raw 层 windowsProtectedDeleteInCommand | precheck   | observed                  |
+| 解释器删除调用（os.remove/unlink/rmdir、shutil.rmtree、fs.rmSync/rmdirSync/unlinkSync、subprocess rm -rf）+ 任意路径 | 同上                               | 引号字面量                            | 解释器族 RE                            | precheck   | observed                  |
+| fdisk -l / parted -l / wipefs 无 -a                                                                                  | 同上                               | 参数 token                            | DISK_FORMAT 分支 :1244                 | precheck   | reachable                 |
+| forbidden 终审 AutoDeniedError 文案                                                                                  | index.ts:145                       | decision.source==="precheck"          | auto.ts:69 → index.ts:353              | auto/index | observed                  |
+| 穿越折叠（/home/../etc）与多斜杠                                                                                     | 同上                               | 折叠归一化必须 raw 双出口共享（N-02） | forbiddenRaw+dangerousRaw              | precheck   | observed（:412-418 断言） |
 
 ## 7. Required Invariants
 
-| ID | Behavioral invariant | Evidence | Existing test |
-| --- | --- | --- | --- |
-| INV-01 | 根/家/驱动器根 forbidden 保持 | 既有断言 :136-186 | :41-167 组 |
-| INV-02 | 系统根根本身 + 一级子目录 forbidden（/usr/local、/etc/ssl、/home/\<u\>、/var/log、C:\Users\\<u\>） | 用户拍板 | :351-353、:891-892、:406-421、:425、:144 保持 |
-| INV-03 | 系统根二级子目录（/usr/local/libexec、/etc/ssl/certs、C:\Users\\<u\>\AppData）→ dangerous，reason 明示"需显式授权"；**三族（bash rm / cmd|PS / 解释器）一致** | 用户拍板"ETC 的子树 → dangerous"、"类似内容完整检查" | 无（新增）；:426 改级 |
-| INV-04 | 更深子树 → cautious（用户案例 .linkd） | 用户拍板 | 无（新增） |
-| INV-05 | 用户数据根深层与 /root 子目录保持既有豁免，不 widen | :1798-1805 | :403-421 保持 |
-| INV-06 | 解释器族 forbidden 收窄为 根/家/系统根一级（裸 `\/` 过宽 bug 修复）；二级 → dangerous；任意路径删除落 cautious 兜底（不低于 rm 同形态层级，防止收窄制造低于矩阵的洞） | B-01 实证 + 矩阵一致 | :196-199、:214-216 保持 + 新增 |
-| INV-07 | mkfs 族不变；fdisk/parted/wipefs 只读打印形态 → cautious，写形态 forbidden 保持 | 用户"过宽则优化" | :949-958 保持 + 新增 |
-| INV-08 | forbidden 终审文案：含"即使用户授权也无法执行"且不含"ask the user for explicit confirmation"；"Use a materially safer approach" 恰好出现一次；非终审文案字节不变 | 用户拍板文案 | 新增断言；next.test.ts:831 子串保持 |
-| INV-09 | forbidden 删除族 reason 全量语义化（含 forbidden 与 root/system directory 表述，无 "critical recursive delete"/"Windows protected directory delete" 黑话）；**替换范围钉死**：forbiddenRaw 全部删除族 return 串 + token 层 "critical recursive delete"/"critical PowerShell recursive delete" + "Windows protected directory delete"（:147-162/:180-188 断言同步更新） | 用户拍板 + N-01 | 断言同步 |
-| INV-10 | 压缩路径（raw 短路、wrapper 传播、maxRisk、段聚合、五级路由、tokenizeRich 剥损契约）不变 | 上轮延续 | 全组回归 |
-| INV-11 | 折叠归一化（多斜杠、.. 穿越）对 forbidden 与 dangerous 两个 raw 出口同样生效 | N-02 + :412-418 既有断言 | :412-418 保持 + 新增 dangerous 折叠用例 |
+| ID     | Behavioral invariant                                                                                                                                                                                                                                                                                                                                                   | Evidence                 | Existing test                                        |
+| ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------ | ---------------------------------------------------- | --------------------- |
+| INV-01 | 根/家/驱动器根 forbidden 保持                                                                                                                                                                                                                                                                                                                                          | 既有断言 :136-186        | :41-167 组                                           |
+| INV-02 | 系统根根本身 + 一级子目录 forbidden（/usr/local、/etc/ssl、/home/\<u\>、/var/log、C:\Users\\<u\>）                                                                                                                                                                                                                                                                     | 用户拍板                 | :351-353、:891-892、:406-421、:425、:144 保持        |
+| INV-03 | 系统根二级子目录（/usr/local/libexec、/etc/ssl/certs、C:\Users\\<u\>\AppData）→ dangerous，reason 明示"需显式授权"；\*\*三族（bash rm / cmd                                                                                                                                                                                                                            | PS / 解释器）一致\*\*    | 用户拍板"ETC 的子树 → dangerous"、"类似内容完整检查" | 无（新增）；:426 改级 |
+| INV-04 | 更深子树 → cautious（用户案例 .linkd）                                                                                                                                                                                                                                                                                                                                 | 用户拍板                 | 无（新增）                                           |
+| INV-05 | 用户数据根深层与 /root 子目录保持既有豁免，不 widen                                                                                                                                                                                                                                                                                                                    | :1798-1805               | :403-421 保持                                        |
+| INV-06 | 解释器族 forbidden 收窄为 根/家/系统根一级（裸 `\/` 过宽 bug 修复）；二级 → dangerous；任意路径删除落 cautious 兜底（不低于 rm 同形态层级，防止收窄制造低于矩阵的洞）                                                                                                                                                                                                  | B-01 实证 + 矩阵一致     | :196-199、:214-216 保持 + 新增                       |
+| INV-07 | mkfs 族不变；fdisk/parted/wipefs 只读打印形态 → cautious，写形态 forbidden 保持                                                                                                                                                                                                                                                                                        | 用户"过宽则优化"         | :949-958 保持 + 新增                                 |
+| INV-08 | forbidden 终审文案：含"即使用户授权也无法执行"且不含"ask the user for explicit confirmation"；"Use a materially safer approach" 恰好出现一次；非终审文案字节不变                                                                                                                                                                                                       | 用户拍板文案             | 新增断言；next.test.ts:831 子串保持                  |
+| INV-09 | forbidden 删除族 reason 全量语义化（含 forbidden 与 root/system directory 表述，无 "critical recursive delete"/"Windows protected directory delete" 黑话）；**替换范围钉死**：forbiddenRaw 全部删除族 return 串 + token 层 "critical recursive delete"/"critical PowerShell recursive delete" + "Windows protected directory delete"（:147-162/:180-188 断言同步更新） | 用户拍板 + N-01          | 断言同步                                             |
+| INV-10 | 压缩路径（raw 短路、wrapper 传播、maxRisk、段聚合、五级路由、tokenizeRich 剥损契约）不变                                                                                                                                                                                                                                                                               | 上轮延续                 | 全组回归                                             |
+| INV-11 | 折叠归一化（多斜杠、.. 穿越）对 forbidden 与 dangerous 两个 raw 出口同样生效                                                                                                                                                                                                                                                                                           | N-02 + :412-418 既有断言 | :412-418 保持 + 新增 dangerous 折叠用例              |
 
 ## 8. First Divergence and Root Cause
 
-| Invariant | First divergence | Owning module/interface | Proof |
-| --- | --- | --- | --- |
-| INV-03/04 | RE_D_RM_RF_ROOT 系统根分支任意深度命中（:154-157） | precheck.ts raw 层 | 探针 A-D forbidden |
-| INV-03/04 | protectedDeleteTarget :1806-1811 系统根与 Windows 系统目录全子树 | precheck.ts token 谓词 | 源码 + 断言 :144 |
-| INV-03（Windows） | forbiddenRaw 单出口——Windows 谓词只能产 forbidden，dangerousRaw 无出口（B-02） | precheck.ts raw 层结构 | 源码 :608 |
-| INV-06 | 解释器族裸 `\/` 分支匹配任意绝对路径（:195-202），比 /usr 子树更宽（B-01）；且收窄后 rmtree/rmSync 任意路径将落 general（低于矩阵） | precheck.ts raw 层 | 正则语义实证 |
-| INV-07 | DISK_FORMAT 分支不看参数（:1244） | precheck.ts token 分支 | 源码 |
-| INV-08 | index.ts:145 单一文案给 forbidden 提供不存在的授权路径 | permission/index.ts | 用户实测重试循环 |
-| INV-09 | reason 黑话无语义载体 | precheck.ts forbiddenRaw | 用户拍板 |
+| Invariant         | First divergence                                                                                                                    | Owning module/interface  | Proof              |
+| ----------------- | ----------------------------------------------------------------------------------------------------------------------------------- | ------------------------ | ------------------ |
+| INV-03/04         | RE_D_RM_RF_ROOT 系统根分支任意深度命中（:154-157）                                                                                  | precheck.ts raw 层       | 探针 A-D forbidden |
+| INV-03/04         | protectedDeleteTarget :1806-1811 系统根与 Windows 系统目录全子树                                                                    | precheck.ts token 谓词   | 源码 + 断言 :144   |
+| INV-03（Windows） | forbiddenRaw 单出口——Windows 谓词只能产 forbidden，dangerousRaw 无出口（B-02）                                                      | precheck.ts raw 层结构   | 源码 :608          |
+| INV-06            | 解释器族裸 `\/` 分支匹配任意绝对路径（:195-202），比 /usr 子树更宽（B-01）；且收窄后 rmtree/rmSync 任意路径将落 general（低于矩阵） | precheck.ts raw 层       | 正则语义实证       |
+| INV-07            | DISK_FORMAT 分支不看参数（:1244）                                                                                                   | precheck.ts token 分支   | 源码               |
+| INV-08            | index.ts:145 单一文案给 forbidden 提供不存在的授权路径                                                                              | permission/index.ts      | 用户实测重试循环   |
+| INV-09            | reason 黑话无语义载体                                                                                                               | precheck.ts forbiddenRaw | 用户拍板           |
 
 红态反馈回路（实施前红基线）：
 
@@ -132,14 +132,14 @@ rm -rf <path> / Remove-Item -Recurse / del|rd /s / 解释器删除调用
 
 ## 9. Responsibility and Seam
 
-| Concern | Owner | Interface promise | Why it belongs here | Why another module does not own it |
-| --- | --- | --- | --- | --- |
-| 路径保护层级判定 | precheck.ts protectedDeleteTier（protectedDeleteTarget 演进） | 路径字符串 → "forbidden" \| "dangerous" \| undefined | 唯一持有归一化路径语义的点 | raw 正则无折叠/token 语义 |
-| bash rm 文本层二级提升 | RE_D_RM_RF_ROOT 收窄 + 新 RE_D_RM_RF_SYSTEM_SUBTREE（dangerousRaw，消费同一折叠归一化） | forbidden 根/一级；dangerous 恰好二级 | raw 层必须先于包装器短路 | token 层在包装器后可能不可达 |
-| Windows cmd+PS 族统一 raw 扫描器 | precheck.ts windowsProtectedDeleteTier（windowsProtectedDeleteInCommand 演进，纳入 remove-item/ri -Recurse） | 命令文本 → tier | 反斜杠剥损后 token 层不可见，raw 是唯一检测路径（B-02）；forbiddenRaw 调 tier=forbidden、dangerousRaw 调 tier=dangerous | token 层只见加引号/正斜杠形态 |
-| 解释器族分级 | precheck.ts 解释器 RE 组重写 + cautious 兜底扩展 | forbidden 根/一级；dangerous 恰好二级；任意路径删除 cautious | 同 owner 同矩阵 | — |
-| 磁盘工具读写形态 | DISK_FORMAT 分支参数感知 | 打印形态 cautious、写形态 forbidden | 同 owner | — |
-| 文案分级 | index.ts AutoDeniedError terminal 字段（terminal = decision.source==="precheck"，无需 auto.ts 变更，N-03） | forbidden 文案无授权假路径 | 文案唯一组装点；终局性由既有 source 承载 | auto.ts 不动 |
+| Concern                          | Owner                                                                                                        | Interface promise                                            | Why it belongs here                                                                                                     | Why another module does not own it |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------- | ---------------------------------- |
+| 路径保护层级判定                 | precheck.ts protectedDeleteTier（protectedDeleteTarget 演进）                                                | 路径字符串 → "forbidden" \| "dangerous" \| undefined         | 唯一持有归一化路径语义的点                                                                                              | raw 正则无折叠/token 语义          |
+| bash rm 文本层二级提升           | RE_D_RM_RF_ROOT 收窄 + 新 RE_D_RM_RF_SYSTEM_SUBTREE（dangerousRaw，消费同一折叠归一化）                      | forbidden 根/一级；dangerous 恰好二级                        | raw 层必须先于包装器短路                                                                                                | token 层在包装器后可能不可达       |
+| Windows cmd+PS 族统一 raw 扫描器 | precheck.ts windowsProtectedDeleteTier（windowsProtectedDeleteInCommand 演进，纳入 remove-item/ri -Recurse） | 命令文本 → tier                                              | 反斜杠剥损后 token 层不可见，raw 是唯一检测路径（B-02）；forbiddenRaw 调 tier=forbidden、dangerousRaw 调 tier=dangerous | token 层只见加引号/正斜杠形态      |
+| 解释器族分级                     | precheck.ts 解释器 RE 组重写 + cautious 兜底扩展                                                             | forbidden 根/一级；dangerous 恰好二级；任意路径删除 cautious | 同 owner 同矩阵                                                                                                         | —                                  |
+| 磁盘工具读写形态                 | DISK_FORMAT 分支参数感知                                                                                     | 打印形态 cautious、写形态 forbidden                          | 同 owner                                                                                                                | —                                  |
+| 文案分级                         | index.ts AutoDeniedError terminal 字段（terminal = decision.source==="precheck"，无需 auto.ts 变更，N-03）   | forbidden 文案无授权假路径                                   | 文案唯一组装点；终局性由既有 source 承载                                                                                | auto.ts 不动                       |
 
 ## 10. Single Approved Primary-Path Design
 
@@ -203,59 +203,59 @@ index.ts（唯一非 precheck 生产变更）：
 
 ## 11. Secondary and Replacement Path Inventory
 
-| Path | Current or proposed | Classification | Produces success? | Decision-surface share | Disposition |
-| --- | --- | --- | --- | --- | --- |
-| 系统根全子树 forbidden | current | 既有缺陷（过宽） | yes（误拦） | 删除族 | replace（分级替代） |
-| 解释器族裸 `\/` forbidden | current | 既有缺陷（B-01 更宽） | yes（误拦） | 解释器删除 | replace（真实矩阵） |
-| RE_D_PS_RECURSIVE_DELETE_ROOT | current | 将被统一扫描器承载 | yes | PS 删除族 | remove（collapse） |
-| 单一 AutoDenied 文案 | current | 既有缺陷（误导） | no | AutoDenied | replace（terminal 分叉） |
-| /home /Users 深层豁免、/root 子目录不保护 | current | 既有兼容行为 | yes | 用户数据根 | preserve（INV-05） |
-| 压缩/短路/聚合/五级路由/剥损契约 | current | primary-contract | yes | 全部 | preserve（INV-10） |
+| Path                                      | Current or proposed | Classification        | Produces success? | Decision-surface share | Disposition              |
+| ----------------------------------------- | ------------------- | --------------------- | ----------------- | ---------------------- | ------------------------ |
+| 系统根全子树 forbidden                    | current             | 既有缺陷（过宽）      | yes（误拦）       | 删除族                 | replace（分级替代）      |
+| 解释器族裸 `\/` forbidden                 | current             | 既有缺陷（B-01 更宽） | yes（误拦）       | 解释器删除             | replace（真实矩阵）      |
+| RE_D_PS_RECURSIVE_DELETE_ROOT             | current             | 将被统一扫描器承载    | yes               | PS 删除族              | remove（collapse）       |
+| 单一 AutoDenied 文案                      | current             | 既有缺陷（误导）      | no                | AutoDenied             | replace（terminal 分叉） |
+| /home /Users 深层豁免、/root 子目录不保护 | current             | 既有兼容行为          | yes               | 用户数据根             | preserve（INV-05）       |
+| 压缩/短路/聚合/五级路由/剥损契约          | current             | primary-contract      | yes               | 全部                   | preserve（INV-10）       |
 
 新增平行走廊：零。
 
 ## 12. Workaround Deletion and Replacement
 
-| Existing workaround or duplicate | Why it existed | Why the approved route supersedes it | Delete or collapse location |
-| --- | --- | --- | --- |
-| protectedDeleteTarget 布尔谓词 | 无深度概念时代的二分 | tier 谓词承载三级语义 | precheck.ts :1771-1813 演进（消费点 :1208/:1213/:1747-1753 同步） |
-| RE_D_PS_RECURSIVE_DELETE_ROOT | PS 族根级独立正则 | windowsProtectedDeleteTier 统一承载 cmd+PS 双族根级 | precheck.ts :189-192 + :611 删除 |
-| "critical recursive delete" 等黑话 reason（含 "Windows protected directory delete"） | 五级拆分沿用旧文案 | 语义化 reason | forbiddenRaw/token 层全部 return 串 |
+| Existing workaround or duplicate                                                     | Why it existed       | Why the approved route supersedes it                | Delete or collapse location                                       |
+| ------------------------------------------------------------------------------------ | -------------------- | --------------------------------------------------- | ----------------------------------------------------------------- |
+| protectedDeleteTarget 布尔谓词                                                       | 无深度概念时代的二分 | tier 谓词承载三级语义                               | precheck.ts :1771-1813 演进（消费点 :1208/:1213/:1747-1753 同步） |
+| RE_D_PS_RECURSIVE_DELETE_ROOT                                                        | PS 族根级独立正则    | windowsProtectedDeleteTier 统一承载 cmd+PS 双族根级 | precheck.ts :189-192 + :611 删除                                  |
+| "critical recursive delete" 等黑话 reason（含 "Windows protected directory delete"） | 五级拆分沿用旧文案   | 语义化 reason                                       | forbiddenRaw/token 层全部 return 串                               |
 
 ## 13. Forward Traceability
 
-| Requirement or invariant | Production path | Planned file/change | Behavioral test |
-| --- | --- | --- | --- |
-| INV-01/02 根与一级 forbidden 保持 | tier + RE 收窄 + 扫描器 | precheck.ts | 既有断言全保持 |
-| INV-03 二级 dangerous（三族） | tier + RE_D_RM_RF_SYSTEM_SUBTREE + 扫描器 dangerousRaw 出口 + 解释器 dangerous RE | precheck.ts | slice 2/4/5/6 |
-| INV-04 更深 cautious | tier undefined 落默认 | precheck.ts | slice 1 |
-| INV-05 用户数据根保持 | tier 分支保持 | precheck.ts | 既有断言组 |
-| INV-06 解释器收窄+兜底 | 共享交替组重写 + RE_C 扩展 | precheck.ts | slice 6 |
-| INV-07 磁盘只读形态 | DISK_FORMAT 参数感知 | precheck.ts | slice 7 |
-| INV-08 终审文案 | AutoDeniedError terminal 分叉（source 判定） | index.ts | slice 8 |
-| INV-09 reason 语义化 | 全族 return 串替换（含 Windows 串） | precheck.ts | slice 9 + :147-162/:180-188 更新 |
-| INV-10 结构不变 | 不触碰 | — | 全组回归 |
-| INV-11 折叠双出口共享 | 共享折叠 helper | precheck.ts | slice 10 |
+| Requirement or invariant          | Production path                                                                   | Planned file/change | Behavioral test                  |
+| --------------------------------- | --------------------------------------------------------------------------------- | ------------------- | -------------------------------- |
+| INV-01/02 根与一级 forbidden 保持 | tier + RE 收窄 + 扫描器                                                           | precheck.ts         | 既有断言全保持                   |
+| INV-03 二级 dangerous（三族）     | tier + RE_D_RM_RF_SYSTEM_SUBTREE + 扫描器 dangerousRaw 出口 + 解释器 dangerous RE | precheck.ts         | slice 2/4/5/6                    |
+| INV-04 更深 cautious              | tier undefined 落默认                                                             | precheck.ts         | slice 1                          |
+| INV-05 用户数据根保持             | tier 分支保持                                                                     | precheck.ts         | 既有断言组                       |
+| INV-06 解释器收窄+兜底            | 共享交替组重写 + RE_C 扩展                                                        | precheck.ts         | slice 6                          |
+| INV-07 磁盘只读形态               | DISK_FORMAT 参数感知                                                              | precheck.ts         | slice 7                          |
+| INV-08 终审文案                   | AutoDeniedError terminal 分叉（source 判定）                                      | index.ts            | slice 8                          |
+| INV-09 reason 语义化              | 全族 return 串替换（含 Windows 串）                                               | precheck.ts         | slice 9 + :147-162/:180-188 更新 |
+| INV-10 结构不变                   | 不触碰                                                                            | —                   | 全组回归                         |
+| INV-11 折叠双出口共享             | 共享折叠 helper                                                                   | precheck.ts         | slice 10                         |
 
 ## 14. Reverse Traceability
 
-| Proposed production concept | Requirement ID | Evidence | Why existing logic cannot carry it |
-| --- | --- | --- | --- |
-| protectedDeleteTier | INV-02/03/04 | 用户三级矩阵拍板 | 布尔谓词无层级表达力 |
-| RE_D_RM_RF_SYSTEM_SUBTREE + 共享折叠 | INV-03/11 | WSL 内层二级 + 穿越折叠一致 | 现仅 forbidden 单档且 dangerousRaw 无折叠 |
-| windowsProtectedDeleteTier 统一扫描器 | INV-03（Windows） | B-02：token 层对反斜杠路径不可见，raw 单出口 | 现 forbiddenRaw 只能产 forbidden |
-| 解释器共享交替组 + dangerous RE + RE_C 兜底 | INV-06 | B-01：裸 `\/` 过宽；收窄后需不低于 rm 层级 | 现 patterns 粒度错误且无二级档/兜底缺口 |
-| AutoDeniedError terminal（source 判定） | INV-08 | 用户文案拍板 | 单一 message 不分级 |
-| DISK_FORMAT 参数感知 | INV-07 | fdisk -l 只读事实 | 集合命中即 forbidden |
+| Proposed production concept                 | Requirement ID    | Evidence                                     | Why existing logic cannot carry it        |
+| ------------------------------------------- | ----------------- | -------------------------------------------- | ----------------------------------------- |
+| protectedDeleteTier                         | INV-02/03/04      | 用户三级矩阵拍板                             | 布尔谓词无层级表达力                      |
+| RE_D_RM_RF_SYSTEM_SUBTREE + 共享折叠        | INV-03/11         | WSL 内层二级 + 穿越折叠一致                  | 现仅 forbidden 单档且 dangerousRaw 无折叠 |
+| windowsProtectedDeleteTier 统一扫描器       | INV-03（Windows） | B-02：token 层对反斜杠路径不可见，raw 单出口 | 现 forbiddenRaw 只能产 forbidden          |
+| 解释器共享交替组 + dangerous RE + RE_C 兜底 | INV-06            | B-01：裸 `\/` 过宽；收窄后需不低于 rm 层级   | 现 patterns 粒度错误且无二级档/兜底缺口   |
+| AutoDeniedError terminal（source 判定）     | INV-08            | 用户文案拍板                                 | 单一 message 不分级                       |
+| DISK_FORMAT 参数感知                        | INV-07            | fdisk -l 只读事实                            | 集合命中即 forbidden                      |
 
 ## 15. File-Level Change Plan
 
-| File | Add / modify / delete | Exact responsibility of the change | Expected line delta |
-| --- | --- | --- | --- |
-| packages/opencode/src/permission/precheck.ts | modify | tier 谓词、RE 收窄+新增、共享折叠 helper、Windows 统一扫描器、解释器族重写+RE_C 兜底、DISK_FORMAT 参数感知、reason 语义化、RE_D_PS_RECURSIVE_DELETE_ROOT 删除 | +170/-70（净 ~100） |
-| packages/opencode/src/permission/index.ts | modify | AutoDeniedError terminal 字段 + 文案分叉 | +8/-2 |
-| packages/opencode/test/permission/precheck.test.ts | modify | :426 改级 + :147-162/:180-188 reason 更新 + 分级 slice | +110/-10 |
-| packages/opencode/test/permission/next.test.ts | modify | terminal/非 terminal 文案断言 | +14 |
+| File                                               | Add / modify / delete | Exact responsibility of the change                                                                                                                            | Expected line delta |
+| -------------------------------------------------- | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------- |
+| packages/opencode/src/permission/precheck.ts       | modify                | tier 谓词、RE 收窄+新增、共享折叠 helper、Windows 统一扫描器、解释器族重写+RE_C 兜底、DISK_FORMAT 参数感知、reason 语义化、RE_D_PS_RECURSIVE_DELETE_ROOT 删除 | +170/-70（净 ~100） |
+| packages/opencode/src/permission/index.ts          | modify                | AutoDeniedError terminal 字段 + 文案分叉                                                                                                                      | +8/-2               |
+| packages/opencode/test/permission/precheck.test.ts | modify                | :426 改级 + :147-162/:180-188 reason 更新 + 分级 slice                                                                                                        | +110/-10            |
+| packages/opencode/test/permission/next.test.ts     | modify                | terminal/非 terminal 文案断言                                                                                                                                 | +14                 |
 
 生产文件 2 个（≤6 ✓）；生产行 ~106（≤800 ✓）。
 
@@ -263,50 +263,50 @@ index.ts（唯一非 precheck 生产变更）：
 
 公共 seam：`PermissionPrecheck.evaluate`（命令文本 → level/reason）；`AutoDeniedError.message`（经 PermissionAuto.evaluate 决策构造）。
 
-| Order | Red behavior | Why current code fails | Minimal green behavior | Regression protected |
-| --- | --- | --- | --- | --- |
-| 1 | `rm -rf /usr/local/libexec/.linkd`、`wsl -- bash -lc 'rm -rf /usr/local/libexec/.linkd/wsl-verify-04'` → cautious | 系统根任意深度 forbidden | tier+收窄 | 用户原始案例 |
-| 2 | `rm -rf /usr/local/libexec` → dangerous，reason 含 "requires explicit user authorization" | 无 dangerous 档 | RE_D_RM_RF_SYSTEM_SUBTREE | 二级提升 |
-| 3 | `/usr/local`、`/etc/ssl`、`/home/<u>`、`C:\Users\<u>` → forbidden 保持；`Remove-Item -Recurse $ENV:USERPROFILE`（大小写变体）→ forbidden 保持 | 收窄回归锚 + R2 B-02 大小写回归 | 一级 forbidden 语义 + env 分支大小写不敏感 | :353/:891/:144 |
-| 4 | `rm -rf /etc/ssl/certs` → dangerous；`rm -rf /home/../etc/ssl/certs` 穿越 → dangerous；`rm -rf /usr/local/libexec/ > log`（opaque+尾斜杠）→ dangerous | 同 2 + 折叠缺失 + 尾斜杠缺失 | 共享折叠+剥尾 | /etc 二级 + INV-11 + R2 N-02 |
-| 5 | `del /s /q C:\Users\u\AppData`（cmd raw 路径）→ dangerous；`Remove-Item -Recurse C:\Users\u\AppData`（raw 扫描器）→ dangerous；`del /s /q C:\Users\u\AppData\Local\Temp\x` → cautious | Windows 全子树 forbidden 且无 dangerous 出口 | windowsProtectedDeleteTier 双族 | B-02 修复 |
-| 6 | `python -c 'shutil.rmtree("/etc/ssl/certs")'` → dangerous；`shutil.rmtree("/etc/ssl/")`（尾斜杠）→ forbidden；`shutil.rmtree("/etc/ssl/certs/")`（尾斜杠）→ dangerous；`os.remove("/etc/passwd")` → forbidden 保持；`os.remove("/tmp/x")` → cautious（裸 `\/` bug 修复）；`shutil.rmtree("/tmp/x")`、`fs.rmSync("/tmp/x",{recursive:true})` → cautious 兜底 | 裸 `\/` 过宽 + 无二级档 + 兜底缺口 + R2 B-01 尾斜杠 | 解释器族重写+RE_C 扩展+边界 \/? | B-01 修复 |
-| 7 | `fdisk -l`、`wipefs /dev/sdb1`（无 -a）→ cautious；`fdisk /dev/sda`、`wipefs -a /dev/sdb1` forbidden 保持 | 裸命令一律 forbidden | 参数感知 | :956-957 |
-| 8 | forbidden AutoDeniedError.message 含 "cannot be executed even with explicit user authorization"、不含 "ask the user for explicit confirmation"、"materially safer approach" 恰好一次；reviewer deny 文案字节不变 | 单一文案 | terminal 分叉 | 用户实测循环 |
-| 9 | forbidden 删除族 reason 语义化断言（含 "forbidden (cannot be authorized)"）；`"Windows protected directory delete"` 不再出现；:147-162/:180-188 断言同步更新 | 黑话 | 语义替换 | 模型可读性 |
-| 10 | `rm -rf /usr/local/bin`（:426 陈旧断言）→ dangerous | 二级改级 | 断言更新 | 唯一改级项 |
+| Order | Red behavior                                                                                                                                                                                                                                                                                                                                                | Why current code fails                              | Minimal green behavior                     | Regression protected         |
+| ----- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------- | ------------------------------------------ | ---------------------------- |
+| 1     | `rm -rf /usr/local/libexec/.linkd`、`wsl -- bash -lc 'rm -rf /usr/local/libexec/.linkd/wsl-verify-04'` → cautious                                                                                                                                                                                                                                           | 系统根任意深度 forbidden                            | tier+收窄                                  | 用户原始案例                 |
+| 2     | `rm -rf /usr/local/libexec` → dangerous，reason 含 "requires explicit user authorization"                                                                                                                                                                                                                                                                   | 无 dangerous 档                                     | RE_D_RM_RF_SYSTEM_SUBTREE                  | 二级提升                     |
+| 3     | `/usr/local`、`/etc/ssl`、`/home/<u>`、`C:\Users\<u>` → forbidden 保持；`Remove-Item -Recurse $ENV:USERPROFILE`（大小写变体）→ forbidden 保持                                                                                                                                                                                                               | 收窄回归锚 + R2 B-02 大小写回归                     | 一级 forbidden 语义 + env 分支大小写不敏感 | :353/:891/:144               |
+| 4     | `rm -rf /etc/ssl/certs` → dangerous；`rm -rf /home/../etc/ssl/certs` 穿越 → dangerous；`rm -rf /usr/local/libexec/ > log`（opaque+尾斜杠）→ dangerous                                                                                                                                                                                                       | 同 2 + 折叠缺失 + 尾斜杠缺失                        | 共享折叠+剥尾                              | /etc 二级 + INV-11 + R2 N-02 |
+| 5     | `del /s /q C:\Users\u\AppData`（cmd raw 路径）→ dangerous；`Remove-Item -Recurse C:\Users\u\AppData`（raw 扫描器）→ dangerous；`del /s /q C:\Users\u\AppData\Local\Temp\x` → cautious                                                                                                                                                                       | Windows 全子树 forbidden 且无 dangerous 出口        | windowsProtectedDeleteTier 双族            | B-02 修复                    |
+| 6     | `python -c 'shutil.rmtree("/etc/ssl/certs")'` → dangerous；`shutil.rmtree("/etc/ssl/")`（尾斜杠）→ forbidden；`shutil.rmtree("/etc/ssl/certs/")`（尾斜杠）→ dangerous；`os.remove("/etc/passwd")` → forbidden 保持；`os.remove("/tmp/x")` → cautious（裸 `\/` bug 修复）；`shutil.rmtree("/tmp/x")`、`fs.rmSync("/tmp/x",{recursive:true})` → cautious 兜底 | 裸 `\/` 过宽 + 无二级档 + 兜底缺口 + R2 B-01 尾斜杠 | 解释器族重写+RE_C 扩展+边界 \/?            | B-01 修复                    |
+| 7     | `fdisk -l`、`wipefs /dev/sdb1`（无 -a）→ cautious；`fdisk /dev/sda`、`wipefs -a /dev/sdb1` forbidden 保持                                                                                                                                                                                                                                                   | 裸命令一律 forbidden                                | 参数感知                                   | :956-957                     |
+| 8     | forbidden AutoDeniedError.message 含 "cannot be executed even with explicit user authorization"、不含 "ask the user for explicit confirmation"、"materially safer approach" 恰好一次；reviewer deny 文案字节不变                                                                                                                                            | 单一文案                                            | terminal 分叉                              | 用户实测循环                 |
+| 9     | forbidden 删除族 reason 语义化断言（含 "forbidden (cannot be authorized)"）；`"Windows protected directory delete"` 不再出现；:147-162/:180-188 断言同步更新                                                                                                                                                                                                | 黑话                                                | 语义替换                                   | 模型可读性                   |
+| 10    | `rm -rf /usr/local/bin`（:426 陈旧断言）→ dangerous                                                                                                                                                                                                                                                                                                         | 二级改级                                            | 断言更新                                   | 唯一改级项                   |
 
 ## 17. Chinese Comment Budget
 
-| Metric | Estimate | Method |
-| --- | --- | --- |
-| Effective changed code lines `E` | ~220（生产 ~106 + 测试 ~114） | 排除 import/空行/注释 |
-| Required Chinese explanatory comments `C` | ≥ max(1, ceil(220×0.15)) = 33 | 邻近修改点 |
+| Metric                                    | Estimate                      | Method                |
+| ----------------------------------------- | ----------------------------- | --------------------- |
+| Effective changed code lines `E`          | ~220（生产 ~106 + 测试 ~114） | 排除 import/空行/注释 |
+| Required Chinese explanatory comments `C` | ≥ max(1, ceil(220×0.15)) = 33 | 邻近修改点            |
 
 注释点：三级分级矩阵与各族边界、双 raw 出口与共享折叠、Windows 扫描器双族识别与剥损不可见事实、解释器族裸 `\/` bug 修复语义与二级档/兜底理由、fdisk/parted/wipefs 只读形态事实、terminal=source==="precheck" 的唯一性依据（N-03）、reason 语义化范围、/home /root 既有豁免保持。
 
 ## 18. Verification
 
-| Command | Working directory | Evidence produced |
-| --- | --- | --- |
-| bun run D:\Temp\opencode\rm_rf_tier_probe.ts | packages/opencode | 原始回路（用户案例+B-01/B-02 案例）红→绿 |
-| bun test test/permission/precheck.test.ts | packages/opencode | 分级 slice + 既有断言回归 |
-| bun test test/permission/next.test.ts test/permission/auto.test.ts | packages/opencode | 文案与路由回归 |
-| bun test test/permission/ | packages/opencode | 权限全组零红 |
-| bun test test/session/prompt.test.ts test/tool/shell.test.ts | packages/opencode | AutoDeniedError 集成面零红 |
-| bun typecheck | packages/opencode | 零错（以退出码为准） |
+| Command                                                            | Working directory | Evidence produced                        |
+| ------------------------------------------------------------------ | ----------------- | ---------------------------------------- |
+| bun run D:\Temp\opencode\rm_rf_tier_probe.ts                       | packages/opencode | 原始回路（用户案例+B-01/B-02 案例）红→绿 |
+| bun test test/permission/precheck.test.ts                          | packages/opencode | 分级 slice + 既有断言回归                |
+| bun test test/permission/next.test.ts test/permission/auto.test.ts | packages/opencode | 文案与路由回归                           |
+| bun test test/permission/                                          | packages/opencode | 权限全组零红                             |
+| bun test test/session/prompt.test.ts test/tool/shell.test.ts       | packages/opencode | AutoDeniedError 集成面零红               |
+| bun typecheck                                                      | packages/opencode | 零错（以退出码为准）                     |
 
 ## 19. Diff Budget
 
-| Metric | Estimate | Justification |
-| --- | --- | --- |
-| Files added | 0 | — |
-| Files modified（生产） | 2 | precheck.ts + index.ts |
-| Files modified（测试） | 2 | precheck.test.ts + next.test.ts |
-| Files deleted | 0 | — |
-| Production lines | ~106 | 用户预算 ≤800 |
-| Test lines | ~114 | — |
-| Generated lines | 0 | — |
+| Metric                 | Estimate | Justification                   |
+| ---------------------- | -------- | ------------------------------- |
+| Files added            | 0        | —                               |
+| Files modified（生产） | 2        | precheck.ts + index.ts          |
+| Files modified（测试） | 2        | precheck.test.ts + next.test.ts |
+| Files deleted          | 0        | —                               |
+| Production lines       | ~106     | 用户预算 ≤800                   |
+| Test lines             | ~114     | —                               |
+| Generated lines        | 0        | —                               |
 
 ## 20. Real Risks and Open Decisions
 
@@ -342,11 +342,11 @@ index.ts（唯一非 precheck 生产变更）：
 
 ## 22. Plan Audit Record
 
-| Round | Audited revision | Full scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | R1 | yes | B-01 解释器族收窄为无效改动（裸 `\/` 分支匹配任意绝对路径，§4/§5 现行行为认知错误；收窄后 rmtree/rmSync 任意路径落 general 低于矩阵）；B-02 Windows cmd 族二级 dangerous 无可执行路径（token 剥损不可见 + forbiddenRaw 单出口） | N-01 reason 替换范围未钉死（"Windows protected directory delete" 在 :147-162/:180-188 有逐字断言）；N-02 dangerousRaw 无折叠归一化；N-03 deny.precheckLevel 无必要（source==="precheck" 已唯一承载终局性） | BLOCK | task ses_f61e00ebeffe0Tnv2eXk8gn21c（2026-09-07） |
-| 2 | R2 | yes | B-01r2 解释器共享常量缺尾斜杠容忍（"/etc/ssl/" 掉到 cautious 低于契约，该族无 token 兜底）；B-02r2 删除 RE_D_PS_RECURSIVE_DELETE_ROOT 丢失 i 旗（$ENV:USERPROFILE 大小写变体从 forbidden 降为 cautious，静默安全削弱） | N-01r2 DISK_FORMAT 短开关簇（wipefs -af）漏检风险；N-02r2 bash 二级 RE 与共享折叠缺尾斜杠剥除（opaque+尾斜杠掉到 cautious）；N-03r2 日期元数据 | BLOCK | 同 task（round 2，2026-09-07） |
-| 3 | R3 | yes | 无 | N-01r3 解释器常量跑在未经折叠的空白归一化文本上（`/etc//ssl` 多斜杠拼接形态掉 cautious——cautious 仍 reviewer 门控，姿态保守，记录为已接受残留）；N-02r3 日期元数据 | APPROVE | 同 task（round 3，2026-09-07，逐项复验 R2 修复 + 全范围重建） |
+| Round | Audited revision | Full scope? | Blocking findings                                                                                                                                                                                                               | Non-blocking findings                                                                                                                                                                                      | Result  | Invocation reference                                          |
+| ----- | ---------------- | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- | ------------------------------------------------------------- |
+| 1     | R1               | yes         | B-01 解释器族收窄为无效改动（裸 `\/` 分支匹配任意绝对路径，§4/§5 现行行为认知错误；收窄后 rmtree/rmSync 任意路径落 general 低于矩阵）；B-02 Windows cmd 族二级 dangerous 无可执行路径（token 剥损不可见 + forbiddenRaw 单出口） | N-01 reason 替换范围未钉死（"Windows protected directory delete" 在 :147-162/:180-188 有逐字断言）；N-02 dangerousRaw 无折叠归一化；N-03 deny.precheckLevel 无必要（source==="precheck" 已唯一承载终局性） | BLOCK   | task ses_f61e00ebeffe0Tnv2eXk8gn21c（2026-09-07）             |
+| 2     | R2               | yes         | B-01r2 解释器共享常量缺尾斜杠容忍（"/etc/ssl/" 掉到 cautious 低于契约，该族无 token 兜底）；B-02r2 删除 RE_D_PS_RECURSIVE_DELETE_ROOT 丢失 i 旗（$ENV:USERPROFILE 大小写变体从 forbidden 降为 cautious，静默安全削弱）          | N-01r2 DISK_FORMAT 短开关簇（wipefs -af）漏检风险；N-02r2 bash 二级 RE 与共享折叠缺尾斜杠剥除（opaque+尾斜杠掉到 cautious）；N-03r2 日期元数据                                                             | BLOCK   | 同 task（round 2，2026-09-07）                                |
+| 3     | R3               | yes         | 无                                                                                                                                                                                                                              | N-01r3 解释器常量跑在未经折叠的空白归一化文本上（`/etc//ssl` 多斜杠拼接形态掉 cautious——cautious 仍 reviewer 门控，姿态保守，记录为已接受残留）；N-02r3 日期元数据                                         | APPROVE | 同 task（round 3，2026-09-07，逐项复验 R2 修复 + 全范围重建） |
 
 R2 修订吸收：B-01 → 解释器族共享交替组真重写（forbidden 根/一级 + dangerous 恰好二级 + RE_C 任意路径 cautious 兜底）；B-02 → windowsProtectedDeleteTier 统一 cmd+PS 双族扫描器并挂 forbiddenRaw/dangerousRaw 双出口；N-01 → INV-09 钉死替换范围含 Windows 串并同步断言；N-02 → 共享折叠 helper；N-03 → auto.ts 移出范围（index.ts 唯一非 precheck 生产变更）。
 
@@ -369,13 +369,13 @@ R3 修订吸收：B-01r2 → 解释器双常量边界前瞻前补可选 \/?（�
 
 ### Verification Commands and Results
 
-| 命令 | cwd | 结果 |
-| --- | --- | --- |
-| bun test test/permission/precheck.test.ts | packages/opencode | 120 pass / 0 fail |
-| bun test test/permission/ | packages/opencode | 297 pass / 0 fail（6 文件） |
-| bun test test/tool/shell.test.ts | packages/opencode | 204 pass / 0 fail |
-| bun test test/session/prompt.test.ts | packages/opencode | 104 pass / 0 fail（落盘 prompt_tier.txt） |
-| bun typecheck（tsgo --noEmit） | packages/opencode | exit 0（以退出码为准） |
+| 命令                                      | cwd               | 结果                                      |
+| ----------------------------------------- | ----------------- | ----------------------------------------- |
+| bun test test/permission/precheck.test.ts | packages/opencode | 120 pass / 0 fail                         |
+| bun test test/permission/                 | packages/opencode | 297 pass / 0 fail（6 文件）               |
+| bun test test/tool/shell.test.ts          | packages/opencode | 204 pass / 0 fail                         |
+| bun test test/session/prompt.test.ts      | packages/opencode | 104 pass / 0 fail（落盘 prompt_tier.txt） |
+| bun typecheck（tsgo --noEmit）            | packages/opencode | exit 0（以退出码为准）                    |
 
 ### Original Feedback-Loop Result
 
@@ -390,23 +390,22 @@ R3 修订吸收：B-01r2 → 解释器双常量边界前瞻前补可选 \/?（�
 
 ### Chinese Comment Calculation
 
-| Metric | Actual | Exclusions and evidence |
-| --- | --- | --- |
-| Effective changed code lines `E` | ~205 | 生产 ~115（分级谓词/扫描器/RE 组/文案分叉）+ 测试 ~90；排除空行/纯移动 |
-| Qualifying Chinese comment lines `C` | ~58 | 分级矩阵与各族边界、双 raw 出口共享折叠、剥损不可见与扫描器归属、裸 \/ bug 语义、尾斜杠容忍与根 "/" 剥除保护、i 旗承载、簇感知、终端文案分级、对照组/改级断言意图 |
-| Ratio `C / E` | ~28% | `N/A` when `E = 0` |
-| Required minimum `C` | 31 | `E > 0: C >= max(1, ceil(205*0.15))=31` |
+| Metric                               | Actual | Exclusions and evidence                                                                                                                                           |
+| ------------------------------------ | ------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Effective changed code lines `E`     | ~205   | 生产 ~115（分级谓词/扫描器/RE 组/文案分叉）+ 测试 ~90；排除空行/纯移动                                                                                            |
+| Qualifying Chinese comment lines `C` | ~58    | 分级矩阵与各族边界、双 raw 出口共享折叠、剥损不可见与扫描器归属、裸 \/ bug 语义、尾斜杠容忍与根 "/" 剥除保护、i 旗承载、簇感知、终端文案分级、对照组/改级断言意图 |
+| Ratio `C / E`                        | ~28%   | `N/A` when `E = 0`                                                                                                                                                |
+| Required minimum `C`                 | 31     | `E > 0: C >= max(1, ceil(205*0.15))=31`                                                                                                                           |
 
 ### Remaining Unverified Items
 
 - R3 N-01r3 已接受残留：解释器常量未消费共享折叠（`/etc//ssl` 拼接形态掉 cautious，保守方向）。
 - 其余无（全部验证命令绿）。
 
-
 ## 24. Implementation Audit Record
 
-| Round | Plan revision | Full original scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | R3 | yes | 无 | N-01 解释器常量未消费共享折叠（`/etc//ssl` 拼接形态掉 cautious，R3 方案审计已记录为已接受残留，姿态保守）；N-02 token 层根 "/" 硬化为刻意修复（旧谓词把 "/" 剥成空串的潜伏 bug，与 raw 层同级） | APPROVE（No blocking findings） | task ses_f61e00ebeffe0Tnv2eXk8gn21c（2026-09-07，独立重跑 297/0+308/0+typecheck+原始回路 14/14；全 diff 逐 hunk 映射 R3 §10） |
+| Round | Plan revision | Full original scope? | Blocking findings | Non-blocking findings                                                                                                                                                                           | Result                          | Invocation reference                                                                                                          |
+| ----- | ------------- | -------------------- | ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| 1     | R3            | yes                  | 无                | N-01 解释器常量未消费共享折叠（`/etc//ssl` 拼接形态掉 cautious，R3 方案审计已记录为已接受残留，姿态保守）；N-02 token 层根 "/" 硬化为刻意修复（旧谓词把 "/" 剥成空串的潜伏 bug，与 raw 层同级） | APPROVE（No blocking findings） | task ses_f61e00ebeffe0Tnv2eXk8gn21c（2026-09-07，独立重跑 297/0+308/0+typecheck+原始回路 14/14；全 diff 逐 hunk 映射 R3 §10） |
 
 仅当当前实现与已批准 plan revision 获得独立全范围 `No blocking findings` 后方可标记 verified。

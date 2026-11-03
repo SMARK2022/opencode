@@ -84,9 +84,7 @@ export const GoalTool = Tool.define<typeof Parameters, GoalToolMetadata, never, 
             }
           }
           // 镜像 Codex get_goal 的响应结构：goal + remaining_tokens
-          const remaining = goal.tokenBudget != null
-            ? Math.max(0, goal.tokenBudget - goal.tokensUsed)
-            : null
+          const remaining = goal.tokenBudget != null ? Math.max(0, goal.tokenBudget - goal.tokensUsed) : null
           return {
             title: "Goal",
             metadata: {},

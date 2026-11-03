@@ -12,7 +12,13 @@ const win = process.platform === "win32" ? describe : describe.skip
 
 function marked(code: string) {
   // 与真实V1/V2构造点同形：显式关闭二次shell，并保留Duration宽限到wire的转换覆盖。
-  return WindowsShellOutput.mark(ChildProcess.make(process.execPath, ["-e", code], { stdin: "ignore", shell: false, forceKillAfter: Duration.millis(500) }))
+  return WindowsShellOutput.mark(
+    ChildProcess.make(process.execPath, ["-e", code], {
+      stdin: "ignore",
+      shell: false,
+      forceKillAfter: Duration.millis(500),
+    }),
+  )
 }
 
 function hostPid(session: WindowsShellOutput.RemoteSession) {

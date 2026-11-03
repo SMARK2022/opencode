@@ -104,7 +104,9 @@ const layer = Layer.effect(
         const data = state.get()
         const selected = data.default ?? defaultID
         // 与旧运行时一致：默认项居首，其余使用本地化名称顺序。
-        return Array.fromIterable(data.agents.values()).toSorted((a, b) => Number(b.id === selected) - Number(a.id === selected) || a.id.localeCompare(b.id))
+        return Array.fromIterable(data.agents.values()).toSorted(
+          (a, b) => Number(b.id === selected) - Number(a.id === selected) || a.id.localeCompare(b.id),
+        )
       }),
     })
   }),

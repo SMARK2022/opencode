@@ -173,7 +173,12 @@ const layer = Layer.effectDiscard(
                 format: input.format,
                 output,
               }
-            }).pipe(Effect.mapError((error) => new ToolFailure({ message: PermissionV2.autoDeniedMessage(error) ?? `Unable to fetch ${input.url}` }))),
+            }).pipe(
+              Effect.mapError(
+                (error) =>
+                  new ToolFailure({ message: PermissionV2.autoDeniedMessage(error) ?? `Unable to fetch ${input.url}` }),
+              ),
+            ),
         }),
       })
       .pipe(Effect.orDie)

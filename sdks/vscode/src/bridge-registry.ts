@@ -34,13 +34,13 @@ export async function registerBridge(input: RegistryInput): Promise<RegistryHand
   const write = () => writeRegistryFile(file, manifest({ ...input, createdAt }))
   await write()
   // 心跳定时器：每 5 秒更新锁文件时间戳
-const timer = setInterval(() => void write(), HEARTBEAT_MS)
+  const timer = setInterval(() => void write(), HEARTBEAT_MS)
 
   return {
     id: input.id,
     // 清理责任：VS Code 关闭时调用 dispose 删除注册文件，opencode 端通过 stale 检查兜底
-// 清理责任：VS Code 关闭时删除注册文件，opencode 端通过 stale 检查兜底
-  async dispose() {
+    // 清理责任：VS Code 关闭时删除注册文件，opencode 端通过 stale 检查兜底
+    async dispose() {
       clearInterval(timer)
       await fs.unlink(file).catch((error) => {
         if (error?.code !== "ENOENT") throw error
@@ -50,8 +50,7 @@ const timer = setInterval(() => void write(), HEARTBEAT_MS)
 }
 
 // 获取锁文件目录：用户配置目录下的 bridges 子目录
-export
-function registryDir() {
+export function registryDir() {
   return process.env.OPENCODE_IDE_REGISTRY_DIR ?? path.join(xdgStateHome(), "opencode", "ide")
 }
 
@@ -59,11 +58,11 @@ export function manifest(input: RegistryInput) {
   const now = Date.now()
   return {
     // Schema 版本：用于未来注册文件格式迁移，当前固定为 1
-  schema: 1,
+    schema: 1,
     id: input.id,
     // PID 记录：注册文件包含 VS Code 进程 PID，opencode 端通过 PID 存活检查判断桥接是否可用
-// PID 记录：opencode 端通过 PID 存活检查判断桥接是否可用
-  pid: process.pid,
+    // PID 记录：opencode 端通过 PID 存活检查判断桥接是否可用
+    pid: process.pid,
     port: input.port,
     token: input.token,
     host: HOST,

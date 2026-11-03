@@ -48,35 +48,35 @@ R3 budget: at most two NEW test cases; existing contrary tests may be corrected 
 
 ## 3. Repository Context
 
-| Source | Constraint |
-| --- | --- |
-| Root `AGENTS.md`, package and test `AGENTS.md` | Small owning changes; package-local Bun tests/typecheck; fixture-based behavior tests |
-| `CONTEXT.md` | v1 MessageV2 production, v2 migration distinction; Compaction vs Snapshot separation |
-| `docs/adr/README.md` | Only triage ADR listed; no ADR authorizes hidden Compaction cutoff |
-| `.opencode/policy/first-principles-engineering.md` | Repair first divergence, no alternate success path, independent audit, Chinese explanatory-comment gate |
+| Source                                                             | Constraint                                                                                               |
+| ------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------- |
+| Root `AGENTS.md`, package and test `AGENTS.md`                     | Small owning changes; package-local Bun tests/typecheck; fixture-based behavior tests                    |
+| `CONTEXT.md`                                                       | v1 MessageV2 production, v2 migration distinction; Compaction vs Snapshot separation                     |
+| `docs/adr/README.md`                                               | Only triage ADR listed; no ADR authorizes hidden Compaction cutoff                                       |
+| `.opencode/policy/first-principles-engineering.md`                 | Repair first divergence, no alternate success path, independent audit, Chinese explanatory-comment gate  |
 | `docs/plans/hidden-message-production-isolation.md:31,134,144,251` | Historical contract explicitly preserved the defect; superseded by the current explicit user requirement |
 
 ## 4. Files and Evidence Read
 
-| Evidence | Relevance | Class |
-| --- | --- | --- |
-| `src/session/revert.ts:46-91,171-226` | Public undo and persisted hidden mutation; Part undo supported | reachable |
-| `src/session/compaction-boundary.ts` | SQL/hot-info pre-read cutoff owner | observed |
-| `src/session/message-v2.ts:789-796,1788-2010` | Ordering, pure filter, replay validity, DB window and proof | observed |
-| `src/session/prompt.ts:2616-2661,3043-3077,3388` | Warm-cache proof, environment epoch, independent prune | reachable |
-| `src/session/compaction.ts:142-171,795-939,1040-1219` | Previous summary, memento, evidence, replay/continue, prune consumers | reachable |
-| `src/storage/cold.ts:917-971` | Cold eligibility uses the same latest boundary | reachable |
-| `src/session/context-epoch.ts:46-99` | Reconcile on boundary change, preserve Git snapshot | reachable |
-| `src/session/projectors.ts:159-209`, `summary-cache.ts:369-435` | File-diff aggregate is unrelated to LLM summary; hidden mutations already invalidate it | reachable |
-| `src/session/session.ts:730-747,885-908` | Existing Message updates and visible paging | reachable |
-| `src/cli/cmd/tui/util/context-usage.ts:156-180,655-694` and reference search | Old exported filter has only a test caller; current UI consumes token accounting, not that filter | observed |
-| `src/cli/cmd/tui/context/sync.tsx` hidden handlers | Visible TUI state removes tombstones already | reachable |
-| `src/session/projectors-next.ts`, `src/v2/session.ts`, `src/cli/cmd/tui/context/sync-v2.tsx`, `src/cli/cmd/tui/plugin/internal.ts` | Experimental raw event/debug path; not ordinary prompt boundary | reachable |
-| `test/session/messages-pagination.test.ts:1071-1114` | Existing test incorrectly expects old history to remain cut after undo | observed |
-| `test/session/prompt.test.ts:1077-1108,1188-1217` | Public Revert, warm Provider input, real Compaction fixtures | observed |
-| `test/storage/cold.test.ts:2629-2722` | Public cold owner and persisted prompt-window fixture | observed |
-| Commits `5f3d18e85b`, `3b2925b777`, `63e3a3466a`, `f430485822` | Hidden anchor introduction, explicit fully-hidden exception, failed compaction vs undo distinction | observed |
-| Section 8 source-executed reproduction | Exact current filter loses preceding boundary after undo | observed |
+| Evidence                                                                                                                           | Relevance                                                                                          | Class     |
+| ---------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- | --------- |
+| `src/session/revert.ts:46-91,171-226`                                                                                              | Public undo and persisted hidden mutation; Part undo supported                                     | reachable |
+| `src/session/compaction-boundary.ts`                                                                                               | SQL/hot-info pre-read cutoff owner                                                                 | observed  |
+| `src/session/message-v2.ts:789-796,1788-2010`                                                                                      | Ordering, pure filter, replay validity, DB window and proof                                        | observed  |
+| `src/session/prompt.ts:2616-2661,3043-3077,3388`                                                                                   | Warm-cache proof, environment epoch, independent prune                                             | reachable |
+| `src/session/compaction.ts:142-171,795-939,1040-1219`                                                                              | Previous summary, memento, evidence, replay/continue, prune consumers                              | reachable |
+| `src/storage/cold.ts:917-971`                                                                                                      | Cold eligibility uses the same latest boundary                                                     | reachable |
+| `src/session/context-epoch.ts:46-99`                                                                                               | Reconcile on boundary change, preserve Git snapshot                                                | reachable |
+| `src/session/projectors.ts:159-209`, `summary-cache.ts:369-435`                                                                    | File-diff aggregate is unrelated to LLM summary; hidden mutations already invalidate it            | reachable |
+| `src/session/session.ts:730-747,885-908`                                                                                           | Existing Message updates and visible paging                                                        | reachable |
+| `src/cli/cmd/tui/util/context-usage.ts:156-180,655-694` and reference search                                                       | Old exported filter has only a test caller; current UI consumes token accounting, not that filter  | observed  |
+| `src/cli/cmd/tui/context/sync.tsx` hidden handlers                                                                                 | Visible TUI state removes tombstones already                                                       | reachable |
+| `src/session/projectors-next.ts`, `src/v2/session.ts`, `src/cli/cmd/tui/context/sync-v2.tsx`, `src/cli/cmd/tui/plugin/internal.ts` | Experimental raw event/debug path; not ordinary prompt boundary                                    | reachable |
+| `test/session/messages-pagination.test.ts:1071-1114`                                                                               | Existing test incorrectly expects old history to remain cut after undo                             | observed  |
+| `test/session/prompt.test.ts:1077-1108,1188-1217`                                                                                  | Public Revert, warm Provider input, real Compaction fixtures                                       | observed  |
+| `test/storage/cold.test.ts:2629-2722`                                                                                              | Public cold owner and persisted prompt-window fixture                                              | observed  |
+| Commits `5f3d18e85b`, `3b2925b777`, `63e3a3466a`, `f430485822`                                                                     | Hidden anchor introduction, explicit fully-hidden exception, failed compaction vs undo distinction | observed  |
+| Section 8 source-executed reproduction                                                                                             | Exact current filter loses preceding boundary after undo                                           | observed  |
 
 Source/test paths without prefix in this document are relative to `packages/opencode`.
 
@@ -97,36 +97,36 @@ The original investigated Session was `ses_fb0592160ffekmK38a40bM58vb`. Its B ma
 
 ## 6. Supported Input Domain and Reachability
 
-| Condition | Producer / guarantee | Path | Owner | Class |
-| --- | --- | --- | --- | --- |
-| Entire completed pair hidden | Public Revert + cleanup; audit rows retained | DB boundary and pure replay | CompactionBoundary/MessageV2 | observed |
-| Only marker or summary hidden | Public Message/part-level operations and partial Revert | Same selectors | Same | reachable |
-| Compaction Part hidden | Public Part undo | Same selectors | Same | reachable |
-| Several prior compactions or none | Repeated successful runs / first Compaction | Latest-valid scan | Same | contracted |
-| Valid Compaction tail points at hidden ordinary Message | Repair of dangling assistant; existing shipped fixture | Raw stream then tail stopping | MessageV2 | observed |
-| No-tail Compaction | Persisted supported format | Marker cutoff | CompactionBoundary | contracted |
-| Warm cached B window | Ordinary post-compaction request before undo | proof -> canonical/chunks rebuild | Prompt | reachable |
-| Cold older messages | Existing freeze/maintenance | restored window hydrate | ColdStorage | reachable |
-| Subsequent compaction / prune | Existing process/prune callers | shared filter -> history | SessionCompaction | reachable |
+| Condition                                               | Producer / guarantee                                    | Path                              | Owner                        | Class      |
+| ------------------------------------------------------- | ------------------------------------------------------- | --------------------------------- | ---------------------------- | ---------- |
+| Entire completed pair hidden                            | Public Revert + cleanup; audit rows retained            | DB boundary and pure replay       | CompactionBoundary/MessageV2 | observed   |
+| Only marker or summary hidden                           | Public Message/part-level operations and partial Revert | Same selectors                    | Same                         | reachable  |
+| Compaction Part hidden                                  | Public Part undo                                        | Same selectors                    | Same                         | reachable  |
+| Several prior compactions or none                       | Repeated successful runs / first Compaction             | Latest-valid scan                 | Same                         | contracted |
+| Valid Compaction tail points at hidden ordinary Message | Repair of dangling assistant; existing shipped fixture  | Raw stream then tail stopping     | MessageV2                    | observed   |
+| No-tail Compaction                                      | Persisted supported format                              | Marker cutoff                     | CompactionBoundary           | contracted |
+| Warm cached B window                                    | Ordinary post-compaction request before undo            | proof -> canonical/chunks rebuild | Prompt                       | reachable  |
+| Cold older messages                                     | Existing freeze/maintenance                             | restored window hydrate           | ColdStorage                  | reachable  |
+| Subsequent compaction / prune                           | Existing process/prune callers                          | shared filter -> history          | SessionCompaction            | reachable  |
 
 ## 7. Required Invariants
 
-| ID | Invariant | Evidence / test |
-| --- | --- | --- |
-| INV-01 | Hidden Compaction marker, hidden summary, or hidden Compaction Part provides neither replay nor cutoff. Applies regardless of hidden reason. | User requirement; red repro |
-| INV-02 | Undo B selects the latest still-valid A and A.tail; without A, all remaining non-hidden history is considered. Multiple hidden pairs are skipped. | User clarification; new persisted test |
-| INV-03 | Current DB, pure replay, warm cache, subsequent summary/memento/evidence, prune and cold eligibility cannot retain B's semantic boundary. | Caller inventory; Provider/cold regression |
-| INV-04 | Hidden ordinary tail anchors remain usable for a still-visible successful Compaction; their content is never replayed. | Historical repair fixture |
-| INV-05 | Audit rows, usage, existing file undo and error/permission behavior remain unchanged. | Explicit file-undo exception; existing suites |
-| INV-06 | Fix owners with minimal production changes; no downstream compensating rollback system. | Explicit user requirement |
+| ID     | Invariant                                                                                                                                         | Evidence / test                               |
+| ------ | ------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------- |
+| INV-01 | Hidden Compaction marker, hidden summary, or hidden Compaction Part provides neither replay nor cutoff. Applies regardless of hidden reason.      | User requirement; red repro                   |
+| INV-02 | Undo B selects the latest still-valid A and A.tail; without A, all remaining non-hidden history is considered. Multiple hidden pairs are skipped. | User clarification; new persisted test        |
+| INV-03 | Current DB, pure replay, warm cache, subsequent summary/memento/evidence, prune and cold eligibility cannot retain B's semantic boundary.         | Caller inventory; Provider/cold regression    |
+| INV-04 | Hidden ordinary tail anchors remain usable for a still-visible successful Compaction; their content is never replayed.                            | Historical repair fixture                     |
+| INV-05 | Audit rows, usage, existing file undo and error/permission behavior remain unchanged.                                                             | Explicit file-undo exception; existing suites |
+| INV-06 | Fix owners with minimal production changes; no downstream compensating rollback system.                                                           | Explicit user requirement                     |
 
 ## 8. First Divergence and Root Cause
 
-| Invariant | First divergence | Owner | Proof |
-| --- | --- | --- | --- |
-| INV-01/02/03 | `latest` admits both-hidden successful pair because Boolean parity suffices | CompactionBoundary.latest | Current lines 61-73 |
-| INV-01/02/03 | Pure filter records hidden successful summary, then uses its marker's tail | MessageV2.filterCompacted | Exact executed source below |
-| INV-01 | `visibleCompactions` independently accepts hidden parity | MessageV2 replay pairing | Lines 1870-1893 |
+| Invariant    | First divergence                                                            | Owner                     | Proof                       |
+| ------------ | --------------------------------------------------------------------------- | ------------------------- | --------------------------- |
+| INV-01/02/03 | `latest` admits both-hidden successful pair because Boolean parity suffices | CompactionBoundary.latest | Current lines 61-73         |
+| INV-01/02/03 | Pure filter records hidden successful summary, then uses its marker's tail  | MessageV2.filterCompacted | Exact executed source below |
+| INV-01       | `visibleCompactions` independently accepts hidden parity                    | MessageV2 replay pairing  | Lines 1870-1893             |
 
 Ranked explanations and checks: (1) hidden cutoff admission predicts loss even without cache, confirmed by source-executed reproduction; (2) stale cache alone predicts cold reconstruction is correct, falsified by the pure filter; (3) UI-only token display predicts Provider window IDs are correct, falsified by the same output. Repairing token display or explicit cache clearing cannot restore history discarded at these owners.
 
@@ -139,19 +139,19 @@ bun -e 'const source=await Bun.file("F:/ML/PythonAIProject/Claude-Code/opencode/
 Observed exit 1, elapsed 851 ms:
 
 ```json
-{"actual":["msg_4","msg_7"],"expected":["msg_1","msg_2","msg_3","msg_4","msg_7"]}
+{ "actual": ["msg_4", "msg_7"], "expected": ["msg_1", "msg_2", "msg_3", "msg_4", "msg_7"] }
 ```
 
 Minimal load-bearing structure: valid A, intervening history, B's later tail, hidden completed B, new Message. No Provider, Snapshot, cache, real DB, or Tool needed to trigger the first pure divergence.
 
 ## 9. Responsibility and Seam
 
-| Concern | Owner / promise | Why here, not elsewhere |
-| --- | --- | --- |
-| Cutoff before reading history | CompactionBoundary.latest | Downstream cannot recover rows never loaded |
-| Canonical replay and tail ordering | MessageV2.filterCompacted / visibleCompactions | Also public array entry for compaction and warm cache; cannot trust DB-only repair |
-| Persist hidden mutations | Existing SessionRevert | Already marks entire suffix; no need to edit Part children or delete metadata |
-| Cache / epoch / cold eligibility | Existing consumers of boundary/proof | Existing identity-change and hydrate mechanisms suffice; verify them rather than add handlers |
+| Concern                            | Owner / promise                                | Why here, not elsewhere                                                                       |
+| ---------------------------------- | ---------------------------------------------- | --------------------------------------------------------------------------------------------- |
+| Cutoff before reading history      | CompactionBoundary.latest                      | Downstream cannot recover rows never loaded                                                   |
+| Canonical replay and tail ordering | MessageV2.filterCompacted / visibleCompactions | Also public array entry for compaction and warm cache; cannot trust DB-only repair            |
+| Persist hidden mutations           | Existing SessionRevert                         | Already marks entire suffix; no need to edit Part children or delete metadata                 |
+| Cache / epoch / cold eligibility   | Existing consumers of boundary/proof           | Existing identity-change and hydrate mechanisms suffice; verify them rather than add handlers |
 
 ## 10. Single Approved Primary-Path Design
 
@@ -171,57 +171,57 @@ No new cache state: `promptWindowProof.boundary` changes from B to A/null, `prom
 
 ## 11. Secondary and Replacement Path Inventory
 
-| Path | Classification | Produces success? | Share / disposition |
-| --- | --- | --- | --- |
-| Latest visible successful pair; earlier A or no boundary | Primary-contract branches | yes | Primary, repair |
-| Fully-hidden successful pair as structural-only cutoff | Superseded behavior contrary to explicit requirement | yes | Remove |
-| Visible Compaction with hidden ordinary tail anchor | Existing persisted compatibility within primary contract | yes | Preserve |
-| Visible no-tail Compaction uses marker cutoff | Existing persisted compatibility | yes | Preserve |
-| Raw audit/fork/events/accounting | Contracted raw pass-through | not replay | Preserve |
-| Ad hoc DB rewrite / forced cache flush / separate restore algorithm | Forbidden compensating paths | would | Reject |
+| Path                                                                | Classification                                           | Produces success? | Share / disposition |
+| ------------------------------------------------------------------- | -------------------------------------------------------- | ----------------- | ------------------- |
+| Latest visible successful pair; earlier A or no boundary            | Primary-contract branches                                | yes               | Primary, repair     |
+| Fully-hidden successful pair as structural-only cutoff              | Superseded behavior contrary to explicit requirement     | yes               | Remove              |
+| Visible Compaction with hidden ordinary tail anchor                 | Existing persisted compatibility within primary contract | yes               | Preserve            |
+| Visible no-tail Compaction uses marker cutoff                       | Existing persisted compatibility                         | yes               | Preserve            |
+| Raw audit/fork/events/accounting                                    | Contracted raw pass-through                              | not replay        | Preserve            |
+| Ad hoc DB rewrite / forced cache flush / separate restore algorithm | Forbidden compensating paths                             | would             | Reject              |
 
 New alternate success paths: zero. New production diagnostic paths: zero (0% changed decision surface). No implementation rollback route; this repairs the primary invariant directly.
 
 ## 12. Workaround Deletion and Replacement
 
-| Existing behavior | Why superseded | Location |
-| --- | --- | --- |
-| Hidden parity map and structural-only exception | Makes an undone operation affect current context | Two production owners above |
-| Test expects only `[next]` after hiding both compaction messages | Encodes opposite of requested undo contract | `messages-pagination.test.ts:1071-1114` |
-| Historical plan's exception | Contradicts current explicit requirement | Supersession notice in this canonical plan; historical record retained |
+| Existing behavior                                                | Why superseded                                   | Location                                                               |
+| ---------------------------------------------------------------- | ------------------------------------------------ | ---------------------------------------------------------------------- |
+| Hidden parity map and structural-only exception                  | Makes an undone operation affect current context | Two production owners above                                            |
+| Test expects only `[next]` after hiding both compaction messages | Encodes opposite of requested undo contract      | `messages-pagination.test.ts:1071-1114`                                |
+| Historical plan's exception                                      | Contradicts current explicit requirement         | Supersession notice in this canonical plan; historical record retained |
 
 ## 13. Forward Traceability
 
-| Requirement | Path / change | Behavioral verification |
-| --- | --- | --- |
-| INV-01/02 | Both boundary owners | Edited pagination test restores full visible history without A; edited Provider test restores A after B undo. Existing partial-pair, failed and no-tail cases run unchanged |
-| INV-03 cache and Provider | Corrected proof + unchanged Prompt | Warm B request then public undo, next request positively contains A/intervening sentinel; no separate B-artifact absence matrix |
-| INV-03 next Compaction | Corrected pure filter | Existing compaction suite plus direct pure-filter assertion in edited pagination test; next-summary consumption shares that function, no new dedicated case |
-| INV-03 cold | Corrected latest + existing eligibility/hydrate | Existing cold suite unchanged; verify common boundary owner by source and corrected persisted-window test, no new freeze/undo matrix |
-| INV-03 epoch | Corrected proof identity + existing prepare | Edited warm Provider test observes restored A/history; existing epoch regressions unchanged, boundary identity source inspection |
-| INV-04 | Preserve raw retained-anchor stopping | Visible pair with repaired hidden ordinary anchor still returns pair + next; no anchor content |
-| INV-05 | Unchanged Revert/Snapshot/accounting | Existing revert-compact/accounting suites unchanged; edited Provider test uses real public Revert cleanup |
-| INV-06 | Two production files | Changed-file/diff audit |
+| Requirement               | Path / change                                   | Behavioral verification                                                                                                                                                     |
+| ------------------------- | ----------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| INV-01/02                 | Both boundary owners                            | Edited pagination test restores full visible history without A; edited Provider test restores A after B undo. Existing partial-pair, failed and no-tail cases run unchanged |
+| INV-03 cache and Provider | Corrected proof + unchanged Prompt              | Warm B request then public undo, next request positively contains A/intervening sentinel; no separate B-artifact absence matrix                                             |
+| INV-03 next Compaction    | Corrected pure filter                           | Existing compaction suite plus direct pure-filter assertion in edited pagination test; next-summary consumption shares that function, no new dedicated case                 |
+| INV-03 cold               | Corrected latest + existing eligibility/hydrate | Existing cold suite unchanged; verify common boundary owner by source and corrected persisted-window test, no new freeze/undo matrix                                        |
+| INV-03 epoch              | Corrected proof identity + existing prepare     | Edited warm Provider test observes restored A/history; existing epoch regressions unchanged, boundary identity source inspection                                            |
+| INV-04                    | Preserve raw retained-anchor stopping           | Visible pair with repaired hidden ordinary anchor still returns pair + next; no anchor content                                                                              |
+| INV-05                    | Unchanged Revert/Snapshot/accounting            | Existing revert-compact/accounting suites unchanged; edited Provider test uses real public Revert cleanup                                                                   |
+| INV-06                    | Two production files                            | Changed-file/diff audit                                                                                                                                                     |
 
 ## 14. Reverse Traceability
 
-| Proposed production concept | Requirement | Evidence / why current code insufficient |
-| --- | --- | --- |
-| Visible-only completed pair admission | INV-01/02 | Hidden parity explicitly accepts wrong operation |
-| Set replaces visibility-state map | INV-01/06 | No valid hidden pair state remains; avoid retaining obsolete model |
-| Reorder/replay use same visible pairing | INV-03 | Independent post-pass must not revive invalid candidates |
+| Proposed production concept             | Requirement | Evidence / why current code insufficient                           |
+| --------------------------------------- | ----------- | ------------------------------------------------------------------ |
+| Visible-only completed pair admission   | INV-01/02   | Hidden parity explicitly accepts wrong operation                   |
+| Set replaces visibility-state map       | INV-01/06   | No valid hidden pair state remains; avoid retaining obsolete model |
+| Reorder/replay use same visible pairing | INV-03      | Independent post-pass must not revive invalid candidates           |
 
 No new interface, module, dependency, feature flag, persisted state, or background task.
 
 ## 15. File-Level Change Plan
 
-| File | Action | Responsibility | Estimated changed lines |
-| --- | --- | --- | --- |
-| `src/session/compaction-boundary.ts` | modify | Reject hidden operation before cutoff | 3-8 code/comment lines |
-| `src/session/message-v2.ts` | modify | Reject hidden pair across walk/reorder/replay; retain ordinary hidden anchors | 15-35 code/comment lines |
-| `test/session/messages-pagination.test.ts` | modify one existing case | Add before-hide assertion for valid pair with hidden ordinary anchor; after-hide require old history through pure and DB filter | 10-25 |
-| `test/session/prompt.test.ts` | modify one existing case | Extend existing successful Compaction cache scenario to A -> B -> public undo B -> Provider restored A/intermediate history | 30-65 |
-| This plan | add/update | Requirement and audit evidence | documentation only |
+| File                                       | Action                   | Responsibility                                                                                                                  | Estimated changed lines  |
+| ------------------------------------------ | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------- | ------------------------ |
+| `src/session/compaction-boundary.ts`       | modify                   | Reject hidden operation before cutoff                                                                                           | 3-8 code/comment lines   |
+| `src/session/message-v2.ts`                | modify                   | Reject hidden pair across walk/reorder/replay; retain ordinary hidden anchors                                                   | 15-35 code/comment lines |
+| `test/session/messages-pagination.test.ts` | modify one existing case | Add before-hide assertion for valid pair with hidden ordinary anchor; after-hide require old history through pure and DB filter | 10-25                    |
+| `test/session/prompt.test.ts`              | modify one existing case | Extend existing successful Compaction cache scenario to A -> B -> public undo B -> Provider restored A/intermediate history     | 30-65                    |
+| This plan                                  | add/update               | Requirement and audit evidence                                                                                                  | documentation only       |
 
 Reuse existing fixture builders. No new test functions are currently necessary; absolute user cap is two new cases. Correct other existing contrary expectations only if found by focused search or test failure; report their concrete conflict with the new invariant. No parameterized matrices, new mock frameworks or separate test files. The size budget is a bound to minimize, not a target.
 
@@ -229,45 +229,45 @@ Reuse existing fixture builders. No new test functions are currently necessary; 
 
 Approved user workflow uses existing public seams: `SessionRevert.revert/cleanup -> MessageV2.filterCompactedEffect`, direct `MessageV2.filterCompacted`, and `SessionPrompt` captured Provider request after actual `SessionCompaction.run`. The two planned edits below are sufficient unless existing contrary assertions are discovered elsewhere. Do not expand coverage with duplicate defensive assertions.
 
-| Order | Red behavior / why it fails now | Minimal green / protection |
-| --- | --- | --- |
-| 1 | Edit `uses hidden retained-tail anchors as boundaries without returning hidden messages`: before hiding the pair assert valid compact/summary survives despite ordinary hidden anchor; after hiding both require `[old, oldReply, next]` rather than `[next]`, through pure and persisted filtering | Change both owners; single fixture's before/after assertions distinguish ordinary anchor from undone operation |
-| 2 | Extend `invalidates a retained window after successful Compaction`: keep original relevant assertions, create distinct A and B summaries with an intermediate visible text sentinel; warm B by a real Provider request, undo from B's marker using public Revert/cleanup, issue next prompt | Captured wire must positively contain A and intervening history; configure retained-tail using existing supported settings as needed so B cannot simply replay A. This catches stale cache and prior-boundary restoration with one lifecycle and no artifact-by-artifact negative assertions |
+| Order | Red behavior / why it fails now                                                                                                                                                                                                                                                                     | Minimal green / protection                                                                                                                                                                                                                                                                   |
+| ----- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1     | Edit `uses hidden retained-tail anchors as boundaries without returning hidden messages`: before hiding the pair assert valid compact/summary survives despite ordinary hidden anchor; after hiding both require `[old, oldReply, next]` rather than `[next]`, through pure and persisted filtering | Change both owners; single fixture's before/after assertions distinguish ordinary anchor from undone operation                                                                                                                                                                               |
+| 2     | Extend `invalidates a retained window after successful Compaction`: keep original relevant assertions, create distinct A and B summaries with an intermediate visible text sentinel; warm B by a real Provider request, undo from B's marker using public Revert/cleanup, issue next prompt         | Captured wire must positively contain A and intervening history; configure retained-tail using existing supported settings as needed so B cannot simply replay A. This catches stale cache and prior-boundary restoration with one lifecycle and no artifact-by-artifact negative assertions |
 
 One vertical red-green slice at a time. Old tests asserting the superseded behavior are corrected with explicit rationale, not deleted to hide failures. Use literal known expected IDs/text; do not recompute expected cutoff with production logic. Existing broad suite covers Snapshot file behavior; no new file-rollback semantics.
 
 ## 17. Chinese Comment Budget
 
-| Metric | Estimate / method |
-| --- | --- |
-| Effective changed code E | 55-100, including tests, excluding imports/formatting/docs |
-| Required C | At least max(1, ceil(E * 0.15)); estimate 9-15 qualifying adjacent Chinese lines |
+| Metric                   | Estimate / method                                                                 |
+| ------------------------ | --------------------------------------------------------------------------------- |
+| Effective changed code E | 55-100, including tests, excluding imports/formatting/docs                        |
+| Required C               | At least max(1, ceil(E \* 0.15)); estimate 9-15 qualifying adjacent Chinese lines |
 
 Explain why undo must precede cutoff, why hidden ordinary tail anchors survive scanning, why both pure/DB entrypoints need coverage, why warm cache must contain B first, and why restored old sentinel is independent evidence. Count actual diff before implementation audit; avoid padding or obvious control-flow translations.
 
 ## 18. Verification
 
-| Command | Working directory | Evidence |
-| --- | --- | --- |
-| Section 8 source-executed command | `D:\Temp\opencode` | Original deterministic bug turns green |
-| `bun test test/session/messages-pagination.test.ts test/session/revert-compact.test.ts` | `packages/opencode` | Persisted window, undo, ordinary hidden anchor, existing file semantics |
-| `bun test test/session/prompt.test.ts` | `packages/opencode` | Edited undo/cache lifecycle plus existing Provider/epoch regressions |
+| Command                                                                                              | Working directory   | Evidence                                                                 |
+| ---------------------------------------------------------------------------------------------------- | ------------------- | ------------------------------------------------------------------------ |
+| Section 8 source-executed command                                                                    | `D:\Temp\opencode`  | Original deterministic bug turns green                                   |
+| `bun test test/session/messages-pagination.test.ts test/session/revert-compact.test.ts`              | `packages/opencode` | Persisted window, undo, ordinary hidden anchor, existing file semantics  |
+| `bun test test/session/prompt.test.ts`                                                               | `packages/opencode` | Edited undo/cache lifecycle plus existing Provider/epoch regressions     |
 | `bun test test/session/compaction.test.ts test/session/message-v2.test.ts test/storage/cold.test.ts` | `packages/opencode` | Existing compaction lifecycle, pure conversion, cold restore/eligibility |
-| `bun typecheck` | `packages/opencode` | Types |
-| `git diff --check` | repository root | Diff hygiene |
+| `bun typecheck`                                                                                      | `packages/opencode` | Types                                                                    |
+| `git diff --check`                                                                                   | repository root     | Diff hygiene                                                             |
 
 Planning-time prerequisite: package dependencies were incomplete (`@babel/preset-typescript`, `ai` missing on import). This was resolved during implementation using the user-authorized frozen-lockfile install; see section 23 for the completed integration/typecheck results. No dependency declarations or lockfile were changed.
 
 ## 19. Diff Budget
 
-| Metric | Estimate | Reason |
-| --- | --- | --- |
-| Files added | 1 plan; zero production/test files | Existing seams suffice |
-| Files modified | 2 production + 2 planned existing test files | Two owning modules and two orthogonal edited cases; any additional old-test correction requires an evidenced contrary expectation |
-| Files deleted | 0 | No cleanup of others' work |
-| Production lines | ~18-43 including explanatory comments | Conditions, set simplification, obsolete comments |
-| Test lines | ~40-90 including explanation | Reuse current fixtures; no new cases or blanket matrix |
-| Generated lines / dependencies / schema | 0 | No API or persistence shape change |
+| Metric                                  | Estimate                                     | Reason                                                                                                                            |
+| --------------------------------------- | -------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| Files added                             | 1 plan; zero production/test files           | Existing seams suffice                                                                                                            |
+| Files modified                          | 2 production + 2 planned existing test files | Two owning modules and two orthogonal edited cases; any additional old-test correction requires an evidenced contrary expectation |
+| Files deleted                           | 0                                            | No cleanup of others' work                                                                                                        |
+| Production lines                        | ~18-43 including explanatory comments        | Conditions, set simplification, obsolete comments                                                                                 |
+| Test lines                              | ~40-90 including explanation                 | Reuse current fixtures; no new cases or blanket matrix                                                                            |
+| Generated lines / dependencies / schema | 0                                            | No API or persistence shape change                                                                                                |
 
 ## 20. Real Risks and Open Decisions
 
@@ -294,11 +294,11 @@ Independent auditor must reconstruct the complete original requirement from curr
 
 ## 22. Plan Audit Record
 
-| Round | Revision | Full scope? | Blocking | Non-blocking | Result | Invocation |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | R1 | yes | No blocking findings. | Two verification/test-separation notes below | APPROVE | ses_f2d5cfc76ffempXRtW2tYsoYsr |
-| Not audited | R2 | N/A | N/A | N/A | superseded by user clarification | N/A |
-| 2 | R3 | yes | No blocking findings. | Verification and discriminating Provider sentinel notes below | APPROVE | ses_f2d5501ddffehtNg3nG9MyJkFk |
+| Round       | Revision | Full scope? | Blocking              | Non-blocking                                                  | Result                           | Invocation                     |
+| ----------- | -------- | ----------- | --------------------- | ------------------------------------------------------------- | -------------------------------- | ------------------------------ |
+| 1           | R1       | yes         | No blocking findings. | Two verification/test-separation notes below                  | APPROVE                          | ses_f2d5cfc76ffempXRtW2tYsoYsr |
+| Not audited | R2       | N/A         | N/A                   | N/A                                                           | superseded by user clarification | N/A                            |
+| 2           | R3       | yes         | No blocking findings. | Verification and discriminating Provider sentinel notes below | APPROVE                          | ses_f2d5501ddffehtNg3nG9MyJkFk |
 
 ### R3 Independent Verdict (Verbatim)
 
@@ -349,12 +349,12 @@ Implemented the approved R3 primary repair. No user database mutations, dependen
 
 Exactly four implementation files: two production owners and two existing test cases. `git diff --numstat`:
 
-| File | Added | Removed |
-| --- | --- | --- |
-| `src/session/compaction-boundary.ts` | 3 | 5 |
-| `src/session/message-v2.ts` | 12 | 14 |
-| `test/session/messages-pagination.test.ts` | 6 | 2 |
-| `test/session/prompt.test.ts` | 20 | 2 |
+| File                                       | Added | Removed |
+| ------------------------------------------ | ----- | ------- |
+| `src/session/compaction-boundary.ts`       | 3     | 5       |
+| `src/session/message-v2.ts`                | 12    | 14      |
+| `test/session/messages-pagination.test.ts` | 6     | 2       |
+| `test/session/prompt.test.ts`              | 20    | 2       |
 
 Total 41 added / 23 removed. No new test cases, no new test files. Removed hidden-parity admission and Boolean-map state. Focused existing-test search found one contrary both-hidden assertion; it is corrected rather than suppressed. The existing Provider cache test is extended with public B undo and two positive restored-content assertions.
 
@@ -367,28 +367,28 @@ Total 41 added / 23 removed. No new test cases, no new test files. Removed hidde
 
 All Bun test/typecheck commands below ran from `packages/opencode`.
 
-| Command | Result |
-| --- | --- |
-| `bun test test/session/messages-pagination.test.ts test/session/revert-compact.test.ts --timeout 30000` | 74 pass / 0 fail, 230 assertions |
-| `bun test test/session/compaction.test.ts --timeout 30000` | 72 pass / 0 fail, 297 assertions |
-| `bun test test/session/message-v2.test.ts --timeout 30000` | 60 pass / 0 fail, 111 assertions |
-| `bun test test/storage/cold.test.ts --timeout 30000` | 42 pass / 0 fail, 203 assertions |
-| `bun test test/session/prompt.test.ts -t 'Compaction\|compaction\|retained\|cached\|Revert\|epoch' --timeout 30000` | 7 pass / 0 fail, 26 assertions |
-| `bun typecheck` | Pass twice, including final restored implementation |
-| `git diff --check` (root) | Pass |
-| Section 8 original source-executed command | Pass, actual equals expected A/history/tail/next IDs |
+| Command                                                                                                             | Result                                               |
+| ------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------- |
+| `bun test test/session/messages-pagination.test.ts test/session/revert-compact.test.ts --timeout 30000`             | 74 pass / 0 fail, 230 assertions                     |
+| `bun test test/session/compaction.test.ts --timeout 30000`                                                          | 72 pass / 0 fail, 297 assertions                     |
+| `bun test test/session/message-v2.test.ts --timeout 30000`                                                          | 60 pass / 0 fail, 111 assertions                     |
+| `bun test test/storage/cold.test.ts --timeout 30000`                                                                | 42 pass / 0 fail, 203 assertions                     |
+| `bun test test/session/prompt.test.ts -t 'Compaction\|compaction\|retained\|cached\|Revert\|epoch' --timeout 30000` | 7 pass / 0 fail, 26 assertions                       |
+| `bun typecheck`                                                                                                     | Pass twice, including final restored implementation  |
+| `git diff --check` (root)                                                                                           | Pass                                                 |
+| Section 8 original source-executed command                                                                          | Pass, actual equals expected A/history/tail/next IDs |
 
 Final independently inspectable JUnit artifacts generated with `--reporter=junit --reporter-outfile=<path>` on the unchanged final implementation:
 
-| Artifact | Full suite result |
-| --- | --- |
-| `D:\Temp\opencode\compaction-undo-prompt-final.xml` | Entire prompt suite: 115 pass, 14 existing skip, 0 fail; 129 cases, 516 assertions, 759.10 seconds |
-| `D:\Temp\opencode\compaction-undo-pagination-revert-final.xml` | Entire pagination + revert suites: 74 pass, 0 fail, 230 assertions |
-| `D:\Temp\opencode\compaction-undo-compaction-final.xml` | Entire compaction suite: 72 pass, 0 fail, 297 assertions |
-| `D:\Temp\opencode\compaction-undo-message-final.xml` | Entire MessageV2 suite: 60 pass, 0 fail, 111 assertions |
-| `D:\Temp\opencode\compaction-undo-cold-final.xml` | Entire isolated cold suite: 42 pass, 0 fail, 203 assertions |
-| `D:\Temp\opencode\compaction-undo-typecheck-final.log` | Native PowerShell transcript: package cwd, `bun typecheck`, native exit code 0 |
-| `D:\Temp\opencode\compaction-undo-original-repro-final.log` | Native PowerShell transcript: section 8 executed source fixture, actual/expected ID arrays equal, native exit code 0 |
+| Artifact                                                       | Full suite result                                                                                                    |
+| -------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| `D:\Temp\opencode\compaction-undo-prompt-final.xml`            | Entire prompt suite: 115 pass, 14 existing skip, 0 fail; 129 cases, 516 assertions, 759.10 seconds                   |
+| `D:\Temp\opencode\compaction-undo-pagination-revert-final.xml` | Entire pagination + revert suites: 74 pass, 0 fail, 230 assertions                                                   |
+| `D:\Temp\opencode\compaction-undo-compaction-final.xml`        | Entire compaction suite: 72 pass, 0 fail, 297 assertions                                                             |
+| `D:\Temp\opencode\compaction-undo-message-final.xml`           | Entire MessageV2 suite: 60 pass, 0 fail, 111 assertions                                                              |
+| `D:\Temp\opencode\compaction-undo-cold-final.xml`              | Entire isolated cold suite: 42 pass, 0 fail, 203 assertions                                                          |
+| `D:\Temp\opencode\compaction-undo-typecheck-final.log`         | Native PowerShell transcript: package cwd, `bun typecheck`, native exit code 0                                       |
+| `D:\Temp\opencode\compaction-undo-original-repro-final.log`    | Native PowerShell transcript: section 8 executed source fixture, actual/expected ID arrays equal, native exit code 0 |
 
 Final total: 363 pass, 14 existing skip, 0 fail across the six requested test files. No registered test timeout, skip, or unrelated assertion was changed. The successful full prompt command was identical except for adding the JUnit reporter and allowing the external shell process up to 1800 seconds; it completed in 759 seconds. This closes B-01's missing full-prompt result.
 
@@ -403,7 +403,7 @@ The five passing test commands cover 255 cases; they are not a claim of a full p
 Pass, exit 0. Exact output:
 
 ```json
-{"actual":["msg_1","msg_2","msg_3","msg_4","msg_7"],"expected":["msg_1","msg_2","msg_3","msg_4","msg_7"]}
+{ "actual": ["msg_1", "msg_2", "msg_3", "msg_4", "msg_7"], "expected": ["msg_1", "msg_2", "msg_3", "msg_4", "msg_7"] }
 ```
 
 ### Actual Secondary and Replacement Path Inventory
@@ -414,15 +414,15 @@ No new alternate success path, diagnostic path, state, helper, schema, interface
 
 Computed from added/substantively modified nonblank code in `git diff --unified=0`, excluding comments, blank lines, imports (none), docs and unchanged context. No generated or formatter-only changes.
 
-| File | E | C |
-| --- | --- | --- |
-| Compaction boundary | 1 | 2 |
-| MessageV2 | 7 | 5 |
-| Pagination test | 4 | 2 |
-| Prompt test | 16 | 3 |
-| Total | 28 | 12 |
+| File                | E   | C   |
+| ------------------- | --- | --- |
+| Compaction boundary | 1   | 2   |
+| MessageV2           | 7   | 5   |
+| Pagination test     | 4   | 2   |
+| Prompt test         | 16  | 3   |
+| Total               | 28  | 12  |
 
-C/E = 42.86%; required minimum ceil(28 * 0.15) = 5. Explanations are adjacent to cutoff admission, hidden ordinary-anchor preservation, replay pairing, pure/DB parity, and the warm Provider test's independent sentinel. No padding, new test names or obvious assignments counted as comments.
+C/E = 42.86%; required minimum ceil(28 \* 0.15) = 5. Explanations are adjacent to cutoff admission, hidden ordinary-anchor preservation, replay pairing, pure/DB parity, and the warm Provider test's independent sentinel. No padding, new test names or obvious assignments counted as comments.
 
 ### Remaining Unverified Items
 
@@ -430,11 +430,11 @@ All six requested test files now have complete passing reports (14 pre-existing 
 
 ## 24. Implementation Audit Record
 
-| Round | Revision | Full scope | Blocking | Result | Invocation |
-| --- | --- | --- | --- | --- | --- |
-| 1 | R3 | yes | B-01 必需的运行验证尚未闭环 | BLOCK | ses_f2d2daecfffe9dD3xOvsxDRKUZ |
-| 2 | R3 | yes | B-01 必需的运行验证证据仍有缺口 | BLOCK | ses_f2d2daecfffe9dD3xOvsxDRKUZ |
-| 3 | R3 | yes | No blocking findings. B-01 已关闭。 | APPROVE | ses_f2d2daecfffe9dD3xOvsxDRKUZ |
+| Round | Revision | Full scope | Blocking                            | Result  | Invocation                     |
+| ----- | -------- | ---------- | ----------------------------------- | ------- | ------------------------------ |
+| 1     | R3       | yes        | B-01 必需的运行验证尚未闭环         | BLOCK   | ses_f2d2daecfffe9dD3xOvsxDRKUZ |
+| 2     | R3       | yes        | B-01 必需的运行验证证据仍有缺口     | BLOCK   | ses_f2d2daecfffe9dD3xOvsxDRKUZ |
+| 3     | R3       | yes        | No blocking findings. B-01 已关闭。 | APPROVE | ses_f2d2daecfffe9dD3xOvsxDRKUZ |
 
 Round 1 finding and verdict (verbatim):
 

@@ -58,9 +58,7 @@ const mergeOptions = (target: Record<string, any>, source: Record<string, any> |
 export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: PrepareInput) {
   // #114：别名 openai 用 npm 识别 oauth 指令路径（prepare 无 config map）
   // #114：instructions 字段与 system 消息互斥，误判会重复注入
-  const isOpenaiOauth =
-    input.auth?.type === "oauth" &&
-    isOpenaiOauthByModelNpm(input.provider.id, input.model.api.npm)
+  const isOpenaiOauth = input.auth?.type === "oauth" && isOpenaiOauthByModelNpm(input.provider.id, input.model.api.npm)
   // 复用最终权限/user.tools 过滤；同一工具对象随后用于 SDK/native 请求，不读取 registry 全集。
   const tools = resolveTools(input)
   // 指引在 prompt transform 和 OAuth instructions 构造之前进入 system，避免漏掉其中一种运行时。

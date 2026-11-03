@@ -18,16 +18,19 @@ import { SessionProjector } from "@opencode-ai/core/session/projector"
 import { testEffect } from "../lib/effect"
 
 // 真实业务层图共享同一连接；隔离运行目录不连接用户正在使用的数据库。
-const it = testEffect(LayerNode.compile(LayerNode.group([Session.node, MessageV2.node, SessionProjector.node, Database.node])))
+const it = testEffect(
+  LayerNode.compile(LayerNode.group([Session.node, MessageV2.node, SessionProjector.node, Database.node])),
+)
 
-const withDb = <A>(body: (db: ColdStorage.TxOrDb) => A) => Effect.gen(function* () {
-  const database = yield* Database.Service
-  return yield* Database.withSync(database, body)
-})
+const withDb = <A>(body: (db: ColdStorage.TxOrDb) => A) =>
+  Effect.gen(function* () {
+    const database = yield* Database.Service
+    return yield* Database.withSync(database, body)
+  })
 
 // 同连接允许已有其他夹具；只检查本例增量，不把:memory:等同于必然跨文件共享。
 function verifyBaseline() {
-  return withDb(db => ColdStorage.verify(db, { repair: false }))
+  return withDb((db) => ColdStorage.verify(db, { repair: false }))
 }
 
 function expectVerifyDelta(baseline: ReturnType<typeof ColdStorage.verify>) {
@@ -40,7 +43,16 @@ function expectVerifyDelta(baseline: ReturnType<typeof ColdStorage.verify>) {
 }
 
 function payloadHashes() {
-  return withDb(db => new Set(db.select({ hash: ColdStorageTable.hash }).from(ColdStorageTable).all().map(row => row.hash)))
+  return withDb(
+    (db) =>
+      new Set(
+        db
+          .select({ hash: ColdStorageTable.hash })
+          .from(ColdStorageTable)
+          .all()
+          .map((row) => row.hash),
+      ),
+  )
 }
 
 // 新增维护用例复用同一预约装配，fixture写入与维护始终属于当前Layer的显式连接。
@@ -49,7 +61,10 @@ function runMaintenance(
   prepared: ColdMaintain.PreparedMaintenance,
   runtime: ColdMaintain.MaintenanceRuntime = { checkpoint: async () => {} },
 ) {
-  return ColdMaintain.maintain(database.sync, prepared, { ...runtime, run: body => Effect.runPromise(Database.withSync(database, body)) })
+  return ColdMaintain.maintain(database.sync, prepared, {
+    ...runtime,
+    run: (body) => Effect.runPromise(Database.withSync(database, body)),
+  })
 }
 
 test("cold worker completes a batch with more than 128 source packs", async () => {
@@ -235,7 +250,8 @@ for (const action of ["preserve", "update", "delete", "activity", "cancel"] as c
       const timer = setInterval(() => ticks++, 1)
       try {
         const result = yield* Effect.promise(() =>
-          runMaintenance(database,
+          runMaintenance(
+            database,
             ColdMaintain.prepareMaintenance({
               operation: "compress",
               sessionID: session.id,
@@ -266,32 +282,32 @@ for (const action of ["preserve", "update", "delete", "activity", "cancel"] as c
                   }
                   // 定时器只在同步SQL段之间执行；直接使用本例已绑定的同一连接，不读全局DB。
                   const db = database.sync
-                    if (action === "delete") {
-                      // 真正删除行，能捕获把旧快照误当成upsert输入的回归。
-                      db.delete(PartTable).where(eq(PartTable.id, value.id)).run()
-                      return
-                    }
-                    if (action === "activity") {
-                      // owner内容保持原样，单独检验Session重新活跃后的资格复核。
-                      db.update(SessionTable)
-                        .set({ time_updated: Date.now() })
-                        .where(eq(SessionTable.id, session.id))
-                        .run()
-                      return
-                    }
-                    // 显式同列赋值覆盖Drizzle的onUpdate，确保此替换确实保留快照时间。
-                    db.update(PartTable)
-                      .set({
-                        time_updated: PartTable.time_updated,
-                        data: {
-                          type: "tool",
-                          tool: value.tool,
-                          callID: value.callID,
-                          state: { ...value.state, output: "updated output" },
-                        },
-                      })
-                      .where(eq(PartTable.id, value.id))
+                  if (action === "delete") {
+                    // 真正删除行，能捕获把旧快照误当成upsert输入的回归。
+                    db.delete(PartTable).where(eq(PartTable.id, value.id)).run()
+                    return
+                  }
+                  if (action === "activity") {
+                    // owner内容保持原样，单独检验Session重新活跃后的资格复核。
+                    db.update(SessionTable)
+                      .set({ time_updated: Date.now() })
+                      .where(eq(SessionTable.id, session.id))
                       .run()
+                    return
+                  }
+                  // 显式同列赋值覆盖Drizzle的onUpdate，确保此替换确实保留快照时间。
+                  db.update(PartTable)
+                    .set({
+                      time_updated: PartTable.time_updated,
+                      data: {
+                        type: "tool",
+                        tool: value.tool,
+                        callID: value.callID,
+                        state: { ...value.state, output: "updated output" },
+                      },
+                    })
+                    .where(eq(PartTable.id, value.id))
+                    .run()
                 }, 0)
               },
             },
@@ -354,7 +370,7 @@ it.instance("explicit recompress reduces an existing frame and preserves owner i
       },
     }
     yield* sessions.updatePart(value)
-    yield* withDb(db => ColdStorage.freezeOwner(db, { type: "part", id: value.id, olderThanMs: 0 }))
+    yield* withDb((db) => ColdStorage.freezeOwner(db, { type: "part", id: value.id, olderThanMs: 0 }))
     const owner = yield* withDb((db) => db.select().from(PartTable).where(eq(PartTable.id, value.id)).get())
     if (!owner?.cold_ref) throw new Error("Expected a frozen owner")
     const before = yield* withDb((db) =>
@@ -449,14 +465,17 @@ it.instance("manual cold Text preserves complete reads and root Text", () =>
       })
       yield* sessions.updatePart({ id, messageID, sessionID: session.id, type: "text", text })
       // eligibility 使用持久 chronology，而不是业务 JSON 中的 created 字段。
-      yield* withDb((db) => db.update(MessageTable).set({ time_created: 1 }).where(eq(MessageTable.id, messageID)).run())
+      yield* withDb((db) =>
+        db.update(MessageTable).set({ time_created: 1 }).where(eq(MessageTable.id, messageID)).run(),
+      )
       const frozen = yield* withDb((db) => ColdStorage.freezeOwner(db, { type: "part", id, olderThanMs: 0 }))
       expect(frozen.type).toBe(session.id === child.id ? "frozen" : "skipped")
       if (session.id === root.id) {
         const totals: number[] = []
         // 年龄0也保留root搜索正文，维护应在读取候选时直接排除它。
         const maintenance = yield* Effect.promise(() =>
-          runMaintenance(database,
+          runMaintenance(
+            database,
             ColdMaintain.prepareMaintenance({
               operation: "compress",
               sessionID: root.id,
@@ -487,7 +506,9 @@ it.instance("manual cold Text preserves complete reads and root Text", () =>
         expect((yield* sessions.list({ search: "中文 % _" })).some((item) => item.id === child.id)).toBe(true)
         // 完整读取之后再显式展开，区分返回值恢复和数据库持久恢复两个合同。
         expect(yield* withDb((db) => ColdStorage.thawOwner(db, { type: "part", id }))).toBe(true)
-        expect((yield* withDb((db) => db.select().from(PartTable).where(eq(PartTable.id, id)).get()))?.cold_ref).toBeNull()
+        expect(
+          (yield* withDb((db) => db.select().from(PartTable).where(eq(PartTable.id, id)).get()))?.cold_ref,
+        ).toBeNull()
       }
     }
   }),
@@ -544,28 +565,31 @@ for (const scoped of [false, true])
       const raw = Buffer.from(JSON.stringify({ entries, owner: "message", version: 2 }))
       const hash = createHash("sha256").update("message-pack\0").update(raw).digest("hex")
       const payload = Buffer.from(Bun.zstdCompressSync(raw))
-      yield* withDb(db => db.transaction((db) => {
-        db.insert(ColdStorageTable)
-          .values({
-            hash,
-            kind: "message-pack",
-            codec: "zstd",
-            payload,
-            raw_bytes: raw.length,
-            compressed_bytes: payload.length,
-            ref_count: 2,
-            time_created: 1,
-            time_updated: 1,
-          })
-          .run()
-        for (const id of [userID, assistantID])
-          db.update(MessageTable)
-            .set({ cold_ref: hash, cold_key: id === userID ? userKey : key })
-            .where(eq(MessageTable.id, id))
+      yield* withDb((db) =>
+        db.transaction((db) => {
+          db.insert(ColdStorageTable)
+            .values({
+              hash,
+              kind: "message-pack",
+              codec: "zstd",
+              payload,
+              raw_bytes: raw.length,
+              compressed_bytes: payload.length,
+              ref_count: 2,
+              time_created: 1,
+              time_updated: 1,
+            })
             .run()
-      }))
+          for (const id of [userID, assistantID])
+            db.update(MessageTable)
+              .set({ cold_ref: hash, cold_key: id === userID ? userKey : key })
+              .where(eq(MessageTable.id, id))
+              .run()
+        }),
+      )
       const result = yield* Effect.promise(() =>
-        runMaintenance(database,
+        runMaintenance(
+          database,
           ColdMaintain.prepareMaintenance({
             operation: "compress",
             sessionID: session.id,
@@ -629,34 +653,37 @@ it.instance("repack includes envelope bytes at the pack size boundary", () =>
     const hash = createHash("sha256").update("message-pack\0").update(raw).digest("hex")
     const payload = Buffer.from(Bun.zstdCompressSync(raw))
     for (const message of messages) yield* sessions.updateMessage(message)
-    yield* withDb(db => db.transaction((db) => {
-      db.insert(ColdStorageTable)
-        .values({
-          hash,
-          kind: "message-pack",
-          codec: "zstd",
-          payload,
-          raw_bytes: raw.length,
-          compressed_bytes: payload.length,
-          ref_count: 2,
-          time_created: 1,
-          time_updated: 1,
-        })
-        .run()
-      for (const [index, message] of messages.entries()) {
-        db.update(MessageTable)
-          .set({
-            // 热投影移去path，完整读取必须确实从旧包恢复它。
-            data: sql`json_remove(${MessageTable.data}, '$.path')`,
-            cold_ref: hash,
-            cold_key: Buffer.from(entries[index].key, "hex"),
+    yield* withDb((db) =>
+      db.transaction((db) => {
+        db.insert(ColdStorageTable)
+          .values({
+            hash,
+            kind: "message-pack",
+            codec: "zstd",
+            payload,
+            raw_bytes: raw.length,
+            compressed_bytes: payload.length,
+            ref_count: 2,
+            time_created: 1,
+            time_updated: 1,
           })
-          .where(eq(MessageTable.id, message.id))
           .run()
-      }
-    }))
+        for (const [index, message] of messages.entries()) {
+          db.update(MessageTable)
+            .set({
+              // 热投影移去path，完整读取必须确实从旧包恢复它。
+              data: sql`json_remove(${MessageTable.data}, '$.path')`,
+              cold_ref: hash,
+              cold_key: Buffer.from(entries[index].key, "hex"),
+            })
+            .where(eq(MessageTable.id, message.id))
+            .run()
+        }
+      }),
+    )
     yield* Effect.promise(() =>
-      runMaintenance(database,
+      runMaintenance(
+        database,
         ColdMaintain.prepareMaintenance({
           operation: "compress",
           sessionID: session.id,
@@ -712,7 +739,9 @@ it.instance("compact packs retain full content and exact tool statistics", () =>
       },
     }
     yield* sessions.updatePart(value)
-    expect((yield* withDb((db) => ColdStorage.freezeOwner(db, { type: "part", id, olderThanMs: 0 }))).type).toBe("frozen")
+    expect((yield* withDb((db) => ColdStorage.freezeOwner(db, { type: "part", id, olderThanMs: 0 }))).type).toBe(
+      "frozen",
+    )
     const row = yield* withDb((db) => db.select().from(PartTable).where(eq(PartTable.id, id)).get())
     if (!row) throw new Error("Tool owner disappeared")
     // 检查存储定位开销，同时完整哈希校验仍由公开 verify 承担。
@@ -729,7 +758,9 @@ it.instance("compact packs retain full content and exact tool statistics", () =>
     const ownerRef = row.cold_ref
     if (!ownerRef) throw new Error("Tool owner lost its cold reference")
     // 沿冷引用定位本例的包，缺失时明确失败，避免误读其他夹具的数据。
-    const packed = yield* withDb((db) => db.select().from(ColdStorageTable).where(eq(ColdStorageTable.hash, ownerRef)).get())
+    const packed = yield* withDb((db) =>
+      db.select().from(ColdStorageTable).where(eq(ColdStorageTable.hash, ownerRef)).get(),
+    )
     if (!packed) throw new Error("Packed payload missing for the frozen owner")
     const fields = {
       // 直接给定旧协议字段，避免调用新 writer 生成旧格式而形成同源自证。
@@ -745,14 +776,16 @@ it.instance("compact packs retain full content and exact tool statistics", () =>
     )
     const hash = createHash("sha256").update("part-pack\0").update(raw).digest("hex")
     const payload = Buffer.from(Bun.zstdCompressSync(raw))
-    yield* withDb((sync) => sync.transaction((db) => {
-      // 先建立旧包再切引用，夹具也遵守 RESTRICT 外键及原子替换顺序。
-      db.insert(ColdStorageTable)
-        .values({ ...packed, hash, payload, raw_bytes: raw.length, compressed_bytes: payload.length })
-        .run()
-      db.update(PartTable).set({ cold_ref: hash, cold_key: legacyKey }).where(eq(PartTable.id, id)).run()
-      db.delete(ColdStorageTable).where(eq(ColdStorageTable.hash, packed.hash)).run()
-    }))
+    yield* withDb((sync) =>
+      sync.transaction((db) => {
+        // 先建立旧包再切引用，夹具也遵守 RESTRICT 外键及原子替换顺序。
+        db.insert(ColdStorageTable)
+          .values({ ...packed, hash, payload, raw_bytes: raw.length, compressed_bytes: payload.length })
+          .run()
+        db.update(PartTable).set({ cold_ref: hash, cold_key: legacyKey }).where(eq(PartTable.id, id)).run()
+        db.delete(ColdStorageTable).where(eq(ColdStorageTable.hash, packed.hash)).run()
+      }),
+    )
     const prepared = ColdMaintain.prepareMaintenance({
       operation: "compress",
       sessionID: session.id,
@@ -785,12 +818,12 @@ it.instance("compact packs retain full content and exact tool statistics", () =>
     )
     expect(resumed.type === "task" && resumed.task.status).toBe("completed")
     // 恢复后的完整值再与原输入比较，成功状态本身不能证明迁移保真。
-    expect((yield* withDb((db) => db.select().from(PartTable).where(eq(PartTable.id, id)).get()))?.cold_key?.length).toBe(
-      4,
-    )
+    expect(
+      (yield* withDb((db) => db.select().from(PartTable).where(eq(PartTable.id, id)).get()))?.cold_key?.length,
+    ).toBe(4)
     expect((yield* MessageV2.get({ sessionID: session.id, messageID })).parts).toEqual([value])
     expect(yield* withDb((db) => ColdStorage.thawOwner(db, { type: "part", id }))).toBe(true)
-    expect([...(yield* payloadHashes())].filter(hash => !beforePayloads.has(hash))).toEqual([])
+    expect([...(yield* payloadHashes())].filter((hash) => !beforePayloads.has(hash))).toEqual([])
     // 最后一个 owner 展开后释放包，防止逻辑成功却遗留冗余冷内容。
   }),
 )
@@ -901,7 +934,9 @@ it.instance("manual freeze admits a completed reviewer attempt in an active chil
     yield* sessions.updateMessage({ ...restored.info, hidden })
     const hiddenReply = yield* MessageV2.get({ sessionID: child.id, messageID: reply, includeHidden: true })
     expect(hiddenReply.info).toEqual({ ...restored.info, hidden })
-    expect(hiddenReply.info).toMatchObject({ inputEstimate: { bodyChars: 100, input: 25, confirmed: false, inputBreakdown: breakdown } })
+    expect(hiddenReply.info).toMatchObject({
+      inputEstimate: { bodyChars: 100, input: 25, confirmed: false, inputBreakdown: breakdown },
+    })
     expect((yield* MessageV2.page({ sessionID: child.id, limit: 10 })).items).toHaveLength(0)
     const text = result.parts.find((part) => part.type === "text")
     if (!text) throw new Error("Reviewer request Text missing")
@@ -997,35 +1032,44 @@ it.instance("resumed repack retains every destination until all owners move", ()
       },
     })
     // checkpoint 包同样手工构造 legacy 形态；与下方 Q/P/R 同一插入纪律。
-    yield* withDb(db => db.transaction((db) => {
-      db.insert(ColdStorageTable)
-        .values({
-          hash: checkpoint.hash,
-          kind: "part-pack",
-          codec: "zstd",
-          payload: checkpoint.payload,
-          raw_bytes: checkpoint.raw.length,
-          compressed_bytes: checkpoint.payload.length,
-          ref_count: 1,
-          time_created: 1,
-          time_updated: 1,
-        })
-        .run()
-      db.update(PartTable)
-        .set({
-          data: {
-            type: "tool",
-            tool: "read",
-            callID: "checkpoint",
-            state: { status: "completed", input: {}, output: "", title: "", metadata: {}, time: { start: 1, end: 2 } },
-          },
-          cold_ref: checkpoint.hash,
-          cold_key: Buffer.from(checkpoint.entries[0].key, "hex"),
-          cold_stats: [2, 0, 2, checkpointOutput.length],
-        })
-        .where(eq(PartTable.id, checkpointID))
-        .run()
-    }))
+    yield* withDb((db) =>
+      db.transaction((db) => {
+        db.insert(ColdStorageTable)
+          .values({
+            hash: checkpoint.hash,
+            kind: "part-pack",
+            codec: "zstd",
+            payload: checkpoint.payload,
+            raw_bytes: checkpoint.raw.length,
+            compressed_bytes: checkpoint.payload.length,
+            ref_count: 1,
+            time_created: 1,
+            time_updated: 1,
+          })
+          .run()
+        db.update(PartTable)
+          .set({
+            data: {
+              type: "tool",
+              tool: "read",
+              callID: "checkpoint",
+              state: {
+                status: "completed",
+                input: {},
+                output: "",
+                title: "",
+                metadata: {},
+                time: { start: 1, end: 2 },
+              },
+            },
+            cold_ref: checkpoint.hash,
+            cold_key: Buffer.from(checkpoint.entries[0].key, "hex"),
+            cold_stats: [2, 0, 2, checkpointOutput.length],
+          })
+          .where(eq(PartTable.id, checkpointID))
+          .run()
+      }),
+    )
     const prepared = ColdMaintain.prepareMaintenance({
       operation: "compress",
       sessionID: session.id,
@@ -1078,38 +1122,42 @@ it.instance("resumed repack retains every destination until all owners move", ()
       yield* sessions.updatePart(value)
       const entry = record.pack.entries.find((item) => item.fields === record.value)
       if (!entry) throw new Error("Fixture entry missing from its pack")
-      yield* withDb((sync) => sync.transaction((db) => {
-        db.insert(ColdStorageTable)
-          .values({
-            hash: record.pack.hash,
-            kind: "part-pack",
-            codec: "zstd",
-            payload: record.pack.payload,
-            raw_bytes: record.pack.raw.length,
-            compressed_bytes: record.pack.payload.length,
-            ref_count: 1,
-            time_created: 1,
-            time_updated: 1,
-          })
-          .run()
-        db.update(PartTable)
-          .set({
-            data: { type: "tool", tool: "read", callID: id, state: { ...value.state, output: "", title: "" } },
-            cold_ref: record.pack.hash,
-            // v2 的 cold_key 是完整 32 字节 entry key；slot 短定位键由重打包后的 v3 包分配。
-            cold_key: Buffer.from(entry.key, "hex"),
-            cold_stats: [2, 0, 2, value.state.output.length],
-          })
-          .where(eq(PartTable.id, id))
-          .run()
-      }))
+      yield* withDb((sync) =>
+        sync.transaction((db) => {
+          db.insert(ColdStorageTable)
+            .values({
+              hash: record.pack.hash,
+              kind: "part-pack",
+              codec: "zstd",
+              payload: record.pack.payload,
+              raw_bytes: record.pack.raw.length,
+              compressed_bytes: record.pack.payload.length,
+              ref_count: 1,
+              time_created: 1,
+              time_updated: 1,
+            })
+            .run()
+          db.update(PartTable)
+            .set({
+              data: { type: "tool", tool: "read", callID: id, state: { ...value.state, output: "", title: "" } },
+              cold_ref: record.pack.hash,
+              // v2 的 cold_key 是完整 32 字节 entry key；slot 短定位键由重打包后的 v3 包分配。
+              cold_key: Buffer.from(entry.key, "hex"),
+              cold_stats: [2, 0, 2, value.state.output.length],
+            })
+            .where(eq(PartTable.id, id))
+            .run()
+        }),
+      )
     }
     yield* expectVerifyDelta(verifyBase)
     // 原始任务参数和实际持久 cursor 原样恢复，不伪造进度或修改 Session scope。
     const task = ColdMaintain.parseMaintenanceTask(interrupted.task)
     const result = yield* Effect.promise(() =>
       ColdMaintain.maintain(database.sync, prepared, {
-        task, lease: { assertOwned() {} }, checkpoint: async () => {},
+        task,
+        lease: { assertOwned() {} },
+        checkpoint: async () => {},
         run: <A>(body: () => A) => Effect.runPromise(Database.withSync(database, body)),
       }),
     )
@@ -1157,25 +1205,27 @@ it.instance("repack merges newly eligible v3 entries and leaves clean packs unto
     )
     const legacyHash = createHash("sha256").update("message-pack\0").update(raw).digest("hex")
     const payload = Buffer.from(Bun.zstdCompressSync(raw))
-    yield* withDb(db => db.transaction((db) => {
-      db.insert(ColdStorageTable)
-        .values({
-          hash: legacyHash,
-          kind: "message-pack",
-          codec: "zstd",
-          payload,
-          raw_bytes: raw.length,
-          compressed_bytes: payload.length,
-          ref_count: 1,
-          time_created: 1,
-          time_updated: 1,
-        })
-        .run()
-      db.update(MessageTable)
-        .set({ cold_ref: legacyHash, cold_key: legacyKey })
-        .where(eq(MessageTable.id, messageID))
-        .run()
-    }))
+    yield* withDb((db) =>
+      db.transaction((db) => {
+        db.insert(ColdStorageTable)
+          .values({
+            hash: legacyHash,
+            kind: "message-pack",
+            codec: "zstd",
+            payload,
+            raw_bytes: raw.length,
+            compressed_bytes: payload.length,
+            ref_count: 1,
+            time_created: 1,
+            time_updated: 1,
+          })
+          .run()
+        db.update(MessageTable)
+          .set({ cold_ref: legacyHash, cold_key: legacyKey })
+          .where(eq(MessageTable.id, messageID))
+          .run()
+      }),
+    )
     const prepared = () =>
       ColdMaintain.prepareMaintenance({
         operation: "compress",

@@ -115,7 +115,12 @@ function releaseReference(db: TxOrDb, table: typeof MessageTable, id: MessageID,
 
 function releaseReference(db: TxOrDb, table: typeof PartTable, id: PartID, hash: string | null): void
 
-function releaseReference(db: TxOrDb, table: typeof SessionMessageTable, id: SessionMessage.ID, hash: string | null): void
+function releaseReference(
+  db: TxOrDb,
+  table: typeof SessionMessageTable,
+  id: SessionMessage.ID,
+  hash: string | null,
+): void
 function releaseReference(
   db: TxOrDb,
   table: typeof MessageTable | typeof PartTable | typeof SessionMessageTable,
@@ -134,7 +139,10 @@ function releaseReference(
       .where(eq(PartTable.id, PartID.make(id)))
       .run()
   } else {
-    db.update(SessionMessageTable).set({ cold_ref: null, cold_key: null, cold_stats: null }).where(eq(SessionMessageTable.id, SessionMessage.ID.make(id))).run()
+    db.update(SessionMessageTable)
+      .set({ cold_ref: null, cold_key: null, cold_stats: null })
+      .where(eq(SessionMessageTable.id, SessionMessage.ID.make(id)))
+      .run()
   }
   release(db, hash)
 }
@@ -222,20 +230,41 @@ export function releaseMessage(db: TxOrDb, messageID: MessageID, sessionID: Sess
 }
 
 // 删除范围由调用者按session/seq确定；不解压即将删除的正文，也不越界释放其他请求。
-export function releaseSessionMessageRows(db: TxOrDb, rows: Pick<typeof SessionMessageTable.$inferSelect, "id" | "cold_ref">[]) {
+export function releaseSessionMessageRows(
+  db: TxOrDb,
+  rows: Pick<typeof SessionMessageTable.$inferSelect, "id" | "cold_ref">[],
+) {
   for (const row of rows) if (row.cold_ref) releaseReference(db, SessionMessageTable, row.id, row.cold_ref)
 }
 
 // 完整Native replacement只清理旧引用，不用占位值猜测调用者是否修改了冷字段。
-export function replaceSessionMessage(db: TxOrDb, input: {
-  id: SessionMessage.ID; session_id: SessionID; type: SessionMessage.Type;
-  time_created: number; data: (typeof SessionMessageTable.$inferSelect)["data"];
-}) {
-  const previous = db.select().from(SessionMessageTable)
-    .where(and(eq(SessionMessageTable.id, input.id), eq(SessionMessageTable.session_id, input.session_id))).get()
+export function replaceSessionMessage(
+  db: TxOrDb,
+  input: {
+    id: SessionMessage.ID
+    session_id: SessionID
+    type: SessionMessage.Type
+    time_created: number
+    data: (typeof SessionMessageTable.$inferSelect)["data"]
+  },
+) {
+  const previous = db
+    .select()
+    .from(SessionMessageTable)
+    .where(and(eq(SessionMessageTable.id, input.id), eq(SessionMessageTable.session_id, input.session_id)))
+    .get()
   if (!previous) return
-  db.update(SessionMessageTable).set({ type: input.type, time_created: input.time_created, data: input.data, cold_ref: null, cold_key: null, cold_stats: null })
-    .where(and(eq(SessionMessageTable.id, input.id), eq(SessionMessageTable.session_id, input.session_id))).run()
+  db.update(SessionMessageTable)
+    .set({
+      type: input.type,
+      time_created: input.time_created,
+      data: input.data,
+      cold_ref: null,
+      cold_key: null,
+      cold_stats: null,
+    })
+    .where(and(eq(SessionMessageTable.id, input.id), eq(SessionMessageTable.session_id, input.session_id)))
+    .run()
   if (previous.cold_ref) release(db, previous.cold_ref)
 }
 
@@ -243,7 +272,10 @@ export function replaceSessionMessage(db: TxOrDb, input: {
 // Part 先于 Message 释放与 Message 删除路径一致，transaction 失败时 session 和 payload 都保持原状。
 // 该 primary path 保证 verify --repair 是外部破坏修复工具，而不是正常删除后的最终一致性补丁。
 export function releaseSession(db: TxOrDb, sessionID: SessionID) {
-  releaseSessionMessageRows(db, db.select().from(SessionMessageTable).where(eq(SessionMessageTable.session_id, sessionID)).all())
+  releaseSessionMessageRows(
+    db,
+    db.select().from(SessionMessageTable).where(eq(SessionMessageTable.session_id, sessionID)).all(),
+  )
   const parts = db
     .select({ id: PartTable.id, cold_ref: PartTable.cold_ref })
     .from(PartTable)
@@ -500,18 +532,35 @@ export function matchColdText(db: TxOrDb, tokens: string[], scope?: SQL) {
     })
   }
   // Native正文沿同一候选宇宙和token集合匹配；不检索reasoning、Tool结果或技术Synthetic。
-  const native = db.select().from(SessionMessageTable).innerJoin(SessionTable, eq(SessionTable.id, SessionMessageTable.session_id)).where(and(
-    scope, isNotNull(SessionMessageTable.cold_ref), isNotNull(SessionMessageTable.cold_key), inArray(SessionMessageTable.type, ["user", "assistant"]),
-    sql`not coalesce((json_extract(${SessionMessageTable.data}, '$.metadata.hidden.reason') = 'permission-reviewer-protocol-retry'
+  const native = db
+    .select()
+    .from(SessionMessageTable)
+    .innerJoin(SessionTable, eq(SessionTable.id, SessionMessageTable.session_id))
+    .where(
+      and(
+        scope,
+        isNotNull(SessionMessageTable.cold_ref),
+        isNotNull(SessionMessageTable.cold_key),
+        inArray(SessionMessageTable.type, ["user", "assistant"]),
+        sql`not coalesce((json_extract(${SessionMessageTable.data}, '$.metadata.hidden.reason') = 'permission-reviewer-protocol-retry'
       and json_type(${SessionMessageTable.data}, '$.metadata.hidden.time') = 'integer'
       and json_extract(${SessionMessageTable.data}, '$.metadata.hidden.time') >= 0), 0)`,
-  )).orderBy(SessionMessageTable.cold_ref).all()
+      ),
+    )
+    .orderBy(SessionMessageTable.cold_ref)
+    .all()
   hash = undefined
   for (const item of native) {
     const row = item.session_message
     const data: unknown = row.data
-    const paths = row.type === "user" ? ["text"] : isRecord(data) && Array.isArray(data.content)
-      ? data.content.flatMap((part, index) => isRecord(part) && part.type === "text" ? [`content.${index}.text`] : []) : []
+    const paths =
+      row.type === "user"
+        ? ["text"]
+        : isRecord(data) && Array.isArray(data.content)
+          ? data.content.flatMap((part, index) =>
+              isRecord(part) && part.type === "text" ? [`content.${index}.text`] : [],
+            )
+          : []
     if (!paths.length) continue
     if (!row.cold_ref || !row.cold_key) throw new CorruptionError({ message: "Native cold Text locator is incomplete" })
     if (hash !== row.cold_ref) {
@@ -524,7 +573,7 @@ export function matchColdText(db: TxOrDb, tokens: string[], scope?: SQL) {
       const text = fields[path]
       if (text === undefined) continue
       if (typeof text !== "string") throw new CorruptionError({ message: "Native cold Text body is invalid", hash })
-      const folded = text.replace(/[A-Z]/g, letter => letter.toLowerCase())
+      const folded = text.replace(/[A-Z]/g, (letter) => letter.toLowerCase())
       tokens.forEach((token, index) => {
         if (folded.includes(token)) result[index].add(row.session_id)
       })

@@ -16,10 +16,10 @@ A future explorer could reasonably assume one system replaces the other — e.g.
 
 The two systems **coexist** and operate on orthogonal axes:
 
-| System                    | Axis            | Mechanism            | Owner                              |
-| ------------------------- | --------------- | -------------------- | ---------------------------------- |
-| Team-assignment agent     | Who works on it | Issue **assignee**   | `.opencode/agent/triage.md` (auto) |
-| mattpocock `triage` skill | Lifecycle state | Issue **labels**     | Invoked on demand by a skill       |
+| System                    | Axis            | Mechanism          | Owner                              |
+| ------------------------- | --------------- | ------------------ | ---------------------------------- |
+| Team-assignment agent     | Who works on it | Issue **assignee** | `.opencode/agent/triage.md` (auto) |
+| mattpocock `triage` skill | Lifecycle state | Issue **labels**   | Invoked on demand by a skill       |
 
 - The team-assignment agent owns **assignment**. The mattpocock `triage` skill owns **lifecycle labels**.
 - When the mattpocock `triage` skill runs, it adds/removes the five lifecycle labels and **leaves assignment untouched**.

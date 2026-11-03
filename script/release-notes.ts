@@ -58,15 +58,17 @@ function kind(subject: string) {
 async function log(range: string) {
   // %H%x00%s 用 NUL 分隔 hash 与 subject，规避 subject 内含空格或特殊字符时的切分歧义。
   const text = await $`git log ${range} --format=%H%x00%s --reverse`.text()
-  return text
-    .split("\n")
-    .filter(Boolean)
-    .map((line): Entry => {
-      const sep = line.indexOf("\0")
-      return { hash: line.slice(0, sep), subject: line.slice(sep + 1) }
-    })
-    // Merge 提交只是合并噪音，不属于本仓的语义变更，统一过滤。
-    .filter((item) => item.hash && item.subject && !item.subject.startsWith("Merge "))
+  return (
+    text
+      .split("\n")
+      .filter(Boolean)
+      .map((line): Entry => {
+        const sep = line.indexOf("\0")
+        return { hash: line.slice(0, sep), subject: line.slice(sep + 1) }
+      })
+      // Merge 提交只是合并噪音，不属于本仓的语义变更，统一过滤。
+      .filter((item) => item.hash && item.subject && !item.subject.startsWith("Merge "))
+  )
 }
 
 function stats(list: Entry[]) {
@@ -122,7 +124,14 @@ if (!prev) {
 
   // 有 bump 且确有新增才分两节；bump 后零提交的异常重发由单节分支兜底。
   if (bump && current.length > 0) {
-    lines.push(`## ${tag} 新增`, "", `本版共 ${current.length} 项变更（${stats(current)}）。`, "", ...current.map(line), "")
+    lines.push(
+      `## ${tag} 新增`,
+      "",
+      `本版共 ${current.length} 项变更（${stats(current)}）。`,
+      "",
+      ...current.map(line),
+      "",
+    )
     if (accumulated.length > 0) {
       // 积累区默认折叠：同版本重发常伴随大量历史提交，展开会淹没本版新增。
       lines.push(
@@ -137,13 +146,24 @@ if (!prev) {
     }
   } else if (accumulated.length > 0) {
     // 无版本 bump（同版本重发或手动覆盖版本号）：单节展示全部增量，无需折叠
-    lines.push(`## 自 ${prev} 以来的变更`, "", `共 ${accumulated.length} 项变更（${stats(accumulated)}）。`, "", ...accumulated.map(line), "")
+    lines.push(
+      `## 自 ${prev} 以来的变更`,
+      "",
+      `共 ${accumulated.length} 项变更（${stats(accumulated)}）。`,
+      "",
+      ...accumulated.map(line),
+      "",
+    )
   } else {
     lines.push("本版无代码变更。", "")
   }
 
   // 页脚携带完整 compare 链接：读者从 Release 页即可进入逐提交 diff，不必信任摘要。
-  lines.push("---", "", `完整对比：[${prev}...${tag}](https://github.com/${repo}/compare/${prev}...${tag}) · 自动构建于 \`${sha.slice(0, 9)}\``)
+  lines.push(
+    "---",
+    "",
+    `完整对比：[${prev}...${tag}](https://github.com/${repo}/compare/${prev}...${tag}) · 自动构建于 \`${sha.slice(0, 9)}\``,
+  )
 }
 
 // trim 掉分段 join 产生的首尾空白后补单一换行，保证文件以恰好一个换行符结束。

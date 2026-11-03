@@ -807,27 +807,35 @@ compaction: {
 
 ```markdown
 ## Objective
+
 - ...
 
 ## Confirmed Constraints
+
 - ...
 
 ## Key Files
+
 - path: role / status
 
 ## Completed Work
+
 - ...
 
 ## Pending Work
+
 - ...
 
 ## Recent Failures or Risks
+
 - ...
 
 ## Working Set
+
 - ...
 
 ## Recommended Next Step
+
 - ...
 ```
 

@@ -22,4 +22,3 @@ describe("Prompt component integration points", () => {
     })
   })
 })
-

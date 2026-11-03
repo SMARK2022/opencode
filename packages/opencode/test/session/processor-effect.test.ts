@@ -283,7 +283,12 @@ const toolBearingScript = scriptedLlmRunner([
   LLMEvent.stepStart({ index: 0 }),
   LLMEvent.toolInputStart({ id: "call-tb", name: "bash" }),
   LLMEvent.toolCall({ id: "call-tb", name: "bash", input: {}, providerExecuted: true }),
-  LLMEvent.toolResult({ id: "call-tb", name: "bash", result: { type: "error", value: "tool settled before output limit" }, providerExecuted: true }),
+  LLMEvent.toolResult({
+    id: "call-tb",
+    name: "bash",
+    result: { type: "error", value: "tool settled before output limit" },
+    providerExecuted: true,
+  }),
   LLMEvent.textStart({ id: "txt-tb" }),
   LLMEvent.textDelta({ id: "txt-tb", text: "x".repeat(65_537) }),
 ])
@@ -293,7 +298,8 @@ const toolBearingScript = scriptedLlmRunner([
 let textCompleteExpanded = false
 const expandingTextPlugin = Layer.mock(Plugin.Service)({
   trigger: <Name extends string, Input, Output>(name: Name, _input: Input, output: Output) => {
-    if (name !== "experimental.text.complete" || typeof output !== "object" || output === null) return Effect.succeed(output)
+    if (name !== "experimental.text.complete" || typeof output !== "object" || output === null)
+      return Effect.succeed(output)
     const text = Reflect.get(output, "text")
     // module 级一次性扩张标记必须在用例内重置，否则重跑时第二次扩张缺失。
     if (typeof text !== "string" || textCompleteExpanded) return Effect.succeed(output)
@@ -424,7 +430,6 @@ function parallelToolCalls(calls: Array<{ id: string; name: string; args: string
 function denyDoomLoopConfig(url: string) {
   return { ...providerCfg(url), permission: { doom_loop: "deny" as const } }
 }
-
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -1359,8 +1364,12 @@ it.live("session.processor effect tests mark pending tools as aborted on cleanup
         // 使用真实数据库账本与已持久化用户身份，不复制结算逻辑或猜测最新请求。
         const usage = SessionRequestUsage.make(database.db)
         yield* usage.begin({
-          sessionID: chat.id, requestID: parent.id, source: "prompt", agent: "build",
-          providerID: ref.providerID, modelID: ref.modelID,
+          sessionID: chat.id,
+          requestID: parent.id,
+          source: "prompt",
+          agent: "build",
+          providerID: ref.providerID,
+          modelID: ref.modelID,
         })
         const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
         const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
@@ -1374,14 +1383,16 @@ it.live("session.processor effect tests mark pending tools as aborted on cleanup
         let observedRaw = ""
         let durableRaw: string | undefined
         const events = yield* EventV2Bridge.Service
-        const unsubscribe = yield* events.listen((event) => Effect.gen(function* () {
-          if (event.type !== MessageV2.Event.PartDelta.type) return
-          const data = Schema.decodeUnknownSync(MessageV2.Event.PartDelta.data)(event.data)
-          if (data.messageID !== msg.id || data.field !== "raw") return
-          const part = yield* session.getPart({ sessionID: chat.id, messageID: msg.id, partID: data.partID })
-          if (part?.type === "tool" && part.state.status === "pending") durableRaw = part.state.raw
-          observedRaw += data.delta
-        }))
+        const unsubscribe = yield* events.listen((event) =>
+          Effect.gen(function* () {
+            if (event.type !== MessageV2.Event.PartDelta.type) return
+            const data = Schema.decodeUnknownSync(MessageV2.Event.PartDelta.data)(event.data)
+            if (data.messageID !== msg.id || data.field !== "raw") return
+            const part = yield* session.getPart({ sessionID: chat.id, messageID: msg.id, partID: data.partID })
+            if (part?.type === "tool" && part.state.status === "pending") durableRaw = part.state.raw
+            observedRaw += data.delta
+          }),
+        )
         yield* Effect.addFinalizer(() => unsubscribe)
 
         const run = yield* handle
@@ -1413,7 +1424,10 @@ it.live("session.processor effect tests mark pending tools as aborted on cleanup
           "timed out waiting for tool part",
         )
         // fixture 发送半段参数后挂起；等待真实 delta 再取消，避免只测到空 pending 的 cleanup。
-        yield* waitFor(Effect.sync(() => observedRaw === '{"cmd"' ? true : undefined), "tool input delta not observed")
+        yield* waitFor(
+          Effect.sync(() => (observedRaw === '{"cmd"' ? true : undefined)),
+          "tool input delta not observed",
+        )
         expect(observedRaw).toBe('{"cmd"')
         expect(durableRaw).toBe("")
 
@@ -1442,13 +1456,21 @@ it.live("session.processor effect tests mark pending tools as aborted on cleanup
         // Fiber 退出后读取编码后的助手终态，协调信号完成不能代替消息落盘。
         const stored = yield* MessageV2.get({ sessionID: chat.id, messageID: msg.id })
         expect(stored.info).toMatchObject({
-          id: msg.id, parentID: parent.id, role: "assistant",
-          error: { name: "MessageAbortedError" }, time: { completed: expect.any(Number) },
+          id: msg.id,
+          parentID: parent.id,
+          role: "assistant",
+          error: { name: "MessageAbortedError" },
+          time: { completed: expect.any(Number) },
         })
         // 没有 step-finish 的取消仍须闭合请求；未解析工具输入不能被当作 provider 用量。
         expect(yield* usage.get({ sessionID: chat.id, requestID: parent.id })).toMatchObject({
-          rootRequestID: parent.id, status: "aborted", assistantCount: 1, stepCount: 0,
-          cost: 0, tokens: { total: 0 }, time: { completed: expect.any(Number) },
+          rootRequestID: parent.id,
+          status: "aborted",
+          assistantCount: 1,
+          stepCount: 0,
+          cost: 0,
+          tokens: { total: 0 },
+          time: { completed: expect.any(Number) },
         })
         // 明细身份固定为本次助手与调用者请求，拒绝错属或只修改内存的假结算。
         expect(yield* usage.assistants({ sessionID: chat.id, requestID: parent.id })).toMatchObject([
@@ -1702,9 +1724,7 @@ it.live("doom_loop AND: same-batch parallel different-input errors do not trigge
 // 故用 "unknown" 代表同一未知 finish 族，直达 processor 的空完成检测逻辑。
 function emptyCompletionSse() {
   return raw({
-    head: [
-      { id: "chatcmpl-test", object: "chat.completion.chunk", choices: [{ delta: { role: "assistant" } }] },
-    ],
+    head: [{ id: "chatcmpl-test", object: "chat.completion.chunk", choices: [{ delta: { role: "assistant" } }] }],
     tail: [
       { id: "chatcmpl-test", object: "chat.completion.chunk", choices: [{ delta: {}, finish_reason: "unknown" }] },
     ],
@@ -1778,7 +1798,11 @@ it.live("session.processor partial output with finish_reason=other retries and r
               { id: "chatcmpl-test", object: "chat.completion.chunk", choices: [{ delta: { content: "partial" } }] },
             ],
             tail: [
-              { id: "chatcmpl-test", object: "chat.completion.chunk", choices: [{ delta: {}, finish_reason: "unknown" }] },
+              {
+                id: "chatcmpl-test",
+                object: "chat.completion.chunk",
+                choices: [{ delta: {}, finish_reason: "unknown" }],
+              },
             ],
           }),
           reply().text("recovered").stop(),
@@ -1886,10 +1910,7 @@ it.live("session.processor repeated over-limit output terminates with MessageOut
 
         // 两次响应都超限：首次进入既有 retry，第二次必须终态，
         // 否则确定性 provider 失败会在无上限 retry policy 下无限循环。
-        yield* llm.push(
-          reply().text("x".repeat(65_537)).stop(),
-          reply().text("y".repeat(65_537)).stop(),
-        )
+        yield* llm.push(reply().text("x".repeat(65_537)).stop(), reply().text("y".repeat(65_537)).stop())
 
         const chat = yield* session.create({})
         const parent = yield* user(chat.id, "repeated over-limit")
@@ -2072,7 +2093,11 @@ it.live("session.processor reasoning-only finish_reason=other retries and recove
           raw({
             head: [
               { id: "chatcmpl-test", object: "chat.completion.chunk", choices: [{ delta: { role: "assistant" } }] },
-              { id: "chatcmpl-test", object: "chat.completion.chunk", choices: [{ delta: { reasoning_content: "partial thinking" } }] },
+              {
+                id: "chatcmpl-test",
+                object: "chat.completion.chunk",
+                choices: [{ delta: { reasoning_content: "partial thinking" } }],
+              },
             ],
             tail: [
               {
@@ -2257,8 +2282,13 @@ it.live("doom_loop AND: hidden current Tool does not satisfy the threshold", () 
           if (turn === 1) {
             // #553：current message 追加 hidden error Tool——不计入连续失败阈值。
             yield* session.updatePart({
-              id: PartID.ascending(), messageID: msg.id, sessionID: chat.id,
-              type: "tool", callID: "hidden", tool: "read", hidden: { time: Date.now(), reason: "undo" },
+              id: PartID.ascending(),
+              messageID: msg.id,
+              sessionID: chat.id,
+              type: "tool",
+              callID: "hidden",
+              tool: "read",
+              hidden: { time: Date.now(), reason: "undo" },
               state: { status: "error", input: { path: "same" }, error: "hidden", time: { start: 0, end: 1 } },
             })
           }
@@ -2505,20 +2535,143 @@ unavailable.live("omits an image attachment when normalization is unavailable", 
 
 // #534：direct completion（abort adapter 等直达 completeToolCall 的路径）也必须经过统一准备边界；
 // hanging pendingTool 让 part 停在 running，测试侧用公开 Handle API 直达 completion（prepared=false 路径）。
-it.live("prepares malformed image attachments on direct tool completion", () =>
-  provideTmpdirServer(
-    ({ dir, llm }) =>
-      Effect.gen(function* () {
-        const { processors, session, provider } = yield* boot()
-        yield* llm.push(reply().pendingTool("direct", { path: "image.png" }).hang())
-        const chat = yield* session.create({})
-        const parent = yield* user(chat.id, "direct completion")
-        const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
-        const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
-        const handle = yield* processors.create({ assistantMessage: msg, sessionID: chat.id, model: mdl })
-        const scope = yield* Scope.Scope
-        const fiber = yield* handle
-          .process({
+it.live(
+  "prepares malformed image attachments on direct tool completion",
+  () =>
+    provideTmpdirServer(
+      ({ dir, llm }) =>
+        Effect.gen(function* () {
+          const { processors, session, provider } = yield* boot()
+          yield* llm.push(reply().pendingTool("direct", { path: "image.png" }).hang())
+          const chat = yield* session.create({})
+          const parent = yield* user(chat.id, "direct completion")
+          const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+          const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+          const handle = yield* processors.create({ assistantMessage: msg, sessionID: chat.id, model: mdl })
+          const scope = yield* Scope.Scope
+          const fiber = yield* handle
+            .process({
+              user: {
+                id: parent.id,
+                sessionID: chat.id,
+                role: "user",
+                time: parent.time,
+                agent: parent.agent,
+                model: { providerID: ref.providerID, modelID: ref.modelID },
+              } satisfies SessionV1.User,
+              sessionID: chat.id,
+              model: mdl,
+              agent: agent(),
+              system: [],
+              messages: [{ role: "user", content: "run direct completion" }],
+              tools: {},
+            })
+            .pipe(Effect.forkIn(scope, { startImmediately: true }))
+          // 等待 pending part 真实发布——以已发布信号为准，不用固定 sleep 猜调度。
+          yield* llm.wait(1)
+          const pending = yield* awaitWithTimeout(
+            Effect.gen(function* () {
+              while (true) {
+                const found = (yield* MessageV2.parts(msg.id)).find(
+                  (part): part is SessionV1.ToolPart => part.type === "tool" && part.tool === "direct",
+                )
+                if (found) return found
+                yield* Effect.sleep(20)
+              }
+            }),
+            "pending direct tool call was not published",
+            "10 seconds",
+          )
+          // 直达 completion 前先把 part 推进到 running——completeToolCall 只接受 running 终态写入。
+          yield* handle.updateToolCall(pending.callID, (part) => ({
+            ...part,
+            state: {
+              status: "running",
+              input: pending.state.input,
+              time: { start: Date.now() },
+            },
+          }))
+          // callID 与 tools.ts 五处直达调用点同一稳定标识；此处复现 abort adapter 的外部写入形态。
+          // 直达 completion：坏图片附件必须先过 prepareToolOutput，且 Tool 终态仍是 completed。
+          yield* handle.completeToolCall(pending.callID, {
+            title: "direct",
+            metadata: {},
+            output: "direct output",
+            attachments: [
+              {
+                id: PartID.ascending(),
+                messageID: msg.id,
+                sessionID: chat.id,
+                type: "file",
+                mime: "image/png",
+                url: "data:image/png;base64,AA==",
+              },
+            ],
+          })
+          const tool = (yield* MessageV2.parts(msg.id)).find(
+            (part): part is SessionV1.ToolPart => part.type === "tool" && part.tool === "direct",
+          )
+          // 图片内容失败不改变 Tool 成功完成的终态语义；
+          // attachment 缺失与 omission 同时检查，防止只追加诊断文本却仍把坏 bytes 落库。
+          expect(tool?.state.status).toBe("completed")
+          if (tool?.state.status !== "completed") return
+          expect(tool.state.output).toContain("direct output")
+          expect(tool.state.output).toContain(
+            "[1 image omitted: could not be decoded or resized within the image size limit.]",
+          )
+          expect(tool.state.attachments).toBeUndefined()
+          yield* Fiber.interrupt(fiber)
+        }),
+      { git: true, config: (url) => providerCfg(url) },
+    ),
+  30_000,
+)
+
+// #534：ordinary tool-result 与事件/落库消费同一 prepared snapshot——
+// 目标 V1 的 updatePart 单源写让 parity 由构造保证，测试锁定 DB 终态 + PartUpdated 事件真实发布。
+it.live(
+  "publishes and persists the same prepared ordinary tool output",
+  () =>
+    provideTmpdirServer(
+      ({ dir, llm }) =>
+        Effect.gen(function* () {
+          const { processors, session, provider } = yield* boot()
+          const bridge = yield* EventV2Bridge.Service
+          const seen: string[] = []
+          const off = yield* bridge.listen((event) => {
+            seen.push(event.type)
+            return Effect.void
+          })
+          // 订阅在 process 前建立：PartUpdated 若末发布则说明事件分支被旁路，而不是错过监听窗口。
+          yield* Effect.addFinalizer(() => off)
+          yield* llm.push(reply().tool("ordinary", { path: "bad.png" }))
+          const chat = yield* session.create({})
+          const parent = yield* user(chat.id, "ordinary result")
+          const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+          const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+          // #509：execute 返回的 attachments 会过 FilePart Schema；缺 id/messageID/sessionID 的原始对象被丢弃，
+          // 必须补全持久化字段才能真实进入 #534 的 prepare 边界。
+          const ordinary = tool({
+            description: "ordinary image result",
+            inputSchema: z.object({ path: z.string() }),
+            execute: async () => ({
+              title: "ordinary",
+              metadata: {},
+              output: "ordinary output",
+              attachments: [
+                {
+                  id: PartID.ascending(),
+                  messageID: msg.id,
+                  sessionID: chat.id,
+                  type: "file" as const,
+                  mime: "image/png",
+                  url: "data:image/png;base64,AA==",
+                },
+              ],
+            }),
+          })
+          const handle = yield* processors.create({ assistantMessage: msg, sessionID: chat.id, model: mdl })
+          yield* handle.process({
             user: {
               id: parent.id,
               sessionID: chat.id,
@@ -2531,141 +2684,22 @@ it.live("prepares malformed image attachments on direct tool completion", () =>
             model: mdl,
             agent: agent(),
             system: [],
-            messages: [{ role: "user", content: "run direct completion" }],
-            tools: {},
+            messages: [{ role: "user", content: "ordinary result" }],
+            tools: { ordinary },
           })
-          .pipe(Effect.forkIn(scope, { startImmediately: true }))
-        // 等待 pending part 真实发布——以已发布信号为准，不用固定 sleep 猜调度。
-        yield* llm.wait(1)
-        const pending = yield* awaitWithTimeout(
-          Effect.gen(function* () {
-            while (true) {
-              const found = (yield* MessageV2.parts(msg.id)).find(
-                (part): part is SessionV1.ToolPart => part.type === "tool" && part.tool === "direct",
-              )
-              if (found) return found
-              yield* Effect.sleep(20)
-            }
-          }),
-          "pending direct tool call was not published",
-          "10 seconds",
-        )
-        // 直达 completion 前先把 part 推进到 running——completeToolCall 只接受 running 终态写入。
-        yield* handle.updateToolCall(pending.callID, (part) => ({
-          ...part,
-          state: {
-            status: "running",
-            input: pending.state.input,
-            time: { start: Date.now() },
-          },
-        }))
-        // callID 与 tools.ts 五处直达调用点同一稳定标识；此处复现 abort adapter 的外部写入形态。
-        // 直达 completion：坏图片附件必须先过 prepareToolOutput，且 Tool 终态仍是 completed。
-        yield* handle.completeToolCall(pending.callID, {
-          title: "direct",
-          metadata: {},
-          output: "direct output",
-          attachments: [
-            {
-              id: PartID.ascending(),
-              messageID: msg.id,
-              sessionID: chat.id,
-              type: "file",
-              mime: "image/png",
-              url: "data:image/png;base64,AA==",
-            },
-          ],
-        })
-        const tool = (yield* MessageV2.parts(msg.id)).find(
-          (part): part is SessionV1.ToolPart => part.type === "tool" && part.tool === "direct",
-        )
-        // 图片内容失败不改变 Tool 成功完成的终态语义；
-        // attachment 缺失与 omission 同时检查，防止只追加诊断文本却仍把坏 bytes 落库。
-        expect(tool?.state.status).toBe("completed")
-        if (tool?.state.status !== "completed") return
-        expect(tool.state.output).toContain("direct output")
-        expect(tool.state.output).toContain(
-          "[1 image omitted: could not be decoded or resized within the image size limit.]",
-        )
-        expect(tool.state.attachments).toBeUndefined()
-        yield* Fiber.interrupt(fiber)
-      }),
-    { git: true, config: (url) => providerCfg(url) },
-  ),
-  30_000,
-)
-
-// #534：ordinary tool-result 与事件/落库消费同一 prepared snapshot——
-// 目标 V1 的 updatePart 单源写让 parity 由构造保证，测试锁定 DB 终态 + PartUpdated 事件真实发布。
-it.live("publishes and persists the same prepared ordinary tool output", () =>
-  provideTmpdirServer(
-    ({ dir, llm }) =>
-      Effect.gen(function* () {
-        const { processors, session, provider } = yield* boot()
-        const bridge = yield* EventV2Bridge.Service
-        const seen: string[] = []
-        const off = yield* bridge.listen((event) => {
-          seen.push(event.type)
-          return Effect.void
-        })
-        // 订阅在 process 前建立：PartUpdated 若末发布则说明事件分支被旁路，而不是错过监听窗口。
-        yield* Effect.addFinalizer(() => off)
-        yield* llm.push(reply().tool("ordinary", { path: "bad.png" }))
-        const chat = yield* session.create({})
-        const parent = yield* user(chat.id, "ordinary result")
-        const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
-        const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
-        // #509：execute 返回的 attachments 会过 FilePart Schema；缺 id/messageID/sessionID 的原始对象被丢弃，
-        // 必须补全持久化字段才能真实进入 #534 的 prepare 边界。
-        const ordinary = tool({
-          description: "ordinary image result",
-          inputSchema: z.object({ path: z.string() }),
-          execute: async () => ({
-            title: "ordinary",
-            metadata: {},
-            output: "ordinary output",
-            attachments: [
-              {
-                id: PartID.ascending(),
-                messageID: msg.id,
-                sessionID: chat.id,
-                type: "file" as const,
-                mime: "image/png",
-                url: "data:image/png;base64,AA==",
-              },
-            ],
-          }),
-        })
-        const handle = yield* processors.create({ assistantMessage: msg, sessionID: chat.id, model: mdl })
-        yield* handle.process({
-          user: {
-            id: parent.id,
-            sessionID: chat.id,
-            role: "user",
-            time: parent.time,
-            agent: parent.agent,
-            model: { providerID: ref.providerID, modelID: ref.modelID },
-          } satisfies SessionV1.User,
-          sessionID: chat.id,
-          model: mdl,
-          agent: agent(),
-          system: [],
-          messages: [{ role: "user", content: "ordinary result" }],
-          tools: { ordinary },
-        })
-        const completed = (yield* MessageV2.parts(msg.id)).find(
-          (part): part is SessionV1.ToolPart => part.type === "tool" && part.tool === "ordinary",
-        )
-        // 事件与 SQLite 同源：omission 文案只拼接一次，durable state 不存在未处理原始 payload。
-        expect(completed?.state.status).toBe("completed")
-        if (completed?.state.status !== "completed") return
-        expect(completed.state.output).toBe(
-          "ordinary output\n\n[1 image omitted: could not be decoded or resized within the image size limit.]",
-        )
-        expect(completed.state.attachments).toBeUndefined()
-        expect(seen).toContain(MessageV2.Event.PartUpdated.type)
-      }),
-    { git: true, config: (url) => providerCfg(url) },
-  ),
+          const completed = (yield* MessageV2.parts(msg.id)).find(
+            (part): part is SessionV1.ToolPart => part.type === "tool" && part.tool === "ordinary",
+          )
+          // 事件与 SQLite 同源：omission 文案只拼接一次，durable state 不存在未处理原始 payload。
+          expect(completed?.state.status).toBe("completed")
+          if (completed?.state.status !== "completed") return
+          expect(completed.state.output).toBe(
+            "ordinary output\n\n[1 image omitted: could not be decoded or resized within the image size limit.]",
+          )
+          expect(completed.state.attachments).toBeUndefined()
+          expect(seen).toContain(MessageV2.Event.PartUpdated.type)
+        }),
+      { git: true, config: (url) => providerCfg(url) },
+    ),
   30_000,
 )

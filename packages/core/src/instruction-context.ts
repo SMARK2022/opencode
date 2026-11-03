@@ -61,20 +61,35 @@ const layer = Layer.effectDiscard(
       }
       // 全局首个存在项获胜；项目按文件类型选一组，不能叠加所有祖先的三种规则。
       const globals: string[] = []
-      for (const candidate of [join(global.config, "AGENTS.md"), ...(names().includes("CLAUDE.md") ? [join(global.home, ".claude", "CLAUDE.md")] : [])]) {
+      for (const candidate of [
+        join(global.config, "AGENTS.md"),
+        ...(names().includes("CLAUDE.md") ? [join(global.home, ".claude", "CLAUDE.md")] : []),
+      ]) {
         const resolved = yield* fs.resolve(candidate)
         if (!(yield* fs.existsSafe(resolved))) continue
         globals.push(resolved)
         break
       }
       // 配置按优先级顺序串联；latest只取最后一份文档会丢失前序有效规则。
-      const configured = Array.dedupe((yield* config.entries()).flatMap(entry => entry.type === "document" ? entry.info.instructions ?? [] : []))
-      const extra = yield* Effect.forEach(configured.filter(item => !/^https?:\/\//.test(item)), raw => {
-        const pattern = raw.startsWith("~/") ? join(global.home, raw.slice(2)) : raw
-        if (isAbsolute(pattern)) return fs.glob(basename(pattern), { cwd: dirname(pattern), absolute: true, include: "file" })
-        // 关闭项目配置时，相对规则仍允许从全局配置目录解析，不再遍历项目祖先。
-        return fs.globUp(pattern, Flag.OPENCODE_DISABLE_PROJECT_CONFIG ? global.config : start, Flag.OPENCODE_DISABLE_PROJECT_CONFIG ? global.config : insideProject ? stop : start)
-      })
+      const configured = Array.dedupe(
+        (yield* config.entries()).flatMap((entry) =>
+          entry.type === "document" ? (entry.info.instructions ?? []) : [],
+        ),
+      )
+      const extra = yield* Effect.forEach(
+        configured.filter((item) => !/^https?:\/\//.test(item)),
+        (raw) => {
+          const pattern = raw.startsWith("~/") ? join(global.home, raw.slice(2)) : raw
+          if (isAbsolute(pattern))
+            return fs.glob(basename(pattern), { cwd: dirname(pattern), absolute: true, include: "file" })
+          // 关闭项目配置时，相对规则仍允许从全局配置目录解析，不再遍历项目祖先。
+          return fs.globUp(
+            pattern,
+            Flag.OPENCODE_DISABLE_PROJECT_CONFIG ? global.config : start,
+            Flag.OPENCODE_DISABLE_PROJECT_CONFIG ? global.config : insideProject ? stop : start,
+          )
+        },
+      )
       const paths = Array.dedupe([...globals, ...discovered, ...extra.flat()])
       const files = yield* Effect.forEach(
         paths,
@@ -94,29 +109,41 @@ const layer = Layer.effectDiscard(
     })
 
     const remote = Effect.gen(function* () {
-      const urls = Array.dedupe((yield* config.entries()).flatMap(entry => entry.type === "document" ? entry.info.instructions ?? [] : [])).filter(item => /^https?:\/\//.test(item))
-      return yield* Effect.forEach(urls, url => http.get(url).pipe(
-        Effect.flatMap(response => response.text),
-        Effect.timeout("5 seconds"),
-        Effect.map(content => ({ url, content })),
-      ), { concurrency: 4 }).pipe(Effect.map(files => files.filter(file => file.content !== "")))
+      const urls = Array.dedupe(
+        (yield* config.entries()).flatMap((entry) =>
+          entry.type === "document" ? (entry.info.instructions ?? []) : [],
+        ),
+      ).filter((item) => /^https?:\/\//.test(item))
+      return yield* Effect.forEach(
+        urls,
+        (url) =>
+          http.get(url).pipe(
+            Effect.flatMap((response) => response.text),
+            Effect.timeout("5 seconds"),
+            Effect.map((content) => ({ url, content })),
+          ),
+        { concurrency: 4 },
+      ).pipe(Effect.map((files) => files.filter((file) => file.content !== "")))
     })
 
     yield* registry.register({
       key,
       load: Effect.all([
-      observe().pipe(
-        Effect.map((files) =>
-          files === SystemContext.unavailable
-            ? source(files)
-            : files.length === 0
-              ? SystemContext.empty
-              : source(files),
+        observe().pipe(
+          Effect.map((files) =>
+            files === SystemContext.unavailable
+              ? source(files)
+              : files.length === 0
+                ? SystemContext.empty
+                : source(files),
+          ),
+          Effect.catch(() => Effect.succeed(source(SystemContext.unavailable))),
+          Effect.catchDefect(() => Effect.succeed(source(SystemContext.unavailable))),
         ),
-        Effect.catch(() => Effect.succeed(source(SystemContext.unavailable))),
-        Effect.catchDefect(() => Effect.succeed(source(SystemContext.unavailable))),
-      ),
-      remote.pipe(Effect.map(remoteContext), Effect.catch(() => Effect.succeed(remoteContext(SystemContext.unavailable)))),
+        remote.pipe(
+          Effect.map(remoteContext),
+          Effect.catch(() => Effect.succeed(remoteContext(SystemContext.unavailable))),
+        ),
       ]).pipe(Effect.map(SystemContext.combine)),
     })
   }),
@@ -125,7 +152,14 @@ const layer = Layer.effectDiscard(
 export const node = makeLocationNode({
   name: "instruction-context",
   layer,
-  deps: [FSUtil.node, Global.node, Location.node, SystemContextRegistry.node, Config.node, LayerNodePlatform.httpClient],
+  deps: [
+    FSUtil.node,
+    Global.node,
+    Location.node,
+    SystemContextRegistry.node,
+    Config.node,
+    LayerNodePlatform.httpClient,
+  ],
 })
 
 function render(files: ReadonlyArray<File>) {
@@ -141,14 +175,16 @@ const RemoteFiles = Schema.Array(Schema.Struct({ url: Schema.String, content: Sc
 
 function remoteContext(files: typeof RemoteFiles.Type | SystemContext.Unavailable) {
   if (files !== SystemContext.unavailable && files.length === 0) return SystemContext.empty
-  const render = (values: typeof RemoteFiles.Type) => values.map(file => `Instructions from: ${file.url}\n${file.content}`).join("\n\n")
+  const render = (values: typeof RemoteFiles.Type) =>
+    values.map((file) => `Instructions from: ${file.url}\n${file.content}`).join("\n\n")
   // URL不进入本地路径codec；短暂网络失败沿Context Epoch保留已接纳正文，不伪装删除或空成功。
   return SystemContext.make({
     key: SystemContext.Key.make("core/instructions-remote"),
     codec: Schema.toCodecJson(RemoteFiles),
     load: Effect.succeed(files),
     baseline: render,
-    update: (_previous, current) => `These remote instructions replace all previously loaded remote instructions.\n\n${render(current)}`,
+    update: (_previous, current) =>
+      `These remote instructions replace all previously loaded remote instructions.\n\n${render(current)}`,
     removed: () => "Previously loaded remote instructions no longer apply.",
   })
 }

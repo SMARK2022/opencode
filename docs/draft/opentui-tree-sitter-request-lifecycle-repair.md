@@ -33,38 +33,38 @@ R81由独立R80方案审计的两个blocking findings触发，必须在implement
 
 ### R74 Complete Scope Contract
 
-| ID | Expected invariant | First divergence / owner | Required public evidence |
-| --- | --- | --- | --- |
-| R74-INV-01 | 合法daemon Project事件对应未加载Session/Message/Part时，TUI projection no-op且继续消费后续事件 | `SyncProvider`缺失collection进入`Binary.search`; owner `sync.tsx` | `sync-undefined-messages.test.tsx` plus compiled target-liveness event/frame continuation |
-| R74-INV-02 | 同buffer mutation完成前不得dispose accepted Tree或删除mirror | `TreeSitterClient.removeStreamingBuffer`绕过in-flight operation; owner per-buffer tail | public delayed update/remove lifecycle test and zero pending callback after destroy |
-| R74-INV-03 | Parser只能在完整parse/query/injection后commit accepted Tree，失败candidate不污染下一次更新 | `ParserWorker.handleStreamingUpdate`提前替换accepted state; worker Tree owner | candidate failure then public successful update/reset and repeated lifecycle tests |
-| R74-INV-04 | Markdown/Thinking/body在异步highlight期间保持当前token/raw可见，`drawUnstyledText=false`不改成常开 | Markdown seed缺失、Code pending TextBuffer提交时机 | structured/list/blockquote/table/fenced pending tests and compiled body/Thinking frames |
-| R74-INV-05 | 正常renderable destroy/Ctrl+C不产生批量Tree-sitter cancellation/highlight warning | Code warning判断晚于destroy owner; Code/client lifecycle | cancellation test plus compiled target-liveness Ctrl+C zero-warning assertion |
-| R74-INV-06 | 支持域primary path不产生worker error/permanent pending；任何真实`error`不能进入成功渲染分支 | correlated response和Code空highlight success conversion; client/Code owners | normal concurrent one-shot/streaming tests, real error-shape protocol test, compiled smoke |
+| ID         | Expected invariant                                                                                 | First divergence / owner                                                               | Required public evidence                                                                   |
+| ---------- | -------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| R74-INV-01 | 合法daemon Project事件对应未加载Session/Message/Part时，TUI projection no-op且继续消费后续事件     | `SyncProvider`缺失collection进入`Binary.search`; owner `sync.tsx`                      | `sync-undefined-messages.test.tsx` plus compiled target-liveness event/frame continuation  |
+| R74-INV-02 | 同buffer mutation完成前不得dispose accepted Tree或删除mirror                                       | `TreeSitterClient.removeStreamingBuffer`绕过in-flight operation; owner per-buffer tail | public delayed update/remove lifecycle test and zero pending callback after destroy        |
+| R74-INV-03 | Parser只能在完整parse/query/injection后commit accepted Tree，失败candidate不污染下一次更新         | `ParserWorker.handleStreamingUpdate`提前替换accepted state; worker Tree owner          | candidate failure then public successful update/reset and repeated lifecycle tests         |
+| R74-INV-04 | Markdown/Thinking/body在异步highlight期间保持当前token/raw可见，`drawUnstyledText=false`不改成常开 | Markdown seed缺失、Code pending TextBuffer提交时机                                     | structured/list/blockquote/table/fenced pending tests and compiled body/Thinking frames    |
+| R74-INV-05 | 正常renderable destroy/Ctrl+C不产生批量Tree-sitter cancellation/highlight warning                  | Code warning判断晚于destroy owner; Code/client lifecycle                               | cancellation test plus compiled target-liveness Ctrl+C zero-warning assertion              |
+| R74-INV-06 | 支持域primary path不产生worker error/permanent pending；任何真实`error`不能进入成功渲染分支        | correlated response和Code空highlight success conversion; client/Code owners            | normal concurrent one-shot/streaming tests, real error-shape protocol test, compiled smoke |
 
 R74 production baseline consists of the already implemented SyncProvider, client tail, parser candidate owner, Code pending seed, Markdown seed and destroy ordering. R74 incremental production change is only one-shot `error` response classification; R74 must not add a new producer fallback or failure state machine.
 
 ### R74 One-Shot Protocol Contract
 
-| Response | Worker meaning | Client owner | Consumer contract |
-| --- | --- | --- | --- |
-| `error` present | parser/protocol failure was actually produced | reject matching callback once | Code cannot treat it as empty-highlight success; this is error evidence, not normal success |
-| `warning` + `hasParser:false` and no error | unsupported capability | resolve existing result object | `treeSitterToStyledText()` and existing unsupported-filetype tests retain capability behavior |
-| no error/warning | successful parse/query | resolve highlights | existing one-shot/Markdown rendering path |
+| Response                                   | Worker meaning                                | Client owner                   | Consumer contract                                                                             |
+| ------------------------------------------ | --------------------------------------------- | ------------------------------ | --------------------------------------------------------------------------------------------- |
+| `error` present                            | parser/protocol failure was actually produced | reject matching callback once  | Code cannot treat it as empty-highlight success; this is error evidence, not normal success   |
+| `warning` + `hasParser:false` and no error | unsupported capability                        | resolve existing result object | `treeSitterToStyledText()` and existing unsupported-filetype tests retain capability behavior |
+| no error/warning                           | successful parse/query                        | resolve highlights             | existing one-shot/Markdown rendering path                                                     |
 
 ### R74 Verification Commands
 
 All Bun commands run from the listed package directory under an external process-tree supervisor:
 
-| Command | Directory | Required observation |
-| --- | --- | --- |
-| `bun test ./src/lib/tree-sitter/client.test.ts -t "concurrent highlightOnce|one-shot response error|unsupported filetype warning"` | `thirdparty/opentui/packages/core` | normal supported calls remain successful; error rejects; warning resolves |
-| `bun test ./src/renderables/Code.test.ts -t "does not commit plain text|drawUnstyledText=false output"` | `thirdparty/opentui/packages/core` | existing no-fallback behavior |
-| `bun test ./src/renderables/__tests__/Markdown.test.ts -t "streaming.*list|pending|table|fenced"` | `thirdparty/opentui/packages/core` | current Markdown/Code representation remains visible |
-| `bun run build:lib` | `thirdparty/opentui/packages/core` | declarations and worker bundle |
-| `bun test ./test/cli/cmd/tui/sync-undefined-messages.test.tsx` | `packages/opencode` | unloaded projection no-op and continued event handling |
-| `bun typecheck` | `packages/opencode` | type contract |
-| `bun run script/smoke-opentui-artifact.ts --binary ./dist/opencode-windows-x64/bin/opencode.exe --scenario target-liveness` | `packages/opencode` | Thinking/body, command palette, event/frame liveness, worker readiness, Ctrl+C and zero warnings |
+| Command                                                                                                                     | Directory                          | Required observation                                                                             |
+| --------------------------------------------------------------------------------------------------------------------------- | ---------------------------------- | ------------------------------------------------------------------------------------------------ | ---------------------------------- | ------------------------------------------------------------------------- | ---------------------------------------------------- |
+| `bun test ./src/lib/tree-sitter/client.test.ts -t "concurrent highlightOnce                                                 | one-shot response error            | unsupported filetype warning"`                                                                   | `thirdparty/opentui/packages/core` | normal supported calls remain successful; error rejects; warning resolves |
+| `bun test ./src/renderables/Code.test.ts -t "does not commit plain text                                                     | drawUnstyledText=false output"`    | `thirdparty/opentui/packages/core`                                                               | existing no-fallback behavior      |
+| `bun test ./src/renderables/**tests**/Markdown.test.ts -t "streaming.\*list                                                 | pending                            | table                                                                                            | fenced"`                           | `thirdparty/opentui/packages/core`                                        | current Markdown/Code representation remains visible |
+| `bun run build:lib`                                                                                                         | `thirdparty/opentui/packages/core` | declarations and worker bundle                                                                   |
+| `bun test ./test/cli/cmd/tui/sync-undefined-messages.test.tsx`                                                              | `packages/opencode`                | unloaded projection no-op and continued event handling                                           |
+| `bun typecheck`                                                                                                             | `packages/opencode`                | type contract                                                                                    |
+| `bun run script/smoke-opentui-artifact.ts --binary ./dist/opencode-windows-x64/bin/opencode.exe --scenario target-liveness` | `packages/opencode`                | Thinking/body, command palette, event/frame liveness, worker readiness, Ctrl+C and zero warnings |
 
 R74 keeps the previously measured full nested baseline `E=744` as an observed audit fact, removes the obsolete `E<=300` plan target, and requires final production `E<=600`, total effective `E<=800`, eight code files, six production files and per-file comment-floor verification. R74's new response branch/test delta is expected to remain below 40 effective lines.
 
@@ -92,19 +92,19 @@ R81保留完整用户原文合同、R74-INV-01至R74-INV-06、单一primary path
 
 ### R81 Producer Ownership Contract
 
-| Path | Existing behavior | R81 owner repair | Public evidence |
-| --- | --- | --- | --- |
-| `handleInitializeParser()` | resolves shared `filetypeParser` outside the proposed reusable tail and can republish a stale promise result after registration/clear | entire filetype resolution, Parser creation, initial parse/query/injections and buffer-state publication run inside `withParserAssets`; no shared cache reference escapes | real buffer initialization versus registration/clear barrier test |
-| `handleOneShotHighlight()` | uses a cached Parser for outer parse, then performs async injection work | hold one scope from outer parse through all injection parse/query, highlight conversion and response preparation; returned Tree remains one-shot-owned and is deleted in existing `finally` | one-shot invalidation and normal concurrent highlight tests |
-| `processInjections()` | obtains a reusable parser per injected language; local catch logs parse/query failure and returns partial captures | accepts current scope, each language group uses scope-owned Parser, Tree cleanup uses `finally`; remove catch-and-continue so no failed injection produces success | streaming fenced-code and one-shot injection invalidation/error-propagation tests |
-| `handleEdits()` / `handleStreamingUpdate()` / `handleResetBuffer()` | buffer candidate paths call async injection/reference helpers while shared asset cache can be invalidated | wrap each complete top-level operation in `withParserAssets`, pass scope to helpers, and commit the accepted buffer candidate before releasing the scope | ordinary edit, streaming injection/reference and reset-after-clear tests |
-| `updateReferenceState()` | obtains `markdown_inline` reusable parser and parses all inline nodes outside filetype cache barrier | accepts current scope and performs complete inline parse/walk within it | streaming reference append/update test with parser invalidation |
-| `preloadParser()` | creates/returns filetype and reusable cache state without invalidation ordering | cache creation runs inside the same scope | preload plus registration ordering test |
-| `addFiletypeParser()` / `invalidateParserCaches()` | deletes cached Parser and clears filetype promises synchronously | parser options update and deletion run as one scope operation; no synchronous cache owner mutation outside scope | real worker registration interleaving tests |
-| `clearCache()` | clears filetype/reusable maps without waiting for initialization or parser users, and does not delete all cached Parser owners | clear operation enters the same scope barrier, deletes every accepted Parser owner once, clears all maps/promises, then performs filesystem clearing | public clear-cache lifecycle regression |
-| `TreeSitterClient.highlightOnce()` -> `initialize()` rejects | catch returns `{ error }`, allowing Code to treat missing highlights as success | remove the conversion and let the original initialization Promise rejection propagate | public `highlightOnce()` initialization-failure seam rejects |
-| `ONESHOT_HIGHLIGHT_RESPONSE.error` | correlated result currently resolves error-shaped object | reject matching callback once; warning-only unsupported capability still resolves | real `onmessage/postMessage` response-shape test |
-| `warning + hasParser:false` | existing unsupported-filetype capability result | preserve resolved capability result | `client.test.ts:398-405` and styled-text consumer |
+| Path                                                                | Existing behavior                                                                                                                     | R81 owner repair                                                                                                                                                                            | Public evidence                                                                   |
+| ------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
+| `handleInitializeParser()`                                          | resolves shared `filetypeParser` outside the proposed reusable tail and can republish a stale promise result after registration/clear | entire filetype resolution, Parser creation, initial parse/query/injections and buffer-state publication run inside `withParserAssets`; no shared cache reference escapes                   | real buffer initialization versus registration/clear barrier test                 |
+| `handleOneShotHighlight()`                                          | uses a cached Parser for outer parse, then performs async injection work                                                              | hold one scope from outer parse through all injection parse/query, highlight conversion and response preparation; returned Tree remains one-shot-owned and is deleted in existing `finally` | one-shot invalidation and normal concurrent highlight tests                       |
+| `processInjections()`                                               | obtains a reusable parser per injected language; local catch logs parse/query failure and returns partial captures                    | accepts current scope, each language group uses scope-owned Parser, Tree cleanup uses `finally`; remove catch-and-continue so no failed injection produces success                          | streaming fenced-code and one-shot injection invalidation/error-propagation tests |
+| `handleEdits()` / `handleStreamingUpdate()` / `handleResetBuffer()` | buffer candidate paths call async injection/reference helpers while shared asset cache can be invalidated                             | wrap each complete top-level operation in `withParserAssets`, pass scope to helpers, and commit the accepted buffer candidate before releasing the scope                                    | ordinary edit, streaming injection/reference and reset-after-clear tests          |
+| `updateReferenceState()`                                            | obtains `markdown_inline` reusable parser and parses all inline nodes outside filetype cache barrier                                  | accepts current scope and performs complete inline parse/walk within it                                                                                                                     | streaming reference append/update test with parser invalidation                   |
+| `preloadParser()`                                                   | creates/returns filetype and reusable cache state without invalidation ordering                                                       | cache creation runs inside the same scope                                                                                                                                                   | preload plus registration ordering test                                           |
+| `addFiletypeParser()` / `invalidateParserCaches()`                  | deletes cached Parser and clears filetype promises synchronously                                                                      | parser options update and deletion run as one scope operation; no synchronous cache owner mutation outside scope                                                                            | real worker registration interleaving tests                                       |
+| `clearCache()`                                                      | clears filetype/reusable maps without waiting for initialization or parser users, and does not delete all cached Parser owners        | clear operation enters the same scope barrier, deletes every accepted Parser owner once, clears all maps/promises, then performs filesystem clearing                                        | public clear-cache lifecycle regression                                           |
+| `TreeSitterClient.highlightOnce()` -> `initialize()` rejects        | catch returns `{ error }`, allowing Code to treat missing highlights as success                                                       | remove the conversion and let the original initialization Promise rejection propagate                                                                                                       | public `highlightOnce()` initialization-failure seam rejects                      |
+| `ONESHOT_HIGHLIGHT_RESPONSE.error`                                  | correlated result currently resolves error-shaped object                                                                              | reject matching callback once; warning-only unsupported capability still resolves                                                                                                           | real `onmessage/postMessage` response-shape test                                  |
+| `warning + hasParser:false`                                         | existing unsupported-filetype capability result                                                                                       | preserve resolved capability result                                                                                                                                                         | `client.test.ts:398-405` and styled-text consumer                                 |
 
 The `withParserAssets` scope is the only new producer-side synchronization mechanism. It serializes the existing filetype/reusable cache and Parser instances, not all worker messages or unrelated client messages. Every top-level Parser request, including `HANDLE_EDITS`, has one scope from its first shared-cache access through its final parse/query/injection/accepted-state transition. No cache promise, parser state or Parser object may be used outside the scope callback. It does not create a second Parser, retry a failed parse, synthesize highlights or convert failure into success. `processInjections()` no longer catches a real parse/query exception and returns partial success. The client response branch remains a correlated settlement contract only.
 
@@ -122,16 +122,16 @@ The `withParserAssets` scope is the only new producer-side synchronization mecha
 
 ### R81 Exact File Boundary
 
-| File | Current R81 responsibility | Planned delta |
-| --- | --- | --- |
-| `packages/core/src/lib/tree-sitter/parser.worker.ts` | Parser asset scope covering filetype/reusable caches, initialization, ordinary edits, one-shot, streaming/reset helpers, registration/clear barriers; remove injection catch-and-success; retain buffer candidate ownership | production modify, expected `E<=115` |
-| `packages/core/src/lib/tree-sitter/client.ts` | Propagate initialization rejection and reject correlated one-shot error response; preserve warning capability result | production modify, expected `E<=10` |
-| `packages/core/src/lib/tree-sitter/types.ts` | Existing typed correlated response contract only; no R81 semantic expansion | production baseline/reverify |
-| `packages/core/src/renderables/Code.ts` | Existing pending seed, no failure-to-success commit and destroyed-first warning suppression | production baseline/reverify |
-| `packages/core/src/renderables/Markdown.ts` | Existing current-token seed into Code with `drawUnstyledText=false` | production baseline/reverify |
-| `packages/core/src/lib/tree-sitter/client.test.ts` | Add deterministic real-worker reusable-parser use/invalidation, clear-cache and one-shot protocol tests; retain normal concurrency | test modify |
-| `packages/core/src/renderables/Code.test.ts` | Existing no-fallback and destroyed-first contracts | test baseline/reverify |
-| `packages/core/src/renderables/__tests__/Markdown.test.ts` | Existing structured/list/table/fenced pending and settle contracts | test baseline/reverify |
+| File                                                       | Current R81 responsibility                                                                                                                                                                                                  | Planned delta                        |
+| ---------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------ |
+| `packages/core/src/lib/tree-sitter/parser.worker.ts`       | Parser asset scope covering filetype/reusable caches, initialization, ordinary edits, one-shot, streaming/reset helpers, registration/clear barriers; remove injection catch-and-success; retain buffer candidate ownership | production modify, expected `E<=115` |
+| `packages/core/src/lib/tree-sitter/client.ts`              | Propagate initialization rejection and reject correlated one-shot error response; preserve warning capability result                                                                                                        | production modify, expected `E<=10`  |
+| `packages/core/src/lib/tree-sitter/types.ts`               | Existing typed correlated response contract only; no R81 semantic expansion                                                                                                                                                 | production baseline/reverify         |
+| `packages/core/src/renderables/Code.ts`                    | Existing pending seed, no failure-to-success commit and destroyed-first warning suppression                                                                                                                                 | production baseline/reverify         |
+| `packages/core/src/renderables/Markdown.ts`                | Existing current-token seed into Code with `drawUnstyledText=false`                                                                                                                                                         | production baseline/reverify         |
+| `packages/core/src/lib/tree-sitter/client.test.ts`         | Add deterministic real-worker reusable-parser use/invalidation, clear-cache and one-shot protocol tests; retain normal concurrency                                                                                          | test modify                          |
+| `packages/core/src/renderables/Code.test.ts`               | Existing no-fallback and destroyed-first contracts                                                                                                                                                                          | test baseline/reverify               |
+| `packages/core/src/renderables/__tests__/Markdown.test.ts` | Existing structured/list/table/fenced pending and settle contracts                                                                                                                                                          | test baseline/reverify               |
 
 Root `sync.tsx`, its regression test and compiled smoke are required verification baselines but are not R81 nested implementation files. Release manifests/lockfiles remain `.6` cleanup only and are not production concepts.
 
@@ -149,11 +149,11 @@ R81 incremental production delta is expected below 125 effective lines across `p
 
 ### R73 Protocol Traceability
 
-| Response shape | Producer | Owner behavior | Existing consumer/test |
-| --- | --- | --- | --- |
-| `error` present | `ParserWorker.handleOneShotHighlight()` parse/protocol failure response | `TreeSitterClient` rejects the matching callback exactly once; Code cannot enter empty-highlight success rendering | real worker `onmessage/postMessage` seam in `client.test.ts`; Code no-fallback tests |
-| `warning` + `hasParser:false`, no error | unsupported filetype capability response | `TreeSitterClient` resolves existing result object; `treeSitterToStyledText()` keeps capability behavior | `client.test.ts` unsupported-filetype contract and styled-text consumers |
-| no error/warning | successful one-shot highlight | resolve highlights and continue existing rendering | existing one-shot/Markdown normal-path tests |
+| Response shape                          | Producer                                                                | Owner behavior                                                                                                     | Existing consumer/test                                                               |
+| --------------------------------------- | ----------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------ |
+| `error` present                         | `ParserWorker.handleOneShotHighlight()` parse/protocol failure response | `TreeSitterClient` rejects the matching callback exactly once; Code cannot enter empty-highlight success rendering | real worker `onmessage/postMessage` seam in `client.test.ts`; Code no-fallback tests |
+| `warning` + `hasParser:false`, no error | unsupported filetype capability response                                | `TreeSitterClient` resolves existing result object; `treeSitterToStyledText()` keeps capability behavior           | `client.test.ts` unsupported-filetype contract and styled-text consumers             |
+| no error/warning                        | successful one-shot highlight                                           | resolve highlights and continue existing rendering                                                                 | existing one-shot/Markdown normal-path tests                                         |
 
 R73 production delta is limited to the existing `TreeSitterClient` one-shot response branch and one existing protocol test seam. No new parser, error state, fallback, retry or renderer path is authorized. The incremental delta is expected to remain below 40 effective lines; the full current nested baseline remains subject to production `E <= 600`, total `E <= 800`, eight-file and per-file comment gates.
 
@@ -169,27 +169,27 @@ The error-shape test is protocol evidence only; normal compiled liveness and sup
 
 ### R72 File Classification
 
-| Classification | Paths | Audit treatment |
-| --- | --- | --- |
-| Existing approved production baseline | OpenTUI `client.ts`, `parser.worker.ts`, `types.ts`, `Markdown.ts`; root `sync.tsx` | Preserve and reverify owner paths; no new architecture |
-| Root-cause protocol repair | OpenTUI `client.ts` one-shot response branch and `Code.ts` one-shot consumer | Error-shaped one-shot response cannot resolve into empty-highlight success rendering; no fallback or retry |
-| Existing test contracts | OpenTUI `client.test.ts`, `Markdown.test.ts`, `Code.test.ts` | Add real `ONESHOT_HIGHLIGHT_RESPONSE` error-shape regression and retain normal-path/legacy lifecycle tests; three existing test files, eight nested code files total |
-| Original compiled feedback loop | `packages/opencode/script/smoke-opentui-artifact.ts` target-liveness | Required normal-path verification; no production instrumentation |
-| Release cleanup | OpenTUI manifests and `bun.lock` | Final tree must match `.6`; release metadata is not part of repair |
+| Classification                        | Paths                                                                               | Audit treatment                                                                                                                                                      |
+| ------------------------------------- | ----------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Existing approved production baseline | OpenTUI `client.ts`, `parser.worker.ts`, `types.ts`, `Markdown.ts`; root `sync.tsx` | Preserve and reverify owner paths; no new architecture                                                                                                               |
+| Root-cause protocol repair            | OpenTUI `client.ts` one-shot response branch and `Code.ts` one-shot consumer        | Error-shaped one-shot response cannot resolve into empty-highlight success rendering; no fallback or retry                                                           |
+| Existing test contracts               | OpenTUI `client.test.ts`, `Markdown.test.ts`, `Code.test.ts`                        | Add real `ONESHOT_HIGHLIGHT_RESPONSE` error-shape regression and retain normal-path/legacy lifecycle tests; three existing test files, eight nested code files total |
+| Original compiled feedback loop       | `packages/opencode/script/smoke-opentui-artifact.ts` target-liveness                | Required normal-path verification; no production instrumentation                                                                                                     |
+| Release cleanup                       | OpenTUI manifests and `bun.lock`                                                    | Final tree must match `.6`; release metadata is not part of repair                                                                                                   |
 
 ### R72 Verification Boundary
 
 Required commands and directories:
 
-| Command | Directory | Contract |
-| --- | --- | --- |
-| bounded `bun test ./src/lib/tree-sitter/client.test.ts -t "..."` | `thirdparty/opentui/packages/core` | Existing correlated protocol, lifecycle and normal Markdown seams; no new generic error state |
-| bounded `bun test ./src/renderables/Code.test.ts -t "..."` | `thirdparty/opentui/packages/core` | One-shot rejection and real response-shape behavior cannot produce success-shaped plain text |
-| bounded Markdown focused tests | `thirdparty/opentui/packages/core` | structured/fenced/current-seed normal path |
-| `bun run build:lib` | `thirdparty/opentui/packages/core` | TypeScript declarations and worker bundle |
-| bounded `bun test ./test/cli/cmd/tui/sync-undefined-messages.test.tsx` | `packages/opencode` | legal unloaded projection events continue consumption |
-| bounded `bun typecheck` | `packages/opencode` | package type contract |
-| bounded `bun run script/smoke-opentui-artifact.ts --binary ./dist/opencode-windows-x64/bin/opencode.exe --scenario target-liveness` | `packages/opencode` | Thinking/body, command palette, event/frame liveness, pending readiness, Ctrl+C and zero warning contract |
+| Command                                                                                                                             | Directory                          | Contract                                                                                                  |
+| ----------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| bounded `bun test ./src/lib/tree-sitter/client.test.ts -t "..."`                                                                    | `thirdparty/opentui/packages/core` | Existing correlated protocol, lifecycle and normal Markdown seams; no new generic error state             |
+| bounded `bun test ./src/renderables/Code.test.ts -t "..."`                                                                          | `thirdparty/opentui/packages/core` | One-shot rejection and real response-shape behavior cannot produce success-shaped plain text              |
+| bounded Markdown focused tests                                                                                                      | `thirdparty/opentui/packages/core` | structured/fenced/current-seed normal path                                                                |
+| `bun run build:lib`                                                                                                                 | `thirdparty/opentui/packages/core` | TypeScript declarations and worker bundle                                                                 |
+| bounded `bun test ./test/cli/cmd/tui/sync-undefined-messages.test.tsx`                                                              | `packages/opencode`                | legal unloaded projection events continue consumption                                                     |
+| bounded `bun typecheck`                                                                                                             | `packages/opencode`                | package type contract                                                                                     |
+| bounded `bun run script/smoke-opentui-artifact.ts --binary ./dist/opencode-windows-x64/bin/opencode.exe --scenario target-liveness` | `packages/opencode`                | Thinking/body, command palette, event/frame liveness, pending readiness, Ctrl+C and zero warning contract |
 
 Every Bun test uses an external process-tree supervisor. A passing test whose process does not exit is a failed verification. The full native `bun run build` remains separately recorded; missing Zig is an environment limitation, not a source bypass.
 
@@ -206,40 +206,40 @@ Every Bun test uses an external process-tree supervisor. A passing test whose pr
 
 The final nested OpenTUI diff against `origin/smark/main` contains exactly eight code files:
 
-| Path | Classification | Net diff |
-| --- | --- | ---: |
-| `packages/core/src/lib/tree-sitter/client.ts` | approved lifecycle baseline | `+218/-224` |
-| `packages/core/src/lib/tree-sitter/parser.worker.ts` | approved Tree owner baseline | `+240/-163` |
-| `packages/core/src/lib/tree-sitter/types.ts` | approved correlated protocol baseline | `+16/-7` |
-| `packages/core/src/renderables/Code.ts` | baseline pending owner plus R71 fallback removal | `+23/-19` |
-| `packages/core/src/renderables/Markdown.ts` | approved current-seed baseline | `+84/-10` |
-| `packages/core/src/lib/tree-sitter/client.test.ts` | approved lifecycle regression baseline | `+318/-5` |
-| `packages/core/src/renderables/__tests__/Markdown.test.ts` | pending structured/fenced normal-path regression | `+21/-9` |
-| `packages/core/src/renderables/Code.test.ts` | R71 replacement of two fallback contracts | `+7/-4` |
+| Path                                                       | Classification                                   |    Net diff |
+| ---------------------------------------------------------- | ------------------------------------------------ | ----------: |
+| `packages/core/src/lib/tree-sitter/client.ts`              | approved lifecycle baseline                      | `+218/-224` |
+| `packages/core/src/lib/tree-sitter/parser.worker.ts`       | approved Tree owner baseline                     | `+240/-163` |
+| `packages/core/src/lib/tree-sitter/types.ts`               | approved correlated protocol baseline            |    `+16/-7` |
+| `packages/core/src/renderables/Code.ts`                    | baseline pending owner plus R71 fallback removal |   `+23/-19` |
+| `packages/core/src/renderables/Markdown.ts`                | approved current-seed baseline                   |   `+84/-10` |
+| `packages/core/src/lib/tree-sitter/client.test.ts`         | approved lifecycle regression baseline           |   `+318/-5` |
+| `packages/core/src/renderables/__tests__/Markdown.test.ts` | pending structured/fenced normal-path regression |    `+21/-9` |
+| `packages/core/src/renderables/Code.test.ts`               | R71 replacement of two fallback contracts        |     `+7/-4` |
 
 The root `SyncProvider` repair is a committed baseline and no R71 root source file was changed. `.7` manifests/lockfile are restored to `.6` and absent from the final net diff; generated/native output is excluded. Exact deletion counts and effective `E/C` must be recomputed by the implementation auditor rather than retained as placeholders.
 
 #### Red-Green Evidence
 
-| Command | Directory | Result |
-| --- | --- | --- |
-| bounded Code fallback test before production removal: `bun test ./src/renderables/Code.test.ts -t "does not commit plain text when highlighting throws"` | `thirdparty/opentui/packages/core` | red: visible plain text was still installed; 1 failing test |
-| bounded Code fallback test before production removal: `bun test ./src/renderables/Code.test.ts -t "keeps failed drawUnstyledText=false output non-successful"` | `thirdparty/opentui/packages/core` | red: visible plain text was still installed; 1 failing test |
-| same two Code tests after production removal | `thirdparty/opentui/packages/core` | green: 4 pass and 2 pass respectively, 0 fail; both exited under process supervision |
+| Command                                                                                                                                                        | Directory                          | Result                                                                               |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------- | ------------------------------------------------------------------------------------ |
+| bounded Code fallback test before production removal: `bun test ./src/renderables/Code.test.ts -t "does not commit plain text when highlighting throws"`       | `thirdparty/opentui/packages/core` | red: visible plain text was still installed; 1 failing test                          |
+| bounded Code fallback test before production removal: `bun test ./src/renderables/Code.test.ts -t "keeps failed drawUnstyledText=false output non-successful"` | `thirdparty/opentui/packages/core` | red: visible plain text was still installed; 1 failing test                          |
+| same two Code tests after production removal                                                                                                                   | `thirdparty/opentui/packages/core` | green: 4 pass and 2 pass respectively, 0 fail; both exited under process supervision |
 
 #### Verification Evidence
 
-| Command | Directory | Result |
-| --- | --- | --- |
-| bounded `bun test ./src/renderables/__tests__/Markdown.test.ts -t "streaming code blocks with concealCode=true show a seed before conceal highlighting\\|streaming demo-style fenced code block shows a seed before syntax highlighting\\|streaming structured list updates keep previous item text visible while highlighting"` | `thirdparty/opentui/packages/core` | 21 pass, 0 fail; process exited |
-| bounded `bun test ./src/renderables/__tests__/Markdown.test.ts -t "streaming.*list\\|pending\\|table"` | `thirdparty/opentui/packages/core` | 61 pass, 95 filtered, 0 fail, 32 snapshots |
-| bounded targeted client lifecycle/Markdown tests | `thirdparty/opentui/packages/core` | public lifecycle and current-seed tests passed and exited |
-| `bun run build:lib` | `thirdparty/opentui/packages/core` | pass; declarations and worker bundle generated |
-| bounded `bun test ./test/cli/cmd/tui/sync-undefined-messages.test.tsx` | `packages/opencode` | 1 pass, 0 fail |
-| bounded `bun typecheck` | `packages/opencode` | pass: `tsgo --noEmit` |
-| bounded full `bun run build` | `thirdparty/opentui` | unavailable: native phase requires `zig`, which is not in PATH; `build:lib` is green |
-| bounded `bun run script/smoke-opentui-artifact.ts --binary ./dist/opencode-windows-x64/bin/opencode.exe --scenario target-liveness` | `packages/opencode` | pass: `targetEventCount=14`, `sourceCount=2`, `renderedCount=2`, `modelRequests=2`; normal exit and Ctrl+C cancellation path completed |
-| `git diff origin/smark/main --check` | `thirdparty/opentui` | pass; eight nested code files and no `.7` release metadata |
+| Command                                                                                                                                                  | Directory                                                                        | Result                                                                                                                                 |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------- | ------------------------------------------ |
+| bounded `bun test ./src/renderables/**tests**/Markdown.test.ts -t "streaming code blocks with concealCode=true show a seed before conceal highlighting\\ | streaming demo-style fenced code block shows a seed before syntax highlighting\\ | streaming structured list updates keep previous item text visible while highlighting"`                                                 | `thirdparty/opentui/packages/core` | 21 pass, 0 fail; process exited            |
+| bounded `bun test ./src/renderables/**tests**/Markdown.test.ts -t "streaming.\*list\\                                                                    | pending\\                                                                        | table"`                                                                                                                                | `thirdparty/opentui/packages/core` | 61 pass, 95 filtered, 0 fail, 32 snapshots |
+| bounded targeted client lifecycle/Markdown tests                                                                                                         | `thirdparty/opentui/packages/core`                                               | public lifecycle and current-seed tests passed and exited                                                                              |
+| `bun run build:lib`                                                                                                                                      | `thirdparty/opentui/packages/core`                                               | pass; declarations and worker bundle generated                                                                                         |
+| bounded `bun test ./test/cli/cmd/tui/sync-undefined-messages.test.tsx`                                                                                   | `packages/opencode`                                                              | 1 pass, 0 fail                                                                                                                         |
+| bounded `bun typecheck`                                                                                                                                  | `packages/opencode`                                                              | pass: `tsgo --noEmit`                                                                                                                  |
+| bounded full `bun run build`                                                                                                                             | `thirdparty/opentui`                                                             | unavailable: native phase requires `zig`, which is not in PATH; `build:lib` is green                                                   |
+| bounded `bun run script/smoke-opentui-artifact.ts --binary ./dist/opencode-windows-x64/bin/opencode.exe --scenario target-liveness`                      | `packages/opencode`                                                              | pass: `targetEventCount=14`, `sourceCount=2`, `renderedCount=2`, `modelRequests=2`; normal exit and Ctrl+C cancellation path completed |
+| `git diff origin/smark/main --check`                                                                                                                     | `thirdparty/opentui`                                                             | pass; eight nested code files and no `.7` release metadata                                                                             |
 
 The broad client filter that previously printed passing tests while leaving Bun workers alive is not used as a clean result. All listed test commands used an external process-tree supervisor; timeout or non-exit is failure.
 
@@ -249,20 +249,20 @@ The implementation audit must independently calculate actual per-file `E/C`, exc
 
 ### R71 Implementation Audit Record
 
-| Round | Plan revision | Full original scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
-| --- | --- | --- | --- | --- | --- | --- |
-| R71 | R71 | pending | pending | pending | pending | pending |
+| Round | Plan revision | Full original scope? | Blocking findings | Non-blocking findings | Result  | Invocation reference |
+| ----- | ------------- | -------------------- | ----------------- | --------------------- | ------- | -------------------- |
+| R71   | R71           | pending              | pending           | pending               | pending | pending              |
 
 ### R71 File Classification
 
-| Classification | Paths | Audit treatment |
-| --- | --- | --- |
-| Existing approved production baseline | `packages/opencode/src/cli/cmd/tui/context/sync.tsx`; OpenTUI `client.ts`, `parser.worker.ts`, `types.ts`, `Code.ts` pending-seed owner; `Markdown.ts` fenced seed | Preserve and audit; no new owner architecture |
-| Root-cause production repair | OpenTUI `Code.ts` streaming and one-shot failure consumers | Remove failure-to-plain-text success conversion; normal valid paths must not reach this error branch |
-| Behavioral regressions | OpenTUI `client.test.ts`, `renderables/__tests__/Markdown.test.ts`, `renderables/Code.test.ts`; existing SyncProvider regression | Replace the two contradictory fallback assertions; retain normal lifecycle/representation tests; total nested code-file cap is eight |
-| Original compiled feedback loop | Existing `packages/opencode/script/smoke-opentui-artifact.ts` target-liveness scenario | Verification-only; no production smoke instrumentation or alternate runtime path |
-| Unauthorised release preparation | OpenTUI workspace `package.json` manifests and `bun.lock` at `0.4.3-smark.7` | Restore the final tree to the `.6` baseline; exclude from the repair diff and do not publish |
-| Generated/native output | OpenTUI `dist/**` and native build output | Not source evidence; never commit as repair output |
+| Classification                        | Paths                                                                                                                                                              | Audit treatment                                                                                                                      |
+| ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------ |
+| Existing approved production baseline | `packages/opencode/src/cli/cmd/tui/context/sync.tsx`; OpenTUI `client.ts`, `parser.worker.ts`, `types.ts`, `Code.ts` pending-seed owner; `Markdown.ts` fenced seed | Preserve and audit; no new owner architecture                                                                                        |
+| Root-cause production repair          | OpenTUI `Code.ts` streaming and one-shot failure consumers                                                                                                         | Remove failure-to-plain-text success conversion; normal valid paths must not reach this error branch                                 |
+| Behavioral regressions                | OpenTUI `client.test.ts`, `renderables/__tests__/Markdown.test.ts`, `renderables/Code.test.ts`; existing SyncProvider regression                                   | Replace the two contradictory fallback assertions; retain normal lifecycle/representation tests; total nested code-file cap is eight |
+| Original compiled feedback loop       | Existing `packages/opencode/script/smoke-opentui-artifact.ts` target-liveness scenario                                                                             | Verification-only; no production smoke instrumentation or alternate runtime path                                                     |
+| Unauthorised release preparation      | OpenTUI workspace `package.json` manifests and `bun.lock` at `0.4.3-smark.7`                                                                                       | Restore the final tree to the `.6` baseline; exclude from the repair diff and do not publish                                         |
+| Generated/native output               | OpenTUI `dist/**` and native build output                                                                                                                          | Not source evidence; never commit as repair output                                                                                   |
 
 ### R71 Verification Boundary
 
@@ -289,11 +289,11 @@ R71 repairs the primary path and removes a success-shaped symptom path:
 
 ### R71 Traceability and Budget
 
-| Requirement / invariant | Owner and change | Public verification |
-| --- | --- | --- |
-| R61-INV-04 current Markdown visibility with `drawUnstyledText=false` | `Code.ts` pending representation commit plus `Markdown.ts` false flag/seed contract | `Markdown.test.ts` persistent update held before mock response |
-| R61-INV-06 no fallback or diagnostic expansion | same existing streaming path; no new catch or alternate renderer | source diff/path audit and focused client/Markdown tests |
-| No unrelated release mutation | package manifests/lockfile restored to `.6` | exact nested diff against `origin/smark/main` has no release metadata paths |
+| Requirement / invariant                                              | Owner and change                                                                    | Public verification                                                         |
+| -------------------------------------------------------------------- | ----------------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
+| R61-INV-04 current Markdown visibility with `drawUnstyledText=false` | `Code.ts` pending representation commit plus `Markdown.ts` false flag/seed contract | `Markdown.test.ts` persistent update held before mock response              |
+| R61-INV-06 no fallback or diagnostic expansion                       | same existing streaming path; no new catch or alternate renderer                    | source diff/path audit and focused client/Markdown tests                    |
+| No unrelated release mutation                                        | package manifests/lockfile restored to `.6`                                         | exact nested diff against `origin/smark/main` has no release metadata paths |
 
 R71 adds no new error mechanism or success path; its production delta is limited to removing two existing fallback commits in `Code.ts`, while three existing test files are modified to replace contradictory fallback contracts. The nested OpenTUI diff remains exactly eight code files: five production owners and three tests; the root SyncProvider remains a committed baseline. The actual implementation audit must recalculate `E/C`.
 
@@ -301,28 +301,28 @@ The release-cleanup paths are exactly: `bun.lock`, `packages/core/package.json`,
 
 ### R67 Plan Audit Record
 
-| Round | Audited revision | Full scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
-| --- | --- | --- | --- | --- | --- | --- |
-| R62 | R62 | yes | B-01 Markdown pending representation contradicts `drawUnstyledText=false`; B-02 request-seam target already implemented; B-03 unrelated `.7` release metadata in repair scope | stale archive material; SyncProvider count precision; comment-budget inconsistency; candidate-failure seam precision | BLOCK | `ses_01f2f8d39ffe8ut8f6xhDeEDLV` |
-| R63 | R63 | yes | No blocking findings | NB-01 archive size; NB-02 baseline/new-file classification; NB-03 build command distinction; NB-04 release-cleanup path precision; NB-05 actual E/C required at implementation audit | APPROVE, invalidated by R64 scope correction | `ses_01f255bb7ffeWp9ntqHrM0XHyP` |
-| R64 | R64 | yes | B-01 fenced-code owner call sites not explicit in plan | NB-01 baseline classification; NB-02 exact test location; NB-03 inherited traceability navigation; NB-04 build boundary | BLOCK | `ses_01f0e3ac1ffeZbK3WOqIhHxBbK` |
-| R65 | R65 | yes | No blocking findings | NB-01 archive boundary; NB-02 minor numbering/history drift; NB-03 conditional fenced seed; NB-04 inherited baseline verification matrix; NB-05 actual E/C required at implementation audit | APPROVE, invalidated by R66 test-contract correction | `ses_01f0858d6ffeHKlMvz2NlBkVrb` |
-| R66 | R66 | yes | B-01 original compiled target-liveness feedback loop omitted from verification boundary | NB-01 baseline/test classification; NB-02 test-only E/C estimate; NB-03 archive size | BLOCK | `ses_01eff359effeBLBfRDGjY6yA5j` |
-| R67 | R67 | yes | B-01 preserved failure-to-plain-text success fallback violates original no-fallback contract | NB-01 duplicate build instructions; NB-02 client-test classification; NB-03 two seed call sites; NB-04 E excludes tests; NB-05 archive size | BLOCK | `ses_01efaa5f2ffepf0Udir1GYwcXP` |
-| R68 | R68 | pending | invalidated by user's explicit correction: failure terminal/diagnostic is not the repair goal; normal supported paths must stop producing the error | - | not audited | not applicable |
-| R69 | R69 | yes | B-01 complete verbatim original requirement is not preserved in current authoritative sections | NB-01 exact catch cleanup semantics; NB-02 exact verification commands; NB-03 archived budget ambiguity | BLOCK | `ses_01eea2ec7ffeTyWs2haeCSGl2H` |
-| R70 | R70 | yes | B-01 Code fallback removal had no authorized behavior-sensitive test path and contradicted existing Code tests | NB-01 inherited baseline navigation; NB-02 exact verification commands; NB-03 effective scope classification; NB-04 archive size; NB-05 E/C estimate | BLOCK | `ses_01ee40747ffeMuWDcmaUISj8Xl` |
-| R71 | R71 | yes | No blocking findings | NB-01 archive navigation; NB-02 verification wording drift; NB-03 baseline/new-delta boundary; NB-04 inherited traceability; NB-05 actual E/C required at implementation audit | APPROVE | `ses_01eddab16ffesVyAS1QxpQbguv` |
-| R72 | R72 | yes | B-01 warning semantics contradictory: warning must remain capability result while error must reject | NB-01 non-concrete filters; NB-02 artifact freshness; NB-03 archive size; NB-04 missing incremental estimate | BLOCK | `ses_01ebe2197ffeBUAUWjdslt4Nll` |
-| R73 | R73 | yes | B-01 full original scope not authoritative; B-02 downstream one-shot reject does not repair producer-side no-error invariant | NB-01 test seam precision; NB-02 inherited verification references; NB-03 incremental budget wording | BLOCK | `ses_01eb4844effeXZDYu3iNqmoYuM` |
-| R74 | R74 | yes | B-01 `highlightOnce()` initialization failure returns `{error}` and still reaches Code's empty-highlight success path | NB-01 missing R74 per-file E/C estimate; NB-02 archive/navigation noise; NB-03 exact test seam; NB-04 `.7` cleanup state | BLOCK | `ses_01ea19c05ffecAKWS68KGqwa6f` |
-| R75 | R75 | yes | B-01 prescribed verification filter did not select the existing normal supported one-shot and unsupported-warning tests | NB-01 incremental E/C estimate; NB-02 exact R75 file table | BLOCK | `ses_01e91d82dffeAewbvR75ltqWAV` |
-| R76 | R76 | yes | B-01 plan still treated producer initialization/parse errors as acceptable reachable outcomes and only repaired downstream rejection | NB-01 current authority not fully self-contained; NB-02 initialization fixture seam not concrete | BLOCK | `ses_01e865aa4ffeINr2qFHLPix822` |
-| R77 | R77 | yes | B-01 reusable-parser tail covered one-shot but not streaming/reference/injection consumers; B-02 exact current file/test contract was incomplete | NB-01 stale archive budget arithmetic; NB-02 future test-name anchoring; NB-03 per-file E/C estimate | BLOCK | `ses_01e6bda58ffesKRcAHH8Ab5gdk` |
-| R78 | R78 | yes | B-01 `processInjections()` catch still converted parse/query failure to partial success; B-02 tail interface, nesting, invalidation order and public red fixture were not executable | NB-01 archive navigation; NB-02 current E/C estimate; NB-03 indirect R74 verification references | BLOCK | `ses_01e624b07ffeqBqVFGcPReklgy` |
-| R79 | R79 | yes | B-01 shared `filetypeParsers/filetypeParserPromises` remained outside the tail through `handleInitializeParser`, allowing stale promise resurrection after registration/clear | NB-01 unsupported injection classification; NB-02 real failed-injection fixture detail; NB-03 aggregate E arithmetic; NB-04 SyncProvider test mapping | BLOCK | `ses_01e58e166ffehX3fA6wDrQpsm5` |
-| R80 | R80 | yes | B-01 one-shot released parser-asset scope before asynchronous injection; B-02 ordinary `HANDLE_EDITS` remained outside the shared parser-asset scope | NB-01 historical archive/budget drift; NB-02 fixture path precision | BLOCK | `ses_01e4f95cdffe2uVAtWo3CW79HV` |
-| R81 | R81 | yes | No blocking findings | NB-01 `UPDATE_DATA_PATH` is existing public/test compatibility; NB-02 scope numbering drift; NB-03 archive navigation; NB-04 E/C estimates require implementation recount | APPROVE | `ses_01e443d73ffedNAJf0czJAYIYv` |
+| Round | Audited revision | Full scope? | Blocking findings                                                                                                                                                                    | Non-blocking findings                                                                                                                                                                       | Result                                               | Invocation reference             |
+| ----- | ---------------- | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------- | -------------------------------- |
+| R62   | R62              | yes         | B-01 Markdown pending representation contradicts `drawUnstyledText=false`; B-02 request-seam target already implemented; B-03 unrelated `.7` release metadata in repair scope        | stale archive material; SyncProvider count precision; comment-budget inconsistency; candidate-failure seam precision                                                                        | BLOCK                                                | `ses_01f2f8d39ffe8ut8f6xhDeEDLV` |
+| R63   | R63              | yes         | No blocking findings                                                                                                                                                                 | NB-01 archive size; NB-02 baseline/new-file classification; NB-03 build command distinction; NB-04 release-cleanup path precision; NB-05 actual E/C required at implementation audit        | APPROVE, invalidated by R64 scope correction         | `ses_01f255bb7ffeWp9ntqHrM0XHyP` |
+| R64   | R64              | yes         | B-01 fenced-code owner call sites not explicit in plan                                                                                                                               | NB-01 baseline classification; NB-02 exact test location; NB-03 inherited traceability navigation; NB-04 build boundary                                                                     | BLOCK                                                | `ses_01f0e3ac1ffeZbK3WOqIhHxBbK` |
+| R65   | R65              | yes         | No blocking findings                                                                                                                                                                 | NB-01 archive boundary; NB-02 minor numbering/history drift; NB-03 conditional fenced seed; NB-04 inherited baseline verification matrix; NB-05 actual E/C required at implementation audit | APPROVE, invalidated by R66 test-contract correction | `ses_01f0858d6ffeHKlMvz2NlBkVrb` |
+| R66   | R66              | yes         | B-01 original compiled target-liveness feedback loop omitted from verification boundary                                                                                              | NB-01 baseline/test classification; NB-02 test-only E/C estimate; NB-03 archive size                                                                                                        | BLOCK                                                | `ses_01eff359effeBLBfRDGjY6yA5j` |
+| R67   | R67              | yes         | B-01 preserved failure-to-plain-text success fallback violates original no-fallback contract                                                                                         | NB-01 duplicate build instructions; NB-02 client-test classification; NB-03 two seed call sites; NB-04 E excludes tests; NB-05 archive size                                                 | BLOCK                                                | `ses_01efaa5f2ffepf0Udir1GYwcXP` |
+| R68   | R68              | pending     | invalidated by user's explicit correction: failure terminal/diagnostic is not the repair goal; normal supported paths must stop producing the error                                  | -                                                                                                                                                                                           | not audited                                          | not applicable                   |
+| R69   | R69              | yes         | B-01 complete verbatim original requirement is not preserved in current authoritative sections                                                                                       | NB-01 exact catch cleanup semantics; NB-02 exact verification commands; NB-03 archived budget ambiguity                                                                                     | BLOCK                                                | `ses_01eea2ec7ffeTyWs2haeCSGl2H` |
+| R70   | R70              | yes         | B-01 Code fallback removal had no authorized behavior-sensitive test path and contradicted existing Code tests                                                                       | NB-01 inherited baseline navigation; NB-02 exact verification commands; NB-03 effective scope classification; NB-04 archive size; NB-05 E/C estimate                                        | BLOCK                                                | `ses_01ee40747ffeMuWDcmaUISj8Xl` |
+| R71   | R71              | yes         | No blocking findings                                                                                                                                                                 | NB-01 archive navigation; NB-02 verification wording drift; NB-03 baseline/new-delta boundary; NB-04 inherited traceability; NB-05 actual E/C required at implementation audit              | APPROVE                                              | `ses_01eddab16ffesVyAS1QxpQbguv` |
+| R72   | R72              | yes         | B-01 warning semantics contradictory: warning must remain capability result while error must reject                                                                                  | NB-01 non-concrete filters; NB-02 artifact freshness; NB-03 archive size; NB-04 missing incremental estimate                                                                                | BLOCK                                                | `ses_01ebe2197ffeBUAUWjdslt4Nll` |
+| R73   | R73              | yes         | B-01 full original scope not authoritative; B-02 downstream one-shot reject does not repair producer-side no-error invariant                                                         | NB-01 test seam precision; NB-02 inherited verification references; NB-03 incremental budget wording                                                                                        | BLOCK                                                | `ses_01eb4844effeXZDYu3iNqmoYuM` |
+| R74   | R74              | yes         | B-01 `highlightOnce()` initialization failure returns `{error}` and still reaches Code's empty-highlight success path                                                                | NB-01 missing R74 per-file E/C estimate; NB-02 archive/navigation noise; NB-03 exact test seam; NB-04 `.7` cleanup state                                                                    | BLOCK                                                | `ses_01ea19c05ffecAKWS68KGqwa6f` |
+| R75   | R75              | yes         | B-01 prescribed verification filter did not select the existing normal supported one-shot and unsupported-warning tests                                                              | NB-01 incremental E/C estimate; NB-02 exact R75 file table                                                                                                                                  | BLOCK                                                | `ses_01e91d82dffeAewbvR75ltqWAV` |
+| R76   | R76              | yes         | B-01 plan still treated producer initialization/parse errors as acceptable reachable outcomes and only repaired downstream rejection                                                 | NB-01 current authority not fully self-contained; NB-02 initialization fixture seam not concrete                                                                                            | BLOCK                                                | `ses_01e865aa4ffeINr2qFHLPix822` |
+| R77   | R77              | yes         | B-01 reusable-parser tail covered one-shot but not streaming/reference/injection consumers; B-02 exact current file/test contract was incomplete                                     | NB-01 stale archive budget arithmetic; NB-02 future test-name anchoring; NB-03 per-file E/C estimate                                                                                        | BLOCK                                                | `ses_01e6bda58ffesKRcAHH8Ab5gdk` |
+| R78   | R78              | yes         | B-01 `processInjections()` catch still converted parse/query failure to partial success; B-02 tail interface, nesting, invalidation order and public red fixture were not executable | NB-01 archive navigation; NB-02 current E/C estimate; NB-03 indirect R74 verification references                                                                                            | BLOCK                                                | `ses_01e624b07ffeqBqVFGcPReklgy` |
+| R79   | R79              | yes         | B-01 shared `filetypeParsers/filetypeParserPromises` remained outside the tail through `handleInitializeParser`, allowing stale promise resurrection after registration/clear        | NB-01 unsupported injection classification; NB-02 real failed-injection fixture detail; NB-03 aggregate E arithmetic; NB-04 SyncProvider test mapping                                       | BLOCK                                                | `ses_01e58e166ffehX3fA6wDrQpsm5` |
+| R80   | R80              | yes         | B-01 one-shot released parser-asset scope before asynchronous injection; B-02 ordinary `HANDLE_EDITS` remained outside the shared parser-asset scope                                 | NB-01 historical archive/budget drift; NB-02 fixture path precision                                                                                                                         | BLOCK                                                | `ses_01e4f95cdffe2uVAtWo3CW79HV` |
+| R81   | R81              | yes         | No blocking findings                                                                                                                                                                 | NB-01 `UPDATE_DATA_PATH` is existing public/test compatibility; NB-02 scope numbering drift; NB-03 archive navigation; NB-04 E/C estimates require implementation recount                   | APPROVE                                              | `ses_01e443d73ffedNAJf0czJAYIYv` |
 
 R62's exact independent verdict was **BLOCK**: the plan could not proceed until the Markdown pending-representation owner is specified, the already-green request-seam item is removed as a no-op target, and release/version/lockfile material is removed from this repair's implementation boundary.
 
@@ -402,11 +402,11 @@ No blocking findings.
 
 ### R65 Forward and Reverse Traceability
 
-| Requirement / invariant | Producer -> consumer -> owner | Exact implementation/test path |
-| --- | --- | --- |
-| R61-INV-04 structured token pending visibility | Markdown structured token -> `applyMarkdownCodeRenderable` -> `CodeRenderable.content`/pending TextBuffer | `Markdown.test.ts` `streaming structured list updates keep previous item text visible while highlighting`, new literal assertions before `resolveAllStreamingUpdates()` |
-| R61-INV-04 fenced token pending visibility | `Tokens.Code.text` -> `createCodeRenderable` or `applyCodeBlockRenderable` -> `CodeRenderable.initialStyledText` -> pending TextBuffer | `Markdown.ts:976-990,1048-1060`; `Markdown.test.ts` `streaming demo-style fenced code block does not flicker unhighlighted`, assertions before `resolveAllHighlightOnce()` |
-| `drawUnstyledText=false` invariant | Markdown caller controls option; Code owns seed commit | both public tests assert false; no error/fallback branch |
+| Requirement / invariant                        | Producer -> consumer -> owner                                                                                                          | Exact implementation/test path                                                                                                                                             |
+| ---------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| R61-INV-04 structured token pending visibility | Markdown structured token -> `applyMarkdownCodeRenderable` -> `CodeRenderable.content`/pending TextBuffer                              | `Markdown.test.ts` `streaming structured list updates keep previous item text visible while highlighting`, new literal assertions before `resolveAllStreamingUpdates()`    |
+| R61-INV-04 fenced token pending visibility     | `Tokens.Code.text` -> `createCodeRenderable` or `applyCodeBlockRenderable` -> `CodeRenderable.initialStyledText` -> pending TextBuffer | `Markdown.ts:976-990,1048-1060`; `Markdown.test.ts` `streaming demo-style fenced code block does not flicker unhighlighted`, assertions before `resolveAllHighlightOnce()` |
+| `drawUnstyledText=false` invariant             | Markdown caller controls option; Code owns seed commit                                                                                 | both public tests assert false; no error/fallback branch                                                                                                                   |
 
 Reverse mapping: `createFencedCodeSeed(token.text)` is necessary because fenced `Tokens.Code` has a different representation contract from inline Markdown tokens; reusing inline tokenization could reinterpret code punctuation and cannot guarantee exact `CodeRenderable.content` text. The existing Code owner already provides the one pending TextBuffer commit, so no second renderer path is justified.
 
@@ -416,36 +416,36 @@ Reverse mapping: `createFencedCodeSeed(token.text)` is necessary because fenced 
 
 The final nested tree compared with `origin/smark/main` contains exactly seven code files and no release metadata paths:
 
-| Path | Classification | Net diff |
-| --- | --- | ---: |
-| `packages/core/src/lib/tree-sitter/client.test.ts` | public lifecycle regression | `+313/-5` |
-| `packages/core/src/lib/tree-sitter/client.ts` | approved lifecycle owner plus verified request seam | `+218/-224` |
-| `packages/core/src/lib/tree-sitter/parser.worker.ts` | accepted Tree owner | `+240/-163` |
-| `packages/core/src/lib/tree-sitter/types.ts` | correlated response contract | `+16/-7` |
-| `packages/core/src/renderables/Code.ts` | R63 pending representation owner | `+22/-12` |
-| `packages/core/src/renderables/Markdown.ts` | current seed and `drawUnstyledText=false` contract | `+78/-10` |
-| `packages/core/src/renderables/__tests__/Markdown.test.ts` | R63 red-green pending-frame assertion | `+5/-1` |
+| Path                                                       | Classification                                      |    Net diff |
+| ---------------------------------------------------------- | --------------------------------------------------- | ----------: |
+| `packages/core/src/lib/tree-sitter/client.test.ts`         | public lifecycle regression                         |   `+313/-5` |
+| `packages/core/src/lib/tree-sitter/client.ts`              | approved lifecycle owner plus verified request seam | `+218/-224` |
+| `packages/core/src/lib/tree-sitter/parser.worker.ts`       | accepted Tree owner                                 | `+240/-163` |
+| `packages/core/src/lib/tree-sitter/types.ts`               | correlated response contract                        |    `+16/-7` |
+| `packages/core/src/renderables/Code.ts`                    | R63 pending representation owner                    |   `+22/-12` |
+| `packages/core/src/renderables/Markdown.ts`                | current seed and `drawUnstyledText=false` contract  |   `+78/-10` |
+| `packages/core/src/renderables/__tests__/Markdown.test.ts` | R63 red-green pending-frame assertion               |     `+5/-1` |
 
 Root `SyncProvider` is an already committed R61 baseline owner repair and has no new R63 worktree diff. The nested `.7` manifests and `bun.lock` were restored to the `.6` consumer baseline and are absent from the final net diff. Generated `dist/**` and native output are excluded.
 
 #### Red-Green Evidence
 
-| Command | Directory | Result |
-| --- | --- | --- |
-| `bun test ./src/renderables/__tests__/Markdown.test.ts -t "streaming structured list updates keep previous item text visible while highlighting"` before the R63 production edit | `thirdparty/opentui/packages/core` | red: `Received: true` for `drawUnstyledText === false`; 20 pass, 1 fail |
-| same command after the R63 production edit | `thirdparty/opentui/packages/core` | green: 21 pass, 0 fail, 113 expect calls; exited under 60-second process supervisor |
+| Command                                                                                                                                                                          | Directory                          | Result                                                                              |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------- | ----------------------------------------------------------------------------------- |
+| `bun test ./src/renderables/__tests__/Markdown.test.ts -t "streaming structured list updates keep previous item text visible while highlighting"` before the R63 production edit | `thirdparty/opentui/packages/core` | red: `Received: true` for `drawUnstyledText === false`; 20 pass, 1 fail             |
+| same command after the R63 production edit                                                                                                                                       | `thirdparty/opentui/packages/core` | green: 21 pass, 0 fail, 113 expect calls; exited under 60-second process supervisor |
 
 #### Verification Evidence
 
-| Command | Directory | Result |
-| --- | --- | --- |
-| bounded `bun test ./src/renderables/__tests__/Markdown.test.ts -t "streaming.*list\\|pending\\|table"` | `thirdparty/opentui/packages/core` | 61 pass, 95 filtered, 0 fail, 32 snapshots; process exited |
-| bounded targeted `client.test.ts` cancellation/error/dispose slices | `thirdparty/opentui/packages/core` | each public slice passed and exited; no unbounded full client suite was used |
-| `bun run build:lib` | `thirdparty/opentui/packages/core` | pass; declarations and worker bundle generated |
-| bounded `bun test ./test/cli/cmd/tui/sync-undefined-messages.test.tsx` | `packages/opencode` | 1 pass, 0 fail; process exited |
-| bounded `bun typecheck` | `packages/opencode` | pass: `tsgo --noEmit` |
-| `git diff origin/smark/main --check` | `thirdparty/opentui` | pass; final net diff has seven code files and no `.7` release metadata |
-| bounded full `bun run build` | `thirdparty/opentui` | unavailable: native phase requires `zig`, which is not in PATH; no TypeScript failure was inferred from this environment limitation |
+| Command                                                                               | Directory                          | Result                                                                                                                              |
+| ------------------------------------------------------------------------------------- | ---------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------- | ---------------------------------------------------------- |
+| bounded `bun test ./src/renderables/**tests**/Markdown.test.ts -t "streaming.\*list\\ | pending\\                          | table"`                                                                                                                             | `thirdparty/opentui/packages/core` | 61 pass, 95 filtered, 0 fail, 32 snapshots; process exited |
+| bounded targeted `client.test.ts` cancellation/error/dispose slices                   | `thirdparty/opentui/packages/core` | each public slice passed and exited; no unbounded full client suite was used                                                        |
+| `bun run build:lib`                                                                   | `thirdparty/opentui/packages/core` | pass; declarations and worker bundle generated                                                                                      |
+| bounded `bun test ./test/cli/cmd/tui/sync-undefined-messages.test.tsx`                | `packages/opencode`                | 1 pass, 0 fail; process exited                                                                                                      |
+| bounded `bun typecheck`                                                               | `packages/opencode`                | pass: `tsgo --noEmit`                                                                                                               |
+| `git diff origin/smark/main --check`                                                  | `thirdparty/opentui`               | pass; final net diff has seven code files and no `.7` release metadata                                                              |
+| bounded full `bun run build`                                                          | `thirdparty/opentui`               | unavailable: native phase requires `zig`, which is not in PATH; no TypeScript failure was inferred from this environment limitation |
 
 Every Bun test was run under an external process-tree supervisor. A prior broad client filter printed passing tests but left Bun worker processes alive; those processes were terminated/verified absent, and that broad command is not treated as a clean verification result.
 
@@ -484,32 +484,32 @@ R61继承本文R60第1节的完整原始需求，并追加本轮用户原文：
 
 ### 3. Repository Context
 
-| Source | Why it constrains R61 |
-| --- | --- |
-| `CONTEXT.md` | Project事件可包含多个Session；TUI本地projection不等于daemon事实；Session/Message/Part是当前领域术语。 |
-| `AGENTS.md` | 最小修改、避免不必要抽象；测试从package目录运行。 |
-| `thirdparty/opentui/AGENTS.md` | 使用Bun；TUI问题必须在真实可达seam复现，不能凭猜测添加错误处理。 |
-| `packages/opencode/AGENTS.md`及`packages/opencode/test/AGENTS.md` | SyncProvider拥有本地projection；并发测试使用published readiness，不用固定sleep。 |
-| `.opencode/policy/first-principles-engineering.md` | 修复第一分歧；禁止fallback和责任泄漏；diagnostic decision surface不超过10%。 |
-| `.opencode/templates/canonical-plan.md` | 维持单一canonical plan、forward/reverse traceability和独立全范围审计。 |
-| `docs/adr/README.md`、`docs/adr/0001-*.md` | 没有适用于TUI/Tree-sitter的ADR；triage ADR不构成运行时设计授权。 |
+| Source                                                            | Why it constrains R61                                                                                 |
+| ----------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| `CONTEXT.md`                                                      | Project事件可包含多个Session；TUI本地projection不等于daemon事实；Session/Message/Part是当前领域术语。 |
+| `AGENTS.md`                                                       | 最小修改、避免不必要抽象；测试从package目录运行。                                                     |
+| `thirdparty/opentui/AGENTS.md`                                    | 使用Bun；TUI问题必须在真实可达seam复现，不能凭猜测添加错误处理。                                      |
+| `packages/opencode/AGENTS.md`及`packages/opencode/test/AGENTS.md` | SyncProvider拥有本地projection；并发测试使用published readiness，不用固定sleep。                      |
+| `.opencode/policy/first-principles-engineering.md`                | 修复第一分歧；禁止fallback和责任泄漏；diagnostic decision surface不超过10%。                          |
+| `.opencode/templates/canonical-plan.md`                           | 维持单一canonical plan、forward/reverse traceability和独立全范围审计。                                |
+| `docs/adr/README.md`、`docs/adr/0001-*.md`                        | 没有适用于TUI/Tree-sitter的ADR；triage ADR不构成运行时设计授权。                                      |
 
 ### 4. Files and Evidence Read
 
-| Evidence | Relevance | Evidence class |
-| --- | --- | --- |
-| `thirdparty/opentui` commit `61023ba5e` | 引入persistent-tree streaming主路径，并移除原有one-shot/queue主路径。 | observed |
-| `thirdparty/opentui` commit `61023ba5e^` / `df4bd31ca` | 提供改动前的可比较主路径：每buffer edit queue、独立one-shot worker、无persistent streaming owner。 | observed |
-| `thirdparty/opentui` commit `80a46c4d4` | 当前R60实现把candidate ownership、buffer tail和大量correlated error处理一起引入。 | observed |
-| `packages/core/src/lib/tree-sitter/client.ts` | `Code -> client -> worker`的streaming mutation、dispose和destroy调用链。 | reachable |
-| `packages/core/src/lib/tree-sitter/parser.worker.ts` | parser-owned Tree的parse/query/replace/dispose owner。 | reachable |
-| `packages/core/src/lib/tree-sitter/types.ts` | worker wire request/response边界。 | contracted |
-| `packages/core/src/renderables/Code.ts`、`Markdown.ts` | pending frame的当前表示、streaming Code生命周期和shutdown warning owner。 | observed/reachable |
-| `packages/opencode/src/cli/cmd/tui/context/sync.tsx` | 合法同Project事件对未加载Session projection的第一分歧。 | observed/reachable |
-| 历史`61023`差分复现 | `STREAMING_UPDATE`未settle时已发送`DISPOSE_BUFFER`且本地buffer已删除。 | observed |
-| 当前`80a`差分复现 | 同一场景下dispose不早于update终态，ack前仍保留buffer。 | observed |
-| upstream `anomalyco/opentui` `v0.4.3`至`v0.5.1` release/compare | `v0.5.1`仍采用queue/one-shot Tree-sitter路线；上游release notes未显示persistent streaming修复。 | observed |
-| 用户提供的Windows日志/截图 | 在途highlight导致正文空白，Ctrl+C销毁时产生批量warning；daemon仍可继续运行。 | observed |
+| Evidence                                                        | Relevance                                                                                          | Evidence class     |
+| --------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- | ------------------ |
+| `thirdparty/opentui` commit `61023ba5e`                         | 引入persistent-tree streaming主路径，并移除原有one-shot/queue主路径。                              | observed           |
+| `thirdparty/opentui` commit `61023ba5e^` / `df4bd31ca`          | 提供改动前的可比较主路径：每buffer edit queue、独立one-shot worker、无persistent streaming owner。 | observed           |
+| `thirdparty/opentui` commit `80a46c4d4`                         | 当前R60实现把candidate ownership、buffer tail和大量correlated error处理一起引入。                  | observed           |
+| `packages/core/src/lib/tree-sitter/client.ts`                   | `Code -> client -> worker`的streaming mutation、dispose和destroy调用链。                           | reachable          |
+| `packages/core/src/lib/tree-sitter/parser.worker.ts`            | parser-owned Tree的parse/query/replace/dispose owner。                                             | reachable          |
+| `packages/core/src/lib/tree-sitter/types.ts`                    | worker wire request/response边界。                                                                 | contracted         |
+| `packages/core/src/renderables/Code.ts`、`Markdown.ts`          | pending frame的当前表示、streaming Code生命周期和shutdown warning owner。                          | observed/reachable |
+| `packages/opencode/src/cli/cmd/tui/context/sync.tsx`            | 合法同Project事件对未加载Session projection的第一分歧。                                            | observed/reachable |
+| 历史`61023`差分复现                                             | `STREAMING_UPDATE`未settle时已发送`DISPOSE_BUFFER`且本地buffer已删除。                             | observed           |
+| 当前`80a`差分复现                                               | 同一场景下dispose不早于update终态，ack前仍保留buffer。                                             | observed           |
+| upstream `anomalyco/opentui` `v0.4.3`至`v0.5.1` release/compare | `v0.5.1`仍采用queue/one-shot Tree-sitter路线；上游release notes未显示persistent streaming修复。    | observed           |
+| 用户提供的Windows日志/截图                                      | 在途highlight导致正文空白，Ctrl+C销毁时产生批量warning；daemon仍可继续运行。                       | observed           |
 
 ### 5. Current Producer-to-Consumer Behavior
 
@@ -531,35 +531,35 @@ daemon Message/Part event
 
 ### 6. Supported Input Domain and Reachability
 
-| Input or condition | Producer | Upstream guarantees | Reachable path | Owner | Classification |
-| --- | --- | --- | --- | --- | --- |
-| 同Project但未加载Session的hidden/remove Message事件 | daemon Bus / Session producer | event schema合法；本地store只加载当前route所需Session | SSE -> SyncProvider | SyncProvider local projection | observed/reachable |
-| 同Message但未加载Part的remove事件 | daemon Part producer | MessageID/PartID合法 | SSE -> SyncProvider | SyncProvider local projection | observed/reachable |
-| 当前Markdown Code的首个或后续streaming token | Markdown parser | token/raw与Code content同一更新 | Markdown -> Code | Markdown representation seam | observed/reachable |
-| 同buffer尚未完成的streaming mutation后发生destroy/remove | Code destroy/filetype/client lifecycle | renderable销毁可在worker响应前发生 | Code -> client -> worker | client buffer owner | observed/reachable |
-| persistent Tree parse/query期间的candidate替换 | ParserWorker | 一个buffer只有一个accepted Tree owner | client request -> worker | ParserWorker WASM owner | reachable |
-| 上游`v0.5.1`与本地`0.4.3-smark.*`的API/package差异 | release producer | 仅有远端tag，不代表本地fork兼容 | package/release closure | release process | observed, out of scope |
+| Input or condition                                       | Producer                               | Upstream guarantees                                   | Reachable path           | Owner                         | Classification         |
+| -------------------------------------------------------- | -------------------------------------- | ----------------------------------------------------- | ------------------------ | ----------------------------- | ---------------------- |
+| 同Project但未加载Session的hidden/remove Message事件      | daemon Bus / Session producer          | event schema合法；本地store只加载当前route所需Session | SSE -> SyncProvider      | SyncProvider local projection | observed/reachable     |
+| 同Message但未加载Part的remove事件                        | daemon Part producer                   | MessageID/PartID合法                                  | SSE -> SyncProvider      | SyncProvider local projection | observed/reachable     |
+| 当前Markdown Code的首个或后续streaming token             | Markdown parser                        | token/raw与Code content同一更新                       | Markdown -> Code         | Markdown representation seam  | observed/reachable     |
+| 同buffer尚未完成的streaming mutation后发生destroy/remove | Code destroy/filetype/client lifecycle | renderable销毁可在worker响应前发生                    | Code -> client -> worker | client buffer owner           | observed/reachable     |
+| persistent Tree parse/query期间的candidate替换           | ParserWorker                           | 一个buffer只有一个accepted Tree owner                 | client request -> worker | ParserWorker WASM owner       | reachable              |
+| 上游`v0.5.1`与本地`0.4.3-smark.*`的API/package差异       | release producer                       | 仅有远端tag，不代表本地fork兼容                       | package/release closure  | release process               | observed, out of scope |
 
 ### 7. Required Invariants
 
-| ID | Behavioral invariant | Evidence | Existing test |
-| --- | --- | --- | --- |
-| R61-INV-01 | 合法Project事件即使对应未加载Session，也不能终止SyncProvider的后续事件消费。 | historical hidden-event red harness | `sync-undefined-messages.test.tsx` |
-| R61-INV-02 | 一个buffer的mutation完成前，dispose不能触碰其accepted Tree或删除本地owner；dispose只在真实worker ack后完成。 | historical/current dispose differential | current `client.test.ts` lifecycle seam |
-| R61-INV-03 | parser只能在完整parse/query结果准备好后转移accepted Tree ownership；失败candidate不能改变下一次更新的输入。 | parser worker ownership contract | current lifecycle tests; new failure-then-success slice |
-| R61-INV-04 | 当前Markdown token在异步highlight等待期间仍有同一token/raw的可见表示，且不需要把`drawUnstyledText`改为常开。 | blank screenshot + Code/Markdown path | current Markdown pending-frame tests |
-| R61-INV-05 | 正常renderable销毁不打印Tree-sitter cancellation warning；真正的live failure不能被伪装成成功。 | shutdown trace + renderer destruction order | bounded shutdown test |
-| R61-INV-06 | production新增diagnostic/error decision surface不超过变更决策面的10%，且新增alternate success path为零。 | user requirement + policy | diff audit |
+| ID         | Behavioral invariant                                                                                         | Evidence                                    | Existing test                                           |
+| ---------- | ------------------------------------------------------------------------------------------------------------ | ------------------------------------------- | ------------------------------------------------------- |
+| R61-INV-01 | 合法Project事件即使对应未加载Session，也不能终止SyncProvider的后续事件消费。                                 | historical hidden-event red harness         | `sync-undefined-messages.test.tsx`                      |
+| R61-INV-02 | 一个buffer的mutation完成前，dispose不能触碰其accepted Tree或删除本地owner；dispose只在真实worker ack后完成。 | historical/current dispose differential     | current `client.test.ts` lifecycle seam                 |
+| R61-INV-03 | parser只能在完整parse/query结果准备好后转移accepted Tree ownership；失败candidate不能改变下一次更新的输入。  | parser worker ownership contract            | current lifecycle tests; new failure-then-success slice |
+| R61-INV-04 | 当前Markdown token在异步highlight等待期间仍有同一token/raw的可见表示，且不需要把`drawUnstyledText`改为常开。 | blank screenshot + Code/Markdown path       | current Markdown pending-frame tests                    |
+| R61-INV-05 | 正常renderable销毁不打印Tree-sitter cancellation warning；真正的live failure不能被伪装成成功。               | shutdown trace + renderer destruction order | bounded shutdown test                                   |
+| R61-INV-06 | production新增diagnostic/error decision surface不超过变更决策面的10%，且新增alternate success path为零。     | user requirement + policy                   | diff audit                                              |
 
 ### 8. First Divergence and Root Cause
 
-| Invariant | First divergence | Owning module/interface | Proof |
-| --- | --- | --- | --- |
-| R61-INV-01 | hidden `message.updated`及remove分支把缺失collection传给`Binary.search`。 | `SyncProvider` local projection | 已运行的hidden-event red harness产生`array.length` TypeError。 |
-| R61-INV-02 | `61023ba5e`的`removeBuffer`在streaming mutation没有终态时立即删除mirror并发送dispose；历史复现输出`disposeSentBeforeUpdateSettlement=true`。 | `TreeSitterClient` buffer lifecycle | 同一脚本在`61023`红、`80a`绿。 |
-| R61-INV-03 | `61023`的`handleStreamingUpdate`在query/injection完成前直接改写accepted `parserState.tree/content`，并且替换Tree没有统一释放旧owner。 | `ParserWorker` accepted Tree owner | 代码差分及WASM Tree显式delete合同；这是状态/ownership断裂，不是错误日志问题。 |
-| R61-INV-04 | Markdown Code创建/更新时未统一提供current seed，而Code streaming路径在等待时不提交当前表示。 | `MarkdownRenderable` -> `CodeRenderable` representation seam | 用户正文空白截图；R60新增的分散seed测试只证明症状，不证明需要整套error状态机。 |
-| R61-INV-05 | Code catch先进入warning，再判断renderable是否已经销毁。 | `CodeRenderable` shutdown observer | renderer先销毁renderable、后销毁全局client的既有顺序和退出日志。 |
+| Invariant  | First divergence                                                                                                                             | Owning module/interface                                      | Proof                                                                          |
+| ---------- | -------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------ | ------------------------------------------------------------------------------ |
+| R61-INV-01 | hidden `message.updated`及remove分支把缺失collection传给`Binary.search`。                                                                    | `SyncProvider` local projection                              | 已运行的hidden-event red harness产生`array.length` TypeError。                 |
+| R61-INV-02 | `61023ba5e`的`removeBuffer`在streaming mutation没有终态时立即删除mirror并发送dispose；历史复现输出`disposeSentBeforeUpdateSettlement=true`。 | `TreeSitterClient` buffer lifecycle                          | 同一脚本在`61023`红、`80a`绿。                                                 |
+| R61-INV-03 | `61023`的`handleStreamingUpdate`在query/injection完成前直接改写accepted `parserState.tree/content`，并且替换Tree没有统一释放旧owner。        | `ParserWorker` accepted Tree owner                           | 代码差分及WASM Tree显式delete合同；这是状态/ownership断裂，不是错误日志问题。  |
+| R61-INV-04 | Markdown Code创建/更新时未统一提供current seed，而Code streaming路径在等待时不提交当前表示。                                                 | `MarkdownRenderable` -> `CodeRenderable` representation seam | 用户正文空白截图；R60新增的分散seed测试只证明症状，不证明需要整套error状态机。 |
+| R61-INV-05 | Code catch先进入warning，再判断renderable是否已经销毁。                                                                                      | `CodeRenderable` shutdown observer                           | renderer先销毁renderable、后销毁全局client的既有顺序和退出日志。               |
 
 Bug feedback loop already run:
 
@@ -578,13 +578,13 @@ result: {"updateSent":true,"disposeSentBeforeUpdateSettlement":false,"bufferStil
 
 ### 9. Responsibility and Seam
 
-| Concern | Owner | Interface promise | Why it belongs here | Why another module does not own it |
-| --- | --- | --- | --- | --- |
-| 未加载对象的本地projection | SyncProvider | daemon事实可以没有本地行；projection按加载集合表达 | 只有SyncProvider知道collection是否存在 | SSE/SDK不知道TUI本地加载域，不能过滤合法事件 |
-| mutation/dispose顺序 | TreeSitterClient buffer lifecycle | 一个公开buffer操作序列只有一个owner尾部 | client同时拥有本地mirror和worker请求顺序 | Code不应管理WASM Tree或跨调用者竞态 |
-| accepted Tree转移和WASM释放 | ParserWorker | worker拥有Tree并在commit/dispose时释放 | Tree对象只存在worker内 | client无法安全delete worker-owned WASM object |
-| current Markdown表示 | MarkdownRenderable | token/raw转换为Code输入并在异步期间保持可见 | token结构和样式seed只在Markdown层可得 | parser只返回highlight，不能重建UI token |
-| shutdown warning观察 | CodeRenderable | 已销毁renderable不再报告正常取消 | Code知道自己的destroyed状态 | worker不能判断终端UI生命周期 |
+| Concern                     | Owner                             | Interface promise                                  | Why it belongs here                      | Why another module does not own it            |
+| --------------------------- | --------------------------------- | -------------------------------------------------- | ---------------------------------------- | --------------------------------------------- |
+| 未加载对象的本地projection  | SyncProvider                      | daemon事实可以没有本地行；projection按加载集合表达 | 只有SyncProvider知道collection是否存在   | SSE/SDK不知道TUI本地加载域，不能过滤合法事件  |
+| mutation/dispose顺序        | TreeSitterClient buffer lifecycle | 一个公开buffer操作序列只有一个owner尾部            | client同时拥有本地mirror和worker请求顺序 | Code不应管理WASM Tree或跨调用者竞态           |
+| accepted Tree转移和WASM释放 | ParserWorker                      | worker拥有Tree并在commit/dispose时释放             | Tree对象只存在worker内                   | client无法安全delete worker-owned WASM object |
+| current Markdown表示        | MarkdownRenderable                | token/raw转换为Code输入并在异步期间保持可见        | token结构和样式seed只在Markdown层可得    | parser只返回highlight，不能重建UI token       |
+| shutdown warning观察        | CodeRenderable                    | 已销毁renderable不再报告正常取消                   | Code知道自己的destroyed状态              | worker不能判断终端UI生命周期                  |
 
 ### 10. Single Approved Primary-Path Design
 
@@ -607,106 +607,106 @@ R61不是“主路径失败后换一条路径”：只有一条persistent stream
 
 ### 11. Secondary and Replacement Path Inventory
 
-| Path | Current or proposed | Classification | Produces success? | Decision-surface share | Disposition |
-| --- | --- | --- | --- | --- | --- |
-| SyncProvider missing-collection no-op | proposed | primary-contract branch | no, projection no-op | primary | preserve |
-| client per-buffer mutation/dispose tail | proposed | primary ownership contract | yes, same operation | primary | preserve |
-| candidate Tree before accepted commit | proposed | primary ownership step | yes, same parse result | primary | preserve |
-| current Markdown seed while request pending | proposed | primary representation step | yes, current token representation | primary | preserve |
-| existing live-error plain-text compatibility | current shipped | existing compatibility | yes, only after genuine failure | existing | preserve without expansion |
-| R60 typed destroy classification / broad callback rejection | current R60 | diagnostic expansion | no | excessive relative to R61 | remove/collapse |
-| retry, watchdog, renderer restart, alternate parser, SDK catch-and-resume | proposed in prior drafts | forbidden fallback | yes | rejected | remove |
+| Path                                                                      | Current or proposed      | Classification              | Produces success?                 | Decision-surface share    | Disposition                |
+| ------------------------------------------------------------------------- | ------------------------ | --------------------------- | --------------------------------- | ------------------------- | -------------------------- |
+| SyncProvider missing-collection no-op                                     | proposed                 | primary-contract branch     | no, projection no-op              | primary                   | preserve                   |
+| client per-buffer mutation/dispose tail                                   | proposed                 | primary ownership contract  | yes, same operation               | primary                   | preserve                   |
+| candidate Tree before accepted commit                                     | proposed                 | primary ownership step      | yes, same parse result            | primary                   | preserve                   |
+| current Markdown seed while request pending                               | proposed                 | primary representation step | yes, current token representation | primary                   | preserve                   |
+| existing live-error plain-text compatibility                              | current shipped          | existing compatibility      | yes, only after genuine failure   | existing                  | preserve without expansion |
+| R60 typed destroy classification / broad callback rejection               | current R60              | diagnostic expansion        | no                                | excessive relative to R61 | remove/collapse            |
+| retry, watchdog, renderer restart, alternate parser, SDK catch-and-resume | proposed in prior drafts | forbidden fallback          | yes                               | rejected                  | remove                     |
 
 New alternate success paths: zero. New diagnostic surface is limited to the pre-existing warning ordering check and the minimum correlated terminal protocol; estimate below must remain within policy's10% ceiling.
 
 ### 12. Workaround Deletion and Replacement
 
-| Existing workaround or duplicate | Why it existed | Why R61 supersedes it | Delete or collapse location |
-| --- | --- | --- | --- |
-| R60 broad all-request Promise/cancellation branches | compensated for a wider-than-needed protocol rewrite | owner tail and candidate transaction repair the actual race at its owner | `client.ts`, `types.ts`, related R60 tests |
-| R60 per-callsite Markdown seed duplication | repeated downstream patches for one representation contract | central current-seed seam carries one representation rule | `Markdown.ts` |
-| R60 typed destroy warning branch | classified a symptom after destruction | destroyed check belongs before existing diagnostic branch | `Code.ts` |
-| any renderer/SDK recovery workaround | tried to keep consuming after a producer/consumer invariant broke | SyncProvider and Tree owner invariants are repaired directly | do not retain |
+| Existing workaround or duplicate                    | Why it existed                                                    | Why R61 supersedes it                                                    | Delete or collapse location                |
+| --------------------------------------------------- | ----------------------------------------------------------------- | ------------------------------------------------------------------------ | ------------------------------------------ |
+| R60 broad all-request Promise/cancellation branches | compensated for a wider-than-needed protocol rewrite              | owner tail and candidate transaction repair the actual race at its owner | `client.ts`, `types.ts`, related R60 tests |
+| R60 per-callsite Markdown seed duplication          | repeated downstream patches for one representation contract       | central current-seed seam carries one representation rule                | `Markdown.ts`                              |
+| R60 typed destroy warning branch                    | classified a symptom after destruction                            | destroyed check belongs before existing diagnostic branch                | `Code.ts`                                  |
+| any renderer/SDK recovery workaround                | tried to keep consuming after a producer/consumer invariant broke | SyncProvider and Tree owner invariants are repaired directly             | do not retain                              |
 
 ### 13. Forward Traceability
 
-| Requirement or invariant | Production path | Planned file/change | Behavioral test |
-| --- | --- | --- | --- |
-| R61-INV-01 | missing local collection projection | `packages/opencode/src/cli/cmd/tui/context/sync.tsx` four affected cases, with three missing guards added and the existing hidden-Part guard preserved | hidden/remove events followed by loaded event |
-| R61-INV-02 | single buffer mutation/dispose tail | `thirdparty/opentui/.../client.ts` | public concurrent update/remove race |
-| R61-INV-03 | candidate Tree commit/disposal | `thirdparty/opentui/.../parser.worker.ts` | failed candidate followed by successful update/reset |
-| R61-INV-04 | centralized current seed | `thirdparty/opentui/.../Markdown.ts` | list/blockquote/table/body pending frame |
-| R61-INV-05 | destroyed check before warning | `thirdparty/opentui/.../Code.ts` | pending request plus normal renderer destroy |
-| R61-INV-06 | no new fallback/diagnostic budget | all changed production files | diff/path audit and source tests |
+| Requirement or invariant | Production path                     | Planned file/change                                                                                                                                    | Behavioral test                                      |
+| ------------------------ | ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------- |
+| R61-INV-01               | missing local collection projection | `packages/opencode/src/cli/cmd/tui/context/sync.tsx` four affected cases, with three missing guards added and the existing hidden-Part guard preserved | hidden/remove events followed by loaded event        |
+| R61-INV-02               | single buffer mutation/dispose tail | `thirdparty/opentui/.../client.ts`                                                                                                                     | public concurrent update/remove race                 |
+| R61-INV-03               | candidate Tree commit/disposal      | `thirdparty/opentui/.../parser.worker.ts`                                                                                                              | failed candidate followed by successful update/reset |
+| R61-INV-04               | centralized current seed            | `thirdparty/opentui/.../Markdown.ts`                                                                                                                   | list/blockquote/table/body pending frame             |
+| R61-INV-05               | destroyed check before warning      | `thirdparty/opentui/.../Code.ts`                                                                                                                       | pending request plus normal renderer destroy         |
+| R61-INV-06               | no new fallback/diagnostic budget   | all changed production files                                                                                                                           | diff/path audit and source tests                     |
 
 ### 14. Reverse Traceability
 
-| Proposed production concept | Requirement ID | Evidence | Why existing logic cannot carry it |
-| --- | --- | --- | --- |
-| four affected missing-collection cases and three new guards | R61-INV-01 | reproducible SyncProvider TypeError plus existing hidden-Part no-op path | current reducer assumes every removable event has loaded local storage |
-| per-buffer mutation/dispose tail | R61-INV-02 | historical red differential | old client deletes mirror and disposes while mutation is pending |
-| candidate ownership transfer | R61-INV-03 | persistent Tree source and WASM ownership contract | old worker mutates accepted state before query and leaves old Tree owner |
-| centralized current seed | R61-INV-04 | screenshot and current Markdown caller matrix | no existing single constructor seam supplies all current representations |
-| destroyed-first check | R61-INV-05 | observed renderer/client destruction order | existing catch logs before its owner-lifetime check |
-| minimum correlated terminal id | R61-INV-02/03 | pending request interface | without request identity a failed operation cannot complete its own channel |
+| Proposed production concept                                 | Requirement ID | Evidence                                                                 | Why existing logic cannot carry it                                          |
+| ----------------------------------------------------------- | -------------- | ------------------------------------------------------------------------ | --------------------------------------------------------------------------- |
+| four affected missing-collection cases and three new guards | R61-INV-01     | reproducible SyncProvider TypeError plus existing hidden-Part no-op path | current reducer assumes every removable event has loaded local storage      |
+| per-buffer mutation/dispose tail                            | R61-INV-02     | historical red differential                                              | old client deletes mirror and disposes while mutation is pending            |
+| candidate ownership transfer                                | R61-INV-03     | persistent Tree source and WASM ownership contract                       | old worker mutates accepted state before query and leaves old Tree owner    |
+| centralized current seed                                    | R61-INV-04     | screenshot and current Markdown caller matrix                            | no existing single constructor seam supplies all current representations    |
+| destroyed-first check                                       | R61-INV-05     | observed renderer/client destruction order                               | existing catch logs before its owner-lifetime check                         |
+| minimum correlated terminal id                              | R61-INV-02/03  | pending request interface                                                | without request identity a failed operation cannot complete its own channel |
 
 ### 15. File-Level Change Plan
 
-| File | Add / modify / delete | Exact responsibility of the change | Expected line delta |
-| --- | --- | --- | --- |
-| `packages/opencode/src/cli/cmd/tui/context/sync.tsx` | modify | three missing local collection guards; retain the existing hidden-Part guard as the fourth affected case | +3 to +6 |
-| `thirdparty/opentui/packages/core/src/lib/tree-sitter/client.ts` | modify | minimal per-buffer tail/dispose ordering and only required streaming/one-shot terminal correlation; remove R60 broad state machinery | -80 to +80 |
-| `thirdparty/opentui/packages/core/src/lib/tree-sitter/parser.worker.ts` | modify | candidate Tree ownership and transient Tree `finally` disposal; no catch-and-success | +35 to +80 |
-| `thirdparty/opentui/packages/core/src/lib/tree-sitter/types.ts` | modify | minimal request/response ids for the two awaitable render paths | +8 to +16 |
-| `thirdparty/opentui/packages/core/src/renderables/Code.ts` | modify | destroyed check before existing warning; remove typed cancellation branch | -4 to +4 |
-| `thirdparty/opentui/packages/core/src/renderables/Markdown.ts` | modify | one centralized current token/raw seed seam; remove duplicated R60 call-site seeds | -30 to +20 |
-| `thirdparty/opentui/packages/core/src/lib/tree-sitter/client.test.ts` | modify | public race, ownership, pending representation and shutdown regressions | +80 to +140 |
-| `thirdparty/opentui/packages/core/src/renderables/__tests__/Markdown.test.ts` | modify | current pending literal contract only where stale | +1 to +1 |
+| File                                                                          | Add / modify / delete | Exact responsibility of the change                                                                                                   | Expected line delta |
+| ----------------------------------------------------------------------------- | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------ | ------------------- |
+| `packages/opencode/src/cli/cmd/tui/context/sync.tsx`                          | modify                | three missing local collection guards; retain the existing hidden-Part guard as the fourth affected case                             | +3 to +6            |
+| `thirdparty/opentui/packages/core/src/lib/tree-sitter/client.ts`              | modify                | minimal per-buffer tail/dispose ordering and only required streaming/one-shot terminal correlation; remove R60 broad state machinery | -80 to +80          |
+| `thirdparty/opentui/packages/core/src/lib/tree-sitter/parser.worker.ts`       | modify                | candidate Tree ownership and transient Tree `finally` disposal; no catch-and-success                                                 | +35 to +80          |
+| `thirdparty/opentui/packages/core/src/lib/tree-sitter/types.ts`               | modify                | minimal request/response ids for the two awaitable render paths                                                                      | +8 to +16           |
+| `thirdparty/opentui/packages/core/src/renderables/Code.ts`                    | modify                | destroyed check before existing warning; remove typed cancellation branch                                                            | -4 to +4            |
+| `thirdparty/opentui/packages/core/src/renderables/Markdown.ts`                | modify                | one centralized current token/raw seed seam; remove duplicated R60 call-site seeds                                                   | -30 to +20          |
+| `thirdparty/opentui/packages/core/src/lib/tree-sitter/client.test.ts`         | modify                | public race, ownership, pending representation and shutdown regressions                                                              | +80 to +140         |
+| `thirdparty/opentui/packages/core/src/renderables/__tests__/Markdown.test.ts` | modify                | current pending literal contract only where stale                                                                                    | +1 to +1            |
 
 No new production file, worker telemetry, generated artifact or release asset is authorized. The `.7` version commit remains unpublished until R61 implementation is independently verified.
 
 ### 16. TDD Behavior Slices
 
-| Order | Red behavior | Why current code fails | Minimal green behavior | Regression protected |
-| --- | --- | --- | --- | --- |
-| 1 | Emit hidden/remove events for an unloaded Session, then a valid loaded event. | undefined local collection reaches `Binary.search`. | no-op only for missing local projection; next event applies. | R61-INV-01 |
-| 2 | On the historical `61023` path, hold `STREAMING_UPDATE`, call public remove, and observe dispose before update settlement. | dispose bypasses the mutation owner. | dispose is sent only after mutation terminal response and local buffer remains until ack. | R61-INV-02 |
-| 3 | Use the existing `client.test.ts:1380-1441` worker `postMessage/onmessage` seam to force a candidate query/parse failure, then perform a public successful update/reset. | accepted Tree/content is mutated before the failed query completes. | failed candidate is released; previous accepted state remains usable. | R61-INV-03 |
-| 4 | Hold current Markdown list/blockquote/table/body highlight and capture frame before completion. | missing current seed leaves Code representation invisible with `drawUnstyledText=false`. | exact current token/raw representation is visible; eventual highlight replaces it. | R61-INV-04 |
-| 5 | Destroy the renderer while a highlight is pending and capture warning output. | warning is emitted before destroyed owner check. | normal destruction produces no warning; a separately injected live failure remains observable. | R61-INV-05 |
-| 6 | Run the existing compiled TUI scenario for daemon event continuation, Thinking/body and Commands restoration. | reducer or pending Code path can stop downstream frame updates. | same public event/render path remains live without production telemetry. | R61-INV-01/04/05 |
+| Order | Red behavior                                                                                                                                                             | Why current code fails                                                                   | Minimal green behavior                                                                         | Regression protected |
+| ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- | -------------------- |
+| 1     | Emit hidden/remove events for an unloaded Session, then a valid loaded event.                                                                                            | undefined local collection reaches `Binary.search`.                                      | no-op only for missing local projection; next event applies.                                   | R61-INV-01           |
+| 2     | On the historical `61023` path, hold `STREAMING_UPDATE`, call public remove, and observe dispose before update settlement.                                               | dispose bypasses the mutation owner.                                                     | dispose is sent only after mutation terminal response and local buffer remains until ack.      | R61-INV-02           |
+| 3     | Use the existing `client.test.ts:1380-1441` worker `postMessage/onmessage` seam to force a candidate query/parse failure, then perform a public successful update/reset. | accepted Tree/content is mutated before the failed query completes.                      | failed candidate is released; previous accepted state remains usable.                          | R61-INV-03           |
+| 4     | Hold current Markdown list/blockquote/table/body highlight and capture frame before completion.                                                                          | missing current seed leaves Code representation invisible with `drawUnstyledText=false`. | exact current token/raw representation is visible; eventual highlight replaces it.             | R61-INV-04           |
+| 5     | Destroy the renderer while a highlight is pending and capture warning output.                                                                                            | warning is emitted before destroyed owner check.                                         | normal destruction produces no warning; a separately injected live failure remains observable. | R61-INV-05           |
+| 6     | Run the existing compiled TUI scenario for daemon event continuation, Thinking/body and Commands restoration.                                                            | reducer or pending Code path can stop downstream frame updates.                          | same public event/render path remains live without production telemetry.                       | R61-INV-01/04/05     |
 
 ### 17. Chinese Comment Budget
 
-| Metric | Estimate | Method |
-| --- | ---: | --- |
-| Effective changed production lines `E` | <=300 | count substantive executable changes only; exclude imports, formatting, pure moves and tests |
+| Metric                                   |                                                          Estimate | Method                                                                                                                        |
+| ---------------------------------------- | ----------------------------------------------------------------: | ----------------------------------------------------------------------------------------------------------------------------- |
+| Effective changed production lines `E`   |                                                             <=300 | count substantive executable changes only; exclude imports, formatting, pure moves and tests                                  |
 | Required qualifying Chinese comments `C` | `>= max(1, ceil(E × 0.15))` and `<=45` at the planned `E` ceiling | comments only for owner transfer, ack ordering and current-seed invariant; actual implementation audit recomputes both values |
 
 The implementation must remove surplus R60 comments rather than retain comments for deleted state-machine branches. No comments are added to explain obvious control flow.
 
 ### 18. Verification
 
-| Command | Working directory | Evidence produced |
-| --- | --- | --- |
-| `bun test ./test/cli/cmd/tui/sync-undefined-messages.test.tsx` | `packages/opencode` | Sync projection regression |
-| targeted `bun test` for `client.test.ts` race/ownership/pending slices | `thirdparty/opentui/packages/core` | public Tree/client/Code behavior without full hanging suite |
-| `bun typecheck` | `packages/opencode` | root TypeScript contract |
-| `bun run build` | `thirdparty/opentui` | current OpenTUI source artifact |
-| existing bounded compiled TUI smoke | `packages/opencode` | daemon event continuation, Thinking/body and Commands frame behavior |
-| `git diff --check` plus actual path/E/C audit | repository and nested repo | no unrelated files, no fallback, budget compliance |
+| Command                                                                | Working directory                  | Evidence produced                                                    |
+| ---------------------------------------------------------------------- | ---------------------------------- | -------------------------------------------------------------------- |
+| `bun test ./test/cli/cmd/tui/sync-undefined-messages.test.tsx`         | `packages/opencode`                | Sync projection regression                                           |
+| targeted `bun test` for `client.test.ts` race/ownership/pending slices | `thirdparty/opentui/packages/core` | public Tree/client/Code behavior without full hanging suite          |
+| `bun typecheck`                                                        | `packages/opencode`                | root TypeScript contract                                             |
+| `bun run build`                                                        | `thirdparty/opentui`               | current OpenTUI source artifact                                      |
+| existing bounded compiled TUI smoke                                    | `packages/opencode`                | daemon event continuation, Thinking/body and Commands frame behavior |
+| `git diff --check` plus actual path/E/C audit                          | repository and nested repo         | no unrelated files, no fallback, budget compliance                   |
 
 Full client suite is not a first-line command; it is attempted only after targeted commands pass and always under the repository's external process-tree timeout.
 
 ### 19. Diff Budget
 
-| Metric | Estimate | Justification |
-| --- | ---: | --- |
-| Files added | 0 | use existing seams |
-| Production files modified | <=6 | SyncProvider plus five OpenTUI owners |
-| Test files modified | <=2 | public behavior slices in existing suites |
-| Production effective lines | <=300 | surgical owner/representation changes; R60 broad rewrite is removed/collapsed |
-| New alternate success paths | 0 | no retry, fallback, restart or second event source |
+| Metric                      | Estimate | Justification                                                                 |
+| --------------------------- | -------: | ----------------------------------------------------------------------------- |
+| Files added                 |        0 | use existing seams                                                            |
+| Production files modified   |      <=6 | SyncProvider plus five OpenTUI owners                                         |
+| Test files modified         |      <=2 | public behavior slices in existing suites                                     |
+| Production effective lines  |    <=300 | surgical owner/representation changes; R60 broad rewrite is removed/collapsed |
+| New alternate success paths |        0 | no retry, fallback, restart or second event source                            |
 
 ### 20. Real Risks and Open Decisions
 
@@ -726,9 +726,9 @@ The independent auditor must audit the complete original user scope against R61,
 
 ### 22. Plan Audit Record
 
-| Round | Audited revision | Full scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
-| --- | --- | --- | --- | --- | --- | --- |
-| R61 | R61 | yes | No blocking findings | See verbatim verdict below | APPROVE | `ses_01f724578ffeS5c7aCpIoLy5Jj` |
+| Round | Audited revision | Full scope? | Blocking findings    | Non-blocking findings      | Result  | Invocation reference             |
+| ----- | ---------------- | ----------- | -------------------- | -------------------------- | ------- | -------------------------------- |
+| R61   | R61              | yes         | No blocking findings | See verbatim verdict below | APPROVE | `ses_01f724578ffeS5c7aCpIoLy5Jj` |
 
 R60 approval is invalidated by this substantive root-cause, owner, file-scope and fallback-policy revision. R61 is the only implementation-authorizing revision.
 
@@ -752,15 +752,15 @@ No blocking findings.
 
 ## Requirement and traceability coverage
 
-| Requirement | R61 owner/path | Verification |
-|---|---|---|
-| TUI must continue consuming valid events after an unloaded-session event | `SyncProvider` missing local collection projection | Hidden/remove event followed by a loaded valid event; compiled liveness smoke |
-| TUI must not deadlock on same-buffer mutation/dispose overlap | `TreeSitterClient` per-buffer operation tail | Public concurrent update/remove lifecycle test |
-| Persistent Tree ownership must remain valid across failures and replacement | `ParserWorker` candidate Tree and single commit point | Candidate failure followed by successful update/reset |
-| Markdown body must remain visible while highlighting is pending | `MarkdownRenderable` current-token seed seam | Pending-frame tests for list, blockquote, table, and ordinary body paths |
-| Normal shutdown must not emit cancellation warnings while live failures remain observable | `CodeRenderable` destruction check before diagnostic branch | Pending highlight plus destruction test and compiled shutdown smoke |
-| No unrelated fallback or error-handling expansion | R61 explicit non-goals, single primary-path design, zero new alternate success paths | Diff/path audit |
-| File and production-line limits | R61 file-level and diff budgets | Independent implementation diff audit |
+| Requirement                                                                               | R61 owner/path                                                                       | Verification                                                                  |
+| ----------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------- |
+| TUI must continue consuming valid events after an unloaded-session event                  | `SyncProvider` missing local collection projection                                   | Hidden/remove event followed by a loaded valid event; compiled liveness smoke |
+| TUI must not deadlock on same-buffer mutation/dispose overlap                             | `TreeSitterClient` per-buffer operation tail                                         | Public concurrent update/remove lifecycle test                                |
+| Persistent Tree ownership must remain valid across failures and replacement               | `ParserWorker` candidate Tree and single commit point                                | Candidate failure followed by successful update/reset                         |
+| Markdown body must remain visible while highlighting is pending                           | `MarkdownRenderable` current-token seed seam                                         | Pending-frame tests for list, blockquote, table, and ordinary body paths      |
+| Normal shutdown must not emit cancellation warnings while live failures remain observable | `CodeRenderable` destruction check before diagnostic branch                          | Pending highlight plus destruction test and compiled shutdown smoke           |
+| No unrelated fallback or error-handling expansion                                         | R61 explicit non-goals, single primary-path design, zero new alternate success paths | Diff/path audit                                                               |
+| File and production-line limits                                                           | R61 file-level and diff budgets                                                      | Independent implementation diff audit                                         |
 
 The producer-to-consumer chain is sufficiently reconstructed:
 
@@ -801,7 +801,7 @@ R60 retains the exact primary transitions from R58 and binds the complete regres
 - Parser edit, streaming update and reset each parse/query a candidate Tree, commit the candidate map entry only after the complete response is ready, delete the previous accepted Tree exactly at that commit, and delete only candidate allocations on failure.
 - Every persistent Markdown CodeRenderable update caller receives a seed built from the exact current token/raw text: list child text/paragraph, list raw fallback, blockquote, top-level non-table, incomplete-table reuse and incomplete-table replacement. Fenced code blocks continue using their existing code-renderer contract.
 - The nested-list regression's pending-frame assertion requires the current updated literal `Nested bullet with a long phrase that should wrap`; the settled initial snapshot continues asserting the shorter initial literal. This changes no renderer or parser behavior.
-- `packages/opencode/script/smoke-opentui-artifact.ts --binary ./dist/opencode-windows-x64/bin/opencode.exe --scenario target-liveness` is the sole target-liveness artifact. Its outer process runs `runSyncProjectionPreflight()` exactly once through the existing `sync-fixture`; the Windows scenario child skips that preflight through `OPENCODE_SMOKE_ROOT_REPORT`. The scenario writes a protocol-complete worker fixture under its isolated root, selects it through the existing public `OTUI_TREE_SITTER_WORKER_PATH` environment seam, and makes the second model response's first SSE delta the complete fenced block "```ts\n// CANCEL-HIGHLIGHT-SENTINEL\n```" before holding the response open. The fixture completes ordinary INIT/parser/edit/stream/one-shot/dispose requests, but for a matching one-shot or streaming request atomically writes the isolated ready file and deliberately withholds only that terminal response. The smoke waits for that file before sending Ctrl+C, proving the real compiled fenced-Code/client request is pending without production telemetry; afterward it requires zero expected shutdown warnings and deletes the fixture/ready file with the isolated root.
+- `packages/opencode/script/smoke-opentui-artifact.ts --binary ./dist/opencode-windows-x64/bin/opencode.exe --scenario target-liveness` is the sole target-liveness artifact. Its outer process runs `runSyncProjectionPreflight()` exactly once through the existing `sync-fixture`; the Windows scenario child skips that preflight through `OPENCODE_SMOKE_ROOT_REPORT`. The scenario writes a protocol-complete worker fixture under its isolated root, selects it through the existing public `OTUI_TREE_SITTER_WORKER_PATH` environment seam, and makes the second model response's first SSE delta the complete fenced block "`ts\n// CANCEL-HIGHLIGHT-SENTINEL\n`" before holding the response open. The fixture completes ordinary INIT/parser/edit/stream/one-shot/dispose requests, but for a matching one-shot or streaming request atomically writes the isolated ready file and deliberately withholds only that terminal response. The smoke waits for that file before sending Ctrl+C, proving the real compiled fenced-Code/client request is pending without production telemetry; afterward it requires zero expected shutdown warnings and deletes the fixture/ready file with the isolated root.
 
 ### 1. Verbatim Requirement
 
@@ -818,37 +818,37 @@ R60 retains the exact primary transitions from R58 and binds the complete regres
 
 ### 3. Repository Context
 
-| Source | Why it constrains this task |
-| --- | --- |
-| `CONTEXT.md` | Session属于Project和工作目录；Status与Run state分离；Project事件可包含多个Session。 |
-| `AGENTS.md` | 测试必须在package目录运行；遵循最小修改、避免mock和复杂抽象。 |
-| `packages/opencode/AGENTS.md` | TUI/daemon是`packages/opencode`职责；不要引入重复Effect运行时或额外生命周期状态。 |
-| `packages/opencode/test/AGENTS.md` | 使用真实fixture、published readiness、禁止固定sleep作为并发就绪协议。 |
-| `packages/opencode/src/server/routes/instance/httpapi/AGENTS.md` | HTTP/SSE owner保持在HttpApi handler；不把HttpApi错误泄漏进Session服务。 |
-| `.opencode/policy/first-principles-engineering.md` | 修复第一分歧；禁止fallback；任何实质计划变化必须重新审计。 |
-| `.opencode/templates/canonical-plan.md` | 本文件必须包含完整证据、责任、TDD、预算、追踪和审计记录。 |
-| `docs/adr/README.md`, `docs/adr/0001-*.md` | 无适用TUI/daemon ADR；不得把triage ADR当作运行时设计授权。 |
+| Source                                                           | Why it constrains this task                                                         |
+| ---------------------------------------------------------------- | ----------------------------------------------------------------------------------- |
+| `CONTEXT.md`                                                     | Session属于Project和工作目录；Status与Run state分离；Project事件可包含多个Session。 |
+| `AGENTS.md`                                                      | 测试必须在package目录运行；遵循最小修改、避免mock和复杂抽象。                       |
+| `packages/opencode/AGENTS.md`                                    | TUI/daemon是`packages/opencode`职责；不要引入重复Effect运行时或额外生命周期状态。   |
+| `packages/opencode/test/AGENTS.md`                               | 使用真实fixture、published readiness、禁止固定sleep作为并发就绪协议。               |
+| `packages/opencode/src/server/routes/instance/httpapi/AGENTS.md` | HTTP/SSE owner保持在HttpApi handler；不把HttpApi错误泄漏进Session服务。             |
+| `.opencode/policy/first-principles-engineering.md`               | 修复第一分歧；禁止fallback；任何实质计划变化必须重新审计。                          |
+| `.opencode/templates/canonical-plan.md`                          | 本文件必须包含完整证据、责任、TDD、预算、追踪和审计记录。                           |
+| `docs/adr/README.md`, `docs/adr/0001-*.md`                       | 无适用TUI/daemon ADR；不得把triage ADR当作运行时设计授权。                          |
 
 ### 4. Files and Evidence Read
 
-| Evidence | Relevance | Evidence class |
-| --- | --- | --- |
-| `packages/opencode/src/cli/cmd/tui/context/event.ts:45-80` | 同Project/global事件进入当前TUI；这是合法事件扇出，不是异常输入。 | reachable |
-| `packages/opencode/src/cli/cmd/tui/context/sdk.tsx:58-109,122-188` | SSE事件进入16ms queue并同步emit；Reducer异常会破坏当前批处理。 | reachable |
-| `packages/opencode/src/cli/cmd/tui/context/sync.tsx:769-900` | hidden message、message removed、part removed存在未加载数组上的`Binary.search`。 | observed/reachable |
-| `packages/opencode/src/cli/cmd/tui/context/sync.tsx:1070-1117` | HTTP快照只建立被请求Session的本地Message/Part投影。 | reachable |
-| `packages/core/src/util/binary.ts:2-19` | `Binary.search`读取`array.length`，undefined输入必然抛错。 | observed |
-| `packages/opencode/src/session/message-v2.ts:1437-1485` | 普通Session page默认排除hidden Message/Part。 | contracted/reachable |
-| `packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts:148-158,176-186` | SDK普通读取与hidden tombstone使用不同可见投影。 | contracted/reachable |
-| `packages/opencode/src/session/status.ts:58-88` | daemon全局Status Map解释active-session计数，但不承载TUI store同步。 | observed |
-| `packages/opencode/src/cli/cmd/tui/thread.ts:165-175` | Ctrl+C后的daemon提示只读status，不是TUI事件消费owner。 | observed |
-| `packages/opencode/test/cli/cmd/tui/sync-fixture.tsx:38-179` | 公开testTransport/event source和renderer cleanup seam。 | contracted |
-| `packages/opencode/test/cli/cmd/tui/sync-undefined-messages.test.tsx:1-47` | 已有TUI sync异常回归，当前1 pass，证明公共同步seam可运行。 | observed |
-| Throwaway `bun -e` hidden tombstone harness | 未加载Session的hidden `message.updated`当前实际输出`TypeError: undefined is not an object (evaluating 'array.length')`。 | observed |
-| `thirdparty/opentui/packages/core/src/lib/tree-sitter/client.ts:219-239` | `OTUI_TREE_SITTER_WORKER_PATH`是现有公开worker选择seam；smoke可用隔离fixture建立pending readiness而不修改production contract。 | contracted/reachable |
-| `thirdparty/opentui/packages/core/src/lib/tree-sitter/{client.ts,parser.worker.ts,types.ts}` | correlated request、worker error和Tree ownership修复的现有owner。 | reachable/observed |
-| `thirdparty/opentui/packages/core/src/renderables/{Code.ts,Markdown.ts}` | shutdown warning和current Markdown representation的渲染owner。 | reachable/observed |
-| `packages/opencode/script/smoke-opentui-artifact.ts` | 已有compiled PTY smoke，当前worktree扩展可作为Thinking/body/dialog/shutdown公开验证面。 | observed/reachable |
+| Evidence                                                                                     | Relevance                                                                                                                      | Evidence class       |
+| -------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ | -------------------- |
+| `packages/opencode/src/cli/cmd/tui/context/event.ts:45-80`                                   | 同Project/global事件进入当前TUI；这是合法事件扇出，不是异常输入。                                                              | reachable            |
+| `packages/opencode/src/cli/cmd/tui/context/sdk.tsx:58-109,122-188`                           | SSE事件进入16ms queue并同步emit；Reducer异常会破坏当前批处理。                                                                 | reachable            |
+| `packages/opencode/src/cli/cmd/tui/context/sync.tsx:769-900`                                 | hidden message、message removed、part removed存在未加载数组上的`Binary.search`。                                               | observed/reachable   |
+| `packages/opencode/src/cli/cmd/tui/context/sync.tsx:1070-1117`                               | HTTP快照只建立被请求Session的本地Message/Part投影。                                                                            | reachable            |
+| `packages/core/src/util/binary.ts:2-19`                                                      | `Binary.search`读取`array.length`，undefined输入必然抛错。                                                                     | observed             |
+| `packages/opencode/src/session/message-v2.ts:1437-1485`                                      | 普通Session page默认排除hidden Message/Part。                                                                                  | contracted/reachable |
+| `packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts:148-158,176-186`   | SDK普通读取与hidden tombstone使用不同可见投影。                                                                                | contracted/reachable |
+| `packages/opencode/src/session/status.ts:58-88`                                              | daemon全局Status Map解释active-session计数，但不承载TUI store同步。                                                            | observed             |
+| `packages/opencode/src/cli/cmd/tui/thread.ts:165-175`                                        | Ctrl+C后的daemon提示只读status，不是TUI事件消费owner。                                                                         | observed             |
+| `packages/opencode/test/cli/cmd/tui/sync-fixture.tsx:38-179`                                 | 公开testTransport/event source和renderer cleanup seam。                                                                        | contracted           |
+| `packages/opencode/test/cli/cmd/tui/sync-undefined-messages.test.tsx:1-47`                   | 已有TUI sync异常回归，当前1 pass，证明公共同步seam可运行。                                                                     | observed             |
+| Throwaway `bun -e` hidden tombstone harness                                                  | 未加载Session的hidden `message.updated`当前实际输出`TypeError: undefined is not an object (evaluating 'array.length')`。       | observed             |
+| `thirdparty/opentui/packages/core/src/lib/tree-sitter/client.ts:219-239`                     | `OTUI_TREE_SITTER_WORKER_PATH`是现有公开worker选择seam；smoke可用隔离fixture建立pending readiness而不修改production contract。 | contracted/reachable |
+| `thirdparty/opentui/packages/core/src/lib/tree-sitter/{client.ts,parser.worker.ts,types.ts}` | correlated request、worker error和Tree ownership修复的现有owner。                                                              | reachable/observed   |
+| `thirdparty/opentui/packages/core/src/renderables/{Code.ts,Markdown.ts}`                     | shutdown warning和current Markdown representation的渲染owner。                                                                 | reachable/observed   |
+| `packages/opencode/script/smoke-opentui-artifact.ts`                                         | 已有compiled PTY smoke，当前worktree扩展可作为Thinking/body/dialog/shutdown公开验证面。                                        | observed/reachable   |
 
 ### 5. Current Producer-to-Consumer Behavior
 
@@ -875,40 +875,40 @@ worker错误没有messageId时会让request channel无法完成；persistent Tre
 
 ### 6. Supported Input Domain and Reachability
 
-| Input or condition | Producer | Upstream guarantees | Reachable path | Owner | Classification |
-| --- | --- | --- | --- | --- | --- |
-| 同Project但未加载Session的`message.updated` hidden tombstone | Revert/hidden Message producer | Event schema合法；Session可能未进入当前TUI store | global SSE -> project event route -> SyncProvider | SyncProvider local projection | observed/reachable |
-| 未加载Session的`message.removed` | Session removal producer | event携带SessionID/MessageID | 同上 | SyncProvider | reachable |
-| 未加载Message的`message.part.removed` | Part removal producer | event携带MessageID/PartID | 同上 | SyncProvider | reachable |
-| 同一Part的正常`message.part.updated`/delta | Session streaming producer | Part/delta schema合法 | SSE -> reducer -> Part store | SyncProvider | contracted |
-| worker correlated error/failed parse | Tree-sitter worker | request携带messageId；失败仍须返回终态 | client -> Code | Tree-sitter client/worker | reachable |
-| persistent Tree accepted replacement | parser worker | 每个buffer只有一个accepted owner | parser worker candidate path | parser worker | reachable |
-| Ctrl+C期间在途highlight请求 | smoke-owned worker fixture publishes isolated ready file only after receiving the sentinel request | destroyed cancellation是正常终止，不是live failure | compiled Markdown/Code -> public worker seam -> ready file -> Ctrl+C -> client destroy | Code/client; smoke owns readiness only | observed/contracted |
-| current Markdown token while highlight pending | Markdown parser | current raw/token representation已存在 | Markdown -> CodeRenderable | Markdown | reachable |
+| Input or condition                                           | Producer                                                                                           | Upstream guarantees                                | Reachable path                                                                         | Owner                                  | Classification      |
+| ------------------------------------------------------------ | -------------------------------------------------------------------------------------------------- | -------------------------------------------------- | -------------------------------------------------------------------------------------- | -------------------------------------- | ------------------- |
+| 同Project但未加载Session的`message.updated` hidden tombstone | Revert/hidden Message producer                                                                     | Event schema合法；Session可能未进入当前TUI store   | global SSE -> project event route -> SyncProvider                                      | SyncProvider local projection          | observed/reachable  |
+| 未加载Session的`message.removed`                             | Session removal producer                                                                           | event携带SessionID/MessageID                       | 同上                                                                                   | SyncProvider                           | reachable           |
+| 未加载Message的`message.part.removed`                        | Part removal producer                                                                              | event携带MessageID/PartID                          | 同上                                                                                   | SyncProvider                           | reachable           |
+| 同一Part的正常`message.part.updated`/delta                   | Session streaming producer                                                                         | Part/delta schema合法                              | SSE -> reducer -> Part store                                                           | SyncProvider                           | contracted          |
+| worker correlated error/failed parse                         | Tree-sitter worker                                                                                 | request携带messageId；失败仍须返回终态             | client -> Code                                                                         | Tree-sitter client/worker              | reachable           |
+| persistent Tree accepted replacement                         | parser worker                                                                                      | 每个buffer只有一个accepted owner                   | parser worker candidate path                                                           | parser worker                          | reachable           |
+| Ctrl+C期间在途highlight请求                                  | smoke-owned worker fixture publishes isolated ready file only after receiving the sentinel request | destroyed cancellation是正常终止，不是live failure | compiled Markdown/Code -> public worker seam -> ready file -> Ctrl+C -> client destroy | Code/client; smoke owns readiness only | observed/contracted |
+| current Markdown token while highlight pending               | Markdown parser                                                                                    | current raw/token representation已存在             | Markdown -> CodeRenderable                                                             | Markdown                               | reachable           |
 
 ### 7. Required Invariants
 
-| ID | Behavioral invariant | Evidence | Existing test |
-| --- | --- | --- | --- |
-| R58-INV-01 | 合法的Project事件即使属于未加载Session，也不能使SyncProvider reducer抛异常或停止后续事件消费。 | hidden tombstone red harness | smoke artifact source preflight |
-| R58-INV-02 | 未加载对象的删除/隐藏事件是本地projection的no-op；随后当前Session的有效Message/Part事件仍更新store和frame。 | `Binary.search(undefined)` first divergence | smoke artifact source preflight |
-| R58-INV-03 | TUI保持daemon事件流与本地store同步；daemon继续运行时，后续正文/Thinking事件仍可见。 | user Session symptom + event chain | compiled target-liveness smoke |
-| R58-INV-04 | 每个Tree-sitter messageId request在成功、warning、显式error、worker failure或destroy cancellation中只完成一次；settlement后callback map不再保留该id。 | client/worker response protocol | new correlated error/settlement tests in `client.test.ts` |
-| R58-INV-05 | 每个buffer只有一个accepted Tree owner；edit/stream/reset的candidate只有完整parse/query成功后才能成为owner，accepted replacement释放旧owner，失败candidate不破坏旧owner。 | parser worker ownership transition | public update/reset/stream failure-then-success tests |
-| R58-INV-06 | `TreeSitterClientDestroyedError`只表示正常client cancellation；Code遇到它不warning，其他live worker/highlight error仍走既有plain-text diagnostic contract。 | client-to-Code cancellation contract | real pending request destroy plus Code one-shot/streaming test and compiled pending-ready smoke |
-| R58-INV-07 | persistent Markdown每个current update caller都显示同一current token/raw representation while pending；最终highlight仍覆盖该representation，不改变fenced code renderer语义。 | Markdown seed call-site matrix | list, blockquote, non-list and incomplete-table tests |
-| R58-INV-08 | Commands打开/关闭后，当前body、Thinking和背景cell重新提交，没有旧dialog残影。 | user-visible dialog symptom | compiled target-liveness smoke |
-| R60-INV-09 | 最终修改不超过8个代码文件，当前-turn明确授权第9个test-only correction；production effective lines低于800，且不引入第二成功路径。 | user constraint/amendment/policy | diff and E/C audit |
+| ID         | Behavioral invariant                                                                                                                                                        | Evidence                                    | Existing test                                                                                   |
+| ---------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| R58-INV-01 | 合法的Project事件即使属于未加载Session，也不能使SyncProvider reducer抛异常或停止后续事件消费。                                                                              | hidden tombstone red harness                | smoke artifact source preflight                                                                 |
+| R58-INV-02 | 未加载对象的删除/隐藏事件是本地projection的no-op；随后当前Session的有效Message/Part事件仍更新store和frame。                                                                 | `Binary.search(undefined)` first divergence | smoke artifact source preflight                                                                 |
+| R58-INV-03 | TUI保持daemon事件流与本地store同步；daemon继续运行时，后续正文/Thinking事件仍可见。                                                                                         | user Session symptom + event chain          | compiled target-liveness smoke                                                                  |
+| R58-INV-04 | 每个Tree-sitter messageId request在成功、warning、显式error、worker failure或destroy cancellation中只完成一次；settlement后callback map不再保留该id。                       | client/worker response protocol             | new correlated error/settlement tests in `client.test.ts`                                       |
+| R58-INV-05 | 每个buffer只有一个accepted Tree owner；edit/stream/reset的candidate只有完整parse/query成功后才能成为owner，accepted replacement释放旧owner，失败candidate不破坏旧owner。    | parser worker ownership transition          | public update/reset/stream failure-then-success tests                                           |
+| R58-INV-06 | `TreeSitterClientDestroyedError`只表示正常client cancellation；Code遇到它不warning，其他live worker/highlight error仍走既有plain-text diagnostic contract。                 | client-to-Code cancellation contract        | real pending request destroy plus Code one-shot/streaming test and compiled pending-ready smoke |
+| R58-INV-07 | persistent Markdown每个current update caller都显示同一current token/raw representation while pending；最终highlight仍覆盖该representation，不改变fenced code renderer语义。 | Markdown seed call-site matrix              | list, blockquote, non-list and incomplete-table tests                                           |
+| R58-INV-08 | Commands打开/关闭后，当前body、Thinking和背景cell重新提交，没有旧dialog残影。                                                                                               | user-visible dialog symptom                 | compiled target-liveness smoke                                                                  |
+| R60-INV-09 | 最终修改不超过8个代码文件，当前-turn明确授权第9个test-only correction；production effective lines低于800，且不引入第二成功路径。                                            | user constraint/amendment/policy            | diff and E/C audit                                                                              |
 
 ### 8. First Divergence and Root Cause
 
-| Invariant | First divergence | Owning module/interface | Proof |
-| --- | --- | --- | --- |
-| R58-INV-01/02/03 | `sync.tsx`在hidden `message.updated`及remove事件上把缺失本地数组传给`Binary.search`。 | `SyncProvider` event reducer | throwaway harness produces exact TypeError before any OpenTUI frame change |
-| R58-INV-04 | worker terminal error path historically lacked correlated completion for every request class. | Tree-sitter worker/client response channel | current source/type diff and existing correlated tests |
-| R58-INV-05 | persistent candidate ownership must transfer only after query success. | parser.worker accepted-state owner | current lifecycle source and repeated edit/stream/reset tests |
-| R58-INV-06 | Code logs rejection before classifying destroyed client cancellation. | Code rejection/shutdown owner | shutdown warning trace and current Code source |
-| R58-INV-07 | persistent CodeRenderable update callers lack current representation seed. | Markdown seed construction | R54 current-source evidence and existing Markdown behavior |
+| Invariant        | First divergence                                                                              | Owning module/interface                    | Proof                                                                      |
+| ---------------- | --------------------------------------------------------------------------------------------- | ------------------------------------------ | -------------------------------------------------------------------------- |
+| R58-INV-01/02/03 | `sync.tsx`在hidden `message.updated`及remove事件上把缺失本地数组传给`Binary.search`。         | `SyncProvider` event reducer               | throwaway harness produces exact TypeError before any OpenTUI frame change |
+| R58-INV-04       | worker terminal error path historically lacked correlated completion for every request class. | Tree-sitter worker/client response channel | current source/type diff and existing correlated tests                     |
+| R58-INV-05       | persistent candidate ownership must transfer only after query success.                        | parser.worker accepted-state owner         | current lifecycle source and repeated edit/stream/reset tests              |
+| R58-INV-06       | Code logs rejection before classifying destroyed client cancellation.                         | Code rejection/shutdown owner              | shutdown warning trace and current Code source                             |
+| R58-INV-07       | persistent CodeRenderable update callers lack current representation seed.                    | Markdown seed construction                 | R54 current-source evidence and existing Markdown behavior                 |
 
 The red-capable feedback loop already run is:
 
@@ -929,14 +929,14 @@ The first command is the minimized root reproducer; the second is the existing r
 
 ### 9. Responsibility and Seam
 
-| Concern | Owner | Interface promise | Why it belongs here | Why another module does not own it |
-| --- | --- | --- | --- | --- |
-| Missing local projection on valid event | SyncProvider | Project events are decoded and delivered; local projection may not contain every Session | Only SyncProvider knows whether a Session/Message/Part is loaded and how no-op projection works | event.ts must preserve project-wide notifications; SDK/SSE does not know local store membership |
-| Event stream continuation | SDKProvider | Queue emits decoded events to subscribers | No new catch is needed once subscriber contract cannot throw for supported events | generic SDK catch would hide reducer defects and create fallback semantics |
-| Correlated worker terminal state | Tree-sitter client/worker | messageId request channel settles once | request/response owner is here | Code only consumes result and cannot repair worker protocol |
-| Accepted Tree ownership | parser.worker | one accepted Tree owner per buffer | worker owns WASM Tree lifetime | client cannot delete worker-owned Trees |
-| Destroyed warning policy | Code | normal cancellation is silent; live failure remains diagnostic | Code knows whether renderable/client is destroyed | renderer only owns destruction ordering |
-| Current Markdown seed | Markdown | current content remains visible while async highlighting is pending | Markdown owns token-to-CodeRenderable representation | parser cannot reconstruct UI token boundaries |
+| Concern                                 | Owner                     | Interface promise                                                                        | Why it belongs here                                                                             | Why another module does not own it                                                              |
+| --------------------------------------- | ------------------------- | ---------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| Missing local projection on valid event | SyncProvider              | Project events are decoded and delivered; local projection may not contain every Session | Only SyncProvider knows whether a Session/Message/Part is loaded and how no-op projection works | event.ts must preserve project-wide notifications; SDK/SSE does not know local store membership |
+| Event stream continuation               | SDKProvider               | Queue emits decoded events to subscribers                                                | No new catch is needed once subscriber contract cannot throw for supported events               | generic SDK catch would hide reducer defects and create fallback semantics                      |
+| Correlated worker terminal state        | Tree-sitter client/worker | messageId request channel settles once                                                   | request/response owner is here                                                                  | Code only consumes result and cannot repair worker protocol                                     |
+| Accepted Tree ownership                 | parser.worker             | one accepted Tree owner per buffer                                                       | worker owns WASM Tree lifetime                                                                  | client cannot delete worker-owned Trees                                                         |
+| Destroyed warning policy                | Code                      | normal cancellation is silent; live failure remains diagnostic                           | Code knows whether renderable/client is destroyed                                               | renderer only owns destruction ordering                                                         |
+| Current Markdown seed                   | Markdown                  | current content remains visible while async highlighting is pending                      | Markdown owns token-to-CodeRenderable representation                                            | parser cannot reconstruct UI token boundaries                                                   |
 
 ### 10. Single Approved Primary-Path Design
 
@@ -967,115 +967,115 @@ Existing R54 renderer scheduler retry changes are not part of R58 because the ne
 
 ### 11. Secondary and Replacement Path Inventory
 
-| Path | Current or proposed | Classification | Produces success? | Decision-surface share | Disposition |
-| --- | --- | --- | --- | --- | --- |
-| `SyncProvider` missing-collection no-op | proposed | primary-contract branch | no, projection no-op | primary | preserve |
-| existing feed/backpressure handling | current | existing compatibility | yes | existing | preserve |
-| SDK generic catch that resumes after reducer failure | proposed in old R54 discussion | forbidden fallback | yes | rejected | reject |
-| session refetch after missing event | proposed in old drafts | alternate success path | yes | rejected | reject |
-| always-visible unstyled Markdown | proposed workaround | alternate rendering success | yes | rejected | reject |
-| renderer restart/watchdog | proposed in old drafts | forbidden fallback | yes | rejected | reject |
-| existing Tree-sitter plain-text compatibility on live failure | current | existing compatibility | yes, as contracted error presentation | existing | preserve |
+| Path                                                          | Current or proposed            | Classification              | Produces success?                     | Decision-surface share | Disposition |
+| ------------------------------------------------------------- | ------------------------------ | --------------------------- | ------------------------------------- | ---------------------- | ----------- |
+| `SyncProvider` missing-collection no-op                       | proposed                       | primary-contract branch     | no, projection no-op                  | primary                | preserve    |
+| existing feed/backpressure handling                           | current                        | existing compatibility      | yes                                   | existing               | preserve    |
+| SDK generic catch that resumes after reducer failure          | proposed in old R54 discussion | forbidden fallback          | yes                                   | rejected               | reject      |
+| session refetch after missing event                           | proposed in old drafts         | alternate success path      | yes                                   | rejected               | reject      |
+| always-visible unstyled Markdown                              | proposed workaround            | alternate rendering success | yes                                   | rejected               | reject      |
+| renderer restart/watchdog                                     | proposed in old drafts         | forbidden fallback          | yes                                   | rejected               | reject      |
+| existing Tree-sitter plain-text compatibility on live failure | current                        | existing compatibility      | yes, as contracted error presentation | existing               | preserve    |
 
 New alternate success paths: zero.
 
 ### 12. Workaround Deletion and Replacement
 
-| Existing workaround or duplicate | Why it existed | Why the approved route supersedes it | Delete or collapse location |
-| --- | --- | --- | --- |
+| Existing workaround or duplicate                                                       | Why it existed                                                  | Why the approved route supersedes it                                                                                            | Delete or collapse location                                                                     |
+| -------------------------------------------------------------------------------------- | --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
 | R54 renderer failure self-requestRender path and rewritten clock-only retry assertions | attempted to treat downstream frame scheduling as incident root | SyncProvider reducer is the first divergence for daemon/TUI detachment; retaining it would be unrelated downstream compensation | task-owned `renderer.ts`/`renderer.custom-stdout.test.ts` worktree diff, after approved cleanup |
-| stream timing telemetry used as a diagnostic substitute | attempted to observe receive/apply phases | root reducer invariant is executable without telemetry; production logs are not required by user | remove only if no other approved plan owns the task-owned telemetry diff |
-| any new generic SDK catch/reconnect-on-reducer-error | would hide a valid reducer defect | primary reducer must not throw for its supported event domain | do not add |
+| stream timing telemetry used as a diagnostic substitute                                | attempted to observe receive/apply phases                       | root reducer invariant is executable without telemetry; production logs are not required by user                                | remove only if no other approved plan owns the task-owned telemetry diff                        |
+| any new generic SDK catch/reconnect-on-reducer-error                                   | would hide a valid reducer defect                               | primary reducer must not throw for its supported event domain                                                                   | do not add                                                                                      |
 
 ### 13. Forward Traceability
 
-| Requirement or invariant | Production path | Planned file/change | Behavioral test |
-| --- | --- | --- | --- |
-| R58-INV-01/02 | missing local collection projection | `packages/opencode/src/cli/cmd/tui/context/sync.tsx` | hidden/remove events for unloaded Session followed by valid event in smoke preflight |
-| R58-INV-03 | SDK emitter remains single path after reducer no-op | same `sync.tsx`; no SDK catch | smoke artifact source preflight and compiled target-liveness scenario |
-| R58-INV-04 | correlated worker response | OpenTUI `client.ts`, `parser.worker.ts`, `types.ts` | public client suite |
-| R58-INV-05 | accepted Tree owner transfer | OpenTUI `parser.worker.ts` | public lifecycle tests |
-| R58-INV-06 | destroyed/live rejection classification | OpenTUI `Code.ts`, `client.ts` | client suite and compiled pending-ready shutdown smoke |
-| R58-INV-07 | current representation seed | OpenTUI `Markdown.ts` | client suite and body/Thinking smoke |
-| R58-INV-08 | public compiled frame transition | repository-tracked smoke artifact | bounded external supervisor invoking the artifact |
-| R58-INV-09 | file/line/comment budget | all listed files | diff/E/C audit |
+| Requirement or invariant | Production path                                     | Planned file/change                                  | Behavioral test                                                                      |
+| ------------------------ | --------------------------------------------------- | ---------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| R58-INV-01/02            | missing local collection projection                 | `packages/opencode/src/cli/cmd/tui/context/sync.tsx` | hidden/remove events for unloaded Session followed by valid event in smoke preflight |
+| R58-INV-03               | SDK emitter remains single path after reducer no-op | same `sync.tsx`; no SDK catch                        | smoke artifact source preflight and compiled target-liveness scenario                |
+| R58-INV-04               | correlated worker response                          | OpenTUI `client.ts`, `parser.worker.ts`, `types.ts`  | public client suite                                                                  |
+| R58-INV-05               | accepted Tree owner transfer                        | OpenTUI `parser.worker.ts`                           | public lifecycle tests                                                               |
+| R58-INV-06               | destroyed/live rejection classification             | OpenTUI `Code.ts`, `client.ts`                       | client suite and compiled pending-ready shutdown smoke                               |
+| R58-INV-07               | current representation seed                         | OpenTUI `Markdown.ts`                                | client suite and body/Thinking smoke                                                 |
+| R58-INV-08               | public compiled frame transition                    | repository-tracked smoke artifact                    | bounded external supervisor invoking the artifact                                    |
+| R58-INV-09               | file/line/comment budget                            | all listed files                                     | diff/E/C audit                                                                       |
 
 ### 14. Reverse Traceability
 
-| Proposed production concept | Requirement ID | Evidence | Why existing logic cannot carry it |
-| --- | --- | --- | --- |
-| three missing-collection no-op branches | R58-INV-01/02 | exact red harness and undefined store paths | existing reducer assumes every project event has a loaded local collection |
-| correlated messageId propagation | R58-INV-04 | worker error and pending callback path | generic error event lacks callback identity |
-| accepted Tree commit/disposal ownership | R58-INV-05 | current WASM Tree owner behavior | replacing map entry without explicit old-owner disposal leaks/overlaps |
-| destroyed-first warning classification | R58-INV-06 | shutdown warning sequence plus harness-only pending-ready file | Code currently decides warning before cancellation state; event arrival alone cannot prove a pending request |
-| current Markdown seed | R58-INV-07 | pending highlight body blank evidence | async highlight path has no current representation fallback/seed |
-| target-liveness smoke assertions | R58-INV-03/08 | user requires no future logs and public PTY evidence | existing normal smoke does not assert Thinking/body/dialog/shutdown together |
+| Proposed production concept             | Requirement ID | Evidence                                                       | Why existing logic cannot carry it                                                                           |
+| --------------------------------------- | -------------- | -------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| three missing-collection no-op branches | R58-INV-01/02  | exact red harness and undefined store paths                    | existing reducer assumes every project event has a loaded local collection                                   |
+| correlated messageId propagation        | R58-INV-04     | worker error and pending callback path                         | generic error event lacks callback identity                                                                  |
+| accepted Tree commit/disposal ownership | R58-INV-05     | current WASM Tree owner behavior                               | replacing map entry without explicit old-owner disposal leaks/overlaps                                       |
+| destroyed-first warning classification  | R58-INV-06     | shutdown warning sequence plus harness-only pending-ready file | Code currently decides warning before cancellation state; event arrival alone cannot prove a pending request |
+| current Markdown seed                   | R58-INV-07     | pending highlight body blank evidence                          | async highlight path has no current representation fallback/seed                                             |
+| target-liveness smoke assertions        | R58-INV-03/08  | user requires no future logs and public PTY evidence           | existing normal smoke does not assert Thinking/body/dialog/shutdown together                                 |
 
 ### 15. File-Level Change Plan
 
 Exactly nine repository code files are authorized for the final task diff in R60; the ninth is a test-only correction explicitly authorized by the user:
 
-| File | Add / modify / delete | Exact responsibility of the change | Expected line delta |
-| --- | --- | --- | --- |
-| `packages/opencode/src/cli/cmd/tui/context/sync.tsx` | modify | three collection ownership guards only | +6 to +12 |
-| `packages/opencode/script/smoke-opentui-artifact.ts` | modify | add outer-only sync preflight; generate/clean a protocol-complete worker fixture and isolated pending-ready file; remove telemetry dependency; retain compiled public-event/frame/shutdown assertions | +90 to +150 |
-| `thirdparty/opentui/packages/core/src/lib/tree-sitter/client.ts` | modify | settle every correlated response exactly once, export typed destroy cancellation, and keep buffer operation tail/disposal ordering | +35 to +75 |
-| `thirdparty/opentui/packages/core/src/lib/tree-sitter/parser.worker.ts` | modify | attach request ids to edit/reset/stream/dispose terminal responses and use one candidate-to-accepted Tree transition | +80 to +180 |
-| `thirdparty/opentui/packages/core/src/lib/tree-sitter/types.ts` | modify | declare the exact request/response messageId fields used by the client/worker wire contract | +15 to +25 |
-| `thirdparty/opentui/packages/core/src/renderables/Code.ts` | modify | classify `TreeSitterClientDestroyedError` before live-failure warning and preserve existing live plain-text behavior | +6 to +12 |
-| `thirdparty/opentui/packages/core/src/renderables/Markdown.ts` | modify | pass current inline/raw seeds at the six persistent Markdown call-site categories listed in R60 | +20 to +50 |
-| `thirdparty/opentui/packages/core/src/lib/tree-sitter/client.test.ts` | modify | public client, Code and Markdown red-green regressions for all four OpenTUI invariants | +100 to +180 |
-| `thirdparty/opentui/packages/core/src/renderables/__tests__/Markdown.test.ts` | modify | update the one pending-frame expectation from stale initial text to the current updated literal; no production behavior change | +1 to +1 |
+| File                                                                          | Add / modify / delete | Exact responsibility of the change                                                                                                                                                                    | Expected line delta |
+| ----------------------------------------------------------------------------- | --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------- |
+| `packages/opencode/src/cli/cmd/tui/context/sync.tsx`                          | modify                | three collection ownership guards only                                                                                                                                                                | +6 to +12           |
+| `packages/opencode/script/smoke-opentui-artifact.ts`                          | modify                | add outer-only sync preflight; generate/clean a protocol-complete worker fixture and isolated pending-ready file; remove telemetry dependency; retain compiled public-event/frame/shutdown assertions | +90 to +150         |
+| `thirdparty/opentui/packages/core/src/lib/tree-sitter/client.ts`              | modify                | settle every correlated response exactly once, export typed destroy cancellation, and keep buffer operation tail/disposal ordering                                                                    | +35 to +75          |
+| `thirdparty/opentui/packages/core/src/lib/tree-sitter/parser.worker.ts`       | modify                | attach request ids to edit/reset/stream/dispose terminal responses and use one candidate-to-accepted Tree transition                                                                                  | +80 to +180         |
+| `thirdparty/opentui/packages/core/src/lib/tree-sitter/types.ts`               | modify                | declare the exact request/response messageId fields used by the client/worker wire contract                                                                                                           | +15 to +25          |
+| `thirdparty/opentui/packages/core/src/renderables/Code.ts`                    | modify                | classify `TreeSitterClientDestroyedError` before live-failure warning and preserve existing live plain-text behavior                                                                                  | +6 to +12           |
+| `thirdparty/opentui/packages/core/src/renderables/Markdown.ts`                | modify                | pass current inline/raw seeds at the six persistent Markdown call-site categories listed in R60                                                                                                       | +20 to +50          |
+| `thirdparty/opentui/packages/core/src/lib/tree-sitter/client.test.ts`         | modify                | public client, Code and Markdown red-green regressions for all four OpenTUI invariants                                                                                                                | +100 to +180        |
+| `thirdparty/opentui/packages/core/src/renderables/__tests__/Markdown.test.ts` | modify                | update the one pending-frame expectation from stale initial text to the current updated literal; no production behavior change                                                                        | +1 to +1            |
 
 `renderer.ts`, `renderer.custom-stdout.test.ts`, `sync.test.tsx` and `sync-undefined-messages.test.tsx` remain unauthorized final diff files in R60. `packages/opencode/script/smoke-opentui-artifact.ts` remains the repository-tracked target-liveness artifact. The only additional file is the explicitly authorized Markdown regression correction above.
 
 ### 16. TDD Behavior Slices
 
-| Order | Red behavior | Why current code fails | Minimal green behavior | Regression protected |
-| --- | --- | --- | --- | --- |
-| 1 | Run the smoke artifact's source-level `sync-fixture` preflight with hidden `message.updated` for an unloaded Session; current harness must observe the TypeError. | hidden branch calls `Binary.search(undefined, ...)`. | no throw; local store remains unchanged. | exact first divergence |
-| 2 | In the same smoke preflight emit unloaded `message.removed` and `message.part.removed`, then emit a valid loaded Message/Part update. | remove branches have the same undefined-array assumption. | all three events no-op safely; valid event updates store. | event consumer remains live |
-| 3 | Replace a controlled worker streaming response with a correlated `ERROR` and await the public update Promise. | messageId error must settle the same request instead of leaving it pending. | Promise rejects once with worker error and later callback map is empty. | R58-INV-04 |
-| 4 | Force a failed streaming candidate, then issue a successful update/reset through the public client API. | candidate failure must not replace the accepted content/tree. | failure rejects; next operation succeeds against the previous accepted state. | R58-INV-05 |
-| 5 | Hold a real pending client request, call `TreeSitterClient.destroy()`, and exercise Code one-shot and streaming catches with the typed cancellation error. | current Code only knows renderable destruction; client rejection may arrive first. | no highlight warning for typed cancellation; a different live error still warns and exposes plain text. | R58-INV-06 |
-| 6 | Hold each Markdown persistent update caller while replacing current list text, blockquote text, generic structured text and incomplete table raw text. | a caller without the same-current seed hides body when `drawUnstyledText=false`. | each current literal appears before resolve; eventual highlight commits afterward; the nested-list suite asserts the updated long literal in pending frames. | R58-INV-07 |
-| 7 | Run the repository smoke with its generated worker fixture; the second prompt emits the complete fenced sentinel block, then waits for the fixture's ready file before Ctrl+C. | daemon event arrival does not prove fenced Code/client has a pending highlight. | the sentinel one-shot/stream request remains unsettled until real client destroy; Thinking/body, Commands restoration and shutdown warning count still pass. | R58-INV-03/06/08 |
+| Order | Red behavior                                                                                                                                                                   | Why current code fails                                                             | Minimal green behavior                                                                                                                                       | Regression protected        |
+| ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------- |
+| 1     | Run the smoke artifact's source-level `sync-fixture` preflight with hidden `message.updated` for an unloaded Session; current harness must observe the TypeError.              | hidden branch calls `Binary.search(undefined, ...)`.                               | no throw; local store remains unchanged.                                                                                                                     | exact first divergence      |
+| 2     | In the same smoke preflight emit unloaded `message.removed` and `message.part.removed`, then emit a valid loaded Message/Part update.                                          | remove branches have the same undefined-array assumption.                          | all three events no-op safely; valid event updates store.                                                                                                    | event consumer remains live |
+| 3     | Replace a controlled worker streaming response with a correlated `ERROR` and await the public update Promise.                                                                  | messageId error must settle the same request instead of leaving it pending.        | Promise rejects once with worker error and later callback map is empty.                                                                                      | R58-INV-04                  |
+| 4     | Force a failed streaming candidate, then issue a successful update/reset through the public client API.                                                                        | candidate failure must not replace the accepted content/tree.                      | failure rejects; next operation succeeds against the previous accepted state.                                                                                | R58-INV-05                  |
+| 5     | Hold a real pending client request, call `TreeSitterClient.destroy()`, and exercise Code one-shot and streaming catches with the typed cancellation error.                     | current Code only knows renderable destruction; client rejection may arrive first. | no highlight warning for typed cancellation; a different live error still warns and exposes plain text.                                                      | R58-INV-06                  |
+| 6     | Hold each Markdown persistent update caller while replacing current list text, blockquote text, generic structured text and incomplete table raw text.                         | a caller without the same-current seed hides body when `drawUnstyledText=false`.   | each current literal appears before resolve; eventual highlight commits afterward; the nested-list suite asserts the updated long literal in pending frames. | R58-INV-07                  |
+| 7     | Run the repository smoke with its generated worker fixture; the second prompt emits the complete fenced sentinel block, then waits for the fixture's ready file before Ctrl+C. | daemon event arrival does not prove fenced Code/client has a pending highlight.    | the sentinel one-shot/stream request remains unsettled until real client destroy; Thinking/body, Commands restoration and shutdown warning count still pass. | R58-INV-03/06/08            |
 
 The smoke artifact uses `sync-fixture` public `eventSource` and independent store/frame values for its source preflight. Its generated worker fixture implements the existing wire protocol only: `INIT -> INIT_RESPONSE`; parser initialize/preload return `hasParser:true`; handle/reset return a correlated empty `HIGHLIGHT_RESPONSE`; ordinary one-shot and streaming requests return correlated successful empty-highlight responses; dispose, data-path, cache and performance requests return their matching terminal response; parser registration remains the existing fire-and-forget message. A one-shot or streaming request whose content contains `CANCEL-HIGHLIGHT-SENTINEL` instead writes `${root}/highlight-pending.ready` and receives no terminal response. The smoke passes the fixture path through `OTUI_TREE_SITTER_WORKER_PATH`, waits for that exact isolated file, then sends Ctrl+C; timeout is failure. This is test-harness observation, not production telemetry or a success path. OpenTUI request tests use the public `TreeSitterClient` constructor/`workerPath` seam with a temporary worker fixture; they do not reach into `messageCallbacks`, worker internals or private parser state. Assertions use public Promise results, buffer content/versions, Code warnings and captured frames rather than source text or call counts alone.
 
 ### 17. Chinese Comment Budget
 
-| Metric | Estimate | Method |
-| --- | --- | --- |
-| Effective changed production lines `E` | <= 450 | Count only substantive executable changes in the six production files; exclude imports, formatter-only, generated and pure moves. This remains below the user ceiling of 800. |
-| Required qualifying Chinese comments `C` | >= 68 | `max(1, ceil(E*0.15))`; comments must explain unloaded projection no-op, correlated ownership, Tree disposal, destroyed cancellation or current seed contract. |
+| Metric                                   | Estimate | Method                                                                                                                                                                        |
+| ---------------------------------------- | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Effective changed production lines `E`   | <= 450   | Count only substantive executable changes in the six production files; exclude imports, formatter-only, generated and pure moves. This remains below the user ceiling of 800. |
+| Required qualifying Chinese comments `C` | >= 68    | `max(1, ceil(E*0.15))`; comments must explain unloaded projection no-op, correlated ownership, Tree disposal, destroyed cancellation or current seed contract.                |
 
 Each changed production file with `E_i > 0` must independently satisfy `C_i >= max(1, ceil(E_i*0.15))`. Existing comments count only when adjacent and explanatory; obvious flow and identifier translations do not count.
 
 ### 18. Verification
 
-| Command | Working directory | Evidence produced |
-| --- | --- | --- |
-| `bun run build --single --skip-embed-web-ui` | `packages/opencode` | creates `dist/opencode-windows-x64/bin/opencode.exe` from the audited source before smoke execution |
-| `bun run script/smoke-opentui-artifact.ts --binary ./dist/opencode-windows-x64/bin/opencode.exe --scenario target-liveness` | `packages/opencode` | source-level unloaded projection, compiled public-event/frame assertions, harness-only pending-ready proof and Ctrl+C warning gate |
-| `bun test ./src/lib/tree-sitter/client.test.ts` | `thirdparty/opentui/packages/core` | correlated settlement, Tree ownership, disposal and cancellation |
-| `bun test ./src/renderables/__tests__/Markdown.test.ts` | `thirdparty/opentui/packages/core` | complete Markdown representation and streaming behavior, including the corrected current pending-frame contract |
-| `bun typecheck` | `packages/opencode` and `thirdparty/opentui/packages/core` | package-local type contracts |
-| bounded external PowerShell process-tree supervisor invoking the exact smoke command above | `packages/opencode` | supervises the repository-tracked source preflight and compiled binary; timeout or an orphan is a failed verification |
-| `git diff --check` | repository root | whitespace integrity |
+| Command                                                                                                                     | Working directory                                          | Evidence produced                                                                                                                  |
+| --------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| `bun run build --single --skip-embed-web-ui`                                                                                | `packages/opencode`                                        | creates `dist/opencode-windows-x64/bin/opencode.exe` from the audited source before smoke execution                                |
+| `bun run script/smoke-opentui-artifact.ts --binary ./dist/opencode-windows-x64/bin/opencode.exe --scenario target-liveness` | `packages/opencode`                                        | source-level unloaded projection, compiled public-event/frame assertions, harness-only pending-ready proof and Ctrl+C warning gate |
+| `bun test ./src/lib/tree-sitter/client.test.ts`                                                                             | `thirdparty/opentui/packages/core`                         | correlated settlement, Tree ownership, disposal and cancellation                                                                   |
+| `bun test ./src/renderables/__tests__/Markdown.test.ts`                                                                     | `thirdparty/opentui/packages/core`                         | complete Markdown representation and streaming behavior, including the corrected current pending-frame contract                    |
+| `bun typecheck`                                                                                                             | `packages/opencode` and `thirdparty/opentui/packages/core` | package-local type contracts                                                                                                       |
+| bounded external PowerShell process-tree supervisor invoking the exact smoke command above                                  | `packages/opencode`                                        | supervises the repository-tracked source preflight and compiled binary; timeout or an orphan is a failed verification              |
+| `git diff --check`                                                                                                          | repository root                                            | whitespace integrity                                                                                                               |
 
 Every long-running command uses an external PowerShell process-tree supervisor; timeout or orphan process is a failed verification, never an implicit pass.
 
 ### 19. Diff Budget
 
-| Metric | Estimate | Justification |
-| --- | --- | --- |
-| Files added | 0 | all seams already exist |
-| Files modified | 9 | exact table in section 15; the ninth is the user-authorized test-only contract correction |
-| Files deleted | 0 | no persisted/generated artifact removal |
-| Production effective lines | <= 450 | surgical guards plus exact lifecycle/seed repairs only, still below the user ceiling |
-| Test/harness lines | <= 360 | one smoke source preflight plus generated pending fixture, OpenTUI public lifecycle/Markdown tests and one corrected pending-frame expectation |
-| Generated lines | 0 | generated SDK/lockfiles excluded |
+| Metric                     | Estimate | Justification                                                                                                                                  |
+| -------------------------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| Files added                | 0        | all seams already exist                                                                                                                        |
+| Files modified             | 9        | exact table in section 15; the ninth is the user-authorized test-only contract correction                                                      |
+| Files deleted              | 0        | no persisted/generated artifact removal                                                                                                        |
+| Production effective lines | <= 450   | surgical guards plus exact lifecycle/seed repairs only, still below the user ceiling                                                           |
+| Test/harness lines         | <= 360   | one smoke source preflight plus generated pending fixture, OpenTUI public lifecycle/Markdown tests and one corrected pending-frame expectation |
+| Generated lines            | 0        | generated SDK/lockfiles excluded                                                                                                               |
 
 ### 20. Real Risks and Open Decisions
 
@@ -1095,15 +1095,15 @@ The independent auditor must read this exact R60 file and the original requireme
 
 ### 22. Plan Audit Record
 
-| Round | Audited revision | Full scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
-| --- | --- | --- | --- | --- | --- | --- |
-| R54 | R54 | yes | No blocking findings | - | APPROVE, invalidated by R55 scope change | `ses_0217852c3ffeS02X0C1vIlbmSy` |
-| R55 | R55 | yes | B-01, B-02 | see independent verdict | BLOCK | `ses_020be2f9effeQUktMqNBHi28ls` |
-| R56 | R56 | yes | B-01 undefined external target-liveness artifact | see independent verdict | BLOCK | `ses_020be2f9effeQUktMqNBHi28ls` |
-| R57 | R57 | yes | B-01 no pending-highlight readiness after telemetry removal | see independent verdict | BLOCK | `ses_020be2f9effeQUktMqNBHi28ls` |
-| R58 | R58 | yes | No blocking findings | four implementation-stage checks | APPROVE, invalidated by R59/R60 scope change | `ses_020be2f9effeQUktMqNBHi28ls` |
-| R59 | R59 | yes | B-01 nine files violates original unamended scope | see independent verdict | BLOCK | `ses_020be2f9effeQUktMqNBHi28ls` |
-| R60 | R60 | yes | No blocking findings | three implementation-stage checks | APPROVE | `ses_020be2f9effeQUktMqNBHi28ls` |
+| Round | Audited revision | Full scope? | Blocking findings                                           | Non-blocking findings             | Result                                       | Invocation reference             |
+| ----- | ---------------- | ----------- | ----------------------------------------------------------- | --------------------------------- | -------------------------------------------- | -------------------------------- |
+| R54   | R54              | yes         | No blocking findings                                        | -                                 | APPROVE, invalidated by R55 scope change     | `ses_0217852c3ffeS02X0C1vIlbmSy` |
+| R55   | R55              | yes         | B-01, B-02                                                  | see independent verdict           | BLOCK                                        | `ses_020be2f9effeQUktMqNBHi28ls` |
+| R56   | R56              | yes         | B-01 undefined external target-liveness artifact            | see independent verdict           | BLOCK                                        | `ses_020be2f9effeQUktMqNBHi28ls` |
+| R57   | R57              | yes         | B-01 no pending-highlight readiness after telemetry removal | see independent verdict           | BLOCK                                        | `ses_020be2f9effeQUktMqNBHi28ls` |
+| R58   | R58              | yes         | No blocking findings                                        | four implementation-stage checks  | APPROVE, invalidated by R59/R60 scope change | `ses_020be2f9effeQUktMqNBHi28ls` |
+| R59   | R59              | yes         | B-01 nine files violates original unamended scope           | see independent verdict           | BLOCK                                        | `ses_020be2f9effeQUktMqNBHi28ls` |
+| R60   | R60              | yes         | No blocking findings                                        | three implementation-stage checks | APPROVE                                      | `ses_020be2f9effeQUktMqNBHi28ls` |
 
 Any substantive revision invalidates earlier approval. Exact R60 is approved for implementation.
 
@@ -1111,65 +1111,65 @@ Any substantive revision invalidates earlier approval. Exact R60 is approved for
 
 This record applies only to approved R81. Code/Markdown renderable hunks are baseline/reverification, and the `.6` manifest/lockfile changes are cleanup-only; neither is counted as a new R81 production concept.
 
-| Area | Evidence |
-| --- | --- |
-| Approved route | `parser.worker.ts` serializes parser-asset use and invalidation through `runWithParserAssets`; injection parse/query failures and inline-reference parse-null propagate instead of publishing partial success; `client.ts` settles correlated one-shot failures through the existing response channel. |
-| TDD red | Before the correlated one-shot repair, the two new client behavior slices resolved instead of rejecting. Before the asset owner tail, the gated `clear cache waits for parser assets in use` slice observed `cleared` before the held operation released. Before the current Markdown seed ordering, the full Markdown suite was `155 pass, 1 fail` on `paragraph updates do not flash raw markdown markers`. Before the current Code pending-owner correction, the full Code suite was `69 pass, 3 fail` in stale/current pending representation contracts. |
-| TDD green | `bun test ./src/lib/tree-sitter/client.test.ts`: `59 pass, 0 fail`; `bun test ./src/renderables/Code.test.ts`: `72 pass, 1 skip, 0 fail`; `bun test ./src/renderables/__tests__/Markdown.test.ts`: `156 pass, 0 fail`. |
-| Package checks | `bunx oxfmt --check` on all affected OpenTUI source/test paths: pass. `bun run build:lib` from `thirdparty/opentui/packages/core`: pass. `bun typecheck` from `packages/opencode`: pass. `bun test ./test/cli/cmd/tui/sync-undefined-messages.test.tsx` from `packages/opencode`: `1 pass, 0 fail`. |
-| Compiled artifact | Built with `bun run script/build.ts --skip-install --skip-embed-web-ui --os=win32 --arch=x64`, using a read-only local HTTP endpoint serving the current checked-in models snapshot because direct `models.dev` access was refused. Build version `0.0.0-dev-smark-202608081605`; OpenTUI `0.4.3-smark.6`; executable `152292864` bytes, SHA-256 `7366c7b07fa053510e49094dcced05f8c452e276d2cac469e267d49102a91bf1`; evidence report: `packages/opencode/dist/opencode-windows-x64/opentui-build.json`. |
-| Compiled normal smoke | `bun run script/smoke-opentui-artifact.ts --binary ./dist/opencode-windows-x64/bin/opencode.exe --scenario normal`: pass; `sourceCount=2`, `renderedCount=2`, `modelRequests=2`, `targetEventCount=0`. |
-| Compiled target-liveness smoke | Same command with `--scenario target-liveness`: pass; `sourceCount=2`, `renderedCount=2`, `modelRequests=2`, `targetEventCount=14`; shutdown completed without warning failure. |
-| Incremental E/C | Independent auditor conservative recount for R81 parser/client route: `E≈210`, qualifying nearby Chinese explanations `C≈40`, ratio `≈19%`; baseline/reverification and cleanup-only paths excluded. |
-| Unverified items | OpenTUI package-wide typecheck retains existing Yoga/upstream test typing failures; no changed-owner failure was reported. Direct network model fetch is unavailable, so the compiled build used the local snapshot endpoint described above. No commit or push was performed. |
+| Area                           | Evidence                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Approved route                 | `parser.worker.ts` serializes parser-asset use and invalidation through `runWithParserAssets`; injection parse/query failures and inline-reference parse-null propagate instead of publishing partial success; `client.ts` settles correlated one-shot failures through the existing response channel.                                                                                                                                                                                                                                                       |
+| TDD red                        | Before the correlated one-shot repair, the two new client behavior slices resolved instead of rejecting. Before the asset owner tail, the gated `clear cache waits for parser assets in use` slice observed `cleared` before the held operation released. Before the current Markdown seed ordering, the full Markdown suite was `155 pass, 1 fail` on `paragraph updates do not flash raw markdown markers`. Before the current Code pending-owner correction, the full Code suite was `69 pass, 3 fail` in stale/current pending representation contracts. |
+| TDD green                      | `bun test ./src/lib/tree-sitter/client.test.ts`: `59 pass, 0 fail`; `bun test ./src/renderables/Code.test.ts`: `72 pass, 1 skip, 0 fail`; `bun test ./src/renderables/__tests__/Markdown.test.ts`: `156 pass, 0 fail`.                                                                                                                                                                                                                                                                                                                                       |
+| Package checks                 | `bunx oxfmt --check` on all affected OpenTUI source/test paths: pass. `bun run build:lib` from `thirdparty/opentui/packages/core`: pass. `bun typecheck` from `packages/opencode`: pass. `bun test ./test/cli/cmd/tui/sync-undefined-messages.test.tsx` from `packages/opencode`: `1 pass, 0 fail`.                                                                                                                                                                                                                                                          |
+| Compiled artifact              | Built with `bun run script/build.ts --skip-install --skip-embed-web-ui --os=win32 --arch=x64`, using a read-only local HTTP endpoint serving the current checked-in models snapshot because direct `models.dev` access was refused. Build version `0.0.0-dev-smark-202608081605`; OpenTUI `0.4.3-smark.6`; executable `152292864` bytes, SHA-256 `7366c7b07fa053510e49094dcced05f8c452e276d2cac469e267d49102a91bf1`; evidence report: `packages/opencode/dist/opencode-windows-x64/opentui-build.json`.                                                      |
+| Compiled normal smoke          | `bun run script/smoke-opentui-artifact.ts --binary ./dist/opencode-windows-x64/bin/opencode.exe --scenario normal`: pass; `sourceCount=2`, `renderedCount=2`, `modelRequests=2`, `targetEventCount=0`.                                                                                                                                                                                                                                                                                                                                                       |
+| Compiled target-liveness smoke | Same command with `--scenario target-liveness`: pass; `sourceCount=2`, `renderedCount=2`, `modelRequests=2`, `targetEventCount=14`; shutdown completed without warning failure.                                                                                                                                                                                                                                                                                                                                                                              |
+| Incremental E/C                | Independent auditor conservative recount for R81 parser/client route: `E≈210`, qualifying nearby Chinese explanations `C≈40`, ratio `≈19%`; baseline/reverification and cleanup-only paths excluded.                                                                                                                                                                                                                                                                                                                                                         |
+| Unverified items               | OpenTUI package-wide typecheck retains existing Yoga/upstream test typing failures; no changed-owner failure was reported. Direct network model fetch is unavailable, so the compiled build used the local snapshot endpoint described above. No commit or push was performed.                                                                                                                                                                                                                                                                               |
 
 ### 23. Implementation Evidence
 
 Implemented approved R58 production route plus the exact R60 test-contract correction in nine repository code files:
 
-| File | Effective `E_i` | Qualifying Chinese `C_i` | Required `ceil(E_i*0.15)` | Result |
-| --- | ---: | ---: | ---: | --- |
-| `packages/opencode/src/cli/cmd/tui/context/sync.tsx` | 4 | 3 | 1 | pass |
-| `packages/opencode/script/smoke-opentui-artifact.ts` | test/harness | not production-gated | - | source preflight, generated worker readiness and compiled PTY harness |
-| `thirdparty/opentui/packages/core/src/lib/tree-sitter/client.ts` | 102 | 38 | 16 | pass |
-| `thirdparty/opentui/packages/core/src/lib/tree-sitter/parser.worker.ts` | 77 | 36 | 12 | pass |
-| `thirdparty/opentui/packages/core/src/lib/tree-sitter/types.ts` | 14 | 3 | 3 | pass |
-| `thirdparty/opentui/packages/core/src/renderables/Code.ts` | 3 | 3 | 1 | pass |
-| `thirdparty/opentui/packages/core/src/renderables/Markdown.ts` | 55 | 9 | 9 | pass |
-| `thirdparty/opentui/packages/core/src/lib/tree-sitter/client.test.ts` | test | not production-gated | - | public lifecycle/Code/Markdown regression seam |
-| `thirdparty/opentui/packages/core/src/renderables/__tests__/Markdown.test.ts` | test-only | not production-gated | - | corrected one pending-frame expectation to the current updated literal |
-| **Production total** | **255** | **92** | **39 total per-file minima** | **pass; below 800** |
+| File                                                                          | Effective `E_i` | Qualifying Chinese `C_i` |    Required `ceil(E_i*0.15)` | Result                                                                 |
+| ----------------------------------------------------------------------------- | --------------: | -----------------------: | ---------------------------: | ---------------------------------------------------------------------- |
+| `packages/opencode/src/cli/cmd/tui/context/sync.tsx`                          |               4 |                        3 |                            1 | pass                                                                   |
+| `packages/opencode/script/smoke-opentui-artifact.ts`                          |    test/harness |     not production-gated |                            - | source preflight, generated worker readiness and compiled PTY harness  |
+| `thirdparty/opentui/packages/core/src/lib/tree-sitter/client.ts`              |             102 |                       38 |                           16 | pass                                                                   |
+| `thirdparty/opentui/packages/core/src/lib/tree-sitter/parser.worker.ts`       |              77 |                       36 |                           12 | pass                                                                   |
+| `thirdparty/opentui/packages/core/src/lib/tree-sitter/types.ts`               |              14 |                        3 |                            3 | pass                                                                   |
+| `thirdparty/opentui/packages/core/src/renderables/Code.ts`                    |               3 |                        3 |                            1 | pass                                                                   |
+| `thirdparty/opentui/packages/core/src/renderables/Markdown.ts`                |              55 |                        9 |                            9 | pass                                                                   |
+| `thirdparty/opentui/packages/core/src/lib/tree-sitter/client.test.ts`         |            test |     not production-gated |                            - | public lifecycle/Code/Markdown regression seam                         |
+| `thirdparty/opentui/packages/core/src/renderables/__tests__/Markdown.test.ts` |       test-only |     not production-gated |                            - | corrected one pending-frame expectation to the current updated literal |
+| **Production total**                                                          |         **255** |                   **92** | **39 total per-file minima** | **pass; below 800**                                                    |
 
 `E` excludes blank, import-only, formatter-only, generated and exact pure-move lines. `C` counts only adjacent Chinese explanations of projection ownership, correlated settlement, Tree ownership/disposal, cancellation classification or current Markdown representation. The smoke harness and the explicitly authorized Markdown test correction are excluded from production `E/C`; the final repository code boundary is nine files under the current-turn amendment.
 
 Red-green and verification evidence:
 
-| Command | Directory | Result |
-| --- | --- | --- |
-| `bun -e '<mount sync-fixture; emit unloaded hidden message.updated>'` | `packages/opencode` | red: exact `TypeError: undefined is not an object (evaluating 'array.length')` at `sync.tsx`/`Binary.search` |
-| same public fixture with hidden/remove/part-remove followed by loaded update | `packages/opencode` | green: exit 0 and loaded Message appears after `wait` |
-| `bun test ./test/cli/cmd/tui/sync-undefined-messages.test.tsx` | `packages/opencode` | 1 pass, 0 fail |
-| `bun typecheck` | `packages/opencode` | pass |
-| `bun test ./src/lib/tree-sitter/client.test.ts` | `thirdparty/opentui/packages/core` | 56 pass, 0 fail, 395 expect calls |
-| focused Markdown pattern: `blockquote|incomplete table|streaming structured lists reuse|assistant-style top-level` | `thirdparty/opentui/packages/core` | 8 pass, 148 filtered, 0 fail |
-| full `bun test ./src/renderables/__tests__/Markdown.test.ts` before R60 correction | `thirdparty/opentui/packages/core` | 155 pass, 1 stale assertion mismatch in `streaming nested structured list updates...`; this is the red signal that authorized the R60 test-only correction. |
-| full `bun test ./src/renderables/__tests__/Markdown.test.ts` after R60 correction | `thirdparty/opentui/packages/core` | 156 pass, 0 fail, 91 snapshots, 383 expect calls |
-| `bun typecheck` | `thirdparty/opentui/packages/core` | existing baseline failure in generated Yoga/upstream test typing; no changed-owner error was surfaced in the bounded output |
-| `bun run build --single --skip-embed-web-ui` | `packages/opencode` | direct network attempt failed at `https://models.dev/api.json`; equivalent bounded build using a local server serving the current checked-in snapshot then succeeded and produced the current Windows artifact |
-| `bun run script/smoke-opentui-artifact.ts --binary F:\\include\\CLI\\opencode.exe --scenario target-liveness` | `packages/opencode` | historical bounded external binary smoke pass; not used as final artifact provenance |
-| local current-snapshot endpoint + `bun run build --single --skip-embed-web-ui` | `packages/opencode` | final current-source build succeeded after renderer cleanup; target `opencode-windows-x64`, OpenTUI `0.4.3-smark.6`, executable SHA-256 `b4cb22042623e16d5c9755eb2befbfda153ed5b847f22c5d873621b686fb3a20` |
-| `bun run script/smoke-opentui-artifact.ts --binary ./dist/opencode-windows-x64/bin/opencode.exe --scenario target-liveness` | `packages/opencode` | final current artifact smoke pass: `targetEventCount=14`, `modelRequests=2`, `sourceCount=2`, `renderedCount=2`, zero shutdown-warning failure |
-| `git diff --check` | repository root and nested OpenTUI | pass |
+| Command                                                                                                                     | Directory                          | Result                                                                                                                                                                                                         |
+| --------------------------------------------------------------------------------------------------------------------------- | ---------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------- | ---------------------------------- | ---------------------------- |
+| `bun -e '<mount sync-fixture; emit unloaded hidden message.updated>'`                                                       | `packages/opencode`                | red: exact `TypeError: undefined is not an object (evaluating 'array.length')` at `sync.tsx`/`Binary.search`                                                                                                   |
+| same public fixture with hidden/remove/part-remove followed by loaded update                                                | `packages/opencode`                | green: exit 0 and loaded Message appears after `wait`                                                                                                                                                          |
+| `bun test ./test/cli/cmd/tui/sync-undefined-messages.test.tsx`                                                              | `packages/opencode`                | 1 pass, 0 fail                                                                                                                                                                                                 |
+| `bun typecheck`                                                                                                             | `packages/opencode`                | pass                                                                                                                                                                                                           |
+| `bun test ./src/lib/tree-sitter/client.test.ts`                                                                             | `thirdparty/opentui/packages/core` | 56 pass, 0 fail, 395 expect calls                                                                                                                                                                              |
+| focused Markdown pattern: `blockquote                                                                                       | incomplete table                   | streaming structured lists reuse                                                                                                                                                                               | assistant-style top-level` | `thirdparty/opentui/packages/core` | 8 pass, 148 filtered, 0 fail |
+| full `bun test ./src/renderables/__tests__/Markdown.test.ts` before R60 correction                                          | `thirdparty/opentui/packages/core` | 155 pass, 1 stale assertion mismatch in `streaming nested structured list updates...`; this is the red signal that authorized the R60 test-only correction.                                                    |
+| full `bun test ./src/renderables/__tests__/Markdown.test.ts` after R60 correction                                           | `thirdparty/opentui/packages/core` | 156 pass, 0 fail, 91 snapshots, 383 expect calls                                                                                                                                                               |
+| `bun typecheck`                                                                                                             | `thirdparty/opentui/packages/core` | existing baseline failure in generated Yoga/upstream test typing; no changed-owner error was surfaced in the bounded output                                                                                    |
+| `bun run build --single --skip-embed-web-ui`                                                                                | `packages/opencode`                | direct network attempt failed at `https://models.dev/api.json`; equivalent bounded build using a local server serving the current checked-in snapshot then succeeded and produced the current Windows artifact |
+| `bun run script/smoke-opentui-artifact.ts --binary F:\\include\\CLI\\opencode.exe --scenario target-liveness`               | `packages/opencode`                | historical bounded external binary smoke pass; not used as final artifact provenance                                                                                                                           |
+| local current-snapshot endpoint + `bun run build --single --skip-embed-web-ui`                                              | `packages/opencode`                | final current-source build succeeded after renderer cleanup; target `opencode-windows-x64`, OpenTUI `0.4.3-smark.6`, executable SHA-256 `b4cb22042623e16d5c9755eb2befbfda153ed5b847f22c5d873621b686fb3a20`     |
+| `bun run script/smoke-opentui-artifact.ts --binary ./dist/opencode-windows-x64/bin/opencode.exe --scenario target-liveness` | `packages/opencode`                | final current artifact smoke pass: `targetEventCount=14`, `modelRequests=2`, `sourceCount=2`, `renderedCount=2`, zero shutdown-warning failure                                                                 |
+| `git diff --check`                                                                                                          | repository root and nested OpenTUI | pass                                                                                                                                                                                                           |
 
 Approved route evidence: SyncProvider now no-ops only missing local Message/Part collections; worker terminal responses carry correlated ids; accepted Tree replacement has one candidate commit/disposal owner; typed destroy cancellation is silent before live-failure warnings; all Markdown current-seed callers retain pending body visibility. R54 renderer scheduler changes, generic SDK recovery, production telemetry dependency and permanent plain-text workaround are not used.
 
 ### 24. Implementation Audit Record
 
-| Round | Plan revision | Full original scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
-| --- | --- | --- | --- | --- | --- | --- |
-| R58-round-0 | R58 | yes | B-01 full Markdown suite has one stale pending-frame assertion; B-02 current-source build/smoke artifact was unavailable at audit time | typecheck baseline and implementation-stage E/C checks | BLOCK | `ses_020712d0cffeKl8BDVPpYLt7z5` |
-| R60-round-0 | R60 | yes | None | R60 test-only correction and current-source build/smoke evidence recorded above | APPROVE, implementation-audit-required before this re-audit | `ses_01ffcf637ffeyrMbMESQnaWXNm` |
-| R60-round-1 | R60 | yes | None | two documentation consistency notes; existing OpenTUI generated Yoga/upstream typecheck baseline | APPROVE | `ses_01ffcf637ffeyrMbMESQnaWXNm` |
+| Round       | Plan revision | Full original scope? | Blocking findings                                                                                                                      | Non-blocking findings                                                                            | Result                                                      | Invocation reference             |
+| ----------- | ------------- | -------------------- | -------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ | ----------------------------------------------------------- | -------------------------------- |
+| R58-round-0 | R58           | yes                  | B-01 full Markdown suite has one stale pending-frame assertion; B-02 current-source build/smoke artifact was unavailable at audit time | typecheck baseline and implementation-stage E/C checks                                           | BLOCK                                                       | `ses_020712d0cffeKl8BDVPpYLt7z5` |
+| R60-round-0 | R60           | yes                  | None                                                                                                                                   | R60 test-only correction and current-source build/smoke evidence recorded above                  | APPROVE, implementation-audit-required before this re-audit | `ses_01ffcf637ffeyrMbMESQnaWXNm` |
+| R60-round-1 | R60           | yes                  | None                                                                                                                                   | two documentation consistency notes; existing OpenTUI generated Yoga/upstream typecheck baseline | APPROVE                                                     | `ses_01ffcf637ffeyrMbMESQnaWXNm` |
 
 Implementation-audit follow-up evidence: the unauthorized renderer diff was removed first. A local HTTP server then served the current checked-in model snapshot to the existing generator, the final current-source `bun run build --single --skip-embed-web-ui` produced the artifact hash recorded above, and the exact target-liveness smoke passed with `targetEventCount=14`, `modelRequests=2`, and zero shutdown-warning failure. R60 corrected the one stale Markdown pending-frame expectation under the explicit current-turn ninth-test amendment; the full Markdown suite is green.
 
@@ -1185,30 +1185,30 @@ R54 supersedes R53 and is self-contained. It carries the complete implementation
 
 ### R54 Evidence, Reachability and First Divergence
 
-| Area | Producer -> consumer path | First divergence/owner | Evidence |
-| --- | --- | --- | --- |
-| Scheduler dead state | `CliRenderer` render-body/native status -> failure cleanup -> future owner cleared or self-scheduled | `renderer.ts` `CliRenderer` scheduler | bounded throwing-renderable probe; current source sets `immediateRerenderRequested` and `finally` calls `requestRender()`; current tests assert clock-only retry |
-| Markdown current body | `Markdown.content` -> persistent CodeRenderable update -> missing current seed -> `drawUnstyledText=false` while highlight pending | `Markdown.ts` `applyMarkdownCodeRenderable` callers | current list/table callers omit seed; upstream `98e390189` changes list update to pass current styled seed; incomplete table cache path reaches raw fallback callers |
-| Worker settlement | worker terminal error -> client callback | verification-only `parser.worker.ts`/`client.ts` owner | current source already correlates `messageId`; `client.test.ts` current correlated-error test passes |
-| Tree ownership | accepted edit/stream/reset candidate -> persistent Tree owner | verification-only `parser.worker.ts` `commitCandidate()` | current source deletes old accepted Tree and failed scratch candidate; lifecycle tests pass |
-| Mutation/dispose | per-buffer mutation -> rejection/success -> next mutation/disposal | verification-only `client.ts` tail owner | current source chains operations and waits for disposal ack; lifecycle tests pass |
-| Shutdown warning | Code rejection -> destroyed classification -> warning decision | verification-only `Code.ts` | current source checks destroyed before warning; renderer/client suite passes |
-| Command residual | command palette dialog transition -> renderer invalidation -> frame capture | existing renderer/output frame owner; smoke harness | compiled target-liveness transition is the required public surface seam; no command-palette state change is authorized |
+| Area                  | Producer -> consumer path                                                                                                          | First divergence/owner                                   | Evidence                                                                                                                                                             |
+| --------------------- | ---------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Scheduler dead state  | `CliRenderer` render-body/native status -> failure cleanup -> future owner cleared or self-scheduled                               | `renderer.ts` `CliRenderer` scheduler                    | bounded throwing-renderable probe; current source sets `immediateRerenderRequested` and `finally` calls `requestRender()`; current tests assert clock-only retry     |
+| Markdown current body | `Markdown.content` -> persistent CodeRenderable update -> missing current seed -> `drawUnstyledText=false` while highlight pending | `Markdown.ts` `applyMarkdownCodeRenderable` callers      | current list/table callers omit seed; upstream `98e390189` changes list update to pass current styled seed; incomplete table cache path reaches raw fallback callers |
+| Worker settlement     | worker terminal error -> client callback                                                                                           | verification-only `parser.worker.ts`/`client.ts` owner   | current source already correlates `messageId`; `client.test.ts` current correlated-error test passes                                                                 |
+| Tree ownership        | accepted edit/stream/reset candidate -> persistent Tree owner                                                                      | verification-only `parser.worker.ts` `commitCandidate()` | current source deletes old accepted Tree and failed scratch candidate; lifecycle tests pass                                                                          |
+| Mutation/dispose      | per-buffer mutation -> rejection/success -> next mutation/disposal                                                                 | verification-only `client.ts` tail owner                 | current source chains operations and waits for disposal ack; lifecycle tests pass                                                                                    |
+| Shutdown warning      | Code rejection -> destroyed classification -> warning decision                                                                     | verification-only `Code.ts`                              | current source checks destroyed before warning; renderer/client suite passes                                                                                         |
+| Command residual      | command palette dialog transition -> renderer invalidation -> frame capture                                                        | existing renderer/output frame owner; smoke harness      | compiled target-liveness transition is the required public surface seam; no command-palette state change is authorized                                               |
 
 The native Windows writer remains a reachable compatibility risk but is excluded because current evidence does not prove it is the first divergence for this incident. A future native repair requires a separate real-console reproduction and native test boundary; R54 does not silently treat it as fixed.
 
 ### R54 Invariants
 
-| ID | Behavioral invariant | Owner | Required evidence |
-| --- | --- | --- | --- |
-| R54-INV-01 | Render-body exception, native failed frame, and no-feed unexpected skip retain one public invalidation, do not self-retry from clock advancement, and recover after one explicit public `requestRender()`. | `renderer.ts` | public scheduler red/green tests |
-| R54-INV-02 | Feed-backed `retryable-skip` and process-stdout `backpressured` preserve their existing transport behavior only. | `renderer.ts` | existing feed/backpressure tests |
-| R54-INV-03 | Every persistent Markdown CodeRenderable update shows the current representation while replacement highlighting is pending. | `Markdown.ts` | list/paragraph, non-list, and incomplete-table public tests |
-| R54-INV-04 | Every messageId request settles once through its correlated response channel. | verification-only worker/client | current correlated-error and full client suite |
-| R54-INV-05 | Each buffer has one accepted Tree owner; accepted replacement deletes the previous owner and failed candidate preserves it. | verification-only parser worker | repeated edit/stream/reset lifecycle |
-| R54-INV-06 | Mutation rejection settles only itself; later same-buffer mutation posts and disposal waits for its correlated ack. | verification-only client | delayed ordering/rejection recovery |
-| R54-INV-07 | Destroyed cancellation is silent while live worker failure remains diagnosable once. | verification-only Code/client | held real request and shutdown smoke |
-| R54-INV-08 | Dialog replacement/clear commits the current surface with no stale Commands, background fragment or old body. | renderer frame owner/smoke | compiled target-liveness PTY capture |
+| ID         | Behavioral invariant                                                                                                                                                                                       | Owner                           | Required evidence                                           |
+| ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------- | ----------------------------------------------------------- |
+| R54-INV-01 | Render-body exception, native failed frame, and no-feed unexpected skip retain one public invalidation, do not self-retry from clock advancement, and recover after one explicit public `requestRender()`. | `renderer.ts`                   | public scheduler red/green tests                            |
+| R54-INV-02 | Feed-backed `retryable-skip` and process-stdout `backpressured` preserve their existing transport behavior only.                                                                                           | `renderer.ts`                   | existing feed/backpressure tests                            |
+| R54-INV-03 | Every persistent Markdown CodeRenderable update shows the current representation while replacement highlighting is pending.                                                                                | `Markdown.ts`                   | list/paragraph, non-list, and incomplete-table public tests |
+| R54-INV-04 | Every messageId request settles once through its correlated response channel.                                                                                                                              | verification-only worker/client | current correlated-error and full client suite              |
+| R54-INV-05 | Each buffer has one accepted Tree owner; accepted replacement deletes the previous owner and failed candidate preserves it.                                                                                | verification-only parser worker | repeated edit/stream/reset lifecycle                        |
+| R54-INV-06 | Mutation rejection settles only itself; later same-buffer mutation posts and disposal waits for its correlated ack.                                                                                        | verification-only client        | delayed ordering/rejection recovery                         |
+| R54-INV-07 | Destroyed cancellation is silent while live worker failure remains diagnosable once.                                                                                                                       | verification-only Code/client   | held real request and shutdown smoke                        |
+| R54-INV-08 | Dialog replacement/clear commits the current surface with no stale Commands, background fragment or old body.                                                                                              | renderer frame owner/smoke      | compiled target-liveness PTY capture                        |
 
 ### R54 Primary Path and Failure Matrix
 
@@ -1221,13 +1221,13 @@ existing worker/client repair -> correlated response -> accepted Tree/mirror -> 
 dialog replace/clear -> existing state transition -> renderer invalidation -> current surface frame
 ```
 
-| Status/path | Required behavior | Test disposition |
-| --- | --- | --- |
-| render-body exception | no clock-only second frame; next public request commits | rewrite current assertion |
-| native `failed` | no clock-only second frame; next public request commits | rewrite current assertion |
-| `SKIPPED` with feed | existing feed-idle `retryable-skip` behavior | preserve |
-| `SKIPPED` without feed | failed-frame contract: no clock-only retry; next public request commits | rewrite unexpected-skip assertion |
-| process-stdout/thread `backpressured` | existing transport backpressure behavior | preserve |
+| Status/path                           | Required behavior                                                       | Test disposition                  |
+| ------------------------------------- | ----------------------------------------------------------------------- | --------------------------------- |
+| render-body exception                 | no clock-only second frame; next public request commits                 | rewrite current assertion         |
+| native `failed`                       | no clock-only second frame; next public request commits                 | rewrite current assertion         |
+| `SKIPPED` with feed                   | existing feed-idle `retryable-skip` behavior                            | preserve                          |
+| `SKIPPED` without feed                | failed-frame contract: no clock-only retry; next public request commits | rewrite unexpected-skip assertion |
+| process-stdout/thread `backpressured` | existing transport backpressure behavior                                | preserve                          |
 
 No alternate success path is added. Retry is permitted only for the two existing transport contracts in the matrix. A current worker/client/Code verification failure stops implementation and requires a new revision; it cannot authorize duplicate production logic or a fallback.
 
@@ -1235,11 +1235,11 @@ No alternate success path is added. Retry is permitted only for the two existing
 
 Every call to `applyMarkdownCodeRenderable()` on a persistent CodeRenderable must pass a seed for the same current content:
 
-| Representation | Seed rule | Required test |
-| --- | --- | --- |
-| paragraph/list/blockquote/inline token | `createInitialStyledText(token)` from current inline/text tokens | current list/paragraph token visible while highlight is held |
-| incomplete table fallback | seed derived from the exact `tableToken.raw` already assigned to `CodeRenderable.content`; no empty/default seed | exact raw table fragment visible while highlight is held |
-| other structured token | current token text/raw representation, preserving eventual highlighted content | representative non-list/non-table current content visible |
+| Representation                         | Seed rule                                                                                                        | Required test                                                |
+| -------------------------------------- | ---------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------ |
+| paragraph/list/blockquote/inline token | `createInitialStyledText(token)` from current inline/text tokens                                                 | current list/paragraph token visible while highlight is held |
+| incomplete table fallback              | seed derived from the exact `tableToken.raw` already assigned to `CodeRenderable.content`; no empty/default seed | exact raw table fragment visible while highlight is held     |
+| other structured token                 | current token text/raw representation, preserving eventual highlighted content                                   | representative non-list/non-table current content visible    |
 
 The helper may centralize representation-preserving seed construction. It may not enable permanent unstyled success, create a second renderer, or change the eventual highlighted content. The table case is reachable because `buildTableContentCache()` returns `cache: null` for incomplete input and both persistent fallback callers reuse `tableToken.raw`.
 
@@ -1251,29 +1251,29 @@ The current worker/client/parser/Code changes are verification-only in R54. They
 
 Exactly eight final code files are authorized:
 
-| Category | Files |
-| --- | --- |
-| Production (5) | `thirdparty/opentui/packages/core/src/renderer.ts`; `thirdparty/opentui/packages/core/src/lib/tree-sitter/client.ts`; `thirdparty/opentui/packages/core/src/lib/tree-sitter/parser.worker.ts`; `thirdparty/opentui/packages/core/src/renderables/Code.ts`; `thirdparty/opentui/packages/core/src/renderables/Markdown.ts` |
-| Regression/harness (3) | `thirdparty/opentui/packages/core/src/lib/tree-sitter/client.test.ts`; `thirdparty/opentui/packages/core/src/tests/renderer.custom-stdout.test.ts`; `packages/opencode/script/smoke-opentui-artifact.ts` |
+| Category               | Files                                                                                                                                                                                                                                                                                                                     |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Production (5)         | `thirdparty/opentui/packages/core/src/renderer.ts`; `thirdparty/opentui/packages/core/src/lib/tree-sitter/client.ts`; `thirdparty/opentui/packages/core/src/lib/tree-sitter/parser.worker.ts`; `thirdparty/opentui/packages/core/src/renderables/Code.ts`; `thirdparty/opentui/packages/core/src/renderables/Markdown.ts` |
+| Regression/harness (3) | `thirdparty/opentui/packages/core/src/lib/tree-sitter/client.test.ts`; `thirdparty/opentui/packages/core/src/tests/renderer.custom-stdout.test.ts`; `packages/opencode/script/smoke-opentui-artifact.ts`                                                                                                                  |
 
 `types.ts` is not authorized. Before implementation-audit evidence, its existing worktree diff must be removed through the approved cleanup path or a new evidence-based revision must explicitly prove it necessary. No ninth file, native output/test file, Markdown test file, command-palette production file, daemon/SSE file, generated/config file, migration or release file is authorized.
 
 ### R54 Traceability
 
-| Requirement/invariant | Owner/path | File | Test/evidence |
-| --- | --- | --- | --- |
-| R54-INV-01 | retained invalidation and public request recovery | `renderer.ts` | scheduler red/green test and compiled smoke |
-| R54-INV-02 | existing feed/backpressure contracts | `renderer.ts` | preserved renderer tests |
-| R54-INV-03 | current representation seed | `Markdown.ts` | three public Markdown cases in `client.test.ts` |
-| R54-INV-04..07 | existing correlated lifecycle owners | `client.ts`, `parser.worker.ts`, `Code.ts` | current client suite and shutdown smoke |
-| R54-INV-08 | current frame owner | `renderer.ts`, smoke | target Commands/background/body transition |
+| Requirement/invariant | Owner/path                                        | File                                       | Test/evidence                                   |
+| --------------------- | ------------------------------------------------- | ------------------------------------------ | ----------------------------------------------- |
+| R54-INV-01            | retained invalidation and public request recovery | `renderer.ts`                              | scheduler red/green test and compiled smoke     |
+| R54-INV-02            | existing feed/backpressure contracts              | `renderer.ts`                              | preserved renderer tests                        |
+| R54-INV-03            | current representation seed                       | `Markdown.ts`                              | three public Markdown cases in `client.test.ts` |
+| R54-INV-04..07        | existing correlated lifecycle owners              | `client.ts`, `parser.worker.ts`, `Code.ts` | current client suite and shutdown smoke         |
+| R54-INV-08            | current frame owner                               | `renderer.ts`, smoke                       | target Commands/background/body transition      |
 
-| Proposed concept | Requirement | Why existing logic cannot carry it |
-| --- | --- | --- |
-| failure-frame invalidation retention without self-retry | R54-INV-01 | current failure cleanup schedules its own next frame |
-| current Markdown token seed for each persistent representation | R54-INV-03 | current update callers set `drawUnstyledText=false` without a current seed |
-| rewrite contradictory scheduler tests | R54-INV-01/02 | current tests encode clock-only retry for failure paths |
-| three-case Markdown regression | R54-INV-03 | current test only proves previous text, not current/table fallback text |
+| Proposed concept                                               | Requirement   | Why existing logic cannot carry it                                         |
+| -------------------------------------------------------------- | ------------- | -------------------------------------------------------------------------- |
+| failure-frame invalidation retention without self-retry        | R54-INV-01    | current failure cleanup schedules its own next frame                       |
+| current Markdown token seed for each persistent representation | R54-INV-03    | current update callers set `drawUnstyledText=false` without a current seed |
+| rewrite contradictory scheduler tests                          | R54-INV-01/02 | current tests encode clock-only retry for failure paths                    |
+| three-case Markdown regression                                 | R54-INV-03    | current test only proves previous text, not current/table fallback text    |
 
 ### R54 Verification Contract
 
@@ -1312,10 +1312,10 @@ Planned new production ceilings are `renderer.ts <=100` and `Markdown.ts <=25`; 
 
 ### R54 Audit Record
 
-| Round | Revision | Full scope? | Blocking findings | Result | Invocation |
-| --- | --- | --- | --- | --- | --- |
-| New window 1 | R53 | yes | B-01 self-contained authority; B-02 missing smoke gate; B-03 missing file/budget/comment gates | BLOCK | `ses_0217852c3ffeS02X0C1vIlbmSy` |
-| New window 2 | R54 | yes | No blocking findings | APPROVE | `ses_0217852c3ffeS02X0C1vIlbmSy` |
+| Round        | Revision | Full scope? | Blocking findings                                                                              | Result  | Invocation                       |
+| ------------ | -------- | ----------- | ---------------------------------------------------------------------------------------------- | ------- | -------------------------------- |
+| New window 1 | R53      | yes         | B-01 self-contained authority; B-02 missing smoke gate; B-03 missing file/budget/comment gates | BLOCK   | `ses_0217852c3ffeS02X0C1vIlbmSy` |
+| New window 2 | R54      | yes         | No blocking findings                                                                           | APPROVE | `ses_0217852c3ffeS02X0C1vIlbmSy` |
 
 ## R53 and Earlier Historical Trace
 
@@ -1327,11 +1327,11 @@ R53 inherits the complete R52 design without behavior changes. The user granted 
 
 The current baseline was re-run under external process-tree deadlines immediately before audit handoff:
 
-| Command | Result | Meaning |
-| --- | --- | --- |
-| `bun test ./src/tests/renderer.custom-stdout.test.ts` | `46 pass / 0 fail / 129 expect()` in 2.40s | current scheduler suite is stable, but still encodes automatic failure retry that R52/R53 must replace |
+| Command                                                 | Result                                                     | Meaning                                                                                                                               |
+| ------------------------------------------------------- | ---------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `bun test ./src/tests/renderer.custom-stdout.test.ts`   | `46 pass / 0 fail / 129 expect()` in 2.40s                 | current scheduler suite is stable, but still encodes automatic failure retry that R52/R53 must replace                                |
 | `bun test ./src/renderables/__tests__/Markdown.test.ts` | `156 pass / 0 fail / 91 snapshots / 383 expect()` in 6.06s | current Markdown suite is stable, but its streaming list test only requires previous text and does not prove current-token visibility |
-| `bun test ./src/lib/tree-sitter/client.test.ts` | `53 pass / 0 fail / 388 expect()` in 15.36s | current correlated settlement, Tree ownership, queue/disposal and destroyed-cancellation paths are verification-only and green |
+| `bun test ./src/lib/tree-sitter/client.test.ts`         | `53 pass / 0 fail / 388 expect()` in 15.36s                | current correlated settlement, Tree ownership, queue/disposal and destroyed-cancellation paths are verification-only and green        |
 
 Current source inspection also confirms:
 
@@ -1342,10 +1342,10 @@ Current source inspection also confirms:
 
 ### R53 Audit Window
 
-| New-window round | Revision | Full scope? | Result | Invocation |
-| --- | --- | --- | --- | --- |
-| 1 | R53 | yes | pending independent full-scope plan audit | - |
-| 2-6 | future only if a policy-supported blocker requires revision | yes | not started | - |
+| New-window round | Revision                                                    | Full scope? | Result                                    | Invocation |
+| ---------------- | ----------------------------------------------------------- | ----------- | ----------------------------------------- | ---------- |
+| 1                | R53                                                         | yes         | pending independent full-scope plan audit | -          |
+| 2-6              | future only if a policy-supported blocker requires revision | yes         | not started                               | -          |
 
 ## R53 Historical Trace
 
@@ -1380,17 +1380,17 @@ Before any implementation-audit evidence is submitted, the existing `types.ts` w
 
 ### R52 Status and Audit Record
 
-| Round | Revision | Full scope? | Blocking findings | Result | Invocation |
-| --- | --- | --- | --- | --- | --- |
-| 1 | R37 | yes | B-01..B-06 | BLOCK | `ses_022118a47ffegn80bogGe10Rz8` |
-| 2 | R38-R45 | yes | Windows/native proof, scope conflicts, mutation recovery, command surface, stale authority and Markdown visibility seam | BLOCK | multiple independent audits recorded below |
-| 3 | R46 | yes | B-01 conditional native ownership/release gate | BLOCK | `ses_0217852c3ffeS02X0C1vIlbmSy` |
-| 4 | R47 | yes | B-01 unproven native root; B-02 non-selecting native filter; B-03 missing normative budget | BLOCK | `ses_0217852c3ffeS02X0C1vIlbmSy` |
-| 5 | R48 | yes | B-01..B-03 already-repaired Tree-sitter/Code paths | BLOCK | `ses_0217852c3ffeS02X0C1vIlbmSy` |
-| 6 | R49 | yes | B-01 contradictory automatic-retry tests | BLOCK | `ses_0217852c3ffeS02X0C1vIlbmSy` |
-| 7 | R50 | yes | B-01 table fallback seed; B-02 no-feed skipped status | BLOCK | `ses_0217852c3ffeS02X0C1vIlbmSy` |
-| 8 | R51 | yes | B-01 missing current-revision comment gate | BLOCK | `ses_0217852c3ffeS02X0C1vIlbmSy` |
-| 9 | R52 | yes | audit unavailable: authorized six rounds exhausted | not started | - |
+| Round | Revision | Full scope? | Blocking findings                                                                                                       | Result      | Invocation                                 |
+| ----- | -------- | ----------- | ----------------------------------------------------------------------------------------------------------------------- | ----------- | ------------------------------------------ |
+| 1     | R37      | yes         | B-01..B-06                                                                                                              | BLOCK       | `ses_022118a47ffegn80bogGe10Rz8`           |
+| 2     | R38-R45  | yes         | Windows/native proof, scope conflicts, mutation recovery, command surface, stale authority and Markdown visibility seam | BLOCK       | multiple independent audits recorded below |
+| 3     | R46      | yes         | B-01 conditional native ownership/release gate                                                                          | BLOCK       | `ses_0217852c3ffeS02X0C1vIlbmSy`           |
+| 4     | R47      | yes         | B-01 unproven native root; B-02 non-selecting native filter; B-03 missing normative budget                              | BLOCK       | `ses_0217852c3ffeS02X0C1vIlbmSy`           |
+| 5     | R48      | yes         | B-01..B-03 already-repaired Tree-sitter/Code paths                                                                      | BLOCK       | `ses_0217852c3ffeS02X0C1vIlbmSy`           |
+| 6     | R49      | yes         | B-01 contradictory automatic-retry tests                                                                                | BLOCK       | `ses_0217852c3ffeS02X0C1vIlbmSy`           |
+| 7     | R50      | yes         | B-01 table fallback seed; B-02 no-feed skipped status                                                                   | BLOCK       | `ses_0217852c3ffeS02X0C1vIlbmSy`           |
+| 8     | R51      | yes         | B-01 missing current-revision comment gate                                                                              | BLOCK       | `ses_0217852c3ffeS02X0C1vIlbmSy`           |
+| 9     | R52      | yes         | audit unavailable: authorized six rounds exhausted                                                                      | not started | -                                          |
 
 ## R52 Historical Trace
 
@@ -1402,11 +1402,11 @@ R51 supersedes R50 after the independent re-audit. It adds the reachable incompl
 
 Every persistent Markdown `CodeRenderable` update covered by `applyMarkdownCodeRenderable()` must provide a visible seed representing the same current content that the renderable is already configured to highlight:
 
-| Caller representation | Current seed | Required regression |
-| --- | --- | --- |
-| paragraph/list/blockquote/inline token | `createInitialStyledText(token)` from current inline/text tokens | current token remains visible during held highlight |
-| incomplete-table fallback | a seed from `tableToken.raw`, using the same raw content already passed as `CodeRenderable.content` | raw current table fragment remains visible while table highlighting is held |
-| other structured Markdown token with a persistent CodeRenderable | the token's existing text/raw representation, without changing the eventual highlighted content | representative non-list/non-table update remains visible |
+| Caller representation                                            | Current seed                                                                                        | Required regression                                                         |
+| ---------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
+| paragraph/list/blockquote/inline token                           | `createInitialStyledText(token)` from current inline/text tokens                                    | current token remains visible during held highlight                         |
+| incomplete-table fallback                                        | a seed from `tableToken.raw`, using the same raw content already passed as `CodeRenderable.content` | raw current table fragment remains visible while table highlighting is held |
+| other structured Markdown token with a persistent CodeRenderable | the token's existing text/raw representation, without changing the eventual highlighted content     | representative non-list/non-table update remains visible                    |
 
 The helper may centralize this representation-preserving seed construction, but it must not synthesize a second renderer or permanently enable unstyled success. The table path is reachable because `buildTableContentCache()` returns `cache: null` for a streaming/incomplete table and both persistent fallback callers then invoke `applyMarkdownCodeRenderable()` with `tableToken.raw`.
 
@@ -1414,13 +1414,13 @@ The helper may centralize this representation-preserving seed construction, but 
 
 R51 classifies every current scheduler status that is not the existing feed backpressure contract:
 
-| Status/path | R51 behavior | Existing assertion disposition |
-| --- | --- | --- |
-| render-body exception | retain invalidation; no clock-only retry; later public `requestRender()` commits | rewrite |
-| native `failed` | retain invalidation; no clock-only retry; later public `requestRender()` commits | rewrite |
-| `NATIVE_RENDER_STATUS_SKIPPED` with feed | preserve `retryable-skip` feed-idle backpressure path | preserve |
-| `NATIVE_RENDER_STATUS_SKIPPED` without feed | classify as failed for scheduler ownership; retain invalidation; no clock-only retry; later public request commits | rewrite `unexpected skip without a feed` |
-| native backpressure with process stdout/thread | preserve existing `backpressured` transport path, not a render-failure success path | preserve only its existing transport contract |
+| Status/path                                    | R51 behavior                                                                                                       | Existing assertion disposition                |
+| ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ | --------------------------------------------- |
+| render-body exception                          | retain invalidation; no clock-only retry; later public `requestRender()` commits                                   | rewrite                                       |
+| native `failed`                                | retain invalidation; no clock-only retry; later public `requestRender()` commits                                   | rewrite                                       |
+| `NATIVE_RENDER_STATUS_SKIPPED` with feed       | preserve `retryable-skip` feed-idle backpressure path                                                              | preserve                                      |
+| `NATIVE_RENDER_STATUS_SKIPPED` without feed    | classify as failed for scheduler ownership; retain invalidation; no clock-only retry; later public request commits | rewrite `unexpected skip without a feed`      |
+| native backpressure with process stdout/thread | preserve existing `backpressured` transport path, not a render-failure success path                                | preserve only its existing transport contract |
 
 The production owner remains `renderer.ts`; the failure branches share one retained-invalidation operation and do not call `requestRender()` from `finally`. The test suite must issue an explicit public request in recovery assertions. Clock advancement alone is a negative assertion for all three failure forms.
 
@@ -1452,16 +1452,16 @@ All tests and smoke commands run under the existing external PowerShell process-
 
 ### R51 Audit Record
 
-| Round | Revision | Full scope? | Blocking findings | Result | Invocation |
-| --- | --- | --- | --- | --- | --- |
-| 1 | R37 | yes | B-01..B-06 | BLOCK | `ses_022118a47ffegn80bogGe10Rz8` |
-| 2 | R38-R45 | yes | Windows/native proof, scope conflicts, mutation recovery, command surface, stale authority and Markdown visibility seam | BLOCK | multiple independent audits recorded below |
-| 3 | R46 | yes | B-01 conditional native ownership/release gate | BLOCK | `ses_0217852c3ffeS02X0C1vIlbmSy` |
-| 4 | R47 | yes | B-01 unproven native root; B-02 non-selecting native filter; B-03 missing normative budget | BLOCK | `ses_0217852c3ffeS02X0C1vIlbmSy` |
-| 5 | R48 | yes | B-01..B-03 already-repaired Tree-sitter/Code paths | BLOCK | `ses_0217852c3ffeS02X0C1vIlbmSy` |
-| 6 | R49 | yes | B-01 contradictory automatic-retry tests | BLOCK | `ses_0217852c3ffeS02X0C1vIlbmSy` |
-| 7 | R50 | yes | B-01 table fallback seed; B-02 no-feed skipped status | BLOCK | `ses_0217852c3ffeS02X0C1vIlbmSy` |
-| 8 | R51 | yes | pending independent full-scope plan audit | not started | - |
+| Round | Revision | Full scope? | Blocking findings                                                                                                       | Result      | Invocation                                 |
+| ----- | -------- | ----------- | ----------------------------------------------------------------------------------------------------------------------- | ----------- | ------------------------------------------ |
+| 1     | R37      | yes         | B-01..B-06                                                                                                              | BLOCK       | `ses_022118a47ffegn80bogGe10Rz8`           |
+| 2     | R38-R45  | yes         | Windows/native proof, scope conflicts, mutation recovery, command surface, stale authority and Markdown visibility seam | BLOCK       | multiple independent audits recorded below |
+| 3     | R46      | yes         | B-01 conditional native ownership/release gate                                                                          | BLOCK       | `ses_0217852c3ffeS02X0C1vIlbmSy`           |
+| 4     | R47      | yes         | B-01 unproven native root; B-02 non-selecting native filter; B-03 missing normative budget                              | BLOCK       | `ses_0217852c3ffeS02X0C1vIlbmSy`           |
+| 5     | R48      | yes         | B-01..B-03 already-repaired Tree-sitter/Code paths                                                                      | BLOCK       | `ses_0217852c3ffeS02X0C1vIlbmSy`           |
+| 6     | R49      | yes         | B-01 contradictory automatic-retry tests                                                                                | BLOCK       | `ses_0217852c3ffeS02X0C1vIlbmSy`           |
+| 7     | R50      | yes         | B-01 table fallback seed; B-02 no-feed skipped status                                                                   | BLOCK       | `ses_0217852c3ffeS02X0C1vIlbmSy`           |
+| 8     | R51      | yes         | pending independent full-scope plan audit                                                                               | not started | -                                          |
 
 ## R51 Historical Trace
 
@@ -1473,11 +1473,11 @@ R50 supersedes R49 after the independent re-audit. It explicitly replaces the ex
 
 The existing `renderer.custom-stdout.test.ts` failure assertions that expect a clock-only automatic retry are superseded and must be rewritten, not retained or skipped:
 
-| Existing path | R50 test contract | Disposition |
-| --- | --- | --- |
-| render-body exception | after the injected failure, no second frame may occur from clock advancement alone; one explicit public `requestRender()` must commit the next frame | rewrite existing assertion |
-| native `failed` frame | same no-clock-only-retry and one-public-request recovery contract | rewrite existing assertion |
-| feed backpressure `retryable-skip` | preserve the existing transport/backpressure retry contract because it is not a render failure and is already part of the feed interface | preserve existing assertion |
+| Existing path                      | R50 test contract                                                                                                                                    | Disposition                 |
+| ---------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------- |
+| render-body exception              | after the injected failure, no second frame may occur from clock advancement alone; one explicit public `requestRender()` must commit the next frame | rewrite existing assertion  |
+| native `failed` frame              | same no-clock-only-retry and one-public-request recovery contract                                                                                    | rewrite existing assertion  |
+| feed backpressure `retryable-skip` | preserve the existing transport/backpressure retry contract because it is not a render failure and is already part of the feed interface             | preserve existing assertion |
 
 The production owner remains `renderer.ts`: retain one pending public invalidation, do not call `requestRender()` from the failure frame, and let the next public request consume the owner through the existing activation path. This is a direct replacement of the current competing test semantics, not a new fallback.
 
@@ -1529,15 +1529,15 @@ R50 new effective production ceiling is `<=125` lines (`renderer.ts <=100`, `Mar
 
 ### R50 Audit Record
 
-| Round | Revision | Full scope? | Blocking findings | Result | Invocation |
-| --- | --- | --- | --- | --- | --- |
-| 1 | R37 | yes | B-01..B-06 | BLOCK | `ses_022118a47ffegn80bogGe10Rz8` |
-| 2 | R38-R45 | yes | Windows/native proof, scope conflicts, mutation recovery, command surface, stale authority and Markdown visibility seam | BLOCK | multiple independent audits recorded below |
-| 3 | R46 | yes | B-01 conditional native ownership/release gate | BLOCK | `ses_0217852c3ffeS02X0C1vIlbmSy` |
-| 4 | R47 | yes | B-01 unproven native root; B-02 non-selecting native filter; B-03 missing normative budget | BLOCK | `ses_0217852c3ffeS02X0C1vIlbmSy` |
-| 5 | R48 | yes | B-01..B-03 already-repaired Tree-sitter/Code paths | BLOCK | `ses_0217852c3ffeS02X0C1vIlbmSy` |
-| 6 | R49 | yes | B-01 contradictory automatic-retry tests | BLOCK | `ses_0217852c3ffeS02X0C1vIlbmSy` |
-| 7 | R50 | yes | pending independent full-scope plan audit | not started | - |
+| Round | Revision | Full scope? | Blocking findings                                                                                                       | Result      | Invocation                                 |
+| ----- | -------- | ----------- | ----------------------------------------------------------------------------------------------------------------------- | ----------- | ------------------------------------------ |
+| 1     | R37      | yes         | B-01..B-06                                                                                                              | BLOCK       | `ses_022118a47ffegn80bogGe10Rz8`           |
+| 2     | R38-R45  | yes         | Windows/native proof, scope conflicts, mutation recovery, command surface, stale authority and Markdown visibility seam | BLOCK       | multiple independent audits recorded below |
+| 3     | R46      | yes         | B-01 conditional native ownership/release gate                                                                          | BLOCK       | `ses_0217852c3ffeS02X0C1vIlbmSy`           |
+| 4     | R47      | yes         | B-01 unproven native root; B-02 non-selecting native filter; B-03 missing normative budget                              | BLOCK       | `ses_0217852c3ffeS02X0C1vIlbmSy`           |
+| 5     | R48      | yes         | B-01..B-03 already-repaired Tree-sitter/Code paths                                                                      | BLOCK       | `ses_0217852c3ffeS02X0C1vIlbmSy`           |
+| 6     | R49      | yes         | B-01 contradictory automatic-retry tests                                                                                | BLOCK       | `ses_0217852c3ffeS02X0C1vIlbmSy`           |
+| 7     | R50      | yes         | pending independent full-scope plan audit                                                                               | not started | -                                          |
 
 ## R50 Historical Trace
 
@@ -1551,10 +1551,10 @@ The original requirement remains unchanged: prevent OpenCode TUI liveness loss, 
 
 Current-source reconciliation leaves two production first divergences that still require repair:
 
-| ID | First divergence | Owner | Current evidence |
-| --- | --- | --- | --- |
-| R49-INV-01 | a render-body exception or native `failed` frame clears the future public frame owner, leaving a live renderer with no scheduled next frame; the failure path must not self-retry | `renderer.ts` `CliRenderer` scheduler | bounded throwing-renderable/native-failure probe and existing scheduler path |
-| R49-INV-02 | an existing persistent Markdown CodeRenderable update omits the current token's `initialStyledText` while replacement highlighting is pending, so the current body can disappear or remain stale until the async request settles | `Markdown.ts` structured update seam | local `Markdown.ts:876-878` and upstream `98e390189`; current local test only asserts previous text and therefore is not a sufficient red test |
+| ID         | First divergence                                                                                                                                                                                                                 | Owner                                 | Current evidence                                                                                                                               |
+| ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| R49-INV-01 | a render-body exception or native `failed` frame clears the future public frame owner, leaving a live renderer with no scheduled next frame; the failure path must not self-retry                                                | `renderer.ts` `CliRenderer` scheduler | bounded throwing-renderable/native-failure probe and existing scheduler path                                                                   |
+| R49-INV-02 | an existing persistent Markdown CodeRenderable update omits the current token's `initialStyledText` while replacement highlighting is pending, so the current body can disappear or remain stale until the async request settles | `Markdown.ts` structured update seam  | local `Markdown.ts:876-878` and upstream `98e390189`; current local test only asserts previous text and therefore is not a sufficient red test |
 
 The following existing worktree paths are verification-only for R49, not new repair concepts: `client.ts`/`parser.worker.ts` correlated settlement and Tree lifecycle, `Code.ts` destroyed classification, and their current regression assertions. If verification disproves those existing repairs, implementation must stop and create a new revision rather than silently broadening R49.
 
@@ -1575,39 +1575,39 @@ No alternate success path is added. There is no retry, timeout-success, second p
 
 Exactly eight code files are authorized for the final current-worktree repair/audit boundary:
 
-| Category | Files |
-| --- | --- |
-| Production (5) | `thirdparty/opentui/packages/core/src/renderer.ts`; `thirdparty/opentui/packages/core/src/lib/tree-sitter/client.ts`; `thirdparty/opentui/packages/core/src/lib/tree-sitter/parser.worker.ts`; `thirdparty/opentui/packages/core/src/renderables/Code.ts`; `thirdparty/opentui/packages/core/src/renderables/Markdown.ts` |
-| Regression/harness (3) | `thirdparty/opentui/packages/core/src/lib/tree-sitter/client.test.ts`; `thirdparty/opentui/packages/core/src/tests/renderer.custom-stdout.test.ts`; `packages/opencode/script/smoke-opentui-artifact.ts` |
+| Category               | Files                                                                                                                                                                                                                                                                                                                     |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Production (5)         | `thirdparty/opentui/packages/core/src/renderer.ts`; `thirdparty/opentui/packages/core/src/lib/tree-sitter/client.ts`; `thirdparty/opentui/packages/core/src/lib/tree-sitter/parser.worker.ts`; `thirdparty/opentui/packages/core/src/renderables/Code.ts`; `thirdparty/opentui/packages/core/src/renderables/Markdown.ts` |
+| Regression/harness (3) | `thirdparty/opentui/packages/core/src/lib/tree-sitter/client.test.ts`; `thirdparty/opentui/packages/core/src/tests/renderer.custom-stdout.test.ts`; `packages/opencode/script/smoke-opentui-artifact.ts`                                                                                                                  |
 
 `types.ts` is not an authorized R49 file because current type definitions already carry the relevant correlated message IDs. Its existing worktree change must be removed or proven necessary before implementation-audit approval; no new type protocol is added. `renderer-output.zig`, Markdown test files, command-palette production files, daemon/SSE/SyncProvider files, native test files, generated/config files and release files are not changed.
 
 ### R49 Forward and Reverse Traceability
 
-| Requirement/invariant | Production path | Planned or verified file | Behavioral evidence |
-| --- | --- | --- | --- |
-| R49-INV-01 scheduler remains recoverable without retry | retained invalidation and public `requestRender()` | `renderer.ts` | throwing-renderable public-request red/green test |
-| R49-INV-02 current Markdown body remains visible during pending highlight | current-token styled seed on persistent update | `Markdown.ts` | strengthened public Markdown/renderer test in `client.test.ts` |
-| worker request settles exactly once | existing correlated response channel | `client.ts`, `parser.worker.ts` verification-only | current correlated-error and lifecycle tests |
-| accepted Tree has one owner | existing commitCandidate owner transition | `parser.worker.ts` verification-only | repeated edit/stream/reset and failed-candidate tests |
-| rejected tail/disposal remains ordered | existing per-buffer queue | `client.ts` verification-only | delayed mutation/disposal tests |
-| destroyed cancellation is silent | existing Code lifecycle classification | `Code.ts` verification-only | held real request shutdown test |
-| command replacement commits current surface | renderer invalidation/frame capture | `renderer.ts`, smoke | compiled target surface transition |
+| Requirement/invariant                                                     | Production path                                    | Planned or verified file                          | Behavioral evidence                                            |
+| ------------------------------------------------------------------------- | -------------------------------------------------- | ------------------------------------------------- | -------------------------------------------------------------- |
+| R49-INV-01 scheduler remains recoverable without retry                    | retained invalidation and public `requestRender()` | `renderer.ts`                                     | throwing-renderable public-request red/green test              |
+| R49-INV-02 current Markdown body remains visible during pending highlight | current-token styled seed on persistent update     | `Markdown.ts`                                     | strengthened public Markdown/renderer test in `client.test.ts` |
+| worker request settles exactly once                                       | existing correlated response channel               | `client.ts`, `parser.worker.ts` verification-only | current correlated-error and lifecycle tests                   |
+| accepted Tree has one owner                                               | existing commitCandidate owner transition          | `parser.worker.ts` verification-only              | repeated edit/stream/reset and failed-candidate tests          |
+| rejected tail/disposal remains ordered                                    | existing per-buffer queue                          | `client.ts` verification-only                     | delayed mutation/disposal tests                                |
+| destroyed cancellation is silent                                          | existing Code lifecycle classification             | `Code.ts` verification-only                       | held real request shutdown test                                |
+| command replacement commits current surface                               | renderer invalidation/frame capture                | `renderer.ts`, smoke                              | compiled target surface transition                             |
 
-| Proposed concept | Requirement | Evidence | Why existing logic cannot carry it |
-| --- | --- | --- | --- |
-| retain scheduler invalidation without failure-frame self-scheduling | R49-INV-01 | current renderer red probe | current failure branches clear the future owner and do not expose a consumable public invalidation |
-| pass current Markdown styled seed during persistent update | R49-INV-02 | upstream diff and local call path | current update call omits the seed while `drawUnstyledText` remains false during streaming |
-| strengthen current-worktree lifecycle tests | original Tree-sitter/Code requirements | existing implementation plus current regression seams | existing repairs need behavior verification, but no new production logic is justified unless a test reopens a divergence |
+| Proposed concept                                                    | Requirement                            | Evidence                                              | Why existing logic cannot carry it                                                                                       |
+| ------------------------------------------------------------------- | -------------------------------------- | ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| retain scheduler invalidation without failure-frame self-scheduling | R49-INV-01                             | current renderer red probe                            | current failure branches clear the future owner and do not expose a consumable public invalidation                       |
+| pass current Markdown styled seed during persistent update          | R49-INV-02                             | upstream diff and local call path                     | current update call omits the seed while `drawUnstyledText` remains false during streaming                               |
+| strengthen current-worktree lifecycle tests                         | original Tree-sitter/Code requirements | existing implementation plus current regression seams | existing repairs need behavior verification, but no new production logic is justified unless a test reopens a divergence |
 
 ### R49 TDD and Verification Contract
 
-| Slice | Red | Green |
-| --- | --- | --- |
-| Scheduler | public `requestRender()` test injects render-body failure, asserts no automatic second frame, then issues one new public request and asserts a committed frame | retained invalidation is consumed only by the next public request |
-| Markdown visibility | public Markdown/renderer test holds highlighting, updates a structured item, and requires current token text before resolve | update passes `createInitialStyledText(token)` and current content remains visible |
-| Existing lifecycle verification | current correlated-error, Tree ownership, rejected-tail, disposal and destroyed-cancellation tests run against the worktree | all pass; any failure stops the route and requires a new plan revision, not a fallback branch |
-| Command surface | compiled target transition leaves Commands/background stale | next visible frame has current background/body and no stale Commands |
+| Slice                           | Red                                                                                                                                                            | Green                                                                                         |
+| ------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
+| Scheduler                       | public `requestRender()` test injects render-body failure, asserts no automatic second frame, then issues one new public request and asserts a committed frame | retained invalidation is consumed only by the next public request                             |
+| Markdown visibility             | public Markdown/renderer test holds highlighting, updates a structured item, and requires current token text before resolve                                    | update passes `createInitialStyledText(token)` and current content remains visible            |
+| Existing lifecycle verification | current correlated-error, Tree ownership, rejected-tail, disposal and destroyed-cancellation tests run against the worktree                                    | all pass; any failure stops the route and requires a new plan revision, not a fallback branch |
+| Command surface                 | compiled target transition leaves Commands/background stale                                                                                                    | next visible frame has current background/body and no stale Commands                          |
 
 Normative bounded commands:
 
@@ -1635,14 +1635,14 @@ Only two production files are authorized for new effective implementation lines:
 
 ### R49 Audit Record
 
-| Round | Revision | Full scope? | Blocking findings | Result | Invocation |
-| --- | --- | --- | --- | --- | --- |
-| 1 | R37 | yes | B-01..B-06 | BLOCK | `ses_022118a47ffegn80bogGe10Rz8` |
-| 2 | R38-R45 | yes | Windows/native proof, scope conflicts, mutation recovery, command surface, stale authority and Markdown visibility seam | BLOCK | multiple independent audits recorded below |
-| 3 | R46 | yes | B-01 conditional native ownership/release gate | BLOCK | `ses_0217852c3ffeS02X0C1vIlbmSy` |
-| 4 | R47 | yes | B-01 unproven native root; B-02 non-selecting native filter; B-03 missing normative budget | BLOCK | `ses_0217852c3ffeS02X0C1vIlbmSy` |
-| 5 | R48 | yes | B-01..B-03 already-repaired Tree-sitter/Code paths | BLOCK | `ses_0217852c3ffeS02X0C1vIlbmSy` |
-| 6 | R49 | yes | pending independent full-scope plan audit | not started | - |
+| Round | Revision | Full scope? | Blocking findings                                                                                                       | Result      | Invocation                                 |
+| ----- | -------- | ----------- | ----------------------------------------------------------------------------------------------------------------------- | ----------- | ------------------------------------------ |
+| 1     | R37      | yes         | B-01..B-06                                                                                                              | BLOCK       | `ses_022118a47ffegn80bogGe10Rz8`           |
+| 2     | R38-R45  | yes         | Windows/native proof, scope conflicts, mutation recovery, command surface, stale authority and Markdown visibility seam | BLOCK       | multiple independent audits recorded below |
+| 3     | R46      | yes         | B-01 conditional native ownership/release gate                                                                          | BLOCK       | `ses_0217852c3ffeS02X0C1vIlbmSy`           |
+| 4     | R47      | yes         | B-01 unproven native root; B-02 non-selecting native filter; B-03 missing normative budget                              | BLOCK       | `ses_0217852c3ffeS02X0C1vIlbmSy`           |
+| 5     | R48      | yes         | B-01..B-03 already-repaired Tree-sitter/Code paths                                                                      | BLOCK       | `ses_0217852c3ffeS02X0C1vIlbmSy`           |
+| 6     | R49      | yes         | pending independent full-scope plan audit                                                                               | not started | -                                          |
 
 ## R49 Historical Trace
 
@@ -1669,16 +1669,16 @@ The native `renderer-output.zig` path is recorded as reachable compatibility ris
 
 R48 retains the confirmed Tree-sitter, Code, scheduler, command-surface and Markdown invariants from R46 as `R48-INV-01` through `R48-INV-08`, with the following owner mapping:
 
-| ID | First divergence | Owner | Red-capable evidence |
-| --- | --- | --- | --- |
-| R48-INV-01 | render-body/native failure clears the future public frame owner instead of retaining one pending invalidation | `renderer.ts` `CliRenderer` scheduler | bounded throwing-renderable probe and public request sequence |
+| ID         | First divergence                                                                                                  | Owner                                             | Red-capable evidence                                              |
+| ---------- | ----------------------------------------------------------------------------------------------------------------- | ------------------------------------------------- | ----------------------------------------------------------------- |
+| R48-INV-01 | render-body/native failure clears the future public frame owner instead of retaining one pending invalidation     | `renderer.ts` `CliRenderer` scheduler             | bounded throwing-renderable probe and public request sequence     |
 | R48-INV-02 | worker terminal error omits request identity, so the client emits an event without settling the matching callback | `parser.worker.ts` + `client.ts` response channel | forced worker-error reproduction: `settled=pending` until destroy |
-| R48-INV-03 | accepted persistent Tree is overwritten without deleting the old WASM owner | `parser.worker.ts` | fixed-length repeated lifecycle RSS reproduction |
-| R48-INV-04 | rejected same-buffer mutation poisons the next operation and disposal can cross the in-flight mutation | `client.ts` per-buffer tail | delayed response ordering seam |
-| R48-INV-05 | Code warns before classifying an expected destroyed-client rejection | `Code.ts` | held real one-shot/streaming request shutdown seam |
-| R48-INV-06 | existing Markdown CodeRenderable update omits current token styled seed while the new highlight is pending | `Markdown.ts` persistent structured update | upstream `98e390189` diff plus public current-text test seam |
-| R48-INV-07 | dialog replacement/clear reaches renderer invalidation but the next visible frame can retain stale surface cells | existing renderer frame owner | compiled target surface transition |
-| R48-INV-08 | worker/client/renderer repairs must remain bounded and one-path | all authorized owners | exact-file diff, no-fallback audit and bounded smoke |
+| R48-INV-03 | accepted persistent Tree is overwritten without deleting the old WASM owner                                       | `parser.worker.ts`                                | fixed-length repeated lifecycle RSS reproduction                  |
+| R48-INV-04 | rejected same-buffer mutation poisons the next operation and disposal can cross the in-flight mutation            | `client.ts` per-buffer tail                       | delayed response ordering seam                                    |
+| R48-INV-05 | Code warns before classifying an expected destroyed-client rejection                                              | `Code.ts`                                         | held real one-shot/streaming request shutdown seam                |
+| R48-INV-06 | existing Markdown CodeRenderable update omits current token styled seed while the new highlight is pending        | `Markdown.ts` persistent structured update        | upstream `98e390189` diff plus public current-text test seam      |
+| R48-INV-07 | dialog replacement/clear reaches renderer invalidation but the next visible frame can retain stale surface cells  | existing renderer frame owner                     | compiled target surface transition                                |
+| R48-INV-08 | worker/client/renderer repairs must remain bounded and one-path                                                   | all authorized owners                             | exact-file diff, no-fallback audit and bounded smoke              |
 
 ### R48 Primary Path
 
@@ -1695,36 +1695,36 @@ No alternate success path is added. There is no retry, timeout-success, second p
 
 Exactly seven code files are authorized:
 
-| Category | Files |
-| --- | --- |
-| Production (5) | `thirdparty/opentui/packages/core/src/renderer.ts`; `thirdparty/opentui/packages/core/src/lib/tree-sitter/client.ts`; `thirdparty/opentui/packages/core/src/lib/tree-sitter/parser.worker.ts`; `thirdparty/opentui/packages/core/src/renderables/Code.ts`; `thirdparty/opentui/packages/core/src/renderables/Markdown.ts` |
-| Regression/harness (2) | `thirdparty/opentui/packages/core/src/lib/tree-sitter/client.test.ts`; `packages/opencode/script/smoke-opentui-artifact.ts` |
+| Category               | Files                                                                                                                                                                                                                                                                                                                     |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Production (5)         | `thirdparty/opentui/packages/core/src/renderer.ts`; `thirdparty/opentui/packages/core/src/lib/tree-sitter/client.ts`; `thirdparty/opentui/packages/core/src/lib/tree-sitter/parser.worker.ts`; `thirdparty/opentui/packages/core/src/renderables/Code.ts`; `thirdparty/opentui/packages/core/src/renderables/Markdown.ts` |
+| Regression/harness (2) | `thirdparty/opentui/packages/core/src/lib/tree-sitter/client.test.ts`; `packages/opencode/script/smoke-opentui-artifact.ts`                                                                                                                                                                                               |
 
 `types.ts`, `renderer-output.zig`, `renderer.custom-stdout.test.ts`, Markdown test files, command-palette production files, daemon/SSE/SyncProvider files, native test files, generated/config files and release files are not changed in R48.
 
 ### R48 Reverse Traceability
 
-| Proposed production concept | Requirement/invariant | Evidence | Why existing logic cannot carry it |
-| --- | --- | --- | --- |
-| pending scheduler invalidation without self-retry | R48-INV-01 | throwing-renderable probe | current failure exits clear the future owner and do not expose a consumable public invalidation |
-| correlated worker terminal response | R48-INV-02 | pending callback reproduction | event-only generic error cannot settle a request Promise |
-| accepted Tree replacement deletion | R48-INV-03 | repeated fixed-length lifecycle RSS | current assignment loses the old WASM owner |
-| recoverable per-buffer operation tail | R48-INV-04 | delayed mutation/disposal sequence | independent completion paths allow rejected mutation to poison or cross disposal |
-| destroyed-before-warning classification | R48-INV-05 | held request shutdown | current Code catch logs before lifecycle classification |
-| current-token `initialStyledText` seed | R48-INV-06 | upstream `98e390189`, local Markdown call path | current persistent update calls `applyMarkdownCodeRenderable` without the current token seed |
-| exact command-surface smoke identity | R48-INV-07 | target-liveness surface transition | source inspection alone cannot prove the committed visible frame |
+| Proposed production concept                       | Requirement/invariant | Evidence                                       | Why existing logic cannot carry it                                                              |
+| ------------------------------------------------- | --------------------- | ---------------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| pending scheduler invalidation without self-retry | R48-INV-01            | throwing-renderable probe                      | current failure exits clear the future owner and do not expose a consumable public invalidation |
+| correlated worker terminal response               | R48-INV-02            | pending callback reproduction                  | event-only generic error cannot settle a request Promise                                        |
+| accepted Tree replacement deletion                | R48-INV-03            | repeated fixed-length lifecycle RSS            | current assignment loses the old WASM owner                                                     |
+| recoverable per-buffer operation tail             | R48-INV-04            | delayed mutation/disposal sequence             | independent completion paths allow rejected mutation to poison or cross disposal                |
+| destroyed-before-warning classification           | R48-INV-05            | held request shutdown                          | current Code catch logs before lifecycle classification                                         |
+| current-token `initialStyledText` seed            | R48-INV-06            | upstream `98e390189`, local Markdown call path | current persistent update calls `applyMarkdownCodeRenderable` without the current token seed    |
+| exact command-surface smoke identity              | R48-INV-07            | target-liveness surface transition             | source inspection alone cannot prove the committed visible frame                                |
 
 ### R48 TDD and Verification Contract
 
-| Slice | Red | Green |
-| --- | --- | --- |
-| Markdown visibility | public Markdown/renderer test in `client.test.ts` holds highlighting, updates a structured item, and requires current token text before resolve | update passes `createInitialStyledText(token)` and current content remains visible |
-| Scheduler | public `requestRender()` test injects a render-body failure, asserts no automatic second frame, then issues one new public request and asserts a committed frame | retained invalidation is consumed only by the next public request |
-| Worker settlement | correlated ERROR leaves request pending | current request rejects once and later request posts |
-| Tail recovery | rejected mutation poisons later operation or disposal crosses it | later edit/stream/reset posts in order and disposal waits for its own ack |
-| Tree ownership | repeated edit/stream/reset loses accepted state or leaks owner | accepted replacement deletes only the prior owner and failed candidate preserves it |
-| Cancellation | held real Code request prints destroy warnings | expected destroyed cancellation is silent and live worker failure remains diagnostic |
-| Command surface | Commands/background remains after replace/clear | next compiled visible frame has current background/body and no stale Commands |
+| Slice               | Red                                                                                                                                                              | Green                                                                                |
+| ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| Markdown visibility | public Markdown/renderer test in `client.test.ts` holds highlighting, updates a structured item, and requires current token text before resolve                  | update passes `createInitialStyledText(token)` and current content remains visible   |
+| Scheduler           | public `requestRender()` test injects a render-body failure, asserts no automatic second frame, then issues one new public request and asserts a committed frame | retained invalidation is consumed only by the next public request                    |
+| Worker settlement   | correlated ERROR leaves request pending                                                                                                                          | current request rejects once and later request posts                                 |
+| Tail recovery       | rejected mutation poisons later operation or disposal crosses it                                                                                                 | later edit/stream/reset posts in order and disposal waits for its own ack            |
+| Tree ownership      | repeated edit/stream/reset loses accepted state or leaks owner                                                                                                   | accepted replacement deletes only the prior owner and failed candidate preserves it  |
+| Cancellation        | held real Code request prints destroy warnings                                                                                                                   | expected destroyed cancellation is silent and live worker failure remains diagnostic |
+| Command surface     | Commands/background remains after replace/clear                                                                                                                  | next compiled visible frame has current background/body and no stale Commands        |
 
 Normative bounded verification commands:
 
@@ -1747,26 +1747,26 @@ Both compiled smoke commands run under the existing external PowerShell process-
 
 ### R48 Budget and Chinese Comment Gate
 
-| Production file | Effective-line ceiling `E_i` | Minimum qualifying comments `C_i` |
-| --- | ---: | ---: |
-| `renderer.ts` | 100 | 15 |
-| `client.ts` | 170 | 26 |
-| `parser.worker.ts` | 200 | 30 |
-| `Code.ts` | 25 | 4 |
-| `Markdown.ts` | 25 | 4 |
-| **Total** | **520** | **per-file minimum, 79 total** |
+| Production file    | Effective-line ceiling `E_i` | Minimum qualifying comments `C_i` |
+| ------------------ | ---------------------------: | --------------------------------: |
+| `renderer.ts`      |                          100 |                                15 |
+| `client.ts`        |                          170 |                                26 |
+| `parser.worker.ts` |                          200 |                                30 |
+| `Code.ts`          |                           25 |                                 4 |
+| `Markdown.ts`      |                           25 |                                 4 |
+| **Total**          |                      **520** |    **per-file minimum, 79 total** |
 
 `E` excludes imports, formatting-only changes, generated lines, pure moves and comment-only lines. Each qualifying Chinese comment must explain a nearby scheduler ownership, response correlation, Tree ownership/deletion, tail recovery, lifecycle cancellation, or current-token visibility invariant; assignment restatements do not count. Final implementation evidence must recompute actual `E_i`, `C_i`, ratio and exclusions. R48 remains below the user's 800-line production limit and seven code files remain below the eight-file limit.
 
 ### R48 Audit Record
 
-| Round | Revision | Full scope? | Blocking findings | Result | Invocation |
-| --- | --- | --- | --- | --- | --- |
-| 1 | R37 | yes | B-01..B-06 | BLOCK | `ses_022118a47ffegn80bogGe10Rz8` |
-| 2 | R38-R45 | yes | Windows/native proof, scope conflicts, mutation recovery, command surface, stale authority and Markdown visibility seam | BLOCK | multiple independent audits recorded below |
-| 3 | R46 | yes | B-01 conditional native ownership/release gate | BLOCK | `ses_0217852c3ffeS02X0C1vIlbmSy` |
-| 4 | R47 | yes | B-01 unproven native root; B-02 non-selecting native filter; B-03 missing normative budget | BLOCK | `ses_0217852c3ffeS02X0C1vIlbmSy` |
-| 5 | R48 | yes | pending independent full-scope plan audit | not started | - |
+| Round | Revision | Full scope? | Blocking findings                                                                                                       | Result      | Invocation                                 |
+| ----- | -------- | ----------- | ----------------------------------------------------------------------------------------------------------------------- | ----------- | ------------------------------------------ |
+| 1     | R37      | yes         | B-01..B-06                                                                                                              | BLOCK       | `ses_022118a47ffegn80bogGe10Rz8`           |
+| 2     | R38-R45  | yes         | Windows/native proof, scope conflicts, mutation recovery, command surface, stale authority and Markdown visibility seam | BLOCK       | multiple independent audits recorded below |
+| 3     | R46      | yes         | B-01 conditional native ownership/release gate                                                                          | BLOCK       | `ses_0217852c3ffeS02X0C1vIlbmSy`           |
+| 4     | R47      | yes         | B-01 unproven native root; B-02 non-selecting native filter; B-03 missing normative budget                              | BLOCK       | `ses_0217852c3ffeS02X0C1vIlbmSy`           |
+| 5     | R48      | yes         | pending independent full-scope plan audit                                                                               | not started | -                                          |
 
 ## R48 Historical Trace
 
@@ -1795,8 +1795,8 @@ R47 removes the R46 wording that permitted an unavailable-console result to rema
 
 R47 retains R46-INV-01 through R46-INV-08 and renames the output invariant to:
 
-| ID | Behavioral invariant | Owner and release gate |
-| --- | --- | --- |
+| ID         | Behavioral invariant                                                                                           | Owner and release gate                                                                                                   |
+| ---------- | -------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
 | R47-INV-09 | Windows real-console output uses the console-safe writer; redirected file/pipe output remains byte-preserving. | `renderer-output.zig`; native test must execute the real console branch on Windows, and compiled Windows smoke must pass |
 
 ### R47 Primary Path and Scope
@@ -1837,12 +1837,12 @@ The two compiled smoke commands must run under the existing external PowerShell 
 
 ### R47 Audit Record
 
-| Round | Revision | Full scope? | Blocking findings | Result | Invocation |
-| --- | --- | --- | --- | --- | --- |
-| 1 | R37 | yes | B-01..B-06 | BLOCK | `ses_022118a47ffegn80bogGe10Rz8` |
-| 2 | R38-R45 | yes | Windows/native proof, scope conflicts, mutation recovery, command surface, stale authority and Markdown visibility seam | BLOCK | multiple independent audits recorded below |
-| 3 | R46 | yes | B-01 conditional native ownership/release gate | BLOCK | `ses_0217852c3ffeS02X0C1vIlbmSy` |
-| 4 | R47 | yes | pending independent full-scope plan audit | not started | - |
+| Round | Revision | Full scope? | Blocking findings                                                                                                       | Result      | Invocation                                 |
+| ----- | -------- | ----------- | ----------------------------------------------------------------------------------------------------------------------- | ----------- | ------------------------------------------ |
+| 1     | R37      | yes         | B-01..B-06                                                                                                              | BLOCK       | `ses_022118a47ffegn80bogGe10Rz8`           |
+| 2     | R38-R45  | yes         | Windows/native proof, scope conflicts, mutation recovery, command surface, stale authority and Markdown visibility seam | BLOCK       | multiple independent audits recorded below |
+| 3     | R46      | yes         | B-01 conditional native ownership/release gate                                                                          | BLOCK       | `ses_0217852c3ffeS02X0C1vIlbmSy`           |
+| 4     | R47      | yes         | pending independent full-scope plan audit                                                                               | not started | -                                          |
 
 ## R47 Historical Trace
 
@@ -1858,31 +1858,31 @@ R46新增一项由上游差异和本地可执行测试共同定位的Markdown可
 
 ### Evidence and First Divergence
 
-| Area | Reachable path | First divergence/owner | Evidence |
-| --- | --- | --- | --- |
-| Blank body from worker failure | worker exception -> uncorrelated ERROR -> client callback pending -> `CodeRenderable` waits with `drawUnstyledText=false` | worker/client response channel | forced worker-error reproduction: pending callback remains until destroy |
-| Blank/current Markdown body during streaming update | `Markdown.content` -> persistent structured child -> `applyMarkdownCodeRenderable` without `initialStyledText` -> `drawUnstyledText=false` while new highlight is pending | `Markdown.ts` existing-renderable update seam | local `Markdown.test.ts` currently asserts only previous text; upstream `98e390189` changes the same assertion to current text and passes `createInitialStyledText(token)` at the call site; current local `Markdown.ts:876-878` lacks that argument |
-| Tree leak | persistent edit/stream/reset replaces WASM Tree | parser worker accepted Tree owner | source ownership path and fixed-length RSS reproduction |
-| Mutation/dispose | same-buffer operations overlap and dispose mirror before ack | client per-buffer Promise tail | delayed worker-response ordering seam |
-| Ctrl+C warnings | renderer destroys client while Code catches rejection | `Code.ts` destroyed classification | actual held one-shot/streaming request unit seam |
-| TUI output stall | default OpenCode `process.stdout` -> `BufferedBackend` -> `StdoutOutput.write` -> native render thread | native stdout boundary only if real Windows console branch is reproduced; otherwise renderer scheduler remains separate | bounded unread-output probe proves a reachable blocked-output shape but not that a stopped pipe can display; upstream `a597e88...` is compatibility evidence, not sufficient root-cause proof |
-| Command residual | `CommandPaletteProvider` -> `dialog.replace/clear` -> renderer invalidation -> native frame commit | existing renderer/output frame owner; no command-palette state change | source command-palette path, existing identity-based `Renderable.remove`, and compiled target surface transition |
+| Area                                                | Reachable path                                                                                                                                                            | First divergence/owner                                                                                                  | Evidence                                                                                                                                                                                                                                             |
+| --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Blank body from worker failure                      | worker exception -> uncorrelated ERROR -> client callback pending -> `CodeRenderable` waits with `drawUnstyledText=false`                                                 | worker/client response channel                                                                                          | forced worker-error reproduction: pending callback remains until destroy                                                                                                                                                                             |
+| Blank/current Markdown body during streaming update | `Markdown.content` -> persistent structured child -> `applyMarkdownCodeRenderable` without `initialStyledText` -> `drawUnstyledText=false` while new highlight is pending | `Markdown.ts` existing-renderable update seam                                                                           | local `Markdown.test.ts` currently asserts only previous text; upstream `98e390189` changes the same assertion to current text and passes `createInitialStyledText(token)` at the call site; current local `Markdown.ts:876-878` lacks that argument |
+| Tree leak                                           | persistent edit/stream/reset replaces WASM Tree                                                                                                                           | parser worker accepted Tree owner                                                                                       | source ownership path and fixed-length RSS reproduction                                                                                                                                                                                              |
+| Mutation/dispose                                    | same-buffer operations overlap and dispose mirror before ack                                                                                                              | client per-buffer Promise tail                                                                                          | delayed worker-response ordering seam                                                                                                                                                                                                                |
+| Ctrl+C warnings                                     | renderer destroys client while Code catches rejection                                                                                                                     | `Code.ts` destroyed classification                                                                                      | actual held one-shot/streaming request unit seam                                                                                                                                                                                                     |
+| TUI output stall                                    | default OpenCode `process.stdout` -> `BufferedBackend` -> `StdoutOutput.write` -> native render thread                                                                    | native stdout boundary only if real Windows console branch is reproduced; otherwise renderer scheduler remains separate | bounded unread-output probe proves a reachable blocked-output shape but not that a stopped pipe can display; upstream `a597e88...` is compatibility evidence, not sufficient root-cause proof                                                        |
+| Command residual                                    | `CommandPaletteProvider` -> `dialog.replace/clear` -> renderer invalidation -> native frame commit                                                                        | existing renderer/output frame owner; no command-palette state change                                                   | source command-palette path, existing identity-based `Renderable.remove`, and compiled target surface transition                                                                                                                                     |
 
 The Markdown evidence is distinct from the worker pending defect: even when the worker request eventually settles, the persistent update path can make the current body invisible during the pending interval. The worker/client repair remains necessary for permanent pending; the Markdown repair owns the visible intermediate state and is not a fallback for worker failure.
 
 ### Invariants
 
-| ID | Invariant | Owner and test |
-| --- | --- | --- |
-| R46-INV-01 | A render-body exception or native failed frame retains one pending public invalidation, does not automatically retry, and the next public `requestRender()` can commit the frame. | `CliRenderer`; public scheduler tests |
-| R46-INV-02 | Every messageId request settles exactly once through its correlated response channel. | worker/client; real worker error test |
-| R46-INV-03 | Each buffer owns exactly one accepted Tree; accepted replacement deletes the previous owner and failed candidate preserves it. | parser worker; repeated lifecycle test |
-| R46-INV-04 | Mutation and disposal share one ordered tail; a rejected mutation settles only itself, later same-buffer mutation still posts, and disposal waits for prior settlement plus its own ack. | client; delayed ordering and rejection-recovery tests |
-| R46-INV-05 | Worker rejection reaches the existing Code error contract and does not turn into an empty successful highlight. | worker/client/Code; visibility tests |
-| R46-INV-06 | Destroyed cancellation is silent; live worker/parser failure remains diagnosable once. | Code/client; held real request test |
-| R46-INV-07 | A persistent Markdown CodeRenderable displays the current token's styled text while its replacement highlight is pending. | `Markdown.ts`; strengthened current-text streaming test |
-| R46-INV-08 | Dialog replacement/clear commits the current surface: no stale `Commands`, black fragment or old dialog remains in the next visible frame. | renderer/output frame owner; compiled PTY transition |
-| R46-INV-09 | Windows real-console output uses the console-safe writer only when the real console branch is reached; redirected output remains byte-preserving. | `renderer-output.zig`; native/compiled evidence |
+| ID         | Invariant                                                                                                                                                                                | Owner and test                                          |
+| ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------- |
+| R46-INV-01 | A render-body exception or native failed frame retains one pending public invalidation, does not automatically retry, and the next public `requestRender()` can commit the frame.        | `CliRenderer`; public scheduler tests                   |
+| R46-INV-02 | Every messageId request settles exactly once through its correlated response channel.                                                                                                    | worker/client; real worker error test                   |
+| R46-INV-03 | Each buffer owns exactly one accepted Tree; accepted replacement deletes the previous owner and failed candidate preserves it.                                                           | parser worker; repeated lifecycle test                  |
+| R46-INV-04 | Mutation and disposal share one ordered tail; a rejected mutation settles only itself, later same-buffer mutation still posts, and disposal waits for prior settlement plus its own ack. | client; delayed ordering and rejection-recovery tests   |
+| R46-INV-05 | Worker rejection reaches the existing Code error contract and does not turn into an empty successful highlight.                                                                          | worker/client/Code; visibility tests                    |
+| R46-INV-06 | Destroyed cancellation is silent; live worker/parser failure remains diagnosable once.                                                                                                   | Code/client; held real request test                     |
+| R46-INV-07 | A persistent Markdown CodeRenderable displays the current token's styled text while its replacement highlight is pending.                                                                | `Markdown.ts`; strengthened current-text streaming test |
+| R46-INV-08 | Dialog replacement/clear commits the current surface: no stale `Commands`, black fragment or old dialog remains in the next visible frame.                                               | renderer/output frame owner; compiled PTY transition    |
+| R46-INV-09 | Windows real-console output uses the console-safe writer only when the real console branch is reached; redirected output remains byte-preserving.                                        | `renderer-output.zig`; native/compiled evidence         |
 
 ### Primary Path
 
@@ -1900,40 +1900,40 @@ No alternate success path is added. The Markdown change is an input-preservation
 
 Exactly eight code files are authorized for R46:
 
-| Category | Files |
-| --- | --- |
-| Production (6) | `thirdparty/opentui/packages/core/src/renderer.ts`; `thirdparty/opentui/packages/core/src/lib/tree-sitter/client.ts`; `thirdparty/opentui/packages/core/src/lib/tree-sitter/parser.worker.ts`; `thirdparty/opentui/packages/core/src/renderables/Code.ts`; `thirdparty/opentui/packages/core/src/renderables/Markdown.ts`; `thirdparty/opentui/packages/core/src/zig/renderer-output.zig` |
-| Regression/harness (2) | `thirdparty/opentui/packages/core/src/lib/tree-sitter/client.test.ts`; `packages/opencode/script/smoke-opentui-artifact.ts` |
+| Category               | Files                                                                                                                                                                                                                                                                                                                                                                                     |
+| ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Production (6)         | `thirdparty/opentui/packages/core/src/renderer.ts`; `thirdparty/opentui/packages/core/src/lib/tree-sitter/client.ts`; `thirdparty/opentui/packages/core/src/lib/tree-sitter/parser.worker.ts`; `thirdparty/opentui/packages/core/src/renderables/Code.ts`; `thirdparty/opentui/packages/core/src/renderables/Markdown.ts`; `thirdparty/opentui/packages/core/src/zig/renderer-output.zig` |
+| Regression/harness (2) | `thirdparty/opentui/packages/core/src/lib/tree-sitter/client.test.ts`; `packages/opencode/script/smoke-opentui-artifact.ts`                                                                                                                                                                                                                                                               |
 
 `types.ts` is not changed in R46; correlated wire shapes remain local to the existing client/worker transport owner. `renderer.custom-stdout.test.ts` is not changed; its renderer assertions are consolidated into the existing `client.test.ts` seam. The Markdown visibility regression is also added to `client.test.ts` through the public renderer/Markdown boundary, so no separate Markdown test file is authorized. No command-palette production file, daemon/SSE file, native test file or generated/config file is authorized.
 
 ### File-Level Change Plan
 
-| File | Exact responsibility | Effective production delta |
-| --- | --- | ---: |
-| `thirdparty/opentui/packages/core/src/renderer.ts` | retain one pending public invalidation after render-body/native failure and remove failure-frame self-scheduling | <=100 |
-| `thirdparty/opentui/packages/core/src/lib/tree-sitter/client.ts` | correlate terminal worker responses and recover the same-buffer operation tail after a rejected mutation | <=170 |
-| `thirdparty/opentui/packages/core/src/lib/tree-sitter/parser.worker.ts` | return request identity on terminal errors and transfer/delete accepted Tree ownership exactly once | <=200 |
-| `thirdparty/opentui/packages/core/src/renderables/Code.ts` | classify destroyed cancellation before warning while preserving live failure diagnostics | <=25 |
-| `thirdparty/opentui/packages/core/src/renderables/Markdown.ts` | pass current token styled seed when updating an existing persistent Markdown CodeRenderable | <=25 |
-| `thirdparty/opentui/packages/core/src/zig/renderer-output.zig` | repair only the proven real-Windows-console encoding/write branch; keep redirected byte output unchanged | <=80 |
-| `thirdparty/opentui/packages/core/src/lib/tree-sitter/client.test.ts` | public Markdown visibility, worker settlement, renderer scheduler, Tree lifecycle, disposal and cancellation regressions | test only |
-| `packages/opencode/script/smoke-opentui-artifact.ts` | bounded normal/target Session, body/Thinking and command-surface correlation plus shutdown-warning assertions | test/harness only |
+| File                                                                    | Exact responsibility                                                                                                     | Effective production delta |
+| ----------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ | -------------------------: |
+| `thirdparty/opentui/packages/core/src/renderer.ts`                      | retain one pending public invalidation after render-body/native failure and remove failure-frame self-scheduling         |                      <=100 |
+| `thirdparty/opentui/packages/core/src/lib/tree-sitter/client.ts`        | correlate terminal worker responses and recover the same-buffer operation tail after a rejected mutation                 |                      <=170 |
+| `thirdparty/opentui/packages/core/src/lib/tree-sitter/parser.worker.ts` | return request identity on terminal errors and transfer/delete accepted Tree ownership exactly once                      |                      <=200 |
+| `thirdparty/opentui/packages/core/src/renderables/Code.ts`              | classify destroyed cancellation before warning while preserving live failure diagnostics                                 |                       <=25 |
+| `thirdparty/opentui/packages/core/src/renderables/Markdown.ts`          | pass current token styled seed when updating an existing persistent Markdown CodeRenderable                              |                       <=25 |
+| `thirdparty/opentui/packages/core/src/zig/renderer-output.zig`          | repair only the proven real-Windows-console encoding/write branch; keep redirected byte output unchanged                 |                       <=80 |
+| `thirdparty/opentui/packages/core/src/lib/tree-sitter/client.test.ts`   | public Markdown visibility, worker settlement, renderer scheduler, Tree lifecycle, disposal and cancellation regressions |                  test only |
+| `packages/opencode/script/smoke-opentui-artifact.ts`                    | bounded normal/target Session, body/Thinking and command-surface correlation plus shutdown-warning assertions            |          test/harness only |
 
 No production file is added for command-palette state, daemon/SSE, SyncProvider, or a second renderer path.
 
 ### TDD and Verification
 
-| Slice | Red | Green |
-| --- | --- | --- |
-| Markdown visibility | through the public Markdown/renderer boundary in `client.test.ts`, strengthen the streaming structured-list expectation from previous text to current token text while highlight is pending; current update path clears the styled seed | existing renderable update passes `createInitialStyledText(token)` and current content remains visible until accepted highlight |
-| Scheduler | failure test observes automatic retry or lost public owner | no clock-only retry; next public request renders |
-| Worker settlement | correlated ERROR leaves request pending | current request rejects once and later request posts |
-| Tail recovery | rejected mutation poisons later same-buffer operation | later edit/stream/reset posts and commits after correlated success |
-| Tree ownership | repeated edit/stream/reset loses accepted state or leaks owner | repeated public lifecycle remains usable; failed candidate preserves prior state |
-| Cancellation | held real Code/Tree-sitter request prints warning after destroy | zero expected destroy warnings |
-| Command surface | Commands/background remains after replace/clear | next visible frame has current background/body and no stale Commands |
-| Windows output | real console branch is absent or generic writer is used | native console branch passes when a real handle is available; redirected bytes remain exact; unavailable console is reported as unverified, not green |
+| Slice               | Red                                                                                                                                                                                                                                     | Green                                                                                                                                                 |
+| ------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Markdown visibility | through the public Markdown/renderer boundary in `client.test.ts`, strengthen the streaming structured-list expectation from previous text to current token text while highlight is pending; current update path clears the styled seed | existing renderable update passes `createInitialStyledText(token)` and current content remains visible until accepted highlight                       |
+| Scheduler           | failure test observes automatic retry or lost public owner                                                                                                                                                                              | no clock-only retry; next public request renders                                                                                                      |
+| Worker settlement   | correlated ERROR leaves request pending                                                                                                                                                                                                 | current request rejects once and later request posts                                                                                                  |
+| Tail recovery       | rejected mutation poisons later same-buffer operation                                                                                                                                                                                   | later edit/stream/reset posts and commits after correlated success                                                                                    |
+| Tree ownership      | repeated edit/stream/reset loses accepted state or leaks owner                                                                                                                                                                          | repeated public lifecycle remains usable; failed candidate preserves prior state                                                                      |
+| Cancellation        | held real Code/Tree-sitter request prints warning after destroy                                                                                                                                                                         | zero expected destroy warnings                                                                                                                        |
+| Command surface     | Commands/background remains after replace/clear                                                                                                                                                                                         | next visible frame has current background/body and no stale Commands                                                                                  |
+| Windows output      | real console branch is absent or generic writer is used                                                                                                                                                                                 | native console branch passes when a real handle is available; redirected bytes remain exact; unavailable console is reported as unverified, not green |
 
 Required commands remain package-local and bounded by an external process-tree supervisor. The Markdown slice must run first as a filtered test; the complete client test must never run without the 120-second supervisor. The final verification must include the compiled normal and target-liveness smoke, `git diff --check`, formatter/typecheck, and an explicit native console pass/unverified result.
 
@@ -1943,11 +1943,11 @@ The R46 production ceiling is `<=600` effective lines, preserving the user's str
 
 ### Audit Record
 
-| Round | Revision | Full scope? | Blocking findings | Result | Invocation |
-| --- | --- | --- | --- | --- | --- |
-| 1 | R37 | yes | B-01..B-06 | BLOCK | `ses_022118a47ffegn80bogGe10Rz8` |
-| 2 | R38-R45 | yes | Windows/native proof, scope conflicts, mutation recovery, command surface, stale authority and Markdown visibility seam | BLOCK | multiple independent audits recorded below |
-| 3 | R46 | yes | pending independent full-scope plan audit | not started | - |
+| Round | Revision | Full scope? | Blocking findings                                                                                                       | Result      | Invocation                                 |
+| ----- | -------- | ----------- | ----------------------------------------------------------------------------------------------------------------------- | ----------- | ------------------------------------------ |
+| 1     | R37      | yes         | B-01..B-06                                                                                                              | BLOCK       | `ses_022118a47ffegn80bogGe10Rz8`           |
+| 2     | R38-R45  | yes         | Windows/native proof, scope conflicts, mutation recovery, command surface, stale authority and Markdown visibility seam | BLOCK       | multiple independent audits recorded below |
+| 3     | R46      | yes         | pending independent full-scope plan audit                                                                               | not started | -                                          |
 
 ## R46 Historical Trace
 
@@ -1961,29 +1961,29 @@ The R46 production ceiling is `<=600` effective lines, preserving the user's str
 
 ### Evidence and First Divergence
 
-| Area | Reachable path | First divergence/owner | Evidence |
-| --- | --- | --- | --- |
-| Blank body | worker exception -> uncorrelated ERROR -> client callback pending -> `CodeRenderable` waits with `drawUnstyledText=false` | worker/client response channel | pending callback reproduction; forced correlated-error test seam |
-| Tree leak | persistent edit/stream/reset replaces WASM Tree | parser worker accepted Tree owner | source ownership path and fixed-length RSS reproduction |
-| Mutation/dispose | same buffer operations overlap and dispose mirror before ack | client per-buffer Promise tail | delayed worker-response ordering seam |
-| Ctrl+C warnings | renderer destroys client while Code catches rejection | `Code.ts` destroyed classification | actual held one-shot/streaming request unit seam |
+| Area             | Reachable path                                                                                                                                                        | First divergence/owner                                                                | Evidence                                                                                                                                   |
+| ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| Blank body       | worker exception -> uncorrelated ERROR -> client callback pending -> `CodeRenderable` waits with `drawUnstyledText=false`                                             | worker/client response channel                                                        | pending callback reproduction; forced correlated-error test seam                                                                           |
+| Tree leak        | persistent edit/stream/reset replaces WASM Tree                                                                                                                       | parser worker accepted Tree owner                                                     | source ownership path and fixed-length RSS reproduction                                                                                    |
+| Mutation/dispose | same buffer operations overlap and dispose mirror before ack                                                                                                          | client per-buffer Promise tail                                                        | delayed worker-response ordering seam                                                                                                      |
+| Ctrl+C warnings  | renderer destroys client while Code catches rejection                                                                                                                 | `Code.ts` destroyed classification                                                    | actual held one-shot/streaming request unit seam                                                                                           |
 | TUI output stall | default OpenCode `process.stdout` -> `BufferedBackend` -> `StdoutOutput.write` -> native render thread; unread-output probe receives STOP but destroy cannot complete | native `StdoutOutput` Windows console boundary, with JS scheduler as downstream owner | bounded default-process-stdout red probe; upstream `a597e88fb0a9a3704c0d487fbcc9e1cde3c64377` adds `GetConsoleMode`/UTF-16/`WriteConsoleW` |
-| Command residual | `CommandPaletteProvider` -> `dialog.replace/clear` -> renderer invalidation -> native frame commit | existing renderer/output frame owner; no command-palette state change | source `command-palette.tsx:82-95,128-139`; target smoke surface transition |
+| Command residual | `CommandPaletteProvider` -> `dialog.replace/clear` -> renderer invalidation -> native frame commit                                                                    | existing renderer/output frame owner; no command-palette state change                 | source `command-palette.tsx:82-95,128-139`; target smoke surface transition                                                                |
 
 The unread-pipe probe is diagnosis evidence for the reachable blocked-output owner, not a claim that an OS consumer which stopped reading can be forced to display. The native repair is limited to real Windows console handles; redirected output preserves byte semantics.
 
 ### Invariants
 
-| ID | Invariant | Owner and test |
-| --- | --- | --- |
-| R45-INV-01 | A render-body exception or native failed frame retains one pending public invalidation, does not automatically retry, and the next public `requestRender()` can commit the frame. | `CliRenderer`; public scheduler tests |
-| R45-INV-02 | Every messageId request settles exactly once through its correlated response channel. | worker/client; real worker error test |
-| R45-INV-03 | Each buffer owns exactly one accepted Tree; accepted replacement deletes the previous owner and failed candidate preserves it. | parser worker; repeated lifecycle test |
-| R45-INV-04 | Mutation and disposal share one ordered tail; a rejected mutation settles only itself, later same-buffer mutation still posts, and disposal waits for prior settlement plus its own ack. | client; delayed ordering and rejection-recovery tests |
-| R45-INV-05 | Worker rejection reaches the existing Code error contract and does not turn into an empty successful highlight. | worker/client/Code; visibility tests |
-| R45-INV-06 | Destroyed cancellation is silent; live worker/parser failure remains diagnosable once. | Code/client; held real request test |
-| R45-INV-07 | Dialog replacement/clear commits the current surface: no stale `Commands`, black fragment or old dialog remains in the next visible frame. | renderer/output frame owner; compiled PTY transition |
-| R45-INV-08 | Windows real-console output uses the console-safe writer; redirected file/pipe output remains byte-preserving. | `renderer-output.zig`; embedded native tests and compiled binary |
+| ID         | Invariant                                                                                                                                                                                | Owner and test                                                   |
+| ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------- |
+| R45-INV-01 | A render-body exception or native failed frame retains one pending public invalidation, does not automatically retry, and the next public `requestRender()` can commit the frame.        | `CliRenderer`; public scheduler tests                            |
+| R45-INV-02 | Every messageId request settles exactly once through its correlated response channel.                                                                                                    | worker/client; real worker error test                            |
+| R45-INV-03 | Each buffer owns exactly one accepted Tree; accepted replacement deletes the previous owner and failed candidate preserves it.                                                           | parser worker; repeated lifecycle test                           |
+| R45-INV-04 | Mutation and disposal share one ordered tail; a rejected mutation settles only itself, later same-buffer mutation still posts, and disposal waits for prior settlement plus its own ack. | client; delayed ordering and rejection-recovery tests            |
+| R45-INV-05 | Worker rejection reaches the existing Code error contract and does not turn into an empty successful highlight.                                                                          | worker/client/Code; visibility tests                             |
+| R45-INV-06 | Destroyed cancellation is silent; live worker/parser failure remains diagnosable once.                                                                                                   | Code/client; held real request test                              |
+| R45-INV-07 | Dialog replacement/clear commits the current surface: no stale `Commands`, black fragment or old dialog remains in the next visible frame.                                               | renderer/output frame owner; compiled PTY transition             |
+| R45-INV-08 | Windows real-console output uses the console-safe writer; redirected file/pipe output remains byte-preserving.                                                                           | `renderer-output.zig`; embedded native tests and compiled binary |
 
 ### Primary Path
 
@@ -2000,24 +2000,24 @@ No alternate success path is added. Feed-backed `retryable-skip` remains its exi
 
 Exactly eight code files are authorized:
 
-| Category | Files |
-| --- | --- |
-| Production (5) | `thirdparty/opentui/packages/core/src/renderer.ts`; `thirdparty/opentui/packages/core/src/lib/tree-sitter/client.ts`; `thirdparty/opentui/packages/core/src/lib/tree-sitter/parser.worker.ts`; `thirdparty/opentui/packages/core/src/renderables/Code.ts`; `thirdparty/opentui/packages/core/src/zig/renderer-output.zig` |
-| Regression/harness (3) | `thirdparty/opentui/packages/core/src/lib/tree-sitter/client.test.ts`; `thirdparty/opentui/packages/core/src/tests/renderer.custom-stdout.test.ts`; `packages/opencode/script/smoke-opentui-artifact.ts` |
+| Category               | Files                                                                                                                                                                                                                                                                                                                     |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Production (5)         | `thirdparty/opentui/packages/core/src/renderer.ts`; `thirdparty/opentui/packages/core/src/lib/tree-sitter/client.ts`; `thirdparty/opentui/packages/core/src/lib/tree-sitter/parser.worker.ts`; `thirdparty/opentui/packages/core/src/renderables/Code.ts`; `thirdparty/opentui/packages/core/src/zig/renderer-output.zig` |
+| Regression/harness (3) | `thirdparty/opentui/packages/core/src/lib/tree-sitter/client.test.ts`; `thirdparty/opentui/packages/core/src/tests/renderer.custom-stdout.test.ts`; `packages/opencode/script/smoke-opentui-artifact.ts`                                                                                                                  |
 
 `types.ts` is not changed in R45; correlated wire shapes are local to the existing client/worker transport owner. No ninth file, command-palette production file, native test file, daemon/SSE file or generated/config file is authorized.
 
 ### TDD and Verification
 
-| Slice | Red | Green |
-| --- | --- | --- |
-| Scheduler | failure test observes automatic retry or lost public owner | no clock-only retry; next public request renders |
-| Worker settlement | correlated ERROR leaves request pending | current request rejects once and later request posts |
-| Tail recovery | rejected mutation poisons later same-buffer operation | later edit/stream/reset posts and commits after correlated success |
-| Tree ownership | repeated edit/stream/reset loses accepted state or leaks owner | repeated public lifecycle remains usable; failed candidate preserves prior state |
-| Cancellation | held real Code/Tree-sitter request prints warning after destroy | zero expected destroy warnings |
-| Command surface | Commands/background remains after replace/clear | next visible frame has current background/body and no stale Commands |
-| Windows output | real console branch is absent or generic writer is used | native console branch pass; redirected bytes exact |
+| Slice             | Red                                                             | Green                                                                            |
+| ----------------- | --------------------------------------------------------------- | -------------------------------------------------------------------------------- |
+| Scheduler         | failure test observes automatic retry or lost public owner      | no clock-only retry; next public request renders                                 |
+| Worker settlement | correlated ERROR leaves request pending                         | current request rejects once and later request posts                             |
+| Tail recovery     | rejected mutation poisons later same-buffer operation           | later edit/stream/reset posts and commits after correlated success               |
+| Tree ownership    | repeated edit/stream/reset loses accepted state or leaks owner  | repeated public lifecycle remains usable; failed candidate preserves prior state |
+| Cancellation      | held real Code/Tree-sitter request prints warning after destroy | zero expected destroy warnings                                                   |
+| Command surface   | Commands/background remains after replace/clear                 | next visible frame has current background/body and no stale Commands             |
+| Windows output    | real console branch is absent or generic writer is used         | native console branch pass; redirected bytes exact                               |
 
 Required commands:
 
@@ -2038,24 +2038,24 @@ The native test is embedded in `renderer-output.zig`: UTF-8 conversion and redir
 
 ### Budget and Comments
 
-| Production file | `E_i` ceiling | `C_i` minimum |
-| --- | ---: | ---: |
-| `renderer.ts` | 100 | 15 |
-| `client.ts` | 170 | 26 |
-| `parser.worker.ts` | 200 | 30 |
-| `Code.ts` | 25 | 4 |
-| `renderer-output.zig` | 85 | 13 |
-| **Total** | **580** | **88 independently** |
+| Production file       | `E_i` ceiling |        `C_i` minimum |
+| --------------------- | ------------: | -------------------: |
+| `renderer.ts`         |           100 |                   15 |
+| `client.ts`           |           170 |                   26 |
+| `parser.worker.ts`    |           200 |                   30 |
+| `Code.ts`             |            25 |                    4 |
+| `renderer-output.zig` |            85 |                   13 |
+| **Total**             |       **580** | **88 independently** |
 
 Comments count only nearby explanations of scheduler ownership, response correlation, Tree transfer/deletion, tail recovery, Windows handle distinction, encoding boundary or test intent. Final actual `E/C` recount is mandatory.
 
 ### Audit Record
 
-| Round | Revision | Full scope? | Blocking findings | Result | Invocation |
-| --- | --- | --- | --- | --- | --- |
-| 1 | R37 | yes | B-01..B-06 | BLOCK | `ses_022118a47ffegn80bogGe10Rz8` |
-| 2 | R38-R44 | yes | Windows/native proof, scope conflicts, mutation recovery, command surface and stale authority | BLOCK | multiple independent audits recorded below |
-| 3 | R45 | yes | pending independent full-scope plan audit | not started | - |
+| Round | Revision | Full scope? | Blocking findings                                                                             | Result      | Invocation                                 |
+| ----- | -------- | ----------- | --------------------------------------------------------------------------------------------- | ----------- | ------------------------------------------ |
+| 1     | R37      | yes         | B-01..B-06                                                                                    | BLOCK       | `ses_022118a47ffegn80bogGe10Rz8`           |
+| 2     | R38-R44  | yes         | Windows/native proof, scope conflicts, mutation recovery, command surface and stale authority | BLOCK       | multiple independent audits recorded below |
+| 3     | R45      | yes         | pending independent full-scope plan audit                                                     | not started | -                                          |
 
 ## R45 Historical Trace
 
@@ -2076,68 +2076,68 @@ R38必须修复已证明的Tree-sitter request永久pending、persistent Tree泄
 
 ### 3. Repository Context
 
-| Source | Constraint |
-| --- | --- |
-| `CONTEXT.md` | OpenTUI core在`thirdparty/opentui/packages/core`；OpenCode TUI正文使用`CodeRenderable`。 |
-| `.opencode/policy/first-principles-engineering.md` | 必须修复first divergence和正确owner；禁止fallback；无批准不得实施。 |
-| `.opencode/templates/canonical-plan.md` | 要求证据、reachability、双向traceability、TDD、验证、预算和审计记录。 |
+| Source                                                                                                         | Constraint                                                                                     |
+| -------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| `CONTEXT.md`                                                                                                   | OpenTUI core在`thirdparty/opentui/packages/core`；OpenCode TUI正文使用`CodeRenderable`。       |
+| `.opencode/policy/first-principles-engineering.md`                                                             | 必须修复first divergence和正确owner；禁止fallback；无批准不得实施。                            |
+| `.opencode/templates/canonical-plan.md`                                                                        | 要求证据、reachability、双向traceability、TDD、验证、预算和审计记录。                          |
 | `AGENTS.md`、`thirdparty/opentui/AGENTS.md`、`packages/opencode/AGENTS.md`、`packages/opencode/test/AGENTS.md` | 使用Bun、package-local tests/typecheck、真实seam、published readiness，禁止固定sleep猜测完成。 |
-| `docs/adr/README.md`、`docs/adr/0001-*.md` | 本次为局部bug repair，不新增跨模块ADR；现有ADR无TUI生命周期约束。 |
+| `docs/adr/README.md`、`docs/adr/0001-*.md`                                                                     | 本次为局部bug repair，不新增跨模块ADR；现有ADR无TUI生命周期约束。                              |
 
 ### 4. Current Behavior and Evidence
 
-| Path | Evidence | Class |
-| --- | --- | --- |
-| OpenCode renderer construction | `packages/opencode/src/cli/cmd/tui/app.tsx:177-190,272`未传custom stdout，并将`externalOutputMode`设为`passthrough`；OpenTUI默认使用process stdout。 | observed |
-| JS/native scheduler boundary | `thirdparty/opentui/packages/core/src/renderer.ts:4373-4504`在`root.render()`异常后只执行`finally`；`:1438-1457,4488-4496`的native `failed`状态也清除future-frame owner。两个分支都由`CliRenderer`持有同一scheduler状态；renderer red probe和现有native failure test分别复现两个dead-state。 | observed/reachable |
-| Renderer red seam | `RootRenderable -> renderSelf -> renderer.loop()` probe得到`isRunning=true`、`isRendering=false`、`hasScheduledRender=false`，red为`render exception left a live renderer without a scheduled next frame`。 | observed |
-| Custom feed | `renderer.ts:1005,1061-1076,1410-1435`可复现backpressure/coalescing，但不是OpenCode默认output。 | observed secondary |
-| Tree-sitter pending | clean nested HEAD的worker generic catch丢失request identity；client `ERROR`分支只emit不reject；此前真实harness为`settled=pending`、`pendingCallbacks=1`，destroy后才reject。 | observed |
-| Tree ownership | clean nested HEAD的`handleEdits`、`handleStreamingUpdate`和`handleResetBuffer`替换accepted Tree时不释放旧WASM owner；one-shot/injection finally显式delete。 | observed |
-| Code visibility | Session保持`drawUnstyledText=false`；pending highlight因此表现为Thinking/正文空白或只剩Markdown结构标记。 | observed |
-| Shutdown warning | renderer/client destroy拒绝在途请求；Code catch在destroy分类前打印warning，产生批量`TreeSitter client destroyed`。 | observed |
-| SSE/exit | `handlers/global.ts:18-95`在abort/stream close递减SSE计数；`thread.ts:157`随后立即status查询，可能观察到关闭时序。 | observed/reachable |
-| Exit summary | `exit-summary.ts:32-52`允许`sessionID?: string`并可输出`opencode -s undefined`；与原始正文空白未建立因果连接。 | observed, out of R37 production scope |
-| Upstream | upstream latest tag `v0.5.1`，main `265d9310735e06b9fddf274a14813a119d8f93e5`；相关修复包括#1314、#1306、#1272、#1150、#1020。 | observed |
-| Recent local release chain | parent `fe2abb7ede`升级至nested`df4bd31ca`，`94f19ae42b`升级至`2ce7e0d5f`（包含`61023ba5e` persistent Tree），`48add250a0`升级至`afd11de829`；最近高风险streaming owner集中在`.5`引入的persistent path。 | observed |
-| Live daemon probe | `127.0.0.1:4096/global/health`返回`1.15.12-smark/healthy=true`；有界SSE读取立即得到`server.connected`，随后得到真实`message.part.progress`。 | observed |
-| API Session metadata | `/session?directory=F:\\ML\\PythonAIProject\\Claude-Code\\opencode\\.temp\\API`返回两个Session，均绑定ProjectID`e5ad5189c1ceb9f616cadf4bcf42bb3cb0aca4c3`；`/session/{id}/message`可读取持久化Message/Part快照。 | observed |
-| API TUI attachment | 当前进程列表没有绑定上述`.temp/API`两个Session的TUI；可见TUI为其他Session。因此live probe证明daemon发布和SQLite快照存在，但尚不能把目标Session的TUI丢失定位到event filter或renderer。 | observed verification boundary |
-| Compiled smoke | `bun run script/smoke-opentui-artifact.ts --binary "F:\\include\\CLI\\opencode.exe"`已在隔离root完成daemon、Session/Goal、初始/resize/restore frame、busy spinner和两次model request；子进程正常清理。该正向结果排除默认process-stdout正常工作负载的必现停帧，但尚未覆盖原始blank-body、command palette残影或目标真实Session的异常路径；当前真实`.temp/API`只读探测未产生可用异常证据，不能替代后续harness gate。 | observed verification boundary |
+| Path                           | Evidence                                                                                                                                                                                                                                                                                                                                                                                                          | Class                                 |
+| ------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------- |
+| OpenCode renderer construction | `packages/opencode/src/cli/cmd/tui/app.tsx:177-190,272`未传custom stdout，并将`externalOutputMode`设为`passthrough`；OpenTUI默认使用process stdout。                                                                                                                                                                                                                                                              | observed                              |
+| JS/native scheduler boundary   | `thirdparty/opentui/packages/core/src/renderer.ts:4373-4504`在`root.render()`异常后只执行`finally`；`:1438-1457,4488-4496`的native `failed`状态也清除future-frame owner。两个分支都由`CliRenderer`持有同一scheduler状态；renderer red probe和现有native failure test分别复现两个dead-state。                                                                                                                      | observed/reachable                    |
+| Renderer red seam              | `RootRenderable -> renderSelf -> renderer.loop()` probe得到`isRunning=true`、`isRendering=false`、`hasScheduledRender=false`，red为`render exception left a live renderer without a scheduled next frame`。                                                                                                                                                                                                       | observed                              |
+| Custom feed                    | `renderer.ts:1005,1061-1076,1410-1435`可复现backpressure/coalescing，但不是OpenCode默认output。                                                                                                                                                                                                                                                                                                                   | observed secondary                    |
+| Tree-sitter pending            | clean nested HEAD的worker generic catch丢失request identity；client `ERROR`分支只emit不reject；此前真实harness为`settled=pending`、`pendingCallbacks=1`，destroy后才reject。                                                                                                                                                                                                                                      | observed                              |
+| Tree ownership                 | clean nested HEAD的`handleEdits`、`handleStreamingUpdate`和`handleResetBuffer`替换accepted Tree时不释放旧WASM owner；one-shot/injection finally显式delete。                                                                                                                                                                                                                                                       | observed                              |
+| Code visibility                | Session保持`drawUnstyledText=false`；pending highlight因此表现为Thinking/正文空白或只剩Markdown结构标记。                                                                                                                                                                                                                                                                                                         | observed                              |
+| Shutdown warning               | renderer/client destroy拒绝在途请求；Code catch在destroy分类前打印warning，产生批量`TreeSitter client destroyed`。                                                                                                                                                                                                                                                                                                | observed                              |
+| SSE/exit                       | `handlers/global.ts:18-95`在abort/stream close递减SSE计数；`thread.ts:157`随后立即status查询，可能观察到关闭时序。                                                                                                                                                                                                                                                                                                | observed/reachable                    |
+| Exit summary                   | `exit-summary.ts:32-52`允许`sessionID?: string`并可输出`opencode -s undefined`；与原始正文空白未建立因果连接。                                                                                                                                                                                                                                                                                                    | observed, out of R37 production scope |
+| Upstream                       | upstream latest tag `v0.5.1`，main `265d9310735e06b9fddf274a14813a119d8f93e5`；相关修复包括#1314、#1306、#1272、#1150、#1020。                                                                                                                                                                                                                                                                                    | observed                              |
+| Recent local release chain     | parent `fe2abb7ede`升级至nested`df4bd31ca`，`94f19ae42b`升级至`2ce7e0d5f`（包含`61023ba5e` persistent Tree），`48add250a0`升级至`afd11de829`；最近高风险streaming owner集中在`.5`引入的persistent path。                                                                                                                                                                                                          | observed                              |
+| Live daemon probe              | `127.0.0.1:4096/global/health`返回`1.15.12-smark/healthy=true`；有界SSE读取立即得到`server.connected`，随后得到真实`message.part.progress`。                                                                                                                                                                                                                                                                      | observed                              |
+| API Session metadata           | `/session?directory=F:\\ML\\PythonAIProject\\Claude-Code\\opencode\\.temp\\API`返回两个Session，均绑定ProjectID`e5ad5189c1ceb9f616cadf4bcf42bb3cb0aca4c3`；`/session/{id}/message`可读取持久化Message/Part快照。                                                                                                                                                                                                  | observed                              |
+| API TUI attachment             | 当前进程列表没有绑定上述`.temp/API`两个Session的TUI；可见TUI为其他Session。因此live probe证明daemon发布和SQLite快照存在，但尚不能把目标Session的TUI丢失定位到event filter或renderer。                                                                                                                                                                                                                             | observed verification boundary        |
+| Compiled smoke                 | `bun run script/smoke-opentui-artifact.ts --binary "F:\\include\\CLI\\opencode.exe"`已在隔离root完成daemon、Session/Goal、初始/resize/restore frame、busy spinner和两次model request；子进程正常清理。该正向结果排除默认process-stdout正常工作负载的必现停帧，但尚未覆盖原始blank-body、command palette残影或目标真实Session的异常路径；当前真实`.temp/API`只读探测未产生可用异常证据，不能替代后续harness gate。 | observed verification boundary        |
 
 ### 5. Supported Domain and Reachability
 
-| Condition | Producer -> consumer path | Owner | Class |
-| --- | --- | --- | --- |
-| Windows compiled TUI frame | input/state invalidation -> `requestRender` -> `loop` -> root/native -> terminal | `CliRenderer` | reachable |
-| Render-body exception | Renderable/frame callback -> `loop` async body | `CliRenderer` scheduler | observed/reachable |
-| Worker exception with messageId | parser/query/injection -> worker catch -> client callback map -> Code | worker protocol/client | observed |
-| Persistent streaming/edit/reset replacement | Code/public mutation -> parser worker Tree replacement | parser worker | observed/reachable |
-| Ctrl+C with highlight in flight | ExitProvider -> renderer/client destroy -> Code catch | Code lifecycle | observed |
-| Daemon SSE close | SDK abort/TCP close -> `eventResponse.close` -> count update | SSE handler | reachable, diagnostic only |
+| Condition                                   | Producer -> consumer path                                                        | Owner                   | Class                      |
+| ------------------------------------------- | -------------------------------------------------------------------------------- | ----------------------- | -------------------------- |
+| Windows compiled TUI frame                  | input/state invalidation -> `requestRender` -> `loop` -> root/native -> terminal | `CliRenderer`           | reachable                  |
+| Render-body exception                       | Renderable/frame callback -> `loop` async body                                   | `CliRenderer` scheduler | observed/reachable         |
+| Worker exception with messageId             | parser/query/injection -> worker catch -> client callback map -> Code            | worker protocol/client  | observed                   |
+| Persistent streaming/edit/reset replacement | Code/public mutation -> parser worker Tree replacement                           | parser worker           | observed/reachable         |
+| Ctrl+C with highlight in flight             | ExitProvider -> renderer/client destroy -> Code catch                            | Code lifecycle          | observed                   |
+| Daemon SSE close                            | SDK abort/TCP close -> `eventResponse.close` -> count update                     | SSE handler             | reachable, diagnostic only |
 
 ### 6. Required Invariants
 
-| ID | Invariant | Evidence / test seam |
-| --- | --- | --- |
+| ID         | Invariant                                                                                                                                                                                                                                                                                                                                             | Evidence / test seam                                                                     |
+| ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
 | R38-INV-01 | Live renderer invalidation either commits a frame or reaches an explicit terminal error while retaining a future frame owner; it cannot remain running with no scheduled frame after either a render-body exception or native `failed` status. A failed frame must not automatically retry; the next public invalidation consumes the retained owner. | renderer public request red probe, native failure test and compiled process-stdout smoke |
-| R38-INV-02 | Every messageId-bearing worker request settles exactly once through its own response channel. | forced worker-error harness/client test |
-| R38-INV-03 | A persistent parser buffer has one accepted Tree owner; each replaced Tree is deleted exactly once after accepted replacement. | repeated edit/stream/reset lifecycle test and failed-candidate preservation |
-| R38-INV-04 | Each buffer's mutation and disposal operations share one completion chain: an in-flight mutation must settle before `DISPOSE_BUFFER` is sent, and disposal must settle before the client removes its mirror. | delayed worker-response disposal test |
-| R38-INV-05 | Worker rejection reaches the existing Code error contract; `drawUnstyledText=false` remains unchanged. | Code visibility test |
-| R38-INV-06 | Expected post-destroy cancellation is silent; live worker/parser failure remains diagnosable once. | one-shot and streaming shutdown tests plus a real compiled request-boundary predicate |
-| R38-INV-07 | Daemon/SSE receipt, SyncProvider application and renderer frame progress remain distinguishable; a healthy daemon cannot be reported as a TUI-render success. | target-Session compiled trace |
+| R38-INV-02 | Every messageId-bearing worker request settles exactly once through its own response channel.                                                                                                                                                                                                                                                         | forced worker-error harness/client test                                                  |
+| R38-INV-03 | A persistent parser buffer has one accepted Tree owner; each replaced Tree is deleted exactly once after accepted replacement.                                                                                                                                                                                                                        | repeated edit/stream/reset lifecycle test and failed-candidate preservation              |
+| R38-INV-04 | Each buffer's mutation and disposal operations share one completion chain: an in-flight mutation must settle before `DISPOSE_BUFFER` is sent, and disposal must settle before the client removes its mirror.                                                                                                                                          | delayed worker-response disposal test                                                    |
+| R38-INV-05 | Worker rejection reaches the existing Code error contract; `drawUnstyledText=false` remains unchanged.                                                                                                                                                                                                                                                | Code visibility test                                                                     |
+| R38-INV-06 | Expected post-destroy cancellation is silent; live worker/parser failure remains diagnosable once.                                                                                                                                                                                                                                                    | one-shot and streaming shutdown tests plus a real compiled request-boundary predicate    |
+| R38-INV-07 | Daemon/SSE receipt, SyncProvider application and renderer frame progress remain distinguishable; a healthy daemon cannot be reported as a TUI-render success.                                                                                                                                                                                         | target-Session compiled trace                                                            |
 
 ### 7. First Divergence and Root Cause
 
-| Invariant | First divergence | Owner | Proof |
-| --- | --- | --- | --- |
-| R38-INV-01 | Both render-body exception and native `failed` exits retain a future invalidation without scheduling an automatic retry; public `requestRender()` is the sole next-frame owner. | `CliRenderer.loop()` and public scheduler | public request red probe plus native failure test |
-| R38-INV-02/05 | Worker generic ERROR loses request correlation; client emits an event instead of rejecting the matching callback. | `parser.worker.ts` + `client.ts` | pending until destroy |
-| R38-INV-03 | Persistent edit/stream/reset handlers replace accepted Trees without deleting the previous owner. | parser worker | repeated public lifecycle test and failed-candidate preservation |
-| R38-INV-04 | Client-side mutation and disposal can cross unless all buffer operations use one serialized lifecycle chain and the disposal ack remains correlated. | `client.ts` + `types.ts` + worker dispatch | delayed update/dispose response ordering test |
-| R38-INV-06 | Code warning is emitted before destroyed lifecycle is classified. | `Code.ts` catch | exact one-shot/streaming cancellation test and compiled request-boundary smoke |
-| R38-INV-07 | Current daemon probe reaches global SSE and persists API Session Messages, but target API TUI is not attached in the observed process set. | `handlers/global.ts`, `sdk.tsx`, `event.ts`, `sync.tsx`, compiled harness | current probe localizes daemon-wide health but not TUI consumer divergence; no daemon/SSE production change is authorized |
+| Invariant     | First divergence                                                                                                                                                                | Owner                                                                     | Proof                                                                                                                     |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| R38-INV-01    | Both render-body exception and native `failed` exits retain a future invalidation without scheduling an automatic retry; public `requestRender()` is the sole next-frame owner. | `CliRenderer.loop()` and public scheduler                                 | public request red probe plus native failure test                                                                         |
+| R38-INV-02/05 | Worker generic ERROR loses request correlation; client emits an event instead of rejecting the matching callback.                                                               | `parser.worker.ts` + `client.ts`                                          | pending until destroy                                                                                                     |
+| R38-INV-03    | Persistent edit/stream/reset handlers replace accepted Trees without deleting the previous owner.                                                                               | parser worker                                                             | repeated public lifecycle test and failed-candidate preservation                                                          |
+| R38-INV-04    | Client-side mutation and disposal can cross unless all buffer operations use one serialized lifecycle chain and the disposal ack remains correlated.                            | `client.ts` + `types.ts` + worker dispatch                                | delayed update/dispose response ordering test                                                                             |
+| R38-INV-06    | Code warning is emitted before destroyed lifecycle is classified.                                                                                                               | `Code.ts` catch                                                           | exact one-shot/streaming cancellation test and compiled request-boundary smoke                                            |
+| R38-INV-07    | Current daemon probe reaches global SSE and persists API Session Messages, but target API TUI is not attached in the observed process set.                                      | `handlers/global.ts`, `sdk.tsx`, `event.ts`, `sync.tsx`, compiled harness | current probe localizes daemon-wide health but not TUI consumer divergence; no daemon/SSE production change is authorized |
 
 ### 8. Feedback Signal
 
@@ -2177,14 +2177,14 @@ R38 has one shared scheduler gate and one compiled end-to-end gate. The schedule
 
 ### 9. Responsibility and Seam
 
-| Concern | Owner | Why this owner |
-| --- | --- | --- |
-| Exception-to-next-frame scheduling | `renderer.ts` | owns rendering flag, timers and existing status branches; Renderable cannot schedule the renderer. |
+| Concern                                | Owner                      | Why this owner                                                                                                                                                                |
+| -------------------------------------- | -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Exception-to-next-frame scheduling     | `renderer.ts`              | owns rendering flag, timers and existing status branches; Renderable cannot schedule the renderer.                                                                            |
 | Native/process-stdout scheduler status | compiled renderer boundary | native `failed` is an existing executable dead-state in the same `CliRenderer` owner; R38 retains the next invalidation owner without automatically re-entering the renderer. |
-| Correlated worker error | `parser.worker.ts` | the existing response type already permits an optional messageId; the worker knows the inbound id. |
-| Callback settlement | `client.ts` | client owns callback map and Promise completion. |
-| Persistent Tree delete | `parser.worker.ts` | worker creates/replaces WASM Trees. |
-| Destroy warning classification | `Code.ts` | Code owns renderable lifecycle and user-visible fallback diagnostics. |
+| Correlated worker error                | `parser.worker.ts`         | the existing response type already permits an optional messageId; the worker knows the inbound id.                                                                            |
+| Callback settlement                    | `client.ts`                | client owns callback map and Promise completion.                                                                                                                              |
+| Persistent Tree delete                 | `parser.worker.ts`         | worker creates/replaces WASM Trees.                                                                                                                                           |
+| Destroy warning classification         | `Code.ts`                  | Code owns renderable lifecycle and user-visible fallback diagnostics.                                                                                                         |
 
 ### 10. Single Approved Primary-Path Design
 
@@ -2211,109 +2211,109 @@ The worker preserves inbound ids in terminal error responses and returns a corre
 
 ### 11. Secondary and Replacement Path Inventory
 
-| Path | Classification | Produces success? | Disposition |
-| --- | --- | --- | --- |
-| normal renderer/native status | primary-contract branch | yes | preserve |
-| render-body exception diagnostic | primary error branch | no | repair at scheduler owner |
-| correlated Tree-sitter success | primary-contract branch | yes | preserve/repair protocol |
-| correlated worker error -> existing Code plain text | existing shipped compatibility | yes under existing contract | preserve, not add |
-| uncorrelated worker diagnostic | diagnostic path | no | preserve for event-only operations |
-| custom stdout feed | existing compatibility | yes | test only unless compiled reachability proves it |
-| daemon/SSE reconnect | existing transport | yes | zero-diff without first divergence |
-| timeout/retry/second parser/raw emergency/renderer restart | forbidden fallback | yes | reject |
+| Path                                                       | Classification                 | Produces success?           | Disposition                                      |
+| ---------------------------------------------------------- | ------------------------------ | --------------------------- | ------------------------------------------------ |
+| normal renderer/native status                              | primary-contract branch        | yes                         | preserve                                         |
+| render-body exception diagnostic                           | primary error branch           | no                          | repair at scheduler owner                        |
+| correlated Tree-sitter success                             | primary-contract branch        | yes                         | preserve/repair protocol                         |
+| correlated worker error -> existing Code plain text        | existing shipped compatibility | yes under existing contract | preserve, not add                                |
+| uncorrelated worker diagnostic                             | diagnostic path                | no                          | preserve for event-only operations               |
+| custom stdout feed                                         | existing compatibility         | yes                         | test only unless compiled reachability proves it |
+| daemon/SSE reconnect                                       | existing transport             | yes                         | zero-diff without first divergence               |
+| timeout/retry/second parser/raw emergency/renderer restart | forbidden fallback             | yes                         | reject                                           |
 
 New alternate-success-path budget: zero.
 
 ### 12. Workaround Deletion
 
-| Workaround | R38 action |
-| --- | --- |
-| generic ERROR without request id | replace only for messageId requests; retain event-only diagnostics |
-| destroy-time rejection as first worker completion | retain only for actual client destruction |
-| warning before destroyed guard | classify lifecycle before warning |
-| permanent unstyled rendering | reject; retain `drawUnstyledText=false` |
-| mutation/dispose overlap | replace independent completion paths with one per-buffer ordered chain and a correlated disposal ack |
+| Workaround                                        | R38 action                                                                                           |
+| ------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| generic ERROR without request id                  | replace only for messageId requests; retain event-only diagnostics                                   |
+| destroy-time rejection as first worker completion | retain only for actual client destruction                                                            |
+| warning before destroyed guard                    | classify lifecycle before warning                                                                    |
+| permanent unstyled rendering                      | reject; retain `drawUnstyledText=false`                                                              |
+| mutation/dispose overlap                          | replace independent completion paths with one per-buffer ordered chain and a correlated disposal ack |
 
 ### 13. Forward Traceability
 
-| Requirement / invariant | Production path | Planned file/change | Behavioral evidence |
-| --- | --- | --- | --- |
-| no live scheduler dead state | render body exception -> loop owner | `renderer.ts` | throwing Renderable probe |
-| no blank body from worker exception | worker catch -> callback reject -> Code contract | `parser.worker.ts`, `client.ts`, `Code.ts` | forced-error public request and visible source |
-| no persistent Tree leak | accepted replacement -> delete old owner | `parser.worker.ts` | fixed-size repeated updates |
-| no Ctrl+C warning flood | destroy -> reject -> Code guard | `client.ts`, `Code.ts` | one-shot/streaming destroy |
-| native/daemon distinction | SSE/input/frame/native trace | no daemon/SSE production change in R38; record target-session separation as a verification boundary | bounded compiled target-Session workload |
+| Requirement / invariant             | Production path                                  | Planned file/change                                                                                 | Behavioral evidence                            |
+| ----------------------------------- | ------------------------------------------------ | --------------------------------------------------------------------------------------------------- | ---------------------------------------------- |
+| no live scheduler dead state        | render body exception -> loop owner              | `renderer.ts`                                                                                       | throwing Renderable probe                      |
+| no blank body from worker exception | worker catch -> callback reject -> Code contract | `parser.worker.ts`, `client.ts`, `Code.ts`                                                          | forced-error public request and visible source |
+| no persistent Tree leak             | accepted replacement -> delete old owner         | `parser.worker.ts`                                                                                  | fixed-size repeated updates                    |
+| no Ctrl+C warning flood             | destroy -> reject -> Code guard                  | `client.ts`, `Code.ts`                                                                              | one-shot/streaming destroy                     |
+| native/daemon distinction           | SSE/input/frame/native trace                     | no daemon/SSE production change in R38; record target-session separation as a verification boundary | bounded compiled target-Session workload       |
 
 ### 14. Reverse Traceability
 
-| Proposed concept | Requirement ID | Evidence | Why reuse is insufficient |
-| --- | --- | --- | --- |
-| exception/native failed frame scheduling | R38-INV-01 | public request/activate scheduler probe and compiled smoke | automatic retry must be removed while the invalidation owner remains consumable |
-| correlated ERROR/WARNING response | R38-INV-02/05 | pending callback | event-only branch cannot settle a Promise |
-| correlated disposal response | R38-INV-02/03/04 | worker Tree ownership must be observable | client cannot prove worker release or ordering without response id |
-| per-buffer mutation/dispose chain | R38-INV-04 | delayed worker-response ordering test | separate tails can let disposal cross an in-flight mutation |
-| accepted Tree replacement deletion | R38-INV-03 | repeated edit/stream/reset lifecycle and failed-candidate test | current assignment loses old owner |
-| destroyed guard before warning | R38-INV-06 | warning flood | current Code catch logs too early |
+| Proposed concept                         | Requirement ID   | Evidence                                                       | Why reuse is insufficient                                                       |
+| ---------------------------------------- | ---------------- | -------------------------------------------------------------- | ------------------------------------------------------------------------------- |
+| exception/native failed frame scheduling | R38-INV-01       | public request/activate scheduler probe and compiled smoke     | automatic retry must be removed while the invalidation owner remains consumable |
+| correlated ERROR/WARNING response        | R38-INV-02/05    | pending callback                                               | event-only branch cannot settle a Promise                                       |
+| correlated disposal response             | R38-INV-02/03/04 | worker Tree ownership must be observable                       | client cannot prove worker release or ordering without response id              |
+| per-buffer mutation/dispose chain        | R38-INV-04       | delayed worker-response ordering test                          | separate tails can let disposal cross an in-flight mutation                     |
+| accepted Tree replacement deletion       | R38-INV-03       | repeated edit/stream/reset lifecycle and failed-candidate test | current assignment loses old owner                                              |
+| destroyed guard before warning           | R38-INV-06       | warning flood                                                  | current Code catch logs too early                                               |
 
 ### 15. File-Level Change Plan
 
 R38 plans the same five production files, two existing regression files and the existing compiled smoke harness. No new benchmark, generated artifact, config or native file is part of the implementation diff.
 
-| File | Responsibility | Effective production delta |
-| --- | --- | ---: |
-| `thirdparty/opentui/packages/core/src/renderer.ts` | common `CliRenderer.loop()` future-frame ownership for render-body exception and native `failed` status | <=110 |
-| `thirdparty/opentui/packages/core/src/lib/tree-sitter/client.ts` | correlated callback rejection and acknowledged disposal | <=150 |
-| `thirdparty/opentui/packages/core/src/lib/tree-sitter/parser.worker.ts` | correlated catch response and accepted Tree candidate/replacement ownership for edit/stream/reset | <=220 |
-| `thirdparty/opentui/packages/core/src/lib/tree-sitter/types.ts` | explicit correlated mutation/disposal wire contract | <=20 |
-| `thirdparty/opentui/packages/core/src/renderables/Code.ts` | destroyed-before-warning classification | <=25 |
-| `thirdparty/opentui/packages/core/src/lib/tree-sitter/client.test.ts` | real worker request/error/disposal/Tree/Code regression | test only |
-| `thirdparty/opentui/packages/core/src/tests/renderer.custom-stdout.test.ts` | renderer exception/native status seam and existing feed regression | test only |
-| `packages/opencode/script/smoke-opentui-artifact.ts` | add `--scenario target-liveness`; in that scenario subscribe to the daemon global event stream after Session creation, correlate events by Session/project/directory, submit the sentinel fixture prompt, assert Thinking/body and `Ctrl+P`/Escape command-palette frames, then count shutdown warnings from the isolated log | test/harness only |
+| File                                                                        | Responsibility                                                                                                                                                                                                                                                                                                                | Effective production delta |
+| --------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------: |
+| `thirdparty/opentui/packages/core/src/renderer.ts`                          | common `CliRenderer.loop()` future-frame ownership for render-body exception and native `failed` status                                                                                                                                                                                                                       |                      <=110 |
+| `thirdparty/opentui/packages/core/src/lib/tree-sitter/client.ts`            | correlated callback rejection and acknowledged disposal                                                                                                                                                                                                                                                                       |                      <=150 |
+| `thirdparty/opentui/packages/core/src/lib/tree-sitter/parser.worker.ts`     | correlated catch response and accepted Tree candidate/replacement ownership for edit/stream/reset                                                                                                                                                                                                                             |                      <=220 |
+| `thirdparty/opentui/packages/core/src/lib/tree-sitter/types.ts`             | explicit correlated mutation/disposal wire contract                                                                                                                                                                                                                                                                           |                       <=20 |
+| `thirdparty/opentui/packages/core/src/renderables/Code.ts`                  | destroyed-before-warning classification                                                                                                                                                                                                                                                                                       |                       <=25 |
+| `thirdparty/opentui/packages/core/src/lib/tree-sitter/client.test.ts`       | real worker request/error/disposal/Tree/Code regression                                                                                                                                                                                                                                                                       |                  test only |
+| `thirdparty/opentui/packages/core/src/tests/renderer.custom-stdout.test.ts` | renderer exception/native status seam and existing feed regression                                                                                                                                                                                                                                                            |                  test only |
+| `packages/opencode/script/smoke-opentui-artifact.ts`                        | add `--scenario target-liveness`; in that scenario subscribe to the daemon global event stream after Session creation, correlate events by Session/project/directory, submit the sentinel fixture prompt, assert Thinking/body and `Ctrl+P`/Escape command-palette frames, then count shutdown warnings from the isolated log |          test/harness only |
 
 Planned production effective ceiling is 525 lines, below the user hard limit of 800 and the earlier stricter 600-line request. The total code-file set is eight, exactly at the user's absolute cap. If the approved implementation exceeds 525 effective lines or needs `event.ts`/`sync.tsx` changes, stop and create a new revision instead of broadening the diff.
 
 ### 16. TDD Behavior Slices
 
-| Order | Red behavior | Current failure | Minimal green behavior |
-| ---: | --- | --- | --- |
-| 1 | Throwing render body or native `failed` status leaves live renderer without scheduled next frame. | both exits clear the future owner from separate branches. | the common scheduler owner preserves the existing continuous-frame contract without a second renderer or success-shaped fallback. |
-| 2 | Forced worker error leaves streaming request pending until destroy. | generic ERROR only emits event. | same id rejects callback once and existing Code error contract makes source visible. |
-| 3 | Fixed-length edit/stream/reset updates retain replaced Tree memory. | old Tree is overwritten without delete. | accepted replacement deletes exactly previous owner; failed candidate preserves accepted owner. |
-| 4 | Dispose after an in-flight mutation can cross the mutation, remove the mirror early, or remain pending. | response correlation and per-buffer ordering are incomplete. | one queue sends disposal after predecessor settlement and removes the mirror only after correlated ack/rejection. |
-| 5 | Ctrl+C during one-shot/streaming highlight prints zero expected warnings. | warning precedes destroyed classification. | destroyed rejection returns silently; live failure remains diagnostic. |
-| 6 | Compiled target Session independently shows daemon SSE receipt, project identity, input acknowledgement, visible body, command-panel transition and shutdown warnings. | current smoke proves normal rendering but does not record the original target-Session observables. | the same bounded harness records the first missing observable, sends `Ctrl+P`/escape through PTY, and fails fast on a hang. |
+| Order | Red behavior                                                                                                                                                           | Current failure                                                                                    | Minimal green behavior                                                                                                            |
+| ----: | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+|     1 | Throwing render body or native `failed` status leaves live renderer without scheduled next frame.                                                                      | both exits clear the future owner from separate branches.                                          | the common scheduler owner preserves the existing continuous-frame contract without a second renderer or success-shaped fallback. |
+|     2 | Forced worker error leaves streaming request pending until destroy.                                                                                                    | generic ERROR only emits event.                                                                    | same id rejects callback once and existing Code error contract makes source visible.                                              |
+|     3 | Fixed-length edit/stream/reset updates retain replaced Tree memory.                                                                                                    | old Tree is overwritten without delete.                                                            | accepted replacement deletes exactly previous owner; failed candidate preserves accepted owner.                                   |
+|     4 | Dispose after an in-flight mutation can cross the mutation, remove the mirror early, or remain pending.                                                                | response correlation and per-buffer ordering are incomplete.                                       | one queue sends disposal after predecessor settlement and removes the mirror only after correlated ack/rejection.                 |
+|     5 | Ctrl+C during one-shot/streaming highlight prints zero expected warnings.                                                                                              | warning precedes destroyed classification.                                                         | destroyed rejection returns silently; live failure remains diagnostic.                                                            |
+|     6 | Compiled target Session independently shows daemon SSE receipt, project identity, input acknowledgement, visible body, command-panel transition and shutdown warnings. | current smoke proves normal rendering but does not record the original target-Session observables. | the same bounded harness records the first missing observable, sends `Ctrl+P`/escape through PTY, and fails fast on a hang.       |
 
 Tests must use real worker/renderer seams and published readiness; no fixed sleep as completion proof, private-method test or source-text assertion.
 
 ### 17. Chinese Comment Budget
 
-| Metric | Estimate | Rule |
-| --- | ---: | --- |
-| Effective changed production lines `E` | <=525 | exclude imports, formatting, generated, pure moves and comment-only lines |
-| Qualifying comments `C` | per-file | each changed production file independently satisfies `C_i >= max(1, ceil(E_i*0.15))`; `E_i=0` requires `C_i=0` |
+| Metric                                 | Estimate | Rule                                                                                                           |
+| -------------------------------------- | -------: | -------------------------------------------------------------------------------------------------------------- |
+| Effective changed production lines `E` |    <=525 | exclude imports, formatting, generated, pure moves and comment-only lines                                      |
+| Qualifying comments `C`                | per-file | each changed production file independently satisfies `C_i >= max(1, ceil(E_i*0.15))`; `E_i=0` requires `C_i=0` |
 
-| Production file | `E_i` ceiling | Required `C_i` minimum |
-| --- | ---: | ---: |
-| `renderer.ts` | 110 | 17 |
-| `client.ts` | 150 | 23 |
-| `parser.worker.ts` | 220 | 33 |
-| `types.ts` | 20 | 3 |
-| `Code.ts` | 25 | 4 |
-| Total | 525 | 80 across files, not concentrated |
+| Production file    | `E_i` ceiling |            Required `C_i` minimum |
+| ------------------ | ------------: | --------------------------------: |
+| `renderer.ts`      |           110 |                                17 |
+| `client.ts`        |           150 |                                23 |
+| `parser.worker.ts` |           220 |                                33 |
+| `types.ts`         |            20 |                                 3 |
+| `Code.ts`          |            25 |                                 4 |
+| Total              |           525 | 80 across files, not concentrated |
 
 Comments must explain the scheduler ownership invariant, messageId response contract, accepted Tree deletion boundary, disposal acknowledgement or destroyed-cancellation compatibility. Assignment restatements, identifier translations, obvious control flow and test names do not count.
 
 ### 18. Verification
 
-| Command | Working directory | Evidence |
-| --- | --- | --- |
-| `bun test ./src/tests/renderer.custom-stdout.test.ts` | `thirdparty/opentui/packages/core` | scheduler/feed regression |
-| `bun test ./src/lib/tree-sitter/client.test.ts` | `thirdparty/opentui/packages/core` | worker correlation/disposal/Tree lifecycle |
-| `bun typecheck` | `thirdparty/opentui/packages/core` | no new diagnostics in changed files; baseline separated |
-| `git diff --check` | repository root | whitespace integrity |
-| `bun run script/smoke-opentui-artifact.ts --binary "F:\\include\\CLI\\opencode.exe"` | `packages/opencode` | current isolated baseline: daemon/Session/Goal, two model requests, initial/resize/restore frames, busy spinner and cleanup all passed |
-| exact PowerShell supervisor below with `--scenario target-liveness` | `packages/opencode` | original prompt/body/command-panel/SSE/native/shutdown behavior under a 120-second process-tree deadline |
-| original normal/error/Ctrl+C workload under same supervisor | compiled boundary | user-visible recovery and zero expected shutdown warning flood |
+| Command                                                                              | Working directory                  | Evidence                                                                                                                               |
+| ------------------------------------------------------------------------------------ | ---------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `bun test ./src/tests/renderer.custom-stdout.test.ts`                                | `thirdparty/opentui/packages/core` | scheduler/feed regression                                                                                                              |
+| `bun test ./src/lib/tree-sitter/client.test.ts`                                      | `thirdparty/opentui/packages/core` | worker correlation/disposal/Tree lifecycle                                                                                             |
+| `bun typecheck`                                                                      | `thirdparty/opentui/packages/core` | no new diagnostics in changed files; baseline separated                                                                                |
+| `git diff --check`                                                                   | repository root                    | whitespace integrity                                                                                                                   |
+| `bun run script/smoke-opentui-artifact.ts --binary "F:\\include\\CLI\\opencode.exe"` | `packages/opencode`                | current isolated baseline: daemon/Session/Goal, two model requests, initial/resize/restore frames, busy spinner and cleanup all passed |
+| exact PowerShell supervisor below with `--scenario target-liveness`                  | `packages/opencode`                | original prompt/body/command-panel/SSE/native/shutdown behavior under a 120-second process-tree deadline                               |
+| original normal/error/Ctrl+C workload under same supervisor                          | compiled boundary                  | user-visible recovery and zero expected shutdown warning flood                                                                         |
 
 Full package/client tests must never run without an external process-tree timeout; a hang is a failed verification result.
 
@@ -2360,14 +2360,14 @@ The smoke harness must keep the existing isolated root and public HTTP/PTY seams
 
 ### 19. Diff Budget
 
-| Metric | Hard budget |
-| --- | ---: |
-| Production files | <=5 planned; absolute user cap <=8 |
-| Total code files | <=8 planned; absolute user cap <=8 |
-| Production effective lines | <=525 planned; absolute user cap <=800 |
-| New alternate success paths | 0 |
-| Native/Zig files | 0 in R38 |
-| Generated/config/migration files | 0 |
+| Metric                           |                            Hard budget |
+| -------------------------------- | -------------------------------------: |
+| Production files                 |     <=5 planned; absolute user cap <=8 |
+| Total code files                 |     <=8 planned; absolute user cap <=8 |
+| Production effective lines       | <=525 planned; absolute user cap <=800 |
+| New alternate success paths      |                                      0 |
+| Native/Zig files                 |                               0 in R38 |
+| Generated/config/migration files |                                      0 |
 
 The budget cannot justify omitting a confirmed invariant. If the route cannot fit, revise and re-audit.
 
@@ -2397,14 +2397,14 @@ The independent auditor must read this exact R37 authority, the original require
 
 ### 22. Plan Audit Record
 
-| Round | Revision | Full scope? | Blocking findings | Result | Invocation |
-| --- | --- | --- | --- | --- | --- |
-| 1 | R32 | yes | B-01 stale normative/archive conflict; B-02 compiled renderer owner not proven; B-03 per-file E/C not recalculable | BLOCK | `ses_0231310a8ffeVWRnp3RZlfYAbA` |
-| 2 | R33 | yes | B-01 compiled Windows default process-stdout/native first divergence and original blank-body path not proven; B-02 existing smoke cannot execute target-Session body/command/SSE/Ctrl+C/shutdown contract | BLOCK | `ses_022f29cf8ffep0W21WlCf2OELx` |
-| 3 | R34 | yes | B-01 compiled first divergence remained unresolved; B-02 `types.ts` wire contract omitted; B-03 mutation/dispose in-flight ordering and owner boundary incomplete | BLOCK | `ses_022c1f3d1ffeUysSqPedCVxAFd` |
-| 4 | R35 | yes | B-01 original compiled abnormal first divergence not proven; B-02 reachable native `failed` dead-state excluded; B-03 compiled target contract remained non-executable | BLOCK | `ses_022c1f3d1ffeUysSqPedCVxAFd` |
-| 5 | R36 | yes | B-01 compiled target contract had no exact process-tree-supervised command and planned sentinel assertions were not yet present in the existing harness | BLOCK | `ses_022c1f3d1ffeUysSqPedCVxAFd` |
-| 6 | R37 | yes | none | APPROVE | `ses_022c1f3d1ffeUysSqPedCVxAFd` |
+| Round | Revision | Full scope? | Blocking findings                                                                                                                                                                                         | Result  | Invocation                       |
+| ----- | -------- | ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- | -------------------------------- |
+| 1     | R32      | yes         | B-01 stale normative/archive conflict; B-02 compiled renderer owner not proven; B-03 per-file E/C not recalculable                                                                                        | BLOCK   | `ses_0231310a8ffeVWRnp3RZlfYAbA` |
+| 2     | R33      | yes         | B-01 compiled Windows default process-stdout/native first divergence and original blank-body path not proven; B-02 existing smoke cannot execute target-Session body/command/SSE/Ctrl+C/shutdown contract | BLOCK   | `ses_022f29cf8ffep0W21WlCf2OELx` |
+| 3     | R34      | yes         | B-01 compiled first divergence remained unresolved; B-02 `types.ts` wire contract omitted; B-03 mutation/dispose in-flight ordering and owner boundary incomplete                                         | BLOCK   | `ses_022c1f3d1ffeUysSqPedCVxAFd` |
+| 4     | R35      | yes         | B-01 original compiled abnormal first divergence not proven; B-02 reachable native `failed` dead-state excluded; B-03 compiled target contract remained non-executable                                    | BLOCK   | `ses_022c1f3d1ffeUysSqPedCVxAFd` |
+| 5     | R36      | yes         | B-01 compiled target contract had no exact process-tree-supervised command and planned sentinel assertions were not yet present in the existing harness                                                   | BLOCK   | `ses_022c1f3d1ffeUysSqPedCVxAFd` |
+| 6     | R37      | yes         | none                                                                                                                                                                                                      | APPROVE | `ses_022c1f3d1ffeUysSqPedCVxAFd` |
 
 R37 received `No blocking findings` and `APPROVE`; implementation is authorized only for this exact revision.
 
@@ -2414,30 +2414,30 @@ This section preserves the evidence audited in R37. It is not implementation aut
 
 #### Actual changed files and raw delta
 
-| File | Raw additions / deletions | Purpose |
-| --- | ---: | --- |
-| `thirdparty/opentui/packages/core/src/renderer.ts` | `10 / 1` | Retain the existing future-frame owner after render-body exception or native `failed`. |
-| `thirdparty/opentui/packages/core/src/lib/tree-sitter/client.ts` | `201 / 180` | Correlated callback settlement, one per-buffer operation tail and acknowledged disposal. |
-| `thirdparty/opentui/packages/core/src/lib/tree-sitter/parser.worker.ts` | `240 / 163` | Correlated worker errors and candidate/accepted Tree ownership; changed blocks formatter-conformant. |
-| `thirdparty/opentui/packages/core/src/lib/tree-sitter/types.ts` | `16 / 7` | MessageId-bearing mutation, warning/error and disposal wire contract. |
-| `thirdparty/opentui/packages/core/src/renderables/Code.ts` | `4 / 2` | Classify one-shot and streaming destroyed cancellation before warning. |
-| `thirdparty/opentui/packages/core/src/lib/tree-sitter/client.test.ts` | `210 / 0` | Worker error, mutation/disposal ordering and Code lifecycle regressions. |
-| `thirdparty/opentui/packages/core/src/tests/renderer.custom-stdout.test.ts` | `55 / 20` | Render exception and native failure future-frame regressions. |
-| `packages/opencode/script/smoke-opentui-artifact.ts` | `247 / 6` | Bounded target-Session compiled feedback loop, part-key correlation and in-flight Ctrl+C. |
+| File                                                                        | Raw additions / deletions | Purpose                                                                                              |
+| --------------------------------------------------------------------------- | ------------------------: | ---------------------------------------------------------------------------------------------------- |
+| `thirdparty/opentui/packages/core/src/renderer.ts`                          |                  `10 / 1` | Retain the existing future-frame owner after render-body exception or native `failed`.               |
+| `thirdparty/opentui/packages/core/src/lib/tree-sitter/client.ts`            |               `201 / 180` | Correlated callback settlement, one per-buffer operation tail and acknowledged disposal.             |
+| `thirdparty/opentui/packages/core/src/lib/tree-sitter/parser.worker.ts`     |               `240 / 163` | Correlated worker errors and candidate/accepted Tree ownership; changed blocks formatter-conformant. |
+| `thirdparty/opentui/packages/core/src/lib/tree-sitter/types.ts`             |                  `16 / 7` | MessageId-bearing mutation, warning/error and disposal wire contract.                                |
+| `thirdparty/opentui/packages/core/src/renderables/Code.ts`                  |                   `4 / 2` | Classify one-shot and streaming destroyed cancellation before warning.                               |
+| `thirdparty/opentui/packages/core/src/lib/tree-sitter/client.test.ts`       |                 `210 / 0` | Worker error, mutation/disposal ordering and Code lifecycle regressions.                             |
+| `thirdparty/opentui/packages/core/src/tests/renderer.custom-stdout.test.ts` |                 `55 / 20` | Render exception and native failure future-frame regressions.                                        |
+| `packages/opencode/script/smoke-opentui-artifact.ts`                        |                 `247 / 6` | Bounded target-Session compiled feedback loop, part-key correlation and in-flight Ctrl+C.            |
 
 No daemon/SSE/SyncProvider production file, native/Zig file, generated artifact, configuration, timeout-success, retry, second parser or renderer restart was added.
 
 #### Red-green evidence
 
-| Slice | Red evidence | Green result |
-| --- | --- | --- |
-| renderer future-frame owner | render-body exception and native `failed` probes left a live renderer without a scheduled next frame | `46 pass / 0 fail / 129 expect()` |
-| worker error correlation | forced worker failure remained pending until destroy | `53 pass / 0 fail / 388 expect()` |
-| persistent Tree replacement | accepted edit/stream/reset replacement lost the previous WASM owner | covered by the same client lifecycle suite; no pending or ownership regression |
-| mutation/dispose ordering | disposal could cross an in-flight mutation and remove the mirror early | covered by delayed-response ordering tests; no pending or mirror-order regression |
-| Code destruction warning | warning was emitted before destroyed classification | `72 pass / 1 skip / 0 fail / 2 snapshots` |
-| compiled target Session | existing smoke did not separately prove SSE, persisted body, Thinking/body cells and Commands restoration | target-liveness smoke completed with `sourceCount=2`, `renderedCount=2`, `modelRequests=2`, `targetEventCount=14`; the second prompt remained in-flight before Ctrl+C |
-| compiled normal workload | latest harness changes must not regress bootstrap, Session, resize or busy rendering | normal smoke completed with `sourceCount=2`, `renderedCount=2`, `modelRequests=3`, `targetEventCount=0` |
+| Slice                       | Red evidence                                                                                              | Green result                                                                                                                                                          |
+| --------------------------- | --------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| renderer future-frame owner | render-body exception and native `failed` probes left a live renderer without a scheduled next frame      | `46 pass / 0 fail / 129 expect()`                                                                                                                                     |
+| worker error correlation    | forced worker failure remained pending until destroy                                                      | `53 pass / 0 fail / 388 expect()`                                                                                                                                     |
+| persistent Tree replacement | accepted edit/stream/reset replacement lost the previous WASM owner                                       | covered by the same client lifecycle suite; no pending or ownership regression                                                                                        |
+| mutation/dispose ordering   | disposal could cross an in-flight mutation and remove the mirror early                                    | covered by delayed-response ordering tests; no pending or mirror-order regression                                                                                     |
+| Code destruction warning    | warning was emitted before destroyed classification                                                       | `72 pass / 1 skip / 0 fail / 2 snapshots`                                                                                                                             |
+| compiled target Session     | existing smoke did not separately prove SSE, persisted body, Thinking/body cells and Commands restoration | target-liveness smoke completed with `sourceCount=2`, `renderedCount=2`, `modelRequests=2`, `targetEventCount=14`; the second prompt remained in-flight before Ctrl+C |
+| compiled normal workload    | latest harness changes must not regress bootstrap, Session, resize or busy rendering                      | normal smoke completed with `sourceCount=2`, `renderedCount=2`, `modelRequests=3`, `targetEventCount=0`                                                               |
 
 #### Verification commands and results
 
@@ -2473,17 +2473,17 @@ The client suite was run under `Start-Process` plus recursive `taskkill` at the 
 
 The reproducible zero-context hunk recount excludes blank, import-only, comment-only and formatter-only lines and uses `max(substantive additions, substantive deletions)` per hunk:
 
-| Production file | `E_i` | qualifying `C_i` | required `ceil(E_i*0.15)` | verdict |
-| --- | ---: | ---: | ---: | --- |
-| `renderer.ts` | 8 | 2 | 2 | pass |
-| `client.ts` | 181 | 38 | 28 | pass |
-| `parser.worker.ts` | 88 | 27 | 14 | pass |
-| `types.ts` | 13 | 3 | 2 | pass |
-| `Code.ts` | 4 | 4 | 1 | pass |
-| `client.test.ts` | 161 | 25 | 25 | pass |
-| `renderer.custom-stdout.test.ts` | 46 | 8 | 7 | pass |
-| `smoke-opentui-artifact.ts` | 223 | 34 | 34 | pass |
-| **Total** | **724** | **141** | **113** | **pass; per-file gate is authoritative** |
+| Production file                  |   `E_i` | qualifying `C_i` | required `ceil(E_i*0.15)` | verdict                                  |
+| -------------------------------- | ------: | ---------------: | ------------------------: | ---------------------------------------- |
+| `renderer.ts`                    |       8 |                2 |                         2 | pass                                     |
+| `client.ts`                      |     181 |               38 |                        28 | pass                                     |
+| `parser.worker.ts`               |      88 |               27 |                        14 | pass                                     |
+| `types.ts`                       |      13 |                3 |                         2 | pass                                     |
+| `Code.ts`                        |       4 |                4 |                         1 | pass                                     |
+| `client.test.ts`                 |     161 |               25 |                        25 | pass                                     |
+| `renderer.custom-stdout.test.ts` |      46 |                8 |                         7 | pass                                     |
+| `smoke-opentui-artifact.ts`      |     223 |               34 |                        34 | pass                                     |
+| **Total**                        | **724** |          **141** |                   **113** | **pass; per-file gate is authoritative** |
 
 The largest `client.ts` count includes replacement of the old independent queue/debounce and disposal timer; those removed paths are the approved superseded workaround, not an additional semantic path. The parser count excludes formatter-only lines through the zero-context `--ignore-all-space` recount. Every added comment is adjacent to request correlation, operation-tail ordering, accepted Tree transfer, renderer scheduling, destroy classification or a regression assertion.
 
@@ -2491,13 +2491,13 @@ The largest `client.ts` count includes replacement of the old independent queue/
 
 The first independent implementation audit returned `BLOCK` with five actionable findings. The following changes are the bounded R37 rework, not a scope expansion:
 
-| Finding | Evidence from round 1 | R37 rework completed |
-| --- | --- | --- |
-| B-01 | One-shot Code cancellation could warn before checking `isDestroyed`. | The one-shot catch now classifies destroyed cancellation before warning; the Code regression covers one-shot and streaming held requests. |
-| B-02 | Smoke correlation was event-type based and could accept another part. | `hasPartTiming()` requires the same session, message, part and field identity in one receive/apply record. |
-| B-03 | Ctrl+C was not held against a live highlight response. | The target fixture emits the first delta of a second public `prompt_async` request, keeps the response in flight, then sends Ctrl+C. |
-| B-04 | The previous comment count did not satisfy the recalculated gate. | Comments were added only adjacent to the affected lifecycle, scheduler, harness and regression assertions; the current recount is `E=724`, `C=141`, with every file passing its floor. |
-| B-05 | Parser changed blocks were not formatter-conformant. | `bunx oxfmt --check src/lib/tree-sitter/parser.worker.ts` passes. |
+| Finding | Evidence from round 1                                                 | R37 rework completed                                                                                                                                                                   |
+| ------- | --------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| B-01    | One-shot Code cancellation could warn before checking `isDestroyed`.  | The one-shot catch now classifies destroyed cancellation before warning; the Code regression covers one-shot and streaming held requests.                                              |
+| B-02    | Smoke correlation was event-type based and could accept another part. | `hasPartTiming()` requires the same session, message, part and field identity in one receive/apply record.                                                                             |
+| B-03    | Ctrl+C was not held against a live highlight response.                | The target fixture emits the first delta of a second public `prompt_async` request, keeps the response in flight, then sends Ctrl+C.                                                   |
+| B-04    | The previous comment count did not satisfy the recalculated gate.     | Comments were added only adjacent to the affected lifecycle, scheduler, harness and regression assertions; the current recount is `E=724`, `C=141`, with every file passing its floor. |
+| B-05    | Parser changed blocks were not formatter-conformant.                  | `bunx oxfmt --check src/lib/tree-sitter/parser.worker.ts` passes.                                                                                                                      |
 
 #### Remaining unverifiable items
 
@@ -2505,9 +2505,9 @@ The compiled harness uses an isolated fixture Session and cannot prove the exact
 
 ### 24. R37 Implementation Audit Record (Superseded by R38)
 
-| Round | Revision | Full original scope? | Blocking findings | Result | Invocation |
-| --- | --- | --- | --- | --- | --- |
-| 1 | R37 | yes | B-01 one-shot cancellation warning; B-02 target-part correlation; B-03 missing in-flight Ctrl+C; B-04 comment gate; B-05 parser formatting | BLOCK | `ses_022118a47ffegn80bogGe10Rz8` |
+| Round | Revision | Full original scope? | Blocking findings                                                                                                                          | Result | Invocation                       |
+| ----- | -------- | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ | ------ | -------------------------------- |
+| 1     | R37      | yes                  | B-01 one-shot cancellation warning; B-02 target-part correlation; B-03 missing in-flight Ctrl+C; B-04 comment gate; B-05 parser formatting | BLOCK  | `ses_022118a47ffegn80bogGe10Rz8` |
 
 ## R38 Revision Delta
 
@@ -2515,13 +2515,13 @@ R38 accepts all six blocking findings from the full-scope R37 implementation aud
 
 ### R38 First Divergences and Owners
 
-| Finding | First divergence | Owner | R38 correction |
-| --- | --- | --- | --- |
-| B-01/B-02 | The failed frame sets `immediateRerenderRequested`, then `loop()` calls `requestRender()` from its own `finally`; in one-shot mode this is both an automatic retry and races `activateFrame()` clearing `updateScheduled`. | `CliRenderer.loop()` and public `requestRender()`/`activateFrame()` scheduler boundary | Keep the pending invalidation flag after failure, remove the failure-frame call to `requestRender()`, and let only the next public invalidation enter `activateFrame()`. |
-| B-03 | The compiled fixture held a provider response, not a Tree-sitter callback. | Code/Tree-sitter cancellation verification boundary | Move the exact in-flight predicate to a package regression using a real `TreeSitterClient` worker and real `CodeRenderable`; hold the actual messageId-bearing worker request, destroy Code/client, and assert zero warning. The compiled target smoke remains the public shutdown/output integration gate and no longer claims internal pending-state observability. |
-| B-04 | Tree replacement was source-inspected but repeated edit/stream/reset and failed-request recovery were not exercised through public client operations. | `ParserWorker` accepted state observed through `TreeSitterClient` | Add a bounded repeated lifecycle regression covering accepted edit, streaming and reset operations, then a correlated failed mutation followed by a successful operation that proves the last accepted state remained usable. Deletion count itself is not exposed across the worker isolate; the existing fixed-length RSS reproduction remains the explicit leak oracle. |
-| B-05 | Changed `client.ts` is not formatter-conformant. | package formatter gate | Format only `client.ts`; the pre-existing `Code.ts` formatter difference is not widened. |
-| B-06 | Raw Chinese comment candidates included obvious or duplicated comments. | each changed file | Remove non-qualifying duplicates, recount per file after semantic edits, and add only nearby invariant/test-boundary explanations or reduce the changed surface until every file independently meets its floor. |
+| Finding   | First divergence                                                                                                                                                                                                           | Owner                                                                                  | R38 correction                                                                                                                                                                                                                                                                                                                                                             |
+| --------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| B-01/B-02 | The failed frame sets `immediateRerenderRequested`, then `loop()` calls `requestRender()` from its own `finally`; in one-shot mode this is both an automatic retry and races `activateFrame()` clearing `updateScheduled`. | `CliRenderer.loop()` and public `requestRender()`/`activateFrame()` scheduler boundary | Keep the pending invalidation flag after failure, remove the failure-frame call to `requestRender()`, and let only the next public invalidation enter `activateFrame()`.                                                                                                                                                                                                   |
+| B-03      | The compiled fixture held a provider response, not a Tree-sitter callback.                                                                                                                                                 | Code/Tree-sitter cancellation verification boundary                                    | Move the exact in-flight predicate to a package regression using a real `TreeSitterClient` worker and real `CodeRenderable`; hold the actual messageId-bearing worker request, destroy Code/client, and assert zero warning. The compiled target smoke remains the public shutdown/output integration gate and no longer claims internal pending-state observability.      |
+| B-04      | Tree replacement was source-inspected but repeated edit/stream/reset and failed-request recovery were not exercised through public client operations.                                                                      | `ParserWorker` accepted state observed through `TreeSitterClient`                      | Add a bounded repeated lifecycle regression covering accepted edit, streaming and reset operations, then a correlated failed mutation followed by a successful operation that proves the last accepted state remained usable. Deletion count itself is not exposed across the worker isolate; the existing fixed-length RSS reproduction remains the explicit leak oracle. |
+| B-05      | Changed `client.ts` is not formatter-conformant.                                                                                                                                                                           | package formatter gate                                                                 | Format only `client.ts`; the pre-existing `Code.ts` formatter difference is not widened.                                                                                                                                                                                                                                                                                   |
+| B-06      | Raw Chinese comment candidates included obvious or duplicated comments.                                                                                                                                                    | each changed file                                                                      | Remove non-qualifying duplicates, recount per file after semantic edits, and add only nearby invariant/test-boundary explanations or reduce the changed surface until every file independently meets its floor.                                                                                                                                                            |
 
 ### R38 Single Primary Path
 
@@ -2544,12 +2544,12 @@ This design contains no retry, timeout-success, renderer restart, second parser,
 
 ### R38 TDD Slices
 
-| Slice | Public seam | Red expectation before correction | Green contract |
-| --- | --- | --- | --- |
-| renderer failure retention | `CliRenderer.requestRender()` plus manual public clock | native `failed` or `root.render()` failure automatically re-enters the loop or loses the owner when `activateFrame()` clears `updateScheduled` | no second call occurs without a new public request; the next request commits a frame |
-| actual cancellation boundary | real `CodeRenderable` plus real `TreeSitterClient` worker transport | destroying with a held messageId request can print `highlight failed` | one-shot and streaming requests reject silently after destroy |
-| persistent lifecycle | public `createBuffer`/`updateBuffer`/`resetBuffer`/`updateStreamingBuffer`/remove methods | repeated replacement or failed mutation can poison the accepted state or leave disposal incomplete | repeated accepted operations remain correct; failure preserves the prior state; acked disposal removes the mirror |
-| compiled integration | existing normal and target-liveness scenarios | TUI body/dialog/shutdown can regress independently of package tests | both bounded scenarios pass; target correlation remains session/message/part/field exact and shutdown warning count is zero |
+| Slice                        | Public seam                                                                               | Red expectation before correction                                                                                                              | Green contract                                                                                                              |
+| ---------------------------- | ----------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| renderer failure retention   | `CliRenderer.requestRender()` plus manual public clock                                    | native `failed` or `root.render()` failure automatically re-enters the loop or loses the owner when `activateFrame()` clears `updateScheduled` | no second call occurs without a new public request; the next request commits a frame                                        |
+| actual cancellation boundary | real `CodeRenderable` plus real `TreeSitterClient` worker transport                       | destroying with a held messageId request can print `highlight failed`                                                                          | one-shot and streaming requests reject silently after destroy                                                               |
+| persistent lifecycle         | public `createBuffer`/`updateBuffer`/`resetBuffer`/`updateStreamingBuffer`/remove methods | repeated replacement or failed mutation can poison the accepted state or leave disposal incomplete                                             | repeated accepted operations remain correct; failure preserves the prior state; acked disposal removes the mirror           |
+| compiled integration         | existing normal and target-liveness scenarios                                             | TUI body/dialog/shutdown can regress independently of package tests                                                                            | both bounded scenarios pass; target correlation remains session/message/part/field exact and shutdown warning count is zero |
 
 ### R38 File and Diff Boundary
 
@@ -2571,9 +2571,9 @@ Run both compiled scenarios from `packages/opencode` under the external 120-seco
 
 ### R38 Audit Record
 
-| Round | Revision | Full original scope? | Blocking findings | Result | Invocation |
-| --- | --- | --- | --- | --- | --- |
-| 1 | R38 | yes | pending independent full-scope plan audit | not started | - |
+| Round | Revision | Full original scope? | Blocking findings                         | Result      | Invocation |
+| ----- | -------- | -------------------- | ----------------------------------------- | ----------- | ---------- |
+| 1     | R38      | yes                  | pending independent full-scope plan audit | not started | -          |
 
 ## R39 Revision Delta
 
@@ -2583,13 +2583,13 @@ R39 also incorporates the R38 corrections: failed JS frames retain a pending pub
 
 ### R39 Current Evidence and First Divergence
 
-| Path | Current evidence | R39 owner decision |
-| --- | --- | --- |
-| OpenCode output construction | `packages/opencode/src/cli/cmd/tui/app.tsx:177-190,272` leaves stdout at `process.stdout`; OpenTUI therefore selects `BufferedBackend.createStdout`. | Reachable default producer; no custom feed substitution. |
-| Local Windows stdout writer | `thirdparty/opentui/packages/core/src/zig/renderer-output.zig:42-61` uses the generic stdout writer for every platform and ignores write/flush errors. | First platform divergence for real Windows console output; repair in `renderer-output.zig`. |
-| Upstream compatibility evidence | Upstream `a597e88...` adds `GetConsoleMode`, UTF-8 chunk conversion and `WriteConsoleW`; its commit message specifically identifies `WriteFile`/console code-page behavior as the defect. | Concrete compatibility repair, not a speculative alternative owner. |
-| JS scheduler failure path | R38 audit found automatic retry and public one-shot scheduling race. | Retain the existing invalidation bit, remove failure-frame self-scheduling, and verify through public `requestRender()`. |
-| Tree-sitter blank body | Correlated worker errors previously left the Code Promise pending while `drawUnstyledText=false`. | Keep R38 client/worker/Tree/Code primary path and real-client cancellation regression. |
+| Path                            | Current evidence                                                                                                                                                                          | R39 owner decision                                                                                                       |
+| ------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| OpenCode output construction    | `packages/opencode/src/cli/cmd/tui/app.tsx:177-190,272` leaves stdout at `process.stdout`; OpenTUI therefore selects `BufferedBackend.createStdout`.                                      | Reachable default producer; no custom feed substitution.                                                                 |
+| Local Windows stdout writer     | `thirdparty/opentui/packages/core/src/zig/renderer-output.zig:42-61` uses the generic stdout writer for every platform and ignores write/flush errors.                                    | First platform divergence for real Windows console output; repair in `renderer-output.zig`.                              |
+| Upstream compatibility evidence | Upstream `a597e88...` adds `GetConsoleMode`, UTF-8 chunk conversion and `WriteConsoleW`; its commit message specifically identifies `WriteFile`/console code-page behavior as the defect. | Concrete compatibility repair, not a speculative alternative owner.                                                      |
+| JS scheduler failure path       | R38 audit found automatic retry and public one-shot scheduling race.                                                                                                                      | Retain the existing invalidation bit, remove failure-frame self-scheduling, and verify through public `requestRender()`. |
+| Tree-sitter blank body          | Correlated worker errors previously left the Code Promise pending while `drawUnstyledText=false`.                                                                                         | Keep R38 client/worker/Tree/Code primary path and real-client cancellation regression.                                   |
 
 The native change is intentionally limited to actual Windows console handles. Redirected stdout continues to use byte writes, preserving pipe/file/PTY UTF-8 bytes. `WriteConsoleW` does not repair a physically blocked terminal consumer; it repairs the local Windows console encoding/write boundary that the current implementation mishandles and gives the existing native status path a valid write operation.
 
@@ -2597,10 +2597,10 @@ The native change is intentionally limited to actual Windows console handles. Re
 
 R39 changes exactly eight code files:
 
-| Category | Files |
-| --- | --- |
-| Production (6) | `thirdparty/opentui/packages/core/src/renderer.ts`; `thirdparty/opentui/packages/core/src/lib/tree-sitter/client.ts`; `thirdparty/opentui/packages/core/src/lib/tree-sitter/parser.worker.ts`; `thirdparty/opentui/packages/core/src/lib/tree-sitter/types.ts`; `thirdparty/opentui/packages/core/src/renderables/Code.ts`; `thirdparty/opentui/packages/core/src/zig/renderer-output.zig` |
-| Regression/harness (2) | `thirdparty/opentui/packages/core/src/lib/tree-sitter/client.test.ts`; `packages/opencode/script/smoke-opentui-artifact.ts` |
+| Category               | Files                                                                                                                                                                                                                                                                                                                                                                                      |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Production (6)         | `thirdparty/opentui/packages/core/src/renderer.ts`; `thirdparty/opentui/packages/core/src/lib/tree-sitter/client.ts`; `thirdparty/opentui/packages/core/src/lib/tree-sitter/parser.worker.ts`; `thirdparty/opentui/packages/core/src/lib/tree-sitter/types.ts`; `thirdparty/opentui/packages/core/src/renderables/Code.ts`; `thirdparty/opentui/packages/core/src/zig/renderer-output.zig` |
+| Regression/harness (2) | `thirdparty/opentui/packages/core/src/lib/tree-sitter/client.test.ts`; `packages/opencode/script/smoke-opentui-artifact.ts`                                                                                                                                                                                                                                                                |
 
 The renderer-specific regression assertions move into the existing `client.test.ts` file at implementation time; `renderer.custom-stdout.test.ts` is not an R39 changed file. No ninth code file, daemon/SSE file, generated file, config, lockfile, release file or native ABI file is authorized.
 
@@ -2629,21 +2629,21 @@ No retry, timeout-success, permanent unstyled rendering, second parser, renderer
 
 ### R39 Test and Verification Contract
 
-| Slice | Seam | Required evidence |
-| --- | --- | --- |
-| Windows output | `renderer-output.zig` UTF-8 conversion and redirected-output tests plus compiled normal/target smoke | non-ASCII text remains intact on redirected output; compiled Windows binary passes normal and target scenarios without liveness regression |
-| renderer scheduler | public `CliRenderer.requestRender()`/`activateFrame()` in `client.test.ts` | failure does not cause a second frame without a new public request; the next request renders successfully |
-| actual cancellation | real `CodeRenderable` + real `TreeSitterClient` worker request held by messageId | one-shot and streaming destroy reject the actual pending request with zero highlight warning |
-| Tree ownership | public client edit, streaming update, reset, correlated failure and disposal sequence | repeated accepted replacements remain usable; failed mutation preserves prior accepted state; disposal waits for ack |
-| compiled TUI | existing normal and `target-liveness` smoke under external 120-second PID-tree supervisor | exact session/project/message/part/field correlation; Thinking/body, dialog replacement/restoration and zero shutdown warning assertions |
+| Slice               | Seam                                                                                                 | Required evidence                                                                                                                          |
+| ------------------- | ---------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| Windows output      | `renderer-output.zig` UTF-8 conversion and redirected-output tests plus compiled normal/target smoke | non-ASCII text remains intact on redirected output; compiled Windows binary passes normal and target scenarios without liveness regression |
+| renderer scheduler  | public `CliRenderer.requestRender()`/`activateFrame()` in `client.test.ts`                           | failure does not cause a second frame without a new public request; the next request renders successfully                                  |
+| actual cancellation | real `CodeRenderable` + real `TreeSitterClient` worker request held by messageId                     | one-shot and streaming destroy reject the actual pending request with zero highlight warning                                               |
+| Tree ownership      | public client edit, streaming update, reset, correlated failure and disposal sequence                | repeated accepted replacements remain usable; failed mutation preserves prior accepted state; disposal waits for ack                       |
+| compiled TUI        | existing normal and `target-liveness` smoke under external 120-second PID-tree supervisor            | exact session/project/message/part/field correlation; Thinking/body, dialog replacement/restoration and zero shutdown warning assertions   |
 
 R39 verification must include `git diff --check`, changed-file formatter checks, package tests, package typecheck diagnostics, native tests when available and both bounded compiled smoke scenarios. The plan does not claim that a pipe whose consumer is physically stopped can be forced to display; it verifies the local Windows console boundary and the downstream scheduler/Tree-sitter contracts separately.
 
 ### R39 Plan Audit Record
 
-| Round | Revision | Full original scope? | Blocking findings | Result | Invocation |
-| --- | --- | --- | --- | --- | --- |
-| 1 | R39 | yes | pending independent full-scope plan audit | not started | - |
+| Round | Revision | Full original scope? | Blocking findings                         | Result      | Invocation |
+| ----- | -------- | -------------------- | ----------------------------------------- | ----------- | ---------- |
+| 1     | R39      | yes                  | pending independent full-scope plan audit | not started | -          |
 
 ## R40 Revision Delta
 
@@ -2665,10 +2665,10 @@ The Windows-specific first divergence remains the local `StdoutOutput.write()` i
 
 The exact eight-file boundary remains:
 
-| Category | Files |
-| --- | --- |
-| Production (6) | `thirdparty/opentui/packages/core/src/renderer.ts`; `thirdparty/opentui/packages/core/src/lib/tree-sitter/client.ts`; `thirdparty/opentui/packages/core/src/lib/tree-sitter/parser.worker.ts`; `thirdparty/opentui/packages/core/src/lib/tree-sitter/types.ts`; `thirdparty/opentui/packages/core/src/renderables/Code.ts`; `thirdparty/opentui/packages/core/src/zig/renderer-output.zig` |
-| Regression/harness (2) | `thirdparty/opentui/packages/core/src/lib/tree-sitter/client.test.ts`; `packages/opencode/script/smoke-opentui-artifact.ts` |
+| Category               | Files                                                                                                                                                                                                                                                                                                                                                                                      |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Production (6)         | `thirdparty/opentui/packages/core/src/renderer.ts`; `thirdparty/opentui/packages/core/src/lib/tree-sitter/client.ts`; `thirdparty/opentui/packages/core/src/lib/tree-sitter/parser.worker.ts`; `thirdparty/opentui/packages/core/src/lib/tree-sitter/types.ts`; `thirdparty/opentui/packages/core/src/renderables/Code.ts`; `thirdparty/opentui/packages/core/src/zig/renderer-output.zig` |
+| Regression/harness (2) | `thirdparty/opentui/packages/core/src/lib/tree-sitter/client.test.ts`; `packages/opencode/script/smoke-opentui-artifact.ts`                                                                                                                                                                                                                                                                |
 
 `renderer-output.zig` changes only the Windows console writer; redirected files/pipes retain byte writes, and no native ABI or status contract changes. Renderer failure retention remains non-retrying: failure records the diagnostic and pending invalidation, then the next public `requestRender()` is the only consumer. Tree-sitter remains the correlated request -> client settlement -> accepted Tree/mirror commit path. Renderer-specific regression assertions are consolidated into `client.test.ts`; `renderer.custom-stdout.test.ts` is not part of the R40 diff.
 
@@ -2691,9 +2691,9 @@ The verification record must include `git diff --check`, native build output whe
 
 ### R40 Audit Record
 
-| Round | Revision | Full original scope? | Blocking findings | Result | Invocation |
-| --- | --- | --- | --- | --- | --- |
-| 1 | R40 | yes | pending independent full-scope plan audit | not started | - |
+| Round | Revision | Full original scope? | Blocking findings                         | Result      | Invocation |
+| ----- | -------- | -------------------- | ----------------------------------------- | ----------- | ---------- |
+| 1     | R40      | yes                  | pending independent full-scope plan audit | not started | -          |
 
 ## R41 Revision Delta
 
@@ -2717,15 +2717,15 @@ accepted state
 
 R41 changes exactly eight code files: six production files (`renderer.ts`, `client.ts`, `parser.worker.ts`, `types.ts`, `Code.ts`, `zig/renderer-output.zig`), one existing nested regression file (`lib/tree-sitter/client.test.ts`) and the existing OpenCode smoke harness. `renderer.custom-stdout.test.ts` is not changed; its R37 renderer assertions are migrated into `client.test.ts` without creating a new test file.
 
-| Production file | Planned `E_i` ceiling | Required qualifying Chinese `C_i` minimum |
-| --- | ---: | ---: |
-| `renderer.ts` | 100 | 15 |
-| `client.ts` | 150 | 23 |
-| `parser.worker.ts` | 200 | 30 |
-| `types.ts` | 20 | 3 |
-| `Code.ts` | 25 | 4 |
-| `zig/renderer-output.zig` | 85 | 13 |
-| **Total** | **580** | **88 across files, independently** |
+| Production file           | Planned `E_i` ceiling | Required qualifying Chinese `C_i` minimum |
+| ------------------------- | --------------------: | ----------------------------------------: |
+| `renderer.ts`             |                   100 |                                        15 |
+| `client.ts`               |                   150 |                                        23 |
+| `parser.worker.ts`        |                   200 |                                        30 |
+| `types.ts`                |                    20 |                                         3 |
+| `Code.ts`                 |                    25 |                                         4 |
+| `zig/renderer-output.zig` |                    85 |                                        13 |
+| **Total**                 |               **580** |        **88 across files, independently** |
 
 The Zig comments must explain only the real Windows handle distinction, UTF-8 chunk/surrogate boundary, redirected-output compatibility and error-preserving write behavior. They must be adjacent to those decisions; restating assignments or native control flow does not count. Final implementation recount, not this ceiling, is authoritative.
 
@@ -2746,9 +2746,9 @@ From the repository root, `bun run script/build.ts --target bun-windows-x64 --si
 
 ### R41 Audit Record
 
-| Round | Revision | Full original scope? | Blocking findings | Result | Invocation |
-| --- | --- | --- | --- | --- | --- |
-| 1 | R41 | yes | pending independent full-scope plan audit | not started | - |
+| Round | Revision | Full original scope? | Blocking findings                         | Result      | Invocation |
+| ----- | -------- | -------------------- | ----------------------------------------- | ----------- | ---------- |
+| 1     | R41      | yes                  | pending independent full-scope plan audit | not started | -          |
 
 ## R42 Revision Delta
 
@@ -2756,8 +2756,8 @@ R42 supersedes R41 in three precise places. First, the existing renderer regress
 
 ### R42 Command-Panel Surface Invariant
 
-| ID | Invariant | Producer/consumer owner | Evidence and regression |
-| --- | --- | --- | --- |
+| ID         | Invariant                                                                                                                                                                                              | Producer/consumer owner                                                                                                                                                                                                                                                                                | Evidence and regression                                                                                                                                                                                                                                                                                                                                                               |
+| ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | R42-INV-08 | A `dialog.replace` or `dialog.clear` transition must invalidate the affected surface so the next committed frame contains the current dialog background/cells and no stale `Commands`/black fragments. | Existing OpenCode `CommandPaletteProvider`/`DialogContext` is the producer; `CliRenderer` frame commit is the consumer and owner of the visible cell refresh. No command-palette logic change is authorized because `dialog.replace` and `dialog.clear` already perform the intended state transition. | Compiled target smoke opens `Commands`, captures the replacement, sends Escape/selection, then requires `Commands` to disappear and the body sentinel/background region to be visible in a later PTY frame. The renderer scheduler/native output regressions are the first-divergence probes; a failure with correct dialog state maps to the renderer/output owner, not Tree-sitter. |
 
 This is a pass-through owner mapping, not a detection-only requirement: the existing dialog producer is proven by `command-palette.tsx:44-95,128-139`; the repair is at the downstream frame owner already responsible for committing current cells. No seventh OpenCode production file is added.
@@ -2779,23 +2779,23 @@ accepted buffer mirror/tree
 
 R42 changes exactly eight code files:
 
-| Category | Files |
-| --- | --- |
-| Production (5) | `thirdparty/opentui/packages/core/src/renderer.ts`; `thirdparty/opentui/packages/core/src/lib/tree-sitter/client.ts`; `thirdparty/opentui/packages/core/src/lib/tree-sitter/parser.worker.ts`; `thirdparty/opentui/packages/core/src/renderables/Code.ts`; `thirdparty/opentui/packages/core/src/zig/renderer-output.zig` |
-| Regression/harness (3) | `thirdparty/opentui/packages/core/src/lib/tree-sitter/client.test.ts`; `thirdparty/opentui/packages/core/src/tests/renderer.custom-stdout.test.ts`; `packages/opencode/script/smoke-opentui-artifact.ts` |
+| Category               | Files                                                                                                                                                                                                                                                                                                                     |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Production (5)         | `thirdparty/opentui/packages/core/src/renderer.ts`; `thirdparty/opentui/packages/core/src/lib/tree-sitter/client.ts`; `thirdparty/opentui/packages/core/src/lib/tree-sitter/parser.worker.ts`; `thirdparty/opentui/packages/core/src/renderables/Code.ts`; `thirdparty/opentui/packages/core/src/zig/renderer-output.zig` |
+| Regression/harness (3) | `thirdparty/opentui/packages/core/src/lib/tree-sitter/client.test.ts`; `thirdparty/opentui/packages/core/src/tests/renderer.custom-stdout.test.ts`; `packages/opencode/script/smoke-opentui-artifact.ts`                                                                                                                  |
 
 The `types.ts` wire changes from earlier revisions are not carried as an independent diff in R42. Equivalent correlated request/response shapes are declared at the existing client/worker transport owners and are consumed through the existing unknown worker boundary; no public type/API change is added. This keeps the file cap at eight while retaining one runtime protocol owner per direction. `types.ts` remains unchanged in R42.
 
 ### R42 Comment and Verification Budget
 
-| Production file | Planned `E_i` ceiling | Required qualifying Chinese `C_i` minimum |
-| --- | ---: | ---: |
-| `renderer.ts` | 100 | 15 |
-| `client.ts` | 170 | 26 |
-| `parser.worker.ts` | 200 | 30 |
-| `Code.ts` | 25 | 4 |
-| `zig/renderer-output.zig` | 85 | 13 |
-| **Total** | **580** | **88 across files, independently** |
+| Production file           | Planned `E_i` ceiling | Required qualifying Chinese `C_i` minimum |
+| ------------------------- | --------------------: | ----------------------------------------: |
+| `renderer.ts`             |                   100 |                                        15 |
+| `client.ts`               |                   170 |                                        26 |
+| `parser.worker.ts`        |                   200 |                                        30 |
+| `Code.ts`                 |                    25 |                                         4 |
+| `zig/renderer-output.zig` |                    85 |                                        13 |
+| **Total**                 |               **580** |        **88 across files, independently** |
 
 The two regression files must both be updated: renderer failure tests must prove no clock-only retry and next-public-invalidation recovery; client tests must prove real worker cancellation, Tree lifecycle and post-rejection tail recovery. The final implementation recount is authoritative.
 
@@ -2823,9 +2823,9 @@ Native console-specific tests must record pass or explicit skip for the real `Ge
 
 ### R42 Audit Record
 
-| Round | Revision | Full original scope? | Blocking findings | Result | Invocation |
-| --- | --- | --- | --- | --- | --- |
-| 1 | R42 | yes | pending independent full-scope plan audit | not started | - |
+| Round | Revision | Full original scope? | Blocking findings                         | Result      | Invocation |
+| ----- | -------- | -------------------- | ----------------------------------------- | ----------- | ---------- |
+| 1     | R42      | yes                  | pending independent full-scope plan audit | not started | -          |
 
 ## R43 Revision Delta
 
@@ -2835,10 +2835,10 @@ R43 resolves the R42 plan-audit blocker by assigning the native test owner insid
 
 The same Zig file will contain behavior-sensitive tests adjacent to `StdoutOutput`:
 
-| Test | Behavior | Non-console behavior |
-| --- | --- | --- |
-| UTF-8 chunk conversion | Independent literals cover ASCII, multibyte BMP, supplementary-plane surrogate pairs, chunk boundaries and invalid UTF-8. | Always runs; no console required. |
-| redirected output | A temporary redirected file receives split UTF-8 writes and the bytes are compared exactly. | Always runs; proves pipe/file compatibility remains byte-preserving. |
+| Test                   | Behavior                                                                                                                                                                           | Non-console behavior                                                                                                                 |
+| ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| UTF-8 chunk conversion | Independent literals cover ASCII, multibyte BMP, supplementary-plane surrogate pairs, chunk boundaries and invalid UTF-8.                                                          | Always runs; no console required.                                                                                                    |
+| redirected output      | A temporary redirected file receives split UTF-8 writes and the bytes are compared exactly.                                                                                        | Always runs; proves pipe/file compatibility remains byte-preserving.                                                                 |
 | Windows console branch | On Windows, `StdoutOutput.init()` must detect a real console handle; the test invokes the UTF-16 `WriteConsoleW` path with a non-ASCII ANSI sequence and asserts the write result. | Returns `error.SkipZigTest` when stdout is not a console handle; the command records skip explicitly and cannot report a false pass. |
 
 The production writer keeps redirected `WriteFile`/byte behavior and uses `WriteConsoleW` only after `GetConsoleMode` confirms a real console handle. The native test therefore observes the actual branch decision and the actual write result rather than testing a copied conversion helper alone.
@@ -2857,9 +2857,9 @@ The verification record must include the native test's explicit `pass` or `SkipZ
 
 ### R43 Audit Record
 
-| Round | Revision | Full original scope? | Blocking findings | Result | Invocation |
-| --- | --- | --- | --- | --- | --- |
-| 1 | R43 | yes | pending independent full-scope plan audit | not started | - |
+| Round | Revision | Full original scope? | Blocking findings                         | Result      | Invocation |
+| ----- | -------- | -------------------- | ----------------------------------------- | ----------- | ---------- |
+| 1     | R43      | yes                  | pending independent full-scope plan audit | not started | -          |
 
 ## R44 Revision Delta
 
@@ -2879,9 +2879,9 @@ The test output must distinguish `console branch passed`, `redirected compatibil
 
 ### R44 Audit Record
 
-| Round | Revision | Full original scope? | Blocking findings | Result | Invocation |
-| --- | --- | --- | --- | --- | --- |
-| 1 | R44 | yes | pending independent full-scope plan audit | not started | - |
+| Round | Revision | Full original scope? | Blocking findings                         | Result      | Invocation |
+| ----- | -------- | -------------------- | ----------------------------------------- | ----------- | ---------- |
+| 1     | R44      | yes                  | pending independent full-scope plan audit | not started | -          |
 
 ## R32 Historical Archive (Non-normative)
 
@@ -2893,20 +2893,20 @@ R32 不把“显示更多日志”“始终显示未高亮文本”“超时后�
 
 ### 2. Current Behavior and Evidence
 
-| Path | Current evidence | Status |
-| --- | --- | --- |
-| OpenCode renderer construction | `packages/opencode/src/cli/cmd/tui/app.tsx:177-190,272` does not pass a custom stdout; `renderer.ts:1000-1005` therefore selects the process-stdout buffered backend, not `NativeSpanFeed`. | confirmed |
-| Windows/native output | `renderer-output.zig:281-286` returns `skipped` while `renderInProgress`; `:459-487` keeps that flag set while synchronous `stdout.write()` runs. `renderer.zig:723-754` maps the status to the JS renderer. | reachable candidate, not yet the user repro |
-| JS render scheduler | `renderer.ts:4373-4504` resets `rendering` in `finally`; `:4488-4496` delegates backpressure/failure scheduling to status handlers. A thrown frame callback/root/native operation is not converted into a successful frame or a new scheduled frame by `loop()`. | reachable candidate, not yet the user repro |
-| Custom stdout feed | `renderer.ts:1005,1061-1076` allocates `NativeSpanFeed` only for non-process stdout; `:1410-1435` waits for `feed.idle()`; `requestRender()` coalesces while `feedIdleRenderScheduled` is true. The bounded probe reproduced this exact coalescing, but this is not OpenCode's default output path. | confirmed secondary path |
-| Worker error completion | `parser.worker.ts:1202-1207,1377-1382` can emit a generic error without request correlation; `client.ts` request callbacks can remain pending; Session keeps `drawUnstyledText={false}` at `packages/opencode/src/cli/cmd/tui/routes/session/index.tsx:2065-2154`. | confirmed blank-body path |
-| Persistent Tree ownership | `parser.worker.ts:967-1093` replaces persistent Trees; the prior Tree must be explicitly deleted, while one-shot cleanup at `:1096-1154` proves the ownership contract. | confirmed leak path |
-| Shutdown warning | `Code.ts:390-489,655-689` can log before checking `isDestroyed`; renderer teardown destroys pending Tree-sitter requests before Code catches them. | confirmed warning path |
-| Daemon/SSE | `packages/opencode/src/cli/cmd/tui/context/sdk.tsx:95-209` has reconnect/heartbeat; `thread.ts:155-179` only reports a still-running daemon after TUI exit. No current evidence proves daemon disconnect is the renderer first divergence. | currently excluded from production change |
-| Compiled smoke | `packages/opencode/.artifacts/opentui-smoke/failure.json` reports `compiled live error logs missing`, not a proof of blank-body recovery or global renderer liveness. | verification gap |
-| Upstream renderer delta | `upstream` currently has tag `v0.5.1` and main `265d9310735e06b9fddf274a14813a119d8f93e5`; upstream added `fix(core): emit render errors (#1314)` and `fix(core): harden renderer resolution lifecycle (#1306)` after the local `v0.4.3-smark.6` line. | relevant external evidence |
-| Upstream Windows output delta | Upstream `v0.5.1` includes `core(renderer): write Windows console output with WriteConsoleW (#1272)`, replacing code-page-dependent console writes. | relevant Windows compatibility evidence; not yet proven as this symptom's first divergence |
-| Upstream Markdown/scrollbox delta | Upstream history includes `Fix markdown blank scrollbox (#1150)` and `fix(renderable): ensure rendering is requested after highlight updates (#1020)`; the current local tree already contains a corresponding scrollbox visibility regression test and current Code streaming render requests. | partially present; do not duplicate blindly |
+| Path                              | Current evidence                                                                                                                                                                                                                                                                                    | Status                                                                                     |
+| --------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| OpenCode renderer construction    | `packages/opencode/src/cli/cmd/tui/app.tsx:177-190,272` does not pass a custom stdout; `renderer.ts:1000-1005` therefore selects the process-stdout buffered backend, not `NativeSpanFeed`.                                                                                                         | confirmed                                                                                  |
+| Windows/native output             | `renderer-output.zig:281-286` returns `skipped` while `renderInProgress`; `:459-487` keeps that flag set while synchronous `stdout.write()` runs. `renderer.zig:723-754` maps the status to the JS renderer.                                                                                        | reachable candidate, not yet the user repro                                                |
+| JS render scheduler               | `renderer.ts:4373-4504` resets `rendering` in `finally`; `:4488-4496` delegates backpressure/failure scheduling to status handlers. A thrown frame callback/root/native operation is not converted into a successful frame or a new scheduled frame by `loop()`.                                    | reachable candidate, not yet the user repro                                                |
+| Custom stdout feed                | `renderer.ts:1005,1061-1076` allocates `NativeSpanFeed` only for non-process stdout; `:1410-1435` waits for `feed.idle()`; `requestRender()` coalesces while `feedIdleRenderScheduled` is true. The bounded probe reproduced this exact coalescing, but this is not OpenCode's default output path. | confirmed secondary path                                                                   |
+| Worker error completion           | `parser.worker.ts:1202-1207,1377-1382` can emit a generic error without request correlation; `client.ts` request callbacks can remain pending; Session keeps `drawUnstyledText={false}` at `packages/opencode/src/cli/cmd/tui/routes/session/index.tsx:2065-2154`.                                  | confirmed blank-body path                                                                  |
+| Persistent Tree ownership         | `parser.worker.ts:967-1093` replaces persistent Trees; the prior Tree must be explicitly deleted, while one-shot cleanup at `:1096-1154` proves the ownership contract.                                                                                                                             | confirmed leak path                                                                        |
+| Shutdown warning                  | `Code.ts:390-489,655-689` can log before checking `isDestroyed`; renderer teardown destroys pending Tree-sitter requests before Code catches them.                                                                                                                                                  | confirmed warning path                                                                     |
+| Daemon/SSE                        | `packages/opencode/src/cli/cmd/tui/context/sdk.tsx:95-209` has reconnect/heartbeat; `thread.ts:155-179` only reports a still-running daemon after TUI exit. No current evidence proves daemon disconnect is the renderer first divergence.                                                          | currently excluded from production change                                                  |
+| Compiled smoke                    | `packages/opencode/.artifacts/opentui-smoke/failure.json` reports `compiled live error logs missing`, not a proof of blank-body recovery or global renderer liveness.                                                                                                                               | verification gap                                                                           |
+| Upstream renderer delta           | `upstream` currently has tag `v0.5.1` and main `265d9310735e06b9fddf274a14813a119d8f93e5`; upstream added `fix(core): emit render errors (#1314)` and `fix(core): harden renderer resolution lifecycle (#1306)` after the local `v0.4.3-smark.6` line.                                              | relevant external evidence                                                                 |
+| Upstream Windows output delta     | Upstream `v0.5.1` includes `core(renderer): write Windows console output with WriteConsoleW (#1272)`, replacing code-page-dependent console writes.                                                                                                                                                 | relevant Windows compatibility evidence; not yet proven as this symptom's first divergence |
+| Upstream Markdown/scrollbox delta | Upstream history includes `Fix markdown blank scrollbox (#1150)` and `fix(renderable): ensure rendering is requested after highlight updates (#1020)`; the current local tree already contains a corresponding scrollbox visibility regression test and current Code streaming render requests.     | partially present; do not duplicate blindly                                                |
 
 ### 3. Supported Domain and Reachability
 
@@ -2916,15 +2916,15 @@ The plan does not assume a worker error, output write stall, malformed terminal 
 
 ### 4. Requirements and Invariants
 
-| ID | Invariant |
-| --- | --- |
-| R32-INV-01 | Every user-visible renderer invalidation either commits a frame or reaches an explicit, observable terminal failure; it must not silently leave the scheduler with no future render owner. |
-| R32-INV-02 | A Windows native output/backend state cannot leave all later frames permanently skipped while the TUI remains apparently alive. A skip must have a reachable owner that completes or fails the same output attempt. |
-| R32-INV-03 | Every messageId-bearing Tree-sitter request settles exactly once through its own response channel; a worker exception cannot leave the Code consumer pending until destroy. |
-| R32-INV-04 | A persistent parser state owns exactly one accepted Tree; replacement, candidate failure and disposal each have one terminal delete/transfer owner. |
-| R32-INV-05 | A rejected highlight request preserves the existing accepted source/error contract; `drawUnstyledText=false` is not changed to mask protocol failure. |
-| R32-INV-06 | Expected destruction cancellation is silent, while a live worker/render failure remains diagnosable once and is not multiplied by teardown. |
-| R32-INV-07 | Daemon/SSE connection state and local renderer state remain distinguishable; a healthy daemon cannot be declared a TUI render success, and a local render stall cannot be misdiagnosed as daemon exit. |
+| ID         | Invariant                                                                                                                                                                                                                   |
+| ---------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| R32-INV-01 | Every user-visible renderer invalidation either commits a frame or reaches an explicit, observable terminal failure; it must not silently leave the scheduler with no future render owner.                                  |
+| R32-INV-02 | A Windows native output/backend state cannot leave all later frames permanently skipped while the TUI remains apparently alive. A skip must have a reachable owner that completes or fails the same output attempt.         |
+| R32-INV-03 | Every messageId-bearing Tree-sitter request settles exactly once through its own response channel; a worker exception cannot leave the Code consumer pending until destroy.                                                 |
+| R32-INV-04 | A persistent parser state owns exactly one accepted Tree; replacement, candidate failure and disposal each have one terminal delete/transfer owner.                                                                         |
+| R32-INV-05 | A rejected highlight request preserves the existing accepted source/error contract; `drawUnstyledText=false` is not changed to mask protocol failure.                                                                       |
+| R32-INV-06 | Expected destruction cancellation is silent, while a live worker/render failure remains diagnosable once and is not multiplied by teardown.                                                                                 |
+| R32-INV-07 | Daemon/SSE connection state and local renderer state remain distinguishable; a healthy daemon cannot be declared a TUI render success, and a local render stall cannot be misdiagnosed as daemon exit.                      |
 | R32-INV-08 | Dialog transitions and width-sensitive output refresh the affected cell region from the current render state; no stale background or out-of-bounds line-width behavior is accepted as a side effect of the liveness repair. |
 
 ### 5. First Divergence Analysis
@@ -2946,7 +2946,7 @@ bun -e '<CliRenderer custom stdout probe: hold the Writable write callback, trig
 Observed result:
 
 ```json
-{"backpressured":true,"feedIdleRenderScheduled":true,"requestCoalesced":true,"recovered":true}
+{ "backpressured": true, "feedIdleRenderScheduled": true, "requestCoalesced": true, "recovered": true }
 ```
 
 The renderer exception probe was then run from the same package directory through the real test renderer and a throwing `Renderable`; it failed as intended with:
@@ -2969,55 +2969,55 @@ The daemon/SSE path remains diagnostic unless the same loop proves that an event
 
 ### 8. Secondary Path Inventory
 
-| Path | Classification | Decision |
-| --- | --- | --- |
-| Correlated Tree-sitter response | supported primary contract | repair |
-| Existing Code parser-error plain-text commit | shipped compatibility | preserve; do not add another fallback |
-| Unmatched worker diagnostic event | diagnostic only | preserve without pretending to settle a request |
-| Process stdout native output | primary OpenCode liveness candidate | repair only after compiled red proof |
-| Custom stdout `NativeSpanFeed` | separate compatibility path | test only unless production reachability is proven |
-| Daemon/SSE reconnect | existing transport behavior | do not modify without producer/consumer divergence |
-| timeout, retry, second parser, raw-text emergency route, renderer restart | forbidden fallback | reject |
+| Path                                                                      | Classification                      | Decision                                           |
+| ------------------------------------------------------------------------- | ----------------------------------- | -------------------------------------------------- |
+| Correlated Tree-sitter response                                           | supported primary contract          | repair                                             |
+| Existing Code parser-error plain-text commit                              | shipped compatibility               | preserve; do not add another fallback              |
+| Unmatched worker diagnostic event                                         | diagnostic only                     | preserve without pretending to settle a request    |
+| Process stdout native output                                              | primary OpenCode liveness candidate | repair only after compiled red proof               |
+| Custom stdout `NativeSpanFeed`                                            | separate compatibility path         | test only unless production reachability is proven |
+| Daemon/SSE reconnect                                                      | existing transport behavior         | do not modify without producer/consumer divergence |
+| timeout, retry, second parser, raw-text emergency route, renderer restart | forbidden fallback                  | reject                                             |
 
 ### 9. Provisional File Boundary
 
 The maximum allowed code-file set is eight. The only files eligible for the approved revision are:
 
-| File | Role |
-| --- | --- |
-| `thirdparty/opentui/packages/core/src/renderer.ts` | JS scheduler/status owner if compiled liveness proof lands there |
-| `thirdparty/opentui/packages/core/src/Renderable.ts` | current renderable owner for an exception emitted during root traversal |
-| `thirdparty/opentui/packages/core/src/lib/tree-sitter/types.ts` | correlated response contract |
-| `thirdparty/opentui/packages/core/src/lib/tree-sitter/client.ts` | callback settlement, accepted mirror and mutation/disposal ordering |
-| `thirdparty/opentui/packages/core/src/lib/tree-sitter/parser.worker.ts` | correlated exception and persistent Tree ownership |
-| `thirdparty/opentui/packages/core/src/renderables/Code.ts` | destruction-warning classification |
-| `thirdparty/opentui/packages/core/src/lib/tree-sitter/client.test.ts` | request, Tree and Code visibility regression seam |
-| `thirdparty/opentui/packages/core/src/tests/renderer.render-error.test.ts` | renderer exception publication and next-frame liveness regression seam |
+| File                                                                       | Role                                                                    |
+| -------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| `thirdparty/opentui/packages/core/src/renderer.ts`                         | JS scheduler/status owner if compiled liveness proof lands there        |
+| `thirdparty/opentui/packages/core/src/Renderable.ts`                       | current renderable owner for an exception emitted during root traversal |
+| `thirdparty/opentui/packages/core/src/lib/tree-sitter/types.ts`            | correlated response contract                                            |
+| `thirdparty/opentui/packages/core/src/lib/tree-sitter/client.ts`           | callback settlement, accepted mirror and mutation/disposal ordering     |
+| `thirdparty/opentui/packages/core/src/lib/tree-sitter/parser.worker.ts`    | correlated exception and persistent Tree ownership                      |
+| `thirdparty/opentui/packages/core/src/renderables/Code.ts`                 | destruction-warning classification                                      |
+| `thirdparty/opentui/packages/core/src/lib/tree-sitter/client.test.ts`      | request, Tree and Code visibility regression seam                       |
+| `thirdparty/opentui/packages/core/src/tests/renderer.render-error.test.ts` | renderer exception publication and next-frame liveness regression seam  |
 
 `NativeSpanFeed.ts`, `renderer-output.zig`, `sdk.tsx`, `thread.ts`, `Code.test.ts`, repository smoke, `buffer.zig`, other native files and generated artifacts are not approved targets in R32 unless the compiled liveness evidence proves the current owner boundary; such a change would require a new revision and audit. The provisional set remains exactly eight code files: six production files and two regression-test files.
 
 ### 9A. Forward Traceability
 
-| Requirement / invariant | Producer -> consumer path | Approved file owner | Behavioral evidence |
-| --- | --- | --- | --- |
-| R32-INV-01 | `RootRenderable.render()` exception -> `CliRenderer.loop()` -> scheduler state | `Renderable.ts`, `renderer.ts` | red renderer probe: current live renderer has no scheduled next frame; future regression requires render error publication and continued scheduling |
-| R32-INV-02 | native render/output status -> JS renderer status handler -> next frame owner | `renderer.ts` only unless compiled proof reaches native output | bounded process-stdout compiled liveness scenario plus native status trace |
-| R32-INV-03/05 | worker request error -> correlated response -> `TreeSitterClient` callback -> `CodeRenderable` visible contract | `types.ts`, `client.ts`, `parser.worker.ts`, `Code.ts` | forced worker-error request rejects once and current body becomes visible without waiting for destroy |
-| R32-INV-04 | accepted Tree -> candidate/replacement/dispose -> worker delete/transfer | `parser.worker.ts`, `client.ts` | repeated edit/stream/reset/dispose ownership test and fixed-length RSS observation |
-| R32-INV-06 | renderer/client destroy -> pending Code rejection -> lifecycle guard | `Code.ts`, `client.ts` | one-shot and streaming shutdown with zero expected cancellation warnings |
-| R32-INV-07 | daemon SSE producer -> SDK subscriber -> TUI state -> renderer frame | no production file until divergence is proven | compiled trace records SSE receipt independently from frame advancement |
-| R32-INV-08 | dialog/resize layout state -> root render buffer -> terminal frame | existing renderer/renderable owners only if a failing path is observed | bounded dialog/resize capture asserts current background and width-sensitive rows |
+| Requirement / invariant | Producer -> consumer path                                                                                       | Approved file owner                                                    | Behavioral evidence                                                                                                                                 |
+| ----------------------- | --------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| R32-INV-01              | `RootRenderable.render()` exception -> `CliRenderer.loop()` -> scheduler state                                  | `Renderable.ts`, `renderer.ts`                                         | red renderer probe: current live renderer has no scheduled next frame; future regression requires render error publication and continued scheduling |
+| R32-INV-02              | native render/output status -> JS renderer status handler -> next frame owner                                   | `renderer.ts` only unless compiled proof reaches native output         | bounded process-stdout compiled liveness scenario plus native status trace                                                                          |
+| R32-INV-03/05           | worker request error -> correlated response -> `TreeSitterClient` callback -> `CodeRenderable` visible contract | `types.ts`, `client.ts`, `parser.worker.ts`, `Code.ts`                 | forced worker-error request rejects once and current body becomes visible without waiting for destroy                                               |
+| R32-INV-04              | accepted Tree -> candidate/replacement/dispose -> worker delete/transfer                                        | `parser.worker.ts`, `client.ts`                                        | repeated edit/stream/reset/dispose ownership test and fixed-length RSS observation                                                                  |
+| R32-INV-06              | renderer/client destroy -> pending Code rejection -> lifecycle guard                                            | `Code.ts`, `client.ts`                                                 | one-shot and streaming shutdown with zero expected cancellation warnings                                                                            |
+| R32-INV-07              | daemon SSE producer -> SDK subscriber -> TUI state -> renderer frame                                            | no production file until divergence is proven                          | compiled trace records SSE receipt independently from frame advancement                                                                             |
+| R32-INV-08              | dialog/resize layout state -> root render buffer -> terminal frame                                              | existing renderer/renderable owners only if a failing path is observed | bounded dialog/resize capture asserts current background and width-sensitive rows                                                                   |
 
 ### 9B. Reverse Traceability
 
-| Proposed concept | Requirement | Evidence | Why reuse is insufficient |
-| --- | --- | --- | --- |
-| Render error event with current renderable context | R32-INV-01 | upstream `#1314` adds `RootRenderable.currentRenderable` and `CliRenderEvents.RENDER_ERROR`; local source lacks both | current `handleError` sees only an unclassified process rejection and `loop()` strands the live scheduler |
-| Final scheduling in the render-error `finally` boundary | R32-INV-01 | local red probe leaves `isRunning=true` with no scheduled render | existing status branches do not execute after a thrown render pass |
-| Correlated worker error completion | R32-INV-03/05 | current generic worker error drops request identity and observed callback stays pending | Code cannot settle a promise from an event-only diagnostic |
-| Single accepted Tree owner and explicit delete/transfer | R32-INV-04 | runtime exposes `Tree.copy()`/`delete()`; current replacement handlers overwrite the owner | client cannot release WASM objects owned by the worker |
-| Destroyed guard before warning | R32-INV-06 | current Code catch order produces the user's shutdown warning flood | client does not know which renderable has been destroyed |
-| Separate daemon/frame observations | R32-INV-07 | current SDK has reconnect behavior and current smoke only proves health/SSE attach, not frame liveness | changing SDK transport without a producer/consumer divergence would be speculative |
+| Proposed concept                                        | Requirement   | Evidence                                                                                                             | Why reuse is insufficient                                                                                 |
+| ------------------------------------------------------- | ------------- | -------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| Render error event with current renderable context      | R32-INV-01    | upstream `#1314` adds `RootRenderable.currentRenderable` and `CliRenderEvents.RENDER_ERROR`; local source lacks both | current `handleError` sees only an unclassified process rejection and `loop()` strands the live scheduler |
+| Final scheduling in the render-error `finally` boundary | R32-INV-01    | local red probe leaves `isRunning=true` with no scheduled render                                                     | existing status branches do not execute after a thrown render pass                                        |
+| Correlated worker error completion                      | R32-INV-03/05 | current generic worker error drops request identity and observed callback stays pending                              | Code cannot settle a promise from an event-only diagnostic                                                |
+| Single accepted Tree owner and explicit delete/transfer | R32-INV-04    | runtime exposes `Tree.copy()`/`delete()`; current replacement handlers overwrite the owner                           | client cannot release WASM objects owned by the worker                                                    |
+| Destroyed guard before warning                          | R32-INV-06    | current Code catch order produces the user's shutdown warning flood                                                  | client does not know which renderable has been destroyed                                                  |
+| Separate daemon/frame observations                      | R32-INV-07    | current SDK has reconnect behavior and current smoke only proves health/SSE attach, not frame liveness               | changing SDK transport without a producer/consumer divergence would be speculative                        |
 
 ### 10. TDD and Verification Slices
 
@@ -3086,65 +3086,65 @@ Everything after this marker is retained only to preserve historical investigati
 
 ## 3. Repository Context
 
-| Source | Why it constrains this task |
-| --- | --- |
-| `CONTEXT.md` | OpenTUI core 位于 `thirdparty/opentui/packages/core`；TUI 正文使用 `CodeRenderable`，Session/Message 是 opencode 当前词汇。 |
-| `.opencode/policy/first-principles-engineering.md` | 必须修复 first divergence；一个 authoritative primary path；无证据不得增加边界；无批准不得实施。 |
-| `.opencode/templates/canonical-plan.md` | 本文件必须包含证据、责任、双向 traceability、TDD、验证、预算和审计记录。 |
-| `AGENTS.md` | 使用 Bun；不要从仓库根运行测试；保持最小修改。 |
-| `thirdparty/opentui/AGENTS.md` | OpenTUI 测试从 package 目录运行；native 变更才需要 native build；必须先构建可复现 feedback loop。 |
-| `packages/opencode/AGENTS.md` | opencode package 测试/类型检查使用 package-local 命令。 |
-| `packages/opencode/test/AGENTS.md` | 测试使用真实 seam，避免通过 sleep 猜测异步完成；优先公开行为和真实 worker 边界。 |
-| `docs/adr/README.md` | 本计划是局部 lifecycle repair，不新增跨模块 ADR。 |
-| `docs/plans/opentui-streaming-markdown-performance-repair.md` R62 | 已验证的 persistent Markdown 算法基线；其明确排除了本次 request cancellation/lifecycle 范围。 |
+| Source                                                            | Why it constrains this task                                                                                                 |
+| ----------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `CONTEXT.md`                                                      | OpenTUI core 位于 `thirdparty/opentui/packages/core`；TUI 正文使用 `CodeRenderable`，Session/Message 是 opencode 当前词汇。 |
+| `.opencode/policy/first-principles-engineering.md`                | 必须修复 first divergence；一个 authoritative primary path；无证据不得增加边界；无批准不得实施。                            |
+| `.opencode/templates/canonical-plan.md`                           | 本文件必须包含证据、责任、双向 traceability、TDD、验证、预算和审计记录。                                                    |
+| `AGENTS.md`                                                       | 使用 Bun；不要从仓库根运行测试；保持最小修改。                                                                              |
+| `thirdparty/opentui/AGENTS.md`                                    | OpenTUI 测试从 package 目录运行；native 变更才需要 native build；必须先构建可复现 feedback loop。                           |
+| `packages/opencode/AGENTS.md`                                     | opencode package 测试/类型检查使用 package-local 命令。                                                                     |
+| `packages/opencode/test/AGENTS.md`                                | 测试使用真实 seam，避免通过 sleep 猜测异步完成；优先公开行为和真实 worker 边界。                                            |
+| `docs/adr/README.md`                                              | 本计划是局部 lifecycle repair，不新增跨模块 ADR。                                                                           |
+| `docs/plans/opentui-streaming-markdown-performance-repair.md` R62 | 已验证的 persistent Markdown 算法基线；其明确排除了本次 request cancellation/lifecycle 范围。                               |
 
 ## 4. Files and Evidence Read
 
-| Evidence | Relevance | Evidence class |
-| --- | --- | --- |
-| `packages/core/src/lib/tree-sitter/types.ts:66-131` | 带 `messageId` 的 request/response 已存在；通用 `ERROR` 缺少关联 message id。 | observed |
-| `packages/core/src/lib/tree-sitter/client.ts:151-198,421-557` | callback map 的完成和 generic `ERROR` 的当前分流；generic error 只 emit，不 reject callback。 | observed |
-| `packages/core/src/lib/tree-sitter/client.ts:685-730` | streaming update 是 awaitable，但没有独立错误完成通道。 | observed |
-| `packages/core/src/lib/tree-sitter/client.ts:795-834` | destroy 会 reject 全部 pending request，错误文本为 `TreeSitter client destroyed`。 | observed |
-| `packages/core/src/lib/tree-sitter/client.ts:849-865` | public `resetBuffer()` 经 debouncer 进入真实 `RESET_BUFFER` worker 路径。 | reachable |
-| `packages/core/src/lib/tree-sitter/client.ts:639-663,738-750` | public `updateBuffer()` 经 ProcessQueue 进入真实 `HANDLE_EDITS` worker 路径。 | reachable |
-| `packages/core/src/lib/tree-sitter/client.ts:649-662,849-864` | ordinary edit/reset 在 worker acceptance 前先提交 client `buffers` 镜像，worker 失败时会与旧 Tree/content 分叉。 | reachable |
-| `packages/core/src/lib/tree-sitter/client.ts:671-681` | streaming buffer 用空内容初始化后，当前 client 直接写入首个 source；R7 保留空 accepted mirror，首个 update 才提交 source。 | reachable |
-| `packages/core/src/lib/tree-sitter/parser.worker.ts:26-42` | persistent `ParserState` 对 current Tree 只有单一字段 owner。 | observed |
-| `packages/core/src/lib/tree-sitter/parser.worker.ts` runtime probe | 安装版本的 `Tree.prototype` 确实提供 `copy()` 和 `delete()`；真实 Markdown parse probe 得到 `accepted="a"`, `candidate="a++"`, `isolated=true`，候选 edit 不修改 accepted Tree。 | observed |
-| `packages/core/src/platform/worker.ts:330-335` | worker message listener 对每条消息执行 `void handler(...)`，同一 buffer 的顺序不能由 worker runtime 自动保证。 | observed |
-| `packages/core/src/lib/queue.ts:4-51` | 当前 ProcessQueue 串行调用但吞掉 processor rejection，且 enqueue 不返回完成 Promise。 | observed |
-| `packages/core/src/lib/debounce.ts:25-46` runtime probe | 相同 debounce key 被替换后旧 Promise 保持 pending；只有实际执行的最新 callback 完成。 | observed |
-| `packages/core/src/lib/tree-sitter/parser.worker.ts:555-589,1259-1281` | ordinary edit 应用多个 `tree.edit()` 后覆盖 current Tree，同样没有 delete previous Tree。 | reachable |
-| `packages/core/src/lib/tree-sitter/parser.worker.ts:940-943,967-1051` | injection 临时 Tree 会 delete；persistent replacement 当前没有使用 `Tree.copy()` 隔离 candidate，也没有及时 delete 被替换的 Tree。 | observed |
-| `packages/core/src/lib/tree-sitter/parser.worker.ts:1053-1093` | reset 在 parse 成功后覆盖 current Tree 且不 delete previous Tree；dispose 只释放最终 current Tree。 | reachable |
-| `packages/core/src/lib/tree-sitter/parser.worker.ts:1096-1154` | one-shot 路径显式 delete，证明 WASM Tree 生命周期合同。 | observed |
-| `packages/core/src/lib/tree-sitter/parser.worker.ts:1202-1207,1377-1382` | worker catch 只能发送 bufferId/error，丢失带 messageId 请求的完成关联。 | observed |
-| `packages/core/src/renderables/Code.ts:317-343,392-458` | `drawUnstyledText=false` 下当前正文等待 highlight；worker rejection 进入现有 plain-text compatibility。 | observed |
-| `packages/core/src/renderables/Code.ts:640-676` | one-shot catch 在 `isDestroyed` 检查前打印 warning。 | observed |
-| `packages/core/src/renderables/Code.test.ts:1158-1189,1706-1741,2355-2394` | 既有可见性和 parser-error 合同，必须保持 `drawUnstyledText=false` 语义。 | observed |
-| `packages/core/src/lib/tree-sitter/client.test.ts:1304-1357,1435-1485` | 已有真实 worker、pending request、streaming buffer 和 cleanup seam。 | observed |
-| `packages/core/src/lib/tree-sitter/cache.test.ts` | 现有真实 client lifecycle/cache 测试入口。 | observed |
-| `packages/core/src/benchmark/markdown-benchmark.ts:262-360,1438-1522` | 已有 frame-independent Markdown timing、RSS/native memory sampling 和 streaming scenario。 | observed |
-| `packages/opencode/script/smoke-opentui-artifact.ts:54-409` | 现有真实编译 OpenCode TUI workload，覆盖 input-ready、Session、resize、spinner、completion、PTY transcript 和 shutdown。 | observed |
-| `packages/opencode/script/smoke-opentui-artifact.ts:131-144,376-380,439-553` | 现有smoke每16ms无条件记录frame time，只提交一次`hello`；它能做功能smoke，但不能区分prompt/Markdown cell advance或产生contracted并发workload。 | observed |
-| `.temp/testing/opentui-lifecycle-benchmark.ts:266-340` | R22 generated copy只替换SSE和completion前短输入，仍缺少pre-submit producer、完整overlap/resize schedule和独立transition denominator。 | observed |
-| isolated compiled smoke daemon log | launcher fails before SSE attach with `Cannot create CliRenderer: stdin is already used by another CliRenderer`; daemon health is200 while `tuiClients=0`. | observed |
-| compiled binary string probe | nested core path is embedded, but `Cannot create CliRenderer...` constructor guard appears twice; current package-local core-only overlay bundles two OpenTUI core module identities. | observed |
-| `@opentui/solid:index.bun.js` and `@opentui/keymap` imports | both packages import `@opentui/core`; copying/linking only core at the opencode package does not redirect imports resolved from root-installed solid/keymap. | observed |
-| R24 full-scope overlay build | package-local core/solid/keymap scopes were created for both `packages/opencode` and `packages/plugin`, Vite was junctioned and cleaned, but the successful compiled binary still contained two renderer constructor guards. `node_modules/@opencode-ai/plugin` is a root symlink to `packages/plugin`, whose `src/tui.ts` exports runtime keymap values and imports OpenTUI packages. | observed/reachable |
-| R25 importer and smoke probes | solid, keymap and local plugin importer paths resolve nested core after explicit keymap dependency linking; the compiled binary still has two guard strings because it contains isolated multi-entrypoint code, while unchanged Session smoke reaches attach, initial frame and both resize frames with no `stdin already used` error before its pre-existing busy-label assertion. | observed |
-| `docs/plans/opentui-streaming-markdown-performance-repair.md:67,106,125,255,258,342-376` | R62 已记录同输入 full-render/streaming 等价、stable-prefix scaling、独立 producer/render cadence 和显著提速的可复验基线。 | verified historical baseline |
-| 用户提供的 worker-error harness | `settled=pending`, `pendingCallbacks=1`, forced worker error；destroy 后才 rejected。 | observed |
-| 用户最新截图 | Thinking计数仍存在，但thinking正文和assistant正文大面积空白；这与`drawUnstyledText=false`等待未完成highlight Promise的consumer症状一致。 | observed |
-| 用户最新退出日志 | 正常/streaming Code renderables在退出后批量打印`TreeSitter client destroyed`，调用链均经过renderer finalize/destroy和Code catch；与destroyed guard晚于warning的shutdown症状一致。 | observed |
-| `client.ts:812-855` + `parser.worker.ts:1353-1359` | dispose每次启动3秒timer；无`BUFFER_DISPOSED`时仍`resolve(false)`，public void fulfilled并在finally删除client mirror，worker Tree释放没有ack。 | observed/reachable |
-| R28 compiled smoke contract | 正常240-delta/exit可在未触发worker query error、未检查正文fallback、未检查PTY/daemon中的destroy warning时通过。 | contracted gap |
-| 用户提供的 Windows RSS 对照 | one-shot 500 次约 145–148 MiB 稳定；streaming 固定长度 500 次约 183.4→196.9 MiB，3000 次约 227 MiB。 | observed |
-| current-source Zig/compiled probe | Zig 0.15.2的既有WrongGeneration test为`1/1 passed`；current-source DLL仍在compiled fixture panic，排除了prebuilt provenance。 | observed |
-| sourcemapped FFI probe | `opentui-spinner.renderSelf -> root core resolveRenderLib/encodeUnicode -> nested core buffer.drawChar`把pool A的packed ID送入pool B；`buffer.zig`只是首个检测者。 | observed |
-| spinner overlay rerun | spinner复制到opencode local scope并显式链接nested core后，renderer guard由2降为1，120字符/240 delta到达`STREAM-0239`且无WrongGeneration。 | observed |
-| same-machine HEAD/current cadence | HEAD/current分别为idle `28.74/27.24Hz`、stream `8.90/9.02Hz`、concurrent `23.42/24.71Hz`；R30绝对50/40/35门槛超出同机HEAD，不可作为本repair的提升证据。 | observed |
+| Evidence                                                                                 | Relevance                                                                                                                                                                                                                                                                                                                                                                              | Evidence class               |
+| ---------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------- |
+| `packages/core/src/lib/tree-sitter/types.ts:66-131`                                      | 带 `messageId` 的 request/response 已存在；通用 `ERROR` 缺少关联 message id。                                                                                                                                                                                                                                                                                                          | observed                     |
+| `packages/core/src/lib/tree-sitter/client.ts:151-198,421-557`                            | callback map 的完成和 generic `ERROR` 的当前分流；generic error 只 emit，不 reject callback。                                                                                                                                                                                                                                                                                          | observed                     |
+| `packages/core/src/lib/tree-sitter/client.ts:685-730`                                    | streaming update 是 awaitable，但没有独立错误完成通道。                                                                                                                                                                                                                                                                                                                                | observed                     |
+| `packages/core/src/lib/tree-sitter/client.ts:795-834`                                    | destroy 会 reject 全部 pending request，错误文本为 `TreeSitter client destroyed`。                                                                                                                                                                                                                                                                                                     | observed                     |
+| `packages/core/src/lib/tree-sitter/client.ts:849-865`                                    | public `resetBuffer()` 经 debouncer 进入真实 `RESET_BUFFER` worker 路径。                                                                                                                                                                                                                                                                                                              | reachable                    |
+| `packages/core/src/lib/tree-sitter/client.ts:639-663,738-750`                            | public `updateBuffer()` 经 ProcessQueue 进入真实 `HANDLE_EDITS` worker 路径。                                                                                                                                                                                                                                                                                                          | reachable                    |
+| `packages/core/src/lib/tree-sitter/client.ts:649-662,849-864`                            | ordinary edit/reset 在 worker acceptance 前先提交 client `buffers` 镜像，worker 失败时会与旧 Tree/content 分叉。                                                                                                                                                                                                                                                                       | reachable                    |
+| `packages/core/src/lib/tree-sitter/client.ts:671-681`                                    | streaming buffer 用空内容初始化后，当前 client 直接写入首个 source；R7 保留空 accepted mirror，首个 update 才提交 source。                                                                                                                                                                                                                                                             | reachable                    |
+| `packages/core/src/lib/tree-sitter/parser.worker.ts:26-42`                               | persistent `ParserState` 对 current Tree 只有单一字段 owner。                                                                                                                                                                                                                                                                                                                          | observed                     |
+| `packages/core/src/lib/tree-sitter/parser.worker.ts` runtime probe                       | 安装版本的 `Tree.prototype` 确实提供 `copy()` 和 `delete()`；真实 Markdown parse probe 得到 `accepted="a"`, `candidate="a++"`, `isolated=true`，候选 edit 不修改 accepted Tree。                                                                                                                                                                                                       | observed                     |
+| `packages/core/src/platform/worker.ts:330-335`                                           | worker message listener 对每条消息执行 `void handler(...)`，同一 buffer 的顺序不能由 worker runtime 自动保证。                                                                                                                                                                                                                                                                         | observed                     |
+| `packages/core/src/lib/queue.ts:4-51`                                                    | 当前 ProcessQueue 串行调用但吞掉 processor rejection，且 enqueue 不返回完成 Promise。                                                                                                                                                                                                                                                                                                  | observed                     |
+| `packages/core/src/lib/debounce.ts:25-46` runtime probe                                  | 相同 debounce key 被替换后旧 Promise 保持 pending；只有实际执行的最新 callback 完成。                                                                                                                                                                                                                                                                                                  | observed                     |
+| `packages/core/src/lib/tree-sitter/parser.worker.ts:555-589,1259-1281`                   | ordinary edit 应用多个 `tree.edit()` 后覆盖 current Tree，同样没有 delete previous Tree。                                                                                                                                                                                                                                                                                              | reachable                    |
+| `packages/core/src/lib/tree-sitter/parser.worker.ts:940-943,967-1051`                    | injection 临时 Tree 会 delete；persistent replacement 当前没有使用 `Tree.copy()` 隔离 candidate，也没有及时 delete 被替换的 Tree。                                                                                                                                                                                                                                                     | observed                     |
+| `packages/core/src/lib/tree-sitter/parser.worker.ts:1053-1093`                           | reset 在 parse 成功后覆盖 current Tree 且不 delete previous Tree；dispose 只释放最终 current Tree。                                                                                                                                                                                                                                                                                    | reachable                    |
+| `packages/core/src/lib/tree-sitter/parser.worker.ts:1096-1154`                           | one-shot 路径显式 delete，证明 WASM Tree 生命周期合同。                                                                                                                                                                                                                                                                                                                                | observed                     |
+| `packages/core/src/lib/tree-sitter/parser.worker.ts:1202-1207,1377-1382`                 | worker catch 只能发送 bufferId/error，丢失带 messageId 请求的完成关联。                                                                                                                                                                                                                                                                                                                | observed                     |
+| `packages/core/src/renderables/Code.ts:317-343,392-458`                                  | `drawUnstyledText=false` 下当前正文等待 highlight；worker rejection 进入现有 plain-text compatibility。                                                                                                                                                                                                                                                                                | observed                     |
+| `packages/core/src/renderables/Code.ts:640-676`                                          | one-shot catch 在 `isDestroyed` 检查前打印 warning。                                                                                                                                                                                                                                                                                                                                   | observed                     |
+| `packages/core/src/renderables/Code.test.ts:1158-1189,1706-1741,2355-2394`               | 既有可见性和 parser-error 合同，必须保持 `drawUnstyledText=false` 语义。                                                                                                                                                                                                                                                                                                               | observed                     |
+| `packages/core/src/lib/tree-sitter/client.test.ts:1304-1357,1435-1485`                   | 已有真实 worker、pending request、streaming buffer 和 cleanup seam。                                                                                                                                                                                                                                                                                                                   | observed                     |
+| `packages/core/src/lib/tree-sitter/cache.test.ts`                                        | 现有真实 client lifecycle/cache 测试入口。                                                                                                                                                                                                                                                                                                                                             | observed                     |
+| `packages/core/src/benchmark/markdown-benchmark.ts:262-360,1438-1522`                    | 已有 frame-independent Markdown timing、RSS/native memory sampling 和 streaming scenario。                                                                                                                                                                                                                                                                                             | observed                     |
+| `packages/opencode/script/smoke-opentui-artifact.ts:54-409`                              | 现有真实编译 OpenCode TUI workload，覆盖 input-ready、Session、resize、spinner、completion、PTY transcript 和 shutdown。                                                                                                                                                                                                                                                               | observed                     |
+| `packages/opencode/script/smoke-opentui-artifact.ts:131-144,376-380,439-553`             | 现有smoke每16ms无条件记录frame time，只提交一次`hello`；它能做功能smoke，但不能区分prompt/Markdown cell advance或产生contracted并发workload。                                                                                                                                                                                                                                          | observed                     |
+| `.temp/testing/opentui-lifecycle-benchmark.ts:266-340`                                   | R22 generated copy只替换SSE和completion前短输入，仍缺少pre-submit producer、完整overlap/resize schedule和独立transition denominator。                                                                                                                                                                                                                                                  | observed                     |
+| isolated compiled smoke daemon log                                                       | launcher fails before SSE attach with `Cannot create CliRenderer: stdin is already used by another CliRenderer`; daemon health is200 while `tuiClients=0`.                                                                                                                                                                                                                             | observed                     |
+| compiled binary string probe                                                             | nested core path is embedded, but `Cannot create CliRenderer...` constructor guard appears twice; current package-local core-only overlay bundles two OpenTUI core module identities.                                                                                                                                                                                                  | observed                     |
+| `@opentui/solid:index.bun.js` and `@opentui/keymap` imports                              | both packages import `@opentui/core`; copying/linking only core at the opencode package does not redirect imports resolved from root-installed solid/keymap.                                                                                                                                                                                                                           | observed                     |
+| R24 full-scope overlay build                                                             | package-local core/solid/keymap scopes were created for both `packages/opencode` and `packages/plugin`, Vite was junctioned and cleaned, but the successful compiled binary still contained two renderer constructor guards. `node_modules/@opencode-ai/plugin` is a root symlink to `packages/plugin`, whose `src/tui.ts` exports runtime keymap values and imports OpenTUI packages. | observed/reachable           |
+| R25 importer and smoke probes                                                            | solid, keymap and local plugin importer paths resolve nested core after explicit keymap dependency linking; the compiled binary still has two guard strings because it contains isolated multi-entrypoint code, while unchanged Session smoke reaches attach, initial frame and both resize frames with no `stdin already used` error before its pre-existing busy-label assertion.    | observed                     |
+| `docs/plans/opentui-streaming-markdown-performance-repair.md:67,106,125,255,258,342-376` | R62 已记录同输入 full-render/streaming 等价、stable-prefix scaling、独立 producer/render cadence 和显著提速的可复验基线。                                                                                                                                                                                                                                                              | verified historical baseline |
+| 用户提供的 worker-error harness                                                          | `settled=pending`, `pendingCallbacks=1`, forced worker error；destroy 后才 rejected。                                                                                                                                                                                                                                                                                                  | observed                     |
+| 用户最新截图                                                                             | Thinking计数仍存在，但thinking正文和assistant正文大面积空白；这与`drawUnstyledText=false`等待未完成highlight Promise的consumer症状一致。                                                                                                                                                                                                                                               | observed                     |
+| 用户最新退出日志                                                                         | 正常/streaming Code renderables在退出后批量打印`TreeSitter client destroyed`，调用链均经过renderer finalize/destroy和Code catch；与destroyed guard晚于warning的shutdown症状一致。                                                                                                                                                                                                      | observed                     |
+| `client.ts:812-855` + `parser.worker.ts:1353-1359`                                       | dispose每次启动3秒timer；无`BUFFER_DISPOSED`时仍`resolve(false)`，public void fulfilled并在finally删除client mirror，worker Tree释放没有ack。                                                                                                                                                                                                                                          | observed/reachable           |
+| R28 compiled smoke contract                                                              | 正常240-delta/exit可在未触发worker query error、未检查正文fallback、未检查PTY/daemon中的destroy warning时通过。                                                                                                                                                                                                                                                                        | contracted gap               |
+| 用户提供的 Windows RSS 对照                                                              | one-shot 500 次约 145–148 MiB 稳定；streaming 固定长度 500 次约 183.4→196.9 MiB，3000 次约 227 MiB。                                                                                                                                                                                                                                                                                   | observed                     |
+| current-source Zig/compiled probe                                                        | Zig 0.15.2的既有WrongGeneration test为`1/1 passed`；current-source DLL仍在compiled fixture panic，排除了prebuilt provenance。                                                                                                                                                                                                                                                          | observed                     |
+| sourcemapped FFI probe                                                                   | `opentui-spinner.renderSelf -> root core resolveRenderLib/encodeUnicode -> nested core buffer.drawChar`把pool A的packed ID送入pool B；`buffer.zig`只是首个检测者。                                                                                                                                                                                                                     | observed                     |
+| spinner overlay rerun                                                                    | spinner复制到opencode local scope并显式链接nested core后，renderer guard由2降为1，120字符/240 delta到达`STREAM-0239`且无WrongGeneration。                                                                                                                                                                                                                                              | observed                     |
+| same-machine HEAD/current cadence                                                        | HEAD/current分别为idle `28.74/27.24Hz`、stream `8.90/9.02Hz`、concurrent `23.42/24.71Hz`；R30绝对50/40/35门槛超出同机HEAD，不可作为本repair的提升证据。                                                                                                                                                                                                                                | observed                     |
 
 ## 5. Baseline and Current Worktree Behavior
 
@@ -3167,47 +3167,47 @@ The current worktree started from an unapproved R7-era repair. It correlated err
 
 ## 6. Supported Input Domain and Reachability
 
-| Input or condition | Producer | Upstream guarantees | Reachable path | Owner | Classification |
-| --- | --- | --- | --- | --- | --- |
-| streaming Markdown append | provider delta -> Session Message Part -> `CodeRenderable.content` | content 是当前完整 source；R62 已定义 persistent buffer | `Code.startStreamingHighlight` -> client -> worker | TreeSitterClient/worker protocol | observed |
-| worker exception during `STREAMING_UPDATE` | parser/query/injection code | request carries `messageId` | worker top-level catch -> generic `ERROR` | worker response protocol | observed/reachable |
-| worker exception during one-shot/parser-init/data-path request | Code/client public operation | request carries `messageId` | same catch -> callback map | worker response protocol | reachable |
-| global/parser initialization overlaps Code removal | fresh-client `createBuffer()` plus renderable destroy | one client owns the buffer id | reservation currently occurs after global initialize; init query and dispose can cross | client tail + worker candidate owner | reachable |
-| repeated fixed-length streaming updates | provider or benchmark producer | source length can remain constant | persistent Tree replacement loop | parser worker Tree owner | observed |
-| queued ordinary buffer edits | public `updateBuffer()` | existing parsed buffer; edits are ordered by ProcessQueue | `HANDLE_EDITS` -> `handleEdits()` | parser worker Tree owner | reachable |
-| debounced full reset | public `resetBuffer()` | buffer/parser already exists | `processEdit(..., true)` -> `RESET_BUFFER` -> `handleResetBuffer()` | parser worker Tree owner | reachable |
-| renderer shutdown with in-flight highlight | Ctrl+C/destroy -> root destroy -> global client destroy | destroy rejects pending requests | Code catch after cancellation; compiled wrapper marker proves query entered before Ctrl+C | Code cancellation/diagnostic seam | observed |
-| queued buffer mutation (`HANDLE_EDITS`/`RESET_BUFFER`/`STREAMING_UPDATE`) | `TreeSitterClient` per-buffer FIFO | one client owns all messages for one buffer | queue operation -> correlated response -> accepted mirror commit | client queue + worker Tree owner | reachable |
-| disposal after rejection or delayed ack | Code/remove after query failure or busy worker | release cannot depend on mutation success or precede worker confirmation | failed tail -> correlated dispose -> ack/rejection | client/worker completion protocol | reachable |
-| compiled local-core build imports `opentui-spinner` | production Session Spinner | peer resolves from importing package location | root spinner -> root core/native pool while target buffer uses nested core | temporary build overlay/importer gate | observed |
+| Input or condition                                                        | Producer                                                           | Upstream guarantees                                                      | Reachable path                                                                            | Owner                                 | Classification     |
+| ------------------------------------------------------------------------- | ------------------------------------------------------------------ | ------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------- | ------------------------------------- | ------------------ |
+| streaming Markdown append                                                 | provider delta -> Session Message Part -> `CodeRenderable.content` | content 是当前完整 source；R62 已定义 persistent buffer                  | `Code.startStreamingHighlight` -> client -> worker                                        | TreeSitterClient/worker protocol      | observed           |
+| worker exception during `STREAMING_UPDATE`                                | parser/query/injection code                                        | request carries `messageId`                                              | worker top-level catch -> generic `ERROR`                                                 | worker response protocol              | observed/reachable |
+| worker exception during one-shot/parser-init/data-path request            | Code/client public operation                                       | request carries `messageId`                                              | same catch -> callback map                                                                | worker response protocol              | reachable          |
+| global/parser initialization overlaps Code removal                        | fresh-client `createBuffer()` plus renderable destroy              | one client owns the buffer id                                            | reservation currently occurs after global initialize; init query and dispose can cross    | client tail + worker candidate owner  | reachable          |
+| repeated fixed-length streaming updates                                   | provider or benchmark producer                                     | source length can remain constant                                        | persistent Tree replacement loop                                                          | parser worker Tree owner              | observed           |
+| queued ordinary buffer edits                                              | public `updateBuffer()`                                            | existing parsed buffer; edits are ordered by ProcessQueue                | `HANDLE_EDITS` -> `handleEdits()`                                                         | parser worker Tree owner              | reachable          |
+| debounced full reset                                                      | public `resetBuffer()`                                             | buffer/parser already exists                                             | `processEdit(..., true)` -> `RESET_BUFFER` -> `handleResetBuffer()`                       | parser worker Tree owner              | reachable          |
+| renderer shutdown with in-flight highlight                                | Ctrl+C/destroy -> root destroy -> global client destroy            | destroy rejects pending requests                                         | Code catch after cancellation; compiled wrapper marker proves query entered before Ctrl+C | Code cancellation/diagnostic seam     | observed           |
+| queued buffer mutation (`HANDLE_EDITS`/`RESET_BUFFER`/`STREAMING_UPDATE`) | `TreeSitterClient` per-buffer FIFO                                 | one client owns all messages for one buffer                              | queue operation -> correlated response -> accepted mirror commit                          | client queue + worker Tree owner      | reachable          |
+| disposal after rejection or delayed ack                                   | Code/remove after query failure or busy worker                     | release cannot depend on mutation success or precede worker confirmation | failed tail -> correlated dispose -> ack/rejection                                        | client/worker completion protocol     | reachable          |
+| compiled local-core build imports `opentui-spinner`                       | production Session Spinner                                         | peer resolves from importing package location                            | root spinner -> root core/native pool while target buffer uses nested core                | temporary build overlay/importer gate | observed           |
 
 ## 7. Required Invariants
 
-| ID | Behavioral invariant | Evidence | Existing test |
-| --- | --- | --- | --- |
+| ID     | Behavioral invariant                                                                                                                                                                                                                                                                                                                                                      | Evidence                                                                                   | Existing test                                                                      |
+| ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------- |
 | INV-01 | Every request carrying `messageId` completes exactly once. Before its first await, create reserves one client id/tail; initialization publishes parser state only after query success. The contracted `hasParser:false` response is an accepted diagnostic state that retains the client buffer; correlated rejection/error removes the reservation and worker candidate. | complete request union + fresh-client init/destroy overlap + unsupported-filetype contract | parameterized protocol, unsupported-filetype test and real-worker init fault tests |
-| INV-02 | A persistent buffer has one accepted client mirror and worker WASM Tree/content pair. Candidate success transfers/deletes copied/previous owners; failure deletes candidates and preserves accepted state. Reset follows the same transfer. Disposal removes client ownership only after correlated worker confirmation; timeout cannot synthesize success. | `Tree.copy()` probe, replacement sites, dispose timer/ack, RSS | candidate tests + delayed-ack disposal + fixed-length benchmark |
-| INV-03 | A worker error reaches the owning Code request, so existing parser-error compatibility can make current source visible without retrying another parser. | current Code catch contract + red harness | new public Code error-completion test |
-| INV-04 | Expected Tree-sitter cancellation after Code destruction is silent; unexpected worker/parser errors remain diagnostic and preserve the existing error path. | Ctrl+C logs + renderer destroy order | new shutdown warning test |
-| INV-05 | `drawUnstyledText=false`, stable-prefix cache semantics, output equivalence and current one-shot behavior remain unchanged. | user requirement + verified R62 | existing Code/client differential tests and benchmark |
-| INV-06 | Lifecycle repair creates no backlog；package MarkdownRenderable保留等价/timing/memory；compiled Session到达最终正文且typing/resize无丢失。Current cadence≥85% HEAD，input p95≤`max(100ms,1.15×HEAD)`；永久pending到≤150ms可见是显著改善。 | same-machine HEAD/current producer timestamps、PTY cell transitions、RSS和原始空白loop | temporary package/build/TUI benchmark |
+| INV-02 | A persistent buffer has one accepted client mirror and worker WASM Tree/content pair. Candidate success transfers/deletes copied/previous owners; failure deletes candidates and preserves accepted state. Reset follows the same transfer. Disposal removes client ownership only after correlated worker confirmation; timeout cannot synthesize success.               | `Tree.copy()` probe, replacement sites, dispose timer/ack, RSS                             | candidate tests + delayed-ack disposal + fixed-length benchmark                    |
+| INV-03 | A worker error reaches the owning Code request, so existing parser-error compatibility can make current source visible without retrying another parser.                                                                                                                                                                                                                   | current Code catch contract + red harness                                                  | new public Code error-completion test                                              |
+| INV-04 | Expected Tree-sitter cancellation after Code destruction is silent; unexpected worker/parser errors remain diagnostic and preserve the existing error path.                                                                                                                                                                                                               | Ctrl+C logs + renderer destroy order                                                       | new shutdown warning test                                                          |
+| INV-05 | `drawUnstyledText=false`, stable-prefix cache semantics, output equivalence and current one-shot behavior remain unchanged.                                                                                                                                                                                                                                               | user requirement + verified R62                                                            | existing Code/client differential tests and benchmark                              |
+| INV-06 | Lifecycle repair creates no backlog；package MarkdownRenderable保留等价/timing/memory；compiled Session到达最终正文且typing/resize无丢失。Current cadence≥85% HEAD，input p95≤`max(100ms,1.15×HEAD)`；永久pending到≤150ms可见是显著改善。                                                                                                                                 | same-machine HEAD/current producer timestamps、PTY cell transitions、RSS和原始空白loop     | temporary package/build/TUI benchmark                                              |
 
 ## 8. First Divergence and Root Cause
 
-| Invariant | First divergence | Owning module/interface | Proof |
-| --- | --- | --- | --- |
-| INV-01/03 | Worker top-level catch creates `ERROR` without the request `messageId`; client cannot find the callback and only emits an event. | `parser.worker.ts` response producer + `client.ts` callback protocol | forced worker error leaves `pendingCallbacks=1` until destroy |
-| INV-02 | `parserState.tree` is overwritten by `newTree` without deleting the previous Tree after changed ranges are read. | `ParserWorker.handleStreamingUpdate` | source comparison with explicit delete in injection/one-shot/dispose paths; RSS trend |
-| INV-02 | ordinary queued edits apply one or more `tree.edit()` calls and overwrite current Tree without deleting the previous owner. | `ParserWorker.handleEdits` | public `updateBuffer()` and worker dispatcher reach the assignment |
-| INV-02 | reset writes new content before parse and overwrites `parserState.tree` after success without deleting the previous Tree. | `ParserWorker.handleResetBuffer` | public reset producer reaches the assignment; only final current Tree is disposed |
-| INV-02 | all three handlers mutate/replace the accepted Tree directly and lose the previous owner. | `ParserWorker.handleEdits`, `handleStreamingUpdate`, `handleResetBuffer` | three reachable `parserState.tree = newTree` sites; no `Tree.copy()` candidate |
-| INV-02 | client commits ordinary edit/reset/streaming content/version before worker success. | `TreeSitterClient` buffer queue and mirror | current `buffers.set()` precedes worker response |
-| INV-04 | `Code` logs before checking `isDestroyed`; expected cancellation is classified as a user-visible highlight failure. | `CodeRenderable` catch/diagnostic seam | repeated Ctrl+C warning and current source order |
-| INV-05 downstream symptom | With `drawUnstyledText=false`, a pending request has no visible commit; this becomes long blank only when INV-01 is already false. | Code consumer, not repair owner | direct Code probe and existing visibility tests |
-| INV-01/02 | `createBuffer()` waits for global init before reservation and does not share the mutation/dispose queue; remove can return or finish before initial query later publishes a Tree. | client initialization + worker map publication | current early returns and map install precede `initialQuery()` |
-| INV-02 | disposal chained only through mutation success is skipped after a predecessor rejection. | client cleanup ordering | `previous.then(operation)` never calls operation on rejection |
-| INV-01/02 | disposal timeout resolves public removal and deletes client mirror without `BUFFER_DISPOSED`. | client/worker completion protocol | reachable3-second `resolve(false)` branch |
-| INV-06 diagnostic | build-local只统一core/solid/keymap/plugin，root `opentui-spinner`仍从自身位置解析root core，形成两个native pool；其cached packed ID跨pool进入nested buffer后触发WrongGeneration。 | temporary benchmark module-identity overlay | sourcemapped FFI stack、guard count `2→1`及无panic rerun |
+| Invariant                 | First divergence                                                                                                                                                                  | Owning module/interface                                                  | Proof                                                                                 |
+| ------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------- |
+| INV-01/03                 | Worker top-level catch creates `ERROR` without the request `messageId`; client cannot find the callback and only emits an event.                                                  | `parser.worker.ts` response producer + `client.ts` callback protocol     | forced worker error leaves `pendingCallbacks=1` until destroy                         |
+| INV-02                    | `parserState.tree` is overwritten by `newTree` without deleting the previous Tree after changed ranges are read.                                                                  | `ParserWorker.handleStreamingUpdate`                                     | source comparison with explicit delete in injection/one-shot/dispose paths; RSS trend |
+| INV-02                    | ordinary queued edits apply one or more `tree.edit()` calls and overwrite current Tree without deleting the previous owner.                                                       | `ParserWorker.handleEdits`                                               | public `updateBuffer()` and worker dispatcher reach the assignment                    |
+| INV-02                    | reset writes new content before parse and overwrites `parserState.tree` after success without deleting the previous Tree.                                                         | `ParserWorker.handleResetBuffer`                                         | public reset producer reaches the assignment; only final current Tree is disposed     |
+| INV-02                    | all three handlers mutate/replace the accepted Tree directly and lose the previous owner.                                                                                         | `ParserWorker.handleEdits`, `handleStreamingUpdate`, `handleResetBuffer` | three reachable `parserState.tree = newTree` sites; no `Tree.copy()` candidate        |
+| INV-02                    | client commits ordinary edit/reset/streaming content/version before worker success.                                                                                               | `TreeSitterClient` buffer queue and mirror                               | current `buffers.set()` precedes worker response                                      |
+| INV-04                    | `Code` logs before checking `isDestroyed`; expected cancellation is classified as a user-visible highlight failure.                                                               | `CodeRenderable` catch/diagnostic seam                                   | repeated Ctrl+C warning and current source order                                      |
+| INV-05 downstream symptom | With `drawUnstyledText=false`, a pending request has no visible commit; this becomes long blank only when INV-01 is already false.                                                | Code consumer, not repair owner                                          | direct Code probe and existing visibility tests                                       |
+| INV-01/02                 | `createBuffer()` waits for global init before reservation and does not share the mutation/dispose queue; remove can return or finish before initial query later publishes a Tree. | client initialization + worker map publication                           | current early returns and map install precede `initialQuery()`                        |
+| INV-02                    | disposal chained only through mutation success is skipped after a predecessor rejection.                                                                                          | client cleanup ordering                                                  | `previous.then(operation)` never calls operation on rejection                         |
+| INV-01/02                 | disposal timeout resolves public removal and deletes client mirror without `BUFFER_DISPOSED`.                                                                                     | client/worker completion protocol                                        | reachable3-second `resolve(false)` branch                                             |
+| INV-06 diagnostic         | build-local只统一core/solid/keymap/plugin，root `opentui-spinner`仍从自身位置解析root core，形成两个native pool；其cached packed ID跨pool进入nested buffer后触发WrongGeneration。 | temporary benchmark module-identity overlay                              | sourcemapped FFI stack、guard count `2→1`及无panic rerun                              |
 
 Red-capable feedback loop already run:
 
@@ -3223,15 +3223,15 @@ The single temporary benchmark owns package oracle/timing/RSS, build provenance 
 
 ## 9. Responsibility and Seam
 
-| Concern | Owner | Interface promise | Why it belongs here | Why another module does not own it |
-| --- | --- | --- | --- | --- |
-| Associate worker exceptions with requests | `parser.worker.ts` + `types.ts` | a messageId request has a correlated response | worker produces the wire response and knows the incoming message | Code cannot recover a missing correlation id |
-| Resolve/reject correlated callbacks | `TreeSitterClient` | each public request promise settles once | client owns callback map and worker message dispatch | worker cannot access client promises |
-| Release replaced WASM Tree | `ParserWorker` | parser state owns one matching Tree/content pair | worker creates, streams, applies ordinary edits, resets, replaces and disposes Trees | client only owns numeric buffer protocol |
-| Serialize accepted buffer mutations | `TreeSitterClient` private Promise chain | one client-owned tail Promise orders all mutation messages of a buffer | shared `ProcessQueue` need not change and worker need not duplicate ordering state |
-| Serialize initialization and terminal release | `TreeSitterClient` private Promise chain + correlated worker dispose ack | init owns the first position; disposal runs after predecessor settlement and succeeds only after worker confirms Tree deletion | a client timer cannot prove worker ownership ended |
-| Suppress expected post-destroy warning | `CodeRenderable` | destroyed renderable must not report expected cancellation as a live failure | Code owns `isDestroyed` and fallback diagnostics | client does not know which UI node owns a request |
-| Measure memory/latency and unify compiled importer identity | one `.temp/testing` benchmark | diagnostic output/build overlay only | benchmark observes public paths and owns temporary core/solid/keymap/spinner/plugin scope | production modules and repository smoke must not gain telemetry or build-provenance policy |
+| Concern                                                     | Owner                                                                    | Interface promise                                                                                                              | Why it belongs here                                                                       | Why another module does not own it                                                         |
+| ----------------------------------------------------------- | ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| Associate worker exceptions with requests                   | `parser.worker.ts` + `types.ts`                                          | a messageId request has a correlated response                                                                                  | worker produces the wire response and knows the incoming message                          | Code cannot recover a missing correlation id                                               |
+| Resolve/reject correlated callbacks                         | `TreeSitterClient`                                                       | each public request promise settles once                                                                                       | client owns callback map and worker message dispatch                                      | worker cannot access client promises                                                       |
+| Release replaced WASM Tree                                  | `ParserWorker`                                                           | parser state owns one matching Tree/content pair                                                                               | worker creates, streams, applies ordinary edits, resets, replaces and disposes Trees      | client only owns numeric buffer protocol                                                   |
+| Serialize accepted buffer mutations                         | `TreeSitterClient` private Promise chain                                 | one client-owned tail Promise orders all mutation messages of a buffer                                                         | shared `ProcessQueue` need not change and worker need not duplicate ordering state        |
+| Serialize initialization and terminal release               | `TreeSitterClient` private Promise chain + correlated worker dispose ack | init owns the first position; disposal runs after predecessor settlement and succeeds only after worker confirms Tree deletion | a client timer cannot prove worker ownership ended                                        |
+| Suppress expected post-destroy warning                      | `CodeRenderable`                                                         | destroyed renderable must not report expected cancellation as a live failure                                                   | Code owns `isDestroyed` and fallback diagnostics                                          | client does not know which UI node owns a request                                          |
+| Measure memory/latency and unify compiled importer identity | one `.temp/testing` benchmark                                            | diagnostic output/build overlay only                                                                                           | benchmark observes public paths and owns temporary core/solid/keymap/spinner/plugin scope | production modules and repository smoke must not gain telemetry or build-provenance policy |
 
 ## 10. Single Approved Primary-Path Design
 
@@ -3272,88 +3272,88 @@ The client mirror advances only in the correlated success continuation. A reject
 
 ## 11. Secondary and Replacement Path Inventory
 
-| Path | Current or proposed | Classification | Produces success? | Decision-surface share | Disposition |
-| --- | --- | --- | --- | ---: | --- |
-| correlated worker success | current primary | primary-contract path | yes | 80% | preserve/repair |
-| correlated worker error -> existing Code plain-text commit | existing shipped behavior | existing compatibility | yes, under existing contract | 10% | preserve; no new parser |
-| uncorrelated worker error event | current path for event-only operations | diagnostic | no | 10% | preserve |
-| disposal timer or timeout/retry/second parser/raw-visible emergency route | current disposal timer plus otherwise proposed routes | forbidden success/fallback | yes | 0% | delete disposal timer; reject all replacements |
+| Path                                                                      | Current or proposed                                   | Classification             | Produces success?            | Decision-surface share | Disposition                                    |
+| ------------------------------------------------------------------------- | ----------------------------------------------------- | -------------------------- | ---------------------------- | ---------------------: | ---------------------------------------------- |
+| correlated worker success                                                 | current primary                                       | primary-contract path      | yes                          |                    80% | preserve/repair                                |
+| correlated worker error -> existing Code plain-text commit                | existing shipped behavior                             | existing compatibility     | yes, under existing contract |                    10% | preserve; no new parser                        |
+| uncorrelated worker error event                                           | current path for event-only operations                | diagnostic                 | no                           |                    10% | preserve                                       |
+| disposal timer or timeout/retry/second parser/raw-visible emergency route | current disposal timer plus otherwise proposed routes | forbidden success/fallback | yes                          |                     0% | delete disposal timer; reject all replacements |
 
 New alternate success-path budget: zero. The existing parser-error plain-text behavior is preserved, not added as a new route.
 
 ## 12. Workaround Deletion and Replacement
 
-| Existing workaround or duplicate | Why it existed | Why the approved route supersedes it | Delete or collapse location |
-| --- | --- | --- | --- |
-| Generic `ERROR` event with no request correlation | older event-style worker reporting | requests now complete through their own response channel | `types.ts`, `parser.worker.ts`, `client.ts` |
-| Copied base and replaced persistent Tree left without one terminal owner | missing owner transfer | every successful edit/stream replacement transfers the returned Tree and deletes copied base plus previous accepted Tree; reset transfers its new Tree and deletes the previous Tree | `parser.worker.ts:handleEdits`, `handleStreamingUpdate`, `handleResetBuffer` |
-| Optimistic buffer mirror before worker acceptance | fire-and-forget edit path | private tail completion is the only mirror commit point | `client.ts`; restore `queue.ts` unchanged |
-| Two-phase `MutationResponse.finalize/rollback` | attempted post-transfer recovery | one ParserState map-pointer install/post/restore boundary carries the whole owner | `parser.worker.ts` |
-| Warning before destroyed guard | fallback logging written for live failures | cancellation is not a live highlight failure | `Code.ts` catch blocks |
-| 3-second disposal `resolve(false)` | bounded old cleanup wait | only worker ack proves Parser/Tree deletion; timeout fulfillment discards client ownership without proof | `types.ts`, `client.ts`, `parser.worker.ts` correlated dispose |
+| Existing workaround or duplicate                                         | Why it existed                             | Why the approved route supersedes it                                                                                                                                                 | Delete or collapse location                                                  |
+| ------------------------------------------------------------------------ | ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------- |
+| Generic `ERROR` event with no request correlation                        | older event-style worker reporting         | requests now complete through their own response channel                                                                                                                             | `types.ts`, `parser.worker.ts`, `client.ts`                                  |
+| Copied base and replaced persistent Tree left without one terminal owner | missing owner transfer                     | every successful edit/stream replacement transfers the returned Tree and deletes copied base plus previous accepted Tree; reset transfers its new Tree and deletes the previous Tree | `parser.worker.ts:handleEdits`, `handleStreamingUpdate`, `handleResetBuffer` |
+| Optimistic buffer mirror before worker acceptance                        | fire-and-forget edit path                  | private tail completion is the only mirror commit point                                                                                                                              | `client.ts`; restore `queue.ts` unchanged                                    |
+| Two-phase `MutationResponse.finalize/rollback`                           | attempted post-transfer recovery           | one ParserState map-pointer install/post/restore boundary carries the whole owner                                                                                                    | `parser.worker.ts`                                                           |
+| Warning before destroyed guard                                           | fallback logging written for live failures | cancellation is not a live highlight failure                                                                                                                                         | `Code.ts` catch blocks                                                       |
+| 3-second disposal `resolve(false)`                                       | bounded old cleanup wait                   | only worker ack proves Parser/Tree deletion; timeout fulfillment discards client ownership without proof                                                                             | `types.ts`, `client.ts`, `parser.worker.ts` correlated dispose               |
 
 ## 13. Forward Traceability
 
-| Requirement or invariant | Production path | Planned file/change | Behavioral test |
-| --- | --- | --- | --- |
-| INV-01 | worker error response -> client callback reject | `types.ts`, `parser.worker.ts`, `client.ts` | forced correlated worker error rejects public update and leaves no pending request |
-| INV-01/02 | synchronous reservation -> global/client init tail -> local worker candidate -> sole terminal response -> accept/remove | `parser.worker.ts`, `client.ts` | fresh-client immediate remove, real-worker initialQuery failure and same-id recreate |
-| INV-02 | candidate ordinary-edit/streaming/reset replacement -> copied-base/previous/candidate terminal ownership | `parser.worker.ts`, `client.ts` | public update/streaming/reset queue coverage, candidate cleanup and fixed-size benchmark |
-| INV-01/02 | rejected predecessor -> always-after-settle correlated dispose -> acknowledged worker Tree release | `types.ts`, `client.ts`, `parser.worker.ts` | suppressed ack remains pending beyond old3s deadline, then real ack completes; same id recreates and repeated RSS is bounded |
-| INV-03 | rejection -> existing Code plain-text commit | `Code.ts` only for cancellation ordering; no draw flag change | package Code and sentinel-only compiled Session both show current body after real worker error |
-| INV-04 | destroyed Code rejects silently | `Code.ts` one-shot and streaming catch guards | package boundary holds `ONESHOT_HIGHLIGHT` plus `STREAMING_UPDATE` until renderer/client destroy; compiled blocked-stream Ctrl+C also emits zero shutdown warnings |
-| INV-05/06 | preserve R62 algorithm；unify spinner/core importer；enforce original visibility and same-machine non-regression | no cache/native algorithm change；temporary package scope adds spinner；HEAD/current PTY metrics | zero mismatch、stable-prefix scaling、RSS、final marker、≤150ms error body、HEAD/current cadence/latency ratio及无native panic |
+| Requirement or invariant | Production path                                                                                                         | Planned file/change                                                                              | Behavioral test                                                                                                                                                    |
+| ------------------------ | ----------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| INV-01                   | worker error response -> client callback reject                                                                         | `types.ts`, `parser.worker.ts`, `client.ts`                                                      | forced correlated worker error rejects public update and leaves no pending request                                                                                 |
+| INV-01/02                | synchronous reservation -> global/client init tail -> local worker candidate -> sole terminal response -> accept/remove | `parser.worker.ts`, `client.ts`                                                                  | fresh-client immediate remove, real-worker initialQuery failure and same-id recreate                                                                               |
+| INV-02                   | candidate ordinary-edit/streaming/reset replacement -> copied-base/previous/candidate terminal ownership                | `parser.worker.ts`, `client.ts`                                                                  | public update/streaming/reset queue coverage, candidate cleanup and fixed-size benchmark                                                                           |
+| INV-01/02                | rejected predecessor -> always-after-settle correlated dispose -> acknowledged worker Tree release                      | `types.ts`, `client.ts`, `parser.worker.ts`                                                      | suppressed ack remains pending beyond old3s deadline, then real ack completes; same id recreates and repeated RSS is bounded                                       |
+| INV-03                   | rejection -> existing Code plain-text commit                                                                            | `Code.ts` only for cancellation ordering; no draw flag change                                    | package Code and sentinel-only compiled Session both show current body after real worker error                                                                     |
+| INV-04                   | destroyed Code rejects silently                                                                                         | `Code.ts` one-shot and streaming catch guards                                                    | package boundary holds `ONESHOT_HIGHLIGHT` plus `STREAMING_UPDATE` until renderer/client destroy; compiled blocked-stream Ctrl+C also emits zero shutdown warnings |
+| INV-05/06                | preserve R62 algorithm；unify spinner/core importer；enforce original visibility and same-machine non-regression        | no cache/native algorithm change；temporary package scope adds spinner；HEAD/current PTY metrics | zero mismatch、stable-prefix scaling、RSS、final marker、≤150ms error body、HEAD/current cadence/latency ratio及无native panic                                     |
 
 ## 14. Reverse Traceability
 
-| Proposed production concept | Requirement ID | Evidence | Why existing logic cannot carry it |
-| --- | --- | --- | --- |
-| Optional `messageId` on generic `ERROR` and correlated reject | INV-01/03 | generic error lacks id and leaves observed pending callback | current event-only branch cannot settle request promise |
-| Correlated edit/reset response and client acceptance commit | INV-01/02 | client mirror currently advances before worker Tree acceptance | worker cannot repair a client mirror it does not own |
-| Copied-base and returned-Tree ownership through commit/failure | INV-02 | runtime exposes `copy()`/`delete()` and current handlers lose old owner | direct accepted-tree mutation cannot isolate failure or assign one terminal owner to copied base, returned candidate and previous Tree |
-| Private per-buffer Promise tail | INV-01/02 | client mirror currently advances before worker response | shared `ProcessQueue` would broaden scope; a client-local chain carries exact request completion |
-| Pre-await init reservation and correlated disposal after settlement | INV-01/02 | global/parser init can publish after early remove; success-only chaining skips release; timer currently fabricates unacknowledged success | worker cannot recover reversed order, and only worker response can confirm its Tree owner ended |
-| Destroyed guard before warning | INV-04 | repeated shutdown warnings and current catch order | current catch logs before knowing node is destroyed |
-| Error/lifecycle regression tests | INV-01..06 | existing tests do not cover generic error correlation or old Tree RSS | current green tests can miss the user-visible failure |
-| Spinner importer joins temporary local core scope | INV-06 | sourcemapped `renderSelf` proves root spinner encoded IDs enter nested buffer/native pool | core/solid/keymap/plugin-only overlay leaves this peer consumer split；native guard cannot repair cross-pool identity |
+| Proposed production concept                                         | Requirement ID | Evidence                                                                                                                                  | Why existing logic cannot carry it                                                                                                     |
+| ------------------------------------------------------------------- | -------------- | ----------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| Optional `messageId` on generic `ERROR` and correlated reject       | INV-01/03      | generic error lacks id and leaves observed pending callback                                                                               | current event-only branch cannot settle request promise                                                                                |
+| Correlated edit/reset response and client acceptance commit         | INV-01/02      | client mirror currently advances before worker Tree acceptance                                                                            | worker cannot repair a client mirror it does not own                                                                                   |
+| Copied-base and returned-Tree ownership through commit/failure      | INV-02         | runtime exposes `copy()`/`delete()` and current handlers lose old owner                                                                   | direct accepted-tree mutation cannot isolate failure or assign one terminal owner to copied base, returned candidate and previous Tree |
+| Private per-buffer Promise tail                                     | INV-01/02      | client mirror currently advances before worker response                                                                                   | shared `ProcessQueue` would broaden scope; a client-local chain carries exact request completion                                       |
+| Pre-await init reservation and correlated disposal after settlement | INV-01/02      | global/parser init can publish after early remove; success-only chaining skips release; timer currently fabricates unacknowledged success | worker cannot recover reversed order, and only worker response can confirm its Tree owner ended                                        |
+| Destroyed guard before warning                                      | INV-04         | repeated shutdown warnings and current catch order                                                                                        | current catch logs before knowing node is destroyed                                                                                    |
+| Error/lifecycle regression tests                                    | INV-01..06     | existing tests do not cover generic error correlation or old Tree RSS                                                                     | current green tests can miss the user-visible failure                                                                                  |
+| Spinner importer joins temporary local core scope                   | INV-06         | sourcemapped `renderSelf` proves root spinner encoded IDs enter nested buffer/native pool                                                 | core/solid/keymap/plugin-only overlay leaves this peer consumer split；native guard cannot repair cross-pool identity                  |
 
 ## 15. File-Level Change Plan
 
-| File | Add / modify / delete | Exact responsibility of the change | Expected line delta |
-| --- | --- | --- | ---: |
-| `thirdparty/opentui/packages/core/src/lib/tree-sitter/types.ts` | modify | Correlate generic error/warning, edit/reset and dispose success without changing event-only compatibility. | `E≤25`; raw≤35 |
-| `thirdparty/opentui/packages/core/src/lib/tree-sitter/parser.worker.ts` | modify | Correlate errors/dispose ack；candidate pointer transfer/release without broad reindent or duplicate cleanup。 | `E≤250`; raw≤285 |
-| `thirdparty/opentui/packages/core/src/lib/tree-sitter/client.ts` | modify | Pre-await reservation/tail、real disposal ack、success-only mirror commit；delete only superseded queue/debounce path。 | `E≤220`; raw≤260 |
-| `thirdparty/opentui/packages/core/src/renderables/Code.ts` | modify | Move destroyed guards before warning in one-shot and streaming catches; avoid unrelated formatting. | `E≤20`; raw≤20 |
-| `thirdparty/opentui/packages/core/src/lib/tree-sitter/client.test.ts` | modify | Ten channels; initialQuery failure; ordering/acknowledged dispose; streaming and one-shot live-error visibility plus deterministically held shared-client shutdown control. | 180–280 |
-| `.temp/testing/opentui-lifecycle-benchmark.ts` | create, temporary only | Public lifecycle/oracle/RSS；one local core/solid/keymap/spinner/plugin scope；worker provenance；HEAD/current cadence comparator；ephemeral normal240/error-visible/blocked-shutdown smoke。 | ≤600 |
+| File                                                                    | Add / modify / delete  | Exact responsibility of the change                                                                                                                                                            | Expected line delta |
+| ----------------------------------------------------------------------- | ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------: |
+| `thirdparty/opentui/packages/core/src/lib/tree-sitter/types.ts`         | modify                 | Correlate generic error/warning, edit/reset and dispose success without changing event-only compatibility.                                                                                    |      `E≤25`; raw≤35 |
+| `thirdparty/opentui/packages/core/src/lib/tree-sitter/parser.worker.ts` | modify                 | Correlate errors/dispose ack；candidate pointer transfer/release without broad reindent or duplicate cleanup。                                                                                |    `E≤250`; raw≤285 |
+| `thirdparty/opentui/packages/core/src/lib/tree-sitter/client.ts`        | modify                 | Pre-await reservation/tail、real disposal ack、success-only mirror commit；delete only superseded queue/debounce path。                                                                       |    `E≤220`; raw≤260 |
+| `thirdparty/opentui/packages/core/src/renderables/Code.ts`              | modify                 | Move destroyed guards before warning in one-shot and streaming catches; avoid unrelated formatting.                                                                                           |      `E≤20`; raw≤20 |
+| `thirdparty/opentui/packages/core/src/lib/tree-sitter/client.test.ts`   | modify                 | Ten channels; initialQuery failure; ordering/acknowledged dispose; streaming and one-shot live-error visibility plus deterministically held shared-client shutdown control.                   |             180–280 |
+| `.temp/testing/opentui-lifecycle-benchmark.ts`                          | create, temporary only | Public lifecycle/oracle/RSS；one local core/solid/keymap/spinner/plugin scope；worker provenance；HEAD/current cadence comparator；ephemeral normal240/error-visible/blocked-shutdown smoke。 |                ≤600 |
 
 Total code files remains six: four production files、`client.test.ts`、one temporary benchmark。`queue.ts`、`Code.test.ts`、repository smoke和全部native/Zig文件必须zero-diff。Final production同时满足`E_p≤600`和raw additions+deletions≤600；当前951 raw touch禁止提交审计，必须通过局部替换、复用既有控制流和删除纯重排收缩，不能用exclusion解释宽diff。
 
 ## 16. TDD Behavior Slices
 
-| Order | Red behavior | Why current code fails | Minimal green behavior | Regression protected |
-| ---: | --- | --- | --- | --- |
-| 1 | Each messageId request terminal-completes once; global-init/query/dispose overlap cannot publish after release or retain state. | create reserves after await, init sits outside queue and worker installs before query. | reserve before await; enqueue init; local candidate; one terminal response; failed cleanup. | no pending/double completion/init leak |
-| 2 | Fixed-size streaming updates complete and do not accumulate copied bases or superseded Trees. | successful replacement loses the accepted Tree without delete, and an unowned copied base leaks even when the returned candidate is accepted. | parse from `Tree.copy()`; after successful post transfer candidate Tree, then delete copied base and previous accepted Tree. | long Session RSS and WASM pressure |
-| 3 | A candidate parse/query/injection failure leaves the accepted Tree/content/reference state unchanged. | current handlers mutate shared state before later work can fail. | evaluate a cloned candidate state and delete all candidate allocations on failure. | subsequent update remains valid after an exception |
-| 4 | Public ordinary edits, streaming updates and resets are serialized in call order and commit client mirror only after correlated success. | reset currently waits outside the edit queue and superseded debounce Promises never settle. | remove reset debounce; one private Promise tail immediately owns every public mutation and completion. | no pending reset, reorder, version mismatch or dependent work after failure |
-| 5 | Package streaming+one-shot Code and compiled streaming Code destroyed while requests are held emit no warning. | both catches log before guard; current package test uses only streaming and normal compiled exit is not in-flight. | intercept real worker boundary after ready state, hold `STREAMING_UPDATE` and `ONESHOT_HIGHLIGHT`, require both observed, then destroy; compiled sentinel covers Ctrl+C. | zero one-shot/streaming shutdown warnings without hiding live errors |
-| 6 | Real worker errors make streaming and one-shot package Code plus compiled Session body visible. | pending promise blocks commit; a streaming-only live control cannot protect one-shot diagnostics. | correlated reject only; same failure worker drives separate `streaming:true/false` Code and asserts their respective warning plus plain text; compiled sentinel body is visible. | screenshot blank and both live compatibility catches |
-| 7 | Existing R62 equivalence/scaling remains green，compiled current cadence≥85% HEAD且input p95≤`max(100ms,1.15×HEAD)`。 | lifecycle changes must not add backlog；HEAD实测约30/9/24Hz，不能伪造50/40/35能力。 | run identical HEAD/current workload；final marker和原始≤150ms visibility独立必过。 | affected-path performance与原始空白显著改善 |
-| 8 | Disposal behind rejection succeeds only on matching worker ack; withholding ack past3s cannot fulfill. | success-only chaining skips cleanup and current timer fabricates success. | disposal waits on the same tail and correlated callback; test withholds outbound request past old deadline, then forwards it and observes real completion. | no unacknowledged release or Tree leak |
-| 9 | Local artifact所有runtime OpenTUI consumers共享一个core/native pool。 | root spinner的peer从自身位置解析root core；其cached encoded ID进入nested buffer会稳定WrongGeneration。 | overlay core/solid/keymap/spinner和local plugin；显式链接并realpath每个importer；require one guard、无panic、cleanup。 | module split不能伪装成native buffer缺陷 |
-| 10 | Compiled Session independently observes120-char typing、exact240 deltas、concurrent typing、two resizes和final body。 | timer ticks不能代表cell变化；绝对cadence门槛不能超过same-machine HEAD。 | parsed PTY advances输出raw metrics；cadence≥85% HEAD，p95≤`max(100ms,1.15×HEAD)`，final/resize/visibility为absolute gates。 | completed SSE不能伪装整体通过 |
+| Order | Red behavior                                                                                                                             | Why current code fails                                                                                                                        | Minimal green behavior                                                                                                                                                           | Regression protected                                                        |
+| ----: | ---------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
+|     1 | Each messageId request terminal-completes once; global-init/query/dispose overlap cannot publish after release or retain state.          | create reserves after await, init sits outside queue and worker installs before query.                                                        | reserve before await; enqueue init; local candidate; one terminal response; failed cleanup.                                                                                      | no pending/double completion/init leak                                      |
+|     2 | Fixed-size streaming updates complete and do not accumulate copied bases or superseded Trees.                                            | successful replacement loses the accepted Tree without delete, and an unowned copied base leaks even when the returned candidate is accepted. | parse from `Tree.copy()`; after successful post transfer candidate Tree, then delete copied base and previous accepted Tree.                                                     | long Session RSS and WASM pressure                                          |
+|     3 | A candidate parse/query/injection failure leaves the accepted Tree/content/reference state unchanged.                                    | current handlers mutate shared state before later work can fail.                                                                              | evaluate a cloned candidate state and delete all candidate allocations on failure.                                                                                               | subsequent update remains valid after an exception                          |
+|     4 | Public ordinary edits, streaming updates and resets are serialized in call order and commit client mirror only after correlated success. | reset currently waits outside the edit queue and superseded debounce Promises never settle.                                                   | remove reset debounce; one private Promise tail immediately owns every public mutation and completion.                                                                           | no pending reset, reorder, version mismatch or dependent work after failure |
+|     5 | Package streaming+one-shot Code and compiled streaming Code destroyed while requests are held emit no warning.                           | both catches log before guard; current package test uses only streaming and normal compiled exit is not in-flight.                            | intercept real worker boundary after ready state, hold `STREAMING_UPDATE` and `ONESHOT_HIGHLIGHT`, require both observed, then destroy; compiled sentinel covers Ctrl+C.         | zero one-shot/streaming shutdown warnings without hiding live errors        |
+|     6 | Real worker errors make streaming and one-shot package Code plus compiled Session body visible.                                          | pending promise blocks commit; a streaming-only live control cannot protect one-shot diagnostics.                                             | correlated reject only; same failure worker drives separate `streaming:true/false` Code and asserts their respective warning plus plain text; compiled sentinel body is visible. | screenshot blank and both live compatibility catches                        |
+|     7 | Existing R62 equivalence/scaling remains green，compiled current cadence≥85% HEAD且input p95≤`max(100ms,1.15×HEAD)`。                    | lifecycle changes must not add backlog；HEAD实测约30/9/24Hz，不能伪造50/40/35能力。                                                           | run identical HEAD/current workload；final marker和原始≤150ms visibility独立必过。                                                                                               | affected-path performance与原始空白显著改善                                 |
+|     8 | Disposal behind rejection succeeds only on matching worker ack; withholding ack past3s cannot fulfill.                                   | success-only chaining skips cleanup and current timer fabricates success.                                                                     | disposal waits on the same tail and correlated callback; test withholds outbound request past old deadline, then forwards it and observes real completion.                       | no unacknowledged release or Tree leak                                      |
+|     9 | Local artifact所有runtime OpenTUI consumers共享一个core/native pool。                                                                    | root spinner的peer从自身位置解析root core；其cached encoded ID进入nested buffer会稳定WrongGeneration。                                        | overlay core/solid/keymap/spinner和local plugin；显式链接并realpath每个importer；require one guard、无panic、cleanup。                                                           | module split不能伪装成native buffer缺陷                                     |
+|    10 | Compiled Session independently observes120-char typing、exact240 deltas、concurrent typing、two resizes和final body。                    | timer ticks不能代表cell变化；绝对cadence门槛不能超过same-machine HEAD。                                                                       | parsed PTY advances输出raw metrics；cadence≥85% HEAD，p95≤`max(100ms,1.15×HEAD)`，final/resize/visibility为absolute gates。                                                      | completed SSE不能伪装整体通过                                               |
 
 Tests assert public outcomes，worker-message interception only makes overlap deterministic。A fresh client reserves/init/removes/recreates one id；ten methods settle once；mutations order；failed stream disposes。Disposal withholds real request beyond3100ms then forwards ack。Healthy streaming/one-shot后hold真实两类消息并destroy，要求zero warnings；live controls仍warn/commit source。Compiled seam用importer realpath、one guard、no panic和same-machine HEAD/current PTY metrics；无production hook。
 
 ## 17. Chinese Comment Budget
 
-| Metric | Estimate | Method |
-| --- | ---: | --- |
-| Production effective changed lines `E_p` | measured from the exact final diff across the four production files | each added or substantively modified nonblank line counts once; exclude only imports, formatting, generated output and pure moves; `E_p≤600` |
-| Per-file denominator `E_i` | measured separately from the exact final diff for each of the six code files | use the same effective-line exclusions as policy; never pool a low-ratio file with another file |
-| Per-file qualifying Chinese comments `C_i` | if `E_i=0`, require `C_i=0`; otherwise `C_i >= max(1, ceil(E_i × 0.15))` | count only comments adjacent to a non-obvious changed boundary in that same file |
+| Metric                                     |                                                                     Estimate | Method                                                                                                                                       |
+| ------------------------------------------ | ---------------------------------------------------------------------------: | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| Production effective changed lines `E_p`   |          measured from the exact final diff across the four production files | each added or substantively modified nonblank line counts once; exclude only imports, formatting, generated output and pure moves; `E_p≤600` |
+| Per-file denominator `E_i`                 | measured separately from the exact final diff for each of the six code files | use the same effective-line exclusions as policy; never pool a low-ratio file with another file                                              |
+| Per-file qualifying Chinese comments `C_i` |     if `E_i=0`, require `C_i=0`; otherwise `C_i >= max(1, ceil(E_i × 0.15))` | count only comments adjacent to a non-obvious changed boundary in that same file                                                             |
 
 Qualifying comments must explain message correlation, candidate isolation, single-pointer transfer, immediate Promise-tail ordering, success-only mirror commit, acknowledged disposal ownership, cancellation classification and test/measurement intent. Comments must be adjacent and cannot be concentrated in a file header.
 
@@ -3361,8 +3361,8 @@ The final evidence must make the effective-line recount reproducible. After appl
 
 ## 18. Verification
 
-| Command | Working directory | Evidence produced |
-| --- | --- | --- |
+| Command                                                                | Working directory            | Evidence produced                                                                                                                                      |
+| ---------------------------------------------------------------------- | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `Invoke-Bounded -WorkingDirectory ... -FilePath bun -ArgumentList ...` | respective package directory | Every row is run through the exact external supervisor below; the target's stdout/stderr and exit code remain evidence, and a timeout is a failed row. |
 
 The verification runner is this executable PowerShell 7+ wrapper, used in the same `pwsh -NoProfile -Command` invocation as each row. It is not a repository file and therefore does not expand the six-file implementation scope:
@@ -3455,17 +3455,17 @@ The old timer-sampled R7 artifact is invalid。Significant improvement由原始p
 
 ## 19. Diff Budget
 
-| Metric | Hard budget |
-| --- | ---: |
-| Production files modified | <= 6 |
-| Total code files modified/created | <=6: 4 production + 1 test + 1 temporary benchmark |
-| Production files planned | 4 |
-| Production effective/raw changed code | `E_p <= 600` and raw additions+deletions `<=600`；both measured against nested `HEAD` |
-| Required qualifying Chinese comments | each file independently satisfies `E_i=0 => C_i=0`; otherwise `C_i >= max(1,ceil(E_i × 0.15))` |
-| Temporary diagnostic | one `.temp/testing` benchmark ≤600 lines, counted in file count and E/C |
-| Native/Zig files | 0；WrongGeneration由temporary spinner/core identity修复，不得修改buffer/native provenance |
-| New alternate success paths | 0 |
-| Plan document | <= 600 lines |
+| Metric                                |                                                                                    Hard budget |
+| ------------------------------------- | ---------------------------------------------------------------------------------------------: |
+| Production files modified             |                                                                                           <= 6 |
+| Total code files modified/created     |                                             <=6: 4 production + 1 test + 1 temporary benchmark |
+| Production files planned              |                                                                                              4 |
+| Production effective/raw changed code |          `E_p <= 600` and raw additions+deletions `<=600`；both measured against nested `HEAD` |
+| Required qualifying Chinese comments  | each file independently satisfies `E_i=0 => C_i=0`; otherwise `C_i >= max(1,ceil(E_i × 0.15))` |
+| Temporary diagnostic                  |                        one `.temp/testing` benchmark ≤600 lines, counted in file count and E/C |
+| Native/Zig files                      |      0；WrongGeneration由temporary spinner/core identity修复，不得修改buffer/native provenance |
+| New alternate success paths           |                                                                                              0 |
+| Plan document                         |                                                                                   <= 600 lines |
 
 The budget is a hard restraint, not permission to omit INV-01 through INV-06. If the approved route cannot fit, stop and revise the plan rather than add a fallback or unrelated refactor.
 
@@ -3500,41 +3500,41 @@ The independent auditor must read exact R31、original requirement、four produc
 
 ## 22. Historical Plan Audit Record (archival, non-normative)
 
-| Round | Audited revision | Full scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | R1 | yes | B-01, B-02, B-03 | incomplete verbatim requirement; decision-share estimate; compatibility classification must be rechecked | BLOCK | `ses_038052f31ffeeI1wKjTDGN5YnR` |
-| 2 | R2 | yes | B-01, B-02 | decision-share estimate; comment estimate; R2 metadata pending | BLOCK | `ses_037fb666effec7rX2Efjx7M1oJ` |
-| 3 | R3 | yes | B-01 | decision-share estimate; comment estimate; temporary benchmark not yet created | BLOCK | `ses_037ee8d08ffe6JZOEQHQtUl9Qh` |
-| 4 | R4 | yes | B-01 | decision-share estimate; comment estimate; R4 metadata pending | BLOCK | `ses_037e6e3acffeK21Sf66F1LVC2e` |
-| 5 | R5 | yes | B-01, B-02 | decision-share estimate; comment estimate; temporary benchmark/smoke artifact pending | BLOCK | `ses_037dd5543ffeeFcNo4MH3vdUTH` |
-| 6 | R6 | yes | B-01, B-02, B-03 | concurrent candidate seam; queue/debouncer completion semantics; whole-TUI metrics | BLOCK | `ses_037ce2acfffe1ywh36612hJjFO` |
-| 7 | R7 | yes | none | decision-surface share estimate; diagnostic artifacts generated during implementation | APPROVE | `ses_03781f6ebffeTjCYGAw2KYKDc6` |
-| 8 | R8 | yes | B-01 contradictory 50-FPS and 30-FPS whole-TUI contracts | archival references and effective-line estimate | BLOCK | `ses_035aee862ffeGaXzwp0igPa2rW` |
-| 9 | R9 | yes | B-01 package FPS gate not executable; B-02 before smoke cannot record failing baseline | implementation evidence remains historical | BLOCK | `ses_035a95841ffeHMPv6kXMDK2AMp` |
-| 10 | R10 | yes | B-01 wrong renderer owner; B-02 timer ticks counted as frames; B-03 no significant whole-TUI improvement | full client exit and final E/C remain implementation evidence | BLOCK | `ses_0358a039dffeMEf4mJsu6qxKB8` |
-| 11 | R11 | yes | B-01 cited benchmark cannot execute lifecycle/oracle gates; B-02 old timer artifact conflicts with new recorder baseline | historical implementation evidence | BLOCK | `ses_0357cb119ffemug9q197GS8cn8` |
-| 12 | R12 | yes | B-01 nine request/error-to-visible contract absent from file plan; B-02 original multi-Code/shared-client shutdown unverified | implementation E/C and clean exit remain pending | BLOCK | `ses_03574c0a8ffe1qRcFEVmMb13aF` |
-| 13 | R13 | yes | production churn960>600; RSS baseline unavailable; resize predicate insensitive |  | BLOCK | `ses_0356bbdf0ffe9Ymk75dIeulO8y` |
-| R14-cycle-1 | R14 | yes | B-01 reset debounce bypasses FIFO and leaves superseded Promise pending |  | BLOCK | `ses_034e0b82dffeoLRAvyR73VKqZi` |
-| R15-cycle-2 | R15 | yes | B-01 audit exception quote missing; B-02 spinner cannot prove 60FPS cadence |  | BLOCK | `ses_034d964c1ffe3CEEPm7eFH36g1` |
-| R16-cycle-3 | R16 | yes | B-01 compiled TUI lacks long streaming Markdown interaction load; B-02 seven code files exceed six |  | BLOCK | `ses_034cf15a3ffeSdWoHRMwLBAtK7` |
-| R17-cycle-4 | R17 | yes | B-01 disposal skipped after predecessor rejection; B-02 initialization/disposal lack one terminal owner |  | BLOCK | `ses_034c16437ffedtw3l0C2nnqfeX` |
-| R18-cycle-5 | R18 | yes | none | metadata mode label only | APPROVE | `ses_034b1bfc1ffeKOasCXckuD41Kj` |
-| R19-retries | R19 | unavailable | independent-audit-unavailable after repeated consecutive invocations |  | independent-audit-unavailable | `ses_0324151d6ffe1BHfeXFCLXRsSu`, `ses_03240bea6ffex4kp5V1r8Ntkl4`, `ses_0323f4035ffeda20IcfsE2Llcv` |
-| R19-cycle-6 | R19 | yes | B-01 package timing gate is computed but not enforced; B-02 compiled TUI does not exercise the required 240-delta Markdown workload; B-03 build-local does not verify parser-worker provenance | NB-01 supplemental verbatim requirement; NB-02 asserted decision-surface percentages; NB-03 extensive archival R18 evidence | BLOCK | `ses_030b2c7b8ffezrbqyttx1sWWQ8` |
-| R20-cycle-1 | R20 | yes | none | NB-01 audit-mode metadata; NB-02 archival implementation evidence; NB-03 asserted decision-surface percentages; NB-04 incomplete R20 implementation evidence | APPROVE | `ses_02da58dbdffeVPHEKqZTQoU7UQ` |
-| R21-cycle-2 | R21 | yes | B-01 verification commands state but do not execute an external120-second process-tree boundary | package/TUI gate separation; lifecycle contracts and traceability consistent | BLOCK | `ses_02d6ca07fffejOKRYoY97us5Jx` |
-| R22-cycle-3 | R22 | yes | none | NB-01 incomplete current-round verbatim capture; NB-02 non-recomputed decision-surface percentages; NB-03 archival implementation evidence retained but explicitly non-authorizing | APPROVE | `ses_02d65891fffedOpB4zPRBLhFrp` |
-| R23-cycle-4 | R23 | yes | B-01 generated compiled Session harness cannot execute the contracted idle typing, production stream-marker, concurrent typing, resize and transition-sensitive cadence/latency workload; the plan says to replace only the SSE body while requiring additional PTY producers and a cell-transition recorder | N-01 audit-mode metadata says `full-scope` while the handoff says `plan` | BLOCK | `ses_02b04752fffezAiIEMNI3Uw9DF` |
-| R24-cycle-5 | R24 | yes | none | `docs/plans/opentui-tree-sitter-request-lifecycle-repair.md:225-232` 的 decision-surface `80% / 10% / 10%` 仍是计划估算，尚未有可复算的实际分支统计。计划已完整分类所有成功、兼容和诊断路径，因此该问题不阻塞 R24；实现审计时仍需按实际 diff 重算。; `docs/plans/opentui-tree-sitter-request-lifecycle-repair.md:472-489` 与 `507-521` 保留了较多历史实现证据。计划已明确标注 archival/non-normative，不影响当前 R24 的权威性，但实现阶段应避免把这些历史数字当作当前预算或验证结果。; 当前共享 worktree 中存在既有的 `packages/opencode/script/smoke-opentui-artifact.ts` 修改。计划已明确要求不覆盖该修改并以 nested `HEAD` 为基线；执行实现审计时需要单独证明 R24 没有把该既有 diff 混入六文件范围。 | APPROVE | `ses_02af6ed5effeGIXuNZ4EMlUYu6` |
-| R25-cycle-6 | R25 | yes | none | R25的验证产物和历史命令中仍保留`r24`文件名，例如`tree-lifecycle-r24.json`，以及若干archival evidence引用。当前计划已明确这些内容不改变R25规范性；实现阶段应避免将历史名称误报为R25当前轮次证据。; Section11的`80% / 10% / 10%` decision-surface数字仍属于计划估算，实际比例须由implementation audit重算。; 计划保留较多R22–R24 implementation evidence，已标注archival/non-normative；实现阶段须继续区分历史证据与R25当前证据。 | APPROVE | `ses_02ad81163ffeRHpW5CCwpk6aj6` |
-| extra-R26-a | R26 | yes | B-01 Section18仍残留binary-wide `one compiled renderer implementation`硬条件，与multi-entrypoint runtime gate冲突 | historical artifact names; estimated decision-surface percentages | BLOCK | `ses_02a9e7b3fffe1Si0I0h05UUCJq` |
-| extra-R26-b | R26 | yes | B-01 primary-path文字未明确成功post后释放`candidateBase` | historical artifact names; estimated decision-surface percentages | BLOCK | `ses_02a99cacfffeBp4QA7FjC5qSf5` |
-| final-cycle-1 | R27 | yes | B-01 15%中文解释注释错误按六文件汇总而非逐文件；B-02既有exit-2 typecheck没有可执行baseline-delta gate |  | BLOCK | `ses_02a20fb00ffex8tFA0GULYq5H6` |
-| final-cycle-2 | R28 | yes | B-01 compiled TUI未触发原始worker-error正文可见和退出warning路径；B-02 disposal timer在无worker ack时仍合成fulfilled success | historical r24 artifact names; estimated decision shares | BLOCK | `ses_02a0f0389ffeUdE73PcOXGeGsV` |
-| final-cycle-3 | R29 | yes | B-01 one-shot Code退出warning路径缺少敏感验证；package/compiled shutdown仅覆盖streaming catch | estimated decision shares; archival evidence | BLOCK | `ses_029fb3f71ffeBjxge1g2hI7TWC` |
-| final-cycle-4 | R30 | yes | none | decision shares remain estimates; historical r24 artifact names/archival evidence | APPROVE | `ses_029f27621ffeARszz9vYNSPbC2` |
-| final-cycle-5 | R31 | yes | none | Section 11 的 `80% / 10% / 10%` decision-surface 仍是计划估算；implementation audit 必须按实际 diff 重算。; 验证产物名仍包含 `tree-lifecycle-r24.json`（计划第353行）。名称陈旧，但不会改变 R31 的验证语义。; Sections 23–25 保留大量历史实现证据；其已明确标记为 archival/non-normative，不构成 R31 授权依据。 | APPROVE | `ses_027c16d14ffenBn3wnnomiUtqp` |
+| Round         | Audited revision | Full scope? | Blocking findings                                                                                                                                                                                                                                                                                            | Non-blocking findings                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   | Result                        | Invocation reference                                                                                 |
+| ------------- | ---------------- | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------- | ---------------------------------------------------------------------------------------------------- |
+| 1             | R1               | yes         | B-01, B-02, B-03                                                                                                                                                                                                                                                                                             | incomplete verbatim requirement; decision-share estimate; compatibility classification must be rechecked                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                | BLOCK                         | `ses_038052f31ffeeI1wKjTDGN5YnR`                                                                     |
+| 2             | R2               | yes         | B-01, B-02                                                                                                                                                                                                                                                                                                   | decision-share estimate; comment estimate; R2 metadata pending                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          | BLOCK                         | `ses_037fb666effec7rX2Efjx7M1oJ`                                                                     |
+| 3             | R3               | yes         | B-01                                                                                                                                                                                                                                                                                                         | decision-share estimate; comment estimate; temporary benchmark not yet created                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          | BLOCK                         | `ses_037ee8d08ffe6JZOEQHQtUl9Qh`                                                                     |
+| 4             | R4               | yes         | B-01                                                                                                                                                                                                                                                                                                         | decision-share estimate; comment estimate; R4 metadata pending                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          | BLOCK                         | `ses_037e6e3acffeK21Sf66F1LVC2e`                                                                     |
+| 5             | R5               | yes         | B-01, B-02                                                                                                                                                                                                                                                                                                   | decision-share estimate; comment estimate; temporary benchmark/smoke artifact pending                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   | BLOCK                         | `ses_037dd5543ffeeFcNo4MH3vdUTH`                                                                     |
+| 6             | R6               | yes         | B-01, B-02, B-03                                                                                                                                                                                                                                                                                             | concurrent candidate seam; queue/debouncer completion semantics; whole-TUI metrics                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      | BLOCK                         | `ses_037ce2acfffe1ywh36612hJjFO`                                                                     |
+| 7             | R7               | yes         | none                                                                                                                                                                                                                                                                                                         | decision-surface share estimate; diagnostic artifacts generated during implementation                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   | APPROVE                       | `ses_03781f6ebffeTjCYGAw2KYKDc6`                                                                     |
+| 8             | R8               | yes         | B-01 contradictory 50-FPS and 30-FPS whole-TUI contracts                                                                                                                                                                                                                                                     | archival references and effective-line estimate                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         | BLOCK                         | `ses_035aee862ffeGaXzwp0igPa2rW`                                                                     |
+| 9             | R9               | yes         | B-01 package FPS gate not executable; B-02 before smoke cannot record failing baseline                                                                                                                                                                                                                       | implementation evidence remains historical                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              | BLOCK                         | `ses_035a95841ffeHMPv6kXMDK2AMp`                                                                     |
+| 10            | R10              | yes         | B-01 wrong renderer owner; B-02 timer ticks counted as frames; B-03 no significant whole-TUI improvement                                                                                                                                                                                                     | full client exit and final E/C remain implementation evidence                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           | BLOCK                         | `ses_0358a039dffeMEf4mJsu6qxKB8`                                                                     |
+| 11            | R11              | yes         | B-01 cited benchmark cannot execute lifecycle/oracle gates; B-02 old timer artifact conflicts with new recorder baseline                                                                                                                                                                                     | historical implementation evidence                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      | BLOCK                         | `ses_0357cb119ffemug9q197GS8cn8`                                                                     |
+| 12            | R12              | yes         | B-01 nine request/error-to-visible contract absent from file plan; B-02 original multi-Code/shared-client shutdown unverified                                                                                                                                                                                | implementation E/C and clean exit remain pending                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        | BLOCK                         | `ses_03574c0a8ffe1qRcFEVmMb13aF`                                                                     |
+| 13            | R13              | yes         | production churn960>600; RSS baseline unavailable; resize predicate insensitive                                                                                                                                                                                                                              |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         | BLOCK                         | `ses_0356bbdf0ffe9Ymk75dIeulO8y`                                                                     |
+| R14-cycle-1   | R14              | yes         | B-01 reset debounce bypasses FIFO and leaves superseded Promise pending                                                                                                                                                                                                                                      |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         | BLOCK                         | `ses_034e0b82dffeoLRAvyR73VKqZi`                                                                     |
+| R15-cycle-2   | R15              | yes         | B-01 audit exception quote missing; B-02 spinner cannot prove 60FPS cadence                                                                                                                                                                                                                                  |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         | BLOCK                         | `ses_034d964c1ffe3CEEPm7eFH36g1`                                                                     |
+| R16-cycle-3   | R16              | yes         | B-01 compiled TUI lacks long streaming Markdown interaction load; B-02 seven code files exceed six                                                                                                                                                                                                           |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         | BLOCK                         | `ses_034cf15a3ffeSdWoHRMwLBAtK7`                                                                     |
+| R17-cycle-4   | R17              | yes         | B-01 disposal skipped after predecessor rejection; B-02 initialization/disposal lack one terminal owner                                                                                                                                                                                                      |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         | BLOCK                         | `ses_034c16437ffedtw3l0C2nnqfeX`                                                                     |
+| R18-cycle-5   | R18              | yes         | none                                                                                                                                                                                                                                                                                                         | metadata mode label only                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                | APPROVE                       | `ses_034b1bfc1ffeKOasCXckuD41Kj`                                                                     |
+| R19-retries   | R19              | unavailable | independent-audit-unavailable after repeated consecutive invocations                                                                                                                                                                                                                                         |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         | independent-audit-unavailable | `ses_0324151d6ffe1BHfeXFCLXRsSu`, `ses_03240bea6ffex4kp5V1r8Ntkl4`, `ses_0323f4035ffeda20IcfsE2Llcv` |
+| R19-cycle-6   | R19              | yes         | B-01 package timing gate is computed but not enforced; B-02 compiled TUI does not exercise the required 240-delta Markdown workload; B-03 build-local does not verify parser-worker provenance                                                                                                               | NB-01 supplemental verbatim requirement; NB-02 asserted decision-surface percentages; NB-03 extensive archival R18 evidence                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             | BLOCK                         | `ses_030b2c7b8ffezrbqyttx1sWWQ8`                                                                     |
+| R20-cycle-1   | R20              | yes         | none                                                                                                                                                                                                                                                                                                         | NB-01 audit-mode metadata; NB-02 archival implementation evidence; NB-03 asserted decision-surface percentages; NB-04 incomplete R20 implementation evidence                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            | APPROVE                       | `ses_02da58dbdffeVPHEKqZTQoU7UQ`                                                                     |
+| R21-cycle-2   | R21              | yes         | B-01 verification commands state but do not execute an external120-second process-tree boundary                                                                                                                                                                                                              | package/TUI gate separation; lifecycle contracts and traceability consistent                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            | BLOCK                         | `ses_02d6ca07fffejOKRYoY97us5Jx`                                                                     |
+| R22-cycle-3   | R22              | yes         | none                                                                                                                                                                                                                                                                                                         | NB-01 incomplete current-round verbatim capture; NB-02 non-recomputed decision-surface percentages; NB-03 archival implementation evidence retained but explicitly non-authorizing                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      | APPROVE                       | `ses_02d65891fffedOpB4zPRBLhFrp`                                                                     |
+| R23-cycle-4   | R23              | yes         | B-01 generated compiled Session harness cannot execute the contracted idle typing, production stream-marker, concurrent typing, resize and transition-sensitive cadence/latency workload; the plan says to replace only the SSE body while requiring additional PTY producers and a cell-transition recorder | N-01 audit-mode metadata says `full-scope` while the handoff says `plan`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                | BLOCK                         | `ses_02b04752fffezAiIEMNI3Uw9DF`                                                                     |
+| R24-cycle-5   | R24              | yes         | none                                                                                                                                                                                                                                                                                                         | `docs/plans/opentui-tree-sitter-request-lifecycle-repair.md:225-232` 的 decision-surface `80% / 10% / 10%` 仍是计划估算，尚未有可复算的实际分支统计。计划已完整分类所有成功、兼容和诊断路径，因此该问题不阻塞 R24；实现审计时仍需按实际 diff 重算。; `docs/plans/opentui-tree-sitter-request-lifecycle-repair.md:472-489` 与 `507-521` 保留了较多历史实现证据。计划已明确标注 archival/non-normative，不影响当前 R24 的权威性，但实现阶段应避免把这些历史数字当作当前预算或验证结果。; 当前共享 worktree 中存在既有的 `packages/opencode/script/smoke-opentui-artifact.ts` 修改。计划已明确要求不覆盖该修改并以 nested `HEAD` 为基线；执行实现审计时需要单独证明 R24 没有把该既有 diff 混入六文件范围。 | APPROVE                       | `ses_02af6ed5effeGIXuNZ4EMlUYu6`                                                                     |
+| R25-cycle-6   | R25              | yes         | none                                                                                                                                                                                                                                                                                                         | R25的验证产物和历史命令中仍保留`r24`文件名，例如`tree-lifecycle-r24.json`，以及若干archival evidence引用。当前计划已明确这些内容不改变R25规范性；实现阶段应避免将历史名称误报为R25当前轮次证据。; Section11的`80% / 10% / 10%` decision-surface数字仍属于计划估算，实际比例须由implementation audit重算。; 计划保留较多R22–R24 implementation evidence，已标注archival/non-normative；实现阶段须继续区分历史证据与R25当前证据。                                                                                                                                                                                                                                                                         | APPROVE                       | `ses_02ad81163ffeRHpW5CCwpk6aj6`                                                                     |
+| extra-R26-a   | R26              | yes         | B-01 Section18仍残留binary-wide `one compiled renderer implementation`硬条件，与multi-entrypoint runtime gate冲突                                                                                                                                                                                            | historical artifact names; estimated decision-surface percentages                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       | BLOCK                         | `ses_02a9e7b3fffe1Si0I0h05UUCJq`                                                                     |
+| extra-R26-b   | R26              | yes         | B-01 primary-path文字未明确成功post后释放`candidateBase`                                                                                                                                                                                                                                                     | historical artifact names; estimated decision-surface percentages                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       | BLOCK                         | `ses_02a99cacfffeBp4QA7FjC5qSf5`                                                                     |
+| final-cycle-1 | R27              | yes         | B-01 15%中文解释注释错误按六文件汇总而非逐文件；B-02既有exit-2 typecheck没有可执行baseline-delta gate                                                                                                                                                                                                        |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         | BLOCK                         | `ses_02a20fb00ffex8tFA0GULYq5H6`                                                                     |
+| final-cycle-2 | R28              | yes         | B-01 compiled TUI未触发原始worker-error正文可见和退出warning路径；B-02 disposal timer在无worker ack时仍合成fulfilled success                                                                                                                                                                                 | historical r24 artifact names; estimated decision shares                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                | BLOCK                         | `ses_02a0f0389ffeUdE73PcOXGeGsV`                                                                     |
+| final-cycle-3 | R29              | yes         | B-01 one-shot Code退出warning路径缺少敏感验证；package/compiled shutdown仅覆盖streaming catch                                                                                                                                                                                                                | estimated decision shares; archival evidence                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            | BLOCK                         | `ses_029fb3f71ffeBjxge1g2hI7TWC`                                                                     |
+| final-cycle-4 | R30              | yes         | none                                                                                                                                                                                                                                                                                                         | decision shares remain estimates; historical r24 artifact names/archival evidence                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       | APPROVE                       | `ses_029f27621ffeARszz9vYNSPbC2`                                                                     |
+| final-cycle-5 | R31              | yes         | none                                                                                                                                                                                                                                                                                                         | Section 11 的 `80% / 10% / 10%` decision-surface 仍是计划估算；implementation audit 必须按实际 diff 重算。; 验证产物名仍包含 `tree-lifecycle-r24.json`（计划第353行）。名称陈旧，但不会改变 R31 的验证语义。; Sections 23–25 保留大量历史实现证据；其已明确标记为 archival/non-normative，不构成 R31 授权依据。                                                                                                                                                                                                                                                                                                                                                                                         | APPROVE                       | `ses_027c16d14ffenBn3wnnomiUtqp`                                                                     |
 
 Historical R31 verdict: **No blocking findings. APPROVE — 仅适用于 canonical plan Revision R31。** Invocation `ses_027c16d14ffenBn3wnnomiUtqp`。该结果不授权R32。
 
@@ -3647,16 +3647,16 @@ Compiled TUI evidence is incomplete and is not claimed green. Both the generated
 
 Final budget evidence, measured against nested `HEAD` and excluding imports, formatter-only, comment-only, generated and pure-move lines:
 
-| File | Raw additions/deletions | Effective code `E` upper |
-| --- | ---: | ---: |
-| `types.ts` | `25 / 5` | `12` |
-| `client.ts` | `240 / 180` | `197` |
-| `parser.worker.ts` | `269 / 231` | `197` |
-| `Code.ts` | `14 / 2` | `4` |
-| `client.test.ts` | `210 / 0` | `159` |
-| temporary benchmark | ignored file, `352` lines | `316` |
-| Production total | `548 / 418` | `E_p=410` |
-| All six code files | raw test/benchmark additions reported above | `E_total=885` |
+| File                |                     Raw additions/deletions | Effective code `E` upper |
+| ------------------- | ------------------------------------------: | -----------------------: |
+| `types.ts`          |                                    `25 / 5` |                     `12` |
+| `client.ts`         |                                 `240 / 180` |                    `197` |
+| `parser.worker.ts`  |                                 `269 / 231` |                    `197` |
+| `Code.ts`           |                                    `14 / 2` |                      `4` |
+| `client.test.ts`    |                                   `210 / 0` |                    `159` |
+| temporary benchmark |                   ignored file, `352` lines |                    `316` |
+| Production total    |                                 `548 / 418` |                `E_p=410` |
+| All six code files  | raw test/benchmark additions reported above |            `E_total=885` |
 
 The historical aggregate recount found `C=139` against `E_total=885`, but R30 explicitly rejects that aggregate as acceptance evidence. Final evidence must recompute and pass all six independent `E_i/C_i` rows. No alternate success path, retry, watchdog, second parser, or production telemetry was added. The existing parser-error plain-text behavior remains shipped compatibility; the only new diagnostic path is correlated request rejection.
 

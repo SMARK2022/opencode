@@ -216,9 +216,7 @@ describe("createCompatibleApi", () => {
       location: { directory: "/repo" },
     })
 
-    expect(requests.map((request) => new URL(request.url).pathname)).toEqual([
-      "/auth/openrouter",
-    ])
+    expect(requests.map((request) => new URL(request.url).pathname)).toEqual(["/auth/openrouter"])
     expect(requests[0]!.headers.get("x-opencode-directory")).toBe("%2Frepo")
   })
 
@@ -232,9 +230,7 @@ describe("createCompatibleApi", () => {
       location: { directory: "/repo" },
     })
 
-    expect(requests.map((request) => new URL(request.url).pathname)).toEqual([
-      "/provider/openrouter/oauth/callback",
-    ])
+    expect(requests.map((request) => new URL(request.url).pathname)).toEqual(["/provider/openrouter/oauth/callback"])
     expect(requests[0]!.headers.get("x-opencode-directory")).toBe("%2Frepo")
   })
 })

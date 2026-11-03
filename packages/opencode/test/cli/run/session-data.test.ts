@@ -116,7 +116,12 @@ describe("run session data", () => {
     const hiddenMessage = reduce(createSessionData(), assistant("msg-hidden", { hidden: { time: 1, reason: "undo" } }))
     expect({ commits: hiddenMessage.commits, footer: hiddenMessage.footer }).toEqual({ commits: [], footer: undefined })
     const visible = text({ id: "part-hidden", messageID: "msg-hidden", text: "secret", time: { end: 2 } })
-    expect(reduce(hiddenMessage.data, { ...visible, properties: { part: { ...visible.properties.part, hidden: { time: 2, reason: "undo" } } } }).commits).toEqual([])
+    expect(
+      reduce(hiddenMessage.data, {
+        ...visible,
+        properties: { part: { ...visible.properties.part, hidden: { time: 2, reason: "undo" } } },
+      }).commits,
+    ).toEqual([])
   })
 
   test("buffers delayed assistant text until the role is known", () => {

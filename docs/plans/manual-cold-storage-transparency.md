@@ -43,7 +43,7 @@ The file and line ceilings remain in force simultaneously.
 
 > 你自己看，按理来说不得因为压缩而大幅度修改现有的调用schema导致后期与上游过大兼容性问题
 
-> 譬如 属于哪个 Session、哪条 Message 工具名称、完成状态、开始结束时间  这种我觉得就 本质上该热表啊
+> 譬如 属于哪个 Session、哪条 Message 工具名称、完成状态、开始结束时间 这种我觉得就 本质上该热表啊
 
 The target end state is `verified-implementation`, with independent plan and
 implementation audits under `docs/workflow.md`. No commit or push is requested.
@@ -75,31 +75,31 @@ The time preference governs scope and test efficiency, not weakening final gates
 
 ## 3. Repository Context
 
-| Source | Constraint |
-| --- | --- |
-| `CONTEXT.md` | Production implementation is `packages/opencode`; `parent_id` identifies subagents, while fork creates a root Session. |
-| Root and package `AGENTS.md` | Shared worktree safety, package-local tests/typecheck, generated migrations if eventually justified. |
-| `docs/workflow.md` and engineering policy | One canonical plan, primary-path repair, exact-revision independent approval, TDD, Chinese comments. |
-| `docs/adr/README.md` | Existing ADR index contains no cold-storage decision replacing the current shipped contract. |
-| `docs/plans/cold-eligibility-root-7d-subagent-24h.md` | Existing explicit-maintenance eligibility clocks and completed Compaction boundary. |
-| `docs/plans/opencode-db-cold-storage-pack-v2.md` | Existing same-DB packs, content identities, refcounts, statistics and restore compatibility. |
+| Source                                                | Constraint                                                                                                             |
+| ----------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `CONTEXT.md`                                          | Production implementation is `packages/opencode`; `parent_id` identifies subagents, while fork creates a root Session. |
+| Root and package `AGENTS.md`                          | Shared worktree safety, package-local tests/typecheck, generated migrations if eventually justified.                   |
+| `docs/workflow.md` and engineering policy             | One canonical plan, primary-path repair, exact-revision independent approval, TDD, Chinese comments.                   |
+| `docs/adr/README.md`                                  | Existing ADR index contains no cold-storage decision replacing the current shipped contract.                           |
+| `docs/plans/cold-eligibility-root-7d-subagent-24h.md` | Existing explicit-maintenance eligibility clocks and completed Compaction boundary.                                    |
+| `docs/plans/opencode-db-cold-storage-pack-v2.md`      | Existing same-DB packs, content identities, refcounts, statistics and restore compatibility.                           |
 
 ## 4. Files and Evidence Read
 
-| Evidence | Relevance | Class |
-| --- | --- | --- |
-| `src/storage/cold.ts` | Extraction whitelist, eligibility, batching, inspect/thaw, fork, replacement, maintenance, integrity. | observed |
-| `src/session/session.sql.ts` | Existing persisted field types, IDs, indexes, references and statistics. | contracted |
-| `src/session/message-v2.ts` | Complete reads, viewer reads, hot predicates, execution-window selection and model conversion. | observed |
-| `src/session/search.ts`, `src/session/session.ts`, `src/v2/session.ts` | Search field whitelist and root scope before pagination. | reachable |
-| `src/permission/reviewer/service.ts` | Reused reviewer Session, request metadata, outer review completion and parent audit result. | observed |
-| `src/tool/task.ts`, `src/background/job.ts` | Parent replay result, child reuse, background-launch versus execution completion. | reachable |
-| `src/session/projectors.ts`, `src/storage/db.ts` | Atomic replacement, deletion, statistics and transaction boundary. | contracted |
-| `src/cli/cmd/stats/data.ts`, `src/token/accounting.ts` | Hot scalar statistics and detailed input breakdown consumers. | observed |
-| HTTP Session group/handler; TUI Session route, sync and subagent footer | Bounded viewer reads, audit navigation and shared permission/question aggregation. | reachable |
-| `test/storage/cold.test.ts`, `test/session/message-v2.test.ts` | Existing public persistence and replay test seams. | observed |
-| `D:/Temp/opencode/cold-storage-feedback.test.ts` | Real persistence red feedback, isolated from production. | observed |
-| `D:/Temp/opencode/manual-cold-same-table-20261002.mjs` and `.sqlite` | Same-schema capacity and reversible-data experiment. | observed |
+| Evidence                                                                | Relevance                                                                                             | Class      |
+| ----------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- | ---------- |
+| `src/storage/cold.ts`                                                   | Extraction whitelist, eligibility, batching, inspect/thaw, fork, replacement, maintenance, integrity. | observed   |
+| `src/session/session.sql.ts`                                            | Existing persisted field types, IDs, indexes, references and statistics.                              | contracted |
+| `src/session/message-v2.ts`                                             | Complete reads, viewer reads, hot predicates, execution-window selection and model conversion.        | observed   |
+| `src/session/search.ts`, `src/session/session.ts`, `src/v2/session.ts`  | Search field whitelist and root scope before pagination.                                              | reachable  |
+| `src/permission/reviewer/service.ts`                                    | Reused reviewer Session, request metadata, outer review completion and parent audit result.           | observed   |
+| `src/tool/task.ts`, `src/background/job.ts`                             | Parent replay result, child reuse, background-launch versus execution completion.                     | reachable  |
+| `src/session/projectors.ts`, `src/storage/db.ts`                        | Atomic replacement, deletion, statistics and transaction boundary.                                    | contracted |
+| `src/cli/cmd/stats/data.ts`, `src/token/accounting.ts`                  | Hot scalar statistics and detailed input breakdown consumers.                                         | observed   |
+| HTTP Session group/handler; TUI Session route, sync and subagent footer | Bounded viewer reads, audit navigation and shared permission/question aggregation.                    | reachable  |
+| `test/storage/cold.test.ts`, `test/session/message-v2.test.ts`          | Existing public persistence and replay test seams.                                                    | observed   |
+| `D:/Temp/opencode/cold-storage-feedback.test.ts`                        | Real persistence red feedback, isolated from production.                                              | observed   |
+| `D:/Temp/opencode/manual-cold-same-table-20261002.mjs` and `.sqlite`    | Same-schema capacity and reversible-data experiment.                                                  | observed   |
 
 Paths in the source/test rows are relative to `packages/opencode`.
 
@@ -119,36 +119,36 @@ Stats use hot scalars and `inspectPartStats` rather than decoding all tool outpu
 
 ## 6. Supported Input Domain and Reachability
 
-| Condition | Producer / guarantee | Owner | Class |
-| --- | --- | --- | --- |
-| Reused reviewer Session containing many requests | Reviewer persists `reviewID` on request Text; attempts and outer review completion differ. | Reviewer for business scope; storage for bytes. | observed |
-| Existing cold v1/v2 owners | Shipped ColdStorage format and refcount invariants. | ColdStorage | contracted |
-| Shared cold prefix and subsequent independent history edits | Fork and projector replacement paths. | ColdStorage/projectors | reachable |
-| Child copied into a root Session | Fork creates root identity; root Text must be searchable. | ColdStorage clone path | reachable |
-| Background task launch response | Completed parent tool can coexist with running child execution. | Background job lifecycle | observed |
+| Condition                                                   | Producer / guarantee                                                                       | Owner                                           | Class      |
+| ----------------------------------------------------------- | ------------------------------------------------------------------------------------------ | ----------------------------------------------- | ---------- |
+| Reused reviewer Session containing many requests            | Reviewer persists `reviewID` on request Text; attempts and outer review completion differ. | Reviewer for business scope; storage for bytes. | observed   |
+| Existing cold v1/v2 owners                                  | Shipped ColdStorage format and refcount invariants.                                        | ColdStorage                                     | contracted |
+| Shared cold prefix and subsequent independent history edits | Fork and projector replacement paths.                                                      | ColdStorage/projectors                          | reachable  |
+| Child copied into a root Session                            | Fork creates root identity; root Text must be searchable.                                  | ColdStorage clone path                          | reachable  |
+| Background task launch response                             | Completed parent tool can coexist with running child execution.                            | Background job lifecycle                        | observed   |
 
 ## 7. Required Invariants
 
-| ID | Invariant | Evidence / verification seam |
-| --- | --- | --- |
-| INV-01 | Explicit user command is the only freeze trigger. | CLI maintenance and command tests. |
-| INV-02 | Public business objects roundtrip exactly, including provider metadata. | Complete Message/Part reads and independent digests. |
-| INV-03 | Root Text search and active prompt reads retain hot access. | Search SQL and model conversion. |
-| INV-04 | Session/Message identity, tool name/status/start/end time remain hot. | Latest user clarification; raw row checks. |
-| INV-05 | Token/cost/character statistics are identical before and after maintenance. | Stats, request ledgers, context accounting. |
-| INV-06 | Viewer/metadata-only consumers preserve cold state as appropriate. | Real persistence feedback and API tests. |
-| INV-07 | Fork/edit/delete/expand preserve independent owners and valid references. | ColdStorage public seams. |
-| INV-08 | Reclaimed complete-schema main file <2,800,000,000 bytes. | Cache-copy physical size, integrity and full index accounting. |
-| INV-09 | Production diff <=8 files and <=1,600 gross added/deleted lines. | Actual scoped diff; no unrelated formatting. |
-| INV-10 | Storage complexity stays behind the existing handler; public schema remains compatible. | Producer/consumer map and package typecheck. |
+| ID     | Invariant                                                                               | Evidence / verification seam                                   |
+| ------ | --------------------------------------------------------------------------------------- | -------------------------------------------------------------- |
+| INV-01 | Explicit user command is the only freeze trigger.                                       | CLI maintenance and command tests.                             |
+| INV-02 | Public business objects roundtrip exactly, including provider metadata.                 | Complete Message/Part reads and independent digests.           |
+| INV-03 | Root Text search and active prompt reads retain hot access.                             | Search SQL and model conversion.                               |
+| INV-04 | Session/Message identity, tool name/status/start/end time remain hot.                   | Latest user clarification; raw row checks.                     |
+| INV-05 | Token/cost/character statistics are identical before and after maintenance.             | Stats, request ledgers, context accounting.                    |
+| INV-06 | Viewer/metadata-only consumers preserve cold state as appropriate.                      | Real persistence feedback and API tests.                       |
+| INV-07 | Fork/edit/delete/expand preserve independent owners and valid references.               | ColdStorage public seams.                                      |
+| INV-08 | Reclaimed complete-schema main file <2,800,000,000 bytes.                               | Cache-copy physical size, integrity and full index accounting. |
+| INV-09 | Production diff <=8 files and <=1,600 gross added/deleted lines.                        | Actual scoped diff; no unrelated formatting.                   |
+| INV-10 | Storage complexity stays behind the existing handler; public schema remains compatible. | Producer/consumer map and package typecheck.                   |
 
 ## 8. First Divergence and Root Cause
 
-| Invariant | First divergence | Owner | Evidence |
-| --- | --- | --- | --- |
-| INV-06 | Default complete hydration calls persistent thaw during ordinary reads. | MessageV2 hydration / ColdStorage | Reasoning body restored correctly, but cold_ref became null. |
-| INV-08 | Eligible child Text never enters extraction. | ColdStorage whitelist | Old reviewer Text freeze returned skipped. |
-| INV-08 | Existing v2 owners are skipped by the hot/v1 compression enumeration. | ColdStorage maintenance | Existing pack-level duplication and encoding are left intact. |
+| Invariant | First divergence                                                        | Owner                             | Evidence                                                      |
+| --------- | ----------------------------------------------------------------------- | --------------------------------- | ------------------------------------------------------------- |
+| INV-06    | Default complete hydration calls persistent thaw during ordinary reads. | MessageV2 hydration / ColdStorage | Reasoning body restored correctly, but cold_ref became null.  |
+| INV-08    | Eligible child Text never enters extraction.                            | ColdStorage whitelist             | Old reviewer Text freeze returned skipped.                    |
+| INV-08    | Existing v2 owners are skipped by the hot/v1 compression enumeration.   | ColdStorage maintenance           | Existing pack-level duplication and encoding are left intact. |
 
 Original feedback command, cwd `packages/opencode`, TEMP/TMP in the cache:
 
@@ -297,13 +297,13 @@ size remains a gate, not an extrapolated acceptance claim.
 
 ## 11. Secondary and Replacement Path Inventory
 
-| Path | Classification | Disposition |
-| --- | --- | --- |
-| Existing v1/v2 decode | Shipped compatibility | Preserve until an explicitly validated migration handles it. |
-| Inspect versus persistent thaw | Distinct read/write contracts in the same storage owner | Preserve and correctly select at the internal read seam. |
-| Explicit expand | Primary user-requested operation | Preserve. |
-| Automatic freeze worker or per-tool freeze hook | Outside requested behavior | Exclude. |
-| Alternate application schemas for cold messages | Responsibility leak | Exclude. |
+| Path                                            | Classification                                          | Disposition                                                  |
+| ----------------------------------------------- | ------------------------------------------------------- | ------------------------------------------------------------ |
+| Existing v1/v2 decode                           | Shipped compatibility                                   | Preserve until an explicitly validated migration handles it. |
+| Inspect versus persistent thaw                  | Distinct read/write contracts in the same storage owner | Preserve and correctly select at the internal read seam.     |
+| Explicit expand                                 | Primary user-requested operation                        | Preserve.                                                    |
+| Automatic freeze worker or per-tool freeze hook | Outside requested behavior                              | Exclude.                                                     |
+| Alternate application schemas for cold messages | Responsibility leak                                     | Exclude.                                                     |
 
 ## 12. Workaround Deletion and Replacement
 
@@ -315,13 +315,13 @@ failure-success path is introduced.
 
 ## 13. Forward Traceability
 
-| Requirement | Candidate path | Behavioral evidence needed |
-| --- | --- | --- |
-| INV-01/02/07 | ColdStorage maintenance/restore/clone/replacement | Manual freeze, complete roundtrip, expand, fork, mutation, failure atomicity. |
-| INV-03/04/05 | Existing hot fields, search, model conversion and Stats | Root results, provider payload, raw identity/time fields and exact counts. |
-| INV-06/10 | MessageV2 internal hydration scope | Ordinary view stays cold; execution reads complete objects; same DTO schemas. |
-| INV-08 | Final approved route on a complete cache copy | Full main-file size after reclaim; per-priority non-overlapping gains. |
-| INV-09 | Final file plan and diff | <=8 production files, <=1,600 gross changed lines. |
+| Requirement  | Candidate path                                          | Behavioral evidence needed                                                    |
+| ------------ | ------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| INV-01/02/07 | ColdStorage maintenance/restore/clone/replacement       | Manual freeze, complete roundtrip, expand, fork, mutation, failure atomicity. |
+| INV-03/04/05 | Existing hot fields, search, model conversion and Stats | Root results, provider payload, raw identity/time fields and exact counts.    |
+| INV-06/10    | MessageV2 internal hydration scope                      | Ordinary view stays cold; execution reads complete objects; same DTO schemas. |
+| INV-08       | Final approved route on a complete cache copy           | Full main-file size after reclaim; per-priority non-overlapping gains.        |
+| INV-09       | Final file plan and diff                                | <=8 production files, <=1,600 gross changed lines.                            |
 
 Exact source ownership: ColdStorage covers INV-01/02/04/05/07/08; MessageV2 covers
 INV-02/03/06/10; search.ts plus the Session-list caller cover INV-03/10; persisted
@@ -329,11 +329,11 @@ TypeScript types in session.sql.ts cover INV-02/05/10. Tests below map these sea
 
 ## 14. Reverse Traceability
 
-| Candidate concept | Requirement | Why current behavior is insufficient |
-| --- | --- | --- |
-| Child Text extraction | INV-08 | Whitelist leaves large eligible reviewer request bodies inline. |
-| Inspect for ordinary complete reads | INV-06 | Current hydration can clear cold references. |
-| Existing-pack maintenance | INV-08 | Current compress enumeration leaves v2 packs unchanged. |
+| Candidate concept                           | Requirement  | Why current behavior is insufficient                                            |
+| ------------------------------------------- | ------------ | ------------------------------------------------------------------------------- |
+| Child Text extraction                       | INV-08       | Whitelist leaves large eligible reviewer request bodies inline.                 |
+| Inspect for ordinary complete reads         | INV-06       | Current hydration can clear cold references.                                    |
+| Existing-pack maintenance                   | INV-08       | Current compress enumeration leaves v2 packs unchanged.                         |
 | Additional historical diagnostic extraction | INV-02/05/08 | Optional detailed fields remain hot; actual consumers need transparent restore. |
 
 Implicit entry hashes, slots, lossless base64url identities and compact statistics
@@ -346,15 +346,15 @@ the storage owner and preserve the public schemas.
 
 ## 15. File-Level Change Plan
 
-| Production file (packages/opencode) | Responsibility | Gross line allowance |
-| --- | --- | --- |
-| `src/storage/cold.ts` | v3 codec/locators/stats, bounded maintenance, eligibility, extraction/restoration, scoped cold matches, fork | 1,180 |
-| `src/session/session.sql.ts` | Internal stored assistant/tuple types; no SQL DDL change | 45 |
-| `src/session/message-v2.ts` | Complete inspect versus execution warming, HotInfo/viewer typing | 170 |
-| `src/session/search.ts` | Merge per-token storage-owned match sets into existing SQL | 40 |
-| `src/session/session.ts` | Pass existing list universe / progressive candidate IDs and root scope | 25 |
-| `src/v2/session.ts` | Pass existing list universe and root scope | 10 |
-| `src/cli/cmd/tui/component/dialog-session-list.tsx` | Existing root scope before search pagination | 20 |
+| Production file (packages/opencode)                 | Responsibility                                                                                               | Gross line allowance |
+| --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ | -------------------- |
+| `src/storage/cold.ts`                               | v3 codec/locators/stats, bounded maintenance, eligibility, extraction/restoration, scoped cold matches, fork | 1,180                |
+| `src/session/session.sql.ts`                        | Internal stored assistant/tuple types; no SQL DDL change                                                     | 45                   |
+| `src/session/message-v2.ts`                         | Complete inspect versus execution warming, HotInfo/viewer typing                                             | 170                  |
+| `src/session/search.ts`                             | Merge per-token storage-owned match sets into existing SQL                                                   | 40                   |
+| `src/session/session.ts`                            | Pass existing list universe / progressive candidate IDs and root scope                                       | 25                   |
+| `src/v2/session.ts`                                 | Pass existing list universe and root scope                                                                   | 10                   |
+| `src/cli/cmd/tui/component/dialog-session-list.tsx` | Existing root scope before search pagination                                                                 | 20                   |
 
 Seven production files, estimated 1,490 gross changed lines with 110 lines reserve.
 No migration, generated SDK, new public endpoint, config or reviewer/tool hook.
@@ -390,13 +390,13 @@ shared entries, restore fidelity, and transaction/checkpoint ownership.
 
 ## 18. Verification
 
-| Command | Working directory | Evidence |
-| --- | --- | --- |
-| `bun test test/storage/cold.test.ts --test-name-pattern "Stats" --timeout 30000` | `packages/opencode` | Prior run: 2 pass, 14 assertions. |
-| `bun test test/session/message-v2.test.ts --test-name-pattern "task" --timeout 30000` | `packages/opencode` | Prior run: 6 pass, 18 assertions. |
-| Cache feedback command in section 8 | `packages/opencode` | Two real persistence failures. |
-| `bun run manual-cold-same-table-20261002.mjs --measure` | `D:/Temp/opencode` | Complete same-schema physical breakdown and integrity. |
-| `bun typecheck` | `packages/opencode` | Required after approved implementation. |
+| Command                                                                               | Working directory   | Evidence                                               |
+| ------------------------------------------------------------------------------------- | ------------------- | ------------------------------------------------------ |
+| `bun test test/storage/cold.test.ts --test-name-pattern "Stats" --timeout 30000`      | `packages/opencode` | Prior run: 2 pass, 14 assertions.                      |
+| `bun test test/session/message-v2.test.ts --test-name-pattern "task" --timeout 30000` | `packages/opencode` | Prior run: 6 pass, 18 assertions.                      |
+| Cache feedback command in section 8                                                   | `packages/opencode` | Two real persistence failures.                         |
+| `bun run manual-cold-same-table-20261002.mjs --measure`                               | `D:/Temp/opencode`  | Complete same-schema physical breakdown and integrity. |
+| `bun typecheck`                                                                       | `packages/opencode` | Required after approved implementation.                |
 
 Run slice-specific `bun test <test-file> --test-name-pattern <slice> --timeout
 30000` first. After all slices, run `bun test test/storage/cold.test.ts
@@ -416,13 +416,13 @@ statistics matched. FK check and quick_check passed.
 
 ## 19. Diff Budget
 
-| Metric | Current / ceiling |
-| --- | --- |
-| Production files changed | 7 actual / 8 ceiling |
-| Production gross changed lines | 819 actual / 1,600 ceiling |
-| Repository tests changed | 3 existing test files plus focused `cold-v3.test.ts` |
-| New canonical plan | This file only |
-| Experiment storage | One 3.454 GB same-table copy, plus retained earlier research artifacts; cache free space was checked before construction. |
+| Metric                         | Current / ceiling                                                                                                         |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------- |
+| Production files changed       | 7 actual / 8 ceiling                                                                                                      |
+| Production gross changed lines | 819 actual / 1,600 ceiling                                                                                                |
+| Repository tests changed       | 3 existing test files plus focused `cold-v3.test.ts`                                                                      |
+| New canonical plan             | This file only                                                                                                            |
+| Experiment storage             | One 3.454 GB same-table copy, plus retained earlier research artifacts; cache free space was checked before construction. |
 
 ## 20. Real Risks and Open Decisions
 
@@ -497,15 +497,15 @@ placeholders at implementation-audit handoff.
 
 ### Actual Files And Diff
 
-| Production file | Added | Deleted |
-| --- | ---: | ---: |
-| `src/storage/cold.ts` | 614 | 67 |
-| `src/session/message-v2.ts` | 57 | 24 |
-| `src/session/search.ts` | 16 | 3 |
-| `src/session/session.sql.ts` | 5 | 2 |
-| `src/session/session.ts` | 12 | 6 |
-| `src/v2/session.ts` | 5 | 4 |
-| `src/cli/cmd/tui/component/dialog-session-list.tsx` | 4 | 0 |
+| Production file                                     | Added | Deleted |
+| --------------------------------------------------- | ----: | ------: |
+| `src/storage/cold.ts`                               |   614 |      67 |
+| `src/session/message-v2.ts`                         |    57 |      24 |
+| `src/session/search.ts`                             |    16 |       3 |
+| `src/session/session.sql.ts`                        |     5 |       2 |
+| `src/session/session.ts`                            |    12 |       6 |
+| `src/v2/session.ts`                                 |     5 |       4 |
+| `src/cli/cmd/tui/component/dialog-session-list.tsx` |     4 |       0 |
 
 Seven production files, 713 added + 106 deleted = **819 gross lines**.
 Tests: `test/storage/cold-v3.test.ts`, `test/storage/cold.test.ts`,
@@ -524,16 +524,16 @@ specified. TEMP/TMP for tests were `D:/Temp/opencode`.
   assertions**. Covers read-only restoration, root Text, exact stats, old-format
   upgrade, payload checkpoint resume, open-tool exclusion, viewer and fork search.
 - `bun test test/storage/cold.test.ts test/storage/cold-v3.test.ts
-  test/session/messages-pagination.test.ts --timeout 30000`: **103 pass, 378
+test/session/messages-pagination.test.ts --timeout 30000`: **103 pass, 378
   assertions**. Earlier failures were old persistent-thaw expectations; complete
   values remain asserted, with explicit thaw tested separately. Two pack fixtures
   now explicitly scope maintenance and retain their independent pure-pack checks.
 - `bun test test/server/session-messages.test.ts test/server/session-list.test.ts
-  --timeout 30000`: **31 pass, 159 assertions**.
+--timeout 30000`: **31 pass, 159 assertions**.
 - After final resume/viewer adjustments, `bun test test/storage/cold-v3.test.ts
-  test/storage/cold.test.ts --timeout 30000`: **45 pass, 232 assertions**.
+test/storage/cold.test.ts --timeout 30000`: **45 pass, 232 assertions**.
 - `bun test test/session/messages-pagination.test.ts test/server/session-messages.test.ts
-  --test-name-pattern "cold|compacted|window|HotInfo" --timeout 30000`: **2 pass,
+--test-name-pattern "cold|compacted|window|HotInfo" --timeout 30000`: **2 pass,
   18 assertions**, with 64 filtered tests; this supplements rather than replaces
   the earlier complete related runs.
 - `bun test "D:/Temp/opencode/cold-storage-feedback.test.ts" --timeout 30000`:

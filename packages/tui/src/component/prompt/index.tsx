@@ -284,7 +284,14 @@ export function Prompt(props: PromptProps) {
   // 保留原始计数供增长比较，避免 Locale 的缩写或分隔符掩盖数值变化。
   // 主值是请求累计，括号是全局累计；数值字段仍供节流后的增长脉冲比较。
   // context 与 cost 继续是文本，不混入 token 信号的比较口径。
-  type UsageInfo = { input: number; output: number; totalInput: number; totalOutput: number; context: string | undefined; cost: string | undefined }
+  type UsageInfo = {
+    input: number
+    output: number
+    totalInput: number
+    totalOutput: number
+    context: string | undefined
+    cost: string | undefined
+  }
   const isRunning = createMemo(() => status().type !== "idle")
 
   const usageRaw = createMemo((): UsageInfo | undefined => {
@@ -321,7 +328,12 @@ export function Prompt(props: PromptProps) {
     // 同一共享 owner 给出 step 与 request 两种范围，各保留一次未确认尾部。
     // 密度随完整 request.inputEstimate 投影到达，100条窗口不再重新校准或累加确认点。
     // 统一统计入口保留完整请求投影与当前尾部，不因分页或首包前无助手而丢失计数。
-    const { input: currentInput, output: currentOutput, totalInput, totalOutput } = tokenAccounting(msg, (id) => sync.data.part[id] ?? [], undefined, { session, last, parts: lastParts }).request
+    const {
+      input: currentInput,
+      output: currentOutput,
+      totalInput,
+      totalOutput,
+    } = tokenAccounting(msg, (id) => sync.data.part[id] ?? [], undefined, { session, last, parts: lastParts }).request
     const requestTokens = currentInput + currentOutput
     const totalTokens = totalInput + totalOutput
     if (requestTokens <= 0 && totalTokens <= 0) {
@@ -331,8 +343,15 @@ export function Prompt(props: PromptProps) {
 
     // 模型随完整请求投影提供，窗口淘汰助手后仍不丢真实上下文上限。
     // 首次等待的模型来自同一用户，确认后继续优先使用请求投影中的实际模型。
-    const modelRef = request.model ?? msg.find((item): item is UserMessage => item.role === "user" && item.id === request.messageID)?.model
-    const contextLimit = getContextLimit(sync.data.provider, modelRef?.providerID, modelRef?.modelID, request.model?.contextLimit)
+    const modelRef =
+      request.model ??
+      msg.find((item): item is UserMessage => item.role === "user" && item.id === request.messageID)?.model
+    const contextLimit = getContextLimit(
+      sync.data.provider,
+      modelRef?.providerID,
+      modelRef?.modelID,
+      request.model?.contextLimit,
+    )
     const pct = requestTokens > 0 && contextLimit ? `${Math.round((requestTokens / contextLimit) * 100)}%` : undefined
     // 恢复源提交的请求费用范围；服务端来源并不使 Session.cost 等同请求 cost。
     // 确认价格继续由原生产者计算，此处只消费完整请求的助手费用求和。
@@ -343,7 +362,12 @@ export function Prompt(props: PromptProps) {
       totalInput,
       totalOutput,
       // context 与 cost 仍是展示文本，不参与流量判断，费用变化不应点亮 token 箭头。
-      context: requestTokens > 0 ? (pct ? `${Locale.number(requestTokens)} (${pct})` : Locale.number(requestTokens)) : undefined,
+      context:
+        requestTokens > 0
+          ? pct
+            ? `${Locale.number(requestTokens)} (${pct})`
+            : Locale.number(requestTokens)
+          : undefined,
       cost: cost > 0 ? money.format(cost) : undefined,
     }
   })
@@ -393,7 +417,9 @@ export function Prompt(props: PromptProps) {
   const voiceInputStatusText = createMemo(() =>
     // shortcut 来自 keymap；兜底值只影响展示，不注册额外 keybind。
     // #491/#505：compact 与 DialogPrompt / QuestionPrompt 统一 short profile；默认长文案留给兼容 consumer。
-    PromptVoiceInput.voiceInputStatusText(voiceInputStatus(), voiceShortcut() || voiceShortcutFallback, now(), { compact: true }),
+    PromptVoiceInput.voiceInputStatusText(voiceInputStatus(), voiceShortcut() || voiceShortcutFallback, now(), {
+      compact: true,
+    }),
   )
   const voiceInput = PromptVoiceInput.createVoiceInputController({
     // 录音上传到当前共享连接，凭据与转录目标由 daemon 统一选择。
@@ -694,7 +720,9 @@ export function Prompt(props: PromptProps) {
       input.setText(prompt.input)
       setStore("prompt", prompt)
       // #192：还原草稿必须同时还原 mode，否则 shell 模式残留会让普通输入误走 /shell
-      if (prompt.mode) { setStore("mode", prompt.mode) }
+      if (prompt.mode) {
+        setStore("mode", prompt.mode)
+      }
       restoreExtmarksFromParts(prompt.parts)
       input.gotoBufferEnd()
     },
@@ -1073,11 +1101,7 @@ export function Prompt(props: PromptProps) {
   useBindings(() => {
     return {
       target: inputTarget,
-      enabled:
-        inputTarget() !== undefined &&
-        !props.disabled &&
-        !auto()?.visible &&
-        !dialog.stack.length,
+      enabled: inputTarget() !== undefined && !props.disabled && !auto()?.visible && !dialog.stack.length,
       // [local-smark] 流式期间也允许发起/停止/取消录音：录音不写 prompt，转写文本落盘前由 submitInner 的
       // voiceInputBusy 提交保护拦截，不会与 assistant 输出竞争 prompt；仅保留对话框/autocomplete/disabled 通用约束。
       commands: [
@@ -1241,7 +1265,7 @@ export function Prompt(props: PromptProps) {
       return false
     }
     // #192：shell/command 后台失败时恢复 draft
-      // #192：shell/command 无接受回执，失败只能靠恢复草稿兜底，且不覆盖用户新输入
+    // #192：shell/command 无接受回执，失败只能靠恢复草稿兜底，且不覆盖用户新输入
     function restoreDraftAfterBackgroundFailure(prompt: typeof store.prompt, mode: typeof currentMode) {
       // #192：后台请求迟到失败不得覆盖用户已输入的新内容，仅空 draft 时恢复
       showSubmitFailureToast()
@@ -1263,7 +1287,9 @@ export function Prompt(props: PromptProps) {
           model: { providerID: selectedModel.providerID, modelID: selectedModel.modelID },
           command: inputText,
         })
-        .then((response) => { if (response.error) restoreDraftAfterBackgroundFailure(submitted, currentMode) })
+        .then((response) => {
+          if (response.error) restoreDraftAfterBackgroundFailure(submitted, currentMode)
+        })
         .catch(() => restoreDraftAfterBackgroundFailure(submitted, currentMode))
       setStore("mode", "normal")
     } else if (
@@ -1324,12 +1350,14 @@ export function Prompt(props: PromptProps) {
           variant,
           parts: nonTextParts.filter((x) => x.type === "file"),
         })
-        .then((response) => { if (response.error) restoreDraftAfterBackgroundFailure(submitted, currentMode) })
+        .then((response) => {
+          if (response.error) restoreDraftAfterBackgroundFailure(submitted, currentMode)
+        })
         .catch(() => restoreDraftAfterBackgroundFailure(submitted, currentMode))
     } else {
       move.startSubmit()
       // #192：promptAsync 替代 prompt+throwOnError——daemon 确认接收后才清 draft
-        // #192：response.error 表示 daemon 未接受，保留 draft 并终止提交流程
+      // #192：response.error 表示 daemon 未接受，保留 draft 并终止提交流程
       const response = await sdk.client.session
         .promptAsync({
           sessionID,
@@ -1337,11 +1365,7 @@ export function Prompt(props: PromptProps) {
           agent: agent.name,
           model: selectedModel,
           variant,
-          parts: [
-            ...editorParts,
-            { type: "text", text: inputText },
-            ...nonTextParts,
-          ],
+          parts: [...editorParts, { type: "text", text: inputText }, ...nonTextParts],
         })
         .catch((error) => ({ error }))
       // #192：promptAsync 的 error 信封是 daemon 拒绝的信号，与本地异常同等处理
@@ -1608,7 +1632,12 @@ export function Prompt(props: PromptProps) {
 
   return (
     <>
-      <box ref={(r: BoxRenderable) => (anchor = r)} visible={props.visible !== false} width="100%" renderBefore={syncPromptWidth}>
+      <box
+        ref={(r: BoxRenderable) => (anchor = r)}
+        visible={props.visible !== false}
+        width="100%"
+        renderBefore={syncPromptWidth}
+      >
         <box
           width="100%"
           border={["left"]}
@@ -1772,7 +1801,16 @@ export function Prompt(props: PromptProps) {
           />
         </box>
         {/* #491：单行外框契约——retry 态由内层 flex 收缩接管，其余状态保持左右分布。 */}
-        <box width="100%" height={1} minWidth={0} flexDirection="row" alignItems="center" justifyContent="space-between" gap={1} overflow="hidden">
+        <box
+          width="100%"
+          height={1}
+          minWidth={0}
+          flexDirection="row"
+          alignItems="center"
+          justifyContent="space-between"
+          gap={1}
+          overflow="hidden"
+        >
           <Switch>
             <Match when={voiceInputBusy()}>
               {/* 语音状态和停止快捷键不参与收缩，文件身份与普通 chrome 先让出宽度。 */}
@@ -1789,7 +1827,16 @@ export function Prompt(props: PromptProps) {
             </Match>
             <Match when={isRunning()}>
               {/* #491：running 行允许消息区域降到零宽，保证 interrupt 不会被长错误反向挤出。 */}
-              <box flexDirection="row" gap={1} flexGrow={1} minWidth={0} height={1} overflow="hidden" alignItems="center" justifyContent="flex-start">
+              <box
+                flexDirection="row"
+                gap={1}
+                flexGrow={1}
+                minWidth={0}
+                height={1}
+                overflow="hidden"
+                alignItems="center"
+                justifyContent="flex-start"
+              >
                 <box marginLeft={1} flexShrink={0}>
                   {/* #491：spinner 是运行态的锚定视觉，不参与收缩竞争，防止长错误把它挤出可视区。 */}
                   <Show when={kv.get("animations_enabled", true)} fallback={<text fg={theme.textMuted}>[⋯]</text>}>
@@ -1834,11 +1881,33 @@ export function Prompt(props: PromptProps) {
                   return (
                     <Show when={retry()}>
                       {/* #505：外层组可伸展以承接剩余宽度，但摘要文本本身不 grow，避免短错误与 (details) 被拉开。 */}
-                      <box minWidth={0} flexBasis={0} flexGrow={1} flexShrink={1} flexDirection="row" gap={1} overflow="hidden">
-                        <box minWidth={0} flexShrink={1} flexDirection="row" gap={1} overflow="hidden" onMouseUp={handleMessageClick}>
+                      <box
+                        minWidth={0}
+                        flexBasis={0}
+                        flexGrow={1}
+                        flexShrink={1}
+                        flexDirection="row"
+                        gap={1}
+                        overflow="hidden"
+                      >
+                        <box
+                          minWidth={0}
+                          flexShrink={1}
+                          flexDirection="row"
+                          gap={1}
+                          overflow="hidden"
+                          onMouseUp={handleMessageClick}
+                        >
                           {/* OpenTUI 命中的子 text 不可靠冒泡到 box；可见摘要本身也必须承接详情点击。 */}
                           {/* #505：content-based shrinkable——minWidth=0+flexShrink，禁止 flexBasis=0 把短文压成零宽。 */}
-                          <text minWidth={0} flexShrink={1} fg={theme.error} wrapMode="none" truncate onMouseUp={handleMessageClick}>
+                          <text
+                            minWidth={0}
+                            flexShrink={1}
+                            fg={theme.error}
+                            wrapMode="none"
+                            truncate
+                            onMouseUp={handleMessageClick}
+                          >
                             {message()}
                           </text>
                           {/* #505：括号化红色入口与错误同色，既短又保持“属于诊断”的视觉归属。 */}
@@ -1935,11 +2004,25 @@ export function Prompt(props: PromptProps) {
           {/* #491：retry 已在左侧承载完整 P0 链；其他状态才分配文件身份与普通快捷键区域。 */}
           {/* #491：右侧区域 height=1 + overflow hidden 是双保险；真正防换行靠子元素 wrapMode=none。 */}
           <Show when={status().type !== "retry"}>
-            <box height={1} minWidth={0} flexShrink={1} gap={2} flexDirection="row" alignItems="center" overflow="hidden">
+            <box
+              height={1}
+              minWidth={0}
+              flexShrink={1}
+              gap={2}
+              flexDirection="row"
+              alignItems="center"
+              overflow="hidden"
+            >
               <Show when={editorContextLabelState() !== "none" ? editorFileLabelDisplay() : undefined}>
                 {(file) => (
                   // #491：文件身份保留可辨识后缀，但仍先于不可换行的操作提示收缩。
-                  <text minWidth={0} flexShrink={1} fg={editorContextLabelState() === "pending" ? theme.secondary : theme.textMuted} wrapMode="none" truncate>
+                  <text
+                    minWidth={0}
+                    flexShrink={1}
+                    fg={editorContextLabelState() === "pending" ? theme.secondary : theme.textMuted}
+                    wrapMode="none"
+                    truncate
+                  >
                     {file()}
                   </text>
                 )}
@@ -1954,7 +2037,11 @@ export function Prompt(props: PromptProps) {
                           fallback={
                             // #125：窄屏合并 ↑↓，只保留 context/cost
                             <text fg={theme.textMuted} wrapMode="none">
-                              <span style={{ fg: usageFlow().input || usageFlow().output ? theme.text : theme.textMuted }}>↑↓</span>
+                              <span
+                                style={{ fg: usageFlow().input || usageFlow().output ? theme.text : theme.textMuted }}
+                              >
+                                ↑↓
+                              </span>
                               {item().context ? ` ${item().context}` : ""}
                               {item().cost ? ` · ${item().cost}` : ""}
                             </text>
@@ -1962,7 +2049,10 @@ export function Prompt(props: PromptProps) {
                         >
                           <text fg={theme.textMuted} wrapMode="none">
                             {/* 只移除重复累计括号，step/request的原始数值与增长脉冲继续由完整投影提供。 */}
-                            <span style={{ fg: usageFlow().input ? theme.text : theme.textMuted }}>↑</span> {Locale.number(item().input)} <span style={{ fg: usageFlow().output ? theme.text : theme.textMuted }}>↓</span> {Locale.number(item().output)}
+                            <span style={{ fg: usageFlow().input ? theme.text : theme.textMuted }}>↑</span>{" "}
+                            {Locale.number(item().input)}{" "}
+                            <span style={{ fg: usageFlow().output ? theme.text : theme.textMuted }}>↓</span>{" "}
+                            {Locale.number(item().output)}
                             {item().context ? ` · ${item().context}` : ""}
                             {item().cost ? ` · ${item().cost}` : ""}
                           </text>

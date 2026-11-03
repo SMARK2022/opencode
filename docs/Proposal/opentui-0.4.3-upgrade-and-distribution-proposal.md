@@ -57,7 +57,7 @@ gh: Resource not accessible by integration (HTTP 403)
 同一接口由已认证维护者token查询返回：
 
 ```json
-{"enabled":true,"enforced_by_owner":false}
+{ "enabled": true, "enforced_by_owner": false }
 ```
 
 因此第一处分歧在release workflow使用`GITHUB_TOKEN`查询repository
@@ -195,16 +195,16 @@ v2 error行为测试新增独立fixture：通过`internalTuiPlugins({experimenta
 
 ### 方案比较
 
-| 路线 | Goal CJK 重复 | stale-frame 乱码 | package family 完整性 | 一次性复杂度 | 持续维护 | 结论 |
-| --- | --- | --- | --- | --- | --- | --- |
-| 官方 `0.4.3` | 不修复 | 修复 | 官方完整 | 低 | 低 | 不完整，拒绝作为主路线 |
-| 当前 `0.3.4` + #845 | 修复 | 不修复 | 需自建完整 native family | 中 | 中 | 仅适合单一事故，不满足本任务完整范围 |
-| 当前 `0.3.4` + #845 + 手工移植 #1224 | 可修复 | 可修复 | 需自建完整 native family | 高 | 高 | #1224 整体无法 clean apply，容易形成自维护 renderer 分叉 |
-| 上游 #845 当前 head 的产物 | 修复 | 取决于其 `0.4.2` 基线 | 当前无可安装产物 | 低 | 低 | 当前不可用，且基线不是 `0.4.3` |
-| **SMARK public fork `smark/main`: `0.4.3` + #845，immutable GitHub Release** | **修复** | **修复** | **11个同commit tarballs + attestation** | **中** | **低到中** | **唯一主路线** |
-| `thirdparty/opentui` 参与OpenCode源码构建 | 修复 | 修复 | 可控，但产生root install bootstrap | 很高 | 高 | 拒绝；submodule仅作源码/provenance |
-| 只改 `@opentui/core` 为 Git URL | 不可靠 | 不可靠 | native 仍可能来自 registry 旧版 | 低 | 高风险 | 无效方案 |
-| `patchedDependencies` 仅打 JS patch | 不修复 | 不修复 | 无法承载 native 二进制修复 | 低 | 高风险 | 无效方案 |
+| 路线                                                                         | Goal CJK 重复 | stale-frame 乱码      | package family 完整性                   | 一次性复杂度 | 持续维护   | 结论                                                     |
+| ---------------------------------------------------------------------------- | ------------- | --------------------- | --------------------------------------- | ------------ | ---------- | -------------------------------------------------------- |
+| 官方 `0.4.3`                                                                 | 不修复        | 修复                  | 官方完整                                | 低           | 低         | 不完整，拒绝作为主路线                                   |
+| 当前 `0.3.4` + #845                                                          | 修复          | 不修复                | 需自建完整 native family                | 中           | 中         | 仅适合单一事故，不满足本任务完整范围                     |
+| 当前 `0.3.4` + #845 + 手工移植 #1224                                         | 可修复        | 可修复                | 需自建完整 native family                | 高           | 高         | #1224 整体无法 clean apply，容易形成自维护 renderer 分叉 |
+| 上游 #845 当前 head 的产物                                                   | 修复          | 取决于其 `0.4.2` 基线 | 当前无可安装产物                        | 低           | 低         | 当前不可用，且基线不是 `0.4.3`                           |
+| **SMARK public fork `smark/main`: `0.4.3` + #845，immutable GitHub Release** | **修复**      | **修复**              | **11个同commit tarballs + attestation** | **中**       | **低到中** | **唯一主路线**                                           |
+| `thirdparty/opentui` 参与OpenCode源码构建                                    | 修复          | 修复                  | 可控，但产生root install bootstrap      | 很高         | 高         | 拒绝；submodule仅作源码/provenance                       |
+| 只改 `@opentui/core` 为 Git URL                                              | 不可靠        | 不可靠                | native 仍可能来自 registry 旧版         | 低           | 高风险     | 无效方案                                                 |
+| `patchedDependencies` 仅打 JS patch                                          | 不修复        | 不修复                | 无法承载 native 二进制修复              | 低           | 高风险     | 无效方案                                                 |
 
 ## 1. Verbatim Requirement
 
@@ -238,121 +238,121 @@ v2 error行为测试新增独立fixture：通过`internalTuiPlugins({experimenta
 
 ## 3. Repository Context
 
-| Source | Why it constrains this task |
-| --- | --- |
-| `AGENTS.md` | 默认分支是 `dev`；测试和 typecheck 必须从 package 目录执行；SDK 生成有专用脚本；优先自动化。 |
-| `packages/opencode/AGENTS.md` | TUI 位于 `packages/opencode/src/cli/cmd/tui`；不能阻塞前台运行 TUI；遵守模块与 Effect 约束。 |
-| `packages/opencode/test/AGENTS.md` | 测试使用真实实现和现有 fixture，避免定时竞态与不必要 mocks。 |
-| `CONTEXT.md` | `Goal` 是 Session 的结构化目标；报告和测试使用该术语，不漂移为 objective/target 作为领域名。 |
-| `docs/adr/README.md` | 当前没有与 OpenTUI dependency ownership 冲突的 accepted ADR；triage ADR 与本任务无关。 |
-| `.opencode/policy/first-principles-engineering.md` | 必须修复第一处分歧，禁止 caller workaround 和新 fallback，要求双向 traceability 与独立审计。 |
-| `.opencode/templates/canonical-plan.md` | 本文必须完整覆盖 24 个 canonical sections。 |
+| Source                                                                              | Why it constrains this task                                                                                            |
+| ----------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `AGENTS.md`                                                                         | 默认分支是 `dev`；测试和 typecheck 必须从 package 目录执行；SDK 生成有专用脚本；优先自动化。                           |
+| `packages/opencode/AGENTS.md`                                                       | TUI 位于 `packages/opencode/src/cli/cmd/tui`；不能阻塞前台运行 TUI；遵守模块与 Effect 约束。                           |
+| `packages/opencode/test/AGENTS.md`                                                  | 测试使用真实实现和现有 fixture，避免定时竞态与不必要 mocks。                                                           |
+| `CONTEXT.md`                                                                        | `Goal` 是 Session 的结构化目标；报告和测试使用该术语，不漂移为 objective/target 作为领域名。                           |
+| `docs/adr/README.md`                                                                | 当前没有与 OpenTUI dependency ownership 冲突的 accepted ADR；triage ADR 与本任务无关。                                 |
+| `.opencode/policy/first-principles-engineering.md`                                  | 必须修复第一处分歧，禁止 caller workaround 和新 fallback，要求双向 traceability 与独立审计。                           |
+| `.opencode/templates/canonical-plan.md`                                             | 本文必须完整覆盖 24 个 canonical sections。                                                                            |
 | `.gitmodules`、`README.md`、`docs/readme/README.en.md`、`docs/readme/README.zht.md` | 现有`thirdparty/chatgpt-browser-agent`提供`SMARK2022` public fork、`smark/main` branch、gitlink和clone说明的仓库先例。 |
-| `docs/proposal/upstream-v1.17.18-merge-governance.md:691-744` | 已确立“一份 OpenTUI runtime/context/native graph”和 release-binary closure gate 的项目方向。 |
-| `docs/proposal/tui-malformed-sgr-mouse-fix.md` | 现有 TUI 问题报告的证据表达约定；同时证明 `0.4.3` 不是所有 TUI parser/render 缺陷的通用修复。 |
+| `docs/proposal/upstream-v1.17.18-merge-governance.md:691-744`                       | 已确立“一份 OpenTUI runtime/context/native graph”和 release-binary closure gate 的项目方向。                           |
+| `docs/proposal/tui-malformed-sgr-mouse-fix.md`                                      | 现有 TUI 问题报告的证据表达约定；同时证明 `0.4.3` 不是所有 TUI parser/render 缺陷的通用修复。                          |
 
 ## 4. Files and Evidence Read
 
 ### OpenCode 生产与测试路径
 
-| Evidence | Relevance | Evidence class |
-| --- | --- | --- |
-| `packages/opencode/src/cli/cmd/tui/feature-plugins/sidebar/goal.tsx:20-45` | Goal objective 进入 `<text wrapMode="word">` 的生产入口 | observed |
-| `packages/opencode/src/cli/cmd/tui/routes/session/sidebar.tsx:26-49` | 固定 42-cell sidebar、左右 padding 2、content paddingRight 1 | observed |
-| `packages/opencode/src/cli/cmd/tui/routes/session/layout.ts:1` | `SESSION_SIDEBAR_WIDTH = 42` | contracted |
-| `packages/opencode/src/cli/cmd/tui/app.tsx:177-199` | OpenCode renderer config 未覆盖 buffered output/thread 的生产设置 | observed |
-| `packages/opencode/src/cli/cmd/run/runtime.lifecycle.ts:81-149` | 第二个 renderer consumer；直接操作生命周期和 scrollback | reachable |
-| `packages/opencode/src/cli/cmd/tui/ui/dialog-prompt.tsx:14-17,116-151` | `description` 已是 factory，但当前渲染为 `{props.description}` | observed |
-| `packages/opencode/src/cli/cmd/tui/component/dialog-provider.tsx:90-98,310-367` | description factory 的生产调用者 | observed |
-| `packages/opencode/src/cli/cmd/tui/feature-plugins/system/plugins.tsx:38-64` | public plugin API 的 reactive description consumer | observed |
-| `packages/opencode/src/cli/cmd/tui/plugin/api.tsx:237-253` | plugin `DialogPrompt` pass-through seam | contracted |
-| `packages/plugin/src/tui.ts:19-50,145-154,300-337` | 公共插件包暴露 OpenTUI types、keymap 和 DialogPrompt factory | contracted |
-| `packages/opencode/src/cli/cmd/tui/component/spinner.tsx:4-20` | 当前显式注册 `SpinnerRenderable`，避免 packaged Bun 的 catalogue 时序问题 | observed |
-| `packages/opencode/test/cli/cmd/tui/spinner.test.tsx` | Solid reconciler spinner registration 行为护栏 | observed |
-| `packages/opencode/test/cli/cmd/tui/session-layout.test.ts:106-227` | 现有 CJK 与 spinner 测试；未覆盖 42/35-cell Goal odd boundary | observed |
-| `packages/opencode/test/cli/tui/slot-replace.test.tsx` | Solid slot/reconciler 升级回归面 | reachable |
-| `packages/opencode/test/cli/tui/plugin-loader*.test.ts` | keymap runtime-module 和 plugin subpath 回归面 | reachable |
-| `.opencode/plugins/tui-smoke.tsx` | repository-local 外部式 consumer；upgrade helper 明确跳过 `.opencode` | reachable |
+| Evidence                                                                        | Relevance                                                                 | Evidence class |
+| ------------------------------------------------------------------------------- | ------------------------------------------------------------------------- | -------------- |
+| `packages/opencode/src/cli/cmd/tui/feature-plugins/sidebar/goal.tsx:20-45`      | Goal objective 进入 `<text wrapMode="word">` 的生产入口                   | observed       |
+| `packages/opencode/src/cli/cmd/tui/routes/session/sidebar.tsx:26-49`            | 固定 42-cell sidebar、左右 padding 2、content paddingRight 1              | observed       |
+| `packages/opencode/src/cli/cmd/tui/routes/session/layout.ts:1`                  | `SESSION_SIDEBAR_WIDTH = 42`                                              | contracted     |
+| `packages/opencode/src/cli/cmd/tui/app.tsx:177-199`                             | OpenCode renderer config 未覆盖 buffered output/thread 的生产设置         | observed       |
+| `packages/opencode/src/cli/cmd/run/runtime.lifecycle.ts:81-149`                 | 第二个 renderer consumer；直接操作生命周期和 scrollback                   | reachable      |
+| `packages/opencode/src/cli/cmd/tui/ui/dialog-prompt.tsx:14-17,116-151`          | `description` 已是 factory，但当前渲染为 `{props.description}`            | observed       |
+| `packages/opencode/src/cli/cmd/tui/component/dialog-provider.tsx:90-98,310-367` | description factory 的生产调用者                                          | observed       |
+| `packages/opencode/src/cli/cmd/tui/feature-plugins/system/plugins.tsx:38-64`    | public plugin API 的 reactive description consumer                        | observed       |
+| `packages/opencode/src/cli/cmd/tui/plugin/api.tsx:237-253`                      | plugin `DialogPrompt` pass-through seam                                   | contracted     |
+| `packages/plugin/src/tui.ts:19-50,145-154,300-337`                              | 公共插件包暴露 OpenTUI types、keymap 和 DialogPrompt factory              | contracted     |
+| `packages/opencode/src/cli/cmd/tui/component/spinner.tsx:4-20`                  | 当前显式注册 `SpinnerRenderable`，避免 packaged Bun 的 catalogue 时序问题 | observed       |
+| `packages/opencode/test/cli/cmd/tui/spinner.test.tsx`                           | Solid reconciler spinner registration 行为护栏                            | observed       |
+| `packages/opencode/test/cli/cmd/tui/session-layout.test.ts:106-227`             | 现有 CJK 与 spinner 测试；未覆盖 42/35-cell Goal odd boundary             | observed       |
+| `packages/opencode/test/cli/tui/slot-replace.test.tsx`                          | Solid slot/reconciler 升级回归面                                          | reachable      |
+| `packages/opencode/test/cli/tui/plugin-loader*.test.ts`                         | keymap runtime-module 和 plugin subpath 回归面                            | reachable      |
+| `.opencode/plugins/tui-smoke.tsx`                                               | repository-local 外部式 consumer；upgrade helper 明确跳过 `.opencode`     | reachable      |
 
 ### Dependency 与构建路径
 
-| Evidence | Relevance | Evidence class |
-| --- | --- | --- |
-| `package.json:31-52,130-149` | 当前trio为`0.4.3-smark.1`，11个overrides固定SMARK release URLs；spinner仍为`0.0.7` | observed |
-| `packages/opencode/package.json:112-148` | CLI 的直接 OpenTUI 与 spinner dependencies | observed |
-| `packages/plugin/package.json:24-43` | 公共plugin peers当前最低`>=0.4.3-smark.1` | contracted |
-| `package.json:85,130-149` | root catalog/override统一`solid-js@1.9.12`；旧patch entry已移除 | observed |
-| `patches/solid-js@1.9.10.patch` | 已不被manifest引用，R12 remaining cleanup要求删除 | observed |
-| `bun.lock` 的 OpenTUI 和 native entries | 当前3个framework+8个platform packages全部锁定同tag URL和integrity | observed |
-| `node_modules/opentui-spinner/package.json:67-82` | 最新 `0.0.7` peers 仍是 `^0.3.4` | contracted |
-| `node_modules/opentui-spinner/dist/src-DjeqLSfu.mjs` | SpinnerRenderable 继承 `@opentui/core` Renderable 并调用 render lib | observed |
-| `node_modules/opentui-spinner/dist/solid.mjs` | 上游 side-effect registration 走 `@opentui/solid/components`；当前应用已绕开 | observed |
-| `script/upgrade-opentui.ts` | 当前只接受已发布`0.4.3-smark.1`，原子更新catalog/11 URLs/peers并排除thirdparty | observed |
-| `packages/opencode/test/script/upgrade-opentui.test.ts` | 旧CLI在3 overrides处red；新CLI 11 URLs且nested manifest byte-identical | observed |
-| `bunfig.toml` | hoisted/exact install 和 OpenTUI release-age exceptions | contracted |
-| `.github/actions/setup-bun/action.yml` | CI setup 与 root install 发生在 build 前 | observed |
-| `.github/workflows/test.yml` | OpenCode/core 在 Linux、Windows、macOS 的 required tests | contracted |
-| `.github/workflows/typecheck.yml` | package typecheck gate | contracted |
-| `.github/workflows/build-opencode.yml` | macOS、Linux、Windows build/package/release matrix | contracted |
-| `packages/opencode/script/install-target.ts` | `--single`、`--os`、`--arch` 到 Bun install target 的映射 | observed |
-| `packages/opencode/script/build.ts:63-179,375-510` | target-specific core install、parser worker、Bun compile、smoke 和 release asset | observed |
+| Evidence                                                | Relevance                                                                          | Evidence class |
+| ------------------------------------------------------- | ---------------------------------------------------------------------------------- | -------------- |
+| `package.json:31-52,130-149`                            | 当前trio为`0.4.3-smark.1`，11个overrides固定SMARK release URLs；spinner仍为`0.0.7` | observed       |
+| `packages/opencode/package.json:112-148`                | CLI 的直接 OpenTUI 与 spinner dependencies                                         | observed       |
+| `packages/plugin/package.json:24-43`                    | 公共plugin peers当前最低`>=0.4.3-smark.1`                                          | contracted     |
+| `package.json:85,130-149`                               | root catalog/override统一`solid-js@1.9.12`；旧patch entry已移除                    | observed       |
+| `patches/solid-js@1.9.10.patch`                         | 已不被manifest引用，R12 remaining cleanup要求删除                                  | observed       |
+| `bun.lock` 的 OpenTUI 和 native entries                 | 当前3个framework+8个platform packages全部锁定同tag URL和integrity                  | observed       |
+| `node_modules/opentui-spinner/package.json:67-82`       | 最新 `0.0.7` peers 仍是 `^0.3.4`                                                   | contracted     |
+| `node_modules/opentui-spinner/dist/src-DjeqLSfu.mjs`    | SpinnerRenderable 继承 `@opentui/core` Renderable 并调用 render lib                | observed       |
+| `node_modules/opentui-spinner/dist/solid.mjs`           | 上游 side-effect registration 走 `@opentui/solid/components`；当前应用已绕开       | observed       |
+| `script/upgrade-opentui.ts`                             | 当前只接受已发布`0.4.3-smark.1`，原子更新catalog/11 URLs/peers并排除thirdparty     | observed       |
+| `packages/opencode/test/script/upgrade-opentui.test.ts` | 旧CLI在3 overrides处red；新CLI 11 URLs且nested manifest byte-identical             | observed       |
+| `bunfig.toml`                                           | hoisted/exact install 和 OpenTUI release-age exceptions                            | contracted     |
+| `.github/actions/setup-bun/action.yml`                  | CI setup 与 root install 发生在 build 前                                           | observed       |
+| `.github/workflows/test.yml`                            | OpenCode/core 在 Linux、Windows、macOS 的 required tests                           | contracted     |
+| `.github/workflows/typecheck.yml`                       | package typecheck gate                                                             | contracted     |
+| `.github/workflows/build-opencode.yml`                  | macOS、Linux、Windows build/package/release matrix                                 | contracted     |
+| `packages/opencode/script/install-target.ts`            | `--single`、`--os`、`--arch` 到 Bun install target 的映射                          | observed       |
+| `packages/opencode/script/build.ts:63-179,375-510`      | target-specific core install、parser worker、Bun compile、smoke 和 release asset   | observed       |
 
 ### OpenTUI 上游证据
 
-| Evidence | Relevance | Evidence class |
-| --- | --- | --- |
-| OpenTUI `v0.3.4` commit `9b216a58...` | 当前基线源码 | observed |
-| OpenTUI `v0.4.3` commit `5803b2cf...` | 升级目标源码 | observed |
-| OpenTUI `v0.4.3 packages/solid/package.json:60-73` | 精确 peer `solid-js: 1.9.12` | contracted |
-| OpenTUI `v0.4.3 packages/keymap/package.json:70-88` | Solid adapter peer同样要求 `solid-js: 1.9.12` | contracted |
-| `solid-js@1.9.12/dist/solid.js` | 已包含旧 patch 的 `if (!Transition.sources.has(node)) node.value = nextValue` | observed |
-| `v0.3.4`/`v0.4.0`/`v0.4.1`/`v0.4.2`/`v0.4.3` release notes | 46 commits中的发布主题和 breaking areas | contracted |
-| `v0.3.4` 与 `v0.4.3` core/solid/keymap manifests | exports、native optional deps、`bun-ffi-structs`、Yoga 变化 | observed |
-| `v0.4.3 packages/core/src/zig/text-buffer-view.zig:1143-1315` | #845 前的错误 offset 演进 | observed |
-| PR #845 head `6fbf515c...` 同文件 `1143-1312` | 修复后在每次 add 后同步 byte offset | observed |
-| `v0.4.3 packages/core/src/zig/buffer.zig:1383-1437` | virtual chunk column offset 到 UTF-8 byte 的绘制转换 | observed |
-| `v0.3.4 packages/core/src/zig/renderer-output.zig:163-394` | 固定 `2 MiB` buffer、BufferFull 和仍返回 `.ok` | observed |
-| `v0.4.3 packages/core/src/zig/renderer-output.zig:168-419` | 动态扩容、整帧失败和 64 小帧后 shrink | observed |
-| `v0.4.3 packages/core/src/zig/renderer.zig` | `.failed` 触发 full repaint | observed |
-| PR #845 | 3 files, +119/-13，当前`OPEN`、`MERGEABLE`、`BLOCKED`，head `6fbf515c...` | observed |
-| PR #1224 | 74 files, +1206/-256, 29 checks；已进入 `v0.4.3` | observed |
-| PR #1171 | packaged Solid catalogue 通过 consumer-selected root module 共享 | contracted |
-| OpenTUI `.github/workflows/build-native.yml` | Bun `1.3.14`、Zig `0.15.2`、macOS cross-build 8 targets，并汇总core/Solid/keymap dist与native dirs | observed |
-| OpenTUI `.github/workflows/npm-latest-release.yml:115-165` | 上游使用`npm pack --dry-run`验证生成后的core/Solid/keymap package；这是tarball producer合同 | observed |
-| OpenTUI `.github/workflows/release.yml` | 上游tag release依赖Blacksmith、npm token和Azure签名secret，最终GitHub Release只上传native/examples ZIP，不上传npm tarballs | observed |
-| OpenTUI `packages/core/scripts/build.ts` | native package naming、exports 和 core optionalDependencies 生成 | observed |
-| OpenTUI `packages/core/scripts/publish.ts` | core 和全部 native packages 是一个发布闭包 | contracted |
-| OpenTUI `scripts/prepare-release.ts` | 现有lockstep owner把9个`@opentui/*` workspace manifests与8个core optional deps统一到显式prerelease version | observed |
+| Evidence                                                      | Relevance                                                                                                                  | Evidence class |
+| ------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- | -------------- |
+| OpenTUI `v0.3.4` commit `9b216a58...`                         | 当前基线源码                                                                                                               | observed       |
+| OpenTUI `v0.4.3` commit `5803b2cf...`                         | 升级目标源码                                                                                                               | observed       |
+| OpenTUI `v0.4.3 packages/solid/package.json:60-73`            | 精确 peer `solid-js: 1.9.12`                                                                                               | contracted     |
+| OpenTUI `v0.4.3 packages/keymap/package.json:70-88`           | Solid adapter peer同样要求 `solid-js: 1.9.12`                                                                              | contracted     |
+| `solid-js@1.9.12/dist/solid.js`                               | 已包含旧 patch 的 `if (!Transition.sources.has(node)) node.value = nextValue`                                              | observed       |
+| `v0.3.4`/`v0.4.0`/`v0.4.1`/`v0.4.2`/`v0.4.3` release notes    | 46 commits中的发布主题和 breaking areas                                                                                    | contracted     |
+| `v0.3.4` 与 `v0.4.3` core/solid/keymap manifests              | exports、native optional deps、`bun-ffi-structs`、Yoga 变化                                                                | observed       |
+| `v0.4.3 packages/core/src/zig/text-buffer-view.zig:1143-1315` | #845 前的错误 offset 演进                                                                                                  | observed       |
+| PR #845 head `6fbf515c...` 同文件 `1143-1312`                 | 修复后在每次 add 后同步 byte offset                                                                                        | observed       |
+| `v0.4.3 packages/core/src/zig/buffer.zig:1383-1437`           | virtual chunk column offset 到 UTF-8 byte 的绘制转换                                                                       | observed       |
+| `v0.3.4 packages/core/src/zig/renderer-output.zig:163-394`    | 固定 `2 MiB` buffer、BufferFull 和仍返回 `.ok`                                                                             | observed       |
+| `v0.4.3 packages/core/src/zig/renderer-output.zig:168-419`    | 动态扩容、整帧失败和 64 小帧后 shrink                                                                                      | observed       |
+| `v0.4.3 packages/core/src/zig/renderer.zig`                   | `.failed` 触发 full repaint                                                                                                | observed       |
+| PR #845                                                       | 3 files, +119/-13，当前`OPEN`、`MERGEABLE`、`BLOCKED`，head `6fbf515c...`                                                  | observed       |
+| PR #1224                                                      | 74 files, +1206/-256, 29 checks；已进入 `v0.4.3`                                                                           | observed       |
+| PR #1171                                                      | packaged Solid catalogue 通过 consumer-selected root module 共享                                                           | contracted     |
+| OpenTUI `.github/workflows/build-native.yml`                  | Bun `1.3.14`、Zig `0.15.2`、macOS cross-build 8 targets，并汇总core/Solid/keymap dist与native dirs                         | observed       |
+| OpenTUI `.github/workflows/npm-latest-release.yml:115-165`    | 上游使用`npm pack --dry-run`验证生成后的core/Solid/keymap package；这是tarball producer合同                                | observed       |
+| OpenTUI `.github/workflows/release.yml`                       | 上游tag release依赖Blacksmith、npm token和Azure签名secret，最终GitHub Release只上传native/examples ZIP，不上传npm tarballs | observed       |
+| OpenTUI `packages/core/scripts/build.ts`                      | native package naming、exports 和 core optionalDependencies 生成                                                           | observed       |
+| OpenTUI `packages/core/scripts/publish.ts`                    | core 和全部 native packages 是一个发布闭包                                                                                 | contracted     |
+| OpenTUI `scripts/prepare-release.ts`                          | 现有lockstep owner把9个`@opentui/*` workspace manifests与8个core optional deps统一到显式prerelease version                 | observed       |
 
 ### 历史与执行证据
 
-| Evidence | Relevance | Evidence class |
-| --- | --- | --- |
-| OpenCode commit `1cad1628d4` | 记录 spinner `0.0.6/0.0.7` 与早期 0.4.3 尝试的 segfault 风险 | observed |
-| OpenCode commit `98dcea02a8` | `0.4.2` 曾被回退到 `0.3.4` | observed |
-| OpenCode commit `561070fbc2` / upstream PR #35226 | 官方 OpenCode 升到 `0.4.3`；Linux/Windows unit、E2E、typecheck 全过 | observed |
-| OpenCode commit `d886a91089` | 当前显式 spinner registration 修复 compiled bundle 时序 | observed |
-| `npm view opentui-spinner ...` on 2026-07-16 | npm 最新仍是 `0.0.7`，无 0.4.x peer release | observed |
-| `https://pkg.pr.new/@opentui/core@6fbf515` | 2026-07-16 返回 404，#845 尚无 preview | observed |
-| PR #845 workflow artifact `7903328346` | 已过期且只含 native libraries，不是完整 package family | observed |
-| npm snapshot 查询 | 不存在 `@opentui/core@0.0.0-20260626-6fbf515c` | observed |
-| `npm view @xterm/headless` on 2026-07-16 | `6.0.0`，可作为 final artifact ANSI terminal model | observed |
-| `npm view pkg-pr-new` on 2026-07-16 | publisher版本 `0.0.78`，记录dist integrity | observed |
-| GitHub-hosted runners reference on 2026-07-16 | public repository标准runner提供Linux arm64 label `ubuntu-24.04-arm` | contracted |
-| `gh api user` on 2026-07-17 | authenticated login是`SMARK2022`；用户明确授权创建public fork、push、tag和release | contracted / observed |
-| `gh repo view SMARK2022/opentui` on 2026-07-17 | public fork存在，default branch=`smark/main`，parent=`anomalyco/opentui` | observed |
-| Bun 1.3.14 direct URL/catalog probes | HTTP`.tgz`可作为catalog/override；`bun install --os=linux --cpu=x64 @opentui/core@catalog:`保持catalog spec并解析URL | observed |
-| Bun 1.3.14 packed closure probe | 本地HTTP提供11个真实`npm pack` tarballs时，core/Solid/keymap、8 native和`solid-js@1.9.12`共110 packages安装且四个入口成功import | observed |
-| local `v0.4.3` package build/pack probe | Zig 0.15.2 cross-build 8 native，core/Solid/keymap build成功，`npm pack`生成恰好11个tarballs和SHA-256；总压缩体积约22 MiB | observed |
-| `bun install --frozen-lockfile` at pristine `v0.4.3` | Bun 1.3.14拒绝；非frozen install给`bun.lock`补8个native entries | observed |
-| GitHub immutable release docs/API | `PUT /repos/{owner}/{repo}/immutable-releases`启用；发布后tag/assets锁定并生成release attestation | contracted |
-| `gh 2.96.0 release verify/verify-asset` | 当前环境可验证immutable release及单个下载asset的cryptographic attestation | observed |
-| 本地 #845 native test | `1675 passed, 2 skipped, 0 failed` | observed |
-| 本地 #845 JS/render tests | `156 passed, 0 failed` | observed |
-| 本地 `v0.4.3` native test | `1680 passed, 2 skipped, 0 failed` | observed |
-| `git apply --check` #845 -> `v0.3.4` | clean | observed |
-| `git apply --check` #845 -> `v0.4.3` | clean | observed |
-| `git apply --check` #1224 -> `v0.3.4` | fails across package/core/renderer/framework files | observed |
+| Evidence                                             | Relevance                                                                                                                       | Evidence class        |
+| ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- | --------------------- |
+| OpenCode commit `1cad1628d4`                         | 记录 spinner `0.0.6/0.0.7` 与早期 0.4.3 尝试的 segfault 风险                                                                    | observed              |
+| OpenCode commit `98dcea02a8`                         | `0.4.2` 曾被回退到 `0.3.4`                                                                                                      | observed              |
+| OpenCode commit `561070fbc2` / upstream PR #35226    | 官方 OpenCode 升到 `0.4.3`；Linux/Windows unit、E2E、typecheck 全过                                                             | observed              |
+| OpenCode commit `d886a91089`                         | 当前显式 spinner registration 修复 compiled bundle 时序                                                                         | observed              |
+| `npm view opentui-spinner ...` on 2026-07-16         | npm 最新仍是 `0.0.7`，无 0.4.x peer release                                                                                     | observed              |
+| `https://pkg.pr.new/@opentui/core@6fbf515`           | 2026-07-16 返回 404，#845 尚无 preview                                                                                          | observed              |
+| PR #845 workflow artifact `7903328346`               | 已过期且只含 native libraries，不是完整 package family                                                                          | observed              |
+| npm snapshot 查询                                    | 不存在 `@opentui/core@0.0.0-20260626-6fbf515c`                                                                                  | observed              |
+| `npm view @xterm/headless` on 2026-07-16             | `6.0.0`，可作为 final artifact ANSI terminal model                                                                              | observed              |
+| `npm view pkg-pr-new` on 2026-07-16                  | publisher版本 `0.0.78`，记录dist integrity                                                                                      | observed              |
+| GitHub-hosted runners reference on 2026-07-16        | public repository标准runner提供Linux arm64 label `ubuntu-24.04-arm`                                                             | contracted            |
+| `gh api user` on 2026-07-17                          | authenticated login是`SMARK2022`；用户明确授权创建public fork、push、tag和release                                               | contracted / observed |
+| `gh repo view SMARK2022/opentui` on 2026-07-17       | public fork存在，default branch=`smark/main`，parent=`anomalyco/opentui`                                                        | observed              |
+| Bun 1.3.14 direct URL/catalog probes                 | HTTP`.tgz`可作为catalog/override；`bun install --os=linux --cpu=x64 @opentui/core@catalog:`保持catalog spec并解析URL            | observed              |
+| Bun 1.3.14 packed closure probe                      | 本地HTTP提供11个真实`npm pack` tarballs时，core/Solid/keymap、8 native和`solid-js@1.9.12`共110 packages安装且四个入口成功import | observed              |
+| local `v0.4.3` package build/pack probe              | Zig 0.15.2 cross-build 8 native，core/Solid/keymap build成功，`npm pack`生成恰好11个tarballs和SHA-256；总压缩体积约22 MiB       | observed              |
+| `bun install --frozen-lockfile` at pristine `v0.4.3` | Bun 1.3.14拒绝；非frozen install给`bun.lock`补8个native entries                                                                 | observed              |
+| GitHub immutable release docs/API                    | `PUT /repos/{owner}/{repo}/immutable-releases`启用；发布后tag/assets锁定并生成release attestation                               | contracted            |
+| `gh 2.96.0 release verify/verify-asset`              | 当前环境可验证immutable release及单个下载asset的cryptographic attestation                                                       | observed              |
+| 本地 #845 native test                                | `1675 passed, 2 skipped, 0 failed`                                                                                              | observed              |
+| 本地 #845 JS/render tests                            | `156 passed, 0 failed`                                                                                                          | observed              |
+| 本地 `v0.4.3` native test                            | `1680 passed, 2 skipped, 0 failed`                                                                                              | observed              |
+| `git apply --check` #845 -> `v0.3.4`                 | clean                                                                                                                           | observed              |
+| `git apply --check` #845 -> `v0.4.3`                 | clean                                                                                                                           | observed              |
+| `git apply --check` #1224 -> `v0.3.4`                | fails across package/core/renderer/framework files                                                                              | observed              |
 
 ## 5. Current Behavior
 
@@ -433,52 +433,52 @@ OpenTUI source producer、immutable artifact producer和OpenCode consumer现已�
 
 ## 6. Supported Input Domain and Reachability
 
-| Input or condition | Producer | Upstream guarantees | Reachable path | Owner | Classification |
-| --- | --- | --- | --- | --- | --- |
-| 含 ASCII、标点和 CJK 双宽 grapheme 的 Goal objective | Goal API / DialogGoal | objective 是普通 Unicode string | Goal sidebar `wrapMode="word"` | OpenTUI TextBufferView | observed |
-| 35-cell odd-width 文本盒，外层 framebuffer 更宽 | 固定 sidebar layout | 42/35 几何由当前源码确定 | Sidebar -> Goal | OpenCode layout + OpenTUI clip | observed |
-| 超过 `2 MiB` 的 ANSI frame | 大 terminal、全量刷新、高密度样式输出 | 0.3.4 无动态容量保证 | renderer output | OpenTUI BufferedBackend | reachable；上游测试 observed |
-| buffered/threaded output | `createCliRenderer` 默认与平台行为 | Linux 在 0.4.3 禁用 thread；macOS 可 threaded | app renderer config | OpenTUI renderer | reachable |
-| `DialogPrompt.description` factory | provider/plugin UI | public plugin type明确为 `() => JSX.Element` | plugin API -> DialogPrompt | OpenCode DialogPrompt | observed |
-| 一份 `solid-js` runtime | root catalog、9个 workspace consumers、OpenTUI Solid/keymap peers | OpenTUI 0.4.3精确要求1.9.12 | app/TUI/plugin component graph | root dependency catalog | contracted |
-| duplicate renderable id 或 object reparent | Solid slot/reconciler | 0.4.3 改为 object identity | plugin slots | OpenTUI core/Solid | reachable |
-| macOS arm64/x64 | release workflow | current release artifact | build.ts target install | OpenCode build | contracted |
-| Linux arm64/x64 glibc/musl native package | OpenTUI package family；OpenCode `--os=linux --cpu=*` | core optional deps 列出 4 variants | build.ts | OpenTUI package producer | contracted |
-| Windows x64/arm64 native package | OpenTUI package family | core optional deps 列出 2 variants | current release用x64；family含arm64 | OpenTUI package producer | contracted/reachable |
-| public OpenTUI fork与SMARK默认分支 | 用户要求、authenticated `SMARK2022` GitHub账户 | fork保持upstream public可见性；默认分支可由repository API设定 | `SMARK2022/opentui:smark/main` | GitHub repository settings | contracted |
-| OpenTUI submodule gitlink | `.gitmodules`和现有chatgpt submodule先例 | gitlink固定commit，branch字段只辅助update | OpenCode checkout -> `thirdparty/opentui` | OpenCode repository metadata | contracted / observed |
-| 11个GitHub Release npm tarballs | OpenTUI build scripts与Bun URL dependency | package内name/version必须与`0.4.3-smark.1`闭包一致 | release URL -> root override -> Bun lock/install | OpenTUI release workflow | contracted / observed |
-| immutable release attestation | repository immutable-release setting | draft可上传；发布后tag/assets不可修改并产生attestation | `gh release verify` / `verify-asset` | GitHub release service | contracted |
-| user运行`bun run upgrade-opentui <version>` | root package script | 当前CLI承诺更新OpenTUI dependency versions | root catalog/overrides与package peers | `script/upgrade-opentui.ts` | reachable |
-| 任意字体把中文算成非双宽 | 未发现 producer/contract | 无 | 无证据 | terminal | speculative，不驱动方案 |
+| Input or condition                                   | Producer                                                          | Upstream guarantees                                           | Reachable path                                   | Owner                          | Classification               |
+| ---------------------------------------------------- | ----------------------------------------------------------------- | ------------------------------------------------------------- | ------------------------------------------------ | ------------------------------ | ---------------------------- |
+| 含 ASCII、标点和 CJK 双宽 grapheme 的 Goal objective | Goal API / DialogGoal                                             | objective 是普通 Unicode string                               | Goal sidebar `wrapMode="word"`                   | OpenTUI TextBufferView         | observed                     |
+| 35-cell odd-width 文本盒，外层 framebuffer 更宽      | 固定 sidebar layout                                               | 42/35 几何由当前源码确定                                      | Sidebar -> Goal                                  | OpenCode layout + OpenTUI clip | observed                     |
+| 超过 `2 MiB` 的 ANSI frame                           | 大 terminal、全量刷新、高密度样式输出                             | 0.3.4 无动态容量保证                                          | renderer output                                  | OpenTUI BufferedBackend        | reachable；上游测试 observed |
+| buffered/threaded output                             | `createCliRenderer` 默认与平台行为                                | Linux 在 0.4.3 禁用 thread；macOS 可 threaded                 | app renderer config                              | OpenTUI renderer               | reachable                    |
+| `DialogPrompt.description` factory                   | provider/plugin UI                                                | public plugin type明确为 `() => JSX.Element`                  | plugin API -> DialogPrompt                       | OpenCode DialogPrompt          | observed                     |
+| 一份 `solid-js` runtime                              | root catalog、9个 workspace consumers、OpenTUI Solid/keymap peers | OpenTUI 0.4.3精确要求1.9.12                                   | app/TUI/plugin component graph                   | root dependency catalog        | contracted                   |
+| duplicate renderable id 或 object reparent           | Solid slot/reconciler                                             | 0.4.3 改为 object identity                                    | plugin slots                                     | OpenTUI core/Solid             | reachable                    |
+| macOS arm64/x64                                      | release workflow                                                  | current release artifact                                      | build.ts target install                          | OpenCode build                 | contracted                   |
+| Linux arm64/x64 glibc/musl native package            | OpenTUI package family；OpenCode `--os=linux --cpu=*`             | core optional deps 列出 4 variants                            | build.ts                                         | OpenTUI package producer       | contracted                   |
+| Windows x64/arm64 native package                     | OpenTUI package family                                            | core optional deps 列出 2 variants                            | current release用x64；family含arm64              | OpenTUI package producer       | contracted/reachable         |
+| public OpenTUI fork与SMARK默认分支                   | 用户要求、authenticated `SMARK2022` GitHub账户                    | fork保持upstream public可见性；默认分支可由repository API设定 | `SMARK2022/opentui:smark/main`                   | GitHub repository settings     | contracted                   |
+| OpenTUI submodule gitlink                            | `.gitmodules`和现有chatgpt submodule先例                          | gitlink固定commit，branch字段只辅助update                     | OpenCode checkout -> `thirdparty/opentui`        | OpenCode repository metadata   | contracted / observed        |
+| 11个GitHub Release npm tarballs                      | OpenTUI build scripts与Bun URL dependency                         | package内name/version必须与`0.4.3-smark.1`闭包一致            | release URL -> root override -> Bun lock/install | OpenTUI release workflow       | contracted / observed        |
+| immutable release attestation                        | repository immutable-release setting                              | draft可上传；发布后tag/assets不可修改并产生attestation        | `gh release verify` / `verify-asset`             | GitHub release service         | contracted                   |
+| user运行`bun run upgrade-opentui <version>`          | root package script                                               | 当前CLI承诺更新OpenTUI dependency versions                    | root catalog/overrides与package peers            | `script/upgrade-opentui.ts`    | reachable                    |
+| 任意字体把中文算成非双宽                             | 未发现 producer/contract                                          | 无                                                            | 无证据                                           | terminal                       | speculative，不驱动方案      |
 
 ## 7. Required Invariants
 
-| ID | Behavioral invariant | Evidence | Existing test |
-| --- | --- | --- | --- |
-| INV-01 | 一个源 grapheme 在一次静态 Goal 渲染中只占一个连续 cell span，不跨行重复 | 用户现象、42/35 repro | 无；现有 CJK 测试未覆盖外层 framebuffer 更宽 |
-| INV-02 | virtual chunk 的 column offset 与 UTF-8 byte offset 在每次消费后表示同一位置 | #845 diff 与 local red/green | 上游 #845 Zig/Markdown tests |
-| INV-03 | renderer 只有在整帧 ANSI 成功输出后才能把 cell state 视为 committed | #1224 / 0.4.3 renderer code | `v0.4.3` native renderer tests |
-| INV-04 | 一个运行进程只能解析到一份 core、Solid、keymap graph 和同一release commit/version的目标 native binary | root overrides、public plugin types、build path | 无完整 closure gate |
-| INV-05 | `DialogPrompt.description` factory 必须在 owner component 中求值并渲染返回 JSX | public plugin type、upstream 0.4.3 OpenCode diff | 现有 smoke plugin 可达，缺专门回归 |
-| INV-06 | release binary 必须嵌入当前 target 对应的 OpenTUI native package，而不是 host 或 registry 旧版本 | build.ts target install + Bun compile | 当前仅 `--version` smoke，不验证 native hash |
-| INV-07 | full upgrade 不得破坏 spinner registration、slot replacement、keymap runtime loading 和 renderer shutdown | current call-surface inventory | 分散存在相关测试 |
-| INV-08 | OpenCode、`@opentui/solid`、keymap Solid adapter和 spinner必须解析到一份满足 peer contract 的 `solid-js@1.9.12` runtime | 0.4.3 manifests、当前 root catalog/patch | 无完整 runtime closure gate |
+| ID     | Behavioral invariant                                                                                                                           | Evidence                                                             | Existing test                                                                                                   |
+| ------ | ---------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| INV-01 | 一个源 grapheme 在一次静态 Goal 渲染中只占一个连续 cell span，不跨行重复                                                                       | 用户现象、42/35 repro                                                | 无；现有 CJK 测试未覆盖外层 framebuffer 更宽                                                                    |
+| INV-02 | virtual chunk 的 column offset 与 UTF-8 byte offset 在每次消费后表示同一位置                                                                   | #845 diff 与 local red/green                                         | 上游 #845 Zig/Markdown tests                                                                                    |
+| INV-03 | renderer 只有在整帧 ANSI 成功输出后才能把 cell state 视为 committed                                                                            | #1224 / 0.4.3 renderer code                                          | `v0.4.3` native renderer tests                                                                                  |
+| INV-04 | 一个运行进程只能解析到一份 core、Solid、keymap graph 和同一release commit/version的目标 native binary                                          | root overrides、public plugin types、build path                      | 无完整 closure gate                                                                                             |
+| INV-05 | `DialogPrompt.description` factory 必须在 owner component 中求值并渲染返回 JSX                                                                 | public plugin type、upstream 0.4.3 OpenCode diff                     | 现有 smoke plugin 可达，缺专门回归                                                                              |
+| INV-06 | release binary 必须嵌入当前 target 对应的 OpenTUI native package，而不是 host 或 registry 旧版本                                               | build.ts target install + Bun compile                                | 当前仅 `--version` smoke，不验证 native hash                                                                    |
+| INV-07 | full upgrade 不得破坏 spinner registration、slot replacement、keymap runtime loading 和 renderer shutdown                                      | current call-surface inventory                                       | 分散存在相关测试                                                                                                |
+| INV-08 | OpenCode、`@opentui/solid`、keymap Solid adapter和 spinner必须解析到一份满足 peer contract 的 `solid-js@1.9.12` runtime                        | 0.4.3 manifests、当前 root catalog/patch                             | 无完整 runtime closure gate                                                                                     |
 | INV-09 | public fork默认分支、OpenCode gitlink、immutable release tag和11个package repository metadata必须指向同一个`v0.4.3 + #845` source owner/commit | 用户的fork/submodule/default-branch要求；GitHub attestation contract | gitlink/tag/package metadata统一指向`cbe492a5`；default branch `e1b90732`只增加workflow retry，不改变tag source |
-| INV-10 | OpenCode build只从11个可公开下载且integrity固定的release tarballs取得OpenTUI，不从submodule、official npm或mixed native graph取得替代成功 | 用户要求独立打包后消费；Bun URL probe | release、11 root URLs、lock integrity和installed closure已验证；final target compile/smoke待完成 |
-| INV-11 | OpenTUI维护命令必须原子更新version catalog、11个artifact overrides和peer floor，并保持`thirdparty/opentui`独立Git工作树clean | 现有upgrade CLI与新增submodule边界 | temp fixture已从3个catalog override red转为11 URLs green，thirdparty byte-identical |
+| INV-10 | OpenCode build只从11个可公开下载且integrity固定的release tarballs取得OpenTUI，不从submodule、official npm或mixed native graph取得替代成功      | 用户要求独立打包后消费；Bun URL probe                                | release、11 root URLs、lock integrity和installed closure已验证；final target compile/smoke待完成                |
+| INV-11 | OpenTUI维护命令必须原子更新version catalog、11个artifact overrides和peer floor，并保持`thirdparty/opentui`独立Git工作树clean                   | 现有upgrade CLI与新增submodule边界                                   | temp fixture已从3个catalog override red转为11 URLs green，thirdparty byte-identical                             |
 
 ## 8. First Divergence and Root Cause
 
-| Invariant | First divergence | Owning module/interface | Proof |
-| --- | --- | --- | --- |
-| INV-01/INV-02 | `word` wrap 选择 punctuation boundary 后只推进 `char_offset`，`byte_offset` 未在统一消费点推进 | OpenTUI `TextBufferView` word-wrap iterator | `v0.4.3` lines 1210-1217、1275-1287、1291-1297 与 #845 lines 1284-1293 对比；exact layout red/green |
-| INV-03 | 0.3.4 `bufferWrite` 返回 BufferFull，但调用点吞错，`endFrame` 仍置 `hasCommittedFrame=true` 并返回 `.ok` | OpenTUI `BufferedBackend` / renderer commit contract | 0.3.4 renderer-output lines 322-394；0.4.3 lines 342-419 |
-| INV-04/INV-06 | 只替换 core JS 时，core optionalDependencies 仍按 package version解析 8 个 native 包；build.ts 又按 target 重新安装 core | package family / OpenCode build seam | manifests、core build script、OpenCode build.ts |
-| INV-05 | 0.4.3 兼容迁移要求 factory invocation，而当前 owner 仍把 function object 作为 child | OpenCode `DialogPrompt` | upstream OpenCode commit `561070fbc2` 精确改为 `{props.description?.()}`；当前 line 127 未迁移 |
-| INV-08 | 初次切catalog后`@solidjs/start`仍嵌套1.9.10，closure verifier先得到2个runtime | root dependency overrides | 新增root `solid-js: catalog:`后closure green为唯一1.9.12；旧patch文件仍待删除 |
-| INV-09/INV-10 | 已完成：release workflow permission/dispatch、11 assets、root URLs和lock建立同一source identity | GitHub repository/submodule/release producer与OpenCode dependency seam | run `29567923763`、release attestations、gitlink/tag `cbe492a5`、closure verifier green |
-| INV-11 | 已完成：旧CLI只更新catalog/3 overrides；新CLI生成11 URLs并排除thirdparty | `script/upgrade-opentui.ts` maintenance interface | temp fixture exact red/green及nested manifest byte equality |
+| Invariant     | First divergence                                                                                                         | Owning module/interface                                                | Proof                                                                                               |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| INV-01/INV-02 | `word` wrap 选择 punctuation boundary 后只推进 `char_offset`，`byte_offset` 未在统一消费点推进                           | OpenTUI `TextBufferView` word-wrap iterator                            | `v0.4.3` lines 1210-1217、1275-1287、1291-1297 与 #845 lines 1284-1293 对比；exact layout red/green |
+| INV-03        | 0.3.4 `bufferWrite` 返回 BufferFull，但调用点吞错，`endFrame` 仍置 `hasCommittedFrame=true` 并返回 `.ok`                 | OpenTUI `BufferedBackend` / renderer commit contract                   | 0.3.4 renderer-output lines 322-394；0.4.3 lines 342-419                                            |
+| INV-04/INV-06 | 只替换 core JS 时，core optionalDependencies 仍按 package version解析 8 个 native 包；build.ts 又按 target 重新安装 core | package family / OpenCode build seam                                   | manifests、core build script、OpenCode build.ts                                                     |
+| INV-05        | 0.4.3 兼容迁移要求 factory invocation，而当前 owner 仍把 function object 作为 child                                      | OpenCode `DialogPrompt`                                                | upstream OpenCode commit `561070fbc2` 精确改为 `{props.description?.()}`；当前 line 127 未迁移      |
+| INV-08        | 初次切catalog后`@solidjs/start`仍嵌套1.9.10，closure verifier先得到2个runtime                                            | root dependency overrides                                              | 新增root `solid-js: catalog:`后closure green为唯一1.9.12；旧patch文件仍待删除                       |
+| INV-09/INV-10 | 已完成：release workflow permission/dispatch、11 assets、root URLs和lock建立同一source identity                          | GitHub repository/submodule/release producer与OpenCode dependency seam | run `29567923763`、release attestations、gitlink/tag `cbe492a5`、closure verifier green             |
+| INV-11        | 已完成：旧CLI只更新catalog/3 overrides；新CLI生成11 URLs并排除thirdparty                                                 | `script/upgrade-opentui.ts` maintenance interface                      | temp fixture exact red/green及nested manifest byte equality                                         |
 
 ### Red-capable feedback loop
 
@@ -512,18 +512,18 @@ exit=0
 
 ## 9. Responsibility and Seam
 
-| Concern | Owner | Interface promise | Why it belongs here | Why another module does not own it |
-| --- | --- | --- | --- | --- |
-| grapheme wrap offset 同步 | OpenTUI TextBufferView | 生成不拆分/重复 grapheme 的 virtual lines | 第一处分歧在 native text layout | Goal caller只提供 string 和 wrap mode，不应实现 Unicode layout |
-| frame 原子提交 | OpenTUI BufferedBackend/renderer | terminal bytes 与 committed cell state一致 | 输出缓冲和 commit 都在 native renderer | OpenCode 不知道 partial ANSI 或 native allocator 状态 |
-| 修复源码所有权 | public `SMARK2022/opentui:smark/main` | 一个可审计release commit包含`v0.4.3 + #845` | 修复和8个binary来自同一源码，默认分支满足用户SMARK要求 | OpenCode repo不应复制native algorithm |
-| source可发现性与pin | OpenCode `.gitmodules` + gitlink | `thirdparty/opentui`固定release commit并可独立clone/update | submodule metadata属于consumer repository | submodule不拥有package build或运行时fallback |
-| package closure发布 | OpenTUI fork workflow + immutable GitHub Release | 一次tag发布同commit/version的11个tarballs、checksums和attestation | 上游已有cross-build/pack seam；GitHub拥有公开immutable artifact boundary | OpenCode release upload已晚于dependency resolution |
-| dependency pin与target install | OpenCode catalog/overrides/lock/build.ts | 语义版本与11个release URL固定，编译时只选择目标native import | 当前dependency/build seam已承担这项职责 | 最终installer只搬运executable，submodule只存源码 |
-| fork dependency维护 | `script/upgrade-opentui.ts` | 一个CLI事务更新catalog、11个URLs和peer floor且不进入thirdparty | 当前CLI是全仓OpenTUI版本owner | 手工改多个manifest会形成漂移，submodule内部version由其fork独立维护 |
-| description factory 求值 | OpenCode DialogPrompt | public plugin factory 返回的 JSX 被渲染 | owner component 定义 child semantics | plugin callers不应知道 Solid reconciler版本差异 |
-| Solid runtime版本与patch处置 | OpenCode root catalog/patchedDependencies | 所有 workspace和OpenTUI adapters共享满足 peer的 runtime | catalog/patch是全仓版本owner | TUI package不能单独覆盖其他8个 Solid consumers |
-| spinner compatibility | OpenCode explicit registration + tests | 一份 catalogue 和 core graph | 当前已是值导入、显式 extend | 不需要复制 spinner scheduler |
+| Concern                        | Owner                                            | Interface promise                                                 | Why it belongs here                                                      | Why another module does not own it                                 |
+| ------------------------------ | ------------------------------------------------ | ----------------------------------------------------------------- | ------------------------------------------------------------------------ | ------------------------------------------------------------------ |
+| grapheme wrap offset 同步      | OpenTUI TextBufferView                           | 生成不拆分/重复 grapheme 的 virtual lines                         | 第一处分歧在 native text layout                                          | Goal caller只提供 string 和 wrap mode，不应实现 Unicode layout     |
+| frame 原子提交                 | OpenTUI BufferedBackend/renderer                 | terminal bytes 与 committed cell state一致                        | 输出缓冲和 commit 都在 native renderer                                   | OpenCode 不知道 partial ANSI 或 native allocator 状态              |
+| 修复源码所有权                 | public `SMARK2022/opentui:smark/main`            | 一个可审计release commit包含`v0.4.3 + #845`                       | 修复和8个binary来自同一源码，默认分支满足用户SMARK要求                   | OpenCode repo不应复制native algorithm                              |
+| source可发现性与pin            | OpenCode `.gitmodules` + gitlink                 | `thirdparty/opentui`固定release commit并可独立clone/update        | submodule metadata属于consumer repository                                | submodule不拥有package build或运行时fallback                       |
+| package closure发布            | OpenTUI fork workflow + immutable GitHub Release | 一次tag发布同commit/version的11个tarballs、checksums和attestation | 上游已有cross-build/pack seam；GitHub拥有公开immutable artifact boundary | OpenCode release upload已晚于dependency resolution                 |
+| dependency pin与target install | OpenCode catalog/overrides/lock/build.ts         | 语义版本与11个release URL固定，编译时只选择目标native import      | 当前dependency/build seam已承担这项职责                                  | 最终installer只搬运executable，submodule只存源码                   |
+| fork dependency维护            | `script/upgrade-opentui.ts`                      | 一个CLI事务更新catalog、11个URLs和peer floor且不进入thirdparty    | 当前CLI是全仓OpenTUI版本owner                                            | 手工改多个manifest会形成漂移，submodule内部version由其fork独立维护 |
+| description factory 求值       | OpenCode DialogPrompt                            | public plugin factory 返回的 JSX 被渲染                           | owner component 定义 child semantics                                     | plugin callers不应知道 Solid reconciler版本差异                    |
+| Solid runtime版本与patch处置   | OpenCode root catalog/patchedDependencies        | 所有 workspace和OpenTUI adapters共享满足 peer的 runtime           | catalog/patch是全仓版本owner                                             | TUI package不能单独覆盖其他8个 Solid consumers                     |
+| spinner compatibility          | OpenCode explicit registration + tests           | 一份 catalogue 和 core graph                                      | 当前已是值导入、显式 extend                                              | 不需要复制 spinner scheduler                                       |
 
 ## 10. Single Approved Primary-Path Design
 
@@ -559,13 +559,13 @@ OpenTUI v0.4.3
 
 OpenCode 所需闭包是11个同release commit、同`0.4.3-smark.1`version的packages，而不是三个版本号：
 
-| Layer | Packages |
-| --- | --- |
-| JS/framework | `@opentui/core`, `@opentui/solid`, `@opentui/keymap` |
-| macOS | `@opentui/core-darwin-arm64`, `@opentui/core-darwin-x64` |
-| Linux glibc | `@opentui/core-linux-arm64`, `@opentui/core-linux-x64` |
-| Linux musl | `@opentui/core-linux-arm64-musl`, `@opentui/core-linux-x64-musl` |
-| Windows | `@opentui/core-win32-arm64`, `@opentui/core-win32-x64` |
+| Layer        | Packages                                                         |
+| ------------ | ---------------------------------------------------------------- |
+| JS/framework | `@opentui/core`, `@opentui/solid`, `@opentui/keymap`             |
+| macOS        | `@opentui/core-darwin-arm64`, `@opentui/core-darwin-x64`         |
+| Linux glibc  | `@opentui/core-linux-arm64`, `@opentui/core-linux-x64`           |
+| Linux musl   | `@opentui/core-linux-arm64-musl`, `@opentui/core-linux-x64-musl` |
+| Windows      | `@opentui/core-win32-arm64`, `@opentui/core-win32-x64`           |
 
 core、Solid和keymap source manifests的`repository.url`必须改为`https://github.com/SMARK2022/opentui`；core build会把该值复制进8个native packages。artifact verifier同时断言11个packed manifests都指向public fork，不能让SMARK binary伪装成upstream release metadata。
 
@@ -663,121 +663,121 @@ Linux固定为两条、没有二选一的权威路径：
 
 ## 11. Secondary and Replacement Path Inventory
 
-| Path | Current or proposed | Classification | Produces success? | Decision-surface share | Disposition |
-| --- | --- | --- | --- | --- | --- |
-| `SMARK2022/opentui:smark/main` `0.4.3 + #845` -> immutable 11-package release -> OpenCode URL graph | proposed | primary-contract branch | yes | 100% | preserve as sole implementation path |
-| root `solid-js@1.9.12` runtime | proposed | supported-domain dependency branch | yes | 属于同一primary graph | preserve；删除1.9.10 patch |
-| `thirdparty/opentui` gitlink | proposed | contracted source/provenance pass-through | no；不产生build success | 0% | preserve；必须与release commit一致 |
-| 官方 `0.4.3` alone | candidate | forbidden fallback/incomplete replacement | 部分 | 0% | reject；不修复 INV-01 |
-| `0.3.4 + #845` | candidate | incomplete replacement | 部分 | 0% | reject for this scope；不修复 INV-03 |
-| `0.3.4 +` 手工 #1224 | candidate | competing implementation | yes if fully rebuilt | 0% | reject；whole PR不 clean apply且重复上游 0.4.3 |
-| Goal 改 `wrapMode`/padding/manual newline | candidate | forbidden fallback | 表面 yes | 0% | reject；绕过 owner defect |
-| core Git URL + registry native | candidate | mixed graph | 不可靠 | 0% | reject |
-| `pkg-pr-new` preview | candidate | replacement package source | yes | 0% | reject；用户要求独立public release且当前无preview |
-| GitHub workflow artifact ZIP | candidate | temporary replacement source | yes before expiry | 0% | reject；30天过期且不是11个npm tarballs |
-| Release URL失败后从submodule源码build | candidate | forbidden fallback | yes | 0% | reject；违反独立package producer/consumer边界 |
-| runtime fork-on-failure loader | candidate | forbidden fallback | yes | 0% | reject |
-| upstream official future release | future migration | speculative，不是当前路径 | unknown | 0% | 不在本 revision 自动切换 |
+| Path                                                                                                | Current or proposed | Classification                            | Produces success?       | Decision-surface share | Disposition                                       |
+| --------------------------------------------------------------------------------------------------- | ------------------- | ----------------------------------------- | ----------------------- | ---------------------- | ------------------------------------------------- |
+| `SMARK2022/opentui:smark/main` `0.4.3 + #845` -> immutable 11-package release -> OpenCode URL graph | proposed            | primary-contract branch                   | yes                     | 100%                   | preserve as sole implementation path              |
+| root `solid-js@1.9.12` runtime                                                                      | proposed            | supported-domain dependency branch        | yes                     | 属于同一primary graph  | preserve；删除1.9.10 patch                        |
+| `thirdparty/opentui` gitlink                                                                        | proposed            | contracted source/provenance pass-through | no；不产生build success | 0%                     | preserve；必须与release commit一致                |
+| 官方 `0.4.3` alone                                                                                  | candidate           | forbidden fallback/incomplete replacement | 部分                    | 0%                     | reject；不修复 INV-01                             |
+| `0.3.4 + #845`                                                                                      | candidate           | incomplete replacement                    | 部分                    | 0%                     | reject for this scope；不修复 INV-03              |
+| `0.3.4 +` 手工 #1224                                                                                | candidate           | competing implementation                  | yes if fully rebuilt    | 0%                     | reject；whole PR不 clean apply且重复上游 0.4.3    |
+| Goal 改 `wrapMode`/padding/manual newline                                                           | candidate           | forbidden fallback                        | 表面 yes                | 0%                     | reject；绕过 owner defect                         |
+| core Git URL + registry native                                                                      | candidate           | mixed graph                               | 不可靠                  | 0%                     | reject                                            |
+| `pkg-pr-new` preview                                                                                | candidate           | replacement package source                | yes                     | 0%                     | reject；用户要求独立public release且当前无preview |
+| GitHub workflow artifact ZIP                                                                        | candidate           | temporary replacement source              | yes before expiry       | 0%                     | reject；30天过期且不是11个npm tarballs            |
+| Release URL失败后从submodule源码build                                                               | candidate           | forbidden fallback                        | yes                     | 0%                     | reject；违反独立package producer/consumer边界     |
+| runtime fork-on-failure loader                                                                      | candidate           | forbidden fallback                        | yes                     | 0%                     | reject                                            |
+| upstream official future release                                                                    | future migration    | speculative，不是当前路径                 | unknown                 | 0%                     | 不在本 revision 自动切换                          |
 
 新 alternate success path 数量为 0；diagnostic-only closure checks不产生成功替代，预计 decision surface占比低于 10%。
 
 ## 12. Workaround Deletion and Replacement
 
-| Existing workaround or duplicate | Why it existed | Why the approved route supersedes it | Delete or collapse location |
-| --- | --- | --- | --- |
-| 无 Goal caller workaround | 当前没有通过截断/手工换行隐藏问题 | native owner修复后无需新增 | Not applicable |
-| `captureCJKFrame()` | 规避 `getRealCharBytes()` 满行缺 newline 的测试读取缺陷 | #845 不修复该独立行为 | preserve |
-| explicit spinner registration | 修复 Bun compile chunk/catalouge 时序 | 0.4.3 #1171降低风险，但当前 explicit value dependency仍是已验证路径 | preserve |
-| root OpenTUI overrides | 防止多 renderer/context graph | full-family pin仍需要 | preserve and expand to 11 immutable URLs |
-| upstream fork `release.yml` npm/Azure/Blacksmith jobs | upstream拥有npm scope、Azure secrets和private runner | SMARK只拥有public GitHub Release producer | 在fork中收敛为public-runner immutable tarball release；不保留并行tag workflow |
-| current `upgrade-opentui.ts` semver-only scan | official npm版本是旧唯一source | release graph还需要11 URLs且thirdparty是独立Git边界 | 修改同一CLI owner；排除thirdparty并原子更新catalog/overrides/peers |
+| Existing workaround or duplicate                      | Why it existed                                          | Why the approved route supersedes it                                | Delete or collapse location                                                   |
+| ----------------------------------------------------- | ------------------------------------------------------- | ------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| 无 Goal caller workaround                             | 当前没有通过截断/手工换行隐藏问题                       | native owner修复后无需新增                                          | Not applicable                                                                |
+| `captureCJKFrame()`                                   | 规避 `getRealCharBytes()` 满行缺 newline 的测试读取缺陷 | #845 不修复该独立行为                                               | preserve                                                                      |
+| explicit spinner registration                         | 修复 Bun compile chunk/catalouge 时序                   | 0.4.3 #1171降低风险，但当前 explicit value dependency仍是已验证路径 | preserve                                                                      |
+| root OpenTUI overrides                                | 防止多 renderer/context graph                           | full-family pin仍需要                                               | preserve and expand to 11 immutable URLs                                      |
+| upstream fork `release.yml` npm/Azure/Blacksmith jobs | upstream拥有npm scope、Azure secrets和private runner    | SMARK只拥有public GitHub Release producer                           | 在fork中收敛为public-runner immutable tarball release；不保留并行tag workflow |
+| current `upgrade-opentui.ts` semver-only scan         | official npm版本是旧唯一source                          | release graph还需要11 URLs且thirdparty是独立Git边界                 | 修改同一CLI owner；排除thirdparty并原子更新catalog/overrides/peers            |
 
 ## 13. Forward Traceability
 
-| Requirement or invariant | Production path | Planned file/change | Behavioral test |
-| --- | --- | --- | --- |
-| INV-01/INV-02 Goal 不重复 CJK | OpenTUI TextBufferView | SMARK OpenTUI fork应用 #845 | exact 42/35 Goal test red->green；#845 native tests |
-| INV-03 stale frame可恢复 | OpenTUI renderer-output | 基线升级到含 #1224 的 `v0.4.3` | `v0.4.3` >2 MiB、allocation failure native tests |
-| INV-04 唯一 package graph | root install/overrides | version catalog、11 immutable URLs、lock、closure verifier | clean install closure command |
-| INV-08 唯一 Solid runtime | root catalog/patchedDependencies | `solid-js@1.9.12`、删除旧patch、closure verifier | 9个consumer typecheck/build + realpath检查 |
-| INV-05 factory child正确渲染 | DialogPrompt | `dialog-prompt.tsx` factory invocation | DialogPrompt/plugin description behavior test |
-| INV-05全部factory callers符合0.4.3 contract | provider API key dialog -> DialogPrompt | `component/dialog-provider.tsx`把provider JSX映射包成factory | 同一DialogPrompt renderer test覆盖provider description文本 |
-| INV-07结构化错误继续显示可读文本 | legacy/v2 Session message renderers | legacy复用`errorMessage`；v2读取SDK `SessionErrorUnknown.message` | 现有session message renderer fixtures + typecheck |
-| INV-07 permission reviewer rationale保持string child | reviewer metadata -> tool renderer | rationale memo显式返回string并由Show gate控制 | 现有permission review decision renderer fixtures + typecheck |
-| INV-06 target native进入 binary | build.ts target install/Bun compile | build closure evidence step + artifact smoke harness | all target builds + extracted archive PTY/ConPTY行为 |
-| INV-07 ecosystem不回归 | spinner/slots/keymap/runtime | peer floor更新；保留 explicit registration | spinner、slot、plugin-loader、footer tests；artifact smoke |
-| INV-09 public fork/default branch/source pin | GitHub fork -> `smark/main` -> tag -> submodule gitlink | fork branch/settings、`.gitmodules`、gitlink、README | repo API/default branch、tag/gitlink equality、submodule clean |
-| INV-10 独立package release且无source fallback | OpenTUI producer -> immutable release -> OpenCode overrides | fork build/release workflows、artifact verifier、root URLs | 11-pack local red/green、GitHub matrix、release attestation、clean OpenCode install |
-| INV-11 可重复升级且不污染submodule | root upgrade CLI -> catalog/overrides/peers | `script/upgrade-opentui.ts`和CLI behavior test | temp fixture断言11 URLs、peer floor和thirdparty unchanged |
-| 用户要求GitHub Actions分发 | fork tag -> draft assets -> immutable publish -> OpenCode build | fork workflows + OpenCode build gate | 11 assets/checksums/attestation、target builds、release smoke |
-| 用户要求thirdparty/submodule方便下载 | `.gitmodules` -> gitlink -> documented init | `.gitmodules`、`thirdparty/opentui`、3份README | fresh `git submodule update --init`后nested HEAD/repo/default branch证据 |
+| Requirement or invariant                             | Production path                                                 | Planned file/change                                               | Behavioral test                                                                     |
+| ---------------------------------------------------- | --------------------------------------------------------------- | ----------------------------------------------------------------- | ----------------------------------------------------------------------------------- |
+| INV-01/INV-02 Goal 不重复 CJK                        | OpenTUI TextBufferView                                          | SMARK OpenTUI fork应用 #845                                       | exact 42/35 Goal test red->green；#845 native tests                                 |
+| INV-03 stale frame可恢复                             | OpenTUI renderer-output                                         | 基线升级到含 #1224 的 `v0.4.3`                                    | `v0.4.3` >2 MiB、allocation failure native tests                                    |
+| INV-04 唯一 package graph                            | root install/overrides                                          | version catalog、11 immutable URLs、lock、closure verifier        | clean install closure command                                                       |
+| INV-08 唯一 Solid runtime                            | root catalog/patchedDependencies                                | `solid-js@1.9.12`、删除旧patch、closure verifier                  | 9个consumer typecheck/build + realpath检查                                          |
+| INV-05 factory child正确渲染                         | DialogPrompt                                                    | `dialog-prompt.tsx` factory invocation                            | DialogPrompt/plugin description behavior test                                       |
+| INV-05全部factory callers符合0.4.3 contract          | provider API key dialog -> DialogPrompt                         | `component/dialog-provider.tsx`把provider JSX映射包成factory      | 同一DialogPrompt renderer test覆盖provider description文本                          |
+| INV-07结构化错误继续显示可读文本                     | legacy/v2 Session message renderers                             | legacy复用`errorMessage`；v2读取SDK `SessionErrorUnknown.message` | 现有session message renderer fixtures + typecheck                                   |
+| INV-07 permission reviewer rationale保持string child | reviewer metadata -> tool renderer                              | rationale memo显式返回string并由Show gate控制                     | 现有permission review decision renderer fixtures + typecheck                        |
+| INV-06 target native进入 binary                      | build.ts target install/Bun compile                             | build closure evidence step + artifact smoke harness              | all target builds + extracted archive PTY/ConPTY行为                                |
+| INV-07 ecosystem不回归                               | spinner/slots/keymap/runtime                                    | peer floor更新；保留 explicit registration                        | spinner、slot、plugin-loader、footer tests；artifact smoke                          |
+| INV-09 public fork/default branch/source pin         | GitHub fork -> `smark/main` -> tag -> submodule gitlink         | fork branch/settings、`.gitmodules`、gitlink、README              | repo API/default branch、tag/gitlink equality、submodule clean                      |
+| INV-10 独立package release且无source fallback        | OpenTUI producer -> immutable release -> OpenCode overrides     | fork build/release workflows、artifact verifier、root URLs        | 11-pack local red/green、GitHub matrix、release attestation、clean OpenCode install |
+| INV-11 可重复升级且不污染submodule                   | root upgrade CLI -> catalog/overrides/peers                     | `script/upgrade-opentui.ts`和CLI behavior test                    | temp fixture断言11 URLs、peer floor和thirdparty unchanged                           |
+| 用户要求GitHub Actions分发                           | fork tag -> draft assets -> immutable publish -> OpenCode build | fork workflows + OpenCode build gate                              | 11 assets/checksums/attestation、target builds、release smoke                       |
+| 用户要求thirdparty/submodule方便下载                 | `.gitmodules` -> gitlink -> documented init                     | `.gitmodules`、`thirdparty/opentui`、3份README                    | fresh `git submodule update --init`后nested HEAD/repo/default branch证据            |
 
 ## 14. Reverse Traceability
 
-| Proposed production concept | Requirement ID | Evidence | Why existing logic cannot carry it |
-| --- | --- | --- | --- |
-| public fork + default `smark/main` | INV-09 | 用户明确要求public repository和SMARK主分支；当前fork/default已验证 | upstream repo不能承载SMARK release commit/default branch |
-| OpenCode submodule gitlink | INV-09 | 用户明确要求thirdparty独立Git提交与submodule | package URL不提供source checkout；普通目录不固定独立commit |
-| immutable `v0.4.3-smark.1` release | INV-09/INV-10 | 用户要求独立打包发布；GitHub API/attestation可用 | workflow artifact会过期，npm scope无权限，普通release可被覆盖 |
-| same-release 11-package family | INV-04/INV-06/INV-10 | core optionalDeps与dynamic imports；11-pack probe | 单core URL仍解析registry native，submodule源码不参与root install |
-| fork artifact verifier | INV-01/INV-02/INV-10 | local HTTP 11-pack probe和多平台native reachability | `npm pack --dry-run`不证明Bun consumer、CJK behavior或checksums |
-| OpenCode closure verifier | INV-04/INV-06/INV-09/INV-10 | hoisted install + target reinstall + plugin peers + gitlink | lockfile文本不能单独证明realpath、release provenance或native binary实际进入executable |
-| artifact-aware upgrade CLI | INV-11 | existing maintenance command + new independent submodule boundary | current helper不更新URLs并会扫描thirdparty；手工步骤无法原子维护11项 |
-| `description?.()` migration | INV-05 | upstream OpenCode 0.4.3 commit与当前 factory type | 当前 function child 依赖旧 reconciler语义 |
-| provider description factory caller migration | INV-05 | `bun typecheck`与upstream PR #35226精确diff | owner prop已是factory，直接JSX不再满足public contract |
-| structured error/rationale text normalization | INV-07 | 0.4.3 TextChildren收紧、SDK公开message字段和既有`errorMessage` | 直接传object/unknown无法编译；renderer不应隐式决定对象显示语义 |
-| exact 42/35 regression | INV-01 | 35-wide framebuffer不会复现，真实 sidebar会 | 现有 pure CJK/even-width测试缺少外层可绘制 cell |
-| final PTY/ConPTY smoke | INV-06/INV-07 | compiled bundle曾出现 spinner registration时序问题 | source test和 `--version` 都不执行真实 TUI/native frame |
-| root `solid-js@1.9.12` + patch删除 | INV-08 | 0.4.3精确 peers与1.9.12已含patch语义 | 1.9.10不满足contract，旧patch不能跨版本保留 |
-| `@xterm/headless` artifact model | INV-01/INV-06/INV-07 | final ANSI需要跨平台独立cell expected value | raw byte计数会把多次diff重绘误判为重复glyph |
+| Proposed production concept                   | Requirement ID              | Evidence                                                           | Why existing logic cannot carry it                                                    |
+| --------------------------------------------- | --------------------------- | ------------------------------------------------------------------ | ------------------------------------------------------------------------------------- |
+| public fork + default `smark/main`            | INV-09                      | 用户明确要求public repository和SMARK主分支；当前fork/default已验证 | upstream repo不能承载SMARK release commit/default branch                              |
+| OpenCode submodule gitlink                    | INV-09                      | 用户明确要求thirdparty独立Git提交与submodule                       | package URL不提供source checkout；普通目录不固定独立commit                            |
+| immutable `v0.4.3-smark.1` release            | INV-09/INV-10               | 用户要求独立打包发布；GitHub API/attestation可用                   | workflow artifact会过期，npm scope无权限，普通release可被覆盖                         |
+| same-release 11-package family                | INV-04/INV-06/INV-10        | core optionalDeps与dynamic imports；11-pack probe                  | 单core URL仍解析registry native，submodule源码不参与root install                      |
+| fork artifact verifier                        | INV-01/INV-02/INV-10        | local HTTP 11-pack probe和多平台native reachability                | `npm pack --dry-run`不证明Bun consumer、CJK behavior或checksums                       |
+| OpenCode closure verifier                     | INV-04/INV-06/INV-09/INV-10 | hoisted install + target reinstall + plugin peers + gitlink        | lockfile文本不能单独证明realpath、release provenance或native binary实际进入executable |
+| artifact-aware upgrade CLI                    | INV-11                      | existing maintenance command + new independent submodule boundary  | current helper不更新URLs并会扫描thirdparty；手工步骤无法原子维护11项                  |
+| `description?.()` migration                   | INV-05                      | upstream OpenCode 0.4.3 commit与当前 factory type                  | 当前 function child 依赖旧 reconciler语义                                             |
+| provider description factory caller migration | INV-05                      | `bun typecheck`与upstream PR #35226精确diff                        | owner prop已是factory，直接JSX不再满足public contract                                 |
+| structured error/rationale text normalization | INV-07                      | 0.4.3 TextChildren收紧、SDK公开message字段和既有`errorMessage`     | 直接传object/unknown无法编译；renderer不应隐式决定对象显示语义                        |
+| exact 42/35 regression                        | INV-01                      | 35-wide framebuffer不会复现，真实 sidebar会                        | 现有 pure CJK/even-width测试缺少外层可绘制 cell                                       |
+| final PTY/ConPTY smoke                        | INV-06/INV-07               | compiled bundle曾出现 spinner registration时序问题                 | source test和 `--version` 都不执行真实 TUI/native frame                               |
+| root `solid-js@1.9.12` + patch删除            | INV-08                      | 0.4.3精确 peers与1.9.12已含patch语义                               | 1.9.10不满足contract，旧patch不能跨版本保留                                           |
+| `@xterm/headless` artifact model              | INV-01/INV-06/INV-07        | final ANSI需要跨平台独立cell expected value                        | raw byte计数会把多次diff重绘误判为重复glyph                                           |
 
 ## 15. File-Level Change Plan
 
 ### 15.1 Separate `SMARK2022/opentui` fork
 
-| File | Add / modify / delete | Exact responsibility of the change | Expected line delta |
-| --- | --- | --- | --- |
-| `packages/core/src/zig/text-buffer-view.zig` | modify | 应用 #845，统一在 virtual chunk消费后推进 byte offset | upstream #845 +约 35/-13 |
-| `packages/core/src/zig/tests/text-buffer-view_test.zig` | modify | 覆盖 punctuation + CJK odd boundary | upstream #845 +约 70 |
-| `packages/core/src/renderables/__tests__/Markdown.test.ts` | modify | framework-visible CJK wrap regression | upstream #845 +约 14 |
-| `packages/{core,examples,keymap,qrcode,react,solid,ssh,three,web}/package.json` | generated modify | 现有`prepare-release`把9个lockstep packages统一为`0.4.3-smark.1`并更新core 8个optional deps | 约18 |
-| `packages/{core,solid,keymap}/package.json` | modify | shipped package repository metadata指向`SMARK2022/opentui`；8 native manifests由core build继承 | 3 |
-| `bun.lock` | generated modify | Bun 1.3.14记录prerelease workspace与8个native optional declarations；producer用frozen lock并省略尚未生成的optional native，consumer仍验证完整11-pack | 约20-35 |
-| `scripts/verify-release-packages.ts` | add | 验证11 assets/checksums，HTTP安装完整closure并在真实native上运行42/35 CJK行为 | 约130-180 |
-| `.github/workflows/build-native.yml` | modify | public macOS producer：frozen source install（仅省略未生成的optional native）、tests、8-target cross-build、core/Solid/keymap build、11次`npm pack`和checksums | 约90-130净改动 |
-| `.github/workflows/smark-ci.yml` | add | `smark/main` push/PR调用唯一producer并在public macOS/Linux x64/Linux arm64/Windows x64验证packed artifacts | 约55-80 |
-| `.github/workflows/release.yml` | replace | `v*-smark.*`唯一tag path；复用producer/matrix、draft upload、immutable publish，不调用npm/Azure/Blacksmith | 约90-130 |
-| `README.md` | modify | 记录SMARK base/#845/version/default branch、unsigned Windows声明和immutable release消费方式 | 约12-20 |
+| File                                                                            | Add / modify / delete | Exact responsibility of the change                                                                                                                             | Expected line delta      |
+| ------------------------------------------------------------------------------- | --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------ |
+| `packages/core/src/zig/text-buffer-view.zig`                                    | modify                | 应用 #845，统一在 virtual chunk消费后推进 byte offset                                                                                                          | upstream #845 +约 35/-13 |
+| `packages/core/src/zig/tests/text-buffer-view_test.zig`                         | modify                | 覆盖 punctuation + CJK odd boundary                                                                                                                            | upstream #845 +约 70     |
+| `packages/core/src/renderables/__tests__/Markdown.test.ts`                      | modify                | framework-visible CJK wrap regression                                                                                                                          | upstream #845 +约 14     |
+| `packages/{core,examples,keymap,qrcode,react,solid,ssh,three,web}/package.json` | generated modify      | 现有`prepare-release`把9个lockstep packages统一为`0.4.3-smark.1`并更新core 8个optional deps                                                                    | 约18                     |
+| `packages/{core,solid,keymap}/package.json`                                     | modify                | shipped package repository metadata指向`SMARK2022/opentui`；8 native manifests由core build继承                                                                 | 3                        |
+| `bun.lock`                                                                      | generated modify      | Bun 1.3.14记录prerelease workspace与8个native optional declarations；producer用frozen lock并省略尚未生成的optional native，consumer仍验证完整11-pack           | 约20-35                  |
+| `scripts/verify-release-packages.ts`                                            | add                   | 验证11 assets/checksums，HTTP安装完整closure并在真实native上运行42/35 CJK行为                                                                                  | 约130-180                |
+| `.github/workflows/build-native.yml`                                            | modify                | public macOS producer：frozen source install（仅省略未生成的optional native）、tests、8-target cross-build、core/Solid/keymap build、11次`npm pack`和checksums | 约90-130净改动           |
+| `.github/workflows/smark-ci.yml`                                                | add                   | `smark/main` push/PR调用唯一producer并在public macOS/Linux x64/Linux arm64/Windows x64验证packed artifacts                                                     | 约55-80                  |
+| `.github/workflows/release.yml`                                                 | replace               | `v*-smark.*`唯一tag path；复用producer/matrix、draft upload、immutable publish，不调用npm/Azure/Blacksmith                                                     | 约90-130                 |
+| `README.md`                                                                     | modify                | 记录SMARK base/#845/version/default branch、unsigned Windows声明和immutable release消费方式                                                                    | 约12-20                  |
 
 ### 15.2 Current OpenCode repository
 
-| File | Add / modify / delete | Exact responsibility of the change | Expected line delta |
-| --- | --- | --- | --- |
-| `.gitmodules` | modify | 注册`thirdparty/opentui`、public URL和`smark/main`update branch | 4 |
-| `thirdparty/opentui` | add gitlink | 固定immutable `v0.4.3-smark.1` source commit；不进入workspace/build | 1 gitlink |
-| `README.md`, `docs/readme/README.en.md`, `docs/readme/README.zht.md` | modify | 说明submodule init、独立repo和release-artifact build边界 | 约9-15 |
-| `package.json` | modify | catalog设`0.4.3-smark.1`；11个overrides固定同tagGitHub assets；Solid升1.9.12并移除旧patch entry | 约14-18 |
-| `patches/solid-js@1.9.10.patch` | delete | 1.9.12已包含该transition修复 | -58 |
-| `bun.lock` | generated modify | 记录11个GitHub URL、integrity和Solid 1.9.12闭包 | 约40-90 |
-| `packages/plugin/package.json` | modify | peer floor升到`>=0.4.3-smark.1` | 3 |
-| `packages/opencode/src/cli/cmd/tui/ui/dialog-prompt.tsx` | modify | 调用 description factory | 1 |
-| `packages/opencode/src/cli/cmd/tui/component/dialog-provider.tsx` | modify | `ApiMethod`把provider说明映射包成description factory，与public prop和upstream迁移一致 | 2 |
-| `packages/opencode/src/cli/cmd/tui/routes/session/index.tsx` | modify | legacy error使用既有`errorMessage`；permission rationale收窄为string child | 2-4 |
-| `packages/opencode/src/cli/cmd/tui/feature-plugins/system/session-v2.tsx` | modify | v2结构化error只渲染SDK定义的message string | 1 |
-| `packages/opencode/test/cli/cmd/tui/session-layout.test.ts` | modify | exact 42/35 Goal CJK multiplicity regression | 35-45 |
-| `packages/opencode/test/cli/cmd/tui/dialog-prompt.test.tsx` | add | public description factory行为 | 25-40 |
-| `packages/opencode/test/cli/cmd/tui/session-v2-error.test.tsx` | add | 通过真实internal plugin/route renderer断言structured error message可见且无object coercion | 35-55 |
-| `script/upgrade-opentui.ts` | modify | 一个CLI原子维护version catalog、11 release overrides和peers，并排除`thirdparty`独立Git树 | 约35-55 |
-| `packages/opencode/test/script/upgrade-opentui.test.ts` | add | 通过temp CLI fixture验证URL literals、peer floor及submodule package不变 | 约55-75 |
-| `packages/opencode/script/verify-opentui-closure.ts` | add | 输出/断言package realpaths、versions、URL source、gitlink/release commit和target native hash | 约70-100 |
-| `packages/opencode/script/smoke-opentui-artifact.ts` | add | extracted executable的PTY/ConPTY、HTTP fixture、headless frame与cleanup契约 | 180-240 |
-| `packages/opencode/package.json` | modify | 增加 `@xterm/headless@6.0.0` dev dependency | 1 |
-| `.github/workflows/test.yml` | modify | 在 clean install后运行 closure与目标 TUI tests | 8-15 |
-| `.github/workflows/build-opencode.yml` | modify | 每个平台编译前后保存closure/native hash，解压最终archive并运行统一 artifact smoke | 35-55 |
-| `.github/workflows/build-opencode.yml` | modify | 新增硬门槛 `smoke-linux-arm64` (`ubuntu-24.04-arm`) 并加入 checksums `needs` | 25-40 |
-| `.opencode/plugins/tui-smoke.tsx` | preserve/test | 作为外部式 consumer执行，不做无证据源码改动 | 0 |
-| 9个 `solid-js` catalog consumer manifests/source | preserve/test | 版本由root catalog统一；无真实API错误前不做源码兼容修改 | 0 |
-| `docs/Proposal/opentui-0.4.3-upgrade-and-distribution-proposal.md` | current plan | canonical specification与审计记录 | documentation only |
+| File                                                                      | Add / modify / delete | Exact responsibility of the change                                                              | Expected line delta |
+| ------------------------------------------------------------------------- | --------------------- | ----------------------------------------------------------------------------------------------- | ------------------- |
+| `.gitmodules`                                                             | modify                | 注册`thirdparty/opentui`、public URL和`smark/main`update branch                                 | 4                   |
+| `thirdparty/opentui`                                                      | add gitlink           | 固定immutable `v0.4.3-smark.1` source commit；不进入workspace/build                             | 1 gitlink           |
+| `README.md`, `docs/readme/README.en.md`, `docs/readme/README.zht.md`      | modify                | 说明submodule init、独立repo和release-artifact build边界                                        | 约9-15              |
+| `package.json`                                                            | modify                | catalog设`0.4.3-smark.1`；11个overrides固定同tagGitHub assets；Solid升1.9.12并移除旧patch entry | 约14-18             |
+| `patches/solid-js@1.9.10.patch`                                           | delete                | 1.9.12已包含该transition修复                                                                    | -58                 |
+| `bun.lock`                                                                | generated modify      | 记录11个GitHub URL、integrity和Solid 1.9.12闭包                                                 | 约40-90             |
+| `packages/plugin/package.json`                                            | modify                | peer floor升到`>=0.4.3-smark.1`                                                                 | 3                   |
+| `packages/opencode/src/cli/cmd/tui/ui/dialog-prompt.tsx`                  | modify                | 调用 description factory                                                                        | 1                   |
+| `packages/opencode/src/cli/cmd/tui/component/dialog-provider.tsx`         | modify                | `ApiMethod`把provider说明映射包成description factory，与public prop和upstream迁移一致           | 2                   |
+| `packages/opencode/src/cli/cmd/tui/routes/session/index.tsx`              | modify                | legacy error使用既有`errorMessage`；permission rationale收窄为string child                      | 2-4                 |
+| `packages/opencode/src/cli/cmd/tui/feature-plugins/system/session-v2.tsx` | modify                | v2结构化error只渲染SDK定义的message string                                                      | 1                   |
+| `packages/opencode/test/cli/cmd/tui/session-layout.test.ts`               | modify                | exact 42/35 Goal CJK multiplicity regression                                                    | 35-45               |
+| `packages/opencode/test/cli/cmd/tui/dialog-prompt.test.tsx`               | add                   | public description factory行为                                                                  | 25-40               |
+| `packages/opencode/test/cli/cmd/tui/session-v2-error.test.tsx`            | add                   | 通过真实internal plugin/route renderer断言structured error message可见且无object coercion       | 35-55               |
+| `script/upgrade-opentui.ts`                                               | modify                | 一个CLI原子维护version catalog、11 release overrides和peers，并排除`thirdparty`独立Git树        | 约35-55             |
+| `packages/opencode/test/script/upgrade-opentui.test.ts`                   | add                   | 通过temp CLI fixture验证URL literals、peer floor及submodule package不变                         | 约55-75             |
+| `packages/opencode/script/verify-opentui-closure.ts`                      | add                   | 输出/断言package realpaths、versions、URL source、gitlink/release commit和target native hash    | 约70-100            |
+| `packages/opencode/script/smoke-opentui-artifact.ts`                      | add                   | extracted executable的PTY/ConPTY、HTTP fixture、headless frame与cleanup契约                     | 180-240             |
+| `packages/opencode/package.json`                                          | modify                | 增加 `@xterm/headless@6.0.0` dev dependency                                                     | 1                   |
+| `.github/workflows/test.yml`                                              | modify                | 在 clean install后运行 closure与目标 TUI tests                                                  | 8-15                |
+| `.github/workflows/build-opencode.yml`                                    | modify                | 每个平台编译前后保存closure/native hash，解压最终archive并运行统一 artifact smoke               | 35-55               |
+| `.github/workflows/build-opencode.yml`                                    | modify                | 新增硬门槛 `smoke-linux-arm64` (`ubuntu-24.04-arm`) 并加入 checksums `needs`                    | 25-40               |
+| `.opencode/plugins/tui-smoke.tsx`                                         | preserve/test         | 作为外部式 consumer执行，不做无证据源码改动                                                     | 0                   |
+| 9个 `solid-js` catalog consumer manifests/source                          | preserve/test         | 版本由root catalog统一；无真实API错误前不做源码兼容修改                                         | 0                   |
+| `docs/Proposal/opentui-0.4.3-upgrade-and-distribution-proposal.md`        | current plan          | canonical specification与审计记录                                                               | documentation only  |
 
 若release package metadata、attestation、gitlink或Bun install不能保持同commit/version closure，实施必须停止并修正OpenTUI package producer；不得在OpenCode runtime增加loader或submodule fallback。
 
@@ -785,26 +785,26 @@ Linux固定为两条、没有二选一的权威路径：
 
 约定测试 seams：OpenTUI public renderer/test renderer、OpenCode public DialogPrompt/plugin UI、clean package resolution、最终 compiled CLI。实施前由用户批准本文即视为确认这些 seams；未批准前不写测试。
 
-| Order | Red behavior | Why current code fails | Minimal green behavior | Regression protected |
-| --- | --- | --- | --- | --- |
-| 1 | 先只加入#845的native/Markdown behavior tests，`v0.4.3`在punctuation + odd CJK boundary失败 | word wrap消费column后没有同步byte offset | 只应用#845 owner算法变更，原tests由red转green，完整native/JS suites继续green | 第一处分歧与上游PR内容 |
-| 2 | fork artifact verifier对已保存的official `v0.4.3` 11-pack运行，HTTP安装成功但42/35 frame得到`source=2/rendered=3` | package transport正确但source仍缺#845 | 同一verifier对`0.4.3-smark.1` 11-pack在host/matrix得到2/2并校验name/version/checksum | release tarballs确实承载修复，不是错误source的可安装包 |
-| 3 | upgrade CLI temp fixture只得到裸semver、缺8 native URLs，并修改`thirdparty/opentui` package manifest | current maintenance owner不知道artifact naming且扫描nested repo | 同一CLI一次生成version catalog、11 exact release URLs、peer floor且thirdparty byte-identical | 后续`smark.N`升级不混源、不污染submodule |
-| 4 | OpenCode exact 42/35 Goal test在当前0.3.4 graph稳定得到frame 3 | current dependency仍含native offset bug | 只切换已验证release family后同一public renderer seam得到frame 2 | 用户截图中的跨行重复 |
-| 5 | `DialogPrompt` description factory在0.4.3 consumer中不显示/语义不稳定 | owner渲染function object而非返回JSX | 只改为`props.description?.()` | provider与plugin reactive description |
-| 5b | `bun typecheck`拒绝ApiMethod直接JSX、legacy/v2 error object和permission rationale unknown作为TextChildren；v2 renderer fixture在旧实现不能显示独立message string | 0.4.3明确factory与TextChildren类型，不再接受隐式object child | provider caller包成factory；legacy复用errorMessage；v2读取message；rationale显式string | provider/legacy fixtures与独立v2 plugin route frame共同证明可读文本 |
-| 6 | closure verifier在旧graph报告无gitlink、registry 0.3.4、Solid 1.9.10或错误target native | 当前source pin、artifact source和runtime closure都不满足新contract | submodule/release pin、11 URL overrides、Solid 1.9.12后所有consumer解析同graph，target native hash唯一 | source/release漂移、FFI/renderer ABI/peer混版 |
-| 7 | spinner、slot、runtime-module targeted tests在新graph运行 | 0.4.x Solid catalogue、slot identity、lazy runtime modules变化 | 不加兼容分支，仅修已证实的DialogPrompt差异 | ecosystem integration |
-| 8 | extracted release binary在`smoke-opentui-artifact.ts`中出现CJK重复、replacement char、spinner残留、resize丢失或child泄漏 | source/package tests不覆盖Bun compile、native embedding、PTY和final archive | 同一个archive binary通过固定HTTP/PTY/ConPTY契约 | 发布物与源码/package验证漂移 |
+| Order | Red behavior                                                                                                                                                     | Why current code fails                                                      | Minimal green behavior                                                                                 | Regression protected                                                |
+| ----- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------- |
+| 1     | 先只加入#845的native/Markdown behavior tests，`v0.4.3`在punctuation + odd CJK boundary失败                                                                       | word wrap消费column后没有同步byte offset                                    | 只应用#845 owner算法变更，原tests由red转green，完整native/JS suites继续green                           | 第一处分歧与上游PR内容                                              |
+| 2     | fork artifact verifier对已保存的official `v0.4.3` 11-pack运行，HTTP安装成功但42/35 frame得到`source=2/rendered=3`                                                | package transport正确但source仍缺#845                                       | 同一verifier对`0.4.3-smark.1` 11-pack在host/matrix得到2/2并校验name/version/checksum                   | release tarballs确实承载修复，不是错误source的可安装包              |
+| 3     | upgrade CLI temp fixture只得到裸semver、缺8 native URLs，并修改`thirdparty/opentui` package manifest                                                             | current maintenance owner不知道artifact naming且扫描nested repo             | 同一CLI一次生成version catalog、11 exact release URLs、peer floor且thirdparty byte-identical           | 后续`smark.N`升级不混源、不污染submodule                            |
+| 4     | OpenCode exact 42/35 Goal test在当前0.3.4 graph稳定得到frame 3                                                                                                   | current dependency仍含native offset bug                                     | 只切换已验证release family后同一public renderer seam得到frame 2                                        | 用户截图中的跨行重复                                                |
+| 5     | `DialogPrompt` description factory在0.4.3 consumer中不显示/语义不稳定                                                                                            | owner渲染function object而非返回JSX                                         | 只改为`props.description?.()`                                                                          | provider与plugin reactive description                               |
+| 5b    | `bun typecheck`拒绝ApiMethod直接JSX、legacy/v2 error object和permission rationale unknown作为TextChildren；v2 renderer fixture在旧实现不能显示独立message string | 0.4.3明确factory与TextChildren类型，不再接受隐式object child                | provider caller包成factory；legacy复用errorMessage；v2读取message；rationale显式string                 | provider/legacy fixtures与独立v2 plugin route frame共同证明可读文本 |
+| 6     | closure verifier在旧graph报告无gitlink、registry 0.3.4、Solid 1.9.10或错误target native                                                                          | 当前source pin、artifact source和runtime closure都不满足新contract          | submodule/release pin、11 URL overrides、Solid 1.9.12后所有consumer解析同graph，target native hash唯一 | source/release漂移、FFI/renderer ABI/peer混版                       |
+| 7     | spinner、slot、runtime-module targeted tests在新graph运行                                                                                                        | 0.4.x Solid catalogue、slot identity、lazy runtime modules变化              | 不加兼容分支，仅修已证实的DialogPrompt差异                                                             | ecosystem integration                                               |
+| 8     | extracted release binary在`smoke-opentui-artifact.ts`中出现CJK重复、replacement char、spinner残留、resize丢失或child泄漏                                         | source/package tests不覆盖Bun compile、native embedding、PTY和final archive | 同一个archive binary通过固定HTTP/PTY/ConPTY契约                                                        | 发布物与源码/package验证漂移                                        |
 
 每个 slice 必须先在目标依赖状态看到 red，再做最小 green；不得一次写完所有 tests再调整实现。
 
 ## 17. Chinese Comment Budget
 
-| Metric | Estimate | Method |
-| --- | --- | --- |
-| Effective changed code lines `E` | 约 900 | 包含fork #845、release verifier/workflows、OpenCode updater/tests、closure/artifact scripts和workflows；排除imports、generated lock/version-only manifests、格式化和纯移动 |
-| Required Chinese explanatory comments `C` | 至少 135 | `ceil(900 * 0.15) = 135`；实际E增加时同步提高 |
+| Metric                                    | Estimate | Method                                                                                                                                                                     |
+| ----------------------------------------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Effective changed code lines `E`          | 约 900   | 包含fork #845、release verifier/workflows、OpenCode updater/tests、closure/artifact scripts和workflows；排除imports、generated lock/version-only manifests、格式化和纯移动 |
+| Required Chinese explanatory comments `C` | 至少 135 | `ceil(900 * 0.15) = 135`；实际E增加时同步提高                                                                                                                              |
 
 计划分布：
 
@@ -823,61 +823,61 @@ Linux固定为两条、没有二选一的权威路径：
 
 ### 18.1 已执行的调查验证
 
-| Command | Working directory | Evidence produced |
-| --- | --- | --- |
-| 第 8 节 exact 42/35 `bun -e`，连续3次 | `packages/opencode` | 当前 `sourceCount=2`, `renderedCount=3`, exit 1 |
-| 同一 harness导入 #845 built dist | OpenTUI PR core directory | `sourceCount=2`, `renderedCount=2`, exit 0 |
-| `zig build test --summary all` | #845 `packages/core/src/zig` | 1675 pass, 2 skip, 0 fail |
-| targeted JS/render tests | #845 `packages/core` | 156 pass, 0 fail |
-| `zig build test --summary all` | `v0.4.3 packages/core/src/zig` | 1680 pass, 2 skip, 0 fail |
-| `gh pr checks 35226 -R anomalyco/opencode` | repo root | upstream OpenCode 0.4.3 unit/E2E/typecheck全过 |
-| `gh pr diff 845 ... \| git apply --check` | OpenTUI `v0.3.4` 和 `v0.4.3` | 两个基线均 clean |
-| `gh pr diff 1224 ... \| git apply --check` | OpenTUI `v0.3.4` | whole PR不 clean apply |
-| `gh pr view 845 ...` + `gh api .../tags/v0.4.3` | repository root | #845当前OPEN/MERGEABLE/BLOCKED，head`6fbf515c...`；annotated tag解引用为`5803b2cf...` |
-| `bun install --frozen-lockfile` | clean `opentui-v0.4.3` temp clone | exit 1；Bun 1.3.14检测tag lock缺8个native entries |
-| `grep` current fork `bun.lock` workspace/package sections | `opentui-smark-r4` | 8个`0.4.3-smark.1` native只出现在workspace optional declarations，`packages` resolution map没有对应prerelease entries；producer在自身release产生前不能让普通optional resolver成为成功路径 |
-| `bun install --help` | `opentui-smark-r4` | Bun 1.3.14提供`--omit=optional`，可让producer frozen bootstrap跳过随后由同一job生成的8个native而不放宽lockfile |
-| `gh run watch 29556088217 -R SMARK2022/opentui --exit-status` | public `SMARK2022/opentui:smark/main` | source frozen install、focused/native tests和8-target cross-build通过；Solid `261/262`，唯一失败为子进程fixture找不到`three`，因此未进入pack/verifier |
-| `bun tests/runtime-plugin-support-configure.fixture.ts` | `thirdparty/opentui/packages/solid` | 独立复现同一模块解析失败：`Cannot find package 'three'`；fixture通过`packages/three/src/index.ts`可达，说明producer source workspace linker需要显式稳定布局 |
-| `bun install` + `build:native --all` + core/Solid/keymap builds | temp `opentui-v0.4.3` | 8 native targets与3个OpenCode-relevant JS packages全部构建成功 |
-| 11次`npm pack --pack-destination ...` + `shasum -a 256` | built temp OpenTUI closure | 恰好11个npm tarballs，总压缩体积约22 MiB，全部有SHA-256 |
-| local Bun HTTP server + `bun install` + public imports | isolated packed consumer | 11个本地tarballs、Solid 1.9.12共110 packages安装；core/Solid/keymap/native imports成功 |
-| semantic `0.4.3-smark.1` catalog + URL overrides + exact target reinstall probe | isolated Bun workspace | nonexistent registry prerelease仍由override解析HTTP tarball；`bun install --os=linux --cpu=x64 @opentui/core@catalog:`保持catalog并成功 |
-| `GET /repos/SMARK2022/opencode/immutable-releases` + `gh release verify --help` | repository root | immutable API返回shape已确认；gh 2.96.0支持release/asset attestation验证 |
+| Command                                                                         | Working directory                     | Evidence produced                                                                                                                                                                         |
+| ------------------------------------------------------------------------------- | ------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 第 8 节 exact 42/35 `bun -e`，连续3次                                           | `packages/opencode`                   | 当前 `sourceCount=2`, `renderedCount=3`, exit 1                                                                                                                                           |
+| 同一 harness导入 #845 built dist                                                | OpenTUI PR core directory             | `sourceCount=2`, `renderedCount=2`, exit 0                                                                                                                                                |
+| `zig build test --summary all`                                                  | #845 `packages/core/src/zig`          | 1675 pass, 2 skip, 0 fail                                                                                                                                                                 |
+| targeted JS/render tests                                                        | #845 `packages/core`                  | 156 pass, 0 fail                                                                                                                                                                          |
+| `zig build test --summary all`                                                  | `v0.4.3 packages/core/src/zig`        | 1680 pass, 2 skip, 0 fail                                                                                                                                                                 |
+| `gh pr checks 35226 -R anomalyco/opencode`                                      | repo root                             | upstream OpenCode 0.4.3 unit/E2E/typecheck全过                                                                                                                                            |
+| `gh pr diff 845 ... \| git apply --check`                                       | OpenTUI `v0.3.4` 和 `v0.4.3`          | 两个基线均 clean                                                                                                                                                                          |
+| `gh pr diff 1224 ... \| git apply --check`                                      | OpenTUI `v0.3.4`                      | whole PR不 clean apply                                                                                                                                                                    |
+| `gh pr view 845 ...` + `gh api .../tags/v0.4.3`                                 | repository root                       | #845当前OPEN/MERGEABLE/BLOCKED，head`6fbf515c...`；annotated tag解引用为`5803b2cf...`                                                                                                     |
+| `bun install --frozen-lockfile`                                                 | clean `opentui-v0.4.3` temp clone     | exit 1；Bun 1.3.14检测tag lock缺8个native entries                                                                                                                                         |
+| `grep` current fork `bun.lock` workspace/package sections                       | `opentui-smark-r4`                    | 8个`0.4.3-smark.1` native只出现在workspace optional declarations，`packages` resolution map没有对应prerelease entries；producer在自身release产生前不能让普通optional resolver成为成功路径 |
+| `bun install --help`                                                            | `opentui-smark-r4`                    | Bun 1.3.14提供`--omit=optional`，可让producer frozen bootstrap跳过随后由同一job生成的8个native而不放宽lockfile                                                                            |
+| `gh run watch 29556088217 -R SMARK2022/opentui --exit-status`                   | public `SMARK2022/opentui:smark/main` | source frozen install、focused/native tests和8-target cross-build通过；Solid `261/262`，唯一失败为子进程fixture找不到`three`，因此未进入pack/verifier                                     |
+| `bun tests/runtime-plugin-support-configure.fixture.ts`                         | `thirdparty/opentui/packages/solid`   | 独立复现同一模块解析失败：`Cannot find package 'three'`；fixture通过`packages/three/src/index.ts`可达，说明producer source workspace linker需要显式稳定布局                               |
+| `bun install` + `build:native --all` + core/Solid/keymap builds                 | temp `opentui-v0.4.3`                 | 8 native targets与3个OpenCode-relevant JS packages全部构建成功                                                                                                                            |
+| 11次`npm pack --pack-destination ...` + `shasum -a 256`                         | built temp OpenTUI closure            | 恰好11个npm tarballs，总压缩体积约22 MiB，全部有SHA-256                                                                                                                                   |
+| local Bun HTTP server + `bun install` + public imports                          | isolated packed consumer              | 11个本地tarballs、Solid 1.9.12共110 packages安装；core/Solid/keymap/native imports成功                                                                                                    |
+| semantic `0.4.3-smark.1` catalog + URL overrides + exact target reinstall probe | isolated Bun workspace                | nonexistent registry prerelease仍由override解析HTTP tarball；`bun install --os=linux --cpu=x64 @opentui/core@catalog:`保持catalog并成功                                                   |
+| `GET /repos/SMARK2022/opencode/immutable-releases` + `gh release verify --help` | repository root                       | immutable API返回shape已确认；gh 2.96.0支持release/asset attestation验证                                                                                                                  |
 
 ### 18.2 实施阶段必跑命令
 
-| Command | Working directory | Evidence produced |
-| --- | --- | --- |
-| `bun test test/cli/cmd/tui/session-layout.test.ts` | `packages/opencode` | exact Goal CJK、layout、spinner direct smoke |
-| `bun test test/cli/cmd/tui/dialog-prompt.test.tsx` | `packages/opencode` | description factory输出可见 |
-| `bun test test/script/upgrade-opentui.test.ts` | `packages/opencode` | version catalog、11 URLs、peer floor与thirdparty exclusion CLI行为 |
-| `bun test test/cli/cmd/tui/spinner.test.tsx test/cli/tui/slot-replace.test.tsx test/cli/tui/plugin-loader.test.ts` | `packages/opencode` | Solid catalogue、slot、runtime modules |
-| `bun typecheck` | `packages/opencode` | current application APIs与 0.4.3 types兼容 |
-| `bun test test/cli/cmd/tui/dialog-prompt.test.tsx test/cli/cmd/tui/session-message-render.test.tsx` | `packages/opencode` | provider/plugin description factory、legacy/v2 error与permission rationale保持可见string |
-| `bun typecheck` | `packages/plugin` | public plugin type surface兼容 |
-| `bun run script/verify-opentui-closure.ts` | `packages/opencode` | 唯一realpath、release URL/version、gitlink/tag、Solid/runtime与spinner actual graph |
-| `bun run script/smoke-opentui-artifact.ts --binary <absolute-extracted-binary-path>` | `packages/opencode` | final archive中的Goal CJK、spinner、resize、exit、process cleanup |
-| `bun typecheck` | `packages/opencode` | 通过；artifact harness与OpenTUI consumer typing无错误 |
-| `bun test test/script/upgrade-opentui.test.ts test/cli/cmd/tui/session-layout.test.ts test/cli/cmd/tui/dialog-prompt.test.tsx test/cli/cmd/tui/session-v2-error.test.tsx` | `packages/opencode` | 8 pass、0 fail、28 expect；KV ENOENT仅为非阻断日志 |
-| `bun run build` | `packages/app`, `packages/enterprise`, `packages/console/app`, `packages/storybook`, `packages/web` | 五个consumer build通过；desktop独立prebuild仍因既有`opencode-sharp.gen.ts`生成缺口失败，未将其伪记为OpenTUI green |
-| `bun run build` | `packages/desktop` | 失败；`scripts/prebuild.ts`调用`build-node.ts`，但`src/image/image.ts`要求未生成的`opencode-sharp.gen.ts`，与本次OpenTUI diff无关 |
-| `bun run script/verify-opentui-closure.ts` | `packages/opencode` | 当前closure通过，11 packages、Solid 1.9.12、gitlink/tag和darwin native SHA均一致 |
-| `bun run script/build.ts --single --skip-embed-web-ui` | `packages/opencode` | host executable可编译并嵌入目标native；保存0.3.4/SMARK binary size对比 |
-| `bun run script/build.ts --skip-embed-web-ui` | `packages/opencode` | 12个macOS/Linux/Windows target directories都编译成功且各有target native evidence |
-| `bun test` | `packages/opencode` | package full regression；不得从 repo root运行 |
-| `bun typecheck` | 每个受影响 package | package-local typecheck；不得直接运行 `tsc` |
-| 各自现有 typecheck/build/test script | 9个Solid catalog consumer package目录 | `solid-js@1.9.12`生态兼容 |
-| `bun scripts/prepare-release.ts 0.4.3-smark.1 --dry-run` then non-dry-run once | `thirdparty/opentui` | 9个lockstep manifests/8 optional deps；release commit中提交Bun 1.3.14 lock |
-| `bun install --frozen-lockfile --omit=optional --linker=hoisted` | `thirdparty/opentui` | producer source bootstrap不改lock且不解析尚未由本次build生成的8个prerelease native；hoisted布局让跨workspace子进程fixture解析`three`等source依赖；随后`build:native --all`必须生成native |
-| native/JS full tests + `bun scripts/verify-release-packages.ts --directory <dir> --version 0.4.3-smark.1` | `thirdparty/opentui` | #845/#1224/native Yoga、11 packs、HTTP CJK consumer |
-| `gh api repos/SMARK2022/opentui/immutable-releases --method PUT` then GET | repository root | release immutability实际启用 |
-| `gh repo view SMARK2022/opentui --json visibility,defaultBranchRef,isFork,parent` | repository root | public fork关系且default=`smark/main` |
-| `gh run watch <fork-ci-run> --repo SMARK2022/opentui --exit-status` | repository root | public-runner package producer与macOS/Linux x64/Linux arm64/Windows x64 consumers通过 |
-| `gh release verify v0.4.3-smark.1 -R SMARK2022/opentui` + 12个`verify-asset` | downloaded release directory | immutable release tag/commit/assets cryptographic attestation |
-| `git submodule status thirdparty/opentui` + nested status/remote/default branch checks | OpenCode root | gitlink等于release commit，nested repo clean，origin/fork正确 |
-| macOS/Linux/Windows workflow target build specification + local all-target compile | OpenCode | 所有release targets和native hashes；因OpenCode禁止push，本轮不伪造远端workflow run |
-| installed binary PTY/ConPTY smoke | extracted release asset | Goal、spinner、resize、退出、无残留 child |
+| Command                                                                                                                                                                   | Working directory                                                                                   | Evidence produced                                                                                                                                                                        |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `bun test test/cli/cmd/tui/session-layout.test.ts`                                                                                                                        | `packages/opencode`                                                                                 | exact Goal CJK、layout、spinner direct smoke                                                                                                                                             |
+| `bun test test/cli/cmd/tui/dialog-prompt.test.tsx`                                                                                                                        | `packages/opencode`                                                                                 | description factory输出可见                                                                                                                                                              |
+| `bun test test/script/upgrade-opentui.test.ts`                                                                                                                            | `packages/opencode`                                                                                 | version catalog、11 URLs、peer floor与thirdparty exclusion CLI行为                                                                                                                       |
+| `bun test test/cli/cmd/tui/spinner.test.tsx test/cli/tui/slot-replace.test.tsx test/cli/tui/plugin-loader.test.ts`                                                        | `packages/opencode`                                                                                 | Solid catalogue、slot、runtime modules                                                                                                                                                   |
+| `bun typecheck`                                                                                                                                                           | `packages/opencode`                                                                                 | current application APIs与 0.4.3 types兼容                                                                                                                                               |
+| `bun test test/cli/cmd/tui/dialog-prompt.test.tsx test/cli/cmd/tui/session-message-render.test.tsx`                                                                       | `packages/opencode`                                                                                 | provider/plugin description factory、legacy/v2 error与permission rationale保持可见string                                                                                                 |
+| `bun typecheck`                                                                                                                                                           | `packages/plugin`                                                                                   | public plugin type surface兼容                                                                                                                                                           |
+| `bun run script/verify-opentui-closure.ts`                                                                                                                                | `packages/opencode`                                                                                 | 唯一realpath、release URL/version、gitlink/tag、Solid/runtime与spinner actual graph                                                                                                      |
+| `bun run script/smoke-opentui-artifact.ts --binary <absolute-extracted-binary-path>`                                                                                      | `packages/opencode`                                                                                 | final archive中的Goal CJK、spinner、resize、exit、process cleanup                                                                                                                        |
+| `bun typecheck`                                                                                                                                                           | `packages/opencode`                                                                                 | 通过；artifact harness与OpenTUI consumer typing无错误                                                                                                                                    |
+| `bun test test/script/upgrade-opentui.test.ts test/cli/cmd/tui/session-layout.test.ts test/cli/cmd/tui/dialog-prompt.test.tsx test/cli/cmd/tui/session-v2-error.test.tsx` | `packages/opencode`                                                                                 | 8 pass、0 fail、28 expect；KV ENOENT仅为非阻断日志                                                                                                                                       |
+| `bun run build`                                                                                                                                                           | `packages/app`, `packages/enterprise`, `packages/console/app`, `packages/storybook`, `packages/web` | 五个consumer build通过；desktop独立prebuild仍因既有`opencode-sharp.gen.ts`生成缺口失败，未将其伪记为OpenTUI green                                                                        |
+| `bun run build`                                                                                                                                                           | `packages/desktop`                                                                                  | 失败；`scripts/prebuild.ts`调用`build-node.ts`，但`src/image/image.ts`要求未生成的`opencode-sharp.gen.ts`，与本次OpenTUI diff无关                                                        |
+| `bun run script/verify-opentui-closure.ts`                                                                                                                                | `packages/opencode`                                                                                 | 当前closure通过，11 packages、Solid 1.9.12、gitlink/tag和darwin native SHA均一致                                                                                                         |
+| `bun run script/build.ts --single --skip-embed-web-ui`                                                                                                                    | `packages/opencode`                                                                                 | host executable可编译并嵌入目标native；保存0.3.4/SMARK binary size对比                                                                                                                   |
+| `bun run script/build.ts --skip-embed-web-ui`                                                                                                                             | `packages/opencode`                                                                                 | 12个macOS/Linux/Windows target directories都编译成功且各有target native evidence                                                                                                         |
+| `bun test`                                                                                                                                                                | `packages/opencode`                                                                                 | package full regression；不得从 repo root运行                                                                                                                                            |
+| `bun typecheck`                                                                                                                                                           | 每个受影响 package                                                                                  | package-local typecheck；不得直接运行 `tsc`                                                                                                                                              |
+| 各自现有 typecheck/build/test script                                                                                                                                      | 9个Solid catalog consumer package目录                                                               | `solid-js@1.9.12`生态兼容                                                                                                                                                                |
+| `bun scripts/prepare-release.ts 0.4.3-smark.1 --dry-run` then non-dry-run once                                                                                            | `thirdparty/opentui`                                                                                | 9个lockstep manifests/8 optional deps；release commit中提交Bun 1.3.14 lock                                                                                                               |
+| `bun install --frozen-lockfile --omit=optional --linker=hoisted`                                                                                                          | `thirdparty/opentui`                                                                                | producer source bootstrap不改lock且不解析尚未由本次build生成的8个prerelease native；hoisted布局让跨workspace子进程fixture解析`three`等source依赖；随后`build:native --all`必须生成native |
+| native/JS full tests + `bun scripts/verify-release-packages.ts --directory <dir> --version 0.4.3-smark.1`                                                                 | `thirdparty/opentui`                                                                                | #845/#1224/native Yoga、11 packs、HTTP CJK consumer                                                                                                                                      |
+| `gh api repos/SMARK2022/opentui/immutable-releases --method PUT` then GET                                                                                                 | repository root                                                                                     | release immutability实际启用                                                                                                                                                             |
+| `gh repo view SMARK2022/opentui --json visibility,defaultBranchRef,isFork,parent`                                                                                         | repository root                                                                                     | public fork关系且default=`smark/main`                                                                                                                                                    |
+| `gh run watch <fork-ci-run> --repo SMARK2022/opentui --exit-status`                                                                                                       | repository root                                                                                     | public-runner package producer与macOS/Linux x64/Linux arm64/Windows x64 consumers通过                                                                                                    |
+| `gh release verify v0.4.3-smark.1 -R SMARK2022/opentui` + 12个`verify-asset`                                                                                              | downloaded release directory                                                                        | immutable release tag/commit/assets cryptographic attestation                                                                                                                            |
+| `git submodule status thirdparty/opentui` + nested status/remote/default branch checks                                                                                    | OpenCode root                                                                                       | gitlink等于release commit，nested repo clean，origin/fork正确                                                                                                                            |
+| macOS/Linux/Windows workflow target build specification + local all-target compile                                                                                        | OpenCode                                                                                            | 所有release targets和native hashes；因OpenCode禁止push，本轮不伪造远端workflow run                                                                                                       |
+| installed binary PTY/ConPTY smoke                                                                                                                                         | extracted release asset                                                                             | Goal、spinner、resize、退出、无残留 child                                                                                                                                                |
 
 ### 18.3 本轮未执行项
 
@@ -887,27 +887,27 @@ Linux固定为两条、没有二选一的权威路径：
 
 ### OpenCode repository
 
-| Metric | Estimate | Justification |
-| --- | --- | --- |
-| Files added | 4 + 1 gitlink | DialogPrompt test、upgrade CLI test、closure verifier、artifact smoke、OpenTUI submodule pin |
-| Files modified | 14-17 | `.gitmodules`、3 README、root/package manifests、lock、plugin peer、DialogPrompt、layout test、upgrade CLI、workflows |
-| Files deleted | 1 | 已被Solid 1.9.12吸收的旧patch |
-| Production lines | 35-60 | description factory + artifact-aware upgrade CLI；dependency metadata不计业务逻辑 |
-| Test lines | 115-160 | Goal、DialogPrompt、upgrade CLI三个behavior seams |
-| Build/verification lines | 320-440 | closure script、artifact PTY/ConPTY harness与workflow gates |
-| Generated lines | 40-90 | `bun.lock`，实际由Bun决定 |
+| Metric                   | Estimate      | Justification                                                                                                         |
+| ------------------------ | ------------- | --------------------------------------------------------------------------------------------------------------------- |
+| Files added              | 4 + 1 gitlink | DialogPrompt test、upgrade CLI test、closure verifier、artifact smoke、OpenTUI submodule pin                          |
+| Files modified           | 14-17         | `.gitmodules`、3 README、root/package manifests、lock、plugin peer、DialogPrompt、layout test、upgrade CLI、workflows |
+| Files deleted            | 1             | 已被Solid 1.9.12吸收的旧patch                                                                                         |
+| Production lines         | 35-60         | description factory + artifact-aware upgrade CLI；dependency metadata不计业务逻辑                                     |
+| Test lines               | 115-160       | Goal、DialogPrompt、upgrade CLI三个behavior seams                                                                     |
+| Build/verification lines | 320-440       | closure script、artifact PTY/ConPTY harness与workflow gates                                                           |
+| Generated lines          | 40-90         | `bun.lock`，实际由Bun决定                                                                                             |
 
 ### OpenTUI fork
 
-| Metric | Estimate | Justification |
-| --- | --- | --- |
-| Files added | 2 | release package verifier、`smark-ci.yml` |
-| Files modified | 16-19 | #845三文件、9 version manifests、lock、build/release workflows、README |
-| Source/test delta | +119/-13 | GitHub PR reported diff；不重写owner算法 |
-| Build/verification lines | 270-390 | package verifier、public CI和immutable release orchestration |
-| Generated/version-only lines | 35-55 | 9 manifests与Bun lock；由existing prepare-release/Bun生成 |
-| New algorithms | 0 | 不重写，只承接 upstream patch |
-| Chinese explanatory comments | 与OpenCode合计至少135行 | 分布按第17节；实际E/C在实现审计重算 |
+| Metric                       | Estimate                | Justification                                                          |
+| ---------------------------- | ----------------------- | ---------------------------------------------------------------------- |
+| Files added                  | 2                       | release package verifier、`smark-ci.yml`                               |
+| Files modified               | 16-19                   | #845三文件、9 version manifests、lock、build/release workflows、README |
+| Source/test delta            | +119/-13                | GitHub PR reported diff；不重写owner算法                               |
+| Build/verification lines     | 270-390                 | package verifier、public CI和immutable release orchestration           |
+| Generated/version-only lines | 35-55                   | 9 manifests与Bun lock；由existing prepare-release/Bun生成              |
+| New algorithms               | 0                       | 不重写，只承接 upstream patch                                          |
+| Chinese explanatory comments | 与OpenCode合计至少135行 | 分布按第17节；实际E/C在实现审计重算                                    |
 
 该 budget 是审计信号，不授权额外 vendor tree、loader、feature flag或 fallback。
 
@@ -915,45 +915,45 @@ Linux固定为两条、没有二选一的权威路径：
 
 ### 20.1 已证实风险
 
-| Risk | Evidence | Impact | Required control |
-| --- | --- | --- | --- |
-| 官方 0.4.3不含 #845 | tag blob与 PR blob不同；snapshot也未含 | 版本升级后 Goal仍错 | fork必须同时含 #845 |
-| #845 当前无可安装产物 | preview URL 404、artifact过期、npm无snapshot | OpenCode不能直接pin当前PR | fork从精确`v0.4.3`构建11个immutable release tarballs |
-| #845 branch使用旧base | PR五个commit最终只改三文件，head metadata不是0.4.3 release | 直接把PR head设默认分支不符合用户基线 | `smark/main`从精确`v0.4.3`创建并完整应用aggregate diff |
-| spinner peer mismatch | npm latest `0.0.7` peers `^0.3.4` | install warning和未声明兼容 | root唯一 graph + direct/compiled tests；不混版 |
-| Solid runtime mismatch | root 1.9.10 vs OpenTUI peers 1.9.12 | peer contract失败或多runtime | root升1.9.12、删旧patch、9 consumers验证、realpath gate |
-| `remove(child)` breaking change | #1224 release body | 直接 id调用会 runtime throw | 全仓 search已排除 direct TUI调用；slot tests保留 |
-| native Yoga | 0.4.1 #1126；core移除 JS `yoga-layout`并新增 `./yoga` | layout/cleanup行为变化 | layout、slot、scrollbox full tests |
-| Solid catalogue/runtime changes | #1171、JSX runtime exports变化 | custom intrinsic/packaged app风险 | 保留 explicit spinner registration + compiled smoke |
-| target reinstall可能改变 graph | build.ts lines 375-395 | host测试与release target不一致 | reinstall后再次 closure/hash gate |
-| pristine v0.4.3 lock不满足Bun 1.3.14 frozen install | 实测缺8个native lock entries | CI若现场改lock则不可重复 | release commit先用fixed Bun更新lock，CI只frozen install |
+| Risk                                                              | Evidence                                                                                                                           | Impact                                                                  | Required control                                                                                                                            |
+| ----------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| 官方 0.4.3不含 #845                                               | tag blob与 PR blob不同；snapshot也未含                                                                                             | 版本升级后 Goal仍错                                                     | fork必须同时含 #845                                                                                                                         |
+| #845 当前无可安装产物                                             | preview URL 404、artifact过期、npm无snapshot                                                                                       | OpenCode不能直接pin当前PR                                               | fork从精确`v0.4.3`构建11个immutable release tarballs                                                                                        |
+| #845 branch使用旧base                                             | PR五个commit最终只改三文件，head metadata不是0.4.3 release                                                                         | 直接把PR head设默认分支不符合用户基线                                   | `smark/main`从精确`v0.4.3`创建并完整应用aggregate diff                                                                                      |
+| spinner peer mismatch                                             | npm latest `0.0.7` peers `^0.3.4`                                                                                                  | install warning和未声明兼容                                             | root唯一 graph + direct/compiled tests；不混版                                                                                              |
+| Solid runtime mismatch                                            | root 1.9.10 vs OpenTUI peers 1.9.12                                                                                                | peer contract失败或多runtime                                            | root升1.9.12、删旧patch、9 consumers验证、realpath gate                                                                                     |
+| `remove(child)` breaking change                                   | #1224 release body                                                                                                                 | 直接 id调用会 runtime throw                                             | 全仓 search已排除 direct TUI调用；slot tests保留                                                                                            |
+| native Yoga                                                       | 0.4.1 #1126；core移除 JS `yoga-layout`并新增 `./yoga`                                                                              | layout/cleanup行为变化                                                  | layout、slot、scrollbox full tests                                                                                                          |
+| Solid catalogue/runtime changes                                   | #1171、JSX runtime exports变化                                                                                                     | custom intrinsic/packaged app风险                                       | 保留 explicit spinner registration + compiled smoke                                                                                         |
+| target reinstall可能改变 graph                                    | build.ts lines 375-395                                                                                                             | host测试与release target不一致                                          | reinstall后再次 closure/hash gate                                                                                                           |
+| pristine v0.4.3 lock不满足Bun 1.3.14 frozen install               | 实测缺8个native lock entries                                                                                                       | CI若现场改lock则不可重复                                                | release commit先用fixed Bun更新lock，CI只frozen install                                                                                     |
 | prerelease native optional packages在producer bootstrap时尚未存在 | current fork lock只有8个workspace optional declarations，没有对应package resolution entries；native packages由同一producer稍后生成 | 普通frozen optional resolver会把source build错误地依赖尚未发布的release | producer固定`--frozen-lockfile --omit=optional --linker=hoisted`，build后对完整11-pack执行HTTP consumer verifier；OpenCode/matrix不使用omit |
-| producer source子进程无法解析workspace生态依赖 | public CI `261/262`失败，fixture独立报`Cannot find package 'three'`；fixture从Solid进入`packages/three/src`并由Bun子进程加载 | source suite无法完整覆盖runtime plugin及相关生态，不能进入pack/release | producer source bootstrap显式使用`--linker=hoisted`；只改变producer workspace layout，不改变11-pack或OpenCode consumer graph |
-| URL overrides保留全部8个native artifacts | Bun隔离store与lock实测出现全部8包，OS/CPU metadata在URL lock entry显示`{}` | install体积增加，compiled binary可能误嵌入无关native | 记录target native hash与binary size；all-target compile和host artifact inspection阻止无界膨胀 |
-| GitHub release默认可修改 | ordinary release允许替换asset/tag | URL相同但内容漂移 | repository启用immutable releases；draft完整上传后publish；attestation + Bun integrity双gate |
-| upstream workflows依赖fork没有的服务 | Blacksmith labels、npm token、Azure签名secret | tag workflow会失败或虚假跳过 | 用一个public-runner SMARK release path替换原`v*` workflow，不保留并行tag成功路径 |
-| fork Windows DLL unsigned | 无Azure credential producer | Windows reputation/签名属性不同于upstream | release notes显式声明；Windows x64真实load/behavior test；不声称已签名 |
-| OpenCode禁止push | Session GOAL commit合同 | 修改后的Linux/Windows OpenCode workflow不能在本轮远端执行 | fork侧native runtime matrix + local all-target compile + macOS final smoke；非host final executable runtime明确列为remaining unverified |
+| producer source子进程无法解析workspace生态依赖                    | public CI `261/262`失败，fixture独立报`Cannot find package 'three'`；fixture从Solid进入`packages/three/src`并由Bun子进程加载       | source suite无法完整覆盖runtime plugin及相关生态，不能进入pack/release  | producer source bootstrap显式使用`--linker=hoisted`；只改变producer workspace layout，不改变11-pack或OpenCode consumer graph                |
+| URL overrides保留全部8个native artifacts                          | Bun隔离store与lock实测出现全部8包，OS/CPU metadata在URL lock entry显示`{}`                                                         | install体积增加，compiled binary可能误嵌入无关native                    | 记录target native hash与binary size；all-target compile和host artifact inspection阻止无界膨胀                                               |
+| GitHub release默认可修改                                          | ordinary release允许替换asset/tag                                                                                                  | URL相同但内容漂移                                                       | repository启用immutable releases；draft完整上传后publish；attestation + Bun integrity双gate                                                 |
+| upstream workflows依赖fork没有的服务                              | Blacksmith labels、npm token、Azure签名secret                                                                                      | tag workflow会失败或虚假跳过                                            | 用一个public-runner SMARK release path替换原`v*` workflow，不保留并行tag成功路径                                                            |
+| fork Windows DLL unsigned                                         | 无Azure credential producer                                                                                                        | Windows reputation/签名属性不同于upstream                               | release notes显式声明；Windows x64真实load/behavior test；不声称已签名                                                                      |
+| OpenCode禁止push                                                  | Session GOAL commit合同                                                                                                            | 修改后的Linux/Windows OpenCode workflow不能在本轮远端执行               | fork侧native runtime matrix + local all-target compile + macOS final smoke；非host final executable runtime明确列为remaining unverified     |
 
 ### 20.2 OpenTUI `0.3.4 -> 0.4.3` 变化审计
 
 GitHub compare显示 46 commits；compare files API达到 300-file上限，前300项至少 +11,446/-1,397，其中 core 180 files、Solid 23 files、keymap 3 files。该数字用于说明内部变更广度，不把 examples/docs变化等同于 OpenCode调用修改。
 
-| Area | Change | Current OpenCode impact | Complexity |
-| --- | --- | --- | --- |
-| core exports | 保留当前入口，新增 `./yoga` | 现有 imports均仍存在 | low |
-| native ABI | `bun-ffi-structs 0.2.2 -> 0.2.4`、native Yoga、renderer internals变化 | JS/native必须同 family | high if mixed；low if full family |
-| renderer config | 已审阅的 `CliRendererConfig` shape基本稳定 | app config source-compatible | low |
-| output backpressure | 0.4.1/0.4.2处理 skip/thread pressure；0.4.3 atomic large frame | 修复 stale output但需 lifecycle regression | medium |
-| renderable child API | `remove(id)` -> `remove(child)`，identity bookkeeping | 无 direct caller；slots/reconciler受内部影响 | medium |
-| Solid JSX runtime | `jsx-runtime`从 declaration-only变为 JS export；catalogue共享 | build plugin和custom intrinsic需实测 | medium |
-| Solid slots | native Yoga和child identity cleanup | plugin slots直接可达 | medium |
-| keymap exports | relevant subpaths保持 | named imports source-compatible | low |
-| keymap runtime modules | eager framework imports改 lazy loaders | plugin runtime直接可达 | medium |
-| terminal capabilities | 增加 OSC52 state字段 | 当前只消费 TerminalColors，无完整 object construction | low |
-| parser worker | export/path保留 | build.ts realpath逻辑仍适用 | low |
-| DialogPrompt child | upstream OpenCode需显式调用 factory | 当前 fork存在同一待迁移点 | medium but one-line fix |
-| spinner ecosystem | 无0.4.x release；peer metadata旧 | runtime在 upstream PR CI通过，当前 explicit registration更稳 | medium residual |
+| Area                   | Change                                                                | Current OpenCode impact                                      | Complexity                        |
+| ---------------------- | --------------------------------------------------------------------- | ------------------------------------------------------------ | --------------------------------- |
+| core exports           | 保留当前入口，新增 `./yoga`                                           | 现有 imports均仍存在                                         | low                               |
+| native ABI             | `bun-ffi-structs 0.2.2 -> 0.2.4`、native Yoga、renderer internals变化 | JS/native必须同 family                                       | high if mixed；low if full family |
+| renderer config        | 已审阅的 `CliRendererConfig` shape基本稳定                            | app config source-compatible                                 | low                               |
+| output backpressure    | 0.4.1/0.4.2处理 skip/thread pressure；0.4.3 atomic large frame        | 修复 stale output但需 lifecycle regression                   | medium                            |
+| renderable child API   | `remove(id)` -> `remove(child)`，identity bookkeeping                 | 无 direct caller；slots/reconciler受内部影响                 | medium                            |
+| Solid JSX runtime      | `jsx-runtime`从 declaration-only变为 JS export；catalogue共享         | build plugin和custom intrinsic需实测                         | medium                            |
+| Solid slots            | native Yoga和child identity cleanup                                   | plugin slots直接可达                                         | medium                            |
+| keymap exports         | relevant subpaths保持                                                 | named imports source-compatible                              | low                               |
+| keymap runtime modules | eager framework imports改 lazy loaders                                | plugin runtime直接可达                                       | medium                            |
+| terminal capabilities  | 增加 OSC52 state字段                                                  | 当前只消费 TerminalColors，无完整 object construction        | low                               |
+| parser worker          | export/path保留                                                       | build.ts realpath逻辑仍适用                                  | low                               |
+| DialogPrompt child     | upstream OpenCode需显式调用 factory                                   | 当前 fork存在同一待迁移点                                    | medium but one-line fix           |
+| spinner ecosystem      | 无0.4.x release；peer metadata旧                                      | runtime在 upstream PR CI通过，当前 explicit registration更稳 | medium residual                   |
 
 ### 20.3 为什么保留 `thirdparty/opentui`，但不从它构建
 
@@ -971,21 +971,21 @@ GitHub compare显示 46 commits；compare files API达到 300-file上限，前30
 
 推荐 workflow stages：
 
-| Stage | Repository | Action | Output/gate |
-| --- | --- | --- | --- |
-| 1. repository | GitHub | fork`anomalyco/opentui`为public`SMARK2022/opentui`，创建/默认`smark/main` | fork关系、visibility、default branch API evidence |
-| 2. source | fork | exact`v0.4.3`base完整合入#845，prepare`0.4.3-smark.1` | base/PR/tree SHA、9 manifests、committed lock |
-| 3. source test | fork | native red-green、full native/core/Solid/keymap tests | 零失败logs |
-| 4. cross-build | fork | `build:native --all` + core/Solid/keymap build | 11 required package directories |
-| 5. pack | fork | 11次`npm pack` + `SHA256SUMS` + local artifact verifier | exact filenames/name/version/checksums/CJK 2/2 |
-| 6. public CI | fork | `smark/main` matrix consumers | macOS、Linux x64、Linux arm64、Windows x64 package behavior |
-| 7. immutable publish | fork | draft upload 12 assets -> publish -> `gh release verify` | protected tag/assets + attestation |
-| 8. source pin | OpenCode | add submodule/gitlink anddocs | gitlink == immutable tag commit；nested clean |
-| 9. consume | OpenCode | version catalog、11 URL overrides、Solid 1.9.12、clean install | unique realpath/source/integrity report |
-| 10. source checks | OpenCode | updater/Goal/DialogPrompt/ecosystem/full tests与package typechecks | behavior与API compatibility |
-| 11. target build | OpenCode | existing all-target `build.ts` + closure/native/binary size evidence | 12 target directories和native hashes |
-| 12. artifact smoke | OpenCode | extracted host archive PTY；workflow specification覆盖其他hosts | Goal/resize/spinner/exit frames与process inventory |
-| 13. independent audit/commit | both repos | full-scope implementation audit；root commit不push | verified verdict、OpenTUI commit、OpenCode commit IDs |
+| Stage                        | Repository | Action                                                                    | Output/gate                                                 |
+| ---------------------------- | ---------- | ------------------------------------------------------------------------- | ----------------------------------------------------------- |
+| 1. repository                | GitHub     | fork`anomalyco/opentui`为public`SMARK2022/opentui`，创建/默认`smark/main` | fork关系、visibility、default branch API evidence           |
+| 2. source                    | fork       | exact`v0.4.3`base完整合入#845，prepare`0.4.3-smark.1`                     | base/PR/tree SHA、9 manifests、committed lock               |
+| 3. source test               | fork       | native red-green、full native/core/Solid/keymap tests                     | 零失败logs                                                  |
+| 4. cross-build               | fork       | `build:native --all` + core/Solid/keymap build                            | 11 required package directories                             |
+| 5. pack                      | fork       | 11次`npm pack` + `SHA256SUMS` + local artifact verifier                   | exact filenames/name/version/checksums/CJK 2/2              |
+| 6. public CI                 | fork       | `smark/main` matrix consumers                                             | macOS、Linux x64、Linux arm64、Windows x64 package behavior |
+| 7. immutable publish         | fork       | draft upload 12 assets -> publish -> `gh release verify`                  | protected tag/assets + attestation                          |
+| 8. source pin                | OpenCode   | add submodule/gitlink anddocs                                             | gitlink == immutable tag commit；nested clean               |
+| 9. consume                   | OpenCode   | version catalog、11 URL overrides、Solid 1.9.12、clean install            | unique realpath/source/integrity report                     |
+| 10. source checks            | OpenCode   | updater/Goal/DialogPrompt/ecosystem/full tests与package typechecks        | behavior与API compatibility                                 |
+| 11. target build             | OpenCode   | existing all-target `build.ts` + closure/native/binary size evidence      | 12 target directories和native hashes                        |
+| 12. artifact smoke           | OpenCode   | extracted host archive PTY；workflow specification覆盖其他hosts           | Goal/resize/spinner/exit frames与process inventory          |
+| 13. independent audit/commit | both repos | full-scope implementation audit；root commit不push                        | verified verdict、OpenTUI commit、OpenCode commit IDs       |
 
 30天workflow artifact只在同一次CI run中把producer输出传给matrix，不能成为OpenCode dependency source。唯一长期build input是immutable GitHub Release中的npm-compatible tarballs；最终OpenCode zip/tar/exe格式保持不变。
 
@@ -1040,20 +1040,20 @@ R6独立审计发现canonical plan内部把已经发生的状态同时写成“�
 
 R7只统一canonical evidence和执行边界，不增加新的实现路径。R9已进一步确认source/default/tag/gitlink均为`cbe492a5`；唯一未完成的OpenTUI发布步骤是GitHub Release draft/assets/attestation，原因是workflow token无法读取administration接口。`pkg-pr-new`仍仅作为上游PR开发预览而非生产source。
 
-| Round | Audited revision | Full scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | R1 | yes | B-01 Solid依赖链/旧patch未纳入；B-02 final artifact smoke不可执行 | comment estimate未计fork；audit mode metadata | BLOCK | `ses_0981f4e92ffeGiXHLu0OdJ6pc6` |
-| 2 | R2 | yes | B-01 Linux arm64 release archive未收敛到唯一执行gate | fork preview前置条件、revision文字、重复项、额外preview packages | BLOCK | `ses_0981331d4ffeUxEZ5q7JLAUrlW` |
-| 3 | R3 | yes | No blocking findings. | 无。 | APPROVE — exact canonical plan revision R3 only. | `ses_0980c0bc2ffe6w3oix4GhiZNLN` |
-| 4 | R4 | yes | No blocking findings. | R4审计记录待回填；Audit mode元数据应统一；upgrade CLI未来/非法版本规则较抽象；非host final executable runtime须保留为未验证边界。 | APPROVE — exact canonical plan revision R4 only. | `ses_091cd2d69ffeTncUda0MdFXuQT` |
-| 5 | R5 | yes | No blocking findings. | R5历史/阶段性元数据需行政回填；未来/非法版本URL规则需在实施时拒绝不存在release；非host final executable runtime须保留未验证边界；artifact smoke需使用readiness signal而非固定sleep。 | APPROVE — exact canonical plan revision R5 only. | `ses_091a7434affeDIQKoJuL1QwXxV` |
-| 6 | R6 | yes | B-01 canonical implementation state contradicts repository/fork/submodule state | historical audit metadata；pkg-pr-new preview workflow边界；non-host final runtime未验证 | BLOCK | `ses_0918350a7ffe3l93q9pbB8JFzV` |
-| 7 | R7 | yes | No blocking findings. | 历史revision metadata需行政归档；跨仓库实施面需按阶段审计；非host final runtime须保留未验证；未来版本URL策略、artifact readiness contract需在实施时具体化。 | APPROVE — exact canonical plan revision R7 only. | `ses_0917e9837ffeYywNfW4A7tGLoP` |
-| 8 | R8 | yes | B-01 release/source identity contradicted by stale `ea4ed655` and no-tag snapshots while current tag/gitlink are `cbe492a5` | 历史审计记录与维护者immutable evidence位置需补充 | BLOCK | `ses_090c826ddffeMN5Oxe6121Lubo` |
-| 9 | R9 | yes | B-01 corrected release workflow cannot be reached by rerunning the already-pushed tag event because reruns retain the old workflow SHA/ref | several stale implementation-evidence snapshots; release-failure rule duplicated | BLOCK | `ses_090c43519ffeeoAWu82ABP9Osf` |
-| 10 | R10 | yes | No blocking findings. | R10 audit metadata remains to be administratively recorded; dispatch invocation should be recorded as an exact verification command; direct API state was not independently queryable in auditor environment | APPROVE — exact canonical plan revision R10 only. | `ses_090bf8bddffeaoLcsOanBpLIiQ` |
-| 11 | R11 | yes | B-01 release/root consumer current state contradicted live manifest；B-02 v2 structured error缺少renderer-level behavior test | historical audit blocks需与current contract分离；E/C计划算术可行 | BLOCK — exact canonical plan revision R11. | `ses_0907e30cbffetDPNZSbajzBuxa` |
-| 12 | R12 | yes | B-01 canonical plan已超过policy允许的6轮full-scope plan audit，不能通过既有cycle批准 | historical material需更清晰归档；verification table应直接列v2 focused test；E/C计划可行 | BLOCK — exact canonical plan revision R12. | `ses_090746efcffehmE1V281L14A14` |
+| Round | Audited revision | Full scope? | Blocking findings                                                                                                                          | Non-blocking findings                                                                                                                                                                                        | Result                                            | Invocation reference             |
+| ----- | ---------------- | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------- | -------------------------------- |
+| 1     | R1               | yes         | B-01 Solid依赖链/旧patch未纳入；B-02 final artifact smoke不可执行                                                                          | comment estimate未计fork；audit mode metadata                                                                                                                                                                | BLOCK                                             | `ses_0981f4e92ffeGiXHLu0OdJ6pc6` |
+| 2     | R2               | yes         | B-01 Linux arm64 release archive未收敛到唯一执行gate                                                                                       | fork preview前置条件、revision文字、重复项、额外preview packages                                                                                                                                             | BLOCK                                             | `ses_0981331d4ffeUxEZ5q7JLAUrlW` |
+| 3     | R3               | yes         | No blocking findings.                                                                                                                      | 无。                                                                                                                                                                                                         | APPROVE — exact canonical plan revision R3 only.  | `ses_0980c0bc2ffe6w3oix4GhiZNLN` |
+| 4     | R4               | yes         | No blocking findings.                                                                                                                      | R4审计记录待回填；Audit mode元数据应统一；upgrade CLI未来/非法版本规则较抽象；非host final executable runtime须保留为未验证边界。                                                                            | APPROVE — exact canonical plan revision R4 only.  | `ses_091cd2d69ffeTncUda0MdFXuQT` |
+| 5     | R5               | yes         | No blocking findings.                                                                                                                      | R5历史/阶段性元数据需行政回填；未来/非法版本URL规则需在实施时拒绝不存在release；非host final executable runtime须保留未验证边界；artifact smoke需使用readiness signal而非固定sleep。                         | APPROVE — exact canonical plan revision R5 only.  | `ses_091a7434affeDIQKoJuL1QwXxV` |
+| 6     | R6               | yes         | B-01 canonical implementation state contradicts repository/fork/submodule state                                                            | historical audit metadata；pkg-pr-new preview workflow边界；non-host final runtime未验证                                                                                                                     | BLOCK                                             | `ses_0918350a7ffe3l93q9pbB8JFzV` |
+| 7     | R7               | yes         | No blocking findings.                                                                                                                      | 历史revision metadata需行政归档；跨仓库实施面需按阶段审计；非host final runtime须保留未验证；未来版本URL策略、artifact readiness contract需在实施时具体化。                                                  | APPROVE — exact canonical plan revision R7 only.  | `ses_0917e9837ffeYywNfW4A7tGLoP` |
+| 8     | R8               | yes         | B-01 release/source identity contradicted by stale `ea4ed655` and no-tag snapshots while current tag/gitlink are `cbe492a5`                | 历史审计记录与维护者immutable evidence位置需补充                                                                                                                                                             | BLOCK                                             | `ses_090c826ddffeMN5Oxe6121Lubo` |
+| 9     | R9               | yes         | B-01 corrected release workflow cannot be reached by rerunning the already-pushed tag event because reruns retain the old workflow SHA/ref | several stale implementation-evidence snapshots; release-failure rule duplicated                                                                                                                             | BLOCK                                             | `ses_090c43519ffeeoAWu82ABP9Osf` |
+| 10    | R10              | yes         | No blocking findings.                                                                                                                      | R10 audit metadata remains to be administratively recorded; dispatch invocation should be recorded as an exact verification command; direct API state was not independently queryable in auditor environment | APPROVE — exact canonical plan revision R10 only. | `ses_090bf8bddffeaoLcsOanBpLIiQ` |
+| 11    | R11              | yes         | B-01 release/root consumer current state contradicted live manifest；B-02 v2 structured error缺少renderer-level behavior test              | historical audit blocks需与current contract分离；E/C计划算术可行                                                                                                                                             | BLOCK — exact canonical plan revision R11.        | `ses_0907e30cbffetDPNZSbajzBuxa` |
+| 12    | R12              | yes         | B-01 canonical plan已超过policy允许的6轮full-scope plan audit，不能通过既有cycle批准                                                       | historical material需更清晰归档；verification table应直接列v2 focused test；E/C计划可行                                                                                                                      | BLOCK — exact canonical plan revision R12.        | `ses_090746efcffehmE1V281L14A14` |
 
 任何 substantive revision都会使此前 approval失效。
 
@@ -1191,7 +1191,7 @@ No blocking findings.
 
 ### R4 Independent Verdict (verbatim)
 
-```text
+````text
 ## Blocking findings
 
 No blocking findings.
@@ -1277,7 +1277,7 @@ OpenTUI v0.4.3
   -> target-specific native install
   -> Bun compile
   -> extracted final artifact smoke
-```
+````
 
 判断如下：
 
@@ -1309,7 +1309,8 @@ if E = 0: C = 0
 if E > 0: C >= max(1, ceil(E * 0.15))
 ```
 
-  重新计算中文解释性注释。
+重新计算中文解释性注释。
+
 - 计划提交的估算为 `E ≈ 900`、`C >= 135`，并明确生成 lockfile、纯版本变更、import-only 和格式化行不计入 `E`：`:624-642`。
 - 由于当前没有实现 diff，不能把计划中的 `E/C` 估算当作实现阶段通过证明；后续 implementation audit 必须按实际 diff 重算。
 
@@ -1467,12 +1468,12 @@ Installed immutable `0.4.3-smark.1`: green，source 2 / rendered 2。
 
 ### Chinese Comment Calculation
 
-| Metric | Actual | Exclusions and evidence |
-| --- | --- | --- |
-| Effective changed code lines `E` | `1118` upper bound | tracked added code/config/test lines`352` + untracked code/test/script lines`766`；已排除空行、import-only、generated `bun.lock`、README/plan、pure version metadata、删除旧patch和qualifying comment lines；未进一步扣除formatter-only行，因此是保守上界 |
-| Qualifying Chinese comment lines `C` | `178` | tracked邻近修改点`52` + new files`126`；均解释ABI/identity、Goal geometry、factory/error seam、fixture readiness、PTY/ConPTY、cleanup、workflow gate或测试独立expected |
-| Ratio `C / E` | `15.92%` | `178 / 1118` |
-| Required minimum `C` | `168` | `ceil(1118 * 0.15)`；实际超过10行 |
+| Metric                               | Actual             | Exclusions and evidence                                                                                                                                                                                                                                   |
+| ------------------------------------ | ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Effective changed code lines `E`     | `1118` upper bound | tracked added code/config/test lines`352` + untracked code/test/script lines`766`；已排除空行、import-only、generated `bun.lock`、README/plan、pure version metadata、删除旧patch和qualifying comment lines；未进一步扣除formatter-only行，因此是保守上界 |
+| Qualifying Chinese comment lines `C` | `178`              | tracked邻近修改点`52` + new files`126`；均解释ABI/identity、Goal geometry、factory/error seam、fixture readiness、PTY/ConPTY、cleanup、workflow gate或测试独立expected                                                                                    |
+| Ratio `C / E`                        | `15.92%`           | `178 / 1118`                                                                                                                                                                                                                                              |
+| Required minimum `C`                 | `168`              | `ceil(1118 * 0.15)`；实际超过10行                                                                                                                                                                                                                         |
 
 ### Remaining Unverified Items
 
@@ -1482,9 +1483,9 @@ Installed immutable `0.4.3-smark.1`: green，source 2 / rendered 2。
 
 ## 24. Implementation Audit Record
 
-| Round | Plan revision | Full original scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | R12 | yes | No blocking findings. | 4项，原样记录如下 | APPROVE | `ses_08f614ea8ffe9v5R1O9udbMhKk` |
+| Round | Plan revision | Full original scope? | Blocking findings     | Non-blocking findings | Result  | Invocation reference             |
+| ----- | ------------- | -------------------- | --------------------- | --------------------- | ------- | -------------------------------- |
+| 1     | R12           | yes                  | No blocking findings. | 4项，原样记录如下     | APPROVE | `ses_08f614ea8ffe9v5R1O9udbMhKk` |
 
 ### R12 Implementation Audit Round 1 (verbatim classifications)
 
