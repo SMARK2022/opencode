@@ -306,7 +306,7 @@ for every patch. Do not set a PASS or BLOCK quota.
 Read the complete original/current for every supplied index, including source
 tests, documentation, configuration, schema, migration, generated changes and
 deletion or rename intent. Reconstruct the relevant target owner and consumers.
-Use the baseline and paths in the current manifest, currently v1.18.32.
+Use the baseline and paths in the current manifest, currently v1.19.5.
 
 Compare upstream strengths and SMARK intent along actual V1/V2 responsibilities.
 When upstream already carries the intent or removes the problem, reuse that path.

@@ -806,7 +806,7 @@ index 603db41ea8..4c3c000c9b 100644
 +  "name": "opencode-ide-bridge",
 +  "displayName": "OpenCode VS Code Bridge",
 +  "description": "VS Code bridge for OpenCode IDE integration, notebook tools, and workspace context.",
-   "version": "1.18.32",
+   "version": "1.19.5",
 -  "publisher": "sst-dev",
 +  "publisher": "SMARK2022",
    "repository": {

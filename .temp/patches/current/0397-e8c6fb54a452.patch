@@ -21,6 +21,6 @@ diff --git a/.github/actions/setup-bun/action.yml b/.github/actions/setup-bun/ac
 +        # CI 不提交代码，无需 husky 安装 git hook；HUSKY=0 让 husky 9 直接 return（exit 0）。
 +        # 测试中的 git commit 均在 os.tmpdir() 的独立 repo 中执行，不读取根 .husky/，互不影响。
 +        HUSKY: "0"
-       run: |
-         # Workaround for patched peer variants
-         # e.g. ./patches/ for standard-openapi
+       # 统一 hoisted linker：全平台避免 patched peer 冲突
+       run: bun install --linker hoisted ${{ inputs.install-flags }}
+       shell: bash

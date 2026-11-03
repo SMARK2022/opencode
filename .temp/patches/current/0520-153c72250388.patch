@@ -197,27 +197,63 @@ diff --git a/packages/sdk/js/src/v2/gen/types.gen.ts b/packages/sdk/js/src/v2/ge
 +            [key: string]: unknown
 +          }
          }
-@@ -3924,3 +3927,6 @@ export type SyncEventSessionNextSynthetic = {
+@@ -3930,16 +3933,19 @@
+ export type SyncEventSessionNextSynthetic = {
+   type: "sync"
+   id: string
+   syncEvent: {
+     type: "session.next.synthetic.1"
+     id: string
+     seq: number
+     aggregateID: string
+     data: {
+       timestamp: number
+       sessionID: string
        messageID: string
        text: string
 +      metadata?: {
 +        [key: string]: unknown
 +      }
      }
-@@ -4960,3 +4966,6 @@ export type SessionNextSynthetic = {
+   }
+ }
+@@ -4962,19 +4968,22 @@
+ export type SessionNextSynthetic = {
+   id: string
+   metadata?: {
+     [key: string]: unknown
+   }
+   type: "session.next.synthetic"
+   durable?: {
+     aggregateID: string
+     seq: number
+     version: number
+   }
+   location?: LocationRef
+   data: {
+     timestamp: number
+     sessionID: string
      messageID: string
      text: string
 +    metadata?: {
 +      [key: string]: unknown
 +    }
    }
-@@ -7239,3 +7248,6 @@ export type EventSessionNextSynthetic = {
+ }
+@@ -7250,10 +7259,13 @@
+ export type EventSessionNextSynthetic = {
+   id: string
+   type: "session.next.synthetic"
+   properties: {
+     timestamp: number
+     sessionID: string
      messageID: string
      text: string
 +    metadata?: {
 +      [key: string]: unknown
 +    }
    }
+ }
 diff --git a/docs/plans/goal-continuation-card-badges.md b/docs/plans/goal-continuation-card-badges.md
 new file mode 100644
 index 0000000000000000000000000000000000000000..ce994b8f96c0865ae9289a6901b3b3fcfa50cc08

@@ -12,10 +12,10 @@ index 10afb9c5c1..85d8252e53 100644
 @@ -1,7 +1,7 @@
  {
    "$schema": "https://json.schemastore.org/package.json",
--  "version": "1.18.32-smark",
--  "//version-note": "版本固定在 1.18.32-smark，不跟踪源 1.14.20-smark 版本号",
-+  "version": "1.18.33-smark",
-+  "//version-note": "版本递增至 1.18.33-smark（#109）",
+-  "version": "1.19.5-smark",
+-  "//version-note": "版本固定在 1.19.5-smark，不跟踪源 1.14.20-smark 版本号",
++  "version": "1.19.6-smark",
++  "//version-note": "版本递增至 1.19.6-smark（#109）",
    "name": "opencode",
    "type": "module",
    "license": "MIT",
@@ -417,7 +417,7 @@ index 65ec793bd9fb67cabcfd94c5851756c3adfce10c..e51ea7588565b7a090bc1fac21ec52d3
      // 版本与 packages/opencode/package.json 保持一致，frozen install 依赖 bun.lock 同步
      "packages/opencode": {
        "name": "opencode",
--      "version": "1.18.32-smark",
-+      "version": "1.18.33-smark",
+-      "version": "1.19.5-smark",
++      "version": "1.19.6-smark",
        "bin": {
          "opencode": "./bin/opencode",

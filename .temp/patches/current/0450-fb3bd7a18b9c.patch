@@ -6,7 +6,7 @@ Subject: [PATCH] =?UTF-8?q?chore(vscode):=20=E5=8D=87=E7=BA=A7=E6=89=A9?=
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
-扩展版本 1.15.10→1.15.11（source 谱系）；v1.18.32 目标链映射为独立扩展版本 1.18.40→1.18.41，既有 CLI 推荐保持不变。
+扩展版本 1.15.10→1.15.11（source 谱系）；v1.19.5 目标链映射为独立扩展版本 1.19.13→1.19.14，既有 CLI 推荐保持不变。
 同步 VSIX manifest、README 与打包指南版本，修正 hidden diagnostics 表述，并将源码目录改为树形结构。
 diff --git a/docs/VSIX-Packaging.md b/docs/VSIX-Packaging.md
 --- a/docs/VSIX-Packaging.md
@@ -15,9 +15,9 @@ diff --git a/docs/VSIX-Packaging.md b/docs/VSIX-Packaging.md
  | Package path | `sdks/vscode` |
  | Source repository | `https://github.com/SMARK2022/opencode` |
  | Source branch | `dev-smark` |
--| Repository extension version | `1.18.40` |
-+| Repository extension version | `1.18.41` |
- | Recommended CLI | `opencode 1.18.42-smark` |
+-| Repository extension version | `1.19.13` |
++| Repository extension version | `1.19.14` |
+ | Recommended CLI | `opencode 1.19.15-smark` |
  | Default version source | `sdks/vscode/package.json` |
  | Local VSIX name | `dist/SMARK2022.opencode-ide-bridge-<version>.vsix` |
 @@ -77,15 +77,15 @@
@@ -49,8 +49,8 @@ diff --git a/docs/VSIX-Packaging.md b/docs/VSIX-Packaging.md
  
  ## Versioning
  
--Use `sdks/vscode/package.json` as the canonical version source for local packaging and push-triggered builds. The repository extension version is ordinary semver (`1.18.40`) so Marketplace tooling accepts it; the recommended CLI is `1.18.42-smark`, but the two packages remain independently versioned.
-+Use `sdks/vscode/package.json` as the canonical version source for local packaging and push-triggered builds. The repository extension version is ordinary semver (`1.18.41`) so Marketplace tooling accepts it; the recommended CLI is `1.18.42-smark`, but the two packages remain independently versioned.
+-Use `sdks/vscode/package.json` as the canonical version source for local packaging and push-triggered builds. The repository extension version is ordinary semver (`1.19.13`) so Marketplace tooling accepts it; the recommended CLI is `1.19.15-smark`, but the two packages remain independently versioned.
++Use `sdks/vscode/package.json` as the canonical version source for local packaging and push-triggered builds. The repository extension version is ordinary semver (`1.19.14`) so Marketplace tooling accepts it; the recommended CLI is `1.19.15-smark`, but the two packages remain independently versioned.
  
  Pushes to `dev-smark` that change `sdks/vscode/**` run `.github/workflows/build-vsix.yml`. By default it reads the manifest version, writes `dist/opencode-vscode-<version>.vsix`, and creates or updates the `vscode-v<version>` GitHub prerelease. A manual `workflow_dispatch.version` leaves the repository manifest and README unchanged but overrides the manifest version inside the packaged VSIX, so use it only for an intentional temporary rebuild and expect the packaged README version statement to remain unchanged. The workflow does not publish Marketplace or Open VSX.
  
@@ -91,14 +91,14 @@ diff --git a/sdks/vscode/README.md b/sdks/vscode/README.md
 --- a/sdks/vscode/README.md
 +++ b/sdks/vscode/README.md
 @@ -3 +3 @@
--Local VS Code extension for the SMARK OpenCode fork. It connects the OpenCode CLI to VS Code workspace and notebook APIs through a localhost HTTP bridge protected by a per-session Bearer token. The CLI and extension are versioned independently. Marketplace may continue to show `1.18.39` until this repository build is published.
+-Local VS Code extension for the SMARK OpenCode fork. It connects the OpenCode CLI to VS Code workspace and notebook APIs through a localhost HTTP bridge protected by a per-session Bearer token. The CLI and extension are versioned independently. Marketplace may continue to show `1.19.12` until this repository build is published.
 +Local VS Code extension for the SMARK OpenCode fork. It connects the OpenCode CLI to VS Code workspace and notebook APIs through a localhost HTTP bridge protected by a per-session Bearer token. The CLI and extension are versioned independently. Marketplace may continue to show an older extension release until this repository build is published.
 @@ -7,7 +7,7 @@
  | Extension ID | `SMARK2022.opencode-ide-bridge` |
  | Publisher | `SMARK2022` |
--| Repository extension version | `1.18.40` |
-+| Repository extension version | `1.18.41` |
- | Recommended CLI | `opencode 1.18.42-smark` |
+-| Repository extension version | `1.19.13` |
++| Repository extension version | `1.19.14` |
+ | Recommended CLI | `opencode 1.19.15-smark` |
  | Source | https://github.com/SMARK2022/opencode/tree/dev-smark/sdks/vscode |
  
  ## What It Adds
@@ -137,7 +137,7 @@ diff --git a/sdks/vscode/package.json b/sdks/vscode/package.json
 --- a/sdks/vscode/package.json
 +++ b/sdks/vscode/package.json
 @@ -5,2 +5,2 @@
--  "version": "1.18.40",
--  "//": "#408：协同升号 1.18.39→1.18.40——source 谱系 1.15.5→1.15.10 映射，格式保持三段式",
-+  "version": "1.18.41",
-+  "//": "#450：独立扩展补丁版本 1.18.40→1.18.41，承接 source 的 +1 升号并保持三段式 semver",
+-  "version": "1.19.13",
+-  "//": "#408：协同升号 1.19.12→1.19.13——source 谱系 1.15.5→1.15.10 映射，格式保持三段式",
++  "version": "1.19.14",
++  "//": "#450：独立扩展补丁版本 1.19.13→1.19.14，承接 source 的 +1 升号并保持三段式 semver",

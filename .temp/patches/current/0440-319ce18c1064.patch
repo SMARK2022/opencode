@@ -2,16 +2,16 @@ diff --git a/packages/opencode/package.json b/packages/opencode/package.json
 --- a/packages/opencode/package.json
 +++ b/packages/opencode/package.json
 @@ -3,2 +3,3 @@
--  "version": "1.18.42-smark",
-+  "version": "1.18.43-smark",
-+  "//440-release-note": "#440 源 patch bump 1.15.10→1.15.11 按版本线映射为 1.18.42→1.18.43；禁止回写 1.14/1.15。",
-   "//396-release-note": "#396 源 patch bump 1.15.9→1.15.10 按版本线映射为 1.18.41→1.18.42；禁止回写 1.14/1.15。",
+-  "version": "1.19.15-smark",
++  "version": "1.19.16-smark",
++  "//440-release-note": "#440 源 patch bump 1.15.10→1.15.11 按版本线映射为 1.19.15→1.19.16；禁止回写 1.14/1.15。",
+   "//396-release-note": "#396 源 patch bump 1.15.9→1.15.10 按版本线映射为 1.19.14→1.19.15；禁止回写 1.14/1.15。",
 diff --git a/bun.lock b/bun.lock
 --- a/bun.lock
 +++ b/bun.lock
 @@ -572,4 +572,4 @@
      "packages/opencode": {
        "name": "opencode",
--      "version": "1.18.38-smark",
-+      "version": "1.18.43-smark",
+-      "version": "1.19.11-smark",
++      "version": "1.19.16-smark",
        "bin": {

@@ -216,6 +216,9 @@ index 86238f1a84..84a8df123a 100644
  import { LayerNode } from "@opencode-ai/core/effect/layer-node"
  import { httpClient } from "@opencode-ai/core/effect/app-node-platform"
  import { serviceUse } from "@opencode-ai/core/effect/service-use"
+@@ -22,1 +23,1 @@
+-import { HttpClient, HttpClientRequest } from "effect/unstable/http"
++import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/unstable/http"
 @@ -204,18 +205,30 @@ const layer = Layer.effect(
        schema: S,
        loginOrigin: string,
@@ -261,18 +264,17 @@ index 5faaa18dc7..a5eda68d76 100644
  
  function wrapSSE(res: Response, ms: number, ctl: AbortController) {
    if (typeof ms !== "number" || ms <= 0) return res
-@@ -1851,8 +1853,9 @@ const layer = Layer.effect(
-           if (opts.signal) signals.push(opts.signal)
-           if (chunkAbortCtl) signals.push(chunkAbortCtl.signal)
-           if (headerTimeoutCtl) signals.push(headerTimeoutCtl.signal)
--          if (options["timeout"] !== undefined && options["timeout"] !== null && options["timeout"] !== false)
--            signals.push(AbortSignal.timeout(options["timeout"]))
-+          // 总期限加入既有取消链，显式 false 仍关闭此期限；路由恢复必须保留同一组合信号。
-+          if (options["timeout"] !== false)
-+            signals.push(AbortSignal.timeout(typeof options["timeout"] === "number" ? options["timeout"] : DEFAULT_TIMEOUT_MS))
+@@ -111,7 +113,9 @@
+     if (opts.signal) signals.push(opts.signal)
+     if (chunkAbortCtl) signals.push(chunkAbortCtl.signal)
+     if (headerTimeoutCtl) signals.push(headerTimeoutCtl.signal)
+-    if (timeout !== undefined && timeout !== null && timeout !== false) signals.push(AbortSignal.timeout(timeout))
++    // 总期限加入既有取消链，显式 false 仍关闭此期限；路由恢复必须保留同一组合信号。
++    if (timeout !== false)
++      signals.push(AbortSignal.timeout(typeof timeout === "number" ? timeout : DEFAULT_TIMEOUT_MS))
  
-           const combined = signals.length === 0 ? null : signals.length === 1 ? signals[0] : AbortSignal.any(signals)
-           if (combined) opts.signal = combined
+     const combined = signals.length === 0 ? null : signals.length === 1 ? signals[0] : AbortSignal.any(signals)
+     if (combined) opts.signal = combined
 diff --git a/packages/opencode/src/session/llm/native-runtime.ts b/packages/opencode/src/session/llm/native-runtime.ts
 --- a/packages/opencode/src/session/llm/native-runtime.ts
 +++ b/packages/opencode/src/session/llm/native-runtime.ts

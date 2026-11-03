@@ -77,7 +77,7 @@ diff --git a/packages/opencode/test/docs/readme.test.ts b/packages/opencode/test
        expect(tip).toBeGreaterThan(warning)
        expect(screenshot).toBeGreaterThan(tip)
        // 分支身份仍沿用目标发布版本，不能随文案重排退回 source 的旧版本。
-       expect(content.slice(tip, screenshot)).toContain("1.18.44-smark")
+       expect(content.slice(tip, screenshot)).toContain("1.19.17-smark")
      }
    })
 -

@@ -548,40 +548,18 @@ diff --git a/packages/opencode/test/installation/installation.test.ts b/packages
 +++ b/packages/opencode/test/installation/installation.test.ts
 @@ -8,6 +8,7 @@ import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process"
  import { Installation } from "../../src/installation"
- import { InstallationChannel } from "@opencode-ai/core/installation/version"
+ import { InstallationVersion } from "@opencode-ai/core/installation/version"
  import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 +import { NpmConfig } from "@opencode-ai/core/npm-config"
  import { testEffect } from "../lib/effect"
  
  const encoder = new TextEncoder()
-@@ -95,10 +96,10 @@ describe("installation", () => {
-     ).effect("reads npm versions via registry", () =>
-       Effect.gen(function* () {
-         const result = yield* Installation.use.latest("npm")
-         expect(result).toBe("1.5.0")
--        // registry 由用户配置决定，npm/bun/pnpm 的包路径断言只固定包名与发布 channel。
--        expect(npmCalls.some((url) => url.endsWith(`/opencode-ai/${InstallationChannel}`))).toBe(true)
-+        // Match the configured registry as well as the package and release channel.
-+        expect(npmCalls).toContain(`${yield* NpmConfig.registry(process.cwd())}/opencode-ai/${InstallationChannel}`)
-       }),
-     )
- 
-     const bunCalls: string[] = []
-@@ -111,7 +112,7 @@ describe("installation", () => {
-       Effect.gen(function* () {
-         const result = yield* Installation.use.latest("bun")
-         expect(result).toBe("1.6.0")
--        expect(bunCalls.some((url) => url.endsWith(`/opencode-ai/${InstallationChannel}`))).toBe(true)
-+        expect(bunCalls).toContain(`${yield* NpmConfig.registry(process.cwd())}/opencode-ai/${InstallationChannel}`)
-       }),
-     )
- 
-@@ -125,7 +126,7 @@ describe("installation", () => {
-       Effect.gen(function* () {
-         const result = yield* Installation.use.latest("pnpm")
-         expect(result).toBe("1.7.0")
--        expect(pnpmCalls.some((url) => url.endsWith(`/opencode-ai/${InstallationChannel}`))).toBe(true)
-+        expect(pnpmCalls).toContain(`${yield* NpmConfig.registry(process.cwd())}/opencode-ai/${InstallationChannel}`)
-       }),
-     )
- 
+@@ -119,6 +120,6 @@ describe("installation", () => {
+           calls.length = 0
+           expect(yield* Installation.use.latest(method)).toBe("1.19.2")
+-          // registry 可由用户配置；保留包名与 latest 路径约束，不固定主机名。
+-          expect(calls[0]?.endsWith("/opencode-ai/latest")).toBe(true)
++          // 八种安装方式共用上游矩阵，校验实际配置的registry而不是只校验路径后缀。
++          expect(calls).toContain(`${yield* NpmConfig.registry(process.cwd())}/opencode-ai/latest`)
+           expect(calls.slice(1).every((url) => url.startsWith(choco))).toBe(true)
+         }),

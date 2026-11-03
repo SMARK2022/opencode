@@ -9,7 +9,7 @@ diff --git a/package.json b/package.json
 index 3c36b2255a..7430f2d9f8 100644
 --- a/package.json
 +++ b/package.json
-@@ -136,10 +136,11 @@
+@@ -136,12 +136,13 @@
      "electron"
    ],
    "overrides": {
@@ -20,4 +20,15 @@ index 3c36b2255a..7430f2d9f8 100644
 +    "opentui-spinner": "catalog:",
      "@types/bun": "catalog:",
      "@types/node": "catalog:",
+     "bun-types": "1.4.4",
+     "open": "11.0.4",
      "poe-oauth": "0.0.6"
+
+diff --git a/bun.lock b/bun.lock
+--- a/bun.lock
++++ b/bun.lock
+@@ -1119,3 +1119,4 @@
+     "bun-types": "1.4.4",
+     "open": "11.0.4",
++    "opentui-spinner": "catalog:",
+     "poe-oauth": "0.0.6",

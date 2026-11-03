@@ -1881,7 +1881,7 @@ diff --git a/packages/opencode/script/build.ts b/packages/opencode/script/build.
  import path from "path"
  import { PromptVoiceAssets } from "../../tui/src/prompt-voice-assets"
  import { fileURLToPath } from "url"
-@@ -198,6 +200,70 @@ function createPvRecorderNativeFileMap(item: (typeof allTargets)[number]) {
+@@ -198,7 +200,71 @@ function createPvRecorderNativeFileMap(item: (typeof allTargets)[number]) {
  
  await $`rm -rf dist`
  
@@ -1951,6 +1951,7 @@ diff --git a/packages/opencode/script/build.ts b/packages/opencode/script/build.
 +
  const binaries: Record<string, string> = {}
  if (!skipInstall) {
+   // Bun 1.4.4 skips native packages for the other libc by default, but the musl targets need them.
    // #468：只安装目标 OS/arch 的原生变体，避免 macOS CI 下载 win32 包触发 bun IntegrityCheckFailed。
 @@ -287,14 +353,38 @@ for (const item of targets) {
      const binaryPath = `dist/${name}/bin/opencode`

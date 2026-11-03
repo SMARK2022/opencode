@@ -1045,7 +1045,7 @@ index 1dd51c046441a02efc7ca56fb75ba666cd858846..90fca7afcf601443cb6982a47abc7a8a
 --- a/packages/opencode/test/provider/provider.test.ts
 +++ b/packages/opencode/test/provider/provider.test.ts
 @@ -8,3 +8,5 @@
--import { Deferred, Effect, Layer } from "effect"
+-import { Deferred, Effect } from "effect"
 +import { Deferred, Effect, Layer, Logger } from "effect"
 +import { NodeFileSystem } from "@effect/platform-node"
 +import { Logging } from "@opencode-ai/core/observability/logging"

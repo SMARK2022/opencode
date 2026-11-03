@@ -1,7 +1,7 @@
 diff --git a/packages/opencode/src/cli/cmd/tui.ts b/packages/opencode/src/cli/cmd/tui.ts
 --- a/packages/opencode/src/cli/cmd/tui.ts
 +++ b/packages/opencode/src/cli/cmd/tui.ts
-@@ -1,15 +1,12 @@
+@@ -1,17 +1,14 @@
  import { cmd } from "@/cli/cmd/cmd"
 -import { Rpc } from "@/util/rpc"
 -import { type rpc } from "../tui/worker"
@@ -17,10 +17,12 @@ diff --git a/packages/opencode/src/cli/cmd/tui.ts b/packages/opencode/src/cli/cm
  import { Filesystem } from "@/util/filesystem"
 -import type { GlobalEvent } from "@opencode-ai/sdk/v2"
 -import type { EventSource } from "@opencode-ai/tui/context/sdk"
+ import type { UpdateNotice, UpdateSource } from "@opencode-ai/tui"
+ import { InstallationVersion } from "@opencode-ai/core/installation/version"
  import { writeHeapSnapshot } from "v8"
 -import { ServerAuth } from "@/server/auth"
  import { validateSession } from "../tui/validate-session"
-@@ -19,43 +16,173 @@
+@@ -21,33 +18,9 @@
    const OPENCODE_WORKER_PATH: string
  }
  
@@ -58,6 +60,7 @@ diff --git a/packages/opencode/src/cli/cmd/tui.ts b/packages/opencode/src/cli/cm
 -  }
 -}
 -
+@@ -91,10 +64,164 @@
  async function target() {
    if (typeof OPENCODE_WORKER_PATH !== "undefined") return OPENCODE_WORKER_PATH
    const dist = new URL("./cli/tui/worker.js", import.meta.url)
@@ -318,17 +321,20 @@ diff --git a/packages/opencode/src/cli/cmd/tui.ts b/packages/opencode/src/cli/cm
            headers,
          })
        } catch (error) {
-@@ -262,9 +375,6 @@
+@@ -262,7 +375,11 @@
          return
        }
  
--      setTimeout(() => {
--        client.call("checkUpgrade", { directory: cwd }).catch(() => {})
--      }, 1000).unref?.()
+-      const updater = createUpdater(async () => await client.call("checkUpgrade", { directory: cwd }))
++      // 更新检查沿用原 upgrade owner，只将已移除的 RPC 调用改为同进程调用。
++      const updater = createUpdater(async () => {
++        const { upgrade } = await import("@/cli/upgrade")
++        return upgrade()
++      })
  
        try {
          const { Effect } = await import("effect")
-@@ -272,18 +382,15 @@
+@@ -272,19 +389,16 @@
          const { createLegacyTuiPluginHost } = await import("@/plugin/tui/runtime")
          await Effect.runPromise(
            run({
@@ -348,10 +354,11 @@ diff --git a/packages/opencode/src/cli/cmd/tui.ts b/packages/opencode/src/cli/cm
 -            headers: transport.headers,
 -            events: transport.events,
 +            headers,
+             updater,
              args: {
                continue: args.continue,
                sessionID: args.session,
-@@ -296,9 +403,15 @@
+@@ -296,9 +411,15 @@
            }),
          )
        } finally {

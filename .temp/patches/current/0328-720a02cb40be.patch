@@ -55,7 +55,7 @@ diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src
  ) {
    const result: UIMessage[] = []
    const toolNames = new Set<string>()
-@@ -334,7 +345,11 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
+@@ -343,10 +354,14 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
            if (part.state.status === "completed") {
              const outputText = part.state.time.compacted
                ? formatCompactionClearedNotice()
@@ -65,7 +65,10 @@ diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src
 +                  options?.toolOutputTruncation?.head,
 +                  options?.toolOutputTruncation?.tail,
 +                )
-             const attachments = part.state.time.compacted || options?.stripMedia ? [] : (part.state.attachments ?? [])
+             const attachments =
+               part.state.time.compacted || options?.stripMedia
+                 ? []
+                 : (part.state.attachments ?? []).filter((a) => !rejectedByProvider(a))
  
              // For providers that don't support media in tool results, extract media files
 @@ -459,8 +474,8 @@

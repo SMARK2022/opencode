@@ -6,7 +6,7 @@ diff --git a/CONTEXT.md b/CONTEXT.md
  # opencode (SMARK fork)
  
 -The domain language of opencode — an open-source AI coding agent. This SMARK glossary supplements the upstream Session Runtime definitions above on the v1.18.32 migration baseline. V1-specific terms describe the retained compatibility path; canonical runtime owners span Schema, Core, Protocol, Server and Client. Use these terms in issues, refactor proposals, hypotheses and test names without replacing the native V2 vocabulary above.
-+The domain language of opencode — an open-source AI coding agent. This SMARK glossary supplements the upstream Session Runtime definitions above on the v1.18.32 migration baseline. V1-specific terms describe the retained compatibility path; canonical runtime owners span Schema, Core, Protocol, Server and Client. Use these terms in issues, refactor proposals, hypotheses and test names without replacing the native V2 vocabulary above. Current SMARK CLI version: `1.18.42-smark`.
++The domain language of opencode — an open-source AI coding agent. This SMARK glossary supplements the upstream Session Runtime definitions above on the v1.18.32 migration baseline. V1-specific terms describe the retained compatibility path; canonical runtime owners span Schema, Core, Protocol, Server and Client. Use these terms in issues, refactor proposals, hypotheses and test names without replacing the native V2 vocabulary above. Current SMARK CLI version: `1.19.15-smark`.
  
  ## Language
  
@@ -16,8 +16,8 @@ diff --git a/packages/opencode/package.json b/packages/opencode/package.json
 @@ -1,5 +1,6 @@
  {
    "$schema": "https://json.schemastore.org/package.json",
--  "version": "1.18.41-smark",
-+  "version": "1.18.42-smark",
-+  "//396-release-note": "#396 源 patch bump 1.15.9→1.15.10 按版本线映射为 1.18.41→1.18.42；禁止回写 1.14/1.15。",
-   "//363-release-note": "#363 协同升号至 1.18.41-smark；源 patch bump 1.15.8→1.15.9 映射到目标版本线递增",
-   "//version-note": "#253 协同升号至 1.18.40-smark；禁止回写 1.14/1.15",
+-  "version": "1.19.14-smark",
++  "version": "1.19.15-smark",
++  "//396-release-note": "#396 源 patch bump 1.15.9→1.15.10 按版本线映射为 1.19.14→1.19.15；禁止回写 1.14/1.15。",
+   "//363-release-note": "#363 协同升号至 1.19.14-smark；源 patch bump 1.15.8→1.15.9 映射到目标版本线递增",
+   "//version-note": "#253 协同升号至 1.19.13-smark；禁止回写 1.14/1.15",

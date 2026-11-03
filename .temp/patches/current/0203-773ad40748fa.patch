@@ -723,11 +723,10 @@ index d973b5d..33288d0 100644
 diff --git a/packages/opencode/test/tool/shell.test.ts b/packages/opencode/test/tool/shell.test.ts
 --- a/packages/opencode/test/tool/shell.test.ts
 +++ b/packages/opencode/test/tool/shell.test.ts
-@@ -10,7 +10,13 @@ import { Shell } from "@opencode-ai/core/shell"
+@@ -10,6 +10,13 @@ import { Shell } from "@opencode-ai/core/shell"
  import { ShellTool } from "../../src/tool/shell"
  import { Filesystem } from "@/util/filesystem"
  import { provideInstance, testInstanceStoreLayer, tmpdirScoped } from "../fixture/fixture"
--import type { Permission } from "../../src/permission"
 +import { Permission } from "../../src/permission"
 +import { PermissionReviewer } from "../../src/permission/reviewer/service"
 +import { PermissionSessionCache } from "../../src/permission/cache/session-cache"

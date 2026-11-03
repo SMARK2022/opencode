@@ -108,7 +108,7 @@ diff --git a/packages/opencode/src/installation/index.ts b/packages/opencode/src
 +
  export type Method = "curl" | "npm" | "yarn" | "pnpm" | "bun" | "brew" | "scoop" | "choco" | "unknown"
  
- export type ReleaseType = "patch" | "minor" | "major"
+ export const Event = InstallationEvent
 @@ -95,8 +105,9 @@
          const result = yield* appProcess.run(
 +          // 安装 spawn 均用过滤后的完整环境并关闭继承，避免 ChildProcess 补回 daemon/Electron 执行角色。

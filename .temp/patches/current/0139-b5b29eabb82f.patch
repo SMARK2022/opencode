@@ -263,7 +263,7 @@ diff --git a/packages/tui/src/app.tsx b/packages/tui/src/app.tsx
 index a17dec9d55..c5687737f8 100644
 --- a/packages/tui/src/app.tsx
 +++ b/packages/tui/src/app.tsx
-@@ -149,6 +149,10 @@ export type TuiInput = {
+@@ -149,7 +149,11 @@ export type TuiInput = {
    fetch?: typeof fetch
    headers?: RequestInit["headers"]
    events?: EventSource
@@ -272,6 +272,7 @@ index a17dec9d55..c5687737f8 100644
 +  // #139：可测心跳超时
 +  heartbeatTimeout?: number
    pluginHost: TuiPluginHost
+   updater?: UpdateSource
  }
  
 @@ -320,6 +324,8 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
@@ -296,10 +297,11 @@ index 171705962f..6eba89b86e 100644
          env: {
            ...env,
            OPENCODE_PROCESS_ROLE: "worker",
-@@ -461,6 +463,28 @@ export const TuiThreadCommand = cmd({
+@@ -461,7 +463,29 @@ export const TuiThreadCommand = cmd({
              pluginHost: createLegacyTuiPluginHost(),
              directory: cwd,
              headers,
+             updater,
 +            // #139：SSE/API 失败时重新 discoverOrSpawn，重绑定 live URL
 +            reconnect: async () => {
 +              const discovered = await discoverOrSpawnDaemon(args)

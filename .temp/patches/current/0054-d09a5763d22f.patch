@@ -32,32 +32,14 @@ diff --git a/packages/opencode/test/agent/agent.test.ts b/packages/opencode/test
 diff --git a/packages/opencode/test/installation/installation.test.ts b/packages/opencode/test/installation/installation.test.ts
 --- a/packages/opencode/test/installation/installation.test.ts
 +++ b/packages/opencode/test/installation/installation.test.ts
-@@ -96,7 +96,8 @@
-       Effect.gen(function* () {
-         const result = yield* Installation.use.latest("npm")
-         expect(result).toBe("1.5.0")
--        expect(npmCalls).toContain(`https://registry.npmjs.org/opencode-ai/${InstallationChannel}`)
-+        // registry 由用户配置决定，npm/bun/pnpm 的包路径断言只固定包名与发布 channel。
-+        expect(npmCalls.some((url) => url.endsWith(`/opencode-ai/${InstallationChannel}`))).toBe(true)
-       }),
-     )
- 
-@@ -110,7 +111,7 @@
-       Effect.gen(function* () {
-         const result = yield* Installation.use.latest("bun")
-         expect(result).toBe("1.6.0")
--        expect(bunCalls).toContain(`https://registry.npmjs.org/opencode-ai/${InstallationChannel}`)
-+        expect(bunCalls.some((url) => url.endsWith(`/opencode-ai/${InstallationChannel}`))).toBe(true)
-       }),
-     )
- 
-@@ -124,7 +125,7 @@
-       Effect.gen(function* () {
-         const result = yield* Installation.use.latest("pnpm")
-         expect(result).toBe("1.7.0")
--        expect(pnpmCalls).toContain(`https://registry.npmjs.org/opencode-ai/${InstallationChannel}`)
-+        expect(pnpmCalls.some((url) => url.endsWith(`/opencode-ai/${InstallationChannel}`))).toBe(true)
-       }),
-     )
- 
+@@ -117,7 +117,8 @@
+       testEffect(registry("1.19.2", calls)).effect(`reads ${method} versions from the opencode-ai npm package`, () =>
+         Effect.gen(function* () {
+           calls.length = 0
+           expect(yield* Installation.use.latest(method)).toBe("1.19.2")
+-          expect(calls[0]).toBe(npm)
++          // registry 可由用户配置；保留包名与 latest 路径约束，不固定主机名。
++          expect(calls[0]?.endsWith("/opencode-ai/latest")).toBe(true)
+           expect(calls.slice(1).every((url) => url.startsWith(choco))).toBe(true)
+         }),
 

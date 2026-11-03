@@ -482,13 +482,12 @@ diff --git a/packages/opencode/test/tool/external-directory.test.ts b/packages/o
 index d43accfb70..fcdca6754e 100644
 --- a/packages/opencode/test/tool/external-directory.test.ts
 +++ b/packages/opencode/test/tool/external-directory.test.ts
-@@ -7,7 +7,7 @@ import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
+@@ -7,6 +7,6 @@ import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
  import type { Tool } from "@/tool/tool"
  import { assertExternalDirectoryEffect } from "../../src/tool/external-directory"
  import { Filesystem } from "@/util/filesystem"
 -import { TestInstance, tmpdirScoped } from "../fixture/fixture"
 +import { TestInstance, provideInstance, tmpdirScoped } from "../fixture/fixture"
- import type { Permission } from "../../src/permission"
  import { SessionID, MessageID } from "../../src/session/schema"
  import { testEffect } from "../lib/effect"
 @@ -105,6 +105,29 @@ describe("tool.assertExternalDirectory", () => {

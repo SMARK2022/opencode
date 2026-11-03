@@ -19,7 +19,7 @@ index 33632c32878ffc8075038b62a143173af635e37a..9f099ec046c636b933b9bb8f1ca70009
 --- a/.github/actions/setup-bun/action.yml
 +++ b/.github/actions/setup-bun/action.yml
 @@ -28,13 +28,20 @@ runs:
-         bun-version-file: ${{ !steps.bun-url.outputs.url && 'package.json' || '' }}
+         bun-version: ${{ !steps.bun-url.outputs.url && steps.bun-url.outputs.version || '' }}
          bun-download-url: ${{ steps.bun-url.outputs.url }}
  
 +    # Windows 跳过 bun pm 缓存的恢复/保存：actions/cache 的 tar+zstd 在 NTFS 上解压

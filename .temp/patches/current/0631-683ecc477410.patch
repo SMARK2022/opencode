@@ -1168,7 +1168,7 @@ diff --git a/bun.lock b/bun.lock
 +++ b/bun.lock
 @@ -318,6 +318,7 @@
          "@ai-sdk/vercel": "2.0.39",
-         "@ai-sdk/xai": "3.0.102",
+         "@ai-sdk/xai": "3.0.139",
          "@aws-sdk/credential-providers": "3.1057.0",
 +        "@babel/core": "7.28.4",
          "@effect/opentelemetry": "catalog:",
@@ -1178,7 +1178,7 @@ diff --git a/packages/core/package.json b/packages/core/package.json
 --- a/packages/core/package.json
 +++ b/packages/core/package.json
 @@ -83,6 +83,7 @@
-     "@ai-sdk/xai": "3.0.102",
+     "@ai-sdk/xai": "3.0.139",
      "@aws-sdk/credential-providers": "3.1057.0",
 +    "@babel/core": "7.28.4",
      "@effect/opentelemetry": "catalog:",

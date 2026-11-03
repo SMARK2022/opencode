@@ -13,8 +13,8 @@ index 156904c77d..82a7b1b7fd 100644
    "name": "opencode-ide-bridge",
    "displayName": "OpenCode IDE Bridge",
    "description": "Local HTTP bridge extension for OpenCode IDE. Provides notebook operations (summary, source, run, edit, output, env), Jupyter kernel management, and workspace context sharing with the OpenCode CLI daemon.",
--  "version": "1.18.32",
-+  "version": "1.18.33",
+-  "version": "1.19.5",
++  "version": "1.19.6",
    "homepage": "https://github.com/anomalyco/opencode",
    "publisher": "SMARK2022",
    "repository": {
@@ -25,7 +25,7 @@ index 156904c77d..82a7b1b7fd 100644
 -    "vscode:prepublish": "bun run package",
 -    "vsix": "bun run package && npx @vscode/vsce package -o dist/SMARK2022.opencode-ide-bridge-1.14.31.vsix",
 +
-+    "vsix": "bun run package && npm exec --yes --package @vscode/vsce -- vsce package --no-dependencies -o dist/SMARK2022.opencode-ide-bridge-1.18.33.vsix",
++    "vsix": "bun run package && npm exec --yes --package @vscode/vsce -- vsce package --no-dependencies -o dist/SMARK2022.opencode-ide-bridge-1.19.6.vsix",
      "compile": "bun run check-types && bun run lint && node esbuild.js",
      "watch:esbuild": "node esbuild.js --watch",
      "watch:tsc": "tsc --noEmit --watch --project tsconfig.json",
@@ -38,7 +38,7 @@ index 97ee4319fc..ec40ab80e7 100644
  | `displayName` | `OpenCode IDE Bridge` |
  | `publisher` | `SMARK2022` |
 -| `version` | `1.14.31` |
-+| `version` | `1.17.21` |
++| `version` | `1.19.6` |
  | `engines.vscode` | `^1.94.0` |
  | `main` | `./dist/extension.js` |
  | `license` | `MIT` |
@@ -48,7 +48,7 @@ index 97ee4319fc..ec40ab80e7 100644
  
 +<!-- #110：Windows/Bun 下 vsce 嵌套 npm prepublish 会丢 PATH；package.json 已删除该 hook -->
 +<!-- #110：vsix 必须 npm exec + --no-dependencies + dist 输出 -->
-+<!-- #110：扩展版本与 CLI 1.17.21-smark 对齐 -->
++<!-- #110：扩展版本与 CLI 1.19.6-smark 对齐 -->
 +This project intentionally does not define `vscode:prepublish`. `vsce package` runs that hook through an internal `npm run vscode:prepublish` child process. In some Windows/Bun terminal environments that nested child process can lose `npm` from `PATH`, producing:
 +
 +```text
@@ -69,7 +69,7 @@ index 97ee4319fc..ec40ab80e7 100644
  ```powershell
  $env:PATH="C:\Users\Lenovo\.bun\bin;$env:PATH"
 -npx --yes --package @vscode/vsce -- vsce package -o "SMARK2022.opencode-ide-bridge-1.14.31.vsix"
-+npm exec --yes --package @vscode/vsce -- vsce package --no-dependencies -o "dist/SMARK2022.opencode-ide-bridge-1.18.33.vsix"
++npm exec --yes --package @vscode/vsce -- vsce package --no-dependencies -o "dist/SMARK2022.opencode-ide-bridge-1.19.6.vsix"
  ```
  
 -The `vscode:prepublish` script runs `bun run package` automatically before `vsce package`.
@@ -82,7 +82,7 @@ index 97ee4319fc..ec40ab80e7 100644
  
  ```
 -SMARK2022.opencode-ide-bridge-1.14.31.vsix
-+dist/SMARK2022.opencode-ide-bridge-1.18.33.vsix
++dist/SMARK2022.opencode-ide-bridge-1.19.6.vsix
  ├─ [Content_Types].xml
  ├─ extension.vsixmanifest
  └─ extension/
@@ -91,7 +91,7 @@ index 97ee4319fc..ec40ab80e7 100644
  
  ```powershell
 -code --install-extension .\SMARK2022.opencode-ide-bridge-1.14.31.vsix --force
-+code --install-extension .\dist/SMARK2022.opencode-ide-bridge-1.18.33.vsix --force
++code --install-extension .\dist/SMARK2022.opencode-ide-bridge-1.19.6.vsix --force
  ```
  
  ### From VS Code UI
@@ -100,7 +100,7 @@ index 97ee4319fc..ec40ab80e7 100644
  ```powershell
  npx ovsx create-namespace SMARK2022 -p <OPENVSX_TOKEN>
 -npx ovsx publish .\SMARK2022.opencode-ide-bridge-1.14.31.vsix -p <OPENVSX_TOKEN>
-+npx ovsx publish .\dist/SMARK2022.opencode-ide-bridge-1.18.33.vsix -p <OPENVSX_TOKEN>
++npx ovsx publish .\dist/SMARK2022.opencode-ide-bridge-1.19.6.vsix -p <OPENVSX_TOKEN>
  ```
  
  ## CLI Integration
@@ -113,7 +113,7 @@ index b70d729f92..a72120292d 100644
  
  ```powershell
 -code --install-extension .\dist\SMARK2022.opencode-ide-bridge-1.14.31.vsix --force
-+code --install-extension .\dist\SMARK2022.opencode-ide-bridge-1.18.33.vsix --force
++code --install-extension .\dist\SMARK2022.opencode-ide-bridge-1.19.6.vsix --force
  ```
  
  ## Development

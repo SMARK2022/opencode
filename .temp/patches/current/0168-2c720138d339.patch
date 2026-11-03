@@ -57,7 +57,7 @@ diff --git a/packages/opencode/src/provider/provider.ts b/packages/opencode/src/
  
  function wrapSSE(res: Response, ms: number, ctl: AbortController) {
    if (typeof ms !== "number" || ms <= 0) return res
-@@ -1913,6 +1942,13 @@ for (const [id, provider] of configProviders) {
+@@ -1913,6 +1942,12 @@ for (const [id, provider] of configProviders) {
              ...options["headers"],
              ...model.headers,
            }
@@ -65,16 +65,16 @@ diff --git a/packages/opencode/src/provider/provider.ts b/packages/opencode/src/
 +        // #168：model.headers 已并入 options 后再归一化，顺序：options→model→UA 策略
 +        const configuredHeaders = requestHeaders(options)
 +        if (Object.keys(configuredHeaders).length > 0) options["headers"] = configuredHeaders
-+        const configuredUserAgent = requestUserAgent(options)
 +        // #168：shortcut 不得进入 SDK constructor options
 +        delete options["header-ua"]
  
          const key = Hash.fast(
            JSON.stringify({
-@@ -1978,5 +2014,17 @@ for (const [id, provider] of configProviders) {
+@@ -120,5 +149,18 @@ function timeoutFetch(options: Record<string, any>) {
            const combined = signals.length === 0 ? null : signals.length === 1 ? signals[0] : AbortSignal.any(signals)
            if (combined) opts.signal = combined
  
++          const configuredUserAgent = requestUserAgent(options)
 +          // #168：仅当当前 UA 为空或仍以配置 UA 为前缀时回写，避免误伤无关 UA
 +          // #168：SDK 可能追加后缀（ai-sdk/...），startsWith 仍允许刷新为配置值
 +          if (configuredUserAgent) {
@@ -92,10 +92,9 @@ diff --git a/packages/opencode/src/provider/provider.ts b/packages/opencode/src/
 diff --git a/packages/opencode/src/session/llm/request.ts b/packages/opencode/src/session/llm/request.ts
 --- a/packages/opencode/src/session/llm/request.ts
 +++ b/packages/opencode/src/session/llm/request.ts
-@@ -7,8 +7,8 @@ import { Permission } from "@/permission"
+@@ -7,7 +7,7 @@ import { Permission } from "@/permission"
  import { ToolSelection } from "@/tool/selection"
  import type { Agent } from "@/agent/agent"
- import type { MessageV2 } from "../message-v2"
 -import type { Provider } from "@/provider/provider"
 +import { Provider } from "@/provider/provider"
  import { ProviderTransform } from "@/provider/transform"
@@ -162,7 +161,7 @@ diff --git a/packages/opencode/test/provider/provider.test.ts b/packages/opencod
 diff --git a/packages/opencode/test/session/llm.test.ts b/packages/opencode/test/session/llm.test.ts
 --- a/packages/opencode/test/session/llm.test.ts
 +++ b/packages/opencode/test/session/llm.test.ts
-@@ -753,5 +753,81 @@ function createEventResponse(chunks: unknown[], includeDone = false) {
+@@ -755,4 +755,80 @@ function createEventResponse(chunks: unknown[], includeDone = false) {
  describe("session.llm.stream", () => {
    const vivgridFixture = { providerID: "vivgrid", modelID: "gemini-3.1-pro-preview" }
    const opencodeFixture = { providerID: "opencode-test", modelID: vivgridFixture.modelID }
@@ -243,8 +242,6 @@ diff --git a/packages/opencode/test/session/llm.test.ts b/packages/opencode/test
 +    )
 +  }
 +
-   it.instance(
-     "sends temperature, tokens, and reasoning options for openai-compatible models",
 diff --git a/packages/core/src/v1/config/provider-options.ts b/packages/core/src/v1/config/provider-options.ts
 --- a/packages/core/src/v1/config/provider-options.ts
 +++ b/packages/core/src/v1/config/provider-options.ts

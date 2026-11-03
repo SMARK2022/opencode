@@ -1021,6 +1021,9 @@ diff --git a/packages/opencode/src/tool/write.ts b/packages/opencode/src/tool/wr
 diff --git a/packages/opencode/test/tool/apply_patch.test.ts b/packages/opencode/test/tool/apply_patch.test.ts
 --- a/packages/opencode/test/tool/apply_patch.test.ts
 +++ b/packages/opencode/test/tool/apply_patch.test.ts
+@@ -6,1 +6,1 @@
+-import { Cause, Effect, Exit, Schema } from "effect"
++import { Cause, Effect, Exit, Layer, Schema } from "effect"
 @@ -21,6 +21,25 @@ const it = testEffect(
    ),
  )
@@ -1675,3 +1678,17 @@ diff --git a/packages/core/test/file-mutation.test.ts b/packages/core/test/file-
 +  )
 +
    it.live("rejects create when a prospective target appears after resolution", () =>
+
+diff --git a/packages/core/test/tool-write.test.ts b/packages/core/test/tool-write.test.ts
+--- a/packages/core/test/tool-write.test.ts
++++ b/packages/core/test/tool-write.test.ts
+@@ -279,2 +279,2 @@
+-                // 本补丁只归一 Write 展示；实际请求仍可把 CRLF/CR 覆写为 LF。
++                // Write展示保持LF，但本项起覆写须保留目标物理EOL与唯一BOM。
+                 for (const ending of ["\n", "\r\n", "\r"]) {
+@@ -288,4 +288,4 @@
+                   expect(output.diff).not.toContain("+two")
+                   expect(output.diff).not.toContain("\uFEFF")
+-                  expect(yield* Effect.promise(() => fs.readFile(preserved, "utf8"))).toBe("\uFEFFone\ntwo\n")
++                  expect(yield* Effect.promise(() => fs.readFile(preserved, "utf8"))).toBe(`\uFEFFone${ending}two${ending}`)
+                 }

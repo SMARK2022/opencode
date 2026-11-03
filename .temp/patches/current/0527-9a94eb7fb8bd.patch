@@ -7,8 +7,8 @@ MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
-源提交将 CLI 版本推进至 1.15.12-smark；目标 package/lock 已为 1.18.44-smark，保留该发布身份并同步滞后的推荐文档。
-扩展 manifest 独立版本保持 1.18.41；不回退迁移基线、native V2 术语或重建目标已移除的旧版本徽章。
+源提交将 CLI 版本推进至 1.15.12-smark；目标 package/lock 已为 1.19.17-smark，保留该发布身份并同步滞后的推荐文档。
+扩展 manifest 独立版本保持 1.19.14；不回退迁移基线、native V2 术语或重建目标已移除的旧版本徽章。
 
 
 diff --git a/CONTEXT.md b/CONTEXT.md
@@ -16,8 +16,8 @@ index 1be32a7f3..e25c04229 100644
 --- a/CONTEXT.md
 +++ b/CONTEXT.md
 @@ -231,1 +231,1 @@
--The domain language of opencode — an open-source AI coding agent. This SMARK glossary supplements the upstream Session Runtime definitions above on the v1.18.32 migration baseline. V1-specific terms describe the retained compatibility path; canonical runtime owners span Schema, Core, Protocol, Server and Client. Use these terms in issues, refactor proposals, hypotheses and test names without replacing the native V2 vocabulary above. Current SMARK CLI version: `1.18.42-smark`.
-+The domain language of opencode — an open-source AI coding agent. This SMARK glossary supplements the upstream Session Runtime definitions above on the v1.18.32 migration baseline. V1-specific terms describe the retained compatibility path; canonical runtime owners span Schema, Core, Protocol, Server and Client. Use these terms in issues, refactor proposals, hypotheses and test names without replacing the native V2 vocabulary above. Current SMARK CLI version: `1.18.44-smark`.
+-The domain language of opencode — an open-source AI coding agent. This SMARK glossary supplements the upstream Session Runtime definitions above on the v1.18.32 migration baseline. V1-specific terms describe the retained compatibility path; canonical runtime owners span Schema, Core, Protocol, Server and Client. Use these terms in issues, refactor proposals, hypotheses and test names without replacing the native V2 vocabulary above. Current SMARK CLI version: `1.19.15-smark`.
++The domain language of opencode — an open-source AI coding agent. This SMARK glossary supplements the upstream Session Runtime definitions above on the v1.18.32 migration baseline. V1-specific terms describe the retained compatibility path; canonical runtime owners span Schema, Core, Protocol, Server and Client. Use these terms in issues, refactor proposals, hypotheses and test names without replacing the native V2 vocabulary above. Current SMARK CLI version: `1.19.17-smark`.
 
 diff --git a/docs/VSIX-Packaging.md b/docs/VSIX-Packaging.md
 index 96cf2c78a..8bd239ad1 100644
@@ -26,9 +26,9 @@ index 96cf2c78a..8bd239ad1 100644
 @@ -11,7 +11,7 @@ This document describes how to build, inspect, install, and publish the SMARK Op
  | Source repository | `https://github.com/SMARK2022/opencode` |
  | Source branch | `dev-smark` |
- | Repository extension version | `1.18.41` |
--| Recommended CLI | `opencode 1.18.42-smark` |
-+| Recommended CLI | `opencode 1.18.44-smark` |
+ | Repository extension version | `1.19.14` |
+-| Recommended CLI | `opencode 1.19.15-smark` |
++| Recommended CLI | `opencode 1.19.17-smark` |
  | Default version source | `sdks/vscode/package.json` |
  | Local VSIX name | `dist/SMARK2022.opencode-ide-bridge-<version>.vsix` |
  | CI/GitHub Release VSIX name | `dist/opencode-vscode-<version>.vsix` |
@@ -36,8 +36,8 @@ index 96cf2c78a..8bd239ad1 100644
  
  ## Versioning
  
--Use `sdks/vscode/package.json` as the canonical version source for local packaging and push-triggered builds. The repository extension version is ordinary semver (`1.18.41`) so Marketplace tooling accepts it; the recommended CLI is `1.18.42-smark`, but the two packages remain independently versioned.
-+Use `sdks/vscode/package.json` as the canonical version source for local packaging and push-triggered builds. The repository extension version is ordinary semver (`1.18.41`) so Marketplace tooling accepts it; the recommended CLI is `1.18.44-smark`, but the two packages remain independently versioned.
+-Use `sdks/vscode/package.json` as the canonical version source for local packaging and push-triggered builds. The repository extension version is ordinary semver (`1.19.14`) so Marketplace tooling accepts it; the recommended CLI is `1.19.15-smark`, but the two packages remain independently versioned.
++Use `sdks/vscode/package.json` as the canonical version source for local packaging and push-triggered builds. The repository extension version is ordinary semver (`1.19.14`) so Marketplace tooling accepts it; the recommended CLI is `1.19.17-smark`, but the two packages remain independently versioned.
  
  Pushes to `dev-smark` that change `sdks/vscode/**` run `.github/workflows/build-vsix.yml`. By default it reads the manifest version, writes `dist/opencode-vscode-<version>.vsix`, and creates or updates the `vscode-v<version>` GitHub prerelease. A manual `workflow_dispatch.version` leaves the repository manifest and README unchanged but overrides the manifest version inside the packaged VSIX, so use it only for an intentional temporary rebuild and expect the packaged README version statement to remain unchanged. The workflow does not publish Marketplace or Open VSX.
  
@@ -49,9 +49,9 @@ index f76178bcb..eb576786f 100644
 @@ -7,7 +7,7 @@ Local VS Code extension for the SMARK OpenCode fork. It connects the OpenCode CL
  | Extension ID | `SMARK2022.opencode-ide-bridge` |
  | Publisher | `SMARK2022` |
- | Repository extension version | `1.18.41` |
--| Recommended CLI | `opencode 1.18.42-smark` |
-+| Recommended CLI | `opencode 1.18.44-smark` |
+ | Repository extension version | `1.19.14` |
+-| Recommended CLI | `opencode 1.19.15-smark` |
++| Recommended CLI | `opencode 1.19.17-smark` |
  | Source | https://github.com/SMARK2022/opencode/tree/dev-smark/sdks/vscode |
  
  ## What It Adds
@@ -60,5 +60,5 @@ diff --git a/README.en.md b/README.en.md
 --- a/README.en.md
 +++ b/README.en.md
 @@ -105,1 +105,1 @@
--使用 Notebook 工具前，请安装 VS Code 扩展 [SMARK2022.opencode-ide-bridge](https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge)。仓库内扩展版本为 `1.18.40`，推荐配合 SMARK CLI `1.18.42-smark`；两者独立版本化，Marketplace 可能仍显示旧版 `1.18.39` 直至新构建发布。该扩展在 VS Code 与 OpenCode CLI 之间建立本地鉴权 bridge；未安装或未连接时，CLI 无法可靠读取、编辑或执行 notebook 单元格。
-+使用 Notebook 工具前，请安装 VS Code 扩展 [SMARK2022.opencode-ide-bridge](https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge)。仓库内扩展版本为 `1.18.40`，推荐配合 SMARK CLI `1.18.44-smark`；两者独立版本化，Marketplace 可能仍显示旧版 `1.18.39` 直至新构建发布。该扩展在 VS Code 与 OpenCode CLI 之间建立本地鉴权 bridge；未安装或未连接时，CLI 无法可靠读取、编辑或执行 notebook 单元格。
+-使用 Notebook 工具前，请安装 VS Code 扩展 [SMARK2022.opencode-ide-bridge](https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge)。仓库内扩展版本为 `1.19.13`，推荐配合 SMARK CLI `1.19.15-smark`；两者独立版本化，Marketplace 可能仍显示旧版 `1.19.12` 直至新构建发布。该扩展在 VS Code 与 OpenCode CLI 之间建立本地鉴权 bridge；未安装或未连接时，CLI 无法可靠读取、编辑或执行 notebook 单元格。
++使用 Notebook 工具前，请安装 VS Code 扩展 [SMARK2022.opencode-ide-bridge](https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge)。仓库内扩展版本为 `1.19.13`，推荐配合 SMARK CLI `1.19.17-smark`；两者独立版本化，Marketplace 可能仍显示旧版 `1.19.12` 直至新构建发布。该扩展在 VS Code 与 OpenCode CLI 之间建立本地鉴权 bridge；未安装或未连接时，CLI 无法可靠读取、编辑或执行 notebook 单元格。

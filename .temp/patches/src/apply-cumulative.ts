@@ -229,9 +229,9 @@ type MaterializedState = {
 const targetRepo = resolve(import.meta.dir, "../../..")
 const sourceRepo = resolve(targetRepo, "../..")
 const patchRoot = resolve(targetRepo, ".temp/patches")
-const reportsDir = resolve(patchRoot, "reports/v1.18.32")
+const reportsDir = resolve(patchRoot, "reports/v1.19.5")
 // 新基线独立命名空间，避免清理旧版状态或覆盖旧报告；物化机制保持原样。
-const statesDir = resolve(patchRoot, "states/v1.18.32")
+const statesDir = resolve(patchRoot, "states/v1.19.5")
 // source proof 放在已忽略的状态区，缓存写入不能改变目标工作树指纹。
 const sourceProofPath = resolve(statesDir, ".source-proof.json")
 // testWorkspaceRoot 保存唯一可安装的执行环境，不污染可审计 materialized state。

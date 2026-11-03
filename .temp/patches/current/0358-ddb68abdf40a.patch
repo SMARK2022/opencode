@@ -36,15 +36,13 @@ diff --git a/packages/opencode/src/provider/provider.ts b/packages/opencode/src/
 +// 默认 10 分钟;其触发的 AbortSignal.timeout 错误在 message-v2 transportError 中归类为可重试。
 +const DEFAULT_TIMEOUT_MS = 600_000
  // #168：归一化 provider 请求头；剥离非 string / 原 UA 后再写入权威 User-Agent
-@@ -2109,5 +2111,7 @@ for (const [id, provider] of configProviders) {
- 
+@@ -213,3 +215,5 @@ function timeoutFetch(options: Record<string, any>, model: { providerID: string; id: string }, bridge: EffectBridge.Shape) {
         const customFetch = options["fetch"]
 -        const chunkTimeout = options["chunkTimeout"] ?? 300_000
 +        // [local-smark] chunk 空闲超时:两个 SSE body 字节之间无数据达此时长才中止(心跳/注释字节会重置计时器)。
 +        // 上游默认 300s 收紧为 180s——挂起连接更早暴露;触发的 SSE_READ_TIMEOUT 同样可重试,显式正值/false 仍可覆盖。
 +        const chunkTimeout = options["chunkTimeout"] ?? 180_000
         const headerTimeout = options["headerTimeout"] ?? 300_000
-        delete options["chunkTimeout"]
 diff --git a/packages/opencode/src/session/llm/native-runtime.ts b/packages/opencode/src/session/llm/native-runtime.ts
 --- a/packages/opencode/src/session/llm/native-runtime.ts
 +++ b/packages/opencode/src/session/llm/native-runtime.ts

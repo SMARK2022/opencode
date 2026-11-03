@@ -14,7 +14,7 @@ Content-Transfer-Encoding: 8bit
 diff --git a/packages/core/src/session/listing.ts b/packages/core/src/session/listing.ts
 --- a/packages/core/src/session/listing.ts
 +++ b/packages/core/src/session/listing.ts
-@@ -19,10 +19,22 @@
+@@ -19,10 +19,24 @@
  function relatedDirectory(directory: string) {
 -  const column = sql<string>`replace(${SessionTable.directory}, ${"\\"}, "/")`
 -  const normalized = path.resolve(directory).replaceAll("\\", "/").replace(/\/+$/, "")
@@ -40,11 +40,13 @@ diff --git a/packages/core/src/session/listing.ts b/packages/core/src/session/li
  // 两代共用相关命名空间的唯一 SQL；调用者决定是否请求此语义，精确目录查询不隐式扩大。
 -export function related(input: { projectID: ProjectV2.ID; worktree: string; path: string; directory?: string }) {
 +export function related(input: { projectID: ProjectV2.ID; worktree: string; path: string; directory?: string; home?: string }) {
++  // 隔离配置HOME不改变历史会话身份；调用方未启用home语义时仍保留原作用域。
++  const home = input.home === undefined ? undefined : process.env.OPENCODE_SESSION_HOME ?? input.home
 +  // home只移除路径边界；workspace、搜索、游标和数量限制仍由原查询保留。
-+  if (input.home !== undefined && input.directory && directoryValue(input.directory) === directoryValue(input.home)) return undefined
-@@ -42,3 +54,4 @@
++  if (home !== undefined && input.directory && directoryValue(input.directory) === directoryValue(home)) return undefined
+@@ -42,3 +56,4 @@
      ...(sameLocation && input.directory ? [relatedDirectory(input.directory)] : []),
-+    ...(input.home !== undefined && input.directory !== undefined ? [eq(directoryColumn(), directoryValue(input.home))] : []),
++    ...(home !== undefined && input.directory !== undefined ? [eq(directoryColumn(), directoryValue(home))] : []),
    ].filter((branch): branch is SQL => branch !== undefined)
    // 第一分支始终含 project_id；join 仅去掉 Drizzle 的可选条件类型，不引入第二次取数。
 diff --git a/packages/opencode/src/session/session.ts b/packages/opencode/src/session/session.ts
@@ -82,7 +84,7 @@ diff --git a/packages/core/test/session-create.test.ts b/packages/core/test/sess
 +      { title: "unrelated-child", project_id: otherID, directory: path.join(foreign, "child"), path: "child" },
        { title: "other-workspace", project_id: projectID, directory: child, path: "packages/a" },
      ]
-@@ -101,3 +102,27 @@
+@@ -101,3 +102,46 @@
      expect((yield* session.list({ ...query, limit: 2, anchor: { id: back.id, time: DateTime.toEpochMillis(back.time.created), direction: "previous" } })).map(item => item.id)).toEqual(first.map(item => item.id))
 +
 +    // 同一真实查询覆盖home全局视图，环境只在当前测试作用域内切换并恢复。
@@ -96,6 +98,25 @@ diff --git a/packages/core/test/session-create.test.ts b/packages/core/test/sess
 +    expect(home.map(item => item.title)).toEqual(["root", "parent", "current", "deeper", "sibling", "global-parent", "legacy", "cross-owner-parent", "global-alias", "unrelated", "unrelated-child"])
 +    expect((yield* session.list({ ...query, search: "unrelated", limit: 1 })).map(item => item.title)).toEqual(["unrelated"])
 +    expect((yield* session.list({ directory: AbsolutePath.make(child), workspaceID, order: "asc" })).map(item => item.title)).toEqual(["current", "legacy"])
++    // 配置HOME隔离时，会话仍按源用户目录识别，过滤继续由同一真实SQL执行。
++    const previousSessionHome = process.env.OPENCODE_SESSION_HOME
++    yield* Effect.addFinalizer(() => Effect.sync(() => {
++      if (previousSessionHome === undefined) delete process.env.OPENCODE_SESSION_HOME
++      if (previousSessionHome !== undefined) process.env.OPENCODE_SESSION_HOME = previousSessionHome
++    }))
++    process.env.OPENCODE_SESSION_HOME = child
++    process.env.OPENCODE_TEST_HOME = foreign
++    expect((yield* session.list(query)).map(item => item.title)).toEqual(home.map(item => item.title))
++    expect((yield* session.list({ ...query, search: "unrelated", limit: 1 })).map(item => item.title)).toEqual(["unrelated"])
++    expect((yield* session.list({ directory: AbsolutePath.make(child), workspaceID, order: "asc" })).map(item => item.title)).toEqual(["current", "legacy"])
++    // 非home视图只并入源home本身，不连带展开它的子目录或整个其他项目。
++    process.env.OPENCODE_SESSION_HOME = foreign
++    const isolated = (yield* session.list(query)).map(item => item.title)
++    expect(isolated).toContain("unrelated")
++    expect(isolated).not.toContain("unrelated-child")
++    expect((yield* session.list({ project: projectID, workspaceID })).map(item => item.title)).not.toContain("unrelated")
++    if (previousSessionHome === undefined) delete process.env.OPENCODE_SESSION_HOME
++    if (previousSessionHome !== undefined) process.env.OPENCODE_SESSION_HOME = previousSessionHome
 +    // 非home查询只并入home本身，不能把其子目录或其他兄弟目录一并展开。
 +    process.env.OPENCODE_TEST_HOME = foreign
 +    const outside = (yield* session.list(query)).map(item => item.title)

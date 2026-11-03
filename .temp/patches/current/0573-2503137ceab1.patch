@@ -11,7 +11,7 @@ Content-Transfer-Encoding: 8bit
 
 保持 VS Code 扩展独立版本源不变，仅更新其文档中的推荐 CLI，避免扩展版本随 TUI 发布误升。
 
-适配说明：source 的27文件版本同步映射到目标现有1.18.44-smark发布合同；0527已对齐推荐CLI，manifest/锁文件保持一致，VS Code扩展独立版本化。本补丁在现有CONTEXT简介后明确版本权威，不覆盖原生V2术语、不回写source的1.15.13，也不把v1.18.32迁移基线当发布版本。
+适配说明：source 的27文件版本同步映射到目标现有1.19.17-smark发布合同；0527已对齐推荐CLI，manifest/锁文件保持一致，VS Code扩展独立版本化。本补丁在现有CONTEXT简介后明确版本权威，不覆盖原生V2术语、不回写source的1.15.13，也不把v1.18.32迁移基线当发布版本。
 
 diff --git a/CONTEXT.md b/CONTEXT.md
 --- a/CONTEXT.md
@@ -19,7 +19,7 @@ diff --git a/CONTEXT.md b/CONTEXT.md
 @@ -229,5 +229,7 @@
  # opencode (SMARK fork)
  
- The domain language of opencode — an open-source AI coding agent. This SMARK glossary supplements the upstream Session Runtime definitions above on the v1.18.32 migration baseline. V1-specific terms describe the retained compatibility path; canonical runtime owners span Schema, Core, Protocol, Server and Client. Use these terms in issues, refactor proposals, hypotheses and test names without replacing the native V2 vocabulary above. Current SMARK CLI version: `1.18.44-smark`.
+ The domain language of opencode — an open-source AI coding agent. This SMARK glossary supplements the upstream Session Runtime definitions above on the v1.18.32 migration baseline. V1-specific terms describe the retained compatibility path; canonical runtime owners span Schema, Core, Protocol, Server and Client. Use these terms in issues, refactor proposals, hypotheses and test names without replacing the native V2 vocabulary above. Current SMARK CLI version: `1.19.17-smark`.
  
 +CLI 发布版本以 `packages/opencode/package.json` 与 `bun.lock` 为准；`v1.18.32` 仅表示迁移基线，VS Code 扩展保持独立版本。
 +

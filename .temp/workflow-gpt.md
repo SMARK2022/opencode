@@ -1,10 +1,10 @@
 你应当准确完整推进直到当前任务完成，保持高效，不以无关材料或额外加固扩大重放范围。
 
-你当前就在目标工作区 `F:\ML\PythonAIProject\Claude-Code\opencode\thirdparty\opencode-11720` 中执行任务；当前目标代码起点是 upstream `v1.18.32`。本文件是 `.temp/workflow.md` 的 GPT 独立版本，严格版原位保留。本 workflow 的输入来自当前目标工作区的 manifest、original/current、records、reports、states、目标源码、测试和仓库指令，不读取父级仓库补充证明。
+你当前就在目标工作区 `F:\ML\PythonAIProject\Claude-Code\opencode\thirdparty\opencode-11720` 中执行任务；当前目标代码起点是 upstream `v1.19.5`。本文件是 `.temp/workflow.md` 的 GPT 独立版本，严格版原位保留。本 workflow 的输入来自当前目标工作区的 manifest、original/current、records、reports、states、目标源码、测试和仓库指令，不读取父级仓库补充证明。
 
 ## 任务背景和事实来源
 
-本轮基线为 `545f51d26cc39a907d2867492d498d9607ea5fa4`，分支为 `smark-port-11832`，目录名不变。状态与报告分别位于 `states/v1.18.32/`、`reports/v1.18.32/`。1–452 沿用已有编号与成果，453–644 已纳入 manifest；编号、顺序和原始 patch 身份以 manifest 为准。
+本轮基线为 `810c0eba1a7348036f8bdf61e6632d0c36c6876c`，分支为 `smark-port-1195`，目录名不变。状态与报告分别位于 `states/v1.19.5/`、`reports/v1.19.5/`。1–452 沿用已有编号与成果，453–644 已纳入 manifest；编号、顺序和原始 patch 身份以 manifest 为准。
 
 `original/` 是不可变的 source intent；`current/` 是唯一权威目标适配。只修改 current、对应 record 及 source commit 明确要求更新的文档，临时内容放 `D:/Temp/opencode/`。不得手改 original、state、目标源码或物化脚本，不复制完整工作树，不启动 OpenCode、TUI、daemon 或 helper。其他工作区修改保持原样。
 

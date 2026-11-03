@@ -1974,7 +1974,7 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
 +  const disabled = createMemo(() => permissions().length > 0 || questions().length > 0 || contextVisible())
  
    const pending = createMemo(() => {
-@@ -609,6 +614,18 @@
+@@ -634,6 +639,18 @@
        },
      },
      {
@@ -1990,8 +1990,8 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
 +      },
 +    },
 +    {
-       title: "Unshare session",
-       value: "session.unshare",
+       title: sidebarVisible() ? "Hide sidebar" : "Show sidebar",
+       value: "session.sidebar.toggle",
        category: "Session",
 @@ -1323,6 +1340,10 @@
                      directory={sync.session.get(questions()[0].sessionID)?.directory}
@@ -2007,10 +2007,9 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
 diff --git a/packages/tui/package.json b/packages/tui/package.json
 --- a/packages/tui/package.json
 +++ b/packages/tui/package.json
-@@ -60,6 +60,7 @@
+@@ -60,5 +60,6 @@
      "fuzzysort": "catalog:",
 +    "gray-matter": "4.0.3",
-     "open": "10.1.2",
      "opentui-spinner": "catalog:",
      "remeda": "catalog:",
      "strip-ansi": "7.1.2",
@@ -2091,11 +2090,10 @@ new file mode 100644
 diff --git a/bun.lock b/bun.lock
 --- a/bun.lock
 +++ b/bun.lock
-@@ -954,6 +954,7 @@
+@@ -954,5 +954,6 @@
          "clipboardy": "4.0.0",
          "diff": "catalog:",
          "effect": "catalog:",
          "fuzzysort": "catalog:",
 +        "gray-matter": "4.0.3",
-         "open": "10.1.2",
          "opentui-spinner": "catalog:",

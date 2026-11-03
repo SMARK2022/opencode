@@ -108,7 +108,10 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
 @@ -1964,1 +1966,1 @@
 -function ReasoningBody(props: { id: string; part: () => ReasoningPart; separator: boolean; expanded: boolean; width: number; syntaxStyle: ReturnType<typeof generateSubtleSyntax>; conceal: boolean }) {
 +function ReasoningBody(props: { id: string; part: () => ReasoningPart; separator: boolean; expanded: boolean; width: number; syntaxStyle: ReturnType<typeof generateSubtleSyntax>; conceal: boolean; onContent: (content: string | undefined) => void }) {
-@@ -1970,1 +1972,3 @@
+@@ -1967,4 +1969,6 @@
+   const content = createMemo(() => {
+     const text = normalizeReasoning(props.part().text)
+     return props.separator ? REASONING_SEPARATOR + text : text
    })
 +  // conceal改变会立即使旧可见文本失效，普通delta则保留已知文本直到新generation回报。
 +  createEffect(on(() => props.conceal, () => props.onContent(undefined)))

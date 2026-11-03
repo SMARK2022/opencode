@@ -23,15 +23,14 @@ new file mode 100644
 diff --git a/packages/opencode/src/session/overflow.ts b/packages/opencode/src/session/overflow.ts
 --- a/packages/opencode/src/session/overflow.ts
 +++ b/packages/opencode/src/session/overflow.ts
-@@ -2,6 +2,7 @@
+@@ -1,5 +1,6 @@
  import { ConfigV1 } from "@opencode-ai/core/v1/config/config"
  import { SessionV1 } from "@opencode-ai/core/v1/session"
 +import { SessionOverflowV1 } from "@opencode-ai/core/v1/session/overflow"
  import type { Provider } from "@/provider/provider"
  import { ProviderTransform } from "@/provider/transform"
- import type { MessageV2 } from "./message-v2"
  
-@@ -8,13 +9,9 @@
+@@ -6,13 +7,9 @@
 -const COMPACTION_BUFFER = 20_000
 -
  export function usable(input: { cfg: ConfigV1.Info; model: Provider.Model; outputTokenMax?: number }) {

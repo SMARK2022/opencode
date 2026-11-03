@@ -9,17 +9,19 @@ MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
-适配说明：owner 迁移 fork cmd/tui routes/session → 目标 packages/tui/src/routes/session/index.tsx（锚点 :1082 区域，context 与 fork 逐字一致）。
+适配说明：v1.19.5 已移除会话分享命令，source 的取消推荐意图由上游完整承载；不恢复停用产品能力。沿现有 Session 源码合同测试增加断言，确认实际命令表仍存在且没有 session.share 注册。
 
-diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes/session/index.tsx
---- a/packages/tui/src/routes/session/index.tsx
-+++ b/packages/tui/src/routes/session/index.tsx
-@@ -1080,7 +1080,7 @@ export function Session() {
-     {
-       title: session()?.share?.url ? "Copy share link" : "Share session",
-       value: "session.share",
--      suggested: route.type === "session",
-+      // [0630] 移除 suggested 推荐标记：会话分享命令高频误触的来源，降为普通命令
-       category: "Session",
-       enabled: sync.data.config.share !== "disabled",
-       slash: {
+diff --git a/packages/tui/test/routes/session/session-exit-lazy.test.tsx b/packages/tui/test/routes/session/session-exit-lazy.test.tsx
+--- a/packages/tui/test/routes/session/session-exit-lazy.test.tsx
++++ b/packages/tui/test/routes/session/session-exit-lazy.test.tsx
+@@ -22,3 +22,10 @@
+   const epilogue = await Bun.file(path.resolve(import.meta.dir, "../../../src/context/epilogue.tsx")).text()
+   expect(epilogue).toMatch(/set\(value\?: string \| \(\(\) => string \| undefined\)\): void/)
+ })
++
++test("session commands do not recommend retired sharing", async () => {
++  const source = await Bun.file(path.resolve(import.meta.dir, "../../../src/routes/session/index.tsx")).text()
++  // 上游已移除分享命令；先确认命令表有效，再防止重放恢复该误触入口。
++  expect(source).toContain('value: "session.rename"')
++  expect(source).not.toMatch(/value:\s*["']session\.share["']/)
++})

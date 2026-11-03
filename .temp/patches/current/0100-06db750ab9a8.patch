@@ -9,20 +9,15 @@ diff --git a/.github/actions/setup-bun/action.yml b/.github/actions/setup-bun/ac
 index 9d29724d86..243d9c5ccd 100644
 --- a/.github/actions/setup-bun/action.yml
 +++ b/.github/actions/setup-bun/action.yml
-@@ -58,11 +58,8 @@ runs:
-         # Workaround for patched peer variants
-         # e.g. ./patches/ for standard-openapi
-         # https://github.com/oven-sh/bun/issues/28147
--        if [ "$RUNNER_OS" = "Windows" ]; then
--          bun install --linker hoisted ${{ inputs.install-flags }}
--        else
--          bun install ${{ inputs.install-flags }}
--        fi
-+        # 统一 hoisted linker：全平台避免 patched peer 冲突
-+        bun install --linker hoisted ${{ inputs.install-flags }}
+@@ -58,6 +58,7 @@ runs:
+     - name: Install dependencies
+-      run: bun install ${{ inputs.install-flags }}
++      # 统一 hoisted linker：全平台避免 patched peer 冲突
++      run: bun install --linker hoisted ${{ inputs.install-flags }}
        shell: bash
  
      - name: Save Bun dependencies
+       if: steps.bun-cache.outputs.cache-hit != 'true' && github.event_name != 'pull_request' && github.event_name != 'pull_request_target'
 diff --git a/.github/workflows/build-opencode.yml b/.github/workflows/build-opencode.yml
 index 939c7d12dc..783b3eddb0 100644
 --- a/.github/workflows/build-opencode.yml

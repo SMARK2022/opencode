@@ -29,10 +29,6 @@ diff --git a/.github/workflows/deploy.yml b/archived/github-workflows/deploy.yml
 similarity index 100%
 rename from .github/workflows/deploy.yml
 rename to archived/github-workflows/deploy.yml
-diff --git a/.github/workflows/docs-locale-sync.yml b/archived/github-workflows/docs-locale-sync.yml
-similarity index 100%
-rename from .github/workflows/docs-locale-sync.yml
-rename to archived/github-workflows/docs-locale-sync.yml
 diff --git a/.github/workflows/docs-update.yml b/archived/github-workflows/docs-update.yml
 similarity index 100%
 rename from .github/workflows/docs-update.yml
@@ -41,18 +37,14 @@ diff --git a/.github/workflows/duplicate-issues.yml b/archived/github-workflows/
 similarity index 100%
 rename from .github/workflows/duplicate-issues.yml
 rename to archived/github-workflows/duplicate-issues.yml
-diff --git a/.github/workflows/generate.yml b/archived/github-workflows/generate.yml
-similarity index 100%
-rename from .github/workflows/generate.yml
-rename to archived/github-workflows/generate.yml
 diff --git a/.github/workflows/nix-eval.yml b/archived/github-workflows/nix-eval.yml
 similarity index 100%
 rename from .github/workflows/nix-eval.yml
 rename to archived/github-workflows/nix-eval.yml
-diff --git a/.github/workflows/nix-hashes.yml b/archived/github-workflows/nix-hashes.yml
+diff --git a/.github/workflows/bot-nix-hashes.yml b/archived/github-workflows/bot-nix-hashes.yml
 similarity index 100%
-rename from .github/workflows/nix-hashes.yml
-rename to archived/github-workflows/nix-hashes.yml
+rename from .github/workflows/bot-nix-hashes.yml
+rename to archived/github-workflows/bot-nix-hashes.yml
 diff --git a/.github/workflows/notify-discord.yml b/archived/github-workflows/notify-discord.yml
 similarity index 100%
 rename from .github/workflows/notify-discord.yml

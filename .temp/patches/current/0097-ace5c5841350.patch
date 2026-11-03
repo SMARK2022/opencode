@@ -147,7 +147,7 @@ index 4c3c000c9b..156904c77d 100644
 -  "description": "VS Code bridge for OpenCode IDE integration, notebook tools, and workspace context.",
 +  "displayName": "OpenCode IDE Bridge",
 +  "description": "Local HTTP bridge extension for OpenCode IDE. Provides notebook operations (summary, source, run, edit, output, env), Jupyter kernel management, and workspace context sharing with the OpenCode CLI daemon.",
-   "version": "1.18.32",
+   "version": "1.19.5",
 +  "homepage": "https://github.com/anomalyco/opencode",
    "publisher": "SMARK2022",
    "repository": {

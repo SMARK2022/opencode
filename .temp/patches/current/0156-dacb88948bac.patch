@@ -747,7 +747,7 @@ index 1111111111..2222222222 100755
                  exit 1
              fi
              ;;
-@@ -59,38 +121,70 @@
+@@ -59,50 +121,82 @@
              shift
              ;;
          *)
@@ -757,6 +757,18 @@ index 1111111111..2222222222 100755
              ;;
      esac
  done
+ 
+ requested_version="${requested_version#v}"
+ 
+ # This installer only installs OpenCode 1. OpenCode 1 clients run it with VERSION set when upgrading,
+ # so refusing 2.x also keeps older clients from replacing themselves with OpenCode 2 by accident.
+ if [[ "$requested_version" =~ ^([0-9]+)\. ]] && [ "${BASH_REMATCH[1]}" -ge 2 ]; then
+     echo -e "${RED}Error: OpenCode ${requested_version} is not an OpenCode 1 release, so this installer can't install it.${NC}"
+     echo -e "${MUTED}To install OpenCode 2, run: ${NC}curl -fsSL https://opencode.ai/v2/install | bash"
+     echo -e "${MUTED}To upgrade an existing OpenCode 1 install, run: ${NC}opencode upgrade --major"
+     echo -e "${MUTED}Docs: https://opencode.ai/v2/docs${NC}"
+     exit 1
+ fi
  
 -INSTALL_DIR=$HOME/.opencode/bin
 +# #156：安装目录 OPENCODE_INSTALL_DIR > XDG_BIN_DIR > 默认
@@ -829,7 +841,7 @@ index 1111111111..2222222222 100755
  
      if [ "$os" = "darwin" ] && [ "$arch" = "x64" ]; then
        rosetta_flag=$(sysctl -n sysctl.proc_translated 2>/dev/null || echo 0)
-@@ -104,131 +198,117 @@
+@@ -116,143 +210,117 @@
        linux-x64|linux-arm64|darwin-x64|darwin-arm64|windows-x64)
          ;;
        *)
@@ -908,9 +920,8 @@ index 1111111111..2222222222 100755
 -            echo -e "${RED}Error: 'unzip' is required but not installed.${NC}"
 +    if [ -z "$requested_version" ]; then
 +        # #156：release 下载 URL 与 tag/version 对齐
-+        base_url="https://github.com/${REPO}/releases/latest/download"
-+        # #156：latest 经 GitHub API 解析 tag，失败 fail-closed
-+        specific_version=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" | sed -n 's/.*"tag_name": *"v\{0,1\}\([^"]*\)".*/\1/p' | head -n 1)
++        # 最新发布可能为2.x；同一仓库只选1.x，并让版本与下载资产固定到同一tag。
++        specific_version=$(curl -fsSL --max-time 30 "https://api.github.com/repos/${REPO}/releases?per_page=100" | sed -n 's/.*"tag_name": *"v\{0,1\}\(1\.[0-9][0-9]*\.[0-9][0-9]*[^"]*\)".*/\1/p' | sed -n '1p')
 +        if [ -z "$specific_version" ]; then
 +            print_message error "Failed to fetch latest version information from ${REPO}"
              exit 1
@@ -918,11 +929,25 @@ index 1111111111..2222222222 100755
 -    fi
 -
 -    if [ -z "$requested_version" ]; then
--        url="https://github.com/anomalyco/opencode/releases/latest/download/$filename"
--        specific_version=$(curl -s https://api.github.com/repos/anomalyco/opencode/releases/latest | sed -n 's/.*"tag_name": *"v\([^"]*\)".*/\1/p')
+-        # The opencode-ai npm package only contains OpenCode 1 (OpenCode 2 ships as @opencode/cli). npm is
+-        # published before the GitHub release, so fall back to the newest v1 entry in GitHub's release list
+-        # until its assets exist. GitHub's Latest release may be OpenCode 2, so it's never used.
+-        specific_version=$(curl -fsSL --max-time 10 "https://registry.npmjs.org/opencode-ai/latest" 2>/dev/null | grep -o '"version": *"[^"]*"' | head -n 1 | sed 's/.*"\([^"]*\)"$/\1/' || true)
+-        if [[ "$specific_version" =~ ^1\.[0-9]+\.[0-9]+$ ]]; then
+-            asset_status=$(curl -sIL --max-time 10 -o /dev/null -w "%{http_code}" "https://github.com/anomalyco/opencode/releases/download/v${specific_version}/$filename" || true)
+-            if [ "$asset_status" != "200" ]; then
+-                specific_version=""
+-            fi
+-        else
+-            specific_version=""
+-        fi
+-        if [ -z "$specific_version" ]; then
+-            specific_version=$(curl -fsSL --max-time 30 "https://api.github.com/repos/anomalyco/opencode/releases?per_page=100" 2>/dev/null | grep -o '"tag_name": *"v1\.[0-9]*\.[0-9]*"' | head -n 1 | sed 's/.*"v\([^"]*\)"$/\1/' || true)
+-        fi
 -
--        if [[ $? -ne 0 || -z "$specific_version" ]]; then
+-        if [[ -z "$specific_version" ]]; then
 -            echo -e "${RED}Failed to fetch version information${NC}"
++        base_url="https://github.com/${REPO}/releases/download/v${specific_version}"
 +    else
 +        requested_version="${requested_version#v}"
 +        base_url="https://github.com/${REPO}/releases/download/v${requested_version}"
@@ -936,16 +961,15 @@ index 1111111111..2222222222 100755
 +            print_message info "${MUTED}Available releases: https://github.com/${REPO}/releases${NC}"
              exit 1
          fi
+-        url="https://github.com/anomalyco/opencode/releases/download/v${specific_version}/$filename"
 -    else
--        # Strip leading 'v' if present
--        requested_version="${requested_version#v}"
 -        url="https://github.com/anomalyco/opencode/releases/download/v${requested_version}/$filename"
 -        specific_version=$requested_version
 -
--        # Verify the release exists before downloading
--        http_status=$(curl -sI -o /dev/null -w "%{http_code}" "https://github.com/anomalyco/opencode/releases/tag/v${requested_version}")
+-        # Verify the release asset exists before downloading. A release that is still publishing has none yet.
+-        http_status=$(curl -sIL -o /dev/null -w "%{http_code}" "$url" || true)
 -        if [ "$http_status" = "404" ]; then
--            echo -e "${RED}Error: Release v${requested_version} not found${NC}"
+-            echo -e "${RED}Error: Release v${requested_version} not found. If it was just released, try again in a few minutes.${NC}"
 -            echo -e "${MUTED}Available releases: https://github.com/anomalyco/opencode/releases${NC}"
 +    fi
 +
@@ -1056,7 +1080,7 @@ index 1111111111..2222222222 100755
              exit 0
          fi
      fi
-@@ -240,7 +320,8 @@
+@@ -264,7 +332,8 @@
      elif echo | sed -l -e "" >/dev/null 2>&1; then
          sed -nl "$@"
      else
@@ -1066,7 +1090,7 @@ index 1111111111..2222222222 100755
          sed -ne "s/$/\\${pad}/" "$@"
      fi
  }
-@@ -256,16 +337,18 @@
+@@ -280,16 +349,18 @@
      local on=$(( percent * width / 100 ))
      local off=$(( width - on ))
  
@@ -1088,7 +1112,7 @@ index 1111111111..2222222222 100755
      local output="$2"
  
      if [ -t 2 ]; then
-@@ -274,6 +357,7 @@
+@@ -298,6 +369,7 @@
          exec 4>/dev/null
      fi
  
@@ -1096,7 +1120,7 @@ index 1111111111..2222222222 100755
      local tmp_dir=${TMPDIR:-/tmp}
      local basename="${tmp_dir}/opencode_install_$$"
      local tracefile="${basename}.trace"
-@@ -281,13 +365,13 @@
+@@ -305,13 +377,13 @@
      rm -f "$tracefile"
      mkfifo "$tracefile"
  
@@ -1112,7 +1136,7 @@ index 1111111111..2222222222 100755
      ) &
      local curl_pid=$!
  
-@@ -324,31 +408,119 @@
+@@ -348,31 +420,119 @@
      return $ret
  }
  
@@ -1247,7 +1271,7 @@ index 1111111111..2222222222 100755
  }
  
  if [ -n "$binary_path" ]; then
-@@ -358,7 +530,7 @@
+@@ -382,7 +542,7 @@
      download_and_install
  fi
  
@@ -1256,7 +1280,7 @@ index 1111111111..2222222222 100755
  add_to_path() {
      local config_file=$1
      local command=$2
-@@ -370,14 +542,15 @@
+@@ -394,14 +554,15 @@
          echo "$command" >> "$config_file"
          print_message info "${MUTED}Successfully added ${NC}opencode ${MUTED}to \$PATH in ${NC}$config_file"
      else
@@ -1275,7 +1299,7 @@ index 1111111111..2222222222 100755
  case $current_shell in
      fish)
          config_files="$HOME/.config/fish/config.fish"
-@@ -395,7 +568,7 @@
+@@ -419,7 +580,7 @@
          config_files="$HOME/.ashrc $HOME/.profile /etc/profile"
      ;;
 +    # 默认分支收敛 bash 语法：rc 差异只在路径，export 语句 POSIX 兼容
@@ -1284,7 +1308,7 @@ index 1111111111..2222222222 100755
          config_files="$HOME/.bashrc $HOME/.bash_profile $XDG_CONFIG_HOME/bash/.bashrc $XDG_CONFIG_HOME/bash/.bash_profile"
      ;;
  esac
-@@ -417,29 +590,17 @@
+@@ -441,29 +602,17 @@
              fish)
                  add_to_path "$config_file" "fish_add_path $INSTALL_DIR"
              ;;
@@ -1319,7 +1343,7 @@ index 1111111111..2222222222 100755
      print_message info "Added $INSTALL_DIR to \$GITHUB_PATH"
  fi
  
-@@ -448,7 +609,6 @@
+@@ -472,7 +621,6 @@
  echo -e "${MUTED}█▀▀█ █▀▀█ █▀▀█ █▀▀▄ ${NC}█▀▀▀ █▀▀█ █▀▀█ █▀▀█"
  echo -e "${MUTED}█░░█ █░░█ █▀▀▀ █░░█ ${NC}█░░░ █░░█ █░░█ █▀▀▀"
  echo -e "${MUTED}▀▀▀▀ █▀▀▀ ▀▀▀▀ ▀  ▀ ${NC}▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀"
@@ -1327,7 +1351,7 @@ index 1111111111..2222222222 100755
  echo -e ""
  echo -e "${MUTED}OpenCode includes free models, to start:${NC}"
  echo -e ""
-@@ -457,4 +617,3 @@
+@@ -481,4 +629,3 @@
  echo -e ""
  echo -e "${MUTED}For more information visit ${NC}https://opencode.ai/docs"
  echo -e ""

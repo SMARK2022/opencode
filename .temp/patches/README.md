@@ -2,13 +2,13 @@
 
 该目录保存 `dev-smark` 的逐提交 patch，并提供只修改临时 clone 的累积 dry-run。1–452 固定保留，新增提交按祖先优先顺序接在其后。
 
-## v1.18.32 迁移起点
+## v1.19.5 迁移起点
 
-当前分支 `smark-port-11832` 的产品源码以官方 `545f51d26cc39a907d2867492d498d9607ea5fa4` 为基线，原目录名保持不变。旧分支已推送至 `origin/smark-port-11720`，归档提交为 `b64e18184`。
+当前分支 `smark-port-1195` 的产品源码以官方 `810c0eba1a7348036f8bdf61e6632d0c36c6876c` 为基线，原目录名保持不变。旧分支已推送至 `origin/smark-port-11720`，归档提交为 `b64e18184`。
 
-当前分支已线性 rebase：官方 `v1.18.32` release 后接原有 21 个迁移提交及后续调整，迁移历史中不保留旧 release 的合并节点。正式脚本的 `--verify-source` 已核验全部 644 项，`--materialize 0` 已生成 HEAD 为该 release 的实际起始状态。
+当前分支已线性 rebase：官方 `v1.19.5` release 后接原有 21 个迁移提交及后续调整，迁移历史中不保留旧 release 的合并节点。正式脚本的 `--verify-source` 已核验全部 644 项，`--materialize 0` 已生成 HEAD 为该 release 的实际起始状态。
 
-本轮脚本将所有新状态和报告分别限定在 `states/v1.18.32/`、`reports/v1.18.32/`；下文同名路径均以这两个子目录为根。原有 states、reports 及其 ignored 内容保持原位，不参与新基线的复用、清理或安装。
+本轮脚本将所有新状态和报告分别限定在 `states/v1.19.5/`、`reports/v1.19.5/`；下文同名路径均以这两个子目录为根。原有 states、reports 及其 ignored 内容保持原位，不参与新基线的复用、清理或安装。
 
 active manifest 共 644 项。1–452 的编号、顺序与 current/original 内容保持不变；新增 192 项统一编号 453–644，两侧文件均直接位于 original/current 根目录，命名为 `NNNN-<sha12>.patch`。453–488 对应此前补出的 36 项历史提交，489–644 对应原来的 453–608。此前 PASS 属于旧基线，新基线按完整序列重新验证。
 

@@ -931,6 +931,14 @@ diff --git a/packages/opencode/src/session/session.ts b/packages/opencode/src/se
 index 63355a01aabdda3ea65fd1fc5473550ff5c383ed..e1ace250dc05dbbddfb1edee769494772eea1214 100644
 --- a/packages/opencode/src/session/session.ts
 +++ b/packages/opencode/src/session/session.ts
+@@ -6,1 +6,1 @@
+-import { selection } from "@opencode-ai/core/session/info"
++import { selection, withRequests } from "@opencode-ai/core/session/info"
+@@ -517,3 +517,3 @@
+     const get = Effect.fn("Session.get")(function* (id: SessionID) {
+-      const row = yield* db.select(selection).from(SessionTable).where(eq(SessionTable.id, id)).get().pipe(Effect.orDie)
++      const row = yield* db.select(selection(id)).from(SessionTable).where(eq(SessionTable.id, id)).get().pipe(Effect.orDie)
+       if (!row) return yield* Effect.fail(new NotFoundError({ message: `Session not found: ${id}` }))
 @@ -522,6 +522,6 @@
      const list = Effect.fn("Session.list")(function* (input?: ListInput) {
        const ctx = yield* InstanceState.context
@@ -963,6 +971,42 @@ index 63355a01aabdda3ea65fd1fc5473550ff5c383ed..e1ace250dc05dbbddfb1edee76949477
        }
 -      if (!input?.archived) conditions.push(isNull(SessionTable.time_archived))
  
+@@ -559,14 +563,15 @@
+       const query =
+         conditions.length > 0
+           ? db
+               // 条件列表也使用共享投影，不能只有无筛选列表带请求数据。
+-              .select(selection)
++              .select()
+               .from(SessionTable)
+               .where(and(...conditions))
+-          // 不另扫描 parts；当前请求计算已经封装在 Core 的同一 SELECT 内。
+-          : db.select(selection).from(SessionTable)
+-      const rows = yield* query
++          // 先固定页面，再绑定每条身份读取完整请求，避免相关CTE反复展开。
++          : db.select().from(SessionTable)
++      const rows = yield* db.transaction(() => query
+         .orderBy(desc(SessionTable.time_updated), desc(SessionTable.id))
+         .limit(input?.limit ?? 100)
+         .all()
+-        .pipe(Effect.orDie)
++        .pipe(Effect.flatMap((rows) => withRequests(db, rows))),
++      ).pipe(Effect.orDie)
+@@ -593,10 +598,11 @@
+     const children = Effect.fn("Session.children")(function* (parentID: SessionID) {
+-      const rows = yield* db
++      const rows = yield* db.transaction(() => db
+         // 子代理独立 Session 使用自己的请求投影，不继承父请求费用。
+-        .select(selection)
++        .select()
+         .from(SessionTable)
+         .where(and(eq(SessionTable.parent_id, parentID)))
+         .all()
+-        .pipe(Effect.orDie)
++        .pipe(Effect.flatMap((rows) => withRequests(db, rows))),
++      ).pipe(Effect.orDie)
+       return rows.map(fromRow)
+     })
 @@ -1022,7 +1026,7 @@
 -function listByProject(
 +function* listByProject(
@@ -973,7 +1017,7 @@ index 63355a01aabdda3ea65fd1fc5473550ff5c383ed..e1ace250dc05dbbddfb1edee76949477
      experimentalWorkspaces: boolean
      worktree: string
    },
-@@ -1030,12 +1034,16 @@
+@@ -1030,25 +1036,31 @@
    // #544：scope/start 谓词与 searchScan 共用 listUniverseConditions，避免 path 语义分叉
    // searchMode 只作用于 list——缺省 all 与历史行为逐字一致，旧客户端零感知。
    const conditions = listUniverseConditions(input)
@@ -992,7 +1036,25 @@ index 63355a01aabdda3ea65fd1fc5473550ff5c383ed..e1ace250dc05dbbddfb1edee76949477
    const limit = input.limit ?? 100
  
 -  return db
-+  return yield* database.db
++  // 页面与请求保持同一读快照，后台更新不能在两段读取间拼出混合版本。
++  return yield* database.db.transaction(() => database.db
+     // 继续使用前项的请求投影，搜索结果不能丢失已落盘的token与费用字段。
+-    .select(selection)
++    .select()
+     .from(SessionTable)
+     // #228：home 切换查询故意无 project/path 谓词——undefined 表示无 WHERE，只保留 start/search/roots 过滤
+     .where(conditions.length > 0 ? and(...conditions) : undefined)
+     // 与scan的keyset完全同序，同毫秒更新的top-400也保持一致。
+     .orderBy(desc(SessionTable.time_updated), desc(SessionTable.id))
+     .limit(limit)
+     .all()
+     .pipe(
+-      Effect.orDie,
++      Effect.flatMap((rows) => withRequests(database.db, rows)),
+       Effect.map((rows) => rows.map(fromRow)),
+-    )
++    ),
++  ).pipe(Effect.orDie)
 @@ -1064,7 +1072,7 @@
  function* searchScanByProject(
 -  db: Database.Interface["db"],
@@ -1010,7 +1072,7 @@ index 63355a01aabdda3ea65fd1fc5473550ff5c383ed..e1ace250dc05dbbddfb1edee76949477
      .where(universe.length > 0 ? and(...universe) : undefined)
      .orderBy(desc(SessionTable.time_updated), desc(SessionTable.id))
      .limit(batch)
-@@ -1113,11 +1121,14 @@
+@@ -1113,12 +1121,16 @@
    // 第二段 SQL：在候选 id 集合上施加完整 searchCondition（title∨content AND）
    // 与「先 search 再 limit 50 命中」不同：这里保证每页固定推进 50 候选
    // 固定 all：complete 召回不得被首屏 title 子集口径污染（INV-09 的服务端锚点）。
@@ -1022,11 +1084,15 @@ index 63355a01aabdda3ea65fd1fc5473550ff5c383ed..e1ace250dc05dbbddfb1edee76949477
 +  )
    // 命中集合走第二段 SQL 而非在内存过滤——候选窗语义要求 SQL 只按 id 收窄。
 -  const matched = yield* db
-+  const matched = yield* database.db
-     .select(selection)
++  const matched = yield* database.db.transaction(() => database.db
+-    .select(selection)
++    .select()
      .from(SessionTable)
      .where(and(inArray(SessionTable.id, ids), full))
      .all()
+-    .pipe(Effect.orDie)
++    .pipe(Effect.flatMap((rows) => withRequests(database.db, rows))),
++  ).pipe(Effect.orDie)
 diff --git a/packages/core/src/storage/cold-storage.ts b/packages/core/src/storage/cold-storage.ts
 index 8d0bd980e38093de5a830821958933a23ad70f3c..e213a96ac255288befc620a637c7c3aa40f83574 100644
 --- a/packages/core/src/storage/cold-storage.ts
@@ -2969,6 +3035,9 @@ diff --git a/packages/core/src/session.ts b/packages/core/src/session.ts
 index 271a007ade0441afd6796ac8a3baded1a96daaef..92b0af86e078764dbf89b9e6c1ddffa645fa6fb9 100644
 --- a/packages/core/src/session.ts
 +++ b/packages/core/src/session.ts
+@@ -28,1 +28,1 @@
+-import { fromRow, selection } from "./session/info"
++import { fromRow, withRequests } from "./session/info"
 @@ -278,6 +278,1 @@
 -        // #121：V2 list 与 opencode 共用 searchCondition
 -        if (input.search) {
@@ -2991,8 +3060,17 @@ index 271a007ade0441afd6796ac8a3baded1a96daaef..92b0af86e078764dbf89b9e6c1ddffa6
          const query = db
            // 列表和 get 返回同一请求口径，列表刷新不能擦掉已加载的请求身份。
            // 继续使用既有分页与 placement 条件，投影不改变成员或排序。
-           .select(selection)
+-          .select(selection)
++          .select()
            .from(SessionTable)
+@@ -373,4 +376,4 @@
+-        const rows = yield* (input.limit === undefined ? query.all() : query.limit(input.limit).all()).pipe(
+-          Effect.orDie,
+-        )
++        const rows = yield* db.transaction(() =>
++          (input.limit === undefined ? query.all() : query.limit(input.limit).all()).pipe(Effect.flatMap((rows) => withRequests(db, rows))),
++        ).pipe(Effect.orDie)
+         return (direction === "previous" ? rows.toReversed() : rows).map((row) => fromRow(row))
 diff --git a/packages/opencode/test/server/session-messages.test.ts b/packages/opencode/test/server/session-messages.test.ts
 index bdcb42c44cff02438da10cb23711f1638a27fd31..9e43cfe9c78fc8a0efe57e2ce6a6ff4e148a0585 100644
 --- a/packages/opencode/test/server/session-messages.test.ts
@@ -3697,3 +3775,160 @@ diff --git a/packages/core/test/session-projector.test.ts b/packages/core/test/s
        expect(ColdStorage.parseMaintenanceTask(compressed.task)).toEqual(compressed.task)
        expect((yield* db.select().from(SessionMessageTable).where(eq(SessionMessageTable.id, oldID)).get())?.cold_ref).toBeTruthy()
 +      expect((yield* db.select().from(SessionMessageTable).where(eq(SessionMessageTable.id, oldID)).get())?.cold_key?.byteLength).toBe(4)
+
+diff --git a/packages/core/src/session/info.ts b/packages/core/src/session/info.ts
+--- a/packages/core/src/session/info.ts
++++ b/packages/core/src/session/info.ts
+@@ -1,2 +1,2 @@
+-import { DateTime, Schema } from "effect"
+-import { getTableColumns, sql } from "drizzle-orm"
++import { DateTime, Effect, Schema } from "effect"
++import { eq, getTableColumns, sql } from "drizzle-orm"
+@@ -14,1 +14,2 @@
+ import { Snapshot } from "../snapshot"
++import type { Database } from "../database/database"
+@@ -17,1 +18,1 @@
+-export const selection = {
++export const selection = (sessionID: SessionSchema.ID) => ({
+@@ -21,1 +22,1 @@
+-    -- 单表 SELECT 会剥离 Column 限定名；关联外层必须固定使用 "session"."id"。
++    -- 绑定身份让CTE在一次请求投影内复用，避免按每个标量字段反复展开相关历史查询。
+@@ -26,1 +27,1 @@
+-      FROM message m WHERE m.session_id = "session"."id" AND json_extract(m.data, '$.role') = 'user'
++      FROM message m WHERE m.session_id = ${sessionID} AND json_extract(m.data, '$.role') = 'user'
+@@ -29,1 +30,1 @@
+-        WHERE u.session_id = "session"."id" AND json_extract(u.data, '$.role') = 'user'
++        WHERE u.session_id = ${sessionID} AND json_extract(u.data, '$.role') = 'user'
+@@ -32,1 +33,1 @@
+-            WHERE a.session_id = "session"."id" AND json_extract(a.data, '$.role') = 'assistant'
++            WHERE a.session_id = ${sessionID} AND json_extract(a.data, '$.role') = 'assistant'
+@@ -37,1 +38,1 @@
+-        WHERE u.session_id = "session"."id" AND json_extract(u.data, '$.role') = 'user'
++        WHERE u.session_id = ${sessionID} AND json_extract(u.data, '$.role') = 'user'
+@@ -44,1 +45,1 @@
+-      FROM session_input WHERE session_id = "session"."id"
++      FROM session_input WHERE session_id = ${sessionID}
+@@ -51,1 +52,1 @@
+-      FROM event e WHERE e.aggregate_id = "session"."id" AND e.type = 'session.next.compaction.started.1'
++      FROM event e WHERE e.aggregate_id = ${sessionID} AND e.type = 'session.next.compaction.started.1'
+@@ -63,1 +64,1 @@
+-          ON e.aggregate_id = "session"."id" AND e.type = 'message.updated.1'
++          ON e.aggregate_id = ${sessionID} AND e.type = 'message.updated.1'
+@@ -70,1 +71,1 @@
+-        SELECT 1 FROM message a WHERE a.session_id = "session"."id"
++        SELECT 1 FROM message a WHERE a.session_id = ${sessionID}
+@@ -78,1 +79,1 @@
+-      WHERE m.session_id = "session"."id" AND json_extract(m.data, '$.role') = 'assistant'
++      WHERE m.session_id = ${sessionID} AND json_extract(m.data, '$.role') = 'assistant'
+@@ -84,1 +85,1 @@
+-      WHERE m.session_id = "session"."id" AND m.type = 'assistant'
++      WHERE m.session_id = ${sessionID} AND m.type = 'assistant'
+@@ -93,1 +94,1 @@
+-      WHERE p.session_id = "session"."id" AND json_extract(p.data, '$.type') = 'step-finish'
++      WHERE p.session_id = ${sessionID} AND json_extract(p.data, '$.type') = 'step-finish'
+@@ -107,1 +108,1 @@
+-      WHERE e.aggregate_id = "session"."id" AND e.type = 'session.next.request.estimated.1'
++      WHERE e.aggregate_id = ${sessionID} AND e.type = 'session.next.request.estimated.1'
+@@ -116,1 +117,1 @@
+-      WHERE p.session_id = "session"."id" AND json_extract(p.data, '$.type') = 'step-finish'
++      WHERE p.session_id = ${sessionID} AND json_extract(p.data, '$.type') = 'step-finish'
+@@ -127,1 +128,1 @@
+-          SELECT 1 FROM part p WHERE p.message_id = a.id AND p.session_id = "session"."id"
++          SELECT 1 FROM part p WHERE p.message_id = a.id AND p.session_id = ${sessionID}
+@@ -205,3 +206,13 @@
+-}
++})
++
++// 调用者在同一读事务内先固定页面，再复用同一参数化投影，不丢请求字段或解冻历史。
++export function withRequests(db: Database.Interface["db"], rows: (typeof SessionTable.$inferSelect)[]) {
++  return Effect.forEach(rows, (row) =>
++    db.select({ request: selection(row.id).request }).from(SessionTable).where(eq(SessionTable.id, row.id)).get().pipe(
++      Effect.orDie,
++      Effect.map((projection) => ({ ...row, request: projection?.request })),
++    ),
++  )
++}
+ 
+ export function fromRow(row: typeof SessionTable.$inferSelect & { request?: Session.RequestUsage }): SessionSchema.Info {
+diff --git a/packages/core/src/session/store.ts b/packages/core/src/session/store.ts
+--- a/packages/core/src/session/store.ts
++++ b/packages/core/src/session/store.ts
+@@ -47,1 +47,1 @@
+-        const row = yield* db.select(selection).from(SessionTable).where(eq(SessionTable.id, sessionID)).get().pipe(Effect.orDie)
++        const row = yield* db.select(selection(sessionID)).from(SessionTable).where(eq(SessionTable.id, sessionID)).get().pipe(Effect.orDie)
+diff --git a/packages/opencode/src/event-v2-bridge.ts b/packages/opencode/src/event-v2-bridge.ts
+--- a/packages/opencode/src/event-v2-bridge.ts
++++ b/packages/opencode/src/event-v2-bridge.ts
+@@ -80,1 +80,1 @@
+-          const row = yield* database.db.select(selection).from(SessionTable).where(eq(SessionTable.id, data.sessionID)).get().pipe(Effect.orDie)
++          const row = yield* database.db.select(selection(data.sessionID)).from(SessionTable).where(eq(SessionTable.id, data.sessionID)).get().pipe(Effect.orDie)
+diff --git a/packages/core/test/session-info-selection.test.ts b/packages/core/test/session-info-selection.test.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/core/test/session-info-selection.test.ts
+@@ -0,0 +1,21 @@
++import { expect, test } from "bun:test"
++import { SQLiteSyncDialect } from "drizzle-orm/sqlite-core"
++import { selection } from "../src/session/info"
++import { SessionSchema } from "../src/session/schema"
++
++test.each(["ses_projection_a", "ses_projection_b"])("binds request history to one Session identity: %s", (value) => {
++  const id = SessionSchema.ID.make(value)
++  const query = new SQLiteSyncDialect().sqlToQuery(selection(id).request)
++  // 相关外层列会把同一历史CTE重复展开；真实参数是此性能回归的边界。
++  expect(query.params.length).toBeGreaterThan(0)
++  expect(query.params.every((parameter) => parameter === id)).toBe(true)
++  expect(query.sql).not.toContain('"session"."id"')
++})
++
++test("keeps one prepared statement shape across Session identities", () => {
++  const dialect = new SQLiteSyncDialect()
++  const first = dialect.sqlToQuery(selection(SessionSchema.ID.make("ses_projection_a")).request)
++  const second = dialect.sqlToQuery(selection(SessionSchema.ID.make("ses_projection_b")).request)
++  expect(first.sql).toBe(second.sql)
++  expect(first.params).not.toEqual(second.params)
++})
+diff --git a/packages/core/test/session-projector.test.ts b/packages/core/test/session-projector.test.ts
+--- a/packages/core/test/session-projector.test.ts
++++ b/packages/core/test/session-projector.test.ts
+@@ -563,13 +563,16 @@
+-      // 只读省略不能持久删除summary；附件和Tool则必须已真实恢复，而非返回骨架。
++      // 查看只恢复返回值；完整附件和Tool断言仍在上方，不能通过解冻存储行冒充只读。
+       const after = yield* db.select().from(SessionMessageTable).orderBy(asc(SessionMessageTable.seq)).all()
+-      expect(after.map(row => row.cold_ref)).toEqual([before[0]?.cold_ref, null, null])
+-      expect(after[0]?.cold_key).toEqual(before[0]?.cold_key)
+-      expect(after[1]?.data).toMatchObject({ summary })
+-      expect((yield* db.select().from(ColdStorageTable).all()).map(row => row.ref_count)).toEqual([1])
+-      // 默认API仍返回完整摘要并释放最后引用；不能让viewer污染SDK/模型历史的后续读取。
++      expect(after.map(row => row.cold_ref)).toEqual(before.map(row => row.cold_ref))
++      expect(after.map(row => row.cold_key)).toEqual(before.map(row => row.cold_key))
++      expect(after.map(row => row.data)).toEqual(before.map(row => row.data))
++      expect((yield* db.select().from(ColdStorageTable).all()).map(row => row.ref_count)).toEqual([3])
++      // 默认API同样返回完整摘要，普通读取不消费冷引用。
+       const complete = yield* sessions.messages({ sessionID, order: "asc" })
+       expect(complete[0]).toMatchObject({ summary })
+       expect(complete[1]).toMatchObject({ files, summary })
+       expect(complete[2] && encodeMessage(complete[2])).toMatchObject({ content })
++      expect((yield* db.select().from(SessionMessageTable).all()).map(row => row.cold_ref)).toEqual(before.map(row => row.cold_ref))
++      // 只有真实执行选集预热才释放存储引用，保留原解冻与完整性检查。
++      yield* SessionHistory.loadForRunner(db, sessionID, 0)
+       expect((yield* db.select().from(SessionMessageTable).all()).every(row => row.cold_ref === null)).toBe(true)
+       expect(yield* db.select().from(ColdStorageTable).all()).toEqual([])
+@@ -633,4 +636,9 @@
+         const history = yield* (runner ? SessionHistory.loadForRunner(db, sessionID, 0) : SessionHistory.load(db, sessionID))
+         expect(history.find(message => message.id === assistantMessageID)).toEqual(expected)
++        if (!runner) {
++          // 普通history保冷；显式执行后继续核对原热行和引用释放，下一轮独立冻结仍成立。
++          expect((yield* db.select().from(SessionMessageTable).where(eq(SessionMessageTable.id, assistantMessageID)).get())?.cold_ref).toBeTruthy()
++          yield* SessionHistory.loadForRunner(db, sessionID, 0)
++        }
+         const restored = yield* db.select().from(SessionMessageTable).where(eq(SessionMessageTable.id, assistantMessageID)).get()
+         expect(restored?.cold_ref).toBeNull()
+@@ -650,3 +658,7 @@
+       expect(yield* SessionHistory.goalTurnMessages(db, sessionID)).toEqual([expected])
++      // Goal进度读取同样只恢复返回值，显式执行后仍验证真实解冻与引用释放。
++      expect((yield* db.select().from(SessionMessageTable).where(eq(SessionMessageTable.id, assistantMessageID)).get())?.cold_ref).toBeTruthy()
++      expect((yield* db.select().from(ColdStorageTable).get())?.ref_count).toBe(1)
++      yield* SessionHistory.loadForRunner(db, sessionID, 0)
+       expect((yield* db.select().from(SessionMessageTable).where(eq(SessionMessageTable.id, assistantMessageID)).get())?.cold_ref).toBeNull()
+       expect(yield* db.select().from(ColdStorageTable).all()).toEqual([])

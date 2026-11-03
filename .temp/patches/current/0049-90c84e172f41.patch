@@ -630,7 +630,7 @@ diff --git a/bun.lock b/bun.lock
 @@ -943,8 +943,9 @@
      "packages/tui": {
        "name": "@opencode-ai/tui",
-       "version": "1.18.32",
+       "version": "1.19.5",
        "dependencies": {
          "@opencode-ai/core": "workspace:*",
          "@opencode-ai/plugin": "workspace:*",

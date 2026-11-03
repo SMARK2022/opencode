@@ -4,8 +4,8 @@ diff --git a/packages/opencode/package.json b/packages/opencode/package.json
 @@ -1,6 +1,6 @@
  {
    "$schema": "https://json.schemastore.org/package.json",
--  "version": "1.18.32",
-+  "version": "1.18.32-smark",
+-  "version": "1.19.5",
++  "version": "1.19.5-smark",
    "name": "opencode",
    "type": "module",
    "license": "MIT",
@@ -48,8 +48,8 @@ index 7b1f4b0e90c6b7c4269e9c2ff13b893ed2200f5c..49b3ab0f16ca59db4e89379c9ea64b31
 +    // 版本与 packages/opencode/package.json 保持一致，frozen install 依赖 bun.lock 同步
      "packages/opencode": {
        "name": "opencode",
--      "version": "1.18.32",
-+      "version": "1.18.32-smark",
+-      "version": "1.19.5",
++      "version": "1.19.5-smark",
        "bin": {
          "opencode": "./bin/opencode",
        },

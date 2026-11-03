@@ -9,10 +9,12 @@ diff --git a/bun.lock b/bun.lock
 index 9dc5acb52a..0a6760263b 100644
 --- a/bun.lock
 +++ b/bun.lock
-@@ -1087,6 +1087,7 @@
+@@ -1087,8 +1087,9 @@
      "@opentui/solid": "catalog:",
      "@types/bun": "catalog:",
      "@types/node": "catalog:",
+     "bun-types": "1.4.4",
+     "open": "11.0.4",
 +    "poe-oauth": "0.0.6",
    },
    "catalog": {
@@ -30,14 +32,16 @@ diff --git a/package.json b/package.json
 index fa950adcb6..3c36b2255a 100644
 --- a/package.json
 +++ b/package.json
-@@ -138,7 +138,8 @@
+@@ -138,10 +138,11 @@
      "@ai-sdk/anthropic": "3.0.111",
      "@opentui/core": "catalog:",
      "@opentui/keymap": "catalog:",
      "@opentui/solid": "catalog:",
      "@types/bun": "catalog:",
--    "@types/node": "catalog:"
-+    "@types/node": "catalog:",
+     "@types/node": "catalog:",
+     "bun-types": "1.4.4",
+-    "open": "11.0.4"
++    "open": "11.0.4",
 +    "poe-oauth": "0.0.6"
    },
    "patchedDependencies": {

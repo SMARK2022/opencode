@@ -40,21 +40,22 @@ diff --git a/packages/opencode/script/build.ts b/packages/opencode/script/build.
 +import { resolveInstallTarget } from "./install-target"
  
  const __filename = fileURLToPath(import.meta.url)
-@@ -202,7 +203,20 @@
+@@ -149,8 +150,21 @@
  const binaries: Record<string, string> = {}
  if (!skipInstall) {
--  await $`bun install --os="*" --cpu="*" @opentui/core@${pkg.dependencies["@opentui/core"]}`
--  await $`bun install --os="*" --cpu="*" @parcel/watcher@${pkg.dependencies["@parcel/watcher"]}`
--  await $`bun install --os="*" --cpu="*" @ff-labs/fff-bun@${pkg.dependencies["@ff-labs/fff-bun"]}`
+   // Bun 1.4.4 skips native packages for the other libc by default, but the musl targets need them.
+-  await $`bun install --os="*" --cpu="*" --libc="*" @opentui/core@${pkg.dependencies["@opentui/core"]}`
+-  await $`bun install --os="*" --cpu="*" --libc="*" @parcel/watcher@${pkg.dependencies["@parcel/watcher"]}`
+-  await $`bun install --os="*" --cpu="*" --libc="*" @ff-labs/fff-bun@${pkg.dependencies["@ff-labs/fff-bun"]}`
 +  // #468：只安装目标 OS/arch 的原生变体，避免 macOS CI 下载 win32 包触发 bun IntegrityCheckFailed。
 +  const { os: installOs, cpu: installCpu } = resolveInstallTarget(osFilter, archFilter, singleFlag)
 +
 +  // bun 不会在完整性校验失败时自动重试（oven-sh/bun#26879）；手动重试并清缓存防损坏 tarball 阻断 CI。
 +  for (let attempt = 1; attempt <= 3; attempt++) {
 +    try {
-+      await $`bun install --os="${installOs}" --cpu="${installCpu}" @opentui/core@${pkg.dependencies["@opentui/core"]}`
-+      await $`bun install --os="${installOs}" --cpu="${installCpu}" @parcel/watcher@${pkg.dependencies["@parcel/watcher"]}`
-+      await $`bun install --os="${installOs}" --cpu="${installCpu}" @ff-labs/fff-bun@${pkg.dependencies["@ff-labs/fff-bun"]}`
++      await $`bun install --os="${installOs}" --cpu="${installCpu}" --libc="*" @opentui/core@${pkg.dependencies["@opentui/core"]}`
++      await $`bun install --os="${installOs}" --cpu="${installCpu}" --libc="*" @parcel/watcher@${pkg.dependencies["@parcel/watcher"]}`
++      await $`bun install --os="${installOs}" --cpu="${installCpu}" --libc="*" @ff-labs/fff-bun@${pkg.dependencies["@ff-labs/fff-bun"]}`
 +      break
 +    } catch (e) {
 +      if (attempt === 3) throw e

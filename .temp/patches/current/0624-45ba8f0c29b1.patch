@@ -3466,7 +3466,7 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
 +      <Show when={!collapsed()}>
 +        <box marginTop={1}>
            {props.children}
-@@ -2998,7 +3457,8 @@ function Shell(props: ToolProps) {
+@@ -2998,10 +3457,11 @@ function Shell(props: ToolProps) {
    const ctx = use()
    const isRunning = createMemo(() => props.part.state.status === "running")
 -  const [showContextOutput, setShowContextOutput] = createSignal(false)
@@ -3476,7 +3476,8 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
    const contextOutputAvailable = createMemo(() => props.output !== undefined && props.part.state.status === "completed")
    const output = createMemo(() => {
      const text = showContextOutput() && contextOutputAvailable() ? props.output : stringValue(props.metadata.output)
-@@ -3007 +3467 @@
+     return stripAnsi(text?.trim() ?? "")
+   })
 -  const [expanded, setExpanded] = createSignal(false)
 +  const [expanded, setExpanded] = useInteraction(() => `expanded:${props.part.id}`)
 @@ -3151,2 +3611,2 @@

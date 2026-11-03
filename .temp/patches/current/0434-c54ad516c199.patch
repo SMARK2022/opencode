@@ -616,12 +616,9 @@ diff --git a/packages/opencode/src/provider/provider.ts b/packages/opencode/src/
  }
  
  function timeoutController(ms: number) {
-@@ -2125,7 +2188,7 @@ for (const [id, provider] of configProviders) {
-         delete options["chunkTimeout"]
-         delete options["headerTimeout"]
- 
--        options["fetch"] = async (input: any, init?: BunFetchRequestInit) => {
-+        options["fetch"] = async (input: any, init?: BunFetchRequestInit & { timeout?: false | number }) => {
+@@ -215,4 +282,4 @@ function timeoutFetch(options: Record<string, any>, model: { providerID: string; id: string }, bridge: EffectBridge.Shape) {
+-  return async (input: any, init?: BunFetchRequestInit) => {
++  return async (input: any, init?: BunFetchRequestInit & { timeout?: false | number }) => {
            const opts = init ?? {}
            const chunkAbortCtl = typeof chunkTimeout === "number" && chunkTimeout > 0 ? new AbortController() : undefined
            const headerTimeoutMs = headerTimeout === false ? undefined : headerTimeout

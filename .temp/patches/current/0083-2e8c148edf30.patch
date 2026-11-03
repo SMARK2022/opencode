@@ -629,6 +629,41 @@ diff --git a/packages/opencode/src/provider/provider.ts b/packages/opencode/src/
 index 041b522f06..d35b09ebe6 100644
 --- a/packages/opencode/src/provider/provider.ts
 +++ b/packages/opencode/src/provider/provider.ts
+@@ -104,7 +104,6 @@
+ 
+   return async (input: any, init?: BunFetchRequestInit) => {
+-    const fetchFn = customFetch ?? fetch
+     const opts = init ?? {}
+     const chunkAbortCtl = typeof chunkTimeout === "number" && chunkTimeout > 0 ? new AbortController() : undefined
+     const headerTimeoutMs = headerTimeout === false ? undefined : headerTimeout
+     const headerTimeoutCtl = typeof headerTimeoutMs === "number" ? timeoutController(headerTimeoutMs) : undefined
+@@ -120,15 +119,18 @@
+     const combined = signals.length === 0 ? null : signals.length === 1 ? signals[0] : AbortSignal.any(signals)
+     if (combined) opts.signal = combined
+ 
+-          // 鉴权 customFetch 和原有 signal 必须透传，只在同一 provider 请求上叠加代理路由。
+-          const res = await NetworkProxy.fetchWithRoute(fetchFn, input, {
+-      ...opts,
+-            // provider 用途保持与基础设施和 npm 区分，后续策略不能误改模型请求身份。
+-            purpose: "provider",
+-      // @ts-ignore see here: https://github.com/oven-sh/bun/issues/16682
+-      timeout: false,
+-    }).finally(() => headerTimeoutCtl?.clear())
++    // 自定义鉴权不重复注入路由，两条路径保留组合取消信号与 header timer 清理。
++    const res = await (
++      customFetch
++        ? NetworkProxy.fetchWithRoute(customFetch, input, { ...opts, purpose: "provider" })
++        : NetworkProxy.fetch(input, {
++            ...opts,
++            purpose: "provider",
++            // @ts-ignore see here: https://github.com/oven-sh/bun/issues/16682
++            timeout: false,
++          })
++    ).finally(() => headerTimeoutCtl?.clear())
+ 
+     if (!chunkAbortCtl) return res
+     return wrapSSE(res, chunkTimeout, chunkAbortCtl)
+   }
 @@ -589,7 +589,7 @@ function custom(dep: CustomDep): Record<string, CustomLoader> {
              const headers = new Headers(init?.headers)
              headers.set("Authorization", `Bearer ${token.token}`)
@@ -647,41 +682,6 @@ index 041b522f06..d35b09ebe6 100644
  
            if (!response.ok && response.status === 400) {
              try {
-@@ -1882,7 +1882,6 @@
-         delete options["headerTimeout"]
- 
-         options["fetch"] = async (input: any, init?: BunFetchRequestInit) => {
--          const fetchFn = customFetch ?? fetch
-           const opts = init ?? {}
-           const chunkAbortCtl = typeof chunkTimeout === "number" && chunkTimeout > 0 ? new AbortController() : undefined
-           const headerTimeoutMs = headerTimeout === false ? undefined : headerTimeout
-@@ -1899,15 +1898,18 @@
-           const combined = signals.length === 0 ? null : signals.length === 1 ? signals[0] : AbortSignal.any(signals)
-           if (combined) opts.signal = combined
- 
--          // 鉴权 customFetch 和原有 signal 必须透传，只在同一 provider 请求上叠加代理路由。
--          const res = await NetworkProxy.fetchWithRoute(fetchFn, input, {
--            ...opts,
--            // provider 用途保持与基础设施和 npm 区分，后续策略不能误改模型请求身份。
--            purpose: "provider",
--            // @ts-ignore see here: https://github.com/oven-sh/bun/issues/16682
--            timeout: false,
--          }).finally(() => headerTimeoutCtl?.clear())
-+          // 自定义鉴权不重复注入路由，两条路径保留组合取消信号与 header timer 清理。
-+          const res = await (
-+            customFetch
-+              ? NetworkProxy.fetchWithRoute(customFetch, input, { ...opts, purpose: "provider" })
-+              : NetworkProxy.fetch(input, {
-+                  ...opts,
-+                  purpose: "provider",
-+                  // @ts-ignore see here: https://github.com/oven-sh/bun/issues/16682
-+                  timeout: false,
-+                })
-+          ).finally(() => headerTimeoutCtl?.clear())
- 
-           if (!chunkAbortCtl) return res
-           return wrapSSE(res, chunkTimeout, chunkAbortCtl)
-         }
 diff --git a/packages/tui/src/feature-plugins/sidebar/context.tsx b/packages/tui/src/feature-plugins/sidebar/context.tsx
 --- a/packages/tui/src/feature-plugins/sidebar/context.tsx
 +++ b/packages/tui/src/feature-plugins/sidebar/context.tsx

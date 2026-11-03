@@ -910,11 +910,12 @@ diff --git a/packages/core/test/session-runner-model.test.ts b/packages/core/tes
 diff --git a/packages/opencode/test/session/message-v2.test.ts b/packages/opencode/test/session/message-v2.test.ts
 --- a/packages/opencode/test/session/message-v2.test.ts
 +++ b/packages/opencode/test/session/message-v2.test.ts
-@@ -1,6 +1,7 @@
+@@ -1,7 +1,8 @@
  import { describe, expect, test } from "bun:test"
  import { SessionV1 } from "@opencode-ai/core/v1/session"
 +import { Token } from "@opencode-ai/core/util/token"
- import { APICallError } from "ai"
+ import { createXai } from "@ai-sdk/xai"
+ import { APICallError, generateText } from "ai"
  import { MessageV2 } from "../../src/session/message-v2"
  import { ProviderTransform } from "@/provider/transform"
  import type { Provider } from "@/provider/provider"

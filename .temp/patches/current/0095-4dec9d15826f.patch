@@ -693,20 +693,14 @@ diff --git a/packages/core/package.json b/packages/core/package.json
 --- a/packages/core/package.json
 +++ b/packages/core/package.json
 @@ -89,1 +89,2 @@
-     "@ff-labs/fff-bun": "0.9.4",
+     "@ff-labs/fff-bun": "0.10.5",
 +    "@modelcontextprotocol/sdk": "1.29.0",
-@@ -121,1 +122,2 @@
-     "npm-package-arg": "13.0.2",
-+    "open": "10.1.2",
 diff --git a/bun.lock b/bun.lock
 --- a/bun.lock
 +++ b/bun.lock
 @@ -324,1 +324,2 @@
          "@lydell/node-pty": "catalog:",
 +        "@modelcontextprotocol/sdk": "1.29.0",
-@@ -356,1 +357,2 @@
-         "npm-package-arg": "13.0.2",
-+        "open": "10.1.2",
 diff --git a/packages/core/src/system-context/builtins.ts b/packages/core/src/system-context/builtins.ts
 --- a/packages/core/src/system-context/builtins.ts
 +++ b/packages/core/src/system-context/builtins.ts
@@ -778,13 +772,12 @@ diff --git a/packages/opencode/src/server/routes/instance/httpapi/handlers/sessi
 diff --git a/packages/opencode/src/session/llm/request.ts b/packages/opencode/src/session/llm/request.ts
 --- a/packages/opencode/src/session/llm/request.ts
 +++ b/packages/opencode/src/session/llm/request.ts
-@@ -4,6 +4,7 @@ import { SessionV1 } from "@opencode-ai/core/v1/session"
+@@ -4,5 +4,6 @@ import { SessionV1 } from "@opencode-ai/core/v1/session"
  import type { RuntimeFlags } from "@/effect/runtime-flags"
  import { InstanceState } from "@/effect/instance-state"
  import { Permission } from "@/permission"
 +import { ToolSelection } from "@/tool/selection"
  import type { Agent } from "@/agent/agent"
- import type { MessageV2 } from "../message-v2"
  import type { Provider } from "@/provider/provider"
 @@ -59,7 +60,7 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: PrepareInput) {
    // 复用最终权限/user.tools 过滤；同一工具对象随后用于 SDK/native 请求，不读取 registry 全集。

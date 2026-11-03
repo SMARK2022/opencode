@@ -368,9 +368,10 @@ diff --git a/packages/opencode/src/tool/todowrite.txt b/packages/opencode/src/to
 diff --git a/packages/core/package.json b/packages/core/package.json
 --- a/packages/core/package.json
 +++ b/packages/core/package.json
-@@ -120,9 +120,12 @@
+@@ -120,10 +120,13 @@
      "minimatch": "10.2.5",
      "npm-package-arg": "13.0.2",
+     "open": "11.0.4",
      "semver": "^7.6.3",
 +    "tree-sitter-bash": "0.25.0",
 +    "tree-sitter-powershell": "0.25.10",
@@ -386,9 +387,10 @@ diff --git a/packages/core/package.json b/packages/core/package.json
 diff --git a/bun.lock b/bun.lock
 --- a/bun.lock
 +++ b/bun.lock
-@@ -353,10 +353,13 @@ "packages/core": {
+@@ -353,11 +353,14 @@ "packages/core": {
          "minimatch": "10.2.5",
          "npm-package-arg": "13.0.2",
+         "open": "11.0.4",
          "semver": "^7.6.3",
 +        "tree-sitter-bash": "0.25.0",
 +        "tree-sitter-powershell": "0.25.10",

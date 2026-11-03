@@ -48,16 +48,16 @@ diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/sess
 +      currentModel = Model.make({ id: model.id, provider: "openai", route: model.route })
 +      yield* Effect.addFinalizer(() => Effect.sync(() => { currentModel = model }))
        const parentID = SessionV2.ID.make("ses_runner_parent")
-@@ -4462,1 +4468,2 @@
-       expect(requests[0]?.http?.headers?.["x-parent-session-id"]).toBe(parentID)
-+      expect(requests[0]?.http?.headers?.["session-id"]).toBe(sessionID)
-@@ -4468,2 +4475,5 @@
+@@ -4470,1 +4476,2 @@
+         "x-parent-session-id": parentID,
++        "session-id": sessionID,
+@@ -4477,2 +4484,5 @@
        yield* setup
 +      // 正文键保持64字符，而代理header必须区分两个完整的真实Session ID。
 +      currentModel = Model.make({ id: model.id, provider: "openai", route: model.route })
 +      yield* Effect.addFinalizer(() => Effect.sync(() => { currentModel = model }))
        const longSessionID = SessionV2.ID.make(`ses_${"a".repeat(64)}`)
-@@ -4492,1 +4502,3 @@
+@@ -4501,1 +4511,3 @@
        expect(keys[0]).not.toBe(keys[1])
 +      expect(requests.map(request => request.http?.headers?.["session-id"])).toEqual([longSessionID, otherLongSessionID])
 +      expect(requests.every(request => request.http?.headers?.session_id === undefined)).toBe(true)

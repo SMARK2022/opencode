@@ -12,7 +12,7 @@ Content-Transfer-Encoding: 8bit
 
 同步根 README、21 份多语言 README 及 VS Code README 的版本引用；IDE 扩展保持独立版本。逐文件校验 24 个文件均只有版本替换，未混入提示词、计划文档或第三方改动。
 
-适配说明：source的24文件90hunk只有版本字面同步。目标CLI manifest/lock与现有README、IDE配对已经采用1.18.44-smark，保留该版本及v1.18.32迁移基线，不回写1.15或改变独立扩展版本。原固定安装意图落实到实际中英文根README，明确把目标版本传给fork installer；保留上游安装选项及其他翻译正文，不再改不存在的CONTEXT旧版本前像。
+适配说明：source的24文件90hunk只有版本字面同步。目标CLI manifest/lock与现有README、IDE配对已经采用1.19.17-smark，保留该版本及v1.18.32迁移基线，不回写1.15或改变独立扩展版本。原固定安装意图落实到实际中英文根README，明确把目标版本传给fork installer；保留上游安装选项及其他翻译正文，不再改不存在的CONTEXT旧版本前像。
 
 diff --git a/README.md b/README.md
 --- a/README.md
@@ -22,10 +22,10 @@ diff --git a/README.md b/README.md
  curl -fsSL https://opencode.ai/install | bash
  
 -# 指定版本安装
--OPENCODE_VERSION=1.18.44 curl -fsSL https://opencode.ai/install | bash
+-OPENCODE_VERSION=1.19.17 curl -fsSL https://opencode.ai/install | bash
 +# 固定SMARK CLI版本，与packages/opencode/package.json保持一致
 +curl -fsSL https://github.com/SMARK2022/opencode/releases/latest/download/install | \
-+  bash -s -- --version 1.18.44-smark
++  bash -s -- --version 1.19.17-smark
  
  # 软件包管理器
  npm i -g opencode-ai@latest        # 也可使用 bun/pnpm/yarn
@@ -38,7 +38,7 @@ diff --git a/README.en.md b/README.en.md
  
 +# 固定SMARK CLI版本，与packages/opencode/package.json保持一致
 +curl -fsSL https://github.com/SMARK2022/opencode/releases/latest/download/install | \
-+  bash -s -- --version 1.18.44-smark
++  bash -s -- --version 1.19.17-smark
 +
  # Package managers
  npm i -g opencode-ai@latest        # or bun/pnpm/yarn

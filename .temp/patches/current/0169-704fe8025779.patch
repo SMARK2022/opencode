@@ -24,7 +24,7 @@ diff --git a/packages/opencode/src/plugin/openai/codex.ts b/packages/opencode/sr
 +export const CODEX_USER_AGENT = CodexHeaders.USER_AGENT
 +export const CODEX_HEADERS = CodexHeaders.JSON_HEADERS
 +const CODEX_FORM_HEADERS = CodexHeaders.FORM_HEADERS
- const ALLOWED_MODELS = new Set(["gpt-5.5", "gpt-5.3-codex-spark", "gpt-5.4", "gpt-5.4-mini"])
+ const ALLOWED_MODELS = new Set(["gpt-5.5", "gpt-5.3-codex-spark", "gpt-5.4", "gpt-5.4-mini", "gpt-6-sol", "gpt-6-luna"])
  const DISALLOWED_MODELS = new Set(["gpt-5.5-pro"])
  
 @@ -118,8 +133,8 @@ interface CodexAuthPluginOptions {
@@ -124,10 +124,11 @@ diff --git a/packages/opencode/src/plugin/openai/codex.ts b/packages/opencode/sr
 diff --git a/packages/opencode/src/provider/provider.ts b/packages/opencode/src/provider/provider.ts
 --- a/packages/opencode/src/provider/provider.ts
 +++ b/packages/opencode/src/provider/provider.ts
-@@ -1982,15 +1982,11 @@ for (const [id, provider] of configProviders) {
+@@ -149,16 +149,12 @@ function timeoutFetch(options: Record<string, any>) {
            const combined = signals.length === 0 ? null : signals.length === 1 ? signals[0] : AbortSignal.any(signals)
            if (combined) opts.signal = combined
  
+           const configuredUserAgent = requestUserAgent(options)
 -          // #168：仅当当前 UA 为空或仍以配置 UA 为前缀时回写，避免误伤无关 UA
 -          // #168：SDK 可能追加后缀（ai-sdk/...），startsWith 仍允许刷新为配置值
 +          // #169：配置 UA 无条件覆盖；AI SDK 常追加后缀导致 startsWith 失败
@@ -273,8 +274,8 @@ diff --git a/packages/opencode/test/session/llm.test.ts b/packages/opencode/test
 +    },
 +  )
 +
-  it.instance(
-    "sends the parent session header for opencode providers",
+   const headerCases = [
+     { providerID: opencodeFixture.providerID, child: false },
 diff --git a/packages/opencode/src/session/llm/native-runtime.ts b/packages/opencode/src/session/llm/native-runtime.ts
 --- a/packages/opencode/src/session/llm/native-runtime.ts
 +++ b/packages/opencode/src/session/llm/native-runtime.ts

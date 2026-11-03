@@ -1,10 +1,10 @@
 你应当准确完整推进直到最终全部完成，期间不得停下，不得以tool-free结尾。
 
-你当前就在目标工作区 `F:\ML\PythonAIProject\Claude-Code\opencode\thirdparty\opencode-11720` 中执行任务；当前目标代码起点是 upstream `v1.18.32`。不要假设可以读取父级仓库的源码、提交或工作区内容；本 workflow 的所有输入都必须来自当前目标工作区中的 `manifest.json`、`manifest.tsv`、`original/`、`current/`、`records/`、`reports/`、`states/`、目标源码、目标测试和仓库指令。你的任务是把父级仓库已经形成的完整 SMARK Git 提交序列，按原始顺序重放到这个新的目标分支中。目标分支与父级分支的基础代码已经发生变化，因此 patch 出现路径变化、owner 迁移、API 变化、Effect/Schema 变化、测试变化或上下文冲突是正常情况。你的工作是完成高质量的行为重建和目标适配，不能把无法直接 apply 当作跳过理由。
+你当前就在目标工作区 `F:\ML\PythonAIProject\Claude-Code\opencode\thirdparty\opencode-11720` 中执行任务；当前目标代码起点是 upstream `v1.19.5`。不要假设可以读取父级仓库的源码、提交或工作区内容；本 workflow 的所有输入都必须来自当前目标工作区中的 `manifest.json`、`manifest.tsv`、`original/`、`current/`、`records/`、`reports/`、`states/`、目标源码、目标测试和仓库指令。你的任务是把父级仓库已经形成的完整 SMARK Git 提交序列，按原始顺序重放到这个新的目标分支中。目标分支与父级分支的基础代码已经发生变化，因此 patch 出现路径变化、owner 迁移、API 变化、Effect/Schema 变化、测试变化或上下文冲突是正常情况。你的工作是完成高质量的行为重建和目标适配，不能把无法直接 apply 当作跳过理由。
 
 ## 任务背景和事实来源
 
-本轮基线为 `545f51d26cc39a907d2867492d498d9607ea5fa4`，分支为 `smark-port-11832`，工作区原目录名保持不变。下文状态与报告路径分别以 `states/v1.18.32/`、`reports/v1.18.32/` 为根；旧目录内容原位保留作历史证据。1–452 的编号、顺序和 patch 内容沿用既有成果，按新基线重新验证；新增 192 项按依赖顺序统一编号 453–644，已纳入 active manifest，original/current 两侧均使用根目录下的 `NNNN-<sha12>.patch`。
+本轮基线为 `810c0eba1a7348036f8bdf61e6632d0c36c6876c`，分支为 `smark-port-1195`，工作区原目录名保持不变。下文状态与报告路径分别以 `states/v1.19.5/`、`reports/v1.19.5/` 为根；旧目录内容原位保留作历史证据。1–452 的编号、顺序和 patch 内容沿用既有成果，按新基线重新验证；新增 192 项按依赖顺序统一编号 453–644，已纳入 active manifest，original/current 两侧均使用根目录下的 `NNNN-<sha12>.patch`。
 
 目标目录已经预先生成了完整迁移输入。`original/` 保存每个 source commit 的不可变完整 patch，`current/` 保存唯一允许适配目标架构的 patch，manifest 固定 index、SHA、parent、source tip、目标 baseline 和 patch 路径，`records/` 保存每项调查与验证结果。你只允许修改 `current/`、对应 record 以及 source commit 明确要求更新的文档内容，除此之外其他修改均需要在全局缓存文件夹`D:/Temp/opencode/`中进行，同时需要避免将整个worktree或者整个state复制到其中，因为这会在长程任务中逐渐消耗完全磁盘空间；不得修改 `original/`、`state/`等其他文件夹，不得删除或缩短任何 source hunk，不能把完整 commit 变成空 current，也不能因为目标文件路径变化就删掉该行为。目标 worktree 中已有的其他修改和后续提交保持原样；脚本会确认目标 baseline commit 仍存在，再从目标仓库独立复制 exact baseline clone，不能依赖目标当前 HEAD。
 

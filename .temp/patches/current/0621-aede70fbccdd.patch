@@ -2608,6 +2608,13 @@ diff --git a/packages/core/test/tool-edit.test.ts b/packages/core/test/tool-edit
 +          expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe(before)
 +        }
        }),
+@@ -562,4 +609,5 @@
+                   type: "error",
++                  // 同行多个候选仍拒绝；反馈还应给出该真实行号。
+                   value:
+-                    "Found multiple matches for oldString. Provide more surrounding context to make the match unique.",
++                    "Found multiple matches for oldString. Provide more surrounding context to make the match unique.\n\nMatches at line 1.",
+                 })
 diff --git a/packages/opencode/test/tool/write.test.ts b/packages/opencode/test/tool/write.test.ts
 --- a/packages/opencode/test/tool/write.test.ts
 +++ b/packages/opencode/test/tool/write.test.ts

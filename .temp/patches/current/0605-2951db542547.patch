@@ -1346,13 +1346,12 @@ diff --git a/packages/tui/package.json b/packages/tui/package.json
      "./logo": "./src/logo.ts",
      "./ui/dialog": "./src/ui/dialog.tsx",
      "./ui/spinner": "./src/ui/spinner.ts",
-@@ -61,6 +63,7 @@
+@@ -61,5 +63,6 @@
      "diff": "catalog:",
      "effect": "catalog:",
      "fuzzysort": "catalog:",
      "gray-matter": "4.0.3",
 +    "jsonc-parser": "3.3.1",
-     "open": "10.1.2",
      "opentui-spinner": "catalog:",
 
 diff --git a/bun.lock b/bun.lock
@@ -1364,7 +1363,7 @@ diff --git a/bun.lock b/bun.lock
          "fuzzysort": "catalog:",
          "gray-matter": "4.0.3",
 +        "jsonc-parser": "3.3.1",
-         "open": "10.1.2",
+         "opentui-spinner": "catalog:",
 
 diff --git a/packages/tui/test/prompt/prompt-voice-input.test.ts b/packages/tui/test/prompt/prompt-voice-input.test.ts
 --- a/packages/tui/test/prompt/prompt-voice-input.test.ts
