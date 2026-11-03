@@ -3364,8 +3364,8 @@ index 0000000..55dd005
 +  for (const platform of ["win32", "linux"] as const) {
 +    test(`render and command description stay within R6 budget: ${platform}/${name}`, () => {
 +      const prompt = ShellPrompt.render(name, platform, { maxLines: 1000, maxBytes: 16384 }, 120000)
-+      // 路径属于机器环境，不是提示改动；替换成冻结时路径以免 CI 用户名改变预算。
-+      const text = prompt.description.replaceAll(Global.Path.tmp, String.raw`D:\Temp\opencode`)
++      // 环境路径和checkout换行不是提示扩张；统一为冻结时的路径与LF再比较原预算。
++      const text = prompt.description.replaceAll("\r\n", "\n").replaceAll(Global.Path.tmp, String.raw`D:\Temp\opencode`)
 +      const command = ToolJsonSchema.fromSchema(prompt.parameters).properties?.command
 +      if (!command || typeof command !== "object" || typeof command.description !== "string") {
 +        throw new Error("missing command description")

@@ -520,3 +520,13 @@ new file mode 100644
 +    engine.detach()
 +  }
 +})
+
+diff --git a/packages/tui/test/routes/session/shell-output-spacing.test.ts b/packages/tui/test/routes/session/shell-output-spacing.test.ts
+--- a/packages/tui/test/routes/session/shell-output-spacing.test.ts
++++ b/packages/tui/test/routes/session/shell-output-spacing.test.ts
+@@ -65,2 +65,4 @@
+-    expect(blockToolSource).toContain("const collapsed = createMemo(() => props.preview !== undefined)")
++    // 存在性检查与挂载共用一次getter求值，不能要求恢复已修复的重复构树路径。
++    expect(blockToolSource).toContain("const previewTree = createMemo(() => props.preview)")
++    expect(blockToolSource).toContain("const collapsed = createMemo(() => previewTree() !== undefined)")
+     expect(blockToolSource).toContain("createSignal(!collapsed())")

@@ -976,15 +976,16 @@ diff --git a/packages/opencode/src/cli/cmd/stats-data.ts b/packages/opencode/src
            series.points.push(point)
            return series
          }, emptySeriesTotals(id)),
-@@ -476,21 +518,29 @@ const getSessions = Effect.fnUntraced(function* (cutoff: number) {
+@@ -476,21 +518,30 @@ const getSessions = Effect.fnUntraced(function* (cutoff: number) {
    return rows.map((row) => Session.fromRow(row))
  })
  
 +// #483：一次批量读取即可覆盖所有聚合行，避免在 project group 循环中形成 N+1 查询
 +const getProjects = Effect.fnUntraced(function* () {
 +  const { db } = yield* Database.Service
++  // 统计只展示历史原文；跨系统路径不经过本机AbsolutePath解码，不改变写入或文件访问校验。
 +  return yield* db
-+    .select({ id: ProjectTable.id, name: ProjectTable.name, worktree: ProjectTable.worktree })
++    .select({ id: ProjectTable.id, name: ProjectTable.name, worktree: sql<string>`${ProjectTable.worktree}` })
 +    .from(ProjectTable)
 +    .all()
 +    .pipe(Effect.orDie)
@@ -2131,7 +2132,8 @@ diff --git a/packages/opencode/test/cli/stats-data.test.ts b/packages/opencode/t
 +import { afterEach, beforeEach, describe, expect, test } from "bun:test"
  import { Effect, Layer } from "effect"
  import { LayerNode } from "@opencode-ai/core/effect/layer-node"
- import { eq } from "drizzle-orm"
+-import { eq } from "drizzle-orm"
++import { eq, sql } from "drizzle-orm"
 +import yargs from "yargs/yargs"
  // #236：aggregateStats 聚合 session+part 数据计算工具归因统计
  import { aggregateStats } from "@/cli/cmd/stats-data"
@@ -2477,7 +2479,7 @@ diff --git a/packages/opencode/test/cli/stats-data.test.ts b/packages/opencode/t
 +      const { db } = yield* Database.Service
 +      yield* db
 +        .update(ProjectTable)
-+        .set({ name: null, worktree: "H:\\Hyper\\FRCheck" as never })
++        .set({ name: null, worktree: sql`${"H:\\Hyper\\FRCheck"}` })
 +        .where(eq(ProjectTable.id, result.projectID))
 +        .run()
 +      const report = yield* aggregateStats()

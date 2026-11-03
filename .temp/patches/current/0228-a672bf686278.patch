@@ -237,7 +237,7 @@ diff --git a/packages/opencode/test/server/session-list.test.ts b/packages/openc
      "does not filter by directory when directory is omitted",
      () =>
        Effect.gen(function* () {
-@@ -60,7 +133,255 @@
+@@ -60,7 +133,256 @@
    )
  
    it.instance(
@@ -389,7 +389,8 @@ diff --git a/packages/opencode/test/server/session-list.test.ts b/packages/openc
 +        ).pipe(Effect.ignore),
 +      )
 +
-+      yield* Database.Service.use(({ db }) =>
++      // Windows历史路径的写入也在相同平台语义域内，不能仅在查询时切换。
++      yield* withPlatform("win32", Database.Service.use(({ db }) =>
 +        Effect.gen(function* () {
 +          yield* db.insert(ProjectTable)
 +// #228：project 行固定 worktree——与 session 行的 directory/path 分离构造
@@ -422,7 +423,7 @@ diff --git a/packages/opencode/test/server/session-list.test.ts b/packages/openc
 +            .where(eq(SessionTable.id, other.id))
 +            .run()
 +        }),
-+      )
++      ))
 +
 +      const ctx = {
 +// #228：win32 实例上下文——directory 用小写+尾部斜杠验证归一化路径
@@ -493,7 +494,7 @@ diff --git a/packages/opencode/test/server/session-list.test.ts b/packages/openc
      () =>
        Effect.gen(function* () {
          const test = yield* TestInstance
-@@ -204,6 +525,7 @@
+@@ -204,6 +526,7 @@
          )
  
          const { db } = yield* Database.Service
@@ -501,7 +502,7 @@ diff --git a/packages/opencode/test/server/session-list.test.ts b/packages/openc
          yield* db
            .update(SessionTable)
            .set({ path: null })
-@@ -335,6 +657,7 @@
+@@ -335,6 +658,7 @@
    // #143：git 子项目列表必须 OR 进 global 项目父会话
    it.instance(
      "includes global parent sessions from a git child project",
@@ -509,7 +510,7 @@ diff --git a/packages/opencode/test/server/session-list.test.ts b/packages/openc
      () =>
        Effect.gen(function* () {
          const test = yield* TestInstance
-@@ -352,6 +675,7 @@
+@@ -352,6 +676,7 @@
          })
          // #143：无 git 的 outer 会话 project_id=global
          const parent = yield* withSession({ title: "global-parent" }).pipe(provideInstance(test.directory))

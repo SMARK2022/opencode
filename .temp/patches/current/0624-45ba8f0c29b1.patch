@@ -3859,3 +3859,13 @@ diff --git a/packages/tui/test/cli/cmd/tui/sync-live-hydration.test.tsx b/packag
 -    const hydrate = sync.session.sync(sessionID)
      await wait(() => requested)
      const hidden = { time: 9, reason: "undo" as const }
+
+diff --git a/packages/tui/test/routes/session/shell-output-spacing.test.ts b/packages/tui/test/routes/session/shell-output-spacing.test.ts
+--- a/packages/tui/test/routes/session/shell-output-spacing.test.ts
++++ b/packages/tui/test/routes/session/shell-output-spacing.test.ts
+@@ -67,2 +67,4 @@
+     expect(blockToolSource).toContain("const collapsed = createMemo(() => previewTree() !== undefined)")
+-    expect(blockToolSource).toContain("createSignal(!collapsed())")
++    // 正文驻留改由外层交互owner控制，收起时不保留第二份内置展开状态。
++    expect(blockToolSource).toContain("<Show when={!collapsed()}>")
++    expect(blockToolSource).not.toContain("createSignal(!collapsed())")

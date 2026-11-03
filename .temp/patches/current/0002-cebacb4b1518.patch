@@ -746,11 +746,12 @@ diff --git a/packages/core/test/tool-read.test.ts b/packages/core/test/tool-read
  
  describe("ReadTool", () => {
    beforeEach(() => {
-@@ -199,6 +205,95 @@
+@@ -199,6 +205,96 @@
 -  it.effect("asks for external_directory approval before reading an external absolute path", () =>
 +  itFiles.live("attaches nearby rules using actual visible results without hiding file contents", () => Effect.gen(function* () {
 +    const fs = yield* FSUtil.Service
-+    const directory = yield* fs.makeTempDirectoryScoped()
++    // macOS临时目录可经/var别名访问，夹具与真实读取结果共用规范路径。
++    const directory = yield* fs.makeTempDirectoryScoped().pipe(Effect.flatMap(directory => fs.realPath(directory)))
 +    const nested = path.join(directory, "nested")
 +    const target = path.join(nested, "notes.txt")
 +    const rules = path.join(nested, "AGENTS.md")

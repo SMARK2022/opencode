@@ -8385,3 +8385,19 @@ diff --git a/packages/core/schema.json b/packages/core/schema.json
 +    },
      {
        "columns": [
+
+diff --git a/packages/opencode/test/cli/help/__snapshots__/help-snapshots.test.ts.snap b/packages/opencode/test/cli/help/__snapshots__/help-snapshots.test.ts.snap
+--- a/packages/opencode/test/cli/help/__snapshots__/help-snapshots.test.ts.snap
++++ b/packages/opencode/test/cli/help/__snapshots__/help-snapshots.test.ts.snap
+@@ -417,2 +417,9 @@
+-  opencode db [query]     open an interactive sqlite3 shell or run a query                 [default]
+-  opencode db path        print the database path
++  opencode db compress         freeze eligible cold fields into the database cold store
++  opencode db expand           thaw cold fields back into the primary tables
++  opencode db status           show cold-storage metrics or a persisted task
++  opencode db resume <taskID>  resume an interrupted cold-storage task
++  opencode db verify           verify cold payload hashes and reference counts
++  opencode db cleanup          report or remove unreferenced cold payloads
++  opencode db vacuum           reclaim unused SQLite pages
++  opencode db [query]          open an interactive sqlite3 shell or run a query            [default]
++  opencode db path             print the database path
