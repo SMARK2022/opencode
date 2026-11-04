@@ -408,7 +408,7 @@ diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.t
 +              const url = new URL(`/session/${sessionID}/goal`, sdk.url)
 +              const dir = result.path.directory || sdk.directory
 +              if (dir) url.searchParams.set("directory", dir)
-+              const resp = await sdk.fetch(url)
++              const resp = await sdk.fetch(url, { signal: sdk.signal })
 +              if (resp.ok) {
 +                const body = (await resp.json()) as { goal?: SessionGoalInfo }
 +                setStore("session_goal", sessionID, body.goal ?? undefined)

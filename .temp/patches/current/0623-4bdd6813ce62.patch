@@ -1123,16 +1123,24 @@ diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.t
      }
  
      async function bootstrap(input: { fatal?: boolean } = {}) {
-@@ -1243,16 +1311,22 @@ export const {
-         async sync(sessionID: string, options?: { force?: boolean }) {
+@@ -1243,24 +1311,30 @@ export const {
+         async sync(sessionID: string, options?: { force?: boolean }): Promise<void> {
+           // 已退出的拥有者不能让排队强刷继续发起新的 HTTP 请求。
+           if (sdk.signal.aborted) return
            // #132：force 忽略 fullSynced 缓存
            if (!options?.force && fullSyncedSessions.has(sessionID)) return
 +          // 沿用force等待与非force加入；取得执行权后才创建租约，不使被加入的请求失效。
-           while (syncingSessions.has(sessionID)) {
+           if (syncingSessions.has(sessionID)) {
              if (!options?.force) return syncingSessions.get(sessionID)
-             // #132：重连等旧请求收尾并重查 owner，再取新快照，避免并发覆盖 tracker。
-             // #132：旧请求失败仍需补读；仅忽略旧失败，新快照错误照常传出。
-             await syncingSessions.get(sessionID)!.catch(() => undefined)
+             const queued = queuedSyncs.get(sessionID)
+             if (queued) return queued
+             // 旧任务失败仍要补读；尾随开始后新到的 force 可以再要求新快照。
+             const task = syncingSessions.get(sessionID)!.catch(() => undefined).then(() => {
+               queuedSyncs.delete(sessionID)
+               return result.session.sync(sessionID, options)
+             })
+             queuedSyncs.set(sessionID, task)
+             return task
            }
            // 请求开始前结清旧窗；之后到达的片段才属于本次 hydration tracker。
            flushPartDeltas()
@@ -1161,7 +1169,7 @@ diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.t
                const url = new URL(`/session/${sessionID}/goal`, sdk.url)
                const dir = result.path.directory || sdk.directory
                if (dir) url.searchParams.set("directory", dir)
-               const resp = await sdk.fetch(url)
+               const resp = await sdk.fetch(url, { signal: sdk.signal })
 +              if (!alive()) return
                if (resp.ok) {
                  const body = (await resp.json()) as { goal?: SessionGoalInfo }
@@ -1216,10 +1224,15 @@ diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.t
                      ...currentParts.filter(
 -                      (part) => tracker.parts.has(part.id) && !parts.some((item) => item.id === part.id),
 +                      (part) => !partGone(part.sessionID, part.messageID, part.id) && tracker.parts.has(part.id) && !parts.some((item) => item.id === part.id),
-@@ -1360,6 +1445,15 @@ export const {
+@@ -1359,1 +1444,1 @@
+-                  draft.part[message.info.id] = parts
++                  setStore("part", message.info.id, reconcile(parts))
+@@ -1360,6 +1445,16 @@ export const {
                  }
                  for (const message of removed) delete draft.part[message.id]
-                 draft.message[sessionID] = visible
+-                draft.message[sessionID] = visible
++                // 同 ID 消息与部件原位更新，避免整页刷新拆建已有渲染树。
++                setStore("message", sessionID, reconcile(visible))
 +                // 窗口外与 part-first 对象在 authoritative 页落定后释放；
 +                // 请求期间有变化的 Part 保留，等待其 Message 到达。
 +                const finalIDs = new Set(visible.map((message) => message.id))
@@ -1241,7 +1254,7 @@ diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.t
              // data??[] 兼容旧 daemon 无 headers 响应；投影后再决定 totals 来源。
              const projected = projectTuiDiff(diff.data ?? [])
              const files = diff.response?.headers.get(TUI_DIFF_TOTAL_FILES) ?? null
-@@ -1402,8 +1498,12 @@ export const {
+@@ -1402,12 +1498,16 @@ export const {
              )
              fullSyncedSessions.add(sessionID)
            })().finally(() => {
@@ -1253,6 +1266,10 @@ diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.t
 +              hydratingSessions.delete(sessionID)
 +              syncTokens.delete(sessionID)
 +            }
+           }).catch((error: unknown) => {
+             // 只结算本界面退出产生的取消，正常运行中的请求失败仍然拒绝。
+             if (sdk.signal.aborted && error instanceof Error && error.name === "AbortError") return
+             throw error
            })
            syncingSessions.set(sessionID, task)
            return task

@@ -47,7 +47,7 @@ diff --git a/packages/core/src/session/info.ts b/packages/core/src/session/info.
 +import { getTableColumns, sql } from "drizzle-orm"
 +import { Session } from "@opencode-ai/schema/session"
  import { AgentV2 } from "../agent"
-@@ -13,3 +15,91 @@
+@@ -13,3 +15,93 @@
  
 -export function fromRow(row: typeof SessionTable.$inferSelect): SessionSchema.Info {
 +// HTTP、列表和事件共用现有 Session SELECT 的请求投影，避免各视图重复扫描历史或另建账本。
@@ -79,7 +79,8 @@ diff --git a/packages/core/src/session/info.ts b/packages/core/src/session/info.
 +        UNION ALL SELECT * FROM native_request)
 +      -- admission 或 promotion 决定最新身份；新 admission 等待时不能借用旧轮次。
 +      ORDER BY position DESC, time_created DESC, id DESC LIMIT 1
-+    ), assistants AS (
++    ), assistants AS MATERIALIZED (
++      -- 固定一次请求的助手集合，避免后续各项统计重复展开整段历史。
 +      -- V1 明确 parentID 归属，不能只按最后助手或时间范围猜测请求。
 +      SELECT m.id, m.data, m.time_created AS position, 'v1' AS kind
 +      FROM message m JOIN current_request r ON r.kind = 'v1'
@@ -97,7 +98,8 @@ diff --git a/packages/core/src/session/info.ts b/packages/core/src/session/info.
 +        )
 +    ), settled AS (
 +      -- V1 所有 step-finish 与 native 每步助手结算互斥，避免重复累计。
-+      SELECT p.data FROM part p JOIN assistants a ON a.kind = 'v1' AND a.id = p.message_id
++      -- 从已选助手点查步骤，不能让规划器改为扫描整个会话的 Part。
++      SELECT p.data FROM assistants a CROSS JOIN part p INDEXED BY part_message_id_id_idx ON a.kind = 'v1' AND a.id = p.message_id
 +      WHERE p.session_id = "session"."id" AND json_extract(p.data, '$.type') = 'step-finish'
 +      UNION ALL
 +      SELECT data FROM assistants WHERE kind = 'native'
@@ -140,7 +142,7 @@ diff --git a/packages/core/src/session/info.ts b/packages/core/src/session/info.
 +
 +export function fromRow(row: typeof SessionTable.$inferSelect & { request?: Session.RequestUsage }): SessionSchema.Info {
    return SessionSchema.Info.make({
-@@ -28,2 +118,3 @@
+@@ -28,2 +120,3 @@
      cost: row.cost,
 +    request: row.request ?? undefined,
      tokens: {

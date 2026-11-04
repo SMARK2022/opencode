@@ -17,7 +17,7 @@ diff --git a/packages/core/src/session/info.ts b/packages/core/src/session/info.
        SELECT * FROM assistants ORDER BY position DESC, id DESC LIMIT 1
 +    ), last_step AS (
 +      -- V1 parts 按 ID 排序，最后 step-finish 不等于最后一个任意 part。
-+      SELECT p.id, p.data FROM part p JOIN last_assistant a ON a.kind = 'v1' AND a.id = p.message_id
++      SELECT p.id, p.data FROM last_assistant a CROSS JOIN part p INDEXED BY part_message_id_id_idx ON a.kind = 'v1' AND a.id = p.message_id
 +      WHERE p.session_id = "session"."id" AND json_extract(p.data, '$.type') = 'step-finish'
 +      ORDER BY p.id DESC LIMIT 1
 +    ), step AS (

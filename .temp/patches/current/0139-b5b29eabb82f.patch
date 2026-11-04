@@ -248,7 +248,7 @@ index 93180c6e21..ddf8810d0f 100644
            await sdk.sync.start().catch(() => {})
          }
        } else {
-@@ -145,7 +183,9 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
+@@ -145,7 +183,11 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
        directory: props.directory,
        event: emitter,
        fetch: props.fetch ?? fetch,
@@ -256,9 +256,134 @@ index 93180c6e21..ddf8810d0f 100644
 +      get url() {
 +        return url
 +      },
++      // 读取拥有者共享退出信号，消费者只处理自身生命周期产生的取消。
++      signal: abort.signal,
      }
    },
  })
+diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.tsx
+--- a/packages/tui/src/context/sync.tsx
++++ b/packages/tui/src/context/sync.tsx
+@@ -580,1 +580,2 @@
+         .catch(async (e) => {
++          if (sdk.signal.aborted && e instanceof Error && e.name === "AbortError") return
+@@ -630,1 +631,3 @@
+         async sync(sessionID: string, options?: { force?: boolean }): Promise<void> {
++          // 已退出的拥有者不能让排队强刷继续发起新的 HTTP 请求。
++          if (sdk.signal.aborted) return
+@@ -707,3 +710,7 @@
+             syncingSessions.delete(sessionID)
+             hydratingSessions.delete(sessionID)
+-          })
++          }).catch((error: unknown) => {
++            // 只结算本界面退出产生的取消，正常运行中的请求失败仍然拒绝。
++            if (sdk.signal.aborted && error instanceof Error && error.name === "AbortError") return
++            throw error
++          })
+diff --git a/packages/tui/src/context/data.tsx b/packages/tui/src/context/data.tsx
+--- a/packages/tui/src/context/data.tsx
++++ b/packages/tui/src/context/data.tsx
+@@ -99,7 +99,13 @@
+-        case "catalog.updated":
++        case "catalog.updated": {
++          // 广播只更新已加载的目录，不能为无人消费的模型表触发首次读取。
++          const location = store.location[locationKey(event.location ?? defaultLocation())]
+           void Promise.all([
+-            result.location.model.refresh(event.location),
+-            result.location.provider.refresh(event.location),
+-          ])
++            location?.model && result.location.model.refresh(event.location),
++            location?.provider && result.location.provider.refresh(event.location),
++          ]).catch((error: unknown) => {
++            if (sdk.signal.aborted && error instanceof Error && error.name === "AbortError") return
++            console.error("Failed to refresh location catalog", error)
++          })
+           break
++        }
+         case "session.next.agent.switched":
+@@ -382,10 +388,19 @@
+         case "reference.updated":
+-          void result.location.reference.refresh()
++          if (store.location[locationKey(defaultLocation())]?.reference)
++            void result.location.reference.refresh().catch((error: unknown) => {
++              if (sdk.signal.aborted && error instanceof Error && error.name === "AbortError") return
++              console.error("Failed to refresh references", error)
++            })
+           break
+-        case "integration.updated":
++        case "integration.updated": {
++          const location = store.location[locationKey(event.location ?? defaultLocation())]
+           void Promise.all([
+-            result.location.integration.refresh(event.location),
+-            result.location.model.refresh(event.location),
+-            result.location.provider.refresh(event.location),
+-          ])
++            location?.integration && result.location.integration.refresh(event.location),
++            location?.model && result.location.model.refresh(event.location),
++            location?.provider && result.location.provider.refresh(event.location),
++          ]).catch((error: unknown) => {
++            if (sdk.signal.aborted && error instanceof Error && error.name === "AbortError") return
++            console.error("Failed to refresh integrations", error)
++          })
+           break
++        }
+@@ -483,1 +498,2 @@
+-            setStore("location", key, "agent", result.data.data)
++            // 响应直接建立并合并所需桶，不依赖定位预取的完成顺序。
++            setStore("location", key, { agent: result.data.data })
+@@ -494,1 +510,1 @@
+-            setStore("location", key, "command", result.data.data)
++            setStore("location", key, { command: result.data.data })
+@@ -506,1 +522,1 @@
+-            setStore("location", key, "integration", result.data.data)
++            setStore("location", key, { integration: result.data.data })
+@@ -516,1 +532,1 @@
+-            setStore("location", key, "model", result.data.data)
++            setStore("location", key, { model: result.data.data })
+@@ -526,1 +542,1 @@
+-            setStore("location", key, "provider", result.data.data)
++            setStore("location", key, { provider: result.data.data })
+@@ -534,4 +549,5 @@
+             const result = await sdk.client.v2.reference.list({ location: locationQuery(ref) }, { throwOnError: true })
+             const key = locationKey(result.data.location)
++            if (!ref) setDefaultLocation({ directory: result.data.location.directory, workspaceID: result.data.location.workspaceID })
+-            setStore("location", key, "reference", result.data.data)
++            setStore("location", key, { reference: result.data.data })
+           },
+@@ -546,1 +563,1 @@
+-            setStore("location", key, "skill", result.data.data)
++            setStore("location", key, { skill: result.data.data })
+@@ -551,15 +567,0 @@
+-    onMount(() => {
+-      void Promise.allSettled([
+-        result.location.refresh(),
+-        result.location.agent.refresh(),
+-        result.location.integration.refresh(),
+-        result.location.model.refresh(),
+-        result.location.provider.refresh(),
+-        result.location.reference.refresh(),
+-        result.location.command.refresh(),
+-        result.location.skill.refresh(),
+-      ]).then((settled) => {
+-        for (const failure of settled.filter((item) => item.status === "rejected"))
+-          console.error("Failed to refresh default location data", failure.reason)
+-      })
+-    })
+diff --git a/packages/tui/src/component/prompt/autocomplete.tsx b/packages/tui/src/component/prompt/autocomplete.tsx
+--- a/packages/tui/src/component/prompt/autocomplete.tsx
++++ b/packages/tui/src/component/prompt/autocomplete.tsx
+@@ -279,3 +279,11 @@
+ 
++  // 引用仅在打开 @ 补全时读取，不挤占会话启动、发送和撤回的请求通道。
++  createEffect(() => {
++    if (store.visible !== "@") return
++    void data.location.reference.refresh().catch((error: unknown) => {
++      if (sdk.signal.aborted && error instanceof Error && error.name === "AbortError") return
++      console.error("Failed to refresh references", error)
++    })
++  })
+   const references = createMemo(() => data.location.reference.list() ?? [])
+ 
 diff --git a/packages/tui/src/app.tsx b/packages/tui/src/app.tsx
 index a17dec9d55..c5687737f8 100644
 --- a/packages/tui/src/app.tsx

@@ -131,10 +131,12 @@ index 9365a8abdc..d792279560 100644
  import { useKV } from "./kv"
  import { usePermission } from "./permission"
  
-@@ -150,2 +152,4 @@
+@@ -150,2 +152,6 @@
      const fullSyncedSessions = new Set<string>()
 +    // #132：区分首次 connected 与重连
 +    let connectedOnce = false
++    // 同一挂起期间的 force 共用尾随刷新，不把重连次数变成整页请求队列。
++    const queuedSyncs = new Map<string, Promise<void>>()
      const syncingSessions = new Map<string, Promise<void>>()
 @@ -155,9 +159,7 @@ export const {
        if (!kv.get("session_directory_filter_enabled", true)) return { scope: "project" }
@@ -163,22 +165,28 @@ index 9365a8abdc..d792279560 100644
          case "permission.replied": {
            const requests = store.permission[event.properties.sessionID]
            if (!requests) break
-@@ -619,8 +630,13 @@ export const {
+@@ -619,8 +630,19 @@ export const {
            if (last.role === "user") return "working"
            return last.time.completed ? "idle" : "working"
          },
 -        async sync(sessionID: string) {
 -          if (fullSyncedSessions.has(sessionID)) return
-+        async sync(sessionID: string, options?: { force?: boolean }) {
++        async sync(sessionID: string, options?: { force?: boolean }): Promise<void> {
 +          // #132：force 忽略 fullSynced 缓存
 +          if (!options?.force && fullSyncedSessions.has(sessionID)) return
 -          const syncing = syncingSessions.get(sessionID)
 -          if (syncing) return syncing
-+          while (syncingSessions.has(sessionID)) {
++          if (syncingSessions.has(sessionID)) {
 +            if (!options?.force) return syncingSessions.get(sessionID)
-+            // #132：重连等旧请求收尾并重查 owner，再取新快照，避免并发覆盖 tracker。
-+            // #132：旧请求失败仍需补读；仅忽略旧失败，新快照错误照常传出。
-+            await syncingSessions.get(sessionID)!.catch(() => undefined)
++            const queued = queuedSyncs.get(sessionID)
++            if (queued) return queued
++            // 旧任务失败仍要补读；尾随开始后新到的 force 可以再要求新快照。
++            const task = syncingSessions.get(sessionID)!.catch(() => undefined).then(() => {
++              queuedSyncs.delete(sessionID)
++              return result.session.sync(sessionID, options)
++            })
++            queuedSyncs.set(sessionID, task)
++            return task
 +          }
            const tracker = { messages: new Set<string>(), parts: new Set<string>(), session: undefined }
 diff --git a/packages/core/src/database/migration/20260723100000_normalize_global_session_path.ts b/packages/core/src/database/migration/20260723100000_normalize_global_session_path.ts
@@ -277,7 +285,7 @@ index 4d6d6a7005..0f1c49feef 100644
 diff --git a/packages/tui/test/cli/cmd/tui/sync-live-hydration.test.tsx b/packages/tui/test/cli/cmd/tui/sync-live-hydration.test.tsx
 --- a/packages/tui/test/cli/cmd/tui/sync-live-hydration.test.tsx
 +++ b/packages/tui/test/cli/cmd/tui/sync-live-hydration.test.tsx
-@@ -105,10 +105,116 @@ test("stale session hydration does not overwrite live message parts", async () => {
+@@ -105,10 +105,117 @@ test("stale session hydration does not overwrite live message parts", async () => {
      expect(sync.data.part[messageID][0]).toMatchObject({ text: "visible live content" })
    } finally {
      app.renderer.destroy()
@@ -323,7 +331,8 @@ diff --git a/packages/tui/test/cli/cmd/tui/sync-live-hydration.test.tsx b/packag
 +    resolveMessages(stale)
 +    // #132：messages 已读取但另一 RPC 尚未结束，force 不能复用这轮断线前快照。
 +    await wait(() => stale.bodyUsed)
-+    const forced = sync.session.sync(sessionID, { force: true })
++    // 一次拥塞中的重复重连只需一轮新快照，不能串行重读十六次正文。
++    const forced = Promise.all(Array.from({ length: 16 }, () => sync.session.sync(sessionID, { force: true })))
 +    expect(calls).toEqual({ get: 1, message: 1, todo: 1, diff: 1 })
 +    resolvePending(json([]))
 +    await Promise.all([hydrate, joined])

@@ -979,6 +979,9 @@ diff --git a/packages/server/src/handlers/event.ts b/packages/server/src/handler
 diff --git a/packages/tui/src/context/data.tsx b/packages/tui/src/context/data.tsx
 --- a/packages/tui/src/context/data.tsx
 +++ b/packages/tui/src/context/data.tsx
+@@ -21,1 +21,1 @@
+-import { createStore, produce } from "solid-js/store"
++import { createStore, produce, reconcile } from "solid-js/store"
 @@ -25 +25,2 @@
  import { createSignal, onCleanup, onMount } from "solid-js"
 +import { PartView } from "@opencode-ai/core/session/part-view"
@@ -1000,9 +1003,51 @@ diff --git a/packages/tui/src/context/data.tsx b/packages/tui/src/context/data.t
                { sessionID },
                { throwOnError: true, headers: { "x-opencode-tui-message-projection": "viewer" } },
              )
+@@ -467,1 +472,1 @@
+-            setStore("session", "message", sessionID, result.data.data)
++            setStore("session", "message", sessionID, reconcile(result.data.data))
 diff --git a/packages/tui/test/cli/tui/data.test.tsx b/packages/tui/test/cli/tui/data.test.tsx
 --- a/packages/tui/test/cli/tui/data.test.tsx
 +++ b/packages/tui/test/cli/tui/data.test.tsx
+@@ -166,4 +166,10 @@
+   try {
+     await mounted
+-    await wait(() => data.location.integration.list() !== undefined)
++    expect(requests).toEqual({ integration: 0, model: 0, provider: 0 })
++    // 事件失效仍覆盖真实消费者；先显式加载，不能靠挂载时的多余请求准备测试。
++    await Promise.all([
++      data.location.integration.refresh(),
++      data.location.model.refresh(),
++      data.location.provider.refresh(),
++    ])
+     expect(data.location.integration.list()).toEqual([])
+@@ -195,4 +201,9 @@
++  let data!: ReturnType<typeof useData>
++  function Probe() {
++    data = useData()
++    return <box />
++  }
+   const app = await testRender(() => (
+     <TestTuiContexts>
+       <SDKProvider url="http://test" directory={directory} testTransport={{ events: events.source, fetch: calls.fetch }}>
+         <ProjectProvider>
+@@ -200,1 +211,1 @@
+-            <box />
++            <Probe />
+@@ -207,3 +218,5 @@
+   try {
+-    await wait(() => requests.model > 0 && requests.provider > 0)
++    await wait(() => !!data)
++    expect(requests).toEqual({ model: 0, provider: 0 })
++    await Promise.all([data.location.model.refresh(), data.location.provider.refresh()])
+     const before = { ...requests }
+@@ -252,4 +265,5 @@
+   try {
+     await mounted
+-    await wait(() => requests === 1)
++    expect(requests).toBe(0)
++    await data.location.reference.refresh()
+     emitEvent(events, { id: "evt_reference_1", type: "reference.updated", properties: {} })
 @@ -263,3 +263,6 @@
  test("settles pending tools when a live failure arrives", async () => {
    const events = createEventSource()
@@ -1062,6 +1107,45 @@ diff --git a/packages/tui/test/cli/tui/data.test.tsx b/packages/tui/test/cli/tui
 +    expect(sync.session.message.list("session-unloaded")).toBeUndefined()
      expect(sync.session.message.list("session-1")?.[0]).toMatchObject({
        id: "msg_context_1",
+diff --git a/packages/tui/test/cli/cmd/tui/sync-snapshot-reuse.test.ts b/packages/tui/test/cli/cmd/tui/sync-snapshot-reuse.test.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/tui/test/cli/cmd/tui/sync-snapshot-reuse.test.ts
+@@ -0,0 +1,34 @@
++import { expect, test } from "bun:test"
++import { tmpdir } from "../../../fixture/fixture"
++import { json, mount } from "./sync-fixture"
++
++test("refresh reuses message and part identities while applying changed values", async () => {
++  await using tmp = await tmpdir()
++  await Bun.write(`${tmp.path}/kv.json`, "{}")
++  const id = "ses_snapshot_identity"
++  const messageID = "msg_snapshot_identity"
++  const partID = "prt_snapshot_identity"
++  let reads = 0
++  const { app, sync } = await mount(url => {
++    if (url.pathname === `/session/${id}`) return json({ id, title: "identity", time: { created: 0, updated: 0 } })
++    if (url.pathname === `/session/${id}/message`) return json([{
++      info: { id: messageID, sessionID: id, role: "assistant", parentID: "msg_user", agent: "build", modelID: "model", providerID: "test", mode: "build", path: { cwd: "/tmp/opencode", root: "/tmp/opencode" }, cost: 0, tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } }, time: { created: 1, completed: ++reads + 1 } },
++      parts: [{ id: partID, messageID, sessionID: id, type: "text", text: reads === 1 ? "before" : "after refreshed" }],
++    }])
++    if ([`/session/${id}/todo`, `/session/${id}/diff`].includes(url.pathname)) return json([])
++    if (url.pathname === `/session/${id}/goal`) return json({ goal: null })
++  }, tmp.path)
++  try {
++    const lease = await sync.session.acquireParts(id)
++    const message = sync.data.message[id][0]
++    const part = sync.data.part[messageID][0]
++    await sync.session.sync(id, { force: true })
++    // 验证复用而不是停止更新：相同身份仍要接收服务端的新完成时间和正文。
++    expect({ message: sync.data.message[id][0] === message, part: sync.data.part[messageID][0] === part }).toEqual({ message: true, part: true })
++    expect(sync.data.message[id][0].time).toMatchObject({ completed: 3 })
++    expect(sync.data.part[messageID][0]).toMatchObject({ type: "text", text: "after refreshed" })
++    lease.release()
++  } finally {
++    app.renderer.destroy()
++  }
++})
 diff --git a/packages/tui/test/cli/cmd/tui/sync-parts-lifetime.test.tsx b/packages/tui/test/cli/cmd/tui/sync-parts-lifetime.test.tsx
 new file mode 100644
 --- /dev/null
@@ -3348,6 +3432,12 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
                    <text fg={theme.textMuted}>
                      <span style={{ fg: theme.textMuted }}>
                        {Locale.todayTimeOrDateTime(props.message.time.created)}
+@@ -1915,3 +2335,4 @@
+   const [turnRequest] = createResource(
+-    () => footerVisible()
++    // 屏外正文已卸载时不预取账本；重新进入视窗仍读取原精确请求。
++    () => footerVisible() && ((ctx.messageView(props.message.id)?.mounted ?? true) || ctx.pinnedMessages().has(props.message.id))
+       ? `${props.message.sessionID}:${props.message.parentID}:${messages().flatMap(message => message.role === "assistant" && message.parentID === props.message.parentID ? [`${message.id}@${message.time.completed ?? "running"}`] : []).join(",")}`
 @@ -1935,8 +2355,49 @@
    const childShortcut = useCommandShortcut("session.child.first")
    const backgroundShortcut = useCommandShortcut("session.background")

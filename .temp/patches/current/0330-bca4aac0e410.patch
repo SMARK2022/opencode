@@ -352,7 +352,7 @@ diff --git a/packages/core/src/session/info.ts b/packages/core/src/session/info.
 +          AND json_extract(a.data, '$.role') = 'assistant'
 +          AND json_extract(a.data, '$.parentID') = candidates.id
 +      ) END DESC, position DESC, time_created DESC, id DESC LIMIT 1
-     ), assistants AS (
+     ), assistants AS MATERIALIZED (
 diff --git a/packages/opencode/test/session/session.test.ts b/packages/opencode/test/session/session.test.ts
 --- a/packages/opencode/test/session/session.test.ts
 +++ b/packages/opencode/test/session/session.test.ts

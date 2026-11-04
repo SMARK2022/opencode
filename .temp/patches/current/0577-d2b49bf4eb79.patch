@@ -1157,7 +1157,7 @@ diff --git a/packages/tui/test/cli/cmd/tui/sync.test.tsx b/packages/tui/test/cli
 diff --git a/packages/tui/test/cli/cmd/tui/sync-live-hydration.test.tsx b/packages/tui/test/cli/cmd/tui/sync-live-hydration.test.tsx
 --- a/packages/tui/test/cli/cmd/tui/sync-live-hydration.test.tsx
 +++ b/packages/tui/test/cli/cmd/tui/sync-live-hydration.test.tsx
-@@ -145,16 +145,18 @@
+@@ -145,17 +145,19 @@
    try {
      const hydrate = sync.session.sync(sessionID)
      const joined = sync.session.sync(sessionID)
@@ -1168,7 +1168,8 @@ diff --git a/packages/tui/test/cli/cmd/tui/sync-live-hydration.test.tsx b/packag
      await wait(() => stale.bodyUsed)
 +    // diff在历史发布后才发起；todo阻塞时应尚未请求diff，diff阻塞时则等待其真实到达。
 +    if (pending === "diff") await wait(() => calls.diff === 1)
-     const forced = sync.session.sync(sessionID, { force: true })
+     // 一次拥塞中的重复重连只需一轮新快照，不能串行重读十六次正文。
+     const forced = Promise.all(Array.from({ length: 16 }, () => sync.session.sync(sessionID, { force: true })))
 -    expect(calls).toEqual({ get: 1, message: 1, todo: 1, diff: 1 })
 +    expect(calls).toEqual({ get: 1, message: 1, todo: 1, diff: pending === "todo" ? 0 : 1 })
      resolvePending(json([]))

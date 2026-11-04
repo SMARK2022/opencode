@@ -20,3 +20,148 @@ diff --git a/packages/sdk/js/script/build.ts b/packages/sdk/js/script/build.ts
 +// resolveSync 把 tsc 定位到本 workspace 依赖内的绝对路径，避免 PATH 上的同名二进制劫持。
  await $`node ${Bun.resolveSync("typescript/bin/tsc", dir)}`
  await $`rm openapi.json`
+
+diff --git a/packages/sdk/js/script/build.ts b/packages/sdk/js/script/build.ts
+index 1bb93def57fdec15badb9fcf56290e16d7ed6c9c..2edd6a23b1283bb6d39e76a2e1acf5256db74a3c 100755
+--- a/packages/sdk/js/script/build.ts
++++ b/packages/sdk/js/script/build.ts
+@@ -115,6 +115,25 @@ if (sseTypesPatched === sseTypesSource) {
+ }
+ await Bun.write(sseTypesPath, sseTypesPatched)
+ 
++// cancel() 返回 Promise，同步 try/catch 接不到原生 fetch 取消响应体后的拒绝。
++// 修补生成入口，避免下次 SDK 再生成时丢失清理责任。
++const ssePath = "./src/v2/gen/core/serverSentEvents.gen.ts"
++const sseSource = await Bun.file(ssePath).text()
++const ssePatched = sseSource.replace(
++  /const abortHandler = \(\) => \{\s*try \{\s*reader\.cancel\(\);?\s*\} catch \{\s*\/\/ noop\s*\}\s*\};?/,
++  `const abortHandler = () => {
++    // 只消化当前请求的取消，真实清理失败仍交给既有 SSE 错误通道。
++    void reader.cancel().catch((error: unknown) => {
++      if (signal.aborted && error === signal.reason) return
++      onSseError?.(error)
++    })
++  }`,
++)
++if (ssePatched === sseSource) {
++  throw new Error(`SSE cancellation patch did not apply; generated transport may have changed (${ssePath})`)
++}
++await Bun.write(ssePath, ssePatched)
++
+ await $`bun prettier --write src/gen`
+ await $`bun prettier --write src/v2`
+ await $`rm -rf dist`
+diff --git a/packages/sdk/js/src/v2/gen/core/serverSentEvents.gen.ts b/packages/sdk/js/src/v2/gen/core/serverSentEvents.gen.ts
+index 056a812593223d1fed57b7b0bbaac58f4ab37c23..df0cb3f8f6067606f8fed87d4ae2a14fc1add8c5 100644
+--- a/packages/sdk/js/src/v2/gen/core/serverSentEvents.gen.ts
++++ b/packages/sdk/js/src/v2/gen/core/serverSentEvents.gen.ts
+@@ -137,11 +137,11 @@ export const createSseClient = <TData = unknown>({
+         let buffer = ""
+ 
+         const abortHandler = () => {
+-          try {
+-            reader.cancel()
+-          } catch {
+-            // noop
+-          }
++          // 只消化当前请求的取消，真实清理失败仍交给既有 SSE 错误通道。
++          void reader.cancel().catch((error: unknown) => {
++            if (signal.aborted && error === signal.reason) return
++            onSseError?.(error)
++          })
+         }
+ 
+         signal.addEventListener("abort", abortHandler)
+diff --git a/packages/tui/test/context/sdk-reconnect.test.tsx b/packages/tui/test/context/sdk-reconnect.test.tsx
+index e86c82450d287e65e91bcf7238e99951a7198007..c20bd553f8b45d2f6dab53d80f349b5c4c5fe886 100644
+--- a/packages/tui/test/context/sdk-reconnect.test.tsx
++++ b/packages/tui/test/context/sdk-reconnect.test.tsx
+@@ -2,6 +2,7 @@
+ /** @jsxImportSource @opentui/solid */
+ import { describe, expect, test } from "bun:test"
+ import { testRender } from "@opentui/solid"
++import { createOpencodeClient } from "@opencode-ai/sdk/v2"
+ import { onMount } from "solid-js"
+ import { SDKProvider, useSDK } from "../../src/context/sdk"
+ 
+@@ -44,6 +45,80 @@ function Probe(props: { onReady: (sdk: ReturnType<typeof useSDK>) => void }) {
+ }
+ 
+ describe("SDKProvider reconnect", () => {
++  test("owns native SSE cancellation when the provider is destroyed", async () => {
++    // 原生 fetch 在 abort 时使响应流报错；静态 Response 替身覆盖不到 cancel() 的拒绝。
++    const server = Bun.serve({
++      hostname: "127.0.0.1",
++      port: 0,
++      fetch() {
++        return new Response(
++          new ReadableStream({
++            start(controller) {
++              controller.enqueue(new TextEncoder().encode(
++                'data: {"directory":"global","payload":{"type":"server.connected","properties":{}}}\n\n',
++              ))
++            },
++          }),
++          { headers: { "content-type": "text/event-stream" } },
++        )
++      },
++    })
++    let sdk: ReturnType<typeof useSDK> | undefined
++    let connected = false
++    const app = await testRender(() => (
++      <SDKProvider url={server.url.href}>
++        <Probe onReady={(value) => {
++          sdk = value
++          value.event.on("event", () => { connected = true })
++        }} />
++      </SDKProvider>
++    ), { useThread: false })
++    try {
++      await wait(() => connected)
++      app.renderer.destroy()
++      expect(sdk!.signal.aborted).toBe(true)
++      // 让 cancel() 真正结算，未处理拒绝由测试运行器直接判失败。
++      await Bun.sleep(20)
++    } finally {
++      app.renderer.destroy()
++      await server.stop(true)
++    }
++  })
++
++  test("reports unexpected asynchronous SSE cancellation failures", async () => {
++    const abort = new AbortController()
++    const failure = new Error("stream cancellation failed")
++    const errors: unknown[] = []
++    let fail!: () => void
++    const client = createOpencodeClient({
++      baseUrl: "http://test",
++      fetch: (async (_input: RequestInfo | URL) => new Response(new ReadableStream({
++        start(controller) {
++          controller.enqueue(new TextEncoder().encode('data: {}\n\n'))
++          fail = () => controller.error(failure)
++        },
++      }))) as typeof fetch,
++    })
++    const events = await client.global.event({
++      signal: abort.signal,
++      sseMaxRetryAttempts: 0,
++      onSseError: (error) => { errors.push(error) },
++    })
++    try {
++      expect((await events.stream.next()).done).toBe(false)
++      // 暂停在 yield 时先让真实响应体失败，随后 cancel() 必须保留这个非取消错误。
++      fail()
++      await Bun.sleep(0)
++      abort.abort()
++      await wait(() => errors.length > 0)
++      // 只忽略当前 signal 的取消原因，其他清理失败仍进入 SDK 原有错误通道。
++      expect(errors).toEqual([failure])
++    } finally {
++      abort.abort()
++      await events.stream.return()
++    }
++  })
++
+   // #139：死端口失败后 rebind 到新 URL 并重建 client/SSE
+   test("rebinds client URL after daemon reconnect", async () => {
+     // #139：记录生产 client 实际请求的 origin+path

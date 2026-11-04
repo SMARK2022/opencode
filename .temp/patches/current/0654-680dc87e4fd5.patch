@@ -12154,3 +12154,196 @@ index 35b6875b1e859f090257385ea62f0539b556595b..215ba46e9915d1ce68873785d8f10c09
            checkpoint: async () => {},
            run: <A>(body: () => A) => Effect.runPromise(Database.withSync(database, body)),
          }),
+
+diff --git a/packages/opencode/src/session/processor.ts b/packages/opencode/src/session/processor.ts
+index f9ec8c51cd70218fe98aa9a6e7f8ffc63bf68c81..db97c8c64392ef54574217d502b838307847a5a9 100644
+--- a/packages/opencode/src/session/processor.ts
++++ b/packages/opencode/src/session/processor.ts
+@@ -1099,7 +1099,10 @@ const layer = Layer.effect(
+             ctx.hasToolCall = false
+             yield* status.set(ctx.sessionID, { type: "busy" })
+             const stream = llm.stream({ ...streamInput, onRequestPrepared: (body) => Effect.gen(function* () {
+-              const history = yield* session.messages({ sessionID: ctx.sessionID }).pipe(Effect.orDie)
++              const metadata = yield* MessageV2.inputEstimateHistory({ sessionID: ctx.sessionID, messageID: ctx.assistantMessage.id, model: ctx.model }).pipe(
++                Effect.provideService(Database.Service, database),
++              )
++              const history = metadata.history
+               const samples = history.toReversed().flatMap((message) => {
+                 const info = message.info
+                 // 重放/重试只读已保存样本；provider 或模型切换不能借用旧比率。
+@@ -1125,7 +1128,7 @@ const layer = Layer.effect(
+                 charsPerToken,
+                 contextLimit: ctx.model.limit.context,
+                 // V1 单助手多 step：新的确认 part 会立即遮掉此轮估算。
+-                afterPartID: history.find(message => message.info.id === ctx.assistantMessage.id)?.parts.at(-1)?.id,
++                afterPartID: metadata.afterPartID,
+               }
+               // 快照提交只刷新元数据；recordAssistant 仍只从 step-finish 结算。
+               // 用即将发送的请求体判断，压缩保留的旧 tail 不再触发连续压缩。
+diff --git a/packages/opencode/src/token/estimate.ts b/packages/opencode/src/token/estimate.ts
+index d9388ef0f54fa11fb30858ed3b6e5dde96f97b39..2d5bff325f4c8a53951061142c893f426d3c10dc 100644
+--- a/packages/opencode/src/token/estimate.ts
++++ b/packages/opencode/src/token/estimate.ts
+@@ -24,7 +24,7 @@ const MIN_CHARS_PER_TOKEN = 2
+ // #194：clamp 上下界与 TUI accounting 同口径，保证 daemon 与展示端估算一致
+ const MAX_CHARS_PER_TOKEN = 8
+ // #194：学习窗口限 100k 字符，避免超长历史拖慢估算且让最近密度主导
+-const INPUT_CHARS_HISTORY_LIMIT = 100_000
++export const INPUT_CHARS_HISTORY_LIMIT = 100_000
+ 
+ type HistoryModel = { providerID?: string; id?: string; modelID?: string }
+ type HistoryMessage = { info?: { role: string; providerID?: string; modelID?: string }; role?: string; providerID?: string; modelID?: string; parts: ReadonlyArray<HistoryPart> }
+@@ -87,7 +87,7 @@ function sameModel(message: HistoryMessage, model: HistoryModel | undefined) {
+ }
+ 
+ // #194：inputRatioSample 只取 step-finish 消息的输入样本，其他消息类型不参与密度学习
+-function inputRatioSample(part: HistoryPart): { chars: number; tokens: number } | undefined {
++export function inputRatioSample(part: HistoryPart): { chars: number; tokens: number } | undefined {
+   // #194：仅 step-finish 消息携带确认过的 input 字符/token，是密度学习的可信来源
+   if (part.type !== "step-finish") return undefined
+   const chars = part.inputChars
+diff --git a/packages/opencode/test/session/messages-pagination.test.ts b/packages/opencode/test/session/messages-pagination.test.ts
+index 88d361c61ebe1cf9b5afa5dd227dcd4cd4999aea..0823e66609e00115dc1310493c1fff513f557521 100644
+--- a/packages/opencode/test/session/messages-pagination.test.ts
++++ b/packages/opencode/test/session/messages-pagination.test.ts
+@@ -17,6 +17,7 @@ import { NotFoundError } from "@/storage/storage"
+ import { testEffect } from "../lib/effect"
+ import { ProviderV2 } from "@opencode-ai/core/provider"
+ import { ModelV2 } from "@opencode-ai/core/model"
++import { TokenEstimate } from "@/token/estimate"
+ 
+ const it = testEffect(LayerNode.compile(LayerNode.group([SessionNs.node, MessageV2.node, SessionProjector.node])))
+ 
+@@ -157,6 +158,39 @@ const addCompactionPart = Effect.fn("Test.addCompactionPart")(function* (
+   } as any)
+ })
+ 
++describe("MessageV2.inputEstimateHistory", () => {
++  it.instance("reads input estimate statistics separately from cold conversation bodies", () =>
++    withSession(({ session, sessionID }) =>
++      Effect.gen(function* () {
++        const database = yield* Database.Service
++        const userID = yield* addUser(sessionID)
++        const assistantID = yield* addAssistant(sessionID, userID)
++        const stepID = PartID.ascending()
++        const tokens = { input: 30000, output: 10, reasoning: 0, cache: { read: 0, write: 0 } }
++        yield* session.updatePart({ id: stepID, sessionID, messageID: assistantID, type: "step-finish", reason: "stop", cost: 0, tokens, inputChars: 120000 })
++        yield* session.updatePart({ id: PartID.ascending(), sessionID, messageID: assistantID, type: "step-finish", reason: "stop", cost: 0, tokens, inputChars: 900000, hidden: { time: Date.now(), reason: "undo" } })
++        const latestID = PartID.ascending()
++        yield* session.updatePart({ id: latestID, sessionID, messageID: assistantID, type: "text", text: "current response" })
++        const coldID = PartID.ascending()
++        yield* session.updatePart({ id: coldID, sessionID, messageID: userID, type: "reasoning", text: "cold-body-".repeat(512), time: { start: 1, end: 2 } })
++        // 统计本身也可在冷层；按需恢复不能预热正文或改写 owner，同时保留当前 Part 水位。
++        yield* Database.withSync(database, sync => {
++          sync.update(SessionTable).set({ time_updated: Date.now() - 31 * 86400000 }).where(eq(SessionTable.id, sessionID)).run()
++          expect(ColdStorage.freezeOwner(sync, { type: "part", id: coldID, now: Date.now() }).type).toBe("frozen")
++          expect(ColdStorage.freezeOwner(sync, { type: "part", id: stepID, now: Date.now() }).type).toBe("frozen")
++        })
++        const result = yield* MessageV2.inputEstimateHistory({ sessionID, messageID: assistantID, model: { providerID: ProviderV2.ID.make("test"), id: ModelV2.ID.make("test") } })
++        expect(result.history.map(message => [message.info.id, message.parts.map(part => part.id)])).toEqual([[assistantID, [stepID]]])
++        expect(result.afterPartID).toBe(latestID)
++        expect(TokenEstimate.learnInputCharsPerToken({ messages: result.history, model: { providerID: "test", id: "test" } })).toEqual({ charsPerToken: 4, source: "model-history" })
++        const fallback = yield* MessageV2.inputEstimateHistory({ sessionID, messageID: assistantID, model: { providerID: ProviderV2.ID.make("test"), id: ModelV2.ID.make("other") } })
++        expect(TokenEstimate.learnInputCharsPerToken({ messages: fallback.history, model: { providerID: "test", id: "other" } })).toEqual({ charsPerToken: 4, source: "session-history" })
++        expect(sessionColdOwners(database.sync, sessionID)).toBe(2)
++      }),
++    ),
++  )
++})
++
+ describe("MessageV2.page", () => {
+   it.instance("returns page result", () =>
+     withSession(({ sessionID }) =>
+diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src/session/message-v2.ts
+index 28920fafe9d5bd2db96d0461868a4038533a8ebe..40d78af738f4687486f8466ec319cf3b391bdf92 100644
+--- a/packages/opencode/src/session/message-v2.ts
++++ b/packages/opencode/src/session/message-v2.ts
+@@ -5,6 +5,7 @@ import { SessionV1 } from "@opencode-ai/core/v1/session"
+ // 显式 re-export 让命名空间自导出携带这两个类型（SessionV1 为唯一来源）
+ export type { WithParts, Part, User, Assistant, ToolPart } from "@opencode-ai/core/v1/session"
+ import { SessionMemento } from "@opencode-ai/core/session/compaction-memento"
++import { TokenEstimate } from "@/token/estimate"
+ import { ProviderV2 } from "@opencode-ai/core/provider"
+ import {
+   APIError,
+@@ -1256,6 +1257,80 @@ export function parts(messageID: MessageID, options?: { includeHidden?: boolean
+   })
+ }
+ 
++// 输入估算只恢复参与学习的统计样本，不能经完整历史接口加载工具正文。
++export const inputEstimateHistory = Effect.fn("MessageV2.inputEstimateHistory")(function* (input: {
++  sessionID: SessionID
++  messageID: MessageID
++  model: Pick<Provider.Model, "providerID" | "id">
++}) {
++  const database = yield* Database.Service
++  // 定位、水位与样本共用只读快照，读取不修改 cold_ref、正文或时间戳。
++  return yield* Database.withSync(database, sync => sync.transaction(tx => {
++    const selected = new Map<MessageID, {
++      info: Pick<Assistant, "id" | "time" | "role" | "providerID" | "modelID" | "tokens" | "inputEstimate">
++      parts: Part[]
++    }>()
++    const collect = (modelOnly: boolean) => {
++      let chars = 0
++      let before: Cursor | undefined
++      while (chars < TokenEstimate.INPUT_CHARS_HISTORY_LIMIT) {
++        // 定位也按需读取；不能先加载全会话元数据，再在内存中挑最近样本。
++        const row = tx.select({ id: MessageTable.id, time: MessageTable.time_created, data: MessageTable.data }).from(MessageTable)
++          .where(and(eq(MessageTable.session_id, input.sessionID),
++            sql`json_extract(${MessageTable.data}, '$.role') = 'assistant'`,
++            sql`json_type(${MessageTable.data}, '$.hidden') is null`,
++            before ? older(before) : undefined,
++            modelOnly ? sql`json_extract(${MessageTable.data}, '$.providerID') = ${input.model.providerID} and json_extract(${MessageTable.data}, '$.modelID') = ${input.model.id}` : undefined,
++            // 旧确认 carrier 与有用的 step 都保留；零 usage、隐藏和纯正文不触发解压。
++            sql`(json_extract(${MessageTable.data}, '$.inputEstimate.confirmed') = 1 or exists (
++              select 1 from ${PartTable} where ${PartTable.message_id} = ${MessageTable.id}
++              and ${PartTable.session_id} = ${input.sessionID}
++              and json_type(${PartTable.data}, '$.hidden') is null
++              and json_extract(${PartTable.data}, '$.type') = 'step-finish'
++              and coalesce(json_extract(${PartTable.data}, '$.tokens.input'), 0)
++                + coalesce(json_extract(${PartTable.data}, '$.tokens.cache.read'), 0)
++                + coalesce(json_extract(${PartTable.data}, '$.tokens.cache.write'), 0) > 0
++              and (${PartTable.cold_ref} is not null or json_extract(${PartTable.data}, '$.inputChars') is not null)
++            ))`))
++          .orderBy(desc(MessageTable.time_created), desc(MessageTable.id)).limit(1).get()
++        if (!row) break
++        before = { id: row.id, time: row.time }
++        if (row.data.role !== "assistant") continue
++        // StepFinish 的输入明细也可能在冷层；只为实际候选恢复统计，不回填历史。
++        const message = selected.get(row.id) ?? {
++          info: { id: row.id, time: { created: row.time }, role: row.data.role, providerID: row.data.providerID, modelID: row.data.modelID,
++            tokens: row.data.tokens, inputEstimate: row.data.inputEstimate },
++          parts: ColdStorage.inspectPartRows(tx, tx.select().from(PartTable)
++            .where(and(eq(PartTable.message_id, row.id), eq(PartTable.session_id, input.sessionID),
++              sql`json_type(${PartTable.data}, '$.hidden') is null`,
++              sql`json_extract(${PartTable.data}, '$.type') = 'step-finish'`))
++            .orderBy(PartTable.id).all()).map(partFromRestored),
++        }
++        selected.set(row.id, message)
++        // 与学习器按完整消息累计到相同字符预算，不能任意截成最近若干条。
++        for (const part of message.parts) {
++          const sample = TokenEstimate.inputRatioSample(part)
++          if (!sample) continue
++          chars += sample.chars
++        }
++      }
++    }
++    // 同模型优先、会话样本回退沿用原算法；第二次选择复用已恢复的统计。
++    const history = () => [...selected.values()].sort((a, b) => compareChronology(a.info, b.info))
++    collect(true)
++    if (!TokenEstimate.learnInputCharsPerToken({ messages: history(), model: input.model })) collect(false)
++    // 水位仍取当前消息最后一个可见 Part，不能用最后一条统计代替。
++    const last = tx.select({ id: PartTable.id }).from(PartTable)
++      .where(and(eq(PartTable.session_id, input.sessionID), eq(PartTable.message_id, input.messageID),
++        sql`json_type(${PartTable.data}, '$.hidden') is null`))
++      .orderBy(desc(PartTable.id)).limit(1).get()
++    return {
++      history: history(),
++      afterPartID: last?.id,
++    }
++  }, { behavior: "deferred" }))
++})
++
+ // #493：usage 只需要 step-finish 热字段；专用 SQL 防止统计同 message 时 thaw tool/reasoning/file payload。
+ // discriminator 在 SQL 与 TS 双重确认，外部损坏 JSON 不会被静默当成 StepFinishPart。
+ export function stepFinishParts(messageID: MessageID, options?: { includeHidden?: boolean }) {

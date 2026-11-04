@@ -175,7 +175,7 @@ diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.t
      const args = useArgs()
  
 @@ -761,6 +854,8 @@ export const {
-             await syncingSessions.get(sessionID)!.catch(() => undefined)
+             return task
            }
 +          // 请求开始前结清旧窗；之后到达的片段才属于本次 hydration tracker。
 +          flushPartDeltas()

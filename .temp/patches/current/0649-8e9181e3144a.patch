@@ -906,6 +906,10 @@ diff --git a/packages/core/src/session/sql.ts b/packages/core/src/session/sql.ts
 index 2a4d112c3d767be8c0e78451d0ee2831c9e5eddc..e19bf0d625d7800e785644af492a102a4029259f 100644
 --- a/packages/core/src/session/sql.ts
 +++ b/packages/core/src/session/sql.ts
+@@ -1,2 +1,3 @@
+ import { sqliteTable, text, integer, index, primaryKey, real, uniqueIndex, blob } from "drizzle-orm/sqlite-core"
++import { sql } from "drizzle-orm"
+ import * as DatabasePath from "../database/path"
 @@ -71,7 +71,9 @@
  type StoredInfoData<T extends SessionV1.Info = SessionV1.Info> = T extends SessionV1.User
    ? Omit<T, "id" | "sessionID" | "summary"> & {
@@ -917,7 +921,19 @@ index 2a4d112c3d767be8c0e78451d0ee2831c9e5eddc..e19bf0d625d7800e785644af492a102a
 +    : Omit<T, "id" | "sessionID">
  
  // #0500：v2 放宽面扩大——pending 之后的 tool state、metadata/title 与 step/compaction 冷字段都可外移。
-@@ -223,7 +225,8 @@
+@@ -209,5 +212,11 @@
+   (table) => [
+     index("message_session_time_created_id_idx").on(table.session_id, table.time_created, table.id),
++    // 按真实 parentID 定位请求，避免每次状态投影都重扫长会话的全部消息。
++    index("message_session_parent_time_created_id_idx").on(table.session_id, sql`json_extract(${table.data}, '$.parentID')`, table.time_created, table.id),
++    // 合法压缩候选使用原查询谓词建稀疏索引，配对和 hidden 裁决仍归原读取器。
++    index("message_session_compaction_time_created_id_idx")
++      .on(table.session_id, table.time_created, table.id)
++      .where(sql`json_extract("data", '$.role') = 'assistant' AND json_extract("data", '$.summary') = 1 AND coalesce(json_extract("data", '$.finish'), '') != '' AND coalesce(json_type("data", '$.error'), 'null') = 'null'`),
+     index("message_cold_ref_idx").on(table.cold_ref),
+   ],
+ )
+@@ -223,7 +232,8 @@
      // #0500：cold_stats 是同一 Part owner 的精确只读投影；它只在 v2 Tool/StepFinish 冷态存在。
      // Stats 可据此完成全量聚合而不解码 pack，thaw/update 必须与 ref/key 一起清空。
      // hot row 始终为 NULL，完整 replacement/thaw 不允许保留过期派生统计。
@@ -3862,13 +3878,113 @@ diff --git a/packages/opencode/src/event-v2-bridge.ts b/packages/opencode/src/ev
 @@ -80,1 +80,1 @@
 -          const row = yield* database.db.select(selection).from(SessionTable).where(eq(SessionTable.id, data.sessionID)).get().pipe(Effect.orDie)
 +          const row = yield* database.db.select(selection(data.sessionID)).from(SessionTable).where(eq(SessionTable.id, data.sessionID)).get().pipe(Effect.orDie)
+diff --git a/packages/core/schema.json b/packages/core/schema.json
+--- a/packages/core/schema.json
++++ b/packages/core/schema.json
+@@ -2736,3 +2736,51 @@
+       "table": "message"
+     },
++    {
++      "columns": [
++        {
++          "value": "session_id",
++          "isExpression": false
++        },
++        {
++          "value": "json_extract(\"data\", '$.parentID')",
++          "isExpression": true
++        },
++        {
++          "value": "time_created",
++          "isExpression": false
++        },
++        {
++          "value": "id",
++          "isExpression": false
++        }
++      ],
++      "isUnique": false,
++      "where": null,
++      "origin": "manual",
++      "name": "message_session_parent_time_created_id_idx",
++      "entityType": "indexes",
++      "table": "message"
++    },
++    {
++      "columns": [
++        {
++          "value": "session_id",
++          "isExpression": false
++        },
++        {
++          "value": "time_created",
++          "isExpression": false
++        },
++        {
++          "value": "id",
++          "isExpression": false
++        }
++      ],
++      "isUnique": false,
++      "where": "json_extract(\"data\", '$.role') = 'assistant' AND json_extract(\"data\", '$.summary') = 1 AND coalesce(json_extract(\"data\", '$.finish'), '') != '' AND coalesce(json_type(\"data\", '$.error'), 'null') = 'null'",
++      "origin": "manual",
++      "name": "message_session_compaction_time_created_id_idx",
++      "entityType": "indexes",
++      "table": "message"
++    },
+     {
+diff --git a/packages/core/src/database/schema.gen.ts b/packages/core/src/database/schema.gen.ts
+--- a/packages/core/src/database/schema.gen.ts
++++ b/packages/core/src/database/schema.gen.ts
+@@ -353,2 +353,8 @@
+         `CREATE INDEX \`message_session_time_created_id_idx\` ON \`message\` (\`session_id\`,\`time_created\`,\`id\`);`,
+       )
++      yield* tx.run(
++        `CREATE INDEX \`message_session_parent_time_created_id_idx\` ON \`message\` (\`session_id\`,json_extract("data", '$.parentID'),\`time_created\`,\`id\`);`,
++      )
++      yield* tx.run(
++        `CREATE INDEX \`message_session_compaction_time_created_id_idx\` ON \`message\` (\`session_id\`,\`time_created\`,\`id\`) WHERE json_extract("data", '$.role') = 'assistant' AND json_extract("data", '$.summary') = 1 AND coalesce(json_extract("data", '$.finish'), '') != '' AND coalesce(json_type("data", '$.error'), 'null') = 'null';`,
++      )
+diff --git a/packages/core/src/database/migration.gen.ts b/packages/core/src/database/migration.gen.ts
+--- a/packages/core/src/database/migration.gen.ts
++++ b/packages/core/src/database/migration.gen.ts
+@@ -55,3 +55,4 @@
+     import("./migration/20261009114905_session_request_usage"),
++    import("./migration/20261104111928_session_request_parent_index"),
+   ])
+ ).map((module) => module.default) satisfies DatabaseMigration.Migration[]
+diff --git a/packages/core/src/database/migration/20261104111928_session_request_parent_index.ts b/packages/core/src/database/migration/20261104111928_session_request_parent_index.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/core/src/database/migration/20261104111928_session_request_parent_index.ts
+@@ -0,0 +1,17 @@
++import { Effect } from "effect"
++import type { DatabaseMigration } from "../migration"
++
++export default {
++  id: "20261104111928_session_request_parent_index",
++  up(tx) {
++    return Effect.gen(function* () {
++      // 只添加访问路径；不搬迁或改写旧消息、冷存储及请求账本。
++      yield* tx.run(
++        `CREATE INDEX \`message_session_parent_time_created_id_idx\` ON \`message\` (\`session_id\`,json_extract("data", '$.parentID'),\`time_created\`,\`id\`);`,
++      )
++      yield* tx.run(
++        `CREATE INDEX \`message_session_compaction_time_created_id_idx\` ON \`message\` (\`session_id\`,\`time_created\`,\`id\`) WHERE json_extract("data", '$.role') = 'assistant' AND json_extract("data", '$.summary') = 1 AND coalesce(json_extract("data", '$.finish'), '') != '' AND coalesce(json_type("data", '$.error'), 'null') = 'null';`,
++      )
++    })
++  },
++} satisfies DatabaseMigration.Migration
 diff --git a/packages/core/test/session-info-selection.test.ts b/packages/core/test/session-info-selection.test.ts
 new file mode 100644
 --- /dev/null
 +++ b/packages/core/test/session-info-selection.test.ts
-@@ -0,0 +1,21 @@
+@@ -0,0 +1,58 @@
 +import { expect, test } from "bun:test"
++import { Database } from "bun:sqlite"
++import { drizzle } from "drizzle-orm/bun-sqlite"
 +import { SQLiteSyncDialect } from "drizzle-orm/sqlite-core"
++import { CompactionBoundary } from "../src/session/compaction-boundary"
 +import { selection } from "../src/session/info"
 +import { SessionSchema } from "../src/session/schema"
 +
@@ -3887,6 +4003,40 @@ new file mode 100644
 +  const second = dialect.sqlToQuery(selection(SessionSchema.ID.make("ses_projection_b")).request)
 +  expect(first.sql).toBe(second.sql)
 +  expect(first.params).not.toEqual(second.params)
++})
++
++test("request and boundary projections stay within indexed ranges", () => {
++  using db = new Database(":memory:")
++  // 同时提供两条真实索引，避免测试因缺少错误候选计划而虚假通过。
++  db.exec(`
++    CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT, cold_ref TEXT, cold_key BLOB);
++    CREATE INDEX message_session_time_created_id_idx ON message(session_id, time_created, id);
++    CREATE INDEX message_session_parent_time_created_id_idx ON message(session_id, json_extract(data, '$.parentID'), time_created, id);
++    CREATE INDEX message_session_compaction_time_created_id_idx ON message(session_id, time_created, id) WHERE json_extract(data, '$.role') = 'assistant' AND json_extract(data, '$.summary') = 1 AND coalesce(json_extract(data, '$.finish'), '') != '' AND coalesce(json_type(data, '$.error'), 'null') = 'null';
++    CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, data TEXT);
++    CREATE INDEX part_message_id_id_idx ON part(message_id, id);
++    CREATE INDEX part_session_idx ON part(session_id);
++    CREATE TABLE session_message (id TEXT PRIMARY KEY, session_id TEXT, seq INTEGER, type TEXT, data TEXT);
++    CREATE INDEX session_message_session_type_seq_idx ON session_message(session_id, type, seq);
++    CREATE TABLE session_input (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, promoted_seq INTEGER, admitted_seq INTEGER);
++    CREATE INDEX session_input_session_promoted_seq_idx ON session_input(session_id, promoted_seq);
++    CREATE TABLE event (id TEXT PRIMARY KEY, aggregate_id TEXT, type TEXT, seq INTEGER, data TEXT);
++    CREATE INDEX event_aggregate_type_seq_idx ON event(aggregate_id, type, seq);
++  `)
++  const query = new SQLiteSyncDialect().sqlToQuery(selection(SessionSchema.ID.make("ses_projection_plan")).request)
++  const plan = db.query<{ detail: string }, string[]>(`EXPLAIN QUERY PLAN SELECT ${query.sql}`).all(...query.params.map(String))
++  // 验证访问范围而非毫秒阈值，慢 CI 主机不应改变正确性判断。
++  expect(plan.filter(row => /SEARCH p USING INDEX part_session_idx/.test(row.detail))).toEqual([])
++  expect(plan.filter(row => /SEARCH p USING INDEX part_message_id_id_idx/.test(row.detail)).length).toBeGreaterThanOrEqual(2)
++  expect(plan.some(row => row.detail.includes("message_session_parent_time_created_id_idx (session_id=? AND <expr>=?)"))).toBe(true)
++  // 解释真实边界读取器发出的查询，不在测试中复制其业务筛选逻辑。
++  const boundaryPlan: string[] = []
++  CompactionBoundary.latest(drizzle({ client: db, logger: {
++    logQuery(query, params) {
++      boundaryPlan.push(...db.query<{ detail: string }, string[]>(`EXPLAIN QUERY PLAN ${query}`).all(...params.map(String)).map(row => row.detail))
++    },
++  } }), SessionSchema.ID.make("ses_projection_plan"))
++  expect(boundaryPlan.some(detail => detail.includes("USING INDEX message_session_compaction_time_created_id_idx"))).toBe(true)
 +})
 diff --git a/packages/core/test/session-projector.test.ts b/packages/core/test/session-projector.test.ts
 --- a/packages/core/test/session-projector.test.ts
@@ -3932,3 +4082,72 @@ diff --git a/packages/core/test/session-projector.test.ts b/packages/core/test/s
 +      yield* SessionHistory.loadForRunner(db, sessionID, 0)
        expect((yield* db.select().from(SessionMessageTable).where(eq(SessionMessageTable.id, assistantMessageID)).get())?.cold_ref).toBeNull()
        expect(yield* db.select().from(ColdStorageTable).all()).toEqual([])
+
+diff --git a/packages/core/src/session/info.ts b/packages/core/src/session/info.ts
+index 0bfbf1646a3f93c3d5161a8ae27da3baeb593f6a..66c9c0c548f25f58d32cfb63ba10b20aa68bfef7 100644
+--- a/packages/core/src/session/info.ts
++++ b/packages/core/src/session/info.ts
+@@ -70,15 +70,17 @@ export const selection = (sessionID: SessionSchema.ID) => ({
+       ORDER BY CASE WHEN kind = 'compaction' THEN 1 WHEN kind = 'native' THEN promoted_seq IS NOT NULL ELSE EXISTS (
+         SELECT 1 FROM message a WHERE a.session_id = ${sessionID}
+           AND json_extract(a.data, '$.role') = 'assistant'
+-          AND json_extract(a.data, '$.parentID') = candidates.id
++          -- SQLite 一元 + 只移除列亲和、不转换 ID，让 JSON 表达式索引参与等值查找。
++          AND json_extract(a.data, '$.parentID') = +candidates.id
+       ) END DESC, position DESC, time_created DESC, id DESC LIMIT 1
+     ), assistants AS MATERIALIZED (
+       -- 固定一次请求的助手集合，避免后续各项统计重复展开整段历史。
+-      -- V1 明确 parentID 归属，不能只按最后助手或时间范围猜测请求。
++      -- 先固定唯一请求再点查其助手，禁止规划器反向扫描整段消息后才过滤请求。
+       SELECT m.id, m.data, m.time_created AS position, 'v1' AS kind
+-      FROM message m JOIN current_request r ON r.kind = 'v1'
++      FROM current_request r CROSS JOIN message m ON r.kind = 'v1'
+       WHERE m.session_id = ${sessionID} AND json_extract(m.data, '$.role') = 'assistant'
+-        AND json_extract(m.data, '$.parentID') = r.id
++        -- 与上方归属检查保持同一比较口径，避免每次 Session 读取扫描所有消息。
++        AND json_extract(m.data, '$.parentID') = +r.id
+       UNION ALL
+       SELECT m.id, m.data, m.seq AS position, 'native' AS kind
+       FROM session_message m JOIN current_request r ON r.kind = 'native'
+diff --git a/packages/core/test/session-info-selection.test.ts b/packages/core/test/session-info-selection.test.ts
+index 3a167ff50121fd40feb306a0ee25b8dcaa63467d..0f2d9b868d29591aef07ab46e64a3fc5a37d3fa7 100644
+--- a/packages/core/test/session-info-selection.test.ts
++++ b/packages/core/test/session-info-selection.test.ts
+@@ -46,7 +46,8 @@ test("request and boundary projections stay within indexed ranges", () => {
+   // 验证访问范围而非毫秒阈值，慢 CI 主机不应改变正确性判断。
+   expect(plan.filter(row => /SEARCH p USING INDEX part_session_idx/.test(row.detail))).toEqual([])
+   expect(plan.filter(row => /SEARCH p USING INDEX part_message_id_id_idx/.test(row.detail)).length).toBeGreaterThanOrEqual(2)
+-  expect(plan.some(row => row.detail.includes("message_session_parent_time_created_id_idx (session_id=? AND <expr>=?)"))).toBe(true)
++  // a 只是存在性探针；真正读取助手集合的 m 也必须同时按 Session 和 parentID 点查。
++  expect(plan.some(row => row.detail.includes("SEARCH m USING INDEX message_session_parent_time_created_id_idx (session_id=? AND <expr>=?)"))).toBe(true)
+   // 解释真实边界读取器发出的查询，不在测试中复制其业务筛选逻辑。
+   const boundaryPlan: string[] = []
+   CompactionBoundary.latest(drizzle({ client: db, logger: {
+diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src/session/message-v2.ts
+index 28920fafe9d5bd2db96d0461868a4038533a8ebe..40d78af738f4687486f8466ec319cf3b391bdf92 100644
+--- a/packages/opencode/src/session/message-v2.ts
++++ b/packages/opencode/src/session/message-v2.ts
+@@ -1550,16 +1625,17 @@ export const promptWindowProof = Effect.fn("MessageV2.promptWindowProof")(functi
+   // time_updated 覆盖同一 Message ID 的原位更新；time_created 决定 common-prefix 的 persisted 顺序。
+   const partRows = yield* db
+     .select({
+-      messageID: PartTable.message_id,
+-      id: PartTable.id,
+-      timeCreated: PartTable.time_created,
+-      timeUpdated: PartTable.time_updated,
++      messageID: sql<MessageID>`${PartTable.message_id}`,
++      id: sql<PartID>`${PartTable.id}`,
++      timeCreated: sql<number>`${PartTable.time_created}`,
++      timeUpdated: sql<number>`${PartTable.time_updated}`,
+       data: sql<string>`cast(${PartTable.data} as text)`,
+-      coldRef: PartTable.cold_ref,
++      coldRef: sql<string | null>`${PartTable.cold_ref}`,
+       coldKey: sql<string>`hex(${PartTable.cold_key})`,
+       coldStats: sql<string>`cast(${PartTable.cold_stats} as text)`,
+     })
+-    .from(PartTable)
++    // 无统计信息时 SQLite 会误选 session 索引，逐次扫描整段历史；沿已有消息索引只读窗口 Part。
++    .from(sql`${PartTable} indexed by part_message_id_id_idx`)
+     .innerJoin(MessageTable, eq(PartTable.message_id, MessageTable.id))
+     // 同一 join 同时承载完整历史与 cutoff 窗口，避免两个 proof 查询形状漂移。
+     .where(

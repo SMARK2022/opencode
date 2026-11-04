@@ -14,11 +14,12 @@ diff --git a/packages/schema/src/session.ts b/packages/schema/src/session.ts
 diff --git a/packages/core/src/session/info.ts b/packages/core/src/session/info.ts
 --- a/packages/core/src/session/info.ts
 +++ b/packages/core/src/session/info.ts
-@@ -61,9 +61,14 @@ export const selection = {
+@@ -61,10 +61,15 @@ export const selection = {
      ), settled AS (
        -- V1 所有 step-finish 与 native 每步助手结算互斥，避免重复累计。
--      SELECT p.data FROM part p JOIN assistants a ON a.kind = 'v1' AND a.id = p.message_id
-+      SELECT p.id, p.data, a.position, a.id AS assistant_id FROM part p JOIN assistants a ON a.kind = 'v1' AND a.id = p.message_id
+       -- 从已选助手点查步骤，不能让规划器改为扫描整个会话的 Part。
+-      SELECT p.data FROM assistants a CROSS JOIN part p INDEXED BY part_message_id_id_idx ON a.kind = 'v1' AND a.id = p.message_id
++      SELECT p.id, p.data, a.position, a.id AS assistant_id FROM assistants a CROSS JOIN part p INDEXED BY part_message_id_id_idx ON a.kind = 'v1' AND a.id = p.message_id
        WHERE p.session_id = "session"."id" AND json_extract(p.data, '$.type') = 'step-finish'
        UNION ALL
 -      SELECT data FROM assistants WHERE kind = 'native'

@@ -189,3 +189,338 @@ diff --git a/packages/tui/test/cli/cmd/tui/sync-parts-lifetime.test.tsx b/packag
      expect(bytes(h, other)).toBe(0)
    } finally {
      gates[0].resolve(json([]))
+
+diff --git a/packages/opencode/src/cli/cmd/mcp.ts b/packages/opencode/src/cli/cmd/mcp.ts
+index c2d2ee2f3b73be7a8f043a300c6acd4e8af2802a..4252f7465c8e0d68d3351d0a47a9750e64fd231f 100644
+--- a/packages/opencode/src/cli/cmd/mcp.ts
++++ b/packages/opencode/src/cli/cmd/mcp.ts
+@@ -449,10 +449,10 @@ export const McpAddCommand = effectCmd({
+         type: "string",
+         array: true,
+       }),
++  // 命名添加只写全局配置，无需启动项目实例。
++  instance: (args) => !args.name,
+   handler: Effect.fn("Cli.mcp.add")(function* (args) {
+-    const maybeCtx = yield* InstanceRef
+-    if (!maybeCtx) return yield* Effect.die("InstanceRef not provided")
+-    const ctx = maybeCtx
++    const ctx = yield* InstanceRef
+     yield* Effect.promise(async () => {
+       const command = args["--"] ?? []
+       if (!args.name && (args.url || args.env?.length || args.header?.length || command.length)) {
+@@ -500,6 +500,7 @@ export const McpAddCommand = effectCmd({
+         return
+       }
+ 
++      if (!ctx) throw new Error("InstanceRef not provided")
+       UI.empty()
+       prompts.intro("Add MCP server")
+ 
+diff --git a/packages/opencode/test/cli/mcp-add.test.ts b/packages/opencode/test/cli/mcp-add.test.ts
+index 9a49384855a1528ed1b43419a2ca6c9a5a9f4c2c..0a81e7e8eb551e1b7d36078f13d43614b2f99e95 100644
+--- a/packages/opencode/test/cli/mcp-add.test.ts
++++ b/packages/opencode/test/cli/mcp-add.test.ts
+@@ -40,21 +40,25 @@ describe("opencode mcp add (non-interactive subprocess)", () => {
+     "adds a local server while preserving argv and environment values",
+     ({ home, opencode }) =>
+       Effect.gen(function* () {
+-        const result = yield* opencode.spawn([
+-          "mcp",
+-          "add",
+-          "local",
+-          "--env",
+-          "API_KEY=secret",
+-          "--env",
+-          "VALUE=one=two",
+-          "--",
+-          "npx",
+-          "-y",
+-          "@example/server",
+-          "--label",
+-          "two words",
+-        ])
++        // 注入无效配置，确保命名添加不触发实例启动。
++        const result = yield* opencode.spawn(
++          [
++            "mcp",
++            "add",
++            "local",
++            "--env",
++            "API_KEY=secret",
++            "--env",
++            "VALUE=one=two",
++            "--",
++            "npx",
++            "-y",
++            "@example/server",
++            "--label",
++            "two words",
++          ],
++          { env: { OPENCODE_CONFIG_CONTENT: "{" } },
++        )
+         opencode.expectExit(result, 0)
+ 
+         const config = yield* Effect.promise(() =>
+diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.tsx
+index 066851a6d4173972a078bc3fdf2b9b3701c60b9f..401ae948447734e427a0adcf00fcec3bc6602081 100644
+--- a/packages/tui/src/context/sync.tsx
++++ b/packages/tui/src/context/sync.tsx
+@@ -1218,7 +1218,13 @@ export const {
+ 
+         case "lsp.updated": {
+           const workspace = project.workspace.current()
+-          void sdk.client.lsp.status({ workspace }).then((x) => setStore("lsp", x.data ?? []))
++          void sdk.client.lsp.status({ workspace })
++            .then((x) => setStore("lsp", x.data ?? []))
++            .catch((error: unknown) => {
++              // 此订阅拥有刷新任务；仅忽略自身退出信号，避免掩盖同时发生的真实错误。
++              if (sdk.signal.aborted && error === sdk.signal.reason) return
++              console.error("Failed to refresh LSP status", error)
++            })
+           break
+         }
+ 
+@@ -1316,7 +1322,8 @@ export const {
+       const fatal = input.fatal ?? true
+       const workspace = project.workspace.current()
+       const projectPromise = project.sync()
+-      const sessionListPromise = projectPromise.then(() => listSessions())
++      // 普通启动等首组成功后再读列表，避免首组失败留下无人接管的派生 Promise。
++      const sessionListPromise = args.continue ? projectPromise.then(() => listSessions()) : undefined
+ 
+       // blocking - include session.list when continuing a session
+       const providersPromise = sdk.client.config.providers({ workspace }, { throwOnError: true })
+@@ -1338,7 +1345,7 @@ export const {
+         agentsPromise,
+         configPromise,
+         projectPromise,
+-        ...(args.continue ? [sessionListPromise] : []),
++        ...(sessionListPromise ? [sessionListPromise] : []),
+       ])
+         .then(async () => {
+           const providersResponse = providersPromise.then((x) => x.data!)
+@@ -1347,7 +1354,6 @@ export const {
+           const consoleStateResponse = consoleStatePromise
+           const agentsResponse = agentsPromise.then((x) => x.data ?? [])
+           const configResponse = configPromise.then((x) => x.data!)
+-          const sessionListResponse = args.continue ? sessionListPromise : undefined
+ 
+           return Promise.all([
+             providersResponse,
+@@ -1356,7 +1362,7 @@ export const {
+             consoleStateResponse,
+             agentsResponse,
+             configResponse,
+-            ...(sessionListResponse ? [sessionListResponse] : []),
++            ...(sessionListPromise ? [sessionListPromise] : []),
+           ]).then((responses) => {
+             const providers = responses[0]
+             const providerList = responses[1]
+@@ -1378,9 +1384,9 @@ export const {
+         })
+         .then(() => {
+           if (store.status !== "complete") setStore("status", "partial")
+-          // non-blocking
+-          void Promise.all([
+-            ...(args.continue ? [] : [sessionListPromise]),
++          // partial 已放行 UI；返回异步组，让下方既有 catch 同时接管取消与真实失败。
++          return Promise.all([
++            ...(sessionListPromise ? [] : [listSessions()]),
+             consoleStatePromise.then((consoleState) => setStore("console_state", reconcile(consoleState))),
+             sdk.client.command.list({ workspace }).then((x) => setStore("command", reconcile(x.data ?? []))),
+             sdk.client.lsp.status({ workspace }).then((x) => setStore("lsp", reconcile(x.data ?? []))),
+@@ -1402,7 +1408,7 @@ export const {
+           })
+         })
+         .catch(async (e) => {
+-          if (sdk.signal.aborted && e instanceof Error && e.name === "AbortError") return
++          if (sdk.signal.aborted && e === sdk.signal.reason) return
+           console.error("tui bootstrap failed", {
+             error: e instanceof Error ? e.message : String(e),
+             name: e instanceof Error ? e.name : undefined,
+diff --git a/packages/tui/test/cli/cmd/tui/sync-fixture.tsx b/packages/tui/test/cli/cmd/tui/sync-fixture.tsx
+index 19435cf8912a28ab781f802021dba79547c56a65..a1425484b302c745cc1fc5881049893a53b51fc3 100644
+--- a/packages/tui/test/cli/cmd/tui/sync-fixture.tsx
++++ b/packages/tui/test/cli/cmd/tui/sync-fixture.tsx
+@@ -3,7 +3,7 @@
+ import { testRender } from "@opentui/solid"
+ import { engine } from "@opentui/core"
+ import { onMount, type JSX } from "solid-js"
+-import { ArgsProvider } from "../../../../src/context/args"
++import { ArgsProvider, type Args } from "../../../../src/context/args"
+ import { KVProvider, useKV } from "../../../../src/context/kv"
+ import { ProjectProvider, useProject } from "../../../../src/context/project"
+ import { SDKProvider } from "../../../../src/context/sdk"
+@@ -26,11 +26,12 @@ export async function wait(fn: () => boolean, timeout = 2000) {
+ 
+ type Ctx = { kv: ReturnType<typeof useKV>; project: ReturnType<typeof useProject>; sync: ReturnType<typeof useSync>; route: ReturnType<typeof useRoute> }
+ 
+-export async function mount(override?: FetchHandler, state?: string, initialRoute?: Route, render?: () => JSX.Element) {
++export async function mount(override?: FetchHandler, state?: string, initialRoute?: Route, render?: () => JSX.Element, options: { args?: Args; status?: "partial" | "complete" } = {}) {
+   // 显式测试目录仍优先；批量隔离运行时不读写固定/tmp或用户全局KV。
+   const statePath = state ?? process.env.XDG_STATE_HOME
+   const calls = createFetch(override)
+   const events = createEventSource()
++  const exits: unknown[] = []
+   let sync!: ReturnType<typeof useSync>
+   let project!: ReturnType<typeof useProject>
+   let kv!: ReturnType<typeof useKV>
+@@ -55,14 +56,14 @@ export async function mount(override?: FetchHandler, state?: string, initialRout
+   const app = await testRender(
+     () => (
+     <TestTuiContexts paths={statePath ? { state: statePath } : undefined}>
+-      <ArgsProvider>
++      <ArgsProvider {...options.args}>
+         <KVProvider>
+           <SDKProvider url="http://test" directory={directory} testTransport={{ fetch: calls.fetch, events: events.source }}>
+             {/* 活动Session资格由现有Route提供，fixture与生产同序，不添加可选context回退。 */}
+             <RouteProvider initialRoute={initialRoute}>
+               <PermissionProvider>
+                 <ProjectProvider>
+-                  <ExitProvider exit={() => {}}>
++                  <ExitProvider exit={(error) => { exits.push(error) }}>
+                     <SyncProvider>
+                       <Probe />
+                     {render?.()}
+@@ -97,7 +98,7 @@ export async function mount(override?: FetchHandler, state?: string, initialRout
+   }
+ 
+   await ready
+-  await wait(() => sync.status === "complete")
+-  return { app, emit: events.emit, kv, project, sync, route, session: calls.session }
++  await wait(() => sync.status === (options.status ?? "complete"))
++  return { app, emit: events.emit, kv, project, sync, route, session: calls.session, exits }
+ }
+ 
+diff --git a/packages/tui/test/cli/cmd/tui/sync.test.tsx b/packages/tui/test/cli/cmd/tui/sync.test.tsx
+index 6c7f14395afac798dedd51c196ed60d5dad21538..76b4a464aa332ccd98faf1747f7c814ec84be253 100644
+--- a/packages/tui/test/cli/cmd/tui/sync.test.tsx
++++ b/packages/tui/test/cli/cmd/tui/sync.test.tsx
+@@ -189,6 +189,127 @@ test("unloaded deletion events preserve projection absence and later live delive
+ })
+ 
+ describe("tui sync", () => {
++  test.each(["/command", "/path", "/session"])("owns bootstrap response-body cancellation at %s", async (endpoint) => {
++    await using tmp = await tmpdir()
++    await Bun.write(`${tmp.path}/kv.json`, "{}")
++    let armed = false
++    let signal: AbortSignal | undefined
++    const { app, emit, exits } = await mount((url, request) => {
++      if (!armed || url.pathname !== endpoint) return
++      signal = request!.signal
++      // 必须在响应头之后取消；fetch 阶段拒绝会被 SDK 的 result.error 路径吸收。
++      return new Response(new ReadableStream({
++        start(controller) {
++          request!.signal.addEventListener("abort", () => controller.error(request!.signal.reason), { once: true })
++        },
++      }), { headers: { "content-type": "application/json" } })
++    }, tmp.path)
++    try {
++      armed = true
++      emit({ directory: "global", payload: { id: "evt_refresh", type: "global.disposed", properties: {} } })
++      await wait(() => signal !== undefined)
++      app.renderer.destroy()
++      expect(signal!.aborted).toBe(true)
++      await Bun.sleep(20)
++      expect(exits).toEqual([])
++    } finally {
++      app.renderer.destroy()
++    }
++  })
++
++  test("keeps partial UI ready and reports a background bootstrap body failure", async () => {
++    await using tmp = await tmpdir()
++    await Bun.write(`${tmp.path}/kv.json`, "{}")
++    const failure = new Error("command response body failed")
++    const logged = spyOn(console, "error").mockImplementation(() => {})
++    let fail!: () => void
++    const { app, sync, exits } = await mount((url) => {
++      if (url.pathname !== "/command") return
++      return new Response(new ReadableStream({
++        start(controller) { fail = () => controller.error(failure) },
++      }), { headers: { "content-type": "application/json" } })
++    }, tmp.path, undefined, undefined, { status: "partial" })
++    try {
++      // 第二阶段仍可挂起，UI 无需等完整 bootstrap；失败则由原有 fatal owner 接管。
++      expect(sync.ready).toBe(true)
++      expect(sync.status).toBe("partial")
++      fail()
++      await wait(() => exits.length > 0)
++      expect(exits).toEqual([failure])
++      expect(logged).toHaveBeenCalledWith("tui bootstrap failed", expect.objectContaining({ error: failure.message }))
++    } finally {
++      app.renderer.destroy()
++      logged.mockRestore()
++    }
++  })
++
++  test.each([false, true])("preserves continue=%s session-list scheduling during bootstrap", async (continuing) => {
++    await using tmp = await tmpdir()
++    await Bun.write(`${tmp.path}/kv.json`, "{}")
++    let armed = false
++    let release!: () => void
++    let pending = false
++    let directories = false
++    let lists = 0
++    const { app, emit, exits } = await mount((url) => {
++      if (!armed) return
++      if (url.pathname === "/session") lists++
++      if (url.pathname === "/project/proj_test/directories") directories = true
++      if (url.pathname !== "/config") return
++      pending = true
++      return new Promise<Response>((resolve) => { release = () => resolve(json({})) })
++    }, tmp.path, undefined, undefined, { args: { continue: continuing } })
++    try {
++      armed = true
++      emit({ directory: "global", payload: { id: "evt_refresh", type: "global.disposed", properties: {} } })
++      await wait(() => pending && directories)
++      await Bun.sleep(20)
++      // 普通启动不派生无人接管的早期列表；continue 仍在阻塞组中启动并等待它。
++      expect(lists).toBe(continuing ? 1 : 0)
++      release()
++      await wait(() => lists === 1)
++      expect(exits).toEqual([])
++    } finally {
++      release?.()
++      app.renderer.destroy()
++    }
++  })
++
++  test.each(["cancel", "failure"])("owns lsp.updated response-body %s during shutdown", async (outcome) => {
++    await using tmp = await tmpdir()
++    await Bun.write(`${tmp.path}/kv.json`, "{}")
++    const failure = new DOMException("LSP body failed independently", "AbortError")
++    const logged = spyOn(console, "error").mockImplementation(() => {})
++    let armed = false
++    let signal: AbortSignal | undefined
++    let fail!: () => void
++    const { app, emit, exits } = await mount((url, request) => {
++      if (!armed || url.pathname !== "/lsp") return
++      signal = request!.signal
++      return new Response(new ReadableStream({
++        start(controller) {
++          fail = () => controller.error(failure)
++          request!.signal.addEventListener("abort", () => controller.error(request!.signal.reason), { once: true })
++        },
++      }), { headers: { "content-type": "application/json" } })
++    }, tmp.path)
++    try {
++      armed = true
++      emit({ directory: "global", payload: { id: "evt_lsp", type: "lsp.updated", properties: {} } })
++      await wait(() => signal !== undefined)
++      // 同名 AbortError 若先于退出发生，仍是真实错误，不能仅凭 name 吞掉。
++      if (outcome === "failure") fail()
++      app.renderer.destroy()
++      expect(signal!.aborted).toBe(true)
++      await Bun.sleep(20)
++      expect(exits).toEqual([])
++      if (outcome === "failure") expect(logged).toHaveBeenCalledWith("Failed to refresh LSP status", failure)
++    } finally {
++      app.renderer.destroy()
++      logged.mockRestore()
++    }
++  })
++
+   test("projects bounded patch-free TUI data through HTTP and SSE", async () => {
+     // 同一 public sync 覆盖两个 transport producer；任一 header 漏传都会恢复完整 payload。
+     // HTTP fixture 故意返回 101 个带唯一 patch 的对象，证明 client-side cap 也守住测试/旧 daemon 边界。
