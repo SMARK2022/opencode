@@ -96,6 +96,10 @@ diff --git a/.github/workflows/test.yml b/.github/workflows/test.yml
 diff --git a/packages/opencode/script/test-ci.ts b/packages/opencode/script/test-ci.ts
 --- a/packages/opencode/script/test-ci.ts
 +++ b/packages/opencode/script/test-ci.ts
+@@ -7,1 +7,2 @@
+-const REPORTER_ARGS = ["--timeout", "30000", "--reporter=junit"]
++// 低核宿主不能同时冷启动二十个CLI；限制调度并发，保留每项期限和内部真实并发断言。
++const REPORTER_ARGS = ["--timeout", "30000", "--max-concurrency", "2", "--reporter=junit"]
 @@ -10,16 +10,19 @@ export function partitionTestFiles(files: readonly string[]) {
    // Bun Glob 在 Windows 返回反斜杠；先统一表示，分区才不会只在 Unix 上成立。
    const normalized = files.map((file) => file.replaceAll("\\", "/"))
@@ -156,6 +160,14 @@ diff --git a/packages/opencode/script/test-ci.ts b/packages/opencode/script/test
    const tuiStatus = await runShard("tui", shards.tui)
    // 首个非零 exit code 保留真实失败；core 失败不能阻止 TUI 产生完整报告。
    process.exit(coreStatus || tuiStatus)
+
+diff --git a/packages/opencode/test/cli/run/stream.transport.test.ts b/packages/opencode/test/cli/run/stream.transport.test.ts
+--- a/packages/opencode/test/cli/run/stream.transport.test.ts
++++ b/packages/opencode/test/cli/run/stream.transport.test.ts
+@@ -31,1 +31,2 @@
+-async function waitFor<T>(check: () => T | undefined, timeout = 1_000): Promise<T> {
++// 等待已发布条件而非测量性能；给CI调度留余量，不改变真实轮询或状态断言。
++async function waitFor<T>(check: () => T | undefined, timeout = 5_000): Promise<T> {
 
 diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/shell.ts
 --- a/packages/opencode/src/tool/shell.ts

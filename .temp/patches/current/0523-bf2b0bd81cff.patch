@@ -934,7 +934,7 @@ index f5209a24f..6bacf5965 100644
  // #493：maintenance task record 类型来自 core ColdStorage——三用例覆盖 lease 抢占/reclaim、control 协议与 startup recovery。
  import type { MaintenanceTask } from "@opencode-ai/core/storage/cold-storage"
  import { win32DetachConsole } from "@opencode-ai/tui/terminal-win32"
-@@ -131,6 +133,99 @@ async function spawnDaemon(lockPath: string, env: Record<string, string> = {}) {
+@@ -131,6 +133,101 @@ async function spawnDaemon(lockPath: string, env: Record<string, string> = {}) {
    throw new Error(`Daemon did not start within ${DAEMON_START_TIMEOUT_MS} ms`)
  }
  
@@ -1009,6 +1009,8 @@ index f5209a24f..6bacf5965 100644
 +// detached worker 仍通过环境中的 launcher PID 观察该进程生命周期。
 +// discover 调用必须在子进程内执行——lock/env 隔离按进程边界生效。
 +async function spawnEnsureLauncher(lockPath: string) {
++  // 与其他CLI夹具共用迁移marker，首次数据迁移不占启动期中断的观测窗口。
++  await prepareCliData(lockPath)
 +  const tuiURL = pathToFileURL(fileURLToPath(new URL("../../../src/cli/cmd/tui.ts", import.meta.url))).href
 +  const launcherCode = `
 +    const { discoverOrSpawnDaemon } = await import(${JSON.stringify(tuiURL)})
@@ -1034,7 +1036,7 @@ index f5209a24f..6bacf5965 100644
  // 累积 SSE 分块，避免关闭事件被分帧后漏检；五秒上限由调用方负责。
  async function readUntil(reader: ReadableStreamDefaultReader<string>, text: string) {
    let seen = ""
-@@ -136,6 +229,272 @@ async function readUntil(reader: ReadableStreamDefaultReader<string>, text: stri
+@@ -136,6 +231,272 @@ async function readUntil(reader: ReadableStreamDefaultReader<string>, text: stri
  }
  
  describe("daemon lifecycle", () => {
@@ -1307,7 +1309,7 @@ index f5209a24f..6bacf5965 100644
    // 这些用例启动真实 worker/CLI，保留完整 stop 契约，仅作静态审查。
    test(
      "daemon stop command gracefully stops daemon and clears the lock file",
-@@ -386,7 +745,44 @@ describe("daemon lifecycle", () => {
+@@ -386,7 +747,45 @@ describe("daemon lifecycle", () => {
      DAEMON_START_TIMEOUT_MS + 10_000,
    )
  
@@ -1346,14 +1348,15 @@ index f5209a24f..6bacf5965 100644
 +        await first.proc.exited.catch(() => undefined)
 +      }
 +    },
-+    40_000,
++    // 两次冷启动和最后一次stop共享外层预算；内部5秒/8秒退出断言仍独立约束关闭行为。
++    2 * DAEMON_START_TIMEOUT_MS + DAEMON_STOP_TIMEOUT_MS + 15_000,
 +  )
 +
 +  test(
      "daemon writes lock file and responds to HTTP health check",
      async () => {
        await using tmp = await tmpdir()
-@@ -1014,3 +1409,5 @@
+@@ -1014,3 +1412,5 @@
 +
 +
    test(
