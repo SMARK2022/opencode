@@ -100,7 +100,7 @@ diff --git a/packages/opencode/script/test-ci.ts b/packages/opencode/script/test
 -const REPORTER_ARGS = ["--timeout", "30000", "--reporter=junit"]
 +// 低核宿主不能同时冷启动二十个CLI；限制调度并发，保留每项期限和内部真实并发断言。
 +const REPORTER_ARGS = ["--timeout", "30000", "--max-concurrency", "2", "--reporter=junit"]
-@@ -10,16 +10,19 @@ export function partitionTestFiles(files: readonly string[]) {
+@@ -10,21 +11,26 @@ export function partitionTestFiles(files: readonly string[]) {
    // Bun Glob 在 Windows 返回反斜杠；先统一表示，分区才不会只在 Unix 上成立。
    const normalized = files.map((file) => file.replaceAll("\\", "/"))
    // 三个 CLI 根目录是 Windows feedback loop 验证过的 native process domain。
@@ -123,7 +123,14 @@ diff --git a/packages/opencode/script/test-ci.ts b/packages/opencode/script/test
    console.log(`Running ${name} test shard (${files.length} files)`)
    // 每个 child 独占 JUnit 路径；复用同一文件会覆盖先完成 shard 的失败证据。
    const proc = Bun.spawn(
-@@ -41,6 +44,11 @@ async function runShard(name: "core" | "tui", files: readonly string[]) {
+     [
+       process.execPath,
+       "test",
+       ...files,
++      // Windows原生生命周期测试按文件隔离，前一文件遗留的global或句柄不能干扰下一owner。
++      ...(name === "tui" && process.platform === "win32" ? ["--isolate"] : []),
+       ...REPORTER_ARGS,
+@@ -41,6 +47,11 @@ async function runShard(name: "core" | "tui", files: readonly string[]) {
  }
  
  async function main() {
@@ -135,7 +142,7 @@ diff --git a/packages/opencode/script/test-ci.ts b/packages/opencode/script/test
    // 显式文件清单是进程边界的载体：child 只接收清单，不做二次自动发现。
    const files = (
      await Array.fromAsync(new Bun.Glob("test/**/*.test.{ts,tsx}").scan({ cwd: PACKAGE_ROOT, onlyFiles: true }))
-@@ -53,8 +61,8 @@ async function main() {
+@@ -53,8 +64,8 @@ async function main() {
    const shards = partitionTestFiles(files)
    // 任一空 shard 都会让 Bun 退回自动发现全套测试，重新破坏进程隔离。
    // 在编排 owner 处 fail closed，避免“看似分片、实际全量”的假绿。
@@ -146,7 +153,7 @@ diff --git a/packages/opencode/script/test-ci.ts b/packages/opencode/script/test
    }
  
    await mkdir(REPORT_DIR, { recursive: true })
-@@ -62,8 +70,11 @@ async function main() {
+@@ -62,8 +73,11 @@ async function main() {
    // 清理旧报告，避免 CI 或本地复用目录时发布未参与本次运行的结果。
    await Promise.all(reports.map((file) => rm(join(REPORT_DIR, file), { force: true })))
  
