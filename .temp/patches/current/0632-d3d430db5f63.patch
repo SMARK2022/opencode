@@ -100,7 +100,7 @@ diff --git a/packages/opencode/script/test-ci.ts b/packages/opencode/script/test
 -const REPORTER_ARGS = ["--timeout", "30000", "--reporter=junit"]
 +// 低核宿主不能同时冷启动二十个CLI；限制调度并发，保留每项期限和内部真实并发断言。
 +const REPORTER_ARGS = ["--timeout", "30000", "--max-concurrency", "2", "--reporter=junit"]
-@@ -10,21 +11,26 @@ export function partitionTestFiles(files: readonly string[]) {
+@@ -10,21 +11,24 @@ export function partitionTestFiles(files: readonly string[]) {
    // Bun Glob 在 Windows 返回反斜杠；先统一表示，分区才不会只在 Unix 上成立。
    const normalized = files.map((file) => file.replaceAll("\\", "/"))
    // 三个 CLI 根目录是 Windows feedback loop 验证过的 native process domain。
@@ -127,10 +127,8 @@ diff --git a/packages/opencode/script/test-ci.ts b/packages/opencode/script/test
        process.execPath,
        "test",
        ...files,
-+      // Windows原生生命周期测试按文件隔离，前一文件遗留的global或句柄不能干扰下一owner。
-+      ...(name === "tui" && process.platform === "win32" ? ["--isolate"] : []),
        ...REPORTER_ARGS,
-@@ -41,6 +47,11 @@ async function runShard(name: "core" | "tui", files: readonly string[]) {
+@@ -41,6 +45,11 @@ async function runShard(name: "core" | "tui", files: readonly string[]) {
  }
  
  async function main() {
@@ -142,7 +140,7 @@ diff --git a/packages/opencode/script/test-ci.ts b/packages/opencode/script/test
    // 显式文件清单是进程边界的载体：child 只接收清单，不做二次自动发现。
    const files = (
      await Array.fromAsync(new Bun.Glob("test/**/*.test.{ts,tsx}").scan({ cwd: PACKAGE_ROOT, onlyFiles: true }))
-@@ -53,8 +64,8 @@ async function main() {
+@@ -53,8 +62,8 @@ async function main() {
    const shards = partitionTestFiles(files)
    // 任一空 shard 都会让 Bun 退回自动发现全套测试，重新破坏进程隔离。
    // 在编排 owner 处 fail closed，避免“看似分片、实际全量”的假绿。
@@ -153,7 +151,7 @@ diff --git a/packages/opencode/script/test-ci.ts b/packages/opencode/script/test
    }
  
    await mkdir(REPORT_DIR, { recursive: true })
-@@ -62,8 +73,11 @@ async function main() {
+@@ -62,8 +71,11 @@ async function main() {
    // 清理旧报告，避免 CI 或本地复用目录时发布未参与本次运行的结果。
    await Promise.all(reports.map((file) => rm(join(REPORT_DIR, file), { force: true })))
  
@@ -237,6 +235,17 @@ diff --git a/packages/opencode/test/cli/db-maintenance.test.ts b/packages/openco
 diff --git a/packages/opencode/test/cli/tui/daemon.test.ts b/packages/opencode/test/cli/tui/daemon.test.ts
 --- a/packages/opencode/test/cli/tui/daemon.test.ts
 +++ b/packages/opencode/test/cli/tui/daemon.test.ts
+@@ -44,1 +44,2 @@
+-const DAEMON_START_TIMEOUT_MS = 30_000
++// 启动窗只是慢宿主的兜底；行为由已发布信号、PID和独立的关闭期限验证。
++const DAEMON_START_TIMEOUT_MS = 60_000
+@@ -63,3 +63,6 @@
+     ...process.env,
++    // 生命周期用例只验证本机owner；外部插件预热和升级检查另有专测，不应抢占就绪阶段。
++    OPENCODE_PURE: "1",
++    OPENCODE_DISABLE_AUTOUPDATE: "1",
+     OPENCODE_DAEMON_LAUNCHER_PID: "",
+     OPENCODE_PROCESS_ROLE: "main",
 @@ -2178,11 +2178,12 @@ test(
        await using yesTmp = await tmpdir()
        const yesLockPath = path.join(yesTmp.path, "tui-server.json")

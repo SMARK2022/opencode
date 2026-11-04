@@ -2873,7 +2873,7 @@ index a0328f7c2..fa25bc63b 100644
  import path from "path"
  import { fileURLToPath, pathToFileURL } from "url"
  // #524：db status 压力夹具直接用 bun:sqlite 写入 part 行（FK OFF）。
-@@ -99,6 +99,30 @@ async function runDaemonStop(lockPath: string, env: Record<string, string> = {})
+@@ -99,6 +99,43 @@ async function runDaemonStop(lockPath: string, env: Record<string, string> = {})
    return { exitCode, stderr }
  }
  
@@ -2901,10 +2901,23 @@ index a0328f7c2..fa25bc63b 100644
 +  return { exitCode, stdout, stderr }
 +}
 +
++// 观察本用例worker已发布的信号；producer退出立即失败，不按宿主耗时推断行为。
++async function waitForDaemonLog(lockPath: string, pid: number, marker: string) {
++  const file = path.join(path.dirname(lockPath), "share", "opencode", "log", "opencode.log")
++  const deadline = Date.now() + DAEMON_START_TIMEOUT_MS
++  while (Date.now() < deadline) {
++    if (!ServerLock.alive(pid)) throw new Error(`Daemon exited before publishing ${marker}`)
++    const text = await Bun.file(file).text().catch(() => "")
++    if (text.includes(marker)) return
++    await Bun.sleep(POLL_INTERVAL_MS)
++  }
++  throw new Error(`Daemon did not publish ${marker}`)
++}
++
  /**
   * 在临时目录中启动守护进程，轮询直到锁文件出现且 HTTP 服务器响应。
   * 返回运行中的进程和锁文件内容。
-@@ -240,6 +264,113 @@ async function readUntil(reader: ReadableStreamDefaultReader<string>, text: stri
+@@ -240,6 +277,113 @@ async function readUntil(reader: ReadableStreamDefaultReader<string>, text: stri
  }
  
  describe("daemon lifecycle", () => {
@@ -2981,7 +2994,7 @@ index a0328f7c2..fa25bc63b 100644
 +  test(
 +    "daemon start JSON creates one owner protected by the external launcher PID and reuses it",
 +    async () => {
-+      // 250ms startup idle 刻意短于 750ms 观察窗，使错误 launcher PID 稳定暴露。
++      // 250ms只触发startup-idle分支；等待launcher-alive信号确认保护执行，不比较宿主耗时。
 +      // 测试进程保持存活代表 bot，首次 SSE 尚未建立，隔离两个 liveness 阶段。
 +      // 第二次 start 比较同一 PID/URL，证明复用而非仅有另一个健康 owner。
 +      // finally 通过 safe stop 清理真实 worker，失败 case 也不遗留实验进程。
@@ -3000,7 +3013,7 @@ index a0328f7c2..fa25bc63b 100644
 +
 +      try {
 +        // CLI 已退出且没有 SSE；worker 仍须观察测试进程这个外部 launcher，不能观察短命 CLI PID
-+        await Bun.sleep(750)
++        await waitForDaemonLog(lockPath, owner.pid, "launcher-alive")
 +        expect(ServerLock.alive(owner.pid)).toBe(true)
 +
 +        const second = await runDaemonMachine(lockPath, "start", env)
@@ -3018,3 +3031,25 @@ index a0328f7c2..fa25bc63b 100644
    // #523：worker 5s deadline 独立于 CLI force path——SIGTERM 直达 worker 验证自杀边界。
    // 前置 /config 请求建立真实 Project context，避免空 worker 立即 idle-exit 干扰 deadline。
    test(
+@@ -1313,7 +1457,8 @@
+         // #495：Project 中的同名程序不能参与 wrapper 解析；launcher 退出也不能成为 daemon 生命周期事件。
+         // 同一 PID/lock 必须继续服务，第二个 TUI 才能复用 owner 而不是发布替代 daemon。
+-        await Bun.sleep(500)
++        // parent退出与SSE断开处理均已发布后再发起新请求，不以固定sleep猜测回收速度。
++        await waitForDaemonLog(lockPath, lock.pid, "global event disconnected")
+         expect(ServerLock.alive(lock.pid)).toBe(true)
+         // 断言原 lock PID 而非任意 health 响应，防止 replacement daemon 把 parent-exit 回归伪装成成功。
+         expect(await ServerLock.ping(lock.port, credentials)).toBe(true)
+         expect((await Bun.file(lockPath).json()).pid).toBe(lock.pid)
+
+diff --git a/packages/opencode/src/cli/tui/worker.ts b/packages/opencode/src/cli/tui/worker.ts
+--- a/packages/opencode/src/cli/tui/worker.ts
++++ b/packages/opencode/src/cli/tui/worker.ts
+@@ -1,1 +1,2 @@
+ import { Server } from "@/server/server"
++import { Flag } from "@opencode-ai/core/flag/flag"
+@@ -588,2 +589,2 @@
+-    // shutdown 已开始时 callback 不再加载新实例。
+-    if (shutdownInProgress) return
++    // 禁用升级时也不启动Project实例；不能先加载完整上下文再在upgrade内部拒绝检查。
++    if (shutdownInProgress || Flag.OPENCODE_DISABLE_AUTOUPDATE) return

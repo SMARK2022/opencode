@@ -934,7 +934,7 @@ index f5209a24f..6bacf5965 100644
  // #493：maintenance task record 类型来自 core ColdStorage——三用例覆盖 lease 抢占/reclaim、control 协议与 startup recovery。
  import type { MaintenanceTask } from "@opencode-ai/core/storage/cold-storage"
  import { win32DetachConsole } from "@opencode-ai/tui/terminal-win32"
-@@ -131,6 +133,101 @@ async function spawnDaemon(lockPath: string, env: Record<string, string> = {}) {
+@@ -131,6 +133,119 @@ async function spawnDaemon(lockPath: string, env: Record<string, string> = {}) {
    throw new Error(`Daemon did not start within ${DAEMON_START_TIMEOUT_MS} ms`)
  }
  
@@ -977,20 +977,34 @@ index f5209a24f..6bacf5965 100644
 +    proc.kill()
 +    throw new Error(`Hanging disposer daemon did not start within ${DAEMON_START_TIMEOUT_MS} ms`)
 +  })()
-+  await readLineMatching(proc.stdout, (line) => line === "disposer-ready")
++  // ready发布前的失败仍由fixture回收，调用方尚未取得进程清理责任。
++  await readLineMatching(proc.stdout, (line) => line === "disposer-ready").catch(async (error) => {
++    proc.kill()
++    await proc.exited.catch(() => undefined)
++    throw error
++  })
 +  return { proc, lock }
 +}
 +
 +// #523：daemon 子进程自身会向 stdout 写 [daemon] 日志行；读取方必须按行匹配而不是假设首行即目标。
-+async function readLineMatching(stream: ReadableStream<Uint8Array> | null, predicate: (line: string) => boolean) {
++async function readLineMatching(stream: ReadableStream<Uint8Array> | null, predicate: (line: string) => boolean, timeoutMs = DAEMON_START_TIMEOUT_MS) {
 +  if (!stream) throw new Error("missing stdout stream")
 +  const reader = stream.getReader()
 +  const decoder = new TextDecoder()
 +  let buffer = ""
 +  try {
-+    const deadline = Date.now() + 10_000
++    const deadline = Date.now() + timeoutMs
 +    while (Date.now() < deadline) {
-+      const next = await reader.read()
++      // deadline必须约束每次read；只在循环入口检查无法结束一直无输出的pipe。
++      let timer: ReturnType<typeof setTimeout> | undefined
++      const next = await Promise.race([
++        reader.read(),
++        new Promise<never>((_, reject) => {
++          timer = setTimeout(() => reject(new Error(`timed out waiting for stdout; buffer=${JSON.stringify(buffer.slice(0, 200))}`)), Math.max(0, deadline - Date.now()))
++        }),
++      ]).finally(() => {
++        if (timer) clearTimeout(timer)
++      })
 +      if (next.done) break
 +      buffer += decoder.decode(next.value, { stream: true })
 +      const lines = buffer.split("\n")
@@ -1029,14 +1043,18 @@ index f5209a24f..6bacf5965 100644
 +    stderr: "pipe",
 +    detached: true,
 +  })
-+  const lock = JSON.parse(await readLineMatching(proc.stdout, (line) => line.startsWith("{"))) as ServerLock.ServerLock
++  const lock = JSON.parse(await readLineMatching(proc.stdout, (line) => line.startsWith("{")).catch(async (error) => {
++    proc.kill()
++    await proc.exited.catch(() => undefined)
++    throw error
++  })) as ServerLock.ServerLock
 +  return { proc, lock }
 +}
 +
  // 累积 SSE 分块，避免关闭事件被分帧后漏检；五秒上限由调用方负责。
  async function readUntil(reader: ReadableStreamDefaultReader<string>, text: string) {
    let seen = ""
-@@ -136,6 +231,272 @@ async function readUntil(reader: ReadableStreamDefaultReader<string>, text: stri
+@@ -136,6 +249,283 @@ async function readUntil(reader: ReadableStreamDefaultReader<string>, text: stri
  }
  
  describe("daemon lifecycle", () => {
@@ -1306,10 +1324,21 @@ index f5209a24f..6bacf5965 100644
 +    }
 +  })
 +
++  test("readLineMatching bounds a silent stream and releases its reader", async () => {
++    const stream = new ReadableStream<Uint8Array>()
++    // 只核超时出口与reader释放，不比较真实耗时；该夹具不启动进程或服务。
++    try {
++      await expect(readLineMatching(stream, () => false, 20)).rejects.toThrow("timed out waiting for stdout")
++      expect(stream.locked).toBe(false)
++    } finally {
++      await stream.cancel()
++    }
++  }, 2_000)
++
    // 这些用例启动真实 worker/CLI，保留完整 stop 契约，仅作静态审查。
    test(
      "daemon stop command gracefully stops daemon and clears the lock file",
-@@ -386,7 +747,45 @@ describe("daemon lifecycle", () => {
+@@ -386,7 +776,45 @@ describe("daemon lifecycle", () => {
      DAEMON_START_TIMEOUT_MS + 10_000,
    )
  
@@ -1356,7 +1385,7 @@ index f5209a24f..6bacf5965 100644
      "daemon writes lock file and responds to HTTP health check",
      async () => {
        await using tmp = await tmpdir()
-@@ -1014,3 +1412,5 @@
+@@ -1014,3 +1441,5 @@
 +
 +
    test(

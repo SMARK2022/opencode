@@ -807,7 +807,7 @@ index 0ed39e936a457423897da9712f422e0c435008e5..2370f4e079dfce3c63fc93d75bcb9e8e
 +import { stopDaemon } from "../../../src/cli/cmd/daemon"
  import { ServerLock } from "../../../src/cli/tui/server-lock"
  // #493：maintenance task record 类型来自 core ColdStorage——三用例覆盖 lease 抢占/reclaim、control 协议与 startup recovery。
-@@ -267,7 +268,58 @@
+@@ -267,7 +268,53 @@
    return { proc, lock }
  }
  
@@ -834,6 +834,7 @@ index 0ed39e936a457423897da9712f422e0c435008e5..2370f4e079dfce3c63fc93d75bcb9e8e
 +  })
 +  const deadline = Date.now() + DAEMON_START_TIMEOUT_MS
 +  while (Date.now() < deadline) {
++    if (proc.exitCode !== null) throw new Error(`Probe daemon exited before readiness: ${proc.exitCode}`)
 +    const lock = await Bun.file(lockPath)
 +      .text()
 +      .then((t) => JSON.parse(t) as ServerLock.ServerLock)
@@ -841,32 +842,26 @@ index 0ed39e936a457423897da9712f422e0c435008e5..2370f4e079dfce3c63fc93d75bcb9e8e
 +    if (lock && lock.pid === proc.pid && ServerLock.alive(lock.pid)) {
 +      const ok = await ServerLock.ping(lock.port, credentials)
 +      if (ok) {
-+        expect(await readLineMatching(proc.stdout, line => line === "probe-ready")).toBe("probe-ready")
++        expect(await readLineMatching(proc.stdout, line => line === "probe-ready").catch(async (error) => {
++          proc.kill()
++          await proc.exited.catch(() => undefined)
++          throw error
++        })).toBe("probe-ready")
 +        return { proc, lock }
 +      }
 +    }
 +    await Bun.sleep(POLL_INTERVAL_MS)
 +  }
 +  proc.kill()
++  await proc.exited.catch(() => undefined)
 +  throw new Error(`Probe daemon did not start within ${DAEMON_START_TIMEOUT_MS} ms`)
 +}
 +
-+async function pollFileContains(file: string, marker: string) {
-+  // 轮询可观测信号（日志行落盘）代替固定 sleep：marker 出现才证明对应 handler 真实执行过。
-+  const deadline = Date.now() + DAEMON_START_TIMEOUT_MS
-+  while (Date.now() < deadline) {
-+    const content = await Bun.file(file).text().catch(() => "")
-+    if (content.includes(marker)) return true
-+    await Bun.sleep(POLL_INTERVAL_MS)
-+  }
-+  return false
-+}
-+
  // #523：daemon 子进程自身会向 stdout 写 [daemon] 日志行；读取方必须按行匹配而不是假设首行即目标。
- async function readLineMatching(stream: ReadableStream<Uint8Array> | null, predicate: (line: string) => boolean) {
+ async function readLineMatching(stream: ReadableStream<Uint8Array> | null, predicate: (line: string) => boolean, timeoutMs = DAEMON_START_TIMEOUT_MS) {
    if (!stream) throw new Error("missing stdout stream")
    const reader = stream.getReader()
-@@ -849,8 +901,173 @@
+@@ -849,8 +896,172 @@
      30_000,
    )
  
@@ -877,11 +872,10 @@ index 0ed39e936a457423897da9712f422e0c435008e5..2370f4e079dfce3c63fc93d75bcb9e8e
 +      const lockPath = path.join(tmp.path, "tui-server.json")
 +      const { proc, lock } = await spawnProbeDaemon(lockPath, `Promise.reject(new Error("probe-rejection"))`)
 +      try {
-+        proc.stdin.write("trigger\n")
++        await proc.stdin.write("trigger\n")
 +        // opencode.log出现probe-rejection证明真实handler执行，不能只观察stdout。
 +        // 之后 ping 仍成功才证明策略是只记录而非自杀（INV-03）。
-+        const devlog = path.join(tmp.path, "share", "opencode", "log", "opencode.log")
-+        expect(await pollFileContains(devlog, "probe-rejection")).toBe(true)
++        await waitForDaemonLog(lockPath, proc.pid, "probe-rejection")
 +        expect(await ServerLock.ping(lock.port, credentials)).toBe(true)
 +        expect(ServerLock.alive(proc.pid)).toBe(true)
 +      } finally {
@@ -889,7 +883,7 @@ index 0ed39e936a457423897da9712f422e0c435008e5..2370f4e079dfce3c63fc93d75bcb9e8e
 +        await proc.exited.catch(() => undefined)
 +      }
 +    },
-+    30_000,
++    DAEMON_START_TIMEOUT_MS + 10_000,
 +  )
 +
 +  test(
@@ -901,7 +895,7 @@ index 0ed39e936a457423897da9712f422e0c435008e5..2370f4e079dfce3c63fc93d75bcb9e8e
 +      // 断言有界退出 + lock 清理，而不是进程崩溃后由 stale-owner 机制兜底的慢路径。
 +      const { proc } = await spawnProbeDaemon(lockPath, `throw new Error("probe-exception")`)
 +      try {
-+        proc.stdin.write("trigger\n")
++        await proc.stdin.write("trigger\n")
 +        const exit = await Promise.race([proc.exited, Bun.sleep(15_000).then(() => "timeout" as const)])
 +        expect(exit).not.toBe("timeout")
 +        expect(ServerLock.alive(proc.pid)).toBe(false)
@@ -911,7 +905,7 @@ index 0ed39e936a457423897da9712f422e0c435008e5..2370f4e079dfce3c63fc93d75bcb9e8e
 +        await proc.exited.catch(() => undefined)
 +      }
 +    },
-+    30_000,
++    DAEMON_START_TIMEOUT_MS + 20_000,
 +  )
 +
 +  test(
