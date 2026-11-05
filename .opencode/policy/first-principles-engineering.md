@@ -233,6 +233,21 @@ Every plan and implementation must perform these steps in order:
 A plan is blocked when it cannot identify the invariant, the first divergence,
 or the owner and nevertheless proposes production changes.
 
+## Plan-Stage Verification
+
+When a relevant fact remains uncertain, use a focused source check or a small
+isolated experiment to resolve it. Reuse results that still apply. Once the
+current stage's requirements are met, stop investigating and advance.
+
+Before plan approval, verify the key assumptions behind the proposed changes
+and the user's explicit plan-stage acceptance criteria. Run isolated experiments
+where execution is needed, and record commands, results, and tested scope in the
+plan. Expand the experiment only as needed to check the remaining requirements.
+
+If an experiment or audit exposes problems introduced by the proposed design,
+first check whether simplifying or dropping that choice meets the requirement
+with less rework.
+
 ## Primary-Path Rules
 
 The following are blocking by default:
@@ -454,6 +469,7 @@ The following block plan approval or implementation completion:
 - A confirmed requirement has no executable owner or path, or no behaviorally
   sensitive verification or explicit unverifiable reason.
 - A production concept lacks observed, contracted, or reachable justification.
+- Required plan-stage checks are missing or failing.
 - Current and approved plan revisions differ.
 - The plan, code, tests, and reported behavior have drifted.
 - Audit scope was narrowed after a revision.

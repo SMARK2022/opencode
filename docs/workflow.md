@@ -12,6 +12,7 @@
 - skills 和文档按阶段即时加载，禁止开局一次性读取全部内容。
 - 审计材料只由 `adversarial-auditor` subagent 加载；primary agent 不预读、不自审。
 - 阶段加载的 policy、skill、template、仓库指令和 canonical plan 是权威依据。
+- 门禁未满足时，主动执行最小检查、隔离实验或方案修订；满足后推进下一阶段，避免停在“证据不足”或重复取证。
 - 仅在目标终态被当前证据逐项证明后标记 `complete`。同一真实阻塞在两个连续 eligible GOAL turns 中保持不变且无法继续推进时，才在第二次标记 `blocked`。
 
 ## 第一性门禁
@@ -34,8 +35,9 @@
 
 ### 产物和门禁
 
-- 从当前仓库重新调查，不把旧方案或旧审计当作已确认事实。只创建或修订 plan，不修改 production、tests、config、migration 或 generated files。
+- 从当前仓库重新调查，不把旧方案或旧审计当作已确认事实。仓库内只创建或修订 plan，不修改 production、tests、config、migration、generated files 或真实业务数据；在用户许可范围内，可用临时脚本或内存副本进行隔离验证。
 - bug 类任务必须建立并实际运行能够捕获用户原始症状的 red-capable feedback loop。没有该信号时不得仅靠源码阅读猜根因，应继续构建信号或记录真实环境阻塞。
+- 送审前验证方案的关键假设和用户明确的方案验收要求；需要执行才能确认的内容应完成隔离实验，在 plan 中记录结果与验证范围。
 - 完成 template 各字段：evidence/domain/reachability、invariant/divergence/owner、route/paths/workaround、file/TDD/verification/diff、risks/speculation/audit/comments。
 - forward mapping：requirement/invariant -> owner/path/file/test。reverse mapping：concept -> requirement/invariant/safety evidence + 不可复用原因。确认行为没有 executable path、行为测试或明确 unverifiable reason 时不得提交；引用位置、估算和重复证据不构成映射缺失。
 - 完成后设置 `Status: audit-required`、`Approved revision: none`、`Implementation allowed: no`。
@@ -55,9 +57,11 @@
 
 ### Blocker 复议
 
-- 方案或实现审计返回 blocker 后，你一定要先判断其是否属于用户需求且涉及内容或者bug确为本次修改引入，不能直接采信并开始进行blocker的修改，否则会导致修改范围无限制扩大最终任务偏移；
-- 若不确定或认为不需要，不得跳过或撤销，必须复用同一 `task_id` 引用 plan 与仓库证据请 auditor 复查是否扩大了用户的修改意图。
+- 收到 blocker 后，先核对其对应的用户需求、必须保持的行为和具体后果，再决定是否修正，不要上来就认为是自己的问题。
+- 若问题由候选设计引出，先评估设计是否是用户要求的，简化或直接改进现有路径能否解决，避免为了保留候选方案逐层追加修补。
+- 若问题本质上是审计员的过度边界审计，复用同一 `task_id`，引用 plan 与仓库证据请 auditor 复查，保留原结论直至复查完成。
 - 复议消息只提供事实和引用，不提供期望 verdict、范围收缩或收敛压力；auditor 的复查结果作为本轮最终 verdict。
+- 用户明确更新需求时，将原文与来源同步到 plan；以更新后的完整需求新建审计任务，延续已有轮次记录。
 
 ### 放行
 

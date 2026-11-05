@@ -265,6 +265,8 @@ In plan mode, verify:
 - File changes are exact and restrained.
 - TDD slices can fail on current behavior.
 - Verification commands are concrete and use correct working directories.
+- Key assumptions and explicit plan-stage acceptance criteria are supported by
+  inspected evidence and, where needed, executed experiments.
 - The `E`/`C` estimate is feasible and commits implementation to the actual hard
   minimum; arithmetic or line-scope drift that preserves that minimum is
   non-blocking.
@@ -345,14 +347,22 @@ Every blocking finding must use:
 - Source evidence: path:line
 - Canonical-plan evidence: section
 - Responsibility owner:
-- Concrete production, test, or contract consequence, not estimate, wording,
-  metadata, or evidence-placement discrepancy:
-- Why this is not speculative:
+- Concrete behavioral consequence:
 - Minimal correction direction:
 ```
 
-The correction direction must identify the constraint or owning path. Do not
-design a family of fallback implementations for the builder.
+State the correction direction in one concise sentence identifying the violated
+constraint or owning path. When the plan itself introduces the problem, use
+the inspected code to suggest a simpler design or a direct improvement to the
+existing path where possible. The builder verifies the suggestion.
+Do not design fallback families.
+
+
+When the plan itself creates a blocking regression, you may briefly suggest
+simplifying the design or improving the existing path. Base the suggestion on
+the inspected code and leave verification to the builder. Besides, please propose
+a design goes with the direction of the original user's requirement(eg: **simple**,
+robust and widely profitable) and do not expand it into complex but avoidable designs.
 
 Use separate sections in this exact order:
 
