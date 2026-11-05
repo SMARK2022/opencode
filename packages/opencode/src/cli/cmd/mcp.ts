@@ -449,7 +449,7 @@ export const McpAddCommand = effectCmd({
         type: "string",
         array: true,
       }),
-  // 命名添加只写全局配置，无需启动项目实例。
+  // 命令行已给出服务器名时只编辑全局配置，项目启动及其数据库读取不属于这条路径。
   instance: (args) => !args.name,
   handler: Effect.fn("Cli.mcp.add")(function* (args) {
     const ctx = yield* InstanceRef
@@ -500,10 +500,10 @@ export const McpAddCommand = effectCmd({
         return
       }
 
-      if (!ctx) throw new Error("InstanceRef not provided")
       UI.empty()
       prompts.intro("Add MCP server")
 
+      if (!ctx) throw new Error("InstanceRef not provided")
       const project = ctx.project
 
       // Resolve config paths eagerly for hints

@@ -52,6 +52,7 @@ function Harness(props: { showThinking: () => boolean; parts: ReasoningPart[]; s
     tui: {} as never,
     messageView: () => undefined,
     pinnedMessages: () => new Set<string>(),
+    requestUsage: () => new Map(),
     markMessageDirty: () => {},
     interaction: {
       get: (key: string) => interaction()[key] ?? false,

@@ -136,12 +136,13 @@ export const createSseClient = <TData = unknown>({
 
         let buffer = ""
 
-        const abortHandler = () => {
-          // 只消化当前请求的取消，真实清理失败仍交给既有 SSE 错误通道。
-          void reader.cancel().catch((error: unknown) => {
-            if (signal.aborted && error === signal.reason) return
-            onSseError?.(error)
-          })
+        const abortHandler = async () => {
+          try {
+            // cancel 的异步拒绝也必须由发起它的监听器接管。
+            await reader.cancel()
+          } catch (error) {
+            if (error !== signal.reason) onSseError?.(error)
+          }
         }
 
         signal.addEventListener("abort", abortHandler)

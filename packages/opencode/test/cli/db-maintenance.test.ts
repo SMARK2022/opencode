@@ -248,15 +248,14 @@ describe("database maintenance CLI", () => {
       },
     })
     const electionDir = path.join(tmp.path, "state", "opencode", "locks")
-    // acquired 只在 contender 真正拿到锁后置位；acquiredAtTerminal 锁 terminal 时刻采样。
     let acquired = false
-    let acquiredAtTerminal = false
     const cli = runPty(["db", "compress", "--older-than", "0ms", "--batch-size", "1"], isolatedEnv(tmp.path))
-    // #549：Compression completed 出现时 election 仍应持有；contender 只能在 process 退出后进入。
-    cli.proc.onData((data) => {
-      if (data.includes("Compression completed")) acquiredAtTerminal = acquired
+    // 先停在真实用户决策边界再检查锁，不能把延迟送达的终端输出当作进程仍持锁。
+    const prompt = new Promise<void>(resolve => {
+      cli.proc.onData(() => {
+        if (cli.output().includes("Reclaim")) resolve()
+      })
     })
-    answerPrompt(cli.proc, "Reclaim", "n")
     while (!(await readdir(electionDir).catch(() => [])).some((file) => file.endsWith(".lock"))) {
       await Bun.sleep(10)
     }
@@ -266,9 +265,10 @@ describe("database maintenance CLI", () => {
       acquired = true
       return "acquired" as const
     })()
+    await Promise.race([prompt, cli.exited.then(() => { throw new Error("Compression exited before reclaim approval") })])
+    expect(acquired).toBe(false)
+    cli.proc.write("n\r")
     expect(await waitForExit(cli.proc, cli.exited)).toBe(0)
-    // terminal 时刻 election 必须仍持有：#549 采样点取代原 race 断言（更强且不依赖调度）。
-    expect(acquiredAtTerminal).toBe(false)
     // CLI 退出后 contender 才拿到锁：release 发生在全部 checkpoint 与输出之后。
     expect(await contender).toBe("acquired")
   }, 60_000)

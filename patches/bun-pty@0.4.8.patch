@@ -1,0 +1,13 @@
+diff --git a/src/terminal.ts b/src/terminal.ts
+index ec248d46a939f8a09cd669e853cefb126922c80a..fe861951ea4cf34927d72b13272116c8134637a4 100644
+--- a/src/terminal.ts
++++ b/src/terminal.ts
+@@ -225,6 +225,8 @@ export class Terminal implements IPty {
+ 	private async _startReadLoop() {
+ 		if (this._readLoop) return;
+ 		this._readLoop = true;
++		// 首次读取等调用者安装监听器，防止快速退出在构造函数内丢失通知。
++		await Promise.resolve();
+ 
+ 		const buf = Buffer.allocUnsafe(4096);
+ 

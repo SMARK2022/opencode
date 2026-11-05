@@ -1218,13 +1218,10 @@ export const {
 
         case "lsp.updated": {
           const workspace = project.workspace.current()
-          void sdk.client.lsp.status({ workspace })
-            .then((x) => setStore("lsp", x.data ?? []))
-            .catch((error: unknown) => {
-              // 此订阅拥有刷新任务；仅忽略自身退出信号，避免掩盖同时发生的真实错误。
-              if (sdk.signal.aborted && error === sdk.signal.reason) return
-              console.error("Failed to refresh LSP status", error)
-            })
+          void sdk.client.lsp.status({ workspace }).then((x) => setStore("lsp", x.data ?? [])).catch(error => {
+            // 订阅发起的任务在此收尾，退出取消不能成为无人处理的拒绝。
+            if (error !== sdk.signal.reason) console.error("Failed to refresh LSP status", error)
+          })
           break
         }
 
@@ -1322,7 +1319,7 @@ export const {
       const fatal = input.fatal ?? true
       const workspace = project.workspace.current()
       const projectPromise = project.sync()
-      // 普通启动等首组成功后再读列表，避免首组失败留下无人接管的派生 Promise。
+      // 只有 continue 的首屏需要列表；其他启动在下方异步组内发起并接管它。
       const sessionListPromise = args.continue ? projectPromise.then(() => listSessions()) : undefined
 
       // blocking - include session.list when continuing a session
@@ -1345,7 +1342,7 @@ export const {
         agentsPromise,
         configPromise,
         projectPromise,
-        ...(sessionListPromise ? [sessionListPromise] : []),
+        ...(args.continue ? [sessionListPromise] : []),
       ])
         .then(async () => {
           const providersResponse = providersPromise.then((x) => x.data!)
@@ -1354,6 +1351,7 @@ export const {
           const consoleStateResponse = consoleStatePromise
           const agentsResponse = agentsPromise.then((x) => x.data ?? [])
           const configResponse = configPromise.then((x) => x.data!)
+          const sessionListResponse = args.continue ? sessionListPromise : undefined
 
           return Promise.all([
             providersResponse,
@@ -1362,7 +1360,7 @@ export const {
             consoleStateResponse,
             agentsResponse,
             configResponse,
-            ...(sessionListPromise ? [sessionListPromise] : []),
+            ...(sessionListResponse ? [sessionListResponse] : []),
           ]).then((responses) => {
             const providers = responses[0]
             const providerList = responses[1]
@@ -1384,9 +1382,9 @@ export const {
         })
         .then(() => {
           if (store.status !== "complete") setStore("status", "partial")
-          // partial 已放行 UI；返回异步组，让下方既有 catch 同时接管取消与真实失败。
+          // partial 已放行界面；返回 Promise 让现有错误出口覆盖第二阶段读取。
           return Promise.all([
-            ...(sessionListPromise ? [] : [listSessions()]),
+            ...(args.continue ? [] : [listSessions()]),
             consoleStatePromise.then((consoleState) => setStore("console_state", reconcile(consoleState))),
             sdk.client.command.list({ workspace }).then((x) => setStore("command", reconcile(x.data ?? []))),
             sdk.client.lsp.status({ workspace }).then((x) => setStore("lsp", reconcile(x.data ?? []))),

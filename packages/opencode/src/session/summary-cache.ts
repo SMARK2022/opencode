@@ -1,6 +1,6 @@
 import { Effect, Schema } from "effect"
 import path from "path"
-import { and, asc, desc, eq, gt, isNull, lte, or, sql, type SQL } from "drizzle-orm"
+import { and, asc, desc, eq, inArray, isNull, sql, type SQL } from "drizzle-orm"
 // #0500：目标分层——cold owner 在 core；TxOrDb 与 SummaryPayload 由 cold-storage 导出。
 import { Database } from "@opencode-ai/core/database/database"
 import { ToolDiffs } from "@opencode-ai/core/session/tool-diffs"
@@ -47,18 +47,13 @@ function resolveMessageCursor(db: TxOrDb, sessionID: SessionID, id: string): Mes
 
 // #0584：开区间增量：只取严格晚于 cursor 的行，避免每次 load 重复累计同一 patch。
 function afterCursor(cursor: MessageCursor) {
-  return or(
-    gt(MessageTable.time_created, cursor.time),
-    and(eq(MessageTable.time_created, cursor.time), gt(MessageTable.id, cursor.id)),
-  )
+  // tuple 比较与持久排序一致，并让现有复合索引直接定位增量起点。
+  return sql`(${MessageTable.time_created}, ${MessageTable.id}) > (${cursor.time}, ${cursor.id})`
 }
 
 // #0584：闭区间上界：同毫秒时用 SQLite BINARY 的 ID 序，不能把同时间整段都纳入。
 function throughCursor(cursor: MessageCursor) {
-  return or(
-    sql`${MessageTable.time_created} < ${cursor.time}`,
-    and(eq(MessageTable.time_created, cursor.time), lte(MessageTable.id, cursor.id)),
-  )
+  return sql`(${MessageTable.time_created}, ${MessageTable.id}) <= (${cursor.time}, ${cursor.id})`
 }
 
 // #0584：空字符串是无 closed Message 的合法 sentinel，恒早于任何具体行；
@@ -171,7 +166,7 @@ function loadToolDiffMessages(db: TxOrDb, sessionID: SessionID, after?: string, 
   // Message 与 Part 分开查询，只搬运必要 Tool rows 而不构造完整 transcript。
   // #0584：两组查询按 persisted chronology 排序，SQLite 扫描顺序不会改变 aggregate hash。
   const messages = db
-    .select()
+    .select({ id: MessageTable.id })
     .from(MessageTable)
     .where(and(...messageConditions))
     .orderBy(asc(MessageTable.time_created), asc(MessageTable.id))
@@ -193,27 +188,40 @@ function loadToolDiffMessages(db: TxOrDb, sessionID: SessionID, after?: string, 
     .orderBy(desc(MessageTable.time_created), desc(MessageTable.id))
     .limit(1)
     .get()?.id ?? ""
+  // 无增量时连 Part 查询也不发起，避免空刷新仍搬运整个会话的工具正文。
+  if (messages.length === 0) return { messages: [], cursor: snapshotMaxID }
   const partConditions: SQL[] = [
     eq(PartTable.session_id, sessionID),
+    // 复用同一消息范围且不展开 ID 参数表，首次全量构建也不受 SQLite 变量数量限制。
+    inArray(PartTable.message_id, db.select({ id: MessageTable.id }).from(MessageTable).where(and(...messageConditions))),
     sql`json_extract(${PartTable.data}, '$.type') = 'tool'`,
     sql`json_extract(${PartTable.data}, '$.state.status') = 'completed'`,
     sql`json_type(${PartTable.data}, '$.hidden') is null`,
   ]
   // #0584：Part 归属以已选 Message 集合为准：回绕后 message_id 与 cursor 无共同排序，
   // 不能用 id 范围二次过滤。
-  const selectedMessageIDs = new Set(messages.map((row) => row.id))
   const parts = db
-    .select()
-    .from(PartTable)
+    .select({
+      id: sql`${PartTable.id}`.mapWith(PartTable.id),
+      message_id: sql`${PartTable.message_id}`.mapWith(PartTable.message_id),
+      session_id: sql`${PartTable.session_id}`.mapWith(PartTable.session_id),
+      time_created: sql`${PartTable.time_created}`.mapWith(PartTable.time_created),
+      time_updated: sql`${PartTable.time_updated}`.mapWith(PartTable.time_updated),
+      data: sql`${PartTable.data}`.mapWith(PartTable.data),
+      cold_ref: sql`${PartTable.cold_ref}`.mapWith(PartTable.cold_ref),
+      cold_key: sql`${PartTable.cold_key}`.mapWith(PartTable.cold_key),
+      cold_stats: sql`${PartTable.cold_stats}`.mapWith(PartTable.cold_stats),
+    })
+    // 仅加 IN 仍可能误选 session 索引；按父消息点查，列解码继续复用原 schema。
+    .from(sql`${PartTable} indexed by part_message_id_id_idx`)
     .where(and(...partConditions))
     .orderBy(asc(PartTable.message_id), asc(PartTable.id))
     .all()
-    .filter((row) => selectedMessageIDs.has(row.message_id))
   // inspect 只在内存恢复 metadata，不持久 thaw compacted head。
   const restored = ColdStorage.inspectPartRows(db, parts)
   // 最小消息形状只服务 collectToolDiffs，禁止借此读取 Text 或 provider context。
   const byMessage = new Map(
-    messages.map((row) => [row.id, { info: { id: row.id, hidden: row.data.hidden }, parts: [] as ToolDiffPart[] }]),
+    messages.map((row) => [row.id, { info: { id: row.id }, parts: [] as ToolDiffPart[] }]),
   )
   for (const row of restored) {
     if (row.data.type !== "tool" || row.data.state.status !== "completed") continue

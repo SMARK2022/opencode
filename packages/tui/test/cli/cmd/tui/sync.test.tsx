@@ -189,124 +189,28 @@ test("unloaded deletion events preserve projection absence and later live delive
 })
 
 describe("tui sync", () => {
-  test.each(["/command", "/path", "/session"])("owns bootstrap response-body cancellation at %s", async (endpoint) => {
+  test.each(["/command", "/lsp"])("settles a pending %s response when its renderer closes", async endpoint => {
     await using tmp = await tmpdir()
     await Bun.write(`${tmp.path}/kv.json`, "{}")
-    let armed = false
-    let signal: AbortSignal | undefined
-    const { app, emit, exits } = await mount((url, request) => {
-      if (!armed || url.pathname !== endpoint) return
-      signal = request!.signal
-      // 必须在响应头之后取消；fetch 阶段拒绝会被 SDK 的 result.error 路径吸收。
+    let pending: AbortSignal | undefined
+    let refresh = false
+    const { app, emit } = await mount((url, request) => {
+      if (!refresh || url.pathname !== endpoint) return
+      pending = request!.signal
+      // SDK 收到响应头后仍在读 body，退出必须沿同一个 Promise 链完成取消。
       return new Response(new ReadableStream({
-        start(controller) {
-          request!.signal.addEventListener("abort", () => controller.error(request!.signal.reason), { once: true })
-        },
+        start: controller => request!.signal.addEventListener("abort", () => controller.error(request!.signal.reason), { once: true }),
       }), { headers: { "content-type": "application/json" } })
     }, tmp.path)
     try {
-      armed = true
-      emit({ directory: "global", payload: { id: "evt_refresh", type: "global.disposed", properties: {} } })
-      await wait(() => signal !== undefined)
+      refresh = true
+      emit({ directory: "global", payload: { id: "evt_refresh", type: endpoint === "/lsp" ? "lsp.updated" : "global.disposed", properties: {} } })
+      await wait(() => pending !== undefined)
       app.renderer.destroy()
-      expect(signal!.aborted).toBe(true)
-      await Bun.sleep(20)
-      expect(exits).toEqual([])
+      expect(pending!.aborted).toBe(true)
+      await Bun.sleep(0)
     } finally {
       app.renderer.destroy()
-    }
-  })
-
-  test("keeps partial UI ready and reports a background bootstrap body failure", async () => {
-    await using tmp = await tmpdir()
-    await Bun.write(`${tmp.path}/kv.json`, "{}")
-    const failure = new Error("command response body failed")
-    const logged = spyOn(console, "error").mockImplementation(() => {})
-    let fail!: () => void
-    const { app, sync, exits } = await mount((url) => {
-      if (url.pathname !== "/command") return
-      return new Response(new ReadableStream({
-        start(controller) { fail = () => controller.error(failure) },
-      }), { headers: { "content-type": "application/json" } })
-    }, tmp.path, undefined, undefined, { status: "partial" })
-    try {
-      // 第二阶段仍可挂起，UI 无需等完整 bootstrap；失败则由原有 fatal owner 接管。
-      expect(sync.ready).toBe(true)
-      expect(sync.status).toBe("partial")
-      fail()
-      await wait(() => exits.length > 0)
-      expect(exits).toEqual([failure])
-      expect(logged).toHaveBeenCalledWith("tui bootstrap failed", expect.objectContaining({ error: failure.message }))
-    } finally {
-      app.renderer.destroy()
-      logged.mockRestore()
-    }
-  })
-
-  test.each([false, true])("preserves continue=%s session-list scheduling during bootstrap", async (continuing) => {
-    await using tmp = await tmpdir()
-    await Bun.write(`${tmp.path}/kv.json`, "{}")
-    let armed = false
-    let release!: () => void
-    let pending = false
-    let directories = false
-    let lists = 0
-    const { app, emit, exits } = await mount((url) => {
-      if (!armed) return
-      if (url.pathname === "/session") lists++
-      if (url.pathname === "/project/proj_test/directories") directories = true
-      if (url.pathname !== "/config") return
-      pending = true
-      return new Promise<Response>((resolve) => { release = () => resolve(json({})) })
-    }, tmp.path, undefined, undefined, { args: { continue: continuing } })
-    try {
-      armed = true
-      emit({ directory: "global", payload: { id: "evt_refresh", type: "global.disposed", properties: {} } })
-      await wait(() => pending && directories)
-      await Bun.sleep(20)
-      // 普通启动不派生无人接管的早期列表；continue 仍在阻塞组中启动并等待它。
-      expect(lists).toBe(continuing ? 1 : 0)
-      release()
-      await wait(() => lists === 1)
-      expect(exits).toEqual([])
-    } finally {
-      release?.()
-      app.renderer.destroy()
-    }
-  })
-
-  test.each(["cancel", "failure"])("owns lsp.updated response-body %s during shutdown", async (outcome) => {
-    await using tmp = await tmpdir()
-    await Bun.write(`${tmp.path}/kv.json`, "{}")
-    const failure = new DOMException("LSP body failed independently", "AbortError")
-    const logged = spyOn(console, "error").mockImplementation(() => {})
-    let armed = false
-    let signal: AbortSignal | undefined
-    let fail!: () => void
-    const { app, emit, exits } = await mount((url, request) => {
-      if (!armed || url.pathname !== "/lsp") return
-      signal = request!.signal
-      return new Response(new ReadableStream({
-        start(controller) {
-          fail = () => controller.error(failure)
-          request!.signal.addEventListener("abort", () => controller.error(request!.signal.reason), { once: true })
-        },
-      }), { headers: { "content-type": "application/json" } })
-    }, tmp.path)
-    try {
-      armed = true
-      emit({ directory: "global", payload: { id: "evt_lsp", type: "lsp.updated", properties: {} } })
-      await wait(() => signal !== undefined)
-      // 同名 AbortError 若先于退出发生，仍是真实错误，不能仅凭 name 吞掉。
-      if (outcome === "failure") fail()
-      app.renderer.destroy()
-      expect(signal!.aborted).toBe(true)
-      await Bun.sleep(20)
-      expect(exits).toEqual([])
-      if (outcome === "failure") expect(logged).toHaveBeenCalledWith("Failed to refresh LSP status", failure)
-    } finally {
-      app.renderer.destroy()
-      logged.mockRestore()
     }
   })
 

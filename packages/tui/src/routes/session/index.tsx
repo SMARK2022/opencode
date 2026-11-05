@@ -3,7 +3,6 @@ import {
   createContext,
   createEffect,
   createMemo,
-  createResource,
   createSignal,
   For,
   Match,
@@ -18,6 +17,7 @@ import {
 import { createStore, produce } from "solid-js/store"
 import { sessionMessageContentWidth } from "./layout"
 import { goalContinuation } from "./goal-continuation"
+import { createRequestUsage } from "./request-usage"
 
 // #185：可见 part 判定（空 text / 隐藏 completed tool 不占首距）
 export const isVisibleAssistantPart = (
@@ -230,6 +230,7 @@ export const context = createContext<{
   // [0624] 渲染资源窗口的只读视图与回写入口：messageView 无记录时按默认挂载/auto 处理。
   messageView: (id: string) => { mounted: boolean; height: number | "auto" } | undefined
   pinnedMessages: () => ReadonlySet<string>
+  requestUsage: ReturnType<typeof createRequestUsage>
   markMessageDirty: (id: string) => void
   interaction: { get: (key: string) => boolean; set: (key: string, value: boolean) => void }
 }>()
@@ -566,6 +567,11 @@ export function Session() {
   // 窗口被实测证伪：scroll p95 劣化 12–14×，证据见 plan §20 R1 实测记录）。
   const [messageView, setMessageView] = createStore<Record<string, { mounted: boolean; height: number | "auto" }>>({})
   const [renderPins, setRenderPins] = createSignal<ReadonlySet<string>>(new Set<string>())
+  const requestUsage = createRequestUsage({
+    messages,
+    mounted: id => messageView[id]?.mounted !== false || renderPins().has(id),
+    get: async (sessionID, requestID) => (await sdk.client.session.requestUsage.get({ sessionID, requestID })).data,
+  })
   // 轻量交互状态（工具展开、Shell 上下文输出、reasoning 展开）决定重建后的实测高度，
   // 必须活在可销毁的内容 owner 之外，否则屏外重建会把用户展开状态重置回折叠。
   const [interaction, setInteraction] = createStore<Record<string, boolean>>({})
@@ -1778,6 +1784,7 @@ export function Session() {
           // [0624] 渲染资源窗口向 Message 渲染层暴露只读视图与标脏/交互回写入口。
           messageView: (id: string) => messageView[id],
           pinnedMessages: renderPins,
+          requestUsage,
           markMessageDirty,
           interaction: interactionState,
         }}
@@ -2239,20 +2246,13 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
     // #243：消息 footer 是完成态的权威展示，耗时必须和运行中 footer 共用
     // parent user -> assistant completed 的 transcript 口径，避免两套算法漂移。
     // final() 已保证 completed 存在；此处仅做口径统一，不重算起点
-    // final() 已保证 completed 存在；此处仅做口径统一，不重算起点
     return assistantTurnDuration(messages(), props.message)
   })
-  // 完成记录读精确parent账本；分页窗口不能冒充完整turn，也不借用活跃请求投影。
-  const usageSDK = useSDK()
-  const [turnRequest] = createResource(
-    // 屏外正文已卸载时不预取账本；重新进入视窗仍读取原精确请求。
-    () => footerVisible() && ((ctx.messageView(props.message.id)?.mounted ?? true) || ctx.pinnedMessages().has(props.message.id))
-      ? `${props.message.sessionID}:${props.message.parentID}:${messages().flatMap(message => message.role === "assistant" && message.parentID === props.message.parentID ? [`${message.id}@${message.time.completed ?? "running"}`] : []).join(",")}`
-      : undefined,
-    async () => (await usageSDK.client.session.requestUsage.get({ sessionID: props.message.sessionID, requestID: props.message.parentID })).data,
-  )
   const turnUsage = createMemo(() => {
     if (!footerVisible()) return ""
+    // 多个助手共享同一请求的权威累计，历史分页和其他请求的更新不改变其统计口径。
+    const turnRequest = ctx.requestUsage().get(props.message.parentID)
+    if (!turnRequest) return ""
     // 失败不退回不完整窗口；状态文本保留可见性，避免把缺证据伪装成零费用。
     if (turnRequest.error) return "usage unavailable"
     const usage = turnRequest()

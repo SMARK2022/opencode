@@ -172,6 +172,8 @@ describe("OpenAI-compatible Chat route", () => {
           {
             role: "assistant",
             content: null,
+            // 与既有 DeepSeek 请求降级一致，工具续轮也保留必填的 reasoning 字段。
+            reasoning_content: "",
             tool_calls: [
               {
                 id: "call_1",

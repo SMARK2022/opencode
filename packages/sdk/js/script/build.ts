@@ -115,24 +115,19 @@ if (sseTypesPatched === sseTypesSource) {
 }
 await Bun.write(sseTypesPath, sseTypesPatched)
 
-// cancel() 返回 Promise，同步 try/catch 接不到原生 fetch 取消响应体后的拒绝。
-// 修补生成入口，避免下次 SDK 再生成时丢失清理责任。
-const ssePath = "./src/v2/gen/core/serverSentEvents.gen.ts"
-const sseSource = await Bun.file(ssePath).text()
-const ssePatched = sseSource.replace(
+// 生成器的同步 try/catch 漏接 cancel Promise；保持生成结果与传输层清理语义一致。
+const sseFile = Bun.file("./src/v2/gen/core/serverSentEvents.gen.ts")
+await sseFile.write((await sseFile.text()).replace(
   /const abortHandler = \(\) => \{\s*try \{\s*reader\.cancel\(\);?\s*\} catch \{\s*\/\/ noop\s*\}\s*\};?/,
-  `const abortHandler = () => {
-    // 只消化当前请求的取消，真实清理失败仍交给既有 SSE 错误通道。
-    void reader.cancel().catch((error: unknown) => {
-      if (signal.aborted && error === signal.reason) return
-      onSseError?.(error)
-    })
+  `const abortHandler = async () => {
+    try {
+      // cancel 的异步拒绝也必须由发起它的监听器接管。
+      await reader.cancel()
+    } catch (error) {
+      if (error !== signal.reason) onSseError?.(error)
+    }
   }`,
-)
-if (ssePatched === sseSource) {
-  throw new Error(`SSE cancellation patch did not apply; generated transport may have changed (${ssePath})`)
-}
-await Bun.write(ssePath, ssePatched)
+))
 
 await $`bun prettier --write src/gen`
 await $`bun prettier --write src/v2`
