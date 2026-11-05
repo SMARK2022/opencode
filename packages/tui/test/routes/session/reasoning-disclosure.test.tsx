@@ -150,7 +150,8 @@ test("real run preserves word-wrap, shared budget, streaming and conceal disclos
     await waitForFrame(app, (frame) => frame.includes("abcdefghijkl") && frame.includes("展开查看完整推理"))
     await click("展开查看完整推理")
     await waitForFrame(app, (frame) => frame.includes("收起推理"))
-    expect(app.captureCharFrame().replace(/\s/g, "")).toContain(wrapped.replace(/\s/g, ""))
+    // 内容完整性对照剥离恢复的左轨；轨道穿过折行不应被误认为 reasoning 正文丢失。
+    expect(app.captureCharFrame().replace(/[┃\s]/g, "")).toContain(wrapped.replace(/\s/g, ""))
     await click("收起推理")
     setParts(Array.from({ length: 8 }, (_, index) => makePart(`mode source ${index + 1}`, index === 0 ? "prt_test" : `prt_${index}`)))
     await waitForFrame(app, (frame) => frame.includes("mode source 1") && frame.includes("展开查看完整推理"))

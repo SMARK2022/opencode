@@ -49,7 +49,7 @@ import { useProject } from "../../context/project"
 import { useSync } from "../../context/sync"
 import { useEvent } from "../../context/event"
 import { SplitBorder } from "../../ui/border"
-import { useTuiPaths, useTuiTerminalEnvironment } from "../../context/runtime"
+import { useTuiPaths } from "../../context/runtime"
 import { Spinner } from "../../component/spinner"
 import { createSyntaxStyleMemo, generateSubtleSyntax, selectedForeground, useTheme } from "../../context/theme"
 import {
@@ -124,7 +124,6 @@ import { useKV } from "../../context/kv.tsx"
 import stripAnsi from "strip-ansi"
 import { usePromptRef } from "../../context/prompt"
 import { useEpilogue } from "../../context/epilogue"
-import { normalizePath } from "../../util/path"
 import { PermissionPrompt } from "./permission"
 import { QuestionPrompt } from "./question"
 import { ContextUsagePanel } from "./context-usage"
@@ -133,7 +132,7 @@ import * as Model from "../../util/model"
 import { formatTranscript } from "../../util/transcript"
 import { formatUsageStats, sessionEpilogue } from "../../util/presentation"
 import { tokenAccounting } from "../../util/token-accounting"
-import { layoutGroups, setPreLayoutSiblingMargin } from "../../util/layout"
+import { setPreLayoutSiblingMargin } from "../../util/layout"
 import { useTuiConfig } from "../../config"
 import { useClipboard } from "../../context/clipboard"
 import { reasoningSummary } from "../../context/thinking"
@@ -1920,6 +1919,8 @@ export function Session() {
                       </Match>
                       <Match when={message.role === "assistant"}>
                         <AssistantMessage
+                          // 使用整个消息列表的位置，用户消息之后的助手也保留旧版外部断行。
+                          index={index()}
                           last={lastAssistant()?.id === message.id}
                           message={message as AssistantMessage}
                           parts={sync.data.part[message.id] ?? []}
@@ -2201,7 +2202,10 @@ function projectMessageParts(messageID: string, parts: Part[]) {
   return result
 }
 
-function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; last: boolean }) {
+// 三态沿用旧版：首块 false、正文后 true、连续工具 undefined（交给实际兄弟行测量）。
+const ToolPartTopMargin = createContext<() => boolean | undefined>(() => undefined)
+
+function AssistantMessage(props: { index: number; message: AssistantMessage; parts: Part[]; last: boolean }) {
   const ctx = use()
   const local = useLocal()
   const { theme } = useTheme()
@@ -2215,27 +2219,31 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
   const final = createMemo(() => {
     return props.message.finish && !["tool-calls", "unknown"].includes(props.message.finish)
   })
-  // 只计实际正文、推理和工具，避免空助手消息先闪出模式与模型行。
-  const visibleParts = createMemo(() => {
-    return props.parts.some((part) => {
-      if (part.type === "text") return part.text.trim().length > 0
-      if (part.type === "reasoning") {
-        if (!ctx.showThinking()) return false
-        // 加密占位不算可见正文，否则空完成消息仍会露出 footer。
-        return part.text.replace("[REDACTED]", "").trim().length > 0
-      }
-      // #185：工具是否计入 visibleParts 与 shouldHide 同口径
-      if (part.type === "tool")
-        return isVisibleAssistantPart(
-          { type: "tool", tool: part.tool, state: part.state },
-          { showDetails: ctx.showDetails(), showThinking: true },
-        )
-      return false
+  const presentation = createMemo(() => {
+    const margins = new Map<string, { top: boolean; tool: boolean | undefined }>()
+    let previous: MessageRenderItem | undefined
+    let content = false
+    // 只遍历当前消息一次，复用旧版可见前驱关系；可见性不改原始 run 边界和 primitive key。
+    renderItems().forEach((item) => {
+      const body = item.kind === "reasoning-run"
+        ? ctx.showThinking() && item.parts.some((part) => normalizeReasoning(part.text))
+        : (item.part.type === "text" || item.part.type === "tool") && isVisibleAssistantPart(
+            item.part, { showDetails: ctx.showDetails(), showThinking: ctx.showThinking() },
+          )
+      // 新版 opaque Thought 有标题但没有正文：参与首距，仍不单独触发完成态 footer。
+      if (!body && !(item.kind === "reasoning-run" && ctx.showThinking() && item.parts.some((part) => part.metadata))) return
+      margins.set(item.key, {
+        top: previous !== undefined,
+        tool: !previous ? false : previous.kind === "part" && previous.part.type === "tool" ? undefined : true,
+      })
+      previous = item
+      content ||= body
     })
+    return { margins, content }
   })
   const footerVisible = createMemo(() => {
     // 中断可能发生在首个正文之前，错误身份不能因消息为空而被这道可见性门槛吞掉。
-    if (!visibleParts() && !props.message.error) return false
+    if (!presentation().content && !props.message.error) return false
     // 最后一条仍在流式生成不等于完成，不能恢复原 props.last 触发的过早元信息。
     return final() || props.message.error?.name === "MessageAbortedError"
   })
@@ -2309,24 +2317,29 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
     ),
   )
 
-  // 消息导航只匹配滚动容器直接子节点的 ID；整条助手消息共用锚点，保留内部各分块的间距。
+  // 外部间距留在消息线之外；内部 part 空行仍在同一个根内，不能逐 part 分别画消息边框。
+  // 保留直接子节点 ID 与冻结高度，正文释放和导航继续沿用现有 owner。
   return (
-    <box id={props.message.id} flexShrink={0} ref={(el: BoxRenderable) => layoutGroups.add(el)} height={fixedHeight()}>
+    <box id={props.message.id} flexShrink={0} border={["left"]} customBorderChars={SplitBorder.customBorderChars}
+      borderColor={theme.backgroundElement} marginTop={props.index === 0 ? 0 : 1} height={fixedHeight()}>
       <Show when={mounted()}>
       <For each={renderItemKeys()}>
         {(key, index) => {
           // For保留primitive key对应的root，普通正文delta不重挂run。
           const item = createMemo(() => itemByKey().get(key)!)
+          const margin = createMemo(() => presentation().margins.get(key))
           return (
             <Switch>
               <Match when={item().kind === "reasoning-run" && item()}>
-                {(current) => <ReasoningRun parts={(current() as Extract<MessageRenderItem, { kind: "reasoning-run" }>).parts} />}
+                {(current) => <ReasoningRun parts={(current() as Extract<MessageRenderItem, { kind: "reasoning-run" }>).parts} topMargin={margin()?.top} />}
               </Match>
               <Match when={item().kind === "part" && item()}>
                 {(current) => {
                   const part = () => (current() as Extract<MessageRenderItem, { kind: "part" }>).part
                   const component = createMemo(() => PART_MAPPING[part().type as keyof typeof PART_MAPPING])
-                  return <Show when={component()}><Dynamic last={index() === renderItemKeys().length - 1} component={component()} part={part() as any} message={props.message} /></Show>
+                  return <Show when={component()}><ToolPartTopMargin.Provider value={() => margin()?.tool}>
+                    <Dynamic last={index() === renderItemKeys().length - 1} component={component()} part={part() as any} message={props.message} topMargin={margin()?.top} />
+                  </ToolPartTopMargin.Provider></Show>
                 }}
               </Match>
             </Switch>
@@ -2437,7 +2450,7 @@ function reasoningRowsTotal(content: string[], width: number, widthMethod: Width
   }
 }
 
-export function ReasoningRun(props: { parts: ReasoningPart[] }) {
+export function ReasoningRun(props: { parts: ReasoningPart[]; topMargin?: boolean }) {
   const { theme } = useTheme()
   const ctx = use()
   const renderer = useRenderer()
@@ -2459,7 +2472,8 @@ export function ReasoningRun(props: { parts: ReasoningPart[] }) {
   const duration = createMemo(() => Math.max(0, Math.max(...props.parts.map((part) => part.time.end ?? part.time.start)) - Math.min(...props.parts.map((part) => part.time.start))))
   return (
     <Show when={ctx.showThinking() && (parts().length > 0 || opaque())}>
-      <box ref={(el: BoxRenderable) => alwaysSeparate.add(el)} paddingLeft={3} marginTop={1} flexDirection="column" flexShrink={0}
+      <box ref={(el: BoxRenderable) => alwaysSeparate.add(el)} border={["left"]} customBorderChars={SplitBorder.customBorderChars}
+        borderColor={theme.backgroundElement} paddingLeft={2} marginTop={props.topMargin ? 1 : 0} flexDirection="column" flexShrink={0}
         onMouseUp={() => {
           if (renderer.getSelection()?.getSelectedText() || opaque() || !overflow()) return
           const value = !expanded()
@@ -2553,7 +2567,7 @@ function ReasoningHeader(props: {
   )
 }
 
-function TextPart(props: { last: boolean; part: TextPart; message: AssistantMessage }) {
+function TextPart(props: { last: boolean; part: TextPart; message: AssistantMessage; topMargin?: boolean }) {
   const ctx = use()
   const { theme, syntax } = useTheme()
   // #135：assistant 未完成则流式渲染
@@ -2566,7 +2580,7 @@ function TextPart(props: { last: boolean; part: TextPart; message: AssistantMess
   const overBudget = createMemo(() => !withinMarkdownBudget(content()))
   return (
     <Show when={content()}>
-      <box ref={(el: BoxRenderable) => alwaysSeparate.add(el)} paddingLeft={3} marginTop={1} flexShrink={0}>
+      <box ref={(el: BoxRenderable) => alwaysSeparate.add(el)} paddingLeft={3} marginTop={props.topMargin ? 1 : 0} flexShrink={0}>
         <Show
           when={overBudget()}
           fallback={
@@ -2765,6 +2779,7 @@ function GenericTool(props: ToolProps) {
             part={props.part}
             onClick={notebookOverflow() ? () => setExpanded((prev) => !prev) : undefined}
             preview={notebookOverflow() && !expanded() ? view().preview : undefined}
+            footer={notebookOverflow() ? "Click to collapse" : undefined}
           >
             {/* [0624] view().body 是工厂：BlockTool 每次展开重新调用，得到全新内容树 */}
             {view().body()}
@@ -2777,6 +2792,7 @@ function GenericTool(props: ToolProps) {
           title={`# ${props.tool} ${input(props.input)}`}
           part={props.part}
           onClick={collapsed().overflow ? () => setExpanded((prev) => !prev) : undefined}
+          footer={collapsed().overflow ? "Click to collapse" : undefined}
           // #144：通用工具折叠预览
           preview={
             collapsed().overflow && !expanded() ? <text fg={theme.text}>{previewText(limited(), 10, maxChars())}</text> : undefined
@@ -2784,9 +2800,6 @@ function GenericTool(props: ToolProps) {
         >
           <box gap={1}>
             <text fg={theme.text}>{expanded() || !collapsed().overflow ? output() : limited()}</text>
-            <Show when={collapsed().overflow}>
-              <text fg={theme.textMuted}>{expanded() ? "Click to collapse" : "Click to expand"}</text>
-            </Show>
           </box>
         </BlockTool>
       </Match>
@@ -3203,6 +3216,7 @@ export function InlineToolRow(props: {
   onMouseOut?: () => void
   onMouseUp?: (evt: MouseEvent) => void
 }) {
+  const topMargin = useContext(ToolPartTopMargin)
   return (
     <box
       paddingLeft={3}
@@ -3211,13 +3225,14 @@ export function InlineToolRow(props: {
       onMouseUp={props.onMouseUp}
       ref={(el: BoxRenderable) => {
         if (props.separate) alwaysSeparate.add(el)
+        // 旧版多行分隔一旦成立就保留；在 Yoga 前改几何，避免 renderBefore 信号导致下一帧跳动。
+        let margin = 0
         setPreLayoutSiblingMargin(el, (previous) => {
-          // #460：无前驱兄弟时承接消息级顶距——首个工具 part 与文本气泡基线一致。
-          if (!previous) return 1
-          return props.separate ||
-            (previous instanceof BoxRenderable && (previous.height > 1 || alwaysSeparate.has(previous)))
-            ? 1
-            : 0
+          if (props.separate || el.height > 1 ||
+            (previous instanceof BoxRenderable && (previous.height > 1 || alwaysSeparate.has(previous)))) margin = 1
+          // 首个可见工具必须覆盖自分隔；连续工具才采用各自真实行高和前驱行高。
+          const explicit = topMargin()
+          return explicit === undefined ? margin : explicit ? 1 : 0
         })
       }}
     >
@@ -3281,6 +3296,8 @@ export function BlockTool(props: {
   contextLabel?: string
   // #144：可选预览节点；折叠时优先于 maxHeight 裁切 children
   preview?: JSX.Element
+  // 只接收展示文字，展开状态仍归调用方；公共 section 统一承担旧版提示前的一行留白。
+  footer?: string
   // #214：autoReview=false 时跳过共享审查状态行——apply_patch 内部 BlockTool 由外部统一渲染
   autoReview?: false
 }) {
@@ -3288,6 +3305,7 @@ export function BlockTool(props: {
   const renderer = useRenderer()
   const { navigate } = useRoute()
   const review = useContext(ToolAutoReview)
+  const topMargin = useContext(ToolPartTopMargin)
   const [hover, setHover] = createSignal(false)
   const error = createMemo(() => (props.part?.state.status === "error" ? props.part.state.error : undefined))
   // 上下文状态优先于 hover，鼠标移入不能抹掉当前视图的颜色提示。
@@ -3309,7 +3327,8 @@ export function BlockTool(props: {
       paddingTop={1}
       paddingBottom={1}
       paddingLeft={2}
-      marginTop={1}
+      // Part 级首距同时适用于多文件 Patch，不能擅自改成逐卡片分组。
+      marginTop={topMargin() === false ? 0 : 1}
       // #109：去掉 gap，改由子块 marginTop 承担间距
       backgroundColor={background()}
       customBorderChars={SplitBorder.customBorderChars}
@@ -3358,8 +3377,9 @@ export function BlockTool(props: {
           {props.children}
         </box>
       </Show>
-      <Show when={previewTree()}>
-        <text fg={theme.textMuted}>Click to expand</text>
+      {/* 提示独立于可销毁的正文；收放正文不重建另一套按钮或改变调用方的展开状态。 */}
+      <Show when={collapsed() ? "Click to expand" : props.footer}>
+        {(label) => <box marginTop={1}><text fg={theme.textMuted}>{label()}</text></box>}
       </Show>
       <Show when={error()}>
         <box marginTop={1}>
@@ -3409,15 +3429,16 @@ function Shell(props: ToolProps) {
   const workdirDisplay = createMemo(() => {
     const workdir = stringValue(props.input.workdir)
     if (!workdir || workdir === ".") return undefined
-    const formatted = pathFormatter.format(workdir)
-    if (formatted === ".") return undefined
-    return formatted
+    // 显式选择项目根目录仍有展示意义；只沿用旧版对缺省值和字面点的省略。
+    return pathFormatter.format(workdir)
   })
 
   const title = createMemo(() => {
+    // 历史输入可能没有可选说明；标题直接消费已保存的 input，不复制到流式 metadata。
+    const desc = stringValue(props.input.description) ?? "Shell"
     const wd = workdirDisplay()
-    if (!wd) return
-    return `# Running in ${wd}`
+    if (!wd || desc.includes(wd)) return `# ${desc}`
+    return `# ${desc} in ${wd}`
   })
 
   // 上下文视图完整展示，右键切换不改变普通输出的展开状态。
@@ -3430,9 +3451,11 @@ function Shell(props: ToolProps) {
     <Switch>
       <Match when={stringValue(props.metadata.output) !== undefined}>
         <BlockTool
-          // 无 workdir 时也提供上下文标题，移除正文标签后仍保留 returned to model 标识。
-          title={title() ?? (showContextOutput() ? "# Shell" : undefined)}
+          title={title()}
+          spinner={isRunning()}
           part={props.part}
+          // 运行态和模型上下文均展示完整输出，沿用旧版不显示折叠入口的语义。
+          footer={shellCanCollapse() && !isRunning() && !showContextOutput() ? "Click to collapse" : undefined}
           onClick={shellCanCollapse() ? () => setExpanded((prev) => !prev) : undefined}
           onRightClick={contextOutputAvailable() ? toggleContextOutput : undefined}
           contextView={showContextOutput()}
@@ -3445,14 +3468,10 @@ function Shell(props: ToolProps) {
           }
         >
           <box gap={1}>
-            <Show when={isRunning()} fallback={<text fg={theme.text}>$ {stringValue(props.input.command)}</text>}>
-              <Spinner color={theme.text}>{stringValue(props.input.command)}</Spinner>
-            </Show>
+            {/* 运行态动效归意图标题，命令正文保持静态，便于定位和复制原始调用。 */}
+            <text fg={theme.text}>$ {stringValue(props.input.command)}</text>
             <Show when={output()}>
               <text fg={theme.text}>{output()}</text>
-            </Show>
-            <Show when={shellCanCollapse()}>
-              <text fg={theme.textMuted}>{expanded() ? "Click to collapse" : "Click to expand"}</text>
             </Show>
           </box>
         </BlockTool>
@@ -3583,20 +3602,18 @@ function Write(props: ToolProps) {
           title={"← Write " + pathFormatter.format(filepath()) + (diffStats().added > 0 || diffStats().removed > 0 ? ` (+${diffStats().added}/-${diffStats().removed})` : "")}
           part={props.part}
           onClick={diffOverflow() ? () => setExpanded((prev) => !prev) : undefined}
+          footer={diffOverflow() ? "Click to collapse" : undefined}
         >
           <DiffView diff={diff()!} filePath={filepath()} view={diffView()} />
-          <Show when={diffOverflow()}>
-            <text fg={theme.textMuted}>{expanded() ? "Click to collapse" : "Click to expand"}</text>
-          </Show>
-          {/* 诊断信息：覆写后显示 LSP 错误和警告 */}
-          <Diagnostics diagnostics={props.metadata.diagnostics} filePath={filepath() ?? ""} summary={props.metadata.diagnosticSummary as { newCount?: number; existingCount?: number } | undefined} />
         </BlockTool>
       </Match>
-      <Match when={props.metadata.diagnostics !== undefined || props.metadata.operation === "write"}>
+      {/* V1 成功结果已有 filepath；卡片就绪取文件结果，V2 仍沿用 operation。 */}
+      <Match when={props.metadata.filepath !== undefined || props.metadata.operation === "write"}>
         <BlockTool
           title={"# Wrote " + pathFormatter.format(filepath())}
           part={props.part}
           onClick={writeCanCollapse() ? () => setExpanded((prev) => !prev) : undefined}
+          footer={writeCanCollapse() ? "Click to collapse" : undefined}
           // #144：Write 内容折叠预览
           preview={writeCanCollapse() && !expanded() ? <text fg={theme.text}>{previewText(limited(), 10, maxChars())}</text> : undefined}
         >
@@ -3609,10 +3626,6 @@ function Write(props: ToolProps) {
               content={limited()}
             />
           </line_number>
-          <Show when={writeCanCollapse()}>
-            <text fg={theme.textMuted}>{expanded() ? "Click to collapse" : "Click to expand"}</text>
-          </Show>
-          <Diagnostics diagnostics={props.metadata.diagnostics} filePath={filepath() ?? ""} summary={props.metadata.diagnosticSummary as { newCount?: number; existingCount?: number } | undefined} />
         </BlockTool>
       </Match>
       <Match when={true}>
@@ -3849,7 +3862,6 @@ function Task(props: ToolProps) {
   return (
     <InlineTool
       icon={props.part.state.status === "completed" ? "✓" : "│"}
-      separate={true}
       color={retry() ? theme.error : undefined}
       spinner={isRunning()}
       complete={stringValue(props.input.description)}
@@ -4003,12 +4015,9 @@ function Edit(props: ToolProps) {
           title={"← Edit " + pathFormatter.format(stringValue(props.input.filePath)) + (stats().added > 0 || stats().removed > 0 ? ` +${stats().added} -${stats().removed}` : "")}
           part={props.part}
           onClick={overflow() ? () => setExpanded((prev) => !prev) : undefined}  // 展开只改变本地预览状态，不重新执行编辑工具。
+          footer={overflow() ? "Click to collapse" : undefined}
         >
           <DiffView diff={diffContent()} filePath={stringValue(props.input.filePath)} view={view()} />
-          <Show when={overflow()}>
-            <text fg={theme.textMuted}>{expanded() ? "Click to collapse" : "Click to expand"}</text>
-          </Show>
-          <Diagnostics diagnostics={props.metadata.diagnostics} filePath={stringValue(props.input.filePath) ?? ""} summary={props.metadata.diagnosticSummary as { newCount?: number; existingCount?: number } | undefined} />
         </BlockTool>
       </Match>
       <Match when={true}>
@@ -4113,6 +4122,7 @@ function ApplyPatch(props: ToolProps) {
               title={title(file)}
               part={props.part}
               onClick={!!file.patch && patchOverflow() ? () => setPatchExpanded((prev) => !prev) : undefined}
+              footer={file.patch && patchOverflow() ? "Click to collapse" : undefined}
             >
               <Show
                 // 正文与折叠预览按相同patch就绪条件分流，避免删除diff只能看到预览。
@@ -4125,11 +4135,7 @@ function ApplyPatch(props: ToolProps) {
                 }
               >
                 <DiffView diff={file.patch || ""} filePath={file.filePath} view={view()} />
-                <Show when={patchOverflow()}>
-                  <text fg={theme.textMuted}>{patchExpanded() ? "Click to collapse" : "Click to expand"}</text>
-                </Show>
               </Show>
-              <Diagnostics diagnostics={props.metadata.diagnostics} filePath={file.movePath ?? file.filePath} summary={props.metadata.diagnosticSummary as { newCount?: number; existingCount?: number } | undefined} />
             </BlockTool>
             )
           }}
@@ -4206,73 +4212,6 @@ function Skill(props: ToolProps) {
     <InlineTool icon="→" pending="Loading skill…" complete={stringValue(props.input.name)} part={props.part}>
       Skill "{stringValue(props.input.name)}"
     </InlineTool>
-  )
-}
-
-// [local-smark] TUI 诊断渲染三态：新错误（header+最多 3 条单行明细）/
-// 既有错误（数量摘要）/完全无错误（绿色确认）。summary 缺失时不推导 clean，
-// 避免在 LSP 未运行时给出虚假"类型安全"信号
-function Diagnostics(props: {
-  diagnostics: unknown
-  filePath: string
-  summary?: { newCount?: number; existingCount?: number }
-}) {
-  const { theme } = useTheme()
-  const terminalEnvironment = useTuiTerminalEnvironment()
-  const errors = createMemo(() => {
-    const normalized = normalizePath(
-      typeof props.filePath === "string" ? props.filePath : "",
-      terminalEnvironment.platform,
-    )
-    return parseDiagnostics(props.diagnostics, normalized)
-  })
-  // [local-smark] summary 字段不完整时视为缺失，TUI 不显示 clean/existing
-  const summary = createMemo(() => {
-    const s = props.summary
-    if (!s || typeof s.newCount !== "number" || typeof s.existingCount !== "number") return undefined
-    return s as { newCount: number; existingCount: number }
-  })
-  // [local-smark] 多行 LSP message 压成单行，避免撑高 TUI 工具块
-  const normalizeMsg = (msg: string) => msg.trim().replace(/\s+/g, " ")
-  // [local-smark] 截断过长 message，保持 TUI 行宽稳定
-  const truncateMsg = (msg: string, limit = 120) => (msg.length <= limit ? msg : msg.slice(0, limit - 3) + "...")
-  const more = createMemo(() => {
-    const s = summary()
-    if (!s || s.newCount <= errors().length) return 0
-    return s.newCount - errors().length
-  })
-  const newCount = createMemo(() => summary()?.newCount ?? errors().length)
-  return (
-    <Switch>
-      {/* [local-smark] 新错误：header + 最多 3 条单行明细 */}
-      <Match when={errors().length > 0}>
-        <box gap={0}>
-          <text fg={theme.error}>
-            LSP · {newCount()} new error{newCount() === 1 ? "" : "s"}
-            {more() > 0 ? ` · +${more()} more` : ""}
-          </text>
-          <For each={errors()}>
-            {(diagnostic) => (
-              <text fg={theme.error}>
-                {"  E "}[{diagnostic.range.start.line + 1}:{diagnostic.range.start.character + 1}] {truncateMsg(normalizeMsg(diagnostic.message))}
-              </text>
-            )}
-          </For>
-        </box>
-      </Match>
-      {/* [local-smark] 无新错误但有既有错误：只显示数量，不展开详情 */}
-      <Match when={summary() && summary()!.existingCount > 0}>
-        <text fg={theme.textMuted}>
-          LSP checked · 0 new · {summary()!.existingCount} existing
-        </text>
-      </Match>
-      {/* [local-smark] 完全无错误：绿色确认，避免模型误以为 LSP 没工作 */}
-      <Match when={summary() && summary()!.newCount === 0 && summary()!.existingCount === 0}>
-        <text fg={theme.success ?? theme.textMuted}>
-          ✓ LSP checked · no errors in this file
-        </text>
-      </Match>
-    </Switch>
   )
 }
 
@@ -4374,20 +4313,4 @@ export function parseQuestionAnswers(value: unknown) {
   return value.map((answer) =>
     Array.isArray(answer) ? answer.filter((item): item is string => typeof item === "string") : [],
   )
-}
-
-export function parseDiagnostics(value: unknown, filePath: string) {
-  const diagnostics = recordValue(value)?.[filePath]
-  if (!Array.isArray(diagnostics)) return []
-  return diagnostics
-    .flatMap((item) => {
-      const diagnostic = recordValue(item)
-      const start = recordValue(recordValue(diagnostic?.range)?.start)
-      const line = numberValue(start?.line)
-      const character = numberValue(start?.character)
-      const message = stringValue(diagnostic?.message)
-      if (diagnostic?.severity !== 1 || line === undefined || character === undefined || !message) return []
-      return [{ range: { start: { line, character } }, message }]
-    })
-    .slice(0, 3)
 }

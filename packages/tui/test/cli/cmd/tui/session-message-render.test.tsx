@@ -1,6 +1,6 @@
 /** @jsxImportSource @opentui/solid */
 import { expect, test } from "bun:test"
-import { Renderable, ScrollBoxRenderable, engine } from "@opentui/core"
+import { MouseButton, Renderable, ScrollBoxRenderable, engine } from "@opentui/core"
 import { testRender, useRenderer } from "@opentui/solid"
 import { createDefaultOpenTuiKeymap } from "@opentui/keymap/opentui"
 import { onCleanup, onMount } from "solid-js"
@@ -54,6 +54,10 @@ const textPart = (id: string, messageID: string, text: string): Part => ({ id, s
 const toolPart = (id: string, messageID: string, output: string, contextOutput = output) => ({ id, sessionID: sid, messageID, type: "tool", callID: id, tool: "bash",
   state: { status: "completed", input: { command: "fixture" }, output: contextOutput, title: "fixture", metadata: { output }, time: { start: 1, end: 2 } },
 } satisfies Part)
+function completedToolPart(id: string, messageID: string, tool: string, input: Record<string, unknown>, metadata: Record<string, unknown> = {}): Part {
+  const part = toolPart(id, messageID, "")
+  return { ...part, tool, state: { ...part.state, input, metadata } }
+}
 type App = Awaited<ReturnType<typeof testRender>>
 type Context = { sync: ReturnType<typeof useSync>; local: ReturnType<typeof useLocal>; keymap: ReturnType<typeof useOpencodeKeymap> }
 
@@ -140,6 +144,12 @@ function messageRoot(app: App, id: string) {
   if (!root) throw new Error(`missing message root ${id}`)
   return root
 }
+function messageFrame(app: App, id: string) {
+  const root = messageRoot(app, id)
+  // 按实际消息矩形裁帧，排除侧栏和滚动条；断言仍观察用户看到的字符，而非 border 属性。
+  return app.captureCharFrame().split("\n").slice(root.screenY, root.screenY + root.height)
+    .map((line) => line.slice(root.screenX, root.screenX + root.width).trimEnd())
+}
 function sessionScrollBox(app: App, id: string) {
   let node: Renderable | null = messageRoot(app, id).parent
   while (node && !(node instanceof ScrollBoxRenderable)) node = node.parent
@@ -190,6 +200,184 @@ async function withFakeNow(run: (advance: (milliseconds: number) => void) => Pro
   try { await run((milliseconds) => { now += milliseconds }) } finally { Date.now = original }
 }
 const AGE = 31_000
+
+// 同一真实 Session 入口覆盖可选说明和目录输入；预期标题直接取旧版合同，不复制格式化算法。
+test.each([
+  { input: { command: "echo done" }, title: "# Shell" },
+  { input: { command: "echo done", description: "Inspect files" }, title: "# Inspect files" },
+  { input: { command: "echo done", workdir: "." }, title: "# Shell" },
+  { input: { command: "echo done", workdir: "src" }, title: "# Shell in src" },
+  { input: { command: "echo done", description: "Inspect files", workdir: directory }, title: "# Inspect files in ." },
+  { input: { command: "echo done", description: "Inspect src", workdir: "src" }, title: "# Inspect src" },
+])("legacy shell title preserves intent and directory: $title", async (sample) => {
+  const info = { ...assistant("msg_shell_title", 1), finish: "tool-calls" }
+  const part = toolPart("part_shell_title", info.id, "done")
+  await withRenderedSession([info], {
+    [info.id]: [{ ...part, state: { ...part.state, input: sample.input } }],
+  }, async (app) => {
+    const frame = await waitForFrame(app, (value) => value.includes("$ echo done"))
+    // 显式项目根目录仍应展示点；缺省目录和字面点继续沿用旧版省略规则。
+    expect(frame).toContain(sample.title)
+    expect(frame).not.toContain("Running in")
+    expect(frame.split("$ echo done")).toHaveLength(2)
+  })
+})
+
+test("legacy shell running animation labels intent while keeping the command visible", async () => {
+  const info = { ...assistant("msg_shell_running", 1), finish: "tool-calls" }
+  const part = { id: "part_shell_running", sessionID: sid, messageID: info.id, type: "tool", callID: "call_shell_running", tool: "bash",
+    state: { status: "running", input: { command: "echo working", description: "Inspect files", workdir: "src" }, metadata: { output: "" }, time: { start: 1 } },
+  } satisfies Part
+  await withRenderedSession([info], { [info.id]: [part] }, async (app) => {
+    const frame = await waitForFrame(app, (value) => value.includes("echo working"))
+    // 只锁定动画承载的语义文字，不依赖定时器此刻选中了哪一个 spinner 字形。
+    expect(frame).toContain("Inspect files in src")
+    expect(frame).toContain("$ echo working")
+  })
+})
+
+test("legacy message rail continues through internal gaps and breaks between messages", async () => {
+  const first = { ...assistant("msg_legacy_parts", 1), finish: "tool-calls" }
+  const second = { ...assistant("msg_legacy_next", 2), finish: "tool-calls" }
+  await withRenderedSession([first, second], {
+    [first.id]: [textPart("part_legacy_text", first.id, "Legacy text"),
+      completedToolPart("part_legacy_read", first.id, "read", { filePath: "alpha.ts" }),
+      completedToolPart("part_legacy_grep", first.id, "grep", { pattern: "needle" }, { matches: 1 })],
+    [second.id]: [textPart("part_legacy_next", second.id, "Next message")],
+  }, async (app) => {
+    await waitForFrame(app, (frame) => frame.includes('Grep "needle"') && frame.includes("Next message"))
+    // 旧版帧的内部空行带消息线；单行连续工具紧排，跨消息的空行留在边框外。
+    // 原生 text 的 padding 不额外占列，预期图标位置采用旧 JSX 实测值，避免凭属性重复加宽。
+    expect(messageFrame(app, first.id)).toEqual([
+      "┃   Legacy text", "┃", "┃   → Read alpha.ts", '┃   ✱ Grep "needle" (1 match)',
+    ])
+    expect(messageFrame(app, second.id)).toEqual(["┃   Next message"])
+    const next = messageRoot(app, second.id)
+    expect(app.captureCharFrame().split("\n")[next.screenY - 1].slice(next.screenX, next.screenX + next.width).trim()).toBe("")
+  }, { width: 100, height: 24 })
+})
+
+test("legacy message first visible spacing follows hidden tools and partial searches live", async () => {
+  const info = { ...assistant("msg_legacy_hidden", 1), finish: "tool-calls" }
+  await withRenderedSession([info], {
+    [info.id]: [textPart("part_legacy_empty", info.id, "  "),
+      completedToolPart("part_legacy_hidden_read", info.id, "read", { filePath: "hidden.ts" }),
+      textPart("part_legacy_visible", info.id, "After hidden"),
+      completedToolPart("part_legacy_partial", info.id, "grep", { pattern: "needle" }, { matches: 0, partial: true })],
+  }, async (app, _emit, ctx) => {
+    await waitForFrame(app, (frame) => frame.includes("Read hidden.ts"))
+    ctx.keymap.dispatchCommand("session.toggle.actions")
+    await waitForFrame(app, (frame) => frame.includes("After hidden") && !frame.includes("Read hidden.ts"))
+    // 真实详情开关移除前驱后，首个正文不应继承旧顶距；partial 搜索继续作为可见工具。
+    expect(messageFrame(app, info.id)).toEqual([
+      "┃   After hidden", "┃", '┃   ✱ Grep "needle" (0 matches, incomplete)',
+    ])
+  })
+})
+
+test.each([false, true])("legacy message reasoning chrome preserves newer Thought visibility: opaque=%s", async (opaque) => {
+  const info = { ...assistant("msg_legacy_reasoning", 1), finish: "tool-calls" }
+  const reasoning = { id: "part_legacy_reasoning", sessionID: sid, messageID: info.id, type: "reasoning",
+    text: opaque ? "" : "Legacy reasoning", metadata: opaque ? { signature: "encrypted" } : undefined, time: { start: 1, end: 2 },
+  } satisfies Part
+  await withRenderedSession([info], {
+    [info.id]: [reasoning, textPart("part_legacy_answer", info.id, "Visible answer")],
+  }, async (app, _emit, ctx) => {
+    await waitForFrame(app, (frame) => frame.includes("Thought") && frame.includes("Visible answer"))
+    // 推理内部线属于旧样式；Thought/opaque 的可见性来自新版，不能因恢复首距而过滤掉。
+    expect(messageFrame(app, info.id)[0].startsWith("┃┃")).toBe(true)
+    expect(messageFrame(app, info.id).find((line) => line.includes("Visible answer"))).toBe("┃   Visible answer")
+    ctx.keymap.dispatchCommand("session.toggle.thinking")
+    await waitForFrame(app, (frame) => !frame.includes("Thought"))
+    expect(messageFrame(app, info.id)).toEqual(["┃   Visible answer"])
+  })
+})
+
+test("legacy message first multiline tool has no leading gap and separates following tools", async () => {
+  const info = { ...assistant("msg_legacy_task", 1), finish: "tool-calls" }
+  await withRenderedSession([info], {
+    [info.id]: [completedToolPart("part_legacy_task", info.id, "task", { description: "Inspect tree", subagent_type: "general" }),
+      completedToolPart("part_legacy_task_read", info.id, "read", { filePath: "alpha.ts" }, { loaded: ["beta.ts"] }),
+      completedToolPart("part_legacy_task_grep", info.id, "grep", { pattern: "needle" }, { matches: 1 })],
+  }, async (app) => {
+    await waitForFrame(app, (frame) => frame.includes("Loaded beta.ts") && frame.includes('Grep "needle"'))
+    // 兄弟间距在布局前消费上一帧的实测高度；等几何稳定后比较旧版静态帧，不以首帧文字出现代替布局完成。
+    await stableHeight(app, sessionScrollBox(app, info.id))
+    const rows = messageFrame(app, info.id)
+    // 首块三态 false 覆盖多行工具的自分隔；后续工具仍按实际前驱高度决定间距。
+    expect(rows[0]).toContain("Inspect tree")
+    const read = rows.findIndex((line) => line.includes("Read alpha.ts"))
+    expect(rows[read - 1]).toBe("┃")
+    // Loaded 是 Read 的真实兄弟行，缩进应与完成态图标一致，后续单行 Grep 不额外隔行。
+    expect(rows[read + 1]).toBe("┃   ↳ Loaded beta.ts")
+    expect(rows[read + 2]).toBe('┃   ✱ Grep "needle" (1 match)')
+  }, { width: 100, height: 24 })
+})
+
+test.each(["bash", "write", "write-overwrite", "edit", "apply_patch", "fixture_tool", "vscode_notebook_source"])("legacy card section gaps survive collapse and expand: %s", async (tool) => {
+  const info = { ...assistant("msg_legacy_card", 1), finish: "tool-calls" }
+  const output = Array.from({ length: 30 }, (_, index) => `card body line ${index}`).join("\n")
+  // 合法 hunk 让 Edit/Patch 走真实 DiffView；其余工具走各自 source/output，不伪造共享 body。
+  const diff = ["diff --git a/alpha.txt b/alpha.txt", "--- a/alpha.txt", "+++ b/alpha.txt", "@@ -1 +1,30 @@", "-old", ...output.split("\n").map((line) => `+${line}`)].join("\n")
+  const input = tool === "bash" ? { command: "fixture" } : { filePath: "alpha.txt", content: output }
+  const metadata = tool === "bash" ? { output }
+    : tool === "write" ? { filepath: "alpha.txt" }
+    : tool === "write-overwrite" ? { exists: true, diff }
+    : tool === "edit" ? { diff }
+    : tool === "apply_patch" ? { files: [{ type: "update", filePath: "alpha.txt", relativePath: "alpha.txt", deletions: 1, patch: diff }] }
+    : tool === "vscode_notebook_source" ? { vscodeNotebook: { view: "source", path: "alpha.ipynb" } } : {}
+  const part = toolPart("part_legacy_card", info.id, output)
+  await withRenderedSession([info], { [info.id]: [{ ...part, tool: tool === "write-overwrite" ? "write" : tool, state: { ...part.state, input, metadata } }] }, async (app) => {
+    await waitForFrame(app, (frame) => frame.includes("Click to expand"))
+    let rows = messageFrame(app, info.id)
+    // 共享 chrome 的留白必须在每一种卡片都成立，不能只由 Shell 的 body gap 偶然保证。
+    expect(rows[rows.findIndex((line) => line.includes("Click to expand")) - 1].replaceAll("┃", "").trim()).toBe("")
+    await click(app, "Click to expand")
+    await waitForFrame(app, (frame) => frame.includes("Click to collapse") && frame.includes("card body line 29"))
+    rows = messageFrame(app, info.id)
+    expect(rows[rows.findIndex((line) => line.includes("Click to collapse")) - 1].replaceAll("┃", "").trim()).toBe("")
+    // exists 与 diff 共同选中覆写卡片；该字面标题防止夹具误入新文件 Write 分支而假绿。
+    if (tool === "write-overwrite") expect(app.captureCharFrame()).toContain("← Write alpha.txt (+30/-1)")
+    // 再次收起只保留预览，既不双显 hint，也不把完整正文留在画面或截断十行之外。
+    await click(app, "Click to collapse")
+    await waitForFrame(app, (frame) => frame.includes("Click to expand") && !frame.includes("card body line 29"))
+    expect(messageFrame(app, info.id).filter((line) => line.includes("Click to expand"))).toHaveLength(1)
+  }, { width: 100, height: 60 })
+})
+
+test.each([false, true])("legacy patch card gaps inherit one Part margin: afterText=%s", async (afterText) => {
+  const info = { ...assistant("msg_legacy_patch", 1), finish: "tool-calls" }
+  const part = completedToolPart("part_legacy_patch", info.id, "apply_patch", {}, {
+    files: ["alpha.txt", "beta.txt"].map((file) => ({ type: "delete", filePath: file, relativePath: file, deletions: 1 })),
+  })
+  await withRenderedSession([info], { [info.id]: [...(afterText ? [textPart("part_patch_intro", info.id, "Patch follows")] : []), part] }, async (app) => {
+    await waitForFrame(app, (frame) => frame.includes("# Deleted beta.txt"))
+    const rows = messageFrame(app, info.id)
+    const first = rows.findIndex((line) => line.includes("# Deleted alpha.txt"))
+    const second = rows.findIndex((line) => line.includes("# Deleted beta.txt"))
+    // 旧版三态归整个 Part；首块时每张卡片都是零外距，正文后则每张卡片各有一行外距。
+    expect(second - first).toBe(afterText ? 6 : 5)
+    expect(rows[first - 1]).toBe("┃┃")
+    expect(rows.filter((line) => line.includes("-1 line"))).toHaveLength(2)
+  })
+})
+
+test("legacy shell context view keeps the intent directory title and one command", async () => {
+  const info = { ...assistant("msg_shell_context", 1), finish: "tool-calls" }
+  const part = toolPart("part_shell_context", info.id, "terminal output", "model output")
+  await withRenderedSession([info], {
+    [info.id]: [{ ...part, state: { ...part.state, input: { command: "fixture", description: "Inspect files", workdir: "src" } } }],
+  }, async (app) => {
+    const frame = await waitForFrame(app, (value) => value.includes("$ fixture"))
+    const row = frame.split("\n").findIndex((line) => line.includes("$ fixture"))
+    await app.mockMouse.click(messageRoot(app, info.id).screenX + 5, row, MouseButton.RIGHT)
+    await waitForFrame(app, (value) => value.includes("returned to model"))
+    // 右键只切换结果视图；原调用意图、目录与命令仍是同一份输入事实。
+    expect(app.captureCharFrame()).toContain("# Inspect files in src · returned to model")
+    expect(app.captureCharFrame().split("$ fixture")).toHaveLength(2)
+    expect(app.captureCharFrame()).toContain("model output")
+  })
+})
 
 test("tool card collapse and expand 100 times keeps identical frames and releases the body owner", async () => {
   const info = assistant("msg_hundred_toggle", 1)

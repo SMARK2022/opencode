@@ -15,7 +15,6 @@ import {
   formatSubagentToolcalls,
   InlineToolRow,
   parseApplyPatchFiles,
-  parseDiagnostics,
   parseQuestionAnswers,
   parseQuestions,
   parseTodos,
@@ -23,7 +22,6 @@ import {
   toolDisplay,
   autoReviewLabel,
 } from "../../../src/routes/session"
-import { layoutGroups } from "../../../src/util/layout"
 import { collapseToolOutput } from "../../../src/util/collapse-tool-output"
 import { goalContinuation } from "../../../src/routes/session/goal-continuation"
 
@@ -53,7 +51,7 @@ const tools: readonly ToolFixture[] = [
   {
     icon: "→",
     label: "Read packages/opencode/src/index.ts [offset=1, limit=100]",
-    error: "No LSP server available for this file type.",
+    error: "Unable to read this file.",
   },
   {
     icon: "✱",
@@ -95,8 +93,8 @@ function Fixture(props: { errorExpanded?: boolean; before?: "shell" | "user" }) 
     <box flexDirection="column" width={72}>
       {props.before === "shell" && <ShellOutput />}
       {props.before === "user" && <UserMessage />}
-      {/* 用户和工具分属不同消息，沿用旧快照才能捕获新增分组吞掉边界空行。 */}
-      <box flexDirection="column" flexShrink={0} ref={(el: BoxRenderable) => layoutGroups.add(el)}>
+      {/* 消息外距归包裹层；独立行的换行仍测真实 InlineToolRow，不再透视别条消息找前驱。 */}
+      <box flexDirection="column" flexShrink={0} marginTop={props.before ? 1 : 0}>
         <For each={tools}>
           {(item) => (
             <InlineToolRow
@@ -249,8 +247,8 @@ describe("TUI inline tool wrapping", () => {
     const frame = await renderFrame(
       () => (
         <box flexDirection="column" width={40}>
-          <For each={["A", "", "B"]}>{(label) => (
-            <box flexDirection="column" ref={(el: BoxRenderable) => layoutGroups.add(el)}>
+          <For each={["A", "", "B"]}>{(label, index) => (
+            <box flexDirection="column" marginTop={label && index() > 0 ? 1 : 0}>
               <Show when={label}>
                 <InlineToolRow icon="→" complete={true} pending="">{label}1</InlineToolRow>
                 <InlineToolRow icon="→" complete={true} pending="">{label}2</InlineToolRow>
@@ -261,8 +259,8 @@ describe("TUI inline tool wrapping", () => {
       ),
       { width: 40, height: 8 },
     )
-    // 首个工具真实占一行消息顶距，组内紧排和跨消息分隔仍由下面的断言验证。
-    expect(frame.split("\n")[0]).toBe("")
+    // 首个可见块紧贴消息顶端；空组不抢外距，消息间一行分隔归根层所有。
+    expect(frame.split("\n")[0]).toContain("A1")
     expect(frame).toMatch(/A1\n[^\n]*A2\n\n[^\n]*B1\n[^\n]*B2/)
   })
 
@@ -365,7 +363,10 @@ describe("TUI inline tool wrapping", () => {
     // 编译实际模块常量，不能在 fixture 另写一套字符预算。
     const budget = source.match(/^const DEFAULT_BLOCK_CHAR_THRESHOLD = \d+$/m)?.[0]
     expect(budget).toBeDefined()
-    const compiled = compiler.transformSync([budget, ...functions].join("\n"), {
+    // 组件恢复的私有上下文也编译原定义；不靠伪造 top-margin 回调让点击夹具通过。
+    const margin = source.match(/^const ToolPartTopMargin = .+$/m)?.[0]
+    expect(margin).toBeDefined()
+    const compiled = compiler.transformSync([budget, margin, ...functions].join("\n"), {
       filename: "session-review-fixture.tsx",
       configFile: false,
       babelrc: false,
@@ -393,6 +394,7 @@ describe("TUI inline tool wrapping", () => {
     const [interaction, setInteraction] = createStore<Record<string, boolean>>({})
     const theme = createTuiPluginApi().theme.current
     const dependencies = {
+      createContext,
       createEffect,
       createMemo,
       createSignal,
@@ -545,18 +547,18 @@ describe("TUI inline tool wrapping", () => {
         { width: 160, height: 12 },
       )
       const shell = testSetup!
-      const diagnostic = findVisibleText(shell.captureCharFrame().split("\n"), visible)
-      expect(diagnostic).toBeDefined()
+      const failure = findVisibleText(shell.captureCharFrame().split("\n"), visible)
+      expect(failure).toBeDefined()
       // 实际生产组件在普通/上下文视图中都只留一行分隔，不靠源码中的 gap 字样判定。
       const command = findVisibleText(shell.captureCharFrame().split("\n"), "$ failed command")
       expect(command).toBeDefined()
-      expect((diagnostic?.y ?? -1) - (command?.y ?? -1)).toBe(2)
+      expect((failure?.y ?? -1) - (command?.y ?? -1)).toBe(2)
       expect(shell.captureCharFrame()).not.toContain('reason="exit"')
       expect(shell.captureCharFrame()).not.toContain("<bash_high_signal_excerpt>")
       shell.renderer.clearSelection()
-      await shell.mockMouse.moveTo(diagnostic!.x + 1, diagnostic!.y)
+      await shell.mockMouse.moveTo(failure!.x + 1, failure!.y)
       await shell.renderOnce()
-      await shell.mockMouse.click(diagnostic!.x + 1, diagnostic!.y, MouseButton.RIGHT)
+      await shell.mockMouse.click(failure!.x + 1, failure!.y, MouseButton.RIGHT)
       await shell.renderOnce()
       await shell.renderOnce()
       const context = shell.captureCharFrame()
@@ -656,21 +658,6 @@ describe("TUI inline tool wrapping", () => {
     expect(parseQuestionAnswers({})).toBeUndefined()
   })
 
-  test("ignores diagnostics with malformed nested ranges", () => {
-    expect(
-      parseDiagnostics(
-        {
-          "a.ts": [
-            { severity: 1, message: "missing range" },
-            { severity: 1, message: "bad line", range: { start: { line: "0", character: 1 } } },
-            { severity: 1, message: "valid", range: { start: { line: 2, character: 3 } } },
-          ],
-        },
-        "a.ts",
-      ),
-    ).toEqual([{ message: "valid", range: { start: { line: 2, character: 3 } } }])
-  })
-
   test("formats completed subagent toolcall details", () => {
     expect(formatCompletedSubagentDetail(0, "501ms")).toBe("501ms")
     expect(formatCompletedSubagentDetail(1, "501ms")).toBe("1 toolcall · 501ms")
@@ -690,19 +677,20 @@ describe("TUI inline tool wrapping", () => {
   })
 
   test("snapshots consecutive grep, glob, and read rows at a narrow width", async () => {
-    expect(await renderFrame(() => <Fixture />, { width: 72, height: 12 })).toMatchSnapshot()
+    // 纵向窗口容纳恢复的多行分隔，快照必须保留最后一个工具的完整末行而非接受裁尾。
+    expect(await renderFrame(() => <Fixture />, { width: 72, height: 16 })).toMatchSnapshot()
   })
 
   test("snapshots expanded tool errors under the tool text", async () => {
-    expect(await renderFrame(() => <Fixture errorExpanded />, { width: 72, height: 12 })).toMatchSnapshot()
+    expect(await renderFrame(() => <Fixture errorExpanded />, { width: 72, height: 18 })).toMatchSnapshot()
   })
 
   test("keeps separation after a shell output block", async () => {
-    expect(await renderFrame(() => <Fixture before="shell" />, { width: 72, height: 16 })).toMatchSnapshot()
+    expect(await renderFrame(() => <Fixture before="shell" />, { width: 72, height: 22 })).toMatchSnapshot()
   })
 
   test("keeps separation after a padded user message", async () => {
-    expect(await renderFrame(() => <Fixture before="user" />, { width: 72, height: 14 })).toMatchSnapshot()
+    expect(await renderFrame(() => <Fixture before="user" />, { width: 72, height: 20 })).toMatchSnapshot()
   })
 
   test("separates after a multi-line task row", async () => {
@@ -743,7 +731,8 @@ describe("TUI inline tool wrapping", () => {
 
     setSeparated(false)
     await testSetup.renderOnce()
-    expect(scroll?.scrollHeight).toBe(3)
+    // 旧版测得多行/正文分隔后保留该一行；其真实高度和粘底位置必须在同一帧一致。
+    expect(scroll?.scrollHeight).toBe(4)
     expect(scroll?.scrollTop).toBe(Math.max(0, scroll!.scrollHeight - scroll!.viewport.height))
   })
 })

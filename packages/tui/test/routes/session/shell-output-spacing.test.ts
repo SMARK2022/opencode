@@ -71,15 +71,7 @@ describe("Session Shell output spacing", () => {
     expect(blockToolSource).not.toContain("setCanCollapse")
   })
 
-  // #460：首个工具 part 需要消息级顶距——无前驱兄弟时 margin=1（与文本气泡基线一致）
-  test("InlineTool gives first tool part message-level top spacing", () => {
-    const start = sessionSource.indexOf("function InlineToolRow(")
-    const end = sessionSource.indexOf("function BlockTool(")
-    const inlineToolSource = sessionSource.slice(start, end)
-    expect(start).toBeGreaterThan(-1)
-    expect(end).toBeGreaterThan(start)
-    expect(inlineToolSource).toContain('if (!previous) return 1')
-  })
+  // 首块零内距与消息外距由 session-message-render 的真实帧覆盖，删除与恢复语义相反的源码断言。
 })
 
 // 主会话保留共享截断入口；真实预览与展开行为另由helper和headless BlockTool用例覆盖。

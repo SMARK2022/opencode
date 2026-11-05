@@ -11,19 +11,20 @@ describe("sessionMessageContentWidth (#184)", () => {
   test("does not subtract sidebar when overlay (narrow)", () => {
     // #184：窄屏侧栏 overlay，消息区应保留全宽扣 chrome
     const w = sessionMessageContentWidth({ terminalWidth: 80, sidebarInLayout: false, scrollbarEnabled: false })
-    expect(w).toBe(80 - 3 - 3)
+    // 左侧四列来自消息边框和正文缩进，不能继续使用无消息轨时的三列预算。
+    expect(w).toBe(80 - 3 - 4)
   })
 
   test("subtracts docked sidebar on wide layout", () => {
     // #184：宽屏 docked 侧栏必须计入
     const w = sessionMessageContentWidth({ terminalWidth: 160, sidebarInLayout: true, scrollbarEnabled: false })
-    expect(w).toBe(160 - SESSION_SIDEBAR_WIDTH - 3 - 3)
+    expect(w).toBe(160 - SESSION_SIDEBAR_WIDTH - 3 - 4)
   })
 
   test("subtracts scrollbar gutter when enabled", () => {
     // 双层padding之外还须计入真实track，预览预算与正文几何才能一致。
     const w = sessionMessageContentWidth({ terminalWidth: 160, sidebarInLayout: true, scrollbarEnabled: true })
-    expect(w).toBe(160 - SESSION_SIDEBAR_WIDTH - 3 - 3 - 3)
+    expect(w).toBe(160 - SESSION_SIDEBAR_WIDTH - 3 - 4 - 3)
   })
 })
 // CJK 全角字符在视觉行尾刚好填满整行时（偶数宽度），OpenTUI 的 native
