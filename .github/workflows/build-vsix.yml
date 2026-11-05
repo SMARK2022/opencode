@@ -2,18 +2,19 @@ name: Build VSCode Extension VSIX
 run-name: ${{ github.event.head_commit.message || github.workflow }}
 
 on:
+  # 旧主线保留手动打包，不再随归档同步自动发布扩展。
   workflow_dispatch:
     inputs:
       version:
         description: "Override VSCode extension version, e.g. 1.15.6"
         required: false
         type: string
-  push:
-    branches:
-      - dev-smark
-    paths:
-      - "sdks/vscode/**"
-      - ".github/workflows/build-vsix.yml"
+  # push:
+  #   branches:
+  #     - dev-smark
+  #   paths:
+  #     - "sdks/vscode/**"
+  #     - ".github/workflows/build-vsix.yml"
 
 permissions:
   contents: write

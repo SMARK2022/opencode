@@ -3,12 +3,13 @@ name: test
 run-name: ${{ github.event.head_commit.message || github.workflow }}
 
 on:
-  push:
-    branches:
-      - dev-smark
-  pull_request:
-    branches:
-      - dev-smark
+  # 旧主线仅保留手动验证入口，避免归档同步继续占用 CI。
+  # push:
+  #   branches:
+  #     - dev-smark
+  # pull_request:
+  #   branches:
+  #     - dev-smark
   workflow_dispatch:
 
 concurrency:

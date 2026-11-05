@@ -3,27 +3,28 @@ name: Build OpenCode CLI
 run-name: ${{ github.event.head_commit.message || github.workflow }}
 
 on:
+  # 旧主线只允许显式手动发布，防止归档推送覆盖现有 Release。
   workflow_dispatch:
     inputs:
       version:
         description: "Override version, for example 1.15.6-smark. Empty means packages/opencode/package.json version."
         required: false
         type: string
-  push:
-    branches:
-      - dev-smark
-    paths:
-      - ".github/workflows/build-opencode.yml"
-      - ".github/actions/setup-bun/action.yml"
-      - "packages/opencode/**"
-      - "packages/core/**"
-      - "packages/plugin/**"
-      - "packages/script/**"
-      - "packages/sdk/js/**"
-      - "packages/ui/**"
-      - "package.json"
-      - "bun.lock"
-      - "install"
+  # push:
+  #   branches:
+  #     - dev-smark
+  #   paths:
+  #     - ".github/workflows/build-opencode.yml"
+  #     - ".github/actions/setup-bun/action.yml"
+  #     - "packages/opencode/**"
+  #     - "packages/core/**"
+  #     - "packages/plugin/**"
+  #     - "packages/script/**"
+  #     - "packages/sdk/js/**"
+  #     - "packages/ui/**"
+  #     - "package.json"
+  #     - "bun.lock"
+  #     - "install"
 
 permissions:
   contents: write
