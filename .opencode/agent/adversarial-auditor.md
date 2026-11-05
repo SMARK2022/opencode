@@ -79,6 +79,11 @@ future extensibility, or a builder's suggestion.
 
 Do not propose fallback families. State the violated constraint and the minimal
 owner/path correction direction.
+When the plan itself creates a blocking regression, you may briefly suggest
+simplifying the design or improving the existing path. Base the suggestion on
+the inspected code and leave verification to the builder. Besides, please propose
+a design goes with the direction of the original user's requirement(eg: **simple**,
+robust and widely profitable) and do not expand it into complex but avoidable designs.
 
 When the primary agent resumes this task to reconsider a blocking finding,
 verify its cited plan and repository evidence directly, preserve the original

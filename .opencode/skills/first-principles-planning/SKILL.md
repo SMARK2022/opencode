@@ -25,8 +25,10 @@ the plan.
 ## Scope
 
 This skill may inspect the repository and create or revise the canonical plan.
-It must not modify production code, tests, configuration, migrations, or
-generated files.
+It must not modify repository production code, tests, configuration, migrations,
+generated files, or live business data. Within the user's permissions, use
+temporary scripts or in-memory copies to reproduce problems and compare
+candidate routes before approval.
 
 This skill does not audit its own plan. It prepares the artifact for an
 independent adversarial audit.
@@ -36,6 +38,8 @@ independent adversarial audit.
 > **Start from current repository evidence for every new task.**
 
 > **Without root-cause repair or an explicit user-requested rollback, no audit handoff.**
+
+> **Repair the origin of the bad state or cost. Downstream containment only supplements that repair.**
 
 > **Never invent a fallback. Only an explicit user-requested rollback may replace the primary path.**
 
@@ -64,7 +68,9 @@ Never maintain a second plan in chat.
 ## Phase 1: Rebuild Repository Context
 
 Read enough of the actual repository to reconstruct the relevant behavior, not
-just the entry point.
+just the entry point. Start from the failing or requested path and follow it.
+Take the full inventory below for the responsibility you will change, not for
+everything nearby.
 
 Inspect all relevant instances of:
 
@@ -98,6 +104,9 @@ The plan must record:
 - The exact user-visible symptom it catches.
 - The observed result.
 - The minimized reproduction.
+- For a failure, instability, or cost symptom, a measurement taken where the
+  cost or bad state is generated (duration, work count, allocation,
+  contention), not only where the symptom is observed.
 
 Do not replace diagnosis with source inspection. No red-capable feedback signal
 means no root-cause repair plan, unless the inability to reproduce is itself
@@ -120,7 +129,28 @@ For each violated invariant:
 5. Separate downstream symptoms from the root cause.
 6. Record the evidence class and source reference.
 
-A plan is blocked if it proposes changes before locating the first divergence.
+The first divergence is often only where the problem becomes visible. Continue
+backward along a single causal chain, one "why" at a time, with one probe per
+step (profile, count, log, bisect), until you reach the origin: the logic, data
+model, schema, interface, or amount of work that makes the bad state or cost
+exist. At each step ask whether that state or work is required by a confirmed
+requirement. Stop when the answer is definitely yes, or when the cause lies
+outside code this task owns. But do not stop when you are not sure. Go broad
+only afterwards, over the callers of the change point you chose.
+
+Label each link on the chain as origin, propagation, or manifestation. A change
+that leaves the origin producing the same bad state or work is containment,
+wherever it sits in the stack.
+
+- A test that times out: ask why the operation takes that long and whether that
+  work is needed, not how long to wait.
+- Memory growth: ask what is loaded or retained that no requirement uses, not
+  when to collect it.
+- A bad value: ask where it was formed wrongly, or why the representation
+  admits it, not where to catch it.
+
+A plan is blocked if it proposes changes before locating the first divergence
+and the origin behind it.
 
 ## Phase 4: Design One Approved Primary Path
 
@@ -128,9 +158,30 @@ Design one authoritative semantic path that repairs the first divergence. If
 the user explicitly requests behavior rollback, design only the exact quoted
 replacement behavior and retain the invariant, divergence, and owner analysis.
 
+Before finalizing this route, verify its key assumptions and the user's
+plan-stage acceptance criteria. Use isolated experiments where execution is
+needed, and record results and tested scope in the plan's verification section.
+Do not propose an unverified plan and leave verification to the builder.
+
 The design may use private helpers, but every helper must support the same
 contract. Do not introduce competing parsers, serializers, data sources,
 recovery implementations, or feature switches.
+
+Repair the origin by eliminating the bad state or unneeded work, reducing what
+the origin produces or loads, or correcting its model and interface so callers
+stop compensating. Downstream containment (guards, retries, waits, timeout
+increases, forced cleanup, or limit tuning) is only a supplement; use it alone
+only when the origin lies outside this task's ownership or measured evidence
+shows origin repair cannot meet the requirement, and record that reason in the
+plan.
+
+For a new capability, check that the owner's existing interface fits it. If the
+consumer would have to stitch together several owner calls, rebuild or filter
+data the owner already holds, or reach past the interface, extend the owner with
+one small general operation instead, so the owner stays coherent and the
+consumer stays thin. Keep a need that only one caller has in that caller rather
+than adding a flag or mode to the owner. An interface extension needs the same
+reverse-traceability entry as any other production concept.
 
 Explicitly audit the proposed design for this prohibited pattern:
 
@@ -141,6 +192,9 @@ primary A is wrong -> disable A -> add B -> add B1/B2/B3 to recover A's cases
 If the proposal matches that pattern outside an exact user-requested rollback,
 discard it and return to the first divergence. A rollback replaces the current
 primary behavior directly. It does not authorize B1/B2/B3 recovery branches.
+
+Also reject this pattern: the origin at A produces the bad state or cost, and
+the plan only makes downstream B tolerate it. Return to the origin.
 
 Inventory every current and proposed secondary or replacement path. Classify it
 as:
@@ -168,12 +222,14 @@ setting, adapter, error conversion, and diagnostic behavior, establish:
 - Why this module owns it.
 - Why no existing module already owns it.
 - Which confirmed requirement would fail without it.
+- Why repairing the origin does not already remove the need for it.
 
 If those facts cannot be established, remove the behavior from the plan.
 
 Do not place a full safety envelope around every internal helper. Put validation
 at the real trust seam, compatibility in the owning adapter, retry in
-orchestration, and observability in its own seam.
+orchestration, and observability in its own seam. These seams hold containment
+that stays necessary after the origin is repaired.
 
 ## Phase 6: Balance Completeness and Restraint
 
