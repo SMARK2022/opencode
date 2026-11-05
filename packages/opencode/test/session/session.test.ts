@@ -53,6 +53,23 @@ const awaitDeferred = <T>(deferred: Deferred.Deferred<T>, message: string) =>
 
 const remove = (id: SessionID) => SessionNs.use.remove(id)
 
+it.instance("limits cancellation children to active ancestry without dropping idle bridges", () =>
+  Effect.gen(function* () {
+    // 空闲父节点仍可能拥有活动后代，不能简单把直接子列表与活动 ID 求交集。
+    const sessions = yield* SessionNs.Service
+    const parent = yield* sessions.create({})
+    yield* sessions.create({ parentID: parent.id })
+    const bridge = yield* sessions.create({ parentID: parent.id })
+    const active = yield* sessions.create({ parentID: bridge.id })
+    const unrelated = yield* sessions.create({})
+    // 默认列表合同不变；取消筛选同时排除历史分支和其他根会话。
+    expect((yield* sessions.children(parent.id)).length).toBe(2)
+    expect((yield* sessions.children(parent.id, [active.id, unrelated.id])).map(child => child.id)).toEqual([bridge.id])
+    expect((yield* sessions.children(bridge.id, [active.id])).map(child => child.id)).toEqual([active.id])
+    expect(yield* sessions.children(parent.id, [])).toEqual([])
+  }),
+)
+
 describe("session.created event", () => {
   it.instance("should emit session.created event when session is created", () =>
     Effect.gen(function* () {

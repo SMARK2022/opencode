@@ -150,12 +150,14 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       params: { sessionID: SessionID }
       query: typeof DiffQuery.Type
     }) {
-      const diffs = yield* summary.diff({ sessionID: ctx.params.sessionID, messageID: ctx.query.messageID })
       const request = yield* HttpServerRequest.HttpServerRequest
+      const viewer = request.headers[TUI_VIEWER_HEADER] === TUI_VIEWER
+      // 在存储读取前选择统计投影，避免为了前 100 个文件恢复全会话 patch。
+      const diffs = yield* summary.diff({ sessionID: ctx.params.sessionID, messageID: ctx.query.messageID, statsOnly: viewer })
       // Effect v4 的 headers 是小写字面量 record；与 TUI 端常量逐字锁定，不做大小写归一。
-      if (request.headers[TUI_VIEWER_HEADER] !== TUI_VIEWER) return diffs
+      if (!viewer) return diffs
 
-      // SummaryCache 当前将 stats 与 patch 存在同一 compressed aggregate；这里是 JSON 序列化前的最早兼容收窄点。
+      // 统计来自与完整摘要同一 owner 的投影；这里只限制展示数量，不再丢弃已加载的正文。
       // 总量必须从完整 authoritative array 计算后再 slice，标题和末尾省略号才不会把前 100 项误报成全量。
       // legacy FileDiff 可缺 file；Files 会过滤这类项，因此 totals 必须先采用同一可显示 source。
       // 默认 response 仍返回 raw aggregate；仅 viewer projection 收窄，不改变 Web App/share/Revert 合同。

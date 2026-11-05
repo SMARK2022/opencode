@@ -6,7 +6,6 @@ const directory = "C:/OpenCode/NewProject"
 
 test("creates a session in a new project, connects OpenCode Go, and selects its model", async ({ page }) => {
   let connectedGo = false
-  let pendingGo = false
   const connections: Array<{ integrationID: string; body: unknown }> = []
 
   await mockOpenCodeServer(page, {
@@ -52,10 +51,8 @@ test("creates a session in a new project, connects OpenCode Go, and selects its 
     integrationMethods: { "opencode-go": [{ type: "api", label: "API key" }] },
     onConnectKey: (input) => {
       connections.push(input)
-      if (input.integrationID === "opencode-go") pendingGo = true
-    },
-    onInstanceDispose: () => {
-      if (pendingGo) connectedGo = true
+      // 认证写入已由服务端刷新 provider；客户端只重新读取，不再销毁实例。
+      if (input.integrationID === "opencode-go") connectedGo = true
     },
     sessions: [],
     pageMessages: () => ({ items: [] }),

@@ -62,6 +62,8 @@ export const ColdStorageTable = sqliteTable(
     kind: text().$type<"message" | "part" | "session_message" | "message-pack" | "part-pack" | "session-message-pack" | "session-summary">().notNull(),
     codec: text().$type<"zstd">().notNull(),
     payload: blob({ mode: "buffer" }).notNull(),
+    // 摘要统计与不可变 payload 同行，列表读取不必恢复完整 patch；旧记录按需补齐。
+    summary_stats: text({ mode: "json" }).$type<unknown>(),
     raw_bytes: integer().notNull(),
     compressed_bytes: integer().notNull(),
     ref_count: integer().notNull().default(0),

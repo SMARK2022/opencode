@@ -35,6 +35,31 @@ function global(payload: GlobalEvent["payload"]): GlobalEvent {
   return { directory: "/tmp/other", project: "proj_test", payload }
 }
 
+test("startup loads connected models without fetching the provider catalog", async () => {
+  // 全目录即使可用也不应参与启动，已连接模型足以恢复会话页。
+  await using tmp = await tmpdir()
+  await Bun.write(`${tmp.path}/kv.json`, "{}")
+  let catalogs = 0
+  const provider = { id: "test", name: "Test", source: "config", env: [], options: {}, models: {} }
+  const { app, sync } = await mount((url) => {
+    if (url.pathname === "/config/providers") return json({ providers: [provider], default: { test: "model" } })
+    if (url.pathname === "/provider") {
+      catalogs++
+      return json({ all: [provider], default: {}, connected: [provider.id] })
+    }
+    return undefined
+  }, tmp.path)
+  try {
+    await wait(() => sync.status === "complete")
+    // 同时验证必需数据已就绪，避免通过省掉整个 bootstrap 得到零目录请求。
+    expect(sync.data.provider.map((item) => item.id)).toEqual([provider.id])
+    expect(sync.data.provider_default).toEqual({ test: "model" })
+    expect(catalogs).toBe(0)
+  } finally {
+    app.renderer.destroy()
+  }
+})
+
 test("live messages use creation time with an ID tie-break", async () => {
   await using tmp = await tmpdir()
   await Bun.write(`${tmp.path}/kv.json`, "{}")

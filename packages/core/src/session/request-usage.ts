@@ -271,8 +271,9 @@ export function make(db: Database.Interface["db"]): Interface {
       const now = Date.now()
       // 账本只解码 step-finish 热字段，不读取或预热同助手的工具、推理及文件冷 payload。
       // 原生 V2 已传入单步快照，不读取 V1 parts，也不桥接旧 runner。
+      // Session 校验保留，但排除它作为扫描索引，让单助手结算按 message_id 定位。
       const parts = input.usage ? [] : (yield* db.select().from(PartTable)
-        .where(and(eq(PartTable.message_id, assistant.id), eq(PartTable.session_id, input.sessionID),
+        .where(and(eq(PartTable.message_id, assistant.id), eq(sql`+${PartTable.session_id}`, input.sessionID),
           sql`json_extract(${PartTable.data}, '$.type') = 'step-finish'`))
         .all().pipe(Effect.orDie)).map(row => Schema.decodeUnknownSync(SessionV1.Part)({
           ...row.data, id: row.id, sessionID: row.session_id, messageID: row.message_id,
@@ -379,7 +380,8 @@ export function make(db: Database.Interface["db"]): Interface {
       for (const row of rows) {
         const info = Schema.decodeUnknownSync(SessionV1.Info)({ ...row.data, id: row.id, sessionID: row.session_id })
         if (info.role !== "assistant") continue
-        const parts = (yield* db.select().from(PartTable).where(and(eq(PartTable.session_id, input.sessionID), eq(PartTable.message_id, info.id), sql`json_extract(${PartTable.data}, '$.type') = 'step-finish'`))
+        // 历史补账同样按助手点查，避免兼容路径重新退回整段 Session 扫描。
+        const parts = (yield* db.select().from(PartTable).where(and(eq(sql`+${PartTable.session_id}`, input.sessionID), eq(PartTable.message_id, info.id), sql`json_extract(${PartTable.data}, '$.type') = 'step-finish'`))
           .all().pipe(Effect.orDie)).map(part => Schema.decodeUnknownSync(SessionV1.Part)({ ...part.data, id: part.id, messageID: part.message_id, sessionID: part.session_id }))
         const totals = stepUsage(parts, info)
         assistants.push({ sessionID: input.sessionID, requestID: input.requestID, rootRequestID: input.requestID,

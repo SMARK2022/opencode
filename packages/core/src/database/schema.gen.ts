@@ -205,6 +205,7 @@ export default {
           \`kind\` text NOT NULL,
           \`codec\` text NOT NULL,
           \`payload\` blob NOT NULL,
+          \`summary_stats\` text,
           \`raw_bytes\` integer NOT NULL,
           \`compressed_bytes\` integer NOT NULL,
           \`ref_count\` integer DEFAULT 0 NOT NULL,

@@ -545,7 +545,13 @@ export const reviewerEvidence = Effect.fn("MessageV2.reviewerEvidence")(function
 export const cancelSnapshot = Effect.fn("MessageV2.cancelSnapshot")(function* (sessionID: SessionID, options?: { includeHidden?: boolean }) {
   const { db } = yield* Database.Service
   const messages = yield* db
-    .select()
+    // 取消只需身份、父请求和完成标记，不搬运每条 Message 的诊断与摘要对象。
+    .select({
+      id: MessageTable.id,
+      role: sql<"user" | "assistant">`json_extract(${MessageTable.data}, '$.role')`,
+      parentID: sql<string | null>`json_extract(${MessageTable.data}, '$.parentID')`,
+      completed: sql<number | null>`json_extract(${MessageTable.data}, '$.time.completed')`,
+    })
     .from(MessageTable)
     .where(and(
       eq(MessageTable.session_id, sessionID),
@@ -553,13 +559,14 @@ export const cancelSnapshot = Effect.fn("MessageV2.cancelSnapshot")(function* (s
     ))
     .orderBy(MessageTable.time_created, MessageTable.id)
     .all()
-    .pipe(Effect.map((rows) => rows.map(hotInfo)), Effect.orDie)
+    .pipe(Effect.orDie)
+  // 保留父请求关联与未完成判定；裁剪查询字段不改变孤立输入的收尾范围。
   const parentIDs = new Set(
     messages.flatMap((message) => (message.role === "assistant" ? [message.parentID] : [])),
   )
   return {
     pendingAssistantIDs: messages.flatMap((message) =>
-      message.role === "assistant" && !message.time.completed ? [message.id] : [],
+      message.role === "assistant" && !message.completed ? [message.id] : [],
     ),
     orphanUserIDs: messages.flatMap((message) =>
       message.role === "user" && !parentIDs.has(message.id) ? [message.id] : [],

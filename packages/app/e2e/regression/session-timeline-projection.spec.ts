@@ -89,6 +89,7 @@ test.describe("session timeline projection", () => {
     const aborted = assistantMessage(
       [
         { id: "prt_before_abort", type: "text", text: "Before interruption" },
+        // 固定自动压缩语义，与下方精确文案断言一致，不依赖缺省字段的解释。
         { id: "prt_compaction", type: "compaction", auto: true },
       ],
       {
@@ -122,7 +123,8 @@ test.describe("session timeline projection", () => {
     await scroller.evaluate((element) => (element.scrollTop = 0))
 
     await expect(page.locator('[data-timeline-row="TurnDivider"]')).toHaveCount(1)
-    await expect(page.getByText("Session compacted", { exact: true })).toBeVisible()
+    // 夹具明确 auto=true，应校验自动压缩标签而非手动压缩文案。
+    await expect(page.getByText("Auto Compaction", { exact: true })).toBeVisible()
     await expect(page.getByText("Visible provider failure")).toBeVisible()
     await scroller.evaluate((element) => (element.scrollTop = element.scrollHeight))
     await expect(page.locator('[data-timeline-row="TurnGap"]')).toBeVisible()

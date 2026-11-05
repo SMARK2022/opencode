@@ -1,4 +1,4 @@
-import { and, eq, inArray, isNotNull, sql, type SQL } from "drizzle-orm"
+import { and, desc, eq, inArray, isNotNull, sql, type SQL } from "drizzle-orm"
 import type { TxOrDb } from "./cold-store"
 import { ColdStorageTable, MessageTable, PartTable, SessionMessageTable, SessionTable } from "../session/sql"
 import { SessionMessage } from "../session/message"
@@ -32,9 +32,10 @@ import {
   decodeSummary,
   releaseSummaryReference,
   inspectPartRows,
+  inspectSummary,
 } from "./cold-store"
 
-// 历史 Message/Part 发生语义替换时，cursor 以内的 aggregate 不再可信；清 ref 后由下一次 load 从当前 Tool rows 重建。
+// 历史变更影响文件贡献时才清 ref 并重建；不贡献摘要的消息保留归档，避免只读撤回解冻正文。
 // 新 owner 位于 cursor 之后不会影响已缓存前缀，因此保持 cache 可增量扩展，避免每个实时 tail 写入都解压 summary。
 export function invalidateSessionSummaryBefore(db: TxOrDb, sessionID: SessionID, messageID: MessageID) {
   const session = db
@@ -90,6 +91,47 @@ export function invalidateSessionSummaryBefore(db: TxOrDb, sessionID: SessionID,
   if (session.summaryCursor === null) return
   const relation = compareStoredMessageCursor(db, sessionID, messageID, session.summaryCursor)
   if (relation === undefined || relation > 0) return
+  // 无已完成 Tool 的消息不贡献文件变化；只需保留 opaque seed 的覆盖边界。
+  // 排除 session 索引竞争，让这次存在性检查也只按父消息定位。
+  const tool = db
+    .select({ id: PartTable.id })
+    .from(PartTable)
+    .where(and(
+      eq(PartTable.message_id, messageID),
+      eq(sql`+${PartTable.session_id}`, sessionID),
+      sql`json_extract(${PartTable.data}, '$.type') = 'tool'`,
+      sql`json_extract(${PartTable.data}, '$.state.status') = 'completed'`,
+    ))
+    .limit(1)
+    .get()
+  if (!tool) {
+    const stats = inspectSummary(db, session.summaryRef, true)
+    // 只有 seed 覆盖范围之外的只读变化可保留归档；覆盖旧 seed 时仍走原失效路径。
+    if (!stats.seed || (compareStoredMessageCursor(db, sessionID, messageID, stats.seed.cursor) ?? 0) > 0) {
+      if (messageID === session.summaryCursor) {
+        // 撤回当前游标时退到前一个可见闭合消息，避免空增量被误判为历史倒退。
+        const previous = db
+          .select({ id: MessageTable.id })
+          .from(MessageTable)
+          .where(and(
+            eq(MessageTable.session_id, sessionID),
+            sql`(${MessageTable.time_created}, ${MessageTable.id}) <
+              (select time_created, id from ${MessageTable} where id = ${messageID})`,
+            sql`json_type(${MessageTable.data}, '$.hidden') is null`,
+            sql`(json_extract(${MessageTable.data}, '$.role') = 'user' or json_type(${MessageTable.data}, '$.time.completed') is not null)`,
+          ))
+          .orderBy(desc(MessageTable.time_created), desc(MessageTable.id))
+          .limit(1)
+          .get()
+        // 同一事务仅回退游标，不交换归档引用，也不把缓存维护记成会话活动。
+        db.update(SessionTable)
+          .set({ summary_cursor: previous?.id ?? "", time_updated: SessionTable.time_updated })
+          .where(eq(SessionTable.id, sessionID))
+          .run()
+      }
+      return
+    }
+  }
   const payload = decodeSummary(db, session.summaryRef)
   // #0584：seed 内部 cursor 与外层 cursor 各自独立解析：保留晚于变更行的 seed，丢弃已被覆盖的 seed。
   const seedRelation = payload.seed

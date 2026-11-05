@@ -1542,7 +1542,8 @@ export interface Interface {
 interface State {
   models: Map<string, LanguageModelV3>
   providers: Record<ProviderV2.ID, Info>
-  catalog: Record<ProviderV2.ID, Info>
+  // 此索引仅服务未命中时的建议；实际调用配置仍由 providers 持有。
+  catalog: Record<ProviderV2.ID, { models: Record<string, Pick<Model, "status">> }>
   sdk: Map<string, BundledSDK>
   modelLoaders: Record<string, CustomModelLoader>
   varsLoaders: Record<string, CustomVarsLoader>
@@ -1689,7 +1690,8 @@ function modeOptions(model: Model, body: Record<string, unknown> | undefined) {
   return { ...rest, reasoningMode: reasoning.mode }
 }
 
-function modelSuggestions(provider: Info | undefined, modelID: ModelV2.ID, enableExperimentalModels: boolean) {
+// 同一候选算法接纳完整提供者或精简索引，保留原有实验模型与弃用状态过滤。
+function modelSuggestions(provider: State["catalog"][ProviderV2.ID] | undefined, modelID: ModelV2.ID, enableExperimentalModels: boolean) {
   const available = provider
     ? Object.keys(provider.models).filter((id) => {
         const model = provider.models[id]
@@ -1735,7 +1737,8 @@ const layer = Layer.effect(
         const cfg = yield* config.get()
         const modelsDev = yield* modelsDevSvc.get()
         const catalog = mapValues(modelsDev, fromModelsDevProvider)
-        const database = mapValues(catalog, toPublicInfo)
+        // 内部目录只需隔离可变模型；公共输出和插件边界仍由 toPublicInfo 校验并净化。
+        const database = structuredClone(catalog)
 
         const providers: Record<ProviderV2.ID, Info> = {} as Record<ProviderV2.ID, Info>
         const languages = new Map<string, LanguageModelV3>()
@@ -2176,7 +2179,8 @@ const layer = Layer.effect(
         return {
           models: languages,
           providers,
-          catalog,
+          // 错误建议只用模型 ID 和状态，不长期保留另一份完整模型目录。
+          catalog: mapValues(catalog, item => ({ models: mapValues(item.models, model => ({ status: model.status })) })),
           sdk,
           modelLoaders,
           varsLoaders,

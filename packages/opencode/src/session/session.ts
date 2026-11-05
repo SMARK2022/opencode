@@ -3,7 +3,7 @@ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 import { Slug } from "@opencode-ai/core/util/slug"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
-import { selection, withRequests } from "@opencode-ai/core/session/info"
+import { columns, selection, withRequests } from "@opencode-ai/core/session/info"
 import { RequestUsage } from "@opencode-ai/schema/session"
 import { serviceUse } from "@opencode-ai/core/effect/service-use"
 import path from "path"
@@ -56,7 +56,8 @@ import { searchCondition, type SearchMode } from "./search"
 // #113：兼容 Session.isDefaultTitle 导出名
 export { isDefaultTitle }
 
-type SessionRow = typeof SessionTable.$inferSelect & { request?: RequestUsage }
+// 公共映射不要求摘要恢复正文，避免后续迁移为了补齐类型而重新使用 SELECT *。
+type SessionRow = Omit<typeof SessionTable.$inferSelect, "summary_seed"> & { request?: RequestUsage }
 
 export function fromRow(row: SessionRow): Info {
   return SessionV1.fromRow(row)
@@ -417,7 +418,8 @@ export interface Interface {
   readonly diff: (sessionID: SessionID) => Effect.Effect<Snapshot.FileDiff[]>
   // fromMessageID：尾部裁剪读取（0393 revert messages 裁剪优化）
   readonly messages: (input: { sessionID: SessionID; limit?: number; fromMessageID?: MessageID; includeHidden?: boolean }) => Effect.Effect<SessionV1.WithParts[], NotFound>
-  readonly children: (parentID: SessionID) => Effect.Effect<Info[]>
+  // active 只由取消路径提供；普通列表仍返回全部子会话，活动后代的空闲祖先也不会被跳过。
+  readonly children: (parentID: SessionID, active?: readonly string[]) => Effect.Effect<Info[]>
   readonly remove: (sessionID: SessionID) => Effect.Effect<void, NotFound>
   readonly updateMessage: <T extends SessionV1.Info>(msg: T) => Effect.Effect<T>
   // #0500：summaryOnly 更新入口——只改派生 per-user diffs，不触发 aggregate 失效。
@@ -563,12 +565,12 @@ const layer: Layer.Layer<
       const query =
         conditions.length > 0
           ? db
-              // 条件列表也使用共享投影，不能只有无筛选列表带请求数据。
-              .select()
+              // 两条列表分支都只取公共列，不能在条件查询中重新搬运内部摘要 seed。
+              .select(columns)
               .from(SessionTable)
               .where(and(...conditions))
           // 先固定页面，再绑定每条身份读取完整请求，避免相关CTE反复展开。
-          : db.select().from(SessionTable)
+          : db.select(columns).from(SessionTable)
       const rows = yield* db.transaction(() => query
         .orderBy(desc(SessionTable.time_updated), desc(SessionTable.id))
         .limit(input?.limit ?? 100)
@@ -595,12 +597,20 @@ const layer: Layer.Layer<
       return rows.map((row) => ({ ...fromRow(row), project: projects.get(row.project_id) ?? null }))
     })
 
-    const children = Effect.fn("Session.children")(function* (parentID: SessionID) {
+    const children = Effect.fn("Session.children")(function* (parentID: SessionID, active?: readonly string[]) {
+      if (active?.length === 0) return []
+      // 从活动身份向上追溯，查询规模随活动链深度增长，不遍历全部已结束后代。
       const rows = yield* db.transaction(() => db
         // 子代理独立 Session 使用自己的请求投影，不继承父请求费用。
-        .select()
+        .select(columns)
         .from(SessionTable)
-        .where(and(eq(SessionTable.parent_id, parentID)))
+        .where(and(eq(SessionTable.parent_id, parentID), active && sql`${SessionTable.id} in (
+          with recursive active_tree(id, parent_id) as (
+            select id, parent_id from ${SessionTable} where id in (${sql.join(active.map(id => sql`${id}`), sql`, `)})
+            union
+            select s.id, s.parent_id from ${SessionTable} s join active_tree a on s.id = a.parent_id
+          ) select id from active_tree
+        )`))
         .all()
         .pipe(Effect.flatMap((rows) => withRequests(db, rows))),
       ).pipe(Effect.orDie)
@@ -976,8 +986,8 @@ function* listByProject(
 
   // 页面与请求保持同一读快照，后台更新不能在两段读取间拼出混合版本。
   return yield* database.db.transaction(() => database.db
-    // 继续使用前项的请求投影，搜索结果不能丢失已落盘的token与费用字段。
-    .select()
+    // 列表先取公共信息，再补权威请求统计；大 seed 只由摘要存储模块读取。
+    .select(columns)
     .from(SessionTable)
     // #228：home 切换查询故意无 project/path 谓词——undefined 表示无 WHERE，只保留 start/search/roots 过滤
     .where(conditions.length > 0 ? and(...conditions) : undefined)
@@ -1038,7 +1048,8 @@ function* searchScanByProject(
   }
 
   const page = yield* database.db
-    .select()
+    // 候选页只用于 ID 过滤和分页；命中后才读取公共会话信息。
+    .select({ id: SessionTable.id, time_updated: SessionTable.time_updated })
     .from(SessionTable)
     .where(universe.length > 0 ? and(...universe) : undefined)
     .orderBy(desc(SessionTable.time_updated), desc(SessionTable.id))
@@ -1056,9 +1067,9 @@ function* searchScanByProject(
   const full = yield* Database.withSync(database, (sync) =>
     searchCondition(sync, input.search, { mode: "all", roots: input.roots, scope: inArray(SessionTable.id, ids) }),
   )
-  // 命中集合走第二段 SQL 而非在内存过滤——候选窗语义要求 SQL 只按 id 收窄。
+  // 命中集合走第二段 SQL 按候选 ID 收窄，再读取与普通列表一致的公共列。
   const matched = yield* database.db.transaction(() => database.db
-    .select()
+    .select(columns)
     .from(SessionTable)
     .where(and(inArray(SessionTable.id, ids), full))
     .all()

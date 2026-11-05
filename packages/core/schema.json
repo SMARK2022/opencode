@@ -1,9 +1,9 @@
 {
   "version": "7",
   "dialect": "sqlite",
-  "id": "6b485bc3-d8eb-4465-b36d-e855c32af330",
+  "id": "9b25f890-5cc7-425f-bb07-c8bf36730683",
   "prevIds": [
-    "00000000-0000-0000-0000-000000000000"
+    "6b485bc3-d8eb-4465-b36d-e855c32af330"
   ],
   "ddl": [
     {
@@ -1409,6 +1409,16 @@
       "table": "cold_storage"
     },
     {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "summary_stats",
+      "entityType": "columns",
+      "table": "cold_storage"
+    },
+    {
       "type": "integer",
       "notNull": true,
       "autoincrement": false,
@@ -2444,62 +2454,18 @@
       "table": "message"
     },
     {
-      "columns": ["cold_ref"],
+      "columns": [
+        "cold_ref"
+      ],
       "tableTo": "cold_storage",
-      "columnsTo": ["hash"],
+      "columnsTo": [
+        "hash"
+      ],
       "onUpdate": "NO ACTION",
       "onDelete": "RESTRICT",
       "nameExplicit": false,
       "name": "fk_message_cold_ref_cold_storage_hash_fk",
       "entityType": "fks",
-      "table": "message"
-    },
-    {
-      "columns": [
-        {
-          "value": "session_id",
-          "isExpression": false
-        },
-        {
-          "value": "json_extract(\"data\", '$.parentID')",
-          "isExpression": true
-        },
-        {
-          "value": "time_created",
-          "isExpression": false
-        },
-        {
-          "value": "id",
-          "isExpression": false
-        }
-      ],
-      "isUnique": false,
-      "where": null,
-      "origin": "manual",
-      "name": "message_session_parent_time_created_id_idx",
-      "entityType": "indexes",
-      "table": "message"
-    },
-    {
-      "columns": [
-        {
-          "value": "session_id",
-          "isExpression": false
-        },
-        {
-          "value": "time_created",
-          "isExpression": false
-        },
-        {
-          "value": "id",
-          "isExpression": false
-        }
-      ],
-      "isUnique": false,
-      "where": "json_extract(\"data\", '$.role') = 'assistant' AND json_extract(\"data\", '$.summary') = 1 AND coalesce(json_extract(\"data\", '$.finish'), '') != '' AND coalesce(json_type(\"data\", '$.error'), 'null') = 'null'",
-      "origin": "manual",
-      "name": "message_session_compaction_time_created_id_idx",
-      "entityType": "indexes",
       "table": "message"
     },
     {
@@ -2518,9 +2484,13 @@
       "table": "part"
     },
     {
-      "columns": ["cold_ref"],
+      "columns": [
+        "cold_ref"
+      ],
       "tableTo": "cold_storage",
-      "columnsTo": ["hash"],
+      "columnsTo": [
+        "hash"
+      ],
       "onUpdate": "NO ACTION",
       "onDelete": "RESTRICT",
       "nameExplicit": false,
@@ -2574,9 +2544,13 @@
       "table": "session_message"
     },
     {
-      "columns": ["cold_ref"],
+      "columns": [
+        "cold_ref"
+      ],
       "tableTo": "cold_storage",
-      "columnsTo": ["hash"],
+      "columnsTo": [
+        "hash"
+      ],
       "onUpdate": "NO ACTION",
       "onDelete": "RESTRICT",
       "nameExplicit": false,
@@ -2600,9 +2574,13 @@
       "table": "session"
     },
     {
-      "columns": ["summary_ref"],
+      "columns": [
+        "summary_ref"
+      ],
       "tableTo": "cold_storage",
-      "columnsTo": ["hash"],
+      "columnsTo": [
+        "hash"
+      ],
       "onUpdate": "NO ACTION",
       "onDelete": "RESTRICT",
       "nameExplicit": false,
@@ -2781,7 +2759,9 @@
       "entityType": "pks"
     },
     {
-      "columns": ["hash"],
+      "columns": [
+        "hash"
+      ],
       "nameExplicit": false,
       "name": "cold_storage_pk",
       "table": "cold_storage",
@@ -3079,6 +3059,54 @@
       "where": null,
       "origin": "manual",
       "name": "message_session_time_created_id_idx",
+      "entityType": "indexes",
+      "table": "message"
+    },
+    {
+      "columns": [
+        {
+          "value": "session_id",
+          "isExpression": false
+        },
+        {
+          "value": "json_extract(\"data\", '$.parentID')",
+          "isExpression": true
+        },
+        {
+          "value": "time_created",
+          "isExpression": false
+        },
+        {
+          "value": "id",
+          "isExpression": false
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "origin": "manual",
+      "name": "message_session_parent_time_created_id_idx",
+      "entityType": "indexes",
+      "table": "message"
+    },
+    {
+      "columns": [
+        {
+          "value": "session_id",
+          "isExpression": false
+        },
+        {
+          "value": "time_created",
+          "isExpression": false
+        },
+        {
+          "value": "id",
+          "isExpression": false
+        }
+      ],
+      "isUnique": false,
+      "where": "json_extract(\"data\", '$.role') = 'assistant' AND json_extract(\"data\", '$.summary') = 1 AND coalesce(json_extract(\"data\", '$.finish'), '') != '' AND coalesce(json_type(\"data\", '$.error'), 'null') = 'null'",
+      "origin": "manual",
+      "name": "message_session_compaction_time_created_id_idx",
       "entityType": "indexes",
       "table": "message"
     },

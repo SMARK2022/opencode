@@ -77,7 +77,8 @@ export type SummaryPayload = {
   delta: SummaryDiffs
 }
 
-function isSummaryPayload(value: unknown): value is SummaryPayload {
+// 统计投影与归档正文共享结构约束，避免存储读取端再维护一份校验逻辑。
+export function isSummaryPayload(value: unknown): value is SummaryPayload {
   if (!isRecord(value) || !isDiffs(value.delta)) return false
   if (value.seed === undefined) return true
   return isSummarySeed(value.seed)
@@ -228,10 +229,10 @@ export function packEnvelope(owner: OwnerKind, entries: PackEntry[]) {
 
 function parsePackEnvelope(owner: OwnerKind, raw: Uint8Array, hash: string): PackEnvelope {
   // 新格式省去可重算的 entry 摘要，包级完整摘要仍覆盖全部原始字节。
-  // 保留 canonical 校验，禁止只改 JSON 排版就绕过唯一内容身份。
+  // 按原始字节窗口解码，保留切片偏移，避免先复制整个包。
   let value: unknown
   try {
-    value = JSON.parse(Buffer.from(raw).toString("utf8"))
+    value = JSON.parse(Buffer.from(raw.buffer, raw.byteOffset, raw.byteLength).toString("utf8"))
   } catch (cause) {
     throw new CorruptionError({ message: `Cold pack is not JSON: ${String(cause)}`, hash })
   }
@@ -266,19 +267,8 @@ function parsePackEnvelope(owner: OwnerKind, raw: Uint8Array, hash: string): Pac
       throw new CorruptionError({ message: "Cold pack entries are not uniquely key-sorted", hash })
     }
   }
-  const parsed: PackEnvelope = { version: value.version, owner, entries }
-  const canonicalValue = {
-    version: value.version,
-    owner,
-    entries:
-      value.version === 3
-        ? entries.map((entry) => entry.fields)
-        : entries.map((entry) => ({ key: entry.key.toString("hex"), fields: entry.fields })),
-  }
-  if (!Buffer.from(canonical(canonicalValue)).equals(Buffer.from(raw))) {
-    throw new CorruptionError({ message: "Cold pack is not canonical JSON", hash })
-  }
-  return parsed
+  // canonical 由写端生成；原始摘要和 entry key 已验证，无需为格式一致性再编码整个包。
+  return { version: value.version, owner, entries }
 }
 
 // 压缩适配器固定产生标准 zstd frame，数据库不保存 Bun/Node 平台标记，保证跨平台可展开。
@@ -307,32 +297,31 @@ export function compress(raw: Uint8Array, threads = 0) {
 // raw size 与 digest 在 decode 中另行核验，因此成功返回 bytes 不代表 payload 已经可信。
 export function decompress(payload: Uint8Array) {
   try {
-    if (typeof Bun !== "undefined") return Buffer.from(Bun.zstdDecompressSync(payload))
+    if (typeof Bun !== "undefined") {
+      const raw = Bun.zstdDecompressSync(payload)
+      // 共享解压结果的字节视图，避免大摘要在进入校验前又完整复制一次。
+      return Buffer.from(raw.buffer, raw.byteOffset, raw.byteLength)
+    }
     return nodeZstdDecompressSync(payload)
   } catch (cause) {
     throw new CorruptionError({ message: `zstd payload cannot be decompressed: ${String(cause)}` })
   }
 }
 
-// parseEnvelope 不接受“语义等价但非 canonical”的 JSON，避免手工写入绕过唯一内容身份。
 // version、owner 和 fields 三个结构字段缺一不可；未知版本必须由迁移处理，不能由当前 reader 猜测。
 // 解析后的 fields 再走 Json 校验，阻止 prototype、非有限数值或非 JSON 值进入恢复路径。
-// canonical byte equality 是 digest 之外的格式约束，可定位 hash 正确但 writer 不符合协议的外部破坏。
 export function parseEnvelope(owner: OwnerKind, raw: Uint8Array, hash: string): Envelope {
   let value: unknown
   try {
-    value = JSON.parse(Buffer.from(raw).toString("utf8"))
+    value = JSON.parse(Buffer.from(raw.buffer, raw.byteOffset, raw.byteLength).toString("utf8"))
   } catch (cause) {
     throw new CorruptionError({ message: `Cold payload is not JSON: ${String(cause)}`, hash })
   }
   if (!isRecord(value) || value.version !== 1 || value.owner !== owner || !isRecord(value.fields)) {
     throw new CorruptionError({ message: "Cold payload envelope does not match its owner", hash })
   }
-  const parsed = { version: 1 as const, owner, fields: jsonObject(value.fields) }
-  if (!Buffer.from(canonical(parsed)).equals(Buffer.from(raw))) {
-    throw new CorruptionError({ message: "Cold payload is not canonical JSON", hash })
-  }
-  return parsed
+  // 内容身份由外层 digest 核验；保留字段校验，移除只检查 JSON 排版的整份重编码。
+  return { version: 1 as const, owner, fields: jsonObject(value.fields) }
 }
 
 // Session summary 使用独立 version/owner，防止 aggregate FileDiff 被当成 Message 的 summary.diffs 字段恢复。
@@ -348,10 +337,22 @@ export function summaryEnvelope(payload: SummaryPayload) {
   return { value, raw, hash: digest("session-summary", raw) }
 }
 
+export function summaryStats(payload: SummaryPayload): SummaryPayload {
+  // 统计投影只保存显示字段；历史附加字段和 patch 都不进入常规列表读取。
+  const project = (diffs: SummaryDiffs) => diffs.map(diff => ({
+    file: diff.file, additions: diff.additions, deletions: diff.deletions, status: diff.status,
+  }))
+  // 保留 seed 的边界与两段结构，统计和完整摘要继续沿用同一增量归并语义。
+  return {
+    ...(payload.seed ? { seed: { cursor: payload.seed.cursor, diffs: project(payload.seed.diffs) } } : {}),
+    delta: project(payload.delta),
+  }
+}
+
 export function parseSummaryEnvelope(raw: Uint8Array, hash: string): SummaryPayload {
   let value: unknown
   try {
-    value = JSON.parse(Buffer.from(raw).toString("utf8"))
+    value = JSON.parse(Buffer.from(raw.buffer, raw.byteOffset, raw.byteLength).toString("utf8"))
   } catch (cause) {
     throw new CorruptionError({ message: `Session summary payload is not JSON: ${String(cause)}`, hash })
   }
@@ -364,18 +365,12 @@ export function parseSummaryEnvelope(raw: Uint8Array, hash: string): SummaryPayl
   ) {
     throw new CorruptionError({ message: "Session summary payload envelope is invalid", hash })
   }
-  const fields = value.fields.seed
-    ? { seed: { cursor: value.fields.seed.cursor, diffs: value.fields.seed.diffs }, delta: value.fields.delta }
-    : { delta: value.fields.delta }
-  const parsed = { version: 2 as const, owner: "session-summary" as const, fields }
-  if (!Buffer.from(canonical(parsed)).equals(Buffer.from(raw))) {
-    throw new CorruptionError({ message: "Session summary payload is not canonical JSON", hash })
-  }
+  // decodeSummary 已验证长度和原始字节摘要，此处恢复业务结构，不再重新序列化全部 patch。
   return {
-    ...(parsed.fields.seed
-      ? { seed: { cursor: parsed.fields.seed.cursor, diffs: Array.from(parsed.fields.seed.diffs) } }
+    ...(value.fields.seed
+      ? { seed: { cursor: value.fields.seed.cursor, diffs: Array.from(value.fields.seed.diffs) } }
       : {}),
-    delta: Array.from(parsed.fields.delta),
+    delta: Array.from(value.fields.delta),
   }
 }
 

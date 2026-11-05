@@ -343,9 +343,9 @@ const layer = Layer.effect(
         return restore(
           Effect.gen(function* () {
             yield* Effect.logInfo("cancel", { "session.id": sessionID })
-            // 冻结一次旧ID，idle后不能再扫描replacement消息。
-            // #216：等待runner前固定已有子会话列表，父取消后再沿各自owner终态化。
-            const children = yield* sessions.children(sessionID)
+            // SessionRunState 提供真实活动身份，Session.children 只追溯其祖先链，保留空闲中间节点。
+            // 等待 runner 前冻结这批子会话，已结束历史不进入流程，也不在 idle 后误取消新工作。
+            const children = yield* sessions.children(sessionID, yield* state.active())
             // pending与queued孤儿身份从同次读取冻结，旧cancel不得重新扫描replacement请求。
             // 只读 hot 定位，已完成助手的冷 Tool 不因取消而持久预热；后续仍沿现有逐 ID 收尾 owner。
             // 隐藏只改变展示，不撤销旧消息上的执行权与计费责任。

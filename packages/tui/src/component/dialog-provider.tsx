@@ -1,5 +1,6 @@
-import { createMemo, createSignal, onMount, Show } from "solid-js"
+import { createMemo, createResource, createSignal, onMount, Show } from "solid-js"
 import { useSync } from "../context/sync"
+import { useProject } from "../context/project"
 import { map, pipe, sortBy } from "remeda"
 import { DialogSelect } from "../ui/dialog-select"
 import { useDialog } from "../ui/dialog"
@@ -90,6 +91,13 @@ export function createDialogProviderOptions() {
   const toast = useToast()
   const { theme } = useTheme()
   const onboarded = useConnected()
+  const project = useProject()
+  // 全目录只供连接选择使用，随对话框销毁，不进入常驻同步状态。
+  // 资源跟随当前 workspace 重取，替代启动时保存的全局目录快照。
+  const [catalog] = createResource(
+    () => ({ workspace: project.workspace.current() }),
+    async (input) => (await sdk.client.provider.list(input, { throwOnError: true })).data,
+  )
 
   async function promptCustomProviderID(): Promise<string | undefined> {
     const value = await DialogPrompt.show(dialog, "Other", {
@@ -113,9 +121,10 @@ export function createDialogProviderOptions() {
     return promptCustomProviderID()
   }
 
+  // 选项与连接标记共用本次目录响应，避免切换 workspace 后混用旧快照。
   const options = createMemo(() => {
     return pipe(
-      providerOptions(sync.data.provider_next.all),
+      providerOptions(catalog()?.all ?? []),
       map((provider) => {
         if (provider.type === "custom") {
           return {
@@ -133,7 +142,8 @@ export function createDialogProviderOptions() {
 
         const providerID = provider.providerID
         const consoleManaged = isConsoleManagedProvider(sync.data.console_state.consoleManagedProviders, providerID)
-        const connected = sync.data.provider_next.connected.includes(providerID)
+        // 连接状态沿用服务端 connected 字段，不能仅凭本地是否有可用模型推断。
+        const connected = catalog()?.connected.includes(providerID)
 
         return {
           title: provider.title,
@@ -405,7 +415,8 @@ function ApiMethod(props: ApiMethodProps) {
         })
         // #362：不再调 instance.dispose()——服务端 authSet handler 已刷新 Provider 缓存
         await sync.bootstrap()
-        if (props.custom && !sync.data.provider_next.all.some((provider) => provider.id === props.providerID)) {
+        // 凭据保存后以已连接模型判断能否使用，无须再次加载整个公共目录。
+        if (props.custom && !sync.data.provider.some((provider) => provider.id === props.providerID)) {
           toast.show({
             variant: "info",
             message: `Saved credential for ${props.providerID}. Configure it in opencode.json to use it.`,

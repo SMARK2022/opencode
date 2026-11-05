@@ -87,20 +87,20 @@ export const Info = Schema.Struct({
   .annotate({ identifier: "ModelV2.Info" })
   .pipe(
     statics((schema) => ({
-      empty: (providerID: Provider.ID, modelID: ID) =>
-        schema.make({
-          id: modelID,
-          providerID,
-          name: modelID,
-          api: { id: modelID, type: "native", settings: {} },
-          capabilities: { tools: false, input: [], output: [] },
-          request: { headers: {}, body: {} },
-          variants: [],
-          time: { released: 0 },
-          cost: [],
-          status: "active",
-          enabled: true,
-          limit: { context: 0, output: 0 },
-        }),
+      // 只有 ID 来自调用方；固定默认结构由返回类型约束，每次创建独立的可变容器。
+      empty: (providerID: Provider.ID, modelID: ID): typeof schema.Type => ({
+        id: ID.make(modelID),
+        providerID: Provider.ID.make(providerID),
+        name: modelID,
+        api: { id: modelID, type: "native", settings: {} },
+        capabilities: { tools: false, input: [], output: [] },
+        request: { headers: {}, body: {} },
+        variants: [],
+        time: { released: 0 },
+        cost: [],
+        status: "active",
+        enabled: true,
+        limit: { context: 0, output: 0 },
+      }),
     })),
   )

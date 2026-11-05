@@ -192,7 +192,8 @@ export const OpencodePlugin = define<HttpClient.HttpClient | EventV2.Service | S
       Stream.runForEach(refresh),
       Effect.forkScoped({ startImmediately: true }),
     )
-    yield* refresh().pipe(Effect.forkScoped)
+    // 未连接时没有远端配置可加载，注册的 transform 已负责公共模型，无须再重建全部目录。
+    if (connected) yield* refresh().pipe(Effect.forkScoped)
   }),
 })
 

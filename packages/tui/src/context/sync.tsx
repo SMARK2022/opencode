@@ -14,7 +14,6 @@ import type {
   McpResource,
   FormatterStatus,
   SessionStatus,
-  ProviderListResponse,
   ProviderAuthMethod,
   VcsInfo,
   SnapshotFileDiff,
@@ -144,9 +143,9 @@ export const {
     const permission = usePermission()
     const [store, setStore] = createStore<{
       status: "loading" | "partial" | "complete"
+      // 会话页只驻留已连接模型；全目录的所有权已移到连接对话框。
       provider: Provider[]
       provider_default: Record<string, string>
-      provider_next: ProviderListResponse
       console_state: ConsoleState
       capabilities: {
         experimentalBackgroundSubagents: boolean
@@ -191,11 +190,7 @@ export const {
       formatter: FormatterStatus[]
       vcs: VcsInfo | undefined
     }>({
-      provider_next: {
-        all: [],
-        default: {},
-        connected: [],
-      },
+      // 连接目录不再占全局状态槽，避免对话框关闭后仍保留全部模型。
       console_state: emptyConsoleState,
       capabilities: {
         experimentalBackgroundSubagents: false,
@@ -1322,9 +1317,9 @@ export const {
       // 只有 continue 的首屏需要列表；其他启动在下方异步组内发起并接管它。
       const sessionListPromise = args.continue ? projectPromise.then(() => listSessions()) : undefined
 
-      // blocking - include session.list when continuing a session
+      // 继续会话时列表才参与首屏等待，其余阻塞项仅覆盖当前界面所需数据。
+      // 启动只需已连接模型；全部 provider 目录由连接对话框按需读取。
       const providersPromise = sdk.client.config.providers({ workspace }, { throwOnError: true })
-      const providerListPromise = sdk.client.provider.list({ workspace }, { throwOnError: true })
       const capabilitiesPromise = sdk.client.experimental.capabilities
         .get({ workspace }, { throwOnError: true })
         .then((x) => x.data)
@@ -1337,7 +1332,6 @@ export const {
       const configPromise = sdk.client.config.get({ workspace }, { throwOnError: true })
       await Promise.all([
         providersPromise,
-        providerListPromise,
         capabilitiesPromise,
         agentsPromise,
         configPromise,
@@ -1346,7 +1340,6 @@ export const {
       ])
         .then(async () => {
           const providersResponse = providersPromise.then((x) => x.data!)
-          const providerListResponse = providerListPromise.then((x) => x.data!)
           const capabilitiesResponse = capabilitiesPromise
           const consoleStateResponse = consoleStatePromise
           const agentsResponse = agentsPromise.then((x) => x.data ?? [])
@@ -1355,24 +1348,22 @@ export const {
 
           return Promise.all([
             providersResponse,
-            providerListResponse,
             capabilitiesResponse,
             consoleStateResponse,
             agentsResponse,
             configResponse,
             ...(sessionListResponse ? [sessionListResponse] : []),
           ]).then((responses) => {
+            // 与上方 Promise 列表同序；目录请求移走后仅调整接线，不改变其余初始化结果。
             const providers = responses[0]
-            const providerList = responses[1]
-            const capabilities = responses[2]
-            const consoleState = responses[3]
-            const agents = responses[4]
-            const config = responses[5]
+            const capabilities = responses[1]
+            const consoleState = responses[2]
+            const agents = responses[3]
+            const config = responses[4]
 
             batch(() => {
               setStore("provider", reconcile(providers.providers))
               setStore("provider_default", reconcile(providers.default))
-              setStore("provider_next", reconcile(providerList))
               setStore("capabilities", "experimentalBackgroundSubagents", capabilities?.backgroundSubagents === true)
               setStore("console_state", reconcile(consoleState))
               setStore("agent", reconcile(agents))

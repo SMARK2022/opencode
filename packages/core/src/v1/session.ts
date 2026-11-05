@@ -51,7 +51,8 @@ export {
 } from "@opencode-ai/schema/session-v1"
 
 // 同一 V1 协议的 HTTP 与事件投影共用此映射，字段演进时只维护一处。
-export function fromRow(row: typeof SessionTable.$inferSelect & { request?: Session.RequestUsage }): Types.DeepMutable<typeof SessionInfo.Type> {
+// 兼容映射也不依赖内部 seed，不能因旧协议适配而把大正文加回公共查询。
+export function fromRow(row: Omit<typeof SessionTable.$inferSelect, "summary_seed"> & { request?: Session.RequestUsage }): Types.DeepMutable<typeof SessionInfo.Type> {
   // summary_files 单独存在也代表有效摘要，不能只检查增删行数。
   const summary =
     row.summary_additions !== null || row.summary_deletions !== null || row.summary_files !== null

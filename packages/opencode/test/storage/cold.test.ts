@@ -2264,6 +2264,59 @@ describe.serial("Packed ColdStorage V2", () => {
     }),
   )
 
+  it.instance("reads projected summary statistics without restoring archived patches", () =>
+    Effect.gen(function* () {
+      const sessions = yield* SessionNs.Service
+      const summary = yield* SessionSummary.Service
+      const storage = yield* Storage.Service
+      const { sync } = yield* Database.Service
+      const session = yield* sessions.create({ title: "projected summary statistics" })
+      const stats = [{ file: "summary.ts", additions: 3, deletions: 1, status: "modified" as const }]
+      const full = [{ ...stats[0], patch: "-before\n+after\n" }]
+      yield* storage.write(["session_diff", session.id], full)
+      expect(yield* summary.diff({ sessionID: session.id })).toEqual(full)
+      const ref = sync.select({ ref: SessionTable.summary_ref }).from(SessionTable).where(eq(SessionTable.id, session.id)).get()!.ref!
+      const before = sync.select().from(ColdStorageTable).where(eq(ColdStorageTable.hash, ref)).get()!
+      expect(before.summary_stats).toEqual({ seed: { cursor: "", diffs: stats }, delta: [] })
+
+      // 模拟升级前的记录，只补齐小投影，地址、引用和原始内容均保持不变。
+      sync.update(ColdStorageTable).set({ summary_stats: null, time_updated: before.time_updated }).where(eq(ColdStorageTable.hash, ref)).run()
+      expect(yield* summary.diff({ sessionID: session.id, statsOnly: true })).toEqual(stats)
+      const after = sync.select().from(ColdStorageTable).where(eq(ColdStorageTable.hash, ref)).get()!
+      expect(after).toEqual(before)
+
+      // 归档正文损坏只应阻止完整读取；已写入的统计投影不依赖解压正文才能显示。
+      sync.update(ColdStorageTable).set({ payload: Buffer.from("damaged") }).where(eq(ColdStorageTable.hash, ref)).run()
+      expect(yield* summary.diff({ sessionID: session.id, statsOnly: true })).toEqual(stats)
+      expect(Exit.isFailure(yield* Effect.exit(summary.diff({ sessionID: session.id })))).toBe(true)
+    }),
+  )
+
+  it.instance("keeps the archived summary when hiding a read-only tail message", () =>
+    Effect.gen(function* () {
+      const sessions = yield* SessionNs.Service
+      const summary = yield* SessionSummary.Service
+      const storage = yield* Storage.Service
+      const { sync } = yield* Database.Service
+      const session = yield* sessions.create({ title: "read-only summary tail" })
+      const expected = [{ file: "legacy.ts", additions: 3, deletions: 1, patch: "-old\n+new\n" }]
+      yield* storage.write(["session_diff", session.id], expected)
+      yield* summary.diff({ sessionID: session.id })
+      const message = yield* sessions.updateMessage({
+        id: MessageID.ascending(), sessionID: session.id, role: "user", time: { created: Date.now() },
+        agent: "plan", model: { providerID: ProviderV2.ID.make("test"), modelID: ModelV2.ID.make("test") },
+      })
+      yield* summary.diff({ sessionID: session.id, statsOnly: true })
+      const before = sync.select({ ref: SessionTable.summary_ref, seed: SessionTable.summary_seed })
+        .from(SessionTable).where(eq(SessionTable.id, session.id)).get()
+      yield* sessions.updateMessage({ ...message, hidden: { time: Date.now(), reason: "undo" } })
+      // 结果相同还不够：撤回只读输入不能先解冻归档，再把相同历史重建一遍。
+      expect(sync.select({ ref: SessionTable.summary_ref, seed: SessionTable.summary_seed })
+        .from(SessionTable).where(eq(SessionTable.id, session.id)).get()).toEqual(before)
+      expect(yield* summary.diff({ sessionID: session.id })).toEqual(expected)
+    }),
+  )
+
   // 首次 automatic summarize 即使只有 legacy materialization，也必须更新 Session counters。
   // 第二次执行使用同一边界并在 mirror 删除后读取，必须保持 aggregate 和 counters 稳定。
   it.instance("publishes legacy materialization through automatic summarize exactly once", () =>

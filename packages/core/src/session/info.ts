@@ -14,9 +14,13 @@ import { SessionMessage } from "./message"
 import { Snapshot } from "../snapshot"
 import type { Database } from "../database/database"
 
+// 摘要 seed 是恢复聚合的内部正文，不属于会话详情或列表的读取需求。
+const { summary_seed: _summarySeed, ...columns } = getTableColumns(SessionTable)
+export { columns }
+
 // HTTP、列表和事件共用现有 Session SELECT 的请求投影，避免各视图重复扫描历史或另建账本。
 export const selection = (sessionID: SessionSchema.ID) => ({
-  ...getTableColumns(SessionTable),
+  ...columns,
   request: sql<string | null>`(
     -- 修订、移除和 revert 直接反映存储行，无需额外 replay 去重标记。
     -- 绑定身份让CTE在一次请求投影内复用，避免按每个标量字段反复展开相关历史查询。
@@ -209,8 +213,8 @@ export const selection = (sessionID: SessionSchema.ID) => ({
   }),
 })
 
-// 调用者在同一读事务内先固定页面，再复用同一参数化投影，不丢请求字段或解冻历史。
-export function withRequests(db: Database.Interface["db"], rows: (typeof SessionTable.$inferSelect)[]) {
+// 页面与请求投影保持同一读快照；补账不要求摘要 seed，避免调用方为满足类型重新读取正文。
+export function withRequests(db: Database.Interface["db"], rows: Omit<typeof SessionTable.$inferSelect, "summary_seed">[]) {
   return Effect.forEach(rows, (row) =>
     db.select({ request: selection(row.id).request }).from(SessionTable).where(eq(SessionTable.id, row.id)).get().pipe(
       Effect.orDie,
@@ -219,7 +223,8 @@ export function withRequests(db: Database.Interface["db"], rows: (typeof Session
   )
 }
 
-export function fromRow(row: typeof SessionTable.$inferSelect & { request?: Session.RequestUsage }): SessionSchema.Info {
+// 原生会话信息只消费公共列；摘要恢复正文由专用存储入口读取。
+export function fromRow(row: Omit<typeof SessionTable.$inferSelect, "summary_seed"> & { request?: Session.RequestUsage }): SessionSchema.Info {
   return SessionSchema.Info.make({
     id: SessionSchema.ID.make(row.id),
     projectID: ProjectV2.ID.make(row.project_id),

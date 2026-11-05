@@ -36,6 +36,8 @@ import {
   decompress,
   parseEnvelope,
   summaryEnvelope,
+  summaryStats,
+  isSummaryPayload,
   parseSummaryEnvelope,
   extractMessageV2,
   projectPartStats,
@@ -1175,7 +1177,7 @@ export function release(db: TxOrDb, hash: string) {
 }
 
 // decode 是所有恢复路径的唯一 codec/integrity gate，调用方不能直接读取 payload 并自行 JSON.parse。
-// compressed size、zstd frame、raw size、SHA-256、canonical envelope 会依次验证，任一失败都不返回 projection。
+// compressed size、zstd frame、raw size、SHA-256 和 envelope 结构会依次验证，失败不返回 projection。
 // owner kind 参与 digest 和 envelope，双重阻止 Message payload 被误用于 Part 或反向恢复。
 export function decode(db: TxOrDb, hash: string, owner: OwnerKind) {
   const payload = db.select().from(ColdStorageTable).where(eq(ColdStorageTable.hash, hash)).get()
@@ -1194,7 +1196,7 @@ export function decode(db: TxOrDb, hash: string, owner: OwnerKind) {
   return parseEnvelope(owner, raw, hash)
 }
 
-// decodePack 是 v2 owner 的唯一 pack integrity gate；解压后同时验证 pack hash、entry key 和 canonical 顺序。
+// decodePack 是 v2 owner 的唯一 pack integrity gate；解压后同时验证 pack hash、entry key 和 key 顺序。
 // 调用方只能拿到经验证的 entry map，不能把任意 JSON 当作 projection 成功返回。
 export function decodePack(db: TxOrDb, hash: string, owner: OwnerKind) {
   const payload = db.select().from(ColdStorageTable).where(eq(ColdStorageTable.hash, hash)).get()
@@ -1263,7 +1265,13 @@ export function decodeSummary(db: TxOrDb, hash: string) {
   if (raw.byteLength !== payload.raw_bytes || digest("session-summary", raw) !== hash) {
     throw new CorruptionError({ message: "Session summary size or hash does not match", hash })
   }
-  return parseSummaryEnvelope(raw, hash)
+  const value = parseSummaryEnvelope(raw, hash)
+  // 完整读取和显式 verify 同时核对派生统计，不能让合法外形掩盖数值漂移。
+  if (payload.summary_stats != null &&
+    (!isSummaryPayload(payload.summary_stats) || canonical(summaryStats(value)) !== canonical(payload.summary_stats))) {
+    throw new CorruptionError({ message: "Session summary statistics do not match payload", hash })
+  }
+  return value
 }
 
 // Summary payload 与 Message/Part 共用 same-table 内容地址和 zstd frame，但 ref owner 是 Session。
@@ -1298,6 +1306,8 @@ export function retainSummaryPayload(db: TxOrDb, diffs: SummaryPayload, now: num
       kind: "session-summary",
       codec: "zstd",
       payload,
+      // 与正文同次入库，使新归档的首次统计读取也不需要解压。
+      summary_stats: summaryStats(diffs),
       raw_bytes: value.raw.byteLength,
       compressed_bytes: payload.byteLength,
       ref_count: 0,
@@ -1328,10 +1338,22 @@ export function releaseSummaryReference(db: TxOrDb, hash: string) {
   release(db, hash)
 }
 
-// rebuild 需要读取完整 aggregate 但不能持久 thaw；该公开 seam 只返回经 integrity gate 验证的 FileDiff。
-export function inspectSummary(db: TxOrDb, hash: string) {
+// 读取不解冻正文；statsOnly 消费同行投影，完整恢复仍交给 decodeSummary。
+export function inspectSummary(db: TxOrDb, hash: string, statsOnly = false) {
   requireReferenceMetadata(db, [hash], "session-summary")
-  return decodeSummary(db, hash)
+  if (!statsOnly) return decodeSummary(db, hash)
+  // 统计端点只取小投影，BLOB 不进入 SQLite 返回值或 JS 堆。
+  const stored = db.select({ stats: ColdStorageTable.summary_stats }).from(ColdStorageTable)
+    .where(eq(ColdStorageTable.hash, hash)).get()?.stats
+  if (stored != null) {
+    if (!isSummaryPayload(stored)) throw new CorruptionError({ message: "Session summary statistics are invalid", hash })
+    return stored
+  }
+  // 仅旧数据库缺少投影时完整验证一次；保留地址、引用计数和活动时间，不再重复恢复旧 patch。
+  const stats = summaryStats(decodeSummary(db, hash))
+  db.update(ColdStorageTable).set({ summary_stats: stats, time_updated: ColdStorageTable.time_updated })
+    .where(eq(ColdStorageTable.hash, hash)).run()
+  return stats
 }
 
 function expandSummaryReference(db: TxOrDb, sessionID: SessionID, hash: string) {

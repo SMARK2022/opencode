@@ -646,6 +646,8 @@ export const commit = Effect.fn("SummaryCache.commit")(function* (input: Prepare
 export const load = Effect.fn("SummaryCache.load")(function* (input: {
   sessionID: SessionID
   storage: Storage.Interface
+  // 展示端可只取统计，仍共用完整摘要的归属、游标和提交事务。
+  statsOnly?: boolean
 }) {
   // load 是读取 aggregate 的唯一公开入口，但读取可能需要原子推进 cursor 或建立首次 cache。
   // 同一 immediate transaction 内 prepare 与 commit，防止二者之间插入新的 Tool rows 造成漏计。
@@ -663,14 +665,15 @@ export const load = Effect.fn("SummaryCache.load")(function* (input: {
       (db) => {
         const prepared = prepareDeltaState(db, input, base)
         if (prepared.type === "unchanged") {
-          // unchanged 只推进 cursor 并 inspect 已验证 payload，不重写相同 compressed bytes。
+          // 只推进 cursor，并按调用方所需读取统计或完整值；命中缓存不再强制恢复 patch。
           advanceSummaryCursor(db, prepared)
-          return publicDiffs(ColdStorage.inspectSummary(db, prepared.previousRef))
+          return publicDiffs(ColdStorage.inspectSummary(db, prepared.previousRef, input.statsOnly))
         }
         // changed 先交换 DB authority，再把完整累计 diffs 返回而不暴露 delta。
-        commitSummary(db, prepared)
+        const ref = commitSummary(db, prepared)
         // 外部 mirror 只能在此 transaction 提交后由上层写出，不能先于 DB authority。
-        return prepared.diffs
+        // 写端已为新引用生成统计，展示请求直接消费它，不再从完整 diffs 重做裁剪。
+        return input.statsOnly ? publicDiffs(ColdStorage.inspectSummary(db, ref, true)) : prepared.diffs
       },
       { behavior: "immediate" },
     ),

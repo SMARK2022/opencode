@@ -19,7 +19,8 @@ import { Database } from "@opencode-ai/core/database/database"
 
 export interface Interface {
   readonly summarize: (input: { sessionID: SessionID; messageID: MessageID }) => Effect.Effect<void>
-  readonly diff: (input: { sessionID: SessionID; messageID?: MessageID }) => Effect.Effect<Snapshot.FileDiff[]>
+  // 投影选择传到存储 owner，调用方无需先读完整正文再丢弃。
+  readonly diff: (input: { sessionID: SessionID; messageID?: MessageID; statsOnly?: boolean }) => Effect.Effect<Snapshot.FileDiff[]>
   readonly computeDiff: (input: { messages: SessionV1.WithParts[] }) => Effect.Effect<Snapshot.FileDiff[]>
 }
 
@@ -89,7 +90,8 @@ const layer = Layer.effect(
       yield* events.publish(Session.Event.Diff, { sessionID: input.sessionID, diff: diffs })
     })
 
-    const diff = Effect.fn("SessionSummary.diff")(function* (input: { sessionID: SessionID; messageID?: MessageID }) {
+    // 指定 messageID 保持原回合读取；会话总览才按 statsOnly 选择聚合投影。
+    const diff = Effect.fn("SessionSummary.diff")(function* (input: { sessionID: SessionID; messageID?: MessageID; statsOnly?: boolean }) {
       if (input.messageID) {
         // 混合历史按 Message 身份选择持久 owner，精确回合不能退回整个会话的汇总。
         const native = yield* nativeMessages.message(SessionMessage.ID.make(input.messageID), input.sessionID)
@@ -101,13 +103,11 @@ const layer = Layer.effect(
         )
         return legacy?.info.role === "user" ? SummaryCache.normalizeDiffPaths(legacy.info.summary?.diffs ?? []) : []
       }
-      // #0500：DB 权威聚合经 SummaryCache 读取；路径归一化后同步镜像，用户清理后可重建。
-      const diffs = yield* SummaryCache.load({ sessionID: input.sessionID, storage }).pipe(
+      // 读取只消费 DB 权威聚合；镜像由摘要变更和撤回的写入端维护，避免每次查看重写全部 patch。
+      const diffs = yield* SummaryCache.load({ sessionID: input.sessionID, storage, statsOnly: input.statsOnly }).pipe(
         Effect.provideService(Database.Service, database),
       )
-      const next = SummaryCache.normalizeDiffPaths(diffs)
-      yield* storage.write(["session_diff", input.sessionID], next).pipe(Effect.ignore)
-      return next
+      return SummaryCache.normalizeDiffPaths(diffs)
     })
 
     return Service.of({ summarize, diff, computeDiff })

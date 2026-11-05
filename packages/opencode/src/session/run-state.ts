@@ -20,6 +20,8 @@ export interface Interface {
   readonly beginRevert: (sessionID: SessionID) => Effect.Effect<void, Session.BusyError>
   readonly endRevert: (sessionID: SessionID) => Effect.Effect<void>
   readonly cancel: (sessionID: SessionID) => Effect.Effect<void>
+  // 供取消入口筛选活动子树；身份来自现有执行登记，不读取历史消息。
+  readonly active: () => Effect.Effect<readonly string[]>
   readonly ensureRunning: (
     sessionID: SessionID,
     onInterrupt: Effect.Effect<SessionV1.WithParts>,
@@ -126,6 +128,18 @@ const layer = Layer.effect(
       data.reverting.delete(sessionID)
     })
 
+    const active = Effect.fn("SessionRunState.active")(function* () {
+      // 复用真实 runner 与后台作业登记，不为取消建立另一套会话状态。
+      const jobs = yield* background.list()
+      return [...new Set([
+        ...runners.keys(),
+        // 作业可直接以 Session ID 命名，也可通过 metadata 关联；归属最终由会话树查询筛选。
+        ...jobs.filter(job => job.status === "running")
+          .flatMap(job => [job.id, job.metadata?.sessionId, job.metadata?.parentSessionId])
+          .filter((id): id is string => typeof id === "string"),
+      ])]
+    })
+
     const cancel = Effect.fn("SessionRunState.cancel")(function* (sessionID: SessionID) {
       const data = yield* InstanceState.get(state)
       const existing = data.runners.get(sessionID)
@@ -214,7 +228,8 @@ const layer = Layer.effect(
         .pipe(Effect.catchTag("RunnerBusy", () => Effect.fail(busyError(sessionID))))
     })
 
-    return Service.of({ assertNotBusy, assertNotReverting, beginRevert, endRevert, cancel, ensureRunning, startExclusive, startShell })
+    // 暴露身份快照供上层收窄查询，取消与终态处理仍沿原有 runner/作业 owner 执行。
+    return Service.of({ assertNotBusy, assertNotReverting, beginRevert, endRevert, active, cancel, ensureRunning, startExclusive, startShell })
   }),
 )
 
