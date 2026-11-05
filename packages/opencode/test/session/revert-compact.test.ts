@@ -522,6 +522,46 @@ describe("revert + compact workflow", () => {
     ),
   )
 
+  it.live("RequestUsage preserves per-step micros and idempotence when terminal state changes", provideTmpdirInstance((dir) =>
+    Effect.gen(function* () {
+      const sessions = yield* Session.Service
+      const usage = yield* SessionRequestUsage.Service
+      const info = yield* sessions.create({})
+      const request = yield* user(info.id)
+      const first = yield* assistant(info.id, request.id, dir)
+      const second = yield* assistant(info.id, request.id, dir)
+      const parts = [first, second].map((message): MessageV2.StepFinishPart => ({
+        id: PartID.ascending(), sessionID: info.id, messageID: message.id, type: "step-finish", reason: "stop",
+        cost: 0.0000006, tokens: { input: 1, output: 2, reasoning: 3, cache: { read: 1, write: 1 } },
+      }))
+      // 两个 0.6 微美元的 step 分别取整后是 2 微美元，不能在桶聚合阶段重新取整。
+      for (const part of parts) yield* sessions.updatePart(part)
+      yield* usage.begin({ sessionID: info.id, requestID: request.id, source: "prompt", agent: "default",
+        providerID: first.providerID, modelID: first.modelID })
+      const aborted: MessageV2.Assistant = { ...first, time: { created: 1, completed: 300 },
+        error: { name: "MessageAbortedError", data: { message: "first error" } } }
+      yield* usage.recordAssistant({ sessionID: info.id, requestID: request.id, assistant: aborted })
+      yield* usage.recordAssistant({ sessionID: info.id, requestID: request.id, assistant: second })
+      // running 优先于已有错误；错误文本不能在 request 尚未结束时提前成为终态诊断。
+      expect(yield* usage.get({ sessionID: info.id, requestID: request.id })).toMatchObject({
+        cost: 0.000002, status: "running", assistantCount: 2, stepCount: 2,
+      })
+      yield* sessions.updatePart({ ...parts[0], cost: 0.0000026 })
+      yield* usage.recordAssistant({ sessionID: info.id, requestID: request.id, assistant: aborted })
+      const failed: MessageV2.Assistant = { ...second, time: { created: 2, completed: 400 },
+        error: { name: "APIError", data: { message: "second error", isRetryable: false } } }
+      yield* usage.recordAssistant({ sessionID: info.id, requestID: request.id, assistant: failed })
+      // terminal 再次覆盖同一 Assistant；不得把前一次 step-finish 已记的费用再加一遍。
+      yield* usage.recordAssistant({ sessionID: info.id, requestID: request.id, assistant: failed })
+      // error 的状态优先级不改变 first-truthy 错误选择，也不改变最大完成时间。
+      expect(yield* usage.get({ sessionID: info.id, requestID: request.id })).toMatchObject({
+        cost: 0.000004, status: "error", error: "first error", assistantCount: 2, stepCount: 2,
+        tokens: { input: 2, output: 4, reasoning: 6, cache: { read: 2, write: 2 }, total: 16 },
+        time: { completed: 400 },
+      })
+    }),
+  ))
+
   it.live(
     "cleanup is a no-op when session has no revert state",
     provideTmpdirInstance(

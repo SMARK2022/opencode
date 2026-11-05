@@ -167,6 +167,8 @@ import type {
   SessionRequestUsageListResponses,
   SessionRevertErrors,
   SessionRevertResponses,
+  SessionSearchScanErrors,
+  SessionSearchScanResponses,
   SessionShareErrors,
   SessionShareResponses,
   SessionShellErrors,
@@ -196,6 +198,8 @@ import type {
   ToolIdsResponses,
   ToolListErrors,
   ToolListResponses,
+  TuiAccountingErrors,
+  TuiAccountingResponses,
   TuiAppendPromptErrors,
   TuiAppendPromptResponses,
   TuiClearPromptResponses,
@@ -215,6 +219,8 @@ import type {
   TuiSelectSessionResponses,
   TuiShowToastResponses,
   TuiSubmitPromptResponses,
+  TuiVoiceTranscribeErrors,
+  TuiVoiceTranscribeResponses,
   V2ModelListResponses,
   V2ProviderGetErrors,
   V2ProviderGetResponses,
@@ -3160,6 +3166,70 @@ export class Goal extends HeyApiClient {
   }
 }
 
+export class Search extends HeyApiClient {
+  /**
+   * Progressive session search scan
+   *
+   * Scan the next candidate window in list universe order and return full searchCondition matches.
+   */
+  public scan<ThrowOnError extends boolean = false>(
+    parameters?: {
+      query_directory?: string
+      workspace?: string
+      search?: string
+      cursor?: {
+        time_updated: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+        id: string
+      }
+      batch?: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+      scope?: "project"
+      path?: string
+      roots?: boolean
+      start?: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+      body_directory?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            {
+              in: "query",
+              key: "query_directory",
+              map: "directory",
+            },
+            { in: "query", key: "workspace" },
+            { in: "body", key: "search" },
+            { in: "body", key: "cursor" },
+            { in: "body", key: "batch" },
+            { in: "body", key: "scope" },
+            { in: "body", key: "path" },
+            { in: "body", key: "roots" },
+            { in: "body", key: "start" },
+            {
+              in: "body",
+              key: "body_directory",
+              map: "directory",
+            },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).post<SessionSearchScanResponses, SessionSearchScanErrors, ThrowOnError>({
+      url: "/session/search/scan",
+      ...options,
+      ...params,
+      headers: {
+        "Content-Type": "application/json",
+        ...options?.headers,
+        ...params.headers,
+      },
+    })
+  }
+}
+
 export class Session2 extends HeyApiClient {
   /**
    * List sessions
@@ -3175,6 +3245,7 @@ export class Session2 extends HeyApiClient {
       roots?: boolean | "true" | "false"
       start?: number
       search?: string
+      searchMode?: "title" | "all"
       limit?: number
     },
     options?: Options<never, ThrowOnError>,
@@ -3191,6 +3262,7 @@ export class Session2 extends HeyApiClient {
             { in: "query", key: "roots" },
             { in: "query", key: "start" },
             { in: "query", key: "search" },
+            { in: "query", key: "searchMode" },
             { in: "query", key: "limit" },
           ],
         },
@@ -4207,6 +4279,11 @@ export class Session2 extends HeyApiClient {
   get goal2(): Goal {
     return (this._goal ??= new Goal({ client: this.client }))
   }
+
+  private _search?: Search
+  get search(): Search {
+    return (this._search ??= new Search({ client: this.client }))
+  }
 }
 
 export class Part extends HeyApiClient {
@@ -4845,6 +4922,39 @@ export class Control extends HeyApiClient {
 }
 
 export class Tui extends HeyApiClient {
+  public voiceTranscribe<ThrowOnError extends boolean = false>(
+    parameters?: {
+      directory?: string
+      workspace?: string
+      body?: Blob | File
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+            { key: "body", map: "body" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).post<TuiVoiceTranscribeResponses, TuiVoiceTranscribeErrors, ThrowOnError>({
+      bodySerializer: null,
+      url: "/tui/voice/transcribe",
+      ...options,
+      ...params,
+      headers: {
+        "Content-Type": "audio/wav",
+        ...options?.headers,
+        ...params.headers,
+      },
+    })
+  }
+
   /**
    * Append TUI prompt
    *
@@ -5249,6 +5359,47 @@ export class Tui extends HeyApiClient {
       url: "/tui/provider-endpoint-status",
       ...options,
       ...params,
+    })
+  }
+
+  /**
+   * Get off-page request accounting
+   *
+   * Read same-session numeric contributions outside the TUI message window.
+   */
+  public accounting<ThrowOnError extends boolean = false>(
+    parameters?: {
+      directory?: string
+      workspace?: string
+      sessionID?: string
+      requestIDs?: Array<string>
+      visibleMessageIDs?: Array<string>
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+            { in: "body", key: "sessionID" },
+            { in: "body", key: "requestIDs" },
+            { in: "body", key: "visibleMessageIDs" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).post<TuiAccountingResponses, TuiAccountingErrors, ThrowOnError>({
+      url: "/tui/accounting",
+      ...options,
+      ...params,
+      headers: {
+        "Content-Type": "application/json",
+        ...options?.headers,
+        ...params.headers,
+      },
     })
   }
 

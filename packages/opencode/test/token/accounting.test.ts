@@ -29,6 +29,20 @@ function stepFinishPart(messageID: string, input: number, output = 0, cacheRead 
 }
 
 describe("tokenAccounting", () => {
+  test("keeps default request totals when its user has left the visible window", () => {
+    const messages = Array.from({ length: 300 }, (_, index) => ({
+      ...assistantMsg(String(index + 2), "paged-user", index < 299 ? 1 : 0),
+      time: index < 299 ? { created: index + 2, completed: index + 3 } : { created: index + 2 },
+    }))
+    const parts = Object.fromEntries(messages.slice(0, -1).map((message) => [
+      message.id, [{ ...stepFinishPart(message.id, 1, 2), cost: 1 }],
+    ]))
+    // 299 个已完成步骤和一个流式步骤都属于同一 request；user 不在页内不代表归属未知。
+    const result = tokenAccounting(messages, (id) => parts[id] ?? [])
+    // 默认入口正是 prompt/sidebar 的调用方式，不以显式 parent 参数绕过身份选择。
+    expect(result.request).toMatchObject({ totalInputPure: 299, totalOutput: 598, cost: 299 })
+  })
+
   test("accumulates request totals across continuation steps even with a trailing orphan user", () => {
     // orphan user4 无 assistant 子节点（模拟 TaskTool 后台注入 noReply prompt 在父会话
     // busy 期间持久化的 user message）。活跃请求是 u1 的两个续轮 assistant(a1+a2)。

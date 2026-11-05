@@ -1,4 +1,6 @@
 import { TuiEvent } from "@/cli/cmd/tui/event"
+import { MessageV2 } from "@/session/message-v2"
+import { SessionID, MessageID } from "@/session/schema"
 import { TuiRequest as TuiRequestPayload } from "@/server/shared/tui-control"
 import { Schema } from "effect"
 import { HttpApi, HttpApiEndpoint, HttpApiError, HttpApiGroup, HttpApiMiddleware, HttpApiSchema, OpenApi } from "effect/unstable/httpapi"
@@ -46,6 +48,11 @@ export const ProviderEndpointStatusQuery = Schema.Struct({
   // 中间件识别 directory/workspace 参数，不破坏既有 TUI 路由行为。
   url: Schema.String,
 })
+export const AccountingPayload = Schema.Struct({
+  sessionID: SessionID,
+  requestIDs: Schema.Array(MessageID),
+  visibleMessageIDs: Schema.Array(MessageID),
+})
 export const ProviderEndpointStatus = Schema.Struct({
   url: Schema.String,
   // HTTP 响应只暴露 ok/down：首次探测由 handler 等待完成，TUI 自己保留本地
@@ -74,6 +81,7 @@ export const TuiPaths = {
   showToast: `${root}/show-toast`,
   publish: `${root}/publish`,
   selectSession: `${root}/select-session`,
+  accounting: `${root}/accounting`,
   providerEndpointStatus: `${root}/provider-endpoint-status`,
   voiceTranscribe: `${root}/voice/transcribe`,
   controlNext: `${root}/control/next`,
@@ -224,6 +232,16 @@ export const TuiApi = HttpApi.make("tui")
             description: "Return daemon-owned proxy route and latency for a provider endpoint origin.",
           }),
         ),
+        HttpApiEndpoint.post("accounting", TuiPaths.accounting, {
+          query: WorkspaceRoutingQuery,
+          payload: AccountingPayload,
+          success: MessageV2.RequestAccounting,
+          error: ApiNotFoundError,
+        }).annotateMerge(OpenApi.annotations({
+          identifier: "tui.accounting",
+          summary: "Get off-page request accounting",
+          description: "Read same-session numeric contributions outside the TUI message window.",
+        })),
         HttpApiEndpoint.get("controlNext", TuiPaths.controlNext, {
           query: WorkspaceRoutingQuery,
           success: described(TuiRequestPayload, "Next TUI request"),

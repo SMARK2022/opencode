@@ -8,7 +8,8 @@ import { SyncEvent } from "../sync"
 import { Database } from "@/storage/db"
 import { ColdStorage } from "@/storage/cold"
 import { NotFoundError } from "@/storage/storage"
-import { and, desc, eq, gt, gte, inArray, lt, lte, or, sql } from "drizzle-orm"
+import { and, desc, eq, gt, gte, inArray, lt, lte, notInArray, or, sql } from "drizzle-orm"
+import { measureMessage, type AccountingPrefix } from "@/token/accounting"
 import { MessageTable, PartTable, SessionTable } from "./session.sql"
 import * as ProviderError from "@/provider/error"
 import { iife } from "@/util/iife"
@@ -1821,32 +1822,25 @@ export const targetWithAssistantChildren = Effect.fn("MessageV2.targetWithAssist
   )
   // 封界行缺失是持久化一致性破坏：报错而不是回退全域或 raw-ID 过滤。
   if (!through) throw new Error(`Snapshot boundary is not resolvable: ${input.throughMessageID}`)
-  const rows = Database.use((db) =>
-    db
-      .select()
-      .from(MessageTable)
-      .where(
-        and(
-          eq(MessageTable.session_id, input.sessionID),
-          // target 和 children 同属普通摘要输入；隐藏 target 不能留下孤立的 children 结果。
-          sql`json_type(${MessageTable.data}, '$.hidden') is null`,
-          or(
-            lt(MessageTable.time_created, through.time),
-            and(eq(MessageTable.time_created, through.time), lte(MessageTable.id, through.id)),
-          ),
-          or(
-            eq(MessageTable.id, input.messageID),
-            and(
-              sql`json_extract(${MessageTable.data}, '$.role') = 'assistant'`,
-              sql`json_extract(${MessageTable.data}, '$.parentID') = ${input.messageID}`,
-            ),
-          ),
-        ),
-      )
-      .orderBy(MessageTable.time_created, MessageTable.id)
-      .all(),
-  )
-  if (!rows.some((row) => row.id === input.messageID)) return [] as WithParts[]
+  const rows = Database.use((db) => {
+    const conditions = [
+      eq(MessageTable.session_id, input.sessionID),
+      sql`json_type(${MessageTable.data}, '$.hidden') is null`,
+      sql`(${MessageTable.time_created}, ${MessageTable.id}) <= (${through.time}, ${through.id})`,
+    ]
+    // 主键 target 与 parent children 分开查询，各自使用索引；隐藏或界外 target 仍不返回孤立 children。
+    const target = db.select().from(MessageTable).where(and(...conditions, eq(MessageTable.id, input.messageID))).get()
+    if (!target) return []
+    const children = db.select().from(MessageTable).where(and(
+      ...conditions,
+      sql`json_extract(${MessageTable.data}, '$.role') = 'assistant'`,
+      sql`json_extract(${MessageTable.data}, '$.parentID') = ${input.messageID}`,
+    )).orderBy(MessageTable.time_created, MessageTable.id).all()
+    // 合并复刻原 OR 集合与 BINARY chronology，hydrate 的可见性及 cold owner 合同不变。
+    return [target, ...children.filter((row) => row.id !== target.id)].sort((a, b) =>
+      a.time_created - b.time_created || Buffer.compare(Buffer.from(a.id), Buffer.from(b.id)),
+    )
+  })
   return hydrate(rows)
 })
 
@@ -1945,6 +1939,63 @@ export function stepFinishParts(messageID: MessageID, options?: { includeHidden?
       .all(),
   )
   return rows.flatMap((row) => (row.data.type === "step-finish" ? [row.data] : []))
+}
+
+export const RequestAccounting = Schema.Record(Schema.String, Schema.Struct({
+  // 与原 tokens/cost 的有限数合同一致，SDK 不需要引入 Infinity/NaN 字符串联合。
+  input: Schema.Finite, inputPure: Schema.Finite, output: Schema.Finite, cost: Schema.Finite,
+}))
+
+export function requestAccounting(input: {
+  sessionID: SessionID
+  requestIDs: readonly MessageID[]
+  visibleMessageIDs: readonly MessageID[]
+}): AccountingPrefix {
+  return Object.fromEntries([...new Set(input.requestIDs)].flatMap((requestID) => Database.use((db) => {
+    // request 的 user 必须属于当前 Session 且可见；外部传入的另一个 Session 的 ID 不授予读取权。
+    // HTTP Schema 只证明 ID 的表示合法，持久归属仍必须由这里的查询证明。
+    const user = db.select({ id: MessageTable.id }).from(MessageTable).where(and(
+      eq(MessageTable.session_id, input.sessionID), eq(MessageTable.id, requestID),
+      sql`json_extract(${MessageTable.data}, '$.role') = 'user'`,
+      sql`json_type(${MessageTable.data}, '$.hidden') is null`,
+    )).get()
+    if (!user) return []
+    // 隐藏的 user 不得留下仅凭 parentID 可读取的累计，规则与普通 Message 可见性一致。
+    // 一个索引关联查询同时取得页外 Message 与 step-finish，避免为每个 Assistant 单独发 SQL。
+    // LEFT JOIN 保留没有 step-finish 的既有 Message.tokens；可见性条件不能把它变成 inner join。
+    const rows = db.select({ info: { id: MessageTable.id, data: MessageTable.data }, part: { id: PartTable.id, data: PartTable.data } })
+      .from(MessageTable).leftJoin(PartTable, and(
+        // Part 通过 Message 外键归属；已限定的 Message 范围同时限定该关联，沿用 message_id 索引。
+        eq(PartTable.message_id, MessageTable.id),
+        sql`json_extract(${PartTable.data}, '$.type') = 'step-finish'`,
+        sql`json_type(${PartTable.data}, '$.hidden') is null`,
+      )).where(and(
+      eq(MessageTable.session_id, input.sessionID),
+      sql`json_extract(${MessageTable.data}, '$.parentID') = ${requestID}`,
+      sql`json_extract(${MessageTable.data}, '$.role') = 'assistant'`,
+      sql`json_type(${MessageTable.data}, '$.hidden') is null`,
+      input.visibleMessageIDs.length ? notInArray(MessageTable.id, [...input.visibleMessageIDs]) : undefined,
+    )).orderBy(MessageTable.time_created, MessageTable.id, PartTable.id).all()
+    const messages = new Map<MessageID, { info: Parameters<typeof measureMessage>[0]; parts: ReturnType<typeof stepFinishParts> }>()
+    // 同一 Message 可有多个 finish；先成组再测量，避免每个关联行都重复使用一次 Message.tokens。
+    for (const row of rows) {
+      if (row.info.data.role !== "assistant") continue
+      const message = messages.get(row.info.id) ?? { info: { ...row.info.data, id: row.info.id }, parts: [] }
+      messages.set(row.info.id, message)
+      if (row.part?.data.type === "step-finish") message.parts.push(row.part.data)
+    }
+    const totals = [...messages.values()].flatMap((message) => measureMessage(message.info, message.parts).atoms).reduce((total, atom) => {
+      // 沿用 measure 的 confirmed/Message.tokens 选择，不在服务端重新定义费用或 token 公式。
+      total.input += atom.tokens.input + atom.tokens.cache.read + atom.tokens.cache.write
+      total.inputPure += atom.tokens.input
+      total.output += atom.tokens.output + atom.tokens.reasoning
+      total.cost += atom.cost
+      return total
+    }, { input: 0, inputPure: 0, output: 0, cost: 0 })
+    // 即使页外为空也返回该 request 的零基线，供 parent user 已滑出窗口时选择当前 request。
+    // 响应没有父 Session 来源字段；fork 的复制事实与普通 Session 沿用完全相同的读取路径。
+    return [[requestID, totals]]
+  })))
 }
 
 // doom-loop AND 窗口需要 cursor 之前、跨多个 visible assistant 的有界非 pending tool tail。

@@ -58,6 +58,7 @@ export type Event =
   | EventSessionCreated
   | EventSessionUpdated
   | EventSessionDeleted
+  | EventSessionForked
   | EventSessionNextAgentSwitched
   | EventSessionNextModelSwitched
   | EventSessionNextPrompted
@@ -1007,6 +1008,7 @@ export type GlobalEvent = {
     | EventSessionCreated
     | EventSessionUpdated
     | EventSessionDeleted
+    | EventSessionForked
     | EventSessionNextAgentSwitched
     | EventSessionNextModelSwitched
     | EventSessionNextPrompted
@@ -1041,6 +1043,7 @@ export type GlobalEvent = {
     | SyncEventSessionCreated
     | SyncEventSessionUpdated
     | SyncEventSessionDeleted
+    | SyncEventSessionForked
     | SyncEventSessionNextAgentSwitched
     | SyncEventSessionNextModelSwitched
     | SyncEventSessionNextPrompted
@@ -1118,12 +1121,13 @@ export type ApprovalsReviewer = "user" | "auto_review"
 export type AutoReviewConfig = {
   model?: string
   /**
-   * Per-attempt reviewer timeout in milliseconds. Total worst-case is 3x this value (one initial attempt plus two retries). Defaults to 90000.
+   * Per-attempt reviewer timeout in milliseconds. Total worst-case is 3x this value (one initial attempt plus two retries). Timeout retries append a time-budget advisory to the prompt. Defaults to 120000.
    */
   timeout_ms?: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
   policy_path?: string
   policy?: string
   fallback?: "deny" | "user"
+  effort?: string
   strict?: boolean
   /**
    * Circuit breaker consecutive denial threshold.
@@ -2100,6 +2104,10 @@ export type V2SessionMessagesResponse = {
   }
 }
 
+export type VoiceError = {
+  message: string
+}
+
 export type EventTuiPromptAppend2 = {
   type: "tui.prompt.append"
   properties: {
@@ -2195,6 +2203,7 @@ export type SyncEventMessageUpdated = {
   data: {
     sessionID: string
     info: Message
+    summaryOnly?: boolean
   }
 }
 
@@ -2318,6 +2327,26 @@ export type SyncEventSessionDeleted = {
   data: {
     sessionID: string
     info: Session
+  }
+}
+
+export type SyncEventSessionForked = {
+  type: "sync"
+  name: "session.forked.1"
+  id: string
+  seq: number
+  aggregateID: "sessionID"
+  data: {
+    sessionID: string
+    sourceSessionID: string
+    messageMap: Array<{
+      sourceID: string
+      targetID: string
+    }>
+    partMap: Array<{
+      sourceID: string
+      targetID: string
+    }>
   }
 }
 
@@ -2835,7 +2864,7 @@ export type EventPermissionReviewStarted = {
     permission: string
     patterns: Array<string>
     precheck: {
-      level: "safe" | "general" | "cautious" | "dangerous"
+      level: "safe" | "general" | "cautious" | "dangerous" | "forbidden"
       reason: string
     }
   }
@@ -3094,6 +3123,7 @@ export type EventMessageUpdated = {
   properties: {
     sessionID: string
     info: Message
+    summaryOnly?: boolean
   }
 }
 
@@ -3150,6 +3180,23 @@ export type EventSessionDeleted = {
   properties: {
     sessionID: string
     info: Session
+  }
+}
+
+export type EventSessionForked = {
+  id: string
+  type: "session.forked"
+  properties: {
+    sessionID: string
+    sourceSessionID: string
+    messageMap: Array<{
+      sourceID: string
+      targetID: string
+    }>
+    partMap: Array<{
+      sourceID: string
+      targetID: string
+    }>
   }
 }
 
@@ -5914,6 +5961,7 @@ export type SessionListData = {
     roots?: boolean | "true" | "false"
     start?: number
     search?: string
+    searchMode?: "title" | "all"
     limit?: number
   }
   url: "/session"
@@ -7148,6 +7196,53 @@ export type SessionPreviewResponses = {
 
 export type SessionPreviewResponse = SessionPreviewResponses[keyof SessionPreviewResponses]
 
+export type SessionSearchScanData = {
+  body?: {
+    search: string
+    cursor?: {
+      time_updated: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+      id: string
+    }
+    batch?: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+    scope?: "project"
+    path?: string
+    roots?: boolean
+    start?: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+    directory?: string
+  }
+  path?: never
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/session/search/scan"
+}
+
+export type SessionSearchScanErrors = {
+  /**
+   * Bad request
+   */
+  400: BadRequestError
+}
+
+export type SessionSearchScanError = SessionSearchScanErrors[keyof SessionSearchScanErrors]
+
+export type SessionSearchScanResponses = {
+  /**
+   * Progressive session search scan page
+   */
+  200: {
+    sessions: Array<Session>
+    nextCursor: {
+      time_updated: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+      id: string
+    }
+    done: boolean
+  }
+}
+
+export type SessionSearchScanResponse = SessionSearchScanResponses[keyof SessionSearchScanResponses]
+
 export type SyncStartData = {
   body?: never
   path?: never
@@ -7513,6 +7608,36 @@ export type V2ProviderGetResponses = {
 
 export type V2ProviderGetResponse = V2ProviderGetResponses[keyof V2ProviderGetResponses]
 
+export type TuiVoiceTranscribeData = {
+  body?: Blob | File
+  path?: never
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/tui/voice/transcribe"
+}
+
+export type TuiVoiceTranscribeErrors = {
+  /**
+   * VoiceError
+   */
+  502: VoiceError
+}
+
+export type TuiVoiceTranscribeError = TuiVoiceTranscribeErrors[keyof TuiVoiceTranscribeErrors]
+
+export type TuiVoiceTranscribeResponses = {
+  /**
+   * Success
+   */
+  200: {
+    text: string
+  }
+}
+
+export type TuiVoiceTranscribeResponse = TuiVoiceTranscribeResponses[keyof TuiVoiceTranscribeResponses]
+
 export type TuiAppendPromptData = {
   body?: {
     text: string
@@ -7814,6 +7939,45 @@ export type TuiProviderEndpointStatusResponses = {
 
 export type TuiProviderEndpointStatusResponse =
   TuiProviderEndpointStatusResponses[keyof TuiProviderEndpointStatusResponses]
+
+export type TuiAccountingData = {
+  body?: {
+    sessionID: string
+    requestIDs: Array<string>
+    visibleMessageIDs: Array<string>
+  }
+  path?: never
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/tui/accounting"
+}
+
+export type TuiAccountingErrors = {
+  /**
+   * NotFoundError
+   */
+  404: NotFoundError
+}
+
+export type TuiAccountingError = TuiAccountingErrors[keyof TuiAccountingErrors]
+
+export type TuiAccountingResponses = {
+  /**
+   * Success
+   */
+  200: {
+    [key: string]: {
+      input: number
+      inputPure: number
+      output: number
+      cost: number
+    }
+  }
+}
+
+export type TuiAccountingResponse = TuiAccountingResponses[keyof TuiAccountingResponses]
 
 export type TuiControlNextData = {
   body?: never

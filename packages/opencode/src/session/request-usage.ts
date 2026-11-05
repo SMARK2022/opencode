@@ -1,6 +1,6 @@
 import z from "zod"
 import { Context, Effect, Layer } from "effect"
-import { and, Database, desc, eq, lt } from "../storage"
+import { and, Database, desc, eq, lt, sql } from "../storage"
 import { MessageV2 } from "./message-v2"
 import { SessionID, MessageID } from "./schema"
 import { RequestUsageAssistantTable, RequestUsageTable } from "./request-usage.sql"
@@ -398,52 +398,36 @@ export const layer = Layer.effect(
               .run()
           }
 
-          const assistantRows = db
-            .select()
-            .from(RequestUsageAssistantTable)
-            .where(
-              and(
-                eq(RequestUsageAssistantTable.session_id, input.sessionID),
-                eq(RequestUsageAssistantTable.request_id, input.requestID),
-              ),
-            )
-            .all()
-
-          const aggregate = assistantRows.reduce(
-            (acc, row) => ({
-              assistantCount: acc.assistantCount + 1,
-              stepCount: acc.stepCount + row.step_count,
-              tokens: {
-                input: acc.tokens.input + row.tokens_input,
-                output: acc.tokens.output + row.tokens_output,
-                reasoning: acc.tokens.reasoning + row.tokens_reasoning,
-                cache: {
-                  read: acc.tokens.cache.read + row.tokens_cache_read,
-                  write: acc.tokens.cache.write + row.tokens_cache_write,
-                },
-                total: acc.tokens.total + row.tokens_total,
-              },
-              costMicros: acc.costMicros + row.cost_micros,
-              hasRunning: acc.hasRunning || row.status === "running",
-              hasError: acc.hasError || row.status === "error",
-              hasAborted: acc.hasAborted || row.status === "aborted",
-              completed: Math.max(acc.completed, row.time_completed ?? 0),
-              errorMessage: acc.errorMessage || row.error_message,
-            }),
-            {
-              assistantCount: 0,
-              stepCount: 0,
-              tokens: emptyTotals(),
-              costMicros: 0,
-              hasRunning: false,
-              hasError: false,
-              hasAborted: false,
-              completed: 0,
-              errorMessage: null as string | null,
-            },
+          const bucket = and(
+            eq(RequestUsageAssistantTable.session_id, input.sessionID),
+            eq(RequestUsageAssistantTable.request_id, input.requestID),
           )
+          // SQLite 只返回桶的数字归约，不把所有 Assistant 的模型、诊断等无关列搬入 JS。
+          // 无 GROUP BY 的聚合对空桶也返回一行，零值来自 SQL 聚合合同而非失败后的备用结果。
+          const aggregate = db.select({
+            assistantCount: sql<number>`count(*)`,
+            stepCount: sql<number>`coalesce(sum(${RequestUsageAssistantTable.step_count}), 0)`,
+            input: sql<number>`coalesce(sum(${RequestUsageAssistantTable.tokens_input}), 0)`,
+            output: sql<number>`coalesce(sum(${RequestUsageAssistantTable.tokens_output}), 0)`,
+            reasoning: sql<number>`coalesce(sum(${RequestUsageAssistantTable.tokens_reasoning}), 0)`,
+            cacheRead: sql<number>`coalesce(sum(${RequestUsageAssistantTable.tokens_cache_read}), 0)`,
+            cacheWrite: sql<number>`coalesce(sum(${RequestUsageAssistantTable.tokens_cache_write}), 0)`,
+            total: sql<number>`coalesce(sum(${RequestUsageAssistantTable.tokens_total}), 0)`,
+            // 保持已逐步取整的整数微美元，重复覆盖快照后重新求和不会重复计费。
+            costMicros: sql<number>`coalesce(sum(${RequestUsageAssistantTable.cost_micros}), 0)`,
+            hasRunning: sql<number>`coalesce(max(${RequestUsageAssistantTable.status} = 'running'), 0)`,
+            hasError: sql<number>`coalesce(max(${RequestUsageAssistantTable.status} = 'error'), 0)`,
+            hasAborted: sql<number>`coalesce(max(${RequestUsageAssistantTable.status} = 'aborted'), 0)`,
+            completed: sql<number>`coalesce(max(${RequestUsageAssistantTable.time_completed}), 0)`,
+          }).from(RequestUsageAssistantTable).where(bucket).all()[0]
+          // 错误文本仍按原查询的顺序做 first-truthy 折叠；不能以 min/max 或新排序改变诊断。
+          // 保留空串与 NULL 的区别，状态优先级也不改变错误文本的选择。
+          const error = db.select({ message: RequestUsageAssistantTable.error_message })
+            .from(RequestUsageAssistantTable).where(bucket).all()
+            .reduce<string | null>((value, row) => value || row.message, null)
 
           const requestStatus: Status = aggregate.hasRunning
+            // 保留原优先级：尚在运行的续轮使 request 保持 running，不由较早错误抢先结束。
             ? "running"
             : aggregate.hasError
               ? "error"
@@ -455,17 +439,17 @@ export const layer = Layer.effect(
             .set({
               assistant_count: aggregate.assistantCount,
               step_count: aggregate.stepCount,
-              tokens_input: aggregate.tokens.input,
-              tokens_output: aggregate.tokens.output,
-              tokens_reasoning: aggregate.tokens.reasoning,
-              tokens_cache_read: aggregate.tokens.cache.read,
-              tokens_cache_write: aggregate.tokens.cache.write,
-              tokens_total: aggregate.tokens.total,
+              tokens_input: aggregate.input,
+              tokens_output: aggregate.output,
+              tokens_reasoning: aggregate.reasoning,
+              tokens_cache_read: aggregate.cacheRead,
+              tokens_cache_write: aggregate.cacheWrite,
+              tokens_total: aggregate.total,
               cost_micros: aggregate.costMicros,
               status: requestStatus,
               time_updated: now,
               time_completed: requestStatus === "running" ? null : aggregate.completed || now,
-              error_message: requestStatus === "error" || requestStatus === "aborted" ? aggregate.errorMessage : null,
+              error_message: requestStatus === "error" || requestStatus === "aborted" ? error : null,
             })
             .where(requestWhere)
             .run()

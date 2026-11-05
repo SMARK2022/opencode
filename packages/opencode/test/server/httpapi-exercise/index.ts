@@ -1522,6 +1522,25 @@ const scenarios: Scenario[] = [
       "status",
     ),
   http.protected
+    .post("/tui/accounting", "tui.accounting")
+    // 使用既有 protected 场景，让 coverage、鉴权探针和正式 Effect 路径共同覆盖新端点。
+    .seeded((ctx) => Effect.gen(function* () {
+      const session = yield* ctx.session({ title: "TUI accounting" })
+      const request = yield* ctx.message(session.id)
+      return { sessionID: session.id, requestID: request.info.id }
+    }))
+    .at((ctx) => ({ path: "/tui/accounting", headers: ctx.headers(), body: {
+      sessionID: ctx.state.sessionID, requestIDs: [ctx.state.requestID], visibleMessageIDs: [],
+    } }))
+    .json(200, (body, ctx) => {
+      object(body)
+      const totals = body[ctx.state.requestID]
+      object(totals)
+      // 请求已持久化但尚无 Assistant，零累计必须由同 Session 事实产生，而非未注册路由的响应。
+      check(totals.input === 0 && totals.inputPure === 0 && totals.output === 0 && totals.cost === 0,
+        "new request should have zero off-page contributions")
+    }),
+  http.protected
     .post("/tui/control/response", "tui.control.response")
     .at((ctx) => ({ path: "/tui/control/response", headers: ctx.headers(), body: { ok: true } }))
     .json(200, boolean, "status"),

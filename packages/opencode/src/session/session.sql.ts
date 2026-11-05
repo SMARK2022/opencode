@@ -1,4 +1,5 @@
 import { sqliteTable, text, integer, index, primaryKey, real, blob } from "drizzle-orm/sqlite-core"
+import { sql } from "drizzle-orm"
 import { ProjectTable } from "../project/project.sql"
 import type { MessageV2 } from "./message-v2"
 import type { SessionMessage } from "@opencode-ai/core/session-message"
@@ -187,6 +188,10 @@ export const MessageTable = sqliteTable(
   },
   (table) => [
     index("message_session_time_created_id_idx").on(table.session_id, table.time_created, table.id),
+    // request 的 parent 选择与持久 chronology 由同一索引完成，不解码整个 Session。
+    index("message_session_parent_time_id_idx").on(
+      table.session_id, sql`json_extract(${table.data}, '$.parentID')`, table.time_created, table.id,
+    ),
     index("message_cold_ref_idx").on(table.cold_ref),
   ],
 )

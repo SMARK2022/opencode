@@ -1,6 +1,7 @@
 import { Bus } from "@/bus"
 import { TuiEvent } from "@/cli/cmd/tui/event"
 import { Session } from "@/session/session"
+import { MessageV2 } from "@/session/message-v2"
 import { getEndpointStatus } from "@/server/shared/tui-endpoint-status"
 import { Effect, FileSystem, Layer } from "effect"
 import { HttpIncomingMessage } from "effect/unstable/http"
@@ -13,7 +14,7 @@ import { resolveVoiceTarget, transcribeVoiceFile } from "@/server/shared/tui-con
 import { HttpApiBuilder, HttpApiError } from "effect/unstable/httpapi"
 import { nextTuiRequest, submitTuiResponse } from "@/server/shared/tui-control"
 import { InstanceHttpApi } from "../api"
-import { CommandPayload, ProviderEndpointStatusQuery, TuiPublishPayload, VoiceError, VoiceUpload } from "../groups/tui"
+import { AccountingPayload, CommandPayload, ProviderEndpointStatusQuery, TuiPublishPayload, VoiceError, VoiceUpload } from "../groups/tui"
 import * as SessionError from "./session-errors"
 
 const commandAliases = {
@@ -126,6 +127,12 @@ export const tuiHandlers = HttpApiBuilder.group(InstanceHttpApi, "tui", (handler
       return yield* Effect.promise(() => nextTuiRequest())
     })
 
+    const accounting = Effect.fn("TuiHttpApi.accounting")(function* (ctx: { payload: typeof AccountingPayload.Type }) {
+      // 复用 Session 的作用域与 not-found 映射，不在领域 owner 中引入 HTTP 错误类型。
+      yield* SessionError.mapStorageNotFound(session.get(ctx.payload.sessionID))
+      return MessageV2.requestAccounting(ctx.payload)
+    })
+
     const controlResponse = Effect.fn("TuiHttpApi.controlResponse")(function* (ctx: { payload: unknown }) {
       submitTuiResponse(ctx.payload)
       return true
@@ -177,6 +184,7 @@ export const tuiHandlers = HttpApiBuilder.group(InstanceHttpApi, "tui", (handler
       .handle("publish", publish)
       .handle("selectSession", selectSession)
       .handle("providerEndpointStatus", providerEndpointStatus)
+      .handle("accounting", accounting)
       .handle("controlNext", controlNext)
       .handle("controlResponse", controlResponse)
   }),

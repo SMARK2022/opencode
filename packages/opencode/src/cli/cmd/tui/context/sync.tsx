@@ -28,7 +28,7 @@ import { createSimpleContext } from "./helper"
 import type { Snapshot } from "@/snapshot"
 import { useExit } from "./exit"
 import { useArgs } from "./args"
-import { batch, createEffect, onCleanup, onMount } from "solid-js"
+import { batch, createEffect, createMemo, createRoot, createSignal, getOwner, mapArray, onCleanup, onMount, untrack, type Accessor, type Setter } from "solid-js"
 import * as Log from "@opencode-ai/core/util/log"
 import { emptyConsoleState, type ConsoleState } from "@/config/console-state"
 import { useKV } from "./kv"
@@ -40,6 +40,7 @@ import { SESSION_LIST_BROWSE_LIMIT, SESSION_LIST_LOOKBACK_MS } from "@tui/util/s
 import { aggregateFailures } from "./aggregate-failures"
 import { logPartDeltaTiming, partDeltaTimingKey, PART_DELTA_TIMING_LIMIT } from "./stream-timing"
 import { DisposedReason } from "@/server/event"
+import { measureMessage, summarizeAccounting, projectAccounting, type AccountingPrefix } from "@/token/accounting"
 
 // 同一私有 viewer 信号收窄 Message 与 diff；默认 SDK/Web App 请求不带它，完整合同不变。
 // 该常量只属于 TUI transport，不进入 OpenAPI query 或 generated SDK，避免把内部投影固化成公共 API。
@@ -192,6 +193,73 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
     const route = useRoute()
 
     const fullSyncedSessions = new Set<string>()
+    const accountingOwner = getOwner()
+    const accounting = new Map<string, {
+      read: Accessor<ReturnType<typeof summarizeAccounting>>
+      prefix: Accessor<AccountingPrefix>
+      setPrefix: Setter<AccountingPrefix>
+      revision: number
+      dispose: () => void
+    }>()
+    function readAccounting(sessionID: string) {
+      const current = accounting.get(sessionID)
+      if (current) return current
+      return untrack(() => createRoot((dispose) => {
+        const [prefix, setPrefix] = createSignal<AccountingPrefix>({})
+        // 基线只持有数字，正文仍由既有 store/partConsumers 管理，不能在共享 owner 中再留一份正文。
+        // owner 属于 Sync 而非首个 footer；其他消费者不受首个 footer 卸载影响。
+        const messages = mapArray(
+          () => store.message[sessionID] ?? [],
+          (message) => createMemo(() => measureMessage(message, store.part[message.id] ?? [])),
+        )
+        const value = {
+          dispose, prefix, setPrefix, revision: 0,
+          read: createMemo(() => summarizeAccounting(messages().map((read) => read()), prefix())),
+        }
+        accounting.set(sessionID, value)
+        // 页面先于控件加载完成时，首次消费仍需取得页外数字；正常初次 sync 负责另一种时序。
+        queueMicrotask(() => {
+          if (fullSyncedSessions.has(sessionID) && accounting.get(sessionID) === value) queueAccountingRefresh(sessionID)
+        })
+        return value
+      }, accountingOwner))
+    }
+    async function refreshAccounting(sessionID: string): Promise<void> {
+      const entry = accounting.get(sessionID)
+      if (!entry) return
+      const revision = ++entry.revision
+      // 这是当前 HTTP 读取的提交代际，不是独立计费状态；用量仍从相同事实完整重建。
+      const messages = store.message[sessionID] ?? []
+      const visibleMessageIDs = messages.map((message) => message.id)
+      const requestIDs = [...new Set(messages.flatMap((message) => message.role === "assistant" ? [message.parentID] : []))]
+      // 一次覆盖本页 request；同一 parent 的多个 footer 不会变成多次网络与数据库读取。
+      const prefix = requestIDs.length
+        ? (await sdk.client.tui.accounting({ sessionID, requestIDs, visibleMessageIDs }, { throwOnError: true })).data
+        : {}
+      // Session 释放/重建或更新请求都撤销旧响应的提交资格，不让迟到数字复活旧 owner。
+      if (accounting.get(sessionID) !== entry || revision !== entry.revision) return
+      const current = store.message[sessionID] ?? []
+      // HTTP 期间只允许正文变长；窗口身份改变后重新读取当前页基线，避免页内/页外重计。
+      // 不把文字签名放进这项判定，正常流式 delta 不应不断重启页外请求。
+      if (current.length !== visibleMessageIDs.length || current.some((message, index) => message.id !== visibleMessageIDs[index]))
+        return refreshAccounting(sessionID)
+      entry.setPrefix(prefix)
+    }
+    function queueAccountingRefresh(sessionID: string) {
+      if (!accounting.has(sessionID)) return
+      queueMicrotask(() => {
+        void refreshAccounting(sessionID).catch((error) => Log.Default.error("tui accounting refresh failed", { sessionID, error }))
+      })
+    }
+    function refreshOutsideAccounting(sessionID: string, messageID: string) {
+      // 可见正文的高频 delta 不请求服务端；仅已完成分页中看不到的事实修订使基线失效。
+      if (fullSyncedSessions.has(sessionID) && !(store.message[sessionID] ?? []).some((message) => message.id === messageID))
+        queueAccountingRefresh(sessionID)
+    }
+    function releaseAccounting(sessionID: string) {
+      accounting.get(sessionID)?.dispose()
+      accounting.delete(sessionID)
+    }
     // [正文消费计数] 只有当前 route、可见 Task 卡片与显式插件 acquisition 持有 Session 正文使用权。
     // 最后一个消费者离开时立即释放已持久终态正文；fullSyncedSessions 只是加载成功标记，不代表仍有人使用。
     const partConsumers = new Map<string, number>()
@@ -361,6 +429,8 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
     // 权限与问题桶保留（它们轻量且 sidebar/status 仍需要）。
     function releaseSessionParts(sessionID: string) {
       fullSyncedSessions.delete(sessionID)
+      // 与正文生命周期一起结束依赖树，不能让离开的 Session 继续测量或持有 Part。
+      releaseAccounting(sessionID)
       const completed = new Set(
         (store.message[sessionID] ?? [])
           .filter((message) => message.role !== "assistant" || message.time.completed !== undefined)
@@ -400,6 +470,7 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
     // Session 删除是显式边界：这里才允许按 sessionID 归属扫描全量 Part，正常 delta 路径保持 O(1)。
     function releaseSession(sessionID: string) {
       syncRequests.delete(sessionID)
+      releaseAccounting(sessionID)
       syncChanges.delete(sessionID)
       fullSyncedSessions.delete(sessionID)
       partConsumers.delete(sessionID)
@@ -1075,6 +1146,7 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
           const info = event.properties.info
           if (deletedSessionIDs.has(info.sessionID)) break
           if ((info as Record<string, unknown>).hidden) {
+            queueAccountingRefresh(info.sessionID)
             // hidden 是持久事实：记录失效 ID 后释放，迟到的 Part/delta 不得复活正文。
             removedMessageIDs.add(info.id)
             releaseMessage(info.sessionID, info.id, info)
@@ -1093,6 +1165,8 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
             })
           }
           const messages = store.message[info.sessionID]
+          if (messages?.length && searchMessage(messages, info).index === 0)
+            refreshOutsideAccounting(info.sessionID, info.id)
           if (!messages) {
             // 首条 SSE 会直接建立数组；先登记索引才能保证紧随其后的 ID-only remove 使用同一投影事实。
             indexMessage(info)
@@ -1117,6 +1191,20 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
           const updated = store.message[info.sessionID]
           if (updated.length > 300) {
             const oldest = updated[0]
+            const entry = accounting.get(info.sessionID)
+            if (entry && oldest.role === "assistant" && oldest.id !== info.id) {
+              const prefix = entry.prefix()
+              const totals = { ...(prefix[oldest.parentID] ?? { input: 0, inputPure: 0, output: 0, cost: 0 }) }
+              // 淘汰时在正文释放前转交其数字贡献；已在页外的旧事件不能重复转交。
+              for (const atom of measureMessage(oldest, store.part[oldest.id] ?? []).atoms) {
+                totals.input += atom.tokens.input + atom.tokens.cache.read + atom.tokens.cache.write
+                totals.inputPure += atom.tokens.input
+                totals.output += atom.tokens.output + atom.tokens.reasoning
+                totals.cost += atom.cost
+              }
+              // 窗口身份已有独立校验；不能同时作废请求代际，否则响应会跳过完整基线重取。
+              entry.setPrefix({ ...prefix, [oldest.parentID]: totals })
+            }
             // 300 条窗口删除 chronology 首项；索引必须在同一事件调用栈移除相同 Message。
             unindexMessage(oldest)
             // 窗口淘汰同时忘掉终态 ID 事实：淘汰后重新加载的 Part 需要能正常准入。
@@ -1140,6 +1228,7 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
           break
         }
         case "message.removed": {
+          refreshOutsideAccounting(event.properties.sessionID, event.properties.messageID)
           // ID-only event：即使本地从未加载父 Message，也要记录失效并清掉 orphan/pending delta。
           removedMessageIDs.add(event.properties.messageID)
           releaseMessage(event.properties.sessionID, event.properties.messageID)
@@ -1150,6 +1239,8 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
           // 幂等 TUI 投影：剪掉同 Part 逐字重复的大字段；生产 SSE 已在 daemon 侧投影，
           // 这里覆盖测试 transport 与直接 SDK 注入，重复应用无害。
           const part = PartView.project(event.properties.part)
+          // 页外累计只依赖 finish 事实，工具 progress/正文更新不制造远程重算。
+          if (part.type === "step-finish") refreshOutsideAccounting(part.sessionID, part.messageID)
           if ((part as Record<string, unknown>).hidden) {
             removedPartIDs.add(part.id)
             dropBufferedDeltas((event) => event.properties.partID === part.id)
@@ -1214,6 +1305,7 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
         }
 
         case "message.part.removed": {
+          refreshOutsideAccounting(event.properties.sessionID, event.properties.messageID)
           removedPartIDs.add(event.properties.partID)
           // lambda 参数会遮蔽 switch 作用域的 event；先取常量再比较，避免恒真谓词清空全部会话的缓冲 delta。
           const removedPartID = event.properties.partID
@@ -1259,6 +1351,8 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
       removedPartIDs.clear()
       syncRequests.clear()
       syncChanges.clear()
+      for (const entry of accounting.values()) entry.dispose()
+      accounting.clear()
       partConsumers.clear()
       releasedTerminalParts.clear()
     })
@@ -1387,6 +1481,9 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
         return project.instance.path()
       },
       session: {
+        accounting(sessionID: string, contextLimit?: number, requestID?: string) {
+          return projectAccounting(readAccounting(sessionID).read(), contextLimit, requestID)
+        },
         get(sessionID: string) {
           const match = Binary.search(store.session, sessionID, (s) => s.id)
           if (match.found) return store.session[match.index]
@@ -1507,6 +1604,9 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
             if (!pageFailed) {
               const finalMessages = store.message[sessionID] ?? []
               messageByID.set(sessionID, new Map(finalMessages.map((message) => [message.id, message])))
+              await refreshAccounting(sessionID)
+              // 新增的 HTTP await 同样受现有 sync token 约束，离开后不能继续回填状态或重放正文。
+              if (!alive()) return
             }
             setStore("session_status", reconcile(status.data ?? {}))
             // session.sync 从 DB 创建/更新 parts 后，replay 在 parts 到达前缓冲的 delta。

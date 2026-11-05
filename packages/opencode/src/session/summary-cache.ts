@@ -1,6 +1,6 @@
 import { Effect, Schema } from "effect"
 import path from "path"
-import { and, asc, desc, eq, gt, isNull, lte, or, sql, type SQL } from "drizzle-orm"
+import { and, asc, desc, eq, isNull, sql, type SQL } from "drizzle-orm"
 import { Database, type TxOrDb } from "@/storage/db"
 import { ColdStorage, type SummaryPayload } from "@/storage/cold"
 import { InstanceState } from "@/effect/instance-state"
@@ -45,18 +45,13 @@ function resolveMessageCursor(db: TxOrDb, sessionID: SessionID, id: string): Mes
 
 // 开区间增量：只取严格晚于 cursor 的行，避免每次 load 重复累计同一 patch。
 function afterCursor(cursor: MessageCursor) {
-  return or(
-    gt(MessageTable.time_created, cursor.time),
-    and(eq(MessageTable.time_created, cursor.time), gt(MessageTable.id, cursor.id)),
-  )
+  // 行值比较保留时间/BINARY ID 的边界，同时让复合索引完成范围 seek。
+  return sql`(${MessageTable.time_created}, ${MessageTable.id}) > (${cursor.time}, ${cursor.id})`
 }
 
 // 闭区间上界：同毫秒时用 SQLite BINARY 的 ID 序，不能把同时间整段都纳入。
 function throughCursor(cursor: MessageCursor) {
-  return or(
-    sql`${MessageTable.time_created} < ${cursor.time}`,
-    and(eq(MessageTable.time_created, cursor.time), lte(MessageTable.id, cursor.id)),
-  )
+  return sql`(${MessageTable.time_created}, ${MessageTable.id}) <= (${cursor.time}, ${cursor.id})`
 }
 
 // 空字符串是无 closed Message 的合法 sentinel，恒早于任何具体行；
@@ -270,16 +265,14 @@ function loadToolDiffMessages(db: TxOrDb, sessionID: SessionID, after?: string, 
     sql`json_extract(${PartTable.data}, '$.state.status') = 'completed'`,
     sql`json_type(${PartTable.data}, '$.hidden') is null`,
   ]
-  // Part 归属以已选 Message 集合为准：回绕后 message_id 与 cursor 无共同排序，
-  // 不能用 id 范围二次过滤。
-  const selectedMessageIDs = new Set(messages.map((row) => row.id))
-  const parts = db
-    .select()
-    .from(PartTable)
-    .where(and(...partConditions))
-    .orderBy(asc(PartTable.message_id), asc(PartTable.id))
-    .all()
-    .filter((row) => selectedMessageIDs.has(row.message_id))
+  // 在生产入口按 Message 点查；无增量时不读取任何历史 Part。
+  // chronology 仍由 messages 决定，每条 Message 内仍按 Part ID 拼接，不能用 cursor 比较 Part ID。
+  const parts = messages.flatMap((message) =>
+    db.select().from(PartTable)
+      .where(and(...partConditions, eq(PartTable.message_id, message.id)))
+      .orderBy(asc(PartTable.id))
+      .all(),
+  )
   // inspect 只在内存恢复 metadata，不持久 thaw compacted head。
   const restored = ColdStorage.inspectPartRows(db, parts)
   // 最小消息形状只服务 collectToolDiffs，禁止借此读取 Text 或 provider context。

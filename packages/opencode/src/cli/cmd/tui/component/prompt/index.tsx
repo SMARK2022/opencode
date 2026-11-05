@@ -40,7 +40,6 @@ import type { AssistantMessage, FilePart, UserMessage } from "@opencode-ai/sdk/v
 import { TuiEvent } from "../../event"
 import { iife } from "@/util/iife"
 import { Locale } from "@/util/locale"
-import { tokenAccounting } from "@/token/accounting"
 import { formatDuration } from "@/util/format"
 import { createColors, createFrames } from "../../ui/spinner.ts"
 import { useDialog } from "@tui/ui/dialog"
@@ -50,7 +49,7 @@ import { useToast } from "../../ui/toast"
 import { useKV } from "../../context/kv"
 // [local-smark] Token flow pulse and throttled signal for usage display
 import { createFadeIn, createRefreshClock, createThrottledSignal, createTokenFlowPulse } from "../../util/signal"
-import { activeTurnDuration, activeTurnPair } from "../../util/session-pending"
+import { activeTurnDuration } from "../../util/session-pending"
 import { DialogSkill } from "../dialog-skill"
 import {
   confirmWorkspaceFileChanges,
@@ -388,18 +387,14 @@ export function Prompt(props: PromptProps) {
     const isRunning = status().type !== "idle"
     const session = sync.session.get(props.sessionID)
     const msg = sync.data.message[props.sessionID] ?? []
-    const getParts = (id: string) => sync.data.part[id] ?? []
 
-    // 以活跃轮次对解析当前 assistant，跳过尚未派生 assistant 的 queued orphan user，
-    // 避免 footer usage 在后台任务注入 orphan user 期间归零（旧逻辑按 lastUser.id
-    // 反查 assistant 找不到时直接 return undefined）。
-    const pair = activeTurnPair(msg)
-    if (!pair?.assistant) return
-    const last = pair.assistant
+    // 模型来自最新 assistant；request 归属由共享 accounting 判定，parent user 滑出分页也不丢统计。
+    const last = msg.findLast((message) => message.role === "assistant")
+    if (!last) return
 
     const model = sync.data.provider.find((item) => item.id === last.providerID)?.models[last.modelID]
     // [local-smark] Detailed token accounting
-    const acc = tokenAccounting(msg, getParts, model?.limit.context)
+    const acc = sync.session.accounting(props.sessionID, model?.limit.context)
     const stepTotal = acc.step.input + acc.step.output
     const requestTotal = acc.request.totalInput + acc.request.totalOutput
 

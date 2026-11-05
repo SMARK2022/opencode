@@ -7,9 +7,7 @@ import { DialogAlert } from "@tui/ui/dialog-alert"
 import { SplitBorder } from "@tui/component/border"
 import { Locale } from "@/util/locale"
 import { formatDuration } from "@/util/format"
-import { tokenAccounting } from "@/token/accounting"
 import { createRefreshClock, createThrottledSignal, createTokenFlowPulse } from "../../util/signal"
-import { activeTurnPair } from "../../util/session-pending"
 import { useCommandPalette } from "../../context/command-palette"
 import { useCommandShortcut } from "../../keymap"
 
@@ -64,17 +62,14 @@ export function SubagentFooter() {
   const usageRaw = createMemo((): UsageInfo | undefined => {
     const isRunning = (status()?.type ?? "idle") !== "idle"
     const msg = messages()
-    const getParts = (id: string) => sync.data.part[id] ?? []
 
-    // 以活跃轮次对解析当前 assistant，跳过尚未派生 assistant 的 queued orphan user，
-    // 避免 subagent footer usage 在 orphan 窗口期归零。
-    const pair = activeTurnPair(msg)
-    if (!pair?.assistant) return
-    const last = pair.assistant
+    // 子 Session 仍只读取自己的最新 assistant；parent user 是否在窗口内不决定统计是否存在。
+    const last = msg.findLast((message) => message.role === "assistant")
+    if (!last) return
 
     const model = sync.data.provider.find((item) => item.id === last.providerID)?.models[last.modelID]
     // [local-smark] token accounting for detailed usage tracking
-    const acc = tokenAccounting(msg, getParts, model?.limit.context)
+    const acc = sync.session.accounting(route.sessionID, model?.limit.context)
     const stepTotal = acc.step.input + acc.step.output
     const requestTotal = acc.request.totalInput + acc.request.totalOutput
 

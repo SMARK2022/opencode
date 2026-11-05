@@ -2251,14 +2251,9 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
   })
   const turnUsage = createMemo(() => {
     if (!footerVisible()) return ""
-    const usage = tokenAccounting(
-      messages(),
-      (id) => sync.data.part[id] ?? [],
-      undefined,
-      props.message.parentID,
-    ).request
+    const usage = sync.session.accounting(props.message.sessionID, undefined, props.message.parentID).request
     // 完成 footer 只记录当前 parent 的永久口径，不读取 prompt/sidebar 的 cache-inclusive total。
-    // 只在 footerVisible 后计算，避免未完成或不可见的 assistant 为视口中的每条消息重算统计。
+    // 所有 footer 共用 Session 的贡献，只在这里选择 parent 与格式化，不再各自校准整个窗口。
     // parentID 是 queued/coalesced turn 的归属边界，不能改用全局 latest assistant。
     // formatter 返回空字符串时，Show 不会人为添加 Stats 0 或 cost 0。
     return formatUsageStats({ input: usage.totalInputPure, output: usage.totalOutput, cost: usage.cost })

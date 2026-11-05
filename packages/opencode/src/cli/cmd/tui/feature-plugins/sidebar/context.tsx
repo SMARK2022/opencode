@@ -5,8 +5,7 @@ import type { InternalTuiPlugin } from "../../plugin/internal"
 import { createEffect, createMemo, createSignal, on, onCleanup } from "solid-js"
 import { leadingAndTrailing, throttle } from "@solid-primitives/scheduled"
 import { createTokenFlowPulse } from "../../util/signal"
-import { activeTurnPair } from "../../util/session-pending"
-import { tokenAccounting } from "@/token/accounting"
+import { useSync } from "@tui/context/sync"
 import { Locale } from "@/util/locale"
 import { useLocal } from "@tui/context/local"
 import { useSDK } from "@tui/context/sdk"
@@ -23,6 +22,7 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
   const theme = () => props.api.theme.current
   const local = useLocal()
   const sdk = useSDK()
+  const sync = useSync()
   const msg = createMemo(() => props.api.state.session.messages(props.session_id))
   // [local-smark] Detailed token accounting state
   const isRunning = createMemo(() => (props.api.state.session.status(props.session_id)?.type ?? "idle") !== "idle")
@@ -40,17 +40,13 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
 
   const stateRaw = createMemo((): StateValue => {
     const messages = msg()
-    const getParts = (id: string) => props.api.state.part(id)
 
-    // 以活跃轮次对解析当前 assistant，跳过尚未派生 assistant 的 queued orphan user，
-    // 避免 sidebar context 在 orphan 窗口期显示全 0（旧逻辑找不到匹配 assistant 时
-    // 直接 return 全 0 对象）。
-    const pair = activeTurnPair(messages)
-    if (!pair?.assistant) return { tokens: 0, totalTokens: 0, input: 0, output: 0, totalInput: 0, totalOutput: 0, percent: null, cost: 0 }
-    const last = pair.assistant
+    // 不把 parent user 的分页可见性当作统计门禁，queued orphan 也不会替换最新 assistant。
+    const last = messages.findLast((message) => message.role === "assistant")
+    if (!last) return { tokens: 0, totalTokens: 0, input: 0, output: 0, totalInput: 0, totalOutput: 0, percent: null, cost: 0 }
 
     const model = props.api.state.provider.find((item) => item.id === last.providerID)?.models[last.modelID]
-    const acc = tokenAccounting(messages, getParts, model?.limit.context)
+    const acc = sync.session.accounting(props.session_id, model?.limit.context)
 
     return {
       tokens: acc.step.input + acc.step.output,

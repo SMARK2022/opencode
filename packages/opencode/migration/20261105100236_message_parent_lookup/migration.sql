@@ -1,0 +1,1 @@
+CREATE INDEX `message_session_parent_time_id_idx` ON `message` (`session_id`,json_extract("data", '$.parentID'),`time_created`,`id`);
