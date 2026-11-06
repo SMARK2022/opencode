@@ -340,7 +340,7 @@ describe("tokenAccounting", () => {
     expect(acc.ratio.output).toBe(8)
     expect(acc.step).toMatchObject({ input: 777, output: 20 })
     expect(acc.request).toEqual({ input: 777, output: 20, totalInput: 4777, totalInputPure: 0, totalOutput: 320, cost: 2 })
-    expect(acc.session).toEqual({ input: 9000, output: 700, reasoning: 30, cacheRead: 100, cacheWrite: 20, cost: 3 })
+    expect(acc.session).toEqual({ input: 9777, output: 720, reasoning: 30, cacheRead: 100, cacheWrite: 20, cost: 3 })
     const native = { ...history, tokens: { input: 400, output: 80, reasoning: 20, cache: { read: 0, write: 0 } } }
     const calibrated = tokenAccounting([native, last], (id) => id === "old" ? parts.old.slice(0, 1) : parts.a,
       undefined, { session: { tokens, request }, last, parts: parts.a })
@@ -381,7 +381,7 @@ describe("tokenAccounting", () => {
           { id: "ss", type: "step-start", inputTokens: 100_000, inputChars: 400_000 },
           sf(100_000, 0, 0, 0, 0, 400_000),
         ] as any[],
-        confirmed: false,
+        confirmed: true,
       },
       {
         // 场景四：completed 落库——步骤转入 confirmed 历史，不改变 request 总计
@@ -426,7 +426,8 @@ describe("tokenAccounting", () => {
       ...assistantMsg("2", "1", { input: 10, output: 20, reasoning: 5, cache: { read: 2, write: 3 } }, 10),
       cost: 0.5,
     }
-    const acc = tokenAccounting([userMsg("1"), msg] as any, () => [])
+    // 同一已保存正文不能在 message.tokens 的25之外再增加2。
+    const acc = tokenAccounting([userMsg("1"), msg], () => [{ type: "text", text: "abcdefgh" }])
 
     expect(acc.step.input).toBe(15)
     expect(acc.request.totalInput).toBe(15)
@@ -439,14 +440,31 @@ describe("tokenAccounting", () => {
     // updatePart(step-finish) 与 updateMessage(tokens) 是两个独立同步事件；
     // UI 可能短暂看到「已确认 provider usage + assistant 仍带旧上传估算」。
     // 该窗口内已确认 step-finish 值是权威值，估算与实际值的差不是 pending context。
-    const msg = assistantMsg("2", "1", { input: 120, output: 0, reasoning: 0, cache: { read: 0, write: 0 } })
-    const acc = tokenAccounting([userMsg("1"), msg] as any, () => [
-      { id: "ss", type: "step-start", inputTokens: 120, inputChars: 480 },
-      sf2(100, 0, 0, 0, 0, 400),
-    ])
+    const msg = {
+      ...assistantMsg("2", "1", { input: 120, output: 0, reasoning: 0, cache: { read: 0, write: 0 } }),
+      inputEstimate: { input: 120, bodyChars: 480, confirmed: false },
+    }
+    const parts: Part[] = [
+      { id: "ss", sessionID: "s", messageID: msg.id, type: "step-start", inputTokens: 120, inputChars: 480 },
+      { id: "text", sessionID: "s", messageID: msg.id, type: "text", text: "abcdefgh" },
+      { ...sf2(100, 10, 0, 0, 0, 480), sessionID: "s", messageID: msg.id, reason: "stop", cost: 0 },
+    ]
+    const acc = tokenAccounting([userMsg("1"), msg], () => parts)
 
-    expect(acc.step.input).toBe(120)
-    expect(acc.request.totalInput).toBe(100)
+    // 完成记录已经确认100/10，即使消息仍保留120/2估算，也只能显示100/10。
+    expect(acc.step).toEqual({ input: 100, output: 10, confirmed: true })
+    expect(acc.request).toMatchObject({ input: 100, output: 10, totalInput: 100, totalOutput: 10 })
+    for (const totals of [
+      { input: 0, output: 0, stepInput: 0, stepOutput: 0 },
+      { input: 100, output: 10, stepInput: 100, stepOutput: 10 },
+    ]) {
+      const request = { messageID: "1", assistantID: "2", cost: 0, estimatedInput: 120, inputEstimate: msg.inputEstimate, ...totals }
+      const value = tokenAccounting([userMsg("1"), msg], () => parts, undefined, {
+        session: { request }, last: { id: msg.id }, parts,
+      })
+      // 累计更新前后使用各自同一份步骤基数，不能扣掉另一路刚到的确认数。
+      expect(value.request).toMatchObject({ input: 100, output: 10, totalInput: 100, totalOutput: 10 })
+    }
   })
 
   function sf2(input: number, output = 0, reasoning = 0, cacheRead = 0, cacheWrite = 0, inputChars?: number) {

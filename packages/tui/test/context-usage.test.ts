@@ -1165,7 +1165,7 @@ describe("context usage", () => {
     // 不对称本地权重要求按比例分摊且保住服务端总额，逐项独立舍入可能在明细中制造或丢失余数。
     expect(native.details.instructions).toEqual([{ path: "a", tokens: 167 }, { path: "b", tokens: 333 }])
     expect(native.details.toolDefs).toEqual([{ name: "a", tokens: 833 }, { name: "b", tokens: 1667 }])
-    expect(native.details.usage.total).toBe(0)
+    expect(native.details.usage.total).toBe(17000)
     expect(native.maxTokens).toBe(8000)
     expect(native.model).toBe("test/api-model")
     // 字典仍有20000窗口，冻结预算零若被当成缺失值就会错误借用该 Catalog 上限。

@@ -48,6 +48,36 @@ test("request and boundary projections stay within indexed ranges", () => {
   expect(plan.filter(row => /SEARCH p USING INDEX part_message_id_id_idx/.test(row.detail)).length).toBeGreaterThanOrEqual(2)
   // a 只是存在性探针；真正读取助手集合的 m 也必须同时按 Session 和 parentID 点查。
   expect(plan.some(row => row.detail.includes("SEARCH m USING INDEX message_session_parent_time_created_id_idx (session_id=? AND <expr>=?)"))).toBe(true)
+  // 在同一真实投影上改变生命周期，prepared 数值仍应可读；不是为测试复制 SQL 选择规则。
+  const message = db.query("INSERT INTO message (id, session_id, time_created, data) VALUES (?, ?, ?, ?)")
+  message.run("u", "ses_projection_plan", 1, JSON.stringify({ role: "user" }))
+  message.run("a", "ses_projection_plan", 2, JSON.stringify({
+    role: "assistant", parentID: "u", time: { created: 2 },
+    inputEstimate: { input: 777, bodyChars: 3108, confirmed: false },
+  }))
+  const estimate = () => db.query<{ estimate: number | null }, string[]>(
+    `SELECT json_extract(${query.sql}, '$.estimatedInput') AS estimate`,
+  ).get(...query.params.map(String))
+  expect(estimate()).toEqual({ estimate: 777 })
+  db.exec("UPDATE message SET data = json_set(data, '$.time.completed', 3) WHERE id = 'a'")
+  expect(estimate()).toEqual({ estimate: 777 })
+  // 零报告与已有估算取最大值，不能把777输入估算清除。
+  db.query("INSERT INTO part (id, session_id, message_id, data) VALUES (?, ?, ?, ?)").run(
+    "finish", "ses_projection_plan", "a", JSON.stringify({
+      type: "step-finish", tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+    }),
+  )
+  // 零记录及完成消息均保留已有估算，直到出现非零用量。
+  expect(estimate()).toEqual({ estimate: 777 })
+  db.exec("UPDATE message SET data = json_set(data, '$.inputEstimate.confirmed', json('true')) WHERE id = 'a'")
+  expect(estimate()).toEqual({ estimate: 777 })
+  // 执行历史中的子调用不属于下一次模型请求，不能把末步 1000/10 遮成 pending。
+  db.exec("UPDATE part SET data = json_set(data, '$.tokens.input', 1000, '$.tokens.output', 10) WHERE id = 'finish'")
+  expect(estimate()).toEqual({ estimate: null })
+  db.query("INSERT INTO part (id, session_id, message_id, data) VALUES (?, ?, ?, ?)").run(
+    "z-child", "ses_projection_plan", "a", JSON.stringify({ type: "tool", metadata: { executeParent: "call" } }),
+  )
+  expect(db.query<{ input: number }, string[]>(`SELECT json_extract(${query.sql}, '$.stepInput') AS input`).get(...query.params.map(String))).toEqual({ input: 1000 })
   // 解释真实边界读取器发出的查询，不在测试中复制其业务筛选逻辑。
   const boundaryPlan: string[] = []
   CompactionBoundary.latest(drizzle({ client: db, logger: {

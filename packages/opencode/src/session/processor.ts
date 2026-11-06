@@ -838,7 +838,7 @@ const layer = Layer.effect(
             ctx.assistantMessage.tokens = usage.tokens
             // 只有本 step 的实际确认能把请求体样本标记为可校准。
             if (ctx.assistantMessage.inputEstimate)
-              ctx.assistantMessage.inputEstimate.confirmed = true
+              ctx.assistantMessage.inputEstimate.confirmed = value.usage !== undefined
             yield* session.updatePart({
               id: PartID.ascending(),
               reason: value.reason,

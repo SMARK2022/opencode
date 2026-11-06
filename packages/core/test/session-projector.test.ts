@@ -993,13 +993,12 @@ describe("SessionProjector", () => {
       yield* events.publish(SessionV1.Event.MessageUpdated, { sessionID, info: { ...next,
         inputEstimate: { input: 777, bodyChars: 3108, confirmed: false } } })
       expect((yield* sessions.get(sessionID)).request).toMatchObject({ input: 42, output: 12, estimatedInput: 777 })
-      // fixture 后续零 step-finish 必须直接遮掉 provisional input，不能等待完成时间。
-      // 零 step-finish 是确认边界，不得因为累计仍非零就保留上一轮估算。
+      // 零报告不覆盖已有777估算；非零确认数仍正常关闭估算。
       yield* events.publish(SessionV1.Event.PartUpdated, { sessionID, part: { ...finish, id: SessionV1.PartID.ascending(), messageID: next.id, tokens: next.tokens },
         time: 12 })
       expect((yield* sessions.get(sessionID)).request).toMatchObject({ input: 42, output: 12, stepInput: 0, stepOutput: 0 })
       expect((yield* sessions.get(sessionID)).request?.pendingInput).toBeUndefined()
-      expect((yield* sessions.get(sessionID)).request?.estimatedInput).toBeUndefined()
+      expect((yield* sessions.get(sessionID)).request?.estimatedInput).toBe(777)
       // completed=0 同样是终态；展示输入不能恢复到先前非零上下文。
       yield* events.publish(SessionV1.Event.MessageUpdated, { sessionID, info: { ...next, time: { created: 12, completed: 0 } } })
       expect((yield* sessions.get(sessionID)).request?.pendingInput).toBeUndefined()

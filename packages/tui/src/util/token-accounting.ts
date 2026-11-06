@@ -4,7 +4,7 @@
 
 import { AttachmentToken } from "@opencode-ai/core/util/attachment-token"
 import type { AssistantMessage, Part, Session } from "@opencode-ai/sdk/v2"
-import { computeFinalTokens, estimateDataUrlInputTokens } from "./token-estimate"
+import { computeFinalTokens, measureOutput, measureTail, modelParts, type TokenPart } from "./token-estimate"
 
 // #122：缺校准样本时默认 4 字符约 1 token
 const DEFAULT_RATIO = 4
@@ -24,7 +24,7 @@ export type TokenAccounting = {
     input: number
     output: number
     totalInput: number
-    // #490：纯 input 永久记录口径（不含 cache）；totalInput 保持 cache-inclusive 实时口径
+    // 消息底部上传数不含缓存命中的历史输入；输入框附近的窗口用量仍读取包含缓存的 totalInput。
     totalInputPure: number
     totalOutput: number
     cost: number
@@ -73,271 +73,237 @@ type Msg = {
   inputEstimate?: AssistantMessage["inputEstimate"]
 }
 
-type Pt = { id?: string; type: string; [key: string]: any }
+type Projection = {
+  session: Pick<Session, "tokens" | "cost" | "request"> | undefined
+  last: AssistantMessage | Pick<AssistantMessage, "id"> | undefined
+  parts: ReadonlyArray<Part>
+}
+
+export type RequestTotals = { input: number; inputPure: number; output: number; cost: number }
+const emptyRequest = (): RequestTotals => ({ input: 0, inputPure: 0, output: 0, cost: 0 })
+
+const shared = new WeakMap<NonNullable<Projection["session"]>, () => ReturnType<typeof summarizeAccounting>>()
+
+// 旧视图已传入同一个 Session 对象，只绑定原 owner 的数字 accessor，不复制贡献或正文。
+export function shareAccounting(session: NonNullable<Projection["session"]>, read: () => ReturnType<typeof summarizeAccounting>) {
+  shared.set(session, read)
+  // Session 移除或 Sync 销毁就解绑，旧视图不能再次唤起已卸载的 owner。
+  return () => shared.delete(session)
+}
 
 // ─── 主函数 ──────────────────────────────────────────────────────────────────
 
 // #122：一次遍历汇总 step/request/session，确认优先于估算
 export function tokenAccounting(
   messages: ReadonlyArray<Msg>,
-  getParts: (id: string) => ReadonlyArray<Pt>,
+  getParts: (id: string) => ReadonlyArray<TokenPart>,
   contextLimit?: number,
-  projection?: { session: Pick<Session, "tokens" | "cost" | "request"> | undefined; last: AssistantMessage | undefined; parts: ReadonlyArray<Part> },
+  projection?: Projection,
   // #490：显式历史 request 选择器——只改变 request projection 的 parent，不改变 session 全量遍历
   requestUserID?: string,
 ): TokenAccounting {
-  // #122：会话累计与当前 request 边界（按 user 消息切分）
-// ── 1. lastUser / requestAssistantIDs ──
-  // 以最新 assistant 的 parentID 锁定当前活跃 user，跳过尚未派生 assistant 的 queued user
-  // （例如 TaskTool 后台注入 noReply prompt 在父会话 busy 期间落库的 orphan）。
-  // 无 assistant（首次 prompt 空窗）时仍取最新 user，保留原 fail-closed 语义。
-  // 不变量：成对场景下 latestAssistantForUser.parentID === latestUser.id，与旧
-  // findLast(role==="user") 完全等价，不改变任何既有行为。
-  // 数据异常边界：若 assistant.parentID 在 messages 中找不到对应 user（理论不应发生，
-  // assistant 创建时 parentID 来自 lastUser.id），lastUser 为 undefined → requestAssistantIDs
-  // 为空 → confirmedRequest 归零，比旧逻辑回退到无关 user 更安全（fail-closed）。
-  const latestAssistantForUser = messages.findLast((m) => m.role === "assistant")
-  const lastUser = latestAssistantForUser
-    ? messages.findLast((m) => m.role === "user" && m.id === latestAssistantForUser.parentID)
-    : messages.findLast((m) => m.role === "user")
-  // #490：selected latest 与 requestAssistantIDs 必须由同一个 parent 派生，不能各自猜测。
-  // 历史 request 必须把 latest assistant、parts 和后续 in-flight 判断绑定到同一 parent；
-  // 否则另一个正在流式的 parent 会把当前永久记录污染成全局 latest 的结果。
-  const selectedRequestUserID = requestUserID ?? lastUser?.id
-  const latestRequestAssistant = selectedRequestUserID
-    ? messages.findLast((m) => m.role === "assistant" && m.parentID === selectedRequestUserID)
-    : undefined
-  const requestAssistantIDs = new Set<string>()
-  if (selectedRequestUserID) {
-    for (const m of messages) {
-      if (m.role === "assistant" && m.parentID === selectedRequestUserID) requestAssistantIDs.add(m.id)
+  const read = projection?.session && shared.get(projection.session)
+  const summary = read?.() ?? summarizeAccounting(messages.map((message) =>
+    measureMessage(message, message.role === "assistant" ? getParts(message.id) : [])))
+  return projectAccounting(summary, contextLimit, projection, requestUserID)
+}
+
+// 沿旧性能提交的 Message 边界测量。只返回数字与步骤元数据，不把正文留在共享 owner。
+export function measureMessage(message: Msg, allParts: ReadonlyArray<TokenPart>) {
+  const parts = modelParts(allParts)
+  // 在测量时读取响应式字段，后续汇总不再订阅原消息或因视图数量重复访问正文。
+  const info = {
+    id: message.id,
+    role: message.role,
+    parentID: message.parentID,
+    cost: message.cost,
+    tokens: message.tokens ? { ...message.tokens, cache: { ...message.tokens.cache } } : undefined,
+    time: message.time ? { ...message.time } : undefined,
+    inputEstimate: message.inputEstimate ? { ...message.inputEstimate } : undefined,
+  }
+  // 校准、尾部和分类复用同次字符测量，尤其避免重复序列化工具参数。
+  const chars = parts.map(measureOutput)
+  const tail = measureTail(info.role === "assistant" ? info : undefined, parts, chars)
+  const atoms: { tokens: NonNullable<Msg["tokens"]>; cost: number }[] = []
+  let inputChars = 0
+  let inputTokens = 0
+  let outputChars = 0
+  let outputTokens = 0
+  for (let i = 0; i < parts.length; i++) {
+    const part = parts[i]
+    if (part.type !== "step-finish") continue
+    // 每个 finish 的顺序保留，不能先改变浮点费用的累加顺序。
+    atoms.push({ tokens: { ...part.tokens, cache: { ...part.tokens.cache } }, cost: part.cost ?? 0 })
+    const start = parts.slice(0, i).findLastIndex((item) => item.type === "step-start")
+    const stepChars = chars.slice(start + 1, i).reduce((sum, value) => sum + value, 0)
+    const input = part.tokens.input + part.tokens.cache.read + part.tokens.cache.write
+    const output = part.tokens.output + part.tokens.reasoning
+    const bd = part.inputBreakdown
+    // 媒体固定 token 不进入文本密度，沿用原有样本门槛和 2..8 钳位。
+    if (part.inputChars !== undefined && part.inputChars >= 100 && input > 0 && (!bd?.messages.attachments || bd.media)) {
+      inputChars += bd?.media ? Math.max(0, part.inputChars - bd.media.rawChars + bd.media.textChars) : part.inputChars
+      inputTokens += Math.max(0, input - (bd?.media?.tokens ?? 0))
+    }
+    if (output > 0 && stepChars > 0) {
+      // 只有生成侧的已报告输出能训练输出密度，输入校准不能混进该样本。
+      outputChars += stepChars
+      outputTokens += output
     }
   }
-  // #490：requestUserID 只改变 request projection 的选择，不改变 session projection 的全量遍历。
-  // 默认调用方（prompt/sidebar/context）语义零变化：latestAssistantForRequest 即全局 latest。
-  const latestAssistantForRequest = requestUserID ? latestRequestAssistant : latestAssistantForUser
-  // 历史 parent 不借当前 durable request；Session 汇总仍保留原 projection。
-  const requestProjection = requestUserID ? undefined : projection
+  const hasFinish = atoms.length > 0
+  if (info.role === "assistant" && !hasFinish && info.tokens) {
+    // 已发布的无 finish 消息仍保留原 tokens/cost 合同，不把估算伪装成费用。
+    atoms.push({ tokens: info.tokens, cost: info.cost ?? 0 })
+    const output = info.tokens.output + info.tokens.reasoning
+    if (info.time?.completed !== undefined && output > 0) {
+      outputChars += chars.reduce((sum, value) => sum + value, 0)
+      outputTokens += output
+    }
+  }
+  const sf = tail.lastStepFinish?.type === "step-finish" ? tail.lastStepFinish : undefined
+  const ssIdx = parts.findLastIndex((part) => part.type === "step-start" && !!part.inputBreakdown)
+  const ss = parts[ssIdx]
+  const estimate = info.inputEstimate
+  const pending = estimate?.inputBreakdown
+    ? { type: "pending" as const, inputChars: estimate.bodyChars, inputTokens: estimate.input, inputBreakdown: estimate.inputBreakdown }
+    : undefined
+  // 本次输入还未确认时，用准备这次请求时保存的分类，避免显示前一次调用的输入分类。
+  const source = pending && estimate?.confirmed === false
+    ? pending
+    : sf?.inputBreakdown && tail.lastSFIdx > ssIdx ? sf
+    : ss?.type === "step-start" && ss.inputBreakdown ? ss : pending
+  const cursor = estimate?.afterPartID
+  // 已确认分类只取其步骤内的生成片段；下一轮准备后只看游标以后的新内容。
+  const begin = source?.type === "step-finish"
+    ? parts.slice(0, tail.lastSFIdx).findLastIndex((part) => part.type === "step-start")
+    : Math.max(ssIdx, estimate?.confirmed === false ? -1 : tail.lastSFIdx, cursor ? parts.findLastIndex((part) => (part.id ?? "") <= cursor) : -1)
+  const end = source?.type === "step-finish" ? tail.lastSFIdx : parts.length
+  const live = { text: 0, reasoning: 0, tools: 0 }
+  let attachmentTokens = 0
+  for (let i = 0; i < parts.length; i++) {
+    const part = parts[i]
+    if (i > begin && i < end) {
+      if (part.type === "text") live.text += chars[i]
+      if (part.type === "reasoning") live.reasoning += chars[i]
+      if (part.type === "tool") live.tools += chars[i]
+    }
+    if (i <= tail.lastSFIdx || part.type !== "tool" || part.state.status !== "completed") continue
+    if (estimate && (part.id ?? "") <= (estimate.afterPartID ?? "")) continue
+    // 工具回执中的媒体按既有固定 token 规则计入输入，不用正文密度解释二进制载荷。
+    for (const attachment of part.state.attachments ?? []) attachmentTokens += AttachmentToken.estimateAttachment(attachment).tokens
+  }
+  return { info, atoms, hasFinish, tail, inputChars, inputTokens, outputChars, outputTokens, source, live, attachmentTokens }
+}
 
-  // ── 2. 一次遍历 ──
+const emptyMessage = measureMessage({ id: "", role: "none" }, [])
+
+export function summarizeAccounting(items: ReadonlyArray<ReturnType<typeof measureMessage>>) {
+  const latest = items.findLast((item) => item.info.role === "assistant")
+  const byID = new Map(items.map((item) => [item.info.id, item]))
+  const latestByRequest = new Map<string, typeof emptyMessage>()
+  // 按真实 parent 归属保留末助手，排队但尚无回复的 user 不接管当前请求。
+  for (const item of items) if (item.info.role === "assistant" && item.info.parentID) latestByRequest.set(item.info.parentID, item)
+  const requests = new Map<string, RequestTotals>()
   const session = { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, cost: 0 }
-  const confirmedRequest = { input: 0, inputPure: 0, output: 0, cost: 0 }
-  // #122：用于校准 input 字符/token 比的累计样本
-  let ratioChars = 0
-  let ratioTokens = 0
-  let outputCharsTotal = 0
-  // #122：输出侧确认 token 样本
-  let outputTokensTotal = 0
-  // #122：按消息遍历，user 边界切 request，assistant 累加 session/request
-  for (const msg of messages) {
-    if (msg.role !== "assistant") continue
-    const parts = getParts(msg.id)
-    const isRequest = requestAssistantIDs.has(msg.id)
-    // #122：本 assistant 是否已出现 step-finish
-  let msgHasFinish = false
-
-    for (let i = 0; i < parts.length; i++) {
-      const p = parts[i]
-      // #122：step-finish 是 provider 确认边界
-      if (p.type !== "step-finish") continue
-      msgHasFinish = true
-
-      session.input += p.tokens.input
-      session.output += p.tokens.output
-      session.reasoning += p.tokens.reasoning
-      session.cacheRead += p.tokens.cache.read
-      session.cacheWrite += p.tokens.cache.write
-      session.cost += p.cost ?? 0
-
-      if (isRequest) {
-        confirmedRequest.input += p.tokens.input + p.tokens.cache.read + p.tokens.cache.write
-        // #490：纯 input 是永久记录口径；cache 仍只进入既有实时 totalInput，避免改变 prompt/sidebar 的含义。
-        // 这里不把 cache 合并进 pure projection，保证完成记录和用户要求的 input 口径一致。
-        confirmedRequest.inputPure += p.tokens.input
-        confirmedRequest.output += p.tokens.output + p.tokens.reasoning
-        confirmedRequest.cost += p.cost ?? 0
-      }
-
-      // input ratio 校准
-      const chars = p.inputChars as number | undefined
-      if (chars && chars >= 100) {
-        const tok = p.tokens.input + p.tokens.cache.read + p.tokens.cache.write
-        if (tok > 0) {
-          const bd = p.inputBreakdown as { messages?: { attachments?: number }; media?: { rawChars: number; textChars: number; tokens: number } } | undefined
-          // #175：校准剔除 media.raw，加回 text 占位
-          // #194：旧附件样本排除，已知媒体量从确认分母扣除，不能稀释文本密度。
-          if (bd?.media || !bd?.messages?.attachments) {
-            ratioChars += bd?.media ? Math.max(0, chars - bd.media.rawChars + bd.media.textChars) : chars
-            ratioTokens += Math.max(0, tok - (bd?.media?.tokens ?? 0))
-          }
-        }
-      }
-
-      // output ratio 校准
-      const confirmedOut = p.tokens.output + p.tokens.reasoning
-      if (confirmedOut > 0) {
-        let stepChars = 0
-        const startIdx = parts.slice(0, i).findLastIndex((x) => x.type === "step-start")
-        for (let j = (startIdx >= 0 ? startIdx + 1 : 0); j < i; j++) {
-          const sp = parts[j]
-          if (sp.type === "text" && !sp.ignored) stepChars += (sp.text?.length ?? 0)
-          if (sp.type === "reasoning") stepChars += (sp.text?.length ?? 0)
-          if (sp.type === "tool") {
-            stepChars += sp.state?.status === "pending"
-              ? (sp.state.raw?.length ?? 0)
-              : JSON.stringify(sp.state?.input ?? {}).length
-          }
-        }
-        if (stepChars > 0) { outputCharsTotal += stepChars; outputTokensTotal += confirmedOut }
-      }
-    }
-
-    // 无 step-finish → message.tokens fallback
-    if (!msgHasFinish && msg.tokens) {
-      session.input += msg.tokens.input
-      session.output += msg.tokens.output
-      session.reasoning += msg.tokens.reasoning
-      session.cacheRead += msg.tokens.cache.read
-      session.cacheWrite += msg.tokens.cache.write
-      session.cost += msg.cost ?? 0
-      if (isRequest) {
-        // 当前 user 请求的最新 assistant 消息在 message.tokens 上携带预流式
-        // 上传估算，让 prompt/侧栏在回车后立即显示 input。该值属于当前步骤
-        // 而非已完成历史步骤，因此 request 总计不得在此处计入后又作为
-        // stepInput 重复统计。output 与 cost 保持在 fallback 路径：上传估算
-        // 回归只影响 input，且无 step-finish parts 的历史消息仍需保留总计。
-        if (msg.id !== latestRequestAssistant?.id)
-          confirmedRequest.input += msg.tokens.input + msg.tokens.cache.read + msg.tokens.cache.write
-        // #490：默认 active request 保留去重规则（Enter 后的预估不能累计两次）；
-        // 显式历史 request 没有当前预估语义，其 message.tokens.input 即永久 pure input。
-        if (msg.id !== latestRequestAssistant?.id || requestUserID) confirmedRequest.inputPure += msg.tokens.input
-        confirmedRequest.output += msg.tokens.output + msg.tokens.reasoning
-        confirmedRequest.cost += msg.cost ?? 0
-      }
-      // native 消息没有 V1 finish part 时，已完成消息的真实输出仍可校准输出密度。
-      const confirmedOut = msg.tokens.output + msg.tokens.reasoning
-      if (msg.time?.completed !== undefined && confirmedOut > 0) {
-        const stepChars = parts.reduce((sum, p) => {
-          if ((p.type === "text" && !p.ignored) || p.type === "reasoning") return sum + (p.text?.length ?? 0)
-          if (p.type === "tool") return sum + (p.state?.status === "pending"
-            ? (p.state.raw?.length ?? 0)
-            : JSON.stringify(p.state?.input ?? {}).length)
-          return sum
-        }, 0)
-        if (stepChars > 0) { outputCharsTotal += stepChars; outputTokensTotal += confirmedOut }
-      }
+  let inputChars = 0
+  let inputTokens = 0
+  let outputChars = 0
+  let outputTokens = 0
+  // 汇总只访问贡献数字。每个请求和每个视图共用这次校准，不重读历史 Part。
+  for (const item of items) {
+    if (item.info.role !== "assistant") continue
+    inputChars += item.inputChars
+    inputTokens += item.inputTokens
+    outputChars += item.outputChars
+    outputTokens += item.outputTokens
+    const request = item.info.parentID ? requests.get(item.info.parentID) ?? emptyRequest() : undefined
+    if (request && item.info.parentID) requests.set(item.info.parentID, request)
+    for (const atom of item.atoms) {
+      session.input += atom.tokens.input
+      session.output += atom.tokens.output
+      session.reasoning += atom.tokens.reasoning
+      session.cacheRead += atom.tokens.cache.read
+      session.cacheWrite += atom.tokens.cache.write
+      session.cost += atom.cost
+      if (!request) continue
+      // 当前无 finish 的输入可能仍是旧式准备值，留给尾部选择，避免累计同一估算两次。
+      if (item.hasFinish || item.tail.tokens || latestByRequest.get(item.info.parentID ?? "") !== item)
+        request.input += atom.tokens.input + atom.tokens.cache.read + atom.tokens.cache.write
+      request.inputPure += atom.tokens.input
+      request.output += atom.tokens.output + atom.tokens.reasoning
+      request.cost += atom.cost
     }
   }
-
-  // ── 3. ratio ──
-  // #194：clamp 2..8——与 TokenEstimate.learnInputCharsPerToken 同口径，防极端样本失真
-  // #194：TUI 不能直接 import TokenEstimate（包边界），但 ratio 逻辑与 daemon 对齐
-  const density = requestProjection?.session?.request?.inputEstimate?.charsPerToken
-  const inputRatio = density !== undefined && Number.isFinite(density) && density > 0 ? density : ratioTokens > 0 && ratioChars > 500 ? Math.min(8, Math.max(2, ratioChars / ratioTokens)) : DEFAULT_RATIO
-  // #122：输出字符/token 比；样本不足回落 DEFAULT_RATIO
-  const outputRatio = outputTokensTotal > 0 && outputCharsTotal > 100 ? outputCharsTotal / outputTokensTotal : DEFAULT_RATIO
-  // 持久投影拥有完整请求确认值；输入密度与输出校准分别进入既有尾部 helper。
-  const projected = requestProjection?.session?.request
-    ? computeFinalTokens(requestProjection.last, requestProjection.parts, requestProjection.session.request, outputRatio)
-    : undefined
-
-  // ── 4. step（基于 latest assistant）───────────────────────────────
-  // 当前投影或显式历史 parent 唯一决定尾部，保留上游分页选择与零确认语义。
-  const latestAssistant = requestProjection ? requestProjection.last : latestAssistantForRequest
-  const lastParts: ReadonlyArray<Pt> = requestProjection ? requestProjection.parts : latestAssistant ? getParts(latestAssistant.id) : []
-  // #122：最后一个 step-finish 划分已确认区与流式追加区
-  const sfIdx = lastParts.findLastIndex((p) => p.type === "step-finish")
-  const stepSF = sfIdx >= 0 ? lastParts[sfIdx] : undefined
-  // #122：消息 completed 才把 step-finish 当最终确认
-  const msgCompleted = latestAssistant?.time?.completed !== undefined
-
-  let stepInput: number
-  let stepConfirmed: boolean
-  // #122：完成消息用 step-finish 全量 tokens 作为 step input
-  if (stepSF && msgCompleted) {
-    stepInput = stepSF.tokens.input + stepSF.tokens.cache.read + stepSF.tokens.cache.write
-    stepConfirmed = true
-  // #122：流式中 step-finish 可能存在但仍需叠加未确认输出
-  } else if (stepSF && !msgCompleted) {
-    // #122：流式进行中：step-finish 存在但消息未 completed
-    stepInput = latestAssistant?.tokens
-      ? latestAssistant.tokens.input + latestAssistant.tokens.cache.read + latestAssistant.tokens.cache.write
-      : stepSF.tokens.input + stepSF.tokens.cache.read + stepSF.tokens.cache.write
-    stepConfirmed = false
-  } else {
-    stepInput = latestAssistant?.tokens
-      ? latestAssistant.tokens.input + latestAssistant.tokens.cache.read + latestAssistant.tokens.cache.write
-      : 0
-    stepConfirmed = false
+  // 保留旧样本门槛；少量短输出不重新校准整个会话的显示，输入仍按原范围钳位。
+  const inputRatio = inputTokens > 0 && inputChars > 500 ? Math.min(8, Math.max(2, inputChars / inputTokens)) : DEFAULT_RATIO
+  const outputRatio = outputTokens > 0 && outputChars > 100 ? outputChars / outputTokens : DEFAULT_RATIO
+  // 按真实 parent 汇集各助手的未结算差额，切换助手不等于结算上一助手。
+  const pending = new Map<string, { input: number; output: number }>()
+  const tails = new Map<string, { input: number; output: number }>()
+  for (const item of items) {
+    if (item.info.role !== "assistant" || !item.info.parentID) continue
+    const value = pending.get(item.info.parentID) ?? { input: 0, output: 0 }
+    pending.set(item.info.parentID, value)
+    // 本地基数与已计入的步骤用同一份数字，不能伪造零累计再扣掉真实确认数。
+    const stepInput = item.tail.tokens ? item.tail.tokens.input + item.tail.tokens.cache.read + item.tail.tokens.cache.write : 0
+    const stepOutput = item.tail.tokens ? item.tail.tokens.output + item.tail.tokens.reasoning : 0
+    const projected = computeFinalTokens(undefined, [], {
+      messageID: item.info.parentID, input: stepInput, output: stepOutput, cost: 0,
+      stepInput, stepOutput,
+      inputEstimate: item.tail.inputEstimate,
+    }, outputRatio, item.tail, inputRatio)
+    const extra = { input: projected.totalInput - stepInput, output: projected.totalOutput - stepOutput }
+    value.input += extra.input
+    value.output += extra.output
+    tails.set(item.info.id, extra)
   }
+  const unsettled = [...pending.values()].reduce((sum, value) => ({ input: sum.input + value.input, output: sum.output + value.output }), { input: 0, output: 0 })
+  return { items, byID, latest, latestByRequest, requests, session, inputRatio, outputRatio, pending, tails, unsettled }
+}
 
-  let stepOutput: number
-  if (stepSF && msgCompleted) {
-    stepOutput = stepSF.tokens.output + stepSF.tokens.reasoning
-  } else {
-    let outChars = 0
-    for (let i = sfIdx + 1; i < lastParts.length; i++) {
-      const p = lastParts[i]
-      if (p.type === "text" && !p.ignored) outChars += (p.text?.length ?? 0)
-      if (p.type === "reasoning") outChars += (p.text?.length ?? 0)
-      if (p.type === "tool") {
-        outChars += p.state?.status === "pending"
-          ? (p.state.raw?.length ?? 0)
-          : JSON.stringify(p.state?.input ?? {}).length
-      }
-    }
-    stepOutput = Math.round(outChars / outputRatio)
+export function projectAccounting(
+  summary: ReturnType<typeof summarizeAccounting>,
+  contextLimit?: number,
+  projection?: Projection,
+  requestUserID?: string,
+  confirmed?: RequestTotals,
+): TokenAccounting {
+  // 显式历史请求不借当前 Session.request，避免把别轮实时估算带进永久记录。
+  const active = requestUserID ? undefined : projection?.session?.request
+  const selected = requestUserID ?? active?.messageID ?? summary.latest?.info.parentID
+  // 服务端指定助手但正文尚未加载时保持该边界，不能借另一个旧助手的报告填空。
+  const item = (active ? active.assistantID ? summary.byID.get(active.assistantID) : undefined
+    : requestUserID ? summary.latestByRequest.get(requestUserID)
+    : projection ? projection.last ? summary.byID.get(projection.last.id) : undefined : summary.latest) ?? emptyMessage
+  // footer 的资源覆盖完整确认前缀，优先于只包含当前可见页的本地确认贡献。
+  const values = confirmed ?? (selected ? summary.requests.get(selected) : undefined) ?? emptyRequest()
+  const tokens = item.tail.tokens ?? item.info.tokens
+  const legacy = !item.hasFinish && !item.info.inputEstimate && !item.tail.tokens
+  const request = {
+    ...(active ?? {
+      messageID: selected ?? "",
+      // 旧账本已含这条消息保存的输入估算，先移出同一份值，再由统一估算入口计入一次。
+      input: values.input - (confirmed && legacy && tokens ? tokens.input + tokens.cache.read + tokens.cache.write : 0),
+      output: values.output, cost: values.cost,
+      stepInput: tokens ? tokens.input + tokens.cache.read + tokens.cache.write : 0,
+      stepOutput: tokens ? tokens.output + tokens.reasoning : 0,
+      inputEstimate: item.info.inputEstimate,
+    }),
+    // 旧消息保存的输入估算也用于 Session 入口，不能因传入投影就丢掉 step-start 或 tokens 的已有值。
+    estimatedInput: active?.estimatedInput ?? (legacy && tokens ? item.tail.start?.type === "step-start" && item.tail.start.inputTokens !== undefined
+      ? item.tail.start.inputTokens : tokens.input + tokens.cache.read + tokens.cache.write : undefined
+    ),
   }
-
-  // ── 5. pending input（step-finish 之后的 tool result）───────────
-  // #122：流式中 completed 工具输出将进入下一轮 input
-  let pendingToolResultChars = 0
-  // #122：流式未完成时附件 data URL 估算计入下一步 input
-  let pendingAttachTokens = 0
-  for (let i = sfIdx + 1; i < lastParts.length; i++) {
-    const p = lastParts[i]
-    if (p.type !== "tool") continue
-    // prepared 游标已覆盖的结果和附件属于输入快照，不能再追加为 pending。
-    if (requestProjection?.session?.request?.estimatedInput !== undefined && (p.id ?? "") <= (requestProjection.last?.inputEstimate?.afterPartID ?? "")) continue
-    if (p.state?.status === "completed") {
-      pendingToolResultChars += (p.state.output?.length ?? 0)
-      for (const att of (p.state.attachments ?? []) as Array<{ url: string; mime: string }>) {
-        // #122：附件 data URL 估算并入待计入 input
-        // #175：pending 附件与 daemon 同口径
-        pendingAttachTokens += AttachmentToken.estimateAttachment({ url: att.url, mime: att.mime, type: "file" }).tokens
-      }
-    }
-    if (p.state?.status === "error") {
-      pendingToolResultChars += (p.state.error?.length ?? 0)
-    }
-  }
-  const pendingToolResultTokens = Math.round(pendingToolResultChars / inputRatio)
-  stepInput += pendingToolResultTokens + pendingAttachTokens
-
-  // ── 6. request totals（confirmed + in-flight）─────────
-  // #124：input 与 output 必须分开，stepOutput 不能混进 totalInput
-  // 当 provider usage 已到达但 message.completed 尚未落库时，confirmedRequest
-  // 已包含最新 step-finish input。assistant 消息可能仍携带较早的预流式估算，
-  // 因此不能用「估算 − 实际用量」推导 pending input。此时只有 finish 之后
-  // 写入的工具结果才是已知的未来 input。
-  const inFlightInput = stepConfirmed
-    ? 0
-    // #490：selected historical parent 不是 global latest 时，不能把当前 parent 的 pending input 借给它。
-    : stepSF && latestAssistant?.id === (requestUserID ? latestAssistantForUser?.id : latestRequestAssistant?.id)
-      ? pendingToolResultTokens + pendingAttachTokens
-      : stepInput
-  const totalInput = confirmedRequest.input + inFlightInput
-  const totalOutput = confirmedRequest.output + (stepConfirmed ? 0 : stepOutput)
-
-  // ── 7. breakdown 优先级（#127）──────────────────────────────
-  // #127：inputBreakdown=上传上下文；当前 step 输出单独叠加（input + live）
-  let breakdown: TokenAccounting["breakdown"] = null
-  // #124：定位最近的 step-start 字符快照
-  const ssIdx = lastParts.findLastIndex((p) => p.type === "step-start" && p.inputBreakdown)
-  // #124：无 step-start 时 breakdown 仅能等 step-finish 或 pending
-  const stepSS = ssIdx >= 0 ? lastParts[ssIdx] : undefined
-  // 当前请求没有快照时不能借旧助手；显式零字符、零估算也是有效快照。
-  const estimate = requestProjection?.session?.request ? requestProjection.session.request.inputEstimate : latestAssistant?.inputEstimate
+  const density = active?.inputEstimate?.charsPerToken
+  const inputRatio = density !== undefined && Number.isFinite(density) && density > 0 ? density : summary.inputRatio
+  const current = computeFinalTokens(undefined, [], request, summary.outputRatio, item.tail, inputRatio)
+  const pending = selected ? summary.pending.get(selected) : undefined
+  const own = summary.tails.get(item.info.id)
+  // 当前步骤已由 current 计入；请求补其他助手和较早未确认轴时必须扣掉 own。
+  const totalInput = current.totalInput + (pending?.input ?? 0) - (own?.input ?? 0)
+  const totalOutput = current.totalOutput + (pending?.output ?? 0) - (own?.output ?? 0)
+  // 分类与主数值共用消息准备快照，避免 Session 投影先到时出现不同确认状态。
+  const estimate = item.info.inputEstimate ?? active?.inputEstimate
   const pendingMsg =
     estimate?.inputBreakdown
       ? {
@@ -347,31 +313,21 @@ export function tokenAccounting(
           inputTokens: estimate.input,
         }
       : undefined
-  // 下一轮 prepared 游标越过旧 finish/start 时，旧确认不能接管新请求体。
-  const breakdownSrc = pendingMsg && estimate?.confirmed === false &&
-    (estimate.afterPartID ?? "") >= (stepSF?.id ?? "") && (estimate.afterPartID ?? "") >= (stepSS?.id ?? "")
-    ? pendingMsg
-    : stepSF?.inputBreakdown && sfIdx > ssIdx
-    ? stepSF
-    : stepSS?.inputBreakdown
-      ? stepSS
-      : pendingMsg
+  // 准备快照与 finish 的分类按同一游标换代，不能把旧输入类别套到新请求。
+  const breakdownSrc = pendingMsg && estimate?.confirmed === false
+    ? pendingMsg : item.source ?? pendingMsg
+  let breakdown: TokenAccounting["breakdown"] = null
   if (breakdownSrc?.inputBreakdown && breakdownSrc.inputChars !== undefined) {
-    const bd = breakdownSrc.inputBreakdown as {
-      system: number; instructions: number; skills: number; tools: number
-      messages: { userText: number; assistantText: number; reasoning: number; toolInput: number; toolOutput: number; attachments: number; total: number }
-      media?: { rawChars: number; textChars: number; tokens: number; count: number; imageTokens: number; pdfTokens: number; otherTokens: number }
-    }
+    const bd = breakdownSrc.inputBreakdown
     // provider 确认优先于旧 prepared 密度，不必等整条消息 completed。
-    const isConfirmed = breakdownSrc.type === "step-finish" || (breakdownSrc === pendingMsg && estimate?.confirmed === true)
-    const confirmedInput = breakdownSrc.type === "step-finish" && stepSF?.tokens
-      ? stepSF.tokens.input + stepSF.tokens.cache.read + stepSF.tokens.cache.write
-      : isConfirmed ? requestProjection?.session?.request?.stepInput ?? (latestAssistant?.tokens
-        ? latestAssistant.tokens.input + latestAssistant.tokens.cache.read + latestAssistant.tokens.cache.write : 0)
-      : breakdownSrc.inputTokens ?? Math.round(breakdownSrc.inputChars / inputRatio)
+    const confirmedInput = breakdownSrc.type === "step-finish"
+      ? breakdownSrc.tokens.input + breakdownSrc.tokens.cache.read + breakdownSrc.tokens.cache.write
+      : breakdownSrc.type === "pending" && estimate?.confirmed === true
+        ? active?.stepInput ?? current.input
+        : item.tail.tokens ? current.input : breakdownSrc.inputTokens ?? Math.round(breakdownSrc.inputChars / inputRatio)
     const denom = breakdownSrc.inputChars
     // #175：先固定切走 media.tokens
-    const media = (bd as any).media as { rawChars: number; textChars: number; tokens: number } | undefined
+    const media = bd.media
     const attachmentTokens = media?.tokens
     // #175：无 media 时保持旧全量分配
     // #175：textAllocInput 在无 media 时等于 confirmedInput
@@ -396,25 +352,11 @@ export function tokenAccounting(
 
     // #127：当前 step live output：只统计本 step 新生成的 text/reasoning/tool
     let liveAssistantText = 0, liveReasoning = 0, liveToolCalls = 0
-    // finish 只扫描它之前的本 step；prepared 游标隔开已上传历史与新输出。
-    const outputStartIdx = breakdownSrc.type === "step-finish"
-      ? lastParts.slice(0, sfIdx).findLastIndex((p) => p.type === "step-start")
-      : Math.max(ssIdx, sfIdx, estimate?.afterPartID ? lastParts.findLastIndex((p) => (p.id ?? "") <= estimate.afterPartID!) : -1)
-    const outputEndIdx = breakdownSrc.type === "step-finish" ? sfIdx : lastParts.length
-    let textC = 0, reasonC = 0, toolC = 0
-    // #127：扫描当前 step 的 live text/reasoning/tool 字符
-    for (let i = outputStartIdx + 1; i < outputEndIdx; i++) {
-      const p = lastParts[i]
-      if (p.type === "text" && !p.ignored) textC += (p.text?.length ?? 0)
-      if (p.type === "reasoning") reasonC += (p.text?.length ?? 0)
-      if (p.type === "tool") {
-        toolC += p.state?.status === "pending"
-          ? (p.state.raw?.length ?? 0)
-          : JSON.stringify(p.state?.input ?? {}).length
-      }
-    }
-    const outputTokens = breakdownSrc.type === "step-finish" ? stepSF?.tokens : latestAssistant?.tokens
-    if (isConfirmed && outputTokens) {
+    // 字符已在变化消息的测量阶段取得；沿用原分配公式，不为每个视图重读 Part。
+    const textC = item.live.text, reasonC = item.live.reasoning, toolC = item.live.tools
+    const outputRatio = summary.outputRatio
+    const outputTokens = item.tail.tokens
+    if (outputTokens) {
       // reasoning 保留 provider 真值，visible output 仅按本 step 的 text/tool 字符分配。
       liveReasoning = outputTokens.reasoning
       const visibleOutput = outputTokens.output
@@ -429,7 +371,8 @@ export function tokenAccounting(
       liveReasoning = Math.round(reasonC / outputRatio)
       liveToolCalls = Math.round(toolC / outputRatio)
     }
-
+    const pendingToolResultTokens = Math.round(item.tail.pendingIn / inputRatio)
+    const pendingAttachTokens = item.attachmentTokens
     breakdown = {
       system, instructions, skills, tools, userMessages, toolResults, attachments,
       // #127：UI 展示 = 上传上下文份额 + 本 step 新输出
@@ -439,36 +382,31 @@ export function tokenAccounting(
       pending: pendingToolResultTokens + pendingAttachTokens,
     }
   }
-
-  // ── 8. contextPercent ──
-  const limit = requestProjection?.session?.request?.model?.contextLimit ?? contextLimit ?? 0
-  // #122：context 占用按 step input+output 相对 limit
-  const stepTotal = (projected?.input ?? stepInput) + (projected?.output ?? stepOutput)
-  // #122：context 百分比相对 model limit
-  const contextPercent = limit > 0 ? Math.round((stepTotal / limit) * 100) : null
-
-  // #122：返回结构供 prompt/sidebar/footer 只读；勿在 UI 再拆第二套算法
+  const limit = active?.model?.contextLimit ?? contextLimit ?? 0
+  // 首包前可以只有服务端 prepared 投影，替换对应本地尾部而非再加一次。
+  const sessionInput = summary.unsettled.input + (active ? current.totalInput - active.input - (own?.input ?? 0) : 0)
+  const sessionOutput = summary.unsettled.output + (active ? current.totalOutput - active.output - (own?.output ?? 0) : 0)
+  // 已确认消费与实时有效值来自同一前缀；Context 的费用区不能把估算标成确认用量。
+  const confirmedSession = projection?.session?.tokens
+    ? { input: projection.session.tokens.input, output: projection.session.tokens.output, reasoning: projection.session.tokens.reasoning,
+        cacheRead: projection.session.tokens.cache.read, cacheWrite: projection.session.tokens.cache.write, cost: projection.session.cost ?? 0 }
+    : summary.session
   return {
-    step: { input: projected?.input ?? stepInput, output: projected?.output ?? stepOutput, confirmed: stepConfirmed },
+    step: { input: current.input, output: current.output, confirmed: !!item.tail.tokens },
     request: {
-      input: projected?.input ?? stepInput,
-      output: projected?.output ?? stepOutput,
-      totalInput: projected?.totalInput ?? totalInput,
-      // #490：totalInput 继续服务实时上下文；totalInputPure 只服务完成态和退出记录。
-      // 两字段同时返回让 consumer 选择口径，而不是让下游重新遍历 Message/Part。
-      totalInputPure: confirmedRequest.inputPure,
-      totalOutput: projected?.totalOutput ?? totalOutput,
-      // #122：cost 仅累计已确认 request 费用
-      cost: requestProjection?.session?.request?.cost ?? confirmedRequest.cost,
+      input: current.input, output: current.output, totalInput, totalOutput,
+      // footer 继续展示纯 input，prompt 的窗口用量则包含 cache；两种范围共享同一贡献。
+      totalInputPure: confirmed ? confirmed.inputPure + (pending?.input ?? 0)
+        : summary.items.some((entry) => entry.info.role === "user" && entry.info.id === selected)
+          ? values.inputPure - (!requestUserID && legacy ? tokens?.input ?? 0 : 0) : 0,
+      cost: active?.cost ?? values.cost,
     },
-    // 会话账本独立于前端分页，旧 transcript-only 调用仍保留原始统计语义。
-    session: projection?.session?.tokens
-      ? { input: projection.session.tokens.input, output: projection.session.tokens.output, reasoning: projection.session.tokens.reasoning,
-          cacheRead: projection.session.tokens.cache.read, cacheWrite: projection.session.tokens.cache.write, cost: projection.session.cost ?? 0 }
-      : session,
+    // 确认账本仍拥有完整前缀；只有尚未结算的贡献加入显示，不写回费用或 tokens。
+    session: { ...confirmedSession, input: confirmedSession.input + sessionInput, output: confirmedSession.output + sessionOutput },
     contextLimit: limit,
-    contextPercent,
+    // 窗口比例属于当前步骤，不使用多轮请求累计或整个会话消费量作分子。
+    contextPercent: limit > 0 ? Math.round((current.input + current.output) / limit * 100) : null,
     breakdown,
-    ratio: { input: inputRatio, output: outputRatio },
+    ratio: { input: inputRatio, output: summary.outputRatio },
   }
 }

@@ -131,7 +131,6 @@ import { DialogExportOptions } from "../../ui/dialog-export-options"
 import * as Model from "../../util/model"
 import { formatTranscript } from "../../util/transcript"
 import { formatUsageStats, sessionEpilogue } from "../../util/presentation"
-import { tokenAccounting } from "../../util/token-accounting"
 import { setPreLayoutSiblingMargin } from "../../util/layout"
 import { useTuiConfig } from "../../config"
 import { useClipboard } from "../../context/clipboard"
@@ -299,12 +298,11 @@ export function Session() {
   const viewportCulling = createMemo(() =>
     remeasuring() ? false : shouldCullSessionViewport(messages(), { stuckToBottom: viewportStuckToBottom() }),
   )
-  // 退出快照只注册producer，不再随part delta全量重算而饿死deferred-destroy。
-  // 路由卸载不清空最后会话摘要；输出合并reasoning、排除cache的口径保持不变。
+  // 退出只保留共享 owner 的数字。销毁后读取最后值，不重建已释放正文的统计。
+  const epilogueUsage = createMemo(() => sync.session.accounting(route.sessionID).session)
   onMount(() =>
     setEpilogue(() => {
-      // 退出时仍消费durable session投影，不能因历史分页变少而丢失tokens或cost。
-      const usage = tokenAccounting(messages(), (id) => sync.data.part[id] ?? [], undefined, { session: session(), last: undefined, parts: [] }).session
+      const usage = epilogueUsage()
       return sessionEpilogue({
         title: Locale.truncate(session()?.title ?? "", 50),
         sessionID: session()?.id,
@@ -2266,8 +2264,16 @@ function AssistantMessage(props: { index: number; message: AssistantMessage; par
     const usage = turnRequest()
     if (!usage) return turnRequest.loading ? "usage pending" : "usage unavailable"
     // SDK允许特殊数值的wire字符串，不能把它们当成已确认的数字相加。
-    if (typeof usage.tokens.input !== "number" || typeof usage.tokens.output !== "number" || typeof usage.tokens.reasoning !== "number" || typeof usage.cost !== "number") return "usage unavailable"
-    return formatUsageStats({ input: usage.tokens.input, output: usage.tokens.output + usage.tokens.reasoning, cost: usage.cost })
+    if (typeof usage.tokens.input !== "number" || typeof usage.tokens.output !== "number" || typeof usage.tokens.reasoning !== "number" || typeof usage.cost !== "number" || typeof usage.tokens.cache.read !== "number" || typeof usage.tokens.cache.write !== "number") return "usage unavailable"
+    // 先取本次用户请求已确认的累计，再补尚未报告用量的估算；费用只取原来记录的真实费用。
+    const value = sync.session.accounting(props.message.sessionID, undefined, props.message.parentID, {
+      input: usage.tokens.input + usage.tokens.cache.read + usage.tokens.cache.write,
+      inputPure: usage.tokens.input,
+      output: usage.tokens.output + usage.tokens.reasoning,
+      cost: usage.cost,
+    }).request
+    // 压缩要展示本次实际处理的全部输入；普通回复底部仍只展示新增输入。
+    return formatUsageStats({ input: props.message.summary ? value.totalInput : value.totalInputPure, output: value.totalOutput, cost: value.cost })
   })
 
   const childShortcut = useCommandShortcut("session.child.first")

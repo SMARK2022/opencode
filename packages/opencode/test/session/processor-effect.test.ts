@@ -27,6 +27,7 @@ import { provideTmpdirInstance, provideTmpdirServer } from "../fixture/fixture"
 import { awaitWithTimeout, testEffect } from "../lib/effect"
 import { httpError, raw, reply, TestLLMServer } from "../lib/llm-server"
 import { RuntimeFlags } from "@/effect/runtime-flags"
+import { tokenAccounting } from "@/token/accounting"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { SessionProjector } from "@opencode-ai/core/session/projector"
@@ -886,6 +887,14 @@ it.live("session.processor effect tests capture reasoning from http mock", () =>
         expect(yield* llm.calls).toBe(1)
         expect(reasoning?.text).toBe("think")
         expect(text?.text).toBe("done")
+        // 此原始 HTTP fixture 没有 usage；正常结束不能把准备估算确认成零。
+        const info = yield* session.get(chat.id)
+        expect(info.request?.inputEstimate?.confirmed).toBe(false)
+        const tokens = tokenAccounting([parent, handle.message], () => parts, undefined, {
+          session: info, last: handle.message, parts,
+        }).request
+        expect(tokens.input).toBeGreaterThan(0)
+        expect(tokens.output).toBe(2)
       }),
     { config: (url) => providerCfg(url) },
   ),
@@ -1498,6 +1507,12 @@ it.live("session.processor effect tests mark pending tools as aborted on cleanup
         expect(observedRaw).toBe('{"cmd"')
         expect(durableRaw).toBe("")
 
+        // 比较真实保存的准备快照，重读不能依赖仍在运行的 processor 内存对象。
+        const before = yield* MessageV2.get({ sessionID: chat.id, messageID: msg.id })
+        const prepared = before.info.role === "assistant" ? before.info.inputEstimate : undefined
+        expect(prepared?.input).toBeGreaterThan(0)
+        expect(prepared?.confirmed).toBe(false)
+
         yield* Fiber.interrupt(run)
 
         const exit = yield* Fiber.await(run)
@@ -1525,6 +1540,7 @@ it.live("session.processor effect tests mark pending tools as aborted on cleanup
         expect(stored.info).toMatchObject({
           id: msg.id, parentID: parent.id, role: "assistant",
           error: { name: "MessageAbortedError" }, time: { completed: expect.any(Number) },
+          inputEstimate: prepared,
         })
         // 没有 step-finish 的取消仍须闭合请求；未解析工具输入不能被当作 provider 用量。
         expect(yield* usage.get({ sessionID: chat.id, requestID: parent.id })).toMatchObject({

@@ -30,7 +30,7 @@ import { useExit } from "./exit"
 import { useEpilogue } from "./epilogue"
 import { useArgs } from "./args"
 import { useRoute } from "./route"
-import { batch, createEffect, onCleanup, onMount } from "solid-js"
+import { batch, createComputed, createEffect, createMemo, createRoot, getOwner, mapArray, onCleanup, onMount, untrack, type Accessor } from "solid-js"
 import path from "path"
 import { SessionPath } from "@opencode-ai/core/session/path"
 // #132：会话 path 规范化
@@ -40,6 +40,7 @@ import { logPartDeltaTiming, partDeltaTimingKey, PART_DELTA_TIMING_LIMIT } from 
 // #529：浏览窗口/上限常量与 dialog 搜索同源，避免两处窗口再次分叉
 import { SESSION_LIST_BROWSE_LIMIT, SESSION_LIST_LOOKBACK_MS } from "../util/session-list-params"
 import { PartView } from "@opencode-ai/core/session/part-view"
+import { measureMessage, projectAccounting, shareAccounting, summarizeAccounting, type RequestTotals } from "../util/token-accounting"
 
 // 同一私有 viewer 信号收窄 Message 与 diff；默认 SDK/Web App 请求不带它，完整合同不变。
 // 该常量只属于 TUI transport，不进入 OpenAPI query 或 generated SDK，避免把内部投影固化成公共 API。
@@ -224,6 +225,39 @@ export const {
     const sdk = useSDK()
 
     const fullSyncedSessions = new Set<string>()
+    const accountingOwner = getOwner()
+    const accounting = new Map<string, {
+      read: Accessor<ReturnType<typeof summarizeAccounting>>
+      dispose: () => void
+    }>()
+    function readAccounting(sessionID: string) {
+      const current = accounting.get(sessionID)
+      if (current) return current
+      // 首个调用者不接管缓存的响应式依赖，footer 卸载也不会销毁其他视图仍需的贡献。
+      return untrack(() => createRoot((dispose) => {
+        // 各消息单独订阅自己的载荷，某条 delta 不会重新测量其他消息的正文。
+        const messages = mapArray(() => store.message[sessionID] ?? [], (message) =>
+          createMemo<ReturnType<typeof measureMessage>>((previous) => {
+            const parts = store.part[message.id]
+            // 主动释放已保存正文不是删除事实；保留已测数字直到原 Session owner 释放。
+            if (!parts && previous && releasedTerminalParts.get(sessionID)?.get(message.id)?.size) return previous
+            return measureMessage(message, parts ?? [])
+          }),
+        )
+        const value = { dispose, read: createMemo(() => summarizeAccounting(messages().map((read) => read()))) }
+        accounting.set(sessionID, value)
+        return value
+      }, accountingOwner))
+    }
+    function releaseAccounting(sessionID: string) {
+      accounting.get(sessionID)?.dispose()
+      accounting.delete(sessionID)
+    }
+    // 绑定生命周期随 Sync 的 Session 引用，旧视图的调用与插件 API 均保持原样。
+    createComputed(mapArray(() => store.session, (session) => {
+      onCleanup(shareAccounting(session, () => readAccounting(session.id).read()))
+      return session.id
+    }))
     // [0624 正文消费计数] 只有当前 route、可见 Task 卡片与显式插件 acquisition 持有 Session 正文使用权。
     // 最后一个消费者离开时立即释放已持久终态正文；fullSyncedSessions 只是加载成功标记，不代表仍有人使用。
     const partConsumers = new Map<string, number>()
@@ -368,6 +402,8 @@ export const {
     // [0624] 最后一个消费者离开时释放该 Session 的全部已持久终态正文；Message metadata、状态、
     // 权限与问题桶保留（它们轻量且 sidebar/status 仍需要）。
     function releaseSessionParts(sessionID: string) {
+      // 正文租约归还时同步释放贡献，下次正常加载不能沿用旧页的测量结果。
+      releaseAccounting(sessionID)
       fullSyncedSessions.delete(sessionID)
       const completed = new Set(
         (store.message[sessionID] ?? [])
@@ -406,6 +442,7 @@ export const {
 
     // Session 删除是显式边界：这里才允许按 sessionID 归属扫描全量 Part，正常 delta 路径保持 O(1)。
     function releaseSession(sessionID: string) {
+      releaseAccounting(sessionID)
       syncTokens.delete(sessionID)
       syncingSessions.delete(sessionID)
       hydratingSessions.delete(sessionID)
@@ -1230,6 +1267,8 @@ export const {
     })
 
     onCleanup(() => {
+      for (const entry of accounting.values()) entry.dispose()
+      accounting.clear()
       // #186：卸载时丢弃未 flush 队列，避免定时器写已销毁 store
       // #186：不在 cleanup 里 flush——组件已拆，UI 不再需要最后一帧
       if (pendingPartDeltaTimer) clearTimeout(pendingPartDeltaTimer)
@@ -1440,6 +1479,12 @@ export const {
         return project.instance.path()
       },
       session: {
+        accounting(sessionID: string, contextLimit?: number, requestID?: string, confirmed?: RequestTotals) {
+          const match = search(store.session, sessionID, (session) => session.id)
+          const session = match.found ? store.session[match.index] : undefined
+          const summary = readAccounting(sessionID).read()
+          return projectAccounting(summary, contextLimit, { session, last: summary.latest ? { id: summary.latest.info.id } : undefined, parts: [] }, requestID, confirmed)
+        },
         get(sessionID: string) {
           const match = search(store.session, sessionID, (s) => s.id)
           if (match.found) return store.session[match.index]

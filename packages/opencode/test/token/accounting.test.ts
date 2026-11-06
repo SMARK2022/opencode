@@ -82,7 +82,7 @@ describe("tokenAccounting", () => {
     ]
     const parts = {
       "old-assistant": [stepFinishPart("old-assistant", 100, 200)],
-      "new-assistant": [stepFinishPart("new-assistant", 300, 900), { type: "text", text: "streaming output ".repeat(64) }],
+      "new-assistant": [stepFinishPart("new-assistant", 300, 900), { type: "text" as const, text: "streaming output ".repeat(64) }],
     }
 
     const acc = tokenAccounting(messages as never, (id) => parts[id as keyof typeof parts] ?? [], 200_000, undefined, "old-user")

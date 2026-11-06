@@ -54,7 +54,7 @@ describe("formatUsageStats", () => {
     const messages = [{ id: "u", role: "user" }, ...tokens.map((tokens, index) => ({
       id: `a${index}`, role: "assistant", parentID: "u", tokens, cost: 0.005, time: { completed: index + 1 },
     }))]
-    const parts = new Map(tokens.map((tokens, index) => [`a${index}`, [{ type: "step-finish", tokens, cost: 0.005 }]]))
+    const parts = new Map(tokens.map((tokens, index) => [`a${index}`, [{ type: "step-finish" as const, tokens, cost: 0.005 }]]))
     const usage = tokenAccounting(messages, (id) => parts.get(id) ?? [])
     // 当前 step 含缓存且只取最后一步；永久记录取 pure input 和含 reasoning 的请求累计。
     expect(usage.step).toEqual({ input: 6450, output: 1000, confirmed: true })

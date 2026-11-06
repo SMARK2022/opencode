@@ -125,17 +125,28 @@ export const selection = (sessionID: SessionSchema.ID) => ({
       WHERE p.session_id = ${sessionID} AND json_extract(p.data, '$.type') = 'step-finish'
       ORDER BY p.id DESC LIMIT 1
     ), step AS (
-      -- native 每个助手就是一轮；V1 未完成且还有尾部时不能沿用旧 step 确认值。
+      -- a 是本次用户请求的最后一条助手消息，不是全库消息。
+      -- v1 是当前 TUI 的 message/part 保存链；native 是新执行器的 session_message 保存链。
       SELECT CASE WHEN a.kind = 'native' AND coalesce((SELECT seq FROM native_estimate), -1) > a.position THEN '{}'
         -- 估算已替换旧 step，但既有 settled 请求累计保持原值。
         WHEN a.kind = 'native' THEN a.data
-        WHEN json_extract(a.data, '$.time.completed') IS NULL AND (
-          (json_extract(a.data, '$.inputEstimate.confirmed') = 0
-            AND coalesce((SELECT id FROM last_step), '') <= coalesce(json_extract(a.data, '$.inputEstimate.afterPartID'), ''))
-          OR EXISTS (
-          SELECT 1 FROM part p WHERE p.message_id = a.id AND p.session_id = ${sessionID}
+        -- 输入还未确认，且准备输入时已经包含此前的完成记录：应继续显示本次估算，中断也不能清除。
+        WHEN json_extract(a.data, '$.inputEstimate.confirmed') = 0
+          -- ID 随内容追加递增；缺少记录时用空 ID 比较，表示尚无确认记录或尚未包含任何内容。
+          AND coalesce((SELECT id FROM last_step), '') <= coalesce(json_extract(a.data, '$.inputEstimate.afterPartID'), '') THEN '{}'
+        -- 没有新的准备资料时，只在消息仍输出且出现新内容时继续估算。
+        WHEN json_extract(a.data, '$.time.completed') IS NULL AND EXISTS (
+          SELECT 1 FROM part p
+          -- 只查看上面选定的这条助手消息，不能借用其他消息或其他 Session 的内容。
+          WHERE p.message_id = a.id AND p.session_id = ${sessionID}
+            -- 只找最后一次确认以后追加的内容；没有完成记录时，从这条消息的开头判断。
             AND p.id > coalesce((SELECT id FROM last_step), '')
-        )) THEN '{}' ELSE coalesce((SELECT data FROM last_step), '{}') END AS data
+            -- 只有正文、工具调用或调用开始才表示继续生成；保存文件快照不能让已确认用量变回估算。
+            AND json_extract(p.data, '$.type') IN ('text', 'reasoning', 'tool', 'step-start')
+            -- 模型只生成外层 execute 调用；其内部展开记录不能再次触发输入估算，普通工具仍参与判断。
+            AND NOT (json_extract(p.data, '$.type') = 'tool'
+              AND coalesce(json_type(p.data, '$.metadata.executeParent'), '') = 'text')
+        ) THEN '{}' ELSE coalesce((SELECT data FROM last_step), '{}') END AS data
       FROM last_assistant a
     )
     SELECT json_object(
@@ -155,24 +166,33 @@ export const selection = (sessionID: SessionSchema.ID) => ({
         + coalesce(json_extract(data, '$.tokens.cache.write'), 0) FROM step), 0),
       'stepOutput', coalesce((SELECT coalesce(json_extract(data, '$.tokens.output'), 0)
         + coalesce(json_extract(data, '$.tokens.reasoning'), 0) FROM step), 0),
-      -- 未确认条件复用当前 step 投影；完成或零确认后不得补入上一轮上下文。
+      -- 待发送输入复用当前 step 投影；已保存的请求体估算由 estimatedInput 独立保留。
       'pendingInput', (SELECT coalesce(json_extract(u.data, '$.tokens.input'), 0)
         + coalesce(json_extract(u.data, '$.tokens.cache.read'), 0)
         + coalesce(json_extract(u.data, '$.tokens.cache.write'), 0)
         + coalesce(json_extract(u.data, '$.tokens.output'), 0) + coalesce(json_extract(u.data, '$.tokens.reasoning'), 0)
         FROM last_usage u, last_assistant a, step s
-        WHERE json_extract(a.data, '$.time.completed') IS NULL
+        -- 逐项排除：只有非 TUI 保存链的已结束消息仍沿用原过滤，当前 TUI 中断不丢弃估算。
+        WHERE NOT (a.kind != 'v1' AND json_extract(a.data, '$.time.completed') IS NOT NULL)
+          -- 当前调用已有确认 tokens 时，不再把此前用量当成本次待发送输入。
           AND json_extract(s.data, '$.tokens') IS NULL),
       -- 只投影当前助手未确认的请求体估算，不从累计或旧用户恢复 bootstrap。
-      -- native tokens 存在（包括全零）或 V1 新 step-finish 到达时立即停止估算。
+      -- TUI零报告与估算取最大值；新执行器仍沿用原确认规则。
       'estimatedInput', coalesce((SELECT json_extract(e.data, '$.inputEstimate.input') FROM native_estimate e
         WHERE e.seq > coalesce((SELECT position FROM last_assistant), -1)),
         (SELECT json_extract(a.data, '$.inputEstimate.input') FROM last_assistant a
-        WHERE json_extract(a.data, '$.time.completed') IS NULL
-          AND json_extract(a.data, '$.inputEstimate.confirmed') = 0
-          AND (a.kind = 'v1' OR json_extract(a.data, '$.tokens') IS NULL)
-          AND NOT EXISTS (SELECT 1 FROM last_step p WHERE a.kind = 'v1'
-            AND p.id > coalesce(json_extract(a.data, '$.inputEstimate.afterPartID'), '')))),
+        -- 本次输入未确认或只报告了零输入时，保留已保存估算。
+        WHERE (json_extract(a.data, '$.inputEstimate.confirmed') = 0 OR EXISTS (
+          -- 全零报告不覆盖本次输入估算，即使消息已标记确认，也保留两者中的较大值。
+          SELECT 1 FROM last_step p WHERE a.kind = 'v1'
+            AND coalesce(json_extract(p.data, '$.tokens.input'), 0)
+              + coalesce(json_extract(p.data, '$.tokens.cache.read'), 0)
+              + coalesce(json_extract(p.data, '$.tokens.cache.write'), 0) = 0
+        ))
+          -- v1 是当前 TUI 的保存链，中断只结束输出；其他保存链的已结束过滤保持原样。
+          AND NOT (a.kind != 'v1' AND json_extract(a.data, '$.time.completed') IS NOT NULL)
+          -- 新执行器直接在消息上保存确认 tokens；该字段已存在时，不再使用其旧估算。
+          AND NOT (a.kind != 'v1' AND json_extract(a.data, '$.tokens') IS NOT NULL))),
       -- 准备元数据跟随相同请求/助手边界；确认后保留细分，不能借用更旧请求的历史样本。
       'inputEstimate', json(coalesce((SELECT json_extract(e.data, '$.inputEstimate') FROM native_estimate e
         WHERE e.seq > coalesce((SELECT position FROM last_assistant), -1)),

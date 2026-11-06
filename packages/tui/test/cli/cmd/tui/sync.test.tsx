@@ -6,6 +6,7 @@ import { SessionSchema } from "@opencode-ai/core/session/schema"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { tmpdir } from "../../../fixture/fixture"
 import { directory, json, mount, wait, worktree } from "./sync-fixture"
+import { tokenAccounting } from "../../../../src/util/token-accounting"
 import type { useSync } from "../../../../src/context/sync"
 import type { AssistantMessage, GlobalEvent, Message, Part, PermissionRequest, QuestionRequest, ToolPart, UserMessage } from "@opencode-ai/sdk/v2"
 import type { TuiSlotPlugin, TuiPluginApi } from "@opencode-ai/plugin/tui"
@@ -1326,6 +1327,46 @@ describe("tui sync part delta coalesce (#186)", () => {
       expect(sync.data.part.msg_1?.[0]).toMatchObject({ type: "text", text: "final" })
     } finally {
       app.renderer.destroy()
+    }
+  })
+
+  test("restores interrupted estimates after rebuilding the sync provider", async () => {
+    await using tmp = await tmpdir()
+    await Bun.write(`${tmp.path}/kv.json`, "{}")
+    const message: AssistantMessage = {
+      ...assistantMessage(), time: { created: 1, completed: 2 },
+      error: { name: "MessageAbortedError", data: { message: "Aborted" } },
+      tokens: { input: 777, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+    }
+    const part = { ...textPart("part_text", "abcdefgh"), time: { start: 1, end: 2 } }
+    const start: Part = { id: "part_start", sessionID: "ses_1", messageID: message.id, type: "step-start", inputTokens: 777, inputChars: 3108 }
+    // 旧版只保存消息tokens和step-start；两次真实挂载都不能依赖新式inputEstimate或上一TUI缓存。
+    for (const _ of [0, 1]) {
+      const { app, sync } = await mount((url) => {
+        if (url.pathname === "/session/ses_1") return json({
+          id: "ses_1", directory, time: { created: 1, updated: 2 }, cost: 0,
+          tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+          request: { messageID: "user_1", assistantID: "msg_1", input: 0, output: 0, cost: 0, stepInput: 0, stepOutput: 0 },
+        })
+        if (url.pathname === "/session/ses_1/message") return json([{ info: message, parts: [start, part] }])
+        if (url.pathname === "/session/ses_1/todo" || url.pathname === "/session/ses_1/diff") return json([])
+      }, tmp.path)
+      try {
+        const lease = await sync.session.acquireParts("ses_1")
+        const usage = sync.session.accounting("ses_1")
+        expect(usage.request).toMatchObject({ input: 777, output: 2, totalInput: 777, totalOutput: 2, cost: 0 })
+        // 原视图仍用旧入口；它必须读到同一共享数字，不要求每个下游改写。
+        expect(tokenAccounting(sync.data.message.ses_1, (id) => sync.data.part[id] ?? [], undefined, {
+          session: sync.session.get("ses_1"), last: message, parts: sync.data.part[message.id] ?? [],
+        }).request).toEqual(usage.request)
+        expect(usage.session).toMatchObject({ input: 777, output: 2, cost: 0 })
+        // 原账本的旧记录兼容读取已含消息tokens中的777；同一估算不能再次叠加。
+        const footer = sync.session.accounting("ses_1", undefined, "user_1", { input: 777, inputPure: 777, output: 0, cost: 0 })
+        expect(footer.request).toMatchObject({ totalInput: 777, totalInputPure: 777, totalOutput: 2, cost: 0 })
+        lease.release()
+      } finally {
+        app.renderer.destroy()
+      }
     }
   })
 
