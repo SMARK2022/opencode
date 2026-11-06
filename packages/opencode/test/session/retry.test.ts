@@ -13,6 +13,7 @@ import { SessionID } from "../../src/session/schema"
 import { SessionStatus } from "../../src/session/status"
 import { testEffect } from "../lib/effect"
 import { ProviderV2 } from "@opencode-ai/core/provider"
+import { AuthenticationReason, ContentPolicyReason, HttpContext, HttpRequestDetails, HttpResponseDetails, InvalidRequestReason, LLMError, LLMEvent, ProviderInternalReason, RateLimitReason } from "@opencode-ai/llm"
 
 const providerID = ProviderV2.ID.make("test")
 const retryProvider = "test"
@@ -99,6 +100,37 @@ describe("session.retry.delay", () => {
     expect(SessionRetry.delay(1, error, 0)).toBe(2000)
   })
 
+  test.each([
+    ["retry-after", "Thu, 01 Jan 1970 00:00:00 GMT", 0, 2000],
+    ["retry-after", "0", 0, 0],
+    ["retry-after-ms", "0", 0, 0],
+    ["retry-after", "7", 7000, 7000],
+    ["retry-after", "not-a-date", undefined, 2000],
+    ["retry-after", "", 0, 2000],
+  ] as const)("preserves native retry hint %s=%s", (key, value, retryAfterMs, expected) => {
+    // 使用真实原生 carrier 和旧 HTTP 解析，区分过期日期归一化的零与显式零等待。
+    const error = new LLMError({ module: "retry-test", method: "stream", reason: new RateLimitReason({
+      message: "rate limited", retryAfterMs, http: new HttpContext({
+        request: new HttpRequestDetails({ method: "POST", url: "https://fixture.invalid", headers: {} }),
+        response: new HttpResponseDetails({ status: 429, headers: { [key]: value } }),
+      }),
+    }) })
+    expect(SessionRetry.delay(1, error, 0)).toBe(expected)
+  })
+
+  test.each([[0, 0], [250, 250], [3_600_000, 1_800_000]])("preserves native millisecond hint %s without headers", (retryAfterMs, expected) => {
+    // 没有原始提示头时仍保留原生时长，较长值沿同一个三十分钟上限。
+    const error = new LLMError({ module: "retry-test", method: "stream",
+      reason: new RateLimitReason({ message: "rate limited", retryAfterMs }) })
+    expect(SessionRetry.delay(1, error, 0)).toBe(expected)
+  })
+
+  test("keeps unbounded attempt delays finite with zero jitter", () => {
+    // 无限次数不等于无限指数：避免 Infinity * 0 让定时器变成 NaN。
+    expect(SessionRetry.delay(10_000, apiError(), 0)).toBe(30_000)
+    expect(SessionRetry.delay(10_000, apiError({}), 0)).toBe(1_800_000)
+  })
+
   test("uses retry-after values even when exceeding 10 minutes with headers", () => {
     const error = apiError({ "retry-after": "50" })
     expect(SessionRetry.delay(1, error)).toBe(50000)
@@ -142,7 +174,7 @@ describe("session.retry.delay", () => {
     }),
   )
 
-  it.instance("policy stops after five retries", () =>
+  it.instance("policy continues beyond five transient failures", () =>
     Effect.gen(function* () {
       const attempts: number[] = []
       const error = apiError({ "retry-after-ms": "0" })
@@ -157,11 +189,12 @@ describe("session.retry.delay", () => {
         }),
       )
 
-      yield* Effect.forEach(Array.from({ length: SessionRetry.RETRY_MAX_RETRIES + 1 }), () =>
+      // 超过旧截止后仍发布重试；零等待头只加速测试，不替换真实调度器。
+      yield* Effect.forEach(Array.from({ length: 8 }), () =>
         Effect.ignore(step(error)),
       )
 
-      expect(attempts).toStrictEqual([1, 2, 3, 4, 5])
+      expect(attempts).toStrictEqual([1, 2, 3, 4, 5, 6, 7, 8])
     }),
   )
 })
@@ -260,6 +293,60 @@ describe("session.retry.retryable", () => {
       }).toObject(),
     )
     expect(SessionRetry.retryable(error, retryProvider)).toEqual({ message: "Request failed" })
+  })
+
+  test("preserves native quota actions and explicit provider refusals", () => {
+    const error = new LLMError({ module: "retry-test", method: "stream", reason: new RateLimitReason({
+      message: "rate limited", http: new HttpContext({
+        request: new HttpRequestDetails({ method: "POST", url: "https://fixture.invalid", headers: {} }),
+        response: new HttpResponseDetails({ status: 429, headers: { "retry-after": "7" } }),
+        body: "FreeUsageLimitError",
+      }),
+    }) })
+    // 原生 carrier 必须进入原限额分支，正例不仅断言“可以 retry”。
+    expect(SessionRetry.retryable(error, "opencode")).toMatchObject({ action: {
+      reason: "free_tier_limit", provider: "opencode", label: "subscribe", link: "https://opencode.ai/go",
+    } })
+    expect(MessageV2.fromError(error, { providerID })).toMatchObject({ name: "APIError", data: {
+      statusCode: 429, isRetryable: true, responseHeaders: { "retry-after": "7" }, responseBody: "FreeUsageLimitError",
+    } })
+    // 同样含暂时错误关键词的鉴权、上下文和显式拒绝事件仍须停止。
+    expect(SessionRetry.retryable(new LLMError({ module: "retry-test", method: "stream",
+      reason: new AuthenticationReason({ message: "service unavailable", kind: "invalid" }) }), retryProvider)).toBeUndefined()
+    expect(SessionRetry.retryable(new LLMError({ module: "retry-test", method: "stream",
+      reason: new InvalidRequestReason({ message: "service unavailable", classification: "context-overflow" }) }), retryProvider)).toBeUndefined()
+    expect(SessionRetry.retryable(LLMEvent.providerError({ message: "service unavailable", retryable: false }), retryProvider)).toBeUndefined()
+    expect(SessionRetry.retryable(LLMEvent.providerError({ message: "connection refused" }), retryProvider)).toEqual({ message: "connection refused" })
+    // 未标记的流失败也持续恢复，不要求每个入口按正文关键词再次放行。
+    expect(SessionRetry.retryable(LLMEvent.providerError({ message: "provider request failed" }), retryProvider)).toEqual({ message: "provider request failed" })
+  })
+
+  test("projects native refusals into existing specific V1 errors", () => {
+    // 具体拒绝不能降为普通 Unknown/API 错误，否则旧 Goal 会错误取得续跑资格。
+    for (const [reason, name] of [
+      [new AuthenticationReason({ message: "service unavailable", kind: "invalid" }), "ProviderAuthError"],
+      [new InvalidRequestReason({ message: "service unavailable", classification: "context-overflow" }), "ContextOverflowError"],
+      [new ContentPolicyReason({ message: "service unavailable" }), "ContentFilterError"],
+    ] as const) {
+      expect(MessageV2.fromError(new LLMError({ module: "retry-test", method: "stream", reason }), { providerID }).name).toBe(name)
+    }
+  })
+
+  test("aligns native 429, server errors, Cloudflare and the legacy OpenAI 404 exception", () => {
+    const http = (status: number) => new HttpContext({
+      request: new HttpRequestDetails({ method: "POST", url: "https://fixture.invalid", headers: {} }),
+      response: new HttpResponseDetails({ status, headers: cloudflareHeaders }), body: cloudflareBody,
+    })
+    // 429/5xx/Cloudflare 沿上游原生分类；此处不重写 HTTP 或拦截页识别。
+    for (const reason of [new RateLimitReason({ message: "limited" }),
+      ...[403, 500, 503, 524].map(status => new ProviderInternalReason({ message: "temporary", status, http: http(status) })),
+    ]) expect(SessionRetry.retryable(new LLMError({ module: "test", method: "stream", reason }), "custom")).toBeDefined()
+    const missing = new LLMError({ module: "test", method: "stream",
+      reason: new InvalidRequestReason({ message: "Not Found", http: http(404) }) })
+    // 只有这一项按旧 provider 前缀覆盖默认否决，不把所有提供者的 404 都重发。
+    expect(SessionRetry.retryable(missing, "openai")).toEqual({ message: "Not Found" })
+    expect(SessionRetry.retryable(missing, "openai-custom")).toEqual({ message: "Not Found" })
+    expect(SessionRetry.retryable(missing, "custom")).toBeUndefined()
   })
 
   test("retries transport timeout errors", () => {

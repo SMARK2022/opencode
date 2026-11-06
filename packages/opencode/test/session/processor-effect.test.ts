@@ -2,6 +2,7 @@ import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { Database } from "@opencode-ai/core/database/database"
 import { SessionRequestUsage } from "@opencode-ai/core/session/request-usage"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+import { LayerNodePlatform } from "@opencode-ai/core/effect/app-node-platform"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { expect } from "bun:test"
 import { tool } from "ai"
@@ -17,6 +18,7 @@ import { Image } from "@/image/image"
 import { LLM } from "../../src/session/llm"
 import { MessageV2 } from "../../src/session/message-v2"
 import { SessionProcessor } from "../../src/session/processor"
+import { SessionPrompt } from "../../src/session/prompt"
 import { MessageID, PartID, SessionID } from "../../src/session/schema"
 import { SessionStatus } from "../../src/session/status"
 import { SessionSummary } from "../../src/session/summary"
@@ -28,7 +30,7 @@ import { RuntimeFlags } from "@/effect/runtime-flags"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { SessionProjector } from "@opencode-ai/core/session/projector"
-import { LLMEvent } from "@opencode-ai/llm"
+import { LLMClient, LLMEvent } from "@opencode-ai/llm"
 import { Plugin } from "../../src/plugin"
 
 const summary = Layer.succeed(
@@ -191,6 +193,32 @@ const env = LayerNode.compile(
 
 const it = testEffect(env)
 
+// 只有续轮用例需要完整 Prompt 图，其余 Processor 测试不额外启动该依赖链。
+const continuationIt = testEffect(LayerNode.compile(
+  LayerNode.group([root, SessionPrompt.node, LayerNode.make({ service: TestLLMServer, layer: TestLLMServer.layer, deps: [] })]),
+  replacements,
+))
+
+// 原生执行器先交付 tool-call 再实际 execute；与 SDK 的相反顺序共同约束同一登记入口。
+const nativeIt = testEffect(LayerNode.compile(
+  LayerNode.group([root, LayerNode.make({ service: TestLLMServer, layer: TestLLMServer.layer, deps: [] })]),
+  [
+    [SessionSummary.node, summary],
+    [RuntimeFlags.node, RuntimeFlags.layer({ experimentalEventSystem: true, experimentalNativeLlm: true })],
+    // 只脚本化 Provider 运输，原生 dispatch、真实 execute 与持久化仍走生产路径。
+    [LayerNodePlatform.llmClient, Layer.succeed(LLMClient.Service, LLMClient.Service.of({
+      prepare: () => Effect.die("unused"),
+      generate: () => Effect.die("unused"),
+      stream: () => Stream.make(
+        LLMEvent.stepStart({ index: 0 }),
+        LLMEvent.toolCall({ id: "call_1", name: "lookup", input: { query: "weather" }, providerMetadata: { openai: { itemId: "fc_1" } } }),
+        LLMEvent.stepFinish({ index: 0, reason: "tool-calls" }),
+        LLMEvent.finish({ reason: "tool-calls" }),
+      ),
+    }))],
+  ],
+))
+
 // #485：resizer 不可用环境——Image.Service 注入必然失败的 normalize，验证 fail-closed 省略语义
 const failingImageLayer = Layer.succeed(
   Image.Service,
@@ -325,7 +353,8 @@ const fragmentFailureLLM = Layer.succeed(
         LLMEvent.reasoningDelta({ id: "reasoning-1", text: "thinking" }),
         LLMEvent.textStart({ id: "text-1" }),
         LLMEvent.textDelta({ id: "text-1", text: "partial" }),
-        LLMEvent.providerError({ message: "provider boom" }),
+        // 此 fixture 验证最终失败投影；普通未标记流错误现在由共享策略持续恢复。
+        LLMEvent.providerError({ message: "provider boom", retryable: false }),
       ),
   }),
 )
@@ -868,42 +897,28 @@ it.live("session.processor effect tests reset reasoning state across retries", (
       Effect.gen(function* () {
         const { processors, session, provider } = yield* boot()
 
-        yield* llm.push(reply().reason("one").reset(), reply().reason("two").stop())
+        const broken = defer<void>()
+        yield* llm.push(reply().reason("one").wait(broken.promise).reset(), reply().reason("two").stop())
 
         const chat = yield* session.create({})
         const parent = yield* user(chat.id, "reason")
         const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+        const events = yield* EventV2Bridge.Service
+        // 已消费失败前缀后才断开，确保测试能发现持久化残留，而非恰好没收到首块。
+        const unsubscribe = yield* events.listen(event => Effect.sync(() => {
+          if (event.type !== MessageV2.Event.PartDelta.type) return
+          const data = Schema.decodeUnknownSync(MessageV2.Event.PartDelta.data)(event.data)
+          if (data.messageID === msg.id && data.delta === "one") broken.resolve()
+        }))
+        yield* Effect.addFinalizer(() => unsubscribe)
         const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
-        const handle = yield* processors.create({
-          assistantMessage: msg,
-          sessionID: chat.id,
-          model: mdl,
-        })
-
-        const value = yield* handle.process({
-          user: {
-            id: parent.id,
-            sessionID: chat.id,
-            role: "user",
-            time: parent.time,
-            agent: parent.agent,
-            model: { providerID: ref.providerID, modelID: ref.modelID },
-          } satisfies SessionV1.User,
-          sessionID: chat.id,
-          model: mdl,
-          agent: agent(),
-          system: [],
-          messages: [{ role: "user", content: "reason" }],
-          tools: {},
-        })
-
+        const handle = yield* processors.create({ assistantMessage: msg, sessionID: chat.id, model: mdl })
+        const value = yield* handle.process({ user: parent, sessionID: chat.id, model: mdl, agent: agent(),
+          system: [], messages: [{ role: "user", content: "reason" }], tools: {} })
         const parts = yield* MessageV2.parts(msg.id)
-        const reasoning = parts.filter((part): part is SessionV1.ReasoningPart => part.type === "reasoning")
-
         expect(value).toBe("continue")
         expect(yield* llm.calls).toBe(2)
-        expect(reasoning.some((part) => part.text === "two")).toBe(true)
-        expect(reasoning.some((part) => part.text === "onetwo")).toBe(false)
+        expect(parts.filter(part => part.type === "reasoning").map(part => part.text)).toEqual(["two"])
       }),
     { config: (url) => providerCfg(url) },
   ),
@@ -1280,18 +1295,16 @@ it.live("session.processor effect tests compact on structured context overflow",
   ),
 )
 
-it.live("session.processor effect tests complete AI SDK tool calls when native flag is off", () =>
+nativeIt.live("session.processor preserves successful tool metadata while recording real execution", () =>
   provideTmpdirServer(
-    ({ dir, llm }) =>
+    ({ dir }) =>
       Effect.gen(function* () {
         const { processors, session, provider } = yield* boot()
-
-        yield* llm.tool("lookup", { query: "weather" })
 
         const chat = yield* session.create({})
         const parent = yield* user(chat.id, "tool")
         const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
-        const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+        const mdl = yield* provider.getModel(ProviderV2.ID.make("opencode-fixture"), ref.modelID)
         const handle = yield* processors.create({
           assistantMessage: msg,
           sessionID: chat.id,
@@ -1328,8 +1341,8 @@ it.live("session.processor effect tests complete AI SDK tool calls when native f
         const parts = yield* MessageV2.parts(msg.id)
         const call = parts.find((part): part is SessionV1.ToolPart => part.type === "tool")
 
+        expect(handle.message.error).toBeUndefined()
         expect(value).toBe("continue")
-        expect(yield* llm.calls).toBe(1)
         expect(call?.callID).toBe("call_1")
         expect(call?.tool).toBe("lookup")
         expect(call?.state.status).toBe("completed")
@@ -1338,11 +1351,79 @@ it.live("session.processor effect tests complete AI SDK tool calls when native f
         expect(call.state.output).toBe("result:weather")
         expect(call.state.title).toBe("Weather lookup")
         expect(call.state.metadata).toEqual({ source: "test" })
+        // 调用事件携带的 itemId 仍须原样保存；只有失败收尾才可剥离它。
+        expect(call.metadata).toMatchObject({ openai: { itemId: "fc_1" } })
         expect(call.state.time.start).toBeDefined()
         expect(call.state.time.end).toBeDefined()
       }),
-    { config: (url) => providerCfg(url) },
+    { config: (url) => {
+      const config = providerCfg(url)
+      // 使用原生支持的 provider 前缀，避免该顺序回归悄悄落回 SDK 路径。
+      return { ...config, provider: { "opencode-fixture": { ...config.provider.test, id: "opencode-fixture", npm: "@ai-sdk/openai" } } }
+    } },
   ),
+)
+
+continuationIt.live("session.processor waits for a real tool after SSE disconnect without cancelling it", () =>
+  provideTmpdirServer(({ dir, llm }) => Effect.gen(function* () {
+    const { processors, session, provider } = yield* boot()
+    const started = defer<void>()
+    const release = defer<void>()
+    const effects: string[] = []
+    yield* Effect.addFinalizer(() => Effect.sync(() => release.resolve()))
+    const frame = reply().tool("lookup", { query: "weather" }).item()
+    if (frame.type !== "sse") return yield* Effect.die("Expected SSE tool fixture")
+    // 完整工具请求先交付，真实 execute 就绪后断连接；工具完成另受独立闸门控制。
+    yield* llm.push({ ...frame, wait: started.promise, reset: true })
+    const chat = yield* session.create({})
+    const parent = yield* user(chat.id, "tool")
+    const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+    const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+    const handle = yield* processors.create({ assistantMessage: msg, sessionID: chat.id, model: mdl })
+    const run = yield* handle.process({ user: parent, sessionID: chat.id, model: mdl, agent: agent(),
+      system: [], messages: [{ role: "user", content: "tool" }], tools: {
+        lookup: tool({ description: "Look up information", inputSchema: z.object({ query: z.string() }),
+          execute: async (_, options) => {
+            started.resolve()
+            await release.promise
+            if (options.abortSignal?.aborted) throw new DOMException("Aborted", "AbortError")
+            effects.push("proof")
+            return { title: "lookup", output: "tool-proof", metadata: {} }
+          },
+        }),
+      } }).pipe(Effect.forkChild)
+    yield* awaitWithTimeout(Effect.promise(() => started.promise), "tool never started")
+    // 此窗口只让已触发的 socket 故障传播，不用于猜测工具是否启动。
+    yield* Effect.sleep("50 millis")
+    const pending = yield* MessageV2.get({ sessionID: chat.id, messageID: msg.id })
+    expect(pending.info.role === "assistant" ? pending.info.time.completed : false).toBeUndefined()
+    const call = pending.parts.find(part => part.type === "tool")
+    if (!call) return yield* Effect.die("Expected running tool")
+    // 在同一持久 Part 注入 Provider 续接身份，验证失败收尾和真正下一请求都不回放它。
+    yield* session.updatePart({ ...call, metadata: { ...call.metadata, openai: { itemId: "failed-tool-item" } } })
+    release.resolve()
+    expect(yield* Fiber.join(run)).toBe("continue")
+    const stored = yield* MessageV2.get({ sessionID: chat.id, messageID: msg.id })
+    expect(effects).toEqual(["proof"])
+    expect(stored.info).toMatchObject({ id: msg.id, role: "assistant", finish: "unknown" })
+    expect(stored.info.role === "assistant" ? stored.info.error : undefined).toBeUndefined()
+    expect(stored.parts.filter(part => part.type === "tool")).toMatchObject([
+      { callID: "call_1", state: { status: "completed", output: "tool-proof" } },
+    ])
+    // 同时检查持久化和 wire，避免某个适配器忽略 metadata 使清理断言失去敏感性。
+    expect(JSON.stringify(stored.parts)).not.toContain("failed-tool-item")
+    yield* llm.text("continued with the original result")
+    const prompt = yield* SessionPrompt.Service
+    const continued = yield* prompt.loop({ sessionID: chat.id })
+    // 真正 Prompt 循环创建新助手，并把已执行调用与原结果交给下一次 HTTP 请求。
+    expect(continued.info.id).not.toBe(msg.id)
+    expect(continued.parts).toContainEqual(expect.objectContaining({ type: "text", text: "continued with the original result" }))
+    const next = JSON.stringify((yield* llm.inputs).at(-1))
+    expect(next).toContain("call_1")
+    expect(next).toContain("tool-proof")
+    expect(next).not.toContain("failed-tool-item")
+    expect(effects).toEqual(["proof"])
+  }), { config: url => providerCfg(url) }),
 )
 
 it.live("session.processor effect tests mark pending tools as aborted on cleanup", () =>
@@ -1459,7 +1540,7 @@ it.live("session.processor effect tests mark pending tools as aborted on cleanup
   ),
 )
 
-it.live("session.processor effect tests record aborted errors and idle state", () =>
+for (const retry of [false, true]) it.live(`session.processor records aborted errors during ${retry ? "retry" : "stream"}`, () =>
   provideTmpdirServer(
     ({ dir, llm }) =>
       Effect.gen(function* () {
@@ -1468,7 +1549,8 @@ it.live("session.processor effect tests record aborted errors and idle state", (
         const events = yield* EventV2Bridge.Service
         const sts = yield* SessionStatus.Service
 
-        yield* llm.hang
+        if (retry) yield* llm.error(429, { error: { message: "rate limited" } })
+        if (!retry) yield* llm.hang
 
         const chat = yield* session.create({})
         const parent = yield* user(chat.id, "abort")
@@ -1509,9 +1591,12 @@ it.live("session.processor effect tests record aborted errors and idle state", (
           .pipe(Effect.forkChild)
 
         yield* llm.wait(1)
+        // 等已发布的 retry 状态再取消，覆盖没有活跃 Provider 的退避阶段。
+        if (retry) yield* waitFor(sts.get(chat.id).pipe(Effect.map(state => state.type === "retry" ? true : undefined)), "retry never started")
         yield* Fiber.interrupt(run)
 
         const exit = yield* Fiber.await(run)
+        expect(handle.message.error?.name).toBe("MessageAbortedError")
         yield* Effect.promise(() => seen.promise)
         const stored = yield* MessageV2.get({ sessionID: chat.id, messageID: msg.id })
         const state = yield* sts.get(chat.id)

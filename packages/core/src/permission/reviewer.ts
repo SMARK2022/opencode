@@ -27,6 +27,7 @@ import { SessionMessage } from "../session/message"
 import { SessionSchema } from "../session/schema"
 import { SessionStore } from "../session/store"
 import { SessionRunnerModel } from "../session/runner/model"
+import { SessionRetry } from "../session/retry"
 import { PermissionAuto } from "./auto"
 import { PermissionReviewerPrompt } from "./reviewer/prompt"
 import { PermissionReviewerSchema } from "./reviewer/schema"
@@ -129,21 +130,23 @@ const layer = Layer.effect(Service, Effect.gen(function* () {
         }, {
           permissionReviewerRequestID: reviewerRequestID, reviewID: input.reviewID,
         })
-        let assessment: typeof PermissionReviewerSchema.Assessment.Type | undefined
-        let textOutput = ""
-        const forced = !toolChoiceRejectedProviders.has(selected.model.provider)
-        const request = LLM.request({
-          toolChoice: forced ? ToolChoice.make("required") : undefined,
-          model: selected.model, prompt: attemptPrompt,
-          // reviewer直接调用LLM而不经过V1插件，同一OpenAI会话仍需使用相同代理亲和身份。
-          ...(selected.model.provider === "openai" ? { http: { headers: { "session-id": session.id } } } : {}),
-          // 逐次移动同一可信原话；证据与协议修复提示始终留在user通道。
-          ...(selected.openaiOAuth ? { providerOptions: { openai: { instructions: system } } } : { system }),
-          tools: Tool.toDefinitions({ permission_review_decision: Tool.make({
-            description: "Submit the structured allow/deny decision for this permission review.",
-            parameters: PermissionReviewerSchema.Assessment, success: Schema.Unknown,
-          }) }),
-        })
+        return yield* Effect.suspend(() => {
+          // 每次尝试自然获得新的裁决和文字；估算保留到下次 onPrepared，避免重试时变成零。
+          let assessment: typeof PermissionReviewerSchema.Assessment.Type | undefined
+          let textOutput = ""
+          const forced = !toolChoiceRejectedProviders.has(selected.model.provider)
+          const request = LLM.request({
+            toolChoice: forced ? ToolChoice.make("required") : undefined,
+            model: selected.model, prompt: attemptPrompt,
+            // reviewer直接调用LLM而不经过V1插件，同一OpenAI会话仍需使用相同代理亲和身份。
+            ...(selected.model.provider === "openai" ? { http: { headers: { "session-id": session.id } } } : {}),
+            // 逐次移动同一可信原话；证据与协议修复提示始终留在user通道。
+            ...(selected.openaiOAuth ? { providerOptions: { openai: { instructions: system } } } : { system }),
+            tools: Tool.toDefinitions({ permission_review_decision: Tool.make({
+              description: "Submit the structured allow/deny decision for this permission review.",
+              parameters: PermissionReviewerSchema.Assessment, success: Schema.Unknown,
+            }) }),
+          })
         const onPrepared = (body: unknown) => Effect.sync(() => {
           // 同一次compile的最终正文包含真正发出的工具；OAuth策略只归instructions，不重复归system正文。
           inputEstimate = {
@@ -152,8 +155,8 @@ const layer = Layer.effect(Service, Effect.gen(function* () {
           }
           // Started读取本尝试的估算；原有Ended仍独立确认真实用量与费用。
         })
-        return yield* client.stream(request, onPrepared).pipe(
-          // typed400发生于事件交付之前；只在同次timeout和publisher内去参重发一次。
+          return client.stream(request, onPrepared).pipe(
+            // typed400发生于事件交付之前；只在同次timeout和publisher内去参重发一次。
           Stream.catch((error) => {
             if (!forced || !("http" in error.reason) || error.reason.http?.response?.status !== 400 || !/tool[_ ]?choice/i.test(error.reason.http.body ?? "")) return Stream.fail(error)
             toolChoiceRejectedProviders.add(selected.model.provider)
@@ -161,8 +164,9 @@ const layer = Layer.effect(Service, Effect.gen(function* () {
           }),
           Stream.runForEach((event) => Effect.gen(function* () {
             if (event.type === "tool-error") return yield* protocolError
+            // 原 provider carrier 先进入共享资格；最终失败再映射回既有 Failed。
+            if (event.type === "provider-error") return yield* Effect.fail(event)
             yield* publisher.publish(event)
-            if (event.type === "provider-error") return yield* new Failed({ reason: event.message })
             if (event.type === "text-delta") textOutput += event.text
             if (event.type !== "tool-call" || event.name !== "permission_review_decision") return
             assessment = Option.getOrUndefined(decodeAssessment(event.input))
@@ -185,6 +189,18 @@ const layer = Layer.effect(Service, Effect.gen(function* () {
             }))
             return fallback
           })),
+          )
+        }).pipe(
+          SessionRetry.retry({
+            provider: String(selected.model.provider),
+            set: input => Effect.gen(function* () {
+              yield* publisher.failAssistant(input.message, false, false, true)
+              yield* publisher.failUnsettledTools(input.message)
+              yield* publisher.retry(input.attempt, input.error)
+            }),
+          }),
+          // 共享策略已经放行过可重试事件；最终仍失败的 provider 错误才回到既有 Failed。
+          Effect.catchIf(LLMEvent.is.providerError, error => Effect.fail(new Failed({ reason: error.message }))),
           // 每次拥有完整执行期限；仍先完成原onExit收尾，再向外层交付超时供补试。
           Effect.timeoutOrElse({ duration: options.timeout_ms ?? 120_000, orElse: () => Effect.fail(timedOut) }),
           Effect.onExit((exit) => Effect.gen(function* () {

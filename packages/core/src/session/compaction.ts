@@ -1,6 +1,6 @@
 export * as SessionCompaction from "./compaction"
 
-import { LLM, LLMError, LLMEvent, Message, type LLMRequest, type Model } from "@opencode-ai/llm"
+import { InvalidProviderOutputReason, LLM, LLMError, LLMEvent, Message, type LLMRequest, type Model } from "@opencode-ai/llm"
 import { Cause, DateTime, Effect, Exit, Stream } from "effect"
 import { and, eq, inArray } from "drizzle-orm"
 import type { Config } from "../config"
@@ -15,6 +15,8 @@ import { tokens } from "./runner/publish-llm-event"
 import { ModelV2 } from "../model"
 import { ProviderV2 } from "../provider"
 import { SessionRunnerModel } from "./runner/model"
+import { SessionRetry } from "./retry"
+import { SessionV1 } from "../v1/session"
 import { SessionMemento } from "./compaction-memento"
 import { SessionHistory } from "./history"
 import { truncateForCompaction } from "../util/output-notice"
@@ -291,44 +293,62 @@ export const make = (dependencies: Dependencies) => {
       model: modelRef,
     }, { id: startedEventID })
 
-    const chunks: string[] = []
-    let failed = false
-    const summarized = yield* dependencies.llm
-      .stream(
-        LLM.request({
-          model: input.model,
-          http: input.request.http,
-          // 摘要继承本次真实请求的可信指令；conversation仍留在user正文。
-          providerOptions: input.request.providerOptions,
-          messages: [Message.user(summaryPrompt)],
-          tools: [],
-          generation: { maxTokens: summaryOutput },
-        }),
-        // 与普通上传复用真实compile回调，估算归压缩独立身份而不是当前用户输入。
-        (body) => Effect.gen(function* () {
-          yield* dependencies.events.publish(SessionEvent.RequestEstimated, {
-            sessionID: input.sessionID, messageID, timestamp: yield* DateTime.now, model: modelRef,
-            inputEstimate: { ...Token.estimateRequest(body, samples, []),
-              contextLimit: input.model.defaults?.limits?.context ?? input.model.route.defaults.limits?.context ?? 0 },
-          })
-        }),
-      )
-      .pipe(
-        Stream.runForEach((event) => {
-          if (LLMEvent.is.providerError(event)) failed = true
-          if (LLMEvent.is.textDelta(event)) chunks.push(event.text)
-          if (LLMEvent.is.stepFinish(event)) {
-            const counted = tokens(event.usage)
-            usage = { tokens: counted, cost: SessionRunnerModel.cost(input.pricing, counted), stepCount: 1 }
-          }
-          return Effect.void
-        }),
-        Effect.as(true),
-        // 显式维护必须向调用者保留提供者失败，不能用 false 伪装成功。
-        Effect.catchTag("LLM.Error", (error) => reason === "manual" ? Effect.fail(error) : Effect.succeed(false)),
-      )
-    const summary = chunks.join("")
-    if (!summarized || failed || !summary.trim()) {
+    const incomplete = new LLMError({ module: "SessionCompaction", method: "summary",
+      reason: new InvalidProviderOutputReason({ message: "Provider returned incomplete completion (finish_reason: unknown)" }) })
+    const summary = yield* Effect.suspend(() => {
+      // 摘要文字属于本次尝试，失败后局部变量自然释放，不复用或显式清空旧前缀。
+      const chunks: string[] = []
+      return dependencies.llm
+        .stream(
+          LLM.request({
+            model: input.model,
+            http: input.request.http,
+            // 摘要继承本次真实请求的可信指令；conversation仍留在user正文。
+            providerOptions: input.request.providerOptions,
+            messages: [Message.user(summaryPrompt)],
+            tools: [],
+            generation: { maxTokens: summaryOutput },
+          }),
+          // 与普通上传复用真实compile回调，估算归压缩独立身份而不是当前用户输入。
+          (body) => Effect.gen(function* () {
+            yield* dependencies.events.publish(SessionEvent.RequestEstimated, {
+              sessionID: input.sessionID, messageID, timestamp: yield* DateTime.now, model: modelRef,
+              inputEstimate: { ...Token.estimateRequest(body, samples, []),
+                contextLimit: input.model.defaults?.limits?.context ?? input.model.route.defaults.limits?.context ?? 0 },
+            })
+          }),
+        )
+        .pipe(
+          Stream.runForEach((event) => Effect.gen(function* () {
+            // 明确的 provider 语义立即交给共享策略，不能被随后断连覆盖。
+            if (LLMEvent.is.providerError(event)) return yield* Effect.fail(event)
+            if (LLMEvent.is.textDelta(event)) chunks.push(event.text)
+            if (LLMEvent.is.stepFinish(event)) {
+              // unknown 沿既有不完整完成重试；正常 stop 的空摘要仍走原不可用结果。
+              if (event.reason === "unknown") return yield* incomplete
+              const counted = tokens(event.usage)
+              usage = { tokens: counted, cost: SessionRunnerModel.cost(input.pricing, counted), stepCount: 1 }
+            }
+          })),
+          Effect.map(() => chunks.join("")),
+        )
+    }).pipe(
+      SessionRetry.retry({
+        provider: String(input.model.provider),
+        parse: error => {
+          if (error === incomplete) return new SessionV1.APIError({
+            message: incomplete.reason.message, isRetryable: true, metadata: { finishReason: "unknown" },
+          }).toObject()
+          return undefined
+        },
+        // 压缩没有独立重试 UI 状态；资格与等待仍完全来自共享策略。
+        set: () => Effect.void,
+      }),
+      // 最终非重试事件保留原 false 合同；真实 LLMError 仍按 manual/auto 原规则传播。
+      Effect.catchIf(LLMEvent.is.providerError, () => Effect.void),
+      Effect.catchTag("LLM.Error", (error) => reason === "manual" ? Effect.fail(error) : Effect.void),
+    )
+    if (!summary || !summary.trim()) {
       yield* fail(false, "Compaction did not produce a usable summary")
       return false
     }

@@ -23,7 +23,7 @@ import { SessionSummary } from "./summary"
 import { SessionRequestUsage } from "@opencode-ai/core/session/request-usage"
 import type { Provider } from "@/provider/provider"
 import { Question } from "@/question"
-import { ProviderError } from "@/provider/error"
+import { EffectBridge } from "@/effect/bridge"
 import { errorMessage } from "@/util/error"
 import { isRecord } from "@/util/record"
 import { EventV2Bridge } from "@/event-v2-bridge"
@@ -31,7 +31,7 @@ import { Database } from "@opencode-ai/core/database/database"
 import { and, eq } from "drizzle-orm"
 import { MessageTable } from "@opencode-ai/core/session/sql"
 import type { EventV2 } from "@opencode-ai/core/event"
-import { Usage, type LLMEvent } from "@opencode-ai/llm"
+import { Usage, LLMError, LLMEvent, ToolResultValue } from "@opencode-ai/llm"
 import { Token } from "@opencode-ai/core/util/token"
 
 // #149：取消时给 bash 等工具完成截断/complete 的宽限
@@ -255,14 +255,33 @@ const layer = Layer.effect(
 
       // 只撤回当前不完整尝试，不能把整个 Message 或已执行工具当作可重放副作用。
       const discardIncompleteAttempt = Effect.fn("SessionProcessor.discardIncompleteAttempt")(function* () {
-        yield* Effect.forEach([...ctx.attemptPartIDs], (partID) =>
-          session.removePart({ sessionID: ctx.sessionID, messageID: ctx.assistantMessage.id, partID }),
-        )
+        const open = new Set([ctx.currentText?.id, ...Object.values(ctx.reasoningMap).map(part => part.id)])
+        const ids = new Set([...ctx.attemptPartIDs, ...Object.values(ctx.toolcalls).map(call => call.partID)])
+        for (const partID of ids) {
+          const part = yield* session.getPart({ sessionID: ctx.sessionID, messageID: ctx.assistantMessage.id, partID, includeHidden: true })
+          if (!part) continue
+          // 有工具只撤回开放残片；未执行参数没有副作用，无工具时一并删除。
+          if ((!ctx.hasToolCall && (part.type !== "tool" || part.state.status === "pending")) || (ctx.hasToolCall && open.has(partID))) {
+            yield* session.removePart({ sessionID: ctx.sessionID, messageID: ctx.assistantMessage.id, partID })
+            continue
+          }
+          if (part.type !== "text" && part.type !== "reasoning" && part.type !== "tool") continue
+          // 失败轮只能保留可见上下文与真实工具事实，opaque 续接凭据不能回放。
+          const provider = MessageV2.providerMeta(part.metadata)
+          if (provider) yield* session.updatePart({ ...part,
+            metadata: Object.fromEntries(Object.entries(part.metadata ?? {}).filter(([key]) => !(key in provider))),
+          })
+        }
         ctx.attemptPartIDs.clear()
         // 耗尽或退避中取消仍会走 cleanup，必须解除引用以免已删除正文被重新保存。
         ctx.currentText = undefined
         ctx.reasoningMap = {}
-      })
+        if (!ctx.hasToolCall) {
+          ctx.toolcalls = {}
+          ctx.toolInputBuffer = {}
+        }
+      // 输出上限也复用此入口，串行元数据写以免覆盖并行工具的获胜终态。
+      }, toolPermit.withPermits(1))
 
 
       // 这些 milestone 只写 daemon log，不记录 prompt、token 内容、工具参数
@@ -295,9 +314,13 @@ const layer = Layer.effect(
           aborted,
         })
 
+      // 原生资格直接保留原 carrier；只让旧 SDK 错误经过既有分类入口。
+      const toRetryCarrier = (error: unknown) =>
+        error instanceof LLMError || LLMEvent.is.providerError(error) ? error : parse(error)
+
       const settleToolCall = Effect.fn("SessionProcessor.settleToolCall")(function* (toolCallID: string) {
         const done = ctx.toolcalls[toolCallID]?.done
-        delete ctx.toolcalls[toolCallID]
+        // 本消息结束前保留终态登记，SDK 迟到回声不能重新创建相同 callID。
         if (done) yield* Deferred.succeed(done, undefined).pipe(Effect.ignore)
       })
 
@@ -504,8 +527,7 @@ const layer = Layer.effect(
         }
         // #557：event 创建路径读取同步 registry；execute 先到时 marker 已经可用。
         // 空 metadata object 合法且不会进入 Provider schema；后续 lifecycle 统一 merge。
-        const part = yield* toolPermit.withPermits(1)(
-          session.updatePart({
+        const part = yield* session.updatePart({
             id: PartID.ascending(),
             messageID: ctx.assistantMessage.id,
             sessionID: ctx.assistantMessage.sessionID,
@@ -517,8 +539,7 @@ const layer = Layer.effect(
               ...(input.providerExecuted ? { providerExecuted: true } : {}),
               ...(ctx.toolWorktree[input.id] ? { worktree: ctx.toolWorktree[input.id] } : {}),
             },
-          } satisfies SessionV1.ToolPart),
-        )
+          } satisfies SessionV1.ToolPart)
         ctx.toolcalls[input.id] = {
           done: yield* Deferred.make<void>(),
           partID: part.id,
@@ -526,7 +547,8 @@ const layer = Layer.effect(
           sessionID: part.sessionID,
         }
         return { call: ctx.toolcalls[input.id], part }
-      })
+      // 检查、创建与登记原子化；事件与实际 execute 必须共用同一 Part。
+      }, toolPermit.withPermits(1))
 
       const isFilePart = (value: unknown): value is SessionV1.FilePart => Schema.is(SessionV1.FilePart)(value)
 
@@ -611,6 +633,31 @@ const layer = Layer.effect(
           )
         }
         return yield* Effect.fail(new MessageError.OutputLengthError({}))
+      })
+
+      const startToolCall = Effect.fnUntraced(function* (value: Extract<StreamEvent, { type: "tool-call" }>) {
+        ctx.hasToolCall = true
+        if (ctx.assistantMessage.summary) throw new Error(`Tool call not allowed while generating summary: ${value.name}`)
+        yield* ensureToolCall(value)
+        const pendingRaw = ctx.toolInputBuffer[value.id]
+        if (pendingRaw) {
+          yield* updateToolCall(value.id, match => match.state.status !== "pending" ? match
+            : { ...match, state: { ...match.state, raw: match.state.raw + pendingRaw } })
+          delete ctx.toolInputBuffer[value.id]
+        }
+        const input = isRecord(value.input) ? value.input : { value: value.input }
+        yield* updateToolCall(value.id, match => ({
+          ...match, tool: value.name,
+          // execute 与流事件可能交错；迟到的声明不能让已完成工具回到 running。
+          state: match.state.status === "completed" || match.state.status === "error" ? match.state
+            : match.state.status === "running" ? { ...match.state, input }
+            : { status: "running", input, time: { start: Date.now() } },
+          // 实际 execute 再登记时没有 Provider 字段；正常续接凭据只由失败收尾负责移除。
+          metadata: { ...match.metadata, ...value.providerMetadata,
+            ...(match.metadata?.providerExecuted ? { providerExecuted: true } : {}),
+            ...(match.metadata?.worktree ? { worktree: match.metadata.worktree } : {}),
+          },
+        }))
       })
 
       const handleEvent = Effect.fnUntraced(function* (value: StreamEvent) {
@@ -698,49 +745,14 @@ const layer = Layer.effect(
           }
 
           case "tool-call": {
-            // [local-smark] 标记本轮已产生 tool 调用，用于 finish-step 空完成检测
-            ctx.hasToolCall = true
-            if (ctx.assistantMessage.summary) {
-              throw new Error(`Tool call not allowed while generating summary: ${value.name}`)
-            }
-            yield* ensureToolCall(value)
-            // 某些 provider 省略 end；先持久化 pending 原文，再转换为解析后的 running input。
-            const pendingRaw = ctx.toolInputBuffer[value.id]
-            if (pendingRaw) {
-              yield* updateToolCall(value.id, (match) => {
-                if (match.state.status !== "pending") return match
-                return { ...match, state: { ...match.state, raw: match.state.raw + pendingRaw } }
-              })
-              delete ctx.toolInputBuffer[value.id]
-            }
-            const input = isRecord(value.input) ? value.input : { value: value.input }
-            yield* updateToolCall(value.id, (match) => ({
-              ...match,
-              tool: value.name,
-              state:
-                match.state.status === "running"
-                  ? { ...match.state, input }
-                  : {
-                      status: "running",
-                      input,
-                      time: { start: Date.now() },
-                    },
-              metadata: {
-                // #557：Provider metadata 可整体替换，但 server-owned primitive 必须显式回填；
-                // providerExecuted 仍独立，远端 Tool 不能伪装成本地 worktree owner。
-                ...value.providerMetadata,
-                ...(match.metadata?.providerExecuted ? { providerExecuted: true } : {}),
-                ...(match.metadata?.worktree ? { worktree: match.metadata.worktree } : {}),
-              },
-            }))
-
-            // #508：doom_loop 仅在 tool-error 上做「同 tool + 同 input + 全 error」AND 判定。
-            // tool-call 阶段结果未知：相同输入的成功重试是合法行为，不得在此预拦截。
+            yield* startToolCall(value)
             return
           }
 
           case "tool-result": {
             const toolCall = yield* readToolCall(value.id)
+            // 真实执行已保存结果时，回声不重复消费图片 proof 或输出准备。
+            if (toolCall?.part.state.status === "completed" || toolCall?.part.state.status === "error") return
             if (!toolCall && value.result.type === "error") return
             if (value.result.type === "error") {
               // 已完成或已收尾的重复事件没有新失败，不能再次触发权限询问。
@@ -765,7 +777,8 @@ const layer = Layer.effect(
           }
 
           case "provider-error":
-            throw new Error(value.message)
+            yield* Effect.fail(value)
+            return
 
           case "step-start":
             // #557：懒快照——start-step 不再兜底 track；baseline 由首个副作用 Tool 的 captureToolSnapshot 建立。
@@ -1087,8 +1100,47 @@ const layer = Layer.effect(
         // 每个 process() 只允许一次语义重试；跨 process 的新回合重新获得额度。
         outputLimitRetried = false
 
+        const bridge = yield* EffectBridge.make()
+        // 网络断流只结束消费；这个 controller 只属于用户取消，不能误杀在途工具。
+        const toolAbort = new AbortController()
+        const executions: Promise<Exit.Exit<void, unknown>>[] = []
+        const tools = Object.fromEntries(Object.entries(streamInput.tools).map(([name, item]) => {
+          const execute = item.execute
+          if (!execute) return [name, item]
+          return [name, { ...item, execute: (args: Parameters<typeof execute>[0], options: Parameters<typeof execute>[1]) => {
+            if (toolAbort.signal.aborted) return Promise.reject(new DOMException("Aborted", "AbortError"))
+            // 登记必须先于首个 await；流断开只释放连接，不取消已经开始的工具。
+            ctx.hasToolCall = true
+            const job = bridge.promise(Effect.gen(function* () {
+              yield* startToolCall({ type: "tool-call", id: options.toolCallId, name, input: args })
+              const exit = yield* Effect.tryPromise({
+                try: () => Promise.resolve(execute(args, { ...options, abortSignal: toolAbort.signal })),
+                catch: error => error,
+              }).pipe(Effect.exit)
+              if (Exit.isSuccess(exit)) {
+                yield* completeToolCall(options.toolCallId, toolResultOutput(LLMEvent.toolResult({
+                  id: options.toolCallId, name, result: ToolResultValue.make(exit.value),
+                })))
+                return exit
+              }
+              if (yield* failToolCall(options.toolCallId, Cause.squash(exit.cause))) {
+                yield* askDoomLoopIfTripleFailure(name, isRecord(args) ? args : { value: args })
+              }
+              return exit
+            }))
+            // 普通工具失败已作为结果保存；登记/落库失败才使收尾本身失败。
+            executions.push(job.then(() => Exit.succeed(undefined), error => Exit.fail(error)))
+            return job.then(exit => {
+              if (Exit.isSuccess(exit)) return exit.value
+              throw Cause.squash(exit.cause)
+            })
+          } }]
+        }))
+
         const result = yield* Effect.gen(function* () {
           yield* Effect.gen(function* () {
+            // 每次网络重试只跟踪本 attempt 的工具，已完成 Promise 不能重复等待。
+            executions.length = 0
             ctx.currentText = undefined
             ctx.reasoningMap = {}
             ctx.attemptTextChars = 0
@@ -1098,7 +1150,7 @@ const layer = Layer.effect(
             ctx.hasReasoning = false
             ctx.hasToolCall = false
             yield* status.set(ctx.sessionID, { type: "busy" })
-            const stream = llm.stream({ ...streamInput, onRequestPrepared: (body) => Effect.gen(function* () {
+            const stream = llm.stream({ ...streamInput, tools, onRequestPrepared: (body) => Effect.gen(function* () {
               const metadata = yield* MessageV2.inputEstimateHistory({ sessionID: ctx.sessionID, messageID: ctx.assistantMessage.id, model: ctx.model }).pipe(
                 Effect.provideService(Database.Service, database),
               )
@@ -1142,7 +1194,7 @@ const layer = Layer.effect(
               yield* publishAssistant(ctx.assistantMessage, events)
             }) })
 
-            yield* stream.pipe(
+            const exit = yield* stream.pipe(
               Stream.tap((event) =>
                 Effect.gen(function* () {
                   if (timing && !timing.firstStreamEvent) {
@@ -1154,31 +1206,34 @@ const layer = Layer.effect(
               ),
               Stream.takeUntil(() => ctx.needsCompaction),
               Stream.runDrain,
+              // 只在 Provider 消费边界归一 cause；收尾持久化故障不进入网络重试。
+              Effect.catchCauseIf(cause => !Cause.hasInterruptsOnly(cause), cause => Effect.fail(Cause.squash(cause))),
+              Effect.exit,
             )
+            if (Exit.isFailure(exit) && (Cause.hasInterrupts(exit.cause) || Cause.squash(exit.cause) === preflightCompaction)) {
+              return yield* Effect.failCause(exit.cause)
+            }
+            // 正常和断流共用一个屏障，不能用 cleanup 唤醒的 Deferred 冒充执行完成。
+            const settled = yield* Effect.promise(() => Promise.all(executions))
+            const failed = settled.find(Exit.isFailure)
+            if (failed) return yield* Effect.die(Cause.squash(failed.cause))
+            if (Exit.isSuccess(exit)) return undefined
+            const retry = SessionRetry.retryable(toRetryCarrier(Cause.squash(exit.cause)), input.model.providerID)
+            if (!retry) return yield* Effect.failCause(exit.cause)
+            yield* discardIncompleteAttempt()
+            if (!ctx.hasToolCall) return yield* Effect.failCause(exit.cause)
+            // 已有真实工具结果时，把当前消息留在未完成态，下一 process 用已保存结果续跑。
+            ctx.assistantMessage.finish = "unknown"
           }).pipe(
-            // 保留 adapter 对 raw network_error 的更强失败路径，只补同一 no-Tool 撤回责任。
-            Effect.tapError((error) => error instanceof ProviderError.ResponseStreamError && error.message === "Provider finish_reason: network_error" && !ctx.hasToolCall ? discardIncompleteAttempt() : Effect.void),
             // 转入已有 compact 结果，保留 cleanup 且不发布虚构的 provider 错误。
             Effect.catchCauseIf(
               (cause) => Cause.squash(cause) === preflightCompaction, () => Effect.void,
-            ),
-            Effect.onInterrupt(() =>
-              Effect.gen(function* () {
-                aborted = true
-                if (!ctx.assistantMessage.error) {
-                  yield* halt(new DOMException("Aborted", "AbortError"))
-                }
-              }),
-            ),
-            Effect.catchCauseIf(
-              (cause) => !Cause.hasInterruptsOnly(cause),
-              (cause) => Effect.fail(Cause.squash(cause)),
             ),
             // #214：SessionRetry.retry 封装替代 Effect.retry(SessionRetry.policy(...))
             // #214：processor 和 reviewer 子代理流共享同一重试策略和分类逻辑
             SessionRetry.retry({
               provider: input.model.providerID,
-              parse,
+              parse: toRetryCarrier,
               set: (info) => {
                 return status.set(ctx.sessionID, {
                   type: "retry",
@@ -1189,9 +1244,18 @@ const layer = Layer.effect(
                 })
               },
             }),
+            // 同一个取消 owner 覆盖消费、工具等待和退避，先停工具再发布中止。
+            Effect.onInterrupt(() => Effect.gen(function* () {
+              aborted = true
+              toolAbort.abort()
+              if (!ctx.assistantMessage.error) yield* halt(new DOMException("Aborted", "AbortError"))
+            })),
+            // 末端分别记录普通错误和收尾 defect，纯中断仍原样传播。
             Effect.catch(halt),
+            Effect.catchDefect(halt),
             // #139：ensuring cleanup 必须尊重 aborted，跳过慢 snapshot
             Effect.ensuring(cleanup()),
+            Effect.ensuring(Effect.sync(() => toolAbort.abort())),
           )
 
           if (ctx.needsCompaction) return "compact"

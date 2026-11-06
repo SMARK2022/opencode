@@ -492,8 +492,6 @@ const layer = Layer.effect(
         message: "Provider output exceeded the 64 KiB text limit",
       }) })
       let outputLimitRetried = false
-      // policy的set不携带cause，在私有parse闭包交接准确错误，不修改公共重试接口。
-      let retryErrorForAttempt = retryError
       // 请求归属与工具读取门寿命不同：dispatch固定代际，终态后的同代最终消耗仍结算。
       const dispatchedGoal = yield* goals.get(session.id)
       const expectedUsage = Option.isSome(dispatchedGoal) && dispatchedGoal.value.status === "active" ? { goalID: dispatchedGoal.value.id, generation: dispatchedGoal.value.generation } : undefined
@@ -531,24 +529,21 @@ const layer = Layer.effect(
             }
             if (overflowFailure || publisher.hasProviderError()) return
             if (LLMEvent.is.providerError(event)) {
-              if (isContextOverflowFailure(event) && !publisher.hasAssistantStarted()) {
-                overflowFailure = event
-                return
-              }
+              // 原事件保留到统一收尾，不能先发布终态或被随后运输错误覆写。
+              overflowFailure = event
               terminalError = !isContextOverflowFailure(event)
+              return
             }
             if (event.type === "tool-call") hasToolCall = true
             if (event.type === "text-delta") {
               // 拒绝越界delta后撤回已接受前缀，flush和durable/live清理仍走同一发布owner。
               if (attemptTextChars + event.text.length > 64 * 1024) {
-                yield* withPublication(publisher.failAssistant(outputLength.reason.message, false, false, true))
                 return yield* outputLength
               }
               attemptTextChars += event.text.length
             }
             if (event.type === "step-finish" && event.reason === "unknown" && !hasToolCall && !publisher.stepSettlement()) {
               // 成功事件和用量确认前清理；tool-bearing attempt 从不重放。
-              yield* withPublication(publisher.failAssistant(incomplete.reason.message, false, false, true))
               return yield* incomplete
             }
             yield* publish(event)
@@ -602,30 +597,13 @@ const layer = Layer.effect(
         // 成功 EOF 保留默认残片通知；只有失败/中断 cleanup 使用退出安全模式。
         Effect.onExit(exit => withPublication(publisher.flush(exit._tag === "Failure"))),
         )
-      }).pipe(Effect.retry({
-        schedule: SessionRetry.policy({
-          provider: String(model.provider), parse: error => {
-            // 必须在set发布Retried之前拒绝终态；Effect v4的while会先执行内层schedule副作用。
-            if (error !== incomplete && error !== outputLength) return { name: "UnknownError", data: {} }
-            if (error === outputLength && (hasToolCall || outputLimitRetried)) return { name: "MessageOutputLengthError", data: {} }
-            if (error === outputLength) outputLimitRetried = true
-            retryErrorForAttempt = error === outputLength
-              ? new SessionV1.APIError({ message: outputLength.reason.message, isRetryable: true, metadata: { reason: "output-length" } })
-              : retryError
-            return retryErrorForAttempt.toObject()
-          },
-          set: ({ attempt }) => Effect.gen(function* () {
-            hasToolCall = false
-            yield* withPublication(publisher.retry(attempt, retryErrorForAttempt.data))
-          }),
-        }),
-      }))
+      })
 
       return yield* Effect.uninterruptibleMask((restore) =>
         Effect.gen(function* () {
           const stream = yield* restore(providerStream).pipe(Effect.exit)
-          const failure =
-            stream._tag === "Failure" ? Option.getOrUndefined(Cause.findErrorOption(stream.cause)) : undefined
+          const failure = overflowFailure ??
+            (stream._tag === "Failure" ? Option.getOrUndefined(Cause.findErrorOption(stream.cause)) : undefined)
           if (
             recoverOverflow &&
             !publisher.hasAssistantStarted() &&
@@ -637,14 +615,24 @@ const layer = Layer.effect(
             nearOverflowNotified.delete(session.id)
             return yield* Effect.die(continueAfterOverflowCompaction(currentStep))
           }
-          if (overflowFailure) yield* publish(overflowFailure)
           const llmFailure = failure instanceof LLMError ? failure : undefined
-          if (llmFailure && !publisher.hasProviderError()) {
-            yield* withPublication(publisher.failUnsettledTools("Provider did not return a tool result", true, true))
-            yield* withPublication(publisher.failAssistant(llmFailure.reason.message, false, true))
-          }
           if (stream._tag === "Failure" && Cause.hasInterrupts(stream.cause)) yield* FiberSet.clear(toolFibers)
           const settled = yield* restore(awaitToolFibers(toolFibers)).pipe(Effect.exit)
+          const providerFailure = overflowFailure ?? llmFailure
+          const recoverable = providerFailure ? SessionRetry.retryable(providerFailure, String(model.provider)) : undefined
+          if (settled._tag === "Success" && recoverable && !hasToolCall) {
+            yield* withPublication(publisher.failAssistant(recoverable.message, false, false, true))
+            // RunError 保持现有 LLMError；共享 policy 直接读取这个 typed carrier。
+            return yield* (llmFailure ?? new LLMError({ module: "SessionRunner", method: "stream",
+              reason: new TransportReason({ message: recoverable.message }),
+            }))
+          }
+          // 只有实际工具结束后才正式发布助手失败，确认用量继续在下方原位置结算。
+          if (overflowFailure) yield* publish(overflowFailure)
+          if (llmFailure && !publisher.hasProviderError()) {
+            yield* withPublication(publisher.failUnsettledTools("Provider did not return a tool result", true, true))
+            yield* withPublication(publisher.failAssistant(llmFailure.reason.message, false, true, failure === incomplete || failure === outputLength))
+          }
           // 熔断不能重放或提前结算本地副作用；原fiber完成后才收尾剩余输入/托管工具。
           if (failure === outputLength)
             yield* withPublication(publisher.failUnsettledTools(outputLength.reason.message, false, true))
@@ -719,6 +707,10 @@ const layer = Layer.effect(
           if (stream._tag === "Success" && !publisher.hasProviderError())
             yield* withPublication(publisher.failUnsettledTools("Provider did not return a tool result", true, finalizer))
           if (settled._tag === "Failure" && isUserDeclined(settled.cause)) return yield* Effect.interrupt
+          if (recoverable && hasToolCall && !aborted) {
+            // 下一回合重读带真实工具结果的历史，不重发旧请求，也不借 Goal 续跑。
+            return { needsContinuation: true, canContinueGoal: false, step: currentStep }
+          }
           // typed鉴权/路由/格式/策略错误不等同于source的API/Unknown错误。
           // 只在本轮结算后读取显式策略，原始中断和未授权错误继续传播同一cause。
           const eligibleFailure = stream._tag === "Failure" && !Cause.hasInterrupts(stream.cause) && llmFailure && !isContextOverflowFailure(llmFailure) && !["Authentication", "NoRoute", "InvalidProviderOutput", "ContentPolicy"].includes(llmFailure.reason._tag)
@@ -744,7 +736,32 @@ const layer = Layer.effect(
             step: currentStep,
           }
         }),
-      )
+      ).pipe(
+        // 外层 retry 只在工具真实结算后运行；退避期间取消仍走同一中断收尾。
+        SessionRetry.retry({
+        provider: String(model.provider), parse: error => {
+          if (hasToolCall) return { name: "UnknownError", data: {} }
+          // 语义哨兵先处理；它们本身不可重试，不能被一般 carrier 分支吞掉额度。
+          if (error === incomplete) return retryError.toObject()
+          if (error === outputLength) {
+            if (outputLimitRetried) return { name: "MessageOutputLengthError", data: {} }
+            outputLimitRetried = true
+            return new SessionV1.APIError({ message: outputLength.reason.message, isRetryable: true, metadata: { reason: "output-length" } }).toObject()
+          }
+          // 保留本轮首个 Provider 错误；其余原生资格和展示字段完全由共享策略处理。
+          return overflowFailure
+        },
+        set: ({ attempt, error }) => Effect.gen(function* () {
+          // 新 attempt 前清掉上一轮 provider 终态，否则流处理会继续跳过后续事件。
+          hasToolCall = false
+          overflowFailure = undefined
+          terminalError = false
+          yield* withPublication(publisher.retry(attempt, error))
+        }),
+      }), Effect.onInterrupt(() =>
+        // 退避在尝试之外；取消此时也必须闭合同一助手，不能留下无终态的 Retried。
+        withPublication(publisher.failAssistant("Provider turn interrupted", true, true)),
+      ))
     }, Effect.scoped)
     type RunTurn = (
       sessionID: SessionSchema.ID,

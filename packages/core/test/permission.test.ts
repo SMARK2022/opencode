@@ -17,7 +17,7 @@ import { Config } from "@opencode-ai/core/config"
 import { ConfigAutoReview } from "@opencode-ai/core/config/auto-review"
 import { LayerNodePlatform } from "@opencode-ai/core/effect/app-node-platform"
 import { SessionRunnerModel } from "@opencode-ai/core/session/runner/model"
-import { HttpContext, HttpRequestDetails, HttpResponseDetails, InvalidRequestReason, LLMClient, LLMError, LLMEvent, LLMRequest, Model, ToolChoice } from "@opencode-ai/llm"
+import { HttpContext, HttpRequestDetails, HttpResponseDetails, InvalidRequestReason, LLMClient, LLMError, LLMEvent, LLMRequest, Model, RateLimitReason, ToolChoice } from "@opencode-ai/llm"
 import { OpenAIChat } from "@opencode-ai/llm/protocols/openai-chat"
 import { OpenAIResponses } from "@opencode-ai/llm/protocols/openai-responses"
 import { Auth } from "@opencode-ai/llm/route"
@@ -49,7 +49,7 @@ let malformed = false
 let rejectedToolChoiceBody: string | undefined
 let reviewBeforeStream: Deferred.Deferred<void> | undefined
 let reviewArrivals: Deferred.Deferred<void> | undefined
-let reviewScript: Stream.Stream<LLMEvent>[] | undefined
+let reviewScript: Stream.Stream<LLMEvent, LLMError>[] | undefined
 let reviewOAuth = false
 let reviewOpenTool = false
 const reviewBodies: unknown[] = []
@@ -1027,7 +1027,7 @@ describe("PermissionV2", () => {
       LLMEvent.stepFinish({ index: 0, reason: "tool-calls" }), LLMEvent.finish({ reason: "tool-calls" }),
     )
     let sequence = 0
-    const run = (script: Stream.Stream<LLMEvent>[]) => {
+    const run = (script: Stream.Stream<LLMEvent, LLMError>[]) => {
       reviewScript = script
       reviewRequests.length = 0
       return service.ask(assertion({ action: "edit", resources: ["src/protocol.ts"], metadata: { diff: `protocol-${++sequence}` } }))
@@ -1098,9 +1098,26 @@ describe("PermissionV2", () => {
     expect(visible).toContain("second malformed reply")
     expect(visible).toContain("third malformed reply")
     const hiddenBeforeProviderFailure = hiddenIDs.length
-    expect(yield* run([Stream.make(LLMEvent.providerError({ message: "provider unavailable" }))])).toMatchObject({ effect: "deny" })
-    expect(reviewRequests).toHaveLength(1)
+    const providerRecovering = yield* run([Stream.make(LLMEvent.providerError({ message: "connection refused", retryable: true })), tool(accepted)]).pipe(Effect.forkScoped)
+    // provider-error 先进入共享退避；虚拟时钟只推进这一个已登记的等待。
+    yield* TestClock.adjust("3 seconds")
+    expect(yield* Fiber.join(providerRecovering)).toMatchObject({ effect: "allow" })
+    expect(reviewRequests).toHaveLength(2)
     expect(hiddenIDs).toHaveLength(hiddenBeforeProviderFailure)
+    // 网络恢复不消耗协议补试；typed 429 之后仍保留一次原协议修复。
+    expect(yield* run([
+      Stream.fail(new LLMError({ module: "permission-reviewer-test", method: "stream",
+        reason: new RateLimitReason({ message: "rate limited", retryAfterMs: 0 }) })),
+      text(malformedText),
+      tool(accepted),
+    ])).toMatchObject({ effect: "allow" })
+    expect(reviewRequests).toHaveLength(3)
+    expect(hiddenIDs).toHaveLength(hiddenBeforeProviderFailure + 2)
+    // 明确不可重试的 provider 错误仍立即进入原 fail-closed 路径。
+    expect(yield* run([Stream.make(LLMEvent.providerError({ message: "provider unavailable", retryable: false }))])).toMatchObject({ effect: "deny" })
+    expect(reviewRequests).toHaveLength(1)
+    expect(hiddenIDs).toHaveLength(hiddenBeforeProviderFailure + 2)
+    const hiddenBeforeCancel = hiddenIDs.length
     // 取消第二次真实流仍由退出owner收尾，不产生第三次尝试或人工pending。
     const retryStarted = yield* Deferred.make<void>()
     const cancelled = yield* run([text("cancel before repair"), Stream.unwrap(Deferred.succeed(retryStarted, undefined).pipe(Effect.as(Stream.never)))]).pipe(Effect.forkScoped)
@@ -1108,7 +1125,7 @@ describe("PermissionV2", () => {
     yield* Fiber.interrupt(cancelled)
     expect((yield* sessions.context(childID)).at(-1)).toMatchObject({ type: "assistant", finish: "error" })
     expect(reviewRequests).toHaveLength(2)
-    expect(hiddenIDs).toHaveLength(hiddenBeforeProviderFailure + 2)
+    expect(hiddenIDs).toHaveLength(hiddenBeforeCancel + 2)
     expect(yield* service.list()).toEqual([])
   }))
 
@@ -1162,6 +1179,23 @@ describe("PermissionV2", () => {
     expect(timeoutInputs[1]?.match(/Time advisory:/g)).toHaveLength(1)
     expect(reviewTerminalWriteFailures).toBe(0)
     expect(reviewTerminals).toEqual(["tool", "assistant"])
+    // 网络退避消耗原 deadline：999ms 后重发，下一次只余 1ms 就进入原协议补试。
+    reviewRequests.length = 0
+    interrupted = 0
+    const retryDeadlineStarted = yield* Deferred.make<void>()
+    reviewScript = [
+      Stream.fail(new LLMError({ module: "permission-reviewer-test", method: "stream",
+        reason: new RateLimitReason({ message: "retry later", retryAfterMs: 999 }) })),
+      hang(retryDeadlineStarted),
+      success,
+    ]
+    const retryDeadline = yield* service.ask(request("network-deadline")).pipe(Effect.forkScoped)
+    yield* TestClock.adjust("999 millis")
+    yield* Deferred.await(retryDeadlineStarted)
+    yield* TestClock.adjust("1 millis")
+    expect(yield* Fiber.join(retryDeadline)).toMatchObject({ effect: "allow" })
+    expect(interrupted).toBe(1)
+    expect(reviewRequests).toHaveLength(3)
     const child = yield* database.db.select().from(SessionTable).where(eq(SessionTable.parent_id, SessionV2.ID.make("ses_test"))).get().pipe(Effect.orDie)
     expect(child).toBeDefined()
     if (!child) return yield* Effect.die("Expected reviewer child")

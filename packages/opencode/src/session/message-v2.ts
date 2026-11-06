@@ -36,6 +36,7 @@ import { encodeProofKey } from "@opencode-ai/core/session/history-proof"
 import { Option } from "effect"
 import { MessageTable, PartTable, SessionTable } from "@opencode-ai/core/session/sql"
 import { ProviderError } from "@/provider/error"
+import { SessionRetry } from "./retry"
 import { iife } from "@/util/iife"
 import { errorMessage } from "@/util/error"
 import { isMedia } from "@/util/media"
@@ -637,7 +638,7 @@ function hydrate(
   })
 }
 
-function providerMeta(metadata: Record<string, any> | undefined) {
+export function providerMeta(metadata: Record<string, any> | undefined) {
   if (!metadata) return undefined
   // 内部 primitive 标记不属于 providerOptions；保留对象 namespace 及自定义供应商签名。
   const rest = Object.fromEntries(
@@ -1716,6 +1717,8 @@ export function fromError(
   e: unknown,
   ctx: { providerID: ProviderV2.ID; aborted?: boolean },
 ): NonNullable<Assistant["error"]> {
+  const native = SessionRetry.fromError(e, ctx.providerID)
+  if (native) return native
   switch (true) {
     case e instanceof DOMException && e.name === "AbortError":
       return new AbortedError(

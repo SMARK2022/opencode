@@ -10,6 +10,7 @@ import {
   TransportReason,
   AuthenticationReason,
   InvalidRequestReason,
+  UnknownProviderReason,
   type LLMClientShape,
   type LLMRequest,
 } from "@opencode-ai/llm"
@@ -438,7 +439,8 @@ const providerUnavailable = () =>
   new LLMError({
     module: "test",
     method: "stream",
-    reason: new TransportReason({ message: "Provider unavailable" }),
+    // 此 fixture 锁定最终失败/Goal 合同；暂时运输故障由上面的恢复场景独立验证。
+    reason: new UnknownProviderReason({ message: "Provider unavailable" }),
   })
 
 const setupOverflowRecovery = Effect.gen(function* () {
@@ -951,9 +953,10 @@ goalTests.effect("gates native terminal error continuation and preserves typed a
         yield* session.prompt({ sessionID: id, prompt: Prompt.make({ text: "Start" }), resume: false })
         requests.length = 0
         responses = [normal, normal]
+        // 此处验证 Goal 的终止错误策略，网络自动恢复由独立会话测试覆盖。
         responseStream = kind === "raw"
           ? Stream.fail(providerUnavailable())
-          : Stream.fromIterable([LLMEvent.providerError({ message: "Provider unavailable" })])
+          : Stream.fromIterable([LLMEvent.providerError({ message: "Provider unavailable", retryable: false })])
         const exit = yield* runner.run({ sessionID: id, force: true }).pipe(Effect.exit)
         // raw失败默认保留typed cause；显式开启后，错误与正常轮次共用两次续跑额度。
         expect(Exit.isFailure(exit)).toBe(kind === "raw" && !enabled)
@@ -1034,6 +1037,37 @@ it.effect("defaults native goal continuation to 32 and resets the allowance on a
 )
 
 describe("SessionRunnerLLM", () => {
+  it.effect("recovers native transport and provider frames without a Goal", () => Effect.gen(function* () {
+    yield* setup
+    const session = yield* SessionV2.Service
+    const runner = yield* SessionRunner.Service
+    const events = yield* EventV2.Service
+    const retries = yield* Queue.unbounded<number>()
+    const off = yield* events.listen(event => Schema.is(SessionEvent.Retried)(event)
+      ? Queue.offer(retries, event.data.attempt).pipe(Effect.asVoid) : Effect.void)
+    yield* Effect.addFinalizer(() => off)
+    yield* Effect.addFinalizer(() => Effect.sync(() => { responses = undefined; responseStream = undefined }))
+    for (const frame of [false, true]) {
+      const id = SessionV2.ID.make(`ses_network_recovery_${frame}`)
+      yield* insertSession(id)
+      yield* session.prompt({ sessionID: id, prompt: Prompt.make({ text: "Recover" }), resume: false })
+      responseStream = Stream.concat(Stream.fromIterable(fragmentFixture("reasoning", "failed", ["partial"]).partialEvents), frame
+        ? Stream.make(LLMEvent.providerError({ message: "provider request failed" }))
+        : Stream.fail(new LLMError({ module: "test", method: "stream", reason: new TransportReason({ message: "connection refused" }) })))
+      responses = [fragmentFixture("text", "recovered", ["recovered"]).completeEvents]
+      const run = yield* runner.run({ sessionID: id, force: true }).pipe(Effect.exit, Effect.forkChild)
+      // 旧入口提前结束时立即变红，不依赖长时间等候一个不会发布的重试通知。
+      expect(yield* Effect.raceFirst(Queue.take(retries), Fiber.await(run).pipe(Effect.as("stopped")))).toBe(1)
+      yield* TestClock.adjust("3 seconds")
+      expect(yield* Fiber.join(run)).toMatchObject({ _tag: "Success" })
+      const context = yield* session.context(id)
+      expect(context.filter(message => message.type === "assistant")).toMatchObject([
+        { finish: "stop", content: [{ type: "text", text: "recovered" }] },
+      ])
+      expect(JSON.stringify(context)).not.toContain("partial")
+    }
+  }))
+
   it.effect("retries incomplete Native completions without replaying tools or retaining failed prefixes", () =>
     Effect.gen(function* () {
       yield* setup
@@ -1084,19 +1118,22 @@ describe("SessionRunnerLLM", () => {
         const id = SessionV2.ID.make(`ses_incomplete_exit_${cancel}`)
         yield* insertSession(id)
         yield* session.prompt({ sessionID: id, prompt: Prompt.make({ text: "Handle incomplete output" }), resume: false })
-        responses = Array.from({ length: 6 }, () => failed("reasoning"))
+        // 非取消路径跨越旧五次截止后恢复；取消路径仍在第一次退避立即退出。
+        responses = [...Array.from({ length: 7 }, () => failed("reasoning")), recovered]
         requests.length = 0
         const fiber = yield* runner.run({ sessionID: id, force: true }).pipe(Effect.exit, Effect.forkChild)
-        for (let attempt = 1; attempt <= (cancel ? 1 : 5); attempt++) {
+        for (let attempt = 1; attempt <= (cancel ? 1 : 7); attempt++) {
           expect(yield* Queue.take(retries)).toBe(attempt)
           if (!cancel) yield* TestClock.adjust("40 seconds")
         }
         if (cancel) yield* Fiber.interrupt(fiber)
         const result = yield* Fiber.await(fiber)
-        expect(cancel ? Exit.isFailure(result) : Exit.isSuccess(result) && Exit.isFailure(result.value)).toBe(true)
-        expect(requests).toHaveLength(cancel ? 1 : 6)
-        expect((yield* session.context(id)).filter(message => message.type === "assistant")).toMatchObject([{ finish: "error", content: [] }])
-        expect((yield* usage.list({ sessionID: id }))[0]).toMatchObject({ status: cancel ? "aborted" : "error", assistantCount: 1, stepCount: 0, tokens: { total: 0 } })
+        expect(cancel ? Exit.isFailure(result) : Exit.isSuccess(result) && Exit.isSuccess(result.value)).toBe(true)
+        expect(requests).toHaveLength(cancel ? 1 : 8)
+        expect((yield* session.context(id)).filter(message => message.type === "assistant")).toMatchObject([
+          cancel ? { finish: "error", content: [] } : { finish: "stop", content: [{ type: "text", text: "recovered" }] },
+        ])
+        expect((yield* usage.list({ sessionID: id }))[0]).toMatchObject({ status: cancel ? "aborted" : "completed", assistantCount: 1, stepCount: cancel ? 0 : 1, tokens: { total: 0 } })
       }
       for (const hosted of [false, true]) {
         const id = SessionV2.ID.make(`ses_incomplete_tool_${hosted}`)
@@ -1301,16 +1338,15 @@ describe("SessionRunnerLLM", () => {
           expect(stopped).toBe(true)
           continue
         }
-        const exit = yield* Fiber.await(fiber)
-        expect(Exit.isFailure(exit)).toBe(true)
-        if (Exit.isSuccess(exit)) throw new Error("Provider deadline unexpectedly succeeded")
-        expect(Cause.squash(exit.cause)).toMatchObject({ _tag: "LLM.Error", reason: { kind: "timeout" } })
+        const retried = (yield* session.history({ sessionID, limit: 100 })).events.findLast(event => event.type === SessionEvent.Retried.type)
+        expect(retried).toMatchObject({ data: { error: { message: "Provider request timed out" } } })
         expect(stopped).toBe(true)
-        // 到期仍经原 owner 结算失败和已收到的文本，不把 partial 数据当成功 EOF。
+        // 总期限仍终止原流；随后通过原共享退避恢复，不把失败前缀当成功 EOF。
+        responses = [fragmentFixture("text", "timeout-recovered", ["recovered"]).completeEvents]
+        yield* TestClock.adjust("3 seconds")
+        yield* Fiber.join(fiber)
         expect((yield* session.context(sessionID)).findLast((message) => message.type === "assistant")).toMatchObject({
-          finish: "error",
-          error: { message: "Provider request timed out" },
-          content: [expect.objectContaining({ type: "text", text: expect.stringContaining(".") })],
+          finish: "stop", content: [{ type: "text", text: "recovered" }],
         })
       }
     }),
@@ -1895,7 +1931,7 @@ describe("SessionRunnerLLM", () => {
           LLMEvent.toolError({ id: "nudge-failed-call", name: "write", message: "nudge failed" }),
           LLMEvent.toolResult({ id: "nudge-failed-call", name: "write", result: { type: "error", value: "nudge failed" } }),
           LLMEvent.stepFinish({ index: 0, reason: "stop" }), LLMEvent.finish({ reason: "stop" }),
-        ] : [LLMEvent.providerError({ message: "nudge failed" })]),
+        ] : [LLMEvent.providerError({ message: "nudge failed", retryable: false })]),
       ]]
       const failed = yield* invoke(childID, "research", "none")
       expect(failed.result).toEqual({ type: "error", value: `Subagent failed (task_id: ${childID}): nudge failed` })
@@ -2645,6 +2681,40 @@ describe("SessionRunnerLLM", () => {
     }),
   )
 
+  it.effect("manual compaction retries transient summary failures without committing partial text", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const session = yield* SessionV2.Service
+      response = fragmentFixture("text", "compact-before", ["Earlier answer"]).completeEvents
+      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Earlier question" }), resume: false })
+      yield* session.resume(sessionID)
+      const failedSummary = [LLMEvent.stepStart({ index: 0 }), LLMEvent.textStart({ id: "summary" }),
+        LLMEvent.textDelta({ id: "summary", text: "failed-summary" }),
+        LLMEvent.providerError({ message: "provider request failed" })]
+      responses = [...Array.from({ length: 7 }, () => failedSummary),
+        fragmentFixture("text", "compact-recovered", ["Recovered summary"]).completeEvents]
+      requests.length = 0
+      const run = yield* session.compact({ sessionID }).pipe(Effect.forkChild)
+      // 每次请求到达后再推进虚拟退避，验证超过旧五次截止仍恢复且不使用真实等待。
+      for (let attempt = 1; attempt <= 7; attempt++) {
+        while (requests.length < attempt) yield* Effect.yieldNow
+        yield* TestClock.adjust("30 seconds")
+      }
+      yield* Fiber.join(run)
+      expect(requests).toHaveLength(8)
+      const context = yield* session.context(sessionID)
+      expect(context.filter(message => message.type === "compaction")).toMatchObject([{ summary: "Recovered summary" }])
+      expect(JSON.stringify(context)).not.toContain("failed-summary")
+      const history = yield* session.history({ sessionID, limit: 100 })
+      const started = history.events.filter(event => event.type === SessionEvent.Compaction.Started.type)
+      const ended = history.events.filter(event => event.type === SessionEvent.Compaction.Ended.type)
+      expect(started).toHaveLength(1)
+      expect(ended).toHaveLength(1)
+      expect(started[0]?.type === SessionEvent.Compaction.Started.type && ended[0]?.type === SessionEvent.Compaction.Ended.type
+        ? ended[0].data.messageID === started[0].data.messageID : false).toBe(true)
+    }),
+  )
+
   it.live("manual compaction stops after summarizing retained tool tail", () =>
     Effect.gen(function* () {
       yield* setup
@@ -3207,7 +3277,8 @@ describe("SessionRunnerLLM", () => {
       const session = yield* setupOverflowRecovery
       responses = [
         [LLMEvent.providerError({ message: "prompt too long", classification: "context-overflow" })],
-        [LLMEvent.providerError({ message: "summary unavailable" })],
+        // 本用例只验证原 overflow 发布；摘要失败显式拒绝重试，避免共享退避改变焦点。
+        [LLMEvent.providerError({ message: "summary unavailable", retryable: false })],
       ]
       yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Continue" }), resume: false })
       yield* session.resume(sessionID)
@@ -5053,12 +5124,14 @@ describe("SessionRunnerLLM", () => {
     }),
   )
 
-  it.effect("awaits started local tools before surfacing provider stream failure", () =>
+  it.effect("awaits started local tools and continues after retryable provider stream failure", () =>
     Effect.gen(function* () {
       yield* setup
       const session = yield* SessionV2.Service
       yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Settle before failing" }), resume: false })
-      const failure = providerUnavailable()
+      const failure = new LLMError({ module: "test", method: "stream", reason: new TransportReason({ message: "connection refused" }) })
+      responses = [fragmentFixture("text", "after-tool-failure", ["recovered"]).completeEvents]
+      executions.length = 0
       toolExecutionGate = yield* Deferred.make<void>()
       responseStream = Stream.concat(
         Stream.fromIterable([
@@ -5072,8 +5145,12 @@ describe("SessionRunnerLLM", () => {
       while (executions.length === 0) yield* Effect.yieldNow
       yield* Effect.yieldNow
       yield* Deferred.succeed(toolExecutionGate, undefined)
-      expect(yield* Fiber.join(run).pipe(Effect.flip)).toBe(failure)
+      yield* Fiber.join(run)
       toolExecutionGate = undefined
+      // 下一请求必须真正携带已执行结果；不能只是把原错误转成成功返回。
+      expect(executions).toHaveLength(1)
+      expect(requests[1]?.messages.map(message => message.role)).toEqual(["user", "assistant", "tool"])
+      expect(JSON.stringify(requests[1]?.messages)).toContain("settle")
 
       expect(yield* session.context(sessionID)).toMatchObject([
         { type: "user", text: "Settle before failing" },
@@ -5083,6 +5160,7 @@ describe("SessionRunnerLLM", () => {
             { type: "tool", id: "call-before-failure", state: { status: "completed", structured: { text: "settle" } } },
           ],
         },
+        { type: "assistant", finish: "stop", content: [{ type: "text", text: "recovered" }] },
       ])
     }),
   )
@@ -5468,10 +5546,11 @@ describe("SessionRunnerLLM", () => {
       responses = undefined
       streamGate = undefined
       streamStarted = undefined
+      // 终止投影显式拒绝重试，避免用永久失败 fixture 意外进入无限网络恢复。
       // provider-error 可能晚于确认 usage；providerFailed 不能抹掉已发生的消耗。
       response = [LLMEvent.stepStart({ index: 0 }),
         LLMEvent.stepFinish({ index: 0, reason: "stop", usage: { nonCachedInputTokens: 8 } }),
-        LLMEvent.providerError({ message: "Provider unavailable" })]
+        LLMEvent.providerError({ message: "Provider unavailable", retryable: false })]
 
       yield* session.resume(sessionID)
 
@@ -5495,7 +5574,7 @@ describe("SessionRunnerLLM", () => {
       yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Fail before step" }), resume: false })
 
       requests.length = 0
-      response = [LLMEvent.providerError({ message: "Provider unavailable" })]
+      response = [LLMEvent.providerError({ message: "Provider unavailable", retryable: false })]
 
       yield* session.resume(sessionID)
 
@@ -5568,7 +5647,7 @@ describe("SessionRunnerLLM", () => {
       response = [
         LLMEvent.stepStart({ index: 0 }),
         LLMEvent.toolCall({ id: "call-before-provider-error", name: "echo", input: { text: "settled" } }),
-        LLMEvent.providerError({ message: "Provider unavailable" }),
+        LLMEvent.providerError({ message: "Provider unavailable", retryable: false }),
       ]
 
       yield* session.resume(sessionID)
@@ -5593,7 +5672,7 @@ describe("SessionRunnerLLM", () => {
           input: { query: "effect" },
           providerExecuted: true,
         }),
-        LLMEvent.providerError({ message: "Provider unavailable" }),
+        LLMEvent.providerError({ message: "Provider unavailable", retryable: false }),
       ]
 
       yield* session.resume(sessionID)

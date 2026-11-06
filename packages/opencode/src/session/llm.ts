@@ -141,7 +141,8 @@ const live: Layer.Layer<
           // 所以这里补同一组 daemon-log milestone。只记录 phase/source、
           // sessionID、工具名、callID、status 和耗时；不记录 argsJson、结果、
           // metadata，避免 workflow 参数或输出进入日志。
-          await bridge.promise(Effect.logInfo("tool timing", { phase: "tool.start", ...timing }))
+          // 非业务日志不能阻塞真实 execute 的同步登记，否则断流会漏掉在途工具。
+          bridge.fork(Effect.logInfo("tool timing", { phase: "tool.start", ...timing }))
           if (!t || !t.execute) {
             await bridge.promise(Effect.logInfo("tool timing", {
               phase: "tool.end",
