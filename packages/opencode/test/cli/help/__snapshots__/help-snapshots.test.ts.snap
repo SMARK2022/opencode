@@ -269,26 +269,16 @@ exports[`opencode CLI help-text snapshots every documented command emits stable 
 show token usage and cost statistics
 
 Commands:
+  opencode stats dashboard              show a balanced usage dashboard
+                                                                  [aliases: dash, overview, summary]
   opencode stats breakdown [dimension]  attribute cost, tokens, and requests by one dimension
                                                                                        [aliases: by]
-  opencode stats overview               show a rich usage overview                [aliases: summary]
-  opencode stats dashboard              show a balanced usage dashboard              [aliases: dash]
-  opencode stats models                 rank token usage and cost by model id       [aliases: model]
-  opencode stats providers              rank token usage and cost by provider    [aliases: provider]
-  opencode stats timeline               render daily token stacks or cost bars      [aliases: daily]
-  opencode stats sessions               rank individual sessions by cost, tokens, calls, or recency
+  opencode stats timeline               inspect daily volume, composition, health, and active days
+                                                                                    [aliases: daily]
+  opencode stats sessions               rank individual sessions by tokens, cost, calls, or recency
                                                                                   [aliases: session]
-  opencode stats charts                 show the chart gallery for visual diagnostics
-                                                                                   [aliases: graphs]
-  opencode stats heatmap                show density maps for days and provider/model usage
-                                                                                     [aliases: heat]
-  opencode stats costs                  show cost-only curves, waterfalls, and distributions
-                                                                                     [aliases: cost]
-  opencode stats tokens                 show token-only input/output/cache stacks and ledger
-                                                                                    [aliases: token]
   opencode stats insights               show quantitative usage shape, attribution, outliers, and
-                                        run-rate                                  [aliases: insight]
-  opencode stats forecast               project cost run-rate and month-end spend[aliases: run-rate]
+                                        actions                                   [aliases: insight]
 
 Options:
   -h, --help         show help                                                             [boolean]
@@ -303,9 +293,9 @@ Options:
                                                                                             [string]
       --color        ANSI color mode [string] [choices: "auto", "always", "never"] [default: "auto"]
       --tools        shortcut to tool breakdown; optionally pass number of tools
-      --models       legacy shortcut: show top model rows in the dashboard; pass a number for top N
-  -n, --limit        number of model/provider rows to show                                  [number]
-  -i, --interactive  cycle dashboard views with keyboard shortcuts        [boolean] [default: false]"
+      --models       shortcut to model breakdown; pass a number for top N
+  -n, --limit        number of rows to show                                                 [number]
+  -i, --interactive  cycle stats views with keyboard shortcuts            [boolean] [default: false]"
 `;
 
 exports[`opencode CLI help-text snapshots every documented command emits stable help text: opencode export --help 1`] = `

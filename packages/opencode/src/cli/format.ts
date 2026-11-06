@@ -8,6 +8,6 @@ export function formatNumber(num: number): string {
   if (Math.abs(num) >= 1_000_000) return (num / 1_000_000).toFixed(1) + "M"
   // #174：绝对值达 1e3 用 K 后缀
   if (Math.abs(num) >= 1_000) return (num / 1_000).toFixed(1) + "K"
-  // #174：小额费用保留四位小数；去掉尾零，整数计数与紧凑量级格式保持不变。
-  return Number(num.toFixed(4)).toString()
+  // Token 和派生计数沿用源分支整数舍入；小额费用由页面专用 money formatter 保留精度。
+  return Math.round(num).toString()
 }

@@ -5,19 +5,17 @@ import { effectCmd } from "../effect-cmd"
 // #174：InstanceRef 提供 currentProject
 import { InstanceRef } from "@/effect/instance-ref"
 import { aggregateStats, type StatsReport } from "./stats-data"
-import { renderForecast, renderInsights } from "./stats-insights"
-import { renderBreakdown, renderCharts,
-  renderCosts,
+import { renderInsights } from "./stats-insights"
+import {
+  renderBreakdown,
   renderDashboard,
-  renderHeatmapPage,
   renderModels,
-  renderOverview,
   renderProviders,
   renderSessions,
   renderTimeline,
-  renderTokens,
   type ColorMode,
-  type StatsRenderOptions, } from "./stats-render"
+  type StatsRenderOptions,
+} from "./stats-render"
 
 export { formatNumber } from "../format"
 
@@ -34,11 +32,11 @@ type BaseArgs = {
 
 // #174：DashboardArgs 含 interactive
 type DashboardArgs = BaseArgs & {
-// #174：interactive 非 TTY 不进键盘循环
+  // #174：interactive 非 TTY 不进键盘循环
   interactive?: boolean
   limit?: number
   models?: unknown
-// #483：Dashboard 的快捷参数只控制展示数量；无值表示全部，带值必须是十进制非负整数
+  // #483：Dashboard 的快捷参数只控制展示数量；无值表示全部，带值必须是十进制非负整数
   tools?: unknown
 }
 
@@ -76,6 +74,10 @@ const breakdownSortChoices = ["tokens", "cost", "calls"] as const
 // #483：“默认两个月”按 60 个自然日定义；该常量同时驱动 CLI 和交互范围，防止口径漂移；
 // 固定日数也让不同月份的趋势比较拥有相同采样点数量
 const DEFAULT_STATS_DAYS = 60
+// 交互断点和 ESC 等待是源终端协议的取值，集中维护但不改变已有键盘节奏。
+const INTERACTIVE_HELP_WIDTH = 60
+const ESCAPE_PREFIX_WAIT_MS = 20
+const INTERACTIVE_RANGES = [DEFAULT_STATS_DAYS, 30, 7, 0, undefined] as const
 
 // #174：nonNegativeInteger 拒浮点与负数
 const nonNegativeInteger = (value: unknown): value is number =>
@@ -128,7 +130,7 @@ const validateStatsArgs = (args: { days?: unknown; limit?: unknown; tools?: unkn
 const withBaseOptions = (yargs: Argv) =>
   yargs
     .option("days", {
-// #174：describe 供 --help
+      // #174：describe 供 --help
       describe: "show stats for the last N days (0 means today)",
       type: "number",
       default: DEFAULT_STATS_DAYS,
@@ -201,22 +203,6 @@ const withMetricOptions = (yargs: Argv) =>
     choices: metricChoices,
   })
 
-// #174：withDetailOptions 追加展示参（保留给 charts/heatmap 等多参页面）
-const withDetailOptions = (yargs: Argv) =>
-  withLimitOptions(yargs)
-    .option("metric", {
-      describe: "primary bar metric",
-      type: "string",
-      choices: metricChoices,
-      default: "tokens",
-    })
-    .option("sort", {
-      describe: "sort order",
-      type: "string",
-      choices: sortChoices,
-      default: "tokens",
-    })
-
 // #483：Timeline 不暴露 sort/limit，避免命令行接受后又静默忽略
 const withTimelineOptions = (yargs: Argv) =>
   withMetricOptions(yargs).option("heatmap", {
@@ -275,31 +261,36 @@ const withBreakdownOptions = (yargs: Argv) =>
     // #483：Tool 聚合没有费用归因，拒绝 cost 比把调用量伪装成费用更安全
     .check((args) => {
       const dimension = (args as { by?: string; dimension?: string }).by ?? (args as { dimension?: string }).dimension
-      if (dimension === "tool" && ((args as { metric?: string }).metric === "cost" || (args as { sort?: string }).sort === "cost")) {
+      if (
+        dimension === "tool" &&
+        ((args as { metric?: string }).metric === "cost" || (args as { sort?: string }).sort === "cost")
+      ) {
         throw new Error("tool breakdown supports token context and call volume, not cost")
       }
       return true
     })
 
 // #483：days 在交互范围间可为 undefined（all-time）；用 Omit 避免交叉类型把可选重新变必填
-const loadReport = Effect.fn("Cli.stats.load")(function* (args: Omit<BaseArgs, "days"> & { days?: number | undefined } & Partial<DetailArgs>) {
+const loadReport = Effect.fn("Cli.stats.load")(function* (
+  args: Omit<BaseArgs, "days"> & { days?: number | undefined } & Partial<DetailArgs>,
+) {
   const ctx = yield* InstanceRef
   // #483：过滤与窗口在一次聚合中完成，渲染层不得二次筛数据，否则总计与图表会失配
   return yield* aggregateStats({
     // #483：--all-time 胜出默认窗口；这样既保留 yargs 可见的 days 默认值，
     // 又为用户提供不受默认窗口约束的显式全历史路径
-    days: args.allTime ? undefined : args.days ?? DEFAULT_STATS_DAYS,
+    days: args.allTime ? undefined : (args.days ?? DEFAULT_STATS_DAYS),
     projectFilter: args.project,
     currentProject: ctx?.project,
-        // #176：映射 CLI session → sessionFilter
+    // #176：映射 CLI session → sessionFilter
     sessionFilter: args.session,
-        // #176：映射 CLI model → modelFilter
+    // #176：映射 CLI model → modelFilter
     modelFilter: args.model,
     providerFilter: args.provider,
     sourceFilter: args.source,
     agentFilter: args.agent,
     statusFilter: args.status,
-        // #176：映射 CLI tool → toolFilter
+    // #176：映射 CLI tool → toolFilter
     toolFilter: args.tool,
   })
 })
@@ -325,12 +316,17 @@ const sortMode = (value?: string): StatsRenderOptions["sort"] => {
 const renderOptions = (args: DetailArgs | DashboardArgs | BreakdownArgs): StatsRenderOptions => ({
   color: colorMode(args.color),
   limit: "limit" in args ? args.limit : undefined,
-  metric: "metric" in args ? metricMode(args.metric) : undefined,
-  sort: "sort" in args ? sortMode(args.sort) : undefined,
+  // 未显式传参时由 canonical 页面决定默认值，不能把 Provider 的 cost 默认覆盖成 tokens。
+  metric: "metric" in args && args.metric !== undefined ? metricMode(args.metric) : undefined,
+  sort: "sort" in args && args.sort !== undefined ? sortMode(args.sort) : undefined,
   // #176：breakdown 维度
-  by: "by" in args || "dimension" in args ? breakdownMode(("by" in args ? args.by : undefined) ?? ("dimension" in args ? (args as BreakdownArgs).dimension : undefined)) : undefined,
+  by:
+    "by" in args || "dimension" in args
+      ? breakdownMode(
+          ("by" in args ? args.by : undefined) ?? ("dimension" in args ? (args as BreakdownArgs).dimension : undefined),
+        )
+      : undefined,
 })
-
 
 // #176：按维度归因成本/tokens/请求
 // #176：breakdown 是维度归因主入口
@@ -343,35 +339,17 @@ export const StatsBreakdownCommand = effectCmd({
     console.log(
       renderBreakdown(yield* loadReport(args), {
         ...renderOptions(args),
-                // #176：--by 优先于 positional dimension
+        // #176：--by 优先于 positional dimension
         by: breakdownMode(args.by ?? args.dimension),
       }),
     )
   }),
 })
 
-export const StatsOverviewCommand = effectCmd({
-  command: "overview",
-// #174：aliases 保持旧脚本
-  aliases: ["summary"],
-  describe: "show a rich usage overview",
-// #174：builder 注册 options 与 check
-  builder: (yargs) =>
-    withBaseOptions(yargs).option("limit", {
-      alias: "n",
-      describe: "number of tools to show",
-      type: "number",
-    }),
-// #174：handler 内 loadReport 后 render
-  handler: Effect.fn("Cli.stats.overview")(function* (args: BaseArgs & { limit?: number }) {
-    console.log(renderOverview(yield* loadReport(args), { color: colorMode(args.color), limit: args.limit }))
-  }),
-})
-
 export const StatsModelsCommand = effectCmd({
   command: "models",
   aliases: ["model"],
-  describe: "rank token usage and cost by model id",
+  describe: false,
   // #483：models 是 breakdown 的 model 维，不接受无消费路径的 updated 排序
   builder: withBreakdownDetailOptions,
   handler: Effect.fn("Cli.stats.models")(function* (args: DetailArgs) {
@@ -382,7 +360,7 @@ export const StatsModelsCommand = effectCmd({
 export const StatsProvidersCommand = effectCmd({
   command: "providers",
   aliases: ["provider"],
-  describe: "rank token usage and cost by provider",
+  describe: false,
   // #483：providers 与 models 同为 breakdown 维度页，共享严格化后的排序集合
   builder: withBreakdownDetailOptions,
   handler: Effect.fn("Cli.stats.providers")(function* (args: DetailArgs) {
@@ -394,7 +372,7 @@ export const StatsProvidersCommand = effectCmd({
 export const StatsTimelineCommand = effectCmd({
   command: "timeline",
   aliases: ["daily"],
-  describe: "render daily token stacks or cost bars",
+  describe: "inspect daily volume, composition, health, and active days",
   // #483：Timeline 不暴露 sort/limit，避免命令行接受后又静默忽略
   builder: withTimelineOptions,
   handler: Effect.fn("Cli.stats.timeline")(function* (args: DetailArgs & { heatmap?: boolean }) {
@@ -405,7 +383,7 @@ export const StatsTimelineCommand = effectCmd({
 export const StatsSessionsCommand = effectCmd({
   command: "sessions",
   aliases: ["session"],
-  describe: "rank individual sessions by cost, tokens, calls, or recency",
+  describe: "rank individual sessions by tokens, cost, calls, or recency",
   // #483：Sessions 的 updated 排序有明确语义，与 Breakdown 集合分离
   builder: withSessionsOptions,
   handler: Effect.fn("Cli.stats.sessions")(function* (args: DetailArgs) {
@@ -415,7 +393,7 @@ export const StatsSessionsCommand = effectCmd({
 
 export const StatsDashboardCommand = effectCmd({
   command: "dashboard",
-  aliases: ["dash"],
+  aliases: ["dash", "overview", "summary"],
   describe: "show a balanced usage dashboard",
   builder: (yargs) =>
     withBaseOptions(yargs)
@@ -426,7 +404,7 @@ export const StatsDashboardCommand = effectCmd({
       })
       .option("interactive", {
         alias: "i",
-        describe: "cycle dashboard views with keyboard shortcuts",
+        describe: "cycle stats views with keyboard shortcuts",
         type: "boolean",
         default: false,
       }),
@@ -440,44 +418,34 @@ export const StatsDashboardCommand = effectCmd({
   }),
 })
 
-export const StatsChartsCommand = effectCmd({
-  command: "charts",
-  aliases: ["graphs"],
-  describe: "show the chart gallery for visual diagnostics",
-  builder: withDetailOptions,
-  handler: Effect.fn("Cli.stats.charts")(function* (args: DetailArgs) {
-    console.log(renderCharts(yield* loadReport(args), renderOptions(args)))
-  }),
-})
-
-// #174：StatsHeatmapCommand 输出密度格/矩阵语义，供 heatmap 命令使用
+// 派生命令只预填 canonical 选项，不复制另一套报告或渲染算法。
 export const StatsHeatmapCommand = effectCmd({
   command: "heatmap",
   aliases: ["heat"],
-  describe: "show density maps for days and provider/model usage",
-  builder: withDetailOptions,
-  handler: Effect.fn("Cli.stats.heatmap")(function* (args: DetailArgs) {
-    console.log(renderHeatmapPage(yield* loadReport(args), renderOptions(args)))
+  describe: false,
+  builder: withTimelineOptions,
+  handler: Effect.fn("Cli.stats.heatmap")(function* (args: DetailArgs & { heatmap?: boolean }) {
+    console.log(renderTimeline(yield* loadReport(args), { ...renderOptions(args), heatmap: true }))
   }),
 })
 
 export const StatsCostsCommand = effectCmd({
   command: "costs",
   aliases: ["cost"],
-  describe: "show cost-only curves, waterfalls, and distributions",
-  builder: withDetailOptions,
+  describe: false,
+  builder: withFilterOptions,
   handler: Effect.fn("Cli.stats.costs")(function* (args: DetailArgs) {
-    console.log(renderCosts(yield* loadReport(args), renderOptions(args)))
+    console.log(renderTimeline(yield* loadReport(args), { ...renderOptions(args), metric: "cost" }))
   }),
 })
 
 export const StatsTokensCommand = effectCmd({
   command: "tokens",
   aliases: ["token"],
-  describe: "show token-only input/output/cache stacks and ledger",
-  builder: withLimitOptions,
+  describe: false,
+  builder: withFilterOptions,
   handler: Effect.fn("Cli.stats.tokens")(function* (args: DetailArgs) {
-    console.log(renderTokens(yield* loadReport(args), renderOptions(args)))
+    console.log(renderTimeline(yield* loadReport(args), { ...renderOptions(args), metric: "tokens" }))
   }),
 })
 
@@ -486,11 +454,11 @@ export const StatsInsightsCommand = effectCmd({
   command: "insights",
   aliases: ["insight"],
   // #483：insights 只呈现定量证据与 outliers，不输出主观建议
-  describe: "show quantitative usage shape, attribution, outliers, and run-rate",
+  describe: "show quantitative usage shape, attribution, outliers, and actions",
   // #483：Insights 不接受排行裁剪，Forecast由独立开关控制。
   builder: withInsightsOptions,
   handler: Effect.fn("Cli.stats.insights")(function* (args: DetailArgs & { forecast?: boolean }) {
-    // 显式转发到唯一Insights渲染入口，独立forecast命令仍保留。
+    // Forecast 只作为同一 Insights 页面中的显式附录。
     console.log(renderInsights(yield* loadReport(args), { color: colorMode(args.color), forecast: args.forecast }))
   }),
 })
@@ -499,11 +467,11 @@ export const StatsInsightsCommand = effectCmd({
 export const StatsForecastCommand = effectCmd({
   command: "forecast",
   aliases: ["run-rate"],
-  describe: "project cost run-rate and month-end spend",
+  describe: false,
   // #483：forecast 不接受 limit——预测图表行数由算法决定，不是用户可裁剪的排行
   builder: withFilterOptions,
   handler: Effect.fn("Cli.stats.forecast")(function* (args: DetailArgs) {
-    console.log(renderForecast(yield* loadReport(args), { color: colorMode(args.color) }))
+    console.log(renderInsights(yield* loadReport(args), { color: colorMode(args.color), forecast: true }))
   }),
 })
 
@@ -519,47 +487,46 @@ export const StatsCommand = effectCmd({
         global: false,
       })
       .option("models", {
-        describe: "legacy shortcut: show top model rows in the dashboard; pass a number for top N",
+        describe: "shortcut to model breakdown; pass a number for top N",
         global: false,
       })
       // #483：root limit 只控制 Dashboard 或 shortcut 行数；Breakdown/Sessions 在自己的 builder 中重新声明
       .option("limit", {
         alias: "n",
-        describe: "number of model/provider rows to show",
+        describe: "number of rows to show",
         type: "number",
         global: false,
       })
       .option("interactive", {
         alias: "i",
-        describe: "cycle dashboard views with keyboard shortcuts",
+        describe: "cycle stats views with keyboard shortcuts",
         type: "boolean",
         default: false,
         global: false,
       })
-            // #176：注册 breakdown 子命令
-      .command(StatsBreakdownCommand)
-      .command(StatsOverviewCommand)
       .command(StatsDashboardCommand)
+      .command(StatsBreakdownCommand)
       .command(StatsModelsCommand)
       .command(StatsProvidersCommand)
       .command(StatsTimelineCommand)
       .command(StatsSessionsCommand)
-      .command(StatsChartsCommand)
       .command(StatsHeatmapCommand)
       .command(StatsCostsCommand)
       .command(StatsTokensCommand)
       .command(StatsInsightsCommand)
       .command(StatsForecastCommand),
   handler: Effect.fn("Cli.stats")(function* (args: DashboardArgs) {
-    const limit = args.models === true ? Number.POSITIVE_INFINITY : shortcutLimit(args.models) ?? args.limit
+    const limit = args.models === true ? Number.POSITIVE_INFINITY : (shortcutLimit(args.models) ?? args.limit)
     // #483：无值 --tools 与 --models 对称地表示全部；带值只覆盖对应 Breakdown 的行数
-    const toolLimit = args.tools === true ? Number.POSITIVE_INFINITY : shortcutLimit(args.tools) ?? args.limit
+    const toolLimit = args.tools === true ? Number.POSITIVE_INFINITY : (shortcutLimit(args.tools) ?? args.limit)
     if (args.interactive) {
       yield* runInteractiveDashboard({ ...args, limit })
       return
     }
     if (args.tools !== undefined) {
-      console.log(renderBreakdown(yield* loadReport(args), { color: colorMode(args.color), limit: toolLimit, by: "tool" }))
+      console.log(
+        renderBreakdown(yield* loadReport(args), { color: colorMode(args.color), limit: toolLimit, by: "tool" }),
+      )
       return
     }
     if (args.models !== undefined) {
@@ -573,8 +540,8 @@ export const StatsCommand = effectCmd({
 // #483：用户显式窗口排在首位，其余预设去重后保持固定循环顺序；
 // undefined 专门表示 all-time，不能与 today 的 0 混用
 const interactiveRanges = (args: BaseArgs) => {
-  const selected = args.allTime ? undefined : args.days ?? DEFAULT_STATS_DAYS
-  return [selected, DEFAULT_STATS_DAYS, 30, 7, 0, undefined].filter(
+  const selected = args.allTime ? undefined : (args.days ?? DEFAULT_STATS_DAYS)
+  return [selected, ...INTERACTIVE_RANGES].filter(
     (days, index, list) => list.findIndex((item) => item === days) === index,
   )
 }
@@ -596,21 +563,29 @@ function runInteractiveDashboard(args: DashboardArgs) {
       return
     }
 
-    // #483：视图集合保留目标全部页面；渲染器不持有状态，切换仅换渲染入口
+    // 页面集合与源分支一致；渲染器无状态，范围缓存仍只由此循环拥有。
     const views = [
-      { name: "dashboard", render: (report: StatsReport) => renderDashboard(report, { color: colorMode(args.color), limit: args.limit }) },
-      { name: "models", render: (report: StatsReport) => renderModels(report, { color: colorMode(args.color), limit: args.limit }) },
       {
-        name: "providers",
-        render: (report: StatsReport) => renderProviders(report, { color: colorMode(args.color), limit: args.limit, metric: "cost" }),
+        name: "dashboard",
+        render: (report: StatsReport) => renderDashboard(report, { color: colorMode(args.color), limit: args.limit }),
+      },
+      {
+        name: "breakdown",
+        render: (report: StatsReport) =>
+          renderBreakdown(report, { color: colorMode(args.color), limit: args.limit, by: "model" }),
       },
       { name: "timeline", render: (report: StatsReport) => renderTimeline(report, { color: colorMode(args.color) }) },
-      { name: "sessions", render: (report: StatsReport) => renderSessions(report, { color: colorMode(args.color), limit: args.limit }) },
+      {
+        name: "sessions",
+        render: (report: StatsReport) => renderSessions(report, { color: colorMode(args.color), limit: args.limit }),
+      },
       { name: "insights", render: (report: StatsReport) => renderInsights(report, { color: colorMode(args.color) }) },
-      { name: "forecast", render: (report: StatsReport) => renderForecast(report, { color: colorMode(args.color) }) },
     ]
     const cache = new Map<string, StatsReport>([[rangeLabel(ranges[0]), initial]])
-    const stdin = process.stdin as NodeJS.ReadStream & { isRaw?: boolean; setRawMode?: (mode: boolean) => NodeJS.ReadStream }
+    const stdin = process.stdin as NodeJS.ReadStream & {
+      isRaw?: boolean
+      setRawMode?: (mode: boolean) => NodeJS.ReadStream
+    }
     const keys = yield* Queue.make<string>()
     let input = ""
     let escapeTimer: ReturnType<typeof setTimeout> | undefined
@@ -647,10 +622,12 @@ function runInteractiveDashboard(args: DashboardArgs) {
               input = input.slice(1)
               Queue.offerUnsafe(keys, "escape")
               flushKeys()
-            }, 20)
+            }, ESCAPE_PREFIX_WAIT_MS)
             return
           }
-          const arrow = { "\u001b[A": "up", "\u001b[B": "down", "\u001b[C": "right", "\u001b[D": "left" }[input.slice(0, 3)]
+          const arrow = { "\u001b[A": "up", "\u001b[B": "down", "\u001b[C": "right", "\u001b[D": "left" }[
+            input.slice(0, 3)
+          ]
           if (arrow) {
             // 一次 data chunk 可能包含多个按键，循环逐个入队而不是丢弃尾部
             input = input.slice(3)
@@ -704,7 +681,7 @@ function runInteractiveDashboard(args: DashboardArgs) {
               process.stdout.write("\x1b[2J\x1b[H")
               process.stdout.write(views[view].render(result.report))
               const help =
-                process.stdout.columns && process.stdout.columns < 60
+                process.stdout.columns && process.stdout.columns < INTERACTIVE_HELP_WIDTH
                   ? `\n\n${views[view].name} · ${rangeLabel(ranges[range])}\nn/p view · r/R range · q quit\n`
                   : `\n\n${views[view].name} · ${rangeLabel(ranges[range])} · n/→ next · p/← previous · r/R range · q/Esc quit\n`
               process.stdout.write(help)

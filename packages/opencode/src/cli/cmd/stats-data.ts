@@ -12,7 +12,13 @@ import { RequestUsageAssistantTable, RequestUsageTable } from "@opencode-ai/core
 import { Database } from "@opencode-ai/core/database/database"
 import { and, gte, inArray, sql } from "drizzle-orm"
 // #174：SessionTable 只用于枚举，不在此写用量
-import { MessageTable, PartTable, SessionTable, SessionMessageTable, type PartColdStats } from "@opencode-ai/core/session/sql"
+import {
+  MessageTable,
+  PartTable,
+  SessionTable,
+  SessionMessageTable,
+  type PartColdStats,
+} from "@opencode-ai/core/session/sql"
 import { SessionMessage } from "@opencode-ai/core/session/message"
 import { ColdStorage } from "@opencode-ai/core/storage/cold-storage"
 import type { Project } from "@/project/project"
@@ -37,7 +43,8 @@ const projectIdentity = (
 ) => {
   const projectPath = displayText(row?.worktree ?? directory ?? "")
   // 数据库可跨操作系统复制；同时识别两种分隔符，避免把 Windows 路径整段当作名称
-  const label = displayText(row?.name ?? "") || displayText(projectPath.split(/[\\/]/).filter(Boolean).at(-1) ?? "") || id
+  const label =
+    displayText(row?.name ?? "") || displayText(projectPath.split(/[\\/]/).filter(Boolean).at(-1) ?? "") || id
   return { label, path: projectPath }
 }
 
@@ -46,7 +53,7 @@ export type TokenTotals = {
   input: number
   output: number
   reasoning: number
-// #174：cache 读写与 output 分列
+  // #174：cache 读写与 output 分列
   cache: { read: number; write: number }
   total: number
 }
@@ -57,10 +64,10 @@ export type UsageTotals = {
   // #176：组件 token 归因与请求结局计数同属用量契约
   components: InputComponentTotals
   cost: number
-// #174：requests 字段只累加次数，不带费用
+  // #174：requests 字段只累加次数，不带费用
   requests: number
-// #174：assistantCalls 与 requests 分列，避免混口径
-// #174：assistant 行优先 cost/model 防双计
+  // #174：assistantCalls 与 requests 分列，避免混口径
+  // #174：assistant 行优先 cost/model 防双计
   assistantCalls: number
   // #176：errors/aborted 由 status==error/aborted 累计，durationMs 来自 request 行完成时刻
   errors: number
@@ -111,10 +118,10 @@ export type SessionUsage = UsageTotals & {
   directory: string
   created: number
   updated: number
-// #174：messages 按 session 拉取
+  // #174：messages 按 session 拉取
   messages: number
-// #174：工具次数来自 parts
-// #174：工具次数来自 message parts
+  // #174：工具次数来自 parts
+  // #174：工具次数来自 message parts
   tools: number
   providers: string[]
   models: string[]
@@ -151,28 +158,28 @@ export type ToolCallAttribution = {
 
 // #174：StatsReport 是渲染只读契约
 export type StatsReport = {
-// #174：totalSessions 计数
+  // #174：totalSessions 计数
   totalSessions: number
-// #174：sessionsWithUsage 排除零用量
+  // #174：sessionsWithUsage 排除零用量
   sessionsWithUsage: number
-// #174：totalMessages 汇总
+  // #174：totalMessages 汇总
   totalMessages: number
-// #174：totalTools 汇总
+  // #174：totalTools 汇总
   totalTools: number
   days: number
-// #174：requestedDays 回显用户参数
+  // #174：requestedDays 回显用户参数
   requestedDays?: number
-// #174：dateRange 记录跨度
+  // #174：dateRange 记录跨度
   dateRange: { earliest: number; latest: number }
   total: UsageTotals
   models: UsageGroup[]
   providers: UsageGroup[]
   daily: DailyUsage[]
-// #174：modelSeries 供图
+  // #174：modelSeries 供图
   modelSeries: UsageSeries[]
-// #174：providerSeries 供图
+  // #174：providerSeries 供图
   providerSeries: UsageSeries[]
-// #174：tokenPartSeries 供堆叠
+  // #174：tokenPartSeries 供堆叠
   tokenPartSeries: TokenPartSeries[]
   sessions: SessionUsage[]
   // #176：工具用量含字符与上下文 token 归因
@@ -191,18 +198,18 @@ export type StatsReport = {
   toolSeries: UsageSeries[]
   // #483：24 槽使用 RequestUsage.time_created 的本地小时；只计 request shell，不重复计算 Assistant rows
   requestsByHour: number[]
-// #174：tokensPerSession 均摊
+  // #174：tokensPerSession 均摊
   tokensPerSession: number
-// #174：median 抗长尾
-// #174：medianTokensPerSession 字段
-// #174：会话 tokens 取中位抗长尾
+  // #174：median 抗长尾
+  // #174：medianTokensPerSession 字段
+  // #174：会话 tokens 取中位抗长尾
   medianTokensPerSession: number
 }
 
 // #174：StatsFilter 描述 days/project
 export type StatsFilter = {
   days?: number
-// #174：projectFilter 空串绑当前项目
+  // #174：projectFilter 空串绑当前项目
   projectFilter?: string
   currentProject?: Project.Info
   // #176：明细过滤下推到聚合事件/会话
@@ -281,8 +288,8 @@ const emptyUsage = (): UsageTotals => ({
 
 // #174：tokenTotal 写回 total
 const tokenTotal = (tokens: Omit<TokenTotals, "total">) =>
-// #174：cache.read 不进 output
-// #174：cache.write 不进 output
+  // #174：cache.read 不进 output
+  // #174：cache.write 不进 output
   tokens.input + tokens.output + tokens.reasoning + tokens.cache.read + tokens.cache.write
 
 // #174：normalizeTokens 补 total
@@ -296,15 +303,15 @@ const normalizeTokens = (tokens: Omit<TokenTotals, "total"> & { total?: number }
 
 // #174：rowTokens 从 SQL 行映射
 const rowTokens = (row: {
-// #174：tokens_input 单独累计
+  // #174：tokens_input 单独累计
   tokens_input: number
-// #174：tokens_output 单独累计
+  // #174：tokens_output 单独累计
   tokens_output: number
-// #174：tokens_reasoning 单独累计
+  // #174：tokens_reasoning 单独累计
   tokens_reasoning: number
-// #174：tokens_cache_read 分列
+  // #174：tokens_cache_read 分列
   tokens_cache_read: number
-// #174：tokens_cache_write 分列
+  // #174：tokens_cache_write 分列
   tokens_cache_write: number
   tokens_total: number
 }) =>
@@ -375,22 +382,26 @@ const addGroup = (map: Map<string, UsageGroupAccumulator>, id: string, label: st
 // #177：分组默认按 tokens 排序，cost 作次键
 const finalizeGroups = (map: Map<string, UsageGroupAccumulator>) =>
   Array.from(map.values())
-    .map((group): UsageGroup => ({
-      id: group.id,
-      label: group.label,
-      tokens: group.tokens,
-      // #176：分组定稿携带组件归因与请求结局计量
-      components: group.components,
-      cost: group.cost,
-      requests: group.requests,
-      assistantCalls: group.assistantCalls,
-      errors: group.errors,
-      aborted: group.aborted,
-      durationMs: group.durationMs,
-      sessions: group.sessionIDs.size,
-      providers: Array.from(group.providerTotals, ([id, tokens]) => ({ id, tokens })).sort((a, b) => b.tokens - a.tokens),
-      models: Array.from(group.modelTotals, ([id, tokens]) => ({ id, tokens })).sort((a, b) => b.tokens - a.tokens),
-    }))
+    .map(
+      (group): UsageGroup => ({
+        id: group.id,
+        label: group.label,
+        tokens: group.tokens,
+        // #176：分组定稿携带组件归因与请求结局计量
+        components: group.components,
+        cost: group.cost,
+        requests: group.requests,
+        assistantCalls: group.assistantCalls,
+        errors: group.errors,
+        aborted: group.aborted,
+        durationMs: group.durationMs,
+        sessions: group.sessionIDs.size,
+        providers: Array.from(group.providerTotals, ([id, tokens]) => ({ id, tokens })).sort(
+          (a, b) => b.tokens - a.tokens,
+        ),
+        models: Array.from(group.modelTotals, ([id, tokens]) => ({ id, tokens })).sort((a, b) => b.tokens - a.tokens),
+      }),
+    )
     .sort((a, b) => b.tokens.total - a.tokens.total || b.cost - a.cost)
 
 // #174：dayStart 对齐本地日界
@@ -534,7 +545,7 @@ const getProjects = Effect.fnUntraced(function* () {
 // #174：cutoffFromDays 解释 0/缺省/正数
 const cutoffFromDays = (days?: number) => {
   if (days === undefined) return 0
-// #174：显式 0 天取今日本地零点，不是空窗口
+  // #174：显式 0 天取今日本地零点，不是空窗口
   if (days === 0) return dayStart(Date.now())
   // #483：正数 N 包含今天在内的 N 个完整自然日；cutoff 是闭区间起点，需要回退 N-1 天
   return shiftDay(Date.now(), -(days - 1))
@@ -693,7 +704,9 @@ const addToolContextTokens = (map: Record<string, ToolUsage>, toolID: string, co
 
 // #483：复合 owner 键保留发起方，不能先按 toolID 合并后再反推模型、Agent 或 Project 占比
 const addToolCall = (map: Map<string, ToolCallAttribution>, call: ToolCallAttribution) => {
-  const key = [call.projectID, call.agent, call.providerID, call.modelID, call.source, call.status, call.toolID].join("\0")
+  const key = [call.projectID, call.agent, call.providerID, call.modelID, call.source, call.status, call.toolID].join(
+    "\0",
+  )
   const item = map.get(key) ?? { ...call, calls: 0, inputChars: 0, outputChars: 0, errors: 0, durationMs: 0 }
   item.calls += call.calls
   item.inputChars += call.inputChars
@@ -711,13 +724,12 @@ const toolDuration = (part: StatsToolPart) => {
   return Math.max(0, part.end - part.start)
 }
 
-
 // #176：无 inputBreakdown 时，用 assistant tokens 按工具 IO 字符占比归因 contextTokens
 // #176：按 IO 占比分摊 assistant tokens
 
 // #176：请求体组件 token 归因桶（与 step-finish.inputBreakdown 对齐）
 // #176：与 step-finish.inputBreakdown 字段同构的 token 桶
-type InputComponentTotals = {
+export type InputComponentTotals = {
   system: number
   instructions: number
   skills: number
@@ -785,7 +797,7 @@ const toolEventsFromAssistant = (input: {
     status: string
   }
 }) => {
-    if (!input.message) return [] as ToolUsageEvent[]
+  if (!input.message) return [] as ToolUsageEvent[]
   // #176：组件 token 来自 step-finish.inputBreakdown，而非整包 assistant tokens
   // #176：优先 breakdown 组件而非整包 tokens
   const components = componentsFromAssistant(input.message)
@@ -805,22 +817,43 @@ const toolEventsFromAssistant = (input: {
       toolID,
       // #176：toolCalls/toolResults 按 IO 字符占比分摊
       contextTokens:
-        (inputTotal > 0 ? Math.round(// #176：toolCalls 对应工具输入字符权重
-        (components.toolCalls * item.inputChars) / inputTotal) : 0) +
-        (outputTotal > 0 ? Math.round(// #176：toolResults 对应工具输出字符权重
-        (components.toolResults * item.outputChars) / outputTotal) : 0),
+        (inputTotal > 0
+          ? Math.round(
+              // #176：toolCalls 对应工具输入字符权重
+              (components.toolCalls * item.inputChars) / inputTotal,
+            )
+          : 0) +
+        (outputTotal > 0
+          ? Math.round(
+              // #176：toolResults 对应工具输出字符权重
+              (components.toolResults * item.outputChars) / outputTotal,
+            )
+          : 0),
     }))
     .filter((event) => event.contextTokens > 0)
 }
 
-
 // #180：单遍扫描 assistants，避免每条消息重复 toolCharsByName
 // #180：批量种子入口，语义同逐条但可扩展单遍优化
 const toolEventsFromAssistants = (
-  assistants: Array<{ message: StatsMessage | undefined; event: { time: number; sessionID: SessionID; projectID: string; providerID: string; modelID: string; source: string; agent: string; status: string } }>,
+  assistants: Array<{
+    message: StatsMessage | undefined
+    event: {
+      time: number
+      sessionID: SessionID
+      projectID: string
+      providerID: string
+      modelID: string
+      source: string
+      agent: string
+      status: string
+    }
+  }>,
   visibleMessages: StatsMessage[],
 ) => {
-  const ordered = assistants.filter((item): item is typeof item & { message: StatsMessage } => !!item.message).toSorted((a, b) => a.message.time - b.message.time)
+  const ordered = assistants
+    .filter((item): item is typeof item & { message: StatsMessage } => !!item.message)
+    .toSorted((a, b) => a.message.time - b.message.time)
   const messages = visibleMessages.toSorted((a, b) => a.time - b.time)
   const chars = new Map<string, { inputChars: number; outputChars: number }>()
   const events: ToolUsageEvent[] = []
@@ -958,7 +991,11 @@ const loadStatsRows = (sessionIDs: SessionID[], cutoff: number) =>
       const requests = new Map<SessionID, (typeof RequestUsageTable.$inferSelect)[]>()
       const assistants = new Map<SessionID, (typeof RequestUsageAssistantTable.$inferSelect)[]>()
       for (const batch of batches) {
-        for (const row of sync.select().from(RequestUsageTable).where(inArray(RequestUsageTable.session_id, batch)).all()) {
+        for (const row of sync
+          .select()
+          .from(RequestUsageTable)
+          .where(inArray(RequestUsageTable.session_id, batch))
+          .all()) {
           append(requests, row.session_id, row)
         }
         for (const row of sync
@@ -972,8 +1009,17 @@ const loadStatsRows = (sessionIDs: SessionID[], cutoff: number) =>
       // Native沿同一只读冷统计入口取字符投影，身份、模型和精确账本关联仍由原消息承担。
       const legacyIDs = new Set(messageRows.map((row) => String(row.id)))
       for (const batch of batches) {
-        const projected = sync.select().from(SessionMessageTable).where(inArray(SessionMessageTable.session_id, batch)).all()
-          .filter(row => !legacyIDs.has(row.id) && (row.type === "assistant" || row.type === "user") && includeTime(cutoff, row.time_created))
+        const projected = sync
+          .select()
+          .from(SessionMessageTable)
+          .where(inArray(SessionMessageTable.session_id, batch))
+          .all()
+          .filter(
+            (row) =>
+              !legacyIDs.has(row.id) &&
+              (row.type === "assistant" || row.type === "user") &&
+              includeTime(cutoff, row.time_created),
+          )
         const nativeStats = ColdStorage.inspectSessionMessageStats(sync, projected)
         for (const [rowIndex, row] of projected.entries()) {
           const message = Schema.decodeUnknownSync(SessionMessage.Message)({ ...row.data, id: row.id, type: row.type })
@@ -987,18 +1033,40 @@ const loadStatsRows = (sessionIDs: SessionID[], cutoff: number) =>
             const state = part.state
             const projection = nativeStats[rowIndex]?.tools[String(contentIndex)]
             if (!projection) throw new Error("Native Stats Tool projection is unavailable: " + row.id)
-            return [{ version: 1, type: "tool", tool: part.name, status: state.status, ...projection,
-              start: DateTime.toEpochMillis(part.time.ran ?? part.time.created),
-              end: DateTime.toEpochMillis(part.time.completed ?? part.time.ran ?? part.time.created),
-            }]
+            return [
+              {
+                version: 1,
+                type: "tool",
+                tool: part.name,
+                status: state.status,
+                ...projection,
+                start: DateTime.toEpochMillis(part.time.ran ?? part.time.created),
+                end: DateTime.toEpochMillis(part.time.completed ?? part.time.ran ?? part.time.created),
+              },
+            ]
           })
           const estimate = message.inputEstimate
-          const step = estimate?.confirmed ? ColdStorage.projectPartStats({ type: "step-finish", reason: "stop",
-            tokens: normalizeTokens(message.tokens ?? emptyTokens()), cost: message.cost ?? 0, inputChars: estimate.bodyChars, inputBreakdown: estimate.inputBreakdown }) : undefined
+          const step = estimate?.confirmed
+            ? ColdStorage.projectPartStats({
+                type: "step-finish",
+                reason: "stop",
+                tokens: normalizeTokens(message.tokens ?? emptyTokens()),
+                cost: message.cost ?? 0,
+                inputChars: estimate.bodyChars,
+                inputBreakdown: estimate.inputBreakdown,
+              })
+            : undefined
           if (step?.type === "step-finish") parts.push(step)
           // 同 ID 投影只保留一份；parent 仍从精确账本取得，混合历史不会按相邻时间猜测归属。
-          append(messages, row.session_id, { id, time: row.time_created, role: "assistant", parts,
-            providerID: message.model.providerID, modelID: message.model.id, tokens: normalizeTokens(message.tokens ?? emptyTokens()), cost: message.cost ?? 0,
+          append(messages, row.session_id, {
+            id,
+            time: row.time_created,
+            role: "assistant",
+            parts,
+            providerID: message.model.providerID,
+            modelID: message.model.id,
+            tokens: normalizeTokens(message.tokens ?? emptyTokens()),
+            cost: message.cost ?? 0,
             parentID: assistants.get(row.session_id)?.find((usage) => usage.assistant_message_id === id)?.request_id,
           })
         }
@@ -1025,10 +1093,18 @@ const aggregateSession = (session: Session.Info, cutoff: number, rows: StatsRows
     const request = assistant ? storedRequestsByID.get(assistant.request_id) : undefined
     // #483：有 request 数据却找不到 Assistant row 通常是 fork/cutoff 历史，不能猜测它原属哪个请求；
     // source 三态：assistant-row 归因 > unattributed（有 request 体系但断链）> legacy-message（无 request 体系）
-    const source = assistant ? request?.source ?? "assistant" : requestUsageRows.length > 0 ? "unattributed" : "legacy-message"
+    const source = assistant
+      ? (request?.source ?? "assistant")
+      : requestUsageRows.length > 0
+        ? "unattributed"
+        : "legacy-message"
     // #483：status 同样三态——request 终局优先于 assistant 自身状态，
     // legacy completed 仅在无 request 体系时可用，防伪造归因
-    const status = assistant ? request?.status ?? assistant.status : requestUsageRows.length > 0 ? "unknown" : "completed"
+    const status = assistant
+      ? (request?.status ?? assistant.status)
+      : requestUsageRows.length > 0
+        ? "unknown"
+        : "completed"
     for (const part of message.parts) {
       if (part.type !== "tool" || !part.tool) continue
       // #0500：字符/耗时标量来自 cold 投影；errors 按 status 判定，不再序列化 input/output。
@@ -1053,12 +1129,12 @@ const aggregateSession = (session: Session.Info, cutoff: number, rows: StatsRows
 
   if (requestUsageRows.length > 0) {
     // #0500：Step components 按 Assistant message ID 关联，不能跨 Assistant 平均再回填模型维度。
-// #174：time_created 过滤 usage
+    // #174：time_created 过滤 usage
     const requestRows = requestUsageRows.filter((row) => includeTime(cutoff, row.time_created))
     const assistantRows = assistantUsageRows.filter((row) => includeTime(cutoff, row.time_created))
 
     if (assistantRows.length > 0) {
-// #174：request_id 用于跳过双计
+      // #174：request_id 用于跳过双计
       const assistantRequests = new Set(assistantRows.map((row) => row.request_id))
       // #176：构造时精确 join：request_id 直接取 request 维，不做时间/模型猜测
       const requestsByID = new Map(requestRows.map((row) => [row.request_id, row]))
@@ -1066,27 +1142,27 @@ const aggregateSession = (session: Session.Info, cutoff: number, rows: StatsRows
       const assistantEvents = assistantRows.map((row) => {
         const request = requestsByID.get(row.request_id)
         return {
-        time: row.time_created,
-        sessionID: session.id,
-// #174：provider_id 标识供应
-        providerID: row.provider_id,
-// #174：model_id 标识模型
-        modelID: row.model_id,
-        tokens: rowTokens(row),
-// #174：cost_micros 显示前换算
-        cost: row.cost_micros / MICROS,
-        requests: 0,
-        assistantCalls: 1,
-        // #176：assistant 事件结局取自身 status，source/agent 取精确 join 的 request
-        source: request?.source ?? "assistant",
-        agent: request?.agent ?? session.agent ?? "unknown",
-        status: row.status,
-        // #483：窗口外 request 无法提供最终结果，此时保留 undefined 并由筛选回退 Assistant status
-        outcome: request?.status,
-        components: componentsFromAssistant(messagesByID.get(row.assistant_message_id)),
-        errors: 0,
-        aborted: 0,
-        durationMs: 0,
+          time: row.time_created,
+          sessionID: session.id,
+          // #174：provider_id 标识供应
+          providerID: row.provider_id,
+          // #174：model_id 标识模型
+          modelID: row.model_id,
+          tokens: rowTokens(row),
+          // #174：cost_micros 显示前换算
+          cost: row.cost_micros / MICROS,
+          requests: 0,
+          assistantCalls: 1,
+          // #176：assistant 事件结局取自身 status，source/agent 取精确 join 的 request
+          source: request?.source ?? "assistant",
+          agent: request?.agent ?? session.agent ?? "unknown",
+          status: row.status,
+          // #483：窗口外 request 无法提供最终结果，此时保留 undefined 并由筛选回退 Assistant status
+          outcome: request?.status,
+          components: componentsFromAssistant(messagesByID.get(row.assistant_message_id)),
+          errors: 0,
+          aborted: 0,
+          durationMs: 0,
         }
       })
       const fallbackRequestEvents = requestRows
@@ -1109,7 +1185,9 @@ const aggregateSession = (session: Session.Info, cutoff: number, rows: StatsRows
           ...statusCounts(row.status, 1),
           durationMs: rowDuration(row),
         }))
-      const requestEvents = requestRows.filter((row) => assistantRequests.has(row.request_id)).map((row) => ({
+      const requestEvents = requestRows
+        .filter((row) => assistantRequests.has(row.request_id))
+        .map((row) => ({
           time: row.time_created,
           sessionID: session.id,
           providerID: row.provider_id,
@@ -1211,7 +1289,7 @@ const aggregateSession = (session: Session.Info, cutoff: number, rows: StatsRows
     const requestsByID = new Map(requestRows.map((row) => [row.request_id, row]))
     // #180：assistant_message_id → 消息映射，种子在此复用避免二次扫描
     const messagesByID = new Map(visibleMessages.map((message) => [message.id, message]))
-        // #180：先收集 assistant 种子再统一生成事件
+    // #180：先收集 assistant 种子再统一生成事件
     const seeds = assistantRows.map((row) => {
       const request = requestsByID.get(row.request_id)
       return {
@@ -1229,12 +1307,17 @@ const aggregateSession = (session: Session.Info, cutoff: number, rows: StatsRows
         },
       }
     })
-        // #180：单点推入，避免循环内重复展开逻辑
+    // #180：单点推入，避免循环内重复展开逻辑
     toolEvents.push(...toolEventsFromAssistants(seeds, visibleMessages))
   }
   // #176：工具上下文沿用同一助手覆盖集合，混合历史只补未入账消息。
   const seeds = visibleMessages
-    .filter((message): message is Extract<StatsMessage, { role: "assistant" }> => message.role === "assistant" && !tracked.has(message.id) && !(message.parentID && fallbackRequests.has(message.parentID)))
+    .filter(
+      (message): message is Extract<StatsMessage, { role: "assistant" }> =>
+        message.role === "assistant" &&
+        !tracked.has(message.id) &&
+        !(message.parentID && fallbackRequests.has(message.parentID)),
+    )
     .map((message) => ({
       message,
       event: {
@@ -1259,7 +1342,15 @@ const aggregateSession = (session: Session.Info, cutoff: number, rows: StatsRows
   }
 
   // #0500：公共 filters 在 aggregate 后统一执行，loader 不提前按 model/tool/status 改变分母。
-  return { session, messageCount: visibleMessages.length, toolUsage, toolEvents, toolCalls, totalEvents, breakdownEvents } satisfies SessionAggregate
+  return {
+    session,
+    messageCount: visibleMessages.length,
+    toolUsage,
+    toolEvents,
+    toolCalls,
+    totalEvents,
+    breakdownEvents,
+  } satisfies SessionAggregate
 }
 
 // #174：aggregateStats 唯一写路径
@@ -1270,12 +1361,12 @@ export const aggregateStats = Effect.fn("Cli.stats.aggregate")(function* (input:
   // #180：聚合入口改用 SQL 预过滤会话，降低全表扫描
   const sessions = yield* getSessions(cutoff)
   const filteredSessions = sessions
-// #174：time.updated 过滤会话
+    // #174：time.updated 过滤会话
     .filter((session) => includeTime(cutoff, session.time.updated))
     .filter((session) => {
       if (input.projectFilter === undefined) return true
-// #174：空串 projectFilter 绑定当前 project.id
-// #174：空串过滤绑定当前 project.id
+      // #174：空串 projectFilter 绑定当前 project.id
+      // #174：空串过滤绑定当前 project.id
       if (input.projectFilter === "") return session.projectID === input.currentProject?.id
       return session.projectID === input.projectFilter
     })
@@ -1287,10 +1378,13 @@ export const aggregateStats = Effect.fn("Cli.stats.aggregate")(function* (input:
     process.stderr.write(`Large dataset detected (${filteredSessions.length} sessions). This may take a while...\n`)
   }
 
-// #174：aggregates 写聚合快照，页面不得再 select
-// #174：aggregates 生成只读 StatsReport 快照
+  // #174：aggregates 写聚合快照，页面不得再 select
+  // #174：aggregates 生成只读 StatsReport 快照
   // #0500：raw snapshot 一次读取，移除旧 concurrency:20 的 per-session hydration/N+1。
-  const rows = yield* loadStatsRows(filteredSessions.map((session) => session.id), cutoff)
+  const rows = yield* loadStatsRows(
+    filteredSessions.map((session) => session.id),
+    cutoff,
+  )
   // loader/inspect 均无写入，v1 decode 也不会清 owner/ref 或补写 cold_stats。
   const aggregates = filteredSessions.map((session) => aggregateSession(session, cutoff, rows))
   // #0500：toolFilter 保持原公开过滤顺序，在完整 Session toolUsage 形成后才筛选。
@@ -1323,7 +1417,7 @@ export const aggregateStats = Effect.fn("Cli.stats.aggregate")(function* (input:
 
   // #176：toolFilter 时仅保留含匹配工具的会话聚合
   // #176：tool 过滤在会话级裁剪，避免空工具会话进榜
-const filteredAggregates =
+  const filteredAggregates =
     input.toolFilter === undefined
       ? aggregates
       : aggregates.filter((aggregate) =>
@@ -1403,11 +1497,8 @@ const filteredAggregates =
       addUsage(sessionUsage, event)
       addUsage(getDaily(daily, event.time), event)
     }
-    // 未筛选日期时沿用持久 Session 全历史累计，部分 request 账本只负责明细与次数。
-    if (cutoff === 0 && ![input.modelFilter, input.providerFilter, input.sourceFilter, input.agentFilter, input.statusFilter, input.toolFilter].some(value => value !== undefined)) {
-      sessionUsage.tokens = normalizeTokens(aggregate.session.tokens ?? emptyTokens())
-      sessionUsage.cost = aggregate.session.cost ?? 0
-    }
+    // 已过滤事件同时决定 Header、日趋势和 Session 份额；持久累计不能成为第二份权威。
+    // 历史补计仍在 aggregateSession 去重完成，零流量请求不会抹掉已有用量。
     addUsage(total, sessionUsage)
 
     for (const event of aggregate.breakdownEvents.filter((event) => eventMatches(event, input))) {
@@ -1422,7 +1513,14 @@ const filteredAggregates =
       const outcome = event.outcome ?? "unattributed"
       addGroup(statuses, outcome, outcome, event)
       // #483：project 分组 label 使用解析后的 display identity
-      addGroup(projects, event.projectID ?? aggregate.session.projectID, projectIdentities.get(event.projectID ?? aggregate.session.projectID)?.label ?? event.projectID ?? aggregate.session.projectID, event)
+      addGroup(
+        projects,
+        event.projectID ?? aggregate.session.projectID,
+        projectIdentities.get(event.projectID ?? aggregate.session.projectID)?.label ??
+          event.projectID ??
+          aggregate.session.projectID,
+        event,
+      )
       addUsage(getSeriesDaily(modelSeries, event.modelID, event.time), event)
       addUsage(getSeriesDaily(providerSeries, event.providerID, event.time), event)
       addUsage(getSeriesDaily(agentSeries, event.agent ?? "unknown", event.time), event)
@@ -1450,7 +1548,9 @@ const filteredAggregates =
   // #483：显式窗口以今天为末日；all-time 才用真实数据首尾确定范围；
   // 空数据库使用 fallback 日期，保证报告结构完整而不是抛错
   const requestedWindow = windowDays(input.days)
-  const latest = requestedWindow ? dayStart(Date.now()) : dayStart((sortedDaily.at(-1)?.day ?? fallbackLatest) || fallbackEarliest)
+  const latest = requestedWindow
+    ? dayStart(Date.now())
+    : dayStart((sortedDaily.at(-1)?.day ?? fallbackLatest) || fallbackEarliest)
   const earliest = requestedWindow
     ? shiftDay(latest, -(requestedWindow - 1))
     : dayStart(sortedDaily.at(0)?.day ?? fallbackEarliest)
@@ -1485,7 +1585,10 @@ const filteredAggregates =
     statuses: finalizeGroups(statuses),
     // #483：聚合 identity 与 group 使用同一 id；缺失元数据时 path 为空而 label 仍保留 id，
     // renderer 依据空 path 省略路径后缀而不是输出空分隔符
-    projects: finalizeGroups(projects).map((group) => ({ ...group, path: projectIdentities.get(group.id)?.path ?? "" })),
+    projects: finalizeGroups(projects).map((group) => ({
+      ...group,
+      path: projectIdentities.get(group.id)?.path ?? "",
+    })),
     daily: completeDaily,
     // #483：小时投影随报告输出，供 Dashboard 时段分布直接消费
     requestsByHour,

@@ -457,6 +457,10 @@ Stats use the latest 60 calendar days by default. Pass `--days 0` for today or
 forward and backward through 60 days, 30 days, 7 days, today, and all time;
 each range is loaded only when first opened.
 
+Interactive mode requires a TTY for both input and output. Pipes render the
+dashboard once. The five views are Dashboard, Breakdown, Timeline, Sessions,
+and Insights; use `n` / `Tab` / `→` and `p` / `←` to switch, or `q` / `Esc` to exit.
+
 The default dashboard summarizes activity, token components, health, models,
 providers, and sessions. Detailed views keep separate responsibilities:
 
@@ -465,8 +469,11 @@ opencode stats timeline [--metric tokens|cost]
 opencode stats breakdown [model|provider|agent|source|project|tool|status]
 opencode stats sessions
 opencode stats insights [--forecast]
-opencode stats forecast
 ```
+
+Aliases select the same canonical pages: `overview` / `summary` select Dashboard,
+`models` / `providers` select Breakdown, `costs` / `tokens` and `heatmap` select
+Timeline, and `forecast` selects `insights --forecast`.
 
 Timeline uses a full-width total trend and independently normalized token
 component trends. Compare component magnitude using the printed total, share,
@@ -482,6 +489,7 @@ billed token usage. If a selected range has no positive recorded cost, stats
 continue to show token and health data and mark cost-derived analysis as
 unavailable. Colors use the terminal's ANSI palette and do not paint a
 custom background, so light and dark terminal themes remain authoritative.
+`--color always` forces color, `never` disables it, and `auto` respects TTY and `NO_COLOR`.
 
 The Sessions view shows population percentiles, full-width token and positive-
 cost distribution bars, and a per-Session token-share bar with Project, Model,
@@ -495,7 +503,7 @@ Provider, request, call, message, Tool, cache, failure, and latency details.
 | <nobr><code>{"--all-time"}</code></nobr> | Include all recorded usage instead of the default 60 days                  |
 | <nobr><code>{"--interactive"}</code></nobr> | Browse views and date ranges interactively                                |
 | <nobr><code>{"--tools"}</code></nobr>   | Shortcut to tool breakdown; pass a number for top N                        |
-| <nobr><code>{"--models"}</code></nobr>  | Show model usage breakdown (hidden by default). Pass a number to show top N |
+| <nobr><code>{"--models"}</code></nobr>  | Shortcut to model breakdown; pass a number for top N                       |
 | <nobr><code>{"--project"}</code></nobr> | Filter by project (all projects, empty string: current project)             |
 
 `--interactive`, `--tools`, and `--models` are root Dashboard shortcuts. Breakdown

@@ -420,6 +420,10 @@ opencode stats
 统计默认展示最近 60 个自然日。传 `--days 0` 只看今天，传 `--all-time` 查看全部
 历史。交互模式下 `r` 与 `R` 在 60 天、30 天、7 天、今天与全部时间之间前后切换；各范围仅在首次打开时加载。
 
+交互模式要求输入和输出均为 TTY；管道环境只输出一次 Dashboard。五个页面依次为
+Dashboard、Breakdown、Timeline、Sessions 和 Insights，使用 `n` / `Tab` / `→`
+与 `p` / `←` 切换，使用 `q` / `Esc` 退出。
+
 默认仪表盘汇总活跃度、Token 组成、健康度、模型、供应方与会话。细分视图各司其职：
 
 ```bash
@@ -427,8 +431,11 @@ opencode stats timeline [--metric tokens|cost]
 opencode stats breakdown [model|provider|agent|source|project|tool|status]
 opencode stats sessions
 opencode stats insights [--forecast]
-opencode stats forecast
 ```
+
+别名进入同一 canonical 页面：`overview` / `summary` 对应 Dashboard，
+`models` / `providers` 对应 Breakdown，`costs` / `tokens` 和 `heatmap` 对应
+Timeline，`forecast` 对应 `insights --forecast`。
 
 Timeline 使用全宽总量趋势，并为各 Token 组成提供独立归一化趋势。比较组成量级时，
 应读取同一行的总量、占比和峰值，而不是比较 sparkline 高度。
@@ -441,6 +448,7 @@ Token"是另一条独立估算：更早的工具内容在后续 assistant 输入
 它不是工具费用，也不是计费 Token。所选范围没有正费用记录时，仍显示 Token 与健康数据，并把费用派生分析标为不可用。
 颜色使用终端 ANSI 调色板且不绘制自定义
 背景，亮色与暗色终端主题始终保持权威。
+`--color always` 强制彩色，`never` 禁用彩色，`auto` 遵循 TTY 和 `NO_COLOR`。
 
 Sessions 展示总体分位数、全宽 Token/正费用分布横条，并为每个 Session 绘制 Token 占比条，
 同时保留 Project、Model、Provider、请求、调用、Message、Tool、缓存、失败与延迟明细。
@@ -453,7 +461,7 @@ Sessions 展示总体分位数、全宽 Token/正费用分布横条，并为每�
 | <nobr><code>{"--all-time"}</code></nobr> | 包含全部历史记录，替代默认的 60 天窗口                |
 | <nobr><code>{"--interactive"}</code></nobr> | 以交互方式浏览视图与时间范围                        |
 | <nobr><code>{"--tools"}</code></nobr>   | 快捷进入工具 Breakdown；传入数字可显示前 N 个          |
-| <nobr><code>{"--models"}</code></nobr>  | 显示模型用量明细（默认隐藏）。传入数字可显示前 N 个    |
+| <nobr><code>{"--models"}</code></nobr>  | 快捷进入模型 Breakdown；传入数字可显示前 N 个          |
 | <nobr><code>{"--project"}</code></nobr> | 按项目筛选（默认为所有项目，传入空字符串表示当前项目） |
 
 `--interactive`、`--tools` 与 `--models` 是根 Dashboard 快捷方式。Breakdown 与
