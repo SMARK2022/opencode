@@ -77,6 +77,8 @@ async function prepareEnvironment(databasePath: string) {
   process.env["XDG_STATE_HOME"] = xdg.state
   // worker 复用仓库 fixture 的模型描述，避免子进程读取开发者机器上的 models.json。
   process.env["OPENCODE_MODELS_PATH"] = path.join(import.meta.dir, "..", "tool", "fixtures", "models-api.json")
+  // 指定文件不会自动停掉后台刷新；路由测试只消费这个固定模型目录。
+  process.env["OPENCODE_DISABLE_MODELS_FETCH"] = "1"
   // 这两个开关是现有 Bun preload 的行为契约，不能因换成子进程而改变路由初始化。
   process.env["OPENCODE_EXPERIMENTAL_EVENT_SYSTEM"] = "true"
   process.env["OPENCODE_EXPERIMENTAL_WORKSPACES"] = "true"
