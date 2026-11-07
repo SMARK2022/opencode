@@ -13,39 +13,107 @@ type Node = {
   media?: boolean
 }
 const CHARS_PER_TOKEN = 4
+// 使用最近20个助手确认点描述当前模型，窗口大小同时限定每次估算的学习工作量。
+export const INPUT_RATIO_HISTORY_SAMPLES = 20
+
+/** 一次已发送请求的测量值：序列化字符、provider确认输入和载荷分类来自同一个step。 */
+export type InputSample = {
+  readonly bodyChars: number
+  // input已经包含普通输入与cache.read/cache.write，表示该请求完整上下文的使用量。
+  readonly input: number
+  readonly inputBreakdown?: {
+    // reasoning按序列化字符记录加密和可见推理；旧数据可以没有这些分类字段。
+    readonly messages?: { readonly reasoning?: number; readonly attachments?: number }
+    // media把二进制载荷的原始字符、模型可见占位字符和独立token预算联系起来。
+    readonly media?: { readonly rawChars: number; readonly textChars: number; readonly tokens: number }
+  }
+}
 
 export const estimate = (input: string) => Math.max(0, Math.round(input.length / CHARS_PER_TOKEN))
 
+/** 从native历史提取同API的已确认输入，返回按时间从新到旧排列的可重复消费数组。 */
 export function inputHistory(messages: ReadonlyArray<SessionMessage.Message>, model: { provider: string; id: string }) {
-  // 三类请求预算共用runner已有的同API确认样本，不能用未结算估计或catalog别名校准。
-  return messages.toReversed().flatMap((message) => {
+  const history: InputSample[] = []
+  for (let index = messages.length - 1; index >= 0 && history.length < INPUT_RATIO_HISTORY_SAMPLES; index--) {
+    const message = messages[index]
+    // provider/model共同标识API编码和模型行为，只有同组确认量能校准当前请求。
     if (message.type !== "assistant" || String(message.model.providerID) !== String(model.provider) || String(message.model.id) !== String(model.id)
-      || !message.inputEstimate?.confirmed || !message.tokens) return []
-    return [{ bodyChars: message.inputEstimate.bodyChars, inputBreakdown: message.inputEstimate.inputBreakdown,
-      input: message.tokens.input + message.tokens.cache.read + message.tokens.cache.write }]
-  })
+      || !message.inputEstimate?.confirmed || !message.tokens) continue
+    // confirmed标记把这次bodyChars与本次usage绑定，缓存读写也计入上下文分母。
+    const sample = { bodyChars: message.inputEstimate.bodyChars, inputBreakdown: message.inputEstimate.inputBreakdown,
+      input: message.tokens.input + message.tokens.cache.read + message.tokens.cache.write }
+    if (inputRatioSample(sample)) history.push(sample)
+  }
+  return history
 }
 
-export function charsPerTokenFromHistory(history: ReadonlyArray<{ bodyChars: number; input: number; inputBreakdown?: SessionMessage.InputBreakdown }>) {
-  const sample = history.reduce((sum, item) => {
-    // 调用方筛选同 API 的确认样本；分子分母同时截止，零确认和不足100字符的样本不校准。
-    if (sum.bodyChars >= 100_000 || !Number.isFinite(item.input) || !Number.isFinite(item.bodyChars) || item.input <= 0 || item.bodyChars < 100) return sum
-    // 媒体样本用占位字符替换 raw；文本密度不能把 base64 当普通正文。
-    const media = item.inputBreakdown?.media
-    // #194：只有已知媒体 token 才能从确认输入中分离；旧附件样本不能校准文本密度。
-    const textInput = item.input - (media?.tokens ?? 0)
-    if (textInput <= 0 || (!media && (item.inputBreakdown?.messages.attachments ?? 0) > 0)) return sum
-    return { bodyChars: sum.bodyChars + Math.max(0, media
-      ? item.bodyChars - media.rawChars + media.textChars
-      : item.bodyChars), input: sum.input + textInput }
-  }, { bodyChars: 0, input: 0 })
-  // 不足 500 字符或零确认不构成比率样本，首轮继续使用通用 /4。
-  // #194：实际上传可达到六字符以上的密度，统一2..8边界而不退回旧3..4。
-  return sample.bodyChars > 500 && sample.input > 0 ? Math.min(8, Math.max(2, sample.bodyChars / sample.input)) : CHARS_PER_TOKEN
+/** 把一个确认点归一为可用于学习的文本字符、非媒体输入和可选reasoning字符。 */
+export function inputRatioSample(item: InputSample) {
+  // 有限正用量和至少100字符提供稳定的密度观测，过短文本不承担模型校准。
+  if (!Number.isFinite(item.input) || !Number.isFinite(item.bodyChars) || item.input <= 0 || item.bodyChars < 100) return undefined
+  const media = item.inputBreakdown?.media
+  const input = item.input - (media?.tokens ?? 0)
+  // 已知媒体预算从文本分母分离，正文只使用模型可见的占位字符。
+  // 旧附件缺少media.tokens时无法完成这项分离，因此该点保留在历史中而不参与学习。
+  if (input <= 0 || (!media && (item.inputBreakdown?.messages?.attachments ?? 0) > 0)) return undefined
+  return { chars: Math.max(0, item.bodyChars - (media?.rawChars ?? 0) + (media?.textChars ?? 0)), input,
+    reasoning: item.inputBreakdown?.messages?.reasoning }
 }
 
-export function estimateRequest(body: unknown, history: ReadonlyArray<{ bodyChars: number; input: number; inputBreakdown?: SessionMessage.InputBreakdown }>, sections?: ReadonlyArray<SystemSection>) {
-  const ratio = charsPerTokenFromHistory(history)
+/**
+ * 从确认历史学习text与reasoning的字符/token密度。
+ *
+ * 完整分类样本求解 I = a*T + b*R，其中T为普通字符、R为推理字符，a/b为每token字符的倒数。
+ * 学习结果再用最近确认点的真实输入缩放，使载荷组成变化与provider的绝对使用量同时进入估算。
+ */
+export function learnInputRatios(history: Iterable<InputSample>) {
+  const all = { count: 0, chars: 0 }
+  // fit累加二元正规方程所需的平方项和交叉项，避免逐请求重复处理正文。
+  const fit = { chars: 0, input: 0, tt: 0, rr: 0, tr: 0, ti: 0, ri: 0 }
+  let latest: ReturnType<typeof inputRatioSample>
+  for (const item of history) {
+    const sample = inputRatioSample(item)
+    if (!sample) continue
+    latest ??= sample
+    all.chars += sample.chars
+    if (sample.reasoning !== undefined) {
+      const text = sample.chars - sample.reasoning
+      fit.chars += sample.chars
+      fit.input += sample.input
+      fit.tt += text * text
+      fit.rr += sample.reasoning * sample.reasoning
+      fit.tr += text * sample.reasoning
+      fit.ti += text * sample.input
+      fit.ri += sample.reasoning * sample.input
+    }
+    // 缺reasoning字段的旧点仍参与总样本门槛和最近点选择，二元拟合只读取有分类的点。
+    if (++all.count >= INPUT_RATIO_HISTORY_SAMPLES) break
+  }
+  if (!latest || all.chars <= 500) return undefined
+  // 单点、单桶或共线样本能确定混合密度；两个区间分别约束正文和推理的极端值。
+  const pooled = Math.max(2, latest.chars / latest.input)
+  const mixed = { text: Math.min(8, pooled), reasoning: Math.min(32, pooled) }
+  const det = fit.tt * fit.rr - fit.tr * fit.tr
+  // 行列式相对规模衡量两个组成轴是否可区分，过小则采用上面的混合密度。
+  if (latest.reasoning === undefined || fit.chars <= 500 || fit.input <= 0 || det <= 0 || det < 0.01 * fit.tt * fit.rr) return mixed
+  const text = (fit.ti * fit.rr - fit.ri * fit.tr) / det
+  const reasoning = (fit.ri * fit.tt - fit.ti * fit.tr) / det
+  if (text <= 0 || reasoning <= 0) return mixed
+  const ratio = { text: Math.min(8, Math.max(2, 1 / text)), reasoning: Math.min(32, Math.max(2, 1 / reasoning)) }
+  // scale让拟合公式在最近bodyChars上重算的输入与该点provider usage相等。
+  // 两个密度同乘scale后保留正文与推理的相对组成，同时跟随最近的绝对使用量。
+  const scale = ((latest.chars - latest.reasoning) / ratio.text + latest.reasoning / ratio.reasoning) / latest.input
+  return { text: Math.min(8, Math.max(2, ratio.text * scale)), reasoning: Math.min(32, Math.max(2, ratio.reasoning * scale)) }
+}
+
+export function charsPerTokenFromHistory(history: Iterable<InputSample>) {
+  // scalar 合同用于文本尾部增量，与请求估算共用学习结果。
+  return learnInputRatios(history)?.text ?? CHARS_PER_TOKEN
+}
+
+/** 在一次JSON遍历中测量实际请求，再按学习到的两类密度折算输入token。 */
+export function estimateRequest(body: unknown, history: Iterable<InputSample>, sections?: ReadonlyArray<SystemSection>) {
+  const ratio = learnInputRatios(history) ?? { text: CHARS_PER_TOKEN, reasoning: CHARS_PER_TOKEN }
   const counts = {
     system: 0, instructions: 0, skills: 0, tools: 0,
     messages: { userText: 0, assistantText: 0, reasoning: 0, toolInput: 0, toolOutput: 0, attachments: 0, total: 0 },
@@ -157,9 +225,13 @@ export function estimateRequest(body: unknown, history: ReadonlyArray<{ bodyChar
   }).length
   // total 只求和六个消息桶，不能用 bodyChars 补残差来掩盖 system 或转义计数的遗漏。
   counts.messages.total = counts.messages.userText + counts.messages.assistantText + counts.messages.reasoning + counts.messages.toolInput + counts.messages.toolOutput + counts.messages.attachments
-  // 不请求细分的既有纯估算调用保留返回契约；两个运行时 owner 均显式请求该元数据。
-  return { input: Math.max(0, Math.round((bodyChars - media.rawChars + media.textChars) / ratio)) + media.tokens, bodyChars, confirmed: false,
-    ...(sections === undefined ? {} : { charsPerToken: ratio, inputBreakdown: {
+  // 正文包含系统、普通消息、工具定义/结果和选项；reasoning从其中分出并使用自己的密度。
+  // 媒体使用AttachmentToken的独立预算，包装与占位字符仍留在正文折算中。
+  const input = Math.max(0, Math.round((bodyChars - media.rawChars + media.textChars - counts.messages.reasoning) / ratio.text
+    + counts.messages.reasoning / ratio.reasoning)) + media.tokens
+  // 不请求细分时保留原有返回形状；显式传入sections时一并交付文本密度和分类测量。
+  return { input, bodyChars, confirmed: false,
+    ...(sections === undefined ? {} : { charsPerToken: ratio.text, inputBreakdown: {
       ...counts, ...(media.count > 0 ? { media } : {}),
     } }) }
 }

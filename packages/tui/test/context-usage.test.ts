@@ -1235,6 +1235,21 @@ describe("context usage", () => {
     expect(data.details.usage).toMatchObject({ input: 1600, cacheRead: 200, cacheWrite: 200 })
   })
 
+  test("existing daemon density avoids preparing legacy context calibration samples", async () => {
+    let reads = 0
+    const message = assistant("2", "1")
+    if (message.role !== "assistant") throw new Error("expected assistant fixture")
+    const tokens = { input: 1000, output: 0, reasoning: 0, cache: { read: 0, write: 0 } }
+    const finish: Part = { id: "sf", sessionID: "s", messageID: "2", type: "step-finish", reason: "stop", cost: 0, tokens,
+      get inputChars() { reads++; return 4000 } }
+    // Context拥有独立快照，但有现成密度时仍应先返回字段，避免构造无用旧样本。
+    await computeContextData({ messages: [user("1"), { ...message, tokens,
+      inputEstimate: { input: 1000, bodyChars: 4000, confirmed: true, charsPerToken: 4 } }],
+      parts: { "1": [text("1", "hello")], "2": [finish] }, providers: [provider], paths: { cwd: process.cwd() },
+      instructionFiles: [], skills: [], toolDefinitions: [] })
+    expect(reads).toBe(0)
+  })
+
   test("ratio=2.5 tracks JSON-heavy input and ignores user or other-model calibration", async () => {
     const longText = JSON.stringify(Array.from({ length: 100 }, (_, i) => ({ role: "user", content: `message ${i} with JSON, code and tool results`.repeat(4) })))
     const confirmed = Math.round(longText.length / 2.5)

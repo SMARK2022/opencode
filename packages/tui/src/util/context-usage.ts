@@ -307,28 +307,45 @@ function estimate(text: string, ratio = 4) {
   return Math.max(0, Math.round(text.length / ratio))
 }
 
+/** 选择当前模型最近一轮输入快照，并为缺字段的旧消息提供Core学习得到的密度。 */
 function latestInputEstimate(messages: WithParts[], raw: WithParts[], model: { providerID: string; modelID: string }): Partial<NonNullable<AssistantMessage["inputEstimate"]>> {
-  // 仅无请求投影的旧 V1 数据扫描确认点；当前请求缺失估算不等于可以借用旧轮次。
-  // 已有 inputChars 的助手只取确认 parts，不能再叠加同一助手旧 carrier 的相同样本。
-  const samples = raw.toReversed().flatMap(message => {
-    const info = message.info
-    if (info.role !== "assistant" || info.providerID !== model.providerID || info.modelID !== model.modelID) return []
-    const parts = message.parts.toReversed().flatMap(part => part.type === "step-finish" && part.inputChars !== undefined
-      ? [{ bodyChars: part.inputChars, inputBreakdown: part.inputBreakdown, input: part.tokens.input + part.tokens.cache.read + part.tokens.cache.write }] : [])
-    return parts.length > 0 ? parts : info.inputEstimate?.confirmed
-      ? [{ bodyChars: info.inputEstimate.bodyChars, inputBreakdown: info.inputEstimate.inputBreakdown, input: info.tokens.input + info.tokens.cache.read + info.tokens.cache.write }] : []
-  })
-  for (const message of messages.toReversed()) {
+  // selected锁定当前可见历史的请求边界，避免用更旧请求的估算填充当前上下文。
+  const selected = messages.findLast(message => message.info.role === "assistant" && message.info.providerID === model.providerID
+    && message.info.modelID === model.modelID && (message.info.inputEstimate || message.parts.some(part => part.type === "step-finish" && part.inputBreakdown !== undefined)))
+  const info = selected?.info
+  const density = info?.role === "assistant" ? info.inputEstimate?.charsPerToken : undefined
+  // daemon已发布密度时直接返回整个快照，输入值、字符分类和afterPartID保持同源。
+  if (info?.role === "assistant" && density !== undefined && Number.isFinite(density) && density > 0) return { ...info.inputEstimate }
+  const samples: Token.InputSample[] = []
+  // 旧域从raw历史补充确认点，热快照优先，最近finish作为该助手的另一持久表示。
+  for (let index = raw.length - 1; index >= 0 && samples.length < Token.INPUT_RATIO_HISTORY_SAMPLES; index--) {
+    const message = raw[index]
     const info = message.info
     if (info.role !== "assistant" || info.providerID !== model.providerID || info.modelID !== model.modelID) continue
-    if (info.inputEstimate) return { ...info.inputEstimate, charsPerToken: info.inputEstimate.charsPerToken ?? Token.charsPerTokenFromHistory(samples) }
-    const part = message.parts.findLast(part => part.type === "step-finish" && part.inputBreakdown !== undefined)
-    if (part?.type !== "step-finish") continue
-    return { input: part.tokens.input + part.tokens.cache.read + part.tokens.cache.write,
-      bodyChars: part.inputChars ?? 0, confirmed: true, inputBreakdown: part.inputBreakdown,
-      charsPerToken: Token.charsPerTokenFromHistory(samples) }
+    if (info.inputEstimate?.confirmed) {
+      const sample = { bodyChars: info.inputEstimate.bodyChars, inputBreakdown: info.inputEstimate.inputBreakdown,
+        input: info.tokens.input + info.tokens.cache.read + info.tokens.cache.write }
+      if (Token.inputRatioSample(sample)) { samples.push(sample); continue }
+    }
+    // 每个助手最多贡献一个finish，carrier与该finish不会重复进入学习窗口。
+    for (let index = message.parts.length - 1; index >= 0; index--) {
+      const part = message.parts[index]
+      if (part.type !== "step-finish" || part.inputChars === undefined) continue
+      const sample = { bodyChars: part.inputChars, inputBreakdown: part.inputBreakdown,
+        input: part.tokens.input + part.tokens.cache.read + part.tokens.cache.write }
+      if (!Token.inputRatioSample(sample)) continue
+      samples.push(sample)
+      break
+    }
   }
-  return { charsPerToken: Token.charsPerTokenFromHistory(samples) }
+  const charsPerToken = Token.charsPerTokenFromHistory(samples)
+  if (info?.role === "assistant" && info.inputEstimate) return { ...info.inputEstimate, charsPerToken }
+  // 旧step-finish的确认输入和分类保留原值，只为缺失的文本密度补充Core结果。
+  const part = selected?.parts.findLast(part => part.type === "step-finish" && part.inputBreakdown !== undefined)
+  return part?.type === "step-finish"
+    ? { input: part.tokens.input + part.tokens.cache.read + part.tokens.cache.write,
+        bodyChars: part.inputChars ?? 0, confirmed: true, inputBreakdown: part.inputBreakdown, charsPerToken }
+    : { charsPerToken }
 }
 
 function distribute<T extends { tokens: number }>(items: T[], total: number, equal = false) {

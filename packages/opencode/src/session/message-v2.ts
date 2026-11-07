@@ -6,6 +6,7 @@ import { SessionV1 } from "@opencode-ai/core/v1/session"
 export type { WithParts, Part, User, Assistant, ToolPart } from "@opencode-ai/core/v1/session"
 import { SessionMemento } from "@opencode-ai/core/session/compaction-memento"
 import { TokenEstimate } from "@/token/estimate"
+import { Token } from "@opencode-ai/core/util/token"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import {
   APIError,
@@ -1281,23 +1282,26 @@ export const inputEstimateHistory = Effect.fn("MessageV2.inputEstimateHistory")(
   const database = yield* Database.Service
   // 定位、水位与样本共用只读快照，读取不修改 cold_ref、正文或时间戳。
   return yield* Database.withSync(database, sync => sync.transaction(tx => {
-    const selected = new Map<MessageID, {
+    // selected暂存从新到旧的确认点，返回时恢复为时间正序供V1适配器统一处理。
+    const selected: {
       info: Pick<Assistant, "id" | "time" | "role" | "providerID" | "modelID" | "tokens" | "inputEstimate">
       parts: Part[]
-    }>()
-    const collect = (modelOnly: boolean) => {
-      let chars = 0
-      let before: Cursor | undefined
-      while (chars < TokenEstimate.INPUT_CHARS_HISTORY_LIMIT) {
-        // 定位也按需读取；不能先加载全会话元数据，再在内存中挑最近样本。
-        const row = tx.select({ id: MessageTable.id, time: MessageTable.time_created, data: MessageTable.data }).from(MessageTable)
+    }[] = []
+    // 旧统计恢复最多累计100K字符；热确认由消息元数据提供，不消耗这项I/O预算。
+    const recoveryLimit = 100_000
+    let chars = 0
+    // before按(time_created,id)向旧消息推进，保证分页不会重复或跳过候选。
+    let before: Cursor | undefined
+    while (selected.length < Token.INPUT_RATIO_HISTORY_SAMPLES) {
+        // 每页只读取20条同Session、同API的可见助手元数据，统计读取与正文加载分离。
+        const rows = tx.select({ id: MessageTable.id, time: MessageTable.time_created, data: MessageTable.data }).from(MessageTable)
           .where(and(eq(MessageTable.session_id, input.sessionID),
             sql`json_extract(${MessageTable.data}, '$.role') = 'assistant'`,
             sql`json_type(${MessageTable.data}, '$.hidden') is null`,
             before ? older(before) : undefined,
-            modelOnly ? sql`json_extract(${MessageTable.data}, '$.providerID') = ${input.model.providerID} and json_extract(${MessageTable.data}, '$.modelID') = ${input.model.id}` : undefined,
-            // 旧确认 carrier 与有用的 step 都保留；零 usage、隐藏和纯正文不触发解压。
-            sql`(json_extract(${MessageTable.data}, '$.inputEstimate.confirmed') = 1 or exists (
+            sql`json_extract(${MessageTable.data}, '$.providerID') = ${input.model.providerID} and json_extract(${MessageTable.data}, '$.modelID') = ${input.model.id}`,
+            // 热carrier始终可作为候选；旧finish候选只在恢复预算尚未耗尽时进入查询。
+            sql`(json_extract(${MessageTable.data}, '$.inputEstimate.confirmed') = 1 or (${chars < recoveryLimit ? 1 : 0} = 1 and exists (
               select 1 from ${PartTable} where ${PartTable.message_id} = ${MessageTable.id}
               and ${PartTable.session_id} = ${input.sessionID}
               and json_type(${PartTable.data}, '$.hidden') is null
@@ -1306,41 +1310,47 @@ export const inputEstimateHistory = Effect.fn("MessageV2.inputEstimateHistory")(
                 + coalesce(json_extract(${PartTable.data}, '$.tokens.cache.read'), 0)
                 + coalesce(json_extract(${PartTable.data}, '$.tokens.cache.write'), 0) > 0
               and (${PartTable.cold_ref} is not null or json_extract(${PartTable.data}, '$.inputChars') is not null)
-            ))`))
-          .orderBy(desc(MessageTable.time_created), desc(MessageTable.id)).limit(1).get()
-        if (!row) break
+            )))`))
+          .orderBy(desc(MessageTable.time_created), desc(MessageTable.id)).limit(Token.INPUT_RATIO_HISTORY_SAMPLES).all()
+      if (rows.length === 0) break
+      for (const row of rows) {
         before = { id: row.id, time: row.time }
         if (row.data.role !== "assistant") continue
-        // StepFinish 的输入明细也可能在冷层；只为实际候选恢复统计，不回填历史。
-        const message = selected.get(row.id) ?? {
+        const message: (typeof selected)[number] = {
           info: { id: row.id, time: { created: row.time }, role: row.data.role, providerID: row.data.providerID, modelID: row.data.modelID,
             tokens: row.data.tokens, inputEstimate: row.data.inputEstimate },
-          parts: ColdStorage.inspectPartRows(tx, tx.select().from(PartTable)
+          parts: [],
+        }
+        // 有效热确认直接交付数字字段，parts保持为空，归档finish无需恢复。
+        const hot = TokenEstimate.inputHistory([message], input.model)
+        if (hot.length > 0) selected.push(message)
+        if (hot.length === 0 && chars < recoveryLimit) {
+          const parts = ColdStorage.inspectPartRows(tx, tx.select().from(PartTable)
             .where(and(eq(PartTable.message_id, row.id), eq(PartTable.session_id, input.sessionID),
               sql`json_type(${PartTable.data}, '$.hidden') is null`,
               sql`json_extract(${PartTable.data}, '$.type') = 'step-finish'`))
-            .orderBy(PartTable.id).all()).map(partFromRestored),
+            .orderBy(PartTable.id).all()).map(partFromRestored)
+          // 读取范围限定step-finish统计，隐藏part继续由原SQL条件排除。
+          // 所有已恢复合格step都计入I/O预算，随后只保留最新一个作为该助手的确认点。
+          message.parts = parts.filter(part => {
+            const raw = TokenEstimate.inputSample(part)
+            const sample = raw && Token.inputRatioSample(raw)
+            if (!sample) return false
+            chars += sample.chars
+            return true
+          }).slice(-1)
+          if (message.parts.length > 0) selected.push(message)
         }
-        selected.set(row.id, message)
-        // 与学习器按完整消息累计到相同字符预算，不能任意截成最近若干条。
-        for (const part of message.parts) {
-          const sample = TokenEstimate.inputRatioSample(part)
-          if (!sample) continue
-          chars += sample.chars
-        }
+        if (selected.length >= Token.INPUT_RATIO_HISTORY_SAMPLES) break
       }
     }
-    // 同模型优先、会话样本回退沿用原算法；第二次选择复用已恢复的统计。
-    const history = () => [...selected.values()].sort((a, b) => compareChronology(a.info, b.info))
-    collect(true)
-    if (!TokenEstimate.learnInputCharsPerToken({ messages: history(), model: input.model })) collect(false)
-    // 水位仍取当前消息最后一个可见 Part，不能用最后一条统计代替。
+    // afterPartID独立指向当前助手的最后一个可见Part，用于TUI识别估算之后的新内容。
     const last = tx.select({ id: PartTable.id }).from(PartTable)
       .where(and(eq(PartTable.session_id, input.sessionID), eq(PartTable.message_id, input.messageID),
         sql`json_type(${PartTable.data}, '$.hidden') is null`))
       .orderBy(desc(PartTable.id)).limit(1).get()
     return {
-      history: history(),
+      history: selected.toReversed(),
       afterPartID: last?.id,
     }
   }, { behavior: "deferred" }))

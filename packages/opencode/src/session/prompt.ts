@@ -68,6 +68,7 @@ import { LLMEvent } from "@opencode-ai/llm"
 import { usable } from "./overflow"
 // #194：改用 TokenEstimate 统一上传估算
 import { TokenEstimate } from "@/token/estimate"
+import { Token } from "@opencode-ai/core/util/token"
 import { formatExecutionNotice, formatLongExecutionNotice } from "@/util/output-notice"
 
 // #159：decide 最近轮目标占用区间（相对 usable）
@@ -1539,16 +1540,12 @@ const layer = Layer.effect(
       for (const [position, start] of starts.entries()) {
         const candidate = sanitized.slice(start)
         const modelMessages = yield* MessageV2.toModelMessagesEffect(candidate, input.model)
-        // #194：decide mode 用 estimateUploadInput——与 normal prompt 同一估算路径
-        const decideEstimate = TokenEstimate.sanitizeModelMessages(modelMessages)
-        const ratio =
-          TokenEstimate.estimateUploadInput({
-            // 裁剪后的reminder仍出现一次，预算候选必须计入同一份实际包装文本。
-            text: [input.systemText, input.contextReminders, decideEstimate.text].filter(Boolean).join("\n"),
-            attachments: decideEstimate.attachments,
-            history: candidate,
-            model: input.model,
-          }).inputTokens / limit
+        // decide与正常请求使用同一个Core估算器，完整JSON保留reasoning、媒体和工具载荷分类。
+        // systemText与contextReminders组成本次候选窗口的系统部分，二者各出现一次。
+        const ratio = Token.estimateRequest({
+          system: [input.systemText, input.contextReminders].filter(Boolean).join("\n"),
+          messages: modelMessages,
+        }, TokenEstimate.inputHistory(candidate, input.model)).input / limit
         // 超满：退回上一个可容纳窗口
         if (ratio >= DECIDE_MAX) return fallback ?? candidate
 

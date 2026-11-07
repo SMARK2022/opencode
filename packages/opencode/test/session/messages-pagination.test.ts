@@ -18,6 +18,7 @@ import { testEffect } from "../lib/effect"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { TokenEstimate } from "@/token/estimate"
+import { Token } from "@opencode-ai/core/util/token"
 
 const it = testEffect(LayerNode.compile(LayerNode.group([SessionNs.node, MessageV2.node, SessionProjector.node])))
 
@@ -159,6 +160,78 @@ const addCompactionPart = Effect.fn("Test.addCompactionPart")(function* (
 })
 
 describe("MessageV2.inputEstimateHistory", () => {
+  it.instance("uses confirmed hot metadata without returning archived finish payloads", () =>
+    withSession(({ session, sessionID }) => Effect.gen(function* () {
+      const database = yield* Database.Service
+      const userID = yield* addUser(sessionID)
+      const assistantID = yield* addAssistant(sessionID, userID)
+      const tokens = { input: 30000, output: 10, reasoning: 0, cache: { read: 0, write: 0 } }
+      const stepID = PartID.ascending()
+      yield* session.updatePart({ id: stepID, sessionID, messageID: assistantID, type: "step-finish", reason: "stop", cost: 0, tokens, inputChars: 120000 })
+      const message = yield* MessageV2.get({ sessionID, messageID: assistantID })
+      if (message.info.role !== "assistant") throw new Error("expected assistant fixture")
+      yield* session.updateMessage({ ...message.info, tokens, inputEstimate: { input: 30000, bodyChars: 120000, confirmed: true } })
+      // 归档保留热确认；只读采集应直接交付它，而不是取回相同的finish正文。
+      yield* Database.withSync(database, sync => {
+        sync.update(SessionTable).set({ time_updated: Date.now() - 31 * 86400000 }).where(eq(SessionTable.id, sessionID)).run()
+        expect(ColdStorage.freezeOwner(sync, { type: "part", id: stepID, now: Date.now() }).type).toBe("frozen")
+      })
+      const result = yield* MessageV2.inputEstimateHistory({ sessionID, messageID: assistantID,
+        model: { providerID: ProviderV2.ID.make("test"), id: ModelV2.ID.make("test") } })
+      expect(result.history.map(item => item.parts)).toEqual([[]])
+      expect(result.afterPartID).toBe(stepID)
+      expect(TokenEstimate.inputHistory(result.history, { providerID: "test", id: "test" }))
+        .toEqual([{ bodyChars: 120000, input: 30000, inputBreakdown: undefined }])
+      expect(sessionColdOwners(database.sync, sessionID)).toBe(1)
+    })),
+  )
+
+  it.instance("bounds hot confirmations by sample count rather than the legacy character budget", () =>
+    withSession(({ session, sessionID }) => Effect.gen(function* () {
+      const parentID = yield* addUser(sessionID)
+      const ids: MessageID[] = []
+      for (let index = 0; index < 21; index++) {
+        const id = yield* addAssistant(sessionID, parentID)
+        ids.push(id)
+        const message = yield* MessageV2.get({ sessionID, messageID: id })
+        if (message.info.role !== "assistant") throw new Error("expected assistant fixture")
+        yield* session.updateMessage({ ...message.info,
+          tokens: { input: 250000, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+          inputEstimate: { input: 250000, bodyChars: 1000000, confirmed: true } })
+      }
+      // 每条热确认已经超过旧100K读取量，仍应交付最近20个数字样本。
+      const result = yield* MessageV2.inputEstimateHistory({ sessionID, messageID: ids[20],
+        model: { providerID: ProviderV2.ID.make("test"), id: ModelV2.ID.make("test") } })
+      expect(result.history.map(item => item.info.id)).toEqual(ids.slice(-20))
+      expect(TokenEstimate.inputHistory(result.history, { providerID: "test", id: "test" })).toHaveLength(20)
+      expect(result.afterPartID).toBeUndefined()
+    })),
+  )
+
+  it.instance("counts all restored steps against the legacy budget while still accepting older hot metadata", () =>
+    withSession(({ session, sessionID }) => Effect.gen(function* () {
+      const parentID = yield* addUser(sessionID)
+      const hotID = yield* addAssistant(sessionID, parentID)
+      const hot = yield* MessageV2.get({ sessionID, messageID: hotID })
+      if (hot.info.role !== "assistant") throw new Error("expected assistant fixture")
+      yield* session.updateMessage({ ...hot.info,
+        tokens: { input: 30000, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+        inputEstimate: { input: 30000, bodyChars: 120000, confirmed: true } })
+      const older = yield* addAssistant(sessionID, parentID)
+      const latest = yield* addAssistant(sessionID, parentID)
+      for (const [messageID, inputChars] of [[older, 60000], [latest, 90000], [latest, 10000]] as const) {
+        yield* session.updatePart({ id: PartID.ascending(), sessionID, messageID, type: "step-finish", reason: "stop", cost: 0,
+          inputChars, tokens: { input: inputChars / 4, output: 0, reasoning: 0, cache: { read: 0, write: 0 } } })
+      }
+      // 最新助手恢复了100K，即使只选末个10K点，也不能再恢复older凑学习样本。
+      const result = yield* MessageV2.inputEstimateHistory({ sessionID, messageID: latest,
+        model: { providerID: ProviderV2.ID.make("test"), id: ModelV2.ID.make("test") } })
+      expect(result.history.map(item => item.info.id)).toEqual([hotID, latest])
+      expect(TokenEstimate.inputHistory(result.history, { providerID: "test", id: "test" }).map(item => item.bodyChars))
+        .toEqual([10000, 120000])
+    })),
+  )
+
   it.instance("reads input estimate statistics separately from cold conversation bodies", () =>
     withSession(({ session, sessionID }) =>
       Effect.gen(function* () {
@@ -182,9 +255,10 @@ describe("MessageV2.inputEstimateHistory", () => {
         const result = yield* MessageV2.inputEstimateHistory({ sessionID, messageID: assistantID, model: { providerID: ProviderV2.ID.make("test"), id: ModelV2.ID.make("test") } })
         expect(result.history.map(message => [message.info.id, message.parts.map(part => part.id)])).toEqual([[assistantID, [stepID]]])
         expect(result.afterPartID).toBe(latestID)
-        expect(TokenEstimate.learnInputCharsPerToken({ messages: result.history, model: { providerID: "test", id: "test" } })).toEqual({ charsPerToken: 4, source: "model-history" })
+        expect(Token.charsPerTokenFromHistory(TokenEstimate.inputHistory(result.history, { providerID: "test", id: "test" }))).toBe(4)
         const fallback = yield* MessageV2.inputEstimateHistory({ sessionID, messageID: assistantID, model: { providerID: ProviderV2.ID.make("test"), id: ModelV2.ID.make("other") } })
-        expect(TokenEstimate.learnInputCharsPerToken({ messages: fallback.history, model: { providerID: "test", id: "other" } })).toEqual({ charsPerToken: 4, source: "session-history" })
+        // 换模型后旧确认仍在数据库，但不能充作新API的学习样本。
+        expect(fallback.history).toEqual([])
         expect(sessionColdOwners(database.sync, sessionID)).toBe(2)
       }),
     ),

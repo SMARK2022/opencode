@@ -167,7 +167,6 @@ const assistant = Effect.fn("TestSession.assistant")(function* (
     providerID: ref.providerID,
     parentID,
     time: { created: Date.now() },
-    finish: "end_turn",
   }
   yield* session.updateMessage(msg)
   return msg
@@ -780,6 +779,39 @@ it.live("session.processor effect tests preserve text start time", () =>
         if (!text?.time?.start || !text.time.end) return
         expect(text.time.start).toBeLessThan(text.time.end)
       }),
+    { config: (url) => providerCfg(url) },
+  ),
+)
+
+it.live("session.processor publishes the shared text density without a V1 ratio override", () =>
+  provideTmpdirServer(
+    ({ dir, llm }) => Effect.gen(function* () {
+      const { processors, session, provider } = yield* boot()
+      yield* llm.text("done", { usage: { input: 100, output: 1 } })
+      const chat = yield* session.create({})
+      const parent = yield* user(chat.id, "estimate")
+      // 两个确认点的正文密度均为4、推理密度均为16，V1总比率覆盖会破坏这个已知解。
+      for (const [reasoning, input] of [[800000, 100000], [200000, 212500]]) {
+        const prior = yield* assistant(chat.id, parent.id, path.resolve(dir))
+        const inputBreakdown = { system: 0, instructions: 0, skills: 0, tools: 0,
+          messages: { userText: 1000000 - reasoning, assistantText: 0, reasoning, toolInput: 0, toolOutput: 0, attachments: 0, total: 1000000 } }
+        const tokens = { input, output: 0, reasoning: 0, cache: { read: 0, write: 0 } }
+        yield* session.updatePart({ id: PartID.ascending(), sessionID: chat.id, messageID: prior.id,
+          type: "step-finish", reason: "stop", cost: 0, inputChars: 1000000,
+          tokens, inputBreakdown })
+        // 与真实finish生产者一样保存成对热确认，读取它不受旧cold恢复预算截断。
+        yield* session.updateMessage({ ...prior, tokens, inputEstimate: { input, bodyChars: 1000000, confirmed: true, inputBreakdown } })
+      }
+      const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+      const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+      const handle = yield* processors.create({ assistantMessage: msg, sessionID: chat.id, model: mdl })
+      yield* handle.process({ user: parent, sessionID: chat.id, model: mdl, agent: agent(), system: ["plain text"],
+        messages: [{ role: "user", content: "estimate" }], tools: {} })
+      expect(handle.message.inputEstimate?.charsPerToken).toBe(4)
+      // provider确认量负责账本，prepared估算及其密度保留自己的字段语义。
+      expect(handle.message.tokens.input).toBe(100)
+      expect((yield* session.get(chat.id)).request?.inputEstimate?.charsPerToken).toBe(4)
+    }),
     { config: (url) => providerCfg(url) },
   ),
 )

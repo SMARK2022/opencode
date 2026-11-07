@@ -3,6 +3,7 @@
 // 确认分类按 categoryChars / inputChars 分配 provider input，不在 TUI 重建请求体。
 
 import { AttachmentToken } from "@opencode-ai/core/util/attachment-token"
+import { Token } from "@opencode-ai/core/util/token"
 import type { AssistantMessage, Part, Session } from "@opencode-ai/sdk/v2"
 import { computeFinalTokens, measureOutput, measureTail, modelParts, type TokenPart } from "./token-estimate"
 
@@ -125,8 +126,11 @@ export function measureMessage(message: Msg, allParts: ReadonlyArray<TokenPart>)
   const chars = parts.map(measureOutput)
   const tail = measureTail(info.role === "assistant" ? info : undefined, parts, chars)
   const atoms: { tokens: NonNullable<Msg["tokens"]>; cost: number }[] = []
-  let inputChars = 0
-  let inputTokens = 0
+  // 旧消息缺少daemon密度时，每条助手只向会话汇总提供最近一个确认样本。
+  let inputSample: Token.InputSample | undefined
+  const density = info.inputEstimate?.charsPerToken
+  // 正的有限密度由daemon准备请求时冻结，当前消息直接用于实时输入增量计算。
+  const preparedDensity = density !== undefined && Number.isFinite(density) && density > 0
   let outputChars = 0
   let outputTokens = 0
   for (let i = 0; i < parts.length; i++) {
@@ -136,13 +140,13 @@ export function measureMessage(message: Msg, allParts: ReadonlyArray<TokenPart>)
     atoms.push({ tokens: { ...part.tokens, cache: { ...part.tokens.cache } }, cost: part.cost ?? 0 })
     const start = parts.slice(0, i).findLastIndex((item) => item.type === "step-start")
     const stepChars = chars.slice(start + 1, i).reduce((sum, value) => sum + value, 0)
-    const input = part.tokens.input + part.tokens.cache.read + part.tokens.cache.write
     const output = part.tokens.output + part.tokens.reasoning
-    const bd = part.inputBreakdown
-    // 媒体固定 token 不进入文本密度，沿用原有样本门槛和 2..8 钳位。
-    if (part.inputChars !== undefined && part.inputChars >= 100 && input > 0 && (!bd?.messages.attachments || bd.media)) {
-      inputChars += bd?.media ? Math.max(0, part.inputChars - bd.media.rawChars + bd.media.textChars) : part.inputChars
-      inputTokens += Math.max(0, input - (bd?.media?.tokens ?? 0))
+    // 输出密度仍从本step生成字符和usage独立学习。
+    // 输入侧仅在旧域读取确认字符，Core负责样本资格和媒体归一。
+    if (!preparedDensity && part.inputChars !== undefined) {
+      const sample = { bodyChars: part.inputChars, inputBreakdown: part.inputBreakdown,
+        input: part.tokens.input + part.tokens.cache.read + part.tokens.cache.write }
+      if (Token.inputRatioSample(sample)) inputSample = sample
     }
     if (output > 0 && stepChars > 0) {
       // 只有生成侧的已报告输出能训练输出密度，输入校准不能混进该样本。
@@ -192,7 +196,7 @@ export function measureMessage(message: Msg, allParts: ReadonlyArray<TokenPart>)
     // 工具回执中的媒体按既有固定 token 规则计入输入，不用正文密度解释二进制载荷。
     for (const attachment of part.state.attachments ?? []) attachmentTokens += AttachmentToken.estimateAttachment(attachment).tokens
   }
-  return { info, atoms, hasFinish, tail, inputChars, inputTokens, outputChars, outputTokens, source, live, attachmentTokens }
+  return { info, atoms, hasFinish, tail, inputSample, outputChars, outputTokens, source, live, attachmentTokens }
 }
 
 const emptyMessage = measureMessage({ id: "", role: "none" }, [])
@@ -205,15 +209,11 @@ export function summarizeAccounting(items: ReadonlyArray<ReturnType<typeof measu
   for (const item of items) if (item.info.role === "assistant" && item.info.parentID) latestByRequest.set(item.info.parentID, item)
   const requests = new Map<string, RequestTotals>()
   const session = { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, cost: 0 }
-  let inputChars = 0
-  let inputTokens = 0
   let outputChars = 0
   let outputTokens = 0
   // 汇总只访问贡献数字。每个请求和每个视图共用这次校准，不重读历史 Part。
   for (const item of items) {
     if (item.info.role !== "assistant") continue
-    inputChars += item.inputChars
-    inputTokens += item.inputTokens
     outputChars += item.outputChars
     outputTokens += item.outputTokens
     const request = item.info.parentID ? requests.get(item.info.parentID) ?? emptyRequest() : undefined
@@ -234,8 +234,15 @@ export function summarizeAccounting(items: ReadonlyArray<ReturnType<typeof measu
       request.cost += atom.cost
     }
   }
-  // 保留旧样本门槛；少量短输出不重新校准整个会话的显示，输入仍按原范围钳位。
-  const inputRatio = inputTokens > 0 && inputChars > 500 ? Math.min(8, Math.max(2, inputChars / inputTokens)) : DEFAULT_RATIO
+  // 最近助手携带密度时沿用该值；旧域按时间从新到旧把数字样本交给Core。
+  const density = latest?.info.inputEstimate?.charsPerToken
+  const inputRatio = density !== undefined && Number.isFinite(density) && density > 0 ? density
+    : Token.charsPerTokenFromHistory((function* () {
+      for (let index = items.length - 1; index >= 0; index--) {
+        const item = items[index]
+        if (item.info.role === "assistant" && item.inputSample) yield item.inputSample
+      }
+    })())
   const outputRatio = outputTokens > 0 && outputChars > 100 ? outputChars / outputTokens : DEFAULT_RATIO
   // 按真实 parent 汇集各助手的未结算差额，切换助手不等于结算上一助手。
   const pending = new Map<string, { input: number; output: number }>()
@@ -294,7 +301,9 @@ export function projectAccounting(
       ? item.tail.start.inputTokens : tokens.input + tokens.cache.read + tokens.cache.write : undefined
     ),
   }
-  const density = active?.inputEstimate?.charsPerToken
+  // active请求使用Session.request的字段；显式历史请求使用其末助手carrier的字段。
+  // 两条路径都通过request交接，保证密度和输入估算来自同一个请求身份。
+  const density = request.inputEstimate?.charsPerToken
   const inputRatio = density !== undefined && Number.isFinite(density) && density > 0 ? density : summary.inputRatio
   const current = computeFinalTokens(undefined, [], request, summary.outputRatio, item.tail, inputRatio)
   const pending = selected ? summary.pending.get(selected) : undefined

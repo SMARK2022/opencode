@@ -1186,36 +1186,18 @@ const layer = Layer.effect(
               const metadata = yield* MessageV2.inputEstimateHistory({ sessionID: ctx.sessionID, messageID: ctx.assistantMessage.id, model: ctx.model }).pipe(
                 Effect.provideService(Database.Service, database),
               )
-              const history = metadata.history
-              const samples = history.toReversed().flatMap((message) => {
-                const info = message.info
-                // 重放/重试只读已保存样本；provider 或模型切换不能借用旧比率。
-                if (info.role !== "assistant" || info.providerID !== ctx.model.providerID || info.modelID !== ctx.model.id) return []
-                // V1 单助手多 step 逐确认点取样；旧64数据缺少该字段时才沿用其已确认 carrier。
-                const steps = message.parts.flatMap(part => part.type === "step-finish" && part.inputChars !== undefined
-                  ? [{ bodyChars: part.inputChars, inputBreakdown: part.inputBreakdown, input: part.tokens.input + part.tokens.cache.read + part.tokens.cache.write }] : [])
-                if (steps.length > 0) return steps.toReversed()
-                if (!info.inputEstimate?.confirmed) return []
-                return [{ bodyChars: info.inputEstimate.bodyChars, inputBreakdown: info.inputEstimate.inputBreakdown,
-                  input: info.tokens.input + info.tokens.cache.read + info.tokens.cache.write }]
-              })
-              // 每次请求准备都覆盖为未确认，旧 tokens 不得确认新请求体样本。
+              // 样本来自同provider/model的已确认历史，body是本次实际准备发送的完整载荷。
+              const samples = TokenEstimate.inputHistory(metadata.history, ctx.model)
               const estimate = Token.estimateRequest(body, samples, streamInput.inputSections ?? [])
-              // #194：同模型优先、会话历史回退，普通与摘要请求都在真实 prepared 入口学习。
-              const charsPerToken = TokenEstimate.learnInputCharsPerToken({ messages: history, model: ctx.model })?.charsPerToken
-                ?? estimate.charsPerToken ?? 4
+              // Core已分别折算正文、reasoning和媒体；这里的扩展只补充请求身份与水位。
               ctx.assistantMessage.inputEstimate = {
                 ...estimate,
-                // clamp 只调整文本密度，媒体 token 固定追加一次，raw 字符只作展示基数。
-                input: Math.round((estimate.bodyChars - (estimate.inputBreakdown?.media?.rawChars ?? 0)
-                  + (estimate.inputBreakdown?.media?.textChars ?? 0)) / charsPerToken) + (estimate.inputBreakdown?.media?.tokens ?? 0),
-                charsPerToken,
                 contextLimit: ctx.model.limit.context,
                 // V1 单助手多 step：新的确认 part 会立即遮掉此轮估算。
                 afterPartID: metadata.afterPartID,
               }
-              // 快照提交只刷新元数据；recordAssistant 仍只从 step-finish 结算。
-              // 用即将发送的请求体判断，压缩保留的旧 tail 不再触发连续压缩。
+              // inputEstimate记录本次估算，provider返回的step-finish再写入对应确认量。
+              // 预检使用同一份请求估算判断可用窗口，随后沿用原有compact结果和续跑流程。
               if (!ctx.assistantMessage.summary && isOverflow({
                 cfg: yield* config.get(), model: ctx.model,
                 tokens: { input: ctx.assistantMessage.inputEstimate.input, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },

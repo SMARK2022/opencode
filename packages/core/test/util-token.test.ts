@@ -15,7 +15,7 @@ test("calibrates input density with thresholds, cache-inclusive samples and a sh
   for (const bodyChars of [200, 500]) expect(Token.charsPerTokenFromHistory([{ bodyChars, input: 40 }])).toBe(4)
   expect(Token.charsPerTokenFromHistory([{ bodyChars: 501, input: 167 }])).toBe(3)
   for (const input of [0, -1, Infinity, NaN]) expect(Token.charsPerTokenFromHistory([{ bodyChars: 1000, input }])).toBe(4)
-  // 第三个样本故意极端偏斜，正确结果要求达到十万字符时分子、分母一起停止接纳旧样本。
+  // 缺分桶时由最近确认点约束绝对量，较旧的极端点不能改变该密度。
   expect(Token.charsPerTokenFromHistory([{ bodyChars: 50000, input: 20000 }, { bodyChars: 50000, input: 20000 }, { bodyChars: 100000, input: 1 }])).toBe(2.5)
   // 附件只从字符分子扣除；纯附件不足文本门槛时仍回到 /4。
   const inputBreakdown = { system: 0, instructions: 0, skills: 0, tools: 0,
@@ -25,6 +25,32 @@ test("calibrates input density with thresholds, cache-inclusive samples and a sh
   expect(Token.charsPerTokenFromHistory(history)).toBe(4)
   expect(Token.estimateRequest({ messages: [] }, history, []).charsPerToken).toBe(4)
   expect(Token.charsPerTokenFromHistory([{ ...history[0], inputBreakdown: { ...inputBreakdown, messages: { ...inputBreakdown.messages, attachments: 100000 } } }])).toBe(4)
+})
+
+test("confirmed mixed densities estimate encrypted reasoning without inflating ordinary text", () => {
+  const breakdown = (reasoning: number): SessionMessage.InputBreakdown => ({
+    system: 0, instructions: 0, skills: 0, tools: 0,
+    messages: { userText: 0, assistantText: 0, reasoning, toolInput: 0, toolOutput: 0, attachments: 0, total: reasoning },
+  })
+  // 两个确认点独立给定 /4 正文和 /16 推理，改变组成后仍应得到约50万输入。
+  const history = [
+    { bodyChars: 1_000_000, input: 212_500, inputBreakdown: breakdown(200_000) },
+    { bodyChars: 1_000_000, input: 100_000, inputBreakdown: breakdown(800_000) },
+  ]
+  const result = Token.estimateRequest({
+    instructions: "t".repeat(1_600_000),
+    input: [{ type: "reasoning", encrypted_content: "r".repeat(1_600_000) }],
+  }, history, [])
+  expect(result.input).toBeGreaterThanOrEqual(500_000)
+  expect(result.input).toBeLessThan(500_100)
+  expect(result.charsPerToken).toBe(4)
+  expect(result.charsPerToken).toBe(Token.charsPerTokenFromHistory(history))
+  // 共线的混合样本不能把推理的高密度泄漏给后续纯文本请求。
+  const plain = Token.estimateRequest({ instructions: "t".repeat(5_000_000) }, [
+    { bodyChars: 1_001_000, input: 31_500, inputBreakdown: breakdown(1_000_000) },
+  ], [])
+  expect(plain.charsPerToken).toBe(8)
+  expect(plain.input).toBeGreaterThanOrEqual(625_000)
 })
 
 test("one serializer accounts for lowered messages, tools, source sections and JSON escapes", () => {
@@ -73,6 +99,28 @@ test("one serializer accounts for lowered messages, tools, source sections and J
   // 无实际载荷的声明和普通instructions提示不能窃取真实user正文。
   expect(Token.estimateRequest(messages, [], [{ kind: "system", text: "absent" }, { kind: "instructions", text: "actual user" }]).inputBreakdown)
     .toEqual(ordinary.inputBreakdown)
+})
+
+test("learning consumes only twenty eligible samples and separates legacy media from text", () => {
+  let consumed = 0
+  function* history() {
+    for (let index = 0; index < 10000; index++) {
+      consumed++
+      yield { bodyChars: 1000, input: 250 }
+    }
+  }
+  // 可迭代数据是调用方持有的样本，不得为了一个scalar结果读完无关旧历史。
+  expect(Token.charsPerTokenFromHistory(history())).toBe(4)
+  expect(consumed).toBe(20)
+  const media = { rawChars: 99000, textChars: 0, tokens: 1600 }
+  const sample = { bodyChars: 100000, input: 1850, inputBreakdown: { media, messages: { attachments: 99000 } } }
+  expect(Token.charsPerTokenFromHistory([sample])).toBe(4)
+  // 媒体输入已从确认量分离；缺media元数据的旧附件仍不能参与学习。
+  expect(Token.charsPerTokenFromHistory([{ ...sample, inputBreakdown: { messages: { attachments: 99000 } } }])).toBe(4)
+  expect(Token.charsPerTokenFromHistory([{ bodyChars: 1000, input: 0 }, { bodyChars: 1000, input: 125 }])).toBe(8)
+  // 样本数组可重复供scalar和prepared估算使用，重试不共享耗尽的iterator。
+  const samples = [{ bodyChars: 1000, input: 125 }]
+  expect(Token.estimateRequest({ instructions: "hello" }, samples)).toEqual(Token.estimateRequest({ instructions: "hello" }, samples))
 })
 
 test("Chat, Responses and SDK bodies use the same estimator without reparsing schemas", () => {

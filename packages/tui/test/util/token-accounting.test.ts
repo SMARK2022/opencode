@@ -37,6 +37,31 @@ function stepFinish(
 }
 
 describe("tokenAccounting", () => {
+  test("daemon density skips input calibration reads while keeping confirmed accounting", () => {
+    let reads = 0
+    const tokens = { input: 1000, output: 10, reasoning: 0, cache: { read: 0, write: 0 } }
+    const message: AssistantMessage = { ...assistantMsg("a", "u", tokens, 1), sessionID: "s", agent: "build", mode: "build",
+      providerID: "p", modelID: "m", path: { cwd: "/", root: "/" },
+      inputEstimate: { input: 1000, bodyChars: 4000, confirmed: true, charsPerToken: 4 } }
+    const finish: Part = { id: "sf", sessionID: "s", messageID: "a", type: "step-finish", reason: "stop", cost: 0, tokens,
+      get inputChars() { reads++; return 4000 } }
+    // 观察真实输入字段读取，保证有daemon密度时没有先训练再覆盖的隐藏工作。
+    const result = tokenAccounting([message], () => [finish])
+    expect(reads).toBe(0)
+    expect(result.ratio.input).toBe(4)
+    expect(result.step.input).toBe(1000)
+    expect(result.session.input).toBe(1000)
+  })
+
+  test("historical requests keep their own daemon density", () => {
+    const first = { ...assistantMsg("a1", "u1"), inputEstimate: { input: 100, bodyChars: 200, confirmed: false, charsPerToken: 2 } }
+    const last = { ...assistantMsg("a2", "u2"), inputEstimate: { input: 100, bodyChars: 800, confirmed: false, charsPerToken: 8 } }
+    // 历史选择改变request归属，不能借最新助手或会话的输入密度。
+    const result = tokenAccounting([first, last], () => [], undefined, undefined, "u1")
+    expect(result.ratio.input).toBe(2)
+    expect(result.step.input).toBe(100)
+  })
+
   // #122：完成消息 + step-finish → step.input 用确认值（含 cache）
   test("step.input uses confirmed tokens when last step-finish exists and message completed", () => {
     const msgs = [userMsg("u1"), assistantMsg("a1", "u1", { input: 10, output: 20, reasoning: 0, cache: { read: 0, write: 0 } }, 100)]
