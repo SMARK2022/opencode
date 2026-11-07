@@ -1,10 +1,11 @@
 @@ description
-Run JavaScript in a confined Code Mode runtime to script tool calls and HTTP requests and compose their results.
+Run JavaScript in a confined Code Mode runtime to compose tool calls and HTTP requests.
+Combine calls when their inputs are known or can be derived in code; return when the next step needs your judgment. Filter and aggregate intermediate results in the script, returning only the evidence needed for the next decision. Console logs also reach the model, so avoid printing entire intermediate results.
+Use exact tool paths and signatures from the Code Mode catalog or global `search(...)`. Do not infer or normalize tool names; preserve bracket notation such as `tools.<namespace>["tool-name"](input)`. Tools shown outside that catalog are not available inside `{ code }`.
+Await every call whose completion matters; pending calls are interrupted when execution ends. Run independent calls with `Promise.all`, or `Promise.allSettled` when partial results are useful. Keep dependent calls and conflicting writes sequential. Let errors surface unless you have a useful recovery or partial result to return; do not hide failed items in a success summary.
+Prefer an explicit `return`; otherwise the final top-level expression becomes the result. Use each tool's documented result fields to judge success and completeness.
+First discover: `return search({ query: "lookup orders" })`. If its signature describes `tools.orders.lookup({ id })` returning an order with `id` and `status`, then use those exact fields. Then compose: `const orders = await Promise.all(["a", "b"].map((id) => tools.orders.lookup({ id }))); return orders.map((order) => ({ id: order.id, status: order.status }));`. Replace the example path, inputs, and fields with what you discovered.
 `fetch` is available for HTTP requests. Imports, direct filesystem access, and timers are unavailable: there is no `setTimeout` or sleep. All other external access goes through `tools`.
-Within `{ code }`, the only callable tools are those explicitly listed in the Code Mode catalog instructions or returned by the `search` function. Inside `{ code }`, ignore tools shown outside the Code Mode catalog. They are not available in the Code Mode runtime.
-Call tools through `tools` using only exact paths and signatures from the catalog. Do not infer or normalize tool names; preserve bracket notation such as `tools.<namespace>["tool-name"](input)`.
-Prefer an explicit `return`; if omitted, the final top-level expression becomes the result.
-Await every call whose completion matters; pending calls are interrupted when execution ends. Run independent calls concurrently with `Promise.allSettled`.
 @@ intro.empty
 No Code Mode tools are currently available. Later Code Mode catalog updates may add or remove tools. Do not call `execute` unless there is at least one available Code Mode tool.
 @@ intro.complete
@@ -19,6 +20,8 @@ The catalog is complete. Do not guess tool names.
 # Code Mode
 
 The tools listed below, and `search`, cannot be called directly: they only work as JavaScript inside the `execute` tool. Every other tool you have is a normal tool call: call it directly, never inside `execute`.
+
+Unlisted tools remain available through search; search by the task you need rather than choosing a less suitable tool just because it is shown.
 
 The catalog is partial. Before calling a tool that is not listed below, find it with the global `search(...)` function. Do not guess tool names. Each result's `path` is the complete call expression: write it out as code, for example `await tools.ns.tool_name({ ... })`. Do not use it as a key such as `tools[path]`.
 

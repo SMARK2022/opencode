@@ -1,5 +1,5 @@
 import { parse } from "acorn"
-import { Cause, Effect, Exit, Fiber, Semaphore } from "effect"
+import { Cause, Effect, Exit, Fiber, Semaphore, Scope } from "effect"
 import { DiagnosticCategory, ModuleKind, ScriptTarget, flattenDiagnosticMessageText, transpileModule } from "typescript"
 import {
   copyIn,
@@ -599,33 +599,39 @@ const collectPatternNames = (pattern: AstNode, out: Array<string> = []): Array<s
   return out
 }
 
+// 能力与执行寿命共享，词法栈属于调用帧；并发函数不能互相替换作用域。
+type Execution<R> = {
+  invokeTool: (path: ReadonlyArray<string>, args: Array<unknown>) => Effect.Effect<unknown, unknown, R>
+  toolKeys: (path: ReadonlyArray<string>) => ReadonlyArray<string>
+  logs: Array<string>
+  callPermits: Semaphore.Semaphore
+  scope: Scope.Scope
+  fetchResponse?: CodeModeFunction
+}
+
 class Interpreter<R> {
-  private scopes: Array<Map<string, Binding>>
-  private readonly invokeTool: (path: ReadonlyArray<string>, args: Array<unknown>) => Effect.Effect<unknown, unknown, R>
-  // Enumerable namespace/tool names at a node of the host tool tree, threaded from
-  // ToolRuntime.make like invokeTool: the interpreter never holds the tree itself.
-  private readonly toolKeys: (path: ReadonlyArray<string>) => ReadonlyArray<string>
-  private readonly logs: Array<string>
   private lastValue: unknown
-  // Caps how many eagerly forked tool calls run at once (the parallel-call concurrency cap).
-  private readonly callPermits: Semaphore.Semaphore
-  // 未等待的调用归本次执行所有；沿v2.2.5在结束时取消，不能延长或重放脚本。
-  private readonly pendingSettlements = new Set<SandboxPromise>()
-  private readonly fetchResponse?: CodeModeFunction
 
   constructor(
-    invokeTool: (path: ReadonlyArray<string>, args: Array<unknown>) => Effect.Effect<unknown, unknown, R>,
-    toolKeys: (path: ReadonlyArray<string>) => ReadonlyArray<string>,
-    logs: Array<string> = [],
-    hasFetch = false,
+    private readonly execution: Execution<R>,
+    private scopes: Array<Map<string, Binding>>,
+  ) {}
+
+  static make<R>(
+    invokeTool: Execution<R>["invokeTool"],
+    toolKeys: Execution<R>["toolKeys"],
+    logs: Array<string>,
+    scope: Scope.Scope,
+    hasFetch: boolean,
   ) {
     const globalScope = new Map<string, Binding>()
-    this.scopes = [globalScope]
-    this.invokeTool = invokeTool
-    this.toolKeys = toolKeys
-    this.logs = logs
-    this.lastValue = undefined
-    this.callPermits = Semaphore.makeUnsafe(TOOL_CALL_CONCURRENCY)
+    const execution: Execution<R> = {
+      invokeTool,
+      toolKeys,
+      logs,
+      scope,
+      callPermits: Semaphore.makeUnsafe(TOOL_CALL_CONCURRENCY),
+    }
     globalScope.set("tools", { mutable: false, value: new ToolReference([]) })
     // 全局search与既有内部入口共用当前目录，调用处分辨同步发现与异步操作。
     globalScope.set("search", { mutable: false, value: new ToolReference(["$codemode", "search"]) })
@@ -669,8 +675,9 @@ class Interpreter<R> {
         headers: { get: name => data.headers[name.toLowerCase()] ?? null, has: name => Object.keys(data.headers).includes(name.toLowerCase()), entries: () => Object.entries(data.headers) },
         text: async () => data.text, json: async () => JSON.parse(data.text), bytes: async () => data.bytes };
       }`).body[0], "fetch response")
-      this.fetchResponse = new CodeModeFunction(getArray(factory, "params").map((param) => asNode(param, "params")), getNode(factory, "body"), [globalScope])
+      execution.fetchResponse = new CodeModeFunction(getArray(factory, "params").map((param) => asNode(param, "params")), getNode(factory, "body"), [globalScope])
     }
+    return new Interpreter(execution, [globalScope])
   }
 
   run(program: ProgramNode): Effect.Effect<unknown, unknown, R> {
@@ -707,43 +714,40 @@ class Interpreter<R> {
       // without an explicit await, exactly as in JS.
       if (value instanceof SandboxPromise) value = yield* self.settlePromise(value)
       return value
-    // 最终器运行时才读取待结算集合，构建Effect时集合尚为空。
-    }).pipe(Effect.ensuring(Effect.suspend(() => Effect.forEach([...self.pendingSettlements], (promise) => promise.fiber ? Fiber.interrupt(promise.fiber) : Effect.void, { concurrency: "unbounded", discard: true }))), Effect.ensuring(Effect.sync(() => self.popScope())))
+    }).pipe(Effect.ensuring(Effect.sync(() => self.popScope())))
   }
 
-  // Eagerly starts a tool call on a supervised child fiber (so the execution timeout and
-  // scope teardown interrupt it) gated by the concurrency semaphore, and wraps the fiber in a
-  // first-class promise value. `startImmediately` makes the runtime admit the call - charging
-  // the tool-call budget and firing onToolCallStart - at the call site, before any await.
+  // 工具调用在调用点启动并计入原预算；只有真实宿主调用占用并发许可。
+  // async 包装与组合观察不占许可，避免嵌套批处理等待自身释放槽位。
   private createToolCallPromise(
     path: ReadonlyArray<string>,
     args: Array<unknown>,
   ): Effect.Effect<SandboxPromise, never, R> {
     const self = this
-    const response = path[0] === "$codemode" && path[1] === "fetch" ? self.fetchResponse : undefined
+    const response = path[0] === "$codemode" && path[1] === "fetch" ? self.execution.fetchResponse : undefined
     const init = args[1]
     const input = response && isRecord(init) && init.body instanceof SandboxURLSearchParams
       ? [args[0], { ...init, body: init.body.params.toString() }] : args
-    const call = Effect.suspend(() => self.invokeTool(path, input))
+    const call = Effect.suspend(() => self.execution.invokeTool(path, input))
     // HTTP和工具调用沿同一个并发/取消边界；响应方法在沙箱内闭包化。
     // 响应转换不再调用宿主，一次HTTP只消耗一次调用预算并产生一次调用记录。
-    return Effect.map(
-      Effect.forkChild(this.callPermits.withPermit(response ? call.pipe(Effect.flatMap((data) => self.invokeFunction(response, [data]))) : call), {
-        startImmediately: true,
-      }),
-      (fiber) => {
-        const promise = new SandboxPromise(fiber)
-        self.pendingSettlements.add(promise)
-        return promise
-      },
+    return this.createPromise(
+      this.execution.callPermits.withPermit(
+        response ? call.pipe(Effect.flatMap((data) => self.invokeFunction(response, [data]))) : call,
+      ),
     )
   }
 
-  // The promise's settlement as an Exit, marking it observed for unhandled-rejection tracking.
-  // Fiber settlement is idempotent, so observing the same promise repeatedly (await twice,
-  // Promise.all([p, p])) never re-runs the underlying call.
+  // 所有 Promise 都归整段执行所有，观察取消或函数返回不能让在途工作失去归属。
+  private createPromise(effect: Effect.Effect<unknown, unknown, R>): Effect.Effect<SandboxPromise, never, R> {
+    return Effect.map(
+      Effect.forkIn(effect, this.execution.scope, { startImmediately: true }),
+      (fiber) => new SandboxPromise(fiber),
+    )
+  }
+
+  // 观察只读取一次执行的结算；重复 await 不重放工具，也不改变其清理责任。
   private observePromise(promise: SandboxPromise): Effect.Effect<Exit.Exit<unknown, unknown>> {
-    this.pendingSettlements.delete(promise)
     return promise.fiber !== undefined ? Fiber.await(promise.fiber) : Effect.exit(promise.immediate ?? Effect.void)
   }
 
@@ -857,6 +861,7 @@ class Interpreter<R> {
       getArray(node, "params").map((parameter, index) => asNode(parameter, `params[${index}]`)),
       getNode(node, "body"),
       this.scopes.slice(),
+      node.async === true,
     )
   }
 
@@ -1144,7 +1149,7 @@ class Interpreter<R> {
   // Returns undefined for everything else so callers can raise a contextual error.
   private enumerableKeys(value: unknown): Array<string> | undefined {
     if (value instanceof ToolReference) {
-      return [...this.toolKeys(value.path)]
+      return [...this.execution.toolKeys(value.path)]
     }
     if (Array.isArray(value)) {
       return Object.keys(value)
@@ -1447,11 +1452,13 @@ class Interpreter<R> {
       case "UpdateExpression":
         return this.evaluateUpdateExpression(node)
       case "AwaitExpression": {
-        // `await` resolves a promise value; awaiting anything else is a passthrough no-op,
-        // matching real JS semantics for non-thenables.
+        // await 普通值也必须让出调度，不能把 async 的后半段抢在调用者之前运行。
         const self = this
         return Effect.flatMap(this.evaluateExpression(getNode(node, "argument")), (value) =>
-          value instanceof SandboxPromise ? self.settlePromise(value, node) : Effect.succeed(value),
+          Effect.andThen(
+            Effect.yieldNow,
+            value instanceof SandboxPromise ? self.settlePromise(value, node) : Effect.succeed(value),
+          ),
         )
       }
       case "NewExpression":
@@ -1907,7 +1914,7 @@ class Interpreter<R> {
         if (callable.path.length === 0) throw new InterpreterRuntimeError("The tools root is not callable.", callee)
         // 发现只读取内存目录，直接交付值；仍经过原工具校验、预算和观察hooks。
         if (callable.path.length === 2 && callable.path[0] === "$codemode" && callable.path[1] === "search")
-          return yield* self.invokeTool(callable.path, args)
+          return yield* self.execution.invokeTool(callable.path, args)
         // An un-awaited tool call is a first-class promise value; the call itself starts now.
         return yield* self.createToolCallPromise(callable.path, args)
       }
@@ -1959,7 +1966,7 @@ class Interpreter<R> {
   private invokeConsole(name: string, args: Array<unknown>, node: AstNode): undefined {
     if (!consoleMethods.has(name))
       throw new InterpreterRuntimeError(`console.${name} is not available in CodeMode.`, node)
-    this.logs.push(publicErrorMessage(this.formatConsoleMessage(name, args, node)))
+    this.execution.logs.push(publicErrorMessage(this.formatConsoleMessage(name, args, node)))
     return undefined
   }
 
@@ -2102,18 +2109,15 @@ class Interpreter<R> {
     })
   }
 
-  // Promise.* over ordinary runtime values. Combinators accept ANY array (or spreadable
-  // collection) mixing promise values and plain data - built inline, beforehand, via spread,
-  // whatever - because tool calls already run eagerly on their own fibers; the combinators
-  // only observe settlements. Joining is therefore sequential (no extra fibers) without
-  // costing parallelism, and the concurrency cap stays where the work is: the fork semaphore.
+  // 组合器消费已有 Promise，而不是执行另一套工具调度；其返回值仍可继续组合。
   private invokePromiseMethod(
     ref: PromiseMethodReference,
     args: Array<unknown>,
     node: AstNode,
   ): Effect.Effect<unknown, unknown, R> {
     const self = this
-    if (ref.name === "resolve") {
+    const name = ref.name
+    if (name === "resolve") {
       // Promise.resolve of a promise is that promise (JS flattens); anything else is a
       // promise already fulfilled with the value.
       const value = args[0]
@@ -2121,139 +2125,137 @@ class Interpreter<R> {
         value instanceof SandboxPromise ? value : new SandboxPromise(undefined, Effect.succeed(value)),
       )
     }
-    if (ref.name === "reject") {
+    if (name === "reject") {
       return Effect.sync(() => new SandboxPromise(undefined, Effect.fail(new ProgramThrow(args[0]))))
     }
 
-    const items = Array.isArray(args[0]) ? args[0] : spreadItems(args[0])
-    if (items === undefined) {
-      throw new InterpreterRuntimeError(
-        `Promise.${ref.name} expects an array of promises or plain values (e.g. Promise.${ref.name}(items.map((item) => tools.ns.tool(item)))).`,
-        node,
-      )
-    }
-
-    switch (ref.name) {
-      case "all": {
-        // Mark every promise element observed up-front (Promise.all handles all of its
-        // members' failures, as in JS), then join in index order; the first failure rejects
-        // the whole call while unrelated in-flight members keep running.
-        const settles = items.map((item) =>
-          item instanceof SandboxPromise ? this.settlePromise(item, node) : Effect.succeed(item),
-        )
-        return Effect.gen(function* () {
-          const values: Array<unknown> = []
-          for (const settle of settles) values.push(yield* settle)
-          return values
-        })
-      }
-      case "allSettled": {
-        const observations = items.map((item) =>
-          item instanceof SandboxPromise
-            ? Effect.map(this.observePromise(item), (exit) => ({ promise: item as SandboxPromise | undefined, exit }))
-            : Effect.succeed({ promise: undefined as SandboxPromise | undefined, exit: Exit.succeed(item as unknown) }),
-        )
-        return Effect.gen(function* () {
-          const outcomes: Array<unknown> = []
-          for (const observation of observations) {
-            const { exit, promise } = yield* observation
-            if (Exit.isSuccess(exit)) {
-              outcomes.push(
-                Object.assign(Object.create(null) as SafeObject, { status: "fulfilled", value: exit.value }),
-              )
-              continue
-            }
-            const raceInterrupted = promise?.interrupted === true && Cause.hasInterruptsOnly(exit.cause)
-            if (Cause.hasInterruptsOnly(exit.cause) && !raceInterrupted) {
-              // Execution teardown (timeout/host interruption), not a program-level rejection.
-              return yield* Effect.failCause(exit.cause)
-            }
-            const thrown = raceInterrupted
-              ? new InterpreterRuntimeError(
-                  "This tool call was interrupted because another value settled a Promise.race first.",
-                  node,
-                )
-              : Cause.squash(exit.cause)
-            outcomes.push(
-              Object.assign(Object.create(null) as SafeObject, {
-                status: "rejected",
-                reason: caughtErrorValue(thrown),
-              }),
-            )
-          }
-          return outcomes
-        })
-      }
-      case "race": {
-        if (items.length === 0) {
+    return this.createPromise(
+      Effect.suspend(() => {
+        const items = Array.isArray(args[0]) ? args[0] : spreadItems(args[0])
+        if (items === undefined) {
           throw new InterpreterRuntimeError(
-            "Promise.race([]) would never settle; provide at least one promise or value.",
+            `Promise.${name} expects an array of promises or plain values (e.g. Promise.${name}(items.map((item) => tools.ns.tool(item)))).`,
             node,
           )
         }
-        const observations = items.map((item, index) =>
-          item instanceof SandboxPromise
-            ? Effect.map(this.observePromise(item), (exit) => ({ index, exit }))
-            : Effect.succeed({ index, exit: Exit.succeed(item as unknown) }),
-        )
-        return Effect.gen(function* () {
-          // First settlement (fulfilled OR rejected) wins; the observations never fail, so
-          // racing them yields exactly that. Losing in-flight calls are then interrupted.
-          const winner = yield* Effect.raceAll(observations)
-          for (const [index, item] of items.entries()) {
-            if (index === winner.index || !(item instanceof SandboxPromise) || item.fiber === undefined) continue
-            item.interrupted = true
-            yield* Fiber.interrupt(item.fiber)
+
+        switch (name) {
+          case "all": {
+            // 同时观察才能及时暴露后项失败；结果仍按输入保序，取消观察不取消成员。
+            const settles = items.map((item) =>
+              item instanceof SandboxPromise ? this.settlePromise(item, node) : Effect.succeed(item),
+            )
+            return Effect.all(settles, { concurrency: "unbounded" })
           }
-          const winningItem = items[winner.index]
-          return yield* self.unwrapPromiseExit(
-            winningItem instanceof SandboxPromise ? winningItem : undefined,
-            winner.exit,
-            node,
-          )
-        })
-      }
-    }
+          case "allSettled": {
+            const observations = items.map((item) =>
+              item instanceof SandboxPromise
+                ? Effect.map(this.observePromise(item), (exit) => ({ promise: item as SandboxPromise | undefined, exit }))
+                : Effect.succeed({ promise: undefined as SandboxPromise | undefined, exit: Exit.succeed(item as unknown) }),
+            )
+            return Effect.gen(function* () {
+              const outcomes: Array<unknown> = []
+              for (const observation of observations) {
+                const { exit, promise } = yield* observation
+                if (Exit.isSuccess(exit)) {
+                  outcomes.push(
+                    Object.assign(Object.create(null) as SafeObject, { status: "fulfilled", value: exit.value }),
+                  )
+                  continue
+                }
+                const raceInterrupted = promise?.interrupted === true && Cause.hasInterruptsOnly(exit.cause)
+                if (Cause.hasInterruptsOnly(exit.cause) && !raceInterrupted) {
+                  // Execution teardown (timeout/host interruption), not a program-level rejection.
+                  return yield* Effect.failCause(exit.cause)
+                }
+                const thrown = raceInterrupted
+                  ? new InterpreterRuntimeError(
+                      "This tool call was interrupted because another value settled a Promise.race first.",
+                      node,
+                    )
+                  : Cause.squash(exit.cause)
+                outcomes.push(
+                  Object.assign(Object.create(null) as SafeObject, {
+                    status: "rejected",
+                    reason: caughtErrorValue(thrown),
+                  }),
+                )
+              }
+              return outcomes
+            })
+          }
+          case "race": {
+            if (items.length === 0) {
+              throw new InterpreterRuntimeError(
+                "Promise.race([]) would never settle; provide at least one promise or value.",
+                node,
+              )
+            }
+            const observations = items.map((item, index) =>
+              item instanceof SandboxPromise
+                ? Effect.map(this.observePromise(item), (exit) => ({ index, exit }))
+                : Effect.succeed({ index, exit: Exit.succeed(item as unknown) }),
+            )
+            return Effect.gen(function* () {
+              // First settlement (fulfilled OR rejected) wins; the observations never fail, so
+              // racing them yields exactly that. Losing in-flight calls are then interrupted.
+              const winner = yield* Effect.raceAll(observations)
+              for (const [index, item] of items.entries()) {
+                if (index === winner.index || !(item instanceof SandboxPromise) || item.fiber === undefined) continue
+                item.interrupted = true
+                yield* Fiber.interrupt(item.fiber)
+              }
+              const winningItem = items[winner.index]
+              return yield* self.unwrapPromiseExit(
+                winningItem instanceof SandboxPromise ? winningItem : undefined,
+                winner.exit,
+                node,
+              )
+            })
+          }
+        }
+      }),
+    )
   }
 
   private invokeFunction(fn: CodeModeFunction, args: Array<unknown>): Effect.Effect<unknown, unknown, R> {
-    const self = this
-    return Effect.suspend(() => {
-      const savedScopes = self.scopes
-      self.scopes = [...fn.capturedScopes, new Map<string, Binding>()]
-      const run = Effect.gen(function* () {
-        // Seed every parameter name into the scope as a TDZ slot first, so a default that
-        // references another parameter resolves to that (uninitialized) param rather than
-        // silently falling through to an outer binding of the same name - matching JS.
-        const paramScope = self.currentScope()
-        for (const parameter of fn.parameters) {
-          for (const name of collectPatternNames(parameter)) {
-            paramScope.set(name, { mutable: true, value: undefined, initialized: false })
-          }
+    // 仅复制作用域栈，闭包 Binding 保持同一引用；局部隔离不能变成闭包快照。
+    const self = new Interpreter(this.execution, [...fn.capturedScopes, new Map<string, Binding>()])
+    const run = Effect.gen(function* () {
+      // Seed every parameter name into the scope as a TDZ slot first, so a default that
+      // references another parameter resolves to that (uninitialized) param rather than
+      // silently falling through to an outer binding of the same name - matching JS.
+      const paramScope = self.currentScope()
+      for (const parameter of fn.parameters) {
+        for (const name of collectPatternNames(parameter)) {
+          paramScope.set(name, { mutable: true, value: undefined, initialized: false })
         }
-        for (const [index, parameter] of fn.parameters.entries()) {
-          if (parameter.type === "RestElement") {
-            yield* self.declarePattern(getNode(parameter, "argument"), args.slice(index), true, parameter)
-            break
-          }
-          yield* self.declarePattern(parameter, args[index], true, parameter)
+      }
+      for (const [index, parameter] of fn.parameters.entries()) {
+        if (parameter.type === "RestElement") {
+          yield* self.declarePattern(getNode(parameter, "argument"), args.slice(index), true, parameter)
+          break
         }
+        yield* self.declarePattern(parameter, args[index], true, parameter)
+      }
 
-        if (fn.body.type === "BlockStatement") {
-          const result = yield* self.evaluateStatement(fn.body)
-          return result.kind === "return" || result.kind === "value" ? result.value : undefined
-        }
+      if (fn.body.type === "BlockStatement") {
+        const result = yield* self.evaluateStatement(fn.body)
+        return result.kind === "return" || result.kind === "value" ? result.value : undefined
+      }
 
-        return yield* self.evaluateExpression(fn.body)
-      })
-      return run.pipe(
-        Effect.ensuring(
-          Effect.sync(() => {
-            self.scopes = savedScopes
-          }),
-        ),
-      )
+      return yield* self.evaluateExpression(fn.body)
     })
+    // 返回 Promise 时吸收其结算；函数体和参数绑定的失败都留在该 Promise 内。
+    return fn.async
+      ? this.createPromise(
+          run.pipe(
+            Effect.flatMap((value) =>
+              value instanceof SandboxPromise ? self.settlePromise(value) : Effect.succeed(value),
+            ),
+          ),
+        )
+      : run
   }
 
   private invokeIntrinsic(
@@ -2303,6 +2305,7 @@ class Interpreter<R> {
     args: Array<unknown>,
     node: AstNode,
   ): Effect.Effect<unknown, unknown, R> {
+    const self = this
     const apply = this.applyCollectionCallback(args[1], `String.${name}`, node)
     const matches: Array<{ readonly match: string; readonly offset: number; readonly args: Array<unknown> }> = []
     const collect = (...callbackArgs: Array<unknown>): string => {
@@ -2346,9 +2349,15 @@ class Interpreter<R> {
       const output: Array<string> = []
       let end = 0
       for (const match of matches) {
+        const replacement = yield* apply(match.args)
+        // 保留已发布的 async replacer 扩展；同步回调漏 await 仍由原数据边界指出。
+        const resolved =
+          args[1] instanceof CodeModeFunction && args[1].async && replacement instanceof SandboxPromise
+            ? yield* self.settlePromise(replacement, node)
+            : replacement
         output.push(
           value.slice(end, match.offset),
-          coerceToString(boundedData(yield* apply(match.args), `String.${name} replacer result`)),
+          coerceToString(boundedData(resolved, `String.${name} replacer result`)),
         )
         end = match.offset + match.match.length
       }
@@ -3368,8 +3377,10 @@ export const executeWithLimits = <const Tools extends Record<string, unknown>>(
 
   const operation = Effect.gen(function* () {
     const program = parseProgram(options.code)
-    const interpreter = new Interpreter<Services<Tools>>(tools.invoke, tools.keys, logs, options.fetch !== undefined)
-    const value = yield* interpreter.run(program)
+    // 作用域在成功、失败和中断时都先收尾，再把结果交给宿主继续执行。
+    const value = yield* Effect.scopedWith((scope) =>
+      Interpreter.make(tools.invoke, tools.keys, logs, scope, options.fetch !== undefined).run(program),
+    )
     const result = copyOut(copyIn(value, "Execution result"), true) as DataValue
     return {
       ok: true,
