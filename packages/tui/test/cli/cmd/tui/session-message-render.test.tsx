@@ -167,6 +167,10 @@ function contentNode(app: App, id: string) {
   }
 }
 const released = (app: App, id: string) => contentNode(app, id) === undefined
+function spanColor(app: App, text: string) {
+  // 只读取用户可见颜色，不断言内部节点类型或复制高亮规则。
+  return app.captureSpans().lines.flatMap((line) => line.spans).find((span) => span.text.includes(text))?.fg?.toInts()
+}
 async function stableHeight(app: App, scroll: ScrollBoxRenderable) {
   let last = -1
   let stable = 0
@@ -359,6 +363,55 @@ test.each(["bash", "write", "write-overwrite", "edit", "apply_patch", "fixture_t
     await click(app, "Click to collapse")
     await waitForFrame(app, (frame) => frame.includes("Click to expand") && !frame.includes("card body line 29"))
     expect(messageFrame(app, info.id).filter((line) => line.includes("Click to expand"))).toHaveLength(1)
+  }, { width: 100, height: 60 })
+})
+
+test("new Write collapsed preview preserves expanded line numbers and syntax color", async () => {
+  const info = { ...assistant("msg_write_source_preview", 1), finish: "tool-calls" }
+  // 30 行 Markdown 触发真实折叠；普通正文尾行同时提供默认颜色和独立完整性标记。
+  const content = ["# Canonical Implementation Plan", "", "> Status: audit-required",
+    ...Array.from({ length: 26 }, (_, index) => `> Body line ${index + 4}`), "Body line 30"].join("\n")
+  const part = completedToolPart("part_write_source_preview", info.id, "write", { filePath: "plan.md", content }, { filepath: "plan.md", exists: false })
+  await withRenderedSession([info], { [info.id]: [part] }, async (app) => {
+    await click(app, "Click to expand")
+    // 尾部字面量不是算法推导值，能直接证明展开正文没有被 preview 预算截断。
+    await waitForFrame(app, (frame) => frame.includes("Click to collapse") && frame.includes("Body line 30"))
+    // 普通正文提供默认文本色，collapsed 即使提前完成高亮也不会破坏该同步条件。
+    const bodyColor = spanColor(app, "Body line 30")
+    expect(bodyColor).toBeDefined()
+    const scroll = sessionScrollBox(app, info.id)
+    // 展开会跟随尾部；回到消息顶部才能在同一公开视口读取标题行号和颜色。
+    scroll.scrollBy(messageRoot(app, info.id).y - scroll.y - 1)
+    await waitForFrame(app, () => {
+      const line = app.captureCharFrame().split("\n").find((row) => row.includes("Canonical Implementation Plan"))
+      return /\b1\s+# Canonical/.test(line ?? "") && spanColor(app, "Canonical Implementation Plan")?.join(",") !== bodyColor?.join(",")
+    })
+    // 展开态是已知正常表示，行号与颜色都作为折叠态的独立参照。
+    const expandedLine = app.captureCharFrame().split("\n").find((line) => line.includes("Canonical Implementation Plan"))
+    expect(expandedLine).toMatch(/\b1\s+# Canonical/)
+    const expectedColor = spanColor(app, "Canonical Implementation Plan")
+    expect(expectedColor).toBeDefined()
+
+    scroll.scrollTo(scroll.scrollHeight)
+    await click(app, "Click to collapse")
+    await waitForFrame(app, (frame) => frame.includes("Click to expand") && !frame.includes("Body line 30"))
+    scroll.scrollBy(messageRoot(app, info.id).y - scroll.y - 1)
+    // 轮询公开帧等待异步高亮，避免固定 sleep 或首帧未落地造成假绿。
+    await waitForFrame(app, () => {
+      const line = app.captureCharFrame().split("\n").find((row) => row.includes("Canonical Implementation Plan"))
+      return /\b1\s+# Canonical/.test(line ?? "") && spanColor(app, "Canonical Implementation Plan")?.join(",") === expectedColor?.join(",")
+    })
+    const collapsedLine = app.captureCharFrame().split("\n").find((line) => line.includes("Canonical Implementation Plan"))
+    // 同一断言覆盖行号、语法色和十行预算，防止只恢复部分视觉合同。
+    expect({
+      numbered: /\b1\s+# Canonical/.test(collapsedLine ?? ""),
+      color: spanColor(app, "Canonical Implementation Plan"),
+      bounded: !app.captureCharFrame().includes("Body line 30"),
+    }).toEqual({ numbered: true, color: expectedColor, bounded: true })
+
+    // 再次展开验证 preview 驻留不妨碍 BlockTool 重建完整 body。
+    await click(app, "Click to expand")
+    await waitForFrame(app, (frame) => frame.includes("Click to collapse") && frame.includes("Body line 30"))
   }, { width: 100, height: 60 })
 })
 

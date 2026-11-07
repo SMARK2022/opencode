@@ -3600,6 +3600,21 @@ function Write(props: ToolProps) {
   // 字符超限只决定是否折叠，预览仍保留合法 hunk，展开正文不截断。
   const diffOverflow = createMemo(() => diffStats().total > 20 || (diff() ?? "").length > DEFAULT_BLOCK_CHAR_THRESHOLD)
 
+  // 收缩与展开共享代码渲染语义；预览只消费 limited 的既有十行预算，不新增解析或折叠状态。
+  function WriteSource(sourceProps: { content: string }) {
+    return (
+      <line_number fg={theme.textMuted} minWidth={3} paddingRight={1}>
+        <code
+          conceal={false}
+          fg={theme.text}
+          filetype={filetype(filepath())}
+          syntaxStyle={syntax()}
+          content={sourceProps.content}
+        />
+      </line_number>
+    )
+  }
+
   return (
     <Switch>
       <Match when={isOverwrite()}>
@@ -3622,18 +3637,10 @@ function Write(props: ToolProps) {
           part={props.part}
           onClick={writeCanCollapse() ? () => setExpanded((prev) => !prev) : undefined}
           footer={writeCanCollapse() ? "Click to collapse" : undefined}
-          // #144：Write 内容折叠预览
-          preview={writeCanCollapse() && !expanded() ? <text fg={theme.text}>{previewText(limited(), 10, maxChars())}</text> : undefined}
+          // preview/body 分别创建组件实例，沿用 BlockTool 的驻留与正文重建所有权。
+          preview={writeCanCollapse() && !expanded() ? <WriteSource content={limited()} /> : undefined}
         >
-          <line_number fg={theme.textMuted} minWidth={3} paddingRight={1}>
-            <code
-              conceal={false}
-              fg={theme.text}
-              filetype={filetype(filepath())}
-              syntaxStyle={syntax()}
-              content={limited()}
-            />
-          </line_number>
+          <WriteSource content={limited()} />
         </BlockTool>
       </Match>
       <Match when={true}>
