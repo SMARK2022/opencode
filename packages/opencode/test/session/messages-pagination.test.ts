@@ -8,6 +8,7 @@ import { ColdMaintain } from "@opencode-ai/core/storage/cold-maintain"
 import { Database } from "@opencode-ai/core/database/database"
 import { MessageTable, PartTable, SessionTable } from "@opencode-ai/core/session/sql"
 import { eq } from "drizzle-orm"
+import { drizzle } from "drizzle-orm/bun-sqlite"
 import { Effect, Option } from "effect"
 import { Session as SessionNs } from "@/session/session"
 import { MessageV2 } from "../../src/session/message-v2"
@@ -252,7 +253,23 @@ describe("MessageV2.inputEstimateHistory", () => {
           expect(ColdStorage.freezeOwner(sync, { type: "part", id: coldID, now: Date.now() }).type).toBe("frozen")
           expect(ColdStorage.freezeOwner(sync, { type: "part", id: stepID, now: Date.now() }).type).toBe("frozen")
         })
-        const result = yield* MessageV2.inputEstimateHistory({ sessionID, messageID: assistantID, model: { providerID: ProviderV2.ID.make("test"), id: ModelV2.ID.make("test") } })
+        // 解释真实统计查询的访问范围，避免在快机器上用耗时阈值漏掉整段 Session 的反复扫描。
+        const plans: string[][] = []
+        const observed = drizzle({ client: database.sync.$client, logger: {
+          logQuery(query, params) {
+            if (!query.startsWith("select")) return
+            // EXPLAIN 结果读完后仍可能持有 SQLite 读锁，观察语句必须在真实查询前释放。
+            using statement = database.sync.$client.prepare<{ detail: string }, string[]>(`EXPLAIN QUERY PLAN ${query}`)
+            plans.push(statement.all(...params.map(String)).map(row => row.detail))
+          },
+        } })
+        const result = yield* MessageV2.inputEstimateHistory({ sessionID, messageID: assistantID, model: { providerID: ProviderV2.ID.make("test"), id: ModelV2.ID.make("test") } }).pipe(
+          Effect.provideService(Database.Service, { ...database, sync: observed }),
+        )
+        const correlated = plans.find(plan => plan.some(detail => detail.includes("CORRELATED SCALAR SUBQUERY")))
+        // 两条既有索引都存在；每个助手只应探查它自己的 Part，不改变冷统计的结果或副作用。
+        expect(correlated?.some(detail => detail.startsWith("SEARCH part ") && detail.includes("message_id=?"))).toBe(true)
+        expect(correlated?.filter(detail => detail.startsWith("SEARCH part ") && !detail.includes("message_id=?"))).toEqual([])
         expect(result.history.map(message => [message.info.id, message.parts.map(part => part.id)])).toEqual([[assistantID, [stepID]]])
         expect(result.afterPartID).toBe(latestID)
         expect(Token.charsPerTokenFromHistory(TokenEstimate.inputHistory(result.history, { providerID: "test", id: "test" }))).toBe(4)

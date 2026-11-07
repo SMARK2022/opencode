@@ -1301,8 +1301,9 @@ export const inputEstimateHistory = Effect.fn("MessageV2.inputEstimateHistory")(
             before ? older(before) : undefined,
             sql`json_extract(${MessageTable.data}, '$.providerID') = ${input.model.providerID} and json_extract(${MessageTable.data}, '$.modelID') = ${input.model.id}`,
             // 热carrier始终可作为候选；旧finish候选只在恢复预算尚未耗尽时进入查询。
+            // 每个候选助手只探查自身Part；无统计信息时Session索引会把相关子查询放大为全历史反复扫描。
             sql`(json_extract(${MessageTable.data}, '$.inputEstimate.confirmed') = 1 or (${chars < recoveryLimit ? 1 : 0} = 1 and exists (
-              select 1 from ${PartTable} where ${PartTable.message_id} = ${MessageTable.id}
+              select 1 from ${PartTable} indexed by part_message_id_id_idx where ${PartTable.message_id} = ${MessageTable.id}
               and ${PartTable.session_id} = ${input.sessionID}
               and json_type(${PartTable.data}, '$.hidden') is null
               and json_extract(${PartTable.data}, '$.type') = 'step-finish'
