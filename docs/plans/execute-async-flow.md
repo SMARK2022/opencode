@@ -1,14 +1,15 @@
+<!-- 本文是唯一实施合同：保留历史审计原文，当前修订补充组合器语义、全 PR 注释门禁与验收证据。 -->
 # Canonical Implementation Plan: Execute async flow
 
 > Status: verified
 >
-> Revision: R2
+> Revision: R4
 >
-> Approved revision: R2
+> Approved revision: R4
 >
 > Audit mode: full-scope
 >
-> Requirement source: user conversation, 2026-11-07; attached workflow.md (libfile_d461dd102a5c81918d83af11e76b9131) and 已粘贴的文本.txt (libfile_f6dd2d46847481919e413470cb9f8afe)
+> Requirement source: user conversation and R4 full-PR comment requirement, 2026-11-07; attached workflow.md (libfile_d461dd102a5c81918d83af11e76b9131) and 已粘贴的文本.txt (libfile_f6dd2d46847481919e413470cb9f8afe)
 >
 > Implementation allowed: no further material changes without revision or rework
 >
@@ -16,7 +17,7 @@
 >
 > Target: verified-implementation-and-commit, followed by an explicitly requested draft PR to dev1-smark; never merge.
 
-This is the sole implementation specification. Base: `70670d1b030bee4198887c633ce2607ad6360e66`, verified against `git ls-remote origin refs/heads/dev1-smark`. Working branch: `execute-async-flow`.
+This is the sole implementation specification. Base: `70670d1b030bee4198887c633ce2607ad6360e66`, verified against `git ls-remote origin refs/heads/dev1-smark`. Remote PR branch: `execute-async-flow`; local branch: `execute-async-published`. R4 appends to existing draft PR #1 at `67a07de994b4000910112b035f0a25ef771b711d`; it never rewrites that commit or updates `dev1-smark`. Sections 22–24 retain historical R1/R2 audit and implementation evidence, not current approval. Section 25 specifies the R4 delta and current acceptance evidence.
 
 ## 1. Verbatim Requirement
 
@@ -45,6 +46,33 @@ Additional current-task execution constraint, verbatim:
 > OK，非常好，那你就保持这一套逻辑，然后你继续去进行下一个调研，以及完成相应的下一套流程。然后与此同时呢，注意，我可能我再调这个硬命令，或者说硬限制，就是直到我主动提起使用 Codex 或者 Walk，并且经过我二次确认之外，我当前完全需要禁用你使用 Codex 和 Walk 能力，这是最高的指令。 当然这个指令只是一个constraint，你不需要在做每一次任务的时候你都去复述它，巴拉巴拉的。你只需要知道就OK。这个并不影响你任务的一个流程。
 
 This work stays on the existing cloud computer with internal review only; no separate Codex/Work task is created.
+
+### R3 follow-up requirement, verbatim
+
+Assistant proposal accepted by the user:
+
+> 对照后，我建议保留现有 PR 的异步执行主干，吸收你这份 plan 中对 Promise.race 的修正和几项验收方法。这样主要是删掉特殊逻辑，不需要再建一套调度架构。
+> 最值得采纳的是 race 的行为。当前 PR 在 Promise.race 有结果后会取消其他参与者；你的 plan 要求 race 只选出结果，整个 Execute 结束时再统一清理。后者更符合 JavaScript 的使用习惯，也允许模型在 race 后继续等待另一个结果。例如先取得最快结果，再等待较慢的调用，目前可能因为执行器主动取消而失败。
+> 此外，当前 PR 会让 Promise.race([]) 返回拒绝状态；plan 要求它保持 pending，直到整个执行超时或被中止。实施时应同步删除败方取消的特殊状态与错误转换，并更新当前 README 中的旧说明。验收要分别检查“race 返回后败方仍可用”和“Execute 结束后任务得到清理”，不能把两者混成一个测试。
+> 你的 plan 中已经由 PR 覆盖的部分包括 async 函数返回 Promise、独立调用帧与共享闭包、await 让出调度、Promise.all 及时暴露后项失败、统一执行作用域，以及 search → 调用 → 精简结果的示例。这些不需要重做。当前 PR 还检查了两个提示词出口；附件只列了其中一个，后续应保留两个出口的检查。
+> 值得补强的验证有三项：
+> 1. 测试 allSettled 中前一项一直等待、后一项发生宿主中断时，中断能否及时传出。代码目前按顺序观察结果，存在被前一项挡住的风险；这是代码分析，本轮尚未运行复现。普通任务仍可并发执行，不能把顺序观察直接等同于工具串行。
+> 2. 用真实宿主入口验证 async 调用的结束、取消和清理，而不仅验证解释器单元测试。
+> 3. 比较提示词效果时，同时记录真实任务的正确性、模型往返、失败重试和实际 usage。当前还没有数据支持具体的 token 或费用收益。
+> 提示词本身只建议做小修：fetch 由宿主选择是否提供，描述应反映这一点；已有的发现工具、并发和精简输出示例可以保留。无需加入完整 Promise API 清单、强制 try/catch 或命名空间误调用提示。
+> 还有一项现有能力应保留：Execute 支持异步 String.replace 回调，你的 plan 没有覆盖它。修正 race 时不应顺手删掉这项行为。
+> 按照仓库 workflow，若实施 race 语义变更，需要先更新当前 PR 的计划和验收标准，再走测试与审查；不能直接沿用旧计划对“race 会取消败方”的批准。本轮我只做了对照，没有修改代码或重新运行测试。
+
+User confirmation:
+
+> 可以，是的，你可以按照现在的逻辑流程去更新相应 PR 的一个计划，以及相应的一个验收标准，然后你再走全套流程，然后再去最终去这个调整以及更新相应的一个 PR。也就是说最终把你的那个 PR 那套分支进行一个追，就是按照我的理解，PR 本身就是一个分支树嘛，那你就在那个分支树上你去追加这个 commit 节点，使得相应的 PR 就是保留整体的逻辑是更加优秀准确的。
+
+Earlier publication exception and configuration constraint remain in force:
+
+> 不要去把这种额外的配置纳入 PR。你就直接去提交 PR，大不了你跑完这些东西，你就直接，就是你大不了你这些门禁，反正你本身你已经测过这些东西了。那如果实在不行的话，你就直接去这个提交一个 PR 就 OK，不要去提交主分支，不要 merge。
+> 对我说的不要包含这种荣荣余的这种逻辑。
+
+This authorizes publication to the existing feature branch despite an accurately disclosed resource-blocked aggregate gate; it does not authorize skipping targeted checks, hiding failures, changing checker configuration, pushing the target branch, or merging.
 
 ## 2. Explicit Non-Goals
 
@@ -94,6 +122,8 @@ The new hint is one sentence in the existing partial-catalog section, not a seco
 
 ## 5. Current Behavior
 
+The following diagnosis records the original 70670d1 base. R2 implemented that repair; R4 current-head observations are recorded in section 25.
+
 `model code -> V1 CodeModeTool -> same-runtime permission preflight -> host.begin -> CodeMode.execute -> TS erasure/Acorn -> Interpreter -> host.invoke -> schema/data boundary -> return/log projection`.
 
 Function AST records `async`, but CodeModeFunction drops it. All functions execute inline by replacing one interpreter-wide scope stack. Array callbacks consequently wait for the entire function, throwing before combinators can observe rejection. Promise.all/allSettled/race also run inline, returning values instead of Promise values. Promise.all observes in index order, hiding a later rejection behind an earlier blocked call. Pending cleanup removes a promise when observation is constructed rather than settled. The tools themselves already start eagerly with an eight-call semaphore. Host failures, permissions and output shaping belong outside this repair.
@@ -117,9 +147,11 @@ Function AST records `async`, but CodeModeFunction drops it. All functions execu
 | INV-02 | Each await yields to its caller; independent async map pipelines overlap; invocation locals do not cross-contaminate, closures stay shared | User order/concurrency; existing map/cap tests |
 | INV-03 | all/allSettled/race themselves return composable Promise values; all rejects on first settlement failure while retaining input-order success | JS-facing existing statics; new nested and readiness-gated tests |
 | INV-04 | All pending execution work is owned until execute returns; cancellation/timeout is not converted to program success | Existing fire-and-forget/timeout/host interrupt tests |
-| INV-05 | Preserve the existing eight-tool cap, exact tools/search/schema, private errors, JSON boundary, direct race-loser cancellation and async string-replacer compatibility | Existing 264 tests and package contract |
+| INV-05 | Preserve the existing eight-tool cap, exact tools/search/schema, private errors, JSON boundary, async string-replacer compatibility; race ownership follows INV-08 | Existing 264 tests and package contract |
 | INV-06 | One concise progressive guide: discover exact signatures, compose deterministic steps, keep dependencies/writes ordered, return only useful evidence; no blanket catch requirement | User full request and Pi/Codex sources |
 | INV-07 | Follow exact workflow, independent audits, verified commit and draft PR on correct base without merging | Latest user instruction |
+| INV-08 | race chooses the first settlement without canceling member work; race([]) stays pending; execute termination owns cleanup | R3 accepted proposal; public execution probes |
+| INV-09 | allSettled preserves ordered ordinary outcomes but a later host interruption cannot be hidden by an earlier pending item | R3 probe; README host-interruption contract |
 
 ## 8. First Divergence and Root Cause
 
@@ -157,7 +189,7 @@ Commands executed with `../../node_modules/.bin/bun -e '<public CodeMode.execute
 1. Preserve `async` on CodeModeFunction. Keep every function on one evaluator, but allocate a frame (scopes/lastValue) per invocation. Share an execution object containing tool dispatch, logs, semaphore, fetch response factory and Effect scope. Captured maps are shared references, local scope stacks are separate. Move builtin initialization into the same interpreter factory; no second engine.
 2. One `createPromise` helper starts a fiber in the execution's Effect scope. Tool calls retain the semaphore; async bodies and combinator observers do not acquire tool permits. Async bodies adopt returned SandboxPromise; throws/default-binding errors reject instead of escaping invocation.
 3. `await` introduces an Effect scheduler yield before consuming either Promise or plain value. Synchronous functions stay synchronous; callback APIs see the actual returned value (so map produces promises, and ordinary filter predicates do not magically await).
-4. all/allSettled/race return a Promise around their existing observation logic. Observe all concurrently for fail-fast, preserve ordered results, keep allSettled normalized outcomes and race's existing loser behavior. resolve/reject remain immediate promise values.
+4. all/allSettled/race return a Promise around their existing observation logic. Observe all concurrently for fail-fast and allSettled concurrently for host interruption, preserving ordered results and normalized ordinary failures. race observes the first Exit without interrupting member producers; empty race remains pending. Remove race-specific interruption state/conversion. resolve/reject remain immediate promise values.
 5. Run the program within one `Effect.scopedWith` lifetime. Remove the pending-set lifecycle and eager observation deletion entirely. Scope teardown interrupts pending work even if an observer was canceled or an async function has already returned a container of promises. No background lifetime, no retry or catch-and-success.
 6. Preserve explicitly async string replacers by settling only the async function's result at that existing callback owner. The established missing-await error for a synchronous replacer returning a tool Promise remains, as required by the existing paired stdlib test. Do not add automatic recursive unwrapping at data boundaries.
 7. Rewrite code-mode description progressively: purpose/composition, exact discovered paths, await/concurrency/dependencies, concise output/log behavior, one conditional search→parallel projection example using discovered signature, and one partial-catalog reminder that unlisted tools remain searchable by task. Keep catalog scope rules and unavailable APIs honest. No mandatory per-call try/catch. Update only directly stale README discovery/async/lifetime paragraphs. Prompt semantic effect on real models cannot be automatically proven here; executable example and public instruction contracts can.
@@ -225,7 +257,7 @@ The prior uncommitted patch was read but not applied. Its namespace hint is unre
 | packages/opencode/test/tool/{code-mode,registry}.test.ts | Replace both obsolete upstream-description hashes with equality to the approved shared CodeMode.description; retain catalog separation | ~6–10 |
 | docs/plans/execute-async-flow.md | Canonical evidence, approvals, final verification | documentation |
 
-No production files outside codemode. Both host-level fixed-description hash assertions are affected consumers and are updated; other host code remains read-only. Host checks remain part of verification when environment dependencies permit.
+No production files outside codemode. Both host-level fixed-description hash assertions are affected consumers and remain covered; R3 adds actual host lifecycle coverage in session/execute.test.ts. Host checks remain part of verification when environment dependencies permit.
 
 ## 16. TDD Behavior Slices
 
@@ -263,8 +295,8 @@ One plan added, eight existing package files modified, no deletions/generated ou
 
 ## 20. Real Risks and Open Decisions
 
-- Confined runtime retains intentional non-native contracts: direct Promise.race losers are interrupted; async string replacers are supported; nested unresolved Promise data is rejected. These are preserved and documented, not silently generalized.
-- Scoped work may include an in-flight tool started by a losing async wrapper; wrapper interruption prevents future script steps, and execution scope closes all still-running work on exit. No arbitrary recursive rollback of already-started tool side effects is promised.
+- Confined runtime retains intentional non-native contracts: async string replacers are supported; nested unresolved Promise data is rejected. R3 deliberately changes the previously documented race-loser cancellation per explicit user approval; no external consumer requiring it was found.
+- Losing race work continues while execution is active; execution scope closes all still-running producers and wrappers on exit. No arbitrary rollback of already-started tool side effects is promised.
 - Host permissions and tool outputs remain real failures. An async rejection does not authorize suppressing it or retrying a partially completed operation.
 - Existing package integration dependencies may be absent; this is a verification environment limit, not permission to weaken tests.
 - Cannot demonstrate end-to-end model behavior quality without provider access/evaluation fixtures; document this rather than claim measured agent improvements.
@@ -506,3 +538,346 @@ This approves the implementation audit gate, not completion of the remaining com
 
 Implementation status is verified under that audit. Commit/publication remain separate steps; no completed PR or aggregate typecheck is implied.
 
+
+## 25. R4 Plan: Settlement Selection and Execution Lifetime
+
+### Current evidence and reachability
+
+Starting head and worktree verified: `67a07de994b4000910112b035f0a25ef771b711d`, clean, same PR feature branch and base. Root/package AGENTS, workflow, current policy/planning skill/template, CONTEXT and ADR index were reread. No relevant accepted async ADR exists. `diagnosing-bugs` and `tdd` remain unavailable; explicit red-green policy remains mandatory.
+
+Additional evidence: `values.ts` owns the race-only `SandboxPromise.interrupted`; runtime `unwrapPromiseExit`, `invokePromiseMethod` are its only consumers/producers. Existing Promise tests require catchable canceled losers and rejected empty race. Host `test/session/execute.test.ts:760–817` checks race followed by execute return, so it proves exit cleanup but does not distinguish race settlement from cleanup. README's Promise paragraph and shared fetch sentence describe those boundaries incorrectly for the accepted R3 contract. Host `src/tool/code-mode.ts` and `src/session/tools.ts` own permission preflight, abort, child terminal states, metadata and partial receipts; no production host changes are planned.
+
+Public seam experiment: `/tmp/execute-r3/codemode/probe.ts`, a copy of the current package with locked dependencies, Bun 1.4.4. Repository production and tests remain untouched in planning.
+
+| Program | Current-head observation | Isolated candidate observation |
+| --- | --- | --- |
+| start slow tool; race it against a value; await slow again | ExecutionFailure: race interrupted loser | `["first", 7]` |
+| `return await Promise.race([Promise.race([]), "outer"])` | ExecutionFailure: empty race never settles | `"outer"` |
+| `return await Promise.allSettled([tools.never({}), tools.stop({})])`, with first `Effect.never`, second `Effect.interrupt` | Success Effect containing TimeoutExceeded after 100ms, not host interruption | failed Effect with interrupt Cause, before timeout |
+
+Isolated candidate `bun typecheck` passes. All 50 existing Promise cases outside the two explicitly replaced race contracts pass; the old canceled-loser and empty-race diagnostic cases fail as expected. No claim of repository-wide verification is made at plan stage.
+
+The original R2 async implementation stays authoritative. New origin/propagation/manifestation chains:
+- INV-08: race explicitly interrupts member producer fibers and marks mutable `interrupted` -> later await transforms interruption into a synthetic program error -> valid retained Promise becomes unusable. Owner: combinator observation; producer lifetime already belongs to execution scope.
+- INV-08 empty: valid empty iterable -> manual diagnostic -> nested race rejects instead of remaining pending. Owner: same race branch; `Effect.never` expresses the contract without another timer/lifetime.
+- INV-09: allSettled waits observations in input order -> pending first item hides a later control interruption -> whole execution eventually reports timeout. Tool bodies already run concurrently; only observation/normalization needs concurrent traversal.
+
+### Authoritative route and deletion
+
+Use the same createPromise/execution scope and Fiber.await seam. Race competes only among observer Exits, unwraps the winning Exit, and leaves producer fibers untouched. A canceled observer never owns producer cancellation. Empty race returns a pending Effect within the same scope. Remove `SandboxPromise.interrupted`, the loser interrupt loop, and synthetic race-error conversions. Exit already implements Effect in the installed Effect version; flattening the observed Exit can replace the now-redundant unwrap helper, without new API or abstraction.
+
+AllSettled traverses each observation and normalization concurrently with ordered Effect results. A successful value produces fulfilled data, ordinary program/tool failure produces the existing normalized rejected data, and pure host interruption fails with its original Cause immediately. Scope teardown then closes other still-running producers. No arbitrary retry, rollback, recursive unwrapping, new scheduler, or background work.
+
+### Forward and reverse mapping / file plan
+
+| Invariant | Owner / files | Behavioral acceptance | Why existing logic is insufficient |
+| --- | --- | --- | --- |
+| 08 selection versus lifetime | runtime.ts, values.ts | direct and async losing members remain awaitable; rejected loser retains its original reason; shared Promise across races/duplicate member does not get canceled; root exit still interrupts pending work | explicit per-race interruption violates retained-Promise ownership |
+| 08 empty race | runtime.ts, promise.test.ts | empty race is an object, loses to an outer settled value, and reaches existing execution timeout if awaited alone | explicit empty-array rejection contradicts accepted contract |
+| 09 interruption | runtime.ts, promise.test.ts | gated first pending member plus later host interruption exits with interrupt Cause and cleans first; ordered ordinary fulfilled/rejected results unchanged | sequential observation hides known control failure |
+| 04/05/08 host lifetime | opencode/test/session/execute.test.ts | actual SessionTools/CodeModeTool async read/question continuation: normal completion, still-live losing work after race, execute return cleanup, host abort cleanup, completed evidence and no late read/mutation | old host cases only observed return cleanup, interpreter-only tools do not prove Session child lifecycle |
+| 06 truthful capability | code-mode.txt, README.md, codemode.test.ts | describe fetch only when host provides it; keep literal search/call example and both host description-consumer checks | shared description currently claims fetch is unconditional |
+| 07 workflow / publication | this plan and existing PR #1 | new independent plan/implementation audits, append commit and verify full remote tree/head | R2 approval explicitly preserved a now-changed contract |
+
+No change to `model.ts` async metadata or String.replace owner. No namespace hint, new configuration, dependency, transport, host permission or output protocol. Only update stale adjacent comments/test names whose semantics actually changed. All new concepts reuse existing Effect observation and execution scope; new alternate-success paths and diagnostic decision surface remain zero.
+
+### TDD and verification
+
+1. Replace the two explicitly superseded race tests; add retained direct/async/rejected/shared Promise and empty/nested race cases. Run against unchanged current head to demonstrate red. Implement the approved deletion and race observation change, then green.
+2. Add a causally gated allSettled test where the first member is pending before the second interrupts. Assert failed Effect with interrupt Cause, no TimeoutExceeded result, and first-producer cleanup. Run red before concurrent observation, then green; ordinary rejected outcomes retain their order/reasons.
+3. Use actual host `resolveTools`/Session/Question services and readiness signals, not elapsed sleeps or mock host callbacks, to test async retained-loser completion and root return/abort cleanup. Assert child terminal states and already completed child facts/parent progress, plus absent after-wait side effects. Existing shell/permission cleanup checks remain and their names distinguish root exit from race.
+4. Change only the fetch availability sentence and README Promise semantics, with focused shared-description assertion plus literal example and both host consumer regressions.
+
+Commands: package `bun test test/promise.test.ts --only-failures` red/green; codemode `bun test --only-failures` and `bun typecheck`; host `OPENCODE_DISABLE_MODELS_FETCH=true bun test test/tool/code-mode.test.ts test/tool/registry.test.ts test/tool/code-mode-integration.test.ts test/session/execute.test.ts --timeout 30000 --only-failures`; root changed-file oxlint/Prettier baseline comparison and `git diff --check`; original `.husky/pre-push` with telemetry disabled, no checker/config changes. Resource limits are disclosed, not fixed by PR configuration. Tests use Bun 1.4.4 restored outside the repository at `/tmp/opencode-bun/node_modules/.bin/bun`.
+
+Expected R3 delta: seven existing files including this plan; runtime/values net deletion, ~25–45 effective changed production lines, ~130–210 test lines, ~5 prose lines plus plan evidence. E estimate 160–250, C required ceil(E×0.15) (24–38); final measured value governs. Qualifying Chinese explanations belong next to observer-versus-producer lifetime, control interruption versus ordinary rejection, readiness gates, host evidence and post-exit continuation checks. No filler or mass formatting.
+
+### Current CI, publication, and unverified measurements
+
+Existing PR head CI: typecheck and scope checks pass. Test run `42373519357` fails Linux/macOS `database maintenance CLI > holds the daemon election while initially offline compression runs`, db-maintenance.test.ts:269 (`acquired` true versus expected false). Exact base `70670d1` has the same failure in run `42358565595` attempt 2, Linux job `128366293580` and macOS `128366293547`; identical test blob `e9ff7c059a15c98905b91649c89bc9d585d3be7c`. This is a known baseline failure, not a green suite or reason to change unrelated database code. New-commit CI must be checked after publication.
+
+Earlier full local pre-push reached SIGKILL in TUI; an unchanged full hook with official Turbo serial concurrency still SIGKILLed in opencode typecheck with rising kernel OOM count. The user's quoted exception allows a transparently failing-resource draft, not a false passing report. No singleThreaded/resource setting is committed. Current plan approval does not assert those historic failures recur on the next run.
+
+Real-model prompt benefit remains unmeasured. Any later controlled comparison must use the same representative tasks and model settings and record task correctness, model round trips, failed/retried tool calls, and actual reported usage. No provider run, token saving or cost claim is fabricated or required without an available authorized model-evaluation fixture.
+
+### R3/R4 independent audit record
+
+R3 review was paused before any verdict after the user added the following requirement. No R3 implementation authorization was issued. R4 requires a new full-scope audit of the entire PR.
+
+### R4 full-PR Chinese-comment requirement, verbatim
+
+> 同时，我观察到你好像之前实现的代码里面，有的地方没有按照现在的逻辑流程来。按理来说，你每一处修改的 hunk，都必须要有完整的中文注释。请注意一点，是中文注释。你的修改的每一处 hunk 都要有中文注释。然后同时整体的这个中文注释的，就是你修改的所有的 hunk 的 diff 的中文注释量，按理来说应该大于 15%。也就是说你整个 PR 都要满足这一点。而不是说你只是新增了，或者说你调整哪部分去进行一个调。就是换言之，我指的整个 PR 是你刚刚那一条好像没满足，所以你新的这条 PR 你需要连带着之前那一条一块去满足这么一个注释等等的一些这个逻辑，然后保持相应的这个逻辑清晰，然后改动的 hunk 等等数量是最少的，不要大幅度调整一些不该调整的一些逻辑语义。
+
+Whole-PR baseline is `70670d1b030bee4198887c633ce2607ad6360e66`, not the previous feature commit. Count E/C for all changes from that baseline, with policy exclusions unchanged: effective added/substantively modified production/test/config code, excluding imports-only, blanks, formatter-only, pure moves, generated files and documentation prose. C counts only adjacent Chinese explanations of rationale/invariant/real boundary/test intent. R4 tightens the threshold to strictly greater than 15%, therefore `C >= floor(E × 0.15) + 1` when E > 0. Record total E, C, excluded categories and per-file values; document/prompt comments count for hunk coverage but not code C so they cannot inflate the code ratio.
+
+Independently of the ratio, every actual whole-PR hunk under `git diff --unified=3 70670d1` must contain a relevant added/modified Chinese comment. Include import-only and comment-only hunks in that coverage. Record file, hunk line range, nearby comment and purpose. Do not increase context size to join otherwise-uncommented hunks. Place comments in existing changed regions; avoid unrelated semantic edits or formatter churn solely to reduce hunk count.
+
+Format ownership:
+- TypeScript: adjacent `//` comments, including a concise ownership explanation for imports changed to support the new contract. Add only necessary missing explanations to R2 hunks.
+- Markdown README and this plan: adjacent `<!-- 中文说明 -->` comments, hidden from rendered prose.
+- `code-mode.txt`: the existing `@@` keyed-section parser in tool-runtime.ts:25–33 outputs only `description` and one of `intro.empty/complete/partial` (line 563). Separate `@@ comment.description` and `@@ comment.intro.partial` sections can hold nearby Chinese maintenance explanations without entering model-facing text. No parser/format expansion is needed. Add public-contract checks that CodeMode.description and all catalog intro variants contain no maintenance-comment text/Chinese note. Preserve literal executable examples.
+- Correct tool-runtime.ts's directly stale parser comment (it currently says upstream text must remain verbatim) to explain structural sections and selected public outputs, without changing code.
+
+This expands the file plan only for comment coverage: existing original PR files all remain in scope, plus `values.ts`, `tool-runtime.ts` (comment only), and host `test/session/execute.test.ts`. Twelve total whole-PR paths, no new runtime API or config. Whole-PR E is expected around 420–520 after movement exclusions; C must exceed 15% of the measured final E. If a changed format cannot contain non-emitting comments, stop and report the exact conflict rather than silently marking coverage complete. Audit must independently verify all hunks and E/C, including R2 content.
+
+R4 pending full-scope plan audit; implementation remains disallowed.
+
+### R4 plan audit, round 1, verbatim
+
+Invocation: `/root/execute_workflow_changes/audit_full_pr_comments`.
+
+## Blocking findings
+
+No blocking findings.
+
+## Non-blocking findings
+
+- R4 is a plan approval, not certification of the existing PR’s comments. Against `70670d1`, the current whole-PR diff has **33 hunks; 20 lack added Chinese comments**. Section 25 explicitly requires repairing these older gaps alongside the new changes.
+- Administrative metadata still names R3 in several current-summary passages and names the working branch `execute-async-flow`; the checked-out branch is `execute-async-published`, at the stated head `67a07de994b4000910112b035f0a25ef771b711d`. The final records should distinguish the local branch, existing PR branch, and historical revisions.
+- Aggregate checks and exact newly published commit/CI verification remain later gates. Historical resource failures and the quoted publication exception do not imply passing checks.
+
+## Rejected speculation
+
+No evidence supports another scheduler, fallback execution mode, Promise API expansion, recursive result unwrapping, new host permission policy, or rollback of already-started external effects. The established async String.replace extension remains within the preserved contract.
+
+## Requirement and traceability coverage
+
+**Full scope: yes. Audited revision: R4. Audit mode: plan.**
+
+Reviewed the original requirements, accepted follow-up proposal, latest whole-PR comment requirement, current nine-path diff, all twelve planned paths, applicable instructions, workflow/policy, domain/ADR evidence, and affected interpreter, prompt, and host lifecycle paths.
+
+Verified:
+
+- Async identity, independent invocation frames, shared closures, suspension, adoption, composable combinators, tool permits, and execution-scoped cleanup remain on the existing R2 path.
+- The race defect originates in the explicit member cancellation at `runtime.ts:2203–2206`, with synthetic error conversion at `runtime.ts:761–778`. Removing that state and conversion repairs the owning boundary.
+- Sequential allSettled observation at `runtime.ts:2156–2185` can hide a later host interruption behind a pending first member. Concurrent observation and normalization address that divergence while retaining ordered ordinary outcomes.
+- Existing host tests at `opencode/test/session/execute.test.ts:760–819` observe cleanup after execution returns. They do not establish whether losers remain live between race settlement and execution termination. R4’s readiness-gated host acceptance distinguishes these boundaries.
+- The parser at `tool-runtime.ts:25–33` already accepts keyed sections; public selection uses only `description` and the three `intro.*` variants. Dedicated maintenance-comment sections require no parser expansion. R4 includes public-output leakage checks and preserves the executable example and both host description consumers.
+
+Independent execution:
+
+- Current codemode suite: **283 passed**, 800 assertions.
+- Current codemode typecheck: **passed**.
+- Current targeted host suites: **102 passed**, 367 assertions.
+- Current-head probes reproduced the retained-loser failure, incorrect empty-race rejection, and masked allSettled interruption.
+- Inspected isolated candidate produced `["first", 7]`, `"outer"`, and an interrupted failed Effect respectively.
+- Isolated candidate Promise suite: **58 passed**, 137 assertions; typecheck passed.
+- `git diff --check`: **passed**.
+- No source, test, configuration, index, or plan edits were made by this audit.
+
+## Primary-path and fallback verdict
+
+One evaluator, one execution-scoped Promise producer, and one host tool-dispatch path remain authoritative. Race selects settlement without owning producer cancellation; execution termination retains cleanup ownership. Concurrent allSettled observation adds no alternative success path.
+
+R4’s comment contract is feasible and explicit:
+
+- Entire PR measured from `70670d1`.
+- Every actual default three-context-line hunk must contain a relevant added/modified Chinese explanation.
+- Strict threshold: **C ≥ floor(E × 0.15) + 1** for E > 0.
+- Documentation/prompt comments cover their hunks without inflating code C.
+- Final implementation audit must independently verify coverage, substantive comment quality, and E/C. Plan estimates cannot substitute for that calculation.
+
+## Release verdict
+
+**APPROVE — full-scope plan audit, round 1, for canonical revision R4.**
+
+Record this verdict before enabling implementation. Approval does not certify the eventual diff, comment coverage, commit, publication, or CI.
+
+
+## 26. R4 Implementation Evidence
+
+### Actual route and files
+
+Implemented the approved delta on local `execute-async-published`, parent `67a07de99`, for remote `execute-async-flow` / PR #1. Twelve paths are in the full diff against `70670d1`, including the unchanged-in-this-commit R2 `model.ts` hunk. The eleven incremental paths are exactly the approved comment/behavior/test/document changes. No dependency, config, hook, host production path, alternate mode or namespace diagnostic changed.
+
+Race now races observer Exits and flattens the winner. Member fibers remain execution-scoped. Empty race uses the same scoped producer with Effect.never. Removed the loser interrupt loop, mutable `interrupted` flag and special synthetic error conversion/unwrap helper. allSettled observes and normalizes concurrently, keeps input-order outcomes and propagates pure host interruption. Existing async frame, closure, eight-tool cap, fetch response and String.replace behavior are retained.
+
+### Red → green and public behavior
+
+- Race slice: six current-head tests fail before the repair (direct/async retained loser, original rejection reason, shared/duplicate member, awaited empty race, nested empty race). After removing per-race cancellation, Promise suite passes 56 tests / 131 assertions while allSettled observation remains sequential.
+- allSettled slice: two readiness-gated direct/async host-interruption tests fail with an Effect Success containing TimeoutExceeded against sequential observation. Concurrent observation yields the original interrupt Cause and cleans the pending first producer. Promise suite passes 58 tests / 137 assertions and package typecheck passes.
+- Prompt slice: the host-optional fetch assertion fails before wording correction, then passes. Separate maintenance-comment sections do not appear in description or any complete/partial/empty catalog. Existing literal example and both host description consumers remain covered.
+- Real host lifecycle: three actual SessionTools/CodeModeTool tests use published Question gates around an async read→wait→read continuation. They verify normal retained-loser completion, root return cleanup, explicit abort cleanup, completed read evidence, no later read on terminated paths, terminal child records and no running parent progress. All three pass. Sensitivity run restoring the original PR runtime/values produces one failure (normal retained-loser completion) and two passing cleanup regressions; the original async wrapper is canceled even though its separately scoped host child is still waiting. The initial test expectation used compact JSON, while the real host pretty-prints it; that fixture expectation was corrected without production changes.
+
+### Final verification
+
+All commands use Bun 1.4.4 from `/tmp/opencode-bun/node_modules/.bin` and the existing locked dependencies.
+
+| Check / cwd | Result |
+| --- | --- |
+| `bun test --only-failures`, packages/codemode | **289 pass, 0 fail, 821 assertions** |
+| `bun typecheck`, packages/codemode | **Pass** |
+| `OPENCODE_DISABLE_MODELS_FETCH=true bun test test/tool/code-mode.test.ts test/tool/registry.test.ts test/tool/code-mode-integration.test.ts test/session/execute.test.ts --timeout 30000 --only-failures`, packages/opencode | **105 pass, 0 fail, 389 assertions** |
+| `node_modules/.bin/oxlint --format json <all nine changed TS files>`, root; repeat exact files at base with same checkout/config | Current **149 warnings, 0 errors**, base **151 warnings, 0 errors**, both exit 0. Remaining rule counts do not increase; one no-this-alias and one redundant type argument removed |
+| Prettier on nine TS paths plus README, current/base | Same six pre-existing TS files flagged; new Promise regions and README formatted. No whole-file unrelated formatting applied |
+| `git diff --check`, root | **Pass** |
+| `TURBO_TELEMETRY_DISABLED=1 TURBO_CONCURRENCY=1 sh .husky/pre-push`, root | **Failed** in opencode typecheck after 41.342s; 23 successful / 30 tasks, 12 cached. Hook unchanged; concurrency only changes scheduling, not coverage. Submodule stage not reached |
+| Direct `bun typecheck`, packages/opencode, to clarify truncated aggregate error | **SIGKILL**, no TypeScript diagnostic; 12.4s, max child RSS 3,922,812 KiB, global OOM counter 15→17. Concurrent type-aware lint makes that RSS/OOM observation unsuitable as an isolated benchmark; it is not presented as heap or exact attribution. Aggregate itself ran without another heavy check |
+
+Initial baseline lint attempts in an external partial copy were invalid (ignore-root panic, then absent tsgolint context); they are not evidence. The recorded comparison above temporarily restored the nine base files in the same checkout, ran the configured check, and restored every byte in a finally block. No other test or check ran while files were substituted.
+
+The full local pre-push remains unpassed, as explicitly permitted for draft publication by the user's exception. No singleThreaded flag/config was added. Existing head CI failure and exact-base evidence remain in section 25; new-head CI will be verified after publication. Real-model correctness/round-trip/retry/usage comparison remains unmeasured and no savings claim is made.
+
+### Whole-PR Chinese comment calculation
+
+Baseline: `70670d1b030bee4198887c633ce2607ad6360e66`. Count nonblank substantive added/modified TS code; remove imports, comments, and same normalized removed/added lines (including reindentation/pure movement). Markdown/prompt prose and their comments do not inflate E/C. The implementation auditor independently checks comment qualification and movement exclusions.
+
+| File | E | C | Whole-PR hunks |
+| --- | ---: | ---: | ---: |
+| interpreter/model.ts | 1 | 1 | 1 |
+| interpreter/runtime.ts | 88 | 25 | 15 |
+| src/tool-runtime.ts | 0 | 1 | 1 |
+| src/values.ts | 0 | 1 | 1 |
+| test/codemode.test.ts | 44 | 7 | 3 |
+| test/promise.test.ts | 235 | 31 | 5 |
+| host test/session/execute.test.ts | 52 | 7 | 3 |
+| host test/tool/code-mode.test.ts | 2 | 2 | 2 |
+| host test/tool/registry.test.ts | 1 | 2 | 2 |
+| README / prompt / plan | excluded | excluded | 6 / 2 / 1 |
+| **Total** | **423** | **77** | **42** |
+
+C/E = **18.20%**, strictly >15%; minimum for E=423 is 64. Even excluding the two comment-only TS-file comments, 75/423 remains >15%. Comments explain ownership, compatibility, control-versus-program failure, fixture causality, shared public descriptions or preservation of completed evidence, not identifier translations.
+
+### Whole-PR hunk-to-comment map
+
+Default `git diff --unified=3 70670d1`; no enlarged context or artificial hunk joining. Each row identifies one actual hunk and its added/modified adjacent Chinese explanation. The plan is one entirely added-file hunk, so its range changes as evidence is appended.
+
+| Path | Hunk (old → new) | Adjacent Chinese explanation |
+| --- | --- | --- |
+| `docs/plans/execute-async-flow.md` | `new file, all lines` | `<!-- 本文是唯一实施合同：保留历史审计原文，当前修订补充组合器语义、全 PR 注释门禁与验收证据。 -->` |
+| `packages/codemode/README.md` | `-62,7 +62,9` | `<!-- 结果边界沿实际解释器行为说明：最后表达式仍可返回，不能误称省略 return 必为 null。 -->` |
+| `packages/codemode/README.md` | `-181,7 +183,9` | `<!-- 预算包含已展示的命名空间标题，文档必须反映既有选择算法而非引入第二套预算。 -->` |
+| `packages/codemode/README.md` | `-192,10 +196,12` | `<!-- 搜索示例使用当前同步全局入口，同时如实保留旧工具拼写的兼容性。 -->` |
+| `packages/codemode/README.md` | `-206,9 +212,10` | `// 翻页复用搜索条件；同步目录查询无需人为加入异步工具调度。` |
+| `packages/codemode/README.md` | `-229,7 +236,9` | `<!-- 固定说明承载调用原则，动态目录只承载当下工具签名，避免重复注入工作流。 -->` |
+| `packages/codemode/README.md` | `-239,14 +248,16` | `<!-- 函数帧隔离与共享闭包必须同时成立，异步身份不能靠调用者额外包装修复。 -->` |
+| `packages/codemode/src/code-mode.txt` | `-1,10 +1,13` | `中文维护说明：组合、等待与结果裁剪由共享说明统一约束，宿主可选能力不能无条件承诺。` |
+| `packages/codemode/src/code-mode.txt` | `-15,11 +18,15` | `中文维护说明：局部目录只是展示预算，不表示未列出的工具不可用；精确签名仍由同一搜索入口提供。` |
+| `packages/codemode/src/interpreter/model.ts` | `-45,6 +45,8` | `// 保留语法身份，所有调用入口才能共享返回 Promise 的语义。` |
+| `packages/codemode/src/interpreter/runtime.ts` | `-1,5 +1,6` | `// Scope 让全部 Promise 共用一次执行寿命，不能把清理责任放回单个观察者。` |
+| `packages/codemode/src/interpreter/runtime.ts` | `-219,7 +220,7` | `// catch 与 allSettled 共享普通失败归一化；宿主中断不转换为脚本数据。` |
+| `packages/codemode/src/interpreter/runtime.ts` | `-599,33 +600,39` | `// 能力与执行寿命共享，词法栈属于调用帧；并发函数不能互相替换作用域。` |
+| `packages/codemode/src/interpreter/runtime.ts` | `-669,8 +676,10` | `// 响应闭包与普通函数共用全局能力，异步读方法不创建第二套宿主状态。` |
+| `packages/codemode/src/interpreter/runtime.ts` | `-707,71 +716,48` | `// 工具调用在调用点启动并计入原预算；只有真实宿主调用占用并发许可。` |
+| `packages/codemode/src/interpreter/runtime.ts` | `-857,6 +843,8` | `// 统一函数值保留语法身份，所有调用入口据此决定是否返回 Promise。` |
+| `packages/codemode/src/interpreter/runtime.ts` | `-1144,7 +1132,8` | `// 各调用帧枚举同一宿主目录，不能复制或扩大原来的工具能力。` |
+| `packages/codemode/src/interpreter/runtime.ts` | `-1447,11 +1436,13` | `// await 普通值也必须让出调度，不能把 async 的后半段抢在调用者之前运行。` |
+| `packages/codemode/src/interpreter/runtime.ts` | `-1905,9 +1896,9` | `// 发现仍经共享执行器的校验、预算和观察 hooks；读取内存目录直接交付同步值。` |
+| `packages/codemode/src/interpreter/runtime.ts` | `-1959,7 +1950,8` | `// 并发帧共享一个日志出口，不能丢掉子调用中已产生的模型可见证据。` |
+| `packages/codemode/src/interpreter/runtime.ts` | `-2102,18 +2094,15` | `// 组合器消费已有 Promise，而不是执行另一套工具调度；其返回值仍可继续组合。` |
+| `packages/codemode/src/interpreter/runtime.ts` | `-2121,139 +2110,104` | `// 同时观察才能及时暴露后项失败；结果仍按输入保序，取消观察不取消成员。` |
+| `packages/codemode/src/interpreter/runtime.ts` | `-2303,6 +2257,8` | `// replacer 结算复用本次执行的解释器边界，不能把既有 async 扩展改成普通回调。` |
+| `packages/codemode/src/interpreter/runtime.ts` | `-2346,9 +2302,15` | `// 保留已发布的 async replacer 扩展；同步回调漏 await 仍由原数据边界指出。` |
+| `packages/codemode/src/interpreter/runtime.ts` | `-3368,8 +3330,10` | `// 作用域在成功、失败和中断时都先收尾，再把结果交给宿主继续执行。` |
+| `packages/codemode/src/tool-runtime.ts` | `-22,7 +22,7` | `// 分段是文件结构；仅 description 与选中的 intro 进入模型，独立维护注释段不输出。` |
+| `packages/codemode/src/values.ts` | `-1,7 +1,7` | `// Promise 保存一次结算来源；生命周期归执行作用域，不再携带 race 私有取消标记。` |
+| `packages/codemode/test/codemode.test.ts` | `-594,9 +594,33` | `// 示例是模型实际收到的公开内容，直接执行而不是把预期代码再复制一份。` |
+| `packages/codemode/test/codemode.test.ts` | `-605,10 +629,15` | `// 维护注释不属于模型任务信息；四种公开出口都必须保持不泄露注释段。` |
+| `packages/codemode/test/codemode.test.ts` | `-1150,3 +1179,24` | `// 响应快照只来自一次宿主请求，读取方法的 Promise 身份不能要求代理采用特殊写法。` |
+| `packages/codemode/test/promise.test.ts` | `-1,5 +1,6` | `// 用宿主控制原因与就绪门闩观察公开行为，不能用超时或私有状态冒充中断证据。` |
+| `packages/codemode/test/promise.test.ts` | `-304,10 +305,48` | `// 就绪信号保证前项确实已挂起；后项发出控制中断，不能等全局超时替它解围。` |
+| `packages/codemode/test/promise.test.ts` | `-322,23 +361,51` | `// race 只竞争结算；保留原 Promise 再等待，才能区分选出赢家与结束整段执行。` |
+| `packages/codemode/test/promise.test.ts` | `-362,9 +429,18` | `// 空集合没有赢家，沿既有执行超时退出，而不是额外生成脚本可捕获的错误。` |
+| `packages/codemode/test/promise.test.ts` | `-452,3 +528,191` | `// 三种语法共享函数值契约，不能只修 map 或箭头回调这一条入口。` |
+| `packages/opencode/test/session/execute.test.ts` | `-757,13 +757,13` | `// 中间 glob 使 question 进入宿主等待；两种脚本都在根执行返回时共用清理边界。` |
+| `packages/opencode/test/session/execute.test.ts` | `-783,7 +783,8` | `// race 后仍可调用其它工具；最终终态在 Execute 返回之后断言，不归因于 race 自身。` |
+| `packages/opencode/test/session/execute.test.ts` | `-818,6 +819,63` | `// 使用真实 SessionTools、权限与 Question 服务；双问题门闩区分 race 结束和 Execute 结束。` |
+| `packages/opencode/test/tool/code-mode.test.ts` | `-1,3 +1,5` | `// 共享说明是宿主实际公开的合同来源；引用它可验证出口一致而不锁定过时文案摘要。` |
+| `packages/opencode/test/tool/code-mode.test.ts` | `-138,11 +140,11` | `// 宿主沿用唯一共享说明，避免文案更新后仍锁定已废弃的上游摘要。` |
+| `packages/opencode/test/tool/registry.test.ts` | `-1,3 +1,5` | `// 注册出口也必须对照同一公开说明，避免只修工具实现而遗漏模型工具清单。` |
+| `packages/opencode/test/tool/registry.test.ts` | `-170,8 +172,8` | `// 注册与执行共用一份说明，动态目录仍由 Session 独立交付。` |
+
+
+### Path verdict and pending gates
+
+One evaluator and one execution scope remain authoritative; observation does not become a producer owner. New alternate-success paths: zero. New diagnostic branches: zero; race diagnostics were removed. Readiness-gated host fixtures exercise existing permission/Question/Session behavior without weakening it. Audit approval, appended commit, leased feature-ref update, complete remote-tree comparison and exact new-head CI status remain pending. No target-branch push or merge is authorized.
+
+## 27. R4 Implementation Audit, Round 1 (Verbatim)
+
+Invocation: `/root/execute_workflow_changes/audit_full_pr_comments`.
+
+## Blocking findings
+
+No blocking findings.
+
+## Non-blocking findings
+
+- `packages/opencode/test/session/execute.test.ts:856` overstates its assertion: an existing Question proves the host child remains present, not that its async wrapper survived. The inspected red run passes that assertion and fails at the final await result, line 863. The complete test is sensitive to the defect; this comment should describe the narrower evidence. I excluded this line from qualifying C.
+- Full host typecheck and aggregate pre-push remain unpassed. Inspected logs show SIGKILL without TypeScript diagnostics. The quoted user exception permits transparently reporting this limitation for draft publication; it does not make these checks green.
+- Prettier still flags the same six pre-existing TS files. README and Promise tests pass formatting. Oxlint reports 149 warnings and no errors, versus 151 warnings in the recorded baseline comparison.
+- Commit, remote-tree/head verification, PR update, and new-head CI remain subsequent gates.
+
+## Rejected speculation
+
+No evidence requires another scheduler, fallback interpreter, new Promise APIs, recursive data unwrapping, additional host permission logic, or rollback of already-started external effects. The existing async string-replacer contract remains preserved.
+
+## Requirement and traceability coverage
+
+**Full scope: yes. Approved revision: R4. Audit mode: implementation.**
+
+Reviewed every hunk across all twelve paths against `70670d1b030bee4198887c633ce2607ad6360e66`, including the earlier R2 implementation.
+
+The diff implements the approved ownership changes:
+
+- Async invocation frames isolate locals while sharing lexical bindings and execution capabilities.
+- Promise creation remains execution-scoped; only actual host calls consume tool permits.
+- Race selects observer settlement without canceling member producers.
+- Empty race stays pending.
+- AllSettled observes concurrently, retains ordered ordinary outcomes, and propagates host interruption.
+- Obsolete pending-set tracking, race cancellation flags, loser interruption, and synthetic error conversion are absent.
+- Real SessionTools tests distinguish retained-loser completion from root return/abort cleanup.
+- Shared guidance, literal discovery/projection example, conditional fetch availability, both host description consumers, and all four maintenance-comment leakage checks remain covered.
+
+Independent verification:
+
+- Codemode: **289 passed**, 821 assertions.
+- Codemode typecheck: **passed**.
+- Targeted host suites: **105 passed**, 389 assertions.
+- Changed-file oxlint: **exit 0**, 149 warnings, no errors.
+- `git diff --check`: **passed**.
+- Public probes confirm the original async throw becomes rejected outcome data, retained race losers remain awaitable, nested empty race loses normally, and later allSettled host interruption propagates.
+- Test sensitivity is supported by independently reproduced pre-implementation failures and the inspected host red-run log.
+
+No source, tests, configuration, index, or plan were modified by this audit.
+
+## Primary-path and fallback verdict
+
+One interpreter, one execution-scoped Promise producer, and the existing host dispatch/permission path remain authoritative.
+
+New alternate-success paths: **zero**. New diagnostic branches: **zero**. Removed race diagnostics are not replaced with recovery behavior. No dependency, configuration, hook, or host production change was introduced.
+
+## Code quality and Chinese-comment verdict
+
+Independently checked the complete default-context diff:
+
+- **42/42 hunks** contain relevant added or modified Chinese explanations.
+- **E = 423**
+- **Qualifying C = 76**
+- **C/E = 17.97%**
+- Strict minimum: **64 qualifying lines**
+
+Per-file E/C:
+
+- interpreter/model.ts: **1/1**
+- interpreter/runtime.ts: **88/25**
+- tool-runtime.ts: **0/1**
+- values.ts: **0/1**
+- codemode.test.ts: **44/7**
+- promise.test.ts: **235/31**
+- host session/execute.test.ts: **52/6**
+- host tool/code-mode.test.ts: **2/2**
+- host tool/registry.test.ts: **1/2**
+
+Excluded blank lines, imports, comments from E, unchanged relocated/reindented code, and Markdown/prompt content from E/C. Documentation and prompt comments were checked separately for hunk coverage. One inaccurate host-test explanation was excluded from C, as noted above.
+
+The implementation satisfies both whole-PR comment requirements. No blocking code-quality or ownership violation was found.
+
+## Release verdict
+
+**APPROVE — full-scope implementation audit, round 1, against approved R4 and the inspected whole-PR diff.**
+
+Record this verdict before advancing. This approves the implementation audit gate, with the disclosed verification limitations; it does not certify publication or CI completion.
+
+### Non-blocking correction and release record
+
+The flagged host-test line was corrected without changing executable behavior: “宿主交互仍存在不代表 async 包装存活；后续显式 await 的结果还必须证明包装未被提前取消。” The final reported budget conservatively retains the auditor's **76/423 = 17.97%**, rather than claiming extra credit for this corrected line. All 42 hunks remain covered. No material implementation change followed audit. Publication is limited to an appended commit on existing `execute-async-flow`, targeting `dev1-smark`; no merge.

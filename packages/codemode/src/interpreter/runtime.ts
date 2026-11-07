@@ -1,4 +1,5 @@
 import { parse } from "acorn"
+// Scope 让全部 Promise 共用一次执行寿命，不能把清理责任放回单个观察者。
 import { Cause, Effect, Exit, Fiber, Semaphore, Scope } from "effect"
 import { DiagnosticCategory, ModuleKind, ScriptTarget, flattenDiagnosticMessageText, transpileModule } from "typescript"
 import {
@@ -219,7 +220,7 @@ const normalizeError = (error: unknown): Diagnostic => {
   }
 }
 
-// Shared by catch bindings, Promise.allSettled rejection reasons, and Promise.race losers.
+// catch 与 allSettled 共享普通失败归一化；宿主中断不转换为脚本数据。
 const caughtErrorValue = (thrown: unknown): unknown => {
   if (thrown instanceof ProgramThrow) return thrown.value
   if (thrown instanceof InterpreterRuntimeError) return createErrorValue(thrown.errorName, thrown.message)
@@ -675,6 +676,7 @@ class Interpreter<R> {
         headers: { get: name => data.headers[name.toLowerCase()] ?? null, has: name => Object.keys(data.headers).includes(name.toLowerCase()), entries: () => Object.entries(data.headers) },
         text: async () => data.text, json: async () => JSON.parse(data.text), bytes: async () => data.bytes };
       }`).body[0], "fetch response")
+      // 响应闭包与普通函数共用全局能力，异步读方法不创建第二套宿主状态。
       execution.fetchResponse = new CodeModeFunction(getArray(factory, "params").map((param) => asNode(param, "params")), getNode(factory, "body"), [globalScope])
     }
     return new Interpreter(execution, [globalScope])
@@ -753,29 +755,9 @@ class Interpreter<R> {
 
   // `await promise`: succeed with the fulfilled value or re-raise the failure so try/catch
   // observes it exactly like a synchronous throw at the await site.
-  private settlePromise(promise: SandboxPromise, node?: AstNode): Effect.Effect<unknown, unknown, never> {
-    const self = this
-    return Effect.flatMap(this.observePromise(promise), (exit) => self.unwrapPromiseExit(promise, exit, node))
-  }
-
-  private unwrapPromiseExit(
-    promise: SandboxPromise | undefined,
-    exit: Exit.Exit<unknown, unknown>,
-    node?: AstNode,
-  ): Effect.Effect<unknown, unknown> {
-    if (Exit.isSuccess(exit)) return Effect.succeed(exit.value)
-    // A call Promise.race interrupted after losing settles as a catchable program failure;
-    // any other interruption is execution teardown (timeout/host) and must keep propagating
-    // as interruption rather than becoming program-visible data.
-    if (promise?.interrupted === true && Cause.hasInterruptsOnly(exit.cause)) {
-      return Effect.fail(
-        new InterpreterRuntimeError(
-          "This tool call was interrupted because another value settled a Promise.race first.",
-          node,
-        ),
-      )
-    }
-    return Effect.failCause(exit.cause)
+  private settlePromise(promise: SandboxPromise): Effect.Effect<unknown, unknown> {
+    // Exit 自身承载成功、失败和中断；直接展开，避免为 race 制造特殊错误。
+    return Effect.flatten(this.observePromise(promise))
   }
 
   private evaluateStatement(node: AstNode): Effect.Effect<StatementResult, unknown, R> {
@@ -861,6 +843,7 @@ class Interpreter<R> {
       getArray(node, "params").map((parameter, index) => asNode(parameter, `params[${index}]`)),
       getNode(node, "body"),
       this.scopes.slice(),
+      // 统一函数值保留语法身份，所有调用入口据此决定是否返回 Promise。
       node.async === true,
     )
   }
@@ -1149,6 +1132,7 @@ class Interpreter<R> {
   // Returns undefined for everything else so callers can raise a contextual error.
   private enumerableKeys(value: unknown): Array<string> | undefined {
     if (value instanceof ToolReference) {
+      // 各调用帧枚举同一宿主目录，不能复制或扩大原来的工具能力。
       return [...this.execution.toolKeys(value.path)]
     }
     if (Array.isArray(value)) {
@@ -1457,7 +1441,7 @@ class Interpreter<R> {
         return Effect.flatMap(this.evaluateExpression(getNode(node, "argument")), (value) =>
           Effect.andThen(
             Effect.yieldNow,
-            value instanceof SandboxPromise ? self.settlePromise(value, node) : Effect.succeed(value),
+            value instanceof SandboxPromise ? self.settlePromise(value) : Effect.succeed(value),
           ),
         )
       }
@@ -1912,7 +1896,7 @@ class Interpreter<R> {
 
       if (callable instanceof ToolReference) {
         if (callable.path.length === 0) throw new InterpreterRuntimeError("The tools root is not callable.", callee)
-        // 发现只读取内存目录，直接交付值；仍经过原工具校验、预算和观察hooks。
+        // 发现仍经共享执行器的校验、预算和观察 hooks；读取内存目录直接交付同步值。
         if (callable.path.length === 2 && callable.path[0] === "$codemode" && callable.path[1] === "search")
           return yield* self.execution.invokeTool(callable.path, args)
         // An un-awaited tool call is a first-class promise value; the call itself starts now.
@@ -1966,6 +1950,7 @@ class Interpreter<R> {
   private invokeConsole(name: string, args: Array<unknown>, node: AstNode): undefined {
     if (!consoleMethods.has(name))
       throw new InterpreterRuntimeError(`console.${name} is not available in CodeMode.`, node)
+    // 并发帧共享一个日志出口，不能丢掉子调用中已产生的模型可见证据。
     this.execution.logs.push(publicErrorMessage(this.formatConsoleMessage(name, args, node)))
     return undefined
   }
@@ -2143,75 +2128,42 @@ class Interpreter<R> {
           case "all": {
             // 同时观察才能及时暴露后项失败；结果仍按输入保序，取消观察不取消成员。
             const settles = items.map((item) =>
-              item instanceof SandboxPromise ? this.settlePromise(item, node) : Effect.succeed(item),
+              item instanceof SandboxPromise ? this.settlePromise(item) : Effect.succeed(item),
             )
             return Effect.all(settles, { concurrency: "unbounded" })
           }
           case "allSettled": {
-            const observations = items.map((item) =>
-              item instanceof SandboxPromise
-                ? Effect.map(this.observePromise(item), (exit) => ({ promise: item as SandboxPromise | undefined, exit }))
-                : Effect.succeed({ promise: undefined as SandboxPromise | undefined, exit: Exit.succeed(item as unknown) }),
-            )
-            return Effect.gen(function* () {
-              const outcomes: Array<unknown> = []
-              for (const observation of observations) {
-                const { exit, promise } = yield* observation
-                if (Exit.isSuccess(exit)) {
-                  outcomes.push(
-                    Object.assign(Object.create(null) as SafeObject, { status: "fulfilled", value: exit.value }),
-                  )
-                  continue
-                }
-                const raceInterrupted = promise?.interrupted === true && Cause.hasInterruptsOnly(exit.cause)
-                if (Cause.hasInterruptsOnly(exit.cause) && !raceInterrupted) {
-                  // Execution teardown (timeout/host interruption), not a program-level rejection.
-                  return yield* Effect.failCause(exit.cause)
-                }
-                const thrown = raceInterrupted
-                  ? new InterpreterRuntimeError(
-                      "This tool call was interrupted because another value settled a Promise.race first.",
-                      node,
-                    )
-                  : Cause.squash(exit.cause)
-                outcomes.push(
-                  Object.assign(Object.create(null) as SafeObject, {
+            // 并发观察使后项控制中断不被前项挂起遮蔽；结果仍按输入顺序收集。
+            return Effect.forEach(
+              items,
+              (item) =>
+                Effect.gen(function* () {
+                  const exit = yield* item instanceof SandboxPromise
+                    ? self.observePromise(item)
+                    : Effect.succeed(Exit.succeed(item))
+                  if (Exit.isSuccess(exit))
+                    return Object.assign(Object.create(null) as SafeObject, { status: "fulfilled", value: exit.value })
+                  // 只有普通失败成为 rejected 数据；宿主终止必须穿透组合器并关闭根作用域。
+                  if (Cause.hasInterruptsOnly(exit.cause)) return yield* Effect.failCause(exit.cause)
+                  return Object.assign(Object.create(null) as SafeObject, {
                     status: "rejected",
-                    reason: caughtErrorValue(thrown),
-                  }),
-                )
-              }
-              return outcomes
-            })
+                    reason: caughtErrorValue(Cause.squash(exit.cause)),
+                  })
+                }),
+              { concurrency: "unbounded" },
+            )
           }
           case "race": {
-            if (items.length === 0) {
-              throw new InterpreterRuntimeError(
-                "Promise.race([]) would never settle; provide at least one promise or value.",
-                node,
-              )
-            }
-            const observations = items.map((item, index) =>
-              item instanceof SandboxPromise
-                ? Effect.map(this.observePromise(item), (exit) => ({ index, exit }))
-                : Effect.succeed({ index, exit: Exit.succeed(item as unknown) }),
+            // 空 race 没有结算来源，继续归根执行的超时与取消管理。
+            if (items.length === 0) return Effect.never
+            // 竞争的是观察，不是生产者寿命；败方仍能被其它 race 或 await 消费。
+            return Effect.flatten(
+              Effect.raceAll(
+                items.map((item) =>
+                  item instanceof SandboxPromise ? this.observePromise(item) : Effect.succeed(Exit.succeed(item)),
+                ),
+              ),
             )
-            return Effect.gen(function* () {
-              // First settlement (fulfilled OR rejected) wins; the observations never fail, so
-              // racing them yields exactly that. Losing in-flight calls are then interrupted.
-              const winner = yield* Effect.raceAll(observations)
-              for (const [index, item] of items.entries()) {
-                if (index === winner.index || !(item instanceof SandboxPromise) || item.fiber === undefined) continue
-                item.interrupted = true
-                yield* Fiber.interrupt(item.fiber)
-              }
-              const winningItem = items[winner.index]
-              return yield* self.unwrapPromiseExit(
-                winningItem instanceof SandboxPromise ? winningItem : undefined,
-                winner.exit,
-                node,
-              )
-            })
           }
         }
       }),
@@ -2305,6 +2257,7 @@ class Interpreter<R> {
     args: Array<unknown>,
     node: AstNode,
   ): Effect.Effect<unknown, unknown, R> {
+    // replacer 结算复用本次执行的解释器边界，不能把既有 async 扩展改成普通回调。
     const self = this
     const apply = this.applyCollectionCallback(args[1], `String.${name}`, node)
     const matches: Array<{ readonly match: string; readonly offset: number; readonly args: Array<unknown> }> = []
@@ -2353,7 +2306,7 @@ class Interpreter<R> {
         // 保留已发布的 async replacer 扩展；同步回调漏 await 仍由原数据边界指出。
         const resolved =
           args[1] instanceof CodeModeFunction && args[1].async && replacement instanceof SandboxPromise
-            ? yield* self.settlePromise(replacement, node)
+            ? yield* self.settlePromise(replacement)
             : replacement
         output.push(
           value.slice(end, match.offset),

@@ -1,3 +1,4 @@
+// 共享说明是宿主实际公开的合同来源；引用它可验证出口一致而不锁定过时文案摘要。
 import { CodeMode } from "@opencode-ai/codemode"
 import { describe, expect, test } from "bun:test"
 import { CODE_MODE_TOOL, CodeModeTool, Parameters, describeCatalog, type CatalogEntry } from "@/tool/code-mode"

@@ -22,7 +22,7 @@ import {
 
 const estimateTokens = (input: string) => Math.max(0, Math.round(input.length / 4))
 
-// Section markers are file structure, not model instructions; retain the upstream text verbatim.
+// 分段是文件结构；仅 description 与选中的 intro 进入模型，独立维护注释段不输出。
 const prompt = Object.fromEntries(
   DESCRIPTION.trimEnd().split(/\r?\n(?=@@ )/).map((block) => {
     const lines = block.split(/\r?\n/)

@@ -757,13 +757,13 @@ it.instance("abort during whole-script review releases the reviewer without tool
   }))
 }))
 
-for (const ending of ["race", "return"]) it.instance(`${ending} cancels its waiting host child and settles parent progress`, () => Effect.gen(function* () {
+for (const ending of ["race", "return"]) it.instance(`${ending} followed by execute exit settles its waiting host child`, () => Effect.gen(function* () {
   const fixture = yield* resolveTools()
   const question = yield* Question.Service
   const execute = fixture.tools.execute?.execute
   if (!execute) throw new Error("execute is missing")
   const controller = new AbortController()
-  // 中间glob使question进入宿主等待；race后的调用和直接return共用原取消边界。
+  // 中间 glob 使 question 进入宿主等待；两种脚本都在根执行返回时共用清理边界。
   const code = `const waiting = tools.$opencode.question({questions:[{question:"Waiting",header:"Test",options:[]}]});
     await tools.$opencode.glob({pattern:"*"});
     const result = ${ending === "race" ? 'await Promise.race([waiting, "done"])' : '"done"'};
@@ -783,7 +783,8 @@ for (const ending of ["race", "return"]) it.instance(`${ending} cancels its wait
   expect(parts.find((part) => part.tool === "question")?.state.status).toBe("error")
 }))
 
-for (const waiting of ["shell", "permission"]) it.instance(`Promise.race cancels ${waiting} and allows later tools`, () => Effect.gen(function* () {
+for (const waiting of ["shell", "permission"]) it.instance(`execute exit cleans a ${waiting} race member after later tools`, () => Effect.gen(function* () {
+  // race 后仍可调用其它工具；最终终态在 Execute 返回之后断言，不归因于 race 自身。
   const fixture = yield* resolveTools()
   const question = yield* Question.Service
   const permission = yield* Permission.Service
@@ -816,6 +817,63 @@ for (const waiting of ["shell", "permission"]) it.instance(`Promise.race cancels
   expect(parts.some((part) => part.state.status === "running" || part.state.status === "pending")).toBe(false)
   expect(parts.find((part) => part.tool === "glob")?.state.status).toBe("completed")
   expect(yield* permission.list()).toEqual([])
+}))
+
+
+for (const ending of ["await", "return", "abort"]) it.instance(`async race member follows ${ending} at the real host boundary`, () => Effect.gen(function* () {
+  // 使用真实 SessionTools、权限与 Question 服务；双问题门闩区分 race 结束和 Execute 结束。
+  const instance = yield* TestInstance
+  yield* Effect.promise(() => Bun.write(path.join(instance.directory, "before.txt"), "completed evidence"))
+  yield* Effect.promise(() => Bun.write(path.join(instance.directory, "after.txt"), "later continuation"))
+  const fixture = yield* resolveTools()
+  const question = yield* Question.Service
+  const execute = fixture.tools.execute?.execute
+  if (!execute) throw new Error("execute is missing")
+  const controller = new AbortController()
+  const code = `const child = (async () => {
+      await tools.$opencode.read({filePath:"before.txt"});
+      await tools.$opencode.question({questions:[{question:"Child",header:"Test",options:[]}]});
+      await tools.$opencode.read({filePath:"after.txt"}); return "finished";
+    })();
+    await tools.$opencode.question({questions:[{question:"Race now",header:"Test",options:[]}]});
+    const winner = await Promise.race([child, "first"]);
+    await tools.$opencode.question({questions:[{question:"After race",header:"Test",options:[]}]});
+    return ${ending === "await" ? '[winner, await child]' : 'winner'};`
+  const pending = yield* Effect.tryPromise({
+    try: () => Promise.resolve(execute({ code }, { toolCallId: "execute-async-lifetime", abortSignal: controller.signal, messages: [] })),
+    catch: (error) => error,
+  }).pipe(Effect.exit, Effect.forkScoped)
+  yield* Effect.gen(function* () {
+    // 先确认 async 已完成首个读取并挂起，再允许 race 开始，不靠任意延时猜调度顺序。
+    const ready = yield* pollWithTimeout(question.list().pipe(Effect.map((items) =>
+      items.some((item) => item.questions[0]?.question === "Child") && items.find((item) => item.questions[0]?.question === "Race now") || undefined,
+    )), "async child did not reach its host gate")
+    yield* question.reply({ requestID: ready.id, answers: [["continue"]] })
+    const after = yield* pollWithTimeout(question.list().pipe(Effect.map((items) =>
+      items.find((item) => item.questions[0]?.question === "After race"),
+    )), "race did not release the caller")
+    const child = (yield* question.list()).find((item) => item.questions[0]?.question === "Child")
+    // 宿主交互仍存在不代表 async 包装存活；后续显式 await 的结果还必须证明包装未被提前取消。
+    expect(child).toBeDefined()
+    if (!child) throw new Error("race canceled its still-needed child")
+    if (ending === "abort") controller.abort()
+    if (ending !== "abort") yield* question.reply({ requestID: after.id, answers: [["continue"]] })
+    if (ending === "await") yield* question.reply({ requestID: child.id, answers: [["finish"]] })
+    const exit = yield* awaitWithTimeout(Fiber.join(pending), "async host cleanup did not finish")
+    expect(exit._tag).toBe(ending === "abort" ? "Failure" : "Success")
+    if (Exit.isSuccess(exit)) {
+      expect(exit.value).toMatchObject({ output: ending === "await" ? JSON.stringify(["first", "finished"], null, 2) : "first" })
+      // 父回执必须已结算所有已记录调用，不能把已清理的等待继续投影成 running。
+      expect(exit.value).toMatchObject({ metadata: { toolCalls: expect.not.arrayContaining([expect.objectContaining({ status: "running" })]) } })
+    }
+    expect(yield* question.list()).toEqual([])
+    const parts = (yield* fixture.sessions.messages({ sessionID: fixture.session.id })).flatMap((message) => message.parts)
+      .filter((part) => part.type === "tool")
+    // 已完成读取在 return/abort 后仍然保留；后续读取仅在显式等待正常完成时允许发生。
+    expect(parts.filter((part) => part.tool === "read" && part.state.status === "completed")).toHaveLength(ending === "await" ? 2 : 1)
+    expect(parts.some((part) => part.state.status === "running" || part.state.status === "pending")).toBe(false)
+    expect(parts.filter((part) => part.tool === "question" && part.state.status === "error")).toHaveLength(ending === "await" ? 0 : ending === "return" ? 1 : 2)
+  }).pipe(Effect.ensuring(Effect.sync(() => controller.abort())))
 }))
 
 it.instance("dismissed question terminates execute rather than entering its catch mutation", () => Effect.gen(function* () {
