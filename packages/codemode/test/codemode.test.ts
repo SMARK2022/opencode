@@ -594,9 +594,33 @@ describe("CodeMode public contract", () => {
     if (exact.ok) expect(exact.value).toMatchObject({ remaining: 0, next: null })
   })
 
-  test("instructions separate the official v2.2.5 description and catalog branches", () => {
-    // 摘要独立取自官方tool.ts常量，不能用本地实现生成预期值。
-    expect(new Bun.CryptoHasher("sha256").update(CodeMode.description).digest("hex")).toBe("4e1d4d35251719086df5e5c85baf32dd27364519b2c1556912dc806e2c74eea8")
+  test("the description's discovery and projection example executes as written", async () => {
+    // 示例是模型实际收到的公开内容，直接执行而不是把预期代码再复制一份。
+    const discovery = CodeMode.description.match(/First discover: `([^`]+)`/)?.[1]
+    const batch = CodeMode.description.match(/Then compose: `([^`]+)`/)?.[1]
+    if (discovery === undefined || batch === undefined) throw new Error("Missing executable workflow example")
+    const runtime = CodeMode.make({ tools, discovery: { catalogBudget: 0 } })
+    // 空内联预算下仍能发现入口，示例不能依赖恰好已展示的工具。
+    expect(await Effect.runPromise(runtime.execute(discovery))).toMatchObject({
+      ok: true,
+      value: { items: [{ path: "tools.orders.lookup" }] },
+    })
+    // 只回传声明的决策字段，避免示例鼓励中间原始数据进入模型回线。
+    expect(await Effect.runPromise(runtime.execute(batch))).toMatchObject({
+      ok: true,
+      value: [
+        { id: "a", status: "open" },
+        { id: "b", status: "open" },
+      ],
+    })
+  })
+
+  test("instructions separate shared execution guidance and catalog branches", () => {
+    // 固定说明与动态目录分别交付，渐进发现不应复制一份运行时规则。
+    expect(CodeMode.description).toContain("pending calls are interrupted when execution ends")
+    expect(CodeMode.description).toContain("returning only the evidence needed for the next decision")
+    // fetch 权限来自宿主显式能力，静态说明不能承诺每个 runtime 都提供网络。
+    expect(CodeMode.description).toContain("When provided by the host, `fetch`")
     const complete = CodeMode.make({ tools }).instructions()
     expect(complete).toStartWith("# Code Mode\n\nThe tools listed below cannot be called directly:")
     expect(complete).toContain("The catalog is complete. Do not guess tool names.")
@@ -605,10 +629,15 @@ describe("CodeMode public contract", () => {
     const partial = CodeMode.make({ tools, discovery: { catalogBudget: 0 } }).instructions()
     expect(partial).toContain("The tools listed below, and `search`, cannot be called directly")
     expect(partial).toContain("find it with the global `search(...)` function")
+    expect(partial).toContain("Unlisted tools remain available through search")
     expect(partial).toContain("Each result's `path` is the complete call expression")
     expect(partial).toContain("- search({")
     // 目录同步结果没有Promise包装；调用语义须与模型看到的发现签名一致。
     expect(partial).toContain("}): {\n  items: Array<{")
+    // 维护注释不属于模型任务信息；四种公开出口都必须保持不泄露注释段。
+    for (const text of [CodeMode.description, complete, partial, CodeMode.make({}).instructions()]) {
+      expect(text).not.toMatch(/中文维护说明|@@ comment\./)
+    }
     expect(CodeMode.make({}).instructions()).toBe("No Code Mode tools are currently available. Later Code Mode catalog updates may add or remove tools. Do not call `execute` unless there is at least one available Code Mode tool.")
   })
 
@@ -1149,4 +1178,25 @@ describe("CodeMode public contract", () => {
   test("reserves the discovery namespace", () => {
     expect(() => CodeMode.make({ tools: { $codemode: { lookup } } })).toThrow(/reserved for CodeMode discovery tools/)
   })
+})
+
+test("fetch response readers compose as async methods over one response", async () => {
+  // 响应快照只来自一次宿主请求，读取方法的 Promise 身份不能要求代理采用特殊写法。
+  const result = await Effect.runPromise(
+    CodeMode.execute({
+      fetch: () =>
+        Effect.succeed({
+          url: "https://example.com",
+          status: 200,
+          statusText: "OK",
+          ok: true,
+          redirected: false,
+          headers: {},
+          text: '{"id":7}',
+          bytes: [7],
+        }),
+      code: 'const response=await fetch("https://example.com"); const p=response.json(); return [p instanceof Promise, await Promise.all([p,response.text(),response.bytes()])]',
+    }),
+  )
+  expect(result).toMatchObject({ ok: true, value: [true, [{ id: 7 }, '{"id":7}', [7]]] })
 })

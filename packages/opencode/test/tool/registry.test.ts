@@ -1,3 +1,5 @@
+// 注册出口也必须对照同一公开说明，避免只修工具实现而遗漏模型工具清单。
+import { CodeMode } from "@opencode-ai/codemode"
 import { afterEach, describe, expect, spyOn } from "bun:test"
 import path from "path"
 import fs from "fs/promises"
@@ -170,8 +172,8 @@ describe("tool.registry", () => {
 
       expect(ids).toContain("execute")
       expect(tools.map((tool) => tool.id)).toContain("execute")
-      // 注册期提供官方固定说明，动态目录只由Session的instructions交付。
-      expect(new Bun.CryptoHasher("sha256").update(execute?.description ?? "").digest("hex")).toBe("4e1d4d35251719086df5e5c85baf32dd27364519b2c1556912dc806e2c74eea8")
+      // 注册与执行共用一份说明，动态目录仍由 Session 独立交付。
+      expect(execute?.description).toBe(CodeMode.description)
     }),
   )
 

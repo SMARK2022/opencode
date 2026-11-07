@@ -62,7 +62,9 @@ const result =
 
 `result` is always a `CodeMode.Result`. Program, validation, limit, and tool failures are returned as diagnostics rather than failing the Effect. Host interruption remains interruption.
 
-Successful result values are JSON-safe data. A program that returns `undefined`, including by reaching the end without `return`, produces `null`; nested `undefined` values are normalized to `null` as well.
+<!-- 结果边界沿实际解释器行为说明：最后表达式仍可返回，不能误称省略 return 必为 null。 -->
+
+Successful result values are JSON-safe data. An explicit `return` is preferred; otherwise the final top-level expression is the result. A program whose result is `undefined` produces `null`; nested `undefined` values are normalized to `null` as well.
 
 ## API
 
@@ -181,7 +183,9 @@ Supported bearer, basic, header, and query authentication follows OpenAPI `secur
 
 The agent-tool instructions use a budgeted catalog. Every tool namespace is always listed with its tool count regardless of budget, and as many complete, JSDoc-annotated tool signatures (each with a one-line description) as fit an estimated-token budget are inlined. Schema field descriptions and tags are part of each signature's measured cost. Selection is round-robin across namespaces for fairness: in each round (namespaces alphabetical), every namespace still holding un-inlined tools attempts to place its next-cheapest signature against the shared budget, and a namespace whose next signature does not fit drops out while the others keep going - so every namespace gets some representation before any namespace gets everything. The instructions state exactly how comprehensive the list is, both overall (`COMPLETE list` vs `PARTIAL - N of M shown`) and per namespace (`(3 tools)`, `(3 tools, 1 shown)`, `(3 tools, none shown)`).
 
-The catalog-entry budget defaults to 2,000 estimated tokens (characters / 4, the same heuristic OpenCode uses). It applies only to full tool entries shown in the catalog; fixed instructions and namespace summaries are not counted. Override it when constructing a runtime:
+<!-- 预算包含已展示的命名空间标题，文档必须反映既有选择算法而非引入第二套预算。 -->
+
+The catalog-entry budget defaults to 2,000 estimated tokens (characters / 4, the same heuristic OpenCode uses). It includes namespace headings and full tool entries shown in the catalog; fixed instructions are not counted. Override it when constructing a runtime:
 
 ```ts
 const runtime = CodeMode.make({
@@ -192,10 +196,12 @@ const runtime = CodeMode.make({
 
 The budget must be a non-negative safe integer.
 
-The runtime search tool is always registered - including when the catalog is fully inlined - so a speculative `tools.$codemode.search` call never fails as an unknown tool. It is only advertised in the instructions when the inlined list is partial:
+<!-- 搜索示例使用当前同步全局入口，同时如实保留旧工具拼写的兼容性。 -->
+
+The runtime search tool is always registered - including when the catalog is fully inlined - and exposed as the synchronous global `search(...)`; the older `tools.$codemode.search(...)` spelling remains supported. It is only advertised in the instructions when the inlined list is partial:
 
 ```ts
-const matches = await tools.$codemode.search({
+const matches = search({
   query: "order status",
   namespace: "orders", // optional: scope to one top-level namespace
   limit: 10,
@@ -206,9 +212,10 @@ const matches = await tools.$codemode.search({
 `search` performs deterministic, additive field-weighted matching. The query is tokenized (camelCase boundaries split; every non-alphanumeric character is a separator; empties and `*` are dropped), and each term scores every tool: exact path or path-segment match (20), path substring (8), description substring (4), and searchable-text substring (2). Each term also carries naive singular variants (trailing `s`/`es` stripped), and a field check passes when the term or any variant matches - so a plural query term (`issues`) still finds a tool whose text only says `issue`, without changing the weights. The searchable text also includes the input schema's property names and their description strings, so a query naming a parameter finds its tool, and substring matching means partial words match. Scores sum across terms; matches are sorted by score (ties broken alphabetically by path), then sliced from the zero-based `offset` (default 0) to the configured `limit` (default 10). `remaining` counts matches after the current page. `next` is `{ offset }` when another page exists and `null` on the final page; spread it into the original request to preserve its query, namespace, and limit.
 
 ```ts
+// 翻页复用搜索条件；同步目录查询无需人为加入异步工具调度。
 const request = { query: "order status", namespace: "orders", limit: 10 }
-const page = await tools.$codemode.search(request)
-const nextPage = page.next ? await tools.$codemode.search({ ...request, ...page.next }) : undefined
+const page = search(request)
+const nextPage = page.next ? search({ ...request, ...page.next }) : undefined
 ```
 
 Each result contains the path, description, and the same generated TypeScript signature used by the inline catalog, so no second lookup is needed. Signatures use the JSDoc-annotated multiline form: each described input/output field carries its schema `description` as a `/** ... */` comment, and constraints TypeScript cannot express ride along as tags (`@deprecated`, `@default`, `@format`, `@minItems`, `@maxItems`).
@@ -229,7 +236,9 @@ tools.github.list_issues(input: {
 
 Result paths are rendered as JavaScript expressions rooted at `tools` (`tools.orders.lookup`, or `tools.context7["resolve-library-id"]` for non-identifier segments), so each `path` is directly usable as the call site. An empty query browses the catalog alphabetically by path; combined with `namespace` (`{ query: "", namespace: "orders" }`) it lists everything in that namespace. A query that names one tool path exactly (canonical path, `tools.`-prefixed path, or rendered JavaScript expression) is treated as a lookup and returns that tool alone.
 
-The instructions are structured markdown, ordered so the workflow sits at the top and the catalog at the bottom: a `## Workflow` section with numbered steps (find a tool via search when the catalog is partial, or pick from the inlined list when it is complete; call the exact path as-is; return only the needed fields), a `## Rules` section holding only guidance the workflow does not already cover (only listed/search-result Code Mode tools and internal runtime tools exist inside `tools`; filter and aggregate collections in code; narrow `Promise<unknown>` results at runtime; run independent calls through `Promise.all`; enumerate `tools` with `Object.keys`/`for...in`; browse a namespace and paginate search results when search is advertised), a short `## Language` section that identifies the runtime as a restricted JavaScript orchestration language and names its major unavailable capabilities, and the budgeted `## Available tools` catalog. Example call forms use explicit `<namespace>.<tool>`/`<field>` placeholders - never a real or fabricated tool name.
+<!-- 固定说明承载调用原则，动态目录只承载当下工具签名，避免重复注入工作流。 -->
+
+The shared `CodeMode.description` carries a short composition workflow and a search-then-call example. `runtime.instructions()` carries the current complete, partial, or empty catalog separately. Search by the task when a needed tool is not shown, use the exact returned path and signature, compose deterministic steps in code, and return only useful evidence. Independent calls can use `Promise.all`; use `Promise.allSettled` when partial results matter without hiding failures. Dependent calls and conflicting writes stay sequential. No blanket per-call `try`/`catch` scaffolding is required.
 
 A host cannot define its own `$codemode` top-level namespace.
 
@@ -239,14 +248,16 @@ CodeMode executes a deliberately bounded JavaScript subset. It supports:
 
 - Plain data literals, property access, assignment, and destructuring.
 - `if`, conditional expressions, `switch`, `for`, `for...of` (arrays, strings, Maps, Sets), `for...in` (own keys of plain objects, index strings of arrays, and namespace/tool names of `tools` references - anything else is an error suggesting `for...of` or `Object.keys`, rather than real JS's surprising behavior of indices for strings and zero iterations for Maps/Sets), `while`, and `do...while`.
-- Arrow functions and function declarations with closures, defaults, rest parameters, and destructuring.
+<!-- 函数帧隔离与共享闭包必须同时成立，异步身份不能靠调用者额外包装修复。 -->
+- Synchronous and async arrow functions, function expressions, and declarations with closures, defaults, rest parameters, and destructuring. Async calls return promises, adopt returned promises, and reject on body or parameter-binding errors; each invocation has independent locals and shares captured lexical bindings.
 - Optional chaining, nullish coalescing, templates, spread (arrays, strings, Maps, Sets), and `try`/`catch`.
 - Common array, string, number, `Object`, `Math`, and `JSON` operations. Mutating array methods include `push`/`pop`/`shift`/`unshift`/`splice` (removes in place and returns the removed elements)/`fill`/`copyWithin`; array `keys`/`values`/`entries` return **arrays** (matching the Map/Set convention) and work with `for...of` and spread. String methods include `localeCompare` (locale/options arguments ignored), `normalize`, and the `trimLeft`/`trimRight` aliases. `Object.keys` also accepts arrays (index strings, as in JS) and tool references: `Object.keys(tools)` lists the top-level namespaces, including `$codemode`, and `Object.keys(tools.ns)` lists the names at that node (a callable tool enumerates as `[]`; an unknown path is an `UnknownTool` diagnostic). `Object.values`/`Object.entries` on a tool reference fail with a pointer at `Object.keys(tools)` and `tools.$codemode.search`.
 - `Date` - `Date.now()`/`Date.parse()`/`Date.UTC()`, `new Date(...)`, the getter methods, and date arithmetic/comparison via the time value. Dates stringify as ISO (`toString` included, for determinism across host timezones).
 - Regular expressions - `/literals/` and `new RegExp(...)` with `test`/`exec` (stateful `lastIndex` for `g`), plus string `match`/`matchAll`/`replace`/`replaceAll`/`split`/`search` with patterns. Match results are arrays carrying `index` and named `groups` as own properties (`input` is omitted). `replace` and `replaceAll` accept function replacers with captures, offset, input, and named groups; callbacks run sequentially, may await tool calls, and have their results coerced to strings. Invalid patterns, invalid flags, and missing-`g` calls fail with catchable errors that say what was wrong and how to fix it (escaping hints, the exact `/pattern/g` to write). Patterns run on the host engine, so pathological backtracking is bounded only by the execution timeout.
 - `Map` and `Set` - construction from entries/arrays/strings, `get`/`set`/`add`/`has`/`delete`/`clear`/`size`/`forEach`, and `keys`/`values`/`entries` returning **arrays** (not iterators).
 - URL helpers - `URL` resolution and mutation, linked `URLSearchParams`, `URL.canParse`/`URL.parse`, URI and URI-component encoding/decoding, and query parameter construction, lookup, mutation, sorting, callbacks, and materialization. URLSearchParams iteration methods return arrays, matching the Map/Set convention.
-- First-class promises - an un-awaited `tools.ns.tool(...)` is a promise value whose call starts immediately on a supervised fiber; `await` resolves it (awaiting a non-promise value is a no-op, and `return tools.ns.tool(...)` resolves like an async-function return). `Promise.all`, `Promise.allSettled`, and `Promise.race` accept any array mixing promises and plain values (built inline, beforehand, or via spread); `Promise.resolve`/`Promise.reject` construct settled promises. `Promise.allSettled` rejection reasons are the same plain `{ name?, message }` data a `catch` binding sees, and `Promise.race` interrupts its losing in-flight calls. At most 8 tool calls run concurrently. When a program completes, still-running un-awaited calls are awaited before the execution ends; a failure from a call that was never awaited surfaces as an unhandled-rejection diagnostic.
+<!-- race 只选择结果，根执行负责终止未完工作；两种边界不可再次混成私有取消政策。 -->
+- First-class promises - tool calls and async functions start eagerly; `await` yields before resolving a promise or passing through a plain value. `Promise.all`, `Promise.allSettled`, and `Promise.race` return composable promises over arrays or supported collections mixing promises and plain values. `Promise.all` preserves success order and rejects on the first observed failure. `allSettled` preserves input order and catch-normalized rejection reasons, while host interruption propagates immediately. `race` chooses the first settlement without canceling its members; retained promises remain awaitable. An empty `race` stays pending until execution timeout or interruption. `Promise.resolve`/`Promise.reject` construct settled promises. Only actual tool calls consume the shared eight-call limit. All promises belong to one execution scope: pending work is interrupted when execution ends, not extended into background work or converted into an unhandled-rejection replacement for an explicit result. Already-started external side effects cannot be rolled back. The deliberate async string-replacer extension remains as described above; ordinary collection callbacks receive normal function return values (for example, async `map` produces promises).
 - `throw value` and `throw new Error(message)` for explicit program failure. `Error` (and `TypeError`/`RangeError`/`SyntaxError`/`ReferenceError`/`EvalError`/`URIError`) are real constructors, callable with or without `new`; error values are plain `{ name, message }` data that additionally satisfy `instanceof Error` (a specific type matches itself and `Error`, as in JS). Every caught failure - thrown errors, interpreter runtime errors, and tool failures - is `instanceof Error` in a `catch` block; a thrown non-error value (`throw "text"`) is not, matching JS. Caught failures carry the `name` the equivalent real-JS failure would have - `JSON.parse` and invalid regex patterns produce a `SyntaxError` (satisfying `instanceof SyntaxError`), an unknown identifier a `ReferenceError`, assigning to a constant a `TypeError`, a bad `normalize` form a `RangeError`; failures with no specific analogue (including tool failures) are named `"Error"`. `instanceof` also recognizes `Date`, `RegExp`, `Map`, `Set`, `URL`, `URLSearchParams`, `Array`, `Object`, and `Promise`; any other right-hand side is a catchable error.
 
 Inside a program, standard-library values stay live everywhere: the internal data checkpoints (`Object.*` helpers, spread, coercion inputs) preserve the instances, so `Object.values({ d: date })[0].getTime()` and a spread copy of an object holding a Map keep working. Only at the host boundary (final result, tool arguments, `JSON.stringify`) do they serialize exactly as `JSON.stringify` would: Date and URL become strings (an invalid Date becomes `null`), while RegExp, Map, Set, and URLSearchParams become `{}`. Promise values never cross a data boundary: an un-awaited promise in a result or tool argument produces a diagnostic that says to await it, instead of serializing to `{}`.

@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test"
-import { Effect, Schema } from "effect"
+// 用宿主控制原因与就绪门闩观察公开行为，不能用超时或私有状态冒充中断证据。
+import { Cause, Deferred, Effect, Schema } from "effect"
 import { CodeMode, Tool, toolError } from "../src/index.js"
 
 // Wave 5 acceptance suite: first-class promise values. Un-awaited tool calls start eagerly on
@@ -304,10 +305,48 @@ describe("Promise.allSettled", () => {
     expect(result.ok).toBe(true)
     if (result.ok) expect(result.value).toBe(2)
   })
+
+  for (const wrap of [false, true])
+    test(`a later ${wrap ? "async" : "direct"} host interruption is not hidden by a pending first member`, async () => {
+      // 就绪信号保证前项确实已挂起；后项发出控制中断，不能等全局超时替它解围。
+      const started = Deferred.makeUnsafe<void>()
+      let cleaned = false
+      const exit = await Effect.runPromise(
+        CodeMode.execute({
+          tools: {
+            wait: Tool.make({
+              description: "Wait for cancellation",
+              input: Schema.Struct({}),
+              run: () =>
+                Deferred.succeed(started, undefined).pipe(
+                  Effect.andThen(Effect.never),
+                  Effect.onInterrupt(() =>
+                    Effect.sync(() => {
+                      cleaned = true
+                    }),
+                  ),
+                ),
+            }),
+            stop: Tool.make({
+              description: "Interrupt after first member starts",
+              input: Schema.Struct({}),
+              run: () => Deferred.await(started).pipe(Effect.andThen(Effect.interrupt)),
+            }),
+          },
+          limits: { timeoutMs: 100 },
+          code: `return await Promise.allSettled([tools.wait({}), ${wrap ? "(async () => await tools.stop({}))()" : "tools.stop({})"}])`,
+        }).pipe(Effect.exit),
+      )
+      // Exit 失败且原因只有中断，排除 TimeoutExceeded 诊断或伪造 rejected 数据。
+      expect(exit._tag).toBe("Failure")
+      if (exit._tag === "Failure") expect(Cause.hasInterruptsOnly(exit.cause)).toBe(true)
+      expect(cleaned).toBe(true)
+    })
 })
 
 describe("Promise.race", () => {
-  test("first settlement wins and losers are interrupted", async () => {
+  test("execute exit interrupts pending race members", async () => {
+    // 此断言在整个 Execute 返回后检查清理，与上文败方可继续等待的合同分开。
     const trace = makeTrace()
     const result = await value(
       `
@@ -322,23 +361,51 @@ describe("Promise.race", () => {
     expect(trace.completed).toBe(1)
   })
 
-  test("awaiting an interrupted loser afterwards is a catchable program failure", async () => {
+  for (const wrap of [false, true])
+    test(`a losing ${wrap ? "async function" : "tool"} remains awaitable`, async () => {
+      // race 只竞争结算；保留原 Promise 再等待，才能区分选出赢家与结束整段执行。
+      const trace = makeTrace()
+      expect(
+        await value(
+          `
+      const slow = ${wrap ? "(async () => await tools.host.sleepy({ id: 2, ms: 10 }))()" : "tools.host.sleepy({ id: 2, ms: 10 })"}
+      const winner = await Promise.race([slow, "first"])
+      return [winner, await slow]
+    `,
+          { trace },
+        ),
+      ).toEqual(["first", 2])
+      expect(trace.completed).toBe(1)
+      expect(trace.interrupted).toBe(0)
+    })
+
+  test("a losing rejection retains its original reason", async () => {
+    // 被另一项抢先结算不应把后续业务失败改写为执行器制造的取消错误。
     expect(
       await value(`
-      const fast = tools.host.sleepy({ id: 1, ms: 10 })
-      const slow = tools.host.sleepy({ id: 2, ms: 5000 })
-      const winner = await Promise.race([fast, slow])
-      try {
-        await slow
-        return "no"
-      } catch (e) {
-        return { winner, caught: e.message }
-      }
+      const slow = (async () => { await tools.host.sleepy({ id: 1 }); throw "original" })()
+      const winner = await Promise.race([slow, "first"])
+      return [winner, await Promise.allSettled([slow])]
     `),
-    ).toEqual({
-      winner: 1,
-      caught: "This tool call was interrupted because another value settled a Promise.race first.",
-    })
+    ).toEqual(["first", [{ status: "rejected", reason: "original" }]])
+  })
+
+  test("shared and duplicate members keep one producer across races", async () => {
+    // 两个组合器共享同一 Promise；第一个的完成不得使第二个失去仍需要的结果。
+    const trace = makeTrace()
+    expect(
+      await value(
+        `
+      const shared = tools.host.sleepy({ id: 7 })
+      const first = Promise.race([shared, "first"])
+      const second = Promise.race([shared, shared])
+      return [await first, await second, await shared]
+    `,
+        { trace },
+      ),
+    ).toEqual(["first", 7, 7])
+    expect(trace.completed).toBe(1)
+    expect(trace.interrupted).toBe(0)
   })
 
   test("a rejection can win the race", async () => {
@@ -362,9 +429,18 @@ describe("Promise.race", () => {
     expect(trace.interrupted).toBe(1)
   })
 
-  test("an empty race is a clear error instead of hanging", async () => {
-    const diagnostic = await error(`return await Promise.race([])`)
-    expect(diagnostic.message).toContain("never settle")
+  test("an empty race stays pending until the execution timeout", async () => {
+    // 空集合没有赢家，沿既有执行超时退出，而不是额外生成脚本可捕获的错误。
+    expect(await error("return await Promise.race([])", { limits: { timeoutMs: 30 } })).toMatchObject({
+      kind: "TimeoutExceeded",
+    })
+  })
+
+  test("a pending empty race can lose to an outer value", async () => {
+    // 只检查空 race 超时会漏掉“已拒绝但未观察”的实现，嵌套组合锁定 pending 身份。
+    expect(
+      await value('const pending = Promise.race([]); return [typeof pending, await Promise.race([pending, "done"])]'),
+    ).toEqual(["object", "done"])
   })
 })
 
@@ -450,5 +526,193 @@ describe("unsupported promise surface", () => {
     expect(diagnostic.kind).toBe("UnsupportedSyntax")
     expect(diagnostic.message).toContain("new Promise(...) is not supported")
     expect(diagnostic.message).toContain("already return promises")
+  })
+})
+
+describe("async function composition", () => {
+  test.each(["async function f() { return 7 }", "const f = async function () { return 7 }", "const f = async () => 7"])(
+    "keeps async identity for %s",
+    async (declaration) => {
+      // 三种语法共享函数值契约，不能只修 map 或箭头回调这一条入口。
+      expect(await value(`${declaration}; const p = f(); return [p instanceof Promise, await p, await p]`)).toEqual([
+        true,
+        7,
+        7,
+      ])
+      // 同步函数仍交付原值，不应为了统一调度强迫所有调用者增加 await。
+      expect(await value("function f() { return 7 }; return f()")).toBe(7)
+    },
+  )
+
+  test("settles body and parameter failures without throwing from invocation", async () => {
+    // 原始无工具复现隔离了解释器故障，排除宿主工具失败传播的干扰。
+    expect(
+      await value('const p = (async () => { throw new Error("probe") })(); return await Promise.allSettled([p])'),
+    ).toEqual([{ status: "rejected", reason: { name: "Error", message: "probe" } }])
+    // 参数默认值也属于 async 调用，绑定失败不能提前逃出 Promise。
+    expect(
+      await value(
+        'const fail = () => { throw "default" }; async function f(x = fail()) { return x }; return await Promise.allSettled([f()])',
+      ),
+    ).toEqual([{ status: "rejected", reason: "default" }])
+    // 捕获后再抛仍保持原始原因，不得用默认成功值掩盖真实失败。
+    expect(
+      await value(
+        'async function f() { try { await Promise.reject("inner") } catch (e) { throw e } }; return await Promise.allSettled([f()])',
+      ),
+    ).toEqual([{ status: "rejected", reason: "inner" }])
+  })
+
+  test("yields at await while keeping the synchronous prefix eager", async () => {
+    // 即使等待普通值，caller 也应先得到控制权；不依赖工具延迟制造顺序。
+    expect(
+      await value(
+        'const order=[]; const p=(async()=>{order.push("before"); await 1; order.push("after")})(); order.push("caller"); await p; return order',
+      ),
+    ).toEqual(["before", "caller", "after"])
+    // 两个挂起帧交错恢复时，外层词法变量仍然是同一个共享绑定。
+    expect(
+      await value(
+        "const order=[]; const p=(async()=>{order.push(1); await 0; order.push(2)})(); const q=(async()=>{order.push(3); await 0; order.push(4)})(); await p; order.push(5); await q; return order",
+      ),
+    ).toEqual([1, 3, 2, 4, 5])
+  })
+
+  test("runs multi-step async callbacks concurrently with isolated locals and shared closures", async () => {
+    const trace = makeTrace()
+    // 共享 counter 与每次调用独有的 local 同时受测，避免并发修复靠复制闭包偷换语义。
+    const result = await value(
+      `let counter=0; const jobs=[1,2,3].map(async id => {
+      const local=await tools.host.sleepy({id,ms:10}); counter++;
+      return await tools.host.sleepy({id:local+10,ms:10});
+    }); return {results:await Promise.all(jobs),counter}`,
+      { trace },
+    )
+    expect(result).toEqual({ results: [11, 12, 13], counter: 3 })
+    // 活跃工具数量证明实际重叠，不用总耗时阈值把慢 CI 误判为语义回归。
+    expect(trace.maxActive).toBeGreaterThan(1)
+    expect(trace.active).toBe(0)
+  })
+
+  test("adopts returned promises without taking tool permits for wrapper functions", async () => {
+    const trace = makeTrace()
+    // 嵌套 helper 与组合器不能占用八个工具许可，否则批次会自锁。
+    expect(
+      await value(
+        "async function inner(id) { return tools.host.sleepy({id}) }; async function outer(id) { return inner(id) }; return (await Promise.all(Array.from({length:20}).map((_,id)=>outer(id)))).length",
+        { trace },
+      ),
+    ).toBe(20)
+    expect(trace.maxActive).toBeGreaterThan(1)
+    expect(trace.maxActive).toBeLessThanOrEqual(8)
+    // 返回容器不是递归 await；其中工具 Promise 必须仍能在函数结束后被调用者收取。
+    expect(
+      await value("async function f() { return [tools.host.sleepy({id:7})] }; return await Promise.all(await f())"),
+    ).toEqual([7])
+  })
+
+  test("keeps async callback values visible to ordinary collection contracts", async () => {
+    // filter 不拥有异步筛选协议，Promise 对象保持真值；map 的调用者才选择如何等待。
+    expect(await value("return [1,2].filter(async () => false)")).toEqual([1, 2])
+    // 普通数据出口仍拒绝未等待 Promise，修复不能泄漏解释器内部对象。
+    expect((await error("return {value:(async()=>7)()}")).kind).toBe("InvalidDataValue")
+  })
+})
+
+describe("composable promise combinators", () => {
+  test.each(["all", "allSettled", "race"])("Promise.%s returns a reusable promise", async (method) => {
+    // 观察必须由 await 驱动消费，组合器调用本身不能提前返回数组或抛出成员错误。
+    expect(await value(`const p=Promise.${method}([7]); return [p instanceof Promise, await p, await p]`)).toEqual(
+      method === "allSettled"
+        ? [true, [{ status: "fulfilled", value: 7 }], [{ status: "fulfilled", value: 7 }]]
+        : method === "all"
+          ? [true, [7], [7]]
+          : [true, 7, 7],
+    )
+    // 非法集合在组合结果上拒绝，外层 allSettled 仍有机会接收失败。
+    expect(await value(`const p=Promise.${method}(42); return (await Promise.allSettled([p]))[0].status`)).toBe(
+      "rejected",
+    )
+  })
+
+  test("nested combinator rejection reaches allSettled", async () => {
+    // 此例不依赖工具，用原生 Promise 组合习惯直接捕获此前同步抛错的根因。
+    expect(await value('const p=Promise.all([Promise.reject("probe")]); return await Promise.allSettled([p])')).toEqual(
+      [{ status: "rejected", reason: "probe" }],
+    )
+  })
+
+  test("all rejects before an earlier blocked call and leaves that call awaitable", async () => {
+    const gate = Deferred.makeUnsafe<void>()
+    // 等待项只能在 catch 后释放，旧的按索引等待实现必然超时，不靠碰运气的延迟排序。
+    const result = await Effect.runPromise(
+      CodeMode.execute({
+        tools: {
+          host: {
+            wait: Tool.make({
+              description: "Wait for release",
+              input: Schema.Struct({}),
+              output: Schema.String,
+              run: () => Deferred.await(gate).pipe(Effect.as("released")),
+            }),
+            fail: failingTool,
+            release: Tool.make({
+              description: "Release waiter",
+              input: Schema.Struct({}),
+              output: Schema.Boolean,
+              run: () => Deferred.succeed(gate, undefined),
+            }),
+          },
+        },
+        code: "const p=tools.host.wait({}); try { await Promise.all([p,tools.host.fail({})]) } catch(e) { await tools.host.release({}) }; return await p",
+        // 期限仅防止红灯永久挂起；成功条件是因果释放，而不是更快的墙钟时间。
+        limits: { timeoutMs: 1000 },
+      }),
+    )
+    expect(result).toMatchObject({ ok: true, value: "released" })
+  })
+
+  test.each([
+    'try { await Promise.all([tools.host.sleepy({id:1,ms:20}),tools.host.fail({})]) } catch(e) {} return "done"',
+    "return await Promise.all([tools.host.sleepy({id:1,ms:20}),tools.host.fail({})])",
+    '(async()=>{await tools.host.sleepy({id:1,ms:20}); await tools.host.sleepy({id:2})})(); return "done"',
+  ])("execution owns abandoned work after %s", async (code) => {
+    const trace = makeTrace()
+    // 宿主 fiber 在 execute 返回后继续存活，避免外层结束或 timeout 替错误清理实现兜底。
+    await Effect.runPromise(
+      CodeMode.execute({ tools: { host: { sleepy: sleepyTool(trace), fail: failingTool } }, code }).pipe(
+        // 故意越过工具完成时刻以检测晚到副作用，而不是等待某个并发阶段就绪。
+        Effect.andThen(Effect.sleep(40)),
+      ),
+    )
+    expect(trace.starts).toEqual([1])
+    expect(trace.completed).toBe(0)
+    expect(trace.interrupted).toBe(1)
+    expect(trace.active).toBe(0)
+  })
+
+  test("timeout and host interruption cannot become allSettled success", async () => {
+    const trace = makeTrace()
+    // async 包装和 allSettled 都不能把执行终止降级为可继续写入的业务结果。
+    const result = await run(
+      "return await Promise.allSettled([1,2].map(async id => await tools.host.sleepy({id,ms:60000})))",
+      { trace, limits: { timeoutMs: 50 } },
+    )
+    expect(result).toMatchObject({ ok: false, error: { kind: "TimeoutExceeded" } })
+    expect(trace.interrupted).toBe(2)
+    // 宿主中断在真实工具 seam 发出，验证错误归一化没有吞掉执行控制信号。
+    const exit = await Effect.runPromise(
+      CodeMode.execute({
+        tools: {
+          stop: Tool.make({
+            description: "Interrupt execution",
+            input: Schema.Struct({}),
+            run: () => Effect.interrupt,
+          }),
+        },
+        code: "return await Promise.allSettled([(async()=>await tools.stop({}))()])",
+      }).pipe(Effect.exit),
+    )
+    expect(exit._tag).toBe("Failure")
   })
 })

@@ -1,7 +1,7 @@
 import type { Effect, Fiber } from "effect"
 
+// Promise 保存一次结算来源；生命周期归执行作用域，不再携带 race 私有取消标记。
 export class SandboxPromise {
-  interrupted = false
   constructor(
     readonly fiber: Fiber.Fiber<unknown, unknown> | undefined,
     readonly immediate?: Effect.Effect<unknown, unknown>,

@@ -45,6 +45,8 @@ export class CodeModeFunction {
     readonly parameters: ReadonlyArray<AstNode>,
     readonly body: AstNode,
     readonly capturedScopes: ReadonlyArray<Map<string, Binding>>,
+    // 保留语法身份，所有调用入口才能共享返回 Promise 的语义。
+    readonly async = false,
   ) {}
 }
 

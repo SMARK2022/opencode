@@ -1,3 +1,5 @@
+// 共享说明是宿主实际公开的合同来源；引用它可验证出口一致而不锁定过时文案摘要。
+import { CodeMode } from "@opencode-ai/codemode"
 import { describe, expect, test } from "bun:test"
 import { CODE_MODE_TOOL, CodeModeTool, Parameters, describeCatalog, type CatalogEntry } from "@/tool/code-mode"
 import { McpCatalog } from "@/mcp/catalog"
@@ -138,11 +140,11 @@ describe("code mode execute", () => {
     )
   })
 
-  test("the static base description preserves upstream guidance without a session catalog", async () => {
+  test("the static base description exposes shared guidance without a session catalog", async () => {
     const tool = await build({ github_list_issues: mcpTool("list_issues", () => "") })
     expect(tool.id).toBe(CODE_MODE_TOOL)
-    // 哈希来自官方v2.2.5固定说明，动态目录由独立的Instructions出口交付。
-    expect(new Bun.CryptoHasher("sha256").update(tool.description).digest("hex")).toBe("4e1d4d35251719086df5e5c85baf32dd27364519b2c1556912dc806e2c74eea8")
+    // 宿主沿用唯一共享说明，避免文案更新后仍锁定已废弃的上游摘要。
+    expect(tool.description).toBe(CodeMode.description)
     expect(tool.description).not.toContain("Available tools")
     expect(tool.description).not.toContain("list_issues")
   })
