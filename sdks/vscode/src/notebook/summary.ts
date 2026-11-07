@@ -1,7 +1,7 @@
 // summary 只读取结构化状态与实时文档，不根据显示文本推断执行成功。
 import vscode from "vscode"
 import { quoteForSummary } from "../util"
-import { compactCell, runtimeLabel, computeVirtualRanges, notebookHeader } from "./format"
+import { compactCell, existingOuts, runtimeLabel, computeVirtualRanges, notebookHeader } from "./format"
 import { resolveNotebook } from "./resolve"
 
 export async function notebookSummary(filePath: string) {
@@ -14,7 +14,10 @@ export async function notebookSummary(filePath: string) {
 
 /** 返回笔记本快照的 summary/data 双层响应。 */
 export function compactNotebookResult(notebook: vscode.NotebookDocument, ran: boolean, extra?: Record<string, unknown>) {
-  const cells = notebook.getCells().map(compactCell)
+  // 程序范围复用共享计算，和文本显示使用同一次实时文档快照。
+  const ranges = computeVirtualRanges(notebook)
+  // MIME是程序判别依据，不能使用UI缩写或让两个不同MIME在缩写后合并。
+  const cells = notebook.getCells().map((cell) => ({ ...compactCell(cell), range: ranges.get(cell.index), outputMimes: existingOuts(cell, true) }))
   return {
     ran,
     summary: notebookSummaryText(notebook, cells),

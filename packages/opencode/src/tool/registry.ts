@@ -57,7 +57,6 @@ import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { MCP } from "@/mcp"
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
-import { McpCatalog } from "@/mcp/catalog"
 // #277：read 工具的图片附件处理收敛到 Image.Service，registry 需要装配该依赖
 import { Image } from "@/image/image"
 
@@ -102,7 +101,6 @@ const layer = Layer.effect(
     const agents = yield* Agent.Service
     const truncate = yield* Truncate.Service
     const flags = yield* RuntimeFlags.Service
-    const mcp = yield* MCP.Service
 
     const invalid = yield* InvalidTool
     const task = yield* TaskTool
@@ -124,8 +122,9 @@ const layer = Layer.effect(
     // [local-smark] goal 工具：始终注册（0367 起无 experimental 开关）
     const goaltool = yield* GoalTool
     const agent = yield* Agent.Service
-    const codeMode = flags.experimentalCodeMode ? yield* Effect.promise(() => import("./code-mode")) : undefined
-    const codeModeTool = codeMode ? yield* codeMode.CodeModeTool : undefined
+    // execute 基础定义与 MCP 连接独立，SessionTools 再注入当轮目录和执行宿主。
+    const codeMode = yield* Effect.promise(() => import("./code-mode"))
+    const codeModeTool = yield* codeMode.CodeModeTool
 
     const state = yield* InstanceState.make<State>(
       Effect.fn("ToolRegistry.state")(function* (ctx) {
@@ -144,13 +143,21 @@ const layer = Layer.effect(
           const parameters = zodParams
             ? Schema.declare<unknown>((u): u is unknown => zodParams.safeParse(u).success)
             : Schema.Unknown
+          // JSON catalog 只描述接口；复用已有 decoder，在插件 body 前验证实际参数。
+          const decode = Schema.decodeUnknownEffect(parameters)
           return {
             id,
             parameters,
             jsonSchema,
             description: def.description,
+            // 插件沿原Zod声明校验；目录复用已有JSON Schema转换，不另建编解码器。
+            output: def.output ? zodJsonSchema(def.output) : undefined,
             execute: (args, toolCtx) =>
               Effect.gen(function* () {
+                yield* decode(args).pipe(
+                  Effect.mapError((error) => new Tool.InvalidArgumentsError({ tool: id, detail: String(error) })),
+                  Effect.orDie,
+                )
                 // Bridge the host's Effect-based `ask` into a Promise-returning
                 // function for the plugin to make sure context persists
                 const bridge = yield* EffectBridge.make()
@@ -170,6 +177,10 @@ const layer = Layer.effect(
                   title: typeof result === "string" ? "" : (result.title ?? ""),
                   output: out.truncated ? out.content : output,
                   attachments,
+                  // 未提供program的外部插件不触发新输出校验，也不把metadata改装成业务值。
+                  ...(typeof result !== "string" && result.program ? {
+                    program: { value: def.output ? def.output.parse(result.program.value) : result.program.value },
+                  } : {}),
                   metadata: {
                     ...metadata,
                     truncated: out.truncated,
@@ -295,17 +306,6 @@ const layer = Layer.effect(
       return ["Available agent types and the tools they have access to:", description].join("\n")
     })
 
-    const describeCodeMode = Effect.fn("ToolRegistry.describeCodeMode")(function* (input: {
-      agent: Agent.Info
-      permission?: PermissionV1.Ruleset
-    }) {
-      if (!codeMode) return
-      const ruleset = Permission.merge(input.agent.permission, input.permission ?? [])
-      const tools = Permission.visibleTools(yield* mcp.tools(), ruleset)
-      if (Object.keys(tools).length === 0) return
-      return codeMode.describeCatalog(tools, Object.keys(yield* mcp.clients()).map(McpCatalog.sanitize))
-    })
-
     const tools: Interface["tools"] = Effect.fn("ToolRegistry.tools")(function* (input) {
       const internalReviewer = yield* agents.get("permission-reviewer")
       const filtered = (yield* all()).filter((tool) => {
@@ -325,13 +325,8 @@ const layer = Layer.effect(
         return true
       })
 
-      const codeModeDescription = filtered.some((tool) => tool.id === "execute")
-        ? yield* describeCodeMode(input)
-        : undefined
-      const visible = filtered.filter((tool) => tool.id !== "execute" || codeModeDescription)
-
       return yield* Effect.forEach(
-        visible,
+        filtered,
         Effect.fnUntraced(function* (tool: Tool.Def) {
           const output = {
             description: tool.description,
@@ -348,12 +343,12 @@ const layer = Layer.effect(
             description: [
               output.description,
               tool.id === TaskTool.id ? yield* describeTask(input.agent) : undefined,
-              tool.id === "execute" ? codeModeDescription : undefined,
             ]
               .filter(Boolean)
               .join("\n"),
             parameters: output.parameters,
             jsonSchema,
+            output: tool.output,
             // #557：plugin 只能改 Provider definition；server policy 始终取原 Tool.Def。
             worktree: tool.worktree,
             execute: tool.execute,

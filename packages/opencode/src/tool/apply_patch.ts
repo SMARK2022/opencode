@@ -556,6 +556,11 @@ export const ApplyPatchTool = Tool.define(
 
       return {
         title,
+        // move保留目标与来源两个不同资源；其他操作只有一个定位字段。
+        program: { value: { files: resultFiles.map((file) => ({ path: file.movePath ?? file.filePath,
+          operation: file.type, ...(file.type === "move" ? { fromPath: file.filePath } : {}),
+          patch: file.patch, additions: file.additions, deletions: file.deletions,
+        })), diagnostics: LSP.Diagnostic.toOutput(diagnosticSummary, diagMetadata) } },
         metadata: {
           diff: resultDiff,
           files: resultFiles,
@@ -571,6 +576,10 @@ export const ApplyPatchTool = Tool.define(
     return {
       description: DESCRIPTION,
       parameters: Parameters,
+      output: Schema.Struct({ files: Schema.Array(Schema.Struct({ path: Schema.String,
+        operation: Schema.Literals(["add", "update", "delete", "move"]), fromPath: Schema.optionalKey(Schema.String),
+        patch: Schema.String, additions: Schema.Number, deletions: Schema.Number,
+      })), diagnostics: LSP.Diagnostic.Output }),
       // #557：apply_patch metadata.files 是多文件 declared authority。
       worktree: "declared",
       execute: (params: Schema.Schema.Type<typeof Parameters>, ctx: Tool.Context) =>

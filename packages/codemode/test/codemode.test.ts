@@ -426,7 +426,7 @@ describe("CodeMode schema flexibility", () => {
       {
         path: "adapter.call",
         description: "Call an adapter-described tool",
-        signature: "tools.adapter.call(input: {\n  id: string,\n  count?: number,\n}): Promise<unknown>",
+        signature: "tools.adapter.call({\n  id: string,\n  count?: number,\n}): Promise<unknown>",
       },
     ])
 
@@ -459,7 +459,7 @@ describe("CodeMode schema flexibility", () => {
       {
         path: "users.lookup",
         description: "Look up a user",
-        signature: "tools.users.lookup(input: {\n  login: string,\n}): Promise<{\n  login: string,\n  id: number,\n}>",
+        signature: "tools.users.lookup({\n  login: string,\n}): Promise<{\n  login: string,\n  id: number,\n}>",
       },
     ])
 
@@ -475,7 +475,7 @@ describe("CodeMode schema flexibility", () => {
       run: () => Effect.succeed("pong"),
     })
     const runtime = CodeMode.make({ tools: { net: { ping } } })
-    expect(runtime.catalog()[0]?.signature).toBe("tools.net.ping(input: {\n  host: string,\n}): Promise<unknown>")
+    expect(runtime.catalog()[0]?.signature).toBe("tools.net.ping({\n  host: string,\n}): Promise<unknown>")
 
     const result = await Effect.runPromise(runtime.execute(`return await tools.net.ping({ host: "example.test" })`))
     expect(result.ok).toBe(true)
@@ -512,13 +512,13 @@ describe("CodeMode public contract", () => {
       {
         path: "orders.lookup",
         description: "Look up an order by ID",
-        signature: "tools.orders.lookup(input: {\n  id: string,\n}): Promise<{\n  id: string,\n  status: string,\n}>",
+        signature: "tools.orders.lookup({\n  id: string,\n}): Promise<{\n  id: string,\n  status: string,\n}>",
       },
     ])
-    expect(runtime.instructions()).toContain("Available tools (COMPLETE list")
+    expect(runtime.instructions()).toContain("The catalog is complete.")
     expect(runtime.instructions()).toContain("- orders (1 tool)")
     expect(runtime.instructions()).toContain(
-      "  - tools.orders.lookup(input: {\n  id: string,\n}): Promise<{\n  id: string,\n  status: string,\n}> // Look up an order by ID",
+      "  - tools.orders.lookup({\n  id: string,\n}): Promise<{\n  id: string,\n  status: string,\n}> // Look up an order by ID",
     )
     // A fully inlined catalog does not advertise search in the instructions...
     expect(runtime.instructions()).not.toMatch(/\$codemode/)
@@ -534,7 +534,7 @@ describe("CodeMode public contract", () => {
             path: "tools.orders.lookup",
             description: "Look up an order by ID",
             signature:
-              "tools.orders.lookup(input: {\n  id: string,\n}): Promise<{\n  id: string,\n  status: string,\n}>",
+              "tools.orders.lookup({\n  id: string,\n}): Promise<{\n  id: string,\n  status: string,\n}>",
           },
         ],
         remaining: 0,
@@ -556,11 +556,11 @@ describe("CodeMode public contract", () => {
       {
         path: "context7.resolve-library-id",
         description: "Resolve a library ID",
-        signature: 'tools.context7["resolve-library-id"](input: {\n  libraryName: string,\n}): Promise<string>',
+        signature: 'tools.context7["resolve-library-id"]({\n  libraryName: string,\n}): Promise<string>',
       },
     ])
     expect(runtime.instructions()).toContain(
-      'tools.context7["resolve-library-id"](input: {\n  libraryName: string,\n}): Promise<string>',
+      'tools.context7["resolve-library-id"]({\n  libraryName: string,\n}): Promise<string>',
     )
 
     const search = await Effect.runPromise(
@@ -573,7 +573,7 @@ describe("CodeMode public contract", () => {
           {
             path: 'tools.context7["resolve-library-id"]',
             description: "Resolve a library ID",
-            signature: 'tools.context7["resolve-library-id"](input: {\n  libraryName: string,\n}): Promise<string>',
+            signature: 'tools.context7["resolve-library-id"]({\n  libraryName: string,\n}): Promise<string>',
           },
         ],
         remaining: 0,
@@ -594,84 +594,22 @@ describe("CodeMode public contract", () => {
     if (exact.ok) expect(exact.value).toMatchObject({ remaining: 0, next: null })
   })
 
-  test("instructions use markdown sections with placeholder-only call forms", () => {
-    const runtime = CodeMode.make({ tools })
-    const instructions = runtime.instructions()
-    // Sections in order: workflow at the top, catalog at the bottom.
-    expect(instructions).toContain("## Workflow")
-    expect(instructions).toContain("## Rules")
-    expect(instructions).toContain("## Language")
-    expect(instructions.indexOf("## Workflow")).toBeLessThan(instructions.indexOf("## Rules"))
-    expect(instructions.indexOf("## Rules")).toBeLessThan(instructions.indexOf("## Language"))
-    expect(instructions.indexOf("## Language")).toBeLessThan(
-      instructions.indexOf("\n## Available tools (COMPLETE list"),
-    )
-    expect(instructions).not.toContain("JSON.parse(res)")
-    expect(instructions).toContain("Return only the fields you need")
-    expect(instructions).toContain("avoid returning large raw payloads")
-    expect(instructions).toContain("Do not infer or normalize tool names")
-    expect(instructions).toContain("bracket notation and quotes are part of the path")
-    expect(instructions).toContain("surrounding agent tools are not available")
-    expect(instructions).toContain("Only Code Mode tools listed here and internal runtime tools")
-    // Placeholders use generic namespace/tool/field names only - no fabricated real tools
-    // and no real catalog tools cherry-picked into example lines.
-    expect(instructions).toContain("`const result = await tools.<namespace>.<tool>(input)`")
-    expect(instructions).toContain("Return only the fields you need from structured results")
-    expect(instructions).toContain("check that it is a non-null object and not an array")
-    expect(instructions).not.toContain("result.<field>")
-    expect(instructions).not.toContain("data.<field>")
-    expect(instructions).not.toContain("total_count")
-    expect(instructions).not.toContain("list_issues")
-    expect(instructions).not.toContain("tools.orders.lookup({")
-    // COMPLETE: step 1 picks from the inlined list; search is not advertised.
-    expect(instructions).toContain("1. Pick a tool from the list under `## Available tools`")
-    expect(instructions).not.toContain("Browse one namespace")
-
+  test("instructions separate the official v2.2.5 description and catalog branches", () => {
+    // 摘要独立取自官方tool.ts常量，不能用本地实现生成预期值。
+    expect(new Bun.CryptoHasher("sha256").update(CodeMode.description).digest("hex")).toBe("4e1d4d35251719086df5e5c85baf32dd27364519b2c1556912dc806e2c74eea8")
+    const complete = CodeMode.make({ tools }).instructions()
+    expect(complete).toStartWith("# Code Mode\n\nThe tools listed below cannot be called directly:")
+    expect(complete).toContain("The catalog is complete. Do not guess tool names.")
+    expect(complete).toContain("## Code Mode tools (call only inside `execute`)")
+    expect(complete).not.toContain("Promise.allSettled")
     const partial = CodeMode.make({ tools, discovery: { catalogBudget: 0 } }).instructions()
-    // PARTIAL: the workflow starts with search (with query-style guidance that is clearly
-    // a query string, never a tool name) and the browse-namespace rule appears.
-    expect(partial).toContain(
-      '1. If needed, discover tools: `return await tools.$codemode.search({ query: "<intent + key nouns>" })`.',
-    )
-    expect(partial).toContain("In the next execution, copy a returned path exactly")
-    expect(partial).toContain(
-      "Only Code Mode tools listed here or returned by `tools.$codemode.search` and internal runtime tools",
-    )
-    expect(partial).toContain(
-      '- Browse one namespace: `await tools.$codemode.search({ query: "", namespace: "<name>" })`.',
-    )
-    expect(partial).toContain("repeat the same search with `offset: next.offset`")
-    expect(partial).toContain("  limit?: number,\n  offset?: number,")
-    expect(partial).not.toContain("total_count")
-    expect(partial).not.toContain("tools.orders.lookup({")
-  })
-
-  test("the language section describes the restricted runtime without overclaiming", () => {
-    const instructions = CodeMode.make({ tools }).instructions()
-    expect(instructions).toContain("restricted JavaScript language for calling tools")
-    expect(instructions).toContain("not a general-purpose runtime")
-    expect(instructions).not.toContain("Standard modern JavaScript works")
-    expect(instructions).not.toContain("TypeScript type annotations")
-    for (const missing of ["Modules/imports", "classes", "generators", "fetch", "promise chaining"]) {
-      expect(instructions).toContain(missing)
-    }
-    expect(instructions).toContain("URL, URLSearchParams, and URI encoding helpers")
-    expect(instructions).not.toContain("host globals")
-    expect(instructions).toContain("Use Code Mode tools for external operations")
-    expect(instructions).toContain(
-      "Dates and URLs serialize to strings at data boundaries; Map/Set/RegExp/URLSearchParams serialize to `{}`.",
-    )
-  })
-
-  test("zero tools keep minimal sections and the no-tools notice", () => {
-    const runtime = CodeMode.make({})
-    const instructions = runtime.instructions()
-    expect(instructions).toContain("No tools are currently available.")
-    expect(instructions).toContain("## Language")
-    expect(instructions).toContain("## Available tools")
-    expect(instructions).not.toContain("## Workflow")
-    expect(instructions).not.toContain("## Rules")
-    expect(instructions).not.toMatch(/\$codemode/)
+    expect(partial).toContain("The tools listed below, and `search`, cannot be called directly")
+    expect(partial).toContain("find it with the global `search(...)` function")
+    expect(partial).toContain("Each result's `path` is the complete call expression")
+    expect(partial).toContain("- search({")
+    // 目录同步结果没有Promise包装；调用语义须与模型看到的发现签名一致。
+    expect(partial).toContain("}): {\n  items: Array<{")
+    expect(CodeMode.make({}).instructions()).toBe("No Code Mode tools are currently available. Later Code Mode catalog updates may add or remove tools. Do not call `execute` unless there is at least one available Code Mode tool.")
   })
 
   test("uses one ranked search returning complete definitions for large catalogs", async () => {
@@ -692,12 +630,12 @@ describe("CodeMode public contract", () => {
       discovery: { catalogBudget: 0 },
     })
     expect(runtime.instructions()).toContain(
-      "Available tools (PARTIAL - 0 of 3 shown; find the rest with tools.$codemode.search)",
+      "The catalog is partial.",
     )
     expect(runtime.instructions()).toContain("- thread (2 tools, none shown)")
     expect(runtime.instructions()).toContain("- orders (1 tool, none shown)")
-    expect(runtime.instructions()).toMatch(/\$codemode\.search/)
-    expect(runtime.instructions()).not.toMatch(/tools\.thread\.uploadFile\(input/)
+    expect(runtime.instructions()).toContain("- search({")
+    expect(runtime.instructions()).not.toContain("tools.thread.uploadFile(")
 
     const result = await Effect.runPromise(
       runtime.execute(`
@@ -714,12 +652,12 @@ describe("CodeMode public contract", () => {
         {
           path: "tools.thread.uploadFile",
           description: "Upload one readable local file to the current Discord thread",
-          signature: "tools.thread.uploadFile(input: {\n  path: string,\n}): Promise<{\n  sent: boolean,\n}>",
+          signature: "tools.thread.uploadFile({\n  path: string,\n}): Promise<{\n  sent: boolean,\n}>",
         },
         {
           path: "tools.thread.generateImage",
           description: "Generate an image and upload it to the current Discord thread",
-          signature: "tools.thread.generateImage(input: {\n  prompt: string,\n}): Promise<{\n  sent: boolean,\n}>",
+          signature: "tools.thread.generateImage({\n  prompt: string,\n}): Promise<{\n  sent: boolean,\n}>",
         },
       ],
       remaining: 0,
@@ -790,7 +728,7 @@ describe("CodeMode public contract", () => {
             {
               path: "tools.many.tool13",
               description: "Numbered tool 13",
-              signature: "tools.many.tool13(input: {\n  id: string,\n}): Promise<string>",
+              signature: "tools.many.tool13({\n  id: string,\n}): Promise<string>",
             },
           ],
           remaining: 0,
@@ -994,25 +932,23 @@ describe("CodeMode public contract", () => {
       output: Schema.String,
       run: () => Effect.succeed("ok"),
     })
-    // Round 1 places alpha.cheap (~17 estimated tokens) and beta.cheap (~17); in round 2
-    // alpha.expensive does not fit, which marks only alpha done - it must NOT prevent
-    // other namespaces from inlining (beta already got its line in the same round).
+    // 官方预算先支付两个namespace标题，再分轮容纳便宜签名，昂贵项不能饿死另一个组。
     const runtime = CodeMode.make({
       tools: { alpha: { cheap, expensive }, beta: { cheap } },
-      discovery: { catalogBudget: 40 },
+      discovery: { catalogBudget: 50 },
     })
 
     const instructions = runtime.instructions()
     expect(instructions).toContain(
-      "Available tools (PARTIAL - 2 of 3 shown; find the rest with tools.$codemode.search)",
+      "The catalog is partial.",
     )
     expect(instructions).toContain("- alpha (2 tools, 1 shown)")
-    expect(instructions).toContain("  - tools.alpha.cheap(input: {\n  q: string,\n}): Promise<string> // Cheap")
+    expect(instructions).toContain("  - tools.alpha.cheap({\n  q: string,\n}): Promise<string> // Cheap")
     expect(instructions).not.toContain("tools.alpha.expensive(")
     // Fully shown namespaces read cleanly (no "shown" annotation).
     expect(instructions).toContain("- beta (1 tool)")
-    expect(instructions).toContain("  - tools.beta.cheap(input: {\n  q: string,\n}): Promise<string> // Cheap")
-    expect(instructions).toMatch(/\$codemode\.search/)
+    expect(instructions).toContain("  - tools.beta.cheap({\n  q: string,\n}): Promise<string> // Cheap")
+    expect(instructions).toContain("- search({")
   })
 
   test("charges inline JSDoc against the catalog token budget", () => {
@@ -1034,9 +970,62 @@ describe("CodeMode public contract", () => {
 
     expect(runtime.catalog()[0]?.signature).toContain("/** A detailed identifier description.")
     expect(runtime.instructions()).toContain(
-      "Available tools (PARTIAL - 0 of 1 shown; find the rest with tools.$codemode.search)",
+      "The catalog is partial.",
     )
-    expect(runtime.instructions()).not.toContain("tools.records.lookup(input:")
+    expect(runtime.instructions()).not.toContain("tools.records.lookup(")
+  })
+
+  test("upstream global search directly exposes signatures and zero-argument calls retain validation", async () => {
+    const ping = Tool.make({ description: "Ping", input: Schema.Struct({}), output: Schema.String, run: () => Effect.succeed("pong") })
+    const runtime = CodeMode.make({ tools: { host: { ping, lookup } } })
+    // 原缺口在直接访问items时出现；只测试await search会掩盖同步语义错误。
+    const result = await Effect.runPromise(runtime.execute(`
+      const item = search({query: "host.ping"}).items[0];
+      return {item, pong: await tools.host.ping(), again: (await search({query: "host.ping"})).items[0].path};
+    `))
+    expect(result).toMatchObject({ ok: true, value: {
+      item: { path: "tools.host.ping", description: "Ping", signature: "tools.host.ping(): Promise<string>" },
+      pong: "pong", again: "tools.host.ping",
+    } })
+    // {}规范化仍经过原输入decoder，不能把必填字段或额外实参错误吞掉。
+    for (const code of ["await tools.host.lookup()", "await tools.host.ping({}, {})"]) {
+      const invalid = await Effect.runPromise(runtime.execute(code))
+      expect(invalid).toMatchObject({ ok: false, error: { kind: "InvalidToolInput" }, toolCalls: [] })
+    }
+    expect(await Effect.runPromise(runtime.execute("search().items.length"))).toMatchObject({ ok: true, value: 2 })
+  })
+
+  test("upstream discovery scopes nested paths, ranks path words, and suggests available tools", async () => {
+    const item = Tool.make({ description: "List", input: Schema.Struct({}), output: Schema.String, run: () => Effect.succeed("ok") })
+    const runtime = CodeMode.make({ tools: { api: { get_timezones: item, zones: { list: item }, get_zones: item } } })
+    // 子串timezones不能排在完整路径词zones之前；同分按确定性路径顺序输出。
+    expect(await Effect.runPromise(runtime.execute('search({query:"zones"}).items.map(x => x.path)'))).toMatchObject({
+      ok: true, value: ["tools.api.get_zones", "tools.api.zones.list", "tools.api.get_timezones"],
+    })
+    for (const namespace of ["api.zones", "tools.api.zones"]) {
+      expect(await Effect.runPromise(runtime.execute(`search({namespace:${JSON.stringify(namespace)}}).items.map(x => x.path)`)))
+        .toMatchObject({ ok: true, value: ["tools.api.zones.list"] })
+    }
+    const missing = await Effect.runPromise(runtime.execute("await tools.api.list_zones()"))
+    expect(missing).toMatchObject({ ok: false, error: {
+      kind: "UnknownTool", message: "Unknown tool 'api.list_zones'. Did you mean tools.api.zones.list?",
+      suggestions: ["Use search to find available tools."],
+    } })
+  })
+
+  test("upstream catalog includes namespace cost and renders exact complete instructions", () => {
+    const ping = Tool.make({ description: "Ping", input: Schema.Struct({}), output: Schema.String, run: () => Effect.succeed("pong") })
+    const runtime = CodeMode.make({ tools: { host: { ping } } })
+    // 独立预期取官方instructions.render格式，固定说明和目录只各承担自己的职责。
+    expect(runtime.instructions()).toBe([
+      "# Code Mode", "",
+      "The tools listed below cannot be called directly: they only work as JavaScript inside the `execute` tool. Every other tool you have is a normal tool call: call it directly, never inside `execute`.", "",
+      "The catalog is complete. Do not guess tool names.", "",
+      "## Code Mode tools (call only inside `execute`)", "",
+      "- host (1 tool)", "  - tools.host.ping(): Promise<string> // Ping",
+    ].join("\n"))
+    // 该签名本身可装入12 token，标题另占7；边界失败证明标题确实计费。
+    expect(CodeMode.make({ tools: { host: { ping } }, discovery: { catalogBudget: 12 } }).instructions()).toContain("1 tool, none shown")
   })
 
   test("decodes tool input and output before exposing either side", async () => {

@@ -56,6 +56,12 @@ export const GoalTool = Tool.define<typeof Parameters, GoalToolMetadata, never, 
   Effect.succeed({
     description: DESCRIPTION,
     parameters: Parameters,
+    output: Schema.NullOr(Schema.Struct({ objective: Schema.String,
+      status: Schema.Literals(["active", "paused", "complete", "blocked"]), generation: Schema.Number,
+      reason: Schema.NullOr(Schema.String), tokensUsed: Schema.Number, tokenBudget: Schema.NullOr(Schema.Number),
+      timeUsedSeconds: Schema.Number,
+      blockedAttempt: Schema.optionalKey(Schema.Struct({ attempt: Schema.Number, required: Schema.Number })),
+    })),
     execute: (params: { operate: "read" | "complete" | "blocked" | "active"; reason?: string }, ctx: Tool.Context) =>
       Effect.gen(function* () {
         const extra = ctx.extra as GoalToolExtra | undefined
@@ -71,6 +77,7 @@ export const GoalTool = Tool.define<typeof Parameters, GoalToolMetadata, never, 
               title: "Goal",
               metadata: {},
               output: "No goal is currently set for this session.",
+              program: { value: null },
             }
           }
           const goal = goalOpt.value
@@ -90,6 +97,7 @@ export const GoalTool = Tool.define<typeof Parameters, GoalToolMetadata, never, 
           return {
             title: "Goal",
             metadata: {},
+            program: { value: goalValue(goal) },
             output: JSON.stringify(
               {
                 goal: {
@@ -135,6 +143,7 @@ export const GoalTool = Tool.define<typeof Parameters, GoalToolMetadata, never, 
             return {
               title: "Goal complete",
               metadata: {},
+              program: { value: goalValue(goal) },
               output: `Goal marked as complete: ${goal.reason}.`,
             }
           }
@@ -142,6 +151,7 @@ export const GoalTool = Tool.define<typeof Parameters, GoalToolMetadata, never, 
             return {
               title: "Goal blocked",
               metadata: {},
+              program: { value: goalValue(goal) },
               output: `Goal marked as blocked: ${goal.reason}. The user can resume the goal later.`,
             }
           }
@@ -149,6 +159,7 @@ export const GoalTool = Tool.define<typeof Parameters, GoalToolMetadata, never, 
           return {
             title: "Goal resumed",
             metadata: {},
+            program: { value: goalValue(goal) },
             output: `Goal resumed to active. Continue working toward the objective.`,
           }
         }
@@ -159,6 +170,7 @@ export const GoalTool = Tool.define<typeof Parameters, GoalToolMetadata, never, 
           title: "Goal blocked (pending)",
           // #520：只有第一轮 pending 需要下一条 continuation 复查，terminal blocked 不会进入此分支。
           metadata: { goal_transition: GOAL_BLOCKED_PENDING_TRANSITION },
+          program: { value: { ...goalValue(result.goal), blockedAttempt: { attempt: result.attempt, required: result.required } } },
           output: [
             `Blocked attempt ${result.attempt} of ${result.required}. The Goal stays active; do not confirm it as blocked yet. Re-check the blocker with a breadth-first pass:`,
             "1. Restate the exact blocker and the Goal requirement it prevents.",
@@ -173,3 +185,10 @@ export const GoalTool = Tool.define<typeof Parameters, GoalToolMetadata, never, 
       }).pipe(Effect.orDie),
   }),
 )
+
+// read和transition均投影服务已返回的快照，避免追加读取改变所报告的代际。
+function goalValue(goal: SessionGoal.Goal) {
+  // 预算null表示无限额，不能把数值0的预算也归入无预算。
+  return { objective: goal.objective, status: goal.status, generation: goal.generation, reason: goal.reason ?? null,
+    tokensUsed: goal.tokensUsed, tokenBudget: goal.tokenBudget ?? null, timeUsedSeconds: goal.timeUsedSeconds }
+}

@@ -221,18 +221,7 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
 })
 
 function resolveTools(input: Pick<PrepareInput, "tools" | "agent" | "permission" | "user">) {
-  const disabled = Permission.disabled(
-    Object.keys(input.tools),
-    Permission.merge(input.agent.permission, input.permission ?? []),
-  )
-  return Record.filter(
-    input.tools,
-    // #568：内部 Tool 必须绕过 user.tools 与 Permission.disabled 两个用户禁用源，供
-    // experimental_repairToolCall 保留注册；用户可配置 Tool 仍执行原有三项权限条件。
-    (_, k) =>
-      !ToolSelection.isUserConfigurable(k) ||
-      (input.user.tools?.[k] !== false && !disabled.has(k) && ToolSelection.enabled(k, input.permission)),
-  )
+  return ToolSelection.filter(input.tools, input.agent.permission, input.permission, input.user.tools)
 }
 
 export function hasToolCalls(messages: ModelMessage[]): boolean {

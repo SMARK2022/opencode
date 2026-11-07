@@ -35,7 +35,8 @@ async function githubFetch(endpoint: string, options: RequestInit = {}) {
   return response.json()
 }
 
-export default tool({
+// 保留已安装插件工厂的参数合同，扩展字段在导出定义上组合，不要求更新依赖。
+export default Object.assign(tool({
   description: `Use this tool to assign a GitHub issue.
 
 Provide the team that should own the issue. This tool picks a random assignee from that team and does not apply labels.`,
@@ -55,6 +56,10 @@ Provide the team that should own the issue. This tool picks a random assignee fr
       body: JSON.stringify({ assignees: [assignee] }),
     })
 
-    return `Assigned @${assignee} from ${args.team} to issue #${issue}`
+    // 回执使用已提交给GitHub的同一次选择，不能为返回值重新随机抽取。
+    return { output: `Assigned @${assignee} from ${args.team} to issue #${issue}`,
+      program: { value: { issueNumber: issue, assignee } } }
   },
+}), {
+  output: tool.schema.object({ issueNumber: tool.schema.number(), assignee: tool.schema.string() }),
 })

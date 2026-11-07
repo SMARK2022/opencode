@@ -53,6 +53,7 @@ describe("tool.webfetch", () => {
           Effect.gen(function* () {
             const result = yield* exec({ url: new URL("/image.png", url).toString(), format: "markdown" })
             expect(result.output).toBe("Image fetched successfully")
+            expect(result.program?.value).toEqual({ path: new URL("/image.png", url).toString(), content: Buffer.from(bytes).toString("base64"), mime: "image/png", encoding: "base64" })
             expect(result.attachments).toBeDefined()
             expect(result.attachments?.length).toBe(1)
             expect(result.attachments?.[0].type).toBe("file")
@@ -77,6 +78,7 @@ describe("tool.webfetch", () => {
         Effect.gen(function* () {
           const result = yield* exec({ url: new URL("/image.svg", url).toString(), format: "html" })
           expect(result.output).toContain("<svg")
+          expect(result.program?.value).toEqual({ path: new URL("/image.svg", url).toString(), content: result.output, mime: "image/svg+xml", encoding: "utf8" })
           expect(result.attachments).toBeUndefined()
         }),
     ),

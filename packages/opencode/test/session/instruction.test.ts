@@ -113,6 +113,26 @@ function loaded(filepath: string): SessionV1.WithParts[] {
 }
 
 describe("Instruction.resolve", () => {
+  it.live("uses delivered execute instructions and ignores intermediate child claims", () =>
+    withFiles({ "subdir/AGENTS.md": "# Execute Instructions", "subdir/file.ts": "data" }, (dir) => Effect.gen(function* () {
+      const svc = yield* Instruction.Service
+      const agents = path.join(dir, "subdir", "AGENTS.md")
+      const history = loaded(agents)
+      const part = history[0].parts[0]
+      if (part.type !== "tool" || part.state.status !== "completed") throw new Error("Expected tool fixture")
+      part.tool = "execute"
+      const filepath = path.join(dir, "subdir", "file.ts")
+      expect(yield* svc.resolve(history, filepath, MessageID.ascending())).toEqual([])
+      // 已压缩父输出和仅供审计的 child 都需要重新交付正文。
+      part.state.time.compacted = 0
+      expect(yield* svc.resolve(history, filepath, MessageID.ascending())).toHaveLength(1)
+      delete part.state.time.compacted
+      part.tool = "read"
+      part.metadata = { executeParent: "execute" }
+      expect(yield* svc.resolve(history, filepath, MessageID.ascending())).toHaveLength(1)
+    })),
+  )
+
   it.live("returns empty when AGENTS.md is at project root (already in systemPaths)", () =>
     withFiles({ "AGENTS.md": "# Root Instructions", "src/file.ts": "const x = 1" }, (dir) =>
       Effect.gen(function* () {

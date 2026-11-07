@@ -2618,6 +2618,8 @@ function ToolPart(props: { last: boolean; part: ToolPart; message: AssistantMess
 
   // Hide tool if showDetails is false and tool completed successfully
   const shouldHide = createMemo(() => {
+    // 子调用由父 execute 列表呈现；独立记录继续供归因和审计读取。
+    if (typeof props.part.metadata?.executeParent === "string") return true
     // #185：与 isVisibleAssistantPart 同口径（详情关+completed 隐藏）
     if (ctx.showDetails()) return false
     return !isVisibleAssistantPart(

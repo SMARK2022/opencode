@@ -90,7 +90,11 @@ const run = Effect.fn("ReadToolTest.run")(function* (
   next: Tool.Context = ctx,
 ) {
   const tool = yield* init()
-  return yield* tool.execute(args, next)
+  const result = yield* tool.execute(args, next)
+  // 所有原读取场景同时经过真实输出声明，缺失的程序分支不能被原展示断言掩盖。
+  if (!tool.output || !Schema.isSchema(tool.output)) throw new Error("Expected read output schema")
+  yield* Schema.decodeUnknownEffect(tool.output)(result.program?.value)
+  return result
 })
 
 const exec = Effect.fn("ReadToolTest.exec")(function* (
@@ -369,6 +373,13 @@ describe("tool.read truncation", () => {
       const visible = history(first)
       // 同会话已有完整页面可预热命中，第一次历史调用也无需进程级初始化。
       expect((yield* exec(dir, request, { ...ctx, messages: visible })).output).toContain('status="stub_same_range_visible"')
+      // 同样的历史对 JS 是数据依赖；嵌套调用需要页面，直接调用只认模型已见正文。
+      expect((yield* exec(dir, request, { ...ctx, messages: visible, executeParent: "execute" })).output).toContain("1: v1")
+      const child = visible[0].parts[0]
+      if (child.type !== "tool") throw new Error("Expected read child")
+      child.metadata = { executeParent: "execute" }
+      expect((yield* exec(dir, request, { ...ctx, messages: visible })).output).toContain("1: v1")
+      child.metadata = {}
       // B 读 v2 后，A 的 v1 历史仍不能证明 v2；此序列捕获原全局缓存缺陷。
       yield* put(target, "v2\ntail")
       const b = { ...ctx, sessionID: SessionID.make("ses_b") }
@@ -728,6 +739,9 @@ describe("tool.read truncation", () => {
       )
 
       const result = yield* exec(dir, { filePath: path.join(dir, "dir"), offset: 6, limit: 5 })
+      expect(result.program?.value).toEqual({ type: "list-page", path: path.join(dir, "dir"),
+        entries: [5,6,7,8,9].map((i) => ({path:path.join(dir,"dir",`file-${i}.txt`),type:"file"})), offset:6,totalEntries:10,truncated:false,
+      })
       expect(result.metadata.truncated).toBe(false)
       expect(result.output).not.toContain("Showing 5 of 10 entries")
       expect(result.metadata.display).toMatchObject({
@@ -740,6 +754,19 @@ describe("tool.read truncation", () => {
       })
     }),
   )
+
+  it.live("keeps other and symlink entries through directory pagination", () => Effect.gen(function* () {
+    const dir = yield* tmpdirScoped()
+    const fs = yield* FSUtil.Service
+    // Windows无需制造socket/FIFO；只替换DirEntry边界，排序、分页和输出仍执行真实ReadTool。
+    const service = { ...fs, readDirectoryEntries: (target: string) => target === dir
+      ? Effect.succeed<FSUtil.DirEntry[]>([{name:"d.txt",type:"file"},{name:"c.dir",type:"directory"},{name:"a.pipe",type:"other"},{name:"b.link",type:"symlink"}])
+      : fs.readDirectoryEntries(target) }
+    const first = yield* exec(dir, {filePath:dir,limit:2}).pipe(Effect.provideService(FSUtil.Service, service))
+    const last = yield* exec(dir, {filePath:dir,offset:3,limit:2}).pipe(Effect.provideService(FSUtil.Service, service))
+    expect(first.program?.value).toEqual({type:"list-page",path:dir,entries:[{path:path.join(dir,"a.pipe"),type:"other"},{path:path.join(dir,"b.link"),type:"symlink"}],offset:1,totalEntries:4,truncated:true,next:3})
+    expect(last.program?.value).toEqual({type:"list-page",path:dir,entries:[{path:path.join(dir,"c.dir"),type:"directory"},{path:path.join(dir,"d.txt"),type:"file"}],offset:3,totalEntries:4,truncated:false})
+  }))
 
   it.live("bounds displayed long lines within the byte budget", () =>
     Effect.gen(function* () {
@@ -776,7 +803,7 @@ describe("tool.read truncation", () => {
       const { default: sharp } = yield* Effect.promise(() => import("sharp"))
       const tiff = yield* Effect.promise(() => sharp(png).tiff({ compression: "lzw" }).toBuffer())
       const avif = yield* Effect.promise(() => sharp(png).avif({ lossless: true }).toBuffer())
-      for (const [name, , data] of [
+      for (const [name, mime, data] of [
         ["image.png", "image/png", png],
         ["image.bmp", "image/bmp", bmp],
         ["image.tiff", "image/tiff", tiff],
@@ -786,6 +813,8 @@ describe("tool.read truncation", () => {
 
         const result = yield* exec(dir, { filePath: path.join(dir, name) })
         expect(result.output).toBe("Image read successfully")
+        // 程序合同交付原文件字节，宿主附件仍遵守各格式的既有PNG规整。
+        expect(result.program?.value).toEqual({type:"file",path:path.join(dir,name),content:data.toString("base64"),mime,encoding:"base64"})
         expect(result.metadata.truncated).toBe(false)
         expect(result.attachments).toBeDefined()
         expect(result.attachments?.length).toBe(1)
@@ -1069,6 +1098,7 @@ root_type Monster;`
       for (const item of cases) {
         yield* put(path.join(dir, item[0]), item[1])
         const result = yield* exec(dir, { filePath: path.join(dir, item[0]) })
+        expect(result.program?.value).toEqual({type:"omitted",path:path.join(dir,item[0]),content:"Image omitted: could not be decoded or resized within the image size limit."})
         // #534：image/* 不再由 read 白名单放行——内容无法解码时统一降级为 omission 文本，
         // 不把伪装成图片扩展名的原始字节当作文本回显。
         expect(result.attachments).toBeUndefined()

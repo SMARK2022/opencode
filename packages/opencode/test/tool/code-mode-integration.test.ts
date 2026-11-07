@@ -1,10 +1,8 @@
 import { beforeAll, describe, expect, test } from "bun:test"
-import { CodeModeTool, describeCatalog } from "@/tool/code-mode"
+import { CodeModeTool, describeCatalog, type CatalogEntry } from "@/tool/code-mode"
 import { McpCatalog } from "@/mcp/catalog"
 import { Agent } from "@/agent/agent"
 import { MCP } from "@/mcp"
-import { Plugin } from "@/plugin"
-import { Session } from "@/session/session"
 import { Tool } from "@/tool/tool"
 import * as Truncate from "@/tool/truncate"
 import { MessageID, SessionID } from "@/session/schema"
@@ -139,23 +137,26 @@ async function buildTool() {
   }
 
   const layer = Layer.mergeAll(
-    Layer.mock(Plugin.Service, {
-      trigger: ((_name: unknown, _input: unknown, output: unknown) =>
-        Effect.succeed(output)) as Plugin.Interface["trigger"],
-    }),
     Layer.mock(Truncate.Service, {
       output: (text: string) => Effect.succeed({ content: text, truncated: false as const }),
     }),
-    Layer.mock(Agent.Service, { get: () => Effect.succeed({ name: "build", permission: [] } as any) }),
-    Layer.mock(Session.Service, { get: () => Effect.succeed({ permission: [] } as any) }),
-    Layer.mock(MCP.Service, {
-      tools: () => Effect.succeed(mcpTools),
-      clients: () => Effect.succeed({ [SERVER]: {} as any }),
-    }),
+    Layer.mock(Agent.Service, { get: () => Effect.succeed({ name: "build", mode: "primary" as const, options: {}, permission: [] }) }),
   )
+  const catalog: CatalogEntry[] = Object.entries(mcpTools).map(([id, entry]) => ({
+    id, path: [SERVER, entry.def.name], description: entry.def.description ?? "",
+    inputSchema: McpCatalog.schemas(entry.def).input, outputSchema: McpCatalog.schemas(entry.def).output,
+  }))
+  const definition = await Effect.runPromise(CodeModeTool.pipe(Effect.flatMap(Tool.init), Effect.provide(layer)))
   return {
-    tool: await Effect.runPromise(CodeModeTool.pipe(Effect.flatMap(Tool.init), Effect.provide(layer))),
-    description: describeCatalog(mcpTools, [SERVER]),
+    // Session 权限与 child 归属由 session/execute 的真实集成覆盖；本组保留真实 MCP wire/result 回归。
+    tool: { ...definition, execute: (params: { code: string }, ctx: Tool.Context) => definition.execute(params, { ...ctx, codeMode: {
+      catalog, signal: ctx.abort, begin: () => Effect.void,
+      invoke: (id, args) => Effect.gen(function* () {
+        const result = yield* Effect.promise(() => McpCatalog.callTool(mcpTools[id], args, ctx.abort))
+        return { title: id, output: "", metadata: {}, program: McpCatalog.programResult(result) }
+      }),
+    } }) },
+    description: await Effect.runPromise(describeCatalog(catalog)),
   }
 }
 
@@ -175,17 +176,16 @@ beforeAll(async () => {
 
 describe("code mode integration (real MCP server)", () => {
   test("the appended catalog inlines full signatures with real MCP schemas", () => {
-    expect(description).toContain("Available tools (COMPLETE list")
+    expect(description).toContain("The catalog is complete. Do not guess tool names.")
     expect(description).toContain("- fixtures (4 tools)")
     expect(description).toContain(
-      "tools.fixtures.add(input: {\n  a: number,\n  b: number,\n}): Promise<{\n  sum: number,\n}>",
+      "tools.fixtures.add({\n  a: number,\n  b: number,\n}): Promise<{\n  sum: number,\n}>",
     )
-    expect(description).toContain("tools.fixtures.get_text(input: {\n  name: string,\n}): Promise<unknown>")
+    expect(description).toContain("tools.fixtures.get_text({\n  name: string,\n}): Promise<unknown>")
     expect(description).toContain("// Add two numbers and return the structured sum")
     expect(description).not.toContain("$codemode")
-    expect(description).toContain("## Workflow")
-    expect(description).toContain("Do not infer or normalize tool names")
-    expect(description).toContain("bracket notation and quotes are part of the path")
+    expect(description).toContain("## Code Mode tools (call only inside `execute`)")
+    expect(description).toContain("Do not guess tool names.")
     expect(description).not.toContain("total_count")
   })
 
@@ -292,24 +292,6 @@ describe("code mode integration (real MCP server)", () => {
     const out = await run("console.log('hi'); console.error('bye'); return 'ok'")
     expect(out.output).toBe("ok\n\nLogs:\nhi\n[error] bye")
     expect(out.metadata.toolCalls).toEqual([])
-  })
-
-  test("asks permission for each MCP call, keyed by the flat catalog name", async () => {
-    const asked: string[] = []
-    const permCtx: Tool.Context = { ...ctx, ask: (req: any) => Effect.sync(() => void asked.push(req.permission)) }
-    await Effect.runPromise(
-      tool.execute(
-        {
-          code: `
-            await tools.fixtures.add({ a: 1, b: 1 })
-            await tools.fixtures.get_text({ name: 'x' })
-            return 'done'
-          `,
-        },
-        permCtx,
-      ),
-    )
-    expect(asked).toEqual(["fixtures_add", "fixtures_get_text"])
   })
 
   test("streams running/completed metadata for child calls over a real transport", async () => {

@@ -609,15 +609,15 @@ class Interpreter<R> {
   private lastValue: unknown
   // Caps how many eagerly forked tool calls run at once (the parallel-call concurrency cap).
   private readonly callPermits: Semaphore.Semaphore
-  // Fiber-backed promises whose settlement no program construct has observed yet. Successful
-  // program completion drains these (like a runtime waiting on in-flight work at exit) and
-  // surfaces a never-awaited failure as an unhandled-rejection diagnostic.
+  // 未等待的调用归本次执行所有；沿v2.2.5在结束时取消，不能延长或重放脚本。
   private readonly pendingSettlements = new Set<SandboxPromise>()
+  private readonly fetchResponse?: CodeModeFunction
 
   constructor(
     invokeTool: (path: ReadonlyArray<string>, args: Array<unknown>) => Effect.Effect<unknown, unknown, R>,
     toolKeys: (path: ReadonlyArray<string>) => ReadonlyArray<string>,
     logs: Array<string> = [],
+    hasFetch = false,
   ) {
     const globalScope = new Map<string, Binding>()
     this.scopes = [globalScope]
@@ -627,6 +627,8 @@ class Interpreter<R> {
     this.lastValue = undefined
     this.callPermits = Semaphore.makeUnsafe(TOOL_CALL_CONCURRENCY)
     globalScope.set("tools", { mutable: false, value: new ToolReference([]) })
+    // 全局search与既有内部入口共用当前目录，调用处分辨同步发现与异步操作。
+    globalScope.set("search", { mutable: false, value: new ToolReference(["$codemode", "search"]) })
     globalScope.set("Promise", { mutable: false, value: new PromiseNamespace() })
     globalScope.set("undefined", { mutable: false, value: undefined })
     globalScope.set("Object", { mutable: false, value: new GlobalNamespace("Object") })
@@ -658,6 +660,17 @@ class Interpreter<R> {
     // boundary - see copyOut), so their global bindings must exist too, e.g. `reduce(max, -Infinity)`.
     globalScope.set("NaN", { mutable: false, value: NaN })
     globalScope.set("Infinity", { mutable: false, value: Infinity })
+    // 复用V1函数与Promise解释，不暴露宿主函数或对象原型；网络权限由宿主持有。
+    if (hasFetch) {
+      globalScope.set("fetch", { mutable: false, value: new ToolReference(["$codemode", "fetch"]) })
+      // 工厂只解析受信常量，用户脚本文本不能改变响应方法的定义。
+      const factory = asNode(parseProgram(`function response(data) {
+      return { url: data.url, status: data.status, statusText: data.statusText, ok: data.ok, redirected: data.redirected,
+        headers: { get: name => data.headers[name.toLowerCase()] ?? null, has: name => Object.keys(data.headers).includes(name.toLowerCase()), entries: () => Object.entries(data.headers) },
+        text: async () => data.text, json: async () => JSON.parse(data.text), bytes: async () => data.bytes };
+      }`).body[0], "fetch response")
+      this.fetchResponse = new CodeModeFunction(getArray(factory, "params").map((param) => asNode(param, "params")), getNode(factory, "body"), [globalScope])
+    }
   }
 
   run(program: ProgramNode): Effect.Effect<unknown, unknown, R> {
@@ -693,30 +706,9 @@ class Interpreter<R> {
       // resolves before crossing the data boundary - `return tools.ns.tool(...)` works
       // without an explicit await, exactly as in JS.
       if (value instanceof SandboxPromise) value = yield* self.settlePromise(value)
-      yield* self.drainPendingSettlements()
       return value
-    }).pipe(Effect.ensuring(Effect.sync(() => self.popScope())))
-  }
-
-  // Awaits every fiber-backed promise the program abandoned (fire-and-forget tool calls), so
-  // their work completes before the execution ends - mirroring a JS runtime waiting on
-  // in-flight I/O at exit. A failure nobody could have handled becomes an unhandled-rejection
-  // diagnostic (interrupted calls, e.g. Promise.race losers, are ignored).
-  private drainPendingSettlements(): Effect.Effect<void, unknown, never> {
-    const self = this
-    return Effect.gen(function* () {
-      for (const promise of [...self.pendingSettlements]) {
-        const exit = yield* self.observePromise(promise)
-        if (Exit.isSuccess(exit) || Cause.hasInterruptsOnly(exit.cause)) continue
-        const failure = normalizeError(Cause.squash(exit.cause))
-        throw new InterpreterRuntimeError(
-          `Unhandled rejection from an un-awaited tool call: ${failure.message}`,
-          undefined,
-          failure.kind,
-          ["Await tool calls - `const result = await tools.ns.tool(...)` - so failures can be caught and handled."],
-        )
-      }
-    })
+    // 最终器运行时才读取待结算集合，构建Effect时集合尚为空。
+    }).pipe(Effect.ensuring(Effect.suspend(() => Effect.forEach([...self.pendingSettlements], (promise) => promise.fiber ? Fiber.interrupt(promise.fiber) : Effect.void, { concurrency: "unbounded", discard: true }))), Effect.ensuring(Effect.sync(() => self.popScope())))
   }
 
   // Eagerly starts a tool call on a supervised child fiber (so the execution timeout and
@@ -728,8 +720,15 @@ class Interpreter<R> {
     args: Array<unknown>,
   ): Effect.Effect<SandboxPromise, never, R> {
     const self = this
+    const response = path[0] === "$codemode" && path[1] === "fetch" ? self.fetchResponse : undefined
+    const init = args[1]
+    const input = response && isRecord(init) && init.body instanceof SandboxURLSearchParams
+      ? [args[0], { ...init, body: init.body.params.toString() }] : args
+    const call = Effect.suspend(() => self.invokeTool(path, input))
+    // HTTP和工具调用沿同一个并发/取消边界；响应方法在沙箱内闭包化。
+    // 响应转换不再调用宿主，一次HTTP只消耗一次调用预算并产生一次调用记录。
     return Effect.map(
-      Effect.forkChild(this.callPermits.withPermit(Effect.suspend(() => self.invokeTool(path, args))), {
+      Effect.forkChild(this.callPermits.withPermit(response ? call.pipe(Effect.flatMap((data) => self.invokeFunction(response, [data]))) : call), {
         startImmediately: true,
       }),
       (fiber) => {
@@ -1906,6 +1905,9 @@ class Interpreter<R> {
 
       if (callable instanceof ToolReference) {
         if (callable.path.length === 0) throw new InterpreterRuntimeError("The tools root is not callable.", callee)
+        // 发现只读取内存目录，直接交付值；仍经过原工具校验、预算和观察hooks。
+        if (callable.path.length === 2 && callable.path[0] === "$codemode" && callable.path[1] === "search")
+          return yield* self.invokeTool(callable.path, args)
         // An un-awaited tool call is a first-class promise value; the call itself starts now.
         return yield* self.createToolCallPromise(callable.path, args)
       }
@@ -1948,7 +1950,7 @@ class Interpreter<R> {
       return boundedData(this.enumerableKeys(ref)!, "Object.keys result")
     }
     throw new InterpreterRuntimeError(
-      `Object.${name}(...) cannot read tool references: they are not plain data. Use Object.keys(tools) for names, or tools.$codemode.search({ query }) for signatures.`,
+      `Object.${name}(...) cannot read tool references: they are not plain data. Use Object.keys(tools) for names, or search({ query }) for signatures.`,
       node,
       "InvalidDataValue",
     )
@@ -3351,6 +3353,7 @@ export const executeWithLimits = <const Tools extends Record<string, unknown>>(
     limits.maxToolCalls,
     searchIndex,
     hooks,
+    options.fetch,
   )
   const logs: Array<string> = []
   const logged = () => (logs.length > 0 ? { logs: [...logs] } : {})
@@ -3365,7 +3368,7 @@ export const executeWithLimits = <const Tools extends Record<string, unknown>>(
 
   const operation = Effect.gen(function* () {
     const program = parseProgram(options.code)
-    const interpreter = new Interpreter<Services<Tools>>(tools.invoke, tools.keys, logs)
+    const interpreter = new Interpreter<Services<Tools>>(tools.invoke, tools.keys, logs, options.fetch !== undefined)
     const value = yield* interpreter.run(program)
     const result = copyOut(copyIn(value, "Execution result"), true) as DataValue
     return {

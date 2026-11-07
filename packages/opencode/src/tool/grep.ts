@@ -3,6 +3,7 @@ import { Effect, Schema } from "effect"
 import { InstanceState } from "@/effect/instance-state"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { Ripgrep } from "@opencode-ai/core/ripgrep"
+import { FileSystem } from "@opencode-ai/schema/filesystem"
 // #244：timeout 上限用 schema 包的正整数与上限检查表达
 import { PositiveInt } from "@opencode-ai/schema"
 // #138：grep 结果上限与过宽候选处理
@@ -50,6 +51,16 @@ export const GrepTool = Tool.define(
     return {
       description: DESCRIPTION,
       parameters: Parameters,
+      output: Schema.Struct({
+        matches: Schema.Array(Schema.Struct({ path: Schema.String, line: FileSystem.Match.fields.line,
+          offset: FileSystem.Match.fields.offset, content: Schema.String,
+          submatches: Schema.Array(Schema.Struct({ content: Schema.String, start: FileSystem.Submatch.fields.start, end: FileSystem.Submatch.fields.end })),
+        })),
+        totalMatches: Schema.Number,
+        truncated: Schema.Boolean,
+        partial: Schema.Boolean,
+        timedOut: Schema.Boolean,
+      }),
       execute: (params: Schema.Schema.Type<typeof Parameters>, ctx: Tool.Context) =>
         // #244：参数类型直接引用 Parameters 推断——新增字段自动进入 execute 类型，
         // 避免手写注解与 schema 漂移
@@ -60,6 +71,7 @@ export const GrepTool = Tool.define(
             // emptyTimedOut 在 metadata 上必须可区分，下游据此决定是否建议重试
             metadata: { matches: 0, truncated: false },
             output: "No files found",
+            program: { value: { matches: [], totalMatches: 0, truncated: false, partial: false, timedOut: false } },
           }
           if (!params.pattern) {
             throw new Error("pattern is required")
@@ -101,7 +113,8 @@ export const GrepTool = Tool.define(
           // timeout与partial可并存，权限信息不能被预算文案吞掉。
           const emptyTimedOut = (partial = false) => ({
             // #244：title 沿用 pattern 与普通结果对齐，调用方按 title 聚合时不受影响
-            title: params.pattern,
+            ...empty,
+            program: { value: { ...empty.program.value, truncated: true, timedOut: true, partial } },
             // #244：timedOut 必须同时置 truncated——下游消费者只看 truncated 判断结果不完整
             metadata: { matches: 0, truncated: true, timedOut: true, ...(partial ? { partial: true } : {}) },
             // #244：文案同时说明「结果不完整」与「下一步怎么办」，
@@ -140,7 +153,8 @@ export const GrepTool = Tool.define(
           // 「部分路径不可访问导致的假阴性」（源提交修复的核心缺陷场景）
           if (result.items.length === 0 && result.partial)
             return {
-              title: params.pattern,
+              ...empty,
+              program: { value: { ...empty.program.value, partial: true } },
               metadata: { matches: 0, truncated: false, partial: true },
               output: [
                 "No files found, but the search could not access some paths (permission denied).",
@@ -152,12 +166,11 @@ export const GrepTool = Tool.define(
           // #244：绝对路径化在工具边界完成——core 返回的相对路径不带会话目录上下文；
           // path.resolve 锚点是 rg 的实际扫描 cwd，两者必须同一基准输出才稳定
           const rows = result.items.map((item) => ({
-            path: path.resolve(
-              requestedInfo?.type === "Directory" ? requested : path.dirname(requested),
-              item.entry.path,
-            ),
-            line: item.line,
-            text: item.text,
+            ...item,
+            entry: { ...item.entry, path: path.resolve(
+                requestedInfo?.type === "Directory" ? requested : path.dirname(requested),
+                item.entry.path,
+              ) },
           }))
 
           // #138：超出 RESULT_LIMIT 截断展示；#244：时间预算耗尽也标记截断；
@@ -176,7 +189,8 @@ export const GrepTool = Tool.define(
           // [local-smark] 同上：RESULT_LIMIT 过滤后为零匹配也须区分 partial 假阴性
           if (final.length === 0 && result.partial)
             return {
-              title: params.pattern,
+              ...empty,
+              program: { value: { ...empty.program.value, partial: true } },
               metadata: { matches: 0, truncated: false, partial: true },
               output: [
                 "No files found, but the search could not access some paths (permission denied).",
@@ -195,10 +209,10 @@ export const GrepTool = Tool.define(
 
           let current = ""
           for (const match of final) {
-            if (current !== match.path) {
+            if (current !== match.entry.path) {
               if (current !== "") output.push("")
-              current = match.path
-              output.push(`${match.path}:`)
+              current = match.entry.path
+              output.push(`${match.entry.path}:`)
             }
             output.push(`  Line ${match.line}: ${match.text}`)
           }
@@ -241,6 +255,12 @@ export const GrepTool = Tool.define(
               partial: result.partial,
             },
             output: output.join("\n"),
+            // 保留原匹配位置，按R15统一正文名称；完整性来自同一次搜索。
+            program: { value: {
+              matches: final.map((match) => ({ path: match.entry.path, line: match.line, offset: match.offset,
+                content: match.text, submatches: match.submatches.map((item) => ({ content: item.text, start: item.start, end: item.end })),
+              })), totalMatches, truncated, partial: result.partial === true, timedOut: result.timedOut === true,
+            } },
           }
         }).pipe(Effect.orDie),
     }

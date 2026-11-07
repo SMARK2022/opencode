@@ -33,6 +33,7 @@ import { MessageTable } from "@opencode-ai/core/session/sql"
 import type { EventV2 } from "@opencode-ai/core/event"
 import { Usage, LLMError, LLMEvent, ToolResultValue } from "@opencode-ai/llm"
 import { Token } from "@opencode-ai/core/util/token"
+import type { Tool } from "@/tool/tool"
 
 // #149：取消时给 bash 等工具完成截断/complete 的宽限
 // 500ms升级窗口后给并行工具2秒结算宽限；输出消费及finalizer仍由原owner收尾。
@@ -138,6 +139,10 @@ export const ownAssistant = Effect.fnUntraced(function* (input: { sessionID: Ses
 
 export interface Handle {
   readonly message: SessionV1.Assistant
+  readonly runChild: <A extends Tool.ExecuteResult>(
+    input: { parentCallID: string; callID: string; tool: string; input: Record<string, unknown> },
+    run: Effect.Effect<A, unknown>,
+  ) => Effect.Effect<A, unknown>
   readonly updateToolCall: (
     toolCallID: string,
     update: (part: SessionV1.ToolPart) => SessionV1.ToolPart,
@@ -509,6 +514,7 @@ const layer = Layer.effect(
         id: string
         name: string
         providerExecuted?: boolean
+        parentCallID?: string
       }) {
         const existing = yield* readToolCall(input.id)
         if (existing) {
@@ -538,6 +544,8 @@ const layer = Layer.effect(
             metadata: {
               ...(input.providerExecuted ? { providerExecuted: true } : {}),
               ...(ctx.toolWorktree[input.id] ? { worktree: ctx.toolWorktree[input.id] } : {}),
+              // 真实子记录保留文件归因，模型消费者据归属字段选择父回执。
+              ...(input.parentCallID ? { executeParent: input.parentCallID } : {}),
             },
           } satisfies SessionV1.ToolPart)
         ctx.toolcalls[input.id] = {
@@ -551,6 +559,30 @@ const layer = Layer.effect(
       }, toolPermit.withPermits(1))
 
       const isFilePart = (value: unknown): value is SessionV1.FilePart => Schema.is(SessionV1.FilePart)(value)
+
+      const runChild: Handle["runChild"] = (input, run) => Effect.uninterruptibleMask((restore) => Effect.gen(function* () {
+        // 登记和结算受同一生命周期保护，取消可中断 body，同时保留终态写入。
+        // 真实宿主调用拥有独立 Part；无需伪造 provider 事件来借用旧的生命周期处理。
+        yield* ensureToolCall({ id: input.callID, name: input.tool, parentCallID: input.parentCallID })
+        yield* updateToolCall(input.callID, (part) => ({
+          ...part, state: { status: "running", input: input.input, time: { start: Date.now() } },
+        }))
+        const exit = yield* restore(run).pipe(Effect.exit)
+        // 先完成原 complete/fail，再把 Exit 交回解释器，后续 leaf 才能读取可靠终态。
+        if (Exit.isSuccess(exit)) {
+          yield* completeToolCall(input.callID, {
+            ...exit.value,
+            attachments: exit.value.attachments?.map((attachment) => ({
+              // child 与父聚合各自拥有附件 Part 身份，媒体内容则来自同一次工具执行。
+              ...attachment, id: PartID.ascending(), sessionID: ctx.sessionID, messageID: ctx.assistantMessage.id,
+            })),
+          })
+        } else {
+          yield* failToolCall(input.callID, Cause.hasInterrupts(exit.cause) ? TOOL_ABORTED_ERROR : Cause.squash(exit.cause))
+        }
+        // 原 Exit 决定脚本的结果，持久化错误不会被转换为成功返回值。
+        return yield* exit
+      }))
 
       const toolResultOutput = (
         value: Extract<StreamEvent, { type: "tool-result" }>,
@@ -1277,6 +1309,7 @@ const layer = Layer.effect(
         },
         updateToolCall,
         completeToolCall,
+        runChild,
         process,
       } satisfies Handle
     })

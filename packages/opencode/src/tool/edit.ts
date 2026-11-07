@@ -142,6 +142,9 @@ export const EditTool = Tool.define(
     return {
       description: DESCRIPTION,
       parameters: Parameters,
+      output: Schema.Struct({ files: Schema.Array(Schema.Struct({ path: Schema.String, operation: Schema.Literal("update"),
+        patch: Schema.String, additions: Schema.Number, deletions: Schema.Number,
+      })), diagnostics: LSP.Diagnostic.Output }),
       // #557：edit result 已声明 filepath/diff，Revert 不需要扩大到 ambient Patch。
       worktree: "declared",
       prepareArguments: prepareEditArguments,
@@ -506,6 +509,10 @@ export const EditTool = Tool.define(
           output += warningTail
 
           return {
+            // filediff是既有落盘真值；程序回执与宿主回执共享同一份差分。
+            program: { value: { files: [{ path: filePath, operation: "update", patch: filediff.patch,
+              additions: filediff.additions, deletions: filediff.deletions,
+            }], diagnostics: LSP.Diagnostic.toOutput(diagnosticSummary, { [normalizedFilePath]: newErrorsArr }) } },
             metadata: {
               // 未连接时不提供clean摘要；差分数据与formatter后的真实diff各自保留。
               diagnostics: { [normalizedFilePath]: newErrorsArr },

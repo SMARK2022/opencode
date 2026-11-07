@@ -164,6 +164,7 @@ describe("tool.write", () => {
 
         expect(result.output).toContain("Wrote file successfully")
         expect(result.metadata.exists).toBe(false)
+        expect(result.program?.value).toMatchObject({ files: [{ path: filepath, operation: "add" }], diagnostics: null })
 
         const content = yield* Effect.promise(() => fs.readFile(filepath, "utf-8"))
         expect(content).toBe("Hello, World!")
@@ -273,6 +274,23 @@ describe("tool.write", () => {
 
   // [local-smark] LSP 不可用时不得携带 diagnosticSummary，防止 TUI 渲染虚假 clean
   describe("LSP unavailable notice", () => {
+    it.instance("returns new diagnostic positions and retains existing error counts", () => Effect.gen(function* () {
+      const instance = yield* TestInstance
+      const filepath = path.join(instance.directory, "diagnostic.txt")
+      yield* Effect.promise(() => fs.writeFile(filepath, "before"))
+      const lsp = yield* LSP.Service
+      const old = {range:{start:{line:0,character:0},end:{line:0,character:1}},message:"existing",severity:1 as const,code:"old"}
+      const fresh = {range:{start:{line:3,character:2},end:{line:3,character:3}},message:"new error",severity:1 as const,code:0}
+      let touched = false
+      // 只控制外部LSP快照；增量分类、位置转换与写入回执都走实际producer。
+      const result = yield* run({filePath:filepath,content:"after"}).pipe(Effect.provideService(LSP.Service, {
+        ...lsp, touchFile: () => Effect.sync(() => { touched = true }),
+        diagnostics: () => Effect.succeed({[FSUtil.normalizePath(filepath)]:touched ? [old,fresh] : [old]}),
+      }))
+      expect(result.program?.value).toMatchObject({diagnostics:{existingCount:1,newErrors:[{path:FSUtil.normalizePath(filepath),line:4,column:3,message:"new error",code:0}]}})
+      expect(yield* Effect.promise(() => fs.readFile(filepath,"utf8"))).toBe("after")
+    }))
+
     it.instance("does not send diagnosticSummary metadata when no language server is running", () =>
       Effect.gen(function* () {
         const test = yield* TestInstance

@@ -96,6 +96,8 @@ const serialize = (message: SessionV1.WithParts) => {
       if (part.type === "text") return part.text ? [`[Assistant]: ${part.text}`] : []
       if (part.type === "reasoning") return part.text ? [`[Assistant reasoning]: ${part.text}`] : []
       if (part.type !== "tool") return []
+      // 压缩消费父聚合回执；子正文仍保存在会话中供文件归因和审计使用。
+      if (typeof part.metadata?.executeParent === "string") return []
       const call = `[Assistant tool call]: ${part.tool}(${JSON.stringify(part.state.input)})`
       if (part.state.status === "completed") {
         const attachments = (part.state.attachments ?? []).map(
@@ -106,7 +108,12 @@ const serialize = (message: SessionV1.WithParts) => {
           : truncate([part.state.output, ...attachments].join("\n"))
         return [call, `[Tool result]: ${output}`]
       }
-      if (part.state.status === "error") return [call, `[Tool error]: ${part.state.error}`]
+      if (part.state.status === "error") {
+        // Task 恢复身份与已完成清单属于错误回执，压缩后也须保留。
+        const partial = part.tool === "execute" && typeof part.state.metadata?.output === "string"
+          ? `\n${truncate(part.state.metadata.output)}` : ""
+        return [call, `[Tool error]: ${part.state.error}${partial}`]
+      }
       return [call]
     })
     .join("\n")
@@ -421,6 +428,8 @@ const layer = Layer.effect(
         for (let partIndex = msg.parts.length - 1; partIndex >= 0; partIndex--) {
           const part = msg.parts[partIndex]
           if (part.type !== "tool") continue
+          // 只计模型实际接收的父回执，避免中间结果提前耗尽保护预算。
+          if (typeof part.metadata?.executeParent === "string") continue
           if (part.state.status !== "completed") continue
           if (PRUNE_PROTECTED_TOOLS.includes(part.tool)) continue
           if (part.state.time.compacted) break loop

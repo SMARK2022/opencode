@@ -1,4 +1,25 @@
 import * as LSPClient from "./client"
+import { Schema } from "effect"
+
+// null保留LSP未可靠完成的事实，与已经检查但newErrors为空不同。
+export const Output = Schema.NullOr(Schema.Struct({
+  existingCount: Schema.Number,
+  newErrors: Schema.Array(Schema.Struct({ path: Schema.String, line: Schema.Number, column: Schema.Number,
+    message: Schema.String, code: Schema.optionalKey(Schema.Union([Schema.String, Schema.Number])),
+  })),
+}))
+
+// 复用已经判定的新错误及可用性；程序位置与原pretty展示同为一基行列。
+export function toOutput(summary: { existingCount: number } | undefined, diagnostics: Readonly<Record<string, readonly LSPClient.Diagnostic[]>>) {
+  if (!summary) return null
+  return { existingCount: summary.existingCount,
+    newErrors: Object.entries(diagnostics).flatMap(([path, errors]) => errors.map((item) => ({
+      path, line: item.range.start.line + 1, column: item.range.start.character + 1, message: item.message,
+      // 数字0也是有效诊断代码，不能通过truthy过滤丢掉它。
+      ...(item.code !== undefined ? { code: item.code } : {}),
+    }))),
+  }
+}
 
 // [local-smark] 每文件诊断上限：5 条足以指示"有问题"；超过 5 条通常意味着
 // 编辑不完整或方向错误，模型应重新审视策略而非逐条修复

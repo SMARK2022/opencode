@@ -40,11 +40,14 @@ export type ToolResult =
       output: string
       metadata?: { [key: string]: any }
       attachments?: ToolAttachment[]
+      // 业务值为显式可选通道，既有字符串回执和附件协议继续有效。
+      program?: { value: unknown }
     }
 
 export function tool<Args extends z.ZodRawShape>(input: {
   description: string
   args: Args
+  output?: z.ZodType
   execute(args: z.infer<z.ZodObject<Args>>, context: ToolContext): Promise<ToolResult>
 }) {
   return input

@@ -1,0 +1,991 @@
+import { expect, spyOn } from "bun:test"
+import { Deferred, Effect, Exit, Fiber, Layer, Option, Stream } from "effect"
+import path from "node:path"
+import { mkdir } from "node:fs/promises"
+import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+import { SessionProjector } from "@opencode-ai/core/session/projector"
+import { Agent } from "@/agent/agent"
+import { Config } from "@/config/config"
+import { MCP } from "@/mcp"
+import { Permission } from "@/permission"
+import { Plugin } from "@/plugin"
+import { Provider } from "@/provider/provider"
+import { Session } from "@/session/session"
+import { SessionGoal } from "@/session/goal"
+import { SessionProcessor } from "@/session/processor"
+import { SessionTools } from "@/session/tools"
+import { MessageID, PartID, SessionID } from "@/session/schema"
+import { ToolRegistry } from "@/tool/registry"
+import type { TaskPromptOps } from "@/tool/task"
+import { Truncate } from "@/tool/truncate"
+import { RuntimeFlags } from "@/effect/runtime-flags"
+import { InstanceState } from "@/effect/instance-state"
+import { isRecord } from "@/util/record"
+import { ProviderTest } from "../fake/provider"
+import { TestConfig } from "../fixture/config"
+import { TestInstance } from "../fixture/fixture"
+import { awaitWithTimeout, pollWithTimeout, testEffect } from "../lib/effect"
+import { Client } from "@modelcontextprotocol/sdk/client/index.js"
+import { Server } from "@modelcontextprotocol/sdk/server/index.js"
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js"
+import { CallToolRequestSchema, ListToolsRequestSchema, ListResourcesRequestSchema, ListResourceTemplatesRequestSchema, ReadResourceRequestSchema } from "@modelcontextprotocol/sdk/types.js"
+import { McpCatalog } from "@/mcp/catalog"
+import { LLM } from "@/session/llm"
+import { LLMEvent } from "@opencode-ai/llm"
+import { MessageV2 } from "@/session/message-v2"
+import { PermissionReviewer } from "@/permission/reviewer/service"
+import { Question } from "@/question"
+import { SessionSummary } from "@/session/summary"
+import { SessionRevert } from "@/session/revert"
+import { debugAgent } from "@/cli/cmd/debug/agent.handler"
+import { SessionPrompt } from "@/session/prompt"
+import { LLMRequestPrep } from "@/session/llm/request"
+import { httpClient } from "@opencode-ai/core/effect/app-node-platform"
+import { HttpClient, HttpClientResponse } from "effect/unstable/http"
+
+const provider = ProviderTest.fake()
+// 使用本机真实方言，避免测试命令与 Shell 分类器观察到两种不同语言。
+const shell = process.platform === "win32" ? Bun.which("pwsh") ?? Bun.which("powershell") : Bun.which("bash")
+// 空 MCP 是产品入口的原始缺口，测试必须通过正常目录找到 execute。
+const layer = (flags: Partial<RuntimeFlags.Info> = {}, http?: HttpClient.HttpClient) => LayerNode.compile(LayerNode.group([
+  ToolRegistry.node, Agent.node, Session.node, SessionProcessor.node, SessionGoal.node,
+  Plugin.node, Permission.node, MCP.node, Truncate.node, RuntimeFlags.node, SessionProjector.node, Question.node,
+  SessionSummary.node, SessionRevert.node,
+]), [
+  [Provider.node, provider.layer],
+  [Config.node, TestConfig.layer({
+    // 普通工具配置 allow，组合路径仍要独立预检；动态升阶用例因此也验证 allow 无法越级。
+    get: () => Effect.succeed({ permission: { "*": "allow" as const }, shell: shell ?? undefined }),
+    directories: () => InstanceState.directory.pipe(Effect.map((directory) => [path.join(directory, ".opencode")])),
+  })],
+  [RuntimeFlags.node, RuntimeFlags.layer({ client: "cli", ...flags })],
+  [MCP.node, Layer.mock(MCP.Service, {
+    // 空连接是正常产品状态，而非网络失败替身，native execute 应在这个状态直接工作。
+    tools: () => Effect.succeed({}),
+    clients: () => Effect.succeed({}),
+  })],
+  [LLM.node, Layer.mock(LLM.Service, {
+    // 仅替换外部模型：真实 processor 消费事件并登记父调用，工具仍由 SessionTools 执行。
+    stream: (input) => Stream.scoped(Stream.unwrap(Effect.gen(function* () {
+      const controller = yield* Effect.acquireRelease(Effect.sync(() => new AbortController()), (controller) => Effect.sync(() => controller.abort()))
+      // 事件负责建立父 Part，工具结果仍经真实 processor 结算，测试不自行写入成功状态。
+      const code = input.system[0]
+      const execute = input.tools.execute?.execute
+      if (code === undefined || !execute) return yield* Effect.die("Missing execute model fixture")
+      return Stream.concat(Stream.concat(
+        // 注册事件先进入 processor，保证失败回执能通过同一个真实父身份持久化。
+        Stream.make(LLMEvent.stepStart({ index: 0 }), LLMEvent.toolInputStart({ id: "execute-stream", name: "execute" }),
+          LLMEvent.toolInputEnd({ id: "execute-stream", name: "execute" }), LLMEvent.toolCall({ id: "execute-stream", name: "execute", input: { code } })),
+        Stream.fromEffect(Effect.tryPromise({
+          try: () => Promise.resolve(execute({ code }, { toolCallId: "execute-stream", abortSignal: controller.signal, messages: input.messages })),
+          catch: (error) => error,
+        }).pipe(Effect.match({
+          onSuccess: (value) => LLMEvent.toolResult({ id: "execute-stream", name: "execute", result: { type: "json", value } }),
+          onFailure: (error) => LLMEvent.toolResult({ id: "execute-stream", name: "execute", result: { type: "error", value: error instanceof Error ? error.message : String(error) } }),
+        }))),
+      ), Stream.make(LLMEvent.stepFinish({ index: 0, reason: "stop" }), LLMEvent.finish({ reason: "stop" })))
+    }))),
+  })],
+  [httpClient, http ? Layer.succeed(HttpClient.HttpClient, http) : httpClient],
+])
+const it = testEffect(layer())
+const background = testEffect(layer({ experimentalBackgroundSubagents: true }))
+
+it.instance("debug execute uses the same native tool host", () => Effect.gen(function* () {
+  const instance = yield* TestInstance
+  yield* Effect.promise(() => Bun.write(path.join(instance.directory, "debug.txt"), "debug host"))
+  // 仅捕获CLI输出；目录、读取、权限和解释器仍走实际入口。
+  const output = yield* Effect.acquireRelease(
+    Effect.sync(() => spyOn(process.stdout, "write").mockReturnValue(true)),
+    (spy) => Effect.sync(() => spy.mockRestore()),
+  )
+  yield* debugAgent({ name: "build", tool: "execute", params: JSON.stringify({
+    code: 'return (await tools.$opencode.read({filePath:"debug.txt"})).content;',
+  }) }).pipe(Effect.provide(Layer.merge(provider.layer, Layer.mock(SessionPrompt.Service, {}))))
+  expect(output).toHaveBeenCalledWith(expect.stringContaining('"output": "debug host"'))
+}))
+
+const resolveTools = Effect.fn("TestExecute.resolveTools")(function* (model = provider.model, userTools?: Record<string, boolean>, promptOps?: TaskPromptOps) {
+  // 每例隔离 Session 与临时项目，避免审批缓存、指令 claims 或旧读记录干扰预期。
+  const instance = yield* TestInstance
+  const sessions = yield* Session.Service
+  const agents = yield* Agent.Service
+  const processors = yield* SessionProcessor.Service
+  const goalSvc = yield* SessionGoal.Service
+  const session = yield* sessions.create()
+  const agent = yield* agents.get("build")
+  const user = yield* sessions.updateMessage({
+    id: MessageID.ascending(), sessionID: session.id, role: "user", agent: "build",
+    model: { modelID: model.id, providerID: model.providerID }, time: { created: Date.now() },
+  })
+  const message = yield* sessions.updateMessage({
+    id: MessageID.ascending(), sessionID: session.id, role: "assistant",
+    parentID: user.id, agent: "build", mode: "build",
+    path: { cwd: instance.directory, root: instance.directory },
+    modelID: model.id, providerID: model.providerID,
+    cost: 0, tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+    time: { created: Date.now() },
+  })
+  const processor = yield* processors.create({ assistantMessage: message, sessionID: session.id, model })
+  const tools = yield* SessionTools.resolve({
+    agent, model, session, processor, goalSvc, userTools,
+    bypassAgentCheck: false, messages: [],
+    loadGoalTurn: Effect.succeed({ id: user.id, userInitiated: true }),
+    // succeed 捕获同一 turn 对象，Goal.read 写入的受信 snapshot 能被后续 complete 消费。
+    // 默认夹具将意外模型调用暴露为错误；Task成功用例显式提供原promptOps边界。
+    promptOps: promptOps ?? {
+      cancel: () => Effect.die("Unexpected child Session cancellation"),
+      resolvePromptParts: () => Effect.die("Unexpected prompt expansion"),
+      // Task 恢复用例在已创建子 Session 之后失败，验证身份而不额外发起模型请求。
+      prompt: () => Effect.die("Unexpected provider turn"),
+    },
+  })
+  return { tools: tools.tools, instructions: tools.instructions, sessions, session, processor, user, agent }
+})
+
+it.instance("execute catalog reaches final system and OAuth instructions with upstream invocation guidance", () => Effect.gen(function* () {
+  const plugin = yield* Plugin.Service
+  const flags = yield* RuntimeFlags.Service
+  const model = { ...provider.model, api: { ...provider.model.api, id: "gpt-6-astra" } }
+  // 用真实registry生成目录，再走两种provider共同的最终请求准备，避免仅证明TXT存在。
+  for (const enabled of [true, false]) {
+    const fixture = yield* resolveTools(model, { execute: enabled })
+    if (fixture.user.role !== "user") throw new Error("Expected user fixture")
+    for (const oauth of [false, true]) {
+      const prepared = yield* LLMRequestPrep.prepare({
+        user: { ...fixture.user, system: "User-provided instruction." }, sessionID: fixture.session.id,
+        model, agent: fixture.agent, tools: fixture.tools, system: ["Project instruction.", ...fixture.instructions],
+        messages: [{ role: "user", content: "Inspect files" }], provider: provider.info, plugin, flags, isWorkflow: false,
+        auth: oauth ? { type: "oauth", access: "test", refresh: "test", expires: 0 } : undefined,
+      })
+      // OAuth只使用instructions，普通请求只使用system消息；目录不能重复或漏送。
+      const system = oauth ? String(prepared.params.options.instructions) : prepared.messages
+        .filter((message) => message.role === "system").map((message) => message.content).join("\n")
+      expect(system).toContain("Project instruction.")
+      expect(system).toContain("User-provided instruction.")
+      expect(system).toContain("For direct tool calls, use multi_tool_use.parallel")
+      expect(prepared.messages.filter((message) => message.role === "system")).toHaveLength(oauth ? 0 : 1)
+      expect(system.match(/^# Code Mode$/gm) ?? []).toHaveLength(enabled ? 1 : 0)
+      if (!enabled) {
+        expect(prepared.tools.execute).toBeUndefined()
+        continue
+      }
+      // execute是附加入口；默认开启时V1直接工具仍必须进入最终provider请求。
+      expect(prepared.tools.read).toBeDefined()
+      expect(prepared.tools.bash).toBeDefined()
+      expect(prepared.tools.execute.description).toContain("Await every call whose completion matters")
+      expect(prepared.tools.execute.description).toContain("Promise.allSettled")
+      expect(system).toContain("find it with the global `search(...)` function")
+      expect(system).toContain("await tools.ns.tool_name({ ... })")
+      expect(system).toContain("search({")
+      expect(system).not.toContain("search(input:")
+    }
+  }
+}))
+
+it.instance("execute composes native glob and read with no MCP server", () => Effect.gen(function* () {
+  // 用上一步返回的路径消费下一步结果，固定路径的两个独立调用证明不了工具组合。
+  // 第二次 read 专门覆盖模型 stub 与 JS 数据接收者的差异。
+  const instance = yield* TestInstance
+  yield* Effect.promise(() => Bun.write(path.join(instance.directory, "note.txt"), "hello execute"))
+  const { tools } = yield* resolveTools()
+  expect(tools.execute).toBeDefined()
+  expect(tools.read).toBeDefined()
+  const execute = tools.execute?.execute
+  if (!execute) throw new Error("Native execute is absent from the resolved tool inventory")
+  const result = yield* Effect.promise(() => Promise.resolve(execute({
+    code: `
+      const found = await tools.$opencode.glob({pattern:"*.txt"});
+      const file = await tools.$opencode.read({filePath:found.files[0].path});
+      const again = await tools.$opencode.read({filePath:found.files[0].path});
+      const matched = await tools.$opencode.grep({pattern:"hello", path:found.files[0].path});
+      const empty = await tools.$opencode.grep({pattern:"absent", path:found.files[0].path});
+      const catalog = await search({query:"glob", namespace:"$opencode"});
+      return {files:found, file, again:again.content, matched, empty, signature:catalog.items[0].signature};
+    `,
+  }, { toolCallId: "execute-files", abortSignal: new AbortController().signal, messages: [] })))
+  if (!isRecord(result) || typeof result.output !== "string") throw new Error("Expected a model tool receipt")
+  const data = JSON.parse(result.output)
+  expect(data.files).toEqual({files:[{path:path.join(instance.directory,"note.txt"),type:"file"}],truncated:false,partial:false})
+  expect(data.again).toBe("hello execute")
+  // 完整程序视图恰有正文与分页事实；预览、版本证明和宿主metadata留在原通道。
+  expect(data.file).toEqual({type:"text-page", path:path.join(instance.directory, "note.txt"), content:"hello execute", mime:"text/plain", offset:1, totalLines:1, totalLinesExact:true, truncated:false})
+  // 搜索使用模型实际可取得的目录，验证返回字段已经进入提示而非只存在于TS类型。
+  expect(data.signature).toContain("files: Array<")
+  expect(data.signature).toContain("path: string")
+  // R15保留完整性信息，并统一正文与定位字段；偏移仍来自真实搜索。
+  expect(data.matched).toEqual({matches:[{path:path.join(instance.directory,"note.txt"),line:1,offset:0,content:"hello execute",submatches:[{content:"hello",start:0,end:5}]}],totalMatches:1,truncated:false,partial:false,timedOut:false})
+  expect(data.empty).toEqual({matches:[],totalMatches:0,truncated:false,partial:false,timedOut:false})
+}))
+
+background.instance("execute composes structured todos, answers and resumable task results", () => Effect.gen(function* () {
+  // 同一业务流覆盖原数组和任务身份；替换外部模型边界，真实工具与子Session继续执行。
+  const instance = yield* TestInstance
+  const sessions = yield* Session.Service
+  const question = yield* Question.Service
+  const fixture = yield* resolveTools(provider.model, undefined, {
+    cancel: () => Effect.void,
+    resolvePromptParts: (text) => Effect.succeed([{type:"text", text}]),
+    prompt: (input) => Effect.gen(function* () {
+      const info = yield* sessions.updateMessage({
+        id: MessageID.ascending(), sessionID: input.sessionID, role: "assistant", parentID: input.messageID ?? MessageID.ascending(),
+        agent: "general", mode: "general", path: {cwd:instance.directory, root:instance.directory},
+        modelID: provider.model.id, providerID: provider.model.providerID,
+        cost: 0, tokens: {input:0, output:0, reasoning:0, cache:{read:0, write:0}}, time: {created:Date.now()},
+      })
+      const part = yield* sessions.updatePart({id:PartID.ascending(), sessionID:info.sessionID, messageID:info.id, type:"text", text:"child reply"})
+      return { info, parts: [part] }
+    }),
+  })
+  const execute = fixture.tools.execute?.execute
+  if (!execute) throw new Error("execute is missing")
+  const pending = yield* Effect.promise(() => Promise.resolve(execute({code: `
+    const todos = await tools.$opencode.todowrite({todos:[{content:"inspect",status:"in_progress",priority:"high"}]});
+    const answers = await tools.$opencode.question({questions:[{question:"Continue?",header:"Test",options:[]}]});
+    const task = await tools.$opencode.task({description:"typed foreground",prompt:"reply",subagent_type:"general"});
+    const background = await tools.$opencode.task({description:"typed background",prompt:"reply",subagent_type:"general",background:true});
+    return {todos,answers,task,background};
+  `}, {toolCallId:"execute-values", abortSignal:new AbortController().signal, messages:[]}))).pipe(Effect.forkScoped)
+  // 使用原问题队列作为就绪信号，答案数组和任务续跑在同一JS调用中观察。
+  const request = yield* pollWithTimeout(question.list().pipe(Effect.map((items) => items[0])), "question not presented")
+  yield* question.reply({requestID:request.id, answers:[["continue"]]})
+  const result = yield* Fiber.join(pending)
+  if (!isRecord(result) || typeof result.output !== "string") throw new Error("Expected values receipt")
+  const data = JSON.parse(result.output)
+  expect(data.todos).toEqual({todos:[{content:"inspect",status:"in_progress",priority:"high"}]})
+  expect(data.answers).toEqual({answers:[["continue"]]})
+  expect(data.task.status).toBe("completed")
+  expect(data.task.content).toBe("child reply")
+  expect(data.background.status).toBe("running")
+  // 恢复身份必须与真实子调用一致，不能靠另造一个看似有效的字符串满足输出schema。
+  const ids = (yield* sessions.messages({sessionID:fixture.session.id})).flatMap((message) => message.parts)
+    .flatMap((part) => part.type === "tool" && part.tool === "task" && part.state.status === "completed" ? [part.state.metadata.sessionId] : [])
+  expect(ids).toEqual([data.task.sessionID, data.background.sessionID])
+}))
+
+testEffect(layer({ experimentalPlanMode: true, enableExa: true }, HttpClient.make((request) => Effect.sync(() => {
+  // 只替换网络边界，真实请求构造、解析、工具和返回decoder都继续运行。
+  expect(request.method).toBe("POST")
+  return HttpClientResponse.fromWeb(request, Response.json({ result: { content: [{ type: "text", text: "source search content" }] } }))
+})))).instance("execute returns websearch content and the approved plan identity", () => Effect.gen(function* () {
+  const instance = yield* InstanceState.context
+  const fixture = yield* resolveTools()
+  const question = yield* Question.Service
+  const execute = fixture.tools.execute?.execute
+  if (!execute) throw new Error("execute is missing")
+  const pending = yield* Effect.promise(() => Promise.resolve(execute({ code: `
+    const search = await tools.$opencode.websearch({query:"fixture"});
+    const plan = await tools.$opencode.plan_exit(); return {search,plan};
+  ` }, { toolCallId: "execute-plan", abortSignal: new AbortController().signal, messages: [] }))).pipe(Effect.forkScoped)
+  // 原审批队列是就绪信号；回复前不制造批准，回复后检查真实Session切换。
+  const request = yield* pollWithTimeout(question.list().pipe(Effect.map((items) => items[0])), "plan approval not presented")
+  yield* question.reply({ requestID: request.id, answers: [["Yes"]] })
+  const result = yield* Fiber.join(pending)
+  if (!isRecord(result) || typeof result.output !== "string") throw new Error("Expected plan receipt")
+  expect(JSON.parse(result.output)).toEqual({ search: { content: "source search content" },
+    plan: { approved: true, agent: "build", path: Session.plan(fixture.session, instance) } })
+  expect((yield* fixture.sessions.messages({ sessionID: fixture.session.id })).findLast((message) => message.info.role === "user")?.info.agent).toBe("build")
+}))
+
+it.instance("execute delivers read instructions and skill context even when code returns a scalar", () => Effect.gen(function* () {
+  // 目录规则放在子目录，确保来自 read 的按需加载，而非项目根 system prompt。
+  // 技能目录走原发现流程；返回标量刻意让脚本丢弃两个工具的普通输出。
+  const instance = yield* TestInstance
+  const nested = path.join(instance.directory, "nested")
+  const skill = path.join(instance.directory, ".opencode", "skills", "execute-fixture")
+  yield* Effect.promise(() => mkdir(nested, { recursive: true }))
+  yield* Effect.promise(() => mkdir(skill, { recursive: true }))
+  yield* Effect.promise(() => Bun.write(path.join(nested, "AGENTS.md"), "Keep the execute instruction marker."))
+  yield* Effect.promise(() => Bun.write(path.join(nested, "note.txt"), "private file data"))
+  yield* Effect.promise(() => Bun.write(path.join(skill, "SKILL.md"), "---\nname: execute-fixture\ndescription: execute test\n---\nKeep the execute skill marker."))
+  const fixture = yield* resolveTools()
+  yield* fixture.processor.process({
+    user: fixture.user, sessionID: fixture.session.id, model: provider.model, agent: fixture.agent,
+    system: ['await tools.$opencode.read({filePath:"nested/note.txt"}); await tools.$opencode.skill({name:"execute-fixture"}); return 1;'],
+    messages: [], tools: fixture.tools,
+  })
+  const messages = yield* fixture.sessions.messages({ sessionID: fixture.session.id })
+  const parent = messages.flatMap((message) => message.parts).find((part) => part.type === "tool" && part.tool === "execute")
+  if (parent?.type !== "tool" || parent.state.status !== "completed") throw new Error("Expected completed execute")
+  // 脚本摘要可丢弃数据，却不能丢弃刚加载的约束；模型投影验证最终可见性。
+  expect(parent.state.metadata.loaded).toEqual([path.join(nested, "AGENTS.md")])
+  expect(parent.state.metadata.skills).toEqual(["execute-fixture"])
+  const projected = JSON.stringify(yield* MessageV2.toModelMessagesEffect(messages, provider.model))
+  expect(projected).toContain("Keep the execute instruction marker.")
+  expect(projected).toContain("Keep the execute skill marker.")
+  expect(projected).not.toContain("private file data")
+}))
+
+const resolveMcp = Effect.fn("TestExecute.resolveMcp")(function* (serverName = "fixtures", userTools?: Record<string, boolean>) {
+  // 保留真实 MCP 协议传输；替换的仅是连接发现，SessionTools 和子记录均实际执行。
+  const transport = yield* Effect.acquireRelease(Effect.promise(async () => {
+    // SDK 两端真实交换请求，结构化与附件断言不能由宿主测试直接返回目标对象凑绿。
+    const server = new Server({ name: "execute-fixtures", version: "1" }, { capabilities: { tools: {}, resources: {} } })
+    server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [{
+      name: "add", description: "Add numbers", inputSchema: { type: "object", properties: { a: {type: "number"}, b: {type: "number"} }, required: ["a", "b"] },
+      outputSchema: { type: "object", properties: { sum: { type: "number" } }, required: ["sum"] },
+    }, { name: "image", description: "Return image", inputSchema: { type: "object" } }] }))
+    server.setRequestHandler(CallToolRequestSchema, async (request) => request.params.name === "image" ? {
+      // 最小有效 PNG 只由远端返回，检查程序是否看见 base64 时有独立的来源。
+      content: [{ type: "image", mimeType: "image/png", data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==" }],
+    } : ({
+      content: [], structuredContent: { sum: Number(request.params.arguments?.a) + Number(request.params.arguments?.b) },
+    }))
+    server.setRequestHandler(ListResourcesRequestSchema, async () => ({ resources: [{ name: "note", uri: "fixture://note", mimeType: "text/plain" }] }))
+    server.setRequestHandler(ListResourceTemplatesRequestSchema, async () => ({ resourceTemplates: [{ name: "notes", uriTemplate: "fixture://{name}" }] }))
+    server.setRequestHandler(ReadResourceRequestSchema, async (request) => ({ contents: [{ uri: request.params.uri, mimeType: "text/plain", text: "actual resource content" }] }))
+    const client = new Client({ name: "execute-tests", version: "1" })
+    const [local, remote] = InMemoryTransport.createLinkedPair()
+    await server.connect(remote)
+    await client.connect(local)
+    return { client, server }
+  }), (transport) => Effect.promise(async () => { await transport.client.close(); await transport.server.close() }))
+  // discovery 来自实际 ListTools，避免模型 schema 与远端执行者的参数契约分叉。
+  const mcp = yield* MCP.Service
+  const definitions = yield* Effect.promise(() => transport.client.listTools())
+  const entries = Object.fromEntries(definitions.tools.map((def) => [McpCatalog.toolName(serverName, def.name), { def, client: transport.client }]))
+  const fixture = yield* resolveTools(provider.model, userTools).pipe(Effect.provideService(MCP.Service, {
+    ...mcp, tools: () => Effect.succeed(entries), clients: () => Effect.succeed({ [serverName]: transport.client }),
+    resources: () => Effect.promise(async () => Object.fromEntries((await transport.client.listResources()).resources.map((resource) => [resource.uri, { ...resource, client: serverName }]))),
+    resourceTemplates: () => Effect.promise(async () => Object.fromEntries((await transport.client.listResourceTemplates()).resourceTemplates.map((resource) => [resource.uriTemplate, { ...resource, client: serverName }]))),
+    readResource: (_server, uri) => Effect.promise(() => transport.client.readResource({ uri })),
+  }))
+  // 模拟连接目录更新，只控制外部 discovery；接纳和拒绝仍走真实 Host。
+  return { ...fixture, removeTools: Effect.sync(() => { for (const key of Object.keys(entries)) delete entries[key] }) }
+})
+
+it.instance("execute fetch uses the host permission path and never sends its preflight requests", () => Effect.gen(function* () {
+  const requests: string[] = []
+  const ready = Promise.withResolvers<void>()
+  // 第二个真实请求到达才释放响应，证明全局fetch确实并发且预跑没有网络副作用。
+  const server = yield* Effect.acquireRelease(Effect.sync(() => Bun.serve({ port: 0, fetch: async (request) => {
+    requests.push(new URL(request.url).pathname)
+    if (requests.length === 2) ready.resolve()
+    await ready.promise
+    return Response.json({ path: new URL(request.url).pathname, method: request.method, body: await request.text(), repeated: request.headers.get("x-repeat") })
+  } })), (server) => Effect.sync(() => server.stop(true)))
+  const fixture = yield* resolveTools()
+  const execute = fixture.tools.execute?.execute
+  if (!execute) throw new Error("execute is missing")
+  const result = yield* Effect.promise(() => Promise.resolve(execute({ code: `
+    const values = await Promise.allSettled([fetch(${JSON.stringify(new URL("a", server.url).href)}), fetch(${JSON.stringify(new URL("b", server.url).href)}, {method:"POST",body:"payload",headers:[["x-repeat","first"],["x-repeat","second"]]})]);
+    const first = values[0].value; const second = values[1].value;
+    return {first:await first.json(),second:await second.json(),status:second.status,header:second.headers.get("Content-Type"),hasHeader:second.headers.has("content-type"),bytes:(await first.bytes()).length};
+  ` }, { toolCallId: "execute-fetch", abortSignal: new AbortController().signal, messages: [] })))
+  if (!isRecord(result) || typeof result.output !== "string") throw new Error("Expected fetch receipt")
+  expect(JSON.parse(result.output)).toMatchObject({ first: { path: "/a", method: "GET", body: "" },
+    second: { path: "/b", method: "POST", body: "payload", repeated: "first, second" }, status: 200, header: expect.stringContaining("application/json"), hasHeader: true,
+  })
+  expect(JSON.parse(result.output).bytes).toBeGreaterThan(0)
+  expect(requests.toSorted()).toEqual(["/a", "/b"])
+  // 成功POST之后再失败，下一轮模型必须知道该操作已经完成，不能把它当待重试工作。
+  const url = new URL("committed", server.url).href
+  yield* fixture.processor.process({ user: fixture.user, sessionID: fixture.session.id, model: provider.model, agent: fixture.agent,
+    system: [`await fetch(${JSON.stringify(url)}, {method:"POST"}); throw new Error("after-http");`], messages: [], tools: fixture.tools,
+  })
+  const messages = yield* fixture.sessions.messages({sessionID:fixture.session.id})
+  const parent = messages.flatMap((message) => message.parts).find((part) => part.type === "tool" && part.tool === "execute")
+  if (parent?.type !== "tool" || parent.state.status !== "error") throw new Error("Expected failed execute receipt")
+  const receipt = String(parent.state.metadata?.output)
+  expect(receipt).toContain('"tool":"$codemode.fetch","status":"completed","input":{"method":"POST","url":' + JSON.stringify(url))
+  const projected = yield* MessageV2.toModelMessagesEffect(messages, provider.model)
+  // 仅检查错误结果正文，调用参数里的URL不能冒充完成事实已交付。
+  const errors = projected.flatMap((message) => typeof message.content === "string" ? [] : message.content.flatMap((part) =>
+    part.type === "tool-result" && part.output.type === "error-text" ? [part.output.value] : []))
+  expect(errors.join("\n")).toContain(receipt)
+  expect(requests.filter((path) => path === "/committed")).toHaveLength(1)
+}))
+
+it.instance("execute shares native lifecycle for a real MCP structured call", () => Effect.gen(function* () {
+  // 返回值来自远端求和；数据库断言另行证明同一次调用经过原 native 子记录生命周期。
+  // 两个观察面并用，防止仅返回正确聚合值却丢失文件审计归属。
+  const fixture = yield* resolveMcp()
+  const execute = fixture.tools.execute?.execute
+  if (!execute) throw new Error("execute is missing")
+  const result = yield* Effect.promise(() => Promise.resolve(execute({
+    code: 'const result = await tools.fixtures.add({a:2,b:3}); return result.sum;',
+  }, { toolCallId: "execute-mcp", abortSignal: new AbortController().signal, messages: [] })))
+  expect(result).toMatchObject({ output: "5" })
+  const messages = yield* fixture.sessions.messages({ sessionID: fixture.session.id })
+  // 从公开 Session 历史确认一次真实子调用，结果来自结构化返回而非文本再解析。
+  expect(messages.flatMap((message) => message.parts).filter((part) => part.type === "tool")).toMatchObject([{
+    tool: "fixtures_add", metadata: { executeParent: "execute-mcp" },
+    state: { status: "completed", input: { a: 2, b: 3 } },
+  }])
+}))
+
+it.instance("MCP media stays out of JS data while the parent returns its attachment", () => Effect.gen(function* () {
+  // 模型的文本与附件分开断言，传回 marker 不能以丢失实际图片为代价。
+  const fixture = yield* resolveMcp()
+  const execute = fixture.tools.execute?.execute
+  if (!execute) throw new Error("execute is missing")
+  const result = yield* Effect.promise(() => Promise.resolve(execute({ code: 'const image = await tools.fixtures.image({}); return {image};' },
+    { toolCallId: "execute-media", abortSignal: new AbortController().signal, messages: [] })))
+  if (!isRecord(result) || typeof result.output !== "string") throw new Error("Expected media receipt")
+  expect(result.output).not.toContain("iVBOR")
+  expect(result).toMatchObject({ output: expect.stringContaining("1 image attached"), attachments: [{ mime: "image/png", url: expect.stringContaining("data:image/png;base64,") }] })
+}))
+
+it.instance("truncated parent context retains a recovery path and clears delivery claims", () => Effect.gen(function* () {
+  // 文件正文保持很短，只让按需规则超过原 Truncate 限额，定位父上下文的交付边界。
+  // 读取恢复文件证明完整内容有去处，而非仅设置 truncated 标志。
+  const instance = yield* TestInstance
+  const nested = path.join(instance.directory, "nested")
+  yield* Effect.promise(() => mkdir(nested, { recursive: true }))
+  const instructions = "Required execute instruction.\n".repeat(3000)
+  yield* Effect.promise(() => Bun.write(path.join(nested, "AGENTS.md"), instructions))
+  yield* Effect.promise(() => Bun.write(path.join(nested, "note.txt"), "data"))
+  const fixture = yield* resolveTools()
+  const execute = fixture.tools.execute?.execute
+  if (!execute) throw new Error("execute is missing")
+  const result = yield* Effect.promise(() => Promise.resolve(execute({ code: 'await tools.$opencode.read({filePath:"nested/note.txt"}); return 1;' },
+    { toolCallId: "execute-truncated", abortSignal: new AbortController().signal, messages: [] })))
+  if (!isRecord(result) || !isRecord(result.metadata) || typeof result.metadata.outputPath !== "string") throw new Error("Expected recoverable truncated output")
+  const outputPath = result.metadata.outputPath
+  // 原 Truncate 服务保存完整正文；父回执的 loaded/skills 只表示已完整送入模型的规则。
+  expect(result.metadata.truncated).toBe(true)
+  expect(result.metadata.loaded).toEqual([])
+  expect(result.metadata.skills).toEqual([])
+  expect(yield* Effect.promise(() => Bun.file(outputPath).text())).toContain(instructions)
+}))
+
+it.instance("disabling execute keeps MCP directly callable and removes disabled native tools", () => Effect.gen(function* () {
+  // 用户关闭编排入口后，远端能力仍从既有直接工具入口提供，调用不会触发另一套执行器。
+  // 同时关闭 read，检验 user.tools 对 native 与 execute 采用同一筛选路径。
+  const fixture = yield* resolveMcp("fixtures", { execute: false, read: false })
+  expect(fixture.tools.execute).toBeUndefined()
+  expect(fixture.tools.read).toBeUndefined()
+  const add = fixture.tools.fixtures_add?.execute
+  if (!add) throw new Error("Expected direct MCP tool")
+  expect(yield* Effect.promise(() => Promise.resolve(add({ a: 2, b: 3 }, {
+    toolCallId: "direct-mcp", abortSignal: new AbortController().signal, messages: [],
+  })))).toMatchObject({ output: '{"sum":5}' })
+}))
+
+it.instance("MCP removal during an awaited question blocks its next invocation", () => Effect.gen(function* () {
+  // 问题提供可观察的暂停点；目录先已广告成功，再更新连接发现，才能验证实时接纳。
+  // 拒绝后检查真实 Session 中没有 MCP child，区分拒绝接纳与远端执行后报错。
+  const fixture = yield* resolveMcp()
+  const question = yield* Question.Service
+  const execute = fixture.tools.execute?.execute
+  if (!execute) throw new Error("execute is missing")
+  const pending = yield* Effect.tryPromise({
+    try: () => Promise.resolve(execute({ code: 'await tools.$opencode.question({questions:[{question:"Ready?",header:"Test",options:[]}]}); try {return await tools.fixtures.add({a:1,b:2});} catch {return "bypassed";}' },
+      { toolCallId: "execute-disconnect", abortSignal: new AbortController().signal, messages: [] })), catch: (error) => error,
+  }).pipe(Effect.exit, Effect.forkScoped)
+  const request = yield* pollWithTimeout(question.list().pipe(Effect.map((items) => items[0])), "question not presented")
+  yield* fixture.removeTools
+  yield* question.reply({ requestID: request.id, answers: [["continue"]] })
+  expect(Exit.isFailure(yield* Fiber.join(pending))).toBe(true)
+  const parts = (yield* fixture.sessions.messages({ sessionID: fixture.session.id })).flatMap((message) => message.parts)
+  expect(parts.some((part) => part.type === "tool" && part.tool === "fixtures_add")).toBe(false)
+}))
+
+it.instance("execute composes MCP resource listing, templates and reading", () => Effect.gen(function* () {
+  // resource 入口原本独立于工具目录；通过同一 execute 验证其权限和结果适配也已汇合。
+  // 模板与普通资源同时存在，防止仅为 list 增加特殊入口而遗漏另外两个操作。
+  const fixture = yield* resolveMcp()
+  const execute = fixture.tools.execute?.execute
+  if (!execute) throw new Error("execute is missing")
+  // 读取 URI 来自真实列表结果，验证依赖调用而非三个互不关联的固定请求。
+  const result = yield* Effect.promise(() => Promise.resolve(execute({ code: `
+    const listed = await tools.$opencode.list_mcp_resources({});
+    const first = listed.resources[0];
+    const templates = await tools.$opencode.list_mcp_resource_templates({});
+    const read = await tools.$opencode.read_mcp_resource({server:first.server, uri:first.path});
+    return {text:read.contents[0].content, templates:templates.templates.map(item => item.pathTemplate), listedTemplates:listed.templates};
+  ` }, { toolCallId: "execute-resources", abortSignal: new AbortController().signal, messages: [] })))
+  if (!isRecord(result) || typeof result.output !== "string") throw new Error("Expected resource receipt")
+  expect(JSON.parse(result.output)).toEqual({ text: "actual resource content", templates: ["fixture://{name}"], listedTemplates: [{ server: "fixtures", name: "notes", pathTemplate: "fixture://{name}" }] })
+}))
+
+it.instance("custom tools use their existing argument validator before body effects", () => Effect.gen(function* () {
+  // 插件脚本实际从磁盘加载，参数拒绝必须发生在原 body 的写盘动作之前。
+  // 合法调用先建立正向对照，排除工具根本没有加载导致的假阳性。
+  const instance = yield* TestInstance
+  const directory = path.join(instance.directory, ".opencode", "tool")
+  yield* Effect.promise(() => mkdir(directory, { recursive: true }))
+  yield* Effect.promise(() => Bun.write(path.join(directory, "probe.ts"), `
+    import { z } from ${JSON.stringify(import.meta.resolve("zod"))};
+    export default {
+      description: "Validated custom fixture", args: { value: z.number() },
+      async execute(args) {
+        await Bun.write(new URL("body.txt", import.meta.url), String(args.value));
+        return {output:String(args.value),metadata:{_syncInput:{internal:true},_formattedContent:"host-only"}};
+      }
+    };
+    export const structured = {
+      description: "Structured fixture", args: {value:z.number()}, output:z.object({value:z.number()}),
+      async execute(args) { return {output:"display only",program:{value:{value:args.value}}}; }
+    };
+  `))
+  const fixture = yield* resolveTools()
+  const execute = fixture.tools.execute?.execute
+  if (!execute) throw new Error("execute is missing")
+  const result = yield* Effect.promise(() => Promise.resolve(execute({ code: `
+    const valid = await tools.$opencode.probe({value:3});
+    const structured = await tools.$opencode.probe_structured({value:4});
+    const catalog = await tools.$codemode.search({query:"probe", namespace:"$opencode"});
+    try { await tools.$opencode.probe({value:"bad"}); }
+    catch (error) { return {valid, structured, invalid:error.message, signature:catalog.items.find(item => item.path === "tools.$opencode.probe").signature}; }
+  ` }, { toolCallId: "execute-custom", abortSignal: new AbortController().signal, messages: [] })))
+  if (!isRecord(result) || typeof result.output !== "string") throw new Error("Expected custom receipt")
+  expect(JSON.parse(result.output)).toMatchObject({ valid: "3", invalid: expect.stringContaining("invalid arguments") })
+  // 同一注册入口同时覆盖旧文本插件与显式结构化插件，不能把所有插件统一改成对象。
+  expect(JSON.parse(result.output).structured).toEqual({value:4})
+  // 原文本准确描述为string；宿主临时字段没有变成程序对象的额外属性。
+  expect(JSON.parse(result.output).signature).toContain("Promise<string>")
+  // 合法调用先建立独立磁盘证据，随后以文件仍为 3 证明校验位于副作用之前。
+  expect(yield* Effect.promise(() => Bun.file(path.join(directory, "body.txt")).text())).toBe("3")
+}))
+
+for (const dynamic of [false, true]) it.instance(`${dynamic ? "runtime" : "preflight"} forbidden stops mutations at its first observable boundary`, () => Effect.gen(function* () {
+  // 相同脚本分别使用字面命令和真实读取结果，区分预跑可见与运行时才可见的风险。
+  const instance = yield* TestInstance
+  const fixture = yield* resolveTools()
+  const execute = fixture.tools.execute?.execute
+  if (!execute) throw new Error("execute is missing")
+  expect(shell).toBeString()
+  const patch = (name: string) => `*** Begin Patch\n*** Add File: ${name}\n+before\n*** End Patch`
+  // 对照先证明真实 patch 可执行，避免把工具加载或路径故障误认为权限拒绝。
+  yield* Effect.promise(() => Promise.resolve(execute({ code: `return await tools.$opencode.apply_patch({patchText:${JSON.stringify(patch("control.txt"))}});` }, {
+    toolCallId: "execute-control", abortSignal: new AbortController().signal, messages: [],
+  })))
+  expect(yield* Effect.promise(() => Bun.file(path.join(instance.directory, "control.txt")).exists())).toBe(true)
+  // Shell 中使用恒假分支，分类器仍识别潜在 forbidden，测试本身也具备物理执行隔离。
+  const command = process.platform === "win32" ? "if ($false) { Remove-Item -Recurse -Force 'C:\\' }" : "if false; then rm -rf /; fi"
+  yield* Effect.promise(() => Bun.write(path.join(instance.directory, "command.txt"), command))
+  const result = yield* Effect.tryPromise({
+    try: () => Promise.resolve(execute({ code: `
+      const command = ${dynamic ? '(await tools.$opencode.read({filePath:"command.txt"})).content' : JSON.stringify(command)};
+      await tools.$opencode.apply_patch({patchText:${JSON.stringify(patch("before.txt"))}});
+      try { await tools.$opencode.bash({command}); }
+      catch { await tools.$opencode.apply_patch({patchText:${JSON.stringify(patch("bypassed.txt"))}}); }
+      await tools.$opencode.apply_patch({patchText:${JSON.stringify(patch("after.txt"))}});
+    ` }, { toolCallId: "execute-preflight", abortSignal: new AbortController().signal, messages: [] })),
+    catch: (error) => error,
+  }).pipe(Effect.exit)
+  expect(Exit.isFailure(result)).toBe(true)
+  expect(yield* Effect.promise(() => Bun.file(path.join(instance.directory, "before.txt")).exists())).toBe(dynamic)
+  // forbidden 穿透脚本 catch，拒绝后任何一个分支都不能继续写入。
+  expect(yield* Effect.promise(() => Bun.file(path.join(instance.directory, "bypassed.txt")).exists())).toBe(false)
+  expect(yield* Effect.promise(() => Bun.file(path.join(instance.directory, "after.txt")).exists())).toBe(false)
+}))
+
+it.instance("computed workdir is created by an earlier shell and consumed by the next shell", () => Effect.gen(function* () {
+  // 创建操作由原 Shell 承担，覆盖字符串求值、实际目录就绪和工作目录传递三个边界。
+  // 第二个进程报告自己的 cwd，而非测试根据输入重算一个期望路径。
+  const instance = yield* TestInstance
+  const fixture = yield* resolveTools()
+  const execute = fixture.tools.execute?.execute
+  if (!execute) throw new Error("execute is missing")
+  const create = process.platform === "win32" ? "New-Item -ItemType Directory -Path 'generated-cwd' | Out-Null" : "mkdir generated-cwd"
+  const where = process.platform === "win32" ? "(Get-Location).Path" : "pwd"
+  // 目录名由 JS 表达式产生，真实 Shell 负责创建；第二次调用验证实际进程 cwd。
+  const result = yield* Effect.promise(() => Promise.resolve(execute({ code: `
+    const directory = "generated" + "-cwd";
+    await tools.$opencode.bash({command:${JSON.stringify(create)}});
+    return (await tools.$opencode.bash({command:${JSON.stringify(where)}, workdir:directory})).content;
+  ` }, { toolCallId: "execute-directory", abortSignal: new AbortController().signal, messages: [] })))
+  if (!isRecord(result) || typeof result.output !== "string") throw new Error("Expected directory receipt")
+  expect(result.output.replaceAll("\\", "/")).toContain(path.join(instance.directory, "generated-cwd").replaceAll("\\", "/"))
+}))
+
+it.instance("model history replays the parent receipt while child records retain audit evidence", () => Effect.gen(function* () {
+  // 同时观察持久化与模型投影：全局隐藏 child 虽能省 token，却会破坏 Summary/Revert。
+  // 中间正文使用独立标记，模型最终摘要即使正确也不能掩盖重复上传。
+  const instance = yield* TestInstance
+  yield* Effect.promise(() => Bun.write(path.join(instance.directory, "note.txt"), "intermediate body"))
+  const fixture = yield* resolveTools()
+  yield* fixture.processor.process({
+    user: fixture.user, sessionID: fixture.session.id, model: provider.model, agent: fixture.agent,
+    system: ['await tools.$opencode.read({filePath:"note.txt"}); return "aggregate";'], messages: [], tools: fixture.tools,
+  })
+  const messages = yield* fixture.sessions.messages({ sessionID: fixture.session.id })
+  const parts = messages.flatMap((message) => message.parts).filter((part) => part.type === "tool")
+  expect(parts.find((part) => part.tool === "execute")?.state.status).toBe("completed")
+  expect(parts.filter((part) => part.metadata?.executeParent)).toHaveLength(1)
+  expect(JSON.stringify(parts)).toContain("intermediate body")
+  // 数据库子记录保留供归因使用；模型输入只含 provider 真正发出的父调用。
+  const projected = yield* MessageV2.toModelMessagesEffect(messages, provider.model)
+  const calls = projected.flatMap((message) => typeof message.content === "string" ? [] : message.content.filter((part) => part.type === "tool-call").map((part) => part.toolName))
+  expect(calls).toEqual(["execute"])
+  expect(JSON.stringify(projected)).toContain("aggregate")
+  expect(JSON.stringify(projected)).not.toContain("intermediate body")
+}))
+
+it.instance("failed execute exposes the actual child Task identity in its error receipt", () => Effect.gen(function* () {
+  // 恢复 ID 从真实 Task 的已保存 metadata 取得，避免让父摘要用猜测值满足断言。
+  // 模型转换器必须保留 error 状态，同时交付继续处理已有子会话所需的信息。
+  const fixture = yield* resolveTools()
+  // Task 已创建真实子 Session 后，模型边界 fixture 主动失败；身份须随父错误交付。
+  yield* fixture.processor.process({
+    user: fixture.user, sessionID: fixture.session.id, model: provider.model, agent: fixture.agent,
+    system: ['await tools.$opencode.task({description:"recovery fixture", prompt:"fixture", subagent_type:"general"});'],
+    messages: [], tools: fixture.tools,
+  })
+  const messages = yield* fixture.sessions.messages({ sessionID: fixture.session.id })
+  const parts = messages.flatMap((message) => message.parts).filter((part) => part.type === "tool")
+  const child = parts.find((part) => part.tool === "task")
+  const parent = parts.find((part) => part.tool === "execute")
+  expect(child?.state.status).toBe("error")
+  if (child?.state.status !== "error") throw new Error("Expected failed Task with persisted identity")
+  const sessionId = child.state.metadata?.sessionId
+  expect(typeof sessionId).toBe("string")
+  expect(parent?.state.status).toBe("error")
+  const projected = yield* MessageV2.toModelMessagesEffect(messages, provider.model)
+  expect(JSON.stringify(projected)).toContain(sessionId)
+  expect(JSON.stringify(projected)).toContain("Partial execution")
+}))
+
+for (const dynamic of [false, true]) it.instance(`${dynamic ? "runtime" : "preflight"} parallel calls share approval and preserve JS state`, () => Effect.gen(function* () {
+  // 分别覆盖可预跑的表达式和实际读取依赖，观察真实执行前/执行中的两种审批时机。
+  // 外部审查用 Deferred 控制，断言在批准之前完成，避免用睡眠碰运气。
+  const reviewing = yield* Deferred.make<void>()
+  const release = yield* Deferred.make<void>()
+  const reviews: string[] = []
+  // 条件恒假的 git push 保留分类风险，却让意外执行也只打印测试结果。
+  const command = process.platform === "win32" ? 'if ($false) { git push origin main }; Write-Output done' : 'if false; then git push origin main; fi; echo done'
+  const instance = yield* TestInstance
+  yield* Effect.promise(() => Bun.write(path.join(instance.directory, "command.txt"), command))
+  const code = `const n = 41; const command = ${dynamic ? '(await tools.$opencode.read({filePath:"command.txt"})).content' : JSON.stringify(command)} + ""; const results = await Promise.all([1,2].map(() => tools.$opencode.bash({command}))); return {state:n + 1, results};`
+  const reviewer: PermissionReviewer.Interface = { review: (request) => Effect.gen(function* () {
+    reviews.push(request.precheck.level)
+    expect(request.permission).toBe("execute")
+    expect(request.metadata.code).toBe(code)
+    yield* Deferred.succeed(reviewing, undefined)
+    yield* Deferred.await(release)
+    return { action: "allow" as const, reason: "fixture approved", reviewID: request.reviewID, risk_level: "medium" as const, user_authorization: "high" as const }
+  }) }
+  yield* Effect.gen(function* () {
+    const fixture = yield* resolveTools()
+    const execute = fixture.tools.execute?.execute
+    if (!execute) throw new Error("execute is missing")
+    const pending = yield* Effect.promise(() => Promise.resolve(execute({ code }, { toolCallId: "execute-dynamic", abortSignal: new AbortController().signal, messages: [] }))).pipe(Effect.forkScoped)
+    yield* Deferred.await(reviewing)
+    // 动态场景已完成读取，但两个Shell均须等待审批；释放后保留原程序n并继续。
+    const parts = (yield* fixture.sessions.messages({ sessionID: fixture.session.id })).flatMap((message) => message.parts)
+      .filter((part) => part.type === "tool")
+    expect(parts.some((part) => part.state.status === "completed")).toBe(dynamic)
+    yield* Deferred.succeed(release, undefined)
+    const result = yield* Fiber.join(pending)
+    if (!isRecord(result) || typeof result.output !== "string") throw new Error("Expected execute receipt")
+    const data = JSON.parse(result.output)
+    expect(data.state).toBe(42)
+    // 与暂停续跑共用真实进程场景，验证程序可按退出码和完整性判断后续动作。
+    expect(data.results).toHaveLength(2)
+    for (const item of data.results) {
+      expect(item).toMatchObject({ exit: 0, truncated: false, timedOut: false, content: expect.stringContaining("done") })
+      expect(item.metadata).toBeUndefined()
+    }
+    expect(reviews).toEqual(["cautious"])
+  }).pipe(Effect.provideService(PermissionReviewer.Service, reviewer))
+}))
+
+it.instance("runtime toggle stops a catalogued tool even inside JS catch", () => Effect.gen(function* () {
+  // 开关在第一个工具的 after hook 更新，此时原目录已经构造，下一调用才会消费新规则。
+  // catch 返回特定成功值，若取消被普通错误处理吞掉，最终 Exit 就会暴露越权续跑。
+  const instance = yield* TestInstance
+  yield* Effect.promise(() => Bun.write(path.join(instance.directory, "note.txt"), "ready"))
+  const sessions = yield* Session.Service
+  const plugin = yield* Plugin.Service
+  const fixture = yield* resolveTools().pipe(Effect.provideService(Plugin.Service, { ...plugin,
+    trigger: (name, input, output) => Effect.gen(function* () {
+      if (name === "tool.execute.after" && isRecord(input) && input.tool === "read" && typeof input.sessionID === "string") {
+        yield* sessions.setPermission({ sessionID: SessionID.make(input.sessionID), permission: [{ permission: "apply_patch", pattern: "*", action: "deny" }] })
+      }
+      return output
+    }),
+  }))
+  const execute = fixture.tools.execute?.execute
+  if (!execute) throw new Error("execute is missing")
+  const patch = "*** Begin Patch\n*** Add File: toggled.txt\n+forbidden after toggle\n*** End Patch"
+  const result = yield* Effect.tryPromise({
+    try: () => Promise.resolve(execute({ code: `await tools.$opencode.read({filePath:"note.txt"}); try { await tools.$opencode.apply_patch({patchText:${JSON.stringify(patch)}}); } catch {} return "bypassed";` },
+      { toolCallId: "execute-toggle", abortSignal: new AbortController().signal, messages: [] })), catch: (error) => error,
+  }).pipe(Effect.exit)
+  expect(Exit.isFailure(result)).toBe(true)
+  expect(yield* Effect.promise(() => Bun.file(path.join(instance.directory, "toggled.txt")).exists())).toBe(false)
+}))
+
+it.instance("hook-modified shell input is checked before the process starts", () => Effect.gen(function* () {
+  // before hook 是真实可变输入边界，不能以模型最初传来的安全字符串替代执行参数授权。
+  const instance = yield* TestInstance
+  const plugin = yield* Plugin.Service
+  const fixture = yield* resolveTools().pipe(Effect.provideService(Plugin.Service, { ...plugin,
+    trigger: (name, input, output) => Effect.sync(() => {
+      if (name === "tool.execute.before" && isRecord(input) && input.tool === "bash" && isRecord(output) && isRecord(output.args)) {
+        output.args.command = process.platform === "win32" ? "if ($false) { Remove-Item -Recurse -Force 'C:\\' }" : "if false; then rm -rf /; fi"
+      }
+      return output
+    }),
+  }))
+  const execute = fixture.tools.execute?.execute
+  if (!execute) throw new Error("execute is missing")
+  const patch = "*** Begin Patch\n*** Add File: hook-bypass.txt\n+bypass\n*** End Patch"
+  // 静态脚本只有安全命令；before hook 改参后必须按真实输入拒绝，catch 也停止。
+  const result = yield* Effect.tryPromise({
+    try: () => Promise.resolve(execute({ code: `try {await tools.$opencode.bash({command:"echo safe"});} catch {await tools.$opencode.apply_patch({patchText:${JSON.stringify(patch)}});} return 1;` },
+      { toolCallId: "execute-hook-risk", abortSignal: new AbortController().signal, messages: [] })), catch: (error) => error,
+  }).pipe(Effect.exit)
+  expect(Exit.isFailure(result)).toBe(true)
+  expect(yield* Effect.promise(() => Bun.file(path.join(instance.directory, "hook-bypass.txt")).exists())).toBe(false)
+}))
+
+it.instance("abort during whole-script review releases the reviewer without tool effects", () => Effect.gen(function* () {
+  // 前置审查先于真实 child；取消释放 reviewer，且整段调用以失败结算。
+  const reviewing = yield* Deferred.make<void>()
+  const controller = new AbortController()
+  let cleaned = false
+  yield* Effect.gen(function* () {
+    const fixture = yield* resolveTools()
+    const execute = fixture.tools.execute?.execute
+    if (!execute) throw new Error("execute is missing")
+    const command = process.platform === "win32" ? "if ($false) { git push origin main }" : "if false; then git push origin main; fi"
+    const pending = yield* Effect.tryPromise({ try: () => Promise.resolve(execute({ code: `await tools.$opencode.bash({command:${JSON.stringify(command)}});` },
+      { toolCallId: "execute-review-abort", abortSignal: controller.signal, messages: [] })), catch: (error) => error }).pipe(Effect.exit, Effect.forkScoped)
+    yield* Deferred.await(reviewing)
+    controller.abort()
+    expect(Exit.isFailure(yield* Fiber.join(pending))).toBe(true)
+    expect(cleaned).toBe(true)
+    const parts = (yield* fixture.sessions.messages({ sessionID: fixture.session.id })).flatMap((message) => message.parts)
+    const children = parts.filter((part) => part.type === "tool")
+    expect(children).toEqual([])
+  }).pipe(Effect.provideService(PermissionReviewer.Service, {
+    // 用真实审批等待位置同步取消，清理标志验证外部 reviewer fiber 已经结束。
+    review: () => Deferred.succeed(reviewing, undefined).pipe(Effect.andThen(Effect.never), Effect.onInterrupt(() => Effect.sync(() => { cleaned = true }))),
+  }))
+}))
+
+for (const ending of ["race", "return"]) it.instance(`${ending} cancels its waiting host child and settles parent progress`, () => Effect.gen(function* () {
+  const fixture = yield* resolveTools()
+  const question = yield* Question.Service
+  const execute = fixture.tools.execute?.execute
+  if (!execute) throw new Error("execute is missing")
+  const controller = new AbortController()
+  // 中间glob使question进入宿主等待；race后的调用和直接return共用原取消边界。
+  const code = `const waiting = tools.$opencode.question({questions:[{question:"Waiting",header:"Test",options:[]}]});
+    await tools.$opencode.glob({pattern:"*"});
+    const result = ${ending === "race" ? 'await Promise.race([waiting, "done"])' : '"done"'};
+    await tools.$opencode.glob({pattern:"*"}); return result;`
+  const result = yield* awaitWithTimeout(Effect.tryPromise({
+    try: () => Promise.resolve(execute({ code }, { toolCallId: "execute-race", abortSignal: controller.signal, messages: [] })),
+    catch: (error) => error,
+  }), "race did not release its host child", "5 seconds").pipe(Effect.ensuring(Effect.sync(() => controller.abort())))
+  expect(result).toMatchObject({ output: "done" })
+  // 子记录已取消还不够；父回执是用户实际看到的进度，不能继续声称running。
+  expect(result).toMatchObject({ metadata: { toolCalls: expect.arrayContaining([
+    expect.objectContaining({ tool: "$opencode.question", status: "error" }),
+  ]) } })
+  expect(yield* question.list()).toEqual([])
+  const parts = (yield* fixture.sessions.messages({ sessionID: fixture.session.id })).flatMap((message) => message.parts).filter((part) => part.type === "tool")
+  expect(parts.filter((part) => part.tool === "glob" && part.state.status === "completed")).toHaveLength(2)
+  expect(parts.find((part) => part.tool === "question")?.state.status).toBe("error")
+}))
+
+for (const waiting of ["shell", "permission"]) it.instance(`Promise.race cancels ${waiting} and allows later tools`, () => Effect.gen(function* () {
+  const fixture = yield* resolveTools()
+  const question = yield* Question.Service
+  const permission = yield* Permission.Service
+  const instance = yield* TestInstance
+  if (waiting === "permission") {
+    yield* Effect.promise(() => Bun.write(path.join(instance.directory, "waiting.txt"), "waiting"))
+    yield* fixture.sessions.setPermission({ sessionID: fixture.session.id, permission: [{ permission: "read", pattern: "*", action: "ask" }] })
+  }
+  const execute = fixture.tools.execute?.execute
+  if (!execute) throw new Error("execute is missing")
+  const controller = new AbortController()
+  const command = process.platform === "win32" ? "Write-Output RACE_READY; Start-Sleep -Seconds 30" : "echo RACE_READY; sleep 30"
+  const code = `const process = ${waiting === "permission" ? 'tools.$opencode.read({filePath:"waiting.txt"})' : `tools.$opencode.bash({command:${JSON.stringify(command)}})`};
+    await tools.$opencode.question({questions:[{question:"Race now?",header:"Test",options:[]}]});
+    const result = await Promise.race([process, "done"]); await tools.$opencode.glob({pattern:"*"}); return result;`
+  const pending = yield* Effect.tryPromise({ try: () => Promise.resolve(execute({ code }, {
+    toolCallId: "execute-shell-race", abortSignal: controller.signal, messages: [],
+  })), catch: (error) => error }).pipe(Effect.forkScoped)
+  // 等实际进程输出或权限请求出现后才释放问题，确保取消确实发生在宿主等待期间。
+  yield* pollWithTimeout(waiting === "permission" ? permission.list().pipe(Effect.map((items) => items.length > 0 || undefined)) : fixture.sessions.messages({ sessionID: fixture.session.id }).pipe(Effect.map((messages) =>
+    messages.flatMap((message) => message.parts).some((part) => part.type === "tool" && part.tool === "bash" &&
+      part.state.status === "running" && String(part.state.metadata?.output).includes("RACE_READY")) || undefined,
+  )), "race shell did not start", "10 seconds")
+  const request = yield* pollWithTimeout(question.list().pipe(Effect.map((items) => items[0])), "race question not presented")
+  yield* question.reply({ requestID: request.id, answers: [["continue"]] })
+  const result = yield* awaitWithTimeout(Fiber.join(pending), "race shell cleanup did not finish", "10 seconds")
+    .pipe(Effect.ensuring(Effect.sync(() => controller.abort())))
+  expect(result).toMatchObject({ output: "done" })
+  const parts = (yield* fixture.sessions.messages({ sessionID: fixture.session.id })).flatMap((message) => message.parts).filter((part) => part.type === "tool")
+  expect(parts.some((part) => part.state.status === "running" || part.state.status === "pending")).toBe(false)
+  expect(parts.find((part) => part.tool === "glob")?.state.status).toBe("completed")
+  expect(yield* permission.list()).toEqual([])
+}))
+
+it.instance("dismissed question terminates execute rather than entering its catch mutation", () => Effect.gen(function* () {
+  // 使用 Question 服务的公开拒绝操作，区分用户关闭交互与普通工具异常。
+  // catch 里放置真实文件操作，能捕获把 QuestionRejectedError 错当普通 JS 错误的回归。
+  const instance = yield* TestInstance
+  const question = yield* Question.Service
+  const fixture = yield* resolveTools()
+  const execute = fixture.tools.execute?.execute
+  if (!execute) throw new Error("execute is missing")
+  const patch = "*** Begin Patch\n*** Add File: after-dismiss.txt\n+unwanted\n*** End Patch"
+  const code = `try { await tools.$opencode.question({questions:[{question:"Proceed?",header:"Test",options:[{label:"Yes",description:"Proceed"}]}]}); } catch { await tools.$opencode.apply_patch({patchText:${JSON.stringify(patch)}}); } return "bypassed";`
+  const pending = yield* Effect.tryPromise({
+    try: () => Promise.resolve(execute({ code }, { toolCallId: "execute-question", abortSignal: new AbortController().signal, messages: [] })), catch: (error) => error,
+  }).pipe(Effect.exit, Effect.forkScoped)
+  const request = yield* pollWithTimeout(question.list().pipe(Effect.map((items) => items[0])), "question not presented")
+  yield* question.reject(request.id)
+  expect(Exit.isFailure(yield* Fiber.join(pending))).toBe(true)
+  expect(yield* Effect.promise(() => Bun.file(path.join(instance.directory, "after-dismiss.txt")).exists())).toBe(false)
+  expect(yield* question.list()).toEqual([])
+}))
+
+it.instance("user abort waits for shell cleanup and retains its partial child output", () => Effect.gen(function* () {
+  // 长等待只作为被取消的实际进程，不用它作为测试同步手段。
+  // Promise 返回后再检查终态，防止父层提前返回却把运行中 child 留在后台。
+  const fixture = yield* resolveTools()
+  const execute = fixture.tools.execute?.execute
+  if (!execute) throw new Error("execute is missing")
+  const controller = new AbortController()
+  const command = process.platform === "win32" ? 'Write-Output EXECUTE_READY; Start-Sleep -Seconds 30' : 'echo EXECUTE_READY; sleep 30'
+  const pending = yield* Effect.tryPromise({
+    try: () => Promise.resolve(execute({ code: `await tools.$opencode.bash({command:${JSON.stringify(command)}}); return "unreachable";` },
+      { toolCallId: "execute-abort", abortSignal: controller.signal, messages: [] })), catch: (error) => error,
+  }).pipe(Effect.exit, Effect.forkScoped)
+  // 实际进程发布输出才取消，保证覆盖已启动 Shell 的 kill/drain 路径。
+  yield* pollWithTimeout(fixture.sessions.messages({ sessionID: fixture.session.id }).pipe(Effect.map((messages) =>
+    messages.flatMap((message) => message.parts).find((part) => part.type === "tool" && part.tool === "bash" &&
+      part.state.status === "running" && String(part.state.metadata?.output).includes("EXECUTE_READY")),
+  )), "shell readiness was not published", "10 seconds")
+  controller.abort()
+  expect(Exit.isFailure(yield* Fiber.join(pending))).toBe(true)
+  const child = (yield* fixture.sessions.messages({ sessionID: fixture.session.id })).flatMap((message) => message.parts)
+    .find((part) => part.type === "tool" && part.tool === "bash")
+  if (child?.type !== "tool") throw new Error("Expected shell child")
+  expect(["completed", "error"]).toContain(child.state.status)
+  if ("metadata" in child.state) expect(child.state.metadata?.output).toContain("EXECUTE_READY")
+}))
+
+it.instance("MCP child hooks run once and persist the actual hook-modified input", () => Effect.gen(function* () {
+  // 带下划线的 server 名也通过真实宿主分组，单元夹具的目录构造无法代替此断言。
+  // 第一项 hook 失败、第二项改参成功，共同验证普通错误可恢复且没有重复执行。
+  const plugin = yield* Plugin.Service
+  const calls: string[] = []
+  const outputs: unknown[] = []
+  const fixture = yield* resolveMcp("my_server").pipe(Effect.provideService(Plugin.Service, { ...plugin,
+    trigger: (name, input, output) => Effect.sync(() => {
+      if ((name === "tool.execute.before" || name === "tool.execute.after") && isRecord(input)) {
+        calls.push(`${name}:${input.tool}:${input.callID}`)
+        if (input.tool === "my_server_add" && name === "tool.execute.before" && isRecord(output) && isRecord(output.args)) {
+          if (output.args.a === -1) throw new Error("hook refused")
+          output.args.a = 3
+        }
+        if (input.tool === "my_server_add" && name === "tool.execute.after") outputs.push(output)
+      }
+      return output
+    }),
+  }))
+  const execute = fixture.tools.execute?.execute
+  if (!execute) throw new Error("execute is missing")
+  expect(fixture.instructions.join("\n")).toContain("tools.my_server.add(")
+  const result = yield* Effect.promise(() => Promise.resolve(execute({ code: `let failed; try {await tools.my_server.add({a:-1,b:0});} catch(e) {failed=e.message;} const result=await tools.my_server.add({a:2,b:4}); return {failed,sum:result.sum};` },
+    { toolCallId: "execute-hooks", abortSignal: new AbortController().signal, messages: [] })))
+  if (!isRecord(result) || typeof result.output !== "string") throw new Error("Expected execute receipt")
+  expect(JSON.parse(result.output)).toEqual({ failed: "hook refused", sum: 7 })
+  expect(calls).toEqual(["tool.execute.before:execute:execute-hooks", "tool.execute.before:my_server_add:execute-hooks/1",
+    "tool.execute.before:my_server_add:execute-hooks/2", "tool.execute.after:my_server_add:execute-hooks/2", "tool.execute.after:execute:execute-hooks"])
+  expect(outputs).toMatchObject([{ content: [{ type: "text", text: '{"sum":7}' }], program: { value: { sum: 7 } } }])
+  const parts = (yield* fixture.sessions.messages({ sessionID: fixture.session.id })).flatMap((message) => message.parts).filter((part) => part.type === "tool")
+  expect(parts).toMatchObject([{ state: { status: "error" } }, { state: { status: "completed", input: { a: 3, b: 4 } } }])
+}))
+
+for (const reply of ["once", "reject"] as const) {
+  // 两种决定经过同一个真实待审请求；拒绝须终止解释器，批准则继续原调用。
+  it.instance(`MCP explicit permission ${reply} uses child identity and terminal scope`, () => Effect.gen(function* () {
+    const permission = yield* Permission.Service
+    const fixture = yield* resolveMcp()
+    yield* fixture.sessions.setPermission({ sessionID: fixture.session.id, permission: [{ permission: "fixtures_add", pattern: "*", action: "ask" }] })
+    const execute = fixture.tools.execute?.execute
+    if (!execute) throw new Error("execute is missing")
+    const pending = yield* Effect.tryPromise({
+      try: () => Promise.resolve(execute({ code: 'try { return (await tools.fixtures.add({a:1,b:2})).sum; } catch { return "bypassed"; }' },
+        { toolCallId: "execute-mcp-ask", abortSignal: new AbortController().signal, messages: [] })), catch: (error) => error,
+    }).pipe(Effect.exit, Effect.forkScoped)
+    const request = yield* pollWithTimeout(permission.list().pipe(Effect.map((items) => items[0])), "MCP permission not presented")
+    expect(request.permission).toBe("fixtures_add")
+    expect(request.tool?.callID).toBe("execute-mcp-ask/1")
+    yield* permission.reply({ requestID: request.id, reply })
+    const result = yield* Fiber.join(pending)
+    expect(Exit.isSuccess(result)).toBe(reply === "once")
+    if (Exit.isSuccess(result)) expect(result.value).toMatchObject({ output: "3" })
+    expect(yield* permission.list()).toEqual([])
+  }))
+}
+
+it.instance("goal read and complete share the trusted turn inside execute", () => Effect.gen(function* () {
+  // 先尝试未经 read 的 complete，确认新增入口仍保留 Goal 原门禁。
+  // 最后检查 SessionGoal 权威状态，防止测试只验证工具返回了成功措辞。
+  const fixture = yield* resolveTools()
+  const goal = yield* SessionGoal.Service
+  yield* goal.set(fixture.session.id, { objective: "fixture goal" })
+  const execute = fixture.tools.execute?.execute
+  if (!execute) throw new Error("execute is missing")
+  const result = yield* Effect.promise(() => Promise.resolve(execute({ code: `let gate; try {await tools.$opencode.goal({operate:"complete",reason:"premature"});} catch(e) {gate=e.message;} await tools.$opencode.goal({operate:"read"}); await tools.$opencode.goal({operate:"complete",reason:"verified"}); return gate;` },
+    { toolCallId: "execute-goal", abortSignal: new AbortController().signal, messages: [] })))
+  expect(result).toMatchObject({ output: expect.stringContaining("before changing the goal") })
+  const current = yield* goal.get(fixture.session.id)
+  expect(Option.isSome(current) && current.value.status).toBe("complete")
+}))
+
+it.instance("patch deletion is prechecked before preceding writes", () => Effect.gen(function* () {
+  // 文件删除的风险由既有 structured files 分类，而非仅凭 edit 权限名决定。
+  const instance = yield* TestInstance
+  yield* Effect.promise(() => Bun.write(path.join(instance.directory, "delete-me.txt"), "keep"))
+  yield* Effect.gen(function* () {
+    const fixture = yield* resolveTools()
+    const execute = fixture.tools.execute?.execute
+    if (!execute) throw new Error("execute is missing")
+    const first = "*** Begin Patch\n*** Add File: before-delete.txt\n+before\n*** End Patch"
+    const last = "*** Begin Patch\n*** Delete File: delete-me.txt\n*** End Patch"
+    const result = yield* Effect.tryPromise({
+      try: () => Promise.resolve(execute({ code: `await tools.$opencode.apply_patch({patchText:${JSON.stringify(first)}}); await tools.$opencode.apply_patch({patchText:${JSON.stringify(last)}});` },
+        { toolCallId: "execute-delete", abortSignal: new AbortController().signal, messages: [] })), catch: (error) => error,
+    }).pipe(Effect.exit)
+    expect(Exit.isFailure(result)).toBe(true)
+    // 复用补丁解析器即可发现后继删除，整段拒绝发生在前序写入之前。
+    expect(yield* Effect.promise(() => Bun.file(path.join(instance.directory, "before-delete.txt")).exists())).toBe(false)
+    expect(yield* Effect.promise(() => Bun.file(path.join(instance.directory, "delete-me.txt")).text())).toBe("keep")
+  }).pipe(Effect.provideService(PermissionReviewer.Service, { review: (input) => Effect.succeed({
+    action: "deny", reason: "fixture deletion denied", reviewID: input.reviewID, risk_level: "medium", user_authorization: "low",
+  }) }))
+}))
+
+for (const tool of ["apply_patch", "edit"]) {
+  // 两种模型的编辑工具分别进入相同 child 接线，父失败不改变已经完成的文件事实。
+  it.instance(`failed parent retains ${tool} file ownership for Summary and Revert`, () => Effect.gen(function* () {
+    const instance = yield* TestInstance
+    yield* Effect.promise(() => Bun.write(path.join(instance.directory, "owned.txt"), "old\n"))
+    const model = tool === "apply_patch" ? provider.model : ProviderTest.model({ api: { ...provider.model.api, id: "claude-test" } })
+    const fixture = yield* resolveTools(model)
+    yield* fixture.sessions.updatePart({ id: PartID.ascending(), messageID: fixture.user.id, sessionID: fixture.session.id, type: "text", text: "change owned.txt" })
+    const args = tool === "apply_patch" ? { patchText: "*** Begin Patch\n*** Update File: owned.txt\n@@\n-old\n+new\n*** End Patch" }
+      : { filePath: "owned.txt", edits: [{ oldString: "old", newString: "new" }] }
+    yield* fixture.processor.process({ user: fixture.user, sessionID: fixture.session.id, model, agent: fixture.agent,
+      system: [`await tools.$opencode.read({filePath:${JSON.stringify(path.join(instance.directory, "owned.txt"))}}); await tools.$opencode.${tool}(${JSON.stringify(args)}); throw new Error("parent failed");`], messages: [], tools: fixture.tools })
+    const messages = yield* fixture.sessions.messages({ sessionID: fixture.session.id })
+    const parts = messages.flatMap((message) => message.parts).filter((part) => part.type === "tool")
+    expect(parts.find((part) => part.tool === "execute")?.state.status).toBe("error")
+    expect(parts.find((part) => part.tool === tool)).toMatchObject({ state: { status: "completed" } })
+    expect(parts.find((part) => part.tool === tool)?.metadata?.worktree).toBe("declared")
+    expect(parts.find((part) => part.tool === "execute")?.metadata?.worktree).not.toBe("ambient")
+    const summary = yield* SessionSummary.Service
+    // 使用原 Summary owner 计算 diff；如果必须修改其算法才通过，说明 child 归属接线有误。
+    expect((yield* summary.computeDiff({ messages })).map((item) => item.file)).toEqual(["owned.txt"])
+    expect(yield* Effect.promise(() => Bun.file(path.join(instance.directory, "owned.txt")).text())).toBe("new\n")
+    // 父脚本失败不会抹掉真实 child 的文件权属；撤回只恢复其文件，保留其它写者的新文件。
+    yield* Effect.promise(() => Bun.write(path.join(instance.directory, "unrelated.txt"), "keep"))
+    const revert = yield* SessionRevert.Service
+    // 通过真实用户轮次边界撤回，覆盖 Snapshot 与 declared authority 的完整消费路径。
+    yield* revert.revert({ sessionID: fixture.session.id, messageID: fixture.user.id })
+    expect(yield* Effect.promise(() => Bun.file(path.join(instance.directory, "owned.txt")).text())).toBe("old\n")
+    expect(yield* Effect.promise(() => Bun.file(path.join(instance.directory, "unrelated.txt")).text())).toBe("keep")
+  }), { git: true })
+}

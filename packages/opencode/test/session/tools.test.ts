@@ -50,6 +50,7 @@ const fakePlugin = Plugin.Service.of({
 
 const fakePermission = Permission.Service.of({
   ask: () => Effect.void,
+  beginExecute: () => Effect.die("Unexpected execute in direct tool timing test"),
   reply: () => Effect.void,
   list: () => Effect.succeed([]),
 } satisfies Permission.Interface)
@@ -62,6 +63,7 @@ const fakeTruncate = Truncate.Service.of({
 } satisfies Truncate.Interface)
 
 const layer = Layer.mergeAll(
+  Layer.mock(Session.Service, {}),
   Layer.succeed(Plugin.Service, fakePlugin),
   Layer.succeed(Permission.Service, fakePermission),
   Layer.succeed(MCP.Service, fakeMcp()),
@@ -141,7 +143,8 @@ it.effect("preserves running tool start time across metadata updates", () =>
           )),
         ),
       completeToolCall: () => Effect.void,
-    } satisfies Pick<SessionProcessor.Handle, "message" | "updateToolCall" | "completeToolCall">
+      runChild: () => Effect.die("Unexpected execute child in direct tool timing test"),
+    } satisfies Pick<SessionProcessor.Handle, "message" | "updateToolCall" | "completeToolCall" | "runChild">
 
     const tools = yield* SessionTools.resolve({
       agent,
@@ -155,7 +158,7 @@ it.effect("preserves running tool start time across metadata updates", () =>
       goalSvc: { get: () => Effect.succeed(null), set: () => Effect.succeed(null), clear: () => Effect.succeed(false), accountUsage: () => Effect.void } as never,
       promptOps: {} as never,
     })
-    const execute = tools.timing.execute
+    const execute = tools.tools.timing.execute
     if (!execute) throw new Error("timing tool is missing execute")
 
     yield* Effect.promise(() =>

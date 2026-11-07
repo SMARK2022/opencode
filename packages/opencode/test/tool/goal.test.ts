@@ -76,6 +76,7 @@ it.instance(
       const { goalSvc, session, def } = yield* setupGoalTool()
       const result = yield* def.execute({ operate: "read" }, makeCtx(session.id, goalSvc))
       expect(result.output).toContain("No goal")
+      expect(result.program?.value).toBeNull()
     }),
   { git: true },
 )
@@ -92,6 +93,9 @@ it.instance(
 
       expect(result.output).toContain("test objective")
       expect(result.output).toContain("active")
+      // JS得到同一次服务快照的扁平业务值，既有文本和受信read gate仍分别验收。
+      expect(result.program?.value).toMatchObject({ objective: "test objective", status: "active", reason: null, tokensUsed: 0, tokenBudget: null, timeUsedSeconds: 0 })
+      expect(result.program?.value).not.toHaveProperty("remainingTokens")
       // trusted snapshot 被写入 goalTurn，供后续 transition 校验
       expect(goalTurn.read).toBeDefined()
       expect(goalTurn.read!.status).toBe("active")

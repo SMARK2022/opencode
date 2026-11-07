@@ -3,7 +3,7 @@ import { ConfigPermissionV1 } from "@opencode-ai/core/v1/config/permission"
 import { Config } from "@/config/config"
 import { InstanceState } from "@/effect/instance-state"
 import { Wildcard } from "@opencode-ai/core/util/wildcard"
-import { Deferred, Effect, Layer, Context } from "effect"
+import { Cause, Deferred, Effect, Layer, Context, Semaphore } from "effect"
 import os from "os"
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 import { EventV2Bridge } from "@/event-v2-bridge"
@@ -13,13 +13,28 @@ import { PermissionReviewer } from "./reviewer/service"
 import { PermissionSessionCache } from "./cache/session-cache"
 import { PermissionCircuitBreaker } from "./reviewer/circuit-breaker"
 import * as Option from "effect/Option"
+import { Shell } from "@opencode-ai/core/shell"
 
 export const Event = PermissionV1.Event
 
 export interface Interface {
   readonly ask: (input: PermissionV1.AskInput) => Effect.Effect<void, PermissionV1.Error>
+  readonly beginExecute: (input: {
+    sessionID: PermissionV1.AskInput["sessionID"]
+    tool: { messageID: string; callID: string }
+    code: string
+    calls: readonly PermissionPrecheck.ExecuteCall[]
+    ruleset: PermissionV1.Ruleset
+    agent: string
+    stop(reason: Error): void
+  }) => Effect.Effect<ExecuteReview, PermissionV1.Error>
   readonly reply: (input: PermissionV1.ReplyInput) => Effect.Effect<void, PermissionV1.NotFoundError>
   readonly list: () => Effect.Effect<ReadonlyArray<PermissionV1.Request>>
+}
+
+export type ExecuteReview = {
+  ready(): Effect.Effect<void>
+  ask(request: PermissionV1.AskInput): Effect.Effect<void, PermissionV1.Error>
 }
 
 interface PendingEntry {
@@ -50,6 +65,7 @@ const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
     const events = yield* EventV2Bridge.Service
+    const config = yield* Config.Service
     const state = yield* InstanceState.make<State>(
       Effect.fn("Permission.state")(function* (ctx) {
         void ctx
@@ -71,8 +87,8 @@ const layer = Layer.effect(
       }),
     )
 
-    const ask = Effect.fn("Permission.ask")(function* (input: PermissionV1.AskInput) {
-      const { approved, pending } = yield* InstanceState.get(state)
+    const matchRequest = Effect.fn("Permission.matchRequest")(function* (input: PermissionV1.AskInput) {
+      const { approved } = yield* InstanceState.get(state)
       const { ruleset, ...request } = input
       let needsAsk = false
       // #199：needsAuto 与 needsAsk 是两个独立门控。混合请求中 auto 可独立拒绝
@@ -114,16 +130,21 @@ const layer = Layer.effect(
         needsAsk = true
       }
 
-      // #199：auto 分支只在有 pattern 命中 auto 规则时进入。所有协作者通过
-      // #199：serviceOption 可选注入，使旧测试和小运行时缺少 reviewer 时仍能
-      // #199：退回正常 ask 路径而非崩溃。
-      if (needsAuto) {
+      return { needsAsk, needsAuto, autoPatterns }
+    })
+
+    // 普通请求与组合请求共享事件、reviewer 和失败策略，只区分批准的缓存寿命。
+    const reviewAuto = Effect.fn("Permission.reviewAuto")(function* (
+      request: Omit<PermissionV1.AskInput, "ruleset">,
+      prechecked?: PermissionPrecheck.Decision,
+      useCache = true,
+    ) {
         // #203：协作者在 ask 时从运行时上下文解析——AppNodeBuilder 下 Permission.node 仅声明
         // #203：cache/circuit 依赖，reviewer 与 config 作为可选协作者经 serviceOption 获取
         const reviewer = Option.getOrUndefined(yield* Effect.serviceOption(PermissionReviewer.Service))
         // #199：会话级缓存避免对同一 auto 请求重复调用 reviewer，但缓存键包含
         // #199：command/cwd/shell/filepath/diff 上下文，上下文变化即失效。
-        const cache = Option.getOrUndefined(yield* Effect.serviceOption(PermissionSessionCache.Service))
+        const cache = useCache ? Option.getOrUndefined(yield* Effect.serviceOption(PermissionSessionCache.Service)) : undefined
         // #199：熔断器跟踪连续拒绝密度；触发后该 session 的 auto 审批永久中断，
         // #199：但当前调用的 deny 结果不依赖熔断状态，熔断仅作为咨询性信号。
         const circuit = Option.getOrUndefined(yield* Effect.serviceOption(PermissionCircuitBreaker.Service))
@@ -139,12 +160,12 @@ const layer = Layer.effect(
         const reviewerFailureFallback = reviewerDisabled ? "user" : (permissionConfig?.auto_review?.fallback ?? "user")
         // #199：autoRequest 只包含 auto 控制的 pattern。若缓存 ask 控制的 pattern，
         // #199：用户回复前规则变更会使原本被拒绝的混合请求变成静默 allow。
-        const autoRequest = { ...request, patterns: autoPatterns }
+        const autoRequest = request
         if (cache && (yield* cache.has(autoRequest))) {
           // #199：缓存命中只满足 auto 部分。若另一个 pattern 仍需 ask，不能提前
           // #199：返回；但缓存命中是 auto 非拒绝，需像全新 allow 一样重置熔断连续计数。
           if (circuit) yield* circuit.recordNonDenial(request.sessionID)
-          if (!needsAsk) return
+          return false
         } else {
           // #199：PermissionAuto.evaluate 按 precheck → fast-path allow → deny →
           // #199：reviewer → fail-closed 顺序裁决；strict 模式禁用 fast-path 但保留 deny。
@@ -163,6 +184,7 @@ const layer = Layer.effect(
                 patterns: [...autoRequest.patterns],
                 precheck: review.precheck,
               }),
+            prechecked,
           )
           yield* Effect.logInfo("auto evaluated", { permission: request.permission, action: decision.action, reason: decision.reason })
           if (decision.action === "allow") {
@@ -184,7 +206,7 @@ const layer = Layer.effect(
               // dangerous批准逐次重审；事件照常发布，cautious仍可写原有会话缓存。
               if (cache && decision.precheckLevel !== "dangerous") yield* cache.put(autoRequest, "allow")
             }
-            if (!needsAsk) return
+            return false
           }
           if (decision.action === "deny") {
             // #199：熔断器只跟踪 reviewer deny——precheck deny 是确定性的静态规则，
@@ -226,12 +248,13 @@ const layer = Layer.effect(
           }
           // #199：reviewer 不可用或返回 ask 时回退到用户审批，保持 fail-open 语义
           // #199：而非 fail-closed——未配置 reviewer 不应阻断正常工作流。
-          if (decision.action === "ask") needsAsk = true
+          return decision.action === "ask"
         }
-      }
+    })
 
-      if (!needsAsk) return
-
+    const requestUser = Effect.fn("Permission.requestUser")(function* (input: PermissionV1.AskInput) {
+      const { pending } = yield* InstanceState.get(state)
+      const { ruleset, ...request } = input
       const id = request.id ?? PermissionV1.ID.ascending()
       const info: PermissionV1.Request = {
         id,
@@ -253,6 +276,79 @@ const layer = Layer.effect(
           pending.delete(id)
         }),
       )
+    })
+
+    const ask = Effect.fn("Permission.ask")(function* (input: PermissionV1.AskInput) {
+      const matched = yield* matchRequest(input)
+      const autoAsk = matched.needsAuto
+        ? yield* reviewAuto({ ...input, patterns: matched.autoPatterns })
+        : false
+      if (matched.needsAsk || autoAsk) yield* requestUser(input)
+    })
+
+    const beginExecute: Interface["beginExecute"] = Effect.fn("Permission.beginExecute")(function* (input) {
+      const cfg = yield* config.get()
+      const cwd = yield* InstanceState.directory
+      const shell = Shell.acceptable(cfg.shell)
+      // 本次脚本只持有风险上界和一次批准；Session 的普通审批缓存保持原职责。
+      // approvedOnce 区分 general 起点与真实初次授权，让 strict 的首轮仍到 reviewer。
+      let approvedLevel: PermissionPrecheck.Level = "general"
+      let approvedOnce = false
+      let stopped = false
+      const gate = Semaphore.makeUnsafe(1)
+      // 所有升阶共用一把锁；并发叶子进入锁后再决定是否复用已完成的审批。
+      const parent = (request?: PermissionV1.AskInput): PermissionV1.AskInput => ({
+        sessionID: input.sessionID, tool: input.tool, ruleset: input.ruleset,
+        permission: "execute", patterns: ["*"], always: [],
+        // 审查保留整段代码；trigger 只记录本次真实请求，包含已有的 completed 恢复摘要。
+        metadata: { agent: input.agent, action_kind: "execute", code: input.code, cwd, shell,
+          probe: input.calls, trigger: request ? [request] : [] },
+      })
+      const terminal = (cause: Cause.Cause<unknown>) => {
+        // 先封住后续接纳再取消现有任务，已结束子调用的记录由 processor 原样保留。
+        stopped = true
+        const error = Cause.squash(cause)
+        input.stop(error instanceof Error ? error : new Error(String(error)))
+        // 取消整个解释器而非抛普通工具错误，JS catch 才无法继续后续副作用。
+        return Effect.interrupt
+      }
+      const check = (request: PermissionV1.AskInput) => gate.withPermits(1)(Effect.gen(function* () {
+        if (stopped) return yield* Effect.interrupt
+        // 每次仍用原分类器分析真实请求；复用的只是本次批准上界，而非旧参数的分类结果。
+        const decision = yield* Effect.promise(() => PermissionPrecheck.evaluate({ ...request,
+          ...(request.permission === "execute" ? { calls: input.calls } : {}),
+        }))
+        // forbidden 在等级复用前终止，先前获批的 dangerous 也不能覆盖它。
+        if (decision.level === "forbidden") return yield* new PermissionV1.AutoDeniedError({ reason: decision.reason, terminal: true })
+        // 锁内重查可让并发同级调用共享一次审批，较高等级仍触发下一次审查。
+        if (approvedOnce && PermissionPrecheck.LEVELS.indexOf(decision.level) <= PermissionPrecheck.LEVELS.indexOf(approvedLevel)) return false
+        const review = request.permission === "execute" ? request : parent(request)
+        // 复用原 AUTO 事件和失败策略，同时关闭宽泛 Session cache 的读写。
+        const asked = yield* reviewAuto(review, decision, false)
+        if (asked) yield* requestUser(review)
+        // 等级记录的是送审的预检结论，不能替换成 reviewer 的 low/medium 等另一套词汇。
+        approvedLevel = decision.level
+        approvedOnce = true
+        // 返回本次是否取得人工批准，让父显式 ask 消费同一申请的结果，而非再弹一次。
+        return asked
+      }).pipe(Effect.catchCause(terminal)))
+      const request = parent()
+      const matched = yield* matchRequest(request).pipe(Effect.catchCause(terminal))
+      // execute 自身的显式 ask 仍然有效，整体 AUTO 与人工匹配各自满足自己的门禁。
+      const asked = yield* check(request)
+      if (matched.needsAsk && !asked) yield* requestUser(request).pipe(Effect.catchCause(terminal))
+      return {
+        // 复用已有锁形成暂停边界；不为扩展构造一个参数缺失的替代权限请求。
+        // 锁只覆盖审查边界；离开ready后仍由原执行器并行运行工具，而非串行化整段脚本。
+        ready: () => gate.withPermits(1)(Effect.suspend(() => stopped ? Effect.interrupt : Effect.void)),
+        ask: (request) => Effect.gen(function* () {
+          // 实际 request 使用宿主读取的最新 ruleset，父批准只满足 AUTO 的风险门槛。
+          const matched = yield* matchRequest(request)
+          yield* check(request)
+          // 叶子 ask 使用最终参数和 child 身份，父 AUTO 批准不代替用户明确要求的询问。
+          if (matched.needsAsk) yield* requestUser(request)
+        }).pipe(Effect.catchCause(terminal)),
+      }
     })
 
     const reply = Effect.fn("Permission.reply")(function* (input: PermissionV1.ReplyInput) {
@@ -320,7 +416,7 @@ const layer = Layer.effect(
       return Array.from(pending.values(), (item) => item.info)
     })
 
-    return Service.of({ ask, reply, list })
+    return Service.of({ ask, beginExecute, reply, list })
   }),
 )
 
@@ -422,6 +518,6 @@ export function visibleTools<T>(tools: Record<string, T>, ruleset: PermissionV1.
 // #199：Permission.node 声明对 session cache 和 circuit breaker 的依赖，使
 // #199：builder 在构建 Permission 层时自动提供这些服务。reviewer 不在此声明——
 // #199：它是可选协作者，通过 serviceOption 访问，缺失时退回 ask 路径。
-export const node = LayerNode.make({ service: Service, layer: layer, deps: [EventV2Bridge.node, PermissionSessionCache.node, PermissionCircuitBreaker.node] })
+export const node = LayerNode.make({ service: Service, layer: layer, deps: [EventV2Bridge.node, PermissionSessionCache.node, PermissionCircuitBreaker.node, Config.node] })
 
 export * as Permission from "."

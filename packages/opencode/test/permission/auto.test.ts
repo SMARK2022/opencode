@@ -68,6 +68,18 @@ const shellExternalDirectory = (
   )
 
 describe("permission auto routing", () => {
+  test("execute uses the host-combined decision rather than classifying its wrapper name", async () => {
+    const request = { permission: "execute", patterns: ["*"], metadata: { precheck: { level: "safe" } } }
+    const reviewer: PermissionAuto.Reviewer = { review: (input) => Effect.sync(() => {
+      expect(input.precheck).toEqual({ level: "cautious", reason: "combined child risk" })
+      return { action: "allow" as const, reason: "fixture", reviewID: input.reviewID, risk_level: "medium" as const, user_authorization: "high" as const }
+    }) }
+    // metadata 中同名字段只是证据，只有可信宿主的独立参数承载已计算等级。
+    expect(await Effect.runPromise(PermissionAuto.evaluate(request, reviewer, undefined,
+      { level: "cautious", reason: "combined child risk" }))).toMatchObject({ action: "allow", source: "reviewer" })
+    expect(await Effect.runPromise(PermissionAuto.evaluate(request))).toMatchObject({ action: "allow", source: "precheck" })
+  })
+
   // #202：验证 precheck safe 路径——只读命令不经过 reviewer，source 标记为 precheck
   test("allows safe commands after precheck without reviewer load", async () => {
     await expect(bash("git status --porcelain")).resolves.toMatchObject({ action: "allow", source: "precheck" })

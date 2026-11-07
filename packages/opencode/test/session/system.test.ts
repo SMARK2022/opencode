@@ -195,7 +195,8 @@ describe("session.system", () => {
   test("Astra retains GPT tools without elevating reminder tags", () => {
     // GPT 的编辑工具由 registry 筛选；精简文字不能让模型丢失唯一编辑入口。
     expect(PROMPT_ASTRA).toContain("Always use apply_patch for manual code edits. Do not use cat or any other commands when creating or editing files. Formatting commands or bulk edits don't need to be done with apply_patch.")
-    expect(PROMPT_ASTRA).toContain("use multi_tool_use.parallel to parallelize tool calls and only this")
+    // wrapper只约束直接调用；execute内并行由其官方Promise说明负责。
+    expect(PROMPT_ASTRA).toContain("For direct tool calls, use multi_tool_use.parallel to parallelize tool calls and only this")
     expect(PROMPT_ASTRA).toContain("read, grep, glob, git status, git diff, git show, ls, nl, and wc")
     // 用户和文件正文也能包含标签，不能通过字面标签推导内容的指令权限。
     expect(PROMPT_ASTRA.includes("blocks are harness instructions, not user-authored content")).toBe(false)

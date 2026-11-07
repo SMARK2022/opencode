@@ -110,8 +110,8 @@ export function cellTypeLabel(kind: vscode.NotebookCellKind) {
   return kind === vscode.NotebookCellKind.Markup ? "markdown" : "code"
 }
 
-export function existingOuts(cell: vscode.NotebookCell) {
-  return [...new Set(cell.outputs.flatMap((cellOutput) => cellOutput.items.map((item) => shortMime(item.mime))))]
+export function existingOuts(cell: vscode.NotebookCell, full = false) {
+  return [...new Set(cell.outputs.flatMap((cellOutput) => cellOutput.items.map((item) => full ? item.mime : shortMime(item.mime))))]
 }
 
 export function executionText(cell: vscode.NotebookCell) {

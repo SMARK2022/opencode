@@ -33,6 +33,7 @@ import { SessionRevert } from "@/session/revert"
 import { SessionRequestUsage } from "@opencode-ai/core/session/request-usage"
 import { SessionSummary } from "@/session/summary"
 import { SessionPrompt } from "@/session/prompt"
+import { SessionGoal } from "@/session/goal"
 import { Instruction } from "@/session/instruction"
 import { LLM } from "@/session/llm"
 import { LSP } from "@/lsp/lsp"
@@ -101,6 +102,8 @@ export const AppLayer = AppNodeBuilderV1.build(
     // V1 prompt 与 processor 使用同一个全局账本实例，不能按项目构造另一份明细状态。
     SessionRequestUsage.node,
     SessionPrompt.node,
+    // debug复用共享工具宿主时直接消费Goal；导出现有依赖实例而非另建运行时。
+    SessionGoal.node,
     Instruction.node,
     LLM.node,
     LSP.node,

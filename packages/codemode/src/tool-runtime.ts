@@ -1,4 +1,5 @@
 import { Cause, Effect, Schema } from "effect"
+import DESCRIPTION from "./code-mode.txt" with { type: "text" }
 import { ToolError, toolError } from "./tool-error.js"
 import {
   decodeInput as decodeToolInput,
@@ -20,6 +21,16 @@ import {
 } from "./values.js"
 
 const estimateTokens = (input: string) => Math.max(0, Math.round(input.length / 4))
+
+// Section markers are file structure, not model instructions; retain the upstream text verbatim.
+const prompt = Object.fromEntries(
+  DESCRIPTION.trimEnd().split(/\r?\n(?=@@ )/).map((block) => {
+    const lines = block.split(/\r?\n/)
+    return [lines[0].slice(3), lines.slice(1).join("\n")] as const
+  }),
+)
+
+export const description = prompt.description
 
 export type HostTool<R = never> = (...args: Array<unknown>) => Effect.Effect<unknown, unknown, R>
 
@@ -326,14 +337,18 @@ const definitions = <R>(
   return entries
 }
 
-const describeDefinition = <R>(path: string, definition: Definition<R>): ToolDescription => ({
-  path,
-  description: definition.description,
-  signature: `${toolExpression(path)}(input: ${inputTypeScript(definition, true)}): Promise<${outputTypeScript(definition, true)}>`,
-})
+const describeDefinition = <R>(path: string, definition: Definition<R>): ToolDescription => {
+  const input = inputTypeScript(definition, true)
+  // 沿官方调用示例显示对象参数；空对象签名对应运行时的零参规范化。
+  return {
+    path,
+    description: definition.description,
+    signature: `${toolExpression(path)}(${input === "{}" ? "" : input}): Promise<${outputTypeScript(definition, true)}>`,
+  }
+}
 
 const visibleDefinitions = <R>(tools: HostTools<R>) =>
-  definitions(tools).map(({ path, definition }) => ({
+  definitions(tools).sort((left, right) => compareText(left.path, right.path)).map(({ path, definition }) => ({
     path,
     definition,
     description: describeDefinition(path, definition),
@@ -350,8 +365,7 @@ export type DiscoveryPlan = {
 
 export type SearchEntry = {
   readonly description: ToolDescription
-  /** Top-level namespace (first path segment), matched by the search `namespace` option. */
-  readonly namespace: string
+  readonly pathWords: ReadonlyArray<string>
   /** Lowercased path + description + input property names/descriptions, for substring matching. */
   readonly searchText: string
 }
@@ -383,9 +397,29 @@ const termForms = (term: string): Array<string> => {
   return forms
 }
 
+const compareText = (left: string, right: string) => left < right ? -1 : left > right ? 1 : 0
+
+// 搜索与拼写恢复共用官方排序；完整路径词优先于偶然的子串命中。
+const rank = (entries: ReadonlyArray<SearchEntry>, query: string): Array<SearchEntry> => {
+  const terms = tokenize(query).map(termForms)
+  return entries.map((entry) => {
+    const path = entry.description.path.toLowerCase()
+    const description = entry.description.description.toLowerCase()
+    const score = terms.reduce((total, forms) => total +
+      (forms.some((form) => path === form || path.endsWith(`.${form}`)) ? 20 : 0) +
+      (forms.some((form) => entry.pathWords.includes(form)) ? 12 : 0) +
+      (forms.some((form) => path.includes(form)) ? 8 : 0) +
+      (forms.some((form) => description.includes(form)) ? 4 : 0) +
+      (forms.some((form) => entry.searchText.includes(form)) ? 2 : 0), 0)
+    return { entry, score }
+  }).filter(({ score }) => terms.length === 0 || score > 0)
+    .sort((left, right) => right.score - left.score || compareText(left.entry.description.path, right.entry.description.path))
+    .map(({ entry }) => entry)
+}
+
 const makeSearchTool = (searchIndex: ReadonlyArray<SearchEntry>): Definition => ({
   _tag: "CodeModeTool",
-  description: "Search available Code Mode tools",
+  description: "Search available tools",
   input: SearchInput,
   output: SearchOutput,
   run: (input) =>
@@ -393,10 +427,14 @@ const makeSearchTool = (searchIndex: ReadonlyArray<SearchEntry>): Definition => 
       const request = input as typeof SearchInput.Type
       const query = request.query ?? ""
       const offset = request.offset ?? 0
+      // tools前缀属于模型看到的调用表达式；仅在目录自身未占用该名字时剥离。
+      const namespace = request.namespace !== undefined && !searchIndex.some((entry) => entry.description.path.startsWith("tools."))
+        ? request.namespace === "tools" ? undefined : request.namespace.replace(/^tools\./, "")
+        : request.namespace
       const scoped =
-        request.namespace === undefined
+        namespace === undefined
           ? searchIndex
-          : searchIndex.filter((entry) => entry.namespace === request.namespace)
+          : searchIndex.filter((entry) => entry.description.path === namespace || entry.description.path.startsWith(`${namespace}.`))
       // A query that names one tool path exactly (canonical path or rendered JavaScript
       // expression) is a lookup, not a search: return that tool alone.
       const trimmed = query.trim()
@@ -407,34 +445,7 @@ const makeSearchTool = (searchIndex: ReadonlyArray<SearchEntry>): Definition => 
           : scoped.find(
               (entry) => entry.description.path === pathQuery || toolExpression(entry.description.path) === trimmed,
             )
-      const terms = tokenize(query).map(termForms)
-      // Additive field-weighted scoring, summed across terms: exact path or path segment
-      // (20) > path substring (8) > description substring (4) > any searchable text,
-      // including input parameter names and descriptions (2).
-      const ranked =
-        exact !== undefined
-          ? [exact]
-          : scoped
-              .map((entry) => {
-                const path = entry.description.path.toLowerCase()
-                const description = entry.description.description.toLowerCase()
-                const score = terms.reduce(
-                  (total, forms) =>
-                    total +
-                    (forms.some((form) => path === form || path.endsWith(`.${form}`)) ? 20 : 0) +
-                    (forms.some((form) => path.includes(form)) ? 8 : 0) +
-                    (forms.some((form) => description.includes(form)) ? 4 : 0) +
-                    (forms.some((form) => entry.searchText.includes(form)) ? 2 : 0),
-                  0,
-                )
-                return { entry, score }
-              })
-              .filter(({ score }) => terms.length === 0 || score > 0)
-              .sort(
-                (left, right) =>
-                  right.score - left.score || left.entry.description.path.localeCompare(right.entry.description.path),
-              )
-              .map(({ entry }) => entry)
+      const ranked = exact !== undefined ? [exact] : rank(scoped, query)
       const items = ranked.slice(offset, offset + (request.limit ?? defaultSearchLimit)).map(({ description }) => ({
         ...description,
         path: toolExpression(description.path),
@@ -448,18 +459,19 @@ const makeSearchTool = (searchIndex: ReadonlyArray<SearchEntry>): Definition => 
     }),
 })
 
-const searchDescription = describeDefinition(`${reservedNamespace}.search`, makeSearchTool([]))
+// search只查询当前内存目录，签名和实际返回均为同步对象；真实工具仍返回Promise。
+const searchSignature = `search(${inputTypeScript(makeSearchTool([]), true)}): ${outputTypeScript(makeSearchTool([]), true)}`
 
 const catalogLine = (tool: ToolDescription) => {
   // Keep the tool description concise; the full schema documentation remains in the signature.
   const line = tool.description.split("\n", 1)[0]!.trim()
-  const description = line.length > 120 ? line.slice(0, 119) + "..." : line
+  const description = line.length > 120 ? line.slice(0, 117) + "..." : line
   return description === "" ? `  - ${tool.signature}` : `  - ${tool.signature} // ${description}`
 }
 
 const toSearchEntry = <R>(path: string, definition: Definition<R>, description: ToolDescription): SearchEntry => ({
   description,
-  namespace: path.split(".", 1)[0]!,
+  pathWords: tokenize(path),
   searchText: [
     path,
     definition.description,
@@ -489,8 +501,8 @@ export const assertValidTools = <R>(tools: HostTools<R>): void => {
  * a namespace whose next line does not fit is done while the others keep going - so every
  * namespace gets some representation before any namespace gets everything. The section
  * states exactly how comprehensive it is - overall (COMPLETE vs PARTIAL) and per
- * namespace. Namespace stub lines are never budgeted: every namespace appears with its
- * tool count even at budget 0.
+ * namespace. Namespace stub lines are always emitted: every namespace appears with its
+ * tool count even at budget 0; their cost is deducted before selecting signatures.
  */
 export const prepare = <R>(tools: HostTools<R>, catalogBudget = defaultCatalogBudget): DiscoveryPlan => {
   if (!Number.isSafeInteger(catalogBudget) || catalogBudget < 0) {
@@ -506,7 +518,7 @@ export const prepare = <R>(tools: HostTools<R>, catalogBudget = defaultCatalogBu
     group.push(tool)
     namespaces.set(namespace, group)
   }
-  const ordered = [...namespaces].sort(([left], [right]) => left.localeCompare(right))
+  const ordered = [...namespaces].sort(([left], [right]) => compareText(left, right))
 
   // Select which signatures fit the budget before emitting, so the list can state
   // exactly how comprehensive it is. Round-robin fairness: in each round (namespaces
@@ -519,10 +531,12 @@ export const prepare = <R>(tools: HostTools<R>, catalogBudget = defaultCatalogBu
     picked: new Set<ToolDescription>(),
     queue: [...group].sort(
       (left, right) =>
-        estimateTokens(catalogLine(left)) - estimateTokens(catalogLine(right)) || left.path.localeCompare(right.path),
+        estimateTokens(catalogLine(left)) - estimateTokens(catalogLine(right)) || compareText(left.path, right.path),
     ),
   }))
-  let used = 0
+  // 官方预算包含始终可见的namespace标题；预算不足只隐藏签名，不隐藏工具组。
+  let used = ordered.reduce((total, [namespace, group]) => total +
+    estimateTokens(`- ${namespace} (${group.length} tool${group.length === 1 ? "" : "s"}, none shown)`), 0)
   let active = selections.filter((selection) => selection.queue.length > 0)
   while (active.length > 0) {
     const stillActive: typeof active = []
@@ -545,81 +559,12 @@ export const prepare = <R>(tools: HostTools<R>, catalogBudget = defaultCatalogBu
 
   const empty = described.length === 0
 
-  // Section order is deliberate: workflow first (the top is the least likely part of a long
-  // description to be truncated or skimmed away), then rules, then syntax, with the budgeted
-  // catalog at the bottom. Example call forms use placeholders - never a real or fabricated
-  // tool name - and show both dot and bracket notation so non-identifier names are not normalized.
-  const intro = [
-    empty
-      ? "This is a restricted JavaScript language for calling tools, not a general-purpose runtime."
-      : complete
-        ? "This is a restricted JavaScript language for calling tools, not a general-purpose runtime. Inside the confined interpreter, `tools` contains the Code Mode tools listed below and internal runtime tools; surrounding agent tools are not available."
-        : "This is a restricted JavaScript language for calling tools, not a general-purpose runtime. Inside the confined interpreter, `tools` contains the Code Mode tools listed or searchable below and internal runtime tools; surrounding agent tools are not available.",
-    ...(empty
-      ? []
-      : ["Do not infer or normalize tool names; use only exact signatures shown below or returned by search."]),
-  ]
+  // 固定执行说明与每轮目录分开，目录文案采用官方v2.2.5的完整/部分分支。
+  const intro = prompt[empty ? "intro.empty" : complete ? "intro.complete" : "intro.partial"]
+    .replace("{{searchSignature}}", searchSignature).split("\n")
 
-  // The search step exists only when search is advertised (PARTIAL catalog); a COMPLETE
-  // catalog already shows every signature, so step 1 picks from the list instead.
-  const workflow = empty
-    ? []
-    : [
-        "",
-        "## Workflow",
-        "",
-        ...(complete
-          ? [
-              "1. Pick a tool from the list under `## Available tools` - each line is the exact call signature; use it as-is rather than guessing segments.",
-              "2. Call it using the exact signature shown: `const result = await tools.<namespace>.<tool>(input)`; bracket notation and quotes are part of the path.",
-              "3. Return only the fields you need from structured results; narrow unknown results before reading fields, and avoid returning large raw payloads.",
-            ]
-          : [
-              '1. If needed, discover tools: `return await tools.$codemode.search({ query: "<intent + key nouns>" })`.',
-              "2. In the next execution, copy a returned path exactly, call it, and return only the needed fields.",
-            ]),
-      ]
-
-  const rules = empty
-    ? []
-    : [
-        "",
-        "## Rules",
-        "",
-        complete
-          ? "- Only Code Mode tools listed here and internal runtime tools are available; surrounding agent tools are not implicitly exposed."
-          : "- Only Code Mode tools listed here or returned by `tools.$codemode.search` and internal runtime tools are available; surrounding agent tools are not implicitly exposed.",
-        "- Filter, aggregate, and transform collections in code - never return them raw or call a tool per item across messages.",
-        "- A result typed `Promise<unknown>` may be structured data or text. Before reading fields, check that it is a non-null object and not an array; otherwise handle the returned text or primitive directly.",
-        '- Run independent calls in parallel: `await Promise.all(items.map((item) => tools.<namespace>.<tool>(item)))`, or use `tools.<namespace>["tool-name"](item)` when the listed signature uses bracket notation.',
-        "- `Object.keys(tools)` lists namespaces; `Object.keys(tools.<namespace>)` lists its tools; `for...in` works on both.",
-        ...(complete
-          ? []
-          : [
-              '- Browse one namespace: `await tools.$codemode.search({ query: "", namespace: "<name>" })`.',
-              "- If search returns `next`, repeat the same search with `offset: next.offset`.",
-            ]),
-      ]
-
-  const language = [
-    "",
-    "## Language",
-    "",
-    "Use common JavaScript data operations, functions, control flow, selected standard-library methods, and awaited tool calls. Built-ins include Date, RegExp, Map, Set, URL, URLSearchParams, and URI encoding helpers.",
-    "Modules/imports, classes, generators, timers, fetch, eval, prototype access, unlisted methods, and promise chaining are unavailable. Use Code Mode tools for external operations. Use await with try/catch.",
-    "Dates and URLs serialize to strings at data boundaries; Map/Set/RegExp/URLSearchParams serialize to `{}`.",
-  ]
-
-  const toolSection: Array<string> = [""]
-  if (empty) {
-    toolSection.push("## Available tools", "", "No tools are currently available.")
-  } else {
-    toolSection.push(
-      complete
-        ? "## Available tools (COMPLETE list - every tool is shown below with its full call signature)"
-        : `## Available tools (PARTIAL - ${totalShown} of ${described.length} shown; find the rest with tools.$codemode.search)`,
-      "",
-    )
+  const toolSection: Array<string> = empty ? [] : [""]
+  if (!empty) {
     for (const [namespace, group] of ordered) {
       const picked = shown.get(namespace)!
       const count = `${group.length} tool${group.length === 1 ? "" : "s"}`
@@ -634,12 +579,9 @@ export const prepare = <R>(tools: HostTools<R>, catalogBudget = defaultCatalogBu
       toolSection.push(`- ${namespace} (${label})`)
       for (const tool of group) if (picked.has(tool)) toolSection.push(catalogLine(tool))
     }
-    if (!complete) {
-      toolSection.push("", "Search returns complete callable signatures:", `- ${searchDescription.signature}`)
-    }
   }
 
-  const lines = [...intro, ...workflow, ...rules, ...language, ...toolSection]
+  const lines = [...intro, ...toolSection]
   return {
     catalog: described,
     instructions: lines.join("\n"),
@@ -664,7 +606,7 @@ const namespaceKeys = <R>(tools: HostTools<R>, path: ReadonlyArray<string>): Rea
       !Object.hasOwn(value, segment)
     ) {
       throw new ToolRuntimeError("UnknownTool", `Unknown tool namespace '${path.join(".")}'.`, [
-        "Object.keys(tools) lists the available namespaces; tools.$codemode.search({ query }) finds described tools.",
+        "Use search to find available tools.",
       ])
     }
     value = value[segment] as HostTool<R> | Definition<R> | HostTools<R>
@@ -673,7 +615,7 @@ const namespaceKeys = <R>(tools: HostTools<R>, path: ReadonlyArray<string>): Rea
   return Object.keys(value)
 }
 
-const resolve = <R>(tools: HostTools<R>, path: ReadonlyArray<string>): HostTool<R> | Definition<R> => {
+const resolve = <R>(tools: HostTools<R>, path: ReadonlyArray<string>, index: ReadonlyArray<SearchEntry>): HostTool<R> | Definition<R> => {
   let value: HostTool<R> | Definition<R> | HostTools<R> = tools
 
   for (const segment of path) {
@@ -683,9 +625,14 @@ const resolve = <R>(tools: HostTools<R>, path: ReadonlyArray<string>): HostTool<
       isDefinition(value) ||
       !Object.hasOwn(value, segment)
     ) {
-      throw new ToolRuntimeError("UnknownTool", `Unknown tool '${path.join(".")}'.`, [
-        "Use tools.$codemode.search({ query }) to find available described tools.",
-      ])
+      const name = path.join(".")
+      const namespace = path.length > 1 && Object.hasOwn(tools, path[0]!) ? path[0] : undefined
+      // 仅推荐同一当前目录中的路径，不猜造别名，也不自动执行推荐项。
+      const closest = rank(namespace ? index.filter((entry) => entry.description.path.startsWith(`${namespace}.`)) : index,
+        namespace ? path.slice(1).join(" ") : name)[0]
+      throw new ToolRuntimeError("UnknownTool", closest
+        ? `Unknown tool '${name}'. Did you mean ${toolExpression(closest.description.path)}?`
+        : `Unknown tool '${name}'.`, ["Use search to find available tools."])
     }
     value = value[segment] as HostTool<R> | Definition<R> | HostTools<R>
   }
@@ -711,15 +658,15 @@ export const make = <R>(
   maxToolCalls: number | undefined,
   searchIndex: ReadonlyArray<SearchEntry>,
   hooks?: ToolCallHooks<R>,
+  fetch?: HostTool<R>,
 ): ToolRuntime<R> => {
   const calls: Array<ToolCall> = []
   const callableTools = {
     ...tools,
-    [reservedNamespace]: { search: makeSearchTool(searchIndex) },
+    [reservedNamespace]: { search: makeSearchTool(searchIndex), ...(fetch ? { fetch } : {}) },
   }
 
-  // Wraps the settling portion of a tool call so onToolCallEnd observes success and failure
-  // symmetrically. Interruption (e.g. the execution timeout) fires neither outcome.
+  // 所有终态在原观察出口交付；取消仍向外传播，父进度不能停留在running。
   const observeEnd = <A, E>(effect: Effect.Effect<A, E, R>, call: ToolCallStarted): Effect.Effect<A, E, R> => {
     const onEnd = hooks?.onToolCallEnd
     if (onEnd === undefined) return effect
@@ -736,6 +683,9 @@ export const make = <R>(
           message,
         })
       }),
+      Effect.onInterrupt(() => onEnd({
+        ...call, durationMs: Date.now() - startedAt, outcome: "failure", message: "Tool execution interrupted",
+      })),
     )
   }
 
@@ -766,13 +716,14 @@ export const make = <R>(
             recordCall(call)
             return calls.length - 1
           }).pipe(Effect.tap((index) => hooks?.onToolCallStart?.({ index, name, input }) ?? Effect.void))
-        const tool = resolve(callableTools, path)
+        const tool = resolve(callableTools, path, searchIndex)
         let describedInput: unknown
         if (isDefinition(tool)) {
-          if (externalArgs.length !== 1)
-            throw new ToolRuntimeError("InvalidToolInput", `Tool '${name}' expects exactly one input object.`)
+          if (externalArgs.length > 1)
+            throw new ToolRuntimeError("InvalidToolInput", `Tool '${name}' expects at most one input object.`)
+          // 零参沿上游按{}进入原decoder，必填字段仍在执行前拒绝；显式undefined不替换。
           describedInput = yield* Effect.try({
-            try: () => decodeToolInput(tool, externalArgs[0]),
+            try: () => decodeToolInput(tool, externalArgs.length === 0 ? {} : externalArgs[0]),
             catch: (cause) =>
               new ToolRuntimeError("InvalidToolInput", `Invalid input for tool '${name}': ${String(cause)}`),
           })

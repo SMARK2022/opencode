@@ -7,6 +7,7 @@ import type { Permission } from "../permission"
 import type { SessionID, MessageID } from "../session/schema"
 import * as Truncate from "./truncate"
 import { Agent } from "@/agent/agent"
+import type { CodeModeHost } from "./code-mode"
 // 两代使用同一可见文本规则；领域数据与原始日志不经此投影清理。
 import { sanitizeVisibleText } from "@opencode-ai/core/util/terminal-text"
 
@@ -41,6 +42,9 @@ export type Context<M extends Metadata = Metadata> = {
   agent: string
   abort: AbortSignal
   callID?: string
+  // 两个字段仅由 SessionTools 注入：父持有 Host，子持有真实持久化归属。
+  codeMode?: CodeModeHost
+  executeParent?: string
   extra?: { [key: string]: unknown }
   messages: SessionV1.WithParts[]
   metadata(input: { title?: string; metadata?: M; delivery?: "durable" | "ephemeral" }): Effect.Effect<void>
@@ -52,6 +56,10 @@ export interface ExecuteResult<M extends Metadata = Metadata> {
   metadata: M
   output: string
   attachments?: Omit<SessionV1.FilePart, "id" | "sessionID" | "messageID">[]
+  // 程序值与模型文本使用不同投影；媒体沿宿主附件通道交付。
+  program?: { value: unknown; attachments?: Omit<SessionV1.FilePart, "id" | "sessionID" | "messageID">[] }
+  // 指令由宿主强制交付，脚本的 return 只决定普通聚合数据。
+  context?: { kind: "instruction" | "skill"; key: string; text: string }[]
 }
 
 export interface Def<
@@ -62,6 +70,8 @@ export interface Def<
   description: string
   parameters: Parameters
   jsonSchema?: JSONSchema7
+  // 程序值的同一声明服务目录和解码；输入校验仍由 parameters 独立拥有。
+  output?: Schema.Decoder<unknown> | JSONSchema7
   // #557：只控制本地 Snapshot/Revert 归因，不能进入 Provider Tool schema；缺失等价于 none。
   worktree?: "none" | "declared" | "ambient"
   /** #514：在 Schema.decode 之前折叠兼容入参（如 edit 的 legacy oldString → edits[]）。 */

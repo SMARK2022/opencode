@@ -81,6 +81,7 @@ export async function notebookSource(input: Record<string, unknown>) {
   let sourceArtifact: string | undefined
   let lastRenderedLine = 0
   const outputCells: string[] = []
+  const cells: { cellID: string; offset: number; content: string }[] = []
 
   for (const cell of notebook.getCells()) {
     const cellRange = ranges.get(cell.index)
@@ -103,6 +104,7 @@ export async function notebookSource(input: Record<string, unknown>) {
     }
     outputCells.push(headerLine)
     bytes += hdrBytes
+    const lines: string[] = []
 
     // 格头计入字节但不占编号正文预算，limit=1 也必须能读取并推进一行源码。
     for (let i = 0; i < cell.document.lineCount; i++) {
@@ -135,7 +137,9 @@ export async function notebookSource(input: Record<string, unknown>) {
         const prefixBytes = Buffer.byteLength(prefix, "utf8")
         const available = maxBytes - bytes - prefixBytes
         if (available > 0) {
-          outputCells.push(prefix + takeUtf8Prefix(sourceLine, available))
+          const content = takeUtf8Prefix(sourceLine, available)
+          outputCells.push(prefix + content)
+          lines.push(content)
           renderedLines++
           lastRenderedLine = globalLineNum
         }
@@ -143,11 +147,14 @@ export async function notebookSource(input: Record<string, unknown>) {
         break
       }
       outputCells.push(outLine)
+      lines.push(sourceLine)
       bytes += outBytes
       renderedLines++
       lastRenderedLine = globalLineNum
     }
 
+    // 只收取同一分页器已选择的正文，保留cell边界而不解析带行号的展示文本。
+    if (lines.length > 0) cells.push({ cellID: copilotLikeCellId(cell), offset: srcStart, content: lines.join("\n") })
     if (bytesCut || renderedLines >= limit) break
   }
 
@@ -200,6 +207,8 @@ export async function notebookSource(input: Record<string, unknown>) {
       returned: renderedLines,
       totalLines,
       sourceArtifact,
+      cells,
+      ...(!sourceArtifact && (bytesCut || more) ? { next: lastRenderedLine + 1 } : {}),
       truncated: bytesCut || more,
     },
   }

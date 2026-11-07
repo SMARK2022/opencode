@@ -1,5 +1,5 @@
 import { Effect, Schema } from "effect"
-import * as Tool from "./tool"
+import { Tool } from "./tool"
 import DESCRIPTION_WRITE from "./todowrite.txt"
 import { Todo } from "../session/todo"
 
@@ -19,6 +19,8 @@ export const TodoWriteTool = Tool.define<typeof Parameters, Metadata, Todo.Servi
     return {
       description: DESCRIPTION_WRITE,
       parameters: Parameters,
+      // 保留本地status/priority的字符串域，不将上游较窄枚举套回原工具。
+      output: Parameters,
       execute: (params: Schema.Schema.Type<typeof Parameters>, ctx: Tool.Context<Metadata>) =>
         Effect.gen(function* () {
           yield* ctx.ask({
@@ -36,6 +38,7 @@ export const TodoWriteTool = Tool.define<typeof Parameters, Metadata, Todo.Servi
           return {
             title: `${params.todos.filter((x) => x.status !== "completed").length} todos`,
             output: JSON.stringify(params.todos, null, 2),
+            program: { value: { todos: params.todos } },
             metadata: {
               todos: params.todos,
             },

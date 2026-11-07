@@ -79,6 +79,8 @@ async function serializeNotebookCellOutput(notebook: vscode.NotebookDocument, ce
       // await 后只附加实际写入路径，不能重新 compactCell 将 B 的状态贴到 A 的输出上。
       ...snapshot.data,
       artifacts,
+      // 空output也占原序列位置；仅靠扁平artifact无法恢复这一层。
+      outputCount: snapshot.outputs.length,
     },
   }
 }

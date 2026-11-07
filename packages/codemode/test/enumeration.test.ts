@@ -60,7 +60,7 @@ describe("Object.keys over tool references", () => {
     const failure = await error(`return Object.keys(tools.nonexistent)`)
     expect(failure.kind).toBe("UnknownTool")
     expect(failure.message).toContain("Unknown tool namespace 'nonexistent'")
-    expect(failure.suggestions?.join(" ")).toContain("Object.keys(tools)")
+    expect(failure.suggestions?.join(" ")).toContain("Use search to find available tools.")
   })
 
   test("Object.values/entries on a tool reference explain the working idioms", async () => {
@@ -68,7 +68,7 @@ describe("Object.keys over tool references", () => {
       const failure = await error(`return Object.${method}(tools)`)
       expect(failure.kind).toBe("InvalidDataValue")
       expect(failure.message).toContain(
-        `Object.${method}(...) cannot read tool references: they are not plain data. Use Object.keys(tools) for names, or tools.$codemode.search({ query }) for signatures.`,
+        `Object.${method}(...) cannot read tool references: they are not plain data. Use Object.keys(tools) for names, or search({ query }) for signatures.`,
       )
     }
     const nested = await error(`return Object.entries(tools.github)`)

@@ -1,0 +1,27 @@
+@@ description
+Run JavaScript in a confined Code Mode runtime to script tool calls and HTTP requests and compose their results.
+`fetch` is available for HTTP requests. Imports, direct filesystem access, and timers are unavailable: there is no `setTimeout` or sleep. All other external access goes through `tools`.
+Within `{ code }`, the only callable tools are those explicitly listed in the Code Mode catalog instructions or returned by the `search` function. Inside `{ code }`, ignore tools shown outside the Code Mode catalog. They are not available in the Code Mode runtime.
+Call tools through `tools` using only exact paths and signatures from the catalog. Do not infer or normalize tool names; preserve bracket notation such as `tools.<namespace>["tool-name"](input)`.
+Prefer an explicit `return`; if omitted, the final top-level expression becomes the result.
+Await every call whose completion matters; pending calls are interrupted when execution ends. Run independent calls concurrently with `Promise.allSettled`.
+@@ intro.empty
+No Code Mode tools are currently available. Later Code Mode catalog updates may add or remove tools. Do not call `execute` unless there is at least one available Code Mode tool.
+@@ intro.complete
+# Code Mode
+
+The tools listed below cannot be called directly: they only work as JavaScript inside the `execute` tool. Every other tool you have is a normal tool call: call it directly, never inside `execute`.
+
+The catalog is complete. Do not guess tool names.
+
+## Code Mode tools (call only inside `execute`)
+@@ intro.partial
+# Code Mode
+
+The tools listed below, and `search`, cannot be called directly: they only work as JavaScript inside the `execute` tool. Every other tool you have is a normal tool call: call it directly, never inside `execute`.
+
+The catalog is partial. Before calling a tool that is not listed below, find it with the global `search(...)` function. Do not guess tool names. Each result's `path` is the complete call expression: write it out as code, for example `await tools.ns.tool_name({ ... })`. Do not use it as a key such as `tools[path]`.
+
+- {{searchSignature}}
+
+## Code Mode tools (call only inside `execute`)

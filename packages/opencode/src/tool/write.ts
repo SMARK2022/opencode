@@ -40,6 +40,9 @@ export const WriteTool = Tool.define(
     return {
       description: DESCRIPTION,
       parameters: Parameters,
+      output: Schema.Struct({ files: Schema.Array(Schema.Struct({ path: Schema.String, operation: Schema.Literals(["add", "update"]),
+        patch: Schema.optionalKey(Schema.String), additions: Schema.optionalKey(Schema.Number), deletions: Schema.optionalKey(Schema.Number),
+      })), diagnostics: LSP.Diagnostic.Output }),
       // #557：write 的单一 filePath 是精确归属，不认领并发 worktree 变化。
       worktree: "declared",
       execute: (params: { content: string; filePath: string }, ctx: Tool.Context) =>
@@ -209,6 +212,11 @@ export const WriteTool = Tool.define(
 
           return {
             title: path.relative(instance.worktree, filepath),
+            // 复用实际写入后的差分与原诊断快照，省略原执行器未提供的可选字段。
+            program: { value: { files: [{ path: filepath, operation: exists ? "update" : "add",
+              ...(metadataDiff !== undefined ? { patch: metadataDiff } : {}),
+              ...(diffCounts ? { additions: diffCounts.additions, deletions: diffCounts.deletions } : {}),
+            }], diagnostics: LSP.Diagnostic.toOutput(diagnosticSummary, { [normalizedFilepath]: newErrorsArr }) } },
             metadata: {
               // [local-smark] diagnostics 存新错误数组（delta）+ diagnosticSummary
               // 无活动client的空差分不证明检查成功，不能发出clean摘要。

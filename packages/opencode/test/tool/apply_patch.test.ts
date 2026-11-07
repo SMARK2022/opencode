@@ -187,6 +187,12 @@ describe("tool.apply_patch freeform", () => {
           expect(result.output).not.toContain("\\")
         }
         expect(result.metadata.diff).toContain("Index:")
+        // 程序回执按实际变更分项；LSP未运行以null表达，而非伪造零错误。
+        expect(result.program?.value).toMatchObject({ files: [
+          { path: path.join(test.directory, "nested/new.txt"), operation: "add", additions: 1, deletions: 0 },
+          { path: deletePath, operation: "delete", additions: 0, deletions: 1 },
+          { path: modifyPath, operation: "update", additions: 1, deletions: 1 },
+        ], diagnostics: null })
         expect(calls.length).toBe(1)
 
         // Verify permission metadata includes files array for UI rendering
@@ -222,7 +228,11 @@ describe("tool.apply_patch freeform", () => {
         const patchText =
           "*** Begin Patch\n*** Update File: old/name.txt\n*** Move to: renamed/dir/name.txt\n@@\n-old content\n+new content\n*** End Patch"
 
-        yield* execute({ patchText }, ctx)
+        const result = yield* execute({ patchText }, ctx)
+        expect(result.program?.value).toMatchObject({ files: [{
+          path: path.join(test.directory, "renamed/dir/name.txt"), fromPath: original, operation: "move",
+          patch: expect.stringContaining("-old content"), additions: 1, deletions: 1,
+        }], diagnostics: null })
 
         expect(calls.length).toBe(1)
         const permissionCall = calls[0]
@@ -1709,6 +1719,9 @@ describe("tool.edit metadata diff bounding (hosted per plan §15)", () => {
       expect(meta.filediff.deletions).toBe(1)
       expect(meta.filediff.additions).toBe(1)
       expect(meta.filediff.patch).toContain("+++ added line")
+      expect(result.program?.value).toMatchObject({ files: [{
+        path: target, operation: "update", patch: meta.filediff.patch, additions: 1, deletions: 1,
+      }], diagnostics: null })
     }),
   )
 })

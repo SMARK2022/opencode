@@ -22,6 +22,7 @@ export const PlanExitTool = Tool.define(
     return {
       description: EXIT_DESCRIPTION,
       parameters: Parameters,
+      output: Schema.Struct({ approved: Schema.Literal(true), agent: Schema.Literal("build"), path: Schema.String }),
       execute: (_params: {}, ctx: Tool.Context) =>
         Effect.gen(function* () {
           const instance = yield* InstanceState.context
@@ -70,6 +71,8 @@ export const PlanExitTool = Tool.define(
 
           return {
             title: "Switching to build agent",
+            // 批准回执指向实际计划文件，只有原Question及切换流程完成后才返回。
+            program: { value: { approved: true, agent: "build", path: Session.plan(info, instance) } },
             output: "User approved switching to build agent. Wait for further instructions.",
             metadata: {},
           }

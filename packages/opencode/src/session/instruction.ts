@@ -17,8 +17,9 @@ function extract(messages: SessionV1.WithParts[]) {
   const paths = new Set<string>()
   for (const msg of messages) {
     for (const part of msg.parts) {
-      if (part.type === "tool" && part.tool === "read" && part.state.status === "completed") {
-        if (part.state.time.compacted) continue
+      if (part.type === "tool" && (part.tool === "read" || part.tool === "execute") && part.state.status === "completed") {
+        // 父回执记录实际交付；child 留作审计，压缩后允许重新加载规则。
+        if (typeof part.metadata?.executeParent === "string" || part.state.time.compacted !== undefined) continue
         const loaded = part.state.metadata?.loaded
         if (!loaded || !Array.isArray(loaded)) continue
         for (const p of loaded) {

@@ -143,7 +143,8 @@ describe("first-class promise values", () => {
     ).toBe("Lookup refused")
   })
 
-  test("a fire-and-forget call completes before the execution ends", async () => {
+  test("a fire-and-forget call is interrupted when execution ends", async () => {
+    // 检查真实挂起调用的清理记录，返回done不能掩盖仍在后台运行的工作。
     const trace = makeTrace()
     const result = await value(
       `
@@ -153,19 +154,16 @@ describe("first-class promise values", () => {
       { trace },
     )
     expect(result).toBe("done")
-    expect(trace.completed).toBe(1)
-    expect(trace.interrupted).toBe(0)
+    expect(trace.completed).toBe(0)
+    expect(trace.interrupted).toBe(1)
   })
 
-  test("a never-awaited failing call surfaces as an unhandled-rejection diagnostic", async () => {
-    const diagnostic = await error(`
+  test("a never-awaited failure does not replace the explicit execution result", async () => {
+    const result = await value(`
       tools.host.fail({})
       return "done"
     `)
-    expect(diagnostic.kind).toBe("ToolFailure")
-    expect(diagnostic.message).toContain("Unhandled rejection from an un-awaited tool call")
-    expect(diagnostic.message).toContain("Lookup refused")
-    expect(diagnostic.suggestions?.join(" ")).toContain("await tools.ns.tool(...)")
+    expect(result).toBe("done")
   })
 })
 

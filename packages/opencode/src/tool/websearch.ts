@@ -107,6 +107,7 @@ export const WebSearchTool = Tool.define(
         return DESCRIPTION.replace("{{year}}", new Date().getFullYear().toString())
       },
       parameters: Parameters,
+      output: Schema.Struct({ content: Schema.String }),
       execute: (params: Schema.Schema.Type<typeof Parameters>, ctx: Tool.Context) =>
         Effect.gen(function* () {
           const provider = selectWebSearchProvider(ctx.sessionID, {
@@ -131,9 +132,11 @@ export const WebSearchTool = Tool.define(
           })
 
           const result = yield* callProvider(http, provider, params, ctx)
+          const output = result ?? "No search results found. Please try a different query."
 
           return {
-            output: result ?? "No search results found. Please try a different query.",
+            output,
+            program: { value: { content: output } },
             title: `${title}: ${params.query}`,
             metadata: { provider },
           }

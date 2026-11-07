@@ -1,6 +1,6 @@
 import { Effect, Schema } from "effect"
 import { executeWithLimits } from "./interpreter/runtime.js"
-import { type HostTools, type Services, type ToolDescription, ToolRuntime } from "./tool-runtime.js"
+import { type HostTool, type HostTools, type Services, type ToolDescription, ToolRuntime } from "./tool-runtime.js"
 import type { Definition } from "./tool.js"
 
 /** A tool call admitted during an execution. */
@@ -38,6 +38,8 @@ export type ExecuteOptions<Tools extends Record<string, unknown> = {}> = {
   code: string
   /** Explicit tool tree exposed to the program as `tools`. */
   tools?: Tools & ToolTree<Services<Tools>>
+  /** HTTP由宿主显式提供；未提供时沙箱没有环境网络权限。 */
+  fetch?: HostTool<Services<Tools>>
   /** Per-execution overrides for the default resource limits. */
   limits?: ExecutionLimits
   /** Observes decoded tool input immediately before tool execution. */
@@ -57,6 +59,7 @@ export type Options<Tools extends Record<string, unknown> = {}> = Omit<ExecuteOp
 
 /** Schema for a host tool input containing CodeMode source. */
 export const Input = Schema.Struct({ code: Schema.String })
+export const description = ToolRuntime.description
 export type Input = typeof Input.Type
 
 export const DiagnosticKind = Schema.Literals([

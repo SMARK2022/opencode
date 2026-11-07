@@ -3,6 +3,7 @@ import { formatShellExecutionNotice, formatLongExecutionNotice } from "../../src
 import { describe, expect, test } from "bun:test"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { Cause, Deferred, Effect, Exit, Fiber, Layer, Logger, PlatformError, Sink, Stream } from "effect"
+import { TestClock } from "effect/testing"
 import type * as Scope from "effect/Scope"
 import os from "os"
 import path from "path"
@@ -3201,20 +3202,24 @@ describe("tool.shell windows PS stderr and progress", () => {
       15_000,
     )
 
-    it.live(
+    it.effect(
       "does not append block-buffering hint on timeout with output",
       () =>
         runIn(
           projectRoot,
           Effect.gen(function* () {
-            // [local-smark] echo 先输出再 sleep，timeout 时已有 output → emptyOutput=false
-            // 验证有输出时不触发 block-buffering 诊断（仅 timeout+空输出触发）
-            // timeout 用平台感知 timeoutMs：pwsh 冷启动 600ms+ 时 500ms 会在输出到达前触发，
-            // emptyOutput=true 反而误追加 block-buffering 诊断，双断言皆败
-            const result = yield* run({
+            // 真实输出到达后才推进测试时钟；平台启动耗时不参与本例的分支选择。
+            const ready = yield* Deferred.make<void>()
+            const pending = yield* run({
               command: `echo started && sleep 60`,
               timeout: timeoutMs,
-            })
+            }, { ...ctx, metadata: (input) => typeof input.metadata?.output === "string" && input.metadata.output.includes("started")
+              ? Deferred.succeed(ready, undefined).pipe(Effect.asVoid) : Effect.void,
+            }).pipe(Effect.forkScoped)
+            yield* Deferred.await(ready)
+            // 虚拟时间越过原死线及调度宽限，实际进程仍由原timeout路径收尾。
+            yield* TestClock.adjust(timeoutMs * 2)
+            const result = yield* Fiber.join(pending)
 
             expect(result.output).toContain("started")
             expect(result.output).toContain('reason="timeout"')
@@ -3649,22 +3654,23 @@ describe("tool.shell execution notice policy", () => {
 
 describe.skipIf(process.platform !== "win32")("tool.shell native script fidelity", () => {
   for (const item of ps) {
-    it.live(`reports final PowerShell status with native exit codes [${item.label}]`, () =>
-      withShell(item, runIn(projectRoot, Effect.gen(function* () {
-        // 独立状态常量覆盖cmdlet失败、native码、成功恢复和显式控制流。
-        const cases = [
-          { command: "Write-Error 'probe'", exit: 1 },
-          { command: "opencode_missing_command_for_status_probe", exit: 1 },
-          { command: "cmd /d /c exit 7; Write-Output recovered", exit: 0 },
-          { command: "cmd /d /c exit 0; Write-Error 'probe'", exit: 1 },
-          { command: "cmd /d /c exit 7; Write-Error 'probe'", exit: 7 },
-          { command: "cmd /d /c exit 9", exit: 9 },
-          { command: "exit 42", exit: 42 },
-          { command: "throw 'probe'", exit: 1 },
-          { command: "param([string]$value = 'ok'); Write-Output $value", exit: 0 },
-          { command: "Write-Information 'probe'", exit: 0 },
-        ]
-        for (const entry of cases) {
+    // 每次run都新建宿主与Shell；状态案例独立，时间保护也按单次调用生效。
+    // 保留原场景与30秒界限，避免累计平台启动成本挤占后续案例的执行时间。
+    const cases = [
+      { command: "Write-Error 'probe'", exit: 1 },
+      { command: "opencode_missing_command_for_status_probe", exit: 1 },
+      { command: "cmd /d /c exit 7; Write-Output recovered", exit: 0 },
+      { command: "cmd /d /c exit 0; Write-Error 'probe'", exit: 1 },
+      { command: "cmd /d /c exit 7; Write-Error 'probe'", exit: 7 },
+      { command: "cmd /d /c exit 9", exit: 9 },
+      { command: "exit 42", exit: 42 },
+      { command: "throw 'probe'", exit: 1 },
+      { command: "param([string]$value = 'ok'); Write-Output $value", exit: 0 },
+      { command: "Write-Information 'probe'", exit: 0 },
+    ]
+    for (const entry of cases) {
+      it.live(`reports final PowerShell status with native exit codes [${item.label}] ${entry.command}`, () =>
+        withShell(item, runIn(projectRoot, Effect.gen(function* () {
           const result = yield* run({ command: entry.command })
           expect(result.metadata.exit).toBe(entry.exit)
           // 模型收到同一准确退出码和真实shell名称，便于按正确方言修正错误。
@@ -3672,8 +3678,8 @@ describe.skipIf(process.platform !== "win32")("tool.shell native script fidelity
             expect(result.output).toContain(`exit_code="${entry.exit}"`)
             expect(result.output).toContain(`shell="${item.label}"`)
           }
-        }
-      }))), 30_000)
+        }))), 30_000)
+    }
   }
 
   for (const item of ps) {

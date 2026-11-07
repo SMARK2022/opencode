@@ -1,4 +1,4 @@
-import { afterEach, describe, expect } from "bun:test"
+import { afterEach, describe, expect, spyOn } from "bun:test"
 import path from "path"
 import fs from "fs/promises"
 import { fileURLToPath, pathToFileURL } from "url"
@@ -57,10 +57,48 @@ const replacements = [
 ] as const
 
 const it = testEffect(LayerNode.compile(root, replacements))
+
+it.instance("repository GitHub tools return their fixed business contracts", () => Effect.gen(function* () {
+  const instance = yield* TestInstance
+  const directory = path.join(instance.directory, ".opencode", "tool")
+  yield* Effect.promise(() => fs.mkdir(directory, {recursive:true}))
+  // 与生产一样动态加载实际模块，避免把项目局部旧插件类型带入应用编译上下文。
+  for (const name of ["github-pr-search", "github-triage"]) yield* Effect.promise(() => fs.writeFile(path.join(directory, `${name}.ts`),
+    `export { default } from ${JSON.stringify(pathToFileURL(path.resolve(import.meta.dir, `../../../../.opencode/tool/${name}.ts`)).href)};`))
+  const registry = yield* ToolRegistry.Service
+  const entries = yield* registry.all()
+  const search = entries.find((tool) => tool.id === "github-pr-search")
+  const triage = entries.find((tool) => tool.id === "github-triage")
+  if (!search || !triage) throw new Error("Missing repository tools")
+  // GitHub地址固定且分派会写共享状态；只替换网络边界，原注册器验证真实返回值。
+  const request = yield* Effect.acquireRelease(Effect.sync(() => spyOn(globalThis, "fetch")), (mock) => Effect.sync(() => mock.mockRestore()))
+  const ctx = { sessionID:SessionID.create(),messageID:MessageID.ascending(),agent:"build",abort:new AbortController().signal,
+    messages:[],metadata:()=>Effect.void,ask:()=>Effect.void }
+  const item = {title:"Change",html_url:"https://github.com/anomalyco/opencode/pull/9"}
+  for (const sample of [
+    {response:{total_count:8,incomplete_results:true,items:[item]},expected:{totalCount:8,items:[{title:"Change",path:"https://github.com/anomalyco/opencode/pull/9"}],partial:true}},
+    {response:{total_count:0,incomplete_results:false,items:[]},expected:{totalCount:0,items:[],partial:false}},
+    {response:{total_count:8,incomplete_results:true,items:[]},expected:{totalCount:8,items:[],partial:true}},
+  ]) {
+    request.mockResolvedValue(Response.json(sample.response))
+    expect((yield* search.execute({query:"fix",limit:10,offset:0},ctx)).program?.value).toEqual(sample.expected)
+  }
+  const sent: {url:string;body?:string}[] = []
+  request.mockImplementation(Object.assign(async (...[url, init]: Parameters<typeof fetch>) => {
+    sent.push({url:String(url),...(typeof init?.body === "string" ? {body:init.body} : {})})
+    return Response.json({})
+  }, { preconnect: () => {} }))
+  yield* Effect.acquireRelease(Effect.sync(() => {const previous=process.env.ISSUE_NUMBER;process.env.ISSUE_NUMBER="42";return previous}),
+    (previous) => Effect.sync(() => {if(previous===undefined) delete process.env.ISSUE_NUMBER; if(previous!==undefined) process.env.ISSUE_NUMBER=previous}))
+  const result = yield* triage.execute({team:"windows"},ctx)
+  // 与实际POST载荷核对同一随机选择，不能仅断言某个合法团队成员。
+  expect(result.program?.value).toEqual({issueNumber:42,assignee:JSON.parse(sent.at(-1)?.body ?? "{}").assignees[0]})
+  expect(sent.at(-1)?.url).toBe("https://api.github.com/repos/anomalyco/opencode/issues/42/assignees")
+}))
 const withCodeMode = testEffect(
   LayerNode.compile(root, [
     [Config.node, configLayer],
-    [RuntimeFlags.node, RuntimeFlags.layer({ experimentalCodeMode: true })],
+    [RuntimeFlags.node, RuntimeFlags.layer()],
     [
       MCP.node,
       Layer.mock(MCP.Service, {
@@ -83,7 +121,7 @@ const withCodeMode = testEffect(
 const withEmptyCodeMode = testEffect(
   LayerNode.compile(root, [
     [Config.node, configLayer],
-    [RuntimeFlags.node, RuntimeFlags.layer({ experimentalCodeMode: true })],
+    [RuntimeFlags.node, RuntimeFlags.layer()],
     [
       MCP.node,
       Layer.mock(MCP.Service, {
@@ -109,16 +147,16 @@ describe("tool.registry", () => {
     }),
   )
 
-  it.instance("does not expose execute unless code mode is enabled", () =>
+  it.instance("registers execute independently of experimental flags", () =>
     Effect.gen(function* () {
       const registry = yield* ToolRegistry.Service
       const ids = yield* registry.ids()
 
-      expect(ids).not.toContain("execute")
+      expect(ids).toContain("execute")
     }),
   )
 
-  withCodeMode.instance("exposes execute when code mode is enabled", () =>
+  withCodeMode.instance("exposes a base execute definition before session catalog resolution", () =>
     Effect.gen(function* () {
       const registry = yield* ToolRegistry.Service
       const agents = yield* Agent.Service
@@ -132,11 +170,12 @@ describe("tool.registry", () => {
 
       expect(ids).toContain("execute")
       expect(tools.map((tool) => tool.id)).toContain("execute")
-      expect(execute?.description).toContain("tools.weather.current(input: {\n  city: string,\n})")
+      // 注册期提供官方固定说明，动态目录只由Session的instructions交付。
+      expect(new Bun.CryptoHasher("sha256").update(execute?.description ?? "").digest("hex")).toBe("4e1d4d35251719086df5e5c85baf32dd27364519b2c1556912dc806e2c74eea8")
     }),
   )
 
-  withEmptyCodeMode.instance("does not expose execute when code mode has no visible tools", () =>
+  withEmptyCodeMode.instance("exposes execute with an empty MCP connection set", () =>
     Effect.gen(function* () {
       const registry = yield* ToolRegistry.Service
       const agents = yield* Agent.Service
@@ -146,7 +185,7 @@ describe("tool.registry", () => {
         agent: yield* agents.defaultInfo(),
       })
 
-      expect(tools.map((tool) => tool.id)).not.toContain("execute")
+      expect(tools.map((tool) => tool.id)).toContain("execute")
     }),
   )
 

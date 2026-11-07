@@ -51,7 +51,31 @@ const run = Effect.fn("Cli.debug.agent.body")(function* (
     }
     const params = parseToolParams(args.params)
     const toolCtx = yield* createToolContext(agent, ctx)
-    const result = yield* tool.execute(params, toolCtx)
+    const result = yield* Effect.gen(function* () {
+      if (toolID !== "execute") return yield* tool.execute(params, toolCtx.context)
+      // debug 已创建会话与助手，统一宿主复用同一身份及原权限、结算路径。
+      const { SessionTools } = yield* Effect.promise(() => import("@/session/tools"))
+      const { SessionProcessor } = yield* Effect.promise(() => import("@/session/processor"))
+      const { SessionGoal } = yield* Effect.promise(() => import("@/session/goal"))
+      const { SessionPrompt } = yield* Effect.promise(() => import("@/session/prompt"))
+      const processors = yield* SessionProcessor.Service
+      const goalSvc = yield* SessionGoal.Service
+      const promptOps = yield* SessionPrompt.Service
+      const provider = yield* Provider.Service
+      const model = yield* provider.getModel(toolCtx.model.providerID, toolCtx.model.modelID).pipe(
+        Effect.catch((error) => fail(`Model not found: ${error.providerID}/${error.modelID}`)),
+      )
+      const processor = yield* processors.create({ assistantMessage: toolCtx.message, sessionID: toolCtx.session.id, model })
+      const tools = yield* SessionTools.resolve({ agent, model, session: toolCtx.session, processor,
+        goalSvc, promptOps: { cancel: promptOps.cancel, resolvePromptParts: promptOps.resolvePromptParts,
+          prompt: (input) => promptOps.prompt(input).pipe(Effect.orDie) }, bypassAgentCheck: false, messages: [] })
+      const execute = tools.tools.execute?.execute
+      if (!execute) return yield* fail("Tool execute is unavailable for this agent", 1)
+      // CLI直接消费原聚合回执；子工具仍由共享invoke执行，而非在debug中另行分派。
+      return yield* Effect.promise(() => Promise.resolve(execute(params, {
+        toolCallId: toolCtx.context.callID, abortSignal: toolCtx.context.abort, messages: [],
+      })))
+    })
     process.stdout.write(JSON.stringify({ tool: toolID, input: params, result }, null, 2) + EOL)
     return
   }
@@ -170,7 +194,7 @@ const createToolContext = Effect.fn("Cli.debug.agent.createToolContext")(functio
 
   const ruleset = Permission.merge(agent.permission, session.permission ?? [])
 
-  return {
+  return { session, message, model, context: {
     sessionID: session.id,
     messageID,
     callID: PartID.ascending(),
@@ -188,5 +212,5 @@ const createToolContext = Effect.fn("Cli.debug.agent.createToolContext")(functio
         }
       })
     },
-  }
+  } }
 })

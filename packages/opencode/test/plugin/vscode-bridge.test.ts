@@ -16,6 +16,47 @@ const tools = plugin.tool
 if (!tools) throw new Error("plugin did not register tools")
 
 describe("vscode bridge plugin", () => {
+  test("projects the fixed notebook contracts from bridge data", async () => {
+    // 只替换外部桥接响应；投影和输出校验使用实际注册工具，预期值独立列出。
+    const path = "F:\\fixture\\notes.ipynb"
+    const execution = { status: "unknown", provenance: "saved" }
+    const artifact = { output: 1, item: 0, mime: "text/plain", bytes: 3, text: "one", artifactPath: "/out.txt", artifactURI: "vscode-remote://fixture/out.txt" }
+    const cases = [
+      { name: "summary", args: {}, data: { path, dirty: true, cells: [{ id: "#VSC-a", kind: "code", lang: "python", range: { start: 1, end: 2 }, execution, existing_outs: ["text"], outputMimes: ["text/plain"] }] },
+        expected: { path, dirty: true, cells: [{ cellID: "#VSC-a", type: "code", language: "python", range: { start: 1, end: 2 }, execution, outputMimes: ["text/plain"] }] } },
+      { name: "source", args: {}, data: { path, cells: [{ cellID: "#VSC-a", offset: 2, content: "7: literal source" }], totalLines: 5, truncated: true, next: 3 },
+        expected: { path, cells: [{ cellID: "#VSC-a", offset: 2, content: "7: literal source" }], totalLines: 5, truncated: true, next: 3 } },
+      { name: "edit", args: { editType: "insert", cellId: "TOP", newCode: "one" }, data: { path, editType: "insert", applied: true, insertedCellId: "#VSC-new", dirty: true, afterSource: "one" },
+        expected: { path, operation: "add", applied: true, cellID: "#VSC-new", dirty: true, content: "one" } },
+      // 未应用插入没有新身份，也不能把拟写入的afterSource宣称为实际源码。
+      { name: "edit", args: { editType: "insert", cellId: "TOP", newCode: "one" }, data: { path, editType: "insert", applied: false, dirty: false, afterSource: "one" },
+        expected: { path, operation: "add", applied: false, cellID: null, dirty: false } },
+      { name: "edit", args: { editType: "delete", cellId: "#VSC-a" }, data: { path, editType: "delete", applied: true, deletedCellId: "#VSC-a", dirty: true, afterSource: "" },
+        expected: { path, operation: "delete", applied: true, cellID: "#VSC-a", dirty: true } },
+      // 超时同时带saved来源，证明本次等待结果不会覆盖历史执行证据。
+      { name: "run", args: { cellId: "#VSC-a" }, data: { path, completed: false, cells: [{ id: "#VSC-a", execution, skipped: false, timedOut: true, outputCount: 2, artifacts: [artifact] }] },
+        expected: { path, completed: false, cells: [{ cellID: "#VSC-a", execution, skipped: false, timedOut: true, outputs: [[], [{ path: artifact.artifactURI, mime: "text/plain", bytes: 3, content: "one" }]] }] } },
+      // 空output层和远程URI均不可丢失；执行状态只取结构化快照。
+      { name: "output", args: { cellId: "#VSC-a" }, data: { path, cell: { id: "#VSC-a", execution }, outputCount: 2, artifacts: [artifact] },
+        expected: { path, cellID: "#VSC-a", execution, outputs: [[], [{ path: artifact.artifactURI, mime: "text/plain", bytes: 3, content: "one" }]] } },
+      { name: "env", args: { operation: "info" }, data: { path, operation: "info", runtime: null, saved_metadata: null }, expected: { path, operation: "info", runtime: null, savedMetadata: null } },
+      { name: "env", args: { operation: "configure" }, data: { path, operation: "configure", status: "selected" }, expected: { path, operation: "configure", status: "selected" } },
+      { name: "env", args: { operation: "restart" }, data: { path, operation: "restart", requested: false, error: "unavailable" }, expected: { path, operation: "restart", requested: false, verified: false, error: "unavailable" } },
+      { name: "env", args: { operation: "stop" }, data: { path, operation: "stop", requested: true }, expected: { path, operation: "stop", requested: true, verified: false } },
+      { name: "env", args: { operation: "save" }, data: { path, operation: "save", saved: false, afterDirty: true, saveError: "disk" }, expected: { path, operation: "save", saved: false, dirty: true, error: "disk" } },
+      { name: "env", args: { operation: "create" }, data: { path, operation: "create", created: false, alreadyExists: true }, expected: { path, operation: "create", created: false, alreadyExists: true } },
+    ]
+    const bridge = spyOn(VscodeBridge, "callBridge")
+    for (const item of cases) {
+      bridge.mockResolvedValue({ summary: "original summary", data: item.data })
+      const tool = tools[`vscode_notebook_${item.name}`]
+      const result = await tool.execute({ filePath: path, ...item.args }, allowContext(path))
+      if (typeof result === "string" || !tool.output) throw new Error("Expected structured notebook result")
+      expect(tool.output.parse(result.program?.value)).toEqual(item.expected)
+      expect(result.output).toBe("original summary")
+    }
+  })
+
   test("checks notebook mutation permissions before calling the VS Code bridge", async () => {
     const calls: Array<{ permission: string; patterns: string[]; always: string[]; metadata: Record<string, unknown> }> = []
     const stop = "stopped after permission check"
@@ -183,6 +224,7 @@ describe("vscode bridge plugin", () => {
         path: filePath,
         editType: "edit",
         cellCountBefore: 3,
+        applied: true,
         cellCountAfter: 3,
         anchorCellIndex: 1,
         dirty: true,
@@ -289,13 +331,17 @@ describe("vscode bridge plugin", () => {
         dirty: false,
         runtime: "Python 3.11",
         cell: { i: 3, id: "#VSC-12345678", kind: "code", lang: "python", lines: 7, exec: "succeeded", existing_outs: ["text"], first: "df.head()" },
+        outputCount: 1,
         artifacts: [
           {
+            output: 0,
+            item: 0,
             mime: "text/plain",
             bytes: 2048,
             preview: "short preview",
             text: "full text should not be persisted into metadata",
             artifactPath: ".opencode/cache/notebook-outputs/analysis-cell-2-output-0-item-0.txt",
+            artifactURI: "file:///fixture/output.txt",
           },
         ],
       },

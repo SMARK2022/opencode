@@ -1,4 +1,4 @@
-import { Effect, Stream } from "effect"
+import { Effect, Schema, Stream } from "effect"
 import os from "os"
 import { createWriteStream } from "node:fs"
 import * as Tool from "./tool"
@@ -787,6 +787,7 @@ export const ShellTool = Tool.define(
         code !== null && code !== 0 ||
         /error TS\d|SyntaxError|FAIL|Error:|✗/i.test(output)
       )
+      const outputPath = (transformed || cut || compressed.stats.applied || compressed.stats.secretsRedacted > 0 || diagnostic.discardedChars > 0) && file ? file : undefined
 
       return {
         title: input.command,
@@ -795,7 +796,7 @@ export const ShellTool = Tool.define(
           output: userOutput,
           exit: code,
           truncated: cut,
-          ...((transformed || cut || compressed.stats.applied || compressed.stats.secretsRedacted > 0 || diagnostic.discardedChars > 0) && file ? { outputPath: file } : {}),
+          ...(outputPath ? { outputPath } : {}),
           // truncated 只表示窗口损失，compressed 的收益针对本次可见捕获计算。
           ...bashCompressionMetadata(compressed.stats),
           durationMs: Date.now() - started,
@@ -807,6 +808,11 @@ export const ShellTool = Tool.define(
           diagnosticDiscardedChars: diagnostic.discardedChars,
         },
         output,
+        // 超时来自实际竞争结果，完整输出地址沿原保留策略，程序字段遵从R15。
+        // null退出码也可能来自取消；timedOut必须使用timeout分支的原事实。
+        program: { value: { content: output, exit: code, truncated: cut, timedOut: expired,
+          ...(outputPath ? { path: outputPath } : {}),
+        } },
       }
     })
 
@@ -833,6 +839,14 @@ export const ShellTool = Tool.define(
         return {
           description: prompt.description + (compressionGuidance ? "\n\n" + compressionGuidance : ""),
           parameters: prompt.parameters,
+          // 程序按真实退出码分支；模型文本与用户面板的输出各自保留原投影。
+          output: Schema.Struct({
+            content: Schema.String,
+            exit: Schema.NullOr(Schema.Number),
+            truncated: Schema.Boolean,
+            timedOut: Schema.Boolean,
+            path: Schema.optionalKey(Schema.String),
+          }),
           // #557：shell 命令副作用不透明，只能使用短窗口 Patch best-effort 归因。
           worktree: "ambient",
           execute: (params: Parameters, ctx: Tool.Context) =>

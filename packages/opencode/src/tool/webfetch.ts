@@ -6,7 +6,7 @@ import TurndownService from "turndown"
 import DESCRIPTION from "./webfetch.txt"
 import { isImageAttachment } from "@/util/media"
 
-const MAX_RESPONSE_SIZE = 5 * 1024 * 1024 // 5MB
+export const MAX_RESPONSE_SIZE = 5 * 1024 * 1024 // 5MB
 const DEFAULT_TIMEOUT = 30 * 1000 // 30 seconds
 const MAX_TIMEOUT = 120 * 1000 // 2 minutes
 
@@ -30,6 +30,7 @@ export const WebFetchTool = Tool.define(
     return {
       description: DESCRIPTION,
       parameters: Parameters,
+      output: Schema.Struct({ path: Schema.String, content: Schema.String, mime: Schema.String, encoding: Schema.Literals(["utf8", "base64"]) }),
       execute: (params: Schema.Schema.Type<typeof Parameters>, ctx: Tool.Context) =>
         Effect.gen(function* () {
           if (!params.url.startsWith("http://") && !params.url.startsWith("https://")) {
@@ -113,6 +114,7 @@ export const WebFetchTool = Tool.define(
               title,
               output: "Image fetched successfully",
               metadata: {},
+              program: { value: { path: params.url, content: base64Content, mime, encoding: "base64" } },
               attachments: [
                 {
                   type: "file" as const,
@@ -125,31 +127,14 @@ export const WebFetchTool = Tool.define(
 
           const content = new TextDecoder().decode(arrayBuffer)
 
-          // Handle content based on requested format and actual content type
-          switch (params.format) {
-            case "markdown":
-              if (contentType.includes("text/html")) {
-                const markdown = convertHTMLToMarkdown(content)
-                return {
-                  output: markdown,
-                  title,
-                  metadata: {},
-                }
-              }
-              return { output: content, title, metadata: {} }
-
-            case "text":
-              if (contentType.includes("text/html")) {
-                return { output: extractTextFromHTML(content), title, metadata: {} }
-              }
-              return { output: content, title, metadata: {} }
-
-            case "html":
-              return { output: content, title, metadata: {} }
-
-            default:
-              return { output: content, title, metadata: {} }
-          }
+          // 文本转换仍由原转换器完成；两个出口共用同一正文，MIME描述转换后的内容。
+          const html = contentType.includes("text/html")
+          const output = html && params.format === "markdown" ? convertHTMLToMarkdown(content)
+            : html && params.format === "text" ? extractTextFromHTML(content) : content
+          return { output, title, metadata: {}, program: { value: { path: params.url, content: output,
+            mime: html && params.format === "markdown" ? "text/markdown" : html && params.format === "text" ? "text/plain" : mime,
+            encoding: "utf8",
+          } } }
         }).pipe(Effect.orDie),
     }
   }),

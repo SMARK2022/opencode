@@ -117,6 +117,7 @@ function findUnexpandedFileInContext(
     for (const part of msg.parts) {
       if (part.type !== "tool") continue
       if (part.tool !== "read") continue
+      if (typeof part.metadata?.executeParent === "string") continue
       if (part.state.status !== "completed") continue
       const input = part.state.input
       // 请求范围与默认范围等价；路径和行号另由完整渲染结果的精确相等证明。
@@ -162,9 +163,12 @@ function modifiedMsOf(stat: { mtime: Option.Option<Date> }) {
 export function visibleReadMeta(part: {
   type?: string
   tool?: string
+  metadata?: { executeParent?: unknown }
   state?: { status?: string; time?: { start?: number; end?: number; compacted?: number }; metadata?: { read?: unknown } }
 }): ReadRangeMeta | undefined {
   if (part.type !== "tool" || part.tool !== "read") return undefined
+  // 子读取正文只交给脚本，数据库记录本身不能证明主模型已看见它。
+  if (typeof part.metadata?.executeParent === "string") return undefined
   if (part.state?.status !== "completed" || part.state?.time?.compacted !== undefined) return undefined
   // 元数据是可见性唯一协议；展示XML改变时不应让已压缩或非空零行读取变成可见正文。
   const meta = part.state?.metadata?.read
@@ -275,15 +279,15 @@ export const ReadTool = Tool.define<
       return yield* Effect.forEach(
         items,
         Effect.fnUntraced(function* (item) {
-          if (item.type === "directory") return item.name + "/"
-          if (item.type !== "symlink") return item.name
+          if (item.type === "directory") return { item, label: item.name + "/" }
+          if (item.type !== "symlink") return { item, label: item.name }
 
+          // 链接目录的尾斜杠只服务原展示，程序类型仍保留symlink。
           const target = yield* fs.stat(path.join(filepath, item.name)).pipe(Effect.catch(() => Effect.void))
-          if (target?.type === "Directory") return item.name + "/"
-          return item.name
+          return { item, label: item.name + (target?.type === "Directory" ? "/" : "") }
         }),
         { concurrency: "unbounded" },
-      ).pipe(Effect.map((items: string[]) => items.sort((a, b) => a.localeCompare(b))))
+      ).pipe(Effect.map((items) => items.sort((a, b) => a.label.localeCompare(b.label))))
     })
 
     const warm = Effect.fn("ReadTool.warm")(function* (filepath: string) {
@@ -430,6 +434,8 @@ export const ReadTool = Tool.define<
         const offset = params.offset || 1
         const start = offset - 1
         const sliced = items.slice(start, start + limit)
+        // 同一排序与分页同时服务展示和程序值，保留symlink/other原始类型及全部条目。
+        const names = sliced.map((entry) => entry.label)
         const truncated = start + sliced.length < items.length
         // #142：目录条目原文输出，结构标签保持稳定
         const output = [
@@ -439,7 +445,7 @@ export const ReadTool = Tool.define<
           `<content>`,
           // #142：目录条目也 escape，结构一致
           // #145：目录名不转义，保留 & 等字符
-          sliced.join("\n"),
+          names.join("\n"),
           `</content>`,
           // #142：目录超限用 entry_limit
           truncated ? `<more offset="${offset + sliced.length}" reason="entry_limit" />` : undefined,
@@ -450,14 +456,18 @@ export const ReadTool = Tool.define<
         return {
           title,
           output,
+          program: { value: { type: "list-page", path: filepath,
+            entries: sliced.map(({ item }) => ({ path: path.join(filepath, item.name), type: item.type })),
+            offset, totalEntries: items.length, truncated, ...(truncated ? { next: offset + sliced.length } : {}),
+          } },
           metadata: readToolMetadata({
-            preview: sliced.slice(0, 20).join("\n"),
+            preview: names.slice(0, 20).join("\n"),
             truncated,
             loaded: [] as string[],
             display: {
               type: "directory" as const,
               path: filepath,
-              entries: sliced,
+              entries: names,
               offset,
               totalEntries: items.length,
               truncated,
@@ -471,6 +481,11 @@ export const ReadTool = Tool.define<
       if (stat.type !== "File") return yield* Effect.fail(new Error(`Cannot read non-regular file: ${filepath}`))
 
       const loaded = yield* instruction.resolve(ctx.messages, filepath, ctx.messageID)
+      // 嵌套读取的目录规则由父 execute 强制交付，独立于脚本选择返回哪些数据。
+      const context = ctx.executeParent ? loaded.map((item) => ({
+        kind: "instruction" as const, key: item.filepath,
+        text: `<system-reminder>\n${item.content}\n</system-reminder>`,
+      })) : undefined
       const sample = yield* readSample(filepath, Number(stat.size), SAMPLE_BYTES)
 
       const mime = sniffAttachmentMime(sample, FSUtil.mimeType(filepath))
@@ -480,11 +495,12 @@ export const ReadTool = Tool.define<
 
       if (isImage || isPdfAttachment(mime)) {
         const bytes = yield* fs.readFile(filepath)
+        const content = Buffer.from(bytes).toString("base64")
         // #277：仅图片走统一规整与预算；PDF 保持原始字节及既有成功文案。
         const input = {
           type: "file" as const,
           mime,
-          url: `data:${mime};base64,${Buffer.from(bytes).toString("base64")}`,
+          url: `data:${mime};base64,${content}`,
         }
         const attachment = isImage
           ? yield* image
@@ -505,7 +521,9 @@ export const ReadTool = Tool.define<
           return {
             title,
             output: msg,
+            program: { value: { type: "omitted", path: filepath, content: msg } },
             metadata: readToolMetadata({ preview: msg, truncated: false, loaded: loaded.map((item) => item.filepath) }),
+            context,
           }
         }
         const msg = isPdfAttachment(mime) ? "PDF read successfully" : "Image read successfully"
@@ -514,12 +532,15 @@ export const ReadTool = Tool.define<
         return {
           title,
           output: msg,
+          // 程序取得原读取内容；模型附件继续经过既有图片规整和预算。
+          program: { value: { type: "file", path: filepath, content, mime, encoding: "base64" } },
           metadata: readToolMetadata({
             preview: msg,
             truncated: false,
             loaded: loaded.map((item) => item.filepath),
           }),
           attachments: [isImage ? Image.markNormalized(media) : media],
+          context,
         }
       }
 
@@ -602,7 +623,8 @@ const current: ReadRangeMeta = {
       // #142：加载可见 reads
 const visibleReads = collectVisibleReads(ctx.messages.filter(message => message.info.sessionID === ctx.sessionID), current.canonicalPath)
       // #142：stub 判定
-const stub = findReadStub(visibleReads, current, file.raw.join("\n").length)
+// JS 的每次调用都需要真实页面；模型可见历史的 stub 仅服务直接读取。
+const stub = ctx.executeParent ? undefined : findReadStub(visibleReads, current, file.raw.join("\n").length)
       if (stub) {
         // #142：可见范围 stub，避免重复灌入相同内容
         // covering 的总行数与 EOF 证明必须一起发布，沿用目标已有 totalExact。
@@ -635,6 +657,7 @@ const stub = findReadStub(visibleReads, current, file.raw.join("\n").length)
         return {
           title,
           output,
+          program: { value: { type: "omitted", path: filepath, content: output } },
           metadata: readToolMetadata({
             preview: output,
             truncated: false,
@@ -686,6 +709,13 @@ let output = renderReadOutput({
       return {
         title,
         output,
+        context,
+        // next仅在还有后续页时提供；totalLinesExact继续标记有界计数是否完整。
+        // 单行裁剪也会truncated，但不一定存在下一页，不能据此伪造续读偏移。
+        program: { value: { type: "text-page", path: filepath, content, mime, offset: file.offset,
+          totalLines: file.count, totalLinesExact: file.totalExact, truncated,
+          ...(file.more ? { next: file.offset + file.raw.length } : {}),
+        } },
         metadata: readToolMetadata({
           preview: file.raw.slice(0, 20).join("\n"),
           truncated,
@@ -708,6 +738,17 @@ let output = renderReadOutput({
     return {
       description: DESCRIPTION,
       parameters: Parameters,
+      output: Schema.Union([
+        Schema.Struct({ type: Schema.Literal("file"), path: Schema.String, content: Schema.String, mime: Schema.String,
+          encoding: Schema.Literals(["utf8", "base64"]) }),
+        Schema.Struct({ type: Schema.Literal("text-page"), path: Schema.String, content: Schema.String, mime: Schema.String,
+          offset: Schema.Number, totalLines: Schema.Number, totalLinesExact: Schema.Boolean, truncated: Schema.Boolean,
+          next: Schema.optionalKey(Schema.Number) }),
+        Schema.Struct({ type: Schema.Literal("list-page"), path: Schema.String,
+          entries: Schema.Array(Schema.Struct({ path: Schema.String, type: Schema.Literals(["file", "directory", "symlink", "other"]) })),
+          offset: Schema.Number, totalEntries: Schema.Number, truncated: Schema.Boolean, next: Schema.optionalKey(Schema.Number) }),
+        Schema.Struct({ type: Schema.Literal("omitted"), path: Schema.String, content: Schema.String }),
+      ]),
       execute: (params: Schema.Schema.Type<typeof Parameters>, ctx: Tool.Context<Metadata>) =>
         run(params, ctx).pipe(Effect.orDie),
     }

@@ -3,6 +3,7 @@ import { Effect, Schema } from "effect"
 import { InstanceState } from "@/effect/instance-state"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { Ripgrep } from "@opencode-ai/core/ripgrep"
+import { FileSystem } from "@opencode-ai/schema/filesystem"
 import { assertExternalDirectoryEffect } from "./external-directory"
 import DESCRIPTION from "./glob.txt"
 import * as Tool from "./tool"
@@ -22,6 +23,7 @@ export const GlobTool = Tool.define(
     return {
       description: DESCRIPTION,
       parameters: Parameters,
+      output: Schema.Struct({ files: Schema.Array(FileSystem.Entry), truncated: Schema.Boolean, partial: Schema.Boolean }),
       execute: (params: { pattern: string; path?: string }, ctx: Tool.Context) =>
         Effect.gen(function* () {
           const ins = yield* InstanceState.context
@@ -57,6 +59,9 @@ export const GlobTool = Tool.define(
           // [local-smark] total: 截断前的真实文件数（rg 按 limit 截停时为下界）
           const totalFiles = originalCount
 
+          // 文本与程序共用绝对路径事实，脚本无需解析带截断提示的展示文本。
+          // 锚点是实际search目录，后续工具可直接复用文件身份而无需重解本次path参数。
+          const paths = files.map((file) => path.resolve(search, file.path))
           const output = []
           // [local-smark] partial 假阴性防护：部分路径不可访问时显式提示，
         // 模型可据此收窄路径或调整 pattern，而不是误信全量无匹配
@@ -64,7 +69,7 @@ export const GlobTool = Tool.define(
           output.push("No files found, but some paths could not be accessed (permission denied); results may be incomplete.")
         else if (files.length === 0) output.push("No files found")
           if (files.length > 0) {
-            output.push(...files.map((file) => path.resolve(search, file.path)))
+            output.push(...paths)
             if (truncated) {
               output.push("")
               output.push(
@@ -90,6 +95,8 @@ export const GlobTool = Tool.define(
               ...(globPartial ? { partial: true } : {}),
             },
             output: output.join("\n"),
+            // R15保留完整性标志；绝对路径沿原V1执行器，便于后续工具直接复用。
+            program: { value: { files: files.map((file) => ({ ...file, path: path.resolve(search, file.path) })), truncated, partial: globPartial } },
           }
         }).pipe(Effect.orDie),
     }

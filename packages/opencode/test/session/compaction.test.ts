@@ -232,6 +232,7 @@ function fake(
     },
     updateToolCall: Effect.fn("TestSessionProcessor.updateToolCall")(() => Effect.succeed(undefined)),
     completeToolCall: Effect.fn("TestSessionProcessor.completeToolCall")(() => Effect.void),
+    runChild: () => Effect.die("Unexpected tool execution by compaction model"),
     process: Effect.fn("TestSessionProcessor.process")(() => Effect.succeed(result)),
   } satisfies SessionProcessorModule.SessionProcessor.Handle
 }
@@ -822,6 +823,37 @@ describe("session.compaction.create", () => {
 })
 
 describe("session.compaction.prune", () => {
+  it.live("execute children preserve the parent pruning budget", provideTmpdirInstance((dir) => Effect.gen(function* () {
+    // 使用原 prune 读取和持久化入口，避免在测试里重新计算一份预算算法。
+    const compact = yield* SessionCompaction.Service
+    const ssn = yield* SessionNs.Service
+    const session = yield* ssn.create({})
+    const user = yield* createUserMessage(session.id, "execute work")
+    const assistant = yield* createAssistantMessage(session.id, user.id, dir)
+    // 父回执小于保护预算；大 child 只留审计记录，不能把父回执挤出预算。
+    for (const child of [false, true]) {
+      // child 排在父之后，逆序 prune 会先遇到它，能稳定复现原来的预算挤占。
+      yield* ssn.updatePart({
+        id: PartID.ascending(), messageID: assistant.id, sessionID: session.id,
+        type: "tool", callID: child ? "execute/1" : "execute", tool: child ? "bash" : "execute",
+        ...(child && { metadata: { executeParent: "execute" } }),
+        state: { status: "completed", input: {}, title: "receipt", metadata: {},
+          output: "x".repeat(child ? 200_000 : 100_000), time: { start: 1, end: 2 } },
+      })
+    }
+    yield* createUserMessage(session.id, "second turn")
+    // 两个后续用户轮次使原 prune 真正处理目标消息，防止被近期保护直接跳过。
+    yield* createUserMessage(session.id, "third turn")
+    yield* compact.prune({ sessionID: session.id })
+    const parts = (yield* ssn.messages({ sessionID: session.id })).flatMap((message) => message.parts)
+      .filter((part) => part.type === "tool")
+    expect(parts).toHaveLength(2)
+    for (const part of parts) {
+      expect(part.state.status).toBe("completed")
+      if (part.state.status === "completed") expect(part.state.time.compacted).toBeUndefined()
+    }
+  }), { config: { compaction: { prune: true } } }))
+
   it.live(
     "compacts old completed tool output",
     provideTmpdirInstance(
@@ -1204,6 +1236,7 @@ describe("session.compaction.process", () => {
                 },
                 updateToolCall: Effect.fn("AccountingSessionProcessor.updateToolCall")(() => Effect.succeed(undefined)),
                 completeToolCall: Effect.fn("AccountingSessionProcessor.completeToolCall")(() => Effect.void),
+                runChild: () => Effect.die("Unexpected tool execution by accounting compaction model"),
                 process: () =>
                   Effect.gen(function* () {
                     // 非零值模拟 Provider 已确认的 accounting；先 recordAssistant 再返回 compact，
@@ -2495,6 +2528,48 @@ describe("session.compaction.process", () => {
     },
     { git: true },
   )
+
+  itCompaction.instance("execute compaction keeps parent success and recovery receipts", () => {
+    // 捕获真正发送给压缩模型的消息，验证独立 serializer 而非普通回放转换器。
+    const stub = llm()
+    let captured = ""
+    stub.push(reply("summary", (input) => { captured = JSON.stringify(input.messages) }))
+    return Effect.gen(function* () {
+      const ssn = yield* SessionNs.Service
+      const instance = yield* TestInstance
+      const session = yield* ssn.create({})
+      const user = yield* createUserMessage(session.id, "execute work")
+      const assistant = yield* createAssistantMessage(session.id, user.id, instance.directory)
+      for (const status of ["completed", "error"] as const) {
+        // error 的恢复字段只放在 metadata.output，能捕获压缩只读取 state.error 的遗漏。
+        // 使用持久化父/子记录进入真实压缩请求，覆盖成功摘要与失败恢复两种投影。
+        yield* ssn.updatePart({
+          id: PartID.ascending(), messageID: assistant.id, sessionID: session.id,
+          type: "tool", callID: status, tool: "execute",
+          state: status === "completed"
+            ? { status, input: { code: "return 1" }, output: "parent-aggregate", title: "execute", metadata: {}, time: { start: 1, end: 2 } }
+            : { status, input: {}, error: "interrupted task", metadata: { output: 'Partial execution: {"task_id":"ses_recovery"}' }, time: { start: 1, end: 2 } },
+        })
+        yield* ssn.updatePart({
+          id: PartID.ascending(), messageID: assistant.id, sessionID: session.id,
+          type: "tool", callID: `${status}/1`, tool: "read", metadata: { executeParent: status },
+          state: { status: "completed", input: {}, output: "child-private-body", title: "read", metadata: {}, time: { start: 1, end: 2 } },
+        })
+      }
+      yield* createCompactionMarker(session.id)
+      const messages = yield* ssn.messages({ sessionID: session.id })
+      const parentID = messages.at(-1)?.info.id
+      if (!parentID) throw new Error("Expected compaction marker")
+      yield* SessionCompaction.use.process({ parentID, messages, sessionID: session.id, auto: false })
+      expect(captured).toContain("parent-aggregate")
+      expect(captured).toContain("interrupted task")
+      expect(captured).toContain("Partial execution")
+      expect(captured).toContain("ses_recovery")
+      // child 正文仍存在于输入历史，断言缺席必须来自生产序列化的父子投影。
+      expect(captured).not.toContain("child-private-body")
+      expect(captured).not.toContain("[Assistant tool call]: read")
+    }).pipe(withCompaction({ llm: stub.llmLayer, config: cfg({ tail_turns: 0 }) }))
+  }, { git: true })
 
   itCompaction.instance(
     "serializes repeated compaction history as one user message",

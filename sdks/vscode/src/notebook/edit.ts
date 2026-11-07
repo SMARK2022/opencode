@@ -665,6 +665,7 @@ function compactEditResult(
     ran: false,
     summary: lines.join("\n"),
     data: {
+      path: notebook.uri.fsPath || notebook.uri.toString(),
       applied: info.applied,
       editType: info.editType,
       cellCountBefore: info.beforeCount,
@@ -676,6 +677,8 @@ function compactEditResult(
       // 类型替换产生新格句柄，后续调用使用同步完成后捕获的anchorCell身份。
       updatedCellId: info.editType === "edit" && info.anchorCell ? copilotLikeCellId(info.anchorCell) : undefined,
       deletedCellIndex: info.deletedCellIndex,
+      // 删除后索引已失效，仍交付删除前捕获的稳定ID供后续关联。
+      deletedCellId: info.deletedId,
       affectedCellIndex: info.affectedCellIndex,
       dirty: notebook.isDirty,
       kind: info.kind,

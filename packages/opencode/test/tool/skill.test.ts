@@ -11,6 +11,10 @@ import { ToolRegistry } from "@/tool/registry"
 import { disposeAllInstances, TestInstance } from "../fixture/fixture"
 import { SessionID, MessageID } from "../../src/session/schema"
 import { testEffect } from "../lib/effect"
+import { SessionV1 } from "@opencode-ai/core/v1/session"
+import { ModelV2 } from "@opencode-ai/core/model"
+import { ProviderV2 } from "@opencode-ai/core/provider"
+import { PartID } from "@/session/schema"
 
 const baseCtx: Omit<Tool.Context, "ask"> = {
   sessionID: SessionID.make("ses_test"),
@@ -89,6 +93,30 @@ Use this skill.
       expect(result.output).toContain(`<skill_content name="tool-skill">`)
       expect(result.output).toContain(`Base directory for this skill: ${skill}`)
       expect(result.output).toContain(`<file>${file}</file>`)
+      const parent: SessionV1.ToolPart = {
+        // 正文在父回执而非 skill child：该形状是新增接收域，不改变直接 skill 的加载行为。
+        id: PartID.ascending(), sessionID: ctx.sessionID, messageID: ctx.messageID,
+        type: "tool", tool: "execute", callID: "execute",
+        state: { status: "completed", input: {}, output: result.output, title: "execute",
+          metadata: { skills: ["tool-skill"] }, time: { start: 1, end: 2 } },
+      }
+      const messages: SessionV1.WithParts[] = [{
+        info: { id: ctx.messageID, sessionID: ctx.sessionID, role: "assistant", agent: "build", mode: "build",
+          parentID: MessageID.ascending(), time: { created: 1 }, path: { cwd: dir, root: dir }, cost: 0,
+          modelID: ModelV2.ID.make("test"), providerID: ProviderV2.ID.make("test"),
+          tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } } }, parts: [parent],
+      }]
+      expect((yield* tool.execute({ name: "tool-skill" }, { ...ctx, messages })).metadata.deduped).toBe(true)
+      if (parent.state.status !== "completed") throw new Error("Expected completed fixture")
+      // 父回执完成交付才允许复用；压缩及单独的 child 记录均恢复完整加载。
+      parent.state.time.compacted = 0
+      // 零时间戳仍表示发生过压缩，不能被 truthy 判定误当作正文仍可见。
+      expect((yield* tool.execute({ name: "tool-skill" }, { ...ctx, messages })).metadata.deduped).toBe(false)
+      delete parent.state.time.compacted
+      parent.tool = "skill"
+      parent.state.input = { name: "tool-skill" }
+      parent.metadata = { executeParent: "execute" }
+      expect((yield* tool.execute({ name: "tool-skill" }, { ...ctx, messages })).metadata.deduped).toBe(false)
     }),
   )
 

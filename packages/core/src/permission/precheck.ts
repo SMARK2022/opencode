@@ -1,6 +1,8 @@
 // membership仅作同步词法判定，不读取真实目录或引入另一套仓库发现机制。
 import { normalize, resolve, sep } from "node:path"
 import { ShellParse } from "../shell/parse"
+import { isRecord } from "../util/record"
+import { FSUtil } from "../fs-util"
 
 // 语法层分离命令、数据和重定向角色；分类器只消费事实，不执行命令或源码。
 // 语法不完整维持general下限，实际风险与同层原因继续聚合，审批沿原路由。
@@ -9,6 +11,7 @@ import { ShellParse } from "../shell/parse"
 export const LEVELS = ["safe", "general", "cautious", "dangerous", "forbidden"] as const
 export type Level = (typeof LEVELS)[number]
 export type Decision = { level: Level; reason: string }
+export type ExecuteCall = { tool: string; input: unknown }
 
 // #197：wrapper 解包结果不含 safe 分支——wrapper 执行本身永远不够安全到可确定性放行，只提取脚本用于递归检测危险模式
 type UnwrapResult = { action: "script"; script: string; reason: string } | { action: "ask"; reason: string } | { action: "none" }
@@ -226,7 +229,36 @@ export async function evaluate(input: {
   permission: string
   patterns: readonly string[]
   metadata: Readonly<Record<string, unknown>>
+  calls?: readonly ExecuteCall[]
 }): Promise<Decision> {
+  if (input.permission === "execute" && input.calls) {
+    // 桩提供可观察的调用参数；完整参数的实际请求仍在原权限边界逐次检查。
+    const decisions = await Promise.all(input.calls.map(async (call) => {
+      const args = isRecord(call.input) ? call.input : {}
+      const patchText = args.patchText
+      if (call.tool === "apply_patch" && typeof patchText === "string") {
+        const { Patch } = await import("../patch")
+        // 复用原补丁语法提取删除事实；损坏的候选参数交给真实工具的原校验处理。
+        const files = await Promise.try(() => Patch.parse(patchText)).catch(() => undefined)
+        if (files) return evaluate({ permission: "edit", patterns: [], metadata: { files } })
+      }
+      const cwd = typeof input.metadata.cwd === "string" ? input.metadata.cwd : undefined
+      const workdir = typeof args.workdir === "string" ? FSUtil.windowsPath(args.workdir) : undefined
+      // 与原 Shell 一致处理 Windows 路径及 PowerShell 盘符相对路径。
+      // MSYS 自有挂载由真实工具的 cygpath 确定；此阶段只让原分类器分析与目录无关的风险。
+      const directory = process.platform === "win32" && shellDialect(input.metadata.shell) === "bash" && workdir?.startsWith("/")
+        ? undefined
+        : cwd && workdir ? resolve(cwd, process.platform === "win32" && shellDialect(input.metadata.shell) === "powershell"
+          ? workdir.replace(/^[A-Za-z]:(?![\\/])/, "") : workdir) : cwd
+      return evaluate({
+        permission: call.tool, patterns: [],
+        metadata: { ...args, shell: input.metadata.shell, cwd: directory },
+      })
+    }))
+    // 组合请求使用风险上界及原因并集；空值分支遗漏维持 general，实际调用再补充证据。
+    const highest = decisions.reduce(maxRisk, { level: "general", reason: "execute probe has no observable calls" })
+    return { level: highest.level, reason: [...new Set(decisions.map((item) => item.reason))].join("; ") || highest.reason }
+  }
   const externalDirectory = await externalDirectoryEffect(input)
   if (externalDirectory) return externalDirectory
   const fileEffect = structuredFileEffect(input)

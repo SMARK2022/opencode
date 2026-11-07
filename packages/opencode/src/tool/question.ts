@@ -1,5 +1,5 @@
 import { Effect, Schema } from "effect"
-import * as Tool from "./tool"
+import { Tool } from "./tool"
 import { Question } from "../question"
 import DESCRIPTION from "./question.txt"
 
@@ -19,6 +19,7 @@ export const QuestionTool = Tool.define<typeof Parameters, Metadata, Question.Se
     return {
       description: DESCRIPTION,
       parameters: Parameters,
+      output: Schema.Struct({ answers: Schema.Array(Question.Answer) }),
       execute: (params: Schema.Schema.Type<typeof Parameters>, ctx: Tool.Context<Metadata>) =>
         Effect.gen(function* () {
           const answers = yield* question.ask({
@@ -34,6 +35,8 @@ export const QuestionTool = Tool.define<typeof Parameters, Metadata, Question.Se
           return {
             title: `Asked ${params.questions.length} question${params.questions.length > 1 ? "s" : ""}`,
             output: `User has answered your questions: ${formatted}. You can now continue with the user's answers in mind.`,
+            // 空选择仍占一道问题的位置，过滤或展平会破坏问题与答案的对应关系。
+            program: { value: { answers } },
             metadata: {
               answers,
             },

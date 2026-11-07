@@ -72,13 +72,13 @@ export async function runNotebook(input: Record<string, unknown>, signal?: Abort
     signal?.throwIfAborted()
     // Markup 保留在范围显示中，但不能提交给原生代码执行命令。
     if (cell.kind !== vscode.NotebookCellKind.Code) {
-      results.push({ i: c1(cell), id: copilotLikeCellId(cell), exec: "skipped (not code)", execution: executionState(cell), existing_outs: [], artifacts: [] })
+      results.push({ i: c1(cell), id: copilotLikeCellId(cell), exec: "skipped (not code)", execution: executionState(cell), existing_outs: [], artifacts: [], skipped: true, timedOut: false, outputCount: 0 })
       continue
     }
     if (stopped) {
       // 跳过格的已有 MIME 是历史证据，stale 标签不能被解释为本次执行输出。
       const outs = existingOuts(cell)
-      results.push({ i: c1(cell), id: copilotLikeCellId(cell), exec: "skipped (previous cell failed)", execution: executionState(cell), existing_outs: outs.length > 0 ? [`stale:${outs.join(",")}`] : outs, artifacts: [] })
+      results.push({ i: c1(cell), id: copilotLikeCellId(cell), exec: "skipped (previous cell failed)", execution: executionState(cell), existing_outs: outs.length > 0 ? [`stale:${outs.join(",")}`] : outs, artifacts: [], skipped: true, timedOut: false, outputCount: 0 })
       continue
     }
 
@@ -115,6 +115,7 @@ export async function runNotebook(input: Record<string, unknown>, signal?: Abort
 
     // 每次执行结算后先同步捕获字节与状态，文件 I/O 不能把第二次输出贴到这一格的结果上。
     const result = await compactRunCell(notebook, cell, captureNotebookCellOutput(notebook, cell))
+    result.timedOut = !executionSummary
     // 超时文案只改展示字段，原生执行状态及已捕获输出不能补成成功或取消。
     // 只给恢复指引，不自动中断；原生状态与捕获输出仍由既有owner负责。
     // 超时不证明取消，用户可显式stop或info检查内核。
@@ -188,6 +189,10 @@ async function compactRunCell(notebook: vscode.NotebookDocument, cell: vscode.No
     execution: snapshot.data.cell.execution,
     // run 与 output 共用从复制 items 得到的 MIME 列表，不增设另一套输出状态观察器。
     existing_outs: snapshot.data.cell.existing_outs,
+    // 保留等待事实与原生执行状态两个维度；无需由exec展示文字反推。
+    skipped: false,
+    timedOut: false,
+    outputCount: snapshot.outputs.length,
     artifacts: await Promise.all(
       // existing_outs 去重仅作能力列表；artifact 是输出序列，同 MIME 的重复输出也须逐项保留原顺序。
       // Promise.all 的拒绝不会撤销兄弟写入，失败响应后可能仍留有已写成的 artifact，不能按事务回滚理解。

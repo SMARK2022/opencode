@@ -427,6 +427,7 @@ export const TaskTool = Tool.define(
       if (yield* background.extend({ id: nextSession.id, run: runTask() })) {
         return {
           title: params.description,
+          program: { value: { sessionID: nextSession.id, status: "running", content: BACKGROUND_UPDATED } },
           metadata: {
             ...metadata,
             background: true,
@@ -460,8 +461,10 @@ export const TaskTool = Tool.define(
       })
 
       function backgroundResult() {
+        // running描述此次后台回执；最终结果继续通过BackgroundJob既有通知交付。
         return {
           title: params.description,
+          program: { value: { sessionID: nextSession.id, status: "running", content: BACKGROUND_STARTED } },
           metadata: {
             ...metadata,
             background: true,
@@ -506,6 +509,8 @@ export const TaskTool = Tool.define(
             return {
               title: params.description,
               metadata,
+              // 程序正文直接取子任务回复，展示包装与恢复提示继续留在原output中。
+              program: { value: { sessionID: nextSession.id, status: "completed", content: result?.output ?? "" } },
               output: renderOutput({
                 sessionID: nextSession.id,
                 state: "completed",
@@ -533,6 +538,7 @@ export const TaskTool = Tool.define(
         ? [TaskPrompt.description, BACKGROUND_DESCRIPTION].join("\n\n")
         : TaskPrompt.description,
       parameters: Parameters,
+      output: Schema.Struct({ sessionID: Schema.String, status: Schema.Literals(["running", "completed"]), content: Schema.String }),
       jsonSchema: flags.experimentalBackgroundSubagents ? undefined : ToolJsonSchema.fromSchema(BaseParameters),
       execute: (params: Schema.Schema.Type<typeof Parameters>, ctx: Tool.Context) =>
         run(params, ctx).pipe(Effect.orDie),

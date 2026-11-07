@@ -1,12 +1,11 @@
 import { describe, expect, test } from "bun:test"
-import { CODE_MODE_TOOL, CodeModeTool, Parameters, describeCatalog } from "@/tool/code-mode"
+import { CODE_MODE_TOOL, CodeModeTool, Parameters, describeCatalog, type CatalogEntry } from "@/tool/code-mode"
+import { McpCatalog } from "@/mcp/catalog"
 import type { Tool as MCPToolDef } from "@modelcontextprotocol/sdk/types.js"
 import type { PermissionV1 } from "@opencode-ai/core/v1/permission"
 import { Agent } from "@/agent/agent"
 import { MCP } from "@/mcp"
 import { Permission } from "@/permission"
-import { Plugin } from "@/plugin"
-import { Session } from "@/session/session"
 import { Tool } from "@/tool/tool"
 import * as Truncate from "@/tool/truncate"
 import { MessageID, SessionID } from "@/session/schema"
@@ -37,28 +36,13 @@ function mcpTool(
   }
 }
 
-function harness(input: {
-  mcpTools: Record<string, MCP.McpTool>
-  servers: string[]
-  permission?: PermissionV1.Rule[]
-  trigger?: Plugin.Interface["trigger"]
-}) {
+function harness() {
   return Layer.mergeAll(
-    Layer.mock(Plugin.Service, {
-      trigger: input.trigger ?? (((_name, _input, output) => Effect.succeed(output)) as Plugin.Interface["trigger"]),
-    }),
     Layer.mock(Truncate.Service, {
       output: (text: string) => Effect.succeed({ content: text, truncated: false as const }),
     }),
     Layer.mock(Agent.Service, {
-      get: () => Effect.succeed({ name: "build", permission: input.permission ?? [] } as any),
-    }),
-    Layer.mock(Session.Service, {
-      get: () => Effect.succeed({ permission: [] } as any),
-    }),
-    Layer.mock(MCP.Service, {
-      tools: () => Effect.succeed(input.mcpTools),
-      clients: () => Effect.succeed(Object.fromEntries(input.servers.map((name) => [name, {} as any]))),
+      get: () => Effect.succeed({ name: "build", mode: "primary" as const, options: {}, permission: [] }),
     }),
   )
 }
@@ -67,23 +51,41 @@ function serverNames(mcpTools: Record<string, MCP.McpTool>, servers?: string[]) 
   return servers ?? [...new Set(Object.keys(mcpTools).map((key) => key.split("_")[0]!))]
 }
 
-function build(
+function catalogFor(mcpTools: Record<string, MCP.McpTool>, servers?: string[], permission: PermissionV1.Rule[] = []): CatalogEntry[] {
+  const names = serverNames(mcpTools, servers).toSorted((a, b) => b.length - a.length)
+  return Object.entries(Permission.visibleTools(mcpTools, permission)).map(([id, entry]) => {
+    const server = names.find((name) => id.startsWith(name + "_")) ?? id.split("_")[0]
+    return { id, path: [server, id.startsWith(server + "_") ? id.slice(server.length + 1) : id],
+      description: entry.def.description ?? "", inputSchema: McpCatalog.schemas(entry.def).input, outputSchema: McpCatalog.schemas(entry.def).output }
+  })
+}
+
+async function build(
   mcpTools: Record<string, MCP.McpTool>,
   servers?: string[],
   permission?: PermissionV1.Rule[],
-  trigger?: Plugin.Interface["trigger"],
 ) {
-  const names = serverNames(mcpTools, servers)
-  return Effect.runPromise(
+  const catalog = catalogFor(mcpTools, servers, permission)
+  const definition = await Effect.runPromise(
     CodeModeTool.pipe(
       Effect.flatMap(Tool.init),
-      Effect.provide(harness({ mcpTools, servers: names, permission, trigger })),
+      Effect.provide(harness()),
     ),
   )
+  return { ...definition, execute: (params: Schema.Schema.Type<typeof Parameters>, ctx: Tool.Context) => definition.execute(params, {
+    ...ctx, codeMode: {
+      catalog, signal: ctx.abort, begin: () => Effect.void,
+      invoke: (id, input) => Effect.gen(function* () {
+        // transport/result 使用真实协议 owner；夹具只替代本测试范围外的 Session 宿主。
+        const result = yield* Effect.promise(() => McpCatalog.callTool(mcpTools[id], input, ctx.abort))
+        return { title: id, output: "", metadata: {}, program: McpCatalog.programResult(result) }
+      }),
+    },
+  }) }
 }
 
 function describeFor(mcpTools: Record<string, MCP.McpTool>, servers?: string[], permission: PermissionV1.Rule[] = []) {
-  return describeCatalog(Permission.visibleTools(mcpTools, permission), serverNames(mcpTools, servers))
+  return Effect.runPromise(describeCatalog(catalogFor(mcpTools, servers, permission)))
 }
 
 // Program failures die at the tool boundary; recover the defect for message assertions.
@@ -107,20 +109,20 @@ describe("code mode execute", () => {
     })
   })
 
-  test("groups multi-underscore server names by longest matching prefix", () => {
-    const description = describeFor({ my_server_do_thing: mcpTool("do_thing", () => "") }, ["my_server"])
+  test("renders the supplied multi-underscore namespace", async () => {
+    const description = await describeFor({ my_server_do_thing: mcpTool("do_thing", () => "") }, ["my_server"])
     expect(description).toContain("- my_server (1 tool)")
     expect(description).toContain("tools.my_server.do_thing(")
   })
 
-  test("groupByServer uses the whole key as the server name when it has no underscore", () => {
-    const description = describeFor({ standalone: mcpTool("standalone", () => "") }, [])
+  test("renders a supplied namespace without underscores", async () => {
+    const description = await describeFor({ standalone: mcpTool("standalone", () => "") }, [])
     expect(description).toContain("- standalone (1 tool)")
     expect(description).toContain("tools.standalone.standalone(")
   })
 
-  test("describeCatalog carries the raw MCP schemas for rendering", () => {
-    const description = describeFor(
+  test("describeCatalog carries the raw MCP schemas for rendering", async () => {
+    const description = await describeFor(
       {
         weather_current: mcpTool(
           "current",
@@ -132,20 +134,21 @@ describe("code mode execute", () => {
       ["weather"],
     )
     expect(description).toContain(
-      "tools.weather.current(input: {\n  city: string,\n}): Promise<{\n  tempC: number,\n}>",
+      "tools.weather.current({\n  city: string,\n}): Promise<{\n  tempC: number,\n}>",
     )
   })
 
-  test("the static base description carries no catalog; the registry appends it", async () => {
+  test("the static base description preserves upstream guidance without a session catalog", async () => {
     const tool = await build({ github_list_issues: mcpTool("list_issues", () => "") })
     expect(tool.id).toBe(CODE_MODE_TOOL)
-    expect(tool.description).toBe("Run a confined orchestration script with access to connected MCP tools.")
+    // 哈希来自官方v2.2.5固定说明，动态目录由独立的Instructions出口交付。
+    expect(new Bun.CryptoHasher("sha256").update(tool.description).digest("hex")).toBe("4e1d4d35251719086df5e5c85baf32dd27364519b2c1556912dc806e2c74eea8")
     expect(tool.description).not.toContain("Available tools")
     expect(tool.description).not.toContain("list_issues")
   })
 
-  test("small catalogs inline every full signature in the appended catalog", () => {
-    const description = describeFor({
+  test("small catalogs inline every full signature in the appended catalog", async () => {
+    const description = await describeFor({
       github_create_issue: mcpTool("create_issue", () => "", {
         type: "object",
         properties: { title: { type: "string" }, body: { type: "string" } },
@@ -155,27 +158,25 @@ describe("code mode execute", () => {
       linear_search: mcpTool("search", () => ""),
     })
 
-    expect(description).toContain("Available tools (COMPLETE list")
+    expect(description).toContain("The catalog is complete. Do not guess tool names.")
     expect(description).toContain("- github (2 tools)")
     expect(description).toContain("- linear (1 tool)")
     expect(description).toContain(
-      "tools.github.create_issue(input: {\n  title: string,\n  body?: string,\n}): Promise<unknown>",
+      "tools.github.create_issue({\n  title: string,\n  body?: string,\n}): Promise<unknown>",
     )
     expect(description).toContain("tools.github.list_issues(")
     expect(description).toContain("tools.linear.search(")
-    expect(description).toContain("tools.linear.search(input: {}): Promise<unknown>")
+    expect(description).toContain("tools.linear.search(): Promise<unknown>")
     expect(description).not.toContain("$codemode")
     expect(description).not.toContain("Browse one namespace")
-    expect(description).toContain("## Workflow")
-    expect(description).toContain("1. Pick a tool from the list under `## Available tools`")
+    expect(description).toContain("## Code Mode tools (call only inside `execute`)")
     expect(description).not.toContain("JSON.parse(res)")
-    expect(description).toContain("check that it is a non-null object and not an array")
-    expect(description).toContain("Return only the fields you need")
+    expect(description).toContain("Every other tool you have is a normal tool call")
     expect(description).not.toContain("total_count")
   })
 
-  test("signatures render the declared outputSchema as the return type", () => {
-    const description = describeFor({
+  test("signatures render the declared outputSchema as the return type", async () => {
+    const description = await describeFor({
       weather_current: mcpTool(
         "current",
         () => "",
@@ -188,7 +189,7 @@ describe("code mode execute", () => {
       ),
     })
     expect(description).toContain(
-      "tools.weather.current(input: {\n  city: string,\n}): Promise<{\n  tempC: number,\n  summary?: string,\n}>",
+      "tools.weather.current({\n  city: string,\n}): Promise<{\n  tempC: number,\n  summary?: string,\n}>",
     )
   })
 
@@ -210,23 +211,23 @@ describe("code mode execute", () => {
       properties: { topic: { type: "string", description: "Subject to look up" } },
       required: ["topic"],
     })
-    const description = describeFor(tools, ["alpha", "zeta"])
+    const description = await describeFor(tools, ["alpha", "zeta"])
 
-    expect(description).toContain("Available tools (PARTIAL - ")
+    expect(description).toContain("The catalog is partial.")
     expect(description).toMatch(/- alpha \(150 tools, \d+ shown\)/)
     expect(description).toContain("- zeta (1 tool)\n")
     expect(description).toContain(
-      "tools.zeta.only_tool(input: {\n  /** Subject to look up */\n  topic: string,\n}): Promise<unknown>",
+      "tools.zeta.only_tool({\n  /** Subject to look up */\n  topic: string,\n}): Promise<unknown>",
     )
-    expect(description).toContain("tools.$codemode.search(")
+    expect(description).toContain("search({")
     expect(description).toContain("  limit?: number,\n  offset?: number,")
     expect(description).toContain("  remaining: number,\n  next: {")
     expect(description).toContain("      offset: number,\n    } | null,")
     expect(description).toContain(
-      '1. If needed, discover tools: `return await tools.$codemode.search({ query: "<intent + key nouns>" })`.',
+      "find it with the global `search(...)` function",
     )
     expect(description).toContain(
-      '- Browse one namespace: `await tools.$codemode.search({ query: "", namespace: "<name>" })`.',
+      "Each result's `path` is the complete call expression",
     )
     expect(description).not.toContain("total_count")
     expect(description).toContain("tools.alpha.op_0(")
@@ -241,7 +242,7 @@ describe("code mode execute", () => {
     expect(result).toMatchObject({ remaining: 0, next: null })
     expect(result.items[0].signature).toContain("tools.")
     const signature = result.items.find((i: any) => i.path === "tools.zeta.only_tool").signature
-    expect(signature).toContain("tools.zeta.only_tool(input: {\n")
+    expect(signature).toContain("tools.zeta.only_tool({\n")
     expect(signature).toContain("  /** Subject to look up */\n  topic: string")
     expect(description).toContain("/** Subject to look up */")
     expect(out.metadata.toolCalls).toEqual([
@@ -358,109 +359,8 @@ describe("code mode execute", () => {
     expect(output.output).toBe("caught: server exploded")
   })
 
-  test("asks permission before each child tool call", async () => {
-    const asked: unknown[] = []
-    const permissionCtx: Tool.Context = { ...ctx, ask: (req) => Effect.sync(() => void asked.push(req)) }
-    const ok = () => ({ content: [{ type: "text", text: "ok" }] })
-    const tool = await build({ a_tool: mcpTool("a", ok), b_tool: mcpTool("b", ok) })
-
-    await Effect.runPromise(
-      tool.execute({ code: "await tools.a.tool({}); await tools.b.tool({}); return 'done'" }, permissionCtx),
-    )
-
-    expect(asked.map((req: any) => req.permission)).toEqual(["a_tool", "b_tool"])
-  })
-
-  test("a denied permission fails the child call with a catchable message, not the whole execute", async () => {
-    const denyCtx: Tool.Context = { ...ctx, ask: () => Effect.die(new Error("permission denied by user")) }
-    const called: string[] = []
-    const tool = await build({
-      a_tool: mcpTool("a", () => {
-        called.push("a")
-        return { content: [{ type: "text", text: "ok" }] }
-      }),
-    })
-
-    const output = await Effect.runPromise(
-      tool.execute({ code: "try { await tools.a.tool({}) } catch (e) { return 'denied: ' + e.message }" }, denyCtx),
-    )
-
-    expect(output.output).toBe("denied: permission denied by user")
-    expect(output.metadata.error).toBeUndefined()
-    expect(called).toEqual([])
-    expect(output.metadata.toolCalls).toEqual([{ tool: "a.tool", status: "error" }])
-  })
-
-  test("child calls fire plugin tool.execute hooks with the MCP key and synthetic parent/N call ids", async () => {
-    const events: { name: string; input: any; output: any }[] = []
-    const trigger = ((name: unknown, input: unknown, output: unknown) =>
-      Effect.sync(() => {
-        events.push({ name: name as string, input, output })
-        return output
-      })) as Plugin.Interface["trigger"]
-    const tool = await build(
-      {
-        a_tool: mcpTool("a", () => ({ content: [{ type: "text", text: "one" }] })),
-        b_tool: mcpTool("b", () => ({ content: [{ type: "text", text: "two" }] })),
-      },
-      undefined,
-      undefined,
-      trigger,
-    )
-
-    const out = await Effect.runPromise(
-      tool.execute({ code: "await tools.a.tool({ x: 1 }); await tools.b.tool({}); return 'done'" }, ctx),
-    )
-
-    expect(out.output).toBe("done")
-    expect(events.map((e) => [e.name, e.input.tool, e.input.callID])).toEqual([
-      ["tool.execute.before", "a_tool", "call_code_mode/1"],
-      ["tool.execute.after", "a_tool", "call_code_mode/1"],
-      ["tool.execute.before", "b_tool", "call_code_mode/2"],
-      ["tool.execute.after", "b_tool", "call_code_mode/2"],
-    ])
-    const [before, after] = events
-    expect(before!.input.sessionID).toBe(ctx.sessionID)
-    expect(before!.output).toEqual({ args: { x: 1 } })
-    expect(after!.input.args).toEqual({ x: 1 })
-    expect(after!.output).toEqual({ content: [{ type: "text", text: "one" }] })
-  })
-
-  test("a failing before hook fails only that child call as a catchable in-program error", async () => {
-    const trigger = ((name: unknown, input: any, output: unknown) => {
-      if (name === "tool.execute.before" && input.tool === "a_tool") return Effect.die(new Error("hook exploded"))
-      return Effect.succeed(output)
-    }) as Plugin.Interface["trigger"]
-    const called: string[] = []
-    const record = (name: string) => () => {
-      called.push(name)
-      return { content: [{ type: "text", text: "ok" }] }
-    }
-    const tool = await build(
-      { a_tool: mcpTool("a", record("a")), b_tool: mcpTool("b", record("b")) },
-      undefined,
-      undefined,
-      trigger,
-    )
-
-    const out = await Effect.runPromise(
-      tool.execute(
-        {
-          code: `
-            let caught
-            try { await tools.a.tool({}) } catch (e) { caught = e.message }
-            const r = await tools.b.tool({})
-            return caught + " / " + r
-          `,
-        },
-        ctx,
-      ),
-    )
-
-    expect(out.metadata.error).toBeUndefined()
-    expect(out.output).toBe("hook exploded / ok")
-    expect(called).toEqual(["b"])
-  })
+  // 权限终止、MCP ask 和 hooks 的验收移至 session/execute.test.ts 的真实共享宿主。
+  // 此处继续验证解释器对宿主数据、普通错误、附件和取消的消费合同。
 
   test("streams live per-call metadata as a call starts and finishes", async () => {
     const snapshots: Array<{ toolCalls: { tool: string; status: string; input?: Record<string, unknown> }[] }> = []
@@ -609,15 +509,14 @@ describe("code mode execute", () => {
         return new Promise(() => {})
       }),
     })
-    const output = await Effect.runPromise(
+    const output = await Effect.runPromiseExit(
       tool.execute(
         { code: "try { await tools.host.trigger({}) } catch {} while (true) {}" },
         { ...ctx, abort: controller.signal },
       ),
     )
-    expect(output.output).toBe("Execution cancelled.")
-    expect(output.metadata.error).toBe(true)
-    expect(output.metadata.toolCalls).toEqual([{ tool: "host.trigger", status: "running" }])
+    expect(Exit.isFailure(output)).toBe(true)
+    if (Exit.isFailure(output)) expect(Cause.hasInterrupts(output.cause)).toBe(true)
   })
 
   test("a pre-aborted signal cancels before the program runs", async () => {
@@ -625,10 +524,10 @@ describe("code mode execute", () => {
     controller.abort()
     const ran: string[] = []
     const tool = await build({ host_touch: mcpTool("touch", () => (ran.push("called"), "ok")) })
-    const output = await Effect.runPromise(
+    const output = await Effect.runPromiseExit(
       tool.execute({ code: "return await tools.host.touch({})" }, { ...ctx, abort: controller.signal }),
     )
-    expect(output.output).toBe("Execution cancelled.")
+    expect(Exit.isFailure(output)).toBe(true)
     expect(ran).toEqual([])
   })
 
@@ -659,23 +558,23 @@ describe("code mode permission visibility", () => {
   const askRule = (permission: string): PermissionV1.Rule => ({ permission, pattern: "*", action: "ask" })
   const ok = () => ({ content: [{ type: "text", text: "ok" }] })
 
-  test("a hard-denied tool never enters the catalog or its search index", () => {
+  test("a hard-denied tool never enters the catalog or its search index", async () => {
     const mcpTools = {
       github_create_issue: mcpTool("create_issue", ok),
       github_list_issues: mcpTool("list_issues", ok),
     }
-    const description = describeFor(mcpTools, ["github"], [deny("github_create_issue")])
+    const description = await describeFor(mcpTools, ["github"], [deny("github_create_issue")])
     expect(description).toContain("tools.github.list_issues(")
     expect(description).not.toContain("create_issue")
     expect(description).toContain("- github (1 tool)")
   })
 
-  test("an ask-level tool stays fully visible in the catalog", () => {
+  test("an ask-level tool stays fully visible in the catalog", async () => {
     const mcpTools = {
       github_create_issue: mcpTool("create_issue", ok),
       github_list_issues: mcpTool("list_issues", ok),
     }
-    const description = describeFor(mcpTools, ["github"], [askRule("github_create_issue")])
+    const description = await describeFor(mcpTools, ["github"], [askRule("github_create_issue")])
     expect(description).toContain("tools.github.create_issue(")
     expect(description).toContain("tools.github.list_issues(")
     expect(description).toContain("- github (2 tools)")
@@ -703,19 +602,6 @@ describe("code mode permission visibility", () => {
     const allowed = await Effect.runPromise(tool.execute({ code: "return await tools.github.list_issues({})" }, ctx))
     expect(allowed.metadata.error).toBeUndefined()
     expect(allowed.output).toBe("ok")
-  })
-
-  test("an ask-level tool remains callable and still prompts via ctx.ask", async () => {
-    const asked: string[] = []
-    const askCtx: Tool.Context = { ...ctx, ask: (req) => Effect.sync(() => void asked.push(req.permission)) }
-    const tool = await build(
-      { github_list_issues: mcpTool("list_issues", ok) },
-      ["github"],
-      [askRule("github_list_issues")],
-    )
-    const out = await Effect.runPromise(tool.execute({ code: "return await tools.github.list_issues({})" }, askCtx))
-    expect(out.output).toBe("ok")
-    expect(asked).toEqual(["github_list_issues"])
   })
 
   test("Permission.visibleTools hides only hard denies, matching Permission.disabled", () => {

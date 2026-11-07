@@ -236,6 +236,23 @@ test("legacy shell running animation labels intent while keeping the command vis
   })
 })
 
+test("execute renders its child summary without a duplicate child tool row", async () => {
+  const info = { ...assistant("msg_execute", 1), finish: "tool-calls" }
+  const child = completedToolPart("part_execute_child", info.id, "read", { filePath: "child-audit-only.ts" })
+  if (child.type !== "tool") throw new Error("Expected child tool")
+  child.metadata = { executeParent: "execute" }
+  await withRenderedSession([info], { [info.id]: [
+    completedToolPart("part_execute", info.id, "execute", { code: "return 1" }, {
+      toolCalls: [{ tool: "$opencode.read", status: "completed", input: { filePath: "from-parent.ts" } }],
+    }), child,
+  ] }, async (app) => {
+    const frame = await waitForFrame(app, (value) => value.includes("from-parent.ts"))
+    // 真实 Session 帧保留父工具的进度列表，持久化 child 只服务审计与归因。
+    expect(frame).toContain("execute")
+    expect(frame).not.toContain("child-audit-only.ts")
+  })
+})
+
 test("legacy message rail continues through internal gaps and breaks between messages", async () => {
   const first = { ...assistant("msg_legacy_parts", 1), finish: "tool-calls" }
   const second = { ...assistant("msg_legacy_next", 2), finish: "tool-calls" }

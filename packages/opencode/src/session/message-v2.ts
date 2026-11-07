@@ -842,6 +842,8 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
             type: "step-start",
           })
         if (part.type === "tool") {
+          // 子记录保留在 Session 供归因使用，provider 历史只回放它实际请求的 execute。
+          if (typeof part.metadata?.executeParent === "string") continue
           toolNames.add(part.tool)
           if (part.state.status === "completed") {
             // 剪枝占位与共享Search History一起保留partial，不能把无正文当作完整阴性。
@@ -892,7 +894,11 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
             const abortNotice = typeof rawElapsed === "number" && Number.isFinite(rawElapsed) && rawElapsed >= 0
               ? formatExecutionNotice({ source: "tool", severity: "warning", reason: "user_abort", elapsed_ms: Math.floor(rawElapsed) })
               : undefined
-            const partialOutput = interrupted ? part.state.metadata?.output : undefined
+            // execute 的 partial 仍是错误回执；普通工具保留原中断输出协议。
+            const partialOutput = interrupted && part.tool !== "execute" ? part.state.metadata?.output : undefined
+            const executeOutput = part.tool === "execute" && typeof part.state.metadata?.output === "string"
+              ? truncateToolOutput(part.state.metadata.output, options?.toolOutputTruncation?.head, options?.toolOutputTruncation?.tail)
+              : undefined
             // Task创建后已保存真实子会话身份；即使没有partial也须交付恢复行，其他工具不变。
             // 恢复行先于既有abort notice，不把中断伪装为完成。
             const taskSessionId =
@@ -911,7 +917,8 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
               })
             } else {
               // #528：无 partial 时仍走 output-error，不把 abort 伪装成 completed（INV-04）
-              const errorBody = taskSessionId ? ensureTaskResumeVisible(part.state.error, taskSessionId) : part.state.error
+              const errorBody = taskSessionId ? ensureTaskResumeVisible(part.state.error, taskSessionId)
+                : executeOutput ? `${part.state.error}\n\n${executeOutput}` : part.state.error
               assistantMessage.parts.push({
                 type: ("tool-" + part.tool) as `tool-${string}`,
                 state: "output-error",

@@ -2031,13 +2031,14 @@ const layer = Layer.effect(
             const decide = isDecideAgent(agent)
 
             // 非 decide：沿用 SessionTools.resolve 完整权限/插件管线
-            const tools: Record<string, AITool> = decide
-              ? {}
+            const resolved = decide
+              ? { tools: {}, instructions: [] }
               : yield* SessionTools.resolve({
                   agent,
                   session,
                   model,
                   processor: handle,
+                  userTools: lastUser.tools,
                   bypassAgentCheck,
                   messages: msgs,
                   promptOps,
@@ -2052,8 +2053,10 @@ const layer = Layer.effect(
                   Effect.provideService(ToolRegistry.Service, registry),
                   Effect.provideService(MCP.Service, mcp),
                   Effect.provideService(Truncate.Service, truncate),
+                  Effect.provideService(Session.Service, sessions),
                   Effect.provideService(RuntimeFlags.Service, flags),
                 )
+            const tools: Record<string, AITool> = resolved.tools
 
             // decide 不挂 StructuredOutput 工具；json_schema 仅非 decide
             if (!decide && lastUser.format?.type === "json_schema") {
@@ -2089,6 +2092,8 @@ const layer = Layer.effect(
             const system = [
               ...env.system,
               ...instructions,
+              // 目录属于当前provider turn，工具开关变化后不能沿用前轮可调用性。
+              ...resolved.instructions,
               ...(mcpInstructions ? [mcpInstructions] : []),
               ...(skills ? [skills] : []),
             ]

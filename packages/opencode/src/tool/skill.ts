@@ -18,6 +18,7 @@ export const SkillTool = Tool.define(
     return {
       description: DESCRIPTION,
       parameters: Parameters,
+      output: Schema.Struct({ path: Schema.String, content: Schema.String }),
       execute: (params: Schema.Schema.Type<typeof Parameters>, ctx: Tool.Context) =>
         Effect.gen(function* () {
           const info = yield* skill
@@ -41,9 +42,12 @@ export const SkillTool = Tool.define(
           const alreadyLoaded = ctx.messages.some((msg) =>
             msg.info.role === "assistant" &&
             msg.parts.some((part) => {
-              if (part.type !== "tool" || part.tool !== "skill") return false
+              if (part.type !== "tool" || typeof part.metadata?.executeParent === "string") return false
               if (part.state.status !== "completed") return false
-              if (part.state.time.compacted) return false
+              if (part.state.time.compacted !== undefined) return false
+              // execute 的完整父输出才是已交付证据，失败或截断父回执不会登记该键。
+              if (part.tool === "execute") return Array.isArray(part.state.metadata.skills) && part.state.metadata.skills.includes(params.name)
+              if (part.tool !== "skill") return false
               const input = part.state.input as Record<string, unknown> | undefined
               return input?.name === params.name
             }),
@@ -53,6 +57,8 @@ export const SkillTool = Tool.define(
               title: `Skill ${params.name} already loaded`,
               output: `Skill '${params.name}' was already loaded in this session. Refer to the prior tool output for instructions.`,
               metadata: { name: params.name, dir: path.dirname(info.location), deduped: true },
+              // 宿主只省略重复展示；脚本仍能取得本次请求的真实技能正文。
+              program: { value: { path: path.dirname(info.location), content: info.content.trim() } },
             }
           }
 
@@ -67,9 +73,7 @@ export const SkillTool = Tool.define(
             limit: 10,
           })
 
-          return {
-            title: `Loaded skill: ${info.name}`,
-            output: [
+          const output = [
               `<skill_content name="${info.name}">`,
               `# Skill: ${info.name}`,
               "",
@@ -83,7 +87,13 @@ export const SkillTool = Tool.define(
               files.map((file) => `<file>${path.resolve(dir, file.path)}</file>`).join("\n"),
               "</skill_files>",
               "</skill_content>",
-            ].join("\n"),
+            ].join("\n")
+          return {
+            title: `Loaded skill: ${info.name}`,
+            output,
+            program: { value: { path: dir, content: info.content.trim() } },
+            // 技能规则属于宿主上下文，脚本 return 不能将它从父回执丢弃。
+            ...(ctx.executeParent && { context: [{ kind: "skill" as const, key: info.name, text: output }] }),
             metadata: {
               name: info.name,
               dir,
