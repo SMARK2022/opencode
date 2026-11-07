@@ -29,6 +29,7 @@ import path from "node:path"
 import { TestLLMServer } from "./llm-server"
 import { testProviderConfig } from "./test-provider"
 import { it } from "./effect"
+import { markPluginDependenciesReady } from "../fixture/plugin"
 
 const opencodeRoot = path.resolve(import.meta.dir, "../../")
 const cliEntry = path.join(opencodeRoot, "src/index.ts")
@@ -63,6 +64,8 @@ function isolatedEnv(home: string, configJson: string): Record<string, string> {
   return {
     OPENCODE_TEST_HOME: home,
     HOME: home,
+    // CLI 的请求目录取自 PWD；只设置 cwd 仍会让工具误入父进程的仓库。
+    PWD: home,
     XDG_CONFIG_HOME: path.join(home, ".config"),
     XDG_DATA_HOME: path.join(home, ".local/share"),
     XDG_STATE_HOME: path.join(home, ".local/state"),
@@ -200,12 +203,23 @@ export function withCliFixture<A, E>(
         .remove(home, { recursive: true })
         .pipe(Effect.retry(Schedule.spaced("50 millis").pipe(Schedule.both(Schedule.recurs(20)))), Effect.ignore),
     )
+    // PURE 不跳过 Config 的依赖准备；复用既有标记，避免行为测试安装外部包。
+    yield* Effect.promise(() => markPluginDependenciesReady(path.join(home, ".config", "opencode")))
 
     const configJson = JSON.stringify(testProviderConfig(llm.url))
     const env = isolatedEnv(home, configJson)
+    // 序号只关联同一 fixture 的调用；不输出 argv、prompt、路径或继承环境中的私有数据。
+    let sequence = 0
+    const observe = (role: "spawn" | "serve" | "startRun") => {
+      const id = ++sequence
+      const started = performance.now()
+      return (stage: string, values: Record<string, number> = {}) =>
+        console.error("[CI-DIAG-R10]", JSON.stringify({ role, id, stage, elapsed: performance.now() - started, ...values }))
+    }
 
     const spawn = Effect.fn("opencode.spawn")(function* (args: string[], opts?: SpawnOpts) {
       const start = Date.now()
+      const observeRun = observe("spawn")
       const timeoutMs = opts?.timeoutMs ?? 30_000
       // stdin: "ignore" so the child doesn't see a piped stdin and block
       // on `Bun.stdin.text()` (see src/cli/cmd/run.ts — non-TTY stdin is
@@ -228,6 +242,8 @@ export function withCliFixture<A, E>(
       // Catch AppProcessError (timeout OR spawn failure) and synthesize a
       // non-zero result so the test sees it via the usual `expectExit`
       // path rather than as an unhandled Effect failure.
+      // AppProcess 仍独占收集与超时清理；这里不另读 stream，也不声称保留 timeout 前的输出。
+      observeRun("run-started", { calls: yield* llm.calls })
       const result = yield* appProc.run(command, { timeout: Duration.millis(timeoutMs) }).pipe(
         Effect.catchTag("AppProcessError", (err) =>
           Effect.succeed({
@@ -240,6 +256,8 @@ export function withCliFixture<A, E>(
           } satisfies AppProcess.RunResult),
         ),
       )
+      // calls 也包含标题请求；pending 才说明预置业务回复是否已全部消费。
+      observeRun("result", { exitCode: result.exitCode, calls: yield* llm.calls, pending: yield* llm.pending })
       return {
         exitCode: result.exitCode,
         stdout: normalizeLines(result.stdout.toString()),
@@ -280,6 +298,7 @@ export function withCliFixture<A, E>(
 
     const startRun = Effect.fn("opencode.startRun")(function* (message: string, opts?: RunOpts) {
       const start = Date.now()
+      const observeRun = observe("startRun")
       const options = runOpts(opts)
       const proc = yield* Effect.acquireRelease(
         Effect.sync(() =>
@@ -293,25 +312,36 @@ export function withCliFixture<A, E>(
         ),
         (child) =>
           Effect.promise(() => {
+            observeRun("scope-release")
             child.kill()
             return child.exited
           }).pipe(Effect.ignore),
       )
+      // 两个 Response 保持唯一消费者；只看原生命周期，不能用 tee 或新 reader 改变背压。
+      observeRun("spawned", { pid: proc.pid, calls: yield* llm.calls })
       const stdout = new Response(proc.stdout).text()
       const stderr = new Response(proc.stderr).text()
 
       return {
-        interrupt: () => proc.kill("SIGINT"),
-        result: Effect.promise(async () => ({
-          exitCode: await proc.exited,
-          stdout: normalizeLines(await stdout),
-          stderr: normalizeLines(await stderr),
-          durationMs: Date.now() - start,
-        })),
+        interrupt: () => {
+          observeRun("interrupt-requested")
+          proc.kill("SIGINT")
+        },
+        result: Effect.promise(async () => {
+          const exitCode = await proc.exited
+          observeRun("exit-observed", { exitCode })
+          return {
+            exitCode,
+            stdout: normalizeLines(await stdout),
+            stderr: normalizeLines(await stderr),
+            durationMs: Date.now() - start,
+          }
+        }),
       } satisfies RunHandle
     })
 
     const serve = Effect.fn("opencode.serve")(function* (opts?: ServeOpts) {
+      const observeRun = observe("serve")
       const argv = ["serve"]
       // Default port 0 — let the OS pick a free port, parse the actual one
       // off stdout. Hard-coded ports flake under parallel tests.
@@ -333,10 +363,12 @@ export function withCliFixture<A, E>(
         ),
         (p) =>
           Effect.promise(() => {
+            observeRun("scope-release")
             p.kill()
             return p.exited
           }).pipe(Effect.ignore),
       )
+      observeRun("spawned", { pid: proc.pid, calls: yield* llm.calls })
 
       // Tail buffer so timeout failures can include stderr context. The fork
       // also keeps the OS pipe buffer from filling and wedging the child.
@@ -374,6 +406,8 @@ export function withCliFixture<A, E>(
         }),
       )
 
+      // ready 仍来自原 listening sentinel；记录调用数不新增请求、轮询或就绪替代条件。
+      observeRun("ready", { calls: yield* llm.calls })
       return {
         url: match.url,
         hostname: match.hostname,
@@ -397,7 +431,8 @@ export function withCliFixture<A, E>(
         Effect.sync(() =>
           Bun.spawn(["bun", "run", cliEntry, ...argv], {
             cwd: opts?.cwd ?? home,
-            env: { ...process.env, ...env, ...opts?.env },
+            // ACP 可指定自己的 cwd，PWD 必须跟随它；保留调用者的显式环境覆盖。
+            env: { ...process.env, ...env, PWD: opts?.cwd ?? home, ...opts?.env },
             stdin: "pipe",
             stdout: "pipe",
             stderr: "pipe",

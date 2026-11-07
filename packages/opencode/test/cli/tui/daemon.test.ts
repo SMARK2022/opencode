@@ -65,6 +65,8 @@ function isolatedDaemonEnv(lockPath: string, env: Record<string, string> = {}) {
     // 生命周期用例只验证本机owner；外部插件预热和升级检查另有专测，不应抢占就绪阶段。
     OPENCODE_PURE: "1",
     OPENCODE_DISABLE_AUTOUPDATE: "1",
+    // 模型已由固定文件提供；外部刷新不属于 daemon 生命周期断言。
+    OPENCODE_DISABLE_MODELS_FETCH: "1",
     OPENCODE_DAEMON_LAUNCHER_PID: "",
     OPENCODE_PROCESS_ROLE: "main",
     // Slow WSL/drvfs cold starts can make the real CLI stop path take >5s before
@@ -2035,6 +2037,10 @@ describe("daemon lifecycle", () => {
   test(
     "daemon exits after the last SSE client disconnects",
     async () => {
+      // 临时阶段只观察原等待边界，不能用额外轮询改变 15s 测试的调度或成功条件。
+      const started = performance.now()
+      const stage = (stage: string) => console.error("[CI-DIAG-R10]", JSON.stringify({ role: "sse", stage, elapsed: performance.now() - started }))
+      stage("spawn-start")
       await using tmp = await tmpdir()
       const lockPath = path.join(tmp.path, "tui-server.json")
       // #173：250ms idle，测试不必等 30s
@@ -2043,6 +2049,7 @@ describe("daemon lifecycle", () => {
         OPENCODE_DAEMON_IDLE_TIMEOUT_MS: "250",
         OPENCODE_DAEMON_STARTUP_IDLE_TIMEOUT_MS: "5000",
       })
+      stage("health-ready")
 
       try {
         const ctrl = new AbortController()
@@ -2058,12 +2065,16 @@ describe("daemon lifecycle", () => {
           const first = await reader.read()
           // #173：先读到 connected，确认 SSE 计数已 +1
           expect(first.value).toContain("server.connected")
+          stage("sse-connected")
           // #173：连接期间必须仍存活，证明 idle 只在断开后计时
           await Bun.sleep(750)
           expect(ServerLock.alive(proc.pid)).toBe(true)
         } finally {
+          // 断开前后分开记录，区分取消流阻塞与 daemon 自身的 idle 清理。
+          stage("before-abort")
           ctrl.abort()
           await reader.cancel().catch(() => undefined)
+          stage("after-cancel")
           reader.releaseLock()
         }
 
@@ -2074,7 +2085,10 @@ describe("daemon lifecycle", () => {
         // #173：退出后进程与锁都应消失
         expect(ServerLock.alive(proc.pid)).toBe(false)
         expect(await Bun.file(lockPath).exists()).toBe(false)
+        stage("pid-and-lock-gone")
       } finally {
+        // 只读取现有退出状态，不额外 await 子进程以延长测试或掩盖超时。
+        console.error("[CI-DIAG-R10]", JSON.stringify({ role: "sse", stage: "cleanup", exitCode: proc.exitCode, elapsed: performance.now() - started }))
         try {
           proc.kill()
         } catch {}

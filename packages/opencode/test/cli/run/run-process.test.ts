@@ -5,10 +5,33 @@
 // `OPENCODE_CONFIG_CONTENT` providing the test provider config inline.
 import { describe, expect } from "bun:test"
 import { Effect } from "effect"
+import path from "node:path"
 import { reply } from "../../lib/llm-server"
 import { cliIt } from "../../lib/cli-process"
 
 describe("opencode run (non-interactive subprocess)", () => {
+  cliIt.concurrent(
+    "reads relative tool paths from the isolated CLI working directory",
+    ({ home, llm, opencode }) =>
+      Effect.gen(function* () {
+        const filename = `working-directory-${crypto.randomUUID()}.txt`
+        const content = `isolated-content-${crypto.randomUUID()}`
+        yield* Effect.promise(() => Bun.write(path.join(home, filename), content))
+        yield* llm.tool("read", { filePath: filename })
+        yield* llm.text("finished")
+
+        const result = yield* opencode.run("read the fixture")
+        opencode.expectExit(result, 0)
+        expect(result.stdout).toBe("finished\n")
+        // 最后一句由夹具预置；后续 provider 收到真实文件内容才证明工具读取了正确目录。
+        const messages = (yield* llm.inputs)
+          .flatMap((input) => Array.isArray(input.messages) ? input.messages : [])
+          .filter((message): message is Record<string, unknown> => typeof message === "object" && message !== null)
+        expect(messages.some((message) => message.role === "tool" && typeof message.content === "string" && message.content.includes(content))).toBe(true)
+      }),
+    60_000,
+  )
+
   // Happy path: prompt completes, output reaches stdout, process exits 0.
   // If this fails, all the others likely will too — debug here first.
   cliIt.concurrent(
@@ -336,5 +359,20 @@ describe("opencode run (non-interactive subprocess)", () => {
         expect(result.durationMs).toBeLessThan(30_000)
       }),
     30_000,
+  )
+})
+
+// 按需加载只覆盖精确的 stop；其他参数仍走完整命令表和原 fail-help。
+describe("opencode daemon stop help", () => {
+  cliIt.live("preserves help for invalid arguments", ({ opencode }) =>
+    Effect.gen(function* () {
+      const env = { COLUMNS: "120", LC_ALL: "en_US.UTF-8" }
+      const invalid = yield* opencode.spawn(["daemon", "stop", "--definitely-unknown"], { env })
+      const help = yield* opencode.spawn(["daemon", "stop", "--help"], { env })
+      expect(invalid.exitCode).toBe(1)
+      expect(help.exitCode).toBe(0)
+      // 同一夹具与终端宽度下直接比较真实输出，不新增归一化规则掩盖差异。
+      expect(invalid.stderr).toBe(help.stderr)
+    }),
   )
 })

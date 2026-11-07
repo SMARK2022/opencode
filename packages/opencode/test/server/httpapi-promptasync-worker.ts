@@ -3,6 +3,11 @@ import path from "node:path"
 import { createOpencodeClient } from "@opencode-ai/sdk/v2"
 import { Effect } from "effect"
 
+// 临时诊断只写固定阶段到 stderr；stdout 的单 JSON 仍是父测试唯一行为协议。
+const started = performance.now()
+const stage = (stage: string) => console.error("[CI-DIAG-R10]", JSON.stringify({ role: "promptAsync", stage, elapsed: performance.now() - started }))
+stage("module-loaded")
+
 type ServerPath = "default" | "raw"
 type App = {
   fetch: (request: Request) => Response | Promise<Response>
@@ -77,6 +82,8 @@ async function prepareEnvironment(databasePath: string) {
   process.env["XDG_STATE_HOME"] = xdg.state
   // worker 复用仓库 fixture 的模型描述，避免子进程读取开发者机器上的 models.json。
   process.env["OPENCODE_MODELS_PATH"] = path.join(import.meta.dir, "..", "tool", "fixtures", "models-api.json")
+  // 指定文件不会自动停掉后台刷新；路由测试只消费这个固定模型目录。
+  process.env["OPENCODE_DISABLE_MODELS_FETCH"] = "1"
   // 这两个开关是现有 Bun preload 的行为契约，不能因换成子进程而改变路由初始化。
   process.env["OPENCODE_EXPERIMENTAL_EVENT_SYSTEM"] = "true"
   process.env["OPENCODE_EXPERIMENTAL_WORKSPACES"] = "true"
@@ -139,11 +146,13 @@ async function runScenario(input: { path: ServerPath; directory: string }): Prom
   const { pollWithTimeout } = await import("../lib/effect")
   // Message 与 usage 均走既有 SDK 和同一 app，不新增另一条持久化观察路径。
   const app = await createApp(input.path)
+  stage("app-ready")
   const sdk = createClient(app, input.directory)
   // 先执行同步 noReply，再执行 async noReply，与原 parity 场景保持相同的 accepted-operation 顺序。
   const session = await sdk.session.create({ title: "prompt" })
   if (session.response.status !== 200 || !session.data)
     throw new Error(`session create failed: ${session.response.status}`)
+  stage("session-created")
   const sessionID = session.data.id
   const prompt = await sdk.session.prompt({
     sessionID,
@@ -152,6 +161,7 @@ async function runScenario(input: { path: ServerPath; directory: string }): Prom
     parts: [{ type: "text", text: "hello" }],
   })
   if (prompt.response.status !== 200 || !prompt.data) throw new Error(`prompt failed: ${prompt.response.status}`)
+  stage("sync-returned")
   // 204 只表示 async request 已被接受，不能作为 Message 或 usage 已完成的替代断言。
   const asyncPrompt = await sdk.session.promptAsync({
     sessionID,
@@ -159,6 +169,7 @@ async function runScenario(input: { path: ServerPath; directory: string }): Prom
     noReply: true,
     parts: [{ type: "text", text: "async hello" }],
   })
+  stage("async-accepted")
   const completed = await Effect.runPromise(
     // pollWithTimeout 等待公开状态变化，而不是用固定时长猜测后台 fiber 的调度速度。
     pollWithTimeout(
@@ -184,6 +195,8 @@ async function runScenario(input: { path: ServerPath; directory: string }): Prom
       "10 seconds",
     ),
   )
+  // 只有原 public-state 轮询完成才记阶段，不能把 204 接受当作持久化完成。
+  stage("public-state-completed")
   const messageTexts = completed.messages.data
     .flatMap((message) => message.parts.flatMap((part) => (part.type === "text" ? [part.text] : [])))
     .sort()
@@ -221,6 +234,7 @@ async function main(): Promise<PromptAsyncWorkerResult> {
   try {
     await mkdir(root, { recursive: true })
     await prepareEnvironment(dbPath)
+    stage("environment-ready")
     const { tmpdir } = await import("../fixture/fixture")
     // 复用仓库 tmpdir 的 git/config/Windows cleanup 契约，避免 worker 复制另一套项目 fixture 逻辑。
     const project = await tmpdir({
@@ -231,9 +245,11 @@ async function main(): Promise<PromptAsyncWorkerResult> {
         await Bun.write(path.join(projectDirectory, "needle.ts"), "export const needle = 'sdk-parity'\n")
       },
     })
+    stage("fixture-ready")
     directory = project.path
     disposeProject = () => project[Symbol.asyncDispose]()
     await initializeSource()
+    stage("source-ready")
     // 环境边界完成后才加载资源 owner；先释放 router，再由 runtime finalizer checkpoint/close 同一数据库。
     const { HttpApiApp } = await import("../../src/server/routes/instance/httpapi/server")
     const { AppRuntime } = await import("../../src/effect/app-runtime")
@@ -248,11 +264,16 @@ async function main(): Promise<PromptAsyncWorkerResult> {
     if (directory) {
       const { disposeInstance } = await import("../../src/effect/instance-registry")
       await disposeInstance(directory)
+      stage("instance-release-returned")
     }
     await closeDatabase?.()
+    stage("database-release-returned")
     await disposeProject?.()
+    stage("fixture-release-returned")
     // 子进程拥有整个临时根目录；移除它可避免 Windows WAL/SHM 文件泄漏到后续测试。
     await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }).catch(() => undefined)
+    // 原清理会吞掉 rm 错误，此标签仅说明控制流返回，不独立证明删除成功。
+    stage("root-cleanup-returned")
   }
 }
 

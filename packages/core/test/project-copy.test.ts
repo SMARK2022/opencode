@@ -361,7 +361,8 @@ describe("ProjectCopy", () => {
   it.live("refresh ignores existing directories that are no longer git checkouts", () =>
     Effect.gen(function* () {
       const input = yield* setup()
-      yield* Effect.promise(() => fs.rm(path.join(input.sourceDirectory, ".git"), { recursive: true }))
+      // 此夹具要求目录已无 Git 元数据；缺失本身满足前置条件，不能阻止后续 refresh 行为断言。
+      yield* Effect.promise(() => fs.rm(path.join(input.sourceDirectory, ".git"), { recursive: true, force: true }))
       const copy = yield* ProjectCopy.Service
 
       yield* copy.refresh({ projectID: input.projectID })
