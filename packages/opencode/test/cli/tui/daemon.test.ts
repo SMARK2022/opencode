@@ -65,6 +65,8 @@ function isolatedDaemonEnv(lockPath: string, env: Record<string, string> = {}) {
     // 生命周期用例只验证本机owner；外部插件预热和升级检查另有专测，不应抢占就绪阶段。
     OPENCODE_PURE: "1",
     OPENCODE_DISABLE_AUTOUPDATE: "1",
+    // 模型已由固定文件提供；外部刷新不属于 daemon 生命周期断言。
+    OPENCODE_DISABLE_MODELS_FETCH: "1",
     OPENCODE_DAEMON_LAUNCHER_PID: "",
     OPENCODE_PROCESS_ROLE: "main",
     // Slow WSL/drvfs cold starts can make the real CLI stop path take >5s before

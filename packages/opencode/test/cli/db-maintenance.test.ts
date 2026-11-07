@@ -7,12 +7,15 @@ import { fileURLToPath } from "url"
 import stripAnsi from "strip-ansi"
 import { spawn, type Proc } from "@opencode-ai/core/pty/pty.bun" // Bun 宿主沿 source 的 #pty 使用原生后端。
 import { Database as SQLite } from "bun:sqlite"
+import { Database } from "@opencode-ai/core/database/database"
+import { Effect } from "effect"
 import { Flock } from "@opencode-ai/core/util/flock"
+import { Hash } from "@opencode-ai/core/util/hash"
 // #549：status --task / hung-control 用例消费 reconcile 与 control 协议常量（目标 owner 在 cli/tui）。
 import { ServerLock } from "../../src/cli/tui/server-lock"
 import type { MaintenanceTask } from "@opencode-ai/core/storage/cold-maintain"
 import { tmpdir } from "../fixture/fixture"
-// 测试只走公开 CLI/PTY seam；不导入 renderer 或调用维护私有函数，避免实现重构产生假绿。
+// 维护断言只走公开 CLI/PTY；播种复用公开迁移，不导入 renderer 或调用维护私有函数。
 const INDEX_TS = fileURLToPath(new URL("../../src/index.ts", import.meta.url))
 const PTY_OPTIONS = { name: "xterm-256color", cols: 100 } as const
 const PIPE_OPTIONS = { stdin: "ignore", stdout: "pipe", stderr: "pipe" } as const
@@ -22,6 +25,8 @@ function isolatedEnv(root: string) {
   return {
     ...process.env,
     OPENCODE_PROCESS_ROLE: "main",
+    // preload 已提供固定模型目录；维护测试不需要后台刷新外部模型列表。
+    OPENCODE_DISABLE_MODELS_FETCH: "1",
     OPENCODE_LOCK_PATH: path.join(root, "tui-server.json"),
     OPENCODE_DB: path.join(root, "opencode.db"),
     OPENCODE_TEST_HOME: path.join(root, "home"),
@@ -36,6 +41,13 @@ async function markMigrated(root: string) {
   const dir = path.join(root, "share", "opencode")
   await mkdir(dir, { recursive: true })
   await Bun.write(path.join(dir, "opencode.db"), "")
+}
+async function prepareDatabase(root: string) {
+  await markMigrated(root)
+  // 使用生产数据库的真实迁移 owner；播种不必启动与维护断言无关的完整 CLI。
+  await Effect.runPromise(
+    Effect.asVoid(Database.Service).pipe(Effect.provide(Database.layerFromPath(path.join(root, "opencode.db")))),
+  )
 }
 // PTY helper 保留真实 stdin/stderr 关系，prompt、ANSI 和光标行为都由产品入口产生。
 function runPty(args: string[], env: Record<string, string | undefined>) {
@@ -70,9 +82,7 @@ function inflateFreelist(root: string, targetBytes = 20_000_000) {
 }
 
 async function seedColdParts(root: string, count = 40) {
-  await markMigrated(root)
-  // 先经真实 CLI status 完成建库与迁移；夹具只在合法 schema 上追加行。
-  await runCli(root, ["db", "status", "--json"])
+  await prepareDatabase(root)
   // 先使用真实 migration，再仅插入独立 owner；fixture 不复制 schema 或 eligibility 算法。
   const db = new SQLite(path.join(root, "opencode.db"))
   // FK OFF 只为插入速度；eligibility 仍由 ColdStorage 的 session.age 判定决定。
@@ -109,8 +119,7 @@ async function waitForExit(proc: Proc, exited: Promise<number>) {
 // 无法制造出历史遗留形态的坏行。
 // foreign_keys 关闭是播种前置：fixture 只写三张表，不维护真实外键图。
 async function seedMalformedToolInput(root: string) {
-  await markMigrated(root)
-  await runCli(root, ["db", "status", "--json"])
+  await prepareDatabase(root)
   const db = new SQLite(path.join(root, "opencode.db"))
   db.exec("PRAGMA foreign_keys = OFF")
   db.query(
@@ -248,6 +257,7 @@ describe("database maintenance CLI", () => {
       },
     })
     const electionDir = path.join(tmp.path, "state", "opencode", "locks")
+    const electionKey = `opencode.server:${path.join(tmp.path, "tui-server.json")}`
     let acquired = false
     const cli = runPty(["db", "compress", "--older-than", "0ms", "--batch-size", "1"], isolatedEnv(tmp.path))
     // 先停在真实用户决策边界再检查锁，不能把延迟送达的终端输出当作进程仍持锁。
@@ -256,12 +266,14 @@ describe("database maintenance CLI", () => {
         if (cli.output().includes("Reclaim")) resolve()
       })
     })
-    while (!(await readdir(electionDir).catch(() => [])).some((file) => file.endsWith(".lock"))) {
+    // 同一目录还有 models-dev 等锁；必须等待本次 election 的精确文件再启动竞争者。
+    const electionLock = Hash.fast(electionKey) + ".lock"
+    while (!(await readdir(electionDir).catch((): string[] => [])).includes(electionLock)) {
       await Bun.sleep(10)
     }
     const contender = (async () => {
       // contender 只拿同 key 选主锁；30s 等待窗口内任何提前成功都是发布边界波漏。
-      await using _ = await Flock.acquire(`opencode.server:${path.join(tmp.path, "tui-server.json")}`, { dir: electionDir, timeoutMs: 30_000 })
+      await using _ = await Flock.acquire(electionKey, { dir: electionDir, timeoutMs: 30_000 })
       acquired = true
       return "acquired" as const
     })()
@@ -322,8 +334,7 @@ describe("database maintenance CLI", () => {
   test("omits vacuum recommendation when reusable freelist is below hint", async () => {
     await using tmp = await tmpdir({
       init: async (root) => {
-        await markMigrated(root)
-        await runCli(root, ["db", "status", "--json"])
+        await prepareDatabase(root)
         // 非零但低于 HINT：旧 Recommendation 会亮；新门槛必须保持沉默。
         inflateFreelist(root, 100_000)
       },

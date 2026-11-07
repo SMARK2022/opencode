@@ -194,6 +194,8 @@ jobs:
           check_name: "必过核心测试结果 / ${{ matrix.label }} / ${{ matrix.os_label }}"
           detailed_summary: true
           include_time_in_summary: true
+          # 注释归当前测试任务，不再创建可能串到其他 workflow 的独立 check。
+          annotate_only: true
           fail_on_failure: false
 
       - name: Upload required unit artifact
@@ -484,6 +486,8 @@ jobs:
           check_name: "警告 上游单元兼容性 / ${{ matrix.os_label }}"
           detailed_summary: true
           include_time_in_summary: true
+          # 注释归当前测试任务，不再创建可能串到其他 workflow 的独立 check。
+          annotate_only: true
           fail_on_failure: false
 
       - name: Upload upstream unit artifacts
@@ -602,6 +606,8 @@ jobs:
           check_name: "警告 上游额外包测试 / ${{ matrix.label }}"
           detailed_summary: true
           include_time_in_summary: true
+          # 注释归当前测试任务，不再创建可能串到其他 workflow 的独立 check。
+          annotate_only: true
           fail_on_failure: false
 
       - name: Upload upstream extra artifact
@@ -731,6 +737,8 @@ jobs:
           check_name: "警告 上游 App E2E / ${{ matrix.os_label }}"
           detailed_summary: true
           include_time_in_summary: true
+          # 注释归当前测试任务，不再创建可能串到其他 workflow 的独立 check。
+          annotate_only: true
           fail_on_failure: false
 
       - name: Upload upstream e2e artifacts

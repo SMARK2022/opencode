@@ -29,6 +29,7 @@ import path from "node:path"
 import { TestLLMServer } from "./llm-server"
 import { testProviderConfig } from "./test-provider"
 import { it } from "./effect"
+import { markPluginDependenciesReady } from "../fixture/plugin"
 
 const opencodeRoot = path.resolve(import.meta.dir, "../../")
 const cliEntry = path.join(opencodeRoot, "src/index.ts")
@@ -63,6 +64,8 @@ function isolatedEnv(home: string, configJson: string): Record<string, string> {
   return {
     OPENCODE_TEST_HOME: home,
     HOME: home,
+    // CLI 的请求目录取自 PWD；只设置 cwd 仍会让工具误入父进程的仓库。
+    PWD: home,
     XDG_CONFIG_HOME: path.join(home, ".config"),
     XDG_DATA_HOME: path.join(home, ".local/share"),
     XDG_STATE_HOME: path.join(home, ".local/state"),
@@ -200,6 +203,8 @@ export function withCliFixture<A, E>(
         .remove(home, { recursive: true })
         .pipe(Effect.retry(Schedule.spaced("50 millis").pipe(Schedule.both(Schedule.recurs(20)))), Effect.ignore),
     )
+    // PURE 不跳过 Config 的依赖准备；复用既有标记，避免行为测试安装外部包。
+    yield* Effect.promise(() => markPluginDependenciesReady(path.join(home, ".config", "opencode")))
 
     const configJson = JSON.stringify(testProviderConfig(llm.url))
     const env = isolatedEnv(home, configJson)
@@ -397,7 +402,8 @@ export function withCliFixture<A, E>(
         Effect.sync(() =>
           Bun.spawn(["bun", "run", cliEntry, ...argv], {
             cwd: opts?.cwd ?? home,
-            env: { ...process.env, ...env, ...opts?.env },
+            // ACP 可指定自己的 cwd，PWD 必须跟随它；保留调用者的显式环境覆盖。
+            env: { ...process.env, ...env, PWD: opts?.cwd ?? home, ...opts?.env },
             stdin: "pipe",
             stdout: "pipe",
             stderr: "pipe",
