@@ -29,6 +29,10 @@ export function getWorkspaceRouteSessionID(url: URL) {
 
   const id =
     url.pathname.match(/^\/session\/([^/]+)(?:\/|$)/)?.[1] ??
+    // legacy question 同样按 Session 定位；remote proxy 保留该身份，让对端重新选择 pending 所在实例。
+    url.pathname.match(/^\/question\/session\/([^/]+)(?:\/|$)/)?.[1] ??
+    // 单 Session list 通过 query 定位；全局 list 没有该参数，仍走原控制面语义。
+    (url.pathname === "/question" ? url.searchParams.get("sessionID") : null) ??
     url.pathname.match(/^\/experimental\/session\/([^/]+)\/background$/)?.[1]
   if (!id) return null
 

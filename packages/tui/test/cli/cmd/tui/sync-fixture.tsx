@@ -6,7 +6,7 @@ import { onMount, type JSX } from "solid-js"
 import { ArgsProvider } from "../../../../src/context/args"
 import { KVProvider, useKV } from "../../../../src/context/kv"
 import { ProjectProvider, useProject } from "../../../../src/context/project"
-import { SDKProvider } from "../../../../src/context/sdk"
+import { SDKProvider, useSDK } from "../../../../src/context/sdk"
 import { SyncProvider, useSync } from "../../../../src/context/sync"
 import { RouteProvider, useRoute, type Route } from "../../../../src/context/route"
 import { PermissionProvider } from "../../../../src/context/permission"
@@ -24,7 +24,8 @@ export async function wait(fn: () => boolean, timeout = 2000) {
   }
 }
 
-type Ctx = { kv: ReturnType<typeof useKV>; project: ReturnType<typeof useProject>; sync: ReturnType<typeof useSync>; route: ReturnType<typeof useRoute> }
+// SDK 与 Sync 必须来自同一个 Provider，双前端验收不能绕过真实客户端回答。
+type Ctx = { kv: ReturnType<typeof useKV>; project: ReturnType<typeof useProject>; sdk: ReturnType<typeof useSDK>; sync: ReturnType<typeof useSync>; route: ReturnType<typeof useRoute> }
 
 export async function mount(override?: FetchHandler, state?: string, initialRoute?: Route, render?: () => JSX.Element) {
   // 显式测试目录仍优先；批量隔离运行时不读写固定/tmp或用户全局KV。
@@ -32,6 +33,8 @@ export async function mount(override?: FetchHandler, state?: string, initialRout
   const calls = createFetch(override)
   const events = createEventSource()
   let sync!: ReturnType<typeof useSync>
+  // 保存 Provider 内实际生成的 SDK，而不是在测试外另建 transport。
+  let sdk!: ReturnType<typeof useSDK>
   let project!: ReturnType<typeof useProject>
   let kv!: ReturnType<typeof useKV>
   let route!: ReturnType<typeof useRoute>
@@ -41,9 +44,11 @@ export async function mount(override?: FetchHandler, state?: string, initialRout
   })
 
   function Probe() {
-    const ctx: Ctx = { kv: useKV(), project: useProject(), sync: useSync(), route: useRoute() }
+    // 同一 Probe 同时发布 SDK 和 Sync，保证回答与观察属于同一前端生命周期。
+    const ctx: Ctx = { kv: useKV(), project: useProject(), sdk: useSDK(), sync: useSync(), route: useRoute() }
     onMount(() => {
       sync = ctx.sync
+      sdk = ctx.sdk
       project = ctx.project
       kv = ctx.kv
       route = ctx.route
@@ -98,6 +103,7 @@ export async function mount(override?: FetchHandler, state?: string, initialRout
 
   await ready
   await wait(() => sync.status === "complete")
-  return { app, emit: events.emit, kv, project, sync, route, session: calls.session }
+  // 返回既有客户端不改变 mount 的默认行为；只有需要真实回答的测试才读取 sdk。
+  return { app, emit: events.emit, kv, project, sdk, sync, route, session: calls.session }
 }
 

@@ -3013,12 +3013,13 @@ export class Question extends HeyApiClient {
   /**
    * List pending questions
    *
-   * Get all pending question requests across all sessions.
+   * Get pending questions globally or for one Session.
    */
   public list<ThrowOnError extends boolean = false>(
     parameters?: {
       directory?: string
       workspace?: string
+      sessionID?: string
     },
     options?: Options<never, ThrowOnError>,
   ) {
@@ -3029,6 +3030,7 @@ export class Question extends HeyApiClient {
           args: [
             { in: "query", key: "directory" },
             { in: "query", key: "workspace" },
+            { in: "query", key: "sessionID" },
           ],
         },
       ],
@@ -3047,6 +3049,7 @@ export class Question extends HeyApiClient {
    */
   public reply<ThrowOnError extends boolean = false>(
     parameters: {
+      sessionID: string
       requestID: string
       directory?: string
       workspace?: string
@@ -3059,6 +3062,7 @@ export class Question extends HeyApiClient {
       [
         {
           args: [
+            { in: "path", key: "sessionID" },
             { in: "path", key: "requestID" },
             { in: "query", key: "directory" },
             { in: "query", key: "workspace" },
@@ -3068,7 +3072,7 @@ export class Question extends HeyApiClient {
       ],
     )
     return (options?.client ?? this.client).post<QuestionReplyResponses, QuestionReplyErrors, ThrowOnError>({
-      url: "/question/{requestID}/reply",
+      url: "/question/session/{sessionID}/{requestID}/reply",
       ...options,
       ...params,
       headers: {
@@ -3086,6 +3090,7 @@ export class Question extends HeyApiClient {
    */
   public reject<ThrowOnError extends boolean = false>(
     parameters: {
+      sessionID: string
       requestID: string
       directory?: string
       workspace?: string
@@ -3097,6 +3102,7 @@ export class Question extends HeyApiClient {
       [
         {
           args: [
+            { in: "path", key: "sessionID" },
             { in: "path", key: "requestID" },
             { in: "query", key: "directory" },
             { in: "query", key: "workspace" },
@@ -3105,7 +3111,7 @@ export class Question extends HeyApiClient {
       ],
     )
     return (options?.client ?? this.client).post<QuestionRejectResponses, QuestionRejectErrors, ThrowOnError>({
-      url: "/question/{requestID}/reject",
+      url: "/question/session/{sessionID}/{requestID}/reject",
       ...options,
       ...params,
     })

@@ -11,6 +11,7 @@ import { InstancePaths } from "../../src/server/routes/instance/httpapi/groups/i
 import { SessionPaths } from "../../src/server/routes/instance/httpapi/groups/session"
 import { ProjectV2 } from "@opencode-ai/core/project"
 import { QuestionID } from "../../src/question/schema"
+import { SessionID } from "../../src/session/schema"
 import { HttpApiApp } from "../../src/server/routes/instance/httpapi/server"
 import { HEADER as FenceHeader } from "../../src/server/shared/fence"
 import { resetDatabase } from "../fixture/db"
@@ -139,11 +140,12 @@ describe("instance HttpApi", () => {
             method: "POST",
             body: JSON.stringify({ reply: "once" }),
           }),
-          request("/question/invalid-question-id/reply", {
+          // Session 段合法而 requestID 非法，400 必须来自 request schema 而非 Session 解析。
+          request("/question/session/ses_invalid_question/invalid-question-id/reply", {
             method: "POST",
             body: JSON.stringify({ answers: [["Yes"]] }),
           }),
-          request("/question/invalid-question-id/reject", { method: "POST" }),
+          request("/question/session/ses_invalid_question/invalid-question-id/reject", { method: "POST" }),
         ],
         { concurrency: "unbounded" },
       )
@@ -154,7 +156,8 @@ describe("instance HttpApi", () => {
     }),
   )
 
-  it.live("returns typed not found bodies for missing permission and question requests", () =>
+  // permission 继续检查 request 缺失；question 则先暴露其所属 Session 缺失。
+  it.live("returns typed not found bodies for missing permission requests and question Sessions", () =>
     Effect.gen(function* () {
       const dir = yield* tmpdirScoped({ git: true })
       const request = (path: string, init?: RequestInit) =>
@@ -170,17 +173,20 @@ describe("instance HttpApi", () => {
       const permissionID = PermissionV1.ID.ascending()
       const questionReplyID = QuestionID.ascending()
       const questionRejectID = QuestionID.ascending()
+      const questionReplySession = SessionID.create()
+      const questionRejectSession = SessionID.create()
+      // 两种 question mutation 使用各自合法但不存在的 Session，验证统一 NotFound 边界。
       const [permission, questionReply, questionReject] = yield* Effect.all(
         [
           request(`/permission/${permissionID}/reply`, {
             method: "POST",
             body: JSON.stringify({ reply: "once" }),
           }),
-          request(`/question/${questionReplyID}/reply`, {
+          request(`/question/session/${questionReplySession}/${questionReplyID}/reply`, {
             method: "POST",
             body: JSON.stringify({ answers: [["Yes"]] }),
           }),
-          request(`/question/${questionRejectID}/reject`, { method: "POST" }),
+          request(`/question/session/${questionRejectSession}/${questionRejectID}/reject`, { method: "POST" }),
         ],
         { concurrency: "unbounded" },
       )
@@ -191,17 +197,14 @@ describe("instance HttpApi", () => {
         requestID: permissionID,
         message: `Permission request not found: ${permissionID}`,
       })
+      // 新协议先核对 Session；缺失 Session 的错误不能伪装成 request 缺失。
       expect(questionReply.status).toBe(404)
-      expect(yield* Effect.promise(() => questionReply.json())).toEqual({
-        _tag: "QuestionNotFoundError",
-        requestID: questionReplyID,
-        message: `Question request not found: ${questionReplyID}`,
+      expect(yield* Effect.promise(() => questionReply.json())).toMatchObject({
+        name: "NotFoundError", data: { message: expect.stringContaining(questionReplySession) },
       })
       expect(questionReject.status).toBe(404)
-      expect(yield* Effect.promise(() => questionReject.json())).toEqual({
-        _tag: "QuestionNotFoundError",
-        requestID: questionRejectID,
-        message: `Question request not found: ${questionRejectID}`,
+      expect(yield* Effect.promise(() => questionReject.json())).toMatchObject({
+        name: "NotFoundError", data: { message: expect.stringContaining(questionRejectSession) },
       })
     }),
   )

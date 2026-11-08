@@ -504,13 +504,16 @@ function createV1Api(input: CompatibleInput): CompatibleApi {
     question: {
       ...input.current.question,
       async reply(value: Parameters<ServerApi["question"]["reply"]>[0]) {
+        // V1 与当前协议一样按 Session/request 配对，不再依赖 viewer placement。
         await legacy().question.reply({
+          sessionID: value.sessionID,
           requestID: value.requestID,
           answers: value.answers.map((answer) => [...answer]),
         })
       },
       async reject(value: Parameters<ServerApi["question"]["reject"]>[0]) {
-        await legacy().question.reject({ requestID: value.requestID })
+        // reject 也保留同一 Session 身份，避免跨实例误取消。
+        await legacy().question.reject({ sessionID: value.sessionID, requestID: value.requestID })
       },
     },
   }

@@ -178,9 +178,11 @@ function questionPick(
   }
 
   if (questionSingle(request)) {
+    // 单选绕过 Confirm 时也由同一 helper 保留 Session 身份。
     return {
       state: next,
       reply: {
+        sessionID: request.sessionID,
         requestID: request.id,
         answers: [[answer]],
       },
@@ -306,14 +308,18 @@ export function questionSave(state: QuestionBodyState, request: QuestionRequest)
 }
 
 export function questionSubmit(request: QuestionRequest, state: QuestionBodyState): QuestionReply {
+  // CLI 与 TUI 使用同一 Session/request 合同，不再只发送 requestID。
   return {
+    sessionID: request.sessionID,
     requestID: request.id,
     answers: questionAnswers(state, request.questions.length),
   }
 }
 
 export function questionReject(request: QuestionRequest): QuestionReject {
+  // 拒绝操作同样由请求自身携带 Session 身份。
   return {
+    sessionID: request.sessionID,
     requestID: request.id,
   }
 }

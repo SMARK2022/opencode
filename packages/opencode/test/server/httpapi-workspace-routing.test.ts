@@ -23,10 +23,12 @@ import { WorkspaceTable } from "@opencode-ai/core/control-plane/workspace.sql"
 import { Database } from "@opencode-ai/core/database/database"
 import { Project } from "../../src/project/project"
 import { Session } from "../../src/session/session"
+import { SessionID } from "../../src/session/schema"
 import { WorkspacePaths } from "../../src/server/routes/instance/httpapi/groups/workspace"
 import {
   WorkspaceRoutingMiddleware,
   WorkspaceRoutingQuery,
+  WorkspaceRoutingQueryFields,
   WorkspaceRouteContext,
   workspaceRoutingLayer,
 } from "../../src/server/routes/instance/httpapi/middleware/workspace-routing"
@@ -228,6 +230,16 @@ const ProbeApi = HttpApi.make("workspace-routing-probe").add(
       HttpApiEndpoint.get("get", "/probe", { query: WorkspaceRoutingQuery, success: ProbeResult }),
       HttpApiEndpoint.patch("patch", "/probe", { query: WorkspaceRoutingQuery, success: Schema.Boolean }),
       HttpApiEndpoint.get("session", "/session", { query: WorkspaceRoutingQuery, success: ProbeResult }),
+      // 与生产 question 相同的身份形状；tiny handler 只观察 middleware placement，不复制 pending 领域逻辑。
+      HttpApiEndpoint.get("question", "/question", {
+        query: Schema.Struct({ ...WorkspaceRoutingQueryFields, sessionID: Schema.optional(Schema.String) }),
+        success: ProbeResult,
+      }),
+      HttpApiEndpoint.post("questionReply", "/question/session/:sessionID/:requestID/reply", {
+        params: { sessionID: Schema.String, requestID: Schema.String },
+        query: WorkspaceRoutingQuery,
+        success: ProbeResult,
+      }),
       HttpApiEndpoint.get("workspace", WorkspacePaths.list, {
         query: WorkspaceRoutingQuery,
         success: ProbeResult,
@@ -246,6 +258,9 @@ const probeHandlers = HttpApiBuilder.group(ProbeApi, "probe", (handlers) =>
     .handle("get", () => routeContextResponse)
     .handle("patch", () => Effect.succeed(false))
     .handle("session", () => routeContextResponse)
+    // 两个 probe 都只返回 middleware 选出的 placement，便于区分 remote proxy 与本地处理。
+    .handle("question", () => routeContextResponse)
+    .handle("questionReply", () => routeContextResponse)
     .handle("workspace", () => routeContextResponse),
 )
 
@@ -324,6 +339,67 @@ describe("HttpApi workspace routing middleware", () => {
       expect(forwarded?.headers["x-target-auth"]).toBe("secret")
       expect(forwarded?.headers["x-opencode-directory"]).toBeUndefined()
       expect(forwarded?.headers["x-opencode-workspace"]).toBeUndefined()
+    }),
+  )
+
+  it.live("routes question list and reply by Session placement instead of the viewer directory", () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdirScoped({ git: true })
+      const project = yield* Project.use.fromDirectory(dir)
+      let forwarded: ProxiedRequest | undefined
+      const remoteUrl = yield* startRemoteWorkspaceHttpServer((request) => {
+        forwarded = request
+        return HttpServerResponse.json({ proxied: true })
+      })
+      const remote = yield* createRemoteWorkspace({ dir, projectID: project.project.id, type: "remote-question-parent", url: `${remoteUrl}/base` })
+      const childDirectory = path.join(dir, "local-question-child")
+      const local = yield* createLocalWorkspace({ projectID: project.project.id, type: "local-question-child", directory: childDirectory })
+      const parentID = SessionID.make("ses_question_remote_parent")
+      const childID = SessionID.make("ses_question_local_child")
+      const parent = {
+        id: parentID, projectID: project.project.id, workspaceID: remote.id, directory: path.join(dir, "remote-parent"),
+        slug: "remote-parent", title: "Remote parent", version: "1", time: { created: 1, updated: 1 },
+      }
+      const child = {
+        ...parent, id: childID, parentID, workspaceID: local.id, directory: childDirectory,
+        slug: "local-child", title: "Local child",
+      }
+      // Session.Service 只提供持久 placement；parent/child 刻意分属 remote/local，viewer 则是第三目录。
+      const sessions = Layer.mock(Session.Service)({
+        get: (id) => id === parentID ? Effect.succeed(parent) : id === childID ? Effect.succeed(child) : Effect.die("unexpected Session"),
+      })
+      yield* HttpApiBuilder.layer(ProbeApi).pipe(
+        Layer.provide(probeHandlers),
+        Layer.provide(workspaceRoutingTestLayer),
+        Layer.provide(sessions),
+        HttpRouter.serve,
+        Layer.build,
+      )
+
+      const viewer = path.join(dir, "third-viewer-directory")
+      const remoteResponse = yield* HttpClientRequest.get(`/question?sessionID=${parentID}`).pipe(
+        HttpClientRequest.setHeaders({ "x-opencode-directory": viewer }),
+        HttpClient.execute,
+      )
+      expect(remoteResponse.status).toBe(200)
+      expect(yield* remoteResponse.json).toEqual({ proxied: true })
+      const forwardedURL = forwarded ? requestURL(forwarded) : undefined
+      // query 中的 Session 身份必须跨 proxy 保留；viewer directory/workspace 不得泄漏到上游。
+      expect(forwardedURL?.pathname).toBe("/base/question")
+      expect(forwardedURL?.searchParams.get("sessionID")).toBe(parentID)
+      expect(forwardedURL?.searchParams.get("workspace")).toBeNull()
+      expect(forwardedURL?.searchParams.get("directory")).toBeNull()
+      expect(forwarded?.headers["x-opencode-directory"]).toBeUndefined()
+
+      forwarded = undefined
+      const localResponse = yield* HttpClientRequest.post(`/question/session/${childID}/que_local_child/reply`).pipe(
+        HttpClientRequest.setHeaders({ "x-opencode-directory": viewer }),
+        HttpClient.execute,
+      )
+      // child 的持久 placement 是 local，因此由 tiny 本地 handler 回答，绝不能跟随 parent 被代理。
+      expect(localResponse.status).toBe(200)
+      expect(yield* localResponse.json).toEqual({ directory: childDirectory, workspaceID: local.id })
+      expect(forwarded).toBeUndefined()
     }),
   )
 

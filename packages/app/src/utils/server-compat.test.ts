@@ -207,6 +207,18 @@ describe("createCompatibleApi", () => {
     expect(new URL(requests[0]!.url).searchParams.get("directory")).toBe("/other")
   })
 
+  test("routes V1 question replies and rejects by Session identity", async () => {
+    const { api, requests } = setup("v1")
+    await api.question.reply({ sessionID: "ses_1", requestID: "que_1", answers: [["Yes"]] })
+    await api.question.reject({ sessionID: "ses_1", requestID: "que_1" })
+
+    // V1 compatibility 也必须走统一 Session 路径，不能保留只含 requestID 的旧分支。
+    expect(requests.map((request) => new URL(request.url).pathname)).toEqual([
+      "/question/session/ses_1/que_1/reply",
+      "/question/session/ses_1/que_1/reject",
+    ])
+  })
+
   test("connects a V1 provider without disposing running sessions", async () => {
     const { api, requests } = setup("v1")
 

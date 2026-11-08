@@ -335,10 +335,8 @@ export function Session() {
     if (session()?.parentID) return []
     return children().flatMap((x) => sync.data.permission[x.id] ?? [])
   })
-  const questions = createMemo(() => {
-    if (session()?.parentID) return []
-    return children().flatMap((x) => sync.data.question[x.id] ?? [])
-  })
+  // 浏览 children 仍服务导航/permission；question 只读独立 scope，避免筛选列表决定回答槽是否存在。
+  const questions = createMemo(() => sync.question.list(route.sessionID))
   // 权限/问题拥有插槽优先级，打开面板不能同时启用普通输入；关闭只恢复可见性而不回复审批。
   const [contextVisible, setContextVisible] = createSignal(false)
   const visible = createMemo(
@@ -463,8 +461,19 @@ export function Session() {
   const sdk = useSDK()
   const editor = useEditorContext()
 
+  function refreshQuestions(sessionID: string) {
+    // question 失败只报告当前页面错误，不合成空快照，也不中断正在进行的正文恢复。
+    // untrack 隔离 sync 内部同步发生的 scope 读取；页面 effect 只能由 route.sessionID 驱动，不能由恢复结果自触发。
+    void untrack(() => sync.question.sync(sessionID)).catch((error) => {
+      if (route.sessionID !== sessionID) return
+      toast.show({ message: errorMessage(error), variant: "error", duration: 5000 })
+    })
+  }
+
   createEffect(() => {
     const sessionID = route.sessionID
+    // question 与正文/viewer workspace 切换独立启动；重开时不能等旧正文缓存或 diff。
+    refreshQuestions(sessionID)
     void (async () => {
       const previousWorkspace = untrack(() => project.workspace.current())
       const result = await sdk.client.session.get({ sessionID }, { throwOnError: true })
@@ -511,6 +520,8 @@ export function Session() {
   let lastSwitch: string | undefined = undefined
   // #132：重连强制刷新当前会话
   event.on("server.connected", () => {
+    // 重连分别刷新 question 与正文；任一慢请求都不应阻塞另一类状态恢复。
+    refreshQuestions(route.sessionID)
     void sync.session.sync(route.sessionID, { force: true })
   })
   event.on("message.part.updated", (evt) => {
@@ -1949,10 +1960,8 @@ export function Session() {
                   />
                 </Show>
                 <Show when={permissions().length === 0 && questions().length > 0}>
-                  <QuestionPrompt
-                    request={questions()[0]}
-                    directory={sync.session.get(questions()[0].sessionID)?.directory}
-                  />
+                  {/* 回答组件只接收 request；Session-ID SDK 负责定位，不能再从浏览行补 directory。 */}
+                  <QuestionPrompt request={questions()[0]} />
                 </Show>
                 {/* 面板归此 Show owner 管理，隐藏时释放订阅，已开始的文件读取仍可自然完成。 */}
                 <Show when={permissions().length === 0 && questions().length === 0 && contextVisible()}>

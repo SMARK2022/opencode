@@ -298,27 +298,40 @@ const scenarios: Scenario[] = [
       body: { reply: "once" },
     }))
     .json(404, object, "status"),
+  // 原全局 list 仍服务 App bootstrap，不能因 scoped 调用而删除。
   http.protected.get("/question", "question.list").json(200, array),
+  // scoped list 复用同一路由与 scenario 矩阵，sessionID 通过 query 进入真实 Session owner。
   http.protected
-    .post("/question/{requestID}/reply", "question.reply.invalid")
+    .get("/question", "question.list.scoped")
+    .seeded((ctx) => ctx.session({ title: "Legacy question Session owner" }))
+    .at((ctx) => ({ path: `/question?${new URLSearchParams({ sessionID: ctx.state.id })}`, headers: ctx.headers() }))
+    .json(200, array),
+  // 非法 payload 在同一 Session 路径上仍由 schema 返回 400。
+  http.protected
+    .post("/question/session/{sessionID}/{requestID}/reply", "question.reply.invalid")
+    .seeded((ctx) => ctx.session({ title: "Legacy question invalid reply" }))
     .at((ctx) => ({
-      path: route("/question/{requestID}/reply", { requestID: "que_httpapi_reply" }),
+      path: route("/question/session/{sessionID}/{requestID}/reply", { sessionID: ctx.state.id, requestID: "que_httpapi_reply" }),
       headers: ctx.headers(),
       body: { answers: "Yes" },
     }))
     .status(400),
+  // 已存在 Session 与缺失 request 的配对返回 typed 404。
   http.protected
-    .post("/question/{requestID}/reply", "question.reply")
+    .post("/question/session/{sessionID}/{requestID}/reply", "question.reply")
+    .seeded((ctx) => ctx.session({ title: "Legacy question reply owner" }))
     .at((ctx) => ({
-      path: route("/question/{requestID}/reply", { requestID: "que_httpapi_reply" }),
+      path: route("/question/session/{sessionID}/{requestID}/reply", { sessionID: ctx.state.id, requestID: "que_httpapi_reply" }),
       headers: ctx.headers(),
       body: { answers: [["Yes"]] },
     }))
     .json(404, object, "status"),
+  // reject 独立进入覆盖矩阵，避免 reply 的声明掩盖 reject 路由遗漏。
   http.protected
-    .post("/question/{requestID}/reject", "question.reject")
+    .post("/question/session/{sessionID}/{requestID}/reject", "question.reject")
+    .seeded((ctx) => ctx.session({ title: "Legacy question reject owner" }))
     .at((ctx) => ({
-      path: route("/question/{requestID}/reject", { requestID: "que_httpapi_reject" }),
+      path: route("/question/session/{sessionID}/{requestID}/reject", { sessionID: ctx.state.id, requestID: "que_httpapi_reject" }),
       headers: ctx.headers(),
     }))
     .json(404, object, "status"),

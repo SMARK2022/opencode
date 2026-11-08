@@ -5,8 +5,6 @@ import type { TextareaRenderable } from "@opentui/core"
 import { selectedForeground, tint, useTheme } from "../../context/theme"
 import type { QuestionAnswer, QuestionRequest } from "@opencode-ai/sdk/v2"
 import { useSDK } from "../../context/sdk"
-import { useProject } from "../../context/project"
-import { useSync } from "../../context/sync"
 import { SplitBorder } from "../../ui/border"
 import { useTuiConfig } from "../../config"
 import { useBindings, useOpencodeModeStack, useCommandShortcut } from "../../keymap"
@@ -18,12 +16,9 @@ import { useToast } from "../../ui/toast"
 
 const QUESTION_MODE = "question"
 
-export function QuestionPrompt(props: { request: QuestionRequest; directory?: string }) {
+export function QuestionPrompt(props: { request: QuestionRequest }) {
+  // 位置解析统一交给 Session-ID 路由；组件不再读取 Project、Sync 或 viewer directory。
   const sdk = useSDK()
-  const project = useProject()
-  const sync = useSync()
-  // 与directory使用同一请求的Session，避免项目当前workspace覆盖跨目录问答的归属。
-  const workspace = () => sync.session.get(props.request.sessionID)?.workspaceID ?? project.workspace.current()
   const { theme } = useTheme()
   const renderer = useRenderer()
   const tuiConfig = useTuiConfig()
@@ -109,20 +104,20 @@ export function QuestionPrompt(props: { request: QuestionRequest; directory?: st
   })
 
   function submit() {
+    // 多问题确认与单选都必须携带同一请求身份，不能因交互分支退回实例级 reply。
     const answers = questions().map((_, i) => store.answers[i] ?? [])
     void sdk.client.question.reply({
+      sessionID: props.request.sessionID,
       requestID: props.request.id,
-      directory: props.directory,
-      workspace: workspace(),
       answers,
     })
   }
 
   function reject() {
+    // 拒绝也由服务端核对 (sessionID, requestID)，避免当前 viewer 误取消其他 Session。
     void sdk.client.question.reject({
+      sessionID: props.request.sessionID,
       requestID: props.request.id,
-      directory: props.directory,
-      workspace: workspace(),
     })
   }
 
@@ -136,10 +131,10 @@ export function QuestionPrompt(props: { request: QuestionRequest; directory?: st
       setStore("custom", inputs)
     }
     if (single()) {
+      // 单选会绕过 Confirm 页面直接提交，因此必须在此次调用中显式保留 Session 身份。
       void sdk.client.question.reply({
+        sessionID: props.request.sessionID,
         requestID: props.request.id,
-        directory: props.directory,
-        workspace: workspace(),
         answers: [[answer]],
       })
       return

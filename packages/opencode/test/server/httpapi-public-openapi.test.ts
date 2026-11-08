@@ -282,12 +282,14 @@ describe("PublicApi OpenAPI v2 errors", () => {
       componentName(responseRef(spec.paths["/permission/{requestID}/reply"]?.post?.responses?.["404"]) ?? ""),
     ).toBe("PermissionNotFoundError")
     for (const route of [
-      ["post", "/question/{requestID}/reply"],
-      ["post", "/question/{requestID}/reject"],
+      ["post", "/question/session/{sessionID}/{requestID}/reply"],
+      ["post", "/question/session/{sessionID}/{requestID}/reject"],
     ] as const) {
-      expect(componentName(responseRef(spec.paths[route[1]]?.[route[0]]?.responses?.["404"]) ?? "")).toBe(
+      // 同一路径先检查 Session 再检查 request，因此 404 合同同时包含两种 typed error。
+      expect(componentNames(spec.paths[route[1]]?.[route[0]]?.responses?.["404"])).toEqual([
+        "NotFoundError",
         "QuestionNotFoundError",
-      )
+      ])
     }
     for (const route of [
       ["post", "/api/session/{sessionID}/question/{requestID}/reply"],

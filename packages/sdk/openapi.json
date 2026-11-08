@@ -4606,6 +4606,15 @@
               "type": "string"
             },
             "required": false
+          },
+          {
+            "name": "sessionID",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "pattern": "^ses"
+            },
+            "required": false
           }
         ],
         "responses": {
@@ -4632,9 +4641,19 @@
                 }
               }
             }
+          },
+          "404": {
+            "description": "NotFoundError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotFoundError"
+                }
+              }
+            }
           }
         },
-        "description": "Get all pending question requests across all sessions.",
+        "description": "Get pending questions globally or for one Session.",
         "summary": "List pending questions",
         "x-codeSamples": [
           {
@@ -4644,11 +4663,20 @@
         ]
       }
     },
-    "/question/{requestID}/reply": {
+    "/question/session/{sessionID}/{requestID}/reply": {
       "post": {
         "tags": ["question"],
         "operationId": "question.reply",
         "parameters": [
+          {
+            "name": "sessionID",
+            "in": "path",
+            "schema": {
+              "type": "string",
+              "pattern": "^ses"
+            },
+            "required": true
+          },
           {
             "name": "requestID",
             "in": "path",
@@ -4705,11 +4733,18 @@
             }
           },
           "404": {
-            "description": "QuestionNotFoundError",
+            "description": "NotFoundError | QuestionNotFoundError",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/QuestionNotFoundError"
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/NotFoundError"
+                    },
+                    {
+                      "$ref": "#/components/schemas/QuestionNotFoundError"
+                    }
+                  ]
                 }
               }
             }
@@ -4745,11 +4780,20 @@
         ]
       }
     },
-    "/question/{requestID}/reject": {
+    "/question/session/{sessionID}/{requestID}/reject": {
       "post": {
         "tags": ["question"],
         "operationId": "question.reject",
         "parameters": [
+          {
+            "name": "sessionID",
+            "in": "path",
+            "schema": {
+              "type": "string",
+              "pattern": "^ses"
+            },
+            "required": true
+          },
           {
             "name": "requestID",
             "in": "path",
@@ -4806,11 +4850,18 @@
             }
           },
           "404": {
-            "description": "QuestionNotFoundError",
+            "description": "NotFoundError | QuestionNotFoundError",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/QuestionNotFoundError"
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/NotFoundError"
+                    },
+                    {
+                      "$ref": "#/components/schemas/QuestionNotFoundError"
+                    }
+                  ]
                 }
               }
             }
@@ -27130,6 +27181,25 @@
         "required": ["id", "sessionID", "questions"],
         "additionalProperties": false
       },
+      "NotFoundError": {
+        "type": "object",
+        "required": ["name", "data"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "enum": ["NotFoundError"]
+          },
+          "data": {
+            "type": "object",
+            "required": ["message"],
+            "properties": {
+              "message": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      },
       "QuestionNotFoundError": {
         "type": "object",
         "properties": {
@@ -27372,25 +27442,6 @@
         },
         "required": ["name", "data"],
         "additionalProperties": false
-      },
-      "NotFoundError": {
-        "type": "object",
-        "required": ["name", "data"],
-        "properties": {
-          "name": {
-            "type": "string",
-            "enum": ["NotFoundError"]
-          },
-          "data": {
-            "type": "object",
-            "required": ["message"],
-            "properties": {
-              "message": {
-                "type": "string"
-              }
-            }
-          }
-        }
       },
       "SessionBusyError": {
         "type": "object",

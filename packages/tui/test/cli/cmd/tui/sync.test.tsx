@@ -513,6 +513,545 @@ describe("tui sync", () => {
     }
   })
 
+  test("recovers parent and direct child questions without hydrating browser sessions", async () => {
+    await using tmp = await tmpdir()
+    await Bun.write(`${tmp.path}/kv.json`, "{}")
+    const parent = { id: "ses_parent", directory, time: { created: 1, updated: 1 } }
+    const child = { ...parent, id: "ses_child", parentID: parent.id }
+    const other = { ...parent, id: "ses_other" }
+    const parentQuestion = { ...questionRequest("question_parent"), sessionID: parent.id }
+    const childQuestion = { ...questionRequest("question_child"), sessionID: child.id }
+    const { app, sync } = await mount((url) => {
+      // 浏览列表刻意只含 other；question 恢复必须通过公开 Session/children 关系发现 family。
+      if (url.pathname === "/session") return json([other])
+      if (url.pathname === `/session/${parent.id}`) return json(parent)
+      if (url.pathname === `/session/${parent.id}/children`) return json([child])
+      if (url.pathname === "/question" && url.searchParams.get("sessionID") === parent.id) return json([parentQuestion])
+      if (url.pathname === "/question" && url.searchParams.get("sessionID") === child.id) return json([childQuestion])
+    }, tmp.path, { type: "session", sessionID: parent.id })
+
+    try {
+      expect(sync.data.session.map((item) => item.id)).toEqual([other.id])
+      // 公开恢复入口不能依赖 store.session；parent/children 必须从 SDK discovery 取得。
+      await sync.question.sync(parent.id)
+      expect(sync.question.list(parent.id).map((item) => item.id)).toEqual([childQuestion.id, parentQuestion.id])
+      // 恢复完成后浏览行仍必须原样，排除靠回灌 parent/child 元数据获得通过。
+      expect(sync.data.session.map((item) => item.id)).toEqual([other.id])
+    } finally {
+      app.renderer.destroy()
+    }
+  })
+
+  test("keeps non-current session questions available to plugin state", async () => {
+    await using tmp = await tmpdir()
+    await Bun.write(`${tmp.path}/kv.json`, "{}")
+    const current = { id: "ses_plugin_current", directory, time: { created: 1, updated: 1 } }
+    const other = { ...current, id: "ses_plugin_other" }
+    const restored = { ...questionRequest("question_plugin_restored"), sessionID: other.id }
+    const live = { ...questionRequest("question_plugin_live"), sessionID: other.id }
+    const { app, emit, sync } = await mount((url) => {
+      if (url.pathname === "/session") return json([])
+      if (url.pathname === `/session/${current.id}`) return json(current)
+      if (url.pathname === `/session/${current.id}/children`) return json([])
+      if (url.pathname === "/question" && url.searchParams.get("sessionID") === current.id) return json([])
+      // 插件 adapter 直接读取这个全局桶；非当前 Session 也必须由 bootstrap 恢复。
+      if (url.pathname === "/question" && !url.searchParams.get("sessionID")) return json([restored])
+    }, tmp.path, { type: "session", sessionID: current.id })
+
+    try {
+      await wait(() => sync.data.question[other.id]?.[0]?.id === restored.id)
+      await sync.question.sync(current.id)
+      // 页面隔离不能删除插件通过 sync.data.question[sessionID] 读取的其他 Session pending。
+      expect(sync.question.list(current.id)).toEqual([])
+      expect(sync.data.question[other.id] ?? []).toEqual([restored])
+
+      emit(questionAskedEvent(live))
+      await wait(() => sync.data.question[other.id]?.length === 2)
+      // 后续 live asked 同样保留在全局桶，但不进入无成员的当前页面。
+      expect(sync.data.question[other.id] ?? []).toEqual([live, restored])
+      expect(sync.question.list(current.id)).toEqual([])
+    } finally {
+      app.renderer.destroy()
+    }
+  })
+
+  test("keeps scoped questions when global bootstrap resolves later", async () => {
+    await using tmp = await tmpdir()
+    await Bun.write(`${tmp.path}/kv.json`, "{}")
+    const parent = { id: "ses_order_parent", directory, time: { created: 1, updated: 1 } }
+    const child = { ...parent, id: "ses_order_child", parentID: parent.id }
+    const other = { ...parent, id: "ses_order_other" }
+    const parentQuestion = { ...questionRequest("question_order_parent"), sessionID: parent.id }
+    const childQuestion = { ...questionRequest("question_order_child"), sessionID: child.id }
+    const otherQuestion = { ...questionRequest("question_order_other"), sessionID: other.id }
+    const global = Promise.withResolvers<Response>()
+    let delayGlobal = false
+    let globalStarted = false
+    const { app, emit, sync } = await mount((url) => {
+      if (url.pathname === "/session") return json([])
+      if (url.pathname === `/session/${parent.id}`) return json(parent)
+      if (url.pathname === `/session/${parent.id}/children`) return json([child])
+      if (url.pathname === "/question" && url.searchParams.get("sessionID") === parent.id) return json([parentQuestion])
+      if (url.pathname === "/question" && url.searchParams.get("sessionID") === child.id) return json([childQuestion])
+      // 首次挂载正常完成；重连后的全量响应刻意延迟，模拟 viewer 不拥有 local child。
+      if (url.pathname === "/question" && !url.searchParams.get("sessionID")) {
+        if (!delayGlobal) return json([])
+        globalStarted = true
+        return global.promise
+      }
+    }, tmp.path, { type: "session", sessionID: parent.id })
+
+    try {
+      emit(serverConnectedEvent("evt_order_initial"))
+      await sync.question.sync(parent.id)
+      expect(sync.question.list(parent.id).map((item) => item.id)).toEqual([childQuestion.id, parentQuestion.id])
+
+      delayGlobal = true
+      emit(serverConnectedEvent("evt_order_reconnect"))
+      await wait(() => globalStarted)
+      global.resolve(json([otherQuestion]))
+      // other 出现证明全量提交已经发生；此时它不得删除先完成的 parent/child。
+      await wait(() => sync.data.question[other.id]?.[0]?.id === otherQuestion.id)
+      expect(sync.question.list(parent.id).map((item) => item.id)).toEqual([childQuestion.id, parentQuestion.id])
+    } finally {
+      global.resolve(json([]))
+      app.renderer.destroy()
+    }
+  })
+
+  test("keeps other sessions, grandchildren and direct-child routes outside the parent question scope", async () => {
+    await using tmp = await tmpdir()
+    await Bun.write(`${tmp.path}/kv.json`, "{}")
+    const parent = { id: "ses_scope_parent", directory, time: { created: 1, updated: 1 } }
+    const child = { ...parent, id: "ses_scope_child", parentID: parent.id }
+    const grandchild = { ...parent, id: "ses_scope_grandchild", parentID: child.id }
+    const other = { ...parent, id: "ses_scope_other" }
+    const parentQuestion = { ...questionRequest("question_scope_parent"), sessionID: parent.id }
+    const childQuestion = { ...questionRequest("question_scope_child"), sessionID: child.id }
+    const requested: string[] = []
+    const { app, sync, route } = await mount((url) => {
+      if (url.pathname === "/session") return json([other])
+      if (url.pathname === `/session/${parent.id}`) return json(parent)
+      if (url.pathname === `/session/${child.id}`) return json(child)
+      if (url.pathname === `/session/${parent.id}/children`) return json([child, grandchild])
+      if (url.pathname === "/question" && url.searchParams.get("sessionID") === parent.id) {
+        requested.push(parent.id)
+        return json([parentQuestion])
+      }
+      if (url.pathname === "/question" && url.searchParams.get("sessionID") === child.id) {
+        requested.push(child.id)
+        return json([childQuestion])
+      }
+      // 全局 bootstrap 是插件兼容读取；这里只记录页面 scoped 请求，避免把两种公开消费者混为一谈。
+      if (url.pathname === "/question" && !url.searchParams.get("sessionID")) return json([])
+    }, tmp.path, { type: "session", sessionID: parent.id })
+
+    try {
+      // children fixture 故意包含 grandchild，选择器必须再次按 parentID 限定直接子级。
+      await sync.question.sync(parent.id)
+      expect(sync.question.list(parent.id).map((item) => item.id)).toEqual([childQuestion.id, parentQuestion.id])
+      // 请求侧也只能读取 root/direct child，不能先取回 other/grandchild 再靠前端正文隐藏。
+      expect(requested.toSorted()).toEqual([child.id, parent.id].toSorted())
+      expect(sync.data.question[grandchild.id]).toBeUndefined()
+      expect(sync.data.question[other.id]).toBeUndefined()
+
+      // 路由直接切到 child 后仍执行真实 discovery，而不是沿用 parent 页的 enabled scope。
+      route.navigate({ type: "session", sessionID: child.id })
+      await sync.question.sync(child.id)
+      // 直接打开 child 只隐藏回答槽；已经知道的 pending 桶不属于本页，不能被顺手删除。
+      expect(sync.question.list(child.id)).toEqual([])
+      expect(sync.question.list(parent.id)).toEqual([])
+      expect(sync.data.question[child.id]).toEqual([childQuestion])
+    } finally {
+      app.renderer.destroy()
+    }
+  })
+
+  test("keeps known questions on HTTP failure and clears them only after an authoritative empty snapshot", async () => {
+    await using tmp = await tmpdir()
+    await Bun.write(`${tmp.path}/kv.json`, "{}")
+    const parent = { id: "ses_failure", directory, time: { created: 1, updated: 1 } }
+    const stale = { ...questionRequest("question_stale"), sessionID: parent.id }
+    const fresh = { ...questionRequest("question_fresh"), sessionID: parent.id }
+    let rows = [stale]
+    let fail = false
+    const { app, sync } = await mount((url) => {
+      if (url.pathname === `/session/${parent.id}`) return json(parent)
+      if (url.pathname === `/session/${parent.id}/children`) return json([])
+      if (url.pathname === "/question" && url.searchParams.get("sessionID") === parent.id) {
+        if (fail) return json({ error: "snapshot failed" }, { status: 500 })
+        return json(rows)
+      }
+    }, tmp.path, { type: "session", sessionID: parent.id })
+
+    try {
+      // 先建立一份已知 pending，后续 500 才有可验证的“保留旧桶”对象。
+      await sync.question.sync(parent.id)
+      expect(sync.question.list(parent.id)).toEqual([stale])
+      // 真实 SDK throwOnError 必须向调用方拒绝，而不是变成空列表成功。
+      fail = true
+      await expect(sync.question.sync(parent.id)).rejects.toBeDefined()
+      // 失败之后旧桶必须原样可见，不能把 catch 当成删除 pending 的授权。
+      expect(sync.question.list(parent.id)).toEqual([stale])
+
+      // 下一次显式刷新用新快照替换旧值，证明失败没有留下 sticky error 或缓存短路。
+      fail = false
+      rows = [fresh]
+      await sync.question.sync(parent.id)
+      expect(sync.question.list(parent.id)).toEqual([fresh])
+      // 只有成功的权威空数组可以清 stale，并与前面的传输失败形成对照。
+      rows = []
+      await sync.question.sync(parent.id)
+      expect(sync.question.list(parent.id)).toEqual([])
+      expect(sync.data.question[parent.id]).toBeUndefined()
+    } finally {
+      app.renderer.destroy()
+    }
+  })
+
+  test("keeps known live events when a later discovery request fails", async () => {
+    await using tmp = await tmpdir()
+    await Bun.write(`${tmp.path}/kv.json`, "{}")
+    const parent = { id: "ses_discovery_failure", directory, time: { created: 1, updated: 1 } }
+    const stale = { ...questionRequest("question_discovery_stale"), sessionID: parent.id }
+    const live = { ...questionRequest("question_discovery_live"), sessionID: parent.id }
+    const discovery = Promise.withResolvers<Response>()
+    let failDiscovery = false
+    let discoveryStarted = false
+    const { app, emit, sync } = await mount((url) => {
+      if (url.pathname === `/session/${parent.id}`) {
+        if (!failDiscovery) return json(parent)
+        discoveryStarted = true
+        return discovery.promise
+      }
+      if (url.pathname === `/session/${parent.id}/children`) return json([])
+      if (url.pathname === "/question" && url.searchParams.get("sessionID") === parent.id) return json([stale])
+    }, tmp.path, { type: "session", sessionID: parent.id })
+
+    try {
+      // 先发布含 stale 的 enabled scope，确保后续事件已经具有确定成员资格。
+      await sync.question.sync(parent.id)
+      expect(sync.question.list(parent.id)).toEqual([stale])
+      failDiscovery = true
+      const recovery = sync.question.sync(parent.id)
+      await wait(() => discoveryStarted)
+
+      // discovery 在途时，新 asked 与旧请求的 settlement 都必须立即进入唯一 pending store。
+      emit(questionAskedEvent(live))
+      emit(questionRejectedEvent(stale))
+      await wait(() => sync.data.question[parent.id]?.length === 1 && sync.data.question[parent.id][0].id === live.id)
+      discovery.resolve(json({ error: "discovery failed" }, { status: 500 }))
+      await expect(recovery).rejects.toBeDefined()
+
+      // HTTP 失败只使本次刷新失败，不能随 trace 丢弃已经确认的实时事实。
+      expect(sync.question.list(parent.id)).toEqual([live])
+    } finally {
+      discovery.resolve(json(parent))
+      app.renderer.destroy()
+    }
+  })
+
+  test("merges created and asked events during discovery, pending snapshots and settled live delivery", async () => {
+    await using tmp = await tmpdir()
+    await Bun.write(`${tmp.path}/kv.json`, "{}")
+    const parent = {
+      id: "ses_trace_parent", directory, slug: "trace", projectID: "proj_test", title: "Trace", version: "1",
+      time: { created: 1, updated: 1 },
+    }
+    const child = { ...parent, id: "ses_trace_child", parentID: parent.id }
+    const lateChild = { ...parent, id: "ses_trace_late", parentID: parent.id }
+    const liveChild = { ...parent, id: "ses_trace_live", parentID: parent.id }
+    const other = { ...parent, id: "ses_trace_other" }
+    const childQuestion = { ...questionRequest("question_trace_child"), sessionID: child.id }
+    const lateQuestion = { ...questionRequest("question_trace_late"), sessionID: lateChild.id }
+    const liveQuestion = { ...questionRequest("question_trace_live"), sessionID: liveChild.id }
+    const otherQuestion = { ...questionRequest("question_trace_other"), sessionID: other.id }
+    const childrenResponse = Promise.withResolvers<Response>()
+    const parentSnapshot = Promise.withResolvers<Response>()
+    let childrenStarted = false
+    let includeChild = false
+    let holdParent = false
+    let parentPending = false
+    let childSnapshots = 0
+    const { app, emit, sync } = await mount((url) => {
+      if (url.pathname === "/session") return json([])
+      if (url.pathname === `/session/${parent.id}`) return json(parent)
+      if (url.pathname === `/session/${parent.id}/children`) {
+        if (childrenStarted) return json(includeChild ? [child] : [])
+        childrenStarted = true
+        return childrenResponse.promise
+      }
+      if (url.pathname === "/question" && url.searchParams.get("sessionID") === parent.id) {
+        if (!holdParent) return json([])
+        parentPending = true
+        return parentSnapshot.promise
+      }
+      if (url.pathname === "/question" && url.searchParams.get("sessionID") === child.id) {
+        childSnapshots += 1
+        return json(childSnapshots === 1 ? [childQuestion] : [])
+      }
+      if (url.pathname === "/question") return json([])
+    }, tmp.path, { type: "session", sessionID: parent.id })
+    // created 使用 SDK 完整事件形状，顶层 sessionID 与 info.id 保持一致，避免 fixture 绕过准入解析。
+    const created = (info: typeof child, id: string) => emit({
+      directory, project: "proj_test",
+      payload: { id, type: "session.created", properties: { sessionID: info.id, info } },
+    })
+
+    try {
+      // 第一个窗口：children 尚未返回，成员与 question 归属都只能先进入请求期 trace。
+      const discovery = sync.question.sync(parent.id)
+      await wait(() => childrenStarted)
+      created(child, "evt_trace_created_child")
+      emit(questionAskedEvent(childQuestion))
+      emit(questionAskedEvent(otherQuestion))
+      emit(branchEvent("trace-discovery-buffered"))
+      await wait(() => sync.data.vcs?.branch === "trace-discovery-buffered")
+      // children 响应不含刚创建的 child；relations 补成员后，权威 pending 必须读到 daemon 已接收的 asked。
+      childrenResponse.resolve(json([]))
+      await discovery
+      expect(sync.question.list(parent.id)).toEqual([childQuestion])
+      // other 可以留在插件全局桶中，但上面的页面选择器已经证明它不属于 parent scope。
+      expect(sync.data.question[other.id]).toEqual([otherQuestion])
+      expect(sync.data.session).toEqual([])
+
+      // 第二个窗口：family 已发布但 parent pending 仍在途，新 child 只能由 live created/asked 保留。
+      includeChild = true
+      holdParent = true
+      const pending = sync.question.sync(parent.id)
+      await wait(() => parentPending)
+      created(lateChild, "evt_trace_created_late")
+      emit(questionAskedEvent(lateQuestion))
+      await wait(() => sync.data.question[lateChild.id]?.[0]?.id === lateQuestion.id)
+      // 新 child 不在已发出的 pending 请求集合内；旧空快照不能撤销它的 live asked。
+      parentSnapshot.resolve(json([]))
+      await pending
+      // 旧 child 的 live 事实已被本轮权威空快照结算；只有本轮 pending 期间新到的 late asked 必须保留。
+      expect(sync.question.list(parent.id).map((item) => item.id)).toEqual([lateQuestion.id])
+      expect(sync.data.session).toEqual([])
+
+      // 第三个窗口：恢复已经完成，后续 created/deleted 直接更新当前 scope，不再经过 trace。
+      created(liveChild, "evt_trace_created_live")
+      emit(questionAskedEvent(liveQuestion))
+      await wait(() => sync.question.list(parent.id).some((item) => item.id === liveQuestion.id))
+      emit({
+        directory, project: "proj_test",
+        payload: { id: "evt_trace_deleted_live", type: "session.deleted", properties: { sessionID: liveChild.id, info: liveChild } },
+      })
+      await wait(() => !sync.question.list(parent.id).some((item) => item.id === liveQuestion.id))
+      expect(sync.data.session).toEqual([])
+    } finally {
+      childrenResponse.resolve(json([]))
+      parentSnapshot.resolve(json([]))
+      app.renderer.destroy()
+    }
+  })
+
+  test("keeps the newest A after A-B-A navigation and preserves B buckets", async () => {
+    await using tmp = await tmpdir()
+    await Bun.write(`${tmp.path}/kv.json`, "{}")
+    const a = { id: "ses_nav_a", directory, time: { created: 1, updated: 1 } }
+    const b = { id: "ses_nav_b", directory, time: { created: 1, updated: 1 } }
+    const child = { ...a, id: "ses_nav_child", parentID: a.id }
+    const stale = { ...questionRequest("question_nav_stale"), sessionID: child.id }
+    const fresh = { ...questionRequest("question_nav_fresh"), sessionID: child.id }
+    const other = { ...questionRequest("question_nav_b"), sessionID: b.id }
+    const delayed = Promise.withResolvers<Response>()
+    let firstA = true
+    // firstA 同时标识第一次 child 请求与其 stale 响应，第二次 A 必须走 fresh 分支。
+    const { app, sync, route } = await mount((url) => {
+      if (url.pathname === "/session") return json([])
+      if (url.pathname === `/session/${a.id}`) return json(a)
+      if (url.pathname === `/session/${b.id}`) return json(b)
+      if (url.pathname === `/session/${a.id}/children`) return json([child])
+      if (url.pathname === `/session/${b.id}/children`) return json([])
+      if (url.pathname === "/question" && url.searchParams.get("sessionID") === child.id) {
+        if (!firstA) return json([fresh])
+        firstA = false
+        return delayed.promise
+      }
+      if (url.pathname === "/question" && url.searchParams.get("sessionID") === a.id) return json([])
+      if (url.pathname === "/question" && url.searchParams.get("sessionID") === b.id) return json([other])
+    }, tmp.path, { type: "session", sessionID: a.id })
+
+    try {
+      // 第一次 A 的 child pending 保持悬挂，确保后续 B 和第二次 A 都能先完成。
+      const first = sync.question.sync(a.id)
+      await wait(() => !firstA)
+      route.navigate({ type: "session", sessionID: b.id })
+      await sync.question.sync(b.id)
+      expect(sync.question.list(b.id)).toEqual([other])
+
+      // 第二次 A 使用新 refreshVersion 和 fresh 快照，不能复用第一次 A 的悬挂任务。
+      route.navigate({ type: "session", sessionID: a.id })
+      await sync.question.sync(a.id)
+      expect(sync.question.list(a.id)).toEqual([fresh])
+
+      // 第一次 A 迟到后只能结束自己的 Promise，不能覆盖 fresh，也不能删除 B 的已知桶。
+      delayed.resolve(json([stale]))
+      await first
+      expect(sync.question.list(a.id)).toEqual([fresh])
+      expect(sync.question.list(b.id)).toEqual([])
+      expect(sync.data.question[b.id]).toEqual([other])
+      expect(sync.data.session).toEqual([])
+    } finally {
+      delayed.resolve(json([]))
+      app.renderer.destroy()
+    }
+  })
+
+  test("recovers the same backend pending after the previous viewer provider is destroyed", async () => {
+    await using firstTmp = await tmpdir()
+    await using secondTmp = await tmpdir()
+    await Bun.write(`${firstTmp.path}/kv.json`, "{}")
+    await Bun.write(`${secondTmp.path}/kv.json`, "{}")
+    const parent = { id: "ses_reopen_parent", directory, time: { created: 1, updated: 1 } }
+    const child = { ...parent, id: "ses_reopen_child", parentID: parent.id }
+    const pending = { ...questionRequest("question_reopen"), sessionID: child.id }
+    // 两个 Provider 共用同一后端响应闭包；destroy 前端不会改变 daemon 中的 pending。
+    const transport = (url: URL) => {
+      if (url.pathname === "/session") return json([])
+      if (url.pathname === `/session/${parent.id}`) return json(parent)
+      if (url.pathname === `/session/${parent.id}/children`) return json([child])
+      if (url.pathname === "/question" && url.searchParams.get("sessionID") === child.id) return json([pending])
+      if (url.pathname === "/question" && url.searchParams.get("sessionID") === parent.id) return json([])
+    }
+    // 两个临时状态目录隔离 KV/viewer 生命周期，共享的只有模拟 daemon transport。
+    const first = await mount(transport, firstTmp.path, { type: "session", sessionID: parent.id })
+
+    try {
+      await first.sync.question.sync(parent.id)
+      expect(first.sync.question.list(parent.id)).toEqual([pending])
+      // 销毁只结束 viewer owner；没有 reject/cancel 请求，也没有清理后端 pending 的生命周期钩子。
+      first.app.renderer.destroy()
+
+      const second = await mount(transport, secondTmp.path, { type: "session", sessionID: parent.id })
+      try {
+        // 第二个 Provider 重新 discovery，而不是读取第一个 Provider 已销毁的 store。
+        await second.sync.question.sync(parent.id)
+        expect(second.sync.question.list(parent.id)).toEqual([pending])
+        expect(second.sync.data.session).toEqual([])
+      } finally {
+        second.app.renderer.destroy()
+      }
+    } finally {
+      // renderer destroy 幂等；finally 保留清理以防首个恢复断言失败。
+      first.app.renderer.destroy()
+    }
+  })
+
+  test("settles shared backend pending in two simultaneously mounted providers", async () => {
+    await using firstTmp = await tmpdir()
+    await using secondTmp = await tmpdir()
+    await Bun.write(`${firstTmp.path}/kv.json`, "{}")
+    await Bun.write(`${secondTmp.path}/kv.json`, "{}")
+    const parent = { id: "ses_dual_parent", directory, time: { created: 1, updated: 1 } }
+    const child = { ...parent, id: "ses_dual_child", parentID: parent.id }
+    const asked = { ...questionRequest("question_dual"), sessionID: child.id }
+    let pending = [asked]
+    let replyBody = ""
+    const viewers: ((event: GlobalEvent) => void)[] = []
+    // 唯一后端账本被两个 Provider 共享；reply 在真实 transport 中结算，再向两个事件源广播同一事实。
+    const transport = async (url: URL, request?: Request, init?: RequestInit) => {
+      if (url.pathname === "/session") return json([])
+      if (url.pathname === `/session/${parent.id}`) return json(parent)
+      if (url.pathname === `/session/${parent.id}/children`) return json([child])
+      if (url.pathname === `/question/session/${child.id}/${asked.id}/reply`) {
+        replyBody = request ? await request.clone().text() : typeof init?.body === "string" ? init.body : ""
+        pending = []
+        for (const emit of viewers) emit({ directory, project: "proj_test", payload: {
+          id: "evt_dual_replied", type: "question.replied", properties: { sessionID: child.id, requestID: asked.id, answers: [["Sync"]] },
+        } })
+        return json(true)
+      }
+      if (url.pathname === "/question" && url.searchParams.get("sessionID") === child.id) return json(pending)
+      if (url.pathname === "/question" && url.searchParams.get("sessionID") === parent.id) return json([])
+    }
+    const first = await mount(transport, firstTmp.path, { type: "session", sessionID: parent.id })
+    viewers.push(first.emit)
+    const second = await mount(transport, secondTmp.path, { type: "session", sessionID: parent.id })
+    viewers.push(second.emit)
+    try {
+      // 两个 Provider 必须同时恢复；不是 destroy/recreate 测试的替代写法。
+      await Promise.all([first.sync.question.sync(parent.id), second.sync.question.sync(parent.id)])
+      expect(first.sync.question.list(parent.id)).toEqual([asked])
+      expect(second.sync.question.list(parent.id)).toEqual([asked])
+      // A 通过自己真实的 SDK 完成回答，B 不调用回答接口，只能由共享后端事件完成 settlement。
+      await first.sdk.client.question.reply({ sessionID: child.id, requestID: asked.id, answers: [["Sync"]] }, { throwOnError: true })
+      await wait(() => first.sync.question.list(parent.id).length === 0 && second.sync.question.list(parent.id).length === 0)
+      expect(replyBody).toBe(JSON.stringify({ answers: [["Sync"]] }))
+      expect(pending).toEqual([])
+      // 随后销毁 A 也不改变 B 已结算的状态；后端不存在 viewer 所有权的取消副作用。
+      first.app.renderer.destroy()
+      await second.sync.question.sync(parent.id)
+      expect(second.sync.question.list(parent.id)).toEqual([])
+    } finally {
+      first.app.renderer.destroy()
+      second.app.renderer.destroy()
+    }
+  })
+
+  test.each(["question", "browse"] as const)("recovers question independently when %s finishes first", async (first) => {
+    await using tmp = await tmpdir()
+    await Bun.write(`${tmp.path}/kv.json`, "{}")
+    const parent = { id: `ses_order_${first}`, directory, title: "Order", time: { created: 1, updated: 1 } }
+    const asked = { ...questionRequest(`question_order_${first}`), sessionID: parent.id }
+    const browse = Promise.withResolvers<Response>()
+    const question = Promise.withResolvers<Response>()
+    let holdBrowse = false
+    let holdQuestion = false
+    let browseStarted = false
+    let questionStarted = false
+    const { app, sync } = await mount((url) => {
+      if (url.pathname === "/session") {
+        if (!holdBrowse) return json([])
+        browseStarted = true
+        return browse.promise
+      }
+      if (url.pathname === `/session/${parent.id}`) return json(parent)
+      if (url.pathname === `/session/${parent.id}/children`) return json([])
+      if (url.pathname === "/question" && url.searchParams.get("sessionID") === parent.id) {
+        if (!holdQuestion) return json([])
+        questionStarted = true
+        return question.promise
+      }
+    }, tmp.path, { type: "session", sessionID: parent.id })
+    const tasks: Promise<unknown>[] = []
+    try {
+      // 两个公开刷新入口同时在途，完成顺序由测试显式控制而不是依赖 sleep。
+      holdBrowse = true
+      holdQuestion = true
+      tasks.push(sync.session.refresh())
+      await wait(() => browseStarted)
+      tasks.push(sync.question.sync(parent.id))
+      await wait(() => questionStarted)
+      if (first === "question") {
+        question.resolve(json([asked]))
+        await tasks[1]
+        // 浏览行仍为空也不能阻止回答槽出现。
+        expect(sync.data.session).toEqual([])
+        expect(sync.question.list(parent.id)).toEqual([asked])
+        browse.resolve(json([parent]))
+        await tasks[0]
+      } else {
+        browse.resolve(json([parent]))
+        await tasks[0]
+        // 反过来，先有浏览行也不会伪造或提前清除仍在途的 question 结果。
+        expect(sync.question.list(parent.id)).toEqual([])
+        question.resolve(json([asked]))
+        await tasks[1]
+      }
+      expect(sync.data.session.map((item) => item.id)).toEqual([parent.id])
+      expect(sync.question.list(parent.id)).toEqual([asked])
+    } finally {
+      // 失败路径也释放两个 deferred，避免悬挂请求越过 renderer teardown。
+      browse.resolve(json([]))
+      question.resolve(json([]))
+      await Promise.allSettled(tasks)
+      app.renderer.destroy()
+    }
+  })
+
   // #192：重连后恢复 pending permission/question 请求——bootstrap refresh 从 API 拉取
   // #192：reconnected 标志控制 API 返回——初始为空，重连后返回 pending 请求
   // #192：server.connected 事件触发 bootstrap——第一个是初始连接，后续是重连
@@ -525,8 +1064,12 @@ describe("tui sync", () => {
     const question = questionRequest("question_1")
     const { app, emit, sync } = await mount((url) => {
       if (url.pathname === "/permission") return json(reconnected ? [permission] : [])
-      if (url.pathname === "/question") return json(reconnected ? [question] : [])
-    }, tmp.path)
+      if (url.pathname === "/session/ses_1") return json({ id: "ses_1", directory, time: { created: 1, updated: 1 } })
+      if (url.pathname === "/session/ses_1/children") return json([])
+      // 页面按 Session 恢复；插件全局桶与 permission 仍走原实例级快照。
+      if (url.pathname === "/question" && url.searchParams.get("sessionID") === "ses_1") return json(reconnected ? [question] : [])
+      if (url.pathname === "/question" && !url.searchParams.get("sessionID")) return json(reconnected ? [question] : [])
+    }, tmp.path, { type: "session", sessionID: "ses_1" })
 
     try {
       expect(sync.data.permission.ses_1).toBeUndefined()
@@ -536,8 +1079,9 @@ describe("tui sync", () => {
       await Bun.sleep(30)
       reconnected = true
       emit(serverConnectedEvent("evt_connected_reconnect"))
+      // fixture 只挂载 SyncProvider；页面重连回调的公开入口在这里显式执行，permission 仍走原 bootstrap。
+      await sync.question.sync("ses_1")
 
-      // #192：bootstrap 拉取快照后 store 必须出现 pending 请求，验证刷新链路
       await wait(() => sync.data.permission.ses_1?.[0]?.id === permission.id)
       await wait(() => sync.data.question.ses_1?.[0]?.id === question.id)
 
@@ -569,7 +1113,10 @@ describe("tui sync", () => {
           stalePermissionSnapshot = () => resolve(json([]))
         })
       }
-      if (url.pathname === "/question") {
+      if (url.pathname === "/session/ses_1") return json({ id: "ses_1", directory, time: { created: 1, updated: 1 } })
+      if (url.pathname === "/session/ses_1/children") return json([])
+      // 延迟的 scoped list 模拟旧空快照；新到 asked 必须由 live merge 保留，而非依赖二次请求。
+      if (url.pathname === "/question" && url.searchParams.get("sessionID") === "ses_1") {
         if (!reconnected) return json([])
         questionSnapshots += 1
         if (questionSnapshots > 1) return json([question])
@@ -577,13 +1124,15 @@ describe("tui sync", () => {
           staleQuestionSnapshot = () => resolve(json([]))
         })
       }
-    }, tmp.path)
+    }, tmp.path, { type: "session", sessionID: "ses_1" })
 
     try {
       emit(serverConnectedEvent("evt_connected_initial"))
       await Bun.sleep(30)
       reconnected = true
       emit(serverConnectedEvent("evt_connected_reconnect"))
+      // 让 scoped pending 保持在途，再注入 asked，验证 version/change merge 而非固定等待。
+      const recovery = sync.question.sync("ses_1")
       await wait(() => Boolean(stalePermissionSnapshot && staleQuestionSnapshot))
 
       emit(permissionAskedEvent(permission))
@@ -591,9 +1140,11 @@ describe("tui sync", () => {
       await wait(() => sync.data.permission.ses_1?.[0]?.id === permission.id)
       await wait(() => sync.data.question.ses_1?.[0]?.id === question.id)
 
+      // 两个 resolver 都已发布才允许释放旧快照，证明 live asked 在响应前已进入 store。
       if (!stalePermissionSnapshot || !staleQuestionSnapshot) throw new Error("reconnect snapshots were not requested")
       stalePermissionSnapshot()
       staleQuestionSnapshot()
+      await recovery
       await Bun.sleep(30)
 
       expect(sync.data.permission.ses_1).toEqual([permission])
@@ -612,17 +1163,25 @@ describe("tui sync", () => {
     await Bun.write(`${tmp.path}/kv.json`, "{}")
     const permission = permissionRequest("perm_cleared")
     const question = questionRequest("question_cleared")
-    const { app, emit, sync } = await mount(undefined, tmp.path)
+    const { app, emit, sync } = await mount((url) => {
+      if (url.pathname === "/session/ses_1") return json({ id: "ses_1", directory, time: { created: 1, updated: 1 } })
+      if (url.pathname === "/session/ses_1/children") return json([])
+      // 成功的 scoped 空数组是权威结算，必须清除该 Session 的 stale 桶而不是保留旧值。
+      if (url.pathname === "/question" && url.searchParams.get("sessionID") === "ses_1") return json([])
+    }, tmp.path, { type: "session", sessionID: "ses_1" })
 
     try {
       emit(serverConnectedEvent("evt_connected_initial"))
       await Bun.sleep(30)
+      // 先建立空 scope，实时 asked 才能进入与后续空快照相同的公开恢复路径。
+      await sync.question.sync("ses_1")
       emit(permissionAskedEvent(permission))
       emit(questionAskedEvent(question))
       await wait(() => sync.data.permission.ses_1?.[0]?.id === permission.id)
       await wait(() => sync.data.question.ses_1?.[0]?.id === question.id)
 
       emit(serverConnectedEvent("evt_connected_reconnect"))
+      await sync.question.sync("ses_1")
 
       // #192：快照为空表示 API 已无 pending，store 必须同步清除过期请求
       await wait(() => sync.data.permission.ses_1 === undefined && sync.data.question.ses_1 === undefined)
@@ -658,7 +1217,10 @@ describe("tui sync", () => {
           stalePermissionSnapshot = () => resolve(json([permission]))
         })
       }
-      if (url.pathname === "/question") {
+      if (url.pathname === "/session/ses_1") return json({ id: "ses_1", directory, time: { created: 1, updated: 1 } })
+      if (url.pathname === "/session/ses_1/children") return json([])
+      // scoped stale 快照仍含已回答请求，settlement 事件必须优先于这份旧响应。
+      if (url.pathname === "/question" && url.searchParams.get("sessionID") === "ses_1") {
         if (!reconnected) return json([])
         questionSnapshots += 1
         if (questionSnapshots > 1) return json([])
@@ -666,11 +1228,13 @@ describe("tui sync", () => {
           staleQuestionSnapshot = () => resolve(json([question]))
         })
       }
-    }, tmp.path)
+    }, tmp.path, { type: "session", sessionID: "ses_1" })
 
     try {
       emit(serverConnectedEvent("evt_connected_initial"))
       await Bun.sleep(30)
+      // 先建立空 scope，实时 asked 才能进入与后续空快照相同的公开恢复路径。
+      await sync.question.sync("ses_1")
       emit(permissionAskedEvent(permission))
       emit(questionAskedEvent(question))
       await wait(() => sync.data.permission.ses_1?.[0]?.id === permission.id)
@@ -678,6 +1242,8 @@ describe("tui sync", () => {
 
       reconnected = true
       emit(serverConnectedEvent("evt_connected_reconnect"))
+      // stale 快照仍包含已拒绝请求，settlement 必须在响应到达前成为本地权威事实。
+      const recovery = sync.question.sync("ses_1")
       await wait(() => Boolean(stalePermissionSnapshot && staleQuestionSnapshot))
 
       emit(permissionRepliedEvent(permission))
@@ -685,10 +1251,12 @@ describe("tui sync", () => {
       // #192：replied/rejected 是本地权威信号，即使快照在途也立即清除
       await wait(() => (sync.data.permission.ses_1?.length ?? 0) === 0 && (sync.data.question.ses_1?.length ?? 0) === 0)
 
+      // settlement 已落定后再释放 stale 响应，避免把异步等待误当成竞态覆盖。
       if (!stalePermissionSnapshot || !staleQuestionSnapshot) throw new Error("reconnect snapshots were not requested")
       // #192：stale 快照不得恢复已由 replied 清除的请求，版本机制保证
       stalePermissionSnapshot()
       staleQuestionSnapshot()
+      await recovery
       await Bun.sleep(30)
 
       // #192：replied 与 stale 快照竞态下 replied 恒优先，最终 store 为空
@@ -773,7 +1341,10 @@ describe("tui sync", () => {
           stalePermissionSnapshot = () => resolve(json([]))
         })
       }
-      if (url.pathname === "/question") {
+      if (url.pathname === "/session/ses_1") return json({ id: "ses_1", directory, time: { created: 1, updated: 1 } })
+      if (url.pathname === "/session/ses_1/children") return json([])
+      // 两轮 scoped list 共用 Session 身份但使用不同刷新代数，后到的旧空响应不能覆盖新 pending。
+      if (url.pathname === "/question" && url.searchParams.get("sessionID") === "ses_1") {
         if (!reconnected) return json([])
         questionSnapshots += 1
         if (questionSnapshots > 1) return json([question])
@@ -781,24 +1352,33 @@ describe("tui sync", () => {
           staleQuestionSnapshot = () => resolve(json([]))
         })
       }
-    }, tmp.path)
+      // 插件全局快照立即返回；延迟竞态只由上面的 scoped 请求驱动，避免两种消费者共用计数。
+      if (url.pathname === "/question" && !url.searchParams.get("sessionID")) return json(reconnected ? [question] : [])
+    }, tmp.path, { type: "session", sessionID: "ses_1" })
 
     try {
       emit(serverConnectedEvent("evt_connected_initial"))
       await Bun.sleep(30)
       reconnected = true
       emit(serverConnectedEvent("evt_connected_reconnect_1"))
+      // first 故意挂在 pending，second 必须使其 refreshVersion 失效。
+      const first = sync.question.sync("ses_1")
       await wait(() => Boolean(stalePermissionSnapshot && staleQuestionSnapshot))
       emit(serverConnectedEvent("evt_connected_reconnect_2"))
+      // second 立即返回新 pending；first 后到时不得覆盖它。
+      const second = sync.question.sync("ses_1")
+      await second
 
       // #192：新快照携带请求时 store 更新，验证最新版本号生效
       await wait(() => sync.data.permission.ses_1?.[0]?.id === permission.id)
       await wait(() => sync.data.question.ses_1?.[0]?.id === question.id)
 
+      // 新快照已完成且两个旧 resolver 仍存在，才能精确验证后到旧响应被丢弃。
       if (!stalePermissionSnapshot || !staleQuestionSnapshot) throw new Error("stale reconnect snapshots were not requested")
       // #192：竞态守卫比较 refreshVersion，旧响应即使后到也不写 store
       stalePermissionSnapshot()
       staleQuestionSnapshot()
+      await first
       await Bun.sleep(30)
 
       // #192：竞态结束后 store 必须等于最新快照，验证版本号单调性

@@ -912,6 +912,8 @@ async function withRenderedReview(
   options: {
     revert?: { messageID: string }
     onRequest?: (url: URL, request?: Request, init?: RequestInit) => void | Promise<void>
+    // 只覆盖当前验收拥有的资源；未处理的 URL 继续走完整 Session 默认夹具。
+    respond?: (url: URL, request?: Request, init?: RequestInit) => Response | undefined | Promise<Response | undefined>
     clipboard?: ClipboardService
     totals?: { cost: number; tokens: AssistantMessage["tokens"] }
     onEpilogue?: (value?: string | (() => string | undefined)) => void
@@ -931,6 +933,9 @@ async function withRenderedReview(
   const sessions: Record<string, () => typeof messages> = { [sessionID]: () => messages, ses_reviewer_child: () => [], ...children }
   const calls = createFetch(async (url, request, init) => {
     await options.onRequest?.(url, request, init)
+    // 个别路由验收只覆盖自己的资源；其余请求仍走同一真实 Session 默认响应。
+    const response = await options.respond?.(url, request, init)
+    if (response) return response
     const details = (id: string) => ({ ...info, id, ...(id === sessionID ? {} : { parentID: sessionID }), ...(id === "ses_reviewer_child" ? { title: "Permission review (@permission-reviewer subagent)" } : {}) })
     // mutation 响应保持既有 SDK 形状，观察请求不启动 Server 或第二条写入路径。
     if (url.pathname === `/session/${sessionID}/abort`) return json(true)
@@ -1201,4 +1206,106 @@ test.each(["short", "long"] as const)("streaming reasoning defaults to stable co
     await clickVisibleText(app, "▼ 展开查看完整推理")
     expect(await frame("STREAM_TAIL")).toContain("STREAM_TAIL")
   }, { width: 80, height: 48 }, {}, { thinking_visibility: true, sidebar: "hide" })
+})
+
+test("real Session route recovers parent and child questions after reopening", async () => {
+  const childID = "ses_question_route_child"
+  const parentQuestion = {
+    id: "que_route_parent", sessionID,
+    questions: [{ question: "Recover parent?", header: "Parent", multiple: false, options: [{ label: "Route parent answer", description: "parent pending" }] }],
+    tool: { messageID: "msg_route_parent", callID: "call_route_parent" },
+  }
+  const childQuestion = {
+    ...parentQuestion, id: "que_route_child", sessionID: childID,
+    questions: [{ question: "Recover child?", header: "Child", multiple: false, options: [{ label: "Route child answer", description: "child pending" }] }],
+  }
+  const replies: string[] = []
+  const otherID = "ses_question_route_other"
+  const other = { id: otherID, directory, projectID: "proj_test", slug: "question-other", title: "Question other", version: "1", time: { created: 1, updated: 1 } }
+  const otherQuestion = { ...parentQuestion, id: "que_route_other", sessionID: otherID, questions: [{ question: "Other?", header: "Other", multiple: false, options: [{ label: "Route other answer", description: "other pending" }] }] }
+  const diff = Promise.withResolvers<Response>()
+  let holdDiff = false
+  let diffStarted = false
+  let parentReads = 0
+  // 浏览列表刻意为空；页面只能通过自己的 Session discovery 恢复 parent+direct child。
+  const respond = (url: URL) => {
+    if (url.pathname === "/session") return json([])
+    if (url.pathname === `/session/${sessionID}/diff` && holdDiff) {
+      diffStarted = true
+      return diff.promise
+    }
+    if (url.pathname === `/session/${otherID}`) return json(other)
+    if (["message", "todo", "diff", "children"].some((part) => url.pathname === `/session/${otherID}/${part}`)) return json([])
+    if (url.pathname === `/session/${sessionID}/children`) return json([{ id: childID, parentID: sessionID, directory, projectID: "proj_test", slug: "question-child", title: "Question child", version: "1", time: { created: 1, updated: 1 } }])
+    if (url.pathname === "/question" && url.searchParams.get("sessionID") === sessionID) {
+      parentReads += 1
+      return json([parentQuestion])
+    }
+    if (url.pathname === "/question" && url.searchParams.get("sessionID") === childID) return json([childQuestion])
+    if (url.pathname === "/question" && url.searchParams.get("sessionID") === otherID) return json([otherQuestion])
+    if (url.pathname.endsWith("/reply")) {
+      replies.push(url.pathname)
+      return json(true)
+    }
+  }
+  const open = (run: Parameters<typeof withRenderedReview>[1]) => withRenderedReview([], run, { width: 100, height: 36 }, {}, {}, { respond })
+
+  await open(async (app, _route, _emit, _commands, sync) => {
+    // 不调用公开 sync 方法；只有真实 Session 的 route-open effect 能触发这次恢复。
+    await waitForReviewFrame(app, async () => {
+      if (sync.question.list(sessionID).length === 2 && app.captureCharFrame().includes("Route child answer")) return true
+      await Bun.sleep(5)
+      return false
+    }, { maxPasses: 400 })
+    expect(sync.question.list(sessionID).map((item) => item.id).toSorted()).toEqual([parentQuestion.id, childQuestion.id].toSorted())
+    // child 没有进入浏览列表，但已经是可见问题来源。
+    expect(sync.data.session.some((item) => item.id === childID)).toBe(false)
+  })
+
+  await open(async (app, _route, _emit, _commands, sync) => {
+    // 第一个完整 Session 已销毁；第二个前端仍从相同后端 pending 恢复并能回答。
+    await waitForReviewFrame(app, async () => {
+      if (sync.question.list(sessionID).length === 2 && app.captureCharFrame().includes("Route child answer")) return true
+      await Bun.sleep(5)
+      return false
+    }, { maxPasses: 400 })
+    const first = sync.question.list(sessionID)[0]
+    app.mockInput.pressKey("1")
+    await waitForReviewFrame(app, async () => {
+      if (replies.length === 1) return true
+      await Bun.sleep(5)
+      return false
+    }, { maxPasses: 400 })
+    expect(replies).toEqual([`/question/session/${first.sessionID}/${first.id}/reply`])
+  })
+
+  holdDiff = true
+  const previousReads = parentReads
+  await open(async (app, route, _emit, _commands, sync) => {
+    try {
+      // A 的 question 已完成而 diff 仍在途；正文资源不能成为回答槽的恢复前置条件。
+      await waitForReviewFrame(app, async () => {
+        if (diffStarted && parentReads === previousReads + 1 && sync.question.list(sessionID).length === 2) return true
+        await Bun.sleep(5)
+        return false
+      }, { maxPasses: 400 })
+      route.navigate({ type: "session", sessionID: otherID })
+      await waitForReviewFrame(app, async () => {
+        if (sync.question.list(otherID).length === 1 && app.captureCharFrame().includes("Route other answer")) return true
+        await Bun.sleep(5)
+        return false
+      }, { maxPasses: 400 })
+      route.navigate({ type: "session", sessionID })
+      // 第二次 A 必须产生新的 scoped list；旧 diff 没有 resolve，旧 scope 也不能被误认为本次恢复。
+      await waitForReviewFrame(app, async () => {
+        if (parentReads >= previousReads + 2 && sync.question.list(sessionID).length === 2 && app.captureCharFrame().includes("Route child answer")) return true
+        await Bun.sleep(5)
+        return false
+      }, { maxPasses: 400 })
+      expect(diffStarted).toBe(true)
+    } finally {
+      // 无论断言成功与否都释放正文请求，避免悬挂 diff 越过真实 Session teardown。
+      diff.resolve(json([]))
+    }
+  })
 })

@@ -32,7 +32,9 @@ describe("run question shared", () => {
   test("replies immediately for a single-select question", () => {
     const out = questionSelect(createQuestionBodyState("question-1"), req())
 
+    // 立即回答必须同时携带 Session 与 request 身份。
     expect(out.reply).toEqual({
+      sessionID: "session-1",
       requestID: "question-1",
       answers: [["chunked"]],
     })
@@ -65,7 +67,9 @@ describe("run question shared", () => {
     state = questionSetSelected(state, 1)
     state = questionSelect(state, ask).state
     expect(questionConfirm(ask, state)).toBe(true)
+    // Confirm 提交不能丢掉同一 Session 身份。
     expect(questionSubmit(ask, state)).toEqual({
+      sessionID: "session-1",
       requestID: "question-1",
       answers: [["chunked"], ["no"]],
     })
@@ -97,7 +101,9 @@ describe("run question shared", () => {
 
     state = questionStoreCustom(next.state, 0, "  custom mode  ")
     next = questionSave(state, req())
+    // 自定义回答与预置选项使用相同配对合同。
     expect(next.reply).toEqual({
+      sessionID: "session-1",
       requestID: "question-1",
       answers: [["custom mode"]],
     })
@@ -108,7 +114,9 @@ describe("run question shared", () => {
 
     expect(questionSync(state, "question-1")).toBe(state)
     expect(questionSync(state, "question-2")).toEqual(createQuestionBodyState("question-2"))
+    // reject payload 同样包含 Session，而不是只保留 requestID。
     expect(questionReject(req())).toEqual({
+      sessionID: "session-1",
       requestID: "question-1",
     })
   })

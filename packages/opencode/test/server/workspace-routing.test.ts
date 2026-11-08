@@ -48,6 +48,18 @@ describe("getWorkspaceRouteSessionID", () => {
     expect(getWorkspaceRouteSessionID(url)).toBe(SessionID.make("ses_bg"))
   })
 
+  test("extracts Session identity from legacy question list, reply and reject paths", () => {
+    // 这三条路径在 remote proxy 后仍须保留身份，不能让 viewer directory 决定 pending 归属。
+    for (const path of [
+      "/question?sessionID=ses_question",
+      "/question/session/ses_question/que_question/reply",
+      "/question/session/ses_question/que_question/reject",
+    ]) {
+      expect(getWorkspaceRouteSessionID(new URL(`http://localhost${path}`))).toBe(SessionID.make("ses_question"))
+    }
+    expect(getWorkspaceRouteSessionID(new URL("http://localhost/question"))).toBeNull()
+  })
+
   test("returns null for list endpoints without a session ID", () => {
     const url = new URL("http://localhost/session/status")
     expect(getWorkspaceRouteSessionID(url)).toBeNull()

@@ -19,6 +19,7 @@ import type {
   SnapshotFileDiff,
   ConsoleState,
   EventMessagePartDelta,
+  Event,
 } from "@opencode-ai/sdk/v2"
 import { createStore, produce, reconcile } from "solid-js/store"
 import { useProject } from "./project"
@@ -30,7 +31,7 @@ import { useExit } from "./exit"
 import { useEpilogue } from "./epilogue"
 import { useArgs } from "./args"
 import { useRoute } from "./route"
-import { batch, createComputed, createEffect, createMemo, createRoot, getOwner, mapArray, onCleanup, onMount, untrack, type Accessor } from "solid-js"
+import { batch, createComputed, createEffect, createMemo, createRoot, createSignal, getOwner, mapArray, on, onCleanup, onMount, untrack, type Accessor } from "solid-js"
 import path from "path"
 import { SessionPath } from "@opencode-ai/core/session/path"
 // #132：会话 path 规范化
@@ -266,16 +267,19 @@ export const {
     const releasedTerminalParts = new Map<string, Map<string, Set<string>>>()
     // #132：区分首次 connected 与重连
     let connectedOnce = false
-    // #192：重连后 permission/question 快照版本
-    // #192：版本计数决定哪些本地变更应回放，避免重连恢复丢变更
+    // #192：question 复用原版本与变更表；新增 scope 只负责当前 Session 的恢复范围。
     let permissionVersion = 0
     let questionVersion = 0
     let permissionRefreshes = 0
     let questionRefreshes = 0
     let permissionRefreshVersion = 0
     let questionRefreshVersion = 0
+    let questionBootstrapVersion = 0
     const permissionChanges = new Map<string, { sessionID: string; requestID: string; version: number }>()
     const questionChanges = new Map<string, { sessionID: string; requestID: string; version: number }>()
+    type QuestionEvent = Extract<Event, { type: "question.asked" | "question.replied" | "question.rejected" }>
+    // 当前页面只保存 ID 投影；pending 仍只有 store.question 一份，浏览行与正文都不承担恢复职责。
+    const [questionScope, setQuestionScope] = createSignal({ sessionID: "", ids: [] as string[] })
     // #186：同一 part/field 的相邻 delta 在 16ms 窗内合并，压低 Solid store 抖动
     // #186：队列与 timer 均局部于 SyncProvider，不泄漏到 SDK 订阅层
     let pendingPartDeltas: EventMessagePartDelta[] = []
@@ -872,6 +876,26 @@ export const {
     // 主动停机先锁定退出状态，后续实例释放通知不能再次 bootstrap。
     let daemonStopSeen = false
 
+    // 实时事件统一投影为按 request ID 排序的数组；空桶、更新和 settlement 共用同一查找结果。
+    function reduceQuestionEvent(event: QuestionEvent) {
+      const sessionID = event.properties.sessionID; const requestID = event.type === "question.asked" ? event.properties.id : event.properties.requestID
+      markQuestionRequestChange(sessionID, requestID)
+      const requests = store.question[sessionID] ?? []; const match = search(requests, requestID, (request) => request.id)
+      if (event.type !== "question.asked") { if (match.found) setStore("question", sessionID, requests.toSpliced(match.index, 1)); return }
+      if (deletedSessionIDs.has(sessionID)) return
+      setStore("question", sessionID, match.found ? requests.with(match.index, event.properties) : requests.toSpliced(match.index, 0, event.properties))
+    }
+
+    function updateQuestionMembership(info: Session, deleted: boolean) {
+      const scope = questionScope()
+      if (scope.ids.length === 0) return
+      if (info.id === scope.sessionID) { if (deleted) setQuestionScope({ ...scope, ids: [] }); return }
+      const member = !deleted && info.parentID === scope.sessionID
+      if (member === scope.ids.includes(info.id)) return
+      // created 只改 question 的 ID scope；不得调用 touchSession 或向浏览列表补行。
+      setQuestionScope({ ...scope, ids: member ? [...scope.ids, info.id].toSorted() : scope.ids.filter((id) => id !== info.id) })
+    }
+
     event.subscribe((event, { directory, workspace }) => {
       // #186：非 delta 事件前强制 flush，保证 part.updated / vcs 等看到完整文本
       // #186：delta 自身不 flush，继续积攒同一 16ms 窗口
@@ -956,45 +980,11 @@ export const {
         }
 
         case "question.replied":
-        case "question.rejected": {
-          markQuestionRequestChange((event.properties as { sessionID: string; requestID: string }).sessionID, (event.properties as { sessionID: string; requestID: string }).requestID)
-          const requests = store.question[event.properties.sessionID]
-          if (!requests) break
-          const match = search(requests, event.properties.requestID, (r) => r.id)
-          if (!match.found) break
-          setStore(
-            "question",
-            event.properties.sessionID,
-            produce((draft) => {
-              draft.splice(match.index, 1)
-            }),
-          )
+        case "question.rejected":
+        // 三种事件继续更新插件全量桶；页面显示隔离由 question.list 单独负责。
+        case "question.asked":
+          reduceQuestionEvent(event)
           break
-        }
-
-        case "question.asked": {
-          if (deletedSessionIDs.has(event.properties.sessionID)) break
-          const request = event.properties
-          markQuestionRequestChange(request.sessionID, request.id)
-          const requests = store.question[request.sessionID]
-          if (!requests) {
-            setStore("question", request.sessionID, [request])
-            break
-          }
-          const match = search(requests, request.id, (r) => r.id)
-          if (match.found) {
-            setStore("question", request.sessionID, match.index, reconcile(request))
-            break
-          }
-          setStore(
-            "question",
-            request.sessionID,
-            produce((draft) => {
-              draft.splice(match.index, 0, request)
-            }),
-          )
-          break
-        }
 
         case "todo.updated":
           if (deletedSessionIDs.has(event.properties.sessionID)) break
@@ -1026,7 +1016,13 @@ export const {
           )
           break
 
+        // created 只建立 question 成员资格，刻意不进入通用 Session hydration/list tracker。
+        case "session.created":
+          updateQuestionMembership(event.properties.info, false)
+          break
         case "session.deleted": {
+          // 先撤 question 成员资格，再由原 releaseSession 清理正文/权限/桶，两个职责不能互换。
+          updateQuestionMembership(event.properties.info, true)
           touchSession(event.properties.info.id, null)
           deletedSessionIDs.add(event.properties.info.id)
           releaseSession(event.properties.info.id)
@@ -1264,6 +1260,7 @@ export const {
           break
         }
       }
+    // 重开和切回以权威 HTTP 恢复为准，不扩大既有 SSE 投递范围。
     })
 
     onCleanup(() => {
@@ -1275,6 +1272,9 @@ export const {
       pendingPartDeltas = []
       orphanPartDeltas.clear()
       loggedPartDeltaApplications.clear()
+      // Provider 销毁后两条读取都失效，任何在途响应不得再写新 owner 的 store。
+      questionRefreshVersion += 1
+      questionBootstrapVersion += 1
       // Provider 退出即失效元数据的终点；ID 集合本身也不跨 Provider 生命周期保留。
       deletedSessionIDs.clear()
       removedMessageIDs.clear()
@@ -1323,8 +1323,7 @@ export const {
     // #192：permissionVersion 是本地单调计数，快照恢复时仅回放版本号更新的变更
     // #192：快照恢复以版本号为界：变更版本高于快照起始才回放，保证不丢不重
     function markPermissionRequestChange(sessionID: string, requestID: string) { permissionVersion += 1; if (permissionRefreshes === 0) return; permissionChanges.set(pendingRequestChangeKey(sessionID, requestID), { sessionID, requestID, version: permissionVersion }) }
-    // #192：question 变更与 permission 同走增量表，保证两类 blocker 一致恢复
-    // #192：questionVersion 与 permission 同规则，保证两类请求恢复一致
+    // #192：question 继续复用原变更表；scope 只决定恢复范围，不改变 stale/live 的裁决规则。
     function markQuestionRequestChange(sessionID: string, requestID: string) { questionVersion += 1; if (questionRefreshes === 0) return; questionChanges.set(pendingRequestChangeKey(sessionID, requestID), { sessionID, requestID, version: questionVersion }) }
     // #192：refreshVersion 是请求计数，仅最新 reconnect 的响应写 store，乱序返回被丢弃
     // #192：permission 快照恢复与本地变更回放合并，是重连后 store 重建的完整路径
@@ -1335,10 +1334,50 @@ export const {
       // #192：竞态守卫比对刷新时的版本号，旧响应即使后到也不覆盖新快照
       finally { permissionRefreshes -= 1; if (permissionRefreshes === 0) permissionChanges.clear() }
     }
-    // #192：question 与 permission 共用同一快照替换+live merge 规则，保证两类请求恢复一致
-    async function refreshQuestionRequests(workspace: string | undefined) {
+    // 插件仍读取全局 pending；bootstrap 使用独立代数，不能被当前页面的 scoped 刷新取消。
+    async function refreshBootstrapQuestions(workspace: string | undefined) {
+      const version = questionVersion; const refreshVersion = questionBootstrapVersion + 1; questionBootstrapVersion = refreshVersion; questionRefreshes += 1
+      try {
+        const response = await sdk.client.question.list({ workspace })
+        if (refreshVersion !== questionBootstrapVersion) return
+        const next = pendingRequestsWithLiveChanges(pendingRequestsBySession((response.data ?? []).filter((request) => !deletedSessionIDs.has(request.sessionID))), store.question, questionChanges, version)
+        // 全局快照只拥有非当前 scope 的桶；当前页面桶即使已空，也不能被 viewer 旧快照复活。
+        const scope = route.data.type === "session" && questionScope().sessionID === route.data.sessionID ? questionScope().ids : []
+        for (const id of scope) { if (store.question[id]) next[id] = store.question[id]; else delete next[id] }
+        setStore("question", reconcile(next))
+      }
+      finally { questionRefreshes -= 1; if (questionRefreshes === 0) questionChanges.clear() }
+    }
+    // 当前页面恢复入口；原变更表负责 stale/live 合并，scope 只限制本轮可读取和提交的 Session。
+    async function refreshQuestionRequests(sessionID: string) {
+      if (route.data.type !== "session" || route.data.sessionID !== sessionID) return
       const version = questionVersion; const refreshVersion = questionRefreshVersion + 1; questionRefreshVersion = refreshVersion; questionRefreshes += 1
-      try { const response = await sdk.client.question.list({ workspace }); if (refreshVersion !== questionRefreshVersion) return; const rows = (response.data ?? []).filter((request) => !deletedSessionIDs.has(request.sessionID)); setStore("question", reconcile(pendingRequestsWithLiveChanges(pendingRequestsBySession(rows), store.question, questionChanges, version))) }
+      if (questionScope().sessionID !== sessionID) setQuestionScope({ sessionID, ids: [] })
+      const alive = () => questionRefreshVersion === refreshVersion && route.data.type === "session" && route.data.sessionID === sessionID
+      try {
+        // GET 只读取身份，不回写浏览行；缺失 data 或 HTTP 错误都必须 reject。
+        const root = (await sdk.client.session.get({ sessionID }, { throwOnError: true })).data
+        if (!root) throw new Error(`Session not found: ${sessionID}`); if (!alive()) return
+        if (root.parentID) { setQuestionScope({ sessionID, ids: [] }); return }
+        // root 之后的 children 请求覆盖在线创建窗口；实时 created 会继续扩展候选 ids。
+        setQuestionScope({ sessionID, ids: [root.id] })
+        const children = (await sdk.client.session.children({ sessionID }, { throwOnError: true })).data
+        if (!children) throw new Error(`Session children unavailable: ${sessionID}`); if (!alive() || deletedSessionIDs.has(root.id)) return
+        // HTTP children 与请求期间创建的 direct child 取并集；other/grandchild 和已删除 ID 不进入。
+        const ids = [...new Set([root.id, ...questionScope().ids, ...children.flatMap((child) => child.parentID === root.id ? [child.id] : [])])].filter((id) => !deletedSessionIDs.has(id)).toSorted()
+        // 成员退出只撤显示资格；不可见桶无需删除，真实 Session deleted 仍走原 releaseSession。
+        setQuestionScope({ sessionID, ids })
+        const responses = await Promise.all(ids.map((id) => sdk.client.question.list({ sessionID: id }, { throwOnError: true })))
+        if (responses.some((response) => !response.data)) throw new Error(`Question snapshot unavailable: ${sessionID}`)
+        if (!alive()) return
+        // discovery 后新增 child 只由 live 事实维护；本轮提交不覆盖新成员或其他 Session。
+        const committed = ids.filter((id) => questionScope().ids.includes(id) && !deletedSessionIDs.has(id))
+        const current = Object.fromEntries(committed.flatMap((id) => store.question[id] ? [[id, store.question[id]] as const] : []))
+        const rows = responses.flatMap((response) => response.data ?? []).filter((request) => committed.includes(request.sessionID))
+        const next = pendingRequestsWithLiveChanges(pendingRequestsBySession(rows), current, questionChanges, version)
+        // 空快照删除键；非成员桶和 discovery 后新增 child 不在本轮提交范围内。
+        setStore("question", produce((draft) => { for (const id of committed) { if (next[id]?.length) draft[id] = next[id]; else delete draft[id] } }))
+      }
       finally { questionRefreshes -= 1; if (questionRefreshes === 0) questionChanges.clear() }
     }
 
@@ -1425,9 +1464,9 @@ export const {
             sdk.client.formatter.status({ workspace }).then((x) => setStore("formatter", reconcile(x.data ?? []))),
             // #153：bootstrap 以同一入口拉取 status，替代原先内联的实现
             refreshStatus(),
-            // #192：refresh 拉取快照后回放本地变更，pending 请求在 store 中重建
+            // 全局桶继续服务插件；当前页面另由 route scope 选择要显示的 question。
             refreshPermissionRequests(workspace),
-            refreshQuestionRequests(workspace),
+            refreshBootstrapQuestions(workspace),
             sdk.client.provider.auth({ workspace }).then((x) => setStore("provider_auth", reconcile(x.data ?? {}))),
             sdk.client.vcs.get({ workspace }).then((x) => setStore("vcs", reconcile(x.data))),
             project.workspace.sync(),
@@ -1449,6 +1488,10 @@ export const {
           }
         })
     }
+
+    // bootstrap 恢复插件全局桶；当前 route 的 scoped 恢复代数单独失效。
+    // 仅 Session ID 变化使刷新代数失效；reviewID 等页内导航不会取消正在恢复的 question。
+    createEffect(on(() => route.data.type === "session" ? route.data.sessionID : undefined, () => { questionRefreshVersion += 1 }))
 
     // [0624] 当前 route 持有其 Session 的正文使用权；离开即释放，后台完成事件不再把正文补进 store。
     let routeParts: string | undefined
@@ -1477,6 +1520,14 @@ export const {
       },
       get path() {
         return project.instance.path()
+      },
+      // 对外只暴露当前 Session 的恢复与读取，调用方不能按 workspace 选择另一套 pending。
+      question: {
+        sync: refreshQuestionRequests,
+        list(sessionID: string) {
+          const scope = questionScope()
+          return scope.sessionID === sessionID ? scope.ids.flatMap((id) => store.question[id] ?? []) : []
+        },
       },
       session: {
         accounting(sessionID: string, contextLimit?: number, requestID?: string, confirmed?: RequestTotals) {

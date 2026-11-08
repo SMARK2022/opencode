@@ -73,6 +73,10 @@ async function withRenderedSession(messages: Array<UserMessage | AssistantMessag
     if (response) return response
     if (url.pathname === "/session") return json([info])
     if (url.pathname === `/session/${sid}`) return json(info)
+    // Session 页还会恢复直接子 Agent 的 question；空 children 与这些消息渲染用例无关。
+    if (url.pathname === `/session/${sid}/children`) return json([])
+    // 全局与按 Session 的 pending 都为空，避免恢复请求进入 unexpected-request 渲染帧。
+    if (url.pathname === "/question") return json([])
     if (url.pathname === `/session/${sid}/message`) return json(messages.map((message) => ({ info: message, parts: parts[message.id] ?? [] })))
     if (url.pathname.endsWith("/todo") || url.pathname.endsWith("/diff")) return json([])
     if (url.pathname.endsWith("/goal")) return json({})
@@ -449,6 +453,7 @@ test("legacy shell context view keeps the intent directory title and one command
   })
 })
 
+// 整组 100 轮不设武断总时限；每次 waitForFrame 仍有 5 秒看门狗，卡死会明确失败。
 test("tool card collapse and expand 100 times keeps identical frames and releases the body owner", async () => {
   const info = assistant("msg_hundred_toggle", 1)
   const output = Array.from({ length: 30 }, (_, index) => `hundred toggle line ${index}`).join("\n")
@@ -468,7 +473,7 @@ test("tool card collapse and expand 100 times keeps identical frames and release
       expect(registry.size).toBe(size)
     }
   }, { width: 80, height: 40 })
-})
+}, 0)
 
 test("offscreen messages release content after aging while roots geometry and expanded state stay exact", async () => {
   const fixture = windowFixture("window")

@@ -2848,6 +2848,13 @@ export type QuestionRequest = {
   tool?: QuestionTool
 }
 
+export type NotFoundError = {
+  name: "NotFoundError"
+  data: {
+    message: string
+  }
+}
+
 export type QuestionNotFoundError = {
   _tag: "QuestionNotFoundError"
   requestID: string
@@ -2926,13 +2933,6 @@ export type ProviderAuthError1 = {
     field?: string
     message?: string
     kind?: string
-  }
-}
-
-export type NotFoundError = {
-  name: "NotFoundError"
-  data: {
-    message: string
   }
 }
 
@@ -10381,6 +10381,7 @@ export type QuestionListData = {
   query?: {
     directory?: string
     workspace?: string
+    sessionID?: string
   }
   url: "/question"
 }
@@ -10390,6 +10391,10 @@ export type QuestionListErrors = {
    * Bad request
    */
   400: BadRequestError
+  /**
+   * NotFoundError
+   */
+  404: NotFoundError
 }
 
 export type QuestionListError = QuestionListErrors[keyof QuestionListErrors]
@@ -10411,13 +10416,14 @@ export type QuestionReplyData = {
     answers: Array<QuestionAnswer>
   }
   path: {
+    sessionID: string
     requestID: string
   }
   query?: {
     directory?: string
     workspace?: string
   }
-  url: "/question/{requestID}/reply"
+  url: "/question/session/{sessionID}/{requestID}/reply"
 }
 
 export type QuestionReplyErrors = {
@@ -10426,9 +10432,9 @@ export type QuestionReplyErrors = {
    */
   400: EffectHttpApiErrorBadRequest | InvalidRequestError
   /**
-   * QuestionNotFoundError
+   * NotFoundError | QuestionNotFoundError
    */
-  404: QuestionNotFoundError
+  404: NotFoundError | QuestionNotFoundError
 }
 
 export type QuestionReplyError = QuestionReplyErrors[keyof QuestionReplyErrors]
@@ -10445,13 +10451,14 @@ export type QuestionReplyResponse = QuestionReplyResponses[keyof QuestionReplyRe
 export type QuestionRejectData = {
   body?: never
   path: {
+    sessionID: string
     requestID: string
   }
   query?: {
     directory?: string
     workspace?: string
   }
-  url: "/question/{requestID}/reject"
+  url: "/question/session/{sessionID}/{requestID}/reject"
 }
 
 export type QuestionRejectErrors = {
@@ -10460,9 +10467,9 @@ export type QuestionRejectErrors = {
    */
   400: EffectHttpApiErrorBadRequest | InvalidRequestError
   /**
-   * QuestionNotFoundError
+   * NotFoundError | QuestionNotFoundError
    */
-  404: QuestionNotFoundError
+  404: NotFoundError | QuestionNotFoundError
 }
 
 export type QuestionRejectError = QuestionRejectErrors[keyof QuestionRejectErrors]

@@ -89,7 +89,8 @@ const pathParamPatterns = [
   { method: "patch", path: SessionPaths.updatePart, name: "partID", pattern: "^prt" },
   { method: "post", path: SessionPaths.permissions, name: "permissionID", pattern: "^per" },
   { method: "post", path: "/permission/:requestID/reply", name: "requestID", pattern: "^per" },
-  { method: "post", path: "/question/:requestID/reply", name: "requestID", pattern: "^que" },
+  // question reply 同时声明 Session 与 request，requestID 的正则约束不能在改路径时丢失。
+  { method: "post", path: "/question/session/:sessionID/:requestID/reply", name: "requestID", pattern: "^que" },
   { method: "put", path: PtyPaths.update, name: "ptyID", pattern: "^pty" },
   { method: "delete", path: WorkspacePaths.remove, name: "id", pattern: "^wrk" },
 ] satisfies Array<{ method: Method; path: string; name: string; pattern: string }>
