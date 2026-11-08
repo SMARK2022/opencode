@@ -477,7 +477,7 @@ function envStatus(metadata: Record<string, unknown>) {
 }
 
 // #564：notebook 内部用的 previewText——与主会话一致，截断不追加 '…' sentinel 行，
-// 折叠语义（“还有更多”）由 BlockTool footer 承载。
+// 折叠语义（“还有更多”）由 BlockTool 容器内置 affordance 承载。
 function previewText(input: string, maxLines: number) {
   const lines = input.split("\n")
   return lines.length > maxLines ? lines.slice(0, maxLines).join("\n") : input

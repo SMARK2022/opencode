@@ -11,7 +11,8 @@ import { KVProvider } from "../../../src/context/kv"
 import { TuiConfigProvider } from "../../../src/config"
 import { ThemeProvider } from "../../../src/context/theme"
 import { RouteProvider } from "../../../src/context/route"
-import { BlockTool } from "../../../src/routes/session"
+import { BlockTool, context } from "../../../src/routes/session"
+import { createSignal } from "solid-js"
 
 // preview存在性检查不能弃用刚构造的树；快照隔离其他测试遗留节点，只检查本次新增对象。
 // 排空正常延迟销毁后沿父链查root，保留源测试的永久脱树泄漏判据。
@@ -21,6 +22,14 @@ await mkdir(stateDir, { recursive: true })
 await writeFile(path.join(stateDir, "kv.json"), "{}")
 
 function PreviewCard(props: { text: string }) {
+  // 真实响应式 store 保证容器 use() 合同与生产 Session 一致。
+  const [interaction, setInteraction] = createSignal<Record<string, boolean>>({})
+  const value = {
+    interaction: {
+      get: (key: string) => interaction()[key] ?? false,
+      set: (key: string, value: boolean) => setInteraction((previous) => ({ ...previous, [key]: value })),
+    },
+  } as never
   return (
     <TuiPathsProvider value={{ cwd: "/work", home: "/home/t", state: stateDir, worktree: "/work" }}>
       <TuiStartupProvider value={{ skipInitialLoading: true }}>
@@ -28,12 +37,18 @@ function PreviewCard(props: { text: string }) {
           <TuiConfigProvider config={{ theme: undefined } as never}>
             <ThemeProvider mode="dark" source={{ discover: async () => ({}) }}>
               <RouteProvider>
-                <BlockTool
-                  title="bash"
-                  autoReview={false}
-                  preview={<text>{props.text}</text>}>
-                  <text>{`${props.text}\napplied`}</text>
-                </BlockTool>
+                <context.Provider value={value}>
+                  <BlockTool
+                    title="bash"
+                    autoReview={false}
+                    // 固定超阈值尺寸让预览在首帧真实挂载，泄漏检查不再依赖调用方条件预览。
+                    totalLines={30}
+                    totalChars={1000}
+                    preview={<text>{props.text}</text>}
+                  >
+                    <text>{`${props.text}\napplied`}</text>
+                  </BlockTool>
+                </context.Provider>
               </RouteProvider>
             </ThemeProvider>
           </TuiConfigProvider>
@@ -50,6 +65,8 @@ test("preview card mounts without leaking discarded preview tree", async () => {
     // Provider 初始化（KV/主题）需要沉淀——与 block-tool-visible-once 同款 100ms。
     await new Promise((resolve) => setTimeout(resolve, 100))
     await app.waitForFrame((frame) => frame.includes("patch preview"))
+    // 预览可见且正文未挂载的帧证明检查覆盖的是容器 previewTree，而非另一份临时节点。
+    expect(app.captureCharFrame()).toContain("Click to expand")
     // 固定10轮20ms让正常nextTick销毁排空，避免把待销毁对象误判为永久泄漏。
     for (let i = 0; i < 10; i++) {
       await new Promise((resolve) => setTimeout(resolve, 20))
@@ -67,6 +84,7 @@ test("preview card mounts without leaking discarded preview tree", async () => {
       }
       if (node !== app.renderer.root) detached.push(key)
     }
+    // 任何被存在性检查弃用的 preview 树都会沿父链无法回到 root，在这里直接暴露。
     expect(detached).toEqual([])
   } finally {
     app.renderer.destroy()

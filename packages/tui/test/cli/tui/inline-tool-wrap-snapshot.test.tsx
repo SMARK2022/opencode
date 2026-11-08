@@ -387,7 +387,6 @@ describe("TUI inline tool wrapping", () => {
     // 导航夹具保留可选锚点，普通 Session 导航仍可省略。
     const navigation: { type: string; sessionID: string; reviewID?: string }[] = []
     const navigate = (route: { type: string; sessionID: string; reviewID?: string }) => navigation.push(route)
-    const [expanded, setExpanded] = createSignal(false)
     let parentClicks = 0
     const ToolAutoReview = createContext(() => review)
     // 真实组件通过响应式属性重绘，普通对象无法验证点击后的展开状态。
@@ -448,11 +447,11 @@ describe("TUI inline tool wrapping", () => {
             complete={true}
             pending=""
             part={{ tool: kind, state: { status: "completed" } }}
-            preview={kind === "edit" && !expanded() ? <text>diff preview</text> : undefined}
-            onClick={() => {
-              parentClicks++
-              setExpanded((value) => !value)
-            }}
+            // edit 卡片按 totals+preview 申报，展开状态由真实 BlockTool 容器而非 fixture 持有。
+            totalLines={kind === "edit" ? 30 : undefined}
+            totalChars={kind === "edit" ? 1000 : undefined}
+            preview={kind === "edit" ? <text>diff preview</text> : undefined}
+            onClick={() => parentClicks++}
           >
             {kind === "edit" ? <text>expanded diff body</text> : "Read external folder/secret key.txt"}
           </Card>
@@ -477,13 +476,12 @@ describe("TUI inline tool wrapping", () => {
     // 状态行点击必须携带精确审查锚点，不能退回子会话末尾。
     expect(navigation).toEqual([{ type: "session", sessionID: "ses_reviewer_child", reviewID: "review_click" }])
     expect(parentClicks).toBe(0)
-    expect(expanded()).toBe(false)
     if (kind === "edit") expect(app.captureCharFrame()).toContain("Click to expand")
     navigation.length = 0
     await app.mockMouse.click(reviewTarget!.screenX + reviewTarget!.width - 1, reviewTarget!.screenY)
     expect(navigation).toEqual([{ type: "session", sessionID: "ses_reviewer_child", reviewID: "review_click" }])
     expect(parentClicks).toBe(0)
-    expect(expanded()).toBe(false)
+    if (kind === "edit") expect(app.captureCharFrame()).toContain("Click to expand")
     navigation.length = 0
     // 明确点击审查入口会清除旧选区；缺少子会话或命中无关目标仍不导航。
     const effects: string[] = []
@@ -522,6 +520,7 @@ describe("TUI inline tool wrapping", () => {
     expect(navigation).toEqual([])
     expect(parentClicks).toBe(1)
     if (kind === "edit") {
+      // 普通标题点击既要保留调用方 onClick，也要由容器展开真实 body，两个动作不能互相替代。
       const body = findVisibleText(app.captureCharFrame().split("\n"), "expanded diff body")
       expect(body).toBeDefined()
       await app.mockMouse.moveTo(body!.x + 1, body!.y)

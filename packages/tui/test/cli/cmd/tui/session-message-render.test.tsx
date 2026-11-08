@@ -370,6 +370,35 @@ test.each(["bash", "write", "write-overwrite", "edit", "apply_patch", "fixture_t
   }, { width: 100, height: 60 })
 })
 
+test("apply_patch keeps long per-file cards independently collapsible", async () => {
+  const info = { ...assistant("msg_patch_isolation", 1), finish: "tool-calls" }
+  const patch = (name: string) => [
+    `diff --git a/${name}.txt b/${name}.txt`,
+    `--- a/${name}.txt`,
+    `+++ b/${name}.txt`,
+    "@@ -1 +1,24 @@",
+    "-old",
+    ...Array.from({ length: 24 }, (_, index) => `+${name} line ${index + 1}`),
+  ].join("\n")
+  const part = completedToolPart("part_patch_isolation", info.id, "apply_patch", {}, {
+    files: ["alpha", "beta"].map((name) => ({ type: "update", filePath: `${name}.txt`, relativePath: `${name}.txt`, deletions: 1, patch: patch(name) })),
+  })
+  await withRenderedSession([info], { [info.id]: [part] }, async (app) => {
+    await waitForFrame(app, (frame) => frame.split("Click to expand").length === 3)
+    // 两个真实 ApplyPatch 文件都超过阈值；测试不提供 stateKey，隔离完全由生产接线决定。
+    await click(app, "Click to expand")
+    await waitForFrame(app, (frame) => frame.includes("alpha line 24") && frame.includes("Click to collapse"))
+    expect(app.captureCharFrame()).toContain("Click to expand")
+    expect(app.captureCharFrame()).not.toContain("beta line 24")
+
+    await click(app, "Click to expand")
+    await waitForFrame(app, (frame) => frame.includes("beta line 24") && frame.split("Click to collapse").length === 3)
+    // 逐文件展开后单独收起 alpha，beta 必须继续保持完整正文。
+    await click(app, "Click to collapse")
+    await waitForFrame(app, (frame) => !frame.includes("alpha line 24") && frame.includes("beta line 24") && frame.includes("Click to expand") && frame.includes("Click to collapse"))
+  }, { width: 100, height: 80 })
+})
+
 test("new Write collapsed preview preserves expanded line numbers and syntax color", async () => {
   const info = { ...assistant("msg_write_source_preview", 1), finish: "tool-calls" }
   // 30 行 Markdown 触发真实折叠；普通正文尾行同时提供默认颜色和独立完整性标记。

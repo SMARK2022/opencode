@@ -33,20 +33,23 @@ describe("Session Shell output spacing", () => {
   })
 
   test("BlockTool can collapse long wrapped single-line content", () => {
-    // 源 totalChars 契约由目标 preview owner 承担，不恢复第二套折叠状态。
+    // totalChars 统一由容器消费，长单行不能绕过 800 字符预算；卡片不再各自维护 overflow。
     expect(sessionSource).toContain("DEFAULT_BLOCK_CHAR_THRESHOLD = 800")
     expect(sessionSource).toContain("maxChars = DEFAULT_BLOCK_CHAR_THRESHOLD")
-    expect(sessionSource).toContain("Math.min(maxChars() * 2, DEFAULT_BLOCK_CHAR_THRESHOLD)")
-    expect(sessionSource).toContain('diffContent().length > DEFAULT_BLOCK_CHAR_THRESHOLD')
-    expect(sessionSource).toContain('(file.patch ?? "").length > DEFAULT_BLOCK_CHAR_THRESHOLD')
-    expect(sessionSource).toContain('(diff() ?? "").length > DEFAULT_BLOCK_CHAR_THRESHOLD')
+    expect(sessionSource).toContain("const charThreshold = createMemo(() => props.charThreshold ?? DEFAULT_BLOCK_CHAR_THRESHOLD)")
+    expect(sessionSource).toContain("totalChars={diffContent().length}")
+    expect(sessionSource).toContain('totalChars={(file.patch ?? "").length}')
+    expect(sessionSource).toContain('totalChars={(diff() ?? "").length}')
+    expect(sessionSource).toContain("totalChars={code().length}")
+    // 这些字面申报分别覆盖 Shell、Edit、Write 与逐文件 Patch，防止某张卡继续自算 overflow。
   })
 
   test("Shell counts command and output characters for collapse", () => {
     const shellSource = sessionSource.slice(sessionSource.indexOf("function Shell("), sessionSource.indexOf("function DiffView("))
     expect(shellSource).toContain("shellPreviewText")
-    expect(shellSource).toContain("collapseToolOutput(shellPreviewText(), 20,")
-    expect(shellSource).toContain("previewText(shellPreviewText(), maxLines, maxChars())")
+    expect(shellSource).toContain('totalLines={shellPreviewText().split("\\n").length}')
+    expect(shellSource).toContain("totalChars={shellPreviewText().length}")
+    expect(shellSource).toContain("previewText(shellPreviewText(), 10)")
   })
 
   // #458：继承源 session-integration 断言——scrollbox 视口裁剪由 helper 与粘底信号驱动
@@ -57,18 +60,19 @@ describe("Session Shell output spacing", () => {
     expect(sessionSource).toContain("renderAfter={syncSessionViewportStuckToBottom}")
   })
 
-  // 首帧从实际 preview 同步决定正文挂载，不恢复已移除的内置折叠状态。
+  // 首帧由容器同步计算 collapsible，预览存在性与正文挂载共用同一棵树和同一展开状态。
   test("BlockTool decides collapse eligibility before mounting previews", () => {
     const start = sessionSource.indexOf("function BlockTool(")
     const end = sessionSource.indexOf("function Shell(")
     const blockToolSource = sessionSource.slice(start, end)
-    // 存在性检查与挂载共用一次getter求值，不能要求恢复已修复的重复构树路径。
+    expect(blockToolSource).toContain("const collapsible = createMemo(() => {")
     expect(blockToolSource).toContain("const previewTree = createMemo(() => props.preview)")
-    expect(blockToolSource).toContain("const collapsed = createMemo(() => previewTree() !== undefined)")
-    // 正文驻留改由外层交互owner控制，收起时不保留第二份内置展开状态。
-    expect(blockToolSource).toContain("<Show when={!collapsed()}>")
+    expect(blockToolSource).toContain("const collapsed = createMemo(() => collapsible() && !expanded())")
+    expect(blockToolSource).toContain("const hasPreview = createMemo(() => previewTree() !== undefined || errorPreview() !== undefined)")
+    expect(blockToolSource).toContain("<Show when={!hasPreview() || !collapsed()}>")
     expect(blockToolSource).not.toContain("createSignal(!collapsed())")
     expect(blockToolSource).not.toContain("setCanCollapse")
+    // hasPreview 同时纳入错误预览，缺失该分支时长错误会在折叠态没有可见摘要。
   })
 
   // 首块零内距与消息外距由 session-message-render 的真实帧覆盖，删除与恢复语义相反的源码断言。

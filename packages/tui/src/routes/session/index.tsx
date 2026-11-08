@@ -246,7 +246,7 @@ function use() {
 const RESIDENCY_MAX_AGE_MS = 30_000
 const RESIDENCY_MAX_BYTES = 64 * 1024 * 1024
 
-// 展开选择留在Session，正文owner可销毁；key由实际工具/推理run提供，不把折叠职责搬回BlockTool。
+// 轻量交互状态留在 Session，正文 owner 可销毁；正文与错误的折叠统一归 BlockTool 容器。
 function useInteraction(key: () => string) {
   const ctx = use()
   const get = () => ctx.interaction.get(key())
@@ -2728,7 +2728,7 @@ type ToolProps = {
 const DEFAULT_BLOCK_CHAR_THRESHOLD = 800
 
 function previewText(input: string, maxLines: number, maxChars = DEFAULT_BLOCK_CHAR_THRESHOLD) {
-  // 折叠信号由footer承载，仍保留Unicode安全与随宽度变化的原字符预算。
+  // 预览截断继续复用统一 Unicode 安全与字符预算，收放入口由 BlockTool 内置。
   return collapseToolOutput(input, maxLines, Math.min(maxChars, DEFAULT_BLOCK_CHAR_THRESHOLD), false).output
 }
 
@@ -2741,15 +2741,6 @@ function GenericTool(props: ToolProps) {
   const { theme } = useTheme()
   const ctx = use()
   const output = createMemo(() => props.output?.trim() ?? "")
-  const [expanded, setExpanded] = useInteraction(() => `expanded:${props.part.id}`)
-  // 20 行判断是否折叠，预览保留 10 行；字符预算继续随终端宽度变化。
-  const maxLines = 10
-  const maxChars = createMemo(() => maxLines * Math.max(20, ctx.width - 6))
-  const collapsed = createMemo(() => collapseToolOutput(output(), 20, Math.min(maxChars() * 2, DEFAULT_BLOCK_CHAR_THRESHOLD)))
-  const limited = createMemo(() => {
-    if (expanded() || !collapsed().overflow) return output()
-    return previewText(output(), maxLines, maxChars())
-  })
   // Notebook完成态消费紧凑元数据，流式参数只用于pending摘要，不访问VS Code。
   const pendingStats = createPendingToolInputStats(() => props.part)
   const notebook = useVscodeNotebookToolView({
@@ -2772,12 +2763,6 @@ function GenericTool(props: ToolProps) {
     const view = notebook()
     return view?.mode === "block" ? view : undefined
   })
-  // 外层沿用同一展开状态；小卡片直接显示正文，超预算时才使用Notebook预览。
-  const notebookOverflow = createMemo(() => {
-    const view = notebookBlock()
-    return Boolean(view?.preview) && ((view?.totalLines ?? 0) > (view?.threshold ?? 20) || (view?.totalChars ?? 0) > maxChars() * 2)
-  })
-
   return (
     <Switch>
       {/* #224：notebook inline 视图——pending 态和完成态的轻量单行摘要 */}
@@ -2794,9 +2779,12 @@ function GenericTool(props: ToolProps) {
           <BlockTool
             title={view().title}
             part={props.part}
-            onClick={notebookOverflow() ? () => setExpanded((prev) => !prev) : undefined}
-            preview={notebookOverflow() && !expanded() ? view().preview : undefined}
-            footer={notebookOverflow() ? "Click to collapse" : undefined}
+            maxLines={view().maxLines ?? 10}
+            threshold={view().threshold ?? 20}
+            // Notebook 视图只申报实际内容尺寸，折叠与资源释放不再由视图层重复实现。
+            totalLines={view().totalLines}
+            totalChars={view().totalChars}
+            preview={view().preview}
           >
             {/* [0624] view().body 是工厂：BlockTool 每次展开重新调用，得到全新内容树 */}
             {view().body()}
@@ -2808,15 +2796,15 @@ function GenericTool(props: ToolProps) {
         <BlockTool
           title={`# ${props.tool} ${input(props.input)}`}
           part={props.part}
-          onClick={collapsed().overflow ? () => setExpanded((prev) => !prev) : undefined}
-          footer={collapsed().overflow ? "Click to collapse" : undefined}
-          // #144：通用工具折叠预览
-          preview={
-            collapsed().overflow && !expanded() ? <text fg={theme.text}>{previewText(limited(), 10, maxChars())}</text> : undefined
-          }
+          maxLines={10}
+          threshold={20}
+          totalLines={output().split("\n").length}
+          totalChars={output().length}
+          // 卡片只申报内容尺寸与预览，收放状态统一由 BlockTool 容器持有。
+          preview={<text fg={theme.text}>{previewText(output(), 10)}</text>}
         >
           <box gap={1}>
-            <text fg={theme.text}>{expanded() || !collapsed().overflow ? output() : limited()}</text>
+            <text fg={theme.text}>{output()}</text>
           </box>
         </BlockTool>
       </Match>
@@ -3038,7 +3026,8 @@ function PermissionReviewDecision(props: ToolProps) {
     return typeof value === "string" ? value : ""
   })
   return (
-    <BlockTool title={`Permission review decision`} part={props.part}>
+    // 审查决策证据始终完整展示，maxLines=0 是容器合同的显式禁折叠分支。
+    <BlockTool title={`Permission review decision`} part={props.part} maxLines={0}>
       <box flexDirection="column" gap={1}>
         {/* #209：结构化决策证据——assistant text 可能辩论替代方案，此 metadata 是审计的最终 reviewer 输出 */}
         <box gap={1}>
@@ -3311,16 +3300,21 @@ export function BlockTool(props: {
   spinner?: boolean
   contextView?: boolean
   contextLabel?: string
-  // #144：可选预览节点；折叠时优先于 maxHeight 裁切 children
+  maxLines?: number
+  threshold?: number
+  totalLines?: number
+  totalChars?: number
+  charThreshold?: number
   preview?: JSX.Element
-  // 只接收展示文字，展开状态仍归调用方；公共 section 统一承担旧版提示前的一行留白。
-  footer?: string
   // #214：autoReview=false 时跳过共享审查状态行——apply_patch 内部 BlockTool 由外部统一渲染
   autoReview?: false
+  // 同一 Part 渲染多张卡片时由调用方提供逐文件区分键，避免展开状态互相串扰。
+  stateKey?: string
 }) {
   const { theme } = useTheme()
   const renderer = useRenderer()
   const { navigate } = useRoute()
+  const ctx = use()
   const review = useContext(ToolAutoReview)
   const topMargin = useContext(ToolPartTopMargin)
   const [hover, setHover] = createSignal(false)
@@ -3331,12 +3325,47 @@ export function BlockTool(props: {
     if (hover()) return theme.backgroundMenu
     return theme.backgroundPanel
   })
-  // 外层拥有展开状态；保存预览节点，使它暂时缺席时不会销毁后再挂载。
-  // getter会创建renderable；存在性、挂载和提示必须复用同一次求值，不能留下弃用树。
+  // maxLines 同时限定折叠预览高度；为 0 时运行态/审查卡可显式禁用折叠。
+  const previewLines = createMemo(() => props.maxLines ?? 10)
+  // 20 行是完整正文与预览的分界，避免把仅用于展示的 10 行预览高度误作折叠阈值。
+  const threshold = createMemo(() => props.threshold ?? 20)
+  // 800 字符覆盖终端自动换行后的视觉高度，长单行命令和 base64 错误不能绕过预算。
+  const charThreshold = createMemo(() => props.charThreshold ?? DEFAULT_BLOCK_CHAR_THRESHOLD)
+  const collapsible = createMemo(() => {
+    if (previewLines() <= 0) return false
+    // 首帧必须同步决定折叠，避免超长 diff 先完整挂载再被预览替换。
+    // 错误与正文共用容器预算，卡片无需理解或申报错误尺寸。
+    const errorLines = error()?.split("\n").length ?? 0
+    const errorChars = error()?.length ?? 0
+    return (props.totalLines ?? 0) + errorLines > threshold() || (props.totalChars ?? 0) + errorChars > charThreshold()
+  })
+  // 展开状态存 Session interaction store，屏外销毁重建后仍保持；只有无状态键时才用本地 signal。
+  const stateKey = createMemo(() => props.stateKey ?? (props.part ? `expanded:${props.part.id}` : undefined))
+  const [localExpanded, setLocalExpanded] = createSignal(false)
+  const expanded = () => {
+    const key = stateKey()
+    // interaction 缺键必须读作 false，首次挂载始终默认收缩而不是继承未知状态。
+    return key ? ctx.interaction.get(key) : localExpanded()
+  }
+  const setExpanded = (update: (previous: boolean) => boolean) => {
+    // 每次切换都回读当前 store 值，避免屏外重建后的旧闭包覆盖最新展开状态。
+    const key = stateKey()
+    if (!key) {
+      setLocalExpanded(update(localExpanded()))
+      return
+    }
+    ctx.interaction.set(key, update(ctx.interaction.get(key)))
+  }
+  const collapsed = createMemo(() => collapsible() && !expanded())
+  // preview getter 每次访问都会构造真实子树；存在性检查和挂载必须共用一棵树，防止弃用树泄漏 native handle。
   const previewTree = createMemo(() => props.preview)
-  const collapsed = createMemo(() => previewTree() !== undefined)
-  const preview = createMemo<JSX.Element>((previous) => previewTree() ?? previous)
-  // 展开仍归调用方；折叠销毁正文owner，重开通过children getter创建新树，不重挂已销毁对象。
+  const errorPreview = createMemo(() => {
+    const text = error()
+    // 错误预览只负责限幅，展开后的完整错误仍由正文承担，两处不各自维护状态。
+    return text ? previewText(text, previewLines(), charThreshold()) : undefined
+  })
+  // 没有卡片预览时，错误预览也能支撑折叠态；短错误则继续随完整正文显示。
+  const hasPreview = createMemo(() => previewTree() !== undefined || errorPreview() !== undefined)
   return (
     <box
       ref={(el: BoxRenderable) => alwaysSeparate.add(el)}
@@ -3350,7 +3379,7 @@ export function BlockTool(props: {
       backgroundColor={background()}
       customBorderChars={SplitBorder.customBorderChars}
       borderColor={props.contextView ? theme.info : theme.background}
-      onMouseOver={() => (props.onClick || props.onRightClick) && setHover(true)}
+      onMouseOver={() => (props.onClick || props.onRightClick || collapsible()) && setHover(true)}
       onMouseOut={() => setHover(false)}
       onMouseUp={(evt?: MouseEvent) => {
         if (openAutoReviewFromToolChrome(review(), navigate, renderer, evt)) return
@@ -3363,6 +3392,8 @@ export function BlockTool(props: {
           props.onRightClick()
           return
         }
+        // 只有可折叠内容才切换容器；调用方附加动作保持原有语义且不在右键触发。
+        if (collapsible()) setExpanded((previous) => !previous)
         props.onClick?.()
       }}
     >
@@ -3385,23 +3416,36 @@ export function BlockTool(props: {
       <Show when={props.autoReview !== false}>
         <ToolAutoReviewLine />
       </Show>
-      {/* visible隐藏整块但不销毁节点，避免零高度仍泄漏首行；状态继续由外层驱动。 */}
-      <box marginTop={collapsed() ? 1 : 0} visible={collapsed()}>
-        {preview()}
-      </box>
-      <Show when={!collapsed()}>
-        <box marginTop={1}>
-          {props.children}
+      {/* preview 只在折叠态可见；卡片预览与错误预览同属一个容器，不引入第二套错误状态。 */}
+      <Show when={hasPreview()}>
+        <box marginTop={collapsed() ? 1 : 0} visible={collapsed()}>
+          {previewTree()}
+          <Show when={errorPreview()}>
+            {(text) => <text fg={theme.error}>{text()}</text>}
+          </Show>
         </box>
       </Show>
-      {/* 提示独立于可销毁的正文；收放正文不重建另一套按钮或改变调用方的展开状态。 */}
-      <Show when={collapsed() ? "Click to expand" : props.footer}>
-        {(label) => <box marginTop={1}><text fg={theme.textMuted}>{label()}</text></box>}
+      {/* 有预览时折叠即卸载正文，释放 Diff/Markdown native 资源；无预览时保留行高裁剪。 */}
+      <Show when={!hasPreview() || !collapsed()}>
+        <box
+          marginTop={1}
+          maxHeight={!hasPreview() && collapsed() ? previewLines() : undefined}
+          overflow={!hasPreview() && collapsed() ? "hidden" : undefined}
+        >
+          {props.children}
+          {/* 未超预算的错误在这里完整显示；超预算错误随同一正文 owner 卸载。 */}
+          <Show when={error()}>
+            <box marginTop={1}>
+              <text fg={theme.error}>{error()}</text>
+            </box>
+          </Show>
+        </box>
       </Show>
-      <Show when={error()}>
+      {/* 容器内置唯一收放入口，正文和错误一次切换。 */}
+      <Show when={collapsible()}>
         <box marginTop={1}>
-        <text fg={theme.error}>{error()}</text>
-      </box>
+          <text fg={theme.textMuted}>{expanded() ? "Click to collapse" : "Click to expand"}</text>
+        </box>
       </Show>
     </box>
   )
@@ -3410,9 +3454,8 @@ export function BlockTool(props: {
 function Shell(props: ToolProps) {
   const { theme } = useTheme()
   const pathFormatter = usePathFormatter()
-  const ctx = use()
   const isRunning = createMemo(() => props.part.state.status === "running")
-  // 模型输出视图和展开选择跨正文重建保留，折叠/右键仍由Shell唯一owner处理。
+  // 模型输出视图与右键切换跨正文重建保留；正文与错误的折叠统一由 BlockTool 处理。
   const [showContextOutput, setShowContextOutput] = useInteraction(() => `context:${props.part.id}`)
   // 只有 completed 的 props.output 才是已返回模型的内容，不能显示运行中的半成品。
   const contextOutputAvailable = createMemo(() => props.output !== undefined && props.part.state.status === "completed")
@@ -3420,29 +3463,11 @@ function Shell(props: ToolProps) {
     const text = showContextOutput() && contextOutputAvailable() ? props.output : stringValue(props.metadata.output)
     return stripAnsi(text?.trim() ?? "")
   })
-  const [expanded, setExpanded] = useInteraction(() => `expanded:${props.part.id}`)
   // 命令和非空输出共用同一文本；空输出不添加分隔行，长命令不能绕过折叠。
   const shellPreviewText = createMemo(() => {
     if (!output()) return `$ ${stringValue(props.input.command) ?? ""}`
     return [`$ ${stringValue(props.input.command) ?? ""}`, "", output()].join("\n")
   })
-  const maxLines = 10
-  const maxChars = createMemo(() => maxLines * Math.max(20, ctx.width - 6))
-  const collapsed = createMemo(() => {
-    if (isRunning() || showContextOutput()) return { output: shellPreviewText(), overflow: false }
-    return collapseToolOutput(shellPreviewText(), 20, Math.min(maxChars() * 2, DEFAULT_BLOCK_CHAR_THRESHOLD))
-  })
-  // #111：外置 collapseToolOutput 主路径 sticky（Shell 唯一折叠 owner）
-  const [shellCanCollapse, setShellCanCollapse] = createSignal(false)
-  createEffect(() => {
-    if (shellCanCollapse()) return
-    if (collapsed().overflow) setShellCanCollapse(true)
-  })
-  const limited = createMemo(() => {
-    if (isRunning() || showContextOutput() || expanded() || !shellCanCollapse()) return shellPreviewText()
-    return previewText(shellPreviewText(), maxLines, maxChars())
-  })
-
   const workdirDisplay = createMemo(() => {
     const workdir = stringValue(props.input.workdir)
     if (!workdir || workdir === ".") return undefined
@@ -3471,18 +3496,15 @@ function Shell(props: ToolProps) {
           title={title()}
           spinner={isRunning()}
           part={props.part}
-          // 运行态和模型上下文均展示完整输出，沿用旧版不显示折叠入口的语义。
-          footer={shellCanCollapse() && !isRunning() && !showContextOutput() ? "Click to collapse" : undefined}
-          onClick={shellCanCollapse() ? () => setExpanded((prev) => !prev) : undefined}
+          // 运行态和模型上下文视图通过 maxLines=0 禁用折叠，其它内容由容器统一计算。
+          maxLines={isRunning() || showContextOutput() ? 0 : 10}
+          threshold={20}
+          totalLines={shellPreviewText().split("\n").length}
+          totalChars={shellPreviewText().length}
           onRightClick={contextOutputAvailable() ? toggleContextOutput : undefined}
           contextView={showContextOutput()}
           contextLabel="returned to model"
-          // 折叠判定和可见预览共用命令/输出预算，运行及模型上下文视图仍完整展示。
-          preview={
-            shellCanCollapse() && !expanded() && !isRunning() && !showContextOutput() ? (
-              <text fg={theme.text}>{limited()}</text>
-            ) : undefined
-          }
+          preview={<text fg={theme.text}>{previewText(shellPreviewText(), 10)}</text>}
         >
           <box gap={1}>
             {/* 运行态动效归意图标题，命令正文保持静态，便于定位和复制原始调用。 */}
@@ -3565,24 +3587,8 @@ function Write(props: ToolProps) {
       </>
     )
   })
-  // 文件预览默认收缩；展开信号只控制显示，不改写工具输入或诊断。
-  const [expanded, setExpanded] = useInteraction(() => `expanded:${props.part.id}`)
   const code = createMemo(() => {
     return stringValue(props.input.content) ?? ""
-  })
-  const maxLines = 10
-  // 完整展示阈值为 20 行，折叠预览为 10 行；两者都保留字符预算。
-  const maxChars = createMemo(() => maxLines * Math.max(20, ctx.width - 6))
-  const collapsed = createMemo(() => collapseToolOutput(code(), 20, Math.min(maxChars() * 2, DEFAULT_BLOCK_CHAR_THRESHOLD)))
-  // #111：Write 外置折叠 sticky（唯一折叠 owner；勿传 totalLines 给 BlockTool）
-  const [writeCanCollapse, setWriteCanCollapse] = createSignal(false)
-  createEffect(() => {
-    if (writeCanCollapse()) return
-    if (collapsed().overflow) setWriteCanCollapse(true)
-  })
-  const limited = createMemo(() => {
-    if (expanded() || !writeCanCollapse()) return code()
-    return previewText(code(), maxLines, maxChars())
   })
   // 文件覆写 diff：当 write 工具覆写已有文件时，metadata.diff 包含 git diff 格式的变更
   const diff = createMemo(() => props.metadata.diff as string | undefined)
@@ -3606,10 +3612,7 @@ function Write(props: ToolProps) {
     const removed = lines.filter((line) => line.startsWith("-") && !line.startsWith("---")).length
     return { added, removed, total: lines.length }
   })
-  // 字符超限只决定是否折叠，预览仍保留合法 hunk，展开正文不截断。
-  const diffOverflow = createMemo(() => diffStats().total > 20 || (diff() ?? "").length > DEFAULT_BLOCK_CHAR_THRESHOLD)
-
-  // 收缩与展开共享代码渲染语义；预览只消费 limited 的既有十行预算，不新增解析或折叠状态。
+  // 收缩与展开共享代码渲染语义；预览只消费 previewText 的十行预算，不新增解析或折叠状态。
   function WriteSource(sourceProps: { content: string }) {
     return (
       <line_number fg={theme.textMuted} minWidth={3} paddingRight={1}>
@@ -3628,13 +3631,15 @@ function Write(props: ToolProps) {
     <Switch>
       <Match when={isOverwrite()}>
         <BlockTool
-          // #144：Write diff 折叠预览
           // 短 diff 独立挂载，折叠滚动不污染展开后的完整 diff。
-          preview={diffOverflow() && !expanded() ? <DiffPreview diff={previewDiff(diff() ?? "", 10)} filePath={filepath()} view={diffView()} maxLines={10} /> : undefined}
+          preview={<DiffPreview diff={previewDiff(diff() ?? "", 10)} filePath={filepath()} view={diffView()} maxLines={10} />}
           title={"← Write " + pathFormatter.format(filepath()) + (diffStats().added > 0 || diffStats().removed > 0 ? ` (+${diffStats().added}/-${diffStats().removed})` : "")}
           part={props.part}
-          onClick={diffOverflow() ? () => setExpanded((prev) => !prev) : undefined}
-          footer={diffOverflow() ? "Click to collapse" : undefined}
+          maxLines={10}
+          threshold={20}
+          // diff 统计包含文件头与上下文行，折叠阈值不能用新增/删除行数近似。
+          totalLines={diffStats().total}
+          totalChars={(diff() ?? "").length}
         >
           <DiffView diff={diff()!} filePath={filepath()} view={diffView()} />
         </BlockTool>
@@ -3644,12 +3649,15 @@ function Write(props: ToolProps) {
         <BlockTool
           title={"# Wrote " + pathFormatter.format(filepath())}
           part={props.part}
-          onClick={writeCanCollapse() ? () => setExpanded((prev) => !prev) : undefined}
-          footer={writeCanCollapse() ? "Click to collapse" : undefined}
+          maxLines={10}
+          threshold={20}
+          totalLines={code().split("\n").length}
+          totalChars={code().length}
           // preview/body 分别创建组件实例，沿用 BlockTool 的驻留与正文重建所有权。
-          preview={writeCanCollapse() && !expanded() ? <WriteSource content={limited()} /> : undefined}
+          preview={<WriteSource content={previewText(code(), 10)} />}
         >
-          <WriteSource content={limited()} />
+          {/* 正文始终使用完整源码，previewText 只进入折叠预览，避免展开后仍被截断。 */}
+          <WriteSource content={code()} />
         </BlockTool>
       </Match>
       <Match when={true}>
@@ -4004,9 +4012,6 @@ function Edit(props: ToolProps) {
       </>
     )
   })
-  // diff 内容展开/收缩：超过 20 行时默认收缩，避免长 diff 占满终端
-  const [expanded, setExpanded] = useInteraction(() => `expanded:${props.part.id}`)
-
   const view = createMemo(() => {
     const diffStyle = ctx.tui.diff_style
     if (diffStyle === "stacked") return "unified"
@@ -4024,22 +4029,20 @@ function Edit(props: ToolProps) {
     // 收缩阈值仍按完整展示行数判断，不能用变更行数忽略上下文和文件头。
     return { ...changes, total: diffContent().split("\n").length }
   })
-  // 20 行是展开阈值，10 行仅是长 diff 的预览高度；短 diff 不应被裁掉。
-  // 与 Write 共享字符门槛，少量超长行也能进入现有 DiffPreview。
-  const overflow = createMemo(() => stats().total > 20 || diffContent().length > DEFAULT_BLOCK_CHAR_THRESHOLD)
-
   return (
     <Switch>
       <Match when={stringValue(props.metadata.diff) !== undefined}>
         <BlockTool
-          // #144：Edit diff 折叠预览
           // 与 Write 共用短 diff 的合法 hunk 重写，展开时仍显示完整内容。
-          preview={overflow() && !expanded() ? <DiffPreview diff={previewDiff(diffContent(), 10)} filePath={stringValue(props.input.filePath)} view={view()} maxLines={10} /> : undefined}
+          preview={<DiffPreview diff={previewDiff(diffContent(), 10)} filePath={stringValue(props.input.filePath)} view={view()} maxLines={10} />}
           // 保留路径格式化与 unknown 解码，只给真实变更附加统计后缀。
           title={"← Edit " + pathFormatter.format(stringValue(props.input.filePath)) + (stats().added > 0 || stats().removed > 0 ? ` +${stats().added} -${stats().removed}` : "")}
           part={props.part}
-          onClick={overflow() ? () => setExpanded((prev) => !prev) : undefined}  // 展开只改变本地预览状态，不重新执行编辑工具。
-          footer={overflow() ? "Click to collapse" : undefined}
+          maxLines={10}
+          threshold={20}
+          // Edit 与 Write 共用同一尺寸申报合同，容器无需理解 diff 的内部结构。
+          totalLines={stats().total}
+          totalChars={diffContent().length}
         >
           <DiffView diff={diffContent()} filePath={stringValue(props.input.filePath)} view={view()} />
         </BlockTool>
@@ -4130,23 +4133,21 @@ function ApplyPatch(props: ToolProps) {
           </Show>
           <For each={files()}>
           {(file) => {
-            // patch 内容展开/收缩：多文件 patch 超过 20 行时收缩，避免长 patch 占满终端
-            // 同Part的各文件使用独立key，原文件级展开owner及删除diff展示保持不变。
-            const [patchExpanded, setPatchExpanded] = useInteraction(() => `expanded:${props.part.id}:${file.filePath}`)
-            const patchLines = createMemo(() => (file.patch || "").split("\n"))
-            // 每文件沿用独立展开状态，字符门槛不改变 add/delete/move 语义。
-            const patchOverflow = createMemo(() => patchLines().length > 20 || (file.patch ?? "").length > DEFAULT_BLOCK_CHAR_THRESHOLD)
-
             return (
             <BlockTool
-              // 文件各自拥有展开状态；有patch的删除项也预览diff，legacy仍走删除摘要。
-          // #214：autoReview=false——审查状态行由外层 box 统一渲染，避免每个文件块重复
-          autoReview={false}
-              preview={!!file.patch && patchOverflow() && !patchExpanded() ? <DiffPreview diff={previewDiff(file.patch || "", 10)} filePath={file.filePath} view={view()} maxLines={10} /> : undefined}
+              // 同一 Part 的逐文件卡片必须使用独立键，避免一张卡片展开串到其它文件。
+              stateKey={`expanded:${props.part.id}:${file.filePath}`}
+              // #214：autoReview=false——审查状态行由外层 box 统一渲染，避免每个文件块重复
+              autoReview={false}
+              // 无 patch 的删除摘要仍由正文 fallback 呈现；有 patch 才申报 DiffPreview。
+              preview={file.patch ? <DiffPreview diff={previewDiff(file.patch, 10)} filePath={file.filePath} view={view()} maxLines={10} /> : undefined}
               title={title(file)}
               part={props.part}
-              onClick={!!file.patch && patchOverflow() ? () => setPatchExpanded((prev) => !prev) : undefined}
-              footer={file.patch && patchOverflow() ? "Click to collapse" : undefined}
+              maxLines={10}
+              threshold={20}
+              // 空 patch 只产生一行空内容且字符数为零，删除摘要卡不会误出现折叠入口。
+              totalLines={(file.patch ?? "").split("\n").length}
+              totalChars={(file.patch ?? "").length}
             >
               <Show
                 // 正文与折叠预览按相同patch就绪条件分流，避免删除diff只能看到预览。
