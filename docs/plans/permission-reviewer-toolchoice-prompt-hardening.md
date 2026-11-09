@@ -47,7 +47,7 @@
 | `packages/opencode/AGENTS.md` | 模块形态（无 namespace export）、Effect v4 规则 |
 | `packages/opencode/test/AGENTS.md` | `testEffect`/`it.instance`/`llm.wait` 同步原语；禁止 sleep 竞态 |
 | `.opencode/policy/first-principles-engineering.md` | 单一 primary path、fallback 禁令（用户显式授权的兼容分支除外，见 §10） |
-| `docs/reviewer-retry-fix-plan.md`（历史） | 3-attempt 重试架构的来源；仅作背景，不是本次授权 |
+| `docs/plans/reviewer-retry-fix-plan.md`（历史） | 3-attempt 重试架构的来源；仅作背景，不是本次授权 |
 | `docs/plans/permission-reviewer-tool-terminal-closure.md`（历史） | Tool Part 终态闭合 invariant（INV-01 关联），不得破坏 |
 
 ## 4. Files and Evidence Read

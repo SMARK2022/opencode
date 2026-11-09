@@ -825,7 +825,7 @@ ReasoningRun 对这个规则应表现为一个非 tool item：
 | `packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx` | 真实 TUI 行为、流式、宽度、点击和间距回归测试 |
 | `packages/opencode/test/cli/cmd/tui/session-layout.test.ts` | 证明 reasoning shell 的实际正文宽度等于 `ctx.width` |
 | `packages/opencode/test/cli/cmd/tui/session-integration.test.ts` | 删除或收窄已经被行为测试替代的脆弱源码字符串断言 |
-| `docs/Proposal/tui-reasoning-run-rendering-proposal.md` | 唯一设计和实施说明，随最终实现保持一致 |
+| `docs/plans/tui-reasoning-run-rendering-plan.md` | 唯一设计和实施说明，随最终实现保持一致 |
 
 目标只修改 1 个源码文件、3 个测试文件和本 proposal。总代码与测试净改动必须小于 1000 行，预计为 550 至 800 行。若实现需要新增文件、超过这个行数，或者扩展到 6 个以上源码/测试文件，必须停止并重新审计，而不是继续堆叠抽象。
 

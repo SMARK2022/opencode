@@ -8,7 +8,7 @@
 >
 > Audit mode: implementation
 >
-> Requirement source: user requests and clarifications quoted in section 1; `docs/workflow.md`
+> Requirement source: user requests and clarifications quoted in section 1; `docs/guides/workflow.md`
 >
 > Implementation allowed: no further material changes without revision or rework
 >
@@ -46,7 +46,7 @@ The file and line ceilings remain in force simultaneously.
 > 譬如 属于哪个 Session、哪条 Message 工具名称、完成状态、开始结束时间  这种我觉得就 本质上该热表啊
 
 The target end state is `verified-implementation`, with independent plan and
-implementation audits under `docs/workflow.md`. No commit or push is requested.
+implementation audits under `docs/guides/workflow.md`. No commit or push is requested.
 
 Latest instructions supersede the earlier numerical capacity gate:
 
@@ -79,7 +79,7 @@ The time preference governs scope and test efficiency, not weakening final gates
 | --- | --- |
 | `CONTEXT.md` | Production implementation is `packages/opencode`; `parent_id` identifies subagents, while fork creates a root Session. |
 | Root and package `AGENTS.md` | Shared worktree safety, package-local tests/typecheck, generated migrations if eventually justified. |
-| `docs/workflow.md` and engineering policy | One canonical plan, primary-path repair, exact-revision independent approval, TDD, Chinese comments. |
+| `docs/guides/workflow.md` and engineering policy | One canonical plan, primary-path repair, exact-revision independent approval, TDD, Chinese comments. |
 | `docs/adr/README.md` | Existing ADR index contains no cold-storage decision replacing the current shipped contract. |
 | `docs/plans/cold-eligibility-root-7d-subagent-24h.md` | Existing explicit-maintenance eligibility clocks and completed Compaction boundary. |
 | `docs/plans/opencode-db-cold-storage-pack-v2.md` | Existing same-DB packs, content identities, refcounts, statistics and restore compatibility. |
@@ -456,7 +456,7 @@ not count as physical database acceptance.
 Independent `adversarial-auditor` plan and implementation audits must cover the
 original requirements, complete affected paths, exact revision, code quality and
 Chinese-comment gate. Primary will provide only the prescribed handoff. Audit
-limits and blocker reconsideration follow `docs/workflow.md` and current policy.
+limits and blocker reconsideration follow `docs/guides/workflow.md` and current policy.
 
 ## 22. Plan Audit Record
 

@@ -55,7 +55,7 @@ R2 用户约束修订（最新用户消息，原文）：
 | 根 `AGENTS.md` | 默认分支 `dev`；并行工具；测试从 package 目录运行；`bun typecheck` 从 package 目录运行。 |
 | `packages/opencode/AGENTS.md` | 数据库 schema 位于 `src/**/*.sql.ts`；开发服务用 tmux；Effect 规则；`db generate` 生成迁移（本任务不新增迁移）。 |
 | `.opencode/policy/first-principles-engineering.md` | primary-path 修复第一 divergence；禁止 fallback；ownership 规则；15% 中文注释门禁；审计独立性。 |
-| `docs/plans/opencode-db-cold-storage*.md`、`docs/superpowers/specs/2026-07-17-opencode-db-cold-storage-design.md` | 冷存储设计背景：`partCandidate` 只筛选 `tool + completed/error` 等，最终字段白名单与 eligibility 由 JS extraction 判定；写入 seam 是 `ColdStorage.replacePart`。 |
+| `docs/plans/opencode-db-cold-storage*.md`、`docs/proposal/2026-07-17-opencode-db-cold-storage-design.md` | 冷存储设计背景：`partCandidate` 只筛选 `tool + completed/error` 等，最终字段白名单与 eligibility 由 JS extraction 判定；写入 seam 是 `ColdStorage.replacePart`。 |
 | 根 `package.json`（catalog `ai: 6.0.168`）、`bun.lock` | AI SDK 6.0.168 的 `parseToolCall` 契约（见 §6）。 |
 
 ## 4. Files and Evidence Read

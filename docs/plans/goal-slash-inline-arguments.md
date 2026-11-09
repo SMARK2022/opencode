@@ -48,7 +48,7 @@ not implementation authority.
 | `CONTEXT.md` Goal 词条 | Goal 是 Session 内结构化 objective（自有 SQL 表），不是普通 chat 文本。 |
 | `packages/opencode/AGENTS.md` | 测试/typecheck 在 package 目录；HTTP/TUI 模式约束。 |
 | `docs/plans/session-goal-transition-integrity.md` | 已锁定：用户 mutation 走 HTTP/`SessionGoal.set`；模型走 `GoalTool`；TUI 只传播用户控制。 |
-| `docs/goal-error-continuation-control-plan.md` | `/goal` 当前是 dialog 管理入口；continueOnError 用户可控。 |
+| `docs/plans/goal-error-continuation-control-plan.md` | `/goal` 当前是 dialog 管理入口；continueOnError 用户可控。 |
 | OpenCode 双层 command 设计（见 §5） | Local UI slash 与 server template slash 语义不同；Goal 属于 local session control。 |
 
 ## 4. Files and Evidence Read

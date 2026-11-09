@@ -286,7 +286,7 @@ rationale: string
 
 ## Codex Windows sandbox 基线
 
-`docs/codex-sandbox-windows-design.md` 里的 Codex Windows sandbox 可以概括为三层：
+`docs/archive/codex-sandbox-windows-design.md` 里的 Codex Windows sandbox 可以概括为三层：
 
 ```text
 +--------------------------------------------------------------------------------+

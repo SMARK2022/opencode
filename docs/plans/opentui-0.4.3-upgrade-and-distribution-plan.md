@@ -249,7 +249,7 @@ v2 error行为测试新增独立fixture：通过`internalTuiPlugins({experimenta
 | `.opencode/templates/canonical-plan.md` | 本文必须完整覆盖 24 个 canonical sections。 |
 | `.gitmodules`、`README.md`、`docs/readme/README.en.md`、`docs/readme/README.zht.md` | 现有`thirdparty/chatgpt-browser-agent`提供`SMARK2022` public fork、`smark/main` branch、gitlink和clone说明的仓库先例。 |
 | `docs/proposal/upstream-v1.17.18-merge-governance.md:691-744` | 已确立“一份 OpenTUI runtime/context/native graph”和 release-binary closure gate 的项目方向。 |
-| `docs/proposal/tui-malformed-sgr-mouse-fix.md` | 现有 TUI 问题报告的证据表达约定；同时证明 `0.4.3` 不是所有 TUI parser/render 缺陷的通用修复。 |
+| `docs/plans/tui-malformed-sgr-mouse-fix.md` | 现有 TUI 问题报告的证据表达约定；同时证明 `0.4.3` 不是所有 TUI parser/render 缺陷的通用修复。 |
 
 ## 4. Files and Evidence Read
 
@@ -777,7 +777,7 @@ Linux固定为两条、没有二选一的权威路径：
 | `.github/workflows/build-opencode.yml` | modify | 新增硬门槛 `smoke-linux-arm64` (`ubuntu-24.04-arm`) 并加入 checksums `needs` | 25-40 |
 | `.opencode/plugins/tui-smoke.tsx` | preserve/test | 作为外部式 consumer执行，不做无证据源码改动 | 0 |
 | 9个 `solid-js` catalog consumer manifests/source | preserve/test | 版本由root catalog统一；无真实API错误前不做源码兼容修改 | 0 |
-| `docs/Proposal/opentui-0.4.3-upgrade-and-distribution-proposal.md` | current plan | canonical specification与审计记录 | documentation only |
+| `docs/plans/opentui-0.4.3-upgrade-and-distribution-plan.md` | current plan | canonical specification与审计记录 | documentation only |
 
 若release package metadata、attestation、gitlink或Bun install不能保持同commit/version closure，实施必须停止并修正OpenTUI package producer；不得在OpenCode runtime增加loader或submodule fallback。
 
@@ -1186,7 +1186,7 @@ No blocking findings.
 
 **APPROVE — exact canonical plan revision R7 only.**
 
-该结论仅适用于：`docs/Proposal/opentui-0.4.3-upgrade-and-distribution-proposal.md`, `Revision: R7`, `Audit mode: plan`。本结论不授权实施本身；记录方应仅行政性回填R7 approved metadata，任何后续 substantive plan/source/workflow/package-release change都需要重新完整范围审计。
+该结论仅适用于：`docs/plans/opentui-0.4.3-upgrade-and-distribution-plan.md`, `Revision: R7`, `Audit mode: plan`。本结论不授权实施本身；记录方应仅行政性回填R7 approved metadata，任何后续 substantive plan/source/workflow/package-release change都需要重新完整范围审计。
 ```
 
 ### R4 Independent Verdict (verbatim)
@@ -1221,7 +1221,7 @@ No blocking findings.
 ## Non-blocking findings
 
 1. **R5 的历史审计记录仍包含未回填/阶段性元数据。**
-   `docs/Proposal/opentui-0.4.3-upgrade-and-distribution-proposal.md:844-850` 仍将 R5 标记为 `pending`，且 `:932-945` 的正文释放结论仍是 `PENDING`。这不会阻止当前计划审计，但在记录独立审计结论后，必须只进行行政性回填，将 R5 状态更新为 `approved`、`Approved revision: R5`、`Implementation allowed: yes`；不得同时修改设计内容。
+   `docs/plans/opentui-0.4.3-upgrade-and-distribution-plan.md:844-850` 仍将 R5 标记为 `pending`，且 `:932-945` 的正文释放结论仍是 `PENDING`。这不会阻止当前计划审计，但在记录独立审计结论后，必须只进行行政性回填，将 R5 状态更新为 `approved`、`Approved revision: R5`、`Implementation allowed: yes`；不得同时修改设计内容。
 
 2. **`script/upgrade-opentui.ts` 对未来版本和非法版本的行为仍未完全具体化。**
    计划已经明确本次 `0.4.3-smark.1` 的 11 个 release URL、`thirdparty` 排除规则及 peer floor，但没有完全规定官方版本、后续 `smark.N` 版本、缺失 release 和非法输入的拒绝行为。相关计划位置：`:440`、`:593-594`、`:865`。实施时不能静默写入不存在的 URL 或产生无法安装的 lockfile。
@@ -1320,7 +1320,7 @@ if E > 0: C >= max(1, ceil(E * 0.15))
 本结论仅适用于：
 
 ```text
-docs/Proposal/opentui-0.4.3-upgrade-and-distribution-proposal.md
+docs/plans/opentui-0.4.3-upgrade-and-distribution-plan.md
 Revision: R5
 Audit mode: plan
 ```
@@ -1396,7 +1396,7 @@ if E > 0: C >= max(1, ceil(E * 0.15))
 
 本结论仅适用于当前文件的R7；R7只完成canonical state reconciliation，不替代后续implementation audit：
 
-docs/Proposal/opentui-0.4.3-upgrade-and-distribution-proposal.md
+docs/plans/opentui-0.4.3-upgrade-and-distribution-plan.md
 Revision: R7
 
 实施前仍必须由记录方将R7独立审计结果写入第 22 节，并把状态转换为：

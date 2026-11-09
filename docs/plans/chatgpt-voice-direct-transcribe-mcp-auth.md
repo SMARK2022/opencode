@@ -49,7 +49,7 @@
 
 > 你应该更新的不只是整轮120秒到点触发 abort，而是整套的完整的取消机制。请注意，取消机制需要保持完整，准确，同时包含具体实施的相关的核心代码等等内容。且整体内容不得使用模糊化表达。
 
-用户已指定每轮重新审计使用全新 agent 上下文；blocker 复议才复用该轮 task_id。GOAL 的阶段及提交规则沿用 `docs/workflow.md` 和本次 GOAL 原文。
+用户已指定每轮重新审计使用全新 agent 上下文；blocker 复议才复用该轮 task_id。GOAL 的阶段及提交规则沿用 `docs/guides/workflow.md` 和本次 GOAL 原文。
 
 ## 2. 最终范围
 

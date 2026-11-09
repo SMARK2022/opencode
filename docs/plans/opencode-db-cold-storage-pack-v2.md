@@ -8,7 +8,7 @@
 >
 > Audit mode: implementation
 >
-> Requirement source: current Session GOAL, the user's post-R9 physical-size requirements, and confirmed product decisions referenced from `docs/plans/opencode-db-cold-storage.md` and `docs/superpowers/specs/2026-07-17-opencode-db-cold-storage-design.md`
+> Requirement source: current Session GOAL, the user's post-R9 physical-size requirements, and confirmed product decisions referenced from `docs/plans/opencode-db-cold-storage.md` and `docs/proposal/2026-07-17-opencode-db-cold-storage-design.md`
 >
 > Implementation allowed: yes
 >
@@ -63,7 +63,7 @@ The hard physical gate is `1,500,000,000` bytes, which is stricter than interpre
 | test/server `AGENTS.md` | public Session list behavior uses real service/HTTP seams |
 | `.opencode/policy/first-principles-engineering.md` | one primary path, no fallback, full traceability, independent audit, 15% Chinese-comment gate |
 | `docs/plans/opencode-db-cold-storage.md` | deployed R9 v1 schema, codec, refcount, daemon maintenance, persistent thaw, fork and integrity baseline |
-| `docs/superpowers/specs/2026-07-17-opencode-db-cold-storage-design.md` | same-DB topology, frontend transparency, daemon/offline shared implementation, explicit expand/vacuum decisions |
+| `docs/proposal/2026-07-17-opencode-db-cold-storage-design.md` | same-DB topology, frontend transparency, daemon/offline shared implementation, explicit expand/vacuum decisions |
 
 No accepted cold-storage ADR exists. The two older documents are evidence and compatibility constraints only.
 

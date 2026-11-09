@@ -5,7 +5,7 @@
 - 状态：第四轮候选设计，等待完整独立审计；未获放行，不允许据此实施。
 - 文档职责：本文件是本次 Session 取消时序问题唯一的方案文档。
 - 实施上限：最多修改 6 个源码文件和 6 个既有测试文件，不新增文件，不改公开 API，不生成 SDK，总改动必须低于 1000 行，目标为 250 至 450 行源码与测试净改动。
-- 非本设计文档：`notice`、elapsed notice、取证报告、`docs/Proposal/` 和 `docs/prompts.md` 不属于本方案，不由本任务修改。
+- 非本设计文档：`notice`、elapsed notice、取证报告、`docs/proposal/` 和 `docs/guides/prompts.md` 不属于本方案，不由本任务修改。
 
 ## 1. 问题与目标
 

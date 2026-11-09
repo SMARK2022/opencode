@@ -65,7 +65,7 @@ R50 达到 continuation 上限后，用户明确授权新的 R51 continuation；
 | `thirdparty/opentui/AGENTS.md` | Bun；必须先有可复现测试；TypeScript-only change 不需要 native build。 |
 | `CONTEXT.md` | 真实 producer 是 Message Part delta；使用既有 Session/Message/Part 术语。 |
 | `.opencode/policy/first-principles-engineering.md` | 修复 first divergence；一个 authoritative path；禁止 fallback；实施和完成均需独立审计。 |
-| `docs/workflow.md` | exact approved revision 前不得实施；red-green 和 implementation audit 是硬门禁。 |
+| `docs/guides/workflow.md` | exact approved revision 前不得实施；red-green 和 implementation audit 是硬门禁。 |
 | `docs/adr/README.md` | 没有约束本任务的 accepted ADR；不新增 ADR。 |
 
 ## 4. Files and Evidence Read

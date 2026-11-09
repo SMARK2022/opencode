@@ -4,7 +4,7 @@
 >
 > 最后更新：2026-07-12
 >
-> 历史记录：本文件保留2026-07-12的设计与实验。当前改造的唯一实施依据为 [单 Bash 工具的原生引用与模型调用成功率](plans/shell-native-script-fidelity-and-model-success.md)，最新验证状态以该 canonical plan 为准。
+> 历史记录：本文件保留2026-07-12的设计与实验。当前改造的唯一实施依据为 [单 Bash 工具的原生引用与模型调用成功率](shell-native-script-fidelity-and-model-success.md)，最新验证状态以该 canonical plan 为准。
 
 ## 1. 目标与硬约束
 
@@ -355,8 +355,8 @@ function shellEvidenceRisk(command: string, metadata: Readonly<Record<string, un
 
 | 文件 | 结果 | 实际 diff（相对 HEAD） |
 |---|---|---:|
-| `docs/powershell-inline-python-normalization-plan.md` | 本规范与审计记录 | +约 515 行 |
-| `docs/harness-improvement-plan.md` | 旧 P2-5 改为引用本规范 | +1/-1 |
+| `docs/plans/powershell-inline-python-normalization-plan.md` | 本规范与审计记录 | +约 515 行 |
+| `docs/archive/harness-improvement-plan.md` | 旧 P2-5 改为引用本规范 | +1/-1 |
 | `packages/opencode/src/tool/shell.ts` | 私有 scanner/formatter、shared evidence、executeCommand | +215/-3 |
 | `packages/opencode/src/permission/precheck.ts` | inline source max-risk helper及两个入口复用 | +25/-3 |
 | `packages/opencode/test/tool/shell.test.ts` | 两代 PowerShell 真实行为与 fallback 测试 | +358 |

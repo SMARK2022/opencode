@@ -27,7 +27,6 @@
         "turbo": "2.10.2",
       },
     },
-    // 批量版本对齐：以下 workspace 版本统一随版本链 patch 升级，lock 必须同步
     "packages/app": {
       "name": "@opencode-ai/app",
       "version": "1.19.9",

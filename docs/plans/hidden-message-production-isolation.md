@@ -46,7 +46,7 @@ not implementation authority.
 | `packages/app/AGENTS.md` | App 不得由实现流程重启；App event reducer 已有正确 tombstone 行为，只作为对照。 |
 | `docs/adr/README.md` | 本任务不新增 ADR：visibility 修复属于既有 Message contract 的 bug repair，不建立新的跨任务架构决策。 |
 | `.opencode/policy/first-principles-engineering.md` | 必须修 first divergence、禁止 fallback、完整 traceability、独立审计和 15% 中文解释注释。 |
-| `docs/workflow.md` | exact revision 获得 full-scope plan approval 前禁止 implementation。 |
+| `docs/guides/workflow.md` | exact revision 获得 full-scope plan approval 前禁止 implementation。 |
 
 ## 4. Files and Evidence Read
 

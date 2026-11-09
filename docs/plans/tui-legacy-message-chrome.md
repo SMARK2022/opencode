@@ -94,11 +94,11 @@ was rejected: “我就是授权你进行所有的这个 BUN 的 install。对�
 | Source | Constraint |
 | --- | --- |
 | `AGENTS.md` | Reuse existing owners, no speculative abstractions, package-local tests/typecheck |
-| `docs/workflow.md` and first-principles policy | Plan approval, TDD, full implementation audit, E/C gate, verified before commit |
+| `docs/guides/workflow.md` and first-principles policy | Plan approval, TDD, full implementation audit, E/C gate, verified before commit |
 | `CONTEXT.md` | Presentation must not change durable history, tool output, or Location ownership |
 | `docs/adr/README.md` | No applicable rendering ADR; no new architectural decision is needed |
 | `packages/tui/package.json`, `tsconfig.json`, `bunfig.toml` | Bun/OpenTUI Solid runtime; `bun typecheck`; tests run in this package |
-| `docs/long-session-performance-fixes.md` and commits `c495ef00e6`, `1194c9ad01` | Preserve shared request usage and bounded history/control paths |
+| `docs/plans/long-session-performance-fixes.md` and commits `c495ef00e6`, `1194c9ad01` | Preserve shared request usage and bounded history/control paths |
 
 ## 4. Files and Evidence Read
 

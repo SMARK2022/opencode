@@ -33,7 +33,7 @@
 
 | 文件 | 已确认内容 | 相关性 |
 | --- | --- | --- |
-| `docs/lsp-complete-enhancement-plan.md` | 旧文档记录了 VSCode Bridge、增量诊断、TUI `diagnosticSummary` 的历史方案；但旧文档中“无任何错误时 TUI 不显示”已不满足本次新需求。 | 确认旧方案边界与需要修正的缺口。 |
+| `docs/plans/lsp-complete-enhancement-plan.md` | 旧文档记录了 VSCode Bridge、增量诊断、TUI `diagnosticSummary` 的历史方案；但旧文档中“无任何错误时 TUI 不显示”已不满足本次新需求。 | 确认旧方案边界与需要修正的缺口。 |
 | `packages/ui/src/components/message-part.tsx` | `Diagnostic` 接口、`getDiagnostics()`、`DiagnosticsDisplay()` 都在文件顶部；edit/write/apply_patch 都从 metadata 读取 `diagnostics` 与 `diagnosticSummary` 后传入 `DiagnosticsDisplay`。 | TUI 渲染的唯一入口。 |
 | `packages/ui/src/components/message-part.css` | `[data-component="diagnostics"]` 当前使用 critical 背景、顶部边框、flex column；单条 message 允许 3 行 clamp。 | 当前丑陋和高度不稳定的直接原因。 |
 | `packages/ui/src/components/basic-tool.tsx` / `basic-tool.css` | `BasicTool` 只处理工具 trigger、整体折叠 open/close 和可选动画；内容高度没有针对 diagnostics 的预算控制。 | 确认不应改全局工具容器。 |
@@ -999,7 +999,7 @@ apply_patch 多文件时，每个 `Accordion.Item` 的 `Accordion.Content` 内�
 | `packages/opencode/test/lsp/lifecycle.test.ts` | 修改 | `checkedMessage` 测试（保留） |
 | `packages/opencode/test/tool/edit.test.ts` | 修改 | unavailable 时不传 summary 断言（保留） |
 | `packages/opencode/test/tool/write.test.ts` | 修改 | unavailable 时不传 summary 断言（保留） |
-| `docs/lsp-diagnostics-ui-read-touch-implementation-plan.md` | 修改 | 本文档（保留） |
+| `docs/plans/lsp-diagnostics-ui-read-touch-implementation-plan.md` | 修改 | 本文档（保留） |
 
 删除的文件：
 

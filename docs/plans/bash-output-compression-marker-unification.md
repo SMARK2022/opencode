@@ -26,7 +26,7 @@
 2. 标记零文档问题需修复："确实你说的这些零标记的一些文档什么 redacted、high entropy，还有什么 same line repeated 等等的 prompt，就是没有任何的一个解释"。
 3. 标记语言风格不一致需统一："它们的设计风格……语言风格好像都不是特别一致"，需给出大小写、标识符、内容的一致方案。
 4. 标记图例应挂在 compress 相关介绍里（compressionGuidance），"保持其高等的这种性价比……避免输入过多冗余的内容，或者说也避免直接默认就诱导它去关闭这个 compress 选项"。
-5. 沿用 `docs/tool-output-notice-format-design.md` 的分层思想，另起新 plan（本文件）；旧设计文档中不合理/弃用内容同步清理。
+5. 沿用 `docs/plans/tool-output-notice-format-plan.md` 的分层思想，另起新 plan（本文件）；旧设计文档中不合理/弃用内容同步清理。
 6. 新建本 canonical plan（用户更正："你应当是创建一个新的 plan，因为当前这个 plan 的它的位置啊等等内容不符合设计标准"）。
 
 **R2 修订（用户在 R1 实施中途提出，为本修订唯一驱动）：**
@@ -61,7 +61,7 @@
 | 根 `AGENTS.md` | 默认分支 dev；并行工具；测试从包目录运行 |
 | `packages/opencode/AGENTS.md` | 模块形态（multi-sibling 无 barrel）；Effect 规则；`bun typecheck` 从包目录 |
 | `packages/opencode/test/AGENTS.md` | 测试 fixture/Effect 模式；`it.live` 用于真实进程 |
-| `docs/tool-output-notice-format-design.md` | 分层格式契约：块级 `<opencode_notice>` / 摘录 `<opencode_excerpt>` / 行内 `[... reason stats]` ASCII 短标记 / 统计进 metadata；内联 marker 规则（ASCII `x`/`->`、`L`/`B/KB`、prefix/suffix 默认不出现、marker 必须短于被替换内容） |
+| `docs/plans/tool-output-notice-format-plan.md` | 分层格式契约：块级 `<opencode_notice>` / 摘录 `<opencode_excerpt>` / 行内 `[... reason stats]` ASCII 短标记 / 统计进 metadata；内联 marker 规则（ASCII `x`/`->`、`L`/`B/KB`、prefix/suffix 默认不出现、marker 必须短于被替换内容） |
 | `docs/plans/shell-user-model-output-panel-isolation.md:38,52` | 边界：不得重设计 `<opencode_notice>` 格式与 output-notice.ts taxonomy；本 plan 遵守（只改 bash-compress 内联层与新增 excerpt 头） |
 | `.opencode/policy/first-principles-engineering.md` | 单一权威路径、禁 fallback、删除 superseded workaround、15% 中文注释门禁 |
 
@@ -215,7 +215,7 @@ text
 
 删除清单（死代码/残留）：`CommandAdapter`/`CommandAdapterContext` 类型、4 个 Adapter 类、`COMMAND_ADAPTERS`、`detectCommandAdapter`/`applyCommandAdapter` 导出、`CompressionConfig.enableCommandAdapters` 字段 + 默认值 + `OPENCODE_BASH_ENABLE_COMMAND_ADAPTERS` env、`bashCompressionMetadata` 不变；`shell.txt:9` `${shellGuidance}` 与 `:15` `${compressionGuidance}` 两行、`prompt.ts:288-289` 对应 `""` 传参。
 
-设计文档同步（`docs/tool-output-notice-format-design.md`）：迁移表标注已完成项（bash-compress 内联层、excerpt、REDACTED 补目），适配器 4 条目改记"已删除（死代码）"，实施顺序段落移除已完成/弃用步骤；并在该文档记录高熵标记采用 `${bytes}B` 原始字节单位（N-03 记录修正：防文档示例 `8KB` 与实现漂移，理由=避免第 5 个生产文件/双实现），以及 R2 定向偏离：脱敏与高熵标记保留 7 字符头部（head=，用户授权，覆盖"prefix/suffix 默认不出现"）。
+设计文档同步（`docs/plans/tool-output-notice-format-plan.md`）：迁移表标注已完成项（bash-compress 内联层、excerpt、REDACTED 补目），适配器 4 条目改记"已删除（死代码）"，实施顺序段落移除已完成/弃用步骤；并在该文档记录高熵标记采用 `${bytes}B` 原始字节单位（N-03 记录修正：防文档示例 `8KB` 与实现漂移，理由=避免第 5 个生产文件/双实现），以及 R2 定向偏离：脱敏与高熵标记保留 7 字符头部（head=，用户授权，覆盖"prefix/suffix 默认不出现"）。
 
 为何修复 first divergence：INV-01/02 的回退点都在 `compressVisibleOutput` 的返回谓词与早返回分支——本设计直接修改该分支归属（早返回并入主管线、谓词补全），不新增任何下游补偿；INV-03/04/05 均为生产点原文与 prompt 的定点替换/删除，无路径分叉。
 
@@ -281,7 +281,7 @@ text
 | `packages/opencode/src/tool/shell/prompt.ts` | modify | 删除 2 个 `""` 传参 | −2 |
 | `packages/opencode/test/tool/bash-compress.test.ts` | modify | 更新 4 处旧方言断言；新增 T1/T2/T2b/T3a-e/T5 用例 | +150 / −6 |
 | `packages/opencode/test/tool/shell.test.ts` | modify | :2321/:2349 excerpt 断言更新；新增 T6 图例用例 | +18 / −2 |
-| `docs/tool-output-notice-format-design.md` | modify | 迁移表完成态标注、REDACTED 补目、适配器条目改删除、实施顺序清理 | +12 / −18 |
+| `docs/plans/tool-output-notice-format-plan.md` | modify | 迁移表完成态标注、REDACTED 补目、适配器条目改删除、实施顺序清理 | +12 / −18 |
 
 生产文件 4 个（恰好预算上限）、生产代码改动约 +121/−284（净 −163，远低于 800 行上限）。
 
@@ -396,7 +396,7 @@ R3 已批准；实施按 R3 执行（含 NB-02 五处 fixture 同步）。
 | `packages/opencode/src/tool/shell/prompt.ts` | 0 / −2 | 死 `""` 传参删除 |
 | `packages/opencode/test/tool/bash-compress.test.ts` | +194 / −7 | 4 处旧方言断言更新 + 15 个新用例（含 B-01 边界钉死） |
 | `packages/opencode/test/tool/shell.test.ts` | +32 / −3 | excerpt 断言更新 + T6 图例两用例 |
-| `docs/tool-output-notice-format-design.md` | +7 / −7 | 迁移状态/适配器删除/REDACTED 补目/head 偏离/B 单位（N-02 修正：实测 numstat） |
+| `docs/plans/tool-output-notice-format-plan.md` | +7 / −7 | 迁移状态/适配器删除/REDACTED 补目/head 偏离/B 单位（N-02 修正：实测 numstat） |
 
 生产文件 4 个（预算上限 4）；生产代码 +91/−391（预算 ≤800，运低于限）。
 

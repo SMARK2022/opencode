@@ -47,7 +47,7 @@ R2 增量原文：
 | --- | --- |
 | `AGENTS.md` / `packages/opencode/AGENTS.md` | package-local test/typecheck；Effect + FileSystem；中文注释预算 |
 | `.opencode/policy/first-principles-engineering.md` | 单主路径、无 fallback、证据边界、根因修复 |
-| `docs/read-stub-mechanism-forensic-report.md` | A4/E1 弱版本键；Fix 2 head fingerprint |
+| `docs/archive/read-stub-mechanism-forensic-report.md` | A4/E1 弱版本键；Fix 2 head fingerprint |
 | Style Guide | 内联优先；少抽 helper；不 preemptive 抽象 |
 | R2 user constraint | schema 克制、无大规模迁移、字段不冗余 |
 
@@ -64,7 +64,7 @@ R2 增量原文：
 | `packages/opencode/test/tool/read.test.ts` | 有 mtime/size 变更测试；无等长+utimes 碰撞测试 | observed |
 | `packages/core/src/util/hash.ts` | `Hash.fast(string \| Buffer)` → sha1 hex | observed |
 | `packages/core/src/util/encode.ts` | `checksum` 吃 string 且空内容 `undefined`；不适合空文件 | observed |
-| `docs/read-stub-mechanism-forensic-report.md` | A4 机制可达；生产库难直接观测 | observed |
+| `docs/archive/read-stub-mechanism-forensic-report.md` | A4 机制可达；生产库难直接观测 | observed |
 | SDK `types.gen.ts` grep | 无 `ReadMetadata` 公开 schema 依赖 | observed |
 
 ## 5. Current Behavior

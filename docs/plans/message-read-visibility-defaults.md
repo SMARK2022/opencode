@@ -8,7 +8,7 @@
 >
 > Audit mode: full-scope
 >
-> Requirement source: verbatim user requests in section 1; docs/workflow.md
+> Requirement source: verbatim user requests in section 1; docs/guides/workflow.md
 >
 > Implementation allowed: no further material changes without revision or rework
 >
@@ -34,7 +34,7 @@ Test/scope constraints carried forward verbatim:
 >
 > 请注意不要去跑全量测试，因为全量测试可能需要几十分钟，很慢。所以你可以只跑几个关键的测试即可。
 
-Follow the user's Session GOAL workflow and `docs/workflow.md`: independently approve the exact plan, implement through TDD, full-scope independent implementation audit, then verified. No commit or push.
+Follow the user's Session GOAL workflow and `docs/guides/workflow.md`: independently approve the exact plan, implement through TDD, full-scope independent implementation audit, then verified. No commit or push.
 
 ## 2. Explicit Non-Goals
 
@@ -55,7 +55,7 @@ Follow the user's Session GOAL workflow and `docs/workflow.md`: independently ap
 | CONTEXT.md | Message has multiple Parts; v1 is current production; Snapshot is file-state, Compaction is context |
 | docs/adr/README.md | Only triage ADR present; no hidden-read exception ADR |
 | first-principles-engineering policy and canonical template | One owning primary path, no fallback, exact-revision audit, E/C gate |
-| docs/workflow.md | Verified implementation terminal state; audit evidence and scope review |
+| docs/guides/workflow.md | Verified implementation terminal state; audit evidence and scope review |
 
 ## 4. Files and Evidence Read
 

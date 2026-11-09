@@ -49,12 +49,12 @@ Interpreted without narrowing:
 | Source | Why it constrains this task |
 | --- | --- |
 | `CONTEXT.md` | Tool returns ExecuteResult with model-facing output; Message/Part persist tool state; vocabulary: Tool, Session, Message |
-| `docs/tool-output-notice-format-design.md` | Contract: `opencode_notice` is model-visible harness; detailed stats stay in metadata; raw output stays plain text |
+| `docs/plans/tool-output-notice-format-plan.md` | Contract: `opencode_notice` is model-visible harness; detailed stats stay in metadata; raw output stays plain text |
 | `docs/plans/tui-bash-command-output-spacing.md` | Documents dual read of `metadata.output` (user) vs `props.output` (model / “returned to model”) in TUI Shell |
 | `packages/opencode/AGENTS.md` | Tests/typecheck run from package dirs; module shape; Effect rules |
 | `packages/opencode/test/AGENTS.md` | Effect/live test patterns; public seam assertions |
 | `.opencode/policy/first-principles-engineering.md` | Root-cause repair, one primary path, no fallback cascade, Chinese comment gate |
-| `docs/workflow.md` | GOAL phases: plan → plan audit → TDD implement → implementation audit → commit |
+| `docs/guides/workflow.md` | GOAL phases: plan → plan audit → TDD implement → implementation audit → commit |
 
 ## 4. Files and Evidence Read
 
@@ -70,7 +70,7 @@ Interpreted without narrowing:
 | `packages/opencode/src/tool/tool.ts` | Outer truncate skipped when shell sets `metadata.truncated` | observed |
 | `packages/opencode/test/tool/shell.test.ts` | Locks model `result.output` notices/`(no output)`; does not lock user-panel isolation | observed |
 | `packages/opencode/test/session/prompt.test.ts` shell suite | Locks stdout/stderr capture and abort notice on `state.output`; asserts metadata contains stdout but not isolation | observed |
-| `docs/tool-output-notice-format-design.md` | Model-visible notice contract | contracted |
+| `docs/plans/tool-output-notice-format-plan.md` | Model-visible notice contract | contracted |
 | Live ShellTool repro 2026-07-23 empty success + timeout empty | RED: agent path user panel polluted | observed |
 | Source reconstruction of `prompt.shell` finish dual-write | Same UI contract broken on user-run bash | observed |
 

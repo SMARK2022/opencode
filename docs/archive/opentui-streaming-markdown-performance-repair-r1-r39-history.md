@@ -100,7 +100,7 @@ This is a later, explicit user scope decision, not a builder inference. The orig
 | `CONTEXT.md:1-181` | 使用 Session、Message、Part 等项目术语；producer是 Message Part delta。 |
 | `.opencode/policy/first-principles-engineering.md:41-69,172-231,236-322` | 修复 first divergence；一个 primary path；禁止 fallback；完成正反向 traceability。 |
 | `.opencode/templates/canonical-plan.md:1-264` | 计划必须覆盖 evidence、domain、owner、TDD、verification、diff、风险和审计记录。 |
-| `docs/workflow.md:1-105` | exact approved revision前不得实施；R5通过后进入 implementation-audit-required流程。 |
+| `docs/guides/workflow.md:1-105` | exact approved revision前不得实施；R5通过后进入 implementation-audit-required流程。 |
 | `docs/adr/README.md:1-50` | 没有约束本任务的 accepted OpenTUI ADR；不新增 ADR。 |
 | `README.md:239-243` | submodule只承载源码发现/provenance；OpenCode正常安装使用 immutable Release；修改 fork后需独立发布完整 package family。 |
 | `thirdparty/opentui/.github/workflows/release.yml:21-137` | release tag必须指向已推送 source commit；workflow构建、验证并发布完整 package family。 |

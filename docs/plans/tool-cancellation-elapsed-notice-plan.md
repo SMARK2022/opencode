@@ -46,8 +46,8 @@
 | `test/session/prompt.test.ts` | direct shell cancel、TERM-resistant shell、Bash cancel truncation、真实 SessionPrompt/Adapter |
 | `test/session/processor-effect.test.ts` | Processor interrupted metadata、cleanup、experimental event |
 | `test/session/message-v2.test.ts` | aborted partial output、error-text、provider message shape |
-| `docs/tool-output-notice-format-design.md` | Notice 应短、稳定、只陈述模型可用事实 |
-| `docs/abort-latency-fix-plan.md` | AI Bash 500ms escalation 与 direct shell 3 秒 policy 不同 |
+| `docs/plans/tool-output-notice-format-plan.md` | Notice 应短、稳定、只陈述模型可用事实 |
+| `docs/plans/abort-latency-fix-plan.md` | AI Bash 500ms escalation 与 direct shell 3 秒 policy 不同 |
 
 ### 1.3 当前精确行为和数据库证据
 

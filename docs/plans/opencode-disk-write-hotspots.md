@@ -167,7 +167,7 @@ implementation audit 或 commit gate。
 | `packages/opencode/test/AGENTS.md:83-204` | 使用真实实现，优先 Effect fixture；并发测试依赖 published readiness signal，只有真正的 throttle/debounce 测试可使用时间推进 |
 | `.opencode/policy/first-principles-engineering.md` | 必须修复 first divergence，禁止 fallback；所有生产概念需双向映射；实施后执行 15% 中文解释性注释门禁 |
 | `docs/adr/README.md` | 当前没有与 Session progress、SQLite 写入或 daemon 恢复相关的 accepted ADR；若 grilling 形成 load-bearing 决策，再判断是否需要单独 ADR |
-| `docs/workflow.md` | 本 GOAL 必须先完成并独立审计 canonical plan，批准 exact revision 后才能实施 |
+| `docs/guides/workflow.md` | 本 GOAL 必须先完成并独立审计 canonical plan，批准 exact revision 后才能实施 |
 
 ## 4. Files and Evidence Read
 

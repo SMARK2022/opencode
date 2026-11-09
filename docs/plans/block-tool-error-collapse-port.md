@@ -62,7 +62,7 @@ not implementation authority.
 
 | Source | Why it constrains this task |
 | --- | --- |
-| `docs/workflow.md` | 本次终态 `verified-implementation-and-commit`：方案批准、实施与验证、独立实现审计均通过后，仅提交本 GOAL 文件。 |
+| `docs/guides/workflow.md` | 本次终态 `verified-implementation-and-commit`：方案批准、实施与验证、独立实现审计均通过后，仅提交本 GOAL 文件。 |
 | `.opencode/policy/first-principles-engineering.md` | 证据分类、单一 primary path、reverse traceability、禁止 fallback。 |
 | 根 `AGENTS.md` | 测试/typecheck 从包目录运行；风格约束。 |
 | 旧主线分支 `dev-smark`（HEAD 26061b595b31） | **全量移植来源**：`BlockTool` 容器自有折叠机制的完整实现与各卡片申报形态。 |

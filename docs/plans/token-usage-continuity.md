@@ -58,7 +58,7 @@ R7 审计后用户改为逐生产 HUNK 审查，并授权真实数据库抽样�
 
 比较对象是实际存在的 `dev-smark` 和 `dev1-smark`，不是 `dev`。当前工作分支为 `dev1-smark`。
 
-最新来源：本会话 `<session-goal-continuation>` 的用户 GOAL；其阶段合同与 `docs/workflow.md` 对应，选择的目标终态原文为：
+最新来源：本会话 `<session-goal-continuation>` 的用户 GOAL；其阶段合同与 `docs/guides/workflow.md` 对应，选择的目标终态原文为：
 
 > - **目标终态**：<verified-implementation-and-commit>
 >
@@ -97,7 +97,7 @@ R7 审计后用户改为逐生产 HUNK 审查，并授权真实数据库抽样�
 
 | Source | Why it constrains this task |
 | --- | --- |
-| `docs/workflow.md` 与第 1 节最新 GOAL | exact revision 方案批准后实施，验证及实现审计通过后只提交本任务；记录性更正不重复审计，不继承历史批准。 |
+| `docs/guides/workflow.md` 与第 1 节最新 GOAL | exact revision 方案批准后实施，验证及实现审计通过后只提交本任务；记录性更正不重复审计，不继承历史批准。 |
 | `.opencode/policy/first-principles-engineering.md`、`.opencode/templates/canonical-plan.md` | 修复事实源与责任 owner；禁止失败后备用算法；要求双向映射和中文注释预算。 |
 | `AGENTS.md`、`packages/opencode/AGENTS.md`、`packages/schema/AGENTS.md`、`packages/llm/AGENTS.md`、`packages/opencode/src/session/llm/AGENTS.md` | Schema/Core/Protocol/Server 单向依赖；V1 与 native orchestration 不互调；package-local tests/typecheck；修改公共合同后重新生成两个客户端。 |
 | `CONTEXT.md:48-52,165-176,411` | Provider Turn 已有明确业务边界，不能把 drain 当作消费身份；V1 与 Core native 是不同执行链，不能因为共享数据库便扩大本任务。 |

@@ -122,7 +122,7 @@ R9 的直接授权和审阅方式来自用户后续原话：
 | `CONTEXT.md:39-52,99-104,127,135` | Provider Turn 与 Session Drain 分开；工具收尾后才进入安全边界；失败不能伪造可复用的原生续接状态 |
 | `.opencode/policy/first-principles-engineering.md` | 根因修复、单一主路径、正反向追溯、独立完整审查、中文解释注释门禁 |
 | `.opencode/templates/canonical-plan.md` | 本文件采用其完整 24 节结构 |
-| `docs/workflow.md:27-71` | 文档阶段、独立审查、实质修订后完整重审；行政编号不触发审查 |
+| `docs/guides/workflow.md:27-71` | 文档阶段、独立审查、实质修订后完整重审；行政编号不触发审查 |
 | `docs/adr/` | 当前 ADR 不规定重试；不为该修复新增 ADR |
 | `docs/plans/grok-finish-other-retryable-repair.md` | 历史修复保留了无工具失败前缀删除；其旧范围和审批不等于本次审批 |
 

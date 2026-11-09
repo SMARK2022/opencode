@@ -53,7 +53,7 @@
 | `packages/opencode/test/server/AGENTS.md` | 真实 Effect HTTP seam、listener 生命周期和配置隔离 |
 | `packages/opencode/src/server/routes/instance/httpapi/AGENTS.md` | 服务在 layer 边界构建，不能在 handler 重新 provide 整图 |
 | `.opencode/policy/first-principles-engineering.md` | first divergence、零新 fallback、双向映射、15% 中文解释注释 |
-| `.opencode/templates/canonical-plan.md`、`docs/workflow.md` | 本文 24 节和阶段终态 |
+| `.opencode/templates/canonical-plan.md`、`docs/guides/workflow.md` | 本文 24 节和阶段终态 |
 | `CONTEXT.md` | Session/Message/Part、Run state、InstanceState、AppRuntime、Snapshot 的既有含义 |
 | `docs/adr/README.md`、ADR 索引 | 仅有 triage-label ADR，无内存生命周期 ADR；不虚构已接受的 eviction 策略 |
 | `packages/opencode/bunfig.toml`、`test/preload.ts` | Solid preload、隔离 XDG、内存 SQLite、测试自己的 GC/清理，不接真实 daemon |

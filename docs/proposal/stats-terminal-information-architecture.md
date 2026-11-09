@@ -66,9 +66,9 @@
 | `README.md` 与 `docs/readme/README.*.md` | 旧 `stats --models` 入口的公开描述 |
 | `CONTEXT.md` | SMARK fork 中 token breakdown 的 load-bearing 定位 |
 | `docs/adr/README.md` | 本方案属于单模块 proposal，不需要新增 ADR |
-| `docs/proposal/tui-reasoning-run-rendering-proposal.md` | proposal 的证据、边界、测试和风险组织方式 |
+| `docs/plans/tui-reasoning-run-rendering-plan.md` | proposal 的证据、边界、测试和风险组织方式 |
 | `docs/proposal/database-cold-storage-compression.md` | 大型方案的分阶段和兼容性记录方式 |
-| `docs/proposal/rg-filesystem-permission-handling.md` | 行为不变量和验证矩阵写法 |
+| `docs/plans/rg-filesystem-permission-handling.md` | 行为不变量和验证矩阵写法 |
 
 ### 2.3 搜索确认的调用点和旧逻辑
 

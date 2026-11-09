@@ -114,7 +114,7 @@
 
 根与 package `AGENTS.md` 要求最小正确修改、Effect 现有 service/layer、package 内测试和 `bun typecheck`；`CONTEXT.md` 确定 Tool/Permission/Session 边界。ADR 索引未规定另一套 shell 合同。
 
-遵循 `.opencode/policy/first-principles-engineering.md`。保留已验证的 `docs/plans/shell-bare-dash-permission-parse-repair.md` R2 的分析/执行隔离和精确分类；`docs/powershell-inline-python-normalization-plan.md` 是旧适配的历史记录。第三方 Pi、上游 OpenCode 仅作参考，不移植额外工具。
+遵循 `.opencode/policy/first-principles-engineering.md`。保留已验证的 `docs/plans/shell-bare-dash-permission-parse-repair.md` R2 的分析/执行隔离和精确分类；`docs/plans/powershell-inline-python-normalization-plan.md` 是旧适配的历史记录。第三方 Pi、上游 OpenCode 仅作参考，不移植额外工具。
 
 ## 4. Files and Evidence Read
 
@@ -359,7 +359,7 @@ PowerShell 保留编码、输出流和 scriptblock，删除 block 外 LASTEXITCO
 | `test/fixture/shell-intent.ts` | 保留固定任务及独立语义预期，模型可见任务文字冻结 |
 | `test/eval-shell-intent.ts` | 显式授权模型评测；原始记录、当前批次与累计预算保持可追溯；以独立同输入基线证据区分新增/继承字符失真 |
 
-实施时在旧 `docs/powershell-inline-python-normalization-plan.md` 增加本计划指针，保留原历史事实。其它第三方、SDK、数据库 schema、agent 默认权限和 CI 保持。额外必要改动先修订本计划。
+实施时在旧 `docs/plans/powershell-inline-python-normalization-plan.md` 增加本计划指针，保留原历史事实。其它第三方、SDK、数据库 schema、agent 默认权限和 CI 保持。额外必要改动先修订本计划。
 
 ## 16. TDD Behavior Slices
 

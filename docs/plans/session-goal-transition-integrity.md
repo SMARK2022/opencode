@@ -48,7 +48,7 @@ HTTP、TUI、OpenAPI/SDK 只传播用户控制和持久化结果，不复制 Goa
 - 任何 implementation 前必须先以本方案获得独立 full-scope audit 的 `approved` revision；当前文件明确禁止实施。
 - 未来实现须先写行为级测试，再确认当前实现能暴露缺口，再实现生产代码。
 - 未来 git diff 中新增/修改的有效代码行至少 15% 对应清晰中文解释性注释；注释解释不变量、竞态、兼容或安全原因，不复述表面代码。
-- 不覆盖工作树中预先存在的 `.gitignore`、`.opencode/*`、`docs/Proposal/stats-foreground-theme-repair-plan.md`、`docs/prompts.md`、`thirdparty/chatgpt-browser-agent` 修改。
+- 不覆盖工作树中预先存在的 `.gitignore`、`.opencode/*`、`docs/plans/stats-foreground-theme-repair-plan.md`、`docs/guides/prompts.md`、`thirdparty/chatgpt-browser-agent` 修改。
 - 本次调研只使用仓库 `.temp/codex` 的本地 Codex 源码和 `gh` 只读查询；不使用 ChatGPT 证据。
 
 ## 4. Evidence Read Before Planning
@@ -111,8 +111,8 @@ HTTP、TUI、OpenAPI/SDK 只传播用户控制和持久化结果，不复制 Goa
 | `CONTEXT.md` | 当前 v1/v2 边界和领域上下文 |
 | `AGENTS.md` | 测试、类型检查、SDK 生成和工作树约束 |
 | `docs/adr/README.md` | ADR/领域文档布局约定 |
-| `docs/goal-error-continuation-control-plan.md` | 既有 continue-on-error、race、usage 和上限设计 |
-| `docs/prompts.md` | 本次 workflow 的调研、审计、TDD 和 commit 要求；文件有预存修改，未覆盖 |
+| `docs/plans/goal-error-continuation-control-plan.md` | 既有 continue-on-error、race、usage 和上限设计 |
+| `docs/guides/prompts.md` | 本次 workflow 的调研、审计、TDD 和 commit 要求；文件有预存修改，未覆盖 |
 | `.opencode/policy/first-principles-engineering.md` | canonical plan 和审计门槛 |
 | `.opencode/templates/canonical-plan.md` | plan 必须包含的结构和 traceability 要求 |
 | `.opencode/skills/first-principles-planning/SKILL.md` | first-principles 调研和方案流程 |
@@ -319,7 +319,7 @@ goalTurn: {
 | TUI raw fetch/手写 Goal type | SDK 生成完成后删除重复 transport 代码 |
 | 旧 prompt continuation 只看 status/turn count | 增加 revision/snapshot guard；不增加 evaluator fallback |
 
-不删除 `docs/goal-error-continuation-control-plan.md` 的历史设计；实现后只在必要处增加“revision/usage 规则已由本方案 supersede”的链接，避免读者把旧 best-effort 描述当成新不变量。
+不删除 `docs/plans/goal-error-continuation-control-plan.md` 的历史设计；实现后只在必要处增加“revision/usage 规则已由本方案 supersede”的链接，避免读者把旧 best-effort 描述当成新不变量。
 
 ## 11. Traceability: Requirement to Code and Test
 

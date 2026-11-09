@@ -147,7 +147,7 @@ R8 验证期间用户选择 `由并行任务修复 (Recommended)`：`packages/co
 | `CONTEXT.md:39-54,116-125` | provider-turn 边界、模型可见输出、指令交付和捕获的 Agent 身份；不把 V2 规范假装成已有 V1 实现 |
 | `docs/adr/README.md` | 当前唯一 ADR 是 triage，无 execute 专项 ADR；本次不新建第二份设计规格 |
 | first-principles policy/template | 逐项前向/反向追踪，禁止新增 fallback；实现需独立审计及 15% 中文解释性注释 |
-| `docs/workflow.md:27-43,45-71` | 先完成方案阶段隔离验证，再考虑独立审计；不能用静态阅读或自查冒充执行验证及批准 |
+| `docs/guides/workflow.md:27-43,45-71` | 先完成方案阶段隔离验证，再考虑独立审计；不能用静态阅读或自查冒充执行验证及批准 |
 
 `packages/core/AGENTS.md` 不存在；不从不存在的文件推导约束。没有新增依赖、数据库列或公共 HttpApi，因此不触发客户端生成。
 

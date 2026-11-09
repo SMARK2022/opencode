@@ -15,7 +15,7 @@
 > Last updated: 2026-07-27
 
 This successor plan replaces the blocked historical plan
-`docs/plans/tui-session-search-progressive.md` as the sole implementation
+`docs/draft/tui-session-search-progressive.md` as the sole implementation
 authority for the remaining working-tree repair. It preserves the complete R3
 progressive Session-search contract, the R4 HttpApi route-coverage repair, and
 the R5 workspace-routing repair, while making title/scan failure tests
@@ -48,7 +48,7 @@ canonical plan records evidence but adds no runtime behavior.
 | --- | --- |
 | `CONTEXT.md` Session, Session search, Project, Workspace vocabulary | Preserves domain terms and distinguishes Project/Workspace/Session ownership |
 | `.opencode/policy/first-principles-engineering.md` | Requires first-divergence repair, no fallback, bounded evidence, and independent audits |
-| `docs/plans/tui-session-search-progressive.md` | Blocked historical R3-R8 evidence, prior route repair, and audit ceiling; not implementation authority after this successor is approved |
+| `docs/draft/tui-session-search-progressive.md` | Blocked historical R3-R8 evidence, prior route repair, and audit ceiling; not implementation authority after this successor is approved |
 | `packages/opencode/AGENTS.md` | Package-local tests/typecheck and module rules |
 | `packages/opencode/src/server/routes/instance/httpapi/AGENTS.md` | Existing HttpApi group/handler ownership |
 | `packages/opencode/test/server/AGENTS.md` | Public HTTP/test seam and scoped fixture guidance |
@@ -524,13 +524,13 @@ No blocking findings.
 
 ### NB-01 — Audit-record metadata still names S1
 
-- The canonical metadata identifies the current revision as `S2`, but the active audit-record rows at `docs/plans/tui-session-search-progressive-successor.md:321-324` and `:350-354` still contain blank S1 entries.
+- The canonical metadata identifies the current revision as `S2`, but the active audit-record rows at `docs/draft/tui-session-search-progressive-successor.md:321-324` and `:350-354` still contain blank S1 entries.
 - This is administrative bookkeeping rather than a behavioral defect. The S2 amendment is present and explicitly defines the current test seam and verification requirements at `:356-421`.
 - Before recording the verdict, the orchestrator should record the result against revision S2 without changing substantive plan content.
 
 ### NB-02 — Historical route-count wording remains stale
 
-- Section 4 records an earlier CI observation of 156 routes at `docs/plans/tui-session-search-progressive-successor.md:66`, while verification requires all 157 route keys at `:271`.
+- Section 4 records an earlier CI observation of 156 routes at `docs/draft/tui-session-search-progressive-successor.md:66`, while verification requires all 157 route keys at `:271`.
 - The executable `--fail-on-missing --fail-on-skip` commands remain the authoritative coverage check, so this does not invalidate the plan.
 
 ### NB-03 — Scan-failure no-later-request assertion should avoid unnecessary wall-clock waiting
@@ -548,9 +548,9 @@ No blocking findings.
 
 ## Requirement and traceability coverage
 
-- **Original CI-failure requirement:** The plan preserves the complete R3 progressive Session-search contract and addresses the observed R4/R5 route failures plus R7/R8 terminal behavior at `docs/plans/tui-session-search-progressive-successor.md:17-22`.
+- **Original CI-failure requirement:** The plan preserves the complete R3 progressive Session-search contract and addresses the observed R4/R5 route failures plus R7/R8 terminal behavior at `docs/draft/tui-session-search-progressive-successor.md:17-22`.
 - **R3 loading and progressive behavior:** INV-01 through INV-11 are explicitly mapped at `:107-121`, with the existing phase, display, Session-service, and transport implementations preserved. The current owner path is `DialogSessionList` at `packages/opencode/src/cli/cmd/tui/component/dialog-session-list.tsx:85-205`.
-- **Title failure:** The current first divergence is correctly identified at `docs/plans/tui-session-search-progressive-successor.md:135`; the title `Response.ok` branch currently falls through to `partial` at `dialog-session-list.tsx:104-112`. The plan repairs that transition with an early terminal return.
+- **Title failure:** The current first divergence is correctly identified at `docs/draft/tui-session-search-progressive-successor.md:135`; the title `Response.ok` branch currently falls through to `partial` at `dialog-session-list.tsx:104-112`. The plan repairs that transition with an early terminal return.
 - **Scan failure:** The current scan non-2xx branch already terminates at `dialog-session-list.tsx:151-157`; the plan correctly preserves it and adds public regression coverage for no later scan and retained visible hits.
 - **Failure-vs-empty distinction:** The current projection always returns `Not Found` for a completed empty result at `packages/opencode/src/cli/cmd/tui/util/session-list-params.ts:56-62`. The plan explicitly adds terminal-specific diagnostic projection while preserving successful empty-search behavior.
 - **R4 route accounting:** The registered `searchScan` endpoint is declared at `packages/opencode/src/server/routes/instance/httpapi/groups/session.ts:677-689` and has a seeded exerciser scenario at `packages/opencode/test/server/httpapi-exercise/index.ts:1386-1409`.

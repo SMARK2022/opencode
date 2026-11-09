@@ -45,7 +45,7 @@ not implementation authority.
 | `CONTEXT.md` | Defines Tool, Message, Part vocabulary; TUI lives in `cli/cmd/tui/`. |
 | `packages/opencode/AGENTS.md` | Tests run from package dirs; module shape conventions; Effect rules. |
 | `packages/opencode/test/AGENTS.md` | Test fixture and Effect testing patterns. |
-| `docs/workflow.md` | GOAL contract and phase gates for `approved-plan-only` terminal state. |
+| `docs/guides/workflow.md` | GOAL contract and phase gates for `approved-plan-only` terminal state. |
 | `.opencode/policy/first-principles-engineering.md` | Root-cause repair, no fallback, one primary path, Chinese comment gate. |
 
 ## 4. Files and Evidence Read

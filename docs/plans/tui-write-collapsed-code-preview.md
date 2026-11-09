@@ -59,7 +59,7 @@ not implementation authority.
 
 | Source | Why it constrains this task |
 | --- | --- |
-| `docs/workflow.md` | bug 必须有实际运行的 red-capable feedback loop；R2 批准后按 TDD 实施、独立实现审计，verified 后才可 scoped commit。 |
+| `docs/guides/workflow.md` | bug 必须有实际运行的 red-capable feedback loop；R2 批准后按 TDD 实施、独立实现审计，verified 后才可 scoped commit。 |
 | `.opencode/policy/first-principles-engineering.md` | 修复 first divergence；禁止 fallback、重复实现、无证据边界；要求完整 traceability 和中文注释门禁。 |
 | `.opencode/templates/canonical-plan.md` | 规定本计划结构、TDD、验证、审计和实施记录字段。 |
 | `AGENTS.md` | 修改保持局部；可复用组件须有真实复用点；测试与 typecheck 从 package 目录运行。 |

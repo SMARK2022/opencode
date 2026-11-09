@@ -130,9 +130,9 @@ and `sdks/vscode` as the production implementation scope. The isolated
 | `packages/opencode/test/tool/write.test.ts:88-96` | Public new-file Write Tool behavior. | observed |
 | `packages/opencode/test/tool/apply_patch.test.ts:126,611,683` | Public `Add File` Apply Patch behavior. | observed |
 | `.temp/testing/vscode-mcp-server/src/tools/diagnostics-tools.ts` and edit tools | Reviewed alternative implementation; it is synchronous and uses editor display in edit paths. | observed |
-| `docs/lsp-diagnostics-ui-read-touch-implementation-plan.md:972-985` | Historical workaround decision; live reproduction disproves its “rare” assumption. | observed |
-| `docs/lsp-complete-enhancement-plan.md:1155-1171` | Historical pre-edit baseline intent; not implementation authority. | observed |
-| `docs/superpowers/specs/2026-07-16-lsp-clean-room-diagnostics-design.md` | Approved isolation topology, zero-tab matrix, exact findings, and result interpretation. | contracted/observed |
+| `docs/plans/lsp-diagnostics-ui-read-touch-implementation-plan.md:972-985` | Historical workaround decision; live reproduction disproves its “rare” assumption. | observed |
+| `docs/plans/lsp-complete-enhancement-plan.md:1155-1171` | Historical pre-edit baseline intent; not implementation authority. | observed |
+| `docs/proposal/2026-07-16-lsp-clean-room-diagnostics-design.md` | Approved isolation topology, zero-tab matrix, exact findings, and result interpretation. | contracted/observed |
 | `.temp/testing/vscode-clean-room-probe.ts` and `.temp/testing/vscode-observer/extension.js` | Fresh-profile PID/nonce/registry assertions, direct provider result capture, event capture, tab invariants, and safety deadline. | observed |
 | `/var/folders/x9/wyq90jb50kxf62wvbs505q4nn7ltx4/T/opencode/lsp-audit-runtime/runs/typescript-semanticDiagnosticsSync-1784186357613-d0f7ed22` | Fresh unopened TypeScript file returned direct code 2322 in 928 ms while aggregate diagnostics stayed empty and no tab appeared. | observed |
 | `/var/folders/x9/wyq90jb50kxf62wvbs505q4nn7ltx4/T/opencode/lsp-audit-runtime/runs/typescript-externalEditSemantic-1784186357810-6afe87c1` | Hidden document version advanced after an external edit, but tsserver retained old `fileContent` and returned an empty semantic result. | observed |

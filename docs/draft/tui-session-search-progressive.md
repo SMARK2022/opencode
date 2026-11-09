@@ -16,7 +16,7 @@
 >
 > R3 plan audit APPROVE; implementation audit round1 BLOCK B-01; rework; round2 APPROVE. R4 added the missing HttpApi exerciser scenario; R5 repairs the workspace-routing seam that rejected that route before the handler.
 >
-> Successor workflow authorized by user after R8 exceeded the six-round plan-audit ceiling: `docs/plans/tui-session-search-progressive-successor.md`.
+> Successor workflow authorized by user after R8 exceeded the six-round plan-audit ceiling: `docs/draft/tui-session-search-progressive-successor.md`.
 
 This file is the sole implementation specification for this task. Chat
 summaries, superseded revisions, and builder rationale outside this file are
@@ -421,7 +421,7 @@ APPROVE
 | `packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts` | handlers |
 | `packages/opencode/test/cli/cmd/tui/session-list-params.test.ts` | phase/empty/cap unit |
 | `packages/opencode/test/server/session-list.test.ts` | title mode + scan + multi-token |
-| `docs/plans/tui-session-search-progressive.md` | plan only |
+| `docs/draft/tui-session-search-progressive.md` | plan only |
 
 Diff (code+test): ~696 insertions / 103 deletions across 9 code/test paths (plan untracked separate). Within 1200-line budget; one extra test file vs strict 8-path ideal (params.test + session-list.test both required for util+server seams).
 
@@ -1142,7 +1142,7 @@ This approval does **not** declare the repository released. The official post-fi
   - `titleRes.ok` is only used to conditionally update `titleHits`.
   - `setSearchPhase("partial")` executes regardless of the title response status.
   - The delayed scan starts afterward at `packages/opencode/src/cli/cmd/tui/component/dialog-session-list.tsx:125-143`.
-- **Canonical-plan evidence:** `docs/plans/tui-session-search-progressive.md:121` (INV-12) and §10 lines 230-233.
+- **Canonical-plan evidence:** `docs/draft/tui-session-search-progressive.md:121` (INV-12) and §10 lines 230-233.
 - **Responsibility owner:** `DialogSessionList` progressive-search orchestration, which owns generation state, phase transitions, request cancellation, and loading termination.
 - **Concrete production, test, or contract consequence, not estimate, wording, metadata, or evidence-placement discrepancy:** A reachable title HTTP failure is treated as a partial successful search and causes a second scan request. This violates the approved failure lifecycle and means the title failure does not end loading at the first failed request. The current tests do not exercise this branch.
 - **Why this is not speculative:** The public HTTP request is an actual network seam, and the code explicitly distinguishes `titleRes.ok === false`; non-2xx responses are therefore directly reachable without malformed input or bypassing validation.
@@ -1470,7 +1470,7 @@ new full-scope implementation audit afterward.
 | `packages/opencode/src/server/shared/workspace-routing.ts` | First-divergence repair: exact collection-route classification for `/session/search/scan` | changed |
 | `packages/opencode/test/server/workspace-routing.test.ts` | Focused public helper regression | changed |
 | `packages/opencode/test/server/httpapi-exercise/index.ts` | R4 public HttpApi route scenario retained and exercised | changed |
-| `docs/plans/tui-session-search-progressive.md` | Canonical R5 plan and evidence only | changed |
+| `docs/draft/tui-session-search-progressive.md` | Canonical R5 plan and evidence only | changed |
 
 The unrelated pre-existing `packages/core/src/models-snapshot.js` worktree
 change was not touched or included.

@@ -15,8 +15,8 @@
 > Last updated: 2026-07-29
 
 This file is the sole implementation specification for the remaining repair.
-`docs/plans/tui-session-search-progressive.md` and
-`docs/plans/tui-session-search-progressive-successor.md` are blocked historical
+`docs/draft/tui-session-search-progressive.md` and
+`docs/draft/tui-session-search-progressive-successor.md` are blocked historical
 records and are not implementation authority.
 
 ## 1. Verbatim Requirement

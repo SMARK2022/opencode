@@ -109,7 +109,7 @@
 
 | Source | Constraint |
 | --- | --- |
-| `docs/workflow.md` | 用户批准R6后实施，完成包内验证、独立实现审计及本任务commit |
+| `docs/guides/workflow.md` | 用户批准R6后实施，完成包内验证、独立实现审计及本任务commit |
 | `.opencode/policy/first-principles-engineering.md` | 修根因、单一语义来源、证据约束、双向追踪、中文注释门禁 |
 | `.opencode/templates/canonical-plan.md` | 保留全部适用章节，不以聊天代替规范 |
 | 根 AGENTS、`packages/opencode/AGENTS.md`、其 test/AGENTS | 包内测试/typecheck、复用 Effect/测试设施、最小修改、保留共享工作树 |

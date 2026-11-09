@@ -6,7 +6,7 @@ Approved revision: R9
 Implementation allowed: yes
 Target terminal state: verified-implementation-and-commit
 Audit mode: implementation
-Requirement source: user GOAL contract plus the confirmed grilling decisions recorded in `docs/superpowers/specs/2026-07-17-opencode-db-cold-storage-design.md`
+Requirement source: user GOAL contract plus the confirmed grilling decisions recorded in `docs/proposal/2026-07-17-opencode-db-cold-storage-design.md`
 
 ## 1. Outcome
 
@@ -31,7 +31,7 @@ R9 已在完整逻辑自查后获得 full-scope plan approval；实施必须严�
 
 ## 3. Confirmed Decisions
 
-以下决定已在 `docs/superpowers/specs/2026-07-17-opencode-db-cold-storage-design.md` 的 `Grilling Decision Log` 中记录，不再重新询问：
+以下决定已在 `docs/proposal/2026-07-17-opencode-db-cold-storage-design.md` 的 `Grilling Decision Log` 中记录，不再重新询问：
 
 | 主题 | 决定 |
 |---|---|
@@ -54,7 +54,7 @@ R9 已在完整逻辑自查后获得 full-scope plan approval；实施必须严�
 
 本 canonical R9 是实现方向的唯一权威。非 canonical spec 中“gzip legacy”与“tail 永远热”的旧表述已被 R1 独立审计证明缺乏 persisted consumer 或存在 eligibility 歧义，因此分别由单 codec 合同和 §7.7 四象限真值表取代；这不是备用实现路径。
 
-用户在 grilling 中明确选择并已落盘的 maintenance contract（`docs/superpowers/specs/2026-07-17-opencode-db-cold-storage-design.md:498`）是：`daemon 是长期 DB 写入 owner；CLI opencode db 作为维护任务客户端；daemon 不可用时使用同一 implementation 的单进程锁定模式。` 因此 offline CLI 是受支持输入域，不是 primary failure 后的 fallback。唯一分流条件在尝试执行前决定：
+用户在 grilling 中明确选择并已落盘的 maintenance contract（`docs/proposal/2026-07-17-opencode-db-cold-storage-design.md:498`）是：`daemon 是长期 DB 写入 owner；CLI opencode db 作为维护任务客户端；daemon 不可用时使用同一 implementation 的单进程锁定模式。` 因此 offline CLI 是受支持输入域，不是 primary failure 后的 fallback。唯一分流条件在尝试执行前决定：
 
 - lock 指向 live daemon 且 dbPath 匹配时，只走 daemon control；control 请求失败返回 typed unavailable，禁止切换到 direct execution。
 - 启动时不存在 live daemon 时，CLI 获取 maintenance lock 后调用与 daemon 完全相同的 `ColdStorage.maintain` owner；没有第二套维护算法。
@@ -63,7 +63,7 @@ R9 已在完整逻辑自查后获得 full-scope plan approval；实施必须严�
 
 ### 4.1 Local DB evidence
 
-`docs/db-space-diagnosis.md` 和 `docs/db-space-optimization-design.md` 的 `1574.66 MB` 数字只保留为历史证据，不能支撑本 revision。R2 在固定副本上重新测量：
+`docs/archive/db-space-diagnosis.md` 和 `docs/archive/db-space-optimization-design.md` 的 `1574.66 MB` 数字只保留为历史证据，不能支撑本 revision。R2 在固定副本上重新测量：
 
 - `2026-07-16T20:01:07.091Z` 使用 Python sqlite3 `Connection.backup()` 从只读 URI `file:C:/Users/Lenovo/.local/share/opencode/opencode.db?mode=ro` 复制包含当前 WAL 可见状态的快照到 `D:\Temp\opencode\opencode-r2-evidence-20260717.db`；源 DB 未写入。
 - 快照为 `2,213,416,960` bytes，即 `2110.88 MB`；page size `4096`，page count `540,385`，freelist `29` pages。

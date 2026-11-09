@@ -39,7 +39,7 @@
 | Source | 约束 |
 | --- | --- |
 | `.opencode/policy/first-principles-engineering.md` | 单一权威路径、定点修复、15% 中文注释门禁 |
-| `docs/tool-output-notice-format-design.md` | 内联 marker 契约（本任务不改格式，只加守卫/调阈值） |
+| `docs/plans/tool-output-notice-format-plan.md` | 内联 marker 契约（本任务不改格式，只加守卫/调阈值） |
 | `docs/plans/bash-output-compression-marker-unification.md` | 前置任务（a3da0d2fc0）已统一方言；本任务在其之上 |
 | `packages/opencode/AGENTS.md` | 测试从包目录跑；`bun typecheck` |
 | 根/测试 `AGENTS.md` | bun:test；live 测试模式 |
@@ -158,7 +158,7 @@
 | --- | --- | --- | --- |
 | `packages/opencode/src/tool/bash-compress.ts` | modify | 阈值默认 + 守卫 + 注释 | +8 / −2 |
 | `packages/opencode/test/tool/bash-compress.test.ts` | modify | 更新 2 处陈旧用例 + 新增 T1/T3 负向锁与 T2/T4 正向锁 | +55 / −8 |
-| `docs/tool-output-notice-format-design.md` | modify | 内联 marker 规则注记阈值 1024 与重复性守卫（N-02 修正：实际 +2/−0） | +2 / −0 |
+| `docs/plans/tool-output-notice-format-plan.md` | modify | 内联 marker 规则注记阈值 1024 与重复性守卫（N-02 修正：实际 +2/−0） | +2 / −0 |
 
 生产 1 文件 +8/−2（预算 ≤4 文件、≤400 行，余量充足）。
 
@@ -242,7 +242,7 @@ Seam：`compressVisibleOutput` 公开导出（唯一改动面）。
 | --- | --- | --- |
 | `packages/opencode/src/tool/bash-compress.ts` | +11 / −2 | 阈值默认 1024（含 2 行注释）+ 守卫（5 行代码 + 3 行注释） |
 | `packages/opencode/test/tool/bash-compress.test.ts` | +41 / −7 | 2 处陈旧 fixture 更新 + T1/T3 新锁（含 xorshift fixture） |
-| `docs/tool-output-notice-format-design.md` | +2 / −0 | 阈值 1024 与守卫两行注记 |
+| `docs/plans/tool-output-notice-format-plan.md` | +2 / −0 | 阈值 1024 与守卫两行注记 |
 
 生产 1 文件 +11/−2（预算 ≤4 文件/≤400 行，余量极大）。
 

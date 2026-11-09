@@ -44,7 +44,7 @@
 >
 > 注意文档的修订，你不要一次写很多，或者说一口气全部写完，这是不现实的。因为你本身在十分钟的时候会触发中断，所以你如果需要去写很长，你可以一大段一大段地写，比如一次性写一百行，或者说一次性写几百行，等等这样。
 
-Workflow 以 `docs/workflow.md` 和用户粘贴的 GOAL 合同为依据；目标终态按用户合同的 `verified-implementation-and-commit` 执行。先独立审计 exact revision，批准前不实施。只允许 `adversarial-auditor` 用于独立审计，不使用 Task 探索或委派实施。不 push、不 amend、不跳过 hook。
+Workflow 以 `docs/guides/workflow.md` 和用户粘贴的 GOAL 合同为依据；目标终态按用户合同的 `verified-implementation-and-commit` 执行。先独立审计 exact revision，批准前不实施。只允许 `adversarial-auditor` 用于独立审计，不使用 Task 探索或委派实施。不 push、不 amend、不跳过 hook。
 
 本轮已确认的测试边界，问题原文：
 
@@ -92,7 +92,7 @@ Workflow 以 `docs/workflow.md` 和用户粘贴的 GOAL 合同为依据；目标
 | `CONTEXT.md` | 持久 Session/Provider Turn/历史等既有词汇；没有 Stats 专属新领域或 ADR 需求 |
 | `docs/adr/README.md`、`0001-triage-labels-and-team-assignment-coexist.md` | 唯一 ADR 为 issue triage，与本次统计无直接行为约束；不新建 ADR |
 | `.opencode/policy/first-principles-engineering.md`、canonical template | primary-path、双向映射、计划验证、独立审计、中文注释门禁 |
-| `docs/workflow.md` | 分阶段审批、TDD、实现审计和提交边界 |
+| `docs/guides/workflow.md` | 分阶段审批、TDD、实现审计和提交边界 |
 | package `package.json`、`bunfig.toml`、`tsconfig.json` | Bun 1.4.4 可用；测试已有隔离 preload；`bun typecheck`；现有终端测试依赖 |
 
 ## 4. Files and Evidence Read

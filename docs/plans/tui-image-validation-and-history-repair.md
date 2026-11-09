@@ -223,7 +223,7 @@ db path [+ --apply]
 
 | File | Change | Budget |
 | --- | --- | ---: |
-| `docs/Proposal/tui-image-validation-and-history-repair.md` | R7规范和审计记录 | docs |
+| `docs/plans/tui-image-validation-and-history-repair.md` | R7规范和审计记录 | docs |
 | `packages/opencode/script/migrate-image-attachment.ts` | 删除single复杂协议，改为精简preview/apply全库处理 | 约220-300行最终文件 |
 | `packages/opencode/test/tool/read.test.ts` | 替换旧single测试为两个bulk CLI行为测试 | +100至160 |
 
@@ -314,7 +314,7 @@ db path [+ --apply]
 
 | File | Actual change | Necessity |
 | --- | --- | --- |
-| `docs/Proposal/tui-image-validation-and-history-repair.md` | R7唯一规范、验证证据和审计记录 | 为批准实施和独立放行提供可审计事实 |
+| `docs/plans/tui-image-validation-and-history-repair.md` | R7唯一规范、验证证据和审计记录 | 为批准实施和独立放行提供可审计事实 |
 | `packages/opencode/script/migrate-image-attachment.ts` | 删除single/source/hash/backup/plan协议，收敛为229行preview/apply全库CLI | 唯一生产修改，直接修复无法自动处理全库和截断Tool图片的问题 |
 | `packages/opencode/test/tool/read.test.ts` | 用两个真实CLI+临时SQLite行为测试替换旧single协议测试 | 覆盖统一Sharp、只读、apply、弃用、空间、幂等和事务回滚 |
 
