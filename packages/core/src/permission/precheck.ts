@@ -255,9 +255,9 @@ export async function evaluate(input: {
         metadata: { ...args, shell: input.metadata.shell, cwd: directory },
       })
     }))
-    // 组合请求使用风险上界及原因并集；空值分支遗漏维持 general，实际调用再补充证据。
+    // 组合请求使用风险上界；先展开原子 reason 再去重，空值分支由真实调用补证。
     const highest = decisions.reduce(maxRisk, { level: "general", reason: "execute probe has no observable calls" })
-    return { level: highest.level, reason: [...new Set(decisions.map((item) => item.reason))].join("; ") || highest.reason }
+    return { level: highest.level, reason: [...new Set(decisions.flatMap((item) => item.reason.split("\n")))].join("\n") || highest.reason }
   }
   const externalDirectory = await externalDirectoryEffect(input)
   if (externalDirectory) return externalDirectory

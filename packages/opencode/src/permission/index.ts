@@ -294,15 +294,19 @@ const layer = Layer.effect(
       // approvedOnce 区分 general 起点与真实初次授权，让 strict 的首轮仍到 reviewer。
       let approvedLevel: PermissionPrecheck.Level = "general"
       let approvedOnce = false
+      // reason 集合只在允许后累积；拒绝路径不得把未批准证据带入后续调用。
+      const approvedReasons = new Set<string>()
       let stopped = false
       const gate = Semaphore.makeUnsafe(1)
       // 所有升阶共用一把锁；并发叶子进入锁后再决定是否复用已完成的审批。
       const parent = (request?: PermissionV1.AskInput): PermissionV1.AskInput => ({
         sessionID: input.sessionID, tool: input.tool, ruleset: input.ruleset,
         permission: "execute", patterns: ["*"], always: [],
-        // 审查保留整段代码；trigger 只记录本次真实请求，包含已有的 completed 恢复摘要。
+        // 审查保留整段代码；真实升阶请求只携带普通动作证据，不回嵌宿主规则。
+        // actual 固定为普通动作三件套，预跑原始参数仍由 probe 承载。
         metadata: { agent: input.agent, action_kind: "execute", code: input.code, cwd, shell,
-          probe: input.calls, trigger: request ? [request] : [] },
+          probe: input.calls,
+          ...(request ? { actual: { permission: request.permission, patterns: request.patterns, metadata: request.metadata } } : {}) },
       })
       const terminal = (cause: Cause.Cause<unknown>) => {
         // 先封住后续接纳再取消现有任务，已结束子调用的记录由 processor 原样保留。
@@ -320,14 +324,24 @@ const layer = Layer.effect(
         }))
         // forbidden 在等级复用前终止，先前获批的 dangerous 也不能覆盖它。
         if (decision.level === "forbidden") return yield* new PermissionV1.AutoDeniedError({ reason: decision.reason, terminal: true })
-        // 锁内重查可让并发同级调用共享一次审批，较高等级仍触发下一次审查。
-        if (approvedOnce && PermissionPrecheck.LEVELS.indexOf(decision.level) <= PermissionPrecheck.LEVELS.indexOf(approvedLevel)) return false
+        // 同级新 reason 也是新证据；已覆盖 reason 才复用本次批准。
+        const reasons = decision.reason.split("\n")
+        if (approvedOnce && reasons.every((reason) => approvedReasons.has(reason))) return false
         const review = request.permission === "execute" ? request : parent(request)
+        // 新风险 reason 送审时合并历史证据；safe/general 仍沿原 AUTO 路由。
+        const reviewDecision = decision.level === "cautious" || decision.level === "dangerous"
+          ? {
+              level: PermissionPrecheck.LEVELS[Math.max(PermissionPrecheck.LEVELS.indexOf(approvedLevel), PermissionPrecheck.LEVELS.indexOf(decision.level))],
+              reason: [...new Set([...approvedReasons, ...reasons])].join("\n"),
+            }
+          : decision
         // 复用原 AUTO 事件和失败策略，同时关闭宽泛 Session cache 的读写。
-        const asked = yield* reviewAuto(review, decision, false)
+        const asked = yield* reviewAuto(review, reviewDecision, false)
         if (asked) yield* requestUser(review)
-        // 等级记录的是送审的预检结论，不能替换成 reviewer 的 low/medium 等另一套词汇。
-        approvedLevel = decision.level
+        // 新低风险 reason 不得降低已批准上界；后续送审仍携带完整历史证据。
+        approvedLevel = PermissionPrecheck.LEVELS.indexOf(reviewDecision.level) > PermissionPrecheck.LEVELS.indexOf(approvedLevel) ? reviewDecision.level : approvedLevel
+        // 只有允许后才累积原因，后续相同证据才能共享本次批准。
+        for (const reason of reasons) approvedReasons.add(reason)
         approvedOnce = true
         // 返回本次是否取得人工批准，让父显式 ask 消费同一申请的结果，而非再弹一次。
         return asked

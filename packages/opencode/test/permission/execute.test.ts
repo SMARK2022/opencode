@@ -64,6 +64,108 @@ it.instance("one execute approval is reused at the same risk and isolated from l
   }).pipe(Effect.provideService(PermissionReviewer.Service, review))
 }))
 
+it.instance("execute preflight deduplicates overlapping atomic reasons", () => Effect.gen(function* () {
+  const permission = yield* Permission.Service
+  const reasons: string[] = []
+  const sessionID = SessionID.descending()
+  const tool = { messageID: MessageID.ascending(), callID: "execute-atomic-reasons" }
+  // 两个真实 Git 请求共享全局 flag，但各自拥有不同的状态变更原因。
+  const calls = [
+    { tool: "bash", input: { command: "git -c core.hooksPath=/tmp/x push origin main" } },
+    { tool: "bash", input: { command: "git -c core.hooksPath=/tmp/y reset --hard HEAD" } },
+  ]
+  yield* permission.beginExecute({
+    sessionID, tool, code: "atomic reason preflight", calls, agent: "build",
+    ruleset: [{ permission: "*", pattern: "*", action: "auto" }],
+    stop: (reason) => { throw reason },
+  }).pipe(Effect.provideService(PermissionReviewer.Service, { review: (input) => Effect.sync(() => {
+    reasons.push(input.precheck.reason)
+    return { action: "allow" as const, reason: "authorized test action", reviewID: input.reviewID, risk_level: "medium" as const, user_authorization: "high" as const }
+  }) }))
+  // 独立预期来自两条 Git 分类规则：全局 flag 只能保留一次，push/reset 不得丢失。
+  expect(reasons).toHaveLength(1)
+  expect(reasons[0]!.split("\n")).toEqual([
+    "git state-changing command requires explicit approval",
+    "git global flag injects configuration or binary path",
+    "destructive git reset requires explicit approval",
+  ])
+}))
+
+it.instance("execute re-reviews new reasons with only actual action evidence", () => Effect.gen(function* () {
+  const instance = yield* TestInstance
+  const permission = yield* Permission.Service
+  const reviews: { permission: string; reason: string; metadata: Readonly<Record<string, unknown>> }[] = []
+  const sessionID = SessionID.descending()
+  const tool = { messageID: MessageID.ascending(), callID: "execute-new-reason" }
+  const ruleset = [{ permission: "*", pattern: "*", action: "auto" as const }]
+  const command = "git push origin main"
+  const request = (value: string) => ({
+    sessionID, tool, ruleset, permission: "bash", patterns: [value], always: [],
+    metadata: { command: value, cwd: instance.directory, shell: "bash" },
+  })
+  yield* Effect.gen(function* () {
+    const scope = yield* permission.beginExecute({
+      sessionID, tool, ruleset, agent: "build", code: "git push composition",
+      calls: [{ tool: "bash", input: { command } }], stop: (reason) => { throw reason },
+    })
+    // 已覆盖的 state-changing reason 必须复用；同等级新增全局 flag 才是新证据。
+    yield* scope.ask(request(command))
+    const changed = "git -c core.hooksPath=/tmp/x push origin main"
+    yield* scope.ask(request(changed))
+    yield* scope.ask(request(changed))
+    // 重复 changed 必须命中新增集合，所以审查总数恰好是初审和新 reason 各一次。
+    expect(reviews).toHaveLength(2)
+    const review = reviews[1]!
+    expect(review.permission).toBe("execute")
+    expect(review.reason.split("\n")).toEqual([
+      "git state-changing command requires explicit approval",
+      "git global flag injects configuration or binary path",
+    ])
+    // actual 必须保留真实命令及执行环境，而不是只给权限名称。
+    expect(review.metadata.actual).toMatchObject({
+      permission: "bash", patterns: [changed], metadata: { command: changed, cwd: instance.directory, shell: "bash" },
+    })
+    // 最终审查证据不得重新嵌套宿主规则或已删除的 trigger。
+    expect(JSON.stringify(review.metadata)).not.toContain("ruleset")
+    expect(JSON.stringify(review.metadata)).not.toContain("trigger")
+  }).pipe(Effect.provideService(PermissionReviewer.Service, { review: (input) => Effect.sync(() => {
+    reviews.push({ permission: input.permission, reason: input.precheck.reason, metadata: input.metadata })
+    return { action: "allow" as const, reason: "authorized test action", reviewID: input.reviewID, risk_level: "medium" as const, user_authorization: "high" as const }
+  }) }))
+}))
+
+it.instance("execute preserves the approved upper bound after new low-risk reasons", () => Effect.gen(function* () {
+  const instance = yield* TestInstance
+  const permission = yield* Permission.Service
+  const reviews: { level: string; reason: string }[] = []
+  const sessionID = SessionID.descending()
+  const tool = { messageID: MessageID.ascending(), callID: "execute-reason-upper-bound" }
+  const ruleset = [{ permission: "*", pattern: "*", action: "auto" as const }]
+  const request = (command: string) => ({
+    sessionID, tool, ruleset, permission: "bash", patterns: [command], always: [],
+    metadata: { command, cwd: instance.directory, shell: "bash" },
+  })
+  yield* Effect.gen(function* () {
+    const scope = yield* permission.beginExecute({ sessionID, tool, ruleset, agent: "build", code: "monotonic reasons", calls: [], stop: (reason) => { throw reason } })
+    yield* scope.ask(request("shutdown -h now"))
+    // 第一次 dangerous 审查建立历史上界，后续放行不能改写这段证据。
+    // 新低风险 reason 可以放行，但不得抹掉已经审查过的 dangerous 证据和上界。
+    yield* scope.ask(request("git status"))
+    yield* scope.ask(request("git push origin main"))
+    // 最终重审必须同时保持 dangerous 上界和全部历史原因。
+    expect(reviews.map((review) => review.level)).toEqual(["dangerous", "dangerous"])
+    expect(reviews[1]!.reason.split("\n")).toEqual([
+      "execute probe has no observable calls",
+      "system shutdown or reboot requires explicit user authorization",
+      "known read-only shell command",
+      "git state-changing command requires explicit approval",
+    ])
+  }).pipe(Effect.provideService(PermissionReviewer.Service, { review: (input) => Effect.sync(() => {
+    reviews.push({ level: input.precheck.level, reason: input.precheck.reason })
+    return { action: "allow" as const, reason: "authorized test action", reviewID: input.reviewID, risk_level: "high" as const, user_authorization: "high" as const }
+  }) }))
+}))
+
 it.instance("execute raises approval only for higher risk and keeps forbidden terminal", () => Effect.gen(function* () {
   // 先 cautious 后 dangerous 再回 cautious，能抓住将上界误降到最近一次风险的实现。
   const instance = yield* TestInstance
