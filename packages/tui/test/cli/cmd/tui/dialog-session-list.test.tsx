@@ -21,7 +21,7 @@ import { TestTuiContexts } from "../../../fixture/tui-environment"
 import { tmpdir } from "../../../fixture/fixture"
 import { createEventSource, createFetch, directory, json } from "./sync-fixture"
 import { DialogProvider, useDialog } from "../../../../src/ui/dialog"
-import { ToastProvider } from "../../../../src/ui/toast"
+import { Toast, ToastProvider } from "../../../../src/ui/toast"
 
 // #561：目标 createDebouncedSignal 是原生 setTimeout 实现（非 @solid-primitives/scheduled），
 // 无需模块 mock；真实 150ms 提交契约直接参与渲染级断言。
@@ -657,6 +657,124 @@ test("old query cleanup preserves a pending new preview across scan batches", as
   })
 })
 
+test("rename Generate serializes the request and closes after success", async () => {
+  const session = sessionInfo()
+  // deferred response 让 busy 状态可被真实观察，避免立即完成掩盖重复请求。
+  const pending = Promise.withResolvers<Response>()
+  const calls: string[] = []
+  await withSessionList({
+    title: () => json([session]),
+    scan: () => json({ sessions: [session], nextCursor: null, done: true }),
+    fetch: (url, request, init) => {
+      const method = (init?.method ?? request?.method ?? "GET").toUpperCase()
+      // 初始 GET 让 Rename 从 Sync 读取真实旧标题，而不是测试 placeholder。
+      if (url.pathname === "/session" && method === "GET") return json([session])
+      if (url.pathname === `/session/${session.id}/title` && method === "POST") {
+        // method/url 在 SDK transport 边界记录，证明不是内部函数 mock 成功。
+        calls.push(`${method} ${url.pathname}`)
+        return pending.promise
+      }
+      if (url.pathname === `/session/${session.id}` && method === "PATCH") calls.push(`${method} ${url.pathname}`)
+    },
+    run: async ({ app }) => {
+      await openRename(app)
+      app.mockInput.pressKey("g", { ctrl: true })
+      await waitFor(() => calls.length === 1)
+      await waitForFrame(app, (frame) => frame.includes("Generating…"))
+      // busy 是公开异步边界：重复 Generate 与 Enter 都不能再发 POST 或保存旧草稿。
+      app.mockInput.pressKey("g", { ctrl: true })
+      app.mockInput.pressEnter()
+      await app.renderOnce()
+      expect(calls).toEqual([`POST /session/${session.id}/title`])
+      // 成功响应完成后只关闭面板，不应再发送 PATCH 保存输入框旧值。
+      pending.resolve(json(sessionInfo({ title: "Generated session title" })))
+      await waitForFrame(app, (frame) => !frame.includes("Rename Session"))
+      expect(calls).toEqual([`POST /session/${session.id}/title`])
+    },
+  })
+})
+
+for (const failure of [
+  {
+    // schema-valid 502 走 SDK 的 result.error 分支，必须展示服务端安全 message。
+    name: "HTTP error",
+    respond: () => json({ _tag: "UpstreamError", message: "title provider failed" }, { status: 502 }),
+  },
+  // transport rejection 没有 HTTP result，Promise 第二终态也必须进入同一可见失败合同。
+  { name: "transport rejection", respond: () => Promise.reject(new Error("title socket offline")) },
+] as const) {
+  test(`rename Generate preserves the draft after ${failure.name}`, async () => {
+    const session = sessionInfo()
+    const requests: string[] = []
+    await withSessionList({
+      title: () => json([session]),
+      scan: () => json({ sessions: [session], nextCursor: null, done: true }),
+      fetch: (url, request, init) => {
+        const method = (init?.method ?? request?.method ?? "GET").toUpperCase()
+        // 初始标题同时是失败后的草稿证据，不能被错误响应清空或替换。
+        if (url.pathname === "/session" && method === "GET") return json([session])
+        if (url.pathname === `/session/${session.id}/title` && method === "POST") {
+          requests.push(`${method} ${url.pathname}`)
+          return failure.respond()
+        }
+        if (url.pathname === `/session/${session.id}` && method === "PATCH") requests.push(`${method} ${url.pathname}`)
+      },
+      run: async ({ app }) => {
+        await openRename(app)
+        app.mockInput.pressKey("g", { ctrl: true })
+        // 先等待真实 POST 到达，再观察 toast，排除键盘未分发造成的假失败。
+        await waitFor(() => requests.length === 1)
+        const expected = failure.name === "HTTP error" ? "vider failed" : "ket offline"
+        const frame = await waitForFrame(app, (value) => value.includes(expected) && value.includes("Rename Session"))
+        // 100 列 Toast 裁掉消息左侧；标题和可见末尾共同证明真实错误已呈现。
+        expect(frame).toContain("Failed to generate title")
+        // 草稿仍是原 Session 标题且 busy 已恢复，用户可以直接修改或重试。
+        expect(frame).toContain("Visible search session")
+        expect(frame).not.toContain("Generating…")
+        expect(requests).toEqual([`POST /session/${session.id}/title`])
+      },
+    })
+  })
+}
+
+test("rename Generate ignores completion after the panel is unmounted", async () => {
+  // 请求在面板卸载前保持 pending，晚到完成才能覆盖陈旧 continuation 的真实风险。
+  const session = sessionInfo()
+  const pending = Promise.withResolvers<Response>()
+  await withSessionList({
+    title: () => json([session]),
+    scan: () => json({ sessions: [session], nextCursor: null, done: true }),
+    fetch: (url, request, init) => {
+      const method = (init?.method ?? request?.method ?? "GET").toUpperCase()
+      // sentinel 与旧面板共享同一 Session 初始快照，错误 clear 会立即可见。
+      if (url.pathname === "/session" && method === "GET") return json([session])
+      if (url.pathname === `/session/${session.id}/title` && method === "POST") return pending.promise
+    },
+    run: async ({ app, dialog }) => {
+      await openRename(app)
+      app.mockInput.pressKey("g", { ctrl: true })
+      await waitForFrame(app, (frame) => frame.includes("Generating…"))
+      // Esc 后立刻打开 sentinel，旧 Promise 若误调 dialog.clear 就会把它关闭。
+      app.mockInput.pressEscape()
+      dialog.replace(() => <text>Sentinel Panel</text>)
+      await waitForFrame(app, (frame) => frame.includes("Sentinel Panel"))
+      // 服务端请求仍会完成，但卸载后的 UI continuation 不得 clear 后续 sentinel。
+      // resolve 后渲染一次让 Promise continuation 有机会执行，sentinel 必须仍然存在。
+      pending.resolve(json(sessionInfo({ title: "Late generated title" })))
+      await app.renderOnce()
+      expect(app.captureCharFrame()).toContain("Sentinel Panel")
+    },
+  })
+})
+
+async function openRename(app: Awaited<ReturnType<typeof testRender>>) {
+  await enterSearch(app, "needle")
+  // 等真实选项可见再按 Ctrl+R，避免空列表阶段吞键被误判为 Generate 缺失。
+  await waitForFrame(app, (frame) => frame.includes("Visible search session"))
+  app.mockInput.pressKey("r", { ctrl: true })
+  await waitForFrame(app, (frame) => frame.includes("Rename Session"))
+}
+
 async function withSessionList(input: {
   title: (url: URL, init?: RequestInit) => Response | Promise<Response>
   scan: (url: URL, init?: RequestInit) => Response | Promise<Response>
@@ -749,6 +867,8 @@ function Harness(props: {
                                 <DialogProvider>
                                   <OpenSessionList onReady={props.onReady} />
                                 </DialogProvider>
+                                {/* Provider 只给 context；挂载实际 Toast 才能验证用户可见错误文本。 */}
+                                <Toast />
                               </LocalProvider>
                             </ToastProvider>
                           </ThemeProvider>

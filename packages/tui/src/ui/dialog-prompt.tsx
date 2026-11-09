@@ -20,6 +20,7 @@ export type DialogPromptProps = {
   busy?: boolean
   busyText?: string
   onConfirm?: (value: string) => void
+  onGenerate?: () => void
   onCancel?: () => void
 }
 
@@ -31,6 +32,7 @@ export function DialogPrompt(props: DialogPromptProps) {
   const toast = useToast()
   const renderer = useRenderer()
   const submitShortcut = useCommandShortcut("dialog.prompt.submit")
+  const generateShortcut = useCommandShortcut("dialog.prompt.generate")
   const [textareaTarget, setTextareaTarget] = createSignal<TextareaRenderable>()
   let textarea: TextareaRenderable
 
@@ -94,6 +96,15 @@ export function DialogPrompt(props: DialogPromptProps) {
         category: "Dialog",
         run: confirm,
       },
+      {
+        name: "dialog.prompt.generate",
+        title: "Generate dialog title",
+        category: "Dialog",
+        run: () => {
+          // command palette 也经过 busy guard，不能只依赖键盘 binding 的 enabled 状态防重入。
+          if (!props.busy) props.onGenerate?.()
+        },
+      },
       // [local-smark] voice toggle：busy 时 bindings enabled 已为 false，无需重复守卫；
       // 复用 prompt.voice.toggle 配置，与主 Prompt 保持相同快捷键
       {
@@ -106,7 +117,11 @@ export function DialogPrompt(props: DialogPromptProps) {
       },
     ],
     bindings: [
-      ...tuiConfig.keybinds.gather("dialog.prompt", ["dialog.prompt.submit"]),
+      // 只有显式提供 Generate action 的面板才占用 Ctrl+G，其他面板保留全局 messages_first。
+      ...tuiConfig.keybinds.gather(
+        "dialog.prompt",
+        props.onGenerate ? ["dialog.prompt.submit", "dialog.prompt.generate"] : ["dialog.prompt.submit"],
+      ),
       ...tuiConfig.keybinds.get("prompt.voice.toggle"),
     ],
   }))
@@ -175,6 +190,12 @@ export function DialogPrompt(props: DialogPromptProps) {
           <Show when={submitShortcut()}>
             <text fg={theme.text}>
               {submitShortcut()} <span style={{ fg: theme.textMuted }}>submit</span>
+            </text>
+          </Show>
+          {/* 文案固定为短动词 Generate；快捷键仍来自用户 keybind，而不是写死 Ctrl+G。 */}
+          <Show when={props.onGenerate && generateShortcut()}>
+            <text fg={theme.text}>
+              {generateShortcut()} <span style={{ fg: theme.textMuted }}>Generate</span>
             </text>
           </Show>
           {/* [local-smark] 录音状态栏 + 快捷键提示；对话框宽度固定，不复用 voiceHintVisible 的 140 列宽度门 */}

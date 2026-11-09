@@ -625,6 +625,8 @@ namespace TestLLMServer {
     readonly textMatch: (match: Match, value: string, opts?: { usage?: Usage }) => Effect.Effect<void>
     readonly toolMatch: (match: Match, name: string, input: unknown) => Effect.Effect<void>
     readonly text: (value: string, opts?: { usage?: Usage }) => Effect.Effect<void>
+    readonly title: (...input: (Item | Reply)[]) => Effect.Effect<void>
+    readonly titleHits: Effect.Effect<Hit[]>
     readonly tool: (name: string, input: unknown) => Effect.Effect<void>
     readonly toolHang: (name: string, input: unknown) => Effect.Effect<void>
     readonly reason: (value: string, opts?: { text?: string; usage?: Usage }) => Effect.Effect<void>
@@ -651,6 +653,8 @@ export class TestLLMServer extends Context.Service<TestLLMServer, TestLLMServer.
 
       let hits: Hit[] = []
       let list: Queue[] = []
+      let titles: Item[] = []
+      let titleHits: Hit[] = []
       let waits: Wait[] = []
       let misses: Hit[] = []
 
@@ -687,18 +691,19 @@ export class TestLLMServer extends Context.Service<TestLLMServer, TestLLMServer.
         const req = yield* HttpServerRequest.HttpServerRequest
         const body = yield* req.json.pipe(Effect.orElseSucceed(() => ({})))
         const current = hit(req.originalUrl, body)
-        if (isTitleRequest(body)) {
-          hits = [...hits, current]
-          yield* notify()
-          const auto: Sse = { type: "sse", head: [role()], tail: [textLine("E2E Title"), finishLine("stop")] }
-          if (mode === "responses") return send(responses(auto, modelFrom(body)))
-          return send(auto)
-        }
-        const next = pull(current)
+        const titled = isTitleRequest(body)
+        // titleHits 是 Provider HTTP 边界证据，自动负向 guard 无需读取内部函数调用计数。
+        if (titled) titleHits = [...titleHits, current]
+        // 标题 fixture 与主 Agent queue 隔离，后台命名不会偷走主回复；未配置时保留原默认标题。
+        const next = titled ? titles.shift() : pull(current)
         if (!next) {
           hits = [...hits, current]
           yield* notify()
-          const auto: Sse = { type: "sse", head: [role()], tail: [textLine("ok"), finishLine("stop")] }
+          const auto: Sse = {
+            type: "sse",
+            head: [role()],
+            tail: [textLine(titled ? "E2E Title" : "ok"), finishLine("stop")],
+          }
           if (mode === "responses") return send(responses(auto, modelFrom(body)))
           return send(auto)
         }
@@ -754,6 +759,10 @@ export class TestLLMServer extends Context.Service<TestLLMServer, TestLLMServer.
           if (opts?.usage) out.usage(opts.usage)
           queue(out.stop().item())
         }),
+        title: Effect.fn("TestLLMServer.title")(function* (...input: (Item | Reply)[]) {
+          titles = [...titles, ...input.map(item)]
+        }),
+        titleHits: Effect.sync(() => [...titleHits]),
         tool: Effect.fn("TestLLMServer.tool")(function* (name: string, input: unknown) {
           queue(reply().tool(name, input).item())
         }),
@@ -778,9 +787,12 @@ export class TestLLMServer extends Context.Service<TestLLMServer, TestLLMServer.
         hold: Effect.fn("TestLLMServer.hold")(function* (value: string, wait: PromiseLike<unknown>) {
           queue(reply().wait(wait).text(value).stop().item())
         }),
+        // reset 同时清理标题 queue 和命中，避免后台命名污染下一个测试的主队列与负向断言。
         reset: Effect.sync(() => {
           hits = []
           list = []
+          titles = []
+          titleHits = []
           waits = []
           misses = []
         }),

@@ -1459,6 +1459,32 @@ const scenarios: Scenario[] = [
       check(body === true, "missing session abort should remain a no-op success")
     }),
   http.protected
+    .post("/session/{sessionID}/title", "session.generateTitle")
+    // mutating/withLlm 让 coverage、auth、effect 三种门禁共享同一真实路由场景。
+    .mutating()
+    .withLlm()
+    .seeded((ctx) =>
+      Effect.gen(function* () {
+        const session = yield* ctx.session({ title: "Generate title session" })
+        // 真实用户消息与 withLlm 的 small_model 共同走完整 SessionPrompt/Provider 路径。
+        yield* ctx.message(session.id, { text: "generate an HTTP title" })
+        return session
+      }),
+    )
+    .at((ctx) => ({
+      path: route("/session/{sessionID}/title", { sessionID: ctx.state.id }),
+      headers: ctx.headers(),
+    }))
+    .jsonEffect(200, (body, ctx) =>
+      Effect.gen(function* () {
+        object(body)
+        // 默认 E2E Title 已覆盖成功响应，无需扩张 ScenarioContext 或伪造自定义标题 queue。
+        check(body.title === "E2E Title", "title endpoint should return the generated title")
+        // sessionGet 是独立持久化证据，防止 handler 返回未写回的成功快照。
+        check((yield* ctx.sessionGet(ctx.state.id))?.title === "E2E Title", "generated title should be persisted")
+      }),
+    ),
+  http.protected
     .post("/session/{sessionID}/init", "session.init")
     .preserveDatabase()
     .withLlm()
@@ -1969,6 +1995,7 @@ const scenarios: Scenario[] = [
 ]
 
 const llmScenarios = new Set([
+  "session.generateTitle",
   "session.init",
   "session.prompt",
   "session.prompt_async",

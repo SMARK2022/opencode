@@ -22,7 +22,14 @@ import {
   WorkspaceRoutingQuery,
   WorkspaceRoutingQueryFields,
 } from "../middleware/workspace-routing"
-import { ApiNotFoundError, PermissionNotFoundError, SessionBusyError } from "../errors"
+import {
+  ApiNotFoundError,
+  InvalidRequestError,
+  PermissionNotFoundError,
+  ServiceUnavailableError,
+  SessionBusyError,
+  UpstreamError,
+} from "../errors"
 import { described } from "./metadata"
 import { QueryBoolean } from "./query"
 import { ProviderV2 } from "@opencode-ai/core/provider"
@@ -163,6 +170,7 @@ export const SessionPaths = {
   create: root,
   remove: `${root}/:sessionID`,
   update: `${root}/:sessionID`,
+  title: `${root}/:sessionID/title`,
   fork: `${root}/:sessionID/fork`,
   abort: `${root}/:sessionID/abort`,
   share: `${root}/:sessionID/share`,
@@ -320,6 +328,20 @@ export const SessionApi = HttpApi.make("session")
             identifier: "session.update",
             summary: "Update session",
             description: "Update properties of an existing session, such as title or other metadata.",
+          }),
+        ),
+        // POST 不接收标题文本，服务端必须从已有历史生成并持久化，避免客户端伪造生成结果。
+        // domain 的 400/503/502 与框架 BadRequest 同列声明，SDK 才能保留可辨识的错误联合。
+        HttpApiEndpoint.post("generateTitle", SessionPaths.title, {
+          params: { sessionID: SessionID },
+          query: WorkspaceRoutingQuery,
+          success: described(Session.Info, "Generated session title"),
+          error: [HttpApiError.BadRequest, ApiNotFoundError, InvalidRequestError, ServiceUnavailableError, UpstreamError],
+        }).annotateMerge(
+          OpenApi.annotations({
+            identifier: "session.generateTitle",
+            summary: "Generate session title",
+            description: "Generate and persist a session title from its existing conversation history.",
           }),
         ),
         HttpApiEndpoint.post("fork", SessionPaths.fork, {

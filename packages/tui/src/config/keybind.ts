@@ -210,6 +210,8 @@ export const Definitions = {
   "dialog.select.end": keybind("end", "Move to last dialog item"),
   "dialog.select.submit": keybind("return", "Submit selected dialog item"),
   "dialog.prompt.submit": keybind("return", "Submit dialog prompt"),
+  // Ctrl+G 已被全局 messages_first 使用；Generate 只在拥有 action 的 DialogPrompt 内局部生效。
+  "dialog.prompt.generate": keybind("ctrl+g", "Generate dialog title"),
   "dialog.mcp.toggle": keybind("space", "Toggle MCP in MCP dialog"),
   "dialog.tool.toggle": keybind("space", "Toggle tool in tool dialog"),
   // #166：上下文面板关闭纳入统一 keymap（可覆盖 / which-key），禁止 raw useKeyboard

@@ -45,7 +45,13 @@ import {
   SummarizePayload,
   UpdatePayload,
 } from "../groups/session"
-import { PermissionNotFoundError, notFound } from "../errors"
+import {
+  InvalidRequestError,
+  PermissionNotFoundError,
+  ServiceUnavailableError,
+  UpstreamError,
+  notFound,
+} from "../errors"
 import * as SessionError from "./session-errors"
 
 // 私有 header 只选择更浅的 TUI wire projection；缺失时 public Message/diff schema 与完整 payload 原样保留。
@@ -286,6 +292,27 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
         yield* session.setArchived({ sessionID: ctx.params.sessionID, time: ctx.payload.time.archived })
       }
       return yield* requireSession(ctx.params.sessionID)
+    })
+
+    const generateTitle = Effect.fn("SessionHttpApi.generateTitle")(function* (ctx: {
+      params: { sessionID: SessionID }
+    }) {
+      // 运行实例必须来自持久化 Session 目录，请求 header 指向的 ambient 项目可能没有对应 Provider。
+      return yield* inSessionDirectory(ctx.params.sessionID, promptSvc.generateTitle(ctx.params.sessionID)).pipe(
+        // 只转换 NotFound，不能用通用 mapError 把已经映射好的 400/503/502 再改成 404。
+        Effect.catchTag("NotFoundError", (error) => Effect.fail(notFound(error.message))),
+        // reason 只决定公共状态码；message 沿用 domain 固定文本，不拼接 raw provider body。
+        Effect.catchTag(
+          "SessionPrompt.TitleError",
+          (error): Effect.Effect<never, InvalidRequestError | ServiceUnavailableError | UpstreamError> => {
+            if (error.reason === "no_user_message")
+              return Effect.fail(new InvalidRequestError({ message: error.message, kind: "title" }))
+            if (error.reason === "unavailable")
+              return Effect.fail(new ServiceUnavailableError({ message: error.message, service: "session.title" }))
+            return Effect.fail(new UpstreamError({ message: error.message, service: "session.title" }))
+          },
+        ),
+      )
     })
 
     const fork = Effect.fn("SessionHttpApi.fork")(function* (ctx: {
@@ -681,6 +708,7 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       .handleRaw("create", createRaw)
       .handle("remove", remove)
       .handle("update", update)
+      .handle("generateTitle", generateTitle)
       .handleRaw("fork", forkRaw)
       .handle("abort", abort)
       .handle("init", init)

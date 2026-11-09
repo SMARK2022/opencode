@@ -7234,3 +7234,235 @@ test("prompt window cache drops in-flight publication after invalidation", () =>
     PromptWindowCache.release(slot)
   }
 })
+
+it.instance(
+  "manual title generation uses active real users and supports child sessions",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig(providerCfg)
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const compaction = yield* SessionCompaction.Service
+      const chat = yield* sessions.create({ title: "Existing project title" })
+      // 旧用户位于压缩边界之前；若 wrapper 错读全量历史，多轮 guard 或旧文本会让用例失败。
+      yield* user(chat.id, "history outside the active compaction window")
+      const marker = yield* compaction.create({ sessionID: chat.id, agent: "build", model: ref, auto: false })
+      const summaryID = MessageID.ascending()
+      // 完成且无错的 summary 与 marker 配对，确保 active-window owner 不会提前移除测试边界。
+      yield* sessions.updateMessage({
+        id: summaryID,
+        role: "assistant",
+        parentID: marker.id,
+        sessionID: chat.id,
+        mode: "compaction",
+        agent: "compaction",
+        summary: true,
+        path: { cwd: "/tmp", root: "/tmp" },
+        cost: 0,
+        tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+        modelID: ref.modelID,
+        providerID: ref.providerID,
+        time: { created: Date.now(), completed: Date.now() },
+        finish: "stop",
+      })
+      yield* sessions.updatePart({
+        id: PartID.ascending(),
+        messageID: summaryID,
+        sessionID: chat.id,
+        type: "text",
+        text: "completed compacted summary",
+      })
+      // summary assistant 可以进入 Provider 前缀，compaction-only user marker 却必须被剔除。
+      // 两条 active 真实用户同时证明手动多轮能力和 firstUser 的未过滤索引锚点。
+      yield* user(chat.id, "active project requirements")
+      yield* user(chat.id, "active project constraints")
+      yield* llm.title(reply().text("Generated project title").stop())
+
+      // 手动生成只跳过自动触发 guard，仍须从首个 active 真实用户构造同一份标题上下文。
+      const generated = yield* prompt.generateTitle(chat.id)
+      expect(generated.title).toBe("Generated project title")
+      expect((yield* sessions.get(chat.id)).title).toBe("Generated project title")
+      // 直接检查真实标题 HTTP body，避免仅凭标题写回就误判 Provider 收到了正确上下文。
+      const first = JSON.stringify((yield* llm.titleHits)[0]?.body)
+      expect(first).toContain("active project requirements")
+      expect(first).not.toContain("What did we do so far?")
+      expect(first).not.toContain("history outside the active compaction window")
+
+      // parentID 只属于自动命名 guard，显式生成必须能为已有子 Session 写回独立标题。
+      const child = yield* sessions.create({ parentID: chat.id, title: "Existing child title" })
+      yield* user(child.id, "child task requirements")
+      yield* llm.title(reply().text("Generated child title").stop())
+      expect((yield* prompt.generateTitle(child.id)).title).toBe("Generated child title")
+      expect((yield* sessions.get(child.id)).title).toBe("Generated child title")
+      expect(yield* llm.titleHits).toHaveLength(2)
+    }),
+  { git: true },
+  shortSessionTimeout,
+)
+
+for (const item of [
+  // 空历史必须在 Provider 调用前返回 no_user_message，并保留用户已有标题。
+  { name: "rejects an empty history", setup: "empty", reason: "no_user_message", hits: 0 },
+  // 全 synthetic replay 没有新的用户授权，不能为了生成标题而伪造一次真实输入。
+  { name: "rejects synthetic-only history", setup: "synthetic", reason: "no_user_message", hits: 0 },
+  // 完成配对的压缩记录仍没有真实用户，覆盖旧 real predicate 把 marker 当输入的缺陷。
+  { name: "rejects compaction-only history", setup: "compaction", reason: "no_user_message", hits: 0 },
+  // title agent 被配置删除属于能力不可用，不应进入上游或返回通用 failed。
+  { name: "rejects a disabled title agent", setup: "real", config: "agent", reason: "unavailable", hits: 0 },
+  // 显式错误模型用于验证 ModelNotFound 的窄映射，不允许换模型后暗中成功。
+  { name: "rejects an unavailable title model", setup: "real", config: "model", reason: "unavailable", hits: 0 },
+  // 空 SSE 文本是上游已经调用但未产出标题，旧标题不得被空字符串覆盖。
+  { name: "rejects an empty provider title", setup: "real", response: "empty", reason: "failed", hits: 1 },
+  // 流错误验证手动请求得到 failed，而不是 defect、旧标题或伪造成功响应。
+  { name: "rejects a title stream failure", setup: "real", response: "error", reason: "failed", hits: 1 },
+] as const) {
+  it.instance(
+    `manual title generation ${item.name}`,
+    () =>
+      Effect.gen(function* () {
+        const { llm } = yield* useServerConfig((url) => {
+          const base = providerCfg(url)
+          if (item.config === "agent") return { ...base, agent: { title: { disable: true } } }
+          if (item.config === "model") return { ...base, agent: { title: { model: "test/missing-model" } } }
+          return base
+        })
+        const prompt = yield* SessionPrompt.Service
+        const sessions = yield* Session.Service
+        const chat = yield* sessions.create({ title: "Existing failure title" })
+        if (item.setup === "real") yield* user(chat.id, "real title input")
+        if (item.setup === "synthetic") {
+          // noReply 只建立持久化输入，不运行 Agent，因此 titleHits=0 能隔离 real-user guard。
+          yield* prompt.prompt({
+            sessionID: chat.id,
+            agent: "build",
+            noReply: true,
+            parts: [{ type: "text", text: "synthetic replay", synthetic: true }],
+          })
+        }
+        if (item.setup === "compaction") {
+          const compaction = yield* SessionCompaction.Service
+          const marker = yield* compaction.create({ sessionID: chat.id, agent: "build", model: ref, auto: false })
+          const summaryID = MessageID.ascending()
+          // 无 memento 的完整 marker/summary 对仍不是用户输入，不能借未配对 marker 制造假 red。
+          yield* sessions.updateMessage({
+            id: summaryID,
+            role: "assistant",
+            parentID: marker.id,
+            sessionID: chat.id,
+            mode: "compaction",
+            agent: "compaction",
+            summary: true,
+            path: { cwd: "/tmp", root: "/tmp" },
+            cost: 0,
+            tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+            modelID: ref.modelID,
+            providerID: ref.providerID,
+            time: { created: Date.now(), completed: Date.now() },
+            finish: "stop",
+          })
+          yield* sessions.updatePart({
+            id: PartID.ascending(),
+            messageID: summaryID,
+            sessionID: chat.id,
+            type: "text",
+            text: "completed summary without real users",
+          })
+        }
+        // 独立 title queue 让空输出与流错误不消耗主 Agent fixture，两个分支共享同一失败断言。
+        if (item.response === "empty") yield* llm.title(reply().stop())
+        if (item.response === "error") yield* llm.title(reply().streamError("title upstream failed").item())
+
+        // Effect.flip 只接受 typed rejection；defect 会使测试直接失败，不能获得绿色假象。
+        const error = yield* prompt.generateTitle(chat.id).pipe(Effect.flip)
+        expect(error).toBeInstanceOf(SessionPrompt.TitleError)
+        if (!(error instanceof SessionPrompt.TitleError)) throw new Error("Expected typed title failure")
+        expect(error.reason).toBe(item.reason)
+        expect((yield* sessions.get(chat.id)).title).toBe("Existing failure title")
+        expect(yield* llm.titleHits).toHaveLength(item.hits)
+      }),
+    { git: true },
+    shortSessionTimeout,
+  )
+}
+
+it.instance(
+  "automatic title generation preserves the default first-turn behavior",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig(providerCfg)
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create()
+      yield* user(chat.id, "first real request")
+      // 标题和主回复分别排队，自动后台请求再早也不会偷走 Main Reply。
+      yield* llm.title(reply().text("Auto Title").stop())
+      yield* llm.text("Main Reply")
+      const result = yield* prompt.loop({ sessionID: chat.id })
+      expect(result.parts.some((part) => part.type === "text" && part.text === "Main Reply")).toBe(true)
+      // 后台标题以真实持久化结果作为 readiness，不能用固定 sleep 猜测 fork 已完成。
+      yield* pollWithTimeout(
+        Effect.map(sessions.get(chat.id), (session) => session.title === "Auto Title" || undefined),
+        "automatic title was not persisted",
+      )
+      expect(yield* llm.titleHits).toHaveLength(1)
+    }),
+  { git: true },
+  shortSessionTimeout,
+)
+
+for (const item of [
+  // 用户已经命名时自动路径不得覆盖，即使仍存在唯一真实用户。
+  { name: "custom title", title: "User supplied title", child: false, users: 1 },
+  // parentID 只阻止自动命名，与前面手动子 Session 正向用例形成明确触发边界。
+  { name: "child session", title: undefined, child: true, users: 1 },
+  // 两个真实用户让 exactly-one guard 拒绝自动命名，防止取第一条或最后一条暗中生成。
+  { name: "multiple real users", title: undefined, child: false, users: 2 },
+] as const) {
+  it.instance(
+    `automatic title generation skips ${item.name}`,
+    () =>
+      Effect.gen(function* () {
+        const { llm } = yield* useServerConfig(providerCfg)
+        const prompt = yield* SessionPrompt.Service
+        const sessions = yield* Session.Service
+        const parent = item.child ? yield* sessions.create() : undefined
+        const chat = yield* sessions.create({ title: item.title, parentID: parent?.id })
+        for (const index of Array.from({ length: item.users }, (_, index) => index)) {
+          yield* user(chat.id, `real request ${index}`)
+        }
+        yield* llm.text(`Main ${item.name}`)
+        const result = yield* prompt.loop({ sessionID: chat.id })
+        expect(result.parts.some((part) => part.type === "text" && part.text === `Main ${item.name}`)).toBe(true)
+        // 三个自动 guard 均在异步标题服务前返回；主 Provider 完成后不得出现额外标题 HTTP 请求。
+        expect(yield* llm.titleHits).toHaveLength(0)
+        expect((yield* sessions.get(chat.id)).title).toBe(chat.title)
+      }),
+    { git: true },
+    shortSessionTimeout,
+  )
+}
+
+it.instance(
+  "automatic title failure does not block the main reply",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig(providerCfg)
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create()
+      yield* user(chat.id, "first real request after title failure")
+      // 标题流失败与主回复成功同时入队，验证 Effect.ignore 只隔离标题分支而非吞掉主错误。
+      yield* llm.title(reply().streamError("title stream unavailable").item())
+      yield* llm.text("Main After Title Failure")
+      const result = yield* prompt.loop({ sessionID: chat.id })
+      expect(result.parts.some((part) => part.type === "text" && part.text === "Main After Title Failure")).toBe(true)
+      yield* pollWithTimeout(
+        Effect.map(llm.titleHits, (hits) => hits.length === 1 || undefined),
+        "title provider was not called",
+      )
+      // 失败只发生在独立标题分支，主回复成功且默认标题不被伪造为已生成。
+      expect(Session.isDefaultTitle((yield* sessions.get(chat.id)).title)).toBe(true)
+    }),
+  { git: true },
+  shortSessionTimeout,
+)

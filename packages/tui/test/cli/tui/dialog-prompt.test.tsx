@@ -26,6 +26,8 @@ async function mountPrompt(input: {
   root: string
   keybinds: Partial<TuiKeybind.Keybinds>
   onConfirm: (value: string) => void
+  onGenerate?: () => void
+  onGlobalFirst?: () => void
 }) {
   const state = path.join(input.root, "state")
   await mkdir(state, { recursive: true })
@@ -38,7 +40,7 @@ async function mountPrompt(input: {
     { ThemeProvider },
     { TuiConfigProvider },
     { ToastProvider },
-    { OpencodeKeymapProvider, registerOpencodeKeymap },
+    { OpencodeKeymapProvider, registerOpencodeKeymap, useBindings },
   ] = await Promise.all([
     import("../../../src/ui/dialog"),
     import("../../../src/ui/dialog-prompt"),
@@ -58,6 +60,20 @@ async function mountPrompt(input: {
     })
     const off = registerOpencodeKeymap(keymap, renderer, resolvedConfig)
     onCleanup(off)
+    function GlobalBindings() {
+      // messages_first 是配置键，session.first 才是可执行 command，二者不能混用。
+      // 独立全局 probe 能发现局部 binding 漏跑或错误吞键，而不是只检查 callback 被调用。
+      useBindings(() => ({
+        commands: [{
+          name: "session.first",
+          title: "Navigate to first message",
+          category: "Messages",
+          run: () => input.onGlobalFirst?.(),
+        }],
+        bindings: resolvedConfig.keybinds.get("session.first"),
+      }))
+      return null
+    }
     // 复用真实 SDK Provider，仅在传输边界隔离网络；Dialog 的语音依赖仍由正常 context 提供。
     const calls = createFetch()
     const events = createEventSource()
@@ -74,13 +90,20 @@ async function mountPrompt(input: {
         }}
       >
         <OpencodeKeymapProvider keymap={keymap}>
+          {/* 只有需要验证全局行为的用例注册 probe，避免改变其他 DialogPrompt 基线。 */}
+          {input.onGlobalFirst ? <GlobalBindings /> : null}
           <TuiConfigProvider config={resolvedConfig}>
             <KVProvider>
               <ThemeProvider mode="dark">
                 <ToastProvider>
                   <SDKProvider url="http://test" directory={directory} testTransport={{ fetch: calls.fetch, events: events.source }}>
                     <DialogProvider>
-                      <DialogPrompt title="Rename Session" value="draft" onConfirm={input.onConfirm} />
+                      <DialogPrompt
+                        title="Rename Session"
+                        value="draft"
+                        onConfirm={input.onConfirm}
+                        onGenerate={input.onGenerate}
+                      />
                     </DialogProvider>
                   </SDKProvider>
                 </ToastProvider>
@@ -160,6 +183,87 @@ test("dialog prompt submit can be rebound separately from input submit", async (
     prompt.app.mockInput.pressKey("y", { ctrl: true })
 
     expect(confirmed).toEqual(["draft"])
+  } finally {
+    await prompt.cleanup()
+  }
+})
+
+test("dialog prompt generate stays local and renders the short label", async () => {
+  await using tmp = await tmpdir()
+  const generated: string[] = []
+  const global: string[] = []
+  const prompt = await mountPrompt({
+    root: tmp.path,
+    keybinds: { messages_first: "ctrl+g" },
+    onConfirm: () => {},
+    onGenerate: () => generated.push("generate"),
+    onGlobalFirst: () => global.push("messages_first"),
+  })
+
+  try {
+    await wait(() => prompt.app.renderer.currentFocusedEditor instanceof TextareaRenderable)
+    await prompt.app.renderOnce()
+    // 真实 frame 同时锁定短文案存在和 Generate Title 不存在，防止商业文案回退。
+    // 快捷键断言与文案断言分离，任何一项缺失都不能靠另一项假绿。
+    const frame = prompt.app.captureCharFrame()
+    expect(frame).toContain("Generate")
+    expect(frame).not.toContain("Generate Title")
+    // 局部 Generate 必须执行一次，同时全局 session.first 必须保持零调用。
+    prompt.app.mockInput.pressKey("g", { ctrl: true })
+    expect(generated).toEqual(["generate"])
+    expect(global).toEqual([])
+  } finally {
+    await prompt.cleanup()
+  }
+})
+
+test("dialog prompt generate can be rebound", async () => {
+  await using tmp = await tmpdir()
+  const generated: string[] = []
+  const global: string[] = []
+  const prompt = await mountPrompt({
+    root: tmp.path,
+    // 覆盖配置把 Generate 移到 Ctrl+Y，验证默认键不是硬编码在生产组件内。
+    keybinds: { messages_first: "ctrl+g", "dialog.prompt.generate": "ctrl+y" },
+    onConfirm: () => {},
+    onGenerate: () => generated.push("generate"),
+    onGlobalFirst: () => global.push("messages_first"),
+  })
+
+  try {
+    await wait(() => prompt.app.renderer.currentFocusedEditor instanceof TextareaRenderable)
+    // rebind 后原 Ctrl+G 不再属于局部 action，全局命令应恢复处理该键。
+    prompt.app.mockInput.pressKey("g", { ctrl: true })
+    expect(generated).toEqual([])
+    expect(global).toEqual(["messages_first"])
+    // 新快捷键只触发 Generate，不能再落到全局 messages_first。
+    prompt.app.mockInput.pressKey("y", { ctrl: true })
+    expect(generated).toEqual(["generate"])
+  } finally {
+    await prompt.cleanup()
+  }
+})
+
+test("dialog prompt without generate preserves the global shortcut", async () => {
+  await using tmp = await tmpdir()
+  const global: string[] = []
+  // 未传 onGenerate 模拟其他既有 DialogPrompt，条件 binding 不得改变它们的全局快捷键。
+  const prompt = await mountPrompt({
+    root: tmp.path,
+    keybinds: { messages_first: "ctrl+g" },
+    onConfirm: () => {},
+    onGlobalFirst: () => global.push("messages_first"),
+  })
+
+  try {
+    await wait(() => prompt.app.renderer.currentFocusedEditor instanceof TextareaRenderable)
+    await prompt.app.renderOnce()
+    // 无 action 时连 footer 也不能出现 Generate，避免展示一个不可执行入口。
+    expect(prompt.app.captureCharFrame()).not.toContain("Generate")
+    // 同一 Ctrl+G 在没有局部注册时必须到达 session.first。
+    prompt.app.mockInput.pressKey("g", { ctrl: true })
+    await prompt.app.renderOnce()
+    expect(global).toEqual(["messages_first"])
   } finally {
     await prompt.cleanup()
   }

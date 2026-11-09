@@ -268,7 +268,15 @@ export function disabledToolNotice(
 }
 
 
+// 公共失败只暴露三种稳定原因，调用方无需解析 Provider 的私有错误体。
+// 自动命名仍忽略这些失败，手动生成则必须能把同一原因映射到 HTTP/UI。
+export class TitleError extends Schema.TaggedErrorClass<TitleError>()("SessionPrompt.TitleError", {
+  message: Schema.String,
+  reason: Schema.Literals(["no_user_message", "unavailable", "failed"]),
+}) {}
+
 export interface Interface {
+  readonly generateTitle: (sessionID: SessionID) => Effect.Effect<Session.Info, TitleError | Session.NotFound>
   readonly cancel: (sessionID: SessionID) => Effect.Effect<void>
   readonly prompt: (input: PromptInput) => Effect.Effect<SessionV1.WithParts, Image.Error>
   readonly loop: (input: LoopInput) => Effect.Effect<SessionV1.WithParts>
@@ -473,32 +481,57 @@ const layer = Layer.effect(
     const title = Effect.fn("SessionPrompt.ensureTitle")(function* (input: {
       session: Session.Info
       history: SessionV1.WithParts[]
-      providerID: ProviderV2.ID
-      modelID: ModelV2.ID
+      providerID?: ProviderV2.ID
+      modelID?: ModelV2.ID
+      manual?: boolean
     }) {
-      if (input.session.parentID) return
-      if (!Session.isDefaultTitle(input.session.title)) return
+      // 手动生成只跳过自动触发 guard；real-user、模型、标题请求与清理算法仍走原路径。
+      if (!input.manual && input.session.parentID) return input.session
+      if (!input.manual && !Session.isDefaultTitle(input.session.title)) return input.session
 
+      // compaction-only 和全 synthetic 消息都没有真实用户授权，不能触发标题写回。
+      // 混合消息只要保留一个真实 part 就仍是用户输入，不能按 every(synthetic) 误删。
       const real = (m: SessionV1.WithParts) =>
-        m.info.role === "user" && !m.parts.every((p) => "synthetic" in p && p.synthetic)
+        m.info.role === "user" && m.parts.some((p) => p.type !== "compaction" && !("synthetic" in p && p.synthetic))
       const idx = input.history.findIndex(real)
-      if (idx === -1) return
-      if (input.history.filter(real).length !== 1) return
+      if (idx === -1)
+        return yield* new TitleError({
+          message: "No user message is available for title generation",
+          reason: "no_user_message",
+        })
+      // exactly-one 只约束首轮自动命名；手动 Generate 允许在多轮 Session 上重新生成。
+      if (!input.manual && input.history.filter(real).length !== 1) return input.session
 
-      const context = input.history.slice(0, idx + 1)
-      const firstUser = context[idx]
-      if (!firstUser || firstUser.info.role !== "user") return
+      // compaction-only marker 不进入 Provider；firstUser 仍锚定未过滤 history，避免索引漂移。
+      const context = input.history
+        .slice(0, idx + 1)
+        .filter((m) => m.info.role !== "user" || m.parts.some((p) => p.type !== "compaction"))
+      const firstUser = input.history[idx]
+      if (!firstUser || firstUser.info.role !== "user")
+        return yield* new TitleError({
+          message: "No user message is available for title generation",
+          reason: "no_user_message",
+        })
       const firstInfo = firstUser.info
 
       const subtasks = firstUser.parts.filter((p): p is SessionV1.SubtaskPart => p.type === "subtask")
       const onlySubtasks = subtasks.length > 0 && firstUser.parts.every((p) => p.type === "subtask")
 
       const ag = yield* agents.get("title")
-      if (!ag) return
-      const mdl = ag.model
-        ? yield* provider.getModel(ag.model.providerID, ag.model.modelID)
-        : ((yield* provider.getSmallModel(input.providerID)) ??
-          (yield* provider.getModel(input.providerID, input.modelID)))
+      if (!ag)
+        return yield* new TitleError({ message: "Title generation is currently unavailable", reason: "unavailable" })
+      const providerID = input.providerID ?? firstInfo.model.providerID
+      const modelID = input.modelID ?? firstInfo.model.modelID
+      // 模型顺序保持 title agent、小模型、首个真实用户模型；缺省解析不得换成别的 Provider。
+      // ModelNotFound 只表示当前标题能力不可用，不能伪装成上游生成失败。
+      const mdl = yield* Effect.gen(function* () {
+        if (ag.model) return yield* provider.getModel(ag.model.providerID, ag.model.modelID)
+        return (yield* provider.getSmallModel(providerID)) ?? (yield* provider.getModel(providerID, modelID))
+      }).pipe(
+        Effect.catchIf(Provider.ModelNotFoundError.isInstance, () =>
+          Effect.fail(new TitleError({ message: "Title generation is currently unavailable", reason: "unavailable" })),
+        ),
+      )
       const msgs = onlySubtasks
         ? [{ role: "user" as const, content: subtasks.map((p) => p.prompt).join("\n") }]
         : yield* MessageV2.toModelMessagesEffect(context, mdl)
@@ -518,18 +551,34 @@ const layer = Layer.effect(
           Stream.filter(LLMEvent.is.textDelta),
           Stream.map((e) => e.text),
           Stream.mkString,
-          Effect.orDie,
+          // 上游或转换错误只映射为安全公共失败，不能把 raw provider body 暴露给 UI。
+          Effect.mapError(() => new TitleError({ message: "Title generation failed", reason: "failed" })),
         )
       const cleaned = text
         .replace(/<think>[\s\S]*?<\/think>\s*/g, "")
         .split("\n")
         .map((line) => line.trim())
         .find((line) => line.length > 0)
-      if (!cleaned) return
+      // 空输出不能覆盖旧标题；固定 100/97 截断保留既有标题长度合同。
+      if (!cleaned) return yield* new TitleError({ message: "Title generation failed", reason: "failed" })
       const t = cleaned.length > 100 ? cleaned.substring(0, 97) + "..." : cleaned
+      if (input.manual) {
+        // 手动响应必须返回持久化后的快照，不能把请求前 Session 当成已写回结果。
+        yield* sessions.setTitle({ sessionID: input.session.id, title: t })
+        return yield* sessions.get(input.session.id)
+      }
+      // 自动写回保持 best-effort：持久化失败只记日志，主 Agent 回复不被标题分支拖失败。
       yield* sessions
         .setTitle({ sessionID: input.session.id, title: t })
         .pipe(Effect.catchCause((cause) => Effect.logError("failed to generate title", { error: Cause.squash(cause) })))
+      return input.session
+    })
+
+    const generateTitle = Effect.fn("SessionPrompt.generateTitle")(function* (sessionID: SessionID) {
+      const session = yield* sessions.get(sessionID)
+      // wrapper 只加载既有 active window；Database 由当前实例层提供，不新建跨目录连接。
+      const history = yield* MessageV2.filterCompactedEffect(sessionID).pipe(Effect.provideService(Database.Service, database))
+      return yield* title({ session, history, manual: true })
     })
 
     const handleSubtask = Effect.fn("SessionPrompt.handleSubtask")(function* (input: {
@@ -2442,6 +2491,7 @@ const layer = Layer.effect(
     })
 
     return Service.of({
+      generateTitle,
       cancel,
       prompt,
       loop,

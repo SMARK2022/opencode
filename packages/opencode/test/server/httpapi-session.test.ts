@@ -46,7 +46,7 @@ import * as DateTime from "effect/DateTime"
 import { eq } from "drizzle-orm"
 import { resetDatabase } from "../fixture/db"
 import { disposeAllInstances, provideInstanceEffect, TestInstance, tmpdirScoped } from "../fixture/fixture"
-import { TestLLMServer } from "../lib/llm-server"
+import { reply, TestLLMServer } from "../lib/llm-server"
 import { testProviderConfig } from "../lib/test-provider"
 import { awaitWithTimeout, pollWithTimeout, testEffect } from "../lib/effect"
 
@@ -1500,4 +1500,73 @@ describe("session HttpApi", () => {
       expect(response.status).toBe(404)
     }).pipe(Effect.provide(TestLLMServer.layer), Effect.provide(AppNodeBuilder.build(CrossSpawnSpawner.node))),
   )
+
+  it.live("generates a title in the persisted session directory", () =>
+    Effect.gen(function* () {
+      const llm = yield* TestLLMServer
+      // 用户 fixture 的模型是 test/test；显式 small_model 保证标题仍走注册的 test/test-model。
+      const directoryA = yield* tmpdirScoped({
+        git: true,
+        config: { ...testProviderConfig(llm.url), small_model: "test/test-model" },
+      })
+      // B 没有 Provider 配置；请求从 B 到达仍生成 A 的标题，证明 instance placement 来自持久化 Session。
+      const directoryB = yield* tmpdirScoped({ git: true, config: { formatter: false, lsp: false } })
+      const session = yield* createSession({ title: "HTTP title draft" }).pipe(provideInstanceEffect(directoryA))
+      yield* createTextMessage(session.id, "HTTP title requirements").pipe(provideInstanceEffect(directoryA))
+      yield* llm.title(reply().text("HTTP Generated Title").stop())
+
+      const response = yield* request(pathFor("/session/:sessionID/title", { sessionID: session.id }), {
+        method: "POST",
+        headers: { "x-opencode-directory": directoryB },
+      })
+      expect(response.status).toBe(200)
+      // 响应与持久化 readback 都必须来自最终 Session.Info，不能只返回请求前快照。
+      expect(yield* responseJson(response)).toMatchObject({ id: session.id, title: "HTTP Generated Title" })
+      const stored = yield* Session.use.get(session.id).pipe(provideInstanceEffect(directoryA))
+      expect(stored.title).toBe("HTTP Generated Title")
+      expect(yield* llm.titleHits).toHaveLength(1)
+    }).pipe(Effect.provide(TestLLMServer.layer), Effect.provide(AppNodeBuilder.build(CrossSpawnSpawner.node))),
+  )
+
+  for (const item of [
+    // 不存在的 Session 由 inSessionDirectory/requireSession 保留标准 NotFoundError。
+    { name: "missing session", status: 404, tag: "NotFoundError" },
+    // no_user_message 是请求不具备生成输入，wire 必须包含 kind=title 的 400。
+    { name: "empty history", status: 400, tag: "InvalidRequestError", kind: "title", real: false },
+    // ModelNotFound 表示标题能力不可用，映射 503 而不是 Provider 已经失败后的 502。
+    { name: "unavailable model", status: 503, tag: "ServiceUnavailableError", service: "session.title", real: true, model: true },
+    // Provider 已返回但内容为空属于上游失败，service=session.title 的 502 不暴露私有 body。
+    { name: "empty provider title", status: 502, tag: "UpstreamError", service: "session.title", real: true, empty: true },
+  ] as const) {
+    it.live(`returns ${item.status} for title generation with ${item.name}`, () =>
+      Effect.gen(function* () {
+        const llm = yield* TestLLMServer
+        const directory = yield* tmpdirScoped({
+          git: true,
+          config: {
+            ...testProviderConfig(llm.url),
+            small_model: "test/test-model",
+            ...(item.model ? { agent: { title: { model: "test/missing-model" } } } : {}),
+          },
+        })
+        const session = item.status === 404 ? undefined : yield* createSession({ title: "Unchanged HTTP title" }).pipe(provideInstanceEffect(directory))
+        if (session && item.real) yield* createTextMessage(session.id, "HTTP failure input").pipe(provideInstanceEffect(directory))
+        if (item.empty) yield* llm.title(reply().stop())
+        const sessionID = session?.id ?? SessionID.descending()
+
+        const response = yield* request(pathFor("/session/:sessionID/title", { sessionID }), {
+          method: "POST",
+          headers: { "x-opencode-directory": directory },
+        })
+        expect(response.status).toBe(item.status)
+        expect(yield* responseJson(response)).toMatchObject({
+          ...(item.status === 404 ? { name: item.tag } : { _tag: item.tag }),
+          ...(item.kind ? { kind: item.kind } : {}),
+          ...(item.service ? { service: item.service } : {}),
+        })
+        // 每个非 404 失败都必须保留旧标题，防止错误映射之前已发生持久化副作用。
+        if (session) expect((yield* Session.use.get(session.id).pipe(provideInstanceEffect(directory))).title).toBe("Unchanged HTTP title")
+      }).pipe(Effect.provide(TestLLMServer.layer), Effect.provide(AppNodeBuilder.build(CrossSpawnSpawner.node))),
+    )
+  }
 })
