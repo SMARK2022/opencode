@@ -248,7 +248,7 @@ const observedSnapshot = LayerNode.make({
   deps: [FSUtil.node, AppProcess.node, Config.node],
 })
 // 观察公开LLM调用入口，准备预算不混入目标新增的wire估算与持久账本结算。
-const llmDispatchTimes = new Map<string, number>()
+const llmDispatches = new Map<string, { at: number; messages: LLM.StreamInput["messages"] }>()
 const measuredLLM = LayerNode.make({
   service: LLM.Service,
   layer: Layer.effect(
@@ -258,7 +258,7 @@ const measuredLLM = LayerNode.make({
       return LLM.Service.of({
         stream: (input) => {
           // 小模型后台任务不属于被测用户请求，仍原样转交真实实现。
-          if (!input.small) llmDispatchTimes.set(input.sessionID, performance.now())
+          if (!input.small) llmDispatches.set(input.sessionID, { at: performance.now(), messages: input.messages })
           return base.stream(input)
         },
       })
@@ -6523,6 +6523,8 @@ measuredPreflight.instance(
       const prompt = yield* SessionPrompt.Service
       const sessions = yield* Session.Service
       const chat = yield* sessions.create({ title: "Large retained prefix" })
+      // 观察器只保留当前用例的公开输入，不能让大历史在测试结束后继续驻留。
+      yield* Effect.addFinalizer(() => Effect.sync(() => { llmDispatches.delete(chat.id) }))
       // 计时对象是读取及转换；造数不经逐条事件fanout，避免把账本维护成本当成缓存回归。
       const database = yield* Database.Service
       // 历史早于后续真实输入，保持2048个闭合turn的创建顺序而不依赖ID比较。
@@ -6581,23 +6583,27 @@ measuredPreflight.instance(
 
       yield* user(chat.id, "cold suffix")
       yield* llm.text("cold response")
-      const coldStarted = performance.now()
       yield* prompt.loop({ sessionID: chat.id })
-      // cold 样本包含首次 hydrate 与 chunk construction，是原始回归基线。
-      const cold = performance.now() - coldStarted
+      const cold = llmDispatches.get(chat.id)
+      if (!cold) throw new Error("Expected cold LLM dispatch")
 
       yield* user(chat.id, "warm suffix")
       yield* llm.text("warm response")
       const warmStarted = performance.now()
       yield* prompt.loop({ sessionID: chat.id })
-      // warm 仍包含 Provider HTTP 与 durable Assistant 写入，不是 private helper 计时。
-      const warm = performance.now() - warmStarted
-      const dispatchedAt = llmDispatchTimes.get(chat.id)
-      if (dispatchedAt === undefined) throw new Error("Expected public LLM dispatch")
-      // 整轮保持冷暖对比；1秒约束消息准备至公开入口，prepared估算和确认账本仍走真实路径。
-      expect(warm).toBeLessThan(cold)
-      expect(dispatchedAt).toBeGreaterThanOrEqual(warmStarted)
-      expect(dispatchedAt - warmStarted).toBeLessThan(1_000)
+      const warm = llmDispatches.get(chat.id)
+      if (!warm) throw new Error("Expected warm LLM dispatch")
+      // 公开输入中的相同转换对象证明真实前缀复用，不把 Provider 延迟及结算波动当作缓存失效。
+      const prefix = warm.messages.slice(0, full.length)
+      expect(cold.messages.slice(0, full.length)).toEqual(full)
+      expect(prefix).toEqual(full)
+      expect(prefix.every((message, index) => message === cold.messages[index])).toBe(true)
+      const body = JSON.stringify((yield* llm.inputs).at(-1)?.messages)
+      expect(body).toContain("cold response")
+      expect(body).toContain("warm suffix")
+      // 一秒预算仍约束消息准备至公开入口，真实 wire 估算及持久结算继续执行。
+      expect(warm.at).toBeGreaterThanOrEqual(warmStarted)
+      expect(warm.at - warmStarted).toBeLessThan(1_000)
 
       // 首次无新消息调用先 admit 刚完成的 Assistant；第二次才是 proof 完全不变的 exact full hit。
       yield* prompt.loop({ sessionID: chat.id })
@@ -6611,8 +6617,8 @@ measuredPreflight.instance(
       const rebuildStarted = performance.now()
       yield* prompt.loop({ sessionID: chat.id })
       const rebuild = performance.now() - rebuildStarted
-      // 两条路径均不 dispatch Provider，时间差只来自 admission/hydration/conversion。
-      // 沿用本轮起点既有120ms跨架构余量；无缓存整段重载仍会违反0.65比例。
+      // 两条路径均不 dispatch Provider，单独保留 admission/hydration 的性能预算。
+      // 沿用120ms跨架构余量；预算不充当前缀命中证明，复用由公开输入断言锁定。
       expect(fullHit).toBeLessThan(rebuild * 0.65 + 120)
       expect(yield* llm.calls).toBe(2)
     }),

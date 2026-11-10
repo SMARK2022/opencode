@@ -1150,8 +1150,8 @@ describe("daemon lifecycle", () => {
           fetch(request) {
             if (request.headers.get("x-opencode-daemon-token") !== token) return new Response("unauthorized", { status: 401 })
             if (new URL(request.url).pathname === "/shutdown") {
-              // 嵌套 -e 子进程同样隐藏 Windows console，不能依赖外层 spawnBackground。
-              Bun.spawn([process.execPath, "-e", ${JSON.stringify(replacementCode)}], { stdin: "ignore", stdout: "ignore", stderr: "ignore", windowsHide: process.platform === "win32" })
+              // 接管仍由已认证 shutdown 触发；进程生命周期交给测试宿主管理。
+              process.send("replacement")
               return Response.json({ ok: true })
             }
             return Response.json({ stopping: true })
@@ -1160,11 +1160,22 @@ describe("daemon lifecycle", () => {
         await Bun.write(${JSON.stringify(lockPath)}, JSON.stringify({ pid: process.pid, port: publicServer.port, token, dbPath: "original", channel: "local", startedAt: new Date().toISOString(), controlPort: controlServer.port }))
         setInterval(() => {}, 1_000)
       `
+      // 两个 owner 都由测试持有句柄，Windows 关闭 original 的 job 不会连带结束 replacement。
+      let replacement: Bun.Subprocess | undefined
       const original = spawnBackground([process.execPath, "-e", fakeOwner], {
         env: isolatedDaemonEnv(lockPath),
         stdin: "ignore",
         stdout: "ignore",
         stderr: "ignore",
+        ipc(message) {
+          if (message !== "replacement") return
+          replacement = spawnBackground([process.execPath, "-e", replacementCode], {
+            env: isolatedDaemonEnv(lockPath),
+            stdin: "ignore",
+            stdout: "ignore",
+            stderr: "ignore",
+          })
+        },
       })
 
       try {
@@ -1200,17 +1211,20 @@ describe("daemon lifecycle", () => {
         expect(result.stderr).toContain("owner changed")
         expect(result.stderr).not.toContain("Force-stopped")
         expect(replacementPid).toBeDefined()
+        expect(replacementPid).toBe(replacement?.pid)
         // #523：replacement 存活是 changed-owner 安全断言的核心，而非仅检查错误文案。
         expect(ServerLock.alive(replacementPid!)).toBe(true)
+        // 原 owner 退出不能替测试杀掉新 owner；同时覆盖 finally 面对已退出句柄的重复清理。
+        original.kill()
+        await original.exited
+        expect(replacement && ServerLock.alive(replacement.pid)).toBe(true)
+        replacement?.kill()
+        await replacement?.exited
       } finally {
-        // #523：replacement 不在本测试的直接句柄内——从 lock 反查 pid 再清理，避免残留进程。
-        if (ServerLock.alive(original.pid)) original.kill()
-        const replacement = await Bun.file(lockPath)
-          .text()
-          .then((text) => JSON.parse(text) as ServerLock.ServerLock)
-          .catch(() => undefined)
-        if (replacement && replacement.pid !== original.pid && ServerLock.alive(replacement.pid)) process.kill(replacement.pid)
-        await original.exited.catch(() => undefined)
+        // 句柄负责 ESRCH 幂等性；等待真实退出再释放临时目录，不吞掉其他终止错误。
+        original.kill()
+        replacement?.kill()
+        await Promise.all([original.exited, replacement?.exited])
       }
     },
     40_000,
