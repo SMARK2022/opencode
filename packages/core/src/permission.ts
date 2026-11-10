@@ -161,7 +161,9 @@ const layer = Layer.effect(
       if (!session) return yield* new SessionV2.NotFoundError({ sessionID })
       const agent = yield* agents.resolve(agentID ?? session.agent)
       // 子会话限制位于代理规则之后；审批和实际执行不能只看代理默认allow。
-      return merge(agent?.permissions ?? missingAgentPermissions, yield* sessions.permissions(sessionID))
+      const rules = merge(agent?.permissions ?? missingAgentPermissions, yield* sessions.permissions(sessionID))
+      // auto action 同时承载子代理继承；automatic 只用于请求局部提升，不改持久规则。
+      return { rules, automatic: agent?.id === "auto" || rules.some((rule) => rule.effect === "auto") }
     })
 
     function denied(input: AssertInput, rules: Permission.Ruleset) {
@@ -184,14 +186,19 @@ const layer = Layer.effect(
     }
 
     const evaluateInput = EffectRuntime.fnUntraced(function* (input: AssertInput) {
-      const rules = yield* configured(input.sessionID, input.agent)
-      if (denied(input, rules)) return { effect: "deny" as const, rules }
+      const configuredResult = yield* configured(input.sessionID, input.agent)
+      if (denied(input, configuredResult.rules)) return { effect: "deny" as const, rules: configuredResult.rules }
       const remembered = yield* savedRules()
-      const all = [...rules, ...remembered]
+      const all = [...configuredResult.rules, ...remembered]
       const canonical = patterns(input)
       // 既有持久审批保存的是原命令；只有配置deny通过后才可复用该明确批准。
       const approved = canonical !== input.resources && input.resources.every((resource) => evaluate(input.action, resource, remembered).effect === "allow")
-      const effects = canonical.map((resource) => approved ? "allow" : evaluate(input.action, resource, all).effect)
+      const effects = canonical.map((resource) => {
+        if (approved) return "allow"
+        const effect = evaluate(input.action, resource, all).effect
+        // deny/raw deny/remembered allow 已先处理；auto 上下文只把剩余 ask 提升为 auto。
+        return configuredResult.automatic && effect === "ask" ? "auto" : effect
+      })
       const resources = canonical.filter((_, index) => effects[index] === "auto")
       const effect: Permission.Effect = effects.includes("deny") ? "deny" : effects.includes("ask") ? "ask" : "allow"
       if (effect === "deny" || resources.length === 0) return { effect, rules: all }
@@ -363,12 +370,12 @@ const layer = Layer.effect(
           const rememberedRules = yield* savedRules()
           for (const [id, item] of pending) {
             const input = { ...item.request }
-            const rules = yield* configured(item.request.sessionID, item.agent).pipe(
+            const configuredResult = yield* configured(item.request.sessionID, item.agent).pipe(
               EffectRuntime.catchTag("Session.NotFoundError", () => EffectRuntime.succeed(undefined)),
             )
-            if (!rules) continue
-            if (denied(input, rules)) continue
-            const effective = [...rules, ...rememberedRules]
+            if (!configuredResult) continue
+            if (denied(input, configuredResult.rules)) continue
+            const effective = [...configuredResult.rules, ...rememberedRules]
             if (
               !item.request.resources.every(
                 (resource) => evaluate(item.request.action, resource, effective).effect === "allow",

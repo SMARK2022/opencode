@@ -3030,7 +3030,7 @@ it.instance(
 // #216：cancel 在 auto-review 进行中触发——验证中止状态正确传播到工具和 reviewer 子会话
 
 it.instance(
-  "auto agent tool permission requests carry auto agent evidence before approval",
+  "auto agent promotes tool ask requests without direct manual pending",
   () =>
     Effect.gen(function* () {
       const { llm } = yield* useServerConfig((url) => ({
@@ -3058,19 +3058,13 @@ it.instance(
           })
           .item(),
       )
-      const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkScoped)
-      yield* llm.wait(1)
-      const [request] = yield* waitForPermission(1)
-      expect(request.permission).toBe("todowrite")
-      // Tool implementations should not each remember to copy ctx.agent into
-      // metadata. The prompt adapter owns that permission fact so native auto can
-      // enable reviewer consistently for every non-shell tool request.
-      expect(request.metadata.agent).toBe("auto")
-      yield* permission.reply({ requestID: request.id, reply: "reject" })
-      yield* Fiber.await(fiber)
+      yield* prompt.loop({ sessionID: chat.id })
+      expect(yield* permission.list()).toHaveLength(0)
+      // auto 上下文把该 ask 提升为 auto；general fast path 直接完成且不再产生人工 pending。
+      expect((yield* MessageV2.filterCompactedEffect(chat.id)).flatMap((message) => message.parts).some((part) => part.type === "tool" && part.tool === "todowrite" && part.state.status === "completed")).toBe(true)
     }),
   { git: true },
-  10_000,
+  30_000,
 )
 
 it.instance(

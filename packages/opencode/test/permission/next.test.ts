@@ -5,6 +5,7 @@ import { Cause, Deferred, Effect, Exit, Fiber, Layer } from "effect"
 import { EventV2Bridge } from "../../src/event-v2-bridge"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { Permission } from "../../src/permission"
+import { SubagentPermissions } from "@opencode-ai/core/permission/subagent"
 import { PermissionSessionCache } from "../../src/permission/cache/session-cache"
 import { PermissionCircuitBreaker } from "../../src/permission/reviewer/circuit-breaker"
 import { PermissionReviewer } from "../../src/permission/reviewer/service"
@@ -13,9 +14,13 @@ import { InstanceBootstrap } from "../../src/project/bootstrap"
 import { InstanceStore } from "../../src/project/instance-store"
 import { TestInstance, tmpdirScoped } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
+import { TestConfig } from "../fixture/config"
 import { MessageID, SessionID } from "../../src/session/schema"
 import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+import { ProjectV2 } from "@opencode-ai/core/project"
+import { Session } from "../../src/session/session"
+import { Storage } from "../../src/storage/storage"
 
 const noopBootstrap = Layer.succeed(InstanceBootstrap.Service, InstanceBootstrap.Service.of({ run: Effect.void }))
 const env = AppNodeBuilder.build(
@@ -136,6 +141,18 @@ const failingReviewedConfigEnv = AppNodeBuilder.build(
     ],
   ],
 )
+const contextConfigEnv = AppNodeBuilder.build(
+  LayerNode.group([Permission.node, Config.node, EventV2Bridge.node, CrossSpawnSpawner.node, InstanceStore.node]),
+  [
+    [InstanceStore.bootstrapNode, noopBootstrap],
+    [Config.node, TestConfig.layer({ get: () => Effect.succeed({
+      default_agent: "custom",
+      agent: { custom: { permission: { workflow_tool_approval: "auto" } } },
+      permission: { workflow_tool_approval: "allow" },
+    }) })],
+  ],
+)
+const contextConfig = testEffect(contextConfigEnv)
 const it = testEffect(env)
 const reviewed = testEffect(reviewedEnv)
 const failingReviewed = testEffect(failingReviewedEnv)
@@ -1012,6 +1029,36 @@ it.instance(
   { git: true },
 )
 
+// auto 上下文的 ENV ask 必须先进入自动管线，不能在规则分流处直接挂起人工审批。
+reviewed.instance(
+  "ask - auto agent handles env read admission without direct manual pending",
+  () =>
+    Effect.gen(function* () {
+      reviewedCalls = 0
+      // 超时只用于识别旧的人工 pending；修复后 reviewer fixture 同步完成，不依赖固定等待。
+      yield* ask({
+        sessionID: SessionID.make("session_test"),
+        permission: "read",
+        patterns: ["config/jp/dashboard.env"],
+        metadata: { agent: "auto" },
+        always: [],
+        ruleset: [
+          { permission: "read", pattern: "*", action: "allow" },
+          { permission: "read", pattern: "*.env", action: "ask" },
+        ],
+      }).pipe(
+        Effect.timeoutOrElse({
+          duration: "1 second",
+          orElse: () => Effect.fail(new Error("auto env read fell back to direct manual approval")),
+        }),
+      )
+
+      expect(reviewedCalls).toBe(1)
+      expect(yield* list()).toHaveLength(0)
+    }),
+  { git: true },
+)
+
 // #199：验证混合 auto+ask 请求中 deny 优先：auto 的危险载荷不被 ask 门控延迟。
 // #199：验证 auto deny 不被同请求中 ask pattern 的用户审批流程阻断。
 it.instance(
@@ -1038,14 +1085,50 @@ it.instance(
   { git: true },
 )
 
-// #199：验证 reviewer allow 只满足 auto 部分，不撤销另一个 pattern 的 ask 门控。
-// #199：验证 auto+ask 混合请求中两个门控独立运作，reviewer 不能替代用户。
+// 前一用例的 reviewer 次数区分真实自动审查与 general fast-path，防止仅凭无 pending 假绿。
+// 子代理 agent 名不是 auto 时，派生规则中的 auto action 仍须把当前 Read ask 提升为自动审批。
 reviewed.instance(
-  "ask - reviewer allow does not bypass another pattern that still requires approval",
+  "ask - inherited auto action promotes subagent env reads at runtime",
   () =>
     Effect.gen(function* () {
       reviewedCalls = 0
-      const fiber = yield* ask({
+      const child: PermissionV1.Ruleset = [
+        { permission: "read", pattern: "*", action: "allow" },
+        { permission: "read", pattern: "*.env", action: "ask" },
+      ]
+      // 派生结果保留 bash:auto，当前 Read 仍由 child ask 决定，覆盖只看 agent 名会漏掉的继承路径。
+      const inherited = SubagentPermissions.deriveSubagentSessionPermission({
+        parentSessionPermission: [{ permission: "bash", pattern: "*", action: "auto" }],
+        subagent: { permission: child },
+      })
+      yield* ask({
+        sessionID: SessionID.make("session_test"),
+        permission: "read",
+        patterns: ["config/jp/dashboard.env"],
+        metadata: { agent: "executor" },
+        always: [],
+        ruleset: Permission.merge(child, inherited),
+      }).pipe(
+        Effect.timeoutOrElse({
+          duration: "1 second",
+          orElse: () => Effect.fail(new Error("inherited auto action fell back to direct manual approval")),
+        }),
+      )
+
+      expect(reviewedCalls).toBe(1)
+      expect(yield* list()).toHaveLength(0)
+    }),
+  { git: true },
+)
+
+// auto 上下文中的 mixed ask 与 auto pattern 共享同一自动审批；纯 evaluate 的通用优先级不变。
+reviewed.instance(
+  "ask - auto context promotes mixed ask patterns into the same auto review",
+  () =>
+    Effect.gen(function* () {
+      reviewedCalls = 0
+      // 两个 pattern 应共享一笔 reviewer，而不是先完成 auto 后再出现另一笔人工请求。
+      yield* ask({
         sessionID: SessionID.make("session_test"),
         permission: "bash",
         patterns: ["git add .", "manual approval target"],
@@ -1055,20 +1138,17 @@ reviewed.instance(
           { permission: "bash", pattern: "git *", action: "auto" },
           { permission: "bash", pattern: "manual approval target", action: "ask" },
         ],
-      }).pipe(Effect.forkScoped)
+      })
 
-      expect(yield* waitForPending(1)).toHaveLength(1)
       expect(reviewedCalls).toBe(1)
-      yield* rejectAll()
-      yield* Fiber.await(fiber)
+      expect(yield* list()).toHaveLength(0)
     }),
   { git: true },
 )
 
-// #199：验证缓存键不含 ask pattern——规则变更后重新评估，防止旧审批污染新决策。
-// #199：验证规则从 auto+ask 变为纯 auto 后缓存不命中，reviewer 被重新调用。
+// mixed ask 被提升后属于 autoPatterns；后续纯 auto 的同请求可以复用这次 reviewer 裁决。
 reviewed.instance(
-  "ask - reviewer cache only stores the auto-controlled patterns",
+  "ask - reviewer cache covers patterns promoted from ask in auto context",
   () =>
     Effect.gen(function* () {
       reviewedCalls = 0
@@ -1079,20 +1159,18 @@ reviewed.instance(
         metadata: { command: "git add .", cwd: "/repo", shell: "bash" },
         always: ["git add *"],
       }
-      const fiber = yield* ask({
+      yield* ask({
         ...request,
         ruleset: [
           { permission: "bash", pattern: "git *", action: "auto" as const },
           { permission: "bash", pattern: "manual approval target", action: "ask" as const },
         ],
-      }).pipe(Effect.forkScoped)
-
-      expect(yield* waitForPending(1)).toHaveLength(1)
-      yield* rejectAll()
-      yield* Fiber.await(fiber)
+      })
+      // 第二次改为纯 auto 但载荷不变，用于证明缓存以提升后的 autoPatterns 为准。
       yield* ask({ ...request, ruleset: [{ permission: "bash", pattern: "*", action: "auto" as const }] })
 
-      expect(reviewedCalls).toBe(2)
+      expect(reviewedCalls).toBe(1)
+      expect(yield* list()).toHaveLength(0)
     }),
   { git: true },
 )
@@ -1951,4 +2029,124 @@ it.instance(
       if (Exit.isFailure(exit)) expect(Cause.squash(exit.cause)).toBeInstanceOf(PermissionV1.RejectedError)
     }),
   { git: true },
+)
+
+function sessionFixture(agent: string | undefined, permission: NonNullable<Session.Info["permission"]> = []): Session.Info {
+  return {
+    id: SessionID.descending(), slug: "permission-test", projectID: ProjectV2.ID.make("project_test"), directory: ".",
+    title: "permission test", version: "1", agent, permission, time: { created: 0, updated: 0 },
+  }
+}
+
+function raceSynthetic<R>(effect: Effect.Effect<void, PermissionV1.Error, R>) {
+  return Effect.gen(function* () {
+    const fiber = yield* effect.pipe(Effect.forkScoped)
+    const first = yield* Effect.race(
+      Fiber.join(fiber).pipe(Effect.as("auto" as const)),
+      waitForPending(1).pipe(Effect.as("ask" as const)),
+    )
+    if (first === "ask") {
+      yield* rejectAll()
+      yield* Fiber.await(fiber)
+    }
+    return first
+  })
+}
+
+it.instance("ask - synthetic permission uses current auto session without direct manual pending", () =>
+  Effect.gen(function* () {
+    const info = sessionFixture("auto")
+    // 空 ruleset 模拟真实 synthetic producer；general auto 应直接完成，不能伪造 ReviewStarted。
+    const first = yield* raceSynthetic(ask({
+      sessionID: info.id, permission: "workflow_tool_approval", patterns: ["tool"],
+      always: [], metadata: {}, ruleset: [],
+    }).pipe(Effect.provide(Layer.mock(Session.Service, { get: () => Effect.succeed(info) }))))
+    expect(first).toBe("auto")
+  }),
+)
+
+contextConfig.instance("ask - synthetic permission discovers custom default agent auto action", () =>
+  Effect.gen(function* () {
+    const info = sessionFixture(undefined)
+    // default_agent 不必叫 auto；只有现有 agent 配置中的 auto action 才决定自动上下文。
+    const first = yield* raceSynthetic(ask({
+      sessionID: info.id, permission: "workflow_tool_approval", patterns: ["tool"],
+      always: [], metadata: {}, ruleset: [],
+    }).pipe(Effect.provide(Layer.mock(Session.Service, { get: () => Effect.succeed(info) }))))
+    expect(first).toBe("auto")
+  }),
+)
+
+it.instance("ask - synthetic permission inherits session-only auto ceiling", () =>
+  Effect.gen(function* () {
+    const info = sessionFixture("build", [{ permission: "workflow_tool_approval", pattern: "*", action: "auto" }])
+    // 当前 agent 不是 auto，Session ceiling 仍必须独立提供自动上下文。
+    const first = yield* raceSynthetic(ask({
+      sessionID: info.id, permission: "workflow_tool_approval", patterns: ["tool"],
+      always: [], metadata: {}, ruleset: [],
+    }).pipe(Effect.provide(Layer.mock(Session.Service, { get: () => Effect.succeed(info) }))))
+    expect(first).toBe("auto")
+  }),
+)
+
+it.instance("ask - auto effective rules keep session deny after caller agent ask", () =>
+  Effect.gen(function* () {
+    const info = sessionFixture("auto", [{ permission: "doom_loop", pattern: "*", action: "deny" }])
+    // auto 补齐规则时 Session deny 最后，caller 的 Agent ask 不能把它覆盖成自动放行。
+    const error = yield* fail(ask({
+      sessionID: info.id, permission: "doom_loop", patterns: ["tool"],
+      always: [], metadata: {}, ruleset: [{ permission: "doom_loop", pattern: "*", action: "ask" }],
+    }).pipe(Effect.provide(Layer.mock(Session.Service, { get: () => Effect.succeed(info) }))))
+    expect(error).toBeInstanceOf(PermissionV1.DeniedError)
+  }),
+)
+
+contextConfig.instance("ask - non-auto synthetic request keeps original rules despite config allow", () =>
+  Effect.gen(function* () {
+    const info = sessionFixture("build")
+    // 非 auto 不使用补齐规则裁决；HEAD 的空 caller ruleset 仍应产生人工审批。
+    const first = yield* raceSynthetic(ask({
+      sessionID: info.id, permission: "workflow_tool_approval", patterns: ["tool"],
+      always: [], metadata: { agent: "build" }, ruleset: [],
+    }).pipe(Effect.provide(Layer.mock(Session.Service, { get: () => Effect.succeed(info) }))))
+    expect(first).toBe("ask")
+  }),
+)
+
+it.instance("ask - missing session preserves caller rules without leaking NotFound", () =>
+  Effect.gen(function* () {
+    const missing = Layer.mock(Session.Service, {
+      get: () => Effect.fail(new Storage.NotFoundError({ message: "missing session" })),
+    })
+    yield* ask({
+      sessionID: SessionID.descending(), permission: "read", patterns: ["note.txt"],
+      always: [], metadata: {}, ruleset: [{ permission: "read", pattern: "*", action: "allow" }],
+    }).pipe(Effect.provide(missing))
+    // 无 Session 可补充时，空 caller ruleset 仍按原合同进入人工审批，而不是抛 NotFound。
+    const first = yield* raceSynthetic(ask({
+      sessionID: SessionID.descending(), permission: "workflow_tool_approval", patterns: ["tool"],
+      always: [], metadata: {}, ruleset: [],
+    }).pipe(Effect.provide(missing)))
+    expect(first).toBe("ask")
+  }),
+)
+
+reviewed.instance("cache - isolates metadata payloads and bypasses structured input", () =>
+  Effect.gen(function* () {
+    const cache = yield* PermissionSessionCache.Service
+    const sessionID = SessionID.descending()
+    const base = { sessionID, permission: "doom_loop", patterns: ["tool"] }
+    // 字符串 metadata 是审批身份的一部分：同值可复用，不同值不得共享放行。
+    yield* cache.put({ ...base, metadata: { tool: "alpha" } }, "allow")
+    expect(yield* cache.has({ ...base, metadata: { tool: "alpha" } })).toBe(true)
+    expect(yield* cache.has({ ...base, metadata: { tool: "beta" } })).toBe(false)
+    // 结构化 input 不做 JSON 序列化，has/put 都直接绕过缓存，避免不同失败载荷误复用。
+    const structured = { ...base, metadata: { input: { value: 1 } } }
+    yield* cache.put(structured, "allow")
+    expect(yield* cache.has(structured)).toBe(false)
+    const circular: { self?: unknown } = {}
+    circular.self = circular
+    yield* cache.put({ ...base, metadata: { input: circular } }, "allow")
+    expect(yield* cache.has({ ...base, metadata: { input: circular } })).toBe(false)
+  }),
 )

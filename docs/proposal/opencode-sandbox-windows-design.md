@@ -100,9 +100,8 @@ auto agent
   edit/write/apply_patch: auto through the shared edit permission gate
 ```
 
-这说明当前 auto 的重点是 shell risk gate 与 workspace edit gate；`apply_patch`、`write`、`edit`
-在运行时共享 `edit` permission，因此文件写入和删除必须在同一个 auto admission seam 上审查，而不是按工具名分散处理。
-read/task/notebook 等其他 build-like 权限暂不因此扩大到 auto。
+这说明 `apply_patch`、`write`、`edit` 在运行时共享 `edit` permission，文件写入和删除在同一个 auto admission seam 上审查，而不是按工具名分散处理。
+auto agent 或有效 ruleset 含 auto action 时，运行时 Permission 还会把规则求值得到的 `ask`（包括 read/ENV）请求局部提升为 `auto`，再复用同一 precheck/reviewer/fallback；`allow`、`deny`、raw deny、保存审批及非 auto 的人工路径保持不变。
 
 ### 中层：Tool Context ask 边界
 

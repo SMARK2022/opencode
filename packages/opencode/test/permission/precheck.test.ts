@@ -770,6 +770,24 @@ describe("permission precheck bash classifier", () => {
     expect((await bash("   "))).toMatchObject({ level: "general" })
   })
 
+  // native Read 的扩展 ENV 分类不能反向修改 shell 已有 safe/cautious 合同。
+  test("marks native env reads cautious without changing shell classification", async () => {
+    const native = (pattern: string) => PermissionPrecheck.evaluate({ permission: "read", patterns: [pattern], metadata: {} })
+
+    // 文件与目录输入共用真实 precheck，分别覆盖 basename 后缀和精确 .env 目录段。
+    expect(await native("config/jp/dashboard.env")).toMatchObject({ level: "cautious" })
+    expect(await native("config/jp/dashboard.env.local")).toMatchObject({ level: "cautious" })
+    expect(await native(".env.local/config")).toMatchObject({ level: "cautious" })
+    // native 的 .envrc 保持 general，不能把 shell 的宽泛 includes 复制到新分支。
+    expect(await native("config/.envrc")).toMatchObject({ level: "general" })
+    expect(await native("src/index.ts")).toMatchObject({ level: "general" })
+    // 大小写预期与平台一致：Windows 对齐 Wildcard，POSIX 不错误扩大敏感文件范围。
+    expect(await native("DASHBOARD.ENV.LOCAL")).toMatchObject({ level: process.platform === "win32" ? "cautious" : "general" })
+    // shell 继续使用旧谓词：dashboard 文件名不升级，嵌套 .envrc 也不被新规则改放。
+    expect(await bash("cat config/jp/dashboard.env")).toMatchObject({ level: "safe" })
+    expect(await bash("cat config/.envrc")).toMatchObject({ level: "cautious" })
+  })
+
     // 语法迁移不变量：非 shell 工具保持既有审批闭合。
   test("marks unsupported permissions general so non-shell tools fail closed to existing approval", async () => {
     expect(

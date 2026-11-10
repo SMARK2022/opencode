@@ -33,6 +33,8 @@ export const layer = Layer.effect(
       // #210：tool-origin external_directory 请求携带 operation/payload 证据而非最终 diff，
       // #210：不复用同一外部目录的路径放行去授权后续不同内容的 write/patch
       if (isToolExternalDirectory(request)) return false
+      // 结构化 metadata 不参与未知对象序列化，也不允许一次放行复用到不同失败载荷。
+      if (hasNonStringMetadata(request)) return false
       // #198：缓存命中要求当前请求的每个 pattern 都已被同一 session 放行——部分命中仍需 review/审批剩余 pattern，不得扩大授权范围
       const session = (yield* InstanceState.get(state)).get(request.sessionID)
       // #198：无 session 记录时缓存未命中——首次请求或 session 重启后无历史授权
@@ -44,6 +46,8 @@ export const layer = Layer.effect(
     const put = Effect.fn("PermissionSessionCache.put")(function* (request: RequestLike, value: Value) {
       // #210：tool-origin 请求不写入缓存——放行不可跨内容复用，避免路径命中授权不同写操作
       if (isToolExternalDirectory(request)) return
+      // put 同步跳过结构化载荷，避免写入无法安全区分的缓存槽。
+      if (hasNonStringMetadata(request)) return
       const all = yield* InstanceState.get(state)
       // #198：按 sessionID 分组存储——不同 session 的授权互不干扰
       const session = all.get(request.sessionID) ?? new Map<Key, Value>()
@@ -56,8 +60,8 @@ export const layer = Layer.effect(
   }),
 )
 
-// #198：规范化缓存键——包含 permission、pattern、command、cwd、shell、filepath、diff，防止不同上下文的相同 pattern 误命中缓存
-// #210：tool-origin 请求在 has/put 入口短路，canonicalKey 无需纳入 operation/payload
+// #198：规范化缓存键——包含 permission、pattern、既有上下文和按 key 排序的字符串 metadata
+// #210：tool-origin 与结构化 metadata 在 has/put 入口短路，canonicalKey 无需序列化未知对象
 function canonicalKey(request: RequestLike, pattern: string) {
   // #198：JSON.stringify 生成稳定键——数组顺序固定，确保相同输入始终命中同一缓存槽
   return JSON.stringify([
@@ -70,12 +74,20 @@ function canonicalKey(request: RequestLike, pattern: string) {
     contextValue(request.metadata.shell),
     contextValue(request.metadata.filepath),
     contextValue(request.metadata.diff),
+    ...Object.entries(request.metadata)
+      .map(([key, value]) => [key, contextValue(value)] as const)
+      .sort(([left], [right]) => left.localeCompare(right)),
   ])
 }
 
 // #198：仅字符串值纳入键——非字符串 metadata 字段不影响缓存身份
 function contextValue(value: unknown) {
   return typeof value === "string" ? value : undefined
+}
+
+// undefined 表示字段缺省；其余非字符串载荷都不可复用，避免把不同对象压成同一身份。
+function hasNonStringMetadata(request: RequestLike) {
+  return Object.values(request.metadata).some((value) => value !== undefined && typeof value !== "string")
 }
 
 // #210：识别 tool-origin external_directory 请求——action_kind=tool 标记来自读写工具的项目外路径门禁

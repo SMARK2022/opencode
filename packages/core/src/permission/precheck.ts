@@ -268,6 +268,9 @@ export async function evaluate(input: {
   // #232：bash 与所有 external_directory 边界携带足够上下文做确定性预审；其他权限
   // #232：默认回到 general allow，除非上方的结构化边界（如 workspace delete metadata）
   // #232：先把它们提升到 cautious。
+  if (input.permission === "read" && hasSensitivePath(["read", ...input.patterns], true)) {
+    return { level: "cautious", reason: "sensitive file read requires explicit approval" }
+  }
   if (input.permission !== "bash") return { level: "general", reason: "precheck only has bash coverage" }
   return bashEffect(input)
 }
@@ -1484,7 +1487,7 @@ function isSensitiveKeyFile(normalizedPath: string) {
   return /(?:ssl|tls|cert|pki|private|secret|\.ssh|\.gnupg)/i.test(normalizedPath)
 }
 
-function hasSensitivePath(tokens: string[]) {
+function hasSensitivePath(tokens: string[], nativeRead = false) {
   // 与SENSITIVE_PATH_PATTERN分别承载原本地读取及外传路径合同；外传匹配已绑定来源，
   // 本地读取匹配已绑定文件，保留原.pem/.key上下文差异。
   //
@@ -1492,11 +1495,14 @@ function hasSensitivePath(tokens: string[]) {
   // pki、private、secret、.ssh、.gnupg）时才判定为敏感，减少 i18n key 文件、
   // #220: .pem/.key 仅在路径含安全相关上下文时才判定为敏感
   return tokens.slice(1).some((item) => {
-    const normalized = item.replaceAll("\\", "/")
+    const normalized = (nativeRead && process.platform === "win32" ? item.toLowerCase() : item).replaceAll("\\", "/")
+    const basename = normalized.split("/").at(-1) ?? ""
+    // 仅 native Read 扩展任意前缀 ENV 文件/目录；shell 保留旧 includes 语义，避免非 auto Execute 分类漂移。
+    const env = nativeRead
+      ? /\.env(?:\.|$)/.test(basename) || /(?:^|\/)[^/]*\.env(?:\.[^/]*)?\//.test(normalized)
+      : normalized === ".env" || normalized.startsWith(".env.") || normalized.includes("/.env")
     if (
-      normalized === ".env" ||
-      normalized.startsWith(".env.") ||
-      normalized.includes("/.env") ||
+      env ||
       normalized.endsWith("/.ssh") ||
       normalized.includes("/.ssh/") ||
       normalized === "~/.aws/credentials" ||
@@ -1519,7 +1525,6 @@ function hasSensitivePath(tokens: string[]) {
       return true
     }
     // #220: SSH 私钥文件名匹配
-    const basename = normalized.split("/").at(-1) ?? ""
     if (/^id_(?:rsa|dsa|ecdsa|ed25519)(?:_sk)?$/.test(basename)) return true
     // #220: .pem/.key 仅在路径含安全相关上下文时才判定为敏感
     if (normalized.endsWith(".pem") || normalized.endsWith(".key")) {

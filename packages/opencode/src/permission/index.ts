@@ -14,6 +14,7 @@ import { PermissionSessionCache } from "./cache/session-cache"
 import { PermissionCircuitBreaker } from "./reviewer/circuit-breaker"
 import * as Option from "effect/Option"
 import { Shell } from "@opencode-ai/core/shell"
+import { Session } from "@/session/session"
 
 export const Event = PermissionV1.Event
 
@@ -90,6 +91,24 @@ const layer = Layer.effect(
     const matchRequest = Effect.fn("Permission.matchRequest")(function* (input: PermissionV1.AskInput) {
       const { approved } = yield* InstanceState.get(state)
       const { ruleset, ...request } = input
+      const sessions = Option.getOrUndefined(yield* Effect.serviceOption(Session.Service))
+      // Session 缺失只表示没有可补充上下文，不向公共 ask 泄漏新的 NotFound 错误。
+      const current = sessions
+        ? yield* sessions.get(request.sessionID).pipe(Effect.catchTag("NotFoundError", () => Effect.void))
+        : undefined
+      const cfg = yield* config.get()
+      // 普通工具已交付 metadata.agent；仅缺省 synthetic 请求才回退当前 Session/default。
+      const selected = typeof request.metadata.agent === "string" ? request.metadata.agent : current?.agent ?? cfg.default_agent
+      const effectiveRules = merge(
+        fromConfig(cfg.permission ?? {}),
+        fromConfig(cfg.agent?.[selected ?? ""]?.permission ?? {}),
+        ruleset,
+        current?.permission ?? [],
+      )
+      // 补齐上下文只发现 auto 身份并服务 auto 求值；非 auto 仍按原 caller ruleset，
+      // 避免 Config 静态 allow 改变 HEAD 的人工路径。Session ceilings 最后，Agent ask 不得覆盖 deny。
+      const automatic = selected === "auto" || effectiveRules.some((rule) => rule.action === "auto")
+      const matchedRules = automatic ? effectiveRules : ruleset
       let needsAsk = false
       // #199：needsAuto 与 needsAsk 是两个独立门控。混合请求中 auto 可独立拒绝
       // #199：关键载荷，但 reviewer allow 不能撤销另一个 pattern 仍需的用户审批，
@@ -99,30 +118,33 @@ const layer = Layer.effect(
 
       // #285：raw_patterns 是 shell 解析的原始拒绝证据，绕过 canonical pattern 评估
       for (const pattern of rawDenyPatterns(request.metadata)) {
-        const denied = rawDenyRule(request.permission, pattern, ruleset)
+        const denied = rawDenyRule(request.permission, pattern, matchedRules)
         yield* Effect.logInfo("evaluated raw deny evidence", { permission: request.permission, pattern, denied: Boolean(denied) })
         if (denied) {
         // #285：命中 deny 立即 fail-closed，不给后续 ask 规则截获的机会；
         // ruleset 过滤只保留本 permission 相关规则，错误对象不含无关规则
           return yield* new PermissionV1.DeniedError({
-            ruleset: ruleset.filter((rule) => Wildcard.match(request.permission, rule.permission)),
+            ruleset: matchedRules.filter((rule) => Wildcard.match(request.permission, rule.permission)),
           })
         }
       }
 
+      // auto action 同时承载子代理继承；运行时只提升 auto 上下文中的 ask，
+      // allow/deny/raw deny 与通用 evaluate 的 last-match-wins 契约保持不变。
       // #199：逐 pattern 评估规则。静态 deny 立即 fail-closed；auto 收集后统一交由
       // #199：precheck+reviewer 决定；ask 累积到 needsAsk 等待用户审批。三者优先级
       // #199：由 evaluate 的 last-match-wins 决定，此处只分流不复核规则语义。
       for (const pattern of request.patterns) {
-        const rule = evaluate(request.permission, pattern, ruleset, approved)
+        const rule = evaluate(request.permission, pattern, matchedRules, approved)
+        const action = automatic && rule.action === "ask" ? "auto" : rule.action
         yield* Effect.logInfo("evaluated", { permission: request.permission, pattern, action: rule })
-        if (rule.action === "deny") {
+        if (action === "deny") {
           return yield* new PermissionV1.DeniedError({
-            ruleset: ruleset.filter((rule) => Wildcard.match(request.permission, rule.permission)),
+            ruleset: matchedRules.filter((rule) => Wildcard.match(request.permission, rule.permission)),
           })
         }
-        if (rule.action === "allow") continue
-        if (rule.action === "auto") {
+        if (action === "allow") continue
+        if (action === "auto") {
           needsAuto = true
           autoPatterns.push(pattern)
           continue
@@ -316,12 +338,14 @@ const layer = Layer.effect(
         // 取消整个解释器而非抛普通工具错误，JS catch 才无法继续后续副作用。
         return Effect.interrupt
       }
-      const check = (request: PermissionV1.AskInput) => gate.withPermits(1)(Effect.gen(function* () {
+      const check = (request: PermissionV1.AskInput, automatic: boolean) => gate.withPermits(1)(Effect.gen(function* () {
         if (stopped) return yield* Effect.interrupt
-        // 每次仍用原分类器分析真实请求；复用的只是本次批准上界，而非旧参数的分类结果。
-        const decision = yield* Effect.promise(() => PermissionPrecheck.evaluate({ ...request,
-          ...(request.permission === "execute" ? { calls: input.calls } : {}),
-        }))
+        // 只有 auto 叶子启用新增 native-read 分类；非 auto 与静态 allow 不被 reviewer 截获。
+        const decision = request.permission === "read" && !automatic
+          ? { level: "general" as const, reason: "precheck only has bash coverage" }
+          : yield* Effect.promise(() => PermissionPrecheck.evaluate({ ...request,
+              ...(request.permission === "execute" ? { calls: input.calls } : {}),
+            }))
         // forbidden 在等级复用前终止，先前获批的 dangerous 也不能覆盖它。
         if (decision.level === "forbidden") return yield* new PermissionV1.AutoDeniedError({ reason: decision.reason, terminal: true })
         // 同级新 reason 也是新证据；已覆盖 reason 才复用本次批准。
@@ -349,7 +373,8 @@ const layer = Layer.effect(
       const request = parent()
       const matched = yield* matchRequest(request).pipe(Effect.catchCause(terminal))
       // execute 自身的显式 ask 仍然有效，整体 AUTO 与人工匹配各自满足自己的门禁。
-      const asked = yield* check(request)
+      // 父 execute 同样只审查 autoPatterns，保持父子请求的自动管辖视图一致。
+      const asked = yield* check(matched.needsAuto ? { ...request, patterns: matched.autoPatterns } : request, matched.needsAuto)
       if (matched.needsAsk && !asked) yield* requestUser(request).pipe(Effect.catchCause(terminal))
       return {
         // 复用已有锁形成暂停边界；不为扩展构造一个参数缺失的替代权限请求。
@@ -358,7 +383,8 @@ const layer = Layer.effect(
         ask: (request) => Effect.gen(function* () {
           // 实际 request 使用宿主读取的最新 ruleset，父批准只满足 AUTO 的风险门槛。
           const matched = yield* matchRequest(request)
-          yield* check(request)
+          // auto 叶子只审查 autoPatterns；静态 allow 的 ENV 不得混入另一资源的自动审查。
+          yield* check(matched.needsAuto ? { ...request, patterns: matched.autoPatterns } : request, matched.needsAuto)
           // 叶子 ask 使用最终参数和 child 身份，父 AUTO 批准不代替用户明确要求的询问。
           if (matched.needsAsk) yield* requestUser(request)
         }).pipe(Effect.catchCause(terminal)),

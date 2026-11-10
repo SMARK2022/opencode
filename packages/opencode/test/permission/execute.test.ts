@@ -231,6 +231,66 @@ it.instance("one human approval satisfies both AUTO routing and explicit parent 
   expect(yield* permission.list()).toEqual([])
 }))
 
+it.instance("execute limits env review to auto leaves and preserves static allow", () => Effect.gen(function* () {
+  const permission = yield* Permission.Service
+  const sessionID = SessionID.descending()
+  const tool = { messageID: MessageID.ascending(), callID: "execute-env-auto" }
+  const ruleset: PermissionV1.Ruleset = [
+    { permission: "*", pattern: "*", action: "allow" },
+    { permission: "bash", pattern: "*", action: "auto" },
+    { permission: "read", pattern: "*", action: "auto" },
+    { permission: "read", pattern: "*.env", action: "ask" },
+    { permission: "read", pattern: "*.env.*", action: "ask" },
+    { permission: "read", pattern: "*.env.example", action: "allow" },
+  ]
+  // 末尾 .env.example allow 模拟真实默认规则，防止把含 ask 的混合 Read 误当整工具静态 allow。
+  const scope = yield* permission.beginExecute({ sessionID, tool, code: "read env", calls: [], ruleset, agent: "auto", stop: (error) => { throw error } })
+  const read = (pattern: string) => scope.ask({ sessionID, tool, permission: "read", patterns: [pattern], always: [], metadata: {}, ruleset })
+  const reviews: string[] = []
+  yield* Effect.gen(function* () {
+    // review 归属父 execute，needsAuto 则由真实叶子 args 决定，锁定父/叶责任边界。
+    yield* read("config/jp/dashboard.env")
+    expect(reviews).toEqual(["execute"])
+    reviews.length = 0
+    // 静态 allow 使用独立 scope，避免复用前一 ENV 审批 reason 而形成假绿。
+    const allowed = yield* permission.beginExecute({ sessionID, tool: { ...tool, callID: "execute-env-allow" }, code: "allowed env", calls: [], ruleset, agent: "auto", stop: (error) => { throw error } })
+    yield* allowed.ask({ sessionID, tool, permission: "read", patterns: ["config/jp/dashboard.env.example"], always: [], metadata: {}, ruleset })
+    expect(reviews).toEqual([])
+    reviews.length = 0
+    // 混合 patterns 只允许 autoPatterns 进入分类；静态 allow 的 ENV 不得搭另一资源的 reviewer 便车。
+    const mixed = yield* permission.beginExecute({ sessionID, tool: { ...tool, callID: "execute-env-mixed" }, code: "mixed env", calls: [], ruleset, agent: "auto", stop: (error) => { throw error } })
+    yield* mixed.ask({ sessionID, tool, permission: "read", patterns: ["note.txt", "config/jp/dashboard.env.example"], always: [], metadata: {}, ruleset })
+    expect(reviews).toEqual([])
+  }).pipe(Effect.provideService(PermissionReviewer.Service, { review: (input) => Effect.sync(() => {
+    reviews.push(input.permission)
+    return { action: "allow" as const, reason: "bounded env read", reviewID: input.reviewID, risk_level: "medium" as const, user_authorization: "high" as const }
+  }) }))
+}))
+
+it.instance("execute keeps non-auto env reads on the original manual path", () => Effect.gen(function* () {
+  const permission = yield* Permission.Service
+  const sessionID = SessionID.descending()
+  const tool = { messageID: MessageID.ascending(), callID: "execute-env-manual" }
+  // 父 execute 的静态 allow 只覆盖脚本整体，不能替叶子 ENV 触发 reviewer 或取消人工。
+  const scope = yield* permission.beginExecute({ sessionID, tool, code: "manual env", calls: [],
+    ruleset: [{ permission: "execute", pattern: "*", action: "allow" }], agent: "build", stop: (error) => { throw error } })
+  const reviews: string[] = []
+  const pending = yield* scope.ask({ sessionID, tool, permission: "read", patterns: ["config/jp/dashboard.env"], always: [], metadata: {},
+    ruleset: [{ permission: "read", pattern: "*", action: "ask" }] }).pipe(
+      Effect.provideService(PermissionReviewer.Service, { review: (input) => Effect.sync(() => {
+        reviews.push(input.permission)
+        return { action: "allow" as const, reason: "unexpected reviewer", reviewID: input.reviewID, risk_level: "medium" as const, user_authorization: "high" as const }
+      }) }),
+      Effect.forkScoped,
+    )
+  // 先等待真实 pending 再断言 reviewer 次数，避免异步审查尚未登记就形成假绿。
+  const request = yield* pollWithTimeout(permission.list().pipe(Effect.map((items) => items[0])), "manual env approval not presented")
+  // 非 auto 的新 ENV 分类不得截获到 reviewer；人工审批仍由叶子的原 ask 负责。
+  expect(reviews).toEqual([])
+  yield* permission.reply({ requestID: request.id, reply: "once" })
+  yield* Fiber.join(pending)
+}))
+
 it.instance("explicit child ask remains separate from whole-script AUTO approval", () => Effect.gen(function* () {
   // 先完成无风险父批准，再让叶子显式 ask；它们是两个不同授权渠道。
   const permission = yield* Permission.Service

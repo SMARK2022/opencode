@@ -522,6 +522,36 @@ describe("PermissionV2", () => {
       expect(yield* service.list()).toEqual([])
     }),
   )
+  it.effect("routes auto agent env reads through auto review without changing manual agents", () => Effect.gen(function* () {
+    reviewSettings = new Config.Info({})
+    reviewRequests.length = 0
+    malformed = false
+    assessment = { outcome: "allow", rationale: "bounded env read", risk_level: "low", user_authorization: "high" }
+    yield* setup([{ action: "read", resource: "*.env", effect: "ask" }])
+    const service = yield* PermissionV2.Service
+    const agents = yield* AgentV2.Service
+    // fixture 不注册内置 auto；显式 Read 规则用于隔离 agent 身份，而不是借默认 auto action 假绿。
+    yield* agents.transform((draft) => draft.update(AgentV2.ID.make("auto"), (item) => {
+      item.permissions = [
+        { action: "read", resource: "*", effect: "allow" },
+        { action: "read", resource: "*.env", effect: "ask" },
+      ]
+    }))
+
+    // auto 身份与 Session ask 合并后，ENV 必须先复用 reviewer；非 auto 的同请求仍由人工处理。
+    // ENV cautious 必须到达独立 reviewer fixture，不能用 general fast-path 的无 pending 冒充自动审查。
+    const automatic = yield* service.ask(assertion({ agent: AgentV2.ID.make("auto"), action: "read", resources: ["config/jp/dashboard.env"] }))
+    expect(automatic.effect).toBe("allow")
+    expect(reviewRequests).toHaveLength(1)
+
+    reviewRequests.length = 0
+    // 人工对照同时要求 effect=ask 和 reviewer 零请求，证明请求局部转换没有污染其他 agent。
+    const manual = yield* service.ask(assertion({ action: "read", resources: ["config/jp/dashboard.env"] }))
+    expect(manual.effect).toBe("ask")
+    expect(reviewRequests).toHaveLength(0)
+    yield* service.reply({ requestID: manual.id, reply: "once" })
+  }))
+
   it.effect("routes native auto permissions through the isolated reviewer", () => Effect.gen(function* () {
     reviewSettings = new Config.Info({})
     reviewRequests.length = 0
@@ -698,10 +728,11 @@ describe("PermissionV2", () => {
     yield* setRules([{ action: "edit", resource: "*", effect: "deny" }])
     expect(yield* service.ask(edit)).toMatchObject({ effect: "deny" })
     expect(reviewRequests).toHaveLength(3)
+    // 先 deny 再 mixed 的顺序同时覆盖硬拒绝与后续 auto 提升，避免旧缓存掩盖规则变化。
     yield* setRules([{ action: "edit", resource: "*", effect: "auto" }, { action: "edit", resource: "manual", effect: "ask" }])
     const mixed = yield* service.ask({ ...edit, resources: ["src/a.ts", "manual"] })
-    expect(mixed.effect).toBe("ask")
-    yield* service.reply({ requestID: mixed.id, reply: "reject" })
+    // 有效 ruleset 已含 auto，manual 的 ask 与其他资源一起进入同一次自动审批。
+    expect(mixed.effect).toBe("allow")
     expect(yield* service.list()).toEqual([])
     // strict 强制只读操作也审查；结构错误按配置分别拒绝或交回人工。
     yield* setRules([{ action: "*", resource: "*", effect: "auto" }])
