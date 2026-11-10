@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test"
 import yargs from "yargs"
 import { RunCommand } from "../../src/cli/cmd/run"
-import { mkdir, readdir } from "fs/promises"
+import { mkdir, readdir, rename } from "fs/promises"
+import { existsSync } from "fs"
 import path from "path"
 import { fileURLToPath } from "url"
 import stripAnsi from "strip-ansi"
@@ -61,7 +62,8 @@ function runPty(args: string[], env: Record<string, string | undefined>) {
   // scrollback 全量累积后统一去 ANSI；单个 chunk 的转义序列边界不可信。
   proc.onData((data) => (output += data))
   const exited = new Promise<number>((resolve) => proc.onExit((event) => resolve(event.exitCode)))
-  return { proc, exited, output: () => stripAnsi(output).replaceAll("\r", "") }
+  // raw 保留 \r 帧边界供百分比序列断言；output 只用于最终文本关系。
+  return { proc, exited, raw: () => output, output: () => stripAnsi(output).replaceAll("\r", "") }
 }
 // 大文本 reasoning 只用于制造真实可压缩页；压缩 eligibility 和 payload 仍由 ColdStorage 判定。
 // #549：通过插入再删除大行制造 freelist，使 PROMPT 门槛（16MB 或占比）在小 fixture 上也可达。
@@ -215,20 +217,44 @@ describe("database maintenance CLI", () => {
   // 通过真实终端观察提交进度，百分比和ETA分别验证可见的完成度与剩余时间提示。
   ptyInteractive("reports committed compression progress in an interactive terminal", async () => {
     await using tmp = await tmpdir({ init: seedColdParts })
+    // 预建 lease padding 后原子移入，避免文件创建与压缩竞争；实测删除窗口约 291ms。
+    const padding = path.join(tmp.path, "lease-padding")
+    await mkdir(padding)
+    await Promise.all(Array.from({ length: 20_000 }, (_, index) => Bun.write(path.join(padding, `${index}`), "")))
+    const lock = path.join(tmp.path, "opencode.db.maintenance", "lock")
     const cli = runPty(["db", "compress", "--older-than", "0ms", "--batch-size", "1"], isolatedEnv(tmp.path))
+    let finalFrames = 0
+    let finalLockPresent = false
+    cli.proc.onData((data) => {
+      if (!data.includes("elapsed") || !data.includes("100.0%")) return
+      finalFrames += [...data.matchAll(/100\.0%/g)].length
+      // 正确收尾必须先释放 lease；direct-update 会在删除窗口内提前画出 100%。
+      if (existsSync(lock)) finalLockPresent = true
+    })
     // batch-size 1 强制多批 checkpoint；进度行必须由持久化快照驱动而非内存估计。
     answerPrompt(cli.proc, "Reclaim", "n")
+    const owner = path.join(lock, "owner.json")
+    await Promise.race([
+      (async () => {
+        while (!existsSync(owner)) await Bun.sleep(10)
+      })(),
+      // WSL 挂载盘仅模块启动实测可超过 20s；外层预算只防冷启动误报，不参与进度计时。
+      Bun.sleep(30_000).then(() => { throw new Error(`offline maintenance lease was not published at ${lock}: ${cli.output()}`) }),
+    ])
+    await rename(padding, path.join(lock, "padding"))
     // N 在 offline reclaim prompt 只跳过 vacuum，不回滚已经完成并持久化的 compression。
     expect(await waitForExit(cli.proc, cli.exited)).toBe(0)
+    expect(finalFrames).toBe(1)
+    expect(finalLockPresent).toBe(false)
     const output = cli.output()
     // 单一顺序断言同时锁定活动行与 terminal 汇总，避免两个宽松匹配分别命中无关输出。
-    expect(output).toMatch(/Compressing cold data[\s\S]*owners[\s\S]*\/s[\s\S]*elapsed[\s\S]*Compression completed in (?:\d+\.\ds|\d+m \d+s)/)
+    expect(output).toMatch(/Scanning cold data[\s\S]*\/s[\s\S]*elapsed[\s\S]*Compression completed in (?:\d+\.\ds|\d+m \d+s)/)
     // 独立检查新展示字段，旧的纯脉冲动画不能满足这两个断言。
     expect(output).toMatch(/\d+\.\d%/)
     expect(output).toContain("ETA ~")
     // 交互域不得输出 task JSON；JSON 只属于 machine 分支。
     expect(output).not.toContain('"operation": "compress"')
-  }, 30_000)
+  }, 90_000)
   test("finishes visible progress before reporting a maintenance failure", async () => {
     await using tmp = await tmpdir({ init: (root) => seedColdParts(root, 4) })
     const db = new SQLite(path.join(tmp.path, "opencode.db"))
@@ -241,12 +267,13 @@ describe("database maintenance CLI", () => {
     expect(await waitForExit(cli.proc, cli.exited)).not.toBe(0)
     const output = cli.output()
     // trigger 消息必须来自 durable task record，证明错误在 checkpoint 后才进入 UI。
-    expect(output).toMatch(/Compressing cold data[\s\S]*owners[\s\S]*fixture maintenance failure/)
+    expect(output).toMatch(/Scanning cold data[\s\S]*fixture maintenance failure/)
     // 进度行换行先于错误文本：finish() 必须在错误传播前把活动行终结。
     // #549：elapsed 字段定宽填充后允许空白；进度行 \r 被 strip 后可能粘连多帧。
     expect(output).toMatch(/elapsed\s+\d+\.\ds[\s\S]*fixture maintenance failure/)
-    // 失败后不得出现完成或回收文案，防止把 failed task 伪装成成功序列。
+    // 失败后不得出现完成或回收文案，也不能由收尾逻辑补出 100%。
     expect(output).not.toMatch(/Compression completed|Reclaim/)
+    expect(output).not.toContain("100.0%")
   }, 30_000)
   ptyInteractive("holds the daemon election while initially offline compression runs", async () => {
     await using tmp = await tmpdir({
@@ -360,11 +387,11 @@ describe("database maintenance CLI", () => {
     answerPrompt(proc, "Reclaim", "n")
     expect(await waitForExit(proc, new Promise<number>((resolve) => proc.onExit((event) => resolve(event.exitCode))))).toBe(0)
     // 保留 \r 分帧；取进度帧检查无残影混入 0 B/s 帧。
-    // \\r 分帧保留原始帧边界；strip-ansi 后仍可按 owners+elapsed 识别进度帧。
-    const frames = raw.split("\r").filter((frame) => frame.includes("owners") && frame.includes("elapsed"))
+    // \\r 分帧保留原始帧边界；strip-ansi 后仍可按阶段文案+elapsed 识别进度帧。
+    const frames = raw.split("\r").filter((frame) => frame.includes("Scanning cold data") && frame.includes("elapsed"))
     expect(frames.length).toBeGreaterThan(1)
     const last = frames[frames.length - 1]
-    expect(last).toMatch(/owners/)
+    expect(last).toMatch(/Scanning cold data/)
     expect(last).toMatch(/elapsed/)
     // 清行序列应出现在进度写入中。
     expect(raw).toContain("\x1b[K")
@@ -410,121 +437,183 @@ describe("database maintenance CLI", () => {
   // #549：若恢复 2s HTTP status 轮询，挂起的 control GET 会 TimeoutError；reconcile 观察则仍应完成。
   // 本用例伪造 live daemon control：POST 只登记 task，进度只写 durable JSON。
   ptyInteractive("online observe completes while control status hangs during nonterminal work", async () => {
-    await using tmp = await tmpdir({ init: (root) => seedColdParts(root, 8) })
-    // seedColdParts 已通过真实 CLI 完成 migration，无需再次冷启动相同的 status 命令。
-    const { realpath } = await import("fs/promises")
-    // realpath 与 CLI Database.getPath 对齐，避免 task.dbPath mismatch 拒读。
-    const dbPath = await realpath(path.join(tmp.path, "opencode.db"))
-    const token = "hung-status-token"
-    const lockPath = path.join(tmp.path, "tui-server.json")
-    // taskID 由 POST 分配；terminal 标记 durable 终态已写入（settlement 解锁）。
-    let taskID = ""
-    let terminal = false
-    // 假 control 与真 daemon 同协议：token 鉴权 + maintenance POST/GET 路径。
-    const server = Bun.serve({
-      hostname: "127.0.0.1",
-      port: 0,
-      async fetch(request) {
-        if (request.headers.get(ServerLock.CONTROL_TOKEN_HEADER) !== token) {
-          return new Response("unauthorized", { status: 401 })
-        }
-        const url = new URL(request.url)
-        if (request.method === "POST" && url.pathname === ServerLock.CONTROL_MAINTENANCE_PATH) {
-          // 202 后 CLI 进入 observe；此处不执行 ColdStorage，只推进 task 文件。
-          taskID = `dbm_hung_${crypto.randomUUID()}`
-          const root = `${dbPath}.maintenance`
-          await mkdir(path.join(root, "tasks"), { recursive: true })
-          const base: MaintenanceTask = {
-            version: 1,
-            taskID,
-            dbPath,
-            operation: "compress",
-            args: { operation: "compress", olderThanMs: 0, batchSize: 1 },
-            status: "running",
-            cursor: { owner: "part", lastID: "" },
-            processed: 0,
-            skipped: 0,
-            failed: 0,
-            rawBytes: 0,
-            compressedBytes: 0,
-            createdAt: Date.now(),
-            updatedAt: Date.now(),
+    // sparse/constant/full 分别锁定稀疏跳变、前瞻上限和满量 running 初始化，不要求跨阶段百分比连续。
+    for (const scenario of [
+      { name: "sparse", initial: 0, updates: [60], pause: false },
+      { name: "constant", initial: 60, updates: [], pause: false },
+      { name: "full", initial: 100, updates: [], pause: false },
+      { name: "long-frame", initial: 0, updates: [60], pause: true },
+      { name: "pulse", initial: undefined, updates: [2, 5, 8], pause: false },
+    ] as const) {
+      await using tmp = await tmpdir({ init: (root) => seedColdParts(root, 8) })
+      // seedColdParts 已通过真实 CLI 完成 migration，无需再次冷启动相同的 status 命令。
+      const { realpath } = await import("fs/promises")
+      // realpath 与 CLI Database.getPath 对齐，避免 task.dbPath mismatch 拒读。
+      const dbPath = await realpath(path.join(tmp.path, "opencode.db"))
+      const token = "hung-status-token"
+      const lockPath = path.join(tmp.path, "tui-server.json")
+      // taskID 由 POST 分配；terminal 标记 durable 终态已写入（settlement 解锁）。
+      let taskID = ""
+      let terminal = false
+      // 假 control 与真 daemon 同协议：token 鉴权 + maintenance POST/GET 路径。
+      const server = Bun.serve({
+        hostname: "127.0.0.1",
+        port: 0,
+        async fetch(request) {
+          if (request.headers.get(ServerLock.CONTROL_TOKEN_HEADER) !== token) {
+            return new Response("unauthorized", { status: 401 })
           }
-          // 真实 observer 可在任意时刻读取 checkpoint；fixture 也必须遵守原子发布协议。
-          await ServerLock.writeMaintenanceTask(base)
-          // live owner 必须与 task 同时存在，否则首帧 reconcile 会直接降为 interrupted。
-          await mkdir(path.join(root, "lock"), { recursive: true })
-          await Bun.write(
-            path.join(root, "lock", "owner.json"),
-            JSON.stringify(
-              {
-                taskID,
-                dbPath,
-                pid: process.pid,
-                token: "hung-owner-token",
-                startedAt: Date.now(),
-              },
-              null,
-              2,
-            ),
-          )
-          // 后台推进 durable counters，不经 control 进度通道。
-          // 间隔 > PROGRESS_FRAME_MS，确保至少多帧 reconcile 读到 running。
-          void (async () => {
-            for (const processed of [2, 5, 8]) {
-              await Bun.sleep(120)
-              base.processed = processed
-              base.rawBytes = processed * 1000
-              base.updatedAt = Date.now()
-              await ServerLock.writeMaintenanceTask(base)
+          const url = new URL(request.url)
+          if (request.method === "POST" && url.pathname === ServerLock.CONTROL_MAINTENANCE_PATH) {
+            // 202 后 CLI 进入 observe；此处不执行 ColdStorage，只推进 task 文件。
+            taskID = `dbm_hung_${crypto.randomUUID()}`
+            const root = `${dbPath}.maintenance`
+            await mkdir(path.join(root, "tasks"), { recursive: true })
+            const base: MaintenanceTask = {
+              version: 1,
+              taskID,
+              dbPath,
+              operation: "compress",
+              args: { operation: "compress", olderThanMs: 0, batchSize: 1 },
+              status: "running",
+              cursor: { owner: "part", lastID: "" },
+              processed: scenario.initial ?? 0,
+              skipped: 0,
+              failed: 0,
+              rawBytes: 0,
+              compressedBytes: 0,
+              createdAt: Date.now(),
+              updatedAt: Date.now(),
+              ...(scenario.initial === undefined ? {} : { progress: { stage: "payload" as const, done: scenario.initial, total: 100 } }),
             }
-            base.status = "completed"
-            base.updatedAt = Date.now()
-            // 终态 checkpoint 同样原子提交；随后直接移除 lease 目录，不覆写虚假 owner。
+            // 真实 observer 可在任意时刻读取 checkpoint；fixture 也必须遵守原子发布协议。
             await ServerLock.writeMaintenanceTask(base)
-            // 终态后撤掉 owner，模拟 worker finally 释放 lease，settlement GET 可立即返回。
-            await import("fs/promises").then((fs) => fs.rm(path.join(root, "lock"), { recursive: true, force: true }))
-            terminal = true
-          })()
-          return Response.json({ taskID, operation: "compress", status: "running", createdAt: base.createdAt }, { status: 202 })
+            // live owner 必须与 task 同时存在，否则首帧 reconcile 会直接降为 interrupted。
+            await mkdir(path.join(root, "lock"), { recursive: true })
+            await Bun.write(
+              path.join(root, "lock", "owner.json"),
+              JSON.stringify(
+                {
+                  taskID,
+                  dbPath,
+                  pid: process.pid,
+                  token: "hung-owner-token",
+                  startedAt: Date.now(),
+                },
+                null,
+                2,
+              ),
+            )
+            // 650ms 间隔制造稀疏快照；恒定场景也保留同样的 running 观察窗口。
+            void (async () => {
+              for (const processed of scenario.updates) {
+                await Bun.sleep(650)
+                base.processed = processed
+                base.rawBytes = processed * 1000
+                base.updatedAt = Date.now()
+                if (scenario.initial !== undefined) base.progress = { stage: "payload", done: processed, total: 100 }
+                await ServerLock.writeMaintenanceTask(base)
+              }
+              // 长帧场景在恢复前保持 60% running，避免 completed 越过受测首帧。
+              await Bun.sleep(scenario.pause ? 5_000 : 650)
+              base.processed = 100
+              base.rawBytes = 100_000
+              base.updatedAt = Date.now()
+              if (scenario.initial !== undefined) base.progress = { stage: "payload", done: 100, total: 100 }
+              base.status = "completed"
+              // 终态 checkpoint 同样原子提交；随后直接移除 lease 目录，不覆写虚假 owner。
+              await ServerLock.writeMaintenanceTask(base)
+              // 终态后撤掉 owner，模拟 worker finally 释放 lease，settlement GET 可立即返回。
+              await import("fs/promises").then((fs) => fs.rm(path.join(root, "lock"), { recursive: true, force: true }))
+              terminal = true
+            })()
+            return Response.json({ taskID, operation: "compress", status: "running", createdAt: base.createdAt }, { status: 202 })
+          }
+          if (request.method === "GET" && url.pathname === ServerLock.CONTROL_MAINTENANCE_STATUS_PATH) {
+            // 非终态故意挂起 >2s：旧 HTTP 轮询必 TimeoutError；新路径只在 settlement 时打一次。
+            // settlement 时 terminal=true，必须立即返回 completed 以免误伤 ensureSettled。
+            if (!terminal) await Bun.sleep(5_000)
+            const id = url.searchParams.get("task") ?? taskID
+            const raw = await Bun.file(`${dbPath}.maintenance/tasks/${id}.json`).text()
+            return Response.json(JSON.parse(raw))
+          }
+          return Response.json({ error: "unexpected" }, { status: 404 })
+        },
+      })
+      try {
+        // pid=本测试进程：liveDaemon() 认为 daemon 仍活，从而走 online observe。
+        await Bun.write(
+          lockPath,
+          JSON.stringify({
+            pid: process.pid,
+            port: 1,
+            token,
+            dbPath,
+            channel: "test",
+            startedAt: new Date().toISOString(),
+            controlPort: server.port,
+          }),
+        )
+        const env = { ...isolatedEnv(tmp.path), OPENCODE_LOCK_PATH: lockPath }
+        const cli = runPty(["db", "compress", "--older-than", "0ms", "--batch-size", "1"], env)
+        // N 保留"daemon"，强制 online 路径而非 offline lease。
+        answerPrompt(cli.proc, "Stop daemon", "n")
+        const resumedFrames: number[] = []
+        let resumed = false
+        if (scenario.pause) {
+          cli.proc.onData((data) => {
+            if (!resumed || !data.includes("elapsed")) return
+            const match = /(\d+\.\d)%/.exec(data)
+            if (match) resumedFrames.push(Number(match[1]))
+          })
+          // 先等到真实活动帧，再暂停进程；不能用固定 sleep 猜测 renderer 已启动。
+          await Promise.race([
+            new Promise<void>((resolve) => cli.proc.onData((data) => {
+              if (data.includes("elapsed") && data.includes("%")) resolve()
+            })),
+            Bun.sleep(15_000).then(() => { throw new Error(`progress renderer did not start before SIGSTOP: ${cli.output()}`) }),
+          ])
+          process.kill(cli.proc.pid, "SIGSTOP")
+          try {
+            // durable 60 在暂停期间发布；恢复后的帧间隔与 offline 长同步事务同属墙钟长帧。
+            await Bun.sleep(2_000)
+          } finally {
+            process.kill(cli.proc.pid, "SIGCONT")
+          }
+          resumed = true
         }
-        if (request.method === "GET" && url.pathname === ServerLock.CONTROL_MAINTENANCE_STATUS_PATH) {
-          // 非终态故意挂起 >2s：旧 HTTP 轮询必 TimeoutError；新路径只在 settlement 时打一次。
-          // settlement 时 terminal=true，必须立即返回 completed 以免误伤 ensureSettled。
-          if (!terminal) await Bun.sleep(5_000)
-          const id = url.searchParams.get("task") ?? taskID
-          const raw = await Bun.file(`${dbPath}.maintenance/tasks/${id}.json`).text()
-          return Response.json(JSON.parse(raw))
+        expect(await waitForExit(cli.proc, cli.exited)).toBe(0)
+        const output = cli.output()
+        expect(output).toMatch(/Continuing through the running daemon[\s\S]*Compression completed/)
+        expect(output).not.toMatch(/timed out|TimeoutError/i)
+        // 只读取同一物理行内的 elapsed+百分比，避免完成汇总污染活动帧。
+        const percentages = cli.raw().split("\r").flatMap((frame) => {
+          const line = stripAnsi(frame).split(/\r?\n/).find((line) => line.includes("elapsed") && line.includes("%"))
+          if (!line) return []
+          const match = /(\d+\.\d)%/.exec(line)
+          return match ? [Number(match[1])] : []
+        })
+        if (scenario.initial === undefined) {
+          // 无 progress 的首个 checkpoint 必须保留 owners/pulse，且没有 determinate 百分比。
+          expect(output).toMatch(/owners[\s\S]*elapsed/)
+          expect(percentages).toEqual([])
+        } else {
+          expect(output).toContain("Compressing payloads")
+          // 稀疏场景必须有中间帧；determinate 场景只准单调前进并由 completed 收尾 100%。
+          if (scenario.initial === 0) expect(percentages.some((value) => value > 0 && value < 60), scenario.name).toBe(true)
+          expect(percentages.at(-1), scenario.name).toBe(100)
+          expect(percentages.every((value, index) => index === 0 || value >= percentages[index - 1]), scenario.name).toBe(true)
+          // 恒定 60/100 的运行段不得超过 65%；满量 running 首帧只能为 99%。
+          expect(percentages.slice(0, -1).every((value) => value <= (scenario.initial === 100 ? 99 : 65)), scenario.name).toBe(true)
+          if (scenario.initial === 100) expect(percentages[0], scenario.name).toBe(99)
+          // 2 秒长帧后不得一次追满到约 64.8%，首个非零帧仍须是一个小步长。
+          if (scenario.pause) expect(resumedFrames.find((value) => value > 0), scenario.name).toBeLessThanOrEqual(25)
         }
-        return Response.json({ error: "unexpected" }, { status: 404 })
-      },
-    })
-    try {
-      // pid=本测试进程：liveDaemon() 认为 daemon 仍活，从而走 online observe。
-      await Bun.write(
-        lockPath,
-        JSON.stringify({
-          pid: process.pid,
-          port: 1,
-          token,
-          dbPath,
-          channel: "test",
-          startedAt: new Date().toISOString(),
-          controlPort: server.port,
-        }),
-      )
-      const env = { ...isolatedEnv(tmp.path), OPENCODE_LOCK_PATH: lockPath }
-      const cli = runPty(["db", "compress", "--older-than", "0ms", "--batch-size", "1"], env)
-      // N 保留"daemon"，强制 online 路径而非 offline lease。
-      answerPrompt(cli.proc, "Stop daemon", "n")
-      expect(await waitForExit(cli.proc, cli.exited)).toBe(0)
-      const output = cli.output()
-      expect(output).toMatch(/Continuing through the running daemon[\s\S]*Compression completed/)
-      expect(output).not.toMatch(/timed out|TimeoutError/i)
-    } finally {
-      server.stop(true)
+      } finally {
+        server.stop(true)
+      }
     }
-  }, 30_000)
+  }, 120_000)
 
   // #549：dead-owner 经 status --task 公开 seam 触发 reconcile，不得永久 running。
   // reconcile 契约：running + 死 owner 必须变成 interrupted 并给出 resume 提示。

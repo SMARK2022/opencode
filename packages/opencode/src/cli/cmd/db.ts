@@ -127,6 +127,8 @@ const RECLAIM_PROMPT_RATIO = 0.02
 const RECLAIM_LARGE_BYTES = 64_000_000
 // #549：online 观察帧时钟约 10fps；rate 只在 durable counter 变化时重算，避免每帧把吞吐刷成 0。
 const PROGRESS_FRAME_MS = 100
+// 350ms 仅控制视觉追赶速度，与 durable checkpoint 和 100ms 采样时钟无关。
+const PROGRESS_SMOOTHING_MS = 350
 const MAINTENANCE_START_TIMEOUT_MS = 10_000
 
 function freelistMetrics(report: Pick<ColdStorage.StatusReport, "freelistPages" | "pageSize" | "pageCount">) {
@@ -262,6 +264,8 @@ function compressionProgress(startedAt: number) {
   let rateBytes = 0
   let previous: { at: number; bytes: number } | undefined
   let phase: { stage: string; at: number; done: number } | undefined
+  let displayRatio = 0
+  let paintedAt = startedAt
   renderCompressionStart()
   const paint = () => {
     if (!latest) return
@@ -274,13 +278,19 @@ function compressionProgress(startedAt: number) {
     const elapsedText = duration(elapsed).padStart(8)
     // 有总量估算时显示真实百分比与 ETA；老旧任务记录没有 progress 字段，回退脉冲动画。
     const progress = latest.progress
-    if (progress && progress.total > 0) {
-      // 分母为估计值，图形限制在满格范围；旁边仍显示真实完成计数。
-      const ratio = Math.min(1, progress.done / progress.total)
-      const filled = Math.round(ratio * 20)
+    // running 的零总量继续 pulse；completed 即使零候选也必须能由 finish 补齐 100%。
+    if (progress && (progress.total > 0 || latest.status === "completed")) {
+      const actual = progress.total > 0 ? Math.min(1, progress.done / progress.total) : 0
+      // 视觉值最多比 durable 进度前瞻 5 个百分点，非 completed 永远不满 100%。
+      const target = latest.status === "completed" ? 1 : Math.min(0.99, actual + 0.05)
+      const remaining = target - displayRatio
+      // 长同步帧也只推进一个视觉帧步长，避免恢复绘制时按数秒墙钟一次追满。
+      const step = 1 - Math.exp(-Math.min(PROGRESS_FRAME_MS, now - paintedAt) / PROGRESS_SMOOTHING_MS)
+      displayRatio = remaining < 0.0005 ? target : displayRatio + remaining * step
+      paintedAt = now
+      const filled = Math.round(displayRatio * 20)
       const bar = `${"█".repeat(filled)}${"·".repeat(20 - filled)}`
-      const percent = `${(ratio * 100).toFixed(1)}%`.padStart(6)
-      const counts = `${progress.done.toLocaleString("en-US")}/${progress.total.toLocaleString("en-US")}`
+      const percent = `${(displayRatio * 100).toFixed(1)}%`.padStart(6)
       // 阶段切换和恢复有不同的计数起点，ETA 只使用本观察阶段实际完成的增量。
       const advanced = phase ? progress.done - phase.done : 0
       // 尚无完成增量时只显示elapsed，避免把第一帧停顿解释成零剩余时间。
@@ -288,11 +298,10 @@ function compressionProgress(startedAt: number) {
         phase && advanced > 0
           ? `  ETA ~${duration(((now - phase.at) * Math.max(0, progress.total - progress.done)) / advanced)}`
           : ""
-      // 包阶段的分母是源包数，一个包可以共享给许多owner。
-      const unit = progress.stage === "payload" ? "packs" : "owners"
+      const stage = progress.stage === "payload" ? "Compressing payloads" : "Scanning cold data"
       // 定宽字段 + EL，防止 rate/耗时变短后留下上一帧残影。
       process.stderr.write(
-        `\r  ${UI.Style.TEXT_HIGHLIGHT}[${bar}]${UI.Style.TEXT_NORMAL} ${percent}  ${counts} ${unit}  ${rateText}  elapsed ${elapsedText}${eta}\x1b[K`,
+        `\r  ${stage} ${UI.Style.TEXT_HIGHLIGHT}[${bar}]${UI.Style.TEXT_NORMAL} ${percent}  ${rateText}  elapsed ${elapsedText}${eta}\x1b[K`,
       )
       return
     }
@@ -308,8 +317,13 @@ function compressionProgress(startedAt: number) {
   return {
     update(task: ColdMaintain.MaintenanceTask) {
       const now = performance.now()
-      if (task.progress && phase?.stage !== task.progress.stage)
+      if (task.progress && phase?.stage !== task.progress.stage) {
         phase = { stage: task.progress.stage, at: now, done: task.progress.done }
+        // owners 与 packs 分母不同；满量 running 首帧也受非终态上限约束，不能先 100% 再回退。
+        const actual = task.progress.total > 0 ? Math.min(1, task.progress.done / task.progress.total) : 0
+        displayRatio = Math.min(actual, task.status === "completed" ? 1 : 0.99)
+        paintedAt = now
+      }
       // rate 只在 rawBytes 变化的 durable 快照之间计算，避免每帧把吞吐刷成 0。
       if (!previous || task.rawBytes !== previous.bytes) {
         rateBytes = previous
@@ -318,11 +332,20 @@ function compressionProgress(startedAt: number) {
         previous = { at: now, bytes: task.rawBytes }
       }
       latest = task
+      // completed 只登记快照并停止定时器，最终 100% 由 finish 独占绘制。
+      if (task.status === "completed") {
+        clearInterval(timer)
+        return
+      }
       paint()
     },
     finish() {
       // 只有画过至少一帧才补换行，纯 machine 或空任务路径不污染 stderr。
       clearInterval(timer)
+      if (latest?.status === "completed") {
+        displayRatio = 1
+        paint()
+      }
       if (visible) process.stderr.write(EOL)
       visible = false
       // 已排队的paint也会看见空快照，收尾后不再覆盖汇总行。
@@ -389,6 +412,7 @@ async function waitForDaemonTask(lock: ServerLock.ServerLock, taskID: string, re
       }
       // 终态（含 retainedDaemon completed）一律走 control GET timeout false 做 lease handoff。
       const settled = await ensureSettled(lock, taskID)
+      progress?.update(settled)
       progress?.finish()
       if (settled.status === "completed") {
         if (progress) renderCompression(settled, performance.now() - started)
@@ -498,7 +522,8 @@ async function runOffline(db: Database.Interface, prepared: ColdMaintain.Prepare
       checkpoint: async (task) => {
         // #535：UI 只能观察已经原子持久化的 checkpoint；先画进度会让屏幕领先可恢复 cursor。
         await ServerLock.writeMaintenanceTask(task)
-        onTask?.(task)
+        // completed 等 encoder/lease 收尾后由 runOffline result 统一送入，定时器不能看到提前终态。
+        if (task.status !== "completed") onTask?.(task)
       },
     })
   } finally {
@@ -589,6 +614,11 @@ async function executeMaintenance(
       // offline 失败必须先释放选主锁再传播原错误，否则 reconnect daemon 会被一次失败维护永久挡住。
       await election?.release()
       throw error
+    })
+    .then((result) => {
+      // offline 的最终快照只在 encoder/lease 已收尾后进入 renderer。
+      if (result.type === "task") progress?.update(result.task)
+      return result
     })
     .finally(() => progress?.finish())
   if (human && request.operation === "compress" && result.type === "task") {
