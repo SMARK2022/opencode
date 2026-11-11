@@ -14,6 +14,7 @@ import { RootHttpApi } from "../api"
 import { GlobalUpgradeInput } from "../groups/global"
 import { EventClients } from "@opencode-ai/server/event-clients"
 import { PartView } from "@opencode-ai/core/session/part-view"
+import { DisposedReason, Event } from "@/server/event"
 import type { MessageV2 } from "@/session/message-v2"
 
 function eventData(data: unknown): Sse.Event {
@@ -67,6 +68,10 @@ function eventResponse(clients: EventClients.Interface, viewer: boolean) {
       // 计数属于响应 body 的 scope；未消费响应不虚增，取消流自动释放。
       Stream.unwrap(Effect.as(clients.acquire, Stream.make({ payload: { id: EventV2.ID.create(), type: "server.connected", properties: {} } }).pipe(
         Stream.concat(events.pipe(Stream.merge(heartbeat, { haltStrategy: "left" }))),
+        // 仅主动停机成为末帧；普通 dispose/凭证刷新仍保留同一订阅。
+        Stream.takeUntil((event) =>
+          event.payload?.type === Event.Disposed.type && event.payload.properties?.reason === DisposedReason.DaemonStop,
+        ),
         Stream.map((event) => eventData(viewer ? projectViewerEvent(event) : event)),
         Stream.pipeThroughChannel(Sse.encode()),
         Stream.encodeText,

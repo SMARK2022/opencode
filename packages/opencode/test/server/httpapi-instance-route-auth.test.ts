@@ -10,7 +10,7 @@ import { resetDatabase } from "../fixture/db"
 import { disposeAllInstances, tmpdir } from "../fixture/fixture"
 
 function app(input: { password?: string; username?: string }) {
-  const handler = HttpRouter.toWebHandler(
+  const web = HttpRouter.toWebHandler(
     HttpApiApp.routes.pipe(
       Layer.provide(
         ConfigProvider.layer(
@@ -22,10 +22,13 @@ function app(input: { password?: string; username?: string }) {
       ),
     ),
     { disableLogger: true },
-  ).handler
+  )
 
   return {
-    fetch: (request: Request) => handler(request, HttpApiApp.context),
+    // 取消 SSE 响应只结束请求流，不会释放 toWebHandler 建立的应用层 scope。
+    // 全局实例仍由 afterEach 清理；这里仅释放该 factory 创建并持有的 Web 层。
+    [Symbol.asyncDispose]: () => web.dispose(),
+    fetch: (request: Request) => web.handler(request, HttpApiApp.context),
     request(input: string | URL | Request, init?: RequestInit) {
       return this.fetch(input instanceof Request ? input : new Request(new URL(input, "http://localhost"), init))
     },
@@ -45,10 +48,11 @@ afterEach(async () => {
   await resetDatabase()
 })
 
+// server 后于 tmp 声明，确保先关 Web scope，再删临时目录和执行 afterEach 的数据库重置。
 describe("HttpApi instance route authorization", () => {
   test("requires configured auth before opening the instance event stream", async () => {
     await using tmp = await tmpdir({ git: true, config: { formatter: false, lsp: false } })
-    const server = app({ password: "secret" })
+    await using server = app({ password: "secret" })
     const headers = { "x-opencode-directory": tmp.path }
 
     const missing = await server.request(EventPaths.event, { headers })
@@ -64,7 +68,7 @@ describe("HttpApi instance route authorization", () => {
 
   test("requires configured auth before resolving the PTY websocket route", async () => {
     await using tmp = await tmpdir({ git: true, config: { formatter: false, lsp: false } })
-    const server = app({ password: "secret" })
+    await using server = app({ password: "secret" })
     const route = PtyPaths.connect.replace(":ptyID", PtyID.ascending())
     const headers = { "x-opencode-directory": tmp.path }
 

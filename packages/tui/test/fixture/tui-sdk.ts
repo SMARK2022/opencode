@@ -79,6 +79,9 @@ export function createFetch(override?: FetchHandler, events?: ReturnType<typeof 
     if (url.pathname === "/session") session.push(url)
     const overridden = await override?.(url, input instanceof Request ? input : undefined, init)
     if (overridden) return overridden
+    // 默认会话没有待答问题；仅补齐读取契约，覆盖响应及未知写请求仍由调用方决定。
+    const method = (init?.method ?? (input instanceof Request ? input.method : "GET")).toUpperCase()
+    if (url.pathname === "/question" && method === "GET") return json([])
     if (url.pathname === "/api/event" && events) return events.response()
 
     if (

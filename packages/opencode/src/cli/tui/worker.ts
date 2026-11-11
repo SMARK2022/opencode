@@ -295,11 +295,12 @@ if (isDaemon) {
       await reconcileStale({ kind: "exit-full" }, { budgetMs: remaining }).catch((error) => log.error("stale-turn exit-full failed", { error: String(error) }))
     } else log.info("stale-turn exit-full skipped: services unavailable or no cleanup budget")
 
+    // 主动停机让末帧走既有 HTTP 优雅窗口；其他退出仍强关，五秒硬截止不变。
     // 监听资源归 daemon 所有，共享它的 TUI 退出只释放自己的连接。
     const stopped = await Promise.allSettled([
       Promise.resolve().then(() => controlServer?.stop(true)),
-      Promise.resolve().then(() => externalServer?.stop(true)),
-      Promise.resolve().then(() => internalServer?.stop(true)),
+      Promise.resolve().then(() => externalServer?.stop(reason !== DisposedReason.DaemonStop)),
+      Promise.resolve().then(() => internalServer?.stop(reason !== DisposedReason.DaemonStop)),
     ])
     // scoped文件logger关闭即排空缓冲；等待仍受原五秒硬截止保护。
     const runtime = await Promise.allSettled([AppRuntime.dispose(), daemonLogging.dispose()])

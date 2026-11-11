@@ -253,7 +253,7 @@ describe("session HttpApi", () => {
     "shares session ownership and cancels V1 runs across service contexts",
     () =>
       Effect.gen(function* () {
-        const shared = HttpApiApp.createSharedServices()
+        const shared = { ...HttpApiApp.createSharedServices(), memoMap: Layer.makeMemoMapUnsafe() }
         const scope = yield* Scope.Scope
         const firstScope = yield* Scope.fork(scope)
         const secondScope = yield* Scope.fork(scope)
@@ -329,6 +329,17 @@ describe("session HttpApi", () => {
         yield* Scope.close(firstScope, Exit.succeed(undefined))
         // 第一scope退出不关闭第二scope仍持有的应用服务。
         expect((yield* Context.get(second, Session.Service).get(session.id).pipe(Effect.provide(second))).id).toBe(session.id)
+        // 隔离的 memoMap 使此处确实释放最后 owner，不借用测试外层的数据库引用。
+        yield* Effect.promise(() => Promise.all(handlers.map(entry => entry.web.dispose())))
+        yield* Scope.close(secondScope, Exit.void)
+        yield* Scope.close(runtimeScope, Exit.void)
+        const previousDatabase = Context.get(first, Database.Service)
+        expect(Exit.isFailure(yield* previousDatabase.db.run("SELECT 1").pipe(Effect.exit))).toBe(true)
+        const rebuiltScope = yield* Scope.fork(scope)
+        const rebuilt = yield* Layer.buildWithMemoMap(shared.layer, shared.memoMap, rebuiltScope)
+        const database = Context.get(rebuilt, Database.Service)
+        expect(database).not.toBe(previousDatabase)
+        yield* database.db.run("SELECT 1")
       }),
   )
 

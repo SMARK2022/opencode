@@ -21,7 +21,7 @@
       "passThroughEnv": ["*"]
     },
     "opencode#test:ci": {
-      "dependsOn": ["^build"],
+      "dependsOn": ["^build", "@opencode-ai/codemode#test"],
       "env": ["OPENCODE_TEST_SHARD"],
       "outputs": [".artifacts/unit/*.xml"],
       "passThroughEnv": ["*"]
@@ -34,6 +34,9 @@
     "@opencode-ai/core#test": {
       "dependsOn": ["^build"],
       "outputs": []
+    },
+    "@opencode-ai/codemode#test": {
+      "cache": false
     },
     "@opencode-ai/function#test": {
       "outputs": []

@@ -309,7 +309,8 @@ export function createSharedServices() {
       AppNodeBuilderV1.build(MoveSession.node, replacements),
     ).pipe(Layer.provideMerge(locationServiceMapV2))
   })).pipe(Layer.provideMerge(legacyOwners))
-  return { layer, memoMap }
+  // 复用组合根及其 scope；仅共享应用服务，listener 的认证与路由仍各自构建。
+  return { layer: Layer.suspend(() => layer), memoMap }
 }
 
 export function createRoutes(
