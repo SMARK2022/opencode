@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test"
 // 用宿主控制原因与就绪门闩观察公开行为，不能用超时或私有状态冒充中断证据。
-import { Cause, Deferred, Effect, Schema } from "effect"
+import { Cause, Clock, Deferred, Duration, Effect, Fiber, Schema } from "effect"
+import { TestClock } from "effect/testing"
 import { CodeMode, Tool, toolError } from "../src/index.js"
 
 // Wave 5 acceptance suite: first-class promise values. Un-awaited tool calls start eagerly on
@@ -594,6 +595,19 @@ describe("async function composition", () => {
     expect(trace.active).toBe(0)
   })
 
+  test("factory closures outlive their call frames and share only their own bindings", async () => {
+    // 工厂返回后局部绑定仍存活；两次工厂调用不能共用一份计数器，旧闭包也不能被深复制。
+    expect(
+      await value(`
+      function factory(n) { let count = n; return async () => {
+        count++; const mine = count; await tools.host.sleepy({ id: mine }); return mine;
+      } }
+      const first = factory(1), second = factory(10);
+      return await Promise.all([first(), second(), first()]);
+    `),
+    ).toEqual([2, 11, 3])
+  })
+
   test("adopts returned promises without taking tool permits for wrapper functions", async () => {
     const trace = makeTrace()
     // 嵌套 helper 与组合器不能占用八个工具许可，否则批次会自锁。
@@ -715,4 +729,229 @@ describe("composable promise combinators", () => {
     )
     expect(exit._tag).toBe("Failure")
   })
+})
+
+// 二十次提交固定验证八个准入槽；取消后保留父作用域，释放门闩也不能复活排队工作。
+const queuedCode = `const calls=Array.from({length:20}).map((_,id)=>tools.work({id})); search({query:"work"}); return await Promise.all(calls)`
+
+for (const cancel of [false, true])
+  test(`20-call admission and cleanup: cancel=${cancel}`, async () => {
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const allSubmitted = yield* Deferred.make<void>()
+        const ninth = yield* Deferred.make<void>()
+        const gates = yield* Effect.forEach(Array.from({ length: 20 }), () => Deferred.make<void>())
+        const starts: number[] = []
+        let active = 0,
+          peak = 0,
+          cleaned = 0
+        const fiber = yield* CodeMode.execute({
+          code: queuedCode,
+          tools: {
+            work: Tool.make({
+              description: "Gate",
+              input: Schema.Struct({ id: Schema.Number }),
+              run: ({ id }) =>
+                Effect.gen(function* () {
+                  starts.push(id)
+                  active++
+                  peak = Math.max(peak, active)
+                  if (starts.length === 9) yield* Deferred.succeed(ninth, undefined)
+                  yield* Deferred.await(gates[id])
+                  return id
+                }).pipe(
+                  Effect.ensuring(
+                    Effect.sync(() => {
+                      active--
+                      cleaned++
+                    }),
+                  ),
+                ),
+            }),
+          },
+          onToolCallStart: (call) =>
+            call.name === "$codemode.search"
+              ? Deferred.succeed(allSubmitted, undefined).pipe(Effect.asVoid)
+              : Effect.void,
+        }).pipe(Effect.forkChild)
+        yield* Deferred.await(allSubmitted)
+        expect(starts).toEqual([0, 1, 2, 3, 4, 5, 6, 7])
+        if (cancel) {
+          yield* Fiber.interrupt(fiber)
+          expect(starts).toHaveLength(8)
+          expect(cleaned).toBe(8)
+          expect(active).toBe(0)
+          // 根结束后继续释放全部阻塞点，排队请求仍不得复活或产生迟到副作用。
+          yield* Effect.forEach(gates, (gate) => Deferred.succeed(gate, undefined))
+          yield* Effect.yieldNow
+          expect(starts).toHaveLength(8)
+          return
+        }
+        yield* Deferred.succeed(gates[0], undefined)
+        yield* Deferred.await(ninth)
+        // 单独释放首个槽位，只允许第九个真实调用进入，证明不是批次等待屏障。
+        expect(starts).toHaveLength(9)
+        expect(active).toBe(8)
+        yield* Effect.forEach(gates, (gate) => Deferred.succeed(gate, undefined))
+        expect(yield* Fiber.join(fiber)).toMatchObject({ ok: true, value: Array.from({ length: 20 }, (_, i) => i) })
+        expect(peak).toBe(8)
+        expect(cleaned).toBe(20)
+        expect(active).toBe(0)
+      }),
+    )
+  })
+
+// 虚拟时钟跨过一千毫秒排队期；十毫秒叶子预算只能在拿到许可后开始计时。
+test("queue time does not consume a leaf-owned timeout", async () => {
+  await Effect.runPromise(
+    Effect.gen(function* () {
+      const allSubmitted = yield* Deferred.make<void>(),
+        release = yield* Deferred.make<void>()
+      const starts: number[] = []
+      const fiber = yield* CodeMode.execute({
+        code: queuedCode,
+        tools: {
+          work: Tool.make({
+            description: "Leaf budget",
+            input: Schema.Struct({ id: Schema.Number }),
+            run: ({ id }) =>
+              Effect.gen(function* () {
+                starts.push(id)
+                if (id < 8) yield* Deferred.await(release)
+                else yield* Effect.sleep(5).pipe(Effect.timeout(10))
+                return id
+              }),
+          }),
+        },
+        onToolCallStart: (c) =>
+          c.name === "$codemode.search" ? Deferred.succeed(allSubmitted, undefined).pipe(Effect.asVoid) : Effect.void,
+      }).pipe(Effect.forkChild)
+      yield* Deferred.await(allSubmitted)
+      yield* TestClock.adjust(1000)
+      expect(starts).toHaveLength(8)
+      yield* Deferred.succeed(release, undefined)
+      yield* TestClock.adjust(20)
+      expect(yield* Fiber.join(fiber)).toMatchObject({ ok: true, value: Array.from({ length: 20 }, (_, i) => i) })
+    }).pipe(Effect.provide(TestClock.layer())),
+  )
+})
+
+// Clock 的真实取消回调是计时器释放证据；根成功、失败和外部取消都须在返回前收尾。
+for (const mode of ["success", "failure", "cancel", "timeout", "loop-break", "loop-return"] as const) {
+  test(`sleep disposes its timer on root ${mode}`, async () => {
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const base = yield* Clock.Clock
+        const ready = yield* Deferred.make<void>()
+        let live = 0
+        let disposed = 0
+        const observed = {
+          // 显式转交 Clock 合同，避免展开类实例漏掉原型方法。
+          currentTimeMillis: base.currentTimeMillis,
+          currentTimeNanos: base.currentTimeNanos,
+          currentTimeMillisUnsafe: () => base.currentTimeMillisUnsafe(),
+          currentTimeNanosUnsafe: () => base.currentTimeNanosUnsafe(),
+          sleep: (duration: Parameters<typeof base.sleep>[0]) => {
+            // 根超时仍走真实 Clock；只观察脚本的长计时器，不把框架计时器误算成泄漏。
+            if (Duration.toMillis(duration) !== 123456) return base.sleep(duration)
+            return Effect.callback<void>(() => {
+              live++
+              return Effect.sync(() => {
+                live--
+                disposed++
+              })
+            })
+          },
+        }
+        // 提前跳出不会访问数组中的未完成 Promise，但根退出仍必须释放该生产者。
+        const ending =
+          mode === "success"
+            ? "return 1"
+            : mode === "failure"
+              ? 'throw new Error("stop")'
+              : mode === "loop-break"
+                ? "for await (const x of [1, timer]) break; return 1"
+                : mode === "loop-return"
+                  ? "for await (const x of [1, timer]) return x"
+                  : "await timer; return 2"
+        // 脚本发现钩子在计时器注册返回之后发信号，避免同步通知在注册中途重入取消。
+        const fiber = yield* CodeMode.execute({
+          code: `const timer = sleep(123456); search({query: "timer"}); ${ending}`,
+          limits: { timeoutMs: 30 },
+          onToolCallStart: () => Deferred.succeed(ready, undefined).pipe(Effect.asVoid),
+        }).pipe(Effect.provideService(Clock.Clock, observed), Effect.forkChild)
+        yield* Deferred.await(ready)
+        if (mode === "cancel") {
+          // 让就绪广播的调用栈完成，再从独立宿主调度轮取消已经挂起的执行。
+          yield* Effect.yieldNow
+          yield* Fiber.interrupt(fiber)
+        } else {
+          const result = yield* Fiber.join(fiber)
+          expect(result.ok).toBe(mode === "success" || mode === "loop-break" || mode === "loop-return")
+          if (mode === "timeout") expect(result).toMatchObject({ error: { kind: "TimeoutExceeded" } })
+        }
+        expect(live).toBe(0)
+        expect(disposed).toBe(1)
+      }),
+    )
+  })
+}
+
+// 睡眠不占用宿主槽、调用预算或回执；八个正在运行的工具不能阻止计时器前进。
+test("sleep progresses with eight occupied host permits and no receipt", async () => {
+  await Effect.runPromise(
+    Effect.gen(function* () {
+      const gate = yield* Deferred.make<void>()
+      let started = 0
+      const result = yield* CodeMode.execute({
+        code: `Array.from({length: 8}).map(() => tools.wait({}));
+        const p = sleep(0); await p; await p; return 1`,
+        limits: { maxToolCalls: 8 },
+        tools: {
+          wait: Tool.make({
+            description: "Hold slot",
+            input: Schema.Struct({}),
+            run: () =>
+              Effect.sync(() => {
+                started++
+              }).pipe(Effect.andThen(Deferred.await(gate))),
+          }),
+        },
+      })
+      expect(result).toMatchObject({ ok: true, value: 1 })
+      expect(started).toBe(8)
+      expect(result.toolCalls).toHaveLength(8)
+    }),
+  )
+})
+
+// 隐式 next/终止/关闭都必须让出；循环体新建任务能观察 break/return/throw 的关闭顺序。
+test("for-await suspends on values, termination and abrupt completion", async () => {
+  for (const [input, tail, expected] of [
+    ["[1,2]", "", ["caller", 1, "marker", 2, "marker", "done", "finally"]],
+    ["[Promise.resolve(1)]", "", ["caller", 1, "marker", "done", "finally"]],
+    ['[Promise.reject("bad")]', "", ["caller", "bad", "finally"]],
+    ["[]", "", ["caller", "done", "finally"]],
+    ["[1,2]", "continue", ["caller", 1, "marker", 2, "marker", "done", "finally"]],
+    ["[1,2]", "break", ["caller", 1, "marker", "done", "finally"]],
+    ["[1,2]", "return", ["caller", 1, "marker", "finally"]],
+    ["[1,2]", 'throw "bad"', ["caller", 1, "marker", "bad", "finally"]],
+  ] as const) {
+    const code = `
+      const events = [];
+      async function mark() { await 0; events.push("marker"); }
+      async function run() {
+        try {
+          for await (const value of ${input}) { events.push(value); mark(); ${tail}; }
+          events.push("done");
+        } catch (error) { events.push(error); }
+        finally { events.push("finally"); }
+      }
+      const task = run(); events.push("caller"); await task; return events;
+    `
+    expect(await Effect.runPromise(CodeMode.execute({ code }))).toMatchObject({
+      ok: true,
+      value: expected,
+    })
+  }
 })

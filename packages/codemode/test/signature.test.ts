@@ -4,7 +4,7 @@ import { CodeMode, Tool } from "../src/index.js"
 import { inputTypeScript, jsonSchemaToTypeScript, outputTypeScript } from "../src/tool-schema.js"
 
 // A raw JSON Schema tool in the shape an MCP adapter produces: render-only input schema
-// whose property descriptions and constraints must surface as JSDoc in pretty signatures.
+// 字段说明用于搜索；签名只保留真实类型与可选性。
 const listIssues = Tool.make({
   description: "List issues in a repository",
   input: {
@@ -21,7 +21,7 @@ const listIssues = Tool.make({
   run: () => Effect.succeed("[]"),
 })
 
-// An Effect Schema tool whose field annotations must flow through the emitted JSON Schema.
+// Effect 字段描述仍可检索，输出类型仍由声明决定。
 const lookupOrder = Tool.make({
   description: "Look up an order",
   input: Schema.Struct({
@@ -34,43 +34,11 @@ const lookupOrder = Tool.make({
   run: () => Effect.succeed({ status: "open" }),
 })
 
-describe("pretty signature rendering", () => {
-  test("described fields get JSDoc comments; undescribed and untagged fields get none", () => {
-    expect(inputTypeScript(listIssues, true)).toBe(
-      [
-        "{",
-        "  /** Repository owner */",
-        "  owner: string,",
-        "  /** Cursor from the previous response's pageInfo */",
-        "  after?: string,",
-        "  /**",
-        "   * Results per page",
-        "   * @default 30",
-        "   */",
-        "  perPage?: number,",
-        "  /**",
-        "   * Filter by labels",
-        "   * @minItems 1",
-        "   * @maxItems 10",
-        "   */",
-        "  labels?: Array<string>,",
-        '  state?: "open" | "closed",',
-        "}",
-      ].join("\n"),
-    )
-  })
-
-  test("compact mode output is unchanged by the pretty machinery", () => {
-    expect(inputTypeScript(listIssues)).toBe(
-      '{ owner: string; after?: string; perPage?: number; labels?: Array<string>; state?: "open" | "closed" }',
-    )
-    expect(inputTypeScript(lookupOrder)).toBe("{ id: string; verbose?: boolean }")
-    expect(outputTypeScript(lookupOrder)).toBe("{ status: string }")
-  })
-
-  test("nested objects recurse with increasing indent and their own JSDoc", () => {
-    const pretty = jsonSchemaToTypeScript(
-      {
+describe("compact signature rendering", () => {
+  test("nested compact objects preserve their field types", () => {
+    // 删除缩进展示不删除嵌套结构；说明文字不影响真实字段类型。
+    expect(
+      jsonSchemaToTypeScript({
         type: "object",
         properties: {
           filter: {
@@ -79,102 +47,31 @@ describe("pretty signature rendering", () => {
             properties: { state: { type: "string", description: "Issue state" } },
           },
         },
-      },
-      true,
-    )
-    expect(pretty).toBe(
-      [
-        "{",
-        "  /** Search filter */",
-        "  filter?: {",
-        "    /** Issue state */",
-        "    state?: string,",
-        "  },",
-        "}",
-      ].join("\n"),
-    )
+      }),
+    ).toBe("{ filter?: { state?: string } }")
   })
 
-  test("Effect Schema annotations become JSDoc on input and output fields", () => {
-    expect(inputTypeScript(lookupOrder, true)).toBe(
-      ["{", "  /** Order identifier */", "  id: string,", "  verbose?: boolean,", "}"].join("\n"),
+  test("compact input and output retain schema types", () => {
+    expect(inputTypeScript(listIssues)).toBe(
+      '{ owner: string; after?: string; perPage?: number; labels?: Array<string>; state?: "open" | "closed" }',
     )
-    expect(outputTypeScript(lookupOrder, true)).toBe(
-      ["{", "  /** Current order status */", "  status: string,", "}"].join("\n"),
-    )
+    // 同一实际对象合同现在显式接受唯一标量字段。
+    expect(inputTypeScript(lookupOrder)).toBe("{ id: string; verbose?: boolean } | string")
+    expect(outputTypeScript(lookupOrder)).toBe("{ status: string }")
   })
 
-  test("constraints TypeScript cannot express surface as JSDoc tags", () => {
-    const pretty = jsonSchemaToTypeScript(
-      {
-        type: "object",
-        properties: {
-          legacy: { type: "string", deprecated: true },
-          homepage: { type: "string", format: "uri" },
-          tags: { type: "array", items: { type: "string" }, minItems: 2, maxItems: 5, default: ["a", "b"] },
-        },
-      },
-      true,
-    )
-    expect(pretty).toContain("  /** @deprecated */\n  legacy?: string")
-    expect(pretty).toContain("  /** @format uri */\n  homepage?: string")
-    expect(pretty).toContain(
-      [
-        "  /**",
-        '   * @default ["a","b"]',
-        "   * @minItems 2",
-        "   * @maxItems 5",
-        "   */",
-        "  tags?: Array<string>",
-      ].join("\n"),
-    )
-  })
-
-  test("skips an unserializable default rather than emitting a broken tag", () => {
-    const pretty = jsonSchemaToTypeScript(
-      { type: "object", properties: { size: { type: "number", default: 1n } } },
-      true,
-    )
-    expect(pretty).toBe(["{", "  size?: number,", "}"].join("\n"))
-  })
-
-  test("neutralizes */ inside descriptions so nothing closes the comment early", () => {
-    const pretty = jsonSchemaToTypeScript(
-      { type: "object", properties: { note: { type: "string", description: "Ends */ early" } } },
-      true,
-    )
-    expect(pretty).toContain("  /** Ends * / early */")
-    expect(pretty).not.toContain("Ends */")
-  })
-
-  test("multiline descriptions become *-prefixed blocks with blank edges trimmed", () => {
-    const pretty = jsonSchemaToTypeScript(
-      {
-        type: "object",
-        properties: { query: { type: "string", description: "\nFirst line\n\nSecond line\n" } },
-      },
-      true,
-    )
-    expect(pretty).toBe(
-      ["{", "  /**", "   * First line", "   *", "   * Second line", "   */", "  query?: string,", "}"].join("\n"),
-    )
-  })
-
-  test("stays total on cyclic $refs and pathological nesting in both modes", () => {
+  test("stays total on cyclic $refs and pathological nesting in compact mode", () => {
     const cyclic = {
       $ref: "#/$defs/Node",
       $defs: { Node: { type: "object", properties: { child: { $ref: "#/$defs/Node" }, name: { type: "string" } } } },
     } as const
     expect(jsonSchemaToTypeScript(cyclic)).toBe("{ child?: unknown; name?: string }")
-    expect(jsonSchemaToTypeScript(cyclic, true)).toContain("child?: unknown")
 
     let deep: Record<string, unknown> = { type: "string" }
     for (let level = 0; level < 12; level += 1) deep = { type: "object", properties: { next: deep } }
-    for (const pretty of [false, true]) {
-      const rendered = jsonSchemaToTypeScript(deep, pretty)
-      expect(rendered).toContain("unknown")
-      expect(rendered).toContain("next?:")
-    }
+    const rendered = jsonSchemaToTypeScript(deep)
+    expect(rendered).toContain("unknown")
+    expect(rendered).toContain("next?:")
   })
 
   test("intersects ref and union siblings instead of discarding them", () => {
@@ -237,21 +134,7 @@ describe("non-identifier property names render as quoted keys", () => {
     )
   })
 
-  test("pretty rendering quotes non-identifier keys and keeps their JSDoc", () => {
-    expect(jsonSchemaToTypeScript(rawSchema, true)).toBe(
-      [
-        "{",
-        '  "123"?: number,',
-        '  "foo-bar"?: string,',
-        '  "@type": string,',
-        "  /** Dotted name */",
-        '  "x.y"?: number,',
-        "  plain?: boolean,",
-        "}",
-      ].join("\n"),
-    )
-  })
-
+  // 单一紧凑渲染也必须保留输入与输出特殊键的引号，移除 pretty 不等于移除合同覆盖。
   test("JSON Schema input and output signatures of a tool both quote", () => {
     const tool = Tool.make({
       description: "Adapter tool with awkward field names",
@@ -264,8 +147,8 @@ describe("non-identifier property names render as quoted keys", () => {
       run: () => Effect.succeed({ "content-type": "text/plain" }),
     })
     expect(inputTypeScript(tool)).toContain('"foo-bar"?: string')
+    // 返回字段同样必须是可表达的属性，而非把横线当成运算符。
     expect(outputTypeScript(tool)).toBe('{ "content-type": string }')
-    expect(outputTypeScript(tool, true)).toBe(["{", '  "content-type": string,', "}"].join("\n"))
   })
 
   test("Effect Schema structs with non-identifier field names quote too", () => {
@@ -274,8 +157,8 @@ describe("non-identifier property names render as quoted keys", () => {
       input: Schema.Struct({ "foo-bar": Schema.String, plain: Schema.optionalKey(Schema.Number) }),
       run: () => Effect.succeed(null),
     })
-    expect(inputTypeScript(tool)).toBe('{ "foo-bar": string; plain?: number }')
-    expect(inputTypeScript(tool, true)).toBe(["{", '  "foo-bar": string,', "  plain?: number,", "}"].join("\n"))
+    // 带横线的真实键仍有标量形式，不能在命名参数展示时丢失引号。
+    expect(inputTypeScript(tool)).toBe('{ "foo-bar": string; plain?: number } | string')
   })
 })
 
@@ -284,16 +167,16 @@ describe("union schemas render every alternative", () => {
     const schema = {
       anyOf: [{ type: "string" }, { type: "number" }],
     } as const
+    // 只留下紧凑出口，仍保留每个真实 union 成员。
     expect(jsonSchemaToTypeScript(schema)).toBe("string | number")
-    expect(jsonSchemaToTypeScript(schema, true)).toBe("string | number")
   })
 
   test("nullable numeric unions keep null", () => {
     const schema = {
       oneOf: [{ type: "number" }, { type: "null" }],
     } as const
+    // nullable 与数字的两种实际结果不能因删除 pretty 断言而合并成 number。
     expect(jsonSchemaToTypeScript(schema)).toBe("number | null")
-    expect(jsonSchemaToTypeScript(schema, true)).toBe("number | null")
   })
 
   test("tool input and output signatures preserve numeric unions", () => {
@@ -338,73 +221,27 @@ describe("union schemas render every alternative", () => {
   })
 })
 
-describe("JSDoc signatures in catalogs and search results", () => {
+// 目录、搜索与恢复共用紧凑签名，字段说明不会变成第二种展示。
+describe("compact signatures in catalogs and search", () => {
   const runtime = CodeMode.make({ tools: { github: { list_issues: listIssues }, orders: { lookup: lookupOrder } } })
-
-  const search = async (query: string) => {
-    const result = await Effect.runPromise(
-      runtime.execute(`return await tools.$codemode.search({ query: ${JSON.stringify(query)} })`),
-    )
-    expect(result.ok).toBe(true)
-    if (!result.ok) throw new Error("search failed")
-    return result.value as { items: Array<{ path: string; signature: string }>; remaining: number }
-  }
-
-  test("a raw JSON Schema (MCP-style) tool's result signature carries field JSDoc and tags", async () => {
-    const { items } = await search("list issues repository")
-    const item = items.find(({ path }) => path === "tools.github.list_issues")!
-    expect(item.signature).toBe(
-      [
-        "tools.github.list_issues({",
-        "  /** Repository owner */",
-        "  owner: string,",
-        "  /** Cursor from the previous response's pageInfo */",
-        "  after?: string,",
-        "  /**",
-        "   * Results per page",
-        "   * @default 30",
-        "   */",
-        "  perPage?: number,",
-        "  /**",
-        "   * Filter by labels",
-        "   * @minItems 1",
-        "   * @maxItems 10",
-        "   */",
-        "  labels?: Array<string>,",
-        '  state?: "open" | "closed",',
-        "}): Promise<unknown>",
-      ].join("\n"),
-    )
-  })
-
-  test("an annotated Effect Schema tool's result signature carries field JSDoc (exact-path lookup too)", async () => {
-    for (const query of ["look up order", "tools.orders.lookup"]) {
-      const { items } = await search(query)
-      const item = items.find(({ path }) => path === "tools.orders.lookup")!
-      expect(item.signature).toBe(
-        [
-          "tools.orders.lookup({",
-          "  /** Order identifier */",
-          "  id: string,",
-          "  verbose?: boolean,",
-          "}): Promise<{",
-          "  /** Current order status */",
-          "  status: string,",
-          "}>",
-        ].join("\n"),
-      )
+  const expected = [
+    'tools.github.list_issues(input: { owner: string; after?: string; perPage?: number; labels?: Array<string>; state?: "open" | "closed" }): Promise<unknown>',
+    "tools.orders.lookup(input: { id: string; verbose?: boolean } | string): Promise<{ status: string }>",
+  ]
+  test("JSON rendering and Effect encoded forms share exact public signatures", async () => {
+    expect(runtime.catalog().map((tool) => tool.signature)).toEqual(expected)
+    // 查字段文档仍能命中工具，但返回值不再放大成第二套多行接口。
+    for (const [query, signature] of [
+      ["Repository owner", expected[0]],
+      ["Order identifier", expected[1]],
+      ["tools.orders.lookup", expected[1]],
+    ]) {
+      expect(
+        await Effect.runPromise(runtime.execute(`return search({query:${JSON.stringify(query)}}).items[0].signature`)),
+      ).toMatchObject({ ok: true, value: signature })
     }
-  })
-
-  test("the inline catalog uses the same JSDoc signatures", async () => {
-    const instructions = runtime.instructions()
-    const github = (await search("list issues repository")).items.find(
-      ({ path }) => path === "tools.github.list_issues",
-    )!
-    const orders = (await search("look up order")).items.find(({ path }) => path === "tools.orders.lookup")!
-    expect(instructions).toContain(`  - ${github.signature} // List issues in a repository`)
-    expect(instructions).toContain(`  - ${orders.signature} // Look up an order`)
-    expect(instructions).toContain("/** Repository owner */")
+    for (const signature of expected) expect(runtime.instructions()).toContain(signature)
+    expect(runtime.instructions()).not.toContain("/**")
   })
 })
 
@@ -426,11 +263,13 @@ describe("non-identifier tool paths", () => {
   test("inline catalog uses bracket notation for dashed tool names", () => {
     const instructions = runtime.instructions()
 
+    // 特殊路径仍使用可执行的括号访问，签名参数名不改变真实调用表达式。
     expect(instructions).toContain(
-      'tools.context7["resolve-library-id"]({\n  query: string,\n  libraryName: string,\n}): Promise<unknown>',
+      'tools.context7["resolve-library-id"](input: { query: string; libraryName: string }): Promise<unknown>',
     )
-    expect(CodeMode.description).toContain("Do not infer or normalize tool names")
-    expect(CodeMode.description).toContain("preserve bracket notation such as")
+    // 精简措辞不能把带短横线的合法路径变成属性访问或自动猜测的别名。
+    expect(CodeMode.description).toContain("Use the exact namespaced paths and argument shapes")
+    expect(CodeMode.description).toContain("special names use bracket notation")
     expect(instructions).not.toContain("tools.context7.resolve-library-id")
     expect(instructions).not.toContain("tools.context7.resolve_library_id")
   })
@@ -444,6 +283,108 @@ describe("non-identifier tool paths", () => {
 
     const value = result.value as { items: Array<{ path: string; signature: string }> }
     expect(value.items[0]?.path).toBe('tools.context7["resolve-library-id"]')
-    expect(value.items[0]?.signature).toContain('tools.context7["resolve-library-id"]({')
+    // 动态搜索与内联目录必须给相同括号路径。
+    expect(value.items[0]?.signature).toContain('tools.context7["resolve-library-id"](input: {')
   })
 })
+
+// 同一条命名参数签名必须贯穿静态目录、动态搜索和误调用 namespace 的恢复提示。
+test("one compact named signature across discovery surfaces", async () => {
+  const runtime = CodeMode.make({ tools: { group: { lookup: lookupOrder } } })
+  const signature = "tools.group.lookup(input: { id: string; verbose?: boolean } | string): Promise<{ status: string }>"
+  expect(runtime.catalog()[0]?.signature).toBe(signature)
+  expect(runtime.instructions()).toContain(signature)
+  expect(
+    await Effect.runPromise(runtime.execute('return search({query:"group.lookup"}).items[0].signature')),
+  ).toMatchObject({ ok: true, value: signature })
+  expect(await Effect.runPromise(runtime.execute("return tools.group()"))).toMatchObject({
+    ok: false,
+    error: { suggestions: [signature] },
+  })
+})
+
+// 适配器展示 schema 不得覆盖实际标量合同，直接形式和拆包形式必须同源。
+test("scalar adapter signature uses its authoritative encoded scalar", async () => {
+  const runtime = CodeMode.make({
+    tools: {
+      call: Tool.make({
+        description: "Scalar adapter",
+        input: {
+          type: "object",
+          properties: { misleading: { type: "boolean" } },
+        },
+        inputContract: Schema.String,
+        run: (value) => Effect.succeed(Schema.decodeUnknownSync(Schema.String)(value)),
+      }),
+    },
+  })
+  expect(runtime.catalog()[0].signature).toBe(
+    "tools.call(input: string | Record<string, string> /* exactly one own enumerable field; undefined values are not unwrapped */): Promise<unknown>",
+  )
+  for (const input of ['"yes"', '{arbitrary:"yes"}'])
+    expect(await Effect.runPromise(runtime.execute(`return await tools.call(${input})`))).toMatchObject({
+      ok: true,
+      value: "yes",
+    })
+})
+
+// 真实对象合同不能在生成快捷描述符时丢失，不能只修正标量这一处分支。
+for (const [actual, expected, input, value] of [
+  [
+    Schema.Struct({
+      realKey: Schema.String.annotate({ description: "contractneedle" }),
+      verbose: Schema.optionalKey(Schema.Boolean),
+    }),
+    "{ realKey: string; verbose?: boolean } | string",
+    '"yes"',
+    { realKey: "yes" },
+  ],
+  [
+    Schema.Struct({ realKey: Schema.String.annotate({ description: "contractneedle" }), count: Schema.Number }),
+    "{ realKey: string; count: number }",
+    '{realKey:"yes",count:2}',
+    { realKey: "yes", count: 2 },
+  ],
+] as const) {
+  test(`adapter contract remains authoritative for ${expected}`, async () => {
+    let decodes = 0
+    const runtime = CodeMode.make({
+      tools: {
+        adapter: {
+          call: Tool.make({
+            description: "Adapter",
+            input: { type: "object", properties: { misleading: { type: "boolean" } } },
+            inputContract: actual,
+            run: (input) =>
+              Effect.sync(() => {
+                decodes++
+                return Schema.decodeUnknownSync(actual)(input)
+              }),
+          }),
+        },
+      },
+    })
+    const signature = `tools.adapter.call(input: ${expected}): Promise<unknown>`
+    expect(runtime.catalog()[0].signature).toBe(signature)
+    expect(runtime.instructions()).toContain(signature)
+    // 字段索引同样取真实来源，不能签名已修而 search 仍只索引虚假展示字段。
+    expect(
+      await Effect.runPromise(runtime.execute('return search({query:"contractneedle"}).items[0].signature')),
+    ).toMatchObject({ ok: true, value: signature })
+    expect(await Effect.runPromise(runtime.execute("return tools.adapter()"))).toMatchObject({
+      ok: false,
+      error: { suggestions: [signature] },
+    })
+    expect(decodes).toBe(0)
+    // 多必填字段没有快捷形式也必须保留完整合同，真实解码只发生在调用本身。
+    expect(await Effect.runPromise(runtime.execute(`return await tools.adapter.call(${input})`))).toMatchObject({
+      ok: true,
+      value,
+    })
+    expect(decodes).toBe(1)
+    expect(
+      await Effect.runPromise(runtime.execute("return await tools.adapter.call({misleading:true})")),
+    ).toMatchObject({ ok: false })
+    expect(decodes).toBe(2)
+  })
+}

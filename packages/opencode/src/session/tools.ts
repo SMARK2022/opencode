@@ -261,7 +261,7 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
                       const cancel = new AbortController()
                       const pending = invoke(leaf, args, { ...options, toolCallId: callID, abortSignal: AbortSignal.any([signal, cancel.signal]) }, child)
                       return Effect.tryPromise({ try: () => pending, catch: (error) => error }).pipe(
-                        // race 取消只针对败方；先通知该次宿主执行，再等待原清理，父 scope 继续可用。
+                        // 根作用域或宿主中断时先通知该次 child，再等待原清理；race 选出赢家本身不取消败方。
                         Effect.onInterrupt(() => Effect.sync(() => cancel.abort())),
                         Effect.ensuring(Effect.promise(() => pending.then(() => undefined, () => undefined))),
                       )
@@ -601,7 +601,8 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
             output: truncated.content,
             attachments,
             content: result.content,
-            program: McpCatalog.programResult(result),
+            // 原声明直接约束候选资格，不能以格式转换规避 SDK 的 structuredContent 要求。
+            program: McpCatalog.programResult(result, entry.def.outputSchema),
           }
         }).pipe(Effect.orDie),
     }
@@ -622,7 +623,8 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
       const local = entry && item.id.startsWith(server + "_") ? item.id.slice(server.length + 1) : item.id
       // 文字工具已有 output:string 合同；远端声明保持原状，原生结构化结果复用原 codec。
       return { id: item.id, path: [server, local], description: item.description,
-        inputSchema: ToolJsonSchema.fromTool(item), outputSchema: entry ? McpCatalog.schemas(entry.def).output : item.output ?? Schema.String }
+        // 只转交真实包装器保留的原 schema；MCP/自定义工具不会从展示字段获得新输入权限。
+        runtimeParameters: item.runtimeParameters, inputSchema: ToolJsonSchema.fromTool(item), outputSchema: entry ? McpCatalog.schemas(entry.def).output : item.output ?? Schema.String }
     }))
   for (const item of Object.values(eligible)) {
     const schema = ProviderTransform.schema(input.model, ToolJsonSchema.fromTool(item))

@@ -28,6 +28,18 @@ export type Binding = {
   initialized?: boolean
 }
 
+// 宿主只持有不透明词法状态；工具回调、执行 Scope 和权限均不属于可复用环境。
+export class Environment {
+  private readonly roots = {
+    globals: new Map<string, Binding>(),
+    bindings: new Map<string, Binding>(),
+  }
+
+  static scopes(environment: Environment) {
+    return environment.roots
+  }
+}
+
 export type StatementResult =
   | { kind: "none" }
   | { kind: "value"; value: unknown }
@@ -88,7 +100,8 @@ export class GlobalNamespace {
 
 export class GlobalMethodReference {
   constructor(
-    readonly namespace: GlobalNamespaceName | "Number" | "String",
+    // 私有内建类别不暴露命名空间或执行上下文，保留别名只能指向当前单元。
+    readonly namespace: GlobalNamespaceName | "Number" | "String" | "$builtin",
     readonly name: string,
   ) {}
 }

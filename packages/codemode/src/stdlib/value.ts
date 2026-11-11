@@ -28,6 +28,9 @@ export const errorBrandName = (value: unknown): string | undefined =>
 export const boundedData = (value: unknown, label: string): unknown => copyIn(value, label, true)
 
 export const coerceToString = (value: unknown): string => {
+  // 显式投影保留源文本，包括空白；普通对象仍走既有字符串转换。
+  const source = rawText(value)
+  if (source !== undefined) return source
   if (value === null) return "null"
   if (value === undefined) return "undefined"
   if (value instanceof SandboxDate)
@@ -74,6 +77,8 @@ export const invokeCoercion = (ref: CoercionFunction, args: Array<unknown>, node
   return coerceToString(value)
 }
 import { type AstNode, CoercionFunction, InterpreterRuntimeError } from "../interpreter/model.js"
+// 来源只在内部转换读取，不向工具参数或最终返回值增加可见字段。
+import { rawText } from "../raw-text.js"
 import { copyIn, type SafeObject } from "../tool-runtime.js"
 import {
   isSandboxValue,

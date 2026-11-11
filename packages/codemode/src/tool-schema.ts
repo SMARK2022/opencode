@@ -34,10 +34,9 @@ const intersection = (members: ReadonlyArray<string>): string => {
  */
 const MAX_RENDER_DEPTH = 8
 
+// 渲染状态只携带引用定义，紧凑签名不再维护第二种 pretty 模式。
 type RenderContext = {
   readonly definitions: Readonly<Record<string, JsonSchema>>
-  /** Indented, JSDoc-annotated multiline rendering (search results); compact single line otherwise. */
-  readonly pretty: boolean
 }
 
 const hasUnresolvedRef = (
@@ -64,46 +63,7 @@ const hasUnresolvedRef = (
   ].some((item) => hasUnresolvedRef(item, definitions, seen, nextVisited))
 }
 
-/**
- * Schema constraints a TypeScript type cannot express natively but a model benefits from,
- * surfaced as JSDoc tags (`@deprecated`, `@default`, `@format`, `@minItems`, `@maxItems`).
- */
-const docTags = (schema: JsonSchema): Array<string> => {
-  const tags: Array<string> = []
-  if (schema.deprecated === true) tags.push("@deprecated")
-  if (schema.default !== undefined) {
-    try {
-      const rendered = JSON.stringify(schema.default)
-      if (rendered !== undefined) tags.push(`@default ${rendered}`)
-    } catch {
-      // unserializable default: skip rather than emit a broken tag
-    }
-  }
-  if (typeof schema.format === "string") tags.push(`@format ${schema.format}`)
-  if (typeof schema.minItems === "number") tags.push(`@minItems ${schema.minItems}`)
-  if (typeof schema.maxItems === "number") tags.push(`@maxItems ${schema.maxItems}`)
-  return tags
-}
-
-/**
- * Format a schema `description` plus `tags` as a JSDoc comment at the given indent,
- * preserving multi-line text (a single line stays `/** ... *\/`; multiple lines become a
- * `*`-prefixed block). `*\/` is neutralized so nothing can close the comment early, and
- * blank leading/trailing lines are trimmed. Returns "" (else a trailing newline) so
- * callers can prepend it directly to the field line.
- */
-const jsdoc = (description: string | undefined, tags: ReadonlyArray<string>, pad: string): string => {
-  const lines = [...(description === undefined ? [] : description.split("\n")), ...tags].map((line) =>
-    line.replaceAll("*/", "* /").replace(/\s+$/, ""),
-  )
-  while (lines.length > 0 && lines[0]!.trim() === "") lines.shift()
-  while (lines.length > 0 && lines[lines.length - 1]!.trim() === "") lines.pop()
-  if (lines.length === 0) return ""
-  if (lines.length === 1) return `${pad}/** ${lines[0]} */\n`
-  const body = lines.map((line) => `${pad} *${line === "" ? "" : ` ${line}`}`).join("\n")
-  return `${pad}/**\n${body}\n${pad} */\n`
-}
-
+// 字段说明供搜索索引使用；这里只保留一套递归类型渲染，不再拼装 JSDoc。
 const renderSchema = (
   schema: JsonSchema,
   ctx: RenderContext,
@@ -177,41 +137,31 @@ const renderSchema = (
     const field = ([name, value]: readonly [string, JsonSchema]) =>
       `${renderKey(name)}${required.has(name) ? "" : "?"}: ${renderSchema(value, nested, depth + 1, seen)}`
 
-    if (!ctx.pretty) {
-      const fields = properties.map(field)
-      if (indexType !== undefined) fields.push(`[key: string]: ${indexType}`)
-      return fields.length === 0 ? "{}" : `{ ${fields.join("; ")} }`
-    }
-
-    // Pretty: an indented block, each described field preceded by its JSDoc comment.
-    if (properties.length === 0 && indexType === undefined) return "{}"
-    const pad = "  ".repeat(depth + 1)
-    const lines = properties.map(
-      (entry) => `${jsdoc(entry[1].description, docTags(entry[1]), pad)}${pad}${field(entry)},`,
-    )
-    if (indexType !== undefined) lines.push(`${pad}[key: string]: ${indexType},`)
-    return `{\n${lines.join("\n")}\n${"  ".repeat(depth)}}`
+    // 所有展示入口共用紧凑类型；字段说明仅用于搜索索引。
+    const fields = properties.map(field)
+    if (indexType !== undefined) fields.push(`[key: string]: ${indexType}`)
+    return fields.length === 0 ? "{}" : `{ ${fields.join("; ")} }`
   }
   return "unknown"
 }
 
-export const toTypeScript = (schema: Schema.Top, decoded = false, pretty = false): string => {
+export const toTypeScript = (schema: Schema.Top, decoded = false): string => {
   try {
     const visible = decoded ? Schema.toType(schema) : schema
     const document = Schema.toJsonSchemaDocument(visible) as {
       readonly schema: JsonSchema
       readonly definitions?: Readonly<Record<string, JsonSchema>>
     }
-    return renderSchema(document.schema, { definitions: document.definitions ?? {}, pretty })
+    return renderSchema(document.schema, { definitions: document.definitions ?? {} })
   } catch {
     return "unknown"
   }
 }
 
 /** Renders a raw JSON Schema document as a TypeScript type string. */
-export const jsonSchemaToTypeScript = (schema: JsonSchema, pretty = false): string => {
+export const jsonSchemaToTypeScript = (schema: JsonSchema): string => {
   try {
-    return renderSchema(schema, { definitions: { ...(schema.definitions ?? {}), ...(schema.$defs ?? {}) }, pretty })
+    return renderSchema(schema, { definitions: { ...(schema.definitions ?? {}), ...(schema.$defs ?? {}) } })
   } catch {
     return "unknown"
   }
@@ -231,16 +181,17 @@ export type InputProperty = {
  * directly, resolving a trivial top-level `$ref` into `$defs`/`definitions` when present.
  * Anything unresolvable yields `[]` (search falls back to path + description).
  */
+// 搜索字段与签名取相同的完整合同；快捷形式不适用也不能丢失真实对象字段。
 export const inputProperties = <R>(definition: Definition<R>): Array<InputProperty> => {
   try {
-    const document = isEffectSchema(definition.input)
-      ? (Schema.toJsonSchemaDocument(definition.input) as {
+    const document = isEffectSchema(definition.inputContract)
+      ? (Schema.toJsonSchemaDocument(definition.inputContract) as {
           readonly schema: JsonSchema
           readonly definitions?: Readonly<Record<string, JsonSchema>>
         })
       : {
-          schema: definition.input,
-          definitions: { ...(definition.input.definitions ?? {}), ...(definition.input.$defs ?? {}) },
+          schema: definition.inputContract,
+          definitions: { ...(definition.inputContract.definitions ?? {}), ...(definition.inputContract.$defs ?? {}) },
         }
     const definitions = document.definitions ?? {}
     let schema = document.schema
@@ -262,26 +213,27 @@ export const inputProperties = <R>(definition: Definition<R>): Array<InputProper
   }
 }
 
-/**
- * The model-visible TypeScript type of a tool's input. `pretty` renders an indented
- * multiline block with schema descriptions and constraints as JSDoc comments on the
- * fields; the default stays the compact single-line form.
- */
-export const inputTypeScript = <R>(definition: Definition<R>, pretty = false): string =>
-  isEffectSchema(definition.input)
-    ? toTypeScript(definition.input, false, pretty)
-    : jsonSchemaToTypeScript(definition.input, pretty)
+// 输入展示与实际适配共用描述符，标量根不采信适配器的展示对象。
+export const inputTypeScript = <R>(definition: Definition<R>): string => {
+  const original = isEffectSchema(definition.inputContract)
+    ? toTypeScript(definition.inputContract, false)
+    : jsonSchemaToTypeScript(definition.inputContract)
+  // 形式说明与执行共用同一实际描述符；显示字段变更不能移走真实参数键。
+  const forms = definition.inputForms
+  if (!forms) return original
+  const scalar = toTypeScript(forms.scalar)
+  return forms.kind === "object"
+    ? `${original} | ${scalar}`
+    : `${scalar} | Record<string, ${scalar}> /* exactly one own enumerable field; undefined values are not unwrapped */`
+}
 
-/**
- * The model-visible TypeScript type of a tool's result; tools without an output schema
- * return `unknown`. `pretty` renders the JSDoc-annotated multiline form, as for inputs.
- */
-export const outputTypeScript = <R>(definition: Definition<R>, pretty = false): string =>
+/** 无输出 schema 时保留 unknown，不从样例推断结果。 */
+export const outputTypeScript = <R>(definition: Definition<R>): string =>
   definition.output === undefined
     ? "unknown"
     : isEffectSchema(definition.output)
-      ? toTypeScript(definition.output, true, pretty)
-      : jsonSchemaToTypeScript(definition.output, pretty)
+      ? toTypeScript(definition.output, true)
+      : jsonSchemaToTypeScript(definition.output)
 
 /**
  * Decodes tool input before `run` is invoked. Effect Schemas validate (throwing on failure);

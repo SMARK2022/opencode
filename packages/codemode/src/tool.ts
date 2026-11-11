@@ -1,4 +1,8 @@
 import { Effect, Schema } from "effect"
+import { inputForms, type InputForms } from "./input-forms.js"
+
+// 宿主可从真实 validator 提取元数据，无须运行 decoder 或把展示 schema 变成验证器。
+export { inputForms, type InputForms } from "./input-forms.js"
 
 /**
  * JSON Schema subset accepted for render-only tool schemas.
@@ -36,6 +40,9 @@ export type SchemaType = Schema.Decoder<unknown> | JsonSchema
 export type Definition<R = never> = {
   readonly _tag: "CodeModeTool"
   readonly description: string
+  // 一个实际合同同时服务展示和形式推导；input 仍独立决定此层是否解码。
+  readonly inputContract: SchemaType
+  readonly inputForms?: InputForms
   readonly input: SchemaType
   readonly output: SchemaType | undefined
   readonly run: (input: unknown) => Effect.Effect<unknown, unknown, R>
@@ -50,6 +57,8 @@ type ResultType<S> = S extends Schema.Decoder<unknown> ? S["Encoded"] : unknown
 /** Options for defining one CodeMode tool. */
 export type Options<I extends SchemaType, O extends SchemaType | undefined, R = never> = {
   readonly description: string
+  // 适配器传完整原始合同而非派生形状；其实际解码仍由原宿主执行。
+  readonly inputContract?: Schema.Decoder<unknown>
   readonly input: I
   readonly output?: O
   readonly run: (input: InputType<I>) => Effect.Effect<ResultType<O>, unknown, R>
@@ -87,10 +96,16 @@ export const isDefinition = <R = never>(value: unknown): value is Definition<R> 
  */
 export const make = <I extends SchemaType, const O extends SchemaType | undefined = undefined, R = never>(
   options: Options<I, O, R>,
-): Definition<R> => ({
-  _tag: "CodeModeTool",
-  description: options.description,
-  input: options.input,
-  output: options.output,
-  run: (input) => options.run(input as InputType<I>),
-})
+): Definition<R> => {
+  const contract = Schema.isSchema(options.input) ? options.input : (options.inputContract ?? options.input)
+  return {
+    _tag: "CodeModeTool",
+    description: options.description,
+    // 展示与适配只从同一实际源推导；纯 JSON 只展示，不能授予快捷形式。
+    inputContract: contract,
+    inputForms: Schema.isSchema(contract) ? inputForms(contract) : undefined,
+    input: options.input,
+    output: options.output,
+    run: (input) => options.run(input as InputType<I>),
+  }
+}

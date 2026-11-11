@@ -1,10 +1,16 @@
+import { withRawText } from "./raw-text.js"
 import { Effect, Schema } from "effect"
 import { executeWithLimits } from "./interpreter/runtime.js"
+import { Environment } from "./interpreter/model.js"
 import { type HostTool, type HostTools, type Services, type ToolDescription, ToolRuntime } from "./tool-runtime.js"
 import type { Definition } from "./tool.js"
 
 /** A tool call admitted during an execution. */
 export type { ToolCall, ToolCallEnded, ToolCallHooks, ToolCallStarted, ToolDescription } from "./tool-runtime.js"
+
+// 只导出环境身份与工厂；词法内容由解释器拥有，宿主负责串行使用和释放。
+export type { Environment } from "./interpreter/model.js"
+export const createEnvironment = (): Environment => new Environment()
 
 /** Resource budgets enforced independently during each CodeMode program execution. */
 export type ExecutionLimits = {
@@ -20,6 +26,8 @@ export type ExecutionLimits = {
 export type DiscoveryOptions = {
   /** Approximate token budget (chars/4, default 2000) for full catalog entries. */
   readonly catalogBudget?: number
+  // 宿主提供已筛选的规范路径；库不按工具名字推断核心身份。
+  readonly priority?: ReadonlyArray<string>
 }
 
 type ToolTree<R = never> = {
@@ -36,6 +44,8 @@ export type ResolvedExecutionLimits = {
 export type ExecuteOptions<Tools extends Record<string, unknown> = {}> = {
   /** Source for one program in the supported JavaScript subset. */
   code: string
+  /** 仅复用词法状态；缺省仍逐次隔离，工具、取消与预算始终属于当前调用。 */
+  environment?: Environment
   /** Explicit tool tree exposed to the program as `tools`. */
   tools?: Tools & ToolTree<Services<Tools>>
   /** HTTP由宿主显式提供；未提供时沙箱没有环境网络权限。 */
@@ -152,11 +162,36 @@ export const make = <const Tools extends Record<string, unknown> = {}>(
   const tools = (options.tools ?? {}) as HostTools<Services<Tools>>
   ToolRuntime.assertValidTools(tools)
   const limits = resolveExecutionLimits(options.limits)
-  const prepared = ToolRuntime.prepare(tools, options.discovery?.catalogBudget)
+  // 仅当前目录参与优先选择；重建 runtime 时重新计算，不缓存旧能力。
+  const prepared = ToolRuntime.prepare(tools, options.discovery?.catalogBudget, options.discovery?.priority)
 
   return {
     catalog: () => prepared.catalog,
     instructions: () => prepared.instructions,
     execute: (code) => executeWithLimits<Tools>({ ...options, code }, limits, prepared.searchIndex),
+  }
+}
+
+// 仅供宿主显式选择的无类型文本；声明字符串和普通工具结果不会自动进入此路径。
+export const fromJsonText = (text: string): unknown => {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text, (_key, value: unknown) => {
+      // JSON 数字溢出无法保持普通数据的数值意义；不改变现有沙箱 Infinity 语义。
+      if (typeof value === "number" && !Number.isFinite(value)) throw new RangeError("JSON numeric overflow")
+      return value
+    })
+  } catch (error) {
+    if (error instanceof SyntaxError || error instanceof RangeError) return text
+    throw error
+  }
+  if (parsed === null || typeof parsed !== "object") return text
+  try {
+    // 复用既有深度、危险键和普通对象边界，不引入第二套可表示性规则。
+    return withRawText(ToolRuntime.copyIn(parsed, "JSON tool result"), text)
+  } catch (error) {
+    // 已知不可表示的文本仍是成功文本；内部意外错误不能伪装成格式选择。
+    if (error instanceof ToolRuntime.ToolRuntimeError && error.kind === "InvalidDataValue") return text
+    throw error
   }
 }

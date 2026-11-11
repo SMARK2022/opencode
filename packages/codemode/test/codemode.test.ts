@@ -426,7 +426,8 @@ describe("CodeMode schema flexibility", () => {
       {
         path: "adapter.call",
         description: "Call an adapter-described tool",
-        signature: "tools.adapter.call({\n  id: string,\n  count?: number,\n}): Promise<unknown>",
+        // JSON schema 仅负责展示，可选字段仍保留，但不能据此推断标量捷径。
+        signature: "tools.adapter.call(input: { id: string; count?: number }): Promise<unknown>",
       },
     ])
 
@@ -459,7 +460,8 @@ describe("CodeMode schema flexibility", () => {
       {
         path: "users.lookup",
         description: "Look up a user",
-        signature: "tools.users.lookup({\n  login: string,\n}): Promise<{\n  login: string,\n  id: number,\n}>",
+        // adapter 的返回 schema 独立渲染；不能从本次模拟结果推断输出类型。
+        signature: "tools.users.lookup(input: { login: string }): Promise<{ login: string; id: number }>",
       },
     ])
 
@@ -475,7 +477,8 @@ describe("CodeMode schema flexibility", () => {
       run: () => Effect.succeed("pong"),
     })
     const runtime = CodeMode.make({ tools: { net: { ping } } })
-    expect(runtime.catalog()[0]?.signature).toBe("tools.net.ping({\n  host: string,\n}): Promise<unknown>")
+    // 实际 Effect 输入有标量形式，但省略输出 schema 时仍只能承诺 unknown。
+    expect(runtime.catalog()[0]?.signature).toBe("tools.net.ping(input: { host: string } | string): Promise<unknown>")
 
     const result = await Effect.runPromise(runtime.execute(`return await tools.net.ping({ host: "example.test" })`))
     expect(result.ok).toBe(true)
@@ -512,19 +515,22 @@ describe("CodeMode public contract", () => {
       {
         path: "orders.lookup",
         description: "Look up an order by ID",
-        signature: "tools.orders.lookup({\n  id: string,\n}): Promise<{\n  id: string,\n  status: string,\n}>",
+        // 订单的对象与标量形式来自同一实际编码域，返回对象合同保持不变。
+        signature: "tools.orders.lookup(input: { id: string } | string): Promise<{ id: string; status: string }>",
       },
     ])
     expect(runtime.instructions()).toContain("The catalog is complete.")
     expect(runtime.instructions()).toContain("- orders (1 tool)")
+    // 下方搜索锁定同一紧凑接口，不再维护与目录不同的多行文档形式。
     expect(runtime.instructions()).toContain(
-      "  - tools.orders.lookup({\n  id: string,\n}): Promise<{\n  id: string,\n  status: string,\n}> // Look up an order by ID",
+      // 内联目录与上方 catalog 的类型必须逐字一致，预算不改写接口。
+      "  - tools.orders.lookup(input: { id: string } | string): Promise<{ id: string; status: string }> // Look up an order by ID",
     )
     // A fully inlined catalog does not advertise search in the instructions...
     expect(runtime.instructions()).not.toMatch(/\$codemode/)
 
     // ...but the search tool stays registered, so a speculative call still works with the
-    // same signature as the inline catalog.
+    // 相同路径的完整工具用途与紧凑签名，不再承诺字段 JSDoc。
     const result = await Effect.runPromise(runtime.execute(`return await tools.$codemode.search({ query: "order" })`))
     expect(result.ok).toBe(true)
     if (result.ok) {
@@ -533,8 +539,9 @@ describe("CodeMode public contract", () => {
           {
             path: "tools.orders.lookup",
             description: "Look up an order by ID",
+            // 完整小目录不会删除 search；显式查询仍返回同一官方签名。
             signature:
-              "tools.orders.lookup({\n  id: string,\n}): Promise<{\n  id: string,\n  status: string,\n}>",
+              "tools.orders.lookup(input: { id: string } | string): Promise<{ id: string; status: string }>",
           },
         ],
         remaining: 0,
@@ -556,11 +563,13 @@ describe("CodeMode public contract", () => {
       {
         path: "context7.resolve-library-id",
         description: "Resolve a library ID",
-        signature: 'tools.context7["resolve-library-id"]({\n  libraryName: string,\n}): Promise<string>',
+        // 横线名称要求括号访问；加入命名参数不能损坏可复制的路径。
+        signature: 'tools.context7["resolve-library-id"](input: { libraryName: string } | string): Promise<string>',
       },
     ])
+    // 压缩类型不能把特殊名称改成无效点号表达式，调用路径仍与完整搜索一致。
     expect(runtime.instructions()).toContain(
-      'tools.context7["resolve-library-id"]({\n  libraryName: string,\n}): Promise<string>',
+      'tools.context7["resolve-library-id"](input: { libraryName: string } | string): Promise<string>',
     )
 
     const search = await Effect.runPromise(
@@ -573,7 +582,8 @@ describe("CodeMode public contract", () => {
           {
             path: 'tools.context7["resolve-library-id"]',
             description: "Resolve a library ID",
-            signature: 'tools.context7["resolve-library-id"]({\n  libraryName: string,\n}): Promise<string>',
+            // 搜索返回完整调用表达式，不能把括号路径退回无效点号表达式。
+            signature: 'tools.context7["resolve-library-id"](input: { libraryName: string } | string): Promise<string>',
           },
         ],
         remaining: 0,
@@ -595,46 +605,56 @@ describe("CodeMode public contract", () => {
   })
 
   test("the description's discovery and projection example executes as written", async () => {
-    // 示例是模型实际收到的公开内容，直接执行而不是把预期代码再复制一份。
-    const discovery = CodeMode.description.match(/First discover: `([^`]+)`/)?.[1]
-    const batch = CodeMode.description.match(/Then compose: `([^`]+)`/)?.[1]
+    // 示例取自模型实际接收的说明；宿主集成另用真实文件工具验证相同脚本。
+    const discovery = CodeMode.description.match(/Discover[^`]+`([^`]+)`/)?.[1]
+    const batch = CodeMode.description.match(/```js\n([\s\S]+?)\n```/)?.[1]
     if (discovery === undefined || batch === undefined) throw new Error("Missing executable workflow example")
-    const runtime = CodeMode.make({ tools, discovery: { catalogBudget: 0 } })
-    // 空内联预算下仍能发现入口，示例不能依赖恰好已展示的工具。
-    expect(await Effect.runPromise(runtime.execute(discovery))).toMatchObject({
-      ok: true,
-      value: { items: [{ path: "tools.orders.lookup" }] },
+    const runtime = CodeMode.make({
+      tools: { $opencode: {
+        glob: Tool.make({
+          description: "Find files matching a glob pattern",
+          input: Schema.Struct({ pattern: Schema.String }),
+          run: () => Effect.succeed({ files: [{ path: "src/a.ts", type: "file" }, { path: "src/b.ts", type: "file" }], truncated: false }),
+        }),
+        read: Tool.make({
+          description: "Read a text page from a file",
+          input: Schema.Struct({ filePath: Schema.String, limit: Schema.Number }),
+          run: ({ filePath }) => Effect.succeed({ type: "text-page", path: filePath, totalLines: filePath.endsWith("a.ts") ? 250 : 5, totalLinesExact: true }),
+        }),
+      } },
+      discovery: { catalogBudget: 0 },
     })
-    // 只回传声明的决策字段，避免示例鼓励中间原始数据进入模型回线。
+    // 零内联预算下发现仍给出当前入口，样例不依赖恰巧已显示某个工具。
+    expect(await Effect.runPromise(runtime.execute(discovery))).toMatchObject({
+      ok: true, value: { items: [{ path: "tools.$opencode.glob" }, { path: "tools.$opencode.read" }] },
+    })
+    // 样例只返回有界统计及精确性，不能把摘要包装成完整文件内容。
     expect(await Effect.runPromise(runtime.execute(batch))).toMatchObject({
-      ok: true,
-      value: [
-        { id: "a", status: "open" },
-        { id: "b", status: "open" },
-      ],
+      ok: true, value: { truncated: false, inspected: 2, files: [{ file: "src/a.ts", lines: 250, exact: true }] },
     })
   })
 
   test("instructions separate shared execution guidance and catalog branches", () => {
-    // 固定说明与动态目录分别交付，渐进发现不应复制一份运行时规则。
-    expect(CodeMode.description).toContain("pending calls are interrupted when execution ends")
-    expect(CodeMode.description).toContain("returning only the evidence needed for the next decision")
-    // fetch 权限来自宿主显式能力，静态说明不能承诺每个 runtime 都提供网络。
-    expect(CodeMode.description).toContain("When provided by the host, `fetch`")
+    // 固定说明先描述收益，再用一条渐进示例示范发现、并发和裁剪。
+    expect(CodeMode.description).toContain("Run JavaScript/TypeScript")
+    expect(CodeMode.description).toContain("pending work ends with the script")
+    expect(CodeMode.description).toContain("Return the fields needed for your next decision")
+    expect(CodeMode.description).toContain("eight-file bounded line-count check")
+    // fetch 由宿主提供；仅保留必要能力边界，不加入强制异常包装教条。
+    expect(CodeMode.description).toContain("Fetch is available when supplied by the host")
+    expect(CodeMode.description).not.toMatch(/try\/catch|MUST NOT|IMPORTANT|timers are unavailable/)
     const complete = CodeMode.make({ tools }).instructions()
-    expect(complete).toStartWith("# Code Mode\n\nThe tools listed below cannot be called directly:")
-    expect(complete).toContain("The catalog is complete. Do not guess tool names.")
+    expect(complete).toStartWith("# Code Mode\n\nCall these tools as JavaScript inside `execute`;")
+    expect(complete).toContain("The catalog is complete.")
     expect(complete).toContain("## Code Mode tools (call only inside `execute`)")
     expect(complete).not.toContain("Promise.allSettled")
     const partial = CodeMode.make({ tools, discovery: { catalogBudget: 0 } }).instructions()
-    expect(partial).toContain("The tools listed below, and `search`, cannot be called directly")
-    expect(partial).toContain("find it with the global `search(...)` function")
-    expect(partial).toContain("Unlisted tools remain available through search")
+    // 同源紧凑签名不再承诺字段 JSDoc；路径仍是可直接使用的调用表达式。
+    expect(partial).toContain("Use `search(...)` for unlisted tools.")
     expect(partial).toContain("Each result's `path` is the complete call expression")
-    expect(partial).toContain("- search({")
-    // 目录同步结果没有Promise包装；调用语义须与模型看到的发现签名一致。
-    expect(partial).toContain("}): {\n  items: Array<{")
-    // 维护注释不属于模型任务信息；四种公开出口都必须保持不泄露注释段。
+    expect(partial).toContain("- search(input:")
+    expect(partial).toContain("): { items: Array<{")
+    // 中文维护段只解释代码修改，不进入任何模型可见出口。
     for (const text of [CodeMode.description, complete, partial, CodeMode.make({}).instructions()]) {
       expect(text).not.toMatch(/中文维护说明|@@ comment\./)
     }
@@ -663,7 +683,8 @@ describe("CodeMode public contract", () => {
     )
     expect(runtime.instructions()).toContain("- thread (2 tools, none shown)")
     expect(runtime.instructions()).toContain("- orders (1 tool, none shown)")
-    expect(runtime.instructions()).toContain("- search({")
+    // 零预算仍公开同步 search 的命名参数，保证隐藏项可被主动发现。
+    expect(runtime.instructions()).toContain("- search(input: {")
     expect(runtime.instructions()).not.toContain("tools.thread.uploadFile(")
 
     const result = await Effect.runPromise(
@@ -681,12 +702,14 @@ describe("CodeMode public contract", () => {
         {
           path: "tools.thread.uploadFile",
           description: "Upload one readable local file to the current Discord thread",
-          signature: "tools.thread.uploadFile({\n  path: string,\n}): Promise<{\n  sent: boolean,\n}>",
+          // 文件路径标量与原对象都合法，返回 sent 仍是结构化业务字段。
+          signature: "tools.thread.uploadFile(input: { path: string } | string): Promise<{ sent: boolean }>",
         },
         {
           path: "tools.thread.generateImage",
           description: "Generate an image and upload it to the current Discord thread",
-          signature: "tools.thread.generateImage({\n  prompt: string,\n}): Promise<{\n  sent: boolean,\n}>",
+          // 同组其他工具独立推导自己的参数键，不能复用上传工具的 path。
+          signature: "tools.thread.generateImage(input: { prompt: string } | string): Promise<{ sent: boolean }>",
         },
       ],
       remaining: 0,
@@ -757,7 +780,8 @@ describe("CodeMode public contract", () => {
             {
               path: "tools.many.tool13",
               description: "Numbered tool 13",
-              signature: "tools.many.tool13({\n  id: string,\n}): Promise<string>",
+              // 分页精确查找不能丢掉该工具的参数形式或把相似路径混入结果。
+              signature: "tools.many.tool13(input: { id: string } | string): Promise<string>",
             },
           ],
           remaining: 0,
@@ -944,7 +968,8 @@ describe("CodeMode public contract", () => {
     if (exhausted.ok) expect(exhausted.value).toStrictEqual({ items: [], remaining: 0, next: null })
   })
 
-  test("inlines round-robin across namespaces so one expensive namespace cannot starve the rest", () => {
+  // 长度选择替代旧轮询策略；此处测实际入选集合，而非绑定实现循环。
+  test("skips expensive signatures and selects the shortest current paths", () => {
     const cheap = Tool.make({
       description: "Cheap",
       input: Schema.Struct({ q: Schema.String }),
@@ -964,7 +989,8 @@ describe("CodeMode public contract", () => {
     // 官方预算先支付两个namespace标题，再分轮容纳便宜签名，昂贵项不能饿死另一个组。
     const runtime = CodeMode.make({
       tools: { alpha: { cheap, expensive }, beta: { cheap } },
-      discovery: { catalogBudget: 50 },
+      // 命名参数和显式标量形式也计入预算；足够容纳两个短签名但不容纳昂贵项。
+      discovery: { catalogBudget: 65 },
     })
 
     const instructions = runtime.instructions()
@@ -972,15 +998,28 @@ describe("CodeMode public contract", () => {
       "The catalog is partial.",
     )
     expect(instructions).toContain("- alpha (2 tools, 1 shown)")
-    expect(instructions).toContain("  - tools.alpha.cheap({\n  q: string,\n}): Promise<string> // Cheap")
+    // 较长工具跳过后，同组短工具仍可入选，不能把整个 namespace 封死。
+    expect(instructions).toContain("  - tools.alpha.cheap(input: { q: string } | string): Promise<string> // Cheap")
     expect(instructions).not.toContain("tools.alpha.expensive(")
     // Fully shown namespaces read cleanly (no "shown" annotation).
     expect(instructions).toContain("- beta (1 tool)")
-    expect(instructions).toContain("  - tools.beta.cheap({\n  q: string,\n}): Promise<string> // Cheap")
-    expect(instructions).toContain("- search({")
+    // 剩余预算足够时另一组短工具也必须展示，组标题不承担选择策略。
+    expect(instructions).toContain("  - tools.beta.cheap(input: { q: string } | string): Promise<string> // Cheap")
+    expect(instructions).toContain("- search(input: {")
   })
 
-  test("charges inline JSDoc against the catalog token budget", () => {
+  test("compact catalog is stable for equal sets supplied in different orders", () => {
+    const entry = Tool.make({ description: "Lookup", input: Schema.Struct({ id: Schema.String }), output: Schema.String, run: ({ id }) => Effect.succeed(id) })
+    // 同一工具集合的顺序变化不应改变目录正文；不把新增工具下的共享预算声称为完全隔离。
+    for (const catalogBudget of [0, 40, 2000]) {
+      const left = CodeMode.make({ tools: { zeta: { last: entry }, alpha: { second: entry, first: entry } }, discovery: { catalogBudget } })
+      const right = CodeMode.make({ tools: { alpha: { first: entry, second: entry }, zeta: { last: entry } }, discovery: { catalogBudget } })
+      expect(left.instructions()).toBe(right.instructions())
+      expect(left.catalog()).toEqual(right.catalog())
+    }
+  })
+
+  test("compact catalog and search share callable types without field JSDoc", async () => {
     const documented = Tool.make({
       description: "Look up a record",
       input: {
@@ -997,11 +1036,15 @@ describe("CodeMode public contract", () => {
       discovery: { catalogBudget: 40 },
     })
 
-    expect(runtime.catalog()[0]?.signature).toContain("/** A detailed identifier description.")
-    expect(runtime.instructions()).toContain(
-      "The catalog is partial.",
-    )
-    expect(runtime.instructions()).not.toContain("tools.records.lookup(")
+    // 详细文案仍用于检索，但有限展示预算只承担准确的紧凑接口。
+    // catalog 与 search 不再保留字段 JSDoc，两者必须与内联接口一致。
+    expect(runtime.catalog()[0]?.signature).not.toContain("/**")
+    expect(runtime.instructions()).toContain("The catalog is complete.")
+    expect(runtime.instructions()).toContain("tools.records.lookup(input: { id: string }): Promise<unknown>")
+    expect(runtime.instructions()).not.toContain("A detailed identifier description.")
+    // 字段说明只参与索引，显式发现复用同一签名，避免另一出口重新产生合同漂移。
+    expect(await Effect.runPromise(runtime.execute('return search({ namespace: "records" }).items[0].signature')))
+      .toMatchObject({ ok: true, value: runtime.catalog()[0]?.signature })
   })
 
   test("upstream global search directly exposes signatures and zero-argument calls retain validation", async () => {
@@ -1022,6 +1065,42 @@ describe("CodeMode public contract", () => {
       expect(invalid).toMatchObject({ ok: false, error: { kind: "InvalidToolInput" }, toolCalls: [] })
     }
     expect(await Effect.runPromise(runtime.execute("search().items.length"))).toMatchObject({ ok: true, value: 2 })
+  })
+
+  test("namespace rejection supplies a usable exact signature without a discovery call", async () => {
+    const received: string[] = []
+    const lookup = Tool.make({ description: "Lookup", input: Schema.Struct({ id: Schema.String }), output: Schema.String,
+      run: ({ id }) => Effect.sync(() => { received.push(id); return id }) })
+    const runtime = CodeMode.make({ tools: { "api-kit": { "group-name": { "lookup-item": lookup } } } })
+    // 错把分组当函数只能产生诊断，不能猜测其中唯一工具并执行副作用。
+    const failed = await Effect.runPromise(runtime.execute('await tools["api-kit"]["group-name"]({ id: "order_42" })'))
+    expect(failed).toMatchObject({ ok: false, error: { kind: "UnknownTool",
+      suggestions: ['tools["api-kit"]["group-name"]["lookup-item"](input: { id: string } | string): Promise<string>'] } })
+    expect(received).toEqual([])
+    if (failed.ok) throw new Error("expected namespace rejection")
+    // 直接消费上一次错误中的精确表达式，证明调用者无需再 search 或自行规范化名字。
+    const path = failed.error.suggestions?.[0]?.split("(")[0]
+    expect(await Effect.runPromise(runtime.execute(`return await ${path}({ id: "order_42" })`)))
+      .toMatchObject({ ok: true, value: "order_42" })
+    expect(received).toEqual(["order_42"])
+  })
+
+  test("namespace recovery bounds whole signatures and reports the omitted count", async () => {
+    const simple = Tool.make({ description: "Entry", input: Schema.Struct({}), output: Schema.String, run: () => Effect.succeed("ok") })
+    const entries = Object.fromEntries(Array.from({ length: 100 }, (_, i) => [`entry_${i}`, simple]))
+    // 单条超长类型不能截成缺参数的伪签名，也不能挡住其它可完整展示的成员。
+    const huge = Tool.make({ description: "Huge", input: { type: "object", properties: { value: { const: "x".repeat(2100) } } } as const, run: () => Effect.succeed("ok") })
+    const runtime = CodeMode.make({ tools: { many: { huge, ...entries } } })
+    const result = await Effect.runPromise(runtime.execute("await tools.many()"))
+    expect(result.ok).toBe(false)
+    if (result.ok) throw new Error("expected namespace rejection")
+    const signatures = result.error.suggestions?.filter((line) => line.startsWith("tools.")) ?? []
+    expect(signatures.length).toBeGreaterThan(0)
+    expect(signatures.every((line) => /^tools\.many\.entry_\d+\(\): Promise<string>$/.test(line))).toBe(true)
+    // 预算只计整条签名和换行；剩余数量让模型知道提示不是完整目录。
+    expect(signatures.join("\n").length).toBeLessThanOrEqual(2000)
+    expect(result.error.suggestions?.at(-1)).toBe(`${101 - signatures.length} more functions; use search for full details.`)
+    expect(result.toolCalls).toEqual([])
   })
 
   test("upstream discovery scopes nested paths, ranks path words, and suggests available tools", async () => {
@@ -1048,8 +1127,9 @@ describe("CodeMode public contract", () => {
     // 独立预期取官方instructions.render格式，固定说明和目录只各承担自己的职责。
     expect(runtime.instructions()).toBe([
       "# Code Mode", "",
-      "The tools listed below cannot be called directly: they only work as JavaScript inside the `execute` tool. Every other tool you have is a normal tool call: call it directly, never inside `execute`.", "",
-      "The catalog is complete. Do not guess tool names.", "",
+      // 固定宿主入口和字段文档去向，短提示不能暗示所有工具都必须走 Execute。
+      "Call these tools as JavaScript inside `execute`; call tools outside this catalog directly.", "",
+      "The catalog is complete.", "",
       "## Code Mode tools (call only inside `execute`)", "",
       "- host (1 tool)", "  - tools.host.ping(): Promise<string> // Ping",
     ].join("\n"))
@@ -1199,4 +1279,25 @@ test("fetch response readers compose as async methods over one response", async 
     }),
   )
   expect(result).toMatchObject({ ok: true, value: [true, [{ id: 7 }, '{"id":7}', [7]]] })
+})
+
+// 优先路径只影响展示；预算放不下或路径不存在时不能制造能力，search 必须仍完整。
+test("discovery priority competes within budget and never restores absent tools", async () => {
+  const tool = (description: string) => Tool.make({ description, input: Schema.Struct({}), run: () => Effect.succeed(null) })
+  const tools = { a: tool("short"), host: { core: tool("eligible core") } }
+  const options = { tools, discovery: { catalogBudget: 35, priority: ["host.core", "missing.read"] } }
+  const preferred = CodeMode.make(options)
+  expect(preferred.instructions()).toContain("tools.host.core(): Promise<unknown>")
+  expect(preferred.instructions()).not.toContain("tools.a(): Promise<unknown>")
+  expect(preferred.instructions()).not.toContain("missing.read")
+  // 两个路径都留在同一索引，未内联不等于权限被撤销或工具不存在。
+  expect(await Effect.runPromise(preferred.execute('return search({}).items.map(item=>item.path)'))).toMatchObject({ ok: true, value: ["tools.a", "tools.host.core"] })
+  const ordinary = CodeMode.make({ tools, discovery: { catalogBudget: 35 } })
+  expect(ordinary.instructions()).toContain("tools.a(): Promise<unknown>")
+  expect(ordinary.instructions()).not.toContain("tools.host.core(): Promise<unknown>")
+  // 零预算和超长核心签名都诚实标记 partial，不能为了优先级突破计费。
+  expect(CodeMode.make({ tools, discovery: { catalogBudget: 0, priority: ["host.core"] } }).instructions()).not.toContain("tools.host.core()")
+  const oversized = CodeMode.make({ tools: { short: tool(""), ["long".repeat(100)]: tool("") }, discovery: { catalogBudget: 140, priority: ["long".repeat(100)] } })
+  expect(oversized.instructions()).toContain("tools.short(): Promise<unknown>")
+  expect(oversized.instructions()).not.toContain(`tools.${"long".repeat(100)}()`)
 })

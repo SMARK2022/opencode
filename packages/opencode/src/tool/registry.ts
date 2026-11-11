@@ -59,6 +59,8 @@ import { MCP } from "@/mcp"
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 // #277：read 工具的图片附件处理收敛到 Image.Service，registry 需要装配该依赖
 import { Image } from "@/image/image"
+// 工具初始化取得环境 owner，下一次 SessionTools.resolve 仍复用同一 Location 生命周期。
+import { ExecuteEnvironments } from "./execute-environments"
 
 export function webSearchEnabled(providerID: ProviderV2.ID, flags = { exa: false, parallel: false }) {
   return (
@@ -347,6 +349,8 @@ const layer = Layer.effect(
               .filter(Boolean)
               .join("\n"),
             parameters: output.parameters,
+            // definition hook 仅改展示；shortcut 仍由原闭包实际使用的 decoder 决定。
+            runtimeParameters: tool.runtimeParameters,
             jsonSchema,
             output: tool.output,
             // #557：plugin 只能改 Provider definition；server policy 始终取原 Tool.Def。
@@ -466,6 +470,8 @@ export const node = LayerNode.make({
     Instruction.node,
     FSUtil.node,
     EventV2Bridge.node,
+    // 通过既有依赖图提供 SessionStore/事件 owner，不在 resolver 内另建状态缓存。
+    ExecuteEnvironments.node,
     httpClient,
     CrossSpawnSpawner.node,
     Format.node,

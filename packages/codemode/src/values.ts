@@ -1,11 +1,8 @@
-import type { Effect, Fiber } from "effect"
+import type { Exit, Fiber } from "effect"
 
-// Promise 保存一次结算来源；生命周期归执行作用域，不再携带 race 私有取消标记。
+// 在途 Fiber 只属于当前执行；收尾后改存终态，闭包不能借 Promise 保活旧宿主上下文。
 export class SandboxPromise {
-  constructor(
-    readonly fiber: Fiber.Fiber<unknown, unknown> | undefined,
-    readonly immediate?: Effect.Effect<unknown, unknown>,
-  ) {}
+  constructor(public state: { fiber: Fiber.Fiber<unknown, unknown> } | { exit: Exit.Exit<unknown, unknown> }) {}
 }
 
 export class SandboxDate {

@@ -22,6 +22,8 @@ import { RuntimeFlags } from "@/effect/runtime-flags"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { MCP } from "@/mcp"
+// 以真实 definition hook 变更展示，运行时 schema 仍由原 Tool.wrap 闭包拥有。
+import { isRecord } from "@/util/record"
 import type { Tool as MCPToolDef } from "@modelcontextprotocol/sdk/types.js"
 
 const configLayer = TestConfig.layer({
@@ -133,6 +135,33 @@ const withEmptyCodeMode = testEffect(
     ],
   ]),
 )
+const withDisplayMutation = testEffect(LayerNode.compile(root, [...replacements, [Plugin.node, Layer.mock(Plugin.Service, {
+  init:()=>Effect.void, list:()=>Effect.succeed([]),
+  trigger:(name,input,output)=>Effect.sync(()=>{
+    if(name === "tool.definition" && isRecord(input) && input.toolID === "read" && isRecord(output)) {
+      // 泛型 hook 保留返回类型；写入只针对已检查的对象视图，不把所有输出强转为 definition。
+      const definition: Record<string, unknown> = output
+      definition.parameters = Schema.Struct({displayOnly:Schema.Number})
+      definition.jsonSchema = {type:"object",properties:{displayOnly:{type:"number"}},required:["displayOnly"]}
+    }
+    return output
+  }),
+})]]))
+// 展示 schema 可被插件替换，但 decoder 不能跟着切换到未获真实工具支持的参数。
+withDisplayMutation.instance("definition hooks cannot replace the captured native runtime schema",()=>Effect.gen(function*(){
+  const registry=yield* ToolRegistry.Service
+  const agents=yield* Agent.Service
+  const native=(yield* registry.all()).find((tool)=>tool.id === "read")
+  const shown=(yield* registry.tools({providerID:ProviderV2.ID.opencode,modelID:ModelV2.ID.make("test"),agent:yield* agents.defaultInfo()})).find((tool)=>tool.id === "read")
+  if(!native || !shown) throw new Error("Missing native read")
+  expect(shown.parameters).not.toBe(native.parameters)
+  expect(shown.runtimeParameters).toBe(native.parameters)
+  const instance=yield* TestInstance
+  yield* Effect.promise(()=>Bun.write(path.join(instance.directory,"actual.txt"),"actual decoder"))
+  const result=yield* shown.execute({filePath:path.join(instance.directory,"actual.txt")},{sessionID:SessionID.create(),messageID:MessageID.ascending(),agent:"build",abort:new AbortController().signal,messages:[],metadata:()=>Effect.void,ask:()=>Effect.void})
+  expect(result.program?.value).toMatchObject({type:"text-page",content:"actual decoder"})
+}))
+
 const withBrokenPlugin = testEffect(LayerNode.compile(root, [...replacements, [Plugin.node, brokenPluginLayer]]))
 
 afterEach(async () => {
@@ -173,7 +202,11 @@ describe("tool.registry", () => {
       expect(ids).toContain("execute")
       expect(tools.map((tool) => tool.id)).toContain("execute")
       // 注册与执行共用一份说明，动态目录仍由 Session 独立交付。
-      expect(execute?.description).toBe(CodeMode.description)
+      // 使用注册器已经初始化的定义；测试不能在生命周期之外重建缺失 owner 的工具。
+      const definition = (yield* registry.all()).find((tool) => tool.id === "execute")
+      expect(execute?.description).toBe(definition?.description)
+      expect(execute?.description).toContain(CodeMode.description)
+      expect(execute?.description).toContain("Reuse the returned environmentID")
     }),
   )
 
@@ -324,6 +357,8 @@ describe("tool.registry", () => {
       const ids = yield* registry.ids()
       expect(ids).toContain("read")
       expect(ids).toContain("broken_plugin_tool")
+      // 插件注册与磁盘自定义工具两条路径均不能获得同名 native 的隐式优先权。
+      expect((yield* registry.all()).find((tool) => tool.id === "broken_plugin_tool")?.runtimeParameters).toBeUndefined()
     }),
   )
 
@@ -378,6 +413,8 @@ describe("tool.registry", () => {
       const registry = yield* ToolRegistry.Service
       const loaded = (yield* registry.all()).find((tool) => tool.id === "sql")
       if (!loaded) throw new Error("custom sql tool was not loaded")
+      // Zod 包装器保留自己的校验边界，不冒充 Tool.wrap 捕获的原生 Effect decoder。
+      expect(loaded.runtimeParameters).toBeUndefined()
       expect(loaded?.jsonSchema).toMatchObject({
         type: "object",
         properties: {

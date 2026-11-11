@@ -1,4 +1,8 @@
-import { Cause, Effect, Schema } from "effect"
+// 参数形式、来源快照与宿主限流各守自己的边界，不向解释器引入宿主策略。
+import { normalizeInput } from "./input-forms.js"
+import { rawText, withRawText } from "./raw-text.js"
+import { TOOL_CALL_CONCURRENCY } from "./stdlib/promise.js"
+import { Cause, Effect, Schema, Semaphore } from "effect"
 import DESCRIPTION from "./code-mode.txt" with { type: "text" }
 import { ToolError, toolError } from "./tool-error.js"
 import {
@@ -11,6 +15,8 @@ import {
 } from "./tool-schema.js"
 import { isDefinition as isToolDefinition, type Definition } from "./tool.js"
 import {
+  // 内部复制复用同一值品牌集合，避免新增支持类型时遗漏另一份枚举。
+  isSandboxValue,
   SandboxDate,
   SandboxMap,
   SandboxPromise,
@@ -24,10 +30,12 @@ const estimateTokens = (input: string) => Math.max(0, Math.round(input.length / 
 
 // 分段是文件结构；仅 description 与选中的 intro 进入模型，独立维护注释段不输出。
 const prompt = Object.fromEntries(
-  DESCRIPTION.trimEnd().split(/\r?\n(?=@@ )/).map((block) => {
-    const lines = block.split(/\r?\n/)
-    return [lines[0].slice(3), lines.slice(1).join("\n")] as const
-  }),
+  DESCRIPTION.trimEnd()
+    .split(/\r?\n(?=@@ )/)
+    .map((block) => {
+      const lines = block.split(/\r?\n/)
+      return [lines[0].slice(3), lines.slice(1).join("\n")] as const
+    }),
 )
 
 export const description = prompt.description
@@ -96,6 +104,8 @@ export type SafeObject = Record<string, unknown>
 const reservedNamespace = "$codemode"
 const defaultCatalogBudget = 2_000
 const defaultSearchLimit = 10
+// 误调用只补一小段完整签名；大命名空间不能把一次失败扩成整份工具目录。
+const namespaceSignatureBudget = 2_000
 const PositiveInt = Schema.Int.check(Schema.isGreaterThan(0))
 const NonNegativeInt = Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
 const SearchInput = Schema.Struct({
@@ -220,19 +230,8 @@ const copyBounded = (
   }
 
   if (preserveSandboxValues) {
-    // Intra-sandbox checkpoints keep sandbox value instances alive as leaves; their contents
-    // are never walked here (Map/Set members are validated where mutation happens, and the
-    // real boundary still serializes them below).
-    if (
-      value instanceof SandboxDate ||
-      value instanceof SandboxRegExp ||
-      value instanceof SandboxMap ||
-      value instanceof SandboxSet ||
-      value instanceof SandboxURL ||
-      value instanceof SandboxURLSearchParams
-    ) {
-      return value
-    }
+    // 内部检查点保留已有沙箱对象身份；成员在修改处校验，真正的跨界仍走下方序列化。
+    if (isSandboxValue(value)) return value
     // Host instances cannot normally reach an intra-sandbox checkpoint (tool results cross
     // the boundary first), but wrap them defensively rather than degrading to JSON forms.
     if (value instanceof Date) return new SandboxDate(value.getTime())
@@ -286,7 +285,8 @@ const copyBounded = (
   if (Array.isArray(value)) {
     const copied = value.map((item) => copyBounded(item, label, depth + 1, seen, preserveSandboxValues))
     seen.delete(value)
-    return copied
+    // 数组内部复制保留来源快照，但 map/spread 新建根值不会凭内容继承来源。
+    return withRawText(copied, rawText(value), true)
   }
 
   const prototype = Object.getPrototypeOf(value)
@@ -302,7 +302,8 @@ const copyBounded = (
     copied[key] = copyBounded(item, label, depth + 1, seen, preserveSandboxValues)
   }
   seen.delete(value)
-  return copied
+  // 普通对象副本此时才暴露只读 text；copyOut 仍仅遍历业务可枚举字段。
+  return withRawText(copied, rawText(value), true)
 }
 
 export const copyOut = (value: unknown, undefinedAsNull = false): unknown => {
@@ -338,12 +339,13 @@ const definitions = <R>(
 }
 
 const describeDefinition = <R>(path: string, definition: Definition<R>): ToolDescription => {
-  const input = inputTypeScript(definition, true)
+  // 所有模型界面复用唯一紧凑签名；字段说明仍作为搜索索引，不再生成第二种展示。
+  const input = inputTypeScript(definition)
   // 沿官方调用示例显示对象参数；空对象签名对应运行时的零参规范化。
   return {
     path,
     description: definition.description,
-    signature: `${toolExpression(path)}(${input === "{}" ? "" : input}): Promise<${outputTypeScript(definition, true)}>`,
+    signature: `${toolExpression(path)}(${input === "{}" ? "" : `input: ${input}`}): Promise<${outputTypeScript(definition)}>`,
   }
 }
 
@@ -397,7 +399,8 @@ const termForms = (term: string): Array<string> => {
   return forms
 }
 
-const compareText = (left: string, right: string) => left < right ? -1 : left > right ? 1 : 0
+// 相同分数必须有规范路径的固定次序，不能受注册顺序影响。
+const compareText = (left: string, right: string) => (left < right ? -1 : left > right ? 1 : 0)
 
 // 搜索与拼写恢复共用官方排序；完整路径词优先于偶然的子串命中。
 const rank = (entries: ReadonlyArray<SearchEntry>, query: string): Array<SearchEntry> => {
@@ -420,21 +423,29 @@ const rank = (entries: ReadonlyArray<SearchEntry>, query: string): Array<SearchE
 const makeSearchTool = (searchIndex: ReadonlyArray<SearchEntry>): Definition => ({
   _tag: "CodeModeTool",
   description: "Search available tools",
+  // 内置搜索也保留同一个真实输入合同，不以描述器另造 schema。
+  inputContract: SearchInput,
   input: SearchInput,
   output: SearchOutput,
+  // 搜索只读取冻结的当前索引，不调用真实工具，也不占宿主并发槽位。
   run: (input) =>
     Effect.sync(() => {
       const request = input as typeof SearchInput.Type
       const query = request.query ?? ""
       const offset = request.offset ?? 0
       // tools前缀属于模型看到的调用表达式；仅在目录自身未占用该名字时剥离。
-      const namespace = request.namespace !== undefined && !searchIndex.some((entry) => entry.description.path.startsWith("tools."))
-        ? request.namespace === "tools" ? undefined : request.namespace.replace(/^tools\./, "")
-        : request.namespace
+      const namespace =
+        request.namespace !== undefined && !searchIndex.some((entry) => entry.description.path.startsWith("tools."))
+          ? request.namespace === "tools"
+            ? undefined
+            : request.namespace.replace(/^tools\./, "")
+          : request.namespace
       const scoped =
         namespace === undefined
           ? searchIndex
-          : searchIndex.filter((entry) => entry.description.path === namespace || entry.description.path.startsWith(`${namespace}.`))
+          : searchIndex.filter(
+              (entry) => entry.description.path === namespace || entry.description.path.startsWith(`${namespace}.`),
+            )
       // A query that names one tool path exactly (canonical path or rendered JavaScript
       // expression) is a lookup, not a search: return that tool alone.
       const trimmed = query.trim()
@@ -460,10 +471,10 @@ const makeSearchTool = (searchIndex: ReadonlyArray<SearchEntry>): Definition => 
 })
 
 // search只查询当前内存目录，签名和实际返回均为同步对象；真实工具仍返回Promise。
-const searchSignature = `search(${inputTypeScript(makeSearchTool([]), true)}): ${outputTypeScript(makeSearchTool([]), true)}`
+const searchSignature = `search(input: ${inputTypeScript(makeSearchTool([]))}): ${outputTypeScript(makeSearchTool([]))}`
 
 const catalogLine = (tool: ToolDescription) => {
-  // Keep the tool description concise; the full schema documentation remains in the signature.
+  // 行预算包含简短用途；search 返回相同签名和完整工具用途，不再承诺字段 JSDoc。
   const line = tool.description.split("\n", 1)[0]!.trim()
   const description = line.length > 120 ? line.slice(0, 117) + "..." : line
   return description === "" ? `  - ${tool.signature}` : `  - ${tool.signature} // ${description}`
@@ -493,26 +504,23 @@ export const assertValidTools = <R>(tools: HostTools<R>): void => {
   }
 }
 
-/**
- * Budgeted catalog: every namespace is always listed with its tool count; full call
- * signatures are inlined against the `catalogBudget` (estimated tokens,
- * chars/4) round-robin across namespaces - in each round (namespaces alphabetical), every
- * namespace still holding un-inlined tools attempts to place its next-cheapest line, and
- * a namespace whose next line does not fit is done while the others keep going - so every
- * namespace gets some representation before any namespace gets everything. The section
- * states exactly how comprehensive it is - overall (COMPLETE vs PARTIAL) and per
- * namespace. Namespace stub lines are always emitted: every namespace appears with its
- * tool count even at budget 0; their cost is deducted before selecting signatures.
- */
-export const prepare = <R>(tools: HostTools<R>, catalogBudget = defaultCatalogBudget): DiscoveryPlan => {
+// 优先级只是宿主给出的当前路径；目录预算不会增加实际工具或绕过过滤。
+export const prepare = <R>(
+  tools: HostTools<R>,
+  catalogBudget = defaultCatalogBudget,
+  priority: ReadonlyArray<string> = [],
+): DiscoveryPlan => {
   if (!Number.isSafeInteger(catalogBudget) || catalogBudget < 0) {
     throw new RangeError("discovery.catalogBudget must be a non-negative safe integer")
   }
   const visible = visibleDefinitions(tools)
-  const described = visible.map(({ description }) => description)
+  const index = visible.map(({ path, definition, description }) => toSearchEntry(path, definition, description))
+  const described = index.map((entry) => entry.description)
 
   const namespaces = new Map<string, Array<ToolDescription>>()
-  for (const tool of described) {
+  // namespace 标题始终存在；零预算也能说明未展示工具数量。
+  for (const entry of index) {
+    const tool = entry.description
     const [namespace = tool.path] = tool.path.split(".")
     const group = namespaces.get(namespace) ?? []
     group.push(tool)
@@ -520,64 +528,53 @@ export const prepare = <R>(tools: HostTools<R>, catalogBudget = defaultCatalogBu
   }
   const ordered = [...namespaces].sort(([left], [right]) => compareText(left, right))
 
-  // Select which signatures fit the budget before emitting, so the list can state
-  // exactly how comprehensive it is. Round-robin fairness: in each round (namespaces
-  // alphabetical), every namespace still holding un-inlined tools tries to place its
-  // next-cheapest line against the shared budget; a namespace whose next line does not
-  // fit is done - the others keep going - so every namespace gets some representation
-  // before any namespace gets everything.
-  const selections = ordered.map(([namespace, group]) => ({
-    namespace,
-    picked: new Set<ToolDescription>(),
-    queue: [...group].sort(
-      (left, right) =>
-        estimateTokens(catalogLine(left)) - estimateTokens(catalogLine(right)) || compareText(left.path, right.path),
-    ),
-  }))
-  // 官方预算包含始终可见的namespace标题；预算不足只隐藏签名，不隐藏工具组。
-  let used = ordered.reduce((total, [namespace, group]) => total +
-    estimateTokens(`- ${namespace} (${group.length} tool${group.length === 1 ? "" : "s"}, none shown)`), 0)
-  let active = selections.filter((selection) => selection.queue.length > 0)
-  while (active.length > 0) {
-    const stillActive: typeof active = []
-    for (const selection of active) {
-      const tool = selection.queue[0]!
-      const cost = estimateTokens(catalogLine(tool))
-      if (used + cost > catalogBudget) continue
-      selection.queue.shift()
-      selection.picked.add(tool)
-      used += cost
-      if (selection.queue.length > 0) stillActive.push(selection)
-    }
-    active = stillActive
-  }
-  const shown = new Map<string, ReadonlySet<ToolDescription>>(
-    selections.map(({ namespace, picked }) => [namespace, picked]),
+  // 核心路径先选，其余按签名长度与路径稳定排序；过长条目跳过而不阻塞后续工具。
+  const preferred = new Set(priority)
+  const queue = [...described].sort(
+    (left, right) =>
+      Number(preferred.has(right.path)) - Number(preferred.has(left.path)) ||
+      left.signature.length - right.signature.length ||
+      compareText(left.path, right.path),
   )
-  const totalShown = selections.reduce((total, { picked }) => total + picked.size, 0)
+  const picked = new Set<ToolDescription>()
+  // 固定标题费用沿用原预算；再高的优先级也不能保证超预算签名必定出现。
+  let used = ordered.reduce(
+    (total, [namespace, group]) =>
+      total + estimateTokens(`- ${namespace} (${group.length} tool${group.length === 1 ? "" : "s"}, none shown)`),
+    0,
+  )
+  for (const tool of queue) {
+    const cost = estimateTokens(catalogLine(tool))
+    if (used + cost > catalogBudget) continue
+    picked.add(tool)
+    used += cost
+  }
+  const totalShown = picked.size
   const complete = totalShown === described.length
 
   const empty = described.length === 0
 
-  // 固定执行说明与每轮目录分开，目录文案采用官方v2.2.5的完整/部分分支。
+  // 固定执行说明与当前目录分开；完整、部分和空目录只声明本次可发现的工具。
   const intro = prompt[empty ? "intro.empty" : complete ? "intro.complete" : "intro.partial"]
-    .replace("{{searchSignature}}", searchSignature).split("\n")
+    .replace("{{searchSignature}}", searchSignature)
+    .split("\n")
 
   const toolSection: Array<string> = empty ? [] : [""]
   if (!empty) {
     for (const [namespace, group] of ordered) {
-      const picked = shown.get(namespace)!
+      // 选择成员只由全局 picked 持有；分组仅派生展示计数，不复制第二套集合。
+      const selected = group.filter((tool) => picked.has(tool))
       const count = `${group.length} tool${group.length === 1 ? "" : "s"}`
       // Annotate only when a namespace is not fully shown, so a comprehensive
       // namespace reads cleanly and a truncated one is unambiguous.
       const label =
-        picked.size === group.length
+        selected.length === group.length
           ? count
-          : picked.size === 0
+          : selected.length === 0
             ? `${count}, none shown`
-            : `${count}, ${picked.size} shown`
+            : `${count}, ${selected.length} shown`
       toolSection.push(`- ${namespace} (${label})`)
-      for (const tool of group) if (picked.has(tool)) toolSection.push(catalogLine(tool))
+      for (const tool of selected) toolSection.push(catalogLine(tool))
     }
   }
 
@@ -585,7 +582,8 @@ export const prepare = <R>(tools: HostTools<R>, catalogBudget = defaultCatalogBu
   return {
     catalog: described,
     instructions: lines.join("\n"),
-    searchIndex: visible.map(({ path, definition, description }) => toSearchEntry(path, definition, description)),
+    // 返回未裁剪索引，目录放不下的工具仍可被同一 search 精确发现。
+    searchIndex: index,
   }
 }
 
@@ -615,7 +613,12 @@ const namespaceKeys = <R>(tools: HostTools<R>, path: ReadonlyArray<string>): Rea
   return Object.keys(value)
 }
 
-const resolve = <R>(tools: HostTools<R>, path: ReadonlyArray<string>, index: ReadonlyArray<SearchEntry>): HostTool<R> | Definition<R> => {
+// 恢复建议取同一当前索引；解析 namespace 不得自动选择或执行其中成员。
+const resolve = <R>(
+  tools: HostTools<R>,
+  path: ReadonlyArray<string>,
+  index: ReadonlyArray<SearchEntry>,
+): HostTool<R> | Definition<R> => {
   let value: HostTool<R> | Definition<R> | HostTools<R> = tools
 
   for (const segment of path) {
@@ -628,17 +631,39 @@ const resolve = <R>(tools: HostTools<R>, path: ReadonlyArray<string>, index: Rea
       const name = path.join(".")
       const namespace = path.length > 1 && Object.hasOwn(tools, path[0]!) ? path[0] : undefined
       // 仅推荐同一当前目录中的路径，不猜造别名，也不自动执行推荐项。
-      const closest = rank(namespace ? index.filter((entry) => entry.description.path.startsWith(`${namespace}.`)) : index,
-        namespace ? path.slice(1).join(" ") : name)[0]
-      throw new ToolRuntimeError("UnknownTool", closest
-        ? `Unknown tool '${name}'. Did you mean ${toolExpression(closest.description.path)}?`
-        : `Unknown tool '${name}'.`, ["Use search to find available tools."])
+      const closest = rank(
+        namespace ? index.filter((entry) => entry.description.path.startsWith(`${namespace}.`)) : index,
+        namespace ? path.slice(1).join(" ") : name,
+      )[0]
+      throw new ToolRuntimeError(
+        "UnknownTool",
+        closest
+          ? `Unknown tool '${name}'. Did you mean ${toolExpression(closest.description.path)}?`
+          : `Unknown tool '${name}'.`,
+        ["Use search to find available tools."],
+      )
     }
     value = value[segment] as HostTool<R> | Definition<R> | HostTools<R>
   }
 
   if (typeof value !== "function" && !isDefinition(value)) {
-    throw new ToolRuntimeError("UnknownTool", `Tool '${path.join(".")}' is not callable.`)
+    const namespace = path.join(".")
+    const entries = index.filter((entry) => !namespace || entry.description.path.startsWith(`${namespace}.`))
+    const signatures: string[] = []
+    let used = 0
+    // 只呈现当前分组的整条签名；即使只有一个成员，也不把误调用转成真实执行。
+    for (const entry of entries) {
+      if (used + entry.description.signature.length + 1 > namespaceSignatureBudget) continue
+      signatures.push(entry.description.signature)
+      used += entry.description.signature.length + 1
+    }
+    throw new ToolRuntimeError("UnknownTool", `Tool '${namespace}' is not callable.`, [
+      ...signatures,
+      // 省略是展示预算而非能力删除；显式计数避免把有限清单误称完整目录。
+      ...(signatures.length < entries.length
+        ? [`${entries.length - signatures.length} more functions; use search for full details.`]
+        : []),
+    ])
   }
 
   return value
@@ -660,6 +685,8 @@ export const make = <R>(
   hooks?: ToolCallHooks<R>,
   fetch?: HostTool<R>,
 ): ToolRuntime<R> => {
+  // 排队不触发校验、计数或 running 通知；叶子超时只在拿到槽位后启动。
+  const permits = Semaphore.makeUnsafe(TOOL_CALL_CONCURRENCY)
   const calls: Array<ToolCall> = []
   const callableTools = {
     ...tools,
@@ -683,9 +710,15 @@ export const make = <R>(
           message,
         })
       }),
-      Effect.onInterrupt(() => onEnd({
-        ...call, durationMs: Date.now() - startedAt, outcome: "failure", message: "Tool execution interrupted",
-      })),
+      // 排队尚未建立观察记录；只有已开始的调用才在中断时闭合失败回执。
+      Effect.onInterrupt(() =>
+        onEnd({
+          ...call,
+          durationMs: Date.now() - startedAt,
+          outcome: "failure",
+          message: "Tool execution interrupted",
+        }),
+      ),
     )
   }
 
@@ -723,7 +756,17 @@ export const make = <R>(
             throw new ToolRuntimeError("InvalidToolInput", `Tool '${name}' expects at most one input object.`)
           // 零参沿上游按{}进入原decoder，必填字段仍在执行前拒绝；显式undefined不替换。
           describedInput = yield* Effect.try({
-            try: () => decodeToolInput(tool, externalArgs.length === 0 ? {} : externalArgs[0]),
+            // 新构造的键仍须过同一数据边界，禁止危险字段绕过入口检查。
+            try: () =>
+              decodeToolInput(
+                tool,
+                copyOut(
+                  copyIn(
+                    normalizeInput(tool.inputForms, externalArgs.length === 0 ? {} : externalArgs[0]),
+                    `Arguments for tool '${name}'`,
+                  ),
+                ),
+              ),
             catch: (cause) =>
               new ToolRuntimeError("InvalidToolInput", `Invalid input for tool '${name}': ${String(cause)}`),
           })
@@ -739,7 +782,8 @@ export const make = <R>(
                 try: () => decodeToolOutput(tool, raw),
                 catch: () => new ToolRuntimeError("InvalidToolOutput", `Invalid output from tool '${name}'.`),
               })
-              return yield* decodeOutput(result, name)
+              // 先验证业务输出，再把原始文本来源带入沙箱副本；别名不污染可选字段。
+              return yield* decodeOutput(withRawText(result, rawText(raw)), name)
             }),
             currentCall,
           )
@@ -750,7 +794,12 @@ export const make = <R>(
           }),
           currentCall,
         )
-      }),
+      }).pipe(
+        // 只有内存目录 search 是同步入口；fetch 和所有宿主调用共用八个槽位。
+        path.length === 2 && path[0] === reservedNamespace && path[1] === "search"
+          ? (effect) => effect
+          : permits.withPermits(1),
+      ),
   }
 }
 

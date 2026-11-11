@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test"
-import { Effect, Schema } from "effect"
+// 回调中断须从公开 Effect 结果判断，不能靠捕获的普通错误冒充宿主控制信号。
+import { Cause, Effect, Exit, Schema } from "effect"
 import { CodeMode, Tool } from "../src/index.js"
 
 // Standard-library value types: Date, RegExp, Map, Set. Programs use them as ordinary JS;
@@ -208,6 +209,53 @@ describe("RegExp", () => {
     )
     expect(!missingAwait.ok && missingAwait.error.kind).toBe("InvalidDataValue")
     expect(!missingAwait.ok && missingAwait.error.message).toContain("un-awaited Promise")
+  })
+
+  test("nested async replacers keep independent output and preserve ordinary rejection", async () => {
+    const echo = Tool.make({
+      description: "Echo",
+      input: Schema.String,
+      output: Schema.String,
+      run: (value) => Effect.succeed(value),
+    })
+    // 内层替换可再次挂起；外层的匹配游标和输出不能由共享回调模式覆盖。
+    expect(
+      await Effect.runPromise(
+        CodeMode.execute({
+          tools: { host: { echo } },
+          code: 'return "ab".replace(/./g, async c => c.replace(/./g, async d => await tools.host.echo(d.toUpperCase())))',
+        }),
+      ),
+    ).toMatchObject({ ok: true, value: "AB" })
+    // 兼容扩展只负责等待 async 回调，用户抛出的普通错误仍走原 catch 语义。
+    expect(
+      await value(
+        'try { return "ab".replace(/./g, async () => { throw new Error("replacer refused") }) } catch(e) { return e.message }',
+      ),
+    ).toBe("replacer refused")
+  })
+
+  test("host interruption in an async replacer cannot resume caught side effects", async () => {
+    const later: string[] = []
+    const stop = Tool.make({ description: "Stop", input: Schema.Struct({}), run: () => Effect.interrupt })
+    const after = Tool.make({
+      description: "After",
+      input: Schema.Struct({}),
+      run: () =>
+        Effect.sync(() => {
+          later.push("ran")
+          return "wrong"
+        }),
+    })
+    // 真正宿主取消不是可恢复的替换失败；后续工具效果和脚本伪成功都必须缺席。
+    const result = await Effect.runPromise(
+      CodeMode.execute({
+        tools: { host: { stop, after } },
+        code: 'try { return "ab".replace(/./g, async () => await tools.host.stop({})) } catch(e) { return await tools.host.after({}) }',
+      }).pipe(Effect.exit),
+    )
+    expect(Exit.isFailure(result) && Cause.hasInterrupts(result.cause)).toBe(true)
+    expect(later).toEqual([])
   })
 
   test("replaceAll without the g flag is a catchable error", async () => {
@@ -712,4 +760,60 @@ describe("sandbox values at intra-sandbox checkpoints", () => {
     expect(result.ok).toBe(true)
     expect(observed).toStrictEqual([{ when: "1970-01-01T00:00:00.000Z", tags: {} }])
   })
+})
+
+// 内建令牌沿用函数的不透明边界，别名和集合回调只能返回受监管的 Promise。
+test("sleep aliases and callbacks retain callable identity without exposing global methods", async () => {
+  expect(
+    await value(`const pause = sleep; const box = { pause };
+    await box.pause(0.25); await Promise.all([0, 0].map(pause));
+    new Set([0]).forEach(pause); new Map([[0, 0]]).forEach(pause);
+    async function nested() { await pause(0); return 3; }
+    return [typeof pause, await nested(), await pause(0)];`),
+  ).toEqual(["function", 3, null])
+  for (const code of [
+    "return sleep.name",
+    "return sleep.constructor",
+    "return [1].map(Math.abs)",
+    "return sleep.call(null, 0)",
+  ]) {
+    expect((await run(code)).ok).toBe(false)
+  }
+  for (const arg of ['"0"', "undefined", "null", "NaN", "Infinity", "-1", "2147483648"]) {
+    expect(await value(`try { sleep(${arg}); } catch (e) { return true; } return false`)).toBe(true)
+  }
+  // 上限是有限可取消计时器，不能为了测试等待二十四天；根返回负责取消它。
+  expect(await value("sleep(2147483647); return 1")).toBe(1)
+})
+
+// for-await 只扩展原来的可迭代域；逐项等待、解构和控制流共用原来的词法帧。
+test("for-await settles yielded promises and preserves sequential bodies and iteration bindings", async () => {
+  expect(
+    await value(`const out = [], closures = [];
+    for await (const [n] of [Promise.resolve([1]), [2], [3]]) {
+      await sleep(0); closures.push(() => n); if (n === 2) continue; out.push(n);
+    }
+    let assigned = 0; for await (assigned of [Promise.resolve(4)]) {}
+    return [out, closures.map(f => f()), assigned];`),
+  ).toEqual([[1, 3], [1, 2, 3], 4])
+  expect(
+    await value(`const chars = []; for await (const c of "A😀") chars.push(c);
+    const set = []; for await (const n of new Set([Promise.resolve(1), 2])) set.push(n);
+    const pairs = []; for await (const [k, v] of new Map([["a", Promise.resolve(3)]]))
+      pairs.push([k, v instanceof Promise, await v]);
+    return [chars, set, pairs];`),
+  ).toEqual([["A", "😀"], [1, 2], [["a", true, 3]]])
+})
+
+// 拒绝必须在绑定之前进入 catch；默认值失败同样弹出帧，早退仍由根结束在途生产者。
+test("for-await rejects before binding and cleans frames through destructuring and early exits", async () => {
+  expect(
+    await value(`let n = 7; let caught = "";
+    try { for await (const n of [Promise.reject("no")]) { throw "body"; } } catch (e) { caught = e; }
+    try { for await (const [n = missing] of [[]]) {} } catch (e) {}
+    const out = []; for await (const x of [1, 2, 3]) { if (x === 2) break; out.push(x); }
+    async function first() { for await (const x of [Promise.resolve(9)]) return x; }
+    return [n, caught, out, await first()];`),
+  ).toEqual([7, "no", [1], 9])
+  expect((await run("for await (const x of { a: 1 }) {} ")).ok).toBe(false)
 })

@@ -58,7 +58,8 @@ export async function callTool(entry: MCP.McpTool, args: unknown, signal?: Abort
 }
 
 // 同一次 transport 的程序投影保留结构化值；媒体留在宿主，避免字节进入解释器。
-export function programResult(result: CallToolResult): NonNullable<Tool.ExecuteResult["program"]> {
+// 声明随结果进入投影，仅用于排除文本候选，不替代 SDK 的输出校验。
+export function programResult(result: CallToolResult, outputSchema?: MCP.McpTool["def"]["outputSchema"]): NonNullable<Tool.ExecuteResult["program"]> {
   // 原 structuredContent 优先级保持不变，文本格式化不能把原生对象变成待解析 JSON。
   const text: string[] = []
   const attachments: NonNullable<Tool.ExecuteResult["attachments"]> = []
@@ -95,7 +96,10 @@ export function programResult(result: CallToolResult): NonNullable<Tool.ExecuteR
   // 媒体专用结果也返回可组合的普通值，让脚本知道调用成功而无需接触字节。
   const value = result.structuredContent ?? (text.length > 0 ? text.join("\n")
     : attachments.length > 0 ? `[${attachments.length} ${noun}${attachments.length === 1 ? "" : "s"} attached to the result]` : null)
-  return { value, attachments }
+  // 只标记成功的单文本；图片/音频仍独立交付，资源、分段文本及声明输出不参与猜测。
+  const rawText = !result.isError && outputSchema === undefined && result.structuredContent === undefined && text.length === 1 &&
+    result.content.every((block) => block.type === "text" || block.type === "image" || block.type === "audio") ? text[0] : undefined
+  return { value, attachments, ...(rawText !== undefined ? { rawText } : {}) }
 }
 
 export * as McpCatalog from "./catalog"
