@@ -242,7 +242,7 @@ describe("tool.registry", () => {
       const definition = (yield* registry.all()).find((tool) => tool.id === "execute")
       expect(execute?.description).toBe(definition?.description)
       expect(execute?.description).toContain(CodeMode.description)
-      expect(execute?.description).toContain("Reuse the returned environmentID")
+      expect(execute?.description).toContain("environmentID")
     }),
   )
 

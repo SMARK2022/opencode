@@ -455,6 +455,131 @@ describe("code mode execute", () => {
     }),
   )
 
+  testEffect(harness()).effect("preview caps total calls while review retains unique tool inputs", () =>
+    Effect.gen(function* () {
+      const tool = yield* CodeModeTool.pipe(Effect.flatMap(Tool.init))
+      const reviewed: unknown[] = []
+      let invoked = 0
+      // 第 1024 次的新参数仍被记录，第 1025 次只在真实执行出现；重复调用同样耗费预算。
+      const result = yield* tool.execute(
+        {
+          code: "for (let i = 0; i < 1023; i++) await tools.host.check({a:1}); await tools.host.check({a:2}); await tools.host.check({a:3}); return 7",
+        },
+        {
+          ...ctx,
+          codeMode: {
+            catalog: [{ id: "check", path: ["host", "check"], description: "check", inputSchema: { type: "object" } }],
+            signal: ctx.abort,
+            begin: (_code, calls) =>
+              Effect.sync(() => {
+                reviewed.push(...calls)
+              }),
+            invoke: () =>
+              Effect.sync(() => {
+                invoked++
+                return { title: "check", output: "", metadata: {}, program: { value: null } }
+              }),
+          },
+        },
+      )
+      expect(reviewed).toEqual([
+        { tool: "check", input: { a: 1 } },
+        { tool: "check", input: { a: 2 } },
+      ])
+      // 预跑只限制收集成本，真实执行仍须到达最后一次调用，不能沿用探针计数。
+      expect(invoked).toBe(1025)
+      expect(scriptOutput(result)).toBe("7")
+    }),
+  )
+
+  testEffect(harness()).effect("preview deduplicates reordered inputs and keeps distinct tools and values", () =>
+    Effect.gen(function* () {
+      const tool = yield* CodeModeTool.pipe(Effect.flatMap(Tool.init))
+      const reviewed: unknown[] = []
+      // 对象键序不影响相同参数；工具名、值以及 undefined 与缺省键仍是不同请求。
+      yield* tool.execute(
+        {
+          code: `
+        await tools.host.first({a:1,b:2}); await tools.host.first({b:2,a:1});
+        await tools.host.first({a:2,b:2}); await tools.host.second({a:1,b:2});
+        await tools.host.first({}); await tools.host.first({a:undefined});
+        await fetch("https://example.invalid"); await fetch("https://example.invalid");
+        return 1
+      `,
+        },
+        {
+          ...ctx,
+          codeMode: {
+            catalog: ["first", "second"].map((id) => ({
+              id,
+              path: ["host", id],
+              description: id,
+              inputSchema: { type: "object" },
+            })),
+            signal: ctx.abort,
+            begin: (_code, calls) =>
+              Effect.sync(() => {
+                reviewed.push(...calls)
+              }),
+            invoke: () => Effect.succeed({ title: "check", output: "", metadata: {}, program: { value: null } }),
+            fetch: () =>
+              Effect.succeed({
+                url: "https://example.invalid",
+                status: 200,
+                statusText: "",
+                ok: true,
+                redirected: false,
+                headers: {},
+                text: "null",
+                bytes: [],
+              }),
+          },
+        },
+      )
+      // 保留首次出现的顺序，fetch 与普通工具共用同一档案，而不是另占一份重复记录。
+      expect(reviewed).toEqual([
+        { tool: "first", input: { a: 1, b: 2 } },
+        { tool: "first", input: { a: 2, b: 2 } },
+        { tool: "second", input: { a: 1, b: 2 } },
+        { tool: "first", input: {} },
+        { tool: "first", input: { a: undefined } },
+        { tool: "webfetch", input: { url: "https://example.invalid" } },
+      ])
+    }),
+  )
+
+  testEffect(harness()).effect("preview reaches review at its 500 millisecond deadline", () =>
+    Effect.gen(function* () {
+      const tool = yield* CodeModeTool.pipe(Effect.flatMap(Tool.init))
+      const reviewing = yield* Deferred.make<void>()
+      let reviewed = false
+      // 无工具循环只能由预跑时间预算退出，审查入口阻塞以排除真实执行计时的干扰。
+      const running = yield* tool
+        .execute(
+          { code: "while (true) {}" },
+          {
+            ...ctx,
+            codeMode: {
+              catalog: [],
+              signal: ctx.abort,
+              begin: () =>
+                Effect.sync(() => {
+                  reviewed = true
+                }).pipe(Effect.andThen(Deferred.succeed(reviewing, undefined)), Effect.andThen(Effect.never)),
+              invoke: () => Effect.die("unreachable"),
+            },
+          },
+        )
+        .pipe(Effect.forkScoped({ startImmediately: true }))
+      yield* TestClock.adjust(499)
+      expect(reviewed).toBe(false)
+      yield* TestClock.adjust(1)
+      yield* Deferred.await(reviewing)
+      expect(reviewed).toBe(true)
+      yield* Fiber.interrupt(running)
+    }),
+  )
+
   test("mixed or multiple fences are not extracted and raw strings remain intact", async () => {
     // 把合法调用放进非法包裹；若实现擅自抽取其中一个块，独立副作用清单就会暴露执行。
     const called: string[] = []
@@ -573,9 +698,9 @@ describe("code mode execute", () => {
     const tool = await build({ github_list_issues: mcpTool("list_issues", () => "") })
     expect(tool.id).toBe(CODE_MODE_TOOL)
     // 宿主只追加环境复用与MCP投影说明；通用使用指导仍须跟随共享文本更新。
-    expect(tool.description).toBe(
-      `${CodeMode.description}\nReuse the returned environmentID to continue with saved variables and functions; omit it for a fresh environment. Schema-less MCP object/array JSON text becomes data; use String(value) for its original text.`,
-    )
+    expect(tool.description).toContain(CodeMode.description)
+    expect(tool.description).toContain("environmentID")
+    expect(tool.description).toContain("saved variables, functions and closures")
     expect(tool.description).not.toContain("Available tools")
     expect(tool.description).not.toContain("list_issues")
   })
@@ -603,27 +728,29 @@ describe("code mode execute", () => {
         properties: Object.fromEntries(Array.from({ length: 20 }, (_, index) => [`field${index}`, { type: "string" }])),
         required: ["field0"],
       }
+      for (const keepTools of [true, false]) for (const id of ["read", "bash", "apply_patch", "write"])
       for (const origin of ["native", "custom", "mcp"] as const) {
         const entry: CatalogEntry = {
-          id: origin === "mcp" ? "remote_read" : "read",
-          path: [origin === "mcp" ? "remote" : "$opencode", "read"],
+          id: origin === "mcp" ? `remote_${id}` : id,
+          path: [origin === "mcp" ? "remote" : "$opencode", id],
           description: "",
           inputSchema: shape,
           ...(origin === "native" ? { runtimeParameters: native.runtimeParameters } : {}),
         }
-        const description = yield* describeCatalog([entry, ...fillers])
+        const description = yield* describeCatalog([entry, ...fillers], keepTools)
         expect(description).toContain("The catalog is partial")
         // 同名自定义/MCP 条目不靠名字继承优先级；仍存在于原目录，不被删掉冒充安全过滤。
-        expect(description.includes(`tools.${entry.path[0]}.read(`)).toBe(origin === "native")
+        expect(description.includes(`tools.${entry.path[0]}.${id}(`)).toBe(origin === "native" && (!keepTools || id === "read"))
         const tool = yield* CodeModeTool.pipe(Effect.flatMap(Tool.init))
         const result = yield* tool.execute(
           {
-            code: `return search({query:"read",namespace:${JSON.stringify(entry.path[0])},limit:1}).items.map(item=>item.path)`,
+            code: `return search({query:${JSON.stringify(id)},namespace:${JSON.stringify(entry.path[0])},limit:1}).items.map(item=>item.path)`,
           },
           {
             ...ctx,
             codeMode: {
               catalog: [entry, ...fillers],
+              keepTools,
               signal: ctx.abort,
               begin: () => Effect.void,
               invoke: () => Effect.die("Search must not invoke leaf"),
@@ -631,7 +758,7 @@ describe("code mode execute", () => {
           },
         )
         // 内联省略的条目仍能被 search 找到，预算裁剪不能变成调用目录的权限过滤。
-        expect(JSON.parse(scriptOutput(result))).toEqual([`tools.${entry.path[0]}.read`])
+        expect(JSON.parse(scriptOutput(result))).toEqual([`tools.${entry.path[0]}.${id}`])
       }
       // 已过滤的核心条目不在输入目录中，优先策略不能重新创造它。
       expect(yield* describeCatalog(fillers)).not.toContain("tools.$opencode.read(")

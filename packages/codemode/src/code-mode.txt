@@ -1,18 +1,28 @@
 @@ description
-Run JavaScript/TypeScript in a confined runtime to compose tool calls and filter intermediate data before returning a concise result.
+Run JavaScript/TypeScript to compose tool calls and return the information needed for your next decision.
 
-Use execute to inspect several files or endpoints, chain calls whose inputs come from earlier results, or summarize large outputs in one turn. Return when the next step needs your judgment. Use the exact namespaced paths and argument shapes shown by the catalog or search({ query: "..." }); special names use bracket notation.
+Batch independent calls with Promise.all; use Promise.allSettled when partial results are useful. Chain dependent calls with await, branch on their results, and filter or summarize large outputs before returning them. Stop when the next step needs your judgment.
 
-If a needed file tool is not shown, discover it with `return search({ query: "glob read", namespace: "$opencode", limit: 2 })`. Use `search({ query: "tools.$opencode.read" })` for a specific tool's full description and field details. When these tools are available, their signatures support this eight-file bounded line-count check:
+Calls: await tools.<namespace>.<name>(args). Use the catalog's exact paths and argument shapes; special names use bracket notation. Tools return their declared data or text. A failed call throws; structured error results remain data to inspect.
+
+Discovery: search({ query: "..." }) returns matching paths, descriptions and signatures. Call search without await; use each result's path as the complete tool expression. Tools omitted from the inline catalog remain searchable. Use an exact path query or detail: true to inspect full field details, for example search({ query: "tools.$opencode.read", detail: true }).
+
+When glob and read are available, this bounded sample checks at most eight files and returns line-count matches with the listing's completeness flags; it is not a complete project scan:
 ```js
 const { files, ...listing } = await tools.$opencode.glob({ pattern: "src/**/*.ts" });
 const pages = await Promise.all(files.slice(0, 8).map(({ path }) => tools.$opencode.read({ filePath: path, limit: 1 })));
-return { ...listing, inspected: pages.length, files: pages.filter(page => page.type === "text-page" && page.totalLines > 200).map(page => ({ file: page.path, lines: page.totalLines, exact: page.totalLinesExact })) };
+return {
+  ...listing,
+  inspected: pages.length,
+  files: pages
+    .filter(page => page.type === "text-page" && page.totalLines > 200)
+    .map(page => ({ file: page.path, lines: page.totalLines, exact: page.totalLinesExact }))
+};
 ```
 
-Await work whose completion matters; pending work ends with the script. Promise.allSettled keeps useful partial results, including failures. Return the fields needed for your next decision; without return, the last value-producing expression is used. Console output is also returned, so keep it brief.
+Globals: tools, search, console, sleep(ms), and host-supplied fetch. Standard data helpers include JSON, Math, Array, Object, String, Number, Boolean, Date, RegExp, Map, Set, URL, URLSearchParams and Promise. These are confined implementations, not a Node.js environment; use tools for files and external capabilities.
 
-Use sleep(ms) to wait within the script. Fetch is available when supplied by the host. Other external access goes through tools, not imports or direct filesystem access.
+Results: return the fields needed for your next decision. Without return, the last value-producing expression is used. Console output is also returned, so keep it brief. Await work whose completion matters; pending work ends with the script.
 @@ intro.empty
 No Code Mode tools are currently available. Later Code Mode catalog updates may add or remove tools. Do not call `execute` unless there is at least one available Code Mode tool.
 @@ intro.complete

@@ -435,7 +435,7 @@ describe("non-identifier tool paths", () => {
       'tools.context7["resolve-library-id"](input: { query: string; libraryName: string }): Promise<unknown>',
     )
     // 精简措辞不能把带短横线的合法路径变成属性访问或自动猜测的别名。
-    expect(CodeMode.description).toContain("Use the exact namespaced paths and argument shapes")
+    expect(CodeMode.description).toContain("catalog's exact paths and argument shapes")
     expect(CodeMode.description).toContain("special names use bracket notation")
     expect(instructions).not.toContain("tools.context7.resolve-library-id")
     expect(instructions).not.toContain("tools.context7.resolve_library_id")

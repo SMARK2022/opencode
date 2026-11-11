@@ -145,48 +145,39 @@ unit.effect("owner capacity keeps the latest eight unique calls", () =>
   }),
 )
 
-unit.effect("new environments wait for the oldest drain and cancelled waiters leave no lease", () =>
+unit.effect("active environments finish independently and retain the latest eight unique calls", () =>
   Effect.gen(function* () {
     const registry = ExecuteEnvironments.makeRegistry()
-    const entered = yield* Deferred.make<void>()
     const release = yield* Deferred.make<void>()
-    let oldest = ""
-    const holder = yield* registry
-      .use(owner, undefined, (lease) =>
-        Effect.gen(function* () {
-          oldest = lease.id
-          yield* Deferred.succeed(entered, undefined)
-          yield* Deferred.await(release)
-        }),
-      )
-      .pipe(Effect.forkScoped({ startImmediately: true }))
-    yield* Deferred.await(entered)
     const ids: string[] = []
-    for (let i = 0; i < 7; i++) ids.push(yield* registry.use(owner, undefined, (lease) => Effect.succeed(lease.id)))
-    let admitted = 0
-    const create = () =>
-      registry.use(owner, undefined, (lease) =>
+    const holders = []
+    // 所有租约共同等待释放，直接观察超过八个环境同时执行；结束顺序不刷新调用顺序。
+    for (let i = 0; i < 16; i++)
+      holders.push(
+        yield* registry
+          .use(owner, undefined, (lease) =>
+            Effect.sync(() => ids.push(lease.id)).pipe(Effect.andThen(Deferred.await(release))),
+          )
+          .pipe(Effect.forkScoped({ startImmediately: true })),
+      )
+    expect(ids).toHaveLength(16)
+    let reused = false
+    // 排队复用最早的环境也刷新 unique 调用顺序，且必须保留其等待者。
+    const queued = yield* registry
+      .use(owner, ids[0], () =>
         Effect.sync(() => {
-          admitted++
-          return lease.id
+          reused = true
         }),
       )
-    const first = yield* create().pipe(Effect.forkScoped({ startImmediately: true }))
-    const second = yield* create().pipe(Effect.forkScoped({ startImmediately: true }))
-    const cancelled = yield* create().pipe(Effect.forkScoped({ startImmediately: true }))
-    expect(admitted).toBe(0)
-    yield* Fiber.interrupt(cancelled)
-    // 等待期间复用最旧环境；drain 完成后必须按最新顺序重选，不能误删已刷新状态。
-    const reuse = yield* registry
-      .use(owner, oldest, () => Effect.void)
       .pipe(Effect.forkScoped({ startImmediately: true }))
     yield* Deferred.succeed(release, undefined)
-    yield* Fiber.join(holder)
-    yield* Fiber.join(reuse)
-    const added = yield* Effect.all([Fiber.join(first), Fiber.join(second)])
-    expect(admitted).toBe(2)
-    for (const id of ids.slice(0, 2)) yield* expectFailure(registry.use(owner, id, () => Effect.void))
-    for (const id of [...ids.slice(2), oldest, ...added]) yield* registry.use(owner, id, () => Effect.void)
+    // 等待全部 finalizer 完成后再查窗口，避免把尚未回收的临时状态误当作保留。
+    for (const holder of holders) yield* Fiber.join(holder)
+    yield* Fiber.join(queued)
+    expect(reused).toBe(true)
+    // 第一个 ID 的复用将它移到末尾，因此最终窗口是 9～15 加 0，而非最后结束的八项。
+    for (const id of ids.slice(1, 9)) yield* expectFailure(registry.use(owner, id, () => Effect.void))
+    for (const id of [...ids.slice(9), ids[0]]) yield* registry.use(owner, id, () => Effect.void)
     yield* registry.close()
   }),
 )
@@ -318,16 +309,13 @@ unit.effect("owner quotas and live ID collisions never replace another live iden
     expect(yield* colliding.use(owner, one, () => Effect.succeed("original"))).toBe("original")
     yield* colliding.close()
     const registry = ExecuteEnvironments.makeRegistry()
+    const other = { ...owner, sessionID: "ses_other" }
+    const retained = yield* registry.use(other, undefined, (lease) => Effect.succeed(lease.id))
     const ids: string[] = []
-    for (let i = 0; i < 65; i++)
-      ids.push(yield* registry.use({ ...owner, sessionID: `ses_${i}` }, undefined, (lease) => Effect.succeed(lease.id)))
-    // 超过旧全局容量仍保留每个 owner 的状态，容量只按各自八项计算。
-    expect(yield* registry.use({ ...owner, sessionID: "ses_0" }, ids[0], () => Effect.succeed("retained"))).toBe(
-      "retained",
-    )
-    expect(yield* registry.use({ ...owner, sessionID: "ses_64" }, ids[64], () => Effect.succeed("newest"))).toBe(
-      "newest",
-    )
+    for (let i = 0; i < 9; i++) ids.push(yield* registry.use(owner, undefined, (lease) => Effect.succeed(lease.id)))
+    // 一个 owner 已发生窗口外回收，另一个 owner 的状态仍独立保留。
+    yield* expectFailure(registry.use(owner, ids[0], () => Effect.void))
+    expect(yield* registry.use(other, retained, () => Effect.succeed("retained"))).toBe("retained")
     yield* registry.close()
   }),
 )

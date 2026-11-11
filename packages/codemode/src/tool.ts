@@ -1,6 +1,6 @@
 import { Effect, Schema } from "effect"
 // 形式识别随真实输入合同派生，避免展示 schema 改写后简写误选字段。
-import { inputForms, type InputForms } from "./input-forms.js"
+import { inputForms, type InputForms } from "./tool-schema.js"
 
 /**
  * JSON Schema subset accepted for render-only tool schemas.

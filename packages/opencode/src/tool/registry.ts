@@ -82,6 +82,8 @@ type State = {
 }
 
 export interface Interface {
+  // 注册与会话工具面共用同一模式，配置依赖由注册表持有。
+  readonly codemode: () => Effect.Effect<{ enabled: boolean; keepTools: boolean }>
   readonly ids: () => Effect.Effect<string[]>
   readonly all: () => Effect.Effect<Tool.Def[]>
   readonly named: () => Effect.Effect<{ task: TaskDef; read: ReadDef }>
@@ -281,10 +283,15 @@ const layer = Layer.effect(
       }),
     )
 
+    const codemode: Interface["codemode"] = Effect.fn("ToolRegistry.codemode")(function* () {
+      return yield* codeMode.configuration((yield* config.get()).codemode)
+    })
+
     const all: Interface["all"] = Effect.fn("ToolRegistry.all")(function* () {
       const s = yield* InstanceState.get(state)
       // 在共同列表出口关闭 Execute，工具选择器、HTTP 和调试入口保持一致。
-      return ([...s.builtin, ...s.custom] as Tool.Def[]).filter((tool) => tool.id !== "execute" || flags.execute)
+      const mode = yield* codemode()
+      return ([...s.builtin, ...s.custom] as Tool.Def[]).filter((tool) => tool.id !== "execute" || mode.enabled)
     })
 
     const ids: Interface["ids"] = Effect.fn("ToolRegistry.ids")(function* () {
@@ -372,7 +379,8 @@ const layer = Layer.effect(
       return { task: s.task, read: s.read }
     })
 
-    return Service.of({ ids, all, named, tools })
+    // 工具枚举与 Session 显示共用同一模式读取，避免两处分别解释 JSON/env。
+    return Service.of({ codemode, ids, all, named, tools })
   }),
 )
 

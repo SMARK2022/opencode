@@ -77,11 +77,11 @@ export const invokeCoercion = (ref: CoercionFunction, args: Array<unknown>, node
   return coerceToString(value)
 }
 import { type AstNode, CoercionFunction, InterpreterRuntimeError } from "../interpreter/model.js"
-// 来源只在内部转换读取，不向工具参数或最终返回值增加可见字段。
-import { rawText } from "../raw-text.js"
 import { copyIn, type SafeObject } from "../tool-runtime.js"
 import {
   isSandboxValue,
+  // 来源只在内部转换读取，不向工具参数或最终返回值增加可见字段。
+  rawText,
   SandboxDate,
   SandboxMap,
   SandboxRegExp,

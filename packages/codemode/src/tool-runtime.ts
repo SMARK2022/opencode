@@ -1,6 +1,4 @@
 // 参数形式、来源快照与宿主限流各守自己的边界，不向解释器引入宿主策略。
-import { normalizeInput } from "./input-forms.js"
-import { rawText, withRawText } from "./raw-text.js"
 import { TOOL_CALL_CONCURRENCY } from "./stdlib/promise.js"
 import { Cause, Effect, Schema, Semaphore } from "effect"
 import DESCRIPTION from "./code-mode.txt" with { type: "text" }
@@ -11,12 +9,15 @@ import {
   identifierSegment,
   inputProperties,
   inputTypeScript,
+  normalizeInput,
   outputTypeScript,
 } from "./tool-schema.js"
 import { isDefinition as isToolDefinition, type Definition } from "./tool.js"
 import {
   // 内部复制复用同一值品牌集合，避免新增支持类型时遗漏另一份枚举。
   isSandboxValue,
+  rawText,
+  withRawText,
   SandboxDate,
   SandboxMap,
   SandboxPromise,

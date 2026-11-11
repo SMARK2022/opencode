@@ -49,6 +49,18 @@ export const Info = Schema.Struct({
     description: "@deprecated Use 'references' field instead. Named git or local directory references",
   }),
   watcher: Schema.optional(Schema.Struct({ ignore: Schema.optional(Schema.mutable(Schema.Array(Schema.String))) })),
+  // 布尔简写只控制启用；对象可选控制直接入口，合并后再以显式环境变量覆盖。
+  codemode: Schema.optional(
+    Schema.Union([
+      Schema.Boolean,
+      Schema.Struct({
+        enabled: Schema.optional(Schema.Boolean).annotate({ description: "Enable Code Mode (default: true)" }),
+        keep_tools: Schema.optional(Schema.Boolean).annotate({
+          description: "Keep direct tool calls alongside Execute (default: true)",
+        }),
+      }),
+    ]),
+  ).annotate({ description: "配置 Code Mode 工具编排；显式环境变量优先于此设置。" }),
   snapshot: Schema.optional(Schema.Boolean).annotate({
     description:
       "Enable or disable snapshot tracking. When false, filesystem snapshots are not recorded and undoing or reverting will not undo/redo file changes. Defaults to true.",

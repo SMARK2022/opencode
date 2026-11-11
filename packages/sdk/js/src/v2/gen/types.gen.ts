@@ -2286,6 +2286,15 @@ export type Config = {
   watcher?: {
     ignore?: Array<string>
   }
+  /**
+   * 配置 Code Mode 工具编排；显式环境变量优先于此设置。
+   */
+  codemode?:
+    | boolean
+    | {
+        enabled?: boolean
+        keep_tools?: boolean
+      }
   snapshot?: boolean
   plugin?: Array<
     | string

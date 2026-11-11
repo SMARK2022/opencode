@@ -20,7 +20,7 @@ export class EnvironmentUnavailable extends Schema.TaggedErrorClass<EnvironmentU
   },
 ) {}
 
-// 每个会话和位置只保留最近调用的八个环境；最旧租约收尾后再回收。
+// 每个会话和位置保留最近调用的八个环境；窗口外的忙项在租约结束后回收。
 const ownerCapacity = 8
 type Entry = Lease & {
   owner: Owner
@@ -51,7 +51,7 @@ export function makeRegistry(options: { nextID?: () => string } = {}) {
     if (entry.users === 0) entries.delete(entry.id)
   }
   // 状态变动延迟到 Effect 真正执行，单纯构造一个 use 请求不会占用目录容量。
-  const acquire = (owner: Owner, id: string | undefined): Effect.Effect<Entry, EnvironmentUnavailable> =>
+  const acquire = (owner: Owner, id: string | undefined) =>
     Effect.suspend(() => {
       if (closing) return Effect.fail(new EnvironmentUnavailable({ message: "Execute environments are disposed." }))
       // 空字符串仍是显式句柄，不能用真值判断把无效复用请求悄悄变成新环境。
@@ -62,15 +62,7 @@ export function makeRegistry(options: { nextID?: () => string } = {}) {
             message: "Execute environment is unavailable. Omit environmentID to start a new one.",
           }),
         )
-      if (id === undefined) {
-        const owned = [...entries.values()].filter((entry) => sameOwner(owner, entry.owner) && !entry.closed)
-        if (owned.length >= ownerCapacity) {
-          const oldest = owned[0]!
-          // 等待最旧租约收尾，再依据最新调用顺序重新选择，不能跳过忙项淘汰较新状态。
-          if (oldest.users > 0)
-            return Deferred.await(oldest.drained).pipe(Effect.interruptible, Effect.andThen(acquire(owner, id)))
-          retire(oldest)
-        }
+      if (!entry) {
         let fresh = nextID()
         // 已存在的句柄绝不覆盖；沿用仓库生成器，仅在当前集合真实冲突时重新生成。
         while (entries.has(fresh)) fresh = nextID()
@@ -86,7 +78,6 @@ export function makeRegistry(options: { nextID?: () => string } = {}) {
         }
         entries.set(fresh, entry)
       }
-      if (!entry) return Effect.fail(new EnvironmentUnavailable({ message: "Execute environment is unavailable." }))
       // 闲置后的新一轮租约需要新的 drain 信号，不能复用上一轮已完成的 Deferred。
       if (entry.users === 0) entry.drained = Deferred.makeUnsafe()
       // 等许可之前先计入使用者，才能让淘汰和关闭逻辑看见仍在队列里的请求。
@@ -127,6 +118,11 @@ export function makeRegistry(options: { nextID?: () => string } = {}) {
                   // 完成顺序不能覆盖调用顺序；关闭项在最后一个租约退出后删除。
                   if (entry.closed) entries.delete(entry.id)
                 }
+                // 最近八个唯一调用之外只回收闲置项；忙项由自己的最后一个租约退出后再检查。
+                const owned = [...entries.values()].filter(
+                  (candidate) => sameOwner(entry.owner, candidate.owner) && !candidate.closed,
+                )
+                for (const candidate of owned.slice(0, -ownerCapacity)) if (candidate.users === 0) retire(candidate)
               }),
             ),
           )

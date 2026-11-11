@@ -1,5 +1,4 @@
 import { parse } from "acorn"
-import { rawText, withRawText } from "../raw-text.js"
 // Scope 让全部 Promise 共用一次执行寿命，不能把清理责任放回单个观察者。
 import { Cause, Effect, Exit, Fiber, Scope } from "effect"
 import { DiagnosticCategory, ModuleKind, ScriptTarget, flattenDiagnosticMessageText, transpileModule } from "typescript"
@@ -110,6 +109,9 @@ import {
   isSandboxValue,
   SandboxDate,
   SandboxMap,
+  // 副本与字符串转换共用值的原文来源，不在解释器另建字典。
+  rawText,
+  withRawText,
   SandboxPromise,
   SandboxRegExp,
   SandboxSet,
@@ -2354,21 +2356,27 @@ class Interpreter<R> {
       return Effect.map(
         this.createPromise(
           Effect.gen(function* () {
-            // 回调排到当前语句之后；返回自身时可识别循环，不能一直等到执行超时。
-            yield* Effect.yieldNow
+            // 先消费已经结算的源，再推迟回调，保留当前语句顺序及链式自循环识别。
             const exit = yield* self.observePromise(source)
+            yield* Effect.yieldNow
             if (Exit.isFailure(exit) && Cause.hasInterruptsOnly(exit.cause)) return yield* Effect.failCause(exit.cause)
-            const handler =
-              ref.name === "catch" ? (Exit.isFailure(exit) ? args[0] : undefined) : args[Exit.isSuccess(exit) ? 0 : 1]
+            const finalizing = ref.name === "finally"
+            const handler = finalizing
+              ? args[0]
+              : ref.name === "catch"
+                ? (Exit.isFailure(exit) ? args[0] : undefined)
+                : args[Exit.isSuccess(exit) ? 0 : 1]
             if (typeofValue(handler) !== "function") return yield* exit
             const apply = self.applyCollectionCallback(handler, `Promise.${ref.name}`, node)
-            const value = yield* apply([
-              Exit.isSuccess(exit) ? exit.value : caughtErrorValue(Cause.squash(exit.cause)),
-            ])
+            const value = yield* apply(
+              finalizing ? [] : [Exit.isSuccess(exit) ? exit.value : caughtErrorValue(Cause.squash(exit.cause))],
+            )
             if (value === chained)
               throw new ProgramThrow(createErrorValue("TypeError", "Chaining cycle detected for promise."))
             // 同步回调返回的 Promise 与 async 回调使用同一套采用终态规则。
-            return yield* self.settlePromise(value)
+            const result = yield* self.settlePromise(value)
+            // finally 仅等待清理，成功后保留原终态；清理失败沿同一结算入口向外传播。
+            return finalizing ? yield* exit : result
           }),
         ),
         (promise) => (chained = promise),
@@ -3177,15 +3185,7 @@ class Interpreter<R> {
 
       // 链式方法绑定当前 Promise；其它属性仍提示先 await，避免误读工具结果。
       if (objectValue instanceof SandboxPromise) {
-        if (key === "then" || key === "catch") return new IntrinsicReference(objectValue, key)
-        if (key === "finally") {
-          throw new InterpreterRuntimeError(
-            `Promise.prototype.${String(key)} is not supported in CodeMode; use await instead (with try/catch to handle failures) - e.g. \`const result = await tools.ns.tool(...)\`.`,
-            propertyNode,
-            "UnsupportedSyntax",
-            [supportedSyntaxMessage],
-          )
-        }
+        if (key === "then" || key === "catch" || key === "finally") return new IntrinsicReference(objectValue, key)
         throw new InterpreterRuntimeError(
           "This value is an un-awaited Promise and has no readable properties; await it first - e.g. `const result = await tools.ns.tool(...)`.",
           objectNode,

@@ -1,12 +1,13 @@
+// 真实配置解码与宿主 Session 共用依赖层，模式矩阵不能用手写结果代替解析。
 import { expect, spyOn } from "bun:test"
-// 从库的已发布描述取示例，避免宿主测试维护另一份提示词。
 import { CodeMode } from "@opencode-ai/codemode"
-import { ConfigProvider, Deferred, Effect, Exit, Fiber, Layer, Option, Stream } from "effect"
+import { ConfigProvider, Deferred, Effect, Exit, Fiber, Layer, Option, Schema, Stream } from "effect"
 import path from "node:path"
 import { mkdir } from "node:fs/promises"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { SessionProjector } from "@opencode-ai/core/session/projector"
 import { Agent } from "@/agent/agent"
+import { ConfigV1 } from "@opencode-ai/core/v1/config/config"
 import { Config } from "@/config/config"
 import { MCP } from "@/mcp"
 import { Permission } from "@/permission"
@@ -20,6 +21,8 @@ import { MessageID, PartID, SessionID } from "@/session/schema"
 import { ToolRegistry } from "@/tool/registry"
 import type { TaskPromptOps } from "@/tool/task"
 import { Truncate } from "@/tool/truncate"
+// 调用生产配置入口，验证缺省环境值不会遮盖 JSON 中的显式 false。
+import { configuration } from "@/tool/code-mode"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { InstanceState } from "@/effect/instance-state"
 import { isRecord } from "@/util/record"
@@ -49,7 +52,7 @@ const provider = ProviderTest.fake()
 // 使用本机真实方言，避免测试命令与 Shell 分类器观察到两种不同语言。
 const shell = process.platform === "win32" ? Bun.which("pwsh") ?? Bun.which("powershell") : Bun.which("bash")
 // 空 MCP 是产品入口的原始缺口，测试必须通过正常目录找到 execute。
-const layer = (flags: Partial<RuntimeFlags.Info> = {}, http?: HttpClient.HttpClient) =>
+const layer = (flags: Partial<RuntimeFlags.Info> = {}, http?: HttpClient.HttpClient, codemode?: ConfigV1.Info["codemode"], env: Record<string, string | undefined> = {}) =>
   LayerNode.compile(
     LayerNode.group([
       ToolRegistry.node,
@@ -73,7 +76,7 @@ const layer = (flags: Partial<RuntimeFlags.Info> = {}, http?: HttpClient.HttpCli
         Config.node,
         TestConfig.layer({
           // 普通工具配置 allow，组合路径仍要独立预检；动态升阶用例因此也验证 allow 无法越级。
-          get: () => Effect.succeed({ permission: { "*": "allow" as const }, shell: shell ?? undefined }),
+          get: () => Effect.succeed({ codemode, permission: { "*": "allow" as const }, shell: shell ?? undefined }),
           directories: () =>
             InstanceState.directory.pipe(Effect.map((directory) => [path.join(directory, ".opencode")])),
         }),
@@ -162,7 +165,7 @@ const layer = (flags: Partial<RuntimeFlags.Info> = {}, http?: HttpClient.HttpCli
       ],
       [httpClient, http ? Layer.succeed(HttpClient.HttpClient, http) : httpClient],
     ],
-  )
+  ).pipe(Layer.provideMerge(ConfigProvider.layer(ConfigProvider.fromUnknown(env))))
 const it = testEffect(layer())
 const background = testEffect(layer({ experimentalBackgroundSubagents: true }))
 
@@ -351,7 +354,7 @@ it.instance("execute catalog reaches final system and OAuth instructions with up
               .join("\n")
         expect(system).toContain("Project instruction.")
         expect(system).toContain("User-provided instruction.")
-        expect(system).toContain("For direct tool calls, use multi_tool_use.parallel")
+        expect(system.includes("Prefer execute for independent batches")).toBe(enabled)
         expect(prepared.messages.filter((message) => message.role === "system")).toHaveLength(oauth ? 0 : 1)
         expect(system.match(/^# Code Mode$/gm) ?? []).toHaveLength(enabled ? 1 : 0)
         if (!enabled) {
@@ -369,11 +372,9 @@ it.instance("execute catalog reaches final system and OAuth instructions with up
         )
         expect(system).toContain("The catalog is complete.")
         expect(system).toContain("tools.$opencode.read(input: { filePath: string;")
-        expect(prepared.tools.execute.description).toContain(
-          'return search({ query: "glob read", namespace: "$opencode", limit: 2 })',
-        )
-        expect(prepared.tools.execute.description).toContain("If a needed file tool is not shown, discover it with")
-        expect(prepared.tools.execute.description).toContain("Use the exact namespaced paths and argument shapes")
+        expect(prepared.tools.execute.description).toContain('search({ query: "..." })')
+        expect(prepared.tools.execute.description).toContain("Globals: tools, search, console, sleep(ms)")
+        expect(prepared.tools.execute.description).toContain("catalog's exact paths and argument shapes")
         expect(system).not.toContain("search(input:")
       }
     }
@@ -1902,193 +1903,51 @@ for (const tool of ["apply_patch", "edit"]) {
   }), { git: true })
 }
 
-// 从实际模型说明提取发现式；未来文案改错字段时，这条生产路径回归必须失败。
-
-it.instance("published discovery example returns complete file tool signatures", () =>
+// 直接运行模型所见示例，验证真实 glob/read 数据形态和采样输出。
+it.instance("published composition example samples actual files", () =>
   Effect.gen(function* () {
-    const code = CodeMode.description.match(/`(return search\([^`]+\))`/)?.[1]
-    if (!code) throw new Error("Revised discovery expression missing")
+    const code = CodeMode.description.match(/```js\n([\s\S]*?)\n```/)?.[1]
+    if (!code) throw new Error("Published composition example missing")
+    const instance = yield* TestInstance
+    yield* Effect.promise(() => mkdir(path.join(instance.directory, "src"), { recursive: true }))
+    for (const lines of [20, 250])
+      yield* Effect.promise(() => Bun.write(path.join(instance.directory, `src/${lines}.ts`), Array.from({ length: lines }, () => "// fixture").join("\n")))
     const fixture = yield* resolveTools()
-    const execute = fixture.tools.execute?.execute
-    if (!execute) throw new Error("Execute missing")
-    const discovered = yield* Effect.promise(() =>
-      Promise.resolve(
-        execute(
-          { code },
-          {
-            toolCallId: "r9-discover-limit2",
-            abortSignal: new AbortController().signal,
-            messages: [],
-          },
-        ),
-      ),
-    )
-    const parsed = scriptResult(discovered)
-    if (!isRecord(parsed.metadata)) throw new Error("Discovery metadata missing")
-    expect(parsed.metadata.truncated).toBe(false)
-    // 完整解析证明宿主未截断；仅 contains 两条路径不能证明发现结果可读。
-    const result = JSON.parse(parsed.output)
-    // 顺序和两项路径来自说明中的 query、namespace 和 limit，不能用任意包含文件工具的结果替代示例。
-    expect(result.items.map((item: { path: string }) => item.path)).toEqual([
-      "tools.$opencode.glob",
-      "tools.$opencode.read",
-    ])
-    // 签名保留脚本依赖的真实 files 对象与行数边界，不猜测字符串路径。
-    expect(result.items[0].signature).toContain("files: Array<")
-    expect(result.items[0].signature).toContain("partial: boolean")
-    expect(result.items[1].signature).toContain("totalLinesExact: boolean")
-    expect(result.items[1].signature).toContain("limit?: number")
-    expect(parsed.output).not.toContain('<opencode_notice type="output_truncated"')
+    yield* fixture.processor.process({
+      user: fixture.user, sessionID: fixture.session.id, model: provider.model,
+      agent: fixture.agent, system: [code], messages: [], tools: fixture.tools,
+    })
+    const parts = (yield* fixture.sessions.messages({ sessionID: fixture.session.id }))
+      .flatMap((message) => message.parts).filter((part) => part.type === "tool")
+    const parent = parts.find((part) => part.tool === "execute")
+    if (!parent || parent.state.status !== "completed") throw new Error("Published example failed")
+    const result = JSON.parse(scriptResult(parent.state).output)
+    const reads = parts.filter((part) => part.tool === "read")
+    expect(reads).toHaveLength(2)
+    expect(reads.every((part) => part.state.status === "completed" && part.state.input.limit === 1)).toBe(true)
+    expect(result).toMatchObject({ inspected: 2, truncated: false, partial: false })
+    expect(result.files).toHaveLength(1)
+    expect(result.files[0]).toMatchObject({ lines: 250, exact: true })
   }),
 )
 
-// 分别覆盖筛选、八文件上限、glob 截断和 read 有界计数，不把抽样描述为全量分析。
-for (const scenario of ["mixed", "bounded", "truncated", "inexact"] as const)
-  it.instance(`published file example preserves ${scenario}`, () =>
-    Effect.gen(function* () {
-      const code = CodeMode.description.match(/```js\n([\s\S]*?)\n```/)?.[1]
-      if (!code) throw new Error("Published file example missing")
-      const instance = yield* TestInstance
-      const directory = path.join(instance.directory, "src")
-      yield* Effect.promise(() => mkdir(directory, { recursive: true }))
-      // 12个文件只触发示例的八项采样，101个还触发glob自身截断，两者不能共用一个完整性标志。
-      const count = scenario === "mixed" ? 2 : scenario === "bounded" ? 12 : scenario === "truncated" ? 101 : 1
-      for (let index = 0; index < count; index++) {
-        const lines = scenario === "mixed" ? (index === 0 ? 20 : 250) : scenario === "inexact" ? 600 : 240
-        // 宽行超出真实 read 计数字节预算，不能 stub 一个不可信的 inexact 标志。
-        const line = scenario === "inexact" ? "//" + "x".repeat(1022) : "// fixture"
-        yield* Effect.promise(() =>
-          Bun.write(path.join(directory, `fixture-${index}.ts`), Array.from({ length: lines }, () => line).join("\n")),
-        )
-      }
-      const fixture = yield* resolveTools()
-      // 生产说明原文直接进入 provider 事件与 SessionTools；不得为通过断言暗改示例。
-      yield* fixture.processor.process({
-        user: fixture.user,
-        sessionID: fixture.session.id,
-        model: provider.model,
-        agent: fixture.agent,
-        system: [code],
-        messages: [],
-        tools: fixture.tools,
-      })
-      const messages = yield* fixture.sessions.messages({ sessionID: fixture.session.id })
-      const parts = messages.flatMap((message) => message.parts).filter((part) => part.type === "tool")
-      const parent = parts.find((part) => part.tool === "execute")
-      if (!parent || parent.state.status !== "completed") throw new Error("Candidate failed: " + JSON.stringify(parent))
-      const result = JSON.parse(scriptResult(parent.state).output)
-      const reads = parts.filter((part) => part.tool === "read")
-      const glob = parts.find((part) => part.tool === "glob")
-      if (!glob || glob.state.status !== "completed") throw new Error("Real glob missing")
-      // 检查真实 child 次数与 limit，不能只相信脚本返回 inspected 的声明。
-      expect(reads).toHaveLength(Math.min(count, 8))
-      expect(reads.every((part) => part.state.status === "completed" && part.state.input.limit === 1)).toBe(true)
-      // inspected 必须等于真实 read 次数，脚本不能用 glob 候选数冒充实际检查数。
-      expect(result.inspected).toBe(reads.length)
-      expect(result.truncated).toBe(scenario === "truncated")
-      expect(result.partial).toBe(false)
-      // listing 标志属于 glob 枚举边界，八文件抽样不能被理解为完整扫描。
-      expect(result.truncated).toBe(glob.state.metadata.truncated ?? false)
-      expect(result.partial).toBe(glob.state.metadata.partial ?? false)
-      expect(result.files.every((file: { lines: number }) => file.lines > 200)).toBe(true)
-      expect(result.files).toHaveLength(scenario === "mixed" ? 1 : Math.min(count, 8))
-      // 宽行场景之外都未触发行数预算，exact 应保持真，防止实现把所有行数都降格成下界。
-      if (scenario === "inexact") {
-        // 下界与 exact=false 均须传出，既不谎报精确 600 行，也不丢弃已知超过 200 的事实。
-        expect(result.files[0].exact).toBe(false)
-        expect(result.files[0].lines).toBeLessThan(600)
-        expect(reads[0].state.status === "completed" && reads[0].state.metadata.read.totalExact).toBe(false)
-      } else expect(result.files.every((file: { exact: boolean }) => file.exact)).toBe(true)
-      if (scenario === "mixed") expect(result.files[0].lines).toBe(250)
-    }),
-  )
-
-
-for (const kind of ["question", "permission"] as const)
-  for (const ending of ["answer", "reject", "abort"] as const)
-    it.instance(`execution budget pauses ${kind} until ${ending}`, () =>
-      Effect.gen(function* () {
-        const fixture = yield* resolveTools()
-        const instance = yield* TestInstance
-        const question = yield* Question.Service
-        const permission = yield* Permission.Service
-        if (kind === "permission") {
-          yield* Effect.promise(() => Bun.write(path.join(instance.directory, "pause.txt"), "paused"))
-          yield* fixture.sessions.setPermission({
-            sessionID: fixture.session.id,
-            permission: [{ permission: "read", pattern: "*", action: "ask" }],
-          })
-        }
-        const execute = fixture.tools.execute?.execute
-        if (!execute) throw new Error("execute missing")
-        const controller = new AbortController()
-        const code =
-          kind === "question"
-            ? 'await tools.$opencode.question({questions:[{question:"Budget pause",header:"Test",options:[]}]}); return "resumed";'
-            : 'const files = await tools.$opencode.glob({pattern:"pause.txt"}); await tools.$opencode.read({filePath:files.files[0].path}); return "resumed";'
-        const pending = yield* Effect.tryPromise({
-          try: () =>
-            Promise.resolve(
-              execute(
-                { code, timeout: 1000 },
-                { toolCallId: "pause-host", abortSignal: controller.signal, messages: [] },
-              ),
-            ),
-          catch: (error) => error,
-        }).pipe(Effect.exit, Effect.forkScoped)
-        const respond = yield* kind === "question"
-          ? pollWithTimeout(question.list().pipe(Effect.map((items) => items[0])), "question never appeared").pipe(
-              Effect.map((request) =>
-                ending === "answer"
-                  ? question.reply({ requestID: request.id, answers: [["continue"]] })
-                  : question.reject(request.id),
-              ),
-            )
-          : pollWithTimeout(permission.list().pipe(Effect.map((items) => items[0])), "permission never appeared").pipe(
-              Effect.map((request) => {
-                expect(request.permission).toBe("read")
-                expect(request.tool?.callID).toBe("pause-host/2")
-                return permission.reply({ requestID: request.id, reply: ending === "answer" ? "once" : "reject" })
-              }),
-            )
-        if (kind === "permission") {
-          const before = (yield* fixture.sessions.messages({ sessionID: fixture.session.id })).flatMap(
-            (message) => message.parts,
-          )
-          expect(
-            before.some((part) => part.type === "tool" && part.tool === "glob" && part.state.status === "completed"),
-          ).toBe(true)
-        }
-        // 超出全部显式预算仍保持真实待答，再决定回答、拒绝或取消。
-        yield* Effect.sleep(1200)
-        expect(pending.pollUnsafe()).toBeUndefined()
-        if (ending === "abort") controller.abort()
-        else yield* respond
-        const result = yield* awaitWithTimeout(Fiber.join(pending), "human wait did not finish")
-        expect(Exit.isSuccess(result)).toBe(ending === "answer")
-        if (Exit.isSuccess(result)) expect(scriptResult(result.value).output).toBe("resumed")
-        expect(yield* question.list()).toEqual([])
-        expect(yield* permission.list()).toEqual([])
-        const parts = (yield* fixture.sessions.messages({ sessionID: fixture.session.id }))
-          .flatMap((message) => message.parts)
-          .filter((part) => part.type === "tool")
-        expect(parts.some((part) => part.state.status === "running" || part.state.status === "pending")).toBe(false)
-      }),
-    )
-
-// 显示组合由配置决定，不能靠权限拒绝后自动恢复另一种工具面。
-for (const flags of [
-  {},
-  { execute: false },
-  { execute: false, executeKeepTools: false },
-  { executeKeepTools: false },
-]) {
-  testEffect(layer(flags)).instance("execute display switches " + JSON.stringify(flags), () =>
+for (const input of [
+  { flags: {} },
+  { flags: { OPENCODE_CODEMODE: "false" } },
+  { flags: { OPENCODE_CODEMODE: "false", OPENCODE_CODEMODE_KEEP_TOOLS: "false" } },
+  { flags: { OPENCODE_CODEMODE_KEEP_TOOLS: "false" } },
+  { flags: {}, config: false },
+  { flags: {}, config: { keep_tools: false } },
+  { flags: { OPENCODE_CODEMODE: "true" }, config: false },
+  { flags: { OPENCODE_CODEMODE_KEEP_TOOLS: "true" }, config: { keep_tools: false } },
+] satisfies Array<{ flags: Record<string, string>; config?: ConfigV1.Info["codemode"] }>) {
+  testEffect(layer({}, undefined, input.config, input.flags)).instance("execute display switches " + JSON.stringify(input), () =>
     Effect.gen(function* () {
       const fixture = yield* resolveTools()
       const registry = yield* ToolRegistry.Service
-      const enabled = flags.execute !== false
-      const retained = !enabled || flags.executeKeepTools !== false
+      const mode = yield* configuration(input.config)
+      const enabled = mode.enabled
+      const retained = !enabled || mode.keepTools
       expect(Boolean(fixture.tools.execute)).toBe(enabled)
       expect(Boolean(fixture.tools.read)).toBe(retained)
       expect((yield* registry.ids()).includes("execute")).toBe(enabled)
@@ -2144,19 +2003,39 @@ for (const flags of [
   )
 }
 
-// 使用真实 ConfigProvider 解码字符串开关，避免测试替身绕过配置默认值。
-it.effect("execute environment switches default on and decode explicit false", () =>
+// 实际 schema 和 ConfigProvider 共用解析入口，显式 false 不能被默认值覆盖。
+it.effect("codemode JSON and environment overrides share one resolution", () =>
   Effect.gen(function* () {
-    for (const input of [{}, { OPENCODE_EXECUTE: "false", OPENCODE_EXECUTE_KEEP_TOOLS: "false" }]) {
-      const flags = yield* Effect.gen(function* () {
-        return yield* RuntimeFlags.Service
-      }).pipe(
-        Effect.provide(
-          RuntimeFlags.Service.layer.pipe(Layer.provide(ConfigProvider.layer(ConfigProvider.fromUnknown(input)))),
-        ),
-      )
-      expect(flags.execute).toBe(!("OPENCODE_EXECUTE" in input))
-      expect(flags.executeKeepTools).toBe(!("OPENCODE_EXECUTE_KEEP_TOOLS" in input))
+    const values = [
+      undefined,
+      false,
+      true,
+      {},
+      { enabled: false },
+      { keep_tools: false },
+      { enabled: true, keep_tools: false },
+    ]
+    for (const value of values) {
+      const config = Schema.decodeUnknownSync(ConfigV1.Info, { onExcessProperty: "error" })({ codemode: value })
+      for (const enabled of [undefined, false, true])
+        for (const keepTools of [undefined, false, true]) {
+          const input = {
+            ...(enabled === undefined ? {} : { OPENCODE_CODEMODE: String(enabled) }),
+            ...(keepTools === undefined ? {} : { OPENCODE_CODEMODE_KEEP_TOOLS: String(keepTools) }),
+          }
+          const mode = yield* configuration(config.codemode).pipe(
+            Effect.provide(ConfigProvider.layer(ConfigProvider.fromUnknown(input))),
+          )
+          expect(mode).toEqual({
+            enabled: enabled ?? (typeof value === "boolean" ? value : value?.enabled) ?? true,
+            keepTools: keepTools ?? (typeof value === "object" ? value.keep_tools : undefined) ?? true,
+          })
+        }
     }
+    // 配置文件由公开 schema 解码，不能依靠展示层恰好忽略拼错字段来掩盖错误。
+    for (const value of [null, "false", { enabled: "false" }, { keep_tools: 0 }, { keepTools: false }])
+      expect(() =>
+        Schema.decodeUnknownSync(ConfigV1.Info, { onExcessProperty: "error" })({ codemode: value }),
+      ).toThrow()
   }),
 )

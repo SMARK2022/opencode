@@ -479,15 +479,8 @@ describe("timeout interruption of forked calls", () => {
   })
 })
 
+// 未等待的 Promise 仍是句柄；读取业务字段应提示等待，不能误判为宿主工具失败。
 describe("unsupported promise surface", () => {
-  // then/catch 的开放不包含 finally，未实现的方法仍应明确诊断而非返回 undefined。
-  test(".finally gives a clear await-instead error", async () => {
-    const diagnostic = await error(`return tools.host.sleepy({ id: 1 }).finally((x) => x)`)
-    expect(diagnostic.kind).toBe("UnsupportedSyntax")
-    expect(diagnostic.message).toContain("Promise.prototype.finally is not supported")
-    expect(diagnostic.message).toContain("await")
-  })
-
   test("other property reads on a promise hint at the missing await", async () => {
     const diagnostic = await error(`return tools.host.sleepy({ id: 1 }).value`)
     expect(diagnostic.kind).toBe("InvalidDataValue")
@@ -1028,6 +1021,24 @@ test("a cancelled race observer does not mark a later rejection observed", async
 })
 
 describe("promise chaining", () => {
+  test("finally awaits cleanup and preserves or replaces the original settlement", async () => {
+    // 清理返回值不替换原结果；抛出或拒绝才替换，且回调不接收原结果参数。
+    expect(
+      await value(
+        `const out = []; const n = await Promise.resolve(4).finally((...args) => { out.push(args.length); return 99; }); return [n, out];`,
+      ),
+    ).toEqual([4, [0]])
+    expect(
+      await value(
+        `const e = {n:1}; return Promise.reject(e).finally(async () => { await sleep(1); return 99; }).catch(x => x === e);`,
+      ),
+    ).toBe(true)
+    expect(await value(`return Promise.resolve(4).finally(() => { throw {n:2}; }).catch(x => x.n);`)).toBe(2)
+    expect(await value(`return Promise.reject(4).finally(() => Promise.reject(5)).catch(x => x);`)).toBe(5)
+    // 非函数沿原合同透传；内建函数仍复用已有callback入口。
+    expect(await value(`return Promise.resolve(4).finally(null).finally(String);`)).toBe(4)
+  })
+
   test("batch catch recovers tool errors and then transforms successful results", async () => {
     expect(
       await value(`return await Promise.all([1,2,3].map(id => tools.host.fail({}).catch(() => id).then(x => x * 2)))`),
@@ -1063,13 +1074,20 @@ describe("promise chaining", () => {
   })
 
   test("callback runs after current statement and direct self-resolution rejects", async () => {
-    expect(
-      await value(
-        `const out = []; const p = Promise.resolve(1).then(() => out.push("callback")); out.push("sync"); await p; return out;`,
-      ),
-    ).toEqual(["sync", "callback"])
-    // 等同一个新Promise会永远挂起；直接自返回必须成为可捕获的TypeError。
-    expect(await value(`let p; p = Promise.resolve(1).then(() => p); return p.catch(e => e.name)`)).toBe("TypeError")
+    for (const method of ["then", "finally"]) {
+      // 同步已结算和仍在途的源都保留同步前缀，finally不能借清理名义提前执行。
+      for (const source of ["Promise.resolve(1)", "tools.host.sleepy({id:1})"]) {
+        expect(
+          await value(
+            `const out = []; const p = ${source}.${method}(() => out.push("callback")); out.push("sync"); await p; return out;`,
+          ),
+        ).toEqual(["sync", "callback"])
+      }
+      // 等待链自身会永久挂起；两个入口共用原TypeError拒绝行为。
+      expect(await value(`let p; p = Promise.resolve(1).${method}(() => p); return p.catch(e => e.name)`)).toBe(
+        "TypeError",
+      )
+    }
   })
 
   test("independent chain callbacks keep separate frames and shared captured bindings", async () => {
@@ -1081,7 +1099,7 @@ describe("promise chaining", () => {
     ).toEqual({ out: [1, 2, 3], count: 3 })
   })
 
-  test("host interruption passes through catch and rejection handler without invoking either", async () => {
+  test("host interruption passes through chain handlers without invoking any", async () => {
     let invoked = false
     const exit = await Effect.runPromise(
       CodeMode.execute({
@@ -1097,7 +1115,7 @@ describe("promise chaining", () => {
               }),
           }),
         },
-        code: `return tools.stop({}).catch(() => tools.mark({})).then(undefined, () => tools.mark({}));`,
+        code: `return tools.stop({}).catch(() => tools.mark({})).then(undefined, () => tools.mark({})).finally(() => tools.mark({}));`,
       }).pipe(Effect.exit),
     )
     expect(Exit.isFailure(exit)).toBe(true)

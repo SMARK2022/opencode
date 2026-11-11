@@ -1,5 +1,3 @@
-// 工具面使用宿主现有运行配置，避免另建一套权限或项目配置解析。
-import { RuntimeFlags } from "@/effect/runtime-flags"
 import { Agent } from "@/agent/agent"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { Provider } from "@/provider/provider"
@@ -111,9 +109,9 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
   const run = yield* EffectBridge.make()
   const plugin = yield* Plugin.Service
   const permission = yield* Permission.Service
-  // 显示选择取同一进程配置；不从权限是否放行反推用户选择的模式。
-  const flags = yield* RuntimeFlags.Service
+  // 注册表拥有配置读取，两处工具面使用同一模式，不从权限结果反推。
   const registry = yield* ToolRegistry.Service
+  const mode = yield* registry.codemode()
   const mcp = yield* MCP.Service
   const truncate = yield* Truncate.Service
   const sessions = yield* Session.Service
@@ -213,7 +211,7 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
               let review: Permission.ExecuteReview | undefined
               let sequence = 0
               ctx.codeMode = {
-                catalog, signal,
+                catalog, signal, keepTools: mode.keepTools,
                 // 只有真实执行消费这个期限，预跑继续使用自己的短预算。
                 waitForTimeout: budget.wait,
                 fetch: (url, init) => Effect.gen(function* () {
@@ -661,7 +659,7 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
     }))
   for (const item of Object.values(eligible)) {
     // 目录先保留完整内部能力；这里只隐藏可嵌套工具的直接入口，不影响控制工具。
-    if (flags.execute && !flags.executeKeepTools && catalog.some((entry) => entry.id === item.id)) continue
+    if (mode.enabled && !mode.keepTools && catalog.some((entry) => entry.id === item.id)) continue
     const schema = ProviderTransform.schema(input.model, ToolJsonSchema.fromTool(item))
     // Provider 只负责参数呈现；直接与嵌套入口都继续复用工具原来的运行时校验。
     tools[item.id] = tool({
@@ -672,7 +670,15 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
   }
 
   // 上游将稳定说明放工具定义，动态目录放当轮指令；V1保持原provider-turn边界。
-  return { tools, instructions: eligible.execute ? [yield* describeCatalog(catalog)] : [] }
+  return {
+    tools,
+    instructions: eligible.execute
+      ? [
+          "Prefer execute for independent batches, dependent tool calls, or filtering large results. Use a direct tool for a simple standalone action.",
+          yield* describeCatalog(catalog, mode.keepTools),
+        ]
+      : [],
+  }
 })
 
 function toRecord(value: unknown) {

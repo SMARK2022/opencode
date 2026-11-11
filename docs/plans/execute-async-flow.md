@@ -19,7 +19,7 @@ Execute 用一段 JavaScript/TypeScript 组合工具调用，在代码里筛选�
 7. 脚本返回、抛错、超时或被取消时，根作用域停止并等完未结束的工作；随后交付结果、日志、调用终态、附件和环境 ID。
 8. 最后释放环境租约，下一单元才能使用该环境。
 
-解释器负责语言和词法状态；ToolRuntime 负责工具数据边界、签名和准入；宿主负责 Session、权限、MCP 协议资格、环境租约及模型可见输出。不要在数组方法、组合器或各工具外再接一层调度和清理。
+解释器负责语言和词法状态；ToolRuntime 负责工具数据边界、签名和准入；宿主负责 Session、权限、MCP 协议资格、环境租约及模型可见输出。宿主内部 withEnvironment 只负责取消与租约边界，完整业务 generator 在租约内运行，清理完再释放；预跑和真实执行不各自接一套。不要在数组方法、组合器或各工具外再接一层调度和清理。
 
 ## 3. 异步函数、组合器与清理
 
@@ -46,9 +46,13 @@ async 函数的参数默认值、函数体、返回值采用都在它自己的 P
 - `Promise.race` 只选择最先结算的结果。败方仍能再次 await；空数组保持 pending，直到本次执行超时或取消。
 - 组合器本身也返回 Promise，能嵌套和传给另一个组合器。
 
-`.then(onFulfilled, onRejected)` 和 `.catch(onRejected)` 返回根 Scope 中的新 Promise。读取成员时复用 IntrinsicReference 保留源 Promise；调用时先让出一次调度，再观察源的 Exit。纯宿主中断直接穿透，普通拒绝才作为回调参数；缺省或非函数 handler 原样传递结算。
+`.then(onFulfilled, onRejected)`、`.catch(onRejected)` 和 `.finally(onFinally)` 返回根 Scope 中的新 Promise。读取成员时复用 IntrinsicReference 保留源 Promise；调用时先观察源的 Exit，再让出一次调度执行回调。已经结算的源因此在回调让出前记为已观察，在途源仍要等真实终态。纯宿主中断直接穿透，普通拒绝才作为回调参数；缺省或非函数 handler 原样传递结算。
 
 handler 复用集合方法已有的 callback 入口，脚本函数、String、URI 函数和 sleep 不另建一套分发。同步或 async 回调返回的 Promise 都交给共同 settlePromise 采用终态；回调抛错进入新 Promise。回调直接返回正在建立的链式 Promise 时以 TypeError 拒绝，避免永远等待自己。
+
+finally 用同一个回调入口传零个参数，等待回调返回的 Promise 后恢复原 Exit；回调抛错或拒绝则采用这个新失败。非函数透传原终态，纯宿主中断仍不进入回调。删除 finally 专属的不支持分支，不增加新的 Promise 类型或清理所有者。
+
+先观察只修正源的观察时序。实测 `Promise.reject("ignored").catch(() => {}); return "done"` 仍带未观察提醒，因为新链的回调尚未执行就被根关闭取消；成功源的 then 也一样。等待链完成时没有提醒。保留这个真实的未完成工作事实，不把移动两行说成整段脚本已处理完成。
 
 函数调用恢复原有 Effect.suspend 层次，但在其中新建独立 Interpreter 帧，不恢复旧共享 scope 交换。参数默认值和闭包共享仍按既有语义运行；原参数绑定/body 保持基线缩进，减少无关diff，不增加第二种函数调用路径。
 
@@ -144,7 +148,7 @@ sleep(ms) 使用 Effect 的可取消等待，属于当前根 Scope，不占工�
 
 catalog、instructions、search 和 namespace 误调用提示复用同一个签名函数。签名只展示标准具名输入，不给每个工具重复追加简写 union；运行时简写不受影响。
 
-内联目录从完整工具索引选择展示项，选择不删除实际能力。宿主只给当前确实存在的原生 read、grep、glob、edit 路径优先级；全局 search 是独立发现入口，不伪装成一个 leaf tool。其余项按签名长度、完整路径稳定排序，namespace 标题也计入预算。预算太小时可能连核心项也放不下，因此用完整 search 接续，不声称排序就能保证任何工具永远显示。
+内联目录从完整工具索引选择展示项，选择不删除实际能力。宿主在双入口模式优先当前确实存在的原生 read、grep、glob、edit；只显示 Execute 时再优先 bash、apply_patch、write。优先项必须同时具有真实 runtimeParameters 且来自 `$opencode`，同名 MCP 工具不冒充本地工具。目录说明和实际执行使用同一模式选择；全局 search 是独立发现入口，不伪装成一个 leaf tool。其余项按签名长度、完整路径稳定排序，namespace 标题也计入预算。预算太小时可能连核心项也放不下，因此用完整 search 接续，不声称排序就能保证任何工具永远显示。
 
 搜索仍按 query 相关性和路径排序，不能把内联目录的优先级和长度排序偷偷用于搜索。
 
@@ -198,11 +202,11 @@ Environment 保存 globals 和用户 bindings 两个根。普通变量、函数�
 
 每个 Session/Location 保留最近调用的八个唯一环境。Map 顺序只在 acquire 接纳调用时刷新；复用同一 ID 移到最近位置，不增加数量。释放租约不改顺序，避免较早开始的慢调用因最后完成而变成“最近使用”。
 
-新建第九个环境时选该 owner 最旧的一项。若它仍有人持有或排队，新建者等待已有 drained 信号，然后重新读取最新使用顺序；等待可以被外层取消，不提前分配第九个环境，也不跳过最旧忙项去删较新的状态。最旧项闲置后按原退休路径删除，再创建新环境。其他 owner 的调用不挤占这八项。去掉全局64项策略，不叠加 TTL、历史调用扫描或第二个缓存。
+新建环境直接准入，不检查八项容量，也不等待最旧环境。每次执行及其清理结束、租约人数更新后，扫描同一 owner 的调用顺序；只回收最近八个唯一环境窗口之外、users 已为零的项。窗口外仍活跃或排队的环境保留，等它自己的最后一个租约退出时再次扫描。活跃环境可以超过八个，全部收尾后只留下最近八个。删除原入口的容量回收和等待路径，只有这一处正常回收入口；实例或Session关闭仍由原退役路径取消并等待。
 
 退休先关闭准入，再发取消；保留条目直到使用人数归零。实例关闭等待所有真实 finalizer，不能只删 Map 引用就声称清理完成。Session 在自己的 cell 内被删除时，事件回调只发退休，不等待自己，避免死锁。
 
-验证：跨格闭包与别名、重声明、失败状态、当前工具/权限、同环境排队、排队取消、九进八出、复用刷新、重复不占槽和 owner 隔离。并发实验让两个新建者等最旧活动环境，取消第三个等待者，再复用旧环境更新顺序；收尾后必须依据新顺序淘汰，取消者不能留下租约。保留 Session delete/move/workspace 和真实 Instance.dispose 等待清理。
+验证保留跨格闭包、重声明、失败状态、当前工具/权限和同环境串行。GC用最终可见行为验证十六个活动环境能同时存在，复用更新唯一调用顺序，结束后只留下该 owner 最近八个；被取消的排队租约不能回收仍在清理的持有者。保留真实 Session delete/move/workspace 和 Instance.dispose 等待清理，不新增专门锁定“进入不GC”的历史对照断言。
 
 ### 7.3 每次预跑使用独立的环境副本
 
@@ -214,11 +218,13 @@ RegExp 用原 source/flags 创建，再复制 lastIndex 等自身描述符。自
 
 不能沿这个入口安全复制的 URL、宿主函数或访问器直接结束本次预跑。它仍是启发式探针：工具返回 null，脚本依赖真实结果时也可能提前停止。宿主保留已经收集的调用，整段审查使用同一规范化源码；真实调用始终经过现有权限入口。无需另设复制失败类型、恢复器或模型提示。
 
-预跑只设一个2000毫秒执行期限，保留已有日志留存限额，不增加访问次数或工具调用次数预算。sleep 在预跑中立即结算，不重复真实轮询等待；普通工具仍返回 null。到期会发起根取消并等待清理，因此整体返回可晚于2000毫秒；同步复制和编译也不能被同线程定时器硬抢占。
+预跑沿现有 ExecutionLimits 设置500毫秒执行期限、最多1024次实际探测工具调用，并保留日志留存限额。sleep 立即结算，普通工具返回 null。每次探测仍计入1024次预算；记录入口以工具身份和Bun.deepEquals的严格参数比较合并重复项，保留首次顺序；对象键顺序不影响等价，缺省键和undefined保持区别。普通工具与fetch共用record，不因重复轮询继续增长存档。达到调用上限或期限后沿根 Scope 停止并清理，已收集的唯一调用仍交给同一 host.begin；真实执行不继承探针的调用次数上限。用户语音中的“1.24”依其同条明确给出的1024解释，原文保留不改。
+
+轮询隔离实测：原期限内产生53020至56875次观察，耗时2128至2170毫秒；候选恰为1024次，耗时41至54毫秒。纯CPU循环在约500.58毫秒到期；有限1200次调用的预跑收集1024次，真实执行仍完成1200次。fetch进入同一计数入口。期限控制发起取消，后续清理和同步复制/编译仍不能声称严格500毫秒墙钟上限。
 
 选择这个小入口是为了既保留闭包原型，又不共享 Map 对象键等可写状态。现成复制方案的实测分别出现原型丢失、闭包环失败或旧对象共享；不以增加依赖来隐藏这些语义差异。核心复制函数维持正常排版，复用同一个身份 memo。
 
-验收保留三个组合场景：旧 helper、私有计数、对象别名/Map 与原文参数共同验证可发现且不写回；无法复制时停止预跑、真实环境仍可正常使用；两秒超时后真实状态保持。原来空环境下旧 helper 不可见的复现与省略复制导致污染的隔离负控分开记录，不把负控冒称原生产行为。
+验收保留三个组合场景：旧 helper、私有计数、对象别名/Map 与原文参数共同验证可发现且不写回；无法复制时停止预跑、真实环境仍可正常使用；预跑超时后真实状态保持。原来空环境下旧 helper 不可见的复现与省略复制导致污染的隔离负控分开记录，不把负控冒称原生产行为。
 
 ## 8. 返回值、协议投影与失败事实
 
@@ -290,28 +296,31 @@ Execute 只组成最终正文：Environment ID、未观察失败提醒、实际�
 
 ## 10. 提示词和文档
 
-提示词按“用途与收益 → 使用时机 → 一条真实例子 → 必要边界”组织。工具路径和返回值以实际 schema 为准，不照搬平铺的 glob/read 或把 read 当字符串。
+系统提示在 Execute 实际可用时给一条使用规则：适合批量独立工具、串联依赖调用或过滤大结果时优先使用 Execute。沿既有 SessionTools.instructions 注入，不改各模型模板，不在关闭 Execute 时残留规则。
+
+工具说明参考Pi的组织：用途与收益、调用方式和结果、真实globals、状态复用，配一条实际例子。工具路径和返回值以实际 schema 为准，不照搬平铺的 glob/read 或把 read 当字符串。
 
 只在需要的工具没显示时搜索；默认先看简略候选，精确路径会自动返回完整参数与说明，detail:true 可一次查看少量候选的详情。例子先 glob，取前八个文件并行读取一行以取得行数信息，再返回超过200行的文件；保留 listing 的截断信息及 totalLinesExact，不能把采样说成完整项目统计。
 
 直接说明 return 的结果、最后表达式、简短 console、sleep、宿主可选 fetch 和 Environment ID 复用。Promise.allSettled 用于保留部分结果，说明失败也在其中。代码如何处理具体业务错误由任务决定，提示词不规定每次调用都包 try/catch。
 
-共享 `code-mode.txt` 的两个宿主出口一起检查。例子从实际 description 提取后执行，使用真实文件工具，验证普通文件、截断列表、超过200行和不精确行数。README 同步真实全局 search、标准工具路径、race 只选结果、根清理、环境和输出行为。
+共享 `code-mode.txt` 的两个宿主出口一起检查。例子从实际 description 提取后执行，使用20行与250行两个真实文件，核对read只取一行、筛选结果及返回的完整性字段。列表截断与行数精度沿原工具合同处理，示例保留这些字段，不重新复制四种情节矩阵。README 同步真实全局 search、标准工具路径、race 只选结果、根清理、环境和输出行为。
 
 `code-mode.txt` 删除新增的中文维护段，不新增中文注释，也不计入本计划的中文说明分子、分母或逐 hunk 注释检查。提示词仍按真实能力写清抽样和行数精度。目录只说明“在 execute 内使用这些路径”，不再声称这些工具只能在 execute 中调用；是否能直接调用由本次 provider 工具清单决定。
 
 ### 10.1 Execute 与原工具的两个开关
 
-沿用已有 RuntimeFlags 配置服务，增加 OPENCODE_EXECUTE 与 OPENCODE_EXECUTE_KEEP_TOOLS 两个布尔环境变量，均缺省为true。前者决定是否启用 Execute，后者只在 Execute 启用时决定是否把原工具同时展示给模型。它们在启动时读取，修改后重启生效；不改变工具执行权限，也不复用 tools 字典中的权限兼容项。
+opencode.json 顶层 `codemode` 接受 boolean 或 `{ enabled?: boolean, keep_tools?: boolean }`。boolean只控制总开关，两项最终缺省都为true。环境变量改为 OPENCODE_CODEMODE 与 OPENCODE_CODEMODE_KEEP_TOOLS，显式环境值优先于合并后的JSON，再取默认值；环境缺省必须保留“未设置”，不能先转true遮掉JSON中的false。旧 OPENCODE_EXECUTE 名称按用户要求替换，不增兼容别名。
 
-- OPENCODE_EXECUTE=false：显示原工具，不提供 Execute 及它的动态目录；第二个开关不影响这个模式。
-- 两项为true或缺省：维持 Execute 加原工具双入口。
-- OPENCODE_EXECUTE=true、OPENCODE_EXECUTE_KEEP_TOOLS=false：原工具仍进入 Execute 的完整可用目录，只从 provider 的直接工具集合隐藏。StructuredOutput、权限审查等不进入脚本目录的控制工具保持原用途。
+配置沿现有 ConfigV1.Info 解析和项目/全局合并流程。布尔与对象互相覆盖时使用既有 mergeDeep：对象→true替换为true，false→对象采用新对象及缺省enabled；两个对象保留递归合并。模式由code-mode.configuration使用Effect ConfigProvider解析；Registry本来拥有Config.Service，codemode()读取合并配置后调用该函数，all和SessionTools都消费同一入口。Session不新增Config依赖，因此不向SessionPrompt重复接线；目录两个出口沿宿主传入的keepTools使用同一模式。旧RuntimeFlags中的两个字段完全移除。
 
-Registry.all 在共同列表出口过滤关闭的 Execute，ids、实际工具、TUI 选择器和调试入口因此一致。SessionTools 先生成经过当前权限筛选的 eligible 和 catalog，再应用 provider 显示选择。隐藏原工具不删内部定义；权限禁止某项时，无论直接或嵌套调用都继续禁止。Execute 被权限禁止时不悄悄恢复被设置隐藏的原工具。
+- enabled=false：保留原工具，不提供 Execute 及动态目录；keep_tools不改变此模式。
+- enabled=true、keep_tools=true：双入口。
+- enabled=true、keep_tools=false：原工具仍进入 Execute 的完整可用目录，只隐藏provider直接入口，控制工具保持原用途。
 
-这些开关属于进程级运行模式，不提供逐项目 JSON 配置。现有 RuntimeFlags 已由实际运行和测试层提供，增加字段不改变公开 Config HTTP/SDK 合同，也不复制另一条配置解析链。实际 SessionTools 验证三种模式，Execute-only 仍能真实读文件；权限拒绝不改变显示策略。再通过 ConfigProvider 验证默认值和环境变量字符串 false 的真实解码。
+Registry共同列表出口过滤关闭的Execute，使ids、TUI、调试和provider一致。SessionTools先建立当前权限允许的eligible/catalog，再应用显示选择；隐藏不删除内部能力，权限禁用也不隐式恢复隐藏项。
 
+ConfigV1同时用于HTTP配置合同，新字段经仓库生成器更新SDK类型；运行client generator确认其实际影响，不能手工改生成文件。验证JSON合法/非法形态、真实ConfigProvider环境值与JSON优先级、真实合并、三个显示模式、权限、Execute-only内部调用及目录双出口。
 ## 11. 测试按最终功能组织
 
 保留四层验证：语言/值的公共 CodeMode 入口，工具 schema 与协议适配，真实 Execute 宿主，真实 Session 资源生命周期。测试夹具复用已有入口；一项断言有不同文字，不代表它需要一项独立测试。
@@ -329,8 +338,9 @@ Registry.all 在共同列表出口过滤关闭的 Execute，ids、实际工具�
 | opencode/test/session/execute.test.ts | 权限、HTTP、question/shell 清理、可见回执、真实例子 | 用 async race 后继续 await/return/abort 的一个流程替代更弱的 question-only 变体 |
 | opencode/test/tool/code-mode-integration.test.ts | wire JSON、附件和公开参数 | 保留协议到宿主的薄集成 |
 | opencode/test/tool/code-mode.test.ts | 预跑、整段检查、租约预算、取消、统一输出截断/进度 | 在现有夹具补关键行为，不复制另一套宿主 |
-| opencode/test/tool/execute-environments.test.ts | owner、最近八项、调用顺序、等待和实例回收 | 删较弱 registry dispose/queued-cancel，用真实实例等待 finalizer 和真实排队宿主覆盖 |
+| opencode/test/tool/execute-environments.test.ts | owner、最近八项窗口、调用顺序、租约和实例回收 | 删较弱 registry dispose/queued-cancel，用真实实例等待 finalizer 和真实排队宿主覆盖 |
 | opencode/test/tool/registry.test.ts | 插件展示变化与原参数、两个提示出口 | 保留实际 registry 路径 |
+| opencode/test/session/tools.test.ts | 原直接工具 Session 路径 | 现有 Registry 替身提供真实接口要求的 codemode，原行为回归不缺服务 |
 
 共享 race 流程检查输出 `["first", 7, 7]`、生产者完成一次、未被 race 中断。根失败用例检查 result.ok=false、未完成生产者清理且之后无迟到副作用。实例关闭保留阻塞 finalizer，并断言持有者失败；简单“调用过 dispose”不足以替代。
 
@@ -350,53 +360,45 @@ Registry.all 在共同列表出口过滤关闭的 Execute，ids、实际工具�
 
 同步测试使用 Deferred/就绪信号，不靠固定 sleep 猜任务是否已启动。只有节流窗口和真实计时器本身的测试等待实际时间。
 
-8. 暂停预算与最近八项：先以当前固定 timeout 复现 question 等待消耗预算、当前64项/释放顺序保留错误环境；再通过 TestClock 和真实租约门闩验证剩余预算、重叠等待、独立执行、取消以及最新使用顺序。原真实 Session 超时清理用例改由普通工具阻塞触发，保留已经完成写入和迟到写入禁止的断言。
+8. 暂停预算与最近八项：先以固定 timeout 的原始入口复现 question 等待消耗预算；环境以最终十六项活动与结束回收验证，不增加仅约束旧入口的专测；再通过 TestClock 和真实租约门闩验证剩余预算、重叠等待、独立执行、取消以及最新使用顺序。原真实 Session 超时清理用例改由普通工具阻塞触发，保留已经完成写入和迟到写入禁止的断言。
 9. 显示开关：旧模式无论配置都同时提供 Execute 与原工具；实际 SessionTools 用三种组合验证目标工具集合和内部调用能力。默认组合保持原回归，其他组合新增针对性测试，不整批 skip 权限和生命周期覆盖。
 ## 12. 每处生产修改的职责与必要性
 
-本节对应共同基线 `a012050340b7eeed68488018205f2ed4cf8d4f0f` 到候选的全部生产差异。Git 默认三行上下文共切分为18个文件、109个 hunk。每个文件列出源文件和候选文件 SHA-256；每个 hunk 列出完整差异的 SHA-256、精确边界与职责。首尾片段取自该候选 hunk 的连续原文，在各自文件中唯一；` ⏎ ` 表示一个原始换行，保留其余字符。新文件的源哈希按空文件计算，源状态另行注明。
+本节覆盖共同基线 `a012050340b7eeed68488018205f2ed4cf8d4f0f` 到候选的全部生产差异。默认三行上下文分为17个文件、114个hunk。各文件给出两端SHA-256，hunk给出差异哈希与唯一首尾上下文；` ⏎ `表示原始换行。源文件不存在时使用空文件哈希。
 
-各项“不做会怎样”描述省去对应修改的具体后果。导入和字段传递说明服务哪个实际调用点；注释与格式只说明维护作用。hunk 哈希覆盖原始 `@@` 头、逐行差异和尾换行，不含文件头。
+职责和必要性按实际调用入口说明；导入也必须指向对应行为，不以“需要接线”替代原因。
 
-### packages/codemode/src/code-mode.txt：共享提示词
+### packages/codemode/src/code-mode.txt
 
 源文件 SHA-256：`6cec77efb4382902e35a16cc62b88f98c0cd4c1cbfa23ef133763c79ccd304e5`
-候选 SHA-256：`c3d657af12c704bb63455a534222b208c06bf48795cdaed66c357920e7d0df4b`
+候选 SHA-256：`773fcfc3a9124fd85feadc0dde5c7f3316a97ce3fce9cccd357a9631f0498605`
 
-#### H001 · 按实际工具合同说明 Execute 的使用方式
+#### H001 · 按实际能力组织说明与一个真实示例
 
-差异：`@@ -1,27 +1,35 @@`；SHA-256：`6ace2acaa2f5e1ba3bd2d86d1ef4ac33f578f11cc410e57655c77f6441d37d09`
-首段：`@@ description ⏎ Run JavaScript/TypeScript in a confined runtime to compose tool calls and filter intermediate data before returning a concise result.`
+差异：`@@ -1,27 +1,45 @@`；SHA-256：`cf48e93ad28aaedc9afbd61ac332a25367f99aa0ffabed28de9d226068d8572f`
+首段：`@@ description ⏎ Run JavaScript/TypeScript to compose tool calls and return the information needed for your next decision.`
 尾段：`- {{searchSignature}} ⏎  ⏎ ## Code Mode tools`
 
-职责：共享提示词说明何时组合调用、如何控制输出，以及完整和局部目录的发现方式。
+职责：工具说明介绍调用、发现、返回值和真实全局能力，系统层另负责组合工具的使用方向。
+机制：按用途、调用、发现、一个真实glob/read筛选样本、globals和results组织。精确路径或detail:true提供字段详情，示例保留listing完整性、采样数量和totalLinesExact；不移植Pi专有globals。
+必要性：模型需要能直接执行的渐进示例，同时知道自己拿到结构化页而非猜测纯字符串；同一说明适用于动态工具目录。
+不做会怎样：只列限制无法形成可用调用方向，照搬Pi示例则会调用不存在的API或错误返回形状；旧全局说明遗漏现有sleep并将fetch当成固定能力。
 
-机制：先写用途，再给真实glob/read有界示例，保留listing、totalLines和totalLinesExact；只在需要的工具未显示时search。简略候选确定工具后可用detail:true查询完整字段。删除新增中文分段，目录只描述execute内的调用路径，不再限制同一工具直调。
-
-必要性：模型需要能直接执行的示例，并知道采样范围和当前能力。完整目录与局部目录分别给出发现指引。
-
-不做会怎样：旧说明仍称sleep不存在、fetch总可用，并把默认可以直接调用的工具错误地标成只能在execute内调用。示例不能表达有界采样和按需详情；中文注释删除不影响模型文本。
-
-### packages/codemode/src/codemode.ts：公共接口
+### packages/codemode/src/codemode.ts
 
 源文件 SHA-256：`33421e122353da5a3fd495318578fbe56c3b604e964778ea3db26b85fad3bf54`
-候选 SHA-256：`83520882978794c82410e8d95cb5af7060eccb2b85bdd0f7780387c675e6b58a`
+候选 SHA-256：`f4da8c49a778cc9a0fec98d7e390a52701aa4d3c78a59a84e66a3f99166f6ef5`
 
 #### H002 · 提供环境的公共类型与工厂
 
-差异：`@@ -1,11 +1,17 @@`；SHA-256：`1d25ddcd9e41b3437c19f06128db3d9b70a7d6a2d63fda2dae059bd8a21b98a6`
-首段：`import { withRawText } from "./raw-text.js" ⏎ import { Effect, Schema } from "effect"`
+差异：`@@ -1,11 +1,17 @@`；SHA-256：`15dca9ddb3c444e7cc5d22d4030bc77128b2717a402b845d5b8a35c2396dae20`
+首段：`import { withRawText } from "./values.js" ⏎ import { Effect, Schema } from "effect"`
 尾段：`export type ExecutionLimits = { ⏎   /** Maximum wall-clock execution time in milliseconds. No default: absent means no timeout. */`
 
 职责：让宿主持有、创建解释器环境，不暴露独立的宿主状态容器。
-
 机制：导出 Environment 类型和 createEnvironment()；Environment 导入服务工厂，withRawText 导入归 H008 的文本投影使用。
-
 必要性：宿主环境注册表需要稳定入口创建词法状态；来源投影也需要复用同一个元数据函数。
-
 不做会怎样：缺少工厂就没有公共环境创建入口；单独删掉配套导入会留下未解析标识符。导入本身没有额外运行时策略。
-
-配套修改：H008、H010、H101。
 
 #### H003 · 声明日志预算与目录优先级
 
@@ -405,14 +407,9 @@ Registry.all 在共同列表出口过滤关闭的 Execute，ids、实际工具�
 尾段：` ⏎ type ToolTree<R = never> = {`
 
 职责：在公共选项中区分日志留存预算和目录展示优先级。
-
 机制：ExecutionLimits 增加 maxLogBytes；DiscoveryOptions 增加由宿主提供的规范路径 priority。
-
 必要性：日志追加限制不能由执行结束后的 maxOutputBytes 代替；原生核心工具优先级也不能靠库猜名字。
-
-不做会怎样：调用者无法通过类型明确传入这两项需求；实际行为仍分别由 H045 和 H064 实现。
-
-配套修改：H045、H064。
+不做会怎样：调用者无法通过类型明确传入这两项需求；实际行为仍分别由 H045 和 H063 实现。
 
 #### H004 · 声明复用与预跑环境选项
 
@@ -421,14 +418,9 @@ Registry.all 在共同列表出口过滤关闭的 Execute，ids、实际工具�
 尾段：`  limits?: ExecutionLimits ⏎   /** Observes decoded tool input immediately before tool execution. */`
 
 职责：把环境复用和独立预跑作为一次执行的显式选择。
-
 机制：ResolvedExecutionLimits携带日志预算；ExecuteOptions增加复用/快照环境与宿主waitForTimeout能力。宿主计时器可排除人类等待，库仍拥有唯一根执行和期限竞争。 ExecuteOptions另提供本次sleep效果，探针可省略真实等待而不改变执行期限。
-
 必要性：宿主需要选择旧词法状态、安全预跑和计时来源；不能在库里引入Session/审批概念，也不能在宿主再包第二套相互竞争的超时。
-
 不做会怎样：缺少环境字段会失去Notebook状态或安全预跑；缺少计时能力入口，运行中question和审批仍会消耗固定预算。
-
-配套修改：H046、H100。
 
 #### H005 · 在成功结果中声明未观察失败
 
@@ -437,14 +429,9 @@ Registry.all 在共同列表出口过滤关闭的 Execute，ids、实际工具�
 尾段：`}) ⏎ /** Successful execution after the result has crossed the plain-data boundary. */`
 
 职责：让脚本成功与异步子任务的失败事实同时表达。
-
 机制：Success schema 增加可选 unobservedFailure，字段只在根清理后发现未观察失败时给出。
-
 必要性：宿主需要一个真实结果字段决定是否附提醒，不能把所有 child error 都称作未处理。
-
 不做会怎样：成功结果合同无法携带这项事实，宿主只能遗漏提醒或自行猜测。
-
-配套修改：H046、H100。
 
 #### H006 · 校验日志预算
 
@@ -453,14 +440,9 @@ Registry.all 在共同列表出口过滤关闭的 Execute，ids、实际工具�
 尾段：` ⏎ /** Executes one Effect-native CodeMode program without constructing a reusable runtime. */`
 
 职责：让 maxLogBytes 与现有执行限额共用合法值检查。
-
 机制：resolveExecutionLimits 调用 validateLimit，允许零预算，保留未设置为 undefined。 timeoutMs复用validateLimit的上限参数，限定到Effect真实支持的2147483647毫秒；其它限额仍保留安全整数范围。
-
 必要性：日志限制需要在进入执行器前完成数值校验，零值也应保留。
-
 不做会怎样：只声明字段而不解析，执行器拿不到已校验的日志预算，追加限额无法按请求工作。 超过32位的期限会因底层不注册timer而悄悄失去超时约束。
-
-配套修改：H003、H045。
 
 #### H007 · 把宿主优先级交给当前目录
 
@@ -469,14 +451,9 @@ Registry.all 在共同列表出口过滤关闭的 Execute，ids、实际工具�
 尾段：`  return { ⏎     catalog: () => prepared.catalog,`
 
 职责：为每次创建的 CodeMode runtime 计算正确的内联工具选择。
-
 机制：ToolRuntime.prepare 增收 options.discovery?.priority，仍以这次 tools 和预算构建目录。
-
 必要性：优先级必须作用于当前可用工具，不能跨执行缓存旧能力。
-
 不做会怎样：公共选项虽存在，目录仍按原规则选择；宿主标记的原生工具不会获得本次优先权。
-
-配套修改：H064、H100。
 
 #### H008 · 将合格 JSON 文本转为沙箱数据
 
@@ -485,591 +462,393 @@ Registry.all 在共同列表出口过滤关闭的 Execute，ids、实际工具�
 尾段：`    throw error ⏎   } ⏎ }`
 
 职责：提供宿主明确调用的无 schema 文本投影入口。
-
 机制：fromJsonText 只接收解析后为对象或数组的 JSON；数值溢出、JSON 语法错误及 copyIn 的 InvalidDataValue 返回原文本，其他异常继续抛出；成功值登记原文。
-
 必要性：复用既有深度、危险键和普通数据边界，既让无类型 JSON 可组合，又保留 String(value) 的原文本。
-
 不做会怎样：合格 JSON 仍只是一段字符串，脚本需自行解析；若跳过 copyIn 或吞掉全部错误，会扩大可表示数据范围或掩盖内部错误。
 
-配套修改：H048、H083、H100。
-
-### packages/codemode/src/input-forms.ts：确定性输入简写
-
-源文件 SHA-256：`e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`（基线不存在此文件）
-候选 SHA-256：`7b38c0cb7fcedee90ec43d173cff76396f0c3ba56244a055f3b14b9fa6af7eca`
-
-#### H009 · 从真实编码合同派生单值简写
-
-差异：`@@ -0,0 +1,50 @@`；SHA-256：`49898e7f2f6507c0c21a603c6b20ed45ea5633921f54e4bdcb51b755f6aef258`
-首段：`import { Schema, SchemaAST } from "effect" ⏎ `
-尾段：`  return matches(value) ? { [forms.key]: value } : value ⏎ }`
-
-职责：只把语义明确的原始值包装进对象合同的单个标量字段。
-
-机制：读取 Schema.toEncoded 的 AST；对象须无索引签名和符号字段，选择唯一必填字段，或全可选对象的唯一字段。标量 union 逐项检查，undefined 原样通过；normalizeInput 按类型包装 false、0、null，不运行 decoder。 字段自己的 encoded 类型保留在 scalar 中，数字字符串先按 string 匹配，转换仍留给真实 decoder。
-
-必要性：参数形式由真实合同决定，转换、default 和 refinement 留给原 decoder 一次执行。
-
-不做会怎样：没有这一层，合法单值简写仍被对象 decoder 拒绝；猜字段或反向拆任意单键对象会改变真实输入合同。本文件没有标量合同的反向拆包。
-
-### packages/codemode/src/interpreter/model.ts：词法值模型
+### packages/codemode/src/interpreter/model.ts
 
 源文件 SHA-256：`985fbdb7c4ebc86a877e5fb45ca34acf7914ad1f407e3637601e80bf183e6628`
-候选 SHA-256：`6e61d2f1827f62eb7b5ba053dbf6220ed10bc16c504677401f64cd3c1360b807`
+候选 SHA-256：`fb3d046a538ea0183d0d16f23dd53305fd2214b2edd6dfad9ae3cbc79e6ea771`
 
-#### H010 · 保存两个词法根
+#### H009 · 保存两个词法根
 
 差异：`@@ -28,6 +28,19 @@ export type Binding = {`；SHA-256：`79e5550464b0483e79155146fc45ae15244840f8a2e1c8b2b5d4cdd194cb40bf`
 首段：`  initialized?: boolean ⏎ }`
 尾段：`  | { kind: "none" } ⏎   | { kind: "value"; value: unknown }`
 
 职责：Environment 只持有内建根和用户绑定根。
-
 机制：类内 roots 含 globals、bindings 两个 Map，解释器通过静态 scopes 取回同一组引用。
-
 必要性：后续单元的闭包需要继续指向原 Binding；当前能力则在执行入口刷新 globals。
-
 不做会怎样：每格重建词法根会丢失变量和闭包；若连旧执行器一起存下，则会保留上一轮权限与取消状态。
 
-配套修改：H021、H022、H044。
-
-#### H011 · 保存函数的 async 身份
+#### H010 · 保存函数的 async 身份
 
 差异：`@@ -45,6 +58,8 @@ export class CodeModeFunction {`；SHA-256：`fe1151573e4bfddf8b826b3ee70337ccb8c43eb59f19768e6177d5931845640c`
 首段：`    readonly parameters: ReadonlyArray<AstNode>, ⏎     readonly body: AstNode,`
-尾段：`    readonly async = false, ⏎   ) {} ⏎ }`
+尾段：`    readonly async = false, ⏎   ) {} ⏎ } ⏎ `
 
 职责：让所有函数调用入口知道函数是否应返回 Promise。
-
 机制：CodeModeFunction 构造器增加默认 false 的 async 字段，创建函数值时由 AST 填入。
-
 必要性：普通调用和集合回调都要依据同一函数值作决定。
-
 不做会怎样：async 与同步函数在值模型里无法区分，统一调用入口无法正确保持两种返回语义。
 
-配套修改：H024、H036。
-
-#### H012 · 为可持久化 sleep 别名提供身份
+#### H011 · 为可持久化 sleep 别名提供身份
 
 差异：`@@ -86,7 +101,8 @@ export class GlobalNamespace {`；SHA-256：`5f20944d498df0d407684e29770bd0423961aa36899d4ba84dc5fdd3502da051`
-首段：`export class GlobalMethodReference { ⏎   constructor(`
+首段：` ⏎ export class GlobalMethodReference {`
 尾段：`    readonly namespace: GlobalNamespaceName | "Number" | "String" | "$builtin", ⏎     readonly name: string, ⏎   ) {} ⏎ }`
 
 职责：把 sleep 表示成解释器识别的内建引用。
-
 机制：GlobalMethodReference 的 namespace 增加私有 $builtin；引用只存名字，不捕获执行上下文。
-
 必要性：保存到环境的 sleep 别名需要在调用时绑定当前根 Scope。
-
 不做会怎样：若用捕获旧执行器的宿主回调保存别名，后续单元会关联旧取消状态；这里提供的身份由 H032/H033 调度。
 
-配套修改：H021、H032、H033。
+#### H012 · 同步可调用语法诊断
 
-#### H013 · 同步可调用语法诊断
-
-差异：`@@ -121,8 +137,9 @@ export type DiagnosticKind =`；SHA-256：`8108699ad79f71fbccb805ef002410d15619b8f200c924a0050625f131b28264`
-首段：`export const OptionalShortCircuit: unique symbol = Symbol("codemode.optional-short-circuit") ⏎ `
+差异：`@@ -121,8 +137,9 @@ export type DiagnosticKind =`；SHA-256：`41e214e614966a57d4d771771943e377d55b84364cc9a111cd5d7b7d6bca3401`
+首段：` ⏎ export const OptionalShortCircuit: unique symbol = Symbol("codemode.optional-short-circuit")`
 尾段：`export class InterpreterRuntimeError extends Error { ⏎   readonly node?: AstNode`
 
 职责：共享诊断文案准确描述解释器已实现的语言面。
-
 机制：把then/catch禁用提示改为共享callback及返回Promise采用语义，其余能力清单不变。
-
 必要性：模型应按真实可用API修复调用，不能被旧错误说明诱导改写本来合法的链式调用。
-
 不做会怎样：普通语法错误会附带错误的Promise限制，造成不必要的重试。
 
-### packages/codemode/src/interpreter/runtime.ts：解释器执行与生命周期
+### packages/codemode/src/interpreter/runtime.ts
 
 源文件 SHA-256：`0a8d2830a207aa07405da2d35a11433b2e97be642a07e967f7cbc0e45471882a`
-候选 SHA-256：`dee800fee149a1c8ab424d57c28365f8f12c11de92de7c52c33bd255b2bf81e9`
+候选 SHA-256：`d634dcc0f1dc09ba44139368eb7a1cf77a76d3bc4e3d44b65691c267bc7a1a85`
 
-#### H014 · 接入根 Scope 与原文元数据
+#### H013 · 接入根 Scope 与原文元数据
 
-差异：`@@ -1,5 +1,7 @@`；SHA-256：`f46ccba278d71c3889c699123ccfda540fef929ed6dc59242e785f243be7c56a`
-首段：`import { parse } from "acorn" ⏎ import { rawText, withRawText } from "../raw-text.js"`
+差异：`@@ -1,5 +1,6 @@`；SHA-256：`c3a30a25a7cc717b71329c1d1d91de332b2ce49bf0c6616b0c3e3f5b55afb2e4`
+首段：`import { parse } from "acorn" ⏎ // Scope 让全部 Promise 共用一次执行寿命，不能把清理责任放回单个观察者。`
 尾段：`import { ⏎   copyIn,`
 
 职责：为根生命周期和环境快照提供所需依赖。
-
 机制：导入 Scope 替换原解释器 Semaphore，并导入 rawText/withRawText。
-
 必要性：这些导入归 H020、H023、H046 的实现使用，八许可调度已转交 ToolRuntime。
-
 不做会怎样：本 hunk 没有独立行为；只删导入会造成对应实现的符号缺失。注释仅解释归属。
 
-配套修改：H020、H023、H046、H067、H070。
+#### H014 · 接入词法环境类型
 
-#### H015 · 接入词法环境类型
-
-差异：`@@ -25,6 +27,8 @@ import {`；SHA-256：`aa32145bc83bd66594f38a1aa5940c051b66d5e0968e1d5295f3fcd9165b9190`
+差异：`@@ -25,6 +26,8 @@ import {`；SHA-256：`e19775d2c8f0e2af09ae55d8a38a112a6229cfa68659dfe7cd4ffd81392387de`
 首段：`  type AstNode, ⏎   asNode,`
 尾段：`  CoercionFunction, ⏎   ComputedValue,`
 
 职责：为解释器构造和快照使用共用 Environment 模型。
-
 机制：从 model 导入 Environment。
-
-必要性：解释器构造、环境复制和执行入口需要引用 H010 的同一个 Environment，避免各自声明不同状态结构。
-
+必要性：解释器构造、环境复制和执行入口需要引用 H009 的同一个 Environment，避免各自声明不同状态结构。
 不做会怎样：没有独立运行时修改；单独去掉导入会使这些环境实现无法解析该类型和值。
 
-配套修改：H020、H021、H046。
+#### H015 · 移除解释器并发常量依赖
 
-#### H016 · 移除解释器并发常量依赖
-
-差异：`@@ -67,7 +71,8 @@ import {`；SHA-256：`e92c69ed2d5c4154ff0105d79dbd5bf322181eb6ab0aac56fc079d02e6050b98`
+差异：`@@ -67,7 +70,8 @@ import {`；SHA-256：`4763407b62b304a1f26d714295f3a40bf8a24424271fa9f9096d2f8e00901cf4`
 首段：`  numberStatics, ⏎ } from "../stdlib/number.js"`
 尾段：`  escapeRegexHint, ⏎   invokeRegExpMethod,`
 
 职责：让解释器只导入 Promise 方法集合。
-
 机制：promiseStatics 导入保留，TOOL_CALL_CONCURRENCY 导入移到 ToolRuntime。
-
-必要性：并发入口归 H067/H070，Promise 观察和 async 函数不占工具许可。
-
+必要性：并发入口归 H066/H069，Promise 观察和 async 函数不占工具许可。
 不做会怎样：仅保留一个不用的 import 不会改变执行行为；实际并发差异来自许可入口迁移。
 
-配套修改：H023、H067、H070。
+#### H016 · 接入沙箱值的原文来源
+
+差异：`@@ -105,6 +109,9 @@ import {`；SHA-256：`7f2a5ffeeafcce81f23cdf05938b9e67f507670cca709078d0e9f88f483549bb`
+首段：`  isSandboxValue, ⏎   SandboxDate,`
+尾段：`  SandboxRegExp, ⏎   SandboxSet,`
+
+职责：解释器从沙箱值的共同元数据入口读取和保存原文。
+机制：rawText和withRawText随其他值类型从values导入；该弱引用来源同copyIn/copyOut及String转换共用。
+必要性：环境快照与HTTP文本投影必须保存同一原文，不应在解释器再维护一份字典。
+不做会怎样：去掉接线后，预跑副本或响应对象会丢失原文；独立重复字典则无法随同一个业务值保持身份。
 
 #### H017 · 在解析诊断中标出可靠的源码位置
 
-差异：`@@ -113,7 +118,9 @@ import {`；SHA-256：`72fcfb7e969d36b16d06187076f4cf4274f42ce5592d61c6c12b15d8e41e8d63`
+差异：`@@ -113,7 +120,9 @@ import {`；SHA-256：`5996ff41f1dad7dc485feeecb3a944e94aade4d476fd642a420e111b7b515b5d`
 首段：`} from "../values.js" ⏎ `
 尾段：`    compilerOptions: { ⏎       target: ScriptTarget.ESNext,`
 
 职责：解析入口负责把TypeScript原始诊断映射回用户脚本。
-
 机制：保留包装前缀长度，只在diagnostic.start落入用户源码半开区间时取原SourceFile位置，扣掉包装行并按UTF-16列号显示。
-
 必要性：生成JS的AST位置不能当作原始TS位置；已有parse diagnostic已有准确来源，不需要增加sourcemap。
-
 不做会怎样：常见缺表达式错误仍没有可定位的源码行列；若不排除wrapper/EOF，可能给出误导位置。
 
 #### H018 · 在解析诊断中标出可靠的源码位置
 
-差异：`@@ -123,8 +130,17 @@ const parseProgram = (code: string): ProgramNode => {`；SHA-256：`48d4d8433fb58eb6cecccc12aac81d2676d0bce2142748c04243fbe7e09b362a`
+差异：`@@ -123,8 +132,17 @@ const parseProgram = (code: string): ProgramNode => {`；SHA-256：`e98fe365ca9d6932ba02c786dc6a450ad503bbcd585a668e7d11102fc8657c00`
 首段：`  const diagnostic = transpiled.diagnostics?.find((item) => item.category === DiagnosticCategory.Error) ⏎ `
 尾段：`      "ParseError", ⏎     )`
 
 职责：解析入口负责把TypeScript原始诊断映射回用户脚本。
-
 机制：保留包装前缀长度，只在diagnostic.start落入用户源码半开区间时取原SourceFile位置，扣掉包装行并按UTF-16列号显示。
-
 必要性：生成JS的AST位置不能当作原始TS位置；已有parse diagnostic已有准确来源，不需要增加sourcemap。
-
 不做会怎样：常见缺表达式错误仍没有可定位的源码行列；若不排除wrapper/EOF，可能给出误导位置。
 
 #### H019 · 更新错误归一化注释
 
-差异：`@@ -219,7 +235,7 @@ const normalizeError = (error: unknown): Diagnostic => {`；SHA-256：`52117caa7742b54ec51513182decb9563433380dce74d4b2e29ee8f65cacd770`
+差异：`@@ -219,7 +237,7 @@ const normalizeError = (error: unknown): Diagnostic => {`；SHA-256：`a3dc84a0abc9983aab9b7ef49d962f69bc1dde1624ce3345558d8141f6c8cd90`
 首段：`  } ⏎ } ⏎  ⏎ // catch 与 allSettled 共享普通失败归一化；宿主中断不转换为脚本数据。`
 尾段：`  if (thrown instanceof ProgramThrow) return thrown.value ⏎   if (thrown instanceof InterpreterRuntimeError) return createErrorValue(thrown.errorName, thrown.message)`
 
 职责：使 caughtErrorValue 的说明对应当前 Promise 语义。
-
 机制：注释改为 catch/allSettled 的普通失败归一化，删去 race losers 的旧描述。
-
 必要性：race 不再主动中断败方，注释应与 H036 保持一致。
-
 不做会怎样：只保留旧注释不会改变执行结果，但会把维护者引向已移除的 race 取消机制。
-
-配套修改：H036。
 
 #### H020 · 复制一次预跑环境
 
-差异：`@@ -241,6 +257,53 @@ const isRuntimeReference = (value: unknown): boolean =>`；SHA-256：`a05aa50034b55a5d2d3b96018a950b5f13d5d8a62d18d06a6d4ba2d8e2b98f64`
+差异：`@@ -241,6 +259,53 @@ const isRuntimeReference = (value: unknown): boolean =>`；SHA-256：`09e6f08fb35e8d5443581430afa76d8b3e6ec896bf1e2bf987fd652796ba2953`
 首段：`  value instanceof ErrorConstructorReference || ⏎   isSandboxValue(value)`
 尾段：`const containsRuntimeReference = (value: unknown, seen = new Set<object>()): boolean => { ⏎   if (isRuntimeReference(value)) return true ⏎   if (value === null || typeof value !== "object") return false`
 
 职责：让探针读取旧变量、闭包和对象关系，同时隔离它造成的修改。
-
 机制：snapshotEnvironment 只有一个 copy 和身份 memo。Map 键值、Set 成员递归复制，普通实例保留原型并按自身数据描述符复制；目标先入 memo，保留循环和别名。RegExp 重建 source/flags，再复制自身字段；共同出口转交原文 WeakMap 元数据。遇到宿主函数、URL/URLSearchParams 或访问器就终止本次预跑。 注释说明沙箱函数是可复制的 AST/作用域对象，并区分不可重建的原生函数。
-
 必要性：闭包捕获的 Map/Binding 与容器数据须在同一复制关系里重绑；描述符复制避免调用 getter，并保留非枚举错误品牌和 text。一个通用 copy 核心从整个环境根递归，身份 memo 同时保留别名和循环。
-
 不做会怎样：旧空环境探针看不到保存的 helper；直接使用真实环境则会提前改变私有计数和对象。复制失败只使本次探针停止，已收集调用及真实权限检查仍由宿主继续处理。
-
-配套修改：H046、H100。
 
 #### H021 · 分开执行共享状态与函数局部栈
 
-差异：`@@ -599,36 +662,57 @@ const collectPatternNames = (pattern: AstNode, out: Array<string> = []): Array<s`；SHA-256：`d29ca1941c2b0dfd6d4fee4f6c39866775334bb47c493045c838ea0f18eff948`
+差异：`@@ -599,36 +664,57 @@ const collectPatternNames = (pattern: AstNode, out: Array<string> = []): Array<s`；SHA-256：`5fe9bb90713c6121c517daa9c04218ffb047be133333256528599da8b008dfe8`
 首段：`  return out ⏎ }`
 尾段：`    globalScope.set("undefined", { mutable: false, value: undefined }) ⏎     globalScope.set("Object", { mutable: false, value: new GlobalNamespace("Object") })`
 
 职责：建立一次执行共有的工具、日志、根 Scope 和 Promise 清单，同时保留每个 Interpreter 的局部词法栈。
-
 机制：新增 Execution；Interpreter.make 从 Environment 取得两个根，清空并重新播种 globals，注入当前 invokeTool/toolKeys/log/scope/promises，sleep 存为 builtin 引用；declared 只记录本格顶层声明。 本次sleep效果也保存在Execution，默认Effect.sleep，探针可单独跳过等待；旧别名不会捕获上一轮计时策略。
-
 必要性：并发函数共享能力和外层 Binding，但不能互相替换参数与局部作用域。globals 复用原 Map 才能刷新旧闭包看到的能力。
-
 不做会怎样：沿用单实例 scopes 切换会让交错 async 回调串用局部状态；重建或保留旧 globals 又会分别破坏闭包引用或沿用旧能力。
-
-配套修改：H022、H036、H044。
 
 #### H022 · 在当前执行绑定 fetch 响应和用户根
 
-差异：`@@ -664,21 +748,28 @@ class Interpreter<R> {`；SHA-256：`c928c7ad0a55ef002d7a7cecc373daf78fd8920f8cc169cc2c29922665733109`
+差异：`@@ -664,21 +750,28 @@ class Interpreter<R> {`；SHA-256：`a4fcb3ad2570f042dd2ced9a05c32e8f8d7ffcb0c9364bf96f111ec8f83d05ab`
 首段：`    if (hasFetch) { ⏎       globalScope.set("fetch", { mutable: false, value: new ToolReference(["$codemode", "fetch"]) })`
 尾段：`      self.hoistFunctions(program.body) ⏎       let value: unknown = undefined`
 
 职责：让 fetch 响应方法与普通函数共用本次能力，并保留用户顶层状态。
-
 机制：响应工厂放入 execution.fetchResponse；make 返回以 globals、roots.bindings 为栈的 Interpreter。run 不再临时 push 一个执行结束即丢弃的用户根。
-
 必要性：fetch 可见性和响应方法必须属于本次执行；用户变量则需跨格保留。
-
 不做会怎样：旧临时 module scope 会丢失顶层状态，旧实例字段也不适合并发函数共享。工厂表达式的换行只是排版，不增加功能。
-
-配套修改：H021、H036。
 
 #### H023 · 统一 Promise 生产、观察和根清理归属
 
-差异：`@@ -707,71 +798,60 @@ class Interpreter<R> {`；SHA-256：`2b19df33f17f289a49c025f203b60393d5a9b567b6e9a03cdbe135bbf6c26a47`
+差异：`@@ -707,71 +800,60 @@ class Interpreter<R> {`；SHA-256：`211c83641ec49b7931e9044a8f20f8c4206f6772c5c2187fc6d3b6c97d9553bb`
 首段：`      // without an explicit await, exactly as in JS. ⏎       if (value instanceof SandboxPromise) value = yield* self.settlePromise(value)`
 尾段：` ⏎   private evaluateStatement(node: AstNode): Effect.Effect<StatementResult, unknown, R> {`
 
 职责：工具、async 函数与组合器都通过同一创建入口登记到根 Scope，观察者只读结果。
-
 机制：createToolCallPromise 复用 execution.invokeTool；createPromise 用 startImmediately 的 forkIn，并将 fork 和 trackPromise 放入不可中断区。observePromise 等到 Exit 到达才标 observed；settlePromise flatten Exit。删去 pendingSettlements、局部许可和 raceInterrupted 特判，run 也不再自行清理一份 pending 集合。 trackPromise 也登记只有 Exit 的即时拒绝，供根收尾判断其是否未观察。 当前执行保存宿主sleep能力，默认Effect.sleep；保留的别名仍在当前根创建Promise。 settlePromise同时接纳普通值与SandboxPromise，await、async返回值和链式handler共用采用规则。
-
 必要性：同步启动时立刻收到取消，也必须先完成根登记；取消一次 await 或 race 观察不能取消共享生产者。清理只由根 Scope 拥有。
-
 不做会怎样：旧登记窗口可让 Execute 在真实 finalizer 完成前返回；旧 pending 集合和 race 特判会把观察取消与生产者寿命混在一起。遗漏 observed 的时机调整还会吞掉取消等待之后的未观察失败。
-
-配套修改：H036、H046、H080。
 
 #### H024 · 把 AST async 标志写入函数值
 
-差异：`@@ -857,6 +937,8 @@ class Interpreter<R> {`；SHA-256：`138ae101647824f079422de9823e9a07b03aead051691ce6c4022f04c67f8b0a`
-首段：``      getArray(node, "params").map((parameter, index) => asNode(parameter, `params[${index}]`)), ⏎       getNode(node, "body"),``
-尾段：`      node.async === true, ⏎     ) ⏎   }`
+差异：`@@ -857,6 +939,8 @@ class Interpreter<R> {`；SHA-256：`a1278c1287e82499fd8e0f2cf76e03316ff4c229d759ead8d26c773eb3ce2c0e`
+首段：`      getArray(node, "params").map((parameter, index) => asNode(parameter, `params[${index}]`)), ⏎       getNode(node, "body"),`
+尾段：`      node.async === true, ⏎     ) ⏎   } ⏎ `
 
 职责：把声明和表达式中的 async 身份交给共用调用入口。
-
 机制：makeFunction 构造 CodeModeFunction 时传 node.async === true。
-
-必要性：H011 的字段需要真实语法来源，所有调用者才能使用 H036 的 Promise 分支。
-
+必要性：H010 的字段需要真实语法来源，所有调用者才能使用 H036 的 Promise 分支。
 不做会怎样：字段保持默认 false 时，源码写了 async 的函数仍按同步函数运行。
-
-配套修改：H011、H036。
 
 #### H025 · 开放已有容器的 for-await 入口
 
-差异：`@@ -1065,11 +1147,8 @@ class Interpreter<R> {`；SHA-256：`90feafa097637033fef2fa717a15cdabac17b69009351bed18835307943b815c`
+差异：`@@ -1065,11 +1149,8 @@ class Interpreter<R> {`；SHA-256：`2c07835b9dec7fab12e1a2a2cc63ec4723bac079b82cf2ebf448cbafa8204297`
 首段：`    }).pipe(Effect.ensuring(Effect.sync(() => self.popScope()))) ⏎   } ⏎  ⏎   // 同一循环路径接纳同步与异步迭代，异步 next 与关闭沿既有 await 调度让出。`
 尾段：`  private evaluateForOfStatement(node: AstNode): Effect.Effect<StatementResult, unknown, R> { ⏎     const self = this ⏎     return Effect.gen(function* () { ⏎       const left = getNode(node, "left")`
 
 职责：允许 for await...of 继续进入现有迭代代码。
-
 机制：删除入口处一概抛出的 unsupported 错误；具体 next、产值等待和退出顺序由 H026/H027 处理。
-
 必要性：现有 Array/string/Map/Set 迭代入口可复用，无需新增独立异步迭代协议。
-
 不做会怎样：入口仍会在读取已有容器前拒绝 for-await，后续实现无法触达。
-
-配套修改：H026、H027。
 
 #### H026 · 按异步顺序取值并清理循环绑定
 
-差异：`@@ -1100,15 +1179,26 @@ class Interpreter<R> {`；SHA-256：`d3cb1a24f164839e956565c2750379747b8612eacea95c2ccf66bf3f77feffcb`
+差异：`@@ -1100,15 +1181,26 @@ class Interpreter<R> {`；SHA-256：`6d6df09bf3aae170de04a8239ad85b157c01db4ca423a2551e9e48b165b8fab7`
 首段：`        throw new InterpreterRuntimeError("Unsupported for...of binding.", left) ⏎       }`
 尾段：`          Effect.onError(() => (getBoolean(node, "await") ? Effect.yieldNow : Effect.void)), ⏎           Effect.ensuring( ⏎             Effect.sync(() => { ⏎               if (declaration) self.popScope()`
 
 职责：在已有同步容器上实现 for-await 的 next、值结算和异常收尾。
-
 机制：手动取得 iterator；每次 next（包括 done）先 yieldNow；仅对产出的 SandboxPromise settle。声明绑定和循环体放进同一 ensuring，异常路径对 for-await 再让出一次，最后释放循环帧。
-
 必要性：普通值与空迭代也有异步观察顺序，解构默认值失败也必须释放已创建的迭代作用域。
-
 不做会怎样：只等待 Promise 项会漏掉普通值和终止时的调度边界；绑定发生在 ensuring 外则可能留下失败迭代帧。Map 产出的键值数组不递归等待。
-
-配套修改：H025、H027。
 
 #### H027 · 补齐 for-await 的 break/return 顺序
 
-差异：`@@ -1116,6 +1206,8 @@ class Interpreter<R> {`；SHA-256：`ce04d07fef46040e6967d6bd2c160673cc83bec0ec14aed1f1bd4b0fa54a73d8`
+差异：`@@ -1116,6 +1208,8 @@ class Interpreter<R> {`；SHA-256：`459836b4a53a32b907e7a5bd4cec7a3a8bfe9d263d8d644decba2f21fad09527`
 首段：`          ), ⏎         ) ⏎  ⏎         // break 与 return 也会关闭异步迭代，须让调用者先于后续语句获得调度。`
 尾段：`        if (getBoolean(node, "await") && (result.kind === "return" || result.kind === "break")) yield* Effect.yieldNow ⏎         if (result.kind === "return") { ⏎           return result ⏎         }`
 
 职责：让正常提前退出也经过异步关闭的让出点。
-
 机制：在处理 return/break 的 StatementResult 前，仅对 await 循环 yieldNow。
-
 必要性：H026 的异常分支之外，还要覆盖 break 和 return。支持的容器没有自定义 return 方法，此处保持它们的关闭调度边界。
-
 不做会怎样：提前退出会少一次异步让出，后续语句与调用者的先后顺序偏离该循环语义；普通 for-of 保持原顺序。
-
-配套修改：H026。
 
 #### H028 · 从执行共享状态枚举工具
 
-差异：`@@ -1144,7 +1236,8 @@ class Interpreter<R> {`；SHA-256：`12bc636d50f34c1cfc637f56cdf3a2c4faece42657d985bafc61d5eae2591615`
+差异：`@@ -1144,7 +1238,8 @@ class Interpreter<R> {`；SHA-256：`6dfe506652fd2876d7ab17e7c6232a069261d189636911470acc282800fd51fd`
 首段：`  // Returns undefined for everything else so callers can raise a contextual error. ⏎   private enumerableKeys(value: unknown): Array<string> | undefined {`
 尾段：`    if (Array.isArray(value)) { ⏎       return Object.keys(value)`
 
 职责：让各函数帧看到同一份当前工具目录。
-
 机制：enumerableKeys 的 ToolReference 分支改用 this.execution.toolKeys。
-
 必要性：配合 H021 的局部帧拆分，工具能力仍由同一个宿主入口决定。
-
 不做会怎样：旧实例字段已移除，保留旧访问会让工具枚举引用不存在的字段；这里沿共享 Execution 读取目录，枚举规则保持原样。
-
-配套修改：H021。
 
 #### H029 · 让 await 普通值也交出执行机会
 
-差异：`@@ -1447,11 +1540,13 @@ class Interpreter<R> {`；SHA-256：`52c5962864ff0cb236c598565bc3f1630afc4658b3a697017320535d6d262599`
+差异：`@@ -1447,11 +1542,13 @@ class Interpreter<R> {`；SHA-256：`370d9588a1adb97119f0ae3fee97e500950632a3a9d313dd610848d16d71ce91`
 首段：`      case "UpdateExpression": ⏎         return this.evaluateUpdateExpression(node)`
 尾段：`      } ⏎       case "NewExpression":`
 
 职责：保持 async 函数首次 await 后的调度顺序。
-
 机制：先求参数表达式，再 yieldNow，之后结算 SandboxPromise 或返回普通值。
-
 必要性：await 1 和 await 已结算 Promise 也应让调用者继续同步语句。
-
 不做会怎样：直接透传普通值会让 async 后半段抢先运行；只有工具挂起的场景无法覆盖这个顺序问题。
 
 #### H030 · 只求值一次被调用成员
 
-差异：`@@ -1897,7 +1992,12 @@ class Interpreter<R> {`；SHA-256：`827cfb79c2c416122e56e381879d4e03b7db7395d7a63b25bd3bcf8db8be46cb`
-首段：`    const self = this ⏎     return Effect.gen(function* () { ⏎       // 形状诊断复用这次求值，不能为解释错误再次执行 receiver 或 computed key。`
-尾段：`      if (callable === OptionalShortCircuit) return OptionalShortCircuit ⏎       if ((callable === null || callable === undefined) && node.optional === true) return OptionalShortCircuit`
+差异：`@@ -1897,7 +1994,12 @@ class Interpreter<R> {`；SHA-256：`b8471ac3929739b2e805fe1e241347476d8411e82e5254f73ea25167ca438561`
+首段：` ⏎     const self = this ⏎     return Effect.gen(function* () { ⏎       // 形状诊断复用这次求值，不能为解释错误再次执行 receiver 或 computed key。`
+尾段：`      if ((callable === null || callable === undefined) && node.optional === true) return OptionalShortCircuit ⏎ `
 
 职责：为调用诊断保留 receiver 和 computed key 的首次求值结果。
-
 机制：MemberExpression 先调用 getMemberReference，再把同一 reference 作为 Effect.succeed 传给 readMember；其他 callee 仍走 evaluateExpression，可选链短路位置保留。
-
 必要性：H033 需要知道接收者形状，但诊断不得再次执行带副作用的表达式。
-
 不做会怎样：若只在报错时重新求值 receiver/key，会制造额外副作用；若不保留引用，则无法准确说明是哪个接收者不可调用。
-
-配套修改：H033、H043。
 
 #### H031 · 把同步 search 接到当前执行
 
-差异：`@@ -1905,9 +2005,9 @@ class Interpreter<R> {`；SHA-256：`f6641922ca7f8d4cce6db66f86a1c87486021b9150b1cccd07b8c108526ddd27`
-首段：`      if (callable instanceof ToolReference) { ⏎         if (callable.path.length === 0) throw new InterpreterRuntimeError("The tools root is not callable.", callee)`
+差异：`@@ -1905,9 +2007,9 @@ class Interpreter<R> {`；SHA-256：`2baa82fcd6545e087ff75a9c5cd7ae0a30c3065f538cc11fbb539d24dbbf3e28`
+首段：` ⏎       if (callable instanceof ToolReference) {`
 尾段：`        return yield* self.createToolCallPromise(callable.path, args) ⏎       }`
 
 职责：维持 search 的同步值返回，同时使用共享调用入口。
-
 机制：ToolReference 的 $codemode.search 分支改为 execution.invokeTool；其他工具仍创建 Promise。
-
 必要性：函数局部帧拆分后，search 仍要经过同一执行的验证、计数和 hooks，保持同步发现结果。
-
 不做会怎样：使用移除的实例字段会断开调用；把 search 改成普通异步工具则会改变现有发现用法。
-
-配套修改：H021、H060、H070。
 
 #### H032 · 把 builtin 别名分发到当前 sleep
 
-差异：`@@ -1921,6 +2021,8 @@ class Interpreter<R> {`；SHA-256：`97d1b98e82ef4f52cf0bcb330e5acdf10511a5061af40bca56a1ae479f00cf99`
+差异：`@@ -1921,6 +2023,8 @@ class Interpreter<R> {`；SHA-256：`61f0bad659721c328bea5687df1af2efb71f69925ce73a08759004fff987a178`
 首段：`        return yield* self.invokeIntrinsic(callable, args, node) ⏎       }`
 尾段：`        if (callable.namespace === "Object" && args[0] instanceof ToolReference) { ⏎           return self.invokeObjectMethodOnTools(callable.name, args[0] as ToolReference, node)`
 
 职责：允许直接调用和跨格别名调用进入本次计时器创建入口。
-
 机制：GlobalMethodReference 的 $builtin 分支调用 invokeSleep，console/Object 等分支保留。
-
 必要性：身份引用本身不携带旧执行器，调用时才能关联当前 Scope。
-
 不做会怎样：存下的 sleep 引用没有执行分支，或被误当成其他全局方法；实际参数和计时规则由 H033 负责。
-
-配套修改：H012、H033。
 
 #### H033 · 提供形状诊断和受根管理的 sleep
 
-差异：`@@ -1937,10 +2039,33 @@ class Interpreter<R> {`；SHA-256：`63c7c9835e64d8d5086518e9778dfee61dab21518982a62b25a05a3ab2affc40`
+差异：`@@ -1937,10 +2041,33 @@ class Interpreter<R> {`；SHA-256：`3e8d90031475ba27c0567815dd041ec77e604014563924cbdd52b1227cf12b57`
 首段：`      if (callable instanceof ErrorConstructorReference) { ⏎         return createErrorValue(callable.name, args[0] === undefined ? "" : coerceToString(args[0]))`
 尾段：`  // namespace/tool names from the host tool tree - the discovery idiom a model reaches for ⏎   // first. Every other Object helper cannot produce data from a tool reference, so it fails`
 
 职责：本 hunk 连续修改两个独立入口：不可调用值的错误说明，以及 sleep 的执行。
-
 机制：诊断使用 H030 保存的 receiver，显示类型及最多八个、每个最多64字符的键名，不读取属性值。invokeSleep 仅接受 0 至 2147483647 的有限 number，经 createPromise(execution.sleep(ms)) 返回根 Scope 的 Promise，不占工具许可和计数。 实际等待由本次宿主能力提供，期限和参数检查保持独立。
-
 必要性：错误应说明对象形状而非笼统声称只有工具可调用；脚本等待要用已有可取消计时器并绑定当前执行。
-
 不做会怎样：对象误用 map 仍只能得到误导提示；没有 sleep 分支则无法等待。字符串、负数、无限值和超范围计时不能靠隐式转换进入 Effect timer。
-
-配套修改：H023、H030、H032、H043。
 
 #### H034 · 让所有函数帧写同一个日志出口
 
-差异：`@@ -1959,7 +2084,8 @@ class Interpreter<R> {`；SHA-256：`b1b858714709b4e515d638e0d09291fcc1df983881f750797ad86b6f2d139216`
+差异：`@@ -1959,7 +2086,8 @@ class Interpreter<R> {`；SHA-256：`d13e669cb98f8f7e26d1a09385a1b583322b363b07017780d42640ba3757641c`
 首段：`  private invokeConsole(name: string, args: Array<unknown>, node: AstNode): undefined { ⏎     if (!consoleMethods.has(name))`
-尾段：`    this.execution.log(publicErrorMessage(this.formatConsoleMessage(name, args, node))) ⏎     return undefined ⏎   }`
+尾段：`    this.execution.log(publicErrorMessage(this.formatConsoleMessage(name, args, node))) ⏎     return undefined ⏎   } ⏎ `
 
 职责：收集并限制整段执行的日志，而非每帧各存一份。
-
 机制：invokeConsole 保留方法白名单和原格式化流程，改调用 execution.log。
-
 必要性：H045 的 UTF-8 留存预算必须覆盖并发函数和集合回调产生的全部日志。
-
 不做会怎样：直接写局部 logs 会绕过共同预算或遗漏子函数日志。
-
-配套修改：H021、H045。
 
 #### H035 · 让组合器返回 Promise，并隔离函数局部帧
 
-差异：`@@ -2102,133 +2228,97 @@ class Interpreter<R> {`；SHA-256：`a530e3b0082f78306bb7f2ac62f1dc0054c4a5015f319c18cb3924be68962c35`
+差异：`@@ -2102,133 +2230,97 @@ class Interpreter<R> {`；SHA-256：`f9a101e524da2cf99885fa4747f92ed8c8b881c9e92eca9ea7aac14bd3440c3b`
 首段：`    }) ⏎   } ⏎  ⏎   // 组合器消费已有 Promise，而不是执行另一套工具调度；其返回值仍可继续组合。`
 尾段：`        } ⏎         for (const [index, parameter] of fn.parameters.entries()) {`
 
 职责：修正 all/allSettled/race 的观察语义，以及 async 函数的调用和返回语义。
-
 机制：resolve/reject 登记即时 Exit；其他组合器由 createPromise 启动。all 并发观察且结果保序，allSettled 并发收集普通拒绝并传播纯中断，race 竞争观察结果而不取消生产者，空 race 为 Effect.never。invokeFunction 新建局部 Interpreter 和参数 Map，共享 capturedScopes；async 的参数绑定、函数体及返回 Promise 采用均放在根生产者中。 函数保留原Effect.suspend延迟层次，在每次运行内分配独立帧；参数/body缩进沿共同基线，async返回值通过共享settlePromise。
-
 必要性：后一项失败或中断不能被前项挂起遮蔽，组合器要能嵌套；多个 async 回调的局部参数要隔离，而闭包外层 Binding 保持共享。
-
 不做会怎样：顺序观察会遮住后项失败；取消 race 败方会破坏后续 await；沿用一个可变 scopes 栈会串扰局部变量；在 Promise 外绑定默认参数会把 async 默认值错误变成同步抛出。
-
-配套修改：H023、H024、H029、H080。
-
-**1. 即时 Promise 与组合结果都保留 Promise 身份**
-
-resolve 对已有 SandboxPromise 原样返回，对普通值登记成功 Exit；reject 登记 ProgramThrow 的失败 Exit。all、allSettled、race 的输入检查和执行放在 createPromise 的生产者中，使组合器返回值可以继续 await、嵌套或交给另一组合器。即时拒绝也进入根清单，才能在无人观察时形成回执。
-
-**2. all 和 allSettled 并发观察，仍按输入保序**
-
-all 用 Effect.all 的无界观察，限制实际工具并发的仍是 ToolRuntime 八许可。allSettled 对普通失败调用 caughtErrorValue 生成 rejected 数据，对纯中断传播 cause。后一项失败或中断能及时结束观察，不必等一直挂起的前项。
-
-**3. race 只竞争观察**
-
-raceAll 竞争每个成员的 Exit，再 flatten 胜方结果；被结束的是败方观察，不是原 Promise 的生产者。空数组返回 Effect.never，等待根执行的取消或超时。删去旧败方 interrupt 循环和专用 interrupted 标记后，同一生产者仍可参加另一个 race 或再次 await。
-
-**4. 每次函数调用有独立局部帧**
-
-新 Interpreter 共用 execution，只复制 capturedScopes 的数组，并追加新的参数 Map；外层 Map/Binding 仍是原引用。参数先建立 TDZ 槽，再绑定默认值、rest 和函数体。async 把这整段执行与返回值采用放进 createPromise，同步函数直接返回 run，集合方法也不因此隐式 await 全部回调。
 
 #### H036 · 让组合器返回 Promise，并隔离函数局部帧
 
-差异：`@@ -2246,13 +2336,9 @@ class Interpreter<R> {`；SHA-256：`5a9c3239887e86e5d61827f2aba74c6c44f0624dda9e7c0a1f000f9bd928e0e6`
-首段：`        return yield* self.evaluateExpression(fn.body) ⏎       })`
-尾段：`      return fn.async ? this.createPromise(run.pipe(Effect.flatMap((value) => self.settlePromise(value)))) : run ⏎     }) ⏎   }`
+差异：`@@ -2246,13 +2338,9 @@ class Interpreter<R> {`；SHA-256：`9de1b74c7416e0c4254a95ddb08b66b659520553fdcc400bfefbd0dfa598f093`
+首段：` ⏎         return yield* self.evaluateExpression(fn.body)`
+尾段：`      return fn.async ? this.createPromise(run.pipe(Effect.flatMap((value) => self.settlePromise(value)))) : run ⏎     }) ⏎   } ⏎ `
 
 职责：修正 all/allSettled/race 的观察语义，以及 async 函数的调用和返回语义。
-
 机制：resolve/reject 登记即时 Exit；其他组合器由 createPromise 启动。all 并发观察且结果保序，allSettled 并发收集普通拒绝并传播纯中断，race 竞争观察结果而不取消生产者，空 race 为 Effect.never。invokeFunction 新建局部 Interpreter 和参数 Map，共享 capturedScopes；async 的参数绑定、函数体及返回 Promise 采用均放在根生产者中。
-
 必要性：后一项失败或中断不能被前项挂起遮蔽，组合器要能嵌套；多个 async 回调的局部参数要隔离，而闭包外层 Binding 保持共享。
-
 不做会怎样：顺序观察会遮住后项失败；取消 race 败方会破坏后续 await；沿用一个可变 scopes 栈会串扰局部变量；在 Promise 外绑定默认参数会把 async 默认值错误变成同步抛出。
 
-配套修改：H023、H024、H029、H080。
+#### H037 · 共用回调入口处理then、catch和finally
 
-**1. 即时 Promise 与组合结果都保留 Promise 身份**
-
-resolve 对已有 SandboxPromise 原样返回，对普通值登记成功 Exit；reject 登记 ProgramThrow 的失败 Exit。all、allSettled、race 的输入检查和执行放在 createPromise 的生产者中，使组合器返回值可以继续 await、嵌套或交给另一组合器。即时拒绝也进入根清单，才能在无人观察时形成回执。
-
-**2. all 和 allSettled 并发观察，仍按输入保序**
-
-all 用 Effect.all 的无界观察，限制实际工具并发的仍是 ToolRuntime 八许可。allSettled 对普通失败调用 caughtErrorValue 生成 rejected 数据，对纯中断传播 cause。后一项失败或中断能及时结束观察，不必等一直挂起的前项。
-
-**3. race 只竞争观察**
-
-raceAll 竞争每个成员的 Exit，再 flatten 胜方结果；被结束的是败方观察，不是原 Promise 的生产者。空数组返回 Effect.never，等待根执行的取消或超时。删去旧败方 interrupt 循环和专用 interrupted 标记后，同一生产者仍可参加另一个 race 或再次 await。
-
-**4. 每次函数调用有独立局部帧**
-
-新 Interpreter 共用 execution，只复制 capturedScopes 的数组，并追加新的参数 Map；外层 Map/Binding 仍是原引用。参数先建立 TDZ 槽，再绑定默认值、rest 和函数体。async 把这整段执行与返回值采用放进 createPromise，同步函数直接返回 run，集合方法也不因此隐式 await 全部回调。
-
-#### H037 · 在共同方法入口结算Promise链式回调
-
-差异：`@@ -2261,6 +2347,33 @@ class Interpreter<R> {`；SHA-256：`d8aaca0848753ab6cfd1cd1b5a8440b7b199c255fcd8a8097e2815feaab051cd`
+差异：`@@ -2261,6 +2349,39 @@ class Interpreter<R> {`；SHA-256：`3d93acf3b2c550119baad92b9613938d4af3621ba40735336447757f06cca54c`
 首段：`    args: Array<unknown>, ⏎     node: AstNode, ⏎   ): Effect.Effect<unknown, unknown, R> { ⏎     if (ref.receiver instanceof SandboxPromise) {`
 尾段：`      if ( ⏎         (ref.name === "replace" || ref.name === "replaceAll") &&`
 
-职责：解释器的方法调用owner把源结算交给handler，新Promise仍属于唯一根Scope。
-
-机制：先yield再observe源Exit，纯中断穿透；按then/catch选择handler，非函数传递原Exit，函数复用applyCollectionCallback。返回值交settlePromise，直接返回自身转为TypeError。
-
-必要性：现有工具Promise已可组合，链式调用只需同一观察与回调入口，不能再要求模型把catch改成手写try/catch。
-
-不做会怎样：自然批量catch/then仍被拒绝；若把中断交给handler，脚本可把用户取消伪装为成功；若不采用返回Promise则会把未结算值传下去。
+职责：方法调用入口负责观察源、调用handler和采用返回终态，新Promise仍属于唯一根Scope。
+机制：先observe源Exit，再yield延迟handler；纯宿主中断穿透。then/catch按源状态选handler，finally无参数执行后恢复源Exit；回调失败覆盖原终态。非函数透传，所有可调用handler复用applyCollectionCallback，返回Promise交settlePromise，自返回循环转TypeError。
+必要性：自然链式调用和清理应复用现有Promise及回调模型。观察与让出先后必须清楚区分源已结算和新链尚未完成。
+不做会怎样：旧then/catch在让出时源尚未记为已观察；finally仍不支持。若清理未等待就恢复原值，会丢掉异步清理失败；若吞宿主中断，取消可被伪装成功。未等待的新链被根取消仍保留未完成提醒。
 
 #### H038 · 为 async replacer 绑定当前解释器
 
-差异：`@@ -2303,6 +2416,8 @@ class Interpreter<R> {`；SHA-256：`2dbcd9c51ffe4d311221ebdc33fb393ba4a4f7b571b23a65f7f118bf2d72499f`
+差异：`@@ -2303,6 +2424,8 @@ class Interpreter<R> {`；SHA-256：`1851634d3536db6753c1a0501c9bd08c66051ba70e8ec0a78e96fa7d41fa9aac`
 首段：`    args: Array<unknown>, ⏎     node: AstNode, ⏎   ): Effect.Effect<unknown, unknown, R> { ⏎     // replacer 结算复用本次执行的解释器边界，不能把既有 async 扩展改成普通回调。`
 尾段：`    const matches: Array<{ readonly match: string; readonly offset: number; readonly args: Array<unknown> }> = [] ⏎     const collect = (...callbackArgs: Array<unknown>): string => {`
 
 职责：为字符串替换中等待 async 回调的结果提供调用上下文。
-
 机制：在现有替换方法内保存 const self = this，供 H039 的生成器使用。
-
 必要性：H039 的生成器需借 self 访问当前解释器，settlePromise 才能沿本次执行的 Promise 观察路径等待回调。
-
 不做会怎样：单独删掉 self 会使后续结算无法引用解释器；本 hunk 本身没有新增替换规则。
-
-配套修改：H039。
 
 #### H039 · 保留 String.replace 的 async 扩展
 
-差异：`@@ -2346,9 +2461,15 @@ class Interpreter<R> {`；SHA-256：`d15009aca165930572936bd583ccdfab79e8d6a73c6c94a9642c2ce724bd61e9`
+差异：`@@ -2346,9 +2469,15 @@ class Interpreter<R> {`；SHA-256：`15f67204677ef6a8b29bfed09601f887379eef4e53d681011d9b56d01cdd0b56`
 首段：`      const output: Array<string> = [] ⏎       let end = 0`
 尾段：`        end = match.offset + match.match.length ⏎       }`
 
 职责：在明确 async 的替换回调中等待返回 Promise，再按原规则转为替换字符串。
-
 机制：先执行 apply；只有 CodeModeFunction.async 且结果为 SandboxPromise 才 settle，随后仍经过 boundedData 和 coerceToString。匹配位置、捕获组与拼接流程不变。
-
 必要性：H036 让 async 函数真实返回 Promise 后，原字符串替换扩展需要在自己的方法边界结算它。
-
 不做会怎样：已支持的 async replacer 会落入数据边界报错；若对全部回调自动 await，又会改变同步回调返回 Promise 的既有检查。
-
-配套修改：H036、H038。
 
 #### H040 · 在共用集合回调入口接纳 sleep
 
-差异：`@@ -2367,16 +2488,20 @@ class Interpreter<R> {`；SHA-256：`d9d68e0b307de87ff271e33b317e9c1c9b76403ca78e3910cd15655e53380106`
+差异：`@@ -2367,16 +2496,20 @@ class Interpreter<R> {`；SHA-256：`650b4e86e84567ad7873ade988fc14b0af5f0fd9433cefb09cc1dde94131bbda`
 首段：`    if ( ⏎       !(callback instanceof CodeModeFunction) &&`
 尾段：` ⏎   private invokeMapMethod(`
 
 职责：让 sleep 可作为数组、Map/Set 等既有回调入口的内建函数。
-
 机制：白名单仅额外允许 $builtin.sleep，并分发到 invokeSleep；CodeModeFunction、CoercionFunction、UriFunction 保留原路径。
-
 必要性：sleep 已表示成身份引用，集合方法需要显式识别该引用，不能把全部全局方法一并放行。
-
 不做会怎样：map(sleep) 等用法会被当作非函数拒绝；扩大到全部全局方法则会超出当前回调白名单。
-
-配套修改：H033、H041。
 
 #### H041 · 数组复用已有集合回调入口
 
-差异：`@@ -2642,24 +2767,8 @@ class Interpreter<R> {`；SHA-256：`0855e12aadeb528303a4f0d4e394b950851a0772824577c4af512bd6e2e7f03d`
+差异：`@@ -2642,24 +2775,8 @@ class Interpreter<R> {`；SHA-256：`53ec383aefce8d421546c55206dc9696c5b27ffda38313f688f6dd587c8516fc`
 首段：`        return Effect.succeed(Array.from(target.entries(), ([index, item]): Array<unknown> => [index, item])) ⏎     }`
 尾段：`      // Iterate a snapshot taken at call time so a callback that mutates the array can't ⏎       // self-extend the loop - matching JS, where elements appended during iteration are not visited.`
 
 职责：删除数组方法单独维护的回调分类分发。
-
 机制：使用 applyCollectionCallback(args[0], Array 方法名, node)，后续数组快照迭代不变。
-
 必要性：H040 的 sleep 支持及函数调用语义应在各集合方法一致。
-
 不做会怎样：保留重复入口会让数组继续遗漏 sleep；除此之外，这段删除主要减少同一白名单的重复实现。
 
-配套修改：H036、H040。
+#### H042 · 把链式成员绑定到现有方法引用
 
-#### H042 · 把then和catch绑定到已有Promise方法引用
-
-差异：`@@ -3066,11 +3175,10 @@ class Interpreter<R> {`；SHA-256：`1e6e09eb05fb2855a87ad2cdb6b0ca40c36c165f3008a818a045735fbd2564e5`
+差异：`@@ -3066,18 +3183,9 @@ class Interpreter<R> {`；SHA-256：`87c29a99f89c7367cb70f5c85fffb7443afbba4e4fdbe1088bf8f5ce2a7336f0`
 首段：`        return new ComputedValue(undefined) ⏎       } ⏎  ⏎       // 链式方法绑定当前 Promise；其它属性仍提示先 await，避免误读工具结果。`
-尾段：``            `Promise.prototype.${String(key)} is not supported in CodeMode; use await instead (with try/catch to handle failures) - e.g. \`const result = await tools.ns.tool(...)\`.`, ⏎             propertyNode,``
+尾段：`          "This value is an un-awaited Promise and has no readable properties; await it first - e.g. `const result = await tools.ns.tool(...)`.", ⏎           objectNode,`
 
-职责：成员读取只解析调用目标，不执行handler或另造Promise实现。
-
-机制：then/catch返回同类IntrinsicReference，绑定当前SandboxPromise；finally及未await结果属性继续走原诊断。
-
-必要性：链式调用必须从普通成员访问进入同一方法分发；共享引用模型还能让环境副本复制receiver身份。
-
-不做会怎样：新回调实现不可达，脚本仍在读取then/catch时被旧禁用分支中断。
+职责：成员读取只解析调用目标，不启动另一套执行器。
+机制：then、catch、finally统一返回绑定当前SandboxPromise的IntrinsicReference；删除finally专属拒绝分支。未await结果的普通属性继续给出原诊断。
+必要性：三种方法必须从同一个成员读取出口进入共同回调处理；副本也要保留receiver的对象身份。
+不做会怎样：只改invokeIntrinsic而不开放成员读取，finally仍在调用前失败；另造方法值则需再接一套快照与调用分发。
 
 #### H043 · 让成员读取接收已求值引用
 
@@ -1078,30 +857,20 @@ raceAll 竞争每个成员的 Exit，再 flatten 胜方结果；被结束的是�
 尾段：`      if (reference instanceof ComputedValue) return reference.value ⏎       if (`
 
 职责：共用原访问规则，避免调用场景重复解析成员。
-
 机制：readMember 增加默认值为 getMemberReference(node) 的 resolved 参数；普通读取按默认路径，调用入口传已有 reference。
-
 必要性：H030 的一次求值结果需要穿过原有可选链、ComputedValue 和访问控制分支。
-
 不做会怎样：只在调用处保存引用却不改 readMember，仍会再次计算 receiver/key，或被迫复制一套访问规则。
-
-配套修改：H030、H033。
 
 #### H044 · 只放宽跨格顶层重声明
 
 差异：`@@ -3259,10 +3368,13 @@ class Interpreter<R> {`；SHA-256：`d5441f64d66e095d2ceb7ac2688a7518d728ab8d5f5e8cc67aaf6d0d13b241fb`
 首段：`    // A pre-seeded parameter slot (initialized === false) is being bound for the first time; ⏎     // anything else already present is a genuine duplicate declaration.`
-尾段：`    scope.set(name, { mutable, value, initialized: true }) ⏎   }`
+尾段：`    scope.set(name, { mutable, value, initialized: true }) ⏎   } ⏎ `
 
 职责：允许 Notebook 重跑定义，同时保留本格与函数局部的重复声明检查。
-
 机制：比较当前 scope 与 moduleScope；本格 declared Set 记录已声明名称，已有参数 TDZ 槽仍按原规则初始化。
-
 必要性：用户需要在后续单元重新声明顶层变量，函数参数和局部作用域语义不能一起放宽。
-
 不做会怎样：复用环境后，旧顶层名称会全部报重复；若直接取消重复检查，同格重复和函数局部错误也会被放过。
-
-配套修改：H021、H022。
 
 #### H045 · 在追加时限制共享日志留存
 
@@ -1110,1139 +879,838 @@ raceAll 竞争每个成员的 Exit，再 flatten 胜方结果；被结束的是�
 尾段：`  if (options.code.trim().length === 0) { ⏎     return Effect.succeed({`
 
 职责：控制循环及并发函数累计保存的日志内存，并在各结果出口说明省略。
-
 机制：log 以 UTF-8 字节加换行计费；首次超预算后只增加 droppedLogs，logged() 追加省略行数标记并设置 truncated。未设置 maxLogBytes 时保留既有无限额行为。
-
 必要性：执行结束后的结果裁剪无法限制执行期间日志持续累积；所有帧必须共享这个累计值。
-
 不做会怎样：长循环仍可持续占用日志内存；没有统一 logged() 标记，成功或失败输出无法说明日志已省略。单行格式化仍先产生该行字符串，此处限制的是留存。
-
-配套修改：H006、H034、H100。
 
 #### H046 · 在根结束后交付结果与安全 Promise 终态
 
 差异：`@@ -3367,30 +3499,75 @@ export const executeWithLimits = <const Tools extends Record<string, unknown>>(`；SHA-256：`5744f2429b9d390a8c830b43b0ec49bac84e549dbe7fc0cbbcfbe23744f80b01`
 首段：`  } ⏎  ⏎   const operation = Effect.gen(function* () {`
-尾段：`    ) ⏎   })`
+尾段：`  }) ⏎ `
 
 职责：把快照选择、根 Scope 清理和未观察失败回执接到公共执行路径。
-
 机制：operation 先 yieldNow，让外层 timeout/race 完成登记，再选择环境副本、解析和启动脚本。scopedWith 包住 Interpreter.run；Scope 关闭后读取各 Promise Exit，记录未观察失败，并将 Fiber 状态换成安全 Exit。纯中断变成供后续单元观察的明确错误，普通拒绝保留沙箱抛值；成功结果附 unobservedFailure，再按原 copyIn/copyOut 交付业务值。 waitForTimeout或原Effect.sleep只负责选出到期；race先等待根清理，再构造超时回执。sleep capability独立传给本次Interpreter，不改变根期限。
-
 必要性：执行起点先给外层观察者完成登记的机会，同时保留子生产者 startImmediately 和原子登记；宿主得到结果前必须等真实清理，Notebook 中保存的 Promise 也不能保活旧 Fiber、私有 cause 和权限上下文。
-
 不做会怎样：脚本同步触发宿主取消时，外层观察可能尚未登记，完成/取消顺序会失真；缺少根收尾和终态替换还会让未结束工作越过执行边界、跨格 Promise 保留旧上下文，或在成功结果中遗漏未观察失败。
-
-配套修改：H020、H023、H036、H045、H080。
-
-**1. 根清理之后校验结果，无期限路径保留同一根**
-
-copyIn/copyOut 在 Scope 关闭及 Promise 终态替换之后执行，返回值校验失败也不会提前交回仍在清理的工具。外层 timeoutMs 为 undefined 时继续返回同一个 program。此处新增注释解释已有顺序和无期限分支；该分支没有额外算法修改。
 
 #### H047 · 裁剪结果时保留附加事实
 
 差异：`@@ -3462,7 +3639,6 @@ const boundOutput = (result: Result, maxOutputBytes: number): Result => {`；SHA-256：`da5a038b0516e092d668b39f37fb5a8937b00924bcd6736dee76687ba8c6e859`
-首段：`  if (!truncated) return result ⏎   const logsPart = kept.length > 0 ? { logs: kept } : {}`
+首段：` ⏎   if (!truncated) return result`
 尾段：`  return result.ok ? { ...result, value, ...logsPart, truncated: true } : { ...result, ...logsPart, truncated: true } ⏎ }`
 
 职责：使既有 maxOutputBytes 结果重建保留 unobservedFailure 等已有字段。
-
 机制：成功和失败分支先展开原 result，再覆盖 value、保留下来的 logs 和 truncated。
-
 必要性：结果预算只应改变被裁剪部分，不应删除本次执行已经确认的事实。
-
 不做会怎样：旧手写字段重建会漏掉新增的未观察失败字段。此处没有新增 JSON 预览或改变业务类型的宿主截断器。
 
-配套修改：H005、H046。
-
-### packages/codemode/src/raw-text.ts：原文来源
-
-源文件 SHA-256：`e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`（基线不存在此文件）
-候选 SHA-256：`ea0ef5ff8ff82d3328349dbafbee99f9f92c55e33942b8ee816e488a2a1e3eac`
-
-#### H048 · 集中保存 JSON 文本来源
-
-差异：`@@ -0,0 +1,17 @@`；SHA-256：`63a8662b18866502d91de2683a403d5e4aab687d859bc0e755831e7b1c070ea5`
-首段：`// 来源元数据不写入业务对象，避免输出解码器把便利字段当成真实数据。 ⏎ // 弱引用随值回收，不为 Notebook 或单次执行增加独立生命周期。`
-尾段：`  return value ⏎ }`
-
-职责：用弱引用元数据保留原文，并只在内部副本上提供便捷 text 别名。
-
-机制：rawText 查询 WeakMap；withRawText 首次登记后不改写，exposeAlias 为真且没有自有 text 时，定义非枚举只读别名。
-
-必要性：原文不能成为输出 decoder 或 JSON.stringify 的业务字段，已有业务 text 也必须优先。
-
-不做会怎样：直接加可枚举 text 会污染合同和输出；不留元数据则 String/模板无法恢复原有空白和格式。弱引用无需另建回收表。
-
-配套修改：H008、H020、H049、H056、H057、H069。
-
-### packages/codemode/src/stdlib/value.ts：字符串转换
+### packages/codemode/src/stdlib/value.ts
 
 源文件 SHA-256：`ab7399b36f12f51f437c81af56e4809ad4cf12cb1bf85563d882c4c248a0fccc`
-候选 SHA-256：`b1c06c530c7af060a1f018398faaf8b81c6dafeb4a78c34fd46742f2f85e2cdd`
+候选 SHA-256：`148adc926d2d1fb40f66728ae4370dd73be37facd282852eb7567e9596b74423`
 
-#### H049 · 字符串转换优先读取登记原文
+#### H048 · 字符串转换优先读取登记原文
 
 差异：`@@ -28,6 +28,9 @@ export const errorBrandName = (value: unknown): string | undefined =>`；SHA-256：`c174205cd84030eea381ed73121b16294a909f51e0bea628883495b4f658f69f`
 首段：`export const boundedData = (value: unknown, label: string): unknown => copyIn(value, label, true) ⏎ `
 尾段：`  if (value === undefined) return "undefined" ⏎   if (value instanceof SandboxDate)`
 
 职责：让投影后的对象或数组在 String 和模板字符串中保留原 JSON 文本。
-
 机制：coerceToString 先查 rawText；没有来源时继续原 null、undefined、日期和普通值转换。
-
 必要性：脚本可以组合业务字段，也可以取得协议原文，两种用途共用同一内部值。
-
 不做会怎样：投影对象会变成普通对象字符串，原文中的空白与格式丢失；普通对象的转换规则无需因此变化。
 
-配套修改：H048。
+#### H049 · 接入字符串转换的来源查询
 
-#### H050 · 接入字符串转换的来源查询
+差异：`@@ -77,6 +80,8 @@ import { type AstNode, CoercionFunction, InterpreterRuntimeError } from "../inte`；SHA-256：`1db88cd437ea106d71a5eeca4c137a11ebdf76f1bdba50a351e58487c3b62bcf`
+首段：`import { copyIn, type SafeObject } from "../tool-runtime.js" ⏎ import {`
+尾段：`  SandboxMap, ⏎   SandboxRegExp,`
 
-差异：`@@ -74,6 +77,8 @@ export const invokeCoercion = (ref: CoercionFunction, args: Array<unknown>, node`；SHA-256：`50e7eaee252de3e38949988272556527519960f936633a9185152dc2d2670f6e`
-首段：`  return coerceToString(value) ⏎ }`
-尾段：`import { ⏎   isSandboxValue,`
-
-职责：给 H049 提供 rawText 函数。
-
-机制：新增 raw-text 导入，既有 copyIn 和沙箱值导入不变。
-
-必要性：与 H049 属于同一原文转换修改。
-
+职责：给 H048 提供 rawText 函数。
+机制：从已有values模块导入rawText，与Promise值和业务对象来源共用同一所有者；既有copyIn转换入口不变。
+必要性：与 H048 属于同一原文转换修改。
 不做会怎样：本 hunk 不独立改变行为；去掉导入会使原文查询缺少符号，注释本身不影响结果。
 
-配套修改：H049。
-
-### packages/codemode/src/tool-runtime.ts：工具边界与发现
+### packages/codemode/src/tool-runtime.ts
 
 源文件 SHA-256：`5ca5e0cc8ff716a26f4517cc70660a2d9d970006c46f07c146ef52765d9af430`
-候选 SHA-256：`de40492ebdce0c9f328963b2925e539b7f8e9d04f7fc817f3828388407d46dab`
+候选 SHA-256：`40e25d5ba34ced7d5d481e42a70a87c2874daf531114006f8178d5963118f67a`
 
-#### H051 · 接入输入适配、来源和统一许可依赖
+#### H050 · 接入输入适配、来源和统一许可依赖
 
-差异：`@@ -1,4 +1,8 @@`；SHA-256：`c5b7b4ff415f5d9a8b9f94b94808edfac16bc16e906bd3ae6b69ce5ec0ca767e`
-首段：`// 参数形式、来源快照与宿主限流各守自己的边界，不向解释器引入宿主策略。 ⏎ import { normalizeInput } from "./input-forms.js"`
+差异：`@@ -1,4 +1,6 @@`；SHA-256：`e5baac6022f823564c597ca4cef88b68debba793b15607a31fd351928736ae69`
+首段：`// 参数形式、来源快照与宿主限流各守自己的边界，不向解释器引入宿主策略。 ⏎ import { TOOL_CALL_CONCURRENCY } from "./stdlib/promise.js"`
 尾段：`import { ToolError, toolError } from "./tool-error.js" ⏎ import {`
 
 职责：为 ToolRuntime 的三个既有边界提供实现依赖。
-
 机制：新增 normalizeInput、rawText/withRawText、TOOL_CALL_CONCURRENCY、Semaphore 导入。
-
-必要性：导入分别归 H068、H056/H057/H069、H067/H070 的行为使用。
-
+必要性：导入分别归 H067、H055/H056/H068、H066/H069 的行为使用。
 不做会怎样：没有独立调度或适配行为；仅删导入会留下未解析引用。不能把这些 import 单算成额外功能。
 
-配套修改：H056、H057、H067、H068、H069、H070。
+#### H051 · 接入统一沙箱值判断
 
-#### H052 · 接入统一沙箱值判断
-
-差异：`@@ -11,6 +15,8 @@ import {`；SHA-256：`6b96b8e26f1e9d906bfec6d9d2b422b44ad1019819a5be08cccf35c3e014d5f4`
-首段：`} from "./tool-schema.js" ⏎ import { isDefinition as isToolDefinition, type Definition } from "./tool.js"`
+差异：`@@ -7,10 +9,15 @@ import {`；SHA-256：`e6ac5e995225a36f5294d44aa8284917db461d503d7ce4c71aa0e43bc4bb02cb`
+首段：`  identifierSegment, ⏎   inputProperties,`
 尾段：`  SandboxMap, ⏎   SandboxPromise,`
 
 职责：让内部复制使用公共品牌判断。
-
 机制：从 values 导入 isSandboxValue。
+必要性：作为 H054 删除重复类型名单的依赖。
+不做会怎样：移除导入会使 copyBounded 中的 isSandboxValue 无法解析；可保留值的判断由 H054 的公共品牌集合决定，导入和注释都不扩展数据边界。
 
-必要性：作为 H055 删除重复类型名单的依赖。
+#### H052 · 限定 namespace 错误提示长度
 
-不做会怎样：移除导入会使 copyBounded 中的 isSandboxValue 无法解析；可保留值的判断由 H055 的公共品牌集合决定，导入和注释都不扩展数据边界。
-
-配套修改：H055。
-
-#### H053 · 限定 namespace 错误提示长度
-
-差异：`@@ -96,9 +102,13 @@ export type SafeObject = Record<string, unknown>`；SHA-256：`2e37f26fef4cd063b72cf9fe69b160e408670a1d2b5ed4513c0c4ca6a4fc2bd9`
+差异：`@@ -96,9 +103,13 @@ export type SafeObject = Record<string, unknown>`；SHA-256：`ccebf178e5f4de1cea1ee0c5b23397fe55399b4f96f43f738e31bf3681f37bd4`
 首段：`const reservedNamespace = "$codemode" ⏎ const defaultCatalogBudget = 2_000`
 尾段：`  namespace: Schema.optionalKey(Schema.String), ⏎   limit: Schema.optionalKey(PositiveInt),`
 
 职责：为 namespace 误调用中的补充签名设置独立展示预算。
-
-机制：新增 namespaceSignatureBudget = 2000，H066 按完整签名累计字符。 SearchInput增加可选detail:true，使模型明确选择少量完整合同；省略时返回概览。
-
+机制：新增 namespaceSignatureBudget = 2000，H065 按完整签名累计字符。 SearchInput增加可选detail:true，使模型明确选择少量完整合同；省略时返回概览。
 必要性：大 namespace 的一次错误不能输出整份目录。
+不做会怎样：H065 没有明确的提示长度上限，或只能截断半条签名。该预算不删除工具能力。
 
-不做会怎样：H066 没有明确的提示长度上限，或只能截断半条签名。该预算不删除工具能力。
+#### H053 · 声明 search 详情与逐侧不可表示标记
 
-配套修改：H066。
-
-#### H054 · 声明 search 详情与逐侧不可表示标记
-
-差异：`@@ -108,6 +118,10 @@ const SearchItem = Schema.Struct({`；SHA-256：`6d39071d3efd7492775396295baff980cac8e858c512f150ade0bd1770a6ad6c`
+差异：`@@ -108,6 +119,10 @@ const SearchItem = Schema.Struct({`；SHA-256：`c57906f4922d84522222f510dc1031c2aa408c30fc883d2d7aac6272924e726f`
 首段：`  path: Schema.String, ⏎   description: Schema.String,`
 尾段：`const SearchOutput = Schema.Struct({ ⏎   items: Schema.Array(SearchItem),`
 
 职责：让搜索结果合同表达输入详情、可选输出详情和 schema 发射失败。
-
 机制：SearchItem的inputSchema和outputSchema只在详细视图出现，schemaUnavailable按失败侧标记；基本路径、说明和签名始终保留。
-
 必要性：合法 Effect 合同也可能无法发射 JSON Schema，搜索需要表达哪一侧缺失而保留其他信息。
-
 不做会怎样：若详情仍是必填，默认紧凑结果无法满足自己的返回合同；若删除字段定义，详细搜索又无法准确声明完整元数据。
 
-配套修改：H061。
+#### H054 · 复用既有沙箱值品牌集合
 
-#### H055 · 复用既有沙箱值品牌集合
-
-差异：`@@ -220,19 +234,8 @@ const copyBounded = (`；SHA-256：`f9d1b1680a087694ddd88df405ab6972c2c44a4509eb126314c63b66ec77a3ea`
+差异：`@@ -220,19 +235,8 @@ const copyBounded = (`；SHA-256：`7b948f43f8dd7a695cedc2a4b5fcb4bf62a8afce21228b49079ec70a22d86627`
 首段：`  } ⏎  ⏎   if (preserveSandboxValues) {`
 尾段：`    // the boundary first), but wrap them defensively rather than degrading to JSON forms. ⏎     if (value instanceof Date) return new SandboxDate(value.getTime())`
 
 职责：减少内部复制检查点重复维护的容器类型列表。
-
 机制：preserveSandboxValues 分支改用 isSandboxValue，后续宿主实例包装和真实跨界序列化保持原路径。
-
 必要性：新增沙箱类型时，内部检查不应漏更新第二份 instanceof 名单。
-
 不做会怎样：在当前品牌集合相同时，保留旧名单不会立即改变结果；这是一处同义收敛，主要风险是今后名单漂移。
 
-配套修改：H052。
+#### H055 · 数组副本继承原文来源
 
-#### H056 · 数组副本继承原文来源
-
-差异：`@@ -286,7 +289,8 @@ const copyBounded = (`；SHA-256：`67a2b40c0ce8d5d45689736143f9fc987903514b978f5d485882f8d041a8b4e5`
+差异：`@@ -286,7 +290,8 @@ const copyBounded = (`；SHA-256：`52e2a37a7ee2c06e8a32792f1ef48fafe19ab6b340d9d2f3ccbe2f0608dedb9a`
 首段：`  if (Array.isArray(value)) { ⏎     const copied = value.map((item) => copyBounded(item, label, depth + 1, seen, preserveSandboxValues))`
 尾段：` ⏎   const prototype = Object.getPrototypeOf(value)`
 
 职责：在 copyIn 的数组分支保留明确登记的文本来源。
-
 机制：递归复制元素并释放 seen 后，用 withRawText(copied, rawText(value), true) 返回内部副本。
-
 必要性：JSON 数组与对象同样需要 String/模板和 text 兼容。
-
 不做会怎样：数组一旦过内部复制就丢失原文。map/spread 创建的新根没有原来源，仍按普通数组处理。
 
-配套修改：H048、H049、H057。
+#### H056 · 对象副本继承原文来源
 
-#### H057 · 对象副本继承原文来源
-
-差异：`@@ -302,7 +306,8 @@ const copyBounded = (`；SHA-256：`9b49e5a8de1553e1c724ef56fdcd8aa9b2a5ade01cc1fd4ae3f00544c072208c`
+差异：`@@ -302,7 +307,8 @@ const copyBounded = (`；SHA-256：`8c93c9b70667f56bf654b2c0163856e832b71261191d64c8bfdc1607ce7c4c8f`
 首段：`    copied[key] = copyBounded(item, label, depth + 1, seen, preserveSandboxValues) ⏎   }`
 尾段：` ⏎ export const copyOut = (value: unknown, undefinedAsNull = false): unknown => {`
 
 职责：在业务字段复制完成后为内部对象转交原文并按条件提供 text 别名。
-
 机制：返回值改为 withRawText(copied, rawText(value), true)；copyOut 继续只遍历业务可枚举字段。
-
 必要性：原文别名应在输出验证后的内部副本出现，并让同名业务字段优先。
-
 不做会怎样：内部复制会丢掉来源；若把别名变成可枚举字段，则会改变最终 JSON 和键遍历。
 
-配套修改：H048、H069。
+#### H057 · 统一工具的紧凑具名签名
 
-#### H058 · 统一工具的紧凑具名签名
-
-差异：`@@ -338,12 +343,13 @@ const definitions = <R>(`；SHA-256：`6bd290f54ed79691ab3e497bc2b56ac002ac84075ac7e2251760a17cc8c0f60d`
+差异：`@@ -338,12 +344,13 @@ const definitions = <R>(`；SHA-256：`4ae78fea54a7a5404514e7dc9a2d210cff9da164235d4b40dfa0ae569c303131`
 首段：`} ⏎  ⏎ const describeDefinition = <R>(path: string, definition: Definition<R>): ToolDescription => {`
-尾段：``    signature: `${toolExpression(path)}(${input === "{}" ? "" : `input: ${input}`}): Promise<${outputTypeScript(definition)}>`, ⏎   } ⏎ }``
+尾段：`    signature: `${toolExpression(path)}(${input === "{}" ? "" : `input: ${input}`}): Promise<${outputTypeScript(definition)}>`, ⏎   } ⏎ } ⏎ `
 
 职责：为 catalog、instructions、search 和 namespace 提示生成同一签名。
-
 机制：describeDefinition 只用无 pretty 参数的输入/输出 renderer，非空输入写为 input: 类型，空对象保留零参展示。
-
 必要性：模型需要稳定的真实参数与返回类型概览；字段详情转到按需 search schema。
-
 不做会怎样：各出口会继续展示多行签名或不同形状，减少同预算可展示工具数。未声明输出仍由 renderer 返回 unknown。
 
-配套修改：H061、H066、H073、H075。
+#### H058 · 让搜索索引保存原合同引用
 
-#### H059 · 让搜索索引保存原合同引用
-
-差异：`@@ -365,6 +371,9 @@ export type DiscoveryPlan = {`；SHA-256：`e1afb662c194227446e9d375717362b811feffc5c17f48d36f21e89d396c0cca`
-首段：`export type SearchEntry = { ⏎   readonly description: ToolDescription`
+差异：`@@ -365,6 +372,9 @@ export type DiscoveryPlan = {`；SHA-256：`0b587f7225f89ea09928623c589dc1ee348d1bb50a1eb412dd978201962bccdb`
+首段：` ⏎ export type SearchEntry = {`
 尾段：`  /** Lowercased path + description + input property names/descriptions, for substring matching. */ ⏎   readonly searchText: string`
 
 职责：为命中后按需发射完整 schema 留下真实输入和输出来源。
-
 机制：SearchEntry 增加 inputContract、outputContract，而 ToolDescription 仍只保存路径、说明和签名。
-
 必要性：详情应仅为搜索命中的条目生成，不预先扩充整个内联目录。
-
 不做会怎样：搜索只剩文字摘要，无法从真实合同恢复字段说明、约束与引用。
 
-配套修改：H061、H062。
+#### H059 · 补齐内建 search 的输入合同
 
-#### H060 · 补齐内建 search 的输入合同
-
-差异：`@@ -420,8 +429,10 @@ const rank = (entries: ReadonlyArray<SearchEntry>, query: string): Array<SearchE`；SHA-256：`28e64ba5229a2abe280fd15741d1b7b525daff44ef68ed1c5ee4d825c972349b`
+差异：`@@ -420,8 +430,10 @@ const rank = (entries: ReadonlyArray<SearchEntry>, query: string): Array<SearchE`；SHA-256：`833d9b5956632413e7a89c271d3a33252259e14a4bb300eb024217e9577b88c3`
 首段：`const makeSearchTool = (searchIndex: ReadonlyArray<SearchEntry>): Definition => ({ ⏎   _tag: "CodeModeTool",`
 尾段：`    Effect.sync(() => { ⏎       const request = input as typeof SearchInput.Type`
 
 职责：让 search 自身也满足新的 Definition 结构。
-
 机制：makeSearchTool 以同一个 SearchInput 同时填写 inputContract 和 input，run 仍为内存索引上的 Effect.sync。
-
 必要性：签名和实际解码同源规则也适用于全局 search。
-
 不做会怎样：Definition 接口和 renderer 缺少 search 的真实输入来源；这条修改不使 search 占用工具许可。
 
-配套修改：H077、H079、H070。
+#### H060 · 按需生成搜索详情并按完整条目分页
 
-#### H061 · 按需生成搜索详情并按完整条目分页
-
-差异：`@@ -445,25 +456,60 @@ const makeSearchTool = (searchIndex: ReadonlyArray<SearchEntry>): Definition =>`；SHA-256：`d4d61d519e6c3f19b8260e4198f47dbc42b13a9a4402c04a419ac953fb78d814`
+差异：`@@ -445,25 +457,60 @@ const makeSearchTool = (searchIndex: ReadonlyArray<SearchEntry>): Definition =>`；SHA-256：`785b73554d50e7f2451512570ba1892c2220ca90133d94b10cc8b73822ec5415`
 首段：`          : scoped.find( ⏎               (entry) => entry.description.path === pathQuery || toolExpression(entry.description.path) === trimmed,`
-尾段：``   const description = line.length > 120 ? line.slice(0, 117) + "..." : line ⏎   return description === "" ? `  - ${tool.signature}` : `  - ${tool.signature} // ${description}` ``
+尾段：`  const description = line.length > 120 ? line.slice(0, 117) + "..." : line ⏎   return description === "" ? `  - ${tool.signature}` : `  - ${tool.signature} // ${description}``
 
 职责：保留原相关性排序和 offset/limit 接口，补齐真实 schema 详情及16K软预算。
-
 机制：复用现有排名、精确匹配、offset/next和16K完整条目预算。默认至多十项，detail:true至多三项，只有详细命中项发射encoded输入和decoded输出schema，各侧发射失败用null及schemaUnavailable说明。 精确路径自动返回详情；宽泛limit:1不改变视图，显式detail:true才展开少量候选。
-
 必要性：默认发现不应把候选的全部schema广播进上下文；确定工具后仍须取得准确字段文档。条数与完整条目软预算共同限制输出而不丢工具。
-
 不做会怎样：保留默认全schema会继续产生不必要大输出；删详情则复杂参数/default/format不可发现；没有逐侧异常边界，一项不可表示合同会拖垮整页。
 
-配套修改：H054、H059、H062、H075。
+#### H061 · 把定义合同放入完整搜索索引
 
-**1. 命中项才生成详情**
-
-SearchEntry 保存原合同引用；每个进入本页的命中项才调用 describeSchema。Effect 输入从原合同发射 encoded schema，输出先取 Schema.toType；生成文档的 definitions 接回 $defs。普通 JSON schema 直接保留，因此字段描述、false/0 默认值和约束不用另写一套文字 renderer。
-
-**2. 发射失败按输入、输出分别处理**
-
-describeSchema 的 try/catch 只包这一侧的 schema 发射与文档组装。失败侧返回 null，并将 input 或 output 加入 schemaUnavailable；成功侧、工具路径、签名、相关性排序和同页其他工具继续保留。页面 JSON.stringify 与实际工具执行不在这个 catch 内。
-
-**3. 用完整响应计量，保留跨阈值条目**
-
-每轮先加入整项，再计算含 items、remaining、next 的序列化长度，首次达到或超过16×1024就停止。limit 继续限制条目数，offset 按已加入项数推进；单个超长项也完整返回。原相关性排序没有换成内联目录的优先级和短签名排序。
-
-#### H062 · 把定义合同放入完整搜索索引
-
-差异：`@@ -471,6 +517,9 @@ const catalogLine = (tool: ToolDescription) => {`；SHA-256：`34915d1f48f9e1384efeccd830da15d3c0d202bc8e755d3382efe2d74fd69bb6`
-首段：`const toSearchEntry = <R>(path: string, definition: Definition<R>, description: ToolDescription): SearchEntry => ({ ⏎   description,`
+差异：`@@ -471,6 +518,9 @@ const catalogLine = (tool: ToolDescription) => {`；SHA-256：`aba15c025df8806502c4ac3e85dd9215f7f8fa50d244f029ceb481d2dc84f86a`
+首段：` ⏎ const toSearchEntry = <R>(path: string, definition: Definition<R>, description: ToolDescription): SearchEntry => ({`
 尾段：`  searchText: [ ⏎     path,`
 
 职责：构建索引时传递真实合同，保持字段搜索文本原来源。
-
 机制：toSearchEntry 复制 definition.inputContract 和 definition.output 的引用，原 pathWords/searchText 构建继续。
-
-必要性：H059 只定义结构，H061 需要在每个实际索引项上取得合同。
-
+必要性：H058 只定义结构，H060 需要在每个实际索引项上取得合同。
 不做会怎样：详情发射拿不到每个工具的原来源；若改拿 ToolDescription，则只能恢复已压缩的字符串。
 
-配套修改：H059、H061。
+#### H062 · 先建立完整索引再安排目录展示
 
-#### H063 · 先建立完整索引再安排目录展示
-
-差异：`@@ -493,26 +542,23 @@ export const assertValidTools = <R>(tools: HostTools<R>): void => {`；SHA-256：`1eb540dab9b7a991a386ac8004c47435b092f4f7db2cd03b4a7b01712e9f33c0`
+差异：`@@ -493,26 +543,23 @@ export const assertValidTools = <R>(tools: HostTools<R>): void => {`；SHA-256：`f9bf4583e10aac14aa84e31611b4076d025e3769d6f83688a34aafd3e9ad18fb`
 首段：`  } ⏎ } ⏎  ⏎ // 优先级只是宿主给出的当前路径；目录预算不会增加实际工具或绕过过滤。`
 尾段：`    const group = namespaces.get(namespace) ?? [] ⏎     group.push(tool)`
 
 职责：把全量能力索引与预算内文字选择分开。
-
 机制：prepare 接收 priority，先从 visibleDefinitions 创建 index，再从 index 的 description 分组；预算仍校验非负安全整数。
-
 必要性：优先级只影响当前过滤目录的展示，不改变可发现工具全集。
-
 不做会怎样：若从选中条目反推索引，目录放不下的工具会从搜索消失；没有 priority 参数也无法接入宿主偏好。
 
-配套修改：H007、H064、H065。
+#### H063 · 按优先路径和签名长度选择内联项
 
-#### H064 · 按优先路径和签名长度选择内联项
-
-差异：`@@ -520,64 +566,49 @@ export const prepare = <R>(tools: HostTools<R>, catalogBudget = defaultCatalogBu`；SHA-256：`2684220da1d7dbc35f93e4c3514a0d5aebc8d6a19b08f3d88a3ddc157bfbd971`
+差异：`@@ -520,64 +567,49 @@ export const prepare = <R>(tools: HostTools<R>, catalogBudget = defaultCatalogBu`；SHA-256：`b1d7a0c86fb4f24b558e92cbef1229600a277d4c66ad5e747391ea51c54aafec`
 首段：`  } ⏎   const ordered = [...namespaces].sort(([left], [right]) => compareText(left, right))`
-尾段：`    } ⏎   }`
+尾段：`    } ⏎   } ⏎ `
 
 职责：在预算内优先展示宿主确认的核心工具，并让余下选择稳定。
-
 机制：priority 变 Set；按是否优先、signature.length、完整路径排序。先扣 namespace 标题成本，再逐项尝试，超长项跳过；最后按 namespace 输出已选项及准确 shown 计数。 新注释明确 picked 只影响展示，完整 catalog 和搜索索引保留。
-
 必要性：同样预算可先放常用入口，同时让未展示数量明确，过长一项不阻塞后项。
-
 不做会怎样：原 round-robin 规则不会应用宿主核心优先级，也保留旧的选项分组结构。极小预算仍可能放不下优先工具，此实现不保证核心项必显。
 
-配套修改：H063、H065、H100。
+#### H064 · 返回未裁剪的搜索索引
 
-#### H065 · 返回未裁剪的搜索索引
-
-差异：`@@ -585,7 +616,8 @@ export const prepare = <R>(tools: HostTools<R>, catalogBudget = defaultCatalogBu`；SHA-256：`84d7e5162eb5484d84de894901a97a3e1c76373e067a6f813a6a28a45a636675`
+差异：`@@ -585,7 +617,8 @@ export const prepare = <R>(tools: HostTools<R>, catalogBudget = defaultCatalogBu`；SHA-256：`8b3c9bf5d2de558c9671feb0357b82db2b1b5685b2e8f90b7dfd19c0d55e117c`
 首段：`  return { ⏎     catalog: described,`
-尾段：`    searchIndex: index, ⏎   } ⏎ }`
+尾段：`    searchIndex: index, ⏎   } ⏎ } ⏎ `
 
 职责：保证预算只影响 instructions 的内联展示。
-
 机制：prepare 的 searchIndex 直接返回预先创建的完整 index。
+必要性：与 H062/H063 共用一次索引构建，隐藏签名的工具仍可精确搜索。
+不做会怎样：保留旧的完整索引重建也能维持能力，但会重复构建；直接返回 index 复用 H062 已完成的工作，旧行本身不会删除工具。
 
-必要性：与 H063/H064 共用一次索引构建，隐藏签名的工具仍可精确搜索。
+#### H065 · 在 namespace 误调用时提供真实签名
 
-不做会怎样：保留旧的完整索引重建也能维持能力，但会重复构建；直接返回 index 复用 H063 已完成的工作，旧行本身不会删除工具。
-
-配套修改：H063、H064。
-
-#### H066 · 在 namespace 误调用时提供真实签名
-
-差异：`@@ -638,7 +670,23 @@ const resolve = <R>(tools: HostTools<R>, path: ReadonlyArray<string>, index: Rea`；SHA-256：`649eb2785c3518409b5053470163991ba59ab3bf01f4e8e590e37aa46fca3b46`
+差异：`@@ -638,7 +671,23 @@ const resolve = <R>(tools: HostTools<R>, path: ReadonlyArray<string>, index: Rea`；SHA-256：`83bf90e89d02a2497223d50e5b8d680d63ca230c3f4e8c39b241cfab1c32b5de`
 首段：`  } ⏎  ⏎   if (typeof value !== "function" && !isDefinition(value)) {`
 尾段：`    ]) ⏎   } ⏎  ⏎   return value`
 
 职责：给错误调用提供可恢复信息，同时保持 UnknownTool 失败。
-
 机制：筛选当前 namespace 前缀下索引项，按2000字符预算加入整条签名；遗漏项给数量和 search 指引，绝不自动选择 leaf 执行。
-
 必要性：模型把一组工具当函数调用时，需要知道实际可调用路径；恢复提示不得制造副作用。
-
 不做会怎样：原错误只有 not callable，缺少当前目录可用项；自动猜工具则会把命名错误变成真实调用。
 
-配套修改：H053、H058。
+#### H066 · 在 ToolRuntime 创建唯一工具许可池
 
-#### H067 · 在 ToolRuntime 创建唯一工具许可池
-
-差异：`@@ -660,6 +708,8 @@ export const make = <R>(`；SHA-256：`ba6c28a10ec8f84d37aa67744470ffa49d807d1d687b84daf82973ce3e25492b`
+差异：`@@ -660,6 +709,8 @@ export const make = <R>(`；SHA-256：`617a762e711f256efac920325e1098a65f77a28f30560cc5155dcf64f3a40d20`
 首段：`  hooks?: ToolCallHooks<R>, ⏎   fetch?: HostTool<R>,`
 尾段：`  const callableTools = { ⏎     ...tools,`
 
 职责：把实际宿主并发控制放在数据与调用边界。
-
 机制：每次 make 创建一个 TOOL_CALL_CONCURRENCY 大小的 Semaphore，当前常量为八。
-
 必要性：所有工具和 fetch 要共用一组许可，async 包装与组合器不应占槽。
-
 不做会怎样：只迁移调用包装而没有当前池，无法约束宿主并发；解释器原许可也不能再作为第二层重复调度。
 
-配套修改：H016、H023、H070。
+#### H067 · 在原解码前应用正向简写
 
-#### H068 · 在原解码前应用正向简写
-
-差异：`@@ -723,7 +773,17 @@ export const make = <R>(`；SHA-256：`74fef328b825b1ffcd4877f7f3550f17cbaa95cb178079fca7812252c1288a7d`
-首段：``            throw new ToolRuntimeError("InvalidToolInput", `Tool '${name}' expects at most one input object.`) ⏎           // 零参沿上游按{}进入原decoder，必填字段仍在执行前拒绝；显式undefined不替换。``
-尾段：``              new ToolRuntimeError("InvalidToolInput", `Invalid input for tool '${name}': ${String(cause)}`), ⏎           })``
+差异：`@@ -723,7 +774,17 @@ export const make = <R>(`；SHA-256：`befa3b49ffd77e6513ad7290230d0eb44d4c99eef83ee55658fa5054ac597644`
+首段：`            throw new ToolRuntimeError("InvalidToolInput", `Tool '${name}' expects at most one input object.`) ⏎           // 零参沿上游按{}进入原decoder，必填字段仍在执行前拒绝；显式undefined不替换。`
+尾段：`              new ToolRuntimeError("InvalidToolInput", `Invalid input for tool '${name}': ${String(cause)}`), ⏎           })`
 
 职责：将明确的标量简写转成对象输入，再沿原参数校验入口执行。
-
 机制：normalizeInput 使用 tool.inputForms；结果再过 copyIn/copyOut 后交 decodeToolInput。零参仍为 {}，显式 undefined 保留，转换错误仍归 InvalidToolInput。
-
 必要性：新构造键值也须经过危险键和普通数据检查；真实 decoder 负责 default/refinement/transform。
-
 不做会怎样：只定义形式而不在入口应用，简写不会生效；绕过数据边界包装则可能把新字段绕进 decoder。标量合同没有反向拆包路径。
 
-配套修改：H009、H079。
+#### H068 · 输出校验后再转交原文来源
 
-#### H069 · 输出校验后再转交原文来源
-
-差异：`@@ -739,7 +799,8 @@ export const make = <R>(`；SHA-256：`b4c355aeb770dc08453a02e4304b1b01b71f7bcd598d5fa2272ac7d8695ac305`
-首段：``                try: () => decodeToolOutput(tool, raw), ⏎                 catch: () => new ToolRuntimeError("InvalidToolOutput", `Invalid output from tool '${name}'.`),``
+差异：`@@ -739,7 +800,8 @@ export const make = <R>(`；SHA-256：`fdad963e2601233e63b4b0886ffb57e2b1109f8ce0508156cf0c33eff808a222`
+首段：`                try: () => decodeToolOutput(tool, raw), ⏎                 catch: () => new ToolRuntimeError("InvalidToolOutput", `Invalid output from tool '${name}'.`),`
 尾段：`            currentCall, ⏎           )`
 
 职责：让 decoder 重建的业务结果保留来源，且不让 text 别名参与输出合同。
-
 机制：先 decodeToolOutput(tool, raw)，再 withRawText(result, rawText(raw))，最后走 decodeOutput 的沙箱复制。
-
 必要性：原文元数据应跨过 decoder 重建，但业务验证必须先完成。
-
 不做会怎样：来源会在 decoder 返回新对象时丢失；若先注入 text 别名再验证，原合同会看到不属于业务的数据。
 
-配套修改：H048、H056、H057。
+#### H069 · 把许可包在实际调用入口外
 
-#### H070 · 把许可包在实际调用入口外
-
-差异：`@@ -750,7 +811,13 @@ export const make = <R>(`；SHA-256：`9041d27006d8825ba61b2474f339d63d3294b2780ccd98e5a7148a0033d5a7f1`
+差异：`@@ -750,7 +812,13 @@ export const make = <R>(`；SHA-256：`81aa537a7f7d26a26fdc6e994d493f8cf096756a90903e90ed673c0075bfa21f`
 首段：`          }), ⏎           currentCall,`
-尾段：`      ), ⏎   } ⏎ }`
+尾段：`      ), ⏎   } ⏎ } ⏎ `
 
 职责：使排队先于实际校验、计数、running 通知和宿主执行。
-
 机制：invoke 的整个 Effect 用 permits.withPermits(1) 包装；仅 $codemode.search 直通，fetch 与全部宿主调用共用许可。 两行注释分别说明准入后的计数/超时起点，以及同步 search 例外；注释压缩保持原调用语义。
-
 必要性：队列等待不应制造假 running，也不应消耗叶子工具自身的执行超时；根取消必须能停止等待者。
-
 不做会怎样：未包住全部入口会出现已计费但尚未运行的记录，或超出八个实际调用；把 search 也异步排队则改变其同步发现合同。
 
-配套修改：H067、H023。
-
-### packages/codemode/src/tool-schema.ts：合同与签名展示
+### packages/codemode/src/tool-schema.ts
 
 源文件 SHA-256：`7d93eac35df2d6b0bd29bc1c944c4d062afc1ff1b5c2b95df0d881ddcd5e748f`
-候选 SHA-256：`f216d4953b417d6f07fd99a98dddea9ecd15cb142f62987ccc5511b4a822105a`
+候选 SHA-256：`ad6b11a136b75d967cc480da7f8af508473fc57e2a20c2742c039eee19a2202c`
+
+#### H070 · 接入真实编码合同的结构查询
+
+差异：`@@ -1,4 +1,5 @@`；SHA-256：`a96420c75d582844fb5c173ad9a275f8a05f4c98a91f099d0b87eda2756dc512`
+首段：`// 描述符只来自实际编码域；展示 JSON schema 不能授予额外调用形式。 ⏎ import { JsonPointer, Schema, SchemaAST } from "effect"`
+尾段：` ⏎ const isEffectSchema = (schema: SchemaType): schema is Schema.Decoder<unknown> & Schema.Top => Schema.isSchema(schema)`
+
+职责：schema所有者同时负责展示和确定性简写的结构信息。
+机制：引入SchemaAST供inputForms识别对象、必填字段和编码域，不执行decoder。
+必要性：展示与简写同属原合同派生，合并到现有模块可避免额外input-forms文件及重复导入。
+不做会怎样：省略AST接口无法判断唯一可包装字段；改读展示JSON则可能被插件的展示修改授予错误调用形式。
 
 #### H071 · 移除多行 renderer 的状态开关
 
-差异：`@@ -34,10 +34,9 @@ const intersection = (members: ReadonlyArray<string>): string => {`；SHA-256：`f546765bd1372ea46ad67ca106d6621c37e977451206069a0f023c3c0a70ffcd`
+差异：`@@ -34,10 +35,9 @@ const intersection = (members: ReadonlyArray<string>): string => {`；SHA-256：`f5f6adfaa7f603fef12e80d20ac0efce078b4f6d9ca35232fb3d9c73966a7c5c`
 首段：` */ ⏎ const MAX_RENDER_DEPTH = 8`
 尾段：` ⏎ const hasUnresolvedRef = (`
 
 职责：让签名渲染只携带引用定义。
-
 机制：RenderContext 删除 pretty 字段。
-
 必要性：和 H072/H073 一起收敛为一套紧凑 renderer。
-
 不做会怎样：单独保留未使用的状态字段不会改变行为；这里是接口清理，真实展示变化在 H073/H075。
-
-配套修改：H072、H073、H075。
 
 #### H072 · 删除 JSDoc 拼装器
 
-差异：`@@ -64,46 +63,7 @@ const hasUnresolvedRef = (`；SHA-256：`9450d312f35328ed131773b399eeb900813f2032d369cf2739764a2e7a6e417b`
+差异：`@@ -64,46 +64,7 @@ const hasUnresolvedRef = (`；SHA-256：`a7b4e0e0793a5391a6b18725a06021b308b8b71cdcab31ac6965b50b4450c953`
 首段：`  ].some((item) => hasUnresolvedRef(item, definitions, seen, nextVisited)) ⏎ }`
 尾段：`  schema: JsonSchema, ⏎   ctx: RenderContext,`
 
 职责：去掉第二套多行字段文档文本生成。
-
 机制：移除 docTags 和 jsdoc，renderSchema 继续负责类型形状。
-
-必要性：字段完整说明由 H061 的原 schema 按需交付，无需同时维护 JSDoc 转写。
-
+必要性：字段完整说明由 H060 的原 schema 按需交付，无需同时维护 JSDoc 转写。
 不做会怎样：保留未调用的辅助函数不会破坏执行；这项删除减少重复实现，不代表字段详情应丢失。
-
-配套修改：H061、H073。
 
 #### H073 · 让所有 schema 渲染为紧凑类型
 
-差异：`@@ -177,41 +137,31 @@ const renderSchema = (`；SHA-256：`31da79a83b8223e81802fbb03442cf637a7af36192250bbde6193f5561c574a9`
-首段：``     const field = ([name, value]: readonly [string, JsonSchema]) => ⏎       `${renderKey(name)}${required.has(name) ? "" : "?"}: ${renderSchema(value, nested, depth + 1, seen)}` ``
+差异：`@@ -177,41 +138,31 @@ const renderSchema = (`；SHA-256：`8e405f838dd52fd46e90516f072d6063e70256273e055b1a9f120f7b266b4fdb`
+首段：`    const field = ([name, value]: readonly [string, JsonSchema]) => ⏎       `${renderKey(name)}${required.has(name) ? "" : "?"}: ${renderSchema(value, nested, depth + 1, seen)}``
 尾段：`    return renderSchema(schema, { definitions: { ...(schema.definitions ?? {}), ...(schema.$defs ?? {}) } }) ⏎   } catch { ⏎     return "unknown" ⏎   }`
 
 职责：统一对象字段、索引签名及 Effect/JSON schema 的 TS 概览输出。
-
 机制：renderSchema 只拼单行字段；toTypeScript、jsonSchemaToTypeScript 去掉 pretty 参数，引用解析和发射失败回退 unknown 保留。
-
 必要性：四个模型出口应复用同一概览，按需 schema 详情负责类型之外的约束。
-
 不做会怎样：目录与搜索仍可能走不同的多行形态，同工具的签名不再同源；这项改动只影响展示，不修改 decoder。
-
-配套修改：H058、H061、H075。
 
 #### H074 · 字段搜索使用真实输入合同
 
-差异：`@@ -231,16 +181,17 @@ export type InputProperty = {`；SHA-256：`7fa1c60f240bce3bfce7a0fd61422ceed93409ba9d28c0869eef3361ca99a450`
-首段：`` * directly, resolving a trivial top-level `$ref` into `$defs`/`definitions` when present. ⏎  * Anything unresolvable yields `[]` (search falls back to path + description).``
+差异：`@@ -231,16 +182,17 @@ export type InputProperty = {`；SHA-256：`fca62234bbce05f5acd7d7e37be962a20c22630fb8b92c8592ef5651dded6a42`
+首段：` * directly, resolving a trivial top-level `$ref` into `$defs`/`definitions` when present. ⏎  * Anything unresolvable yields `[]` (search falls back to path + description).`
 尾段：`    const definitions = document.definitions ?? {} ⏎     let schema = document.schema`
 
 职责：让字段名和字段描述的索引来源与签名、简写一致。
-
 机制：inputProperties 从 definition.inputContract 发射或读取 JSON schema，保留 definitions/$defs 和原 top-level ref 处理。
-
 必要性：展示 schema 经插件改写后，仍需按实际可调用字段查找工具。
-
 不做会怎样：搜索可能按展示字段命中却与真实 decoder 不符；正向简写不适用的复杂对象也不能因此失去完整字段索引。
-
-配套修改：H077、H079。
 
 #### H075 · 从真实合同生成唯一输入输出签名
 
-差异：`@@ -262,26 +213,20 @@ export const inputProperties = <R>(definition: Definition<R>): Array<InputProper`；SHA-256：`0c74be22c7057609570833173a9ae07434edae31551d035ecc331f67b8aba829`
+差异：`@@ -262,26 +214,20 @@ export const inputProperties = <R>(definition: Definition<R>): Array<InputProper`；SHA-256：`c11e88735eb85aa12207c3e26ab809a392d7097be3b6187c29bb6a756127cd14`
 首段：`  } ⏎ } ⏎  ⏎ // 只展示原始输入合同；运行时简写仍由同一合同推导，不把宽容形式重复注入每条签名。`
-尾段：``/** ⏎  * Decodes tool input before `run` is invoked. Effect Schemas validate (throwing on failure);``
+尾段：`/** ⏎  * Decodes tool input before `run` is invoked. Effect Schemas validate (throwing on failure);`
 
 职责：把 inputContract 用于输入概览，保留真实输出来源。
-
 机制：inputTypeScript 对 Effect 合同按 encoded 域渲染；outputTypeScript 按 decoded 域，缺失则 unknown；两者都删除 pretty 参数，也不追加简写 union。
-
 必要性：签名展示标准输入，宽容简写由运行时派生，避免给每个工具重复扩充类型。
-
 不做会怎样：模型仍可能看到插件改过的展示输入，或看到另一套多行签名；根据工具名字猜返回类型没有合同依据。
 
-配套修改：H058、H073、H079。
+#### H076 · 从真实编码合同派生单值简写
 
-### packages/codemode/src/tool.ts：工具定义
+差异：`@@ -299,3 +245,50 @@ export const decodeOutput = <R>(definition: Definition<R>, value: unknown): unkn`；SHA-256：`fb17a1d6c789fc2e20811d5c21d90d6e248e3e499035b65c4533819db98b7704`
+首段：`  definition.output !== undefined && isEffectSchema(definition.output) ⏎     ? Schema.decodeUnknownSync(definition.output)(value)`
+尾段：`  return forms.types.includes(value === null ? "null" : typeof value) ? { [forms.key]: value } : value ⏎ }`
+
+职责：schema模块识别唯一的对象字段包装，原decoder仍负责实际解码。
+机制：inputForms仅接受无索引、无符号字段的对象：一个必填字段，或全可选且仅一个字段；字段编码域须是原始值。normalizeInput按类型包装单值，对象与undefined原样交付。与渲染代码同处一模块，tool.ts只有类型依赖反向引用。
+必要性：read("path")不应只因对象包装重试，但不能猜多键主键、反向吞掉对象、重复运行default或transform。
+不做会怎样：不做时合法单值直觉调用仍报参数外形错误；若任意拆包或猜键，可能执行错误目标。独立小模块没有额外消费者，合并可减少路径而不改变参数合同。
+
+### packages/codemode/src/tool.ts
 
 源文件 SHA-256：`e297f881d51f281d21376ce58cd30909aa0e69f8ec1b722334c09834d6f6a1bd`
-候选 SHA-256：`77c69403bba814c18cbfb9d76422e7e72f470054fa110e2d964056b25708b428`
+候选 SHA-256：`d946f6b6f163f61315c239c7bc50b4b1507b17aac42f6970ceb0bad2018d1a1f`
 
-#### H076 · 接入输入形式派生函数
+#### H077 · 接入输入形式派生函数
 
-差异：`@@ -1,4 +1,6 @@`；SHA-256：`96f86dd607a2c48b58e75ef9c03a593e0f14ccb661c113b5b18550e465fe843c`
+差异：`@@ -1,4 +1,6 @@`；SHA-256：`b05b8ffaea6853b5d98dc195c7f120fde2dd9f83818c3515f7b503ae2ef9a352`
 首段：`import { Effect, Schema } from "effect" ⏎ // 形式识别随真实输入合同派生，避免展示 schema 改写后简写误选字段。`
 尾段：`/** ⏎  * JSON Schema subset accepted for render-only tool schemas.`
 
 职责：为 Tool.make 从真实合同推导简写提供依赖。
-
 机制：导入 inputForms 和 InputForms 类型。
-
-必要性：归 H077/H079 的定义和构造使用。
-
+必要性：归 H078/H080 的定义和构造使用。
 不做会怎样：没有独立行为；单独删导入会造成函数或类型引用缺失，注释不增加简写规则。
 
-配套修改：H009、H077、H079。
-
-#### H077 · 区分输入来源合同与本层 decoder
+#### H078 · 区分输入来源合同与本层 decoder
 
 差异：`@@ -36,6 +38,9 @@ export type SchemaType = Schema.Decoder<unknown> | JsonSchema`；SHA-256：`255e5707e036793ca9e8c1500f58fcae9cab6fe7446302ef5fa364030d56515d`
 首段：`export type Definition<R = never> = { ⏎   readonly _tag: "CodeModeTool"`
 尾段：`  readonly output: SchemaType | undefined ⏎   readonly run: (input: unknown) => Effect.Effect<unknown, unknown, R>`
 
 职责：在工具定义中保存完整合同和派生形式。
-
 机制：Definition 增加必填 inputContract、可选 inputForms；既有 input 继续决定本层是否执行 Effect 解码。
-
 必要性：宿主适配器要展示真实合同，同时让实际解码留在原宿主入口。
-
 不做会怎样：只复用 input 会把展示与执行混在一起，难以同时避免重复 decoder 和展示漂移。
 
-配套修改：H068、H074、H075、H079。
-
-#### H078 · 允许宿主传入原 decoder 来源
+#### H079 · 允许宿主传入原 decoder 来源
 
 差异：`@@ -50,6 +55,8 @@ type ResultType<S> = S extends Schema.Decoder<unknown> ? S["Encoded"] : unknown`；SHA-256：`e87cd0dde0334497f1082a1339fb50636b6a3121a507eda35ff81821d9959757`
 首段：`/** Options for defining one CodeMode tool. */ ⏎ export type Options<I extends SchemaType, O extends SchemaType | undefined, R = never> = {`
 尾段：`  readonly output?: O ⏎   readonly run: (input: InputType<I>) => Effect.Effect<ResultType<O>, unknown, R>`
 
 职责：给只用 JSON input 展示的适配器传递真实合同的选项。
-
 机制：Options 新增可选 inputContract: Schema.Decoder<unknown>。
-
 必要性：ToolRuntime 可以依据真实合同生成签名和简写，而原工具仍执行自己的 decoder。
-
 不做会怎样：适配器只剩展示 JSON schema，无法证明真实参数结构和 encoded 域。
 
-配套修改：H079、H099、H100。
-
-#### H079 · 以同一实际合同派生展示和简写
+#### H080 · 以同一实际合同派生展示和简写
 
 差异：`@@ -87,10 +94,17 @@ export const isDefinition = <R = never>(value: unknown): value is Definition<R>`；SHA-256：`b1755a3b09d927457b76064538548a447a6aa52dc868617c9aa16e87dd629628`
 首段：` */ ⏎ export const make = <I extends SchemaType, const O extends SchemaType | undefined = undefined, R = never>(`
 尾段：`  } ⏎ }`
 
 职责：在 Tool.make 集中确定合同优先级，不执行 decoder 探测。
-
 机制：input 是 Effect schema 时优先使用它；否则用明确传入的 inputContract，最后才回退 JSON input。只有 Effect 合同派生 inputForms，原 input/output/run 保留。
-
 必要性：原始输入与转换语义需要一个来源；纯展示 JSON 不能额外授予调用形式。
-
 不做会怎样：展示、字段搜索和简写可能各用不同来源；先运行 decoder 猜形式还会重复 default/transform 的效果。
 
-配套修改：H009、H068、H074、H075、H077、H078。
-
-### packages/codemode/src/values.ts：Promise 值
+### packages/codemode/src/values.ts
 
 源文件 SHA-256：`61069ee6cec59ded1c14f1214d243e91fd59cd27ab78d3851ca2112aade745a9`
-候选 SHA-256：`8f6f6d092347dddc2ec2418aca2a6703cf23c8df03309b889a8e94181a9e8510`
+候选 SHA-256：`55700675c9d5e961dbb965b966997a96900dbde0c81954a4b84267d9a8e24b9d`
 
-#### H080 · 用 Fiber 或终态表示 Promise
+#### H081 · 统一Promise终态和业务值原文来源
 
-差异：`@@ -1,11 +1,10 @@`；SHA-256：`ecf593e4ee8587c6e83366a01ea6ec3fb60a4bbd063e21dc80d3a69952009f2a`
+差异：`@@ -1,11 +1,28 @@`；SHA-256：`a82265498003ea87dc56518c8e346150b721854b91d2e354ed62844cf06688a0`
 首段：`import type { Exit, Fiber } from "effect" ⏎ `
 尾段：` ⏎ export class SandboxDate {`
 
-职责：把在途状态与跨单元可保存的结果分开，并记录结果是否被观察。
+职责：值模块保存沙箱值身份和随值回收的原文元数据。
+机制：SandboxPromise只保存fiber或安全exit及observed位；原文用WeakMap保存，已有来源不覆盖，只在沙箱副本缺少业务text字段时提供不可枚举只读别名。原raw-text模块原样归入values。
+必要性：根清理后不能保活旧Fiber或权限；JSON文本投影还须支持String(value)恢复原文而不污染输出键。
+不做会怎样：保留旧Promise字段会残留race专属取消状态；没有来源映射则投影后的对象无法恢复精确文本；把元数据写成可枚举字段会改变业务合同。
 
-机制：SandboxPromise 改为 state 联合 { fiber } | { exit }，observed 默认 false；删去 interrupted 和 immediate Effect 字段。
+### packages/core/src/v1/config/config.ts
 
-必要性：H023/H046 可以统一即时与异步 Promise，并在根结束后释放旧 Fiber 引用。
+源文件 SHA-256：`c4f4b1ecf28b6bd76bf3ea209995c38288428c843129b0baa95055ca439d8c28`
+候选 SHA-256：`0e2fa28ad38729a34727b33cf9df1e07151a784938af74f5dfa2a835b60e8ed4`
 
-不做会怎样：保留旧结构会把 race 专属取消标记和即时 Effect 带入新语义，也无法统一表达已安全退休的 Promise 结果。
+#### H082 · 声明JSON配置的唯一公开合同
 
-配套修改：H023、H036、H046。
+差异：`@@ -49,6 +49,18 @@ export const Info = Schema.Struct({`；SHA-256：`4c14037e2fb5b8d0f7a3e7cdd45d7282dbc4c368ad667e77f74d01325217fe50`
+首段：`    description: "@deprecated Use 'references' field instead. Named git or local directory references", ⏎   }),`
+尾段：`    description: ⏎       "Enable or disable snapshot tracking. When false, filesystem snapshots are not recorded and undoing or reverting will not undo/redo file changes. Defaults to true.",`
 
-### packages/opencode/src/effect/runtime-flags.ts：运行模式配置
+职责：ConfigV1接收项目和全局Codemode选项，HTTP与SDK由它派生。
+机制：codemode为boolean或含enabled/keep_tools可选布尔字段的对象；沿用原配置合并，说明由Schema传到生成类型。
+必要性：用户需要opencode.json控制显示模式，不能只保留进程环境开关或在宿主手工解析未知JSON字段。
+不做会怎样：不加字段时配置解码无法保留用户的Codemode设置，HTTP和SDK也不知道该配置；独立手工解析会与公开配置合同脱节。
 
-源文件 SHA-256：`fd372b725c92a47355cab7e6e55dd0b8549fdff59814c65b8ced33e0325983c3`
-候选 SHA-256：`23d8ecf3d9a12878baf03a9fd58d0d1455c113396dbe057ab6cb1442d7f1b0b5`
-
-#### H081 · 在既有运行配置中定义两个显示开关
-
-差异：`@@ -14,6 +14,9 @@ const enabledByExperimental = (name: string) =>`；SHA-256：`55e90969efeb04aebc13a654159e236e1138991145fef247c2f429b691f44760`
-首段：`  ) ⏎  ⏎ export class Service extends ConfigService.Service<Service>()("@opencode/RuntimeFlags", {`
-尾段：`  pure: bool("OPENCODE_PURE"), ⏎   disableDefaultPlugins: bool("OPENCODE_DISABLE_DEFAULT_PLUGINS"),`
-
-职责：RuntimeFlags负责进程级配置解码和缺省值，不承担权限判断。
-
-机制：OPENCODE_EXECUTE与OPENCODE_EXECUTE_KEEP_TOOLS都使用已有Config.boolean，缺省true，启动读取。
-
-必要性：用户需要关闭Execute或只展示Execute；现有tools兼容字典会被翻译成权限，不能独立表达显示选择。
-
-不做会怎样：模型仍始终同时看到两种入口；用权限模拟显示可能把本应留给Execute的内部工具也删掉。
-
-### packages/opencode/src/mcp/catalog.ts：MCP 协议投影
+### packages/opencode/src/mcp/catalog.ts
 
 源文件 SHA-256：`fafeb96cf45c3c8769e13395b1d6e3a9d9628802f41eb9678a2d86f7b8796e1e`
 候选 SHA-256：`bece9223f0b0b25d121d7b4c4164fe9950559304e5d1c9e9f1a4b7cf3e533f64`
 
-#### H082 · 让 MCP 投影接收输出声明
+#### H083 · 让 MCP 投影接收输出声明
 
 差异：`@@ -58,7 +58,11 @@ export async function callTool(entry: MCP.McpTool, args: unknown, signal?: Abort`；SHA-256：`7f456c6c4ac30fa12dbbfbe2a8b8a0ad97457152536ae5a6340d578497ef6876`
 首段：`} ⏎  ⏎ // 同一次 transport 的程序投影保留结构化值；媒体留在宿主，避免字节进入解释器。`
 尾段：`  const text: string[] = [] ⏎   const attachments: NonNullable<Tool.ExecuteResult["attachments"]> = []`
 
 职责：把判断文本投影资格所需的协议合同带到 owner。
-
 机制：programResult 新增可选 outputSchema 参数，structuredContent 和附件处理流程保留。
-
 必要性：只有 MCP 适配层同时知道原结果和工具声明，宿主不能仅凭文本长得像 JSON 决定。
+不做会怎样：H084 无法排除已声明输出的结果，可能改变有类型工具的返回语义。
 
-不做会怎样：H083 无法排除已声明输出的结果，可能改变有类型工具的返回语义。
-
-配套修改：H083、H095。
-
-#### H083 · 标记可投影的成功单文本结果
+#### H084 · 标记可投影的成功单文本结果
 
 差异：`@@ -95,7 +99,18 @@ export function programResult(result: CallToolResult): NonNullable<Tool.ExecuteR`；SHA-256：`a2846d3840d745fe3eee9f353e3247c41f1a60c271e2f389c3ab12ea0bc381da`
 首段：`  // 媒体专用结果也返回可组合的普通值，让脚本知道调用成功而无需接触字节。 ⏎   const value = result.structuredContent ?? (text.length > 0 ? text.join("\n")`
 尾段：` ⏎ export * as McpCatalog from "./catalog"`
 
 职责：严格限定哪些 MCP 文本允许后续转成对象或数组。
-
 机制：仅在非 isError、无 outputSchema、无 structuredContent、恰有一个文本且其余内容仅 image/audio 时给出 rawText。原 value 与独立 attachments 保留。
-
 必要性：一段 schema-less JSON 文本可供脚本组合，分段文本、资源、错误和声明输出仍遵循原协议。
-
 不做会怎样：无标记时宿主无法安全选择投影；宽泛解析会把已声明字符串、错误正文或多块协议内容改成另一种结果。
 
-配套修改：H008、H082、H095、H100、H106。
-
-### packages/opencode/src/session/tools.ts：Session 目录与清理
+### packages/opencode/src/session/tools.ts
 
 源文件 SHA-256：`c68bfb2c4427423c536a24a26c4c81c76fbc85ba373fce560ef5d7cee9eee862`
-候选 SHA-256：`e370e9bf5bf4a3406cfcd8fd399fe8705a69fa2faef79c11d79b264ea3445c22`
-
-#### H084 · 读取既有运行模式服务
-
-差异：`@@ -1,3 +1,5 @@`；SHA-256：`ccf54147d5f62276081e163d0ecbe74cb96136937d6f9e25e0825e58f065503c`
-首段：`// 工具面使用宿主现有运行配置，避免另建一套权限或项目配置解析。 ⏎ import { RuntimeFlags } from "@/effect/runtime-flags"`
-尾段：`import { SessionV1 } from "@opencode-ai/core/v1/session" ⏎ import { Provider } from "@/provider/provider"`
-
-职责：SessionTools在自己的执行上下文中连接宿主计时能力。
-
-机制：导入RuntimeFlags并由同一resolve调用读取，配套后面的provider显示筛选。
-
-必要性：模式应沿宿主现有配置服务传递，不能用全局环境变量查询另开一条读取路径。
-
-不做会怎样：显示筛选没有对应配置来源，无法提供两个独立运行模式开关。
+候选 SHA-256：`74946e5168a267304560f2b00ff3e79f82aa606754743963a125de55916abd89`
 
 #### H085 · 把本次预算接到真实宿主等待
 
-差异：`@@ -28,7 +30,8 @@ import { EffectBridge } from "@/effect/bridge"`；SHA-256：`08e41730d167eeb332ff9887b4790f4b17c646cf5f264206f2cdba7395c823c0`
+差异：`@@ -28,7 +28,8 @@ import { EffectBridge } from "@/effect/bridge"`；SHA-256：`e0350ba24b1e53bf83563f64c01424125e08b8982dbf5d0ebe5dff97d2c9ce5b`
 首段：`import { ProviderV2 } from "@opencode-ai/core/provider" ⏎ import { ModelV2 } from "@opencode-ai/core/model"`
 尾段：`type ToolTimingInput = { ⏎   source: "local" | "mcp"`
 
 职责：SessionTools在自己的执行上下文中连接宿主计时能力。
-
 机制：复用已有code-mode模块的预算工厂导入，由本次Execute分支创建实例。
-
 必要性：同一宿主模块已经提供CodeModeHost与HTTP能力，不另建计时模块或全局状态。
-
 不做会怎样：缺少配套导入，实际创建预算的分支无法解析；导入本身不增加另一种计时政策。
 
-#### H086 · 把进程模式带入本次工具解析
+#### H086 · 读取注册表确定的显示模式
 
-差异：`@@ -108,6 +111,8 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {`；SHA-256：`a330adbddf7fb6355c35e6a7c44b60d0bfab8b95707997d614d952f653b0b21f`
+差异：`@@ -108,7 +109,9 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {`；SHA-256：`6da0f379ff0d3bc926873318855513fb06fd8431a6ca3fa54f06d2a8bf44e21a`
 首段：`  const run = yield* EffectBridge.make() ⏎   const plugin = yield* Plugin.Service`
-尾段：`  const mcp = yield* MCP.Service ⏎   const truncate = yield* Truncate.Service`
+尾段：`  const truncate = yield* Truncate.Service ⏎   const sessions = yield* Session.Service`
 
-职责：SessionTools在自己的执行上下文中连接宿主计时能力。
-
-机制：从已提供的RuntimeFlags.Service取得当前启动配置，后续筛选只使用这份状态。
-
-必要性：显示模式与权限结果是不同输入；不能从eligible里是否存在execute反推模式。
-
-不做会怎样：Execute权限被禁止时可能错误恢复用户选择隐藏的原工具。
+职责：SessionTools消费工具注册表已解析的模式，不再自己读取另一套配置服务。
+机制：从原ToolRegistry.Service调用codemode()，此状态用于provider工具过滤、目录优先级和宿主keepTools。
+必要性：Registry已经拥有Config并负责execute能否列出，Session复用同一入口可避免向SessionPrompt追加Config接线。
+不做会怎样：各处分别读配置可能采用不同缺省或优先级；从权限结果反推模式又会在execute被禁用时恢复用户隐藏的工具。
 
 #### H087 · 把本次预算接到真实宿主等待
 
-差异：`@@ -116,6 +121,8 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {`；SHA-256：`42805c2a45570193a4f3de53825dc18473668805bea29ee5287cbd4679c51e78`
-首段：`  type Execution = { ⏎     // child 继承本次批准与已完成上下文，身份始终由宿主分配而非脚本传参。`
+差异：`@@ -116,6 +119,8 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {`；SHA-256：`26b0ca85d927b14e8c391bd110708afb19d2d8f1469384c90b8ca24b2cf9183c`
+首段：` ⏎   type Execution = {`
 尾段：`    review: Permission.ExecuteReview ⏎     messages: SessionV1.WithParts[]`
 
 职责：SessionTools在自己的执行上下文中连接宿主计时能力。
-
 机制：私有Execution类型增加泛型pause包装器，工具child携带当前根预算。
-
 必要性：child执行经过独立run.promise，不能依赖隐式Fiber上下文传递。
-
 不做会怎样：没有这个字段，ctx.ask无法对正在计时的根预算暂停，或不得不从全局猜当前执行。
 
 #### H088 · 把本次预算接到真实宿主等待
 
-差异：`@@ -172,7 +179,8 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {`；SHA-256：`aa401ef9e57be33631916f59250b69a6fcac94839fccde2c331cec9d5393faa2`
+差异：`@@ -172,7 +177,8 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {`；SHA-256：`74f3f50e88153d3edaf8e3e907b3ed3b9843f30a734986e064ba1a41894fcaf0`
 首段：`        }) ⏎         // #216：权限询问与 abort 信号竞速——cancel 时不再阻塞在 permission.ask 而是立即失败`
 尾段：` ⏎   const inventory: Record<string, Tool.Def> = Object.fromEntries((yield* registry.tools({`
 
 职责：SessionTools在自己的执行上下文中连接宿主计时能力。
-
 机制：context.ask在执行权限询问/审批的同一Effect外调用execution.pause，直接工具无Execution仍走原调用。现有abort竞争和错误传播保留。
-
 必要性：所有真实native、MCP与fetch权限都通过这个ctx.ask；暂停应由这个共同owner定义。
-
 不做会怎样：运行中升阶审批仍消耗脚本期限，用户回答前整个Execute可能被误判超时。
 
-#### H089 · 把本次预算接到真实宿主等待
+#### H089 · 把当前模式和独立预算传给Execute宿主
 
-差异：`@@ -197,6 +205,8 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {`；SHA-256：`f91f440b906e1c70bd5c3fd93491d8601047f315477494d3ae93ecb2c96f01c9`
+差异：`@@ -197,13 +203,17 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {`；SHA-256：`8892e859e3dc146e7570cc00ed8cd196bc6f41298ac58311a26de2f8e7927f8e`
 首段：`            let parent: SessionV1.ToolPart | undefined ⏎             return yield* Effect.gen(function* () {`
-尾段：`              // 用户取消与权限终止共享 signal，后续 leaf 和已运行任务观察同一结束原因。 ⏎               const signal = AbortSignal.any(options.abortSignal ? [options.abortSignal, controller.signal] : [controller.signal])`
+尾段：`                fetch: (url, init) => Effect.gen(function* () { ⏎                   if (signal.aborted) return yield* Effect.interrupt ⏎                   const approved = review`
 
-职责：SessionTools在自己的执行上下文中连接宿主计时能力。
-
-机制：每次execute创建独立预算，并把wait闭包交给CodeModeHost。创建不扣时，解释器启动竞争时才调用wait。
-
-必要性：暂停状态不能跨Execute共享，也不能在预跑或初始审批时开始消耗真实执行预算。
-
-不做会怎样：全局或过早起算会使别的Execute受影响，或用户还在初始审批时已失去执行时间。
+职责：本次Session执行显式携带显示模式与计时能力。
+机制：在execute分支创建makeExecutionBudget，将mode.keepTools和budget.wait放入ctx.codeMode；已有signal、权限review和fetch仍属于本次调用。
+必要性：宿主目录的两个出口必须使用同一模式；暂停计时也不能跨Execute共享或从预跑时就扣预算。
+不做会怎样：只改变provider工具列表会留下错误内联优先级；共享或过早启动预算会让等待初始审批的时间、其他Execute的暂停影响本次执行。
 
 #### H090 · 把本次预算接到真实宿主等待
 
-差异：`@@ -204,6 +214,8 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {`；SHA-256：`086059ae663521e58f0eb569b34a5f89455bcf741005ade3844d1fa719da5689`
-首段：`              let sequence = 0 ⏎               ctx.codeMode = {`
-尾段：`                fetch: (url, init) => Effect.gen(function* () { ⏎                   if (signal.aborted) return yield* Effect.interrupt ⏎                   const approved = review`
-
-职责：SessionTools在自己的执行上下文中连接宿主计时能力。
-
-机制：每次execute创建独立预算，并把wait闭包交给CodeModeHost。创建不扣时，解释器启动竞争时才调用wait。
-
-必要性：暂停状态不能跨Execute共享，也不能在预跑或初始审批时开始消耗真实执行预算。
-
-不做会怎样：全局或过早起算会使别的Execute受影响，或用户还在初始审批时已失去执行时间。
-
-#### H091 · 把本次预算接到真实宿主等待
-
-差异：`@@ -212,6 +224,7 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {`；SHA-256：`17730cb905ed481544f8dab75cd85552458de802913a43c2c4e1bd381949c7c7`
+差异：`@@ -212,6 +222,7 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {`；SHA-256：`c7d68db18653dcd595a08d2a4e03098dc2a2e55b4b5d77315bdaa3224c1407cc`
 首段：`                  // 复用真实子调用的权限上下文，HTTP也服从整段批准、升阶及终止。 ⏎                   return yield* fetchHTTP(url, init, context({}, { ...options, abortSignal: signal }, {`
 尾段：`                }), ⏎                 begin: (code, calls) => Effect.gen(function* () {`
 
 职责：SessionTools在自己的执行上下文中连接宿主计时能力。
-
 机制：fetch的私有Execution携带budget.pause，让其ctx.ask引用当前根预算。
-
 必要性：HTTP复用相同权限上下文，但不通过普通child构建点；这个唯一差别需要明确传递同一个能力。
-
 不做会怎样：HTTP权限审批会继续扣脚本时间，即使普通工具审批已暂停；真实HTTP请求自己的30秒期限不改变。
 
-#### H092 · 把本次预算接到真实宿主等待
+#### H091 · 把本次预算接到真实宿主等待
 
-差异：`@@ -253,6 +266,8 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {`；SHA-256：`fa28e32f06b3656c6acf95ab9eedfb94bfb3ebb78d85d48bbfd4c0b6924de1d2`
+差异：`@@ -253,6 +264,8 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {`；SHA-256：`0bd6745f6af9d898c8b7356ede97164cdd575441c6c5996d900134fe15f23a70`
 首段：`                    }) ⏎                   const child: Execution = {`
 尾段：`                  } ⏎                   return yield* input.processor.runChild({ parentCallID: options.toolCallId, callID, tool: id, input: args },`
 
 职责：SessionTools在自己的执行上下文中连接宿主计时能力。
-
 机制：child Execution携带budget.pause，随后经原invoke/run.promise进入ctx.ask。
-
 必要性：每个独立宿主Promise必须接到同一次Execute预算，不能各自开启或重置计时器。
-
 不做会怎样：真实子调用与库根计时器断开，单独改变ctx.ask并不能排除人工等待时间。
 
-#### H093 · 说明并展开 child 的取消与清理边界
+#### H092 · 说明并展开 child 的取消与清理边界
 
-差异：`@@ -261,9 +276,17 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {`；SHA-256：`30f23967d4fedfac8c08e8aac3010a65ce8b08310fb269bd5d83caafad236bbc`
+差异：`@@ -261,9 +274,17 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {`；SHA-256：`3c4fa6504419898e4338fd0275c58a2e0ef4c88b2647ce05a21bd4adeced8951`
 首段：`                      const cancel = new AbortController() ⏎                       const pending = invoke(leaf, args, { ...options, toolCallId: callID, abortSignal: AbortSignal.any([signal, cancel.signal]) }, child)`
 尾段：`                    }), ⏎                   ).pipe(Effect.onExit(() => Effect.gen(function* () {`
 
 职责：说明真实 child 的取消通知和清理完成顺序，并展开原 pending 回调以便阅读。
-
 机制：注释说明根 Scope 或宿主中断触发取消、abort 仅发通知、ensuring 等原 pending 完成；Effect.ensuring/Effect.promise/pending.then 的原表达式分行显示，两个回调仍分别返回 undefined。
-
 必要性：race 只竞争观察，实际 child 由根或宿主取消；同环境下一格接管资源仍依赖原 Promise 完成。分行后能直接看清两个完成分支都归同一清理等待。
-
 不做会怎样：保留旧排版不改变执行。缺少准确注释会让维护者误把 race 获胜当作生产者取消，或把 abort 通知当作资源已释放；本 hunk 没有取消或清理算法变更。
 
-配套修改：H023、H036、H100。
+#### H093 · 把本次预算接到真实宿主等待
 
-#### H094 · 把本次预算接到真实宿主等待
-
-差异：`@@ -303,7 +326,11 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {`；SHA-256：`5ee63c54e322ec5a833f53dd19e1466e82778e7b9212b9b857a47bbc1eb4cff3`
+差异：`@@ -303,7 +324,11 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {`；SHA-256：`31e05644fb42c9df74222118202bef000c99de3906632210b1ac1d370305fc97`
 首段：`              // hook 后的真实参数留给原 decoder/body；权限事实由工具自身的 ctx.ask 产生。 ⏎               yield* input.processor.updateToolCall(options.toolCallId, (part) => ({ ...part, state: { ...part.state, input: args } }))`
 尾段：`              ...result, ⏎               attachments: result.attachments?.map((attachment) => ({`
 
 职责：SessionTools在自己的执行上下文中连接宿主计时能力。
-
 机制：仅本次Execute中的question工具body由execution.pause包住，再进入原timedToolExecution；普通工具body不暂停。
-
 必要性：question的等待不调用ctx.ask，必须在其已有真实工具边界纳入同一预算。
-
 不做会怎样：用户回答问题仍会耗尽脚本期限；若包住所有工具，则shell、读文件和网络等待会错误变成无限额工作。
 
-#### H095 · 把 MCP 原输出声明交给投影
+#### H094 · 把 MCP 原输出声明交给投影
 
-差异：`@@ -601,7 +628,8 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {`；SHA-256：`162af125ca03407163636e124c5bf3cef0d653b6a3c108333896687b675dfc15`
+差异：`@@ -601,7 +626,8 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {`；SHA-256：`af8239dd0dcb3c1656a04e21f14ca0ddb231b1cd62c211eb86bc4dc61ea739b4`
 首段：`            output: truncated.content, ⏎             attachments,`
 尾段：`        }).pipe(Effect.orDie), ⏎     }`
 
 职责：在实际 Session MCP 返回路径接通资格判断。
-
 机制：McpCatalog.programResult(result, entry.def.outputSchema) 替代只传 result。
-
-必要性：H082/H083 的条件需要实际工具定义，不能由展示结果倒推。
-
+必要性：H083/H084 的条件需要实际工具定义，不能由展示结果倒推。
 不做会怎样：声明输出的 MCP 结果会被误认为无 schema 候选；SDK 原输出验证仍由既有调用负责。
 
-配套修改：H082、H083。
+#### H095 · 保留完整调用目录，再选择provider入口
 
-#### H096 · 把原 decoder 来源放进 Session 目录
-
-差异：`@@ -621,10 +649,19 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {`；SHA-256：`d420fda774892194742a24a25eebc13c5364c3944db9e575325cbde1fc31893a`
+差异：`@@ -621,10 +647,19 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {`；SHA-256：`873b5d86c591c29f874bd320cd8b32bee16f54c1af689e940fe626d426a9d8da`
 首段：`        : "$opencode" ⏎       const local = entry && item.id.startsWith(server + "_") ? item.id.slice(server.length + 1) : item.id`
 尾段：`    // Provider 只负责参数呈现；直接与嵌套入口都继续复用工具原来的运行时校验。 ⏎     tools[item.id] = tool({`
 
-职责：让宿主目录携带真实 runtimeParameters，同时保留现有展示 schema 和输出合同。
+职责：目录携带原decoder来源，显示选择不改变脚本可调用能力。
+机制：目录项逐字段转交runtimeParameters与原output合同，MCP命名沿原入口；provider循环才依据Registry模式隐藏catalog内普通工具，控制工具保留。
+必要性：真实参数与展示schema不能混为一谈，隐藏直调也不能把工具从Execute内部删除。
+不做会怎样：省略原合同会按展示字段猜参数；若构建目录前先删工具，Execute-only失去内部能力；按权限自动恢复隐藏项会违背显示设置。
 
-机制：目录项传递item.runtimeParameters，返回对象保持逐字段展开；catalog.push、filter、namespace查找等未变语句恢复基线排版。 完整catalog构建后，provider循环按RuntimeFlags隐藏脚本可调用工具；控制工具保留，权限禁止不自动切换模式。
+#### H096 · 把组合调用建议放进实际系统指令
 
-必要性：真实decoder来源必须经SessionTools到toolTree，插件展示变化不能夺取参数合同。未改变的筛选和命名语句无需重新排版。
+差异：`@@ -635,7 +670,15 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {`；SHA-256：`12d9bdcc512462a971e96415b661324479ef3327e24fe3ebafd9ce95dccb1cb9`
+首段：`  } ⏎  ⏎   // 上游将稳定说明放工具定义，动态目录放当轮指令；V1保持原provider-turn边界。`
+尾段：` ⏎ function toRecord(value: unknown) {`
 
-不做会怎样：省去runtimeParameters会丢失实际合同；恢复未变语句原文不改变行为，只减少主干无关diff。 若先从inventory删除工具，Execute-only会连带失去内层调用能力；若依据权限回退，显示模式会违背用户选择。
+职责：系统提示只负责何时组合工具，工具说明负责调用和返回值。
+机制：eligible.execute存在时，沿既有instructions数组先给一条批量、依赖链和过滤的使用建议，再给按同一mode生成的动态目录；关闭时不注入。
+必要性：参考Pi的是提示组织，不需要改各模型模板或引入另一套工具执行逻辑。
+不做会怎样：说明只堆在工具描述中会缺少系统层使用方向；即使execute关闭仍注入会诱导调用不可用能力。
 
-配套修改：H099、H100、H104、H108、H109。
-
-### packages/opencode/src/tool/code-mode.ts：Execute 宿主
+### packages/opencode/src/tool/code-mode.ts
 
 源文件 SHA-256：`2d16bff069c584a73689cdc821aa0b39e9508163dba369c84367e6ded1b8369d`
-候选 SHA-256：`30a6eba87b256429395a94ac8591240bfbb799a4fb2429e3f8a11153dbe42dca`
+候选 SHA-256：`9e8f3215710f1ca25b4f623a635a4b903a4219785d9d8f123f25675d51bb6b55`
 
-#### H097 · 建立宿主可暂停预算并声明环境和期限参数
+#### H097 · 集中配置解释、暂停预算和公开参数
 
-差异：`@@ -1,13 +1,74 @@`；SHA-256：`55880206c5ce4cfb38f7d3b2e4750a4b3fd9eb6a516cc83df795ab68a5e55a0e`
-首段：`import { Tool } from "./tool" ⏎ import { Truncate } from "./truncate"`
+差异：`@@ -1,13 +1,86 @@`；SHA-256：`7fb4311b2aa028c0c436a2048a4104751207e152d3678f1c86f29b37ddb213c0`
+首段：`import type { ConfigV1 } from "@opencode-ai/core/v1/config/config" ⏎ import { Tool } from "./tool"`
 尾段：`    description: "Script body executed by the confined interpreter.", ⏎   }),`
 
-职责：宿主拥有人工等待政策，提供本次独立剩余预算，参数仍由公共schema验证。
-
-机制：makeExecutionBudget使用Clock、等待计数、剩余时间和单个变更Deferred；首次人工等待扣除已用时间，最后一个离开后恢复，acquireUseRelease保证异常/中断归还。真正wait调用才起算，外部取消保持独立。environmentID可选，timeout默认600000且上限2147483647。
-
-必要性：固定墙钟会把用户等待计入执行工作；并发问题不能重置或重复扣除预算。已创建对象不能提前消耗预跑和初始审批时间。
-
-不做会怎样：用户稍晚回答会被脚本超时打断；一个等待结束可能错误恢复仍有其他等待的预算；超大参数会悄悄变成无期限。
-
-配套修改：H100、H101。
+职责：宿主提供单一Codemode配置解释、可暂停执行预算及公开环境/期限参数。
+机制：configuration通过Effect ConfigProvider解析两个OPENCODE_CODEMODE环境变量，以合并后的JSON或true作为缺省；Registry拥有配置读取。makeExecutionBudget用等待计数、单Deferred和剩余时间处理重叠人工等待；Parameters声明environmentID和毫秒timeout。
+必要性：配置优先级与预算是共享宿主入口的职责，不能在Registry、Session或各子调用复制策略；环境句柄和可调期限需要真实schema。
+不做会怎样：环境默认true可能遮掉JSONfalse，或两个工具面产生不同模式；普通固定timeout会在用户仍审批时终止脚本，重叠等待也可能重复扣时。缺参数合同则模型无法明确复用环境或调整期限。
 
 #### H098 · 在每份进度 metadata 保留环境 ID
 
-差异：`@@ -16,6 +77,8 @@ export const Parameters = Schema.Struct({`；SHA-256：`29ec35c45ef7b7403e0668986ee5e40a110a5a5db91cbfb50a01980647d79565`
+差异：`@@ -16,6 +89,8 @@ export const Parameters = Schema.Struct({`；SHA-256：`d41becdb0d0103df5492b3b3f3683282053924833dd3f6e8766430a825b6c94a`
 首段：`type CallEntry = { tool: string; status: "running" | "completed" | "error"; input?: Record<string, unknown> } ⏎ `
 尾段：`  error?: boolean ⏎   loaded?: string[]`
 
 职责：使成功、进度与错误回执可以指回同一环境。
-
-机制：Metadata 增加 environmentID 字段；H100 在每次整对象更新时填写。
-
+机制：Metadata 增加 environmentID 字段；H102 在每次整对象更新时填写。
 必要性：进度 metadata 被替换时，环境句柄不能只存在第一份回执。
-
 不做会怎样：仅开始时发 ID，后续更新会丢结构化句柄，出错或取消后难以复用。
 
-配套修改：H100。
+#### H099 · 携带真实合同、本次模式和计时能力
 
-#### H099 · 声明目录项中的原 decoder 来源
-
-差异：`@@ -25,16 +88,19 @@ type Metadata = {`；SHA-256：`e0c8a8056e48b20d0b893bf709a1aec5ba4d958227620ada737642b7d8a7923f`
+差异：`@@ -25,16 +100,20 @@ type Metadata = {`；SHA-256：`027ded7f603de884b699557151fb81edb8b0055f3391fe66c699e29c5c570f40`
 首段：`type Attachment = NonNullable<Tool.ExecuteResult["attachments"]>[number] ⏎ `
 尾段：`  begin(code: string, calls: readonly PermissionPrecheck.ExecuteCall[]): Effect.Effect<void> ⏎   invoke(id: string, input: unknown): Effect.Effect<Tool.ExecuteResult, unknown>`
 
 职责：把 Session 目录与 CodeMode Tool.make 的真实合同入口连起来。
-
-机制：CatalogEntry 新增可选 runtimeParameters，inputSchema 继续负责展示 JSON。
-
+机制：CatalogEntry 新增可选 runtimeParameters，inputSchema 继续负责展示 JSON。 CodeModeHost同时接收当前keepTools和独立waitForTimeout，使目录优先级与真实计时沿本次Session能力传入。
 必要性：工具可有真实 Effect decoder，也可只有 MCP/自定义 schema，类型需保留这一区别。
+不做会怎样：宿主适配器无法把 H095 收到的原合同传给 H079/H080，或只能把展示 schema 当实际来源。 只更新静态说明而不传当前模式，Execute-only实际runtime的内联优先级仍会与说明不同。
 
-不做会怎样：宿主适配器无法把 H096 收到的原合同传给 H078/H079，或只能把展示 schema 当实际来源。
+#### H100 · 在一个边界中持有取消、租约和真实执行
 
-配套修改：H096、H100。
-
-#### H100 · 串起真实 Execute 的环境、预跑与交付
-
-差异：`@@ -84,139 +150,263 @@ const toolTree = Effect.fn("CodeMode.toolTree")(function* (`；SHA-256：`771a95ca8a268f5f6f8eb2072feeff1c4190ac010f2ed4f68c32c0e619c40902`
+差异：`@@ -84,67 +163,157 @@ const toolTree = Effect.fn("CodeMode.toolTree")(function* (`；SHA-256：`f320c86a86eb98955c6bc01770ce2c7b3ee5202ae472119a301418b639a9bb3d`
 首段：`      description: entry.description, ⏎       // 沿用 V1 原 JSON Schema 签名适配：对象原样透传，真实输入校验仍由工具拥有。`
-尾段：`    } ⏎     return init`
+尾段：`            }), ⏎           onToolCallEnd: ({ index, outcome }) =>`
 
-职责：在现有宿主入口组合当前工具、环境租约、预跑检查、真实执行、进度和最终输出。
+职责：宿主将当前工具合同、环境租约与取消绑定为一次完整操作。
+机制：toolTree传原inputContract；discovery按最终显示模式优先真实内置工具。文件内withEnvironment先验证host并安装外层abort竞争，取得租约后运行完整业务generator，清理完才释放。generator统一规范化围栏、创建当前runtime、收取附件和上下文；进度在复制调用列表前检查100ms窗口。
+必要性：租约和取消属于一个生命周期，不能在预跑、begin或真实脚本里各包一层。独立边界让业务保持原层次，而不是把整个文件不断缩进；当前工具合同和进度事实必须贯穿各阶段。
+不做会怎样：若abort只放在取得租约后，排队者无法及时退出；若业务返回即释放，下一单元会与旧cleanup重叠。缺合同接线则展示和真实validator分叉；没有发送前窗口会重复复制全部调用记录。
 
-机制：toolTree 传原 inputContract；discovery 只优先当前原生 read/grep/glob/edit。完整单一 JS/TS 外围栏规范化一次，外层同步 abort 观察覆盖租约排队。租约内创建 runtime，真实预算默认十分钟，探针用同一源码和环境副本、两秒期限。进度先检查100毫秒窗口再复制列表；结果保留 ID、上下文、附件、日志与未观察提醒，把完整正文交既有 wrapper 截断。 实际runtime接收宿主waitForTimeout；该预算只在真实执行起算，预跑仍用自己的两秒期限。
+#### H101 · 有界预跑、唯一记录和统一错误交付
 
-必要性：这组连续改动把各库能力接到真实 Session 路径：权限与工具校验沿原入口，环境串行持续到根清理完成，输出事实不由脚本的 return 筛掉。
+差异：`@@ -155,48 +324,90 @@ export const CodeModeTool = Tool.define(`；SHA-256：`7090ed44ccefe00c37262b080a0ed69880badeecdc41ea071da1421ba416e205`
+首段：`            }), ⏎         })`
+尾段：` ⏎         // The interpreter validates returned values as plain JSON, so stringify cannot throw;`
 
-不做会怎样：只改库而不接宿主，环境和输入合同不会生效；原空环境预跑看不到旧 helper；每事件都快照会放大父进度开销；成功或失败正文也缺少环境 ID 和新增异步失败事实。输出直接复用既有统一截断，最终实现没有宿主折半 JSON 预览。
+职责：预跑只收集确定的调用，整段检查与真实执行继续共用同一源码。
+机制：在当前租约内复制环境，sleep立即结算；500ms与总1024调用限制来自同一runtime。record以工具身份和严格参数值去重，普通工具与fetch共用入口，先出现者保持顺序；随后host.begin使用唯一列表。真实runtime不继承探测上限，失败/取消保留环境ID与完整调用事实。
+必要性：轮询不能将相同意图存成数万条，但不同参数必须保留；去重也不能延长可执行次数。环境副本避免探测修改真实状态，独立真实权限入口承担未发现调用。
+不做会怎样：不设总调用限制会在期限内累积大量探测；只在检查时去重仍浪费记录。若按unique计数则重复轮询永远不触发调用上限；若共享真实环境则变量和闭包会被预跑执行两遍。
 
-配套修改：H008、H020、H045、H046、H064、H083、H097、H098、H099、H101。
+#### H102 · 结果、环境身份与未观察事实一起交付
 
-**1. 合同来源与原生核心项**
+差异：`@@ -206,18 +417,33 @@ export const CodeModeTool = Tool.define(`；SHA-256：`a8c3e591c33c59bdd76a7d92c0dabcd740fcaadecf3482775f0629d830a4fee9`
+首段：`            ? result.value ⏎             : (JSON.stringify(result.value, null, 2) ?? String(result.value))`
+尾段：`    return init ⏎   }),`
 
-toolTree 把 runtimeParameters 作为 inputContract，input 仍是原 JSON 展示适配，原工具执行 decoder。discovery 只接受当前目录中带 runtimeParameters、namespace 为 $opencode、id 为 read/grep/glob/edit 的项。describeCatalog 与真实 runtime 共用这个选择，既不添加已过滤工具，也不提升同名 MCP 工具。
+职责：宿主保留脚本结果以外必须交付的执行事实。
+机制：成功正文包含Environment ID、仅由unobservedFailure触发的提醒、强制上下文和日志；metadata保留全部调用终态，附件独立返回。结果交现有wrapper统一截断，不加第二个JSON预览器。
+必要性：已catch的工具错误仍有审计记录，但不能被笼统当成未观察失败。ID和附件不能被脚本return筛掉，也不能因截断丢失恢复入口。
+不做会怎样：省略会把未等完的异步工作藏在父成功后，或让正常catch变成误导性提醒；丢掉ID使后续无法继续Notebook，额外预览会复制统一截断职责。
 
-**2. 同一份规范化源码进入三个阶段**
+### packages/opencode/src/tool/execute-environments.ts
 
-只移除完整、唯一、标签为 JS/TS 或无标签的外层代码围栏；混合文本和内层围栏仍交原编译器。规范化后的 code 同时传给探针、host.begin 和真实 runtime.execute，避免权限审查和实际执行看到不同源码。
+源文件 SHA-256：`e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`
+候选 SHA-256：`a6987985094007ed929c7d3d02f3afb4d3d6fed7d2bd19ee13313daee4be2914`
 
-**3. 取消覆盖环境等待，执行起点登记修复留在库内**
+#### H103 · 按Session与位置管理环境租约和结束回收
 
-宿主保留 AbortSignal 的同步 resume(Effect.interrupt)，外层 raceFirst 包住 environments.use，所以排队也能被取消；监听器退出时移除。公共执行入口的 yieldNow 归 H040，它在脚本启动前让外层 timeout/race 完成登记，子生产者仍同步启动并原子登记。此处没有给 abort listener 延迟通知。
-
-**4. 环境 ID、进度和最终状态分别交付**
-
-拿到租约后先发 durable 更新，把同一 ID 放进 metadata 和正文。真实调用的首条 ephemeral 进度立即发送，后续事件先检查100毫秒窗口再复制 calls；没有定时刷新任务。跳过的是父进度快照，child hooks、权限和调用终态照常记录。最终成功由原 ToolResult 持久化，失败/中断由 onExit 保存 ID、完整 calls、错误与已收上下文。
-
-**5. 工具结果、媒体与上下文分开**
-
-每次 host.invoke 返回后先收取附件，并按 kind:key 去重实际收到的 context。只有 program.rawText 标记触发 fromJsonText；其他 program.value，包括 null、false、0，原样选用。脚本 return 1 也不会撤掉宿主已经收到的规则正文和媒体。
-
-**6. 真实预算与探针期限分开**
-
-真实 runtime 在租约内绑定 lease.environment、当前 tools/fetch、默认600000毫秒或显式 timeout，以及现有 Truncate maxBytes 派生的 maxLogBytes。环境排队、预跑和 host.begin 都在 runtime.execute 之外。探针复制同一环境，使用当前桩工具和两秒 timeout，无旧128次工具调用上限；HTTP 桩只记录意图，不发网络。探针失败前已观察到的调用仍交给 host.begin，真实权限检查继续负责后来才确定的调用。
-
-**7. 完整正文交现有 wrapper**
-
-普通失败保持 Effect.fail，正文含 ID、诊断、建议与已捕获日志。成功正文合并 ID、必要的未观察失败提醒、上下文和业务结果，附件单独返回；提醒只陈述未观察事实，不罗列全部失败 child 名称。宿主按原规则 stringify 完整业务值，未添加折半 JSON 预览、手工 truncated/outputPath 或业务数组裁剪；Tool.wrap 继续负责统一截断、落盘和恢复路径。
-
-**8. 展开已有表达式并注明交付约束**
-
-fetch 的 method/url 展示、probe 的 toolTree 回调和 HTTP 桩结果展开为多行，求值顺序与字段值保持。注释说明 context 按 kind:key 更新、调用终态沿启动 index 回写、成功仅由 ToolResult 持久化、日志合并和重复错误提示过滤；这些说明不增加新的执行策略。
-
-### packages/opencode/src/tool/execute-environments.ts：环境租约
-
-源文件 SHA-256：`e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`（基线不存在此文件）
-候选 SHA-256：`52ebece9f63d1e8a9bef35a574a2c1282258d2b6de0a40525021dd8ca470b761`
-
-#### H101 · 按 Session 与位置管理串行环境租约
-
-差异：`@@ -0,0 +1,234 @@`；SHA-256：`3842e44d8798fcdeb70cca97f4de658aedd58000e49a3a61ea0ee053197b06bd`
+差异：`@@ -0,0 +1,230 @@`；SHA-256：`95fdeb9fd55c167a6dffb0d453572ece57542bd381a327964047903af71165da`
 首段：`import { CodeMode } from "@opencode-ai/codemode" ⏎ import { Context, Deferred, Effect, Layer, Schema, Semaphore } from "effect"`
 尾段：`export const node = LayerNode.make({ service: Service, layer, deps: [EventV2Bridge.node, SessionStore.node] }) ⏎ export * as ExecuteEnvironments from "./execute-environments"`
 
-职责：为跨格词法状态提供归属、容量、串行和真实回收。
+职责：环境服务拥有跨格词法状态、同环境串行、归属隔离及最终回收。
+机制：acquire校验owner并刷新唯一调用顺序，允许直接新建。gate串行到callback清理完成，users含排队租约。每次release更新users后扫描同owner，最近八个之外仅retire闲置项；忙项保留到自己的租约退出。Session退休和实例关闭仍先禁止准入，再取消并等drained。
+必要性：Notebook需要最近使用状态，但不能用环境容量取消真实工具或阻止第九个独立工作。完成顺序也不能覆盖调用顺序。
+不做会怎样：入口硬八项会阻塞本可并行的新环境；只按闲置先后删除会保留错误集合；提前丢掉忙项会让实例关闭无法等待真实清理。结束扫描让同一条回收路径同时满足八项保留和活动溢出。
 
-机制：使用原owner校验、gate、cancel、drained和users管理租约。每个owner最多八项，Map顺序在acquire刷新，release只处理清理；新建超过八项时等待最旧活动项drain并重新选择，只取消自己的等待。Session退休和实例关闭仍先关闭准入再取消并等清理。
-
-必要性：Notebook需保留最近使用的唯一环境，慢调用的结束顺序不能改变LRU；不能为腾槽取消仍在运行的工具或跳过更旧环境淘汰较新状态。
-
-不做会怎样：原64项/闲置顺序与最近八项不符；若忙时直接删Map或跳过最旧项，可能丢失真实执行/保留错误集合；没有drain和finally则排队取消可能永久占槽。
-
-配套修改：H010、H100、H105。
-
-**1. 状态、租约和退休各自承担一种职责**
-
-Environment保存词法状态；gate串行实际执行；users包含排队；drained表示当前租约清理完毕；cancel只用于整环境退休。acquire与释放逻辑的安装保持不可中断，只有等待最旧drain这一段可中断，避免增计数后失去释放者。
-
-**2. 调用顺序决定保留集合**
-
-每次成功接纳同一ID只移动原条目，不增加环境数。新建者在等待后重读owner集合，保留等待期间发生的复用刷新；release不重新排序。旧ID被淘汰后明确不可用，不自动创建替代环境。
-
-### packages/opencode/src/tool/registry.ts：Registry 合同和依赖
+### packages/opencode/src/tool/registry.ts
 
 源文件 SHA-256：`fb07f6ea12655025ef2fd758a055f613651361560c992b28c8317d203247343b`
-候选 SHA-256：`e676077221ff0c0fa7890d6776a61be4db8bc5efe969d1d5377e51ce55493d66`
+候选 SHA-256：`4096d1fe581d21766718f26c98809714596c431fd09c88b716f8d47d42ac4cec`
 
-#### H102 · 导入环境服务节点
+#### H104 · 导入环境服务节点
 
 差异：`@@ -59,6 +59,8 @@ import { MCP } from "@/mcp"`；SHA-256：`bec3cb2322772a964ca1e3c8071100aa559465cd5c1afcb8f2e613b2164b22cc`
 首段：`import { PermissionV1 } from "@opencode-ai/core/v1/permission" ⏎ // #277：read 工具的图片附件处理收敛到 Image.Service，registry 需要装配该依赖`
 尾段：`export function webSearchEnabled(providerID: ProviderV2.ID, flags = { exa: false, parallel: false }) { ⏎   return (`
 
 职责：为 Registry 依赖图接入环境管理提供符号。
-
 机制：新增 ExecuteEnvironments import。
-
-必要性：归 H105 的依赖装配使用。
-
+必要性：归 H109 的依赖装配使用。
 不做会怎样：本 hunk 没有独立缓存或生命周期行为；单独删导入会使节点引用无法解析。
 
-配套修改：H105。
+#### H105 · 向工具消费者提供同一模式入口
 
-#### H103 · 在共同工具列表出口应用Execute开关
+差异：`@@ -80,6 +82,8 @@ type State = {`；SHA-256：`801eaf47909d299786bda6f1516a2c5ace4602c60d64ddd86c81bb3cb0c754cd`
+首段：`} ⏎  ⏎ export interface Interface {`
+尾段：`  readonly all: () => Effect.Effect<Tool.Def[]> ⏎   readonly named: () => Effect.Effect<{ task: TaskDef; read: ReadDef }>`
 
-差异：`@@ -281,7 +283,8 @@ const layer = Layer.effect(`；SHA-256：`fe36907b484461378cd7d36e656bb40eb11f0d24c8fbcc1e227857546f709d23`
-首段：`    const all: Interface["all"] = Effect.fn("ToolRegistry.all")(function* () { ⏎       const s = yield* InstanceState.get(state)`
+职责：Registry是可用工具和显示配置的共同服务边界。
+机制：接口新增codemode()，返回解析后的enabled与keepTools；不新增服务层或权限状态。
+必要性：Session本来依赖Registry，复用该入口能消除Config向调用链层层传递。
+不做会怎样：不提供入口，Session只能复制配置读取或增加上游服务注入，导致显示策略接线分散。
+
+#### H106 · 在共同工具列表出口应用Execute开关
+
+差异：`@@ -279,9 +283,15 @@ const layer = Layer.effect(`；SHA-256：`5204fdf2f0e080fe06c6f5c46d91a339d10469ae94bc37783df13be76d523a08`
+首段：`      }), ⏎     )`
 尾段：` ⏎     const ids: Interface["ids"] = Effect.fn("ToolRegistry.ids")(function* () {`
 
 职责：Registry.all拥有本地工具集合，供实际调用与ids展示共用。
-
-机制：仅当flags.execute为false时移除execute，原工具与插件条目保留。
-
+机制：读取共同配置入口的enabled，仅当它为false时移除execute，原工具与插件条目保留。
 必要性：SessionTools、HTTP、TUI及debug都读取同一Registry，不能只隐藏其中一个界面。
-
 不做会怎样：关闭Execute后工具选择器仍出现它，或用户可以经另一入口看到与设置不一致的工具集合。
 
-#### H104 · 插件修改展示后仍保留原合同
+#### H107 · 插件修改展示后仍保留原合同
 
-差异：`@@ -347,6 +350,9 @@ const layer = Layer.effect(`；SHA-256：`c69d5b071858b4ace9f0f6fb6b8272b46bc9948dda504c2115df78409e0acd88`
+差异：`@@ -347,6 +357,9 @@ const layer = Layer.effect(`；SHA-256：`e22720aa5b5f81ad71b5e5f40473338dbad165b1b0a264d2b663f305b8457ecd`
 首段：`              .filter(Boolean) ⏎               .join("\n"),`
 尾段：`            output: tool.output, ⏎             // #557：plugin 只能改 Provider definition；server policy 始终取原 Tool.Def。`
 
 职责：在 Registry 的 definition hook 之后把实际 decoder 来源传下去。
-
 机制：返回定义使用 output.parameters 展示，同时 runtimeParameters 取原 tool.runtimeParameters。
-
 必要性：插件可改说明和展示参数，实际 wrapper 闭包仍使用原 decoder，两者需保持清晰。
-
 不做会怎样：Session 只能看到插件修改后的展示参数，签名和简写会与真实校验产生偏差。
 
-配套修改：H096、H108、H109。
+#### H108 · 在原服务出口发布模式读取
 
-#### H105 · 沿现有依赖图提供环境服务
+差异：`@@ -366,7 +379,8 @@ const layer = Layer.effect(`；SHA-256：`34b2b05b298283fc322a976c72dc77a66cc6cce9120ed7be2e4a61c6f10fb3cd`
+首段：`      return { task: s.task, read: s.read } ⏎     })`
+尾段：`) ⏎ `
 
-差异：`@@ -466,6 +472,8 @@ export const node = LayerNode.make({`；SHA-256：`4fd65a6a1004e5fe96c6b1798a85b205857524dcbb3c97ab289c755b9bfa1932`
+职责：实际Layer提供接口承诺的模式入口。
+机制：Service.of返回codemode与原ids/all/named/tools，测试fake也提供该方法。
+必要性：声明接口并不等于运行时可调用，既有消费者要从同一个Registry实例获得它。
+不做会怎样：Session调用会拿到undefined，或测试只用缺失的替身掩盖实际依赖；无需另建Config服务链。
+
+#### H109 · 沿现有依赖图提供环境服务
+
+差异：`@@ -466,6 +480,8 @@ export const node = LayerNode.make({`；SHA-256：`87eadc989e07e534e53a896ce4bb5cbc65ebe8a1d1dc0daa4c0b41234cec8da8`
 首段：`    Instruction.node, ⏎     FSUtil.node,`
 尾段：`    CrossSpawnSpawner.node, ⏎     Format.node,`
 
 职责：让 Execute 初始化获得 InstanceState 下的环境 owner。
-
 机制：ToolRegistry 的 LayerNode deps 加入 ExecuteEnvironments.node，其 SessionStore/事件依赖由该节点提供。
-
 必要性：环境管理应随既有实例生命周期创建与释放，不在 resolver 每次建立另一份缓存。
-
 不做会怎样：CodeModeTool 取不到所需服务，或被迫把状态放到错误的 resolver 寿命中。
 
-配套修改：H101、H102。
-
-### packages/opencode/src/tool/tool.ts：工具 wrapper
+### packages/opencode/src/tool/tool.ts
 
 源文件 SHA-256：`8f7e44cd4dbd379e51847285a82e1cbedc8c2f81d41bc68de79c78039c1ad2ac`
 候选 SHA-256：`c09b229b7b358a69e6ff606934d57ea0f1ef68f44b5d64be97cfebc9675f1e5c`
 
-#### H106 · 在程序结果通道声明 rawText
+#### H110 · 在程序结果通道声明 rawText
 
 差异：`@@ -57,7 +57,12 @@ export interface ExecuteResult<M extends Metadata = Metadata> {`；SHA-256：`a0eb22acf61cacaf02c59816bed8cc580b6134a01057a8f2e6d4467a7144f1b4`
 首段：`  output: string ⏎   attachments?: Omit<SessionV1.FilePart, "id" | "sessionID" | "messageID">[]`
 尾段：`  context?: { kind: "instruction" | "skill"; key: string; text: string }[] ⏎ }`
 
 职责：给协议 owner 的候选标记提供宿主类型出口。
-
 机制：ExecuteResult.program 扩展为 value、可选 rawText 和 attachments；普通 output 与 context 继续分开。
-
 必要性：MCP 投影要把资格事实传到 Execute，不应通过正文猜测或改变用户可见 MCP output。
+不做会怎样：H084 的标记无法沿实际结果结构传到 H102；把它塞进业务 value 则会污染脚本数据。
 
-不做会怎样：H083 的标记无法沿实际结果结构传到 H100；把它塞进业务 value 则会污染脚本数据。
-
-配套修改：H083、H100。
-
-#### H107 · 在工具定义声明原参数来源
+#### H111 · 在工具定义声明原参数来源
 
 差异：`@@ -69,6 +74,8 @@ export interface Def<`；SHA-256：`73078c9d25047f41e1b02400f367a2b9a12245209b4cc1368e3651a986afc1a1`
 首段：`  id: string ⏎   description: string`
 尾段：`  // 程序值的同一声明服务目录和解码；输入校验仍由 parameters 独立拥有。 ⏎   output?: Schema.Decoder<unknown> | JSONSchema7`
 
 职责：让 wrapper 保留的 decoder 引用可经过 Registry 与 Session。
-
 机制：Def 增加只读可选 runtimeParameters，parameters/jsonSchema/output 的职责不变。
-
 必要性：这条类型链只保存已有来源，不在工具启动路径引入解释器依赖。
-
 不做会怎样：后续层没有标准字段接收真实 decoder，只能依赖可能被插件修改的展示参数。
 
-配套修改：H104、H108、H109。
-
-#### H108 · 固定 wrapper 实际使用的参数来源
+#### H112 · 固定 wrapper 实际使用的参数来源
 
 差异：`@@ -146,10 +153,10 @@ function wrap<Parameters extends Schema.Decoder<unknown>, Result extends Metadat`；SHA-256：`ff51a6e0c36956e82902fd97fa795d05075a34ffe01509c95ecaf63f10335e85`
 首段：`  return () => ⏎     Effect.gen(function* () {`
 尾段：`      toolInfo.execute = (args, ctx) => { ⏎         // #155：streaming metadata 先消毒再转发，避免终端转义序列先落 UI`
 
 职责：在编译 parser 的同一位置保存原 schema 引用。
-
 机制：runtimeParameters = toolInfo.parameters，decodeUnknownEffect 用这个引用在 init 时编译一次；未调用 decoder 做形式探测。原连续三行英文说明改成两处单行中文注释，分别贴近合同捕获和 parser 编译。
-
 必要性：保存来源必须与真实闭包所用合同完全一致，default/transform 也不能因分类先执行一次。
-
 不做会怎样：仅接受 initializer 自报 runtimeParameters 可能与实际 parser 不一致；原 decoder 仍应只在真实调用执行。注释替换保留了每次 init 只编译一次的维护约束，自身不改变执行。
 
-配套修改：H107、H109。
-
-#### H109 · 返回由 wrapper 确认的原参数来源
+#### H113 · 返回由 wrapper 确认的原参数来源
 
 差异：`@@ -199,7 +206,8 @@ function wrap<Parameters extends Schema.Decoder<unknown>, Result extends Metadat`；SHA-256：`0728d1ef8e21d0a4072f9f51530cfe56fd50295a005a5fc30fd97fb75656c8d7`
 首段：`          } ⏎         }).pipe(Effect.orDie, Effect.withSpan("Tool.execute", { attributes: attrs }))`
-尾段：`    }) ⏎ }`
+尾段：`    }) ⏎ } ⏎ `
 
 职责：将真实 parser 来源交给后续 Registry，并覆盖 initializer 同名字段。
-
-机制：wrap 返回 { ...toolInfo, runtimeParameters }，把 H108 捕获的引用放在展开之后。
-
+机制：wrap 返回 { ...toolInfo, runtimeParameters }，把 H112 捕获的引用放在展开之后。
 必要性：原合同的权威来源是 wrapper 编译 decoder 的位置。
-
 不做会怎样：后续层拿不到保存的原引用，或 initializer 提供的同名字段覆盖它，导致展示和简写再次偏离真实执行。
 
-配套修改：H096、H104、H108。
+### packages/sdk/js/src/v2/gen/types.gen.ts
+
+源文件 SHA-256：`df85616df55ae0db0bfc53fb3af4ef48bf342607a5d176bcad5d73c0901d0084`
+候选 SHA-256：`4467bdc29c41e5a572c2e7ae0c36e14a38e70947afce74cf2fa33c43da0f28b1`
+
+#### H114 · 同步公开配置的生成类型
+
+差异：`@@ -2286,6 +2286,15 @@ export type Config = {`；SHA-256：`945c7c2203b544775252a2b7346abd6a20a0b0b7c4d7a4c1b6e8727b61063b20`
+首段：`  watcher?: { ⏎     ignore?: Array<string>`
+尾段：`  plugin?: Array< ⏎     | string`
+
+职责：SDK客户端与ConfigV1 HTTP合同保持一致。
+机制：运行仓库SDK build自动生成codemode布尔或对象联合，以及从Schema传来的中文说明；client生成检查零差异。
+必要性：JSON新字段是公开配置API，SDK不能继续把合法设置视为不存在。
+不做会怎样：只改服务端会让类型化客户端无法提交或读取Codemode配置；手工改生成物则下次生成丢失或漂移。
+
 
 ## 13. 修改范围与代码写法
 
-生产修改集中在前述18个文件，测试12个文件，文档为 README 和现有计划文件，共32个路径。输入形式、原文来源、环境租约各有一个清楚的所有者，其余都扩展现有函数。
+生产修改集中在前述17个文件，测试13个文件，文档为 README 和现有计划文件，共32个路径。输入形式归入原 tool-schema，原文来源归入原 values，环境租约由 execute-environments 统一管理；其余扩展现有函数，不保留两个仅负责同类元数据的小文件。
 
 长调用和多分支按仓库120列正常排版，保留空行。既有文件只展开实际修改的完整语句；新文件整体排版。保留原 fetchHTTP、未改的 Session 主干和原解释器方法格式，避免把功能改动变成全文件重排。
 
@@ -2254,15 +1722,15 @@ Environment保存词法状态；gate串行实际执行；users包含排队；dra
 
 关键生产代码分别说明调用登记、闭包共享、参数来源、准入和清理的责任；重要测试在实际观察点解释夹具如何建立前提、门闩为何能捕获过早返回、预期值从哪里来，以及怎样排除权限或副作用的假通过。复杂步骤不能只靠段首概述，说明应靠近各自负责的代码；不重复翻译变量和断言，也不写与函数无关的设计辩论。
 
-当前候选相对共同基线：生产新增1418行、删除574行，总修改1992行、净增844行；18个生产文件、12个测试文件和2份文档，共32个路径。全PR有效修改 E=5456，合格中文逻辑说明 C=886，比例16.24%；严格门槛819条。排除code-mode.txt后235个hunk均有对应中文说明，新增普通注释没有超过连续两行。
+当前实际差异相对共同基线：生产新增1459行、删除541行，总修改2000行、净增918行；17个生产文件、13个测试文件和2份文档，共32个路径。测试新增6243行、删除852行，净增5391行，另列且不占生产上限。中文说明从共同基线与实际源码独立重算：E至多5593，C至少853，比例至少15.2512%，严格门槛839块。这是上下界证明，不冒称精确E/C；统一排版的56份证据副本与原文件AST一致，保守保留尚未扣除的移动或排版行。C逐条核对附近有效修改，排除基线已有、重复、导入及无实质解释的文字。排除prompt后242/242个hunk有中文说明，其中代码与测试230个、文档12个；新增普通连续注释超过两行为0。
 
 生产和测试逐文件记录新增、删除及净增；共同基线使用原字节，不先格式化基线减小修改量。中文说明先按 AST/统一排版排除纯格式，再对应原始源行，保留逐条语义分类和逻辑注释块清单。两类统计分开，不能用有效行 E 代替生产新增加删除上限。最终候选重新核算每个 hunk 的邻近说明、连续行数、C/E 与全部路径。
 
 ### 常用组合能力的选择
 
-保留当前 all、allSettled、race、for-await 和 sleep，并在共同回调入口加入 then/catch。八许可已经在宿主入口统一生效，另加 mapLimit 或 Promise.all 自动分批会重复并发策略，也可能改变脚本的启动顺序；这一需求由现有入口完成。
+保留当前 all、allSettled、race、for-await 和 sleep，并在共同回调入口加入 then/catch/finally。八许可已经在宿主入口统一生效，另加 mapLimit 或 Promise.all 自动分批会重复并发策略，也可能改变脚本的启动顺序；这一需求由现有入口完成。
 
-路径继续使用工具返回的完整 path 和原工具参数。跨平台 path.join/dirname 需要明确采用哪种平台语义，不能因为一段建议示例就让同一字符串在不同宿主下改变含义。Object.fromEntries 和 Array.at 已有实现，公开组合回归直接验证 entries→filter→fromEntries 及 at(-1)，不新增替代代码。Promise.any 不能直接照搬 Effect.raceAll：实测 interrupt 与延迟成功竞争会返回成功，与 never 竞争会继续等待，全部失败的原因还按结算顺序排列。它需要新的首成功/中断与输入顺序错误归集合同，本轮保留明确的现有组合器，不把 race 当作 any。
+路径继续使用工具返回的完整 path 和原工具参数。跨平台 path.join/dirname 需要明确采用哪种平台语义，不能因为一段建议示例就让同一字符串在不同宿主下改变含义。Object.fromEntries 和 Array.at 已有实现，保留原标准库覆盖，删除仅为纠正外部评论新增的重复组合例，不增加替代代码。Promise.any 不能直接照搬 Effect.raceAll：实测 interrupt 与延迟成功竞争会返回成功，与 never 竞争会继续等待，全部失败的原因还按结算顺序排列。它需要新的首成功/中断与输入顺序错误归集合同，本轮保留明确的现有组合器，不把 race 当作 any。
 
 社区方案借鉴具体做法：Pi 的短用途说明、代码内组合和过滤；上游 #62336 的 namespace 发现缺口；#62176 的目录可发现性目标。本分支用一个稳定目录选择器和完整搜索满足它，不引入另一套 namespace 展开状态机。#60709 的后台 job 依赖另一套执行生命周期，这里仍由当前 Execute 根 Scope 收尾。
 
@@ -2277,7 +1745,7 @@ bun test
 bun run typecheck
 ```
 
-宿主受影响回归从 packages/opencode 执行：
+宿主受影响回归从 packages/opencode 执行；本地夹具显式设置 OPENCODE_DISABLE_MODELS_FETCH=true，防止本地模型快照仍触发后台刷新：
 
 ```sh
 bun test test/tool/code-mode.test.ts test/tool/code-mode-integration.test.ts test/tool/execute-environments.test.ts test/tool/registry.test.ts test/session/execute.test.ts test/session/tools.test.ts test/mcp/catalog.test.ts test/tool/truncation.test.ts
@@ -2304,11 +1772,13 @@ bun test test/project-copy.test.ts
 
 对改动 TS 运行仓库现有 lint/format 检查，并与共同基线区分既有警告。`git diff --check` 检查空白错误；逐文件 `git diff --numstat a012050 --` 给出生产、测试、文档三类新增/删除和路径数。格式化不得改 AST、字符串内容或模型实际收到的 prompt 段。
 
+实际工作树验证：库全量372项、1354断言通过；上述八个宿主文件180项、1167断言通过；两包原样typecheck均退出0。SDK正式生成仅增加Config类型的codemode字段，client生成无差异。CLI三文件串行74通过、6项Windows专属跳过、0失败；core的project-copy13项通过。类型感知lint在29文件完成，0错误、529条警告。Prettier仍标记12个文件，这12个文件在共同基线也不通过相同全文件排版检查；没有为此重排无关代码。
+
 在同一份最终候选上重跑真实提示词例子、输入 schema 权威性、环境复用与权限、根生命周期、分页、回执、日志和统一截断。单项隔离实验通过以后，仍要跑整合回归，避免在共同 runtime/host 入口合并时破坏另一项行为。
 
 全量实现审查逐一对照本计划和最终生产 diff。审查通过后检查本地提交、远端功能分支和目标分支，保留用户新提交；仅更新已有 PR 功能分支。必要的 rebase 后重新跑受影响检查，不推目标分支、不合并。
 
-发布前核对远端提交和完整 tree 与本地一致，PR 描述列实际测试结果。原样 pre-push 由 `sh .husky/pre-push` 执行；若资源限制再次导致 SIGKILL，按用户允许的 hook 例外提交，同时写明未通过的原门禁和实际通过的补充检查。
+发布前核对远端提交和完整 tree 与本地一致，PR 描述列实际测试结果。原样 pre-push 由 `sh .husky/pre-push` 执行，本次在32.752秒后退出1：并发typecheck中的opencode tsgo收到SIGKILL，29项中2项完成。没有类型诊断，也没有证据确认OOM。按用户允许的hook例外提交，同时保留这个失败结果及两包单独完整typecheck等实际通过的检查，不能称原hook通过。
 
 测试中的 CallEntry 期望数组使用 `as const` 保留 completed/error 状态字面量，避免 map 把它推宽为 string；不改变预期值和断言。该文件同时运行行为测试与类型检查。
 

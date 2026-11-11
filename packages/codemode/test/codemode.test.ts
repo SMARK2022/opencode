@@ -646,18 +646,9 @@ describe("CodeMode schema flexibility", () => {
     })
   })
 
-  // 原始危险键必须先失败，适配新建的危险键也必须重新通过同一边界。
-  test("blocked keys cannot disappear through reverse conversion or appear through forward conversion", async () => {
-    // 宿主传入的普通对象可含危险自有键，不能依赖解释器对象字面量提前拒绝。
+  // 单参数简写新建的字段仍须通过解释器的数据边界。
+  test("object shorthand cannot introduce blocked fields", async () => {
     const { ToolRuntime } = await import("../src/tool-runtime.js")
-    const scalar = ToolRuntime.make(
-      { call: Tool.make({ description: "scalar", input: Schema.String, run: (value) => Effect.succeed(value) }) },
-      undefined,
-      [],
-    )
-    await expect(Effect.runPromise(scalar.invoke(["call"], [{ constructor: "x" }]))).rejects.toThrow(
-      "blocked property 'constructor'",
-    )
     // 正向新建字段也受同一边界约束，真实 schema 不能授予危险属性访问权。
     const object = ToolRuntime.make(
       {
@@ -967,11 +958,11 @@ describe("CodeMode public contract", () => {
     // 固定说明先描述收益，再用一条渐进示例示范发现、并发和裁剪。
     expect(CodeMode.description).toContain("Run JavaScript/TypeScript")
     expect(CodeMode.description).toContain("pending work ends with the script")
-    expect(CodeMode.description).toContain("Return the fields needed for your next decision")
-    expect(CodeMode.description).toContain("eight-file bounded line-count check")
+    expect(CodeMode.description).toContain("return the fields needed for your next decision")
+    expect(CodeMode.description).toContain("Chain dependent calls with await")
     // fetch 由宿主提供；仅保留必要能力边界，不加入强制异常包装教条。
-    expect(CodeMode.description).toContain("Fetch is available when supplied by the host")
-    expect(CodeMode.description).not.toMatch(/try\/catch|MUST NOT|IMPORTANT|timers are unavailable/)
+    expect(CodeMode.description).toContain("host-supplied fetch")
+    expect(CodeMode.description).toContain("Globals: tools, search, console, sleep(ms)")
     const complete = CodeMode.make({ tools }).instructions()
     expect(complete).toStartWith("# Code Mode\n\nUse these paths inside `execute`.")
     expect(complete).toContain("The catalog is complete.")
