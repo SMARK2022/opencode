@@ -1,6 +1,5 @@
 import { parse } from "acorn"
 import { Cause, Effect, Exit, Fiber, Scope } from "effect" // 根 Scope 统一拥有 Promise 生产者；许可移交真实工具入口。
-import { DiagnosticCategory, ModuleKind, ScriptTarget, flattenDiagnosticMessageText, transpileModule } from "typescript"
 import {
   copyIn,
   copyOut,
@@ -117,7 +116,9 @@ import {
 
 // 仅缓存纯语法树，不携带环境或能力；八项同时容纳用户源码与 fetch 的常量工厂。
 const programs = new Map<string, ProgramNode>()
-const parseProgram = (code: string): ProgramNode => {
+// 两处转译共用实际加载的 TypeScript；仅传递依赖，不改语法缓存或诊断处理。
+const parseProgram = (code: string, typescript: typeof import("typescript")): ProgramNode => {
+  const { DiagnosticCategory, ModuleKind, ScriptTarget, flattenDiagnosticMessageText, transpileModule } = typescript
   const cached = programs.get(code)
   if (cached) return cached
   // 保存真实包装长度，解析诊断才能区分用户源码与解释器添加的内容。
@@ -715,6 +716,7 @@ class Interpreter<R> {
   ) {}
 
   static make<R>(
+    typescript: typeof import("typescript"),
     execution: Execution<R>,
     hasFetch: boolean,
     environment = new Environment(),
@@ -767,7 +769,7 @@ class Interpreter<R> {
       return { url: data.url, status: data.status, statusText: data.statusText, ok: data.ok, redirected: data.redirected,
         headers: { get: name => data.headers[name.toLowerCase()] ?? null, has: name => Object.keys(data.headers).includes(name.toLowerCase()), entries: () => Object.entries(data.headers) },
         text: async () => data.text, json: async () => JSON.parse(data.text), bytes: async () => data.bytes };
-      }`).body[0], "fetch response")
+      }`, typescript).body[0], "fetch response")
       // 响应闭包与普通函数共用全局能力，异步读方法不创建第二套宿主状态。
       execution.fetchResponse = new CodeModeFunction(
         getArray(factory, "params").map((param) => asNode(param, "params")),
@@ -3482,19 +3484,21 @@ export const executeWithLimits = <const Tools extends Record<string, unknown>>(
     })
   }
 
-  const operation = Effect.gen(function* () {
+  // 目录读取不执行程序；编译器在实际运行时加载，不改变工具、回调和空代码的构造时点。
+  const operation = (typescript: typeof import("typescript")) => Effect.gen(function* () {
     // 先让外层 race 登记根 Fiber，再进入脚本；脚本内部仍同步启动每个 Promise。
     yield* Effect.yieldNow
     const environment =
       options.snapshotEnvironment && options.environment
         ? snapshotEnvironment(options.environment)
         : options.environment
-    const program = parseProgram(options.code)
+    const program = parseProgram(options.code, typescript)
     const promises: Array<SandboxPromise> = []
     let unobservedFailure = false
     // 正常 return 也关闭仍在运行的生产者；已完成的宿主副作用保持原样。
     const value = yield* Effect.scopedWith((scope) =>
       Interpreter.make(
+        typescript,
         {
           invokeTool: tools.invoke,
           toolKeys: tools.keys,
@@ -3557,9 +3561,7 @@ export const executeWithLimits = <const Tools extends Record<string, unknown>>(
           } satisfies Result),
       ),
     )
-  })
-
-  return operation.pipe(
+  }).pipe(
     Effect.catchCause((cause) =>
       Cause.hasInterruptsOnly(cause)
         ? Effect.interrupt
@@ -3572,6 +3574,8 @@ export const executeWithLimits = <const Tools extends Record<string, unknown>>(
     ),
     Effect.map((result) => (limits.maxOutputBytes === undefined ? result : boundOutput(result, limits.maxOutputBytes))),
   )
+  // 原预算仍只约束解析和执行；导入不计入预算，也不转成脚本可消费的失败诊断。
+  return Effect.promise(() => import("typescript")).pipe(Effect.flatMap(operation))
 }
 
 const utf8ByteLength = (value: string): number => new TextEncoder().encode(value).byteLength

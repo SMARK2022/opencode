@@ -115,7 +115,11 @@ async function withRenderedSession(messages: Array<UserMessage | AssistantMessag
   registerOpencodeSpinner()
   const app = await testRender(() => <Harness />, { ...size, footerHeight: 0, useThread: false })
   try {
-    await waitForFrame(app, () => Boolean(ctx && ctx.sync.status === "complete" && ctx.local.model.ready && ctx.sync.data.message[sid]?.length))
+    // 有用户历史时只恢复一次 model；等原子重命名完成后，临时目录才可被 teardown 删除。
+    await waitForFrame(app, async () =>
+      Boolean(ctx && ctx.sync.status === "complete" && ctx.local.model.ready && ctx.sync.data.message[sid]?.length) &&
+      (!messages.some((message) => message.role === "user") || await Bun.file(`${tmp.path}/model.json`).exists()),
+    )
     if (!ctx) throw new Error("Session harness did not mount")
     await run(app, events.emit, ctx)
   } finally {
@@ -133,13 +137,13 @@ async function pumpFrames(app: App, rounds: number) {
     await Bun.sleep(0)
   }
 }
-async function waitForFrame(app: App, predicate: (frame: string) => boolean) {
+async function waitForFrame(app: App, predicate: (frame: string) => boolean | Promise<boolean>) {
   // 单调时钟保证受控推进Date.now时也有真实超时，不把等待变成无界循环。
   const start = performance.now()
   while (performance.now() - start < 5_000) {
     await pumpFrames(app, 1)
     const frame = app.captureCharFrame()
-    if (predicate(frame)) return frame
+    if (await predicate(frame)) return frame
   }
   throw new Error(`frame did not settle:\n${app.captureCharFrame()}`)
 }

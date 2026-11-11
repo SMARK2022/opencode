@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto"
 import { describe, expect } from "bun:test"
 import { Flag } from "@opencode-ai/core/flag/flag"
-import { ConfigProvider, Effect, Layer, Option } from "effect"
+import { ConfigProvider, Effect, Exit, Layer, Option } from "effect"
 import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import {
   HttpClient,
@@ -58,8 +58,9 @@ function restoreEnv(key: string, value: string | undefined) {
   process.env[key] = value
 }
 
-function app(input?: { password?: string; username?: string }) {
-  const handler = HttpRouter.toWebHandler(
+// Web 层在首次请求时才构建；factory 返回前登记清理，调用方 yield 后才能发请求。
+const app = Effect.fnUntraced(function* (input?: { password?: string; username?: string }) {
+  const { handler, dispose } = HttpRouter.toWebHandler(
     HttpApiApp.routes.pipe(
       Layer.provide(
         ConfigProvider.layer(
@@ -71,7 +72,8 @@ function app(input?: { password?: string; username?: string }) {
       ),
     ),
     { disableLogger: true },
-  ).handler
+  )
+  yield* Effect.addFinalizer(() => Effect.promise(dispose))
   return {
     request(input: string | URL | Request, init?: RequestInit) {
       return Effect.promise(() =>
@@ -84,15 +86,16 @@ function app(input?: { password?: string; username?: string }) {
       )
     },
   }
-}
+})
 
-function uiApp(input?: {
+// 每个 UI app 归当前测试的 body scope 所有，断言失败也先释放资源，再恢复全局 flag。
+const uiApp = Effect.fnUntraced(function* (input?: {
   password?: string
   username?: string
   client?: Layer.Layer<HttpClient.HttpClient>
   disableEmbeddedWebUi?: boolean
 }) {
-  const handler = HttpRouter.toWebHandler(
+  const { handler, dispose } = HttpRouter.toWebHandler(
     HttpRouter.use((router) =>
       Effect.gen(function* () {
         const fs = yield* FSUtil.Service
@@ -112,7 +115,8 @@ function uiApp(input?: {
       ]),
     ),
     { disableLogger: true },
-  ).handler
+  )
+  yield* Effect.addFinalizer(() => Effect.promise(dispose))
   return {
     request(input: string | URL | Request, init?: RequestInit) {
       return Effect.promise(() =>
@@ -125,11 +129,12 @@ function uiApp(input?: {
       )
     },
   }
-}
+})
 
-function routeOrderingApp() {
+// 与 UI factory 保持相同归属，不让路由顺序测试的客户端层逃出测试 scope。
+const routeOrderingApp = Effect.fnUntraced(function* () {
   let proxiedUrl: string | undefined
-  const handler = HttpRouter.toWebHandler(
+  const { handler, dispose } = HttpRouter.toWebHandler(
     HttpRouter.use((router) =>
       Effect.gen(function* () {
         const fs = yield* FSUtil.Service
@@ -153,7 +158,8 @@ function routeOrderingApp() {
       ]),
     ),
     { disableLogger: true },
-  ).handler
+  )
+  yield* Effect.addFinalizer(() => Effect.promise(dispose))
   return {
     proxiedUrl: () => proxiedUrl,
     request(input: string | URL | Request, init?: RequestInit) {
@@ -167,7 +173,7 @@ function routeOrderingApp() {
       )
     },
   }
-}
+})
 
 function httpClient(response: Response, onRequest?: (request: HttpClientRequest.HttpClientRequest) => void) {
   return Layer.succeed(
@@ -188,7 +194,7 @@ describe("HttpApi UI fallback", () => {
     Effect.gen(function* () {
       let proxiedUrl: string | undefined
 
-      const response = yield* uiApp({
+      const server = yield* uiApp({
         disableEmbeddedWebUi: true,
         client: httpClient(
           new Response("<html>opencode</html>", { headers: { "content-type": "text/html" } }),
@@ -196,12 +202,42 @@ describe("HttpApi UI fallback", () => {
             proxiedUrl = request.url
           },
         ),
-      }).request("/")
+      })
+      const response = yield* server.request("/")
 
       expect(response.status).toBe(200)
       expect(response.headers.get("content-type")).toContain("text/html")
       expect(yield* responseText(response)).toBe("<html>opencode</html>")
       expect(proxiedUrl).toBe("https://app.opencode.ai/")
+      // 沿同一真实 UI 服务例覆盖成功和失败的释放出口，不新增独立用例。
+      for (const fail of [false, true]) {
+        const events: string[] = []
+        // 固定哨兵区分故意失败与请求断言异常，避免把所有 failure 都误当作预期结果。
+        const failure = new Error("intentional body failure")
+        // 先关闭子 scope 再捕获 Exit，使释放阶段的异常也进入检查，不能提前记录成功。
+        const exit = yield* Effect.gen(function* () {
+          const server = yield* uiApp({
+            disableEmbeddedWebUi: true,
+            client: httpClient(new Response("scope probe")).pipe(
+              // 必须由真实请求触发层构建，防止从未使用 handler 的空 scope 通过清理检查。
+              Layer.tap(() =>
+                Effect.acquireRelease(
+                  Effect.sync(() => events.push("acquired")),
+                  () => Effect.sync(() => events.push("disposed")),
+                ),
+              ),
+            ),
+          })
+          const response = yield* server.request("/")
+          expect(response.status).toBe(200)
+          expect(yield* responseText(response)).toBe("scope probe")
+          expect(events).toEqual(["acquired"])
+          if (fail) yield* Effect.die(failure)
+        }).pipe(Effect.scoped, Effect.exit)
+
+        expect(exit).toEqual(fail ? Exit.die(failure) : Exit.void)
+        expect(events).toEqual(["acquired", "disposed"])
+      }
     }),
   )
 
@@ -358,7 +394,7 @@ describe("HttpApi UI fallback", () => {
 
   it.live("keeps matched API routes ahead of the UI fallback", () =>
     Effect.gen(function* () {
-      const server = routeOrderingApp()
+      const server = yield* routeOrderingApp()
       const response = yield* server.request("/session/ses_nope")
 
       expect(response.status).toBe(404)
@@ -368,11 +404,12 @@ describe("HttpApi UI fallback", () => {
 
   it.live("requires server password for the web UI", () =>
     Effect.gen(function* () {
-      const response = yield* uiApp({
+      const server = yield* uiApp({
         password: "secret",
         username: "opencode",
         disableEmbeddedWebUi: true,
-      }).request("/")
+      })
+      const response = yield* server.request("/")
 
       expect(response.status).toBe(401)
       expect(response.headers.get("www-authenticate")).toBe('Basic realm="Secure Area"')
@@ -381,12 +418,13 @@ describe("HttpApi UI fallback", () => {
 
   it.live("accepts auth token for the web UI", () =>
     Effect.gen(function* () {
-      const response = yield* uiApp({
+      const server = yield* uiApp({
         password: "secret",
         username: "opencode",
         disableEmbeddedWebUi: true,
         client: httpClient(new Response("<html>opencode</html>", { headers: { "content-type": "text/html" } })),
-      }).request(`/?auth_token=${btoa("opencode:secret")}`)
+      })
+      const response = yield* server.request(`/?auth_token=${btoa("opencode:secret")}`)
 
       expect(response.status).toBe(200)
       expect(yield* responseText(response)).toBe("<html>opencode</html>")
@@ -395,11 +433,12 @@ describe("HttpApi UI fallback", () => {
 
   it.live("accepts basic auth for the web UI", () =>
     Effect.gen(function* () {
-      const response = yield* uiApp({
+      const server = yield* uiApp({
         password: "secret",
         username: "opencode",
         disableEmbeddedWebUi: true,
-      }).request("/", {
+      })
+      const response = yield* server.request("/", {
         headers: { authorization: `Basic ${btoa("opencode:secret")}` },
       })
 
@@ -409,11 +448,12 @@ describe("HttpApi UI fallback", () => {
 
   it.live("accepts basic auth passwords containing colons for the web UI", () =>
     Effect.gen(function* () {
-      const response = yield* uiApp({
+      const server = yield* uiApp({
         password: "sec:ret",
         username: "opencode",
         disableEmbeddedWebUi: true,
-      }).request("/", {
+      })
+      const response = yield* server.request("/", {
         headers: { authorization: `Basic ${btoa("opencode:sec:ret")}` },
       })
 
@@ -428,13 +468,15 @@ describe("HttpApi UI fallback", () => {
   // should bypass auth.
   it.live("serves the PWA manifest without auth even when a server password is set", () =>
     Effect.gen(function* () {
+      // 每个资源使用独立客户端层，全部 handler 都归本例 scope，不能只释放最后创建的一份。
       for (const path of ["/site.webmanifest", "/web-app-manifest-192x192.png", "/web-app-manifest-512x512.png"]) {
-        const response = yield* uiApp({
+        const server = yield* uiApp({
           password: "secret",
           username: "opencode",
           disableEmbeddedWebUi: true,
           client: httpClient(new Response("ok")),
-        }).request(path)
+        })
+        const response = yield* server.request(path)
         expect(response.status).not.toBe(401)
       }
     }),
@@ -442,7 +484,8 @@ describe("HttpApi UI fallback", () => {
 
   it.live("allows web UI preflight without auth", () =>
     Effect.gen(function* () {
-      const response = yield* app({ password: "secret", username: "opencode" }).request("/", {
+      const server = yield* app({ password: "secret", username: "opencode" })
+      const response = yield* server.request("/", {
         method: "OPTIONS",
         headers: {
           origin: "http://localhost:3000",

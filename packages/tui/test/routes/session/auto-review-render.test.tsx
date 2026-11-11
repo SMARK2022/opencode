@@ -413,7 +413,12 @@ test.each(["read", "read-error", "generic", "edit", "write", "running-output", "
           ? { status: "running", input, metadata, title: "running", time: { start: 1 } }
           : { status: "completed", input, metadata, output: scenario === "generic" ? "GENERIC_OUTPUT" : "", title: "completed", time: { start: 1, end: 2 } },
     }
-    await withRenderedReview([{ info, parts: [part] }], async (app) => {
+    await withRenderedReview([{ info, parts: [part] }], async (app, _route, _emit, _commands, sync) => {
+      // 通过真实 SDK 验证默认空问题列表，避免缺失请求产生的提示遮住审查标签。
+      if (scenario === "read-error") {
+        await sync.question.sync(sessionID)
+        expect(sync.question.list(sessionID)).toEqual([])
+      }
       await waitForReviewFrame(app, async (frame) => {
         if (plain ? frame.includes(patch ? "a.ts" : "config.ts") : frame.includes("@permission-reviewer")) return true
         await Bun.sleep(10)
@@ -423,6 +428,7 @@ test.each(["read", "read-error", "generic", "edit", "write", "running-output", "
       await app.renderOnce()
       const lines = app.captureCharFrame().split("\n")
       const reviewRows = lines.filter((line) => line.includes("auto review"))
+      if (scenario === "read-error") expect(lines.join("\n")).not.toContain("unexpected request:")
       expect(reviewRows).toHaveLength(plain ? 0 : 1)
       // 缺省KV必须显示真实非空generic输出，空字符串不会经过被修改的分支。
       if (scenario === "generic") expect(lines.join("\n")).toContain("GENERIC_OUTPUT")

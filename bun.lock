@@ -1080,6 +1080,7 @@
     "electron"
   ],
   "patchedDependencies": {
+    "@opentui/solid@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.13/opentui-solid-0.4.3-smark.13.tgz": "patches/@opentui%2Fsolid@0.4.3-smark.13.patch",
     "@opentui/core@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.13/opentui-core-0.4.3-smark.13.tgz": "patches/@opentui%2Fcore@0.4.3-smark.13.patch",
     "@pierre/trees@1.0.0-beta.4": "patches/@pierre%2Ftrees@1.0.0-beta.4.patch",
     "@tanstack/virtual-core@3.17.3": "patches/@tanstack%2Fvirtual-core@3.17.3.patch",

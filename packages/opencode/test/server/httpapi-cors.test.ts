@@ -62,14 +62,17 @@ describe("HttpApi CORS", () => {
 
   it.live("adds CORS headers to unauthorized responses", () =>
     Effect.gen(function* () {
-      const handler = HttpRouter.toWebHandler(
+      // NodeHttpServer 只拥有主测试 server，此处另建的 Web handler 需要独立的关闭责任。
+      const web = HttpRouter.toWebHandler(
         HttpApiApp.createRoutes().pipe(
           Layer.provide(ConfigProvider.layer(ConfigProvider.fromUnknown({ OPENCODE_SERVER_PASSWORD: "secret" }))),
         ),
         { disableLogger: true },
-      ).handler
+      )
+      // body scope 先于 testStateLayer 关闭，避免数据库重置时仍留有 Web 层资源。
+      yield* Effect.addFinalizer(() => Effect.promise(() => web.dispose()))
       const response = yield* Effect.promise(() =>
-        handler(
+        web.handler(
           new Request(new URL("/global/config", "http://localhost"), {
             headers: { origin: "https://app.opencode.ai" },
           }),

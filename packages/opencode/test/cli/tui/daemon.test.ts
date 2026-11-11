@@ -195,25 +195,24 @@ async function runDaemonMachine(
   return { exitCode, stdout, stderr }
 }
 
-// 观察本用例worker已发布的信号；producer退出立即失败，不按宿主耗时推断行为。
+// 观察本用例worker已发布的信号；退出后的最终快照仍无信号才失败，不按宿主耗时推断行为。
 async function waitForDaemonLog(lockPath: string, pid: number, marker: string) {
   const file = path.join(path.dirname(lockPath), "share", "opencode", "log", "opencode.log")
   const deadline = Date.now() + DAEMON_START_TIMEOUT_MS
   while (Date.now() < deadline) {
-    if (!ServerLock.alive(pid)) throw new Error(`Daemon exited before publishing ${marker}`)
+    // 先采样存活再读日志；死亡后的读取才是最终快照，避免漏掉读取期间发布的末条事件。
+    const alive = ServerLock.alive(pid)
     const text = await Bun.file(file).text().catch(() => "")
     if (text.includes(marker)) return
+    if (!alive) throw new Error(`Daemon exited before publishing ${marker}`)
     await Bun.sleep(POLL_INTERVAL_MS)
   }
   throw new Error(`Daemon did not publish ${marker}`)
 }
 
-/**
- * 在临时目录中启动守护进程，轮询直到锁文件出现且 HTTP 服务器响应。
- * 返回运行中的进程和锁文件内容。
- */
-async function spawnDaemon(lockPath: string, env: Record<string, string> = {}) {
-  const proc = spawnBackground([process.execPath, WORKER_TS], {
+// 进程创建与活体就绪分开：预期立即退出的生命周期不应要求父进程抢到短暂健康窗口。
+function startDaemon(lockPath: string, env: Record<string, string> = {}) {
+  return spawnBackground([process.execPath, WORKER_TS], {
     env: {
       ...isolatedDaemonEnv(lockPath, env),
       OPENCODE_PROCESS_ROLE: "worker",
@@ -222,6 +221,14 @@ async function spawnDaemon(lockPath: string, env: Record<string, string> = {}) {
     stdout: "ignore",
     stderr: "ignore",
   })
+}
+
+/**
+ * 在临时目录中启动守护进程，轮询直到锁文件出现且 HTTP 服务器响应。
+ * 返回运行中的进程和锁文件内容。
+ */
+async function spawnDaemon(lockPath: string, env: Record<string, string> = {}) {
+  const proc = startDaemon(lockPath, env)
 
   // 锁文件存在不足以交付 fixture；真实子 PID 与受保护的 HTTP health 必须同时成立。
   const deadline = Date.now() + DAEMON_START_TIMEOUT_MS
@@ -1051,6 +1058,8 @@ describe("daemon lifecycle", () => {
           if (lock?.pid === proc.pid) break
           await Bun.sleep(25)
         }
+        expect(await ServerLock.read(lockPath)).toMatchObject({ pid: proc.pid, token, controlPort: expect.any(Number) })
+        expect(ServerLock.alive(proc.pid)).toBe(true)
         const result = await runDaemonStop(lockPath)
         expect(result.exitCode).toBe(0)
         expect(result.stderr).toContain("Force-stopped opencode daemon.")
@@ -1109,6 +1118,8 @@ describe("daemon lifecycle", () => {
           if (lock?.pid === proc.pid) break
           await Bun.sleep(25)
         }
+        expect(await ServerLock.read(lockPath)).toMatchObject({ pid: proc.pid, token, controlPort: expect.any(Number) })
+        expect(ServerLock.alive(proc.pid)).toBe(true)
         ServerLock._setLockPath(lockPath)
         // 与下方 maintenance-idle 409 合同测试互为两个方向：应答拒绝与无应答都不构成条件式停机的
         // 中断授权——无应答不等于空闲（控制面可能正被同步事务阻塞），只有 worker 明确接受才授权。
@@ -1377,7 +1388,13 @@ describe("daemon lifecycle", () => {
           expect(shutdownEvent).not.toBe("timeout")
           expect(String(shutdownEvent)).toContain("global.disposed")
           expect(String(shutdownEvent)).toContain("daemon-stop")
-          await stop
+          expect((await stop).exitCode).toBe(0)
+          // 同一订阅须自然 EOF；再核实正常退出和清锁，不能只收到关键字就通过。
+          while (true) {
+            const chunk = await reader.read()
+            if (chunk.done) break
+          }
+          expect({ exit: await proc.exited, lock: await Bun.file(lockPath).exists() }).toEqual({ exit: 0, lock: false })
         } finally {
           ctrl.abort()
           await reader.cancel().catch(() => undefined)
@@ -1524,51 +1541,6 @@ describe("daemon lifecycle", () => {
       }
     },
     DAEMON_START_TIMEOUT_MS + DAEMON_STOP_TIMEOUT_MS,
-  )
-
-  test(
-    "daemon private status reports current TUI client count",
-    async () => {
-      await using tmp = await tmpdir()
-      const lockPath = path.join(tmp.path, "tui-server.json")
-      const { proc, lock } = await spawnDaemon(lockPath, { OPENCODE_DAEMON_IDLE_TIMEOUT_MS: "5000" })
-
-      try {
-        if (!lock.controlPort) throw new Error("missing control port")
-        const statusBefore = await fetch(`http://127.0.0.1:${lock.controlPort}${ServerLock.CONTROL_STATUS_PATH}`, {
-          headers: { [ServerLock.CONTROL_TOKEN_HEADER]: lock.token },
-        }).then((x) => x.json() as Promise<{ tuiClients: number; sessionActivity: number }>)
-        expect(statusBefore.tuiClients).toBe(0)
-        expect(statusBefore.sessionActivity).toBe(0)
-
-        const ctrl = new AbortController()
-        // SSE 与健康 fixture 共用显式认证，401 不能伪装成客户端计数没有增加。
-        const res = await fetch(`http://127.0.0.1:${lock.port}/global/event`, {
-          signal: ctrl.signal,
-          headers: ServerLock.headers(credentials),
-        })
-        expect(res.ok).toBe(true)
-        if (!res.body) throw new Error("missing SSE body")
-        const reader = res.body.pipeThrough(new TextDecoderStream()).getReader()
-
-        try {
-          const first = await reader.read()
-          expect(first.value).toContain("server.connected")
-          const statusDuring = await fetch(`http://127.0.0.1:${lock.controlPort}${ServerLock.CONTROL_STATUS_PATH}`, {
-            headers: { [ServerLock.CONTROL_TOKEN_HEADER]: lock.token },
-          }).then((x) => x.json() as Promise<{ tuiClients: number; sessionActivity: number }>)
-          expect(statusDuring.tuiClients).toBe(1)
-        } finally {
-          ctrl.abort()
-          await reader.cancel().catch(() => undefined)
-          reader.releaseLock()
-        }
-      } finally {
-        if (ServerLock.alive(proc.pid)) proc.kill("SIGTERM")
-        await proc.exited.catch(() => undefined)
-      }
-    },
-    DAEMON_START_TIMEOUT_MS + 10_000,
   )
 
   // #523：launcher Ctrl-C 测试——源仓用 Daemon.ensure；目标等价 seam 是 discoverOrSpawnDaemon。
@@ -1936,7 +1908,7 @@ describe("daemon lifecycle", () => {
       await using tmp = await tmpdir()
       const lockPath = path.join(tmp.path, "tui-server.json")
       // #235：startup idle 250ms 远小于常规 idle——验证启动期保护独立生效
-      const { proc } = await spawnDaemon(lockPath, {
+      const proc = startDaemon(lockPath, {
         OPENCODE_DAEMON_IDLE_TIMEOUT_MS: "5000",
         OPENCODE_DAEMON_STARTUP_IDLE_TIMEOUT_MS: "250",
         // #235：显式清零 launcher——宿主 opencode 会话注入的 LAUNCHER_PID 会让 startup idle 永久 skip
@@ -1944,8 +1916,12 @@ describe("daemon lifecycle", () => {
       })
 
       try {
+        // 启动证据来自锁发布后的既有日志；正常退出再快也不能被误报为未启动。
+        await waitForDaemonLog(lockPath, proc.pid, "daemon startup idle shutdown scheduled")
         const exitCode = await Promise.race([proc.exited, Bun.sleep(5_000).then(() => "timeout" as const)])
         expect(exitCode).toBe(0)
+        // 退出码本身不能证明空闲保护执行，须观察同一 worker 的实际退出原因。
+        await waitForDaemonLog(lockPath, proc.pid, "reason=startup-idle-timeout")
         expect(await Bun.file(lockPath).text().catch(() => undefined)).toBeUndefined()
       } finally {
         if (ServerLock.alive(proc.pid)) proc.kill()
@@ -1961,15 +1937,19 @@ describe("daemon lifecycle", () => {
     async () => {
       await using tmp = await tmpdir()
       const lockPath = path.join(tmp.path, "tui-server.json")
-      const { proc } = await spawnDaemon(lockPath, {
+      const proc = startDaemon(lockPath, {
         OPENCODE_DAEMON_IDLE_TIMEOUT_MS: "5000",
         OPENCODE_DAEMON_STARTUP_IDLE_TIMEOUT_MS: "5000",
         OPENCODE_DAEMON_LAUNCHER_PID: "987654321",
       })
 
       try {
+        // launcher watcher 也是短命启动路径，观察已发布事件而非要求退出前仍可健康探测。
+        await waitForDaemonLog(lockPath, proc.pid, "daemon launcher watcher started")
         const exitCode = await Promise.race([proc.exited, Bun.sleep(5_000).then(() => "timeout" as const)])
         expect(exitCode).toBe(0)
+        // 区分 launcher 死亡与稍后的 startup idle，不能只凭相同零退出码通过。
+        await waitForDaemonLog(lockPath, proc.pid, "reason=launcher-exited-before-first-client")
         expect(await Bun.file(lockPath).text().catch(() => undefined)).toBeUndefined()
       } finally {
         if (ServerLock.alive(proc.pid)) proc.kill()
@@ -2049,7 +2029,7 @@ describe("daemon lifecycle", () => {
   )
   // #173：短 idle 超时 + SSE 断开后守护进程应退出并清锁
   test(
-    "daemon exits after the last SSE client disconnects",
+    "daemon reports TUI clients and exits after the last SSE client disconnects",
     async () => {
       await using tmp = await tmpdir()
       const lockPath = path.join(tmp.path, "tui-server.json")
@@ -2061,6 +2041,14 @@ describe("daemon lifecycle", () => {
       })
 
       try {
+        // 同一真实 worker 覆盖计数与 idle 退出，避免为相同 SSE 生命周期重复冷启动服务树。
+        if (!lock.controlPort) throw new Error("missing control port")
+        const before = await controlRequest(lock, ServerLock.CONTROL_STATUS_PATH)
+        expect(before.ok).toBe(true)
+        const statusBefore = (await before.json()) as { tuiClients: number; sessionActivity: number }
+        expect(statusBefore.tuiClients).toBe(0)
+        expect(statusBefore.sessionActivity).toBe(0)
+
         const ctrl = new AbortController()
         const res = await fetch(`http://127.0.0.1:${lock.port}/global/event`, {
           signal: ctrl.signal,
@@ -2074,6 +2062,11 @@ describe("daemon lifecycle", () => {
           const first = await reader.read()
           // #173：先读到 connected，确认 SSE 计数已 +1
           expect(first.value).toContain("server.connected")
+          // control token 与公开 SSE 凭证分别走生产认证；连接帧之后必须已发布 +1。
+          const during = await controlRequest(lock, ServerLock.CONTROL_STATUS_PATH)
+          expect(during.ok).toBe(true)
+          const statusDuring = (await during.json()) as { tuiClients: number }
+          expect(statusDuring.tuiClients).toBe(1)
           // #173：连接期间必须仍存活，证明 idle 只在断开后计时
           await Bun.sleep(750)
           expect(ServerLock.alive(proc.pid)).toBe(true)
@@ -2091,9 +2084,9 @@ describe("daemon lifecycle", () => {
         expect(ServerLock.alive(proc.pid)).toBe(false)
         expect(await Bun.file(lockPath).exists()).toBe(false)
       } finally {
-        try {
-          proc.kill()
-        } catch {}
+        // 临时目录归还前等待真实子进程退出；kill 对已退出的 owned child 保持幂等。
+        proc.kill()
+        await proc.exited
       }
     },
     15_000,

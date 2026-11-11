@@ -4,6 +4,8 @@ import path from "node:path"
 import { pathToFileURL } from "node:url"
 import { Flag } from "@opencode-ai/core/flag/flag"
 import { Server } from "../../src/server/server"
+import { HttpApiApp } from "../../src/server/routes/instance/httpapi/server"
+import { GlobalBus } from "../../src/bus/global"
 import { EventClients } from "@opencode-ai/server/event-clients"
 import { PtyPaths } from "../../src/server/routes/instance/httpapi/groups/pty"
 import { withTimeout } from "../../src/util/timeout"
@@ -38,12 +40,12 @@ async function startListener() {
   return Server.listen({ hostname: "127.0.0.1", port: 0 })
 }
 
-async function startNoAuthListener(eventClients?: EventClients.Interface) {
+async function startNoAuthListener(options: Partial<Parameters<typeof Server.listen>[0]> = {}) {
   Flag.OPENCODE_SERVER_PASSWORD = undefined
   Flag.OPENCODE_SERVER_USERNAME = auth.username
   delete process.env.OPENCODE_SERVER_PASSWORD
   process.env.OPENCODE_SERVER_USERNAME = auth.username
-  return Server.listen({ hostname: "127.0.0.1", port: 0, eventClients })
+  return Server.listen({ hostname: "127.0.0.1", port: 0, ...options })
 }
 
 function authorization() {
@@ -215,8 +217,11 @@ describe("HttpApi Server.listen", () => {
       // 必须先观察建立再观察清零，避免初始零连接让清理断言空通过。
       if (connected && count === 0) drained.resolve()
     })
-    const listener = await startNoAuthListener(eventClients)
+    const sharedServices = HttpApiApp.createSharedServices()
+    const listener = await startNoAuthListener({ eventClients, sharedServices, cors: ["https://first.test"] })
     const socket = net.connect(listener.port, "127.0.0.1")
+    let second: Server.Listener | undefined
+    let events: ReadableStreamDefaultReader<string> | undefined
     try {
       const response = await withTimeout(
         new Promise<string>((resolve, reject) => {
@@ -236,18 +241,53 @@ describe("HttpApi Server.listen", () => {
       )
       expect(response).toContain("HTTP/1.1 200 OK")
       expect(response).toContain("text/event-stream")
+      // 应用层可共享，第二监听的认证、CORS 和 SSE 计数必须仍各自拥有。
+      process.env.OPENCODE_SERVER_PASSWORD = auth.password
+      second = await Server.listen({ hostname: "127.0.0.1", port: 0, ephemeral: true, sharedServices, cors: ["https://second.test"] })
+      const stream = await fetch(new URL("/global/event", second.url), {
+        headers: { authorization: authorization(), origin: "https://second.test" },
+      })
+      expect(stream.status).toBe(200)
+      expect(stream.headers.get("access-control-allow-origin")).toBe("https://second.test")
+      events = stream.body!.pipeThrough(new TextDecoderStream()).getReader()
+      // SSE 帧可能分块或先收到心跳；总期限内累积到目标事件，不以一次 read 作为帧边界。
+      const readEvent = (marker: string) => withTimeout(
+        (async () => {
+          let received = ""
+          while (!received.includes(marker)) {
+            const chunk = await events!.read()
+            if (chunk.done) throw new Error(`second SSE ended before ${marker}`)
+            received += chunk.value
+          }
+          return received
+        })(),
+        5_000,
+        `second SSE did not emit ${marker}`,
+      )
+      expect(await readEvent("server.connected")).toContain("server.connected")
+      expect((await fetch(new URL("/global/health", second.url))).status).toBe(401)
       socket.destroy()
       // 等待生产收尾通知，不用固定 sleep 假定 fiber、heartbeat 与订阅已经释放。
       await withTimeout(drained.promise, 5_000, "SSE client count did not return to zero")
       expect(connected).toBe(true)
       // 断开流式连接后 listener 仍服务普通请求；读取正文也完成后继请求的生命周期。
-      const health = await fetch(new URL("/global/health", listener.url))
+      const health = await fetch(new URL("/global/health", listener.url), { headers: { origin: "https://first.test" } })
       expect(health.status).toBe(200)
+      expect(health.headers.get("access-control-allow-origin")).toBe("https://first.test")
       expect(await health.json()).toMatchObject({ healthy: true })
+      await stop(listener, "timed out stopping first shared listener")
+      GlobalBus.emit("event", { directory: "global", payload: { type: "global.disposed", properties: {} } })
+      GlobalBus.emit("event", { payload: { type: "server.heartbeat", properties: { marker: "second-survives" } } })
+      expect(await readEvent("second-survives")).toContain("second-survives")
     } finally {
       socket.destroy()
       // 观察者随本listener服务释放，不修改其他连接持有的计数服务。
-      await stop(listener, "timed out cleaning up SSE listener")
+      await Promise.all([
+        stop(listener, "timed out cleaning up SSE listener"),
+        second ? stop(second, "timed out cleaning up second shared listener") : undefined,
+        events?.cancel().catch(() => undefined),
+      ])
+      events?.releaseLock()
     }
   }, 15_000)
 
@@ -280,7 +320,7 @@ describe("HttpApi Server.listen", () => {
       ws.send("ping-listen\n")
       expect(await message).toContain("ping-listen")
 
-      await stop(listener, "timed out waiting for listener.stop(true)")
+      await withTimeout(listener.stop(), 10_000, "timed out waiting for listener.stop()")
       stopped = true
       await withTimeout(closed, 5_000, "timed out waiting for websocket close")
       expect(ws.readyState).toBe(WebSocket.CLOSED)

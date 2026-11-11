@@ -1,0 +1,28 @@
+diff --git a/scripts/solid-transform.js b/scripts/solid-transform.js
+--- a/scripts/solid-transform.js
++++ b/scripts/solid-transform.js
+@@ -1,10 +1,3 @@
+-import { transformAsync } from "@babel/core";
+-// @ts-expect-error - Types not important.
+-import ts from "@babel/preset-typescript";
+-// @ts-expect-error - Types not important.
+-import moduleResolver from "babel-plugin-module-resolver";
+-// @ts-expect-error - Types not important.
+-import solid from "babel-preset-solid";
+ const nodeModulesPattern = /[/\\]node_modules[/\\]/;
+ const tsPattern = /\.[cm]?tsx?$/;
+ const jsxPattern = /\.[cm]?[jt]sx$/;
+@@ -28,6 +21,13 @@
+     }
+ }
+ export async function transformSolidSource(code, options) {
++    // 保持插件注册轻量，只有实际转换源码时才加载 Babel 依赖。
++    const [{ transformAsync }, { default: ts }, { default: moduleResolver }, { default: solid }] = await Promise.all([
++        import("@babel/core"),
++        import("@babel/preset-typescript"),
++        import("babel-plugin-module-resolver"),
++        import("babel-preset-solid"),
++    ]);
+     const filename = stripQueryAndHash(options.filename);
+     const plugins = options.resolvePath
+         ? [

@@ -180,7 +180,8 @@ function makeStop(state: ListenerState, unpublishMdns: Effect.Effect<void>, list
   return Effect.gen(function* () {
     const forceCloseOnce = yield* Effect.cached(forceClose(state).pipe(Effect.ignore))
     const closeScopeOnce = yield* Effect.cached(
-      Scope.close(state.scope, Exit.void).pipe(
+      state.websockets.closeAll.pipe(
+        Effect.ensuring(Scope.close(state.scope, Exit.void)),
         Effect.ignore,
         Effect.ensuring(
           Effect.sync(() => {

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 // 参数形式回归沿用真实转换型 Schema，避免只测展示用 JSON。
-import { Cause, Deferred, Effect, Exit, Fiber, Schema, SchemaGetter } from "effect"
+import { Cause, Clock, Deferred, Duration, Effect, Exit, Fiber, Scheduler, Schema, SchemaGetter } from "effect"
 import { TestClock } from "effect/testing"
 import { CodeMode, Tool, toolError } from "../src/index.js"
 
@@ -859,6 +859,72 @@ describe("CodeMode public contract", () => {
     const input: CodeMode.Input = { code: source }
     expect(Schema.decodeUnknownSync(CodeMode.Input)(input)).toStrictEqual(input)
     expect(Schema.decodeUnknownSync(CodeMode.Result)(JSON.parse(JSON.stringify(reusable)))).toStrictEqual(reusable)
+
+    // 同一执行契约内用新进程检查冷加载边界，不新增测试注册。
+    const child = Bun.spawn(
+      [
+        process.execPath,
+        "--no-install",
+        "--eval",
+        `
+      const { CodeMode } = await import(${JSON.stringify(new URL("../src/index.ts", import.meta.url).href)})
+      const { Effect } = await import("effect")
+      // resolve 只定位已安装编译器；cache 观察不能为检查而提前执行模块。
+      const compiler = require.resolve("typescript")
+      const loaded = () => Boolean(require.cache[compiler])
+      // 库导入、目录渲染和两种 Effect 构造都不执行程序，分别检查资源边界。
+      const states = [loaded()]
+      const runtime = CodeMode.make()
+      const metadata = { catalog: runtime.catalog(), hasInstructions: runtime.instructions().length > 0 }
+      states.push(loaded())
+      const prepared = runtime.execute("const answer: number = 42; return answer")
+      // fetch 只取本地 Effect 数据；响应 json 方法仍经过解释器的第二处真实转译。
+      const direct = CodeMode.execute({
+        code: 'const response: object = await fetch("https://example.invalid"); return { url: response.url, status: response.status, body: await response.json() }',
+        fetch: (url) => Effect.succeed({ url, status: 200, statusText: "OK", ok: true,
+          redirected: false, headers: {}, text: "2", bytes: [50] }),
+      })
+      states.push(loaded())
+      // 真实类型注解要求两入口仍使用同一编译器，不能通过跳过执行获得轻量结果。
+      const values = await Promise.all([Effect.runPromise(prepared), Effect.runPromise(direct)])
+      console.log(JSON.stringify({ states, loaded: loaded(), metadata, values }))
+    `,
+      ],
+      {
+        cwd: import.meta.dir,
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+        // 子进程四秒预算短于既有用例默认五秒，保留回收时间；不放宽原用例期限。
+        timeout: 4_000,
+      },
+    )
+    try {
+      // 同时消费两条管道并等待退出，防止资源探针自身因输出反压而挂起。
+      const [exit, stdout, stderr] = await Promise.all([
+        child.exited,
+        new Response(child.stdout).text(),
+        new Response(child.stderr).text(),
+      ])
+      expect({ exit, stderr }).toEqual({ exit: 0, stderr: "" })
+      expect(JSON.parse(stdout)).toStrictEqual({
+        states: [false, false, false],
+        loaded: true,
+        metadata: { catalog: [], hasInstructions: true },
+        values: [
+          { ok: true, value: 42, toolCalls: [] },
+          {
+            ok: true,
+            value: { url: "https://example.invalid", status: 200, body: 2 },
+            toolCalls: [{ name: "$codemode.fetch" }],
+          },
+        ],
+      })
+    } finally {
+      // 即使读取或断言失败，本测试也负责终止并收完自己创建的进程。
+      if (child.exitCode === null) child.kill()
+      await child.exited
+    }
   })
 
   test("inlines a COMPLETE small catalog and keeps search registered but unadvertised", async () => {
@@ -2802,11 +2868,35 @@ describe("CodeMode retained environments", () => {
         expect(calls).toEqual([1])
         expect(yield* CodeMode.execute({ environment, code: "return count;" })).toMatchObject({ value: 0 })
 
+        const base = yield* Clock.Clock
+        const ready = yield* Deferred.make<void>()
+        const observed = {
+          // 显式转发原 Clock 方法，只观察本例的真实计时器，不替换默认 sleep 能力。
+          currentTimeMillis: base.currentTimeMillis,
+          currentTimeNanos: base.currentTimeNanos,
+          currentTimeMillisUnsafe: () => base.currentTimeMillisUnsafe(),
+          currentTimeNanosUnsafe: () => base.currentTimeNanosUnsafe(),
+          sleep: (duration: Parameters<typeof base.sleep>[0]) => {
+            if (Duration.toMillis(duration) !== 100) return base.sleep(duration)
+            return Effect.gen(function* () {
+              // 仅计时器启动段禁自动让步；原 TestClock 入队后才允许父测试推进时间。
+              const timer = yield* base.sleep(duration).pipe(
+                Effect.forkChild({ startImmediately: true }),
+                Effect.provideService(Scheduler.PreventSchedulerYield, true),
+              )
+              yield* Deferred.succeed(ready, undefined)
+              // 结构化子任务仍随真实执行取消，解释器自身的调度策略不变。
+              yield* Fiber.join(timer)
+            })
+          },
+        }
         const running = yield* CodeMode.execute({
           environment,
           tools,
           code: "return await work();",
-        }).pipe(Effect.forkChild)
+        }).pipe(Effect.provideService(Clock.Clock, observed), Effect.forkChild)
+        // 动态导入可能先挂起；等待计时器实际登记，而不是假定 fork 后已经开始睡眠。
+        yield* Deferred.await(ready)
         // 不靠墙钟猜测：推进到到期前一毫秒仍不能出现第二次真实调用。
         yield* TestClock.adjust(99)
         expect(calls).toEqual([1])
